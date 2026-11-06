@@ -318,7 +318,7 @@ Renders markdown with syntax highlighting and theming support.
 
 ```typescript
 interface MarkdownTheme {
-	heading: (text: string) => string;
+	heading: (text: string, depth: number) => string; // depth 1–6
 	link: (text: string) => string;
 	linkUrl: (text: string) => string;
 	code: (text: string) => string;
@@ -332,6 +332,9 @@ interface MarkdownTheme {
 	italic: (text: string) => string;
 	strikethrough: (text: string) => string;
 	underline: (text: string) => string;
+	strong?: (text: string) => string; // **strong**; defaults to bold
+	emphasis?: (text: string) => string; // *emphasis*; defaults to italic
+	tableHeader?: (text: string) => string; // defaults to bold
 	highlightCode?: (code: string, lang?: string) => string[];
 	symbols: SymbolTheme;
 }

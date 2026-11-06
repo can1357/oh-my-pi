@@ -7315,6 +7315,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.getEvalBridgeToolNames();
 	}
 
+	/** Eval tool names frozen into the provider-visible eval description (see {@link SessionTools.advertisedEvalToolNames}). */
+	getAdvertisedEvalToolNames(): readonly string[] {
+		return this.#tools.advertisedEvalToolNames;
+	}
+
 	/** Whether a registry entry came from a built-in factory. */
 	hasBuiltInTool(name: string): boolean {
 		return this.#tools.hasBuiltInTool(name);

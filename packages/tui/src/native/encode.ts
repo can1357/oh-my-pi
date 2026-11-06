@@ -24,6 +24,8 @@ const APC = "\x1b_";
 const ST = "\x1b\\";
 /** Every TSP message starts with this. */
 export const TSP_PREFIX = `${APC}${TSP_APC_ID};`;
+/** TSP input framing through ConPTY, whose input parser discards APC. */
+export const TSP_OSC_PREFIX = `\x1b]877;${TSP_APC_ID};`;
 
 /** The terminal's hello reply. */
 export type TspHello = Extract<TspReply, { r: "hello" }>;

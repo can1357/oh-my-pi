@@ -171,7 +171,7 @@ pub fn is_basechar(c: char) -> bool {
 }
 
 /// zsh `ZC_iblank`: white space other than a newline.
-pub fn iblank(c: char) -> bool {
+pub const fn iblank(c: char) -> bool {
 	c != '\n' && c.is_whitespace()
 }
 
@@ -381,7 +381,7 @@ pub fn cut(zle: &mut Zle, ed: &Editor, i: usize, ct: usize, flags: u32) {
 /// `"_` register.
 pub fn cuttext(zle: &mut Zle, ed: &Editor, text: &[char], flags: u32) {
 	let vilinerange = ed.ls.vilinerange;
-	if !(!text.is_empty() || vilinerange) || ed.zmod.flags & modflags::NULL != 0 {
+	if (text.is_empty() && !vilinerange) || ed.zmod.flags & modflags::NULL != 0 {
 		return;
 	}
 	let lineflag = if vilinerange { CUTBUFFER_LINE } else { 0 };
@@ -915,7 +915,7 @@ pub fn pastebuf(ed: &mut Editor, buf: &CutBuffer, mult: i64, position: u8) {
 	}
 }
 
-/// zsh `doinsert`: insert `zstr` [`Editor::zmod`]`.mult` times (after
+/// zsh `doinsert`: insert `zstr` `Editor::zmod.mult` times (after
 /// the cursor for a negative count), overwriting what is there in
 /// overwrite mode (never a newline; a character with its combining marks
 /// counts as one).
@@ -987,9 +987,7 @@ pub fn zstrtol0(s: &[u8]) -> i64 {
 	if neg || s.get(i) == Some(&b'+') {
 		i += 1;
 	}
-	let base: u64 = if s.get(i) != Some(&b'0') {
-		10
-	} else {
+	let base: u64 = if s.get(i) == Some(&b'0') {
 		i += 1;
 		match s.get(i) {
 			Some(b'x' | b'X') => {
@@ -1002,6 +1000,8 @@ pub fn zstrtol0(s: &[u8]) -> i64 {
 			},
 			_ => 8,
 		}
+	} else {
+		10
 	};
 	let mut calc: u64 = 0;
 	let mut trunc = false;

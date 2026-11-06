@@ -15,6 +15,7 @@ import {
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
+import { logger } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
@@ -66,6 +67,8 @@ export interface BashExecutorOptions {
 	 * enforced by the embedded shell's `git` builtin.
 	 */
 	gitGuard?: boolean;
+	/** ovnfs command for the git guard's separate-checkout guidance. */
+	ovnfs?: string;
 	/**
 	 * Filesystem for `scheme://` paths in this run of the embedded shell (a URL
 	 * `cwd` included). External shells and processes never see it.
@@ -163,16 +166,25 @@ const TRACE_POLL_MS = 80;
 /**
  * Polls `trace` every {@link TRACE_POLL_MS} while the run is in flight and
  * forwards each changed snapshot; `stop()` takes the final one.
+ *
+ * An invalid snapshot is logged once and skipped: the poll runs from a timer,
+ * where a throw would escape as an uncaught exception and end the session,
+ * and the trace is only a visualization of the run.
  */
 function pollRunTrace(trace: RunTrace, onTrace: (trace: ShellTrace) => void): { stop: () => ShellTrace | undefined } {
 	let last = -1;
 	let latest: ShellTrace | undefined;
+	let warned = false;
 	const poll = () => {
 		const version = trace.version();
 		if (version === last) return;
-		const snapshot: unknown = JSON.parse(trace.snapshot());
-		if (!isShellTrace(snapshot)) throw new Error("Native shell returned an invalid execution trace");
 		last = version;
+		const snapshot: unknown = JSON.parse(trace.snapshot());
+		if (!isShellTrace(snapshot)) {
+			if (!warned) logger.warn("Native shell returned an invalid execution trace", { version });
+			warned = true;
+			return;
+		}
 		latest = snapshot;
 		attachShellTrace(latest, trace);
 		onTrace(latest);
@@ -721,7 +733,9 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	// The embedded shell reads its builtin switches from the session env; a
 	// different env also keys a separate persistent session.
-	const sessionEnv = options?.gitGuard ? { ...shellEnv, PI_GIT_GUARD: "1" } : shellEnv;
+	const sessionEnv = options?.gitGuard
+		? { ...shellEnv, PI_GIT_GUARD: "1", PI_GIT_GUARD_OVNFS: options.ovnfs ?? "" }
+		: shellEnv;
 	const shellOptions = {
 		sessionEnv,
 		snapshotPath: snapshotPath ?? undefined,

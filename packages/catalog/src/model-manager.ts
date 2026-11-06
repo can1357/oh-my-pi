@@ -850,7 +850,8 @@ const ModelSpecShape = type({
 	name: "string > 0",
 	api: "string > 0",
 	provider: "string > 0",
-	baseUrl: "string > 0",
+	// Providers such as Azure resolve the deployment endpoint at request time.
+	baseUrl: "string",
 	reasoning: "boolean",
 	input: "('text' | 'image')[] > 0",
 	cost: FiniteTokenCost.and({

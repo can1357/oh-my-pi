@@ -105,7 +105,7 @@ impl Lex {
 
 	/// Whether the lexer is between tokens with nothing open (no quote,
 	/// escape, here-document): a line read now begins a new command.
-	pub fn idle(&self) -> bool {
+	pub const fn idle(&self) -> bool {
 		self.stack.is_empty()
 			&& !self.esc
 			&& !self.comment
@@ -115,7 +115,7 @@ impl Lex {
 	}
 
 	/// Whether the next character would start a comment.
-	fn comment_next(&self, comments: bool) -> bool {
+	const fn comment_next(&self, comments: bool) -> bool {
 		comments && self.at_word && !self.esc && self.stack.is_empty() && self.bodies.is_empty()
 	}
 
@@ -360,7 +360,7 @@ pub struct BangError(pub Option<Diag>, pub Option<BString>);
 impl BangError {
 	/// bash's message for the failure (`SPEC: event not found`, …), set by
 	/// [`expand_line`].
-	pub fn bash(&self) -> Option<&BString> {
+	pub const fn bash(&self) -> Option<&BString> {
 		self.1.as_ref()
 	}
 }
@@ -457,7 +457,7 @@ fn fail<T>(msg: impl Into<String>) -> Result<T, Stop> {
 }
 
 /// A silent failure (`return -1` without a message).
-fn fail_quietly<T>() -> Result<T, Stop> {
+const fn fail_quietly<T>() -> Result<T, Stop> {
 	Err(Stop::Error(BangError(None, None)))
 }
 
@@ -550,11 +550,11 @@ impl Run<'_, '_> {
 		}
 	}
 
-	fn bangchar(&self) -> u8 {
+	const fn bangchar(&self) -> u8 {
 		self.h.st.chars[0]
 	}
 
-	fn hatchar(&self) -> u8 {
+	const fn hatchar(&self) -> u8 {
 		self.h.st.chars[1]
 	}
 
@@ -663,12 +663,11 @@ impl Run<'_, '_> {
 
 	/// The event at `ev` (zsh `gethist`), else `no such event`.
 	fn gethist(&mut self, ev: i64) -> Result<usize, Stop> {
-		match self.h.gethistent(ev, 0) {
-			Some(i) => Ok(i),
-			None => {
-				self.herrflush();
-				fail(format!("no such event: {ev}"))
-			},
+		if let Some(i) = self.h.gethistent(ev, 0) {
+			Ok(i)
+		} else {
+			self.herrflush();
+			fail(format!("no such event: {ev}"))
 		}
 	}
 
@@ -770,7 +769,7 @@ impl Run<'_, '_> {
 
 	/// zsh `subst`: replace `hsubl` by `hsubr` (all with `gbal`); `false`
 	/// when it does not occur.
-	fn subst(&mut self, s: &mut BString, gbal: bool) -> Result<bool, Stop> {
+	fn subst(&self, s: &mut BString, gbal: bool) -> Result<bool, Stop> {
 		if self.o.substpattern {
 			let d = Diag::Unsupported { what: "histsubstpattern in history substitution".into() };
 			return Err(Stop::Error(BangError(Some(d), None)));
@@ -954,25 +953,21 @@ impl Run<'_, '_> {
 					c = self.inp.get();
 				}
 				self.h.st.hsubl = Some(buf.clone());
-				match self.hconsearch(&buf) {
-					Some((found, m)) => {
-						ev = found;
-						mev = found;
-						marg = m;
-					},
-					None => {
-						mev = -1;
-						self.h.st.mev = mev;
-						self.herrflush();
-						return fail(format!("no such event: {}", buf.as_bstr()));
-					},
+				if let Some((found, m)) = self.hconsearch(&buf) {
+					ev = found;
+					mev = found;
+					marg = m;
+				} else {
+					mev = -1;
+					self.h.st.mev = mev;
+					self.herrflush();
+					return fail(format!("no such event: {}", buf.as_bstr()));
 				}
 				evset = 0;
 				self.h.st.marg = marg;
 				self.h.st.mev = mev;
 			} else {
-				loop {
-					let Some(ch) = c else { break };
+				while let Some(ch) = c {
 					let stops = matches!(
 						ch,
 						b';' | b':' | b'^' | b'$' | b'*' | b'%' | b'}' | b'\'' | b'"' | b'`'
@@ -1003,16 +998,16 @@ impl Run<'_, '_> {
 				}
 				let t0 = zstrtol(&buf);
 				if buf.is_empty() {
-					if c != Some(b'%') {
+					if c == Some(b'%') {
+						ev = if marg == -1 { self.ls.defev } else { mev };
+						evset = 0;
+					} else {
 						ev = if self.o.cshjunkie {
 							self.h.addhistnum(self.h.st.curhist, -1, HIST_FOREIGN)
 						} else {
 							self.ls.defev
 						};
-						evset = if c == Some(b':') && evset == -1 { 0 } else { 1 };
-					} else {
-						ev = if marg != -1 { mev } else { self.ls.defev };
-						evset = 0;
+						evset = i64::from(!(c == Some(b':') && evset == -1));
 					}
 				} else if t0 != 0 {
 					ev = if t0 < 0 {
@@ -1027,17 +1022,12 @@ impl Run<'_, '_> {
 				} else if buf[0] == b'#' {
 					ev = self.h.st.curhist;
 					evset = 1;
+				} else if let Some(i) = self.h.search_up(|t| t.starts_with(buf.as_slice())) {
+					ev = self.h.num_at(i);
+					evset = 1;
 				} else {
-					match self.h.search_up(|t| t.starts_with(buf.as_slice())) {
-						Some(i) => {
-							ev = self.h.num_at(i);
-							evset = 1;
-						},
-						None => {
-							self.herrflush();
-							return fail(format!("event not found: {}", buf.as_bstr()));
-						},
-					}
+					self.herrflush();
+					return fail(format!("event not found: {}", buf.as_bstr()));
 				}
 			}
 			// The event.
@@ -1141,12 +1131,13 @@ impl Run<'_, '_> {
 					let abs = chabspath(sline, &self.o.cwd);
 					*sline = BString::from(self.realpath_prefix(abs)?);
 				},
-				Some(b'c') => match self.which(sline)? {
-					Some(p) => *sline = p,
-					None => {
+				Some(b'c') => {
+					if let Some(p) = self.which(sline)? {
+						*sline = p;
+					} else {
 						self.herrflush();
 						return fail("modifier failed: c");
-					},
+					}
 				},
 				Some(b'h') => {
 					let n = self.digitcount();
@@ -1191,10 +1182,10 @@ impl Run<'_, '_> {
 				Some(b'Q') => *sline = unquote(sline),
 				Some(b'x') => *sline = quotebreak(sline),
 				Some(b'l') => {
-					*sline = BString::from(casemodify(sline, CaseMod::Lower, self.o.multibyte))
+					*sline = BString::from(casemodify(sline, CaseMod::Lower, self.o.multibyte));
 				},
 				Some(b'u') => {
-					*sline = BString::from(casemodify(sline, CaseMod::Upper, self.o.multibyte))
+					*sline = BString::from(casemodify(sline, CaseMod::Upper, self.o.multibyte));
 				},
 				Some(b'P') => {
 					let abs = if sline.first() == Some(&b'/') {

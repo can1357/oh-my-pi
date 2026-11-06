@@ -113,6 +113,8 @@ export interface ShellTraceUnit {
 	syntax?: unknown;
 	/** Compiler-known wrapper bytes removed from this unit's displayed source. */
 	projection?: number;
+	/** Script a callout (`timeout`, `git`, `xargs`, …) ran for its operands; its calling command stands for it. */
+	callout?: boolean;
 	nodes: ShellTraceNode[];
 }
 
@@ -337,6 +339,7 @@ function traceUnit(value: unknown): value is ShellTraceUnit {
 		optional(value, "at", finite) &&
 		optional(value, "bytes", finite) &&
 		optional(value, "source", string) &&
+		optional(value, "callout", boolean) &&
 		Array.isArray(value.nodes) &&
 		value.nodes.every(traceNode)
 	);

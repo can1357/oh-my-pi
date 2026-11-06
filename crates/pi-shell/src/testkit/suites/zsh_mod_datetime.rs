@@ -57,6 +57,10 @@ fn strftime_libc_conversions() {
 }
 
 #[test]
+#[cfg_attr(
+	not(target_os = "macos"),
+	ignore = "expects macOS `%x` and an installed en_US.UTF-8 locale"
+)]
 fn strftime_options() {
 	let (out, ..) = dt("strftime -s v '%s' 5; print -r $v; strftime -n x 0; echo .");
 	assert_eq!(out, "5\nx.\n");
@@ -104,9 +108,25 @@ fn strftime_reverse() {
 	assert_eq!(err, "");
 	assert_eq!(
 		out,
-		"1699920000\n1699920000\n1681084800\n1583366400\n1583397000\n1577836800\n1583712000\\
-		 n3092601600\n-31536000\n-2208906000\n1583370123\n1583402400\n1583107200\n915148800\n-1\n-5\\
-		 n1578182400\n"
+		concat!(
+			"1699920000\n",
+			"1699920000\n",
+			"1681084800\n",
+			"1583366400\n",
+			"1583397000\n",
+			"1577836800\n",
+			"1583712000\n",
+			"3092601600\n",
+			"-31536000\n",
+			"-2208906000\n",
+			"1583370123\n",
+			"1583402400\n",
+			"1583107200\n",
+			"915148800\n",
+			"-1\n",
+			"-5\n",
+			"1578182400\n",
+		)
 	);
 	assert_eq!(st, 0);
 	let (out, err, _) = dt("strftime -r '%Y-%m-%d' 2023-11-14xx; strftime -r %Y 123456");
@@ -143,6 +163,7 @@ fn datetime_parameters() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "C-locale `nl_langinfo` values are macOS libc's")]
 fn langinfo_in_the_c_locale() {
 	let (out, err, _) = zsh(
 		"LC_ALL=C; zmodload zsh/langinfo; for k in ${(k)langinfo}; do print -rn -- \
@@ -151,16 +172,20 @@ fn langinfo_in_the_c_locale() {
 	assert_eq!(err, "");
 	assert_eq!(
 		out,
-		"CODESET=US-ASCII;D_T_FMT=%a %b %e %H:%M:%S \
-		 %Y;D_FMT=%m/%d/%y;T_FMT=%H:%M:%S;RADIXCHAR=.;THOUSEP=;YESEXPR=^[yY];NOEXPR=^[nN];CRNCYSTR=;\
-		 ABDAY_1=Sun;ABDAY_2=Mon;ABDAY_3=Tue;ABDAY_4=Wed;ABDAY_5=Thu;ABDAY_6=Fri;ABDAY_7=Sat;\
-		 DAY_1=Sunday;DAY_2=Monday;DAY_3=Tuesday;DAY_4=Wednesday;DAY_5=Thursday;DAY_6=Friday;\
-		 DAY_7=Saturday;ABMON_1=Jan;ABMON_2=Feb;ABMON_3=Mar;ABMON_4=Apr;ABMON_5=May;ABMON_6=Jun;\
-		 ABMON_7=Jul;ABMON_8=Aug;ABMON_9=Sep;ABMON_10=Oct;ABMON_11=Nov;ABMON_12=Dec;MON_1=January;\
-		 MON_2=February;MON_3=March;MON_4=April;MON_5=May;MON_6=June;MON_7=July;MON_8=August;\
-		 MON_9=September;MON_10=October;MON_11=November;MON_12=December;T_FMT_AMPM=%I:%M:%S \
-		 %p;AM_STR=AM;PM_STR=PM;ERA=;ERA_D_FMT=;ERA_D_T_FMT=;ERA_T_FMT=;ALT_DIGITS=;\\
-		 nassociation-hide-hideval-special\nx\n"
+		concat!(
+			"CODESET=US-ASCII;D_T_FMT=%a %b %e %H:%M:%S %Y;D_FMT=%m/%d/%y;T_FMT=%H:%M:%S;",
+			"RADIXCHAR=.;THOUSEP=;YESEXPR=^[yY];NOEXPR=^[nN];CRNCYSTR=;ABDAY_1=Sun;ABDAY_2=Mon;",
+			"ABDAY_3=Tue;ABDAY_4=Wed;ABDAY_5=Thu;ABDAY_6=Fri;ABDAY_7=Sat;DAY_1=Sunday;",
+			"DAY_2=Monday;DAY_3=Tuesday;DAY_4=Wednesday;DAY_5=Thursday;DAY_6=Friday;",
+			"DAY_7=Saturday;ABMON_1=Jan;ABMON_2=Feb;ABMON_3=Mar;ABMON_4=Apr;ABMON_5=May;",
+			"ABMON_6=Jun;ABMON_7=Jul;ABMON_8=Aug;ABMON_9=Sep;ABMON_10=Oct;ABMON_11=Nov;",
+			"ABMON_12=Dec;MON_1=January;MON_2=February;MON_3=March;MON_4=April;MON_5=May;",
+			"MON_6=June;MON_7=July;MON_8=August;MON_9=September;MON_10=October;MON_11=November;",
+			"MON_12=December;T_FMT_AMPM=%I:%M:%S %p;AM_STR=AM;PM_STR=PM;ERA=;ERA_D_FMT=;",
+			"ERA_D_T_FMT=;ERA_T_FMT=;ALT_DIGITS=;\n",
+			"association-hide-hideval-special\n",
+			"x\n",
+		)
 	);
 	let (out, ..) = zsh(
 		"zmodload zsh/langinfo; LC_ALL=en_US.UTF-8; print -r -- $langinfo[CODESET] $langinfo[D_FMT] \
