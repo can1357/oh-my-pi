@@ -4,7 +4,7 @@
 
 ### Added
 
-- `models.yml` `providers.<id>.apiKey` accepts a list of keys in priority order: the first is used while it works, and later ones only while an earlier key is rejected (401/403) or out of quota
+- `models.yml` `providers.<id>.apiKey` accepts a list of keys in priority order: the first is used while it works, and later ones only while an earlier key is rejected (401/403) or out of quota ([#18247](https://github.com/can1357/oh-my-pi/pull/18247) by [@VeigaPunk](https://github.com/VeigaPunk))
 
 ## [18.17.0] - 2026-11-06
 
