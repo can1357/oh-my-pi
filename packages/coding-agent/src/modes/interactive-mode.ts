@@ -257,6 +257,7 @@ import {
 	initProgramStatus,
 	resendProgramStatus,
 	setProgramStatusEnabled,
+	settleStartupRun,
 } from "../utils/run-status";
 import {
 	disposeTerminalTitleState,
@@ -2686,7 +2687,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
-		initProgramStatus();
+		initProgramStatus({ startupRun: options.startupRun });
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
 		// Only a frame that actually writes the mark needs a replacement; diff
@@ -7605,6 +7606,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.goalModeEnabled) return;
 		this.#resetGoalContinuationSuppression();
 		await this.session.prompt(objective, { streamingBehavior: "steer" });
+	}
+
+	/** End the `working` hold of `init({ startupRun })` once the command-line prompts are dispatched. */
+	settleStartupRun(): void {
+		settleStartupRun();
 	}
 
 	async #startGoalFromObjective(
