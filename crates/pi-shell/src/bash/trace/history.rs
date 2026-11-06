@@ -86,7 +86,7 @@ pub struct HistoryEvent {
 	/// Actual segmented submission index, absent for a single session run.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub segment:        Option<u32>,
-	/// This real root RunEnd is the finalized logical call boundary.
+	/// This real root `RunEnd` is the finalized logical call boundary.
 	#[serde(rename = "logicalEnd", skip_serializing_if = "std::ops::Not::not")]
 	#[serde(default)]
 	pub logical_end:    bool,
