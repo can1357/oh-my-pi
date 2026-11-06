@@ -240,8 +240,11 @@ function buildPlacementScript(request: GhosttyLaunchRequest, host: GhosttyTermin
 		// A created tab's result may be the tab or its terminal depending on the
 		// dictionary revision; normalize to the terminal either way.
 		lines.push("\tset created to new tab in hostWindow with configuration cfg");
-		lines.push("\tif class of created is tab then set newTerm to first terminal of created");
-		lines.push("\telse set newTerm to created");
+		lines.push("\tif class of created is tab then");
+		lines.push("\t\tset newTerm to first terminal of created");
+		lines.push("\telse");
+		lines.push("\t\tset newTerm to created");
+		lines.push("\tend if");
 	}
 	if (request.focus === true) lines.push("\tfocus newTerm");
 	if (request.focus === false) lines.push("\tfocus hostTerm");

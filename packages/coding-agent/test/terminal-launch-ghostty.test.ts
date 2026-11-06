@@ -182,6 +182,8 @@ describe("Ghostty launches", () => {
 		expect(result).toEqual({ multiplexer: "ghostty", placement: "window", id: "term-tab" });
 		const script = calls[3]!.argv[2]!;
 		expect(script).toContain("new tab in hostWindow with configuration cfg");
+		// The branch must compile: a bare `else` cannot follow a one-line `then`.
+		expect(script).toContain("if class of created is tab then\n\t\tset newTerm to first terminal of created\n\telse\n\t\tset newTerm to created\n\tend if");
 		expect(script).toContain("focus hostTerm");
 		expect(script).not.toContain("focus newTerm");
 	});
