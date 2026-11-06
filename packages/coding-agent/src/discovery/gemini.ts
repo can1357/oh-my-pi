@@ -325,7 +325,7 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 	const load = async (filePath: string | null, level: "user" | "project", kind: "text" | "template") => {
 		if (!filePath) return;
 		const content = await readFile(filePath);
-		if (content) {
+		if (content !== null) {
 			items.push({ path: filePath, content, kind, level, _source: createSourceMeta(PROVIDER_ID, filePath, level) });
 		}
 	};

@@ -276,11 +276,7 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 
 	const load = async (filePath: string, level: "user" | "project", kind: "text" | "template"): Promise<void> => {
 		const content = await readFile(filePath);
-		if (!content) return;
-		if (kind === "template" && !content.trim()) {
-			warnings.push(`Ignoring empty system prompt template at ${filePath}`);
-			return;
-		}
+		if (content === null) return;
 		items.push({ path: filePath, content, kind, level, _source: createSourceMeta(PROVIDER_ID, filePath, level) });
 	};
 
@@ -291,8 +287,8 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 		await load(path.join(nearestProjectConfigDir.dir, "SYSTEM.md"), "project", "text");
 		await load(path.join(nearestProjectConfigDir.dir, "SYSTEM_TEMPLATE.md"), "project", "template");
 	}
-	await load(path.join(getAgentDir(), "SYSTEM.md"), "user", "text");
-	await load(path.join(getAgentDir(), "SYSTEM_TEMPLATE.md"), "user", "template");
+	await load(path.join(ctx.agentDir ?? getAgentDir(), "SYSTEM.md"), "user", "text");
+	await load(path.join(ctx.agentDir ?? getAgentDir(), "SYSTEM_TEMPLATE.md"), "user", "template");
 
 	return { items, warnings };
 }

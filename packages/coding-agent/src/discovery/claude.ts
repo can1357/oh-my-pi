@@ -489,7 +489,7 @@ async function loadSystemPrompts(ctx: LoadContext): Promise<LoadResult<SystemPro
 	] as const) {
 		const projectPath = path.join(projectBase, file);
 		const content = await readFile(projectPath);
-		if (content) {
+		if (content !== null) {
 			items.push({
 				path: projectPath,
 				content,
