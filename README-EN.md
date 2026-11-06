@@ -1,6 +1,6 @@
 # omp-fork — English
 
-**A fork of [oh-my-pi](https://github.com/can1357/oh-my-pi) with Claude Code mechanics, the A2A protocol, and chrome-mcp as the base browser.**
+**A fork of [oh-my-pi](https://github.com/can1357/oh-my-pi): cross-terminal agent networking (A2A), chrome-mcp as the base browser, a deterministic workflow orchestrator, agent-storm guards.**
 
 - Repository: [spgsroot/oh-my-pi](https://github.com/spgsroot/oh-my-pi), branch `main` = upstream mirror + features
 - Upstream base: 18.16+ (main `96e4d8eb`)
@@ -93,9 +93,13 @@ cd ~/Documents/LAB/oh-my-pi && bun run build && rsync -a packages/coding-agent/d
 - zero corporate context in the diff (clean public fork);
 - live runs: A2A spawn through the bridge, the subagent chain (A2A → main → subagent → answer), workflow journal-resume after SIGKILL, 81 chrome tools on both MCP revisions.
 
-## What was ported from Claude Code (reverse-engineered 2.1.311)
+## Origins of the mechanics
 
-ingress-guard (rate/dedup/hops/queue-cap) · error-not-queue with numbers · `<total_tokens>` budget · SubagentHandback (anti-injection) · the Workflow VM (journal.jsonl, longest-unchanged-prefix resume, Date.now/Math.random ban) · capability tokens (the `--discard-unpushed` pattern). omp-specific adaptations are described in [FORK-RU.md](./FORK-RU.md).
+The agent-interaction mechanics follow established industry patterns for multi-agent coordination (addressed delivery with a reply channel, report anti-injection, journal-resume, capability tokens).
+
+### Details
+
+ingress guard (rate/dedup/hops/queue-cap) · refuse-instead-of-queue with numbers in the error · subagent token budget (`<total_tokens>`) · a final-report tool with anti-injection · the workflow VM (journal + prefix-resume, determinism) · one-shot capability tokens for destructive ops. Settings and details — [FORK-RU.md](./FORK-RU.md).
 
 ## Known limitations
 

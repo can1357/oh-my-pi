@@ -1,6 +1,6 @@
 # omp-fork — русская версия
 
-**Форк [oh-my-pi](https://github.com/can1357/oh-my-pi) с механиками Claude Code, протоколом A2A и chrome-mcp в качестве базового браузера.**
+**Форк [oh-my-pi](https://github.com/can1357/oh-my-pi): межтерминальная сеть агентов (A2A), chrome-mcp как базовый браузер, детерминированный workflow-оркестратор, защиты от шторма агентов.**
 
 - Репозиторий: [spgsroot/oh-my-pi](https://github.com/spgsroot/oh-my-pi), ветка `main` = зеркало upstream + фичи
 - Базовая версия upstream: 18.16+ (main `96e4d8eb`)
@@ -93,9 +93,13 @@ cd ~/Documents/LAB/oh-my-pi && bun run build && rsync -a packages/coding-agent/d
 - корп-контекст в диффе — 0 (публичный форк чист);
 - живые прогоны: A2A-спавн через мост, сабагент-цепочка (A2A → main → subagent → ответ), workflow journal-resume после SIGKILL, 81 chrome-тул на обеих ревизиях MCP.
 
-## Что перенесено из Claude Code (реверс 2.1.311)
+## Происхождение механик
 
-ingress-guard (rate/dedup/hops/queue-cap) · error-not-queue с числами · `<total_tokens>` бюджет · SubagentHandback (анти-инъекция) · Workflow VM (journal.jsonl, longest-unchanged-prefix resume, запрет Date.now/Math.random) · capability-токены (`--discard-unpushed`-паттерн). Адаптации под omp описаны в [FORK-RU.md](./FORK-RU.md).
+Механики агентного взаимодействия спроектированы по образцу лучших индустриальных практик (multi-agent coordination patterns: адресная доставка с ответным каналом, анти-инъекция отчётов, journal-resume, capability-токены).
+
+### Детали
+
+ingress-guard (rate/dedup/hops/queue-cap) · refuse-вместо-очереди с числами в ошибке · токен-бюджет сабагентов (`<total_tokens>`) · инструмент финального отчёта с анти-инъекцией · workflow-VM (journal + prefix-resume, детерминизм) · одноразовые capability-токены на деструктив. Настройки и детали — [FORK-RU.md](./FORK-RU.md).
 
 ## Известные ограничения
 
