@@ -41,8 +41,11 @@ fn the_site_matrix_covers_every_variant_of_the_model() {
 			recorded,
 			variants,
 			"{name} is no longer what the site matrix was measured for; re-run \
-			 gen-sites.py and measure-sites.py and regenerate \
-			 tests/fatal-site-matrix.json so every variant keeps a sample"
+			 crates/pi-shell/scripts/fatal-site-matrix/gen-sites.py, \
+			 crates/pi-shell/scripts/fatal-site-matrix/measure-sites.py and \
+			 crates/pi-shell/scripts/fatal-site-matrix/emit-fixture.py to regenerate \
+			 crates/pi-shell/tests/fatal-site-matrix.json so every variant keeps a sample; \
+			 see crates/pi-shell/scripts/fatal-site-matrix/README.md"
 		);
 	}
 }

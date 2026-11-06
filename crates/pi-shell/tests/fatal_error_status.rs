@@ -12,9 +12,19 @@ use pi_shell::{
 
 /// Run `script` (its diagnostics discarded) in a fresh shell: its output and
 /// exit status.
+///
+/// `TMPDIR` points at a `TempDir` of this run, so the rows that make a
+/// scratch directory with `mktemp -d` leave nothing behind: the directory
+/// goes when this function returns. `export` is the first command either
+/// way, so no row's `$?` moves.
 async fn run(script: &str) -> (String, Option<i32>) {
+	let tmp = tempfile::Builder::new()
+		.prefix("fatal-error-status-")
+		.tempdir()
+		.expect("scratch directory");
 	let (tx, rx) = flume::unbounded::<String>();
-	let command = format!("exec 2>/dev/null\n{script}");
+	let command =
+		format!("exec 2>/dev/null\nexport TMPDIR='{}'\n{script}", tmp.path().display());
 	let result = Shell::new(None)
 		.run(
 			ShellRunOptions { command, ..Default::default() },
@@ -174,10 +184,16 @@ async fn posix_assignment_error_is_a_fatal_error() {
 /// A trap that runs inside the EXIT trap's action (ERR, DEBUG, a signal)
 /// takes the jump out of both actions, and the shell exits with the status
 /// of that moment, not with the status the EXIT trap saved (bash's nested
-/// `parse_and_execute` leaves `last_command_exit_value` behind). A RETURN
-/// trap is different: its own `return_catch` swallows the jump, so what
-/// encloses it decides. The engine exited with the EXIT trap's saved
-/// status in every one of them.
+/// `parse_and_execute` leaves `last_command_exit_value` behind). The engine
+/// exited with the EXIT trap's saved status in every one of them.
+///
+/// The two RETURN rows are the control for that rule, not an instance of
+/// it: without `functrace` a top-level RETURN trap is NOT inherited by a
+/// function, so no action runs and no jump is taken. (An earlier round of
+/// this change read them as "a RETURN trap's own `return_catch` swallows
+/// the jump"; that model was retracted in round 6, and the `set -T` rows
+/// of `a_return_trap_is_a_nested_trap_like_any_other` carry the real
+/// behaviour.)
 #[tokio::test(flavor = "multi_thread")]
 async fn a_trap_inside_the_exit_trap_exits_with_the_status_of_the_moment() {
 	check(&[
@@ -187,7 +203,7 @@ async fn a_trap_inside_the_exit_trap_exits_with_the_status_of_the_moment() {
 		(r##"trap ': "${zz?B}"' ERR; f(){ false; }; trap 'f' EXIT; exit 7"##, "", 1),
 		(r##"trap ': "${zz?B}"' ERR; trap 'false' EXIT; exit 0"##, "", 1),
 		(r##"trap ': "${zz?B}"' USR1; trap 'kill -USR1 $$; echo S:in $?' EXIT; exit 7"##, "", 0),
-		// A RETURN trap's jump is caught by the trap itself.
+		// Not inherited without `set -T`: the action never runs.
 		(r##"trap ': "${zz?B}"' RETURN; f(){ return 3; }; trap 'f' EXIT; exit 7"##, "", 7),
 		(r##"trap ': "${zz?B}"' RETURN; f(){ return 3; }; f; echo S:after $?"##, "S:after 3\n", 0),
 		// Outside an EXIT trap the shell's own catch still decides.
@@ -240,15 +256,11 @@ async fn an_exec_of_a_text_file_runs_no_exit_trap() {
 	.await;
 }
 
-/// Round-2 review rows, each the output and status of Bash 5.2.21 and 5.3.0
-/// for the same `-c` string: the innermost trap nested in the EXIT trap's
-/// action decides (a DEBUG trap takes its own saved status, an ERR trap the
-/// failure status), `errexit` makes the EXIT trap's own jump exit 1, a posix
-/// arithmetic-subscript assignment error stays a discard (1, not the fatal
-/// 127), and a posix temporary-environment assignment error ends the shell
-/// before the command runs.
+/// The innermost trap nested in an EXIT trap's action decides the fatal
+/// status: a DEBUG trap uses its saved status, and an ERR trap uses the
+/// failed command's status. Bash 5.2.21 and 5.3.0 give the answers below.
 #[tokio::test(flavor = "multi_thread")]
-async fn round_two_rows() {
+async fn the_innermost_trap_in_an_exit_trap_decides_the_fatal_status() {
 	check(&[
 		// The innermost nested trap decides (a signal trap whose action sets
 		// an ERR trap).
@@ -263,14 +275,44 @@ async fn round_two_rows() {
 			"",
 			0,
 		),
+	])
+	.await;
+}
+
+/// `errexit` makes a fatal error caught by the EXIT trap end the shell
+/// with status 1, rather than the status that the trap saved. Bash 5.2.21
+/// and 5.3.0 agree, whether `errexit` was set before or inside the action.
+#[tokio::test(flavor = "multi_thread")]
+async fn errexit_turns_a_fatal_error_in_an_exit_trap_into_status_one() {
+	check(&[
 		// `errexit` while the fatal error lands in the EXIT trap.
 		(r##"trap 'set -e; : ${x?BOOM}' EXIT; exit 7"##, "", 1),
 		(r##"( trap 'set -e; : ${x?BOOM}' EXIT; exit 7 ); echo "S:$?""##, "S:1\n", 0),
 		(r##"trap 'set -e; : ${x?BOOM}' EXIT; exit 0"##, "", 1),
 		(r##"set -e; trap ': ${x?BOOM}' EXIT; exit 7"##, "", 1),
+	])
+	.await;
+}
+
+/// A POSIX arithmetic-subscript assignment error is a discard, not a
+/// fatal error: Bash 5.2.21 and 5.3.0 exit 1 rather than 127, including
+/// when the assignment runs in a background child.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_posix_arithmetic_subscript_assignment_error_is_a_discard() {
+	check(&[
 		// A posix arithmetic-subscript assignment error is a discard.
 		(r##"set -o posix; declare -a A; A[bad!]=x; echo BAD"##, "", 1),
 		(r##"set -o posix; declare -a A; A[bad!]=x & wait $!; echo "S:$?""##, "S:1\n", 0),
+	])
+	.await;
+}
+
+/// A POSIX temporary-environment assignment error ends the shell before
+/// the command runs. Bash 5.2.21 and 5.3.0 exit 1 for an external command
+/// and 127 for a special builtin; a child's EXIT trap still runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_posix_temporary_assignment_error_ends_the_shell_before_the_command_runs() {
+	check(&[
 		// A posix temporary-environment assignment error, by what it runs.
 		(r##"set -o posix; readonly R; R=x /usr/bin/true; echo BAD"##, "", 1),
 		(r##"set -o posix; readonly R; R=x :; echo BAD"##, "", 127),
@@ -285,18 +327,12 @@ async fn round_two_rows() {
 	.await;
 }
 
-/// Round-3 review rows, each the output and status of Bash 5.2.21 and 5.3.0
-/// for the same `-c` string. With `errexit` on, bash raises `ERREXIT` where
-/// it would have raised its `FORCE_EOF` or its `DISCARD`, and every catch
-/// answers that with 1: the EXIT trap's action, a trap nested in it, the
-/// shell itself, and a child the shell forked before it expanded anything.
-/// An arithmetic error in an assignment is bash's own jump instead: no
-/// `eval`, `.` or function contains it, `errexit` does not change it, and it
-/// keeps the status of the place it lands. A command substitution in a
-/// forked command's words leaves it one simple command, which lands where
-/// its parent's jump would have.
+/// With `errexit` on, bash raises `ERREXIT` instead of `FORCE_EOF` or
+/// `DISCARD`, and every catch answers with 1: the EXIT trap's action, a
+/// trap nested in it, the shell itself, and a child forked before expansion.
+/// Bash 5.2.21 and 5.3.0 agree on these statuses and their controls.
 #[tokio::test(flavor = "multi_thread")]
-async fn round_three_rows() {
+async fn errexit_converts_fatal_and_discarded_expansion_jumps_to_status_one() {
 	check(&[
 		// `errexit` and a child the shell forked before it expanded anything.
 		(
@@ -327,6 +363,16 @@ async fn round_three_rows() {
 		(r##"trap 'set -e; : ${x.y} | cat; echo P:${PIPESTATUS[0]}' EXIT; exit 7"##, "P:1\n", 7),
 		(r##"trap ': ${x.y} | cat; echo P:${PIPESTATUS[0]}' EXIT; exit 7"##, "P:7\n", 7),
 		(r##"trap 'set -e; trap '"'"': ${x.y}'"'"' DEBUG; :; echo AFTER' EXIT; exit 7"##, "", 1),
+	])
+	.await;
+}
+
+/// An arithmetic error in an assignment makes bash's assignment jump:
+/// no `eval`, `.`, or function contains it, and `errexit` does not replace
+/// it. Bash 5.2.21 and 5.3.0 keep the status of the catch where it lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_assignment_arithmetic_error_bypasses_eval_and_function_catches() {
+	check(&[
 		// An arithmetic error in an assignment: no catch of eval, `.` or a
 		// function, and `errexit` does not change it.
 		(r##"declare -a A; eval 'A[bad!]=x'; echo AFTER:$?"##, "", 1),
@@ -353,6 +399,16 @@ async fn round_three_rows() {
 		),
 		(r##"set -e; declare -a A; A[bad!]=x & wait $!; echo W:$?"##, "", 1),
 		(r##"x=$( declare -a A; A[bad!]=x; echo IN ); echo "[$x] AFTER:$?""##, "[] AFTER:1\n", 0),
+	])
+	.await;
+}
+
+/// A POSIX temporary-environment assignment error is a discard that
+/// `eval` catches. Bash 5.2.21 and 5.3.0 continue after `eval`, including
+/// when it runs inside an EXIT trap's action.
+#[tokio::test(flavor = "multi_thread")]
+async fn eval_catches_a_posix_temporary_assignment_error() {
+	check(&[
 		// A posix temporary-environment assignment error is a discard `eval`
 		// and `.` catch.
 		(r##"set -o posix; readonly R; eval 'R=x /usr/bin/true'; echo AFTER:$?"##, "AFTER:1\n", 0),
@@ -361,6 +417,16 @@ async fn round_three_rows() {
 			"BAD\n",
 			7,
 		),
+	])
+	.await;
+}
+
+/// A command substitution in a forked command's words leaves it one
+/// simple command: its fatal error lands where its parent's jump would.
+/// Bash 5.2.21 and 5.3.0 agree for words, assignments, and redirections.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forked_simple_command_keeps_its_error_catch_with_command_substitutions() {
+	check(&[
 		// A command substitution in the words of a forked simple command.
 		(r##": "${u?BOOM}" "$( echo ready )" & wait $!; echo W:$?"##, "W:127\n", 0),
 		(r##": "${u?BOOM}" "$( echo ready )" | cat; echo P:${PIPESTATUS[0]}"##, "P:127\n", 0),
@@ -375,16 +441,12 @@ async fn round_three_rows() {
 	.await;
 }
 
-/// Round-4 review rows, each the output and status of Bash 5.2.21 and 5.3.0
-/// for the same `-c` string. `errexit` raises bash's `ERREXIT` in place of a
-/// fatal error or a discarded expansion, but not inside an `eval` or a `.`
-/// whose own status is ignored (`builtin_ignoring_errexit`), and never for
-/// an arithmetic error: in a word it is a discard `eval` and `.` catch, and
-/// in an assignment it is a jump no `eval`, `.`, function, subshell or
-/// command substitution answers, which keeps the status of the place it
-/// lands.
+/// An ignored `eval` status disables `errexit`, but an ignored function
+/// status or a condition does not disable it for a fatal expansion error.
+/// Bash's `builtin_ignoring_errexit` applies to `eval` and `.`, and Bash
+/// 5.2.21 and 5.3.0 give the answers below.
 #[tokio::test(flavor = "multi_thread")]
-async fn round_four_rows() {
+async fn an_ignored_eval_status_disables_errexit_but_an_ignored_function_status_does_not() {
 	check(&[
 		// `eval` and `.` whose status is ignored turn `errexit` off.
 		(
@@ -413,6 +475,16 @@ async fn round_four_rows() {
 			"NO:1\nAFTER:0\n",
 			0,
 		),
+	])
+	.await;
+}
+
+/// An arithmetic error in a word is a discard that `errexit` does not
+/// replace. Bash 5.2.21 and 5.3.0 let `eval` catch it and preserve the
+/// enclosing catch's status inside an EXIT trap.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_arithmetic_error_in_a_word_is_a_discard_even_with_errexit() {
+	check(&[
 		// An arithmetic error in a word: a discard `errexit` does not
 		// replace.
 		(r##"trap 'set -e; : $((7/0)); echo AFTER:$?' EXIT; exit 7"##, "", 7),
@@ -424,9 +496,29 @@ async fn round_four_rows() {
 		(r##"eval ': $((7/0))'; echo AFTER:$?"##, "AFTER:1\n", 0),
 		(r##"( : $((7/0)); echo IN ); echo AFTER:$?"##, "AFTER:1\n", 0),
 		(r##": $((7/0)) & wait $!; echo W:$?"##, "W:1\n", 0),
+	])
+	.await;
+}
+
+/// A bad substitution is a discard that `errexit` replaces with
+/// `ERREXIT`; without `errexit`, a nested DEBUG trap keeps its saved
+/// status. Bash 5.2.21 and 5.3.0 agree on both answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bad_substitution_uses_errexit_or_the_nested_traps_saved_status() {
+	check(&[
 		// A discarded expansion that `errexit` does replace.
 		(r##"trap 'set -e; : ${x.y} | /usr/bin/cat; echo P:${PIPESTATUS[0]}' EXIT; exit 7"##, "P:1\n", 7),
 		(r##"trap 'trap '"'"': ${x.y}'"'"' DEBUG; :' EXIT; exit 7"##, "", 7),
+	])
+	.await;
+}
+
+/// An assignment's arithmetic error bypasses subshell, command-substitution,
+/// function, and nested-trap catches and keeps the status of the enclosing
+/// catch. Bash 5.2.21 and 5.3.0 do not let `errexit` replace this jump.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_assignment_arithmetic_error_keeps_the_status_of_its_enclosing_catch() {
+	check(&[
 		// An arithmetic error in an assignment: no catch of a subshell, a
 		// command substitution or a trap nested in the EXIT trap's action.
 		(r##"trap '( declare -i I; I=bad!; echo INNER ); echo AFTER:$?' EXIT; exit 7"##, "AFTER:7\n", 7),
@@ -446,6 +538,16 @@ async fn round_four_rows() {
 			7,
 		),
 		(r##"set -e; f(){ declare -i I; I=bad!; }; if f; then echo YES; fi; echo AFTER:$?"##, "", 1),
+	])
+	.await;
+}
+
+/// A POSIX temporary-environment assignment error inside an EXIT trap's
+/// subshell ends that subshell with 1, not the trap's saved status. Bash
+/// 5.2.21 and 5.3.0 then continue the action and exit with its saved status.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_posix_temporary_assignment_error_in_an_exit_trap_ends_only_its_subshell() {
+	check(&[
 		// A posix temporary-environment assignment error in a subshell of
 		// the EXIT trap's action still ends that subshell with 1.
 		(
@@ -457,14 +559,11 @@ async fn round_four_rows() {
 	.await;
 }
 
-/// Round-5 review rows, each the output and status of Bash 5.2.21 and 5.3.0
-/// for the same `-c` string. A subshell hands the catch around it on to its
-/// own children, so an assignment's arithmetic error keeps the status of
-/// that catch however deep the nesting; and a trap nested in the EXIT
-/// trap's action is answered with the status its own frame saved, which for
-/// an ERR trap is the status of the command that failed, not a constant 1.
+/// A subshell hands its enclosing catch on to its own children, so an
+/// assignment's arithmetic error keeps that catch's status through nested
+/// subshells and command substitutions. Bash 5.2.21 and 5.3.0 agree.
 #[tokio::test(flavor = "multi_thread")]
-async fn round_five_rows() {
+async fn an_assignment_arithmetic_error_keeps_the_enclosing_catch_through_nested_children() {
 	check(&[
 		// An assignment's arithmetic error through nested children.
 		(
@@ -483,6 +582,16 @@ async fn round_five_rows() {
 			7,
 		),
 		(r##"( ( declare -i I; I=bad! ); echo TWO:$? ); echo ONE:$?"##, "TWO:1\nONE:0\n", 0),
+	])
+	.await;
+}
+
+/// An ERR trap nested in an EXIT trap's action saves the failed command's
+/// status, not a constant 1. Bash 5.2.21 and 5.3.0 use that status when a
+/// fatal expansion or an assignment's arithmetic error leaves the action.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_err_trap_nested_in_an_exit_trap_saves_the_failed_commands_status() {
+	check(&[
 		// An ERR trap nested in the EXIT trap's action starts with the
 		// status of the command that failed.
 		(r##"trap 'trap '"'"': ${x?boom}'"'"' ERR; (exit 9)' EXIT; exit 7"##, "", 9),
@@ -497,16 +606,11 @@ async fn round_five_rows() {
 	.await;
 }
 
-/// Round-6 review rows, each the output and status of Bash 5.2.21 and 5.3.0
-/// for the same `-c` string. bash runs the ERR trap before it reads
-/// `exit_immediately_on_error`, so the action's own `set -e`/`set +e`
-/// decides whether the failed command ends the shell; a RETURN trap is a
-/// nested trap like any other, so a jump out of it carries the status that
-/// trap saved; a declaration builtin's `-i` value error is the assignment
-/// jump; and an arithmetic error in a `for ((;;))` header ends only that
-/// loop, with status 1.
+/// Bash runs the ERR trap before reading `exit_immediately_on_error`, so
+/// the action's `set -e` or `set +e` decides whether the failed command
+/// ends the shell. Bash 5.2.21 and 5.3.0 agree even when the action errors.
 #[tokio::test(flavor = "multi_thread")]
-async fn round_six_rows() {
+async fn errexit_is_read_after_the_err_trap_action_ends() {
 	check(&[
 		// `errexit` is read when the ERR trap action ends.
 		(
@@ -539,6 +643,16 @@ async fn round_six_rows() {
 			"OK_ERR\nEXIT_AFTER\n",
 			7,
 		),
+	])
+	.await;
+}
+
+/// A RETURN trap inherited with `set -T` is a nested trap like any other:
+/// a jump out of its action carries the status the trap saved. Bash
+/// 5.2.21 and 5.3.0 agree; without `set -T`, the function runs no action.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_return_trap_is_a_nested_trap_like_any_other() {
+	check(&[
 		// A RETURN trap nested in the EXIT trap's action.
 		(
 			r##"trap 'set -E -T; trap '"'"': ${review_missing?BOOM}; echo TRAP_BAD'"'"' RETURN; f(){ return 9; }; f; echo EXIT_AFTER' EXIT; exit 7"##,
@@ -555,10 +669,30 @@ async fn round_six_rows() {
 			"AFTER\n",
 			7,
 		),
+	])
+	.await;
+}
+
+/// A declaration builtin's invalid `-i` value makes the assignment jump,
+/// bypassing a function's catch and keeping the enclosing catch's status.
+/// Bash 5.2.21 and 5.3.0 do not let `errexit` replace this jump.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_integer_declarations_value_error_takes_the_assignment_jump() {
+	check(&[
 		// A declaration builtin's `-i` value error makes the assignment jump.
 		(r##"declare -i I=bad!; echo NEXT:$?"##, "", 1),
 		(r##"trap 'set -e; declare -i I=bad!; echo NEXT:$?' EXIT; exit 7"##, "", 7),
 		(r##"f(){ local -i I=bad!; echo IN:$?; }; f; echo NEXT:$?"##, "", 1),
+	])
+	.await;
+}
+
+/// An arithmetic error in a `for ((;;))` header ends only that loop with
+/// status 1, even with `errexit` set or another loop around it. Bash 5.2.21
+/// and 5.3.0 agree; a sound or omitted header still lets the loop run.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_arithmetic_for_header_error_ends_only_that_loop() {
+	check(&[
 		// An arithmetic error in a `for ((;;))` header ends only that loop.
 		(r##"for ((i=0; 1/0; i++)); do :; done; echo NEXT:$?"##, "NEXT:1\n", 0),
 		(r##"set -e; for ((i=0; 1/0; i++)); do :; done; echo NEXT:$?"##, "NEXT:1\n", 0),
@@ -587,13 +721,12 @@ async fn round_six_rows() {
 	.await;
 }
 
-/// Round-7 review rows, each the output and status of Bash 5.2.21 and 5.3.0
-/// for the same `-c` string. bash samples `was_error_trap` before a command
-/// runs, so an ERR trap the command itself installs does not fire for that
-/// command; and a declaration builtin's arithmetic *subscript* error makes
-/// the same assignment jump its value error does.
+/// Bash samples `was_error_trap` before a command runs, so an ERR trap the
+/// command installs does not fire for that command. A trap already set
+/// when a function call starts can fire for the call as well as its body.
+/// Bash 5.2.21 and 5.3.0 agree on these outputs and statuses.
 #[tokio::test(flavor = "multi_thread")]
-async fn round_seven_rows() {
+async fn an_err_trap_is_sampled_before_the_command_runs() {
 	check(&[
 		// `was_error_trap` is sampled before the command.
 		(r##"f(){ trap 'set -e; return 6' ERR; false; }; f; echo OUT:$?"##, "", 6),
@@ -608,6 +741,16 @@ async fn round_seven_rows() {
 			0,
 		),
 		(r##"trap 'echo T' ERR; false; echo OUT:$?"##, "T\nOUT:1\n", 0),
+	])
+	.await;
+}
+
+/// A declaration builtin's arithmetic subscript error makes the same
+/// assignment jump as an invalid arithmetic value: no `eval` or subshell
+/// answers it. Bash 5.2.21 and 5.3.0 keep the enclosing catch's status.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declaration_subscript_error_takes_the_assignment_jump() {
+	check(&[
 		// A declaration builtin's arithmetic subscript error is the
 		// assignment jump, which no `eval` or subshell answers.
 		(r##"eval 'declare -i "A[bad!]=3"'; echo BAD:$?"##, "", 1),
@@ -624,14 +767,12 @@ async fn round_seven_rows() {
 	.await;
 }
 
-/// Round-8 review rows, each the output and status of Bash 5.2.21 and 5.3.0
-/// for the same `-c` string. The `was_error_trap` sample is taken once, before
-/// the DEBUG trap that runs between it and the command, so a trap the DEBUG
-/// action installs does not arm the command it ran before; and `readonly` and
-/// `export` reject a subscripted name as no identifier instead of evaluating
-/// its subscript.
+/// Bash samples `was_error_trap` once, before the DEBUG action that runs
+/// before the command. An ERR trap installed by that action does not arm
+/// the current command. Bash 5.2.21 and 5.3.0 agree, and an unchanged DEBUG
+/// trap still runs before each command.
 #[tokio::test(flavor = "multi_thread")]
-async fn round_eight_rows() {
+async fn an_err_trap_is_sampled_before_the_debug_action_runs() {
 	check(&[
 		// A DEBUG action that installs an ERR trap does not arm this command.
 		(
@@ -655,6 +796,17 @@ async fn round_eight_rows() {
 			"D\nD\nO:AFTER:1\nD\nT:0\n",
 			0,
 		),
+	])
+	.await;
+}
+
+/// `readonly` and `export` reject a subscripted name as an invalid
+/// identifier without evaluating its subscript. Bash 5.2.21 and 5.3.0
+/// continue with status 1, unlike declaration builtins whose arithmetic
+/// evaluation errors make the assignment jump.
+#[tokio::test(flavor = "multi_thread")]
+async fn readonly_and_export_reject_subscripted_names_without_evaluating_them() {
+	check(&[
 		// `readonly` and `export` reject a subscripted name without
 		// evaluating the subscript.
 		(r##"readonly "A[bad!]=3"; echo O:AFTER:$?"##, "O:AFTER:1\n", 0),

@@ -226,10 +226,14 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			// Without that, a DEBUG action that installs an ERR trap armed
 			// the very command it ran before.
 			if vp.frames[fi].debug_pc != Some(vp.frames[fi].pc) {
-				let armed = matches!(
-					state::record(cx.store, vp, Key::Trap(TrapKey::Err)),
-					Ok(Some(Record::Trap { action, .. })) if !action.is_empty()
-				);
+				// `pseudo_trap_maybe` first, as `start_trap` does: a shell
+				// with no ERR trap anywhere pays one bit test per command
+				// instead of a `state::record` store read.
+				let armed = pseudo_trap_maybe(k, cx, TrapKey::Err)
+					&& matches!(
+						state::record(cx.store, vp, Key::Trap(TrapKey::Err)),
+						Ok(Some(Record::Trap { action, .. })) if !action.is_empty()
+					);
 				vp.frames[fi].err_trap_armed = armed;
 			}
 		}
@@ -486,12 +490,12 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				vp.status = status;
 				let code =
 					if errexit_jump(k, cx, vp) { JumpCode::Errexit } else { JumpCode::Discard };
-				let status = jump_status(cx, vp, code);
+				let status = leave_with_jump_status(cx, vp, code);
 				exit_shell(k, vp, cx, status);
 			},
 			Flow::DiscardArith(status) if super::nested::in_subshell(cx.store, vp) => {
 				vp.status = status;
-				let status = jump_status(cx, vp, JumpCode::Discard);
+				let status = leave_with_jump_status(cx, vp, JumpCode::Discard);
 				exit_shell(k, vp, cx, status);
 			},
 			// With `errexit` in force the code is bash's `ERREXIT`, which
@@ -500,11 +504,11 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			// error is never `ERREXIT`.
 			Flow::Discard(status) if errexit_jump(k, cx, vp) => {
 				vp.status = status;
-				let status = jump_status(cx, vp, JumpCode::Errexit);
+				let status = leave_with_jump_status(cx, vp, JumpCode::Errexit);
 				exit_shell(k, vp, cx, status);
 			},
 			Flow::DiscardKeep(status) if errexit_jump(k, cx, vp) => {
-				let answer = jump_status(cx, vp, JumpCode::Errexit);
+				let answer = leave_with_jump_status(cx, vp, JumpCode::Errexit);
 				vp.status = status;
 				exit_shell(k, vp, cx, answer);
 			},
@@ -2209,7 +2213,7 @@ pub(super) enum JumpCode {
 
 /// A fatal shell error (bash's `jump_to_top_level (FORCE_EOF)`: `${x?}`,
 /// `set -u`, a posix shell's assignment error): the shell exits with the
-/// status of the place the jump lands ([`jump_status`]), unlike `exit n`
+/// status of the place the jump lands ([`leave_with_jump_status`]), unlike `exit n`
 /// whose status is `n` wherever it runs. The site sets the status to 1
 /// first, as bash's does, and `errexit` raises `ERREXIT` in its place.
 pub fn fatal(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
@@ -2235,7 +2239,7 @@ fn fatal_code(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, errexit: bool) ->
 	} else {
 		JumpCode::ForceEof
 	};
-	Flow::Exit(jump_status(cx, vp, code))
+	Flow::Exit(leave_with_jump_status(cx, vp, code))
 }
 
 /// An arithmetic error in an assignment (`A[bad!]=x`, `declare -i I;
@@ -2245,7 +2249,7 @@ fn fatal_code(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, errexit: bool) ->
 /// the vproc where its jump lands instead of taking the
 /// "carry on with the next command" of a plain [`Flow::Discard`].
 pub fn assign_jump(vp: &mut Vproc, cx: &mut Cx<'_>) -> Flow {
-	Flow::Exit(jump_status(cx, vp, JumpCode::AssignDiscard))
+	Flow::Exit(leave_with_jump_status(cx, vp, JumpCode::AssignDiscard))
 }
 
 /// Whether `vp` runs a `-c` string as the shell itself (a nested shell,
@@ -2327,11 +2331,14 @@ fn catch(cx: &mut Cx<'_>, vp: &Vproc) -> Catch {
 /// `last_command_exit_value` as it stands at the site, which is
 /// `vp.status` here — bash's own rule, one answer per catch:
 /// `run_exit_trap` (`trap.c`), `run_one_command` (`shell.c`), `reader_loop`
-/// (`eval.c`) and `execute_in_subshell` (`execute_cmd.c`). A forked command
-/// that has not dispatched its program yet runs the EXIT trap it
-/// inherited, as bash's child does before it resets its traps
-/// ([`forked_dispatch`]).
-fn jump_status(cx: &mut Cx<'_>, vp: &mut Vproc, code: JumpCode) -> i32 {
+/// (`eval.c`) and `execute_in_subshell` (`execute_cmd.c`).
+///
+/// It also ARMS the inherited EXIT trap of a forked command that has not
+/// dispatched its program yet, as bash's child does before it resets its
+/// traps ([`forked_dispatch`]) — which is why the name says "leave": every
+/// caller is on its way out of the shell through `exit_shell` or
+/// `Flow::Exit`. A caller that wants only the status must call [`catch`].
+fn leave_with_jump_status(cx: &mut Cx<'_>, vp: &mut Vproc, code: JumpCode) -> i32 {
 	// bash's `last_command_exit_value` at the jump site. A shell never
 	// leaves on an error with a zero status, so an `ERREXIT` whose site
 	// kept a zero answers 1: `readonly r=1; set -e; trap ':; r=2' EXIT;
