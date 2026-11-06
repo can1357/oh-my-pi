@@ -526,6 +526,7 @@ const TITLE_FORK_TIMEOUT_MS = 15_000;
 /** Cap on the judgment that decides whether a `title.refreshAfterPrompts` check regenerates the title. */
 const TITLE_DRIFT_JUDGE_TIMEOUT_MS = 15_000;
 
+import { bindProviderAvailabilityNotices } from "./provider-availability-notice";
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
 import { EAGER_TODO_PRELUDE_MESSAGE_TYPE, TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
@@ -2317,6 +2318,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#setMcpServerInstructionsSource = config.setMcpServerInstructionsSource;
 		this.#customCommands = config.customCommands ?? [];
 		const recoveryHost: TurnRecoveryHost = {
+			isSubagent: () => this.#agentKind === "sub",
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			settings: this.settings,
@@ -2388,6 +2390,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				throw new DOMException("Usage preflight cancelled", "AbortError");
 			}
 		});
+		const detachUsagePreflight = this.#detachUsageBeforeModelCall;
+		const detachProviderAvailability = this.agent.addBeforeModelCallHook(signal =>
+			this.#recovery.awaitProviderAvailability(signal),
+		);
+		this.#detachUsageBeforeModelCall = () => {
+			detachProviderAvailability();
+			detachUsagePreflight();
+		};
 		const statsHost: SessionStatsTrackerHost = {
 			session: this,
 			agent: this.agent,
@@ -3083,6 +3093,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#watchSessionSettings();
 		this.#watchModelAvailabilitySettings();
 		// Last: makes the session addressable by its instance key (and, on a worker, published to main).
+		if (this.#agentKind === "main") this.addDisposer(bindProviderAvailabilityNotices(this));
 		registerLocalSession(this);
 	}
 
@@ -4839,6 +4850,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 			if (event.message.role === "assistant") {
 				const assistantMsg = event.message as AssistantMessage;
+				if (assistantMsg.stopReason !== "error")
+					await this.#recovery.recordProviderAvailabilityOutcome(assistantMsg);
 				// Fold this turn's timing into per-model perf aggregates (drives the
 				// /models TPS/TTFT display). Errored turns measure nothing; aborted
 				// turns with reported usage are still valid throughput samples.
@@ -5137,6 +5150,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// replayed. Visible/side-effecting output then remains terminal while its
 			// credential is still blocked or rotated exactly once.
 			await this.#recovery.recordUsageLimitOutcome(msg);
+			if (await this.#recovery.handleUnavailableProvider(msg)) {
+				await emitAgentEndNotification({ willContinue: true });
+				return;
+			}
 
 			let compactionResult = COMPACTION_CHECK_NONE;
 			let checkedCompaction = false;
@@ -5256,6 +5273,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return;
 				}
 			}
+			await this.#recovery.recordProviderAvailabilityOutcome(msg);
 			// Classifier refusals are persisted-skipped above; also prune the trailing
 			// stub from active context so the next turn's prompt does not replay it.
 			// Keep a reference for post-settle readers (print mode, task executor via
@@ -9167,6 +9185,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#resetPromptMaintenanceState();
 			this.#recovery.setAcceptTerminalEmptyStop(options?.acceptTerminalEmptyStop === true);
 
+			// A cold discovery outage has no model metadata yet; recovery waits without inventing one.
+			if (!this.model) await this.#recovery.awaitProviderAvailability(setupAbort.signal);
 			// Validate model
 			const model = this.model;
 			if (!model) {
