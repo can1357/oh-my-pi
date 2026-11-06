@@ -19,7 +19,7 @@
 //! Ported from zsh 5.9 `Src/Builtins/rlimits.c` (MIT-style licence,
 //! Copyright (c) 1992-1997 Paul Falstad and the zsh development group).
 
-use std::io;
+use std::{fmt::Write as _, io};
 
 use bstr::{BStr, BString, ByteSlice};
 
@@ -51,7 +51,10 @@ enum Kind {
 	/// `ZLIMTYPE_TIME`: seconds, shown as `h:mm:ss`.
 	Time,
 	/// `ZLIMTYPE_MICROSECONDS` (Linux's `RLIMIT_RTTIME`).
-	#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+	#[cfg_attr(
+		not(target_os = "linux"),
+		allow(dead_code, reason = "RLIMIT_RTTIME exists only on Linux")
+	)]
 	Micro,
 }
 
@@ -119,7 +122,7 @@ const RESINFO: &[ResInfo] = &[
 /// `RLIM_NLIMITS`.
 const NLIMITS: usize = RESINFO.len();
 
-/// RLIMIT_FSIZE, `ulimit`'s default resource.
+/// `RLIMIT_FSIZE`, `ulimit`'s default resource.
 const FSIZE: usize = 1;
 
 /// A `struct rlimit` in zsh's raw form ([`INF`] is unlimited).
@@ -130,6 +133,10 @@ struct Lim {
 }
 
 /// An engine limit (`None`: unlimited) as `rlim_t`.
+#[allow(
+	clippy::unnecessary_min_or_max,
+	reason = "INF is u64::MAX on Linux but i64::MAX on macOS, where the clamp matters"
+)]
 fn raw(v: Option<u64>) -> u64 {
 	v.map_or(INF, |v| v.min(INF))
 }
@@ -369,15 +376,15 @@ fn print_ulimit(ctx: &mut Ctx<'_, '_>, st: &State, lim: usize, hard: bool, head:
 	let mut out = String::new();
 	if head {
 		if info.opt == b'N' {
-			out.push_str(&format!("-N {lim:2}: {:<29}", info.descr));
+			let _ = write!(out, "-N {lim:2}: {:<29}", info.descr);
 		} else {
-			out.push_str(&format!("-{}: {:<32}", char::from(info.opt), info.descr));
+			let _ = write!(out, "-{}: {:<32}", char::from(info.opt), info.descr);
 		}
 	}
 	if limit == INF {
 		out.push_str("unlimited\n");
 	} else {
-		out.push_str(&format!("{}\n", limit / info.unit));
+		let _ = writeln!(out, "{}", limit / info.unit);
 	}
 	ctx.out(out.as_bytes());
 	0
@@ -675,7 +682,7 @@ pub fn ulimit(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 /// The bit of resource `res` in `ulimit`'s `int` mask: zsh's `1 << res`,
 /// whose shift count the CPU takes modulo 32 (`ulimit -N 35` shows
 /// resource 3).
-fn bit(res: usize) -> u64 {
+const fn bit(res: usize) -> u64 {
 	1u64 << (res & 31)
 }
 

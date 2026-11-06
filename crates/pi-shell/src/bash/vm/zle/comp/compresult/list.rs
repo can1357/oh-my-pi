@@ -157,15 +157,12 @@ pub fn metastrwidth(s: &[u8], cs: Charset) -> i32 {
 	let mut i = 0;
 	while i < raw.len() {
 		let (ch, n) = bstr::decode_utf8(&raw[i..]);
-		match ch {
-			Some(ch) => {
-				w += wcwidth(ch).max(0);
-				i += n;
-			},
-			None => {
-				w += 1;
-				i += 1;
-			},
+		if let Some(ch) = ch {
+			w += wcwidth(ch).max(0);
+			i += n;
+		} else {
+			w += 1;
+			i += 1;
 		}
 	}
 	w
@@ -204,7 +201,7 @@ fn skip_colour(s: &[u8]) -> usize {
 	}
 }
 
-/// zsh `printfmt(fmt, n, dopr, doesc)` (zle_tricky.c): print (into `pr`
+/// zsh `printfmt(fmt, n, dopr, doesc)` (`zle_tricky.c)`: print (into `pr`
 /// when given) or measure the explanation `fmt` (metafied; with `doesc`
 /// its `%` escapes: `%n` is `n`, `%B`/`%S`/`%U` and their ends, `%F`/`%K`
 /// colours, `%{…%}`); the screen lines it takes at `columns`.
@@ -403,7 +400,7 @@ pub fn printfmt_in(
 			}
 		}
 	}
-	if let Some(pr) = pr.as_deref_mut() {
+	if let Some(pr) = pr {
 		if cc % cols == 0 {
 			pr.out.extend_from_slice(b" \x08");
 		}

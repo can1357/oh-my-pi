@@ -5,6 +5,7 @@ import {
 	type AssistantMessage,
 	coerceServiceTierByFamily,
 	getPremiumServiceTierRequests,
+	type MessageAttribution,
 	parseServiceTier,
 	resolveModelServiceTier,
 	type ServiceTierByFamily,
@@ -135,11 +136,16 @@ function extractUserText(content: unknown): string {
 }
 
 /**
- * Build user-message stats from an entry. Returns null for empty/synthetic content.
+ * Build user-message stats from an entry. Returns null for empty, synthetic, or agent-attributed content.
  */
 function extractUserStats(sessionFile: string, folder: string, entry: SessionMessageEntry): UserMessageStats | null {
-	const msg = entry.message as { role: "user"; content?: unknown; synthetic?: boolean };
-	if (msg.role !== "user" || msg.synthetic) return null;
+	const msg = entry.message as {
+		role: "user";
+		content?: unknown;
+		synthetic?: boolean;
+		attribution?: MessageAttribution;
+	};
+	if (msg.role !== "user" || msg.synthetic || msg.attribution === "agent") return null;
 	const text = extractUserText(msg.content);
 	if (!text.trim()) return null;
 	const metrics = computeUserMessageMetrics(text);

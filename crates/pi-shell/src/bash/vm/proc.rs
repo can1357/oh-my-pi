@@ -1146,7 +1146,7 @@ pub enum Atom {
 	/// next pass puts `old` back first while `name` still holds `new`, then
 	/// assigns again as it replays, so it sees the first pass's state at
 	/// every point.
-	Wrote { name: BString, old: Box<Atom>, new: Option<BString> },
+	Wrote { name: BString, old: Box<Self>, new: Option<BString> },
 }
 
 /// Per-op scratch: expansion replay logs, staged progress and transient

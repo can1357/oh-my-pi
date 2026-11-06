@@ -667,7 +667,9 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	attachTimeout(ms: number): void {
-		if (ms <= 0 || this.proc.killed) return;
+		// Not skipped for a root Bun already reports as exited (`proc.killed`): it can
+		// exit before spawn() returns, while a descendant still holds its pipes.
+		if (ms <= 0) return;
 		this.#exited.catch(() => {});
 		// One unref'd deadline controls both termination and pipe collection.
 		// A clean command clears it in wait(), so fast invocations do not hold

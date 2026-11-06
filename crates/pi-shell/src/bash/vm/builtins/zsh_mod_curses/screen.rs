@@ -51,7 +51,7 @@ impl Cell {
 	pub const BLANK: Self = Self { ch: ' ' as u32, attrs: 0, pair: 0 };
 
 	/// The character, if the cell starts one.
-	pub fn char(self) -> Option<char> {
+	pub const fn char(self) -> Option<char> {
 		if self.ch == 0 {
 			None
 		} else {
@@ -201,7 +201,7 @@ pub struct Curses {
 	/// The terminal modes before `zcurses init` (zsh `saved_tty_state`).
 	pub saved_tty:   Option<crate::bash::Termios>,
 	/// The terminal modes curses set (zsh `curses_tty_state`).
-	pub curses_tty:  Option<crate::bash::Termios>,
+	pub prog_tty:    Option<crate::bash::Termios>,
 	/// The terminal reports mouse events (`mousemask` on; zsh
 	/// `ZCF_MOUSE_ACTIVE`).
 	pub mouse_on:    bool,
@@ -239,7 +239,7 @@ impl Curses {
 			fifo: Vec::new(),
 			pending: Vec::new(),
 			saved_tty: None,
-			curses_tty: None,
+			prog_tty: None,
 			mouse_on: false,
 			mouse_dirty: false,
 			mouse_moves: false,
@@ -446,30 +446,24 @@ impl Curses {
 	fn render(&self, w: usize, ch: u32, attrs: u16) -> Cell {
 		let win = &self.wins[w];
 		let a = win.attrs | attrs;
-		if ch == u32::from(b' ') && attrs == 0 {
-			let pair = if win.pair != 0 {
-				win.pair
-			} else {
-				win.bkgd.pair
-			};
-			Cell { ch: win.bkgd.ch, attrs: a | win.bkgd.attrs, pair }
+		let pair = if win.pair != 0 {
+			win.pair
 		} else {
-			let pair = if win.pair != 0 {
-				win.pair
-			} else {
-				win.bkgd.pair
-			};
-			Cell { ch, attrs: a | win.bkgd.attrs, pair }
-		}
+			win.bkgd.pair
+		};
+		let ch = if ch == u32::from(b' ') && attrs == 0 {
+			win.bkgd.ch
+		} else {
+			ch
+		};
+		Cell { ch, attrs: a | win.bkgd.attrs, pair }
 	}
 
 	/// Mark every line of window `w` changed (`touchwin`).
 	pub fn touchwin(&mut self, w: usize) {
 		let win = &mut self.wins[w];
 		let last = win.cols - 1;
-		for t in &mut win.touched {
-			*t = (0, last);
-		}
+		win.touched.fill((0, last));
 	}
 
 	/// ncurses `wmove`.
@@ -795,8 +789,7 @@ impl<'t> Caps<'t> {
 	pub fn new(ti: &'t TermInfo) -> Self {
 		let acs = ti
 			.str("acsc")
-			.map(|s| s.chunks_exact(2).map(|p| (p[0], p[1])).collect())
-			.unwrap_or_default();
+			.map_or_default(|s| s.as_chunks::<2>().0.iter().map(|p| (p[0], p[1])).collect());
 		Self { ti, acs }
 	}
 
