@@ -222,6 +222,20 @@ export class SessionAffinity implements SessionsApi {
 		return credential && this.#permits(provider, sessionId, credential.index) ? credential : undefined;
 	}
 
+	/** Check an explicit pin without restoring, pruning, or changing affinity state. */
+	permitsExplicitSnapshot(provider: string, sessionId: string, credentialId: number): boolean {
+		const live = this.#sessionLastCredential.get(provider)?.peek(sessionId);
+		if (live) return live.explicit !== true || live.credentialId === credentialId;
+		try {
+			const raw = this.#store.getCache(`${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`);
+			if (!raw) return true;
+			const pin = JSON.parse(raw) as SessionCredential;
+			return pin.explicit !== true || pin.credentialId === credentialId;
+		} catch {
+			return false;
+		}
+	}
+
 	selected(provider: string, sessionId: string): { credentialId: number; explicit: boolean } | undefined {
 		const credential = this.get(provider, sessionId);
 		if (credential?.credentialId === undefined) return undefined;

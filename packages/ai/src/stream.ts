@@ -73,8 +73,10 @@ import {
 	type AdmittedSend,
 	currentUsageAdmission,
 	type UsageAdmissionCall,
+	UsageRouteInvalidatedError,
+	validateSendRoute,
 } from "./usage-governor/admission";
-import type { UsageAdmissionOutcome } from "./usage-governor/types";
+import type { UsageAdmissionOutcome, UsageRouteBinding } from "./usage-governor/types";
 import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
@@ -643,7 +645,7 @@ export const __providerInFlightForTesting = {
  */
 type DispatchOptions = Pick<
 	StreamOptions,
-	"signal" | "maxInFlightRequests" | "beforeDispatch" | "credentialId" | "usageContext"
+	"signal" | "maxInFlightRequests" | "beforeDispatch" | "credentialId" | "usageContext" | "usageRouteBinding"
 > & { apiKey?: unknown };
 
 /**
@@ -662,7 +664,7 @@ function withAdmittedDispatch<TOptions extends DispatchOptions>(
 	// chokepoint — so the loop guard (which wraps this) sees healed events and all
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
-	if (limit === undefined && currentUsageAdmission()?.active !== true) {
+	if (limit === undefined && currentUsageAdmission()?.active !== true && !options?.usageRouteBinding) {
 		options?.beforeDispatch?.();
 		return healLeakedThinking(model, dispatch(false));
 	}
@@ -702,6 +704,7 @@ function withAdmittedDispatch<TOptions extends DispatchOptions>(
 				modelId: model.id,
 				baseUrl: model.baseUrl,
 				context: options?.usageContext,
+				usageRouteBinding: options?.usageRouteBinding,
 			};
 			send = await admitSend(call, options?.signal);
 			const startedWaitingAt = Date.now();
@@ -712,6 +715,7 @@ function withAdmittedDispatch<TOptions extends DispatchOptions>(
 			if (options?.signal?.aborted) {
 				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 			}
+			validateSendRoute(call);
 			options?.beforeDispatch?.();
 			const inner = healLeakedThinking(model, dispatch(limit !== undefined));
 			outcome = "sent";
@@ -1273,6 +1277,7 @@ function streamSimpleRequest<TApi extends Api>(
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
+			usageRouteBinding?: UsageRouteBinding,
 		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
@@ -1282,7 +1287,7 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
+				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity, usageRouteBinding };
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
@@ -1322,6 +1327,10 @@ function streamSimpleRequest<TApi extends Api>(
 					outer.end(result);
 				}
 			} catch (error) {
+				if (error instanceof UsageRouteInvalidatedError) {
+					outer.fail(error);
+					return undefined;
+				}
 				if (
 					!emittedReplayUnsafeEvent &&
 					isRetryableUpstreamError(
@@ -1351,11 +1360,13 @@ function streamSimpleRequest<TApi extends Api>(
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
+			let usageRouteBinding: UsageRouteBinding | undefined;
 			try {
 				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+				usageRouteBinding = typeof resolved === "string" ? undefined : resolved?.usageRouteBinding;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1377,14 +1388,21 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity, usageRouteBinding);
 			if (!failure) return;
+			// An automatic route authorizes this attempt only. Recovery must prepare
+			// a fresh binding rather than letting the generic resolver rotate it.
+			if (usageRouteBinding) {
+				emitFailure(failure);
+				return;
+			}
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
 				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
+				let nextBinding: UsageRouteBinding | undefined;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
@@ -1393,10 +1411,15 @@ function streamSimpleRequest<TApi extends Api>(
 					resolved => {
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+						nextBinding = typeof resolved === "string" ? undefined : resolved?.usageRouteBinding;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
+				if (usageRouteBinding && !nextBinding) {
+					outer.fail(new UsageRouteInvalidatedError());
+					return;
+				}
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, nextBinding);
 				if (!next) return;
 				failure = next;
 			}
@@ -1836,6 +1859,7 @@ function mapOptionsForApi<TApi extends Api>(
 		apiKey: apiKey ?? (typeof options?.apiKey === "string" ? options.apiKey : undefined),
 		credentialId: options?.credentialId,
 		oauthIdentity: options?.oauthIdentity,
+		usageRouteBinding: options?.usageRouteBinding,
 		usageContext: options?.usageContext,
 		cacheRetention: options?.cacheRetention,
 		headers: options?.headers,

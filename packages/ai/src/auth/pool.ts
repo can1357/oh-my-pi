@@ -367,10 +367,23 @@ export class CredentialPool implements CredentialsApi {
 
 	/** Maps a bearer fingerprint (see {@link fingerprintBearer}) to the stored row it was issued for. */
 	idForBearerFingerprint(provider: string, fingerprint: string): number | undefined {
+		let match: number | undefined;
 		for (const [credentialId, history] of this.#oauthBearerFingerprints.get(provider) ?? []) {
-			if (history.includes(fingerprint)) return credentialId;
+			if (!history.includes(fingerprint)) continue;
+			if (!this.entries(provider).some(row => row.id === credentialId && row.credential.type === "oauth")) continue;
+			if (match !== undefined) return undefined;
+			match = credentialId;
 		}
-		return undefined;
+		return match;
+	}
+
+	/** A bound attempt must still use the most recently resolved bearer for this row. */
+	isCurrentBearerFingerprint(provider: string, credentialId: number, fingerprint: string): boolean {
+		const history = this.#oauthBearerFingerprints.get(provider)?.get(credentialId);
+		return (
+			history?.[history.length - 1] === fingerprint &&
+			this.idForBearerFingerprint(provider, fingerprint) === credentialId
+		);
 	}
 
 	#resolveOAuthDedupeIdentityKey(provider: string, credential: OAuthCredential): string | null {

@@ -76,6 +76,7 @@ import type {
 	UsageGovernorStatus,
 	UsageRouteEvaluation,
 	UsageRouteEvaluationRequest,
+	UsageRouteBinding,
 	UsageRoutingScope,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
@@ -299,6 +300,7 @@ export type AuthStorageProtocol = {
 		[request: UsageRouteEvaluationRequest, signal?: AbortSignal],
 		UsageRouteEvaluation
 	>;
+	"governor.validateRoute": RpcMethod<[binding: UsageRouteBinding, request: UsageAdmissionRequest], boolean>;
 	"governor.admit": RpcMethod<[request: UsageAdmissionRequest, signal?: AbortSignal], UsageAdmissionGrant | undefined>;
 	"governor.settle": RpcMethod<[grantId: string, outcome: UsageAdmissionOutcome], void>;
 	"governor.status": RpcMethod<[options?: { provider?: string; waitLimit?: number }], UsageGovernorStatus>;

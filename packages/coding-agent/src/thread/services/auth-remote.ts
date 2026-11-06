@@ -82,6 +82,7 @@ import type {
 	UsageGovernorStatus,
 	UsageRouteEvaluation,
 	UsageRouteEvaluationRequest,
+	UsageRouteBinding,
 	UsageRoutingScope,
 	GovernorApi,
 } from "@oh-my-pi/pi-ai";
@@ -671,6 +672,9 @@ class RemoteGovernor implements GovernorApi {
 	}
 	evaluateRoutes(request: UsageRouteEvaluationRequest, signal?: AbortSignal): Promise<UsageRouteEvaluation> {
 		return this.#remote.call("governor.evaluateRoutes", request, signal);
+	}
+	validateRoute(binding: UsageRouteBinding, request: UsageAdmissionRequest): boolean {
+		return this.#remote.callSync("governor.validateRoute", binding, request);
 	}
 	configure(config: UsageGovernorConfig): void {
 		this.#config = config;

@@ -5158,7 +5158,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			disableModelFallback: options.disableModelFallback,
 			routingRole:
-				options.usageContext?.routingRole ?? modelPatternRetryFallbackRole ?? options.modelPatternFallbackRole,
+				options.usageContext?.routingRole ??
+				modelPatternRetryFallbackRole ??
+				options.modelPatternFallbackRole ??
+				(!hasExplicitModel
+					? (sessionManager.getLastModelChangeRole({ skipEphemeral: true }) ?? "default")
+					: undefined),
 			initialRetryFallback,
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
 			prewalk,
@@ -5287,7 +5292,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			autoTitle: options.autoTitle === true && !isSubagentSession,
 		});
 		hasSession = true;
-		await session.applyStartupUsageRouting();
 		// The session now owns its cost gate; the interactive TUI starts compression after its first frame.
 		if (options.deferSkillDescriptionCompression !== true) skillDescriptions.startCompression();
 		credentialNoticeSession = session;

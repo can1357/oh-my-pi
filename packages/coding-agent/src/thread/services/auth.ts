@@ -389,6 +389,11 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 			const lifetime = state.lifetime.signal;
 			return storage.governor.evaluateRoutes(request, signal ? AbortSignal.any([signal, lifetime]) : lifetime);
 		},
+		"governor.validateRoute": (storage, binding, request) => {
+			const owner = routingScopeOwners.get(storage)?.get(binding.scopeId);
+			if (owner && owner !== state) return false;
+			return storage.governor.validateRoute?.(binding, request) === true;
+		},
 		"governor.admit": async (storage, request, signal) => {
 			const lifetime = state.lifetime.signal;
 			const grant = await storage.governor.admit(request, signal ? AbortSignal.any([signal, lifetime]) : lifetime);

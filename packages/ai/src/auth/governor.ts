@@ -18,6 +18,7 @@ import {
 	type LedgerWindow,
 	UsageLedger,
 } from "../usage-governor/ledger";
+import { UsageRouteInvalidatedError } from "../usage-governor/admission";
 import {
 	admissionVerdict,
 	applicableWindows,
@@ -41,13 +42,14 @@ import {
 	type UsageRouteAccountEvaluation,
 	type UsageRouteEvaluation,
 	type UsageRouteEvaluationRequest,
+	type UsageRouteBinding,
 	type UsageRouteTarget,
 	type UsageRoutingScope,
 } from "../usage-governor/types";
 import { fingerprintBearer } from "./bearer-fingerprint";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool, StoredCredential } from "./pool";
-import type { AuthCredential, UsageApi } from "./types";
+import { oauthAccountKey, type AuthCredential, type UsageApi } from "./types";
 import { buildUsageCredential, usageCacheIdentity } from "./usage-cache";
 
 /** Re-check interval while a request waits, so config and snapshot changes are noticed. */
@@ -63,6 +65,8 @@ export interface CredentialGovernorSource {
 	readonly usage: UsageApi;
 	readonly policies: AccountPolicies;
 	readonly affinity?: { permits(provider: string, sessionId: string, credentialId: number): boolean };
+	readonly permitsOAuthFingerprint?: (provider: string) => boolean;
+	readonly permitsRoute?: (binding: UsageRouteBinding, request: UsageAdmissionRequest) => boolean;
 	readonly strategies: RankingStrategyResolver;
 }
 
@@ -141,11 +145,19 @@ export class CredentialGovernor implements GovernorApi {
 
 	async evaluateRoutes(request: UsageRouteEvaluationRequest, signal?: AbortSignal): Promise<UsageRouteEvaluation> {
 		signal?.throwIfAborted();
+		return this.#evaluateRoutes(request);
+	}
+
+	#evaluateRoutes(request: UsageRouteEvaluationRequest, cachedOnly = false): UsageRouteEvaluation {
 		const scope = this.#scopes.get(request.scopeId);
 		if (!scope || scope.revision !== request.revision) throw new Error("Usage routing scope revision mismatch");
-		const role = scope.roles.find(item => item.role === request.role);
-		if (!role || request.targets.some(target => !role.targets.some(allowed => sameTarget(target, allowed)))) {
-			throw new Error("Usage routing targets do not belong to this role");
+		const owner = request.owner ?? { kind: "role" as const, role: request.role };
+		const targets =
+			owner.kind === "role"
+				? scope.roles.find(item => item.role === owner.role)?.targets
+				: scope.models?.find(item => item.selector === owner.selector)?.targets;
+		if (!targets || request.targets.some(target => !targets.some(allowed => sameTarget(target, allowed)))) {
+			throw new Error("Usage routing targets do not belong to this owner");
 		}
 		const source = this.#source();
 		const now = this.#now();
@@ -163,6 +175,12 @@ export class CredentialGovernor implements GovernorApi {
 				if (!this.active || !source.affinity) return unknown;
 				if (!source.affinity.permits(target.provider, request.sessionId, row.id)) {
 					return { ...unknown, eligibility: "ineligible" };
+				}
+				if (target.accountIds !== undefined && row.credential.type === "oauth") {
+					const account = oauthAccountKey(row.credential);
+					if (account === undefined || !target.accountIds.includes(account)) {
+						return { ...unknown, eligibility: "ineligible" };
+					}
 				}
 				const credential =
 					source.usage.resolvedUsageCredential?.(target.provider, row.credential) ??
@@ -195,7 +213,7 @@ export class CredentialGovernor implements GovernorApi {
 					windows.some(window => !window.limitId || !ids.includes(window.limitId))
 				)
 					return unknown;
-				const evaluated = this.#inspect(
+				const evaluated = (cachedOnly ? this.#inspectCached.bind(this) : this.#inspect.bind(this))(
 					windows.map(window => ({
 						...window,
 						reserve: this.#reserveFor(source, target.provider, row.credential, false),
@@ -277,6 +295,53 @@ export class CredentialGovernor implements GovernorApi {
 		return { scopeId: scope.id, revision: scope.revision, accounts };
 	}
 
+	validateRoute(binding: UsageRouteBinding, request: UsageAdmissionRequest): boolean {
+		if (
+			!this.active ||
+			request.credentialId !== binding.credentialId ||
+			request.bearerFingerprint !== binding.bearerFingerprint ||
+			request.provider !== binding.target.provider ||
+			request.modelId !== binding.target.modelId ||
+			request.baseUrl !== binding.target.baseUrl ||
+			!request.context?.sessionId
+		)
+			return false;
+		const source = this.#source();
+		if (source.permitsRoute?.(binding, request) !== true) return false;
+		const row = source.pool.entries(binding.target.provider).find(entry => entry.id === binding.credentialId);
+		if (!row) return false;
+		if (row.credential.type === "oauth") {
+			if (!source.pool.isCurrentBearerFingerprint(binding.target.provider, row.id, binding.bearerFingerprint))
+				return false;
+		} else {
+			const credential = source.usage.resolvedUsageCredential?.(binding.target.provider, row.credential);
+			if (!credential?.apiKey || fingerprintBearer(credential.apiKey) !== binding.bearerFingerprint) return false;
+		}
+		try {
+			const evaluation = this.#evaluateRoutes(
+				{
+					scopeId: binding.scopeId,
+					revision: binding.revision,
+					owner: binding.owner,
+					role: binding.owner.kind === "role" ? binding.owner.role : "",
+					sessionId: request.context.sessionId,
+					targets: [binding.target],
+				},
+				true,
+			);
+			return evaluation.accounts.some(
+				account =>
+					account.selector === binding.target.selector &&
+					account.credentialId === binding.credentialId &&
+					account.eligibility === "eligible" &&
+					account.allowance === "included" &&
+					account.state === "open",
+			);
+		} catch {
+			return false;
+		}
+	}
+
 	onEvent(listener: (event: UsageGovernorEvent) => void): () => void {
 		this.#listeners.add(listener);
 		return () => {
@@ -297,12 +362,18 @@ export class CredentialGovernor implements GovernorApi {
 	 * Resolves `undefined` when the request is not governed or the ledger is degraded.
 	 */
 	async admit(request: UsageAdmissionRequest, signal?: AbortSignal): Promise<UsageAdmissionGrant | undefined> {
+		if (request.usageRouteBinding && !this.validateRoute(request.usageRouteBinding, request)) {
+			throw new UsageRouteInvalidatedError();
+		}
 		if (!this.active) return undefined;
 		const grantId = crypto.randomUUID();
 		let wait: OpenWait | undefined;
 		try {
 			for (;;) {
 				signal?.throwIfAborted();
+				if (request.usageRouteBinding && !this.validateRoute(request.usageRouteBinding, request)) {
+					throw new UsageRouteInvalidatedError();
+				}
 				if (!this.active) {
 					// Disabled or closed while waiting: release the request instead of holding it for a window that no longer governs.
 					this.#closeWait(wait, "admitted", this.#now());
@@ -517,7 +588,12 @@ export class CredentialGovernor implements GovernorApi {
 	): { provider: Provider; row: StoredCredential } | undefined {
 		for (const provider of source.pool.providers()) {
 			if (request.provider !== undefined && provider !== request.provider) continue;
-			const id = request.credentialId;
+			if (request.credentialId === undefined && source.permitsOAuthFingerprint?.(provider) !== true) continue;
+			const id =
+				request.credentialId ??
+				(request.provider && request.bearerFingerprint
+					? source.pool.idForBearerFingerprint(provider, request.bearerFingerprint)
+					: undefined);
 			if (id === undefined) continue;
 			const row = source.pool.entries(provider).find(entry => entry.id === id);
 			if (row) return { provider, row };
@@ -575,6 +651,10 @@ export class CredentialGovernor implements GovernorApi {
 				if (readOnly) ledger.close();
 			}
 		}
+		return this.#inspectCached(windows, now);
+	}
+
+	#inspectCached(windows: LedgerWindow[], now: number): EvaluatedLedgerWindow[] {
 		return windows.map(window => ({
 			...window,
 			decision: evaluateWindow({
@@ -763,6 +843,11 @@ function sameTarget(left: UsageRouteTarget, right: UsageRouteTarget): boolean {
 		left.selector === right.selector &&
 		left.provider === right.provider &&
 		left.modelId === right.modelId &&
-		left.baseUrl === right.baseUrl
+		left.baseUrl === right.baseUrl &&
+		(left.accountIds === undefined
+			? right.accountIds === undefined
+			: right.accountIds !== undefined &&
+				left.accountIds.length === right.accountIds.length &&
+				left.accountIds.every((id, index) => id === right.accountIds?.[index]))
 	);
 }

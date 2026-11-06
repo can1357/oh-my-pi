@@ -357,6 +357,26 @@ export class CredentialSelector {
 		options: AuthApiKeyOptions | undefined,
 		filter?: (credential: ApiKeyCredential) => boolean,
 	): Promise<ApiKeySelection | undefined> {
+		const requestedId = options?.requestCredential?.credentialId;
+		if (requestedId !== undefined) {
+			const entries = this.#deps.pool.entries(provider);
+			const index = entries.findIndex(entry => entry.id === requestedId);
+			const credential = entries[index]?.credential;
+			const pin = this.#deps.affinity.get(provider, sessionId);
+			if (
+				index < 0 ||
+				credential?.type !== "api_key" ||
+				!(filter?.(credential) ?? true) ||
+				(pin?.explicit && pin.credentialId !== requestedId)
+			)
+				return undefined;
+			const strategy = this.#deps.strategies(provider);
+			const context = { modelId: options?.modelId };
+			const scopes = credentialBlockScopesForRequest(provider, strategy, context, strategy?.blockScope?.(context));
+			if (this.#deps.blocks.isBlocked(provider, providerTypeKey(provider, "api_key"), index, scopes))
+				return undefined;
+			return { credential, index };
+		}
 		const credentials = this.#deps.pool
 			.credentials(provider)
 			.map((credential, index) => ({ credential, index }))
@@ -661,7 +681,18 @@ export class CredentialSelector {
 		);
 		// A session restriction drops every other account before ranking, pins,
 		// and the fallback passes below, so none of them can route back to it.
-		const credentials = stored.filter(entry => this.#deps.affinity.allows(provider, sessionId, entry.credential));
+		const requestedId = options?.requestCredential?.credentialId;
+		const pin = this.#deps.affinity.get(provider, sessionId);
+		if (requestedId !== undefined && pin?.explicit && pin.credentialId !== requestedId) return undefined;
+		const credentials = stored.filter(
+			entry =>
+				this.#deps.affinity.allows(provider, sessionId, entry.credential) &&
+				(requestedId === undefined || this.#deps.pool.entries(provider)[entry.index]?.id === requestedId) &&
+				(requestedId === undefined ||
+					!options?.accountIds?.length ||
+					(oauthAccountKey(entry.credential) !== undefined &&
+						options.accountIds.includes(oauthAccountKey(entry.credential)!))),
+		);
 
 		if (credentials.length === 0) return undefined;
 		// Ranking and preflight both await provider work; preserve the row each
@@ -1029,7 +1060,8 @@ export class CredentialSelector {
 		// every report is unknown or ineligible, preserve trial/grandfathered access
 		// by allowing the normal candidate fallback to attempt the request.
 		const enforcePlanRequirement =
-			hasPlanRequirement && candidates.some(candidate => planGate?.(candidate.usage) === true);
+			hasPlanRequirement &&
+			(requestedId !== undefined || candidates.some(candidate => planGate?.(candidate.usage) === true));
 
 		// Plan-gated models rank on every resolve to re-verify account tiers,
 		// so the drain-urgency order can flip between two eligible accounts as their
@@ -1050,17 +1082,19 @@ export class CredentialSelector {
 		const passes = [{ allowBlocked: false, enforcePlanRequirement, enforceAccounts }];
 		// Discovery may have observed only part of the pool. Try other unblocked
 		// accounts before reusing a blocked discovery match, without relaxing plan gates.
-		if (enforceAccounts) passes.push({ allowBlocked: false, enforcePlanRequirement, enforceAccounts: false });
-		passes.push({ allowBlocked: true, enforcePlanRequirement, enforceAccounts });
+		if (requestedId === undefined) {
+			if (enforceAccounts) passes.push({ allowBlocked: false, enforcePlanRequirement, enforceAccounts: false });
+			passes.push({ allowBlocked: true, enforcePlanRequirement, enforceAccounts });
+		}
 		const eligiblePreflightFailed =
 			this.#governed() &&
 			!sessionPinIsExplicit &&
 			preferredCandidate !== undefined &&
 			enforcePlanRequirement &&
 			rankedCandidates.some(candidate => preflightFailures.has(candidate) && planGate?.(candidate.usage) === true);
-		if (enforcePlanRequirement && !eligiblePreflightFailed)
+		if (requestedId === undefined && enforcePlanRequirement && !eligiblePreflightFailed)
 			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
-		if (enforceAccounts && !eligiblePreflightFailed)
+		if (requestedId === undefined && enforceAccounts && !eligiblePreflightFailed)
 			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
 		// Blocked candidates rank earliest-unblock first, which would route a
 		// blocked explicit pin to an equally blocked sibling. Once the strict

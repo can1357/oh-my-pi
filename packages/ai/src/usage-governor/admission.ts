@@ -1,6 +1,12 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { fingerprintBearer } from "../auth/bearer-fingerprint";
-import type { UsageAdmission, UsageAdmissionOutcome, UsageAdmissionRequest, UsageRequestContext } from "./types";
+import type {
+	UsageAdmission,
+	UsageAdmissionOutcome,
+	UsageAdmissionRequest,
+	UsageRequestContext,
+	UsageRouteBinding,
+} from "./types";
 
 let registered: UsageAdmission | undefined;
 
@@ -27,6 +33,7 @@ export interface UsageAdmissionCall {
 	modelId?: string;
 	baseUrl?: string;
 	context?: UsageRequestContext;
+	usageRouteBinding?: UsageRouteBinding;
 }
 
 function admissionRequest(call: UsageAdmissionCall): UsageAdmissionRequest {
@@ -36,9 +43,28 @@ function admissionRequest(call: UsageAdmissionCall): UsageAdmissionRequest {
 		modelId: call.modelId,
 		baseUrl: call.baseUrl,
 		context: call.context,
+		usageRouteBinding: call.usageRouteBinding,
 	};
 	if (call.bearer) request.bearerFingerprint = fingerprintBearer(call.bearer);
 	return request;
+}
+
+/** The cached authorization for an automatically selected route no longer holds. */
+export class UsageRouteInvalidatedError extends Error {
+	constructor() {
+		super("Usage route authorization is no longer valid");
+		this.name = "UsageRouteInvalidatedError";
+	}
+}
+
+/** Reject bound sends even when admission is absent or degraded. */
+export function validateSendRoute(call: UsageAdmissionCall): void {
+	const binding = call.usageRouteBinding;
+	if (!binding) return;
+	const request = admissionRequest(call);
+	if (!registered?.active || registered.validateRoute?.(binding, request) !== true) {
+		throw new UsageRouteInvalidatedError();
+	}
 }
 
 /** One admitted send. `settle` reports its outcome to the seam once; later calls do nothing. */
@@ -53,6 +79,7 @@ export interface AdmittedSend {
  */
 export async function admitSend(call: UsageAdmissionCall, signal?: AbortSignal): Promise<AdmittedSend | undefined> {
 	const admission = registered;
+	validateSendRoute(call);
 	if (!admission?.active) return undefined;
 	const grant = await admission.admit(admissionRequest(call), signal);
 	if (grant === undefined) return undefined;

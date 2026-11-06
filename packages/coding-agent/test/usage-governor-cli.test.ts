@@ -346,7 +346,7 @@ describe("usage governor CLI proof: scenarios", () => {
 			const status = governorOf(await proof.usageJson());
 			expect(windowsFor(status, "govplan-g-b@example.invalid").some(window => window.state === "open")).toBe(true);
 			expect(proof.fake.records.some(record => record.kind === "usage" && record.label === "b")).toBe(true);
-			child = proof.spawnOmp(["-p", "proactive fallback"]);
+			child = proof.spawnOmp(["-p", "WARM_FALLBACK proactive fallback"]);
 			const stderr = new Response(child.stderr).text();
 			const routed = await awaitCondition(() => proof.chats().length > 0, 20_000);
 			if (!routed) {
@@ -367,6 +367,34 @@ describe("usage governor CLI proof: scenarios", () => {
 			proof.close();
 		}
 	}, 60_000);
+
+	test("a flexible role protects a constrained role's shared account", async () => {
+		for (const roleProtection of ["prefer-alternatives", "off"] as const) {
+			const proof = await GovernorProof.create(
+				[
+					account("govplan", "a", { usedFraction: 0, resetInMs: 58_000 }),
+					account("govplan-g", "b", { usedFraction: 0, resetInMs: 58_000 }),
+				],
+				{
+					enabled: true,
+					roleProtection,
+					modelRoles: { default: "govplan/m", task: "govplan/m" },
+					fallbackChains: { default: ["govplan-g/m"], task: [] },
+				},
+			);
+			try {
+				const result = await proof.runOmp(["-p", "WARM_FALLBACK protection"]);
+				expect(result.exitCode).toBe(0);
+				expect(proof.chats().map(record => record.provider)).toEqual([
+					roleProtection === "off" ? "govplan" : "govplan-g",
+				]);
+				expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
+				assertConfined(proof);
+			} finally {
+				proof.close();
+			}
+		}
+	}, 120_000);
 	test("an unprobed fallback remains unknown and cannot escape to paid capacity", async () => {
 		const proof = await GovernorProof.create(
 			[
@@ -401,6 +429,7 @@ describe("usage governor CLI proof: scenarios", () => {
 			],
 			{
 				enabled: true,
+				roleProtection: "off",
 				modelRoles: { default: "govplan/m", task: "govplan/m" },
 				fallbackChains: { default: ["govplan-g/m"], task: [] },
 			},
@@ -409,8 +438,14 @@ describe("usage governor CLI proof: scenarios", () => {
 		try {
 			const status = governorOf(await proof.usageJson());
 			expect(windowsFor(status, "govplan-g-b@example.invalid").some(window => window.state === "open")).toBe(true);
-			child = proof.spawnOmp(["-p", "ROUTE_PIN"]);
-			expect(await awaitCondition(() => proof.chats().length >= 2, 20_000)).toBe(true);
+			child = proof.spawnOmp(["-p", "WARM_FALLBACK ROUTE_PIN"]);
+			if (!(await awaitCondition(() => proof.chats().length >= 2, 20_000))) {
+				child.kill("SIGINT");
+				await child.exited;
+				throw new Error(
+					`missing second chat: ${JSON.stringify({ records: proof.fake.records, ledger: proof.readLedger(), stderr: await new Response(child.stderr).text() })}`,
+				);
+			}
 			expect(
 				proof
 					.chats()

@@ -194,6 +194,37 @@ export class KeyCascade implements KeysApi {
 		return stored.length > 0 && stored.every(credential => this.isKeylessFallback(provider, credential));
 	}
 
+	/** Cached source-precedence and session authorization for a bound row. */
+	permitsRouteSnapshot(provider: string, sessionId: string, credentialId: number): boolean {
+		const row = this.#deps.pool.entries(provider).find(entry => entry.id === credentialId);
+		if (
+			!row ||
+			!this.#deps.affinity.allows(provider, sessionId, row.credential) ||
+			!this.#deps.affinity.permitsExplicitSnapshot(provider, sessionId, credentialId)
+		)
+			return false;
+		const restricted = this.#deps.affinity.isRestricted(provider, sessionId);
+		if (
+			(!restricted && this.#deps.overrides.runtimeKey(provider)) ||
+			this.#deps.overrides.configKey(provider) !== undefined
+		)
+			return false;
+		if (row.credential.type !== "api_key") return true;
+		const credentials = this.#deps.pool.credentials(provider);
+		if (credentials.some(credential => credential.type === "oauth")) return false;
+		if (row.credential.source === "login") return !this.isKeylessFallback(provider, row.credential);
+		return (
+			!credentials.some(
+				credential =>
+					credential.type === "api_key" &&
+					credential.source === "login" &&
+					!this.isKeylessFallback(provider, credential),
+			) &&
+			this.#deps.overrides.fallbackKey(provider) === undefined &&
+			!getEnvApiKey(provider)
+		);
+	}
+
 	/**
 	 * Env auth that belongs to this provider, not a cross-provider alias.
 	 * A declared OAuth token env list excludes borrowed API-key aliases from
@@ -383,6 +414,30 @@ export class KeyCascade implements KeysApi {
 		onCredentialId?: (id: number, identity?: OAuthRequestIdentity, oauthAccess?: string) => void,
 	): Promise<string | undefined> {
 		const restricted = this.#deps.affinity.isRestricted(provider, sessionId);
+		const requestedId = options?.requestCredential?.credentialId;
+		const requested =
+			requestedId === undefined ? undefined : this.#deps.pool.entries(provider).find(row => row.id === requestedId);
+		if (requestedId !== undefined) {
+			if (!requested || (restricted && requested.credential.type !== "oauth")) return undefined;
+			if (
+				(!restricted && this.#deps.overrides.runtimeKey(provider)) ||
+				this.#deps.overrides.configKey(provider) !== undefined
+			)
+				return undefined;
+			// Do not let a row constraint bypass a higher-priority source.
+			if (requested.credential.type === "api_key") {
+				if (this.#deps.pool.credentials(provider).some(credential => credential.type === "oauth")) return undefined;
+				if (
+					requested.credential.source !== "login" &&
+					(this.#deps.pool
+						.credentials(provider)
+						.some(credential => credential.type === "api_key" && credential.source === "login") ||
+						this.#deps.overrides.fallbackKey(provider) !== undefined ||
+						getEnvApiKey(provider))
+				)
+					return undefined;
+			}
+		}
 		// Runtime override takes highest priority
 		const runtimeKey = restricted ? undefined : this.#deps.overrides.runtimeKey(provider);
 		if (runtimeKey) {
@@ -425,6 +480,7 @@ export class KeyCascade implements KeysApi {
 			}
 			return oauthResolved.apiKey;
 		}
+		if (requestedId !== undefined && requested?.credential.type === "oauth") return undefined;
 		if (restricted) {
 			if (oauthRefreshFailure) throw oauthRefreshFailure;
 			throw new AIError.MissingApiKeyError(
@@ -454,13 +510,14 @@ export class KeyCascade implements KeysApi {
 		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
 		// env/api_key, not OAuth, so clear it now so getOAuthAccountId() correctly
 		// suppresses account_uuid for this session.
-		if (sessionId) this.#deps.affinity.forget(provider, sessionId);
+		if (sessionId && options?.recordAffinity !== false) this.#deps.affinity.forget(provider, sessionId);
 
 		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
-		if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
+		if (fallbackKey !== undefined)
+			return requestedId === undefined ? this.#deps.overrides.resolve(fallbackKey) : undefined;
 
 		const envKey = getEnvApiKey(provider);
-		if (envKey) return envKey;
+		if (envKey) return requestedId === undefined ? envKey : undefined;
 		const apiKeySelection = await this.#deps.selector.selectApiKey(
 			provider,
 			sessionId,

@@ -37,6 +37,7 @@ export interface ScenarioSettings {
 	enabled: boolean;
 	/** `usageGovernor.interactiveReserve`; omitted to exercise the default. */
 	interactiveReserve?: "hold" | "spend";
+	roleProtection?: "off" | "prefer-alternatives";
 	fallbackChains?: Record<string, string[]>;
 	modelRoles?: Record<string, string>;
 }
@@ -46,6 +47,7 @@ export function writeScenarioConfig(agentDir: string, settings: ScenarioSettings
 	fs.mkdirSync(agentDir, { recursive: true });
 	const usageGovernor: Record<string, unknown> = { enabled: settings.enabled };
 	if (settings.interactiveReserve !== undefined) usageGovernor.interactiveReserve = settings.interactiveReserve;
+	if (settings.roleProtection !== undefined) usageGovernor.roleProtection = settings.roleProtection;
 	const config = {
 		usageGovernor,
 		disabledProviders: [

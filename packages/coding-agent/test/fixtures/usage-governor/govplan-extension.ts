@@ -15,6 +15,16 @@ export default function govplanExtension(pi: ExtensionAPI): void {
 	const fake = process.env.GOVPLAN_FAKE_URL;
 	if (!fake) throw new Error("GOVPLAN_FAKE_URL is required by the govplan fixture");
 
+	// Warm the fallback in the exercising process, after extension registration
+	// invalidates its provider cache. The governor itself remains cache-only.
+	pi.on("before_agent_start", async (event, ctx) => {
+		if (!event.prompt.includes("WARM_FALLBACK")) return;
+		await ctx.modelRegistry.authStorage.usage.reports({
+			provider: "govplan-g",
+			baseUrlResolver: provider => ctx.modelRegistry.getProviderBaseUrl(provider),
+		});
+	});
+
 	pi.registerTool({
 		name: "govplan_pin_probe",
 		label: "Governor pin probe",

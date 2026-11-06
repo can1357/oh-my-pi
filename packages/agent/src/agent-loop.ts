@@ -98,6 +98,7 @@ import type {
 	AsideMessage,
 	BeforeToolCallResult,
 	CommittableAsideMessage,
+	PreparedModelAuth,
 	SoftToolRequirement,
 	SteeringInterruptSource,
 	SteeringQueueState,
@@ -1921,6 +1922,7 @@ interface PreparedProviderCall {
 	ownedDialect: Dialect | undefined;
 	/** Steering source offered to the provider for this call. */
 	liveSteering?: LiveSteeringChannel;
+	auth?: PreparedModelAuth;
 }
 
 /**
@@ -1990,7 +1992,25 @@ async function prepareProviderCall(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedProviderCall> {
-	const model = config.getModel?.() ?? config.model;
+	let model = config.getModel?.() ?? config.model;
+	let auth: PreparedProviderCall["auth"];
+	if (config.prepareModelCallAuth) {
+		let current: Promise<NonNullable<PreparedProviderCall["auth"]>> | undefined;
+		const resolveCurrent = () => {
+			current ??= (async () => {
+				const apiKey = (config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey;
+				let resolved: ApiKeyResolution;
+				const bearer = await resolveApiKeyOnce(apiKey, signal, value => {
+					resolved = value;
+				});
+				return { model, apiKey, resolved: resolved ?? bearer };
+			})();
+			return current;
+		};
+		auth = await config.prepareModelCallAuth(model, resolveCurrent, signal);
+		if (!auth && current) auth = await current;
+		if (auth) model = auth.model;
+	}
 	let messages = context.messages;
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
@@ -2042,7 +2062,7 @@ async function prepareProviderCall(
 		if (llmContext.tools) config.sentToolDefinitions.record(llmContext.tools);
 		llmContext = config.sentToolDefinitions.withInactiveTools(llmContext);
 	}
-	return { model, context: llmContext, promptToolWireTools, ownedDialect };
+	return { model, context: llmContext, promptToolWireTools, ownedDialect, auth };
 }
 
 /**
@@ -2099,11 +2119,16 @@ async function streamAssistantResponse(
 			: providerAbortSignals.length === 1
 				? providerAbortSignals[0]!
 				: AbortSignal.any(providerAbortSignals);
-	const requestApiKey = (config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey;
-	let resolvedCredential: ApiKeyResolution;
-	const resolvedApiKey = await resolveApiKeyOnce(requestApiKey, finalRequestSignal, resolved => {
-		resolvedCredential = resolved;
-	});
+	const requestApiKey = providerCall.auth
+		? providerCall.auth.apiKey
+		: ((config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey);
+	let resolvedCredential: ApiKeyResolution = providerCall.auth?.resolved;
+	let resolvedApiKey: string | undefined;
+	if (!providerCall.auth) {
+		resolvedApiKey = await resolveApiKeyOnce(requestApiKey, finalRequestSignal, resolved => {
+			resolvedCredential = resolved;
+		});
+	}
 	const apiKey = isApiKeyResolver(requestApiKey)
 		? seedApiKeyResolver(resolvedCredential ?? resolvedApiKey, requestApiKey)
 		: requestApiKey;

@@ -3745,6 +3745,8 @@ export class ModelRegistry {
 			forceRefresh: options?.forceRefresh,
 			refreshReason: options?.refreshReason,
 			rejectedAccessToken: options?.rejectedAccessToken,
+			recordAffinity: options?.recordAffinity,
+			requestCredential: options?.requestCredential,
 			signal: options?.signal,
 		});
 	}

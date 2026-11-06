@@ -133,6 +133,7 @@ import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mod
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	disabledProviderIds,
+	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
 	resolveCliModel,
@@ -2299,7 +2300,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
 				await this.#setModelWithProviderSessionReset(model);
 				// Only a completed explicit selection, including same-model reselection, takes ownership.
-				if (selection === "explicit") this.#prewalk.releaseHandoff();
+				if (selection === "explicit") {
+					this.#usageRoutingRole = undefined;
+					this.#prewalk.releaseHandoff();
+				}
+			},
+			setRoutingRole: role => {
+				this.#usageRoutingRole = role;
 			},
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
@@ -2340,8 +2347,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			usageRouting,
-			routingRole: () =>
-				config.routingRole ?? this.sessionManager.getLastModelChangeRole({ skipEphemeral: true }) ?? "default",
+			routingRole: () => this.#usageRoutingRole,
 			configWarnings: this.configWarnings,
 			model: () => this.model,
 			contextFitsModel: (model, excludedMessage) => this.#maintenance.contextFitsModel(model, excludedMessage),
@@ -2383,7 +2389,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			deferFallbackChainValidation: this.#fallbackChainValidationDeferred,
 			unexpectedStopJudgeTimeoutMs: config.unexpectedStopJudgeTimeoutMs,
 		});
+		const configureGovernedPreparation = () => {
+			this.agent.prepareModelCallAuth = cfgUsageGovernorEnabled.get(this.settings)
+				? (model, resolveCurrent, signal) =>
+						this.#recovery.prepareGovernedModelCall(
+							model,
+							resolveCurrent,
+							this.#usageRoutingRole
+								? { kind: "role", role: this.#usageRoutingRole }
+								: { kind: "model", selector: formatModelStringWithRouting(model) },
+							signal,
+						)
+				: undefined;
+		};
+		configureGovernedPreparation();
+		this.addDisposer(this.settings.onLayersChange(configureGovernedPreparation));
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
+			if (cfgUsageGovernorEnabled.get(this.settings)) return;
 			if (
 				(!cfgRetryUsageAwareFallback.get(this.settings) && !cfgUsageGovernorEnabled.get(this.settings)) ||
 				(this.#usagePreflightReadyForNextModelCall && this.#usagePreflightReadyModel === this.model)
@@ -2397,6 +2419,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
+			if (cfgUsageGovernorEnabled.get(this.settings)) return;
 			if (!cfgRetryUsageAwareFallback.get(this.settings) && !cfgUsageGovernorEnabled.get(this.settings)) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
@@ -6507,20 +6530,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	get isDisposed(): boolean {
 		return this.#isDisposed;
 	}
-	get usageRoutingContext(): { routingScopeId: string; routingRevision: number; routingRole: string } | undefined {
+	get usageRoutingContext(): { routingScopeId: string; routingRevision: number; routingRole?: string } | undefined {
 		const scope = this.#usageRouting?.refresh();
 		if (!scope) return undefined;
 		return {
 			routingScopeId: scope.id,
 			routingRevision: scope.revision,
-			routingRole:
-				this.#usageRoutingRole ?? this.sessionManager.getLastModelChangeRole({ skipEphemeral: true }) ?? "default",
+			routingRole: this.#usageRoutingRole,
 		};
-	}
-	async applyStartupUsageRouting(): Promise<void> {
-		if (cfgUsageGovernorEnabled.get(this.settings)) {
-			await this.#recovery.maybeApplyUsageAwareFallback(new AbortController().signal);
-		}
 	}
 
 	markMovedFromEmptySessionFile(sessionFile: string): void {

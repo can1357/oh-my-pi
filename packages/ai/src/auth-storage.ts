@@ -272,6 +272,19 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 				usage: this.#modules.usage,
 				policies: this.#policies,
 				strategies: options.rankingStrategyResolver ?? defaultRankingStrategy,
+				permitsOAuthFingerprint: provider =>
+					this.#modules.keys.source(provider, { env: "aliases" })?.kind === "oauth",
+				permitsRoute: (binding, request) => {
+					const sessionId = request.context?.sessionId;
+					if (!sessionId) return false;
+					const { provider, modelId } = binding.target;
+					const row = this.#modules.pool.entries(provider).find(entry => entry.id === binding.credentialId);
+					return (
+						row !== undefined &&
+						this.#modules.keys.permitsRouteSnapshot(provider, sessionId, row.id) &&
+						this.#modules.blocks.isBlockedSnapshot(provider, row.credential.type, row.id, modelId) === false
+					);
+				},
 			}),
 		});
 		this.#overrides = new KeyOverrides(options.configValueResolver);

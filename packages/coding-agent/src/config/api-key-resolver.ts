@@ -19,6 +19,8 @@ export interface ApiKeyResolverOptions {
 	baseUrl?: string;
 	/** Provider model id forwarded to model-scoped usage ranking/backoff. */
 	modelId?: string;
+	recordAffinity?: AuthApiKeyOptions["recordAffinity"];
+	requestCredential?: AuthApiKeyOptions["requestCredential"];
 }
 
 /**
@@ -72,6 +74,8 @@ export function createApiKeyResolver(
 		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
 			modelId,
+			recordAffinity: options.recordAffinity,
+			requestCredential: options.requestCredential,
 			forceRefresh,
 			signal,
 			refreshReason,

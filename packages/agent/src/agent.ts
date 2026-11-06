@@ -188,6 +188,7 @@ export interface AgentOptions {
 	 * Useful for expiring tokens and model-scoped credential routing.
 	 */
 	getApiKey?: (model: Model) => Promise<ApiKey | undefined> | ApiKey | undefined;
+	prepareModelCallAuth?: AgentLoopConfig["prepareModelCallAuth"];
 
 	/**
 	 * Inspect or replace provider payloads before they are sent.
@@ -527,6 +528,7 @@ export class Agent {
 
 	streamFn: StreamFn;
 	getApiKey?: (model: Model) => Promise<ApiKey | undefined> | ApiKey | undefined;
+	prepareModelCallAuth?: AgentLoopConfig["prepareModelCallAuth"];
 	/** Prepare actual queue deliveries after dequeue gates; commit runs only while ownership remains valid. */
 	prepareQueuedMessages?: PrepareQueuedMessages;
 	/**
@@ -596,6 +598,7 @@ export class Agent {
 		this.#hideThinkingSummary = opts.hideThinkingSummary;
 		this.#maxRetryDelayMs = opts.maxRetryDelayMs;
 		this.getApiKey = opts.getApiKey;
+		this.prepareModelCallAuth = opts.prepareModelCallAuth;
 		this.#onPayload = opts.onPayload;
 		this.#onResponse = opts.onResponse;
 		this.#onSseEvent = opts.onSseEvent;
@@ -2031,6 +2034,7 @@ export class Agent {
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
 			getApiKey: this.getApiKey,
+			prepareModelCallAuth: this.prepareModelCallAuth,
 			getToolContext: this.#getToolContext,
 			syncContextBeforeModelCall: async (context, signal) => {
 				await this.#runBeforeModelCallHooks(signal, context);
