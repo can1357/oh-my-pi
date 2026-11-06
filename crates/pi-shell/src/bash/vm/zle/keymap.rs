@@ -445,6 +445,15 @@ pub struct CursorKeys {
 	pub right: Option<BString>,
 }
 
+/// How a keymap name came to be, as `bindkey -lL` shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MapOrigin {
+	/// `bindkey -A primary name`.
+	Linked(BString),
+	/// `bindkey -N name`.
+	New,
+}
+
 /// zsh's keymaps: the name table (`keymapnamtab`) and the keymaps it names.
 #[derive(Clone, Debug)]
 pub struct Keymaps {
@@ -487,10 +496,10 @@ impl Keymaps {
 		self.names.nodes = vec![Vec::new(); nodes.len()];
 		self.names.ct = 0;
 		for n in nodes.into_iter().flatten() {
-			if self.unref_keymap(KmId(n.km)) != 0 {
-				if let Some(km) = self.km_mut(n.km) {
-					km.primary = None;
-				}
+			if self.unref_keymap(KmId(n.km)) != 0
+				&& let Some(km) = self.km_mut(n.km)
+			{
+				km.primary = None;
 			}
 		}
 		self.default_bindings(main_vi);
@@ -587,15 +596,17 @@ impl Keymaps {
 	}
 
 	/// What `bindkey -lL` shows for name `name`: `None` for `.safe` (or no
-	/// such name), `Some(Some(primary))` for `bindkey -A primary name`,
-	/// `Some(None)` for `bindkey -N name`.
-	pub fn primary_of(&self, name: &[u8]) -> Option<Option<BString>> {
+	/// such name), else how the name came to be.
+	pub fn primary_of(&self, name: &[u8]) -> Option<MapOrigin> {
 		let n = self.names.get(name)?;
 		if n.name.as_slice() == b".safe" {
 			return None;
 		}
 		let primary = self.km(n.km).and_then(|k| k.primary.clone());
-		Some(primary.filter(|p| p.as_slice() != name))
+		Some(match primary.filter(|p| p.as_slice() != name) {
+			Some(p) => MapOrigin::Linked(p),
+			None => MapOrigin::New,
+		})
 	}
 
 	/// zsh `refkeymap`: hold keymap `id` so it survives losing its names
@@ -639,9 +650,9 @@ impl Keymaps {
 		if self.unref_keymap(KmId(id)) == 0 {
 			return;
 		}
-		if !self
+		if self
 			.km(id)
-			.is_some_and(|k| k.primary.as_ref().is_some_and(|p| p.as_slice() == name))
+			.is_none_or(|k| k.primary.as_ref().is_none_or(|p| p.as_slice() != name))
 		{
 			return;
 		}
@@ -748,14 +759,14 @@ impl Keymaps {
 		emap.first[127] = emap.first[8].clone();
 
 		// vi command mode: 0-127 from the table, 128-255 undefined-key.
-		for i in 0..128 {
-			amap.first[i] = th(bindings::VICMD[i]);
+		for (slot, &b) in amap.first.iter_mut().zip(&bindings::VICMD) {
+			*slot = th(b);
 		}
 
 		// Safe fallback keymap: .self-insert, except .accept-line for
 		// newline and return.
-		for i in 0..256 {
-			smap.first[i] = th(Some(".self-insert"));
+		for slot in smap.first.iter_mut().take(256) {
+			*slot = th(Some(".self-insert"));
 		}
 		smap.first[usize::from(b'\n')] = th(Some(".accept-line"));
 		smap.first[usize::from(b'\r')] = th(Some(".accept-line"));
