@@ -39,8 +39,8 @@ use tokio_util::sync::CancellationToken;
 use super::{Child, ToolConfig, Turn};
 use crate::{
 	bash::{
-		CallOutcome, IntrinsicId, LAUNCH_CARRIER, Lineage, ModeId, RunId, RunStdio, Script, ShellApi,
-		ToolCall, VprocSel,
+		CallOutcome, IntrinsicId, LAUNCH_CARRIER, Launch, LaunchHow, Lineage, ModeId, RunId,
+		RunStdio, Script, ShellApi, ToolCall, VprocSel,
 	},
 	extras::Done,
 	sys::StdFile,
@@ -233,24 +233,28 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 		}
 	}
 	let mut args: Vec<BString> = command.args().iter().map(|arg| os_bytes(arg)).collect();
-	// The operand's words go to the engine as data, not into the synthetic
-	// source and not as positional parameters ([`Script::launch`]): the
-	// subshell keeps the caller's parameters and the source is the same
-	// one command whatever the operand is.
-	let mut launch: Vec<BString> = match program {
-		Program::Builtin => vec![BString::from("command"), BString::from("--")],
+	// The operand's words, how they run and the text the shell shows for
+	// them go to the engine as data ([`Script::launch`]), not into the
+	// synthetic source and not as positional parameters: the subshell keeps
+	// the caller's parameters, the source is the same one command whatever
+	// the operand is, and no `command` or `exec` word is there for a
+	// caller's function or alias of that name to take.
+	let how = match program {
+		Program::Builtin => LaunchHow::Builtin,
 		Program::Path(path) => {
 			let argv0 = command
 				.presented_argv0()
 				.map_or_else(|| args[0].clone(), os_bytes);
 			args[0] = os_bytes(path.as_os_str());
-			vec![BString::from("exec"), BString::from("-a"), argv0, BString::from("--")]
+			LaunchHow::Exec { argv0 }
 		},
 	};
-	launch.append(&mut args);
 	source.extend_from_slice(LAUNCH_CARRIER.as_bytes());
 	let mut script = Script::command(source);
-	script.launch = Some(launch);
+	script.launch = Some(Launch { argv: args, how });
+	// The environment sweep above is the engine's own text, parsed without
+	// the caller's aliases and resolved without its functions.
+	script.engine_source = true;
 	script.foreign_env = foreign_env;
 	script.unexport_env = unexport_env;
 	// The working directory is logical, as after `cd`: `-execdir` hands over

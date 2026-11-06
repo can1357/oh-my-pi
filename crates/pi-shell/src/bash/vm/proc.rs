@@ -83,10 +83,10 @@ pub struct Vproc {
 	/// nested shell). A field, not an overlay record: a record would cost
 	/// every subshell a ~530-byte map allocation (idle vproc ≤ 2 KiB).
 	pub subshell:      u32,
-	/// The command being run (`BASH_COMMAND`): its unit and syntax node.
-	/// Externalized by unit id (a trap action continuing after a restore
-	/// still names the trapped command).
-	pub command:       Option<(Arc<Unit>, u32)>,
+	/// The command being run (`BASH_COMMAND`): where its text comes from.
+	/// A node is externalized by unit id (a trap action continuing after a
+	/// restore still names the trapped command).
+	pub command:       Option<CmdSite>,
 	/// Pushes onto bash's call-stack arrays (`FUNCNAME`, `BASH_SOURCE`,
 	/// `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`), oldest first; a subshell
 	/// starts with its parent's.
@@ -745,16 +745,41 @@ pub struct Coproc {
 	pub write: i32,
 }
 
+/// Where the text of the command a vproc runs (`BASH_COMMAND`, the DEBUG
+/// and ERR traps, the trace) comes from.
+pub enum CmdSite {
+	/// A command of a compiled unit: the source bytes its syntax node
+	/// spans, as bash reports the text it parsed.
+	Node(Arc<Unit>, u32),
+	/// A host callout's operand ([`super::Launch`]), which has no source of
+	/// its own: the words as the shell would print them, boxed so this site
+	/// stays the size of the node one (every byte here is a byte per idle
+	/// vproc). The carrier word the engine compiled is private and never
+	/// reported.
+	Text(Box<BString>),
+}
+
+impl Clone for CmdSite {
+	fn clone(&self) -> Self {
+		match self {
+			Self::Node(unit, node) => Self::Node(Arc::clone(unit), *node),
+			Self::Text(text) => Self::Text(text.clone()),
+		}
+	}
+}
+
 impl Vproc {
-	/// `BASH_COMMAND`: the source text of the current command.
+	/// `BASH_COMMAND`: the text of the current command.
 	pub fn command_text(&self) -> &[u8] {
-		self.command.as_ref().map_or(&[][..], |(unit, node)| {
-			unit
+		match &self.command {
+			None => &[],
+			Some(CmdSite::Text(text)) => text.as_slice(),
+			Some(CmdSite::Node(unit, node)) => unit
 				.nodes
 				.get(*node as usize)
 				.and_then(|n| unit.source.get(n.lo as usize..n.hi as usize))
-				.unwrap_or_default()
-		})
+				.unwrap_or_default(),
+		}
 	}
 
 	pub fn has_work(&self) -> bool {
@@ -802,10 +827,13 @@ pub struct Run {
 	/// Root scripts: positional parameters, cwd and exported variables to
 	/// install when the script starts.
 	pub args:              Option<Vec<BString>>,
-	/// The words of this run's carrier command
+	/// The command this run's carrier command runs
 	/// ([`Script::launch`](super::Script::launch)), taken by that command
 	/// once its own words are expanded and `None` from then on.
-	pub launch:            Option<Vec<BString>>,
+	pub launch:            Option<super::Launch>,
+	/// The source is the engine's own
+	/// ([`Script::engine_source`](super::Script::engine_source)).
+	pub engine:            bool,
 	pub cwd:               Option<BString>,
 	pub env:               Vec<(BString, BString)>,
 	pub started:           bool,
@@ -1488,8 +1516,10 @@ pub struct ExecState {
 	pub exec_as:     Option<Box<ExecAs>>,
 	/// `wait -p var`: the variable that gets the waited child's pid.
 	pub wait_into:   Option<Box<BString>>,
-	/// Run through `command`: a special builtin's failure does not end a
-	/// posix shell.
+	/// Run through `command`, either because a `command` word of the source
+	/// resolved or because a host callout asked for that dispatch
+	/// ([`super::LaunchHow::Builtin`]): no function of the name runs, and a
+	/// special builtin's failure does not end a posix shell.
 	pub via_command: bool,
 	/// The awaited frame was pushed by the builtin, which runs again when
 	/// it returns ([`Control::Resume`](super::builtins::Control::Resume)).

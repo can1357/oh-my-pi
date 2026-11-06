@@ -92,7 +92,8 @@ pub use crate::bash::{
 	store::{Attrs, StateStore, StoreError, VarValue},
 	term::{CtlChar, Pty, SetWhen, Shtty, TermFlag, Terminal, Termios},
 	vm::{
-		Budget, CallOutcome, ControlHandle, Cx, IoPoll, LAUNCH_CARRIER, Profile, RunStdio, Script,
-		Shell, ShellApi, ShellInit, Step, ToolCall, VprocSel, WakeToken, vproc_layout,
+		Budget, CallOutcome, ControlHandle, Cx, IoPoll, LAUNCH_CARRIER, Launch, LaunchHow, Profile,
+		RunStdio, Script, Shell, ShellApi, ShellInit, Step, ToolCall, VprocSel, WakeToken,
+		vproc_layout,
 	},
 };

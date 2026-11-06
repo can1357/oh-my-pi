@@ -15,9 +15,9 @@ use super::{
 	expand::{self, Expander, Stop},
 	is_ident, probe,
 	proc::{
-		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, LastBg,
-		LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run, Saved,
-		Scratch, ScriptKind, Slot, TryEnd, Vproc,
+		AssignValue, Atom, Bang, BangStage, CmdSite, Coproc, Depths, Frame, FrameKind, InlineStage,
+		LastBg, LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run,
+		Saved, Scratch, ScriptKind, Slot, TryEnd, Vproc,
 	},
 	redir,
 	state::{self, Level, Root, Scope, Var, VarMap},
@@ -203,7 +203,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		let starts = starts_command(unit, op);
 		let fresh = vp.frames[fi].scratch.is_none();
 		if fresh && starts {
-			note_command(vp, unit, op);
+			note_command(k, cx, vp, unit, op);
 		}
 		// bash's DEBUG trap: before a simple command, `[[ ]]`, `(( ))`, each
 		// arith-for expression, a `case` or `select` command and each `for`
@@ -570,19 +570,40 @@ pub fn set_trap_line(vp: &mut Vproc, line: u32) {
 /// Record the command `op` starts (a simple command, `[[ ]]` or `(( ))`:
 /// the caller checked [`starts_command`]) as `BASH_COMMAND`; not while a
 /// trap action runs (bash keeps the trapped command).
-fn note_command(vp: &mut Vproc, unit: &Arc<Unit>, op: Op) {
+///
+/// A host callout's carrier command is recorded as its operand's own text
+/// instead ([`CmdSite::Text`]), from this first reader on: the DEBUG trap
+/// runs before the command's words are expanded, so the carrier would
+/// otherwise be what it reports. The carrier is the one command of the
+/// engine's own script whose source is [`LAUNCH_CARRIER`], and the run
+/// still carries the operand until that command expands.
+fn note_command(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, unit: &Arc<Unit>, op: Op) {
 	if vp.trap_frames == 0
 		|| !vp
 			.frames
 			.iter()
 			.any(|f| matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. }))
 	{
-		if let Some((u, node)) = &mut vp.command
+		if vp.runs.front().is_some_and(|r| r.launch.is_some())
+			&& node_text(unit, op.node) == crate::bash::vm::LAUNCH_CARRIER.as_bytes()
+		{
+			let utf8 = super::locale::is_utf8(k, cx.store, vp);
+			let text = vp
+				.runs
+				.front()
+				.and_then(|r| r.launch.as_ref())
+				.map(|launch| command::launch_text(launch, utf8));
+			if let Some(text) = text {
+				vp.command = Some(CmdSite::Text(Box::new(text)));
+				return;
+			}
+		}
+		if let Some(CmdSite::Node(u, node)) = &mut vp.command
 			&& Arc::ptr_eq(u, unit)
 		{
 			*node = op.node;
 		} else {
-			vp.command = Some((Arc::clone(unit), op.node));
+			vp.command = Some(CmdSite::Node(Arc::clone(unit), op.node));
 		}
 	}
 }
@@ -943,6 +964,15 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		},
 		_ => (false, false),
 	};
+	// The engine's own source ([`Script::engine_source`]) is parsed without
+	// the shell's aliases: a caller's alias — of a host callout's carrier
+	// word, of the `unset` of its environment sweep, of a keyword in it —
+	// must not rewrite bytes the user never wrote. bash has no such source,
+	// so there is nothing to match.
+	let engine = matches!(
+		vp.frames.last().map(|f| &f.kind),
+		Some(FrameKind::Script { what: ScriptKind::Run, .. })
+	) && vp.runs.front().is_some_and(|r| r.engine);
 	let (feat, mut aliases) = if snapped {
 		(Features::NONE, None)
 	} else {
@@ -953,12 +983,16 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 				return None;
 			},
 		};
-		match builtins::alias_table(k, cx, vp) {
-			Ok(a) => (feat, a),
-			Err(err) => {
-				k.fail(err);
-				return None;
-			},
+		if engine {
+			(feat, None)
+		} else {
+			match builtins::alias_table(k, cx, vp) {
+				Ok(a) => (feat, a),
+				Err(err) => {
+					k.fail(err);
+					return None;
+				},
+			}
 		}
 	};
 	let mode = vp.mode;
@@ -1259,7 +1293,11 @@ pub(super) fn literal_script_origin(
 	source: &[u8],
 	shell: bool,
 ) -> Option<crate::bash::event::SourceOrigin> {
-	let (unit, node) = vp.command.as_ref()?;
+	// A host callout's operand has no syntax of its own
+	// ([`CmdSite::Text`]): nothing here can be proved fixed for it.
+	let Some(CmdSite::Node(unit, node)) = vp.command.as_ref() else {
+		return None;
+	};
 	let op = unit
 		.ops
 		.iter()
@@ -2699,7 +2737,7 @@ fn control_flow(
 				return None;
 			}
 			if starts {
-				note_command(vp, unit, op);
+				note_command(k, cx, vp, unit, op);
 			}
 			let f = top_frame(vp);
 			if starts {

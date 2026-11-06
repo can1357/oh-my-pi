@@ -202,18 +202,18 @@ impl Default for ShellInit {
 /// A script to run ([`Shell::submit`]).
 pub struct Script {
 	/// Source bytes.
-	pub source:       Arc<[u8]>,
+	pub source:        Arc<[u8]>,
 	/// Where they came from (diagnostic prefixes, events).
-	pub origin:       Origin,
+	pub origin:        Origin,
 	/// Mode to parse and run in; the vproc's mode before the run comes
 	/// back when it ends (`None`: the shell's current mode, which an
 	/// `emulate` in the script changes for later runs too).
-	pub mode:         Option<ModeId>,
+	pub mode:          Option<ModeId>,
 	/// Positional parameters for the script, replacing the inherited current
 	/// positional scope in a new subshell without changing its caller.
-	pub args:         Option<Vec<BString>>,
-	/// The words of the script's carrier command ([`LAUNCH_CARRIER`]),
-	/// supplied by the host instead of written into the source.
+	pub args:          Option<Vec<BString>>,
+	/// The command a host callout's synthetic script runs, supplied by the
+	/// host instead of written into the source ([`Launch`]).
 	///
 	/// A host callout runs its operand as one command of a synthetic
 	/// script. Putting the operand's words in that script — as positional
@@ -221,55 +221,97 @@ pub struct Script {
 	/// something the engine keys on: a scope, which has a lifetime, or a
 	/// compiled unit, which has a content address. These words are neither.
 	/// The source is one fixed carrier command per callout shape, so every
-	/// callout in a session compiles to the same unit; the words replace
-	/// the carrier's own the moment that command's words are expanded, and
-	/// the slot is empty from then on. The subshell's positional parameters
+	/// callout in a session compiles to the same unit; the words, how they
+	/// are dispatched and the text the shell shows for them replace the
+	/// carrier's own the moment that command's words are expanded, and the
+	/// slot is empty from then on. The subshell's positional parameters
 	/// are its caller's throughout, exactly as in the `( … )` subshell a
 	/// callout stands for, and nothing the operand runs can reach the slot.
 	///
 	/// Unrelated to [`Script::args`], which is still the script's own
 	/// positional parameters.
-	pub launch:       Option<Vec<BString>>,
+	pub launch:        Option<Launch>,
+	/// The source is the engine's own, not the user's.
+	///
+	/// Nothing the user writes is in these bytes, and nothing the user
+	/// names may rewrite them: they are parsed without the shell's aliases,
+	/// and the commands they contain themselves (not the operand the host
+	/// supplies in [`Script::launch`]) resolve without the shell's
+	/// functions. A callout's own `unset`, `export` or carrier word is
+	/// therefore not something a caller can alias, shadow or observe.
+	pub engine_source: bool,
 	/// Which virtual process runs it.
-	pub vproc:        VprocSel,
+	pub vproc:         VprocSel,
 	/// Opaque host tag, echoed in `RunStart`.
-	pub tag:          u64,
+	pub tag:           u64,
 	/// Working directory for the run.
-	pub cwd:          Option<BString>,
+	pub cwd:           Option<BString>,
 	/// Exported variables for the run.
-	pub env:          Vec<(BString, BString)>,
+	pub env:           Vec<(BString, BString)>,
 	/// Changes to inherited non-shell environment entries for a new subshell.
 	/// A `None` name clears them; otherwise `None` removes and `Some` sets.
-	pub foreign_env:  Vec<(Option<BString>, Option<BString>)>,
+	pub foreign_env:   Vec<(Option<BString>, Option<BString>)>,
 	/// Shell variable names whose inherited bindings must not be exported in
 	/// the new subshell, including bindings hidden by local scopes.
-	pub unexport_env: Vec<BString>,
+	pub unexport_env:  Vec<BString>,
 }
 
-/// The one word of a host callout's synthetic script: the command whose
-/// words [`Script::launch`] supplies.
+/// The one word of a host callout's synthetic script, a private marker in
+/// bytes the engine wrote and no user text reaches.
 ///
-/// It is a placeholder, never looked up — the operand's words replace it
-/// before the command is resolved — so every callout of the same redirect
-/// shape has the same source and compiles to the same unit, whatever its
-/// operand is.
+/// It is never resolved as a name (the operand's words replace it before
+/// the command is looked up), never alias-expanded
+/// ([`Script::engine_source`]) and never shown (the operand's own text is
+/// what `BASH_COMMAND`, the DEBUG and ERR traps and the trace report), so
+/// every callout of the same redirect shape has the same source and
+/// compiles to the same unit, whatever its operand is.
 pub const LAUNCH_CARRIER: &str = "__pi_callout";
+
+/// What a host callout's carrier command runs ([`Script::launch`]): the
+/// operand's words, and how the shell dispatches them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Launch {
+	/// The command's words, which replace the carrier's.
+	pub argv: Vec<BString>,
+	/// How they are dispatched.
+	pub how:  LaunchHow,
+}
+
+/// How a [`Launch`]'s words run.
+///
+/// The engine used to write these as words of the synthetic source
+/// (`command --`, `exec -a name --`), which made a caller's function or
+/// alias of the name `command` or `exec` run instead of the operand. They
+/// are dispatch, not a command, so the host states them and nothing is
+/// looked up by name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LaunchHow {
+	/// As the caller would have run the words: a function, builtin or
+	/// external of the name, whichever the shell finds.
+	Plain,
+	/// As `command` runs them: no function of the name.
+	Builtin,
+	/// As `exec -a argv0` runs them: the program at `argv[0]` replaces the
+	/// subshell and is presented as `argv0`.
+	Exec { argv0: BString },
+}
 
 impl Script {
 	/// A command script (`-c` semantics) on the root vproc.
 	pub fn command(source: impl Into<Arc<[u8]>>) -> Self {
 		Self {
-			source:       source.into(),
-			origin:       Origin::Command,
-			mode:         None,
-			args:         None,
-			launch:       None,
-			vproc:        VprocSel::Root,
-			tag:          0,
-			cwd:          None,
-			env:          Vec::new(),
-			foreign_env:  Vec::new(),
-			unexport_env: Vec::new(),
+			source:        source.into(),
+			origin:        Origin::Command,
+			mode:          None,
+			args:          None,
+			launch:        None,
+			engine_source: false,
+			vproc:         VprocSel::Root,
+			tag:           0,
+			cwd:           None,
+			env:           Vec::new(),
+			foreign_env:   Vec::new(),
+			unexport_env:  Vec::new(),
 		}
 	}
 }
@@ -1637,6 +1679,7 @@ impl Shell {
 			lossy: 0,
 			args: None,
 			launch: script.launch,
+			engine: script.engine_source,
 			cwd: None,
 			env: Vec::new(),
 			started: false,
@@ -1741,11 +1784,11 @@ impl Shell {
 		vp.status = status;
 		vp.scopes = scopes;
 		// The script's own positional parameters ([`Script::args`]). A host
-		// callout does not use them: its operand's words are quoted into
-		// the synthetic source it runs (`tools::quote_words`), so the
-		// subshell keeps the caller's parameters, as the `( … )` subshell
-		// it stands for does, and the operand's own `getopts`, `shift` and
-		// `set --` read and write those.
+		// callout does not use them: its operand's words travel as data on
+		// the run ([`Script::launch`]), so the subshell keeps the caller's
+		// parameters, as the `( … )` subshell it stands for does, and the
+		// operand's own `getopts`, `shift` and `set --` read and write
+		// those.
 		if let Some(args) = script.args {
 			// A copied function scope takes precedence over the overlay: install
 			// the script's arguments at that level, as `set --` does.

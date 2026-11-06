@@ -40,8 +40,8 @@ use parking_lot::Mutex;
 
 use crate::{
 	bash::{
-		CallId, CallOutcome, ControlHandle, Cx, IoPoll, LAUNCH_CARRIER, Lineage, NativeRef, RunId,
-		Script, Shell, ShellApi, ToolCall, ToolRef,
+		CallId, CallOutcome, ControlHandle, Cx, IoPoll, LAUNCH_CARRIER, Launch, LaunchHow, Lineage,
+		NativeRef, RunId, Script, Shell, ShellApi, ToolCall, ToolRef,
 	},
 	extras::{ExtrasGate, ReportedError},
 	git::{GitLayers, flag_on},
@@ -337,8 +337,9 @@ impl Child {
 	///
 	/// The words go to the engine as data ([`Script::launch`]), not as the
 	/// subshell's positional parameters and not quoted into its source, so
-	/// the subshell keeps the caller's parameters and every callout of the
-	/// same redirect shape compiles to the same unit.
+	/// the subshell keeps the caller's parameters, every callout of the
+	/// same redirect shape compiles to the same unit, and nothing a caller
+	/// can alias or shadow stands between the shell and the operand.
 	fn start(
 		&mut self,
 		api: &mut ShellApi<'_, '_>,
@@ -350,7 +351,8 @@ impl Child {
 	) {
 		self.label = turn.labels.fresh(api.lineage().label);
 		let mut script = Script::command(format!("{LAUNCH_CARRIER}{redirect}").into_bytes());
-		script.launch = Some(argv);
+		script.launch = Some(Launch { argv, how: LaunchHow::Plain });
+		script.engine_source = true;
 		// The command's environment, per-command assignments included.
 		script.env = call
 			.env
