@@ -97,6 +97,7 @@ function makeFailingGuestContext(failure: Error): InteractiveModeContext {
 		},
 		session: {
 			newSession: () => Promise.resolve(),
+			setReplicaPersonaName: () => {},
 			messages: [],
 		},
 		statusContainer: { clear: () => {} },
@@ -148,6 +149,7 @@ function makeCancelledSwitchGuestContext(
 		session: {
 			switchSession,
 			newSession: () => Promise.resolve(),
+			setReplicaPersonaName: () => {},
 			messages: [],
 			agent: {
 				state: { model: undefined },

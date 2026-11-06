@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added agent persona cycling: agents with `mode: "primary"` in their frontmatter join a `Tab` / `Ctrl+Tab` cycle in the main chat editor (while the editor is empty), `--agent <name>` picks the starting persona, and the `model` and `order` frontmatter fields set the model a persona loads with and its place in the cycle ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Added an `agent_persona` status-line segment showing the active persona, and `activePersonaName` on `ExtensionContext` for extensions ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Added persona restore on `/resume` and `--resume`: saved messages now record the active persona, and a resumed session reselects the last one, falling back to the first primary agent ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+
 ### Fixed
 
 - Subagents receive task instructions with their blank lines, Markdown hard breaks, and table spacing intact, whether given inline or via `taskFile`.
@@ -10,6 +16,8 @@
 - `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.
 - The bash execution visualization keeps updating, and saved traces still restore, after a command handles bytes that aren't valid UTF-8 (e.g. `v=$(printf '\377')`)
 - On Windows, `grep`, `glob` and isolated subagents no longer flash a console window when they query or start the ovnfs daemon.
+- Fixed the startup persona overriding an explicit `--model` or thinking level with its own; explicit startup options now win ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Fixed the active persona's instructions being dropped from the system prompt by any later rebuild, such as a tool-set or model change or the rebuild before each turn ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
 
 ## [18.17.0] - 2026-11-06
 

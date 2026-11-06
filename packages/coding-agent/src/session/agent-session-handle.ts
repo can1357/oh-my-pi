@@ -280,6 +280,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly systemPrompt: string[];
 	/** Skills available to the session. */
 	readonly skills: readonly Skill[];
+	/** Active main-session persona; null for a focused subagent, which never loads one. */
+	readonly activePersonaName: string | null;
 	/** Whether the effective thinking level is resolved automatically. */
 	readonly isAutoThinking: boolean;
 	/** Whether a compaction is in progress. */

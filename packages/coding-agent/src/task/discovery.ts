@@ -20,10 +20,10 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
+import { findAllNearestProjectConfigDirs } from "../config";
 import { pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
@@ -80,22 +80,17 @@ async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): 
  * installed npm/link plugins, Claude marketplace plugin agents (project scope
  * before user), then bundled.
  * @param cwd - Current working directory for project agent discovery
- * @param home - Home directory for user and marketplace discovery
+ * @param home - Home directory for marketplace/extension-root discovery
  * @param extensionRoots - Session-local extension roots (explicit + mode + configured)
+ * @param agentDir - Effective agent config directory for user-level `agents/` discovery (default: getAgentDir())
  */
 export async function discoverAgents(
 	cwd: string,
 	home: string = os.homedir(),
 	extensionRoots?: EffectiveExtensionRoots,
+	agentDir: string = getAgentDir(),
 ): Promise<DiscoveryResult> {
 	const resolvedCwd = path.resolve(cwd);
-
-	const userDirs = getConfigDirs("agents", { project: false })
-		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
-		.map(entry => ({
-			...entry,
-			path: path.resolve(entry.path),
-		}));
 
 	const projectDirs = findAllNearestProjectConfigDirs("agents", resolvedCwd)
 		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
@@ -107,8 +102,11 @@ export async function discoverAgents(
 	const orderedDirs: AgentDirectory[] = [];
 	const project = projectDirs[0];
 	if (project) orderedDirs.push({ dir: project.path, source: "project" });
-	const user = userDirs[0];
-	if (user) orderedDirs.push({ dir: user.path, source: "user" });
+	// User-level agents dir is resolved directly from the caller's agentDir
+	// (default: getAgentDir()) rather than via getConfigDirs, whose ".omp" base
+	// hardcodes the real os.homedir() and ignores any agentDir override —
+	// breaking isolation for sessions configured with a custom agentDir.
+	orderedDirs.push({ dir: path.resolve(agentDir, "agents"), source: "user" });
 
 	// Extension-package agents use the same effective root set as sibling
 	// skills/hooks/tools, threaded whole so explicit roots and mode survive.

@@ -161,6 +161,7 @@ function cacheStatusLine(
 ): StatusLineComponent {
 	const session: StatusLineSession = {
 		state: { messages: [] },
+		activePersonaName: null,
 		messages: [],
 		isStreaming: false,
 		isAutoThinking: false,
