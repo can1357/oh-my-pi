@@ -133,19 +133,47 @@ describe("snapshotMcpRuntime", () => {
 		expect(snap.command).toBe("/usr/bin/shadowed-github");
 	});
 
-	test("a disconnected server with registered tools is not listed as unavailable", () => {
-		// A dormant lazy server: no connection, its cached tools registered as
-		// deferred entries that connect on first use.
-		const dormant: MCPRuntimeSource = {
-			getConnectionStatus: () => "disconnected",
-			getConnection: () => undefined,
-			getTools: () => [{ mcpServerName: "github", mcpToolName: "search_code", description: "Search code." }],
-		};
-		const snap = snapshotMcpRuntime(server(), dormant);
-		expect(snap.health).toBe("disconnected");
-		expect(formatMcpListHint(snap)).not.toBe("unavailable");
-		expect(formatMcpListHint(snap)).toContain("1 tool");
-		expect(formatMcpListHint(snapshotMcpRuntime(server(), sourceFor("disconnected")))).toBe("unavailable");
+	// A disconnected server with registered tools is serving a cached catalog.
+	// That alone says nothing about what invoking one of them does: the manager
+	// keeps a failed server's catalog registered on purpose, and for that one
+	// the call is refused until `/mcp reconnect`. Only the source's dormancy
+	// answer may turn the hint into a promise to connect.
+	const cachedCatalog = (dormant: boolean | undefined): MCPRuntimeSource => ({
+		getConnectionStatus: () => "disconnected",
+		...(dormant === undefined ? {} : { isServerDormant: () => dormant }),
+		getConnection: () => undefined,
+		getTools: () => [{ mcpServerName: "github", mcpToolName: "search_code", description: "Search code." }],
+	});
+
+	test("a disconnected server promises a connect only while it is dormant", () => {
+		const dormant = snapshotMcpRuntime(server(), cachedCatalog(true));
+		expect(dormant.health).toBe("disconnected");
+		expect(dormant.dormant).toBe(true);
+		expect(formatMcpListHint(dormant)).toBe("1 tool · connects on first use");
+
+		// Same registered tools, last connect failed: the catalog is reported,
+		// the connect is not promised.
+		const failed = snapshotMcpRuntime(server(), cachedCatalog(false));
+		expect(failed.dormant).toBe(false);
+		expect(formatMcpListHint(failed)).toBe("1 tool cached");
+
+		// A source that cannot answer is not evidence of dormancy either.
+		expect(formatMcpListHint(snapshotMcpRuntime(server(), cachedCatalog(undefined)))).toBe("1 tool cached");
+
+		// No tools at all is still the one case with nothing to report.
+		const empty = snapshotMcpRuntime(server(), sourceFor("disconnected"));
+		expect(empty.dormant).toBe(false);
+		expect(formatMcpListHint(empty)).toBe("unavailable");
+	});
+
+	test("a connected or shadowed server is never reported dormant", () => {
+		// `isServerDormant` is asked about a name, and a shadowed entry shares
+		// the winner's name: joining on it would promise a connect for a config
+		// that owns no connection at all.
+		const live: MCPRuntimeSource = { ...sourceFor("connected", connection()), isServerDormant: () => true };
+		expect(snapshotMcpRuntime(server(), live).dormant).toBe(false);
+		expect(snapshotMcpRuntime(server(), live, { shadowed: true }).dormant).toBe(false);
+		expect(snapshotMcpRuntime(server(), live, { enabled: false }).dormant).toBe(false);
 	});
 
 	test("infers http from url when transport is omitted", () => {

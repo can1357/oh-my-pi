@@ -272,4 +272,36 @@ describe("/mcp listing over the shared dispatcher and lazy servers", () => {
 		expect(syncTestedMcpServer).toHaveBeenCalledWith("dormant");
 		expect(output.join("\n")).toContain('Server "dormant" connected (0 tools).');
 	}, 30_000);
+
+	// Round 8 (roboomp, `slash-commands/helpers/mcp.ts:313`): the shared
+	// dispatcher's `/mcp test` probed the config-file entry verbatim, while
+	// the session's discovery expands the whole entry before connecting and
+	// `prepareConfig` expands nothing. A working server written as
+	// `url: "${VAR}"` was probed at the literal placeholder and reported as a
+	// connection failure while the session was connected to it.
+	test("/mcp test connects to the expanded endpoint, not the literal placeholder", async () => {
+		const urlVar = "OMP_ACP_MCP_TEST_URL";
+		Bun.env[urlVar] = "http://127.0.0.1:9/real";
+		try {
+			await Bun.write(
+				getMCPConfigPath("user", getProjectDir()),
+				JSON.stringify({ mcpServers: { dormant: { type: "http", url: `\${${urlVar}}`, lazy: true } } }),
+			);
+			const connect = vi
+				.spyOn(mcpClient, "connectToServer")
+				.mockResolvedValue({ name: "dormant" } as unknown as MCPServerConnection);
+			vi.spyOn(mcpClient, "listTools").mockResolvedValue([]);
+			vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue(undefined);
+			const { output, runtime } = makeRuntime();
+
+			expect(await handleMcpAcp({ args: "test dormant" } as ParsedSlashCommand, runtime)).toEqual({
+				consumed: true,
+			});
+
+			expect(connect).toHaveBeenCalledWith("dormant", expect.objectContaining({ url: "http://127.0.0.1:9/real" }));
+			expect(output.join("\n")).toContain('Server "dormant" connected');
+		} finally {
+			delete Bun.env[urlVar];
+		}
+	}, 30_000);
 });

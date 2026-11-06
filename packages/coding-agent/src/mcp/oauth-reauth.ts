@@ -164,7 +164,33 @@ export class McpReauthRefusalError extends Error {}
 export interface FoundMcpServer {
 	filePath: string;
 	scope: "user" | "project";
+	/**
+	 * The entry exactly as the config file holds it. What a write-back edits,
+	 * and what `enabled: false` is read from: both are statements about the
+	 * file, not about a connection.
+	 */
 	config: MCPServerConfig;
+	/**
+	 * What a connection to this server has to be made with:
+	 * {@link FoundMcpServer.config} with its `${VAR}` placeholders expanded,
+	 * or that same config when it came from the live manager and is expanded
+	 * already.
+	 *
+	 * Every provider that owns a file this lookup reads expands the whole
+	 * entry before building the server — `native` for `.omp/mcp.json` and
+	 * `mcp-json` for a standalone `mcp.json`/`.mcp.json` both run
+	 * `expandEnvVarsDeep` over `mcpServers` — so by the time the session
+	 * connects, no `${VAR}` is left in any field. `MCPManager.prepareConfig`
+	 * does not close the gap: it resolves a bare env name or a `!command`
+	 * inside `env`/`headers` values and nothing else, so `url: "${MCP_URL}"`
+	 * reaches the transport as that literal. A probe made from the raw entry
+	 * therefore tests an endpoint the session would never contact, and
+	 * reports a connection failure for a server the session is connected to.
+	 *
+	 * The whole entry is expanded, not a chosen subset, because that is what
+	 * discovery does; a subset would test a configuration no provider builds.
+	 */
+	connectionConfig: MCPServerConfig;
 	/** Live-manager entry that lives in no writable config file; writes go to user scope. */
 	discovered: boolean;
 	/**
@@ -210,6 +236,10 @@ export async function findMcpServerForAuth(
 				filePath: getMCPConfigPath("user", cwd),
 				scope: "user",
 				config: managerConfig,
+				// The manager's own copy: discovery expanded it before it was
+				// declared, and expanding it again could substitute inside a
+				// value a variable supplied.
+				connectionConfig: managerConfig,
 				discovered: true,
 				acpOwned: true,
 			};
@@ -233,10 +263,24 @@ export async function findMcpServerForAuth(
 	// would report success while the active project server keeps its stale
 	// credential after the next reload.
 	if (enableProjectConfig && projectConfig?.mcpServers?.[name]) {
-		return { filePath: projectPath, scope: "project", config: projectConfig.mcpServers[name], discovered: false };
+		const config = projectConfig.mcpServers[name];
+		return {
+			filePath: projectPath,
+			scope: "project",
+			config,
+			connectionConfig: expandEnvVarsDeep(config),
+			discovered: false,
+		};
 	}
 	if (userConfig.mcpServers?.[name]) {
-		return { filePath: userPath, scope: "user", config: userConfig.mcpServers[name], discovered: false };
+		const config = userConfig.mcpServers[name];
+		return {
+			filePath: userPath,
+			scope: "user",
+			config,
+			connectionConfig: expandEnvVarsDeep(config),
+			discovered: false,
+		};
 	}
 
 	// Standalone fallback files match the discovery paths used by the
@@ -256,7 +300,13 @@ export async function findMcpServerForAuth(
 	for (const [index, fallbackConfig] of fallbackConfigs.entries()) {
 		const config = fallbackConfig?.mcpServers?.[name];
 		if (config) {
-			return { filePath: standalonePaths[index]!, scope: "project", config, discovered: false };
+			return {
+				filePath: standalonePaths[index]!,
+				scope: "project",
+				config,
+				connectionConfig: expandEnvVarsDeep(config),
+				discovered: false,
+			};
 		}
 	}
 
@@ -264,7 +314,8 @@ export async function findMcpServerForAuth(
 	const source = mcpManager?.getSource(name);
 	if (!config || !source) return null;
 
-	return { filePath: userPath, scope: "user", config, discovered: true };
+	// Already expanded; see the ACP branch above.
+	return { filePath: userPath, scope: "user", config, connectionConfig: config, discovered: true };
 }
 
 /** Strip the `auth` block so a probe or flow starts from the raw server config. */

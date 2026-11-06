@@ -81,6 +81,13 @@ export interface MCPRuntimeSnapshot {
 	implementationName?: string;
 	implementationVersion?: string;
 	instructions?: string;
+	/**
+	 * The server is configured, not connected, and nothing has tried it yet —
+	 * so invoking one of its cached tools connects it. False whenever that
+	 * cannot be established, including for a server whose last connect failed:
+	 * its catalog stays registered too, and invoking it is refused.
+	 */
+	dormant: boolean;
 	tools: MCPRuntimeCatalogItem[];
 	resources: MCPRuntimeCatalogItem[];
 	prompts: MCPRuntimeCatalogItem[];
@@ -93,6 +100,8 @@ export interface MCPRuntimeSnapshot {
 /** Narrow manager surface so tests can stub without constructing MCPManager. */
 export interface MCPRuntimeSource {
 	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected";
+	/** See {@link MCPRuntimeSnapshot.dormant}; absent in a source that cannot answer it. */
+	isServerDormant?(name: string): boolean;
 	getConnection(name: string): MCPConnectionDisplay | undefined;
 	getTools(): Array<{
 		mcpServerName?: string;
@@ -202,6 +211,7 @@ export function snapshotMcpRuntime(
 		args: server.args?.map(arg => sanitizeDisplayText(arg)),
 		url: sanitizeDisplayField(server.url),
 		envCount,
+		dormant: false,
 		tools: [],
 		resources: [],
 		prompts: [],
@@ -224,6 +234,9 @@ export function snapshotMcpRuntime(
 	return {
 		...base,
 		health,
+		// Only a source that tracks connect attempts can answer this; one that
+		// cannot leaves the hint neutral rather than promising a connect.
+		dormant: health === "disconnected" && (manager.isServerDormant?.(server.name) ?? false),
 		...identity,
 		instructions: sanitizeDisplayField(connection?.instructions),
 		tools,
@@ -252,13 +265,15 @@ export function formatMcpListHint(snapshot: MCPRuntimeSnapshot): string {
 			return "inactive";
 		case "connecting":
 			return "connecting…";
-		case "disconnected":
-			// Registered tools without a connection are deferred entries (a lazy
-			// server's cached catalog): invoking one connects the server.
-			if (snapshot.tools.length > 0) {
-				return `${snapshot.tools.length} tool${snapshot.tools.length === 1 ? "" : "s"} · connects on first use`;
-			}
-			return "unavailable";
+		case "disconnected": {
+			if (snapshot.tools.length === 0) return "unavailable";
+			const tools = `${snapshot.tools.length} tool${snapshot.tools.length === 1 ? "" : "s"}`;
+			// Tools registered without a connection are a cached catalog, which
+			// a server whose last connect failed keeps too. Only a dormant one
+			// connects when a tool of its is invoked; the other refuses until
+			// `/mcp reconnect`, so it gets a hint that claims nothing.
+			return snapshot.dormant ? `${tools} · connects on first use` : `${tools} cached`;
+		}
 		case "connected": {
 			const parts = [`${snapshot.tools.length} tool${snapshot.tools.length === 1 ? "" : "s"}`];
 			if (snapshot.resources.length > 0) {

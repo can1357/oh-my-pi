@@ -15,6 +15,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import {
+	formatMcpListHint,
+	type MCPServerDisplay,
+	snapshotMcpRuntime,
+} from "@oh-my-pi/pi-tui/overlays/extensions/mcp-runtime";
 import { getConfigRootDir, removeSyncWithRetries, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { loadAllMCPConfigs } from "../src/mcp/config";
 import "../src/discovery/builtin";
@@ -108,6 +113,51 @@ describe("MCP lazy connect", () => {
 			await manager.disconnectAll();
 		}
 	});
+
+	// `/extensions` joins discovery config to the live manager through
+	// `snapshotMcpRuntime(server, mcpManager)`, and `isServerDormant` is
+	// optional on `MCPRuntimeSource`: a manager that stopped answering it
+	// would still type-check and silently downgrade every dormant server's
+	// hint. Both arms are rendered from a real manager for that reason.
+	it("renders the /extensions hint for a dormant and for a failed lazy server from the live manager", async () => {
+		const config = lazyConfig(path.join(workDir, "spawned.marker"));
+		const broken: MCPStdioServerConfig = {
+			type: "stdio",
+			command: BUN_EXEC,
+			args: ["-e", "process.exit(3)"],
+			lazy: true,
+			timeout: 2_000,
+		};
+		const cache = new MCPToolCache(fakeStorage());
+		await cache.set("lazyfixture", config, [TOOL_DEF]);
+		await cache.set("brokenfixture", broken, [TOOL_DEF]);
+		const manager = new MCPManager(workDir, cache, undefined, {
+			ladderMs: [],
+			retryBaseMs: 60_000,
+			retryMaxMs: 60_000,
+		});
+		const display = (name: string): MCPServerDisplay => ({
+			name,
+			command: BUN_EXEC,
+			transport: "stdio",
+			_source: { provider: "native", path: path.join(workDir, "mcp.json"), level: "project" },
+		});
+
+		try {
+			await manager.connectServers({ lazyfixture: config, brokenfixture: broken }, {});
+			expect(formatMcpListHint(snapshotMcpRuntime(display("lazyfixture"), manager))).toBe(
+				"1 tool · connects on first use",
+			);
+
+			// First use of the broken server fails; its cached catalog stays
+			// registered, so only the recorded failure separates the two.
+			await manager.reconnectServer("brokenfixture", { manual: true });
+			expect(manager.getTools().some(tool => tool.mcpServerName === "brokenfixture")).toBe(true);
+			expect(formatMcpListHint(snapshotMcpRuntime(display("brokenfixture"), manager))).toBe("1 tool cached");
+		} finally {
+			await manager.disconnectAll();
+		}
+	}, 20_000);
 
 	it("connects on demand when a deferred tool is first invoked", async () => {
 		const marker = path.join(workDir, "spawned.marker");

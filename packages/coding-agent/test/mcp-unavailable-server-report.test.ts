@@ -476,6 +476,66 @@ describe("MCP server that is not connected", () => {
 	}, 30_000);
 
 	/**
+	 * Round 8 (roboomp, `overlays/extensions/mcp-runtime.ts:258`): `/mcp list`
+	 * and the `/extensions` dashboard inferred "connects on first use" from
+	 * registered tools without a connection. That is the state a *failed*
+	 * server is also in — `#doReconnect` and the crash-storm breaker both keep
+	 * its catalog registered on purpose — so the line promised a connect while
+	 * the invocation was refused and `/mcp reconnect` was the actual recovery.
+	 *
+	 * `isServerDormant` is the one fact the renderers may say it from, and it
+	 * is the complement of what `explainMissingTool` partitions on: the same
+	 * live failure record, so a status line and the note cannot disagree.
+	 */
+	it("answers isServerDormant only while nothing has failed under the live config", async () => {
+		const lazyServer = startLoginRequiredServer();
+		const lazyConfig: MCPHttpServerConfig = { type: "http", url: lazyServer.url, timeout: 2_000, lazy: true };
+		const cache = new MCPToolCache(memoryStorage());
+		await cache.set("dormant", lazyConfig, [PING_DEF]);
+		const lazyManager = new MCPManager(tempDir, cache, undefined, SINGLE_ATTEMPT);
+		lazyManager.setAuthStorage(session);
+		try {
+			await lazyManager.connectServers({ dormant: lazyConfig }, {});
+			await lazyManager.waitForStartup(GUARD_MS);
+
+			// Cached tools registered, no connection, nothing tried: the one
+			// state in which invoking a tool really does connect the server.
+			expect(lazyManager.getConnectionStatus("dormant")).toBe("disconnected");
+			expect(lazyManager.getTools().map(tool => tool.name)).toContain("mcp__dormant_ping");
+			expect(lazyManager.isServerDormant("dormant")).toBe(true);
+
+			// First use fails. The catalog is still registered — and that is
+			// exactly why the tool count is not evidence of anything.
+			await lazyManager.reconnectServer("dormant", { manual: true });
+			expect(lazyManager.getConnectionStatus("dormant")).toBe("disconnected");
+			expect(lazyManager.getTools().map(tool => tool.name)).toContain("mcp__dormant_ping");
+			expect(lazyManager.isServerDormant("dormant")).toBe(false);
+			// The note reached the same verdict from the same record.
+			expect(lazyManager.explainMissingTool("mcp__dormant_ping")).toContain("dormant");
+
+			// A login another session stored brings it back: connected is not
+			// dormant either, and the stale failure is retired with it.
+			await otherSession.credentials.set(mcpOAuthCredentialId(lazyServer.url), {
+				type: "oauth",
+				access: GOOD_TOKEN,
+				refresh: "unused-refresh",
+				expires: Date.now() + 3_600_000,
+			});
+			lazyManager.explainMissingTool("mcp__dormant_ping");
+			await connectionEstablished(lazyManager, "dormant");
+			expect(lazyManager.isServerDormant("dormant")).toBe(false);
+
+			// A name the manager holds no config for was never tried either.
+			expect(lazyManager.isServerDormant("never-configured")).toBe(true);
+		} finally {
+			await lazyManager.disconnectAll();
+			lazyServer.stop();
+			await otherSession.credentials.remove(mcpOAuthCredentialId(lazyServer.url));
+			await session.credentials.poll();
+		}
+	}, 30_000);
+
+	/**
 	 * R2-a, same shape from the other end: a server that connected and then
 	 * died keeps its tools registered on purpose, so a call routes through
 	 * the tool-level reconnect. It is reported, because the model cannot see

@@ -424,4 +424,101 @@ describe("the tool cache keys a discovered server on its config as written", () 
 		if (config.type !== "http") throw new Error("expected an http server");
 		expect(await cache.get(name, { ...config, url: "https://other.example.test/mcp" })).toBeNull();
 	});
+
+	/**
+	 * Round 8 (roboomp, `discovery/codex.ts:245`). Codex forwards a value from
+	 * the environment only when the variable is set; the as-written form
+	 * substituted `${VAR}` either way. With the variable unset, two different
+	 * effective configurations — the explicit literal the connection really
+	 * uses — therefore hashed to the same key, so editing it left a lazy
+	 * server serving the previous configuration's catalog.
+	 *
+	 * Both directions are asserted per form, because they pull against each
+	 * other: a placeholder must stand in wherever a value *was* taken (so a
+	 * rotated secret keeps the catalog), and nowhere else (so an edited
+	 * literal drops it).
+	 */
+	const CODEX_FORWARDS = [
+		{
+			id: "env_vars",
+			toml: (literal: string) =>
+				[
+					"[mcp_servers.aw]",
+					'command = "aw-server"',
+					`env_vars = ["${TOKEN_VAR}"]`,
+					"[mcp_servers.aw.env]",
+					`${TOKEN_VAR} = "${literal}"`,
+					"",
+				].join("\n"),
+			effective: (config: MCPServerConfig) => (config.type === "stdio" ? config.env?.[TOKEN_VAR] : undefined),
+		},
+		{
+			id: "env_http_headers",
+			toml: (literal: string) =>
+				[
+					"[mcp_servers.aw]",
+					'url = "https://mcp.example.test/aw"',
+					"[mcp_servers.aw.http_headers]",
+					`X-Api-Key = "${literal}"`,
+					"[mcp_servers.aw.env_http_headers]",
+					`X-Api-Key = "${TOKEN_VAR}"`,
+					"",
+				].join("\n"),
+			effective: (config: MCPServerConfig) => remoteHeaders(config)?.["X-Api-Key"],
+		},
+		{
+			id: "bearer_token_env_var",
+			toml: (literal: string) =>
+				[
+					"[mcp_servers.aw]",
+					'url = "https://mcp.example.test/aw"',
+					`bearer_token_env_var = "${TOKEN_VAR}"`,
+					"[mcp_servers.aw.http_headers]",
+					`Authorization = "Bearer ${literal}"`,
+					"",
+				].join("\n"),
+			effective: authorization,
+		},
+	];
+
+	for (const form of CODEX_FORWARDS) {
+		test(`codex ${form.id}: the key follows the value the connection uses, set or unset`, async () => {
+			const codexToml = path.join(dirs.project, ".codex", "config.toml");
+			delete process.env[TOKEN_VAR];
+			delete Bun.env[TOKEN_VAR];
+
+			// Unset: nothing is forwarded, so the explicit literal is the
+			// connection, and editing it is editing the connection.
+			await Bun.write(codexToml, form.toml("literal-a"));
+			const [name, literalA] = await reload();
+			expect(form.effective(literalA)).toContain("literal-a");
+			const literalCache = new MCPToolCache(memoryStorage().storage);
+			await literalCache.set(name, literalA, [TOOL]);
+
+			await Bun.write(codexToml, form.toml("literal-b"));
+			const [, literalB] = await reload();
+			expect(form.effective(literalB)).toContain("literal-b");
+			expect(await literalCache.get(name, literalB)).toBeNull();
+
+			// Set: the variable overrides the literal, so the literal is not
+			// the connection — editing it must change neither, and rotating
+			// the variable must keep the catalog (the as-written rule).
+			process.env[TOKEN_VAR] = "token-a";
+			await Bun.write(codexToml, form.toml("literal-a"));
+			const [, forwarded] = await reload();
+			expect(form.effective(forwarded)).toContain("token-a");
+			const forwardedCache = new MCPToolCache(memoryStorage().storage);
+			await forwardedCache.set(name, forwarded, [TOOL]);
+
+			await Bun.write(codexToml, form.toml("literal-c"));
+			const [, overridden] = await reload();
+			expect(form.effective(overridden)).toBe(form.effective(forwarded));
+			expect(await forwardedCache.get(name, overridden)).toEqual([TOOL]);
+
+			process.env[TOKEN_VAR] = "token-b";
+			const [, rotated] = await reload();
+			expect(form.effective(rotated)).toContain("token-b");
+			expect(await forwardedCache.get(name, rotated)).toEqual([TOOL]);
+		});
+	}
 });

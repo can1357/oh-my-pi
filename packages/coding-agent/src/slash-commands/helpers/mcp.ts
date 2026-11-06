@@ -304,13 +304,16 @@ async function handleTestCommand(rest: string, runtime: SlashCommandRuntime): Pr
 		enableProjectConfig: cfgMcpEnableProjectConfig.get(runtime.settings),
 	});
 	if (!found) return usage(`Server "${name}" not found. Run /mcp list to see configured servers.`, runtime);
+	// `enabled: false` is a statement about the file entry; the connection is
+	// made from the expanded one the session would use (see
+	// `FoundMcpServer.connectionConfig`).
 	if (found.config.enabled === false) {
 		return usage(`Server "${name}" is disabled. Run /mcp enable ${name} first.`, runtime);
 	}
 
 	let lines: string[];
 	try {
-		lines = await withPreparedMcpConnection(runtime, name, found.config, async connection => {
+		lines = await withPreparedMcpConnection(runtime, name, found.connectionConfig, async connection => {
 			const tools = await listTools(connection);
 			const output = [`Server "${name}" connected (${tools.length} tools).`];
 			for (const tool of tools) output.push(`  - ${tool.name}`);

@@ -241,13 +241,24 @@ function extractMCPServersFromToml(
 			server.headers = headers;
 		}
 
+		// A `${VAR}` placeholder stands in for a value the environment
+		// supplied, so that rotating the variable keeps the server's cached
+		// catalog. It may stand in only where a value was actually taken:
+		// each substitution below repeats the condition its counterpart above
+		// applied. Substituting unconditionally made two different effective
+		// configurations hash the same — with `TOKEN` unset,
+		// `env = { TOKEN: "a" }` and `env = { TOKEN: "b" }` both keyed on
+		// `${TOKEN}`, so editing that literal left a lazy server serving the
+		// previous server's catalog.
 		const asWrittenEnv: Record<string, string> = { ...config.env };
-		for (const varName of config.env_vars ?? []) asWrittenEnv[varName] = `\${${varName}}`;
+		for (const varName of config.env_vars ?? []) {
+			if (Bun.env[varName] !== undefined) asWrittenEnv[varName] = `\${${varName}}`;
+		}
 		const asWrittenHeaders: Record<string, string> = { ...config.http_headers };
 		for (const [headerName, varName] of Object.entries(config.env_http_headers ?? {})) {
-			asWrittenHeaders[headerName] = `\${${varName}}`;
+			if (Bun.env[varName] !== undefined) asWrittenHeaders[headerName] = `\${${varName}}`;
 		}
-		if (config.bearer_token_env_var) {
+		if (config.bearer_token_env_var && Bun.env[config.bearer_token_env_var]) {
 			asWrittenHeaders.Authorization = `Bearer \${${config.bearer_token_env_var}}`;
 		}
 		server.asWritten = {

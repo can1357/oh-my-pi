@@ -1751,6 +1751,41 @@ export class MCPManager implements MCPManagerApi {
 	}
 
 	/**
+	 * Whether `name` is dormant: not connected, and with no failure recorded
+	 * against the definition the manager holds for it now — so nothing has
+	 * tried it yet under that definition, and the next tool call is its first
+	 * attempt. This is the only thing a renderer may say "connects on first
+	 * use" from.
+	 *
+	 * Registered tools are not that evidence. `#doReconnect` keeps a failed
+	 * server's catalog registered on purpose, and so does the crash-storm
+	 * breaker (see {@link MCPManager.#tripReconnectBreaker}), so a cached
+	 * catalog without a connection is equally what a server that is refusing
+	 * every connect leaves behind — and for that one the invocation is
+	 * refused and `/mcp reconnect` is what recovers it.
+	 *
+	 * The recorded failure is what separates the two, read through the same
+	 * {@link MCPManager.#liveConnectFailure} that
+	 * {@link MCPManager.explainMissingTool} partitions on, so a one-line
+	 * status and the unavailable-servers note cannot disagree about which
+	 * servers are down.
+	 */
+	isServerDormant(name: string): boolean {
+		return this.getConnectionStatus(name) === "disconnected" && this.#liveConnectFailure(name) === undefined;
+	}
+
+	/**
+	 * The failure recorded for `name` while it describes the config the manager
+	 * holds and the server is down right now — the two facts every reader of
+	 * "this server's last connect failed" needs together. A pure read; see
+	 * {@link MCPManager.#liveFailure}.
+	 */
+	#liveConnectFailure(name: string): McpStartupFailure | undefined {
+		if (this.getConnectionStatus(name) !== "disconnected") return undefined;
+		return this.#liveFailure(name);
+	}
+
+	/**
 	 * Why the `mcp__…` tool `toolName` is not mounted: the configured servers
 	 * whose last connect failed and that are not connecting again, with the
 	 * error of each. `undefined` for any other name, or when no server is down.
@@ -1797,9 +1832,8 @@ export class MCPManager implements MCPManagerApi {
 		// One pass over the asker's view, not one per down server.
 		const serversWithVisibleTools = new Set(this.getTools(scope).map(tool => tool.mcpServerName));
 		for (const serverName of this.#startupFailures.keys()) {
-			const failure = this.#liveFailure(serverName);
+			const failure = this.#liveConnectFailure(serverName);
 			if (!failure) continue;
-			if (this.getConnectionStatus(serverName) !== "disconnected") continue;
 			const reported: McpConnectionFailure = {
 				serverName,
 				error: failure.error,

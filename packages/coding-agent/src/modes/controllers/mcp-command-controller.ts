@@ -1240,16 +1240,20 @@ export class MCPCommandController {
 		const state = manager?.getConnectionStatus(name) ?? "disconnected";
 		if (state === "connected") return theme.fg("success", " ● connected");
 		if (state === "connecting") return theme.fg("muted", " ◌ connecting");
-		// Registered tools without a connection are deferred entries (a lazy
-		// server's cached catalog): invoking one connects the server.
 		const toolCount = manager?.getTools().filter(tool => tool.mcpServerName === name).length ?? 0;
-		if (toolCount > 0) {
-			return theme.fg(
-				"muted",
-				` ○ not connected · ${toolCount} tool${toolCount === 1 ? "" : "s"}, connects on first use`,
-			);
-		}
-		return theme.fg("muted", " ○ not connected");
+		if (toolCount === 0 || !manager) return theme.fg("muted", " ○ not connected");
+		const tools = `${toolCount} tool${toolCount === 1 ? "" : "s"}`;
+		// Tools registered without a connection are a cached catalog, which a
+		// server whose last connect failed keeps too (`MCPManager.isServerDormant`).
+		// Only a dormant server connects when one of them is invoked; for the
+		// other the invocation is refused and `/mcp reconnect` is the recovery,
+		// so its badge counts the catalog and claims nothing more.
+		return theme.fg(
+			"muted",
+			manager.isServerDormant(name)
+				? ` ○ not connected · ${tools}, connects on first use`
+				: ` ○ not connected · ${tools} cached`,
+		);
 	}
 
 	/**
@@ -1363,7 +1367,11 @@ export class MCPCommandController {
 				return;
 			}
 
-			const { config } = found;
+			// `config` is the file entry: what `enabled: false` is a statement
+			// about, and what a write-back edits. The connection is made from
+			// `connectionConfig`, the same entry with its `${VAR}`
+			// placeholders expanded as discovery expands them.
+			const { config, connectionConfig } = found;
 			if (config.enabled === false) {
 				this.ctx.mcpTestEscapeHandlers.delete(handleEscape);
 				this.ctx.showError(`Server "${name}" is disabled. Run /mcp enable ${name} first.`);
@@ -1398,11 +1406,11 @@ export class MCPCommandController {
 			// Resolve auth config if needed
 			let resolvedConfig: MCPServerConfig;
 			if (this.ctx.mcpManager) {
-				resolvedConfig = await this.ctx.mcpManager.prepareConfig(config);
+				resolvedConfig = await this.ctx.mcpManager.prepareConfig(connectionConfig);
 			} else {
 				const tempManager = new MCPManager(getProjectDir());
 				tempManager.setAuthStorage(this.ctx.session.modelRegistry.authStorage);
-				resolvedConfig = await tempManager.prepareConfig(config);
+				resolvedConfig = await tempManager.prepareConfig(connectionConfig);
 			}
 
 			// Create temporary connection
@@ -1634,9 +1642,10 @@ export class MCPCommandController {
 				await removeManagedMcpOAuthCredential(authStorage, currentAuth.credentialId);
 			}
 			// Also drop this profile's url-keyed binding so the server is truly
-			// signed out even when the config carries no auth block. Runtime
-			// discovery expands `${...}` URL values before MCPManager looks up the
-			// deterministic credential row, so unauth must clear that same key.
+			// signed out even when the config carries no auth block. The raw
+			// entry is the right input: `mcpOAuthCredentialIdsForServerUrl`
+			// returns the id for the expanded URL *and* for the literal one, so
+			// a row written before the URL became a `${VAR}` is cleared too.
 			let removedUrlKeyedCredential = false;
 			if ((found.config.type === "http" || found.config.type === "sse") && found.config.url) {
 				removedUrlKeyedCredential = await removeManagedMcpOAuthCredentials(

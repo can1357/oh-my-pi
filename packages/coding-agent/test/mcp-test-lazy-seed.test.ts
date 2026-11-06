@@ -59,6 +59,7 @@ function buildController(mcpManager: unknown, settings = Settings.isolated()) {
 	const refreshMCPTools = vi.fn(async (_tools: unknown) => {});
 	const showCommandReport = vi.fn();
 	const presentCommandOutput = vi.fn();
+	const showError = vi.fn();
 	const controller = new MCPCommandController({
 		chatContainer: { addChild: vi.fn() },
 		present: vi.fn(),
@@ -66,7 +67,7 @@ function buildController(mcpManager: unknown, settings = Settings.isolated()) {
 		showCommandReport,
 		ui: { requestRender: vi.fn() },
 		editor: {},
-		showError: vi.fn(),
+		showError,
 		showStatus: vi.fn(),
 		keybindings: KeybindingsManager.inMemory(),
 		mcpTestEscapeHandlers: new Set(),
@@ -84,7 +85,7 @@ function buildController(mcpManager: unknown, settings = Settings.isolated()) {
 		},
 		mcpManager,
 	} as never);
-	return { controller, refreshMCPTools, showCommandReport, presentCommandOutput, settings };
+	return { controller, refreshMCPTools, showCommandReport, presentCommandOutput, showError, settings };
 }
 
 /** Plain text of the last block a command presented (the `/mcp test` result). */
@@ -107,6 +108,9 @@ function createController(options: { toolsAfterReconnect?: boolean; settings?: S
 		})),
 		getTools: vi.fn(() => (seeded && toolsFor ? serverTools(toolsFor) : [])),
 		getConnectionStatus: vi.fn(() => "disconnected"),
+		// What the real manager answers for a server nothing has tried; a test
+		// about a failed server overrides it per name.
+		isServerDormant: vi.fn((_name: string) => true),
 		reconnectServer: vi.fn(
 			async (name: string, _options?: { manual?: boolean }): Promise<Record<string, never> | null> => {
 				if (options.toolsAfterReconnect !== false) {
@@ -395,6 +399,62 @@ describe("/mcp test seeds first-time lazy servers (PR #9793 review)", () => {
 		expect(output).toContain('this session could not connect "lazysrv"');
 		expect(output).toContain("/mcp reconnect lazysrv");
 	});
+
+	// Round 8 (roboomp, `slash-commands/helpers/mcp.ts:313`): `/mcp test` reads
+	// the entry straight out of the config file, while discovery expands the
+	// whole entry (`expandEnvVarsDeep` in both `builtin.ts` and `mcp-json.ts`)
+	// before connecting, and `prepareConfig` expands nothing — it resolves a
+	// bare env name or a `!command` inside env/header values. So a working
+	// server written as `url: "${VAR}"` was probed at the literal placeholder
+	// and reported as a connection failure while the session was connected to
+	// it. The file entry stays raw, because that is what `enabled: false` and
+	// a write-back are statements about.
+	test("connects to the expanded endpoint, not the literal placeholder", async () => {
+		const urlVar = "OMP_TEST_MCP_TEST_URL";
+		const tokenVar = "OMP_TEST_MCP_TEST_TOKEN";
+		Bun.env[urlVar] = "https://mcp.example.test/real";
+		Bun.env[tokenVar] = "k";
+		try {
+			await writeProjectConfig(projectDir, {
+				remotesrv: {
+					type: "http",
+					url: `\${${urlVar}}`,
+					headers: { Authorization: `Bearer \${${tokenVar}}` },
+				},
+			});
+			const { controller } = createController();
+
+			await controller.handle("/mcp test remotesrv");
+
+			expect(mcpClient.connectToServer).toHaveBeenCalledWith(
+				"remotesrv",
+				expect.objectContaining({
+					type: "http",
+					url: "https://mcp.example.test/real",
+					headers: { Authorization: "Bearer k" },
+				}),
+				expect.anything(),
+			);
+		} finally {
+			delete Bun.env[urlVar];
+			delete Bun.env[tokenVar];
+		}
+	});
+
+	// The raw file entry is still what the disabled check reads: it is a
+	// statement about the file, and refusing before any connect is the point.
+	test("refuses a disabled entry before probing anything", async () => {
+		await writeProjectConfig(projectDir, {
+			offsrv: { type: "stdio", command: "off-cmd", enabled: false },
+		});
+		const { controller, mcpManager, showError } = createController();
+
+		await controller.handle("/mcp test offsrv");
+
+		expect(showError).toHaveBeenCalledWith('Server "offsrv" is disabled. Run /mcp enable offsrv first.');
+		expect(mcpClient.connectToServer).not.toHaveBeenCalled();
+		expect(mcpManager.reconnectServer).not.toHaveBeenCalled();
+	});
 });
 
 // PR #9793 review (Codex, manager.ts:644): a dormant lazy server keeps
@@ -423,27 +483,35 @@ describe("/mcp list distinguishes a dormant lazy server from an unreachable one"
 		await removeWithRetries(agentDir);
 	});
 
-	test("a disconnected server with registered tools lists as reachable on first use", async () => {
+	test("lists a dormant server as connecting on first use and a failed one as merely cached", async () => {
 		await writeProjectConfig(projectDir, {
 			lazysrv: { type: "stdio", command: "lazy-cmd", lazy: true },
+			// Tools registered with no connection, like `lazysrv`, but its last
+			// connect failed: `#doReconnect` keeps a failed server's catalog, so
+			// the registered tools say nothing about what invoking one does.
+			failedsrv: { type: "stdio", command: "failed-cmd", lazy: true },
 			downsrv: { type: "stdio", command: "down-cmd" },
 		});
 		const { controller, mcpManager, showCommandReport } = createController();
 		mcpManager.getTools.mockReturnValue([
 			{ name: "fixture_tool", mcpServerName: "lazysrv" },
 			{ name: "other_tool", mcpServerName: "lazysrv" },
+			{ name: "stale_tool", mcpServerName: "failedsrv" },
 		]);
+		mcpManager.isServerDormant.mockImplementation((name: string) => name !== "failedsrv");
 
 		await controller.handle("/mcp list");
 
 		const report = showCommandReport.mock.calls[0]?.[0] as { body: { render(width: number): string[] } };
 		const lines = report.body.render(200).map(line => Bun.stripANSI(line).trim());
 		const lazyLine = lines.find(line => line.startsWith("lazysrv")) ?? "";
+		const failedLine = lines.find(line => line.startsWith("failedsrv")) ?? "";
 		const downLine = lines.find(line => line.startsWith("downsrv")) ?? "";
-		expect(lazyLine).toContain("2 tools");
-		expect(lazyLine).toContain("connects on first use");
+		expect(lazyLine).toContain("2 tools, connects on first use");
+		expect(failedLine).toContain("1 tool cached");
+		expect(failedLine).not.toContain("connects on first use");
 		expect(downLine).toContain("not connected");
-		expect(downLine).not.toContain("connects on first use");
+		expect(downLine).not.toContain("tool");
 	});
 });
 
