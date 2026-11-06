@@ -68,7 +68,7 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		return done(2);
 	};
 	let posix = ctx.option(OptId::Posix)?;
-	let mut path = None;
+	let mut found = None;
 	if !file.contains(&b'/') {
 		let search = match search_arg {
 			Some(p) if p.is_empty() => Some(BString::from(".")),
@@ -80,14 +80,14 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			let cwd = ctx.vp.cwd.clone();
 			for cand in candidates(&search, file, &cwd, ctx.k.engine.config().platform, &[]) {
 				if let ProbeResult::Stat(Some(st)) =
-					ctx.probe(Probe::Stat { path: cand.clone(), follow: true })?
+					ctx.probe(Probe::Stat { path: cand.path.clone(), follow: true })?
 					&& st.kind == StatKind::File
 				{
-					path = Some(cand);
+					found = Some(cand);
 					break;
 				}
 			}
-			if path.is_none() && (search_arg.is_some() || posix) {
+			if found.is_none() && (search_arg.is_some() || posix) {
 				let utf8 = locale::is_utf8(ctx.k, ctx.cx.store, ctx.vp);
 				let name = quote::printable_filename(file, utf8, false);
 				ctx.err(Diag::Usage { msg: format!("{}: file not found", name.as_bstr()).into() });
@@ -96,9 +96,12 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			}
 		}
 	}
-	// bash's `_evalfile` names the file it found.
-	let shown = path.clone().unwrap_or_else(|| file.clone());
-	let path = path.unwrap_or_else(|| absolute(&ctx.vp.cwd, file));
+	// bash's `_evalfile` names the file it found: the `$PATH` entry joined to
+	// the name, as bash joined it.
+	let shown = found
+		.as_ref()
+		.map_or_else(|| file.clone(), |c| c.shown.clone());
+	let path = found.map_or_else(|| absolute(&ctx.vp.cwd, file), |c| c.path);
 	let text = match ctx.probe(Probe::Read { path: path.clone() })? {
 		ProbeResult::Bytes(Ok(text)) => text,
 		ProbeResult::Bytes(Err(msg)) if msg.as_slice() == b"Is a directory" => {
@@ -133,12 +136,13 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let restore = source_args(ctx, rest, true)?;
 	// As for `eval`: the file sees the caller's `$?`.
 	push_script(ctx.vp, &text, 1, ScriptKind::Source);
-	// `BASH_SOURCE` shows the name as given.
+	// `BASH_SOURCE` shows the file as bash found it: the name as given, or the
+	// `$PATH` entry joined to it.
 	crate::bash::vm::callstack::push_source(
 		ctx.k,
 		ctx.cx.store,
 		ctx.vp,
-		file.clone(),
+		shown.clone(),
 		ctx.line,
 		rest,
 		restore,

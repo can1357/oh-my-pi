@@ -14,7 +14,7 @@ use super::{
 	Cx, Kernel,
 	builtins::history::io::{ErrKind, HistErr, HistOp},
 	glob::Walk,
-	proc::{Live, PathSearch, Probe, ProbeResult, Scratch, Vproc},
+	proc::{Candidate, Live, PathSearch, Probe, ProbeResult, Scratch, Vproc},
 };
 use crate::bash::{
 	diag,
@@ -179,21 +179,13 @@ pub fn perform(
 				});
 			}
 			match path_search(&mut tcx, cx, sc) {
-				// Windows reports the probed path: `shown_candidate` splits PATH
-				// on `:` and its `idx` stops addressing one entry once every
-				// entry expands to a name plus its PATHEXT candidates.
+				// Windows reports the probed path: a PATHEXT spelling is the
+				// name, not the entry joined to the word.
 				Search::Found(found) if k.engine.config().platform == Platform::Windows => {
-					ProbeResult::Path(Some(found))
+					ProbeResult::Path(Some(found.path))
 				},
 				// bash shows `dir/name` as built (`./e` for an empty entry).
-				Search::Found(_) => {
-					let idx = sc
-						.io
-						.as_ref()
-						.and_then(|io| io.search.as_ref())
-						.map_or(0, |s| s.idx);
-					ProbeResult::Path(shown_candidate(path, name, idx))
-				},
+				Search::Found(found) => ProbeResult::Path(Some(found.shown)),
 				Search::NotFound => ProbeResult::Path(None),
 				Search::Pending(key) => return Err(key),
 			}
@@ -482,15 +474,16 @@ pub const fn path_separator(platform: Platform) -> u8 {
 	}
 }
 
-/// `dir/name` for every `$PATH` entry; on Windows each is followed by the
-/// `extensions` (`PATHEXT`) spellings unless `name` already ends in one.
+/// `dir/name` for every `$PATH` entry, as the shell probes it and as bash
+/// spells it; on Windows each is followed by the `extensions` (`PATHEXT`)
+/// spellings unless `name` already ends in one.
 pub fn candidates(
 	path: &[u8],
 	name: &[u8],
 	cwd: &[u8],
 	platform: Platform,
 	extensions: &[String],
-) -> Vec<BString> {
+) -> Vec<Candidate> {
 	let has_extension = extensions.iter().any(|ext| {
 		name.len() >= ext.len() && name[name.len() - ext.len()..].eq_ignore_ascii_case(ext.as_bytes())
 	});
@@ -507,18 +500,37 @@ pub fn candidates(
 			base.push(b'/');
 		}
 		base.extend_from_slice(name);
+		// bash's `sh_makepath`: the entry as written, an empty one read as `.`.
+		let mut shown = BString::from(if dir.is_empty() { b".".as_slice() } else { dir });
+		if !(shown.ends_with(b"/") || windows && shown.ends_with(b"\\")) {
+			shown.push(b'/');
+		}
+		shown.extend_from_slice(name);
 		// The bare name first, then its PATHEXT spellings.
 		let at = out.len();
-		out.push(base);
+		out.push(Candidate { path: base, shown, hashed: false });
 		for ext in suffixes {
-			let base = &out[at];
-			let mut p = BString::from(Vec::with_capacity(base.len() + ext.len()));
-			p.extend_from_slice(base);
-			p.extend_from_slice(ext.as_bytes());
-			out.push(p);
+			let mut c = out[at].clone();
+			c.path.extend_from_slice(ext.as_bytes());
+			c.shown.extend_from_slice(ext.as_bytes());
+			out.push(c);
 		}
 	}
 	out
+}
+
+/// bash's `phash_search`: a hashed relative path is reported as `./path` when
+/// that names the same file from the shell's directory (bash's `HASH_CHKDOT`),
+/// so `hash -p bin/x x; x` reports `./bin/x`. An absolute path, one that
+/// already begins with `./`, and one that names no file keep their spelling.
+#[must_use]
+pub fn hashed_shown(path: &BString, exists: bool) -> BString {
+	if !exists || path.starts_with(b"/") || path.starts_with(b"./") {
+		return path.clone();
+	}
+	let mut shown = BString::from("./");
+	shown.extend_from_slice(path);
+	shown
 }
 
 /// The shell's `PATHEXT` suffixes, normalized as the exec check reads them
@@ -535,18 +547,6 @@ pub fn executable_extensions(k: &Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Vec<Str
 		.and_then(|v| v.as_scalar())
 		.map(String::from_utf8_lossy);
 	crate::sys::pathext::Pathext::parse(raw.as_deref().map(std::ffi::OsStr::new)).into_extensions()
-}
-
-/// The `idx`th `$PATH` candidate as bash prints it (`type -p`,
-/// `command -v`, `hash -t`): `dir/name`, an empty entry read as `.`.
-pub fn shown_candidate(path: &[u8], name: &[u8], idx: usize) -> Option<BString> {
-	let dir = path.split(|&c| c == b':').nth(idx)?;
-	let mut p = BString::from(if dir.is_empty() { b".".as_slice() } else { dir });
-	if !p.ends_with(b"/") {
-		p.push(b'/');
-	}
-	p.extend_from_slice(name);
-	Some(p)
 }
 
 pub use crate::bash::fs::url_root_len;
@@ -589,7 +589,7 @@ const fn is_windows_absolute(name: &[u8]) -> bool {
 }
 
 pub enum Search {
-	Found(BString),
+	Found(Candidate),
 	NotFound,
 	Pending(WaitKey),
 }
@@ -604,13 +604,14 @@ pub fn path_search(tcx: &mut Context<'_>, cx: &mut Cx<'_>, sc: &mut Scratch) -> 
 		return Search::NotFound;
 	};
 	loop {
-		let Some(path) = search.cands.get(search.idx) else {
+		let Some(cand) = search.cands.get(search.idx) else {
 			if let Some(i) = search.nonexec.take() {
 				search.idx = i;
 				return Search::Found(search.cands[i].clone());
 			}
 			return Search::NotFound;
 		};
+		let path = &cand.path;
 		if search.checking_exec {
 			let res = match &mut sc.live {
 				Live::Access(p) => p.poll(tcx),
@@ -631,7 +632,7 @@ pub fn path_search(tcx: &mut Context<'_>, cx: &mut Cx<'_>, sc: &mut Scratch) -> 
 				},
 				Poll::Ready(Ok(())) => {
 					sc.live = Live::None;
-					return Search::Found(path.clone());
+					return Search::Found(cand.clone());
 				},
 				Poll::Ready(Err(_)) => {
 					sc.live = Live::None;
@@ -678,11 +679,32 @@ mod tests {
 	#[test]
 	fn path_candidates_resolve_empty_and_relative_entries_against_cwd() {
 		let c = candidates(b"/bin::rel", b"ls", b"/home/u", Platform::Linux, &[]);
-		assert_eq!(c, vec![
-			BString::from("/bin/ls"),
-			BString::from("/home/u/ls"),
-			BString::from("/home/u/rel/ls")
+		let paths: Vec<&BString> = c.iter().map(|c| &c.path).collect();
+		assert_eq!(paths, vec![
+			&BString::from("/bin/ls"),
+			&BString::from("/home/u/ls"),
+			&BString::from("/home/u/rel/ls")
 		]);
+		// bash 5.3: `PATH=:bin; type -p e f` prints `./e` and `bin/f`, and the
+		// same spelling is what a refusal names and what `hash` stores.
+		let shown: Vec<&BString> = c.iter().map(|c| &c.shown).collect();
+		assert_eq!(shown, vec![
+			&BString::from("/bin/ls"),
+			&BString::from("./ls"),
+			&BString::from("rel/ls")
+		]);
+	}
+
+	#[test]
+	fn a_hashed_relative_path_is_shown_from_the_shell_directory() {
+		// bash 5.3: `hash -p bin/x x; hash -t x` prints `./bin/x`; a path that
+		// names no file, an absolute one, and one already dotted keep theirs.
+		assert_eq!(hashed_shown(&BString::from("bin/x"), true), "./bin/x");
+		assert_eq!(hashed_shown(&BString::from("x"), true), "./x");
+		assert_eq!(hashed_shown(&BString::from("../x"), true), "./../x");
+		assert_eq!(hashed_shown(&BString::from("./x"), true), "./x");
+		assert_eq!(hashed_shown(&BString::from("/bin/x"), true), "/bin/x");
+		assert_eq!(hashed_shown(&BString::from("bin/x"), false), "bin/x");
 	}
 
 	#[test]
@@ -691,7 +713,7 @@ mod tests {
 		let win = |path: &[u8], name: &[u8]| -> Vec<String> {
 			candidates(path, name, br"C:\project", Platform::Windows, &exts)
 				.into_iter()
-				.map(|p| String::from_utf8_lossy(&p).into_owned())
+				.map(|c| String::from_utf8_lossy(&c.path).into_owned())
 				.collect()
 		};
 		assert_eq!(win(br"C:\Tools;;rel", b"tool"), [
@@ -725,15 +747,6 @@ mod tests {
 			absolute_on(br"C:\project", br"\\server\share\app.exe", Platform::Windows),
 			br"\\server\share\app.exe".as_slice()
 		);
-	}
-
-	#[test]
-	fn shown_candidate_keeps_relative_entries_like_bash() {
-		// bash 5.3: `PATH=:bin; type -p e f` prints `./e` and `bin/f`.
-		assert_eq!(shown_candidate(b":bin", b"e", 0).unwrap(), "./e");
-		assert_eq!(shown_candidate(b":bin", b"f", 1).unwrap(), "bin/f");
-		assert_eq!(shown_candidate(b"/usr/bin/", b"ls", 0).unwrap(), "/usr/bin/ls");
-		assert!(shown_candidate(b"/bin", b"ls", 1).is_none());
 	}
 
 	#[test]
