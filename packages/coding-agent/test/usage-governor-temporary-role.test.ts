@@ -116,9 +116,14 @@ test("switch restores model ownership for temporary, skips internal markers, and
 	const temporary = await x.transcript("temporary", "temporary", "prewalk");
 	const named = await x.transcript("named", "task", "fallback");
 	const manager = SessionManager.create(x.h.dir, path.join(x.h.dir, "active"));
-	const agent = new Agent({ initialState: { model: x.source, systemPrompt: [], tools: [], messages: [] } });
+	const registryResolver = () => undefined;
+	const agent = new Agent({
+		getApiKey: registryResolver,
+		initialState: { model: x.source, systemPrompt: [], tools: [], messages: [] },
+	});
 	const session = new AgentSession({
 		agent,
+		registryAuthResolver: registryResolver,
 		sessionManager: manager,
 		settings: x.settings,
 		modelRegistry: x.registry,
