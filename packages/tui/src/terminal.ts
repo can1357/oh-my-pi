@@ -610,8 +610,7 @@ export interface Terminal {
 	enableInput?(): void;
 
 	// Stop the terminal and restore state
-	/** `discardQueued: false` keeps what a stalled terminal has not taken, for a handoff the session resumes from. */
-	stop(discardQueued?: boolean): void;
+	stop(): void;
 
 	/**
 	 * Hand the terminal back with nothing still queued: wait (bounded) for the
@@ -621,7 +620,16 @@ export interface Terminal {
 	 * is not reading. Optional so custom Terminals built against older pi-tui
 	 * versions keep working.
 	 */
-	settleOutput?(discard?: boolean): boolean;
+	settleOutput?(): boolean;
+
+	/**
+	 * Whether the last {@link settleOutput} dropped undelivered bytes, as
+	 * opposed to draining them or leaving them queued behind a write it could
+	 * not interrupt. A handoff the session resumes from rewrites its committed
+	 * history when this is true, since those rows were marked retired and the
+	 * terminal never received them. Optional, like settleOutput itself.
+	 */
+	discardedQueuedOutput?(): boolean;
 
 	/**
 	 * Drain stdin before exiting to prevent Kitty key release events from
@@ -931,6 +939,8 @@ export class ProcessTerminal implements Terminal {
 	// drop the handoff bytes queued behind it, which arrive in order once the
 	// terminal reads again.
 	#stalledBacklog: number | undefined;
+	// Whether the last settleOutput() dropped bytes the terminal never took.
+	#discardedQueuedOutput = false;
 	// A stale addon cannot discard; warn about it once, not at every settle.
 	#staleDiscardWarned = false;
 	#active = false;
@@ -2443,14 +2453,10 @@ export class ProcessTerminal implements Terminal {
 	 * earlier discard could not interrupt is left alone: waiting again buys
 	 * nothing, and a discard would drop only the handoff bytes queued behind
 	 * that write, which arrive in order once the terminal reads again.
-	 *
-	 * `discard: false` waits and reports, but never drops: a handoff the
-	 * session resumes from has already committed what is queued, so dropping
-	 * it would lose those rows for good. What stays queued arrives in order
-	 * once the terminal reads again.
 	 */
-	settleOutput(discard = true): boolean {
+	settleOutput(): boolean {
 		const pump = this.#outputPump;
+		this.#discardedQueuedOutput = false;
 		if (!pump) return true;
 		if (this.#dead) return false;
 		if (this.#stalledBacklog !== undefined && pump.pending() === this.#stalledBacklog) return false;
@@ -2459,7 +2465,6 @@ export class ProcessTerminal implements Terminal {
 			this.#stalledBacklog = undefined;
 			return true;
 		}
-		if (!discard) return false;
 		if (!pump.discard) {
 			if (!this.#staleDiscardWarned) {
 				this.#staleDiscardWarned = true;
@@ -2469,13 +2474,19 @@ export class ProcessTerminal implements Terminal {
 			return false;
 		}
 		pump.discard();
+		this.#discardedQueuedOutput = true;
 		logger.warn("Discarded undelivered terminal output at a terminal handoff", { bytes });
 		this.#stalledBacklog = pump.pending();
 		this.write(SETTLE_RESET);
 		return false;
 	}
 
-	stop(discardQueued = true): void {
+	/** Whether the last {@link settleOutput} dropped undelivered bytes. */
+	discardedQueuedOutput(): boolean {
+		return this.#discardedQueuedOutput;
+	}
+
+	stop(): void {
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
 		this.#inputDeferred = false;
@@ -2493,7 +2504,7 @@ export class ProcessTerminal implements Terminal {
 		restoreTerminalStderr();
 		// Nothing queued may land after the restore writes below. After a caller's
 		// settle the pump is empty or still blocked, so this returns at once.
-		this.settleOutput(discardQueued);
+		this.settleOutput();
 
 		this.#clearProgressTimer();
 		if (this.#progressActive) {

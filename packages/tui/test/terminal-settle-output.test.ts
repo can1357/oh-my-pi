@@ -133,6 +133,7 @@ class EditableRows implements Component {
 /** A transcript whose shutdown flush retires `rows` history rows in one batch. */
 class FlushProvider implements TerminalFrameProvider {
 	readonly acknowledged: number[] = [];
+	replays = 0;
 	#flushing = false;
 	constructor(readonly rows: number) {}
 	renderFrame(): TerminalFramePlan {
@@ -147,6 +148,9 @@ class FlushProvider implements TerminalFrameProvider {
 	}
 	beginHistoryFlush(): void {
 		this.#flushing = true;
+	}
+	beginHistoryReplay(): void {
+		this.replays++;
 	}
 }
 
@@ -201,7 +205,7 @@ describe("settling the output pump before the terminal is handed back", () => {
 		expect(positionsInOrder(pump.stream, [SETTLE_RESET, SHOW_CURSOR, FIRST_RESTORE_WRITE])).not.toContain(-1);
 	});
 
-	it("keeps the flush's own output when the handoff resumes, instead of dropping committed rows", async () => {
+	it("rewrites the committed ledger when a resuming handoff had to discard the flush's own rows", async () => {
 		vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const pump = new FakePump({ flushes: [true, false], thenFlushes: false });
 		const provider = new FlushProvider(200);
@@ -210,11 +214,26 @@ describe("settling the output pump before the terminal is handed back", () => {
 		session.tui.stop({ resuming: true });
 		pump.catchUp();
 
-		// The flush marked the batch retired, so the session that resumes will
-		// never offer those rows again: a discard here would lose them for good.
+		// The flush marked the batch retired and the settle dropped its rows, so
+		// the session that resumes would never offer them again; a replay after
+		// start() writes the committed ledger instead. Keeping them queued is not
+		// the answer: they would land after the next owner had painted.
+		expect(provider.acknowledged).toEqual([1]);
+		expect(pump.discards).toBe(1);
+		expect(pump.stream).not.toContain("hist ");
+		expect(provider.replays).toBe(1);
+	});
+
+	it("asks for no replay when a resuming handoff delivered everything it committed", async () => {
+		const pump = new FakePump();
+		const provider = new FlushProvider(200);
+		const session = await startFlushingSession(pump, provider);
+
+		session.tui.stop({ resuming: true });
+
 		expect(provider.acknowledged).toEqual([1]);
 		expect(pump.discards).toBe(0);
-		expect(pump.stream).toContain("hist ");
+		expect(provider.replays).toBe(0);
 	});
 
 	it("leaves a backlog that drains alone", async () => {

@@ -2784,12 +2784,11 @@ export class TUI extends Container {
 		// discard anything, and one that finds the pump still blocked in the same
 		// write leaves them queued. Never re-emit ?1049l instead: on the normal
 		// screen it restores a stale saved cursor.
-		// A handoff the session resumes from never drops what it has already
-		// committed: a discard here, or after the flush below, would leave rows
-		// marked retired that the terminal never received, and start() would
-		// never offer them again. What stays queued arrives in order instead.
-		const keepQueued = resuming === true;
-		const backlogDrained = this.terminal.settleOutput?.(!keepQueued) ?? true;
+		const backlogDrained = this.terminal.settleOutput?.() ?? true;
+		// A discard drops rows the flush has already marked retired. At exit the
+		// session file keeps them; a handoff the session resumes from has no
+		// other copy, so it rewrites the committed ledger after start().
+		let lostCommittedRows = this.terminal.discardedQueuedOutput?.() === true;
 		if (this.#resizeInPlaceActive && this.terminal.rows > 0) {
 			// The hardware cursor sits wherever the drag left it, but tracking still
 			// describes the pre-resize row (no alt-buffer restore replays it back).
@@ -2854,7 +2853,12 @@ export class TUI extends Container {
 		// Drain or drop what the writes above queued before the handoff writes
 		// below, so the prompt placement and cursor show land after them, not
 		// mid-output.
-		this.terminal.settleOutput?.(!keepQueued);
+		this.terminal.settleOutput?.();
+		lostCommittedRows ||= this.terminal.discardedQueuedOutput?.() === true;
+		// Never leave the queue for the next owner instead: its bytes would land
+		// after an editor, a shell or the resumed TUI had already painted, and a
+		// late alternate-screen exit would drop that owner's screen.
+		if (resuming === true && lostCommittedRows) this.#frameProvider?.beginHistoryReplay?.();
 		// Deliberately leave transmitted images in the terminal's graphics store:
 		// placeholder cells committed to native scrollback render only while their
 		// image data lives, so a delete-by-id here blanks every transcript image
@@ -2891,7 +2895,7 @@ export class TUI extends Container {
 		// terminal-level dedupe believes was last written.
 		this.terminal.showCursor(true);
 		this.#forgetHardwareCursorState();
-		this.terminal.stop(!keepQueued);
+		this.terminal.stop();
 	}
 
 	/**
