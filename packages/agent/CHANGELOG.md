@@ -6,7 +6,6 @@
 
 - Added `Agent.queuedMessageGate` to filter queued messages before delivery and observe claimed messages returned undelivered.
 - Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
-- `beforeProviderCall` agent option: an async hook that runs before each provider request is prepared, ahead of reading the model, so a host can fold an on-disk configuration change into that request's model ([#16401](https://github.com/can1357/oh-my-pi/pull/16401) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

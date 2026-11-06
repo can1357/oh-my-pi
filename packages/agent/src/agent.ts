@@ -119,9 +119,6 @@ export interface AgentOptions {
 	 */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 
-	/** Runs before each provider request is prepared, ahead of reading the model. */
-	beforeProviderCall?: (signal?: AbortSignal) => Promise<void>;
-
 	/**
 	 * Optional transform applied to context before convertToLlm.
 	 * Use for context pruning, injecting external context, etc.
@@ -429,7 +426,6 @@ export class Agent {
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	#beforeProviderCall?: (signal?: AbortSignal) => Promise<void>;
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#sentToolDefinitions = new SentToolDefinitions();
 	#steeringQueue: AgentMessage[] = [];
@@ -579,7 +575,6 @@ export class Agent {
 		this.#syncTokenizer(this.#state.model);
 		this.#convertToLlm = opts.convertToLlm || defaultConvertToLlm;
 		this.#transformContext = opts.transformContext;
-		this.#beforeProviderCall = opts.beforeProviderCall;
 		this.#steeringMode = opts.steeringMode || "one-at-a-time";
 		this.#followUpMode = opts.followUpMode || "one-at-a-time";
 		this.#interruptMode = opts.interruptMode || "immediate";
@@ -2032,7 +2027,6 @@ export class Agent {
 			transformProviderContext: this.#transformProviderContext,
 			sentToolDefinitions: this.#sentToolDefinitions,
 			transformContext: this.#transformContext,
-			beforeProviderCall: this.#beforeProviderCall,
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,

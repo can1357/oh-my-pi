@@ -82,8 +82,6 @@ describe("one-shot side request state", () => {
 				authStorage: { usage: { ingestHeaders() {} }, oauth: { identity() {} } },
 				hasLazyRuntimeMetadata: () => false,
 				reloadIfConfigChanged: async () => false,
-				configGeneration: 0,
-				find: () => undefined,
 			} as never,
 			sideStreamFn,
 		});

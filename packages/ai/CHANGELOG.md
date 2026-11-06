@@ -9,7 +9,6 @@
 - Anthropic official-API sessions use message threads, sending only new messages per turn for faster first tokens; toggle with `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0`/`1`
 - Added `devin-cli` (Devin CLI seat key) and `devin-windsurf` (Windsurf Enterprise sign-in) logins, both stored as a `devin` API key ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov), [#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - Factory Droid Gemini 4 Argon requests now match Droid's request and conversation handling ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
-- `requestBinding` stream option: with a resolver `apiKey`, `streamSimple` calls it after each dispatch attempt's credential resolves (the first send and every auth retry), so a host whose configuration can change while a request waits sends the endpoint, headers and credential of one configuration version ([#16401](https://github.com/can1357/oh-my-pi/pull/16401) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

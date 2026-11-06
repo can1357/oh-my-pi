@@ -1,12 +1,5 @@
 import * as path from "node:path";
-import type {
-	ApiKeyResolution,
-	ApiKeyResolveContext,
-	ApiKeyResolver,
-	FetchImpl,
-	ResolvedApiKey,
-	UsageProvider,
-} from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
 import { type AuthApiKeyOptions, type AuthPeekOptions, oauthAccountKey } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
@@ -56,7 +49,7 @@ import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-refere
 import { apiServesKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
-import { modelDerivationOf, recordModelDerivation, resolveProviderModelReference } from "../config/model-resolver";
+import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
 import type { AuthStorage } from "../session/auth-storage";
@@ -270,27 +263,6 @@ function contextWindowKey(model: { provider: string; id: string }): string {
 	return `${model.provider}\u0000${model.id}`;
 }
 
-/** A model the registry handed out: how it was looked up, and the configuration it reflected then. */
-interface HandedOutModel {
-	/** The id it was looked up by (`find`'s `modelId`), so a rebind finds the same variant again. */
-	readonly ref: string;
-	/** The catalog entry it was, or was derived from. */
-	readonly entry: Model<Api>;
-	/** Per-provider models.yml digests current when it was handed out. */
-	readonly digests: ReadonlyMap<string, string>;
-	/** Every id this object has been handed out under; the catalog has it while one of them resolves. */
-	readonly refs: Set<string>;
-}
-
-/** A catalog entry's fields other than its limits; `JSON.stringify` drops functions (header resolvers). */
-function configShape(model: Model<Api>): unknown {
-	const { contextWindow: _contextWindow, maxTokens: _maxTokens, ...rest } = model;
-	return rest;
-}
-
-/** Catalog generation recorded for a credential resolved while the catalog was rebuilt. */
-const STRADDLED_GENERATION = -1;
-
 /**
  * Recorded for a catalog built from a file that appeared between the stamp and the read: no file
  * version describes it, so the next check re-reads rather than comparing equal to either.
@@ -418,18 +390,6 @@ export class ModelRegistry {
 	#configGeneration = 0;
 	/** The models.yml parse the static catalog was last built from; undefined when it was missing or invalid. */
 	#loadedConfig: ModelsConfig | undefined;
-	/** Per provider: a digest of its models.yml entry as the static catalog was last built from it. */
-	#providerConfigDigests: ReadonlyMap<string, string> = new Map();
-	/** Per model this registry handed out: how it was looked up and the configuration it reflected then. */
-	#handedOut = new WeakMap<Model<Api>, HandedOutModel>();
-	#handedOutArrays = new WeakSet<Model<Api>[]>();
-	/**
-	 * Per held model: its rebinding to a catalog entry (for a derived variant, to its rebound source),
-	 * for one settings scope (see {@link currentConfigOf}).
-	 */
-	#currentConfigs = new WeakMap<Model<Api>, { entry: Model<Api>; scope: Settings | undefined; result: Model<Api> }>();
-	/** Per credential this registry's resolvers produced: the catalog generation it came from. */
-	#credentialGenerations = new WeakMap<object, number>();
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
@@ -1313,15 +1273,12 @@ export class ModelRegistry {
 				);
 			}
 			this.#models = this.#finalizeModels(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
-			const refreshed = resolveProviderModelReference(current.provider, current.id, this.#models) ?? patchedBase;
-			this.#handOut(refreshed, current.id);
-			return refreshed;
+			return resolveProviderModelReference(current.provider, current.id, this.#models) ?? patchedBase;
 		}
 		const patched = applyModelPatch(current, patch, "merge");
 		this.#models = this.#models.map(candidate =>
 			candidate.provider === current.provider && candidate.id === current.id ? patched : candidate,
 		);
-		this.#handOut(patched, current.id);
 		return patched;
 	}
 
@@ -1521,12 +1478,6 @@ export class ModelRegistry {
 		// The config #loadCustomModels built from: the file's own parse when it loaded, the last one
 		// that loaded while a later edit does not, and nothing once the file is gone.
 		this.#loadedConfig = this.#ignoreLocalModelConfig ? undefined : this.#lastLoadedModelsConfig;
-		this.#providerConfigDigests = new Map(
-			Object.entries(this.#loadedConfig?.providers ?? {}).map(([provider, entry]) => [
-				provider,
-				Bun.hash(JSON.stringify(entry)).toString(16),
-			]),
-		);
 		this.#configGeneration++;
 	}
 
@@ -3402,9 +3353,6 @@ export class ModelRegistry {
 		if (cached?.contextWindow === window) return cached;
 		const refitted = applyModelOverride(model, { contextWindow: window });
 		this.#refittedRows.set(model, refitted);
-		// A refit is a variant of `model` for one scope: a rebind refits the rebound source for the
-		// scope it is wanted for, falling back to this one.
-		recordModelDerivation(refitted, model, (rebound, wanted) => this.fitContextWindow(rebound, wanted ?? scope));
 		return refitted;
 	}
 
@@ -3579,17 +3527,17 @@ export class ModelRegistry {
 	 */
 	getAll(kind: ModelKind | "all" = "chat"): Model<Api>[] {
 		const models = this.#ensureFullSnapshot();
-		if (kind === "all") return this.#handOutAll(models);
+		if (kind === "all") return models;
 		let snapshots = this.#fullKindSnapshots.get(models);
 		if (!snapshots) {
 			snapshots = {};
 			this.#fullKindSnapshots.set(models, snapshots);
 		}
 		const cached = snapshots[kind];
-		if (cached) return this.#handOutAll(cached);
+		if (cached) return cached;
 		const filtered = models.filter(model => modelKind(model) === kind);
 		snapshots[kind] = filtered;
-		return this.#handOutAll(filtered);
+		return filtered;
 	}
 
 	/**
@@ -3631,13 +3579,11 @@ export class ModelRegistry {
 		const requested = new Set([...providers].map(provider => provider.trim().toLowerCase()).filter(Boolean));
 		const isProviderAvailable = this.#createProviderAvailabilityCheck();
 		if (this.#hasFullSnapshot) {
-			return this.#handOutAll(
-				this.#models.filter(
-					model =>
-						requested.has(model.provider.toLowerCase()) &&
-						isProviderAvailable(model.provider) &&
-						(kind === "all" || modelKind(model) === kind),
-				),
+			return this.#models.filter(
+				model =>
+					requested.has(model.provider.toLowerCase()) &&
+					isProviderAvailable(model.provider) &&
+					(kind === "all" || modelKind(model) === kind),
 			);
 		}
 		const availableProviders = new Set(
@@ -3652,10 +3598,10 @@ export class ModelRegistry {
 		// those rather than extending the lifetime of their output.
 		if (availableProviders.size === 1 && this.#runtimeModelModifiers.size === 0) {
 			const models = this.#modelsForProviderLookup(availableProviders.values().next().value!);
-			return this.#handOutAll(kind === "all" ? models.slice() : models.filter(model => modelKind(model) === kind));
+			return kind === "all" ? models.slice() : models.filter(model => modelKind(model) === kind);
 		}
 		const models = this.#composeStaticModels(availableProviders);
-		return this.#handOutAll(kind === "all" ? models : models.filter(model => modelKind(model) === kind));
+		return kind === "all" ? models : models.filter(model => modelKind(model) === kind);
 	}
 
 	/**
@@ -3811,118 +3757,7 @@ export class ModelRegistry {
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		const model = resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
-		if (model) this.#handOut(model, modelId);
-		return model;
-	}
-
-	/**
-	 * `model` as the catalog configures it now, for a request about to be sent. Only a model this
-	 * registry handed out (from `find`, `getAll`, `getAvailable`, `getAvailableForProviders`,
-	 * `getProviderModels`, or derived by `refreshSelectedModelMetadata`), or a variant derived from
-	 * one (an `@upstream` pin, an OpenRouter requested id, a Bedrock inference profile, a window
-	 * `fitContextWindow` refitted: `modelDerivationOf`), is rebound, and only when its configuration
-	 * changed since: its provider's models.yml entry, or the catalog entry's fields other than limits.
-	 * The rebound model is the current entry, looked up the way the original was, keeping the held
-	 * object's context window and output cap except where models.yml now configures a different
-	 * value for one; a derived variant is derived again from its rebound source for `scope`, so its
-	 * pin stays and a refit follows `scope`. Any other object (an SDK caller's model or a variant it
-	 * built) is sent as given. Stable per (model, entry, scope), so identity-keyed caches hold.
-	 */
-	currentConfigOf(model: Model<Api>, scope?: Settings): Model<Api> {
-		const then = this.#handedOut.get(model);
-		if (!then) return this.#currentConfigOfDerived(model, scope);
-		const now = resolveProviderModelReference(
-			model.provider,
-			then.ref,
-			this.#modelsForProviderLookup(model.provider),
-		);
-		if (!now || now === then.entry) return model;
-		const cached = this.#currentConfigs.get(model);
-		if (cached?.entry === now && cached.scope === scope) return cached.result;
-		const result = this.#rebind(model, then, now, scope);
-		this.#currentConfigs.set(model, { entry: now, scope, result });
-		return result;
-	}
-
-	/**
-	 * A derived variant: rebind its source, then derive the same variant from the result for
-	 * `scope`. Its limits are the derived ones: the source's rebind already kept the held limits
-	 * except where models.yml now configures a different value, and a refit follows `scope`.
-	 */
-	#currentConfigOfDerived(model: Model<Api>, scope: Settings | undefined): Model<Api> {
-		const derivation = modelDerivationOf(model);
-		if (!derivation) return model;
-		const source = this.currentConfigOf(derivation.source, scope);
-		if (source === derivation.source) return model;
-		const cached = this.#currentConfigs.get(model);
-		if (cached?.entry === source && cached.scope === scope) return cached.result;
-		const result = derivation.derive(source, scope);
-		this.#currentConfigs.set(model, { entry: source, scope, result });
-		return result;
-	}
-
-	#rebind(model: Model<Api>, then: HandedOutModel, now: Model<Api>, scope: Settings | undefined): Model<Api> {
-		const provider = model.provider;
-		const providerEdited = then.digests.get(provider) !== this.#providerConfigDigests.get(provider);
-		const configuredLimits = this.#configuredLimits(now);
-		// A limit follows models.yml only where it configures one now: a window this registry probed
-		// for the held object survives the rebind. Removing a configured limit therefore reaches the
-		// held model at its next lookup rather than through this rebind.
-		const contextWindowEdited =
-			configuredLimits.contextWindow !== undefined && then.entry.contextWindow !== now.contextWindow;
-		const maxTokensEdited = configuredLimits.maxTokens !== undefined && then.entry.maxTokens !== now.maxTokens;
-		if (
-			!providerEdited &&
-			!contextWindowEdited &&
-			!maxTokensEdited &&
-			JSON.stringify(configShape(then.entry)) === JSON.stringify(configShape(now))
-		) {
-			return model;
-		}
-		const fitted = contextWindowEdited && scope ? this.fitContextWindow(now, scope) : now;
-		const result: Model<Api> = {
-			...now,
-			contextWindow: contextWindowEdited ? fitted.contextWindow : model.contextWindow,
-			maxTokens: maxTokensEdited ? now.maxTokens : model.maxTokens,
-		};
-		this.#handedOut.set(result, {
-			ref: then.ref,
-			refs: new Set(then.refs),
-			entry: now,
-			digests: this.#providerConfigDigests,
-		});
-		return result;
-	}
-
-	/** The context window and output cap models.yml sets for `model` (a custom model or a model override). */
-	#configuredLimits(model: Model<Api>): { contextWindow?: number; maxTokens?: number } {
-		const override = this.#resolveLiveModelOverride(model);
-		const custom = this.#resolveLiveCustomModelOverlay(model);
-		return {
-			contextWindow: override?.contextWindow ?? custom?.contextWindow,
-			maxTokens: override?.maxTokens ?? custom?.maxTokens,
-		};
-	}
-
-	/** Record that `model` (looked up as `ref`) was handed out under the current configuration. */
-	#handOut(model: Model<Api>, ref: string): void {
-		const held = this.#handedOut.get(model);
-		if (!held) {
-			this.#handedOut.set(model, { ref, refs: new Set([ref]), entry: model, digests: this.#providerConfigDigests });
-			return;
-		}
-		// One object can reach callers under several ids: an enumeration tags a collapsed model by
-		// its own id, an explicit lookup by the variant it asked for. Both are references this model
-		// is still reachable by, and neither caller's view may change the other's.
-		held.refs.add(ref);
-	}
-
-	#handOutAll<T extends Model<Api>[]>(models: T): T {
-		if (this.#handedOutArrays.has(models)) return models;
-		for (const model of models) this.#handOut(model, model.id);
-		this.#handedOutArrays.add(models);
-		return models;
+		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
 	}
 
 	/** Whether settings disable `provider` (`disabledProviders`). */
@@ -3938,8 +3773,8 @@ export class ModelRegistry {
 	 */
 	getProviderModels(provider: string): Model<Api>[] {
 		const normalizedProvider = provider.trim().toLowerCase();
-		return this.#handOutAll(
-			this.#modelsForProviderLookup(provider).filter(model => model.provider.toLowerCase() === normalizedProvider),
+		return this.#modelsForProviderLookup(provider).filter(
+			model => model.provider.toLowerCase() === normalizedProvider,
 		);
 	}
 
@@ -4077,77 +3912,20 @@ export class ModelRegistry {
 	 * policy. Accepts a provider id with options, or a model with an optional
 	 * session id (`resolver(model, sessionId)`) which derives `baseUrl`/`modelId`
 	 * from the model. Callers that need the initial key for a guard can call
-	 * `resolveApiKeyOnce(resolver)`. Each credential it resolves records the
-	 * catalog generation it came from (see {@link bindRequest}).
+	 * `resolveApiKeyOnce(resolver)`.
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
-		const resolve =
-			typeof target === "string"
-				? createApiKeyResolver(this, target, options)
-				: createApiKeyResolver(this, target.provider, { ...options, baseUrl: target.baseUrl, modelId: target.id });
-		return ctx => this.#resolveVersioned(resolve, ctx);
-	}
-
-	/**
-	 * Resolve through `resolve` and record the catalog generation the credential came from:
-	 * {@link STRADDLED_GENERATION} when the catalog was rebuilt while it resolved, since it may
-	 * then reflect either version.
-	 */
-	async #resolveVersioned(resolve: ApiKeyResolver, ctx: ApiKeyResolveContext): Promise<ApiKeyResolution> {
-		const generation = this.#configGeneration;
-		const resolved = await resolve(ctx);
-		// A mirror's credentials come from its owner, which answers this call only after pushing every
-		// reload it made before it; so a reload the credential already reflects is applied here first.
-		if (this.#owner) await this.#owner.reloadIfConfigChanged();
-		if (resolved === undefined) return resolved;
-		const credential = typeof resolved === "string" ? { apiKey: resolved } : resolved;
-		this.#credentialGenerations.set(
-			credential,
-			generation === this.#configGeneration ? generation : STRADDLED_GENERATION,
-		);
-		return credential;
-	}
-
-	/**
-	 * The model a request sends with `credential`, both from one catalog version: for a credential one
-	 * of this registry's resolvers produced from the current catalog, `model` rebound to it
-	 * ({@link currentConfigOf}); `undefined` when the credential came from an earlier catalog (resolve
-	 * it again). A credential from elsewhere (an SDK caller's key) goes out with `model` as given.
-	 */
-	bindRequest<TApi extends Api>(
-		model: Model<TApi>,
-		credential: ApiKeyResolution,
-		scope?: Settings,
-	): Model<TApi> | undefined {
-		const generation =
-			typeof credential === "object" && credential !== null
-				? this.#credentialGenerations.get(credential)
-				: undefined;
-		if (generation === undefined) return model;
-		if (generation !== this.#configGeneration) return undefined;
-		// The current catalog no longer defines this model, so its endpoint and headers belong to the
-		// configuration it came from while the credential belongs to this one: binding would send a
-		// mixed pair. The caller resolves again and gives up when the model stays gone.
-		if (!this.#stillInCatalog(model)) return undefined;
-		return this.currentConfigOf(model, scope) as Model<TApi>;
-	}
-
-	/** Whether the current catalog still has the entry `model` was handed out from (or derived from). */
-	#stillInCatalog(model: Model<Api>): boolean {
-		const then = this.#handedOut.get(model);
-		if (!then) {
-			const derivation = modelDerivationOf(model);
-			// Not ours: an SDK caller's model goes out as given.
-			return derivation ? this.#stillInCatalog(derivation.source) : true;
+		if (typeof target === "string") {
+			return createApiKeyResolver(this, target, options);
 		}
-		const lookup = this.#modelsForProviderLookup(model.provider);
-		for (const ref of then.refs) {
-			if (resolveProviderModelReference(model.provider, ref, lookup) !== undefined) return true;
-		}
-		return false;
+		return createApiKeyResolver(this, target.provider, {
+			...options,
+			baseUrl: target.baseUrl,
+			modelId: target.id,
+		});
 	}
 
 	async #peekApiKeyForProvider(provider: string, options?: AuthPeekOptions): Promise<string | undefined> {

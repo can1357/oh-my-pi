@@ -1263,9 +1263,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
-	/** Registry catalog generation and model object last checked against it (see {@link syncModelConfig}). */
-	#modelConfigGeneration: number | undefined;
-	#modelConfigCheckedModel: Model | undefined;
 	/** Main thread only: spots streaming spawning tool calls so a subagent worker boots ahead of dispatch. */
 	readonly #spawnSignal = isMainThread() ? new SubagentSpawnSignal() : undefined;
 	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
@@ -7014,26 +7011,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				error,
 			});
 		}
-	}
-
-	/**
-	 * Before each model request: re-read models.yml when it changed on disk and
-	 * re-bind this session's model to its current catalog configuration
-	 * (`ModelRegistry.currentConfigOf`: only a model the registry handed out, only
-	 * when its configuration changed), so the session's state (context window,
-	 * compat, headers) follows an edit. Requests themselves are rebound at the
-	 * session's stream function, which covers side requests, advisors and
-	 * fallbacks too. Runs once per registry generation and per model object.
-	 */
-	async syncModelConfig(): Promise<void> {
-		await this.#modelRegistry.reloadIfConfigChanged();
-		const generation = this.#modelRegistry.configGeneration;
-		const current = this.model;
-		if (generation === this.#modelConfigGeneration && current === this.#modelConfigCheckedModel) return;
-		this.#modelConfigGeneration = generation;
-		const fresh = current ? this.#modelRegistry.currentConfigOf(current, this.settings) : current;
-		if (fresh !== current && fresh) this.agent.setModel(fresh);
-		this.#modelConfigCheckedModel = this.model;
 	}
 
 	/**

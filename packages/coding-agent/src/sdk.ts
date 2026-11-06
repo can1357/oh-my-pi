@@ -20,7 +20,6 @@ import type {
 	Model,
 	ModelUsageHealth,
 	ProviderSessionState,
-	RequestBinding,
 	ServiceTier,
 	ServiceTierByFamily,
 	SimpleStreamOptions,
@@ -4787,21 +4786,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// request, not the process-wide switch (the newest effect holder's): concurrent ACP/SDK
 		// sessions in one process each keep their own policy.
 		// Every request of this session (main loop, side requests, advisors, cache warming,
-		// fallbacks) first folds in a models.yml edit, then goes out with its model rebound to the
-		// catalog's current configuration (`ModelRegistry.currentConfigOf`): every model the registry
-		// handed out, and every variant a selector derived from one (an `@upstream` pin keeps its pin).
-		// The request may then wait (for a provider slot, or before an auth retry) while another
-		// caller reloads the catalog, so each dispatch attempt binds again where its credential
-		// resolves (`requestBinding`, `ModelRegistry.bindRequest`): the endpoint, headers and key it
-		// sends all come from one catalog version.
-		const requestBinding: RequestBinding = {
-			bind: (model, credential) => modelRegistry.bindRequest(model, credential, settings),
-		};
+		// fallbacks) first folds in an on-disk models.yml edit, so it is sent against the catalog
+		// the file describes now rather than the one this process started with.
 		const settingsAwareStreamFn: StreamFn = async (streamModel, context, streamOptions) => {
 			await modelRegistry.reloadIfConfigChanged();
-			const requestModel = modelRegistry.currentConfigOf(streamModel, settings);
 			return withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
-				settingsBoundStreamFn(requestModel, context, { ...streamOptions, requestBinding }),
+				settingsBoundStreamFn(streamModel, context, streamOptions),
 			);
 		};
 		// Primary-agent (and its auto-learn capture twin) provider options read per
@@ -4867,8 +4857,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			promptCacheKey: providerPromptCacheKey,
 			deadline: options.deadline,
 			transformContext,
-			// A models.yml edit reaches this running session at its next request.
-			beforeProviderCall: () => session.syncModelConfig(),
 			transformProviderContext,
 			steeringMode: cfgSteeringMode.get(settings),
 			followUpMode: cfgFollowUpMode.get(settings),

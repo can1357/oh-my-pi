@@ -457,33 +457,6 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.getError()?.message).toContain("Failed to load config file models");
 	});
 
-	test("bindRequest refuses a model the reloaded config dropped instead of pairing it with the new key", async () => {
-		const gateway = (modelId: string, apiKey: string) => ({
-			gateway: {
-				baseUrl: `http://127.0.0.1:9991/${modelId}`,
-				api: "openai-completions",
-				apiKey,
-				models: [{ id: modelId, reasoning: false, input: ["text"] }],
-			},
-		});
-		writeRawModelsJson(gateway("first-model", "first-key"));
-		const registry = new ModelRegistry(authStorage, modelsJsonPath);
-		const held = registry.find("gateway", "first-model");
-		expect(held).toBeDefined();
-		const resolve = registry.resolver(held!);
-		expect(registry.bindRequest(held!, await resolve({ lastChance: false, error: undefined }))).toBeDefined();
-
-		// A valid edit that drops the model and changes the key: the held model's endpoint belongs to
-		// the old config, so sending it with the new key would mix two configurations.
-		writeRawModelsJson(gateway("second-model", "second-key"));
-		const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
-		fs.utimesSync(modelsJsonPath, next, next);
-		expect(await registry.reloadIfConfigChanged()).toBe(true);
-
-		expect(registry.bindRequest(held!, await resolve({ lastChance: false, error: undefined }))).toBeUndefined();
-		expect(registry.find("gateway", "second-model")).toBeDefined();
-	});
-
 	test("reloadIfConfigChanged folds a models config edit into a running registry and keeps the last good one when an edit does not load", async () => {
 		const gateway = (compat?: Record<string, unknown>) => ({
 			gateway: {

@@ -15,13 +15,7 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import {
-	type ApiKeyResolution,
-	createAuthRetryKeyState,
-	isApiKeyResolver,
-	resolvedApiKeyBearer,
-	resolveNextAuthRetryKey,
-} from "./auth-retry";
+import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -1176,20 +1170,9 @@ export function streamSimple<TApi extends Api>(
 	// byte-identical to a non-reasoning model's.
 	const effortRequested =
 		sessionOptions.reasoning !== undefined && !sessionOptions.disableReasoning && !sessionOptions.forceReasoningOff;
-	const sourceModel = model;
 	if (!effortRequested) model = withoutUnverifiedThinking(model);
-	const shapedModel = model;
-	const binding = sessionOptions.requestBinding;
-	// The binding rebinds the model the caller sent; a rebound model gets the same request shaping.
-	const bindAttempt: AttemptBinder<TApi> | undefined = binding
-		? credential => {
-				const bound = binding.bind(sourceModel, credential);
-				if (bound === sourceModel) return shapedModel;
-				return bound && !effortRequested ? withoutUnverifiedThinking(bound) : bound;
-			}
-		: undefined;
 	if (!model.requiresGlyphTokenization) {
-		return streamSimpleRequest(model, context, sessionOptions, bindAttempt);
+		return streamSimpleRequest(model, context, sessionOptions);
 	}
 	const codec = applyGlyphCodec(context);
 	const execHandlers = sessionOptions.cursorExecHandlers ?? sessionOptions.execHandlers;
@@ -1202,7 +1185,7 @@ export function streamSimple<TApi extends Api>(
 					execHandlers: wrappedExecHandlers,
 					cursorExecHandlers: wrappedExecHandlers,
 				};
-	return codec.wrap(streamSimpleRequest(model, codec.context, wireOptions, bindAttempt));
+	return codec.wrap(streamSimpleRequest(model, codec.context, wireOptions));
 }
 
 /**
@@ -1225,17 +1208,10 @@ function forwardBedrockUserAgent(
 	return modelUserAgent === undefined ? callerHeaders : { ...callerHeaders, "User-Agent": modelUserAgent };
 }
 
-/** Rebinds a request's model to the configuration a resolved credential came from (see {@link RequestBinding}). */
-type AttemptBinder<TApi extends Api> = (credential: ApiKeyResolution) => Model<TApi> | undefined;
-
-/** How many times a dispatch attempt re-resolves its credential to reach one configuration version. */
-const MAX_REQUEST_BINDING_ATTEMPTS = 4;
-
 function streamSimpleRequest<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: SimpleStreamOptions,
-	bindAttempt?: AttemptBinder<TApi>,
 ): AssistantMessageEventStream {
 	const requestOptions = withSupportedSamplingParams(
 		model,
@@ -1246,34 +1222,10 @@ function streamSimpleRequest<TApi extends Api>(
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
-		// The credential an attempt sends and the model (endpoint, headers) it sends it with come
-		// from one configuration version: a credential resolved after the configuration moved on
-		// is resolved again, so a new key never reaches an old endpoint, nor an old key a new one.
-		// A configuration that keeps moving, or one that no longer defines this model at all, would
-		// never bind, so the attempts are bounded and the request fails saying so rather than
-		// sending a mixed pair.
-		const bindCredential = async (
-			resolved: ApiKeyResolution,
-		): Promise<{ resolved: ApiKeyResolution; model: Model<TApi> }> => {
-			if (!bindAttempt) return { resolved, model };
-			let bound = bindAttempt(resolved);
-			for (let attempt = 0; bound === undefined && attempt < MAX_REQUEST_BINDING_ATTEMPTS; attempt++) {
-				signal?.throwIfAborted();
-				resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
-				bound = bindAttempt(resolved);
-			}
-			if (bound === undefined) {
-				throw new Error(
-					`Model configuration for ${model.provider}/${model.id} changed while the request was prepared and no longer matches its credential; it may have been removed from the configuration.`,
-				);
-			}
-			return { resolved, model: bound };
-		};
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
 		const runAttempt = async (
-			attemptModel: Model<TApi>,
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
@@ -1286,14 +1238,8 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = {
-					...requestOptions,
-					apiKey,
-					credentialId,
-					oauthIdentity,
-					requestBinding: undefined,
-				};
-				const inner = streamSimpleRequest(attemptModel, context, attemptOptions);
+				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
+				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
 						if ("partial" in event) event.partial.credentialId = credentialId;
@@ -1308,14 +1254,14 @@ function streamSimpleRequest<TApi extends Api>(
 						!emittedReplayUnsafeEvent &&
 						event.type === "error" &&
 						isRetryableUpstreamError(
-							attemptModel,
+							model,
 							event.error,
 							extractStatusFromAssistantError(event.error),
 							event.error.errorMessage,
 						)
 					) {
 						return {
-							error: contextualizeAuthRetryError(attemptModel, createAssistantAuthError(event.error)),
+							error: contextualizeAuthRetryError(model, createAssistantAuthError(event.error)),
 							bufferedEvents,
 							terminalEvent: event,
 						};
@@ -1335,13 +1281,13 @@ function streamSimpleRequest<TApi extends Api>(
 				if (
 					!emittedReplayUnsafeEvent &&
 					isRetryableUpstreamError(
-						attemptModel,
+						model,
 						error,
 						AIError.status(error),
 						error instanceof Error ? error.message : undefined,
 					)
 				) {
-					return { error: contextualizeAuthRetryError(attemptModel, error), bufferedEvents };
+					return { error: contextualizeAuthRetryError(model, error), bufferedEvents };
 				}
 				flushBuffered();
 				outer.fail(error);
@@ -1361,11 +1307,8 @@ function streamSimpleRequest<TApi extends Api>(
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
-			let attemptModel: Model<TApi>;
 			try {
-				const bound = await bindCredential(await apiKeyResolver({ lastChance: false, error: undefined, signal }));
-				const resolved = bound.resolved;
-				attemptModel = bound.model;
+				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
@@ -1382,7 +1325,7 @@ function streamSimpleRequest<TApi extends Api>(
 			}
 			if (lastKey === undefined) {
 				if (getProviderDefinition(model.provider)?.allowsMissingApiKey) {
-					const failure = await runAttempt(attemptModel);
+					const failure = await runAttempt();
 					if (failure) emitFailure(failure);
 					return;
 				}
@@ -1390,39 +1333,26 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(attemptModel, lastKey, credentialId, oauthIdentity);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
-				let nextResolved: ApiKeyResolution = undefined;
-				const retryKey = await resolveNextAuthRetryKey(
+				let nextCredentialId: number | undefined;
+				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
+				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
 					failure.error,
 					signal,
 					resolved => {
-						nextResolved = resolved;
+						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 					},
 				);
-				if (retryKey === undefined) break;
-				// A retry is a dispatch attempt too: its credential and endpoint share one version.
-				let bound: { resolved: ApiKeyResolution; model: Model<TApi> };
-				try {
-					bound = await bindCredential(nextResolved);
-				} catch {
-					break;
-				}
-				const nextKey = resolvedApiKeyBearer(bound.resolved);
 				if (nextKey === undefined) break;
-				if (nextKey !== retryKey) {
-					retryState.attemptedKeys.add(nextKey);
-					retryState.lastKey = nextKey;
-				}
-				const nextCredentialId = typeof bound.resolved === "string" ? undefined : bound.resolved?.credentialId;
-				const nextOAuthIdentity = typeof bound.resolved === "string" ? undefined : bound.resolved?.oauthIdentity;
-				const next = await runAttempt(bound.model, nextKey, nextCredentialId, nextOAuthIdentity);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;
 			}
