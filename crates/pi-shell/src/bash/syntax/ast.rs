@@ -147,13 +147,17 @@ pub struct Stage {
 	pub pipe_stderr: bool,
 }
 
-/// A command with its trailing redirections.
+/// A command with its redirections.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Command {
 	/// Preorder id.
 	pub id:     NodeId,
 	/// Source span, redirections included.
 	pub span:   Span,
+	/// The command proper, recorded before/after its grammar rule, excluding
+	/// surrounding redirections. Absent for simple commands and synthesized
+	/// groups, which have no compound tokens of their own.
+	pub extent: Option<Span>,
 	/// Offset of the token that closes this compound command (`)`, `}`,
 	/// `done`, `esac`, `fi`, `))`, `]]`), as the parser read it. `None` when
 	/// the command has no closing token (a simple command) or the parser
@@ -305,6 +309,9 @@ pub struct For {
 	pub extra_vars: Vec<Name>,
 	/// Span of the variable word.
 	pub var_span:   Span,
+	/// Iterator header from the first variable through the last name,
+	/// keyword, word or closing parenthesis the parser read.
+	pub header:     Span,
 	/// `in` words; `None` means `"$@"`.
 	pub words:      Option<Vec<Word>>,
 	/// Loop body.
@@ -569,14 +576,18 @@ pub struct ArrayElem {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Redir {
 	/// Source span.
-	pub span:   Span,
+	pub span:    Span,
 	/// Explicit fd (`2>`) or fd variable (`{var}>`); `None` uses the operator
 	/// default.
-	pub fd:     Option<RedirFd>,
+	pub fd:      Option<RedirFd>,
+	/// Explicit descriptor text, including braces, at its recorded span.
+	pub fd_name: Option<Name>,
+	/// Offset of the redirection operator as the parser read it.
+	pub op_pos:  u32,
 	/// Operator.
-	pub op:     RedirOp,
+	pub op:      RedirOp,
 	/// Target word or here-document.
-	pub target: RedirTarget,
+	pub target:  RedirTarget,
 }
 
 /// Explicit redirection source.

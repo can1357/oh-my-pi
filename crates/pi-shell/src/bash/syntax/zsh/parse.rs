@@ -104,6 +104,7 @@ fn empty_command(span: Span) -> Command {
 	Command {
 		id: NodeId(0),
 		span,
+		extent: None,
 		close: None,
 		kind: CommandKind::Simple(Simple::default()),
 		redirs: Vec::new(),
@@ -124,6 +125,7 @@ fn pipeline_command(p: Pipeline) -> Command {
 	Command {
 		id: NodeId(0),
 		span,
+		extent: None,
 		close: None,
 		kind: CommandKind::Brace(List { items: vec![ListItem { and_or, sep: Sep::None }] }),
 		redirs: Vec::new(),
@@ -139,7 +141,14 @@ fn list_command(mut list: List, span: Span) -> Command {
 	if lone && let Some(item) = list.items.pop() {
 		return pipeline_command(item.and_or.first);
 	}
-	Command { id: NodeId(0), span, close: None, kind: CommandKind::Brace(list), redirs: Vec::new() }
+	Command {
+		id: NodeId(0),
+		span,
+		extent: None,
+		close: None,
+		kind: CommandKind::Brace(list),
+		redirs: Vec::new(),
+	}
 }
 
 /// zsh `IS_DASH`.
@@ -487,6 +496,7 @@ impl Ctx<'_> {
 			let cmd = Command {
 				id: NodeId(0),
 				span,
+				extent: Some(span),
 				close: None,
 				kind: CommandKind::Coproc(Coproc { name: None, body: Box::new(body) }),
 				redirs: Vec::new(),
@@ -557,6 +567,7 @@ impl Ctx<'_> {
 		let mut redirs = Vec::new();
 		self.trailing_redirs(&mut redirs);
 		let nr = redirs.len();
+		let cmd_lo = self.lx.lo;
 		if self.lx.tok == T::Time && !self.inpartime {
 			self.inpartime = true;
 			let tp = self.par_time(lo);
@@ -626,11 +637,14 @@ impl Ctx<'_> {
 			self.cmdpop();
 		}
 		let kind = kind.unwrap_or_else(failed);
+		let extent =
+			(!matches!(kind, CommandKind::Simple(_))).then(|| Span::new(cmd_lo, self.lx.last_hi));
 		self.trailing_redirs(&mut redirs);
 		self.end_cmd();
 		let mut cmd = Command {
 			id: NodeId(0),
 			span: Span::new(lo, self.lx.last_hi),
+			extent,
 			close: self.cmd_close.take(),
 			kind,
 			redirs,
@@ -729,12 +743,14 @@ impl Ctx<'_> {
 			return self.yyerr();
 		}
 		let var_span = self.tok_span();
+		let mut header_hi;
 		let mut vars = Vec::new();
 		self.ps.incmdpos = true;
 		let ona = self.noaliases;
 		self.noaliases = true;
 		loop {
 			vars.push(Name { text: plain(&self.lx.buf), span: self.tok_span() });
+			header_hi = self.lx.hi;
 			self.zshlex();
 			if self.lx.tok != T::String || self.lx.buf == b"in" || sel {
 				break;
@@ -755,6 +771,7 @@ impl Ctx<'_> {
 			self.ps.incmdpos = false;
 			self.zshlex();
 			let w = self.par_wordlist();
+			header_hi = self.lx.last_hi;
 			if self.lx.tok != T::Seper {
 				return self.yyerr();
 			}
@@ -767,6 +784,7 @@ impl Ctx<'_> {
 			if self.lx.tok != T::Outpar {
 				return self.yyerr();
 			}
+			header_hi = self.lx.hi;
 			self.ps.incmdpos = true;
 			self.zshlex();
 			Some(w)
@@ -778,8 +796,17 @@ impl Ctx<'_> {
 		let (body, do_pos, braces) = self.loop_body(csh, Loop::For)?;
 		let mut vars = vars.into_iter();
 		let var = vars.next().map_or_else(Vec::new, |n| n.text);
-		let f =
-			For { var, extra_vars: vars.collect(), var_span, words, body, in_pos, do_pos, braces };
+		let f = For {
+			var,
+			extra_vars: vars.collect(),
+			var_span,
+			header: Span::new(var_span.lo, header_hi),
+			words,
+			body,
+			in_pos,
+			do_pos,
+			braces,
+		};
 		Some(if sel {
 			CommandKind::Select(f)
 		} else {
@@ -1118,6 +1145,7 @@ impl Ctx<'_> {
 			return Some(Command {
 				id: NodeId(0),
 				span: Span::new(lo, self.lx.last_hi),
+				extent: Some(Span::new(lo, self.lx.last_hi)),
 				close,
 				kind: CommandKind::Brace(list),
 				redirs: Vec::new(),
@@ -1354,7 +1382,7 @@ impl Ctx<'_> {
 						&& ident_end(b, 1, self.opt(Features::ZSH_WIDE_IDENT)) >= b.len() - 1
 					{
 						let toksave = self.tok_word();
-						let idstring = plain(span(b, 1, b.len() - 1));
+						let idstring = Name { text: plain(b), span: *toksave.span };
 						redir_var = true;
 						self.zshlex();
 						if hasalias.is_none() {
@@ -1492,22 +1520,33 @@ impl Ctx<'_> {
 	}
 
 	/// zsh `par_redir`: `( OUTANG | … | TRINANG ) STRING`; `idstring` is the
-	/// variable of a `{var}>` redirection.
-	fn par_redir(&mut self, idstring: Option<Vec<u8>>) -> Option<Redir> {
-		let lo = self.lx.lo;
+	/// full `{var}` descriptor of a variable redirection, with its span.
+	fn par_redir(&mut self, idstring: Option<Name>) -> Option<Redir> {
+		let op_pos = self.lx.redir_op_pos;
+		let fd1 = self.lx.tokfd;
+		let (fd, fd_name) = match idstring {
+			Some(name) => {
+				let var = name.text[1..name.text.len() - 1].to_vec();
+				(Some(RedirFd::Var(var)), Some(name))
+			},
+			None => (
+				u32::try_from(fd1).ok().map(RedirFd::Num),
+				self
+					.lx
+					.redir_fd
+					.take()
+					.map(|(byte, span)| Name { text: vec![byte], span }),
+			),
+		};
+		let lo = fd_name.as_ref().map_or(self.lx.lo, |name| name.span.lo);
 		let oldcmdpos = self.ps.incmdpos;
 		self.ps.incmdpos = false;
 		let rt = self.lx.tok;
-		let fd1 = self.lx.tokfd;
 		self.zshlex();
 		if !matches!(self.lx.tok, T::String | T::Envstring) {
 			return self.yyerr();
 		}
 		self.ps.incmdpos = oldcmdpos;
-		let fd = match idstring {
-			Some(v) => Some(RedirFd::Var(v)),
-			None => u32::try_from(fd1).ok().map(RedirFd::Num),
-		};
 		if matches!(rt, T::Dinang | T::Dinangdash) {
 			let strip = rt == T::Dinangdash;
 			let name = &self.lx.buf;
@@ -1530,6 +1569,8 @@ impl Ctx<'_> {
 			return Some(Redir {
 				span: Span::new(lo, hi),
 				fd,
+				fd_name,
+				op_pos,
 				op: RedirOp::HereDoc { strip_tabs: strip },
 				target: RedirTarget::HereDoc(HereDoc {
 					delim,
@@ -1555,6 +1596,8 @@ impl Ctx<'_> {
 		Some(Redir {
 			span: Span::new(lo, target.span.hi),
 			fd,
+			fd_name,
+			op_pos,
 			op: redir_op(rt),
 			target: RedirTarget::Word(target),
 		})
@@ -1859,10 +1902,17 @@ fn attach_function_redirs(cmd: &mut Command) {
 		*f.body = Command {
 			id: NodeId(0),
 			span,
+			extent: None,
 			close: None,
 			kind: CommandKind::Brace(List { items: vec![ListItem { and_or, sep: Sep::None }] }),
 			redirs: Vec::new(),
 		};
+	}
+	// The body owns these redirections, so its enclosing range must own
+	// their parsed spans too. Its compound extent stays at its own tokens.
+	for r in &redirs {
+		f.body.span.lo = f.body.span.lo.min(r.span.lo);
+		f.body.span.hi = f.body.span.hi.max(r.span.hi);
 	}
 	f.body.redirs.extend(redirs);
 }

@@ -253,7 +253,8 @@ mod tests {
 
 	#[test]
 	fn archive_round_trip_preserves_native_syntax_and_origin() {
-		let source = b"f() { local -a a=( [1]=x y ); printf '%s' \"$1\"; }\n";
+		let source =
+			b"f() { local -a a=( [1]=x y ); for i in; do printf '%s' \"$1\" 0012>/dev/null; done; }\n";
 		let (syntax, _) = UnitSyntax::parse_boundary(source, Features::NONE.bits(), &[], 3).unwrap();
 		let syntax = syntax.with_parent(SourceParent { unit: 2, node: 7, lo: 12, hi: 40 });
 		let encoded = serde_json::to_string(&syntax).unwrap();

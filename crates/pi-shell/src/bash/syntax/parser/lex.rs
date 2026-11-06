@@ -204,8 +204,8 @@ pub(super) struct Tok {
 	pub hi:    u32,
 	/// 1-based line of the first byte.
 	pub line:  u32,
-	/// Word value of `Word`, `Assign` and `RedirWord` (the name, as a plain
-	/// word).
+	/// Parsed word value of `Word`, `Assign`, `RedirWord` and `Number`.
+	/// Numeric tokens keep their text as well as their numeric value.
 	pub word:  Option<WordTok>,
 	/// `Number` value.
 	pub num:   u32,
@@ -756,6 +756,7 @@ impl<'s> Parser<'s> {
 		{
 			let mut t = Tok::new(T::Number, lo, hi, line);
 			t.num = n;
+			t.word = w;
 			return Ok(Some(t));
 		}
 		if let Some(text) = plain

@@ -96,21 +96,13 @@ use crate::bash::{
 
 /// IR version; part of the frames header.
 ///
-/// Main's version 15 is its own layout change. On top of it, version 16
-/// gives each conditional operator the offset it was read at, version 17
-/// records every `!` of a run and every `&&`/`||` of a chain rather than
-/// deriving them, version 18 is 17 merged with main's 15, version 19 gives
-/// a conditional group the offset after its `)`, and version 20 records
-/// every compound command's own keyword and operator offsets (`do`, `done`,
-/// `then`, `fi`, `else`, `in`, `esac`, the arm terminators, the arithmetic
-/// header, and each closing `)`, `}`, `))` and `]]`), version 21 adds
-/// the `)` that closes a `case` arm's patterns, and version 22 records
-/// zsh's `repeat` body keyword and the `}` and `always` of a `try`, and
-/// makes the arithmetic-`for` header and its `))` plain fields, since
-/// every parser reads them. Version 23 records parameter transform and
-/// replacement-anchor offsets; version 25 records word-part boundaries,
-/// parameter and assignment prefixes, compound-array delimiters and element
-/// starts, trimmed arithmetic extents, and original here-document buffers.
+/// Deferred function bodies can contain a serialized syntax tree. A tree
+/// layout change raises this version so restore rejects incompatible bytes.
+/// Version 24 records each compound's own extent separately from its
+/// enclosing command span, which also contains redirections. Version 25 adds
+/// word-part boundaries and values, parameter and assignment prefixes,
+/// compound-array delimiters and element starts, trimmed arithmetic extents,
+/// and original here-document buffers.
 pub const IR_VERSION: u32 = 25;
 
 /// Opcodes.

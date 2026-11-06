@@ -119,8 +119,8 @@ fn write(out: &mut String, v: V, pretty: bool, depth: usize) {
 
 /// Serialize a program as JSON.
 ///
-/// `src` is the source the program was parsed from (offsets, line/column
-/// numbers and shfmt's literal values come from it).
+/// `src` supplies the original offsets, line/column numbers and shfmt word
+/// text slices. Command names and descriptor text come from the parsed tree.
 ///
 /// # Native schema
 ///
@@ -167,11 +167,14 @@ fn write(out: &mut String, v: V, pretty: bool, depth: usize) {
 /// nodes, `Pos` objects with `Offset`/`Line`/`Col`, tab-indented), as
 /// consumed by bash-viz. Arithmetic expressions are emitted as a single
 /// `Word` leaf holding the expression text rather than shfmt's operator
-/// tree, comments are not emitted, and extglob groups stay inside `Lit`.
+/// tree, and extglob groups stay inside `Lit`.
 /// zsh words are `Lit` leaves holding their source text; zsh-only commands
 /// use node types shfmt lacks (`RepeatClause`, `TryClause`, `AnonFuncDecl`),
 /// `&|` sets `Background` and `Disown`, and extra loop variables or function
 /// names are listed in `ExtraNames`.
+/// Command extents and keyword positions come from the parser, not from
+/// adjacent redirections. Unwritten group delimiters and conditional keywords
+/// are omitted. Every object in `Parts` includes its `Type`.
 pub fn to_json(src: &[u8], program: &Program, dialect: JsonDialect, offsets: Offsets) -> String {
 	let map = OffMap::new(src, offsets);
 	let mut out = String::new();
@@ -908,16 +911,8 @@ mod shfmt {
 			}
 		}
 
-		/// End of the token text that ends right before `hi`, trimming blanks.
-		fn trim_back(&self, lo: u32, mut hi: u32) -> u32 {
-			while hi > lo && matches!(self.at(hi - 1), b' ' | b'\t' | b'\n') {
-				hi -= 1;
-			}
-			hi
-		}
-
-		fn lit(&self, lo: u32, hi: u32, typed: bool) -> V {
-			let mut f = Vec::new();
+		fn lit_value(&self, lo: u32, hi: u32, value: &[u8], typed: bool) -> V {
+			let mut f = Vec::with_capacity(6);
 			if typed {
 				f.push(("Type", s(b"Lit")));
 			}
@@ -925,18 +920,8 @@ mod shfmt {
 			f.push(("End", self.m.pos(hi)));
 			f.push(("ValuePos", self.m.pos(lo)));
 			f.push(("ValueEnd", self.m.pos(hi)));
-			f.push(("Value", s(self.src.get(lo as usize..hi as usize).unwrap_or_default())));
+			f.push(("Value", s(value)));
 			V::Obj(f)
-		}
-
-		fn lit_value(&self, lo: u32, hi: u32, value: &[u8]) -> V {
-			V::Obj(vec![
-				("Pos", self.m.pos(lo)),
-				("End", self.m.pos(hi)),
-				("ValuePos", self.m.pos(lo)),
-				("ValueEnd", self.m.pos(hi)),
-				("Value", s(value)),
-			])
 		}
 
 		fn stmt(&self, st: St) -> V {
@@ -1200,18 +1185,15 @@ mod shfmt {
 		fn redir(&self, r: &Redir) -> (V, u32) {
 			let mut end = r.span.hi;
 			let op = redir_op(r.op);
-			let op_pos = match r.fd {
-				None => r.span.lo,
-				Some(_) => self.find_op(r.span.lo, op),
-			};
+			let op_pos = r.op_pos;
 			let mut f = vec![
 				("Pos", self.m.pos(r.span.lo)),
 				("End", self.m.pos(r.span.hi)),
 				("OpPos", self.m.pos(op_pos)),
 				("Op", s(op)),
 			];
-			if r.fd.is_some() {
-				f.push(("N", self.lit(r.span.lo, op_pos, false)));
+			if let Some(name) = &r.fd_name {
+				f.push(("N", self.lit_value(name.span.lo, name.span.hi, &name.text, false)));
 			}
 			match &r.target {
 				RedirTarget::Word(w) => f.push(("Word", self.word(w, false))),
@@ -1254,17 +1236,6 @@ mod shfmt {
 			(V::Obj(f), end)
 		}
 
-		fn find_op(&self, lo: u32, op: &[u8]) -> u32 {
-			let mut i = lo;
-			while (i as usize) < self.src.len() {
-				if self.src[i as usize..].starts_with(op) {
-					return i;
-				}
-				i += 1;
-			}
-			lo
-		}
-
 		/// The stored body is the parser's input, not a slice recovered from
 		/// the command's source. Its sub-parser keeps the recorded origin.
 		fn text_parts(&self, source: &HereDocSource, doc_end: u32) -> Vec<V> {
@@ -1289,16 +1260,10 @@ mod shfmt {
 			parts
 		}
 
-		/// The shfmt command for `c` and the end of the command proper
-		/// (without trailing redirections).
+		/// The shfmt command and its parser-recorded extent, without surrounding
+		/// redirections. Synthesized groups retain only their enclosing range.
 		fn command(&self, c: &Command) -> (Option<V>, u32) {
-			let lo = c.span.lo;
-			let hi = match c.redirs.first() {
-				Some(r) if !matches!(c.kind, CommandKind::Simple(_) | CommandKind::FuncDef(_)) => {
-					self.trim_back(lo, r.span.lo)
-				},
-				_ => c.span.hi,
-			};
+			let Span { lo, hi } = c.extent.unwrap_or(c.span);
 			let p = |o| self.m.pos(o);
 			// The closing token's own offset is the parser's to record. A
 			// command it synthesized rather than read has none, and the
@@ -1313,15 +1278,19 @@ mod shfmt {
 			let v = match &c.kind {
 				CommandKind::Simple(sc) => return self.simple(sc),
 				CommandKind::Brace(l) => {
-					let mut f =
-						vec![("Type", s(b"Block")), ("Pos", p(lo)), ("End", p(hi)), ("Lbrace", p(lo))];
+					let mut f = vec![("Type", s(b"Block")), ("Pos", p(lo)), ("End", p(hi))];
+					if let Some(span) = c.extent {
+						f.push(("Lbrace", p(span.lo)));
+					}
 					close(&mut f, "Rbrace");
 					f.push(("Stmts", self.list(l)));
 					V::Obj(f)
 				},
 				CommandKind::Subshell(l) => {
-					let mut f =
-						vec![("Type", s(b"Subshell")), ("Pos", p(lo)), ("End", p(hi)), ("Lparen", p(lo))];
+					let mut f = vec![("Type", s(b"Subshell")), ("Pos", p(lo)), ("End", p(hi))];
+					if let Some(span) = c.extent {
+						f.push(("Lparen", p(span.lo)));
+					}
 					close(&mut f, "Rparen");
 					f.push(("Stmts", self.list(l)));
 					V::Obj(f)
@@ -1335,7 +1304,7 @@ mod shfmt {
 					},
 					&i.arms,
 					true,
-					lo,
+					Some(lo),
 				),
 				CommandKind::While(w) => {
 					let mut f = vec![
@@ -1359,16 +1328,9 @@ mod shfmt {
 					let select = matches!(c.kind, CommandKind::Select(_));
 					let mut iter = vec![
 						("Type", s(b"WordIter")),
-						("Pos", p(fr.var_span.lo)),
-						(
-							"End",
-							p(fr
-								.words
-								.as_ref()
-								.and_then(|w| w.last())
-								.map_or(fr.var_span.hi, |w| w.span.hi)),
-						),
-						("Name", self.lit_value(fr.var_span.lo, fr.var_span.hi, &fr.var)),
+						("Pos", p(fr.header.lo)),
+						("End", p(fr.header.hi)),
+						("Name", self.lit_value(fr.var_span.lo, fr.var_span.hi, &fr.var, false)),
 					];
 					if let Some(extra) = self.extra_names(&fr.extra_vars) {
 						iter.push(("ExtraNames", extra));
@@ -1426,14 +1388,16 @@ mod shfmt {
 					for arm in &cs.arms {
 						let plo = arm.patterns.first().map_or(at, |w| w.span.lo);
 						// An arm with no body ends after the `)` that closes
-						// its patterns, which the parser recorded: in alias
-						// text there is no byte after the last pattern.
+						// its patterns, which the parser recorded. Where it
+						// recorded none — zsh's `(x)` arm reads its `)` on
+						// another branch — the arm ends at its last pattern:
+						// a byte past it is a byte of whatever follows, and
+						// in text an alias expanded it is not the arm's at
+						// all.
 						let body_end = arm.body.items.last().map_or_else(
 							|| {
-								arm.rparen.map_or_else(
-									|| arm.patterns.last().map_or(plo, |w| w.span.hi + 1),
-									|r| r.hi,
-								)
+								arm.rparen
+									.map_or_else(|| arm.patterns.last().map_or(plo, |w| w.span.hi), |r| r.hi)
 							},
 							|it| it.and_or.span.hi,
 						);
@@ -1492,7 +1456,7 @@ mod shfmt {
 				CommandKind::FuncDef(fd) => {
 					let mut f = vec![
 						("Type", s(b"FuncDecl")),
-						("Pos", p(lo)),
+						("Pos", p(c.span.lo)),
 						("End", p(c.span.hi)),
 						("Position", p(lo)),
 					];
@@ -1502,7 +1466,7 @@ mod shfmt {
 					if fd.parens {
 						f.push(("Parens", V::Bool(true)));
 					}
-					f.push(("Name", self.lit_value(fd.name_span.lo, fd.name_span.hi, &fd.name)));
+					f.push(("Name", self.lit_value(fd.name_span.lo, fd.name_span.hi, &fd.name, false)));
 					if let Some(extra) = self.extra_names(&fd.extra_names) {
 						f.push(("ExtraNames", extra));
 					}
@@ -1604,7 +1568,7 @@ mod shfmt {
 				V::Arr(
 					names
 						.iter()
-						.map(|n| self.lit_value(n.span.lo, n.span.hi, &n.text))
+						.map(|n| self.lit_value(n.span.lo, n.span.hi, &n.text, false))
 						.collect(),
 				)
 			})
@@ -1635,7 +1599,7 @@ mod shfmt {
 			V::Obj(f)
 		}
 
-		fn if_clause(&self, c: &IfClause<'_>, arms: &[IfArm], typed: bool, pos: u32) -> V {
+		fn if_clause(&self, c: &IfClause<'_>, arms: &[IfArm], typed: bool, pos: Option<u32>) -> V {
 			let p = |o| self.m.pos(o);
 			let Some((arm, rest)) = arms.split_first() else {
 				return V::Null;
@@ -1644,9 +1608,13 @@ mod shfmt {
 			if typed {
 				f.push(("Type", s(b"IfClause")));
 			}
-			f.push(("Pos", p(pos)));
+			if let Some(at) = pos {
+				f.push(("Pos", p(at)));
+			}
 			f.push(("End", p(c.hi)));
-			f.push(("Position", p(pos)));
+			if let Some(at) = pos {
+				f.push(("Position", p(at)));
+			}
 			if let Some(at) = arm.then_pos {
 				f.push(("ThenPos", p(at)));
 			}
@@ -1655,19 +1623,17 @@ mod shfmt {
 			}
 			f.push(("Cond", self.list(&arm.cond)));
 			f.push(("Then", self.list(&arm.body)));
-			// A short form writes no `elif`/`else` keyword for the parser to
-			// record; the clause then starts at the first node it holds,
-			// which is an offset the parser did read.
 			if let Some((next, _)) = rest.split_first() {
-				let elif = next
-					.kw_pos
-					.unwrap_or_else(|| next.cond.items.first().map_or(pos, |it| it.and_or.span.lo));
-				f.push(("Else", self.if_clause(c, rest, false, elif)));
+				f.push(("Else", self.if_clause(c, rest, false, next.kw_pos)));
 			} else if let Some(e) = c.else_body {
-				let epos = c
-					.else_pos
-					.unwrap_or_else(|| e.items.first().map_or(pos, |it| it.and_or.span.lo));
-				let mut g = vec![("Pos", p(epos)), ("End", p(c.hi)), ("Position", p(epos))];
+				let mut g = Vec::new();
+				if let Some(at) = c.else_pos {
+					g.push(("Pos", p(at)));
+				}
+				g.push(("End", p(c.hi)));
+				if let Some(at) = c.else_pos {
+					g.push(("Position", p(at)));
+				}
 				if let Some(at) = c.close {
 					g.push(("FiPos", p(at)));
 				}
@@ -1813,7 +1779,7 @@ mod shfmt {
 						("Type", s(b"DeclClause")),
 						("Pos", p(lo)),
 						("End", p(hi)),
-						("Variant", self.lit_value(head.span.lo, head.span.hi, name)),
+						("Variant", self.lit_value(head.span.lo, head.span.hi, name, false)),
 					];
 					if !args.is_empty() {
 						f.push(("Args", V::Arr(args)));
@@ -1967,7 +1933,7 @@ mod shfmt {
 			let mut f = vec![("Pos", p(lo)), ("End", p(hi)), ("Naked", V::Bool(true))];
 			match &w.parts[..] {
 				[WordPart::Lit(n)] if crate::bash::syntax::util::is_identifier(n) => {
-					f.push(("Name", self.lit_value(lo, hi, n)));
+					f.push(("Name", self.lit_value(lo, hi, n, false)));
 				},
 				_ => {
 					if let Some(value) =
@@ -2328,12 +2294,8 @@ mod shfmt {
 			V::Obj(f)
 		}
 
-		fn lit_with(&self, lo: u32, hi: u32, v: &[u8]) -> V {
-			self.lit_owned(lo, hi, v.to_vec())
-		}
-
-		fn lit_owned(&self, lo: u32, hi: u32, v: Vec<u8>) -> V {
-			self.lit_at(Some(Span::new(lo, hi)), v, true)
+		fn lit_with(&self, lo: u32, hi: u32, value: &[u8]) -> V {
+			self.lit_value(lo, hi, value, true)
 		}
 
 		fn lit_optional(&self, span: Option<Span>, value: &[u8], typed: bool) -> V {
