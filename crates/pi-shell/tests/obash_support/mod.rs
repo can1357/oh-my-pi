@@ -1,6 +1,6 @@
 //! How the cli tests start processes, all through [`command`]: hermetic
-//! (none of the caller's environment — a [`TEST_PATH`] naming one
-//! directory this harness makes and fills, and the account's own name,
+//! (none of the caller's environment — a [`TEST_PATH`] built from where
+//! the programs the tests need actually live, and the account's own name,
 //! nothing else — stdin `/dev/null`, stdout and stderr pipes, on Unix
 //! nothing but stdio inherited) and bounded (on Unix in its own process
 //! group, killed with whatever it left in it).
@@ -31,161 +31,96 @@ const REQUIRED: [&str; 10] =
 /// launcher can put its own `cat` in front of the system's.
 #[cfg(unix)]
 const SYSTEM_DIRS: &[&str] = &["/usr/bin", "/bin"];
-
-/// The `PATH` the test process gets, instead of the caller's: ONE
-/// directory, the one [`toolbox`] makes and fills with the programs in
-/// [`REQUIRED`]. No directory of the caller's is on it.
-///
-/// Earlier versions of this harness put the caller's own directories on
-/// the test `PATH` — first a fixed `/usr/bin:/bin`, which is wrong on a
-/// host that does not follow the filesystem hierarchy standard (this
-/// repository ships `nix/dev-shell.nix`, and `cat` is in the Nix store
-/// there), then the directories the programs were actually found in.
-/// That second shape kept the harness dependent on those directories
-/// being nameable and reachable from every child, and review found three
-/// hosts in a row where they are not: a directory whose name holds the
-/// list separator cannot go on a `PATH` at all, a relative entry means a
-/// different place in each child that chose its own working directory,
-/// and a working directory that has been removed cannot be named.
-///
-/// One directory this harness owns answers all of them at once: it has a
-/// name we chose, it is absolute, and it means the same thing to every
-/// child whatever directory that child runs in.
-///
-/// What is still read from the caller is which directories to SEARCH
-/// after the system ones, and `TMPDIR` for where to put our own
-/// directory — never a startup file, a shell option or a setting that
-/// changes what obash does. A program found nowhere is not installed,
-/// and the test that needs it fails on it, as it does on a host that
-/// lacks it.
-#[cfg(unix)]
-pub static TEST_PATH: LazyLock<OsString> = LazyLock::new(|| match toolbox() {
-	Some(dir) => dir.into_os_string(),
-	None => OsString::new(),
-});
-
-/// On a non-Unix host this harness builds no toolbox: it has no
-/// `faccessat` to ask about executability and no symlink it may create
-/// unprivileged. These integration tests need `sh`, `mkfifo` and `tty`
-/// and are not run there, so the caller's `PATH` is passed through
-/// rather than a second resolution scheme being carried for a platform
-/// that does not run them.
 #[cfg(not(unix))]
-pub static TEST_PATH: LazyLock<OsString> =
-	LazyLock::new(|| std::env::var_os("PATH").unwrap_or_default());
+const SYSTEM_DIRS: &[&str] = &[];
 
-/// A directory holding the programs in [`REQUIRED`] under their own
-/// names, made fresh for this test process.
+/// The `PATH` the test process gets, instead of the caller's: the
+/// directories the programs in [`REQUIRED`] were found in, **in search
+/// order**, and nothing else.
 ///
-/// Each program is the FIRST one the search finds, so the shell runs the
-/// same `sh` the caller's own `PATH` would have reached, and a launcher
-/// still cannot put its own `cat` in front of the system's. Collapsing
-/// the search to one directory loses nothing: order only ever decided
-/// which of several `cat`s wins, and that decision is made here.
+/// A fixed `/usr/bin:/bin` is hermetic and wrong on a host that does not
+/// follow the filesystem hierarchy standard. This repository ships
+/// `nix/dev-shell.nix`, so NixOS is one: `cat` is in the Nix store and the
+/// FIFO test's `cat < f` failed with the program installed. Resolving each
+/// program keeps both properties — the search starts at [`SYSTEM_DIRS`],
+/// so an FHS host answers as a fixed list would and the caller cannot
+/// redirect anything; a host that keeps its tools elsewhere contributes
+/// only the directories those tools are in.
 ///
-/// `None` only when the directory cannot be made at all, which leaves an
-/// empty `PATH` — the same outcome as a host that has none of the
-/// programs.
-#[cfg(unix)]
-fn toolbox() -> Option<PathBuf> {
-	let dir = owned_dir()?;
+/// Two properties this has to keep, both of which a first version broke.
+/// The result is the searched directories FILTERED, never reordered: if
+/// `cat` is found in the second directory and `sh` in the first, the
+/// `PATH` is still first-then-second, so the shell runs the same `sh` the
+/// caller's own `PATH` would have. And a directory counts only if this
+/// account can actually execute the program in it, so an unreadable or
+/// not-executable-by-us file does not shadow a usable one further along.
+///
+/// What is read from the caller is therefore which **absolute**
+/// directories to search after the system ones, never a startup file, a
+/// shell option or a setting that changes what obash does. A relative
+/// entry is not supported and is dropped — see [`supported_dir`], which
+/// carries the reason. A program found nowhere puts no directory on the
+/// `PATH` and the test that needs it fails on it, as it does today on a
+/// host that lacks it.
+pub static TEST_PATH: LazyLock<OsString> = LazyLock::new(|| {
 	let caller = std::env::var_os("PATH").unwrap_or_default();
 	let searched: Vec<PathBuf> = SYSTEM_DIRS
 		.iter()
 		.map(PathBuf::from)
-		.chain(std::env::split_paths(&caller).filter(|entry| !entry.as_os_str().is_empty()))
+		.chain(std::env::split_paths(&caller).filter_map(supported_dir))
 		.collect();
+	let mut needed = vec![false; searched.len()];
 	for program in REQUIRED {
-		let found = searched.iter().map(|dir| dir.join(program)).find(|p| is_program(p));
-		if let Some(found) = found {
-			install(&found, &dir.join(program));
+		if let Some(at) = searched.iter().position(|dir| is_program(&dir.join(program))) {
+			needed[at] = true;
 		}
 	}
-	Some(dir)
-}
+	let kept = searched
+		.iter()
+		.zip(&needed)
+		.filter(|&(_, &used)| used)
+		// A directory whose own name holds the list separator cannot go on
+		// a `PATH` at all, and the question is asked of the function that
+		// would reject it rather than of a hardcoded character. Dropping
+		// it loses the programs in it; letting `join_paths` fail would
+		// instead panic every spawn in the binary, which is worse — and a
+		// working directory named `a:b` reaches this through a relative
+		// entry, so it is not hypothetical.
+		.filter(|(dir, _)| std::env::join_paths([dir.as_path()]).is_ok())
+		.map(|(dir, _)| dir);
+	std::env::join_paths(kept).unwrap_or_default()
+});
 
-/// `found` under `at`, so that running `at` runs it.
+/// One of the caller's `PATH` entries, if this harness supports it.
 ///
-/// A symlink: `execve` follows it, it costs no read and 12 bytes of
-/// directory entry (measured 0.09 ms and 0 disk blocks for all ten,
-/// against 0.86 ms and 733 kB for copies), and it follows a CHAIN, so a
-/// Nix profile entry that is itself a symlink with a relative target
-/// still resolves against its own directory rather than ours. The source
-/// may be read-only; nothing writes to it.
+/// **A relative entry is not supported and is dropped.** That is a
+/// deliberate limitation of the harness, not an oversight, and the pull
+/// request that introduced it says so rather than leaving it here. A
+/// launcher that says `PATH=../../store` has usable programs there and
+/// this harness will not find them; a test that needs one of the ten
+/// then fails on it, as it does on a host that lacks the program.
 ///
-/// A hard link would be cheaper still and is not usable: it cannot cross
-/// a filesystem, and the one it would have to cross is the ordinary one
-/// — `/usr/bin` against `TMPDIR` fails with `EXDEV` on this very box, a
-/// plain FHS host, before any Nix store is involved. It also links the
-/// SYMLINK rather than its target, which would move a relative profile
-/// entry's meaning into our directory and break it.
+/// The reason is that a relative entry has no single meaning for the
+/// processes this harness starts. Several tests give the process they
+/// start a `current_dir` of their own, so a relative entry passed
+/// through would name a different place in each of them. Resolving it
+/// against the TEST PROCESS's working directory was tried and does not
+/// hold either: that directory may be unnameable — one called `a:b`
+/// produces an entry no `PATH` can carry — or unreadable, since a
+/// removed working directory makes `current_dir()` fail, and review
+/// found both. Installing the programs into a directory the harness
+/// owns was tried next and was worse: it made the harness depend on
+/// `TMPDIR` being absolute, colon-free and writable, and its cleanup
+/// could follow a symlink a caller planted out of its own tree.
 ///
-/// A copy is the fallback for the one source a symlink cannot name: a
-/// program found through a relative `PATH` entry while the working
-/// directory cannot be read. The kernel still resolves `../store/cat`
-/// from a removed directory, so the copy succeeds where naming it
-/// absolutely does not.
-#[cfg(unix)]
-fn install(found: &Path, at: &Path) {
-	if let Some(target) = absolute(found)
-		&& std::os::unix::fs::symlink(&target, at).is_ok()
-	{
-		return;
-	}
-	let _ = std::fs::copy(found, at);
-}
-
-/// `found` as a path that means the same from any directory, or `None`
-/// when it cannot be named that way.
-#[cfg(unix)]
-fn absolute(found: &Path) -> Option<PathBuf> {
-	if found.is_absolute() {
-		return Some(found.to_path_buf());
-	}
-	Some(std::env::current_dir().ok()?.join(found))
-}
-
-/// An empty directory belonging to this test process alone.
+/// An **empty** entry means the working directory in the same way, and
+/// is dropped for the same reason.
 ///
-/// Named after the pid under a per-account base, so two test processes
-/// cannot collide and a reused pid cannot inherit the last one's
-/// contents. Nothing removes it at exit — a test process can be killed —
-/// so each one first clears out the directories of processes that are
-/// gone, which bounds what accumulates without an exit hook that a kill
-/// would skip.
-#[cfg(unix)]
-fn owned_dir() -> Option<PathBuf> {
-	// SAFETY: `getuid` takes no arguments, cannot fail and has no preconditions.
-	let uid = unsafe { libc::getuid() };
-	let base = std::env::temp_dir().join(format!("obash-test-path.{uid}"));
-	sweep(&base);
-	let dir = base.join(std::process::id().to_string());
-	let _ = std::fs::remove_dir_all(&dir);
-	std::fs::create_dir_all(&dir).ok()?;
-	Some(dir)
-}
-
-/// Remove the toolboxes of test processes that have exited.
-#[cfg(unix)]
-fn sweep(base: &Path) {
-	let Ok(entries) = std::fs::read_dir(base) else {
-		return;
-	};
-	for entry in entries.flatten() {
-		let Ok(pid) = entry.file_name().to_string_lossy().parse::<libc::pid_t>() else {
-			continue;
-		};
-		if pid <= 0 {
-			continue;
-		}
-		// SAFETY: signal 0 sends nothing; it only reports whether the pid
-		// exists and whether we could signal it.
-		let gone = unsafe { libc::kill(pid, 0) } == -1
-			&& std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-		if gone {
-			let _ = std::fs::remove_dir_all(entry.path());
-		}
-	}
+/// What a caller gets is therefore this: the absolute directories on its
+/// `PATH` are searched after the system ones, and nothing else it offers
+/// is read.
+fn supported_dir(dir: PathBuf) -> Option<PathBuf> {
+	dir.is_absolute().then_some(dir)
 }
 
 /// Whether `path` is a program this process can execute, following links:
@@ -202,23 +137,29 @@ fn sweep(base: &Path) {
 /// for the real ids, and under `setpriv` — real 60001, effective 1000 —
 /// it called every program unusable and left the `PATH` empty while the
 /// shell could have run them.
-#[cfg(unix)]
 fn is_program(path: &Path) -> bool {
-	use std::os::unix::ffi::OsStrExt as _;
+	#[cfg(unix)]
+	{
+		use std::os::unix::ffi::OsStrExt as _;
 
-	if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
-		return false;
+		if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+			return false;
+		}
+		let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+			return false;
+		};
+		// SAFETY: `c_path` is a NUL-terminated string that outlives the
+		// call; `faccessat` only reads it, and `AT_FDCWD` with an
+		// absolute path ignores the directory argument.
+		let rc = unsafe {
+			libc::faccessat(libc::AT_FDCWD, c_path.as_ptr(), libc::X_OK, libc::AT_EACCESS)
+		};
+		rc == 0
 	}
-	let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-		return false;
-	};
-	// SAFETY: `c_path` is a NUL-terminated string that outlives the call;
-	// `faccessat` only reads it. `AT_FDCWD` resolves a relative path
-	// against this process's working directory, which is where a relative
-	// `PATH` entry means, and is ignored for an absolute one.
-	let rc =
-		unsafe { libc::faccessat(libc::AT_FDCWD, c_path.as_ptr(), libc::X_OK, libc::AT_EACCESS) };
-	rc == 0
+	#[cfg(not(unix))]
+	{
+		path.is_file()
+	}
 }
 
 /// The name of the account the tests run as, read from the password
