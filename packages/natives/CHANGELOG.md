@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- `glob`, `grep`, `fuzzyFind`, `ast_grep` and `ast_edit` no longer run their filesystem work on the scheduler pool, so a search over a large or cold tree can no longer stall every other native call in the process — the embedded shell included, since it shares that pool. A walk that blocks on an uncached inode now holds a blocking thread instead of a scheduler worker.
+- `glob`, `grep`, `fuzzyFind`, `ast_grep` and `ast_edit` now run their directory traversal on a filesystem runtime of their own, so a search over a large or cold tree can no longer take the worker threads that the embedded shell and every other native call are scheduled on. Those threads are named `pi-fs-worker`, so a stall in a search is tellable apart from a stall elsewhere.
 
 ## [18.17.0] - 2026-11-06
 
