@@ -199,3 +199,35 @@ describe("agent:// for agents without a published output", () => {
 		expect(error?.message).not.toContain("Unrelated");
 	});
 });
+
+describe("bare agent:// roster", () => {
+	it("lists local registry agents and A2A bridge registrations", async () => {
+		const { A2aAgentBridge } = await import("@oh-my-pi/pi-coding-agent/a2a/agent-bridge");
+		const registry = new AgentRegistry();
+		registry.register({ id: "Scout", kind: "agent", status: "running" });
+		registry.register({ id: "AdvisorX", kind: "advisor", status: "running" });
+		const bridge = new A2aAgentBridge();
+		bridge.add({
+			name: "a2a:Main",
+			skillId: "Main",
+			description: "peer main",
+			cardName: "omp",
+			url: "http://127.0.0.1:7001/",
+		});
+		const resource = await InternalUrlRouter.instance().resolve("agent://", {
+			agentRegistry: registry,
+			session: { getA2aBridge: () => bridge } as never,
+		});
+		expect(resource.content).toContain("Scout (running, agent");
+		expect(resource.content).toContain("a2a:Main (remote, a2a, http://127.0.0.1:7001/)");
+		expect(resource.content).not.toContain("AdvisorX");
+		expect(resource.content).toContain("task tool");
+	});
+
+	it("explains how to get agents when nothing is registered", async () => {
+		const registry = new AgentRegistry();
+		await expect(InternalUrlRouter.instance().resolve("agent://", { agentRegistry: registry })).rejects.toThrow(
+			/No agents registered/,
+		);
+	});
+});

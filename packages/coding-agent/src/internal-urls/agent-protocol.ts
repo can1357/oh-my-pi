@@ -211,7 +211,41 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		const outputId = url.rawHost || url.hostname;
 		if (outputId === "all") throw new Error("agent://all is write-only; use it to broadcast a message.");
 		if (!outputId) {
-			throw new Error("agent:// URL requires an output ID: agent://<id>");
+			// Bare `agent://` answers the natural question "which agents do you
+			// see": the local registry (this session's peers) plus the A2A bridge
+			// registrations (agents of other live terminals, spawnable as a2a:*).
+			const registry = context?.agentRegistry ?? AgentRegistry.global();
+			const rows: Array<{ name: string; status: string; kind: string; origin: string }> = [];
+			for (const ref of registry.list()) {
+				if (ref.kind === "advisor") continue;
+				rows.push({
+					name: ref.id,
+					status: ref.status,
+					kind: ref.kind,
+					origin: "local session",
+				});
+			}
+			const bridge = context?.session?.getA2aBridge?.();
+			for (const agent of bridge?.list() ?? []) {
+				rows.push({ name: agent.name, status: "remote", kind: "a2a", origin: agent.url });
+			}
+			if (rows.length === 0) {
+				throw new Error(
+					"No agents registered. Spawn one with the task tool, or start another terminal — its A2A bridge agents appear here as a2a:*.",
+				);
+			}
+			const table = rows
+				.map(
+					row =>
+						`- ${row.name} (${row.status}, ${row.kind}${row.origin === "local session" ? "" : `, ${row.origin}`})`,
+				)
+				.join("\n");
+			const body = `Registered agents (local registry + A2A bridge):\n${table}\n\nMessage a local peer with write agent://<id>; spawn a remote one through the task tool by agent name.`;
+			return {
+				url: url.href,
+				content: body,
+				contentType: "text/plain",
+			};
 		}
 
 		const extraction = hasPathExtraction(url);
