@@ -187,8 +187,11 @@ impl Options {
 /// zsh's evaluator globals, owned by the caller so that every evaluation
 /// of a shell (including the nested ones its [`Env`] starts) shares them,
 /// as zsh's do.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MathState {
+	/// The value of the last evaluation that ended, at any nesting level
+	/// (zsh `lastmathval`); `None` before the first.
+	pub last:              Option<Number>,
 	/// Nesting depth of evaluations in progress (zsh `mlevel`): a top-level
 	/// evaluation ([`matheval`] at 0) resets the output format.
 	pub mlevel:            u32,
@@ -239,6 +242,9 @@ pub enum FuncKind {
 	/// A built-in string function (`MFF_STR`): the argument text as is,
 	/// without an argument count check.
 	String,
+	/// A shell function taking its evaluated arguments as text
+	/// (`functions -M`, `MFF_USERFUNC`).
+	User,
 	/// A shell function taking its argument text (`functions -Ms`).
 	UserString,
 }
@@ -2026,6 +2032,9 @@ fn mathevall<E: Env + ?Sized>(
 	} else {
 		expr.lastbase
 	};
+	if let Ok(n) = &r {
+		st.last = Some(*n);
+	}
 	r.map(|n| (n, expr.end, expr.last))
 }
 

@@ -29,17 +29,7 @@ import {
 	shapesItself,
 } from "../types";
 import { lineIndex, matchLine } from "./align";
-import { EDIT_TOOLS } from "../edit-gate";
-import {
-	isPageBack,
-	isTestRun,
-	namesSource,
-	narrowsOutput,
-	printsFiles,
-	runsAgent,
-	runsProgram,
-	SOURCE_PATH,
-} from "./command";
+import { isPageBack, isTestRun, namesSource, printsFiles, runsAgent, runsProgram, SOURCE_PATH } from "./command";
 import { foldBashDocs, foldReadDoc } from "./docs";
 import { shapeDumpOutput, shapeDumpRead } from "./dumps";
 import { AGAIN_CHARS, indentOfFirst, MARKER, norm, words } from "./lines";
@@ -62,11 +52,15 @@ import {
 	isGrid,
 	keepHeadings,
 	type Window,
-	witnessedMask,
+	type Witnessed,
+	witnessedRuns,
 } from "./window";
 
-/** The probe Spotlight scores output lines under: each line's relevance to the agent's current call. */
-export const SHAPE_PROBE: string = shapeProbe;
+/**
+ * The probe Spotlight scores output lines under: each line's relevance to the agent's current call.
+ * Each line is appended right after it, so trailing whitespace (an editor's final newline) is trimmed.
+ */
+export const SHAPE_PROBE: string = shapeProbe.trimEnd();
 
 /** The system-prompt paragraph telling the agent how shaped output reads (read narrowly, batch calls). */
 export const SHAPE_RULE: string = shapeRule.trim();
@@ -95,8 +89,8 @@ const SEEN_RUN = 4;
 const SHORT_SEEN_RUN = 3;
 const SEEN_MARGIN = 80;
 /**
- * A word of the call's intent names a line for keeping when it is in at most this many of the result's lines: a word
- * in more says nothing about which line the agent wants.
+ * A word of the call's intent names a line for a cut to choose first when it is in at most this many of the result's
+ * lines: a word in more says nothing about which line the agent wants.
  */
 const INTENT_LINES = 6;
 /** The valve's budget: a cut result shows about this many characters. */
@@ -185,17 +179,6 @@ interface Base {
 	recovery: boolean;
 }
 
-function withNote(view: View, note: string): View {
-	return { lines: [...view.lines, note], spans: view.spans && [...view.spans, null] };
-}
-
-const foldedNote = (paths: string[]) => {
-	const file = paths.length === 1 ? paths[0] : "FILE";
-	return `[folded: … [lines A-B] are lines A-B of ${file} (read ${file}:A-B)]`;
-};
-const docsNote = (paths: string[]) =>
-	`[sections folded: read ${paths.length === 1 ? paths[0] : "FILE"}:A-B prints one]`;
-
 async function realPath(cwd: string, file: string): Promise<string> {
 	const abs = path.resolve(cwd, file);
 	try {
@@ -215,11 +198,11 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 		let recovery = false;
 		if (SOURCE_PATH.test(input.read.path)) {
 			const o = await outlineRead(run, await realPath(run.cwd, input.read.path));
-			if (o.view) return { view: withNote(o.view, foldedNote(o.paths)), steps: ["outline"], recovery: false };
+			if (o.view) return { view: o.view, steps: ["outline"], recovery: false };
 			recovery = o.recovery;
 		}
 		const doc = await foldReadDoc(run);
-		if (doc) return { view: withNote(doc, docsNote([input.read.path])), steps: ["docs"], recovery };
+		if (doc) return { view: doc, steps: ["docs"], recovery };
 		const dump = await shapeDumpRead(run);
 		if (dump) return { view: dump, steps: ["dump"], recovery };
 		return { view: subject.view, steps: [], recovery };
@@ -232,12 +215,12 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 		const code = await outlineBash(run, text);
 		recovery = code.recovery;
 		if (code.text !== undefined) {
-			text = `${code.text}\n${foldedNote(code.paths)}`;
+			text = code.text;
 			steps.push("outline");
 		}
 		const docs = await foldBashDocs(run, text);
-		if (docs) {
-			text = `${docs.text}\n${docsNote(docs.paths)}`;
+		if (docs !== undefined) {
+			text = docs;
 			steps.push("docs");
 		}
 		if (isTestRun(command)) {
@@ -329,83 +312,70 @@ function commitNote(hidden: readonly string[]): string {
 const seenMarker = (count: number, url: string, [a, z]: [number, number], note = "") =>
 	`… [${count} ${count === 1 ? "line" : "lines"} as shown before${note}: read ${url}:${a}-${z}]`;
 
-/** The footer of a result with numbered gaps (`… [A-B]`) or capped lines: where those numbers are. */
-const cutFooter = (url: string) => `[cut: … [A-B] are lines A-B of ${url} (read ${url}:A-B)]`;
+/**
+ * The last line of a result whose gaps (`… [A-B]`) or capped lines number lines of a saved copy: the copy's URL. The
+ * shape rule in the system prompt says what the numbers mean, so the footer carries only the URL.
+ */
+const cutFooter = (url: string) => `[cut: ${url}]`;
 
 /**
- * Lines no seen-collapse hides: a line holding a word of the call's intent that few lines hold (the agent asked for
- * that line now, beside this result), and for command output its last line, which says how the run ended. An output
- * matching an earlier one but cut short otherwise collapses whole and reads as the earlier run. `named` lists the
- * lines holding such an intent word, `terms` the words, and `missing` the intent's words no line holds.
+ * Lines the call's intent names, which a cut chooses first: those holding a word of the intent that few lines hold
+ * (the agent asked for that line now, beside this result) and, for a word too common to name one, its first and last
+ * lines. A seen-collapse still hides them: the agent has them in its context already, and re-showing seen lines an
+ * intent named cost more than the reads it spared.
  */
-function seenKeeps(
-	run: Run,
-	lines: readonly string[],
-): { keep: boolean[]; named: number[]; terms: string[]; missing: string[] } {
-	const keep = Array.from<boolean>({ length: lines.length }).fill(false);
-	const named: number[] = [];
-	const terms: string[] = [];
-	const missing: string[] = [];
+function intentLines(run: Run, lines: readonly string[]): boolean[] {
+	const named = Array.from<boolean>({ length: lines.length }).fill(false);
 	const asked = words(run.ctx.intent);
-	if (asked.size) {
-		const hits = new Map<string, number[]>();
-		lines.forEach((line, i) => {
-			if (MARKER.test(line)) return;
-			for (const w of words(line)) {
-				if (!asked.has(w)) continue;
-				const at = hits.get(w);
-				if (at) at.push(i);
-				else hits.set(w, [i]);
-			}
-		});
-		for (const [term, at] of hits) {
-			if (at.length > INTENT_LINES) {
-				// Too common to name one line, but newest-first and newest-last output put the latest at an end.
-				keep[at[0]] = true;
-				keep[at[at.length - 1]] = true;
-				continue;
-			}
-			terms.push(term);
-			for (const i of at) {
-				if (!keep[i]) named.push(i);
-				keep[i] = true;
-			}
+	if (!asked.size) return named;
+	const hits = new Map<string, number[]>();
+	lines.forEach((line, i) => {
+		if (MARKER.test(line)) return;
+		for (const w of words(line)) {
+			if (!asked.has(w)) continue;
+			const at = hits.get(w);
+			if (at) at.push(i);
+			else hits.set(w, [i]);
 		}
-		// A word counts as present when any line holds its stem anywhere (`shape` in `#shapeOutput`, `truncat` in
-		// `truncated`): a claim that no line holds it must be true of every spelling a reader would accept.
-		const text = lines.join("\n").toLowerCase();
-		const stems = new Map<string, string>();
-		for (const term of asked) {
-			if (hits.has(term)) continue;
-			const stem = term.slice(0, Math.max(5, term.length - 3));
-			if (!text.includes(stem)) stems.set(stem, term);
+	});
+	for (const at of hits.values()) {
+		if (at.length > INTENT_LINES) {
+			// Too common to name one line, but newest-first and newest-last output put the latest at an end.
+			named[at[0]] = true;
+			named[at[at.length - 1]] = true;
+			continue;
 		}
-		// `truncate` and `truncation` miss as `trunc…` and `truncat…`: the shorter stem says both.
-		for (const [stem, shown] of stems) {
-			if (![...stems.keys()].some(other => other !== stem && stem.startsWith(other))) missing.push(shown);
-		}
+		for (const i of at) named[i] = true;
 	}
-	if (!run.input.read) {
-		for (let i = lines.length - 1; i >= 0; i--) {
-			if (!lines[i].trim() || MARKER.test(lines[i])) continue;
-			keep[i] = true;
-			break;
-		}
-	}
-	return { keep, named, terms, missing };
+	return named;
 }
 
-/** `mask` without the runs whose text (newlines included) is shorter than their marker plus {@link SEEN_MARGIN}. */
-function payingRuns(lines: readonly string[], mask: readonly boolean[]): boolean[] {
-	const out = [...mask];
+/**
+ * Lines no seen-collapse hides: for command output, its last line, which says how the run ended. An output matching
+ * an earlier one but cut short otherwise collapses whole and reads as the earlier run.
+ */
+function seenKeeps(run: Run, lines: readonly string[]): boolean[] {
+	const keep = Array.from<boolean>({ length: lines.length }).fill(false);
+	if (run.input.read) return keep;
+	for (let i = lines.length - 1; i >= 0; i--) {
+		if (!lines[i].trim() || MARKER.test(lines[i])) continue;
+		keep[i] = true;
+		break;
+	}
+	return keep;
+}
+
+/** `seen.mask` without the runs whose text (newlines included) is shorter than their marker plus {@link SEEN_MARGIN}. */
+function payingRuns(lines: readonly string[], seen: Witnessed): boolean[] {
+	const out = [...seen.mask];
 	for (let i = 0; i < lines.length;) {
 		if (!out[i]) {
 			i++;
 			continue;
 		}
-		let j = i;
-		let chars = 0;
-		while (j < lines.length && out[j]) chars += lines[j++].length + 1;
+		let j = i + 1;
+		let chars = lines[i].length + 1;
+		while (j < lines.length && out[j] && !seen.starts[j]) chars += lines[j++].length + 1;
 		if (chars < seenMarker(j - i, COUNTED_COPY, [i + 1, j]).length + 1 + SEEN_MARGIN) out.fill(false, i, j);
 		i = j;
 	}
@@ -417,8 +387,9 @@ function payingRuns(lines: readonly string[], mask: readonly boolean[]): boolean
  * collapsed to one marker naming the read that brings the lines back.
  */
 async function collapseSeen(run: Run, view: View, steps: string[]): Promise<View> {
-	const { keep } = seenKeeps(run, view.lines);
-	const mask = payingRuns(view.lines, witnessedMask(view.lines, run.state.seen, SHORT_SEEN_RUN, keep));
+	const keep = seenKeeps(run, view.lines);
+	const seen = witnessedRuns(view.lines, run.state.seen, SHORT_SEEN_RUN, keep);
+	const mask = payingRuns(view.lines, seen);
 	if (!mask.includes(true)) return view;
 	noteWhy(
 		run,
@@ -436,8 +407,8 @@ async function collapseSeen(run: Run, view: View, steps: string[]): Promise<View
 			i++;
 			continue;
 		}
-		let j = i;
-		while (j < view.lines.length && mask[j]) j++;
+		let j = i + 1;
+		while (j < view.lines.length && mask[j] && !seen.starts[j]) j++;
 		lines.push(
 			`${run.input.read ? indentOfFirst(view.lines.slice(i, j)) : ""}${seenMarker(j - i, target.url, runLines(target.spans, i, j), commitNote(view.lines.slice(i, j)))}`,
 		);
@@ -496,8 +467,8 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	}
 	if (again) bump(run, "reasks");
 
-	const { keep, named, terms, missing } = seenKeeps(run, lines);
-	const witnessed = witnessedMask(lines, state.seen, again ? Math.min(SEEN_RUN, 2) : SEEN_RUN, keep);
+	const keep = seenKeeps(run, lines);
+	const { mask: witnessed, starts } = witnessedRuns(lines, state.seen, again ? Math.min(SEEN_RUN, 2) : SEEN_RUN, keep);
 	const width = lines.map(l => (!again && l.length > MAX_LINE ? LINE_KEEP + 36 : l.length));
 	let shown = 0;
 	lines.forEach((_, i) => {
@@ -514,18 +485,15 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	const report =
 		input.tool === "task" ||
 		input.tool === "wait" ||
-		Object.hasOwn(EDIT_TOOLS, input.tool) ||
+		input.tool === "edit" ||
+		input.tool === "write" ||
+		input.tool === "ast_edit" ||
 		(input.tool === "bash" && runsAgent(command));
-	// A diff is reviewed whole: each cut one a review needed its hidden lines (4 of 4).
+	// A diff is reviewed whole: each cut one a review needed its hidden lines (4 of 4). Searches and filtered commands
+	// get no such pass: cut, 2% of `grep` results and 11% of filtered commands were read back, costing a fraction of
+	// what showing them whole up to 12k added.
 	const diff = isDiff(input.read?.lines ?? lines);
-	// Lines the agent already picked (a search, a filtered command): a cut one needed its hidden lines 6 of 8 times
-	// and maybe the other 2, so a cut pays only past ~15k chars.
-	const narrowed =
-		input.tool === "grep" ||
-		input.tool === "find" ||
-		input.tool === "glob" ||
-		(input.tool === "bash" && narrowsOutput(command));
-	const exempt = ((folded || sourceRead || report || diff || narrowed) && shown <= EXEMPT_MAX) || isGrid(lines);
+	const exempt = ((folded || sourceRead || report || diff) && shown <= EXEMPT_MAX) || isGrid(lines);
 	const cut = !again && !exempt && shown > VALVE_OVER * scale * (program ? PROGRAM_SCALE : 1);
 	// Scalars unwrapped above no longer equal their base lines; the view's own lines still do.
 	const origin = viewOrigin(run, b.view) ?? alignedTo(run, b.view.lines);
@@ -538,9 +506,14 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		const spot = await lineScores(run, lines, origin);
 		const density = densityScores(lines, spot);
 		uniform = input.read ? undefined : uniformShape(lines, witnessed);
+		// The lines the call asks for: those its intent names and command output's last line.
+		const asked = intentLines(run, lines).map((named, i) => named || keep[i]);
 		const forced = lines.map(
 			(l, i) =>
-				(MARKER.test(l) && l.length < 200) || keep[i] || uniform?.differs[i] === true || uniform?.edges[i] === true,
+				(MARKER.test(l) && l.length < 200) ||
+				asked[i] ||
+				uniform?.differs[i] === true ||
+				uniform?.edges[i] === true,
 		);
 		// Chosen first: lines the intent names and the bodies the outline opened because the conversation names them
 		// (what the agent asked for) and, in uniform output, the lines that differ (the news); then earlier shaping's
@@ -552,15 +525,15 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		};
 		// Within a tier Spotlight's rank decides, so position alone never picks among equals.
 		const scores = density.map((s, i) =>
-			keep[i] || uniform?.differs[i] ? 30 + s : namedBody(i) ? 20 + s : forced[i] ? 10 + s : s,
+			asked[i] || uniform?.differs[i] ? 30 + s : namedBody(i) ? 20 + s : forced[i] ? 10 + s : s,
 		);
 		// A body the conversation names is what the agent came for: the window grows to hold it, up to the size a
 		// source read is shown whole at.
-		let named = 0;
+		let bodies = 0;
 		lines.forEach((_, i) => {
-			if (namedBody(i)) named += width[i] + 1;
+			if (namedBody(i)) bodies += width[i] + 1;
 		});
-		budget = Math.min(Math.max(EXEMPT_MAX, WINDOW_BUDGET * scale), WINDOW_BUDGET * scale + named);
+		budget = Math.min(Math.max(EXEMPT_MAX, WINDOW_BUDGET * scale), WINDOW_BUDGET * scale + bodies);
 		const chosen = frameLines(width, lines, witnessed, scores, {
 			budget,
 			// Neighbours of a line that differs in uniform output are routine lines themselves.
@@ -626,8 +599,9 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 			i++;
 			continue;
 		}
-		let j = i;
-		while (j < lines.length && !show(j)) j++;
+		let j = i + 1;
+		// Back to back seen runs are two passages of the context: one marker would read as one.
+		while (j < lines.length && !show(j) && !(starts[j] && witnessed[j - 1])) j++;
 		// A run the window hid holds a line not seen before, short ones included: it is a gap, not "as shown before".
 		let fresh = false;
 		for (let k = i; k < j; k++) {
@@ -685,29 +659,8 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 			outSpans.push(null);
 		}
 	}
-	// What a cut means for the intent's words: every line naming a rare one is shown, and none holds the missing ones.
-	// Saying so spares the agent a read to check the gaps.
-	if (hidden) {
-		const quoted = (ws: readonly string[]) =>
-			`${ws
-				.slice(0, 4)
-				.map(w => `"${w}"`)
-				.join(", ")}${ws.length > 4 ? ", …" : ""}`;
-		const said: string[] = [];
-		if (terms.length && named.every(i => show(i))) said.push(`every line naming ${quoted(terms)} is shown`);
-		if (missing.length) {
-			// A tool that stopped at its own result limit returned only part of what exists.
-			const limited = lines.some(l => /\blimit reached\]?$/i.test(l.trim()));
-			said.push(
-				`no line contains any spelling of ${quoted(missing)}${limited ? " (of those the tool returned before its limit)" : ""}`,
-			);
-		}
-		if (said.length) {
-			out.push(`[intent: ${said.join("; ")}]`);
-			outSpans.push(null);
-		}
-	}
-	if (bare || shortened) {
+	// A read's numbers are its file's own lines, which the shape rule says: only a saved copy needs naming.
+	if ((bare || shortened) && !target.spans) {
 		out.push(cutFooter(target.url));
 		outSpans.push(null);
 	}

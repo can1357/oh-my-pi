@@ -51,28 +51,35 @@ mod mem_store;
 mod packed_names;
 pub mod signal;
 pub mod snapshot;
+pub mod socket;
 pub mod store;
+pub mod term;
 mod text;
+pub mod trace;
 mod vm;
 pub mod zshopt;
 
 pub mod pattern;
 pub mod syntax;
 
+/// zsh/newuser's startup check: the `newuser` scripts an interactive zsh
+/// sources after `/etc/zshenv` when the user has no startup files.
+pub use crate::bash::vm::newuser_startup_scripts;
 pub use crate::bash::{
 	diag::Diag,
 	engine::{Engine, EngineConfig},
 	error::{ExtError, Incompatibility, RestoreError, ShellError},
 	event::{
-		CustomEvent, Event, EventData, EventKind, EventMask, NodeRef, Origin, SpanRef, WaitKey,
+		CompiledUnit, CustomEvent, Event, EventData, EventKind, EventMask, EventSink, NodeRef,
+		Origin, SpanRef, WaitKey,
 	},
-	fd::{BadFd, FdRef},
+	fd::{BadFd, FdFlags, FdRef},
 	fs::{DirEntry, DirIter, File, FileKind, Fs, FsPending, FsPoll, OpenFlags, Stat},
 	host::{
 		ChildRedir, ChildRedirs, CpuTimes, Deadline, EnvView, ExitStatus, ExtProc, Host, Invocation,
-		Lineage, OsHandle, PgroupSpec, PipeMirror, PipeTap, ResolveCtx, Resolved, Rlimit,
-		SpawnFuture, SpawnSpec, StdFd, StdioSpec, SystemTimeLike, Task, Timer, TtyInfo, UserInfo,
-		Verdict, Via,
+		Lineage, Login, Logins, OsHandle, PgroupSpec, PipeMirror, PipeTap, ProcEvent, ResolveCtx,
+		Resolved, Rlimit, SpawnFuture, SpawnSpec, StdFd, StdioSpec, SystemTimeLike, Task, Timer,
+		TtyInfo, UserInfo, Verdict, Via,
 	},
 	ids::{
 		AstNodeId, CallId, CmdTag, Dialect, IntrinsicId, JobId, ModeId, NativeRef, Platform, RunId,
@@ -81,9 +88,11 @@ pub use crate::bash::{
 	mem_store::MemStore,
 	signal::{SigSet, SigTarget, Signal},
 	snapshot::{ExternalizeReport, Lost, RestoreOpts, RestoreReport},
+	socket::{Accepted, IpFamily, ListenError, ListenStage, SockAddr, Sockets},
 	store::{Attrs, StateStore, StoreError, VarValue},
+	term::{CtlChar, Pty, SetWhen, Shtty, TermFlag, Terminal, Termios},
 	vm::{
-		Budget, CallOutcome, ControlHandle, Cx, IoPoll, RunStdio, Script, Shell, ShellApi, ShellInit,
-		Step, ToolCall, VprocSel, WakeToken, vproc_layout,
+		Budget, CallOutcome, ControlHandle, Cx, IoPoll, Profile, RunStdio, Script, Shell, ShellApi,
+		ShellInit, Step, ToolCall, VprocSel, WakeToken, vproc_layout,
 	},
 };

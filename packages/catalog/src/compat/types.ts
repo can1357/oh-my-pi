@@ -768,6 +768,12 @@ export interface RequestPolicy {
 	/** Default `tool_choice` to `auto` when the request carries tools and the caller picks none. */
 	responsesToolChoiceAuto?: boolean;
 	googleThinking?: "level" | "level-medium";
+	/** Send no `temperature`, `topP` or `topK` in `generationConfig`. */
+	googleOmitSampling?: boolean;
+	/** Send `generationConfig.maxOutputTokens` as the model's output maximum. */
+	googlePinMaxOutputTokens?: boolean;
+	/** Replay the model's own turns as the native Gemini content it streamed. */
+	googleNativeReplay?: boolean;
 	/** The route locks its upstream for the session (`x-provider-routing-source: session_lock`). */
 	routingSessionLock?: boolean;
 }
