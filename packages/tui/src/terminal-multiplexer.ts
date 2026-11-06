@@ -1,4 +1,5 @@
 import { cmuxMultiplexer } from "./multiplexers/cmux";
+import { ghosttyMultiplexer } from "./multiplexers/ghostty";
 import { herdrMultiplexer } from "./multiplexers/herdr";
 import { orcaMultiplexer } from "./multiplexers/orca";
 import { screenMultiplexer } from "./multiplexers/screen";
@@ -19,6 +20,7 @@ const registry = [
 	cmuxMultiplexer,
 	wmuxMultiplexer,
 	orcaMultiplexer,
+	ghosttyMultiplexer,
 ] as const satisfies readonly TerminalMultiplexerModule[];
 
 /** Terminal multiplexers omp recognizes. */

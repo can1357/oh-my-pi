@@ -108,6 +108,17 @@ describe("terminal multiplexer classification", () => {
 		expect(classifyTerminalMultiplexer({ ORCA_WORKTREE_ID: "worktree-1" })).toBe(null);
 	});
 
+	it("classifies Ghostty after nested multiplexers without moving it off the direct render path", () => {
+		expect(classifyTerminalMultiplexer({ TERM_PROGRAM: "ghostty" })).toBe("ghostty");
+		expect(hasTerminalMultiplexerSession("ghostty", { TERM_PROGRAM: "ghostty" })).toBe(true);
+		expect(hasTerminalMultiplexerSession("ghostty", { TERM_PROGRAM: "iTerm.app" })).toBe(false);
+		expect(isInsideTerminalMultiplexer({ TERM_PROGRAM: "ghostty" })).toBe(false);
+		expect(classifyTerminalMultiplexer({ TERM_PROGRAM: "ghostty", TMUX: "session" })).toBe("tmux");
+		expect(classifyTerminalMultiplexer({ TERM_PROGRAM: "ghostty", ZELLIJ: "session" })).toBe("zellij");
+		expect(classifyTerminalMultiplexer({ TERM_PROGRAM: "ghostty", TERM: "tmux-256color" })).toBe("tmux");
+		expect(classifyTerminalMultiplexer({ TERM_PROGRAM: "ghostty", TERM: "screen-256color" })).toBe("screen");
+	});
+
 	it("recognizes session markers through the generic render-path gate", () => {
 		expect(isInsideTerminalMultiplexer({ HERDR_PANE_ID: "p1" })).toBe(true);
 		expect(isInsideTerminalMultiplexer({ WMUX: "1" })).toBe(true);
