@@ -30,9 +30,11 @@ export const HANDOFF_DRAIN_IDLE_MS = 5000;
 
 /**
  * Backstop on {@link drainTerminalHandoff}'s total wait, for a terminal that
- * reads just fast enough to look alive. Past either bound the handoff is
- * released and its bytes abandoned, exactly as a stop that could not drain did
- * before the handoff existed.
+ * reads just fast enough to look alive. It ends a drain that is still making
+ * progress, so a slow enough reader loses the rest: measured, one taking about
+ * 4 KiB every 500 ms had 229,007 of 262,144 bytes when it ended. Past either
+ * bound the handoff is released and its bytes abandoned, exactly as a stop
+ * that could not drain did before the handoff existed.
  */
 export const HANDOFF_DRAIN_DEADLINE_MS = 30_000;
 
