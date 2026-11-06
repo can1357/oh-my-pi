@@ -47,6 +47,7 @@ import {
 	type UsageRoutingScope,
 } from "../usage-governor/types";
 import { fingerprintBearer } from "./bearer-fingerprint";
+import type { CredentialBlocks } from "./blocks";
 import type { AccountPolicies } from "./policy";
 import type { CredentialPool, StoredCredential } from "./pool";
 import { oauthAccountKey, type AuthCredential, type UsageApi } from "./types";
@@ -66,6 +67,8 @@ export interface CredentialGovernorSource {
 	readonly policies: AccountPolicies;
 	readonly affinity?: { permits(provider: string, sessionId: string, credentialId: number): boolean };
 	readonly permitsOAuthFingerprint?: (provider: string) => boolean;
+	/** Persisted block reads, nonmutating. Absent or undefined answers make a row unknown; it is never counted. */
+	readonly blocks?: Pick<CredentialBlocks, "isBlockedSnapshot">;
 	readonly permitsRoute?: (binding: UsageRouteBinding, request: UsageAdmissionRequest) => boolean;
 	readonly strategies: RankingStrategyResolver;
 }
@@ -176,6 +179,14 @@ export class CredentialGovernor implements GovernorApi {
 				if (!source.affinity.permits(target.provider, request.sessionId, row.id)) {
 					return { ...unknown, eligibility: "ineligible" };
 				}
+				const blocked = source.blocks?.isBlockedSnapshot(
+					target.provider,
+					row.credential.type,
+					row.id,
+					target.modelId,
+				);
+				if (blocked === undefined) return unknown;
+				if (blocked) return { ...unknown, eligibility: "ineligible" };
 				if (target.accountIds !== undefined && row.credential.type === "oauth") {
 					const account = oauthAccountKey(row.credential);
 					if (account === undefined || !target.accountIds.includes(account)) {
@@ -424,27 +435,22 @@ export class CredentialGovernor implements GovernorApi {
 		credential: AuthCredential,
 		usage: UsageReport,
 		context: CredentialRankingContext,
-		baseUrl?: string,
+		_baseUrl?: string,
 	): { measured: boolean; pacedUntil?: number } {
 		if (!this.active) return { measured: false };
 		const now = this.#now();
 		const source = this.#source();
-		if (credential.type === "api_key") {
-			const resolved = source.usage.resolvedUsageCredential?.(provider, credential);
-			const adapter = source.usage.providerFor(provider);
-			const ids =
-				resolved && adapter?.governorAllowance?.({ provider, credential: resolved, baseUrl }, usage, context);
-			if (
-				!ids?.length ||
-				ids.some(id => {
-					const limit = usage.limits.find(item => item.id === id);
-					return !limit?.observedAt || limit.observedAt > now || now - limit.observedAt > GOVERNOR_STALE_MS;
-				})
-			)
-				return { measured: false };
-		}
+		if (credential.type === "api_key" && (!context.modelId || !source.strategies(provider)))
+			return { measured: false };
 		const applicable = this.#applicable(provider, credential, usage, context, now);
 		if (applicable.length === 0) return { measured: false };
+		if (
+			credential.type === "api_key" &&
+			applicable.some(
+				window => !window.fetchedAt || window.fetchedAt > now || now - window.fetchedAt > GOVERNOR_STALE_MS,
+			)
+		)
+			return { measured: false };
 		const reserve = this.#reserveFor(source, provider, credential, false);
 		const evaluated = this.#inspect(
 			applicable.map(window => ({ ...window, reserve })),
@@ -561,21 +567,15 @@ export class CredentialGovernor implements GovernorApi {
 		const context = { modelId: request.modelId };
 		const applicable = this.#applicable(provider, row.credential, report, context, now, credential);
 		if (applicable.length === 0) return undefined;
-		if (row.credential.type === "api_key") {
-			const adapter = source.usage.providerFor(provider);
-			const ids =
-				credential &&
-				adapter?.governorAllowance?.({ provider, credential, baseUrl: request.baseUrl }, report, context);
-			if (
-				!ids?.length ||
-				ids.some(id => {
-					const limit = report.limits.find(item => item.id === id);
-					return !limit?.observedAt || limit.observedAt > now || now - limit.observedAt > GOVERNOR_STALE_MS;
-				}) ||
-				applicable.some(window => !window.limitId || !ids.includes(window.limitId))
-			)
-				return undefined;
-		}
+		if (
+			row.credential.type === "api_key" &&
+			(!request.modelId ||
+				!source.strategies(provider) ||
+				applicable.some(
+					window => !window.fetchedAt || window.fetchedAt > now || now - window.fetchedAt > GOVERNOR_STALE_MS,
+				))
+		)
+			return undefined;
 		const interactive = request.context?.interactive === true;
 		const reserve = this.#reserveFor(source, provider, row.credential, interactive);
 		return { provider, row, windows: applicable.map(window => ({ ...window, reserve })) };

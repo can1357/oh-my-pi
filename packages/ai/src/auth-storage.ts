@@ -58,7 +58,7 @@ import { DEFAULT_USAGE_REQUEST_TIMEOUT_MS, UsageCache } from "./auth/usage-cache
 import type { UsageLogger } from "./usage";
 import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
 import { CredentialGovernor } from "./auth/governor";
-import { configureUsageAdmission, currentUsageAdmission } from "./usage-governor/admission";
+import { clearUsageAdmission } from "./usage-governor/admission";
 import { DISABLED_USAGE_GOVERNOR_CONFIG, type GovernorApi } from "./usage-governor/types";
 
 export {
@@ -230,8 +230,7 @@ export class AuthStorage {
 	 * keeps the store open until it has saved the rotated token.
 	 */
 	close(): void {
-		const governor = this.#backend.governor;
-		if (currentUsageAdmission() === governor) configureUsageAdmission(undefined);
+		clearUsageAdmission(this.#backend.governor);
 		this.#backend.close();
 	}
 
@@ -269,6 +268,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			source: () => ({
 				pool: this.#modules.pool,
 				affinity: this.#modules.sessions,
+				blocks: this.#modules.blocks,
 				usage: this.#modules.usage,
 				policies: this.#policies,
 				strategies: options.rankingStrategyResolver ?? defaultRankingStrategy,

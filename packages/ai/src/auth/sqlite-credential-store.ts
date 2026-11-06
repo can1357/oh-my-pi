@@ -1649,6 +1649,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 
 	getCredentialBlockScopes(credentialId: number, providerKey: string): Map<string, number> {
 		this.#sweepExpiredCredentialBlocks();
+		return this.getCredentialBlockScopesSnapshot(credentialId, providerKey);
+	}
+
+	getCredentialBlockScopesSnapshot(credentialId: number, providerKey: string): Map<string, number> {
 		const rows = this.#listCredentialBlockScopesStmt.all(credentialId, providerKey, Date.now()) as Array<
 			Pick<CredentialBlockRow, "block_scope" | "blocked_until_ms">
 		>;

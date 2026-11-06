@@ -151,7 +151,7 @@ export class CredentialBlocks implements BlocksApi {
 	): boolean | undefined {
 		if (this.#deps.health.damaged) return undefined;
 		const store = this.#deps.store;
-		if (!store.getCredentialBlockScopes && !store.getCredentialBlock) return undefined;
+		if (!store.getCredentialBlockScopesSnapshot) return undefined;
 		const providerKey = providerTypeKey(provider, type);
 		const strategy = this.#deps.strategies(provider);
 		const context = { modelId };
@@ -162,15 +162,13 @@ export class CredentialBlocks implements BlocksApi {
 		];
 		const now = Date.now();
 		try {
-			const persisted = store.getCredentialBlockScopes?.(credentialId, providerKey);
+			const persisted = store.getCredentialBlockScopesSnapshot(credentialId, providerKey);
 			for (const scope of scopes) {
 				if (
 					(this.#credentialBackoff.get(scopedBackoffKey(providerKey, scope))?.get(credentialId)?.until ?? 0) > now
 				)
 					return true;
-				const expiry = persisted
-					? persisted.get(scope)
-					: store.getCredentialBlock?.(credentialId, providerKey, scope);
+				const expiry = persisted.get(scope);
 				if (expiry !== undefined && expiry > now) return true;
 			}
 			return false;

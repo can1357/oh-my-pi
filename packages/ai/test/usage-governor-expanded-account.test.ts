@@ -220,7 +220,9 @@ describe("stored coding-plan account admission", () => {
 		for (const kind of ["metered", "unknown"] as const) {
 			w.allowance = kind;
 			expect((await w.evaluate()).map(a => a.allowance)).toEqual(["unknown", "unknown"]);
-			expect(await w.admit(rowA.id, "account-a")).toBeUndefined();
+			const grant = await w.admit(rowA.id, "account-a");
+			expect(grant?.id).toBeDefined();
+			if (grant) w.auth.governor.settle(grant.id, "not-sent");
 		}
 		w.allowance = "included";
 		for (const observedAt of [null, Date.now() - STALE, Date.now() + STALE]) {
