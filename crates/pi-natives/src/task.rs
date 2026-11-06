@@ -40,7 +40,7 @@ use pi_shell::cancel as core_cancel;
 pub use pi_shell::cancel::{AbortReason, AbortToken};
 use pi_vfs::{BlockingFs, Fs};
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::{
 	memory::{Settled, native_work},
@@ -532,7 +532,7 @@ where
 	let cancellation = CancellationToken::new();
 	let _cancel_on_exit = cancellation.clone().drop_guard();
 	let fs = fs.with_cancellation(cancellation.clone());
-	let mut worker = FS_RUNTIME.spawn(async move {
+	let spawned = FS_RUNTIME.spawn(async move {
 		let _guard = profile_region(tag);
 		let _work = native_work();
 		let mut work = pin!(work(fs));
@@ -541,6 +541,11 @@ where
 		});
 		AssertUnwindSafe(scoped).catch_unwind().await
 	});
+	// Dropping this future must stop the walk, which is what base did when the
+	// work was polled inline. A bare `JoinHandle` *detaches* on drop, so the
+	// walk ran on after its caller was gone — a host-side drop (the napi
+	// promise going away, env teardown) stopped nothing.
+	let mut worker = AbortOnDropHandle::new(spawned);
 	tokio::select! {
 		biased;
 		joined = &mut worker => Some(match joined {
@@ -736,6 +741,68 @@ mod tests {
 			"filesystem work spawned a child onto the host scheduler worker, which is where the \
 			 syscalls that park a thread actually run"
 		);
+	}
+
+	/// Dropping the caller's future stops the walk. Base got this for free: the
+	/// work was polled inline, so dropping the future dropped the work. Moving
+	/// the work onto another runtime loses it unless the handle is held with an
+	/// abort-on-drop guard, because a bare `JoinHandle` *detaches* on drop —
+	/// found in review at `3510dd16`, where a walk kept running after its host
+	/// was gone.
+	///
+	/// This covers a walk that can be preempted, i.e. one that yields between
+	/// directories. A walk parked inside a stalled `getdents64` is bounded by
+	/// the device, not by this: `pi_walker`'s native list is an unguarded
+	/// `libc::syscall` loop and nothing in the process can interrupt it.
+	#[test]
+	fn dropping_the_caller_stops_the_walk() {
+		use std::{
+			sync::{
+				Arc,
+				atomic::{AtomicBool, Ordering},
+			},
+			time::Duration,
+		};
+
+		let host = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.unwrap();
+		let started = Arc::new(AtomicBool::new(false));
+		let ran_on = Arc::new(AtomicBool::new(false));
+		let started_probe = Arc::clone(&started);
+		let ran_on_probe = Arc::clone(&ran_on);
+
+		host.block_on(async move {
+			let walk = Box::pin(run_filesystem_future(
+				"dropped",
+				CancelToken::new(None, None),
+				Fs::native(),
+				move |_fs| async move {
+					started_probe.store(true, Ordering::SeqCst);
+					// The yield point a walker has between directories.
+					tokio::time::sleep(Duration::from_millis(200)).await;
+					ran_on_probe.store(true, Ordering::SeqCst);
+					Ok(1_u32)
+				},
+			));
+			let mut walk = Some(walk);
+			// Start it, then let go while the work is still in flight.
+			tokio::select! {
+				_ = walk.as_mut().unwrap() => panic!("the walk finished before it was dropped"),
+				() = tokio::time::sleep(Duration::from_millis(60)) => {},
+			}
+			assert!(started.load(Ordering::SeqCst), "the walk never started");
+			drop(walk.take());
+
+			tokio::time::sleep(Duration::from_millis(400)).await;
+			assert!(
+				!ran_on.load(Ordering::SeqCst),
+				"the walk ran on after its caller was dropped, so a torn-down host leaves filesystem \
+				 work running"
+			);
+		});
 	}
 
 	#[test]
