@@ -105,7 +105,8 @@ fn zsh_mod_attr_extended_attributes() {
 		"zmodload zsh/attr zsh/stat
 print > f; zsetattr f user.k val; echo $?; zgetattr f user.k; zgetattr f user.k v; print -r -- $v
 zlistattr f l; print -l ${l:#com.apple.*}; zdelattr f user.k; echo $?; zgetattr f user.k; echo $?
-ln -s f l2; zsetattr -h l2 user.s 1; echo $?; zlistattr -h l2 a; print -l ${a:#com.apple.*}; zlistattr l2 b; print -l x ${b:#com.apple.*}
+ln -s f l2; zsetattr -h l2 user.s 1; echo $?; zlistattr -h l2 a; print -l ${a:#com.apple.*}; \
+		 zlistattr l2 b; print -l x ${b:#com.apple.*}
 zsetattr f user.e \"\"; zgetattr f user.e; echo $?; v=x; zgetattr f user.e v; echo ${+v}
 zdelattr f user.e user.nope user.k; echo $?
 zstat -L +mode l2; zstat -L -s +mode l2",

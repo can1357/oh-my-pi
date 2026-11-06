@@ -446,6 +446,143 @@ fn compile(text: &[u8]) -> Expr {
 	Expr { src: BString::from(text), root }
 }
 
+/// Format native arithmetic syntax for the trace's Python-like presentation.
+///
+/// This consumes the same compiled expression as evaluation, including native
+/// integer/base parsing and precedence. Indexed variables deliberately stay
+/// raw: deciding whether their subscript is arithmetic or an associative key
+/// needs runtime declarations, which a static presentation must not guess.
+pub(crate) fn pseudo(text: &[u8]) -> Option<String> {
+	if text.trim_ascii().is_empty() {
+		return Some("0".into());
+	}
+	fn lvalue(lv: &Lv) -> Option<String> {
+		if lv.index.is_some() {
+			return None;
+		}
+		core::str::from_utf8(&lv.name).ok().map(str::to_owned)
+	}
+	fn binary(op: Bin, a: String, b: String) -> String {
+		let symbol = match op {
+			Bin::Set => return format!("assign({a}, {b})"),
+			// Python / and % disagree with signed bash division/remainder.
+			Bin::Div => return format!("trunc_div({a}, {b})"),
+			Bin::Mod => return format!("trunc_mod({a}, {b})"),
+			Bin::Mul => "*",
+			Bin::Add => "+",
+			Bin::Sub => "-",
+			Bin::Shl => "<<",
+			Bin::Shr => ">>",
+			Bin::Lt => "<",
+			Bin::Le => "<=",
+			Bin::Gt => ">",
+			Bin::Ge => ">=",
+			Bin::Eq => "==",
+			Bin::Ne => "!=",
+			Bin::BitAnd => "&",
+			Bin::BitXor => "^",
+			Bin::BitOr => "|",
+		};
+		format!("({a} {symbol} {b})")
+	}
+	fn format_node(node: &Node) -> Option<String> {
+		Some(match node {
+			Node::Num(value) => value.to_string(),
+			Node::Fail(_) => return None,
+			Node::Var(lv) => lvalue(lv)?,
+			Node::Seq(nodes) => {
+				let values = nodes.iter().map(format_node).collect::<Option<Vec<_>>>()?;
+				format!("value_last({})", values.join(", "))
+			},
+			Node::PostInc(lv, delta) | Node::PreInc(lv, delta) => {
+				let position = if matches!(node, Node::PostInc(..)) {
+					"post"
+				} else {
+					"pre"
+				};
+				let operation = match delta {
+					1 => "inc",
+					-1 => "dec",
+					_ => return None,
+				};
+				format!("{position}_{operation}({})", lvalue(lv)?)
+			},
+			Node::Assign { lv, op, rhs, .. } => {
+				let target = lvalue(lv)?;
+				let rhs = format_node(rhs)?;
+				if *op == Bin::Set {
+					format!("assign({target}, {rhs})")
+				} else {
+					// Keep one lvalue evaluation and the assignment's returned
+					// value.
+					let name = match op {
+						Bin::Mul => "mul",
+						Bin::Div => "trunc_div",
+						Bin::Mod => "trunc_mod",
+						Bin::Add => "add",
+						Bin::Sub => "sub",
+						Bin::Shl => "shl",
+						Bin::Shr => "shr",
+						Bin::Lt => "lt",
+						Bin::Le => "le",
+						Bin::Gt => "gt",
+						Bin::Ge => "ge",
+						Bin::Eq => "eq",
+						Bin::Ne => "ne",
+						Bin::BitAnd => "bit_and",
+						Bin::BitXor => "bit_xor",
+						Bin::BitOr => "bit_or",
+						Bin::Set => unreachable!(),
+					};
+					format!("assign_{name}({target}, {rhs})")
+				}
+			},
+			Node::Nest { inner, .. } => format_node(inner)?,
+			Node::Unary(op, inner) => {
+				let value = format_node(inner)?;
+				match op {
+					Un::Not => format!("int(not ({value}))"),
+					Un::BitNot => format!("(~({value}))"),
+					Un::Neg => format!("(-({value}))"),
+				}
+			},
+			Node::Pow { base, exp, .. } => {
+				format!("({} ** {})", format_node(base)?, format_node(exp)?)
+			},
+			Node::Binary(first, rest) => {
+				let mut value = format_node(first)?;
+				for (op, _, rhs) in rest {
+					value = binary(*op, value, format_node(rhs)?);
+				}
+				value
+			},
+			Node::And(first, rest) | Node::Or(first, rest) => {
+				let connector = if matches!(node, Node::And(..)) {
+					" and "
+				} else {
+					" or "
+				};
+				let mut values = Vec::with_capacity(rest.len() + 1);
+				values.push(format!("bool({})", format_node(first)?));
+				for rhs in rest {
+					values.push(format!("bool({})", format_node(rhs)?));
+				}
+				format!("int({})", values.join(connector))
+			},
+			Node::Cond(parts) => {
+				let [condition, yes, no] = &**parts;
+				format!(
+					"({} if {} else {})",
+					format_node(yes)?,
+					format_node(condition)?,
+					format_node(no)?
+				)
+			},
+		})
+	}
+	format_node(&compile(text.trim_ascii()).root)
+}
+
 /// bash's `VALID_NUMCHAR`: a digit of some base up to 64.
 const fn is_numchar(c: u8) -> bool {
 	c.is_ascii_alphanumeric() || c == b'_' || c == b'@'
@@ -1312,6 +1449,31 @@ impl Walk<'_> {
 #[cfg(test)]
 mod tests {
 	use std::collections::HashMap as StdMap;
+
+	#[test]
+	fn pseudo_uses_native_numbers_and_precedence() {
+		assert_eq!(pseudo(b"16#ff + 2 * 03").as_deref(), Some("(255 + (2 * 3))"));
+		assert_eq!(pseudo(b"(1+2)*3").as_deref(), Some("((1 + 2) * 3)"));
+		assert_eq!(pseudo(b"2**3**2").as_deref(), Some("(2 ** (3 ** 2))"));
+		assert_eq!(pseudo(b"-7/3").as_deref(), Some("trunc_div((-(7)), 3)"));
+	}
+	#[test]
+	fn pseudo_preserves_side_effect_values_and_short_circuiting() {
+		assert_eq!(pseudo(b"x++, ++x").as_deref(), Some("value_last(post_inc(x), pre_inc(x))"));
+		assert_eq!(pseudo(b"x += y--").as_deref(), Some("assign_add(x, post_dec(y))"));
+		assert_eq!(pseudo(b"x ? y++ : --z").as_deref(), Some("(post_inc(y) if x else pre_dec(z))"));
+		assert_eq!(
+			pseudo(b"x && y || !z").as_deref(),
+			Some("int(bool(int(bool(x) and bool(y))) or bool(int(not (z))))")
+		);
+	}
+	#[test]
+	fn pseudo_rejects_runtime_expansions_indices_and_deferred_errors() {
+		for input in [b"$x".as_slice(), b"a[$i]", b"a[1]", b"0 && (1 +)", b"08"] {
+			assert_eq!(pseudo(input), None, "{input:?}");
+		}
+		assert_eq!(pseudo(b"  ").as_deref(), Some("0"));
+	}
 
 	use super::*;
 

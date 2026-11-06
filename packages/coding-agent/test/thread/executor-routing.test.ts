@@ -36,6 +36,17 @@ import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 const MODEL = "fake/fake-model";
 const TEST_TIMEOUT_MS = 120_000;
+/**
+ * Scripted tasks are sentinels no other prompt text can contain: the session may wrap a task
+ * (a date/cwd reminder prefixed to the first user turn) and sends side requests quoting other
+ * text (one per discovered skill, compressing its description), so neither equality nor a
+ * plain word like "hang" identifies the run's turn.
+ */
+const SCRIPT_ID = Bun.randomUUIDv7("hex");
+const HANG_TASK = `omp-test-scripted-hang-${SCRIPT_ID}`;
+const BG_JOB_TASK = `omp-test-scripted-bg-job-${SCRIPT_ID}`;
+/** In the routed agent's system prompt only, so a request without it is never the run's own turn. */
+const AGENT_MARKER = `omp-test-agent-${SCRIPT_ID}`;
 
 interface ChatMessage {
 	role: string;
@@ -81,9 +92,11 @@ function chunks(reply: Reply): string {
 }
 
 /**
- * Scripted model, by the conversation's last user message: `bg_job` → an async `bash`
- * call; `hang` → no answer until the request is aborted; anything else (including the
- * job's completion notice) → `pong`. A tool result is answered with `tool said: …`.
+ * Scripted model. Only the routed agent's own turns (their system prompt carries
+ * {@link AGENT_MARKER}) are scripted, by their last user message: containing
+ * {@link BG_JOB_TASK} → an async `bash` call; containing {@link HANG_TASK} → no answer until
+ * the request is aborted. A tool result is answered with `tool said: …`; everything else
+ * (the job's completion notice, side requests) → `pong`.
  */
 class FakeModelServer {
 	readonly #server: Bun.Server<undefined>;
@@ -102,7 +115,7 @@ class FakeModelServer {
 		return this.#server.port ?? 0;
 	}
 
-	/** Resolves once a `hang` request is being held. */
+	/** Resolves once a {@link HANG_TASK} request is being held. */
 	hung(): Promise<void> {
 		return this.#hungRequest.promise;
 	}
@@ -146,12 +159,17 @@ class FakeModelServer {
 		const last = messages.at(-1);
 		const lastUser = messages.findLast(message => message.role === "user");
 		const userText = lastUser ? messageText(lastUser.content) : "";
+		const systemText = messages
+			.filter(message => message.role === "system" || message.role === "developer")
+			.map(message => messageText(message.content))
+			.join("\n");
+		const runTurn = systemText.includes(AGENT_MARKER);
 		let reply: Reply = { text: "pong" };
-		if (last?.role === "tool") {
+		if (runTurn && last?.role === "tool") {
 			reply = { text: `tool said: ${messageText(last.content)}` };
-		} else if (userText.includes("bg_job")) {
+		} else if (runTurn && userText.includes(BG_JOB_TASK)) {
 			reply = { tool: "bash", args: { command: "echo bg-done", async: true } };
-		} else if (userText.includes("hang")) {
+		} else if (runTurn && userText.includes(HANG_TASK)) {
 			const held = Promise.withResolvers<void>();
 			this.#hangs.push(held.resolve);
 			request.signal.addEventListener("abort", () => held.resolve(), { once: true });
@@ -180,7 +198,7 @@ function mirrorOf(session: AgentSessionHandle | null | undefined): RemoteAgentSe
 const AGENT: AgentDefinition = {
 	name: "task",
 	description: "routing test agent",
-	systemPrompt: "You are a test agent.",
+	systemPrompt: `You are a test agent (${AGENT_MARKER}).`,
 	source: "bundled",
 	tools: ["read", "bash"],
 };
@@ -377,7 +395,7 @@ describe("subagent runs routed into pooled workers", () => {
 		"runs the child in a worker: main mirror, result, progress, lifecycle frames, cost, async jobs",
 		async () => {
 			const progress: AgentProgress[] = [];
-			const result = await runSubprocess(runOptions("Bg", "bg_job", { onProgress: p => progress.push(p) }));
+			const result = await runSubprocess(runOptions("Bg", BG_JOB_TASK, { onProgress: p => progress.push(p) }));
 
 			expect(result.error).toBeUndefined();
 			expect(result.exitCode).toBe(0);
@@ -422,7 +440,7 @@ describe("subagent runs routed into pooled workers", () => {
 		"aborts the worker run when main's signal aborts",
 		async () => {
 			const controller = new AbortController();
-			const running = runSubprocess(runOptions("Hang", "hang", { signal: controller.signal }));
+			const running = runSubprocess(runOptions("Hang", HANG_TASK, { signal: controller.signal }));
 			await server.hung();
 			controller.abort(new Error("stop from main"));
 			const result = await running;
@@ -472,7 +490,7 @@ describe("subagent runs routed into pooled workers", () => {
 	it(
 		"fails a first run whose worker dies mid-run instead of hanging, naming the worker",
 		async () => {
-			const running = runSubprocess(runOptions("Lost", "hang"));
+			const running = runSubprocess(runOptions("Lost", HANG_TASK));
 			await server.hung();
 			const [worker] = pool.workers();
 			if (!worker) throw new Error("no pooled worker");
@@ -501,7 +519,7 @@ describe("subagent runs routed into pooled workers", () => {
 			const worker = pool.forThread(home);
 			if (!worker) throw new Error("home worker missing");
 
-			const turn = runSubagentFollowUpTurn({ id: "Crash", agent: AGENT, message: "hang", structured: false });
+			const turn = runSubagentFollowUpTurn({ id: "Crash", agent: AGENT, message: HANG_TASK, structured: false });
 			await server.hung();
 			worker.terminate("worker crashed: boom");
 			const failed = await turn;

@@ -60,5 +60,12 @@ pub use crate::sys::{
 };
 pub(crate) use crate::sys::{pump::End, relay::Relays};
 
+/// The C library's `PATH_MAX`, which zsh sizes path buffers by. Windows has
+/// no such limit for the engine's paths, so it takes Linux's.
+#[cfg(unix)]
+pub const PATH_MAX: usize = libc::PATH_MAX as usize;
+#[cfg(not(unix))]
+pub const PATH_MAX: usize = 4096;
+
 #[cfg(test)]
 mod suites;

@@ -630,9 +630,9 @@ const KNOWN_TERMINALS = Object.freeze({
 	// Rex (TERM_PROGRAM=rex / TERM=xterm-rex): only Kitty graphics is confirmed.
 	rex: new TerminalInfo("rex", ImageProtocol.Kitty, true, false),
 	// Tern (Stencil's terminal, `stencil-term`) sets TERM_PROGRAM=tern and
-	// implements Kitty graphics, OSC 8 and OSC 9/99 notifications. Whether omp
-	// renders natively (Tern Surface Protocol) is decided by the `hello`
-	// handshake alone, never by this identity.
+	// implements Kitty graphics (Unicode placeholders included), OSC 8 and
+	// OSC 9/99 notifications. Whether omp renders natively (Tern Surface
+	// Protocol) is decided by the `hello` handshake alone, never by this identity.
 	tern: new TerminalInfo("tern", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99),
 	// Monstar (rockorager/monstar) is a Wayland terminal built on libghostty. It
 	// sets TERM=monstar and answers XTVERSION with `monstar <version>`. It

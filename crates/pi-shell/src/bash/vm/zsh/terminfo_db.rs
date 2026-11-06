@@ -493,7 +493,9 @@ impl<'a> Reader<'a> {
 	fn shorts(&mut self, n: usize) -> Option<Vec<i16>> {
 		let raw = self.take(n.checked_mul(2)?)?;
 		Some(
-			raw.chunks_exact(2)
+			raw.as_chunks::<2>()
+				.0
+				.iter()
 				.map(|c| i16::from_le_bytes([c[0], c[1]]))
 				.collect(),
 		)
@@ -503,19 +505,23 @@ impl<'a> Reader<'a> {
 	fn numbers(&mut self, n: usize, width: usize) -> Option<Vec<i32>> {
 		let raw = self.take(n.checked_mul(width)?)?;
 		Some(if width == 4 {
-			raw.chunks_exact(4)
+			raw.as_chunks::<4>()
+				.0
+				.iter()
 				.map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
 				.collect()
 		} else {
-			raw.chunks_exact(2)
+			raw.as_chunks::<2>()
+				.0
+				.iter()
 				.map(|c| i32::from(i16::from_le_bytes([c[0], c[1]])))
 				.collect()
 		})
 	}
 
 	/// ncurses `even_boundary`: skip a pad byte after an odd count.
-	fn even(&mut self, n: usize) {
-		if n % 2 != 0 {
+	const fn even(&mut self, n: usize) {
+		if !n.is_multiple_of(2) {
 			self.pos += 1;
 		}
 	}
@@ -609,14 +615,12 @@ fn parse(buf: &[u8]) -> Option<TermInfo> {
 		let values = convert_strings(&offsets[..es], table, esl);
 		let base: usize = values.iter().flatten().map(|s| s.len() + 1).sum();
 		let names_table = table.get(base..).unwrap_or_default();
-		let names: Vec<Vec<u8>> = convert_strings(&offsets[es..], names_table, esl)
+		let mut names = convert_strings(&offsets[es..], names_table, esl)
 			.into_iter()
-			.map(Option::unwrap_or_default)
-			.collect();
+			.map(Option::<Vec<u8>>::unwrap_or_default);
 		info.bools.extend(ebools.iter().map(|&b| b == 1));
 		info.nums.extend(enums);
 		info.strs.extend(values);
-		let mut names = names.into_iter();
 		info.ext_bools = names.by_ref().take(eb).collect();
 		info.ext_nums = names.by_ref().take(en).collect();
 		info.ext_strs = names.take(es).collect();
@@ -867,7 +871,7 @@ fn skip_delay(s: &[u8], mut i: usize) -> usize {
 }
 
 /// ncurses `rewrite_sgr`: move `attr` from the front of `s` to its end.
-fn rewrite_sgr(s: &mut Vec<u8>, attr: Option<&[u8]>) {
+fn rewrite_sgr(s: &mut [u8], attr: Option<&[u8]>) {
 	if let Some(attr) = attr
 		&& s.len() > attr.len()
 		&& s.starts_with(attr)
@@ -1043,14 +1047,14 @@ struct Stack<'a> {
 }
 
 impl<'a> Stack<'a> {
-	fn npush(&mut self, x: i32) {
+	const fn npush(&mut self, x: i32) {
 		if self.ptr < STACKSIZE {
 			self.items[self.ptr] = Item { num_type: true, num: x, s: None };
 			self.ptr += 1;
 		}
 	}
 
-	fn npop(&mut self) -> i32 {
+	const fn npop(&mut self) -> i32 {
 		if self.ptr > 0 {
 			self.ptr -= 1;
 			let it = self.items[self.ptr];
@@ -1061,14 +1065,14 @@ impl<'a> Stack<'a> {
 		0
 	}
 
-	fn spush(&mut self, x: Option<&'a [u8]>) {
+	const fn spush(&mut self, x: Option<&'a [u8]>) {
 		if self.ptr < STACKSIZE {
 			self.items[self.ptr] = Item { num_type: false, num: 0, s: x };
 			self.ptr += 1;
 		}
 	}
 
-	fn spop(&mut self) -> &'a [u8] {
+	const fn spop(&mut self) -> &'a [u8] {
 		if self.ptr > 0 {
 			self.ptr -= 1;
 			let it = self.items[self.ptr];
@@ -1385,9 +1389,7 @@ pub fn tparm(cap: &[u8], params: &[TParm<'_>]) -> Vec<u8> {
 	let mut incremented_two = false;
 	let mut cp = 0;
 	while cp < s.len() {
-		if s[cp] != b'%' {
-			out.push(s[cp]);
-		} else {
+		if s[cp] == b'%' {
 			let (ncp, fmt) = parse_format(s, cp + 1);
 			cp = ncp;
 			match at(s, cp) {
@@ -1542,6 +1544,8 @@ pub fn tparm(cap: &[u8], params: &[TParm<'_>]) -> Vec<u8> {
 				b'e' => cp = skip_branch(s, cp, false),
 				_ => {},
 			}
+		} else {
+			out.push(s[cp]);
 		}
 		if at(s, cp) == 0 {
 			break;
@@ -1683,16 +1687,9 @@ pub fn tputs(cap: &[u8]) -> Vec<u8> {
 	let mut out = Vec::with_capacity(s.len());
 	let mut i = 0;
 	while i < s.len() {
-		if s[i] != b'$' {
-			out.push(s[i]);
-		} else {
+		if s[i] == b'$' {
 			i += 1;
-			if at(s, i) != b'<' {
-				out.push(b'$');
-				if at(s, i) != 0 {
-					out.push(s[i]);
-				}
-			} else {
+			if at(s, i) == b'<' {
 				i += 1;
 				let c = at(s, i);
 				if (!c.is_ascii_digit() && c != b'.') || !s[i..].contains(&b'>') {
@@ -1712,7 +1709,14 @@ pub fn tputs(cap: &[u8]) -> Vec<u8> {
 				while matches!(at(s, i), b'*' | b'/') {
 					i += 1;
 				}
+			} else {
+				out.push(b'$');
+				if at(s, i) != 0 {
+					out.push(s[i]);
+				}
 			}
+		} else {
+			out.push(s[i]);
 		}
 		if at(s, i) == 0 {
 			break;

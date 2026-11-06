@@ -21,7 +21,7 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
   - Emulation: `emulate(options?)` merges device/viewport, geolocation, offline/network, media, headers/auth, UA, timezone/locale, and CPU overrides; `devices()` lists valid device names.
   - Clipboard: `clipboardRead()` returns `{text, source}`; `clipboardWrite(text)`, `clipboardCopy()`, and `clipboardPaste()` return `{source}` (`page` or write/read-only `shim` fallback).
   - Storage: `cookies`, `setCookies`, `clearCookies`, `storage`, `setStorage`, `clearStorage`, `saveState`, `loadState`; cookie imports accept objects, raw `Cookie:` headers, DevTools cURL dumps, or JSON arrays.
-  - Initialization: `addInitScript`, `removeInitScript`, `initScripts`; downloads: `waitForDownload`, `downloads`.
+  - Initialization: `addInitScript`, `removeInitScript`, `initScripts`; downloads: `waitForDownload`, `downloads`. `waitForDownload` holds the tab until a file arrives, so start it and the click that downloads in one `tab.run`: `const download = tab.waitForDownload(); await tab.click(selector); return await download;`.
   - Diagnostics: `console`, `errors`, `clearConsole`, `traceStart`, `traceStop`, `profileStart`, `profileStop`, `metrics`.
   - Recording: `recordStart(path, options?)`, `recordStop`, `recordRestart(path, options?)`, `recording`; `.mp4` uses H.264 and `.webm` uses VP9/VP8, with optional cursor overlay and changed-frame contact sheet.
   - Web Vitals + React: `vitals`, `reactEnable` (installs the hook and reloads), `reactTree`, `reactInspect`, `reactRenders`, `reactSuspense`; call `reactEnable` before other `react*` helpers.

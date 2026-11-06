@@ -5,8 +5,8 @@
 //! Relinking `main` (`-e`, `-v`, `-A … main`, `-N main`, `-D`, `-d`) needs
 //! no separate step for a line in progress: the reader resolves the
 //! current keymap by name for every key, which is zsh's `reselectkeymap`
-//! after each widget (falling back to `.safe` with `No such keymap `x'`
-//! when the name is gone).
+//! after each widget (falling back to `.safe` with a `No such keymap`
+//! warning when the name is gone).
 //!
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
@@ -17,7 +17,7 @@ use bstr::BString;
 
 use super::{
 	bindings,
-	keymap::{Bind, Keymap, Keymaps, UnlinkError, default_main_vi},
+	keymap::{Bind, Keymap, Keymaps, MapOrigin, UnlinkError, default_main_vi},
 };
 use crate::bash::{
 	store::Attrs,
@@ -88,7 +88,7 @@ struct Report {
 }
 
 impl Report {
-	fn new(fmt: Fmt) -> Self {
+	const fn new(fmt: Fmt) -> Self {
 		Self { fmt, ev: Vec::new() }
 	}
 
@@ -252,17 +252,14 @@ fn run(
 	let fmt = rep.fmt;
 	// Select the operation and ensure no clashing options.
 	let op = OPNS.iter().position(|o| ops.isset(o.0));
-	if let Some(i) = op {
-		if OPNS[i + 1..].iter().any(|o| ops.isset(o.0)) {
-			rep.warn("incompatible operation selection options".into());
-			return 1;
-		}
+	if let Some(i) = op
+		&& OPNS[i + 1..].iter().any(|o| ops.isset(o.0))
+	{
+		rep.warn("incompatible operation selection options".into());
+		return 1;
 	}
 	let (o, selp, min, max) = op.map_or((0, true, 0, None), |i| OPNS[i]);
-	let n = [b'e', b'v', b'a', b'M']
-		.iter()
-		.filter(|&&c| ops.isset(c))
-		.count();
+	let n = b"evaM".iter().filter(|&&c| ops.isset(c)).count();
 	if !selp && n != 0 {
 		rep.warn(format!("keymap cannot be selected with -{}", char::from(o)));
 		return 1;
@@ -273,8 +270,7 @@ fn run(
 	}
 
 	// Keymap selection.
-	let mut sel = None;
-	if selp {
+	let sel = if selp {
 		let kmname: &[u8] = if ops.isset(b'e') {
 			b"emacs"
 		} else if ops.isset(b'v') {
@@ -295,8 +291,10 @@ fn run(
 			// (which nothing creates) could refuse.
 			let _ = Arc::make_mut(kms).link(id, b"main", false);
 		}
-		sel = Some((kmname, id));
-	}
+		Some((kmname, id))
+	} else {
+		None
+	};
 
 	// Listing is a special case.
 	if o == 0 && args.len() < 2 {
@@ -368,7 +366,7 @@ fn listmap(kms: &Keymaps, name: &[u8], long: bool, rep: &mut Report) {
 			return;
 		};
 		out.extend_from_slice(b"bindkey -");
-		if let Some(p) = primary {
+		if let MapOrigin::Linked(p) = primary {
 			out.extend_from_slice(b"A ");
 			if p.first() == Some(&b'-') {
 				out.extend_from_slice(b"-- ");
@@ -484,7 +482,7 @@ fn bind(
 	func: u8,
 	rep: &mut Report,
 ) -> i32 {
-	if func != b'r' && args.len() % 2 != 0 {
+	if func != b'r' && !args.len().is_multiple_of(2) {
 		rep.warn("even number of arguments required".into());
 		return 1;
 	}
@@ -578,31 +576,33 @@ fn list(
 		let seq = getkeys(a);
 		st.all = true;
 		st.bind = km.lookup(&seq).cloned();
-		st.first = seq.clone();
+		st.first.clone_from(&seq);
 		st.last = seq;
 		let out = bindlistout(&st, fmt);
 		rep.out(&out);
 		return 0;
 	}
 	// An empty prefix is no prefix.
-	let mut prefix = Vec::new();
-	if pflag && args.first().is_none_or(|a| !a.is_empty()) {
+	let prefix = if pflag && args.first().is_none_or(|a| !a.is_empty()) {
 		let Some(a) = args.first() else {
 			rep.warn("option -p requires a prefix string".into());
 			return 1;
 		};
-		prefix = getkeys(a);
-	}
+		getkeys(a)
+	} else {
+		Vec::new()
+	};
 	let mut out = Vec::new();
 	km.scan_entries(&mut |seq, bind| {
-		if !prefix.is_empty() && !(seq.starts_with(&prefix) && seq.len() > prefix.len()) {
+		if !prefix.is_empty() && (!seq.starts_with(&prefix) || seq.len() <= prefix.len()) {
 			return;
 		}
-		if let ([t], [l]) = (seq, st.last.as_slice()) {
-			if bind == st.bind.as_ref() && l.checked_add(1) == Some(*t) {
-				st.last = seq.to_vec();
-				return;
-			}
+		if let ([t], [l]) = (seq, st.last.as_slice())
+			&& bind == st.bind.as_ref()
+			&& l.checked_add(1) == Some(*t)
+		{
+			st.last = seq.to_vec();
+			return;
 		}
 		out.extend_from_slice(&bindlistout(&st, fmt));
 		st.first = seq.to_vec();
@@ -778,16 +778,19 @@ mod tests {
 			"visual", "viopp", "command", ".safe", "vicmd", "main", "isearch", "viins", "emacs"
 		]);
 		// zsh: bindkey -l; bindkey -lL
-		assert_eq!(bkrun(&mut kms, b"l", &[]), (
-			0,
-			".safe\ncommand\nemacs\nisearch\nmain\nvicmd\nviins\nviopp\nvisual\n".into()
-		));
-		assert_eq!(bkrun(&mut kms, b"lL", &[]), (
-			0,
-			"bindkey -N command\nbindkey -N emacs\nbindkey -N isearch\nbindkey -A emacs main\nbindkey -N \
-			 vicmd\nbindkey -N viins\nbindkey -N viopp\nbindkey -N visual\n"
-				.into()
-		));
+		assert_eq!(
+			bkrun(&mut kms, b"l", &[]),
+			(0, ".safe\ncommand\nemacs\nisearch\nmain\nvicmd\nviins\nviopp\nvisual\n".into())
+		);
+		assert_eq!(
+			bkrun(&mut kms, b"lL", &[]),
+			(
+				0,
+				"bindkey -N command\nbindkey -N emacs\nbindkey -N isearch\nbindkey -A emacs \
+				 main\nbindkey -N vicmd\nbindkey -N viins\nbindkey -N viopp\nbindkey -N visual\n"
+					.into()
+			)
+		);
 		// zsh: bindkey -l nope emacs
 		assert_eq!(
 			bkrun(&mut kms, b"l", &[b"nope", b"emacs"]),
@@ -811,9 +814,9 @@ mod tests {
 		bkrun(&mut kms, b"A", &[b"emacs", b"a b"]);
 		assert_eq!(
 			bkrun(&mut kms, b"lL", &[]).1,
-			"bindkey -N -- -foo\nbindkey -A emacs 'a b'\nbindkey -A -- -foo bar\nbindkey -N command\nbindkey -N \
-			 emacs\nbindkey -N isearch\nbindkey -A emacs main\nbindkey -N vicmd\nbindkey -N viins\nbindkey -N \
-			 viopp\nbindkey -N visual\n"
+			"bindkey -N -- -foo\nbindkey -A emacs 'a b'\nbindkey -A -- -foo bar\nbindkey -N \
+			 command\nbindkey -N emacs\nbindkey -N isearch\nbindkey -A emacs main\nbindkey -N \
+			 vicmd\nbindkey -N viins\nbindkey -N viopp\nbindkey -N visual\n"
 		);
 		// zsh: bindkey -D -- -foo; bindkey -lL | grep bar
 		bkrun(&mut kms, b"D", &[b"-foo"]);
@@ -877,8 +880,8 @@ mod tests {
 		// zsh: bindkey -L -p "^[O"
 		assert_eq!(
 			bk(&mut kms, b"main", b"Lp", &[b"^[O"]).1,
-			"bindkey \"^[OA\" up-line-or-history\nbindkey \"^[OB\" down-line-or-history\nbindkey \"^[OC\" \
-			 forward-char\nbindkey \"^[OD\" backward-char\n"
+			"bindkey \"^[OA\" up-line-or-history\nbindkey \"^[OB\" down-line-or-history\nbindkey \
+			 \"^[OC\" forward-char\nbindkey \"^[OD\" backward-char\n"
 		);
 		// zsh: bindkey -p "" | wc -l
 		assert_eq!(bk(&mut kms, b"main", b"p", &[b""]).1.lines().count(), 117);
@@ -916,8 +919,8 @@ mod tests {
 		bk(&mut kms, b"t", b"", &[b"^?", b"undefined-key"]);
 		assert_eq!(
 			bk(&mut kms, b"t", b"L", &[]).1,
-			"bindkey -s -M t \"^Xa\" \"ab\\$\\\"c^A\"\nbindkey -M t \"-x\" dash\nbindkey -M t \"\\\\\\\\\" \
-			 bs\nbindkey -R -M t \"a\"-\"f\" foo\n"
+			"bindkey -s -M t \"^Xa\" \"ab\\$\\\"c^A\"\nbindkey -M t \"-x\" dash\nbindkey -M t \
+			 \"\\\\\\\\\" bs\nbindkey -R -M t \"a\"-\"f\" foo\n"
 		);
 		assert_eq!(
 			bk(&mut kms, b"t", b"", &[]).1,

@@ -1768,7 +1768,7 @@ describe("lsp regressions", () => {
 		);
 		const resultText = sanitizeText(result.render(120).join("\n"));
 		const normalizedResultText = resultText.replace(/\s+/g, " ");
-		expect(normalizedResultText).toContain("symbol: foo bar baz");
+		expect(normalizedResultText).toContain("src/example.ts:10 (foo bar baz)");
 		expect(resultText).not.toContain("\t");
 	});
 
@@ -1814,7 +1814,8 @@ describe("lsp regressions", () => {
 		expect(lines.every(line => Bun.stringWidth(line) <= width)).toBe(true);
 		expect(text.match(/x/g)?.length).toBe(200);
 		expect(text).not.toContain("…");
-		const rowContents = lines.map(line => line.replace(/^│\s+[├└│]?─?\s*/, "").replace(/\s*│$/, ""));
+		// Each row past the header, tree connector and guide rail stripped: the note reads whole across its rows.
+		const rowContents = lines.slice(1).map(line => line.replace(/^\s*(?:[├└│]─?)?\s*/, ""));
 		expect(rowContents.join(" ").replace(/\s+/g, " ")).toContain(note);
 	});
 
@@ -2720,7 +2721,7 @@ describe("lsp regressions", () => {
 				servers: { empty: serverConfig },
 				idleTimeoutMs: undefined,
 			});
-			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue({} as LspClient);
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue({ openFiles: new Map() } as LspClient);
 			vi.spyOn(lspClient, "sendRequest").mockResolvedValue([]);
 
 			const result = await new LspTool(makeLspSession(tempDir.path())).execute("workspace-symbol-empty", {
@@ -2749,7 +2750,7 @@ describe("lsp regressions", () => {
 			});
 			vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(async config => {
 				if (config.command === "broken-lsp") throw new Error("server exited with code 7");
-				return {} as LspClient;
+				return { openFiles: new Map() } as LspClient;
 			});
 			vi.spyOn(lspClient, "sendRequest").mockResolvedValue([
 				{
@@ -4066,6 +4067,96 @@ describe("lsp regressions", () => {
 			expect(sawDidChange).toBe(true);
 			expect(overlay).toBe(`\n\n${original}`);
 			expect(referencedSymbol).toBe("target");
+		} finally {
+			configCache.delete(tempDir.path());
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("syncs open consumers edited outside OMP before references and workspace symbols", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-external-consumer-sync-");
+		const definitionPath = path.join(tempDir.path(), "target.py");
+		const consumerPath = path.join(tempDir.path(), "consumer.py");
+		const consumer = "from target import target\nvalue = target()\n";
+		// What the server holds for each open document: its answers are computed from these.
+		const overlays = new Map<string, string>();
+		/** Every `target` occurrence in the server's documents, at the line it holds them. */
+		const occurrences = () =>
+			Array.from(overlays, ([uri, text]) =>
+				text.split("\n").flatMap((lineText, line) => {
+					const character = lineText.indexOf("target()");
+					return character < 0
+						? []
+						: [{ uri, range: { start: { line, character }, end: { line, character: character + 6 } } }];
+				}),
+			).flat();
+		try {
+			await Bun.write(definitionPath, "def target():\n    return 1\n");
+			await Bun.write(consumerPath, consumer);
+			const serverConfig: ServerConfig = { command: "fake-pyls", fileTypes: ["py"], rootMarkers: [] };
+			installFakeLsp((message, srv) => {
+				const params = message.params as
+					| { textDocument?: { uri?: string; text?: string }; contentChanges?: Array<{ text?: string }> }
+					| undefined;
+				if (message.method === "initialize") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { referencesProvider: true, workspaceSymbolProvider: true } },
+					});
+				} else if (message.method === "textDocument/didOpen" && params?.textDocument?.uri) {
+					overlays.set(params.textDocument.uri, params.textDocument.text ?? "");
+				} else if (message.method === "textDocument/didChange" && params?.textDocument?.uri) {
+					overlays.set(params.textDocument.uri, params.contentChanges?.[0]?.text ?? "");
+				} else if (message.method === "textDocument/references") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: occurrences() });
+				} else if (message.method === "workspace/symbol") {
+					const result = occurrences().map(location => ({ name: "target", kind: 12, location }));
+					srv.send({ jsonrpc: "2.0", id: message.id, result });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "fake-pyls": serverConfig },
+				idleTimeoutMs: undefined,
+			});
+			const projectLoad = vi.spyOn(lspClient, "waitForProjectLoaded").mockResolvedValue(undefined);
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+
+			// Opens the consumer, then an unrelated file, then the definition file.
+			const otherPath = path.join(tempDir.path(), "other.py");
+			await Bun.write(otherPath, "x = 1\n");
+			await tool.execute("open-consumer", { action: "references", file: consumerPath, line: 2, symbol: "target" });
+			await tool.execute("open-other", { action: "references", file: otherPath, line: 1, symbol: "x" });
+			await tool.execute("open-definition", {
+				action: "references",
+				file: definitionPath,
+				line: 1,
+				symbol: "target",
+			});
+
+			// External edits (not through OMP's write/edit tools) move the consumer's call down.
+			await Bun.write(consumerPath, `\n\n${consumer}`);
+			const symbols = textResult(await tool.execute("symbols", { action: "symbols", file: "*", query: "target" }));
+			expect(symbols).toContain("consumer.py:4");
+			expect(symbols).not.toContain("consumer.py:2");
+
+			// This one lands while the query waits for the project to load, and the
+			// unrelated open file is no longer readable: the query still answers.
+			await fsp.rm(otherPath);
+			await fsp.mkdir(otherPath);
+			projectLoad.mockImplementation(async () => {
+				await Bun.write(consumerPath, `\n\n\n\n${consumer}`);
+			});
+			const references = textResult(
+				await tool.execute("references", { action: "references", file: definitionPath, line: 1, symbol: "target" }),
+			);
+			expect(references).toContain("consumer.py:6");
+			expect(references).not.toContain("consumer.py:4");
 		} finally {
 			configCache.delete(tempDir.path());
 			await lspClient.shutdownAll();

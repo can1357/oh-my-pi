@@ -356,7 +356,7 @@ pub fn infernexthistory(zw: &mut Zw<'_, '_>) -> WResult {
 /// Widget `set-local-history` (zsh `setlocalhistory`): with a numeric
 /// argument, history motions skip other sessions' lines when it is not
 /// zero; without one, toggle.
-pub fn setlocalhistory(zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn setlocalhistory(zw: &mut Zw<'_, '_>) -> WResult {
 	let ed = &mut *zw.ed;
 	if ed.zmod.flags & modflags::MULT != 0 {
 		ed.ls.localhistory = ed.zmod.mult != 0;
@@ -658,12 +658,11 @@ fn visrch_cmd(zw: &mut Zw<'_, '_>, mut r: ViRead, got: Got) -> WResult {
 			if cmd.as_slice() == b"self-insert-unmeta" {
 				misc::fixunmeta(zw.ed);
 			}
-			match zw.ed.lastchar_wide {
-				Some(c) => r.sbuf.push(c),
-				None => {
-					utils::handlefeep(zw.ed);
-					return visrch_key(zw, r);
-				},
+			if let Some(c) = zw.ed.lastchar_wide {
+				r.sbuf.push(c);
+			} else {
+				utils::handlefeep(zw.ed);
+				return visrch_key(zw, r);
 			}
 		},
 		_ => feep = true,
@@ -741,7 +740,7 @@ fn vi_history_search(zw: &mut Zw<'_, '_>, sense: i64) -> WResult {
 	if let Some(a) = zw.args.first() {
 		let st = &mut zw.zle.hsearch;
 		let ose = std::mem::replace(&mut st.visrchsense, sense);
-		let ost = std::mem::replace(&mut st.visrchstr, Some(to_line(a)));
+		let ost = st.visrchstr.replace(to_line(a));
 		let ret = vi_repeat(zw);
 		let st = &mut zw.zle.hsearch;
 		st.visrchsense = ose;

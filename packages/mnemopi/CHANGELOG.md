@@ -5,9 +5,12 @@
 ### Fixed
 
 - Fixed `EpisodicGraph.extractFacts` truncating multi-word objects, dropping numeric objects, matching cross-line or stopword subjects (`This`, `That`, `It`), and missing Unicode names and CJK entity triples, and updated `findFactsBySubject` to match case-insensitively ([#17240](https://github.com/can1357/oh-my-pi/pull/17240) by [@GTanger](https://github.com/GTanger)).
+
+## [18.17.0] - 2026-11-06
+
 ### Changed
 
-- Development installs now share fastembed's ONNX runtime instead of installing a second native runtime
+- Development installs reuse fastembed’s ONNX Runtime instead of installing a duplicate native runtime.
 
 ## [18.14.2] - 2026-10-31
 
