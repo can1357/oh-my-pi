@@ -15,6 +15,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
+import * as discoveryFs from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import "@oh-my-pi/pi-coding-agent/discovery";
 import {
@@ -24,12 +25,16 @@ import {
 import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { getConfigRootDir, removeWithRetries, setAgentDir, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { loadAllMCPConfigs } from "../src/mcp/config";
-import { MCPToolCache } from "../src/mcp/tool-cache";
+import { MCPToolCache, sameMcpServerIdentity } from "../src/mcp/tool-cache";
 import type { MCPServerConfig, MCPToolDefinition } from "../src/mcp/types";
 import type { AgentStorage } from "../src/session/agent-storage";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
 const TOKEN_VAR = "OMP_AS_WRITTEN_TOKEN";
+/** A variable whose value is a path component the provider roots. */
+const PATH_VAR = "OMP_AW_ROOT_PATH";
+/** A variable nothing sets, so `${...}` naming it is literal text. */
+const UNSET_VAR = "OMP_AW_NEVER_SET_TOKEN";
 
 // Assembled, as the source files do, to keep oxlint's
 // no-template-curly-in-string off a literal placeholder name.
@@ -105,6 +110,30 @@ async function writeClaudeRegistry(dirs: Dirs, installPath: string, id: string):
 			],
 		},
 	});
+}
+
+/** One remote OpenCode server, written as raw text so each escape reaches the parser as spelled. */
+const opencodeText = (header: string) =>
+	`{"mcp":{"aw":{"type":"remote","url":"https://mcp.example.test/aw","headers":{"Authorization":"${header}"}}}}`;
+
+/** A project of its own holding that server, for the pairs that need two. */
+async function opencodeProject(dirs: Dirs, slot: string, header: string): Promise<string> {
+	const root = path.join(dirs.root, slot);
+	await fs.mkdir(path.join(root, ".git"), { recursive: true });
+	await Bun.write(path.join(root, "opencode.json"), opencodeText(header));
+	return root;
+}
+
+/** A project whose OMP extension package declares one stdio server. */
+async function ompExtensionProject(dirs: Dirs, slot: string, entry: Record<string, unknown>): Promise<string> {
+	const root = path.join(dirs.root, slot);
+	const extension = path.join(root, "aw-extension");
+	await fs.mkdir(path.join(root, ".git"), { recursive: true });
+	await writeJson(path.join(extension, "package.json"), { name: "aw-extension", omp: { extensions: ["./main.ts"] } });
+	await Bun.write(path.join(extension, "main.ts"), "export default function (_pi) {}\n");
+	await writeJson(path.join(extension, ".mcp.json"), { mcpServers: { aw: entry } });
+	await writeJson(path.join(root, ".omp", "settings.json"), { extensions: [extension] });
+	return root;
 }
 
 /** Where the agent-plugins row keeps its plugin: the registry points at one of two copies. */
@@ -342,6 +371,8 @@ describe("the tool cache keys a discovered server on its config as written", () 
 	let dirs: Dirs;
 	let originalHome: string | undefined;
 	let originalToken: string | undefined;
+	let originalPath: string | undefined;
+	let originalUnset: string | undefined;
 	let originalClaudeConfigDir: string | undefined;
 
 	const reload = async (): Promise<[string, MCPServerConfig]> => {
@@ -358,6 +389,8 @@ describe("the tool cache keys a discovered server on its config as written", () 
 		await fs.mkdir(dirs.home, { recursive: true });
 		originalHome = process.env.HOME;
 		originalToken = process.env[TOKEN_VAR];
+		originalPath = process.env[PATH_VAR];
+		originalUnset = process.env[UNSET_VAR];
 		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
 		delete process.env.CLAUDE_CONFIG_DIR;
 		process.env.HOME = dirs.home;
@@ -378,6 +411,8 @@ describe("the tool cache keys a discovered server on its config as written", () 
 		}
 		restoreEnvValue("HOME", originalHome);
 		restoreEnvValue(TOKEN_VAR, originalToken);
+		restoreEnvValue(PATH_VAR, originalPath);
+		restoreEnvValue(UNSET_VAR, originalUnset);
 		restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 		await removeWithRetries(dirs.root);
 	});
@@ -1081,4 +1116,339 @@ describe("the tool cache keys a discovered server on its config as written", () 
 			expect(await cache.get(name, here)).toEqual([TOOL]);
 		});
 	}
+
+	/**
+	 * Round 14 (Anthropic arm, F1). OpenCode's grammar lives in the config
+	 * *text*, so that is where it recognises a reference — but it escaped
+	 * the record there too, and the text can spell one character several
+	 * ways. `\x00` is a NUL the six-character escaper never matched, and
+	 * `\u003a` is a colon it could not see, so a value that parses to a real
+	 * marker around a real `{env:...}` recorded as that marker, and the
+	 * project sending the braces verbatim mounted the other's catalogue.
+	 */
+	test("opencode: an escape that hides a reference from the text pass still only writes a literal", async () => {
+		await setToken(dirs, "token-a");
+		const forgedRoot = await opencodeProject(dirs, "forged", String.raw`\x00({env\u003a${TOKEN_VAR}}\x00)`);
+		const realRoot = await opencodeProject(dirs, "real", `{env:${TOKEN_VAR}}`);
+
+		clearFsCache();
+		const [name, forged] = findServer((await loadAllMCPConfigs(forgedRoot, { filterExa: false })).configs);
+		clearFsCache();
+		const [, real] = findServer((await loadAllMCPConfigs(realRoot, { filterExa: false })).configs);
+
+		// Neither escape is a reference to OpenCode: the braces go on the wire.
+		expect(forged.type === "http" && forged.headers?.Authorization).toBe(`\u0000({env:${TOKEN_VAR}}\u0000)`);
+		expect(authorization(real)).toBe("token-a");
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, real, [TOOL]);
+		expect(await cache.get(name, forged)).toBeNull();
+		expect(await cache.get(name, real)).toEqual([TOOL]);
+	});
+
+	/**
+	 * Round 14 (OpenAI arm, Finding 2). `"\\u0000("` and `"\u005cu0000("`
+	 * are two JSON spellings of one six-character value, and a lazy server
+	 * must not lose its catalogue to a re-spelling that changes nothing it
+	 * sends.
+	 */
+	test("opencode: two JSON spellings of one value keep the cached catalogue", async () => {
+		const config = path.join(dirs.project, "opencode.json");
+		await Bun.write(config, opencodeText(String.raw`\\u0000(`));
+		clearFsCache();
+		const [name, backslash] = findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs);
+		await Bun.write(config, opencodeText(String.raw`\u005cu0000(`));
+		clearFsCache();
+		const [, escaped] = findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs);
+
+		expect(authorization(backslash)).toBe(String.raw`\u0000(`);
+		expect(authorization(escaped)).toBe(authorization(backslash));
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, backslash, [TOOL]);
+		expect(await cache.get(name, escaped)).toEqual([TOOL]);
+	});
+
+	/**
+	 * Round 14 (Anthropic arm, F2; the same cause as the two above, with no
+	 * exotic escape). A value whose *text* is `\u0000(lit` contains no NUL,
+	 * and the record must not invent one: the pass that doubled the escape
+	 * in the source text put a real NUL in front of the `(`, which is the
+	 * record of the value one character along — the one that really holds a
+	 * NUL there — so the two hashed alike while sending different bytes.
+	 */
+	test("opencode: a record holds no U+0000 the parsed value did not", async () => {
+		const spelledRoot = await opencodeProject(dirs, "spelled", String.raw`\\u0000(lit`);
+		const realRoot = await opencodeProject(dirs, "real-nul", String.raw`\u005cu0000\x00(lit`);
+
+		clearFsCache();
+		const [name, spelled] = findServer((await loadAllMCPConfigs(spelledRoot, { filterExa: false })).configs);
+		clearFsCache();
+		const [, withNul] = findServer((await loadAllMCPConfigs(realRoot, { filterExa: false })).configs);
+
+		expect(authorization(spelled)).toBe(String.raw`\u0000(lit`);
+		expect(authorization(withNul)).toBe(`${String.raw`\u0000`}\u0000(lit`);
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, withNul, [TOOL]);
+		expect(await cache.get(name, spelled)).toBeNull();
+		expect(await cache.get(name, withNul)).toEqual([TOOL]);
+	});
+
+	/**
+	 * Round 14 (OpenAI arm, Finding 3). The effective value and the record
+	 * are two readings of one config file; reading the file twice let an
+	 * edit land between them and keyed the server that was connected on the
+	 * definition that replaced it.
+	 */
+	test("opencode: the config file is read once, so no record comes from a later one", async () => {
+		const config = path.join(dirs.project, "opencode.json");
+		const entry = (command: string, value: string) =>
+			JSON.stringify({ mcp: { aw: { type: "local", command: [command], environment: { K: value } } } });
+		await Bun.write(config, entry("server-a", "A"));
+
+		const read = discoveryFs.readFile;
+		let reads = 0;
+		vi.spyOn(discoveryFs, "readFile").mockImplementation(async (filePath: string) => {
+			if (path.resolve(filePath) !== config) return read(filePath);
+			reads++;
+			return reads === 1 ? entry("server-a", "A") : entry("server-b", "B");
+		});
+		clearFsCache();
+		const [name, torn] = findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs);
+		vi.restoreAllMocks();
+		vi.spyOn(os, "homedir").mockReturnValue(dirs.home);
+
+		expect(reads).toBe(1);
+		expect(torn.type === "stdio" && torn.command).toBe("server-a");
+
+		await Bun.write(config, entry("server-b", "B"));
+		clearFsCache();
+		const [, replacement] = findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs);
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, replacement, [TOOL]);
+		expect(await cache.get(name, torn)).toBeNull();
+	});
+
+	/**
+	 * Round 14 (OpenAI arm, Finding 1). A declaration is not a path. The
+	 * record is rooted by the base the effective value got, and `..` inside
+	 * a default the expansion never used must not walk out of the project
+	 * that rooting just named — it does not walk there in the value the
+	 * connection uses either.
+	 */
+	test("omp-plugins: a `..` in an unused default does not leave the project it rooted", async () => {
+		process.env[PATH_VAR] = "./local";
+		const entry = { command: `${DOLLAR}{${PATH_VAR}:-tag/../../../shared}/bin/aw`, lazy: true };
+		const projectA = await ompExtensionProject(dirs, "unused-a", entry);
+		const projectB = await ompExtensionProject(dirs, "unused-b", entry);
+
+		clearFsCache();
+		const [name, here] = findServer((await loadAllMCPConfigs(projectA, { filterExa: false })).configs);
+		clearFsCache();
+		const [, there] = findServer((await loadAllMCPConfigs(projectB, { filterExa: false })).configs);
+
+		// The default is unused, so each project runs its own copy.
+		expect(here.type === "stdio" && here.command).toBe(
+			path.join(dirs.root, "unused-a", "aw-extension", "local", "bin", "aw"),
+		);
+		expect(there.type === "stdio" && there.command).toBe(
+			path.join(dirs.root, "unused-b", "aw-extension", "local", "bin", "aw"),
+		);
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, here, [TOOL]);
+		expect(await cache.get(name, there)).toBeNull();
+		expect(await cache.get(name, here)).toEqual([TOOL]);
+
+		// And the declaration is still a declaration: rotating it keeps the catalogue.
+		process.env[PATH_VAR] = "./other";
+		clearFsCache();
+		const [, rotated] = findServer((await loadAllMCPConfigs(projectA, { filterExa: false })).configs);
+		expect(rotated.type === "stdio" && rotated.command).toContain(path.join("unused-a", "aw-extension", "other"));
+		expect(await cache.get(name, rotated)).toEqual([TOOL]);
+	});
+
+	/**
+	 * Round 14 (Anthropic arm, M1). The encoding doubles a literal U+0000
+	 * so no value can spell a recorded substitution. One provider's
+	 * substitution syntax is another's literal text, which is where a
+	 * forgery comes from: `${VAR}` is a reference in `.mcp.json` and plain
+	 * characters to OpenCode.
+	 */
+	test("a literal spelling another provider's recorded substitution is still a literal", async () => {
+		await setToken(dirs, "token-a");
+		const forgedRoot = await opencodeProject(dirs, "forged-marker", `\\u0000(${DOLLAR}{${TOKEN_VAR}}\\u0000)`);
+		const referenceRoot = path.join(dirs.root, "reference");
+		await fs.mkdir(path.join(referenceRoot, ".git"), { recursive: true });
+		await writeJson(path.join(referenceRoot, ".mcp.json"), {
+			mcpServers: {
+				aw: {
+					type: "http",
+					url: "https://mcp.example.test/aw",
+					headers: { Authorization: `${DOLLAR}{${TOKEN_VAR}}` },
+				},
+			},
+		});
+
+		clearFsCache();
+		const [name, forged] = findServer((await loadAllMCPConfigs(forgedRoot, { filterExa: false })).configs);
+		clearFsCache();
+		const [, reference] = findServer((await loadAllMCPConfigs(referenceRoot, { filterExa: false })).configs);
+
+		expect(authorization(forged)).toBe(`\u0000(${DOLLAR}{${TOKEN_VAR}}\u0000)`);
+		expect(authorization(reference)).toBe("token-a");
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, reference, [TOOL]);
+		expect(await cache.get(name, forged)).toBeNull();
+		expect(await cache.get(name, reference)).toEqual([TOOL]);
+	});
+
+	/**
+	 * Round 14 (Anthropic arm, M6). Codex forwards a variable into a header
+	 * it records as a substitution; a header the config writes out as the
+	 * same text is a literal, and the two must not hash alike — the first
+	 * carries a secret that rotates, the second sends `${VAR}` on the wire.
+	 */
+	test("codex: a forwarded variable and a header spelling it are two servers", async () => {
+		await setToken(dirs, "token-a");
+		const codexProject = async (slot: string, lines: string[]): Promise<string> => {
+			const root = path.join(dirs.root, slot);
+			await fs.mkdir(path.join(root, ".git"), { recursive: true });
+			await Bun.write(path.join(root, ".codex", "config.toml"), lines.join("\n"));
+			return root;
+		};
+		const forwardedRoot = await codexProject("forwarded", [
+			"[mcp_servers.aw]",
+			'url = "https://mcp.example.test/aw"',
+			`bearer_token_env_var = "${TOKEN_VAR}"`,
+			"",
+		]);
+		const spelledRoot = await codexProject("spelled-header", [
+			"[mcp_servers.aw]",
+			'url = "https://mcp.example.test/aw"',
+			"[mcp_servers.aw.http_headers]",
+			`Authorization = "Bearer ${DOLLAR}{${TOKEN_VAR}}"`,
+			"",
+		]);
+
+		clearFsCache();
+		const [name, forwarded] = findServer((await loadAllMCPConfigs(forwardedRoot, { filterExa: false })).configs);
+		clearFsCache();
+		const [, spelled] = findServer((await loadAllMCPConfigs(spelledRoot, { filterExa: false })).configs);
+
+		expect(authorization(forwarded)).toBe("Bearer token-a");
+		expect(authorization(spelled)).toBe(`Bearer ${DOLLAR}{${TOKEN_VAR}}`);
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, forwarded, [TOOL]);
+		expect(await cache.get(name, spelled)).toBeNull();
+		expect(await cache.get(name, forwarded)).toEqual([TOOL]);
+	});
+
+	/**
+	 * Round 14 (Anthropic arm, M7). An Agent Plugin's install directory is
+	 * outside its identity, which the parse says by recording
+	 * `${PLUGIN_ROOT}`/`${PLUGIN_DATA}` as substitutions. A config whose
+	 * values are those characters has declared nothing — the plugin format
+	 * is the only thing that expands them, and it reserves both names, so
+	 * nothing else can resolve one — and names a program that is not the
+	 * plugin's. It must not inherit the plugin's catalogue.
+	 */
+	test(`agent-plugins: a config spelling ${PLUGIN_ROOT_VAR} does not inherit a plugin's catalogue`, async () => {
+		enableUserSource("claude");
+		await writeAgentPlugin(dirs, "a", "v1");
+		await writeClaudeRegistry(dirs, agentPluginPath(dirs, "a"), "aw-plugin@market");
+		clearFsCache();
+		clearClaudePluginRootsCache();
+		const [name, plugin] = findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs);
+		if (plugin.type !== "stdio") throw new Error("expected a stdio server");
+		expect(plugin.command).toBe(path.join(agentPluginPath(dirs, "a"), "bin", "aw"));
+
+		const spelled: MCPServerConfig = {
+			...plugin,
+			command: `${PLUGIN_ROOT_VAR}/bin/aw`,
+			args: ["--config", `${PLUGIN_ROOT_VAR}/aw.json`, "--profile", "v1"],
+			cwd: PLUGIN_ROOT_VAR,
+			env: { PLUGIN_ROOT: PLUGIN_ROOT_VAR, PLUGIN_DATA: `${DOLLAR}{PLUGIN_DATA}` },
+		};
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, plugin, [TOOL]);
+		expect(await cache.get(name, spelled)).toBeNull();
+		expect(await cache.get(name, plugin)).toEqual([TOOL]);
+
+		// And the declaration is a declaration: a move keeps the catalogue.
+		await fs.cp(agentPluginPath(dirs, "a"), agentPluginPath(dirs, "b"), { recursive: true });
+		await writeClaudeRegistry(dirs, agentPluginPath(dirs, "b"), "aw-plugin@market");
+		clearFsCache();
+		clearClaudePluginRootsCache();
+		const [, moved] = findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs);
+		expect(moved.type === "stdio" && moved.command).toBe(path.join(agentPluginPath(dirs, "b"), "bin", "aw"));
+		expect(await cache.get(name, moved)).toEqual([TOOL]);
+	});
+
+	/**
+	 * Round 14 (Anthropic arm, M8). A `${VAR}` with no default and no
+	 * variable expands to nothing: the characters reach the server. Exporting
+	 * the variable therefore changes what the connection sends, and the
+	 * catalogue the literal earned does not carry over to the secret.
+	 */
+	test(`an unset ${DOLLAR}{VAR} with no default is literal text, so setting it is a new server`, async () => {
+		delete process.env[UNSET_VAR];
+		delete Bun.env[UNSET_VAR];
+		await writeJson(path.join(dirs.project, ".omp", "mcp.json"), {
+			mcpServers: {
+				aw: {
+					type: "http",
+					url: "https://mcp.example.test/aw",
+					headers: { Authorization: `Bearer ${DOLLAR}{${UNSET_VAR}}` },
+				},
+			},
+		});
+		clearFsCache();
+		const [name, literal] = findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs);
+		expect(authorization(literal)).toBe(`Bearer ${DOLLAR}{${UNSET_VAR}}`);
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, literal, [TOOL]);
+
+		process.env[UNSET_VAR] = "token-a";
+		clearFsCache();
+		const [, resolved] = findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs);
+		expect(authorization(resolved)).toBe("Bearer token-a");
+		expect(await cache.get(name, resolved)).toBeNull();
+	});
+
+	/**
+	 * Round 14 (OpenAI arm, scope boundary). An effective `oauth.scope` is
+	 * plain text: a U+0000 a server really asks for opens nothing. Reading
+	 * it as a recorded substitution swallowed the rest of the list, so
+	 * reordering one grant's tokens read as a different server — which, for
+	 * {@link sameMcpServerIdentity}'s other caller, retires the crash-burst
+	 * window a server had already filled.
+	 */
+	test("oauth: an effective scope carrying U+0000 is still a space-delimited set", async () => {
+		const write = (scope: string) =>
+			writeJson(path.join(dirs.project, ".omp", "mcp.json"), {
+				mcpServers: {
+					aw: { type: "http", url: "https://mcp.example.test/aw", oauth: { scope } },
+				},
+			});
+		await write("\u0000(read write admin");
+		clearFsCache();
+		const [, first] = findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs);
+		expect(first.oauth?.scope).toBe("\u0000(read write admin");
+		await write("admin write \u0000(read");
+		clearFsCache();
+		const [, reordered] = findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs);
+		await write("admin write \u0000(read offline_access");
+		clearFsCache();
+		const [, widened] = findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs);
+
+		expect(sameMcpServerIdentity(first, reordered)).toBe(true);
+		// A scope the first grant does not ask for is still a different grant.
+		expect(sameMcpServerIdentity(first, widened)).toBe(false);
+	});
 });

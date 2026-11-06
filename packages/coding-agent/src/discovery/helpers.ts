@@ -39,7 +39,7 @@ import { normalizeToolNames } from "../tools/builtin-names";
 import { realpathIfExists, resolveContainedPath } from "./contained-path";
 import { buildPluginDirRoot } from "./plugin-dir-roots";
 import type { StdioPathBases } from "./substitute-plugin-root";
-import { asWrittenLiteral, asWrittenText } from "../mcp/as-written";
+import { asWrittenLiteral, asWrittenText, resolveAsWrittenPath } from "../mcp/as-written";
 
 /**
  * Standard paths for each config source.
@@ -237,8 +237,12 @@ export interface McpAsWrittenOptions {
  * served one project's catalog to the other. Rooting is not substitution: it
  * names a program, and the program a path names depends on where it is
  * rooted. `options.rooting` carries the bases that call reported, and the
- * written form is rebased by the same ones — so a path the provider rooted
- * is rooted here too, declaration and all, and a path it left alone
+ * written form is rebased by the same ones — through
+ * {@link resolveAsWrittenPath}, which resolves the path around each
+ * recorded substitution rather than through it, because a `..` the
+ * connection never walked (an unused `${TAG:-a/../b}` default) must not eat
+ * the directory that rooting just established. So a path the provider
+ * rooted is rooted here too, declaration and all, and a path it left alone
  * (already absolute, or a bare executable name) is left alone here too.
  *
  * So the written form stands only where the provider substituted something,
@@ -257,7 +261,7 @@ export function withMcpAsWritten<T extends MCPServer>(server: T, written: unknow
 	for (const field of MCP_AS_WRITTEN_FIELDS) {
 		const base = field === "command" || field === "cwd" ? options?.rooting?.[field] : undefined;
 		const raw = written[field];
-		const value = base !== undefined && typeof raw === "string" ? path.resolve(base, raw) : raw;
+		const value = base !== undefined && typeof raw === "string" ? resolveAsWrittenPath(base, raw) : raw;
 		if (server[field] === undefined || value === undefined || Bun.deepEquals(value, server[field])) continue;
 		asWritten[field] = value;
 		differs = true;

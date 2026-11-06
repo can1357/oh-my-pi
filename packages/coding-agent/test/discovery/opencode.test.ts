@@ -367,4 +367,21 @@ describe("OpenCode MCP discovery", () => {
 			delete Bun.env.OMP_TEST_MCP_PATH;
 		}
 	});
+
+	test("expands a reference standing where JSON syntax goes, not inside a string", async () => {
+		// OpenCode substitutes the config text before parsing it, so a
+		// reference may supply a value that is not a string. Such a file is
+		// not JSON until it is expanded, and must still load.
+		await fs.writeFile(
+			path.join(tempDir, "opencode.json"),
+			'{"mcp":{"syntax-server":{"type":"remote","url":"https://mcp.example.xyz/mcp","enabled":{env:OMP_TEST_MCP_ENABLED}}}}',
+		);
+		Bun.env.OMP_TEST_MCP_ENABLED = "false";
+		try {
+			const servers = await loadOpenCodeMcpConfig(tempDir);
+			expect(servers.find(server => server.name === "syntax-server")?.enabled).toBe(false);
+		} finally {
+			delete Bun.env.OMP_TEST_MCP_ENABLED;
+		}
+	});
 });

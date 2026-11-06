@@ -30,7 +30,7 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
 import { slashCommandFrontmatterDisplay } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { settings } from "../config/settings";
-import { asWrittenSubstitution, SUBSTITUTION_MARK } from "../mcp/as-written";
+import { asWrittenLiteral, asWrittenSubstitution } from "../mcp/as-written";
 
 import {
 	buildExtensionModuleItems,
@@ -52,28 +52,196 @@ const DISPLAY_NAME = "OpenCode";
 const PRIORITY = 55;
 const CONFIG_FILENAMES = ["opencode.json", "opencode.jsonc"] as const;
 
-/** JSON's spelling of {@link SUBSTITUTION_MARK}, for a marker that still has to survive parsing. */
-const JSON_MARK = JSON.stringify(SUBSTITUTION_MARK).slice(1, -1);
-
 interface OpenCodeConfigSource {
 	path: string;
 	level: "user" | "project";
+}
+
+/** One `{env:...}`/`{file:...}` reference, as a span of the config file's text. */
+interface ConfigReference {
+	start: number;
+	end: number;
+	token: string;
+}
+
+/** A loaded OpenCode config: the effective value, and how the file wrote it. */
+interface OpenCodeConfig {
+	config: Record<string, unknown>;
+	/** `null` when the file has no parsed shape of its own; see {@link loadOpenCodeConfig}. */
+	asWritten: Record<string, unknown> | null;
 }
 
 // =============================================================================
 // JSON Config Loading
 // =============================================================================
 
-async function loadJsonConfig(
+/**
+ * OpenCode's config references, as spans of the raw config text.
+ *
+ * OpenCode expands `{env:VAR}` (the env value, or an empty string when
+ * unset) and `{file:path}` (file contents, trimmed) at load time, before the
+ * JSON is parsed — see opencode `packages/opencode/src/config/variable.ts`.
+ * OMP loads the same config files, so it MUST honor the same syntax; the
+ * generic `${VAR}` expansion used elsewhere never matches, leaving a header
+ * like `Bearer {env:MCP_KEY}` to reach the MCP server verbatim and 401
+ * (#8778). Recognising a reference in the *parsed* value instead would
+ * expand what OpenCode does not: `"\u007benv:VAR}"` and `"{env:VAR}"` parse
+ * to one string, and only the second is a reference.
+ *
+ * A reference on a `//` comment line is not one, matching OpenCode. (The
+ * line is dropped by the parse either way; the rule is kept so the text and
+ * the tree agree about what was replaced.)
+ */
+function scanConfigReferences(text: string): ConfigReference[] {
+	const references: ConfigReference[] = [];
+	for (const match of text.matchAll(/\{(?:env|file):[^}]+\}/g)) {
+		const start = match.index;
+		const lineStart = text.lastIndexOf("\n", start - 1) + 1;
+		if (text.slice(lineStart, start).trimStart().startsWith("//")) continue;
+		references.push({ start, end: start + match[0].length, token: match[0] });
+	}
+	return references;
+}
+
+/** `text` with each reference replaced by `replacement`. */
+function spliceReferences(
+	text: string,
+	references: readonly ConfigReference[],
+	replacement: (index: number) => string,
+): string {
+	let out = "";
+	let cursor = 0;
+	for (const [index, reference] of references.entries()) {
+		out += text.slice(cursor, reference.start) + replacement(index);
+		cursor = reference.end;
+	}
+	return out + text.slice(cursor);
+}
+
+/**
+ * What one reference expands to: the variable's value, or the referenced
+ * file's trimmed contents. A missing file expands to an empty string
+ * (OpenCode's `missing: "empty"` mode) rather than aborting discovery, and
+ * `{file:path}` resolves relative to the config file's directory or from a
+ * `~`/absolute path.
+ */
+async function expandReference(token: string, configDir: string, configPath: string): Promise<string> {
+	if (token.startsWith("{env:")) return Bun.env[token.slice("{env:".length, -1)] ?? "";
+	let filePath = token.slice("{file:".length, -1);
+	if (filePath.startsWith("~/")) filePath = path.join(os.homedir(), filePath.slice(2));
+	const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(configDir, filePath);
+	const fileContent = await readFile(resolved);
+	if (fileContent === null) {
+		logger.warn("OpenCode config references a missing file", { configPath, path: resolved });
+		return "";
+	}
+	return fileContent.trim();
+}
+
+/** `value` with every placeholder rendered by `replacements`, and every other span by `literal`. */
+function renderConfig(
+	value: unknown,
+	nonce: string,
+	replacements: readonly string[],
+	literal: (text: string) => string,
+): unknown {
+	if (typeof value === "string") {
+		const pieces = value.split(nonce);
+		if (pieces.length === 1) return literal(value);
+		let out = "";
+		for (const [index, piece] of pieces.entries()) {
+			out += (index % 2 === 1 ? replacements[Number(piece)] : undefined) ?? literal(piece);
+		}
+		return out;
+	}
+	if (Array.isArray(value)) return value.map(item => renderConfig(item, nonce, replacements, literal));
+	if (isRecord(value)) {
+		const out: Record<string, unknown> = {};
+		for (const [key, nested] of Object.entries(value)) {
+			out[renderConfig(key, nonce, replacements, literal) as string] = renderConfig(
+				nested,
+				nonce,
+				replacements,
+				literal,
+			);
+		}
+		return out;
+	}
+	return value;
+}
+
+/**
+ * One OpenCode config file: read once, parsed once, rendered twice.
+ *
+ * Each reference {@link scanConfigReferences} found is spliced into the text
+ * as a placeholder carrying a nonce chosen after the file was read, so the
+ * one parse yields a tree in which every span OpenCode's own grammar would
+ * replace is marked and nothing in the file can forge one. Walking that tree
+ * gives the effective config and the as-written record from the same
+ * snapshot and the same structure, so the two cannot disagree about what was
+ * substituted or pair different reads of the file. Only then does the record
+ * get its encoding, on the parsed strings, like every other provider's
+ * (`mcp/as-written.ts`).
+ *
+ * One OpenCode config cannot be read this way: a reference standing where
+ * JSON *syntax* goes rather than inside a string (`"timeout": {env:MS}`),
+ * which leaves the file unparseable until it is expanded. That one falls
+ * back to expanding the text first, as OpenCode does, and records no written
+ * form — the file has no parsed shape of its own to record one against — so
+ * such a server is keyed on its effective config.
+ */
+async function loadOpenCodeConfig(
 	configPath: string,
 	onInvalid: (configPath: string) => void,
-): Promise<Record<string, unknown> | null> {
+): Promise<OpenCodeConfig | null> {
 	const content = await readFile(configPath);
 	if (!content) return null;
+	const references = scanConfigReferences(content);
+	const configDir = path.dirname(configPath);
+	const nonce = `omp${crypto.randomUUID().replaceAll("-", "")}`;
 
+	let tree: unknown;
+	try {
+		tree = JSONC.parse(spliceReferences(content, references, index => `${nonce}${index}${nonce}`));
+	} catch {
+		return loadExpandedBeforeParse(content, references, configDir, configPath, onInvalid);
+	}
+	if (!isRecord(tree)) {
+		onInvalid(configPath);
+		return null;
+	}
+
+	const expanded = await Promise.all(references.map(({ token }) => expandReference(token, configDir, configPath)));
+	return {
+		config: renderConfig(tree, nonce, expanded, text => text) as Record<string, unknown>,
+		asWritten: renderConfig(
+			tree,
+			nonce,
+			references.map(({ token }) => asWrittenSubstitution(token)),
+			asWrittenLiteral,
+		) as Record<string, unknown>,
+	};
+}
+
+/** The fallback {@link loadOpenCodeConfig} documents: expand the text, then parse it. */
+async function loadExpandedBeforeParse(
+	content: string,
+	references: readonly ConfigReference[],
+	configDir: string,
+	configPath: string,
+	onInvalid: (configPath: string) => void,
+): Promise<OpenCodeConfig | null> {
+	const expanded = await Promise.all(
+		references.map(async ({ token }) => {
+			const value = await expandReference(token, configDir, configPath);
+			// JSON-escape file contents so multi-line/quoted text stays valid
+			// inside the string literal it lands in, as OpenCode does.
+			return token.startsWith("{file:") ? JSON.stringify(value).slice(1, -1) : value;
+		}),
+	);
 	let parsed: unknown;
 	try {
-		parsed = JSONC.parse(await substituteConfigVars(content, configPath));
+		parsed = JSONC.parse(spliceReferences(content, references, index => expanded[index]!));
 	} catch {
 		onInvalid(configPath);
 		return null;
@@ -82,106 +250,7 @@ async function loadJsonConfig(
 		onInvalid(configPath);
 		return null;
 	}
-	return parsed;
-}
-
-/**
- * The same config, parsed from the text {@link substituteConfigVars} reports
- * it rewrote: every `{env:...}`/`{file:...}` reference it really expanded
- * recorded as a substitution, everything else — a reference on a comment
- * line, a value that merely spells one — as literal text.
- *
- * Reading the parsed value instead cannot tell those apart: OpenCode
- * substitutes the config *text*, so `"\u007benv:VAR}"` and `"{env:VAR}"`
- * parse to one string while only the second is a reference, and recording
- * the first as one handed the project sending the brace verbatim the other
- * project's catalogue.
- */
-async function loadJsonConfigAsWritten(configPath: string): Promise<Record<string, unknown> | null> {
-	const content = await readFile(configPath);
-	if (!content) return null;
-	try {
-		const parsed: unknown = JSONC.parse(await substituteConfigVars(content, configPath, { asWritten: true }));
-		return isRecord(parsed) ? parsed : null;
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Apply OpenCode's config variable substitution to raw config text.
- *
- * OpenCode expands `{env:VAR}` (the env value, or an empty string when unset)
- * and `{file:path}` (file contents, trimmed and JSON-escaped) at load time,
- * before the JSON is parsed — see opencode `packages/opencode/src/config/variable.ts`.
- * OMP loads the same config files, so it MUST honor the same syntax; the generic
- * `${VAR}` expansion used elsewhere never matches, leaving a header like
- * `Bearer {env:MCP_KEY}` to reach the MCP server verbatim and 401 (#8778).
- *
- * `{file:path}` resolves relative to the config file's directory, or from a `~`/
- * absolute path. A token on a `//` comment line is left untouched, matching
- * OpenCode. A missing file expands to an empty string (OpenCode's `missing:
- * "empty"` mode) rather than aborting discovery.
- *
- * Under `asWritten` this performs the same pass and reports it instead of
- * applying it: each reference it would expand becomes an as-written
- * substitution marker, and every literal U+0000 escape is doubled so no
- * literal can parse into the marker's shape (see `mcp/as-written.ts`). The
- * marker goes in as a JSON escape, because a raw control character is not
- * legal inside a JSON string and this text is parsed afterwards.
- */
-async function substituteConfigVars(
-	text: string,
-	configPath: string,
-	options?: { asWritten?: boolean },
-): Promise<string> {
-	const asWritten = options?.asWritten === true;
-	const mark = (token: string) => asWrittenSubstitution(token).replaceAll(SUBSTITUTION_MARK, JSON_MARK);
-	const source = asWritten ? text.replaceAll(JSON_MARK, JSON_MARK + JSON_MARK) : text;
-	const envExpanded = source.replace(/\{env:([^}]+)\}/g, (token, name: string) =>
-		asWritten ? mark(token) : (Bun.env[name] ?? ""),
-	);
-
-	const fileMatches = [...envExpanded.matchAll(/\{file:[^}]+\}/g)];
-	if (fileMatches.length === 0) return envExpanded;
-
-	const configDir = path.dirname(configPath);
-	let out = "";
-	let cursor = 0;
-	for (const match of fileMatches) {
-		const token = match[0];
-		const index = match.index ?? 0;
-		out += envExpanded.slice(cursor, index);
-		cursor = index + token.length;
-
-		// A `{file:...}` sitting on a JSONC comment line is not a real reference.
-		const lineStart = envExpanded.lastIndexOf("\n", index - 1) + 1;
-		if (envExpanded.slice(lineStart, index).trimStart().startsWith("//")) {
-			out += token;
-			continue;
-		}
-
-		// A reference is a reference whether or not the file is there, so the
-		// written form records it either way.
-		if (asWritten) {
-			out += mark(token);
-			continue;
-		}
-
-		let filePath = token.slice("{file:".length, -1);
-		if (filePath.startsWith("~/")) filePath = path.join(os.homedir(), filePath.slice(2));
-		const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(configDir, filePath);
-
-		const fileContent = await readFile(resolved);
-		if (fileContent === null) {
-			logger.warn("OpenCode config references a missing file", { configPath, path: resolved });
-			continue;
-		}
-		// JSON-escape so multi-line/quoted contents stay valid inside the string literal.
-		out += JSON.stringify(fileContent.trim()).slice(1, -1);
-	}
-	out += envExpanded.slice(cursor);
-	return out;
+	return { config: parsed, asWritten: null };
 }
 
 /**
@@ -327,13 +396,12 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	const asWrittenByName = new Map<string, Record<string, unknown>>();
 
 	for (const source of getConfigSources(ctx)) {
-		const [config, asWritten] = await Promise.all([
-			loadJsonConfig(source.path, configPath => {
-				logger.warn("Failed to parse OpenCode config", { path: configPath });
-			}),
-			loadJsonConfigAsWritten(source.path),
-		]);
-		if (!config || !isRecord(config.mcp)) continue;
+		const loaded = await loadOpenCodeConfig(source.path, configPath => {
+			logger.warn("Failed to parse OpenCode config", { path: configPath });
+		});
+		if (!loaded) continue;
+		const { config, asWritten } = loaded;
+		if (!isRecord(config.mcp)) continue;
 
 		for (const name in config.mcp) {
 			const raw = config.mcp[name];
@@ -556,9 +624,10 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 	const warnings: string[] = [];
 
 	for (const source of getConfigSources(ctx)) {
-		const parsed = await loadJsonConfig(source.path, configPath => {
+		const loaded = await loadOpenCodeConfig(source.path, configPath => {
 			warnings.push(`Invalid JSON in ${configPath}`);
 		});
+		const parsed = loaded?.config;
 		if (!parsed) continue;
 
 		items.push({

@@ -93,8 +93,27 @@ function stripKeys(config: MCPServerConfig, keys: readonly ConfigField[]): Recor
 	return identity;
 }
 
+/** A digest under one of the retired schemes: the expanded config, as it hashed it. */
 function hashIdentity(identity: Record<string, unknown>): string {
 	return Bun.SHA256.hash(stableStringifyJson(identity), "hex");
+}
+
+/**
+ * A digest under the current scheme, in its own namespace.
+ *
+ * The retired schemes {@link hashLegacyConfigs} enumerates hash the
+ * *expanded* config; this one hashes a record in the as-written encoding,
+ * where a literal U+0000 is doubled (`mcp/as-written.ts`). An expanded
+ * config is not in that encoding, so it can spell a record — one project's
+ * header really reading `\0({env:TOKEN}\0)` is byte for byte another
+ * project's record of `{env:TOKEN}` — and a legacy tier of the first would
+ * otherwise match the current digest of the second, which is the cross-
+ * project catalogue the encoding exists to prevent. The two namespaces are
+ * therefore kept apart, and a released digest is still reproduced byte for
+ * byte by the tier that wrote it.
+ */
+function hashCurrentIdentity(identity: Record<string, unknown>): string {
+	return Bun.SHA256.hash(`as-written\u0000${stableStringifyJson(identity)}`, "hex");
 }
 
 /**
@@ -104,7 +123,7 @@ function hashIdentity(identity: Record<string, unknown>): string {
  * and where the loopback listener that catches the redirect binds. None of
  * them reaches the MCP connection, so toggling one serves no different tools
  * and spawns no different process. `prompt` is read by `oauth-flow.ts:443`,
- * `oauth-reauth.ts:874` and `mcp-command-controller.ts:692`; the three
+ * `oauth-reauth.ts:877` and `mcp-command-controller.ts:695`; the three
  * callback members by `resolveCallbackOptions` in `oauth-flow.ts`. The rest
  * of `oauth` stays: `clientId` and `clientSecret` are the credentials the
  * login presents, and `scope` is the grant it asks for.
@@ -124,11 +143,14 @@ const OAUTH_LOGIN_POLICY_KEYS = ["prompt", "redirectUri", "callbackPort", "callb
  *   resolved again, so it is sorted and deduped, never dropped.
  * - `oauth.scope` is a space-delimited *set* of scopes: RFC 6749 §3.3 says
  *   the order of its values is not significant, and asking twice for one
- *   scope asks for nothing more. So it is sorted and deduped too. The split
- *   keeps each recorded substitution whole, because this runs over the
- *   as-written config as well as the effective one: the whitespace inside a
- *   `${VAR:-two words}` default belongs to the declaration, and splitting
- *   there made two different grants sort to one multiset.
+ *   scope asks for nothing more. So it is sorted and deduped too. An
+ *   as-written scope — `encoded` — is split keeping each recorded
+ *   substitution whole, because the whitespace inside a `${VAR:-two words}`
+ *   default belongs to the declaration, and splitting there made two
+ *   different grants sort to one multiset. An effective scope is plain text
+ *   and is split as plain text: it carries no markers, and reading a U+0000
+ *   a server really asked for as one made reordering that grant's tokens
+ *   change its identity.
  * - {@link OAUTH_LOGIN_POLICY_KEYS} are deleted, and an `oauth` left empty by
  *   that goes with them: `oauth: { prompt: "login" }` and no `oauth` at all
  *   describe the same connection.
@@ -143,7 +165,7 @@ const OAUTH_LOGIN_POLICY_KEYS = ["prompt", "redirectUri", "callbackPort", "callb
  * `capability/mcp.ts`; see the comment above it. The two disagree in both
  * directions, conservatively, and must not be assumed to agree.
  */
-function identityRecord(config: MCPServerConfig): Record<string, unknown> {
+function identityRecord(config: MCPServerConfig, encoded = false): Record<string, unknown> {
 	const identity = stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS);
 	const literalKeys = identity.envLiteralKeys;
 	if (Array.isArray(literalKeys)) identity.envLiteralKeys = [...new Set<unknown>(literalKeys)].sort();
@@ -153,7 +175,8 @@ function identityRecord(config: MCPServerConfig): Record<string, unknown> {
 		for (const key of OAUTH_LOGIN_POLICY_KEYS) delete connection[key];
 		const scope = connection.scope;
 		if (typeof scope === "string") {
-			connection.scope = [...new Set(splitOutsideSubstitutions(scope))].sort().join(" ");
+			const tokens = encoded ? splitOutsideSubstitutions(scope) : scope.split(/\s+/).filter(Boolean);
+			connection.scope = [...new Set(tokens)].sort().join(" ");
 		}
 		if (Object.keys(connection).length === 0) delete identity.oauth;
 		else identity.oauth = connection;
@@ -210,11 +233,14 @@ export function attachConfigAsWritten(config: MCPServerConfig, asWritten: MCPSer
  * The config a cache entry is keyed on: the as-written form discovery attached
  * ({@link attachConfigAsWritten}), or `config` itself when it has none or is a
  * copy whose connection fields changed since. A policy edit (`enabled`,
- * `lazy`, ...) keeps the as-written form.
+ * `lazy`, ...) keeps the as-written form. `encoded` says which of the two it
+ * is, because only the as-written form carries substitution markers.
  */
-function cacheIdentityConfig(config: MCPServerConfig): MCPServerConfig {
+function cacheIdentityConfig(config: MCPServerConfig): { config: MCPServerConfig; encoded: boolean } {
 	const asWritten = config[MCP_CONFIG_AS_WRITTEN];
-	return asWritten && asWritten.attachedTo === identityJson(config) ? asWritten.config : config;
+	return asWritten && asWritten.attachedTo === identityJson(config)
+		? { config: asWritten.config, encoded: true }
+		: { config, encoded: false };
 }
 
 /**
@@ -358,7 +384,8 @@ export class MCPToolCache {
 
 		let currentHash: string;
 		try {
-			currentHash = hashIdentity(identityRecord(cacheIdentityConfig(config)));
+			const identity = cacheIdentityConfig(config);
+			currentHash = hashCurrentIdentity(identityRecord(identity.config, identity.encoded));
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return null;
@@ -381,7 +408,8 @@ export class MCPToolCache {
 	async set(serverName: string, config: MCPServerConfig, tools: MCPToolDefinition[]): Promise<void> {
 		let configHash: string;
 		try {
-			configHash = hashIdentity(identityRecord(cacheIdentityConfig(config)));
+			const identity = cacheIdentityConfig(config);
+			configHash = hashCurrentIdentity(identityRecord(identity.config, identity.encoded));
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return;
