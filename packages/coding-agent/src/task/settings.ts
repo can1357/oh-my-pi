@@ -745,7 +745,20 @@ export const cfgA2aName = register({
 		tab: "tasks",
 		group: "A2A",
 		label: "A2A Name",
-		description: "Public name for this terminal's agents in the A2A network: the main agent's skill id becomes this name (a2a:<name> on peers); empty keeps the default (Main)",
+		description:
+			"Public name for this terminal's agents in the A2A network: the main agent's skill id becomes this name (a2a:<name> on peers); empty keeps the default (Main)",
+	},
+});
+
+export const cfgSessionRetentionDays = register({
+	id: "session.retentionDays",
+	type: "number",
+	default: 30,
+	ui: {
+		tab: "tasks",
+		group: "Sessions",
+		label: "Session Retention (days)",
+		description: "Prune session transcripts and custom-session files older than this at startup; 0 disables the GC",
 	},
 });
 

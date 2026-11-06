@@ -496,6 +496,18 @@ async function registerLocalBridge(options: {
 	}
 }
 
+/** This process's own registry entry, if it registered a bridge. */
+export async function readLocalBridgeEntry(agentDir: string, pid: number): Promise<LocalBridgeEntry | undefined> {
+	try {
+		const raw = await fs.readFile(localBridgesPath(agentDir), "utf8");
+		const entries = JSON.parse(raw) as LocalBridgeEntry[];
+		if (!Array.isArray(entries)) return undefined;
+		return entries.find(entry => entry.pid === pid);
+	} catch {
+		return undefined;
+	}
+}
+
 /** Live local bridges: entries whose pid still exists, this process excluded. */
 export async function readLiveBridges(agentDir: string): Promise<Map<number, LocalBridgeEntry>> {
 	const map = new Map<number, LocalBridgeEntry>();

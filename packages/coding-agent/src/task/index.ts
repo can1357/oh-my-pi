@@ -2110,6 +2110,29 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * `<task-result>` envelope. Registered remote agents declare `blocking: true`,
 	 * so this runs inline on the task call; the A2A wire itself is async-first.
 	 */
+	/** This terminal's public A2A identity for reply envelopes: the bridge name (if any) plus its loopback url from the local registry. */
+	async #ownA2aIdentity(): Promise<{ name?: string; url?: string }> {
+		try {
+			const { readLiveBridges } = await import("../a2a/server");
+			const agentDir = this.session.settings.getAgentDir();
+			const live = await readLiveBridges(agentDir);
+			const own = [...live.values()].find(entry => entry.pid !== process.pid);
+			// Prefer this process's own registry entry: not in readLiveBridges
+			// (it excludes self), so read the raw file for our pid.
+			const { readLocalBridgeEntry } = await import("../a2a/server");
+			const entry = await readLocalBridgeEntry(agentDir, process.pid);
+			if (entry !== undefined) {
+				return {
+					...(entry.name !== undefined ? { name: entry.name } : {}),
+					url: `http://127.0.0.1:${entry.port}/`,
+				};
+			}
+			return own !== undefined ? { url: `http://127.0.0.1:${own.port}/` } : {};
+		} catch {
+			return {};
+		}
+	}
+
 	async #runA2aSpawn(args: {
 		agent: A2aRuntimeAgent;
 		params: SpawnParams;
@@ -2151,6 +2174,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			agent: args.agent,
 			prompt: assignment,
 			spawn: args.params.a2aSpawn === true,
+			fromIdentity: await this.#ownA2aIdentity(),
 			timeoutMs: cfgA2aClientTimeoutMs.get(this.session.settings),
 			signal: args.signal,
 		});

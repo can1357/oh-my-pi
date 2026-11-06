@@ -198,7 +198,14 @@ import {
 	cfgSessionWorktreeScope,
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
-import { cfgA2aAutoRegister, cfgA2aEnabled, cfgA2aName, cfgA2aPort, cfgTaskAgentIdleTtlMs } from "./task/settings";
+import {
+	cfgA2aAutoRegister,
+	cfgA2aEnabled,
+	cfgA2aName,
+	cfgA2aPort,
+	cfgSessionRetentionDays,
+	cfgTaskAgentIdleTtlMs,
+} from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 
@@ -2347,6 +2354,16 @@ export async function runRootCommand(
 				? logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd)
 				: undefined;
 		daemonPresencePromise?.catch(() => {});
+
+		// Session retention GC: best-effort prune of transcripts and custom
+		// scratch older than `session.retentionDays` (default 30; 0 = off).
+		// Never blocks startup; first run is bounded by the per-pass cap.
+		const retentionDays = cfgSessionRetentionDays.get(settingsInstance);
+		if (retentionDays > 0) {
+			void import("./session/session-gc")
+				.then(({ runSessionGc }) => runSessionGc({ retentionDays }))
+				.catch(() => {});
+		}
 
 		let startupTelemetry: CreateAgentSessionOptions["telemetry"];
 		let startupExtensions: CreateAgentSessionOptions["extensions"];

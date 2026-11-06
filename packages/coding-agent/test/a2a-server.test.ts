@@ -1032,3 +1032,90 @@ describe("local bridge registry", () => {
 		expect(result.a2aPort).toBe(0);
 	});
 });
+
+describe("A2A reply envelope", () => {
+	it("delivers the task with a reply-back instruction when metadata.from is present", async () => {
+		const bodies: string[] = [];
+		const handle = createA2aServer({
+			token: "reply-token",
+			port: 0,
+			registry: {
+				list: () => [],
+				get: id => (id === "Main" ? makeRef({ id: "Main", displayName: "Main", status: "running" }) : undefined),
+				onChange: () => () => {},
+				setStatus: () => false,
+			},
+			bus: {
+				send: async (message: { to: string; body: string }) => {
+					bodies.push(message.body);
+					return { to: message.to, outcome: "injected" as const };
+				},
+			} as never,
+			spawn: async () => {
+				throw new Error("spawn must not run for an addressed send");
+			},
+			card: async () =>
+				buildAgentCard({
+					url: "http://127.0.0.1:1/",
+					version: "t",
+					skills: [],
+				}),
+		});
+		handles.push(handle);
+		const response = await fetch(handle.url + "/", {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: "Bearer reply-token" },
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "SendMessage",
+				params: {
+					message: { messageId: "m1", role: "ROLE_USER", parts: [{ text: "do the thing" }] },
+					metadata: { to: "Main", from: "alpha", fromUrl: "http://127.0.0.1:7531/" },
+				},
+			}),
+		});
+		const payload = (await response.json()) as { result?: { task?: { metadata?: Record<string, unknown> } } };
+		expect(payload.result?.task?.metadata?.delivery).toMatchObject({ outcome: "injected" });
+		expect(bodies).toHaveLength(1);
+		expect(bodies[0]).toContain("[A2A task from peer terminal alpha");
+		expect(bodies[0]).toContain("spawning the agent a2a:alpha");
+		expect(bodies[0]).toContain("do the thing");
+	});
+
+	it("delivers the raw text when no sender identity is given", async () => {
+		const bodies: string[] = [];
+		const handle = createA2aServer({
+			token: "reply-token-2",
+			port: 0,
+			registry: {
+				list: () => [],
+				get: id => (id === "Main" ? makeRef({ id: "Main", displayName: "Main", status: "running" }) : undefined),
+				onChange: () => () => {},
+				setStatus: () => false,
+			},
+			bus: {
+				send: async (message: { to: string; body: string }) => {
+					bodies.push(message.body);
+					return { to: message.to, outcome: "injected" as const };
+				},
+			} as never,
+			card: async () => buildAgentCard({ url: "http://127.0.0.1:1/", version: "t", skills: [] }),
+		});
+		handles.push(handle);
+		await fetch(handle.url + "/", {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: "Bearer reply-token-2" },
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 2,
+				method: "SendMessage",
+				params: {
+					message: { messageId: "m2", role: "ROLE_USER", parts: [{ text: "plain text" }] },
+					metadata: { to: "Main" },
+				},
+			}),
+		});
+		expect(bodies).toEqual(["plain text"]);
+	});
+});

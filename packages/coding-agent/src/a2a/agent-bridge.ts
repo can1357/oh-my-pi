@@ -234,6 +234,8 @@ export interface SpawnA2aAgentOptions {
 	timeoutMs?: number;
 	/** Explicit spawn mode: ask the remote terminal to create a NEW agent instead of addressing its own. */
 	spawn?: boolean;
+	/** This terminal's public A2A identity (name + bridge url): stamps `from`/`fromUrl` so the remote can answer back. */
+	fromIdentity?: { name?: string; url?: string };
 	connectTimeoutMs?: number;
 	pollIntervalMs?: number;
 	signal?: AbortSignal;
@@ -270,18 +272,22 @@ export async function spawnA2aAgent(options: SpawnA2aAgentOptions): Promise<Spaw
 		// terminal's main conversation, and that agent decides whether to answer
 		// itself or spawn its own subagents. An addressed delivery to a running
 		// agent returns a receipt; the answer appears in the remote terminal
-		// (and over GetTask once its agent yields).
+		// (and over GetTask once its agent yields). `from` identifies this
+		// terminal to the peer: the delivered envelope tells the remote agent to
+		// send its answer back by spawning this terminal's a2a agent (the
+		// symmetric auto-registered roster entry).
+		const from = options.fromIdentity;
 		const run = await client.sendAndWait(options.prompt, {
-			metadata: options.spawn === true ? { spawn: true } : { to: agent.skillId },
+			metadata: {
+				...(options.spawn === true ? { spawn: true } : { to: agent.skillId }),
+				...(from?.name !== undefined ? { from: from.name } : {}),
+				...(from?.url !== undefined ? { fromUrl: from.url } : {}),
+			},
 		});
 		const text = run.text.trim();
 		const remoteTaskId = run.task?.id;
 		const delivery = asRecord(run.task?.metadata)?.delivery;
-		if (
-			delivery !== undefined &&
-			run.state !== TASK_STATE.COMPLETED &&
-			run.state !== TASK_STATE.FAILED
-		) {
+		if (delivery !== undefined && run.state !== TASK_STATE.COMPLETED && run.state !== TASK_STATE.FAILED) {
 			const receipt = asRecord(delivery);
 			const outcome = typeof receipt?.outcome === "string" ? receipt.outcome : "unknown";
 			if (outcome === "failed") {

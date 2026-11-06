@@ -271,6 +271,10 @@ export interface ParsedSendMessage {
 	context?: string;
 	/** omp extension: force a spawn even when `to` is given (spawn wins). */
 	spawn?: boolean;
+	/** omp extension: the sender terminal's public name (for the reply envelope). */
+	from?: string;
+	/** omp extension: the sender terminal's bridge url (for the reply envelope). */
+	fromUrl?: string;
 }
 
 /** Validate a `SendMessage` request and flatten its text parts. */
@@ -311,6 +315,8 @@ export function parseSendMessageParams(params: unknown): ParsedSendMessage {
 	const to = readString("to");
 	const agent = readString("agent");
 	const context = readString("context");
+	const from = readString("from");
+	const fromUrl = readString("fromUrl");
 	const spawnRaw = metadata?.spawn ?? messageMetadata?.spawn;
 	if (spawnRaw !== undefined && typeof spawnRaw !== "boolean") {
 		throw invalidParams("metadata.spawn must be a boolean");
@@ -321,6 +327,8 @@ export function parseSendMessageParams(params: unknown): ParsedSendMessage {
 		...(to !== undefined ? { to } : {}),
 		...(agent !== undefined ? { agent } : {}),
 		...(context !== undefined ? { context } : {}),
+		...(from !== undefined ? { from } : {}),
+		...(fromUrl !== undefined ? { fromUrl } : {}),
 		...(spawnRaw === true ? { spawn: true } : {}),
 	};
 }
@@ -429,10 +437,19 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 		if (!target) {
 			throw new RpcError(RPC_ERRORS.TASK_NOT_FOUND, `Task not found: ${request.to}`, { httpStatus: 404 });
 		}
+		// CC-inherited reply channel (task-notification pattern): the delivered
+		// body carries instructions to answer back by spawning the sender's
+		// a2a agent — the remote's own bridge has the sender auto-registered,
+		// so the reply lands in the sender's terminal conversation.
+		const replyTo = request.from ?? (request.fromUrl !== undefined ? `the peer at ${request.fromUrl}` : undefined);
+		const body =
+			replyTo === undefined
+				? request.text
+				: `[A2A task from peer terminal ${replyTo}. This message was delivered into your conversation. When you have the answer, send it back by spawning the agent a2a:${replyTo} with the task tool — that delivers your reply to the sender's terminal. Do not answer in plain text: the sender only sees replies through the a2a agent.]\n\n${request.text}`;
 		const receipt = await deps.send({
 			from: deps.senderId ?? A2A_SENDER_ID,
 			to: target.id,
-			body: request.text,
+			body,
 			external: true,
 		});
 		const current = deps.registry.get(target.id) ?? target;
