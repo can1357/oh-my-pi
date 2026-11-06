@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A tool called from an `eval` cell whose text the harness sampled now reports `truncated` — the lines and bytes shown against the totals, plus the `artifact://` URL of the whole value — so a script cannot read a sample as the whole answer ([#18273](https://github.com/can1357/oh-my-pi/pull/18273) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
