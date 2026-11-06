@@ -4786,7 +4786,7 @@ fn run_script_file(
 		Err(key) => return Some(Flow::Block(key)),
 		Ok(ProbeResult::Bytes(Ok(text))) => text,
 		Ok(ProbeResult::Bytes(Err(msg))) => {
-			let name = st(vp).argv[0].clone();
+			let name = tried_name(vp, &path);
 			k.diag(cx, vp, line, Diag::Usage { msg: format!("{name}: {msg}").into() });
 			let s = st(vp);
 			s.status = 126;
