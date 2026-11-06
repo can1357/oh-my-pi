@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 use anyhow::Context;
 use objc2::rc::Retained;
 use objc2_app_kit::NSSpellChecker;
-use objc2_foundation::{NSArray, NSRange, NSString, NSTextCheckingType};
+use objc2_foundation::{NSArray, NSOrthography, NSRange, NSString, NSTextCheckingType};
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
@@ -148,13 +148,77 @@ fn strings(values: Option<Retained<NSArray<NSString>>>) -> Vec<String> {
 	values.map_or_default(|values| values.iter().map(|value| value.to_string()).collect())
 }
 
+/// Orthography `checkString:` identifies for text under automatic language
+/// identification - the per-script language map the spelling pass in `check`
+/// uses.
+fn orthography(checker: &NSSpellChecker, text: &NSString) -> Option<Retained<NSOrthography>> {
+	let full = NSRange { location: 0, length: text.length() };
+	// SAFETY: the arguments match the documented nil options, tag, and
+	// word-count usage.
+	let results = unsafe {
+		checker.checkString_range_types_options_inSpellDocumentWithTag_orthography_wordCount(
+			text,
+			full,
+			NSTextCheckingType::Orthography.bits(),
+			None,
+			0,
+			None,
+			std::ptr::null_mut(),
+		)
+	};
+	results.iter().find_map(|result| {
+		(result.resultType() == NSTextCheckingType::Orthography)
+			.then(|| result.orthography())
+			.flatten()
+	})
+}
+
+/// Language identification assigns to the word at `range`, read from the
+/// whole text's script-to-language map. `languageForWordRange:` without an
+/// orthography does not consult that map, so the word's script is resolved
+/// here.
+fn detected_word_language(
+	checker: &NSSpellChecker,
+	text: &NSString,
+	range: NSRange,
+) -> Option<Retained<NSString>> {
+	let end = range.location.checked_add(range.length)?;
+	if range.length == 0 || end > text.length() {
+		return None;
+	}
+	// SAFETY: bounds are checked above.
+	let word = text.substringWithRange(range);
+	let script = orthography(checker, &word)?.dominantScript();
+	let language = orthography(checker, text)?.dominantLanguageForScript(&script)?;
+	if language.to_string() == "und" {
+		return None;
+	}
+	Some(language)
+}
+
 /// Language macOS identifies for a word range, honoring automatic language
-/// identification. Falls back to the shared checker's current language when
-/// detection is inconclusive (issue #9334).
+/// identification. Falls back to the shared checker's current language only
+/// when identification is inconclusive (issue #9334).
 fn word_language(checker: &NSSpellChecker, text: &NSString, range: NSRange) -> Retained<NSString> {
-	checker
-		.languageForWordRange_inString_orthography(range, text, None)
-		.unwrap_or_else(|| checker.language())
+	detected_word_language(checker, text, range).unwrap_or_else(|| checker.language())
+}
+
+/// Whether the spelling pass flags the word at `range`.
+///
+/// Autocorrection may only rewrite a word the typo pass would undercurl.
+/// Word-level language lookup can fall back to the checker's preferred language
+/// (`en_GB`) where the pass judges with the detected dictionary, which
+/// "corrects" `artifacts` to `artefacts` while the pass accepts `artifacts`
+/// (issue #9334).
+fn word_is_misspelled(text: &str, range: NSRange) -> bool {
+	let Ok(flagged) = check(text) else {
+		return false;
+	};
+	let start = u32::try_from(range.location).unwrap_or(u32::MAX);
+	let end = start.saturating_add(u32::try_from(range.length).unwrap_or(u32::MAX));
+	flagged
+		.iter()
+		.any(|flagged| flagged.start < end && flagged.start.saturating_add(flagged.length) > start)
 }
 
 /// Dictionary completions for the partial word at `start..start + length`.
@@ -222,16 +286,21 @@ pub fn guesses(text: &str, start: u32, length: u32) -> anyhow::Result<Vec<String
 }
 
 /// The autocorrection macOS would apply to the word at `start..start + length`,
-/// if it is confident. Call on the spelling thread.
+/// if it is confident and the spelling pass flags that word. Call on the
+/// spelling thread.
 ///
 /// # Errors
 /// Returns an error when a range overflows.
 pub fn correction(text: &str, start: u32, length: u32) -> anyhow::Result<Option<String>> {
 	let checker = checker();
-	let text = NSString::from_str(text);
+	let source = NSString::from_str(text);
 	let range = ns_range(start, length)?;
-	let language = word_language(&checker, &text, range);
-	let value = checker
-		.correctionForWordRange_inString_language_inSpellDocumentWithTag(range, &text, &language, 0);
+	if !word_is_misspelled(text, range) {
+		return Ok(None);
+	}
+	let language = word_language(&checker, &source, range);
+	let value = checker.correctionForWordRange_inString_language_inSpellDocumentWithTag(
+		range, &source, &language, 0,
+	);
 	Ok(value.map(|value| value.to_string()))
 }
