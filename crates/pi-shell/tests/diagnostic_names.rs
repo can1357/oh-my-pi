@@ -24,8 +24,8 @@ enum Mode {
 	/// the script: script mode is not reachable through `Shell::run`.
 	ScriptFile,
 	/// `obash --norc --noprofile -i -c`: runtime errors name the shell;
-	/// syntax errors in a `.` file name that file and its line. With no terminal,
-	/// Bash first prints two job-control notices, so compare the last line.
+	/// syntax errors in a `.` file name that file and its line. Filter only
+	/// the two no-terminal job-control notices, keeping every diagnostic line.
 	Interactive,
 }
 
@@ -106,13 +106,17 @@ async fn observe(row: &Row) -> (i32, Vec<u8>, Vec<u8>, String) {
 				.envs(&env)
 				.output()
 				.expect("run obash");
-			let last = done
+			let stderr = done
 				.stderr
 				.split_inclusive(|&c| c == b'\n')
-				.filter(|l| l.len() > 1)
-				.next_back()
-				.map_or_else(Vec::new, <[u8]>::to_vec);
-			(done.status.code().unwrap_or(-1), done.stdout, last, home)
+				.filter(|line| {
+					!line.starts_with(b"bash: cannot set terminal process group")
+						&& *line != b"bash: no job control in this shell\n"
+				})
+				.flatten()
+				.copied()
+				.collect();
+			(done.status.code().unwrap_or(-1), done.stdout, stderr, home)
 		},
 		Mode::ScriptFile => {
 			std::fs::write(dir.path().join("script.sh"), format!("{}\n", row.script))
@@ -610,6 +614,116 @@ const ROWS: &[Row] = &[
 		status: 126,
 		stdout: b"",
 		stderr: b"script.sh: ./victim\xff: /missing/review/interpreter: bad interpreter: No such file or directory\n",
+	},
+	// src-script-file-elf (file)
+	Row {
+		id: "src-script-file-elf",
+		setup: "",
+		mode: Mode::ScriptFile,
+		script: "ELF text",
+		status: 126,
+		stdout: b"",
+		stderr: b"script.sh: script.sh: cannot execute binary file\n",
+	},
+	// src-nul-offset-79 (c)
+	Row {
+		id: "src-nul-offset-79",
+		setup: r#"printf ':                                                                              \000\ncd ./missing\n' > v; chmod 755 v"#,
+		mode: Mode::Dashc,
+		script: "./v",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: line 1: ./v: cannot execute binary file: Exec format error\n",
+	},
+	// src-nul-offset-80 (c)
+	Row {
+		id: "src-nul-offset-80",
+		setup: r#"printf ':                                                                               \000\ncd ./missing\n' > v; chmod 755 v"#,
+		mode: Mode::Dashc,
+		script: "./v",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: line 1: ./v: cannot execute binary file: Exec format error\n",
+	},
+	// src-nul-offset-127 (c)
+	Row {
+		id: "src-nul-offset-127",
+		setup: r#"printf ':                                                                                                                              \000\ncd ./missing\n' > v; chmod 755 v"#,
+		mode: Mode::Dashc,
+		script: "./v",
+		status: 126,
+		stdout: b"",
+		stderr: b"bash: line 1: ./v: cannot execute binary file: Exec format error\n",
+	},
+	// src-nul-offset-128 (c)
+	Row {
+		id: "src-nul-offset-128",
+		setup: r#"printf ':                                                                                                                               \000\ncd ./missing\n' > v; chmod 755 v"#,
+		mode: Mode::Dashc,
+		script: "./v",
+		status: 1,
+		stdout: b"",
+		stderr: b"./v: line 2: cd: ./missing: No such file or directory\n",
+	},
+	// int-top-syntax-token (i)
+	Row {
+		id: "int-top-syntax-token",
+		setup: "",
+		mode: Mode::Interactive,
+		script: ")",
+		status: 2,
+		stdout: b"",
+		stderr: b"bash: syntax error near unexpected token `)'\n",
+	},
+	// int-top-eval-token (i)
+	Row {
+		id: "int-top-eval-token",
+		setup: "",
+		mode: Mode::Interactive,
+		script: r#"eval ")""#,
+		status: 2,
+		stdout: b"",
+		stderr: b"bash: syntax error near unexpected token `)'\n",
+	},
+	// int-eval-function-after-source (i)  // 5.2.21 differs: 2 'bash: syntax error: unexpected end of file\n'
+	Row {
+		id: "int-eval-function-after-source",
+		setup: r#"printf 'f() { eval "if true; then"; }\n' > defs"#,
+		mode: Mode::Interactive,
+		script: ". ./defs; f",
+		status: 2,
+		stdout: b"",
+		stderr: b"bash: syntax error: unexpected end of file from `if' command on line 1\n",
+	},
+	// int-sourced-eval-token (i)
+	Row {
+		id: "int-sourced-eval-token",
+		setup: r#"printf 'eval ")"\n' > source.sh"#,
+		mode: Mode::Interactive,
+		script: ". ./source.sh",
+		status: 2,
+		stdout: b"",
+		stderr: b"bash: eval: line 1: syntax error near unexpected token `)'\nbash: eval: line 1: `)'\n",
+	},
+	// byt-failglob-pattern (c)
+	Row {
+		id: "byt-failglob-pattern",
+		setup: "",
+		mode: Mode::Dashc,
+		script: r#"shopt -s failglob; echo $'x\377y'*"#,
+		status: 1,
+		stdout: b"",
+		stderr: b"bash: line 1: no match: x\xffy*\n",
+	},
+	// int-trap-eval-token (i)
+	Row {
+		id: "int-trap-eval-token",
+		setup: "",
+		mode: Mode::Interactive,
+		script: r#"trap 'eval ")"' ERR; false"#,
+		status: 1,
+		stdout: b"",
+		stderr: b"bash: eval: line 1: syntax error near unexpected token `)'\nbash: eval: line 1: `)'\n",
 	},
 ];
 
