@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- The dashboard refuses requests whose `Host` is not loopback, its bind address, or an allowed host (`421`); to open it under another name (a LAN address on a `0.0.0.0` bind, Tailscale Serve, a reverse proxy) pass `--allowed-host <name>` (repeatable; `*.example.net` matches subdomains) or set `OMP_STATS_ALLOWED_HOSTS`
+
+### Added
+
+- Added `--allowed-host` to `omp-stats` and an `allowedHosts` option to `startServer`
+
+### Changed
+
+- The dashboard refuses cross-site API requests (`403`), and starting a sync now needs the `X-Omp-Stats-Action` header like its other actions
+- Background session ingest starts with the dashboard instead of when a page first connects
+- A dashboard still running from an older omp is replaced instead of reused, so the new host checks take effect
+
+### Fixed
+
+- Session traces no longer follow symlinks out of the sessions directory
+- Unexpected dashboard errors return a generic `500` without internal details
+
 ## [18.17.0] - 2026-11-06
 
 ### Fixed

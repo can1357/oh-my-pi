@@ -107,6 +107,7 @@ export async function printStatsSummary(): Promise<void> {
 export interface StandaloneStatsArgs {
 	port: number;
 	host: string;
+	allowedHosts: string[];
 	json: boolean;
 	sync: boolean;
 	help: boolean;
@@ -119,6 +120,7 @@ export function parseStandaloneStatsArgs(args: string[]): StandaloneStatsArgs {
 		options: {
 			port: { type: "string", short: "p", default: "3847" },
 			host: { type: "string", default: "127.0.0.1" },
+			"allowed-host": { type: "string", multiple: true, default: [] },
 			json: { type: "boolean", short: "j", default: false },
 			sync: { type: "boolean", short: "s", default: false },
 			help: { type: "boolean", short: "h", default: false },
@@ -128,6 +130,7 @@ export function parseStandaloneStatsArgs(args: string[]): StandaloneStatsArgs {
 	return {
 		port: parseInt(values.port || "3847", 10),
 		host: values.host || "127.0.0.1",
+		allowedHosts: values["allowed-host"] ?? [],
 		json: values.json ?? false,
 		sync: values.sync ?? false,
 		help: values.help ?? false,
@@ -150,6 +153,8 @@ Usage:
 Options:
   -p, --port <port>  Port for the dashboard server (default: 3847)
   --host <host>       Host to bind (default: 127.0.0.1)
+  --allowed-host <h>  Extra Host name to serve, e.g. a Tailscale Serve name; repeatable,
+                      "*.example.net" matches subdomains (also: OMP_STATS_ALLOWED_HOSTS=a,b)
   -j, --json         Output stats as JSON and exit
   -s, --sync         Sync session files and show summary
   -h, --help         Show this help message
@@ -166,7 +171,9 @@ Examples:
 	try {
 		if (!values.json && !values.sync) {
 			// The dashboard ingests sessions in the background and streams progress to the page.
-			const { port: actualPort } = await startServer(values.port, values.host);
+			const { port: actualPort } = await startServer(values.port, values.host, {
+				allowedHosts: values.allowedHosts,
+			});
 			console.log(`Dashboard available at: ${formatStatsDashboardUrl(values.host, actualPort)}`);
 			console.log("Press Ctrl+C to stop\n");
 			process.on("SIGINT", () => {

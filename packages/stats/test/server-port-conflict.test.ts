@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { networkInterfaces } from "node:os";
 import { connect, type Subprocess } from "bun";
 import {
+	STATS_DASHBOARD_ALLOWED_HOSTS_HEADER,
 	STATS_DASHBOARD_HEADER,
 	STATS_DASHBOARD_HOSTNAME,
 	STATS_DASHBOARD_HOSTNAME_HEADER,
@@ -241,6 +242,12 @@ describe("startServer port conflicts", () => {
 		},
 		// Never answering is what a dashboard stalled mid-ingest looks like; stopping it would kill a live `omp stats`.
 		{ name: "a stats listener that never answers", response: "Promise.withResolvers().promise", statsOwned: true },
+		{
+			// Reusing it would leave the requested --allowed-host answering 421; stopping it could end an interactive omp.
+			name: "a current dashboard serving other allowed hosts",
+			response: `Response.json([], { headers: { "${STATS_DASHBOARD_HEADER}": "${STATS_DASHBOARD_SECURITY_VERSION}", "${STATS_DASHBOARD_HOSTNAME_HEADER}": "${STATS_DASHBOARD_HOSTNAME}", "${STATS_DASHBOARD_ALLOWED_HOSTS_HEADER}": "other.example" } })`,
+			statsOwned: true,
+		},
 	]) {
 		it(`serves on an ephemeral port beside ${fixture.name}`, async () => {
 			const holder = await startBunHolder(fixture.response, { statsOwned: fixture.statsOwned });

@@ -33,6 +33,7 @@ import { statsLive } from "./live";
 import {
 	prepareStatsPort,
 	recoverStatsPort,
+	STATS_DASHBOARD_ALLOWED_HOSTS_HEADER,
 	STATS_DASHBOARD_HEADER,
 	STATS_DASHBOARD_HOSTNAME,
 	STATS_DASHBOARD_HOSTNAME_HEADER,
@@ -164,6 +165,167 @@ const ensureClientBuild = async () => {
  */
 const STATS_ACTION_HEADER = "X-Omp-Stats-Action";
 
+/** Environment variable holding extra comma-separated Host names the dashboard may be served under. */
+export const STATS_ALLOWED_HOSTS_ENV = "OMP_STATS_ALLOWED_HOSTS";
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+/**
+ * Wildcard bind addresses. Never a name the dashboard is reached by from elsewhere, but the URL printed for a
+ * wildcard bind uses one, and local clients that open it connect over loopback.
+ */
+const UNSPECIFIED_HOSTS = new Set(["0.0.0.0", "[::]"]);
+
+/** Characters that never belong in a Host header or allowed-host entry: they smuggle userinfo, paths, or fragments past URL parsing. */
+const HOST_FORBIDDEN = /[@#?/\\\s]/;
+/** A normalized host name: dot-separated non-empty labels, or a bracketed IPv6 literal. */
+const HOSTNAME_SHAPE = /^(?:\[[0-9a-f:.]+\]|[a-z0-9_-]+(?:\.[a-z0-9_-]+)*)$/;
+
+/** Lower-case a host name, drop any port, and strip a trailing FQDN dot. Returns undefined when unparsable. */
+function normalizeHostName(value: string): string | undefined {
+	const trimmed = value.trim();
+	if (!trimmed || HOST_FORBIDDEN.test(trimmed)) return undefined;
+	try {
+		const { hostname } = new URL(`http://${trimmed}`);
+		const name = hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
+		return HOSTNAME_SHAPE.test(name) ? name : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Host names a dashboard answers to; see {@link buildAllowedHosts}. */
+export interface AllowedHosts {
+	/** Exact host names: the concrete bind address and non-wildcard extras. */
+	readonly exact: ReadonlySet<string>;
+	/** Suffixes (with leading dot) of `*.example.net` entries; they match subdomains only, never a literal `*`. */
+	readonly suffixes: readonly string[];
+	/** Hosts reached over plain http by construction: loopback and wildcard addresses and the concrete bind address. */
+	readonly plainHttp: ReadonlySet<string>;
+	/** Bound to loopback, so only local peers can connect and loopback Host names are safe from any peer. */
+	readonly loopbackBind: boolean;
+	/** Canonical, sorted extra hosts (`*.` for suffixes); equal keys mean equal policies, so a dashboard is reused only by a caller asking for the same hosts. */
+	readonly key: string;
+}
+
+function invalidAllowedHost(entry: string): Error {
+	return new Error(
+		`Invalid allowed host ${JSON.stringify(entry)}: expected a bare host name such as "mybox.tailnet.ts.net", ` +
+			`"*.example.net" or "host:port" (no scheme, path, userinfo or whitespace)`,
+	);
+}
+
+/** Validate one `--allowed-host` entry: `[*.]host[:port]` only. */
+function parseAllowedEntry(rawEntry: string): { wildcard: boolean; hostname: string } {
+	const entry = rawEntry.trim();
+	const wildcard = entry.startsWith("*.");
+	const rest = wildcard ? entry.slice(2) : entry;
+	const portMatch = /:(\d{1,5})$/.exec(rest);
+	const hostPart = portMatch ? rest.slice(0, portMatch.index) : rest;
+	if (portMatch && Number(portMatch[1]) > 65535) throw invalidAllowedHost(rawEntry);
+	if (!hostPart.startsWith("[") && hostPart.includes(":")) throw invalidAllowedHost(rawEntry);
+	const hostname = normalizeHostName(hostPart);
+	if (!hostname || (wildcard && hostname.startsWith("["))) throw invalidAllowedHost(rawEntry);
+	return { wildcard, hostname };
+}
+
+/**
+ * Resolve the Host names a dashboard bound to `bindHostname` answers to: loopback, the
+ * concrete bind address (never a wildcard), and operator-approved extras. An extra of the form
+ * `*.example.net` matches any subdomain of `example.net`, but not `example.net` itself.
+ * Throws on malformed extras so a typo such as `https://host` fails at startup instead of
+ * silently allowing the wrong host.
+ */
+export function buildAllowedHosts(bindHostname: string, extra: readonly string[] = []): AllowedHosts {
+	const exact = new Set<string>();
+	const suffixes: string[] = [];
+	const plainHttp = new Set([...LOOPBACK_HOSTS, ...UNSPECIFIED_HOSTS]);
+	const bind = normalizeHostName(
+		bindHostname.includes(":") && !bindHostname.startsWith("[") ? `[${bindHostname}]` : bindHostname,
+	);
+	// Reaching a wildcard bind by an interface address or name takes an allowed host.
+	if (bind && !UNSPECIFIED_HOSTS.has(bind)) {
+		exact.add(bind);
+		plainHttp.add(bind);
+	}
+	const extras = new Set<string>();
+	for (const entry of extra) {
+		const { wildcard, hostname } = parseAllowedEntry(entry);
+		if (wildcard) suffixes.push(`.${hostname}`);
+		else exact.add(hostname);
+		extras.add(wildcard ? `*.${hostname}` : hostname);
+	}
+	const loopbackBind = bind !== undefined && (LOOPBACK_HOSTS.has(bind) || bind.startsWith("127."));
+	return { exact, suffixes, plainHttp, loopbackBind, key: [...extras].sort().join(",") };
+}
+
+/**
+ * True when the request's Host header names an allowed host. Defeats DNS rebinding and forged-Host
+ * access. Loopback names (and the wildcard addresses) are only trusted when the listener is loopback-bound or the TCP
+ * peer (`peerAddress`) is itself local, so a LAN client cannot claim `Host: 127.0.0.1` on a wildcard bind.
+ */
+function isAllowedHostHeader(hostHeader: string | null, allowed: AllowedHosts, peerAddress?: string): boolean {
+	if (!hostHeader) return false;
+	const hostname = normalizeHostName(hostHeader);
+	if (!hostname) return false;
+	if (LOOPBACK_HOSTS.has(hostname) || UNSPECIFIED_HOSTS.has(hostname)) {
+		const loopbackPeer =
+			peerAddress !== undefined &&
+			(peerAddress === "::1" || peerAddress.startsWith("127.") || peerAddress.startsWith("::ffff:127."));
+		return allowed.loopbackBind || loopbackPeer;
+	}
+	if (allowed.exact.has(hostname)) return true;
+	return allowed.suffixes.some(suffix => hostname.length > suffix.length && hostname.endsWith(suffix));
+}
+
+function parseAllowedHostsEnv(): string[] {
+	return (process.env[STATS_ALLOWED_HOSTS_ENV] ?? "")
+		.split(",")
+		.map(host => host.trim())
+		.filter(Boolean);
+}
+
+/**
+ * True when the request's `Origin` is exactly this dashboard's serialized origin (scheme, host,
+ * port). Userinfo, paths, queries, fragments, `null` and scheme mismatches all fail. Loopback
+ * and bind-address hosts are plain http; other allowed hosts may be fronted by a TLS proxy
+ * (Tailscale Serve), so https is accepted for them too. Call only after the Host check passed.
+ */
+function isSameOrigin(req: Request, allowed: AllowedHosts): boolean {
+	const origin = req.headers.get("origin");
+	const host = req.headers.get("host");
+	if (origin === null || !host) return false;
+	try {
+		if (new URL(origin).origin !== origin) return false;
+		const hostname = normalizeHostName(host);
+		if (!hostname) return false;
+		const schemes = allowed.plainHttp.has(hostname) ? ["http"] : ["http", "https"];
+		return schemes.some(scheme => new URL(`${scheme}://${host}`).origin === origin);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Gate for every API route: a cross-site browser request (`Sec-Fetch-Site: cross-site`, or an
+ * `Origin` that is not this dashboard) must not trigger work or read data, whatever the method.
+ */
+function rejectCrossSite(req: Request, allowed: AllowedHosts): Response | undefined {
+	const crossSite = req.headers.get("sec-fetch-site") === "cross-site";
+	if (crossSite || (req.headers.has("origin") && !isSameOrigin(req, allowed))) {
+		return Response.json({ error: "cross-site request rejected" }, { status: 403 });
+	}
+	return undefined;
+}
+
+/** Gate for spending/mutating endpoints: POST only, with the custom action header. Returns a rejection or undefined. */
+function rejectUnlessAction(req: Request): Response | undefined {
+	if (req.method !== "POST") return Response.json({ error: "POST required" }, { status: 405 });
+	if (req.headers.get(STATS_ACTION_HEADER) !== "1") {
+		return Response.json({ error: `${STATS_ACTION_HEADER}: 1 header required` }, { status: 403 });
+	}
+	return undefined;
+}
+
 /** What the page's Close calls; unset, the page offers none. */
 let closeHandler: (() => void) | undefined;
 
@@ -249,10 +411,8 @@ export async function handleApi(req: Request): Promise<Response> {
 	}
 
 	if (path === "/api/frustration/judge" || path === "/api/frustration/cancel") {
-		if (req.method !== "POST") return Response.json({ error: "POST required" }, { status: 405 });
-		if (req.headers.get(STATS_ACTION_HEADER) !== "1") {
-			return Response.json({ error: `${STATS_ACTION_HEADER}: 1 header required` }, { status: 403 });
-		}
+		const rejection = rejectUnlessAction(req);
+		if (rejection) return rejection;
 		if (path === "/api/frustration/cancel") return Response.json(cancelFrustrationRun());
 		const result = await startFrustrationRun(range);
 		if (!result.started) return Response.json({ error: result.error }, { status: result.status });
@@ -311,17 +471,16 @@ export async function handleApi(req: Request): Promise<Response> {
 
 	if (path === "/api/close") {
 		if (req.method === "GET") return Response.json({ closable: closeHandler !== undefined });
-		if (req.method !== "POST") return Response.json({ error: "GET or POST required" }, { status: 405 });
-		if (req.headers.get(STATS_ACTION_HEADER) !== "1") {
-			return Response.json({ error: `${STATS_ACTION_HEADER}: 1 header required` }, { status: 403 });
-		}
+		const rejection = rejectUnlessAction(req);
+		if (rejection) return rejection;
 		if (!closeHandler) return Response.json({ error: "this dashboard is not closed from its page" }, { status: 404 });
 		closeHandler();
 		return new Response(null, { status: 202 });
 	}
 
 	if (path === "/api/sync") {
-		if (req.method !== "POST") return Response.json({ error: "POST required" }, { status: 405 });
+		const rejection = rejectUnlessAction(req);
+		if (rejection) return rejection;
 		statsLive().requestSync();
 		return Response.json(statsLive().status(), { status: 202 });
 	}
@@ -433,12 +592,27 @@ export function formatStatsDashboardUrl(hostname: string, port: number): string 
 	return `http://${urlHostname}:${port}`;
 }
 
-function createDashboardServer(port: number, hostname: string): Server<undefined> {
+function createDashboardServer(port: number, hostname: string, allowedHosts: AllowedHosts): Server<undefined> {
 	const server = Bun.serve({
 		port,
 		hostname,
+		error(error) {
+			// Never fall through to Bun's development error page: it embeds source lines and absolute paths.
+			logger.error("Stats dashboard server error", { error: String(error) });
+			return new Response("Internal Server Error", { status: 500 });
+		},
 		async fetch(req, server) {
-			const url = new URL(req.url);
+			// Every route (API, SSE, static) is gated: a hostile page that DNS-rebinds onto this
+			// listener, or a client forging Host, must not read session data.
+			if (!isAllowedHostHeader(req.headers.get("host"), allowedHosts, server.requestIP(req)?.address)) {
+				return new Response("Misdirected Request: Host not allowed (see --allowed-host)", { status: 421 });
+			}
+			let url: URL;
+			try {
+				url = new URL(req.url);
+			} catch {
+				return new Response("Bad Request", { status: 400 });
+			}
 			const path = url.pathname;
 
 			// The identity header lets another omp session's reuse probe positively
@@ -446,10 +620,16 @@ function createDashboardServer(port: number, hostname: string): Server<undefined
 			const dashboardHeaders: Record<string, string> = {
 				[STATS_DASHBOARD_HEADER]: STATS_DASHBOARD_SECURITY_VERSION,
 				[STATS_DASHBOARD_HOSTNAME_HEADER]: hostname,
+				[STATS_DASHBOARD_ALLOWED_HOSTS_HEADER]: allowedHosts.key,
 			};
 
 			if (req.method === "OPTIONS") {
 				return new Response(null, { headers: dashboardHeaders });
+			}
+
+			if (path.startsWith("/api/")) {
+				const rejection = rejectCrossSite(req, allowedHosts);
+				if (rejection) return rejection;
 			}
 
 			if (path === "/api/events") {
@@ -479,10 +659,8 @@ function createDashboardServer(port: number, hostname: string): Server<undefined
 				});
 			} catch (error) {
 				logger.error("Stats dashboard request failed", { path, error: String(error) });
-				return Response.json(
-					{ error: error instanceof Error ? error.message : "Unknown error" },
-					{ status: 500, headers: dashboardHeaders },
-				);
+				// Details stay in the log: messages can carry paths and other internals.
+				return Response.json({ error: "Internal Server Error" }, { status: 500, headers: dashboardHeaders });
 			}
 		},
 	});
@@ -495,12 +673,10 @@ const EVENT_HEARTBEAT_MS = 15_000;
 /**
  * Server-sent events of {@link LiveStatus}: the current status immediately,
  * then every change (sync progress, data version bumps, indexing backlog).
- * Disconnects unsubscribe, so ingest winds down once no page is listening.
+ * Read-only: ingest is owned by the server's lifetime (see `startServer`), never by a request.
  */
 function liveEventStream(headers: Record<string, string>, signal: AbortSignal): Response {
 	const live = statsLive();
-	// Ingest starts when the first page connects, not when the server binds.
-	live.start();
 	const encoder = new TextEncoder();
 	let cleanup = () => {};
 	const stream = new ReadableStream<Uint8Array>({
@@ -559,6 +735,11 @@ let liveServers = 0;
 export interface StartServerOptions {
 	/** Host judge for the Frustration dashboard's judge runs; replaces any previously registered one. */
 	judge?: StatsJudgeProvider;
+	/**
+	 * Extra Host names to serve beyond loopback and the bind address (e.g. a Tailscale Serve name).
+	 * `*.example.net` allows any subdomain. Merged with the `OMP_STATS_ALLOWED_HOSTS` environment variable.
+	 */
+	allowedHosts?: string[];
 }
 
 /**
@@ -572,18 +753,25 @@ export async function startServer(
 	hostname = STATS_DASHBOARD_HOSTNAME,
 	options: StartServerOptions = {},
 ): Promise<StatsServerHandle> {
+	// Validate before any side effect, so a malformed entry fails startup instead of binding.
+	const allowedHosts = buildAllowedHosts(hostname, [...(options.allowedHosts ?? []), ...parseAllowedHostsEnv()]);
 	if (options.judge) setStatsJudgeProvider(options.judge);
-	const requestedKey = `${hostname}:${port}`;
+	// The allowed hosts are part of the identity: a caller asking for other host names never gets this handle.
+	const requestedKey = `${hostname}:${port}#${allowedHosts.key}`;
 	if (port !== 0) {
 		const active = activeServers.get(requestedKey);
 		if (active) return active;
 	}
 	await ensureClientBuild();
 	const register = (server: Server<undefined>): StatsServerHandle => {
-		liveServers++;
+		// Ingest runs for as long as any dashboard in this process is bound; `/api/events` only observes it.
+		if (liveServers++ === 0) statsLive().start();
 		let stopped = false;
 		const boundPort = server.port ?? port;
-		const keys = port === 0 ? [`${hostname}:${boundPort}`] : [requestedKey, `${hostname}:${boundPort}`];
+		const keys =
+			port === 0
+				? [`${hostname}:${boundPort}#${allowedHosts.key}`]
+				: [requestedKey, `${hostname}:${boundPort}#${allowedHosts.key}`];
 		const handle: StatsServerHandle = {
 			hostname,
 			port: boundPort,
@@ -600,25 +788,25 @@ export async function startServer(
 		return handle;
 	};
 
-	let claim = await prepareStatsPort(port, hostname);
+	let claim = await prepareStatsPort(port, hostname, allowedHosts.key);
 	if (claim === "bind") {
-		const server = bindDashboardServer(port, hostname);
+		const server = bindDashboardServer(port, hostname, allowedHosts);
 		if (server) return register(server);
-		claim = await recoverStatsPort(port, hostname);
+		claim = await recoverStatsPort(port, hostname, allowedHosts.key);
 	}
 	if (claim === "reuse") return { hostname, port, stop: () => {} };
 	if (claim === "bind") {
-		const server = bindDashboardServer(port, hostname);
+		const server = bindDashboardServer(port, hostname, allowedHosts);
 		if (server) return register(server);
 	}
 	logger.warn("Stats dashboard port is held by another process; serving on an ephemeral port", { hostname, port });
-	return register(createDashboardServer(0, hostname));
+	return register(createDashboardServer(0, hostname, allowedHosts));
 }
 
 /** {@link createDashboardServer}, or null when the port is already in use. */
-function bindDashboardServer(port: number, hostname: string): Server<undefined> | null {
+function bindDashboardServer(port: number, hostname: string, allowedHosts: AllowedHosts): Server<undefined> | null {
 	try {
-		return createDashboardServer(port, hostname);
+		return createDashboardServer(port, hostname, allowedHosts);
 	} catch (error) {
 		if (error instanceof Error && "code" in error && error.code === "EADDRINUSE") return null;
 		throw error;

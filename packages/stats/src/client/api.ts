@@ -139,7 +139,7 @@ export async function closeDashboard(): Promise<void> {
 
 /** Ask the server to start a background sync; progress arrives on the `/api/events` stream. */
 export async function requestSync(): Promise<LiveStatus> {
-	return fetchJson<LiveStatus>(`${API_BASE}/sync`, { method: "POST" });
+	return fetchJson<LiveStatus>(`${API_BASE}/sync`, { method: "POST", headers: ACTION_HEADERS });
 }
 
 export async function getFrustrationDashboardStats(

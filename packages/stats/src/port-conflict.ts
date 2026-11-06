@@ -24,22 +24,29 @@ interface PortHolder {
 export const STATS_DASHBOARD_HEADER = "x-omp-stats-dashboard";
 /** Header recording the server's requested bind host so reuse cannot change its exposure scope. */
 export const STATS_DASHBOARD_HOSTNAME_HEADER = "x-omp-stats-hostname";
+/** Header recording the server's extra allowed hosts, so reuse cannot serve a different set of host names. */
+export const STATS_DASHBOARD_ALLOWED_HOSTS_HEADER = "x-omp-stats-allowed-hosts";
 
-/** Identity-header value for dashboards enforcing an explicit bind host and same-origin access. */
-export const STATS_DASHBOARD_SECURITY_VERSION = "3";
+/**
+ * Identity-header value for dashboards enforcing an explicit bind host, same-origin access, and a
+ * Host allow-list. Bumped whenever an older dashboard must be replaced rather than reused.
+ */
+export const STATS_DASHBOARD_SECURITY_VERSION = "4";
 
 /** IPv4 loopback address shared by the dashboard server and reuse probe. */
 export const STATS_DASHBOARD_HOSTNAME = "127.0.0.1";
 
 /**
  * What answers on the dashboard port:
- * - `reusable`: a current dashboard bound to the requested host.
+ * - `reusable`: a current dashboard bound to the requested host with the same allowed hosts.
+ * - `mismatched`: a current dashboard on the requested host serving other allowed hosts; it may
+ *   be someone's interactive omp, so it keeps running and the caller serves beside it.
  * - `replaceable`: an older dashboard this version may upgrade.
  * - `occupied`: any other HTTP answer.
  * - `unresponsive`: accepted the connection but did not answer in time (busy or hung).
  * - `unreachable`: the connection failed, typically because nothing listens there.
  */
-type StatsDashboardProbe = "reusable" | "replaceable" | "occupied" | "unresponsive" | "unreachable";
+type StatsDashboardProbe = "reusable" | "mismatched" | "replaceable" | "occupied" | "unresponsive" | "unreachable";
 
 /**
  * How {@link startServer} proceeds with the requested port: bind it, reuse the
@@ -48,7 +55,11 @@ type StatsDashboardProbe = "reusable" | "replaceable" | "occupied" | "unresponsi
  */
 export type StatsPortClaim = "bind" | "reuse" | "fallback";
 
-async function probeStatsDashboard(port: number, hostname: string): Promise<StatsDashboardProbe> {
+async function probeStatsDashboard(
+	port: number,
+	hostname: string,
+	allowedHostsKey: string,
+): Promise<StatsDashboardProbe> {
 	const probeHostname = hostname === "0.0.0.0" ? STATS_DASHBOARD_HOSTNAME : hostname === "::" ? "::1" : hostname;
 	const urlHostname = probeHostname.includes(":") ? `[${probeHostname}]` : probeHostname;
 	const signal = AbortSignal.timeout(STATS_PROBE_TIMEOUT_MS);
@@ -62,13 +73,14 @@ async function probeStatsDashboard(port: number, hostname: string): Promise<Stat
 			Number.isSafeInteger(dashboardVersion) &&
 			dashboardVersion > 0 &&
 			dashboardVersion <= Number(STATS_DASHBOARD_SECURITY_VERSION);
-		const reusable =
+		const current =
 			response.status === 200 &&
 			dashboardVersionHeader === STATS_DASHBOARD_SECURITY_VERSION &&
 			response.headers.get(STATS_DASHBOARD_HOSTNAME_HEADER) === hostname &&
 			!response.headers.has("Access-Control-Allow-Origin");
+		const sameAllowedHosts = (response.headers.get(STATS_DASHBOARD_ALLOWED_HOSTS_HEADER) ?? "") === allowedHostsKey;
 		await response.body?.cancel();
-		if (reusable) return "reusable";
+		if (current) return sameAllowedHosts ? "reusable" : "mismatched";
 		return replaceable ? "replaceable" : "occupied";
 	} catch {
 		return signal.aborted ? "unresponsive" : "unreachable";
@@ -284,16 +296,23 @@ async function reclaimStatsPort(port: number, probe: "replaceable" | "occupied")
 	return "bind";
 }
 
-async function claimStatsPort(port: number, hostname: string, ifUnreachable: StatsPortClaim): Promise<StatsPortClaim> {
-	const probe = await probeStatsDashboard(port, hostname);
+async function claimStatsPort(
+	port: number,
+	hostname: string,
+	allowedHostsKey: string,
+	ifUnreachable: StatsPortClaim,
+): Promise<StatsPortClaim> {
+	const probe = await probeStatsDashboard(port, hostname, allowedHostsKey);
 	switch (probe) {
 		case "reusable":
 			return "reuse";
 		case "replaceable":
 		case "occupied":
 			return reclaimStatsPort(port, probe);
+		case "mismatched":
 		case "unresponsive":
-			// Busy or hung: a dashboard stalled mid-ingest must never be stopped.
+			// Mismatched: a current dashboard serving other hosts is left alone.
+			// Unresponsive: busy or hung, a dashboard stalled mid-ingest must never be stopped.
 			return "fallback";
 		case "unreachable":
 			return ifUnreachable;
@@ -305,12 +324,20 @@ async function claimStatsPort(port: number, hostname: string, ifUnreachable: Sta
  * The preflight is needed on platforms that permit wildcard and loopback-specific
  * listeners to coexist on one port.
  */
-export async function prepareStatsPort(port: number, hostname = STATS_DASHBOARD_HOSTNAME): Promise<StatsPortClaim> {
+export async function prepareStatsPort(
+	port: number,
+	hostname = STATS_DASHBOARD_HOSTNAME,
+	allowedHostsKey = "",
+): Promise<StatsPortClaim> {
 	if (port === 0) return "bind";
-	return claimStatsPort(port, hostname, "bind");
+	return claimStatsPort(port, hostname, allowedHostsKey, "bind");
 }
 
 /** Reuse or reclaim a listener found after the server bind reports EADDRINUSE. */
-export async function recoverStatsPort(port: number, hostname = STATS_DASHBOARD_HOSTNAME): Promise<StatsPortClaim> {
-	return claimStatsPort(port, hostname, "fallback");
+export async function recoverStatsPort(
+	port: number,
+	hostname = STATS_DASHBOARD_HOSTNAME,
+	allowedHostsKey = "",
+): Promise<StatsPortClaim> {
+	return claimStatsPort(port, hostname, allowedHostsKey, "fallback");
 }

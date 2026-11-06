@@ -14,13 +14,17 @@ describe("stats dashboard host arguments", () => {
 	it("forwards the real omp stats flags to the dashboard runner", async () => {
 		vi.spyOn(theme, "initTheme").mockResolvedValue();
 		const runStatsCommand = vi.spyOn(statsCli, "runStatsCommand").mockResolvedValue();
-		const command = new Stats(["--host", "::", "--port", "3850"], TEST_CONFIG);
+		const command = new Stats(
+			["--host", "::", "--port", "3850", "--allowed-host", "a.ts.net", "--allowed-host", "*.example.net"],
+			TEST_CONFIG,
+		);
 
 		await command.run();
 
 		expect(runStatsCommand).toHaveBeenCalledWith({
 			port: 3850,
 			host: "::",
+			allowedHosts: ["a.ts.net", "*.example.net"],
 			json: false,
 			summary: false,
 		});
