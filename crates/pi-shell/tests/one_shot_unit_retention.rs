@@ -17,7 +17,7 @@ use pi_shell::{
 	bash::trace::{
 		RunTrace,
 		history::{HISTORY_BYTES, HISTORY_EVENTS, HistoryData},
-		viz::StoredVisualization,
+		viz::{Options as VizOptions, StoredVisualization},
 	},
 	cancel::CancelToken,
 };
@@ -166,27 +166,70 @@ async fn retained_output_of_a_one_shot_source_keeps_its_own_command() {
 	}
 }
 
-/// A source the trace collected and the engine then runs again is announced
-/// again, so its text is back in the table rather than an empty placeholder.
+/// The same source, run once, retired while thousands of other sources run,
+/// and run again: the second run must be announced again and resolve to its
+/// own text rather than to a placeholder with no source.
 #[tokio::test]
-async fn a_repeated_source_is_announced_again_after_collection() {
+async fn a_source_run_again_after_retirement_is_announced_again() {
 	let count = HISTORY_EVENTS / 4;
+	let repeated = "eval 'printf \"repeated %s\\n\" \"$BASH_SOURCE\"'";
 	let script = format!(
-		"for ((i=0;i<{count};i++)); do eval \"printf '%0512d' $i\" >/dev/null; done; eval \
-		 'printf \"last\\n\"'; echo {count}"
+		"{repeated} >/dev/null; for ((i=0;i<{count};i++)); do eval \"printf '%0512d' $i\" \
+		 >/dev/null; done; {repeated}; echo {count}"
 	);
-	let trace = trace(&script, &[], &format!("last\n{count}")).await;
+	let trace = trace(&script, &[], &format!("repeated \n{count}")).await;
 	let snapshot = trace.snapshot();
 	let event = snapshot
 		.history
 		.iter()
-		.find(|event| matches!(&event.data, HistoryData::Output { text, .. } if text.starts_with(b"last")))
-		.expect("the last eval's output");
-	let unit = &snapshot.units[event.u.expect("the last eval resolves to a source") as usize];
+		.rev()
+		.find(|event| matches!(&event.data, HistoryData::Output { text, .. } if text.starts_with(b"repeated")))
+		.expect("the second run of the repeated source produced output");
+	let unit = &snapshot.units[event.u.expect("the second run resolves to a source") as usize];
+	let node = &unit.nodes[event.n.expect("the second run resolves to a node") as usize];
+	let source = unit.source.as_deref().unwrap_or(&snapshot.script);
+	let source = if let Some(at) = unit.at {
+		&source[at as usize..]
+	} else {
+		source
+	};
 	assert!(
-		unit.source
-			.as_deref()
-			.is_some_and(|source| source.contains(&b'l')),
-		"the re-announced source carries its own text"
+		String::from_utf8_lossy(&source[node.lo as usize..node.hi as usize]).contains("repeated"),
+		"the re-announced source carries its own text, not an empty placeholder"
+	);
+}
+
+/// A row the presentation parsed ahead of the engine can be selected and
+/// expanded: it names no compiled unit, so the key/index boundary must leave
+/// its identity alone rather than read it as a source that has gone.
+#[tokio::test]
+async fn a_parsed_ahead_row_can_still_be_selected_and_expanded() {
+	let trace = RunTrace::new("printf 'one'; printf '%s' 'two'");
+	let first: serde_json::Value =
+		serde_json::from_str(&trace.presentation_json(&VizOptions::default()).expect("present"))
+			.expect("presentation json");
+	let node = first["rows"]
+		.as_array()
+		.expect("rows")
+		.iter()
+		.flat_map(|row| row["segments"].as_array().expect("segments"))
+		.find_map(|segment| segment.get("node").filter(|node| !node.is_null()))
+		.expect("a selectable parsed-ahead node")
+		.clone();
+	let options: VizOptions = serde_json::from_value(serde_json::json!({
+		"selectedNode": node,
+		"expandedNodes": [node],
+	}))
+	.expect("presentation options");
+	let second: serde_json::Value =
+		serde_json::from_str(&trace.presentation_json(&options).expect("present")).expect("json");
+	assert_eq!(
+		second["preferences"]["selectedNode"], node,
+		"the selection the renderer offered comes back unchanged"
+	);
+	assert_eq!(
+		second["preferences"]["expandedNodes"],
+		serde_json::json!([node]),
+		"the expanded row the renderer offered is kept"
 	);
 }

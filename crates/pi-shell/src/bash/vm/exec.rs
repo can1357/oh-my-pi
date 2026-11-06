@@ -1427,6 +1427,14 @@ pub(super) fn retire_sources(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) {
 	if let Some(announced) = k.announced.get_mut(&vp.vpid) {
 		announced.retain(|(unit, _)| !retired.contains(unit));
 	}
+	// The origin record exists to give a source's events their parent; a
+	// source nothing can reach has no more events, and an execution that
+	// happens anyway records its origin again at the announcement.
+	if let Some(origins) = k.trace_unit_origins.get_mut(&vp.vpid)
+		&& origins.keys().any(|unit| retired.contains(unit))
+	{
+		std::sync::Arc::make_mut(origins).retain(|unit, _| !retired.contains(unit));
+	}
 	for unit in retired {
 		k.emit(cx, (vp.vpid, vp.mode), vp.runs.front(), EventData::UnitRetired { unit });
 	}

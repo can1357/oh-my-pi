@@ -270,6 +270,8 @@ impl VizSource for StoredVisualization {
 			.unwrap_or(index as u32)
 	}
 
+	// A stored table is read once per presentation of a persisted trace, not
+	// on a poll, and it is bounded by the same caps as the live one.
 	fn unit_position(&self, key: u32) -> Option<usize> {
 		self
 			.trace
@@ -282,23 +284,29 @@ impl VizSource for StoredVisualization {
 
 // Journal indices are snapshot-local. Inspector controls cross that boundary
 // with stable keys, so a removed source cannot redirect an existing selection.
+// A row the presentation parsed ahead of the engine names no compiled unit
+// (`printer::AHEAD`): it has no key to translate and keeps its identity.
 fn indexed_options<'a>(source: &impl VizSource, options: &'a Options) -> Cow<'a, Options> {
 	if options.selected_node.is_none() && options.expanded_nodes.is_empty() {
 		return Cow::Borrowed(options);
 	}
-	let mut indexed = options.clone();
-	indexed.selected_node = indexed.selected_node.and_then(|mut node| {
-		node.unit = source.unit_position(node.unit)? as u32;
-		Some(node)
-	});
-	indexed.expanded_nodes.retain_mut(|node| {
-		if let Some(index) = source.unit_position(node.unit) {
-			node.unit = index as u32;
-			true
-		} else {
-			false
+	let index = |node: &mut model::NodeKey| {
+		if node.unit == printer::AHEAD {
+			return true;
 		}
-	});
+		match source.unit_position(node.unit) {
+			Some(index) => {
+				node.unit = index as u32;
+				true
+			},
+			None => false,
+		}
+	};
+	let mut indexed = options.clone();
+	indexed.selected_node = indexed
+		.selected_node
+		.and_then(|mut node| index(&mut node).then_some(node));
+	indexed.expanded_nodes.retain_mut(index);
 	Cow::Owned(indexed)
 }
 
