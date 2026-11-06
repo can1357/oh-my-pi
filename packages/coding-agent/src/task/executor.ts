@@ -1028,11 +1028,15 @@ export function createMCPProxyTools(mcpManager: MCPManagerApi, scope: MCPToolSco
 						details: { serverName, mcpToolName, isError: true },
 					};
 				}
-				// Attributed to this session, so tools the call makes the server add
-				// reach this session's view and no other's.
-				const release = mcpManager.trackToolCall(scope, toolCallId);
+				// Provider tool-call IDs are unique only within one agent run. Use a
+				// cross-worker invocation token for both tracking and observation so a
+				// sibling's identical provider ID cannot replace this call's attribution.
+				// The proxy's caller still sees the original provider ID; MCP tools use
+				// this internal value only to find their observer's scope.
+				const invocationId = `${toolCallId}:${crypto.randomUUID()}`;
+				const release = mcpManager.trackToolCall(scope, invocationId);
 				try {
-					return await untilAborted(signal, source.execute(toolCallId, params, onUpdate, ctx, signal));
+					return await untilAborted(signal, source.execute(invocationId, params, onUpdate, ctx, signal));
 				} catch (error) {
 					if (error instanceof ToolAbortError) {
 						throw error;
