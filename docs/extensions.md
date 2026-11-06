@@ -978,18 +978,19 @@ workspace—not an OS window) and returns the reported native ID, plus a `warnin
 the provider started the command but could not show it where requested. RPC, ACP,
 print, and headless contexts do not provide this optional method. The request type and
 supported provider set derive from canonical launch capabilities: tmux, Zellij,
-Herdr, CMUX, and Orca are supported; screen and wmux remain recognized by the
-multiplexer taxonomy but are currently unsupported.
+Herdr, CMUX, Orca, and the Herdr app (herdr-core, pane placement only) are supported;
+screen and wmux remain recognized by the multiplexer taxonomy but are currently
+unsupported.
 
 Provider-specific session detection is centralized in
 `@oh-my-pi/pi-tui/terminal-multiplexer`, which registers one module per multiplexer.
 `hasTerminalMultiplexerSession(provider, env)` checks explicit session markers, while
 `classifyTerminalMultiplexer(env)` names the multiplexer hosting the process: session
 markers first, then a `tmux`/`screen` `TERM` fallback, then outer applications such as
-Orca, so a multiplexer running inside Orca wins. `isInsideTerminalMultiplexer(env)` is
-true only when the classified multiplexer owns the screen grid; Orca keeps the
-direct-terminal render path. A classified multiplexer does not prove that a nested
-provider session or a native pane ID exists.
+Orca and the Herdr app, so a multiplexer running inside them wins.
+`isInsideTerminalMultiplexer(env)` is true only when the classified multiplexer owns the
+screen grid; Orca and the Herdr app keep the direct-terminal render path. A classified
+multiplexer does not prove that a nested provider session or a native pane ID exists.
 
 The TUI host injects this capability; extensions do not need to import dispatcher
 code to use it.
@@ -1037,6 +1038,12 @@ Targets are provider-native IDs/refs, with different meanings by placement:
   defaults to worktree `id:<ORCA_WORKTREE_ID>`; an application label alone is
   insufficient to detect an Orca session. Targets, titles, and commands are passed
   as `--flag=value`, so a value starting with `--` stays data.
+- The Herdr app (herdr-core, CLI `hc`) is a separate product from the Herdr TUI and
+  is detected from both `HC_TERMINAL_ID` and `HC_TERMINAL_SOCKET`. It supports pane
+  placement only and takes no target: the new terminal is a child of the calling
+  terminal and copies its `herdr.space`/`herdr.tab` labels from `hc get`, so the app
+  shows it in the same tab. `name` must be 1-32 characters of `a-z`, `0-9`, `-`, `_`;
+  any other name is rejected rather than rewritten.
 - CMUX pane placement targets a surface ID; workspace placement targets a window
   ID. Both targets may be omitted when the corresponding CMUX context is active.
   An explicit surface target is authoritative and is not combined with the ambient
@@ -1071,6 +1078,11 @@ under the temp directory and types only its absolute path. Any interactive shell
 that runs a bare path (POSIX shells, fish, Nushell) launches the exact argv, so
 Herdr requests take no `shellGrammar`. Herdr launches are rejected on Windows.
 
+The Herdr app runs argv directly through `hc run --bg -- <argv>` with `--cwd`, so its
+requests take no `shellGrammar`. The launch passes `--no-notify`, so hc does not type
+an exit note into the calling agent, and `--outlive-parent`, so the new terminal keeps
+running after the calling program exits. Herdr app launches are rejected on Windows.
+
 CMUX `--command` and Orca `terminal split`/`terminal create`
 submit shell command text to the destination's interactive shell rather than
 launching argv directly. Their requests therefore require `shellGrammar: "posix"`.
@@ -1092,7 +1104,8 @@ workspace; CMUX and Orca also reject them in `cwd`, which is embedded in their
 shell command. The restriction is not applied to direct tmux or Zellij argv,
 where argument newlines remain data rather than terminal input.
 
-Herdr, Zellij, and Orca `window` placements create tabs; CMUX creates a workspace.
+Herdr, Zellij, and Orca `window` placements create tabs; CMUX creates a workspace; the
+Herdr app has no `window` placement because hc cannot create a tab.
 Provider-specific fields include pane direction, Zellij floating panes/names,
 Herdr tab labels, and CMUX workspace names. Zellij floating panes cannot specify a
 split direction, and Zellij new-tab creation cannot target a tab. tmux returns
@@ -1103,7 +1116,7 @@ its JSON response. CMUX reports workspace/pane IDs when present, but its JSON
 response may omit an ID, in which case `result.id` is unavailable.
 Orca returns a pane handle at `result.split.handle` or a tab handle at
 `result.terminal.handle`; the top-level JSON `id` is the RPC request ID, not the
-terminal handle.
+terminal handle. The Herdr app returns the terminal `address` from `hc run --json`.
 
 `cwd` must be an absolute path. A request that is not an object or names an unknown
 multiplexer or placement rejects with a `TypeError`. Every other failure, including a

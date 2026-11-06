@@ -1,6 +1,7 @@
 import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { cmuxLaunchProvider } from "./cmux";
 import { herdrLaunchProvider } from "./herdr";
+import { herdrCoreLaunchProvider } from "./herdr-core";
 import { orcaLaunchProvider } from "./orca";
 import { tmuxLaunchProvider } from "./tmux";
 import type { SupportedMultiplexerCapabilities, UnsupportedMultiplexerCapabilities } from "./types";
@@ -32,6 +33,7 @@ export const terminalLaunchProviders = {
 		},
 	},
 	orca: orcaLaunchProvider,
+	"herdr-core": herdrCoreLaunchProvider,
 } as const satisfies Record<
 	TerminalMultiplexer,
 	{ capabilities: SupportedMultiplexerCapabilities | UnsupportedMultiplexerCapabilities }
