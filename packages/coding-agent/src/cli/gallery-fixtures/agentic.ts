@@ -166,13 +166,15 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 			details: {
 				op: "wait",
 				from: "Main",
-				waited: {
-					id: "7181122334455667790",
-					from: "AuthLoader",
-					to: "Main",
-					body: "session-store rename is merged; auth.ts is yours.",
-					ts: FIXTURE_NOW - 30_000,
-				},
+				waited: [
+					{
+						id: "7181122334455667790",
+						from: "AuthLoader",
+						to: "Main",
+						body: "session-store rename is merged; auth.ts is yours.",
+						ts: FIXTURE_NOW - 30_000,
+					},
+				],
 			} satisfies CoordinationDetails,
 		},
 	},

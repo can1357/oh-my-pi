@@ -14,18 +14,25 @@ export function extractProviderRetryHint(
 
 const RETRY_AFTER_HINT = "retry-after-ms=";
 
-export function formatErrorMessageWithRetryAfter(error: unknown, headers?: HeadersLike): string {
-	const message = error instanceof Error ? error.message : JSON.stringify(error);
+export function errorMessageText(error: unknown): string {
+	return error instanceof Error ? error.message : JSON.stringify(error);
+}
+
+export function appendRetryAfterHint(message: string, headers: HeadersLike): string {
 	if (message.includes(RETRY_AFTER_HINT)) {
 		return message;
 	}
 
-	const retryAfterMs = getRetryAfterMsFromHeaders(headers ?? getHeadersFromError(error));
+	const retryAfterMs = getRetryAfterMsFromHeaders(headers);
 	if (retryAfterMs === undefined) {
 		return message;
 	}
 
 	return `${message} ${RETRY_AFTER_HINT}${retryAfterMs}`;
+}
+
+export function formatErrorMessageWithRetryAfter(error: unknown): string {
+	return appendRetryAfterHint(errorMessageText(error), getHeadersFromError(error));
 }
 
 export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undefined {
@@ -41,6 +48,20 @@ export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undef
 	);
 	if (candidates.length === 0) return undefined;
 	return Math.max(...candidates);
+}
+
+/**
+ * The server's explicit `x-should-retry` verdict: `true`/`false` when the
+ * header says so, `undefined` when absent or unrecognised. Non-standard
+ * (Stainless-SDK convention) but emitted by OpenAI, Anthropic, and retrying
+ * gateways; when present it overrides status/text retry heuristics.
+ */
+export function getShouldRetryFromHeaders(headers: HeadersLike): boolean | undefined {
+	if (!headers) return undefined;
+	const value = getHeaderValue(headers, "x-should-retry");
+	if (value === "true") return true;
+	if (value === "false") return false;
+	return undefined;
 }
 
 export function getHeadersFromError(error: unknown): HeadersLike {

@@ -1,5 +1,7 @@
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
+import type { Api, Model, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import { describe, expect, it, spyOn } from "bun:test";
 import {
 	type ApiKeyResolveContext,
@@ -19,6 +21,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import type { ImageContent } from "@oh-my-pi/pi-ai/types";
 import { ConfigurationError, ValidationError } from "@oh-my-pi/pi-ai/error";
+import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { withEnv } from "./helpers";
 
 const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -341,6 +344,46 @@ describe("NativeJudge", () => {
 		expect(result.model).toBe("jev-latest");
 		expect(result.usage.input).toBe(5);
 		expect(result.usage.totalTokens).toBe(6);
+	});
+
+	it("redacts credentials from the state under an active redaction policy", async () => {
+		const token = `ghp_${"aB1".repeat(12)}`;
+		const state = { recent: [{ role: "user", text: `rotate ${token} for deploys` }] };
+		const bodies: string[] = [];
+		const judge = new NativeJudge({
+			apiKey: "ts-key",
+			fetch: async (_url, init) => {
+				bodies.push(String(init?.body));
+				return answered();
+			},
+		});
+
+		await withCredentialRedaction(true, () => judge.judge({ ...request, state }));
+		await withCredentialRedaction(false, () => judge.judge({ ...request, state }));
+
+		expect(bodies[0]).not.toContain(token);
+		expect(bodies[0]).toContain("[github_token_redacted]");
+		expect(bodies[1]).toContain(token);
+	});
+
+	it("sends the default User-Agent unless configured headers override it", async () => {
+		for (const headers of [undefined, { "User-Agent": "custom-judge-client/1.0" }]) {
+			const calls: { init: RequestInit | undefined }[] = [];
+			const judge = new NativeJudge({
+				apiKey: "ts-key",
+				baseUrl: "https://ts.example/",
+				headers,
+				fetch: async (_url, init) => {
+					calls.push({ init });
+					return answered();
+				},
+			});
+
+			await judge.judge(request);
+
+			expect(calls).toHaveLength(1);
+			expect(new Headers(calls[0].init?.headers).get("User-Agent")).toBe(headers?.["User-Agent"] ?? USER_AGENT);
+		}
 	});
 
 	it("requires explicit image opt-in for an unknown direct System One model", async () => {
@@ -1072,6 +1115,56 @@ describe("NativeJudge", () => {
 				expect(wireState.__omp_judgment_images_1).toEqual(states[0].__omp_judgment_images_1);
 			}
 		}
+	});
+
+	it("sends an OpenRouter Decisions model's compat routing and extraBody as the request's provider controls", async () => {
+		const pin = { only: ["typesafe"], allow_fallbacks: false, data_collection: "deny" };
+		// Judgment APIs share the chat compat vocabulary, as models.yml overrides apply it to every API.
+		const decisionsModel = (compat?: OpenAICompat) => {
+			const spec: ModelSpec<Api> = {
+				id: "typesafe/jev-1.14",
+				name: "Jev 1.14",
+				api: "openrouter-decisions",
+				provider: "openrouter",
+				// A relay base URL: the Decisions API is OpenRouter's own, so routing applies off openrouter.ai too.
+				baseUrl: "https://relay.example/agents/openrouter/api/alpha",
+				reasoning: false,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: null,
+				compat,
+			};
+			return buildModel(spec);
+		};
+		const send = async (model: Model) => {
+			let body: Record<string, unknown> = {};
+			const judge = createNativeJudge(model, {
+				apiKey: "or-key",
+				fetch: async (_url, init) => {
+					body = JSON.parse(String(init?.body));
+					return Response.json({
+						model: "typesafe/jev-1.14",
+						answers: { urgent: { type: "noul", noul: 0.7 } },
+						usage: { input_tokens: 10, output_tokens: 2 },
+					});
+				},
+			});
+			await judge.judge(request);
+			// The overlay keeps the encoded request intact.
+			expect(body).toMatchObject({ model: "typesafe/jev-1.14", questions: request.questions });
+			return body;
+		};
+
+		// `extraBody` overlays `openRouterRouting`, as on chat requests: privacy fields only fit there.
+		const configured = await send(
+			decisionsModel({ openRouterRouting: { only: ["fallback-host"] }, extraBody: { provider: pin } }),
+		);
+		expect(configured.provider).toEqual(pin);
+		const routed = await send(decisionsModel({ openRouterRouting: { only: ["typesafe"] } }));
+		expect(routed.provider).toEqual({ only: ["typesafe"] });
+		const unconfigured = await send(decisionsModel());
+		expect(unconfigured).not.toHaveProperty("provider");
 	});
 
 	it("rejects malformed OpenRouter image input before fetching", async () => {

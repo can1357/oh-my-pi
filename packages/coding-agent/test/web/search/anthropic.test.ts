@@ -210,6 +210,27 @@ describe("Anthropic search request body", () => {
 		}
 	});
 
+	it("omits temperature for Haiku 5.5 despite an explicit zero value", async () => {
+		const fixture = createFixture("claude-haiku-5-5");
+		try {
+			expect(fixture.model.compat?.supportsSamplingParams).toBe(false);
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "sampling compatibility",
+				systemPrompt: "Use web search.",
+				temperature: 0,
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch: cap.fetch,
+			});
+
+			expect(cap.body()).not.toHaveProperty("temperature");
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
 	it("preserves temperature for compatible selected models", async () => {
 		const fixture = createFixture("claude-haiku-4-5");
 		try {

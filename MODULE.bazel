@@ -2,7 +2,7 @@
 
 Builds the pi_natives NAPI cdylib for every shipped target with hermetic
 toolchains, replacing cargo-zigbuild/cargo-xwin/sccache plus the hand-rolled
-CI caches with Bazel's content-addressed action cache (see infra/bazel-remote.yaml).
+CI caches with Bazel's content-addressed action cache (see infra/docs/03-caching.md).
 
 Layout:
   //:natives-<target>      release-grade renamed .node artifacts (root BUILD.bazel)
@@ -171,8 +171,8 @@ crate.from_cargo(
     # splice's rustc probe must accept user-level -Z RUSTFLAGS.
     host_tools = "@rust_host_tools_nightly",
     # The root manifest covers all workspace members, including the vendored
-    # brush fork (members so their sources render hermetically; the
-    # [patch.crates-io] entry redirects brush-core's registry dep to it).
+    # crates (members so their sources render hermetically; the
+    # [patch.crates-io] entries redirect registry deps to them).
     manifests = ["//:Cargo.toml"],
     # Exactly the shipped addon triples: crate BUILD files get
     # target_compatible_with selects over this set (defaults omit darwin-x64
@@ -217,6 +217,14 @@ crate.annotation(
     build_script_deps = ["@@//crates/vendor/cfg_aliases:cfg_aliases"],
     crate = "nix",
     version = "0.28.0",
+)
+
+# Same for normal dependencies: grep-printer's edge to the vendored
+# grep-searcher (a workspace member via [patch.crates-io]) is dropped, so its
+# rustc invocation has no `--extern grep_searcher`.
+crate.annotation(
+    crate = "grep-printer",
+    deps = ["@@//crates/vendor/grep-searcher:grep-searcher"],
 )
 
 # Release addons must never pick up a host libpcre2 (Homebrew paths leaked into

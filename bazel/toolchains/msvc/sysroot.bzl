@@ -104,10 +104,10 @@ def _xwin_sysroot_impl(rctx):
     )
     rctx.report_progress("Splatting MSVC CRT + Windows SDK via xwin (first fetch ~1 GiB from the Microsoft CDN)")
 
-    # OMP_XWIN_CACHE_DIR points at a persistent location (CI: the runner-cache
-    # PVC via --repo_env) so ephemeral pods reuse the ~1 GiB CDN download the
-    # repository cache cannot hold. Unset (dev machines): a repo-local cache,
-    # deleted after the --copy splat.
+    # OMP_XWIN_CACHE_DIR points at a persistent location (CI: the cache baked
+    # into the vmon omp-ci template, via --repo_env) so ephemeral runners reuse
+    # the ~1 GiB CDN download the repository cache cannot hold. Unset (dev
+    # machines): a repo-local cache, deleted after the --copy splat.
     cache_dir = rctx.os.environ.get("OMP_XWIN_CACHE_DIR", "")
     ephemeral_cache = cache_dir == ""
     if ephemeral_cache:
@@ -165,8 +165,8 @@ def _xwin_sysroot_impl(rctx):
     # Opt into the repo contents cache. The splat is channel-stable, not
     # bit-reproducible forever (see the module docstring) — caching freezes a
     # known-good splat, which also keeps remote action keys stable across
-    # pods until this file changes or the cache entry ages out (14 d GC).
-    # OMP_XWIN_CACHE_DIR is a predeclared input (environ attr), so kata and
+    # runners until this file changes or the cache entry ages out (14 d GC).
+    # OMP_XWIN_CACHE_DIR is a predeclared input (environ attr), so CI and
     # dev fetches key separate entries.
     return rctx.repo_metadata(reproducible = True)
 

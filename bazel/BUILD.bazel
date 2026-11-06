@@ -1,1 +1,10 @@
 # Namespace package for repo-local Bazel rules (defs.bzl).
+
+package(default_visibility = ["//visibility:public"])
+
+# `-c fastbuild` (the default, and CI's test mode): selects per-crate
+# optimization overrides that mirror Cargo.toml's `[profile.dev.package.*]`.
+config_setting(
+    name = "fastbuild",
+    values = {"compilation_mode": "fastbuild"},
+)

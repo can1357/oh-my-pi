@@ -138,7 +138,7 @@ describe("BashTool ACP terminal routing", () => {
 		const sessionEnvOf = (call: number) =>
 			Object.fromEntries(
 				(createSpy.mock.calls[call]![0].env ?? [])
-					.filter(({ name }) => name === "PI_SESSION_ID" || name === "PI_SESSION_FILE")
+					.filter(({ name }) => name.startsWith("PI_SESSION_") || name === "PI_TOOL_CALL_ID")
 					.map(({ name, value }) => [name, value]),
 			);
 
@@ -147,9 +147,17 @@ describe("BashTool ACP terminal routing", () => {
 		sessionFile = null;
 		await tool.execute("call-env-b", { command: "true" });
 
-		expect(sessionEnvOf(0)).toEqual({ PI_SESSION_ID: "session-a", PI_SESSION_FILE: fileA });
+		expect(sessionEnvOf(0)).toEqual({
+			PI_SESSION_ID: "session-a",
+			PI_SESSION_FILE: fileA,
+			PI_TOOL_CALL_ID: "call-env-a",
+		});
 		// Empty, not absent: an env overlay cannot unset a stale value inherited from a parent omp.
-		expect(sessionEnvOf(1)).toEqual({ PI_SESSION_ID: "session-b", PI_SESSION_FILE: "" });
+		expect(sessionEnvOf(1)).toEqual({
+			PI_SESSION_ID: "session-b",
+			PI_SESSION_FILE: "",
+			PI_TOOL_CALL_ID: "call-env-b",
+		});
 	});
 
 	it("extracts graphics from cumulative terminal snapshots without leaking escapes", async () => {

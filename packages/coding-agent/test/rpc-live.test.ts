@@ -12,6 +12,8 @@ import { readLines, removeWithRetries } from "@oh-my-pi/pi-utils";
 class FakeLiveSession implements RpcLiveSession {
 	muted = false;
 	stopCalls = 0;
+	/** What the controller reports once started; `undefined` models a session that ended first. */
+	sdpAnswer: string | undefined;
 	readonly started = Promise.withResolvers<void>();
 	#stopped: Promise<void> | undefined;
 	constructor(readonly options: LiveSessionControllerOptions) {}
@@ -119,6 +121,26 @@ describe("RpcLiveBridge", () => {
 		expect(frames.at(-1)).toEqual({ type: "live_end" });
 	});
 
+	test("an sdpOffer session reaches the controller and resolves with its SDP answer", async () => {
+		const { bridge, sessions } = harness();
+		const starting = bridge.start({ sdpOffer: "v=0 offer" });
+		const live = sessions[0]!;
+		expect(live.options.sdpOffer).toBe("v=0 offer");
+		live.sdpAnswer = "v=0 answer";
+		live.started.resolve();
+		expect(await starting).toEqual({ voice: "sol", sdpAnswer: "v=0 answer" });
+		expect(bridge.active).toBe(true);
+	});
+
+	test("an sdpOffer session that ends before its answer exists rejects and releases the slot", async () => {
+		const { bridge, frames, sessions } = harness();
+		const starting = bridge.start({ sdpOffer: "v=0 offer" });
+		sessions[0]!.started.resolve();
+		await expect(starting).rejects.toThrow("stopped before its SDP answer");
+		expect(bridge.active).toBe(false);
+		expect(frames.at(-1)).toEqual({ type: "live_end" });
+	});
+
 	test("mute sets or toggles and fails without a session", async () => {
 		const { bridge, live } = await startedBridge();
 		expect(bridge.setMuted()).toEqual({ muted: true });
@@ -213,8 +235,17 @@ describe("live commands over RPC", () => {
 				command: "live_stop",
 				success: true,
 			});
-			expect(await command({ type: "live_start", instructions: "Hey {{firstName}}" })).toEqual({
+			expect(await command({ type: "live_connect", sdpOffer: "v=0 offer" })).toEqual({
 				id: "4",
+				type: "response",
+				command: "live_connect",
+				success: true,
+				data: { voice: "sol", sdpAnswer: "answer to v=0 offer" },
+			});
+			expect(await command({ type: "live_stop" })).toMatchObject({ success: true });
+			seen.length = 0;
+			expect(await command({ type: "live_start", instructions: "Hey {{firstName}}" })).toEqual({
+				id: "6",
 				type: "response",
 				command: "live_start",
 				success: true,
@@ -229,6 +260,12 @@ describe("live commands over RPC", () => {
 				command: "live_start",
 				success: false,
 				error: "A live session is already active",
+			});
+			// Without an offer, live_connect must fail at the boundary, not fall back to host audio.
+			expect(await command({ type: "live_connect" })).toMatchObject({
+				command: "live_connect",
+				success: false,
+				error: "live_connect requires a non-empty sdpOffer",
 			});
 			expect(await command({ type: "live_mute" })).toMatchObject({ success: true, data: { muted: true } });
 			expect(await command({ type: "live_mute", muted: false })).toMatchObject({ data: { muted: false } });

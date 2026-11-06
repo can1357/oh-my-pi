@@ -594,6 +594,20 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).toMatch(/^\*\d+:.*beta needle/m);
 	});
 
+	it("searches a local:// directory listed beside a `!glob` exclusion", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(path.join(localRoot, "notes"), { recursive: true });
+		await Bun.write(path.join(localRoot, "notes", "a.md"), "kept needle\n");
+		await Bun.write(path.join(localRoot, "notes", "a.test.md"), "excluded needle\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+
+		const result = await new GrepTool(createSession()).execute("local-exclude", {
+			pattern: "needle",
+			path: "local://notes;!*.test.md",
+		});
+		expect(result.details?.files).toEqual(["local://notes/a.md"]);
+	});
+
 	it("runs ast_grep over a local:// file", async () => {
 		const localRoot = path.join(artifactsDir, "local");
 		await fs.mkdir(localRoot, { recursive: true });
@@ -778,12 +792,14 @@ describe("GrepTool internal URL resolution", () => {
 		} as CapabilityResult<unknown>);
 		vi.spyOn(sshFileTransfer, "readRemoteFile").mockRejectedValue(new Error("Is a directory"));
 		vi.spyOn(sshFileTransfer, "statRemotePath").mockResolvedValue("directory");
-		const listSpy = vi.spyOn(sshFileTransfer, "listRemoteDir").mockResolvedValue([]);
+		// Unreadable directories still fail; their rendered listing text must
+		// never become a successful searchable document.
+		const listSpy = vi.spyOn(sshFileTransfer, "listRemoteDir").mockRejectedValue(new Error("Permission denied"));
 		const tool = new GrepTool(createSession());
 		await expect(tool.execute("ssh-dir-search", { pattern: "x", path: "ssh://h/etc" })).rejects.toThrow(
-			/ssh:\/\/h\/etc(: Operation not supported| lists only through the read tool)/,
+			/Permission denied|Input\/output error/i,
 		);
-		expect(listSpy).not.toHaveBeenCalled();
+		expect(listSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("searches an IPv6 ssh:// file instead of rejecting the brackets as a glob", async () => {

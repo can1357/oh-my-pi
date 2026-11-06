@@ -331,7 +331,8 @@ export function buildSessionContext(
 			// recorded yet. Newer sessions always record an explicit default
 			// model_change at the start of the conversation, so this branch is
 			// only used to keep pre-model_change sessions working.
-			if (!hasExplicitDefaultModel) {
+			// Claude Code's synthetic API errors retain their placeholder model in history, not as a selection.
+			if (!hasExplicitDefaultModel && entry.message.model !== "<synthetic>") {
 				models.default = `${entry.message.provider}/${entry.message.model}`;
 			}
 		} else if (entry.type === "compaction") {

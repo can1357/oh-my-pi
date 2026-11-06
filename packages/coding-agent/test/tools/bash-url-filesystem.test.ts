@@ -153,3 +153,35 @@ describe("bash internal URLs through the shell filesystem", () => {
 		expect(isError).toBe(true);
 	});
 });
+
+describe("bash replies through out://", () => {
+	it("carries each closed redirect as a reply, live and in the final result, without touching the output", async () => {
+		const frames: unknown[] = [];
+		const result = await new BashTool({ ...session, tuiTranscript: true }).execute(
+			"call",
+			{ command: "printf '**first**\\n' > out://; echo between; echo second >> out://" },
+			undefined,
+			update => frames.push(update.details),
+		);
+
+		expect(result.content.find(c => c.type === "text")?.text).toBe("between\n");
+		expect(result.details?.replies).toEqual(["**first**\n", "second\n"]);
+		// The first reply reaches the card while the command still runs.
+		expect(frames).toContainEqual({ replies: ["**first**\n"] });
+	});
+
+	it("drops an oversize reply instead of showing a truncated one, and refuses reads", async () => {
+		const big = await new BashTool({ ...session, tuiTranscript: true }).execute("call", {
+			// `yes` rather than /dev/zero, which Windows lacks.
+			command: "yes a | head -c 70000 | tr '\\n' a > out://; echo status=$?",
+		});
+		// Unix spells the rejected write by its errno text; Windows has no EFBIG errno and keeps the code.
+		const text = big.content.find(c => c.type === "text")?.text;
+		expect(text).toMatch(/File too large|EFBIG/);
+		expect(text).toContain("status=1");
+		expect(big.details?.replies).toBeUndefined();
+
+		const read = await run("cat out://; echo status=$?");
+		expect(read.text).toContain("status=1");
+	});
+});

@@ -2,22 +2,19 @@
  * Descriptors omp holds for its own lifetime — session/advisor transcripts and
  * the rotating log — must not reach the commands the bash tool runs.
  *
- * The bash tool executes through the natives brush shell, which `fork`/`exec`s
+ * The bash tool executes through the natives embedded shell, which spawns
  * external commands and therefore hands every inheritable descriptor to them
  * (the same property pinned by `config-value-fd-inheritance.test.ts`). Bun's
- * `fs.open*` omitted `O_CLOEXEC` where libuv adds it (Bun 1.4.3 started adding
- * it; older Bun still satisfies the `bun@>=1.4` pin), so before #13224 a
- * command — or any daemon it started — held a writable handle to the session
- * it was launched from for its whole life.
+ * `fs.open*` omitted `O_CLOEXEC` where libuv adds it until Bun 1.4.3, so before
+ * #13224 a command — or any daemon it started — held a writable handle to the
+ * session it was launched from for its whole life.
  *
  * Oracle: list the child's descriptor table. `sh -c` is required — a bare `ls`
  * resolves to an in-process builtin, whose `$$` is omp itself. The scenario runs
  * in a spawned bun that receives a control descriptor as fd 3 the way a
  * launcher passes one: an extra stdio entry, `dup2`'d in without close-on-exec
  * whatever the Bun version's `fs.open` defaults are. It must reach the listed
- * child, so the assertions cannot pass vacuously. /proc makes this Linux-only;
- * the helper's flag handling is covered on every platform by
- * `packages/utils/test/fs-open.test.ts`.
+ * child, so the assertions cannot pass vacuously. /proc makes this Linux-only.
  */
 import { afterAll, expect, test } from "bun:test";
 import * as fs from "node:fs";

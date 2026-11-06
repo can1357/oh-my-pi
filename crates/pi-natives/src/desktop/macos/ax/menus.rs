@@ -211,7 +211,7 @@ fn with_window_menu<T>(
 			&& read_leaves_focus(key_focus(pid), wid, skylight::window_parent);
 		let prepared = enter_menu_context(access, || {
 			let prepared =
-				make_key_in_background(&source()?, pid, wid, window, entry_front, overlay, visit)?;
+				make_key_in_background(&*source()?, pid, wid, window, entry_front, overlay, visit)?;
 			// The user may have brought the app forward while its key window
 			// settled.
 			recheck_background(
@@ -516,7 +516,7 @@ mod tests {
 		// to 1.2 s; the read waits for the change instead of returning that.
 		let reads = Cell::new(0);
 		let read = || {
-			reads.set(reads.get() + 1);
+			reads.update(|v| v + 1);
 			Ok(reads.get() >= 3)
 		};
 		let changed = |first: &bool, now: &bool| first != now;
