@@ -1965,6 +1965,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 			modelRegistry: {
 				getApiKey: async () => "test-key",
 				getAvailable: () => [],
+				getProviderModels: () => (agent.state.model ? [agent.state.model] : []),
 				find: () => agent.state.model,
 				hasConfiguredAuth: () => true,
 			} as never,
