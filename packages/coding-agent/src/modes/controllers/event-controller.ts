@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -1011,8 +1012,7 @@ export class EventController {
 		const restarted = this.#pendingMessageRestart;
 		this.#pendingMessageRestart = false;
 		if (restarted && event.assistantMessageEvent.type !== "start") {
-			this.#retractStreamedToolPreviews();
-			await this.handleEvent({ type: "message_start", message: event.message });
+			await this.#restartAssistantStream(event.message);
 		}
 		await this.handleEvent(event);
 	}
@@ -1595,6 +1595,11 @@ export class EventController {
 		if (text) vocalizer.speak(text);
 	}
 
+	async #restartAssistantStream(message: AgentMessage): Promise<void> {
+		this.#retractStreamedToolPreviews();
+		await this.handleEvent({ type: "message_start", message });
+	}
+
 	#retractStreamedToolPreviews(): void {
 		// A provider replay can abandon previews without ever executing them.
 		// No result will settle those cards; leaving one pins all later history.
@@ -1620,16 +1625,20 @@ export class EventController {
 			this.#vocalizeDelta(event);
 		}
 		if (event.assistantMessageEvent?.type === "start") {
-			this.#retractStreamedToolPreviews();
-			await this.#handleMessageStart({ type: "message_start", message: event.message });
+			await this.#restartAssistantStream(event.message);
 		}
-		if (this.ctx.streamingComponent && event.message.role === "assistant") {
-			const unlockedThinkingVisibility = this.ctx.noteDisplayableThinkingContent(event.message);
+		if (event.message.role === "assistant") await this.syncAssistantMessage(event.message);
+	}
+
+	/** Resync a cumulative snapshot without replay cleanup or speech side effects. */
+	async syncAssistantMessage(message: AssistantMessage): Promise<void> {
+		if (this.ctx.streamingComponent) {
+			const unlockedThinkingVisibility = this.ctx.noteDisplayableThinkingContent(message);
 			if (unlockedThinkingVisibility) {
 				this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
 				this.#streamingReveal.resyncVisibility();
 			}
-			this.ctx.streamingMessage = event.message;
+			this.ctx.streamingMessage = message;
 			const timeline = splitAssistantMessageToolTimeline(this.ctx.streamingMessage);
 			this.#streamingReveal.setTarget(timeline.beforeTools, timeline.hasToolCalls);
 

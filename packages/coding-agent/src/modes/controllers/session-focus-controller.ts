@@ -189,11 +189,7 @@ export class SessionFocusController {
 					await this.ctx.eventController.handleEvent({ type: "message_start", message });
 					if (generation !== this.#attachGeneration) return;
 				}
-				await this.ctx.eventController.handleEvent({
-					type: "message_update",
-					message,
-					assistantMessageEvent: { type: "start", partial: message },
-				});
+				await this.ctx.eventController.syncAssistantMessage(message);
 				if (generation === this.#attachGeneration) this.ctx.eventController.restorePendingToolResults();
 			};
 			this.ctx.unsubscribe = target.subscribe(async event => {
