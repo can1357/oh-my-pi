@@ -154,16 +154,26 @@ interface TrackScan {
 // ---------------------------------------------------------------------------
 // Path containment + transcript IO
 
-/** Resolve a client-supplied transcript path, enforcing sessions-root containment. */
-function resolveSessionPath(fileParam: string): string {
+/**
+ * Resolve a client-supplied transcript path, enforcing sessions-root containment. Containment is
+ * checked on real paths and symlinks inside the root are refused, so a link cannot reach a file
+ * outside it. ENOENT passes through for the caller's 404 mapping.
+ */
+async function resolveSessionPath(fileParam: string): Promise<string> {
+	const sessionsDir = getSessionsDir();
 	const resolved = path.resolve(fileParam);
-	const rel = path.relative(getSessionsDir(), resolved);
+	const rel = path.relative(sessionsDir, resolved);
 	if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
 		throw new TracePathError(`Path is outside the sessions directory: ${fileParam}`);
 	}
 	const base = path.basename(resolved);
 	if (!base.endsWith(".jsonl") && !base.endsWith(".jsonl.gz")) {
 		throw new TracePathError(`Not a session transcript: ${fileParam}`);
+	}
+	// The root itself may legitimately live behind a symlink; anything below it may not.
+	const realRoot = await fs.realpath(sessionsDir);
+	if ((await fs.realpath(resolved)) !== path.join(realRoot, rel)) {
+		throw new TracePathError(`Path is outside the sessions directory: ${fileParam}`);
 	}
 	return resolved;
 }
@@ -831,7 +841,7 @@ async function readTraceFingerprint(resolved: string): Promise<TraceFingerprint>
  */
 export async function traceFingerprintForEtag(fileParam: string): Promise<TraceFingerprint | undefined> {
 	try {
-		return await readTraceFingerprint(resolveSessionPath(fileParam));
+		return await readTraceFingerprint(await resolveSessionPath(fileParam));
 	} catch {
 		return undefined;
 	}
@@ -850,7 +860,7 @@ export function traceMemoForTests(): { file: string; mtimeMs: number } | undefin
  * file (its ETag pre-check), sparing a second walk.
  */
 export async function buildSessionTrace(fileParam: string, fingerprint?: TraceFingerprint): Promise<SessionTrace> {
-	const resolved = resolveSessionPath(fileParam);
+	const resolved = await resolveSessionPath(fileParam);
 	const memo = traceMemo?.file === resolved ? traceMemo.entry : undefined;
 	// Pre-build child fingerprint on EVERY path (hit check and rebuild
 	// alike): the post-build race guard compares against this, so a child
@@ -1056,10 +1066,10 @@ function assembleSessionTrace(
 
 /** Fetch one full journal entry by id from a transcript, for the span drawer. */
 export async function getTraceEntry(fileParam: string, entryId: string): Promise<SessionEntry | null> {
-	const resolved = resolveSessionPath(fileParam);
 	let bytes: Uint8Array;
 	try {
-		bytes = await readTranscript(resolved);
+		// Resolution realpaths the transcript, so a vanished one fails here with ENOENT too.
+		bytes = await readTranscript(await resolveSessionPath(fileParam));
 	} catch (err) {
 		if (isEnoent(err)) return null;
 		throw err;

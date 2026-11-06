@@ -582,6 +582,22 @@ describe("buildSessionTrace", () => {
 			TracePathError,
 		);
 	});
+
+	it("refuses a symlink inside the sessions root that points outside it", async () => {
+		await writeFixture();
+		const outside = path.join(path.dirname(getSessionsDir()), `outside-${Date.now()}`);
+		await Bun.write(
+			path.join(outside, "secret.jsonl"),
+			`${JSON.stringify({ type: "title", v: 1, title: "secret" })}\n`,
+		);
+		const dirLink = path.join(getSessionsDir(), "linked-dir");
+		const fileLink = path.join(getSessionsDir(), "linked.jsonl");
+		await fs.symlink(outside, dirLink);
+		await fs.symlink(path.join(outside, "secret.jsonl"), fileLink);
+		await expect(buildSessionTrace(fileLink)).rejects.toThrow(TracePathError);
+		await expect(buildSessionTrace(path.join(dirLink, "secret.jsonl"))).rejects.toThrow(TracePathError);
+		await expect(getTraceEntry(fileLink, "x")).rejects.toThrow(TracePathError);
+	});
 });
 
 describe("buildSessionTraceFromSnapshots", () => {
@@ -678,6 +694,13 @@ describe("getTraceEntry", () => {
 		const entry = await getTraceEntry(rootFile, "a1");
 		expect(entry).toMatchObject({ type: "message", id: "a1" });
 		expect(await getTraceEntry(rootFile, "nope")).toBeNull();
+	});
+
+	it("returns null for a transcript that vanished inside the sessions root", async () => {
+		// Resolution realpaths the file; a missing one must still map to 404, not a generic 500.
+		const rootFile = await writeFixture();
+		await fs.rm(rootFile);
+		expect(await getTraceEntry(rootFile, "a1")).toBeNull();
 	});
 });
 

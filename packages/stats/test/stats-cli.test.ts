@@ -7,10 +7,17 @@ describe("standalone stats CLI", () => {
 		expect(parseStandaloneStatsArgs([])).toEqual({
 			port: 3847,
 			host: "127.0.0.1",
+			allowedHosts: [],
 			json: false,
 			sync: false,
 			help: false,
 		});
+	});
+
+	it("collects repeated --allowed-host values", () => {
+		expect(
+			parseStandaloneStatsArgs(["--allowed-host", "a.ts.net", "--allowed-host", "*.example.net"]).allowedHosts,
+		).toEqual(["a.ts.net", "*.example.net"]);
 	});
 
 	it("forwards explicit bind hosts and formats IPv6 dashboard URLs", () => {
