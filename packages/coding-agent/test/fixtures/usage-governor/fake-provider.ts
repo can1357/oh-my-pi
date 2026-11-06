@@ -16,7 +16,7 @@
 export const WINDOW_MS = 60_000;
 export const WEEK_MS = 7 * 24 * 60 * 60_000;
 
-export type FakeProviderId = "govplan" | "govplan-g";
+export type FakeProviderId = "govplan" | "govplan-g" | "govplan-h";
 
 /** Static description of one account the fake serves. */
 export interface FakeAccountSpec {
@@ -38,7 +38,14 @@ export interface FakeAccountSpec {
 	/** Weekly used fraction; static, never incremented by sends. */
 	weeklyUsedFraction?: number;
 	/** Banked resets served with the usage report; `usable` marks them redeemable now. */
-	bankedResets?: { count: number; usable: boolean };
+	bankedResets?: {
+		count: number;
+		usable: boolean;
+		eligible?: boolean;
+		observedAgoMs?: number;
+		expiresInMs?: number;
+		clears?: string[];
+	};
 	/** Paid overage balance, separate from the included renewable window and banked resets. */
 	creditBalance?: number;
 	/** Usage endpoint answers 500 while true. */
@@ -133,19 +140,28 @@ function usageReport(account: AccountState, nowMs: number): Record<string, unkno
 		});
 	}
 	if (account.bankedResets) {
-		const { count, usable } = account.bankedResets;
+		const {
+			count,
+			usable,
+			eligible = usable,
+			observedAgoMs = 0,
+			expiresInMs = 24 * 60 * 60_000,
+			clears = ["requests-60s"],
+		} = account.bankedResets;
 		report.resetCredits = {
 			availableCount: count,
 			redeemableCount: usable ? count : 0,
-			eligible: usable,
-			reason: usable ? undefined : "not eligible",
+			eligible,
+			observedAt: nowMs - observedAgoMs,
+			reason: eligible ? undefined : "not eligible",
 			credits: Array.from({ length: count }, (_, index) => ({
 				id: `credit-${account.label}-${index}`,
 				title: "Banked reset",
 				usable,
+				remainingCount: 1,
 				requiresLimit: true,
-				clears: ["requests-60s"],
-				expiresAt: new Date(nowMs + 24 * 60 * 60_000).toISOString(),
+				clears,
+				expiresAt: new Date(nowMs + expiresInMs).toISOString(),
 				status: "available",
 			})),
 		};

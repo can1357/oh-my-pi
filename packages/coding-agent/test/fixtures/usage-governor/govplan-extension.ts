@@ -25,10 +25,12 @@ export default function govplanExtension(pi: ExtensionAPI): void {
 			});
 		}
 		if (!event.prompt.includes("WARM_FALLBACK")) return;
-		await ctx.modelRegistry.authStorage.usage.reports({
-			provider: "govplan-g",
-			baseUrlResolver: provider => ctx.modelRegistry.getProviderBaseUrl(provider),
-		});
+		for (const provider of ["govplan-g", "govplan-h"] as const) {
+			await ctx.modelRegistry.authStorage.usage.reports({
+				provider,
+				baseUrlResolver: candidate => ctx.modelRegistry.getProviderBaseUrl(candidate),
+			});
+		}
 	});
 
 	pi.registerTool({
@@ -47,7 +49,7 @@ export default function govplanExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	for (const provider of ["govplan", "govplan-g"] as const) {
+	for (const provider of ["govplan", "govplan-g", "govplan-h"] as const) {
 		const usage: UsageProvider = {
 			id: provider,
 			governorAllowance: params => {

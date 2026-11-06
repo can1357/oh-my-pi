@@ -70,7 +70,7 @@ export function writeScenarioConfig(agentDir: string, settings: ScenarioSettings
 				"apple",
 				"lm-studio",
 			]),
-		].filter(provider => provider !== "govplan" && provider !== "govplan-g"),
+		].filter(provider => provider !== "govplan" && provider !== "govplan-g" && provider !== "govplan-h"),
 		modelRoles: settings.modelRoles ?? { default: "govplan/m", task: "govplan-g/m" },
 		retry: {
 			usageReservePct: 10,

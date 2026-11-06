@@ -370,6 +370,110 @@ describe("usage governor CLI proof: scenarios", () => {
 		}
 	}, 60_000);
 
+	test("fallback tie-break uses only fresh, eligible, covering banked reset expiry", async () => {
+		const covering = ["requests-60s", "requests-7d"];
+		const valid = { count: 1, usable: true, clears: covering };
+		const cases: Array<{
+			name: string;
+			first: FakeAccountSpec["bankedResets"];
+			second: FakeAccountSpec["bankedResets"];
+			expected: string;
+		}> = [
+			{
+				name: "earlier second",
+				first: { ...valid, expiresInMs: 7_200_000 },
+				second: { ...valid, expiresInMs: 3_600_000 },
+				expected: "second",
+			},
+			{
+				name: "earlier first",
+				first: { ...valid, expiresInMs: 3_600_000 },
+				second: { ...valid, expiresInMs: 7_200_000 },
+				expected: "first",
+			},
+			{
+				name: "stale",
+				first: { ...valid, expiresInMs: 7_200_000 },
+				second: { ...valid, expiresInMs: 3_600_000, observedAgoMs: 86_400_000 },
+				expected: "first",
+			},
+			{
+				name: "ineligible",
+				first: { ...valid, expiresInMs: 7_200_000 },
+				second: { ...valid, expiresInMs: 3_600_000, eligible: false },
+				expected: "first",
+			},
+			{
+				name: "unusable",
+				first: { ...valid, expiresInMs: 7_200_000 },
+				second: { ...valid, usable: false, eligible: true, expiresInMs: 3_600_000 },
+				expected: "first",
+			},
+			{
+				name: "expired",
+				first: { ...valid, expiresInMs: 7_200_000 },
+				second: { ...valid, expiresInMs: -3_600_000 },
+				expected: "first",
+			},
+			{
+				name: "empty",
+				first: { ...valid, expiresInMs: 7_200_000 },
+				second: { ...valid, count: 0, expiresInMs: 3_600_000 },
+				expected: "first",
+			},
+			{
+				name: "uncovered",
+				first: { ...valid, expiresInMs: 7_200_000 },
+				second: { ...valid, expiresInMs: 3_600_000, clears: ["requests-60s"] },
+				expected: "first",
+			},
+			{ name: "absent", first: undefined, second: undefined, expected: "first" },
+		];
+		for (const scenario of cases) {
+			const proof = await GovernorProof.create(
+				[
+					account("govplan", "primary", { usedFraction: 0.8, resetInMs: 58_000 }),
+					account("govplan-g", "first", { perRequest: 0, resetInMs: 58_000, bankedResets: scenario.first }),
+					account("govplan-h", "second", { perRequest: 0, resetInMs: 58_000, bankedResets: scenario.second }),
+				],
+				{
+					enabled: true,
+					roleProtection: "off",
+					modelRoles: { default: "govplan/m", task: "govplan/m" },
+					fallbackChains: { default: ["govplan-g/m", "govplan-h/m"], task: [] },
+				},
+			);
+			try {
+				const result = await proof.runOmp(["-p", `WARM_FALLBACK reset ${scenario.name}`], 30_000);
+				expect(result.exitCode).toBe(0);
+				expect(proof.chats().map(record => record.label)).toEqual([scenario.expected]);
+				for (const label of ["first", "second"]) {
+					expect(proof.fake.records.some(record => record.kind === "usage" && record.label === label)).toBe(true);
+				}
+				expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
+				const db = new Database(path.join(proof.agentDir, "agent.db"));
+				try {
+					expect(db.query("SELECT * FROM auth_credential_blocks").all()).toEqual([]);
+					db.run("BEGIN");
+					try {
+						db.run(
+							"INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at) SELECT id, 'fixture', 'fixture', ?, ? FROM auth_credentials LIMIT 1",
+							[Date.now() + 60_000, Date.now()],
+						);
+						expect(db.query("SELECT * FROM auth_credential_blocks").all()).toHaveLength(1);
+					} finally {
+						db.run("ROLLBACK");
+					}
+				} finally {
+					db.close();
+				}
+				assertConfined(proof);
+			} finally {
+				proof.close();
+			}
+		}
+	}, 240_000);
+
 	test("a flexible role protects a constrained role's shared account", async () => {
 		for (const roleProtection of ["prefer-alternatives", "off"] as const) {
 			const proof = await GovernorProof.create(
@@ -702,6 +806,48 @@ describe("usage governor CLI proof: stored API key", () => {
 			}
 		}, 60_000);
 	}
+
+	test("stored API key routes to a verified included API key fallback", async () => {
+		const primary = account("govplan", "primary-key", { authType: "api_key", usedFraction: 0.8, resetInMs: 58_000 });
+		const fallback = account("govplan-g", "fallback-key", {
+			authType: "api_key",
+			usedFraction: 0,
+			resetInMs: 58_000,
+		});
+		const proof = await GovernorProof.create([primary, fallback], {
+			enabled: true,
+			roleProtection: "off",
+			modelRoles: { default: "govplan/m", task: "govplan/m" },
+			fallbackChains: { default: ["govplan-g/m"], task: [] },
+		});
+		try {
+			const db = new Database(path.join(proof.agentDir, "agent.db"), { readonly: true });
+			let row: { id: number; credential_type: string } | null;
+			try {
+				row = db
+					.query<{ id: number; credential_type: string }, [string]>(
+						"SELECT id, credential_type FROM auth_credentials WHERE provider = ?",
+					)
+					.get("govplan-g");
+			} finally {
+				db.close();
+			}
+			expect(row?.credential_type).toBe("api_key");
+			const result = await proof.runOmp(["-p", "WARM_API_KEY WARM_FALLBACK included fallback"], 30_000);
+			expect(result.exitCode).toBe(0);
+			expect(proof.fake.records.some(record => record.kind === "usage" && record.bearer === fallback.bearer)).toBe(
+				true,
+			);
+			expect(proof.chats().map(record => record.bearer)).toEqual([fallback.bearer]);
+			const reservations = proof.readLedger().reservations.filter(item => item.provider === "govplan-g");
+			expect(reservations.length).toBeGreaterThan(0);
+			expect(reservations.every(item => item.credentialId === row!.id)).toBe(true);
+			expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
+			assertConfined(proof);
+		} finally {
+			proof.close();
+		}
+	}, 60_000);
 
 	for (const allowance of ["unknown", "metered"] as const) {
 		test(`stored API key ${allowance} fallback cannot proactively spend`, async () => {

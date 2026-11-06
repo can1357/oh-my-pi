@@ -441,6 +441,78 @@ export class TurnRecovery {
 		return { model, apiKey: () => undefined, resolved: { ...resolved, usageRouteBinding: binding } };
 	}
 
+	/** Select a verified sibling of the failed bound route, without changing session affinity. */
+	async #switchGovernedSibling(
+		model: Model,
+		failedCredentialId: number | undefined,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		const pending = this.#governedRoute;
+		if (!pending || failedCredentialId === undefined || pending.credentialId !== failedCredentialId) return false;
+		if (
+			pending.target.provider !== model.provider ||
+			pending.target.modelId !== model.id ||
+			pending.target.baseUrl !== model.baseUrl
+		)
+			return false;
+		if (this.#host.modelRegistry.authStorage.sessions.selected(model.provider, this.#host.sessionId())?.explicit)
+			return false;
+		const owner = pending.owner;
+		const routing = this.#host.usageRouting;
+		const evaluation = await routing?.evaluate(owner, this.#host.sessionId(), signal);
+		const plan =
+			owner.kind === "role"
+				? evaluation?.scope.roles.find(item => item.role === owner.role)
+				: evaluation?.scope.models?.find(item => item.selector === owner.selector);
+		const target = plan?.targets.find(
+			item =>
+				item.selector === pending.target.selector &&
+				item.provider === model.provider &&
+				item.modelId === model.id &&
+				item.baseUrl === model.baseUrl,
+		);
+		if (!evaluation || !target || signal?.aborted) return false;
+		const accounts = evaluation.accounts
+			.filter(
+				account =>
+					account.selector === target.selector &&
+					account.credentialId !== failedCredentialId &&
+					account.eligibility === "eligible" &&
+					account.allowance === "included" &&
+					account.state === "open" &&
+					account.quotaKeys.length > 0,
+			)
+			.sort(
+				(a, b) =>
+					a.protectedFor.length - b.protectedFor.length ||
+					(a.resetTieBreakExpiresAtMs ?? Infinity) - (b.resetTieBreakExpiresAtMs ?? Infinity) ||
+					a.credentialId - b.credentialId,
+			);
+		for (const account of accounts) {
+			signal?.throwIfAborted();
+			const candidate: UsageRouteCandidate = {
+				...pending,
+				scopeId: evaluation.scope.id,
+				revision: evaluation.scope.revision,
+				target,
+				credentialId: account.credentialId,
+				intent: "error",
+			};
+			let prepared: PreparedModelAuth | undefined;
+			try {
+				prepared = await this.#resolveGovernedRoute(candidate, model, signal);
+			} catch {
+				signal?.throwIfAborted();
+				continue;
+			}
+			if (!prepared || this.#governedRoute !== pending || !modelsAreEqual(this.#host.model(), model)) continue;
+			this.#governedRoute = candidate;
+			this.#governedRouteStale = false;
+			return true;
+		}
+		return false;
+	}
+
 	async prepareGovernedModelCall(
 		model: Model,
 		resolveCurrent: () => Promise<PreparedModelAuth>,
@@ -1037,7 +1109,10 @@ export class TurnRecovery {
 					},
 				);
 				return {
-					switchedCredential: outcome.switched,
+					switchedCredential:
+						outcome.switched && this.#governedRoute
+							? await this.#switchGovernedSibling(activeModel, message.credentialId)
+							: outcome.switched,
 					retryAfterMs,
 					retryAtMs: outcome.retryAtMs,
 					blockedUntilMs: outcome.blockedUntilMs,
@@ -3174,12 +3249,19 @@ export class TurnRecovery {
 						credentialId: message.credentialId,
 						modelId: currentModel.id,
 						signal: rotateAbortController.signal,
-						waitForSibling: rotationsRemaining > 0,
+						waitForSibling: rotationsRemaining > 0 && !this.#governedRoute,
 					})
 				).switched;
 				// Rotation is advisory: expired blocks or a repeatedly offered sibling
 				// must not retry beyond one pool traversal in this saga.
 				switchedCredential &&= rotationsRemaining > 0;
+				if (switchedCredential && this.#governedRoute) {
+					switchedCredential = await this.#switchGovernedSibling(
+						currentModel,
+						message.credentialId,
+						rotateAbortController.signal,
+					);
+				}
 			} catch (error) {
 				if (!rotateAbortController.signal.aborted) throw error;
 				if (this.#retryAbortController !== rotateAbortController) return false;
@@ -3212,6 +3294,7 @@ export class TurnRecovery {
 						siblingAvailabilityWaitMs,
 					));
 		const waitForSiblingCredential =
+			!this.#governedRoute &&
 			siblingAvailabilityWaitMs !== undefined &&
 			effectiveUsageLimitWaitMs !== undefined &&
 			effectiveUsageLimitWaitMs <= retrySettings.maxDelayMs;
@@ -3355,7 +3438,11 @@ export class TurnRecovery {
 			// same-route budget: every distinct account must be tried first.
 			if (switchedModel) this.#retryAttempt = 1;
 		}
-		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
+		if (
+			(classifierRefusal || accountPolicyDenial || (recordedUsageLimitOutcome && this.#governedRoute)) &&
+			!switchedCredential &&
+			!switchedModel
+		) {
 			// A prior attempt in this saga already announced `auto_retry_start`
 			// (retryAttempt was incremented for each call to this method, so > 1
 			// means at least one earlier attempt started the loop) but this

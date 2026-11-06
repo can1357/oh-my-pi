@@ -35,7 +35,7 @@ afterEach(async () => {
 	await disposeHarness();
 });
 
-async function setup() {
+async function setup(later = false) {
 	const h = await createHarness(ENABLED);
 	const original = h.usage.provider.bind(h.usage);
 	h.usage.provider = id => {
@@ -63,7 +63,7 @@ async function setup() {
 		"usageGovernor.enabled": true,
 		"retry.modelFallback": true,
 		"retry.fallbackChains": {
-			task: [`${CODEX}/fallback`],
+			task: [`${CODEX}/fallback`, ...(later ? [`${PROVIDER}/later`] : [])],
 			[`${PROVIDER}/primary:high`]: [`${CODEX}/fallback`],
 			[`${PROVIDER}/primary:low`]: [],
 		},
@@ -90,7 +90,7 @@ async function setup() {
 		api: "openai-completions",
 		baseUrl: "https://source.example.test",
 		oauth,
-		models: [definition("primary")],
+		models: [definition("primary"), ...(later ? [definition("later")] : [])],
 	});
 	registry.registerProvider(CODEX, {
 		api: "openai-completions",
@@ -226,6 +226,152 @@ test("a stale fallback is rejected once and then rebound to a newly authorized r
 		x.routing.dispose();
 	}
 });
+
+for (const failure of ["usage", "policy"] as const) {
+	for (const siblingState of ["included", "unknown", "spent", "later"] as const) {
+		test(`bound ${failure} recovery handles ${siblingState} sibling`, async () => {
+			const x = await setup(siblingState === "later");
+			try {
+				const owner = { kind: "role", role: "task" } as const;
+				let active = x.source;
+				let selectedSiblingId: number | undefined;
+				let retryScheduled = false;
+				const routing = {
+					refresh: x.routing.refresh.bind(x.routing),
+					candidates: (
+						requestedOwner: typeof owner,
+						sessionId: string,
+						model: typeof active,
+						credentialId: number | undefined,
+						intent: "error" | "proactive",
+						signal?: AbortSignal,
+					) =>
+						x.routing.candidates(
+							requestedOwner,
+							sessionId,
+							model,
+							credentialId,
+							intent === "proactive" ? "error" : intent,
+							signal,
+						),
+					evaluate: async (requestedOwner: typeof owner, sessionId: string, signal?: AbortSignal) => {
+						const result = await x.routing.evaluate(requestedOwner, sessionId, signal);
+						if (!result || siblingState === "included" || selectedSiblingId === undefined) return result;
+						return {
+							...result,
+							accounts: result.accounts.map(account =>
+								account.credentialId === selectedSiblingId
+									? { ...account, allowance: siblingState === "later" ? ("unknown" as const) : siblingState }
+									: account,
+							),
+						};
+					},
+				};
+				const state = { messages: [] as AssistantMessage[], systemPrompt: [] as string[], tools: [] };
+				const host = {
+					settings: x.settings,
+					modelRegistry: x.registry,
+					usageRouting: routing,
+					agent: {
+						state,
+						replaceMessages: (messages: AssistantMessage[]) => {
+							state.messages = messages;
+						},
+					},
+					model: () => active,
+					sessionId: () => "s",
+					routingRole: () => "task",
+					thinkingLevel: () => undefined,
+					configuredThinkingLevel: () => undefined,
+					thinkingLevelCeiling: () => undefined,
+					contextFitsModel: () => true,
+					resolveActiveEditMode: () => "hashline",
+					setModelWithProviderSessionReset: async (model: typeof active) => {
+						active = model;
+					},
+					sessionManager: {
+						appendModelChange: () => {},
+						getSessionId: () => "s",
+						getBranchView: () => [],
+						getBranch: () => [],
+					},
+					setThinkingLevel: () => {},
+					syncAfterModelChange: async () => {},
+					emitSessionEvent: async () => {},
+					configWarnings: [],
+					abortInProgress: () => false,
+					isDisposed: () => false,
+					streamingEditAbortTriggered: () => false,
+					promptGeneration: () => 0,
+					promptSequence: () => 0,
+					textOutputCommitted: () => false,
+					persistedAssistantEntryId: () => undefined,
+					sessionMessageAlreadyPersisted: () => true,
+					waitForSessionMessagePersistence: async () => {},
+					appendSessionMessage: () => {},
+					scheduleAgentContinue: () => {
+						retryScheduled = true;
+					},
+				} as unknown as TurnRecoveryHost;
+				const recovery = new TurnRecovery(host, { deferFallbackChainValidation: true });
+				const current = async () => ({
+					model: x.source,
+					apiKey: () => undefined,
+					resolved: { apiKey: "source", credentialId: x.sourceId },
+				});
+				const initial = await recovery.prepareGovernedModelCall(x.source, current, owner);
+				const first = typeof initial?.resolved === "object" ? initial.resolved?.credentialId : undefined;
+				expect(first).toBeDefined();
+				selectedSiblingId = first === x.failedId ? x.pinnedId : x.failedId;
+				const message = {
+					role: "assistant",
+					content: [],
+					api: "openai-codex-responses",
+					provider: CODEX,
+					model: "fallback",
+					stopReason: "error",
+					credentialId: first,
+					timestamp: Date.now(),
+					errorMessage:
+						failure === "usage"
+							? "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000"
+							: "Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				} as AssistantMessage;
+				if (failure === "usage")
+					expect(await recovery.recordUsageLimitOutcome(message)).toBe(siblingState === "included");
+				const retried = await recovery.handleRetryableError(message);
+				expect(retried).toBe(siblingState === "included" || siblingState === "later");
+				expect(retryScheduled).toBe(siblingState === "included" || siblingState === "later");
+				if (siblingState === "included") {
+					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
+					expect(
+						typeof prepared?.resolved === "object" && prepared.resolved?.usageRouteBinding?.credentialId,
+					).toBe(selectedSiblingId);
+				} else if (siblingState === "later") {
+					expect(active.id).toBe("later");
+					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
+					expect(
+						typeof prepared?.resolved === "object" && prepared.resolved?.usageRouteBinding?.credentialId,
+					).toBe(x.sourceId);
+				} else {
+					await expect(recovery.prepareGovernedModelCall(active, current, owner)).rejects.toThrow();
+				}
+				expectNoStrayFetch(x.h);
+				expect(x.h.redemptionPosts()).toHaveLength(0);
+			} finally {
+				x.routing.dispose();
+			}
+		});
+	}
+}
 
 test("switch restores transcript role and a rejected switch preserves it", async () => {
 	const x = await setup();
