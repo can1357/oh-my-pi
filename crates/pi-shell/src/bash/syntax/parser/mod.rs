@@ -12,11 +12,10 @@
 //! [`WordPart`]s; command substitutions are parsed recursively at parse
 //! time, as bash 5.3 does.
 //!
-//! Node ids are assigned after a top-level command is complete
-//! (`finish.rs`), so they do not depend on lexer lookahead.
+//! Node ids are assigned once a top-level command is complete
+//! ([`Tree::assign_ids`]), so they do not depend on lexer lookahead.
 
 mod cursor;
-pub mod finish;
 mod grammar;
 mod lex;
 mod raw;
@@ -28,13 +27,20 @@ use core::fmt;
 pub use self::lex::looks_like_assignment;
 use self::{
 	cursor::{Frame, Skip},
-	lex::{LexState, Tok},
+	lex::{LexState, Tok, TokArena},
 };
 use crate::bash::syntax::{
 	ast::*,
 	features::{AliasLookup, Features, NO_ALIASES},
-	span::{NodeId, Pos, Span},
+	span::{Pos, Span},
+	tree::{
+		Id, Tree,
+		shape::{self, Text},
+	},
 };
+
+/// Short literal runs and names, kept out of the heap up to 24 bytes.
+type SmallBytes = smallvec::SmallVec<[u8; 24]>;
 
 /// A syntax error.
 ///
@@ -179,16 +185,6 @@ struct PendingDoc {
 	quoted: bool,
 }
 
-/// Placeholder stored in `HereDoc::text` until the body is gathered:
-/// `0xff 'H' 'D'` and the sequence number. Real document text is empty or
-/// ends in a newline, so the two never collide.
-pub fn doc_placeholder(seq: u32) -> Vec<u8> {
-	let mut v = Vec::with_capacity(7);
-	v.extend_from_slice(&[0xff, b'H', b'D']);
-	v.extend_from_slice(&seq.to_le_bytes());
-	v
-}
-
 /// Incremental parser over one source.
 ///
 /// The engine parses one top-level command at a time (resuming with
@@ -233,12 +229,19 @@ pub struct Parser<'s> {
 	lx:             LexState,
 	/// One-token lookahead.
 	la:             Option<Tok>,
+	/// Payloads of the current command's tokens.
+	toks:           TokArena<'s>,
 	/// End offset of the last token taken.
 	last_hi:        u32,
 	/// Gathered here-document texts, by sequence number.
 	docs:           Vec<Vec<u8>>,
+	/// Here-document text nodes waiting for their bodies, and the
+	/// sequence numbers of the bodies.
+	doc_nodes:      Vec<(Id<Text>, u32)>,
 	/// Here-documents waiting for the next newline.
 	pending:        Vec<PendingDoc>,
+	/// The syntax of the command being parsed.
+	t:              Tree,
 	/// Open compound commands and their lines (bash `compoundcmd_lineno`).
 	compound:       Vec<(lex::T, u32)>,
 	warnings:       Vec<ParseWarning>,
@@ -304,12 +307,14 @@ pub enum TextMode {
 /// Node ids start at 0 (the word itself). Errors carry bash's message and a
 /// line relative to `src`; the engine adds the context (`command
 /// substitution: `) and the base line.
-pub fn parse_text(src: &[u8], feat: Features, mode: TextMode) -> Result<Word, ParseError> {
+pub fn parse_text(src: &[u8], feat: Features, mode: TextMode) -> Result<(Tree, u32), ParseError> {
 	let mut p = Parser::new(src, feat, NO_ALIASES);
 	p.virt = 0;
-	let mut word = p.text_word(mode)?;
-	finish::finish_word(&mut word, &p.docs);
-	Ok(word)
+	let word = p.text_word(mode)?;
+	debug_assert_eq!(p.t.scratch_len(), 0, "a builder left children on the scratch stack");
+	p.fill_docs(0);
+	p.t.assign_ids(word.index());
+	Ok((p.t, word.index()))
 }
 
 impl<'s> Parser<'s> {
@@ -340,9 +345,12 @@ impl<'s> Parser<'s> {
 			skip: None,
 			lx: LexState::new(),
 			la: None,
+			toks: TokArena::default(),
 			last_hi: 0,
 			docs: Vec::new(),
+			doc_nodes: Vec::new(),
 			pending: Vec::new(),
+			t: Tree::default(),
 			compound: Vec::new(),
 			warnings: Vec::new(),
 			alias_uses: Vec::new(),
@@ -407,6 +415,27 @@ impl<'s> Parser<'s> {
 		p.buf = &resume.pending;
 		p.pos = 0;
 		p
+	}
+
+	/// Build the next command in `tree`'s buffers (cleared) instead of
+	/// fresh ones. Each command takes the buffers it was built in; a caller
+	/// done with a command hands its tree back here so the next one does
+	/// not allocate. [`Parser::take_tree`] returns buffers no command took.
+	pub fn recycle(&mut self, mut tree: Tree) {
+		if let Some(z) = &mut self.zsh {
+			return z.recycle(tree);
+		}
+		tree.clear();
+		self.t = tree;
+	}
+
+	/// The buffers the next command would be built in (see
+	/// [`Parser::recycle`]).
+	pub fn take_tree(&mut self) -> Tree {
+		if let Some(z) = &mut self.zsh {
+			return z.take_tree();
+		}
+		core::mem::take(&mut self.t)
 	}
 
 	/// Where the next [`Parser::next_command`] starts in the source.
@@ -514,22 +543,45 @@ impl Parser<'_> {
 			}
 		}
 	}
-}
 
-/// A word with no parts yet, at `lo..hi`.
-const fn empty_word(lo: u32, hi: u32) -> Word {
-	Word { id: NodeId(0), span: Span::new(lo, hi), parts: Vec::new() }
+	/// Put the here-document bodies gathered for the registrations from
+	/// `from` on into their text nodes, retiring those registrations: the
+	/// next command's document numbers start over (a backquoted list
+	/// parses its commands into one tree), and a substitution must not
+	/// fill the enclosing command's documents before they are read.
+	fn fill_docs(&mut self, from: usize) {
+		for (node, seq) in self.doc_nodes.drain(from..) {
+			if let Some(text) = self.docs.get(seq as usize) {
+				self.t.set_text(node, text);
+			}
+		}
+	}
 }
 
 /// Parse `code` (text bash re-parses at run time: a backquoted command, a
-/// `$((…))` that is not arithmetic) as one list; spans are shifted by
-/// `base`. Aliases are not expanded.
-fn sub_parse_list(code: &[u8], feat: Features, base: u32) -> PResult<List> {
+/// `$((…))` that is not arithmetic) into `t` as one list; spans are
+/// shifted by `base`. Aliases are not expanded. An error yields an empty
+/// list.
+fn sub_parse_list(t: &mut Tree, code: &[u8], feat: Features, base: u32) -> Id<shape::List> {
 	let mut p = Parser::new(code, feat, NO_ALIASES);
 	p.base = base;
-	let mut list = List::default();
-	while let Some(cc) = p.next_command() {
-		list.items.extend(cc?.list.items);
+	p.t = core::mem::take(t);
+	let mark = p.t.open();
+	let ok = loop {
+		match p.top_list() {
+			Ok(Some(top)) => {
+				p.fill_docs(0);
+				p.t.kid_items(mark, top.list);
+			},
+			Ok(None) => break true,
+			Err(_) => break false,
+		}
+	};
+	if !ok {
+		p.t.drop_opened(mark);
 	}
-	Ok(list)
+	let list = p.t.list_at(mark);
+	debug_assert_eq!(p.t.opened_len(mark), 0, "a builder left children on the scratch stack");
+	*t = p.t;
+	list
 }

@@ -477,6 +477,11 @@ impl Tree {
 		Seq::over(self, &self.kids[run.0 as usize..(run.0 + run.1) as usize])
 	}
 
+	/// How deep the scratch stack is (zero between commands).
+	pub(crate) const fn scratch_len(&self) -> usize {
+		self.scratch.len()
+	}
+
 	/// Nodes, children and the scratch stack, borrowed apart (for walks).
 	fn walk_parts(&mut self) -> (&mut [Node], &[u32], &mut Vec<u32>) {
 		(&mut self.nodes, &self.kids, &mut self.scratch)

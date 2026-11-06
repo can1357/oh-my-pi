@@ -926,8 +926,8 @@ impl Inner {
 				&& unit.syntax.as_ref().is_none_or(|existing| {
 					!existing.shares_tree(&syntax)
 						&& (existing.parent.is_none() || syntax.parent.is_some())
-						&& !(matches!(existing.tree, syntax::SyntaxTree::List(_))
-							&& matches!(syntax.tree, syntax::SyntaxTree::Command(_)))
+						&& !(existing.tree.kind == syntax::RootKind::List
+							&& syntax.tree.kind == syntax::RootKind::Command)
 				}) {
 				unit.syntax = Some(syntax);
 			}
