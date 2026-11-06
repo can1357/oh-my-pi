@@ -1094,6 +1094,14 @@ export interface TraceSummary {
 	toolStats: TraceToolStat[];
 }
 
+/** Payload cap counts when a trace exceeds the dashboard's size guard. */
+export interface TraceTruncation {
+	/** Tracks omitted from the end of the DFS track list. */
+	tracks: number;
+	/** Spans omitted after the per-trace span budget was exhausted. */
+	spans: number;
+}
+
 /** Complete span tree for one session, `/api/session/trace` payload. */
 export interface SessionTrace {
 	file: string;
@@ -1113,5 +1121,7 @@ export interface SessionTrace {
 	etag: string;
 	/** DFS order, main first. */
 	tracks: TraceTrack[];
+	/** Present when the payload was capped for size; summary totals are unaffected. */
+	truncated?: TraceTruncation;
 	summary: TraceSummary;
 }

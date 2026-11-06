@@ -18,6 +18,15 @@
 	animation: traces-spin 900ms linear infinite;
 }
 
+.traces-truncated {
+	padding: 8px 12px;
+	border: 1px solid var(--warn);
+	border-radius: 6px;
+	background: var(--warn-soft);
+	color: var(--warn);
+	font-size: 12px;
+}
+
 @keyframes traces-spin {
 	to {
 		transform: rotate(360deg);

@@ -27,6 +27,7 @@ import type {
 	TraceSummary,
 	TraceToolStat,
 	TraceTrack,
+	TraceTruncation,
 } from "./types";
 
 /** Client-supplied path escaped the sessions root or is not a transcript. Maps to HTTP 400. */
@@ -43,6 +44,9 @@ const LABEL_MAX = 80;
 const DETAIL_MAX = 160;
 const TITLE_SCAN_BYTES = 4096;
 const LIST_FOLD_LIMIT = 300;
+/** Safety valves for pathological sessions; normal heavy traces stay far below. */
+const MAX_TRACE_TRACKS = 1024;
+const MAX_TRACE_SPANS = 100_000;
 
 // ---------------------------------------------------------------------------
 // Structural entry views (journal shapes mirrored without importing coding-agent)
@@ -1021,6 +1025,43 @@ function storeTraceCache(file: string, entry: TraceMemoEntry): void {
 }
 
 /**
+ * Cap a payload for pathological sessions. Summary totals are computed before
+ * this runs and stay complete; only the transport `tracks` array is reduced.
+ * Tracks are DFS-ordered with the main track first. Spans within each track are
+ * start-sorted, so the cap keeps the earliest activity.
+ */
+export function truncateTraceTracks(
+	tracks: TraceTrack[],
+	maxTracks = MAX_TRACE_TRACKS,
+	maxSpans = MAX_TRACE_SPANS,
+): TraceTruncation | undefined {
+	let omittedTracks = 0;
+	let omittedSpans = 0;
+	if (tracks.length > maxTracks) {
+		for (let index = maxTracks; index < tracks.length; index++) omittedSpans += tracks[index].spans.length;
+		omittedTracks = tracks.length - maxTracks;
+		tracks.length = maxTracks;
+	}
+	let remaining = maxSpans;
+	for (const track of tracks) {
+		if (track.spans.length > remaining) {
+			omittedSpans += track.spans.length - Math.max(remaining, 0);
+			track.spans = track.spans.slice(0, Math.max(remaining, 0));
+		}
+		remaining = Math.max(0, remaining - track.spans.length);
+	}
+	if (omittedTracks === 0 && omittedSpans === 0) return undefined;
+	// Drop links to omitted or emptied tracks so no span offers navigation it cannot perform.
+	const navigable = new Set(tracks.filter(track => track.spans.length > 0).map(track => track.id));
+	for (const track of tracks) {
+		for (const span of track.spans) {
+			if (span.childTrackId !== undefined && !navigable.has(span.childTrackId)) delete span.childTrackId;
+		}
+	}
+	return { tracks: omittedTracks, spans: omittedSpans };
+}
+
+/**
  * Fingerprint of the child-transcript set: per-directory file COUNT plus
  * sorted `name@mtimeMs` pairs, mirroring buildTrackTree's discovery (stats
  * only, no parse). The count makes an empty directory distinguishable from a
@@ -1330,6 +1371,9 @@ function assembleSessionTrace(
 		toolStats: [...toolStats.values()].sort((a, b) => b.totalMs - a.totalMs),
 	};
 
+	// `summary` above already covers the full tree; only the transport track
+	// list is capped, and `truncated` tells the client what was omitted.
+	const truncated = truncateTraceTracks(tracks);
 	return {
 		file: rootScan.track.file,
 		title: rootScan.title,
@@ -1339,6 +1383,7 @@ function assembleSessionTrace(
 		mtimeMs: rootMtimeMs,
 		etag,
 		tracks,
+		truncated,
 		summary,
 	};
 }

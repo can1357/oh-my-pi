@@ -10,6 +10,7 @@
 
 - Heavy trace sessions reuse parsed transcripts and parse only appended tails, keep an LRU of recent traces, and look up span-drawer entries by index instead of rescanning the transcript. ([#18279](https://github.com/can1357/oh-my-pi/pull/18279) by [@aleister1102](https://github.com/aleister1102))
 - Gzip-encodes `/api/session/trace` and `/api/session/entry` responses when the client sends `Accept-Encoding: gzip`; `q=0` now excludes gzip even when `*` would allow it. ([#18279](https://github.com/can1357/oh-my-pi/pull/18279) by [@aleister1102](https://github.com/aleister1102))
+- Pathological trace sessions no longer ship unbounded payloads: the trace response caps tracks and spans, keeps summary totals complete, and shows a notice when the view is truncated. ([#18279](https://github.com/can1357/oh-my-pi/pull/18279) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.17.0] - 2026-11-06
 
