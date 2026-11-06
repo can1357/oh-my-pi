@@ -514,6 +514,8 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { headlessSlashCommandHost, runHeadlessBuiltinSlashCommand } from "../slash-commands/builtin-registry";
+import type { SlashCommandHost } from "../slash-commands/types";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -10714,11 +10716,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * Where a built-in an extension runs through expanded input reports to: the
+	 * {@link SlashCommandHost} this host's own typed input passes built-ins, so a built-in's output,
+	 * title and config changes reach the host's client as they do when typed there. Unset (subagents,
+	 * an SDK embedder that wires none), a built-in's output only returns to the extension.
+	 */
+	slashCommandHost: SlashCommandHost | undefined;
+
+	/**
 	 * Run `text` as if it had been typed into this session, in the order typed input takes:
 	 *   1. extension `input` handlers, with `source: "extension"` — one can consume the text or
 	 *      rewrite it and add images, exactly as for interactive Enter and an RPC `prompt`;
 	 *   2. `/skill:<name>`, submitted as the user's skill prompt message;
-	 *   3. everything else through {@link prompt}, which runs extension and custom commands,
+	 *   3. built-in slash commands: those with a text-mode `handle` (the ones RPC and ACP run) run
+	 *      with {@link slashCommandHost}; the TUI-only rest answer `terminal-only`;
+	 *   4. everything else through {@link prompt}, which runs extension and custom commands,
 	 *      expands file slash commands and prompt templates, and submits any other text —
 	 *      slash text that names no command (`/nosuch`, a path like `/var/log/app.log`) included.
 	 *
@@ -10757,6 +10769,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				{ streamingBehavior, queueChipText: text },
 			);
 			return { handled: "skill" };
+		}
+
+		const builtin = await runHeadlessBuiltinSlashCommand(
+			this,
+			text,
+			this.slashCommandHost ?? headlessSlashCommandHost(this),
+		);
+		if (builtin === "terminal-only") return { handled: "terminal-only" };
+		if (builtin) {
+			const output = builtin.output === undefined ? undefined : { output: builtin.output };
+			const { result } = builtin;
+			if (result && "prompt" in result) {
+				await this.prompt(result.prompt, { streamingBehavior, images, tag });
+				return { handled: "prompt", ...output };
+			}
+			// `/retry` and the like start a turn without submitting a message; hosts must not treat
+			// that as locally handled.
+			const agentInvoked = result?.agentInvoked === true ? { agentInvoked: true } : undefined;
+			return { handled: "command", ...agentInvoked, ...output };
 		}
 
 		// prompt() answers false only when an extension or custom command handled the text locally.

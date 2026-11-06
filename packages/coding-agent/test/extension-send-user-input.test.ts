@@ -24,12 +24,15 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
+import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { headlessSlashCommandHost } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { isRecord, readJsonl, removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 interface Harness {
 	api: ExtensionAPI;
@@ -39,6 +42,10 @@ interface Harness {
 	started: AgentMessage[];
 	/** Arguments each `/deploy` extension-command run received. */
 	deployRuns: string[];
+	/** Status lines the interactive host showed (only with `host: "interactive"`). */
+	statuses: string[];
+	/** Each turn-ownership task `initializeExtensions` reported for an expanded send, in order. */
+	invoking: Promise<unknown>[];
 }
 
 function messageText(message: AgentMessage): string {
@@ -79,11 +86,15 @@ describe("pi.sendUserMessage with expand", () => {
 		onInput?: (event: InputEvent) => InputEventResult | undefined;
 		/** The model's scripted replies, one per turn. */
 		responses?: MockResponse[];
+		/** Which host wires the actions: `initializeExtensions` (default) or the interactive TUI's controller. */
+		host?: "runtime-init" | "interactive";
 	}): Promise<Harness> {
 		const manager = SessionManager.inMemory();
 		const runtime = new ExtensionRuntime();
 		const started: AgentMessage[] = [];
 		const deployRuns: string[] = [];
+		const statuses: string[] = [];
+		const invoking: Promise<unknown>[] = [];
 		let api: ExtensionAPI | undefined;
 		const extension = await loadExtensionFromFactory(
 			pi => {
@@ -127,16 +138,34 @@ describe("pi.sendUserMessage with expand", () => {
 			promptTemplates: options?.promptTemplates,
 		});
 		session = created;
-
-		await initializeExtensions(created, {
-			reportSendError: (_action, error) => {
-				throw error;
-			},
-			reportRuntimeError: error => {
-				throw new Error(error.error);
-			},
-		});
-		return { api, session: created, manager, started, deployRuns };
+		if (options?.host === "interactive") {
+			const ctx = {
+				session: created,
+				sessionManager: manager,
+				settings: created.settings,
+				showStatus: (text: string) => {
+					statuses.push(text);
+				},
+				setToolUIContext: () => {},
+				syncComposerShape: () => {},
+				syncExtensionLinks: () => {},
+			} as unknown as InteractiveModeContext;
+			await new ExtensionUiController(ctx).initHooksAndCustomTools();
+		} else {
+			await initializeExtensions(created, {
+				reportSendError: (_action, error) => {
+					throw error;
+				},
+				reportRuntimeError: error => {
+					throw new Error(error.error);
+				},
+				trackAgentInvokingMessage: task => {
+					invoking.push(task);
+				},
+				slashCommandHost: headlessSlashCommandHost(created),
+			});
+		}
+		return { api, session: created, manager, started, deployRuns, statuses, invoking };
 	}
 
 	it("submits plain text as a user turn whose message carries the caller's tag", async () => {
@@ -265,4 +294,102 @@ describe("pi.sendUserMessage with expand", () => {
 		expect(userTurns(started).map(messageText)).toEqual(inputs);
 		expect(session.messages.filter(message => message.role === "assistant")).toHaveLength(2);
 	});
+
+	it("runs a built-in the headless modes run and returns what it printed", async () => {
+		const { api, session, started } = await start();
+
+		const result = await api.sendUserMessage("/jobs", { expand: true });
+		await session.waitForIdle();
+
+		// What `/jobs` prints in a session with no background jobs, so the result proves the handler ran.
+		expect(result).toEqual({ handled: "command", output: expect.stringContaining("No background jobs running.") });
+		expect(userTurns(started)).toHaveLength(0);
+	});
+
+	it("reports a built-in that starts a turn, as /retry does, so the host counts the input as invoking the agent", async () => {
+		const { api, session, invoking } = await start({
+			responses: [{ throw: "first attempt fails" }, { content: ["Recovered"] }],
+		});
+		await session.prompt("fail once");
+		await session.waitForIdle();
+
+		const result = await api.sendUserMessage("/retry", { expand: true });
+		await session.waitForIdle();
+
+		expect(result).toEqual({ handled: "command", agentInvoked: true, output: "Retrying the last failed turn." });
+		expect(invoking).toHaveLength(1);
+		await expect(invoking[0]).resolves.toBeUndefined();
+		expect(messageText(session.messages.at(-1)!)).toBe("Recovered");
+	});
+
+	it("shows a built-in's output in the interactive TUI's status line, as typing it there does", async () => {
+		const { api, statuses } = await start({ host: "interactive" });
+
+		const result = await api.sendUserMessage("/rename Bridge title", { expand: true });
+
+		expect(result).toEqual({ handled: "command", output: "Session renamed to Bridge title." });
+		expect(statuses).toEqual(["Session renamed to Bridge title."]);
+	});
+
+	it.each(["/new", "/resume"])("answers terminal-only for %s and sends nothing", async text => {
+		const { api, session, started } = await start();
+		const sessionId = session.sessionId;
+
+		expect(await api.sendUserMessage(text, { expand: true })).toEqual({ handled: "terminal-only" });
+		await session.waitForIdle();
+
+		expect(userTurns(started)).toHaveLength(0);
+		expect(session.sessionId).toBe(sessionId);
+	});
+});
+
+/** Frames a real RPC-mode process writes while a bridge extension forwards each input through the API. */
+async function runRpcBridge(inputs: string[]): Promise<{ frames: Record<string, unknown>[]; results: unknown[] }> {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-send-user-input-rpc-${Snowflake.next()}-`));
+	const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures", "send-user-input-rpc-agent.ts")], {
+		cwd: directory,
+		env: { PATH: Bun.env.PATH, HOME: directory, PI_CODING_AGENT_DIR: directory, PI_NO_TITLE: "1" },
+		stdin: "pipe",
+		stdout: "pipe",
+		stderr: "pipe",
+		timeout: 20_000,
+	});
+	const stderr = new Response(child.stderr).text();
+	const frames: Record<string, unknown>[] = [];
+	const results: unknown[] = [];
+	const send = async (index: number): Promise<void> => {
+		child.stdin.write(
+			`${JSON.stringify({ type: "prompt", id: `p${index}`, message: `/bridge ${inputs[index]}` })}\n`,
+		);
+		await child.stdin.flush();
+	};
+	try {
+		await send(0);
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (!isRecord(frame)) continue;
+			frames.push(frame);
+			if (frame.type !== "extension_ui_request" || frame.method !== "notify") continue;
+			results.push(JSON.parse(String(frame.message)));
+			if (results.length === inputs.length) break;
+			await send(results.length);
+		}
+	} finally {
+		child.stdin.end();
+		await child.exited;
+		await removeWithRetries(directory);
+	}
+	if (results.length !== inputs.length) throw new Error(`RPC bridge ended early: ${await stderr}`);
+	return { frames, results };
+}
+
+describe("expanded extension input in RPC mode", () => {
+	it("runs a built-in with the hooks RPC gives typed input, so the client sees its output and the new title", async () => {
+		const { frames, results } = await runRpcBridge(["/rename Bridge title"]);
+
+		expect(results).toEqual([{ handled: "command", output: "Session renamed to Bridge title." }]);
+		expect(frames).toContainEqual(
+			expect.objectContaining({ type: "command_output", text: "Session renamed to Bridge title." }),
+		);
+		expect(frames).toContainEqual(expect.objectContaining({ type: "session_info_update", title: "Bridge title" }));
+	}, 30_000);
 });

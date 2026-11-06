@@ -11,6 +11,7 @@ import { runExtensionCompact, runExtensionSetModel } from "../extensibility/exte
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
+import type { SlashCommandHost } from "../slash-commands/types";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
 /** Action name for an extension-originated send failure. */
@@ -46,6 +47,13 @@ export interface InitializeExtensionsOptions {
 		change: () => Promise<T>,
 		options: { detachesRun: boolean },
 	) => Promise<T>;
+	/**
+	 * Where a built-in an extension runs through expanded input reports to: the
+	 * {@link SlashCommandHost} the host's own typed input passes them (RPC; print mode passes the
+	 * headless host with its MCP hooks). Omitted (subagents), a built-in's output only returns to
+	 * the extension.
+	 */
+	slashCommandHost?: SlashCommandHost;
 }
 
 /**
@@ -69,8 +77,10 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		trackExtensionSend,
 		filterActiveTools,
 		wrapSessionChange = change => change(),
+		slashCommandHost,
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
+	if (slashCommandHost) session.slashCommandHost = slashCommandHost;
 
 	runner.initialize(
 		// ExtensionActions

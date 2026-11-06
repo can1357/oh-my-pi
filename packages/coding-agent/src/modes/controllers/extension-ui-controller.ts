@@ -46,6 +46,7 @@ import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, them
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import type { SendUserMessageResult } from "../../session/agent-session";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { tuiSlashCommandHost } from "../../slash-commands/builtin-registry";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
@@ -1504,6 +1505,8 @@ export class ExtensionUiController {
 	 */
 	#sendExtensionUserMessage: SendUserMessageHandler = (content, options) => {
 		if (this.#rejectGuestExtensionTurn()) return Promise.resolve<SendUserMessageResult>({ handled: "unavailable" });
+		// A built-in it runs reports where a typed one does: the TUI status line.
+		this.ctx.session.slashCommandHost = tuiSlashCommandHost(this.ctx);
 		const sendTask = this.ctx.session.sendUserMessage(content, options);
 		sendTask.catch((err: unknown) => {
 			this.ctx.showError(`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`);

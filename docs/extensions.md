@@ -360,6 +360,12 @@ either way. In order:
   text and no images, sends nothing, and text or images it substitutes are what the
   steps below dispatch;
 - `/skill:<name>` is submitted as the user's skill prompt;
+- a built-in slash command with a headless handler (the set RPC and ACP run, e.g. `/jobs`,
+  `/compact`, `/retry`) runs, with the hooks the host gives its own typed input, so what it
+  prints also shows where typed output does (the TUI status line, an RPC `command_output`
+  frame, an ACP message) and a rename or model change reaches an RPC or ACP client; its
+  printed text comes back as `output`, and one that returns prompt text submits it. A
+  built-in only the interactive terminal runs answers `terminal-only` and runs nothing;
 - anything else goes through the prompt flow: extension and custom commands run
   locally; plain text, templates, file slash commands and slash text that names no
   command (such as `/nosuch` or a path like `/var/log/app.log`) submit a user message,
