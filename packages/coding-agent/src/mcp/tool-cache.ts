@@ -102,6 +102,30 @@ function identityJson(config: MCPServerConfig): string {
 }
 
 /**
+ * Whether `a` and `b` are the same server: the same connection, differing at
+ * most in {@link CURRENT_IDENTITY_EXCLUDED_KEYS} — when to connect, whether to
+ * connect at all, how long to wait, how request ids are encoded, whether the
+ * instructions reach the prompt.
+ *
+ * Shared with the manager's crash-burst breaker, which retires a server's
+ * window when the definition it was filled against is replaced. The two ask
+ * slightly different questions — the cache asks whether this would serve
+ * different tools, the breaker whether this is a different process to crash —
+ * but they partition the fields the same way, because every excluded key is
+ * policy applied to one unchanged endpoint or process and every other key
+ * names the endpoint, the executable, its arguments, its environment, its
+ * directory or the credentials it presents. One definition of "a different
+ * server", so a rewrite cannot be identity for one of them and not the other.
+ *
+ * The effective config is the right input here, not the as-written one: "is
+ * this a different process" is a question about what will be spawned or
+ * dialled, and a symbol-keyed as-written record is invisible to JSON anyway.
+ */
+export function sameMcpServerIdentity(a: MCPServerConfig, b: MCPServerConfig): boolean {
+	return identityJson(a) === identityJson(b);
+}
+
+/**
  * Give a discovered config its cache identity: `asWritten`, the same server
  * built from its config-file entry before the provider expanded `${VAR}`
  * placeholders (or read an env-forwarded value, a `{file:...}` reference or a

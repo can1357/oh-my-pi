@@ -611,9 +611,18 @@ describe("MCP server that is not connected", () => {
 	 * Driven end to end through `connectServers` and a real loopback server,
 	 * because that is the only way to show both halves: that the sentence is
 	 * true, and that the connect it promises actually happens.
+	 *
+	 * Round 10 re-aims the replacement at a second endpoint. The fold now
+	 * rules that a rewrite which changes only connection policy is not a
+	 * replacement at all (see the storm suite), so a `timeout` edit no
+	 * longer retires anything and could not test what this test is for.
+	 * Both catalogues are seeded by hand, as the first one always was: the
+	 * cache row is keyed on the server name, so each definition's entry is
+	 * written when that definition is the live one.
 	 */
 	it("connects a lazy server whose definition was replaced while its reconnects were suspended", async () => {
 		const endpoint = startFlakyServer();
+		const moved = startFlakyServer();
 		const first: MCPHttpServerConfig = { type: "http", url: endpoint.url, timeout: 2_000, lazy: true };
 		const cache = new MCPToolCache(memoryStorage());
 		await cache.set("storm", first, [PING_DEF]);
@@ -633,26 +642,84 @@ describe("MCP server that is not connected", () => {
 			expect(replaced.isServerDormant("storm")).toBe(false);
 			expect(extensionsHint(replaced, "storm")).toBe("1 tool cached");
 
-			// The definition is replaced by one that makes the same
-			// connection: `timeout` is policy, so the catalogue survives in
-			// the tool cache, and the failure record retires with the object
-			// it was recorded against.
-			const second: MCPHttpServerConfig = { ...first, timeout: 2_001 };
+			// The user points the server at a different endpoint: a new
+			// definition, which has crashed nothing. Its failure record
+			// retires with the object it was recorded against, and its
+			// name-keyed burst window retires with the definition.
+			const second: MCPHttpServerConfig = { ...first, url: moved.url };
+			await cache.set("storm", second, [PING_DEF]);
 			await replaced.connectServers({ storm: second }, {});
 			expect(extensionsHint(replaced, "storm")).toBe("1 tool · connects on first use");
 
 			// Whatever the line says, the first use has to make it true.
-			endpoint.state.down = false;
+			moved.state.down = false;
 			const result = await deferred().execute("up-1", {}, undefined, {} as CustomToolContext, undefined);
 			expect({
-				initializes: endpoint.state.initializes,
+				initializes: moved.state.initializes,
+				stale: endpoint.state.initializes,
 				isError: result.isError === true,
 				status: replaced.getConnectionStatus("storm"),
 				after: extensionsHint(replaced, "storm"),
-			}).toEqual({ initializes: 1, isError: false, status: "connected", after: "1 tool" });
+			}).toEqual({ initializes: 1, stale: 0, isError: false, status: "connected", after: "1 tool" });
 		} finally {
 			await replaced.disconnectAll();
 			endpoint.stop();
+			moved.stop();
+		}
+	}, 60_000);
+
+	/**
+	 * Round 10 (Anthropic arm, B2). A budget entry is spent by every
+	 * `reconnectServer` call, including one that returns before it connects:
+	 * an auth challenge whose handler resolves `undefined` — the declared
+	 * outcome when a person cancels the login — is refused inside
+	 * `#doReconnect` before any transport is opened and before any `failed`
+	 * event is emitted. Five of those fill the window with no failure to
+	 * show for it, so a predicate that asks only "has anything failed under
+	 * this definition" still answers "dormant" while the breaker refuses
+	 * every connect it promises.
+	 *
+	 * The endpoint is healthy throughout, so the breaker is the only thing
+	 * that can keep `initialize` off the wire.
+	 */
+	it("stops promising a first-use connect once cancelled logins have spent the budget", async () => {
+		const healthy = startFlakyServer();
+		healthy.state.down = false;
+		const config: MCPHttpServerConfig = { type: "http", url: healthy.url, timeout: 2_000, lazy: true };
+		const cache = new MCPToolCache(memoryStorage());
+		await cache.set("cancelled", config, [PING_DEF]);
+		const manager = new MCPManager(tempDir, cache, undefined, SINGLE_ATTEMPT);
+		manager.setAuthStorage(session);
+		// The person closed the browser tab: no refreshed config, no error.
+		manager.setAuthHandler(async () => undefined);
+		try {
+			await manager.connectServers({ cancelled: config }, {});
+			expect(manager.isServerDormant("cancelled")).toBe(true);
+			expect(extensionsHint(manager, "cancelled")).toBe("1 tool · connects on first use");
+
+			for (let attempt = 0; attempt < BURST_LIMIT; attempt++) {
+				expect(await manager.reconnectServer("cancelled", { authChallenge: { wwwAuthenticate: [] } })).toBeNull();
+			}
+
+			// Nothing was tried and nothing failed — the record the predicate
+			// reads is empty, and the note agrees there is nothing to report.
+			expect(healthy.state.initializes).toBe(0);
+			expect(manager.explainMissingTool("mcp__cancelled_ping")).toBeUndefined();
+			// But the window is full, so the next attempt is refused outright.
+			expect(manager.isServerDormant("cancelled")).toBe(false);
+			expect(extensionsHint(manager, "cancelled")).toBe("1 tool cached");
+
+			// And that is the truth the line has to tell: a first use against
+			// a healthy endpoint reaches no `initialize` at all.
+			const deferred = manager.getTools().find(tool => tool.mcpServerName === "cancelled") as DeferredMCPTool;
+			const result = await deferred.execute("first-use", {}, undefined, {} as CustomToolContext, undefined);
+			expect({ initializes: healthy.state.initializes, isError: result.isError === true }).toEqual({
+				initializes: 0,
+				isError: true,
+			});
+		} finally {
+			await manager.disconnectAll();
+			healthy.stop();
 		}
 	}, 60_000);
 

@@ -52,7 +52,7 @@ import { resolveMCPStartupTimeoutMs } from "./timeout";
 
 import { MCP_TOOL_NAME_PREFIX, type MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 import { DeferredMCPTool, MCPTool, type MCPToolCallObserver } from "./tool-bridge";
-import type { MCPToolCache } from "./tool-cache";
+import { type MCPToolCache, sameMcpServerIdentity } from "./tool-cache";
 import { setGeneratedHeader } from "./transports/header-policy";
 import type {
 	MCPAuthChallenge,
@@ -1751,11 +1751,11 @@ export class MCPManager implements MCPManagerApi {
 	}
 
 	/**
-	 * Whether `name` is dormant: configured, not connected, and with no
-	 * failure recorded against the definition the manager holds for it now —
-	 * so nothing has tried it yet under that definition, and the next tool
-	 * call is its first attempt. This is the only thing a renderer may say
-	 * "connects on first use" from.
+	 * Whether `name` is dormant: configured, not connected, with no failure
+	 * recorded against the definition the manager holds for it now, and not
+	 * refused by the crash-burst breaker — so nothing has tried it yet and
+	 * the next tool call is its first attempt. This is the only thing a
+	 * renderer may say "connects on first use" from.
 	 *
 	 * Registered tools are not that evidence. `#doReconnect` keeps a failed
 	 * server's catalog registered on purpose, and so does the crash-storm
@@ -1765,47 +1765,68 @@ export class MCPManager implements MCPManagerApi {
 	 * about the next attempt, and while the breaker is open the attempt is
 	 * refused outright.
 	 *
-	 * The recorded failure is what separates the two, read through the same
+	 * The recorded failure is read through the same
 	 * {@link MCPManager.#liveConnectFailure} that
 	 * {@link MCPManager.explainMissingTool} partitions on, so a one-line
 	 * status and the unavailable-servers note cannot disagree about which
-	 * servers are down. For that record to answer for the breaker too, the
-	 * breaker's name-keyed window must not outlive the definition that
-	 * filled it; {@link MCPManager.#holdServerConfig} is what makes the two
-	 * retire together, and without it this predicate promised a connect the
-	 * breaker went on refusing.
+	 * servers are down.
 	 *
-	 * The first term is the predicate's own configured-server guard, rather
-	 * than one borrowed from each renderer's tool count: a name nobody
-	 * declared connects on nothing.
+	 * Three guards, each load-bearing for a state the others answer nothing
+	 * about, which is why dropping any of them leaves the sentence false in
+	 * exactly one place:
+	 *
+	 * - `#serverConfigs.has(name)` excludes a name nobody declared. The
+	 *   predicate owns this rather than borrowing each renderer's tool count:
+	 *   a name the manager holds no definition for connects on nothing.
+	 * - `#liveConnectFailure(name) === undefined` excludes a known name whose
+	 *   last attempt under this definition failed.
+	 * - `!#reconnectsSuspended(name)` excludes a known name whose crash-burst
+	 *   budget is spent *with no failure to show for it*. Every
+	 *   `reconnectServer` call takes a budget entry, including one that
+	 *   returns before it connects: an auth challenge whose handler resolves
+	 *   `undefined` — a person cancelling the login — is refused inside
+	 *   `#doReconnect` before any transport is opened and before any `failed`
+	 *   event is emitted. Five of those fill the window while the failure
+	 *   record stays empty, so the second guard cannot see them and the
+	 *   first does not apply: the server is configured, and the next tool
+	 *   call is refused outright rather than connecting.
 	 */
 	isServerDormant(name: string): boolean {
 		return (
 			this.#serverConfigs.has(name) &&
 			this.getConnectionStatus(name) === "disconnected" &&
-			this.#liveConnectFailure(name) === undefined
+			this.#liveConnectFailure(name) === undefined &&
+			!this.#reconnectsSuspended(name)
 		);
 	}
 
 	/**
 	 * Hold `config` as the definition for `name`, and — when it replaces a
-	 * different one — drop that name's crash-burst history with it.
+	 * different server — drop that name's crash-burst history with it.
 	 *
 	 * Everything else that is "about a definition" is bound to the object
 	 * (see {@link McpStartupFailure}); the breaker's window is keyed on the
 	 * name alone, deliberately, so that an auth handler refreshing the config
 	 * on every challenge cannot storm by handing out new objects. What it
-	 * must not survive is a definition the *user* replaced: that one has
-	 * crashed nothing, and inheriting the previous one's bursts is the same
-	 * mistake as inheriting its error text. Left in, it refused the very
-	 * connect the retired failure record had just licensed
-	 * {@link MCPManager.isServerDormant} to promise.
+	 * must not survive is a server the *user* replaced: that one has crashed
+	 * nothing, and inheriting the previous one's bursts is the same mistake
+	 * as inheriting its error text.
+	 *
+	 * "A different server" is {@link sameMcpServerIdentity}, the tool cache's
+	 * own answer, not object inequality. Object inequality made the budget a
+	 * function of how often the config file is rewritten: every rediscovery
+	 * that changed only connection policy — a `timeout`, a `lazy` flip —
+	 * handed back five more spawns of the same crashing process, without
+	 * bound. The endpoint, the executable, its arguments, its environment,
+	 * its directory and its credentials are what a crash can be about; the
+	 * rest is policy applied to a process that is still the same one.
 	 *
 	 * The auth handler's own refreshed config in `#doReconnect` is installed
 	 * directly, not through here, for the reason above.
 	 */
 	#holdServerConfig(name: string, config: MCPServerConfig): void {
-		if (this.#serverConfigs.get(name) !== config) this.#reconnectHistory.delete(name);
+		const held = this.#serverConfigs.get(name);
+		if (held === undefined || !sameMcpServerIdentity(held, config)) this.#reconnectHistory.delete(name);
 		this.#serverConfigs.set(name, config);
 	}
 

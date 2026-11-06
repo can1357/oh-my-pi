@@ -261,24 +261,19 @@ function extractMCPServersFromToml(
 		if (config.bearer_token_env_var && Bun.env[config.bearer_token_env_var]) {
 			asWrittenHeaders.Authorization = `Bearer \${${config.bearer_token_env_var}}`;
 		}
-		server.asWritten = {
-			// Rooted, not raw. The tool cache keys a catalogue on the server
-			// name alone, and `./bin/aw` under two projects' `.codex` dirs is
-			// two different programs in two different working directories —
-			// recording the written form made them hash alike, so the second
-			// project mounted the first one's catalogue. The config dir is
-			// not a value anything rotates: it is where the file is, so
-			// `rooted` belongs in the identity exactly as it belongs in the
-			// connection. A bare executable (`npx`) is left alone by
-			// `resolvePluginStdioPaths` here as it is above, so the common
-			// entry still hashes on what was written.
-			...(rooted.command !== undefined && { command: rooted.command }),
-			...(config.args !== undefined && { args: config.args }),
-			...(Object.keys(asWrittenEnv).length > 0 && { env: asWrittenEnv }),
-			...(rooted.cwd !== undefined && { cwd: rooted.cwd }),
-			...(config.url !== undefined && { url: config.url }),
-			...(Object.keys(asWrittenHeaders).length > 0 && { headers: asWrittenHeaders }),
-		};
+		// Only the substituted fields are recorded; `command`, `cwd`, `args`
+		// and `url` are the effective values and stay out, which is the same
+		// rule `withMcpAsWritten` applies for every other provider. The
+		// config dir is not a value anything rotates — it is where the file
+		// is — so a rooted `./bin/aw` belongs in the identity exactly as it
+		// belongs in the connection, and `./bin/aw` under two projects'
+		// `.codex` dirs stays two servers.
+		if (Object.keys(asWrittenEnv).length > 0 || Object.keys(asWrittenHeaders).length > 0) {
+			server.asWritten = {
+				...(Object.keys(asWrittenEnv).length > 0 && { env: asWrittenEnv }),
+				...(Object.keys(asWrittenHeaders).length > 0 && { headers: asWrittenHeaders }),
+			};
+		}
 
 		// Determine transport type (infer from config if not explicit)
 		if (config.url) {

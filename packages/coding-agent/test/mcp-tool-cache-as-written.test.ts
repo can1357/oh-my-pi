@@ -556,4 +556,101 @@ describe("the tool cache keys a discovered server on its config as written", () 
 		// The project that wrote the entry still hits its own.
 		expect(await cache.get(name, here)).toEqual([TOOL]);
 	});
+
+	/**
+	 * Round 10 (both arms, blocking class). Codex was fixed by rooting its
+	 * own record; the shared helper that every other provider uses records
+	 * whatever the entry wrote, so `./bin/aw` under two projects' extension
+	 * directories is one identity and the cache row is the server name
+	 * alone. The second project started with the first project's catalogue
+	 * mounted, which for a `lazy` server is its whole tool list.
+	 */
+	test("omp-plugins: two projects declaring one server name with a relative command keep separate catalogues", async () => {
+		const project = async (slot: string): Promise<string> => {
+			const root = path.join(dirs.root, slot);
+			const ext = path.join(root, "aw-extension");
+			await fs.mkdir(path.join(root, ".git"), { recursive: true });
+			await writeJson(path.join(ext, "package.json"), { name: "aw-extension", omp: { extensions: ["./main.ts"] } });
+			await Bun.write(path.join(ext, "main.ts"), "export default function (_pi) {}\n");
+			await writeJson(path.join(ext, ".mcp.json"), {
+				mcpServers: { aw: { command: "./bin/aw", cwd: "srv" } },
+			});
+			await writeJson(path.join(root, ".omp", "settings.json"), { extensions: [ext] });
+			return root;
+		};
+		const projectA = await project("proj-a");
+		const projectB = await project("proj-b");
+
+		clearFsCache();
+		const [name, here] = findServer((await loadAllMCPConfigs(projectA, { filterExa: false })).configs);
+		clearFsCache();
+		const [, there] = findServer((await loadAllMCPConfigs(projectB, { filterExa: false })).configs);
+
+		// Two different programs, each in its own working directory.
+		const stdio = (config: MCPServerConfig) =>
+			config.type === "stdio" ? { command: config.command, cwd: config.cwd } : undefined;
+		expect(stdio(here)?.command).toContain(path.join("proj-a", "aw-extension", "bin", "aw"));
+		expect(stdio(there)?.command).toContain(path.join("proj-b", "aw-extension", "bin", "aw"));
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, here, [TOOL]);
+		expect(await cache.get(name, there)).toBeNull();
+		// The project that wrote the entry still hits its own.
+		expect(await cache.get(name, here)).toEqual([TOOL]);
+	});
+
+	/**
+	 * Round 10, the other half of the same rule. A plugin that wants its
+	 * install directory kept out of its identity says so — Claude plugins
+	 * with `${CLAUDE_PLUGIN_ROOT}`, Agent Plugins with `${PLUGIN_ROOT}`
+	 * (covered by the `agent-plugins` row above) — and then an upgrade into
+	 * a new directory keeps the catalogue. A plugin that writes a bare
+	 * relative path has declared nothing, and two installs of it are two
+	 * programs.
+	 *
+	 * All three arms are asserted together because they pull against each
+	 * other: making the relative form root-dependent is only right if the
+	 * declared form stays root-independent, and a declaration covers only
+	 * the fields it is written on — a declared `command` beside a relative
+	 * `cwd` still names a directory that moved.
+	 */
+	test("claude-plugins: a declared plugin root survives a move, a bare relative path does not", async () => {
+		enableUserSource("claude");
+		const install = async (slot: string, command: string, cwd: string): Promise<MCPServerConfig> => {
+			const pluginPath = path.join(dirs.root, "claude-plugins", slot, "aw-plugin");
+			await writeJson(path.join(pluginPath, ".mcp.json"), { aw: { type: "stdio", command, cwd } });
+			await Bun.write(path.join(pluginPath, "bin", "aw"), "#!/bin/sh\n");
+			await writeClaudeRegistry(dirs, pluginPath, "aw-plugin@claude-plugins-official");
+			clearFsCache();
+			clearClaudePluginRootsCache();
+			return findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs)[1];
+		};
+		// Concatenated, as the source does, to keep oxlint's
+		// no-template-curly-in-string off a literal placeholder name.
+		const ROOT = "$" + "{CLAUDE_PLUGIN_ROOT}";
+
+		// Declared on both rooted fields: the install directory is not part
+		// of this plugin's identity, so moving it keeps the catalogue.
+		const declaredA = await install("a", `${ROOT}/bin/aw`, `${ROOT}/srv`);
+		const declaredB = await install("b", `${ROOT}/bin/aw`, `${ROOT}/srv`);
+		expect(declaredA.type === "stdio" && declaredA.command).not.toBe(declaredB.type === "stdio" && declaredB.command);
+		const declaredCache = new MCPToolCache(memoryStorage().storage);
+		await declaredCache.set("aw-plugin:aw", declaredA, [TOOL]);
+		expect(await declaredCache.get("aw-plugin:aw", declaredB)).toEqual([TOOL]);
+
+		// Declared nowhere: two installs are two programs in two directories.
+		const bareA = await install("a", "./bin/aw", "srv");
+		const bareB = await install("b", "./bin/aw", "srv");
+		const bareCache = new MCPToolCache(memoryStorage().storage);
+		await bareCache.set("aw-plugin:aw", bareA, [TOOL]);
+		expect(await bareCache.get("aw-plugin:aw", bareB)).toBeNull();
+		expect(await bareCache.get("aw-plugin:aw", bareA)).toEqual([TOOL]);
+
+		// Declared on one of the two: the relative `cwd` still moved.
+		const halfA = await install("a", `${ROOT}/bin/aw`, "srv");
+		const halfB = await install("b", `${ROOT}/bin/aw`, "srv");
+		const halfCache = new MCPToolCache(memoryStorage().storage);
+		await halfCache.set("aw-plugin:aw", halfA, [TOOL]);
+		expect(await halfCache.get("aw-plugin:aw", halfB)).toBeNull();
+	});
 });

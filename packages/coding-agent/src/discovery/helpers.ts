@@ -209,11 +209,42 @@ const MCP_AS_WRITTEN_FIELDS = [
 ] as const satisfies readonly (keyof MCPServerAsWritten)[];
 
 /**
+ * The substitution forms a discovery provider expands while loading an MCP
+ * entry: `${VAR}` and `${VAR:-default}` (which covers the reserved plugin
+ * roots `${PLUGIN_ROOT}`, `${PLUGIN_DATA}`, `${CLAUDE_PLUGIN_ROOT}` and
+ * `${OMP_PLUGIN_ROOT}`), and OpenCode's `{env:VAR}` / `{file:path}`.
+ */
+const MCP_SUBSTITUTION_PATTERN = /\$\{[^}]*\}|\{env:[^}]+\}|\{file:[^}]+\}/;
+
+/** Whether `value`, or anything nested in it, was written as a substitution. */
+function declaresSubstitution(value: unknown): boolean {
+	if (typeof value === "string") return MCP_SUBSTITUTION_PATTERN.test(value);
+	if (Array.isArray(value)) return value.some(declaresSubstitution);
+	if (isRecord(value)) return Object.values(value).some(declaresSubstitution);
+	return false;
+}
+
+/**
  * Record on `server` the connection fields that `entry`, its config-file entry
- * before the provider expanded `${VAR}` placeholders (or read a plugin root),
- * wrote differently. Only fields the provider set count, and `entry` must use
- * the {@link MCPServer} field names. The tool cache keys the server's catalog
- * on these, so a rotated `${TOKEN}` keeps the catalog. Returns `server`.
+ * before the provider expanded them, wrote as a *substitution*. Only fields
+ * the provider set count, and `entry` must use the {@link MCPServer} field
+ * names. The tool cache keys the server's catalog on these, so a rotated
+ * `${TOKEN}` keeps the catalog. Returns `server`.
+ *
+ * A difference is not enough. Providers also *resolve* a relative `command`
+ * or `cwd` against the directory that declared it
+ * ({@link resolvePluginStdioPaths}), and recording the written form there
+ * said that two projects' `./bin/aw` are one server — which, since the cache
+ * row is the server name alone, served one project's catalog to the other.
+ * Rooting is not substitution: it names a program, and the program a path
+ * names depends on where it is rooted.
+ *
+ * So the written form stands only where the entry asked for it, with a
+ * placeholder or a reference. A plugin whose install directory is not part
+ * of its identity says so — `${PLUGIN_ROOT}/bin/aw`, `${CLAUDE_PLUGIN_ROOT}`
+ * — and keeps its catalog across an upgrade; a plugin that writes a bare
+ * relative path has declared nothing, and two installs of it are two
+ * programs.
  */
 export function withMcpAsWritten<T extends MCPServer>(server: T, entry: unknown): T {
 	if (!isRecord(entry)) return server;
@@ -222,6 +253,7 @@ export function withMcpAsWritten<T extends MCPServer>(server: T, entry: unknown)
 	for (const field of MCP_AS_WRITTEN_FIELDS) {
 		const written = entry[field];
 		if (server[field] === undefined || written === undefined || Bun.deepEquals(written, server[field])) continue;
+		if (!declaresSubstitution(written)) continue;
 		asWritten[field] = written;
 		differs = true;
 	}

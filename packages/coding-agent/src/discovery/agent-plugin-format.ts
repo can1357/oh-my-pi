@@ -397,6 +397,12 @@ async function parseStdioServer(
 		}
 	}
 
+	// A plugin-relative `./` path is rooted at the install directory, and the
+	// spec puts that directory outside the plugin's identity: an upgrade into
+	// a new directory is the same server. Record it as the placeholder the
+	// spec gives for exactly that, so the tool cache reads the declaration
+	// rather than inferring one from the difference (see `withMcpAsWritten`,
+	// which records a written form only where the entry asked for one).
 	return {
 		server: {
 			name,
@@ -406,14 +412,15 @@ async function parseStdioServer(
 			env: expandedEnv,
 			cwd: resolvedCwd,
 			asWritten: {
-				command,
+				command: command.startsWith("./") ? `${PLUGIN_ROOT_VAR}/${command.slice(2)}` : command,
 				...(args !== undefined && { args: args as string[] }),
 				env: {
 					...(env as Record<string, string> | undefined),
 					PLUGIN_ROOT: PLUGIN_ROOT_VAR,
 					PLUGIN_DATA: PLUGIN_DATA_VAR,
 				},
-				cwd: cwd ?? PLUGIN_ROOT_VAR,
+				cwd:
+					cwd === undefined ? PLUGIN_ROOT_VAR : cwd.startsWith("./") ? `${PLUGIN_ROOT_VAR}/${cwd.slice(2)}` : cwd,
 			},
 		},
 	};
