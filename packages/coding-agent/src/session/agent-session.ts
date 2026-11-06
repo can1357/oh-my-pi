@@ -895,7 +895,7 @@ interface TitleInput {
 	/** Read from a resumed transcript rather than typed. An interrupt drops it
 	 *  instead of reviving it: an operator can send their message again, a
 	 *  transcript cannot, and reviving it would spend the one try per resume
-	 *  ({@link AgentSession.adoptResumedTitleInput}) on every later wake. */
+	 *  ({@link #adoptResumedTitleInput}) on every later wake. */
 	resumed?: true;
 }
 
@@ -11252,10 +11252,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *
 	 * A relaunch need not send an operator message: a wake notice arrives as a
 	 * `custom` message, which {@link operatorTitleText} reads only for `/skill:`
-	 * chips, so {@link #noteTitleInput} never fires and the session stays unnamed
-	 * until a person types — in the case this fixes, five hours, while it worked.
-	 * The carried transcript is a better source than a first message anyway: it
-	 * is what {@link #advanceDeferredTitle} already retitles from.
+	 * chips, so {@link #noteTitleInput} never fires and the session would stay
+	 * unnamed until a person typed. The carried transcript is a better source
+	 * than a first message anyway: it is what {@link #advanceDeferredTitle}
+	 * already retitles from.
 	 *
 	 * The bound is one title request per resumed session, the same budget one
 	 * operator message buys: the entitlement is spent on the first reply whatever

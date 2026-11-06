@@ -35,6 +35,7 @@ import { parseMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
 import { parseMotionMode } from "../config/motion-presets";
 import { parseSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { cleanSessionTitle } from "../session/title-text";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
 
@@ -260,10 +261,12 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.export = value;
 	},
 	"--title": (result, value) => {
-		// Cleaned and checked for blankness in `buildSessionOptions`, against
-		// `SessionManager.cleanTitle` — this table may not reach session code, and
-		// a second notion of blank here would disagree with the one that counts.
-		result.title = value;
+		// Cleaned against the one definition of a title, so a value that would
+		// clean away to nothing is refused here rather than discovered later:
+		// `setSessionName` drops such a title and returns false without a word.
+		const title = cleanSessionTitle(value);
+		if (!title) throw new CliUsageError(`--title requires a session title; ${JSON.stringify(value)} holds none.`);
+		result.title = title;
 	},
 	"--hook": (result, value) => {
 		result.hooks = result.hooks ?? [];

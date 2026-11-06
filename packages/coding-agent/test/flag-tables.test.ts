@@ -305,12 +305,14 @@ describe("restartArgv (/restart relaunch argv)", () => {
 	});
 });
 describe("--title", () => {
-	it("takes the name as its value verbatim, leaving cleaning to the session manager", () => {
+	it("cleans the name it takes, and refuses at parse time what cleans to nothing", () => {
 		expect(parseArgs(["--title", "ShellPortAudit lane"]).title).toBe("ShellPortAudit lane");
-		// Not trimmed or rejected here: `buildSessionOptions` cleans and refuses
-		// with `SessionManager.cleanTitle`, which is the notion of blank that
-		// decides whether `setSessionName` keeps the title.
-		expect(parseArgs(["--title", "  spaced  "]).title).toBe("  spaced  ");
+		expect(parseArgs(["--title", "  spaced  "]).title).toBe("spaced");
+		// Rejected here, like every other validated flag in this table, so no
+		// session is resolved — and a forked one never minted — before the error.
+		// `trim()` would call the second of these a title; the one cleaner does not.
+		expect(() => parseArgs(["--title", "   "])).toThrow(CliUsageError);
+		expect(() => parseArgs(["--title", "\u001b"])).toThrow(CliUsageError);
 	});
 });
 describe("--restore", () => {

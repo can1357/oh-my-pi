@@ -6,6 +6,8 @@ interface Observation {
 	error?: { name: string; message: string };
 	sessionName?: string | null;
 	titleSource?: string | null;
+	/** Session files in the launch's session directory when the run ended. */
+	files?: string[];
 }
 
 /**
@@ -82,6 +84,9 @@ async function resumeWithTitle(title: string | undefined): Promise<Observation> 
 		} finally {
 			await manager?.close();
 			authStorage.close();
+			observation.files = (await Array.fromAsync(
+				new Bun.Glob("*.jsonl").scan({ cwd: SessionManager.getDefaultSessionDir(cwd) })
+			)).sort();
 		}
 		console.log("OBSERVATION_TITLE_FLAG:" + JSON.stringify(observation));
 		process.exit(0);
@@ -139,12 +144,12 @@ describe("omp --title", () => {
 		expect(unnamed.titleSource).toBeNull();
 	}, 90_000);
 
-	// Whitespace and control characters alike: `SessionManager.cleanTitle` turns
-	// both into nothing, and `setSessionName` would then drop the title and
-	// return false without a word, leaving the launcher to believe it had named
-	// the session. The launch refuses instead. `trim()` calls the second of
-	// these a title, which is why the check asks the cleaner rather than
-	// carrying its own notion of blank.
+	// Whitespace and control characters alike: `cleanSessionTitle` turns both
+	// into nothing, and `setSessionName` would then drop the title and return
+	// false without a word, leaving the launcher to believe it had named the
+	// session. The flag refuses at parse time instead, before a session exists.
+	// `trim()` calls the second of these a title, which is why the check asks
+	// the one cleaner rather than carrying its own notion of blank.
 	test.each([
 		["whitespace", "   "],
 		["control characters", "\u0001\u0002"],
@@ -155,6 +160,9 @@ describe("omp --title", () => {
 
 			expect(refused.error?.name).toBe("CliUsageError");
 			expect(refused.sessionName).toBeUndefined();
+			// Refused at parse time, so no session was resolved: the dead one it
+			// would have resumed is the only file, with no fork left behind.
+			expect(refused.files).toEqual(["dead.jsonl"]);
 		},
 		90_000,
 	);

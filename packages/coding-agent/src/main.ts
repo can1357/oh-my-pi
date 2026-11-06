@@ -1739,17 +1739,10 @@ export async function buildSessionOptions(
 	if (titleSystemPrompt) {
 		options.titleSystemPrompt = titleSystemPrompt;
 	}
-	// `--title`: the launcher already knows what the session is called, so no
-	// generated title ever has to be waited for. Recorded as a title the user
-	// set, which every automatic path yields to. Cleaned here, by the same
-	// function `setSessionName` cleans with, so a title that would clean away to
-	// nothing is refused rather than silently ignored.
+	// `--title` is already a cleaned, non-blank title: the flag table refuses
+	// anything else at parse time.
 	if (parsed.title !== undefined) {
-		const title = SessionManager.cleanTitle(parsed.title);
-		if (!title) {
-			throw new CliUsageError(`Invalid --title value: ${JSON.stringify(parsed.title)} is not a session title.`);
-		}
-		options.sessionTitle = title;
+		options.sessionTitle = parsed.title;
 	}
 
 	// Tools

@@ -82,6 +82,7 @@ import {
 	type TtsrInjectionEntry,
 	type UsageStatistics,
 } from "./session-entries";
+import { cleanSessionTitle } from "./title-text";
 import { currentRuntimeIdentity, type RuntimeIdentity } from "./runtime-identity";
 import {
 	findMostRecentNonEmptySession,
@@ -2263,21 +2264,6 @@ export class SessionManager {
 		}
 	}
 
-	/**
-	 * The one definition of what a session title may contain, and so of what
-	 * counts as blank: {@link setSessionName} drops a title that cleans away to
-	 * nothing and reports nothing. A caller that wants to refuse such a title
-	 * rather than discover it was ignored (`omp --title`) MUST ask here instead
-	 * of writing a second notion of blank — `"\u0001"` is not blank to `trim()`
-	 * and is blank to this.
-	 */
-	static cleanTitle(raw: string): string {
-		return raw
-			.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
-			.replace(/ +/g, " ")
-			.trim();
-	}
-
 	/** Puts a binary blob into the blob store and returns the blob reference. */
 	async putBlob(data: Buffer, options?: BlobPutOptions): Promise<BlobPutResult> {
 		return this.#blobs.put(data, options);
@@ -3470,7 +3456,7 @@ export class SessionManager {
 		if (this.#released) return false;
 		if (this.#titleSource === "user" && source === "auto") return false;
 
-		const title = SessionManager.cleanTitle(name);
+		const title = cleanSessionTitle(name);
 		if (!title) return false;
 
 		const previousTitle = this.#sessionName;
