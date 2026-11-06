@@ -49,6 +49,7 @@ import {
 	jobWidgetSummary,
 	latestJobWidget,
 } from "@oh-my-pi/pi-tui/tools/job-widget";
+import { installSignalProfiler } from "../debug/signal-profiler";
 import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
@@ -2435,7 +2436,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.playWelcomeIntro();
 	}
 
+	#removeSignalProfiler: (() => void) | undefined;
+
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
+		this.#removeSignalProfiler ??= installSignalProfiler();
 		if (this.isInitialized) return;
 		this.#idleMaintenanceActivity.scheduledTurn = target =>
 			target === this.session &&
@@ -8146,6 +8150,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.#removeSignalProfiler?.();
+		this.#removeSignalProfiler = undefined;
 		this.syncIdleMaintenanceView(null);
 		this.#hidePlanReview();
 		this.#appearanceRefreshRequest = undefined;
