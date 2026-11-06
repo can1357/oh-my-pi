@@ -1,7 +1,6 @@
 import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { type } from "@oh-my-pi/omptype";
-
 /**
  * Loaded with `-e` into the child `omp`. Registers two loopback providers whose base URLs,
  * OAuth rows and usage come from the fake in the test process:
@@ -35,6 +34,7 @@ export default function govplanExtension(pi: ExtensionAPI): void {
 	for (const provider of ["govplan", "govplan-g"] as const) {
 		const usage: UsageProvider = {
 			id: provider,
+			governorAllowance: () => ["requests-60s", "requests-7d"],
 			async fetchUsage(params, context): Promise<UsageReport | null> {
 				const response = await context.fetch(`${fake}/${provider}/usage`, {
 					headers: { Authorization: `Bearer ${params.credential.accessToken ?? ""}` },

@@ -329,6 +329,103 @@ describe("usage governor CLI proof: scenarios", () => {
 		}
 	}, 120_000);
 
+	test("proactive fallback uses the configured default chain when the primary is paced", async () => {
+		const proof = await GovernorProof.create(
+			[
+				account("govplan", "a", { usedFraction: 0.8, resetInMs: 58_000 }),
+				account("govplan-g", "b", { usedFraction: 0, resetInMs: 58_000 }),
+			],
+			{
+				enabled: true,
+				modelRoles: { default: "govplan/m", task: "govplan/m" },
+				fallbackChains: { default: ["govplan-g/m"], task: [] },
+			},
+		);
+		let child: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
+		try {
+			const status = governorOf(await proof.usageJson());
+			expect(windowsFor(status, "govplan-g-b@example.invalid").some(window => window.state === "open")).toBe(true);
+			expect(proof.fake.records.some(record => record.kind === "usage" && record.label === "b")).toBe(true);
+			child = proof.spawnOmp(["-p", "proactive fallback"]);
+			const stderr = new Response(child.stderr).text();
+			const routed = await awaitCondition(() => proof.chats().length > 0, 20_000);
+			if (!routed) {
+				child.kill("SIGINT");
+				await child.exited;
+				throw new Error(
+					`no fallback send: ${JSON.stringify({ records: proof.fake.records, ledger: proof.readLedger(), stderr: await stderr })}`,
+				);
+			}
+			expect(proof.chats().map(record => record.provider)).toEqual(["govplan-g"]);
+			expect(proof.fake.records.some(record => record.kind === "usage" && record.label === "a")).toBe(true);
+			expect(proof.fake.records.some(record => record.kind === "usage" && record.label === "b")).toBe(true);
+			expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
+			assertConfined(proof);
+		} finally {
+			child?.kill("SIGINT");
+			if (child) await child.exited;
+			proof.close();
+		}
+	}, 60_000);
+	test("an unprobed fallback remains unknown and cannot escape to paid capacity", async () => {
+		const proof = await GovernorProof.create(
+			[
+				account("govplan", "a", { usedFraction: 0.8, resetInMs: 58_000 }),
+				account("govplan-g", "b", { usedFraction: 1, resetInMs: 58_000, creditBalance: 100 }),
+			],
+			{
+				enabled: true,
+				modelRoles: { default: "govplan/m", task: "govplan/m" },
+				fallbackChains: { default: ["govplan-g/m"], task: [] },
+			},
+		);
+		const child = proof.spawnOmp(["-p", "unknown fallback"]);
+		try {
+			expect(await awaitCondition(() => proof.readLedger().waits.length > 0, 20_000)).toBe(true);
+			expect(proof.fake.records.some(record => record.kind === "usage" && record.label === "b")).toBe(false);
+			expect(proof.chats()).toEqual([]);
+			expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
+			assertConfined(proof);
+		} finally {
+			child.kill("SIGINT");
+			await child.exited;
+			proof.close();
+		}
+	}, 60_000);
+
+	test("a selected primary falls back within the same session after crossing its line", async () => {
+		const proof = await GovernorProof.create(
+			[
+				account("govplan", "a", { usedFraction: 0, resetInMs: 58_000, perRequest: 0.4 }),
+				account("govplan-g", "b", { usedFraction: 0, resetInMs: 58_000, perRequest: 0.01 }),
+			],
+			{
+				enabled: true,
+				modelRoles: { default: "govplan/m", task: "govplan/m" },
+				fallbackChains: { default: ["govplan-g/m"], task: [] },
+			},
+		);
+		let child: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
+		try {
+			const status = governorOf(await proof.usageJson());
+			expect(windowsFor(status, "govplan-g-b@example.invalid").some(window => window.state === "open")).toBe(true);
+			child = proof.spawnOmp(["-p", "ROUTE_PIN"]);
+			expect(await awaitCondition(() => proof.chats().length >= 2, 20_000)).toBe(true);
+			expect(
+				proof
+					.chats()
+					.slice(0, 2)
+					.map(record => record.provider),
+			).toEqual(["govplan", "govplan-g"]);
+			expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
+			assertConfined(proof);
+		} finally {
+			child?.kill("SIGINT");
+			if (child) await child.exited;
+			proof.close();
+		}
+	}, 60_000);
+
 	test("role restriction: default-role sends wait and never reach govplan-g; subagent sends are reserved as subagent", async () => {
 		// Both govplan accounts sit at 50 % with the line already crossed. Both govplan-g accounts are fresh.
 		const specs = [

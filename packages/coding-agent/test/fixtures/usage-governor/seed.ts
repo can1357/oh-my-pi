@@ -37,6 +37,8 @@ export interface ScenarioSettings {
 	enabled: boolean;
 	/** `usageGovernor.interactiveReserve`; omitted to exercise the default. */
 	interactiveReserve?: "hold" | "spend";
+	fallbackChains?: Record<string, string[]>;
+	modelRoles?: Record<string, string>;
 }
 
 /** Writes the scenario config: `usageGovernor.leadPct` is left unset so the default applies. */
@@ -59,10 +61,10 @@ export function writeScenarioConfig(agentDir: string, settings: ScenarioSettings
 				"lm-studio",
 			]),
 		].filter(provider => provider !== "govplan" && provider !== "govplan-g"),
-		modelRoles: { default: "govplan/m", task: "govplan-g/m" },
+		modelRoles: settings.modelRoles ?? { default: "govplan/m", task: "govplan-g/m" },
 		retry: {
 			usageReservePct: 10,
-			fallbackChains: { default: ["govplan/m2"] },
+			fallbackChains: settings.fallbackChains ?? { default: ["govplan/m2"] },
 		},
 		compaction: { enabled: false },
 	};

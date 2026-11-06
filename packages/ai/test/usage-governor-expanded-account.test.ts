@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import type { UsageProvider, UsageReport, UsageResetCredits } from "@oh-my-pi/pi-ai/usage";
 import { fingerprintBearer } from "../src/auth/bearer-fingerprint";
+import { usageCacheIdentity } from "../src/auth/usage-cache";
 import { fakeStrategy, installFetchTripwire } from "./fixtures/usage-governor/harness";
 
 installFetchTripwire();
@@ -73,6 +74,18 @@ class World {
 	async refresh() {
 		await this.auth.usage.invalidate(PROVIDER);
 		await this.auth.usage.reports({ provider: PROVIDER });
+	}
+	storeReport(key: string, expired = false) {
+		const report = this.reports.get(key);
+		if (!report) throw new Error(`missing report for ${key}`);
+		const identity = usageCacheIdentity({ type: "api_key", apiKey: key });
+		const cacheKey = `usage_cache:report:${PROVIDER}:default:${identity}`;
+		const expiresAt = Date.now() + (expired ? -1000 : 60_000);
+		this.store.setCache(
+			cacheKey,
+			JSON.stringify({ value: report, expiresAt }),
+			Math.floor((Date.now() + STALE) / 1000),
+		);
 	}
 	async evaluate() {
 		return (
@@ -212,7 +225,7 @@ describe("stored coding-plan account admission", () => {
 		w.allowance = "included";
 		for (const observedAt of [null, Date.now() - STALE, Date.now() + STALE]) {
 			w.report("account-a", { observedAt });
-			await w.refresh();
+			w.storeReport("account-a");
 			const accounts = await w.evaluate();
 			expect(accounts.find(a => a.credentialId === rowA.id)?.allowance).toBe("unknown");
 			expect(await w.admit(rowA.id, "account-a")).toBeUndefined();
@@ -241,7 +254,7 @@ describe("banked reset tie-break evidence", () => {
 		} satisfies UsageResetCredits;
 		const check = async (resets: UsageResetCredits, expected?: number) => {
 			w.report("account-a", { resets });
-			await w.refresh();
+			w.storeReport("account-a");
 			const before = w.fetches;
 			const account = (await w.evaluate())[0]!;
 			expect(account.allowance).toBe("included");
@@ -249,10 +262,23 @@ describe("banked reset tie-break evidence", () => {
 			expect(w.fetches).toBe(before);
 			expect(w.blockCount()).toBe(0);
 		};
+		w.report("account-a", { observedAt: null, resets: { ...reset, observedAt: undefined } });
+		await w.refresh();
+		const fresh = (await w.evaluate())[0]!;
+		expect(fresh.allowance).toBe("included");
+		expect(fresh.resetTieBreakExpiresAtMs).toBe(expiry);
 		await check(reset, expiry);
 		await check({ ...reset, observedAt: now - STALE });
 		await check({ ...reset, observedAt: now + STALE });
 		await check({ ...reset, observedAt: undefined });
+		// A failed refresh retains the legacy cache entry rather than observing it anew.
+		w.report("account-a", { resets: { ...reset, observedAt: undefined } });
+		w.storeReport("account-a", true);
+		w.reports.delete("account-a");
+		const beforeFailure = w.fetches;
+		await w.auth.usage.reports({ provider: PROVIDER });
+		expect(w.fetches).toBe(beforeFailure + 1);
+		expect((await w.evaluate())[0]!.resetTieBreakExpiresAtMs).toBeUndefined();
 		await check({ ...reset, eligible: false });
 		await check({ ...reset, credits: [{ ...credit, clears: ["other"] }] });
 		await check({ ...reset, credits: [{ ...credit, usable: false }] });
