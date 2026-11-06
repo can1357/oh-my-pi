@@ -44,6 +44,7 @@ import {
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
 	openCodeGoBaseUrlForApi,
+	openCodeZenBaseUrlForApi,
 	projectOpenAIProReasoningAliases,
 	stripFireworksDeepSeekThinkingToggle,
 } from "../src/provider-models/openai-compat";
@@ -679,10 +680,12 @@ async function generateModels(selectedProvider?: string) {
 	allModels = filterModelsDevCatalogRows(allModels);
 	allModels = normalizeAntigravityEndpoint(allModels);
 	// Previous-snapshot fallbacks keep their old baseUrl; re-base every OpenCode
-	// Go row so retained rows follow gateway endpoint moves (#15722).
-	allModels = allModels.map(model =>
-		model.provider === "opencode-go" ? { ...model, baseUrl: openCodeGoBaseUrlForApi(model.api) } : model,
-	);
+	// Go and Zen row so retained rows follow gateway endpoint moves (#15722).
+	allModels = allModels.map(model => {
+		if (model.provider === "opencode-go") return { ...model, baseUrl: openCodeGoBaseUrlForApi(model.api) };
+		if (model.provider === "opencode-zen") return { ...model, baseUrl: openCodeZenBaseUrlForApi(model.api) };
+		return model;
+	});
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
 	// markers ("(latest)"), provider attribution ("(Antigravity)"), and
 	// price/promo tags are model-extrinsic — strip them from the bundle.

@@ -26,6 +26,10 @@
 - Fixed newly published Azure models missing after catalog refresh ([#18173](https://github.com/can1357/oh-my-pi/issues/18173), [#18174](https://github.com/can1357/oh-my-pi/pull/18174) by [@dunkpi](https://github.com/dunkpi))
 - Fixed Factory Droid hiding models when the live-routing family default yields no usable upstream; explicit empty per-model routes still hide them ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Changed
+
+- Update OpenCode Zen and OpenCode Go requests to OpenCode's new inference endpoints ([#18101](https://github.com/can1357/oh-my-pi/pull/18101) by [@mikucat0309](https://github.com/mikucat0309))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

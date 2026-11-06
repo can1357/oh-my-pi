@@ -52,7 +52,7 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 		case "opencode-go":
 			return "https://opencode.ai/inference/go/v1";
 		case "opencode-zen":
-			return "https://opencode.ai/zen/v1";
+			return "https://opencode.ai/inference/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
 		default:
