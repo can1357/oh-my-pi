@@ -1906,13 +1906,18 @@ export class RelayBridge {
 	#detachIfUnheld(tabKey: string): void {
 		if (this.#sessionHolders(tabKey).length > 0) return;
 		const tab = this.#tabs.get(tabKey);
-		if (!tab?.attached) return;
-		tab.attached = false;
-		this.#resetRuntime(tab);
-		this.#forgetChildren(tab);
-		tab.reattachedAfterDetach = false;
-		const done = this.#rpc({ op: "detach", tabId: tab.tabId }, this.#instanceFor(tab))
-			.then(() => {})
+		if (!tab?.attached || tab.detaching) return;
+		// Chrome must finish resetting tab-wide switches before its debugger session ends. Detaching while focus
+		// emulation is changing can strand the renderer's next session, whose commands then never answer.
+		const transitions = TAB_WIDE_SWITCHES.map(method => this.#switchTransitions.get(`${tabKey} ${method}`));
+		const done = Promise.all(transitions)
+			.then(async () => {
+				tab.attached = false;
+				this.#resetRuntime(tab);
+				this.#forgetChildren(tab);
+				tab.reattachedAfterDetach = false;
+				await this.#rpc({ op: "detach", tabId: tab.tabId }, this.#instanceFor(tab));
+			})
 			.catch(() => {})
 			.finally(() => {
 				if (tab.detaching === done) tab.detaching = null;
