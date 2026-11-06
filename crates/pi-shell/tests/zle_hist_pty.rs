@@ -21,14 +21,8 @@ const KEY: Duration = Duration::from_millis(60);
 const QUIET: Duration = Duration::from_millis(300);
 
 /// The history file every case starts with (oldest first).
-const HIST: &str = "echo café crème\n\
-                    echo one\n\
-                    echo two\n\
-                    ls -l /tmp\n\
-                    echo three\n\
-                    print -r -- Two Words\n\
-                    echo two\n\
-                    git status\n";
+const HIST: &str = "echo café crème\necho one\necho two\nls -l /tmp\necho three\nprint -r -- Two \
+                    Words\necho two\ngit status\n";
 
 /// `zsh -f -i` with the history file, `PS1`/`RPS1` and the rc file `rc`
 /// (sourced with `.` as the first command, since `-f` skips `.zshrc`).
@@ -40,8 +34,8 @@ fn spawn(real: bool, rc: &str) -> Spawn {
 	};
 	// `^Xq` replaces the line with `cat ~/log` and runs it (see `same_log`).
 	let rc = format!(
-		"HISTSIZE=100\nfc -R ~/hist\nq() {{ BUFFER='cat ~/log'; zle .accept-line }}\nzle -N q\n\
-		 bindkey -M emacs '^Xq' q\nbindkey -M viins '^Xq' q\nbindkey -M vicmd '^Xq' q\n{rc}"
+		"HISTSIZE=100\nfc -R ~/hist\nq() {{ BUFFER='cat ~/log'; zle .accept-line }}\nzle -N \
+		 q\nbindkey -M emacs '^Xq' q\nbindkey -M viins '^Xq' q\nbindkey -M vicmd '^Xq' q\n{rc}"
 	);
 	s.args(["-f", "-i"])
 		.env("PS1", "%~ %# ")
@@ -99,7 +93,8 @@ fn same_log(rc: &str, typed: &str) {
 
 /// A widget logging `BUFFER`, `CURSOR` and `HISTNO` to `~/log`, bound to
 /// `^Xp`.
-const SHOW: &str = "show() { print -r -- \"<$BUFFER> $CURSOR $HISTNO\" >>~/log }\nzle -N show\nbindkey '^Xp' show\n";
+const SHOW: &str = "show() { print -r -- \"<$BUFFER> $CURSOR $HISTNO\" >>~/log }\nzle -N \
+                    show\nbindkey '^Xp' show\n";
 
 #[test]
 fn up_and_down_history_with_numeric_arguments() {
@@ -109,13 +104,17 @@ fn up_and_down_history_with_numeric_arguments() {
 
 #[test]
 fn up_history_stops_at_the_oldest_line_without_failing() {
-	let rc = "w() { zle up-history; print -r -- \"st=$? <$BUFFER> $HISTNO\" >>~/log }\nzle -N w\nbindkey '^T' w\n";
+	let rc = "w() { zle up-history; print -r -- \"st=$? <$BUFFER> $HISTNO\" >>~/log }\nzle -N \
+	          w\nbindkey '^T' w\n";
 	same_log(rc, "\x1b9\x1b9\x10\x14\x14");
 }
 
 #[test]
 fn up_history_with_histignoredups_skips_the_same_line() {
-	let rc = format!("{SHOW}setopt histignoredups histbeep\nw() {{ zle up-history; print -r -- \"st=$? <$BUFFER>\" >>~/log }}\nzle -N w\nbindkey '^T' w\n");
+	let rc = format!(
+		"{SHOW}setopt histignoredups histbeep\nw() {{ zle up-history; print -r -- \"st=$? \
+		 <$BUFFER>\" >>~/log }}\nzle -N w\nbindkey '^T' w\n"
+	);
 	// Up from a buffer equal to the line above skips it; skipping off the
 	// oldest line fails.
 	same_log(&rc, "git status\x14\x14\x1b<\x0e\x15. ~/.zshrc\x14");
@@ -137,8 +136,8 @@ fn history_search_backward_and_forward_by_first_word() {
 #[test]
 fn history_search_with_an_argument_and_numeric_count() {
 	let rc = format!(
-		"{SHOW}w() {{ zle history-search-backward ls; print -r -- \"st=$? <$BUFFER>\" >>~/log }}\nzle -N w\n\
-		 bindkey '^T' w\nbindkey '^Y' history-search-backward\n"
+		"{SHOW}w() {{ zle history-search-backward ls; print -r -- \"st=$? <$BUFFER>\" >>~/log \
+		 }}\nzle -N w\nbindkey '^T' w\nbindkey '^Y' history-search-backward\n"
 	);
 	same_log(&rc, "\x14\x05\x15echo\x1b2\x19\x18p");
 }
@@ -146,7 +145,8 @@ fn history_search_with_an_argument_and_numeric_count() {
 #[test]
 fn history_beginning_search_keeps_the_cursor() {
 	let rc = format!(
-		"{SHOW}bindkey '^T' history-beginning-search-backward\nbindkey '^Y' history-beginning-search-forward\n"
+		"{SHOW}bindkey '^T' history-beginning-search-backward\nbindkey '^Y' \
+		 history-beginning-search-forward\n"
 	);
 	same_log(&rc, "echo t\x14\x18p\x14\x18p\x14\x18p\x19\x18p\x19\x18p");
 }
@@ -161,11 +161,10 @@ fn history_beginning_search_with_histfindnodups() {
 #[test]
 fn history_beginning_search_end_functions() {
 	let rc = format!(
-		"{SHOW}fpath=(/usr/share/zsh/5.9/functions)\nautoload -Uz history-search-end\n\
-		 zle -N history-beginning-search-backward-end history-search-end\n\
-		 zle -N history-beginning-search-forward-end history-search-end\n\
-		 bindkey '^T' history-beginning-search-backward-end\n\
-		 bindkey '^Y' history-beginning-search-forward-end\n"
+		"{SHOW}fpath=(/usr/share/zsh/5.9/functions)\nautoload -Uz history-search-end\nzle -N \
+		 history-beginning-search-backward-end history-search-end\nzle -N \
+		 history-beginning-search-forward-end history-search-end\nbindkey '^T' \
+		 history-beginning-search-backward-end\nbindkey '^Y' history-beginning-search-forward-end\n"
 	);
 	same_log(&rc, "echo t\x14\x18p\x14\x18p\x19\x18p");
 }
@@ -268,8 +267,8 @@ fn incremental_pattern_search_anchored() {
 
 #[test]
 fn incremental_pattern_search_both_ways() {
-	let rc = "bindkey '^T' history-incremental-pattern-search-backward\n\
-	          bindkey '^Y' history-incremental-pattern-search-forward\n";
+	let rc = "bindkey '^T' history-incremental-pattern-search-backward\nbindkey '^Y' \
+	          history-incremental-pattern-search-forward\n";
 	same(rc, "\x14o\x14\x14\x14\x19\x19");
 }
 
@@ -303,26 +302,25 @@ fn incremental_pattern_search_invalid_pattern() {
 
 #[test]
 fn incremental_search_hooks_and_match_parameters() {
-	let rc = "zle-isearch-update() { print -r -- \"upd $WIDGET $ISEARCHMATCH_ACTIVE $ISEARCHMATCH_START $ISEARCHMATCH_END <$BUFFER> $CURSOR\" >>~/log }\n\
-	          zle -N zle-isearch-update\n\
-	          zle-isearch-exit() { print -r -- \"exit $WIDGET <$BUFFER> $ISEARCHMATCH_ACTIVE\" >>~/log }\n\
-	          zle -N zle-isearch-exit\n\
-	          zle-history-line-set() { print -r -- \"set <$BUFFER> $CURSOR\" >>~/log }\n\
-	          zle -N zle-history-line-set\n";
+	let rc = "zle-isearch-update() { print -r -- \"upd $WIDGET $ISEARCHMATCH_ACTIVE \
+	          $ISEARCHMATCH_START $ISEARCHMATCH_END <$BUFFER> $CURSOR\" >>~/log }\nzle -N \
+	          zle-isearch-update\nzle-isearch-exit() { print -r -- \"exit $WIDGET <$BUFFER> \
+	          $ISEARCHMATCH_ACTIVE\" >>~/log }\nzle -N zle-isearch-exit\nzle-history-line-set() { \
+	          print -r -- \"set <$BUFFER> $CURSOR\" >>~/log }\nzle -N zle-history-line-set\n";
 	same_log(rc, "\x12ls\x12x\x08\x05");
 }
 
 #[test]
 fn incremental_search_with_argument_keys() {
-	let rc = "w() { zle history-incremental-search-backward thr; print -r -- \"st=$? <$BUFFER>\" >>~/log }\n\
-	          zle -N w\nbindkey '^T' w\nbindkey -M isearch '^M' accept-search\n";
+	let rc = "w() { zle history-incremental-search-backward thr; print -r -- \"st=$? <$BUFFER>\" \
+	          >>~/log }\nzle -N w\nbindkey '^T' w\nbindkey -M isearch '^M' accept-search\n";
 	same_log(rc, "\x14\r");
 }
 
 #[test]
 fn incremental_search_failing_status() {
-	let rc = "w() { zle history-incremental-search-backward; print -r -- \"st=$?\" >>~/log }\n\
-	          zle -N w\nbindkey '^T' w\nbindkey -M isearch '^M' accept-search\n";
+	let rc = "w() { zle history-incremental-search-backward; print -r -- \"st=$?\" >>~/log }\nzle \
+	          -N w\nbindkey '^T' w\nbindkey -M isearch '^M' accept-search\n";
 	same_log(rc, "\x14zzz\r\x14two\r\x14x\x07");
 }
 
@@ -352,14 +350,15 @@ fn infer_next_history_and_accept_and_infer() {
 
 #[test]
 fn set_local_history_toggles() {
-	let rc = "w() { zle set-local-history; print -r -- \"$ZLE_STATE\" >>~/log }\nzle -N w\nbindkey '^T' w\n";
+	let rc = "w() { zle set-local-history; print -r -- \"$ZLE_STATE\" >>~/log }\nzle -N w\nbindkey \
+	          '^T' w\n";
 	same_log(rc, "\x14\x14\x1b0\x14\x1b3\x14");
 }
 
 /// The vi history widgets bound in the emacs keymap.
-const VI_IN_EMACS: &str = "bindkey '^T' vi-history-search-backward\nbindkey '^Y' vi-history-search-forward\n\
-                           bindkey '^Xn' vi-repeat-search\nbindkey '^XN' vi-rev-repeat-search\n\
-                           bindkey '^Xf' vi-fetch-history\n";
+const VI_IN_EMACS: &str = "bindkey '^T' vi-history-search-backward\nbindkey '^Y' \
+                           vi-history-search-forward\nbindkey '^Xn' vi-repeat-search\nbindkey \
+                           '^XN' vi-rev-repeat-search\nbindkey '^Xf' vi-fetch-history\n";
 
 #[test]
 fn vi_search_widgets_from_emacs() {
@@ -376,7 +375,8 @@ fn vi_search_minibuffer_editing() {
 #[test]
 fn vi_search_aborted_forgets_the_string() {
 	let rc = format!(
-		"{SHOW}{VI_IN_EMACS}w() {{ zle vi-repeat-search; print -r -- \"st=$? <$BUFFER>\" >>~/log }}\nzle -N w\nbindkey '^Xw' w\n"
+		"{SHOW}{VI_IN_EMACS}w() {{ zle vi-repeat-search; print -r -- \"st=$? <$BUFFER>\" >>~/log \
+		 }}\nzle -N w\nbindkey '^Xw' w\n"
 	);
 	same_log(&rc, "\x14two\r\x18w\x14x\x07\x18w");
 }

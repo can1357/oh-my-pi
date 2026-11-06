@@ -42,7 +42,7 @@ fn gp_match1(g: Gp<'_>, c: u32, mt: &mut i32) -> u32 {
 /// the restrictions `prestrict` (from `pi`), `wp` against the word
 /// characters `wsc[wsi..]` (`wsclen` of them); the line characters
 /// deduced go to `new_line[ni..]`.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "mirrors zsh's C signature")]
 fn pattern_match_restrict(
 	p: &[Cpattern],
 	wp: &[Cpattern],
@@ -55,7 +55,11 @@ fn pattern_match_restrict(
 	ni: isize,
 ) -> bool {
 	let get = |v: &[u32], i: isize| usize::try_from(i).ok().and_then(|i| v.get(i).copied());
-	let pr = |i: isize| usize::try_from(i).ok().and_then(|i| prestrict.get(i).copied());
+	let pr = |i: isize| {
+		usize::try_from(i)
+			.ok()
+			.and_then(|i| prestrict.get(i).copied())
+	};
 	let (mut k, mut wk, mut ws, mut pri, mut nl) = (0usize, 0usize, wsi, pi, ni);
 	let (mut mt, mut wmt) = (0i32, 0i32);
 	let mut put = |nl: &mut isize, c: u32| -> bool {
@@ -259,7 +263,9 @@ fn bld_line(
 			let mut ms = bm;
 			while let Some(m) = ms {
 				ms = m.next.as_deref();
-				let Some(mp2) = m.matcher.as_deref() else { continue };
+				let Some(mp2) = m.matcher.as_deref() else {
+					continue;
+				};
 				if mp2.flags == 0 && mp2.wlen <= wlen && mp2.llen <= llen {
 					let (mut lp, mut wq, mut tg2) = (linep, wordcp, curgen);
 					if sfx {
@@ -315,14 +321,22 @@ fn join_strs(
 	let (mut ia, mut ib) = (0isize, 0isize);
 	let mut rs = Vec::new();
 	while la != 0 && lb != 0 {
-		if at(sa, ia) != at(sb, ib) {
+		if at(sa, ia) == at(sb, ib) {
+			rs.push(at(sa, ia));
+			ia += 1;
+			ib += 1;
+			la -= 1;
+			lb -= 1;
+		} else {
 			let mut t = false;
 			let mut ms = bm;
 			while let Some(m) = ms
 				&& !t
 			{
 				ms = m.next.as_deref();
-				let Some(mp) = m.matcher.as_deref() else { continue };
+				let Some(mp) = m.matcher.as_deref() else {
+					continue;
+				};
 				if mp.flags == 0 && mp.wlen > 0 && mp.llen > 0 && mp.wlen <= la && mp.wlen <= lb {
 					let ta = pattern_match(&mp.word, tail(sa, ia));
 					if ta || pattern_match(&mp.word, tail(sb, ib)) {
@@ -353,12 +367,6 @@ fn join_strs(
 			if !t {
 				break;
 			}
-		} else {
-			rs.push(at(sa, ia));
-			ia += 1;
-			ib += 1;
-			la -= 1;
-			lb -= 1;
 		}
 	}
 	if la != 0 || lb != 0 { None } else { Some(rs) }
@@ -443,20 +451,20 @@ fn check_cmdata(c: &Comp, md: &mut Cmdata, sfx: bool) -> bool {
 		if x.flags & clf::LINE != 0 {
 			md.line = true;
 			md.len = x.llen;
-			md.str = x.line.clone();
+			md.str.clone_from(&x.line);
 			md.sp = 0;
 		} else {
 			md.line = false;
 			md.len = x.wlen;
 			md.olen = x.wlen;
-			md.str = x.word.clone();
+			md.str.clone_from(&x.word);
 			md.sp = if md.str.is_some() && sfx {
 				md.len as isize
 			} else {
 				0
 			};
 			md.alen = x.llen;
-			md.astr = x.line.clone();
+			md.astr.clone_from(&x.line);
 			md.ap = if md.astr.is_some() && sfx {
 				md.alen as isize
 			} else {
@@ -470,8 +478,8 @@ fn check_cmdata(c: &Comp, md: &mut Cmdata, sfx: bool) -> bool {
 }
 
 /// The `len` bytes of `s` from `p` (C `p` with length `len`).
-fn sub(s: &Option<BString>, p: isize, len: i32) -> Option<BString> {
-	s.as_ref().map(|s| super::cut(tail(s, p), len))
+fn sub(s: &BString, p: isize, len: i32) -> BString {
+	super::cut(tail(s, p), len)
 }
 
 /// zsh `undo_cmdata`: put the unmatched rest back into the last cline.
@@ -484,11 +492,11 @@ fn undo_cmdata(c: &mut Comp, md: &Cmdata, sfx: bool) -> Option<Cl> {
 		y.wlen = 0;
 		y.flags |= clf::LINE;
 		y.llen = md.len;
-		y.line = sub(&md.str, start, md.len);
+		y.line = md.str.as_ref().map(|s| sub(s, start, md.len));
 	} else if md.len != md.olen {
 		let y = c.clines.get_mut(r);
 		y.wlen = md.len;
-		y.word = sub(&md.str, start, md.len);
+		y.word = md.str.as_ref().map(|s| sub(s, start, md.len));
 	}
 	Some(r)
 }
@@ -517,7 +525,9 @@ fn join_sub(
 		&& !t
 	{
 		ms = m.next.as_deref();
-		let Some(mp) = m.matcher.as_deref() else { continue };
+		let Some(mp) = m.matcher.as_deref() else {
+			continue;
+		};
 		if mp.flags == 0 && mp.wlen > 0 && mp.llen > 0 {
 			let (lo, wo) = if sfx {
 				(mp.llen as isize, mp.wlen as isize)
@@ -688,7 +698,7 @@ fn set_field(c: &mut Comp, o: Cl, f: F, off: i32, len: i32) {
 		F::Line => (&mut y.line, &mut y.llen),
 		F::Word => (&mut y.word, &mut y.wlen),
 	};
-	*s = sub(s, off as isize, len);
+	*s = s.as_ref().map(|s| sub(s, off as isize, len));
 	*l = len;
 }
 
@@ -781,14 +791,14 @@ fn join_psfx(
 			{
 				c.clines.get_mut(joinl).flags |= clf::DIFF;
 				let onext = c.clines.get(oc).next;
-				if len + jlen != slen {
+				if len + jlen == slen {
+					c.clines.get_mut(joinl).next = onext;
+				} else {
 					let off = if sfx { 0 } else { (len + jlen) as isize };
 					let rest =
 						get_cline(c, None, 0, Some(tail(&sstr, off)), slen - len - jlen, None, 0, 0);
 					c.clines.get_mut(rest).next = onext;
 					c.clines.get_mut(joinl).next = Some(rest);
-				} else {
-					c.clines.get_mut(joinl).next = onext;
 				}
 				if len != 0 {
 					set_field(c, oc, sf, if sfx { slen - len } else { 0 }, len);
@@ -820,13 +830,12 @@ fn join_psfx(
 					c.clines.get_mut(x).next = onext;
 					*r = Some(x);
 					set_field(c, oc, sf, 0, len);
-					c.clines.get_mut(oc).next = None;
 				} else {
 					set_field(c, oc, sf, if sfx { slen - len } else { 0 }, len);
 					let onext = c.clines.get(oc).next;
 					free_cline(c, onext);
-					c.clines.get_mut(oc).next = None;
 				}
+				c.clines.get_mut(oc).next = None;
 			} else {
 				match p {
 					Some(p) => c.clines.get_mut(p).next = None,
@@ -851,10 +860,10 @@ fn join_psfx(
 	if md.len != 0 || md.cl.is_some() {
 		c.clines.get_mut(ot).flags |= clf::MISS;
 	}
-	if let Some(r) = orest.as_deref_mut() {
+	if let Some(r) = orest {
 		*r = None;
 	}
-	if let Some(r) = nrest.as_deref_mut() {
+	if let Some(r) = nrest {
 		*r = undo_cmdata(c, &md, sfx);
 	}
 }
@@ -866,7 +875,6 @@ fn join_mid(c: &mut Comp, o: Cl, n: Cl) {
 		join_psfx(c, o, n, None, Some(&mut nr), false);
 		let r = revert_cline(c, nr);
 		c.clines.get_mut(n).suffix = r;
-		join_psfx(c, o, n, None, None, true);
 	} else {
 		c.clines.get_mut(o).flags |= clf::JOIN;
 		let (mut or, mut nr) = (None, None);
@@ -879,8 +887,8 @@ fn join_mid(c: &mut Comp, o: Cl, n: Cl) {
 		c.clines.get_mut(o).suffix = r;
 		let r = revert_cline(c, nr);
 		c.clines.get_mut(n).suffix = r;
-		join_psfx(c, o, n, None, None, true);
 	}
+	join_psfx(c, o, n, None, None, true);
 	c.clines.get_mut(n).suffix = None;
 }
 

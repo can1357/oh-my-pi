@@ -134,7 +134,7 @@ import {
 	resolveOpenCodeGoCacheAffinity,
 	setHeaderIfAbsent,
 } from "./inference-headers";
-import { isValidToolCallId, transformMessages } from "./transform-messages";
+import { isMalformedToolCallName, isValidToolCallId, transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
 export interface OpenAIModelIdentity {
@@ -1573,6 +1573,46 @@ export function collectKnownCallIds(messages: ResponseInput): Set<string> {
 	return knownCallIds;
 }
 
+/**
+ * Recover executable tool-call blocks omitted from a turn's stored native Responses items.
+ *
+ * Only calls in the final pairing window count as recorded: `call_id` is not unique across a
+ * `dt: false` snapshot, so an earlier round that reused the id must not hide this turn's cut call.
+ */
+export function pickUnrecordedResponsesToolCalls(
+	assistantMsg: AssistantMessage,
+	historyItems: readonly Record<string, unknown>[],
+): ToolCall[] {
+	let hasToolCalls = false;
+	for (const block of assistantMsg.content) {
+		if (block.type !== "toolCall") continue;
+		hasToolCalls = true;
+		break;
+	}
+	if (!hasToolCalls) return [];
+	const recordedIds = new Set<string>();
+	for (let index = historyItems.length - 1; index >= 0; index--) {
+		const item = historyItems[index];
+		if (responsesToolOutputKind(item.type) !== undefined) break;
+		const role = item.role;
+		if ((item.type === "message" || item.type === undefined) && typeof role === "string" && role !== "assistant") {
+			break;
+		}
+		if (responsesToolCallKind(item.type) === undefined || typeof item.call_id !== "string") continue;
+		recordedIds.add(sanitizeCodexCallId(item.call_id));
+	}
+	const missing: ToolCall[] = [];
+	for (const block of assistantMsg.content) {
+		if (block.type !== "toolCall") continue;
+		if (recordedIds.has(sanitizeCodexCallId(block.id))) continue;
+		if (block.providerMetadata?.type !== "computer" && isMalformedToolCallName(block.customWireName ?? block.name)) {
+			continue;
+		}
+		missing.push(block);
+	}
+	return missing;
+}
+
 /** Scan replay items for call_ids that were originally custom tool calls. */
 export function collectCustomCallIds(messages: ResponseInput): Set<string> {
 	const customCallIds = new Set<string>();
@@ -1973,6 +2013,25 @@ function adaptResponsesReplayItemsForModel(
 	return changed ? adapted : input;
 }
 
+/**
+ * Tool-name rule for a host with a `toolNamePrefix` catalog axis: the prefix,
+ * and the longest name the host accepts (`tool-call-name-max-length`).
+ */
+export interface ResponsesToolNaming {
+	prefix: string;
+	maxLength: number | undefined;
+}
+
+/**
+ * Wire name of a function tool. It carries the prefix unless the prefixed name
+ * would exceed the host's limit. Without a naming rule the name is unchanged.
+ */
+export function encodeResponsesToolName(name: string, naming: ResponsesToolNaming | undefined): string {
+	if (!naming) return name;
+	const wire = `${naming.prefix}${name}`;
+	return naming.maxLength !== undefined && wire.length > naming.maxLength ? name : wire;
+}
+
 export interface BuildResponsesInputOptions<TApi extends Api> {
 	model: Model<TApi>;
 	context: Context;
@@ -2003,6 +2062,8 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	requiresReasoningReplayForAllTurns?: boolean;
 	/** As {@link requiresReasoningReplayForAllTurns}, but only for turns that contain a tool call. */
 	requiresReasoningReplayForToolCalls?: boolean;
+	/** Naming rule for rebuilt `function_call` names; see {@link ResponsesToolNaming}. */
+	toolNaming?: ResponsesToolNaming;
 }
 
 /**
@@ -2262,25 +2323,49 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 						supportsComputerUse: options.model.supportsComputerUse === true,
 					},
 				);
-				const sanitizedHistoryItems = rawSanitizedHistoryItems
-					? ensureRequiredResponsesReasoningReplay(
-							adaptResponsesReplayItemsForModel(
-								rawSanitizedHistoryItems,
-								supportsCustomToolCalls,
-								customToolWireNameMap,
-								options.model.supportsComputerUse === true,
-							),
-							assistantMsg.stopReason,
-							options.requiresReasoningReplayForAllTurns ?? false,
-							options.requiresReasoningReplayForToolCalls ?? false,
-						)
-					: undefined;
 				const replayNativeItems =
 					nativeReplayEnabled ||
 					(options.nativeHistory !== undefined &&
 						rawSanitizedHistoryItems !== undefined &&
 						isColdReplayableResponsesTurn(rawSanitizedHistoryItems));
-				if (replayNativeItems && sanitizedHistoryItems) {
+				if (replayNativeItems && rawSanitizedHistoryItems) {
+					const nativeItems = adaptResponsesReplayItemsForModel(
+						rawSanitizedHistoryItems,
+						supportsCustomToolCalls,
+						customToolWireNameMap,
+						options.model.supportsComputerUse === true,
+					);
+					// Calls cut by the output limit have no native item: rebuild them the way the cold path
+					// encodes calls (wire tool names included), and before the required-reasoning repair, so a
+					// turn whose only call was cut still counts as one that calls a tool.
+					const missingCalls = pickUnrecordedResponsesToolCalls(assistantMsg, historyItems);
+					const turnItems =
+						missingCalls.length > 0
+							? [
+									...nativeItems,
+									...convertResponsesAssistantMessage(
+										{ ...assistantMsg, content: missingCalls },
+										options.model,
+										msgIndex,
+										knownCallIds,
+										false,
+										customCallIds,
+										false,
+										supportsCustomToolCalls,
+										customToolWireNameMap,
+										computerCallIds,
+										false,
+										false,
+										options.toolNaming,
+									),
+								]
+							: nativeItems;
+					const sanitizedHistoryItems = ensureRequiredResponsesReasoningReplay(
+						turnItems,
+						assistantMsg.stopReason,
+						options.requiresReasoningReplayForAllTurns ?? false,
+						options.requiresReasoningReplayForToolCalls ?? false,
+					);
 					// Model-owned replay items can carry reserved control-token
 					// spellings as data (the model writing *about* Harmony); escape the
 					// transport copy just like client turns.
@@ -2301,7 +2386,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 					msgIndex++;
 					continue;
 				}
-				if (!sanitizedHistoryItems) suppressHiddenEmptyFallback = true;
+				if (!rawSanitizedHistoryItems) suppressHiddenEmptyFallback = true;
 			}
 
 			const convertedOutputItems = convertResponsesAssistantMessage(
@@ -2317,6 +2402,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				computerCallIds,
 				options.requiresReasoningReplayForAllTurns ?? false,
 				options.requiresReasoningReplayForToolCalls ?? false,
+				options.toolNaming,
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
@@ -2490,6 +2576,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	computerCallIds?: Set<string>,
 	requiresReasoningReplayForAllTurns = false,
 	requiresReasoningReplayForToolCalls = false,
+	toolNaming?: ResponsesToolNaming,
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
@@ -2634,7 +2721,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			type: "function_call",
 			...(itemId ? { id: itemId } : {}),
 			call_id: normalized.callId,
-			name: functionName,
+			name: encodeResponsesToolName(functionName, toolNaming),
 			arguments: stringifyJson(block.arguments) ?? "null",
 		});
 	}
@@ -3213,6 +3300,12 @@ export interface ProcessResponsesStreamOptions {
 	 * response omits the `service_tier` echo. Only applied for `provider: "openai"`.
 	 */
 	requestServiceTier?: ServiceTier;
+	/**
+	 * Declared tool name per wire name (`toolNamesByWire` in `utils/tool-names`). A
+	 * returned `function_call` dispatches to the tool it was offered as; a name
+	 * the map lacks passes through unchanged.
+	 */
+	toolNamesByWire?: ReadonlyMap<string, string>;
 }
 
 export function computerCallMetadata(item: ResponseComputerToolCall): ComputerToolCallMetadata {
@@ -3519,7 +3612,7 @@ export async function processResponsesStream<TApi extends Api>(
 				const block: StreamingToolCallBlock = {
 					type: "toolCall",
 					id: encodeResponsesToolCallId(item.call_id, item.id),
-					name: item.name,
+					name: options?.toolNamesByWire?.get(item.name) ?? item.name,
 					arguments: {},
 					[kStreamingPartialJson]: item.arguments || "",
 				};
@@ -3743,7 +3836,7 @@ export async function processResponsesStream<TApi extends Api>(
 				const toolCall: ToolCall = {
 					type: "toolCall",
 					id: encodeResponsesToolCallId(item.call_id, item.id),
-					name: item.name,
+					name: options?.toolNamesByWire?.get(item.name) ?? item.name,
 					arguments: args,
 				};
 				let contentIndex: number;

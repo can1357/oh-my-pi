@@ -19,7 +19,7 @@ import {
 	type ViewportSize,
 } from "../tui";
 import { wrapLiteralLine } from "../utils";
-import type { NativeChild, NativeSurface, NativeSurfaceProvider } from "../native/node";
+import type { DescribeContext, NativeChild, NativeSurface, NativeSurfaceProvider } from "../native/node";
 import { sameItems } from "../native/memo";
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { CustomEditor } from "./custom-editor";
@@ -577,7 +577,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	 * row, the editor and the status line. There is no history/viewport split:
 	 * retirement, resize replay and hover bands are ANSI concerns.
 	 */
-	describeSurface(): NativeSurface {
+	describeSurface(cx: DescribeContext): NativeSurface {
 		if (!this.#started || this.#stopped) return this.#nativeSurface;
 		const main: NativeChild[] = [...this.#header.children];
 		const dock: NativeChild[] = [];
@@ -591,7 +591,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 				dock.push(...roots);
 			} else {
 				const transcript = roots[transcriptIndex] as TranscriptContainer;
-				main.push(...roots.slice(0, transcriptIndex), ...transcript.nativeBlocks());
+				main.push(...roots.slice(0, transcriptIndex), ...transcript.nativeBlocks(cx));
 				for (const root of this.#nativeTail) main.push(...root.children);
 				const tail: readonly Component[] = this.#nativeTail;
 				dock.push(...(this.#nativeDock ?? roots.slice(transcriptIndex + 1).filter(root => !tail.includes(root))));

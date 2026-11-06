@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { streamFactoryDroid } from "../src/providers/factory-droid";
-import type { Tool } from "../src/types";
+import type { Context, Tool, ToolResultMessage } from "../src/types";
 import { type CapturedRequest, captureFetch, factoryModel, responsesChunks, workosJwt } from "./helpers/factory-droid";
 
 /**
@@ -78,5 +78,92 @@ describe("Factory Droid responses wire", () => {
 		const request = await capture(id, { reasoning: undefined, disableReasoning: true }, upstream);
 		expect(request.body.reasoning).toEqual({ effort: "none" });
 		expect(request.body.include).toBeUndefined();
+	});
+});
+
+/** A Responses turn that reasons (with encrypted content) and then calls Read. */
+function reasoningToolCallChunks(): string[] {
+	const call = { type: "function_call", id: "fc_1", call_id: "call_1", name: "Read" };
+	return [
+		{ type: "response.created", response: { id: "resp_1", status: "in_progress" } },
+		{ type: "response.output_item.added", output_index: 0, item: { type: "reasoning", id: "rs_1", summary: [] } },
+		{
+			type: "response.output_item.done",
+			output_index: 0,
+			item: { type: "reasoning", id: "rs_1", summary: [], encrypted_content: "ENCRYPTED" },
+		},
+		{ type: "response.output_item.added", output_index: 1, item: { ...call, arguments: "" } },
+		{ type: "response.function_call_arguments.delta", output_index: 1, item_id: "fc_1", delta: '{"path":"a.txt"}' },
+		{
+			type: "response.output_item.done",
+			output_index: 1,
+			item: { ...call, arguments: '{"path":"a.txt"}', status: "completed" },
+		},
+		{
+			type: "response.completed",
+			response: {
+				id: "resp_1",
+				status: "completed",
+				usage: { input_tokens: 9, output_tokens: 4, total_tokens: 13 },
+			},
+		},
+	].map(chunk => JSON.stringify(chunk));
+}
+
+describe("Factory Droid Muse Spark 1.3 on Vertex Responses", () => {
+	it("sends native's Responses body to the google upstream", async () => {
+		const request = await capture("muse-spark-1.3", { reasoning: Effort.XHigh });
+		expect(request.url).toEndWith("/api/llm/o/v1/responses");
+		expect(request.headers["x-api-provider"]).toBe("google");
+		expect(request.headers["openai-platform"] as string | undefined).toBeUndefined();
+		expect(request.body).toMatchObject({
+			model: "muse-spark-1.3",
+			store: false,
+			stream: true,
+			reasoning: { effort: "xhigh", summary: "auto" },
+			include: ["reasoning.encrypted_content"],
+			parallel_tool_calls: true,
+			max_output_tokens: 131072,
+		});
+		expect(request.body.prompt_cache_key).toEqual(expect.any(String));
+		// Native configures none of the OpenAI-family request extras for this model.
+		for (const field of ["text", "tool_choice", "safety_identifier", "service_tier", "prompt_cache_retention"]) {
+			expect(request.body[field]).toBeUndefined();
+		}
+		// Vertex rejects `custom` tools; every tool is a non-strict function.
+		expect(request.body.tools).toEqual([expect.objectContaining({ type: "function", name: "Read", strict: false })]);
+	});
+
+	it("drops its encrypted reasoning from the replayed tool turn, as native does", async () => {
+		const model = factoryModel("muse-spark-1.3");
+		const options = { apiKey: WORKOS_TOKEN_WITH_USER, sessionId: "sess-1", reasoning: Effort.High };
+		const captured: CapturedRequest[] = [];
+		const first = await streamFactoryDroid(model, context(), {
+			...options,
+			fetch: captureFetch(captured, reasoningToolCallChunks()),
+		}).result();
+		const call = first.content.find(block => block.type === "toolCall");
+		expect(first.content.some(block => block.type === "thinking")).toBe(true);
+		if (call?.type !== "toolCall") throw new Error("turn 1 made no tool call");
+
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: call.id,
+			toolName: "Read",
+			content: [{ type: "text", text: "amber=1729" }],
+			isError: false,
+			timestamp: 3,
+		};
+		const followUp: Context = { ...context(), messages: [...context().messages, first, result] };
+		await streamFactoryDroid(model, followUp, {
+			...options,
+			fetch: captureFetch(captured, responsesChunks("SUM=1729")),
+		}).result();
+
+		const input = captured[1]?.body.input as { type?: string }[];
+		expect(input.map(item => item.type)).toContain("function_call");
+		expect(input.map(item => item.type)).toContain("function_call_output");
+		expect(input.filter(item => item.type === "reasoning")).toEqual([]);
+		expect(JSON.stringify(input)).not.toContain("ENCRYPTED");
 	});
 });

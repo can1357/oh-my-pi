@@ -81,11 +81,15 @@ impl List {
 
 	/// Write the list back.
 	fn save(self, root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc) {
-		let times = self
-			.times
-			.iter()
-			.any(|&t| t != 0)
-			.then(|| Record::Words(self.times.iter().map(|t| BString::from(t.to_string())).collect()));
+		let times = self.times.iter().any(|&t| t != 0).then(|| {
+			Record::Words(
+				self
+					.times
+					.iter()
+					.map(|t| BString::from(t.to_string()))
+					.collect(),
+			)
+		});
 		state::store_record(root, store, vp, KeyBuf::Misc(MiscKey::HistoryTimes), times);
 		let entries = (!self.entries.is_empty()).then_some(Record::Words(self.entries));
 		state::store_record(root, store, vp, KeyBuf::Misc(MiscKey::History), entries);

@@ -445,6 +445,19 @@ export const cfgTuiTextSizing = register({
 	},
 });
 
+export const cfgTuiColorfulMarkdown = register({
+	id: "tui.colorfulMarkdown",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Colorful Markdown",
+		description:
+			"Color headings by level, bold and italic text, inline code, and table headers from the theme's ANSI palette. Off uses one heading color and plain bold/italic.",
+	},
+});
+
 export const cfgTuiRenderMermaid = register({
 	id: "tui.renderMermaid",
 	type: "boolean",
@@ -804,6 +817,18 @@ export const cfgDisplayCacheMissMarker = register({
 	},
 });
 
+export const cfgDisplayShellVisualization = register({
+	id: "display.shellVisualization",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Shell Visualization",
+		description: "Show bash commands as an interactive execution visualization instead of plain shell commands",
+	},
+});
+
 export const cfgDisplayAdvisorCollapsedLines = register({
 	id: "display.advisorCollapsedLines",
 	type: "number",
@@ -826,6 +851,7 @@ export const cfgDisplayAdvisorCollapsedLines = register({
 effect(
 	combine({
 		hideToolActivity: cfgDisplayHideToolActivity,
+		shellVisualization: cfgDisplayShellVisualization,
 		readToolResultPreview: cfgReadToolResultPreview,
 		showImages: cfgTerminalShowImages,
 		cacheMissMarker: cfgDisplayCacheMissMarker,

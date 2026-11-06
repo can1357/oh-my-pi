@@ -5,7 +5,7 @@
 //! `accept_last`, `do_ambig_menu`, `do_allmatches`), and listing
 //! ([`list`]: `calclist`, `asklist`, `printlist`, `ilistmatches`).
 //!
-//! The suffix code of zle_misc.c the insertion uses is [`suffix`].
+//! The suffix code of `zle_misc.c` the insertion uses is [`suffix`].
 //!
 //! Functions that may wait (a `stat` of a file through the host, the
 //! `zle-line-pre-redraw` hook, a suffix-removal shell function, the
@@ -60,7 +60,7 @@ pub struct State {
 	pub icache:       Option<BString>,
 	/// `unambig_data`'s static `ccache`.
 	pub ccache:       i32,
-	/// zle_misc.c's suffix state.
+	/// `zle_misc.c`'s suffix state.
 	pub suffix:       suffix::Suffix,
 }
 
@@ -613,7 +613,7 @@ pub fn cline_str(
 				*v += add;
 			}
 		}
-		if let Some(pl) = posl.as_deref_mut() {
+		if let Some(pl) = posl {
 			for p in pl.iter_mut() {
 				if *p >= i64::from(ocs) {
 					*p += i64::from(add);
@@ -730,10 +730,8 @@ fn instmatch(c: &mut Comp, m: &Cmatch, scsp: Option<&mut i32>) -> i32 {
 		let p = ipre[skip..].to_vec();
 		r += ins(c, &p, true);
 	}
-	for s in [&m.pre, &m.ppre] {
-		if let Some(s) = s {
-			r += ins(c, s, true);
-		}
+	for s in [&m.pre, &m.ppre].into_iter().flatten() {
+		r += ins(c, s, true);
 	}
 	r += ins(c, &m.str, true);
 	let mut ocs = cs(c);
@@ -787,10 +785,8 @@ fn instmatch(c: &mut Comp, m: &Cmatch, scsp: Option<&mut i32>) -> i32 {
 			*scsp = ocs;
 		}
 	}
-	for s in [&m.suf, &m.isuf] {
-		if let Some(s) = s {
-			r += ins(c, s, true);
-		}
+	for s in [&m.suf, &m.isuf].into_iter().flatten() {
+		r += ins(c, s, true);
 	}
 	if !c.tricky.brend.is_empty() {
 		c.tricky.lastpostbr = Some(line_part(c, brb, cs(c)));
@@ -978,10 +974,7 @@ fn ambig_list(zw: &mut Zw<'_, '_>, k: K<i32>) -> WResult {
 	let listbeep = zw.isset(ZshOpt::Listbeep);
 	let c = &zw.zle.comp;
 	let d = &mut zw.zle.display;
-	let mut ret = 0;
-	if listbeep && c.core.oldlist == 0 {
-		ret = 1;
-	}
+	let ret = i32::from(listbeep && c.core.oldlist == 0);
 	if c.core.uselist != 0
 		&& (c.tricky.usemenu != 2 || (d.listshown == 0 && c.core.oldlist == 0))
 		&& ((d.showinglist == 0 && (d.listshown == 0 || c.core.oldlist == 0))
@@ -1547,8 +1540,8 @@ pub fn accept_last(zw: &mut Zw<'_, '_>, k: K<i32>) -> WResult {
 	let listshown = zw.zle.display.listshown;
 	let c = &mut zw.zle.comp;
 	if c.core.menuacc == 0 {
-		c.core.minfo.prebr = c.tricky.lastprebr.clone();
-		c.core.minfo.postbr = c.tricky.lastpostbr.clone();
+		c.core.minfo.prebr.clone_from(&c.tricky.lastprebr);
+		c.core.minfo.postbr.clone_from(&c.tricky.lastpostbr);
 		if listshown != 0 && (c.tricky.lastprebr.is_some() || c.tricky.lastpostbr.is_some()) {
 			let (pre, post) = (c.core.minfo.prebr.clone(), c.core.minfo.postbr.clone());
 			let gs: Vec<GId> = c.groups.list(c.core.amatches).collect();
@@ -1634,7 +1627,7 @@ fn accept_last_end(zw: &mut Zw<'_, '_>, wasmeta: bool, k: K<i32>) -> WResult {
 
 /// zsh `comp_mod(v, m)`: `v` into `[0, m-1]` (decremented when
 /// non-negative; negative values count backwards).
-fn comp_mod(v: i32, m: i32) -> i32 {
+const fn comp_mod(v: i32, m: i32) -> i32 {
 	let mut v = v;
 	if v >= 0 {
 		v -= 1;

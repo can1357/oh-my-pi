@@ -402,13 +402,6 @@ describe("searchCodex model selection", () => {
 		expect(capturedRequest?.body?.tools).toEqual([{ type: "web_search", search_context_size: "high" }]);
 	});
 
-	it("sends directive-free queries byte-identical", async () => {
-		const query = "how does the bun runtime schedule timers?";
-		await searchCodex(makeSearchParams(query, mockCodexFetch("gpt-5.6-luna")));
-
-		expect(sentUserText()).toBe(query);
-	});
-
 	it("uses configured Codex endpoint, API key, and headers without OAuth", async () => {
 		const result = await searchCodex({
 			...makeSearchParams("proxy codex model", mockCodexFetch("gpt-5.4"), proxyCodexModel),

@@ -665,7 +665,6 @@ const fn isprint(c: u8) -> bool {
 /// zsh `quotestring`: `s` quoted in style `how` (the surrounding quotes
 /// of [`Qt::Single`], [`Qt::Double`] and [`Qt::Dollars`] are the
 /// caller's).
-#[expect(clippy::too_many_lines, reason = "a faithful port of one C function")]
 #[allow(clippy::many_single_char_names, reason = "a direct port of zsh's quotestring")]
 pub fn quotestring(s: &[u8], how: Qt, o: QuoteOpts) -> Vec<u8> {
 	quotestring_comma(s, how, o, false)
@@ -1310,7 +1309,9 @@ mod tests {
 	fn casemodify_multibyte() {
 		use crate::bash::syntax::zsh::tok::{metafy, unmetafy};
 		// zsh strings are metafied (`É` is c3 89, and 0x89 is a meta byte).
-		let cm = |s: &str, how| String::from_utf8(unmetafy(&casemodify(&metafy(s.as_bytes()), how, true))).unwrap();
+		let cm = |s: &str, how| {
+			String::from_utf8(unmetafy(&casemodify(&metafy(s.as_bytes()), how, true))).unwrap()
+		};
 		assert_eq!(cm("l'état c'est moi", CaseMod::Caps), "L'État C'Est Moi");
 		assert_eq!(cm("ténébreux", CaseMod::Caps), "Ténébreux");
 		assert_eq!(cm("øpened", CaseMod::Upper), "ØPENED");

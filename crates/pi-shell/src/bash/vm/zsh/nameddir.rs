@@ -26,9 +26,9 @@ use super::{
 	params::{self, PmFlags, opt},
 };
 use crate::bash::{
+	fs::PwQuery,
 	store::{Key, KeyBuf, MiscKey, Record},
 	syntax::zsh::tok::{metafy, tail},
-	fs::PwQuery,
 	vm::{
 		expand::{Expander, Stop, X},
 		fsprobe::FsReq,
@@ -74,7 +74,9 @@ impl NamedDirs {
 			Some(Record::Words(w)) if !w.is_empty() => {
 				let grown = w[0].to_str().ok().and_then(|s| s.parse().ok()).unwrap_or(0);
 				let items = tail(w, 1)
-					.chunks_exact(2)
+					.as_chunks::<2>()
+					.0
+					.iter()
 					.map(|p| (p[0].clone(), p[1].clone()));
 				ZHash::from_items(items, BUCKETS, grown)
 			},
@@ -169,7 +171,11 @@ pub fn adduserdir(ex: &mut Expander<'_, '_>, s: &[u8], t: &[u8], flags: u8, alwa
 		return Ok(());
 	}
 	let present = match state::record(ex.cx.store, ex.vp, Key::Misc(MiscKey::ZshNamedDirs))? {
-		Some(Record::Words(w)) => tail(w, 1).chunks_exact(2).any(|p| p[0].as_slice() == s),
+		Some(Record::Words(w)) => tail(w, 1)
+			.as_chunks::<2>()
+			.0
+			.iter()
+			.any(|p| p[0].as_slice() == s),
 		_ => false,
 	};
 	if flags & ND_USERNAME != 0 && present {
@@ -258,9 +264,13 @@ fn user_db(ex: &mut Expander<'_, '_>, q: PwQuery) -> X<Option<Vec<(BString, BStr
 	let atom = ex.log.get(ex.cursor).cloned();
 	ex.cursor += usize::from(atom.is_some());
 	match atom {
-		Some(Atom::List(v)) => {
-			Ok(Some(v.chunks_exact(2).map(|p| (p[0].clone(), p[1].clone())).collect()))
-		},
+		Some(Atom::List(v)) => Ok(Some(
+			v.as_chunks::<2>()
+				.0
+				.iter()
+				.map(|p| (p[0].clone(), p[1].clone()))
+				.collect(),
+		)),
 		Some(_) => Ok(None),
 		None => Err(Stop::Probe(Probe::Fs { seq: 0, req: Box::new(FsReq::UserDb(q)) })),
 	}
@@ -275,12 +285,11 @@ pub fn fill(ex: &mut Expander<'_, '_>) -> X<()> {
 	if !opt(ex, ZshOpt::Interactive)? {
 		return Ok(());
 	}
-	let users = match user_db(ex, PwQuery::AllUsers)? {
-		Some(u) => u,
-		None => {
-			let me = ex.cx.host.user();
-			vec![(me.name, me.home)]
-		},
+	let users = if let Some(u) = user_db(ex, PwQuery::AllUsers)? {
+		u
+	} else {
+		let me = ex.cx.host.user();
+		vec![(me.name, me.home)]
 	};
 	for (name, dir) in users {
 		adduserdir(ex, &name, &dir, ND_USERNAME, true)?;
@@ -310,13 +319,12 @@ fn dircmp(dir: &[u8], s: &[u8]) -> bool {
 /// The hook's command substitution to run first; a store failure.
 pub fn finddir(ex: &mut Expander<'_, '_>, s: &[u8]) -> X<Option<Found>> {
 	let home = params::getsparam(ex, b"HOME")?.unwrap_or_default();
-	let mut best: usize = 0;
-	let mut found: Option<Found> = None;
 	// `homenode.diff` is 0 for `/`: never an abbreviation.
-	if home.len() > 1 && dircmp(&home, s) {
-		best = home.len();
-		found = Some(Found { name: BString::default(), dir_len: home.len() });
-	}
+	let (mut best, mut found) = if home.len() > 1 && dircmp(&home, s) {
+		(home.len(), Some(Found { name: BString::default(), dir_len: home.len() }))
+	} else {
+		(0, None)
+	};
 	let tab = load(ex)?;
 	for e in tab.entries() {
 		let diff = e.dir.len().saturating_sub(e.name.len());
