@@ -172,6 +172,7 @@ import {
 	type BuiltSkillPromptMessage,
 	loadSkillPrompt,
 	renderSkillPromptMessage,
+	resolveSkillInvocation,
 	type Skill,
 	type SkillPromptInput,
 	type SkillRediscoveryHost,
@@ -329,6 +330,7 @@ import type {
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SendUserMessageOptions,
+	SendUserMessageResult,
 	SessionHandoffOptions,
 	SessionOAuthAccountList,
 	SessionStats,
@@ -447,6 +449,7 @@ import {
 	isAdvisorCard,
 	isDisplayableQueuedMessage,
 	isHiddenUserCompanion,
+	isRestorableQueuedMessage,
 	isUserAuthoredQueuedMessage,
 	isUserQueuedMessage,
 	queueChipText,
@@ -511,6 +514,8 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { headlessSlashCommandHost, runHeadlessBuiltinSlashCommand } from "../slash-commands/builtin-registry";
+import type { SlashCommandHost } from "../slash-commands/types";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -4405,6 +4410,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					// otherwise records emission time, which on rebuild excludes
 					// provider preparation / hook time from the prompt→yield anchor.
 					message.timestamp,
+					message.role === "custom" ? message.tag : undefined,
 				);
 			}
 			if (message.role === "custom" && message.customType === "ttsr-injection") {
@@ -8586,6 +8592,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				onPromptQueued: options?.onPromptQueued,
 				onPromptAdmitted: options?.onPromptAdmitted,
 				promptGeneration: queueGeneration,
+				tag: options?.tag,
 			});
 			outcome.sessionClaimed = queued;
 			if (!queued && this.#promptGeneration !== queueGeneration && !options?.synthetic) {
@@ -8659,6 +8666,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				attribution: promptAttribution,
 				prependMessages: prependNotices,
 				rawText: typedText,
+				tag: options?.tag,
 				preprocessed: {
 					images: normalizedImages,
 					descriptionNotice: imageDescriptionNotice,
@@ -8685,7 +8693,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					synthetic: true,
 					userInitiated: options?.userInitiated === true ? true : undefined,
 				}
-			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
+			: {
+					role: "user" as const,
+					content: userContent,
+					attribution: promptAttribution,
+					timestamp: submittedAt,
+					...(options?.tag !== undefined && { tag: options.tag }),
+				};
 
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
@@ -8767,7 +8781,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * stop instead of hanging.
 	 */
 	async promptCustomMessage<T = unknown>(
-		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution" | "tag">,
 		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
@@ -8778,7 +8792,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	async #promptCustomMessage<T = unknown>(
-		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution" | "tag">,
 		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
@@ -8799,7 +8813,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	async #dispatchCustomPrompt<T = unknown>(
-		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution" | "tag">,
 		options:
 			| (Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
 					queueChipText?: string;
@@ -8860,6 +8874,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			display: message.display,
 			details: message.details,
 			attribution: message.attribution ?? "agent",
+			...(message.tag !== undefined && { tag: message.tag }),
 			timestamp: Date.now(),
 		};
 		const hasSkillImages =
@@ -9779,6 +9794,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			 *  it later. Defaults to `text` (the common case: no transformation ran,
 			 *  so raw and queued content are identical). */
 			rawText?: string;
+			/** Caller correlation id recorded as `tag` on the queued user message. */
+			tag?: string;
 			/**
 			 * Set only when image normalization and the vision description already
 			 * ran for this prompt; its presence suppresses both here. Companions
@@ -9822,6 +9839,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const rawText = options?.rawText ?? text;
 		const preprocessed = options?.preprocessed;
 		const prependMessages = options?.prependMessages ?? [];
+		const tagField = options?.tag !== undefined ? { tag: options.tag } : undefined;
 		// Captured before any await below so the aside branch can detect a
 		// newSession()/switchSession() that completed while normalization/vision
 		// description was in flight and drop a record that would otherwise land in a
@@ -9874,7 +9892,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			const records: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
-			const userMessage: AgentMessage = { role: "user", content, attribution, timestamp: timestamp ?? Date.now() };
+			const userMessage: AgentMessage = {
+				role: "user",
+				content,
+				attribution,
+				timestamp: timestamp ?? Date.now(),
+				...tagField,
+			};
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			records.push(userMessage);
 			this.#irc.queueAside(records);
@@ -9900,6 +9924,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				content,
 				attribution,
 				timestamp: timestamp ?? Date.now(),
+				...tagField,
 			};
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			this.agent.followUp(userMessage);
@@ -9913,6 +9938,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				steering: true,
 				attribution,
 				timestamp: timestamp ?? Date.now(),
+				...tagField,
 			};
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			this.agent.steer(userMessage);
@@ -10301,7 +10327,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Queue a custom message without starting a turn, matching steer/follow-up/aside delivery. */
 	async #queueCustomMessage<T = unknown>(
-		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution" | "tag">,
 		deliverAs: "steer" | "followUp" | "aside",
 		options?: {
 			queueChipText?: string;
@@ -10334,6 +10360,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			display: message.display,
 			details,
 			attribution: message.attribution ?? "agent",
+			...(message.tag !== undefined && { tag: message.tag }),
 			timestamp: Date.now(),
 		};
 		const preprocessed = options?.preprocessed;
@@ -10617,16 +10644,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Send a user message through the prompt flow.
+	 * Send a user message through the prompt flow, and report how it was handled.
 	 *
 	 * Omitted `deliverAs` starts a turn when idle and queues as a steer while streaming.
 	 * Explicit `deliverAs` queues without starting a turn in either state; `aside` at
 	 * an idle session instead starts a turn, since there is no live run to inject into.
+	 *
+	 * With `expand`, the text runs as typed input instead (see {@link #sendExpandedUserInput}),
+	 * and `deliverAs` becomes the submitted prompt's streaming behavior, as for typed input.
+	 * `tag` rides onto whichever message the call submits.
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
 		options?: SendUserMessageOptions,
-	): Promise<void> {
+	): Promise<SendUserMessageResult> {
 		// Normalize content to text string + optional images
 		let text: string;
 		let images: ImageContent[] | undefined;
@@ -10647,21 +10678,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (images.length === 0) images = undefined;
 		}
 
+		if (options?.expand) return this.#sendExpandedUserInput(text, images, options);
+
+		const queued = { attribution: options?.attribution, tag: options?.tag };
 		let deliveredAsAside = false;
 		if (options?.deliverAs === "aside") {
 			if (this.isStreaming) {
-				await this.#queueUserMessage(text, images, "aside", { attribution: options.attribution });
-				return;
+				await this.#queueUserMessage(text, images, "aside", queued);
+				return { handled: "prompt" };
 			}
 			// Idle: fall through to the prompt flow below (starts a turn, like an omitted
 			// deliverAs) — there is no live run to inject an aside into.
 			deliveredAsAside = true;
 		} else if (options?.deliverAs === "followUp") {
-			await this.#queueUserMessage(text, images, "followUp", { attribution: options.attribution });
-			return;
+			await this.#queueUserMessage(text, images, "followUp", queued);
+			return { handled: "prompt" };
 		} else if (options?.deliverAs === "steer") {
-			await this.#queueUserMessage(text, images, "steer", { attribution: options.attribution });
-			return;
+			await this.#queueUserMessage(text, images, "steer", queued);
+			return { handled: "prompt" };
 		}
 
 		// Use prompt() with expandPromptTemplates: false to skip command handling and template
@@ -10676,7 +10710,94 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			expandPromptTemplates: false,
 			images,
 			streamingBehavior: deliveredAsAside ? "aside" : "steer",
+			tag: options?.tag,
 		});
+		return { handled: "prompt" };
+	}
+
+	/**
+	 * Where a built-in an extension runs through expanded input reports to: the
+	 * {@link SlashCommandHost} this host's own typed input passes built-ins, so a built-in's output,
+	 * title and config changes reach the host's client as they do when typed there. Unset (subagents,
+	 * an SDK embedder that wires none), a built-in's output only returns to the extension.
+	 */
+	slashCommandHost: SlashCommandHost | undefined;
+
+	/**
+	 * Run `text` as if it had been typed into this session, in the order typed input takes:
+	 *   1. extension `input` handlers, with `source: "extension"` — one can consume the text or
+	 *      rewrite it and add images, exactly as for interactive Enter and an RPC `prompt`;
+	 *   2. `/skill:<name>`, submitted as the user's skill prompt message;
+	 *   3. built-in slash commands: those with a text-mode `handle` (the ones RPC and ACP run) run
+	 *      with {@link slashCommandHost}; the TUI-only rest answer `terminal-only`;
+	 *   4. everything else through {@link prompt}, which runs extension and custom commands,
+	 *      expands file slash commands and prompt templates, and submits any other text —
+	 *      slash text that names no command (`/nosuch`, a path like `/var/log/app.log`) included.
+	 *
+	 * Unlike a plain send, the answer says what happened, so a bridge forwarding a person's text
+	 * can report a refusal instead of guessing.
+	 */
+	async #sendExpandedUserInput(
+		text: string,
+		images: ImageContent[] | undefined,
+		options?: SendUserMessageOptions,
+	): Promise<SendUserMessageResult> {
+		const streamingBehavior = options?.deliverAs ?? "steer";
+		const tag = options?.tag;
+
+		const runner = this.#extensionRunner;
+		if (runner?.hasHandlers("input")) {
+			const input = await runner.emitInput(text, images, "extension");
+			if (input.handled) return { handled: "command" };
+			if (input.text !== undefined) text = input.text;
+			if (input.images !== undefined) images = input.images;
+		}
+		if (!text.trim() && !images?.length) return { handled: "command" };
+
+		const invocation = resolveSkillInvocation(this, text);
+		if (invocation) {
+			const built = await this.buildUserSkillPrompt(invocation.skill, invocation);
+			await this.promptCustomMessage(
+				{
+					customType: SKILL_PROMPT_MESSAGE_TYPE,
+					content: images?.length ? [{ type: "text", text: built.message }, ...images] : built.message,
+					display: true,
+					details: built.details,
+					attribution: "user",
+					tag,
+				},
+				{ streamingBehavior, queueChipText: text },
+			);
+			return { handled: "skill" };
+		}
+
+		const builtin = await runHeadlessBuiltinSlashCommand(
+			this,
+			text,
+			this.slashCommandHost ?? headlessSlashCommandHost(this),
+		);
+		if (builtin === "terminal-only") return { handled: "terminal-only" };
+		if (builtin) {
+			const output = builtin.output === undefined ? undefined : { output: builtin.output };
+			const { result } = builtin;
+			if (result && "prompt" in result) {
+				await this.prompt(result.prompt, { streamingBehavior, images, tag });
+				return { handled: "prompt", ...output };
+			}
+			// `/retry` and the like start a turn without submitting a message; hosts must not treat
+			// that as locally handled.
+			const agentInvoked = result?.agentInvoked === true ? { agentInvoked: true } : undefined;
+			return { handled: "command", ...agentInvoked, ...output };
+		}
+
+		// prompt() answers false only when an extension or custom command handled the text locally.
+		const submitted = await this.prompt(text, {
+			attribution: options?.attribution,
+			images,
+			streamingBehavior,
+			tag,
+		});
+		return { handled: submitted ? "prompt" : "command" };
 	}
 
 	/** Clear queued messages and return the user-restorable ones (text plus any attached images).
@@ -10694,6 +10815,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  `display: false` custom messages (the session builds its mode context again for the next
 	 *  prompt, and a released TTSR reservation lets its rule fire again) and synthetic developer
 	 *  directives, which the user never sees.
+	 *  Input an extension forwarded with a `tag` (`sendUserInput`) is never handed back as editor
+	 *  text (see isRestorableQueuedMessage): a plain clear leaves it queued with its companions, and
+	 *  an interrupt records it intact, tag included, like other visible queued messages.
 	 *  `forInterrupt` also withdraws input the run already dequeued but never recorded — live-steered
 	 *  into the aborted response, or taken for its next model call — and treats it as queued ahead of
 	 *  the rest (it was queued first). */
@@ -10704,32 +10828,30 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const withdrawn = options?.forInterrupt ? this.agent.withdrawUndeliveredQueuedMessages() : undefined;
 		const steeringAll = [...(withdrawn?.steering ?? []), ...this.agent.peekSteeringQueue()];
 		const followUpAll = [...(withdrawn?.followUp ?? []), ...this.agent.peekFollowUpQueue()];
-		const steering = steeringAll.filter(isUserAuthoredQueuedMessage).map(toRestoredQueuedMessage);
-		const followUp = followUpAll.filter(isUserAuthoredQueuedMessage).map(toRestoredQueuedMessage);
-		const recordable = (m: AgentMessage): boolean =>
-			m.role !== "developer" && isDisplayableQueuedMessage(m) && !isUserAuthoredQueuedMessage(m);
-		const recordedOnInterrupt = new Set<AgentMessage>();
-		if (options?.forInterrupt) {
-			for (const queue of [steeringAll, followUpAll]) {
-				let companionOfRecorded = false;
-				for (let i = queue.length - 1; i >= 0; i--) {
-					const message = queue[i]!;
-					if (recordable(message)) {
-						recordedOnInterrupt.add(message);
-						companionOfRecorded = true;
-					} else if (companionOfRecorded && isHiddenUserCompanion(message)) {
-						recordedOnInterrupt.add(message);
-					} else {
-						companionOfRecorded = false;
-					}
+		const steering = steeringAll.filter(isRestorableQueuedMessage).map(toRestoredQueuedMessage);
+		const followUp = followUpAll.filter(isRestorableQueuedMessage).map(toRestoredQueuedMessage);
+		const stays: (m: AgentMessage) => boolean = options?.forInterrupt
+			? m => m.role !== "developer" && isDisplayableQueuedMessage(m) && !isRestorableQueuedMessage(m)
+			: m => !isRestorableQueuedMessage(m) && !isHiddenUserCompanion(m);
+		// A message that stays (or, on interrupt, is recorded) keeps the hidden companions queued
+		// directly before it, as a normal delivery would; a restored prompt's companions leave with it.
+		const kept = new Set<AgentMessage>();
+		for (const queue of [steeringAll, followUpAll]) {
+			let companionOfKept = false;
+			for (let i = queue.length - 1; i >= 0; i--) {
+				const message = queue[i]!;
+				if (stays(message)) {
+					kept.add(message);
+					companionOfKept = true;
+				} else if (companionOfKept && isHiddenUserCompanion(message)) {
+					kept.add(message);
+				} else {
+					companionOfKept = false;
 				}
 			}
 		}
-		const keep: (m: AgentMessage) => boolean = options?.forInterrupt
-			? m => recordedOnInterrupt.has(m)
-			: m => !isUserAuthoredQueuedMessage(m) && !isHiddenUserCompanion(m);
 		for (const message of [...steeringAll, ...followUpAll]) {
-			if (!keep(message)) {
+			if (!kept.has(message)) {
 				if (message.role === "custom" && message.customType === "ttsr-injection") {
 					this.#ttsr.releaseDeferredReservationFromDetails(message.details);
 				}
@@ -10737,14 +10859,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#interruptWithdrawnMessages.add(message);
 			}
 		}
-		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));
+		this.agent.replaceQueues(
+			steeringAll.filter(message => kept.has(message)),
+			followUpAll.filter(message => kept.has(message)),
+		);
 		this.#reconcileQueuedMessageDrain();
 		return { steering, followUp };
 	}
 
 	/** Number of messages that can wake a session, plus advisor cards parked for abort replay.
 	 *  Untriggered hidden next-turn context rides with the next prompt, so it is not queued work for
-	 *  hasPendingMessages()/RPC or the empty-submit abort gate. */
+	 *  hasPendingMessages()/RPC or the empty-submit abort gate. getQueuedMessages() lists the
+	 *  user-authored chips; clearQueue() returns the restorable subset (isRestorableQueuedMessage,
+	 *  which excludes tagged input). */
 	get queuedMessageCount(): number {
 		// A scheduled hidden turn runs every pending message; otherwise only advisor cards count.
 		let pendingNextTurnCount = this.#pendingNextTurnMessages.length;
@@ -10841,11 +10968,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * {@link removeQueuedMessage}, returning the removed message as editor-restorable
-	 * content (its chip text and images); undefined when nothing matched.
+	 * content (its chip text and images); undefined when nothing matched. Tagged input
+	 * (`sendUserInput`) never matches: its tag cannot ride editor text, so it stays queued.
 	 */
 	takeQueuedMessage(text: string, queue: "steering" | "followUp"): RestoredQueuedMessage | undefined {
 		const selected = queue === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
-		const index = this.#findQueuedUserMessage(selected, text);
+		const index = this.#findQueuedUserMessage(selected, text, isRestorableQueuedMessage);
 		if (index < 0) return undefined;
 
 		const removed = selected[index];
@@ -10856,8 +10984,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Move the first matching user follow-up and its hidden companions to the end of the
-	 * steering queue without preprocessing them again. Matches exactly like
-	 * {@link removeQueuedMessage}; agent-attributed handoffs are never promoted. A missing
+	 * steering queue without preprocessing them again. Matches like {@link removeQueuedMessage},
+	 * except that tagged `sendUserInput` input can be promoted (the move keeps the message and its
+	 * tag); agent-attributed handoffs are never promoted. A missing
 	 * or already delivered target changes nothing; repeated calls may promote duplicates.
 	 */
 	promoteQueuedMessage(text: string): boolean {
@@ -10886,12 +11015,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * matches the raw text the caller originally submitted first, then the queued chip text
 	 * itself (exact); -1 when nothing matches.
 	 */
-	#findQueuedUserMessage(queue: readonly AgentMessage[], text: string): number {
-		let index = queue.findIndex(
-			message => isUserAuthoredQueuedMessage(message) && this.#queuedMessageRawText.get(message) === text,
-		);
+	#findQueuedUserMessage(
+		queue: readonly AgentMessage[],
+		text: string,
+		editable: (message: AgentMessage) => boolean = isUserAuthoredQueuedMessage,
+	): number {
+		let index = queue.findIndex(message => editable(message) && this.#queuedMessageRawText.get(message) === text);
 		if (index < 0) {
-			index = queue.findIndex(message => isUserAuthoredQueuedMessage(message) && queueChipText(message) === text);
+			index = queue.findIndex(message => editable(message) && queueChipText(message) === text);
 		}
 		return index;
 	}
@@ -10914,14 +11045,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * Pop the last queued message (steering first, then follow-up).
 	 * Used by dequeue keybinding to restore messages to editor one at a time.
-	 * Steps over agent-authored queued messages (advisor cards, hidden/internal steers).
+	 * Steps over agent-authored queued messages (advisor cards, hidden/internal steers) and
+	 * tagged input (`sendUserInput`), whose tag editor text cannot carry.
 	 */
 	popLastQueuedMessage(): RestoredQueuedMessage | undefined {
 		const steering = this.agent.peekSteeringQueue();
 		const followUp = this.agent.peekFollowUpQueue();
 		const lastUserIndex = (queue: readonly AgentMessage[]): number => {
 			for (let i = queue.length - 1; i >= 0; i--) {
-				if (isUserAuthoredQueuedMessage(queue[i])) return i;
+				if (isRestorableQueuedMessage(queue[i])) return i;
 			}
 			return -1;
 		};

@@ -20,7 +20,11 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	convertToLlm,
+	SKILL_PROMPT_MESSAGE_TYPE,
+	USER_INTERRUPT_LABEL,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -370,5 +374,113 @@ describe("AgentSession editor-restoring interrupt", () => {
 		expect(JSON.stringify(session.agent.state.messages)).not.toMatch(/hidden (context|directive)/);
 		expect(session.agent.hasQueuedMessages()).toBe(false);
 		expect(mock.calls).toHaveLength(1);
+	});
+
+	it("records input an extension forwarded with a tag intact instead of merging it into the editor", async () => {
+		const { session, sessionManager, mock, streamStarted } = await createParkedSession();
+		const running = session.prompt("first task");
+		await streamStarted;
+
+		// What an extension's `sendUserMessage(…, { expand: true, tag })` queues while the agent
+		// streams: a user turn carrying the bridge's tag.
+		await session.prompt("forwarded message", { streamingBehavior: "steer", tag: "bridge-msg-1" });
+		await session.prompt("typed here", { streamingBehavior: "steer" });
+
+		const restored = session.clearQueue({ forInterrupt: true });
+		await session.abort({ reason: USER_INTERRUPT_LABEL });
+		await session.waitForIdle();
+		await running.catch(() => {});
+
+		// Only the person's own typing goes back to the editor ...
+		expect(restored).toEqual({ steering: [{ text: "typed here", images: undefined }], followUp: [] });
+		// ... the forwarded input is recorded once with its tag, live and persisted, so the bridge finds it,
+		expect(
+			session.agent.state.messages.filter(message => message.role === "user" && message.tag === "bridge-msg-1"),
+		).toMatchObject([{ content: [{ type: "text", text: "forwarded message" }] }]);
+		expect(
+			sessionManager
+				.getBranch()
+				.filter(
+					entry =>
+						entry.type === "message" && entry.message.role === "user" && entry.message.tag === "bridge-msg-1",
+				),
+		).toHaveLength(1);
+		expect(persistedTranscript(sessionManager)).toEqual(["user: first task", "user: forwarded message"]);
+		// and the stopped run does not resume on it.
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+		expect(mock.calls).toHaveLength(1);
+	});
+
+	it("records a tagged skill prompt an extension forwarded instead of handing it to the editor", async () => {
+		const { session, sessionManager, streamStarted } = await createParkedSession();
+		const running = session.prompt("first task");
+		await streamStarted;
+
+		// What `sendUserMessage("/skill:demo …", { expand: true, tag })` queues while the agent streams.
+		await session.promptCustomMessage(
+			{
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: "skill body",
+				display: true,
+				attribution: "user",
+				tag: "bridge-msg-2",
+			},
+			{ streamingBehavior: "steer", queueChipText: "/skill:demo" },
+		);
+
+		const restored = session.clearQueue({ forInterrupt: true });
+		await session.abort({ reason: USER_INTERRUPT_LABEL });
+		await session.waitForIdle();
+		await running.catch(() => {});
+
+		expect(restored).toEqual({ steering: [], followUp: [] });
+		expect(
+			sessionManager.getBranch().filter(entry => entry.type === "custom_message" && entry.tag === "bridge-msg-2"),
+		).toMatchObject([{ customType: SKILL_PROMPT_MESSAGE_TYPE }]);
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("never hands tagged input back as text: Alt+Up, RPC take and a plain clear leave it queued with its tag", async () => {
+		const { session, mock, streamStarted } = await createParkedSession([{ content: ["answered"] }]);
+		const running = session.prompt("first task");
+		await streamStarted;
+
+		await session.prompt("typed here", { streamingBehavior: "steer" });
+		// Tagged input as #queueUserMessage publishes it: its hidden companion right before it.
+		session.agent.steer({
+			role: "custom",
+			customType: "ultrathink-notice",
+			content: "notice for the forwarded message",
+			display: false,
+			attribution: "user",
+			timestamp: Date.now(),
+		});
+		await session.prompt("forwarded message", { streamingBehavior: "steer", tag: "bridge-msg-3" });
+		const queuedTagged = (): AgentMessage[] =>
+			session.agent.peekSteeringQueue().filter(message => message.role === "user" && message.tag === "bridge-msg-3");
+
+		// The chip stays visible ...
+		expect(session.getQueuedMessages().steering).toEqual(["typed here", "forwarded message"]);
+		// ... but Alt+Up steps over it to the typed message, then finds nothing else to restore,
+		expect(session.popLastQueuedMessage()).toEqual({ text: "typed here", images: undefined });
+		expect(session.popLastQueuedMessage()).toBeUndefined();
+		// RPC take/remove does not match it,
+		expect(session.takeQueuedMessage("forwarded message", "steering")).toBeUndefined();
+		// and a plain clear restores nothing of it and keeps it with its companion.
+		await session.prompt("typed again", { streamingBehavior: "steer" });
+		expect(session.clearQueue()).toEqual({ steering: [{ text: "typed again", images: undefined }], followUp: [] });
+		expect(queuedTagged()).toHaveLength(1);
+		expect(session.agent.peekSteeringQueue().map(message => message.role)).toEqual(["custom", "user"]);
+
+		// The run goes on and delivers it with its tag and companion (an internal abort hands the
+		// stranded queue to a fresh turn).
+		await session.abort();
+		await session.waitForIdle();
+		await running.catch(() => {});
+		const delivered = session.agent.state.messages;
+		const taggedIndex = delivered.findIndex(message => message.role === "user" && message.tag === "bridge-msg-3");
+		expect(taggedIndex).toBeGreaterThan(0);
+		expect(delivered[taggedIndex - 1]).toMatchObject({ role: "custom", customType: "ultrathink-notice" });
+		expect(mock.calls).toHaveLength(2);
 	});
 });

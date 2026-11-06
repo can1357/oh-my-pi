@@ -11,6 +11,7 @@ import { runExtensionCompact, runExtensionSetModel } from "../extensibility/exte
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
+import type { SlashCommandHost } from "../slash-commands/types";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
 /** Action name for an extension-originated send failure. */
@@ -46,6 +47,13 @@ export interface InitializeExtensionsOptions {
 		change: () => Promise<T>,
 		options: { detachesRun: boolean },
 	) => Promise<T>;
+	/**
+	 * Where a built-in an extension runs through expanded input reports to: the
+	 * {@link SlashCommandHost} the host's own typed input passes them (RPC; print mode passes the
+	 * headless host with its MCP hooks). Omitted (subagents), a built-in's output only returns to
+	 * the extension.
+	 */
+	slashCommandHost?: SlashCommandHost;
 }
 
 /**
@@ -69,8 +77,10 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		trackExtensionSend,
 		filterActiveTools,
 		wrapSessionChange = change => change(),
+		slashCommandHost,
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
+	if (slashCommandHost) session.slashCommandHost = slashCommandHost;
 
 	runner.initialize(
 		// ExtensionActions
@@ -108,7 +118,27 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			sendUserMessage: (content, sendOptions) => {
 				const sendTask = session.sendUserMessage(content, sendOptions);
 				trackExtensionSend?.(sendTask);
-				if (trackAgentInvokingMessage) {
+				if (sendOptions?.expand) {
+					// Expanded input can be handled locally without submitting anything (a command ran, an
+					// `input` handler consumed the text), and a built-in like `/retry` starts a turn without
+					// a message. Claim turn ownership only once the answer says a turn started.
+					const invokingTask = sendTask.then(result => {
+						if (result.handled !== "prompt" && result.handled !== "skill" && !result.agentInvoked) {
+							throw new Error("input did not invoke the agent");
+						}
+					});
+					// Outside a prompt scope nothing attaches a handler, and this rejection — a normal
+					// outcome — would otherwise be unobserved and fatal the process.
+					invokingTask.catch(() => {});
+					if (trackAgentInvokingMessage) {
+						trackAgentInvokingMessage(invokingTask);
+					} else {
+						invokingTask.then(
+							() => markAgentInvokingMessage?.(),
+							() => {},
+						);
+					}
+				} else if (trackAgentInvokingMessage) {
 					trackAgentInvokingMessage(sendTask);
 				} else {
 					markAgentInvokingMessage?.();
@@ -116,6 +146,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				sendTask.catch(e => {
 					reportSendError("extension_send_user", toError(e));
 				});
+				return sendTask;
 			},
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);

@@ -1,6 +1,9 @@
 import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
+import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../discovery/helpers";
+import type { InteractiveModeContext } from "../modes/types";
+import type { AgentSession } from "../session/agent-session";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import {
 	buildArgumentCompletions,
@@ -23,6 +26,7 @@ import { parseSlashCommand } from "./helpers/parse";
 import type {
 	BuiltinSlashCommand,
 	ParsedSlashCommand,
+	SlashCommandHost,
 	SlashCommandResult,
 	SlashCommandRuntime,
 	SlashCommandSpec,
@@ -135,6 +139,97 @@ export function buildTuiBuiltinSlashCommands(runtime: TuiSlashCommandRuntime): R
  */
 export const BUILTIN_SLASH_COMMANDS_INTERNAL: ReadonlyArray<SlashCommandSpec> = BUILTIN_SLASH_COMMAND_REGISTRY;
 
+/** A built-in slash command, marked with how expanded extension input answers it. */
+export interface UserInputBuiltinCommand {
+	name: string;
+	aliases: readonly string[];
+	description: string;
+	/** True when only the interactive terminal runs it, so expanded input answers `terminal-only`. */
+	terminalOnly: boolean;
+}
+
+/**
+ * Every built-in slash command, for a bridge that offers completion or explains a `terminal-only`
+ * answer. A function, not a constant, so importing this module never reads the registry while
+ * modules still load.
+ */
+export function listUserInputBuiltinCommands(): UserInputBuiltinCommand[] {
+	return BUILTIN_SLASH_COMMANDS_INTERNAL.map(command => ({
+		name: command.name,
+		aliases: command.aliases ?? [],
+		description: command.acpDescription ?? command.description,
+		terminalOnly: command.handle === undefined,
+	}));
+}
+
+/**
+ * The interactive TUI's {@link SlashCommandHost}: output as a status line, the TUI's own command
+ * refresh and plugin reload. Used when a typed built-in has no `handleTui`, and by expanded
+ * extension input.
+ */
+export function tuiSlashCommandHost(ctx: InteractiveModeContext): SlashCommandHost {
+	return {
+		output: (text: string) => {
+			ctx.showStatus(text);
+		},
+		refreshCommands: () => ctx.refreshSlashCommandState(),
+		reloadPlugins: () => reloadTuiPluginState(ctx),
+	};
+}
+
+/**
+ * Hooks for a host with no client to report to (print mode, subagents, an SDK embedder that passes
+ * none): a built-in's output only returns to the caller, and plugin reload refreshes the session
+ * alone. A host that keeps a live MCP manager (print mode) passes its `/mcp` hooks, as its own
+ * typed built-ins get them.
+ */
+export function headlessSlashCommandHost(
+	session: AgentSession,
+	mcp?: Pick<SlashCommandHost, "mcpManager" | "reconnectMcpServer">,
+): SlashCommandHost {
+	return {
+		output: () => {},
+		// Nothing to re-advertise to; `refreshSkillsAndCommands()` still fires `subscribeCommandMetadataChanged`.
+		refreshCommands: () => {},
+		reloadPlugins: async () => {
+			const projectPath = await resolveActiveProjectRegistryPath(session.sessionManager.getCwd());
+			clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+			await session.refreshSkillsAndCommands();
+		},
+		...mcp,
+	};
+}
+
+/**
+ * Run `text` as a built-in slash command outside the interactive dispatcher — the same text-mode
+ * `handle` RPC and ACP run — reporting through `host`, the hooks the host's own typed input gives
+ * built-ins. Returns undefined when the text names no built-in, so the caller falls through to its
+ * own handling; `terminal-only` when only the TUI runs it.
+ */
+export async function runHeadlessBuiltinSlashCommand(
+	session: AgentSession,
+	text: string,
+	host: SlashCommandHost,
+): Promise<{ result: SlashCommandResult | void; output?: string } | "terminal-only" | undefined> {
+	const parsed = parseSlashCommand(text);
+	const command = parsed ? BUILTIN_SLASH_COMMAND_LOOKUP.get(parsed.name) : undefined;
+	if (!parsed || !command) return undefined;
+	if (!command.handle) return "terminal-only";
+	const printed: string[] = [];
+	const result = await command.handle(parsed, {
+		session,
+		sessionManager: session.sessionManager,
+		settings: session.settings,
+		cwd: session.sessionManager.getCwd(),
+		...host,
+		output: line => {
+			printed.push(line);
+			return host.output(line);
+		},
+	});
+	return printed.length > 0 ? { result, output: printed.join("\n") } : { result };
+}
+
 /**
  * Execute a builtin slash command in the interactive TUI.
  *
@@ -184,11 +279,7 @@ export async function executeBuiltinSlashCommand(
 			sessionManager: ctx.sessionManager,
 			settings: ctx.settings,
 			cwd: ctx.sessionManager.getCwd(),
-			output: (text: string) => {
-				ctx.showStatus(text);
-			},
-			refreshCommands: () => ctx.refreshSlashCommandState(),
-			reloadPlugins: () => reloadTuiPluginState(ctx),
+			...tuiSlashCommandHost(ctx),
 			notifySessionPinChanged: (sessionId: string, pinned: boolean) => ctx.applySessionPin(sessionId, pinned),
 		};
 		const result = await command.handle(parsed, adapted);

@@ -35,7 +35,7 @@ import {
 import {
 	type BuiltSkillPromptMessage,
 	loadSkillPrompt,
-	parseSkillInvocation,
+	resolveSkillInvocation,
 	type Skill,
 	type SkillPromptInput,
 	type SkillRediscoverySource,
@@ -61,6 +61,7 @@ import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/m
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
+import type { SlashCommandHost } from "../../slash-commands/types";
 import { cfgSttEnabled } from "../../stt/settings";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
@@ -265,17 +266,13 @@ export interface RpcSkillInvocation extends SkillPromptInput {
 }
 
 /**
- * Fast in-memory pre-check for a skill invocation: settings gate, text shape,
- * and skill lookup. Returns null when the message is not a runnable skill
- * command. Performs no I/O — safe to run on the RPC serial queue.
+ * Fast in-memory pre-check for a skill invocation, in the shape the RPC prompt path
+ * carries it. Returns null when the message is not a runnable skill command. Performs
+ * no I/O — safe to run on the RPC serial queue.
  */
 export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text: string): RpcSkillInvocation | null {
-	if (!session.skillsSettings?.enableSkillCommands) return null;
-	const parsed = parseSkillInvocation(text);
-	if (!parsed) return null;
-	const skill = session.skills.find(candidate => candidate.name === parsed.name);
-	if (!skill) return null;
-	return { skill, args: parsed.args, prompt: parsed.prompt, queueChipText: text };
+	const resolved = resolveSkillInvocation(session, text);
+	return resolved ? { ...resolved, queueChipText: text } : null;
 }
 
 /**
@@ -1749,6 +1746,43 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	};
 	inputRead.then(rejectStartupDialogs, rejectStartupDialogs);
 
+	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
+	const reloadPluginState = async () => {
+		const cwd = session.sessionManager.getCwd();
+		const projectPath = await resolveActiveProjectRegistryPath(cwd);
+		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+		await session.refreshSkillsAndCommands();
+		await emitAvailableCommandsUpdate();
+	};
+	const emitAvailableCommandsUpdate = async () => {
+		output({ type: "available_commands_update", commands: await getAvailableCommands() });
+	};
+	// What a built-in reports to the client and the MCP manager `/mcp` works on, for a typed `prompt` and
+	// for expanded extension input alike; defined before `initializeExtensions` because `session_start`
+	// handlers can already send input.
+	const slashCommandHost: SlashCommandHost = {
+		mcpManager: options.mcpManager,
+		// `/mcp reauth` writes config-file credentials; RPC mode wires no tools-changed
+		// callback, so refresh the session binding once the reconnect recovers tools.
+		reconnectMcpServer: options.mcpManager
+			? async (mcpName, selected) => {
+					const manager = options.mcpManager!;
+					const state = await reconnectMcpManagerServer(manager, mcpName, selected);
+					if (state) await session.refreshMCPTools(manager.getTools());
+					return state;
+				}
+			: undefined,
+		output: commandOutput => output({ type: "command_output", text: commandOutput }),
+		refreshCommands: emitAvailableCommandsUpdate,
+		reloadPlugins: reloadPluginState,
+		notifyTitleChanged: async () => {
+			output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
+		},
+		notifyConfigChanged: async () => {
+			output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+		},
+	};
+
 	// Set up extensions with RPC-based UI context
 	await initializeExtensions(session, {
 		mode: "rpc",
@@ -1793,6 +1827,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		},
 		// Headless hosts get the extension runner's no-op UI: hasUI=false, dialogs resolve to defaults.
 		uiContext: headless ? undefined : rpcUiContext,
+		slashCommandHost,
 	});
 
 	// Output all agent events as JSON; prompt results follow the frame that settled them.
@@ -1869,17 +1904,6 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		process.exit(0);
 	};
 
-	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
-	const reloadPluginState = async () => {
-		const cwd = session.sessionManager.getCwd();
-		const projectPath = await resolveActiveProjectRegistryPath(cwd);
-		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-		await session.refreshSkillsAndCommands();
-		await emitAvailableCommandsUpdate();
-	};
-	const emitAvailableCommandsUpdate = async () => {
-		output({ type: "available_commands_update", commands: await getAvailableCommands() });
-	};
 	session.subscribeCommandMetadataChanged(() => {
 		void emitAvailableCommandsUpdate();
 	});
@@ -1940,32 +1964,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					sessionManager: session.sessionManager,
 					settings: session.settings,
 					cwd: session.sessionManager.getCwd(),
-					output: commandOutput => output({ type: "command_output", text: commandOutput }),
-					refreshCommands: emitAvailableCommandsUpdate,
-					reloadPlugins: reloadPluginState,
-					mcpManager: options.mcpManager,
-					reconnectMcpServer: options.mcpManager
-						? async (mcpName, selected) => {
-								const manager = options.mcpManager!;
-								const state = await reconnectMcpManagerServer(manager, mcpName, selected);
-								if (state) {
-									// RPC mode wires no tools-changed callback; refresh the
-									// session binding so later prompts see the recovered tools.
-									await session.refreshMCPTools(manager.getTools());
-								}
-								return state;
-							}
-						: undefined,
+					...slashCommandHost,
 					signal: builtinAbort.signal,
 					runCommandInBackground: task => {
 						backgroundedBuiltin = true;
 						shutdownCoordinator.track(task().finally(() => builtinCommandAborts.delete(builtinAbort)));
-					},
-					notifyTitleChanged: async () => {
-						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
-					},
-					notifyConfigChanged: async () => {
-						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 					},
 				});
 				if (!backgroundedBuiltin) builtinCommandAborts.delete(builtinAbort);

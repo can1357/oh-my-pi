@@ -18,6 +18,7 @@ import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disable
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
 import { parseSlashCommand, parseSubcommand } from "../slash-commands/helpers/parse";
+import { headlessSlashCommandHost } from "../slash-commands/builtin-registry";
 import type { SlashCommandRuntime } from "../slash-commands/types";
 import { reconnectMcpManagerServer } from "../mcp/oauth-reauth";
 import {
@@ -171,6 +172,19 @@ async function runPrintModeCore(
 			writeStdoutLine(`${JSON.stringify(header)}\n`);
 		}
 	}
+	// The live MCP manager `/mcp` works on, for a dispatched built-in and expanded extension input alike.
+	const mcpManager = options.mcpManager;
+	const reconnectMcpServer: SlashCommandRuntime["reconnectMcpServer"] = mcpManager
+		? async (name, selected) => {
+				const state = await reconnectMcpManagerServer(mcpManager, name, selected);
+				if (state) {
+					// Print mode wires no tools-changed callback; refresh the
+					// session binding so later prompts see the recovered tools.
+					await session.refreshMCPTools(mcpManager.getTools());
+				}
+				return state;
+			}
+		: undefined;
 	// Set up extensions for print mode (no UI, no command context)
 	await initializeExtensions(session, {
 		mode: mode === "json" ? "json" : "print",
@@ -182,6 +196,7 @@ async function runPrintModeCore(
 		reportRuntimeError: err => {
 			process.stderr.write(`Extension error (${err.extensionPath}): ${err.error}\n`);
 		},
+		slashCommandHost: headlessSlashCommandHost(session, { mcpManager, reconnectMcpServer }),
 	});
 
 	// `plan.defaultOnStartup` opens fresh *interactive* sessions in plan mode so a
@@ -239,7 +254,6 @@ async function runPrintModeCore(
 	// The runtime is rebuilt per dispatch: an earlier positional message (e.g.
 	// `/move`, `/wt`) may have changed the session cwd, and manager state may
 	// have moved since the last one.
-	const mcpManager = options.mcpManager;
 	const builtinRuntimeFor = (): SlashCommandRuntime => ({
 		session,
 		sessionManager: session.sessionManager,
@@ -249,17 +263,7 @@ async function runPrintModeCore(
 		refreshCommands: () => {},
 		reloadPlugins: () => Promise.resolve(),
 		mcpManager,
-		reconnectMcpServer: mcpManager
-			? async (name, selected) => {
-					const state = await reconnectMcpManagerServer(mcpManager, name, selected);
-					if (state) {
-						// Print mode wires no tools-changed callback; refresh the
-						// session binding so later prompts see the recovered tools.
-						await session.refreshMCPTools(mcpManager.getTools());
-					}
-					return state;
-				}
-			: undefined,
+		reconnectMcpServer,
 		// `/retry` only schedules its continuation (`session.retry()` posts a
 		// post-prompt task) and returns before the retried turn streams: hold
 		// the dispatch open until the session is idle — same pairing as the

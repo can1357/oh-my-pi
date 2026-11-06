@@ -28,8 +28,9 @@ const transformedImage: ImageContent = { type: "image", mimeType: "image/jpeg", 
 async function createHarness(factory: ExtensionFactory) {
 	const runtime = new ExtensionRuntime();
 	const generatedMessages: Array<string | (TextContent | ImageContent)[]> = [];
-	runtime.sendUserMessage = (content?: string | (TextContent | ImageContent)[]) => {
+	runtime.sendUserMessage = async (content?: string | (TextContent | ImageContent)[]) => {
 		if (content !== undefined) generatedMessages.push(content);
+		return { handled: "prompt" as const };
 	};
 	const sessionManager = SessionManager.inMemory(process.cwd());
 	const blobs = new Map<string, Buffer>();

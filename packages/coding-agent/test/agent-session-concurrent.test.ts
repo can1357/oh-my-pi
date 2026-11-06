@@ -2140,7 +2140,7 @@ describe("AgentSession TTSR resume gate", () => {
 		extensionRunner.initialize(
 			{
 				sendMessage: () => {},
-				sendUserMessage: () => {},
+				sendUserMessage: async () => ({ handled: "prompt" }),
 				appendEntry: () => {},
 				setLabel: () => {},
 				getActiveTools: () => [],

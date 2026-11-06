@@ -20,6 +20,7 @@ import { GuestLifecycleEmitter } from "@oh-my-pi/pi-coding-agent/extensibility/e
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
+import type { SendUserMessageResult } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -114,22 +115,25 @@ describe("collab guest extension turn guard", () => {
 			await agentSession.waitForIdle();
 		};
 
-		// Joined: plan-mode's "Execute" after the host settles, plus the other
-		// turn-starting delivery modes.
+		// Joined: plan-mode's "Execute" after the host settles, plus the other turn-starting
+		// delivery modes, and expanded input, which must run nothing at all on the replica.
+		const inputResults: Promise<SendUserMessageResult>[] = [];
 		onAgentEnd = pi => {
 			pi.sendMessage({ customType: "plan-execute", content: "EXECUTE_PLAN", display: true }, { triggerTurn: true });
 			pi.sendMessage(
 				{ customType: "plan-followup", content: "FOLLOW_UP", display: false },
 				{ deliverAs: "followUp" },
 			);
-			pi.sendUserMessage("USER_CONTINUE");
+			void pi.sendUserMessage("USER_CONTINUE");
+			inputResults.push(pi.sendUserMessage("USER_INPUT", { expand: true }));
 		};
 		await mirrorHostRun();
 
 		expect(mock.calls).toHaveLength(0);
 		expect(agentSession.messages).toHaveLength(0);
+		expect(await Promise.all(inputResults)).toEqual([{ handled: "unavailable" }]);
 		expect(errors).toEqual([]);
-		expect(statuses).toHaveLength(3);
+		expect(statuses).toHaveLength(4);
 		for (const status of statuses) expect(status).toContain("host-only during a collab session");
 
 		// Left the session: the same reaction now owns a real local turn.

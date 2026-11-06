@@ -44,7 +44,9 @@ import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
+import type { SendUserMessageResult } from "../../session/agent-session";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { tuiSlashCommandHost } from "../../slash-commands/builtin-registry";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
@@ -1491,12 +1493,25 @@ export class ExtensionUiController {
 			});
 	};
 
-	/** Every `sendUserMessage` form prompts or queues a user turn (see `AgentSession.sendUserMessage`). */
+	/**
+	 * Every `sendUserMessage` form prompts or queues a user turn (see `AgentSession.sendUserMessage`).
+	 * A collab guest's typed prompts go to the host and its other commands, apart from a few read-only
+	 * local ones (`COLLAB_GUEST_ALLOWED_COMMANDS`), are host-only, so a guest runs none of an
+	 * extension's input on the replica and answers `unavailable`.
+	 *
+	 * The failure is reported here and the task is returned as it is: the attached handler keeps a
+	 * caller that ignores the answer from raising an unhandled rejection, while one that awaits it
+	 * still sees the error.
+	 */
 	#sendExtensionUserMessage: SendUserMessageHandler = (content, options) => {
-		if (this.#rejectGuestExtensionTurn()) return;
-		this.ctx.session.sendUserMessage(content, options).catch((err: unknown) => {
+		if (this.#rejectGuestExtensionTurn()) return Promise.resolve<SendUserMessageResult>({ handled: "unavailable" });
+		// A built-in it runs reports where a typed one does: the TUI status line.
+		this.ctx.session.slashCommandHost = tuiSlashCommandHost(this.ctx);
+		const sendTask = this.ctx.session.sendUserMessage(content, options);
+		sendTask.catch((err: unknown) => {
 			this.ctx.showError(`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`);
 		});
+		return sendTask;
 	};
 
 	/**

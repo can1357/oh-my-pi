@@ -469,6 +469,8 @@ export interface PromptOptions {
 	userInitiated?: boolean;
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Caller correlation id recorded as `tag` on the user message this prompt submits (see `sendUserInput`). */
+	tag?: string;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
 	/** Delegator's open-endedness description (task tool `solutionSpace`); replaces the prompt as `auto` thinking classification input. */
@@ -528,10 +530,38 @@ export interface SteerOptions {
 
 /** Options for AgentSession.sendUserMessage(). */
 export interface SendUserMessageOptions {
-	/** Queue behavior; omitted starts a turn when idle and steers while streaming. */
+	/** Queue behavior; omitted starts a turn when idle and steers while streaming.
+	 *  With {@link expand} this is instead the submitted prompt's streaming behavior, as for typed
+	 *  input: an idle session starts a turn whichever value is given. */
 	deliverAs?: "steer" | "followUp" | "aside";
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+	/** Run the text as typed input rather than sending it verbatim: extension `input` handlers see
+	 *  it first (`source: "extension"`), then `/skill:<name>`, extension and custom commands, file
+	 *  slash commands and prompt templates are handled as they are for typed input; anything left
+	 *  is submitted as a user message. */
+	expand?: boolean;
+	/** Caller correlation id recorded as `tag` on the message this call submits (the user message,
+	 *  or the skill prompt message), so a bridge can match the message to the input it forwarded. */
+	tag?: string;
+}
+
+/**
+ * How {@link AgentSession.sendUserMessage} handled its text:
+ * - `prompt`: submitted as a user message (plain text, a prompt template, a file slash command, or
+ *   slash text that names no command); the message carries the caller's `tag`.
+ * - `command`: handled locally and submitted nothing itself — an extension or custom command ran, an
+ *   extension `input` handler consumed the text, or no text was left to send.
+ * - `skill`: `/skill:<name>` was submitted as the user's skill prompt message, carrying the `tag`.
+ * - `terminal-only`: a built-in only the interactive terminal runs; nothing was sent.
+ * - `unavailable`: the host does not run typed input for this caller; nothing was sent or run.
+ */
+export interface SendUserMessageResult {
+	handled: "prompt" | "command" | "skill" | "terminal-only" | "unavailable";
+	/** Text a built-in command printed, when it printed any. */
+	output?: string;
+	/** True when a `command` started an agent turn without submitting a message, as `/retry` does. */
+	agentInvoked?: boolean;
 }
 
 /** Result from a handoff operation. */

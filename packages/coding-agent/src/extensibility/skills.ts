@@ -847,6 +847,34 @@ export type SkillInvocationKind = "user" | "autoload";
 /** What the user typed around a skill token: `args` feed the template, `prompt` only the transcript. */
 export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pick<ParsedSkillInvocation, "prompt">>;
 
+/** Where a `/skill:<name>` lookup reads from: the session's loaded skills and their settings. */
+export interface SkillInvocationSource {
+	readonly skills: readonly Skill[];
+	readonly skillsSettings: SkillsSettings | undefined;
+}
+
+/** A resolved `/skill:<name>` invocation: the skill plus the prompt input parsed around its token. */
+export interface ResolvedSkillInvocation extends SkillPromptInput {
+	skill: Skill;
+}
+
+/**
+ * Fast in-memory pre-check for a skill invocation: settings gate, text shape, and skill
+ * lookup. Returns undefined when the text names no runnable skill. Performs no I/O — safe
+ * to run on the RPC serial queue.
+ */
+export function resolveSkillInvocation(
+	source: SkillInvocationSource,
+	text: string,
+): ResolvedSkillInvocation | undefined {
+	if (!source.skillsSettings?.enableSkillCommands) return undefined;
+	const parsed = parseSkillInvocation(text);
+	if (!parsed) return undefined;
+	const skill = source.skills.find(candidate => candidate.name === parsed.name);
+	if (!skill) return undefined;
+	return { skill, args: parsed.args, prompt: parsed.prompt };
+}
+
 /** Read a skill's instruction body before rendering user-provided arguments. */
 export async function loadSkillPromptBody(skill: Pick<Skill, "filePath">): Promise<string> {
 	const content = await Bun.file(skill.filePath).text();
