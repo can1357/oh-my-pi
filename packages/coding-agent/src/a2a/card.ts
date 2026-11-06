@@ -60,12 +60,14 @@ export interface AgentCardInput {
 	/** Fork version, e.g. `18.16.0`. */
 	version: string;
 	skills: readonly AgentCardSkillInput[];
+	/** Public A2A identity: overrides the card's name (default "omp"). */
+	name?: string;
 }
 
 /** Build the served card; `skills` must already exclude advisor transcripts. */
 export function buildAgentCard(input: AgentCardInput): AgentCard {
 	return {
-		name: CARD_NAME,
+		name: input.name ?? CARD_NAME,
 		description: CARD_DESCRIPTION,
 		protocolVersion: A2A_PROTOCOL_VERSION,
 		version: input.version,

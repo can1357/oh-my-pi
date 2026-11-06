@@ -81,6 +81,7 @@ export const taskItemSchema = type({
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
 	"model?": "string",
+	"a2aSpawn?": "boolean",
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -93,6 +94,7 @@ const taskItemSchemaIsolated = type({
 	"tools?": "string[]",
 	"model?": "string",
 	"isolated?": "boolean",
+	"a2aSpawn?": "boolean",
 	"+": "delete",
 });
 
@@ -106,6 +108,7 @@ export const taskSchema = type({
 	"tools?": "string[]",
 	"model?": "string",
 	"isolated?": "boolean",
+	"a2aSpawn?": "boolean",
 	"+": "delete",
 });
 const taskSchemaNoIsolation = type({
@@ -117,6 +120,7 @@ const taskSchemaNoIsolation = type({
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
 	"model?": "string",
+	"a2aSpawn?": "boolean",
 	"+": "delete",
 });
 function guardBatchAgent(schema: BaseType): BaseType {
@@ -245,6 +249,7 @@ function createTaskSchema(options: {
 			...toolsField,
 			...seanceFields,
 			"isolated?": "boolean",
+			"a2aSpawn?": "boolean",
 			"+": "delete",
 		});
 	}
@@ -257,6 +262,7 @@ function createTaskSchema(options: {
 		...schemaFields,
 		...toolsField,
 		...seanceFields,
+		"a2aSpawn?": "boolean",
 		"+": "delete",
 	});
 }

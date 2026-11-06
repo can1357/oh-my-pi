@@ -607,7 +607,7 @@ describe("two-instance loop (task-9 server as counterparty)", () => {
 
 			const tool = await createTaskTool(bridge);
 			const text = textOf(
-				await tool.execute("tc-a2a-loop", { agent: "a2a:main", task: "run the loop" } as TaskParams),
+				await tool.execute("tc-a2a-loop", { agent: "a2a:main", task: "run the loop", a2aSpawn: true } as TaskParams),
 			);
 
 			expect(spawns).toHaveLength(1);
@@ -709,5 +709,57 @@ describe("autoRegisterLocalBridges", () => {
 	it("parses --no-a2a-auto-register", () => {
 		expect(parseArgs([]).noA2aAutoRegister).toBeUndefined();
 		expect(parseArgs(["--no-a2a-auto-register"]).noA2aAutoRegister).toBe(true);
+	});
+});
+
+describe("spawnA2aAgent default addressing", () => {
+	it("addresses the skill (metadata.to) and returns the delivery receipt for a running target", async () => {
+		const { spawnA2aAgent } = await import("@oh-my-pi/pi-coding-agent/a2a/agent-bridge");
+		let capturedMetadata: Record<string, unknown> | undefined;
+		const server = startMockA2a({
+			onRpc: call => {
+				if (call.method === "SendMessage") {
+					capturedMetadata = call.params.metadata as Record<string, unknown>;
+					return {
+						jsonrpc: "2.0",
+						id: 1,
+						result: {
+							task: {
+								id: "Main",
+								contextId: "Main",
+								status: { state: "TASK_STATE_WORKING", timestamp: new Date().toISOString() },
+								metadata: { delivery: { to: "Main", outcome: "injected" } },
+							},
+						},
+					};
+				}
+				return { jsonrpc: "2.0", id: 1, result: {} };
+			},
+		});
+		try {
+			const result = await spawnA2aAgent({
+				agent: {
+					name: "a2a:Main",
+					skillId: "Main",
+					description: "peer",
+					cardName: "omp",
+					url: server.url,
+				},
+				prompt: "hello peer",
+			});
+			expect(capturedMetadata?.to).toBe("Main");
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain("Delivered to a2a:Main");
+			expect(result.output).toContain("own conversation");
+		} finally {
+			server.stop();
+		}
+	});
+});
+
+describe("--a2a-name flag", () => {
+	it("parses both --a2a-name value and --a2a-name=value", () => {
+		expect(parseArgs(["--a2a-name", "builder"]).a2aName).toBe("builder");
+		expect(parseArgs(["--a2a-name=reviewer"]).a2aName).toBe("reviewer");
 	});
 });

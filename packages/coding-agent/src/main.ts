@@ -198,7 +198,7 @@ import {
 	cfgSessionWorktreeScope,
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
-import { cfgA2aAutoRegister, cfgA2aEnabled, cfgA2aPort, cfgTaskAgentIdleTtlMs } from "./task/settings";
+import { cfgA2aAutoRegister, cfgA2aEnabled, cfgA2aName, cfgA2aPort, cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 
@@ -2702,6 +2702,7 @@ export async function runRootCommand(
 					]);
 					const a2a = await startA2aServer({
 						settings: settingsInstance,
+						name: parsedArgs.a2aName ?? (cfgA2aName.get(settingsInstance) || undefined),
 						session: {
 							cwd: session.sessionManager.getCwd(),
 							getSessionAgents: () => session.getSessionAgents(),

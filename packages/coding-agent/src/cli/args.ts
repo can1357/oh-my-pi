@@ -75,6 +75,7 @@ export interface Args {
 	/** `--a2a-port <port>`: serve the A2A bridge on 127.0.0.1 for this run (implies `a2a.enabled`). */
 	a2aPort?: number;
 	noA2aAutoRegister?: boolean;
+	a2aName?: string;
 	providerSessionId?: string;
 	providerPromptCacheKey?: string;
 	fork?: string;
@@ -363,6 +364,10 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.fromClaude = true;
 		} else if (arg === "--from-codex") {
 			result.fromCodex = true;
+		} else if (arg === "--a2a-name" && i + 1 < args.length) {
+			result.a2aName = args[++i];
+		} else if (arg.startsWith("--a2a-name=")) {
+			result.a2aName = arg.slice("--a2a-name=".length);
 		} else if (arg === "--no-a2a-auto-register") {
 			result.noA2aAutoRegister = true;
 		} else if (arg === "--no-session") {

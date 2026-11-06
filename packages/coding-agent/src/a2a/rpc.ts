@@ -389,7 +389,13 @@ export const A2A_SENDER_ID = "a2a";
  * so GetTask/CancelTask must not reach them either.
  */
 export function resolveAddressedRef(registry: Pick<AgentRegistryApi, "get">, to: string): AgentRef | undefined {
-	const ref = registry.get(to) ?? (to.toLowerCase() === "main" ? registry.get(MAIN_AGENT_ID) : undefined);
+	// `to` may be the registry id ("Main"), the literal "main", or the
+	// terminal's public A2A identity (a2a.name): all resolve to the main ref.
+	const lowered = to.toLowerCase();
+	const ref =
+		registry.get(to) ??
+		(lowered === "main" ? registry.get(MAIN_AGENT_ID) : undefined) ??
+		registry.get(to.slice(0, 1).toUpperCase() + to.slice(1));
 	return ref?.kind === "advisor" ? undefined : ref;
 }
 

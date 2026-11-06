@@ -21,11 +21,11 @@ Auto-registration is on by default (`a2a.autoRegister`): every new session finds
 live bridges on the machine and wires up their peers — the other terminals' agents are
 available from the first turn as `a2a:Main`, `a2a:Main-2` … (the manual `/a2a auto`
 command also remains; disable with `--no-a2a-auto-register`). Spawn and talk:
-> "Spawn a2a:Main-2 with task X" — the request goes to terminal B's live session, the answer returns in the standard `<task-result>` envelope.
+> "Give a2a:Main-2 task X" — the task is delivered to **terminal B's own main agent** (it lands in its chat; that agent decides whether to answer itself or spawn its own subagents). The result returns in the standard `<task-result>` envelope. Spawning a NEW agent on the peer terminal is opt-in via the task tool's `a2aSpawn: true`.
 
 - Loopback-only (`127.0.0.1`), bearer token `~/.omp/agent/a2a.token` (mode 600, auto-generated);
 - JSON-RPC 2.0: `SendMessage`, `SendStreamingMessage` (SSE with final frames), `GetTask`, `ListTasks`, `CancelTask`; `TASK_STATE_*` statuses;
-- Addressee-less SendMessage spawns a **new** agent (full spawn; the response carries the agentId);
+- SendMessage addresses the terminal's own agent by default (`metadata.to`); spawning a new agent is opt-in (`metadata.spawn: true` / `a2aSpawn` in the task tool);
 - rejection taxonomy: `AGENT_REJECTED` (−32010); registration timeout → `SUBMITTED`+pending with a 30s grace;
 - bridge registry `~/.omp/agent/a2a-bridges.json` (pid+port; dead entries pruned on read);
 - same-name skill collisions resolve with suffixes (`a2a:Main-2/-3`); re-adding the same URL refreshes in place.

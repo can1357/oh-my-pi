@@ -21,7 +21,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Settings } from "../config/settings";
 import type { SpawnSubagentOptions } from "../extensibility/extensions/types";
 import { type IrcBusApi, IrcBus } from "../irc/bus";
-import { AgentRegistry, type AgentRef, type AgentRegistryApi } from "../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID, type AgentRef, type AgentRegistryApi } from "../registry/agent-registry";
 import { discoverAgents } from "../task/discovery";
 import { cfgA2aPort, cfgA2aToken } from "../task/settings";
 import type { AgentDefinition } from "../task/types";
@@ -385,6 +385,8 @@ export interface StartA2aServerOptions extends Omit<A2aServerOptions, "card" | "
 	version?: string;
 	/** Session whose cwd and agent discovery feed the card. */
 	session?: A2aHostSession;
+	/** Public A2A identity (`a2a.name` / `--a2a-name`): renames the main agent's skill id. */
+	name?: string;
 }
 
 /**
@@ -414,6 +416,7 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 		});
 		return descriptionsPromise;
 	};
+	const identity = options.name?.trim() || undefined;
 	const card =
 		options.card ??
 		(async (): Promise<AgentCard> => {
@@ -422,7 +425,7 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 				.list()
 				.filter(ref => ref.kind !== "advisor")
 				.map(ref => ({
-					id: ref.id,
+					id: identity !== undefined && ref.id === MAIN_AGENT_ID ? identity : ref.id,
 					displayName: ref.displayName,
 					description: descriptions.get(ref.history?.agent ?? ref.id),
 				}));
@@ -430,6 +433,7 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 				url: `http://${A2A_HOST}:${handle.port}/`,
 				version: options.version ?? VERSION,
 				skills,
+				...(identity !== undefined ? { name: identity } : {}),
 			});
 		});
 
@@ -443,6 +447,7 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 		agentDir: options.agentDir ?? options.settings.getAgentDir(),
 		port: handle.port,
 		token,
+		...(identity !== undefined ? { name: identity } : {}),
 	});
 	return handle;
 }
@@ -452,6 +457,8 @@ export interface LocalBridgeEntry {
 	pid: number;
 	port: number;
 	startedAt: number;
+	/** Public A2A identity when `a2a.name`/`--a2a-name` is set. */
+	name?: string;
 }
 
 function localBridgesPath(agentDir: string): string {

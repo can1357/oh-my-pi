@@ -479,6 +479,11 @@ function spawnParamsFor(params: TaskParams, item: ResolvedTaskItem, defaultAgent
 	} else if ("isolated" in params) {
 		spawn.isolated = params.isolated;
 	}
+	if (item.a2aSpawn !== undefined) {
+		spawn.a2aSpawn = item.a2aSpawn;
+	} else if ("a2aSpawn" in params) {
+		spawn.a2aSpawn = params.a2aSpawn;
+	}
 	return spawn;
 }
 
@@ -2145,6 +2150,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const outcome = await spawnA2aAgent({
 			agent: args.agent,
 			prompt: assignment,
+			spawn: args.params.a2aSpawn === true,
 			timeoutMs: cfgA2aClientTimeoutMs.get(this.session.settings),
 			signal: args.signal,
 		});

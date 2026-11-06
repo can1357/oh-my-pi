@@ -223,11 +223,17 @@ export async function addA2aAgentsFromUrl(options: AddA2aAgentsOptions): Promise
 	return { card, endpoint, added };
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
 export interface SpawnA2aAgentOptions {
 	agent: A2aRuntimeAgent;
 	prompt: string;
 	/** Whole-run budget in milliseconds; `0`/undefined waits indefinitely (A2A is async-first). */
 	timeoutMs?: number;
+	/** Explicit spawn mode: ask the remote terminal to create a NEW agent instead of addressing its own. */
+	spawn?: boolean;
 	connectTimeoutMs?: number;
 	pollIntervalMs?: number;
 	signal?: AbortSignal;
@@ -259,9 +265,32 @@ export async function spawnA2aAgent(options: SpawnA2aAgentOptions): Promise<Spaw
 			signal: options.signal,
 			...(options.fetch ? { fetch: options.fetch } : {}),
 		});
-		const run = await client.sendAndWait(options.prompt);
+		// Default addressing (spec 2026-11-06): the message goes to the terminal's
+		// own agent (the skill the card advertised) — the task lands in that
+		// terminal's main conversation, and that agent decides whether to answer
+		// itself or spawn its own subagents. An addressed delivery to a running
+		// agent returns a receipt; the answer appears in the remote terminal
+		// (and over GetTask once its agent yields).
+		const run = await client.sendAndWait(options.prompt, {
+			metadata: options.spawn === true ? { spawn: true } : { to: agent.skillId },
+		});
 		const text = run.text.trim();
 		const remoteTaskId = run.task?.id;
+		const delivery = asRecord(run.task?.metadata)?.delivery;
+		if (
+			delivery !== undefined &&
+			run.state !== TASK_STATE.COMPLETED &&
+			run.state !== TASK_STATE.FAILED
+		) {
+			const receipt = asRecord(delivery);
+			const outcome = typeof receipt?.outcome === "string" ? receipt.outcome : "unknown";
+			if (outcome === "failed") {
+				const reason = typeof receipt?.error === "string" ? receipt.error : "delivery failed";
+				return { exitCode: 1, output: reason, error: reason, state: run.state, remoteTaskId };
+			}
+			const delivered = `Delivered to ${agent.name} (${agent.url}) — the task now runs in that terminal's own conversation. It answers in its session; poll GetTask ${remoteTaskId ?? ""} for its state.`;
+			return { exitCode: 0, output: delivered, state: run.state, remoteTaskId };
+		}
 		if (run.interrupted) {
 			const reason = run.state === TASK_STATE.AUTH_REQUIRED ? A2A_AUTH_REQUIRED_TEXT : A2A_WAITING_FOR_INPUT_TEXT;
 			return { exitCode: 1, output: reason, error: reason, state: run.state, remoteTaskId };

@@ -126,6 +126,12 @@ function isAgentRole(role: unknown): boolean {
 }
 
 /** Final text of a task: artifacts first, then the status message, then agent history. */
+/** True when a SendMessage task is an addressed delivery receipt (metadata.delivery) — the work happens in the remote session. */
+function isDeliveryReceipt(task: A2aTask): boolean {
+	const metadata = typeof task.metadata === "object" && task.metadata !== null ? (task.metadata as Record<string, unknown>) : undefined;
+	return metadata?.delivery !== undefined;
+}
+
 export function taskText(task: A2aTask): string {
 	const artifacts = Array.isArray(task.artifacts) ? task.artifacts : [];
 	const artifactTexts = artifacts
@@ -276,7 +282,17 @@ export class A2aClient {
 		const sent = await this.sendMessage(prompt, options);
 		if (sent.task) {
 			const settled = this.#settled(sent.task);
-			return settled ?? this.#awaitTask(sent.task, deadline);
+			if (settled) return settled;
+			// An addressed delivery to a running agent (the terminal's own
+			// conversation) carries the bus receipt: the work now happens in the
+			// remote session, so there is nothing left to poll here.
+			if (isDeliveryReceipt(sent.task)) return {
+				state: sent.task.status?.state ?? TASK_STATE.WORKING,
+				task: sent.task,
+				text: taskText(sent.task),
+				interrupted: false,
+			};
+			return this.#awaitTask(sent.task, deadline);
 		}
 		if (sent.message) {
 			return {

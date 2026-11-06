@@ -737,6 +737,18 @@ export const cfgA2aToken = register({
 	},
 });
 
+export const cfgA2aName = register({
+	id: "a2a.name",
+	type: "string",
+	default: "",
+	ui: {
+		tab: "tasks",
+		group: "A2A",
+		label: "A2A Name",
+		description: "Public name for this terminal's agents in the A2A network: the main agent's skill id becomes this name (a2a:<name> on peers); empty keeps the default (Main)",
+	},
+});
+
 export const cfgA2aAutoRegister = register({
 	id: "a2a.autoRegister",
 	type: "boolean",
