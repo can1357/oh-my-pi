@@ -2356,15 +2356,35 @@ function renderText(result: GcResult): string {
  * carries on, which is the right answer for an operator who redirected it
  * on purpose.
  */
-async function writeDrained(stream: NodeJS.WriteStream, text: string): Promise<void> {
+async function writeDrained(stream: NodeJS.WriteStream, text: string, claimErrors = false): Promise<void> {
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	// `claimErrors` is for the receipt a *failing* run prints, and it exists
+	// because of what else listens here. `registerStdioDisconnectHandling`
+	// puts an `error` listener on `process.stdout` that treats a broken pipe
+	// as `omp --help | head` — cleanup and exit 0 — which is right for a run
+	// that succeeded and whose reader left early, and wrong for one that is
+	// already failing: `omp gc --blobs --wal --apply --json | true` deleted a
+	// blob, failed its checkpoint, and exited **0** with the `SQLITE_CANTOPEN`
+	// never printed, where upstream main exits 1 and prints it. Attaching
+	// another listener does not prevent that one from running, so for this one
+	// write the stream's `error` listeners are held aside and restored
+	// afterwards. A receipt that cannot be delivered is a lost receipt; it is
+	// never a reason to call a failed run successful.
+	const displaced = claimErrors ? stream.listeners("error") : [];
+	for (const listener of displaced) stream.removeListener("error", listener as (...args: never[]) => void);
+	const restore = (): void => {
+		for (const listener of displaced) stream.on("error", listener as (...args: never[]) => void);
+	};
 	// `true` means the stream handed the bytes straight to the kernel:
 	// nothing is queued, so there is nothing to wait for. `false` means they
 	// are sitting in a userspace buffer, which is the case this exists for —
 	// wait for the write callback, or for the drain that says the buffer has
 	// emptied, whichever the host delivers.
 	const accepted = stream.write(text, error => (error ? reject(error) : resolve()));
-	if (accepted) return;
+	if (accepted) {
+		restore();
+		return;
+	}
 	const onDrain = (): void => resolve();
 	const onError = (error: Error): void => reject(error);
 	stream.once("drain", onDrain);
@@ -2376,6 +2396,7 @@ async function writeDrained(stream: NodeJS.WriteStream, text: string): Promise<v
 		// listener that did not fire.
 		stream.off("drain", onDrain);
 		stream.off("error", onError);
+		restore();
 	}
 }
 
@@ -2409,8 +2430,12 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	// exactly when it matters: measured against a backpressured stdout, a
 	// reclaiming run deleted a blob and printed a truncated object that did not
 	// parse. The success path awaits for the same reason and costs nothing.
-	const report = async (): Promise<void> => {
-		await writeDrained(process.stdout, options.json ? `${JSON.stringify(next, null, 2)}\n` : renderText(next));
+	const report = async (claimErrors = false): Promise<void> => {
+		await writeDrained(
+			process.stdout,
+			options.json ? `${JSON.stringify(next, null, 2)}\n` : renderText(next),
+			claimErrors,
+		);
 	};
 	try {
 		await withGcLock(options.agentDir, async lockPath => {
@@ -2456,7 +2481,7 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		// receipt still sitting in a userspace buffer is not a receipt. A
 		// report that itself cannot be written does not replace the failure
 		// the run is already reporting.
-		if (hasPhaseResult(next)) await report().catch(() => undefined);
+		if (hasPhaseResult(next)) await report(true).catch(() => undefined);
 		throw error;
 	}
 	await report();

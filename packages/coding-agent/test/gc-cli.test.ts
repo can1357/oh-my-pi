@@ -3098,6 +3098,41 @@ describe("runGcCommand blob reclamation is opt-in and announced", () => {
 	const fifoAvailable =
 		process.platform !== "win32" &&
 		Bun.spawnSync(["mkfifo", "--version"], { stdout: "ignore", stderr: "ignore" }).success;
+	test("keeps a failed run failed when its receipt meets a closed stdout", async () => {
+		const orphan = await writeBlob(root, hashFor("closed-stdout"), "orphan");
+		await agePath(orphan);
+		// A database the checkpoint phase fails on, after the blob phase has
+		// already deleted something.
+		await fs.mkdir(getHistoryDbPath(root), { recursive: true });
+
+		// `omp gc … | true`: the reader is gone before the receipt is written.
+		// A broken pipe on stdout is `omp --help | head` for a run that
+		// succeeded, and the shared handler in `postmortem.ts` exits 0 for it —
+		// correct there, and fatal here, because this run deleted a blob and
+		// then failed. Exit 0 with the checkpoint error never printed is the
+		// regression.
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				path.join(import.meta.dir, "..", "src", "cli.ts"),
+				"gc",
+				"--blobs",
+				"--wal",
+				"--apply",
+				"--json",
+			],
+			{ env: { ...process.env, PI_CODING_AGENT_DIR: root, NO_COLOR: "1" }, stdout: "pipe", stderr: "pipe" },
+		);
+		// Close the read end straight away, as `| true` does.
+		await (child.stdout as ReadableStream<Uint8Array>).cancel();
+		const stderr = await new Response(child.stderr as ReadableStream<Uint8Array>).text();
+		const exit = await child.exited;
+
+		expect(await Bun.file(orphan).exists()).toBe(false);
+		expect(exit).toBe(1);
+		expect(stderr).toContain("SQLITE");
+	}, 60_000);
+
 	test.if(fifoAvailable)(
 		"delivers what it deleted even when stdout is backpressured",
 		async () => {
