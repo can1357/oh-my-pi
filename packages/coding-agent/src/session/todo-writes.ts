@@ -323,22 +323,40 @@ export class TodoWrites {
 				throw new Error("create() did not return an object with apply() and replace()");
 			}
 			const todo = this.#host.todo;
-			// The list the backend was last sent, recorded before each call. A call omp stopped waiting
-			// for, or one whose write did not commit, leaves it different from the committed list; the
-			// next `apply` then sends `replace` with the committed list first. It starts at the
-			// committed list, so switching backends does not copy the list.
-			let sent = todo.phases;
-			const replace = (phases: TodoPhase[], signal: AbortSignal | undefined) => {
-				sent = todo.clonePhases(phases);
-				return runner.runTodoBackendCall(backendSignal => backend.replace(phases, backendSignal), signal);
+			// The list the backend last confirmed, or `undefined` while a call is pending or after one
+			// failed, timed out or was abandoned. When it differs from the committed list (that call was
+			// lost, or its write did not commit), the next `apply` sends `replace` with the committed list
+			// first. It starts at the committed list, so switching backends does not copy the list.
+			let sent: TodoPhase[] | undefined = todo.phases;
+			const call = async (
+				phases: TodoPhase[],
+				work: (backendSignal: AbortSignal) => Promise<void>,
+				signal: AbortSignal | undefined,
+			) => {
+				const snapshot = todo.clonePhases(phases);
+				sent = undefined;
+				await runner.runTodoBackendCall(work, signal);
+				sent = snapshot;
 			};
+			const replace = (phases: TodoPhase[], signal: AbortSignal | undefined) =>
+				call(phases, backendSignal => backend.replace(phases, backendSignal), signal);
 			this.#active = {
 				label: sanitizeTodoBackendText(definition.label),
 				apply: async (op, params, next, signal) => {
 					const committed = todo.phases;
-					if (!Bun.deepEquals(sent, committed)) await replace(committed, signal);
-					sent = todo.clonePhases(next);
-					await runner.runTodoBackendCall(backendSignal => backend.apply(op, params, next, backendSignal), signal);
+					if (!sent || !Bun.deepEquals(sent, committed)) {
+						try {
+							await replace(committed, signal);
+						} catch (error) {
+							throw new Error(
+								`it did not take the committed list sent first (${sanitizeTodoBackendText(error)})`,
+								{
+									cause: error,
+								},
+							);
+						}
+					}
+					await call(next, backendSignal => backend.apply(op, params, next, backendSignal), signal);
 				},
 				replace,
 			};

@@ -561,6 +561,28 @@ export default function(pi) {
 		expect(taskContents(session)).toEqual(["base", "real"]);
 	});
 
+	test("a catch-up replace that fails is retried before the next apply, and is reported as the catch-up", async () => {
+		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+		await todo(session, { op: "init", items: ["base"] });
+		recorder.applyError = new Error("apply boom");
+		await todo(session, { op: "append", phase: "Tasks", items: ["ghost"] });
+		recorder.applyError = undefined;
+		recorder.replaceError = new Error("replace boom");
+		const callsBefore = recorder.calls.length;
+
+		const refused = await todo(session, { op: "append", phase: "Tasks", items: ["b"] });
+		recorder.replaceError = undefined;
+		await todo(session, { op: "append", phase: "Tasks", items: ["c"] });
+
+		expect(text(refused)).toContain("did not take the committed list sent first (replace boom)");
+		expect(recorder.calls.slice(callsBefore).map(call => [call.method, contentsOf(call.phases)])).toEqual([
+			["replace", ["base"]],
+			["replace", ["base"]],
+			["apply", ["base", "c"]],
+		]);
+	});
+
 	test("aborting a write that is still queued skips it: apply is never called for it", async () => {
 		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
 		const gate = hold(recorder, "apply");

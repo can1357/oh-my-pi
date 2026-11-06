@@ -127,9 +127,9 @@ export class TodoBackendRegistry {
 	readonly #byId = new Map<string, TodoBackendRegistration>();
 
 	/**
-	 * Add a backend. A malformed definition or the reserved `native` id throws; an id already taken
-	 * is skipped with a warning, so the second extension keeps its other registrations (as with
-	 * conflicting commands and shortcuts).
+	 * Add a backend. A malformed definition or the reserved `native` id throws. An id already taken
+	 * is skipped with a warning: the first registration stays, and the second extension keeps its
+	 * other registrations, as a conflicting command or shortcut does not fail its extension either.
 	 */
 	register(definition: TodoBackendDefinition, sourceId: string): void {
 		const id: unknown = definition.id;
