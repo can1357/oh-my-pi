@@ -11,6 +11,7 @@ import { resolveInitScriptSources } from "@oh-my-pi/pi-coding-agent/tools/browse
 import { DownloadManager } from "@oh-my-pi/pi-coding-agent/tools/browser/downloads";
 import {
 	buildHeadlessLaunchArgs,
+	closeLaunchedBrowser,
 	launchHeadlessBrowser,
 	removeUserDataDir,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
@@ -459,7 +460,7 @@ await Promise.withResolvers().promise;`;
 			server.stop(true);
 			recycled.stop(true);
 			later.stop(true);
-			await browser.close();
+			await closeLaunchedBrowser(browser);
 			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	}, 30_000);
@@ -725,5 +726,42 @@ await Promise.withResolvers().promise;`;
 		} finally {
 			server.stop(true);
 		}
+	});
+
+	it("answers a click beside a direct waitForDownload with a run that downloads the file", async () => {
+		const invoke = browserHost();
+		const name = `download-busy-${crypto.randomUUID()}`;
+		const link = '<a id="export" href="data:text/plain,export payload" download="export.txt">export</a>';
+		await invoke({ action: "open", name, url: `data:text/html,${encodeURIComponent(link)}` });
+		const tab = getTab(name);
+		if (!tab) throw new Error("Expected the opened tab");
+		// The wait holds the tab a few host awaits after its call starts.
+		const holding = Promise.withResolvers<void>();
+		const register = tab.pending.set.bind(tab.pending);
+		const registered = spyOn(tab.pending, "set").mockImplementation((id, run) => {
+			holding.resolve();
+			return register(id, run);
+		});
+		const stopWaiting = new AbortController();
+		let refused: unknown;
+		try {
+			const waiting = invoke(
+				{ action: "call", name, chain: [{ method: "waitForDownload", args: [] }] },
+				stopWaiting.signal,
+			).catch(() => undefined);
+			await holding.promise;
+			registered.mockRestore();
+			refused = await rejectionOf(invoke({ action: "call", name, chain: [{ method: "click", args: ["#export"] }] }));
+			stopWaiting.abort();
+			await waiting;
+		} finally {
+			registered.mockRestore();
+		}
+		// The refusal's own run, as an agent would paste it.
+		const code = /tab\.run\("(.+)"\)$/.exec(refused instanceof Error ? refused.message : "")?.[1];
+		if (!code) throw new Error(`Expected a tab.run to paste in: ${String(refused)}`);
+		const download = returnedValue(await invoke({ action: "run", name, code })) as { path: string };
+		tempDirs.push(path.dirname(download.path));
+		expect(await Bun.file(download.path).text()).toBe("export payload");
 	});
 });

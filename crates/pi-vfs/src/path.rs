@@ -16,14 +16,15 @@ use std::{
 /// Length in bytes of the `scheme://` root of `path`, if it is a URL.
 pub(crate) fn url_root_len(path: &Path) -> Option<usize> {
 	let bytes = path.as_os_str().as_encoded_bytes();
-	let colon = bytes.iter().position(|&b| b == b':')?;
-	if colon < 2 || !bytes[0].is_ascii_alphabetic() {
+	if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
 		return None;
 	}
-	if !bytes[1..colon]
+	// The scheme ends at its first byte that no scheme may contain, which
+	// must start the `://`.
+	let colon = bytes
 		.iter()
-		.all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
-	{
+		.position(|&b| !(b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')))?;
+	if colon < 2 {
 		return None;
 	}
 	bytes[colon..].starts_with(b"://").then_some(colon + 3)

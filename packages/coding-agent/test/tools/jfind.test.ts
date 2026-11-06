@@ -4,11 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Judge, JudgmentRequest, JudgmentResult, NoulAnswer, Questions } from "@oh-my-pi/pi-ai";
 import { tokenUsage } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
 import { ChainJudge } from "@oh-my-pi/pi-coding-agent/judgment";
-import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
+import { FIND_TIMEOUT_MS, FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
 import {
 	type SpotlightClient,
 	SpotlightError,
@@ -26,8 +27,12 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/jfind/passages";
 import { readText, ReadTextError } from "@oh-my-pi/pi-coding-agent/tools/jfind/text";
 import { eligibleFile, renderTree, resolveSearchRoot } from "@oh-my-pi/pi-coding-agent/tools/jfind/tree";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { resolveSearchResultPath } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { rejectionOf } from "../helpers/rejection";
 
 /** Read-tier URL filesystem rooted at `cwd`, as the `find` tool builds one per call. */
 function urlFs(cwd: string): InternalUrlFilesystem {
@@ -481,6 +486,121 @@ describe("jfind cascade", () => {
 					signal: controller.signal,
 				}),
 			).rejects.toThrow("Operation aborted");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	/** `find`'s 20 s budget as a controller the test fires. */
+	function stubDeadline(): AbortController {
+		const deadline = new AbortController();
+		const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+		vi.spyOn(AbortSignal, "timeout").mockImplementation(ms =>
+			ms === FIND_TIMEOUT_MS ? deadline.signal : realTimeout(ms),
+		);
+		return deadline;
+	}
+
+	function findTool(cwd: string): FindTool {
+		return new FindTool({
+			cwd,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated({ "find.enabled": "on" }),
+			modelRegistry: new ModelRegistry(createInMemoryAuthStorage()),
+		});
+	}
+
+	it("returns the hits verified before find's deadline, marked partial", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-deadline-"));
+		try {
+			await Bun.write(path.join(dir, "a.ts"), "export function refreshToken() { return 1; }\n");
+			await Bun.write(path.join(dir, "b.ts"), "export function renewToken() { return 2; }\n");
+			await Bun.write(path.join(dir, "c.ts"), "export function rotateToken() { return 3; }\n");
+			const deadline = stubDeadline();
+			const answers = new FakeJudge(() => 0.9);
+			const aVerified = Promise.withResolvers<void>();
+			const late = Promise.withResolvers<void>();
+			const macrotask = () => {
+				const tick = Promise.withResolvers<void>();
+				setImmediate(tick.resolve);
+				return tick.promise;
+			};
+			vi.spyOn(ChainJudge.prototype, "judge").mockImplementation(async request => {
+				const file = stateOf(request).file;
+				if (file === "b.ts") {
+					// The deadline fires once a.ts's verification has settled, while b.ts's is in flight.
+					await aVerified.promise;
+					await macrotask();
+					deadline.abort();
+					throw new Error("request aborted");
+				}
+				// c.ts's judge ignores the abort and answers only after the call returned.
+				if (file === "c.ts") await late.promise;
+				const result = await answers.judge(request);
+				if (file === "a.ts") aVerified.resolve();
+				return result;
+			});
+			const result = await findTool(dir).execute("x", { query: "token refresh", grep_keywords: [] });
+			expect(result.details?.hits.map(hit => hit.rel)).toEqual(["a.ts"]);
+			expect(result.details?.coverage).toBe("partial");
+			expect(result.details?.timeout).toEqual({ verified: 1, passages: 3 });
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("1 of 3 passages verified");
+			expect(text).toContain("Narrow `path`");
+			const stats = structuredClone(result.details?.stats);
+			late.resolve();
+			await macrotask();
+			expect(result.details?.stats).toEqual(stats);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("names the interrupted phase when find's deadline fires before anything is verified", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-deadline-early-"));
+		try {
+			await Bun.write(path.join(dir, "a.ts"), "export function refreshToken() { return 1; }\n");
+			const deadline = stubDeadline();
+			vi.spyOn(ChainJudge.prototype, "judge").mockImplementation(async () => {
+				deadline.abort();
+				throw new Error("request aborted");
+			});
+			const error = await rejectionOf(findTool(dir).execute("x", { query: "token refresh", grep_keywords: [] }));
+			if (!(error instanceof ToolError)) throw error;
+			expect(error.message).toContain('at "filename ranking 0/1"');
+			expect(error.message).toContain("Narrow `path`");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("rejects a caller abort during verification even when the deadline fired too", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-deadline-caller-"));
+		try {
+			await Bun.write(path.join(dir, "a.ts"), "export function refreshToken() { return 1; }\n");
+			const caller = new AbortController();
+			const deadline = new AbortController();
+			const judge = new FakeJudge(request => {
+				if (!("file" in stateOf(request))) return 0.9;
+				caller.abort();
+				deadline.abort();
+				return new Error("request aborted");
+			});
+			const error = await rejectionOf(
+				runCascade({
+					root: { path: dir, type: "directory" },
+					filesystem: urlFs(dir),
+					query: "token refresh",
+					extraKeywords: [],
+					judge,
+					includeHidden: false,
+					signal: caller.signal,
+					deadline: deadline.signal,
+				}),
+			);
+			expect(error).toBeInstanceOf(ToolAbortError);
 		} finally {
 			await removeWithRetries(dir);
 		}

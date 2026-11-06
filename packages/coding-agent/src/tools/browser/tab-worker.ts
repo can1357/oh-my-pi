@@ -1830,6 +1830,15 @@ export class WorkerCore {
 			this.#tracing = new BrowserTracingController(this.#page);
 			this.#network = new BrowserNetworkManager(this.#page, payload.allowedDomains);
 			await this.#network.start();
+			// A window omp does not size (visible, attached, relay) takes a viewport only when the open asks for one,
+			// after the steps that can fail, so a failed open leaves a borrowed tab at its own size. Without `scale` it
+			// keeps the window's own device scale (0).
+			if (payload.viewport && (payload.mode === "attach" || payload.emulateViewport === false)) {
+				await this.#page.setViewport({
+					...payload.viewport,
+					deviceScaleFactor: payload.viewport.deviceScaleFactor ?? 0,
+				});
+			}
 			const info = await this.#currentReadyInfo();
 			this.#started = true;
 			this.#transport.send({ type: "ready", info });

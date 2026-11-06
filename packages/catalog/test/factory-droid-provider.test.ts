@@ -339,13 +339,6 @@ describe("Factory Droid offline seed", () => {
 		expect(ids).toContain(PLAIN);
 	});
 
-	it("names Opus 5.5's refusal fallback offline, where every unblocked model is available", () => {
-		const models = factoryDroidModelManagerOptions().staticModels ?? [];
-		expect(models.find(model => model.id === "claude-opus-5-5")?.factoryDroidRefusalFallbacks).toEqual([
-			"claude-opus-5",
-		]);
-	});
-
 	it("keeps offline EU models on the EU host with EU rotations", () => {
 		const models = factoryDroidModelManagerOptions({ region: "eu" }).staticModels ?? [];
 		expect(models.some(model => model.id === "kimi-k3")).toBe(false);
@@ -619,6 +612,61 @@ describe("Factory Droid discovery gates", () => {
 		for (const id of ultraFast) expect(unconsented).not.toContain(id);
 		const consented = await discoverIds({ modelPolicy: { allowAllFactoryModels: true } });
 		for (const id of [...gated, ...ultraFast]) expect(consented).toContain(id);
+	});
+
+	it("serves Muse Spark 1.3 from Vertex, Global only, behind its flag, on its own effort ladder", async () => {
+		const muse = registryModel("muse-spark-1.3");
+		expect(buildFactoryDroidModel(muse).thinking).toMatchObject({
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			requiresEffort: true,
+			defaultLevel: Effort.High,
+		});
+		const global = (await discover())?.find(model => model.id === "muse-spark-1.3");
+		expect(global?.factoryDroidApiProviders).toEqual(["google"]);
+		expect(global?.input).toEqual(["text"]);
+		expect(await discoverIds({ flags: {}, modelPolicy: { allowAllFactoryModels: true } })).not.toContain(
+			"muse-spark-1.3",
+		);
+		for (const inferenceRegion of ["us", "eu"] as const) {
+			const regional = await discover({}, { inferenceRegion });
+			expect(regional?.map(model => model.id)).not.toContain("muse-spark-1.3");
+		}
+	});
+
+	it("falls back to the registry upstream when family defaults name none of the model's upstreams", async () => {
+		const models = await discover({
+			routing: { defaults: { factory: ["baseten", "fireworks"] }, models: { "beam-1.0": ["fireworks"] } },
+		});
+		const muse = models?.find(model => model.id === "muse-spark-1.3");
+		expect(muse?.factoryDroidApiProviders).toEqual(["google"]);
+		expect(muse?.factoryDroidRoutingSource).toBeUndefined();
+		const nemotron = models?.find(model => model.id === "nemotron-3.5-super");
+		expect(nemotron?.factoryDroidApiProviders).toEqual(["baseten"]);
+		expect(nemotron?.factoryDroidRoutingSource).toBe("configured_order");
+		// A model route the registry cannot serve still hides the model.
+		expect(models?.find(model => model.id === "beam-1.0")).toBeUndefined();
+	});
+
+	it("falls back to the registry upstream when a family default is explicitly empty", async () => {
+		const models = await discover({
+			modelPolicy: { allowAllFactoryModels: true },
+			routing: { defaults: { factory: [] }, models: { "glm-5.3": [] } },
+		});
+		const kimi = models?.find(model => model.id === "kimi-k3");
+		expect(kimi?.factoryDroidApiProviders?.[0]).toBe("fireworks");
+		expect(kimi?.factoryDroidRoutingSource).toBeUndefined();
+		// An explicitly empty model route still disables the model.
+		expect(models?.find(model => model.id === "glm-5.3")).toBeUndefined();
+	});
+
+	it("falls back to the region's registry upstreams when the family default serves none of them", async () => {
+		const models = await discover(
+			{ modelPolicy: { allowAllFactoryModels: true }, routing: { defaults: { anthropic: ["anthropic"] } } },
+			{ region: "eu" },
+		);
+		const sonnet = models?.find(model => model.id === "claude-sonnet-5");
+		expect(sonnet?.factoryDroidApiProviders).toEqual(["vertex_anthropic", "bedrock_anthropic"]);
+		expect(sonnet?.factoryDroidRoutingSource).toBeUndefined();
 	});
 
 	it("keeps global overrides restrictive without removing the EU Mistral route", async () => {

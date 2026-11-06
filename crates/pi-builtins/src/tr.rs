@@ -59,7 +59,7 @@ pub fn process_single_char_replace(
 	source_char: u8,
 	target_char: u8,
 ) {
-	let count = bytecount::count(input, source_char);
+	let count = memchr::memchr_iter(source_char, input).count();
 	if count == 0 {
 		output.extend_from_slice(input);
 	} else if count == input.len() {
@@ -75,7 +75,7 @@ pub fn process_single_char_replace(
 
 /// SIMD-optimized delete operation for single character
 pub fn process_single_delete(input: &[u8], output: &mut Vec<u8>, delete_char: u8) {
-	let count = bytecount::count(input, delete_char);
+	let count = memchr::memchr_iter(delete_char, input).count();
 	if count == 0 {
 		output.extend_from_slice(input);
 	} else if count < input.len() {

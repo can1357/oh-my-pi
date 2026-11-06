@@ -439,4 +439,7 @@ pub enum SigTarget {
 	/// [`Lineage::label`](crate::bash::Lineage::label) is this (nonzero)
 	/// label: a host callout's child tree, like a process group.
 	Label(u32),
+	/// A virtual process and every descendant: the process group of a
+	/// forked zsh subshell (`zpty -d` sends `SIGHUP` to it).
+	Tree(Vpid),
 }
