@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	Lexer,
@@ -2006,7 +2007,7 @@ function plainInlineTokens(tokens: Token[]): string {
 	let result = "";
 	for (const token of tokens) {
 		if (isMathToken(token)) {
-			result += renderMathToken(token.text);
+			result += stripVTControlCharacters(renderMathToken(token.text));
 			continue;
 		}
 		switch (token.type) {

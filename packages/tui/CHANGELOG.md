@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed LaTeX styles being lost inside nested wrappers: `\textnormal` resets bold and italic, radical indexes such as `\sqrt[n]{…}` keep the caller's style and color, optional arguments like `\xrightarrow[n]{…}` keep the active color, and `\color` no longer leaks past `\end{…}`; sized headings no longer show the ANSI codes of inline math ([#18275](https://github.com/can1357/oh-my-pi/pull/18275) by [@aleister1102](https://github.com/aleister1102))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes
