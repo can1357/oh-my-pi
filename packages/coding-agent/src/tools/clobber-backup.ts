@@ -273,9 +273,15 @@ export async function noteOwnWrite(session: ClobberBackupSession, absolutePath: 
 	}
 }
 
-/** Forget a path this session wrote, for a caller that then deleted or moved it away. */
+/**
+ * Forget a path this session wrote, for a caller that then deleted or moved it
+ * away. The `realpath` is resolved BEFORE the record set is taken: an SDK host
+ * can re-point the session while that syscall is pending, and a map captured
+ * first would be the previous session's.
+ */
 export async function forgetOwnWrite(session: ClobberBackupSession, absolutePath: string): Promise<void> {
-	createdFiles(session).byPath.delete(await realPath(absolutePath, false));
+	const target = await realPath(absolutePath, false);
+	createdFiles(session).byPath.delete(target);
 }
 
 /**
@@ -287,10 +293,11 @@ export async function forgetOwnWrite(session: ClobberBackupSession, absolutePath
 export async function ownsCurrentContent(session: ClobberBackupSession, absolutePath: string): Promise<boolean> {
 	const stat = await fs.promises.stat(absolutePath).catch(() => undefined);
 	if (!stat?.isFile()) return false;
-	// Through `createdFiles`, never the raw map: a `ToolSession` outlives the
-	// logical session it serves, and a stale set must be thrown away here as it
-	// is everywhere else, or one session's exemption answers for another's.
-	const written = createdFiles(session).byPath.get(await realPath(absolutePath, false));
+	// Resolve first, then take the record set: `createdFiles` re-checks the
+	// logical session, and a set captured before this `await` would be the one
+	// belonging to whichever session was live when the syscall started.
+	const target = await realPath(absolutePath, false);
+	const written = createdFiles(session).byPath.get(target);
 	return (
 		written !== undefined &&
 		written.size === stat.size &&

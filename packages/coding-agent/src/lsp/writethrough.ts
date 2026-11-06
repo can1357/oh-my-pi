@@ -128,6 +128,12 @@ export type WritethroughDeferredHandle = {
 export interface WritethroughResult {
 	diagnostics?: FileDiagnosticsResult;
 	finalContent: string;
+	/**
+	 * Whether this call put bytes on `dst`. Not inferable from the content it
+	 * returns: a formatter that rewrites a file to the same text still rewrote
+	 * it, and a caller holding a record of the file has to know.
+	 */
+	touchedDisk?: boolean;
 }
 
 /** Callback type for the LSP writethrough */
@@ -150,7 +156,7 @@ export async function writethroughNoop(
 	_getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 ): Promise<WritethroughResult> {
 	await writeFileWithFallback(dst, content, file);
-	return { finalContent: content };
+	return { finalContent: content, touchedDisk: true };
 }
 
 interface PendingWritethrough {
@@ -419,9 +425,17 @@ async function runLspWritethrough(
 	// Bytes this operation has committed to disk; `undefined` until they land
 	// there (the caller already wrote `content` when `contentAlreadyWritten`).
 	let diskContent = contentAlreadyWritten ? content : undefined;
+	// Whether anything in this call may have put bytes on disk. A formatter
+	// counts even when its output equals its input: a custom linter client runs
+	// the formatter binary with `--write`, so the file is rewritten and its
+	// timestamps move whether or not the text changes. Identical text is no
+	// evidence that nothing was written, and a caller holding a record of this
+	// file has to be told either way.
+	let touchedDisk = false;
 	const writeContent = async (value: string) => {
 		await writeFileWithFallback(dst, value, file);
 		diskContent = value;
+		touchedDisk = true;
 	};
 	/** Commit {@link finalContent} unless those exact bytes are already on disk. */
 	const commitWrite = async () => {
@@ -447,7 +461,7 @@ async function runLspWritethrough(
 	if (!enableFormat && !enableDiagnostics) {
 		await commitWrite();
 		await notifyWriteCommitted();
-		return { finalContent, diagnostics: undefined };
+		return { finalContent, diagnostics: undefined, touchedDisk };
 	}
 
 	const config = getConfig(cwd);
@@ -456,7 +470,7 @@ async function runLspWritethrough(
 	if (servers.length === 0) {
 		await commitWrite();
 		await notifyWriteCommitted();
-		return { finalContent, diagnostics: undefined };
+		return { finalContent, diagnostics: undefined, touchedDisk };
 	}
 	const { lspServers, customLinterServers } = splitServers(servers);
 	const useCustomFormatter = enableFormat && customLinterServers.length > 0;
@@ -515,6 +529,10 @@ async function runLspWritethrough(
 				} else {
 					formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
 				}
+				// A custom linter client formats by running its binary over the file
+				// with `--write`, so unless it never ran the file was rewritten —
+				// identical output included.
+				touchedDisk ||= !formattedContent.unsupported;
 				await commitWrite();
 				await notifyWriteCommitted(operationSignal);
 				if (changeType === FileChangeType.Created) {
@@ -624,7 +642,7 @@ async function runLspWritethrough(
 		diagnostics.formatter = formatter;
 	}
 
-	return { finalContent, diagnostics };
+	return { finalContent, diagnostics, touchedDisk };
 }
 
 async function flushWritethroughBatch(
@@ -673,14 +691,14 @@ async function flushWritethroughBatch(
 			{ contentAlreadyWritten: true },
 		);
 		finalContents.set(entry.dst, diag.finalContent);
-		// Only a destination this flush actually REWROTE. `content` is what was on
-		// disk when the flush read it; when the post-processing returns it
-		// unchanged nothing was written, and reporting it would hand the caller
-		// ownership of whatever another process had left there between the tool
-		// calls — a wider hole than the stale record this hook exists to repair.
-		// The entry the caller is waiting on is excluded either way: its own
-		// post-write checks have not run yet.
-		if (entry.dst !== requestedDst && diag.finalContent !== content) await options.onFileSettled?.(entry.dst);
+		// Only a destination this flush actually wrote. Equal text is no evidence
+		// that nothing was written — a custom linter formats by running its
+		// binary with `--write` — and claiming a file this flush merely READ
+		// would hand the caller whatever another process left there between the
+		// tool calls, a wider hole than the stale record this hook exists to
+		// repair. The entry the caller is waiting on is excluded either way: its
+		// own post-write checks have not run yet.
+		if (entry.dst !== requestedDst && diag.touchedDisk) await options.onFileSettled?.(entry.dst);
 		bundle?.finalize(diag.diagnostics);
 		results.push(diag.diagnostics);
 	}

@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as nodefs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -7,7 +8,7 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { createLspWritethrough } from "@oh-my-pi/pi-coding-agent/lsp/writethrough";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { backupBeforeClobber } from "@oh-my-pi/pi-coding-agent/tools/clobber-backup";
+import { backupBeforeClobber, ownsCurrentContent } from "@oh-my-pi/pi-coding-agent/tools/clobber-backup";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { addFileWriteFallback } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -55,6 +56,27 @@ function batchContext(batchId: string, index: number): AgentToolContext {
 		},
 	} as unknown as AgentToolContext;
 }
+
+/**
+ * A Biome binary this machine already has, on `PATH` or in bun's package cache.
+ * It is the formatter the suite needs for one case no other reaches: a custom
+ * linter client runs its binary with `--write`, so an already-formatted file is
+ * rewritten although its text does not change.
+ */
+function biomeBinary(): string | null {
+	const onPath = $which("biome");
+	if (onPath !== null) return onPath;
+	const cache = path.join(os.homedir(), ".bun", "install", "cache", "@biomejs");
+	let packages: string[];
+	try {
+		packages = nodefs.readdirSync(cache);
+	} catch {
+		return null;
+	}
+	return packages.map(name => path.join(cache, name, "biome")).find(candidate => nodefs.existsSync(candidate)) ?? null;
+}
+
+const BIOME = biomeBinary();
 
 function resultText(result: { content: { type: string; text?: string }[] }): string {
 	return result.content.flatMap(block => (block.type === "text" && block.text ? [block.text] : [])).join("\n");
@@ -713,6 +735,80 @@ describe("copy-before-clobber: a record must not claim bytes this session never 
 			expect(beforeFlush).toBe("x={'a':1}\n");
 			expect(afterFlush).toBe('x = {"a": 1}\n');
 			expect(await backupBeforeClobber(session, path.join(tempDir, "one.py"))).toBeUndefined();
+		},
+	);
+
+	test("a session change while the path is being resolved cannot hand over the record", async () => {
+		// The record set has to be taken AFTER the `realpath`, not before it: an
+		// SDK host re-points the session while that syscall is in flight, and a
+		// set captured first belongs to the session that has already ended.
+		let id = "session-A";
+		const session = makeSession(tempDir);
+		session.getSessionId = () => id;
+		const target = path.join(tempDir, "a.md");
+		await new WriteTool(session).execute("create", { path: "a.md", content: DOOMED });
+
+		const realpath = nodefs.promises.realpath;
+		// Cast because `realpath` is overloaded on its encoding option; this test
+		// only ever reaches the string form.
+		const flipSession = (async (resolved: nodefs.PathLike) => {
+			id = "session-B";
+			return realpath(resolved);
+		}) as typeof nodefs.promises.realpath;
+		const spy = spyOn(nodefs.promises, "realpath").mockImplementation(flipSession);
+		try {
+			expect(await ownsCurrentContent(session, target)).toBe(false);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	test.skipIf(BIOME === null)(
+		"a formatter that rewrote a file to the same bytes still refreshes the record",
+		async () => {
+			// Equal text is not "nothing was written": a custom linter client runs its
+			// binary over the file with `--write`, so an already-formatted file is
+			// rewritten and its ctime moves. Deciding by content leaves the record
+			// stale, and the session's own file is then copied on its next write —
+			// the per-edit cost this whole feature must not add.
+			await Bun.write(path.join(tempDir, "biome.json"), "{}\n");
+			await Bun.write(path.join(tempDir, "lsp.json"), JSON.stringify({ servers: { biome: { command: BIOME } } }));
+			const session = makeSession(tempDir);
+			session.enableLsp = true;
+			session.settings = Settings.isolated({
+				"edit.mode": "patch",
+				"lsp.formatOnWrite": true,
+				"lsp.diagnosticsOnWrite": false,
+				"lsp.diagnosticsOnEdit": false,
+			});
+			const tool = new WriteTool(session);
+			const target = path.join(tempDir, "a.js");
+			const formatted = "const x = 1;\n";
+
+			await tool.execute(
+				"first",
+				{ path: "a.js", content: formatted },
+				undefined,
+				undefined,
+				batchContext("biome", 0),
+			);
+			const beforeFlush = await fs.stat(target);
+			await tool.execute(
+				"flush",
+				{ path: "b.js", content: "const y = 2;\n" },
+				undefined,
+				undefined,
+				batchContext("biome", 1),
+			);
+			const afterFlush = await fs.stat(target);
+
+			// The flush rewrote the file and left its text alone: only the record can
+			// tell that anything happened to it.
+			expect(await Bun.file(target).text()).toBe(formatted);
+			expect(afterFlush.ctimeMs).not.toBe(beforeFlush.ctimeMs);
+			const next = await tool.execute("next", { path: "a.js", content: "const x = 3;\n" });
+			expect(await backupFiles()).toHaveLength(0);
+			expect(resultText(next)).not.toContain("[Backup]");
 		},
 	);
 
