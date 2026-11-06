@@ -1259,6 +1259,14 @@ export interface SessionsApi {
 	release(provider: string, sessionId: string): boolean;
 }
 
+/** Provenance and transport details for a provider usage-header observation. */
+export interface UsageHeaderIngestOptions {
+	sessionId?: string;
+	baseUrl?: string;
+	responseStatus?: number;
+	/** Exact serving row; null means explicitly unknown or external. */
+	credentialId?: number | null;
+}
 /** Usage reporting, observation, and provider configuration. */
 export interface UsageApi {
 	/** Fetch usage reports for configured providers, optionally restricted to one provider. */
@@ -1272,11 +1280,7 @@ export interface UsageApi {
 	/** Previously resolved on an ordinary auth or usage path; absent means identity is unknown. */
 	resolvedUsageCredential?(provider: Provider, credential: AuthCredential): UsageCredential | undefined;
 	/** Ingest provider usage limits from response headers. */
-	ingestHeaders(
-		provider: Provider,
-		headers: Record<string, string>,
-		options?: { sessionId?: string; baseUrl?: string; responseStatus?: number },
-	): boolean;
+	ingestHeaders(provider: Provider, headers: Record<string, string>, options?: UsageHeaderIngestOptions): boolean;
 	/**
 	 * Discard cached usage reports before a user-requested refresh. The next
 	 * read probes upstream serially per provider; a failure reports no fresh

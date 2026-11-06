@@ -278,6 +278,8 @@ export interface TurnRecoveryHost {
 	modelRegistry: ModelRegistry;
 	usageRouting?: SessionUsageRouting;
 	routingRole?(): string | undefined;
+	/** True only when this session still uses its registry-owned auth resolver. */
+	usesRegistryAuth?(): boolean;
 	configWarnings: string[];
 	model(): Model | undefined;
 	/**

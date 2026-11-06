@@ -420,6 +420,8 @@ export interface ProviderResponseMetadata {
 	status: number;
 	headers: Record<string, string>;
 	requestId?: string | null;
+	/** Stored credential that served this attempt; null means external or unknown. */
+	credentialId?: number | null;
 	metadata?: Record<string, unknown>;
 }
 

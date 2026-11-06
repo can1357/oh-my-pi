@@ -171,6 +171,8 @@ export interface InitialRetryFallbackState {
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
 	agent: Agent;
+	/** Registry-owned resolver identity; absent for externally supplied auth callbacks. */
+	registryAuthResolver?: Agent["getApiKey"];
 	sessionManager: SessionManager;
 	settings: Settings;
 	/**

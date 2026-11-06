@@ -10,7 +10,7 @@ import {
 	type UsageAdmissionCall,
 	validateSendRoute,
 } from "./usage-governor/admission";
-import type { UsageRequestContext, UsageRouteBinding } from "./usage-governor/types";
+import type { UsageAdmission, UsageRequestContext, UsageRouteBinding } from "./usage-governor/types";
 
 /**
  * Context passed to an {@link ApiKeyResolver} on each resolution attempt.
@@ -441,6 +441,7 @@ export async function withAuth<T>(
 export interface OAuthAccessSource {
 	readonly oauth: Pick<OAuthApi, "access">;
 	readonly limits: Pick<LimitsApi, "rotate">;
+	readonly governor?: UsageAdmission;
 }
 
 export interface WithOAuthAccessOptions {
