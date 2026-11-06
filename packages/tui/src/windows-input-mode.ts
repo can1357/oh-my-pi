@@ -194,6 +194,8 @@ function encodeKey(record: KeyRecord): string | null {
 	if (ctrl) {
 		// Windows Terminal / ConPTY report Ctrl+J as VK_J with Uc=LF. Returning the
 		// raw LF would make the editor treat it as Enter, so keep the key identity.
+		// Only J is special-cased: `ctrl+j` is a default `tui.input.newLine` binding,
+		// while Ctrl+M/I (CR/Tab) already decode to the keys their C0 bytes represent.
 		const ctrlJ = !alt && vk === VK_J && uc === 0x0a;
 		// Ctrl+Shift+letter collapses onto Ctrl+letter in legacy bytes; keep it distinct.
 		if ((shift || uc === 0 || ctrlJ) && base !== 0) return `\x1b[${base};${mod}u`;
