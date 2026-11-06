@@ -993,6 +993,8 @@ export class TUI extends Container {
 	 * at `#INPUT_FRAME_INTERVAL_MS` instead of the ceiling; cleared when that frame paints.
 	 */
 	#inputRenderPending = false;
+	// Promote once per pending paint: repeated producers must not keep canceling its timer.
+	#inputRenderTimerPromoted = false;
 	/**
 	 * Cap on the adaptive floor derived from `#lastFrameCostMs`. Bounds the UI
 	 * responsiveness at ~5 fps under sustained heavy renders — anything slower
@@ -2845,7 +2847,8 @@ export class TUI extends Container {
 		// A render while a keystroke's latch is set rides the fixed input cadence: an animation frame
 		// parked further out under the `tui.maxFps` ceiling is replaced by one the keystroke can ride.
 		// Input listeners (scroll wheel, toggles) and focused components alike request through here.
-		if (this.#inputRenderPending && this.#renderTimer && !this.#nativeLive) {
+		if (this.#inputRenderPending && this.#renderTimer && !this.#nativeLive && !this.#inputRenderTimerPromoted) {
+			this.#inputRenderTimerPromoted = true;
 			this.#renderTimer.cancel();
 			this.#renderTimer = undefined;
 			this.#renderRequested = true;
@@ -4111,6 +4114,7 @@ export class TUI extends Container {
 		if (this.#nativeHoldTimer) return;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
+		this.#inputRenderTimerPromoted = false;
 		if (this.#resizeAltActive) {
 			this.#renderResizeAltFrame(width, height);
 			return;
