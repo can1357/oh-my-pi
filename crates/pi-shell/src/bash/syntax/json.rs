@@ -2,12 +2,7 @@
 
 use alloc::{string::String, vec, vec::Vec};
 
-use crate::bash::syntax::{
-	JsonDialect, Offsets,
-	ast::*,
-	parser::{TextMode, parse_text_at},
-	span::Span,
-};
+use crate::bash::syntax::{JsonDialect, Offsets, ast::*, span::Span};
 
 // ---- value tree and writer
 // ----------------------------------------------------
@@ -504,15 +499,18 @@ mod native {
 		};
 		let target = match &r.target {
 			RedirTarget::Word(w) => word(m, w),
-			RedirTarget::HereDoc(d) => V::Obj(vec![(
-				"heredoc",
-				V::Obj(vec![
+			RedirTarget::HereDoc(d) => {
+				let mut fields = vec![
 					("delim", s(&d.delim)),
 					("delim_raw", s(&d.delim_raw)),
 					("quoted", V::Bool(d.quoted)),
 					("text", s(&d.text)),
-				]),
-			)]),
+				];
+				if let Some(delimiter) = &d.delimiter {
+					fields.push(("delimiter", word(m, delimiter)));
+				}
+				V::Obj(vec![("heredoc", V::Obj(fields))])
+			},
 		};
 		V::Obj(vec![
 			("span", m.span(r.span)),
@@ -590,7 +588,12 @@ mod native {
 	}
 
 	pub(super) fn word(m: &OffMap, w: &Word) -> V {
-		V::Obj(vec![("id", id(w.id)), ("span", m.span(w.span)), ("parts", parts(m, &w.parts))])
+		let mut fields = vec![("id", id(w.id))];
+		if let Some(span) = w.span.recorded() {
+			fields.push(("span", m.span(span)));
+		}
+		fields.push(("parts", parts(m, &w.parts)));
+		V::Obj(fields)
 	}
 
 	fn parts(m: &OffMap, ps: &[WordPart]) -> V {
@@ -602,14 +605,14 @@ mod native {
 	}
 
 	fn part(m: &OffMap, p: &WordPart) -> V {
-		match p {
+		let mut value = match p {
 			WordPart::Lit(v) => tv(b"lit", v),
 			WordPart::Escaped(v) => tv(b"escaped", v),
 			WordPart::SQuote(v) => tv(b"squote", v),
 			WordPart::AnsiC(v) => tv(b"ansic", v),
 			WordPart::BadSubst(v) => tv(b"bad_subst", v),
 			WordPart::BadComsub(b) => tv(b"bad_comsub", &b.text),
-			WordPart::DroppedQuote => tv(b"dropped_quote", b"\""),
+			WordPart::DroppedQuote(_) => tv(b"dropped_quote", b"\""),
 			WordPart::DQuote(inner) => {
 				V::Obj(vec![("type", s(b"dquote")), ("parts", parts(m, inner))])
 			},
@@ -643,7 +646,13 @@ mod native {
 				crate::bash::syntax::print::zsh_text(raw, &mut text);
 				V::Obj(vec![("type", s(b"zsh")), ("text", V::Str(text))])
 			},
+		};
+		if let Some(pos) = p.pos()
+			&& let V::Obj(fields) = &mut value
+		{
+			fields.insert(0, ("span", m.span(pos.span)));
 		}
+		value
 	}
 
 	fn param(m: &OffMap, p: &Param) -> V {
@@ -798,20 +807,6 @@ mod shfmt {
 		else_body: Option<&'a List>,
 		/// Offset of `else`, as the parser recorded it.
 		else_pos:  Option<u32>,
-	}
-
-	/// A position `n` bytes before `hi`, never before `lo`.
-	///
-	/// A node the parser read from the text an alias expanded to occupies no
-	/// source bytes, so there is no room for a token `n` bytes back: its one
-	/// position is `lo`, the offset just after the aliased word.
-	const fn back(lo: u32, hi: u32, n: u32) -> u32 {
-		if hi > lo + n { hi - n } else { lo }
-	}
-
-	/// A position `n` bytes after `lo`, never past `hi`.
-	const fn fwd(lo: u32, hi: u32, n: u32) -> u32 {
-		if lo + n < hi { lo + n } else { hi }
 	}
 
 	/// Source scanning helpers.
@@ -1190,12 +1185,11 @@ mod shfmt {
 
 		/// Redirections and the end of the last one.
 		fn redirs(&self, rs: &[Redir]) -> (Vec<V>, u32) {
-			let mut next_body: Option<u32> = None;
 			let mut end = 0;
 			let v = rs
 				.iter()
 				.map(|r| {
-					let (v, e) = self.redir(r, &mut next_body);
+					let (v, e) = self.redir(r);
 					end = e;
 					v
 				})
@@ -1203,7 +1197,7 @@ mod shfmt {
 			(v, end)
 		}
 
-		fn redir(&self, r: &Redir, next_body: &mut Option<u32>) -> (V, u32) {
+		fn redir(&self, r: &Redir) -> (V, u32) {
 			let mut end = r.span.hi;
 			let op = redir_op(r.op);
 			let op_pos = match r.fd {
@@ -1222,32 +1216,39 @@ mod shfmt {
 			match &r.target {
 				RedirTarget::Word(w) => f.push(("Word", self.word(w, false))),
 				RedirTarget::HereDoc(d) => {
-					let wlo = self.skip_ws(op_pos + op.len() as u32);
-					let whi = wlo + d.delim_raw.len() as u32;
-					let delim_word = Word {
-						id:    crate::bash::syntax::span::NodeId(0),
-						span:  Span::new(wlo, whi),
-						parts: first_word_parts(&d.delim_raw),
-					};
-					f.push(("Word", self.word(&delim_word, false)));
-					let body = next_body.unwrap_or_else(|| self.line_after(r.span.hi));
-					let strip = matches!(r.op, RedirOp::HereDoc { strip_tabs: true });
-					let (text_end, delim_end) = self.doc_end(body, &d.delim, strip);
-					*next_body = Some(self.line_after(delim_end));
-					let parts = if text_end == body {
-						Vec::new()
-					} else if d.quoted {
-						vec![self.lit_with(body, delim_end, &self.src[body as usize..text_end as usize])]
+					if let Some(word) = &d.delimiter {
+						f.push(("Word", self.word(word, false)));
 					} else {
-						self.text_parts(body, text_end, delim_end)
-					};
-					let mut h = vec![("Pos", self.m.pos(body)), ("End", self.m.pos(delim_end))];
-					if !parts.is_empty() {
-						h.push(("Parts", V::Arr(parts)));
+						f.push((
+							"Word",
+							V::Obj(vec![(
+								"Parts",
+								V::Arr(vec![self.lit_optional(None, &d.delim_raw, true)]),
+							)]),
+						));
 					}
-					f[1] = ("End", self.m.pos(delim_end));
-					end = delim_end;
-					f.push(("Hdoc", V::Obj(h)));
+					let (parts, span) = if let Some(source) = &d.source {
+						let doc_end = source.close.map_or(source.span.hi, |close| close.hi);
+						let parts = if source.raw.is_empty() {
+							Vec::new()
+						} else if d.quoted {
+							vec![self.lit_with(source.span.lo, doc_end, &source.raw)]
+						} else {
+							self.text_parts(source, doc_end)
+						};
+						(parts, Some(Span::new(source.span.lo, doc_end)))
+					} else if d.text.is_empty() {
+						(Vec::new(), None)
+					} else {
+						(vec![self.lit_optional(None, &d.text, true)], None)
+					};
+					if let Some(hdoc) = self.optional_word(span, parts, false) {
+						if let Some(span) = span {
+							f[1] = ("End", self.m.pos(span.hi));
+							end = span.hi;
+						}
+						f.push(("Hdoc", hdoc));
+					}
 				},
 			}
 			(V::Obj(f), end)
@@ -1264,71 +1265,28 @@ mod shfmt {
 			lo
 		}
 
-		/// Start of the line after the one containing `i`.
-		fn line_after(&self, i: u32) -> u32 {
-			let mut j = i as usize;
-			while j < self.src.len() && self.src[j] != b'\n' {
-				j += 1;
-			}
-			(j + 1).min(self.src.len()) as u32
-		}
-
-		/// End of a here-document body starting at `body`: the start of the
-		/// delimiter text and the end of the delimiter line (without newline).
-		fn doc_end(&self, body: u32, delim: &[u8], strip: bool) -> (u32, u32) {
-			let mut i = body as usize;
-			while i < self.src.len() {
-				let end = self.src[i..]
-					.iter()
-					.position(|&c| c == b'\n')
-					.map_or(self.src.len(), |n| i + n);
-				let mut j = i;
-				if strip {
-					while j < end && self.src[j] == b'\t' {
-						j += 1;
+		/// The stored body is the parser's input, not a slice recovered from
+		/// the command's source. Its sub-parser keeps the recorded origin.
+		fn text_parts(&self, source: &HereDocSource, doc_end: u32) -> Vec<V> {
+			let Ok(word) = crate::bash::syntax::parser::parse_doc_text(
+				source,
+				crate::bash::syntax::Features::NONE,
+			) else {
+				return vec![self.lit_with(source.span.lo, doc_end, &source.raw)];
+			};
+			let mut parts = self.parts(&word.parts);
+			// shfmt extends the final literal to the closing delimiter's end,
+			// while its value contains only the bytes read in the body.
+			if let Some(V::Obj(fields)) = parts.last_mut()
+				&& matches!(fields.first(), Some(("Type", V::Str(kind))) if kind == b"Lit")
+			{
+				for (key, value) in fields {
+					if matches!(*key, "End" | "ValueEnd") {
+						*value = self.m.pos(doc_end);
 					}
 				}
-				if &self.src[j..end] == delim {
-					return (j as u32, end as u32);
-				}
-				i = end + 1;
 			}
-			let n = self.src.len() as u32;
-			(n, n)
-		}
-
-		/// Parts of an unquoted here-document body.
-		/// Parts of an unquoted here-document body `lo..hi`; shfmt ends a
-		/// final literal at the end of the delimiter line (`doc_end`).
-		fn text_parts(&self, lo: u32, hi: u32, doc_end: u32) -> Vec<V> {
-			let text = &self.src[lo as usize..hi as usize];
-			let Ok(w) =
-				parse_text_at(text, crate::bash::syntax::Features::NONE, TextMode::HereDoc, lo)
-			else {
-				return vec![self.lit_with(lo, doc_end, text)];
-			};
-			let spans = part_spans(self.src, lo, hi, &w.parts);
-			let mut out = self.parts(&w.parts, &spans);
-			let lit_kind = |p: &WordPart| {
-				matches!(
-					p,
-					WordPart::Lit(_)
-						| WordPart::Escaped(_)
-						| WordPart::BadSubst(_)
-						| WordPart::BadComsub(_)
-						| WordPart::DroppedQuote
-				)
-			};
-			if w.parts.last().is_some_and(lit_kind) {
-				let mut k = w.parts.len() - 1;
-				while k > 0 && lit_kind(&w.parts[k - 1]) {
-					k -= 1;
-				}
-				let run_lo = spans[k].0;
-				out.pop();
-				out.push(self.lit_with(run_lo, doc_end, &self.src[run_lo as usize..hi as usize]));
-			}
-			out
+			parts
 		}
 
 		/// The shfmt command for `c` and the end of the command proper
@@ -1576,7 +1534,10 @@ mod shfmt {
 							V::Obj(vec![
 								("Pos", p(name.span.lo)),
 								("End", p(name.span.hi)),
-								("Parts", V::Arr(vec![self.lit(name.span.lo, name.span.hi, true)])),
+								(
+									"Parts",
+									V::Arr(vec![self.lit_with(name.span.lo, name.span.hi, &name.text)]),
+								),
 							]),
 						));
 					}
@@ -1718,19 +1679,19 @@ mod shfmt {
 
 		/// An arithmetic expression as one `Word` leaf.
 		fn arith(&self, a: &ArithText) -> Option<V> {
-			let mut lo = a.span.lo;
-			while lo < a.span.hi && matches!(self.at(lo), b' ' | b'\t' | b'\n') {
-				lo += 1;
-			}
-			let hi = self.trim_back(lo, a.span.hi);
-			(hi > lo).then(|| {
-				V::Obj(vec![
-					("Type", s(b"Word")),
-					("Pos", self.m.pos(lo)),
-					("End", self.m.pos(hi)),
-					("Parts", V::Arr(vec![self.lit(lo, hi, true)])),
-				])
-			})
+			let start = a
+				.src
+				.iter()
+				.position(|c| !matches!(c, b' ' | b'\t' | b'\n'))?;
+			let end = a
+				.src
+				.iter()
+				.rposition(|c| !matches!(c, b' ' | b'\t' | b'\n'))?
+				+ 1;
+			let mut word = vec![("Type", s(b"Word"))];
+			self.span_fields(&mut word, a.trimmed);
+			word.push(("Parts", V::Arr(vec![self.lit_optional(a.trimmed, &a.src[start..end], true)])));
+			Some(V::Obj(word))
 		}
 
 		fn test(&self, e: &CondExpr) -> V {
@@ -1840,7 +1801,8 @@ mod shfmt {
 			let p = |o| self.m.pos(o);
 			if sc.assigns.is_empty()
 				&& let Some(head) = sc.words.first()
-				&& let [WordPart::Lit(name)] = &head.parts[..]
+				&& let [part] = &head.parts[..]
+				&& let Some(name) = Self::decl_bytes(part)
 			{
 				if matches!(
 					&name[..],
@@ -1888,55 +1850,76 @@ mod shfmt {
 			if a.append {
 				f.push(("Append", V::Bool(true)));
 			}
-			let nhi = fwd(a.span.lo, a.span.hi, a.name.len() as u32);
-			f.push(("Name", self.lit_value(a.span.lo, nhi, &a.name)));
-			if let Some(i) = &a.index {
-				f.push(("Index", self.word(i, true)));
+			f.push(("Name", self.lit_optional(a.name_span, &a.name, false)));
+			if let Some(i) = &a.index
+				&& let Some(index) = self.optional_word(i.span.recorded(), self.parts(&i.parts), true)
+			{
+				f.push(("Index", index));
 			}
 			match &a.value {
 				AssignValue::Scalar(w) => {
-					if !w.parts.is_empty() {
-						f.push(("Value", self.word(w, false)));
+					if let Some(value) =
+						self.optional_word(w.span.recorded(), self.parts(&w.parts), false)
+					{
+						f.push(("Value", value));
 					}
 				},
 				AssignValue::Array(elems) => {
-					let alo = self.find(a.span.lo, b"(");
-					let alo = if self.at(alo) == b'(' {
-						alo
-					} else {
-						back(a.span.lo, a.span.hi, 1)
-					};
-					f.push(("Array", self.array(alo, a.span.hi, elems)));
+					f.push(("Array", self.array(elems)));
 				},
 			}
 			V::Obj(f)
 		}
 
-		fn array(&self, lo: u32, hi: u32, elems: &[ArrayElem]) -> V {
+		fn array(&self, array: &CompoundArray) -> V {
 			let p = |o| self.m.pos(o);
-			let es: Vec<V> = elems
+			let es: Vec<V> = array
 				.iter()
 				.map(|e| {
-					let elo = e
-						.key
-						.as_ref()
-						.map_or(e.value.span.lo, |k| back(lo, k.span.hi, k.span.hi - k.span.lo + 1));
-					let mut f = vec![("Pos", p(elo)), ("End", p(e.value.span.hi))];
-					if let Some(k) = &e.key {
-						f.push(("Index", self.word(k, true)));
+					let mut f = Vec::new();
+					if let Some(lo) = e.lo {
+						f.push(("Pos", p(lo)));
 					}
-					if !e.value.parts.is_empty() {
-						f.push(("Value", self.word(&e.value, false)));
+					f.push(("End", p(e.value.span.hi)));
+					if let Some(k) = &e.key
+						&& let Some(index) =
+							self.optional_word(k.span.recorded(), self.parts(&k.parts), true)
+					{
+						f.push(("Index", index));
+					}
+					if let Some(value) =
+						self.optional_word(e.value.span.recorded(), self.parts(&e.value.parts), false)
+					{
+						f.push(("Value", value));
 					}
 					V::Obj(f)
 				})
 				.collect();
-			let mut f =
-				vec![("Pos", p(lo)), ("End", p(hi)), ("Lparen", p(lo)), ("Rparen", p(back(lo, hi, 1)))];
+			let mut f = Vec::new();
+			if let Some(lo) = array.lparen {
+				f.push(("Pos", p(lo)));
+			}
+			if let Some(close) = array.rparen {
+				f.push(("End", p(close.hi)));
+			}
+			if let Some(lo) = array.lparen {
+				f.push(("Lparen", p(lo)));
+			}
+			if let Some(close) = array.rparen {
+				f.push(("Rparen", p(close.lo)));
+			}
 			if !es.is_empty() {
 				f.push(("Elems", V::Arr(es)));
 			}
 			V::Obj(f)
+		}
+
+		fn decl_bytes(part: &WordPart) -> Option<&[u8]> {
+			match part {
+				WordPart::Lit(text) => Some(text.as_slice()),
+				WordPart::Zsh(text) => Some(text.as_slice()),
+				_ => None,
+			}
 		}
 
 		fn decl_arg(&self, w: &Word) -> V {
@@ -1944,7 +1927,8 @@ mod shfmt {
 			let lo = w.span.lo;
 			let hi = w.span.hi;
 			// `name=(…)` and `name=value`.
-			if let Some(WordPart::Lit(first)) = w.parts.first()
+			if let Some(part) = w.parts.first()
+				&& let Some(first) = Self::decl_bytes(part)
 				&& let Some(eq) = first.iter().position(|&c| c == b'=')
 				&& crate::bash::syntax::util::is_identifier(
 					first[..eq].strip_suffix(b"+").unwrap_or(&first[..eq]),
@@ -1955,20 +1939,28 @@ mod shfmt {
 				if append {
 					f.push(("Append", V::Bool(true)));
 				}
-				f.push(("Name", self.lit_value(lo, fwd(lo, hi, name.len() as u32), name)));
-				let vlo = fwd(lo, hi, eq as u32 + 1);
+				f.push(("Name", self.lit_optional(w.assignment.map(|a| a.name), name, false)));
 				if let Some(WordPart::Compound(elems)) = w.parts.get(1) {
-					f.push(("Array", self.array(vlo, hi, elems)));
-				} else if vlo < hi {
-					let mut rest = w.clone();
-					rest.span = Span::new(vlo, hi);
-					if let Some(WordPart::Lit(l)) = rest.parts.first_mut() {
-						l.drain(..=eq);
+					f.push(("Array", self.array(elems)));
+				} else {
+					let mut rest = w.parts.clone();
+					if let Some(WordPart::Lit(l)) = rest.first_mut() {
+						l.value.remove_prefix(eq + 1);
+						l.pos = w.assignment.map(|a| {
+							let span = Span::new(a.value_lo, l.pos.map_or(hi, |p| p.span.hi));
+							PartSpan { span, content: span, close: None }
+						});
 						if l.is_empty() {
-							rest.parts.remove(0);
+							rest.remove(0);
 						}
 					}
-					f.push(("Value", self.word(&rest, false)));
+					if let Some(value) = self.optional_word(
+						w.assignment.map(|a| Span::new(a.value_lo, hi)),
+						self.parts(&rest),
+						false,
+					) {
+						f.push(("Value", value));
+					}
 				}
 				return V::Obj(f);
 			}
@@ -1977,124 +1969,167 @@ mod shfmt {
 				[WordPart::Lit(n)] if crate::bash::syntax::util::is_identifier(n) => {
 					f.push(("Name", self.lit_value(lo, hi, n)));
 				},
-				_ => f.push(("Value", self.word(w, false))),
+				_ => {
+					if let Some(value) =
+						self.optional_word(w.span.recorded(), self.parts(&w.parts), false)
+					{
+						f.push(("Value", value));
+					}
+				},
 			}
 			V::Obj(f)
 		}
 
 		/// A word; `typed` adds `"Type": "Word"` (interface positions).
 		fn word(&self, w: &Word, typed: bool) -> V {
-			let spans = part_spans(self.src, w.span.lo, w.span.hi, &w.parts);
-			let parts = self.parts(&w.parts, &spans);
+			let parts = self.parts(&w.parts);
 			let mut f = Vec::new();
 			if typed {
 				f.push(("Type", s(b"Word")));
 			}
-			f.push(("Pos", self.m.pos(w.span.lo)));
-			f.push(("End", self.m.pos(w.span.hi)));
+			self.span_fields(&mut f, w.span.recorded());
 			if !parts.is_empty() {
 				f.push(("Parts", V::Arr(parts)));
 			}
 			V::Obj(f)
 		}
 
-		/// Parts with their source spans; literal and escaped runs merge into
-		/// one `Lit` holding the source text, as shfmt keeps them.
-		fn parts(&self, parts: &[WordPart], spans: &[(u32, u32)]) -> Vec<V> {
+		/// Optional shfmt words need a part; unlike native nodes, they cannot
+		/// distinguish a present empty operand from an absent operand.
+		fn optional_word(&self, span: Option<Span>, parts: Vec<V>, typed: bool) -> Option<V> {
+			if parts.is_empty() {
+				return None;
+			}
+			let mut fields = Vec::new();
+			if typed {
+				fields.push(("Type", s(b"Word")));
+			}
+			self.span_fields(&mut fields, span);
+			fields.push(("Parts", V::Arr(parts)));
+			Some(V::Obj(fields))
+		}
+
+		fn append_literal(
+			run: &mut Option<(Option<Span>, Vec<u8>)>,
+			span: Option<Span>,
+			bytes: &[u8],
+		) {
+			if bytes.is_empty() {
+				return;
+			}
+			let (extent, text) = run.get_or_insert_with(|| (span, Vec::with_capacity(bytes.len())));
+			*extent = extent.zip(span).map(|(a, b)| Span::new(a.lo, b.hi));
+			text.extend_from_slice(bytes);
+		}
+
+		/// Literal runs keep the bytes held by the parsed parts. A source
+		/// range locates a part; it is not the value of alias-expanded text.
+		fn parts(&self, parts: &[WordPart]) -> Vec<V> {
 			let mut out = Vec::new();
-			let mut run: Option<(u32, u32)> = None;
-			for (part, &(lo, hi)) in parts.iter().zip(spans) {
-				if matches!(part, WordPart::Lit(_)) {
-					// shfmt makes every `$` that starts no expansion a `Lit` of
-					// its own; a literal part's `$` bytes are exactly those.
-					let mut start = lo;
-					for at in lo..hi {
-						if self.at(at) == b'$' {
-							if let Some((a, _)) = run.take() {
-								out.push(self.lit(a, at, true));
-							} else if at > start {
-								out.push(self.lit(start, at, true));
-							}
-							out.push(self.lit(at, at + 1, true));
-							start = at + 1;
+			let mut run: Option<(Option<Span>, Vec<u8>)> = None;
+			for part in parts {
+				if let WordPart::Lit(literal) = part {
+					let span = literal.pos.map(|pos| pos.span);
+					let mut start = 0;
+					let mut lo = span.map(|span| span.lo);
+					for &(index, token) in &literal.value.dollars {
+						Self::append_literal(
+							&mut run,
+							lo.map(|lo| Span::new(lo, token.lo)),
+							&literal.value.bytes[start..index],
+						);
+						if let Some((span, text)) = run.take() {
+							out.push(self.lit_at(span, text, true));
 						}
+						out.push(self.lit_with(token.lo, token.hi, b"$"));
+						start = index + 1;
+						lo = Some(token.hi);
 					}
-					if start < hi {
-						run = Some(run.map_or((start, hi), |(a, _)| (a, hi)));
-					}
+					Self::append_literal(
+						&mut run,
+						lo.zip(span).map(|(lo, span)| Span::new(lo, span.hi)),
+						&literal.value.bytes[start..],
+					);
 					continue;
 				}
-				if matches!(
+				let literal = matches!(
 					part,
 					WordPart::Escaped(_)
 						| WordPart::BadSubst(_)
 						| WordPart::BadComsub(_)
-						| WordPart::DroppedQuote
+						| WordPart::DroppedQuote(_)
 						| WordPart::Zsh(_)
-				) {
-					run = Some(run.map_or((lo, hi), |(a, _)| (a, hi)));
+				);
+				if literal {
+					let span = part.pos().map(|p| p.span);
+					let (extent, text) = run.get_or_insert_with(|| (span, Vec::new()));
+					*extent = extent.zip(span).map(|(a, b)| Span::new(a.lo, b.hi));
+					crate::bash::syntax::print::parts_text(core::slice::from_ref(part), text);
 					continue;
 				}
-				if let Some((a, b)) = run.take() {
-					out.push(self.lit(a, b, true));
+				if let Some((span, text)) = run.take() {
+					out.push(self.lit_at(span, text, true));
 				}
-				out.push(self.part(part, lo, hi));
+				out.push(self.part(part));
 			}
-			if let Some((a, b)) = run {
-				out.push(self.lit(a, b, true));
+			if let Some((span, text)) = run {
+				out.push(self.lit_at(span, text, true));
 			}
 			out
 		}
 
-		fn part(&self, part: &WordPart, lo: u32, hi: u32) -> V {
-			let p = |o| self.m.pos(o);
+		fn span_fields(&self, fields: &mut Vec<(&'static str, V)>, span: Option<Span>) {
+			if let Some(span) = span {
+				fields.push(("Pos", self.m.pos(span.lo)));
+				fields.push(("End", self.m.pos(span.hi)));
+			}
+		}
+
+		fn part_fields(
+			&self,
+			kind: &[u8],
+			pos: Option<PartSpan>,
+			left: &'static str,
+			right: &'static str,
+		) -> Vec<(&'static str, V)> {
+			let mut fields = vec![("Type", s(kind))];
+			self.span_fields(&mut fields, pos.map(|p| p.span));
+			if let Some(pos) = pos {
+				fields.push((left, self.m.pos(pos.span.lo)));
+				if let Some(close) = pos.close {
+					fields.push((right, self.m.pos(close.lo)));
+				}
+			}
+			fields
+		}
+
+		fn part(&self, part: &WordPart) -> V {
+			let pos = part.pos();
 			match part {
 				WordPart::SQuote(v) | WordPart::AnsiC(v) => {
-					let mut f = vec![
-						("Type", s(b"SglQuoted")),
-						("Pos", p(lo)),
-						("End", p(hi)),
-						("Left", p(lo)),
-						("Right", p(back(lo, hi, 1))),
-					];
+					let mut f = self.part_fields(b"SglQuoted", pos, "Left", "Right");
 					if matches!(part, WordPart::AnsiC(_)) {
 						f.push(("Dollar", V::Bool(true)));
 					}
-					// shfmt omits empty strings.
 					if !v.is_empty() {
 						f.push(("Value", s(v)));
 					}
 					V::Obj(f)
 				},
 				WordPart::DQuote(inner) | WordPart::Locale(inner) => {
-					let dollar = matches!(part, WordPart::Locale(_));
-					let ilo = fwd(lo, hi, 1 + u32::from(dollar));
-					let spans = part_spans(self.src, ilo, back(lo, hi, 1), inner);
-					let parts = self.parts(inner, &spans);
-					let mut f = vec![
-						("Type", s(b"DblQuoted")),
-						("Pos", p(lo)),
-						("End", p(hi)),
-						("Left", p(lo)),
-						("Right", p(back(lo, hi, 1))),
-					];
-					if dollar {
+					let mut f = self.part_fields(b"DblQuoted", pos, "Left", "Right");
+					if matches!(part, WordPart::Locale(_)) {
 						f.push(("Dollar", V::Bool(true)));
 					}
+					let parts = self.parts(inner);
 					if !parts.is_empty() {
 						f.push(("Parts", V::Arr(parts)));
 					}
 					V::Obj(f)
 				},
-				WordPart::Param(pp) => self.param(pp, lo, hi),
+				WordPart::Param(pp) => self.param(pp),
 				WordPart::Comsub(c) => {
-					let mut f = vec![
-						("Type", s(b"CmdSubst")),
-						("Pos", p(lo)),
-						("End", p(hi)),
-						("Left", p(lo)),
-						("Right", p(back(lo, hi, 1))),
-					];
+					let mut f = self.part_fields(b"CmdSubst", pos, "Left", "Right");
 					if !c.body.items.is_empty() {
 						f.push(("Stmts", self.list(&c.body)));
 					}
@@ -2107,15 +2142,8 @@ mod shfmt {
 					V::Obj(f)
 				},
 				WordPart::Arith(a) => {
-					let bracket = self.at(lo + 1) == b'[';
-					let mut f = vec![
-						("Type", s(b"ArithmExp")),
-						("Pos", p(lo)),
-						("End", p(hi)),
-						("Left", p(lo)),
-						("Right", p(back(lo, hi, if bracket { 1 } else { 2 }))),
-					];
-					if bracket {
+					let mut f = self.part_fields(b"ArithmExp", pos, "Left", "Right");
+					if a.bracket {
 						f.push(("Bracket", V::Bool(true)));
 					}
 					if let Some(x) = self.arith(a) {
@@ -2124,48 +2152,48 @@ mod shfmt {
 					V::Obj(f)
 				},
 				WordPart::ProcSub(ps) => {
-					let mut f = vec![
-						("Type", s(b"ProcSubst")),
-						("Pos", p(lo)),
-						("End", p(hi)),
-						("OpPos", p(lo)),
-						("Rparen", p(back(lo, hi, 1))),
-						("Op", s(if ps.output { b">(" } else { b"<(" })),
-					];
+					let mut f = self.part_fields(b"ProcSubst", pos, "OpPos", "Rparen");
+					f.push(("Op", s(if ps.output { b">(" } else { b"<(" })));
 					if !ps.body.items.is_empty() {
 						f.push(("Stmts", self.list(&ps.body)));
 					}
 					V::Obj(f)
 				},
-				WordPart::Compound(elems) => self.array(lo, hi, elems),
+				WordPart::Compound(elems) => self.array(elems),
 				WordPart::Lit(_)
 				| WordPart::Escaped(_)
 				| WordPart::BadSubst(_)
 				| WordPart::BadComsub(_)
-				| WordPart::DroppedQuote
-				| WordPart::Zsh(_) => self.lit(lo, hi, true),
+				| WordPart::DroppedQuote(_)
+				| WordPart::Zsh(_) => {
+					let mut text = Vec::new();
+					crate::bash::syntax::print::parts_text(core::slice::from_ref(part), &mut text);
+					self.lit_at(pos.map(|p| p.span), text, true)
+				},
 			}
 		}
 
-		fn param(&self, pp: &Param, lo: u32, hi: u32) -> V {
+		fn param(&self, located: &Located<Box<Param>>) -> V {
+			let pp = &located.value;
 			let p = |o| self.m.pos(o);
-			let mut f =
-				vec![("Type", s(b"ParamExp")), ("Pos", p(lo)), ("End", p(hi)), ("Dollar", p(lo))];
-			let mut name_lo = fwd(lo, hi, 1);
+			let mut f = vec![("Type", s(b"ParamExp"))];
+			self.span_fields(&mut f, located.pos.map(|p| p.span));
+			if let Some(pos) = located.pos {
+				f.push(("Dollar", p(pos.span.lo)));
+			}
 			if pp.braced {
-				f.push(("Rbrace", p(back(lo, hi, 1))));
-				name_lo = fwd(name_lo, hi, 1);
+				if let Some(close) = located.pos.and_then(|p| p.close) {
+					f.push(("Rbrace", p(close.lo)));
+				}
 			} else {
 				f.push(("Short", V::Bool(true)));
 			}
 			let excl = matches!(pp.op, ParamOp::Indirect | ParamOp::PrefixNames { .. }) || pp.indirect;
 			if excl {
 				f.push(("Excl", V::Bool(true)));
-				name_lo = fwd(name_lo, hi, 1);
 			}
 			if pp.op == ParamOp::Length {
 				f.push(("Length", V::Bool(true)));
-				name_lo = fwd(name_lo, hi, 1);
 			}
 			let mut name = Vec::new();
 			match &pp.name {
@@ -2173,8 +2201,7 @@ mod shfmt {
 				ParamName::Positional(n) => crate::bash::syntax::util::push_u32(&mut name, *n),
 				ParamName::Special(sp) => name.push(special_char(*sp)),
 			}
-			let name_hi = fwd(name_lo, hi, name.len() as u32);
-			f.push(("Param", self.lit_value(name_lo, name_hi, &name)));
+			f.push(("Param", self.lit_optional(pp.name_span, &name, false)));
 			match &pp.index {
 				Some(Subscript::At | Subscript::Star) => {
 					let at: &[u8] = if pp.index == Some(Subscript::At) {
@@ -2182,28 +2209,27 @@ mod shfmt {
 					} else {
 						b"*"
 					};
-					f.push((
-						"Index",
-						V::Obj(vec![
-							("Type", s(b"Word")),
-							("Pos", p(fwd(name_hi, hi, 1))),
-							("End", p(fwd(name_hi, hi, 2))),
-							(
-								"Parts",
-								V::Arr(vec![self.lit_with(fwd(name_hi, hi, 1), fwd(name_hi, hi, 2), at)]),
-							),
-						]),
-					));
+					let mut index = vec![("Type", s(b"Word"))];
+					self.span_fields(&mut index, pp.index_span);
+					index.push(("Parts", V::Arr(vec![self.lit_optional(pp.index_span, at, true)])));
+					f.push(("Index", V::Obj(index)));
 				},
-				Some(Subscript::Expr(w)) => f.push(("Index", self.word(w, true))),
+				Some(Subscript::Expr(w)) => {
+					if let Some(index) =
+						self.optional_word(w.span.recorded(), self.parts(&w.parts), true)
+					{
+						f.push(("Index", index));
+					}
+				},
 				None => {},
 			}
 			let opw = |op: &[u8], w: Option<&Word>| {
 				let mut e = vec![("Op", s(op))];
 				if let Some(w) = w
-					&& !w.parts.is_empty()
+					&& let Some(word) =
+						self.optional_word(w.span.recorded(), self.parts(&w.parts), false)
 				{
-					e.push(("Word", self.word(w, false)));
+					e.push(("Word", word));
 				}
 				V::Obj(e)
 			};
@@ -2248,23 +2274,26 @@ mod shfmt {
 					if *mode == ReplaceMode::All {
 						r.push(("All", V::Bool(true)));
 					}
-					let orig = if let Some(alo) = *anchor {
-						// shfmt keeps the anchor in the pattern. Its offset is
-						// the parser's: a byte before the pattern's start is
-						// a byte of whatever stands there, and in text an
-						// alias expanded it is not the anchor at all.
-						let spans = part_spans(self.src, pat.span.lo, pat.span.hi, &pat.parts);
-						let mut parts =
-							vec![self.lit(alo, spans.first().map_or(pat.span.lo, |s| s.0), true)];
-						parts.extend(self.parts(&pat.parts, &spans));
-						let merged = merge_lit_vs(parts, self);
-						V::Obj(vec![("Pos", p(alo)), ("End", p(pat.span.hi)), ("Parts", V::Arr(merged))])
+					let (span, parts) = if let Some(alo) = *anchor {
+						let byte = if *mode == ReplaceMode::Suffix {
+							b'%'
+						} else {
+							b'#'
+						};
+						let mut parts = vec![self.lit_with(alo.lo, alo.hi, &[byte])];
+						parts.extend(self.parts(&pat.parts));
+						(Some(Span::new(alo.lo, pat.span.hi)), merge_lit_vs(parts))
 					} else {
-						self.word(pat, false)
+						(pat.span.recorded(), self.parts(&pat.parts))
 					};
-					r.push(("Orig", orig));
-					if let Some(w) = rep {
-						r.push(("With", self.word(w, false)));
+					if let Some(orig) = self.optional_word(span, parts, false) {
+						r.push(("Orig", orig));
+					}
+					if let Some(w) = rep
+						&& let Some(with) =
+							self.optional_word(w.span.recorded(), self.parts(&w.parts), false)
+					{
+						r.push(("With", with));
 					}
 					f.push(("Repl", V::Obj(r)));
 				},
@@ -2280,11 +2309,6 @@ mod shfmt {
 					f.push(("Exp", opw(op, pat.as_ref())));
 				},
 				ParamOp::Transform { op: c, at } => {
-					// The operator letter's own offset, as the parser read it.
-					// Counting back from the word's end lands on a byte of the
-					// aliased word instead.
-					let at = *at;
-					let end = fwd(at, hi, 1);
 					f.push((
 						"Exp",
 						V::Obj(vec![
@@ -2292,9 +2316,9 @@ mod shfmt {
 							(
 								"Word",
 								V::Obj(vec![
-									("Pos", p(at)),
-									("End", p(end)),
-									("Parts", V::Arr(vec![self.lit_with(at, end, &[*c])])),
+									("Pos", p(at.lo)),
+									("End", p(at.hi)),
+									("Parts", V::Arr(vec![self.lit_with(at.lo, at.hi, &[*c])])),
 								]),
 							),
 						]),
@@ -2305,53 +2329,56 @@ mod shfmt {
 		}
 
 		fn lit_with(&self, lo: u32, hi: u32, v: &[u8]) -> V {
-			V::Obj(vec![
-				("Type", s(b"Lit")),
-				("Pos", self.m.pos(lo)),
-				("End", self.m.pos(hi)),
-				("ValuePos", self.m.pos(lo)),
-				("ValueEnd", self.m.pos(hi)),
-				("Value", s(v)),
-			])
+			self.lit_owned(lo, hi, v.to_vec())
 		}
-	}
 
-	/// The parts of the first word of `raw` (a here-document delimiter as
-	/// written).
-	fn first_word_parts(raw: &[u8]) -> Vec<WordPart> {
-		let parsed = crate::bash::syntax::parse_all(raw, crate::bash::syntax::Features::NONE).ok();
-		let word = parsed.as_ref().and_then(|p| {
-			let cmd = &p
-				.commands
-				.first()?
-				.list
-				.items
-				.first()?
-				.and_or
-				.first
-				.stages
-				.first()?
-				.cmd;
-			match &cmd.kind {
-				CommandKind::Simple(s) => s.words.first().cloned(),
-				_ => None,
+		fn lit_owned(&self, lo: u32, hi: u32, v: Vec<u8>) -> V {
+			self.lit_at(Some(Span::new(lo, hi)), v, true)
+		}
+
+		fn lit_optional(&self, span: Option<Span>, value: &[u8], typed: bool) -> V {
+			self.lit_at(span, value.to_vec(), typed)
+		}
+
+		fn lit_at(&self, span: Option<Span>, value: Vec<u8>, typed: bool) -> V {
+			let mut fields = Vec::new();
+			if typed {
+				fields.push(("Type", s(b"Lit")));
 			}
-		});
-		word.map_or_else(|| vec![WordPart::Lit(raw.to_vec())], |w| w.parts)
+			self.span_fields(&mut fields, span);
+			if let Some(span) = span {
+				fields.push(("ValuePos", self.m.pos(span.lo)));
+				fields.push(("ValueEnd", self.m.pos(span.hi)));
+			}
+			fields.push(("Value", V::Str(value)));
+			V::Obj(fields)
+		}
 	}
 
 	/// Join a leading anchor `Lit` with a following `Lit` (shfmt keeps
 	/// `#x` of `${a/#x/y}` as one literal).
-	fn merge_lit_vs(parts: Vec<V>, c: &Ctx<'_>) -> Vec<V> {
+	fn merge_lit_vs(parts: Vec<V>) -> Vec<V> {
 		let mut out: Vec<V> = Vec::new();
 		for v in parts {
-			if let (Some(prev), Some((lo2, hi2))) = (out.last(), lit_span(&v))
-				&& let Some((lo1, hi1)) = lit_span(prev)
-				&& hi1 == lo2
+			if let (Some(prev), Some((lo, _))) = (out.last_mut(), lit_span(&v))
+				&& let Some((_, end)) = lit_span(prev)
+				&& end == lo
 			{
-				let merged = c.lit(lo1, hi2, true);
-				out.pop();
-				out.push(merged);
+				let V::Obj(before) = prev else {
+					unreachable!("a literal is an object")
+				};
+				let V::Obj(after) = v else {
+					unreachable!("a literal is an object")
+				};
+				for (key, value) in after {
+					if let Some((_, old)) = before.iter_mut().find(|(name, _)| *name == key) {
+						match (key, old, value) {
+							("Value", V::Str(a), V::Str(mut b)) => a.append(&mut b),
+							("End" | "ValueEnd", old, value) => *old = value,
+							_ => {},
+						}
+					}
+				}
 				continue;
 			}
 			out.push(v);
@@ -2383,194 +2410,4 @@ mod shfmt {
 		matches!(&c.kind, CommandKind::Simple(s) if s.assigns.is_empty() && s.words.is_empty())
 			&& c.redirs.is_empty()
 	}
-}
-
-// ---- part spans
-// ---------------------------------------------------------------------
-/// Source spans of `parts`, which lie in `src[lo..hi]` (re-scanning the
-/// source; transformed text such as re-printed command substitutions is
-/// located by its delimiters).
-///
-/// A word the parser read from the text an alias expanded to occupies no
-/// source bytes: `lo == hi`, the one position just after the aliased word
-/// (`parser/cursor.rs` `off`). Every part of it was read from a buffer that
-/// is not the source, so none of them has a source span of its own, and
-/// scanning `src[lo..lo]` would answer with bytes of the aliased word or
-/// run backwards. Each part reports that one position instead.
-fn part_spans(src: &[u8], lo: u32, hi: u32, parts: &[WordPart]) -> Vec<(u32, u32)> {
-	if hi <= lo {
-		return vec![(lo, lo); parts.len()];
-	}
-	let mut sc = PartScan { src, i: lo as usize, hi: hi as usize };
-	let mut out = Vec::with_capacity(parts.len());
-	for p in parts {
-		let a = sc.i;
-		sc.part(p);
-		let b = sc.i.min(sc.hi.max(a));
-		out.push((a as u32, b as u32));
-	}
-	// A zsh word ends at the word's end whatever its stored text dropped
-	// (`\newline`).
-	if let (Some(WordPart::Zsh(_)), Some(last)) = (parts.last(), out.last_mut()) {
-		last.1 = last.1.max(hi);
-	}
-	out
-}
-
-struct PartScan<'a> {
-	src: &'a [u8],
-	i:   usize,
-	hi:  usize,
-}
-
-impl PartScan<'_> {
-	fn at(&self, i: usize) -> u8 {
-		self.src.get(i).copied().unwrap_or(0)
-	}
-
-	fn skip_cont(&mut self) {
-		while self.at(self.i) == b'\\' && self.at(self.i + 1) == b'\n' {
-			self.i += 2;
-		}
-	}
-
-	fn part(&mut self, p: &WordPart) {
-		self.skip_cont();
-		match p {
-			WordPart::Lit(s) => {
-				for &b in s {
-					self.skip_cont();
-					if self.at(self.i) == b {
-						self.i += 1;
-					} else {
-						break;
-					}
-				}
-			},
-			WordPart::Escaped(s) => self.i += 1 + s.len(),
-			WordPart::SQuote(s) => self.i += 2 + s.len(),
-			WordPart::AnsiC(s) => self.i += 3 + s.len(),
-			WordPart::DQuote(inner) | WordPart::Locale(inner) => {
-				self.i += if matches!(p, WordPart::Locale(_)) {
-					2
-				} else {
-					1
-				};
-				for q in inner {
-					self.part(q);
-				}
-				self.skip_cont();
-				self.i += 1;
-			},
-			WordPart::Param(pp) => {
-				if pp.braced {
-					let inner_end = param_inner_end(pp);
-					self.close_after(inner_end.map_or(self.i + 2, |e| e as usize), b'}');
-				} else {
-					self.i += 1;
-					match &pp.name {
-						ParamName::Var(v) => self.i += v.len(),
-						_ => self.i += 1,
-					}
-				}
-			},
-			WordPart::Comsub(c) => match c.kind {
-				ComsubKind::Backtick => {
-					self.i += 1;
-					while self.i < self.src.len() && self.at(self.i) != b'`' {
-						if self.at(self.i) == b'\\' {
-							self.i += 1;
-						}
-						self.i += 1;
-					}
-					self.i += 1;
-				},
-				ComsubKind::Dollar if c.body.items.is_empty() || self.at(self.i + 2) == b'(' => {
-					self.i += 2 + c.text.len() + 1;
-				},
-				ComsubKind::Dollar => self.after_list(&c.body, b')'),
-				ComsubKind::NoFork | ComsubKind::ValueSub => self.after_list(&c.body, b'}'),
-			},
-			WordPart::ProcSub(ps) => self.after_list(&ps.body, b')'),
-			WordPart::Arith(a) => {
-				let e = a.span.hi as usize;
-				self.i = if self.at(e) == b']' { e + 1 } else { e + 2 };
-			},
-			WordPart::Compound(elems) => {
-				let e = elems
-					.last()
-					.map_or(self.i + 1, |e| e.value.span.hi as usize);
-				self.close_after(e, b')');
-			},
-			WordPart::BadSubst(t) => self.i += t.len(),
-			WordPart::BadComsub(b) => self.i += b.text.len(),
-			WordPart::DroppedQuote => self.i += 1,
-			WordPart::Zsh(raw) => {
-				let mut text = Vec::new();
-				crate::bash::syntax::print::zsh_text(raw, &mut text);
-				for &b in &text {
-					self.skip_cont();
-					if self.at(self.i) == b {
-						self.i += 1;
-					} else {
-						break;
-					}
-				}
-			},
-		}
-	}
-
-	/// After a command list: skip separators and blanks to `close`.
-	fn after_list(&mut self, l: &List, close: u8) {
-		let start = l
-			.items
-			.last()
-			.map_or(self.i + 2, |it| it.and_or.span.hi as usize);
-		let mut j = start.max(self.i);
-		while j < self.src.len() {
-			match self.at(j) {
-				b' ' | b'\t' | b'\n' | b';' | b'&' => j += 1,
-				b'#' => {
-					while j < self.src.len() && self.at(j) != b'\n' {
-						j += 1;
-					}
-				},
-				c if c == close => {
-					j += 1;
-					break;
-				},
-				_ => j += 1,
-			}
-		}
-		self.i = j;
-	}
-
-	/// Move to just after the first `close` at or after `from`.
-	fn close_after(&mut self, from: usize, close: u8) {
-		let mut j = from.max(self.i);
-		while j < self.src.len() && self.at(j) != close {
-			j += 1;
-		}
-		self.i = (j + 1).min(self.src.len());
-	}
-}
-
-/// End of the last source-located piece inside a `${…}`.
-fn param_inner_end(p: &Param) -> Option<u32> {
-	let w = |w: &Word| Some(w.span.hi);
-	let from_op = match &p.op {
-		ParamOp::Default { word, .. } | ParamOp::Assign { word, .. } | ParamOp::Alt { word, .. } => {
-			w(word)
-		},
-		ParamOp::Error { word, .. } => word.as_ref().and_then(w),
-		ParamOp::Trim { pat, .. } => w(pat),
-		ParamOp::Replace { pat, rep, .. } => rep.as_ref().map_or(Some(pat.span.hi), w),
-		ParamOp::Case { pat, .. } => pat.as_ref().and_then(w),
-		ParamOp::Substr { offset, len } => Some(len.as_ref().map_or(offset.span.hi, |l| l.span.hi)),
-		_ => None,
-	};
-	from_op.or(match &p.index {
-		Some(Subscript::Expr(x)) => Some(x.span.hi),
-		_ => None,
-	})
 }

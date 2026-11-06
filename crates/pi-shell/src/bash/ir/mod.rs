@@ -107,8 +107,11 @@ use crate::bash::{
 /// the `)` that closes a `case` arm's patterns, and version 22 records
 /// zsh's `repeat` body keyword and the `}` and `always` of a `try`, and
 /// makes the arithmetic-`for` header and its `))` plain fields, since
-/// every parser reads them.
-pub const IR_VERSION: u32 = 23;
+/// every parser reads them. Version 23 records parameter transform and
+/// replacement-anchor offsets; version 25 records word-part boundaries,
+/// parameter and assignment prefixes, compound-array delimiters and element
+/// starts, trimmed arithmetic extents, and original here-document buffers.
+pub const IR_VERSION: u32 = 25;
 
 /// Opcodes.
 #[derive(

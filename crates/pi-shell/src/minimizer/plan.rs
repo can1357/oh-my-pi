@@ -198,7 +198,7 @@ fn parts_are_safe(parts: &[WordPart]) -> bool {
 		| WordPart::Escaped(_)
 		| WordPart::SQuote(_)
 		| WordPart::AnsiC(_)
-		| WordPart::DroppedQuote => true,
+		| WordPart::DroppedQuote(_) => true,
 		WordPart::DQuote(inner) | WordPart::Locale(inner) => parts_are_safe(inner),
 		WordPart::Param(param) => param_is_safe(param),
 		WordPart::Compound(elems) => elems.iter().all(array_elem_is_safe),
@@ -306,7 +306,7 @@ fn simple_segment(pipeline: &Pipeline, src: &str) -> Option<(String, String)> {
 	// are captured but never rewritten (runtime detects `CommandPlan::Piped`),
 	// keeping the chain decomposable when an inner stage pipes (e.g.
 	// `ls | head -10 && git status`).
-	let program = span_text(src, first.words.first()?.span)?;
+	let program = span_text(src, first.words.first()?.span.recorded()?)?;
 	if program.trim().is_empty() {
 		return None;
 	}
@@ -327,7 +327,7 @@ fn classify_pipeline(pipeline: &Pipeline, src: &str) -> Option<CommandPlan> {
 	}
 	match &pipeline.stages.first()?.cmd.kind {
 		CommandKind::Simple(simple) => {
-			let program = span_text(src, simple.words.first()?.span)?;
+			let program = span_text(src, simple.words.first()?.span.recorded()?)?;
 			if program.trim().is_empty() {
 				return None;
 			}

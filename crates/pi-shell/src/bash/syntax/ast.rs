@@ -388,6 +388,8 @@ pub enum CaseTerm {
 pub struct ArithText {
 	/// Span of the expression text.
 	pub span:    Span,
+	/// Nonblank token extent, as read; absent for empty or synthesized text.
+	pub trimmed: Option<Span>,
 	/// Expression bytes as written.
 	pub src:     Vec<u8>,
 	/// Written as bash's obsolete `$[…]` (printed back that way).
@@ -500,17 +502,19 @@ pub struct Coproc {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assign {
 	/// Preorder id.
-	pub id:     NodeId,
+	pub id:        NodeId,
 	/// Source span.
-	pub span:   Span,
+	pub span:      Span,
 	/// Variable name.
-	pub name:   Vec<u8>,
+	pub name:      Vec<u8>,
+	/// Name token's recorded span; absent in synthesized assignments.
+	pub name_span: Option<Span>,
 	/// Subscript of `NAME[i]=`.
-	pub index:  Option<Word>,
+	pub index:     Option<Word>,
 	/// `+=`.
-	pub append: bool,
+	pub append:    bool,
 	/// Assigned value.
-	pub value:  AssignValue,
+	pub value:     AssignValue,
 }
 
 /// Right-hand side of an assignment.
@@ -519,12 +523,40 @@ pub enum AssignValue {
 	/// `NAME=word`
 	Scalar(Word),
 	/// `NAME=(elem …)`
-	Array(Vec<ArrayElem>),
+	Array(CompoundArray),
+}
+
+/// A compound assignment's delimiters and elements, as the parser read them.
+/// Missing positions belong to synthesized trees and are not exported.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompoundArray {
+	/// Opening `(` offset.
+	pub lparen: Option<u32>,
+	/// Closing `)` token, including its cursor-recorded end.
+	pub rparen: Option<Span>,
+	/// Elements in source order.
+	pub elems:  Vec<ArrayElem>,
+}
+
+impl core::ops::Deref for CompoundArray {
+	type Target = [ArrayElem];
+
+	fn deref(&self) -> &[ArrayElem] {
+		&self.elems
+	}
+}
+
+impl core::ops::DerefMut for CompoundArray {
+	fn deref_mut(&mut self) -> &mut [ArrayElem] {
+		&mut self.elems
+	}
 }
 
 /// One element of a compound array assignment.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArrayElem {
+	/// First byte of the element, including `[` when it has a key.
+	pub lo:     Option<u32>,
 	/// `[key]=` prefix.
 	pub key:    Option<Word>,
 	/// `[key]+=value`: append to the element instead of replacing it.
@@ -617,59 +649,289 @@ pub struct HereDoc {
 	/// expanded (`parse_text(text, TextMode::HereDoc)`), as bash does, so a
 	/// malformed `$(` in a body is a run-time error, not a syntax error.
 	pub text:      Vec<u8>,
+	/// Opening delimiter word, with the bytes and positions the parser read.
+	pub delimiter: Option<Word>,
+	/// Body bytes and boundaries read by the lexer, before bash's processing.
+	pub source:    Option<HereDocSource>,
+}
+
+/// The input consumed for a here-document, independent of its stored text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HereDocSource {
+	/// Body range, including any tabs before the closing delimiter.
+	pub span:       Span,
+	/// Bytes actually read: no tab stripping, continuation removal, or virtual
+	/// newline.
+	pub raw:        Vec<u8>,
+	/// Closing delimiter range, excluding its newline; absent if it was not
+	/// read.
+	pub close:      Option<Span>,
+	/// Start of the closing delimiter's line, before any stripped tabs.
+	pub close_line: Option<u32>,
+	/// The body includes alias text or inherits a flat-position parser context.
+	pub flat:       bool,
+}
+
+/// A word's own recorded range, or only its enclosing source context when
+/// the word was synthesized from a token string. Context is never exported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WordSpan {
+	/// Both boundaries were read by the parser.
+	Recorded(Span),
+	/// Only the enclosing token's boundaries are known.
+	Context(Span),
+}
+
+impl WordSpan {
+	/// A source range the exporter may publish.
+	pub const fn recorded(self) -> Option<Span> {
+		match self {
+			Self::Recorded(span) => Some(span),
+			Self::Context(_) => None,
+		}
+	}
+}
+
+impl From<Span> for WordSpan {
+	fn from(span: Span) -> Self {
+		Self::Recorded(span)
+	}
+}
+
+impl From<WordSpan> for Option<Span> {
+	fn from(span: WordSpan) -> Self {
+		span.recorded()
+	}
+}
+
+impl core::ops::Deref for WordSpan {
+	type Target = Span;
+
+	fn deref(&self) -> &Span {
+		match self {
+			Self::Recorded(span) | Self::Context(span) => span,
+		}
+	}
 }
 
 /// A shell word: a sequence of literal, quoted and expansion parts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Word {
 	/// Preorder id.
-	pub id:    NodeId,
-	/// Source span.
-	pub span:  Span,
+	pub id:         NodeId,
+	/// Recorded range or enclosing source context.
+	pub span:       WordSpan,
 	/// Parts in order; empty for an empty word (`x=`).
-	pub parts: Vec<WordPart>,
+	pub parts:      Vec<WordPart>,
+	/// Assignment prefix read with this word, before declaration lowering.
+	pub assignment: Option<AssignPrefix>,
+}
+
+/// Recorded boundaries of an assignment word's prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssignPrefix {
+	/// Variable name, excluding any subscript or `+=`.
+	pub name:     Span,
+	/// Start of the value, after `=`.
+	pub value_lo: u32,
+}
+
+/// Parser-recorded boundaries of a word part. `close` includes the cursor's
+/// end, which equals its start in alias-expanded text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartSpan {
+	/// The whole part, including its opening and closing syntax.
+	pub span:    Span,
+	/// The bytes between its delimiters, or the literal itself.
+	pub content: Span,
+	/// Its closing delimiter, when one was read.
+	pub close:   Option<Span>,
+}
+
+/// Literal bytes plus the exact tokens that the shfmt view keeps separate.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Literal {
+	/// Bytes retained by the word parser.
+	pub bytes:   Vec<u8>,
+	/// Non-expanding `$` tokens: index in `bytes` and recorded source span.
+	pub dollars: Vec<(usize, Span)>,
+}
+
+impl Literal {
+	/// Remove an assignment prefix without losing the remaining token origins.
+	pub fn remove_prefix(&mut self, count: usize) {
+		self.bytes.drain(..count);
+		self.dollars.retain_mut(|(index, _)| {
+			if *index < count {
+				false
+			} else {
+				*index -= count;
+				true
+			}
+		});
+	}
+}
+
+impl From<Vec<u8>> for Literal {
+	fn from(bytes: Vec<u8>) -> Self {
+		Self { bytes, dollars: Vec::new() }
+	}
+}
+
+impl core::ops::Deref for Literal {
+	type Target = Vec<u8>;
+
+	fn deref(&self) -> &Vec<u8> {
+		&self.bytes
+	}
+}
+
+impl AsRef<[u8]> for Literal {
+	fn as_ref(&self) -> &[u8] {
+		&self.bytes
+	}
+}
+
+impl<const N: usize> PartialEq<[u8; N]> for Literal {
+	fn eq(&self, other: &[u8; N]) -> bool {
+		self.bytes.as_slice() == other.as_slice()
+	}
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for Literal {
+	fn eq(&self, other: &&[u8; N]) -> bool {
+		self.bytes.as_slice() == other.as_slice()
+	}
+}
+
+impl PartialEq<Vec<u8>> for Literal {
+	fn eq(&self, other: &Vec<u8>) -> bool {
+		self.bytes == *other
+	}
+}
+
+impl PartialEq<&[u8]> for Literal {
+	fn eq(&self, other: &&[u8]) -> bool {
+		self.bytes.as_slice() == *other
+	}
+}
+
+/// A parsed value and its optional source location. Synthesized values have
+/// no location; exporters must not reconstruct one from their contents.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Located<T> {
+	/// Parsed value, independent of its source range.
+	pub value: T,
+	/// Boundaries the parser actually read.
+	pub pos:   Option<PartSpan>,
+}
+
+impl<T> Located<T> {
+	/// A value read by the parser.
+	pub const fn new(value: T, span: Span, content: Span, close: Option<Span>) -> Self {
+		Self { value, pos: Some(PartSpan { span, content, close }) }
+	}
+}
+
+impl<T> From<T> for Located<T> {
+	fn from(value: T) -> Self {
+		Self { value, pos: None }
+	}
+}
+
+impl From<Vec<u8>> for Located<Literal> {
+	fn from(bytes: Vec<u8>) -> Self {
+		Self { value: bytes.into(), pos: None }
+	}
+}
+
+impl<T> core::ops::Deref for Located<T> {
+	type Target = T;
+
+	fn deref(&self) -> &T {
+		&self.value
+	}
+}
+
+impl<T> core::ops::DerefMut for Located<T> {
+	fn deref_mut(&mut self) -> &mut T {
+		&mut self.value
+	}
+}
+
+impl<T: IntoIterator> IntoIterator for Located<T> {
+	type IntoIter = T::IntoIter;
+	type Item = T::Item;
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.value.into_iter()
+	}
+}
+
+impl<'a, T> IntoIterator for &'a Located<T>
+where
+	&'a T: IntoIterator,
+{
+	type IntoIter = <&'a T as IntoIterator>::IntoIter;
+	type Item = <&'a T as IntoIterator>::Item;
+
+	fn into_iter(self) -> Self::IntoIter {
+		(&self.value).into_iter()
+	}
+}
+
+impl<T: AsRef<[u8]>, const N: usize> PartialEq<[u8; N]> for Located<T> {
+	fn eq(&self, other: &[u8; N]) -> bool {
+		self.value.as_ref() == other.as_slice()
+	}
+}
+
+impl<T: AsRef<[u8]>> PartialEq<[u8]> for Located<T> {
+	fn eq(&self, other: &[u8]) -> bool {
+		self.value.as_ref() == other
+	}
 }
 
 /// One piece of a word.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WordPart {
 	/// Unquoted bytes (glob characters, `~` and braces stay active).
-	Lit(Vec<u8>),
+	Lit(Located<Literal>),
 	/// `\c`: one backslash-quoted character (its bytes, without the backslash).
-	Escaped(Vec<u8>),
+	Escaped(Located<Vec<u8>>),
 	/// `'…'`
-	SQuote(Vec<u8>),
+	SQuote(Located<Vec<u8>>),
 	/// `"…"`
-	DQuote(Vec<Self>),
+	DQuote(Located<Vec<Self>>),
 	/// `$'…'`, raw bytes between the quotes (escapes decoded by the engine).
-	AnsiC(Vec<u8>),
+	AnsiC(Located<Vec<u8>>),
 	/// `$"…"`
-	Locale(Vec<Self>),
+	Locale(Located<Vec<Self>>),
 	/// `$x`, `${x…}`
-	Param(Box<Param>),
+	Param(Located<Box<Param>>),
 	/// `$(…)`, `` `…` ``, `${ …;}`, `${| …;}`
-	Comsub(Box<Comsub>),
+	Comsub(Located<Box<Comsub>>),
 	/// `$((…))`
-	Arith(ArithText),
+	Arith(Located<ArithText>),
 	/// `<(…)`, `>(…)`
-	ProcSub(Box<ProcSub>),
+	ProcSub(Located<Box<ProcSub>>),
 	/// `(elem …)` of a compound array assignment written as an argument of a
 	/// declaration builtin (`declare -a a=(1 2)`, `local x=(…)`): the word
 	/// is `[Lit("a="), Compound(…)]`.
-	Compound(Vec<ArrayElem>),
+	Compound(CompoundArray),
 	/// `${…}` that bash accepts at parse time but rejects when it is
 	/// expanded (`${a b}`, `${(f)x}`, `${x@}`): the whole `${…}` text as
 	/// bash stores it. Expanding it is the `bad substitution` error.
-	BadSubst(Vec<u8>),
+	BadSubst(Located<Vec<u8>>),
 	/// A `$(` between the literal single quotes of a `${…}` word inside
 	/// `"…"` (`"${a+'$('\'}"`) whose text up to the end of the word does
 	/// not parse. bash parses it only when it expands the word; expanding
 	/// it is the error.
-	BadComsub(Box<BadComsub>),
+	BadComsub(Located<Box<BadComsub>>),
 	/// A `"` between the literal single quotes of a `${…}` word inside
 	/// `"…"` (`"${x-'"'y}"`): bash removes it when it expands the word
 	/// (`''y`); it prints as written.
-	DroppedQuote,
+	DroppedQuote(Option<Span>),
 	/// zsh grammar: a whole word as zsh's lexer leaves it (`lex.c`
 	/// `gettokstr`): metafied, with zsh's token bytes
 	/// ([`crate::bash::syntax::zsh::tok`]) marking unquoted specials and quotes.
@@ -677,7 +939,31 @@ pub enum WordPart {
 	/// globs and quotes from it at run time, as zsh does. In zsh grammar
 	/// every word is `[Zsh(bytes)]`, or `[Zsh(b"name="), Compound(…)]` for an
 	/// array assignment argument of a `typeset`-family reserved word.
-	Zsh(Vec<u8>),
+	Zsh(Located<Vec<u8>>),
+}
+
+impl WordPart {
+	/// Recorded location, absent for synthesized syntax.
+	pub fn pos(&self) -> Option<PartSpan> {
+		match self {
+			Self::Lit(p) => p.pos,
+			Self::Escaped(p) | Self::SQuote(p) | Self::AnsiC(p) | Self::BadSubst(p) | Self::Zsh(p) => {
+				p.pos
+			},
+			Self::DQuote(p) | Self::Locale(p) => p.pos,
+			Self::Param(p) => p.pos,
+			Self::Comsub(p) => p.pos,
+			Self::Arith(p) => p.pos,
+			Self::ProcSub(p) => p.pos,
+			Self::BadComsub(p) => p.pos,
+			Self::DroppedQuote(span) => span.map(|span| PartSpan { span, content: span, close: None }),
+			Self::Compound(a) => a.lparen.zip(a.rparen).map(|(lo, close)| PartSpan {
+				span:    Span::new(lo, close.hi),
+				content: Span::new(lo, close.lo),
+				close:   Some(close),
+			}),
+		}
+	}
 }
 
 /// The deferred error of [`WordPart::BadComsub`].
@@ -697,17 +983,21 @@ pub struct BadComsub {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Param {
 	/// Which parameter.
-	pub name:     ParamName,
+	pub name:       ParamName,
+	/// Source span of the name, excluding `$`, braces and prefix operators.
+	pub name_span:  Option<Span>,
 	/// `[@]`, `[*]` or `[expr]`.
-	pub index:    Option<Subscript>,
+	pub index:      Option<Subscript>,
+	/// The `@` or `*` token of a special subscript.
+	pub index_span: Option<Span>,
 	/// Operator applied.
-	pub op:       ParamOp,
+	pub op:         ParamOp,
 	/// Written with braces.
-	pub braced:   bool,
+	pub braced:     bool,
 	/// `${!x<op>}`: the operator applies to the parameter named by the value
 	/// of `x` (`${!x:-d}`, `${!x#p}`). Plain `${!x}` is
 	/// [`ParamOp::Indirect`] with `indirect` false.
-	pub indirect: bool,
+	pub indirect:   bool,
 }
 
 /// The parameter being expanded.
@@ -813,9 +1103,8 @@ pub enum ParamOp {
 	Replace {
 		/// Which occurrences.
 		mode:   ReplaceMode,
-		/// Offset of the `#` or `%` anchor, as the parser read it; `None`
-		/// for the unanchored forms.
-		anchor: Option<u32>,
+		/// The `#` or `%` anchor token, as the parser read it.
+		anchor: Option<Span>,
 		/// Pattern.
 		pat:    Word,
 		/// Replacement (`None` deletes).
@@ -836,7 +1125,7 @@ pub enum ParamOp {
 		/// The operator letter.
 		op: u8,
 		/// Where it was read.
-		at: u32,
+		at: Span,
 	},
 }
 

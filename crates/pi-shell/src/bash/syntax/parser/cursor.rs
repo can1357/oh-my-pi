@@ -163,6 +163,11 @@ impl<'s> Parser<'s> {
 		}
 	}
 
+	/// This buffer has no source bytes, including inherited sub-parser state.
+	pub(super) const fn flat_positions(&self) -> bool {
+		self.flat || !self.in_source()
+	}
+
 	/// Whether the cursor is in the source (not in alias text).
 	pub(super) const fn in_source(&self) -> bool {
 		self.frames.is_empty()

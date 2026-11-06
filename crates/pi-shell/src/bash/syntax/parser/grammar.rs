@@ -80,7 +80,8 @@ fn word_text(w: &WordTok) -> Vec<u8> {
 fn delim_text(parts: &[WordPart], out: &mut Vec<u8>) {
 	for p in parts {
 		match p {
-			WordPart::Lit(s) | WordPart::Escaped(s) | WordPart::SQuote(s) => out.extend_from_slice(s),
+			WordPart::Lit(s) => out.extend_from_slice(s),
+			WordPart::Escaped(s) | WordPart::SQuote(s) => out.extend_from_slice(s),
 			WordPart::DQuote(inner) | WordPart::Locale(inner) => delim_text(inner, out),
 			WordPart::AnsiC(raw) => {
 				out.extend_from_slice(&crate::bash::syntax::util::ansi_decode(raw));
@@ -88,22 +89,6 @@ fn delim_text(parts: &[WordPart], out: &mut Vec<u8>) {
 			other => crate::bash::syntax::print::parts_text(core::slice::from_ref(other), out),
 		}
 	}
-}
-
-/// Split `for ((…))` text at its top-level `;`s (bash
-/// `make_arith_for_command`): each piece starts after leading blanks.
-fn split_arith_for(text: &[u8], semis: &[usize]) -> Vec<(usize, usize)> {
-	let mut pieces = Vec::with_capacity(semis.len() + 1);
-	let mut start = 0;
-	for &end in semis.iter().chain(core::iter::once(&text.len())) {
-		let mut s = start;
-		while s < end && matches!(text[s], b' ' | b'\t') {
-			s += 1;
-		}
-		pieces.push((s, end));
-		start = end + 1;
-	}
-	pieces
 }
 
 /// A `test_unop` operator.
@@ -426,6 +411,7 @@ impl Parser<'_> {
 				let t = self.take()?.arith.expect("arithmetic token");
 				CommandKind::Arith(ArithText {
 					span:    Span::new(t.lo, t.hi),
+					trimmed: t.trimmed,
 					src:     t.text,
 					bracket: false,
 				})
@@ -548,7 +534,12 @@ impl Parser<'_> {
 		}
 		let mut text = Vec::new();
 		push_u32(&mut text, t.num);
-		Word { id: NodeId(0), span: t.span(), parts: vec![WordPart::Lit(text)] }
+		Word {
+			id:         NodeId(0),
+			span:       t.span().into(),
+			parts:      vec![WordPart::Lit(Located::new(text.into(), t.span(), t.span(), None))],
+			assignment: None,
+		}
 	}
 
 	fn for_cmd(&mut self) -> PResult<CommandKind> {
@@ -605,7 +596,7 @@ impl Parser<'_> {
 		}
 		let (body, do_pos, braces) = self.do_body()?;
 		let arith = t.arith.as_ref().expect("arithmetic token");
-		let pieces = split_arith_for(&arith.text, &arith.semis);
+		let pieces = &arith.pieces;
 		if pieces.len() != 3 {
 			let detail: &[u8] = if pieces.len() < 3 {
 				b"syntax error: arithmetic expression required"
@@ -622,12 +613,8 @@ impl Parser<'_> {
 			);
 		}
 		let at = |i: usize| {
-			let (s, e) = pieces[i];
-			ArithText {
-				span:    Span::new(arith.lo + s as u32, (arith.lo + e as u32).min(arith.hi)),
-				src:     arith.text[s..e].to_vec(),
-				bracket: false,
-			}
+			let (s, e, span, trimmed) = pieces[i];
+			ArithText { span, trimmed, src: arith.text[s..e].to_vec(), bracket: false }
 		};
 		Ok(CommandKind::ArithFor(ArithFor {
 			init: at(0),
@@ -901,15 +888,22 @@ impl Parser<'_> {
 				let mut text = Vec::new();
 				push_u32(&mut text, w.num);
 				RedirTarget::Word(Word {
-					id:    NodeId(0),
-					span:  w.span(),
-					parts: vec![WordPart::Lit(text)],
+					id:         NodeId(0),
+					span:       w.span().into(),
+					parts:      vec![WordPart::Lit(Located::new(text.into(), w.span(), w.span(), None))],
+					assignment: None,
 				})
 			},
 			(RedirOp::DupIn | RedirOp::DupOut, T::Dash) => RedirTarget::Word(Word {
-				id:    NodeId(0),
-				span:  w.span(),
-				parts: vec![WordPart::Lit(b"-".to_vec())],
+				id:         NodeId(0),
+				span:       w.span().into(),
+				parts:      vec![WordPart::Lit(Located::new(
+					b"-".to_vec().into(),
+					w.span(),
+					w.span(),
+					None,
+				))],
+				assignment: None,
 			}),
 			(RedirOp::HereDoc { strip_tabs }, T::Word | T::Assign) => {
 				// bash `push_heredoc`: at most 16 documents wait for their
@@ -927,7 +921,14 @@ impl Parser<'_> {
 				let word = wt.into_word();
 				delim_text(&word.parts, &mut delim);
 				let seq = self.push_doc(delim.clone(), strip_tabs, quoted);
-				RedirTarget::HereDoc(HereDoc { delim, delim_raw, quoted, text: doc_placeholder(seq) })
+				RedirTarget::HereDoc(HereDoc {
+					delim,
+					delim_raw,
+					quoted,
+					text: doc_placeholder(seq),
+					delimiter: Some(word),
+					source: None,
+				})
 			},
 			(_, T::Word | T::Assign) => RedirTarget::Word(Self::tok_word(w)),
 			_ => return Err(self.token_error(&w)),

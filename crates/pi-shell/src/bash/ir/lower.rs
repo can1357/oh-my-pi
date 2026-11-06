@@ -1211,7 +1211,7 @@ impl Lower {
 		{
 			let mut indices = Vec::with_capacity(alts.len());
 			for parts in alts {
-				let alt = syn::Word { id: w.id, span: w.span, parts };
+				let alt = syn::Word { id: w.id, span: w.span, parts, assignment: w.assignment };
 				indices.push(self.plain_word(&alt, kind)?);
 			}
 			let parks = indices.iter().any(|&i| self.unit.words[i as usize].parks);
@@ -1225,7 +1225,7 @@ impl Lower {
 	/// Lower a word without brace expansion.
 	fn plain_word(&mut self, w: &syn::Word, kind: WordKind) -> Idx {
 		let kind = if self.text { WordKind::Text } else { kind };
-		self.node(w.id, NodeKind::Word, w.span);
+		self.node(w.id, NodeKind::Word, *w.span);
 		let mut parts = Vec::with_capacity(w.parts.len());
 		for part in &w.parts {
 			self.part(part, false, &mut parts)?;
@@ -1384,7 +1384,7 @@ impl Lower {
 			},
 			syn::WordPart::Compound(elems) => out.push(Part::Compound(self.elems(elems)?)),
 			syn::WordPart::BadSubst(text) => out.push(Part::BadSubst(text.as_slice().into())),
-			syn::WordPart::DroppedQuote => {},
+			syn::WordPart::DroppedQuote(_) => {},
 			syn::WordPart::BadComsub(b) => {
 				out.push(Part::ComsubSyntax { line: b.line, msg: b.msg.as_slice().into() });
 			},
@@ -1564,9 +1564,10 @@ fn zsh_funcdef_words(cmd: &syn::Command, f: &syn::FuncDef, mode: ModeId) -> Opti
 		toks
 			.into_iter()
 			.map(|t| syn::Word {
-				id:    syn::NodeId(0),
-				span:  cmd.span,
-				parts: vec![syn::WordPart::Zsh(t)],
+				id:         syn::NodeId(0),
+				span:       syn::WordSpan::Context(cmd.span),
+				parts:      vec![syn::WordPart::Zsh(t.into())],
+				assignment: None,
 			})
 			.collect(),
 	)
@@ -1843,6 +1844,7 @@ mod tests {
 			b"f() { emit \"${1:-default}\"; }\n".as_slice(),
 			b"f() { echo \"${x+'$(echo x'}\"; }\n".as_slice(),
 			b"f() { emit; [[ a && b && c || '' || d ]]; }\n".as_slice(),
+			b"f() { emit; local -a a=( [1]=x y ); a=( [2]+=z ); }\n".as_slice(),
 		] {
 			let mut parser = syn::Parser::new(src, syn::Features::NONE, &Aliases)
 				.with_pos(syn::Pos { offset: 0, line: 17 });
@@ -1884,16 +1886,19 @@ mod tests {
 		let lazy = lower_deferred(&cc, src, ModeId::Bash, syn::Features::NONE).unwrap();
 		let deferred = lazy.funcs[0].body.deferred.as_ref().unwrap();
 		#[rustfmt::skip]
-		const WIRE: [u8; 126] = [
-			0, 3, 4, 48, 1, 47, 1, 2, 4, 10, 10, 5, 10, 10, 0, 0, 1, 6, 10, 10, 0, 0,
-			0, 2, 7, 10, 10, 1, 0, 4, 101, 99, 104, 111, 8, 10, 10, 1, 0, 6, 102, 114, 111, 122,
-			101, 110, 0, 0, 0, 0, 0, 9, 12, 45, 10, 12, 45, 0, 0, 1, 11, 12, 45, 1, 43,
-			10, 5, 2, 4, 2, 3, 15, 1, 17, 2, 12, 19, 20, 1, 0, 1, 97, 0, 2, 45, 110, 24,
-			13, 27, 28, 1, 0, 1, 98, 1, 21, 6, 32, 41, 42, 1, 2, 61, 61, 36, 14, 34, 35,
-			1, 0, 1, 99, 15, 39, 40, 1, 0, 1, 100, 1, 29, 0, 0, 0, 0, 0,
+		const WIRE: [u8; 180] = [
+			0, 3, 4, 48, 1, 47, 1, 2, 4, 10, 10, 5, 10, 10, 0, 0, 1, 6, 10, 10,
+			0, 0, 0, 2, 7, 0, 10, 10, 1, 0, 4, 101, 99, 104, 111, 0, 1, 10, 10, 10,
+			10, 0, 0, 8, 0, 10, 10, 1, 0, 6, 102, 114, 111, 122, 101, 110, 0, 1, 10, 10,
+			10, 10, 0, 0, 0, 0, 0, 0, 0, 9, 12, 45, 10, 12, 45, 0, 0, 1, 11, 12,
+			45, 1, 43, 10, 5, 2, 4, 2, 3, 15, 1, 17, 2, 12, 0, 19, 20, 1, 0, 1,
+			97, 0, 1, 19, 20, 19, 20, 0, 0, 0, 2, 45, 110, 24, 13, 0, 27, 28, 1, 0,
+			1, 98, 0, 1, 27, 28, 27, 28, 0, 0, 1, 21, 6, 32, 41, 42, 1, 2, 61, 61,
+			36, 14, 0, 34, 35, 1, 0, 1, 99, 0, 1, 34, 35, 34, 35, 0, 0, 15, 0, 39,
+			40, 1, 0, 1, 100, 0, 1, 39, 40, 39, 40, 0, 0, 1, 29, 0, 0, 0, 0, 0,
 		];
 
-		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (23, WIRE.as_slice()));
+		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (25, WIRE.as_slice()));
 	}
 
 	#[test]
@@ -1959,7 +1964,7 @@ mod tests {
 	}
 
 	fn lit(s: &str) -> syn::WordPart {
-		syn::WordPart::Lit(s.as_bytes().to_vec())
+		syn::WordPart::Lit(s.as_bytes().to_vec().into())
 	}
 
 	// bash `assignment()`: what `echo NAME=~` tilde-expands outside posix
@@ -1969,11 +1974,15 @@ mod tests {
 		assert!(assignment_like(&[lit("a=~")]));
 		assert!(assignment_like(&[lit("a+=x")]));
 		assert!(assignment_like(&[lit("a[1]=~")]));
-		assert!(assignment_like(&[lit("a["), syn::WordPart::SQuote(b"k".to_vec()), lit("]=v")]));
+		assert!(assignment_like(&[
+			lit("a["),
+			syn::WordPart::SQuote(b"k".to_vec().into()),
+			lit("]=v")
+		]));
 		assert!(!assignment_like(&[lit("./x=~")]));
 		assert!(!assignment_like(&[lit("=~")]));
 		assert!(!assignment_like(&[lit("1a=b")]));
-		assert!(!assignment_like(&[syn::WordPart::SQuote(b"a".to_vec()), lit("=b")]));
+		assert!(!assignment_like(&[syn::WordPart::SQuote(b"a".to_vec().into()), lit("=b")]));
 		assert!(!assignment_like(&[lit("a[1]")]));
 	}
 }

@@ -211,72 +211,75 @@ pub fn doc_placeholder(seq: u32) -> Vec<u8> {
 /// alias substitutions, so re-parsing reproduces it.
 pub struct Parser<'s> {
 	/// The whole source.
-	src:            &'s [u8],
+	src:               &'s [u8],
 	/// Offset added to every span (sub-parsers of backquoted text).
-	base:           u32,
+	base:              u32,
 	/// This parser's buffer is not in the source: every offset is `base`.
-	flat:           bool,
-	feat:           Features,
-	aliases:        &'s dyn AliasLookup,
+	flat:              bool,
+	feat:              Features,
+	aliases:           &'s dyn AliasLookup,
 	/// Current input buffer: `src` or an alias value.
-	buf:            &'s [u8],
+	buf:               &'s [u8],
 	/// Cursor in `buf`.
-	pos:            usize,
+	pos:               usize,
 	/// 1 + newlines consumed from `src` (the line of the next byte).
-	line:           u32,
+	line:              u32,
 	/// Saved outer buffers while alias expansions are being read.
-	frames:         Vec<Frame<'s>>,
+	frames:            Vec<Frame<'s>>,
 	/// Byte bash appends to a final line without a newline (`\n`, or `\`
 	/// after an odd trailing backslash); 0 when the source ends in `\n`.
-	virt:           u8,
-	virt_done:      bool,
+	virt:              u8,
+	virt_done:         bool,
 	/// Here-document bodies read ahead of the current line.
-	skip:           Option<Skip>,
-	lx:             LexState,
+	skip:              Option<Skip>,
+	lx:                LexState,
 	/// One-token lookahead.
-	la:             Option<Tok>,
+	la:                Option<Tok>,
 	/// End offset of the last token taken.
-	last_hi:        u32,
+	last_hi:           u32,
 	/// Start offset of the last token taken. A compound command's closing
 	/// token is the last one its grammar rule takes, and the text an alias
 	/// expands to has no bytes in the source, so the position cannot be
 	/// derived from `last_hi`.
-	last_lo:        u32,
+	last_lo:           u32,
 	/// Offset of the closing byte the last `raw_matched` scan consumed.
-	raw_close:      u32,
-	/// Gathered here-document texts, by sequence number.
-	docs:           Vec<Vec<u8>>,
+	raw_close:         u32,
+	/// Nonblank extents recorded by the last raw arithmetic scan.
+	raw_trimmed:       Option<Span>,
+	raw_inner_trimmed: Option<Span>,
+	/// Gathered here-document text and recorded input, by sequence number.
+	docs:              Vec<finish::GatheredDoc>,
 	/// Here-documents waiting for the next newline.
-	pending:        Vec<PendingDoc>,
+	pending:           Vec<PendingDoc>,
 	/// Open compound commands and their lines (bash `compoundcmd_lineno`).
-	compound:       Vec<(lex::T, u32)>,
-	warnings:       Vec<ParseWarning>,
-	alias_uses:     Vec<AliasUse>,
-	expand_aliases: bool,
-	failed:         bool,
+	compound:          Vec<(lex::T, u32)>,
+	warnings:          Vec<ParseWarning>,
+	alias_uses:        Vec<AliasUse>,
+	expand_aliases:    bool,
+	failed:            bool,
 	/// Text of the last token read inside `[[ … ]]`, for messages.
-	last_cond_text: Option<Vec<u8>>,
+	last_cond_text:    Option<Vec<u8>>,
 	/// Nesting of the raw scanner (`parse_matched_pair`).
-	raw_depth:      u32,
-	/// Top-level `;` offsets collected while scanning `for ((…))`.
-	arith_semis:    Option<Vec<usize>>,
+	raw_depth:         u32,
+	/// Text ranges and cursor-recorded spans of `for ((…))` operands.
+	arith_pieces:      Option<Vec<(usize, usize, Span, Option<Span>)>>,
 	/// Line of the `[[` being parsed (bash's `lineno` in its messages).
-	cond_line:      u32,
+	cond_line:         u32,
 	/// Whether the last `[[ … ]]` token read was the end of input.
-	cond_eof:       bool,
+	cond_eof:          bool,
 	/// Offset of the last token read inside `[[ … ]]`: the position the
 	/// caller's `tok` kind was read at.
-	cond_tok_lo:    u32,
+	cond_tok_lo:       u32,
 	/// Offset after that token, as the cursor reported it.
-	cond_tok_hi:    u32,
+	cond_tok_hi:       u32,
 	/// The zsh grammar under [`Features::ZSH`]: every call goes to it
 	/// (boxed: a bash parser stays as small as it was).
-	zsh:            Option<Box<crate::bash::syntax::zsh::ZshParser<'s>>>,
+	zsh:               Option<Box<crate::bash::syntax::zsh::ZshParser<'s>>>,
 	/// Whether a comment consumed the virtual trailing backslash.
-	virt_comment:   bool,
+	virt_comment:      bool,
 	/// The error being raised is one bash recovers from by dropping the
 	/// rest of the input line.
-	discard_line:   bool,
+	discard_line:      bool,
 }
 
 /// Where the next top-level command starts, alias text included.
@@ -347,6 +350,17 @@ pub fn parse_text_at(
 	Ok(word)
 }
 
+/// Parse the raw input the lexer recorded for an unquoted here-document.
+pub(crate) fn parse_doc_text(source: &HereDocSource, feat: Features) -> Result<Word, ParseError> {
+	let mut p = Parser::new(&source.raw, feat, NO_ALIASES);
+	p.virt = 0;
+	p.base = source.span.lo;
+	p.flat = source.flat;
+	let mut word = p.text_word(TextMode::HereDoc)?;
+	finish::finish_word(&mut word, &p.docs);
+	Ok(word)
+}
+
 impl<'s> Parser<'s> {
 	/// Parser at the start of `src`.
 	///
@@ -379,6 +393,8 @@ impl<'s> Parser<'s> {
 			last_hi: 0,
 			last_lo: 0,
 			raw_close: 0,
+			raw_trimmed: None,
+			raw_inner_trimmed: None,
 			docs: Vec::new(),
 			pending: Vec::new(),
 			compound: Vec::new(),
@@ -388,7 +404,7 @@ impl<'s> Parser<'s> {
 			failed: false,
 			last_cond_text: None,
 			raw_depth: 0,
-			arith_semis: None,
+			arith_pieces: None,
 			cond_line: 0,
 			cond_eof: false,
 			cond_tok_lo: 0,
@@ -545,7 +561,7 @@ impl Parser<'_> {
 		self.pos = at;
 		self.skip = None;
 		self.raw_depth = 0;
-		self.arith_semis = None;
+		self.arith_pieces = None;
 		self.expand_aliases = true;
 		while let Some(c) = self.peek() {
 			self.bump();
@@ -558,7 +574,12 @@ impl Parser<'_> {
 
 /// A word with no parts yet, at `lo..hi`.
 const fn empty_word(lo: u32, hi: u32) -> Word {
-	Word { id: NodeId(0), span: Span::new(lo, hi), parts: Vec::new() }
+	Word {
+		id:         NodeId(0),
+		span:       WordSpan::Recorded(Span::new(lo, hi)),
+		parts:      Vec::new(),
+		assignment: None,
+	}
 }
 
 /// Parse `code` (text bash re-parses at run time: a backquoted command, a

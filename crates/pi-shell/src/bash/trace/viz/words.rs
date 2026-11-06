@@ -47,7 +47,8 @@ impl WordPrinter<'_> {
 
 	fn part(&self, p: &WordPart) -> String {
 		match p {
-			WordPart::Lit(v) | WordPart::Escaped(v) | WordPart::SQuote(v) => quote(&text(v)),
+			WordPart::Lit(v) => quote(&text(v)),
+			WordPart::Escaped(v) | WordPart::SQuote(v) => quote(&text(v)),
 			WordPart::AnsiC(v) => quote(&text(&crate::bash::syntax::ansi_decode_all(v))),
 			WordPart::DQuote(v) | WordPart::Locale(v) => self.interpolation(v),
 			WordPart::Param(p) => self.parameter(p),
@@ -78,7 +79,7 @@ impl WordPrinter<'_> {
 			WordPart::Compound(e) => self.elements(e),
 			WordPart::BadSubst(v) | WordPart::Zsh(v) => text(v),
 			WordPart::BadComsub(c) => text(&c.text),
-			WordPart::DroppedQuote => "\"".into(),
+			WordPart::DroppedQuote(_) => "\"".into(),
 		}
 	}
 
@@ -90,15 +91,16 @@ impl WordPrinter<'_> {
 					| WordPart::Escaped(_)
 					| WordPart::SQuote(_)
 					| WordPart::AnsiC(_)
-					| WordPart::DroppedQuote
+					| WordPart::DroppedQuote(_)
 			)
 		});
 		let mut content = String::new();
 		for part in parts {
 			let literal = match part {
-				WordPart::Lit(v) | WordPart::Escaped(v) | WordPart::SQuote(v) => Some(text(v)),
+				WordPart::Lit(v) => Some(text(v)),
+				WordPart::Escaped(v) | WordPart::SQuote(v) => Some(text(v)),
 				WordPart::AnsiC(v) => Some(text(&crate::bash::syntax::ansi_decode_all(v))),
-				WordPart::DroppedQuote => Some("\"".into()),
+				WordPart::DroppedQuote(_) => Some("\"".into()),
 				_ => None,
 			};
 			if let Some(literal) = literal {

@@ -461,7 +461,7 @@ impl Context<'_> {
 		NodeKey::nested(self.unit, self.source, id)
 	}
 
-	fn text(&self, span: Span) -> String {
+	fn text(&self, span: impl Into<Option<Span>>) -> String {
 		String::from_utf8_lossy(self.map.raw(self.bytes, span)).into_owned()
 	}
 }
@@ -727,7 +727,7 @@ impl<S: VizSource> Printer<'_, S> {
 		&self,
 		c: &Context<'_>,
 		id: NodeId,
-		span: Span,
+		span: impl Into<Option<Span>>,
 		text: impl Into<String>,
 		style: &str,
 		leaf: bool,
@@ -2220,8 +2220,9 @@ impl<S: VizSource> Printer<'_, S> {
 			let parsed = (|| {
 				let body = literal(w)?;
 				let origin = if let Some(parent) = &c.origin {
-					let [start, _] = c.map.bytes(w.span)?;
-					let origins = source::literal_map(c.map.raw(c.bytes, w.span), body.as_bytes())?;
+					let span = w.span.recorded()?;
+					let [start, _] = c.map.bytes(span)?;
+					let origins = source::literal_map(c.map.raw(c.bytes, span), body.as_bytes())?;
 					let mapped = origins
 						.into_iter()
 						.map(|at| parent.at((start as u32).checked_add(at)?))
@@ -2283,7 +2284,7 @@ impl<S: VizSource> Printer<'_, S> {
 					language,
 					c,
 					w.id,
-					Some(w.span),
+					w.span.recorded(),
 					depth + 1,
 					Some("inline argument"),
 				);
@@ -2295,7 +2296,7 @@ impl<S: VizSource> Printer<'_, S> {
 				cache
 					.docs
 					.entry(c.key(cmd.id))
-					.or_insert_with(|| Arc::new(source::heredoc_spans(&c.map, c.bytes, &cmd.redirs))),
+					.or_insert_with(|| Arc::new(source::heredoc_spans(&c.map, &cmd.redirs))),
 			)
 		};
 		for (index, redir) in cmd.redirs.iter().enumerate() {

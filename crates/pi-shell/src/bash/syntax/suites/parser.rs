@@ -169,8 +169,13 @@ fn collect_cmd(cmd: &Command, out: &mut Vec<u32>) {
 		},
 	}
 	for r in &cmd.redirs {
-		if let RedirTarget::Word(w) = &r.target {
-			collect_word(w, out);
+		match &r.target {
+			RedirTarget::Word(w) => collect_word(w, out),
+			RedirTarget::HereDoc(d) => {
+				if let Some(w) = &d.delimiter {
+					collect_word(w, out);
+				}
+			},
 		}
 	}
 }
@@ -592,8 +597,8 @@ fn extglob_groups_are_one_word_only_with_extglob() {
 fn bad_substitutions_parse_and_keep_their_text() {
 	let s = first_cmd(b"echo ${a b} ${x@}");
 	let s = simple(&s);
-	assert_eq!(s.words[1].parts, vec![WordPart::BadSubst(b"${a b}".to_vec())]);
-	assert_eq!(s.words[2].parts, vec![WordPart::BadSubst(b"${x@}".to_vec())]);
+	assert!(matches!(&s.words[1].parts[..], [WordPart::BadSubst(s)] if s.value == b"${a b}"));
+	assert!(matches!(&s.words[2].parts[..], [WordPart::BadSubst(s)] if s.value == b"${x@}"));
 }
 
 #[test]
@@ -601,7 +606,7 @@ fn indirect_expansion_with_an_operator() {
 	let s = first_cmd(b"echo ${!x:-d} ${!x} ${!a[@]} ${!p*}");
 	let s = simple(&s);
 	let p = |i: usize| match &s.words[i].parts[0] {
-		WordPart::Param(p) => p.clone(),
+		WordPart::Param(p) => p.value.as_ref().clone(),
 		other => panic!("{other:?}"),
 	};
 	assert!(p(1).indirect && matches!(p(1).op, ParamOp::Default { colon: true, .. }));
@@ -650,7 +655,11 @@ fn parse_text_reads_expansions_in_each_mode() {
 	assert_eq!(w.id, NodeId(0));
 	assert!(w.parts.iter().any(|p| matches!(p, WordPart::Param(_))));
 	assert!(w.parts.iter().any(|p| matches!(p, WordPart::Arith(_))));
-	assert!(w.parts.contains(&WordPart::Escaped(b"$".to_vec())));
+	assert!(
+		w.parts
+			.iter()
+			.any(|p| matches!(p, WordPart::Escaped(s) if s.value == b"$"))
+	);
 	let h = parse_text(b"x \\\" $(y)\n", Features::NONE, TextMode::HereDoc).unwrap();
 	assert!(!h.parts.iter().any(|p| matches!(p, WordPart::Escaped(_))), "`\\\"` stays literal");
 	let a = parse_text(b"\"1\" + $x", Features::NONE, TextMode::Arith).unwrap();
@@ -762,7 +771,7 @@ fn first_param(w: &Word) -> Param {
 	inner
 		.iter()
 		.find_map(|p| match p {
-			WordPart::Param(p) => Some((**p).clone()),
+			WordPart::Param(p) => Some(p.value.as_ref().clone()),
 			_ => None,
 		})
 		.expect("a parameter")
@@ -776,33 +785,36 @@ fn single_quotes_in_double_quoted_non_pattern_operators_are_literal() {
 		panic!()
 	};
 	assert_eq!(word.parts.len(), 3, "{:?}", word.parts);
-	assert_eq!(word.parts[0], WordPart::Lit(b"'".to_vec()));
+	assert!(matches!(&word.parts[0], WordPart::Lit(s) if s.value == b"'"));
 	assert!(matches!(word.parts[1], WordPart::Param(_)));
 	// Outside posix mode the quotes still pair: `}` inside them is literal.
 	let w = param_word(b"echo \"${x-'}'}\"\n", Features::NONE);
 	let ParamOp::Default { word, .. } = first_param(&w).op else {
 		panic!()
 	};
-	assert_eq!(word.parts, vec![WordPart::Lit(b"'}'".to_vec())]);
+	assert!(matches!(&word.parts[..], [WordPart::Lit(s)] if s.value == b"'}'"));
 	assert!(parse_all(b"echo \"foo ${IFS+'bar} baz\"\n", Features::NONE).is_err());
 	// In posix mode a lone `'` needs no partner.
 	let w = param_word(b"echo \"foo ${IFS+'bar} baz\"\n", Features::POSIX);
 	let ParamOp::Alt { word, .. } = first_param(&w).op else {
 		panic!()
 	};
-	assert_eq!(word.parts, vec![WordPart::Lit(b"'bar".to_vec())]);
+	assert!(matches!(&word.parts[..], [WordPart::Lit(s)] if s.value == b"'bar"));
 	// Pattern operators keep `'` as a quote.
 	let w = param_word(b"echo \"${x#'a'}\"\n", Features::NONE);
 	let ParamOp::Trim { pat, .. } = first_param(&w).op else {
 		panic!()
 	};
-	assert_eq!(pat.parts, vec![WordPart::SQuote(b"a".to_vec())]);
+	assert!(matches!(&pat.parts[..], [WordPart::SQuote(s)] if s.value == b"a"));
 	// braces.tests: a backslash before `'` in a double-quoted pattern.
 	let w = param_word(b"echo \"${a#'$('\\'}\"\n", Features::NONE);
 	let ParamOp::Trim { pat, .. } = first_param(&w).op else {
 		panic!()
 	};
-	assert_eq!(pat.parts, vec![WordPart::SQuote(b"$(".to_vec()), WordPart::Escaped(b"'".to_vec())]);
+	assert!(matches!(
+		&pat.parts[..],
+		[WordPart::SQuote(s), WordPart::Escaped(e)] if s.value == b"$(" && e.value == b"'"
+	));
 }
 
 #[test]
@@ -834,7 +846,7 @@ fn dollar_bang_and_dollar_hash_with_operators() {
 		let mut src = b"echo ".to_vec();
 		src.extend_from_slice(bad);
 		let w = param_word(&src, Features::NONE);
-		assert_eq!(w.parts, vec![WordPart::BadSubst(bad.to_vec())]);
+		assert!(matches!(&w.parts[..], [WordPart::BadSubst(s)] if s.value == bad));
 	}
 	// Still valid: lengths of special parameters and `$#` with a word.
 	let w = param_word(b"echo ${##}\n", Features::NONE);
@@ -900,8 +912,11 @@ fn here_document_parameter_words_quote_like_bash() {
 			_ => None,
 		})
 		.collect();
-	assert_eq!(pats[0].parts, vec![WordPart::AnsiC(b"no\\t".to_vec())]);
-	assert_eq!(pats[1].parts, vec![WordPart::Lit(b"n".to_vec()), WordPart::AnsiC(b"o\\t".to_vec())]);
+	assert!(matches!(&pats[0].parts[..], [WordPart::AnsiC(s)] if s.value == b"no\\t"));
+	assert!(matches!(
+		&pats[1].parts[..],
+		[WordPart::Lit(s), WordPart::AnsiC(a)] if s.value == b"n" && a.value == b"o\\t"
+	));
 	// … but literal text in a non-pattern word (`"${u:-$'a'}"` outside a
 	// document is ANSI-C quoting).
 	let w = parse_text(b"${u:-$'a\\tb'}\n", Features::NONE, TextMode::HereDoc).unwrap();
@@ -911,12 +926,12 @@ fn here_document_parameter_words_quote_like_bash() {
 	let ParamOp::Default { word, .. } = &p.op else {
 		panic!()
 	};
-	assert_eq!(word.parts, vec![WordPart::Lit(b"$'a\\tb'".to_vec())]);
+	assert!(matches!(&word.parts[..], [WordPart::Lit(s)] if s.value == b"$'a\\tb'"));
 	let w = param_word(b"echo \"${u:-$'a'}\"\n", Features::NONE);
 	let ParamOp::Default { word, .. } = first_param(&w).op else {
 		panic!()
 	};
-	assert_eq!(word.parts, vec![WordPart::AnsiC(b"a".to_vec())]);
+	assert!(matches!(&word.parts[..], [WordPart::AnsiC(s)] if s.value == b"a"));
 }
 
 #[test]
@@ -926,10 +941,11 @@ fn double_quotes_in_double_quoted_parameter_words_escape_everything() {
 	let ParamOp::Alt { word, .. } = first_param(&w).op else {
 		panic!()
 	};
-	assert_eq!(word.parts, vec![
-		WordPart::Lit(b"x=".to_vec()),
-		WordPart::DQuote(vec![WordPart::Escaped(b"p".to_vec())]),
-	]);
+	assert!(matches!(
+		&word.parts[..],
+		[WordPart::Lit(s), WordPart::DQuote(inner)] if s.value == b"x="
+			&& matches!(&inner.value[..], [WordPart::Escaped(e)] if e.value == b"p")
+	));
 	let w = param_word(b"echo \"${v:+x=\"\\'$v\\'\"}\"\n", Features::NONE);
 	let ParamOp::Alt { word, .. } = first_param(&w).op else {
 		panic!()
@@ -937,14 +953,14 @@ fn double_quotes_in_double_quoted_parameter_words_escape_everything() {
 	let WordPart::DQuote(inner) = &word.parts[1] else {
 		panic!("{word:?}")
 	};
-	assert_eq!(inner[0], WordPart::Escaped(b"'".to_vec()));
-	assert_eq!(inner[2], WordPart::Escaped(b"'".to_vec()));
+	assert!(matches!(&inner[0], WordPart::Escaped(s) if s.value == b"'"));
+	assert!(matches!(&inner[2], WordPart::Escaped(s) if s.value == b"'"));
 	// Without the inner quotes the backslash stays.
 	let w = param_word(b"echo \"${v:+x=\\'$v\\'}\"\n", Features::NONE);
 	let ParamOp::Alt { word, .. } = first_param(&w).op else {
 		panic!()
 	};
-	assert_eq!(word.parts[0], WordPart::Lit(b"x=\\'".to_vec()));
+	assert!(matches!(&word.parts[0], WordPart::Lit(s) if s.value == b"x=\\'"));
 	// Pattern words and unquoted expansions keep the "…" rules.
 	let w = param_word(b"echo ${v:+\"\\p\"}\n", Features::NONE);
 	let WordPart::Param(p) = &w.parts[0] else {
@@ -953,7 +969,11 @@ fn double_quotes_in_double_quoted_parameter_words_escape_everything() {
 	let ParamOp::Alt { word, .. } = &p.op else {
 		panic!()
 	};
-	assert_eq!(word.parts, vec![WordPart::DQuote(vec![WordPart::Lit(b"\\p".to_vec())])]);
+	assert!(matches!(
+		&word.parts[..],
+		[WordPart::DQuote(inner)]
+			if matches!(&inner.value[..], [WordPart::Lit(s)] if s.value == b"\\p")
+	));
 }
 
 #[test]
@@ -1162,19 +1182,19 @@ fn double_quotes_between_literal_quotes_are_dropped_at_expansion() {
 	let ParamOp::Default { word, .. } = first_param(&s.words[1]).op else {
 		panic!()
 	};
-	assert_eq!(word.parts, vec![
-		WordPart::Lit(b"'".to_vec()),
-		WordPart::DroppedQuote,
-		WordPart::Lit(b"'hey".to_vec()),
-	]);
+	assert!(matches!(
+		&word.parts[..],
+		[WordPart::Lit(a), WordPart::DroppedQuote(_), WordPart::Lit(b)]
+			if a.value == b"'" && b.value == b"'hey"
+	));
 	let ParamOp::Default { word, .. } = first_param(&s.words[2]).op else {
 		panic!()
 	};
-	assert_eq!(word.parts, vec![
-		WordPart::Lit(b"'".to_vec()),
-		WordPart::DroppedQuote,
-		WordPart::Lit(b"hey'".to_vec()),
-	]);
+	assert!(matches!(
+		&word.parts[..],
+		[WordPart::Lit(a), WordPart::DroppedQuote(_), WordPart::Lit(b)]
+			if a.value == b"'" && b.value == b"hey'"
+	));
 	// The printed text keeps the quote.
 	assert_eq!(print_list(&prog.commands[0].list, PrintStyle::Compact), &src[..src.len() - 1]);
 }
@@ -1187,18 +1207,18 @@ fn backslashes_in_double_quoted_pattern_words_quote_any_character() {
 	let ParamOp::Replace { pat, rep: Some(rep), .. } = first_param(&w).op else {
 		panic!()
 	};
-	assert_eq!(pat.parts, vec![WordPart::Escaped(b"'".to_vec())]);
-	assert_eq!(rep.parts, vec![WordPart::Escaped(b"'".to_vec())]);
+	assert!(matches!(&pat.parts[..], [WordPart::Escaped(s)] if s.value == b"'"));
+	assert!(matches!(&rep.parts[..], [WordPart::Escaped(s)] if s.value == b"'"));
 	let w = param_word(b"echo \"${v/a/\\q}\"\n", Features::NONE);
 	let ParamOp::Replace { rep: Some(rep), .. } = first_param(&w).op else {
 		panic!()
 	};
-	assert_eq!(rep.parts, vec![WordPart::Escaped(b"q".to_vec())]);
+	assert!(matches!(&rep.parts[..], [WordPart::Escaped(s)] if s.value == b"q"));
 	let w = param_word(b"echo \"${u-\\'}\"\n", Features::NONE);
 	let ParamOp::Default { word, .. } = first_param(&w).op else {
 		panic!()
 	};
-	assert_eq!(word.parts, vec![WordPart::Lit(b"\\'".to_vec())]);
+	assert!(matches!(&word.parts[..], [WordPart::Lit(s)] if s.value == b"\\'"));
 }
 
 #[test]
@@ -1211,12 +1231,16 @@ fn double_byte_charsets_read_whole_characters() {
 	else {
 		panic!()
 	};
-	assert_eq!(lhs.parts, vec![WordPart::Lit(b"\xa3\x5c".to_vec())]);
-	assert_eq!(rhs.parts, lhs.parts);
+	assert!(matches!(&lhs.parts[..], [WordPart::Lit(s)] if s.value == b"\xa3\x5c"));
+	assert!(matches!(&rhs.parts[..], [WordPart::Lit(s)] if s.value == b"\xa3\x5c"));
 	let CommandKind::Simple(s) = &and_or.rest[0].1.stages[0].cmd.kind else {
 		panic!()
 	};
-	assert_eq!(s.words[1].parts, vec![WordPart::DQuote(vec![WordPart::Lit(b"\xa3\x5c".to_vec())])]);
+	assert!(matches!(
+		&s.words[1].parts[..],
+		[WordPart::DQuote(inner)]
+			if matches!(&inner.value[..], [WordPart::Lit(s)] if s.value == b"\xa3\x5c")
+	));
 	assert_eq!(s.words.len(), 4);
 	assert_eq!(print_list(&prog.commands[0].list, PrintStyle::Compact), &src[..src.len() - 1]);
 	// Without the flag the same bytes are a backslash.
@@ -1251,7 +1275,7 @@ fn global_replacement_patterns_may_start_with_a_slash() {
 			w.parts
 				.iter()
 				.flat_map(|p| match p {
-					WordPart::Lit(b) => b.clone(),
+					WordPart::Lit(b) => b.iter().copied(),
 					other => panic!("{other:?}"),
 				})
 				.collect()

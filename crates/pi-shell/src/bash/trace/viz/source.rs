@@ -16,11 +16,12 @@ impl SourceMap {
 
 	pub fn nested(
 		&self,
-		parent_span: Span,
+		parent_span: impl Into<Option<Span>>,
 		parent_source: &[u8],
 		decoded: &[u8],
 		offset: u32,
 	) -> Option<Self> {
+		let parent_span = parent_span.into()?;
 		let [lo, _] = self.bytes(parent_span)?;
 		let literal = literal_map(self.raw(parent_source, parent_span), decoded)?;
 		let outer = self.outer.as_ref()?;
@@ -31,7 +32,8 @@ impl SourceMap {
 		Some(Self { offset, projection: 0, len: decoded.len(), outer: Some(mapped?.into()) })
 	}
 
-	pub fn bytes(&self, span: Span) -> Option<[usize; 2]> {
+	pub fn bytes(&self, span: impl Into<Option<Span>>) -> Option<[usize; 2]> {
+		let span = span.into()?;
 		let lo = span
 			.lo
 			.checked_sub(self.offset)?
@@ -43,13 +45,13 @@ impl SourceMap {
 		(lo <= hi && hi <= self.len).then_some([lo, hi])
 	}
 
-	pub fn range(&self, span: Span) -> Option<[u32; 2]> {
+	pub fn range(&self, span: impl Into<Option<Span>>) -> Option<[u32; 2]> {
 		let [lo, hi] = self.bytes(span)?;
 		let map = self.outer.as_ref()?;
 		Some([*map.get(lo)?, *map.get(hi)?])
 	}
 
-	pub fn raw<'a>(&self, unit_source: &'a [u8], span: Span) -> &'a [u8] {
+	pub fn raw<'a>(&self, unit_source: &'a [u8], span: impl Into<Option<Span>>) -> &'a [u8] {
 		self
 			.bytes(span)
 			.and_then(|[lo, hi]| unit_source.get(lo..hi))
@@ -288,64 +290,19 @@ fn decode_literal(raw: &[u8]) -> Option<(Vec<u8>, Vec<u32>)> {
 	origins.push(end as u32);
 	Some((value, origins))
 }
-/// Locate here-document text from canonical headers and exact delimiter lines.
-/// Results correspond to redirection indexes and exclude the closing delimiter.
-pub fn heredoc_spans(
-	map: &SourceMap,
-	unit_source: &[u8],
-	redirs: &[crate::bash::syntax::Redir],
-) -> Vec<Option<Span>> {
-	use crate::bash::syntax::{RedirOp, RedirTarget};
-	let line_after = |at: usize| -> usize {
-		unit_source
-			.get(at..)
-			.and_then(|rest| rest.iter().position(|byte| *byte == b'\n'))
-			.map_or(unit_source.len(), |distance| at + distance + 1)
-	};
-	let mut next_body = None;
+/// Recorded here-document body ranges, in redirection order.
+pub fn heredoc_spans(map: &SourceMap, redirs: &[crate::bash::syntax::Redir]) -> Vec<Option<Span>> {
+	use crate::bash::syntax::RedirTarget;
 	redirs
 		.iter()
 		.map(|redir| {
 			let RedirTarget::HereDoc(document) = &redir.target else {
 				return None;
 			};
-			let [_, header_end] = map.bytes(redir.span)?;
-			let start = next_body.unwrap_or_else(|| line_after(header_end));
-			let mut line = start;
-			let mut body_end = unit_source.len();
-			while line < unit_source.len() {
-				let end = unit_source[line..]
-					.iter()
-					.position(|byte| *byte == b'\n')
-					.map_or(unit_source.len(), |distance| line + distance);
-				let mut delimiter_start = line;
-				if matches!(redir.op, RedirOp::HereDoc { strip_tabs: true }) {
-					while delimiter_start < end && unit_source[delimiter_start] == b'\t' {
-						delimiter_start += 1;
-					}
-				}
-				if unit_source.get(delimiter_start..end) == Some(document.delim.as_slice()) {
-					body_end = line;
-					next_body = Some(if end < unit_source.len() {
-						end + 1
-					} else {
-						end
-					});
-					break;
-				}
-				line = if end < unit_source.len() {
-					end + 1
-				} else {
-					end
-				};
-			}
-			if line >= unit_source.len() {
-				next_body = Some(unit_source.len());
-			}
-			let base = map.offset.checked_add(map.projection)?;
-			let lo = base.checked_add(u32::try_from(start).ok()?)?;
-			let hi = base.checked_add(u32::try_from(body_end).ok()?)?;
-			Some(Span::new(lo, hi))
+			let source = document.source.as_ref()?;
+			let span = Span::new(source.span.lo, source.close_line.unwrap_or(source.span.hi));
+			map.bytes(span)?;
+			Some(span)
 		})
 		.collect()
 }
@@ -354,25 +311,17 @@ mod tests {
 	use super::*;
 	#[test]
 	fn heredoc_boundaries_are_sequential_and_exact() {
-		use crate::bash::syntax::{HereDoc, Redir, RedirOp, RedirTarget};
+		use crate::bash::syntax::{Features, NO_ALIASES, Parser, Pos};
 		let bytes = b"cat <<A <<-B\nnot A\nA\n\tbody B\n\tB\n";
-		let doc = |span, delimiter: &[u8], strip| Redir {
-			span,
-			fd: None,
-			op: RedirOp::HereDoc { strip_tabs: strip },
-			target: RedirTarget::HereDoc(HereDoc {
-				delim:     delimiter.to_vec(),
-				delim_raw: delimiter.to_vec(),
-				quoted:    false,
-				text:      Vec::new(),
-			}),
-		};
+		let mut source = vec![b' '; 13];
+		source.extend_from_slice(bytes);
+		let mut parser =
+			Parser::new(&source, Features::NONE, NO_ALIASES).with_pos(Pos { offset: 13, line: 1 });
+		let command = parser.next_command().unwrap().unwrap();
+		let redirs = &command.list.items[0].and_or.first.stages[0].cmd.redirs;
 		let map =
 			SourceMap { offset: 10, projection: 3, len: bytes.len(), outer: None };
-		let spans = heredoc_spans(&map, bytes, &[
-			doc(Span::new(17, 20), b"A", false),
-			doc(Span::new(21, 25), b"B", true),
-		]);
+		let spans = heredoc_spans(&map, redirs);
 		assert_eq!(spans.len(), 2);
 		assert_eq!(map.raw(bytes, spans[0].unwrap()), b"not A\n");
 		assert_eq!(map.raw(bytes, spans[1].unwrap()), b"\tbody B\n");

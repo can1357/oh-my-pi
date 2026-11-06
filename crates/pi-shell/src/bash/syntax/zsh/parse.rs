@@ -82,7 +82,21 @@ fn failed() -> CommandKind {
 
 /// A word holding token string `s`.
 fn zword(s: Vec<u8>, span: Span) -> Word {
-	Word { id: NodeId(0), span, parts: vec![WordPart::Zsh(s)] }
+	Word {
+		id:         NodeId(0),
+		span:       span.into(),
+		parts:      vec![WordPart::Zsh(Located::new(s, span, span, None))],
+		assignment: None,
+	}
+}
+
+fn contextual_word(text: Vec<u8>, context: Span) -> Word {
+	Word {
+		id:         NodeId(0),
+		span:       WordSpan::Context(context),
+		parts:      vec![WordPart::Zsh(text.into())],
+		assignment: None,
+	}
 }
 
 /// A command with no words (the empty pipeline of `!`, `coproc`, `time`).
@@ -146,17 +160,16 @@ fn array_elem(w: Word) -> ArrayElem {
 		let append = s.get(end + 1) == Some(&b'+') && s.get(end + 2) == Some(&EQUALS);
 		if append || s.get(end + 1) == Some(&EQUALS) {
 			let vstart = end + 2 + usize::from(append);
-			let lo = w.span.lo;
-			let kspan = Span::new(lo + 1, lo + end as u32);
-			let vspan = Span::new((lo + vstart as u32).min(w.span.hi), w.span.hi);
+			let context = *w.span;
 			return ArrayElem {
-				key: Some(zword(span(s, 1, end).to_vec(), kspan)),
+				lo: Some(w.span.lo),
+				key: Some(contextual_word(span(s, 1, end).to_vec(), context)),
 				append,
-				value: zword(tail(s, vstart).to_vec(), vspan),
+				value: contextual_word(tail(s, vstart).to_vec(), context),
 			};
 		}
 	}
-	ArrayElem { key: None, append: false, value: w }
+	ArrayElem { lo: Some(w.span.lo), key: None, append: false, value: w }
 }
 
 /// Splits `name[sub]` of an assignment token into the name text and the
@@ -591,7 +604,12 @@ impl Ctx<'_> {
 					Span::new((span.lo + 2).min(span.hi), span.hi.saturating_sub(2).max(span.lo));
 				self.cmd_close = Some(inner.hi);
 				self.zshlex();
-				Some(CommandKind::Arith(ArithText { span: inner, src: s, bracket: false }))
+				Some(CommandKind::Arith(ArithText {
+					span:    inner,
+					trimmed: None,
+					src:     s,
+					bracket: false,
+				}))
 			},
 			_ => {
 				if self.lx.tok == T::Time {
@@ -685,7 +703,7 @@ impl Ctx<'_> {
 					header_hi = self.lx.hi;
 				}
 				let (src, span) = self.tw();
-				exprs.push(ArithText { span, src, bracket: false });
+				exprs.push(ArithText { span, trimmed: None, src, bracket: false });
 			}
 			self.ps.infor = 0;
 			self.ps.incmdpos = true;
@@ -1227,24 +1245,22 @@ impl Ctx<'_> {
 		} else {
 			s.iter().position(|&c| c == b'=').map_or(s.len(), |i| i + 1)
 		};
-		let vlo = (span.lo + value_from as u32).min(span.hi);
-		let index = index.map(|i| {
-			let ilo = (span.lo + name.len() as u32 + 1).min(span.hi);
-			zword(i, Span::new(ilo, ilo))
-		});
+		let index = index.map(|text| contextual_word(text, span));
 		Assign {
 			id: NodeId(0),
 			span,
 			name,
+			name_span: None,
 			index,
 			append,
-			value: AssignValue::Scalar(zword(tail(s, value_from).to_vec(), Span::new(vlo, span.hi))),
+			value: AssignValue::Scalar(contextual_word(tail(s, value_from).to_vec(), span)),
 		}
 	}
 
 	/// The elements of an array assignment after its `name=(`, up to its
 	/// `)`.
-	fn array_elems(&mut self) -> Option<Vec<ArrayElem>> {
+	fn array_elems(&mut self) -> Option<CompoundArray> {
+		let lparen = self.last_src_off;
 		self.cmdpush(CS_ARRAY);
 		self.zshlex();
 		let words = self.par_nl_wordlist();
@@ -1252,7 +1268,11 @@ impl Ctx<'_> {
 		if self.lx.tok != T::Outpar {
 			return self.yyerr();
 		}
-		Some(words.into_iter().map(array_elem).collect())
+		Some(CompoundArray {
+			lparen: Some(lparen),
+			rparen: Some(self.tok_span()),
+			elems:  words.into_iter().map(array_elem).collect(),
+		})
 	}
 
 	/// zsh `par_simple`: assignments, words, redirections, and the
@@ -1286,11 +1306,12 @@ impl Ctx<'_> {
 					let append = self.lx.buf.get(p) == Some(&b'+');
 					let elems = self.array_elems()?;
 					self.ps.incmdpos = oldcmdpos;
-					let index = index.map(|i| zword(i, Span::new(lo, lo)));
+					let index = index.map(|i| contextual_word(i, Span::new(lo, self.lx.hi)));
 					assigns.push(Assign {
 						id: NodeId(0),
 						span: Span::new(lo, self.lx.hi),
 						name,
+						name_span: None,
 						index,
 						append,
 						value: AssignValue::Array(elems),
@@ -1385,20 +1406,14 @@ impl Ctx<'_> {
 					let lo = self.lx.lo;
 					let mut head = self.lx.buf.clone();
 					head.push(b'=');
-					self.cmdpush(CS_ARRAY);
 					self.ps.intypeset = false;
-					self.zshlex();
-					let words_n = self.par_nl_wordlist();
-					self.cmdpop();
+					let elems = self.array_elems()?;
 					self.ps.intypeset = true;
-					if self.lx.tok != T::Outpar {
-						return self.yyerr();
-					}
-					let elems = words_n.into_iter().map(array_elem).collect();
 					words.push(Word {
-						id:    NodeId(0),
-						span:  Span::new(lo, self.lx.hi),
-						parts: vec![WordPart::Zsh(head), WordPart::Compound(elems)],
+						id:         NodeId(0),
+						span:       Span::new(lo, self.lx.hi).into(),
+						parts:      vec![WordPart::Zsh(head.into()), WordPart::Compound(elems)],
+						assignment: None,
 					});
 					self.zshlex();
 				},
@@ -1446,7 +1461,7 @@ impl Ctx<'_> {
 					} else {
 						let mut names = words
 							.iter()
-							.map(|w| Name { text: word_text(w), span: w.span });
+							.map(|w| Name { text: word_text(w), span: *w.span });
 						let name = names
 							.next()
 							.unwrap_or(Name { text: Vec::new(), span: self.tok_span() });
@@ -1510,6 +1525,7 @@ impl Ctx<'_> {
 				.hdocs
 				.push(PendingDoc { seq, delim: delim.clone(), strip, quoted });
 			let hi = self.lx.hi;
+			let delimiter = self.tok_word();
 			self.zshlex();
 			return Some(Redir {
 				span: Span::new(lo, hi),
@@ -1520,6 +1536,8 @@ impl Ctx<'_> {
 					delim_raw,
 					quoted,
 					text: crate::bash::syntax::parser::doc_placeholder(seq as u32),
+					delimiter: Some(delimiter),
+					source: None,
 				}),
 			});
 		}
@@ -1792,11 +1810,14 @@ impl Ctx<'_> {
 		}
 		let lo = l.first().map_or(a.1.hi, |t| t.1.lo);
 		let hi = l.last().map_or(a.1.hi, |t| t.1.hi);
-		let parts = l.into_iter().map(|t| WordPart::Zsh(t.0)).collect();
+		let parts = l
+			.into_iter()
+			.map(|(text, span)| WordPart::Zsh(Located::new(text, span, span, None)))
+			.collect();
 		Some(CondExpr::Unary {
 			op:    plain(&a.0),
 			op_lo: a.1.lo,
-			arg:   Word { id: NodeId(0), span: Span::new(lo, hi), parts },
+			arg:   Word { id: NodeId(0), span: Span::new(lo, hi).into(), parts, assignment: None },
 		})
 	}
 }

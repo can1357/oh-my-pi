@@ -79,7 +79,7 @@ fn simple(src: &[u8]) -> Simple {
 
 fn zsh_bytes(w: &Word) -> &[u8] {
 	match &w.parts[..] {
-		[WordPart::Zsh(s)] => s,
+		[WordPart::Zsh(s)] => &s.value,
 		other => panic!("not one zsh part: {other:?}"),
 	}
 }
@@ -210,7 +210,7 @@ fn typeset_arguments_keep_assignments_with_a_literal_equals() {
 	assert_eq!(zsh_bytes(&s.words[1]), b"x=1");
 	match &s.words[2].parts[..] {
 		[WordPart::Zsh(head), WordPart::Compound(elems)] => {
-			assert_eq!(head, b"y=");
+			assert_eq!(head.value, b"y=");
 			assert_eq!(elems.len(), 2);
 		},
 		other => panic!("{other:?}"),

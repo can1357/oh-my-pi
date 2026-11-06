@@ -1172,7 +1172,7 @@ fn part_text(p: &WordPart, out: &mut Vec<u8>, ctx: Ctx) {
 		WordPart::Compound(elems) => elems_text(elems, out),
 		WordPart::BadSubst(text) => out.extend_from_slice(text),
 		WordPart::BadComsub(b) => out.extend_from_slice(&b.text),
-		WordPart::DroppedQuote => out.push(b'"'),
+		WordPart::DroppedQuote(_) => out.push(b'"'),
 		WordPart::Zsh(raw) => zsh_text(raw, out),
 	}
 }

@@ -702,72 +702,72 @@ pub(super) struct ParseFlags {
 /// zsh's lexer and parser globals over one source.
 pub(super) struct Ctx<'s> {
 	/// The whole source.
-	pub(super) src:        &'s [u8],
+	pub(super) src:          &'s [u8],
 	/// Parse-affecting options.
-	pub(super) feat:       Features,
+	pub(super) feat:         Features,
 	/// Alias tables.
-	pub(super) aliases:    &'s dyn AliasLookup,
+	pub(super) aliases:      &'s dyn AliasLookup,
 	/// Input stack; `frames[0]` is the source. Frames above `top` are
 	/// popped alias frames `inungetc` may re-activate.
-	frames:                Vec<Frame<'s>>,
+	frames:                  Vec<Frame<'s>>,
 	/// Index of the frame being read.
-	top:                   usize,
+	top:                     usize,
 	/// Line of the next source byte (zsh `lineno`).
-	pub(super) line:       u32,
+	pub(super) line:         u32,
 	/// Source offset of the last byte read.
-	last_src_off:          u32,
+	pub(super) last_src_off: u32,
 	/// `lexstop`
-	pub(super) lexstop:    bool,
+	pub(super) lexstop:      bool,
 	/// `lex_add_raw` nesting.
-	lex_add_raw:           u32,
+	lex_add_raw:             u32,
 	/// `tokstr_raw`: raw text of the command substitution being skipped.
-	raw:                   Vec<u8>,
+	raw:                     Vec<u8>,
 	/// Length of `raw` before the command substitution started.
-	raw_floor:             usize,
+	raw_floor:               usize,
 	/// Lexer state.
-	pub(super) lx:         LexState,
+	pub(super) lx:           LexState,
 	/// Parser state.
-	pub(super) ps:         ParseFlags,
+	pub(super) ps:           ParseFlags,
 	/// `errflag & ERRFLAG_ERROR`
-	pub(super) errflag:    bool,
+	pub(super) errflag:      bool,
 	/// Messages zsh printed (`zerr`/`zwarn`), with their lines.
-	pub(super) msgs:       Vec<(u32, Vec<u8>)>,
+	pub(super) msgs:         Vec<(u32, Vec<u8>)>,
 	/// `noaliases`
-	pub(super) noaliases:  bool,
+	pub(super) noaliases:    bool,
 	/// Offset of the token that closes the compound command being parsed,
 	/// as the lexer read it; taken by `par_cmd` when it builds the command.
-	pub(super) cmd_close:  Option<u32>,
+	pub(super) cmd_close:    Option<u32>,
 	/// `inalmore`
-	inalmore:              bool,
+	inalmore:                bool,
 	/// `inpartime` of `par_cmd`.
-	pub(super) inpartime:  bool,
+	pub(super) inpartime:    bool,
 	/// Here-document bodies by sequence number.
-	pub(super) docs:       Vec<Vec<u8>>,
+	pub(super) docs:         Vec<Vec<u8>>,
 	/// Alias substitutions of the current top-level command.
-	pub(super) alias_uses: Vec<AliasUse>,
+	pub(super) alias_uses:   Vec<AliasUse>,
 	/// Line of the first token of the event being parsed.
-	pub(super) ev_line:    u32,
+	pub(super) ev_line:      u32,
 	/// The token `par_event` failed at (before it became `LEXERR`).
-	pub(super) err_tok:    T,
+	pub(super) err_tok:      T,
 	/// zsh `lexflags` (`LEXFLAGS_*`; 0 for command input).
-	lexflags:              u32,
+	lexflags:                u32,
 	/// zsh `nocomments`.
-	nocomments:            bool,
+	nocomments:              bool,
 	/// zsh `cmdstack`/`cmdsp` (`prompt.c`): the open constructs (`CS_*`),
 	/// innermost last.
-	pub(super) cmdstack:   Vec<u8>,
+	pub(super) cmdstack:     Vec<u8>,
 	/// `cmdstack` when the input first ran out in this event: what zsh
 	/// would show in `PS2`'s `%_` when it asks for another line.
-	pub(super) eof_stack:  Option<Vec<u8>>,
+	pub(super) eof_stack:    Option<Vec<u8>>,
 	/// zsh `strin`: lexing a string (`strinbeg`), which lets comments in
 	/// once `lexflags` is 0 (the ZLE line after the cursor word).
-	strin:                 bool,
+	strin:                   bool,
 	/// The ZLE word-tracking globals of lex.c while the editor line is
 	/// lexed for completion ([`ZleLex`]); `None` otherwise.
-	zle:                   Option<ZleWords>,
+	zle:                     Option<ZleWords>,
 	/// With [`Self::zle`]: metafied length of `src[i..]` for each `i`
 	/// (zsh's input is metafied; `inbufct` counts metafied bytes).
-	meta_rest:             Vec<u32>,
+	meta_rest:               Vec<u32>,
 }
 
 /// zsh `CS_FOR` (`zsh.h`): a `for` loop.

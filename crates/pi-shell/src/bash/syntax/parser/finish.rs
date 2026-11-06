@@ -4,11 +4,19 @@ use alloc::vec::Vec;
 
 use crate::bash::syntax::{ast::*, span::NodeId};
 
+/// A gathered document's bash text and the input that produced it.
+#[derive(Default)]
+pub(super) struct GatheredDoc {
+	pub text:   Vec<u8>,
+	pub source: Option<HereDocSource>,
+}
+
 /// Walks a tree in id order, filling here-document texts and/or ids.
 struct Walk<'d> {
-	next: u32,
-	ids:  bool,
-	docs: &'d [Vec<u8>],
+	next:      u32,
+	ids:       bool,
+	docs:      &'d [GatheredDoc],
+	doc_texts: &'d [Vec<u8>],
 }
 
 impl Walk<'_> {
@@ -111,10 +119,16 @@ impl Walk<'_> {
 			match &mut r.target {
 				RedirTarget::Word(w) => self.word(w),
 				RedirTarget::HereDoc(doc) => {
-					if let Some(seq) = placeholder_seq(&doc.text)
-						&& let Some(text) = self.docs.get(seq as usize)
-					{
-						doc.text.clone_from(text);
+					if let Some(seq) = placeholder_seq(&doc.text) {
+						if let Some(gathered) = self.docs.get(seq as usize) {
+							doc.text.clone_from(&gathered.text);
+							doc.source.clone_from(&gathered.source);
+						} else if let Some(text) = self.doc_texts.get(seq as usize) {
+							doc.text.clone_from(text);
+						}
+					}
+					if let Some(delimiter) = &mut doc.delimiter {
+						self.word(delimiter);
 					}
 				},
 			}
@@ -201,7 +215,7 @@ impl Walk<'_> {
 				| WordPart::Arith(_)
 				| WordPart::BadSubst(_)
 				| WordPart::BadComsub(_)
-				| WordPart::DroppedQuote
+				| WordPart::DroppedQuote(_)
 				| WordPart::Zsh(_) => {},
 			}
 		}
@@ -216,12 +230,20 @@ const fn placeholder_seq(text: &[u8]) -> Option<u32> {
 	}
 }
 
-/// Replace here-document placeholders with the gathered texts.
-pub fn fill_docs(list: &mut List, docs: &[Vec<u8>]) {
+/// Replace bash here-document placeholders with their text and recorded input.
+pub(super) fn fill_docs(list: &mut List, docs: &[GatheredDoc]) {
 	if docs.is_empty() {
 		return;
 	}
-	Walk { next: 0, ids: false, docs }.list(list);
+	Walk { next: 0, ids: false, docs, doc_texts: &[] }.list(list);
+}
+
+/// Fill documents from zsh's text-only gatherer without inventing positions.
+pub(crate) fn fill_doc_texts(list: &mut List, docs: &[Vec<u8>]) {
+	if docs.is_empty() {
+		return;
+	}
+	Walk { next: 0, ids: false, docs: &[], doc_texts: docs }.list(list);
 }
 
 /// Assign preorder ids; returns the count.
@@ -230,14 +252,97 @@ pub fn assign_ids(list: &mut List) -> u32 {
 }
 
 /// Finalize a bash command's ids and gathered documents in one tree walk.
-pub(super) fn assign_ids_with_docs(list: &mut List, docs: &[Vec<u8>]) -> u32 {
-	let mut w = Walk { next: 0, ids: true, docs };
+pub(super) fn assign_ids_with_docs(list: &mut List, docs: &[GatheredDoc]) -> u32 {
+	let mut w = Walk { next: 0, ids: true, docs, doc_texts: &[] };
 	w.list(list);
 	w.next
 }
 
 /// Ids for a lone word ([`parse_text`](super::parse_text)).
-pub(super) fn finish_word(word: &mut Word, docs: &[Vec<u8>]) {
-	let mut w = Walk { next: 0, ids: true, docs };
+pub(super) fn finish_word(word: &mut Word, docs: &[GatheredDoc]) {
+	let mut w = Walk { next: 0, ids: true, docs, doc_texts: &[] };
 	w.word(word);
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::bash::syntax::{Features, NO_ALIASES, Parser};
+
+	#[test]
+	fn document_source_preserves_unstripped_bytes_and_real_closer() {
+		let src = b"cat <<-'END'\n\t$(echo x)\\\ny\n\tEND\n";
+		let mut parser = Parser::new(src, Features::NONE, NO_ALIASES);
+		let command = parser.next_command().unwrap().unwrap();
+		let cmd = &command.list.items[0].and_or.first.stages[0].cmd;
+		let RedirTarget::HereDoc(doc) = &cmd.redirs[0].target else {
+			panic!()
+		};
+		let recorded = serde_json::to_value(doc).unwrap();
+		assert_eq!(
+			doc.delimiter.as_ref().unwrap().span.recorded(),
+			Some(crate::bash::syntax::Span::new(7, 12))
+		);
+		assert_eq!(recorded["source"]["span"], serde_json::json!({"lo": 13, "hi": 28}));
+		assert_eq!(recorded["source"]["raw"], serde_json::json!(b"\t$(echo x)\\\ny\n\t"));
+		assert_eq!(recorded["source"]["close"], serde_json::json!({"lo": 28, "hi": 31}));
+		assert_eq!(recorded["source"]["close_line"], 27);
+		assert_eq!(doc.text, b"$(echo x)\\\ny\n");
+	}
+
+	#[test]
+	fn document_source_omits_unread_closer_and_virtual_newline() {
+		let mut parser = Parser::new(b"cat <<END\nlast", Features::NONE, NO_ALIASES);
+		let command = parser.next_command().unwrap().unwrap();
+		let cmd = &command.list.items[0].and_or.first.stages[0].cmd;
+		let RedirTarget::HereDoc(doc) = &cmd.redirs[0].target else {
+			panic!()
+		};
+		let recorded = serde_json::to_value(doc).unwrap();
+		assert_eq!(recorded["source"]["span"], serde_json::json!({"lo": 10, "hi": 14}));
+		assert_eq!(recorded["source"]["raw"], serde_json::json!(b"last"));
+		assert_eq!(recorded["source"]["close"], serde_json::Value::Null);
+		assert_eq!(recorded["source"]["close_line"], serde_json::Value::Null);
+		assert_eq!(doc.text, b"last\n");
+		assert_eq!(
+			command.warnings[0].bash_msg,
+			b"warning: here-document at line 1 delimited by end-of-file (wanted `END')"
+		);
+	}
+
+	#[test]
+	fn document_source_keeps_alias_bytes_without_the_injected_space() {
+		struct Alias;
+		impl crate::bash::syntax::AliasLookup for Alias {
+			fn alias(&self, name: &[u8]) -> Option<&[u8]> {
+				(name == b"doc").then_some(&b"cat <<EOF\nhello\nEOF"[..])
+			}
+		}
+		let mut parser = Parser::new(b"doc\n", Features::NONE, &Alias);
+		let command = parser.next_command().unwrap().unwrap();
+		let cmd = &command.list.items[0].and_or.first.stages[0].cmd;
+		let RedirTarget::HereDoc(doc) = &cmd.redirs[0].target else {
+			panic!()
+		};
+		let source = doc.source.as_ref().unwrap();
+		assert_eq!(source.raw, b"hello\n");
+		assert_eq!(source.span, crate::bash::syntax::Span::new(3, 3));
+		assert_eq!(source.close, Some(crate::bash::syntax::Span::new(3, 3)));
+		assert!(source.flat);
+		assert_eq!(doc.text, b"hello\n");
+	}
+
+	#[test]
+	fn document_closer_records_a_continued_delimiter_extent() {
+		let mut parser = Parser::new(b"cat <<EOF\nx\nE\\\nOF\n", Features::NONE, NO_ALIASES);
+		let command = parser.next_command().unwrap().unwrap();
+		let cmd = &command.list.items[0].and_or.first.stages[0].cmd;
+		let RedirTarget::HereDoc(doc) = &cmd.redirs[0].target else {
+			panic!()
+		};
+		let source = doc.source.as_ref().unwrap();
+		assert_eq!(source.raw, b"x\n");
+		assert_eq!(source.span, crate::bash::syntax::Span::new(10, 12));
+		assert_eq!(source.close, Some(crate::bash::syntax::Span::new(12, 17)));
+	}
 }

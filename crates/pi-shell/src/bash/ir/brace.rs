@@ -87,7 +87,7 @@ fn quoted_alternatives_from(part: &syn::WordPart, from: usize) -> Option<Vec<syn
 					if let syn::WordPart::Param(param) = &mut inner[j]
 						&& let Some(word) = param_words_mut(param).into_iter().nth(w).flatten()
 					{
-						word.parts[k] = syn::WordPart::DQuote(alt);
+						word.parts[k] = syn::WordPart::DQuote(alt.into());
 					}
 					let part = syn::WordPart::DQuote(inner);
 					match quoted_alternatives_from(&part, j + 1) {
@@ -221,7 +221,8 @@ fn expand_toks<'a>(toks: &[Tok<'a>], out: &mut Vec<Vec<Tok<'a>>>) -> bool {
 /// A quoted empty string: bash re-reads brace-expanded text, so the `\`
 /// a character sequence produces is quote-removed to an empty word
 /// (`{Z..a}` has an empty word between `[` and `]`).
-static EMPTY_QUOTE: syn::WordPart = syn::WordPart::SQuote(Vec::new());
+static EMPTY_QUOTE: syn::WordPart =
+	syn::WordPart::SQuote(syn::Located { value: Vec::new(), pos: None });
 
 /// The `}` closing the `{` at `s` (nested braces counted).
 fn matching_close(toks: &[Tok<'_>], s: usize) -> Option<usize> {
@@ -405,11 +406,14 @@ fn rebuild(toks: &[Tok<'_>]) -> Vec<syn::WordPart> {
 /// name (`$var{x,y}` is `$varx $vary`).
 fn push_lit(parts: &mut Vec<syn::WordPart>, mut lit: Vec<u8>) {
 	if let Some(syn::WordPart::Param(p)) = parts.last_mut()
-		&& let syn::ParamName::Var(name) = &mut p.name
-		&& !p.braced
-		&& !p.indirect
-		&& p.index.is_none()
-		&& p.op == syn::ParamOp::None
+		&& let syn::Param {
+			name: syn::ParamName::Var(name),
+			braced: false,
+			indirect: false,
+			index: None,
+			op: syn::ParamOp::None,
+			..
+		} = p.value.as_mut()
 	{
 		let n = lit
 			.iter()
@@ -421,7 +425,7 @@ fn push_lit(parts: &mut Vec<syn::WordPart>, mut lit: Vec<u8>) {
 			return;
 		}
 	}
-	parts.push(syn::WordPart::Lit(lit));
+	parts.push(syn::WordPart::Lit(lit.into()));
 }
 
 #[cfg(test)]
@@ -429,7 +433,7 @@ mod tests {
 	use super::*;
 
 	fn lit(s: &str) -> Vec<syn::WordPart> {
-		vec![syn::WordPart::Lit(s.as_bytes().to_vec())]
+		vec![syn::WordPart::Lit(s.as_bytes().to_vec().into())]
 	}
 
 	fn words(s: &str) -> Vec<String> {
@@ -441,7 +445,7 @@ mod tests {
 					parts
 						.into_iter()
 						.map(|p| match p {
-							syn::WordPart::Lit(b) => String::from_utf8(b).unwrap(),
+							syn::WordPart::Lit(b) => String::from_utf8(b.value.bytes).unwrap(),
 							_ => String::from("<atom>"),
 						})
 						.collect()
@@ -485,35 +489,41 @@ mod tests {
 	#[test]
 	fn quoted_parts_are_opaque() {
 		let parts = vec![
-			syn::WordPart::Lit(b"{a,".to_vec()),
-			syn::WordPart::SQuote(b"b,c".to_vec()),
-			syn::WordPart::Lit(b"}".to_vec()),
+			syn::WordPart::Lit(b"{a,".to_vec().into()),
+			syn::WordPart::SQuote(b"b,c".to_vec().into()),
+			syn::WordPart::Lit(b"}".to_vec().into()),
 		];
 		let alts = expand(&parts).unwrap();
 		assert_eq!(alts.len(), 2);
-		assert_eq!(alts[1], vec![syn::WordPart::SQuote(b"b,c".to_vec())]);
+		assert_eq!(alts[1], vec![syn::WordPart::SQuote(b"b,c".to_vec().into())]);
 	}
 
 	fn var(name: &str, braced: bool) -> syn::WordPart {
-		syn::WordPart::Param(Box::new(syn::Param {
-			name: syn::ParamName::Var(name.as_bytes().to_vec()),
-			index: None,
-			op: syn::ParamOp::None,
-			braced,
-			indirect: false,
-		}))
+		syn::WordPart::Param(
+			Box::new(syn::Param {
+				name: syn::ParamName::Var(name.as_bytes().to_vec()),
+				name_span: None,
+				index: None,
+				index_span: None,
+				op: syn::ParamOp::None,
+				braced,
+				indirect: false,
+			})
+			.into(),
+		)
 	}
 
 	// Goldens: bash 5.3.20 `var=baz varx=vx; echo $var{x,y} ${var}{x,y}`
 	// prints `vx vy bazx bazy`.
 	#[test]
 	fn unbraced_names_absorb_expanded_name_characters() {
-		let alts = expand(&[var("var", false), syn::WordPart::Lit(b"{x,y-}".to_vec())]).unwrap();
+		let alts =
+			expand(&[var("var", false), syn::WordPart::Lit(b"{x,y-}".to_vec().into())]).unwrap();
 		assert_eq!(alts, [vec![var("varx", false)], vec![
 			var("vary", false),
-			syn::WordPart::Lit(b"-".to_vec())
+			syn::WordPart::Lit(b"-".to_vec().into())
 		]]);
-		let alts = expand(&[var("var", true), syn::WordPart::Lit(b"{x,y}".to_vec())]).unwrap();
-		assert_eq!(alts[0], vec![var("var", true), syn::WordPart::Lit(b"x".to_vec())]);
+		let alts = expand(&[var("var", true), syn::WordPart::Lit(b"{x,y}".to_vec().into())]).unwrap();
+		assert_eq!(alts[0], vec![var("var", true), syn::WordPart::Lit(b"x".to_vec().into())]);
 	}
 }

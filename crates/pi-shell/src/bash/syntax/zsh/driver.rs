@@ -105,7 +105,7 @@ impl<'s> ZshParser<'s> {
 				let lo = items.first().map_or(0, |i| i.and_or.span.lo);
 				let hi = items.last().map_or(lo, |i| i.and_or.span.hi);
 				let mut list = List { items };
-				finish::fill_docs(&mut list, &cx.docs);
+				finish::fill_doc_texts(&mut list, &cx.docs);
 				let node_count = finish::assign_ids(&mut list);
 				return Some(Ok(CompleteCommand {
 					span: Span::new(lo, hi),

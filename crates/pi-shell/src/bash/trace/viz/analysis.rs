@@ -465,11 +465,9 @@ impl<'a> Walker<'a> {
 		}
 		for assignment in &simple.assigns {
 			self.register(assignment.id, assignment.span, owner);
-			self.color(
-				owner,
-				Span::new(assignment.span.lo, assignment.span.lo + assignment.name.len() as u32),
-				"var def",
-			);
+			if let Some(span) = assignment.name_span {
+				self.color(owner, span, "var def");
+			}
 			let start = self.references.len();
 			let secret_before = self.secret_reads;
 			let calls_before = self.calls.len();
@@ -544,7 +542,7 @@ impl<'a> Walker<'a> {
 	}
 
 	fn word(&mut self, word: &'a Word, owner: NodeKey, context: Context, fallback: &str) {
-		self.register(word.id, word.span, owner);
+		self.register(word.id, *word.span, owner);
 		let value = literal(word);
 		if let (Some(body), Some(slot)) = (&value, self.source_slot) {
 			let next = u32::try_from(body.len())
@@ -577,7 +575,9 @@ impl<'a> Walker<'a> {
 		} else {
 			fallback
 		};
-		self.color(owner, word.span, style);
+		if let Some(span) = word.span.recorded() {
+			self.color(owner, span, style);
+		}
 		self.parts(&word.parts, owner, context);
 	}
 

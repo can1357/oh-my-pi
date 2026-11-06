@@ -215,10 +215,11 @@ pub(super) struct Tok {
 
 /// The uncommon arithmetic token payload, kept out of every word token.
 pub(super) struct ArithTok {
-	pub text:  Vec<u8>,
-	pub semis: Vec<usize>,
-	pub lo:    u32,
-	pub hi:    u32,
+	pub text:    Vec<u8>,
+	pub pieces:  Vec<(usize, usize, Span, Option<Span>)>,
+	pub lo:      u32,
+	pub hi:      u32,
+	pub trimmed: Option<Span>,
 }
 
 impl Tok {
@@ -686,9 +687,9 @@ impl<'s> Parser<'s> {
 			// A `for ((…))` inside a substitution inside another one starts
 			// its own collection.
 			let depth = core::mem::replace(&mut self.raw_depth, 0);
-			let outer = self.arith_semis.replace(Vec::new());
+			let outer = self.arith_pieces.replace(Vec::new());
 			let text = self.raw_arith(b'(', b')', start);
-			let semis = core::mem::replace(&mut self.arith_semis, outer).unwrap_or_default();
+			let pieces = core::mem::replace(&mut self.arith_pieces, outer).unwrap_or_default();
 			self.raw_depth = depth;
 			let text = text?;
 			let ahi = self.raw_close;
@@ -697,7 +698,8 @@ impl<'s> Parser<'s> {
 			}
 			self.bump();
 			let mut t = Tok::new(T::ArithFor, lo, self.off(), line);
-			t.arith = Some(Box::new(ArithTok { text, semis, lo: alo, hi: ahi }));
+			t.arith =
+				Some(Box::new(ArithTok { text, pieces, lo: alo, hi: ahi, trimmed: self.raw_trimmed }));
 			return Ok(Some(t));
 		}
 		if self.reserved_word_acceptable(self.lx.last) {
@@ -710,7 +712,13 @@ impl<'s> Parser<'s> {
 			if self.peek() == Some(b')') {
 				self.bump();
 				let mut t = Tok::new(T::ArithCmd, lo, self.off(), line);
-				t.arith = Some(Box::new(ArithTok { text, semis: Vec::new(), lo: alo, hi: ahi }));
+				t.arith = Some(Box::new(ArithTok {
+					text,
+					pieces: Vec::new(),
+					lo: alo,
+					hi: ahi,
+					trimmed: self.raw_trimmed,
+				}));
 				return Ok(Some(t));
 			}
 			// Not `(( … ))`: a subshell inside a subshell. Re-read from the
@@ -785,9 +793,12 @@ impl<'s> Parser<'s> {
 		let w = w.unwrap_or_else(|| WordTok {
 			lo,
 			hi,
-			parts: vec![crate::bash::syntax::WordPart::Lit(
-				keyword.expect("borrowed keyword").to_vec(),
-			)],
+			parts: vec![crate::bash::syntax::WordPart::Lit(crate::bash::syntax::Located::new(
+				keyword.expect("borrowed keyword").to_vec().into(),
+				Span::new(lo, hi),
+				Span::new(lo, hi),
+				None,
+			))],
 			quoted: false,
 			asg: None,
 		});
@@ -1094,24 +1105,41 @@ impl<'s> Parser<'s> {
 		self.skip = Some(super::cursor::Skip { at, to, line });
 	}
 
-	/// Read one here-document body (bash `make_here_document`).
-	fn read_doc(&mut self, doc: &PendingDoc, at_line: u32) -> Vec<u8> {
+	/// Read one here-document body (bash `make_here_document`), retaining
+	/// both bash's processed text and the actual input consumed for export.
+	fn read_doc(&mut self, doc: &PendingDoc, at_line: u32) -> super::finish::GatheredDoc {
+		let start = self.off();
+		let mut source = crate::bash::syntax::ast::HereDocSource {
+			span:       Span::new(start, start),
+			raw:        Vec::new(),
+			close:      None,
+			close_line: None,
+			flat:       self.flat,
+		};
 		let mut text = Vec::new();
 		let mut line = Vec::new();
 		let delim = &doc.delim[..];
 		loop {
 			let line_start = self.mark();
+			let line_lo = self.off();
+			let raw_start = source.raw.len();
 			line.clear();
-			if !self.read_doc_line(&mut line, !doc.quoted) {
+			let Some((line_span, raw_content)) =
+				self.read_doc_line(&mut line, &mut source, !doc.quoted)
+			else {
 				self.doc_eof_warning(doc, at_line);
 				break;
-			}
+			};
 			let mut body: &[u8] = &line;
 			if doc.strip && !body.is_empty() {
 				if body.len() == delim.len() + 1
 					&& body.starts_with(delim)
 					&& body[delim.len()] == b'\n'
 				{
+					source.close = Some(Span::new(line_lo, line_span.hi));
+					source.close_line = Some(line_lo);
+					source.span.hi = line_lo;
+					source.raw.truncate(raw_start);
 					break;
 				}
 				while body.first() == Some(&b'\t') {
@@ -1121,27 +1149,45 @@ impl<'s> Parser<'s> {
 			if body.is_empty() {
 				continue;
 			}
+			let (close_lo, raw_close) = if doc.strip {
+				(line_span.lo, raw_content)
+			} else {
+				(line_lo, raw_start)
+			};
 			if body.len() == delim.len() + 1 && body.starts_with(delim) && body[delim.len()] == b'\n' {
+				source.close = Some(Span::new(close_lo, line_span.hi));
+				source.close_line = Some(line_lo);
+				source.span.hi = close_lo;
+				source.raw.truncate(raw_close);
 				break;
 			}
 			if self.lx.eof_token != 0
 				&& body.starts_with(delim)
 				&& body[delim.len()..].contains(&self.lx.eof_token)
 			{
-				// bash pushes the rest of the line back as input.
+				// bash pushes the rest of the line back as input. Record
+				// the delimiter's end while consuming it again, not by
+				// subtracting the rest of the line from its old end.
 				let tabs = line.len() - body.len();
-				let back = tabs + delim.len();
 				if self.reset(line_start) {
-					for _ in 0..back {
+					for _ in 0..tabs {
 						self.bump();
 					}
+					let lo = self.off();
+					for _ in delim {
+						self.bump();
+					}
+					source.close = Some(Span::new(lo, self.off()));
 				}
+				source.close_line = Some(line_lo);
+				source.span.hi = close_lo;
+				source.raw.truncate(raw_close);
 				self.doc_eof_warning(doc, at_line);
 				break;
 			}
 			text.extend_from_slice(body);
 		}
-		text
+		super::finish::GatheredDoc { text, source: Some(source) }
 	}
 
 	fn doc_eof_warning(&mut self, doc: &PendingDoc, at_line: u32) {
@@ -1155,15 +1201,22 @@ impl<'s> Parser<'s> {
 			.push(ParseWarning { line: self.bash_line(), bash_msg: msg });
 	}
 
-	/// One here-document line with its newline (bash `read_a_line`); `false`
-	/// at end of input. `unquoted` removes `\newline`.
-	fn read_doc_line(&mut self, out: &mut Vec<u8>, unquoted: bool) -> bool {
+	/// One processed line and its recorded delimiter extent/raw start. The
+	/// raw input keeps tabs, NULs and continuations, but no virtual newline.
+	fn read_doc_line(
+		&mut self,
+		out: &mut Vec<u8>,
+		source: &mut crate::bash::syntax::ast::HereDocSource,
+		unquoted: bool,
+	) -> Option<(Span, usize)> {
+		let mut content = None;
 		loop {
 			if self.pos == 0 && core::ptr::eq(self.buf.as_ptr(), cursor::END_ALIAS_SPACE.as_ptr()) {
 				self.pos = 1;
 				continue;
 			}
-			// Fast path: copy up to a newline or backslash.
+			// Fast path: copy up to a newline or backslash. Split only
+			// the leading tabs to record where a stripped delimiter starts.
 			let buf: &'s [u8] = self.buf;
 			let rest = buf.get(self.pos..).unwrap_or_default();
 			let n = rest
@@ -1171,40 +1224,86 @@ impl<'s> Parser<'s> {
 				.position(|&c| c == b'\n' || (unquoted && c == b'\\') || c == 0)
 				.unwrap_or(rest.len());
 			if n > 0 {
-				out.extend_from_slice(&rest[..n]);
-				self.advance(n);
+				source.flat |= self.flat_positions();
+				let tabs = if content.is_none() {
+					rest[..n].iter().take_while(|&&c| c == b'\t').count()
+				} else {
+					0
+				};
+				out.extend_from_slice(&rest[..tabs]);
+				source.raw.extend_from_slice(&rest[..tabs]);
+				self.advance(tabs);
+				if tabs < n && content.is_none() {
+					content = Some((self.off(), source.raw.len()));
+				}
+				out.extend_from_slice(&rest[tabs..n]);
+				source.raw.extend_from_slice(&rest[tabs..n]);
+				self.advance(n - tabs);
+				source.span.hi = self.off();
 			}
 			let Some(c) = self.peek() else {
 				if out.is_empty() {
-					return false;
+					return None;
 				}
+				let end = self.off();
+				let (lo, raw) = content.unwrap_or((end, source.raw.len()));
 				out.push(b'\n');
-				return true;
+				return Some((Span::new(lo, end), raw));
 			};
+			let at = self.off();
+			let raw_at = source.raw.len();
+			let real = self.pos < self.buf.len();
+			let alias_space = core::ptr::eq(self.buf.as_ptr(), cursor::END_ALIAS_SPACE.as_ptr());
+			if real && !alias_space {
+				source.flat |= self.flat_positions();
+				source.raw.push(c);
+			}
 			self.bump();
 			if self.at_alias_space() {
 				// bash adds no end-of-alias space while it reads a document.
 				continue;
 			}
+			if real {
+				source.span.hi = self.off();
+			}
 			match c {
 				0 => {},
 				b'\n' => {
+					let (lo, raw) = content.unwrap_or((at, raw_at));
 					out.push(b'\n');
-					return true;
+					return Some((Span::new(lo, at), raw));
 				},
 				b'\\' => match self.peek() {
-					Some(b'\n') => self.bump(),
-					None => out.push(b'\\'),
+					Some(b'\n') => {
+						if self.pos < self.buf.len() {
+							source.flat |= self.flat_positions();
+							source.raw.push(b'\n');
+						}
+						self.bump();
+						source.span.hi = self.off();
+					},
+					None => {
+						content.get_or_insert((at, raw_at));
+						out.push(b'\\');
+					},
 					Some(d) => {
+						content.get_or_insert((at, raw_at));
 						out.push(b'\\');
 						out.push(d);
-						self.bump();
-						if d == b'\n' {
-							return true;
+						if self.pos < self.buf.len() {
+							source.flat |= self.flat_positions();
+							source.raw.push(d);
 						}
+						self.bump();
+						source.span.hi = self.off();
 					},
 				},
-				_ => out.push(c),
+				_ => {
+					if c != b'\t' {
+						content.get_or_insert((at, raw_at));
+					}
+					out.push(c);
+				},
 			}
 		}
 	}
@@ -1212,7 +1311,7 @@ impl<'s> Parser<'s> {
 	/// Queue a here-document; its text slot gets the body at the next newline.
 	pub(super) fn push_doc(&mut self, delim: Vec<u8>, strip: bool, quoted: bool) -> u32 {
 		let seq = self.docs.len() as u32;
-		self.docs.push(Vec::new());
+		self.docs.push(super::finish::GatheredDoc::default());
 		self.pending.push(PendingDoc { seq, delim, strip, quoted });
 		seq
 	}

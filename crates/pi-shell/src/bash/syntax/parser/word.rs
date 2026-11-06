@@ -23,15 +23,16 @@ pub(super) struct WordTok {
 
 /// Where an assignment word splits.
 pub(super) struct AsgSplit {
-	pub name:     Vec<u8>,
+	pub name:      Vec<u8>,
+	pub name_span: Span,
 	/// Parts `[a, b)` of the subscript of `name[sub]=`, and its span.
-	pub index:    Option<(usize, usize, Span)>,
-	pub append:   bool,
+	pub index:     Option<(usize, usize, Span)>,
+	pub append:    bool,
 	/// First part of the value.
-	pub value_at: usize,
-	pub value_lo: u32,
+	pub value_at:  usize,
+	pub value_lo:  u32,
 	/// `name=(…)` read as a compound assignment, and the parts after it.
-	pub array:    Option<Vec<ArrayElem>>,
+	pub array:     Option<CompoundArray>,
 }
 
 impl WordTok {
@@ -69,12 +70,16 @@ impl WordTok {
 		let lo = self.lo;
 		let hi = self.hi;
 		let mut parts = self.parts;
+		let assignment = self
+			.asg
+			.as_ref()
+			.map(|a| AssignPrefix { name: a.name_span, value_lo: a.value_lo });
 		if let Some(a) = self.asg
 			&& let Some(elems) = a.array
 		{
 			parts.insert(a.value_at, WordPart::Compound(elems));
 		}
-		Word { id: NodeId(0), span: Span::new(lo, hi), parts: merge_lits(parts) }
+		Word { id: NodeId(0), span: Span::new(lo, hi).into(), parts: merge_lits(parts), assignment }
 	}
 
 	/// The token as an assignment (only when [`WordTok::is_assign`]).
@@ -85,9 +90,10 @@ impl WordTok {
 		let mut parts = self.parts;
 		let value_parts = parts.split_off(a.value_at);
 		let index = a.index.map(|(s, e, span)| Word {
-			id: NodeId(0),
-			span,
-			parts: merge_lits(parts.drain(s..e).collect()),
+			id:         NodeId(0),
+			span:       span.into(),
+			parts:      merge_lits(parts.drain(s..e).collect()),
+			assignment: None,
 		});
 		let value = match a.array {
 			Some(elems) if value_parts.is_empty() => AssignValue::Array(elems),
@@ -95,21 +101,24 @@ impl WordTok {
 				let mut v = vec![WordPart::Compound(elems)];
 				v.extend(value_parts);
 				AssignValue::Scalar(Word {
-					id:    NodeId(0),
-					span:  Span::new(a.value_lo, hi),
-					parts: merge_lits(v),
+					id:         NodeId(0),
+					span:       Span::new(a.value_lo, hi).into(),
+					parts:      merge_lits(v),
+					assignment: None,
 				})
 			},
 			None => AssignValue::Scalar(Word {
-				id:    NodeId(0),
-				span:  Span::new(a.value_lo, hi),
-				parts: merge_lits(value_parts),
+				id:         NodeId(0),
+				span:       Span::new(a.value_lo, hi).into(),
+				parts:      merge_lits(value_parts),
+				assignment: None,
 			}),
 		};
 		Assign {
 			id: NodeId(0),
 			span: Span::new(lo, hi),
 			name: a.name,
+			name_span: Some(a.name_span),
 			index,
 			append: a.append,
 			value,
@@ -128,7 +137,28 @@ pub(super) fn merge_lits(mut parts: Vec<WordPart>) -> Vec<WordPart> {
 	parts.retain(|part| !matches!(part, WordPart::Lit(s) if s.is_empty()));
 	parts.dedup_by(|next, previous| {
 		if let (WordPart::Lit(next), WordPart::Lit(previous)) = (next, previous) {
-			previous.extend_from_slice(next);
+			let offset = previous.value.bytes.len();
+			previous.value.bytes.extend_from_slice(&next.value.bytes);
+			if previous.value.dollars.is_empty() {
+				previous.value.dollars = core::mem::take(&mut next.value.dollars);
+				for (index, _) in &mut previous.value.dollars {
+					*index += offset;
+				}
+			} else {
+				previous.value.dollars.extend(
+					next
+						.value
+						.dollars
+						.iter()
+						.map(|&(index, span)| (offset + index, span)),
+				);
+			}
+			if let (Some(a), Some(b)) = (&mut previous.pos, next.pos) {
+				a.span.hi = b.span.hi;
+				a.content.hi = b.content.hi;
+			} else {
+				previous.pos = None;
+			}
 			true
 		} else {
 			false
@@ -139,24 +169,43 @@ pub(super) fn merge_lits(mut parts: Vec<WordPart>) -> Vec<WordPart> {
 
 /// Accumulates literal bytes and parts.
 struct Acc {
-	parts: Vec<WordPart>,
-	lit:   Vec<u8>,
+	parts:   Vec<WordPart>,
+	lit:     Vec<u8>,
+	dollars: Vec<(usize, Span)>,
+	lo:      u32,
+	end:     u32,
 }
 
 impl Acc {
 	const fn new() -> Self {
-		Self { parts: Vec::new(), lit: Vec::new() }
+		Self { parts: Vec::new(), lit: Vec::new(), dollars: Vec::new(), lo: 0, end: 0 }
+	}
+
+	fn at(&mut self, at: u32) {
+		if self.lit.is_empty() {
+			self.lo = at;
+		}
+		self.end = at;
 	}
 
 	fn flush(&mut self) {
 		if !self.lit.is_empty() {
-			self
-				.parts
-				.push(WordPart::Lit(core::mem::take(&mut self.lit)));
+			self.parts.push(WordPart::Lit(Located::new(
+				Literal {
+					bytes:   core::mem::take(&mut self.lit),
+					dollars: core::mem::take(&mut self.dollars),
+				},
+				Span::new(self.lo, self.end),
+				Span::new(self.lo, self.end),
+				None,
+			)));
 		}
 	}
 
 	fn push(&mut self, p: WordPart) {
+		if let Some(pos) = p.pos() {
+			self.end = pos.span.lo;
+		}
 		self.flush();
 		if self.parts.capacity() == 0 {
 			self.parts = vec![p];
@@ -170,7 +219,12 @@ impl Acc {
 			if self.lit.is_empty() {
 				self.parts
 			} else {
-				vec![WordPart::Lit(self.lit)]
+				vec![WordPart::Lit(Located::new(
+					Literal { bytes: self.lit, dollars: self.dollars },
+					Span::new(self.lo, self.end),
+					Span::new(self.lo, self.end),
+					None,
+				))]
 			}
 		} else {
 			self.flush();
@@ -268,7 +322,12 @@ impl<'s> Parser<'s> {
 		let mut sub: Option<(usize, usize, Span)> = None;
 		let compassign = self.lx.compassign;
 		let mut first = true;
+		let mut name_hi = lo;
 		loop {
+			acc.at(self.off());
+			if scan == Scan::Name {
+				name_hi = self.off();
+			}
 			// Fast path: a run of ordinary bytes in the current buffer.
 			if self.pos < self.buf.len() {
 				let buf: &'s [u8] = self.buf;
@@ -287,7 +346,12 @@ impl<'s> Parser<'s> {
 						return Ok(WordTok {
 							lo,
 							hi: self.off(),
-							parts: vec![WordPart::Lit(text)],
+							parts: vec![WordPart::Lit(Located::new(
+								text.into(),
+								Span::new(lo, self.off()),
+								Span::new(lo, self.off()),
+								None,
+							))],
 							quoted: false,
 							asg: None,
 						});
@@ -311,6 +375,7 @@ impl<'s> Parser<'s> {
 				}
 			}
 			let Some(c) = self.peek() else { break };
+			let at = self.off();
 			match c {
 				b'\\' => {
 					if self.peek_at(1) == Some(b'\n') {
@@ -319,6 +384,7 @@ impl<'s> Parser<'s> {
 						continue;
 					}
 					self.bump();
+					let content = self.off();
 					quoted = true;
 					if !matches!(scan, Scan::Found | Scan::LitSub(_)) {
 						scan = Scan::No;
@@ -327,7 +393,13 @@ impl<'s> Parser<'s> {
 						None => acc.lit.push(b'\\'),
 						Some(d) => {
 							let bytes = self.take_char(d);
-							acc.push(WordPart::Escaped(bytes));
+							let span = Span::new(at, self.off());
+							acc.push(WordPart::Escaped(Located::new(
+								bytes,
+								span,
+								Span::new(content, span.hi),
+								None,
+							)));
 						},
 					}
 				},
@@ -380,6 +452,8 @@ impl<'s> Parser<'s> {
 						acc.push(part);
 					} else {
 						self.bump();
+						let span = Span::new(at, self.off());
+						acc.dollars.push((acc.lit.len(), span));
 						acc.lit.push(b'$');
 					}
 				},
@@ -401,12 +475,14 @@ impl<'s> Parser<'s> {
 					// cursor does not advance there.
 					let sub_inner = self.off();
 					acc.lit.push(b'[');
+					acc.at(self.off());
 					acc.flush();
 					let start = acc.parts.len();
 					let inner = self.parts_until(Stop::Bracket)?;
 					let inner_hi = self.off();
 					acc.parts.extend(inner);
 					let end = acc.parts.len();
+					acc.at(self.off());
 					if self.peek() == Some(b']') {
 						self.bump();
 					}
@@ -463,16 +539,25 @@ impl<'s> Parser<'s> {
 								},
 							}
 						};
+						acc.at(self.off());
 						acc.flush();
 						let value_at = acc.parts.len();
 						let value_lo = self.off();
-						let mut s =
-							AsgSplit { name, index: sub, append, value_at, value_lo, array: None };
+						let mut s = AsgSplit {
+							name,
+							name_span: Span::new(lo, name_hi),
+							index: sub,
+							append,
+							value_at,
+							value_lo,
+							array: None,
+						};
 						scan = Scan::Found;
 						// `name=(…)`: a compound assignment.
 						if self.peek() == Some(b'(') && (acceptable || self.lx.assignok) && !compassign {
+							let lparen = self.off();
 							self.bump();
-							s.array = Some(self.compound_assignment()?);
+							s.array = Some(self.compound_assignment(lparen)?);
 						}
 						split = Some(Box::new(s));
 					} else if scan != Scan::Found {
@@ -544,9 +629,11 @@ impl<'s> Parser<'s> {
 	/// `dq`: inside double quotes (single quotes are literal there).
 	fn quoted_part(&mut self, c: u8, dq: bool) -> PResult<WordPart> {
 		let line = self.bash_line();
+		let lo = self.off();
 		match c {
 			b'\'' if !dq => {
 				self.bump();
+				let content = self.off();
 				let mut s = Vec::new();
 				loop {
 					let buf: &'s [u8] = self.buf;
@@ -554,16 +641,28 @@ impl<'s> Parser<'s> {
 					if let Some(n) = rest.iter().position(|&c| c == b'\'') {
 						s.extend_from_slice(&rest[..n]);
 						self.advance_lines(n);
+						let end = self.off();
 						self.bump();
-						return Ok(WordPart::SQuote(s));
+						return Ok(WordPart::SQuote(Located::new(
+							s,
+							Span::new(lo, self.off()),
+							Span::new(content, end),
+							Some(Span::new(end, self.off())),
+						)));
 					}
 					s.extend_from_slice(rest);
 					self.advance_lines(rest.len());
 					match self.peek() {
 						None => return Err(unmatched_error(self.eof_span(), line, "'")),
 						Some(b'\'') => {
+							let end = self.off();
 							self.bump();
-							return Ok(WordPart::SQuote(s));
+							return Ok(WordPart::SQuote(Located::new(
+								s,
+								Span::new(lo, self.off()),
+								Span::new(content, end),
+								Some(Span::new(end, self.off())),
+							)));
 						},
 						Some(d) => {
 							s.push(d);
@@ -574,8 +673,15 @@ impl<'s> Parser<'s> {
 			},
 			b'"' => {
 				self.bump();
+				let content = self.off();
 				let parts = self.parts_until_line(Stop::DQuote { all: false }, line)?;
-				Ok(WordPart::DQuote(parts))
+				let close = Span::new(self.raw_close, self.off());
+				Ok(WordPart::DQuote(Located::new(
+					parts,
+					Span::new(lo, close.hi),
+					Span::new(content, close.lo),
+					Some(close),
+				)))
 			},
 			_ => self.backquote(line, dq),
 		}
@@ -602,17 +708,20 @@ impl<'s> Parser<'s> {
 	/// from the text with `\$`, `` \` ``, `\\` (and `\"` inside `"…"`)
 	/// unescaped.
 	fn backquote(&mut self, line: u32, dq: bool) -> PResult<WordPart> {
+		let lo = self.off();
+		let flat = self.flat_positions();
 		self.bump();
 		let text_lo = self.off();
 		let mut text = Vec::new();
-		loop {
+		let close = loop {
 			let Some(c) = self.peek() else {
 				return Err(unmatched_error(self.eof_span(), line, "`"));
 			};
 			match c {
 				b'`' => {
+					let at = self.off();
 					self.bump();
-					break;
+					break Span::new(at, self.off());
 				},
 				b'\\' => {
 					self.bump();
@@ -630,7 +739,7 @@ impl<'s> Parser<'s> {
 					self.take_char_into(c, &mut text);
 				},
 			}
-		}
+		};
 		let mut code = Vec::with_capacity(text.len());
 		let mut i = 0;
 		while i < text.len() {
@@ -645,9 +754,13 @@ impl<'s> Parser<'s> {
 				i += 1;
 			}
 		}
-		let flat = !self.in_source();
 		let body = super::sub_parse_list(&code, self.feat, text_lo, flat).unwrap_or_default();
-		Ok(WordPart::Comsub(Box::new(Comsub { kind: ComsubKind::Backtick, body, text })))
+		Ok(WordPart::Comsub(Located::new(
+			Box::new(Comsub { kind: ComsubKind::Backtick, body, text }),
+			Span::new(lo, close.hi),
+			Span::new(text_lo, close.lo),
+			Some(close),
+		)))
 	}
 
 	/// Parts up to the terminator of `stop`.
@@ -677,6 +790,7 @@ impl<'s> Parser<'s> {
 		let mut lit_sq = false;
 		let mut sq_line = line;
 		loop {
+			acc.at(self.off());
 			if self.pos < self.buf.len() {
 				let buf: &'s [u8] = self.buf;
 				let rest = &buf[self.pos..];
@@ -717,6 +831,7 @@ impl<'s> Parser<'s> {
 					Stop::Group => Err(unmatched_error(self.eof_span(), line, ")")),
 				};
 			};
+			let at = self.off();
 			match c {
 				// In a non-pattern `${…}` word inside "…", `'` is an ordinary
 				// character; outside posix mode it still pairs, so `}` and `"`
@@ -733,13 +848,14 @@ impl<'s> Parser<'s> {
 				},
 				b'"' if lit_sq => {
 					self.bump();
-					acc.push(WordPart::DroppedQuote);
+					acc.push(WordPart::DroppedQuote(Some(Span::new(at, self.off()))));
 				},
 				b'}' | b'/' if lit_sq => {
 					self.bump();
 					acc.lit.push(c);
 				},
 				b'"' if matches!(stop, Stop::DQuote { .. }) => {
+					self.raw_close = self.off();
 					self.bump();
 					return Ok(());
 				},
@@ -771,6 +887,7 @@ impl<'s> Parser<'s> {
 				},
 				b'\\' => {
 					self.bump();
+					let content = self.off();
 					match self.peek() {
 						Some(b'\n') => self.bump(),
 						None => acc.lit.push(b'\\'),
@@ -790,7 +907,13 @@ impl<'s> Parser<'s> {
 							};
 							let bytes = self.take_char(d);
 							if escaped {
-								acc.push(WordPart::Escaped(bytes));
+								let span = Span::new(at, self.off());
+								acc.push(WordPart::Escaped(Located::new(
+									bytes,
+									span,
+									Span::new(content, span.hi),
+									None,
+								)));
 							} else {
 								// The backslash stays, and the character after it
 								// starts nothing (`"${a#'x'\'}"`).
@@ -818,9 +941,16 @@ impl<'s> Parser<'s> {
 					} else if matches!(stop, Stop::Brace { dq: true, pat: false, .. }) {
 						// `"${v:+x="\p"}"`: every backslash in these quotes quotes.
 						self.bump();
+						let content = self.off();
 						let inner =
 							self.parts_until_line(Stop::DQuote { all: true }, self.bash_line())?;
-						acc.push(WordPart::DQuote(inner));
+						let close = Span::new(self.raw_close, self.off());
+						acc.push(WordPart::DQuote(Located::new(
+							inner,
+							Span::new(at, close.hi),
+							Span::new(content, close.lo),
+							Some(close),
+						)));
 					} else {
 						let part = self.quoted_part(c, true)?;
 						acc.push(part);
@@ -849,6 +979,8 @@ impl<'s> Parser<'s> {
 						acc.push(part);
 					} else {
 						self.bump();
+						let span = Span::new(at, self.off());
+						acc.dollars.push((acc.lit.len(), span));
 						acc.lit.push(b'$');
 					}
 				},
@@ -871,30 +1003,41 @@ impl<'s> Parser<'s> {
 		};
 		let dq = ctx.in_dq();
 		let doc = matches!(ctx, Stop::Text(TextMode::HereDoc) | Stop::Brace { doc: true, .. });
-		let param = |name: ParamName| {
-			Some(WordPart::Param(Box::new(Param {
-				name,
-				index: None,
-				op: ParamOp::None,
-				braced: false,
-				indirect: false,
-			})))
+		let start = self.off();
+		let param = |name, lo, hi| {
+			Some(WordPart::Param(Located::new(
+				Box::new(Param {
+					name,
+					name_span: Some(Span::new(lo, hi)),
+					index: None,
+					index_span: None,
+					op: ParamOp::None,
+					braced: false,
+					indirect: false,
+				}),
+				Span::new(start, hi),
+				Span::new(lo, hi),
+				None,
+			)))
 		};
 		match c {
 			_ if is_name_start(c) => {
 				self.bump();
+				let lo = self.off();
 				let name = self.take_name();
-				Ok(param(ParamName::Var(name)))
+				Ok(param(ParamName::Var(name), lo, self.off()))
 			},
 			b'0'..=b'9' => {
 				self.bump();
+				let lo = self.off();
 				self.bump();
-				Ok(param(ParamName::Positional(u32::from(c - b'0'))))
+				Ok(param(ParamName::Positional(u32::from(c - b'0')), lo, self.off()))
 			},
 			_ if special_dollar(c).is_some() => {
 				self.bump();
+				let lo = self.off();
 				self.bump();
-				Ok(param(ParamName::Special(special_dollar(c).expect("checked"))))
+				Ok(param(ParamName::Special(special_dollar(c).expect("checked")), lo, self.off()))
 			},
 			b'{' => {
 				let n2 = self.peek_at(2);
@@ -905,7 +1048,7 @@ impl<'s> Parser<'s> {
 					if value {
 						self.bump();
 					}
-					return self.funsub(value).map(Some);
+					return self.funsub(start, value).map(Some);
 				}
 				self.braced_param(dq, doc).map(Some)
 			},
@@ -913,9 +1056,9 @@ impl<'s> Parser<'s> {
 				self.bump();
 				self.bump();
 				if self.peek() == Some(b'(') {
-					return self.dollar_dparen().map(Some);
+					return self.dollar_dparen(start).map(Some);
 				}
-				self.dollar_paren().map(Some)
+				self.dollar_paren(start).map(Some)
 			},
 			b'[' => {
 				self.bump();
@@ -923,21 +1066,29 @@ impl<'s> Parser<'s> {
 				let lo = self.off();
 				let line = self.bash_line();
 				let src = self.raw_arith(b'[', b']', line)?;
-				let hi = self.off() - 1;
-				Ok(Some(WordPart::Arith(ArithText { span: Span::new(lo, hi), src, bracket: true })))
+				let hi = self.raw_close;
+				let content = Span::new(lo, hi);
+				Ok(Some(WordPart::Arith(Located::new(
+					ArithText { span: content, trimmed: self.raw_trimmed, src, bracket: true },
+					Span::new(start, self.off()),
+					content,
+					Some(Span::new(hi, self.off())),
+				))))
 			},
 			b'\'' if !no_quotes => {
 				self.bump();
 				let line = self.bash_line();
 				self.bump();
+				let content = self.off();
 				let mut raw = Vec::new();
-				loop {
+				let close = loop {
 					let Some(d) = self.peek() else {
 						return Err(unmatched_error(self.eof_span(), line, "'"));
 					};
+					let at = self.off();
 					self.bump();
 					match d {
-						b'\'' => break,
+						b'\'' => break Span::new(at, self.off()),
 						b'\\' => {
 							raw.push(b'\\');
 							if let Some(e) = self.peek() {
@@ -947,15 +1098,27 @@ impl<'s> Parser<'s> {
 						},
 						_ => raw.push(d),
 					}
-				}
-				Ok(Some(WordPart::AnsiC(raw)))
+				};
+				Ok(Some(WordPart::AnsiC(Located::new(
+					raw,
+					Span::new(start, close.hi),
+					Span::new(content, close.lo),
+					Some(close),
+				))))
 			},
 			b'"' if !no_quotes => {
 				self.bump();
 				let line = self.bash_line();
 				self.bump();
+				let content = self.off();
 				let parts = self.parts_until_line(Stop::DQuote { all: false }, line)?;
-				Ok(Some(WordPart::Locale(parts)))
+				let close = Span::new(self.raw_close, self.off());
+				Ok(Some(WordPart::Locale(Located::new(
+					parts,
+					Span::new(start, close.hi),
+					Span::new(content, close.lo),
+					Some(close),
+				))))
 			},
 			_ => Ok(None),
 		}
@@ -963,47 +1126,77 @@ impl<'s> Parser<'s> {
 
 	/// `$((` seen (cursor at the second `(`): arithmetic when the text closes
 	/// with `))`, otherwise a command substitution of a subshell.
-	fn dollar_dparen(&mut self) -> PResult<WordPart> {
+	fn dollar_dparen(&mut self, start: u32) -> PResult<WordPart> {
 		let lo = self.off();
+		let flat = self.flat_positions();
 		let line = self.bash_line();
-		let text = self.raw_arith(b'(', b')', line)?;
-		let hi = self.off() - 1;
+		let (text, inner_span) = self.raw_arith_pair(line)?;
 		// text is `(…)…` without the final `)`.
 		if let Some(inner) = arith_inner(&text) {
-			return Ok(WordPart::Arith(ArithText {
-				span:    Span::new(lo + 1, hi.saturating_sub(1)),
-				src:     inner.to_vec(),
-				bracket: false,
-			}));
+			let content = inner_span.expect("arithmetic text has a matched inner pair");
+			return Ok(WordPart::Arith(Located::new(
+				ArithText {
+					span:    content,
+					trimmed: self.raw_inner_trimmed,
+					src:     inner.to_vec(),
+					bracket: false,
+				},
+				Span::new(start, self.off()),
+				content,
+				Some(Span::new(content.hi, self.off())),
+			)));
 		}
-		let flat = !self.in_source();
 		let body = super::sub_parse_list(&text, self.feat, lo, flat).unwrap_or_default();
-		Ok(WordPart::Comsub(Box::new(Comsub { kind: ComsubKind::Dollar, body, text })))
+		Ok(WordPart::Comsub(Located::new(
+			Box::new(Comsub { kind: ComsubKind::Dollar, body, text }),
+			Span::new(start, self.off()),
+			Span::new(lo, self.raw_close),
+			Some(Span::new(self.raw_close, self.off())),
+		)))
 	}
 
 	/// `$(` seen: parse the command substitution.
-	fn dollar_paren(&mut self) -> PResult<WordPart> {
-		let (body, text) = self.comsub(b')', false)?;
-		Ok(WordPart::Comsub(Box::new(Comsub { kind: ComsubKind::Dollar, body, text })))
+	fn dollar_paren(&mut self, start: u32) -> PResult<WordPart> {
+		let lo = self.off();
+		let (body, text, close) = self.comsub(b')', false)?;
+		Ok(WordPart::Comsub(Located::new(
+			Box::new(Comsub { kind: ComsubKind::Dollar, body, text }),
+			Span::new(start, close.hi),
+			Span::new(lo, close.lo),
+			Some(close),
+		)))
 	}
 
 	/// `${ ` / `${|` seen: a nofork command substitution.
-	fn funsub(&mut self, value: bool) -> PResult<WordPart> {
-		let (body, text) = self.comsub(b'}', value)?;
+	fn funsub(&mut self, start: u32, value: bool) -> PResult<WordPart> {
+		let lo = self.off();
+		let (body, text, close) = self.comsub(b'}', value)?;
 		let kind = if value {
 			ComsubKind::ValueSub
 		} else {
 			ComsubKind::NoFork
 		};
-		Ok(WordPart::Comsub(Box::new(Comsub { kind, body, text })))
+		Ok(WordPart::Comsub(Located::new(
+			Box::new(Comsub { kind, body, text }),
+			Span::new(start, close.hi),
+			Span::new(lo, close.lo),
+			Some(close),
+		)))
 	}
 
 	/// `<(` / `>(` at the cursor.
 	fn procsub(&mut self, output: bool) -> PResult<WordPart> {
+		let start = self.off();
 		self.bump();
 		self.bump();
-		let (body, _) = self.comsub(b')', false)?;
-		Ok(WordPart::ProcSub(Box::new(ProcSub { output, body })))
+		let lo = self.off();
+		let (body, _, close) = self.comsub(b')', false)?;
+		Ok(WordPart::ProcSub(Located::new(
+			Box::new(ProcSub { output, body }),
+			Span::new(start, close.hi),
+			Span::new(lo, close.lo),
+			Some(close),
+		)))
 	}
 
 	/// `"${a+'$('\'}"`: between the literal quotes of a `${…}` word inside
@@ -1012,6 +1205,7 @@ impl<'s> Parser<'s> {
 	/// the part keeps the error for expansion time and the cursor moves to
 	/// the `}` ending the word.
 	fn bad_comsub(&mut self) -> Option<WordPart> {
+		let lo = self.off();
 		let buf: &'s [u8] = self.buf;
 		let rest = buf.get(self.pos..).unwrap_or_default();
 		let len = word_end_in_quote(rest)?;
@@ -1020,30 +1214,45 @@ impl<'s> Parser<'s> {
 		let e = sub.comsub(b')', false).err()?;
 		let part = BadComsub { text: text.to_vec(), line: e.line, msg: e.bash_msg() };
 		self.advance_lines(len);
-		Some(WordPart::BadComsub(Box::new(part)))
+		let span = Span::new(lo, self.off());
+		Some(WordPart::BadComsub(Located::new(Box::new(part), span, span, None)))
 	}
 
 	/// `${…}` at the cursor; `doc`: inside an unquoted here-document.
 	fn braced_param(&mut self, dq: bool, doc: bool) -> PResult<WordPart> {
+		let lo = self.off();
 		let start = self.mark();
 		let line = self.bash_line();
 		self.bump();
 		self.bump();
+		let content = self.off();
 		match self.param_body(dq, doc, line)? {
 			Some(p) => {
 				if self.peek() == Some(b'}') {
+					let end = self.off();
 					self.bump();
-					return Ok(WordPart::Param(Box::new(p)));
+					return Ok(WordPart::Param(Located::new(
+						Box::new(p),
+						Span::new(lo, self.off()),
+						Span::new(content, end),
+						Some(Span::new(end, self.off())),
+					)));
 				}
-				self.bad_subst(start, line)
+				self.bad_subst(start, line, lo, content)
 			},
-			None => self.bad_subst(start, line),
+			None => self.bad_subst(start, line, lo, content),
 		}
 	}
 
 	/// Skip to the `}` closing a `${` that bash rejects at expansion time and
 	/// keep its text.
-	fn bad_subst(&mut self, start: super::cursor::Mark<'s>, line: u32) -> PResult<WordPart> {
+	fn bad_subst(
+		&mut self,
+		start: super::cursor::Mark<'s>,
+		line: u32,
+		lo: u32,
+		content: u32,
+	) -> PResult<WordPart> {
 		// Re-scan from the start with bash's matching rules.
 		let restarted = self.reset(start);
 		if restarted {
@@ -1054,18 +1263,26 @@ impl<'s> Parser<'s> {
 		let body = self.raw_matched(b'{', b'}', super::raw::Flags::DOLBRACE, line)?;
 		text.extend_from_slice(&body);
 		text.push(b'}');
-		Ok(WordPart::BadSubst(text))
+		let close = Span::new(self.raw_close, self.off());
+		Ok(WordPart::BadSubst(Located::new(
+			text,
+			Span::new(lo, close.hi),
+			Span::new(content, close.lo),
+			Some(close),
+		)))
 	}
 
 	/// The inside of `${…}` up to (not including) the closing `}`; `None`
 	/// when bash would report a bad substitution.
 	fn param_body(&mut self, dq: bool, doc: bool, line: u32) -> PResult<Option<Param>> {
 		let mut p = Param {
-			name:     ParamName::Special(Special::Count),
-			index:    None,
-			op:       ParamOp::None,
-			braced:   true,
-			indirect: false,
+			name:       ParamName::Special(Special::Count),
+			name_span:  None,
+			index:      None,
+			index_span: None,
+			op:         ParamOp::None,
+			braced:     true,
+			indirect:   false,
 		};
 		let c0 = self.peek();
 		let c1 = self.peek_at(1);
@@ -1080,6 +1297,7 @@ impl<'s> Parser<'s> {
 					&& !self.peek().is_some_and(|c| is_name_char(c) || c == b'[')
 				{
 					p.name = ParamName::Var(name);
+					p.name_span = raw.pos.map(|pos| pos.content);
 					return self.param_op(p, dq, doc, line);
 				}
 			}
@@ -1091,11 +1309,13 @@ impl<'s> Parser<'s> {
 		if c0 == Some(b'#') && c1 != Some(b'}') && c1.is_some_and(starts_param) {
 			let save = self.mark();
 			self.bump();
-			if let Some((name, index)) = self.param_name()?
+			if let Some((name, index, name_span, index_span)) = self.param_name()?
 				&& self.peek() == Some(b'}')
 			{
 				p.name = name;
 				p.index = index;
+				p.name_span = Some(name_span);
+				p.index_span = index_span;
 				p.op = ParamOp::Length;
 				return Ok(Some(p));
 			}
@@ -1118,7 +1338,9 @@ impl<'s> Parser<'s> {
 			self.bump();
 			if self.prefix_names_end() {
 				// `${!prefix*}` / `${!prefix@}`.
+				let lo = self.off();
 				let name = self.take_name();
+				p.name_span = Some(Span::new(lo, self.off()));
 				let star = self.peek() == Some(b'*');
 				self.bump();
 				p.name = ParamName::Var(name);
@@ -1126,9 +1348,11 @@ impl<'s> Parser<'s> {
 				return Ok(Some(p));
 			}
 			match self.param_name()? {
-				Some((name, index)) => {
+				Some((name, index, name_span, index_span)) => {
 					p.name = name;
 					p.index = index;
+					p.name_span = Some(name_span);
+					p.index_span = index_span;
 					if self.peek() == Some(b'}') {
 						p.op = ParamOp::Indirect;
 						return Ok(Some(p));
@@ -1144,7 +1368,7 @@ impl<'s> Parser<'s> {
 			}
 		}
 		match self.param_name()? {
-			Some((name, index)) => {
+			Some((name, index, name_span, index_span)) => {
 				// `${#:}`, `${#%}`, `${#/}`, … : `$#` with an operator and no
 				// word is a bad substitution.
 				if name == ParamName::Special(Special::Count)
@@ -1155,6 +1379,8 @@ impl<'s> Parser<'s> {
 				}
 				p.name = name;
 				p.index = index;
+				p.name_span = Some(name_span);
+				p.index_span = index_span;
 				self.param_op(p, dq, doc, line)
 			},
 			None => Ok(None),
@@ -1177,10 +1403,11 @@ impl<'s> Parser<'s> {
 	}
 
 	/// A parameter name (with subscript) at the cursor.
-	fn param_name(&mut self) -> PResult<Option<(ParamName, Option<Subscript>)>> {
+	fn param_name(&mut self) -> PResult<Option<(ParamName, Option<Subscript>, Span, Option<Span>)>> {
 		let Some(c) = self.peek() else {
 			return Ok(None);
 		};
+		let lo = self.off();
 		let name = if is_name_start(c) {
 			ParamName::Var(self.take_name())
 		} else if c.is_ascii_digit() {
@@ -1198,6 +1425,8 @@ impl<'s> Parser<'s> {
 		} else {
 			return Ok(None);
 		};
+		let name_span = Span::new(lo, self.off());
+		let mut index_span = None;
 		let mut index = None;
 		if matches!(name, ParamName::Var(_)) && self.peek() == Some(b'[') {
 			self.bump();
@@ -1206,6 +1435,7 @@ impl<'s> Parser<'s> {
 			let at = self.peek();
 			if matches!(at, Some(b'@' | b'*')) && self.peek_at(1) == Some(b']') {
 				self.bump();
+				index_span = Some(Span::new(ilo, self.off()));
 				self.bump();
 				index = Some(if at == Some(b'@') {
 					Subscript::At
@@ -1220,13 +1450,14 @@ impl<'s> Parser<'s> {
 				}
 				self.bump();
 				index = Some(Subscript::Expr(Word {
-					id:    NodeId(0),
-					span:  Span::new(ilo, hi),
-					parts: merge_lits(parts),
+					id:         NodeId(0),
+					span:       Span::new(ilo, hi).into(),
+					parts:      merge_lits(parts),
+					assignment: None,
 				}));
 			}
 		}
-		Ok(Some((name, index)))
+		Ok(Some((name, index, name_span, index_span)))
 	}
 
 	/// The operator after the parameter name, up to the closing `}`.
@@ -1273,13 +1504,15 @@ impl<'s> Parser<'s> {
 						ReplaceMode::All
 					},
 					Some(b'#') => {
-						anchor = Some(self.off());
+						let lo = self.off();
 						self.bump();
+						anchor = Some(Span::new(lo, self.off()));
 						ReplaceMode::Prefix
 					},
 					Some(b'%') => {
-						anchor = Some(self.off());
+						let lo = self.off();
 						self.bump();
+						anchor = Some(Span::new(lo, self.off()));
 						ReplaceMode::Suffix
 					},
 					_ => ReplaceMode::First,
@@ -1290,15 +1523,20 @@ impl<'s> Parser<'s> {
 				// such skip.
 				let lo = self.off();
 				let lead = matches!(mode, ReplaceMode::All) && self.peek() == Some(b'/');
-				if lead {
+				let lead_hi = if lead {
 					self.bump();
-				}
+					Some(self.off())
+				} else {
+					None
+				};
 				let mut pat = self.op_word(Stop::Brace { dq, slash: true, pat: true, doc })?;
 				if lead {
-					let mut parts = vec![WordPart::Lit(b"/".to_vec())];
+					let span = Span::new(lo, lead_hi.expect("leading slash was consumed"));
+					let mut parts =
+						vec![WordPart::Lit(Located::new(b"/".to_vec().into(), span, span, None))];
 					parts.append(&mut pat.parts);
 					pat.parts = merge_lits(parts);
-					pat.span = Span::new(lo, pat.span.hi);
+					pat.span = Span::new(lo, pat.span.hi).into();
 				}
 				let rep = if self.peek() == Some(b'/') {
 					self.bump();
@@ -1332,7 +1570,7 @@ impl<'s> Parser<'s> {
 					) => {
 						let at = self.off();
 						self.bump();
-						p.op = ParamOp::Transform { op, at };
+						p.op = ParamOp::Transform { op, at: Span::new(at, self.off()) };
 					},
 					_ => return Ok(None),
 				}
@@ -1347,7 +1585,7 @@ impl<'s> Parser<'s> {
 		let lo = self.off();
 		let parts = self.parts_until(stop)?;
 		let hi = self.off();
-		Ok(Word { id: NodeId(0), span: Span::new(lo, hi), parts })
+		Ok(Word { id: NodeId(0), span: Span::new(lo, hi).into(), parts, assignment: None })
 	}
 
 	/// `${x:off[:len]}` after the `:`: arithmetic texts.
@@ -1355,7 +1593,12 @@ impl<'s> Parser<'s> {
 		let lo = self.off();
 		let (off, at_colon) = self.raw_until_colon(line)?;
 		let hi = self.off();
-		let offset = ArithText { span: Span::new(lo, hi), src: off, bracket: false };
+		let offset = ArithText {
+			span:    Span::new(lo, hi),
+			trimmed: self.raw_trimmed,
+			src:     off,
+			bracket: false,
+		};
 		if !at_colon {
 			return Ok((offset, None));
 		}
@@ -1363,7 +1606,15 @@ impl<'s> Parser<'s> {
 		let lo2 = self.off();
 		let (len, _) = self.raw_until_colon(line)?;
 		let hi2 = self.off();
-		Ok((offset, Some(ArithText { span: Span::new(lo2, hi2), src: len, bracket: false })))
+		Ok((
+			offset,
+			Some(ArithText {
+				span:    Span::new(lo2, hi2),
+				trimmed: self.raw_trimmed,
+				src:     len,
+				bracket: false,
+			}),
+		))
 	}
 
 	/// Read one word in `mode` until end of input ([`parse_text`]).
@@ -1493,5 +1744,38 @@ fn word_op(op: u8, colon: bool, word: Word) -> ParamOp {
 			},
 		},
 		_ => ParamOp::Alt { colon, word },
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn merging_literals_rebases_value_indices_without_changing_recorded_tokens() {
+		let rows = [
+			("$a", vec![(0, Span::new(5, 5))], "b", vec![], "$ab", vec![(0, Span::new(5, 5))]),
+			("ab", vec![], "$c", vec![(0, Span::new(41, 42))], "ab$c", vec![(2, Span::new(41, 42))]),
+			("a$", vec![(1, Span::new(11, 12))], "b$", vec![(1, Span::new(90, 91))], "a$b$", vec![
+				(1, Span::new(11, 12)),
+				(3, Span::new(90, 91)),
+			]),
+		];
+		for (left, lmarks, right, rmarks, bytes, dollars) in rows {
+			let right_markers = rmarks.clone();
+			let mut parts = merge_lits(vec![
+				WordPart::Lit(Literal { bytes: left.as_bytes().to_vec(), dollars: lmarks }.into()),
+				WordPart::Lit(Literal { bytes: right.as_bytes().to_vec(), dollars: rmarks }.into()),
+			]);
+			assert_eq!(parts.len(), 1, "{left:?} + {right:?}");
+			let WordPart::Lit(mut merged) = parts.remove(0) else {
+				panic!("literal merge")
+			};
+			assert_eq!(merged.value.bytes, bytes.as_bytes(), "{left:?} + {right:?}");
+			assert_eq!(merged.value.dollars, dollars, "{left:?} + {right:?}");
+			merged.value.remove_prefix(left.len());
+			assert_eq!(merged.value.bytes, right.as_bytes(), "removing {left:?}");
+			assert_eq!(merged.value.dollars, right_markers, "removing {left:?}");
+		}
 	}
 }
