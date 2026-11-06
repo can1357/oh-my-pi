@@ -30,6 +30,7 @@ import {
 } from "../config/model-resolver";
 import { isKindRole } from "../config/model-roles";
 import type { Settings } from "../config/settings";
+import { isProviderExhausted } from "../session/provider-exhaustion";
 import { cfgTaskDisabledAgents, cfgTaskPerCallModelAllow } from "./settings";
 
 /** A per-call model request could not be dispatched or restored. */
@@ -324,6 +325,9 @@ export function assertPerCallModelApproved(
 	registry: ApprovalRegistry,
 ): void {
 	const target = formatModelStringWithRouting(model);
+	if (isProviderExhausted(model.provider)) {
+		throw new PerCallModelUnavailableError(`Per-call model ${target} is not an available chat model.`);
+	}
 	let cache = decisionCache.get(grants);
 	if (!cache || !isCurrent(cache, grants.settings, registry)) {
 		cache = {
