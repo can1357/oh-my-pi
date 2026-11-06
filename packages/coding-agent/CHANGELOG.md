@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `serviceTiers` to custom models and `modelOverrides` in models.yml, so compatible gateways can opt into Ultrafast with `/fast ultra`.
+- Added `serviceTiers` to custom models and `modelOverrides` in models.yml, so compatible gateways can opt into Ultrafast with `/fast ultra` ([#18304](https://github.com/can1357/oh-my-pi/pull/18304) by [@Ikaleio](https://github.com/Ikaleio)).
 
 ### Fixed
 
