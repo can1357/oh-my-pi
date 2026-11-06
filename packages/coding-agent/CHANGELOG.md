@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a context file including the same file twice losing the second copy, leaving a literal `@path` in the prompt instead of the included content ([#16656](https://github.com/can1357/oh-my-pi/pull/16656) by [@adi-IL](https://github.com/adi-IL))
 ### Added
 
 - Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
