@@ -24,6 +24,7 @@ mod timer;
 use std::{
 	fs,
 	io::{self, IsTerminal, Read, Write},
+	mem,
 	path::PathBuf,
 	task::Context,
 	time::Duration,
@@ -61,7 +62,10 @@ pub struct ProcessOptions {
 	/// - exits of externals are observed by a waiter thread each, beside the
 	///   runtime's own child handling, and the process umask is read without
 	///   changing it;
-	/// - terminal modes the shell changed are restored when it ends.
+	/// - terminal modes the shell changed are restored when it ends;
+	/// - teardown: the shell's in-memory state (engine caches, store, vprocs) is
+	///   freed before [`main`] returns. Standalone, the process is about to
+	///   exit, so that memory is left to the OS.
 	///
 	/// Nothing outlives the call: a second [`main`] in the same process
 	/// starts from the same state.
@@ -480,6 +484,17 @@ fn run(args: &ShellArgs, env: Vec<(BString, BString)>, input: Input, opts: Proce
 	let status = drive(&mut host, &mut store, &mut shell, run, root);
 	// zsh `zexit`: hang up running jobs, give the terminal back.
 	shell.leave_job_control(&mut Cx { host: &mut host, store: &mut store });
+	// Standalone, the process exits next: let the OS reclaim the shell's
+	// memory instead of freeing every cached unit, function and variable
+	// one by one (a quarter of a 100k-command script's run). The three hold
+	// no OS resources (`Shell` holds no host references; the store and the
+	// engine are data), and the host still drops: it reaps, closes and
+	// gives the terminal back.
+	if !opts.embedded {
+		mem::forget(shell);
+		mem::forget(store);
+		mem::forget(engine);
+	}
 	status & 0xff
 }
 
