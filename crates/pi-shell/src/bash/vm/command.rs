@@ -2122,6 +2122,23 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 			return flow;
 		}
 	}
+	if vp.mode.dialect() != crate::bash::ids::Dialect::Zsh
+		&& st(vp).exec_as.is_some()
+		&& matches!(st(vp).target, Some(Target::External(_)))
+	{
+		let mut sc = exec::take_scratch(vp);
+		let s = sc.exec.as_mut().expect("exec");
+		let name = match s.spelled.as_deref() {
+			Some(Spelled::Joined(name)) => name,
+			None => &s.argv[0],
+		};
+		let shown = probe::make_absolute(&vp.cwd, name, k.engine.config().platform);
+		match s.spelled.as_deref_mut() {
+			Some(Spelled::Joined(name)) => *name = shown,
+			None => s.spelled = Some(Box::new(Spelled::Joined(shown))),
+		}
+		vp.frames.last_mut().expect("frame").scratch = Some(sc);
+	}
 	st(vp).stage = Stage::Dispatch;
 	if k.mask.contains(crate::bash::event::EventKind::CmdExpanded)
 		&& let Some(e) = current_exec(vp)
@@ -4924,12 +4941,8 @@ fn interpreter(text: &[u8]) -> BString {
 /// command keeps the spelling chosen during resolution.
 fn tried_name(vp: &mut Vproc, path: &BString) -> BString {
 	let s = st(vp);
-	if s.exec_as.is_some() {
-		return path.clone();
-	}
-	let n = s.argv[0].clone();
-	if n.contains(&b'/') {
-		return n;
+	if s.exec_as.is_none() && s.argv[0].contains(&b'/') {
+		return s.argv[0].clone();
 	}
 	match s.spelled.as_deref() {
 		Some(Spelled::Joined(p)) => p.clone(),

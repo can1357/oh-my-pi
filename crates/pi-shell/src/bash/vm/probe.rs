@@ -594,6 +594,13 @@ pub fn absolute_on(cwd: &[u8], name: &[u8], platform: Platform) -> BString {
 	p
 }
 
+/// Bash's `make_absolute`: remove one leading `./` from a relative name,
+/// then join it to `cwd`. Absolute names and remaining components stay as
+/// written.
+pub fn make_absolute(cwd: &[u8], name: &[u8], platform: Platform) -> BString {
+	absolute_on(cwd, name.strip_prefix(b"./").unwrap_or(name), platform)
+}
+
 /// A Windows drive (`C:\x`, `C:/x`) or UNC (`\\srv\share`) path.
 const fn is_windows_absolute(name: &[u8]) -> bool {
 	matches!(name, [b'\\' | b'/', b'\\' | b'/', ..])

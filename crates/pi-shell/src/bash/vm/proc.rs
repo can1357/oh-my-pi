@@ -1463,7 +1463,7 @@ pub struct ExecState {
 	/// How resolution spelled the command, for the diagnostic that names it
 	/// when running it fails. `None` when the word itself is the name; boxed
 	/// because an idle vproc holds an `ExecState` and this is set only for an
-	/// external command the shell looked up.
+	/// external command the shell looked up or made absolute for `exec`.
 	pub spelled:     Option<Box<Spelled>>,
 	pub waiting:     Option<Awaited>,
 	/// A temporary scope (builtin environment) was pushed for this command.
@@ -1551,7 +1551,7 @@ pub enum Stage {
 /// How a resolved command is spelled when a diagnostic names it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Spelled {
-	/// A `$PATH` entry joined to the word, or a hash lookup's resolved spelling.
+	/// A `$PATH` or hash lookup's spelling, or the absolute name used by `exec`.
 	Joined(BString),
 }
 
