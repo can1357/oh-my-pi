@@ -285,7 +285,8 @@ impl TermCaps {
 			tcstr[at(Cap::Backspace)] = Some(b"\x08".to_vec());
 		}
 		if tcstr[at(Cap::Left)].is_none() {
-			tcstr[at(Cap::Left)] = tcstr[at(Cap::Backspace)].clone();
+			let bs = tcstr[at(Cap::Backspace)].clone();
+			tcstr[at(Cap::Left)] = bs;
 		}
 		if tcstr[at(Cap::SaveCursor)].is_some() && tcstr[at(Cap::RestrCursor)].is_none() {
 			tcstr[at(Cap::SaveCursor)] = None;
@@ -305,7 +306,7 @@ impl TermCaps {
 	}
 
 	/// zsh `tccan(cap)`.
-	pub fn tccan(&self, cap: Cap) -> bool {
+	pub const fn tccan(&self, cap: Cap) -> bool {
 		self.tcstr[cap as usize].is_some()
 	}
 
@@ -591,42 +592,39 @@ impl Bv<'_> {
 			return match_colour(None, fg, arg, &env.term, env.nearcolor);
 		}
 		self.i += 2;
-		match tail(&self.fm, self.i).iter().position(|&c| c == b'}') {
-			Some(n) => {
-				let ep = self.i + n;
-				// The argument is expanded (`%v` works) with only
-				// `PROMPT_PERCENT`.
-				let inner = Bv {
-					env,
-					fm: self.fm[self.i..ep].to_vec(),
-					i: 0,
-					buf: Vec::with_capacity(n),
-					bufline: 0,
-					truncwidth: 0,
-					dontcount: 0,
-					trunccount: 0,
-					percent: true,
-					bang: false,
-					attrs: self.attrs,
-				};
-				let (col, attrs) = inner.finish();
-				self.attrs = attrs;
-				let col = unmetafy(&strip_markers_metafied(&col));
-				let mut s: &[u8] = &col;
-				let atr = match_colour(Some(&mut s), fg, 0, &env.term, env.nearcolor);
-				self.i = ep;
-				atr
-			},
-			None => {
-				let rest = tail(&self.fm, self.i).to_vec();
-				let mut s: &[u8] = &rest;
-				let atr = match_colour(Some(&mut s), fg, 0, &env.term, env.nearcolor);
-				self.i += rest.len() - s.len();
-				if self.at(self.i) != b'}' {
-					self.i -= 1;
-				}
-				atr
-			},
+		if let Some(n) = tail(&self.fm, self.i).iter().position(|&c| c == b'}') {
+			let ep = self.i + n;
+			// The argument is expanded (`%v` works) with only
+			// `PROMPT_PERCENT`.
+			let inner = Bv {
+				env,
+				fm: self.fm[self.i..ep].to_vec(),
+				i: 0,
+				buf: Vec::with_capacity(n),
+				bufline: 0,
+				truncwidth: 0,
+				dontcount: 0,
+				trunccount: 0,
+				percent: true,
+				bang: false,
+				attrs: self.attrs,
+			};
+			let (col, attrs) = inner.finish();
+			self.attrs = attrs;
+			let col = unmetafy(&strip_markers_metafied(&col));
+			let mut s: &[u8] = &col;
+			let atr = match_colour(Some(&mut s), fg, 0, &env.term, env.nearcolor);
+			self.i = ep;
+			atr
+		} else {
+			let rest = tail(&self.fm, self.i).to_vec();
+			let mut s: &[u8] = &rest;
+			let atr = match_colour(Some(&mut s), fg, 0, &env.term, env.nearcolor);
+			self.i += rest.len() - s.len();
+			if self.at(self.i) != b'}' {
+				self.i -= 1;
+			}
+			atr
 		}
 	}
 
@@ -746,7 +744,7 @@ impl Bv<'_> {
 					arg -= 1;
 				}
 				let rest = if ss.is_empty() { ss } else { tail(ss, 1) };
-				let slashes = rest.iter().filter(|&&c| c == b'/').count();
+				let slashes = rest.split(|&c| c == b'/').count() - 1;
 				arg -= i64::try_from(slashes).unwrap_or(0);
 				arg <= 0
 			},
@@ -979,9 +977,8 @@ impl Bv<'_> {
 					// A negative width counts from the right margin.
 					if minus {
 						let (t0, _) = countprompt(tail(&self.buf, self.bufline), env.columns, 0);
-						arg = i64::try_from(env.columns).unwrap_or(i64::MAX)
-							- i64::try_from(t0).unwrap_or(0)
-							+ arg;
+						arg += i64::try_from(env.columns).unwrap_or(i64::MAX)
+							- i64::try_from(t0).unwrap_or(0);
 						if arg <= 0 {
 							arg = 1;
 						}
@@ -1363,7 +1360,7 @@ fn metastrwidth(s: &[u8], utf8: bool) -> usize {
 fn match_named_colour(s: &mut &[u8]) -> i32 {
 	const COLOURS: [&[u8]; 9] =
 		[b"black", b"red", b"green", b"yellow", b"blue", b"magenta", b"cyan", b"white", b"default"];
-	let cur: &[u8] = *s;
+	let cur: &[u8] = s;
 	let len = cur.iter().take_while(|c| c.is_ascii_alphabetic()).count();
 	let word = &cur[..len];
 	*s = &cur[len..];
@@ -1414,7 +1411,7 @@ pub fn match_colour(
 	let mut colour = colour;
 	if let Some(s) = s {
 		if s.first() == Some(&b'#') && s.get(1).is_some_and(u8::is_ascii_hexdigit) {
-			let cur: &[u8] = *s;
+			let cur: &[u8] = s;
 			let (col, rest) = zstrtol(tail(cur, 1), 16);
 			let used = cur.len() - rest.len();
 			let (r, g, b) = match used {
@@ -1452,7 +1449,7 @@ pub fn match_colour(
 				return TXT_ERROR;
 			}
 		} else {
-			let cur: &[u8] = *s;
+			let cur: &[u8] = s;
 			let (v, rest) = zstrtol(cur, 10);
 			*s = rest;
 			colour = v;

@@ -68,6 +68,7 @@ The tool returns a single text content block plus structured `details`.
 - `details`: `SearchResultDetails` from `packages/coding-agent/src/web/search/types.ts`
    - `response: SearchResponse`
    - `error?: string`
+   - `failures?: SearchFailureDetail[]`: the candidates that failed, in chain order, on a fallback answer and on the all-failed result; absent when nothing failed. Each entry is `{ provider, label, reason, status? }`: `provider` is the search provider id (the catalog model id when the provider never loaded), `reason` the flattened, 240-character-capped text the fallback note quotes, and `status` the `SearchProviderError` status when it carries one (`204` marks an answer rejected for having no sources or renderable content)
 
 `text` is produced by `formatForLLM()` in `packages/coding-agent/src/web/search/index.ts`. Notes about relaxed query constraints are emitted first:
 
@@ -85,6 +86,7 @@ Failure output is not thrown at the tool boundary when providers are unavailable
 - `content[0].text = "Error: ..."`
 - `details.response.provider = <last attempted provider> | "none"`
 - `details.error = ...`
+- `details.failures = [...]`, one entry per failed candidate (absent when no model matched, since nothing ran)
 
 Streaming: none. `WebSearchTool.execute()` forwards its `AbortSignal` into `executeSearch()`, and `executeSearch()` passes it to providers. If the signal is aborted during fallback handling, `throwIfAborted(signal)` rethrows the cancellation instead of returning an `"Error: ..."` text result.
 

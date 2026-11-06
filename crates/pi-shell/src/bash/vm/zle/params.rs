@@ -154,7 +154,7 @@ const NAMES: &[&[u8]] = &[
 /// function runs the editor's parameters are read-only.
 fn in_compfunc_readonly(ex: &Expander<'_, '_>, zp: Zp) -> X<()> {
 	if matches!(zp, Zp::Widgets | Zp::Keymaps)
-		|| !ex.vp.zle.as_deref().is_some_and(|z| z.comp.incompfunc == 1)
+		|| ex.vp.zle.as_deref().is_none_or(|z| z.comp.incompfunc != 1)
 	{
 		return Ok(());
 	}
@@ -167,7 +167,7 @@ fn in_compfunc_readonly(ex: &Expander<'_, '_>, zp: Zp) -> X<()> {
 }
 
 /// The ZLE special `name` names, if any.
-pub fn lookup(name: &[u8]) -> Option<Zp> {
+pub const fn lookup(name: &[u8]) -> Option<Zp> {
 	Some(match name {
 		b"BUFFER" => Zp::Buffer,
 		b"BUFFERLINES" => Zp::Bufferlines,
@@ -289,12 +289,12 @@ pub fn visible(vp: &Vproc, zp: Zp) -> bool {
 	}
 }
 
-fn num(n: impl std::fmt::Display) -> Option<PValue> {
-	Some(PValue::Scalar(BString::from(n.to_string())))
+fn num(n: impl std::fmt::Display) -> PValue {
+	PValue::Scalar(BString::from(n.to_string()))
 }
 
-fn text(s: impl Into<BString>) -> Option<PValue> {
-	Some(PValue::Scalar(s.into()))
+fn text(s: impl Into<BString>) -> PValue {
+	PValue::Scalar(s.into())
 }
 
 /// zsh `get_zle_state`.
@@ -312,23 +312,16 @@ fn zle_state(ed: &Editor) -> BString {
 }
 
 /// The value of `zp` (`None`: unset).
-///
-/// # Errors
-/// [`Stop::Store`] never today; kept for the special-parameter interface.
-pub fn get(ex: &mut Expander<'_, '_>, zp: Zp) -> X<Option<PValue>> {
+pub fn get(ex: &mut Expander<'_, '_>, zp: Zp) -> Option<PValue> {
 	if let Zp::Widgets | Zp::Keymaps = zp {
 		let zle = super::zle_mut(ex.k, ex.cx, ex.vp);
-		return Ok(Some(match zp {
+		return Some(match zp {
 			Zp::Widgets => PValue::Hash(widgets_hash(zle)),
 			_ => PValue::Array(zle.keymaps.names()),
-		}));
+		});
 	}
-	let Some(zle) = ex.vp.zle.as_deref_mut() else {
-		return Ok(None);
-	};
-	let Some(ed) = zle.ed.as_deref_mut() else {
-		return Ok(None);
-	};
+	let zle = ex.vp.zle.as_deref_mut()?;
+	let ed = zle.ed.as_deref_mut()?;
 	// While completion code has the line metafied (zsh `zlemetaline !=
 	// NULL`), the buffer and cursor are read from it.
 	if let Some(s) = zle.comp.line.s.as_deref()
@@ -336,28 +329,23 @@ pub fn get(ex: &mut Expander<'_, '_>, zp: Zp) -> X<Option<PValue>> {
 	{
 		use crate::bash::syntax::zsh::tok::unmetafy;
 		let cs = zle.comp.line.cs.min(s.len());
-		return Ok(match zp {
+		return Some(match zp {
 			Zp::Buffer => text(unmetafy(s)),
 			Zp::Cursor => num(to_line(&unmetafy(&s[..cs])).len()),
 			Zp::Lbuffer => text(unmetafy(&s[..cs])),
 			_ => text(unmetafy(&s[cs..])),
 		});
 	}
-	Ok(match zp {
-		Zp::Buffer => text(from_line(&ed.line)),
-		Zp::Bufferlines => num(zle.display.nlnct),
-		Zp::Context => text(ed.context.name()),
-		Zp::Cursor => num(ed.cs),
-		Zp::Cutbuffer => text(
-			zle.cutbuf
-				.as_ref()
-				.map(|c| from_line(&c.buf))
-				.unwrap_or_default(),
-		),
-		Zp::Histno => num(ed.histline),
-		Zp::Keymap => text(ed.keymap.clone()),
-		Zp::Keys => text(ed.keybuf.clone()),
-		Zp::KeysQueuedCount => num(ed.unget.len()),
+	match zp {
+		Zp::Buffer => Some(text(from_line(&ed.line))),
+		Zp::Bufferlines => Some(num(zle.display.nlnct)),
+		Zp::Context => Some(text(ed.context.name())),
+		Zp::Cursor => Some(num(ed.cs)),
+		Zp::Cutbuffer => Some(text(zle.cutbuf.as_ref().map_or_default(|c| from_line(&c.buf)))),
+		Zp::Histno => Some(num(ed.histline)),
+		Zp::Keymap => Some(text(ed.keymap.clone())),
+		Zp::Keys => Some(text(ed.keybuf.clone())),
+		Zp::KeysQueuedCount => Some(num(ed.unget.len())),
 		Zp::Killring => {
 			let size = if zle.kring_size == 0 {
 				8
@@ -373,26 +361,26 @@ pub fn get(ex: &mut Expander<'_, '_>, zp: Zp) -> X<Option<PValue>> {
 			out.resize(size, BString::default());
 			Some(PValue::Array(out))
 		},
-		Zp::LastAbortedSearch => text(zle.last_aborted.clone()),
-		Zp::LastSearch => text(zle.last_search.clone()),
-		Zp::LastWidget => text(ed.lbindk.clone().unwrap_or_default()),
-		Zp::Lbuffer => text(from_line(&ed.line[..ed.cs.min(ed.line.len())])),
+		Zp::LastAbortedSearch => Some(text(zle.last_aborted.clone())),
+		Zp::LastSearch => Some(text(zle.last_search.clone())),
+		Zp::LastWidget => Some(text(ed.lbindk.clone().unwrap_or_default())),
+		Zp::Lbuffer => Some(text(from_line(&ed.line[..ed.cs.min(ed.line.len())]))),
 		// WidgetsVi: zsh's `mark` is -1 while a vi operator reads its motion.
-		Zp::Mark if ed.mark == super::widgets::vi::NOMARK => num(-1),
-		Zp::Mark => num(ed.mark),
+		Zp::Mark if ed.mark == super::widgets::vi::NOMARK => Some(num(-1)),
+		Zp::Mark => Some(num(ed.mark)),
 		Zp::Numeric => {
 			if ed.zmod.flags & (modflags::MULT | modflags::TMULT) == 0 {
 				None
 			} else {
-				num(ed.zmod.mult)
+				Some(num(ed.zmod.mult))
 			}
 		},
-		Zp::Pending => num(ed.unget.len() + zle.tty.as_ref().map_or(0, |t| t.pending_input())),
-		Zp::Postdisplay => text(from_line(&ed.postdisplay)),
-		Zp::Prebuffer => text(ed.hline.clone().unwrap_or_default()),
-		Zp::Predisplay => text(from_line(&ed.predisplay)),
-		Zp::Rbuffer => text(from_line(&ed.line[ed.cs.min(ed.line.len())..])),
-		Zp::RegionActive => num(ed.region_active),
+		Zp::Pending => Some(num(ed.unget.len() + zle.tty.as_ref().map_or(0, |t| t.pending_input()))),
+		Zp::Postdisplay => Some(text(from_line(&ed.postdisplay))),
+		Zp::Prebuffer => Some(text(ed.hline.clone().unwrap_or_default())),
+		Zp::Predisplay => Some(text(from_line(&ed.predisplay))),
+		Zp::Rbuffer => Some(text(from_line(&ed.line[ed.cs.min(ed.line.len())..]))),
+		Zp::RegionActive => Some(num(ed.region_active)),
 		Zp::RegionHighlight => {
 			Some(PValue::Array(super::refresh::get_region_highlight(&ed.region_highlights)))
 		},
@@ -404,19 +392,16 @@ pub fn get(ex: &mut Expander<'_, '_>, zp: Zp) -> X<Option<PValue>> {
 				} else {
 					b'0' + (i - 26) as u8
 				};
-				out.push((
-					BString::from(vec![name]),
-					r.as_ref().map(|c| from_line(&c.buf)).unwrap_or_default(),
-				));
+				out.push((BString::from(vec![name]), r.as_ref().map_or_default(|c| from_line(&c.buf))));
 			}
 			Some(PValue::Hash(out))
 		},
-		Zp::UndoChangeNo => num(super::undo::current_change(ed)),
-		Zp::UndoLimitNo => num(ed.undo.limitno),
-		Zp::Widget => text(ed.bindk.clone().unwrap_or_default()),
+		Zp::UndoChangeNo => Some(num(super::undo::current_change(ed))),
+		Zp::UndoLimitNo => Some(num(ed.undo.limitno)),
+		Zp::Widget => Some(text(ed.bindk.clone().unwrap_or_default())),
 		Zp::WidgetFunc | Zp::WidgetStyle => {
 			let w = ed.bindk.as_ref().and_then(|b| zle.widgets.get(b));
-			text(match w.map(|w| &w.kind) {
+			Some(text(match w.map(|w| &w.kind) {
 				Some(Kind::Builtin(_) | Kind::Native(_)) | None => BString::from(".internal"),
 				Some(Kind::Comp { base, func }) => {
 					if zp == Zp::WidgetFunc {
@@ -432,23 +417,23 @@ pub fn get(ex: &mut Expander<'_, '_>, zp: Zp) -> X<Option<PValue>> {
 						BString::default()
 					}
 				},
-			})
+			}))
 		},
-		Zp::YankStart => num(ed.yank.0),
-		Zp::YankEnd => num(ed.yank.1),
-		Zp::YankActive => num(
+		Zp::YankStart => Some(num(ed.yank.0)),
+		Zp::YankEnd => Some(num(ed.yank.1)),
+		Zp::YankActive => Some(num(
 			u8::from(ed.lastcmd & wflags::YANK != 0) + u8::from(ed.lastcmd & wflags::YANKAFTER != 0),
-		),
-		Zp::IsearchStart => num(ed.ls.isearch.0),
-		Zp::IsearchEnd => num(ed.ls.isearch.1),
-		Zp::IsearchActive => num(u8::from(ed.ls.isearch_active)),
-		Zp::SuffixStart => num(ed.cs.saturating_sub(ed.ls.suffixlen)),
-		Zp::SuffixEnd => num(ed.cs),
-		Zp::SuffixActive => num(ed.ls.suffixlen),
-		Zp::Recursive => num(ed.recursive),
-		Zp::State => text(zle_state(ed)),
+		)),
+		Zp::IsearchStart => Some(num(ed.ls.isearch.0)),
+		Zp::IsearchEnd => Some(num(ed.ls.isearch.1)),
+		Zp::IsearchActive => Some(num(u8::from(ed.ls.isearch_active))),
+		Zp::SuffixStart => Some(num(ed.cs.saturating_sub(ed.ls.suffixlen))),
+		Zp::SuffixEnd => Some(num(ed.cs)),
+		Zp::SuffixActive => Some(num(ed.ls.suffixlen)),
+		Zp::Recursive => Some(num(ed.recursive)),
+		Zp::State => Some(text(zle_state(ed))),
 		Zp::Widgets | Zp::Keymaps => unreachable!("handled above"),
-	})
+	}
 }
 
 /// zsh/zleparameter `widgets`: each widget name with `builtin`,
@@ -572,8 +557,7 @@ pub fn set(ex: &mut Expander<'_, '_>, zp: Zp, value: PValue) -> X<()> {
 				.tty
 				.as_ref()
 				.and_then(|t| t.caps.as_ref())
-				.map(|(_, c)| std::sync::Arc::clone(c))
-				.unwrap_or_default();
+				.map_or_default(|(_, c)| std::sync::Arc::clone(c));
 			let near = nearcolor;
 			ed.region_highlights = super::refresh::set_region_highlight(Some(&v), &caps, near);
 		},
@@ -641,9 +625,7 @@ pub fn unset(ex: &mut Expander<'_, '_>, zp: Zp) -> X<()> {
 			}
 		},
 		Zp::Registers => {
-			for r in &mut zle.vibuf {
-				*r = None;
-			}
+			zle.vibuf.fill(None);
 		},
 		Zp::RegionHighlight => {
 			if let Some(ed) = zle.ed.as_deref_mut() {

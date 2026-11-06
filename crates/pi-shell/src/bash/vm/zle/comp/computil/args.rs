@@ -1681,27 +1681,25 @@ fn ca_set_data(
 			if single {
 				break;
 			}
-			if !opt {
-				if a.num >= 0 && ar.next(sets).is_none() && miss {
-					arg = head_rest();
-				} else {
-					let onum = a.num;
-					let rest = onum != a.min && onum == head.nth;
-					arg = ar.next(sets);
-					if let Some(n) = arg {
-						if n.get(sets).num != onum + 1 {
-							miss = true;
-						}
-					} else if rest || (oopt > 0 && !opt) {
-						arg = head_rest();
-						oopt = -1;
-					}
-				}
-			} else {
+			if opt {
 				if !lopt {
 					break;
 				}
 				arg = ar.next(sets);
+			} else if a.num >= 0 && ar.next(sets).is_none() && miss {
+				arg = head_rest();
+			} else {
+				let onum = a.num;
+				let rest = onum != a.min && onum == head.nth;
+				arg = ar.next(sets);
+				if let Some(n) = arg {
+					if n.get(sets).num != onum + 1 {
+						miss = true;
+					}
+				} else if rest || (oopt > 0 && !opt) {
+					arg = head_rest();
+					oopt = -1;
+				}
 			}
 		}
 		if !single && opt && (lopt || head.oopt != 0) {
@@ -1966,7 +1964,7 @@ fn init(ctx: &mut Ctx<'_, '_>, rec: Option<Record>, args: &[BString]) -> R {
 	let mut failed = false;
 	let words = compwords(ctx, &mut failed)?;
 	let cc = compcurrent(ctx, &mut failed)?;
-	if !(cc > 1 && !words.is_empty()) {
+	if cc <= 1 || words.is_empty() {
 		return fin(1, failed);
 	}
 	let sets = match parse_cadef(args) {
