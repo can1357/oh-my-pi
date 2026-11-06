@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the session exiting with `Native shell returned an invalid execution trace` when a bash command assigned a value over 256 bytes whose 256th byte fell inside a multi-byte character (e.g. Chinese text); an invalid trace snapshot is now logged and skipped instead of crashing ([#18259](https://github.com/can1357/oh-my-pi/issues/18259))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

@@ -8,7 +8,7 @@ use bstr::{BStr, BString, ByteSlice};
 use super::{Ctx, Need, R, done, number, opts};
 use crate::bash::{
 	diag::Diag,
-	event::{AssignScope, EventData, EventKind},
+	event::{ASSIGN_PREVIEW_BYTES, AssignScope, EventData, EventKind, assign_preview, utf8_floor},
 	ids::IntrinsicId,
 	ir::{self, FuncIr},
 	store::{
@@ -94,7 +94,7 @@ pub fn emit_assignment_at(
 			return Ok(None);
 		};
 		let (value, full_len) = match &var.value {
-			VarValue::Str(value) => (BString::from(&value[..value.len().min(256)]), value.len()),
+			VarValue::Str(value) => (BString::from(assign_preview(value)), value.len()),
 			VarValue::Indexed(values) => {
 				assignment_preview(values.iter().map(|(_, value)| value.as_slice()))
 			},
@@ -125,13 +125,17 @@ fn assignment_preview<'a>(values: impl Iterator<Item = &'a [u8]>) -> (BString, u
 	for (index, value) in values.enumerate() {
 		if index != 0 {
 			full_len = full_len.saturating_add(1);
-			if shown.len() < 256 {
+			if shown.len() < ASSIGN_PREVIEW_BYTES {
 				shown.push(b' ');
 			}
 		}
 		full_len = full_len.saturating_add(value.len());
-		let kept = value.len().min(256 - shown.len());
+		let kept = value.len().min(ASSIGN_PREVIEW_BYTES - shown.len());
 		shown.extend_from_slice(&value[..kept]);
+	}
+	if shown.len() < full_len {
+		let end = utf8_floor(&shown);
+		shown.truncate(end);
 	}
 	(shown, full_len)
 }

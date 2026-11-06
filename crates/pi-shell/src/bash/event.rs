@@ -30,6 +30,28 @@ use crate::bash::{
 	vm::{Run, Vproc},
 };
 
+/// Most value bytes an [`EventData::Assign`] carries.
+pub(crate) const ASSIGN_PREVIEW_BYTES: usize = 256;
+
+/// `value` cut to [`ASSIGN_PREVIEW_BYTES`] for [`EventData::Assign`], never
+/// inside a UTF-8 character.
+pub(crate) fn assign_preview(value: &[u8]) -> &[u8] {
+	if value.len() <= ASSIGN_PREVIEW_BYTES {
+		return value;
+	}
+	&value[..utf8_floor(&value[..ASSIGN_PREVIEW_BYTES])]
+}
+
+/// Length of the cut `bytes` without the partial UTF-8 character its end
+/// split, so a cut text value still serializes as text ([`text::Text`]).
+/// Bytes invalid before the end are kept: the value was never text.
+pub(crate) const fn utf8_floor(bytes: &[u8]) -> usize {
+	match std::str::from_utf8(bytes) {
+		Err(e) if e.error_len().is_none() => e.valid_up_to(),
+		_ => bytes.len(),
+	}
+}
+
 /// One event.
 ///
 /// Built in place at every emission and handed to
