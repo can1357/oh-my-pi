@@ -1189,6 +1189,11 @@ pub enum MiscKey {
 	/// [`crate::bash::vm::proc::JobTable::bang_seen`] of the root shell
 	/// (decimal); absent when zero.
 	BangSeen,
+	/// Optional postcard-encoded job/wait execution state accompanying the
+	/// `Frames` blob (`Record::Misc`), consumed with it. Absent in images
+	/// from engines without retained child statuses. Root retained statuses
+	/// remain in `BgPids` and `BangSeen`, even without frames.
+	JobFrames,
 }
 
 crate::bash::packed_names::packed_names!(MiscKey);

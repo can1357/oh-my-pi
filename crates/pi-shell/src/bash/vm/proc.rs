@@ -362,6 +362,8 @@ pub struct JobTable {
 	pub subshell: bool,
 	/// What the shell keeps about children that ended (bash's `bgpids`).
 	/// Boxed: a vproc that starts no job keeps nothing (idle vproc ≤ 2 KiB).
+	/// Stored separately from the version-29 job-table layout.
+	#[serde(skip)]
 	pub ended:    Option<Box<Ended>>,
 }
 
@@ -1764,13 +1766,16 @@ pub enum Awaited {
 	/// which named a kept status (pid 0 for an invalid operand).
 	Jobs {
 		force:      bool,
+		#[serde(skip)]
 		foreground: bool,
+		#[serde(skip)]
 		kept:       Option<(u32, i32)>,
 	},
 	/// Every background child (`wait` without operands); the status is 0.
 	/// Then every status is forgotten except `keep`'s: the pid `$!` names
 	/// when that child had finished before the `wait`.
 	AllJobs {
+		#[serde(skip)]
 		keep: Option<u32>,
 	},
 	/// The first of the children to finish (`wait -n`); its status. `kept`:
@@ -1778,12 +1783,14 @@ pub enum Awaited {
 	/// for a child to change, so a finished job that was already reported
 	/// counts too (bash `wait_for_any_job` after `wait_for (ANY_PID)`).
 	AnyJob {
+		#[serde(skip)]
 		kept: Option<(u32, i32)>,
+		#[serde(skip)]
 		woke: bool,
 	},
 	/// One ordinary `wait` operand, then resolution at the next argv index.
-	/// Appended instead of changing `Jobs`: old snapshots contain that
-	/// variant's resolved children and final kept operand already.
+	/// The upstream `Jobs`/`AllJobs`/`AnyJob` wire forms stay unchanged;
+	/// their skipped state lives in the optional `JobFrames` store record.
 	WaitOperand {
 		force:    bool,
 		kept_pid: u32,
