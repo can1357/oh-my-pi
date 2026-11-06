@@ -88,7 +88,10 @@ function evalEnd(
 		toolCallId,
 		toolName: "eval",
 		isError,
-		result: { content: [{ type: "text", text: "done" }], details: statusEvents ? { statusEvents } : undefined },
+		result: {
+			content: [{ type: "text", text: "done" }],
+			details: statusEvents ? { cells: [{ statusEvents }] } : undefined,
+		},
 	} as unknown as Extract<AgentSessionEvent, { type: "tool_execution_end" }>;
 }
 

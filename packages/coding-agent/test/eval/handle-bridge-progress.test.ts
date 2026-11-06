@@ -80,8 +80,8 @@ test("agent progress events keep scalar fields and cut long text", async () => {
 		expect(event).not.toHaveProperty("extractedToolData");
 		expect(event).not.toHaveProperty("recentTools");
 		expect(event).not.toHaveProperty("recentOutput");
-		expect((event!.assignment as string).length).toBeLessThanOrEqual(256);
-		expect((event!.task as string).startsWith("Review the parser")).toBe(true);
+		expect(event).not.toHaveProperty("assignment");
+		expect(event).not.toHaveProperty("task");
 		expect(JSON.stringify(event).length).toBeLessThan(1_500);
 	} finally {
 		await manager.dispose();

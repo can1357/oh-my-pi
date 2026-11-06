@@ -117,10 +117,9 @@ function hasCommittedTodo(events: unknown): boolean {
 	);
 }
 
-/** Eval status events live on each cell; results persisted before that also carry a call-level list. */
+/** Eval status events live on each cell. */
 function hasNestedTodo(details: unknown): boolean {
 	if (!isRecord(details)) return false;
-	if (hasCommittedTodo(details.statusEvents)) return true;
 	return (
 		Array.isArray(details.cells) && details.cells.some(cell => isRecord(cell) && hasCommittedTodo(cell.statusEvents))
 	);

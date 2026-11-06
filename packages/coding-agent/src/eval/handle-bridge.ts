@@ -145,10 +145,12 @@ const AGENT_STATUS_STRING_MAX = 256;
  * The scalar fields of a subagent progress snapshot, long strings cut. Its nested data (tool
  * data, recent tools and output) stays with the job: no eval renderer reads it, and copying it
  * into each snapshot stored the full assignment and every extracted record with the eval result.
+ * `assignment` and `task` are dropped too: the row shows `taskPreview` instead.
  */
 function agentStatusFields(progress: Record<string, unknown>): Record<string, unknown> {
 	const fields: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(progress)) {
+		if (key === "assignment" || key === "task") continue;
 		if (typeof value === "string") fields[key] = truncate(value, AGENT_STATUS_STRING_MAX);
 		else if (typeof value === "number" || typeof value === "boolean") fields[key] = value;
 	}

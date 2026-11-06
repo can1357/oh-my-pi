@@ -93,7 +93,6 @@ A requested unavailable runtime raises `ToolError` with the bounded, sanitized p
 - `language`: the backend used; `languages`: the distinct backend list. These retain the historical multi-cell-compatible shape, but a current call has one backend.
 - `cells[].views`: pretty views of printed values, in print order, as `{ text, view }` where `text` is the exact span of `output` the value printed and `view` is a `table` (data frames, `console.table`), `json` (dicts/lists/plain objects printing longer than 80 chars or multiple lines), or `markdown` (Python objects with `_repr_markdown_`). Renderers show the view in place of the matching text; the model only sees the text. At most 16 views per cell are kept, and a view whose JSON exceeds 32 KiB is dropped; dropped views show as their text.
 - `images`: present on live updates when images have arrived; final images are content blocks.
-- `statusEvents`: deduplicated helper/tool status events.
 - `notice`: optional backend notice.
 - `meta`: output truncation/artifact metadata supplied by `toolResult(...)`.
 - `async`: present when the cell was auto-backgrounded as an async job (`{ state, jobId, type: "eval" }`).
