@@ -356,6 +356,37 @@ describe("MarketplaceManager", () => {
 		}
 	});
 
+	it("lists and installs a bare-name plugin source resolved under metadata.pluginRoot", async () => {
+		const marketplaceDir = path.join(ctx.tmpDir, "bare-name-marketplace");
+		const pluginDir = path.join(marketplaceDir, "plugins", "bare-plugin");
+		fs.mkdirSync(path.join(marketplaceDir, ".claude-plugin"), { recursive: true });
+		fs.mkdirSync(pluginDir, { recursive: true });
+		await Bun.write(
+			path.join(marketplaceDir, ".claude-plugin", "marketplace.json"),
+			`${JSON.stringify(
+				{
+					name: "Bare-Marketplace",
+					owner: { name: "Test Author" },
+					metadata: { pluginRoot: "plugins" },
+					plugins: [{ name: "bare-plugin", source: "bare-plugin", version: "1.0.0" }],
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		await Bun.write(
+			path.join(pluginDir, "package.json"),
+			`${JSON.stringify({ name: "bare-plugin", version: "1.0.0" })}\n`,
+		);
+
+		await ctx.manager.addMarketplace(marketplaceDir);
+		const listed = await ctx.manager.listAvailablePlugins("Bare-Marketplace");
+		expect(listed.map(plugin => plugin.name)).toEqual(["bare-plugin"]);
+
+		const installed = await ctx.manager.installPlugin("bare-plugin", "Bare-Marketplace");
+		expect(fs.existsSync(path.join(installed.installPath, "package.json"))).toBe(true);
+	});
+
 	it("rejects case-equivalent runtime package names before replacing the installed link", async () => {
 		const upperMarketplace = buildNamedMarketplace(path.join(ctx.tmpDir, "upper-marketplace"), "upper-market", "Foo");
 		const lowerMarketplace = buildNamedMarketplace(path.join(ctx.tmpDir, "lower-marketplace"), "lower-market", "foo");

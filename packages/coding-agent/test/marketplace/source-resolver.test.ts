@@ -81,9 +81,9 @@ describe("resolvePluginSource", () => {
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/marketplaceClonePath/);
 	});
 
-	it("prepends catalogMetadata.pluginRoot to the relative source path", async () => {
-		// pluginRoot "plugins" + source "./hello-plugin" → ./plugins/hello-plugin
-		const entry = makeEntry("./hello-plugin");
+	it("resolves a bare source name under catalogMetadata.pluginRoot", async () => {
+		// pluginRoot "plugins" + bare source "hello-plugin" → ./plugins/hello-plugin
+		const entry = makeEntry("hello-plugin");
 		const resolved = await resolvePluginSource(entry, {
 			marketplaceClonePath: FIXTURE_DIR,
 			catalogMetadata: { pluginRoot: "plugins" },
@@ -91,6 +91,37 @@ describe("resolvePluginSource", () => {
 		});
 		expect(resolved.dir).toBe(path.resolve(FIXTURE_DIR, "plugins/hello-plugin"));
 		expect(resolved.tempCloneRoot).toBeUndefined();
+	});
+
+	it("prefers the marketplace-root path for ./ sources when it exists", async () => {
+		const entry = makeEntry("./plugins/hello-plugin");
+		const resolved = await resolvePluginSource(entry, {
+			marketplaceClonePath: FIXTURE_DIR,
+			catalogMetadata: { pluginRoot: "./plugins" },
+			tmpDir,
+		});
+		expect(resolved.dir).toBe(path.resolve(FIXTURE_DIR, "plugins/hello-plugin"));
+	});
+
+	it("falls back to pluginRoot for ./ sources missing at the marketplace root", async () => {
+		// Catalogs with pluginRoot "plugins" and source "./hello-plugin" resolved to plugins/hello-plugin before.
+		const context = { marketplaceClonePath: FIXTURE_DIR, catalogMetadata: { pluginRoot: "plugins" }, tmpDir };
+		const resolved = await resolvePluginSource(makeEntry("./hello-plugin"), context);
+		expect(resolved.dir).toBe(path.resolve(FIXTURE_DIR, "plugins/hello-plugin"));
+		const validated = await validatePluginSource(makeEntry("./hello-plugin"), context);
+		expect(validated).toBe(path.resolve(FIXTURE_DIR, "plugins/hello-plugin"));
+	});
+
+	it("uses the marketplace-root directory over pluginRoot when both exist", async () => {
+		const root = path.join(tmpDir, "marketplace");
+		fs.mkdirSync(path.join(root, "hello-plugin"), { recursive: true });
+		fs.mkdirSync(path.join(root, "plugins", "hello-plugin"), { recursive: true });
+		const resolved = await resolvePluginSource(makeEntry("./hello-plugin"), {
+			marketplaceClonePath: root,
+			catalogMetadata: { pluginRoot: "plugins" },
+			tmpDir,
+		});
+		expect(resolved.dir).toBe(path.join(root, "hello-plugin"));
 	});
 
 	it("throws when resolved directory does not exist", async () => {

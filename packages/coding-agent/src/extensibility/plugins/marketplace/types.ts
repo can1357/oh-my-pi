@@ -20,6 +20,11 @@ export function isValidNameSegment(s: string): boolean {
 	return s.length > 0 && s.length <= MAX_NAME_LENGTH && NAME_RE.test(s);
 }
 
+/** A string plugin source is a bare name (no path separator, not dot-prefixed); it resolves under `metadata.pluginRoot`. */
+export function isBarePluginSource(source: string): boolean {
+	return !source.includes("/") && !source.startsWith(".");
+}
+
 /** Return the case-insensitive key used to detect cache-path name collisions. */
 export function nameSegmentCollisionKey(s: string): string {
 	return s.toLowerCase();
@@ -63,7 +68,7 @@ export interface MarketplaceCatalogOwner {
 export interface MarketplaceCatalogMetadata {
 	description?: string;
 	version?: string;
-	/** If set, prepended to relative plugin source paths. */
+	/** Base directory for bare plugin source names; "./" sources fall back to it when absent at the marketplace root. */
 	pluginRoot?: string;
 }
 
