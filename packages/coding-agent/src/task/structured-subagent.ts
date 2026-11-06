@@ -165,6 +165,8 @@ export interface StructuredSubagentRequest {
 	index?: number;
 	parentToolCallId?: string;
 	detached?: boolean;
+	/** Team workspace root added to the child's additionalDirectories. */
+	teamWorkspace?: string;
 	invokedAt?: number;
 	acquiredAt?: number;
 	isolation?: StructuredSubagentIsolationControls;
@@ -779,7 +781,10 @@ function buildExecutorOptions(
 	return {
 		cwd: session.cwd,
 		costGate: session.costGate,
-		additionalDirectories: session.additionalDirectories,
+		additionalDirectories:
+			request.teamWorkspace !== undefined
+				? [...(session.additionalDirectories ?? []), request.teamWorkspace]
+				: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
 		a2aPeers:

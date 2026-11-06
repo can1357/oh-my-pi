@@ -1,15 +1,12 @@
-# Agent Teams (planned)
+# Agent Teams
 
-> An analog of Claude Code's Agent Teams for omp: a lead session coordinating
-> several persistent teammates — full agent sessions with their own context —
-> that message each other directly over a shared workspace. **This page
-> describes a planned feature.** Nothing here is implemented yet; it documents
-> the design direction and the fork primitives that already exist.
+> A lead session coordinating several persistent teammates — full agent
+> sessions with their own context — that message each other directly over a
+> shared workspace. Enabled with `team.enabled: true` (off by default).
 
-## What is planned
+## What it is
 
-Claude Code's Agent Teams (experimental) model the unit of delegation as a
-*team*, not a single spawn:
+The unit of delegation is a *team*, not a single spawn:
 
 - a **lead** session the human talks to, which carries the team's task list
   and configuration;
@@ -37,10 +34,48 @@ context, own transcript, steerable — unlike an in-context subagent spawn),
 coordination rides the same `agent://`/IrcBus messaging, and the shared
 workspace is the plain filesystem the sessions already share.
 
-## What exists today
+## Quick start
 
-The fork is not starting from zero. These primitives are implemented and
-tested today:
+1. Enable the gate: `/settings` → Tasks → Teams → **Agent Teams** (or `team.enabled: true`).
+2. Create `.omp/teams/audit.md`:
+
+```markdown
+---
+name: audit
+description: Log-audit crew
+workspace: ./ws
+members:
+  - agent: scout
+    handle: Scout
+    role: Collect logs
+  - agent: reviewer
+    handle: Reviewer
+    role: Verify findings
+context: |
+  Claim tasks in TASKS.md (owner: <handle>).
+---
+Audit covers services X and Y; the lead collects the final report.
+```
+
+3. `/team start audit "run the audit"` — members spawn with stable handles
+   (`Scout`, `Reviewer`), visible in the Agent Hub; message them via
+   `write agent://Scout`; `/team status audit`, `/team stop audit`.
+
+## Implementation
+
+Members spawn through the shared subagent seam (`handle` → registry id,
+`teamWorkspace` → the child's additional directories); teammate↔teammate and
+lead↔teammate messaging ride the existing `agent://` IrcBus with its ingress
+guard; the lead receives final answers through the existing wake relay;
+`/team stop` releases members through the lifecycle manager with tombstones
+(transcripts kept, revive available). Files: `task/teams.ts` (discovery +
+parsing + render), `slash-commands/builtin-teams.ts` (`/team`), settings
+`team.enabled` / `team.maxTeammates`. Design contract:
+[`specs/2026-11-06-agent-teams-design.md`](./specs/2026-11-06-agent-teams-design.md).
+
+### Built on
+
+These primitives were already implemented and are reused:
 
 | Primitive | What it provides | Where |
 | --- | --- | --- |

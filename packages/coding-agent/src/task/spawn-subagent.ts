@@ -95,13 +95,14 @@ export async function spawnSubagentViaExecutor(
 	let id: string;
 	let run: Promise<StructuredSubagentResult>;
 	try {
-		id = await executor.reserveId(session, { label: options.agent });
+		id = await executor.reserveId(session, { label: options.handle ?? options.agent });
 		run = executor.run({
 			session,
 			invocationKind: "task",
 			assignment: prompt,
 			agent: options.agent,
 			context: options.context,
+			...(options.teamWorkspace !== undefined ? { teamWorkspace: options.teamWorkspace } : {}),
 			identity: { id },
 			detached: true,
 			retainArtifacts: true,
