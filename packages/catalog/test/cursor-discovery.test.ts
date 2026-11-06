@@ -1003,10 +1003,11 @@ describe("cursor rich discovery review regressions", () => {
 			"/aiserver.v1.AiService/AvailableModels": { status: 503 },
 			"/agent.v1.AgentService/GetDefaultModelForCli": { status: 200, body: providerDefault },
 		});
-		// An empty 200 body is a decoded (empty) GetUsableModels message.
+		// An empty 200 body is a decoded (empty) GetUsableModels message; a 404
+		// AvailableModels is an endpoint without the RPC, so the legacy roster stands.
 		const empty = serveCursorRpcStatuses({
 			"/agent.v1.AgentService/GetUsableModels": { status: 200, body: new Uint8Array() },
-			"/aiserver.v1.AiService/AvailableModels": { status: 503 },
+			"/aiserver.v1.AiService/AvailableModels": { status: 404 },
 			"/agent.v1.AgentService/GetDefaultModelForCli": { status: 200, body: providerDefault },
 		});
 		try {
@@ -1223,7 +1224,84 @@ describe("cursor rich discovery review regressions", () => {
 
 		const expected = ["cursor-grok-4.6", "cursor-grok-4.6-fast"];
 		expect(await discoverIds(200)).toEqual(expected);
-		expect(await discoverIds(503)).toEqual(expected);
+		expect(await discoverIds(404)).toEqual(expected);
+	});
+
+	it("keeps cached rich lanes when AvailableModels fails transiently but GetUsableModels answers", async () => {
+		const context = create(ModelParameterDefinitionSchema, {
+			id: "context",
+			name: "Context",
+			parameterType: create(ModelParameterDefinition_ModelParameterTypeSchema, {
+				enumParameter: create(ModelParameterDefinition_EnumParameterDefinitionSchema, {
+					values: ["300k", "1m"].map(value =>
+						create(ModelParameterDefinition_EnumParameterDefinition_EnumParameterValueSchema, { value }),
+					),
+				}),
+			}),
+		});
+		const usable = toBinary(
+			GetUsableModelsResponseSchema,
+			create(GetUsableModelsResponseSchema, {
+				models: [create(ModelDetailsSchema, { modelId: "claude-opus-4-8-high" })],
+			}),
+		);
+		const available = toBinary(
+			AvailableModelsResponseSchema,
+			create(AvailableModelsResponseSchema, {
+				models: [
+					create(AvailableModelsResponse_ModelDetailsSchema, {
+						name: "claude-opus-4-8",
+						supportsAgent: true,
+						parameterDefinitions: [context],
+						variants: [
+							richVariant("claude-opus-4-8-high", { context: "300k" }, { isDefaultNonMaxConfig: true }),
+							richVariant("claude-opus-4-8-high", { context: "1m" }),
+						],
+					}),
+				],
+			}),
+		);
+		const cacheDbPath = await createTempCachePath();
+		// One endpoint for every pass: the cache namespace is keyed on the base URL.
+		let availableStatus = 200;
+		const server = Bun.serve({
+			port: 0,
+			fetch(request) {
+				const pathname = new URL(request.url).pathname;
+				if (pathname === "/agent.v1.AgentService/GetUsableModels") return new Response(Buffer.from(usable));
+				if (pathname === "/aiserver.v1.AiService/AvailableModels") {
+					return new Response(availableStatus === 200 ? Buffer.from(available) : null, {
+						status: availableStatus,
+					});
+				}
+				return new Response(null, { status: 404 });
+			},
+		});
+		const resolveIds = async (strategy: "online" | "offline", now: number): Promise<string[]> => {
+			const result = await resolveProviderModels(
+				{
+					...cursorModelManagerOptions({ apiKey: "t", baseUrl: server.url.toString() }),
+					cacheDbPath,
+					staticModels: [],
+					now: () => now,
+				},
+				strategy,
+			);
+			return result.models.map(model => model.id).sort();
+		};
+
+		try {
+			const rich = ["claude-opus-4-8", "claude-opus-4-8-1m"];
+			expect(await resolveIds("online", 1)).toEqual(rich);
+			// A timed-out or failing AvailableModels must not replace the cached
+			// catalog with the legacy roster, which has no `-1m` lane — neither in
+			// this cycle nor in the row the next startup reads offline.
+			availableStatus = 503;
+			expect(await resolveIds("online", 2)).toEqual(rich);
+			expect(await resolveIds("offline", 3)).toEqual(rich);
+		} finally {
+			server.stop(true);
+		}
 	});
 
 	it("migrates selectors and overrides keyed by the retired unprefixed rich Grok lane ids (#14164)", () => {

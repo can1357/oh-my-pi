@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor's long-context and other variant models (e.g. `cursor/claude-opus-5-5-1m`) disappearing until the next refresh, with "unknown model" fallback-chain warnings at startup, when one discovery pass got Cursor's basic model list but not its variant list; the previous catalog is now kept and refetched sooner
+
 ## [18.12.4] - 2026-10-20
 
 ### Added
