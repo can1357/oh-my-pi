@@ -14,6 +14,7 @@
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { readFile } from "../capability/fs";
+import { asWrittenLiteral, asWrittenSubstitution } from "../mcp/as-written";
 import { isContainedResolved, realpathIfExists, resolveContainedPath } from "./contained-path";
 import { registerPluginCacheInvalidator } from "./helpers";
 
@@ -399,10 +400,21 @@ async function parseStdioServer(
 
 	// A plugin-relative `./` path is rooted at the install directory, and the
 	// spec puts that directory outside the plugin's identity: an upgrade into
-	// a new directory is the same server. Record it as the placeholder the
-	// spec gives for exactly that, so the tool cache reads the declaration
-	// rather than inferring one from the difference (see `withMcpAsWritten`,
-	// which records a written form only where the entry asked for one).
+	// a new directory is the same server. Record what this parse substituted,
+	// so the tool cache reads the substitution rather than inferring one from
+	// the difference (see `withMcpAsWritten`, which records a written form
+	// only where a provider's own pass reports replacing something).
+	const writtenValue = (value: string) =>
+		asWrittenLiteral(value)
+			.replaceAll(PLUGIN_ROOT_VAR, asWrittenSubstitution(PLUGIN_ROOT_VAR))
+			.replaceAll(PLUGIN_DATA_VAR, asWrittenSubstitution(PLUGIN_DATA_VAR));
+	// `command` and `cwd` also accept the plugin-relative `./` form, which
+	// this parse roots at the install directory — the same substitution
+	// `${PLUGIN_ROOT}` names, so it is recorded as the same thing.
+	const writtenPath = (value: string) =>
+		value.startsWith("./")
+			? `${asWrittenSubstitution(PLUGIN_ROOT_VAR)}/${asWrittenLiteral(value.slice(2))}`
+			: writtenValue(value);
 	return {
 		server: {
 			name,
@@ -412,15 +424,19 @@ async function parseStdioServer(
 			env: expandedEnv,
 			cwd: resolvedCwd,
 			asWritten: {
-				command: command.startsWith("./") ? `${PLUGIN_ROOT_VAR}/${command.slice(2)}` : command,
-				...(args !== undefined && { args: args as string[] }),
+				command: writtenPath(command),
+				...(args !== undefined && { args: (args as string[]).map(arg => writtenValue(arg)) }),
 				env: {
-					...(env as Record<string, string> | undefined),
-					PLUGIN_ROOT: PLUGIN_ROOT_VAR,
-					PLUGIN_DATA: PLUGIN_DATA_VAR,
+					...Object.fromEntries(
+						Object.entries((env ?? {}) as Record<string, string>).map(([key, value]) => [
+							asWrittenLiteral(key),
+							writtenValue(value),
+						]),
+					),
+					PLUGIN_ROOT: asWrittenSubstitution(PLUGIN_ROOT_VAR),
+					PLUGIN_DATA: asWrittenSubstitution(PLUGIN_DATA_VAR),
 				},
-				cwd:
-					cwd === undefined ? PLUGIN_ROOT_VAR : cwd.startsWith("./") ? `${PLUGIN_ROOT_VAR}/${cwd.slice(2)}` : cwd,
+				cwd: cwd === undefined ? asWrittenSubstitution(PLUGIN_ROOT_VAR) : writtenPath(cwd),
 			},
 		},
 	};

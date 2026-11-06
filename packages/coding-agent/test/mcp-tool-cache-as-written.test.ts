@@ -754,11 +754,11 @@ describe("the tool cache keys a discovered server on its config as written", () 
 
 	/**
 	 * Round 11 (confirm pass, F3). OpenCode substitutes its config *text*
-	 * before parsing it, so `{env:...}` is as real a declaration in an object
-	 * key as in a value. `declaresSubstitution` read only `Object.values`, so
-	 * a header name built from a rotating variable looked like an edited
-	 * literal and the catalogue was dropped on every rotation — which for a
-	 * `lazy` server means it starts with no tools at all.
+	 * before parsing it, so a reference is as real in an object key as in a
+	 * value. Reading the parsed value's `Object.values` alone made a header
+	 * name built from a rotating variable look like an edited literal, and
+	 * the catalogue was dropped on every rotation — which for a `lazy`
+	 * server means it starts with no tools at all.
 	 */
 	test("opencode: a declaration in a header name keeps the catalogue across a rotation", async () => {
 		const write = () =>
@@ -847,6 +847,238 @@ describe("the tool cache keys a discovered server on its config as written", () 
 			const cache = new MCPToolCache(memoryStorage().storage);
 			await cache.set("aw-plugin:aw", slotA, [TOOL]);
 			expect(await cache.get("aw-plugin:aw", slotB)).toEqual([TOOL]);
+		});
+	}
+
+	/**
+	 * Round 12 (OpenAI arm, S1). `identityRecord` normalises the *written*
+	 * config too, and a scope list was split on whitespace without regard
+	 * for what wrote it, so the words inside one declaration's default
+	 * became separate grant tokens. Two projects asking for different
+	 * grants then sorted to the same multiset and shared one catalogue.
+	 */
+	test("oauth: two scope declarations differing inside their defaults are two grants", async () => {
+		const SCOPE_SET = "OMP_AW_SCOPE_SET";
+		const SCOPE_UNSET = "OMP_AW_SCOPE_UNSET";
+		const originalSet = process.env[SCOPE_SET];
+		const originalUnset = process.env[SCOPE_UNSET];
+		process.env[SCOPE_SET] = "fixed";
+		delete process.env[SCOPE_UNSET];
+		try {
+			const project = async (slot: string, first: string, second: string): Promise<string> => {
+				const root = path.join(dirs.root, slot);
+				await fs.mkdir(path.join(root, ".git"), { recursive: true });
+				await writeJson(path.join(root, ".omp", "mcp.json"), {
+					mcpServers: {
+						aw: {
+							type: "http",
+							url: "https://mcp.example.test/aw",
+							oauth: {
+								scope: `${DOLLAR}{${SCOPE_SET}:-first ${first}} ${DOLLAR}{${SCOPE_UNSET}:-second ${second}}`,
+							},
+						},
+					},
+				});
+				return root;
+			};
+			const projectA = await project("scope-a", "read", "write");
+			const projectB = await project("scope-b", "write", "read");
+
+			clearFsCache();
+			const [name, here] = findServer((await loadAllMCPConfigs(projectA, { filterExa: false })).configs);
+			clearFsCache();
+			const [, there] = findServer((await loadAllMCPConfigs(projectB, { filterExa: false })).configs);
+
+			// The set variable really won and the unset one really defaulted:
+			// the two connections ask the authorization server for different grants.
+			expect(here.oauth?.scope).toBe("fixed second write");
+			expect(there.oauth?.scope).toBe("fixed second read");
+
+			const cache = new MCPToolCache(memoryStorage().storage);
+			await cache.set(name, here, [TOOL]);
+			expect(await cache.get(name, there)).toBeNull();
+			expect(await cache.get(name, here)).toEqual([TOOL]);
+		} finally {
+			restoreEnvValue(SCOPE_SET, originalSet);
+			restoreEnvValue(SCOPE_UNSET, originalUnset);
+		}
+	});
+
+	/**
+	 * Round 12 (OpenAI arm, S3). `claude-plugins` substitutes only its two
+	 * plugin-root placeholders in `command`/`cwd`; every other `${...}` form
+	 * is literal text it hands to the OS. Reading those paths with the OMP
+	 * grammar called them declarations and left them unrooted, so two
+	 * installs recorded one written `cwd` while running in two directories.
+	 *
+	 * The manifest points the server map at a nested file on purpose: this
+	 * provider roots a relative path at the config file's own directory, not
+	 * at the plugin directory, and the written form has to follow the same base.
+	 */
+	for (const declared of [`${DOLLAR}{HOME}`, `${DOLLAR}{OMP_AW_UNSET_TAG:-tag}`]) {
+		test(`claude-plugins: "${declared}/srv" is literal text in a path field, so two installs stay two servers`, async () => {
+			enableUserSource("claude");
+			const install = async (slot: string): Promise<MCPServerConfig> => {
+				const pluginPath = path.join(dirs.root, "claude-plugins", slot, "aw-plugin");
+				await writeJson(path.join(pluginPath, ".claude-plugin", "plugin.json"), {
+					name: "aw-plugin",
+					mcpServers: "nested/mcp.json",
+				});
+				await writeJson(path.join(pluginPath, "nested", "mcp.json"), {
+					aw: { type: "stdio", command: "aw-server", cwd: `${declared}/srv` },
+				});
+				await writeClaudeRegistry(dirs, pluginPath, "aw-plugin@claude-plugins-official");
+				clearFsCache();
+				clearClaudePluginRootsCache();
+				return findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs)[1];
+			};
+
+			const slotA = await install("a");
+			const slotB = await install("b");
+			// Nothing expanded it: the text survives into the path the provider
+			// rooted at each install's own nested config directory.
+			const cwd = (config: MCPServerConfig) => (config.type === "stdio" ? config.cwd : undefined);
+			expect(cwd(slotA)).toContain(path.join("a", "aw-plugin", "nested", declared, "srv"));
+			expect(cwd(slotB)).toContain(path.join("b", "aw-plugin", "nested", declared, "srv"));
+
+			const cache = new MCPToolCache(memoryStorage().storage);
+			await cache.set("aw-plugin:aw", slotA, [TOOL]);
+			expect(await cache.get("aw-plugin:aw", slotB)).toBeNull();
+			expect(await cache.get("aw-plugin:aw", slotA)).toEqual([TOOL]);
+		});
+	}
+
+	/**
+	 * Round 12 (OpenAI arm, S4). OpenCode substitutes its config *text*
+	 * before parsing it, so an escaped brace and a real one parse to the
+	 * same string while only the second is a reference. Recognising the
+	 * reference in the parsed value made the literal one and the same as the
+	 * reference, and the project sending the brace verbatim mounted the
+	 * other project's catalogue.
+	 */
+	test("opencode: a header that only spells a reference is not one, so two projects stay two servers", async () => {
+		const project = async (slot: string, brace: string): Promise<string> => {
+			const root = path.join(dirs.root, slot);
+			await fs.mkdir(path.join(root, ".git"), { recursive: true });
+			await Bun.write(
+				path.join(root, "opencode.json"),
+				`{"mcp":{"aw":{"type":"remote","url":"https://mcp.example.test/aw","headers":{"Authorization":"Bearer ${brace}env:${TOKEN_VAR}}"}}}}`,
+			);
+			return root;
+		};
+		await setToken(dirs, "token-a");
+		const spelledRoot = await project("spelled", "\\u007b");
+		const referencedRoot = await project("referenced", "{");
+
+		clearFsCache();
+		const [name, spelled] = findServer((await loadAllMCPConfigs(spelledRoot, { filterExa: false })).configs);
+		clearFsCache();
+		const [, referenced] = findServer((await loadAllMCPConfigs(referencedRoot, { filterExa: false })).configs);
+
+		// One header reaches the transport verbatim, the other carries the token.
+		expect(authorization(spelled)).toBe(`Bearer {env:${TOKEN_VAR}}`);
+		expect(authorization(referenced)).toBe("Bearer token-a");
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, spelled, [TOOL]);
+		expect(await cache.get(name, referenced)).toBeNull();
+		expect(await cache.get(name, spelled)).toEqual([TOOL]);
+	});
+
+	/**
+	 * The same question one level down. The as-written record encodes a
+	 * substituted span with U+0000, and doubles that character wherever a
+	 * value really contains it, so the encoding stays injective: a config
+	 * that writes the marker by hand is literal text like any other, not the
+	 * reference it spells.
+	 */
+	test("opencode: a value spelling the as-written marker is still only a literal", async () => {
+		const project = async (slot: string, header: string): Promise<string> => {
+			const root = path.join(dirs.root, slot);
+			await fs.mkdir(path.join(root, ".git"), { recursive: true });
+			await Bun.write(
+				path.join(root, "opencode.json"),
+				`{"mcp":{"aw":{"type":"remote","url":"https://mcp.example.test/aw","headers":{"Authorization":"${header}"}}}}`,
+			);
+			return root;
+		};
+		await setToken(dirs, "token-a");
+		// A hand-written marker around an escaped-brace reference: nothing
+		// here is substituted, so all of it reaches the transport verbatim.
+		const spelledRoot = await project("marker", String.raw`Bearer \u0000(\u007benv:${TOKEN_VAR}}\u0000)`);
+		const referencedRoot = await project("real-ref", `Bearer {env:${TOKEN_VAR}}`);
+
+		clearFsCache();
+		const [name, spelled] = findServer((await loadAllMCPConfigs(spelledRoot, { filterExa: false })).configs);
+		clearFsCache();
+		const [, referenced] = findServer((await loadAllMCPConfigs(referencedRoot, { filterExa: false })).configs);
+
+		expect(authorization(spelled)).toBe(`Bearer \u0000({env:${TOKEN_VAR}}\u0000)`);
+		expect(authorization(referenced)).toBe("Bearer token-a");
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, spelled, [TOOL]);
+		expect(await cache.get(name, referenced)).toBeNull();
+		expect(await cache.get(name, spelled)).toEqual([TOOL]);
+	});
+
+	/**
+	 * Round 12 (OpenAI arm, S5). A declaration that *begins* a value is not
+	 * therefore the value's root: its default may end inside the first path
+	 * component, or supply a relative component the provider still roots.
+	 * Each row below resolves to a different program or directory per
+	 * project, so each is two servers however it is written.
+	 */
+	const LEADING_DECLARATIONS: Array<{ id: string; entry: Record<string, unknown>; shows: string[] }> = [
+		{
+			id: "a declaration ending inside the first path component",
+			entry: { command: `${DOLLAR}{OMP_AW_UNSET_TAG:-./tag}-server/bin/aw` },
+			shows: ["aw-extension", "tag-server", "bin", "aw"],
+		},
+		{
+			id: "a declaration whose default is the whole first component",
+			entry: { command: `${DOLLAR}{OMP_AW_UNSET_REL:-./server}/bin/aw` },
+			shows: ["aw-extension", "server", "bin", "aw"],
+		},
+		{
+			id: "a declaration beginning a relative cwd beside an absolute command",
+			entry: { command: "/usr/bin/aw-server", cwd: `${DOLLAR}{OMP_AW_UNSET_TAG:-tag}-server/srv` },
+			shows: ["aw-extension", "tag-server", "srv"],
+		},
+	];
+	for (const row of LEADING_DECLARATIONS) {
+		test(`omp-plugins: ${row.id} still roots the path at its own project`, async () => {
+			const project = async (slot: string): Promise<string> => {
+				const root = path.join(dirs.root, slot);
+				const ext = path.join(root, "aw-extension");
+				await fs.mkdir(path.join(root, ".git"), { recursive: true });
+				await writeJson(path.join(ext, "package.json"), {
+					name: "aw-extension",
+					omp: { extensions: ["./main.ts"] },
+				});
+				await Bun.write(path.join(ext, "main.ts"), "export default function (_pi) {}\n");
+				await writeJson(path.join(ext, ".mcp.json"), { mcpServers: { aw: { ...row.entry, lazy: true } } });
+				await writeJson(path.join(root, ".omp", "settings.json"), { extensions: [ext] });
+				return root;
+			};
+			const projectA = await project("lead-a");
+			const projectB = await project("lead-b");
+
+			clearFsCache();
+			const [name, here] = findServer((await loadAllMCPConfigs(projectA, { filterExa: false })).configs);
+			clearFsCache();
+			const [, there] = findServer((await loadAllMCPConfigs(projectB, { filterExa: false })).configs);
+
+			// The default really expanded, and the rooted field really differs.
+			const rooted = (config: MCPServerConfig) =>
+				config.type === "stdio" ? (row.entry.cwd === undefined ? config.command : config.cwd) : undefined;
+			expect(rooted(here)).toContain(path.join("lead-a", ...row.shows));
+			expect(rooted(there)).toContain(path.join("lead-b", ...row.shows));
+
+			const cache = new MCPToolCache(memoryStorage().storage);
+			await cache.set(name, here, [TOOL]);
+			expect(await cache.get(name, there)).toBeNull();
+			expect(await cache.get(name, here)).toEqual([TOOL]);
 		});
 	}
 });

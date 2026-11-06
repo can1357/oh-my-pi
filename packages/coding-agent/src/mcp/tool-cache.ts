@@ -4,6 +4,7 @@
  * Stores tool definitions per server in agent.db for fast startup.
  */
 import { isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { splitOutsideSubstitutions } from "./as-written";
 import type { AgentStorageApi } from "../session/agent-storage";
 import { DEFAULT_MCP_TIMEOUT_MS } from "./timeout";
 import { MCP_CONFIG_AS_WRITTEN, type MCPRequestIdFormat, type MCPServerConfig, type MCPToolDefinition } from "./types";
@@ -100,12 +101,13 @@ function hashIdentity(identity: Record<string, unknown>): string {
  * `oauth` members excluded from identity for the same reason as
  * {@link CURRENT_IDENTITY_EXCLUDED_KEYS}: they configure the *interactive
  * browser login* — what the authorization request asks to be prompted for,
- * and where the loopback listener that catches the redirect binds. Their
- * only consumer is `resolveCallbackOptions` in `oauth-flow.ts`; none of them
- * reaches the MCP connection, so toggling one serves no different tools and
- * spawns no different process. The rest of `oauth` stays: `clientId` and
- * `clientSecret` are the credentials the login presents, and `scope` is the
- * grant it asks for.
+ * and where the loopback listener that catches the redirect binds. None of
+ * them reaches the MCP connection, so toggling one serves no different tools
+ * and spawns no different process. `prompt` is read by `oauth-flow.ts:443`,
+ * `oauth-reauth.ts:874` and `mcp-command-controller.ts:692`; the three
+ * callback members by `resolveCallbackOptions` in `oauth-flow.ts`. The rest
+ * of `oauth` stays: `clientId` and `clientSecret` are the credentials the
+ * login presents, and `scope` is the grant it asks for.
  */
 const OAUTH_LOGIN_POLICY_KEYS = ["prompt", "redirectUri", "callbackPort", "callbackPath"] as const;
 
@@ -119,10 +121,14 @@ const OAUTH_LOGIN_POLICY_KEYS = ["prompt", "redirectUri", "callbackPort", "callb
  *   (`resolveMarketplaceEnv` in `discovery/claude-plugins.ts`), so swapping
  *   two expanded entries in a plugin's `.mcp.json` reorders an array without
  *   changing one resolved value. Membership still decides whether a value is
- *   resolved again, so it is sorted and deduped, never dropped. This is the
- *   partition `isSameMCPConnection` already applies in `capability/mcp.ts`.
- * - `oauth.scope` is a space-delimited scope list, and RFC 6749 §3.3 says the
- *   order of its values is not significant.
+ *   resolved again, so it is sorted and deduped, never dropped.
+ * - `oauth.scope` is a space-delimited *set* of scopes: RFC 6749 §3.3 says
+ *   the order of its values is not significant, and asking twice for one
+ *   scope asks for nothing more. So it is sorted and deduped too. The split
+ *   keeps each recorded substitution whole, because this runs over the
+ *   as-written config as well as the effective one: the whitespace inside a
+ *   `${VAR:-two words}` default belongs to the declaration, and splitting
+ *   there made two different grants sort to one multiset.
  * - {@link OAUTH_LOGIN_POLICY_KEYS} are deleted, and an `oauth` left empty by
  *   that goes with them: `oauth: { prompt: "login" }` and no `oauth` at all
  *   describe the same connection.
@@ -132,6 +138,10 @@ const OAUTH_LOGIN_POLICY_KEYS = ["prompt", "redirectUri", "callbackPort", "callb
  * order is the program's input and not a set; `type` is written by
  * `buildLegacyConfig` for every discovered server, so it never varies between
  * two readings of one entry.
+ *
+ * This is *not* the partition `isSameMCPConnection` applies in
+ * `capability/mcp.ts`; see the comment above it. The two disagree in both
+ * directions, conservatively, and must not be assumed to agree.
  */
 function identityRecord(config: MCPServerConfig): Record<string, unknown> {
 	const identity = stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS);
@@ -142,7 +152,9 @@ function identityRecord(config: MCPServerConfig): Record<string, unknown> {
 		const connection: Record<string, unknown> = { ...oauth };
 		for (const key of OAUTH_LOGIN_POLICY_KEYS) delete connection[key];
 		const scope = connection.scope;
-		if (typeof scope === "string") connection.scope = scope.split(/\s+/).filter(Boolean).sort().join(" ");
+		if (typeof scope === "string") {
+			connection.scope = [...new Set(splitOutsideSubstitutions(scope))].sort().join(" ");
+		}
 		if (Object.keys(connection).length === 0) delete identity.oauth;
 		else identity.oauth = connection;
 	}
@@ -170,7 +182,9 @@ function identityJson(config: MCPServerConfig): string {
  * policy applied to one unchanged endpoint or process and every other key
  * names the endpoint, the executable, its arguments, its environment, its
  * directory or the credentials it presents. One definition of "a different
- * server", so a rewrite cannot be identity for one of them and not the other.
+ * server" — for these two readers — so a rewrite cannot be identity for one
+ * of them and not the other. It does not extend to `isSameMCPConnection` in
+ * `capability/mcp.ts`, which partitions differently; see the comment there.
  *
  * The effective config is the right input here, not the as-written one: "is
  * this a different process" is a question about what will be spawned or
@@ -264,14 +278,29 @@ function requestIdFormatCandidates(current: MCPRequestIdFormat | undefined): Arr
  * hash released builds write.
  *
  * A released cache keyed on a plugin's or a codex server's expanded config
- * therefore survives this change without a `CACHE_VERSION` bump, through the
- * released tier this already enumerates (the `[]` entry, which reconstructs
- * the whole effective config), not through the first tier, which excludes
- * policy. What it cannot recover is an entry whose newly normalised or
- * newly excluded value *also* changed across the upgrade — a reordered
- * `envLiteralKeys`, an edited `oauth.prompt` — since no digest keeps the
- * historical text. That costs one self-healing miss, the same residual
- * {@link timeoutCandidates} already documents.
+ * therefore survives this change without a `CACHE_VERSION` bump: the
+ * released tier this enumerates (the `[]` entry) reconstructs the whole
+ * effective config and reproduces that digest. For a config that sets no
+ * policy key — which is what discovery produces for a plugin or a codex
+ * server — the first tier deletes nothing and reproduces the same digest, so
+ * the two coincide; they come apart only once a policy key is set. Nothing
+ * here picks a winner either way: the result is a de-duplicated set of
+ * digests, and {@link MCPToolCache.get} asks whether the stored one is in it.
+ *
+ * What it cannot recover is an entry whose newly normalised or newly
+ * excluded value *also* changed across the upgrade — an edited
+ * `oauth.prompt`, a `scope` that gained a duplicate token — since no digest
+ * keeps the historical text. `envLiteralKeys` misses in one direction only:
+ * every tier here starts from the raw {@link stripKeys} form, which carries
+ * the array in the order the current config has it, so a released entry
+ * written out of normal form from a file nobody has edited still hits —
+ * that is what starting raw instead of from {@link identityRecord} exists
+ * for. Only an entry whose array was stored out of normal form *and*
+ * reordered since is lost. Each costs one self-healing miss, the same
+ * residual {@link timeoutCandidates} already documents — and a miss is not
+ * free for a lazy server: `set()` runs only after a real connect, so a
+ * dormant server's legacy hit is never rewritten under the new digest and it
+ * pays this whole enumeration on every start until something connects it.
  */
 function hashLegacyConfigs(config: MCPServerConfig): string[] {
 	const identity = stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS);

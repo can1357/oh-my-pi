@@ -40,6 +40,7 @@ import {
 	scanSkillsFromDir,
 } from "./helpers";
 import { resolvePluginStdioPaths } from "./substitute-plugin-root";
+import { asWrittenLiteral, asWrittenSubstitution } from "../mcp/as-written";
 
 import { cfgSkillsEnableCodexUser } from "../extensibility/settings";
 
@@ -250,16 +251,20 @@ function extractMCPServersFromToml(
 		// `env = { TOKEN: "a" }` and `env = { TOKEN: "b" }` both keyed on
 		// `${TOKEN}`, so editing that literal left a lazy server serving the
 		// previous server's catalog.
-		const asWrittenEnv: Record<string, string> = { ...config.env };
+		const asWrittenEnv: Record<string, string> = {};
+		for (const [name, value] of Object.entries(config.env ?? {})) asWrittenEnv[name] = asWrittenLiteral(value);
 		for (const varName of config.env_vars ?? []) {
-			if (Bun.env[varName] !== undefined) asWrittenEnv[varName] = `\${${varName}}`;
+			if (Bun.env[varName] !== undefined) asWrittenEnv[varName] = asWrittenSubstitution(`\${${varName}}`);
 		}
-		const asWrittenHeaders: Record<string, string> = { ...config.http_headers };
+		const asWrittenHeaders: Record<string, string> = {};
+		for (const [name, value] of Object.entries(config.http_headers ?? {})) {
+			asWrittenHeaders[name] = asWrittenLiteral(value);
+		}
 		for (const [headerName, varName] of Object.entries(config.env_http_headers ?? {})) {
-			if (Bun.env[varName] !== undefined) asWrittenHeaders[headerName] = `\${${varName}}`;
+			if (Bun.env[varName] !== undefined) asWrittenHeaders[headerName] = asWrittenSubstitution(`\${${varName}}`);
 		}
 		if (config.bearer_token_env_var && Bun.env[config.bearer_token_env_var]) {
-			asWrittenHeaders.Authorization = `Bearer \${${config.bearer_token_env_var}}`;
+			asWrittenHeaders.Authorization = `Bearer ${asWrittenSubstitution(`\${${config.bearer_token_env_var}}`)}`;
 		}
 		// Only the substituted fields are recorded; `command`, `cwd`, `args`
 		// and `url` are the effective values and stay out, which is the same

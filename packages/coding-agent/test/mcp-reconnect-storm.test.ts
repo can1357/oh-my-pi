@@ -348,6 +348,16 @@ describe("a rewrite of what is not the process does not replenish the crash-burs
 			spawns: [BURST_LIMIT, BURST_LIMIT, BURST_LIMIT],
 		},
 		{
+			// Round 12 (OpenAI arm, S2). A scope list is a set of grants:
+			// repeating one token asks for nothing new, so writing it twice
+			// is not a new server and buys no second budget.
+			id: "a scope list that repeats one token keeps one budget",
+			server: "stormy",
+			write: round => writeOmpMcp(crashingStdio({ oauth: { scope: round % 2 === 0 ? "read" : "read read" } })),
+			rewritten: config => config.oauth?.scope,
+			spawns: [BURST_LIMIT, BURST_LIMIT, BURST_LIMIT],
+		},
+		{
 			id: "an OAuth client id that alternates buys a new budget",
 			server: "stormy",
 			write: round => writeOmpMcp(crashingStdio({ oauth: { clientId: round % 2 === 0 ? "client-a" : "client-b" } })),

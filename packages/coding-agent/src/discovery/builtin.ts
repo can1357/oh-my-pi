@@ -28,6 +28,7 @@ import {
 	discoverRuleFromMarkdown,
 	createSourceMeta,
 	discoverExtensionModulePaths,
+	envVarsDeepAsWritten,
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	getProjectDiscoveryCeilings,
@@ -134,6 +135,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		if (!data?.mcpServers) return result;
 
 		const expanded = expandEnvVarsDeep(data.mcpServers);
+		const written = envVarsDeepAsWritten(data.mcpServers);
 		for (const [serverName, config] of Object.entries(expanded)) {
 			const serverConfig = config as Record<string, unknown>;
 
@@ -233,7 +235,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,
 				_source: createSourceMeta(PROVIDER_ID, path, level),
 			};
-			result.push(withMcpAsWritten(server, data.mcpServers[serverName]));
+			result.push(withMcpAsWritten(server, written[serverName]));
 		}
 		return result;
 	};

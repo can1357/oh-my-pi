@@ -38,7 +38,8 @@ import { normalizeToolNames } from "../tools/builtin-names";
 
 import { realpathIfExists, resolveContainedPath } from "./contained-path";
 import { buildPluginDirRoot } from "./plugin-dir-roots";
-import { resolvePluginStdioPaths, type StdioCommandBase } from "./substitute-plugin-root";
+import type { StdioPathBases } from "./substitute-plugin-root";
+import { asWrittenLiteral, asWrittenText } from "../mcp/as-written";
 
 /**
  * Standard paths for each config source.
@@ -209,132 +210,56 @@ const MCP_AS_WRITTEN_FIELDS = [
 	"oauth",
 ] as const satisfies readonly (keyof MCPServerAsWritten)[];
 
-/**
- * The substitution syntax one discovery provider expands while loading an
- * MCP entry. It has to be the provider's own, not the union of all of them:
- * a form a provider never expands is literal text it will read back
- * unchanged, so calling it a declaration claims a rotation that cannot
- * happen (see {@link withMcpAsWritten}).
- *
- * - `omp`: `${VAR}` and `${VAR:-default}`, exactly the grammar
- *   {@link expandEnvVarsDeep} expands — a non-empty, colon-free name, which
- *   covers the reserved plugin roots `${PLUGIN_ROOT}`, `${PLUGIN_DATA}`,
- *   `${CLAUDE_PLUGIN_ROOT}` and `${OMP_PLUGIN_ROOT}` and excludes the forms
- *   it leaves alone, `${}` among them.
- * - `opencode`: OpenCode's `{env:VAR}` / `{file:path}`, substituted into the
- *   config *text* before it is parsed, so a declaration can sit in an object
- *   key as readily as in a value.
- */
-export type McpSubstitutionSyntax = "omp" | "opencode";
-
-const OMP_SUBSTITUTION = /\$\{[^}:]+(?::-[^}]*)?\}/;
-const OPENCODE_SUBSTITUTION = /\{env:[^}]+\}|\{file:[^}]+\}/;
-
-interface McpSubstitutionDialect {
-	/** Matches a declaration anywhere in a value. */
-	readonly anywhere: RegExp;
-	/** Matches a declaration that *begins* a value, and so governs its root. */
-	readonly leading: RegExp;
-	/** Whether this provider substitutes in object keys as well as values. */
-	readonly inKeys: boolean;
-}
-
-const MCP_SUBSTITUTION_DIALECTS: Record<McpSubstitutionSyntax, McpSubstitutionDialect> = {
-	omp: {
-		anywhere: OMP_SUBSTITUTION,
-		leading: new RegExp(`^(?:${OMP_SUBSTITUTION.source})`),
-		inKeys: false,
-	},
-	opencode: {
-		anywhere: OPENCODE_SUBSTITUTION,
-		leading: new RegExp(`^(?:${OPENCODE_SUBSTITUTION.source})`),
-		inKeys: true,
-	},
-};
-
-/** Whether `value`, or anything nested in it, was written as a substitution. */
-function declaresSubstitution(value: unknown, dialect: McpSubstitutionDialect): boolean {
-	if (typeof value === "string") return dialect.anywhere.test(value);
-	if (Array.isArray(value)) return value.some(item => declaresSubstitution(item, dialect));
-	if (isRecord(value)) {
-		return Object.entries(value).some(
-			([key, nested]) => (dialect.inKeys && dialect.anywhere.test(key)) || declaresSubstitution(nested, dialect),
-		);
-	}
-	return false;
-}
-
-/** Where a provider rooted a relative `command`/`cwd`; see {@link withMcpAsWritten}. */
+/** Where a provider rebased `command`/`cwd`; see {@link withMcpAsWritten}. */
 export interface McpAsWrittenOptions {
-	/** Substitution syntax this provider expands (default `"omp"`). */
-	syntax?: McpSubstitutionSyntax;
-	/** The {@link resolvePluginStdioPaths} call the provider made on the effective config. */
-	rooting?: { dir: string; commandBase?: StdioCommandBase };
+	/**
+	 * The bases {@link resolvePluginStdioPaths} rebased the *effective*
+	 * `command`/`cwd` against, as it reported them. The written form is
+	 * rebased by the same ones, so it keeps the directory the value really
+	 * resolved against and keeps the declaration where the entry put it.
+	 */
+	rooting?: StdioPathBases;
 }
 
 /**
- * `entry` with its path fields rooted the way the provider rooted the
- * effective ones, so the written form keeps the directory it was resolved
- * against and keeps the placeholder where the entry put it
- * (`./bin/${TAG}/aw` under `/a/ext` becomes `/a/ext/bin/${TAG}/aw`).
+ * Record on `server` the connection fields its provider's substitution pass
+ * reported replacing something in. `written` is that report: the entry with
+ * every span the provider really substituted recorded as a substitution and
+ * everything else as literal text (see `mcp/as-written.ts`), under the
+ * {@link MCPServer} field names. The tool cache keys the server's catalog on
+ * these, so a rotated `${TOKEN}` keeps the catalog. Returns `server`.
  *
- * A value that *begins* with a declaration is left alone: that declaration
- * is the root, which is exactly what `${PLUGIN_ROOT}/bin/aw` says, and
- * re-rooting it would bury a plugin's own placeholder under the install
- * directory it exists to replace. A declaration anywhere later substitutes
- * one path component and leaves the rest of the path, root included, as
- * written.
- */
-function rootWrittenPaths(
-	entry: Record<string, unknown>,
-	dialect: McpSubstitutionDialect,
-	rooting: { dir: string; commandBase?: StdioCommandBase },
-): Record<string, unknown> {
-	const relative: { command?: string; cwd?: string } = {};
-	for (const field of ["command", "cwd"] as const) {
-		const value = entry[field];
-		if (typeof value === "string" && !dialect.leading.test(value)) relative[field] = value;
-	}
-	if (relative.command === undefined && relative.cwd === undefined) return entry;
-	return { ...entry, ...resolvePluginStdioPaths(relative, rooting.dir, rooting.commandBase) };
-}
-
-/**
- * Record on `server` the connection fields that `entry`, its config-file entry
- * before the provider expanded them, wrote as a *substitution*. Only fields
- * the provider set count, and `entry` must use the {@link MCPServer} field
- * names. The tool cache keys the server's catalog on these, so a rotated
- * `${TOKEN}` keeps the catalog. Returns `server`.
+ * A difference is not enough, which is why the report and not the raw entry
+ * is the input. Providers also *resolve* a relative `command` or `cwd`
+ * against the directory that declared it ({@link resolvePluginStdioPaths}),
+ * and recording the written form there said that two projects' `./bin/aw`
+ * are one server — which, since the cache row is the server name alone,
+ * served one project's catalog to the other. Rooting is not substitution: it
+ * names a program, and the program a path names depends on where it is
+ * rooted. `options.rooting` carries the bases that call reported, and the
+ * written form is rebased by the same ones — so a path the provider rooted
+ * is rooted here too, declaration and all, and a path it left alone
+ * (already absolute, or a bare executable name) is left alone here too.
  *
- * A difference is not enough. Providers also *resolve* a relative `command`
- * or `cwd` against the directory that declared it
- * ({@link resolvePluginStdioPaths}), and recording the written form there
- * said that two projects' `./bin/aw` are one server — which, since the cache
- * row is the server name alone, served one project's catalog to the other.
- * Rooting is not substitution: it names a program, and the program a path
- * names depends on where it is rooted. `options.rooting` says which call the
- * provider made, and the written form is rooted by the same one.
- *
- * So the written form stands only where the entry asked for it, with a
- * placeholder or a reference, and only over what it was written on. A plugin
- * whose install directory is not part of its identity says so with a leading
- * `${PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_ROOT}` and keeps its catalog across an
- * upgrade; a plugin that writes a bare relative path has declared nothing,
- * and two installs of it are two programs; a plugin that writes
+ * So the written form stands only where the provider substituted something,
+ * and only over what it was written on. A plugin whose install directory is
+ * not part of its identity says so with a placeholder its provider expands —
+ * `${CLAUDE_PLUGIN_ROOT}`, `${PLUGIN_ROOT}` — and keeps its catalog across
+ * an upgrade; a plugin that writes a bare relative path has declared
+ * nothing, and two installs of it are two programs; a plugin that writes
  * `./bin/${TAG}/aw` has declared one component of a path that is still
  * rooted where it was installed.
  */
-export function withMcpAsWritten<T extends MCPServer>(server: T, entry: unknown, options?: McpAsWrittenOptions): T {
-	if (!isRecord(entry)) return server;
-	const dialect = MCP_SUBSTITUTION_DIALECTS[options?.syntax ?? "omp"];
-	const rooted = options?.rooting ? rootWrittenPaths(entry, dialect, options.rooting) : entry;
+export function withMcpAsWritten<T extends MCPServer>(server: T, written: unknown, options?: McpAsWrittenOptions): T {
+	if (!isRecord(written)) return server;
 	const asWritten: Record<string, unknown> = {};
 	let differs = false;
 	for (const field of MCP_AS_WRITTEN_FIELDS) {
-		const written = rooted[field];
-		if (server[field] === undefined || written === undefined || Bun.deepEquals(written, server[field])) continue;
-		if (!declaresSubstitution(written, dialect)) continue;
-		asWritten[field] = written;
+		const base = field === "command" || field === "cwd" ? options?.rooting?.[field] : undefined;
+		const raw = written[field];
+		const value = base !== undefined && typeof raw === "string" ? path.resolve(base, raw) : raw;
+		if (server[field] === undefined || value === undefined || Bun.deepEquals(value, server[field])) continue;
+		asWritten[field] = value;
 		differs = true;
 	}
 	if (differs) server.asWritten = asWritten as MCPServerAsWritten;
@@ -640,7 +565,9 @@ export async function scanSkillsFromDir(
 		try {
 			const content = await readFile(skillPath);
 			if (!content) return;
-			const { frontmatter, body } = parseFrontmatter(content, { source: skillPath });
+			const { frontmatter, body } = parseFrontmatter(content, {
+				source: skillPath,
+			});
 			if (frontmatter.enabled === false) {
 				return;
 			}
@@ -708,20 +635,38 @@ function lookupEnvValue(varName: string, extraEnv?: Record<string, string>): str
 	return typeof ambient === "string" ? ambient : undefined;
 }
 
+/** The grammar {@link expandEnvVarsDeep} expands: a non-empty, colon-free name, with an optional `:-default`. */
+const ENV_PLACEHOLDER = /\$\{([^}:]+)(?::-([^}]*))?\}/g;
+
+/**
+ * What `${varName}` / `${varName:-defaultValue}` expands to, or `undefined`
+ * where expansion leaves the placeholder standing.
+ *
+ * `${VAR:-default}` follows POSIX `:-`: the default applies when the
+ * variable is unset OR empty. Plain `${VAR}` keeps the value verbatim (even
+ * an empty one) and stays literal when unset — the one case that substitutes
+ * nothing, since a placeholder with a default always resolves to one.
+ */
+function resolveEnvPlaceholder(
+	varName: string,
+	defaultValue: string | undefined,
+	extraEnv?: Record<string, string>,
+): string | undefined {
+	const envValue = lookupEnvValue(varName, extraEnv);
+	if (envValue !== undefined && (defaultValue === undefined || envValue !== "")) return envValue;
+	return defaultValue;
+}
+
 /**
  * Expand environment variables in a string.
  * Supports ${VAR} and ${VAR:-default} syntax.
  */
 function expandEnvVars(value: string, extraEnv?: Record<string, string>): string {
-	return value.replace(/\$\{([^}:]+)(?::-([^}]*))?\}/g, (_, varName: string, defaultValue?: string) => {
-		const envValue = lookupEnvValue(varName, extraEnv);
-		// `${VAR:-default}` follows POSIX `:-`: the default applies when the
-		// variable is unset OR empty. Plain `${VAR}` keeps the value verbatim
-		// (even an empty one) and stays literal when unset.
-		if (envValue !== undefined && (defaultValue === undefined || envValue !== "")) return envValue;
-		if (defaultValue !== undefined) return defaultValue;
-		return `\${${varName}}`;
-	});
+	return value.replace(
+		ENV_PLACEHOLDER,
+		(token, varName: string, defaultValue?: string) =>
+			resolveEnvPlaceholder(varName, defaultValue, extraEnv) ?? token,
+	);
 }
 
 /**
@@ -738,6 +683,34 @@ export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>):
 		const result: Record<string, unknown> = {};
 		for (const [key, value] of Object.entries(obj)) {
 			result[key] = expandEnvVarsDeep(value, extraEnv);
+		}
+		return result as T;
+	}
+	return obj;
+}
+
+/**
+ * What {@link expandEnvVarsDeep} did to `obj`, as the as-written record
+ * spells it: every placeholder it really expanded recorded as a
+ * substitution, everything else — an unset `${VAR}` with no default among it
+ * — as literal text. Keys go through unchanged, as the expansion leaves
+ * them, so a key is literal text here exactly as it is to the expander.
+ */
+export function envVarsDeepAsWritten<T>(obj: T, extraEnv?: Record<string, string>): T {
+	if (typeof obj === "string") {
+		return asWrittenText(
+			obj,
+			ENV_PLACEHOLDER,
+			match => resolveEnvPlaceholder(match[1]!, match[2], extraEnv) !== undefined,
+		) as T;
+	}
+	if (Array.isArray(obj)) {
+		return obj.map(item => envVarsDeepAsWritten(item, extraEnv)) as T;
+	}
+	if (obj !== null && typeof obj === "object") {
+		const result: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(obj)) {
+			result[asWrittenLiteral(key)] = envVarsDeepAsWritten(value, extraEnv);
 		}
 		return result as T;
 	}
@@ -982,7 +955,10 @@ async function readExtensionModuleManifest(
 	const content = await readFile(packageJsonPath);
 	if (!content) return null;
 
-	const pkg = tryParseJson<{ omp?: ExtensionModuleManifest; pi?: ExtensionModuleManifest }>(content);
+	const pkg = tryParseJson<{
+		omp?: ExtensionModuleManifest;
+		pi?: ExtensionModuleManifest;
+	}>(content);
 	const manifest = pkg?.omp ?? pkg?.pi;
 	if (manifest && typeof manifest === "object") {
 		return manifest;

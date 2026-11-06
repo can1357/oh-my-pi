@@ -31,6 +31,7 @@ import {
 	calculateDepth,
 	createSourceMeta,
 	discoverExtensionModulePaths,
+	envVarsDeepAsWritten,
 	expandEnvVarsDeep,
 	getProjectPath,
 	getUserPath,
@@ -95,6 +96,7 @@ async function loadMCPFromSettings(
 	}
 
 	const servers = expandEnvVarsDeep(parsed.mcpServers);
+	const written = envVarsDeepAsWritten(parsed.mcpServers);
 
 	for (const [name, config] of Object.entries(servers)) {
 		if (!config || typeof config !== "object") {
@@ -119,7 +121,7 @@ async function loadMCPFromSettings(
 			timeout: typeof raw.timeout === "number" ? raw.timeout : undefined,
 			_source: createSourceMeta(PROVIDER_ID, path, level),
 		};
-		items.push(withMcpAsWritten(server, parsed.mcpServers[name]));
+		items.push(withMcpAsWritten(server, written[name]));
 	}
 
 	return { items, warnings };

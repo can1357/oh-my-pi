@@ -92,7 +92,29 @@ export type MCPServerAsWritten = Partial<
 	Pick<MCPServer, "command" | "args" | "env" | "cwd" | "url" | "headers" | "auth" | "oauth">
 >;
 
-/** Compare the transport inputs that determine which MCP endpoint gets connected. */
+/**
+ * Compare the transport inputs that determine which MCP endpoint gets
+ * connected. This is discovery's dedup: `mcpCapability.equivalent`, which
+ * decides whether two providers' entries for one server name are the same
+ * definition or a conflict.
+ *
+ * It is **not** the same partition as `sameMcpServerIdentity` in
+ * `mcp/tool-cache.ts`, which the tool cache and the crash-burst breaker
+ * share, and the two must not be assumed to agree. Measured, in both
+ * directions:
+ *
+ * - `envPolicy: "literal"` over `{A, B}` against `envLiteralKeys: ["B","A"]`
+ *   over the same env: same here (the effective literal sets match), a
+ *   different server there (`envPolicy` is a field of its own).
+ * - `oauth: { prompt: "login" }` against no `oauth`: a different connection
+ *   here (`oauth` is compared whole), the same server there (the browser
+ *   login is policy).
+ *
+ * Both divergences are conservative today — an extra dedup entry, an extra
+ * crash budget, an extra cache miss, never a shared catalogue — which is why
+ * they stand. Unifying the two predicates would change discovery's dedup,
+ * the breaker and the cache at once; whoever tries it owns all three.
+ */
 export function isSameMCPConnection(left: MCPServer, right: MCPServer): boolean {
 	if (!Bun.deepEquals(left.auth, right.auth) || !Bun.deepEquals(left.oauth, right.oauth)) return false;
 	// Normalize against the allocator's own default so an explicit "number" is

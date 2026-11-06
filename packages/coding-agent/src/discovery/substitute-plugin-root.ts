@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { asWrittenLiteral, asWrittenSubstitution } from "../mcp/as-written";
 
 /**
  * Recursively substitute ${CLAUDE_PLUGIN_ROOT} and ${OMP_PLUGIN_ROOT}
@@ -31,6 +32,32 @@ export function substitutePluginRoot<T>(value: T, rootPath: string): T {
 }
 
 /**
+ * What {@link substitutePluginRoot} did to `value`, as the as-written record
+ * spells it: each plugin-root placeholder it replaced recorded as the
+ * substitution it is, everything else as literal text. The placeholder names
+ * are the whole grammar here — any other `${...}` form is text this provider
+ * hands to the OS unchanged, so it is text in the record too.
+ */
+export function substitutePluginRootAsWritten<T>(value: T): T {
+	if (typeof value === "string") {
+		return asWrittenLiteral(value)
+			.replaceAll(CLAUDE_VAR, asWrittenSubstitution(CLAUDE_VAR))
+			.replaceAll(OMP_VAR, asWrittenSubstitution(OMP_VAR)) as T;
+	}
+	if (Array.isArray(value)) {
+		return value.map(item => substitutePluginRootAsWritten(item)) as T;
+	}
+	if (value && typeof value === "object") {
+		const result: Record<string, unknown> = {};
+		for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+			result[asWrittenLiteral(key)] = substitutePluginRootAsWritten(nested);
+		}
+		return result as T;
+	}
+	return value;
+}
+
+/**
  * Where a relative, path-like `command` is rooted by {@link resolvePluginStdioPaths}.
  *
  * - `"config-dir"` (default): the directory of the config file that declared the
@@ -43,6 +70,26 @@ export function substitutePluginRoot<T>(value: T, rootPath: string): T {
  *   `cwd = "server"`, `command = "./bin/mcp"` → `<configDir>/server/bin/mcp`.
  */
 export type StdioCommandBase = "config-dir" | "cwd";
+
+/**
+ * The directory {@link resolvePluginStdioPaths} rebased each field against.
+ * A field it left alone — absent, already absolute, or a bare executable
+ * name — has no entry, because nothing about it depends on where the config
+ * file is. The as-written identity reads this to rebase the written form by
+ * the same decision the effective value got (`withMcpAsWritten` in
+ * `discovery/helpers.ts`).
+ */
+export interface StdioPathBases {
+	command?: string;
+	cwd?: string;
+}
+
+/** {@link resolvePluginStdioPaths}' result: the rebased values and the bases it used. */
+export interface ResolvedStdioPaths {
+	command?: string;
+	cwd?: string;
+	bases: StdioPathBases;
+}
 
 /**
  * Rebase relative filesystem values in a discovered stdio server config against
@@ -58,20 +105,29 @@ export type StdioCommandBase = "config-dir" | "cwd";
  * - path-like `command` (`./`, `../`, or the Windows `.\`/`..\` forms) →
  *   resolved against the base selected by `commandBase` (see {@link StdioCommandBase});
  * - bare executables (`npx`, `uvx`, …) and absolute paths are left untouched.
+ *
+ * `bases` reports which of the two it rebased and against what; see
+ * {@link StdioPathBases}.
  */
 export function resolvePluginStdioPaths(
 	config: { command?: string; cwd?: string },
 	configDir: string,
 	commandBase: StdioCommandBase = "config-dir",
-): { command?: string; cwd?: string } {
-	const resolved: { command?: string; cwd?: string } = {};
+): ResolvedStdioPaths {
+	const resolved: ResolvedStdioPaths = { bases: {} };
 	if (typeof config.cwd === "string") {
-		resolved.cwd = path.isAbsolute(config.cwd) ? config.cwd : path.resolve(configDir, config.cwd);
+		if (path.isAbsolute(config.cwd)) {
+			resolved.cwd = config.cwd;
+		} else {
+			resolved.cwd = path.resolve(configDir, config.cwd);
+			resolved.bases.cwd = configDir;
+		}
 	}
 	if (config.command !== undefined) {
 		const isPathLike = /^\.\.?[/\\]/.test(config.command);
 		const base = commandBase === "cwd" ? (resolved.cwd ?? configDir) : configDir;
 		resolved.command = isPathLike ? path.resolve(base, config.command) : config.command;
+		if (isPathLike) resolved.bases.command = base;
 	}
 	return resolved;
 }

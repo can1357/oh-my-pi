@@ -32,6 +32,7 @@ import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
 	discoverRuleFromMarkdown,
 	createSourceMeta,
+	envVarsDeepAsWritten,
 	expandEnvVarsDeep,
 	loadFilesFromDir,
 	parseMcpBooleanField,
@@ -318,10 +319,9 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			logger.warn(`[omp-plugins] Invalid JSON in ${mcpPath}`);
 			continue;
 		}
-		const servers = expandEnvVarsDeep(parsed.mcpServers, {
-			CLAUDE_PLUGIN_ROOT: root.path,
-			OMP_PLUGIN_ROOT: root.path,
-		});
+		const pluginRoots = { CLAUDE_PLUGIN_ROOT: root.path, OMP_PLUGIN_ROOT: root.path };
+		const servers = expandEnvVarsDeep(parsed.mcpServers, pluginRoots);
+		const written = envVarsDeepAsWritten(parsed.mcpServers, pluginRoots);
 		if (!servers || typeof servers !== "object" || Array.isArray(servers)) continue;
 
 		for (const [serverName, serverCfg] of Object.entries(servers)) {
@@ -383,7 +383,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(cfg.type !== undefined && { transport: cfg.type }),
 				_source: createSourceMeta(PROVIDER_ID, mcpPath, root.level),
 			};
-			items.push(withMcpAsWritten(server, parsed.mcpServers?.[serverName], { rooting: { dir: root.path } }));
+			items.push(withMcpAsWritten(server, written?.[serverName], { rooting: rooted.bases }));
 		}
 	}
 

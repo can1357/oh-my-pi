@@ -30,6 +30,7 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
 import { slashCommandFrontmatterDisplay } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { settings } from "../config/settings";
+import { asWrittenSubstitution, SUBSTITUTION_MARK } from "../mcp/as-written";
 
 import {
 	buildExtensionModuleItems,
@@ -50,6 +51,9 @@ const PROVIDER_ID = "opencode";
 const DISPLAY_NAME = "OpenCode";
 const PRIORITY = 55;
 const CONFIG_FILENAMES = ["opencode.json", "opencode.jsonc"] as const;
+
+/** JSON's spelling of {@link SUBSTITUTION_MARK}, for a marker that still has to survive parsing. */
+const JSON_MARK = JSON.stringify(SUBSTITUTION_MARK).slice(1, -1);
 
 interface OpenCodeConfigSource {
 	path: string;
@@ -81,12 +85,23 @@ async function loadJsonConfig(
 	return parsed;
 }
 
-/** Parse OpenCode JSONC before its `{env:...}` / `{file:...}` substitutions. */
+/**
+ * The same config, parsed from the text {@link substituteConfigVars} reports
+ * it rewrote: every `{env:...}`/`{file:...}` reference it really expanded
+ * recorded as a substitution, everything else — a reference on a comment
+ * line, a value that merely spells one — as literal text.
+ *
+ * Reading the parsed value instead cannot tell those apart: OpenCode
+ * substitutes the config *text*, so `"\u007benv:VAR}"` and `"{env:VAR}"`
+ * parse to one string while only the second is a reference, and recording
+ * the first as one handed the project sending the brace verbatim the other
+ * project's catalogue.
+ */
 async function loadJsonConfigAsWritten(configPath: string): Promise<Record<string, unknown> | null> {
 	const content = await readFile(configPath);
 	if (!content) return null;
 	try {
-		const parsed: unknown = JSONC.parse(content);
+		const parsed: unknown = JSONC.parse(await substituteConfigVars(content, configPath, { asWritten: true }));
 		return isRecord(parsed) ? parsed : null;
 	} catch {
 		return null;
@@ -107,9 +122,25 @@ async function loadJsonConfigAsWritten(configPath: string): Promise<Record<strin
  * absolute path. A token on a `//` comment line is left untouched, matching
  * OpenCode. A missing file expands to an empty string (OpenCode's `missing:
  * "empty"` mode) rather than aborting discovery.
+ *
+ * Under `asWritten` this performs the same pass and reports it instead of
+ * applying it: each reference it would expand becomes an as-written
+ * substitution marker, and every literal U+0000 escape is doubled so no
+ * literal can parse into the marker's shape (see `mcp/as-written.ts`). The
+ * marker goes in as a JSON escape, because a raw control character is not
+ * legal inside a JSON string and this text is parsed afterwards.
  */
-async function substituteConfigVars(text: string, configPath: string): Promise<string> {
-	const envExpanded = text.replace(/\{env:([^}]+)\}/g, (_, name: string) => Bun.env[name] ?? "");
+async function substituteConfigVars(
+	text: string,
+	configPath: string,
+	options?: { asWritten?: boolean },
+): Promise<string> {
+	const asWritten = options?.asWritten === true;
+	const mark = (token: string) => asWrittenSubstitution(token).replaceAll(SUBSTITUTION_MARK, JSON_MARK);
+	const source = asWritten ? text.replaceAll(JSON_MARK, JSON_MARK + JSON_MARK) : text;
+	const envExpanded = source.replace(/\{env:([^}]+)\}/g, (token, name: string) =>
+		asWritten ? mark(token) : (Bun.env[name] ?? ""),
+	);
 
 	const fileMatches = [...envExpanded.matchAll(/\{file:[^}]+\}/g)];
 	if (fileMatches.length === 0) return envExpanded;
@@ -127,6 +158,13 @@ async function substituteConfigVars(text: string, configPath: string): Promise<s
 		const lineStart = envExpanded.lastIndexOf("\n", index - 1) + 1;
 		if (envExpanded.slice(lineStart, index).trimStart().startsWith("//")) {
 			out += token;
+			continue;
+		}
+
+		// A reference is a reference whether or not the file is there, so the
+		// written form records it either way.
+		if (asWritten) {
+			out += mark(token);
 			continue;
 		}
 
@@ -347,9 +385,7 @@ function buildMCPServer(
 ): MCPServer {
 	const server = buildMCPServerFields(name, serverConfig, source);
 	return asWritten
-		? withMcpAsWritten(server, buildMCPServerFields(name, asWritten as OpenCodeMCPConfig, source), {
-				syntax: "opencode",
-			})
+		? withMcpAsWritten(server, buildMCPServerFields(name, asWritten as OpenCodeMCPConfig, source))
 		: server;
 }
 

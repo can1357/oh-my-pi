@@ -14,6 +14,7 @@ import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import {
 	createSourceMeta,
+	envVarsDeepAsWritten,
 	expandEnvVarsDeep,
 	parseMcpBooleanField,
 	parseRequestIdFormat,
@@ -72,6 +73,7 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 		// placeholders like `"lazy": "${MCP_LAZY}"` resolve to their real value before
 		// parseMcpBooleanField sees them (mirrors builtin.ts's discovery provider).
 		const expanded = expandEnvVarsDeep(config.mcpServers);
+		const written = envVarsDeepAsWritten(config.mcpServers);
 		for (const [name, serverConfig] of Object.entries(expanded)) {
 			// Runtime type validation for user-controlled JSON values
 			let enabled: boolean | undefined;
@@ -137,7 +139,7 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				transport: serverConfig.type,
 				_source: source,
 			};
-			servers.push(withMcpAsWritten(server, config.mcpServers[name]));
+			servers.push(withMcpAsWritten(server, written[name]));
 		}
 	}
 

@@ -26,6 +26,7 @@ import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import {
 	discoverRuleFromMarkdown,
 	createSourceMeta,
+	envVarsDeepAsWritten,
 	expandEnvVarsDeep,
 	getProjectPath,
 	getUserPath,
@@ -55,6 +56,7 @@ function parseMCPServers(
 	}
 
 	const servers = expandEnvVarsDeep(parsed.mcpServers);
+	const written = envVarsDeepAsWritten(parsed.mcpServers);
 	for (const [name, config] of Object.entries(servers)) {
 		const serverConfig = config as Record<string, unknown>;
 		const server: MCPServer = {
@@ -72,7 +74,7 @@ function parseMCPServers(
 			timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 			_source: createSourceMeta(PROVIDER_ID, path, level),
 		};
-		items.push(withMcpAsWritten(server, parsed.mcpServers[name]));
+		items.push(withMcpAsWritten(server, written[name]));
 	}
 
 	return { items };
