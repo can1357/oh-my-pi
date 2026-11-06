@@ -179,7 +179,7 @@ function claimPromptSources(
 /**
  * System blocks with claimed instruction-file and skill fragments moved to their own categories.
  * Each fragment leaves a colored marker in its block; markers are display-only and carry no tokens.
- * Returns false when some source could not be attributed and remains in System Prompt.
+ * Returns false when some source could not be attributed.
  */
 function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildState): boolean {
 	const tokenizer = session.agent.tokenizer;
@@ -489,7 +489,7 @@ export function buildSessionContextView(
 
 	const notices: string[] = [];
 	if (!appendSystemPromptEntries(session, state))
-		notices.push("Some prompt sources could not be attributed; their content remains in System Prompt.");
+		notices.push("Some prompt sources could not be attributed.");
 	appendToolDefinitionEntries(session, state);
 	appendMessageEntries(session, state);
 	finalizeToolOutputGroups(state);
