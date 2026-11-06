@@ -146,11 +146,10 @@ pub enum Control {
 	/// subscript), status in [`Outcome::status`]: a `-c` string is abandoned
 	/// whole, a script file goes on with its next command.
 	DiscardAll,
-	/// A declaration builtin's arithmetic error in an assignment value
-	/// (`declare -i I=bad!`): the jump an ordinary assignment's error
-	/// makes ([`crate::bash::vm::exec::assign_jump`]), not an ordinary
-	/// failure.
-	AssignJump,
+	/// An arithmetic error in a subscript: the same abandonment, from a
+	/// site that leaves the status alone and that `errexit` never converts
+	/// (bash's `array_expand_index`).
+	DiscardArith,
 	/// A frame was pushed (`eval`, `source`): wait for it to return.
 	Frame,
 	/// A frame was pushed (`mapfile`'s callback): wait for it to return,

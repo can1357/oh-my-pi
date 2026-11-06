@@ -55,7 +55,8 @@ python3 crates/pi-shell/scripts/fatal-site-matrix/measure-sites.py \
 
 python3 crates/pi-shell/scripts/fatal-site-matrix/emit-fixture.py \
   .fatal-site-matrix/sites.json .fatal-site-matrix/measured.json \
-  crates/pi-shell/tests/fatal-site-matrix.json
+  crates/pi-shell/tests/fatal-site-matrix.json \
+  --baseline 'upstream main <commit>'
 ```
 
 The example explicitly measures the current checkout for both native columns.
@@ -77,6 +78,11 @@ baseline revision or output is inferred when a tree is missing.
   repository containing the script; `--main-tree` is required. `--bash-52`
   defaults to `bash` on `PATH`; `--bash-53` is required. `--bun` defaults to
   `bun` on `PATH`. `--runner` defaults to the adjacent `run-batch.ts`.
+  `--extra-tree LABEL=TREE`, repeatable, measures another repository as its
+  own column, for example an earlier head to compare a scope change against.
+  The summary reports both directions for every column but `main`: the rows
+  the baseline answers as Bash 5.3.0 does and this column does not
+  (regressions, each one named), and the rows the other way round (gains).
   `--tmp` selects a scratch parent; otherwise Python uses its system temporary
   directory, honoring `TMPDIR`. Each run creates and removes its own scratch
   subdirectory containing case JSON, result JSON Lines and separate working
@@ -84,11 +90,16 @@ baseline revision or output is inferred when a tree is missing.
   missing addons, failed batches, timeouts and incomplete columns fail
   non-zero rather than copying an answer from another column. Non-zero shell
   statuses are normal measurements, not batch failures.
-- `emit-fixture.py SITES MEASURED OUTPUT`: reads the generated and measured
-  JSON, selects the regression rows by axis and writes `OUTPUT` with enum
-  lists, row identifiers, axis labels, programs, expected output and expected
-  status. A missing row or unusable Bash column, or disagreement between the
-  two Bash columns on a selected row, fails before it writes the fixture.
+- `emit-fixture.py SITES MEASURED OUTPUT --baseline NAME`: reads the generated
+  and measured JSON, selects the regression rows by axis and writes `OUTPUT`
+  with enum lists, row identifiers, axis labels, programs, expected output,
+  expected status and `base_matches` — whether the `main` column already
+  answered the row as Bash 5.3.0 does, which lets the in-crate test call a
+  failure on such a row a regression against the baseline rather than an
+  unfixed site. `--baseline` is the name that goes in the fixture's note, for
+  example the upstream commit the `main` column was built from. A missing row
+  or unusable column, or disagreement between the two Bash columns on a
+  selected row, fails before it writes the fixture.
 - `run-batch.ts TREE`: called by the measurement script with `CASE_FILE`
   (input JSON), `RESULT_FILE` (output JSON Lines), `CASE_CWD` (case working
   directory) and `TMPDIR` (scratch directory). No private runner is needed.

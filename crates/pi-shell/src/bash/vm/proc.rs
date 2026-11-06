@@ -1600,10 +1600,9 @@ pub enum Transfer {
 	/// The rest of the line is abandoned with this status (a `-c` string
 	/// whole).
 	DiscardAll(i32),
-	/// A declaration builtin's arithmetic error in an assignment value
-	/// (`declare -i I=bad!`, `local -i I=bad!`): the same jump an ordinary
-	/// assignment's makes ([`super::exec::assign_jump`]).
-	AssignJump,
+	/// The same, from an arithmetic error: the site leaves the status
+	/// alone and `errexit` never converts it.
+	DiscardArith(i32),
 	/// `exec command`: the shell exits with the command's status.
 	Exec,
 }
@@ -1800,13 +1799,14 @@ impl Live {
 // vproc with both. The line editor's boxed state (`Vproc::zle`, 8 B) brings
 // that to at most 1,840 B.
 // This change's own cost, measured with the `memory` bench on one host in
-// one run series, upstream main against this head: **1,832 B per idle vproc
-// at upstream main and 1,840 B here, +8 B.** At main `Vproc` is 664 B and
-// `Frame` 256 B; here `Vproc` is 680 B (a forked lone simple command's
-// landing, [`Vproc::fork_landing`], a 4-byte `Option<Landing>` in an 8-byte
-// slot, plus the 8 B the rest of the model costs) and `Frame` is 248 B
-// (`Frame::err_trap_armed` fits in existing padding and the field order
-// packs one word tighter). Both are well under the 2,048 B target.
+// one run series, upstream main `b83f8d747c` against this head: **1,840 B
+// per idle vproc on both sides — no cost at all.** At main `Vproc` is
+// 672 B and `Frame` 256 B; here `Vproc` is 680 B (a forked lone simple
+// command's landing, [`Vproc::fork_landing`], a 4-byte `Option<Landing>`
+// in an 8-byte slot, plus the 8 B the rest of the model costs) and
+// `Frame` is 248 B, because the field order packs one word tighter. The
+// two cancel out in the allocation the bench measures, and both are well
+// under the 2,048 B target.
 const _: () = assert!(size_of::<Vproc>() <= 680, "Vproc grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Frame>() <= 256, "Frame grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Scratch>() <= 216, "Scratch grew (idle vproc ≤ 2 KiB)");

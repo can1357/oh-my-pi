@@ -3993,8 +3993,8 @@ fn settle_builtin(
 			e.stage = Stage::Output;
 			None
 		},
-		Control::AssignJump => {
-			e.control = Some(Transfer::AssignJump);
+		Control::DiscardArith => {
+			e.control = Some(Transfer::DiscardArith(outcome.status));
 			e.stage = Stage::Output;
 			None
 		},
@@ -4704,7 +4704,13 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 				Flow::Discard(n)
 			}
 		},
-		Some(Transfer::AssignJump) => exec::assign_jump(vp, cx),
+		// An arithmetic error leaves `last_command_exit_value` alone at its
+		// site and is never converted by `errexit` (bash raises its
+		// `DISCARD` from `array_expand_index` without setting the status),
+		// which is what `Flow::DiscardArith` carries: `set -e; trap
+		// 'declare "A[bad!]=3"' EXIT; exit 7` is 7 in Bash 5.2.21 and
+		// 5.3.0, not 1.
+		Some(Transfer::DiscardArith(n)) => Flow::DiscardArith(n),
 		Some(Transfer::Exec) => Flow::Exit(status),
 	}
 }

@@ -497,20 +497,42 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				vp.status = status;
 				// bash's `parse_and_execute` (the script, `-c`, `eval`, `.`,
 				// a trap action) catches the jump: the innermost script goes
-				// on with its next command.
-				let script = vp
+				// on with its next command (`evalstring.c:423-443`). A
+				// `${ ;}` substitution runs its body through that same
+				// `parse_and_execute` (`subst.c`'s `function_substitute`),
+				// so its frame is a catch too — but what ends there is the
+				// substitution, not a command inside it: the frame is
+				// popped, the word keeps what the body wrote before the
+				// jump, and the enclosing command carries on with status 1.
+				// Measured in Bash 5.3.0 (5.2.21 has no such substitution):
+				// `readonly r=1; x=${ echo BEFORE; r=2; echo BAD; }` prints
+				// `AFTER:1` with `x` = `BEFORE`, and so do the word
+				// arithmetic error `: $((1/0))` and the bad substitution
+				// `: ${x.y}` in the same place. An assignment's arithmetic
+				// error and a fatal expansion error are not discards and
+				// never reach this arm: `x=${ declare -i I; I=bad!; }` ends
+				// the shell with 1 and `x=${ : ${u?BOOM}; }` with 127, in
+				// 5.3.0 and here.
+				let catch = vp
 					.frames
 					.iter()
-					.rposition(|f| matches!(f.kind, FrameKind::Script { .. }));
-				if let Some(i) = script {
-					unwind(&mut k.root, cx.store, vp, i + 1);
-					clear_scratch(&mut k.root, cx.store, vp);
-					truncate(vp, Depths::default());
-					let f = top_frame(vp);
-					f.unit = None;
-					f.loops.clear();
-				} else {
-					unwind(&mut k.root, cx.store, vp, 0);
+					.rposition(|f| matches!(f.kind, FrameKind::Script { .. } | FrameKind::NoFork));
+				match catch {
+					// `pop_frame` is the substitution's own teardown: its
+					// scope, its `REPLY` (`pass_reply`) and its redirections
+					// go exactly as they do when the body ends normally.
+					Some(i) if vp.frames[i].kind == FrameKind::NoFork => {
+						unwind(&mut k.root, cx.store, vp, i);
+					},
+					Some(i) => {
+						unwind(&mut k.root, cx.store, vp, i + 1);
+						clear_scratch(&mut k.root, cx.store, vp);
+						truncate(vp, Depths::default());
+						let f = top_frame(vp);
+						f.unit = None;
+						f.loops.clear();
+					},
+					None => unwind(&mut k.root, cx.store, vp, 0),
 				}
 			},
 		}
@@ -677,7 +699,19 @@ fn in_function_scope(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 }
 
 /// Whether `set -e` is on for `vp`.
+///
+/// A `${ ;}` substitution's body runs with `errexit` off, as the body of a
+/// `$( )` does: bash expands a word with `comsub_ignore_return` set
+/// (`subst.c`), so neither form ends the shell on a failing command, and
+/// neither converts a jump out of it into bash's `ERREXIT`. Measured in
+/// Bash 5.3.0: `set -e; x=${ false; echo AFTER_FALSE; }` prints
+/// `DONE:0` with `x` = `AFTER_FALSE`, exactly as `x=$( … )` does, and
+/// `set -e; x=${ : ${u?BOOM}; }` is 127 — the fatal error's own status —
+/// where the same expansion outside a substitution is 1.
 fn errexit_on(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+	if vp.frames.iter().any(|f| f.kind == FrameKind::NoFork) {
+		return false;
+	}
 	match state::option(&mut k.root, cx.store, vp, OptId::Errexit) {
 		Ok(on) => on,
 		Err(err) => {

@@ -14,10 +14,21 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct Row {
-	id:     String,
-	script: String,
-	out:    String,
-	status: i32,
+	id:           String,
+	script:       String,
+	out:          String,
+	status:       i32,
+	/// Whether the baseline engine named in the fixture's `note` — the
+	/// upstream commit this work was measured against — already answered
+	/// this row as Bash 5.3.0 does. A failure on such a row is a
+	/// regression against upstream, not an unfixed site, and the message
+	/// says which.
+	base_matches: bool,
+	/// Whether this engine answered the row differently from Bash 5.3.0
+	/// when the fixture was generated: a site it does not keep yet, so the
+	/// row is expected to fail. A row recorded this way that starts
+	/// passing means the fixture is stale and must be regenerated.
+	known_wrong:  bool,
 }
 
 #[derive(Deserialize)]
@@ -54,15 +65,32 @@ async fn every_site_of_the_jump_model_answers_as_bash_does() {
 		.tempdir()
 		.expect("scratch directory");
 	let cwd = dir.path().to_string_lossy().into_owned();
-	let mut wrong = Vec::new();
+	let (mut regressed, mut wrong, mut stale) = (Vec::new(), Vec::new(), Vec::new());
 	for row in &fixture.rows {
 		let got = run(&row.script, &cwd).await;
-		if got != (row.out.clone(), Some(row.status)) {
-			wrong.push(format!(
-				"{}: got {got:?}, Bash 5.3.0 gives ({:?}, {})",
-				row.id, row.out, row.status
-			));
+		let matches = got == (row.out.clone(), Some(row.status));
+		match (matches, row.known_wrong) {
+			(true, false) | (false, true) => {},
+			(true, true) => stale.push(row.id.clone()),
+			(false, false) => {
+				let line = format!(
+					"{}: got {got:?}, Bash 5.3.0 gives ({:?}, {})",
+					row.id, row.out, row.status
+				);
+				if row.base_matches { regressed.push(line) } else { wrong.push(line) }
+			},
 		}
 	}
-	assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+	assert!(
+		regressed.is_empty() && wrong.is_empty() && stale.is_empty(),
+		"{} row(s) the baseline engine answers correctly and this one does not:\n{}\n\
+		 {} row(s) newly wrong:\n{}\n\
+		 {} row(s) recorded as still wrong that now pass (regenerate the fixture):\n{}",
+		regressed.len(),
+		regressed.join("\n"),
+		wrong.len(),
+		wrong.join("\n"),
+		stale.len(),
+		stale.join("\n")
+	);
 }

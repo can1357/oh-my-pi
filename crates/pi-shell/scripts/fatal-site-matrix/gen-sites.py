@@ -147,6 +147,12 @@ CONTEXTS = [
     ("exit_trap_errexit", "ExitTrap", "set -e; trap '__body' EXIT; exit 7"),
     ("err_trap", "ShellCommand", 'trap \'__body\' ERR; false; echo "E:$?"'),
     ("debug_trap", "ShellCommand", 'trap \'__body\' DEBUG; :; echo "E:$?"'),
+    # An ERR trap installed by the DEBUG action that runs just before the
+    # body. Crossed with the `background` construct this is the shape a
+    # review round found the engine getting wrong (`trap 'trap "echo T:$?"
+    # ERR; trap - DEBUG' DEBUG; false & wait $!`), so it is an axis of every
+    # pass rather than a row of one round.
+    ("err_trap_from_debug", "ShellCommand", 'trap \'trap "echo T:\\$?" ERR; trap - DEBUG\' DEBUG; __body; echo "E:$?"'),
     ("return_trap", "ShellCommand", 'set -T; trap \'__body\' RETURN; __g() { return 9; }; __g; echo "E:$?"'),
     ("err_trap_in_exit", "Trap", "trap 'trap \"__body\" ERR; (exit 9)' EXIT; exit 7"),
     ("debug_trap_in_exit", "Trap", "trap 'trap \"__body\" DEBUG; :' EXIT; exit 7"),

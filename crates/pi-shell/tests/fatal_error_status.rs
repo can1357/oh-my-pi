@@ -669,20 +669,6 @@ async fn a_return_trap_is_a_nested_trap_like_any_other() {
 	.await;
 }
 
-/// A declaration builtin's invalid `-i` value makes the assignment jump,
-/// bypassing a function's catch and keeping the enclosing catch's status.
-/// Bash 5.2.21 and 5.3.0 do not let `errexit` replace this jump.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_integer_declarations_value_error_takes_the_assignment_jump() {
-	check(&[
-		// A declaration builtin's `-i` value error makes the assignment jump.
-		(r##"declare -i I=bad!; echo NEXT:$?"##, "", 1),
-		(r##"trap 'set -e; declare -i I=bad!; echo NEXT:$?' EXIT; exit 7"##, "", 7),
-		(r##"f(){ local -i I=bad!; echo IN:$?; }; f; echo NEXT:$?"##, "", 1),
-	])
-	.await;
-}
-
 /// An arithmetic error in a `for ((;;))` header ends only that loop with
 /// status 1, even with `errexit` set or another loop around it. Bash 5.2.21
 /// and 5.3.0 agree; a sound or omitted header still lets the loop run.
@@ -717,32 +703,9 @@ async fn an_arithmetic_for_header_error_ends_only_that_loop() {
 	.await;
 }
 
-/// A declaration builtin's arithmetic subscript error makes the same
-/// assignment jump as an invalid arithmetic value: no `eval` or subshell
-/// answers it. Bash 5.2.21 and 5.3.0 keep the enclosing catch's status.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_declaration_subscript_error_takes_the_assignment_jump() {
-	check(&[
-		// A declaration builtin's arithmetic subscript error is the
-		// assignment jump, which no `eval` or subshell answers.
-		(r##"eval 'declare -i "A[bad!]=3"'; echo BAD:$?"##, "", 1),
-		(r##"eval 'declare "A[bad!]=3"'; echo BAD:$?"##, "", 1),
-		(r##"declare -i "A[bad!]=3"; echo BAD:$?"##, "", 1),
-		(r##"f(){ local -i "A[bad!]=3"; echo IN:$?; }; f; echo BAD:$?"##, "", 1),
-		(
-			r##"trap '( declare -i "A[bad!]=3" ); echo OUT:$?' EXIT; exit 7"##,
-			"OUT:7\n",
-			7,
-		),
-		(r##"declare -a A; A[bad!]=x; echo BAD:$?"##, "", 1),
-	])
-	.await;
-}
-
 /// `readonly` and `export` reject a subscripted name as an invalid
-/// identifier without evaluating its subscript. Bash 5.2.21 and 5.3.0
-/// continue with status 1, unlike declaration builtins whose arithmetic
-/// evaluation errors make the assignment jump.
+/// identifier without evaluating its subscript, so the line carries on
+/// with status 1. Bash 5.2.21 and 5.3.0 agree on every row.
 #[tokio::test(flavor = "multi_thread")]
 async fn readonly_and_export_reject_subscripted_names_without_evaluating_them() {
 	check(&[
@@ -760,12 +723,6 @@ async fn readonly_and_export_reject_subscripted_names_without_evaluating_them() 
 			"O:AFTER:1\n",
 			7,
 		),
-		// A declaration builtin that does evaluate the subscript keeps the
-		// assignment jump.
-		(r##"declare "A[bad!]=3"; echo O:AFTER:$?"##, "", 1),
-		(r##"typeset "A[bad!]=3"; echo O:AFTER:$?"##, "", 1),
-		(r##"f(){ local "A[bad!]=3"; }; f; echo O:AFTER:$?"##, "", 1),
-		(r##"declare -i I=bad!; echo O:AFTER:$?"##, "", 1),
 	])
 	.await;
 }
@@ -825,6 +782,59 @@ async fn an_arithmetic_for_header_leaves_the_status_alone() {
 			"I:7\n",
 			1,
 		),
+	])
+	.await;
+}
+
+/// A `${ ;}` substitution runs in the current shell and its body goes
+/// through the same `parse_and_execute` an `eval` or a `.` does, so a
+/// discard there ends the substitution and the enclosing command carries
+/// on with status 1 and whatever the body wrote before the jump. An
+/// assignment's arithmetic error and a fatal expansion error are not
+/// discards and still end the shell. `errexit` is off inside the body, as
+/// it is inside a `$( )`. Bash 5.2.21 has no such substitution, so Bash
+/// 5.3.0 is the oracle for every row of this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nofork_substitution_catches_a_discard() {
+	check(&[
+		// Every discard the substitution catches, and what the word keeps.
+		(r##"x=${ set -o posix; readonly r=1; r=2 true; }; echo AFTER:$?"##, "AFTER:1\n", 0),
+		(r##"set -o posix; readonly r=1; x=${ r=2 true; }; echo AFTER:$?"##, "AFTER:1\n", 0),
+		(
+			r##"readonly r=1; x=${ echo BEFORE; r=2; echo BAD; }; echo "AFTER:$? <$x>""##,
+			"AFTER:1 <BEFORE>\n",
+			0,
+		),
+		(
+			r##"x=${ echo BEFORE; : $((1/0)); echo BAD; }; echo "AFTER:$? <$x>""##,
+			"AFTER:1 <BEFORE>\n",
+			0,
+		),
+		(
+			r##"x=${ echo BEFORE; : ${nope.bad}; echo BAD; }; echo "AFTER:$? <$x>""##,
+			"AFTER:1 <BEFORE>\n",
+			0,
+		),
+		// The caller's scope and `REPLY` come back as they do when the
+		// body ends normally.
+		(
+			r##"f(){ local v=outer; x=${ local v=inner; readonly r=1; r=2; }; echo "v=$v x=<$x> s=$?"; }; f"##,
+			"v=outer x=<> s=1\n",
+			0,
+		),
+		(r##"x=${| REPLY=hello; readonly r=1; r=2; }; echo "AFTER:$? <$x>""##, "AFTER:1 <hello>\n", 0),
+		// `errexit` is off inside the body, and does not convert a jump
+		// out of it.
+		(r##"set -e; x=${ false; echo AFTER_FALSE; }; echo "DONE:$? <$x>""##, "DONE:0 <AFTER_FALSE>\n", 0),
+		(r##"set -e; x=${ : ${review_missing?BOOM}; }; echo AFTER:$?"##, "", 127),
+		(r##"set -e; set -u; x=${ : $review_missing; }; echo AFTER:$?"##, "", 127),
+		// Controls: the jumps a `${ ;}` does not catch, and the forms that
+		// already caught this one.
+		(r##"x=${ declare -i I; I=bad!; echo BAD; }; echo AFTER:$?"##, "", 1),
+		(r##"x=${ echo BEFORE; : ${review_missing?BOOM}; echo BAD; }; echo AFTER:$?"##, "", 127),
+		(r##"x=${ exit 5; }; echo AFTER:$?"##, "", 5),
+		(r##"set -o posix; readonly r=1; x=$( r=2 true ); echo AFTER:$?"##, "AFTER:1\n", 0),
+		(r##"set -o posix; readonly r=1; eval 'r=2 true'; echo AFTER:$?"##, "AFTER:1\n", 0),
 	])
 	.await;
 }

@@ -92,6 +92,13 @@ def main() -> None:
     parser.add_argument("--bun", default="bun", help="Bun executable (default: bun on PATH)")
     parser.add_argument("--runner", default=str(Path(__file__).with_name("run-batch.ts")), help="batch runner (default: run-batch.ts beside this script)")
     parser.add_argument("--tmp", help="scratch parent directory (default: Python's temporary directory, honoring TMPDIR)")
+    parser.add_argument(
+        "--extra-tree",
+        action="append",
+        default=[],
+        metavar="LABEL=TREE",
+        help="another repository root to measure as its own column, e.g. an earlier head; repeatable",
+    )
     args = parser.parse_args()
     fixture = json.load(open(args.sites, encoding="utf-8"))
     rows = fixture["rows"]
@@ -106,6 +113,11 @@ def main() -> None:
     if not os.path.isfile(runner):
         raise SystemExit(f"measure-sites: the batch runner is missing: {runner}")
     trees = {"main": os.path.realpath(args.main_tree), "head": os.path.realpath(args.head_tree)}
+    for spec in args.extra_tree:
+        label, _, path = spec.partition("=")
+        if not label or not path or label in trees:
+            raise SystemExit(f"measure-sites: --extra-tree wants a fresh LABEL=TREE, got {spec!r}")
+        trees[label] = os.path.realpath(path)
     for label, tree in trees.items():
         for leaf in ("index.js", "loader-state.js"):
             module = os.path.join(tree, "packages/natives/native", leaf)
@@ -130,7 +142,7 @@ def main() -> None:
     merged = []
     for r in rows:
         m = dict(r)
-        for label in ("5.2", "5.3", "main", "head"):
+        for label in ("5.2", "5.3", *trees):
             c = cols[label][r["id"]]
             m[label] = {"out": c.get("out"), "rc": c.get("rc")}
         merged.append(m)
@@ -139,13 +151,24 @@ def main() -> None:
     def same(a: dict, b: dict) -> bool:
         return a["out"] == b["out"] and a["rc"] == b["rc"]
 
-    head_wrong = [m for m in merged if not same(m["head"], m["5.3"])]
-    main_wrong = [m for m in merged if not same(m["main"], m["5.3"])]
     bash_split = [m for m in merged if not same(m["5.2"], m["5.3"])]
-    print(
-        f"rows {len(merged)}; head != 5.3: {len(head_wrong)}; "
-        f"main != 5.3: {len(main_wrong)}; 5.2 != 5.3: {len(bash_split)}"
-    )
+    print(f"rows {len(merged)}; 5.2 != 5.3: {len(bash_split)}")
+    # Both directions against the baseline, which is what a change to the
+    # model has to answer for: a regression is a row the baseline gets right
+    # and this column gets wrong, a gain is the other way round.
+    for label in trees:
+        if label == "main":
+            continue
+        wrong = [m for m in merged if not same(m[label], m["5.3"])]
+        regressions = [m for m in merged if same(m["main"], m["5.3"]) and not same(m[label], m["5.3"])]
+        gains = [m for m in merged if not same(m["main"], m["5.3"]) and same(m[label], m["5.3"])]
+        print(
+            f"{label}: != 5.3: {len(wrong)}; regressions over main: {len(regressions)}; "
+            f"gains over main: {len(gains)}"
+        )
+        for m in regressions[:20]:
+            print(f"  regression {m['id']}")
+    print(f"main: != 5.3: {len([m for m in merged if not same(m['main'], m['5.3'])])}")
 
 
 if __name__ == "__main__":
