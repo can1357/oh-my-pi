@@ -19,6 +19,11 @@ import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngBasicPassword, cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
+import {
+	cfgBashInterceptorPatterns,
+	cfgBashPatterns,
+	DEFAULT_BASH_INTERCEPTOR_RULES,
+} from "@oh-my-pi/pi-coding-agent/exec/settings";
 
 const tick = () => Promise.resolve();
 
@@ -426,5 +431,83 @@ describe("settings registry", () => {
 		).toThrow("Invalid task.agentCompactionThresholdOverrides.scout");
 		expect(() => Settings.isolated({ temperature: "hot" })).toThrow("Invalid value for temperature");
 		expect(cfgModelRoles.get(Settings.isolated({ modelRoles: { smol: "a/b" } }))).toEqual({ smol: "a/b" });
+	});
+
+	it("prepends project and overlay bash.patterns and bashInterceptor.patterns onto global rules", async () => {
+		const dir = TempDir.createSync("@omp-settings-array-merge-");
+		try {
+			const agentDir = path.join(dir.path(), "agent");
+			const projectDir = path.join(dir.path(), "project");
+			const overlayFile = path.join(dir.path(), "overlay.yml");
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				YAML.stringify({
+					bash: {
+						patterns: [
+							{ match: "git status*", approval: "allow" },
+							{ match: "*", approval: "prompt" },
+						],
+					},
+				}),
+			);
+			await Bun.write(
+				path.join(projectDir, ".omp", "config.yml"),
+				YAML.stringify({
+					bash: {
+						patterns: [
+							{ match: "make build*", approval: "allow" },
+							{ match: "make lint*", approval: "allow" },
+						],
+					},
+					bashInterceptor: {
+						patterns: [{ pattern: "^\\s*custom\\s+", tool: "read", message: "Use read." }],
+					},
+				}),
+			);
+			await Bun.write(
+				overlayFile,
+				YAML.stringify({
+					bash: {
+						patterns: [{ match: "cargo test*", approval: "allow" }],
+					},
+				}),
+			);
+
+			const settings = await Settings.loadReadOnly({
+				cwd: projectDir,
+				agentDir,
+				configFiles: [overlayFile],
+			});
+
+			expect(cfgBashPatterns.get(settings)).toEqual([
+				{ match: "cargo test*", approval: "allow" },
+				{ match: "make build*", approval: "allow" },
+				{ match: "make lint*", approval: "allow" },
+				{ match: "git status*", approval: "allow" },
+				{ match: "*", approval: "prompt" },
+			]);
+			expect(cfgBashInterceptorPatterns.get(settings)).toEqual([
+				{ pattern: "^\\s*custom\\s+", tool: "read", message: "Use read." },
+				...DEFAULT_BASH_INTERCEPTOR_RULES,
+			]);
+
+			// Runtime overrides still replace the effective list wholesale until cleared.
+			cfgBashPatterns.override(settings, [{ match: "echo *", approval: "allow" }]);
+			expect(cfgBashPatterns.get(settings)).toEqual([{ match: "echo *", approval: "allow" }]);
+			cfgBashPatterns.clearOverride(settings);
+			expect(cfgBashPatterns.get(settings)).toHaveLength(5);
+
+			// Configuring an explicit empty array in a higher layer resets the inherited list.
+			const resetOverlayFile = path.join(dir.path(), "reset-overlay.yml");
+			await Bun.write(resetOverlayFile, YAML.stringify({ bash: { patterns: [] } }));
+			const resetSettings = await Settings.loadReadOnly({
+				cwd: projectDir,
+				agentDir,
+				configFiles: [resetOverlayFile],
+			});
+			expect(cfgBashPatterns.get(resetSettings)).toEqual([]);
+		} finally {
+			await dir.remove();
+		}
 	});
 });

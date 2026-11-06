@@ -13,6 +13,16 @@ export interface BashInterceptorRule {
 	allowSubcommands?: string[];
 }
 
+export type BashPatternApproval = "allow" | "deny" | "prompt";
+
+/** One bash approval pattern rule (`bash.patterns`). */
+export interface BashApprovalPatternRule {
+	match: string;
+	approval: BashPatternApproval;
+}
+
+const EMPTY_BASH_PATTERNS: BashApprovalPatternRule[] = [];
+
 const EMPTY_STRING_ARRAY: string[] = [];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
@@ -156,7 +166,8 @@ export const cfgBashGitGuard = register({
 export const cfgBashPatterns = register({
 	id: "bash.patterns",
 	type: "array",
-	default: [],
+	default: EMPTY_BASH_PATTERNS,
+	merge: "prepend",
 	ui: {
 		tab: "shell",
 		group: "Bash",
@@ -183,6 +194,7 @@ export const cfgBashInterceptorPatterns = register({
 	id: "bashInterceptor.patterns",
 	type: "array",
 	default: DEFAULT_BASH_INTERCEPTOR_RULES,
+	merge: "prepend",
 });
 
 export const cfgBashDirenv = register({
