@@ -4,7 +4,7 @@
 
 ### Added
 
-- `CustomMessage` and custom message transcript entries have an optional `tag`, a caller correlation id that stays with the message when a transcript is rebuilt
+- `CustomMessage` and custom message transcript entries have an optional `tag`, a caller correlation id that stays with the message when a transcript is rebuilt ([#18359](https://github.com/can1357/oh-my-pi/pull/18359) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
