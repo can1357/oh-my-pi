@@ -390,3 +390,66 @@ fn an_unknown_fault_mode_fails_loudly() {
 		String::from_utf8_lossy(&out.stderr)
 	);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn zsh_function_signal_handlers_and_saved_aliases_survive_real_exec() {
+	use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+	let dir = tempfile::tempdir().unwrap();
+	fs::write(dir.path().join("TRAPUSR1"), "print -r -- \"AUTO:$1\"\n").unwrap();
+	let cases = [
+		(
+			"ulimit -c 0; TRAPIOT() { print -r -- \"IOT:$1\"; }; TRAPIO() { print WRONG; }; \
+			 TRAPPOLL() { print -r -- \"POLL:$1\"; }; TRAPUSR1() { print -r -- \"USR1:$1\"; }; i=0; \
+			 while (( i < 6 )); do (( ++i )); done; /bin/kill -6 $$; /bin/kill -29 $$; /bin/kill -10 \
+			 $$; print DONE",
+			"IOT:6\nPOLL:29\nUSR1:10\nDONE\n",
+		),
+		(
+			"ulimit -c 0; TRAPIO() { print -r -- \"OUTER:$1\"; }; f() { setopt localtraps; \
+			 TRAPPOLL() { print -r -- \"INNER:$1\"; }; i=0; while (( i < 6 )); do (( ++i )); done; \
+			 /bin/kill -29 $$; }; f; /bin/kill -29 $$; print DONE",
+			"INNER:29\nOUTER:29\nDONE\n",
+		),
+		(
+			"ulimit -c 0; fpath=(\"$1\"); autoload TRAPUSR1; i=0; while (( i < 6 )); do (( ++i )); \
+			 done; /bin/kill -10 $$; print DONE",
+			"AUTO:10\nDONE\n",
+		),
+		(
+			"ulimit -c 0; TRAPUSR1() { :; }; enable -f TRAPUSR1; /bin/kill -10 $$; print FIRST; \
+			 /bin/kill -10 $$; print DONE",
+			"FIRST\nDONE\n",
+		),
+	];
+	let status = |out: &Output| {
+		out.status
+			.code()
+			.unwrap_or_else(|| 128 + out.status.signal().expect("a signal or exit code"))
+	};
+	for (script, expected) in cases {
+		let oracle = Path::new("/bin/zsh").exists().then(|| {
+			let mut command = obash_support::command("/bin/zsh");
+			command.args(["-f", "-c", script, "zsh"]).arg(dir.path());
+			obash_support::output(&mut command)
+		});
+		for reexec in [false, true] {
+			let mut command = obash_support::obash();
+			command.arg0("zsh");
+			if reexec {
+				command.args(["--fault=1:3", "--fault-mode=exec"]);
+			}
+			command.args(["-f", "-c", script, "zsh"]).arg(dir.path());
+			let out = obash_support::output(&mut command);
+			assert_eq!(status(&out), 0, "reexec={reexec}: {script}: {out:?}");
+			assert_eq!(out.stdout, expected.as_bytes(), "reexec={reexec}: {script}");
+			assert!(out.stderr.is_empty(), "reexec={reexec}: {out:?}");
+			if let Some(oracle) = &oracle {
+				assert_eq!(status(&out), status(oracle), "same-host signal status");
+				assert_eq!(out.stdout, oracle.stdout, "same-host trap execution");
+				assert_eq!(out.stderr, oracle.stderr, "same-host valid-script diagnostics");
+			}
+		}
+	}
+}

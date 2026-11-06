@@ -1252,9 +1252,9 @@ pub fn zsh_startup_values(
 	}
 	// `signals`: `EXIT`, the signal names by number, `ZERR`, `DEBUG`.
 	let mut signals = vec![BString::from("EXIT")];
-	for n in 1..=31u8 {
+	for n in 1..=crate::bash::signal::ZSH_SIGCOUNT {
 		match crate::bash::signal::Signal::from_number(n, platform) {
-			Some(s) => signals.push(BString::from(s.to_string())),
+			Some(s) => signals.push(BString::from(s.zsh_name(platform))),
 			None => signals.push(BString::from(format!("SIG{n}"))),
 		}
 	}
@@ -1497,7 +1497,11 @@ impl Shell {
 			k.root.set_record(
 				cx.store,
 				KeyBuf::Trap(crate::bash::store::TrapKey::Signal(sig)),
-				Some(Record::Trap { mode: init.mode, action: BString::default() }),
+				Some(Record::Trap {
+					mode:         init.mode,
+					action:       BString::default(),
+					assumed_name: false,
+				}),
 			);
 		}
 		let vpid = k.vpid(cx.store);
@@ -2050,7 +2054,7 @@ impl Shell {
 					if trapped {
 						exec::mark_cancel(&mut self.procs[i], status);
 					} else {
-						exec::finish_cancel(&mut self.k.root, cx.store, &mut self.procs[i], status);
+						exec::finish_cancel(&mut self.k, cx, &mut self.procs[i], status);
 					}
 				} else {
 					self.kill(cx, i, sig, status, false);
@@ -2131,7 +2135,7 @@ impl Shell {
 				}
 			}
 		}
-		exec::unwind(&mut self.k.root, cx.store, p, 0);
+		exec::unwind(&mut self.k, cx, p, 0);
 		while state::drop_scope(&mut self.k.root, cx.store, p) {}
 		p.out.clear();
 		p.blocked = None;
@@ -2245,9 +2249,10 @@ impl Shell {
 				None
 			} else {
 				let key = crate::bash::store::TrapKey::Signal(sig);
-				match state::record(cx.store, &self.procs[i], crate::bash::store::Key::Trap(key)) {
-					Ok(Some(Record::Trap { action, .. })) => Some(action.is_empty()),
-					Ok(_) => None,
+				match builtins::trap::effective(cx.store, &self.procs[i], key, platform) {
+					Ok(builtins::trap::Handler::Absent) => None,
+					Ok(builtins::trap::Handler::Ignored) => Some(true),
+					Ok(_) => Some(false),
 					Err(err) => {
 						self.k.fail(err);
 						return;
@@ -2527,14 +2532,9 @@ pub fn owe_chld(k: &mut Kernel, cx: &mut Cx<'_>, p: &mut Vproc, background: bool
 	if zsh && !background {
 		return;
 	}
-	let key = crate::bash::store::Key::Trap(crate::bash::store::TrapKey::Signal(Signal::Chld));
-	let trapped = match state::record(cx.store, p, key) {
-		Ok(Some(Record::Trap { action, .. })) => !action.is_empty(),
-		Ok(None) if zsh => matches!(
-			state::record(cx.store, p, crate::bash::store::Key::Func(bstr::BStr::new(b"TRAPCHLD"))),
-			Ok(Some(Record::Func { .. }))
-		),
-		Ok(_) => false,
+	let key = crate::bash::store::TrapKey::Signal(Signal::Chld);
+	let trapped = match builtins::trap::effective(cx.store, p, key, k.engine.config().platform) {
+		Ok(handler) => handler.caught(),
 		Err(err) => {
 			k.fail(err);
 			false

@@ -617,9 +617,10 @@ pub trait ExtProc: Send {
 	/// Signal the process group (Unix) or Job Object (Windows).
 	fn signal(&mut self, sig: Signal) -> io::Result<()>;
 	/// Record a cancellation signal delivered by [`Host::cancel_externals`]
-	/// without sending it again. Implementors with termination bookkeeping
-	/// override this; decorators must forward it.
-	fn signal_delivered(&mut self, _sig: Signal) {}
+	/// without sending it again. `targets` pins the tree captured before the
+	/// signal; termination bookkeeping retains it through escalation.
+	/// Decorators must forward both arguments.
+	fn signal_delivered(&mut self, _sig: Signal, _targets: crate::proctree::TerminationTargets) {}
 	/// Stop the process group (job pause).
 	fn stop(&mut self) -> io::Result<()>;
 	/// Continue after [`ExtProc::stop`].

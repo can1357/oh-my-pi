@@ -297,4 +297,89 @@ describe("scoped prompt recall", () => {
 			});
 		},
 	);
+
+	it.each([
+		{ setting: "session", sameDirectory: true, foreignRepository: false, eligible: false },
+		{ setting: "session", sameDirectory: false, foreignRepository: false, eligible: false },
+		{ setting: "cwd", sameDirectory: true, foreignRepository: false, eligible: true },
+		{ setting: "cwd", sameDirectory: false, foreignRepository: false, eligible: false },
+		{ setting: "repo", sameDirectory: false, foreignRepository: false, eligible: true },
+		{ setting: "repo", sameDirectory: false, foreignRepository: true, eligible: false },
+		{ setting: "global", sameDirectory: false, foreignRepository: true, eligible: true },
+	] as const)(
+		"refreshes cached duplicate provenance in $setting (same directory: $sameDirectory, foreign repo: $foreignRepository)",
+		async ({ setting, sameDirectory, foreignRepository, eligible }) => {
+			const dir = tempDir!;
+			const repo = dir.join("repo");
+			const child = path.join(repo, "child");
+			const other = dir.join("other");
+			await fs.mkdir(child, { recursive: true });
+			await fs.mkdir(other);
+			await initGitFixture(repo);
+			await initGitFixture(other);
+			const cwd = foreignRepository ? other : sameDirectory ? repo : child;
+			const storage = HistoryStorage.open(dir.join("history.db"));
+			await storage.add("B_ONLY", cwd, "session-b");
+			await storage.add("SHARED", cwd, "session-b");
+			const context = { sessionId: "session-b", cwd };
+			const editor = bindEditor(storage, { setting, context });
+			setProjectDir(cwd);
+			expect(recall(editor)).toBe("SHARED");
+			editor.addToHistory("SHARED", { sessionId: "session-a", cwd: repo });
+			const source = bindHistorySource(storage, () => resolveHistoryScope(setting, context));
+			expect(source.storage.getRecent(20).map(row => row.prompt)).toEqual(
+				eligible ? ["SHARED", "B_ONLY"] : ["B_ONLY"],
+			);
+			expect(recall(editor)).toBe(eligible ? "SHARED" : "B_ONLY");
+			await Promise.resolve();
+			expect(recall(editor)).toBe(eligible ? "SHARED" : "B_ONLY");
+		},
+	);
+
+	it("retains canceled drafts when a foreign duplicate retires cached persistent provenance", async () => {
+		const dir = tempDir!;
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await storage.add("B_ONLY", dir.path(), "session-b");
+		await storage.add("SHARED", dir.path(), "session-b");
+		const editor = bindEditor(storage, {
+			setting: "session",
+			context: { sessionId: "session-b", cwd: dir.path() },
+		});
+		expect(recall(editor)).toBe("SHARED");
+		let restored = 0;
+		editor.setText("CANCELED_DRAFT");
+		editor.rememberDraft(() => restored++);
+		editor.addToHistory("SHARED", { sessionId: "session-a", cwd: dir.path() });
+		expect(recall(editor)).toBe("CANCELED_DRAFT");
+		expect(restored).toBe(1);
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("B_ONLY");
+		expect(storage.getRecent(20).some(row => row.prompt === "CANCELED_DRAFT")).toBe(false);
+	});
+
+	it("retires an old seed when a foreign duplicate is written during a failed refresh", async () => {
+		const dir = tempDir!;
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await storage.add("A_ONLY", dir.path(), "session-a");
+		await storage.add("SHARED", dir.path(), "session-a");
+		const state: { setting: HistoryScopeKind; context: HistoryScopeContext } = {
+			setting: "session",
+			context: { sessionId: "session-a", cwd: dir.path() },
+		};
+		const source = bindHistorySource(storage, () => resolveHistoryScope(state.setting, state.context));
+		const editor = new Editor(getEditorTheme());
+		let failReadKey = false;
+		editor.setHistoryStorage(source.storage, context => {
+			if (failReadKey && !context) throw new Error("Source key temporarily unavailable");
+			return source.sourceKey(context);
+		});
+		expect(recall(editor)).toBe("SHARED");
+		state.context = { sessionId: "session-b", cwd: dir.path() };
+		failReadKey = true;
+		editor.addToHistory("SHARED", { sessionId: "session-c", cwd: dir.path() });
+		expect(storage.getRecent(20, { kind: "session", value: "session-a" }).map(row => row.prompt)).toEqual(["A_ONLY"]);
+		failReadKey = false;
+		state.context = { sessionId: "session-a", cwd: dir.path() };
+		expect(recall(editor)).toBe("A_ONLY");
+	});
 });

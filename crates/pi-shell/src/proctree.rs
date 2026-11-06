@@ -1209,17 +1209,91 @@ impl TerminationTargets {
 	/// the caller's policy is "best effort".
 	pub fn signal(&self, signal: i32) {
 		let mut pgids = self.pgids.clone();
-		let mut processes = Vec::new();
 		for process in &self.processes {
 			if let Some(pgid) = process.group_id()
 				&& pgid == process.pid()
 			{
 				pgids.push(pgid);
 			}
-			processes.extend(process.live_descendants());
+		}
+		let processes = self.captured_processes();
+		let _ = signal_processes(signal, &pgids, processes, &host_protected_pids());
+	}
+
+	/// Pin one tree before a batched signal can orphan its descendants.
+	#[cfg(unix)]
+	#[must_use]
+	pub(crate) fn capture_process(process: Process) -> Self {
+		let mut processes = process.live_descendants();
+		if process.status() == ProcessStatus::Running {
+			processes.push(process);
+		}
+		let seen_pids = processes.iter().map(Process::pid).collect();
+		Self { pgids: Vec::new(), processes, seen_pids }
+	}
+
+	/// Share captured handles with the batch while its external retains
+	/// ownership.
+	#[cfg(unix)]
+	pub(crate) fn extend(&mut self, targets: &Self) {
+		for &pgid in &targets.pgids {
+			self.add_pgid(pgid);
+		}
+		for process in &targets.processes {
+			// Defer overlapping generations to signal_processes: an exited
+			// earlier pin must not suppress a newly captured identity.
+			self.seen_pids.insert(process.pid());
+			self.processes.push(process.clone());
+		}
+	}
+
+	/// Preserve live pins across repeated cancellation without reserving an
+	/// exited generation's numeric PID against incoming captured identities.
+	#[cfg(unix)]
+	pub(crate) fn append(&mut self, targets: Self) {
+		self
+			.processes
+			.retain(|process| process.status() == ProcessStatus::Running);
+		self.seen_pids.clear();
+		self
+			.seen_pids
+			.extend(self.processes.iter().map(Process::pid));
+		for pgid in targets.pgids {
+			self.add_pgid(pgid);
+		}
+		for process in targets.processes {
+			self.add_process(process);
+		}
+	}
+
+	/// Deliver the already captured batch without a second process-tree walk.
+	#[cfg(unix)]
+	pub(crate) fn signal_captured(self, signal: i32) {
+		let _ = signal_processes(signal, &self.pgids, self.processes, &host_protected_pids());
+	}
+
+	fn captured_processes(&self) -> Vec<Process> {
+		if let [process] = self.processes.as_slice() {
+			let mut processes = process.live_descendants();
+			if process.status() == ProcessStatus::Running {
+				processes.push(process.clone());
+			}
+			return processes;
+		}
+		let mut processes = Vec::new();
+		let mut covered = HashSet::new();
+		// Captured trees are postorder. Walk surviving parents first so each
+		// subtree is refreshed once, including children born during the grace.
+		for process in self.processes.iter().rev() {
+			if process.status() != ProcessStatus::Running || !covered.insert(process.pid()) {
+				continue;
+			}
+			let descendants = process.live_descendants();
+			covered.extend(descendants.iter().map(Process::pid));
+			processes.extend(descendants);
 			processes.push(process.clone());
 		}
-		let _ = signal_processes(signal, &pgids, processes, &host_protected_pids());
+		processes
 	}
 }
 
@@ -1463,6 +1537,28 @@ mod tests {
 		let incoming = Process::from_pid(incoming_pid).expect("pin replacement identity");
 		fixture.pins.push(incoming.clone());
 		assert_eq!(incoming_pid, old_pid, "fixture must exercise actual numeric reuse");
+
+		let mut retained = TerminationTargets::new();
+		retained.add_process(old.clone());
+		let mut latest = TerminationTargets::new();
+		latest.add_process(incoming.clone());
+		let mut batch = TerminationTargets::new();
+		batch.add_process(old.clone());
+		batch.extend(&latest);
+		assert!(
+			batch
+				.processes
+				.iter()
+				.any(|process| process.status() == ProcessStatus::Running),
+			"the batch must not discard an incoming reused generation before delivery"
+		);
+		retained.append(latest);
+		assert_eq!(retained.processes.len(), 1, "retire the exited generation before union");
+		assert_eq!(
+			retained.processes[0].status(),
+			ProcessStatus::Running,
+			"the incoming generation must remain eligible for escalation"
+		);
 
 		let _ =
 			signal_processes(KILL_SIGNAL, &[], vec![old, incoming.clone()], &host_protected_pids());

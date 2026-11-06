@@ -247,18 +247,31 @@ impl Lifecycle {
 
 /// The lifecycle plus the input-pump cancellation shared by an `ExtProc`
 /// (whose `poll_wait` polls the pumps) and its waiter.
-#[derive(Debug)]
 pub struct Tracker {
-	life:   Mutex<Lifecycle>,
-	cancel: AtomicBool,
+	life:         Mutex<Lifecycle>,
+	cancel:       AtomicBool,
+	/// Captured before cancellation can orphan descendants outside the scope.
+	#[cfg(unix)]
+	cancellation: Mutex<Option<crate::proctree::TerminationTargets>>,
+}
+
+impl std::fmt::Debug for Tracker {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Tracker")
+			.field("life", &self.life)
+			.field("cancel", &self.cancel)
+			.finish_non_exhaustive()
+	}
 }
 
 impl Tracker {
 	/// Tracker of a process with `draining` output pumps.
 	pub fn new(draining: usize) -> Arc<Self> {
 		Arc::new(Self {
-			life:   Mutex::new(Lifecycle::new(draining)),
+			life: Mutex::new(Lifecycle::new(draining)),
 			cancel: AtomicBool::new(false),
+			#[cfg(unix)]
+			cancellation: Mutex::new(None),
 		})
 	}
 
@@ -267,6 +280,34 @@ impl Tracker {
 	/// exit is recorded under this lock.
 	pub fn lock(&self) -> MutexGuard<'_, Lifecycle> {
 		self.life.lock()
+	}
+
+	/// Retain the pre-signal snapshot until the existing escalation worker runs.
+	#[cfg(unix)]
+	pub(crate) fn cancellation_delivered(
+		&self,
+		sig: Signal,
+		targets: crate::proctree::TerminationTargets,
+	) {
+		let mut retained = self.cancellation.lock();
+		if let Some(retained) = retained.as_mut() {
+			retained.append(targets);
+		} else {
+			*retained = Some(targets);
+		}
+		drop(retained);
+		self.life.lock().cancellation_delivered(sig);
+	}
+
+	/// Refresh retained orphan subtrees before the hard wave, then release pins.
+	#[cfg(unix)]
+	pub(crate) fn kill_cancellation(&self) {
+		let targets = self.cancellation.lock().take();
+		if let Some(targets) = targets
+			&& !targets.is_empty()
+		{
+			targets.signal(crate::proctree::KILL_SIGNAL);
+		}
 	}
 
 	/// [`Lifecycle::poll`].

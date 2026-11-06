@@ -23,7 +23,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use bstr::{BStr, BString};
+use bstr::BString;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+pub const FRAMES_VERSION: u32 = 30;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -740,7 +740,10 @@ impl Shell {
 		if let Some(err) = shell.k.root.take_fault() {
 			return Err(RestoreError::Store(err));
 		}
-		reinstall_signal_traps(cx)?;
+		reinstall_signal_traps(&mut shell.k, cx, &mut shell.procs[0])?;
+		if let Some(err) = shell.k.root.take_fault() {
+			return Err(RestoreError::Store(err));
+		}
 		let root = (shell.procs[0].vpid, shell.procs[0].mode);
 		shell
 			.k
@@ -1076,31 +1079,51 @@ impl Shell {
 	}
 }
 
-/// Give the host the OS disposition of every trapped or ignored signal in
-/// the root trap table: a restore in a new process starts with default
-/// dispositions (handlers do not survive `exec`), so a trapped signal
-/// would otherwise kill it. `KILL` and `STOP` cannot be trapped; `CHLD`
-/// traps run from the engine (one per reaped child), with no OS handler,
-/// as the `trap` builtin sets them.
+/// Restore every root list or function signal handler in a new host
+/// process. Select candidate identities without cloning actions or
+/// function bodies; use the virtual bus's effective-handler rules.
+/// KILL/STOP cannot be trapped; CHLD runs on reaped children in-engine.
 ///
 /// # Errors
 ///
 /// [`RestoreError::Store`] when the trap table cannot be read,
 /// [`RestoreError::SignalSetup`] when the host refuses a disposition.
-fn reinstall_signal_traps(cx: &mut Cx<'_>) -> Result<(), RestoreError> {
-	let mut traps = Vec::new();
+fn reinstall_signal_traps(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+) -> Result<(), RestoreError> {
+	let platform = k.engine.config().platform;
+	let mut candidates = SigSet::EMPTY;
 	cx.store.scan(Table::Trap, &mut |key, rec| {
-		if let (Key::Trap(TrapKey::Signal(sig)), Record::Trap { action, .. }) = (key, rec)
-			&& !matches!(sig, Signal::Kill | Signal::Stop | Signal::Chld)
+		if let (Key::Trap(TrapKey::Signal(sig)), Record::Trap { .. } | Record::TrapFunction) =
+			(key, rec)
 		{
-			traps.push((sig, action.clone()));
+			candidates = candidates.with(sig);
 		}
 	})?;
-	for (sig, action) in traps {
-		// `Ok(false)`: ignored on entry, which the trap table already says.
-		cx.host
-			.set_signal_trap(sig, Some(BStr::new(&action)))
+	if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		for sig in cx.host.ignored_signals().iter() {
+			cx.host.forget_ignored(sig);
+		}
+	}
+	for sig in candidates.iter() {
+		if matches!(sig, Signal::Kill | Signal::Stop | Signal::Chld) {
+			continue;
+		}
+		let key = TrapKey::Signal(sig);
+		let handler = super::builtins::trap::effective(cx.store, vp, key, platform)?;
+		if handler == super::builtins::trap::Handler::Absent {
+			continue;
+		}
+		let action = super::jobctl::trap_disposition(k, sig, handler.disposition());
+		let accepted = cx
+			.host
+			.set_signal_trap(sig, action)
 			.map_err(|source| RestoreError::SignalSetup { sig, source })?;
+		if !accepted {
+			super::builtins::trap::record_ignored(k, cx, vp, sig, handler)?;
+		}
 	}
 	Ok(())
 }

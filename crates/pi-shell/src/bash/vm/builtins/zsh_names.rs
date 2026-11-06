@@ -11,18 +11,21 @@
 //! directories (`hash -d`, `unhash -d`, `printnameddirnode`)
 //! [`MiscKey::ZshNamedDirs`].
 //!
-//! Not provided: math functions (`functions -M`), `functions -c`/`-w`.
+//! Not provided: math functions (`functions -M`), `functions -w`.
 //! `zmodload` is
 //! [`super::zsh_module`].
 //!
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
 
+use std::borrow::Cow;
+
 use bstr::{BStr, BString, ByteSlice};
 use strum::IntoEnumIterator;
 
 use super::{
 	Ctx, Need, R, done,
+	trap::Removal,
 	zsh_args::{Func, Ops, isset, pattern_arg, zx},
 	zsh_print::charset,
 	zsh_quote::{niceformat, quotedzputs},
@@ -342,9 +345,9 @@ fn table_names(ctx: &mut Ctx<'_, '_>, ht: Ht) -> Result<Vec<BString>, Need> {
 	})
 }
 
-/// Remove `name` from `ht`; whether it was there.
-fn remove(ctx: &mut Ctx<'_, '_>, ht: Ht, name: &[u8]) -> Result<bool, Need> {
-	Ok(match ht {
+/// Remove `name`, distinguishing absence from a diagnosed host failure.
+fn remove(ctx: &mut Ctx<'_, '_>, ht: Ht, name: &[u8]) -> Result<Removal, Need> {
+	let found = match ht {
 		Ht::Alias | Ht::Suffix => {
 			let suffix = ht == Ht::Suffix;
 			let found = get_alias(ctx, name, suffix)?.is_some();
@@ -357,10 +360,14 @@ fn remove(ctx: &mut Ctx<'_, '_>, ht: Ht, name: &[u8]) -> Result<bool, Need> {
 			found
 		},
 		Ht::Func => {
-			let found = ctx.function(name)?.is_some();
+			if let Some(key) = super::trap::func_key(name, ctx.k.engine.config().platform) {
+				return Ok(super::trap::remove_function(ctx.k, ctx.cx, ctx.vp, key)?);
+			}
+			let found = matches!(
+				state::record(ctx.cx.store, ctx.vp, Key::Func(BStr::new(name)))?,
+				Some(Record::Func { .. })
+			);
 			if found {
-				// A `TRAPxxx` function is its trap.
-				super::trap::func_changing(ctx.k, ctx.cx.store, ctx.vp, name, false)?;
 				ctx.store_record(KeyBuf::Func(name.into()), None);
 			}
 			found
@@ -380,6 +387,11 @@ fn remove(ctx: &mut Ctx<'_, '_>, ht: Ht, name: &[u8]) -> Result<bool, Need> {
 			}
 			found
 		},
+	};
+	Ok(if found {
+		Removal::Removed
+	} else {
+		Removal::Absent
 	})
 }
 
@@ -415,10 +427,13 @@ pub fn unhash(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: Func) ->
 		Ht::Cmd
 	};
 	if all {
+		let mut returnval = 0;
 		for n in table_names(ctx, ht)? {
-			remove(ctx, ht, &n)?;
+			if matches!(remove(ctx, ht, &n)?, Removal::Failed) {
+				returnval = 1;
+			}
 		}
-		return done(0);
+		return done(returnval);
 	}
 	if ops.isset(b'm') {
 		let (mut matched, mut returnval) = (0, 0);
@@ -429,7 +444,9 @@ pub fn unhash(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: Func) ->
 			};
 			for n in table_names(ctx, ht)? {
 				if pat.matches(&n) {
-					remove(ctx, ht, &n)?;
+					if matches!(remove(ctx, ht, &n)?, Removal::Failed) {
+						returnval = 1;
+					}
 					matched += 1;
 				}
 			}
@@ -439,9 +456,13 @@ pub fn unhash(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: Func) ->
 	let posix = isset(ctx, ZshOpt::Posixbuiltins)?;
 	let mut returnval = 0;
 	for n in args {
-		if !remove(ctx, ht, n)? && (func != Func::Unset || !posix) {
-			ctx.usage(format!("no such hash table element: {}", n.as_bstr()));
-			returnval = 1;
+		match remove(ctx, ht, n)? {
+			Removal::Absent if func != Func::Unset || !posix => {
+				ctx.usage(format!("no such hash table element: {}", n.as_bstr()));
+				returnval = 1;
+			},
+			Removal::Failed => returnval = 1,
+			_ => {},
 		}
 	}
 	done(returnval)
@@ -756,7 +777,7 @@ fn expand_text(src: &[u8], expand: i32) -> Vec<u8> {
 }
 
 /// zsh `printshfuncnode`.
-fn print_func(
+pub(super) fn print_func(
 	ctx: &mut Ctx<'_, '_>,
 	name: &[u8],
 	rec: &Record,
@@ -835,11 +856,13 @@ fn print_func(
 	// `-x N` re-prints the definition with N spaces per level (zsh
 	// `text_expand_tabs`); text that does not parse keeps its tabs
 	// expanded line by line.
-	let text = if expand == 0 {
-		source.to_vec()
+	let text: Cow<'_, [u8]> = if expand == 0 {
+		Cow::Borrowed(source.as_slice())
 	} else {
-		crate::bash::syntax::zsh::reindent_function(name, source, expand)
-			.unwrap_or_else(|| expand_text(source, expand))
+		Cow::Owned(
+			crate::bash::syntax::zsh::reindent_function(name, source, expand)
+				.unwrap_or_else(|| expand_text(source, expand)),
+		)
 	};
 	// zsh `printshfuncnode`: the name through `quotedzputs`, then ` () {`,
 	// `# traced` for a traced function, the body.
@@ -1062,7 +1085,10 @@ pub fn functions(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], _func: Func
 				}
 				continue;
 			}
-			let name = add_autoload_function(ctx, a, on)?;
+			let Some(name) = add_autoload_function(ctx, a, on)? else {
+				returnval = 1;
+				continue;
+			};
 			if check_autoload(ctx, ops, &name)? != 0 {
 				returnval = 1;
 			}
@@ -1079,7 +1105,11 @@ pub fn functions(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], _func: Func
 /// that directory (`PM_ABSPATH_USED`); a bare name autoloaded by a
 /// function itself loaded by an absolute path is looked for in that
 /// function's directory first, if a file for it is there. Its name.
-fn add_autoload_function(ctx: &mut Ctx<'_, '_>, arg: &[u8], on: Attrs) -> Result<BString, Need> {
+fn add_autoload_function(
+	ctx: &mut Ctx<'_, '_>,
+	arg: &[u8],
+	on: Attrs,
+) -> Result<Option<BString>, Need> {
 	let (name, file, attrs) = match arg.rfind_byte(b'/') {
 		Some(s) if arg.starts_with(b"/") && s + 1 < arg.len() => (
 			BString::from(tail(arg, s + 1)),
@@ -1130,9 +1160,18 @@ fn add_autoload_function(ctx: &mut Ctx<'_, '_>, arg: &[u8], on: Attrs) -> Result
 		attrs,
 		file,
 	};
-	super::trap::func_changing(ctx.k, ctx.cx.store, ctx.vp, &name, false)?;
+	if !super::trap::func_defined(
+		ctx.k,
+		ctx.cx,
+		ctx.vp,
+		arg,
+		super::trap::FunctionDefinition::Autoload,
+	)? {
+		return Ok(None);
+	}
+	super::trap::set_function_disabled(&mut ctx.k.root, ctx.cx.store, ctx.vp, &name, false)?;
 	ctx.store_record(KeyBuf::Func(name.clone()), Some(rec));
-	Ok(name)
+	Ok(Some(name))
 }
 
 /// The innermost running function (zsh `funcstack`'s first `FS_FUNC`)
@@ -1323,6 +1362,7 @@ fn autoload_x(ctx: &mut Ctx<'_, '_>, args: &[BString], on: Attrs) -> R {
 			file,
 		},
 	};
+	super::trap::set_function_disabled(&mut ctx.k.root, ctx.cx.store, ctx.vp, &name, false)?;
 	ctx.store_record(KeyBuf::Func(name.clone()), Some(rec));
 	// zsh `bin_eval` of `NAME "$@"`.
 	let mut src = crate::bash::vm::quote::sh_single_quote(&name);
@@ -1339,7 +1379,12 @@ fn copy_function(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		ctx.usage("-c: requires two arguments");
 		return done(1);
 	};
-	let Some(mut rec) = ctx.function(old)? else {
+	let source = if super::trap::is_function_disabled(ctx.cx.store, ctx.vp, old)? {
+		None
+	} else {
+		ctx.function(old)?
+	};
+	let Some(mut rec) = source else {
 		ctx.usage(format!("no such function: {}", old.as_bstr()));
 		return done(1);
 	};
@@ -1355,6 +1400,7 @@ fn copy_function(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	if let Record::Func { attrs, .. } = &mut rec {
 		*attrs = attrs.without(Attrs::ZSH_ABSPATH_USED);
 	}
+	super::trap::set_function_disabled(&mut ctx.k.root, ctx.cx.store, ctx.vp, new, false)?;
 	ctx.store_record(KeyBuf::Func(new.clone()), Some(rec));
 	done(0)
 }
@@ -1886,12 +1932,19 @@ pub fn enable(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: Func) ->
 		return done(0);
 	}
 	let mut returnval = 0;
-	let set = |disabled: &mut Vec<BString>, n: &BString| {
-		disabled.retain(|d| d != n);
-		if !enabling {
-			disabled.push(n.clone());
-		}
-	};
+	let set =
+		|ctx: &mut Ctx<'_, '_>, disabled: &mut Vec<BString>, n: &BString| -> Result<bool, Need> {
+			if key == MiscKey::ZshDisabledFuncs
+				&& !super::trap::function_enabled(ctx.k, ctx.cx, ctx.vp, n, enabling)?
+			{
+				return Ok(false);
+			}
+			disabled.retain(|d| d != n);
+			if !enabling {
+				disabled.push(n.clone());
+			}
+			Ok(true)
+		};
 	if ops.isset(b'm') {
 		let mut matched = 0;
 		for p in args {
@@ -1900,7 +1953,16 @@ pub fn enable(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: Func) ->
 				continue;
 			};
 			for n in universe.iter().filter(|n| pat.matches(n)) {
-				set(&mut disabled, n);
+				if key == MiscKey::ZshDisabledFuncs
+					&& !matches!(
+						state::record(ctx.cx.store, ctx.vp, Key::Func(n.as_bstr()))?,
+						Some(Record::Func { .. })
+					) {
+					continue;
+				}
+				if !set(ctx, &mut disabled, n)? {
+					returnval = 1;
+				}
 				matched += 1;
 			}
 		}
@@ -1908,8 +1970,18 @@ pub fn enable(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: Func) ->
 		return done(if matched == 0 { 1 } else { returnval });
 	}
 	for a in args {
-		if universe.contains(a) {
-			set(&mut disabled, a);
+		let present = if key == MiscKey::ZshDisabledFuncs {
+			matches!(
+				state::record(ctx.cx.store, ctx.vp, Key::Func(a.as_bstr()))?,
+				Some(Record::Func { .. })
+			)
+		} else {
+			universe.contains(a)
+		};
+		if present {
+			if !set(ctx, &mut disabled, a)? {
+				returnval = 1;
+			}
 		} else {
 			ctx.usage(format!("no such hash table element: {}", a.as_bstr()));
 			returnval = 1;

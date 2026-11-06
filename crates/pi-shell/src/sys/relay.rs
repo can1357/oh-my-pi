@@ -368,8 +368,8 @@ impl ExtProc for Relayed {
 		self.child.signal(sig)
 	}
 
-	fn signal_delivered(&mut self, sig: Signal) {
-		self.child.signal_delivered(sig);
+	fn signal_delivered(&mut self, sig: Signal, targets: crate::proctree::TerminationTargets) {
+		self.child.signal_delivered(sig, targets);
 	}
 
 	fn stop(&mut self) -> io::Result<()> {

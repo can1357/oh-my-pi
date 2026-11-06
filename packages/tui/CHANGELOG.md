@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Editor history accepts captured submission provenance and keeps delayed writes out of unrelated scoped recall lists, while preserving eligible global, folder and repository recall and shared canceled drafts ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Editor history accepts captured submission provenance and keeps delayed writes out of unrelated scoped recall lists. Foreign upserts also invalidate cached duplicate provenance, including writes during a failed refresh, without discarding shared canceled drafts or eligible global, folder and repository recall ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed existing `HistorySearchComponent` callers passing a single history source, including Proxy-backed sources, crashing on upgrade; labeled scope arrays remain supported ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Editor history navigation now contains failed source-key resolution and retries on the next recall instead of letting the error escape the keystroke handler ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Failed history refreshes no longer leave a recalled prompt from the previous scope in the composer, while edited drafts and canceled attachments remain recoverable ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).

@@ -22,7 +22,9 @@ fn shell(real: bool) -> io::Result<Pty> {
 	} else {
 		Spawn::zsh()
 	};
-	spawn.args(["-f", "-i"]).env("PS1", "").spawn()
+	let mut pty = spawn.args(["-f", "-i"]).env("PS1", "").spawn()?;
+	pty.wait_raw(TIMEOUT)?;
+	Ok(pty)
 }
 
 /// Type `line` and a return.

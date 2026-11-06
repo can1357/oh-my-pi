@@ -1282,9 +1282,8 @@ export class Editor implements Component, Focusable {
 		// A command can change the conversation or working directory without a browse in
 		// between. Re-seed the current recall scope before considering local insertion;
 		// the write below independently uses the captured submission owner, when supplied.
-		// A failed seed leaves the stale list in place. Returning to its old scope may not
-		// re-seed, because that key never changed, so keep this entry out of the stale list
-		// even though storage still receives the write.
+		// A failed seed leaves a stale list. Retire its key after the write so
+		// returning to that scope cannot reuse rows whose provenance moved.
 		const seeded = this.#rehydrateHistory();
 
 		const stor = this.#historyStorage;
@@ -1293,12 +1292,20 @@ export class Editor implements Component, Focusable {
 				logger.error("HistoryStorage add failed", { error: String(error) });
 			});
 		}
-		if (!seeded) return;
+		if (!seeded) {
+			this.#historySourceKeyValue = undefined;
+			return;
+		}
 		if (context && this.#historySourceKey) {
 			try {
-				// Persist a late write for its owner without adding it to another scoped list.
-				if (this.#historySourceKey(context) !== this.#historySourceKeyValue) return;
+				// An upsert can also move a cached duplicate out of this scope.
+				// Re-seeding retires persistent rows but preserves canceled drafts.
+				if (this.#historySourceKey(context) !== this.#historySourceKeyValue) {
+					this.#historySourceKeyValue = undefined;
+					return;
+				}
 			} catch (error) {
+				this.#historySourceKeyValue = undefined;
 				logger.warn("History source resolution failed", { error: String(error) });
 				return;
 			}

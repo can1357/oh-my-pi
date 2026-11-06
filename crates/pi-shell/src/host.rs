@@ -618,16 +618,16 @@ impl crate::bash::Host for PiHost {
 			{
 				// The detached group remains ours after its leader exits.
 				targets.add_pgid(process.pid());
-				targets.add_process(process);
-				external.signal_delivered(sig);
+				let owned = crate::proctree::TerminationTargets::capture_process(process);
+				targets.extend(&owned);
+				external.signal_delivered(sig, owned);
 			} else {
 				fallback.push(index);
 			}
 		}
-		// Keep every external alive until all trees are captured and signalled:
-		// terminating one parent must not hide another root's escaped
-		// descendants.
-		targets.signal(i32::from(sig.number(crate::bash::Platform::current())));
+		// Every tree is captured before TERM can orphan another root's
+		// descendants. Each external retains its own pins for escalation.
+		targets.signal_captured(i32::from(sig.number(crate::bash::Platform::current())));
 		for index in fallback {
 			let _ = externals[index].signal(sig);
 		}
@@ -908,8 +908,8 @@ impl ExtProc for Observed {
 		self.child.signal(sig)
 	}
 
-	fn signal_delivered(&mut self, sig: Signal) {
-		self.child.signal_delivered(sig);
+	fn signal_delivered(&mut self, sig: Signal, targets: crate::proctree::TerminationTargets) {
+		self.child.signal_delivered(sig, targets);
 	}
 
 	fn stop(&mut self) -> io::Result<()> {
