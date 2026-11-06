@@ -21,8 +21,11 @@
  * - while main watches it (`watch(true)`): the full event stream, plus the
  *   view state and the entry list (a full `view` snapshot when the watch
  *   starts, then `entries` deltas and `viewPatch` diffs in the same flush as
- *   the state patch, ahead of the event that caused them). Entries are sent in
- *   display form: model-authored text has its secret placeholders restored,
+ *   the state patch, ahead of the event that caused them). Main keeps its
+ *   entry list between watches, so the snapshot carries only the entries
+ *   added since main last received any (the whole list after a rewrite) and
+ *   refocusing a long session does not re-send its history. Entries are sent
+ *   in display form: model-authored text has its secret placeholders restored,
  *   as `buildTranscriptSessionContext` would. While unwatched,
  *   `message_update`/`tool_execution_update` do not even refresh state, since
  *   main derives `streamMessage` and running tool updates from forwarded
@@ -65,6 +68,7 @@ import { isRpcProxy, type RpcServe } from "./rpc";
 import {
 	SESSION_STATE_READERS as read,
 	type SessionBridgeClient,
+	type SessionEntriesDelta,
 	type SessionHostProtocol,
 	type SessionMirrorState,
 	type SessionQueuedEntry,
@@ -209,7 +213,7 @@ export class SessionPublisher {
 	/** Last published view state; undefined until the current watch sent its snapshot. */
 	#view: DiffedViewState | undefined;
 	#viewSources: ViewSources | undefined;
-	/** Entries main holds, by identity, in order, and the body revision they were read at. */
+	/** Entries main holds (kept across watches), by identity, in order, and the body revision they were read at. */
 	#entries: SessionEntry[] = [];
 	#entriesRevision = 0;
 	#scheduled = false;
@@ -286,7 +290,6 @@ export class SessionPublisher {
 		}
 		this.#view = undefined;
 		this.#viewSources = undefined;
-		this.#entries = [];
 	}
 
 	/** Post `closed` and stop observing the session. Idempotent. */
@@ -384,6 +387,17 @@ export class SessionPublisher {
 	}
 
 	#publishEntries(): void {
+		const delta = this.#entriesDelta();
+		if (delta) this.#bridge.remote.notify("entries", this.#key, delta);
+	}
+
+	/**
+	 * What main's entry list lacks, recorded as sent: the entries appended since
+	 * it last received any, or the whole list once the journal was rewritten
+	 * (body revision bump, or a published endpoint no longer in place).
+	 * Undefined when main is current.
+	 */
+	#entriesDelta(): SessionEntriesDelta | undefined {
 		const manager = this.session.sessionManager;
 		const current = manager.getEntries();
 		const revision = manager.bodyRevision;
@@ -393,19 +407,12 @@ export class SessionPublisher {
 			revision === this.#entriesRevision &&
 			current.length >= published.length &&
 			(published.length === 0 || (current[0] === published[0] && current[last] === published[last]));
-		if (extends_ && current.length === published.length) return;
+		if (extends_ && current.length === published.length) return undefined;
 		this.#entries = current;
 		this.#entriesRevision = revision;
 		const obfuscator = this.session.obfuscator;
-		if (extends_) {
-			const added = displayEntries(current.slice(published.length), obfuscator);
-			this.#bridge.remote.notify("entries", this.#key, { kind: "append", entries: added });
-			return;
-		}
-		this.#bridge.remote.notify("entries", this.#key, {
-			kind: "replace",
-			entries: displayEntries(current, obfuscator),
-		});
+		if (extends_) return { kind: "append", entries: displayEntries(current.slice(published.length), obfuscator) };
+		return { kind: "replace", entries: displayEntries(current, obfuscator) };
 	}
 
 	#publishView(): void {
@@ -413,14 +420,11 @@ export class SessionPublisher {
 		const previous = this.#view;
 		this.#view = next;
 		if (!previous) {
-			const manager = this.session.sessionManager;
-			this.#entries = manager.getEntries();
-			this.#entriesRevision = manager.bodyRevision;
 			const state: SessionViewState = {
 				...next,
 				activeToolExecutionUpdates: toWireData([...this.session.activeToolExecutionUpdates()]),
 			};
-			this.#bridge.remote.notify("view", this.#key, state, displayEntries(this.#entries, this.session.obfuscator));
+			this.#bridge.remote.notify("view", this.#key, state, this.#entriesDelta());
 			return;
 		}
 		const patch: Partial<SessionViewState> = {};
@@ -483,7 +487,8 @@ export class SessionPublisher {
 			systemPrompt: previous && reuse("systemPrompt") ? previous.systemPrompt : [...sources.systemPrompt],
 			skills: previous && reuse("skills") ? previous.skills : toWireData([...session.skills]),
 			rules: previous && reuse("rules") ? previous.rules : sources.rules && toWireData(sources.rules),
-			hasAbortedToolCallTail: session.hasAbortedToolCallTail,
+			// Mid-run its transcript fallback rebuilds the display context on every flush; main reads it only idle.
+			hasAbortedToolCallTail: !session.isStreaming && session.hasAbortedToolCallTail,
 			isAutoThinking: session.isAutoThinking,
 			isCompacting: session.isCompacting,
 			compactionSpeculation: session.compactionSpeculation,
