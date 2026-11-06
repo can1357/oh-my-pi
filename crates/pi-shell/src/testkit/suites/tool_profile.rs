@@ -71,8 +71,8 @@ fn home() -> MemFs {
 /// (no file, no `.LOCK`) and does not save at exit.
 #[test]
 fn zsh_history_files_and_recording() {
-	let src = "HISTFILE=/h/hist; SAVEHIST=10; unsetopt histsavebycopy\nfc -R\necho one\nprint -r -- \
-	           ${#history}\nprint -s pushed\nfc -W /h/out\n";
+	let src = "HISTFILE=/h/hist; SAVEHIST=10; unsetopt histsavebycopy\nfc -R\necho one\nprint -r \
+	           -- ${#history}\nprint -s pushed\nfc -W /h/out\n";
 	let user = home();
 	let ran = run(ModeId::Zsh, Profile::User, &user, true, src);
 	assert_ne!(ran.out.lines().last(), Some("0"), "user shell keeps history: {}", ran.out);
@@ -122,8 +122,9 @@ fn bash_history_and_completion() {
 /// tool shell (so neither do their builtins); other modules do.
 #[test]
 fn no_line_editor_or_completion_modules() {
-	let src = "for m in zsh/zle zsh/complete zsh/complist zsh/computil zsh/datetime; do zmodload $m \
-	           2>/dev/null; print -n $?; done; echo; (bindkey -l) >/dev/null 2>&1; echo $?; (compadd x)";
+	let src = "for m in zsh/zle zsh/complete zsh/complist zsh/computil zsh/datetime; do zmodload \
+	           $m 2>/dev/null; print -n $?; done; echo; (bindkey -l) >/dev/null 2>&1; echo $?; \
+	           (compadd x)";
 	// `compadd` fails outside a completion widget either way; only the
 	// tool's cannot load it.
 	let ran = run(ModeId::Zsh, Profile::User, &MemFs::new(), false, src);

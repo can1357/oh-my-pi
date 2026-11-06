@@ -1,4 +1,4 @@
-//! zle_tricky.c's expansion of the word on the line (`doexpansion`): zsh
+//! `zle_tricky.c`'s expansion of the word on the line (`doexpansion`): zsh
 //! `prefork` and `globlist` (with `NULL_GLOB`) on the word, run from native
 //! editor code as an op would run them: command substitutions run in
 //! child vprocs (or, for expansion hooks, as frames of the editing vproc)
@@ -87,9 +87,11 @@ where
 					},
 				}
 			},
-			Err(Stop::Probe(p)) => match settle_probe(zw.k, zw.cx, zw.vp, &mut sc, Slot::Builtin, &p) {
-				Ok(()) => {},
-				Err(key) => return then(Await::Wait(key), move |zw, _| run(zw, sc, f, k)),
+			Err(Stop::Probe(p)) => {
+				match settle_probe(zw.k, zw.cx, zw.vp, &mut sc, Slot::Builtin, &p) {
+					Ok(()) => {},
+					Err(key) => return then(Await::Wait(key), move |zw, _| run(zw, sc, f, k)),
+				}
 			},
 			Err(Stop::Wait(key)) => return then(Await::Wait(key), move |zw, _| run(zw, sc, f, k)),
 			Err(stop) => {
@@ -169,7 +171,9 @@ fn globlist(zw: &mut Zw<'_, '_>, mut sc: Box<Scratch>, nodes: Vec<Vec<u8>>, k: G
 	}
 	match r {
 		Ok(()) => {},
-		Err(Flow::Block(key)) => return then(Await::Wait(key), move |zw, _| globlist(zw, sc, nodes, k)),
+		Err(Flow::Block(key)) => {
+			return then(Await::Wait(key), move |zw, _| globlist(zw, sc, nodes, k));
+		},
 		Err(_) => return k(zw, sc, None),
 	}
 	let mut kept = nodes

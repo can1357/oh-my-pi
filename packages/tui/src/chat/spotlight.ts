@@ -447,8 +447,14 @@ export class SpotlightNotices {
 		for (const notice of this.#list) notice.setHidden(hidden);
 	}
 
-	/** The notice blocks, the same array while none came or went. */
-	list(): readonly Component[] {
-		return this.#list;
+	/**
+	 * The notice blocks, the same array while none came or went; `shown` drops the notices of calls a
+	 * transcript presenter hides (a fresh array then).
+	 */
+	list(shown?: (toolCallId: string) => boolean): readonly Component[] {
+		if (!shown) return this.#list;
+		const kept: SpotlightNotice[] = [];
+		for (const [toolCallId, notice] of this.#byCall) if (shown(toolCallId)) kept.push(notice);
+		return kept.length === this.#list.length ? this.#list : kept;
 	}
 }

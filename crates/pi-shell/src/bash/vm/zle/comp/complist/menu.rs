@@ -18,14 +18,14 @@ use super::{
 	Menusearch, Mg, State,
 	colors::{self, Listcols},
 	menuselect_bindings,
-	print::{Ask, Mt, P, Penv, ScrollKey},
+	print::{Mt, P, Penv, ScrollKey},
 };
 use crate::bash::{
 	store::{Key, KeyBuf, MiscKey, Record, Table},
 	syntax::zsh::tok::{metafy, unmetafy},
 	vm::{
-		locale, state,
 		builtins::zsh_prompt::{Cap, TermCaps},
+		locale, state,
 		zle::{
 			comp::{
 				self, Comp, K, compcore, compresult, tricky,
@@ -33,9 +33,8 @@ use crate::bash::{
 			},
 			display,
 			exec::{Await, Got, WResult, Zw, then},
-			undo, utils,
+			undo, utils, wflags,
 			widgets::{misc, yank::Paste},
-			wflags,
 		},
 		zsh::{arith, zpattern},
 	},
@@ -202,14 +201,12 @@ fn getcols(zw: &mut Zw<'_, '_>, caps: &TermCaps) -> Listcols {
 		.getsparam(b"ZLS_COLORS")
 		.or_else(|| zw.getsparam(b"ZLS_COLOURS"));
 	match s {
-		None => {
-			colors::getcols_unset(
-				caps.tcstr[Cap::StandoutBeg as usize].as_deref(),
-				caps.tcstr[Cap::StandoutEnd as usize].as_deref(),
-			)
-		},
+		None => colors::getcols_unset(
+			caps.tcstr[Cap::StandoutBeg as usize].as_deref(),
+			caps.tcstr[Cap::StandoutEnd as usize].as_deref(),
+		),
 		Some(s) => {
-			let mut opts = zw.params(|ex| zpattern::opts(ex)).unwrap_or_default();
+			let mut opts = zw.params(zpattern::opts).unwrap_or_default();
 			opts.extended_glob = true;
 			colors::getcols_from(&s, &opts)
 		},
@@ -276,28 +273,27 @@ fn print_list(
 		p.compprintlist(showall)
 	};
 	emit(zw, &mut pe);
-	match r {
-		Ok(printed) => k(zw, printed),
-		Err(Ask) => {
-			snap.restore(zw);
-			zsetterm(zw);
-			menuselect_bindings(&mut zw.zle.keymaps);
-			zw.ed.localkeymap = Some(BString::from("listscroll"));
-			then(Await::Key, move |zw, got| {
-				zw.ed.localkeymap = None;
-				settyinfo(zw);
-				let cmd = match got {
-					Got::Key(c) => c,
-					_ => None,
-				};
-				let (key, unget) = ScrollKey::of(cmd.as_deref().map(|c| c.as_slice()));
-				if unget {
-					ungetkeycmd(zw);
-				}
-				pe.keys.push(key);
-				print_list(zw, pe, Some(snap), showall, k)
-			})
-		},
+	if let Ok(printed) = r {
+		k(zw, printed)
+	} else {
+		snap.restore(zw);
+		zsetterm(zw);
+		menuselect_bindings(&mut zw.zle.keymaps);
+		zw.ed.localkeymap = Some(BString::from("listscroll"));
+		then(Await::Key, move |zw, got| {
+			zw.ed.localkeymap = None;
+			settyinfo(zw);
+			let cmd = match got {
+				Got::Key(c) => c,
+				_ => None,
+			};
+			let (key, unget) = ScrollKey::of(cmd.as_deref().map(|c| c.as_slice()));
+			if unget {
+				ungetkeycmd(zw);
+			}
+			pe.keys.push(key);
+			print_list(zw, pe, Some(snap), showall, k)
+		})
 	}
 }
 
@@ -362,7 +358,7 @@ pub fn complistmatches(zw: &mut Zw<'_, '_>, dat: Chdata, k: K<i32>) -> WResult {
 	let mut pe = Box::new(Penv::new(caps, columns, lines, mcolors));
 	pe.colseqs = pr.colseqs;
 	pe.nearcolor = pr.nearcolor;
-	pe.env = zw.params(|ex| zpattern::char_env(ex)).unwrap_or_default();
+	pe.env = zw.params(zpattern::char_env).unwrap_or_default();
 	pe.utf8 = locale::is_utf8(zw.k, zw.cx.store, zw.vp);
 	pe.multibyte = pe.utf8 && zw.isset(ZshOpt::Multibyte);
 	pe.print_eight = zw.isset(ZshOpt::Printeightbit);
@@ -376,7 +372,13 @@ pub fn complistmatches(zw: &mut Zw<'_, '_>, dat: Chdata, k: K<i32>) -> WResult {
 			.map(|s| BString::from(metafy(&s)))
 	};
 	if zw.zle.comp.list.mselect >= 0 || zw.zle.comp.list.mlbeg >= 0 || listprompt.is_some() {
-		let mlistp = listprompt.map(|p| if p.is_empty() { BString::from(DEF_LISTPROMPT) } else { p });
+		let mlistp = listprompt.map(|p| {
+			if p.is_empty() {
+				BString::from(DEF_LISTPROMPT)
+			} else {
+				p
+			}
+		});
 		display::trashzle(zw);
 		zw.zle.display.showinglist = 0;
 		zw.zle.display.listshown = 0;
@@ -502,9 +504,7 @@ fn adjust_mcol(l: &mut State, wish: i32, p: &mut isize, pg: Option<&mut isize>) 
 			return true;
 		}
 		n
-	} else if n < 0 {
-		pp
-	} else if (l.mcol - pp) < (n - l.mcol) {
+	} else if n < 0 || (l.mcol - pp) < (n - l.mcol) {
 		pp
 	} else {
 		n
@@ -664,16 +664,8 @@ fn setmstatus(
 			(p, s)
 		},
 		None => (
-			c.complete
-				.complastprefix
-				.clone()
-				.map(Vec::from)
-				.unwrap_or_default(),
-			c.complete
-				.complastsuffix
-				.clone()
-				.map(Vec::from)
-				.unwrap_or_default(),
+			c.complete.complastprefix.clone().map_or_default(Vec::from),
+			c.complete.complastsuffix.clone().map_or_default(Vec::from),
 		),
 	};
 	let (pl, sl) = (p.len() as i32, s.len() as i32);
@@ -862,8 +854,7 @@ pub fn domenuselect(zw: &mut Zw<'_, '_>, dat: Option<Chdata>, k: K<i32>) -> WRes
 				.tricky
 				.origline
 				.clone()
-				.map(Vec::from)
-				.unwrap_or_default();
+				.map_or_default(Vec::from);
 			let ocs = zw.zle.comp.tricky.origcs;
 			set_metaline(zw, &orig, ocs);
 			setmstatus(zw, &mut status, None);
@@ -875,9 +866,13 @@ pub fn domenuselect(zw: &mut Zw<'_, '_>, dat: Option<Chdata>, k: K<i32>) -> WRes
 			};
 		}
 	}
-	let mstatus = zw
-		.getsparam(b"MENUPROMPT")
-		.map(|s| if s.is_empty() { BString::from(DEF_MENUPROMPT) } else { BString::from(metafy(&s)) });
+	let mstatus = zw.getsparam(b"MENUPROMPT").map(|s| {
+		if s.is_empty() {
+			BString::from(DEF_MENUPROMPT)
+		} else {
+			BString::from(metafy(&s))
+		}
+	});
 	{
 		let l = &mut zw.zle.comp.list;
 		l.mhasstat = i32::from(mstatus.as_ref().is_some_and(|s| !s.is_empty()));
@@ -965,7 +960,7 @@ fn ms_top(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 		let l = &mut c.list;
 		if l.mline < 0 || l.mtab_been_reallocated != 0 {
 			let mcols = l.mcols.max(0) as usize;
-			let rows = if mcols == 0 { 0 } else { l.mtab.len() / mcols };
+			let rows = l.mtab.len().checked_div(mcols).unwrap_or(0);
 			let mut found = None;
 			'scan: for y in 0..(l.mlines.max(0) as usize).min(rows) {
 				for x in 0..mcols {
@@ -1385,8 +1380,7 @@ fn ms_dispatch(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 			.tricky
 			.origline
 			.clone()
-			.map(Vec::from)
-			.unwrap_or_default();
+			.map_or_default(Vec::from);
 		let ocs = zw.zle.comp.tricky.origcs;
 		set_metaline(zw, &orig, ocs);
 		let mut st = std::mem::take(&mut ms.status);
@@ -1592,7 +1586,7 @@ fn ms_dispatch(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 			}
 			let _ = adjust_mcol(l, wishcol, &mut p, Some(&mut pg));
 			let e = mg(l, pg);
-			if !(ol != l.mline && (e == g || !(e.g.is_some() || e.mark) || e.mark)) {
+			if ol == l.mline || (e != g && e.g.is_some() && !e.mark) {
 				break;
 			}
 		}
@@ -1711,10 +1705,7 @@ fn ms_dispatch(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>) -> WResult {
 }
 
 /// zsh `bracketedstring()`: the text of a bracketed paste.
-fn read_paste(
-	p: Paste,
-	done: Box<dyn FnOnce(&mut Zw<'_, '_>, Vec<u8>) -> WResult + Send>,
-) -> WResult {
+fn read_paste(p: Paste, done: comp::K<Vec<u8>>) -> WResult {
 	then(Await::Char, move |zw, got| {
 		let mut p = p;
 		let Got::Char(Some(c)) = got else {
@@ -1746,11 +1737,12 @@ fn ms_isearch(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>, mut p: isize, ins: Option<Ve
 		}
 		if !is_ins {
 			if was {
-				if c.list.msearchstr.is_empty() && back == (ms.mode == MM_BSEARCH) {
-					if let Some(last) = c.list.lastsearch.clone() {
-						c.list.msearchstr = last;
-						ms.mode = 0;
-					}
+				if c.list.msearchstr.is_empty()
+					&& back == (ms.mode == MM_BSEARCH)
+					&& let Some(last) = c.list.lastsearch.clone()
+				{
+					c.list.msearchstr = last;
+					ms.mode = 0;
 				}
 			} else {
 				c.list.msearchstr.clear();
@@ -1819,8 +1811,7 @@ fn ms_infer(zw: &mut Zw<'_, '_>, mut ms: Box<Ms>, infer: bool, selfins: bool) ->
 		.tricky
 		.origline
 		.clone()
-		.map(Vec::from)
-		.unwrap_or_default();
+		.map_or_default(Vec::from);
 	let ocs = zw.zle.comp.tricky.origcs;
 	set_metaline(zw, &orig, ocs);
 	let f: fn(&mut Zw<'_, '_>) -> WResult = if selfins {

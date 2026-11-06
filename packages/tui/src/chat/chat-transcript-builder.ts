@@ -248,6 +248,8 @@ export class ChatTranscriptBuilder {
 		if (!this.#readGroup) {
 			this.#readGroup = new ReadToolGroupComponent({
 				showContentPreview: displayPreferences.readToolResultPreview,
+				// Extension presenters draw only the live main transcript; every replay draws stock cards.
+				transcriptPresenters: false,
 			});
 			this.#trackExpandable(this.#readGroup);
 			this.container.addChild(this.#readGroup);
@@ -523,6 +525,7 @@ export class ChatTranscriptBuilder {
 						// Stable ids and Kitty placeholder cells keep images anchored
 						// while the transcript viewport scrolls and reflows.
 						showImages: displayPreferences.showImages,
+						transcriptPresenters: false,
 					},
 					this.#deps.getTool?.(content.name),
 					this.#deps.ui,

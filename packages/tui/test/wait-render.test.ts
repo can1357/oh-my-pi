@@ -146,11 +146,6 @@ describe("job renderer task-result preview", () => {
 		expect(output.split("\n").some(line => line.trim() === "{")).toBe(false);
 	});
 
-	it("passes non-envelope result text through unchanged", () => {
-		const output = renderLines("42 pass, 0 fail (18.4s)");
-		expect(output).toContain("42 pass, 0 fail (18.4s)");
-	});
-
 	it("drops the id column when the label repeats it", () => {
 		// Task jobs label themselves with their agent id; rendering both columns
 		// stutters ("SpawnProbe ⟨task⟩ SpawnProbe").

@@ -28,6 +28,8 @@ export interface ToolCallOutcome {
 export interface IntegrationsProbe {
 	/** What the worker's `MCPManager` statics report. */
 	mcpGlobal(): Promise<{ available: boolean; remote: boolean; servers: string[]; tools: string[] }>;
+	/** Each scope's MCP tool names as this worker reads them, in order, through one `RemoteMCPManager`. */
+	mcpViews(scopes: string[]): Promise<string[][]>;
 	/** Call an MCP tool through `createMCPProxyTools(MCPManager.instance())`, as a child session would. */
 	mcpCall(
 		registry: ModelRegistry,
@@ -120,10 +122,16 @@ function buildProbe(): IntegrationsProbe {
 				tools: manager?.getTools().map(tool => tool.name) ?? [],
 			};
 		},
+		mcpViews: async scopes => {
+			const manager = MCPManager.instance();
+			if (!manager) throw new Error("no MCP manager in worker");
+			return scopes.map(scope => manager.getTools(scope).map(tool => tool.mcpToolName ?? ""));
+		},
 		mcpCall: async (registry, toolName, args, signal) => {
 			const manager = MCPManager.instance();
 			if (!manager) throw new Error("no MCP manager in worker");
-			const tool = createMCPProxyTools(manager).find(candidate => candidate.name === toolName);
+			manager.openToolScope("worker-child");
+			const tool = createMCPProxyTools(manager, "worker-child").find(candidate => candidate.name === toolName);
 			if (!tool) throw new Error(`no proxy for ${toolName}`);
 			return runTool(
 				tool,

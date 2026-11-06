@@ -36,12 +36,21 @@ use crate::bash::{
 	zshopt::ZshOpt,
 };
 
+/// The `HISTFILE` a history stack level restores when popped.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistfileRestore {
+	/// Leave `HISTFILE` alone.
+	#[default]
+	Keep,
+	/// Set `HISTFILE` to the value (`None` unsets it).
+	Set(Option<BString>),
+}
+
 /// One level of the history stack (zsh `struct histsave`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StackLevel {
-	/// `HISTFILE` to restore: `None` leaves it alone, `Some(None)` unsets
-	/// it.
-	pub histfile:   Option<Option<BString>>,
+	/// `HISTFILE` to restore.
+	pub histfile:   HistfileRestore,
 	/// The saved events.
 	pub entries:    Vec<Entry>,
 	/// The saved state.
@@ -133,7 +142,11 @@ fn push(
 	h.st = st;
 	h.curline = saved.curline.take();
 	StackLevel {
-		histfile:   hf.map(|_| histfile_now),
+		histfile:   if hf.is_some() {
+			HistfileRestore::Set(histfile_now)
+		} else {
+			HistfileRestore::Keep
+		},
 		entries:    Arc::unwrap_or_clone(saved.entries),
 		st:         saved.st,
 		locallevel: level,
@@ -141,7 +154,7 @@ fn push(
 }
 
 /// zsh `pophiststack`: restore `lv`; the `HISTFILE` to restore.
-fn pop(h: &mut Hist, lv: StackLevel) -> Option<Option<BString>> {
+fn pop(h: &mut Hist, lv: StackLevel) -> HistfileRestore {
 	let linked = h.st.linked;
 	let curline = h.curline.take();
 	let (chars, hsubl, hsubr, marg, mev, histactive, curline_num) = (
@@ -192,7 +205,7 @@ pub fn save_and_pop(
 	locallevel: i64,
 	nohistsave: bool,
 	r: &mut Report,
-) -> Result<(bool, Option<Option<BString>>), Pending> {
+) -> Result<(bool, HistfileRestore), Pending> {
 	let pos = stack.len() as i64;
 	if pop_through <= 0 {
 		pop_through += pos + 1;
@@ -204,19 +217,19 @@ pub fn save_and_pop(
 		pop_through -= 1;
 	}
 	if (stack.len() as i64) < pop_through {
-		return Ok((false, None));
+		return Ok((false, HistfileRestore::Keep));
 	}
 	let mut fopts = o.clone();
-	let mut set = None;
+	let mut set = HistfileRestore::Keep;
 	loop {
 		if !nohistsave {
 			let mut l = Locks::default();
 			file::savehistfile(h, steps, &fopts, &mut l, None, true, writeflags, r)?;
 		}
 		let Some(lv) = stack.pop() else { break };
-		if let Some(hf) = pop(h, lv) {
+		if let HistfileRestore::Set(hf) = pop(h, lv) {
 			fopts.histfile = hf.clone().filter(|f| !f.is_empty());
-			set = Some(hf);
+			set = HistfileRestore::Set(hf);
 		}
 		if (stack.len() as i64) < pop_through {
 			break;
@@ -246,12 +259,11 @@ fn fcgetcomm(ctx: &mut Ctx<'_, '_>, h: &Hist, s: &[u8]) -> Option<i64> {
 		};
 		return Some(cmd.max(0));
 	}
-	match h.search_up(|t| t.starts_with(s)) {
-		Some(i) => Some(h.num_at(i)),
-		None => {
-			warn(ctx, format!("event not found: {}", s.as_bstr()));
-			None
-		},
+	if let Some(i) = h.search_up(|t| t.starts_with(s)) {
+		Some(h.num_at(i))
+	} else {
+		warn(ctx, format!("event not found: {}", s.as_bstr()));
+		None
 	}
 }
 
@@ -365,9 +377,10 @@ pub fn zsh_fc(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		let mut stack = stack_load(ctx.cx.store, ctx.vp)?;
 		let mut fresh = h.clone();
 		let lv = push(&mut fresh, now_file, Some(hf), hs, shs, level);
-		let mut r = Report::default();
-		if !hf.is_empty() {
-			let mut fo = o.clone();
+		let r = if hf.is_empty() {
+			Report::default()
+		} else {
+			let mut fo = o;
 			fo.histfile = Some(BString::from(hf));
 			let hfb = BString::from(hf);
 			let res = hz::in_builtin(ctx, |steps| {
@@ -393,8 +406,8 @@ pub fn zsh_fc(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 				Ok((h2, r2))
 			})?;
 			fresh = res.0;
-			r = res.1;
-		}
+			res.1
+		};
 		stack.push(lv);
 		stack_save(&stack, &mut ctx.k.root, ctx.cx.store, ctx.vp);
 		fresh.save(&mut ctx.k.root, ctx.cx.store, ctx.vp);
@@ -421,7 +434,7 @@ pub fn zsh_fc(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		if popped {
 			h2.save(&mut ctx.k.root, ctx.cx.store, ctx.vp);
 			stack_save(&stack, &mut ctx.k.root, ctx.cx.store, ctx.vp);
-			if let Some(v) = set {
+			if let HistfileRestore::Set(v) = set {
 				set_histfile(&mut ctx.k.root, ctx.cx.store, ctx.vp, v);
 			}
 		}
@@ -440,12 +453,11 @@ pub fn zsh_fc(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 			sh_glob: ctx.zsh_option(ZshOpt::Shglob)?,
 			..crate::bash::pattern::zsh::Opts::default()
 		};
-		match Pattern::compile(&t, PatFlags::NONE, &popts) {
-			Ok(p) => pprog = Some(p),
-			Err(_) => {
-				ctx.diag(Diag::Usage { msg: "invalid match pattern".into() }.by(ctx.name));
-				return done(1);
-			},
+		if let Ok(p) = Pattern::compile(&t, PatFlags::NONE, &popts) {
+			pprog = Some(p);
+		} else {
+			ctx.diag(Diag::Usage { msg: "invalid match pattern".into() }.by(ctx.name));
+			return done(1);
 		}
 		args = rest;
 	}

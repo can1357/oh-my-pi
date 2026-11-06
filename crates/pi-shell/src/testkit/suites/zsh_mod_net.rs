@@ -48,9 +48,9 @@ fn zsh_mod_net_ztcp_argument_errors() {
 		err,
 		"zsh:ztcp:1: -l requires an argument\nzsh:ztcp:1: -a requires an argument\nzsh:ztcp:1: \
 		 invalid numerical argument\nzsh:ztcp:1: fd 5 is not registered as a tcp \
-		 connection\nzsh:ztcp:1: fd 5 not found in tcp table\nzsh:ztcp:1: x is an invalid \
-		 argument to -c\nzsh:ztcp:1: x is an invalid argument to -d\nzsh:ztcp:1: bad service \
-		 name or port number\nzsh:ztcp:1: bad service name or port number\n"
+		 connection\nzsh:ztcp:1: fd 5 not found in tcp table\nzsh:ztcp:1: x is an invalid argument \
+		 to -c\nzsh:ztcp:1: x is an invalid argument to -d\nzsh:ztcp:1: bad service name or port \
+		 number\nzsh:ztcp:1: bad service name or port number\n"
 	);
 	assert_eq!(st, 0);
 }
@@ -58,8 +58,8 @@ fn zsh_mod_net_ztcp_argument_errors() {
 #[test]
 fn zsh_mod_net_fake_host_refuses_sockets() {
 	let (out, err, st) = zsh(
-		"zmodload zsh/net/socket zsh/net/tcp; zsocket /tmp/s; echo $?; zsocket -l /tmp/s; echo \
-		 $?; ztcp -l 5555; echo $?; ztcp -L; echo $?",
+		"zmodload zsh/net/socket zsh/net/tcp; zsocket /tmp/s; echo $?; zsocket -l /tmp/s; echo $?; \
+		 ztcp -l 5555; echo $?; ztcp -L; echo $?",
 	);
 	assert_eq!(out, "1\n1\n1\n0\n");
 	assert_eq!(
