@@ -13,7 +13,7 @@ use crate::bash::{syntax::NodeId, trace::State};
 /// IDs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct NodeKey {
-	/// Index of the actual trace unit.
+	/// Stable trace-unit identity at the presentation boundary.
 	pub unit:   u32,
 	/// Zero for engine syntax; other values identify native-parsed literal
 	/// sources.
