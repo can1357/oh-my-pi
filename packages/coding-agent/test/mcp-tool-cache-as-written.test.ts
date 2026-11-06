@@ -31,6 +31,14 @@ import { restoreEnvValue } from "./helpers/settings-test-state";
 
 const TOKEN_VAR = "OMP_AS_WRITTEN_TOKEN";
 
+// Assembled, as the source files do, to keep oxlint's
+// no-template-curly-in-string off a literal placeholder name.
+const DOLLAR = "$";
+/** The Agent Plugins placeholder for a plugin's install directory. */
+const PLUGIN_ROOT_VAR = `${DOLLAR}{PLUGIN_ROOT}`;
+/** A placeholder with a default, written inside one component of a relative path. */
+const TAG_VAR = `${DOLLAR}{OMP_AW_BINARY_UNSET:-server}`;
+
 const TOOL: MCPToolDefinition = {
 	name: "lookup",
 	description: "A cached tool.",
@@ -653,4 +661,192 @@ describe("the tool cache keys a discovered server on its config as written", () 
 		await halfCache.set("aw-plugin:aw", halfA, [TOOL]);
 		expect(await halfCache.get("aw-plugin:aw", halfB)).toBeNull();
 	});
+
+	/**
+	 * Round 11 (confirm pass, F2). A declaration inside one path *component*
+	 * is not a declaration about the path's root. Two extension packages
+	 * shipping `./bin/${TAG:-server}/aw` resolve to two different programs
+	 * under two different roots, but the whole raw command was recorded, so
+	 * both hashed to `./bin/${TAG:-server}/aw` and project B mounted project
+	 * A's catalogue — for a `lazy` server, its whole tool list.
+	 *
+	 * The line the repair draws: a declaration that *begins* the value is the
+	 * root (`${PLUGIN_ROOT}/bin/aw`, asserted above and in the `agent-plugins`
+	 * row), and anything later leaves the root as written, so the recorded
+	 * form keeps the directory the provider resolved it against and keeps the
+	 * placeholder where the entry put it.
+	 */
+	test("omp-plugins: a placeholder inside a relative command keeps each project's root", async () => {
+		const project = async (slot: string): Promise<string> => {
+			const root = path.join(dirs.root, slot);
+			const ext = path.join(root, "aw-extension");
+			await fs.mkdir(path.join(root, ".git"), { recursive: true });
+			await writeJson(path.join(ext, "package.json"), { name: "aw-extension", omp: { extensions: ["./main.ts"] } });
+			await Bun.write(path.join(ext, "main.ts"), "export default function (_pi) {}\n");
+			await writeJson(path.join(ext, ".mcp.json"), {
+				mcpServers: { aw: { command: `./bin/${TAG_VAR}/aw`, lazy: true } },
+			});
+			await writeJson(path.join(root, ".omp", "settings.json"), { extensions: [ext] });
+			return root;
+		};
+		const projectA = await project("tag-a");
+		const projectB = await project("tag-b");
+
+		clearFsCache();
+		const [name, here] = findServer((await loadAllMCPConfigs(projectA, { filterExa: false })).configs);
+		clearFsCache();
+		const [, there] = findServer((await loadAllMCPConfigs(projectB, { filterExa: false })).configs);
+
+		// The placeholder really expanded, and each root really differs.
+		const command = (config: MCPServerConfig) => (config.type === "stdio" ? config.command : undefined);
+		expect(command(here)).toContain(path.join("tag-a", "aw-extension", "bin", "server", "aw"));
+		expect(command(there)).toContain(path.join("tag-b", "aw-extension", "bin", "server", "aw"));
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, here, [TOOL]);
+		expect(await cache.get(name, there)).toBeNull();
+		expect(await cache.get(name, here)).toEqual([TOOL]);
+	});
+
+	/**
+	 * Round 11 (confirm pass, F2, the other direction). The substitution
+	 * forms are per provider. `{env:...}`, `{file:...}` and the empty `${}`
+	 * are literal text to every OMP-owned provider — `expandEnvVarsDeep`
+	 * expands a non-empty, colon-free `${NAME}` and nothing else — so a path
+	 * beginning with one declares no root of its own and stays rooted where
+	 * the provider rooted it. Reading them as declarations handed the second
+	 * install the first one's catalogue, the same defect as above with no
+	 * placeholder in sight.
+	 *
+	 * The command is a bare executable here on purpose: `resolvePluginStdioPaths`
+	 * leaves `aw-server` alone, so the rooted `cwd` is the only thing telling
+	 * the two installs apart and the decision under test is the only thing
+	 * deciding.
+	 */
+	for (const literal of ["{env:AW_TAG}", `${DOLLAR}{}`]) {
+		test(`claude-plugins: "${literal}" is literal text here, so two installs stay two servers`, async () => {
+			enableUserSource("claude");
+			const install = async (slot: string): Promise<MCPServerConfig> => {
+				const pluginPath = path.join(dirs.root, "claude-plugins", slot, "aw-plugin");
+				await writeJson(path.join(pluginPath, ".mcp.json"), {
+					aw: { type: "stdio", command: "aw-server", cwd: `${literal}/srv` },
+				});
+				await writeClaudeRegistry(dirs, pluginPath, "aw-plugin@claude-plugins-official");
+				clearFsCache();
+				clearClaudePluginRootsCache();
+				return findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs)[1];
+			};
+
+			const slotA = await install("a");
+			const slotB = await install("b");
+			// Nothing expanded it: the token survives into the resolved path,
+			// which the provider rooted at each install directory.
+			const cwd = (config: MCPServerConfig) => (config.type === "stdio" ? config.cwd : undefined);
+			expect(cwd(slotA)).toContain(path.join("a", "aw-plugin", `${literal}`, "srv"));
+			expect(cwd(slotB)).toContain(path.join("b", "aw-plugin", `${literal}`, "srv"));
+
+			const cache = new MCPToolCache(memoryStorage().storage);
+			await cache.set("aw-plugin:aw", slotA, [TOOL]);
+			expect(await cache.get("aw-plugin:aw", slotB)).toBeNull();
+			expect(await cache.get("aw-plugin:aw", slotA)).toEqual([TOOL]);
+		});
+	}
+
+	/**
+	 * Round 11 (confirm pass, F3). OpenCode substitutes its config *text*
+	 * before parsing it, so `{env:...}` is as real a declaration in an object
+	 * key as in a value. `declaresSubstitution` read only `Object.values`, so
+	 * a header name built from a rotating variable looked like an edited
+	 * literal and the catalogue was dropped on every rotation — which for a
+	 * `lazy` server means it starts with no tools at all.
+	 */
+	test("opencode: a declaration in a header name keeps the catalogue across a rotation", async () => {
+		const write = () =>
+			writeJson(path.join(dirs.project, "opencode.json"), {
+				mcp: {
+					aw: {
+						type: "remote",
+						url: "https://mcp.example.test/aw",
+						headers: { [`X-{env:${TOKEN_VAR}}`]: "same-literal" },
+					},
+				},
+			});
+
+		await setToken(dirs, "one");
+		await write();
+		const [name, first] = await reload();
+		await setToken(dirs, "two");
+		const [, rotated] = await reload();
+
+		// The provider really substituted the key, and only the key moved.
+		expect(Object.keys(remoteHeaders(first) ?? {})).toEqual(["X-one"]);
+		expect(Object.keys(remoteHeaders(rotated) ?? {})).toEqual(["X-two"]);
+
+		const cache = new MCPToolCache(memoryStorage().storage);
+		await cache.set(name, first, [TOOL]);
+		expect(await cache.get(name, rotated)).toEqual([TOOL]);
+
+		// An edited literal still drops it: the key is identity, not noise.
+		await writeJson(path.join(dirs.project, "opencode.json"), {
+			mcp: {
+				aw: {
+					type: "remote",
+					url: "https://mcp.example.test/aw",
+					headers: { [`X-Other-{env:${TOKEN_VAR}}`]: "same-literal" },
+				},
+			},
+		});
+		const [, edited] = await reload();
+		expect(await cache.get(name, edited)).toBeNull();
+	});
+
+	/**
+	 * Round 11 (confirm pass, F4). Agent Plugins §7.2.1 puts the install
+	 * directory outside a plugin's identity, so `agent-plugin-format` records
+	 * `cwd` as the placeholder the spec gives for it rather than the resolved
+	 * path: `${PLUGIN_ROOT}` when the entry omits it, `${PLUGIN_ROOT}/x` for
+	 * the plugin-relative `./x`, and the entry's own text when it already
+	 * names a root. Only the `command` half of that rule was pinned, so
+	 * reverting the `cwd` half left every suite green while an upgrade into a
+	 * new directory silently dropped the catalogue of every plugin that sets
+	 * one — and a `lazy` plugin server then starts with no tools at all.
+	 *
+	 * All three forms are asserted together because the rule is one rule, and
+	 * the move is the test: each is written into two install directories and
+	 * has to be one server across them.
+	 */
+	for (const cwd of [undefined, "./srv", `${PLUGIN_ROOT_VAR}/srv`]) {
+		test(`agent-plugins: a plugin whose cwd is ${JSON.stringify(cwd) ?? "unset"} survives a move`, async () => {
+			const install = async (slot: string): Promise<MCPServerConfig> => {
+				const pluginPath = agentPluginPath(dirs, slot);
+				await writeJson(path.join(pluginPath, "plugin.json"), {
+					$schema: AGENT_PLUGIN_MANIFEST_SCHEMA,
+					name: "aw-plugin",
+				});
+				await Bun.write(path.join(pluginPath, "bin", "aw"), "#!/bin/sh\n");
+				await fs.mkdir(path.join(pluginPath, "srv"), { recursive: true });
+				await writeJson(path.join(pluginPath, "mcp.json"), {
+					$schema: AGENT_PLUGIN_MCP_SCHEMA,
+					mcpServers: { aw: { type: "stdio", command: "./bin/aw", ...(cwd !== undefined && { cwd }) } },
+				});
+				await writeClaudeRegistry(dirs, pluginPath, "aw-plugin@market");
+				clearFsCache();
+				clearClaudePluginRootsCache();
+				return findServer((await loadAllMCPConfigs(dirs.project, { filterExa: false })).configs)[1];
+			};
+
+			const slotA = await install("a");
+			const slotB = await install("b");
+			// The plugin really moved: both rooted fields followed it.
+			const stdio = (config: MCPServerConfig) =>
+				config.type === "stdio" ? { command: config.command, cwd: config.cwd } : undefined;
+			expect(stdio(slotA)).not.toEqual(stdio(slotB));
+			expect(stdio(slotA)?.cwd).toContain(path.join("a", "aw-plugin"));
+			expect(stdio(slotB)?.cwd).toContain(path.join("b", "aw-plugin"));
+
+			const cache = new MCPToolCache(memoryStorage().storage);
+			await cache.set("aw-plugin:aw", slotA, [TOOL]);
+			expect(await cache.get("aw-plugin:aw", slotB)).toEqual([TOOL]);
+		});
+	}
 });

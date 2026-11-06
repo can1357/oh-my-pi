@@ -711,7 +711,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(raw.type !== undefined && { transport: raw.type as MCPServer["transport"] }),
 				_source: createSourceMeta(PROVIDER_ID, sourcePath, root.scope, root.origin),
 			};
-			items.push(withMcpAsWritten(server, raw));
+			items.push(withMcpAsWritten(server, raw, { rooting: { dir: baseDir } }));
 		}
 	}
 

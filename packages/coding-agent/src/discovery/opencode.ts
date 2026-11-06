@@ -347,7 +347,9 @@ function buildMCPServer(
 ): MCPServer {
 	const server = buildMCPServerFields(name, serverConfig, source);
 	return asWritten
-		? withMcpAsWritten(server, buildMCPServerFields(name, asWritten as OpenCodeMCPConfig, source))
+		? withMcpAsWritten(server, buildMCPServerFields(name, asWritten as OpenCodeMCPConfig, source), {
+				syntax: "opencode",
+			})
 		: server;
 }
 

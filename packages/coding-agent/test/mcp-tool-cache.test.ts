@@ -38,8 +38,8 @@
  */
 import { describe, expect, it } from "bun:test";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
-import { MCPToolCache } from "../src/mcp/tool-cache";
-import type { MCPStdioServerConfig, MCPToolDefinition } from "../src/mcp/types";
+import { MCPToolCache, sameMcpServerIdentity } from "../src/mcp/tool-cache";
+import type { MCPHttpServerConfig, MCPServerConfig, MCPStdioServerConfig, MCPToolDefinition } from "../src/mcp/types";
 import type { AgentStorage } from "../src/session/agent-storage";
 
 function fakeStorage(): AgentStorage {
@@ -295,4 +295,149 @@ describe("MCPToolCache", () => {
 		expect(await cache.get("srv", { ...releasedConfig, lazy: true })).toEqual([TOOL_DEF]);
 		expect(await cache.get("srv", config({ lazy: true }))).toEqual([TOOL_DEF]);
 	});
+});
+
+/**
+ * The identity partition itself, field by field.
+ *
+ * `sameMcpServerIdentity` is the one answer to "is this a different server":
+ * the tool cache keys a catalogue on it, and `MCPManager.#holdServerConfig`
+ * retires a crashing server's burst budget on it. Each row asserts both, so
+ * the two cannot drift apart.
+ *
+ * Round 11 (confirm pass, F1) found two fields on the wrong side and they
+ * wanted *different* repairs, which is why this is a table and not two
+ * regressions: `envLiteralKeys` is a set written in the `env` object's key
+ * order, so its order is normalised while its membership still counts;
+ * `oauth.prompt` is browser-login policy, so it is excluded outright. The
+ * rows that must stay different — `envLiteralKeys` membership, `envPolicy`,
+ * `headerPolicy`, `oauth.clientId`/`clientSecret`, a changed scope,
+ * `auth.credentialId` — are what a blanket exclusion of either field would
+ * break, and `args` is the order that genuinely is identity.
+ */
+describe("MCP server identity", () => {
+	const httpConfig = (overrides?: Partial<MCPHttpServerConfig>): MCPHttpServerConfig => ({
+		type: "http",
+		url: "https://mcp.example.test/mcp",
+		...overrides,
+	});
+
+	const ROWS: Array<{ id: string; a: MCPServerConfig; b: MCPServerConfig; same: boolean }> = [
+		{
+			id: "envLiteralKeys written in a different order",
+			a: config({ env: { A: "a", B: "b" }, envLiteralKeys: ["A", "B"] }),
+			b: config({ env: { A: "a", B: "b" }, envLiteralKeys: ["B", "A"] }),
+			same: true,
+		},
+		{
+			id: "envLiteralKeys naming one key twice",
+			a: config({ env: { A: "a" }, envLiteralKeys: ["A"] }),
+			b: config({ env: { A: "a" }, envLiteralKeys: ["A", "A"] }),
+			same: true,
+		},
+		{
+			id: "envLiteralKeys covering one more key",
+			a: config({ env: { A: "a", B: "b" }, envLiteralKeys: ["A"] }),
+			b: config({ env: { A: "a", B: "b" }, envLiteralKeys: ["A", "B"] }),
+			same: false,
+		},
+		{
+			id: "envPolicy making every value literal",
+			a: config({ env: { A: "a" } }),
+			b: config({ env: { A: "a" }, envPolicy: "literal" }),
+			same: false,
+		},
+		{
+			id: "env written in a different order",
+			a: config({ env: { A: "a", B: "b" } }),
+			b: config({ env: { B: "b", A: "a" } }),
+			same: true,
+		},
+		{
+			id: "args in a different order",
+			a: config({ args: ["--one", "--two"] }),
+			b: config({ args: ["--two", "--one"] }),
+			same: false,
+		},
+		{
+			id: "oauth.prompt asking for a different authorization prompt",
+			a: config({ oauth: { prompt: "consent" } }),
+			b: config({ oauth: { prompt: "login" } }),
+			same: true,
+		},
+		{ id: "oauth carrying nothing but a prompt", a: config(), b: config({ oauth: { prompt: "login" } }), same: true },
+		{
+			id: "oauth.redirectUri pointing the login somewhere else",
+			a: config({ oauth: { redirectUri: "http://127.0.0.1:9000/cb" } }),
+			b: config({ oauth: { redirectUri: "http://127.0.0.1:9100/cb" } }),
+			same: true,
+		},
+		{
+			id: "oauth.callbackPort and callbackPath moving the loopback listener",
+			a: config({ oauth: { callbackPort: 9000, callbackPath: "/cb" } }),
+			b: config({ oauth: { callbackPort: 9100, callbackPath: "/callback" } }),
+			same: true,
+		},
+		{
+			id: "oauth.scope listing the same scopes in a different order",
+			a: config({ oauth: { scope: "read write" } }),
+			b: config({ oauth: { scope: "write read" } }),
+			same: true,
+		},
+		{
+			id: "oauth.scope asking for one more scope",
+			a: config({ oauth: { scope: "read" } }),
+			b: config({ oauth: { scope: "read write" } }),
+			same: false,
+		},
+		{
+			id: "oauth.clientId presenting a different client",
+			a: config({ oauth: { clientId: "client-a" } }),
+			b: config({ oauth: { clientId: "client-b" } }),
+			same: false,
+		},
+		{
+			id: "oauth.clientSecret presenting a different secret",
+			a: config({ oauth: { clientId: "client", clientSecret: "k" } }),
+			b: config({ oauth: { clientId: "client", clientSecret: "k2" } }),
+			same: false,
+		},
+		{
+			id: "auth.credentialId naming a different stored credential",
+			a: config({ auth: { type: "oauth", credentialId: "cred-a" } }),
+			b: config({ auth: { type: "oauth", credentialId: "cred-b" } }),
+			same: false,
+		},
+		{
+			id: "auth.resource naming a different OAuth resource",
+			a: config({ auth: { type: "oauth", credentialId: "cred", resource: "https://a.example.test" } }),
+			b: config({ auth: { type: "oauth", credentialId: "cred", resource: "https://b.example.test" } }),
+			same: false,
+		},
+		{
+			id: "headers written in a different order",
+			a: httpConfig({ headers: { "X-One": "1", "X-Two": "2" } }),
+			b: httpConfig({ headers: { "X-Two": "2", "X-One": "1" } }),
+			same: true,
+		},
+		{
+			id: "headerPolicy pinning the headers to the URL's origin",
+			a: httpConfig({ headers: { "X-One": "1" } }),
+			b: httpConfig({ headers: { "X-One": "1" }, headerPolicy: "origin-locked" }),
+			same: false,
+		},
+	];
+
+	for (const row of ROWS) {
+		it(`${row.same ? "is the same server" : "is a different server"}: ${row.id}`, async () => {
+			const cache = new MCPToolCache(fakeStorage());
+			await cache.set("srv", row.a, [TOOL_DEF]);
+
+			// The breaker's answer and the cache's are one answer, by contract.
+			expect({
+				identity: sameMcpServerIdentity(row.a, row.b),
+				catalogue: (await cache.get("srv", row.b)) !== null,
+			}).toEqual({ identity: row.same, catalogue: row.same });
+		});
+	}
 });

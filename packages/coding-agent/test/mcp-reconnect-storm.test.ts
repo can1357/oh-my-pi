@@ -16,16 +16,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { disableUserSource, enableUserSource } from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import "@oh-my-pi/pi-coding-agent/discovery";
+import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { MCPManager, type MCPReconnectPolicy } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { MCPToolCache } from "@oh-my-pi/pi-coding-agent/mcp/tool-cache";
-import type { MCPStdioServerConfig, MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type { MCPServerConfig, MCPStdioServerConfig, MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getConfigRootDir, removeSyncWithRetries, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "crash-after-init-mcp.ts");
 const BUN_EXEC = process.execPath;
@@ -221,4 +224,220 @@ describe("a policy-only rewrite does not replenish the crash-burst budget", () =
 			await manager.disconnectAll();
 		}
 	}, 60_000);
+});
+
+/**
+ * Round 11 (confirm pass, F1). `#holdServerConfig` retires a name's
+ * crash window when the definition is *replaced*, and
+ * `sameMcpServerIdentity` decides what "replaced" means. Two more rewrites
+ * got past it, neither of them a different process to crash:
+ *
+ * - `envLiteralKeys` is built in the `env` object's key order
+ *   (`resolveMarketplaceEnv` in `discovery/claude-plugins.ts`) and consumed
+ *   as a set (`new Set(resolved.envLiteralKeys)` in `manager.ts`), so
+ *   swapping two expanded entries in a plugin's `.mcp.json` reorders an
+ *   array whose order means nothing. Measured 5, 10, 15 spawns.
+ * - `oauth.prompt` selects what the authorization endpoint is asked to
+ *   prompt for during an interactive browser login. On a crashing stdio
+ *   server it changes neither the executable nor its environment.
+ *   Measured 5, 10, 15 spawns.
+ *
+ * The last row is the other half of the rule, and the reason the repair is
+ * two different instruments rather than one: `oauth.clientId` is a
+ * credential the connection presents, so editing it *is* a new server and
+ * must still buy the budget a fixed definition deserves. A blanket
+ * exclusion of `oauth` passes the second row and fails this one.
+ *
+ * Driven through real discovery and real config files, because the rewrite
+ * is the input, with plain `reconnectServer` calls standing in for ordinary
+ * model traffic — never `manual`, which resets the window by design.
+ */
+describe("a rewrite of what is not the process does not replenish the crash-burst budget", () => {
+	const SPAWN_FIXTURE = path.join(import.meta.dir, "fixtures", "spawn-and-exit-mcp.ts");
+	const SINGLE_ATTEMPT: MCPReconnectPolicy = { ladderMs: [], retryBaseMs: 60_000, retryMaxMs: 60_000 };
+	/** Mirrors `RECONNECT_BURST_LIMIT` in `src/mcp/manager.ts`. */
+	const BURST_LIMIT = 5;
+	/** Env names the fixture reports back from the process it was spawned as. */
+	const WITNESS_KEYS = "A,B";
+	const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+
+	interface Rewrite {
+		id: string;
+		/** The name discovery reports the server under. */
+		server: string;
+		/** Providers reading a user-level source need it switched on. */
+		userSource?: "claude";
+		/** Write round `round`'s config files; rounds alternate exactly one field. */
+		write(round: number): Promise<void>;
+		/** The alternating field, read back off the discovered config. */
+		rewritten(config: MCPServerConfig): unknown;
+		/** Cumulative spawns after each round. */
+		spawns: number[];
+	}
+
+	let projectDir: string;
+	let tempHome: string;
+	let userAgentDir: string;
+	let spawnLog: string;
+	let originalHome: string | undefined;
+	let originalClaudeConfigDir: string | undefined;
+	let originalWitnessA: string | undefined;
+	let originalWitnessB: string | undefined;
+
+	/** The stdio entry every row crashes on: one spawn per connect, no handshake. */
+	const crashingStdio = (extra: Record<string, unknown>, env?: Record<string, string>) => ({
+		command: BUN_EXEC,
+		args: [SPAWN_FIXTURE],
+		env: { OMP_TEST_SPAWN_LOG: spawnLog, OMP_TEST_SPAWN_ENV_KEYS: WITNESS_KEYS, ...env },
+		lazy: true,
+		...extra,
+	});
+
+	const writeOmpMcp = (entry: Record<string, unknown>) =>
+		Bun.write(path.join(projectDir, ".omp", "mcp.json"), JSON.stringify({ mcpServers: { stormy: entry } })).then(
+			() => {},
+		);
+
+	/** A marketplace plugin whose two expanded env entries swap places each round. */
+	const writeClaudePlugin = async (round: number): Promise<void> => {
+		const pluginPath = path.join(tempHome, "claude-plugins", "aw-plugin");
+		const a: [string, string] = ["A", `\${OMP_TEST_AW_A}`];
+		const b: [string, string] = ["B", `\${OMP_TEST_AW_B}`];
+		await Bun.write(
+			path.join(pluginPath, ".mcp.json"),
+			JSON.stringify({
+				stormy: crashingStdio(
+					{ type: "stdio" },
+					Object.fromEntries(round % 2 === 0 ? [a, b] : [b, a]) as Record<string, string>,
+				),
+			}),
+		);
+		await Bun.write(
+			path.join(tempHome, ".claude", "plugins", "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"aw-plugin@claude-plugins-official": [
+						{
+							scope: "user",
+							installPath: pluginPath,
+							version: "1.0.0",
+							installedAt: "2026-01-01T00:00:00Z",
+							lastUpdated: "2026-01-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+	};
+
+	const REWRITES: Rewrite[] = [
+		{
+			id: "two expanded env entries that swap places keep one budget",
+			server: "aw-plugin:stormy",
+			userSource: "claude",
+			write: writeClaudePlugin,
+			rewritten: config => (config.type === "stdio" ? config.envLiteralKeys : undefined),
+			spawns: [BURST_LIMIT, BURST_LIMIT, BURST_LIMIT],
+		},
+		{
+			id: "an OAuth prompt that alternates keeps one budget",
+			server: "stormy",
+			write: round => writeOmpMcp(crashingStdio({ oauth: { prompt: round % 2 === 0 ? "consent" : "login" } })),
+			rewritten: config => config.oauth?.prompt,
+			spawns: [BURST_LIMIT, BURST_LIMIT, BURST_LIMIT],
+		},
+		{
+			id: "an OAuth client id that alternates buys a new budget",
+			server: "stormy",
+			write: round => writeOmpMcp(crashingStdio({ oauth: { clientId: round % 2 === 0 ? "client-a" : "client-b" } })),
+			rewritten: config => config.oauth?.clientId,
+			spawns: [BURST_LIMIT, 2 * BURST_LIMIT, 3 * BURST_LIMIT],
+		},
+	];
+
+	beforeEach(async () => {
+		projectDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-mcp-identity-proj-"));
+		tempHome = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-mcp-identity-home-"));
+		userAgentDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-mcp-identity-agent-"));
+		spawnLog = path.join(projectDir, "spawns.log");
+		await Bun.write(spawnLog, "");
+		originalHome = process.env.HOME;
+		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+		originalWitnessA = process.env.OMP_TEST_AW_A;
+		originalWitnessB = process.env.OMP_TEST_AW_B;
+		delete process.env.CLAUDE_CONFIG_DIR;
+		process.env.HOME = tempHome;
+		process.env.OMP_TEST_AW_A = "aaa";
+		process.env.OMP_TEST_AW_B = "bbb";
+		vi.spyOn(os, "homedir").mockReturnValue(tempHome);
+		setAgentDir(userAgentDir);
+		clearFsCache();
+		clearClaudePluginRootsCache();
+	});
+
+	afterEach(async () => {
+		disableUserSource("claude");
+		vi.restoreAllMocks();
+		clearFsCache();
+		clearClaudePluginRootsCache();
+		if (originalAgentDirEnv) setAgentDir(originalAgentDirEnv);
+		else setAgentDir(path.join(getConfigRootDir(), "agent"));
+		restoreEnvValue("HOME", originalHome);
+		restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
+		restoreEnvValue("OMP_TEST_AW_A", originalWitnessA);
+		restoreEnvValue("OMP_TEST_AW_B", originalWitnessB);
+		await removeWithRetries(projectDir);
+		await removeWithRetries(tempHome);
+		await removeWithRetries(userAgentDir);
+	});
+
+	/** One entry per spawn: `pid ts {env}`. */
+	const spawns = async (): Promise<string[]> =>
+		(await Bun.file(spawnLog).text()).split("\n").filter(line => line.trim().length > 0);
+
+	for (const row of REWRITES) {
+		it(
+			row.id,
+			async () => {
+				if (row.userSource) enableUserSource(row.userSource);
+				const store = new Map<string, string>();
+				const cache = new MCPToolCache({
+					getCache: (key: string) => store.get(key) ?? null,
+					setCache: (key: string, value: string) => void store.set(key, value),
+				} as unknown as AgentStorage);
+				const manager = new MCPManager(projectDir, cache, undefined, SINGLE_ATTEMPT);
+				const rewritten: unknown[] = [];
+				const spawnsByRound: number[] = [];
+				try {
+					for (let round = 0; round < 3; round++) {
+						await row.write(round);
+						clearFsCache();
+						clearClaudePluginRootsCache();
+						await manager.discoverAndConnect({ filterExa: false });
+						const { configs } = await loadAllMCPConfigs(projectDir, { filterExa: false });
+						const config = configs[row.server];
+						if (!config) throw new Error(`server ${row.server} not discovered`);
+						rewritten.push(row.rewritten(config));
+						// Ordinary model traffic: one call more than the budget,
+						// every one of them a non-manual reconnect.
+						for (let call = 0; call <= BURST_LIMIT; call++) await manager.reconnectServer(row.server);
+						spawnsByRound.push((await spawns()).length);
+					}
+
+					// The rewrite landed: the field really alternates round to round.
+					expect(rewritten[0]).not.toEqual(rewritten[1]);
+					expect(rewritten[0]).toEqual(rewritten[2]);
+					expect(spawnsByRound).toEqual(row.spawns);
+					// ...and what was spawned never changed: the environment every
+					// process really received is one value, whatever the file said.
+					const witnesses = new Set((await spawns()).map(line => line.slice(line.indexOf("{"))));
+					expect([...witnesses]).toHaveLength(1);
+				} finally {
+					await manager.disconnectAll();
+				}
+			},
+			60_000,
+		);
+	}
 });

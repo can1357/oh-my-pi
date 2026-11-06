@@ -38,6 +38,7 @@ import { normalizeToolNames } from "../tools/builtin-names";
 
 import { realpathIfExists, resolveContainedPath } from "./contained-path";
 import { buildPluginDirRoot } from "./plugin-dir-roots";
+import { resolvePluginStdioPaths, type StdioCommandBase } from "./substitute-plugin-root";
 
 /**
  * Standard paths for each config source.
@@ -209,19 +210,93 @@ const MCP_AS_WRITTEN_FIELDS = [
 ] as const satisfies readonly (keyof MCPServerAsWritten)[];
 
 /**
- * The substitution forms a discovery provider expands while loading an MCP
- * entry: `${VAR}` and `${VAR:-default}` (which covers the reserved plugin
- * roots `${PLUGIN_ROOT}`, `${PLUGIN_DATA}`, `${CLAUDE_PLUGIN_ROOT}` and
- * `${OMP_PLUGIN_ROOT}`), and OpenCode's `{env:VAR}` / `{file:path}`.
+ * The substitution syntax one discovery provider expands while loading an
+ * MCP entry. It has to be the provider's own, not the union of all of them:
+ * a form a provider never expands is literal text it will read back
+ * unchanged, so calling it a declaration claims a rotation that cannot
+ * happen (see {@link withMcpAsWritten}).
+ *
+ * - `omp`: `${VAR}` and `${VAR:-default}`, exactly the grammar
+ *   {@link expandEnvVarsDeep} expands — a non-empty, colon-free name, which
+ *   covers the reserved plugin roots `${PLUGIN_ROOT}`, `${PLUGIN_DATA}`,
+ *   `${CLAUDE_PLUGIN_ROOT}` and `${OMP_PLUGIN_ROOT}` and excludes the forms
+ *   it leaves alone, `${}` among them.
+ * - `opencode`: OpenCode's `{env:VAR}` / `{file:path}`, substituted into the
+ *   config *text* before it is parsed, so a declaration can sit in an object
+ *   key as readily as in a value.
  */
-const MCP_SUBSTITUTION_PATTERN = /\$\{[^}]*\}|\{env:[^}]+\}|\{file:[^}]+\}/;
+export type McpSubstitutionSyntax = "omp" | "opencode";
+
+const OMP_SUBSTITUTION = /\$\{[^}:]+(?::-[^}]*)?\}/;
+const OPENCODE_SUBSTITUTION = /\{env:[^}]+\}|\{file:[^}]+\}/;
+
+interface McpSubstitutionDialect {
+	/** Matches a declaration anywhere in a value. */
+	readonly anywhere: RegExp;
+	/** Matches a declaration that *begins* a value, and so governs its root. */
+	readonly leading: RegExp;
+	/** Whether this provider substitutes in object keys as well as values. */
+	readonly inKeys: boolean;
+}
+
+const MCP_SUBSTITUTION_DIALECTS: Record<McpSubstitutionSyntax, McpSubstitutionDialect> = {
+	omp: {
+		anywhere: OMP_SUBSTITUTION,
+		leading: new RegExp(`^(?:${OMP_SUBSTITUTION.source})`),
+		inKeys: false,
+	},
+	opencode: {
+		anywhere: OPENCODE_SUBSTITUTION,
+		leading: new RegExp(`^(?:${OPENCODE_SUBSTITUTION.source})`),
+		inKeys: true,
+	},
+};
 
 /** Whether `value`, or anything nested in it, was written as a substitution. */
-function declaresSubstitution(value: unknown): boolean {
-	if (typeof value === "string") return MCP_SUBSTITUTION_PATTERN.test(value);
-	if (Array.isArray(value)) return value.some(declaresSubstitution);
-	if (isRecord(value)) return Object.values(value).some(declaresSubstitution);
+function declaresSubstitution(value: unknown, dialect: McpSubstitutionDialect): boolean {
+	if (typeof value === "string") return dialect.anywhere.test(value);
+	if (Array.isArray(value)) return value.some(item => declaresSubstitution(item, dialect));
+	if (isRecord(value)) {
+		return Object.entries(value).some(
+			([key, nested]) => (dialect.inKeys && dialect.anywhere.test(key)) || declaresSubstitution(nested, dialect),
+		);
+	}
 	return false;
+}
+
+/** Where a provider rooted a relative `command`/`cwd`; see {@link withMcpAsWritten}. */
+export interface McpAsWrittenOptions {
+	/** Substitution syntax this provider expands (default `"omp"`). */
+	syntax?: McpSubstitutionSyntax;
+	/** The {@link resolvePluginStdioPaths} call the provider made on the effective config. */
+	rooting?: { dir: string; commandBase?: StdioCommandBase };
+}
+
+/**
+ * `entry` with its path fields rooted the way the provider rooted the
+ * effective ones, so the written form keeps the directory it was resolved
+ * against and keeps the placeholder where the entry put it
+ * (`./bin/${TAG}/aw` under `/a/ext` becomes `/a/ext/bin/${TAG}/aw`).
+ *
+ * A value that *begins* with a declaration is left alone: that declaration
+ * is the root, which is exactly what `${PLUGIN_ROOT}/bin/aw` says, and
+ * re-rooting it would bury a plugin's own placeholder under the install
+ * directory it exists to replace. A declaration anywhere later substitutes
+ * one path component and leaves the rest of the path, root included, as
+ * written.
+ */
+function rootWrittenPaths(
+	entry: Record<string, unknown>,
+	dialect: McpSubstitutionDialect,
+	rooting: { dir: string; commandBase?: StdioCommandBase },
+): Record<string, unknown> {
+	const relative: { command?: string; cwd?: string } = {};
+	for (const field of ["command", "cwd"] as const) {
+		const value = entry[field];
+		if (typeof value === "string" && !dialect.leading.test(value)) relative[field] = value;
+	}
+	if (relative.command === undefined && relative.cwd === undefined) return entry;
+	return { ...entry, ...resolvePluginStdioPaths(relative, rooting.dir, rooting.commandBase) };
 }
 
 /**
@@ -237,23 +312,28 @@ function declaresSubstitution(value: unknown): boolean {
  * said that two projects' `./bin/aw` are one server — which, since the cache
  * row is the server name alone, served one project's catalog to the other.
  * Rooting is not substitution: it names a program, and the program a path
- * names depends on where it is rooted.
+ * names depends on where it is rooted. `options.rooting` says which call the
+ * provider made, and the written form is rooted by the same one.
  *
  * So the written form stands only where the entry asked for it, with a
- * placeholder or a reference. A plugin whose install directory is not part
- * of its identity says so — `${PLUGIN_ROOT}/bin/aw`, `${CLAUDE_PLUGIN_ROOT}`
- * — and keeps its catalog across an upgrade; a plugin that writes a bare
- * relative path has declared nothing, and two installs of it are two
- * programs.
+ * placeholder or a reference, and only over what it was written on. A plugin
+ * whose install directory is not part of its identity says so with a leading
+ * `${PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_ROOT}` and keeps its catalog across an
+ * upgrade; a plugin that writes a bare relative path has declared nothing,
+ * and two installs of it are two programs; a plugin that writes
+ * `./bin/${TAG}/aw` has declared one component of a path that is still
+ * rooted where it was installed.
  */
-export function withMcpAsWritten<T extends MCPServer>(server: T, entry: unknown): T {
+export function withMcpAsWritten<T extends MCPServer>(server: T, entry: unknown, options?: McpAsWrittenOptions): T {
 	if (!isRecord(entry)) return server;
+	const dialect = MCP_SUBSTITUTION_DIALECTS[options?.syntax ?? "omp"];
+	const rooted = options?.rooting ? rootWrittenPaths(entry, dialect, options.rooting) : entry;
 	const asWritten: Record<string, unknown> = {};
 	let differs = false;
 	for (const field of MCP_AS_WRITTEN_FIELDS) {
-		const written = entry[field];
+		const written = rooted[field];
 		if (server[field] === undefined || written === undefined || Bun.deepEquals(written, server[field])) continue;
-		if (!declaresSubstitution(written)) continue;
+		if (!declaresSubstitution(written, dialect)) continue;
 		asWritten[field] = written;
 		differs = true;
 	}

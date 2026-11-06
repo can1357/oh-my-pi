@@ -383,7 +383,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(cfg.type !== undefined && { transport: cfg.type }),
 				_source: createSourceMeta(PROVIDER_ID, mcpPath, root.level),
 			};
-			items.push(withMcpAsWritten(server, parsed.mcpServers?.[serverName]));
+			items.push(withMcpAsWritten(server, parsed.mcpServers?.[serverName], { rooting: { dir: root.path } }));
 		}
 	}
 

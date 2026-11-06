@@ -96,16 +96,71 @@ function hashIdentity(identity: Record<string, unknown>): string {
 	return Bun.SHA256.hash(stableStringifyJson(identity), "hex");
 }
 
-/** `config` without its policy keys, as stable JSON. */
+/**
+ * `oauth` members excluded from identity for the same reason as
+ * {@link CURRENT_IDENTITY_EXCLUDED_KEYS}: they configure the *interactive
+ * browser login* — what the authorization request asks to be prompted for,
+ * and where the loopback listener that catches the redirect binds. Their
+ * only consumer is `resolveCallbackOptions` in `oauth-flow.ts`; none of them
+ * reaches the MCP connection, so toggling one serves no different tools and
+ * spawns no different process. The rest of `oauth` stays: `clientId` and
+ * `clientSecret` are the credentials the login presents, and `scope` is the
+ * grant it asks for.
+ */
+const OAUTH_LOGIN_POLICY_KEYS = ["prompt", "redirectUri", "callbackPort", "callbackPath"] as const;
+
+/**
+ * `config` without its policy keys, and with every member that carries no
+ * order put into one — identity is a question about the connection, so two
+ * spellings of the same connection have to hash alike.
+ *
+ * - `envLiteralKeys` is consumed as a set (`new Set(...)` in
+ *   `MCPManager.#prepareConfig`) but built in the `env` object's key order
+ *   (`resolveMarketplaceEnv` in `discovery/claude-plugins.ts`), so swapping
+ *   two expanded entries in a plugin's `.mcp.json` reorders an array without
+ *   changing one resolved value. Membership still decides whether a value is
+ *   resolved again, so it is sorted and deduped, never dropped. This is the
+ *   partition `isSameMCPConnection` already applies in `capability/mcp.ts`.
+ * - `oauth.scope` is a space-delimited scope list, and RFC 6749 §3.3 says the
+ *   order of its values is not significant.
+ * - {@link OAUTH_LOGIN_POLICY_KEYS} are deleted, and an `oauth` left empty by
+ *   that goes with them: `oauth: { prompt: "login" }` and no `oauth` at all
+ *   describe the same connection.
+ *
+ * Nothing else needs it. `env`, `headers` and `auth` are objects, and
+ * {@link stableStringifyJson} already sorts object keys; `args` is argv, whose
+ * order is the program's input and not a set; `type` is written by
+ * `buildLegacyConfig` for every discovered server, so it never varies between
+ * two readings of one entry.
+ */
+function identityRecord(config: MCPServerConfig): Record<string, unknown> {
+	const identity = stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS);
+	const literalKeys = identity.envLiteralKeys;
+	if (Array.isArray(literalKeys)) identity.envLiteralKeys = [...new Set<unknown>(literalKeys)].sort();
+	const oauth = identity.oauth;
+	if (isRecord(oauth)) {
+		const connection: Record<string, unknown> = { ...oauth };
+		for (const key of OAUTH_LOGIN_POLICY_KEYS) delete connection[key];
+		const scope = connection.scope;
+		if (typeof scope === "string") connection.scope = scope.split(/\s+/).filter(Boolean).sort().join(" ");
+		if (Object.keys(connection).length === 0) delete identity.oauth;
+		else identity.oauth = connection;
+	}
+	return identity;
+}
+
+/** {@link identityRecord} as stable JSON. */
 function identityJson(config: MCPServerConfig): string {
-	return stableStringifyJson(stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS));
+	return stableStringifyJson(identityRecord(config));
 }
 
 /**
  * Whether `a` and `b` are the same server: the same connection, differing at
- * most in {@link CURRENT_IDENTITY_EXCLUDED_KEYS} — when to connect, whether to
- * connect at all, how long to wait, how request ids are encoded, whether the
- * instructions reach the prompt.
+ * most in {@link CURRENT_IDENTITY_EXCLUDED_KEYS} and
+ * {@link OAUTH_LOGIN_POLICY_KEYS} — when to connect, whether to connect at
+ * all, how long to wait, how request ids are encoded, whether the
+ * instructions reach the prompt, how the browser login is driven — or in the
+ * written order of something {@link identityRecord} normalises.
  *
  * Shared with the manager's crash-burst breaker, which retires a server's
  * window when the definition it was filled against is replaced. The two ask
@@ -200,9 +255,23 @@ function requestIdFormatCandidates(current: MCPRequestIdFormat | undefined): Arr
 
 /**
  * Hashes of `config` under every retired identity scheme, for cache-miss
- * migration. Each of them hashed the expanded config: the first entry is the
- * scheme just before {@link attachConfigAsWritten} (policy keys excluded), and
- * {@link LEGACY_IDENTITY_EXCLUDED_KEYS} lists the ones before it.
+ * migration. Every one of them hashed the *expanded* config, un-normalised,
+ * which is why this starts from {@link stripKeys} and not
+ * {@link identityRecord}: the first entry is the scheme just before
+ * {@link identityRecord} and {@link attachConfigAsWritten} (policy keys
+ * excluded, nothing normalised), and {@link LEGACY_IDENTITY_EXCLUDED_KEYS}
+ * lists the ones before that, ending with the empty set — the full-config
+ * hash released builds write.
+ *
+ * A released cache keyed on a plugin's or a codex server's expanded config
+ * therefore survives this change without a `CACHE_VERSION` bump, through the
+ * released tier this already enumerates (the `[]` entry, which reconstructs
+ * the whole effective config), not through the first tier, which excludes
+ * policy. What it cannot recover is an entry whose newly normalised or
+ * newly excluded value *also* changed across the upgrade — a reordered
+ * `envLiteralKeys`, an edited `oauth.prompt` — since no digest keeps the
+ * historical text. That costs one self-healing miss, the same residual
+ * {@link timeoutCandidates} already documents.
  */
 function hashLegacyConfigs(config: MCPServerConfig): string[] {
 	const identity = stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS);
@@ -260,7 +329,7 @@ export class MCPToolCache {
 
 		let currentHash: string;
 		try {
-			currentHash = hashIdentity(stripKeys(cacheIdentityConfig(config), CURRENT_IDENTITY_EXCLUDED_KEYS));
+			currentHash = hashIdentity(identityRecord(cacheIdentityConfig(config)));
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return null;
@@ -283,7 +352,7 @@ export class MCPToolCache {
 	async set(serverName: string, config: MCPServerConfig, tools: MCPToolDefinition[]): Promise<void> {
 		let configHash: string;
 		try {
-			configHash = hashIdentity(stripKeys(cacheIdentityConfig(config), CURRENT_IDENTITY_EXCLUDED_KEYS));
+			configHash = hashIdentity(identityRecord(cacheIdentityConfig(config)));
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return;
