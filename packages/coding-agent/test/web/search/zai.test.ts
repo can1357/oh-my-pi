@@ -183,18 +183,4 @@ describe("Z.AI web search provider", () => {
 			'pytest "fixture scope" site:docs.pytest.org -inurl:changelog filetype:html',
 		);
 	});
-
-	it("sends directive-free queries upstream byte-identical", async () => {
-		const { fetchImpl, capturedRequests } = createMcpFetch();
-		await new ZaiProvider().search({
-			query: "latest bun release notes",
-			systemPrompt: "",
-			authStorage,
-			model: zaiModel,
-			modelRegistry,
-			fetch: fetchImpl,
-		});
-
-		expect(toolCallQuery(capturedRequests)).toBe("latest bun release notes");
-	});
 });

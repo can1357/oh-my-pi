@@ -399,10 +399,12 @@ pub fn getcols_from(s: &[u8], opts: &Opts) -> Listcols {
 	}
 	// Orphans default to links, missing files to files.
 	if mc.col(COL_OR).is_none() {
-		mc.files[COL_OR] = mc.files[COL_LN].clone();
+		let (lo, hi) = mc.files.split_at_mut(COL_OR);
+		hi[0].clone_from(&lo[COL_LN]);
 	}
 	if mc.col(COL_MI).is_none() {
-		mc.files[COL_MI] = mc.files[COL_FI].clone();
+		let (lo, hi) = mc.files.split_at_mut(COL_MI);
+		hi[0].clone_from(&lo[COL_FI]);
 	}
 	mc
 }

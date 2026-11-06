@@ -1672,11 +1672,10 @@ fn trace_zsh(
 							out.push(b'[');
 							q.push(&mut out, &key);
 							out.extend_from_slice(b"]=");
-							q.push(&mut out, &v);
 						} else {
 							out.push(b' ');
-							q.push(&mut out, &v);
 						}
+						q.push(&mut out, &v);
 					}
 					out.extend_from_slice(b" )");
 				} else {
@@ -2625,11 +2624,12 @@ fn zsh_prefix_ids(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) ->
 		return None;
 	}
 	let mut log = Vec::new();
-	let mut ex = super::expand::Expander::new(k, cx, vp, &mut log, false, line);
+	let ex = super::expand::Expander::new(k, cx, vp, &mut log, false, line);
 	for (name, value) in ids {
-		match super::zsh::specials::check_id_prefix(&mut ex, &name, &value) {
-			Err(super::expand::Stop::Fail(d) | super::expand::Stop::Fatal(d)) => return Some(d),
-			_ => {},
+		if let Err(super::expand::Stop::Fail(d) | super::expand::Stop::Fatal(d)) =
+			super::zsh::specials::check_id_prefix(&ex, &name, &value)
+		{
+			return Some(d);
 		}
 	}
 	None

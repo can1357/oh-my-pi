@@ -143,7 +143,7 @@ pub struct WrapSave {
 	pub oqi:     Option<BString>,
 	/// `compqstack`.
 	pub oqs:     Option<BString>,
-	/// zle_tricky's `autoq`.
+	/// `zle_tricky`'s `autoq`.
 	pub oaq:     Option<BString>,
 	/// `compwords`.
 	pub owords:  Vec<BString>,
@@ -344,7 +344,7 @@ pub enum Cp {
 }
 
 /// The completion special `name` names, if any.
-pub fn lookup(name: &[u8]) -> Option<Cp> {
+pub const fn lookup(name: &[u8]) -> Option<Cp> {
 	Some(match name {
 		b"words" => Cp::Words,
 		b"redirections" => Cp::Redirections,
@@ -437,7 +437,7 @@ const KEYS: [(&str, Kt, bool); 26] = [
 ];
 
 /// The string variable behind a plain `compstate` key.
-fn key_var(s: &mut State, i: i32) -> Option<&mut Option<BString>> {
+const fn key_var(s: &mut State, i: i32) -> Option<&mut Option<BString>> {
 	Some(match i {
 		kpn::CONTEXT => &mut s.compcontext,
 		kpn::PARAMETER => &mut s.compparameter,
@@ -560,7 +560,7 @@ fn set_compstate(ex: &mut Expander<'_, '_>, c: &mut Comp, new: Vec<(BString, BSt
 		seen |= 1 << i;
 		let shown = c.complete.kunset & (1 << i) == 0;
 		if ro {
-			if !shown || BString::from(unmetafy(&key_value(ex, c, i))) != v {
+			if !shown || unmetafy(&key_value(ex, c, i)) != v {
 				return Err(Stop::Fail(Diag::Readonly { name: k }));
 			}
 			continue;
@@ -611,17 +611,14 @@ fn array(a: &[BString]) -> PValue {
 }
 
 /// The value of `cp` (`None`: unset or not visible).
-///
-/// # Errors
-/// None today; kept for the special-parameter interface.
-pub fn get(ex: &mut Expander<'_, '_>, cp: Cp) -> X<Option<PValue>> {
+pub fn get(ex: &mut Expander<'_, '_>, cp: Cp) -> Option<PValue> {
 	if !visible(ex.vp) {
-		return Ok(None);
+		return None;
 	}
 	if super::comp(ex.vp).is_some_and(|c| c.complete.runset & (1 << cp.index()) != 0) {
-		return Ok(None);
+		return None;
 	}
-	Ok(Some(with_taken(ex, |ex, c| {
+	Some(with_taken(ex, |ex, c| {
 		let s = &c.complete;
 		match cp {
 			Cp::Words => array(&s.compwords),
@@ -635,7 +632,7 @@ pub fn get(ex: &mut Expander<'_, '_>, cp: Cp) -> X<Option<PValue>> {
 			Cp::Qisuffix => scalar(s.compqisuffix.as_ref()),
 			Cp::Compstate => PValue::Hash(get_compstate(ex, c)),
 		}
-	})))
+	}))
 }
 
 fn as_scalar(v: &PValue) -> BString {
@@ -677,7 +674,7 @@ pub fn set(ex: &mut Expander<'_, '_>, cp: Cp, value: PValue) -> X<()> {
 				s.compwords = as_array(value)
 					.iter()
 					.map(|e| BString::from(metafy(e)))
-					.collect()
+					.collect();
 			},
 			Cp::Redirections => {
 				s.compredirs = as_array(value)
@@ -706,15 +703,12 @@ pub fn set(ex: &mut Expander<'_, '_>, cp: Cp, value: PValue) -> X<()> {
 
 /// Unset `cp` (zsh `compunsetfn(pm, 1)`): a string becomes empty, an
 /// array empty, `compstate` loses its keys; the parameter stays.
-///
-/// # Errors
-/// None today; kept for the special-parameter interface.
-pub fn unset(ex: &mut Expander<'_, '_>, cp: Cp) -> X<()> {
+pub fn unset(ex: &mut Expander<'_, '_>, cp: Cp) {
 	let Some(c) = super::comp_mut(ex.vp) else {
-		return Ok(());
+		return;
 	};
 	if c.incompfunc != 1 {
-		return Ok(());
+		return;
 	}
 	let s = &mut c.complete;
 	let empty = || Some(BString::default());
@@ -733,7 +727,6 @@ pub fn unset(ex: &mut Expander<'_, '_>, cp: Cp) -> X<()> {
 			s.extra.clear();
 		},
 	}
-	Ok(())
 }
 
 // ---- comp_wrapper
@@ -1248,7 +1241,7 @@ pub fn compset(ctx: &mut Ctx<'_, '_>, argv: &[BString]) -> R {
 		b's' => Cvt::SufNum,
 		b'S' => Cvt::SufPat,
 		b'q' => {
-			let r = zx(ctx, |ex| Ok(with_taken(ex, |ex, c| super::compcore::set_comp_sep(ex, c))))?;
+			let r = zx(ctx, |ex| Ok(with_taken(ex, super::compcore::set_comp_sep)))?;
 			return match r {
 				Ok(st) => done(st),
 				Err(d) => zerr(ctx, d),
@@ -1356,14 +1349,13 @@ fn parse_ordering(arg: &[u8], flags: Option<&mut u32>) -> Result<(), ()> {
 			.iter()
 			.rev()
 			.find(|&&(name, abbrev, _)| opt.len() >= abbrev && name.as_bytes().starts_with(opt));
-		match found {
-			Some(&(_, _, f)) => fl |= f,
-			None => {
-				if let Some(flags) = flags {
-					*flags = caf::MATSORT;
-				}
-				return Err(());
-			},
+		if let Some(&(_, _, f)) = found {
+			fl |= f;
+		} else {
+			if let Some(flags) = flags {
+				*flags = caf::MATSORT;
+			}
+			return Err(());
 		}
 	}
 	if let Some(flags) = flags {
@@ -1610,7 +1602,7 @@ pub fn compadd(ctx: &mut Ctx<'_, '_>, argv: &[BString]) -> R {
 	if let Some(ms) = &mstr {
 		let mut warns: Vec<Vec<u8>> = Vec::new();
 		let r = super::compmatch::parse_cmatcher(Some(ctx.name.as_bytes()), ms, &mut |w: &[u8]| {
-			warns.push(w.to_vec())
+			warns.push(w.to_vec());
 		});
 		for w in warns {
 			ctx.usage(String::from_utf8_lossy(&w).into_owned());
@@ -1683,7 +1675,7 @@ fn ztat(ctx: &mut Ctx<'_, '_>, nam: &[u8], ls: bool) -> Result<Option<u32>, Need
 }
 
 /// `st_mode` with the file type bits (`S_IF*`) of `st`.
-fn st_mode(st: &crate::bash::fs::Stat) -> u32 {
+const fn st_mode(st: &crate::bash::fs::Stat) -> u32 {
 	use crate::bash::fs::StatKind as K;
 	let t = match st.kind {
 		K::File => 0o100_000,

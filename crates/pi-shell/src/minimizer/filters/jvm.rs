@@ -2813,21 +2813,29 @@ mod tests {
 
 	#[test]
 	fn gradle_dependencies_extracts_top_level() {
-		let input =
-			"> Task :app:dependencies\n\\
-			 n------------------------------------------------------------\nProject \
-			 ':app'\n------------------------------------------------------------\n\nimplementation \
-			 - Implementation dependencies for the 'main' feature.\n+--- \
-			 org.jetbrains.kotlin:kotlin-stdlib:1.9.22\n+--- androidx.core:core-ktx:1.12.0\n+--- \
-			 androidx.appcompat:appcompat:1.6.1\n|    +--- androidx.annotation:annotation:1.3.0\n|    \
-			 +--- androidx.core:core:1.9.0\n|    \\--- \
-			 androidx.cursoradapter:cursoradapter:1.0.0\n+--- \
-			 com.google.android.material:material:1.11.0\n|    +--- \
-			 androidx.annotation:annotation:1.2.0\n\\--- com.squareup.retrofit2:retrofit:2.9.0\n     \
-			 +--- com.squareup.okhttp3:okhttp:3.14.9\n     \\--- \
-			 com.squareup.okio:okio:1.17.2\n\ntestImplementation - Test dependencies for the 'main' \
-			 feature.\n+--- junit:junit:4.13.2\n\\--- org.mockito:mockito-core:5.8.0\n\nBUILD \
-			 SUCCESSFUL in 2s\n1 actionable tasks: 1 executed";
+		let input = concat!(
+			"> Task :app:dependencies\n",
+			"\n------------------------------------------------------------\n",
+			"Project ':app'\n",
+			"------------------------------------------------------------\n",
+			"\nimplementation - Implementation dependencies for the 'main' feature.\n",
+			"+--- org.jetbrains.kotlin:kotlin-stdlib:1.9.22\n",
+			"+--- androidx.core:core-ktx:1.12.0\n",
+			"+--- androidx.appcompat:appcompat:1.6.1\n",
+			"|    +--- androidx.annotation:annotation:1.3.0\n",
+			"|    +--- androidx.core:core:1.9.0\n",
+			"|    \\--- androidx.cursoradapter:cursoradapter:1.0.0\n",
+			"+--- com.google.android.material:material:1.11.0\n",
+			"|    +--- androidx.annotation:annotation:1.2.0\n",
+			"\\--- com.squareup.retrofit2:retrofit:2.9.0\n",
+			"     +--- com.squareup.okhttp3:okhttp:3.14.9\n",
+			"     \\--- com.squareup.okio:okio:1.17.2\n",
+			"\ntestImplementation - Test dependencies for the 'main' feature.\n",
+			"+--- junit:junit:4.13.2\n",
+			"\\--- org.mockito:mockito-core:5.8.0\n",
+			"\nBUILD SUCCESSFUL in 2s\n",
+			"1 actionable tasks: 1 executed",
+		);
 		let o = filter_gradle_dependencies(input);
 		assert!(o.contains("implementation (5):"), "config with count; got:\n{o}");
 		assert!(o.contains("testImplementation (2):"), "test config; got:\n{o}");
