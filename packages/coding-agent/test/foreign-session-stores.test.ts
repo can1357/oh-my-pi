@@ -131,6 +131,22 @@ async function loadClaudeModelHistory(models: string[]): Promise<SessionManager>
 }
 
 describe("ClaudeSessionStore", () => {
+	it("lists and imports the /rename title sidecar over the transcript's older title", async () => {
+		const { info, store } = await createClaudeFixture();
+		await Bun.write(
+			path.join(path.dirname(info.path), info.id, "custom-title.json"),
+			JSON.stringify({ customTitle: "Renamed session" }),
+		);
+
+		const listed = (await store.list()).find(item => item.id === info.id);
+		if (!listed) throw new Error("sidecar fixture was not listed");
+		expect(listed.title).toBe("Renamed session");
+		expect(listed.firstMessage).toBe("First prompt");
+		const manager = await store.load(listed);
+		expect(manager.getSessionName()).toBe("Renamed session");
+		expect(manager.titleSource).toBe("user");
+	});
+
 	it("lists an unindexed session at the cwd its transcript recorded", async () => {
 		const root = path.join(tempRoot, ".claude");
 		const cwd = path.join(tempRoot, "my-project.dir");

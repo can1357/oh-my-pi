@@ -65,6 +65,12 @@ fn mtime(p: &Path) -> std::time::SystemTime {
 	fs::metadata(p).unwrap().modified().unwrap()
 }
 
+/// The physical path of `dir`, resolved like `realpath`: `fs::canonicalize`
+/// spells Windows paths `\\?\…`, where `/` is not a separator.
+fn physical(dir: &Path) -> PathBuf {
+	pi_vfs::BlockingFs::native().canonicalize_with(dir, &pi_vfs::CanonicalizeOptions::default()).unwrap()
+}
+
 #[test]
 fn version_and_help_go_to_stdout() {
 	let dir = tempfile::tempdir().unwrap();
@@ -118,7 +124,7 @@ fn too_old_protocol_is_a_mismatch() {
 #[test]
 fn local_server_setup_failure_is_reported_once() {
 	let tmp = tempfile::tempdir().unwrap();
-	let dir = fs::canonicalize(tmp.path()).unwrap();
+	let dir = physical(tmp.path());
 	fs::create_dir_all(dir.join("src")).unwrap();
 	fs::write(dir.join("src/a"), b"a\n").unwrap();
 	// A file list far larger than the in-process pipe, so the client is still
@@ -134,7 +140,7 @@ fn local_server_setup_failure_is_reported_once() {
 		format!(
 			"rsync: [Receiver] mkdir \"{}/dst/new/deeper\" failed: No such file or directory (2)\n\
 			 rsync error: error in file IO (code 11) at main.c(821) [Receiver=3.5.1]\n",
-			dir.display()
+			String::from_utf8_lossy(&crate::rsync::paths::path_bytes(&dir))
 		)
 	);
 	let (code, _, err) = run(&["-ai", "--temp-dir=../nope", "src/", "dst2/"], &dir);
@@ -205,7 +211,7 @@ fn confine_root_leaves_roots_and_list_file_alone() {
 	let tmp = tempfile::tempdir().unwrap();
 	// Physical paths: the confine check (like the reference's) refuses a path
 	// that only reaches the root through an alias such as macOS's /var symlink.
-	let dir = fs::canonicalize(tmp.path()).unwrap();
+	let dir = physical(tmp.path());
 	let root = dir.join("X/root");
 	fs::create_dir_all(&root).unwrap();
 	fs::write(root.join("keep"), b"k\n").unwrap();
@@ -509,6 +515,10 @@ fn delete_removes_extraneous_files() {
 	assert_eq!(run(&["-a", "src/", "dst/"], dir.path()).0, 0);
 	fs::write(dir.path().join("dst/extra"), b"gone").unwrap();
 	fs::create_dir(dir.path().join("dst/olddir")).unwrap();
+	// Adding the extras bumped dst's mtime; restore src's so only the deletions are itemized
+	// rather than also `.d..t...... ./` whenever the writes crossed a timestamp tick.
+	let src_mtime = fs::metadata(&src).unwrap().modified().unwrap();
+	fs::set_times_nofollow(dir.path().join("dst"), fs::FileTimes::new().set_modified(src_mtime)).unwrap();
 	let (code, out, err) = run(&["-ai", "--delete", "src/", "dst/"], dir.path());
 	assert_eq!((code, err.as_str()), (0, ""));
 	assert_eq!(out, "*deleting   olddir/\n*deleting   extra\n");
@@ -736,6 +746,11 @@ fn batch_write_then_read_round_trip() {
 #[test]
 fn batch_read_by_reference_rsync() {
 	let Some(rsync) = reference() else { return };
+	// The batch file carries our protocol (33); an older reference refuses it.
+	let version = Command::new(&rsync).arg("--version").output().unwrap();
+	if !String::from_utf8_lossy(&version.stdout).contains("protocol version 33") {
+		return;
+	}
 	let dir = tempfile::tempdir().unwrap();
 	let src = dir.path().join("src");
 	make_tree(&src);
@@ -821,4 +836,66 @@ fn files_from_forwarding_collapses_lines() {
 	forward_files_from(src, &w, 31, false, Some(&implied), &AtomicBool::new(false)).unwrap();
 	assert_eq!(&*lock(&buf), b"a\0b/c\0last\0\0");
 	assert_eq!(lock(&implied).check(b"b/c", false), crate::rsync::filter::Verdict::Include);
+}
+
+/// A `--log-file` that cannot be opened is reported as rsync 3.5.1 reports
+/// it, and the copy goes on. Measured with rsync 3.5.1 under `LC_ALL=C`: a
+/// missing directory, a directory, and (not as root) a directory it may not
+/// write give the client `rsync: [client] failed to open log-file …` on
+/// stderr and `Ignoring "log file" setting.` on stdout, and a local copy's
+/// server half (`-M--log-file=`) both lines on stderr as `[Receiver]`; an
+/// empty name means syslog and prints nothing on either side. Before, the
+/// client named itself `[sender]`, and an empty name opened the current
+/// directory and failed with `Is a directory (21)`.
+#[cfg(unix)]
+#[test]
+fn a_log_file_that_cannot_be_opened_is_reported_as_rsync_does() {
+	use std::os::unix::fs::PermissionsExt;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	fs::create_dir_all(dir.path().join("adir")).unwrap();
+	fs::create_dir_all(dir.path().join("ro")).unwrap();
+	fs::set_permissions(dir.path().join("ro"), fs::Permissions::from_mode(0o555)).unwrap();
+	let d = dir.path().display().to_string();
+	let mut cases = vec![
+		("missing", format!("{d}/nope/x.log"), Some(format!("{d}/nope/x.log: No such file or directory (2)"))),
+		("dir", format!("{d}/adir"), Some(format!("{d}/adir: Is a directory (21)"))),
+		("empty", String::new(), None),
+	];
+	if !nix::unistd::geteuid().is_root() {
+		cases.push(("unwritable", format!("{d}/ro/x.log"), Some(format!("{d}/ro/x.log: Permission denied (13)"))));
+	}
+	for (case, path, failure) in cases {
+		for server in [false, true] {
+			let _ = fs::remove_dir_all(dir.path().join("dst"));
+			let arg = if server { format!("-M--log-file={path}") } else { format!("--log-file={path}") };
+			let (code, out, err) = run(&["-a", &arg, "src/", "dst/"], dir.path());
+			let (want_out, want_err) = match (&failure, server) {
+				(None, _) => (String::new(), String::new()),
+				(Some(why), false) => {
+					("Ignoring \"log file\" setting.\n".to_string(), format!("rsync: [client] failed to open log-file {why}\n"))
+				},
+				(Some(why), true) => (
+					String::new(),
+					format!("rsync: [Receiver] failed to open log-file {why}\nIgnoring \"log file\" setting.\n"),
+				),
+			};
+			assert_eq!((code, out, err), (0, want_out, want_err), "{case} server={server}");
+			assert_eq!(fs::read(dir.path().join("dst/sub/b")).unwrap(), b"x\n", "{case} server={server}");
+		}
+	}
+}
+
+/// The builtin run as a remote server (`--server`, as a client's remote
+/// shell starts it) names itself `[server]` when its `--log-file` cannot be
+/// opened, as rsync 3.5.1's remote server does while it is starting up.
+#[cfg(unix)]
+#[test]
+fn a_remote_server_names_itself_server_when_its_log_cannot_be_opened() {
+	let dir = tempfile::tempdir().unwrap();
+	let log = dir.path().join("nope/x.log");
+	let arg = format!("--log-file={}", log.display());
+	let (_, _, err) = run(&["--server", "-logDtpre.iLsfxCIvu", &arg, ".", "dst/"], dir.path());
+	let first = err.lines().next().unwrap_or_default();
+	assert_eq!(first, format!("rsync: [server] failed to open log-file {}: No such file or directory (2)", log.display()), "{err}");
 }

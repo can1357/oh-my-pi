@@ -45,6 +45,7 @@ import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
+	stripOpenAIResponsesInternalMetadataForReplay,
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
 	truncateResponseItemId,
 } from "@oh-my-pi/pi-ai/utils";
@@ -846,6 +847,9 @@ export function buildOpenAiNativeHistory(
 		msgIndex++;
 	}
 
+	for (let index = 0; index < input.length; index++) {
+		input[index] = stripOpenAIResponsesInternalMetadataForReplay(input[index]!);
+	}
 	return stripOpenAIResponsesOutputOnlyStatusesForReplay(hoistInterleavedResponsesToolBatchMessages(input));
 }
 
@@ -961,7 +965,6 @@ export async function requestOpenAiRemoteCompaction(
 		if (attestation) {
 			headers[OPENAI_HEADERS.ATTESTATION] = attestation;
 		}
-		headers[OPENAI_HEADERS.BETA] = OPENAI_HEADER_VALUES.BETA_RESPONSES;
 		headers[OPENAI_HEADERS.ORIGINATOR] = OPENAI_HEADER_VALUES.ORIGINATOR_CODEX;
 		// This compaction request sends no `service_tier`, so the hint is model-only.
 		headers[OPENAI_HEADERS.ROUTING_HINT] = codexRoutingHint(request.model, undefined);

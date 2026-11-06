@@ -22,10 +22,6 @@
 #![allow(clippy::trivially_copy_pass_by_ref, reason = "napi env idiom")]
 #![feature(alloc_error_hook)]
 
-// Match the host feature set of terminfo's phf generator.
-#[cfg(unix)]
-use phf_shared as _;
-
 pub mod appearance;
 pub mod applefm;
 pub mod ast;
@@ -42,6 +38,7 @@ pub mod file_lock;
 pub mod glob;
 pub mod grammars;
 pub mod grep;
+pub mod held_files;
 pub mod highlight;
 /// HDiffPatch single-stream binary patch application.
 pub mod hpatch;

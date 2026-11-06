@@ -22,12 +22,18 @@ Run from `packages/coding-agent/` (or add `--cwd=packages/coding-agent`):
 | Autofix: lint + format prompts | `bun run fix`         |
 | Build the `dist/omp` binary    | `bun run build`       |
 
-Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate. After
-changing export HTML/CSS/JS, web themes, or the shared tool/trace renderers, run
+Type checks use Bun's built-in checker (`bun check --no-script`); the explicit
+flag bypasses each package's `check` script. Stable TypeScript is retained only
+for publishing declarations and JavaScript, which `bun check` does not emit.
+Use `bun run check` for the full typecheck/lint gate.
+
+After changing export HTML/CSS/JS, web themes, or the shared tool/trace renderers, run
 `bun run gen:export-viewer` and include `src/export/html/viewer.generated.json`
 with the change. The generated JS lives in ignored `export-assets/`; CI verifies
 the committed metadata (`--check`, also implied by `CI=true`) and publishes the
-exact asset from the Linux binary build alongside the release binaries.
+exact asset from the Linux binary build alongside the release binaries. In a
+shell that sets `CI=true`, such as omp's bash tool, use
+`bun run gen:export-viewer --write` to update the metadata.
 
 Exports from a source checkout inline the generated viewer, so `bun gen:export-viewer`
 followed by `/export` exercises local changes without publishing or a local

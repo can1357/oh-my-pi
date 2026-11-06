@@ -419,7 +419,7 @@ export function symbolKindToName(kind: SymbolKind): string {
 export function formatDocumentSymbol(symbol: DocumentSymbol, indent = 0): string[] {
 	const prefix = "  ".repeat(indent);
 	const icon = symbolKindToIcon(symbol.kind);
-	const line = symbol.range.start.line + 1;
+	const line = symbol.selectionRange.start.line + 1;
 	const detail = symbol.detail ? ` ${symbol.detail}` : "";
 	const results = [`${prefix}${icon} ${symbol.name}${detail} @ line ${line}`];
 
@@ -684,7 +684,7 @@ export async function readLocationContext(filePath: string, line: number, contex
 		// Context is decoration: a special-file location keeps its header, like a missing file.
 		if (specialFileKind(await fs.stat(filePath))) return [];
 		const fileText = await Bun.file(filePath).text();
-		const lines = fileText.split("\n");
+		const lines = fileText.split(/\r?\n/);
 		if (lines.length === 0) return [];
 
 		const startLine = Math.max(1, targetLine - surrounding);

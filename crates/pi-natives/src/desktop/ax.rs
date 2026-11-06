@@ -691,6 +691,12 @@ pub fn snapshot(
 	Ok(AxSnapshot { text, node_count, truncated: state.truncated })
 }
 
+/// How many elements `find()` reads; bounds its work.
+const FIND_MAX_NODES: u32 = 5_000;
+/// How many levels below the window `find()` reads; bounds `walk_raw`'s
+/// recursion, deep enough for the levels Electron nests its content in.
+const FIND_MAX_DEPTH: u32 = 64;
+
 pub fn query(
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
@@ -700,7 +706,7 @@ pub fn query(
 	let target = &window.id;
 	let generation = registry.current_generation(target);
 	let root = backend.window_root(window)?;
-	let mut state = WalkState::new(5_000, 24, WalkBounds::Read);
+	let mut state = WalkState::new(FIND_MAX_NODES, FIND_MAX_DEPTH, WalkBounds::Read);
 	let Some(tree) = walk_raw(backend, root.clone(), 0, &mut state)? else {
 		return Ok(Vec::new());
 	};
@@ -823,8 +829,8 @@ pub fn refind(
 		return Ok(None);
 	}
 	let mut state = WalkState::new(
-		proof.walk.max_nodes.max(5_000),
-		proof.walk.max_depth.max(24),
+		proof.walk.max_nodes.max(FIND_MAX_NODES),
+		proof.walk.max_depth.max(FIND_MAX_DEPTH),
 		WalkBounds::Skip,
 	)
 	.cancellable();
@@ -917,6 +923,115 @@ pub fn normalize_role_atspi(native: &str, multiline: bool) -> String {
 		"frame" | "dialog" => "window".into(),
 		other => other.replace(' ', ""),
 	}
+}
+
+/// Refuses input to an iPhone Mirroring window that shows a connection screen
+/// ("Connection Paused", "iPhone in Use") instead of the phone: a picture of
+/// the phone with static text beside it. Reads at most three levels and 64
+/// nodes of the window, never the phone's content; a window it cannot read
+/// takes the input as before.
+#[cfg(any(target_os = "macos", test))]
+pub(super) fn require_phone_screen(
+	backend: &mut dyn AxBackend,
+	window: &DesktopWindow,
+) -> CoreResult<()> {
+	match connection_screen(backend, window) {
+		Ok(None) => Ok(()),
+		Ok(Some((text, buttons))) => {
+			let mut message = format!(
+				"window {} of {} is not showing the phone; no input was sent; connection state: \
+				 {text:?}",
+				window.id, window.app,
+			);
+			if !buttons.is_empty() {
+				let _ = write!(
+					message,
+					"; buttons: {}, pressed with press() on their element. Connecting needs the phone \
+					 locked and plays the phone's audio on this Mac, so do not press one while the \
+					 user is using the phone",
+					buttons.join(", "),
+				);
+			}
+			Err(DesktopError::input_failed(message))
+		},
+		Err(error) if error.code == ErrorCode::Cancelled => Err(error),
+		Err(_) => Ok(()),
+	}
+}
+
+/// The connection screen's text and titled buttons: the children of one
+/// element that holds an image and non-empty static text.
+#[cfg(any(target_os = "macos", test))]
+fn connection_screen(
+	backend: &mut dyn AxBackend,
+	window: &DesktopWindow,
+) -> CoreResult<Option<(String, Vec<String>)>> {
+	let root = backend.window_root(window)?;
+	// (role, label, parent) per node read; parent indexes this list, the root
+	// is `None`.
+	let mut nodes: Vec<(String, String, Option<usize>)> = Vec::new();
+	let mut pending: Vec<_> = backend
+		.children(&root)?
+		.into_iter()
+		.rev()
+		.map(|h| (h, 1, None))
+		.collect();
+	while nodes.len() < 64 {
+		let Some((handle, depth, parent)) = pending.pop() else {
+			break;
+		};
+		let (props, children) = backend.walk_node(&handle, WalkBounds::Skip)?;
+		let label = props
+			.value
+			.or(props.title)
+			.or(props.description)
+			.unwrap_or_default()
+			.split_whitespace()
+			.collect::<Vec<_>>()
+			.join(" ");
+		let index = nodes.len();
+		nodes.push((props.role, label, parent));
+		if depth < 3 {
+			pending.extend(
+				children
+					.into_iter()
+					.rev()
+					.map(|h| (h, depth + 1, Some(index))),
+			);
+		}
+	}
+	let labels = |parent: Option<usize>, role: &str| -> Vec<String> {
+		nodes
+			.iter()
+			.filter(|(r, label, p)| *p == parent && r == role && !label.is_empty())
+			.map(|(_, label, _)| label.clone())
+			.collect()
+	};
+	let mut parents: Vec<Option<usize>> = Vec::new();
+	for (_, _, parent) in &nodes {
+		if !parents.contains(parent) {
+			parents.push(*parent);
+		}
+	}
+	for parent in parents {
+		let text = labels(parent, "statictext");
+		let pictured = nodes
+			.iter()
+			.any(|(role, _, p)| *p == parent && role == "image");
+		if pictured && !text.is_empty() {
+			let text = text.join(" ");
+			let mut shown: String = text.chars().take(512).collect();
+			if text.chars().count() > 512 {
+				shown.push('…');
+			}
+			let buttons = labels(parent, "button")
+				.into_iter()
+				.map(|title| format!("{title:?}"))
+				.collect();
+			return Ok(Some((shown, buttons)));
+		}
+	}
+	Ok(None)
 }
 
 #[cfg(test)]
@@ -1073,6 +1188,133 @@ mod tests {
 			focused: true,
 		}
 	}
+	fn text(value: &str) -> AxProps {
+		AxProps { value: Some(value.into()), ..p("statictext", None) }
+	}
+
+	#[test]
+	fn phone_screen_refuses_a_connection_screen_quoting_it_and_its_buttons() {
+		// The localized "Connecting" shape: the picture after the text.
+		let mut m = Mock {
+			props: [
+				(2, p("group", None)),
+				(3, text("  Connexion\n suspendue ")),
+				(4, text(" Verrouillez   votre iPhone. ")),
+				(5, p("button", Some("Reprendre"))),
+				(6, p("image", Some("Background"))),
+			]
+			.into(),
+			children: [(1, vec![2]), (2, vec![3, 4, 5, 6])].into(),
+			..Default::default()
+		};
+		let error = require_phone_screen(&mut m, &window()).unwrap_err();
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert!(
+			error
+				.message
+				.contains("\"Connexion suspendue Verrouillez votre iPhone.\""),
+			"{}",
+			error.message
+		);
+		assert!(error.message.contains("buttons: \"Reprendre\""), "{}", error.message);
+		assert_eq!(m.root_reads, 1);
+		assert_eq!(m.bounds_reads, 0);
+	}
+
+	#[test]
+	fn phone_screen_allows_bare_window() {
+		assert!(require_phone_screen(&mut Mock::default(), &window()).is_ok());
+	}
+
+	#[test]
+	fn phone_screen_allows_the_settings_window_and_blank_text() {
+		// iPhone Mirroring Settings: text and buttons, no picture.
+		let mut settings = Mock {
+			props: [
+				(2, p("scrollarea", None)),
+				(3, p("group", None)),
+				(4, text("Require Mac login to access iPhone:")),
+				(5, p("group", None)),
+				(6, p("button", Some("Revoke Access…"))),
+				(7, text("iPhone Mirroring Settings")),
+			]
+			.into(),
+			children: [(1, vec![2, 7]), (2, vec![3, 5]), (3, vec![4]), (5, vec![6])].into(),
+			..Default::default()
+		};
+		assert!(require_phone_screen(&mut settings, &window()).is_ok());
+		let mut blank = Mock {
+			props: [(2, p("group", None)), (3, p("image", None)), (4, text("  "))].into(),
+			children: [(1, vec![2]), (2, vec![3, 4])].into(),
+			..Default::default()
+		};
+		assert!(require_phone_screen(&mut blank, &window()).is_ok());
+	}
+
+	#[test]
+	fn phone_screen_lets_input_through_when_the_window_cannot_be_read() {
+		let mut m = Mock {
+			props: [(2, p("group", None)), (3, p("image", None)), (4, text("Timed Out"))].into(),
+			children: [(1, vec![2]), (2, vec![3, 4])].into(),
+			destroyed: [2].into(),
+			..Default::default()
+		};
+		assert!(require_phone_screen(&mut m, &window()).is_ok());
+	}
+
+	#[test]
+	fn phone_screen_stops_input_when_the_window_read_is_cancelled() {
+		struct CancelledRoot(Mock);
+		impl AxBackend for CancelledRoot {
+			fn window_root(&mut self, _: &DesktopWindow) -> CoreResult<AxHandle> {
+				Err(DesktopError::cancelled("test root lookup cancelled"))
+			}
+
+			fn window_id(&mut self, h: &AxHandle, windows: &[DesktopWindow]) -> CoreResult<String> {
+				self.0.window_id(h, windows)
+			}
+
+			fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
+				self.0.props(h)
+			}
+
+			fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>> {
+				self.0.children(h)
+			}
+
+			fn parent(&mut self, h: &AxHandle) -> CoreResult<Option<AxHandle>> {
+				self.0.parent(h)
+			}
+
+			fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()> {
+				self.0.perform(h, action)
+			}
+
+			fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
+				self.0.set_value(h, value)
+			}
+
+			fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
+				self.0.focus(h)
+			}
+
+			fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>> {
+				self.0.element_at(x, y)
+			}
+
+			fn focused_element(&mut self) -> CoreResult<Option<AxHandle>> {
+				self.0.focused_element()
+			}
+
+			fn attributes(&mut self, h: &AxHandle) -> CoreResult<Vec<(String, String)>> {
+				self.0.attributes(h)
+			}
+		}
+		let mut m = CancelledRoot(Mock::default());
+		let error = require_phone_screen(&mut m, &window()).unwrap_err();
+		assert_eq!(error.code, ErrorCode::Cancelled);
+	}
+
 	#[test]
 	fn generations_keep_current_and_previous() {
 		let mut m = Mock::default();
@@ -1366,39 +1608,61 @@ mod tests {
 		assert_eq!(result.err().map(|error| error.code), Some(ErrorCode::Cancelled));
 		assert_eq!(m.root_reads, reads);
 	}
-	/// A window with a "Go" button, node 100, 31 levels down: past the 24
-	/// `find()` reads.
-	fn deep_go() -> Mock {
+	/// A window with a "Go" button, node 1000, `depth` levels down.
+	fn deep_go(depth: u32) -> Mock {
+		let depth = u64::from(depth);
 		let mut m = Mock {
-			props: [(1, p("window", Some("Title"))), (100, p("button", Some("Go")))].into(),
+			props: [(1, p("window", Some("Title"))), (1_000, p("button", Some("Go")))].into(),
 			..Default::default()
 		};
-		for group in 2..=31 {
+		for group in 2..=depth {
 			m.props.insert(group, p("group", None));
 			m.children.insert(group - 1, vec![group]);
 		}
-		m.children.insert(31, vec![100]);
+		m.children.insert(depth, vec![1_000]);
 		m
 	}
-	/// The app destroys the deep button `old` and puts an identical `new` in
-	/// its place.
-	fn rebuild_deep(m: &mut Mock, old: u64, new: u64) {
+	/// The app destroys the button `old` `depth` levels down and puts an
+	/// identical `new` in its place.
+	fn rebuild_deep(m: &mut Mock, depth: u32, old: u64, new: u64) {
 		m.destroyed.insert(old);
 		m.props.insert(new, p("button", Some("Go")));
-		m.children.insert(31, vec![new]);
+		m.children.insert(u64::from(depth), vec![new]);
+	}
+	#[test]
+	fn find_reaches_content_as_deep_as_electron_nests_it() {
+		// Deeper than `ax()` reads by default, as Electron nests its content.
+		let mut m = deep_go(31);
+		let mut registry = AxRegistry::default();
+		let buttons = AxQuery { role: Some("button".into()), ..Default::default() };
+		let found = query(&mut m, &mut registry, &window(), &buttons).unwrap();
+		assert_eq!(
+			found
+				.iter()
+				.map(|node| node.title.as_deref())
+				.collect::<Vec<_>>(),
+			[Some("Go")]
+		);
+		let mut m = deep_go(FIND_MAX_DEPTH + 1);
+		assert!(
+			query(&mut m, &mut registry, &window(), &buttons)
+				.unwrap()
+				.is_empty()
+		);
 	}
 	#[test]
 	fn a_ref_from_a_read_deeper_than_find_reads_is_searched_as_deep() {
-		let mut m = deep_go();
+		let depth = FIND_MAX_DEPTH + 7;
+		let mut m = deep_go(depth);
 		let mut registry = AxRegistry::default();
-		let options = AxSnapshotOptions { max_depth: Some(40), ..Default::default() };
+		let options = AxSnapshotOptions { max_depth: Some(depth + 9), ..Default::default() };
 		let read = snapshot(&mut m, &mut registry, &window(), &options).unwrap();
 		assert!(!read.truncated && read.text.contains("\"Go\" [ref=e2]"), "{}", read.text);
-		rebuild_deep(&mut m, 100, 101);
+		rebuild_deep(&mut m, depth, 1_000, 1_001);
 		let found = refind(&mut m, &mut registry, &window(), "e2")
 			.unwrap()
 			.expect("the one copy");
-		assert!(matches!(registry.resolve(&found).unwrap(), AxHandle::Test(101)));
+		assert!(matches!(registry.resolve(&found).unwrap(), AxHandle::Test(1_001)));
 	}
 	#[test]
 	fn a_read_that_missed_part_of_the_window_cannot_make_a_ref_refindable() {

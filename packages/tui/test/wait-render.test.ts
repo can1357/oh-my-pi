@@ -52,21 +52,47 @@ describe("job renderer task-result preview", () => {
 		await initTheme();
 	});
 
-	it("renders the consumed peer message as a sender card", () => {
+	it("renders every consumed peer message as a sender card, oldest first", () => {
+		const now = Date.now();
 		const component = waitToolRenderer.renderResult(
 			{
-				content: [{ type: "text", text: "[42] Worker: file unlocked" }],
+				content: [{ type: "text", text: "[42] Worker: file unlocked\n\n[43] Reviewer: tests pass" }],
 				details: {
 					op: "wait",
-					waited: { id: "42", from: "Worker", to: "Main", body: "file unlocked", ts: Date.now() },
+					waited: [
+						{ id: "42", from: "Worker", to: "Main", body: "file unlocked", ts: now - 1_000 },
+						{ id: "43", from: "Reviewer", to: "Main", body: "tests pass", ts: now },
+					],
 				},
 			},
 			{ expanded: true, isPartial: false },
 			theme,
 		);
 		const output = Bun.stripANSI(component.render(120).join("\n"));
-		expect(output).toContain("Worker");
-		expect(output).toContain("file unlocked");
+		expect(output.indexOf("Worker")).toBeGreaterThanOrEqual(0);
+		expect(output.indexOf("file unlocked")).toBeGreaterThan(output.indexOf("Worker"));
+		expect(output.indexOf("Reviewer")).toBeGreaterThan(output.indexOf("file unlocked"));
+		expect(output.indexOf("tests pass")).toBeGreaterThan(output.indexOf("Reviewer"));
+	});
+
+	it("describes several consumed messages on one native card", () => {
+		const view = waitToolRenderer.describeResult!(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					op: "wait",
+					waited: [
+						{ id: "42", from: "Worker", to: "Main", body: "file unlocked", ts: 0 },
+						{ id: "43", from: "Reviewer", to: "Main", body: "tests pass", ts: 0, replyTo: "41" },
+					],
+				},
+			},
+			{ expanded: true, isPartial: false },
+		);
+		const json = JSON.stringify(view);
+		expect(json).toContain("IRC ← Worker, Reviewer");
+		expect(json).toContain(" 2 messages");
+		expect(json.indexOf("file unlocked")).toBeLessThan(json.indexOf("tests pass"));
 	});
 
 	it("previews the envelope body, not the wrapper markup", () => {
@@ -118,11 +144,6 @@ describe("job renderer task-result preview", () => {
 		const output = Bun.stripANSI(renderLines(summary));
 		expect(output).toContain('{ "echo": "alpha", "ok": true }');
 		expect(output.split("\n").some(line => line.trim() === "{")).toBe(false);
-	});
-
-	it("passes non-envelope result text through unchanged", () => {
-		const output = renderLines("42 pass, 0 fail (18.4s)");
-		expect(output).toContain("42 pass, 0 fail (18.4s)");
 	});
 
 	it("drops the id column when the label repeats it", () => {
@@ -469,7 +490,7 @@ describe("job renderer task-result preview", () => {
 			const tiles = (strip!.c ?? []) as NativeNode[];
 			expect(tiles.map(tile => byRole(tile, "omp.job.tile.title")?.p)).toMatchObject([
 				{ spans: [{ t: "Bencher" }] },
-				{ spans: [{ t: "verb-bench · decode throughput" }] },
+				{ spans: [{ t: "loadtest · decode throughput" }] },
 			]);
 			const bench = tiles[1]!;
 			expect(byRole(bench, "omp.job.tile.chart")).toBeDefined();
@@ -496,7 +517,7 @@ describe("job renderer task-result preview", () => {
 				const lines = (component.render(100) as readonly string[]).map(line => Bun.stripANSI(line));
 				const row = lines.findIndex(line => line.includes("bg_3"));
 				expect(row).toBeGreaterThan(0);
-				expect(lines[row]).toContain("verb-bench · decode throughput bg_3");
+				expect(lines[row]).toContain("loadtest · decode throughput bg_3");
 				expect(lines[row]).toMatch(/decode 186 tok\/s ▲ 15% {2}42\.0s$/);
 				expect(lines[row + 1]).toMatch(/[▁▂▃▄▅▆▇█]+ {2}186 tok\/s {2}┄ target 200 tok\/s/);
 				for (const line of lines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(100);

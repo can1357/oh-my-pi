@@ -40,6 +40,7 @@
    - `packages/coding-agent/src/web/search/providers/ollama.ts` — Ollama web search adapter.
    - `packages/coding-agent/src/web/search/providers/tavily.ts` — Tavily search adapter.
    - `packages/coding-agent/src/web/search/providers/tinyfish.ts` — TinyFish search adapter.
+   - `packages/coding-agent/src/web/search/providers/keenable.ts` — Keenable search adapter (keyed or keyless public endpoint).
    - `packages/coding-agent/src/web/search/providers/xai.ts` — xAI Responses web and X search adapter.
    - `packages/coding-agent/src/web/search/providers/zai.ts` — Z.AI remote MCP adapter.
    - `packages/coding-agent/src/web/parallel.ts` — Parallel search/extract HTTP client.
@@ -51,7 +52,7 @@
 | Field                | Type                                   | Required | Description                                                                                                                                                                                                                                                                                                            |
 | -------------------- | -------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `query`              | `string`                               | Yes      | Raw query. The parser recognizes `site:`/`-site:`, `after:`/`before:`, `inurl:`, `intitle:`, `intext:`, `filetype:`, `lang:`/`language:`, quoted phrases, exclusions, `OR`, and directive aliases. Providers map these to native filters or supported syntax; body/language directives are not central source filters. |
-| `recency`            | `"day" \| "week" \| "month" \| "year"` | No       | Relative time filter. Implemented by Brave, DeepSeek, Perplexity, Parallel, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek. Public Web forwards it to its engines; other adapters ignore it.                                                                                    |
+| `recency`            | `"day" \| "week" \| "month" \| "year"` | No       | Relative time filter. Implemented by Brave, DeepSeek, Perplexity, Parallel, Tavily, SearXNG, Kagi, TinyFish, Keenable, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek. Public Web forwards it to its engines; other adapters ignore it.                                                                                    |
 | `limit`              | `number`                               | No       | Max results to return. Usually becomes the provider request's result-count parameter when `num_search_results` is absent. TinyFish uses it for paginated fetches before slicing. xAI uses the collapsed value only as a local cap on parsed sources/citations, defaulting to `10` and max `30`.                        |
 | `max_tokens`         | `number`                               | No       | Token cap passed through by Anthropic, Gemini, OpenAI Responses, xAI, and Perplexity API-key mode. Ignored by the other providers.                                                                                                                                                                                     |
 | `temperature`        | `number`                               | No       | Passed through only by Anthropic models that support sampling parameters, Gemini, xAI, and Perplexity API-key mode. Ignored or omitted by the other provider/model paths.                                                                                                                                              |
@@ -67,6 +68,7 @@ The tool returns a single text content block plus structured `details`.
 - `details`: `SearchResultDetails` from `packages/coding-agent/src/web/search/types.ts`
    - `response: SearchResponse`
    - `error?: string`
+   - `failures?: SearchFailureDetail[]`: the candidates that failed, in chain order, on a fallback answer and on the all-failed result; absent when nothing failed. Each entry is `{ provider, label, reason, status? }`: `provider` is the search provider id (the catalog model id when the provider never loaded), `reason` the flattened, 240-character-capped text the fallback note quotes, and `status` the `SearchProviderError` status when it carries one (`204` marks an answer rejected for having no sources or renderable content)
 
 `text` is produced by `formatForLLM()` in `packages/coding-agent/src/web/search/index.ts`. Notes about relaxed query constraints are emitted first:
 
@@ -84,6 +86,7 @@ Failure output is not thrown at the tool boundary when providers are unavailable
 - `content[0].text = "Error: ..."`
 - `details.response.provider = <last attempted provider> | "none"`
 - `details.error = ...`
+- `details.failures = [...]`, one entry per failed candidate (absent when no model matched, since nothing ran)
 
 Streaming: none. `WebSearchTool.execute()` forwards its `AbortSignal` into `executeSearch()`, and `executeSearch()` passes it to providers. If the signal is aborted during fallback handling, `throwIfAborted(signal)` rethrows the cancellation instead of returning an `"Error: ..."` text result.
 
@@ -196,6 +199,11 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - Availability: `TINYFISH_API_KEY` or `agent.db` credential for `tinyfish`.
       - Querying: GET `https://api.search.tinyfish.ai` with `X-API-Key` and `query`; `recency` maps to `recency_minutes`.
       - `limit` / `num_search_results`: collapsed, clamped to `1..20`, default `10`; sends `num_results=min(count,10)` per page and paginates from `page=0` through at most `page=10`, stopping on a short page or enough unique URLs, then slices locally. `lang:it-it` maps to `language=it`, `location=IT`. Output `sources`, `authMode: "api_key"`.
+   - **Keenable** — `packages/coding-agent/src/web/search/providers/keenable.ts`
+      - Availability: the auto chain admits it only with `KEENABLE_API_KEY` or a configured/stored `keenable` credential. An explicit `web/keenable` selection always runs: without a key it calls the keyless public endpoint (rate limited per IP, no account). A configured credential that fails to resolve errors instead of downgrading to the public endpoint.
+      - Querying: POST `https://api.keenable.ai/v1/search` with `X-API-Key`, or POST `https://api.keenable.ai/v1/search/public` with `X-Keenable-Title: oh-my-pi` when no key resolves. Body `{ query, max_results }`; a single `site:` host maps to `site`, `after:`/`before:` map to `published_after`/`published_before`, and `recency` becomes a relative `published_after` (`1d`, `7d`, `1mo`, `1y`) unless the query already has an `after:` bound. Quoted phrases are kept; other directives are left to the post-filter. A directives-only query searches its constraint values (site hosts, `intitle:` words) as keywords; a date-only query is rejected.
+      - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..50`, default `10`.
+      - Output: `sources` (snippet from `snippet`, `published_at` as `publishedDate`), `authMode: "api_key"` or `"anonymous"`.
    - **Jina** — `packages/coding-agent/src/web/search/providers/jina.ts`
       - Availability: `JINA_API_KEY` or a configured/stored `jina` credential.
       - Querying: GET `https://s.jina.ai/<encoded query>?count=<count>` with bearer auth and JSON/no-content headers. A single `site:` host maps to `X-Site`; multiple sites remain inline.
@@ -297,6 +305,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - `formatForLLM()` emits at most 3 search queries, each truncated to 120 chars (`packages/coding-agent/src/web/search/index.ts`).
 - Brave result count: default `10`, max `20` (`DEFAULT_NUM_RESULTS`, `MAX_NUM_RESULTS` in `packages/coding-agent/src/web/search/providers/brave.ts`).
 - DeepSeek result count: default `10`, max `50`; query length max `128` characters (`packages/coding-agent/src/web/search/providers/deepseek.ts`).
+- Keenable result count: default `10`, max `50` (`packages/coding-agent/src/web/search/providers/keenable.ts`).
 - TinyFish count: default `10`, max `20`; sends at most `10` results per page, fetching pages `0..10` until enough unique sources or a short page.
 - Jina count: default `5`, max `20`; OpenRouter plugin breadth: default `5`.
 - DuckDuckGo result count: default `10`, max `20` (`packages/coding-agent/src/web/search/providers/duckduckgo.ts`).
@@ -333,7 +342,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - The model-facing schema does not expose a provider or model; CLI/internal callers can pin one through `SearchQueryParams.model`.
 - `executeSearch()` loads provider modules lazily as the chain reaches them. Provider instances are cached per id (`packages/coding-agent/src/web/search/provider.ts`), and asking for labels via `getSearchProviderLabel()` does not trigger imports.
 - Most providers treat `limit` and `num_search_results` as the same number because adapters pass `params.numSearchResults ?? params.limit`. Perplexity preserves both concepts. TinyFish uses the collapsed value as a local cap, serializes `num_results` per page, and paginates when more results are needed. xAI uses it only to cap parsed sources/citations (`10` default, `30` max).
-- `recency` has native or engine-query mappings in Brave, DeepSeek, Perplexity, Parallel, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek. xAI retains absolute query dates as hints but ignores the separate recency field; Ecosia ignores it. Public Web forwards the request to its engines.
+- `recency` has native or engine-query mappings in Brave, DeepSeek, Perplexity, Parallel, Tavily, SearXNG, Kagi, TinyFish, Keenable, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek. xAI retains absolute query dates as hints but ignores the separate recency field; Ecosia ignores it. Public Web forwards the request to its engines.
 - `SEARCH_PROVIDER_LABELS` in `packages/tui/src/tools/web-search-types.ts` is the id→label registry for every search implementation (engines and groundings); provider ids, `SearchResponse`, and the transcript renderer all derive from it. Selection itself lives only in the `web` model role.
 - The credential-free scrapers close the auto chain: Startpage and DuckDuckGo precede the browser-backed Ecosia, Google, and Mojeek paths; `public` is listed last and never auto-selected.
 - `/login exa` stores the pasted key in AuthStorage; Exa resolves stored or environment credentials before the unauthenticated `https://mcp.exa.ai/mcp` fallback.
