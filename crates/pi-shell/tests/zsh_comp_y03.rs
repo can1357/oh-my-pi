@@ -578,9 +578,19 @@ const CASES: &[Case] = &[
 			),
 			Test(
 				"tst \t a -\t",
-				"line: {tst \
-				 }{}\nDESCRIPTION:{letter}\nNO:{a}\nNO:{b}\nDESCRIPTION:{number}\nNO:{1}\nNO:{2}\\
-				 nline: {tst  a -}{}\nDESCRIPTION:{option}\nNO:{-e}\nNO:{-o}",
+				concat!(
+					"line: {tst }{}\n",
+					"DESCRIPTION:{letter}\n",
+					"NO:{a}\n",
+					"NO:{b}\n",
+					"DESCRIPTION:{number}\n",
+					"NO:{1}\n",
+					"NO:{2}\n",
+					"line: {tst  a -}{}\n",
+					"DESCRIPTION:{option}\n",
+					"NO:{-e}\n",
+					"NO:{-o}",
+				),
 			),
 		],
 	},

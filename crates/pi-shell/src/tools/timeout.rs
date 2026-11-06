@@ -322,7 +322,7 @@ impl Timeout {
 			Phase::Start(opts) => {
 				self
 					.child
-					.start(api, turn, &self.call, opts.command.clone(), false, "");
+					.start(api, turn, &self.call, opts.command.clone(), false, &[]);
 				let deadline = opts.limit.map(|d| now.saturating_add(nanos(d)));
 				Phase::Running { opts, deadline }
 			},

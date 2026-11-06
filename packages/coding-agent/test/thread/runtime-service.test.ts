@@ -213,6 +213,19 @@ describe("runtime thread services: cost gate, event bus, artifacts, storage", ()
 		expect(gate.check()?.cap).toBe(1);
 	});
 
+	it("enforces a cap set on main after a worker saw the tree uncapped", async () => {
+		const settings = Settings.isolated();
+		const gate = new CostGate(settings, 0, () => {});
+		const probe = await startWorker();
+		expect(await probe("cost", gate, 2)).toEqual({ spent: 2, capped: false, capError: false });
+
+		// Settings listeners run a microtask after the write; the cap push they send then reaches
+		// the worker ahead of this probe call (frames are ordered).
+		cfgSessionMaxCost.override(settings, 1);
+		await Promise.resolve();
+		expect(await probe("cost", gate, 0)).toEqual({ spent: 2, capped: true, capError: true });
+	});
+
 	it("delivers worker frames to main listeners once and worker listeners receive main frames", async () => {
 		const bus = new EventBus();
 		const other = new EventBus();

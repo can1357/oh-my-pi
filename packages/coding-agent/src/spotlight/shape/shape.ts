@@ -56,8 +56,11 @@ import {
 	witnessedRuns,
 } from "./window";
 
-/** The probe Spotlight scores output lines under: each line's relevance to the agent's current call. */
-export const SHAPE_PROBE: string = shapeProbe;
+/**
+ * The probe Spotlight scores output lines under: each line's relevance to the agent's current call.
+ * Each line is appended right after it, so trailing whitespace (an editor's final newline) is trimmed.
+ */
+export const SHAPE_PROBE: string = shapeProbe.trimEnd();
 
 /** The system-prompt paragraph telling the agent how shaped output reads (read narrowly, batch calls). */
 export const SHAPE_RULE: string = shapeRule.trim();

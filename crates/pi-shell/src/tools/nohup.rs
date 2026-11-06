@@ -90,7 +90,7 @@ impl Nohup {
 		turn: &mut Turn<'_>,
 	) -> Option<CallOutcome> {
 		if let Some(command) = self.command.take() {
-			self.child.start(api, turn, &self.call, command, true, "");
+			self.child.start(api, turn, &self.call, command, true, &[]);
 		}
 		let code = self.exit.or(self.child.status)?;
 		self.out.flush(api).then_some(CallOutcome::Exit(code))

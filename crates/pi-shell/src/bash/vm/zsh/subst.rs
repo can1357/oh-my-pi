@@ -1795,7 +1795,7 @@ pub fn strmetasort(
 		.iter()
 		.map(|s| {
 			let k = key(s);
-			let c = coll.map(|c| c.key(&k)).unwrap_or_default();
+			let c = coll.map_or_default(|c| c.key(&k));
 			(k, c, s.clone())
 		})
 		.collect();
@@ -2907,26 +2907,24 @@ fn paramsubst(
 				}
 			},
 			b'?' | QUEST => {
-				if ps.vunset != 0 {
-					if opt(ex, ZshOpt::Exec)? {
-						let msg = if sbody.is_empty() {
-							BString::from("parameter not set")
-						} else {
-							let mut m = singsub(ex, sbody)?;
-							untokenize(&mut m);
-							BString::from(unmetafy(&m))
-						};
-						// zsh: an interactive shell goes back to its prompt;
-						// any other shell exits.
-						if opt(ex, ZshOpt::Interactive)? {
-							return Err(Stop::Fail(Diag::ParamUnset { name: idname, msg }));
-						}
-						return Err(Stop::Fatal(Diag::ParamUnset { name: idname, msg }));
+				if ps.vunset != 0 && opt(ex, ZshOpt::Exec)? {
+					let msg = if sbody.is_empty() {
+						BString::from("parameter not set")
+					} else {
+						let mut m = singsub(ex, sbody)?;
+						untokenize(&mut m);
+						BString::from(unmetafy(&m))
+					};
+					// zsh: an interactive shell goes back to its prompt;
+					// any other shell exits.
+					if opt(ex, ZshOpt::Interactive)? {
+						return Err(Stop::Fail(Diag::ParamUnset { name: idname, msg }));
 					}
-					// `NO_EXEC`: zsh's `paramsubst` gives up on the word
-					// without an error; nothing runs it, so the (empty)
-					// value goes on unreported.
+					return Err(Stop::Fatal(Diag::ParamUnset { name: idname, msg }));
 				}
+				// `NO_EXEC`: zsh's `paramsubst` gives up on the word
+				// without an error; nothing runs it, so the (empty)
+				// value goes on unreported.
 			},
 			_ => {
 				// `%`, `#`, `/`: pattern operations.
@@ -4097,6 +4095,10 @@ fn assign_target(unit: &crate::bash::ir::Unit, a: &crate::bash::ir::AssignOp) ->
 	name
 }
 
+/// A `GLOB_ASSIGN` value waiting for filename generation: the value and
+/// its glob (see [`assign_scalar`]).
+pub type GlobAssign = (Vec<BString>, Vec<(u32, BString)>);
+
 /// A zsh scalar assignment statement `name=word` / `name[sub]=word` /
 /// `name+=word` (zsh `addvars` with `PREFORK_SINGLE|PREFORK_ASSIGN`, then
 /// `assignsparam`). Under `GLOB_ASSIGN` a value with wildcards goes
@@ -4111,7 +4113,7 @@ pub fn assign_scalar(
 	unit: &crate::bash::ir::Unit,
 	a: &crate::bash::ir::AssignOp,
 	shown: Option<&mut BString>,
-) -> X<Option<(Vec<BString>, Vec<(u32, BString)>)>> {
+) -> X<Option<GlobAssign>> {
 	let crate::bash::ir::AssignVal::Scalar(w) = a.value else {
 		return Ok(None);
 	};

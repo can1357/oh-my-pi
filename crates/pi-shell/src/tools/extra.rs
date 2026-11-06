@@ -36,11 +36,11 @@ use bstr::{BString, ByteSlice};
 use pi_builtins::extras::{CommandRunner, CommandStatus, EnvChange, Fd, ShellCommand};
 use tokio_util::sync::CancellationToken;
 
-use super::{Child, ToolConfig, Turn, quote, quote_words};
+use super::{Child, ToolConfig, Turn};
 use crate::{
 	bash::{
-		CallOutcome, IntrinsicId, Lineage, ModeId, RunId, RunStdio, Script, ShellApi, ToolCall,
-		VprocSel,
+		CallOutcome, IntrinsicId, Launch, LaunchHow, Lineage, ModeId, RunId, RunStdio, Script,
+		ShellApi, ToolCall, VprocSel,
 	},
 	extras::Done,
 	sys::StdFile,
@@ -205,11 +205,20 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 						source.extend_from_slice(b" 2>/dev/null; ");
 					}
 				}
+				// The tool profile has no `compgen`: every variable name comes
+				// from `${!X@}` over each possible first character, and every
+				// function from `declare -F` (`declare -f[x…] name` lines).
+				source.extend_from_slice(b"for __pi_var in");
+				for first in (b'A'..=b'Z').chain(b'a'..=b'z').chain(*b"_") {
+					source.extend_from_slice(b" ${!");
+					source.push(first);
+					source.extend_from_slice(b"@}");
+				}
 				source.extend_from_slice(
-					b"for __pi_var in $(compgen -v); do unset -v \"$__pi_var\" 2>/dev/null \
+					b"; do unset -v \"$__pi_var\" 2>/dev/null \
 					  || export -n \"$__pi_var\" 2>/dev/null; done; unset -v __pi_var; \
-					  for __pi_fn in $(compgen -A function); do unset -f \"$__pi_fn\"; done; \
-					  unset -v __pi_fn; ",
+					  while read -r _ _ __pi_fn; do [ -n \"$__pi_fn\" ] && unset -f \"$__pi_fn\"; \
+					  done <<< \"$(declare -F)\"; unset -v __pi_fn; ",
 				);
 			},
 			EnvChange::Remove(name) if is_name(name) => {
@@ -233,23 +242,28 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 		}
 	}
 	let mut args: Vec<BString> = command.args().iter().map(|arg| os_bytes(arg)).collect();
-	match program {
-		Program::Builtin => source.extend_from_slice(b"command --"),
+	// The operand's words, how they run, the fds its command duplicates
+	// and the text the shell shows for them go to the engine as data
+	// ([`Script::launch`]), not into the synthetic source and not as
+	// positional parameters: the subshell keeps the caller's parameters,
+	// the command that runs them is one the engine builds with no word in
+	// it, and no `command` or `exec` word is there for a caller's function
+	// or alias of that name to take.
+	let how = match program {
+		Program::Builtin => LaunchHow::Builtin,
 		Program::Path(path) => {
 			let argv0 = command
 				.presented_argv0()
 				.map_or_else(|| args[0].clone(), os_bytes);
-			source.extend_from_slice(b"exec -a ");
-			quote(&mut source, &argv0);
-			source.extend_from_slice(b" --");
 			args[0] = os_bytes(path.as_os_str());
+			LaunchHow::Exec { argv0 }
 		},
-	}
-	// The operand's words go into the synthetic source quoted, so the
-	// subshell's positional parameters stay the caller's ([`quote_words`]).
-	source.push(b' ');
-	quote_words(&mut source, &args);
+	};
 	let mut script = Script::command(source);
+	script.launch = Some(Launch { argv: args, how, dups: Vec::new() });
+	// The environment sweep above is the engine's own text, parsed without
+	// the caller's aliases and resolved without its functions.
+	script.engine_source = true;
 	script.foreign_env = foreign_env;
 	script.unexport_env = unexport_env;
 	// The working directory is logical, as after `cd`: `-execdir` hands over
@@ -277,6 +291,19 @@ fn child_stdin(stdin: Option<Fd>) -> RunStdio {
 
 fn os_bytes(s: &OsStr) -> BString {
 	BString::from(s.as_encoded_bytes())
+}
+
+/// Append `word` single-quoted.
+fn quote(out: &mut Vec<u8>, word: &[u8]) {
+	out.push(b'\'');
+	for &c in word {
+		if c == b'\'' {
+			out.extend_from_slice(b"'\\''");
+		} else {
+			out.push(c);
+		}
+	}
+	out.push(b'\'');
 }
 
 /// A shell variable name.

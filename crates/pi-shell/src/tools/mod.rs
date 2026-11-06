@@ -40,8 +40,8 @@ use parking_lot::Mutex;
 
 use crate::{
 	bash::{
-		CallId, CallOutcome, ControlHandle, Cx, IoPoll, Lineage, NativeRef, RunId, Script, Shell,
-		ShellApi, ToolCall, ToolRef,
+		CallId, CallOutcome, ControlHandle, Cx, IoPoll, Launch, LaunchHow, Lineage, NativeRef, RunId,
+		Script, Shell, ShellApi, ToolCall, ToolRef,
 	},
 	extras::{ExtrasGate, ReportedError},
 	git::{GitLayers, flag_on},
@@ -331,9 +331,17 @@ struct Child {
 }
 
 impl Child {
-	/// Run `argv` (as its own words, so functions, builtins and externals
-	/// run as anywhere) in a subshell of the caller under a fresh label;
-	/// `redirect` is appended to the command (`>&2`).
+	/// Run `argv` (so functions, builtins and externals run as anywhere) in
+	/// a subshell of the caller under a fresh label; `dups` are the fd
+	/// duplications the command carries (`(1, 2)`: its output goes to the
+	/// caller's stderr).
+	///
+	/// The words, their dispatch and those duplications go to the engine
+	/// as data ([`Script::launch`]), not as the subshell's positional
+	/// parameters and not as text of its source, so the subshell keeps the
+	/// caller's parameters, every callout of the same shape runs the same
+	/// engine-built command, and nothing a caller can name, alias or
+	/// shadow stands between the shell and the operand.
 	fn start(
 		&mut self,
 		api: &mut ShellApi<'_, '_>,
@@ -341,13 +349,12 @@ impl Child {
 		call: &ToolCall,
 		argv: Vec<BString>,
 		detached: bool,
-		redirect: &str,
+		dups: &[(u32, u32)],
 	) {
 		self.label = turn.labels.fresh(api.lineage().label);
-		let mut source = Vec::new();
-		quote_words(&mut source, &argv);
-		source.extend_from_slice(redirect.as_bytes());
-		let mut script = Script::command(source);
+		let mut script = Script::command(Vec::new());
+		script.launch = Some(Launch { argv, how: LaunchHow::Plain, dups: dups.to_vec() });
+		script.engine_source = true;
 		// The command's environment, per-command assignments included.
 		script.env = call
 			.env
@@ -376,35 +383,6 @@ impl Child {
 	/// The run, while its `Done` is still to come.
 	fn pending(&self) -> Option<RunId> {
 		self.run.filter(|_| self.status.is_none())
-	}
-}
-
-/// Append `word` single-quoted.
-fn quote(out: &mut Vec<u8>, word: &[u8]) {
-	out.push(b'\'');
-	for &c in word {
-		if c == b'\'' {
-			out.extend_from_slice(b"'\\''");
-		} else {
-			out.push(c);
-		}
-	}
-	out.push(b'\'');
-}
-
-/// Append `argv` as the words of one command, each single-quoted.
-///
-/// A callout runs its operand as one command of a synthetic script, and the
-/// operand's words go into that script quoted rather than through `"$@"`
-/// and [`Script::args`]. So the subshell's positional parameters stay the
-/// caller's, as in the `( … )` subshell the callout stands for, and the
-/// operand's own `getopts`, `shift` and `set --` read and write those.
-fn quote_words(out: &mut Vec<u8>, argv: &[BString]) {
-	for (i, word) in argv.iter().enumerate() {
-		if i > 0 {
-			out.push(b' ');
-		}
-		quote(out, word);
 	}
 }
 

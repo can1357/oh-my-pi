@@ -299,7 +299,7 @@ pub fn cond(ex: &mut Expander<'_, '_>, name: &[u8], args: &[BString]) -> X<bool>
 
 /// The math functions: `length` (`STRMATHFUNC`) and `sum`
 /// (`NUMMATHFUNC`, one argument or more).
-pub fn math_def(name: &[u8]) -> Option<MathFunc> {
+pub const fn math_def(name: &[u8]) -> Option<MathFunc> {
 	match name {
 		b"length" => Some(MathFunc { kind: FuncKind::String, min_args: 0, max_args: None }),
 		b"sum" => Some(MathFunc { kind: FuncKind::Numeric, min_args: 1, max_args: None }),
