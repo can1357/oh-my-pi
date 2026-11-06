@@ -2584,8 +2584,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 					crate::bash::vm::callstack::read_base(ex.k, ex.cx.store, ex.vp)?;
 					let items =
 						crate::bash::vm::callstack::listed_array(ex.k, ex.cx.store, ex.vp, &name)?
-							.map(|v| v.keys())
-							.unwrap_or_default();
+							.map_or_else(Vec::new, |v| v.keys());
 					return Ok(Val::List { items, star });
 				}
 				Ok(match state::lookup(&ex.k.root, ex.cx.store, ex.vp, &name)? {

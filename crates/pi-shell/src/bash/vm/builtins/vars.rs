@@ -1696,9 +1696,13 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				// them, so a consumer that replays the declaration lost
 				// them too.
 				match (dynamic, declared(ctx, name)?) {
-					(Some(dynamic), Some(stored)) => {
-						Some(Var { attrs: stored.attrs, value: dynamic.value })
-					},
+					(Some(dynamic), Some(stored)) => Some(Var {
+						// `INVISIBLE` belongs to the stored variable, which
+						// has no value of its own: the value shown is the
+						// call stack's, so the declaration is not invisible.
+						attrs: stored.attrs.without(Attrs::INVISIBLE),
+						value: dynamic.value,
+					}),
 					(dynamic, _) => dynamic,
 				}
 			} else {

@@ -99,16 +99,29 @@ pub struct SourceSave {
 }
 
 impl CallKind {
-	/// The `BASH_ARGV` push, in argument order.
-	///
-	/// A `.` file whose RETURN trap is running (`ended`) has already lost
-	/// its file-name push in bash's `_evalfile`; an arguments push
-	/// survives until `source_builtin`, which runs after the trap.
+	/// The `BASH_ARGV` push, in argument order. This is the push itself,
+	/// which the pop accounting owns; what a READER sees of it while a
+	/// `.` file's RETURN trap runs is [`CallKind::visible_argv`].
 	fn argv(&self) -> Option<&[BString]> {
 		match self {
-			Self::Source { ended: true, name_push: true, .. } => None,
 			Self::Function { argv, .. } | Self::Source { argv, .. } => argv.as_deref(),
 			Self::Args(args) => Some(args),
+		}
+	}
+
+	/// What a read of `BASH_ARGC`/`BASH_ARGV` sees of this push.
+	///
+	/// A `.` file whose RETURN trap is running (`ended`) has already lost
+	/// its FILE-NAME push: bash pops that one in `_evalfile`, before the
+	/// trap. An ARGUMENTS push survives until `source_builtin`, which runs
+	/// after the trap, so it is still read there. Measured on Bash 5.2.21
+	/// and 5.3.0: `. f` shows the caller's levels in its trap, `. f A B`
+	/// still shows `C=[2 0] V=[B A]`. The push itself is untouched, so the
+	/// pop accounting still owns and still pops it.
+	fn visible_argv(&self) -> Option<&[BString]> {
+		match self {
+			Self::Source { ended: true, name_push: true, .. } => None,
+			other => other.argv(),
 		}
 	}
 }
@@ -213,7 +226,7 @@ fn argcv(vp: &Vproc, name: &[u8], base: Option<&[BString]>) -> Vec<BString> {
 		.calls
 		.iter()
 		.rev()
-		.filter_map(|c| c.kind.argv())
+		.filter_map(|c| c.kind.visible_argv())
 		.chain(base);
 	if name == b"BASH_ARGC" {
 		pushes
