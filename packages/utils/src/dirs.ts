@@ -817,6 +817,20 @@ export function getAntigravityCliDir(): string {
 	return dirs.rootSubdir("antigravity-cli", "data");
 }
 
+/**
+ * Get the cross-process provider exhaustion cooldown file
+ * (~/.omp/agent/provider-cooldowns.json; XDG default: $XDG_STATE_HOME/omp/provider-cooldowns.json).
+ * `bun test` processes get a per-process temp path instead, so suites never read or write the
+ * developer's real ban list.
+ */
+export function getProviderCooldownsPath(): string {
+	if (isBunTestRuntime()) {
+		const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
+		return path.join(os.tmpdir(), `omp-test-provider-cooldowns-${uid}-${process.pid}`, "provider-cooldowns.json");
+	}
+	return dirs.agentSubdir(undefined, "provider-cooldowns.json", "state");
+}
+
 /** Get the puppeteer sandbox directory (~/.omp/puppeteer). */
 export function getPuppeteerDir(): string {
 	return dirs.rootSubdir("puppeteer", "cache");
