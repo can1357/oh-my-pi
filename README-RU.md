@@ -73,6 +73,7 @@ omp --a2a-port 0        # терминал C: ...
 | `irc.dedupWindowMs` | 30000 | окно дедупликации |
 | `irc.maxHops` | 28 | предел цепочки пересылок |
 | `task.concurrencyPolicy` | "queue" | "refuse" = отказ при переполнении |
+| `team.enabled` / `team.maxTeammates` | off / 4 | declarative agent teams (`.omp/teams/*.md`, `/team start`) |
 | `task.tokenBudget` | 0 (off) | токен-бюджет сабагента |
 
 ## Установка на этой машине

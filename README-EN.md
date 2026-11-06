@@ -73,6 +73,7 @@ Extensions can spawn subagents (`pi.spawnSubagent({agent, prompt})`) with ordina
 | `irc.dedupWindowMs` | 30000 | dedup window |
 | `irc.maxHops` | 28 | relay-chain limit |
 | `task.concurrencyPolicy` | "queue" | "refuse" = refuse when saturated |
+| `team.enabled` / `team.maxTeammates` | off / 4 | declarative agent teams (`.omp/teams/*.md`, `/team start`) |
 | `task.tokenBudget` | 0 (off) | subagent token budget |
 
 ## Install on this machine

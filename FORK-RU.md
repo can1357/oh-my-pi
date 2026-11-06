@@ -215,6 +215,8 @@ export default function (pi) {
 |---|---|---|
 | `a2a.enabled` / `a2a.port` | **on / 0 (авто)** | A2A-мост на свободном порту (только 127.0.0.1); `--a2a-port N` — фикс. порт на запуск |
 | `session.retentionDays` | 30 | GC сессий/артефактов старше N дней при старте; 0 = off |
+| `team.enabled` | off | команды агентов (.omp/teams/*.md, /team start…) |
+| `team.maxTeammates` | 4 | кап участников на /team start |
 | `a2a.autoRegister` | on | авторегистрация живых мостов при старте сессии |
 | `a2a.clientTimeoutMs` | 0 (без лимита) | таймаут клиентских спавнов |
 | `browser.relay` | off | браузер в вашем Chrome через relay-расширение (:9224) |
@@ -235,6 +237,15 @@ export default function (pi) {
 волной по именам ролей → трекинг без тугого поллинга → слияние после волны).
 Промпт каждого сабагента листает доступные ему a2a-пир терминалы — сабагент
 может делегировать чужому терминалу сам, без переобъяснения.
+
+## 9. Команды агентов (Agent Teams)
+
+`.omp/teams/<имя>.md` — декларативная команда: members (ссылки на agent-definitions
++ хэндл + роль), общий workspace, context. `/team start <имя> [задание]` спавнит
+участников с устойчивыми хэндлами (id = `agent://<хэндл>`), `/team list|status|stop`.
+Участники — полноценные сессии: видят друг друга, общаются напрямую мимо лида,
+общий TASKS.md в workspace команды. Гейт: `team.enabled` (default off);
+кап: `team.maxTeammates` (default 4). [docs/agent-teams.md](docs/agent-teams.md)
 
 ## Известные ограничения
 
