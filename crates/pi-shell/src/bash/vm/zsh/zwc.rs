@@ -51,7 +51,7 @@ pub enum Map {
 	/// Neither: mapped when it is at least `FD_MINMAP` bytes.
 	Auto,
 	/// `-M`: mapped.
-	Map,
+	Mapped,
 }
 
 /// One program of a dump (zsh `struct wcfunc`).
@@ -65,7 +65,7 @@ pub struct DumpProg<'a> {
 }
 
 /// Words a program takes in the dump: its code and strings, rounded up.
-fn prog_words(p: &Eprog) -> usize {
+const fn prog_words(p: &Eprog) -> usize {
 	p.byte_len().div_ceil(4)
 }
 
@@ -83,7 +83,7 @@ pub fn write_dump(progs: &[DumpProg<'_>], map: Map) -> Vec<u8> {
 	let tlen = (tlen_words + hlen0) * 4;
 	let mapped = match map {
 		Map::Read => false,
-		Map::Map => true,
+		Map::Mapped => true,
 		Map::Auto => tlen >= FD_MINMAP,
 	};
 	let mut out = Vec::with_capacity(tlen * 2);
@@ -227,7 +227,9 @@ impl DumpHeader {
 		let strs = data.get(base + f.strs..base + f.len)?;
 		Some(Eprog {
 			prog:  code
-				.chunks_exact(4)
+				.as_chunks::<4>()
+				.0
+				.iter()
 				.map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
 				.collect(),
 			strs:  strs.to_vec(),

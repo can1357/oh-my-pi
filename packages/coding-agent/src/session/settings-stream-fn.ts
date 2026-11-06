@@ -102,13 +102,9 @@ export function createSettingsAwareStreamFn(
 			openrouterRoutingPreset && openrouterRoutingPreset !== "default" ? openrouterRoutingPreset : undefined;
 		const antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
 		const textVerbosity =
-			model.api === "openai-codex-responses"
-				? cfgTextVerbosity.isConfigured(settings)
-					? cfgTextVerbosity.get(settings)
-					: undefined
-				: model.api === "openai-responses"
-					? cfgTextVerbosity.get(settings)
-					: undefined;
+			model.api === "openai-codex-responses" || model.api === "openai-responses"
+				? cfgTextVerbosity.get(settings)
+				: undefined;
 		// "auto" leaves the option unset so provider defaults and the
 		// PI_CACHE_RETENTION env override keep working; anything else is an
 		// explicit per-request retention (long restores 1h Anthropic TTLs and

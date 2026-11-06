@@ -4,6 +4,10 @@
 
 use std::cmp::Ordering;
 
+use super::super::{
+	Comp, isset,
+	types::{Cexpl, Cmatch, Cmgroup, GId, cgf, cmf},
+};
 use crate::{
 	bash::{
 		syntax::zsh::tok::unmetafy,
@@ -11,11 +15,6 @@ use crate::{
 		zshopt::ZshOpt,
 	},
 	sys::langinfo::Collator,
-};
-
-use super::super::{
-	Comp, isset,
-	types::{Cexpl, Cmatch, Cmgroup, GId, cgf, cmf},
 };
 
 /// zsh `zstrcmp(as, bs, SORTIT_IGNORING_BACKSLASHES | (numeric ?
@@ -259,7 +258,12 @@ pub fn makearray(
 /// arrays keep their first `nbeg`/`nend` entries).
 pub fn dupmatch(m: &Cmatch, nbeg: i32, nend: i32) -> Cmatch {
 	let cut = |v: &Option<Vec<i32>>, n: i32| {
-		v.as_ref().map(|v| v.iter().copied().take(usize::try_from(n).unwrap_or(0)).collect())
+		v.as_ref().map(|v| {
+			v.iter()
+				.copied()
+				.take(usize::try_from(n).unwrap_or(0))
+				.collect()
+		})
 	};
 	Cmatch { brpl: cut(&m.brpl, nbeg), brsl: cut(&m.brsl, nend), ..m.clone() }
 }
@@ -307,7 +311,30 @@ pub fn permmatches_with(
 	let mut g = c.core.amatches;
 	while let Some(gid) = g {
 		let gr = c.groups.get(gid);
-		if fi != ofi || gr.perm.is_none() || gr.new {
+		if let Some(perm) = gr.perm
+			&& fi == ofi
+			&& !gr.new
+		{
+			let (mcount, lcount) = (gr.mcount, gr.lcount);
+			if c.core.lmatches.is_none() {
+				c.core.lmatches = Some(perm);
+			}
+			if let Some(p) = c.core.pmatches {
+				c.groups.get_mut(p).prev = Some(perm);
+			}
+			let pm = c.core.pmatches;
+			let pg = c.groups.get_mut(perm);
+			pg.next = pm;
+			pg.prev = None;
+			c.core.pmatches = Some(perm);
+			c.core.nmatches += mcount;
+			c.core.smatches += lcount;
+			if mcount > 1 {
+				c.core.diffmatches = 1;
+			}
+			c.groups.get_mut(gid).num = gn;
+			gn += 1;
+		} else {
 			let gr = c.groups.get_mut(gid);
 			let flags = gr.flags;
 			let list = if fi != 0 {
@@ -378,27 +405,6 @@ pub fn permmatches_with(
 				c.groups.get_mut(p).prev = Some(nid);
 			}
 			c.core.pmatches = Some(nid);
-		} else {
-			let perm = gr.perm.expect("checked above");
-			let (mcount, lcount) = (gr.mcount, gr.lcount);
-			if c.core.lmatches.is_none() {
-				c.core.lmatches = Some(perm);
-			}
-			if let Some(p) = c.core.pmatches {
-				c.groups.get_mut(p).prev = Some(perm);
-			}
-			let pm = c.core.pmatches;
-			let pg = c.groups.get_mut(perm);
-			pg.next = pm;
-			pg.prev = None;
-			c.core.pmatches = Some(perm);
-			c.core.nmatches += mcount;
-			c.core.smatches += lcount;
-			if mcount > 1 {
-				c.core.diffmatches = 1;
-			}
-			c.groups.get_mut(gid).num = gn;
-			gn += 1;
 		}
 		let gr = c.groups.get_mut(gid);
 		gr.new = false;

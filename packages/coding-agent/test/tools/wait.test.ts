@@ -501,7 +501,7 @@ describe("wait", () => {
 	describe("a reply wait", () => {
 		/** A live session that takes IRC deliveries and can end its turn on demand. */
 		function liveSession() {
-			const listeners = new Set<(event: { type: string }) => void>();
+			const listeners = new Set<(state: "running" | "idle") => void>();
 			const state = { isStreaming: true, runStartedAt: 0, holdsQuestion: false };
 			const session = {
 				get isStreaming() {
@@ -513,7 +513,7 @@ describe("wait", () => {
 				deliverIrcMessage: async () => "injected",
 				waitForIrcReplies: async () => {},
 				hasQueuedIrcFrom: () => state.holdsQuestion,
-				subscribe: (listener: (event: { type: string }) => void) => {
+				subscribeRunState: (listener: (state: "running" | "idle") => void) => {
 					listeners.add(listener);
 					return () => listeners.delete(listener);
 				},
@@ -523,7 +523,7 @@ describe("wait", () => {
 				state,
 				endTurn: () => {
 					state.isStreaming = false;
-					for (const listener of listeners) listener({ type: "agent_end" });
+					for (const listener of listeners) listener("idle");
 				},
 			};
 		}

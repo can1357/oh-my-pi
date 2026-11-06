@@ -112,8 +112,10 @@ export interface LoadOptions<T = unknown> {
 	agentDir?: string;
 	/** Include items even if they fail validation. Default: false */
 	includeInvalid?: boolean;
-	/** Include disabled items without letting them shadow enabled items. Default: false */
+	/** Include item-disabled and opted-out sources for inspection. Default: false. */
 	includeDisabled?: boolean;
+	/** Classify listed sources that would be inactive at runtime so they cannot shadow active rows. */
+	isSourceDisabled?: (source: SourceMeta) => boolean;
 	/** Explicit disabled extension IDs to apply instead of settings. */
 	disabledExtensions?: string[];
 	/**

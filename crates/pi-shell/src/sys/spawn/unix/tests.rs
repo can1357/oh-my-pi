@@ -634,7 +634,8 @@ fn stop_and_cont_reach_every_member_of_the_group() {
 }
 
 /// Cancel of a running external: TERM to the group at once, KILL after the
-/// grace. Prints the measured grace for the phase report.
+/// grace. Observe the fixture, not a full process-table scan that can itself
+/// outlast the grace on a busy host.
 fn abandon_escalates(grace: Duration) -> Duration {
 	let env = EnvView::default();
 	let s = spawner(Sessions::Share, grace);
@@ -642,12 +643,25 @@ fn abandon_escalates(grace: Duration) -> Duration {
 	let a = sh("trap '' TERM; /bin/sleep 30; exit 0");
 	let p = s.spawn(spec(&a, &env, NEW)).unwrap();
 	let group = p.pid() as i32;
-	until("sleep started", || live_group(group).len() == 2);
+	let mut members = Vec::new();
+	until("sleep started", || {
+		members = live_group(group);
+		members.len() == 2
+	});
 	let start = Instant::now();
 	drop(p);
-	thread::sleep(grace / 2);
-	assert_eq!(live_group(group).len(), 2, "TERM is ignored, KILL waits for the grace");
-	until("group killed", || live_group(group).is_empty());
+	until("group killed", || {
+		let mut killed = true;
+		for member in &members {
+			let gone = proc::info(member.pid)
+				.is_none_or(|now| now.start != member.start || now.state == ProcState::Zombie);
+			if gone {
+				assert!(start.elapsed() >= grace, "KILL before the grace: pid {}", member.pid);
+			}
+			killed &= gone;
+		}
+		killed
+	});
 	let measured = start.elapsed();
 	eprintln!("TERM→KILL escalation: grace {grace:?}, measured {measured:?}");
 	assert!(measured >= grace, "KILL before the grace: {measured:?}");
@@ -1265,6 +1279,22 @@ fn cwd_env_and_argv0_reach_the_child() {
 	let mut p = s.spawn(sp).unwrap();
 	assert_eq!(wait(&mut p), ExitStatus::Exited(0));
 	assert_eq!(out.captured(), b"/usr\nb a r|name0\n");
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn missing_spawn_chdir_uses_fork_with_the_requested_cwd() {
+	let mut s = NativeSpawner::default();
+	Arc::get_mut(&mut s.shared).unwrap().state.add_chdir = None;
+	let env = EnvView::default();
+	let a = argv(&["/bin/pwd"]);
+	let out = MemFile::default();
+	let mut sp = spec(&a, &env, NEW);
+	sp.cwd = b"/usr".as_bstr();
+	sp.stdio = [StdioSpec::Null, out.boxed(), StdioSpec::Null];
+	let mut p = s.spawn(sp).unwrap();
+	assert_eq!(wait(&mut p), ExitStatus::Exited(0));
+	assert_eq!(out.captured(), b"/usr\n");
 }
 
 #[test]

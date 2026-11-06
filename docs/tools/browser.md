@@ -83,7 +83,7 @@ Direct helpers cross the host bridge and return real structured values. The comp
 - Emulation: `emulate`, `devices`.
 - Clipboard: `clipboardRead`, `clipboardWrite`, `clipboardCopy`, `clipboardPaste`.
 - Storage: `cookies`, `setCookies`, `clearCookies`, `storage`, `setStorage`, `clearStorage`, `saveState`, `loadState`.
-- Initialization/downloads: `addInitScript`, `removeInitScript`, `initScripts`, `waitForDownload`, `downloads`.
+- Initialization/downloads: `addInitScript`, `removeInitScript`, `initScripts`, `waitForDownload`, `downloads`. `waitForDownload` holds the tab until a download finishes, so another call on the tab fails as busy while it waits, and on a tab opened without `downloads` a download started before the first wait is not tracked. Start the wait and the step that downloads in one run: `tab.run("const download = tab.waitForDownload(); await tab.click('#export'); return await download;")`.
 - Diagnostics: `console`, `errors`, `clearConsole`, `traceStart`, `traceStop`, `profileStart`, `profileStop`, `metrics`.
 - Recording: `recordStart`, `recordStop`, `recordRestart`, `recording`.
 - Web Vitals/React: `vitals`, `reactEnable`, `reactTree`, `reactInspect`, `reactRenders`, `reactSuspense`; call `reactEnable` before other `react*` helpers (it installs the hook and reloads).

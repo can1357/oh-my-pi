@@ -277,6 +277,16 @@ fn launch(
 		*s = stdin;
 	}
 	child.frames.push(Frame::new(None, 0, kind));
+	if k.mask.contains(crate::bash::event::EventKind::UnitCompiled)
+		&& !stdin
+		&& k.trace_sources.len() < crate::bash::trace::history::HISTORY_EVENTS
+		&& let Some(origin) = exec::literal_script_origin(vp, src, true)
+	{
+		k.trace_sources
+			.entry(child.vpid)
+			.or_default()
+			.insert(child.frames.len(), origin);
+	}
 	for text in startup.iter().rev() {
 		push_script(&mut child, text, 1, ScriptKind::Source);
 	}
@@ -409,7 +419,7 @@ fn fresh_shell(
 	let values = if args.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		super::zsh_startup_values(cx, k.engine.config().platform)
 	} else {
-		startup_values(cx, &args.shell_name, ppid, super::StartupVars {
+		startup_values(cx, &args.shell_name, ppid, k.engine.config().platform, super::StartupVars {
 			lookup_shell: need_shell,
 			interactive:  args.interactive,
 		})

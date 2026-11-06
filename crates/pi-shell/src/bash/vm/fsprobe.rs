@@ -319,9 +319,7 @@ fn start(fs: &mut dyn Fs, req: &FsReq) -> FsPoll<FsAns> {
 		FsReq::Rmdir { path } => map(fs.rmdir(BStr::new(path)), done),
 		FsReq::Unlink { path } => map(fs.unlink(BStr::new(path)), done),
 		FsReq::Rename { from, to } => map(fs.rename(BStr::new(from), BStr::new(to)), done),
-		FsReq::Symlink { target, path } => {
-			map(fs.symlink(BStr::new(target), BStr::new(path)), done)
-		},
+		FsReq::Symlink { target, path } => map(fs.symlink(BStr::new(target), BStr::new(path)), done),
 		FsReq::Link { from, to } => map(fs.link(BStr::new(from), BStr::new(to)), done),
 		FsReq::Chmod { path, mode } => map(fs.chmod(BStr::new(path), *mode), done),
 		FsReq::Chown { path, uid, gid, follow } => {

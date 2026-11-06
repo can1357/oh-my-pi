@@ -55,6 +55,7 @@ pub mod socket;
 pub mod store;
 pub mod term;
 mod text;
+pub mod trace;
 mod vm;
 pub mod zshopt;
 
@@ -69,7 +70,8 @@ pub use crate::bash::{
 	engine::{Engine, EngineConfig},
 	error::{ExtError, Incompatibility, RestoreError, ShellError},
 	event::{
-		CustomEvent, Event, EventData, EventKind, EventMask, NodeRef, Origin, SpanRef, WaitKey,
+		CompiledUnit, CustomEvent, Event, EventData, EventKind, EventMask, EventSink, NodeRef,
+		Origin, SpanRef, WaitKey,
 	},
 	fd::{BadFd, FdFlags, FdRef},
 	fs::{DirEntry, DirIter, File, FileKind, Fs, FsPending, FsPoll, OpenFlags, Stat},
@@ -87,8 +89,8 @@ pub use crate::bash::{
 	signal::{SigSet, SigTarget, Signal},
 	snapshot::{ExternalizeReport, Lost, RestoreOpts, RestoreReport},
 	socket::{Accepted, IpFamily, ListenError, ListenStage, SockAddr, Sockets},
-	term::{CtlChar, Pty, SetWhen, Shtty, TermFlag, Termios, Terminal},
 	store::{Attrs, StateStore, StoreError, VarValue},
+	term::{CtlChar, Pty, SetWhen, Shtty, TermFlag, Terminal, Termios},
 	vm::{
 		Budget, CallOutcome, ControlHandle, Cx, IoPoll, Profile, RunStdio, Script, Shell, ShellApi,
 		ShellInit, Step, ToolCall, VprocSel, WakeToken, vproc_layout,

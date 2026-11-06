@@ -15,8 +15,9 @@ use super::{
 use crate::bash::{
 	syntax::zsh::{ctxtlex_ends, tok::is_meta},
 	vm::zle::{
-		Editor, byte_len, from_line,
+		Editor, byte_len,
 		exec::{WResult, Zw},
+		from_line,
 		utils::{self, iblank, invicmdmode},
 	},
 	zshopt::ZshOpt,
