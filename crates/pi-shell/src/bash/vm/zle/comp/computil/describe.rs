@@ -525,11 +525,12 @@ fn cd_init(
 	if st.maxmlen < 4 {
 		st.maxmlen = 4;
 	}
-	let mut grp = false;
-	if args.first().is_some_and(|a| a == "-g") {
+	let grp = if args.first().is_some_and(|a| a == "-g") {
 		args = &args[1..];
-		grp = true;
-	}
+		true
+	} else {
+		false
+	};
 	// zsh drops its old state before parsing (`cd_parsed = 0`).
 	save::<CdState>(ctx, MiscKey::ZshCompDescribe, None);
 	while let Some(a) = args.first() {

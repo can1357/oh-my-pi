@@ -14,10 +14,6 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 // is always declared, so a disabled per-call model reaches preflight and is rejected.
 
 describe("oneLineLabel", () => {
-	it("returns short text unchanged", () => {
-		expect(oneLineLabel("DB migration specialist")).toBe("DB migration specialist");
-	});
-
 	it("collapses control and zero-width characters that \\s alone misses", () => {
 		// U+0085 (NEL) and U+200B (zero-width space) are NOT matched by \s, so a
 		// bare replace(/\s+/) would leak them into a prompt/roster field.

@@ -72,7 +72,7 @@ pub fn zcompile(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		return done(1);
 	};
 	let map = if o(b'M') {
-		Map::Map
+		Map::Mapped
 	} else if o(b'R') {
 		Map::Read
 	} else {
@@ -230,7 +230,7 @@ fn finish(ctx: &mut Ctx<'_, '_>, mark: usize, dump: &[u8], data: Option<Vec<u8>>
 
 /// The text of `file` if it is a regular file zsh can open and read
 /// (`Err` is the message: `can't open file`).
-fn read_file(ctx: &mut Ctx<'_, '_>, file: &[u8]) -> Result<Option<BString>, Need> {
+fn read_file(ctx: &Ctx<'_, '_>, file: &[u8]) -> Result<Option<BString>, Need> {
 	let path = absolute(&ctx.vp.cwd, file);
 	let regular = matches!(
 		ctx.probe(Probe::Stat { path: path.clone(), follow: true })?,
@@ -323,12 +323,11 @@ fn build_cur_dump(
 		}
 	} else {
 		for n in names {
-			match funcs.iter().find(|(name, ..)| name == n) {
-				Some((name, _, attrs)) => chosen.push((name.clone(), *attrs)),
-				None => {
-					ctx.usage(format!("unknown function: {}", n.as_bstr()));
-					return finish(ctx, mark, &dump, None);
-				},
+			if let Some((name, _, attrs)) = funcs.iter().find(|(name, ..)| name == n) {
+				chosen.push((name.clone(), *attrs));
+			} else {
+				ctx.usage(format!("unknown function: {}", n.as_bstr()));
+				return finish(ctx, mark, &dump, None);
 			}
 		}
 	}

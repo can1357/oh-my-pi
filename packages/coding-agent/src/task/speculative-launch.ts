@@ -73,14 +73,31 @@ export class BatchArgsScanner {
 	feed(raw: string): void {
 		if (!raw.startsWith(this.#raw)) this.#reset();
 		this.#raw = raw;
-		for (let i = this.#pos; i < raw.length && !this.#malformed; i++) {
-			const char = raw[i];
+		this.#scan(raw.slice(this.#pos));
+	}
+
+	/**
+	 * Scan the next streamed chunk: {@link feed} of the buffer so far plus `delta`, without
+	 * re-reading the buffer, so a whole stream costs time linear in its length.
+	 */
+	append(delta: string): void {
+		this.#raw += delta;
+		this.#scan(delta);
+	}
+
+	/** Scan `chunk`, the part of the buffer past the last scanned position. */
+	#scan(chunk: string): void {
+		const base = this.#pos;
+		for (let offset = 0; offset < chunk.length && !this.#malformed; offset++) {
+			const char = chunk[offset];
+			const i = base + offset;
 			if (this.#inString) {
 				if (this.#escaped) this.#escaped = false;
 				else if (char === "\\") this.#escaped = true;
 				else if (char === '"') {
 					this.#inString = false;
-					this.#closeString(raw.slice(this.#stringStart, i + 1));
+					// Only top-level strings matter; slicing a streamed (rope) buffer copies it.
+					if (this.#depth === 1) this.#closeString(this.#raw.slice(this.#stringStart, i + 1));
 				}
 				continue;
 			}
@@ -111,7 +128,7 @@ export class BatchArgsScanner {
 				case "]":
 					this.#depth--;
 					if (this.#inTasks && this.#depth === 2 && char === "}")
-						this.#closeItem(raw.slice(this.#itemStart, i + 1));
+						this.#closeItem(this.#raw.slice(this.#itemStart, i + 1));
 					else if (this.#inTasks && this.#depth === 1) this.#inTasks = false;
 					break;
 				case ":":
@@ -130,11 +147,10 @@ export class BatchArgsScanner {
 					if (atItemLevel) this.#malformed = true;
 			}
 		}
-		this.#pos = raw.length;
+		this.#pos = this.#raw.length;
 	}
 
 	#closeString(literal: string): void {
-		if (this.#depth !== 1) return;
 		let value: unknown;
 		try {
 			value = JSON.parse(literal);

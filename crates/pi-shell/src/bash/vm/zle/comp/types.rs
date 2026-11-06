@@ -332,7 +332,7 @@ pub enum Cpattern {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Cmatcher {
 	/// Next matcher of the same spec.
-	pub next:  Option<Arc<Cmatcher>>,
+	pub next:  Option<Arc<Self>>,
 	/// [`cmatcher_flags`].
 	pub flags: u32,
 	/// What matches on the line.
@@ -358,7 +358,7 @@ pub struct Cmatcher {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Cmlist {
 	/// Next one.
-	pub next:    Option<Arc<Cmlist>>,
+	pub next:    Option<Arc<Self>>,
 	/// The matcher definition (`None`: an empty spec).
 	pub matcher: Option<Arc<Cmatcher>>,
 	/// The spec string.
@@ -595,7 +595,7 @@ pub struct Cldata {
 	pub showall:       bool,
 }
 
-/// zsh `struct brinfo` (zle_tricky.c): a brace on the line.
+/// zsh `struct brinfo` (`zle_tricky.c)`: a brace on the line.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Brinfo {
 	/// The text of the brace part.

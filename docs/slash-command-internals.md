@@ -240,10 +240,10 @@ This is why built-ins reserve their names before file commands are considered, s
 
 The parser is simple quote-aware splitting:
 
-- supports `'single'` and `"double"` quoting to keep spaces
-- strips quote delimiters
+- supports `'single'` and `"double"` quoting to keep spaces; a quote delimits when it starts an argument or follows an option `=`, and a matching quote ends one (followed by a space, tab, or end of input)
+- strips quote delimiters; other quote characters, such as apostrophes in `user's` or `don't`, stay literal
 - does not implement backslash escaping rules
-- unmatched quote is not an error; parser consumes until end
+- a leading quote with no matching closing quote is literal, not an error
 - empty quoted arguments are discarded in this default, non-strict parsing mode
 
 Argument substitution is one pass over the template; dollar placeholders inside argument values are not substituted again. Missing positional values, zero start/length slices, and out-of-range slice starts render as empty strings.

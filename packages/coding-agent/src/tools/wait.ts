@@ -267,9 +267,11 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			for (const id of asked) {
 				const session = messaging.registry.get(id)?.session;
 				if (!session) continue;
+				// Every turn settles idle just ahead of its `agent_end`. Unlike `subscribe`, this does not
+				// make an agent homed on another thread stream its whole event feed and view here.
 				unsubscribers.push(
-					session.subscribe(event => {
-						if (event.type === "agent_end") void session.waitForIrcReplies().then(checkReplies);
+					session.subscribeRunState(state => {
+						if (state === "idle") void session.waitForIrcReplies().then(checkReplies);
 					}),
 				);
 			}
