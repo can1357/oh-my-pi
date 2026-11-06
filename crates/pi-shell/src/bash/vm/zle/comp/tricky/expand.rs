@@ -1,4 +1,4 @@
-//! zle_tricky.c's expansion of the word on the line (`doexpansion`): zsh
+//! `zle_tricky.c`'s expansion of the word on the line (`doexpansion`): zsh
 //! `prefork` and `globlist` (with `NULL_GLOB`) on the word, run from native
 //! editor code as an op would run them: command substitutions run in
 //! child vprocs (or, for expansion hooks, as frames of the editing vproc)

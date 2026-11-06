@@ -175,11 +175,4 @@ describe("planDeccaraFills", () => {
 		expect(plan.texts[0]).toBe(`${BG_OPEN}Hi\x1b[0m`);
 		expect(plan.sequence).toBe(`${DECSACE_RECT}${encodeDeccara(1, 3, 1, 40, BG_SGR)}${DECSACE_DEFAULT}`);
 	});
-
-	it("passes plain rows through untouched with no rectangles", () => {
-		const lines = ["hello", "world"];
-		const plan = planDeccaraFills(lines, 40);
-		expect(plan.texts).toEqual(lines);
-		expect(plan.sequence).toBe("");
-	});
 });

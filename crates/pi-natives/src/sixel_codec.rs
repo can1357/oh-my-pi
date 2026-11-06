@@ -254,6 +254,11 @@ fn nearest_color(
 	}
 }
 
+#[allow(
+	clippy::suboptimal_flops,
+	reason = "per-pixel hot loop: mul_add is a libm call on the x86-64 baseline target (no FMA), \
+	          and fusing would change the dithered output"
+)]
 fn dither(rgba: &[u8], width: usize, palette: &[[u8; 3]]) -> Vec<u16> {
 	let mut colors: [usize; 256] = std::array::from_fn(|index| index);
 	let mut nodes = Vec::with_capacity(palette.len());
@@ -432,7 +437,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<RgbaImage> {
 						1 => palette[index] = hls(values[2], values[3], values[4]),
 						2 => {
 							palette[index] =
-								Rgba([percent(values[2]), percent(values[3]), percent(values[4]), 255])
+								Rgba([percent(values[2]), percent(values[3]), percent(values[4]), 255]);
 						},
 						_ => {},
 					}
@@ -497,7 +502,7 @@ fn hls(hue: usize, lightness: usize, saturation: usize) -> Rgba<u8> {
 	let hue = ((hue % 360 + 240) % 360) as f64 / 60.0;
 	let lightness = lightness.min(100) as f64 / 100.0;
 	let saturation = saturation.min(100) as f64 / 100.0;
-	let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+	let chroma = (1.0 - (lightness + lightness - 1.0).abs()) * saturation;
 	let secondary = chroma * (1.0 - (hue % 2.0 - 1.0).abs());
 	let rgb = match hue as usize {
 		0 => [chroma, secondary, 0.0],

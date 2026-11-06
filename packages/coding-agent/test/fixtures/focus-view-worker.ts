@@ -21,7 +21,6 @@ import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AgentSession } from "../../src/session/agent-session";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
-import { loadedModulesChangedSince } from "../../src/thread/code-skew";
 import { isThreadId, setCurrentThreadId } from "../../src/thread/identity";
 import type { SubagentWorkerInit, SubagentWorkerReady, WorkerThreadLink } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
@@ -251,7 +250,6 @@ port.on("message", (message: unknown) => {
 		link.handle("ping", nonce => nonce);
 		const ready: SubagentWorkerReady = {
 			type: "subagent-worker-ready",
-			changedModules: loadedModulesChangedSince(message.mainStartedAt),
 		};
 		port.postMessage(ready);
 		return;

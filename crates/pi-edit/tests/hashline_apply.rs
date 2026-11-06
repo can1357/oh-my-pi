@@ -574,6 +574,16 @@ fn syntax_helpers_use_pi_ast() {
 }
 
 #[test]
+fn markdown_edits_never_warn_of_a_syntax_error() {
+	// tree-sitter-md marks a GFM table row with an empty `||` cell as an
+	// `ERROR`, yet every input is valid Markdown.
+	let file = "# Results\n\n| case | before | after |\n|---|---|---|\n| a | 1 | 2 |\n";
+	let result = apply(file, &[insert_after(5, "| b |||", 1)], Some("notes.md"));
+	assert_eq!(result.text, format!("{file}| b |||\n"));
+	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+#[test]
 fn clipboard_cut_then_gap_paste_moves_lines() {
 	let cut = Edit::Cut {
 		range:    ParsedRange { start: Anchor { line: 2 }, end: Anchor { line: 3 } },
