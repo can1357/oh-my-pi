@@ -484,6 +484,17 @@ where
 
 /// Drive the work future until it settles or its caller cancels; cancelling
 /// drops the future.
+///
+/// The future runs on a **blocking** thread, not a scheduler worker. The
+/// filesystem callers that reach here (`glob`, `grep`, `fuzzy_find`,
+/// `ast_grep`, `ast_edit`) do synchronous syscalls inside their futures, and
+/// an uncached inode parks the calling thread in uninterruptible IO for as
+/// long as the device takes. The scheduler pool has one worker per CPU and is
+/// shared with `shell.run`, so enough simultaneous walks leave no worker to
+/// poll anything else and every native call in the process stops: measured on
+/// 2026-11-06 as 8 of 8 workers in `D` under `path_lookupat`, with a plain
+/// embedded `echo` going from 1 ms to 180 ms, and on a wedged session as
+/// minutes.
 async fn run_filesystem_future<T, F, Fut>(
 	tag: &'static str,
 	cancel_token: CancelToken,
@@ -497,21 +508,35 @@ where
 {
 	let cancellation = CancellationToken::new();
 	let _cancel_on_exit = cancellation.clone().drop_guard();
-	let fs = fs.with_cancellation(cancellation);
-	let _guard = profile_region(tag);
-	let _work = native_work();
-	let mut work = pin!(work(fs));
-	let scoped = future::poll_fn(|cx| {
-		crate::crash_handler::blocking_task_panic_scope(|| work.as_mut().poll(cx))
+	let fs = fs.with_cancellation(cancellation.clone());
+	let mut worker = tokio::task::spawn_blocking(move || {
+		let _guard = profile_region(tag);
+		let _work = native_work();
+		// `block_on` belongs on a blocking thread and nowhere else: doing it on
+		// a scheduler worker is what this function exists to avoid.
+		tokio::runtime::Handle::current().block_on(async move {
+			let mut work = pin!(work(fs));
+			let scoped = future::poll_fn(|cx| {
+				crate::crash_handler::blocking_task_panic_scope(|| work.as_mut().poll(cx))
+			});
+			AssertUnwindSafe(scoped).catch_unwind().await
+		})
 	});
-	let run = AssertUnwindSafe(scoped).catch_unwind();
 	tokio::select! {
 		biased;
-		result = run => Some(match result {
-			Ok(result) => result.map(Settled::new),
-			Err(payload) => Err(panic_error(tag, payload)),
+		joined = &mut worker => Some(match joined {
+			Ok(Ok(result)) => result.map(Settled::new),
+			Ok(Err(payload)) => Err(panic_error(tag, payload)),
+			// A blocking task is never aborted, so a join error is a panic that
+			// escaped the scope above.
+			Err(err) => Err(Error::from_reason(format!("native task `{tag}` failed: {err}"))),
 		}),
-		_ = cancel_token.wait() => None,
+		// Tell the walk to stop; its thread returns once the provider sees the
+		// cancellation, and nothing waits for it here.
+		_ = cancel_token.wait() => {
+			cancellation.cancel();
+			None
+		},
 	}
 }
 
@@ -628,6 +653,53 @@ mod tests {
 		assert_eq!(err.status, Status::GenericFailure);
 		assert!(err.reason.contains("t_panic_str"), "reason = {}", err.reason);
 		assert!(err.reason.contains("kaboom"), "reason = {}", err.reason);
+	}
+
+	/// A filesystem walk blocks its thread inside synchronous syscalls: an
+	/// uncached inode parks it in uninterruptible IO for as long as the device
+	/// takes. The scheduler pool has one worker per CPU and is shared with
+	/// `shell.run`, so a walk that occupies a worker can stop every other
+	/// native call in the process — measured on 2026-11-06 as 8 of 8 workers
+	/// in `D` with a plain embedded `echo` going from 1 ms to 180 ms.
+	/// The contract is therefore where the work runs. With a single scheduler
+	/// worker, every ordinary task runs on that one thread; a walk that runs on
+	/// it too is occupying it.
+	#[test]
+	fn filesystem_work_never_occupies_a_scheduler_worker() {
+		use std::{
+			sync::{Arc, Mutex},
+			thread::ThreadId,
+			time::Duration,
+		};
+
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.unwrap();
+		// The id of the only scheduler worker: whatever an ordinary task runs on.
+		let worker_id =
+			runtime.block_on(runtime.spawn(async { std::thread::current().id() })).unwrap();
+
+		let walk_id: Arc<Mutex<Option<ThreadId>>> = Arc::new(Mutex::new(None));
+		let probe = Arc::clone(&walk_id);
+		let walk = runtime.spawn(run_filesystem_future(
+			"placement",
+			CancelToken::new(None, None),
+			Fs::native(),
+			move |_fs| async move {
+				*probe.lock().unwrap() = Some(std::thread::current().id());
+				// Stands in for the syscall that parks the thread.
+				std::thread::sleep(Duration::from_millis(50));
+				Ok(1_u32)
+			},
+		));
+		assert!(matches!(runtime.block_on(walk).unwrap(), Some(Ok(_))));
+		let ran_on = walk_id.lock().unwrap().expect("the walk never ran");
+		assert_ne!(
+			ran_on, worker_id,
+			"filesystem work ran on the scheduler worker, where it can starve every other native call"
+		);
 	}
 
 	#[test]

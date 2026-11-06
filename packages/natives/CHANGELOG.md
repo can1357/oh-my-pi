@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `glob`, `grep`, `fuzzyFind`, `ast_grep` and `ast_edit` no longer run their filesystem work on the scheduler pool, so a search over a large or cold tree can no longer stall every other native call in the process — the embedded shell included, since it shares that pool. A walk that blocks on an uncached inode now holds a blocking thread instead of a scheduler worker.
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes
