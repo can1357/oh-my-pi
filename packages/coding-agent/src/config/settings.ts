@@ -355,6 +355,13 @@ export interface SettingsMirrorState {
 	 * reports. It is not derivable from `project`, where those values were dropped as the files loaded.
 	 */
 	readonly projectAsWritten: RawSettings;
+	/**
+	 * The global config file and the project files behind those layers. A mirror opens no file, so
+	 * without them it cannot name the file an ignored value came from (see `Settings.ignoredValues`)
+	 * and reports the same value a second time with no source.
+	 */
+	readonly configPath: string | null;
+	readonly projectSourcePaths: readonly string[];
 	readonly configOverlay: RawSettings;
 	readonly overrides: RawSettings;
 	readonly derived: boolean;
@@ -792,6 +799,11 @@ export class Settings {
 
 	/** Whether to persist changes */
 	#persist: boolean;
+	/**
+	 * Worker mirror: the main instance's global config file, for naming where an ignored value came
+	 * from. Kept apart from `#configPath`, which also decides whether this instance writes to disk.
+	 */
+	#mirroredConfigPath: string | null = null;
 	/** Main-thread instance this worker mirror replicates; set only by {@link Settings.mirror}. */
 	#mirror: SettingsMirrorSource | undefined;
 	/** {@link SettingsMirrorState.generation} this mirror last adopted; `-1` before the first. */
@@ -1070,6 +1082,8 @@ export class Settings {
 			global: structuredClone(this.#global),
 			project: structuredClone(this.#project),
 			projectAsWritten: structuredClone(this.#projectAsWritten),
+			configPath: this.#globalConfigPath() ?? null,
+			projectSourcePaths: [...this.#projectSourcePaths],
 			configOverlay: structuredClone(this.#configOverlay),
 			overrides: structuredClone(this.#overrides),
 			derived: this.#derived,
@@ -1102,6 +1116,8 @@ export class Settings {
 		this.#global = structuredClone(state.global);
 		this.#project = structuredClone(state.project);
 		this.#projectAsWritten = structuredClone(state.projectAsWritten);
+		this.#mirroredConfigPath = state.configPath;
+		this.#projectSourcePaths = [...state.projectSourcePaths];
 		this.#configOverlay = structuredClone(state.configOverlay);
 		this.#overrides = structuredClone(state.overrides);
 		this.#derived = state.derived;
@@ -1167,6 +1183,11 @@ export class Settings {
 		return undefined;
 	}
 
+	/** The global config file, on a worker mirror the one its main instance reads. */
+	#globalConfigPath(): string | undefined {
+		return (this.#configPath ?? this.#mirroredConfigPath) ?? undefined;
+	}
+
 	/** The config file(s) holding `setting`'s merged value, as {@link getProvenance} finds its layer. */
 	#sourceOf(setting: AnySetting): string | undefined {
 		const segments = setting.segments;
@@ -1175,7 +1196,7 @@ export class Settings {
 		if (getByPath(projectLayerForMerge(this.#project), segments) !== undefined) {
 			return this.#projectSourcePaths.join(", ") || getProjectAgentDir(this.#cwd);
 		}
-		if (getByPath(this.#global, segments) !== undefined) return this.#configPath ?? undefined;
+		if (getByPath(this.#global, segments) !== undefined) return this.#globalConfigPath();
 		return this.#parent ? this.#parent.#sourceOf(setting) : undefined;
 	}
 
@@ -1218,7 +1239,7 @@ export class Settings {
 			for (const setting of permissiveDefaultSettings()) {
 				const value = getByPath(this.#global, setting.segments);
 				if (setting.rejects(value)) {
-					add({ setting, source: this.#configPath ?? undefined, ...rejectedValueMetadata(value) });
+					add({ setting, source: this.#globalConfigPath(), ...rejectedValueMetadata(value) });
 				}
 			}
 		}

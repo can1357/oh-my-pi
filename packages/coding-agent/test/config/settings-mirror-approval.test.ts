@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgTemperature } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { readUserApprovalPolicies, userApprovalPolicy } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
@@ -81,5 +82,28 @@ describe("tools.approval across worker settings mirrors", () => {
 
 		const mirror = Settings.mirror(mirrorSource(source), source.mirrorState());
 		expect(mirror.getProjectSettings()).toEqual(source.getProjectSettings());
+	});
+
+	it("names the file an ignored value came from on a worker mirror, and lists it once", async () => {
+		// A mirror opens no config file of its own. Without the main instance's paths it reports the
+		// same rejected value twice — once as carried, once with no source — and logs the second with
+		// no file to go and fix.
+		using dir = TempDir.createSync("@pi-approval-mirror-source-");
+		const agentDir = dir.join("agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		const global = path.join(agentDir, "config.yml");
+		fs.writeFileSync(global, YAML.stringify({ tools: { approval: "deny-bash" }, temperature: "warm" }));
+		const source = await Settings.init({ cwd: dir.path(), agentDir });
+		// A rejected value outside an approval setting is recorded when its setting is first read.
+		cfgTemperature.get(source);
+		const listed = (settings: Settings) =>
+			settings
+				.ignoredValues()
+				.map(({ setting, source: file }) => `${setting.id}@${file ?? "<none>"}`)
+				.sort();
+		expect(listed(source)).toEqual([`temperature@${global}`, `tools.approval@${global}`]);
+
+		const mirror = Settings.mirror(mirrorSource(source), source.mirrorState());
+		expect(listed(mirror)).toEqual(listed(source));
 	});
 });
