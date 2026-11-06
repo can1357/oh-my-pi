@@ -1,10 +1,12 @@
 import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { terminalLaunchCapabilities } from "./providers";
 import type {
+	SupportedMultiplexerCapabilities,
 	TerminalLaunchMultiplexer,
 	TerminalLaunchPlacement,
 	TerminalLaunchPlacementInfo,
 	TerminalLaunchRequest,
+	UnsupportedMultiplexerCapabilities,
 } from "./types";
 import { validateRequest } from "./validate";
 
@@ -13,7 +15,9 @@ function isSupportedMultiplexer(multiplexer: TerminalMultiplexer): multiplexer i
 }
 
 function supportedProvidersMessage(placement: TerminalLaunchPlacement): string {
-	const providers = Object.values(terminalLaunchCapabilities)
+	const providers = Object.values<SupportedMultiplexerCapabilities | UnsupportedMultiplexerCapabilities>(
+		terminalLaunchCapabilities,
+	)
 		.filter(provider => provider.supported && provider[placement] !== undefined)
 		.map(provider => provider.displayName);
 	return providers.length > 0
@@ -37,7 +41,7 @@ export function getTerminalLaunchPlacement(
 		};
 	}
 
-	const provider = terminalLaunchCapabilities[multiplexer];
+	const provider: SupportedMultiplexerCapabilities = terminalLaunchCapabilities[multiplexer];
 	const placementCapabilities = provider[placement];
 	if (!placementCapabilities) {
 		return {
@@ -45,7 +49,7 @@ export function getTerminalLaunchPlacement(
 		};
 	}
 
-	const shellGrammar = "shellGrammar" in placementCapabilities ? placementCapabilities.shellGrammar : undefined;
+	const shellGrammar = placementCapabilities.shellGrammar;
 	return {
 		multiplexer,
 		displayName: provider.displayName,

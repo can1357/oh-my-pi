@@ -10,11 +10,13 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { Settings } from "../../../src/config/settings";
 import {
 	createTerminalLauncher,
+	type SupportedMultiplexerCapabilities,
 	terminalLaunchCapabilities,
 	type TerminalLaunchMultiplexer,
 	type TerminalLaunchPlacement,
 	type TerminalLaunchRequest,
 	type TerminalLaunchResult,
+	type UnsupportedMultiplexerCapabilities,
 } from "../../../src/subprocess/terminal-launch";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "../../tools/tern-fake-daemon";
 
@@ -108,12 +110,12 @@ function createContext(
 
 function findPosixShellPlacement(): { multiplexer: TerminalLaunchMultiplexer; placement: TerminalLaunchPlacement } {
 	for (const [multiplexer, capabilities] of Object.entries(terminalLaunchCapabilities) as Array<
-		[TerminalMultiplexer, (typeof terminalLaunchCapabilities)[TerminalMultiplexer]]
+		[TerminalMultiplexer, SupportedMultiplexerCapabilities | UnsupportedMultiplexerCapabilities]
 	>) {
 		if (!capabilities.supported) continue;
 		for (const placement of ["pane", "window"] as const) {
 			const capability = capabilities[placement];
-			if (capability && "shellGrammar" in capability && capability.shellGrammar === "posix") {
+			if (capability?.shellGrammar === "posix") {
 				return { multiplexer: multiplexer as TerminalLaunchMultiplexer, placement };
 			}
 		}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/fork pane` and `ctx.ui.openTerminal` work in the Herdr app (herdr-core): the new terminal opens as a pane in the same app tab.
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

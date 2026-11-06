@@ -155,6 +155,12 @@ type OrcaPaneDirectionIsRestricted = AssertFalse<
 		TerminalLaunchRequest
 	>
 >;
+type HerdrCoreWindowIsExcluded = AssertFalse<
+	IsAssignable<
+		{ multiplexer: "herdr-core"; placement: "window"; command: readonly string[]; cwd: string },
+		TerminalLaunchRequest
+	>
+>;
 const terminalLaunchTypeChecks: [
 	ZellijWindowTargetIsExcluded,
 	ZellijFloatingDirectionIsExcluded,
@@ -169,7 +175,8 @@ const terminalLaunchTypeChecks: [
 	OrcaPaneFocusIsExcluded,
 	OrcaPaneShellGrammarIsRequired,
 	OrcaPaneDirectionIsRestricted,
-] = [false, false, true, false, false, true, true, false, false, true, false, false, false];
+	HerdrCoreWindowIsExcluded,
+] = [false, false, true, false, false, true, true, false, false, true, false, false, false, false];
 void terminalLaunchTypeChecks;
 
 describe("generic terminal launch construction", () => {
@@ -1373,5 +1380,102 @@ describe("terminal launch dispatcher", () => {
 			).rejects.toThrow("terminal control bytes");
 		}
 		expect(calls).toEqual([]);
+	});
+
+	describe("Herdr app launches", () => {
+		const herdrCoreEnv = { HC_TERMINAL_ID: "t1d", HC_TERMINAL_SOCKET: "/tmp/herdr-core/default.sock" };
+
+		it("starts a pane in the calling terminal's app space and tab and returns its address", async () => {
+			const { calls, launch } = createHarness(herdrCoreEnv, [
+				{
+					stdout: JSON.stringify({
+						address: "t1d",
+						labels: { "herdr.space": "sp9cda", "herdr.tab": "tb2933", "herdr.seen": "3", where: "repo / 1" },
+						parent: null,
+					}),
+					exitCode: 0,
+				},
+				{ stdout: JSON.stringify({ address: "t1q", parent: "t1d", state: "live", turn: 0 }), exitCode: 0 },
+			]);
+
+			const result = await launch({
+				multiplexer: "herdr-core",
+				placement: "pane",
+				command: ["omp", "--flag"],
+				cwd: "/repo",
+			});
+
+			expect(calls).toEqual([
+				{ argv: ["hc", "get", "t1d", "--json"], cwd: "/repo" },
+				{
+					argv: [
+						"hc",
+						"run",
+						"--bg",
+						"--json",
+						"--no-notify",
+						"--outlive-parent",
+						"--cwd",
+						"/repo",
+						"--label",
+						"herdr.space=sp9cda",
+						"--label",
+						"herdr.tab=tb2933",
+						"--",
+						"omp",
+						"--flag",
+					],
+					cwd: "/repo",
+				},
+			]);
+			expect(result).toEqual({ multiplexer: "herdr-core", placement: "pane", id: "t1q" });
+		});
+
+		it("starts a named child without app labels when the calling terminal has none", async () => {
+			const { calls, launch } = createHarness(herdrCoreEnv, [
+				{ stdout: JSON.stringify({ address: "t1d", labels: {}, parent: null }), exitCode: 0 },
+				{ stdout: JSON.stringify({ address: "t2a" }), exitCode: 0 },
+			]);
+
+			const result = await launch({
+				multiplexer: "herdr-core",
+				placement: "pane",
+				command: ["omp"],
+				cwd: "/repo",
+				name: "fork-1",
+			});
+
+			expect(calls[1]?.argv).toEqual([
+				"hc",
+				"run",
+				"--bg",
+				"--json",
+				"--no-notify",
+				"--outlive-parent",
+				"--cwd",
+				"/repo",
+				"--name",
+				"fork-1",
+				"--",
+				"omp",
+			]);
+			expect(result.id).toBe("t2a");
+		});
+
+		it("rejects a name herdr-core cannot accept before starting a terminal", async () => {
+			const { calls, launch } = createHarness(herdrCoreEnv, []);
+
+			const rejection = launch({
+				multiplexer: "herdr-core",
+				placement: "pane",
+				command: ["omp"],
+				cwd: "/repo",
+				name: "My Fork",
+			});
+
+			await expect(rejection).rejects.toBeInstanceOf(TerminalLaunchError);
+			await expect(rejection).rejects.toMatchObject({ operation: "name" });
+			expect(calls).toEqual([]);
+		});
 	});
 });

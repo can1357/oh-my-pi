@@ -108,6 +108,24 @@ describe("terminal multiplexer classification", () => {
 		expect(classifyTerminalMultiplexer({ ORCA_WORKTREE_ID: "worktree-1" })).toBe(null);
 	});
 
+	it("recognizes a Herdr app terminal only from both hc markers and keeps the direct render path", () => {
+		const herdrCoreEnv = { HC_TERMINAL_ID: "t1d", HC_TERMINAL_SOCKET: "/tmp/herdr-core/default.sock" };
+		for (const env of [
+			{ HC_TERMINAL_ID: "t1d" },
+			{ HC_TERMINAL_SOCKET: "/tmp/herdr-core/default.sock" },
+			{ HC_TERMINAL_ID: " ", HC_TERMINAL_SOCKET: "/tmp/herdr-core/default.sock" },
+			{ HC_TERMINAL_ID: "t1d", HC_TERMINAL_SOCKET: "" },
+			{ TERM_PROGRAM: "ghostty" },
+		]) {
+			expect(hasTerminalMultiplexerSession("herdr-core", env)).toBe(false);
+			expect(classifyTerminalMultiplexer(env)).toBe(null);
+		}
+		expect(classifyTerminalMultiplexer(herdrCoreEnv)).toBe("herdr-core");
+		expect(isInsideTerminalMultiplexer(herdrCoreEnv)).toBe(false);
+		expect(classifyTerminalMultiplexer({ ...herdrCoreEnv, TMUX: "session" })).toBe("tmux");
+		expect(isInsideTerminalMultiplexer({ ...herdrCoreEnv, TMUX: "session" })).toBe(true);
+	});
+
 	it("recognizes session markers through the generic render-path gate", () => {
 		expect(isInsideTerminalMultiplexer({ HERDR_PANE_ID: "p1" })).toBe(true);
 		expect(isInsideTerminalMultiplexer({ WMUX: "1" })).toBe(true);

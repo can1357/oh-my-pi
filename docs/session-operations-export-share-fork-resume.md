@@ -299,11 +299,13 @@ Typing `/fork ` shows `[pane|window|tab]` as dim inline text, and Enter still
 runs the bare in-place fork. Typing a prefix (`/fork w`) opens the suggestions
 with the rest of the selected argument as dim inline text; Tab accepts it.
 
-Placement commands autodetect tmux, Zellij, Herdr, CMUX, or Orca from the terminal;
-`/fork auto` is not a subcommand (valid arguments are `pane`, `window`, and
-`tab`). `window` maps to a tmux window, a Zellij/Herdr/Orca tab, or a CMUX workspace.
-Plain terminals, `screen`, and `wmux` cannot host this fork placement and receive
-an explicit error; use bare `/fork` there instead.
+Placement commands autodetect tmux, Zellij, Herdr, CMUX, Orca, or the Herdr app
+(herdr-core) from the terminal; `/fork auto` is not a subcommand (valid arguments are
+`pane`, `window`, and `tab`). `window` maps to a tmux window, a Zellij/Herdr/Orca tab,
+or a CMUX workspace. The Herdr app supports only `/fork pane`: the child starts as a
+pane in the same app tab, and `window`/`tab` receive an explicit error because hc
+cannot create a tab. Plain terminals, `screen`, and `wmux` cannot host this fork
+placement and receive an explicit error; use bare `/fork` there instead.
 
 ### Preconditions and immediate guards
 

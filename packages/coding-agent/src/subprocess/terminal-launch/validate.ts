@@ -3,10 +3,11 @@ import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer"
 import { terminalLaunchCapabilities } from "./providers";
 import { launchError } from "./shared";
 import {
-	type PlacementCapabilities,
+	type SupportedMultiplexerCapabilities,
 	TerminalLaunchError,
 	type TerminalLaunchMultiplexer,
 	type TerminalLaunchRequest,
+	type UnsupportedMultiplexerCapabilities,
 } from "./types";
 
 const terminalControlBytes = /[\u0000-\u001f\u007f-\u009f]/u;
@@ -26,11 +27,12 @@ export function validateRequest(value: unknown): asserts value is TerminalLaunch
 		throw new TypeError("The requested terminal placement is not supported.");
 	}
 
-	const provider = terminalLaunchCapabilities[multiplexer as TerminalMultiplexer];
+	const provider: SupportedMultiplexerCapabilities | UnsupportedMultiplexerCapabilities =
+		terminalLaunchCapabilities[multiplexer as TerminalMultiplexer];
 	if (!provider.supported) {
 		throw new TerminalLaunchError(provider.reason, multiplexer as TerminalMultiplexer, placement, "capability");
 	}
-	const capabilities = provider[placement] as PlacementCapabilities | undefined;
+	const capabilities = provider[placement];
 	if (!capabilities) {
 		throw new TerminalLaunchError(
 			`${multiplexer} does not support ${placement} launches.`,
