@@ -133,15 +133,18 @@ describe("autoloadSkills in executor", () => {
 			},
 		];
 
-		vi.spyOn(skillsModule, "buildSkillPromptMessage").mockImplementation(async skill => ({
-			message: `Content of ${skill.name}\n\n---\n\nSkill: ${skill.filePath}`,
-			details: {
-				name: skill.name,
-				path: skill.filePath,
-				args: undefined,
-				lineCount: 1,
-			},
-		}));
+		vi.spyOn(skillsModule, "buildSkillPromptMessage").mockImplementation(async skillOrSkills => {
+			const skill = Array.isArray(skillOrSkills) ? skillOrSkills[0] : skillOrSkills;
+			return {
+				message: `Content of ${skill.name}\n\n---\n\nSkill: ${skill.filePath}`,
+				details: {
+					name: skill.name,
+					path: skill.filePath,
+					args: undefined,
+					lineCount: 1,
+				},
+			};
+		});
 
 		await runSubprocess({
 			...baseOptions,
