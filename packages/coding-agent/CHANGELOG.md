@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/quit` and `/exit` no longer wait several seconds for an unresponsive OTLP telemetry collector ([#18255](https://github.com/can1357/oh-my-pi/issues/18255)).
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
