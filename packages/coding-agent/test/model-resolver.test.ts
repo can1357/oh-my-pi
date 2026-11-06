@@ -30,6 +30,7 @@ import {
 	resolveRoleChain,
 	rolePriorityDefaults,
 	resolveProviderModelReference,
+	resolveSessionModelSelector,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1537,6 +1538,55 @@ describe("resolveExactModelIdentity", () => {
 		expect(routed && formatModelStringWithRouting(routed)).toBe("openrouter/z-ai/glm-4.7@cerebras");
 		expect(
 			resolveExactModelIdentity("openrouter/z-ai/glm-4.7@cerebras:high", { getAvailable: () => allModels }),
+		).toBeUndefined();
+	});
+});
+
+describe("resolveSessionModelSelector", () => {
+	const base = buildModel({
+		id: "arcee-ai/trinity-large-preview",
+		name: "Trinity",
+		api: "openai-completions",
+		provider: "openrouter",
+		baseUrl: "https://openrouter.ai/api/v1",
+		reasoning: true,
+		thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	});
+	const registry = (models: Model<Api>[]) =>
+		({
+			find: (provider: string, id: string) => resolveProviderModelReference(provider, id, models),
+			getProviderModels: (provider: string) => models.filter(model => model.provider === provider),
+			hasConfiguredAuth: () => true,
+		}) as unknown as Parameters<typeof resolveSessionModelSelector>[0];
+
+	test.each(["", ":high"])("restores a free variant's upstream routing before fuzzy lookup (%s)", suffix => {
+		const result = resolveSessionModelSelector(registry([base]), `openrouter/${base.id}:free@cerebras${suffix}`);
+		expect(result?.model.id).toBe(`${base.id}:free`);
+		expect(
+			(result?.model.compat as { openRouterRouting?: { only?: string[] } } | undefined)?.openRouterRouting?.only,
+		).toEqual(["cerebras"]);
+		expect(result?.thinkingLevel).toBe(suffix ? Effort.High : undefined);
+	});
+
+	test.each(["@cerebras", ":free@cerebras", ":free@cerebras:high"])(
+		"preserves an exact registered identity containing %s",
+		suffix => {
+			const literal = { ...base, id: `${base.id}${suffix}` };
+			const result = resolveSessionModelSelector(registry([base, literal]), `openrouter/${literal.id}`);
+			expect(result?.model).toBe(literal);
+			expect(result?.thinkingLevel).toBeUndefined();
+		},
+	);
+
+	test("keeps ordinary OpenRouter suffix fallback", () => {
+		const result = resolveSessionModelSelector(registry([base]), `openrouter/${base.id}:free`);
+		expect(result?.model.id).toBe(`${base.id}:free`);
+		expect(
+			(result?.model.compat as { openRouterRouting?: { only?: string[] } } | undefined)?.openRouterRouting?.only,
 		).toBeUndefined();
 	});
 });

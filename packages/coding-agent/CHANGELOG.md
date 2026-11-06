@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Fixed resuming routed OpenRouter `:free` models sending the pinned upstream as part of the model ID ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed manual `/prewalk` takeover of an automatic arm losing the planning-model restoration from a completed handoff ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed concurrent saves to different model roles discarding an unrelated global or project role assignment ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed canceled context promotion compacting a newly opened session after `/new` or a session switch ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed superseded role-model cycles incorrectly reporting that only one role model is available ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed a rejected transcript switch reviving an automatic prewalk target after an explicit model or thinking selection consumed its arm, while preserving pending handoffs when no selection intervenes ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))

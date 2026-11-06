@@ -402,6 +402,77 @@ describe("AgentSession model persistence", () => {
 
 	it.each(
 		(["global", "project"] as const).flatMap(persistScope =>
+			(["default", "smol"] as const).map(newerRole => ({ persistScope, newerRole })),
+		),
+	)("a newer $persistScope $newerRole save supersedes only its own role", async ({ persistScope, newerRole }) => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const older = getAnthropicModelOrThrow("claude-opus-4-6");
+		const newer = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const agentDir = path.join(tempDir.path(), "config");
+		const diskSettings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir });
+		const created = await createSession({
+			initialModel: source,
+			settings: diskSettings,
+			modelRoles: { default: modelValue(source), smol: modelValue(source) },
+		});
+		if (persistScope === "project") {
+			created.settings.setProjectModelRole("default", modelValue(source));
+			created.settings.setProjectModelRole("smol", modelValue(source));
+		}
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const reconcile = SessionTools.prototype.reconcileThinkTool;
+		let held = false;
+		const reconciliation = vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (
+			this: SessionTools,
+			...args
+		) {
+			if (!held && created.session.model?.id === older.id) {
+				held = true;
+				entered.resolve();
+				await release.promise;
+			}
+			return reconcile.apply(this, args);
+		});
+		const pending = created.session.setModel(older, "default", {
+			persist: true,
+			persistScope,
+			persistAutoThinking: true,
+		});
+		try {
+			await entered.promise;
+			await created.session.setModel(newer, newerRole, { persist: true, persistScope });
+			created.session.setThinkingLevel(Effort.Low, true);
+		} finally {
+			release.resolve();
+			await pending;
+			reconciliation.mockRestore();
+		}
+		expect(await pending).toEqual({ switched: false });
+		expect(created.session.model?.id).toBe(newer.id);
+		expect(created.session.configuredThinkingLevel()).toBe(Effort.Low);
+		await diskSettings.flush();
+		const reloaded = await Settings.loadReadOnly({ cwd: tempDir.path(), agentDir });
+		for (const settings of [created.settings, reloaded]) {
+			expect(cfgDefaultThinkingLevel.get(settings)).toBe(Effort.Low);
+			const expectedDefault = modelValue(newerRole === "default" ? newer : older);
+			const expectedSmol = modelValue(newerRole === "smol" ? newer : source);
+			if (persistScope === "project") {
+				expect(settings.getProjectModelRole("default")).toBe(expectedDefault);
+				expect(settings.getProjectModelRole("smol")).toBe(expectedSmol);
+				expect(settings.getGlobalModelRole("default")).toBe(modelValue(source));
+				expect(settings.getGlobalModelRole("smol")).toBe(modelValue(source));
+			} else {
+				expect(settings.getGlobalModelRole("default")).toBe(expectedDefault);
+				expect(settings.getGlobalModelRole("smol")).toBe(expectedSmol);
+				expect(settings.getProjectModelRole("default")).toBeUndefined();
+				expect(settings.getProjectModelRole("smol")).toBeUndefined();
+			}
+		}
+	});
+
+	it.each(
+		(["global", "project"] as const).flatMap(persistScope =>
 			(["reload", "switch"] as const).flatMap(transition =>
 				(["none", "before", "after"] as const).map(newer => ({ persistScope, transition, newer })),
 			),

@@ -1775,10 +1775,14 @@ export function disabledProviderIds(settings?: Settings): ReadonlySet<string> {
 }
 
 function parseSessionModelSelector(modelRegistry: ModelRegistry, selector: string) {
-	return parseModelString(selector, {
-		...MAX_THINKING_SUFFIX_OPTIONS,
-		isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
-	});
+	const parsed = parseModelString(selector, MAX_THINKING_SUFFIX_OPTIONS);
+	if (!parsed) return undefined;
+	const literalId = selector.slice(parsed.provider.length + 1);
+	return modelRegistry
+		.getProviderModels(parsed.provider)
+		.some(model => model.id.toLowerCase() === literalId.toLowerCase())
+		? { provider: parsed.provider, id: literalId }
+		: parsed;
 }
 
 /**
@@ -1797,14 +1801,17 @@ export function resolveSessionModelSelector(
 	const parsed = parseSessionModelSelector(modelRegistry, selector);
 	if (!parsed) return undefined;
 	let model = modelRegistry.find(parsed.provider, parsed.id);
-	if (!model) {
-		const routing = splitUpstreamRouting(parsed.id);
-		if (routing) {
-			const base = modelRegistry.find(parsed.provider, routing.base);
-			if (base && supportsUpstreamRouting(base)) {
-				model =
-					getSingleUpstreamRoute(base) === routing.upstream ? base : applyUpstreamRouting(base, routing.upstream);
-			}
+	const routing = splitUpstreamRouting(parsed.id);
+	if (
+		routing &&
+		!modelRegistry
+			.getProviderModels(parsed.provider)
+			.some(candidate => candidate.id.toLowerCase() === parsed.id.toLowerCase())
+	) {
+		const base = modelRegistry.find(parsed.provider, routing.base);
+		if (base && supportsUpstreamRouting(base)) {
+			model =
+				getSingleUpstreamRoute(base) === routing.upstream ? base : applyUpstreamRouting(base, routing.upstream);
 		}
 	}
 	if (!model || !modelRegistry.hasConfiguredAuth(model)) return undefined;

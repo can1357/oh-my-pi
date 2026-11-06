@@ -456,7 +456,9 @@ export class PrewalkCoordinator {
 	/** Arms a prewalk immediately for an explicit slash-command request, replacing an automatic arm. */
 	arm(target: Model, thinkingLevel?: ConfiguredThinkingLevel): boolean {
 		if (this.#autoArm && this.#autoArm === this.#prewalk) {
-			this.releaseHandoffAndAutoArm();
+			this.#host.invalidateAutomaticSelection();
+			this.#scrubPlanNudge(undefined, true);
+			this.#clearPrewalkState();
 		}
 		const active = this.#prewalk;
 		if (active) {

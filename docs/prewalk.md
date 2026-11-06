@@ -85,7 +85,7 @@ Run these slash commands without restarting OMP:
 
 After a handoff, `/prewalk restart` immediately returns the session to `from` and re-arms the handoff to `into`; omitted arguments use `prewalk.from` and `prewalk.into`. Arguments apply to that command only and are not remembered. Selectors are resolved when the command runs, so role reassignments take effect, and neither role's persisted configuration changes.
 
-If prewalk is already armed, `/prewalk` leaves the existing target in place. `/prewalk restart` preserves a matching target and effort as a fresh handoff attempt, so an older switch cannot consume a successful restart. If another operation consumes, disarms, or replaces that arm while the planning model is being restored, restart is rejected rather than reporting an inactive arm as successful. A different existing target from the requested `into` rejects restart before changing the active model. To choose a different target at startup, use `--prewalk-into`.
+If a manual, configured, or startup prewalk is already armed, `/prewalk` leaves its target and effort in place. A pending automatic arm is different: `/prewalk` takes it over with the requested target and effort, even when either differs. Arming alone does not discard a previous completed handoff's planning-model restoration; an actual model or effort selection does. `/prewalk restart` preserves a matching target and effort as a fresh handoff attempt, so an older switch cannot consume a successful restart. If another operation consumes, disarms, or replaces that arm while the planning model is being restored, restart is rejected rather than reporting an inactive arm as successful. A different existing target or effort from the requested `into` rejects restart before changing the active model. To choose a different target at startup, use `--prewalk-into`.
 
 ## Auto-prewalk
 
@@ -177,7 +177,7 @@ A follow-up such as `do that` or `continue` cannot be judged alone, so the judge
 
 A negative, direct, or sub-threshold decision, or a classifier error, leaves the model, thinking level, and prewalk exactly as they were.
 
-A pending prewalk from `/prewalk`, `prewalk.enabled`, or `--prewalk` is never replaced, retargeted, or reclassified. `/prewalk off` and `--no-prewalk` keep auto-prewalk out of the session (for `--no-prewalk`, the startup session) until `/new`, and neither switches models. An explicit `/prewalk` takes over a pending auto arm, even when the requested target or effort differs; a matching `/prewalk restart` also takes manual ownership.
+A pending prewalk from `/prewalk`, `prewalk.enabled`, or `--prewalk` keeps its target and effort: neither auto-prewalk nor another `/prewalk` replaces or retargets it, and auto-prewalk does not reclassify it. `/prewalk off` and `--no-prewalk` keep auto-prewalk out of the session (for `--no-prewalk`, the startup session) until `/new`, and neither switches models. An explicit `/prewalk` takes over a pending auto arm using the requested target and effort; a matching `/prewalk restart` also takes manual ownership.
 
 ### Failure behavior
 

@@ -23,7 +23,7 @@ import { PrewalkCoordinator, type PrewalkCoordinatorHost } from "@oh-my-pi/pi-co
 import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
-import { cfgPrewalkAuto, cfgPrewalkEnabled } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgPrewalkAuto, cfgPrewalkEnabled, cfgPrewalkInto } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { EAGER_TODO_PRELUDE_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/todo-tracker";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -1353,6 +1353,47 @@ describe("AgentSession auto-prewalk", () => {
 			expect(asked(calls)).toHaveLength(0);
 			expect(f.requested).toEqual([f.primary.id, f.primary.id, configured.id]);
 		});
+
+		it.each(
+			(["manual", "configured", "startup"] as const).flatMap(origin =>
+				(["no-op", "new target and effort"] as const).map(takeover => ({ origin, takeover })),
+			),
+		)(
+			"a $takeover manual takeover preserves the completed $origin handoff for /new",
+			async ({ origin, takeover }) => {
+				stubJudge([PREWALK]);
+				const opus = modelOrThrow("claude-opus-4-6");
+				const sonnet = modelOrThrow("claude-sonnet-4-6");
+				const haiku = modelOrThrow("claude-haiku-4-5");
+				const f = createFixture([...cycle(), done("plan only")], {
+					auto: "on",
+					primary: opus,
+					target: haiku,
+					startupArm: origin === "startup" ? sonnet : undefined,
+				});
+				cfgPrewalkInto.override(f.settings, `${formatModelStringWithRouting(sonnet)}:low`);
+				if (origin === "manual") {
+					expect(await executeBuiltinSlashCommand("/prewalk", { ctx: f.ctx })).toBe(true);
+				}
+				cfgPrewalkEnabled.override(f.settings, true);
+				await f.session.prompt(TASK);
+				expect(f.session.model?.id).toBe(sonnet.id);
+				expect(f.session.configuredThinkingLevel()).toBe(Effort.Low);
+
+				await f.session.prompt("plan another implementation");
+				expect(f.session.getPrewalkState()?.target.id).toBe(haiku.id);
+				const command = takeover === "no-op" ? "/prewalk" : "/prewalk anthropic/claude-opus-4-6:medium";
+				expect(await executeBuiltinSlashCommand(command, { ctx: f.ctx })).toBe(true);
+				if (takeover === "no-op") expect(f.session.getPrewalkState()).toBeUndefined();
+				else expect(f.session.getPrewalkState()).toMatchObject({ target: opus, thinkingLevel: Effort.Medium });
+				expect(f.session.model?.id).toBe(sonnet.id);
+
+				expect(await f.session.newSession()).toBe(true);
+				expect(f.session.model?.id).toBe(opus.id);
+				expect(f.session.configuredThinkingLevel()).toBe(Effort.High);
+				expect(f.session.getPrewalkState()).toMatchObject({ target: sonnet, thinkingLevel: Effort.Low });
+			},
+		);
 
 		it.each(["arm", "restart"] as const)(
 			"an explicit matching /prewalk %s takes over a pending auto arm, so the next task keeps it",

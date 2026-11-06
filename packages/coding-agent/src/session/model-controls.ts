@@ -177,7 +177,7 @@ interface ModelPublicationScope {
 	preparation: object;
 	livePublication: number;
 	resumePublication: number;
-	settingsPublication: number;
+	settingsPublications: Map<string, number>;
 }
 
 interface ModelPublicationSnapshot {
@@ -198,14 +198,14 @@ export class ModelControls {
 	#automaticInvalidation = 0;
 	#modelPublication = 0;
 	// Global preferences outlive transcript scopes and have independent model/effort owners.
-	#globalSettingsPublication = 0;
+	#globalSettingsPublications = new Map<string, number>();
 	#thinkingSettingsGeneration = 0;
 	// /clear and /new keep published model owners; a rejected transcript switch restores them.
 	#publicationScope: ModelPublicationScope = {
 		preparation: {},
 		livePublication: 0,
 		resumePublication: 0,
-		settingsPublication: 0,
+		settingsPublications: new Map(),
 	};
 	#serviceTierByFamily: ServiceTierByFamily;
 
@@ -247,7 +247,12 @@ export class ModelControls {
 	/** A transcript switch starts a fresh scope; the returned snapshot reinstates the origin if the switch rolls back. */
 	beginPublicationScope(): ModelPublicationSnapshot {
 		const snapshot = { scope: this.#publicationScope, selectionGeneration: this.#selectionGeneration };
-		this.#publicationScope = { preparation: {}, livePublication: 0, resumePublication: 0, settingsPublication: 0 };
+		this.#publicationScope = {
+			preparation: {},
+			livePublication: 0,
+			resumePublication: 0,
+			settingsPublications: new Map(),
+		};
 		return snapshot;
 	}
 
@@ -403,16 +408,16 @@ export class ModelControls {
 			publication = scope.livePublication = ++this.#modelPublication;
 			if (role !== EPHEMERAL_MODEL_CHANGE_ROLE) scope.resumePublication = publication;
 			if (options?.persist) {
-				if (options.persistScope === "project") scope.settingsPublication = publication;
-				else this.#globalSettingsPublication = publication;
+				if (options.persistScope === "project") scope.settingsPublications.set(role, publication);
+				else this.#globalSettingsPublications.set(role, publication);
 				if (options.persistAutoThinking) thinkingSettingsGeneration = ++this.#thinkingSettingsGeneration;
 			}
 		});
 		await this.#recordModelReceipt(targetModel, role, publication, scope);
 		const ownsSettings =
 			options?.persistScope === "project"
-				? this.#publicationScope === scope && scope.settingsPublication === publication
-				: this.#globalSettingsPublication === publication;
+				? this.#publicationScope === scope && scope.settingsPublications.get(role) === publication
+				: this.#globalSettingsPublications.get(role) === publication;
 		if (roleValue !== undefined && ownsSettings) {
 			if (options?.persistScope === "project") {
 				this.#host.settings.setProjectModelRole(role, roleValue);
