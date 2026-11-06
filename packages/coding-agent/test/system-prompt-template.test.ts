@@ -366,11 +366,16 @@ describe("system prompt Handlebars templates", () => {
 });
 
 describe("per-model system prompt template", () => {
+	// Every per-model template must reference the required fields. This guard's condition is never
+	// set, so it renders nothing and the fixtures' output stays exactly their literal text.
+	const requiredFieldsGuard =
+		"{{#if requiredFieldsGuard}}{{subagent}}{{toolInventory}}{{xdevDocs}}{{skills}}{{rules}}{{alwaysApplyRules}}{{internalUrls}}{{/if}}";
+
 	async function writeModelTemplates(cwd: string): Promise<Record<string, string>> {
 		const routerPath = path.join(cwd, "templates", "router.md");
 		const qwenPath = path.join(cwd, "templates", "qwen.md");
-		await Bun.write(routerPath, "ROUTER TEMPLATE {{model}}");
-		await Bun.write(qwenPath, "QWEN TEMPLATE {{model}}");
+		await Bun.write(routerPath, `ROUTER TEMPLATE {{model}}${requiredFieldsGuard}`);
+		await Bun.write(qwenPath, `QWEN TEMPLATE {{model}}${requiredFieldsGuard}`);
 		// The shorter key comes first so a match on the longer key cannot be an insertion-order accident.
 		return { qwen: qwenPath, "openrouter/qwen": routerPath };
 	}
@@ -481,6 +486,85 @@ describe("per-model system prompt template", () => {
 			});
 		});
 	}
+
+	// Pinned here, not imported: dropping a field from the implementation's list must redden these tests.
+	const requiredFields = [
+		"subagent",
+		"toolInventory",
+		"xdevDocs",
+		"skills",
+		"rules",
+		"alwaysApplyRules",
+		"internalUrls",
+	];
+
+	const missingFieldCases: Array<{ name: string; content: string; missing: string[] }> = [
+		{
+			name: "only cosmetic fields",
+			content: "BARE TEMPLATE {{model}}{{#if renderSvg}}svg{{/if}}",
+			missing: requiredFields,
+		},
+		{
+			name: "some required fields, with the rest only in comments",
+			content: [
+				"PARTIAL TEMPLATE",
+				"{{!-- {{subagent}} --}}{{! xdevDocs }}",
+				"{{toolInventory}}{{internalUrls}}",
+				"{{#each skills}}{{name}}{{/each}}{{#if rules.length}}r{{/if}}{{#each alwaysApplyRules}}{{content}}{{/each}}",
+			].join("\n"),
+			missing: ["subagent", "xdevDocs"],
+		},
+	];
+	for (const { name, content, missing } of missingFieldCases) {
+		it(`rejects a model template referencing ${name}, naming exactly the missing fields`, async () => {
+			await withDiscoveryHome(async ({ cwd }) => {
+				const templatePath = path.join(cwd, "templates", "claude.md");
+				await Bun.write(templatePath, content);
+				const build = buildSystemPrompt(
+					options(cwd, { model: "anthropic/claude-test", modelSystemPromptTemplates: { claude: templatePath } }),
+				);
+				const error = await build.then(
+					() => undefined,
+					(reason: unknown) => reason,
+				);
+				expect(error).toBeInstanceOf(Error);
+				const message = (error as Error).message;
+				expect(message).toContain(templatePath);
+				const listed = [...message.matchAll(/\{\{(\w+)\}\}/g)].map(match => match[1]);
+				expect(listed.toSorted()).toEqual(missing.toSorted());
+			});
+		});
+	}
+
+	it("renders a model template that references every required field, even only inside false branches", async () => {
+		await withDiscoveryHome(async ({ cwd }) => {
+			const templatePath = path.join(cwd, "templates", "claude.md");
+			await Bun.write(
+				templatePath,
+				[
+					"COMPLETE TEMPLATE",
+					"{{#if subagent}}{{xdevDocs}}{{/if}}",
+					"{{#if neverSet}}{{toolInventory}}{{internalUrls}}{{else}}INVERSE BRANCH{{/if}}",
+					"{{#each skills}}{{name}}{{/each}}{{#if rules.length}}r{{/if}}{{#each alwaysApplyRules}}{{content}}{{/each}}",
+				].join("\n"),
+			);
+			const result = await buildSystemPrompt(
+				options(cwd, { model: "anthropic/claude-test", modelSystemPromptTemplates: { claude: templatePath } }),
+			);
+			const text = result.systemPrompt.join("\n\n");
+			expect(text).toContain("COMPLETE TEMPLATE");
+			expect(text).toContain("INVERSE BRANCH");
+			expect(text).not.toContain("RFC 2119 keywords");
+		});
+	});
+
+	it("does not require the fields in an explicit systemPromptTemplate", async () => {
+		await withDiscoveryHome(async ({ cwd }) => {
+			const { text } = await render(cwd, "EXPLICIT TEMPLATE {{model}}", { model: "anthropic/claude-test" });
+			expect(text).toContain("EXPLICIT TEMPLATE");
+			expect(text).not.toContain("RFC 2119 keywords");
+		});
+	});
 });
 
 describe("systemPromptTemplates config validation", () => {

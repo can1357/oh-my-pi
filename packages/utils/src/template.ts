@@ -557,6 +557,62 @@ export function compile<T = unknown>(source: string, options: CompileOptions = {
 	};
 }
 
+function addPathRoot(path: string, roots: Set<string>): void {
+	if (path.startsWith("@") || path.startsWith("../")) return;
+	const root = pathParts(path)[0];
+	if (root && root !== "this" && root !== ".") roots.add(root);
+}
+
+function collectExpressionRoots(expression: Expression, roots: Set<string>): void {
+	if (expression.kind === "literal") return;
+	if (expression.kind === "path") {
+		addPathRoot(expression.value, roots);
+		return;
+	}
+	collectCallRoots(expression, roots, true);
+}
+
+function collectCallRoots(call: CallExpression, roots: Set<string>, nameIsReference: boolean): void {
+	const hashValues = Object.values(call.hash);
+	if (nameIsReference && call.args.length === 0 && hashValues.length === 0) addPathRoot(call.name, roots);
+	for (const arg of call.args) collectExpressionRoots(arg, roots);
+	for (const value of hashValues) collectExpressionRoots(value, roots);
+}
+
+function collectNodeRoots(nodes: Node[], roots: Set<string>): void {
+	for (const node of nodes) {
+		switch (node.kind) {
+			case "text":
+				break;
+			case "output":
+				collectCallRoots(node.expression, roots, true);
+				break;
+			case "block":
+				collectCallRoots(node.expression, roots, true);
+				collectNodeRoots(node.body, roots);
+				collectNodeRoots(node.inverse, roots);
+				break;
+			case "partial":
+				// The partial name selects a registered template, not a data field.
+				collectCallRoots(node.expression, roots, false);
+				break;
+		}
+	}
+}
+
+/**
+ * Collect the root data fields a template references anywhere in its AST
+ * (`{{foo.bar}}`, `{{#if foo}}`, `{{#each foo}}`, helper args, hash values,
+ * sub-expressions), whether or not that branch would render. Context-relative
+ * (`this`, `.`), parent (`../`), and `@`-data paths are excluded. Throws on
+ * templates that fail to parse.
+ */
+export function referencedRoots(source: string): Set<string> {
+	const roots = new Set<string>();
+	collectNodeRoots(parseTemplate(stripStandalone(source)), roots);
+	return roots;
+}
+
 /** Create an isolated template engine with its own helper and partial registries. */
 export function create(): TemplateEngine {
 	return new TemplateEngine();

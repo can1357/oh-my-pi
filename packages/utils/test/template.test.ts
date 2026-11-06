@@ -147,3 +147,56 @@ describe("template semantics", () => {
 		expect(engine.compile("{{name}}/{{missing.path}}")({ name: "property" })).toBe("helper/");
 	});
 });
+
+describe("referencedRoots", () => {
+	const cases: { name: string; source: string; expected: string[] }[] = [
+		{
+			name: "reports only the first segment of dotted and bracketed output paths",
+			source: "{{user.name}}|{{{raw.html}}}|{{&amp.value}}|{{user.[display name]}}|{{[literal.key].x}}",
+			expected: ["user", "raw", "amp", "literal.key"],
+		},
+		{
+			name: "includes roots inside branches that would not execute and inverse sections",
+			source:
+				"{{#if never}}{{inBody}}{{else if chained}}{{inChain.x}}{{else}}{{inInverse}}{{/if}}{{#unless gone}}{{inUnless}}{{/unless}}",
+			expected: ["never", "inBody", "chained", "inChain", "inInverse", "gone", "inUnless"],
+		},
+		{
+			name: "includes block params and skips this, data, and parent paths inside them",
+			source:
+				"{{#each skills}}{{this}}{{this.name}}{{.}}{{@index}}{{@key}}{{@root.title}}{{../outer}}{{../../outer2}}{{else}}{{noSkills}}{{/each}}{{#with rules}}{{.}}{{/with}}{{#if skills.length}}n{{/if}}",
+			expected: ["skills", "noSkills", "rules"],
+		},
+		{
+			name: "includes helper args, hash values, and nested sub-expression args but not helper names or literals",
+			source:
+				'{{#has tools "read" 1 true}}x{{/has}}{{label (eq left (lookup map key)) prefix=suffix lit="s"}}{{#list items join=(sep tag)}}{{/list}}',
+			expected: ["tools", "left", "map", "key", "suffix", "items", "tag"],
+		},
+		{
+			name: "includes partial args",
+			source: "{{> card person}}",
+			expected: ["person"],
+		},
+		{
+			name: "ignores references that only appear in comments",
+			source: "{{! short note }}{{!-- {{subagent}} {{#if xdevDocs}}{{/if}} --}}\n{{!--\n{{rules}}\n--}}\n{{kept}}",
+			expected: ["kept"],
+		},
+		{
+			name: "reports nothing for a top-level this, data, or parent path",
+			source: "{{this}}{{this.x}}{{@root.title}}{{@index}}{{../up}}",
+			expected: [],
+		},
+	];
+	for (const { name, source, expected } of cases) {
+		it(name, () => {
+			expect(prompt.referencedRoots(source)).toEqual(new Set(expected));
+		});
+	}
+
+	it("propagates template parse errors", () => {
+		expect(() => prompt.referencedRoots("{{#if a}}open")).toThrow("unclosed block if");
+		expect(() => prompt.referencedRoots("{{#if a}}x{{/each}}")).toThrow("mismatched /each");
+	});
+});

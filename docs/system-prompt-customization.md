@@ -196,7 +196,17 @@ systemPromptTemplates:
 
 Keys match the active `provider/model-id` as case-insensitive substrings. When several keys match, the longest (most specific) wins, so `openrouter/qwen` beats `qwen` regardless of config order. Keys must not be blank: use `SYSTEM.md` or `APPEND_SYSTEM.md` for a prompt that applies to every model. Template paths must be absolute or start with `~/`, because relative paths would point at a different file in each project and in subagent worktrees.
 
-Templates use the same Handlebars fields as `SYSTEM_TEMPLATE.md`, and they also apply to subagent sessions. A template should ideally reference every field the bundled prompt uses (including `{{subagent}}`, `{{toolInventory}}`, and `{{xdevDocs}}`). It still works without them, but the agent gets less guidance and performs worse. Copying `system-prompt.md` is the safest starting point.
+Templates use the same Handlebars fields as `SYSTEM_TEMPLATE.md`, and they also apply to subagent sessions. A template **MUST** reference every field below, because the prompt block for each is produced only by the template:
+
+- `{{subagent}}`
+- `{{toolInventory}}`
+- `{{xdevDocs}}`
+- `{{skills}}`
+- `{{rules}}`
+- `{{alwaysApplyRules}}`
+- `{{internalUrls}}`
+
+These count wherever the field appears in the template, even inside a branch that never renders (a comment does not count). A template missing any of them is rejected with an error naming the file and the missing fields, instead of silently dropping that guidance. Copying `system-prompt.md` is the safest starting point.
 
 The prompt re-renders whenever the selected template changes: on `/model` and role switches, on retry-fallback hops, and when `systemPromptTemplates` is edited mid-session. Explicit and discovered prompts (`--system-prompt`, `--system-prompt-template`, `SYSTEM.md`, `SYSTEM_TEMPLATE.md`) take precedence, and the per-model file is not read while one of them applies. If the selected file is missing, OMP logs a warning and uses the bundled prompt. An empty or invalid template file is an error.
 

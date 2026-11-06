@@ -3,6 +3,7 @@ import type { HelperDelegate, Template } from "./template";
 import * as Handlebars from "./template";
 
 export type { HelperDelegate, HelperOptions, Template, TemplateDelegate } from "./template";
+export { referencedRoots } from "./template";
 
 export type PromptRenderPhase = "pre-render" | "post-render";
 

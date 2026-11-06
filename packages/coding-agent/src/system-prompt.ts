@@ -317,6 +317,40 @@ export function matchModelSystemPromptTemplate(
 	return best === undefined ? undefined : templates[best];
 }
 
+/**
+ * Data fields a `systemPromptTemplates` file must reference: omitting one silently strips that
+ * section from the prompt, so a template that drops any of them is rejected instead.
+ */
+export const REQUIRED_MODEL_TEMPLATE_FIELDS = [
+	"subagent",
+	"toolInventory",
+	"xdevDocs",
+	"skills",
+	"rules",
+	"alwaysApplyRules",
+	"internalUrls",
+] as const;
+
+/** Single wording for a template that fails to parse, shared by the field check and the render. */
+function invalidTemplateError(error: unknown): Error {
+	return new Error(`Invalid system prompt template: ${String(error)}`, { cause: error });
+}
+
+function assertModelTemplateFields(template: string, templatePath: string): void {
+	let referenced: Set<string>;
+	try {
+		referenced = prompt.referencedRoots(template);
+	} catch (error) {
+		throw invalidTemplateError(error);
+	}
+	const missing = REQUIRED_MODEL_TEMPLATE_FIELDS.filter(field => !referenced.has(field));
+	if (missing.length > 0) {
+		throw new Error(
+			`systemPromptTemplates template ${templatePath} is missing required fields: ${missing.map(field => `{{${field}}}`).join(", ")}`,
+		);
+	}
+}
+
 /** Resolve input as file path or literal string */
 export async function resolvePromptInput(input: string | undefined, description: string): Promise<string | undefined> {
 	if (!input) {
@@ -780,6 +814,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 				path: templateFile,
 			});
 		}
+		if (resolvedSystemPromptTemplate !== undefined) {
+			assertModelTemplateFields(resolvedSystemPromptTemplate, modelTemplatePath);
+		}
 	}
 
 	const prepDefaults = {
@@ -1101,7 +1138,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	} catch (error) {
 		if (resolvedSystemPromptTemplate === undefined) throw error;
 		if (!hasDiscoveredTemplate) {
-			throw new Error(`Invalid system prompt template: ${String(error)}`, { cause: error });
+			throw invalidTemplateError(error);
 		}
 		logger.warn("Ignoring invalid discovered system prompt template; using the bundled prompt", {
 			error: String(error),
