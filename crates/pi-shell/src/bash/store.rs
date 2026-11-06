@@ -1182,6 +1182,18 @@ pub enum MiscKey {
 	/// (`Record::Misc`); absent for a user's shell. Nested shells see the
 	/// root's record.
 	Profile,
+	/// Statuses of jobs that left the root table (bash `bgpids`;
+	/// `Record::Words`, one `vpid:ospid:status` each, `ospid` empty when
+	/// none); absent when there are none.
+	BgPids,
+	/// [`crate::bash::vm::proc::JobTable::bang_seen`] of the root shell
+	/// (decimal); absent when zero.
+	BangSeen,
+	/// Optional postcard-encoded job/wait execution state accompanying the
+	/// `Frames` blob (`Record::Misc`), consumed with it. Absent in images
+	/// from engines without retained child statuses. Root retained statuses
+	/// remain in `BgPids` and `BangSeen`, even without frames.
+	JobFrames,
 }
 
 crate::bash::packed_names::packed_names!(MiscKey);

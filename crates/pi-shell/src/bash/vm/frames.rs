@@ -20,6 +20,12 @@
 //! contents inline). Restore rebuilds each once, so shared fds stay shared
 //! and a pipe counts exactly the ends restored fds hold. Only host files
 //! (and what externals held) are lost.
+//!
+//! Retained child statuses and wait bookkeeping use the optional keyed
+//! `JobFrames` store record, not new fields in the version-29 frames wire
+//! layout. Its absence means no such state was saved; it does not invent
+//! statuses an upstream engine already forgot. Root retained statuses are
+//! still in `BgPids`/`BangSeen` independently of the frames blob.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -94,6 +100,52 @@ struct Image {
 	bangs:     Vec<super::proc::Bang>,
 	/// Their commands' redirections still deciding ([`Kernel::deferrals`]).
 	deferrals: Vec<super::proc::Deferral>,
+}
+
+/// Job state omitted from the stable frames layout, by vproc. Only
+/// subshells need `ended`: the root's retained statuses live in the store.
+#[derive(Default, Serialize, Deserialize)]
+struct SavedJobs {
+	ended: Option<Box<super::proc::Ended>>,
+	waits: Vec<(usize, SavedWait)>,
+}
+
+/// The fields skipped by `Awaited`'s upstream-compatible wire forms.
+#[derive(Serialize, Deserialize)]
+enum SavedWait {
+	Jobs { foreground: bool, kept: Option<(u32, i32)> },
+	AllJobs { keep: u32 },
+	AnyJob { kept: Option<(u32, i32)>, woke: bool },
+}
+
+impl SavedWait {
+	const fn from_awaited(wait: Awaited) -> Option<Self> {
+		match wait {
+			Awaited::Jobs { foreground, kept, .. } if foreground || kept.is_some() => {
+				Some(Self::Jobs { foreground, kept })
+			},
+			Awaited::AllJobs { keep: Some(keep) } => Some(Self::AllJobs { keep }),
+			Awaited::AnyJob { kept, woke } if kept.is_some() || woke => {
+				Some(Self::AnyJob { kept, woke })
+			},
+			_ => None,
+		}
+	}
+
+	const fn restore(self, waiting: &mut Option<Awaited>) {
+		match (self, waiting) {
+			(Self::Jobs { foreground, kept }, Some(Awaited::Jobs { foreground: fg, kept: k, .. })) => {
+				*fg = foreground;
+				*k = kept;
+			},
+			(Self::AllJobs { keep }, Some(Awaited::AllJobs { keep: k })) => *k = Some(keep),
+			(Self::AnyJob { kept, woke }, Some(Awaited::AnyJob { kept: k, woke: w })) => {
+				*k = kept;
+				*w = woke;
+			},
+			_ => {},
+		}
+	}
 }
 
 /// One fd object.
@@ -521,9 +573,20 @@ impl Shell {
 		let mut procs = Vec::with_capacity(self.procs.len());
 		let mut runs = Vec::new();
 		let mut fds = FdImager::default();
+		let mut job_frames = HashMap::new();
 		for p in &mut self.procs {
+			let mut jobs = SavedJobs::default();
 			let mut frames = Vec::with_capacity(p.frames.len());
-			for f in &mut p.frames {
+			for (index, f) in p.frames.iter_mut().enumerate() {
+				if let Some(wait) = f
+					.scratch
+					.as_ref()
+					.and_then(|s| s.exec.as_ref())
+					.and_then(|e| e.waiting)
+					.and_then(SavedWait::from_awaited)
+				{
+					jobs.waits.push((index, wait));
+				}
 				if let Some(unit) = &f.unit
 					&& self.k.written.insert(unit.id)
 				{
@@ -583,17 +646,24 @@ impl Shell {
 				},
 				None => None,
 			};
-			let fields = p.overlay.as_ref().map(|overlay| Fields {
-				scopes:     p.scopes.clone(),
-				cwd:        p.cwd.clone(),
-				status:     p.status,
-				pipestatus: p.pipestatus.clone(),
-				overlay:    overlay.clone(),
-				jobs:       p.jobs.clone(),
-				last_bg:    p.last_bg,
-				getopts:    p.getopts.clone(),
-				rlimits:    p.rlimits.clone(),
+			let fields = p.overlay.as_ref().map(|overlay| {
+				let mut table = p.jobs.clone();
+				jobs.ended = table.ended.take();
+				Fields {
+					scopes:     p.scopes.clone(),
+					cwd:        p.cwd.clone(),
+					status:     p.status,
+					pipestatus: p.pipestatus.clone(),
+					overlay:    overlay.clone(),
+					jobs:       table,
+					last_bg:    p.last_bg,
+					getopts:    p.getopts.clone(),
+					rlimits:    p.rlimits.clone(),
+				}
 			});
+			if jobs.ended.is_some() || !jobs.waits.is_empty() {
+				job_frames.insert(p.vpid, jobs);
+			}
 			procs.push(ProcImage {
 				vpid: p.vpid,
 				parent: p.parent,
@@ -647,6 +717,14 @@ impl Shell {
 		};
 		let mut bytes = postcard::to_stdvec(&header).map_err(ExtError::Encode)?;
 		bytes.extend_from_slice(&postcard::to_stdvec(&image).map_err(ExtError::Encode)?);
+		let key = Key::Misc(MiscKey::JobFrames);
+		if job_frames.is_empty() {
+			cx.store.apply(Change::Del(key))?;
+		} else {
+			let saved = postcard::to_stdvec(&job_frames).map_err(ExtError::Encode)?;
+			cx.store
+				.apply(Change::Put(key, Record::Misc(saved.into())))?;
+		}
 		cx.store.put_blob(BlobSlot::Frames, &bytes)?;
 		report.bytes = bytes.len();
 		Ok(report)
@@ -727,12 +805,20 @@ impl Shell {
 			} else {
 				check(&header).map_err(|why| RestoreError::Incompatible { why })?;
 				let image: Image = postcard::from_bytes(body).map_err(RestoreError::Corrupt)?;
-				shell.apply(engine, cx, image, &mut stdio, &mut report)?;
+				let jobs = match cx.store.get(Key::Misc(MiscKey::JobFrames))? {
+					Some(Record::Misc(bytes)) => {
+						postcard::from_bytes(bytes).map_err(RestoreError::Corrupt)?
+					},
+					None => HashMap::new(),
+					Some(_) => return Err(StoreError::Shape { table: Table::Misc }.into()),
+				};
+				shell.apply(engine, cx, image, jobs, &mut stdio, &mut report)?;
 				shell.seed_orphans();
 				restored = true;
 			}
 			cx.store.del_blob(BlobSlot::Frames)?;
 		}
+		cx.store.apply(Change::Del(Key::Misc(MiscKey::JobFrames)))?;
 		if !restored {
 			shell.lose_running(cx, &mut report)?;
 		}
@@ -753,6 +839,7 @@ impl Shell {
 		engine: &Engine,
 		cx: &mut Cx<'_>,
 		img: Image,
+		mut job_frames: HashMap<Vpid, SavedJobs>,
 		stdio: &mut [Option<FdRef>; 3],
 		report: &mut RestoreReport,
 	) -> Result<(), RestoreError> {
@@ -798,6 +885,7 @@ impl Shell {
 		let mut procs = Vec::with_capacity(img.procs.len());
 		for p in img.procs {
 			let vpid = p.vpid;
+			let saved = job_frames.remove(&vpid).unwrap_or_default();
 			let mut fds = FdTable::default();
 			for (fd, obj) in p.fds.into_iter().enumerate() {
 				if let Some(obj) = obj {
@@ -827,6 +915,10 @@ impl Shell {
 				vp.rlimits.clone_from(&loaded.rlimits);
 				vp
 			};
+			if vp.overlay.is_some() {
+				vp.jobs.ended = saved.ended;
+			}
+			let mut waits = saved.waits.into_iter().peekable();
 			vp.out = p.out.into();
 			vp.pending_traps = p.pending_traps;
 			vp.stopped = p.stopped;
@@ -885,7 +977,12 @@ impl Shell {
 				});
 			}
 			report.runs += vp.runs.len() as u32;
-			for f in p.frames {
+			for (index, mut f) in p.frames.into_iter().enumerate() {
+				if let Some((_, wait)) = waits.next_if(|(at, _)| *at == index)
+					&& let Some(exec) = f.scratch.as_mut().and_then(|s| s.exec.as_mut())
+				{
+					wait.restore(&mut exec.waiting);
+				}
 				let unit = match f.unit {
 					Some(id) => {
 						let unit = load_unit(
@@ -929,8 +1026,9 @@ impl Shell {
 									| Awaited::Call(_)
 									| Awaited::Frame
 									| Awaited::Jobs { .. }
-									| Awaited::AllJobs
-									| Awaited::AnyJob,
+									| Awaited::WaitOperand { .. }
+									| Awaited::AllJobs { .. }
+									| Awaited::AnyJob { .. },
 								)
 								| None => {},
 							}

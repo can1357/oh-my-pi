@@ -31,7 +31,7 @@ use crate::bash::{
 	ir::{self, ComsubForm, Op, Opcode, SpawnKind, Unit},
 	mem::{self, Capture},
 	pattern::PatOpts,
-	store::{Attrs, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
+	store::{Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
 	syntax::{CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume},
 	zshopt::ZshOpt,
 };
@@ -790,6 +790,15 @@ fn end_run(k: &mut Kernel, vp: &Vproc, cx: &mut Cx<'_>, run: &super::proc::Run) 
 fn park(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, key: WaitKey, at: u64) {
 	if vp.blocked.as_ref().is_none_or(|b| b.key != key) {
 		k.emit(cx, (vp.vpid, vp.mode), vp.runs.front(), EventData::Blocked { key: &key });
+	}
+	// The shell notices the end of the child `$!` names while it waits for
+	// something else (waiting on that child itself, as `$!` settling or
+	// `wait` does, is not noticing it on the side).
+	if let Some(v) = vp.last_bg.vpid()
+		&& key != WaitKey::Proc(v)
+		&& matches!(vp.jobs.by_vpid(v).map(|j| j.state), Some(super::proc::JobState::Done(_)))
+	{
+		vp.jobs.see_bang(v);
 	}
 	vp.blocked = Some(super::proc::Blocked { key, at });
 }
@@ -2255,8 +2264,10 @@ pub fn start_sub(
 				}
 			}
 			// bash keeps job control and the job list in `$( )`: `jobs`
-			// lists the parent's jobs, `fg` finds no current job.
-			child.jobs = inherited_jobs(vp, vp.jobs.subshell);
+			// lists the parent's jobs, `fg` finds no current job. Forking
+			// cleans up the parent's waited-for jobs first.
+			k.cleanup_dead_jobs(cx.store, vp);
+			child.jobs = comsub_jobs(vp);
 			// Its externals stay in the shell's process group.
 			super::jobctl::set_leader(k, child.vpid, None);
 			let vpid = child.vpid;
@@ -2330,7 +2341,7 @@ pub fn start_zsh_sub(
 	let mut fds = vp.fds.clone();
 	fds.set(1, Some(FdRef::mem(capture.clone())));
 	let mut child = vp.child_text(k, cx.store, text, line, fds);
-	child.jobs = inherited_jobs(vp, vp.jobs.subshell);
+	child.jobs = comsub_jobs(vp);
 	// Its externals stay in the shell's process group (zsh
 	// `ESUB_NOMONITOR`).
 	super::jobctl::set_leader(k, child.vpid, None);
@@ -2525,6 +2536,11 @@ pub fn start_procsub(
 	}
 	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
 	let vpid = child.vpid;
+	// The parent can read `$!` and call `wait` in this same slice, before
+	// the scheduler adopts the child. Publish its parentage and running
+	// state before publishing the pid, so every wait lookup can find it.
+	let rec = Record::Proc { parent: child.parent, status: None };
+	k.root.write(cx.store, Change::Put(Key::Proc(vpid), rec));
 	// Not a job: its externals stay in the shell's group, without the
 	// terminal.
 	super::jobctl::set_leader(k, vpid, None);
@@ -3886,6 +3902,9 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 		.as_ref()
 		.is_some_and(|s| !s.children.is_empty());
 	if !started {
+		// bash `stop_pipeline`: every fork first deletes the jobs whose end
+		// was reported or waited for, keeping their statuses.
+		k.cleanup_dead_jobs(cx.store, vp);
 		// A job that forks (a subshell, pipeline, job or coprocess of its
 		// own) is not just one program: it keeps its virtual pid.
 		if !k.bangs.is_empty() {
@@ -4113,6 +4132,17 @@ pub(super) fn inherited_jobs(vp: &Vproc, subshell: bool) -> super::proc::JobTabl
 	for job in &mut jobs.list {
 		job.inherited = true;
 	}
+	jobs
+}
+
+/// A command substitution's copy of `vp`'s jobs: bash's `$( )` marks the
+/// finished ones reported, all but the one `$!` names, and drops them
+/// (`notify_of_job_status` with `SUBSHELL_COMSUB`); their kept statuses
+/// stay.
+fn comsub_jobs(vp: &Vproc) -> super::proc::JobTable {
+	let mut jobs = inherited_jobs(vp, vp.jobs.subshell);
+	let last = vp.last_bg;
+	jobs.remove_where(|j| matches!(j.state, super::proc::JobState::Done(_)) && !last.is(j.vpid));
 	jobs
 }
 

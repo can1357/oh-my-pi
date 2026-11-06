@@ -70,7 +70,9 @@ use crate::bash::{
 	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
-	store::{Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, VarValue},
+	store::{
+		Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, Table, VarValue,
+	},
 };
 
 /// Ops a vproc runs per scheduler turn.
@@ -513,6 +515,11 @@ impl ProcState {
 	}
 }
 
+/// The parent a running child's record names once its job was deleted
+/// (`disown`): no vproc has this vpid, so no `wait` reaches it, and its
+/// record goes when it ends ([`Kernel::proc_exited`]).
+pub const DISOWNED: Vpid = Vpid(0);
+
 impl Kernel {
 	fn new(engine: &Arc<Engine>, root: Root, argv0: BString, shell_pid: u32) -> Self {
 		let ctl = Ctl::new();
@@ -672,6 +679,11 @@ impl Kernel {
 		parent: Option<Vpid>,
 		status: i32,
 	) {
+		// A disowned child's status is collected by no one.
+		if self.root.disowned(store, vpid) {
+			self.root.write(store, Change::Del(Key::Proc(vpid)));
+			return;
+		}
 		let rec = Record::Proc { parent, status: Some(status) };
 		self.root.write(store, Change::Put(Key::Proc(vpid), rec));
 	}
@@ -711,6 +723,103 @@ impl Kernel {
 		let status = self.proc_state(store, vpid)?.exited()?;
 		self.root.write(store, Change::Del(Key::Proc(vpid)));
 		Some(status)
+	}
+
+	/// Bash `wait_for_background_pids` runs `cleanup_dead_jobs` (including
+	/// `procsub_prune`) before `bgp_clear`: completed non-job statuses are
+	/// forgotten even when no explicit wait moved them to the kept table.
+	/// An enclosing foreground pipeline / substitution still owns its
+	/// children, so an inline `lastpipe` stage must not collect those.
+	pub fn forget_completed_nonjobs(&mut self, store: &mut dyn StateStore, vp: &Vproc) {
+		let mut ended = Vec::new();
+		let result = store.scan(Table::Proc, &mut |key, rec| {
+			if let (Key::Proc(v), Record::Proc { parent: Some(parent), status: Some(_) }) = (key, rec)
+				&& *parent == vp.vpid
+				&& vp.jobs.by_vpid(v).is_none()
+				&& !vp.frames.iter().any(|f| {
+					f.scratch.as_ref().is_some_and(|sc| {
+						sc.children.iter().any(|(child, _)| *child == v)
+							|| matches!(sc.sub, Some(proc::PendingSub::Fork { vpid, .. }) if vpid == v)
+							|| sc.exec.as_ref().is_some_and(|e| e.wait_for.contains(&v))
+					})
+				}) {
+				ended.push(v);
+			}
+		});
+		if let Err(err) = result {
+			self.root.fail(err);
+			return;
+		}
+		for v in ended {
+			self.root.write(store, Change::Del(Key::Proc(v)));
+		}
+	}
+
+	/// Delete job `number` of `vp` (bash `delete_job`): `keep` keeps its
+	/// status for `wait PID` ([`proc::JobTable::delete`]); its finished
+	/// vproc's record goes, a running one's is disowned ([`DISOWNED`]), so
+	/// `wait` no longer reaches it through `$!` or its pid.
+	pub fn delete_job(
+		&mut self,
+		store: &mut dyn StateStore,
+		vp: &mut Vproc,
+		number: u32,
+		keep: bool,
+	) -> Option<proc::Job> {
+		let job = vp.jobs.delete(number, keep)?;
+		self.forget_job_proc(store, &job);
+		Some(job)
+	}
+
+	/// Release a deleted job's proc record, retaining a disown marker while
+	/// it runs. The caller applies its dialect's job-table deletion rules.
+	pub fn forget_job_proc(&mut self, store: &mut dyn StateStore, job: &proc::Job) {
+		if !job.inherited && self.proc_collect(store, job.vpid).is_none() {
+			// Still running (`disown`): no shell waits for it now, so its
+			// record names no parent and goes when it ends. A job disowned
+			// before its first turn has no record yet; `adopt` keeps this one.
+			let running = match store.get(Key::Proc(job.vpid)) {
+				Ok(Some(Record::Proc { status, .. })) => status.is_none(),
+				Ok(_) => !matches!(job.state, proc::JobState::Done(_)),
+				Err(_) => false,
+			};
+			if running {
+				let rec = Record::Proc { parent: Some(DISOWNED), status: None };
+				self
+					.root
+					.write(store, Change::Put(Key::Proc(job.vpid), rec));
+			}
+		}
+	}
+
+	/// Delete `vp`'s finished jobs whose state was reported or waited for,
+	/// keeping their statuses (bash `cleanup_dead_jobs`: `jobs`, and every
+	/// fork of the shell). zsh deletes a job when it reports it instead.
+	pub fn cleanup_dead_jobs(&mut self, store: &mut dyn StateStore, vp: &mut Vproc) {
+		let dead: Vec<u32> = vp
+			.jobs
+			.iter()
+			.filter(|j| j.notified && matches!(j.state, proc::JobState::Done(_)))
+			.map(|j| j.number)
+			.collect();
+		for number in dead {
+			self.delete_job(store, vp, number, true);
+		}
+		// bash `compact_jobs_list` once the table is full: finished jobs
+		// nothing reported go too, oldest first, all but `$!`'s, their
+		// statuses kept.
+		while vp.jobs.len() > proc::JOBS_MAX {
+			let last = vp.last_bg;
+			let Some(number) = vp
+				.jobs
+				.iter()
+				.find(|j| matches!(j.state, proc::JobState::Done(_)) && !last.is(j.vpid))
+				.map(|j| j.number)
+			else {
+				break;
+			};
+			self.delete_job(store, vp, number, true);
+		}
 	}
 
 	/// The clock for an event now: the last reading while it is still
@@ -1825,6 +1934,10 @@ impl Shell {
 	/// subshell vprocs that finished.
 	fn adopt(&mut self, cx: &mut Cx<'_>) {
 		for p in &self.k.spawned {
+			// A job disowned before its first turn keeps its disowned record.
+			if self.k.root.disowned(cx.store, p.vpid) {
+				continue;
+			}
 			let rec = Record::Proc { parent: p.parent, status: None };
 			self
 				.k
@@ -1868,6 +1981,11 @@ impl Shell {
 				if let Some(entry) = p.jobs.by_vpid_mut(job) {
 					entry.os_pid = Some(pid);
 				}
+				// A kept status under that OS pid named an earlier child
+				// (bash `bgp_delete` in `make_child`); the job's own, kept
+				// when it was disowned before it settled, takes the pid.
+				p.jobs.retain_kept(|k| k.vpid == job || !k.named_by(pid));
+				p.jobs.settle_kept(job, pid);
 			}
 		}
 	}
@@ -1908,7 +2026,16 @@ impl Shell {
 		let Some(i) = parent.and_then(|v| self.procs.iter().position(|p| p.vpid == v)) else {
 			return;
 		};
-		let job = self.procs[i].jobs.by_vpid_mut(vpid);
+		let p = &mut self.procs[i];
+		if p.last_bg.is(vpid)
+			&& p
+				.blocked
+				.as_ref()
+				.is_some_and(|b| b.key != crate::bash::event::WaitKey::Proc(vpid))
+		{
+			p.jobs.see_bang(vpid);
+		}
+		let job = p.jobs.by_vpid_mut(vpid);
 		let background = job.is_some();
 		if let Some(job) = job {
 			job.state = proc::JobState::Done(status);
@@ -2540,10 +2667,16 @@ fn interrupt_wait(p: &mut Vproc, status: i32) {
 		};
 		let waiting = matches!(
 			e.waiting,
-			Some(proc::Awaited::Jobs { .. } | proc::Awaited::AllJobs | proc::Awaited::AnyJob)
+			Some(
+				proc::Awaited::Jobs { .. }
+					| proc::Awaited::WaitOperand { .. }
+					| proc::Awaited::AllJobs { .. }
+					| proc::Awaited::AnyJob { .. }
+			)
 		);
 		if waiting && e.target == Some(proc::Target::Intrinsic(crate::bash::ids::IntrinsicId::Wait)) {
-			e.waiting = Some(proc::Awaited::Jobs { force: true });
+			e.waiting =
+				Some(proc::Awaited::Jobs { force: true, foreground: false, kept: None });
 			e.wait_for.clear();
 			e.wait_into = None;
 			e.status = status;
