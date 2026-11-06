@@ -2,7 +2,8 @@
  * Worker-side {@link AsyncJobManagerApi} over the root's main-thread manager.
  *
  * Every query and command runs on main: synchronous methods through
- * `callSync`, async ones through `call`. Job rows come back as
+ * `callSync` (`releaseForegroundJob`, which returns nothing, as an ordered
+ * notification), async ones through `call`. Job rows come back as
  * {@link RemoteAsyncJob}s built from {@link AsyncJobWire} projections, with
  * local equivalents of the live fields:
  *
@@ -307,8 +308,9 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return this.#remote.callSync("backgroundJob", jobId);
 	}
 
+	/** A notification: nothing to wait for, and every later call reaches main after it. */
 	releaseForegroundJob(jobId: string): void {
-		this.#remote.callSync("releaseForegroundJob", jobId);
+		this.#remote.notify("releaseForegroundJob", jobId);
 	}
 
 	getDeliveryState(filter?: AsyncJobFilter): AsyncJobDeliveryState {

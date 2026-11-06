@@ -30,10 +30,11 @@ use crate::bash::{
 /// What `vared` restores when the edit ends (kept on the editor across
 /// the builtin's re-runs).
 pub struct VaredState {
-	/// `-M`: the keymap `main` named before.
-	main:    Option<Option<KmId>>,
-	/// `-m`: the keymap `vicmd` named before.
-	vicmd:   Option<Option<KmId>>,
+	/// `-M`: the keymap `main` named before, to link back (`None`: nothing
+	/// to restore).
+	main:    Option<KmId>,
+	/// `-m`: the keymap `vicmd` named before, to link back.
+	vicmd:   Option<KmId>,
 	/// The parameter's type for the assignment (`-a`, `-A`).
 	pm_type: PmFlags,
 }
@@ -182,7 +183,7 @@ pub fn vared(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		return done(1);
 	}
 	let km = std::sync::Arc::make_mut(&mut z.keymaps);
-	let mut save = |slot: &[u8], new: Option<&BString>| -> Result<Option<Option<KmId>>, BString> {
+	let mut save = |slot: &[u8], new: Option<&BString>| -> Result<Option<KmId>, BString> {
 		let Some(new) = new else {
 			return Ok(None);
 		};
@@ -191,13 +192,13 @@ pub fn vared(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		};
 		let old = km.open(slot);
 		if old == Some(id) {
-			return Ok(Some(None));
+			return Ok(None);
 		}
 		if let Some(o) = old {
 			km.ref_keymap(o);
 		}
 		let _ = km.link(id, slot, false);
-		Ok(Some(old))
+		Ok(old)
 	};
 	let mut missing = Vec::new();
 	let main = save(b"main", main_km.as_ref()).unwrap_or_else(|n| {
@@ -281,7 +282,7 @@ fn run(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	if let Some(st) = st.as_deref() {
 		let km = std::sync::Arc::make_mut(&mut z.keymaps);
 		for (slot, saved) in [(&b"main"[..], st.main), (&b"vicmd"[..], st.vicmd)] {
-			if let Some(Some(old)) = saved {
+			if let Some(old) = saved {
 				let _ = km.link(old, slot, false);
 				km.unref_keymap(old);
 			}

@@ -88,11 +88,11 @@ describe("subagent session MCP tools follow the shared manager", () => {
 
 	it("adds and removes a live child's MCP tools across parent reloads", async () => {
 		await connectReady({ alpha: fixtureConfig() });
-		const follower = followMCPTools(manager);
+		const follower = followMCPTools(manager, { scope: "Follow-1" });
 		const { session: child } = await createAgentSession({
 			...sessionOptions(),
 			mcpManager: manager,
-			mcpTools: createMCPProxyTools(manager),
+			mcpTools: follower.proxyTools(),
 			parentTaskPrefix: "Follow-1",
 		});
 		sessions.push(child);
@@ -123,11 +123,11 @@ describe("subagent session MCP tools follow the shared manager", () => {
 			parameters: { type: "object", properties: {} },
 			execute: async () => ({ content: [{ type: "text", text: KERNEL_RESULT }] }),
 		};
-		const follower = followMCPTools(manager, new Set([collidingName]));
+		const follower = followMCPTools(manager, { scope: "Follow-2" }, new Set([collidingName]));
 		const { session: child } = await createAgentSession({
 			...sessionOptions(),
 			mcpManager: manager,
-			mcpTools: createMCPProxyTools(manager),
+			mcpTools: follower.proxyTools(),
 			customTools: [kernelTool],
 			parentTaskPrefix: "Follow-2",
 		});

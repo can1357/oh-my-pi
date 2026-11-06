@@ -123,8 +123,9 @@ fn search_path(env: &[(BString, BString)]) -> BString {
 		.map_or_else(|| BString::from(invocation::DEFAULT_PATH), |(_, v)| v.clone())
 }
 
-/// Read the script operand as bash's `open_shell_script` does (zsh's
-/// `setupshin` for the zsh dialect, [`read_zsh_script`]): a name without
+/// Read the script operand as bash's `open_shell_script` does.
+///
+/// zsh's `setupshin` for the zsh dialect ([`read_zsh_script`]): a name without
 /// `/` that is not in the current directory is looked up in `PATH` (bash's
 /// default when unset); a directory or a binary file (a NUL on the first
 /// line of the first 80 bytes) is refused (126); a missing file is 127.
@@ -187,8 +188,9 @@ pub fn read_script(
 	Ok((path, text))
 }
 
-/// zsh 5.9 `setupshin`: the script operand as given (not a directory);
-/// failing that, under `pathscript` (on in the sh and ksh emulations) a
+/// zsh 5.9 `setupshin`: the script operand as given (not a directory).
+///
+/// Failing that, under `pathscript` (on in the sh and ksh emulations) a
 /// name without `/` is looked up in `PATH` (`pathprog`). Anything else is
 /// zsh's `NAME: can't open input file: SCRIPT`, status 127.
 ///
@@ -232,7 +234,9 @@ pub fn read_zsh_script(
 }
 
 /// What the command line `args` runs: the `-c` command, the script operand
-/// ([`read_script`]) or stdin. A script on stdin is left to the engine,
+/// ([`read_script`]) or stdin.
+///
+/// A script on stdin is left to the engine,
 /// which reads it a line at a time as the shells do (commands that read
 /// stdin get the lines that follow), unless `whole_stdin` (tool modes that
 /// take the whole text) reads it all now.
@@ -307,15 +311,14 @@ pub enum Start {
 	Exit(i32),
 }
 
-/// The shell's command line `argv` up to what it runs: option errors,
-/// `--help` and `--version` are handled here (written, with their status),
-/// as is bash's `-o`/`+O` listing without a command; then the environment
-/// is taken and the input read ([`input`]; `whole_stdin` as there).
+/// The shell's command line `argv` up to what it runs.
+///
+/// Option errors, `--help` and `--version` are handled here (written, with
+/// their status), as is bash's `-o`/`+O` listing without a command; then the
+/// environment is taken and the input read ([`input`]; `whole_stdin` as there).
 pub fn start(argv: &[BString], whole_stdin: bool) -> Start {
 	// The executable's own name keeps zsh zsh under another `argv[0]`.
-	let exe = std::env::current_exe()
-		.map(|p| p.into_os_string().into_encoded_bytes())
-		.unwrap_or_default();
+	let exe = std::env::current_exe().map_or_default(|p| p.into_os_string().into_encoded_bytes());
 	let args = match ShellArgs::parse_exe(argv, &exe) {
 		Ok(args) => args,
 		Err(err) => {
@@ -388,9 +391,7 @@ fn zsh_help_text(argzero: &[u8], args: &ShellArgs) -> Vec<u8> {
 fn zsh_version_text() -> Vec<u8> {
 	let arch = std::env::consts::ARCH;
 	let host = if cfg!(target_os = "macos") {
-		let release = crate::sys::uname::uname()
-			.map(|(_, release, _)| release)
-			.unwrap_or_default();
+		let release = crate::sys::uname::uname().map_or_default(|(_, release, _)| release);
 		let major = release.split(|&c| c == b'.').next().unwrap_or_default();
 		let cpu = if arch == "aarch64" { "arm64" } else { arch };
 		format!("{cpu}-apple-darwin{}.0", String::from_utf8_lossy(major))
@@ -482,8 +483,9 @@ fn run(args: &ShellArgs, env: Vec<(BString, BString)>, input: Input, opts: Proce
 	status & 0xff
 }
 
-/// The new shell's initial state from the command line `args`: `$0`
-/// (`argv0`) and the positional parameters (`params`), the options in the
+/// The new shell's initial state from the command line `args`.
+///
+/// `$0` (`argv0`) and the positional parameters (`params`), the options in the
 /// shell's order, interactivity (`-i`, or stdin and stderr on a terminal)
 /// and the startup files that exist (unreadable ones are reported and
 /// skipped, as bash's `maybe_execute_file` does).
@@ -636,7 +638,9 @@ fn zsh_params(args: &ShellArgs) -> Vec<(BString, BString)> {
 	}
 }
 
-/// Run `shell` until script `run` finishes; its status. Between steps the
+/// Run `shell` until script `run` finishes; its status.
+///
+/// Between steps the
 /// OS signals the host caught go to the root vproc `root`; while the shell
 /// waits, the thread parks (and, standalone on Linux, waits for the exits
 /// of externals itself).
