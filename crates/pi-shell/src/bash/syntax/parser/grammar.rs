@@ -16,15 +16,17 @@ use crate::bash::syntax::{
 /// What `for NAME` / `select NAME` is followed by.
 struct LoopTail {
 	/// `in` words; `None` means `"$@"`.
-	words:  Option<Vec<Word>>,
+	words:     Option<Vec<Word>>,
 	/// Loop body.
-	body:   List,
+	body:      List,
 	/// Offset of `in`, as the parser read it.
-	in_pos: Option<u32>,
+	in_pos:    Option<u32>,
+	/// End of the iterator header, before a separator or the body.
+	header_hi: u32,
 	/// Offset of the `do` or `{` that opens the body.
-	do_pos: Option<u32>,
+	do_pos:    Option<u32>,
 	/// The body is a `{ … }` group rather than `do … done`.
-	braces: bool,
+	braces:    bool,
 }
 
 /// Tokens that can begin a command.
@@ -485,7 +487,7 @@ impl Parser<'_> {
 	/// After `for NAME` / `select NAME`: the optional `in` list and the body.
 	/// Returns the words, the body, and the offsets of `in` and of the token
 	/// that opens the body.
-	fn loop_tail(&mut self) -> PResult<LoopTail> {
+	fn loop_tail(&mut self, mut header_hi: u32) -> PResult<LoopTail> {
 		let mut words = None;
 		let mut in_pos = None;
 		if self.peek_kind()? == T::Semi {
@@ -494,12 +496,15 @@ impl Parser<'_> {
 		} else {
 			self.skip_newlines()?;
 			if self.peek_kind()? == T::In {
-				in_pos = Some(self.take()?.lo);
+				let token = self.take()?;
+				in_pos = Some(token.lo);
+				header_hi = token.hi;
 				let mut list = Vec::new();
 				loop {
 					match self.peek_kind()? {
 						T::Word | T::Assign | T::Number => {
 							let t = self.take()?;
+							header_hi = t.hi;
 							list.push(Self::tok_word(t));
 						},
 						T::Newline | T::Semi => {
@@ -515,7 +520,7 @@ impl Parser<'_> {
 			}
 		}
 		let (body, do_pos, braces) = self.do_body()?;
-		Ok(LoopTail { words, body, in_pos, do_pos, braces })
+		Ok(LoopTail { words, body, in_pos, header_hi, do_pos, braces })
 	}
 
 	/// `DO compound_list DONE` or `'{' compound_list '}'`: the body, the
@@ -562,11 +567,12 @@ impl Parser<'_> {
 		}
 		let var_span = t.span();
 		let var = word_text(t.word.as_ref().expect("word token"));
-		let tail = self.loop_tail()?;
+		let tail = self.loop_tail(var_span.hi)?;
 		Ok(CommandKind::For(For {
 			var,
 			extra_vars: Vec::new(),
 			var_span,
+			header: Span::new(var_span.lo, tail.header_hi),
 			words: tail.words,
 			body: tail.body,
 			in_pos: tail.in_pos,
@@ -583,11 +589,12 @@ impl Parser<'_> {
 		}
 		let var_span = t.span();
 		let var = word_text(t.word.as_ref().expect("word token"));
-		let tail = self.loop_tail()?;
+		let tail = self.loop_tail(var_span.hi)?;
 		Ok(CommandKind::Select(For {
 			var,
 			extra_vars: Vec::new(),
 			var_span,
+			header: Span::new(var_span.lo, tail.header_hi),
 			words: tail.words,
 			body: tail.body,
 			in_pos: tail.in_pos,
@@ -860,10 +867,16 @@ impl Parser<'_> {
 	fn redirection(&mut self) -> PResult<Redir> {
 		let lo = self.peek_tok()?.lo;
 		let mut fd = None;
+		let mut fd_name = None;
 		match self.peek_kind()? {
 			T::Number => {
 				let t = self.take()?;
 				fd = Some(RedirFd::Num(t.num));
+				let span = t.span();
+				let Some(WordPart::Lit(text)) = t.word.and_then(|mut w| w.parts.pop()) else {
+					unreachable!("a number token is one plain literal");
+				};
+				fd_name = Some(Name { text, span });
 			},
 			T::RedirWord => {
 				let t = self.take()?;
@@ -876,10 +889,12 @@ impl Parser<'_> {
 					.unwrap_or_default()
 					.to_vec();
 				fd = Some(RedirFd::Var(name));
+				fd_name = Some(Name { text, span: t.span() });
 			},
 			_ => {},
 		}
 		let t = self.take()?;
+		let op_pos = t.lo;
 		let op = match t.kind {
 			T::Lt => RedirOp::In,
 			T::Gt => RedirOp::Out,
@@ -932,7 +947,7 @@ impl Parser<'_> {
 			(_, T::Word | T::Assign) => RedirTarget::Word(Self::tok_word(w)),
 			_ => return Err(self.token_error(&w)),
 		};
-		Ok(Redir { span: Span::new(lo, self.last_hi), fd, op, target })
+		Ok(Redir { span: Span::new(lo, self.last_hi), fd, fd_name, op_pos, op, target })
 	}
 
 	// ---- [[ … ]] ---------------------------------------------------------

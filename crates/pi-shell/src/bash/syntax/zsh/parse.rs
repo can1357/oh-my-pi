@@ -711,12 +711,14 @@ impl Ctx<'_> {
 			return self.yyerr();
 		}
 		let var_span = self.tok_span();
+		let mut header_hi;
 		let mut vars = Vec::new();
 		self.ps.incmdpos = true;
 		let ona = self.noaliases;
 		self.noaliases = true;
 		loop {
 			vars.push(Name { text: plain(&self.lx.buf), span: self.tok_span() });
+			header_hi = self.lx.hi;
 			self.zshlex();
 			if self.lx.tok != T::String || self.lx.buf == b"in" || sel {
 				break;
@@ -737,6 +739,7 @@ impl Ctx<'_> {
 			self.ps.incmdpos = false;
 			self.zshlex();
 			let w = self.par_wordlist();
+			header_hi = self.lx.last_hi;
 			if self.lx.tok != T::Seper {
 				return self.yyerr();
 			}
@@ -749,6 +752,7 @@ impl Ctx<'_> {
 			if self.lx.tok != T::Outpar {
 				return self.yyerr();
 			}
+			header_hi = self.lx.hi;
 			self.ps.incmdpos = true;
 			self.zshlex();
 			Some(w)
@@ -760,8 +764,17 @@ impl Ctx<'_> {
 		let (body, do_pos, braces) = self.loop_body(csh, Loop::For)?;
 		let mut vars = vars.into_iter();
 		let var = vars.next().map_or_else(Vec::new, |n| n.text);
-		let f =
-			For { var, extra_vars: vars.collect(), var_span, words, body, in_pos, do_pos, braces };
+		let f = For {
+			var,
+			extra_vars: vars.collect(),
+			var_span,
+			header: Span::new(var_span.lo, header_hi),
+			words,
+			body,
+			in_pos,
+			do_pos,
+			braces,
+		};
 		Some(if sel {
 			CommandKind::Select(f)
 		} else {
@@ -1333,7 +1346,7 @@ impl Ctx<'_> {
 						&& ident_end(b, 1, self.opt(Features::ZSH_WIDE_IDENT)) >= b.len() - 1
 					{
 						let toksave = self.tok_word();
-						let idstring = plain(span(b, 1, b.len() - 1));
+						let idstring = Name { text: plain(b), span: toksave.span };
 						redir_var = true;
 						self.zshlex();
 						if hasalias.is_none() {
@@ -1477,22 +1490,33 @@ impl Ctx<'_> {
 	}
 
 	/// zsh `par_redir`: `( OUTANG | … | TRINANG ) STRING`; `idstring` is the
-	/// variable of a `{var}>` redirection.
-	fn par_redir(&mut self, idstring: Option<Vec<u8>>) -> Option<Redir> {
-		let lo = self.lx.lo;
+	/// full `{var}` descriptor of a variable redirection, with its span.
+	fn par_redir(&mut self, idstring: Option<Name>) -> Option<Redir> {
+		let op_pos = self.lx.redir_op_pos;
+		let fd1 = self.lx.tokfd;
+		let (fd, fd_name) = match idstring {
+			Some(name) => {
+				let var = name.text[1..name.text.len() - 1].to_vec();
+				(Some(RedirFd::Var(var)), Some(name))
+			},
+			None => (
+				u32::try_from(fd1).ok().map(RedirFd::Num),
+				self
+					.lx
+					.redir_fd
+					.take()
+					.map(|(byte, span)| Name { text: vec![byte], span }),
+			),
+		};
+		let lo = fd_name.as_ref().map_or(self.lx.lo, |name| name.span.lo);
 		let oldcmdpos = self.ps.incmdpos;
 		self.ps.incmdpos = false;
 		let rt = self.lx.tok;
-		let fd1 = self.lx.tokfd;
 		self.zshlex();
 		if !matches!(self.lx.tok, T::String | T::Envstring) {
 			return self.yyerr();
 		}
 		self.ps.incmdpos = oldcmdpos;
-		let fd = match idstring {
-			Some(v) => Some(RedirFd::Var(v)),
-			None => u32::try_from(fd1).ok().map(RedirFd::Num),
-		};
 		if matches!(rt, T::Dinang | T::Dinangdash) {
 			let strip = rt == T::Dinangdash;
 			let name = &self.lx.buf;
@@ -1514,6 +1538,8 @@ impl Ctx<'_> {
 			return Some(Redir {
 				span: Span::new(lo, hi),
 				fd,
+				fd_name,
+				op_pos,
 				op: RedirOp::HereDoc { strip_tabs: strip },
 				target: RedirTarget::HereDoc(HereDoc {
 					delim,
@@ -1537,6 +1563,8 @@ impl Ctx<'_> {
 		Some(Redir {
 			span: Span::new(lo, target.span.hi),
 			fd,
+			fd_name,
+			op_pos,
 			op: redir_op(rt),
 			target: RedirTarget::Word(target),
 		})

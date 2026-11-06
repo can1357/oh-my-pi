@@ -359,6 +359,8 @@ mod tests {
 		let doc = |span, delimiter: &[u8], strip| Redir {
 			span,
 			fd: None,
+			fd_name: None,
+			op_pos: span.lo,
 			op: RedirOp::HereDoc { strip_tabs: strip },
 			target: RedirTarget::HereDoc(HereDoc {
 				delim:     delimiter.to_vec(),

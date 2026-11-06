@@ -302,15 +302,18 @@ fn an_alias_expanded_conditional_exports_no_backwards_range() {
 	}
 }
 
-struct AliasOne(&'static [u8], &'static [u8]);
+struct AliasOne<'a>(&'a [u8], &'a [u8]);
 
-impl AliasLookup for AliasOne {
+impl AliasLookup for AliasOne<'_> {
 	fn alias(&self, name: &[u8]) -> Option<&[u8]> {
 		(name == self.0).then_some(self.1)
 	}
 }
 
 fn token_range(v: &serde_json::Value) -> Option<(u64, u64)> {
+	if let Some(span) = v.get("span") {
+		return Some((span.get(0)?.as_u64()?, span.get(1)?.as_u64()?));
+	}
 	let pos = v.get("Pos")?.get("Offset")?.as_u64()?;
 	let end = v.get("End")?.get("Offset")?.as_u64()?;
 	Some((pos, end))
@@ -346,6 +349,16 @@ fn range_faults(
 				here = Some(((pos, end), path.to_string()));
 			}
 			for (k, child) in map {
+				if k.ends_with("_span")
+					&& let (Some(lo), Some(hi)) = (
+						child.get(0).and_then(serde_json::Value::as_u64),
+						child.get(1).and_then(serde_json::Value::as_u64),
+					)
+					&& let Some(((pos, end), _)) = &here
+					&& (lo < *pos || hi > *end || hi < lo)
+				{
+					bad.push(format!("{path}.{k} [{lo},{hi}] outside [{pos},{end}]"));
+				}
 				if let Some(o) = bare_offset(child)
 					&& let Some(((pos, end), _)) = &here
 					&& (o < *pos || o > *end)
@@ -358,6 +371,33 @@ fn range_faults(
 		serde_json::Value::Array(items) => {
 			for (i, child) in items.iter().enumerate() {
 				range_faults(child, here.clone(), &format!("{path}[{i}]"), bad);
+			}
+		},
+		_ => {},
+	}
+}
+
+fn word_part_faults(v: &serde_json::Value, path: &str, bad: &mut Vec<String>) {
+	match v {
+		serde_json::Value::Object(map) => {
+			if let Some(serde_json::Value::Array(parts)) = map.get("Parts") {
+				for (i, part) in parts.iter().enumerate() {
+					if part
+						.get("Type")
+						.and_then(serde_json::Value::as_str)
+						.is_none()
+					{
+						bad.push(format!("{path}.Parts[{i}] has no Type"));
+					}
+				}
+			}
+			for (k, child) in map {
+				word_part_faults(child, &format!("{path}.{k}"), bad);
+			}
+		},
+		serde_json::Value::Array(items) => {
+			for (i, child) in items.iter().enumerate() {
+				word_part_faults(child, &format!("{path}[{i}]"), bad);
 			}
 		},
 		_ => {},
@@ -439,46 +479,43 @@ const ALL_WORD_PARTS: [&str; 15] = [
 enum Owner {
 	/// This change: the sample must export no containment fault.
 	Here,
-	/// The sibling change (`wip/ShellPortAudit-18193-words`): the positions
-	/// INSIDE a word — a quote's `Right`, a `${…}`'s `Rbrace`, an array's
-	/// parentheses — are still derived from the word's end or located by
-	/// scanning the source, which is the wrong buffer for alias text. The
-	/// sample must still fault here, so the marker cannot outlive the
-	/// defect: the sibling moves it to `Here` in the commit that fixes it.
+	/// Positions outside this command-node change: word/expression interiors
+	/// and structural pipeline operators. The alias sample must still fault,
+	/// so its marker is removed by the change that repairs those positions.
 	Sibling,
 }
 
 /// One sample: the text the alias `check` expands to, the source that
 /// reaches it, the dialect, and who owns its exported positions.
-struct Sample {
-	src:   &'static [u8],
-	text:  &'static [u8],
+struct Sample<'a> {
+	src:   &'a [u8],
+	text:  &'a [u8],
 	zsh:   bool,
 	owner: Owner,
 }
 
-const fn bash(text: &'static [u8]) -> Sample {
+const fn bash(text: &'static [u8]) -> Sample<'static> {
 	Sample { src: b"check\n", text, zsh: false, owner: Owner::Here }
 }
 
 /// A bash sample whose only faults are inside a word.
-const fn word(text: &'static [u8]) -> Sample {
+const fn word(text: &'static [u8]) -> Sample<'static> {
 	Sample { src: b"check\n", text, zsh: false, owner: Owner::Sibling }
 }
 
-const fn zsh(text: &'static [u8]) -> Sample {
+const fn zsh(text: &'static [u8]) -> Sample<'static> {
 	Sample { src: b"check\n", text, zsh: true, owner: Owner::Here }
 }
 
 /// An alias standing inside a compound of the source, so every exported
 /// node has a real enclosing node with real bytes around it: a position the
 /// export scans for can then land on a token of the enclosing command.
-const fn nested(src: &'static [u8], text: &'static [u8]) -> Sample {
+const fn nested(src: &'static [u8], text: &'static [u8]) -> Sample<'static> {
 	Sample { src, text, zsh: false, owner: Owner::Here }
 }
 
 /// The same, in zsh grammar.
-const fn nested_zsh(src: &'static [u8], text: &'static [u8]) -> Sample {
+const fn nested_zsh(src: &'static [u8], text: &'static [u8]) -> Sample<'static> {
 	Sample { src, text, zsh: true, owner: Owner::Here }
 }
 
@@ -486,7 +523,7 @@ const fn nested_zsh(src: &'static [u8], text: &'static [u8]) -> Sample {
 /// held exhaustive by the assertion below rather than by a reviewer naming
 /// the row that broke: every variant of [`CommandKind`] and [`WordPart`]
 /// must be produced by a sample here.
-const SAMPLES: &[Sample] = &[
+const SAMPLES: &[Sample<'static>] = &[
 	// Command forms, bash.
 	bash(b"echo ok"),
 	bash(b"{ echo ok; }"),
@@ -496,9 +533,6 @@ const SAMPLES: &[Sample] = &[
 	bash(b"if true; then echo a; elif false; then echo b; else echo c; fi"),
 	bash(b"while false; do echo ok; done"),
 	bash(b"until true; do echo ok; done"),
-	bash(b"for i in a b; do echo ok; done"),
-	bash(b"for (( i = 0; i < 2; i++ )); do echo ok; done"),
-	bash(b"select i in a b; do echo ok; done"),
 	bash(b"case x in a) echo a ;; *) echo b ;; esac"),
 	bash(b"case x in x) esac"),
 	bash(b"case x in a) echo a ;; *) esac"),
@@ -517,6 +551,12 @@ const SAMPLES: &[Sample] = &[
 	bash(b"f() { echo ok; }"),
 	bash(b"function f { echo ok; }"),
 	bash(b"coproc c { echo ok; }"),
+	bash(b"coproc f\\\noo { :; }"),
+	bash(b": 12>/dev/null"),
+	bash(b": 0012>/dev/null"),
+	bash(b": {fd}>/dev/null"),
+	nested(b"check 99>/dev/null\n", b": 12>/dev/null"),
+	nested(b": '\xf0\x9f\x98\x80'; check 99>/dev/null\n", b": 12>/dev/null"),
 	bash(b"while false; do echo ok; done >/dev/null"),
 	bash(b"( echo ok ) >/dev/null"),
 	nested(b"case x in x) check;; esac\n", b"case x in x) esac"),
@@ -535,12 +575,13 @@ const SAMPLES: &[Sample] = &[
 	nested_zsh(b"for i in a; do check; done\n", b"{ : } always { : }"),
 	zsh(b"function f g { echo ok }"),
 	zsh(b"f g () { echo ok }"),
-	zsh(b"for a b in 1 2; do echo ok; done"),
 	zsh(b"if true; then echo a; else echo b; fi"),
 	zsh(b"while false; do echo ok; done"),
-	zsh(b"for i in a b; do echo ok; done"),
-	zsh(b"for (( i = 0; i < 2; i++ )); do echo ok; done"),
-	zsh(b"select i in a b; do echo ok; done"),
+	zsh(b": 12>/dev/null"),
+	zsh(b": 0012>/dev/null"),
+	zsh(b": {fd}>/dev/null"),
+	nested_zsh(b"check 99>/dev/null\n", b": 12>/dev/null"),
+	nested_zsh(b": '\xf0\x9f\x98\x80'; check 99>/dev/null\n", b": 12>/dev/null"),
 	zsh(b"case x in a) echo a ;; esac"),
 	zsh(b"(( 1 + 1 ))"),
 	zsh(b"[[ -n a ]]"),
@@ -563,7 +604,62 @@ const SAMPLES: &[Sample] = &[
 	word(b"declare -a a=(1 2)"),
 	word(b"echo \"${a+'$('\\'}\""),
 	word(b"echo \"${x-'\"'y}\""),
+	Sample { src: b"check | :\n", text: b": | :", zsh: false, owner: Owner::Sibling },
 ];
+
+/// Cross the loop grammar's header alternatives with its body alternatives.
+/// The exhaustive node/operand walk below checks that these parsed samples
+/// also produce every `CommandKind` and `WordPart` variant.
+fn for_each_sample(mut visit: impl FnMut(&Sample<'_>)) {
+	for sample in SAMPLES {
+		visit(sample);
+	}
+	for zsh in [false, true] {
+		let bodies: &[&str] = if zsh {
+			&["; do :; done", "\ndo :; done", "; { : }", "; :\n"]
+		} else {
+			&["; do :; done", "\ndo :; done"]
+		};
+		for keyword in ["for", "select"] {
+			let names: &[&str] = if zsh && keyword == "for" {
+				&["i", "a b"]
+			} else {
+				&["i"]
+			};
+			for name in names {
+				for words in ["", " in", " in a b", " i\\\nn"] {
+					for body in bodies {
+						let text = format!("{keyword} {name}{words}{body}");
+						visit(&Sample {
+							src: b"check\n",
+							text: text.as_bytes(),
+							zsh,
+							owner: Owner::Here,
+						});
+					}
+				}
+			}
+		}
+		for expressions in ["; ;", "i = 0; i < 2; i++"] {
+			let text = format!("for (( {expressions} )); do :; done");
+			// Bash's arithmetic operands still derive their own native spans.
+			let owner = if zsh { Owner::Here } else { Owner::Sibling };
+			visit(&Sample { src: b"check\n", text: text.as_bytes(), zsh, owner });
+		}
+		if zsh {
+			for name in ["i", "a b"] {
+				for words in ["( )", "(a b)"] {
+					let text = format!("for {name} {words}; do :; done");
+					visit(&Sample { src: b"check\n", text: text.as_bytes(), zsh, owner: Owner::Here });
+				}
+				for words in ["()", "( )", "(a b)"] {
+					let text = format!("foreach {name} {words}\n:; end");
+					visit(&Sample { src: b"check\n", text: text.as_bytes(), zsh, owner: Owner::Here });
+				}
+			}
+		}
+	}
+}
 
 fn collect_cmd_names(cmd: &Command, kinds: &mut Vec<&'static str>, parts: &mut Vec<&'static str>) {
 	kinds.push(command_kind_name(&cmd.kind));
@@ -720,15 +816,17 @@ fn zsh_features() -> Features {
 		| Features::ZSH_INTERACTIVE_COMMENTS
 }
 
-/// Parse `sample`'s source with `check` aliased to its text.
-fn parse_sample(sample: &Sample) -> Program {
+/// Parse the sample as ordinary source or as the expansion of `check`.
+fn parse_sample(sample: &Sample<'_>, aliased: bool) -> Program {
 	let table = AliasOne(b"check", sample.text);
 	let features = if sample.zsh {
 		zsh_features()
 	} else {
 		Features::NONE
 	};
-	let mut parser = Parser::new(sample.src, features, &table);
+	let src = if aliased { sample.src } else { sample.text };
+	let aliases: &dyn AliasLookup = if aliased { &table } else { NO_ALIASES };
+	let mut parser = Parser::new(src, features, aliases);
 	let mut commands = Vec::new();
 	while let Some(cmd) = parser.next_command() {
 		commands.push(
@@ -746,10 +844,20 @@ fn every_node_kind_has_an_alias_sample() {
 	// Coverage is now a property of the list: every variant the tree can
 	// hold must be produced by a sample, in whichever dialect parses it.
 	let (mut kinds, mut parts) = (Vec::new(), Vec::new());
-	for sample in SAMPLES {
-		for unit in &parse_sample(sample).commands {
+	let mut exported_samples = Vec::new();
+	for_each_sample(|sample| {
+		exported_samples.push(serde_json::json!({
+			"src": String::from_utf8_lossy(sample.src),
+			"text": String::from_utf8_lossy(sample.text),
+			"zsh": sample.zsh,
+			"sibling": sample.owner == Owner::Sibling,
+		}));
+		for unit in &parse_sample(sample, true).commands {
 			collect_list_names(&unit.list, &mut kinds, &mut parts);
 		}
+	});
+	if let Some(path) = std::env::var_os("EXPORT_SAMPLES_FILE") {
+		std::fs::write(path, serde_json::to_vec(&exported_samples).unwrap()).unwrap();
 	}
 	let missing_kinds: Vec<&str> = ALL_COMMAND_KINDS
 		.into_iter()
@@ -766,44 +874,95 @@ fn every_node_kind_has_an_alias_sample() {
 }
 
 #[test]
-fn alias_expanded_nodes_export_ranges_that_contain_their_children() {
-	// A node's keyword, operator and closing-token positions are the
-	// parser's to record: the text an alias expands to has no bytes in the
-	// source, so neither arithmetic on the node's end nor a scan of the
-	// source finds them. Every sample of every variant must export a tree
-	// whose every position lies inside the node that holds it.
+fn exported_nodes_contain_their_children_in_source_and_alias_text() {
+	// Alias expansion collapses positions and can hide an undersized range
+	// in ordinary source. Check both buffers for every parser branch.
 	let mut faults = Vec::new();
 	let mut clean_siblings = Vec::new();
-	for sample in SAMPLES {
-		let program = parse_sample(sample);
-		let mut here = Vec::new();
-		for offsets in [Offsets::Bytes, Offsets::Utf16] {
-			let json = to_json(sample.src, &program, JsonDialect::Shfmt, offsets);
-			let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
-			let mut bad = Vec::new();
-			range_faults(&shfmt, None, "", &mut bad);
-			for fault in bad {
-				here.push(format!(
-					"{} with {} aliased, in {offsets:?}: {fault}",
-					String::from_utf8_lossy(sample.src).escape_debug(),
-					String::from_utf8_lossy(sample.text)
-				));
+	for_each_sample(|sample| {
+		for aliased in [false, true] {
+			let program = parse_sample(sample, aliased);
+			let src = if aliased { sample.src } else { sample.text };
+			let mut here = Vec::new();
+			for offsets in [Offsets::Bytes, Offsets::Utf16] {
+				for dialect in [JsonDialect::Native, JsonDialect::Shfmt] {
+					let json = to_json(src, &program, dialect, offsets);
+					let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+					let mut bad = Vec::new();
+					range_faults(&document, None, "", &mut bad);
+					for fault in bad {
+						here.push(format!(
+							"{} with {} (aliased={aliased}), {dialect:?}, {offsets:?}: {fault}",
+							String::from_utf8_lossy(src).escape_debug(),
+							String::from_utf8_lossy(sample.text)
+						));
+					}
+				}
+			}
+			match (sample.owner, aliased) {
+				(Owner::Sibling, true) if here.is_empty() => {
+					clean_siblings.push(String::from_utf8_lossy(sample.text).into_owned());
+				},
+				(Owner::Sibling, true) => {},
+				_ => faults.append(&mut here),
 			}
 		}
-		match sample.owner {
-			Owner::Here => faults.append(&mut here),
-			Owner::Sibling if here.is_empty() => {
-				clean_siblings.push(String::from_utf8_lossy(sample.text).into_owned());
-			},
-			Owner::Sibling => {},
-		}
-	}
+	});
 	assert!(faults.is_empty(), "{} range faults:\n{}", faults.len(), faults.join("\n"));
 	assert!(
 		clean_siblings.is_empty(),
 		"these samples no longer fault, so they are this change's now, not the word change's: {}",
 		clean_siblings.join(", ")
 	);
+}
+
+#[test]
+fn every_exported_word_part_has_a_type_discriminator() {
+	let mut faults = Vec::new();
+	for_each_sample(|sample| {
+		for aliased in [false, true] {
+			let program = parse_sample(sample, aliased);
+			let src = if aliased { sample.src } else { sample.text };
+			for offsets in [Offsets::Bytes, Offsets::Utf16] {
+				let json = to_json(src, &program, JsonDialect::Shfmt, offsets);
+				let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
+				let mut bad = Vec::new();
+				word_part_faults(&shfmt, "", &mut bad);
+				for fault in bad {
+					faults.push(format!(
+						"{} (aliased={aliased}), {offsets:?}: {fault}",
+						String::from_utf8_lossy(sample.text)
+					));
+				}
+			}
+		}
+	});
+	assert!(faults.is_empty(), "{} schema faults:\n{}", faults.len(), faults.join("\n"));
+}
+
+#[test]
+fn redirection_descriptors_keep_the_parsed_text_and_their_own_operator() {
+	for (zsh, text, value) in [
+		(false, b": 12>/dev/null".as_slice(), "12"),
+		(false, b": 0012>/dev/null".as_slice(), "0012"),
+		(false, b": 0\\\n12>/dev/null".as_slice(), "012"),
+		(false, b": {fd}>/dev/null".as_slice(), "{fd}"),
+		(true, b": 2>/dev/null".as_slice(), "2"),
+		(true, b": {fd}>/dev/null".as_slice(), "{fd}"),
+	] {
+		for src in [b"check\n".as_slice(), b"check 99>/dev/null\n".as_slice()] {
+			let sample = Sample { src, text, zsh, owner: Owner::Here };
+			let program = parse_sample(&sample, true);
+			for offsets in [Offsets::Bytes, Offsets::Utf16] {
+				let json = to_json(src, &program, JsonDialect::Shfmt, offsets);
+				let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
+				let redir = &shfmt["Stmts"][0]["Redirs"][0];
+				assert_eq!(redir["N"]["Value"], value, "{zsh:?}, {offsets:?}: {json}");
+				assert_eq!(redir["OpPos"]["Offset"], 5, "{json}");
+				assert_eq!(token_range(&redir["N"]), Some((5, 5)), "{json}");
+			}
+		}
+	}
 }
 
 #[test]
@@ -836,5 +995,33 @@ fn an_exported_name_carries_the_text_the_parser_read() {
 
 	// The same name through an alias, where the source holds none of it.
 	let sample = bash(b"coproc named { :; }");
-	assert_eq!(value(sample.src, &parse_sample(&sample)), "named");
+	assert_eq!(value(sample.src, &parse_sample(&sample, true)), "named");
+}
+
+#[test]
+fn unrecorded_conditional_keywords_are_not_replaced_with_operand_positions() {
+	let src = b"if :; then :; elif :; then :; else :; fi";
+	for features in [Features::NONE, Features::ZSH] {
+		let mut program = parse_all(src, features).unwrap();
+		let CommandKind::If(clause) = &mut program.commands[0].list.items[0].and_or.first.stages[0]
+			.cmd
+			.kind
+		else {
+			panic!("an if clause");
+		};
+		clause.arms[1].kw_pos = None;
+		clause.else_pos = None;
+		for offsets in [Offsets::Bytes, Offsets::Utf16] {
+			let json = to_json(src, &program, JsonDialect::Shfmt, offsets);
+			let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+			let elif = &document["Stmts"][0]["Cmd"]["Else"];
+			let otherwise = &elif["Else"];
+			for clause in [elif, otherwise] {
+				assert!(clause.get("Position").is_none(), "{json}");
+				assert!(clause.get("Pos").is_none(), "{json}");
+			}
+			assert_eq!(elif["Cond"][0]["Cmd"]["Args"][0]["Parts"][0]["Value"], ":");
+			assert_eq!(otherwise["Then"][0]["Cmd"]["Args"][0]["Parts"][0]["Value"], ":");
+		}
+	}
 }

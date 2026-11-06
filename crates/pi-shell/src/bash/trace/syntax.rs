@@ -16,7 +16,7 @@ use crate::bash::{ids::ModeId, ir, syntax as syn};
 /// postcard reports as a corrupt value rather than as an old archive. This
 /// number rises with the tree, beside `ir::IR_VERSION`, so an older archive
 /// is refused by its version instead.
-const ARCHIVE_VERSION: u8 = 3;
+const ARCHIVE_VERSION: u8 = 4;
 
 /// Exact originating region, when the engine supplies one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,7 +253,7 @@ mod tests {
 
 	#[test]
 	fn archive_round_trip_preserves_native_syntax_and_origin() {
-		let source = b"f() { printf '%s' \"$1\"; }\n";
+		let source = b"f() { for i in; do printf '%s' \"$1\" 0012>/dev/null; done; }\n";
 		let (syntax, _) = UnitSyntax::parse_boundary(source, Features::NONE.bits(), &[], 3).unwrap();
 		let syntax = syntax.with_parent(SourceParent { unit: 2, node: 7, lo: 12, hi: 40 });
 		let encoded = serde_json::to_string(&syntax).unwrap();
