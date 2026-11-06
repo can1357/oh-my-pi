@@ -572,7 +572,10 @@ pub(super) fn trap(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		let mut status = 0;
 		for spec in args {
 			let Some(key) = key(spec, platform) else {
-				ctx.diag(Diag::InvalidSignal { cmd: "trap".into(), spec: spec.clone() });
+				ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::InvalidSignal {
+					cmd:  "trap".into(),
+					spec: spec.clone(),
+				});
 				status = 1;
 				continue;
 			};
@@ -637,7 +640,10 @@ pub(super) fn trap(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let mut status = 0;
 	for spec in specs {
 		let Some(key) = key(spec, platform) else {
-			ctx.diag(Diag::InvalidSignal { cmd: "trap".into(), spec: spec.clone() });
+			ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::InvalidSignal {
+				cmd:  "trap".into(),
+				spec: spec.clone(),
+			});
 			status = 1;
 			continue;
 		};

@@ -1332,15 +1332,22 @@ fn emit(ctx: &mut Ctx<'_, '_>, msgs: Vec<Msg>) -> bool {
 				if n.as_slice() == ctx.name.as_bytes() {
 					ctx.usage(s);
 				} else {
-					ctx.diag(Diag::Usage { msg: s.into() }.by(n.to_string()));
+					ctx.diag(
+						crate::bash::diag::Producer::BuiltinError,
+						Diag::Usage { msg: s.into() }.by(n.to_string()),
+					);
 				}
 			},
-			Msg::Warn(s) => ctx.diag(Diag::Warning { msg: s.into() }),
+			Msg::Warn(s) => {
+				ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Warning { msg: s.into() })
+			},
 			Msg::Err(s) => {
 				err = true;
-				ctx.diag(Diag::Warning { msg: s.into() });
+				ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Warning { msg: s.into() });
 			},
-			Msg::Unavailable(n) => ctx.diag(Diag::ModuleUnavailable { name: n }),
+			Msg::Unavailable(n) => {
+				ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::ModuleUnavailable { name: n })
+			},
 		}
 	}
 	err
@@ -1359,7 +1366,8 @@ fn emit_ex(ex: &mut Expander<'_, '_>, msgs: Vec<Msg>) -> X<()> {
 			},
 			Msg::Unavailable(n) => Diag::ModuleUnavailable { name: n },
 		};
-		ex.k.diag(ex.cx, ex.vp, ex.line, d);
+		ex.k
+			.diag(ex.cx, ex.vp, ex.line, crate::bash::diag::Producer::ErrorProlog, d);
 	}
 	match fail {
 		Some(d) => Err(crate::bash::vm::expand::Stop::Fail(d)),
@@ -1422,7 +1430,7 @@ fn boot_hook(ctx: &mut Ctx<'_, '_>, module: &'static str) -> Result<(), Need> {
 		},
 		"zsh/watch" => {
 			if let Err(d) = super::zsh_args::zx(ctx, super::zsh_mod_watch::boot)? {
-				ctx.diag(d);
+				ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 			}
 			Ok(())
 		},
@@ -1609,7 +1617,9 @@ pub fn run_stub(ctx: &mut Ctx<'_, '_>, argv: &[BString]) -> R {
 	match IntrinsicId::lookup(name, ctx.vp.mode) {
 		Some(id) => super::run(id, ctx, argv),
 		None => {
-			ctx.diag(Diag::CommandNotFound { name: name.clone() });
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::CommandNotFound {
+				name: name.clone(),
+			});
 			done(127)
 		},
 	}
@@ -2793,7 +2803,7 @@ fn assign_array(ctx: &mut Ctx<'_, '_>, name: &[u8], list: Vec<BString>) -> Resul
 	match zx(ctx, |ex| params::assignaparam(ex, name, list, 0))? {
 		Ok(()) => Ok(0),
 		Err(d) => {
-			ctx.diag(d);
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 			Ok(1)
 		},
 	}

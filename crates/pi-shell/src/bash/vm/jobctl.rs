@@ -433,7 +433,7 @@ fn interrupt(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 	if vp.frames.is_empty() {
 		return;
 	}
-	exec::unwind(&mut k.root, cx.store, vp, 1);
+	exec::unwind(k, cx.store, vp, 1);
 	exec::clear_scratch(&mut k.root, cx.store, vp);
 	let f = &mut vp.frames[0];
 	let saves: Vec<Vec<Saved>> = std::mem::take(&mut f.redirs);
@@ -781,7 +781,7 @@ pub fn suspend(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, sig: Signal) -> 
 			undo_scratch(k, cx, vp, sc);
 			live_children(sc, &mut children);
 		}
-		exec::pop_frame(&mut k.root, cx.store, vp);
+		exec::pop_stand_in(k, cx.store, vp);
 		moved.push(frame);
 	}
 	moved.reverse();

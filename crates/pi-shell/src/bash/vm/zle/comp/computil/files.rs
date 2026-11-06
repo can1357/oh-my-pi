@@ -469,7 +469,7 @@ fn cfp_opt_pats(
 			let mut warns = Vec::new();
 			add = cfp_matcher_pats(matcher, &add, utf8, &mut warns);
 			for w in warns {
-				ctx.diag(crate::bash::diag::Diag::Usage {
+				ctx.diag(crate::bash::diag::Producer::ErrorProlog, crate::bash::diag::Diag::Usage {
 					msg: String::from_utf8_lossy(&w).into_owned().into(),
 				});
 			}

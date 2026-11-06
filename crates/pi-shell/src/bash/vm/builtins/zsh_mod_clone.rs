@@ -36,7 +36,7 @@ pub fn clone(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 		ctx.usage(format!("{tty}: permission denied"));
 		return done(1);
 	}
-	ctx.diag(Diag::Unsupported {
+	ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Unsupported {
 		what: "`clone' (forking the running shell onto another terminal)".into(),
 	});
 	done(1)

@@ -269,7 +269,8 @@ fn paste_text(zw: &mut Zw<'_, '_>, pbuf: Vec<u8>) -> WResult {
 				WResult::Done(1)
 			},
 			Err(Stop::Fail(d) | Stop::Fatal(d)) => {
-				zw.k.diag(zw.cx, zw.vp, 0, d);
+				zw.k
+					.diag(zw.cx, zw.vp, 0, crate::bash::diag::Producer::ErrorProlog, d);
 				WResult::Done(1)
 			},
 			Err(_) => WResult::Done(1),

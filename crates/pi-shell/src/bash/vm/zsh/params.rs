@@ -2377,7 +2377,9 @@ fn check_warn_pm(
 		format!("{pmtype} parameter {name} set in enclosing scope in function {func}")
 	};
 	ex.k
-		.diag(ex.cx, ex.vp, ex.line, Diag::Warning { msg: msg.into() });
+		.diag(ex.cx, ex.vp, ex.line, crate::bash::diag::Producer::ErrorProlog, Diag::Warning {
+			msg: msg.into(),
+		});
 	Ok(())
 }
 

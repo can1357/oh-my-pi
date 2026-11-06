@@ -494,7 +494,14 @@ pub(super) fn edit(
 		let mut cmd = editor;
 		cmd.push(b' ');
 		cmd.extend_from_slice(&path);
-		push_script(ctx.vp, &cmd, ctx.line, ScriptKind::Eval);
+		push_script(
+			crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
+			ctx.k,
+			ctx.vp,
+			&cmd,
+			ctx.line,
+			ScriptKind::Eval,
+		);
 		return Ok(Outcome { status: 0, control: Control::Resume });
 	}
 	let edited = ctx.vp.status == 0;
@@ -530,6 +537,13 @@ pub(super) fn edit(
 		list.add(BString::from(line), size, time);
 	}
 	list.save(&mut ctx.k.root, ctx.cx.store, ctx.vp);
-	push_script(ctx.vp, &contents, ctx.line, ScriptKind::Eval);
+	push_script(
+		crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
+		ctx.k,
+		ctx.vp,
+		&contents,
+		ctx.line,
+		ScriptKind::Eval,
+	);
 	Ok(Outcome { status: 0, control: Control::Frame })
 }

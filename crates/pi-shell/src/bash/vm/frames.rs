@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+pub const FRAMES_VERSION: u32 = 30;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -86,6 +86,7 @@ struct Image {
 	done:      Vec<(RunId, i32)>,
 	results:   Vec<(CallId, CallOutcome)>,
 	procs:     Vec<ProcImage>,
+	inputs:    Vec<Option<super::proc::ScriptInput>>,
 	/// Fd objects, referred to by index.
 	fd_objs:   Vec<FdObjImage>,
 	/// Engine memory objects, referred to by index.
@@ -236,42 +237,43 @@ impl FdRebuild<'_> {
 /// (`state::sync_root`), so the root's image has none.
 #[derive(Serialize, Deserialize)]
 struct ProcImage {
-	vpid:          Vpid,
-	parent:        Option<Vpid>,
-	runs:          Vec<RunImage>,
-	frames:        Vec<FrameImage>,
+	vpid:           Vpid,
+	parent:         Option<Vpid>,
+	runs:           Vec<RunImage>,
+	frames:         Vec<FrameImage>,
 	/// Fd object index of every slot.
-	fds:           Vec<Option<u32>>,
+	fds:            Vec<Option<u32>>,
 	/// A subshell's own state (`None` for the root vproc).
-	fields:        Option<Fields>,
-	out:           Vec<PendingWrite>,
-	pending_traps: SigSet,
-	stopped:       bool,
-	transient:     bool,
-	procsubs:      Vec<(u32, i32)>,
-	coprocs:       Vec<super::proc::Coproc>,
-	restore_opts:  Vec<BString>,
-	trace_base:    u32,
+	fields:         Option<Fields>,
+	out:            Vec<PendingWrite>,
+	pending_traps:  SigSet,
+	stopped:        bool,
+	transient:      bool,
+	procsubs:       Vec<(u32, i32)>,
+	coprocs:        Vec<super::proc::Coproc>,
+	restore_opts:   Vec<BString>,
+	trace_base:     u32,
 	/// `$BASH_SUBSHELL`.
-	subshell:      u32,
+	subshell:       u32,
 	/// `BASH_COMMAND`: the unit (written to the store) and syntax node; a
 	/// trap action that runs after the restore still names the trapped
 	/// command.
-	command:       Option<(UnitId, u32)>,
+	command:        Option<(UnitId, u32)>,
 	/// Pushes onto bash's call-stack arrays.
-	calls:         Vec<super::callstack::Call>,
+	calls:          Vec<super::callstack::Call>,
+	async_compound: bool,
 	/// The pseudo-signal traps the vproc set itself.
-	own_traps:     super::proc::OwnTraps,
+	own_traps:      super::proc::OwnTraps,
 	/// Current mode (the root's is also `MiscKey::Mode`).
-	mode:          ModeId,
+	mode:           ModeId,
 	/// zsh state (sticky emulation, frames' restores).
-	zsh:           Option<Box<super::proc::VprocZsh>>,
+	zsh:            Option<Box<super::proc::VprocZsh>>,
 	/// Host lineage (a detached tree stays detached after a restore).
-	lineage:       crate::bash::host::Lineage,
+	lineage:        crate::bash::host::Lineage,
 	/// What the vproc was parked on and the wake count then: a restored
 	/// shell schedules exactly as the externalized one would have (no
 	/// second `Blocked`, same interleaving).
-	blocked:       Option<(WaitKey, u64)>,
+	blocked:        Option<(WaitKey, u64)>,
 }
 
 /// A subshell vproc's state that the root vproc keeps in the store.
@@ -290,19 +292,20 @@ struct Fields {
 
 #[derive(Serialize, Deserialize)]
 struct RunImage {
-	id:                RunId,
-	tag:               u64,
-	src:               BString,
-	chain:             OriginChain,
-	mode:              ModeId,
-	restore_mode:      Option<ModeId>,
-	explicit_mode:     bool,
-	lossy:             u8,
-	args:              Option<Vec<BString>>,
-	cwd:               Option<BString>,
-	env:               Vec<(BString, BString)>,
-	started:           bool,
-	exit_trap_started: bool,
+	id:                   RunId,
+	tag:                  u64,
+	src:                  BString,
+	chain:                OriginChain,
+	mode:                 ModeId,
+	restore_mode:         Option<ModeId>,
+	explicit_mode:        bool,
+	lossy:                u8,
+	args:                 Option<Vec<BString>>,
+	cwd:                  Option<BString>,
+	env:                  Vec<(BString, BString)>,
+	started:              bool,
+	exit_trap_started:    bool,
+	exit_diagnostic_file: Option<BString>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -612,6 +615,7 @@ impl Shell {
 				subshell: p.subshell,
 				command,
 				calls: p.calls.clone(),
+				async_compound: p.async_compound,
 				own_traps: p.own_traps,
 				mode: p.mode,
 				zsh: p.zsh.clone(),
@@ -640,6 +644,7 @@ impl Shell {
 			done: k.done.iter().copied().collect(),
 			results: k.results.iter().map(|(id, o)| (*id, o.clone())).collect(),
 			procs,
+			inputs: k.inputs.slots.clone(),
 			fd_objs: fds.objs,
 			mems: fds.mems,
 			bangs: k.bangs.clone(),
@@ -756,6 +761,15 @@ impl Shell {
 		stdio: &mut [Option<FdRef>; 3],
 		report: &mut RestoreReport,
 	) -> Result<(), RestoreError> {
+		let mut inputs = vec![false; img.inputs.len()];
+		for frame in img.procs.iter().flat_map(|proc| &proc.frames) {
+			if let FrameKind::Script { input, .. } = frame.kind
+				&& (img.inputs.get(input.0).is_none_or(Option::is_none)
+					|| std::mem::replace(&mut inputs[input.0], true))
+			{
+				return Err(RestoreError::Corrupt(postcard::Error::DeserializeBadEncoding));
+			}
+		}
 		// The root vproc as `restore` loaded it from the store: the image
 		// holds its execution position, the store its fields.
 		let loaded = self
@@ -763,6 +777,7 @@ impl Shell {
 			.pop()
 			.expect("restore starts with the root vproc");
 		let k = &mut self.k;
+		k.inputs = super::proc::Inputs::restore(img.inputs);
 		k.seq = img.seq;
 		k.next_run = img.next_run;
 		k.next_call = img.next_call;
@@ -836,6 +851,7 @@ impl Shell {
 			vp.trace_base = p.trace_base;
 			vp.subshell = p.subshell;
 			vp.calls = p.calls;
+			vp.async_compound = p.async_compound;
 			vp.own_traps = p.own_traps;
 			vp.mode = p.mode;
 			vp.zsh = p.zsh;
@@ -869,19 +885,20 @@ impl Shell {
 			vp.blocked = blocked;
 			for r in p.runs {
 				vp.runs.push_back(Run {
-					id:                r.id,
-					tag:               r.tag,
-					src:               Arc::from(r.src.as_slice()),
-					chain:             r.chain,
-					mode:              r.mode,
-					restore_mode:      r.restore_mode,
-					explicit_mode:     r.explicit_mode,
-					lossy:             r.lossy,
-					args:              r.args,
-					cwd:               r.cwd,
-					env:               r.env,
-					started:           r.started,
-					exit_trap_started: r.exit_trap_started,
+					id:                   r.id,
+					tag:                  r.tag,
+					src:                  Arc::from(r.src.as_slice()),
+					chain:                r.chain,
+					mode:                 r.mode,
+					restore_mode:         r.restore_mode,
+					explicit_mode:        r.explicit_mode,
+					lossy:                r.lossy,
+					args:                 r.args,
+					cwd:                  r.cwd,
+					env:                  r.env,
+					started:              r.started,
+					exit_trap_started:    r.exit_trap_started,
+					exit_diagnostic_file: r.exit_diagnostic_file,
 				});
 			}
 			report.runs += vp.runs.len() as u32;
@@ -1107,19 +1124,20 @@ fn reinstall_signal_traps(cx: &mut Cx<'_>) -> Result<(), RestoreError> {
 
 fn run_image(r: &Run) -> RunImage {
 	RunImage {
-		id:                r.id,
-		tag:               r.tag,
-		src:               BString::from(&*r.src),
-		chain:             r.chain.clone(),
-		mode:              r.mode,
-		restore_mode:      r.restore_mode,
-		explicit_mode:     r.explicit_mode,
-		lossy:             r.lossy,
-		args:              r.args.clone(),
-		cwd:               r.cwd.clone(),
-		env:               r.env.clone(),
-		started:           r.started,
-		exit_trap_started: r.exit_trap_started,
+		id:                   r.id,
+		tag:                  r.tag,
+		src:                  BString::from(&*r.src),
+		chain:                r.chain.clone(),
+		mode:                 r.mode,
+		restore_mode:         r.restore_mode,
+		explicit_mode:        r.explicit_mode,
+		lossy:                r.lossy,
+		args:                 r.args.clone(),
+		cwd:                  r.cwd.clone(),
+		env:                  r.env.clone(),
+		started:              r.started,
+		exit_trap_started:    r.exit_trap_started,
+		exit_diagnostic_file: r.exit_diagnostic_file.clone(),
 	}
 }
 

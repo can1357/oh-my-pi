@@ -76,11 +76,15 @@ pub fn cond_regex_match(
 		Ok(Some(groups)) => groups,
 		Ok(None) => return Ok(Ok(false)),
 		Err(RegexFail::Compile(msg)) => {
-			ctx.diag(Diag::Usage { msg: format!("failed to compile regex: {msg}").into() });
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
+				msg: format!("failed to compile regex: {msg}").into(),
+			});
 			return Ok(Ok(false));
 		},
 		Err(RegexFail::Exec(msg)) => {
-			ctx.diag(Diag::Usage { msg: format!("regex matching error: {msg}").into() });
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
+				msg: format!("regex matching error: {msg}").into(),
+			});
 			return Ok(Ok(false));
 		},
 	};

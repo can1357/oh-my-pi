@@ -175,7 +175,14 @@ pub fn mapfile(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	script.extend_from_slice(format!(" {} ", spec.origin + n - 1).as_bytes());
 	script.extend_from_slice(&sh_single_quote(&line));
 	script.push(b'\n');
-	push_script(ctx.vp, &script, ctx.line, ScriptKind::Eval);
+	push_script(
+		crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
+		ctx.k,
+		ctx.vp,
+		&script,
+		ctx.line,
+		ScriptKind::Eval,
+	);
 	ctx.k.emit_op(ctx.cx, ctx.vp, 0, EventData::EvalEnter);
 	Ok(Outcome { status: 0, control: Control::Resume })
 }

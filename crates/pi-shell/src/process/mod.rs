@@ -126,10 +126,11 @@ fn search_path(env: &[(BString, BString)]) -> BString {
 /// Read the script operand as bash's `open_shell_script` does (zsh's
 /// `setupshin` for the zsh dialect, [`read_zsh_script`]): a name without
 /// `/` that is not in the current directory is looked up in `PATH` (bash's
-/// default when unset); a directory or a binary file (ELF magic or a NUL
-/// on the first line of the first 128 bytes) is refused (126); a missing file
-/// is 127. Errors before the file opens are prefixed with the shell's name,
-/// later ones with the script's (`$0`). Returns the path opened and the text.
+/// default when unset); a directory or a regular binary file (ELF magic or a
+/// NUL on the first line of the first 80 bytes) is refused (126); a missing
+/// file is 127. Errors before the file opens are prefixed with the shell's
+/// name, later ones with the script's (`$0`). Returns the path opened and the
+/// text.
 ///
 /// # Errors
 ///
@@ -172,14 +173,22 @@ pub fn read_script(
 		ScriptError::new(&args.shell_name, &path, &strerror(&err), status)
 	})?;
 	let dollar0 = &args.dollar0;
-	if file.metadata().is_ok_and(|m| m.is_dir()) {
+	let metadata = file.metadata().ok();
+	if metadata.as_ref().is_some_and(|m| m.is_dir()) {
 		return Err(ScriptError::new(dollar0, &path, "Is a directory", 126));
 	}
 	let mut text = Vec::new();
 	file
 		.read_to_end(&mut text)
 		.map_err(|err| ScriptError::new(dollar0, &path, &strerror(&err), 126))?;
-	if crate::bash::vm::command::looks_binary(&text, args.mode.dialect() != Dialect::Zsh) {
+	// Bash 5.2.21/5.3.0 script operands: NUL at 79 is refused, at 80
+	// (and 127) runs. ELF magic is refused only in regular files; FIFO
+	// input beginning with the same four bytes runs as shell text.
+	if crate::bash::vm::command::looks_binary(&text, crate::bash::vm::command::BinaryCheck {
+		sample_len:      80,
+		elf_magic:       args.mode.dialect() != Dialect::Zsh,
+		sniff_file_kind: metadata.as_ref().is_some_and(|m| m.is_file()),
+	}) {
 		return Err(ScriptError::new(dollar0, &path, "cannot execute binary file", 126));
 	}
 	Ok((path, text))
@@ -566,6 +575,7 @@ pub fn shell_init(
 	ShellInit {
 		mode: args.mode,
 		argv0,
+		invocation_name: Some(args.shell_name.clone()),
 		args: params,
 		env,
 		cwd,

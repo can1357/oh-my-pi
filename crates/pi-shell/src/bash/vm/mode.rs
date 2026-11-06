@@ -69,7 +69,9 @@ pub fn report_lossy(
 			None => {},
 		},
 	}
-	k.diag(cx, vp, line, Diag::ModeLossy { what: what.into() });
+	k.diag(cx, vp, line, crate::bash::diag::Producer::ErrorProlog, Diag::ModeLossy {
+		what: what.into(),
+	});
 }
 
 /// Make `mode` `vp`'s current mode; the root's is written through as

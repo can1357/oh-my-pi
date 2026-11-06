@@ -1041,7 +1041,7 @@ fn name_pat(ctx: &mut Ctx<'_, '_>, name: &[u8]) -> Result<Result<BString, BStrin
 	let opts = match zx(ctx, zpattern::opts)? {
 		Ok(o) => o,
 		Err(d) => {
-			ctx.diag(d);
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 			return Ok(Err(rembslash(name)));
 		},
 	};

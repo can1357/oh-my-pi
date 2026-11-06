@@ -185,12 +185,15 @@ fn compile(
 		Ok(p) => Some(p),
 		Err(CompileError::Syntax(msgs)) => {
 			for (line, msg) in msgs {
-				ctx.diag(Diag::ZshAtLine { line, msg: BString::from(msg) });
+				ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::ZshAtLine {
+					line,
+					msg: BString::from(msg),
+				});
 			}
 			None
 		},
 		Err(CompileError::Undefined(why)) => {
-			ctx.diag(Diag::Unsupported {
+			ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Unsupported {
 				what: format!("zcompile of {} ({why})", what.as_bstr()).into(),
 			});
 			None
@@ -316,7 +319,7 @@ fn build_cur_dump(
 		if chosen.len() > 1 {
 			// zsh walks its function hash table: an order this engine
 			// does not keep.
-			ctx.diag(Diag::Unsupported {
+			ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Unsupported {
 				what: "zcompile -c/-a of several functions chosen by pattern or by naming none".into(),
 			});
 			return done(1);
@@ -368,7 +371,7 @@ fn cur_add_func(
 		}
 		// zsh dumps the word code it keeps for the function; the engine
 		// keeps none.
-		ctx.diag(Diag::Unsupported {
+		ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Unsupported {
 			what: format!("zcompile -c of the loaded function `{}'", name.as_bstr()).into(),
 		});
 		return Ok(None);

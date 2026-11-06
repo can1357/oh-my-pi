@@ -9,6 +9,7 @@
 use std::{borrow::Cow, fmt, io};
 
 use bstr::BString;
+use serde::{Deserialize, Serialize};
 
 use crate::bash::fd::BadFd;
 
@@ -223,6 +224,14 @@ pub enum Diag {
 		/// OS error.
 		err:  io::Error,
 	},
+	/// A file read failed through the filesystem probe's byte-valued error.
+	#[error("{path}: {msg}")]
+	ReadFailed {
+		/// Path, kept as bytes rather than formatted into a UTF-8 message.
+		path: BString,
+		/// The filesystem's error text.
+		msg:  BString,
+	},
 	/// A redirection word expanded to zero or several fields.
 	#[error("{word}: ambiguous redirect")]
 	AmbiguousRedirect {
@@ -429,6 +438,14 @@ pub enum Diag {
 		/// Message.
 		msg:  BString,
 	},
+	/// The source line following a command-substitution syntax error.
+	#[error("`{text}'")]
+	ComsubContext {
+		/// The script line supplied by the command-substitution reader.
+		line: u32,
+		/// Source bytes, without the newline.
+		text: BString,
+	},
 	/// An arithmetic error inside an array subscript: bash reports it
 	/// without the command's name (`let 'a[1+]=1'` → `1+: arithmetic
 	/// syntax error…`), so [`Diag::by`] leaves it as it is.
@@ -550,16 +567,22 @@ pub enum Producer<'a> {
 	/// The expansion parser already supplied its command-substitution line.
 	CommandSubstitution,
 	/// `parser_error` / `report_syntax_error`, including an offending line.
-	ParserError { input: ParserInput<'a>, context_line: bool },
+	ParserError { input: &'a ParserInput, context_line: bool },
 }
 
-/// `yy_input_name()` and Bash's current `interactive`, not
-/// `interactive_shell`. Eval inherits its caller's parser interactivity;
-/// sourced files and trap actions run a noninteractive parser.
-#[derive(Clone, Copy, Debug)]
-pub struct ParserInput<'a> {
-	pub name:        &'a [u8],
+/// A parser input's identity and interactivity, captured when it is created.
+/// It travels with its script frame, including through snapshots. Eval
+/// inherits its caller's parser interactivity; file and child inputs do not.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParserInput {
+	pub name:        Cow<'static, [u8]>,
 	pub interactive: bool,
+}
+
+impl ParserInput {
+	pub fn new(name: impl Into<Cow<'static, [u8]>>, interactive: bool) -> Self {
+		Self { name: name.into(), interactive }
+	}
 }
 
 /// A message paired with the producer that emitted it. Borrowing avoids
@@ -606,9 +629,9 @@ pub fn render(diagnostic: Diagnostic<'_>, site: DiagSite<'_>) -> Vec<u8> {
 	match producer {
 		Producer::ParserError { input, .. } => {
 			if !input.interactive {
-				if site.interactive || name != input.name {
+				if site.interactive || name != input.name.as_ref() {
 					out.extend_from_slice(b": ");
-					out.extend_from_slice(input.name);
+					out.extend_from_slice(&input.name);
 				}
 				line_prefix(&mut out, site.line);
 			}
@@ -658,9 +681,13 @@ pub struct ZshSite<'a> {
 /// The full stderr line for `diag` printed by zsh-dialect code (zsh
 /// `zwarning`): `PREFIX:LINE: msg`, or `PREFIX:CMD:LINE: msg` for a
 /// builtin's ([`Diag::Prefixed`]); without a line, `PREFIX: msg`.
-pub fn render_zsh(diag: &Diag, site: ZshSite<'_>) -> Vec<u8> {
+pub fn render_zsh(diagnostic: Diagnostic<'_>, site: ZshSite<'_>) -> Vec<u8> {
+	let Diagnostic { message: diag, producer } = diagnostic;
 	if let Diag::Several { diags } = diag {
-		return diags.iter().flat_map(|d| render_zsh(d, site)).collect();
+		return diags
+			.iter()
+			.flat_map(|message| render_zsh(Diagnostic { message, producer }, site))
+			.collect();
 	}
 	let mut out = Vec::with_capacity(64);
 	let prefixed = matches!(diag, Diag::Prefixed { .. });
@@ -811,6 +838,11 @@ fn message(diag: &Diag, utf8: bool, out: &mut Vec<u8>) {
 			named(out, name, &format!(": {}", strerror(err)));
 		},
 		Diag::Io { path, err } => named(out, path, &format!(": {}", strerror(err))),
+		Diag::ReadFailed { path, msg } => {
+			out.extend_from_slice(path);
+			out.extend_from_slice(b": ");
+			out.extend_from_slice(msg);
+		},
 		Diag::BadInterpreter { name, interp, err } => {
 			out.extend_from_slice(name);
 			out.extend_from_slice(b": ");
@@ -823,6 +855,13 @@ fn message(diag: &Diag, utf8: bool, out: &mut Vec<u8>) {
 			out.extend_from_slice(line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
 			out.extend_from_slice(b": ");
 			out.extend_from_slice(msg);
+		},
+		Diag::ComsubContext { line, text } => {
+			out.extend_from_slice(b"command substitution: line ");
+			out.extend_from_slice(line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
+			out.extend_from_slice(b": `");
+			out.extend_from_slice(text);
+			out.push(b'\'');
 		},
 		// A builtin reporting one of the above (`cd: PATH: …`).
 		Diag::Prefixed { cmd, diag } => {
@@ -917,12 +956,12 @@ mod tests {
 		};
 		let syntax = Diag::Syntax { msg: BString::from("syntax error near unexpected token `)'") };
 		let context = Diag::SyntaxContext { text: BString::from(")") };
-		let parser = |message, name, interactive, context_line| {
+		let parser = |message, name: &'static [u8], interactive, context_line| {
 			render(
 				Diagnostic {
 					message,
 					producer: Producer::ParserError {
-						input: ParserInput { name, interactive },
+						input: &ParserInput::new(name, interactive),
 						context_line,
 					},
 				},
@@ -955,7 +994,7 @@ mod tests {
 				Diagnostic {
 					message:  &syntax,
 					producer: Producer::ParserError {
-						input:        ParserInput { name: b"./defs", interactive: false },
+						input:        &ParserInput::new(&b"./defs"[..], false),
 						context_line: false,
 					},
 				},

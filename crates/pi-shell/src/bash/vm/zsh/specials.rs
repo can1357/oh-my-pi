@@ -1619,7 +1619,8 @@ pub fn set(ex: &mut Expander<'_, '_>, sp: Special, name: &[u8], value: PValue) -
 				&v,
 			)?;
 			if let Err(d) = res {
-				ex.k.diag(ex.cx, ex.vp, ex.line, d);
+				ex.k
+					.diag(ex.cx, ex.vp, ex.line, crate::bash::diag::Producer::ErrorProlog, d);
 			}
 		},
 		Special::Random => {
@@ -1783,9 +1784,13 @@ fn set_functions(ex: &mut Expander<'_, '_>, value: PValue) -> X<()> {
 		src.extend_from_slice(&body);
 		src.extend_from_slice(b"\n}");
 		let Some(mut f) = crate::bash::ir::function_from_source(&src, ex.vp.mode, feat) else {
-			ex.k.diag(ex.cx, ex.vp, ex.line, Diag::Warning {
-				msg: "invalid function definition".into(),
-			});
+			ex.k.diag(
+				ex.cx,
+				ex.vp,
+				ex.line,
+				crate::bash::diag::Producer::ErrorProlog,
+				Diag::Warning { msg: "invalid function definition".into() },
+			);
 			continue;
 		};
 		f.name = name;
@@ -1840,12 +1845,16 @@ fn set_id(ex: &mut Expander<'_, '_>, sp: Special, want: i64) -> X<()> {
 fn set_option(ex: &mut Expander<'_, '_>, name: &[u8], value: &[u8]) -> X<()> {
 	if value != b"on" && value != b"off" {
 		let msg = BString::from(format!("invalid value: {}", bstr::BStr::new(value)));
-		ex.k.diag(ex.cx, ex.vp, ex.line, Diag::Warning { msg });
+		ex.k
+			.diag(ex.cx, ex.vp, ex.line, crate::bash::diag::Producer::ErrorProlog, Diag::Warning {
+				msg,
+			});
 		return Ok(());
 	}
 	let Some((opt, inv)) = ZshOpt::lookup(name) else {
 		let d = Diag::NoSuchOption { name: BString::from(name) };
-		ex.k.diag(ex.cx, ex.vp, ex.line, d);
+		ex.k
+			.diag(ex.cx, ex.vp, ex.line, crate::bash::diag::Producer::ErrorProlog, d);
 		return Ok(());
 	};
 	let on = (value == b"on") != inv;
@@ -1862,7 +1871,10 @@ fn set_option(ex: &mut Expander<'_, '_>, name: &[u8], value: &[u8]) -> X<()> {
 			&& !crate::bash::vm::jobctl::enable_monitor(ex.k, ex.cx, ex.vp))
 	{
 		let msg = BString::from(format!("can't change option: {}", bstr::BStr::new(name)));
-		ex.k.diag(ex.cx, ex.vp, ex.line, Diag::Warning { msg });
+		ex.k
+			.diag(ex.cx, ex.vp, ex.line, crate::bash::diag::Producer::ErrorProlog, Diag::Warning {
+				msg,
+			});
 		return Ok(());
 	}
 	state::set_zsh_option(&mut ex.k.root, ex.cx.store, ex.vp, opt, on)?;

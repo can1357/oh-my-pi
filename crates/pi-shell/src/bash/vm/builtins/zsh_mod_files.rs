@@ -142,7 +142,9 @@ impl<'a> Fsq<'a> {
 				for c in std::mem::take(&mut ctx.chunks) {
 					let (fd, bytes) = match c {
 						Chunk::Out(fd, b) => (fd, b),
-						Chunk::Diag(d) => (2, ctx.k.render_diag(ctx.cx, ctx.vp, ctx.line, &d)),
+						Chunk::Diag(d, producer) => {
+							(2, ctx.k.render_diag(ctx.cx, ctx.vp, ctx.line, producer, &d))
+						},
 					};
 					ctx.vp
 						.out

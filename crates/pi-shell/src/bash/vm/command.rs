@@ -28,7 +28,7 @@ use super::{
 	xtrace,
 };
 use crate::bash::{
-	diag::Diag,
+	diag::{Diag, Producer},
 	event::{EventData, NodeKind, RedirKind, ResolvedKind, WaitKey},
 	fd::FdRef,
 	fs::StatKind,
@@ -316,7 +316,7 @@ pub fn exec(
 						&& cmd.assigns.is_empty()
 						&& cmd
 							.redirs
-							.is_some_and(|list| zsh_read_subst(vp, unit, list))))
+							.is_some_and(|list| zsh_read_subst(k, vp, unit, list))))
 					&& st(vp).argv.is_empty()
 				{
 					// `$(< file)`: the file is the substitution's output.
@@ -454,7 +454,7 @@ fn assignment_statement(
 			Err(stop) => return Some(exec::stop_flow(k, vp, cx, line, stop)),
 		};
 		if let Err(d) = assign_now(k, vp, cx, &a.name, None, a.append, AssignValue::Scalar(value)) {
-			k.diag(cx, vp, line, d);
+			k.diag(cx, vp, line, Producer::ErrorProlog, d);
 			// bash abandons the rest of the command line after a failed
 			// assignment statement; a posix shell exits.
 			if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
@@ -888,7 +888,9 @@ fn expand(
 					.iter()
 					.position(|&c| c == b']')
 					.map_or(src.len(), |p| p + 1);
-				k.diag(cx, vp, line, Diag::InvalidIdent { name: BString::from(&src[..close]) });
+				k.diag(cx, vp, line, Producer::ErrorProlog, Diag::InvalidIdent {
+					name: BString::from(&src[..close]),
+				});
 				let s = st(vp);
 				s.assigns.push((a.name.clone(), BString::default()));
 				s.values
@@ -903,7 +905,7 @@ fn expand(
 			{
 				let mut shown = a.name.clone();
 				shown.extend_from_slice(b"[]");
-				k.diag(cx, vp, line, Diag::BadSubscript { shown });
+				k.diag(cx, vp, line, Producer::ErrorProlog, Diag::BadSubscript { shown });
 				if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 					.unwrap_or(false)
 				{
@@ -998,7 +1000,7 @@ fn expand(
 				// bash reports it and runs the command without the
 				// assignment; in posix mode the command does not run, and a
 				// special builtin's assignment error ends the shell.
-				k.diag(cx, vp, line, Diag::Readonly { name: name.clone() });
+				k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Readonly { name: name.clone() });
 				// zsh: an error (`errflag`); the command does not run.
 				if unit.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 					return Some(Flow::Discard(1));
@@ -1030,7 +1032,7 @@ fn expand(
 				match builtins::prefix_value(k, cx, vp, &name, &raw, append) {
 					Ok(converted) => AssignValue::Scalar(converted),
 					Err(diag) => {
-						k.diag(cx, vp, line, diag);
+						k.diag(cx, vp, line, Producer::ErrorProlog, diag);
 						// bash does not run the command.
 						let state = st(vp);
 						state.status = 1;
@@ -1067,7 +1069,7 @@ fn expand(
 			if let Err(d) =
 				assign_now(k, vp, cx, &name, index.as_ref().map(|i| i.as_slice()), append, value)
 			{
-				k.diag(cx, vp, line, d);
+				k.diag(cx, vp, line, Producer::ErrorProlog, d);
 				// bash abandons the rest of the command line after a failed
 				// assignment statement; a posix shell exits.
 				if state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
@@ -1172,7 +1174,7 @@ fn cat_stdin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Opti
 		Err(key) => return Some(Flow::Block(key)),
 		Ok(ProbeResult::Bytes(Ok(text))) => text,
 		Ok(ProbeResult::Bytes(Err(msg))) => {
-			k.diag(cx, vp, line, Diag::Usage { msg: format!("{msg}").into() });
+			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Usage { msg: format!("{msg}").into() });
 			let s = st(vp);
 			s.status = 1;
 			s.stage = Stage::Finish;
@@ -1192,8 +1194,8 @@ fn cat_stdin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Opti
 /// lone `<` on fd 0 (redirection list `list` of `unit`). Its output is the
 /// file, read without running `$READNULLCMD`.
 #[inline(never)]
-fn zsh_read_subst(vp: &Vproc, unit: &Unit, list: u32) -> bool {
-	let [Frame { kind: FrameKind::Script { src, what: ScriptKind::Eval, aux, .. }, .. }] =
+fn zsh_read_subst(k: &Kernel, vp: &Vproc, unit: &Unit, list: u32) -> bool {
+	let [Frame { kind: FrameKind::Script { input, what: ScriptKind::Eval, aux, .. }, .. }] =
 		vp.frames.as_slice()
 	else {
 		return false;
@@ -1210,7 +1212,7 @@ fn zsh_read_subst(vp: &Vproc, unit: &Unit, list: u32) -> bool {
 		&& unit.redirs.get(list as usize).is_some_and(
 			|rs| matches!(rs.as_slice(), [r] if r.op == RedirKind::In && r.fd == ir::RedirFdIr::Default),
 		)
-		&& src.trim_ascii() == unit.source.trim_ascii()
+		&& k.inputs.get(*input).source.trim_ascii() == unit.source.trim_ascii()
 }
 
 /// zsh `execcmd` for redirections without a command: without `$NULLCMD`
@@ -1255,7 +1257,9 @@ fn null_command(
 		st(vp).argv.push(word);
 		return None;
 	}
-	k.diag(cx, vp, line, Diag::Usage { msg: "redirection with no command".into() });
+	k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Usage {
+		msg: "redirection with no command".into(),
+	});
 	Some(Flow::Discard(1))
 }
 
@@ -1934,7 +1938,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 						// `builtin` takes no options.
 						let msg = format!("-{}: invalid option", argv[0][1] as char).into();
 						let line = line_of(vp, op.node);
-						k.diag(cx, vp, line, Diag::Usage { msg }.by("builtin"));
+						k.diag(cx, vp, line, Producer::BuiltinError, Diag::Usage { msg }.by("builtin"));
 						vp.out.push_back(PendingWrite {
 							fd:    2,
 							bytes: BString::from("builtin: usage: builtin [shell-builtin [arg ...]]\n"),
@@ -1950,7 +1954,13 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 				_ if via == Via::Builtin && !matches!(resolved, Resolved::Intrinsic(_)) => {
 					let name = argv[0].clone();
 					let line = line_of(vp, op.node);
-					k.diag(cx, vp, line, Diag::NotABuiltin { name }.by("builtin"));
+					k.diag(
+						cx,
+						vp,
+						line,
+						Producer::BuiltinError,
+						Diag::NotABuiltin { name }.by("builtin"),
+					);
 					let s = st(vp);
 					s.status = 1;
 					s.stage = Stage::Finish;
@@ -2186,7 +2196,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 	if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh
 		&& let Some(d) = zsh_prefix_ids(k, vp, cx, line)
 	{
-		k.diag(cx, vp, line, d);
+		k.diag(cx, vp, line, Producer::ErrorProlog, d);
 		if matches!(target, Target::Function(_) | Target::Intrinsic(_)) {
 			return Some(Flow::Discard(1));
 		}
@@ -2217,7 +2227,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 			} else {
 				(format!("{name}: not found"), 127)
 			};
-			k.diag(cx, vp, line, Diag::Usage { msg: msg.into() }.by("exec"));
+			k.diag(cx, vp, line, Producer::BuiltinError, Diag::Usage { msg: msg.into() }.by("exec"));
 			let s = st(vp);
 			s.status = status;
 			s.stage = Stage::Output;
@@ -2229,7 +2239,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				return Some(flow);
 			}
 			let name = argv0(vp);
-			k.diag(cx, vp, line, Diag::CommandNotFound { name });
+			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::CommandNotFound { name });
 			let s = st(vp);
 			s.status = 127;
 			// The message goes to the command's own (redirected) stderr:
@@ -2310,7 +2320,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				},
 				Err(err) => {
 					let name = argv0(vp);
-					k.diag(cx, vp, line, Diag::StartFailed { name, err });
+					k.diag(cx, vp, line, Producer::ErrorProlog, Diag::StartFailed { name, err });
 					let s = st(vp);
 					s.status = 126;
 					s.stage = Stage::Output;
@@ -2568,7 +2578,7 @@ fn spawned_external(
 			// 126 for `EACCES` and `ENOEXEC`, else 127.
 			let name = st(vp).argv[0].clone();
 			let msg = format!("{}: {name}", super::redir::zsh_errno(&err)).into();
-			k.diag(cx, vp, line, Diag::Usage { msg });
+			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Usage { msg });
 			let s = st(vp);
 			s.status = if err.kind() == std::io::ErrorKind::PermissionDenied || is_enoexec(&err) {
 				126
@@ -2591,7 +2601,7 @@ fn spawned_external(
 			let name = st(vp).argv[0].clone();
 			let name = if name.contains(&b'/') { name } else { path };
 			let (diag, status) = spawn_error(name, err);
-			k.diag(cx, vp, line, diag);
+			k.diag(cx, vp, line, Producer::ErrorProlog, diag);
 			let s = st(vp);
 			s.status = status;
 			// Written while the command's redirections are in place
@@ -2656,7 +2666,7 @@ fn zsh_restricted_external(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line
 		return false;
 	};
 	let msg = format!("{what}: restricted").into();
-	k.diag(cx, vp, line, Diag::Usage { msg });
+	k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Usage { msg });
 	let s = st(vp);
 	s.status = 1;
 	s.stage = Stage::Output;
@@ -2699,7 +2709,7 @@ fn call_function(
 	let max = funcnest.map_or(limit, |n| u32::try_from(n).unwrap_or(u32::MAX).min(limit));
 	if depth >= max {
 		let max = funcnest.map_or(max, |n| u32::try_from(n).unwrap_or(u32::MAX));
-		k.diag(cx, vp, line, Diag::FuncNest { name, max });
+		k.diag(cx, vp, line, Producer::ErrorProlog, Diag::FuncNest { name, max });
 		return Some(Flow::Discard(1));
 	}
 	let (unit_id, mode, sticky, file, attrs) =
@@ -2708,7 +2718,7 @@ fn call_function(
 				(*unit, *mode, sticky.clone(), file.clone(), *attrs)
 			},
 			Ok(_) => {
-				k.diag(cx, vp, line, Diag::CommandNotFound { name });
+				k.diag(cx, vp, line, Producer::ErrorProlog, Diag::CommandNotFound { name });
 				let s = st(vp);
 				s.status = 127;
 				s.stage = Stage::Output;
@@ -2728,7 +2738,7 @@ fn call_function(
 	let body = match load_body(k, vp, cx, &name, unit_id, mode) {
 		Ok(Some(u)) => u,
 		Ok(None) => {
-			k.diag(cx, vp, line, Diag::Lost { name });
+			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Lost { name });
 			let s = st(vp);
 			s.status = 1;
 			s.stage = Stage::Finish;
@@ -2782,11 +2792,10 @@ fn zsh_funcnest(
 	let (_, zline) = k.zsh_site(cx, vp, line);
 	let msg = "maximum nested function level reached; increase FUNCNEST?";
 	let diag = Diag::Usage { msg: msg.into() };
-	let bytes = crate::bash::diag::render_zsh(&diag, crate::bash::diag::ZshSite {
-		prefix: name,
-		line:   zline,
-		utf8:   false,
-	});
+	let bytes = crate::bash::diag::render_zsh(
+		crate::bash::diag::Diagnostic { message: &diag, producer: Producer::ErrorProlog },
+		crate::bash::diag::ZshSite { prefix: name, line: zline, utf8: false },
+	);
 	vp.out
 		.push_back(super::proc::PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
 	vp.status = 1;
@@ -2836,7 +2845,7 @@ fn autoload(
 				FpFound::Dump(dump) => super::builtins::zsh_zcompile::word_code_only(&dump),
 				_ => Diag::Usage { msg: format!("{name}: function definition file not found").into() },
 			};
-			k.diag(cx, vp, line, d);
+			k.diag(cx, vp, line, Producer::ErrorProlog, d);
 			let s = st(vp);
 			s.status = 1;
 			s.stage = Stage::Output;
@@ -2920,7 +2929,7 @@ fn ksh_autoload(
 	let Some(body) = lowered else {
 		let what =
 			format!("ksh-style autoloaded definition of {} that cannot be lowered", BStr::new(name));
-		k.diag(cx, vp, line, Diag::Unsupported { what: what.into() });
+		k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Unsupported { what: what.into() });
 		return fail(vp);
 	};
 	// The file's definition replaces the stub (a file that defines nothing
@@ -3007,7 +3016,13 @@ fn parse_autoload(
 				{
 					let diag = Diag::Syntax { msg: msg.into() };
 					let site = crate::bash::diag::ZshSite { prefix: name, line, utf8: false };
-					bytes.extend_from_slice(&crate::bash::diag::render_zsh(&diag, site));
+					bytes.extend_from_slice(&crate::bash::diag::render_zsh(
+						crate::bash::diag::Diagnostic {
+							message:  &diag,
+							producer: Producer::ErrorProlog,
+						},
+						site,
+					));
 				}
 				vp.out
 					.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
@@ -3196,7 +3211,7 @@ pub fn define_autoloaded(
 	let Some(f) = f else {
 		let what = format!("autoloaded definition of {} that cannot be lowered", BStr::new(name));
 		let line = exec::current_line(vp);
-		k.diag(cx, vp, line, Diag::Unsupported { what: what.into() });
+		k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Unsupported { what: what.into() });
 		return false;
 	};
 	// A deferred body (no ops yet) is only persisted: `load_unit` lowers it
@@ -3592,7 +3607,9 @@ pub fn call_anon(
 			ir::materialize(&f.body, k.mask.contains(crate::bash::event::EventKind::UnitCompiled))
 		else {
 			let what = "an anonymous function body that cannot be lowered";
-			k.diag(cx, vp, line, crate::bash::diag::Diag::Unsupported { what: what.into() });
+			k.diag(cx, vp, line, Producer::ErrorProlog, crate::bash::diag::Diag::Unsupported {
+				what: what.into(),
+			});
 			return Flow::Discard(1);
 		};
 		k.engine.intern(b)
@@ -3646,7 +3663,7 @@ pub fn start_math_call(
 			},
 			Ok(_) => {
 				let msg = format!("no such function: {name}");
-				k.diag(cx, vp, line, Diag::BadMathExpr { msg: msg.into() });
+				k.diag(cx, vp, line, Producer::ErrorProlog, Diag::BadMathExpr { msg: msg.into() });
 				return Flow::Discard(1);
 			},
 			Err(err) => {
@@ -3661,7 +3678,7 @@ pub fn start_math_call(
 	let body = match load_body(k, vp, cx, &name, unit_id, mode) {
 		Ok(Some(u)) => u,
 		Ok(None) => {
-			k.diag(cx, vp, line, Diag::Lost { name });
+			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Lost { name });
 			return Flow::Discard(1);
 		},
 		Err(err) => {
@@ -3787,7 +3804,7 @@ fn run_builtin(
 		for ((index, value), name) in values.into_iter().zip(&names) {
 			let lhs = Lhs { name, index: index.as_ref().map(|i| i.as_slice()), append: false };
 			if let Err(d) = builtins::assign_special_prefix(k, cx, vp, lhs, value) {
-				k.diag(cx, vp, line, d);
+				k.diag(cx, vp, line, Producer::ErrorProlog, d);
 			}
 		}
 	}
@@ -3909,9 +3926,9 @@ fn settle_builtin(
 	for c in chunks {
 		let (fd, bytes) = match c {
 			Chunk::Out(fd, b) => (fd, b),
-			Chunk::Diag(d) => {
+			Chunk::Diag(d, producer) => {
 				super::zle::display::trash_for_message(k, cx, vp);
-				(2, k.render_diag(cx, vp, line, &d))
+				(2, k.render_diag(cx, vp, line, producer, &d))
 			},
 		};
 		sc.exec
@@ -4066,7 +4083,13 @@ fn exec_builtin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> O
 		}
 	}
 	if let Some(msg) = bad {
-		let text = k.render_diag(cx, vp, line, &Diag::Usage { msg: msg.into() }.by("exec"));
+		let text = k.render_diag(
+			cx,
+			vp,
+			line,
+			Producer::BuiltinError,
+			&Diag::Usage { msg: msg.into() }.by("exec"),
+		);
 		let s = st(vp);
 		s.argv = argv;
 		s.writes
@@ -4091,7 +4114,7 @@ fn exec_builtin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> O
 	let zsh = vp.mode.dialect() == crate::bash::ids::Dialect::Zsh;
 	if zsh && state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Restricted).unwrap_or(false) {
 		let msg = format!("{name}: restricted").into();
-		k.diag(cx, vp, line, Diag::Usage { msg }.by("exec"));
+		k.diag(cx, vp, line, Producer::BuiltinError, Diag::Usage { msg }.by("exec"));
 		let s = st(vp);
 		s.argv = argv;
 		s.status = 1;
@@ -4377,7 +4400,7 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			Some(CallOutcome::Signaled(sig)) => sig.exit_status(platform),
 			Some(CallOutcome::Error(msg)) => {
 				let tool = st(vp).argv[0].clone();
-				k.diag(cx, vp, line, Diag::Tool { tool, msg });
+				k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Tool { tool, msg });
 				1
 			},
 			None => return Some(Flow::Block(WaitKey::Call(id))),
@@ -4492,7 +4515,7 @@ fn waited_into(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, pid: 
 	let lhs = Lhs { name: base, index, append: false };
 	let value = AssignValue::Scalar(BString::from(pid.to_string()));
 	if let Err(d) = builtins::set_value(k, cx, vp, lhs, value, Level::Dynamic) {
-		k.diag(cx, vp, line, d);
+		k.diag(cx, vp, line, Producer::ErrorProlog, d);
 	}
 }
 
@@ -4545,7 +4568,10 @@ fn output(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<
 					state.status = 1;
 					// Through the command's own fd 2 (`2>&1 >&4`), while its
 					// redirections are in place.
-					let bytes = k.render_diag(cx, vp, line, &Diag::WriteError { cmd, err });
+					let bytes = k.render_diag(cx, vp, line, Producer::BuiltinError, &Diag::WriteError {
+						cmd,
+						err,
+					});
 					st(vp)
 						.writes
 						.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
@@ -4594,7 +4620,7 @@ fn zsh_write_error(
 		diags.push(Diag::Usage { msg: msg.into() });
 	}
 	for d in diags {
-		let bytes = k.render_diag(cx, vp, line, &d);
+		let bytes = k.render_diag(cx, vp, line, Producer::BuiltinError, &d);
 		st(vp)
 			.writes
 			.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
@@ -4689,7 +4715,7 @@ fn print_exit_value(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32
 fn lost(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32, what: Lost) -> i32 {
 	k.emit_op(cx, vp, op.node, EventData::Lost { lost: &what });
 	let name = st(vp).argv[0].clone();
-	k.diag(cx, vp, line, Diag::Lost { name });
+	k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Lost { name });
 	137
 }
 
@@ -4700,14 +4726,22 @@ fn is_enoexec(err: &std::io::Error) -> bool {
 	err.raw_os_error() == Some(code)
 }
 
-/// bash `check_binary_file`: ELF magic or a NUL before the first newline.
-/// The 128-byte sample is measured against Bash 5.2.21 and 5.3.0, not
-/// read from bash's source.
-pub(crate) fn looks_binary(text: &[u8], elf_magic: bool) -> bool {
-	let head = &text[..text.len().min(128)];
-	// An ELF image is binary however it reads: bash checks its magic before
-	// looking for a NUL. zsh has no such rule.
-	if elf_magic && head.starts_with(b"\x7fELF") {
+/// A reader's measured binary sample and file-kind policy.
+#[derive(Clone, Copy)]
+pub(crate) struct BinaryCheck {
+	pub sample_len:      usize,
+	pub elf_magic:       bool,
+	/// The caller selects the file kinds it sniffs, before reading bytes.
+	pub sniff_file_kind: bool,
+}
+
+/// Bash `check_binary_file`: ELF magic or a NUL before the first newline.
+pub(crate) fn looks_binary(text: &[u8], policy: BinaryCheck) -> bool {
+	if !policy.sniff_file_kind {
+		return false;
+	}
+	let head = &text[..text.len().min(policy.sample_len)];
+	if policy.elf_magic && head.starts_with(b"\x7fELF") {
 		return true;
 	}
 	let line = head
@@ -4739,7 +4773,9 @@ fn run_script_file(
 		Ok(ProbeResult::Bytes(Ok(text))) => text,
 		Ok(ProbeResult::Bytes(Err(msg))) => {
 			let name = st(vp).argv[0].clone();
-			k.diag(cx, vp, line, Diag::Usage { msg: format!("{name}: {msg}").into() });
+			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Usage {
+				msg: format!("{name}: {msg}").into(),
+			});
 			let s = st(vp);
 			s.status = 126;
 			s.stage = Stage::Finish;
@@ -4748,9 +4784,15 @@ fn run_script_file(
 		},
 		Ok(_) => BString::default(),
 	};
-	if looks_binary(&text, vp.mode.dialect() != crate::bash::ids::Dialect::Zsh) {
+	// Bash 5.2.21/5.3.0 ENOEXEC: NUL at 127 is refused, at 128 runs;
+	// four ELF magic bytes suffice. FIFOs fail execution before this reader.
+	if looks_binary(&text, BinaryCheck {
+		sample_len:      128,
+		elf_magic:       vp.mode.dialect() != crate::bash::ids::Dialect::Zsh,
+		sniff_file_kind: true,
+	}) {
 		let name = st(vp).argv[0].clone();
-		k.diag(cx, vp, line, Diag::BinaryFile { name });
+		k.diag(cx, vp, line, Producer::ErrorProlog, Diag::BinaryFile { name });
 		let s = st(vp);
 		s.status = 126;
 		s.stage = Stage::Finish;
@@ -4952,7 +4994,7 @@ fn refused(
 			}
 		}
 	};
-	k.diag_from(cx, vp, line, producer, diag);
+	k.diag(cx, vp, line, producer, diag);
 	let s = st(vp);
 	s.status = status;
 	s.stage = Stage::Output;
@@ -5038,7 +5080,7 @@ fn zsh_refused(
 	} else {
 		format!("command not found: {name}")
 	};
-	k.diag(cx, vp, line, Diag::Usage { msg: msg.into() });
+	k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Usage { msg: msg.into() });
 	let s = st(vp);
 	s.status = status;
 	s.stage = Stage::Output;
@@ -5128,26 +5170,27 @@ fn build_env(k: &Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Result<EnvView, StoreEr
 
 #[cfg(test)]
 mod tests {
-	use super::looks_binary;
+	use super::{BinaryCheck, looks_binary};
 
 	// NUL sampling stops at the first newline and the measured byte boundary;
 	// the ELF magic check is bash-only.
 	#[test]
 	fn binary_check_looks_at_the_first_line_only() {
-		assert!(!looks_binary(b"(echo \"$1\")\n", true));
-		assert!(looks_binary(b"\x7fELF\x02\x01\x01\0\0", true));
-		assert!(!looks_binary(b"echo hi\n\0binary after the first line", true));
-		assert!(!looks_binary(b"", true));
-		// bash refuses an ELF image whose first line holds no NUL; zsh, which
-		// has no ELF rule, runs it as text (its own `$'\177ELF'` report).
-		assert!(looks_binary(b"\x7fELF text\n", true));
-		assert!(!looks_binary(b"\x7fELF text\n", false));
-		assert!(!looks_binary(b"\x7fEL", true));
+		let bash = BinaryCheck { sample_len: 128, elf_magic: true, sniff_file_kind: true };
+		assert!(!looks_binary(b"(echo \"$1\")\n", bash));
+		assert!(looks_binary(b"\x7fELF\x02\x01\x01\0\0", bash));
+		assert!(!looks_binary(b"echo hi\n\0binary after the first line", bash));
+		assert!(!looks_binary(b"", bash));
+		assert!(looks_binary(b"\x7fELF text\n", bash));
+		assert!(!looks_binary(b"\x7fELF text\n", BinaryCheck { elf_magic: false, ..bash }));
+		assert!(!looks_binary(b"\x7fELF text\n", BinaryCheck { sniff_file_kind: false, ..bash }));
+		assert!(!looks_binary(b"\x7fEL", bash));
 		let mut text = [b' '; 129];
 		text[127] = 0;
-		assert!(looks_binary(&text, true));
+		assert!(looks_binary(&text, bash));
+		assert!(!looks_binary(&text, BinaryCheck { sample_len: 80, ..bash }));
 		text[127] = b' ';
 		text[128] = 0;
-		assert!(!looks_binary(&text, true));
+		assert!(!looks_binary(&text, bash));
 	}
 }

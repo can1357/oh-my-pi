@@ -54,7 +54,9 @@ pub fn private(ctx: &mut Ctx<'_, '_>, ops: &mut Ops, args: &[BString], base: usi
 	}
 	if ops.isset(b'T') {
 		// zsh `zwarn`: no builtin name.
-		ctx.diag(Diag::Warning { msg: BString::from("bad option: -T") });
+		ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Warning {
+			msg: BString::from("bad option: -T"),
+		});
 		return done(1);
 	}
 	// zsh calls `bin_typeset("private", …)` for `local -P` too.
@@ -102,11 +104,13 @@ fn declare(ctx: &mut Ctx<'_, '_>, ops: &mut Ops, args: &[BString], base: usize) 
 		let plan = match zx(ctx, |ex| plan_for(ex, &pname, level, hide, readonly))? {
 			Ok(Ok(plan)) => plan,
 			Ok(Err(what)) => {
-				ctx.diag(Diag::Unsupported { what: what.into() });
+				ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Unsupported {
+					what: what.into(),
+				});
 				return done(1);
 			},
 			Err(d) => {
-				ctx.diag(d);
+				ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 				return Ok(Outcome { status: 1, control: Control::DiscardAll });
 			},
 		};

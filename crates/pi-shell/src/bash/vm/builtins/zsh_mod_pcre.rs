@@ -315,7 +315,9 @@ pub fn cond_pcre_match(
 	let ksh = i64::from(!ctx.zsh_option(ZshOpt::Ksharrays)?);
 	let pattern = match r.find_byte(0) {
 		Some(n) => {
-			ctx.diag(Diag::Usage { msg: "embedded NULs in PCRE pattern terminate pattern".into() });
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
+				msg: "embedded NULs in PCRE pattern terminate pattern".into(),
+			});
 			&r[..n]
 		},
 		None => r,
@@ -323,7 +325,7 @@ pub fn cond_pcre_match(
 	let re = match compiled(pattern, opts) {
 		Ok(re) => re,
 		Err(e) => {
-			ctx.diag(Diag::Usage {
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
 				msg: format!("failed to compile regexp /{}/: {}", r.as_bstr(), e.message()).into(),
 			});
 			return Ok(Ok(false));
@@ -333,7 +335,9 @@ pub fn cond_pcre_match(
 		Ok(Some(groups)) => groups,
 		Ok(None) => return Ok(Ok(false)),
 		Err(code) => {
-			ctx.diag(Diag::Usage { msg: format!("pcre_exec() error [{code}]").into() });
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
+				msg: format!("pcre_exec() error [{code}]").into(),
+			});
 			return Ok(Ok(false));
 		},
 	};

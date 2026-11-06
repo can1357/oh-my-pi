@@ -276,14 +276,16 @@ fn atoi(s: &[u8]) -> i64 {
 
 /// zsh `zwarnnam("fc", …)`.
 fn warn(ctx: &mut Ctx<'_, '_>, msg: String) {
-	ctx.diag(Diag::Usage { msg: msg.into() }.by("fc"));
+	ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Usage { msg: msg.into() }.by("fc"));
 }
 
 /// zsh `zerr`: the message, and the rest of the command line abandoned.
 fn zerr_report(ctx: &mut Ctx<'_, '_>, r: Report, status: i32) -> R {
 	let error = r.error;
 	for m in r.msgs {
-		ctx.diag(Diag::Usage { msg: m.to_str_lossy().into_owned().into() });
+		ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
+			msg: m.to_str_lossy().into_owned().into(),
+		});
 	}
 	if error {
 		return Ok(Outcome { status, control: Control::DiscardAll });
@@ -443,7 +445,10 @@ pub fn zsh_fc(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		match Pattern::compile(&t, PatFlags::NONE, &popts) {
 			Ok(p) => pprog = Some(p),
 			Err(_) => {
-				ctx.diag(Diag::Usage { msg: "invalid match pattern".into() }.by(ctx.name));
+				ctx.diag(
+					crate::bash::diag::Producer::BuiltinError,
+					Diag::Usage { msg: "invalid match pattern".into() }.by(ctx.name),
+				);
 				return done(1);
 			},
 		}
@@ -567,7 +572,7 @@ pub fn zsh_fc(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 /// `zwarnnam(nam, …)` under the builtin's own name.
 fn warn_name(ctx: &mut Ctx<'_, '_>, msg: String) {
 	let name = ctx.name;
-	ctx.diag(Diag::Usage { msg: msg.into() }.by(name));
+	ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Usage { msg: msg.into() }.by(name));
 }
 
 /// An integer argument as `zstrtol(…, &check, 10)` with nothing after it.
@@ -787,7 +792,14 @@ fn rerun(ctx: &mut Ctx<'_, '_>, h: Hist, text: BString, editor: &[u8]) -> R {
 		let mut cmd = BString::from(editor);
 		cmd.push(b' ');
 		cmd.extend_from_slice(&path);
-		push_script(ctx.vp, &cmd, ctx.line, ScriptKind::Eval);
+		push_script(
+			crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
+			ctx.k,
+			ctx.vp,
+			&cmd,
+			ctx.line,
+			ScriptKind::Eval,
+		);
 		return Ok(Outcome { status: 0, control: Control::Resume });
 	}
 	let edited = if edit { ctx.vp.status == 0 } else { true };
@@ -833,7 +845,14 @@ fn rerun(ctx: &mut Ctx<'_, '_>, h: Hist, text: BString, editor: &[u8]) -> R {
 		h.st.curline_num = num;
 		h.save(&mut ctx.k.root, ctx.cx.store, ctx.vp);
 	}
-	push_script(ctx.vp, &contents, ctx.line, ScriptKind::Eval);
+	push_script(
+		crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
+		ctx.k,
+		ctx.vp,
+		&contents,
+		ctx.line,
+		ScriptKind::Eval,
+	);
 	Ok(Outcome { status: 0, control: Control::Frame })
 }
 
@@ -842,7 +861,10 @@ fn rerun(ctx: &mut Ctx<'_, '_>, h: Hist, text: BString, editor: &[u8]) -> R {
 pub fn print_s(ctx: &mut Ctx<'_, '_>, words: &[Vec<u8>], lex: bool) -> R {
 	if lex && words.len() > 1 {
 		let name = ctx.name;
-		ctx.diag(Diag::Usage { msg: "option -S takes a single argument".into() }.by(name));
+		ctx.diag(
+			crate::bash::diag::Producer::BuiltinError,
+			Diag::Usage { msg: "option -S takes a single argument".into() }.by(name),
+		);
 		return done(1);
 	}
 	let text = BString::from(bstr::join(b" ", words));

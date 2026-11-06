@@ -183,7 +183,7 @@ pub fn bind_lhs(ctx: &mut Ctx<'_, '_>, lhs: Lhs<'_>, value: AssignValue) -> bool
 	match set_value(ctx.k, ctx.cx, ctx.vp, lhs, value, Level::Dynamic) {
 		Ok(()) => true,
 		Err(d @ Diag::Readonly { .. }) => {
-			ctx.diag(d);
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 			false
 		},
 		Err(d) => {

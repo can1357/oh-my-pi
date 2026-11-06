@@ -230,7 +230,7 @@ pub fn log(ctx: &mut Ctx<'_, '_>) -> R {
 			done(0)
 		},
 		Err(d) => {
-			ctx.diag(d);
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 			done(1)
 		},
 	}

@@ -258,7 +258,13 @@ impl Env for ShellEnv<'_, '_, '_> {
 
 	fn warn(&mut self, warning: Warning) {
 		let d = Diag::Warning { msg: warning.to_string().into() };
-		self.ex.k.diag(self.ex.cx, self.ex.vp, self.ex.line, d);
+		self.ex.k.diag(
+			self.ex.cx,
+			self.ex.vp,
+			self.ex.line,
+			crate::bash::diag::Producer::ErrorProlog,
+			d,
+		);
 	}
 
 	/// The user math functions (`functions -M`), then those of loaded (or

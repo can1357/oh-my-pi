@@ -282,7 +282,9 @@ pub fn times(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		return done(st);
 	}
 	let Ok(t) = ctx.cx.host.cpu_times() else {
-		ctx.diag(Diag::Unsupported { what: "`times' on this host (no CPU time)".into() });
+		ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Unsupported {
+			what: "`times' on this host (no CPU time)".into(),
+		});
 		return done(1);
 	};
 	let text = format!(

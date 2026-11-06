@@ -143,9 +143,10 @@ fn globlist(zw: &mut Zw<'_, '_>, mut sc: Box<Scratch>, nodes: Vec<Vec<u8>>, k: G
 		return k(zw, sc, Some(nodes));
 	}
 	let Some(fi) = zw.vp.frames.len().checked_sub(1) else {
-		zw.k.diag(zw.cx, zw.vp, 0, Diag::Unsupported {
-			what: "filename generation in ZLE without a frame".into(),
-		});
+		zw.k
+			.diag(zw.cx, zw.vp, 0, crate::bash::diag::Producer::ErrorProlog, Diag::Unsupported {
+				what: "filename generation in ZLE without a frame".into(),
+			});
 		return k(zw, sc, None);
 	};
 	let ng = zw.isset(ZshOpt::Nullglob);

@@ -41,7 +41,14 @@ pub fn eval(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	};
 	// `$?` stays the caller's until the text runs its first command; text
 	// without one ends with status 0 (the script frame's end).
-	push_script(ctx.vp, &src, line, ScriptKind::Eval);
+	push_script(
+		crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
+		ctx.k,
+		ctx.vp,
+		&src,
+		line,
+		ScriptKind::Eval,
+	);
 	ctx.k.emit_op(ctx.cx, ctx.vp, 0, EventData::EvalEnter);
 	Ok(Outcome { status: 0, control: Control::Frame })
 }
@@ -102,16 +109,21 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let text = match ctx.probe(Probe::Read { path: path.clone() })? {
 		ProbeResult::Bytes(Ok(text)) => text,
 		ProbeResult::Bytes(Err(msg)) if msg.as_slice() == b"Is a directory" => {
-			ctx.err(Diag::Usage { msg: format!("{}: is a directory", shown.as_bstr()).into() });
+			ctx.err(Diag::ReadFailed { path: shown.clone(), msg: "is a directory".into() });
 			return done(1);
 		},
 		ProbeResult::Bytes(Err(msg)) => {
-			ctx.diag(Diag::Usage { msg: format!("{}: {}", file.as_bstr(), msg.as_bstr()).into() });
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::ReadFailed {
+				path: file.clone(),
+				msg,
+			});
 			ctx.usage_error = true;
 			return done(1);
 		},
 		_ => {
-			ctx.diag(Diag::NoSuchFile { name: file.clone() });
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::NoSuchFile {
+				name: file.clone(),
+			});
 			ctx.usage_error = true;
 			return done(1);
 		},
@@ -132,7 +144,14 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	};
 	let restore = source_args(ctx, rest, true)?;
 	// As for `eval`: the file sees the caller's `$?`.
-	push_script(ctx.vp, &text, 1, ScriptKind::Source);
+	push_script(
+		crate::bash::diag::ParserInput::new(Vec::from(file.clone()), false),
+		ctx.k,
+		ctx.vp,
+		&text,
+		1,
+		ScriptKind::Source,
+	);
 	// `BASH_SOURCE` shows the name as given.
 	crate::bash::vm::callstack::push_source(
 		ctx.k,
@@ -181,7 +200,10 @@ pub fn zsh_source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				super::zsh_zcompile::source_dump::<super::Need>(&mut ask, &cwd, file)?
 			};
 			if let Some(dump) = dump {
-				ctx.diag(super::zsh_zcompile::word_code_only(&dump));
+				ctx.diag(
+					crate::bash::diag::Producer::BuiltinError,
+					super::zsh_zcompile::word_code_only(&dump),
+				);
 				return done(1);
 			}
 		}
@@ -219,7 +241,14 @@ pub fn zsh_source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let argzero = ctx
 		.zsh_option(crate::bash::zshopt::ZshOpt::Functionargzero)?
 		.then(|| file.clone());
-	push_script(ctx.vp, &text, 1, ScriptKind::Source);
+	push_script(
+		crate::bash::diag::ParserInput::new(Vec::from(file.clone()), false),
+		ctx.k,
+		ctx.vp,
+		&text,
+		1,
+		ScriptKind::Source,
+	);
 	crate::bash::vm::callstack::push_source(
 		ctx.k,
 		ctx.cx.store,
@@ -278,12 +307,17 @@ fn numeric_arg(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> Result<Option<i64>, B
 		return Ok(None);
 	};
 	let Some(n) = number(a) else {
-		ctx.diag(Diag::NumericArg { cmd: ctx.name.into(), arg: a.clone() });
+		ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::NumericArg {
+			cmd: ctx.name.into(),
+			arg: a.clone(),
+		});
 		ctx.usage_error = true;
 		return Err(BadArg::NotNumeric);
 	};
 	if args.len() > 1 {
-		ctx.diag(Diag::TooManyArgs { cmd: ctx.name.into() });
+		ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::TooManyArgs {
+			cmd: ctx.name.into(),
+		});
 		return Err(BadArg::TooMany);
 	}
 	Ok(Some(n))
@@ -389,8 +423,22 @@ fn bash_logout(ctx: &mut Ctx<'_, '_>, status: i32) -> Result<Option<Outcome>, su
 	};
 	ctx.store_record(KeyBuf::Misc(MiscKey::LoggedOut), Some(Record::Misc(BString::from("1"))));
 	ctx.vp.status = status;
-	push_script(ctx.vp, format!("builtin exit {status}\n").as_bytes(), ctx.line, ScriptKind::Eval);
-	push_script(ctx.vp, &text, 1, ScriptKind::Source);
+	push_script(
+		crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
+		ctx.k,
+		ctx.vp,
+		format!("builtin exit {status}\n").as_bytes(),
+		ctx.line,
+		ScriptKind::Eval,
+	);
+	push_script(
+		crate::bash::diag::ParserInput::new(Vec::from(path.clone()), false),
+		ctx.k,
+		ctx.vp,
+		&text,
+		1,
+		ScriptKind::Source,
+	);
 	ctx.k
 		.emit_op(ctx.cx, ctx.vp, 0, EventData::SourceEnter { path: path.as_bstr() });
 	Ok(Some(Outcome { status, control: Control::Frame }))
@@ -570,7 +618,7 @@ pub fn wait(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				Ok(n) => {
 					let job = ctx.vp.jobs.get(n).map(|j| (j.vpid, j.state));
 					if let Some((_, crate::bash::vm::proc::JobState::Stopped(_))) = job {
-						ctx.diag(Diag::Warning {
+						ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Warning {
 							msg: format!("warning: wait_for_job: job {n} is stopped").into(),
 						});
 					}

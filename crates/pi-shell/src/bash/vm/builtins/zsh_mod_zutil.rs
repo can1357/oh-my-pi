@@ -71,7 +71,7 @@ fn px<T>(
 		Ok(v) => Ok(Some(v)),
 		Err(d) => {
 			if !*failed {
-				ctx.diag(d);
+				ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 				*failed = true;
 			}
 			Ok(None)
@@ -217,7 +217,14 @@ fn code_error(ctx: &mut Ctx<'_, '_>) -> Result<bool, Need> {
 /// its lines numbered from `line`; the builtin runs again after it.
 fn push_code(ctx: &mut Ctx<'_, '_>, code: &[u8], line: u32, kind: CodeKind) -> R {
 	code_error(ctx)?;
-	push_script(ctx.vp, code, line, ScriptKind::Code(kind));
+	push_script(
+		crate::bash::diag::ParserInput::new(kind.context().as_bytes(), false),
+		ctx.k,
+		ctx.vp,
+		code,
+		line,
+		ScriptKind::Code(kind),
+	);
 	ctx.k.emit_op(ctx.cx, ctx.vp, 0, EventData::EvalEnter);
 	Ok(Outcome { status: 0, control: Control::Resume })
 }
@@ -800,7 +807,7 @@ fn zstyle_set(ctx: &mut Ctx<'_, '_>, args: &[BString], eval: bool) -> R {
 			return done(1);
 		},
 		Err(d) => {
-			ctx.diag(d);
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 			return fin(1, true);
 		},
 	};
@@ -813,7 +820,7 @@ fn zstyle_set(ctx: &mut Ctx<'_, '_>, args: &[BString], eval: bool) -> R {
 		if let Some(e) = parse_error(ctx, &code)? {
 			// zsh has added the style already.
 			styles_save(ctx, &tab);
-			ctx.diag(Diag::ZshAtLine {
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::ZshAtLine {
 				line: at + e.line.saturating_sub(1),
 				msg:  BString::from(e.bash_msg()),
 			});
@@ -863,7 +870,7 @@ fn zstyle_list(ctx: &mut Ctx<'_, '_>, args: &[BString], list: List) -> R {
 				Ok((Some(p), env)) => Some((p, env)),
 				Ok((None, _)) => return done(1),
 				Err(d) => {
-					ctx.diag(d);
+					ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 					return fin(1, true);
 				},
 			}
@@ -930,7 +937,7 @@ impl<'s> Fmt<'s> {
 		match zx(ctx, |ex| arith::mathevali(ex, &text))? {
 			Ok(v) => Ok(v),
 			Err(d) => {
-				ctx.diag(d);
+				ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 				self.failed = true;
 				Ok(0)
 			},
@@ -1662,7 +1669,7 @@ pub fn zregexparse(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	let parsed = p.alt(&mut top).is_ok() && p.pos >= regex.len();
 	let mut m = if ctx.resumed > 0 {
 		let Some(Wait::Regex(mut m)) = pending_take(ctx)? else {
-			ctx.diag(Diag::Unsupported {
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Unsupported {
 				what: "`zregexparse' lost its place after shell code".into(),
 			});
 			return done(3);

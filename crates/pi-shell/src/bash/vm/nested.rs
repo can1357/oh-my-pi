@@ -106,7 +106,7 @@ pub fn start(
 		let diag = crate::bash::diag::Diag::Unsupported {
 			what: std::borrow::Cow::Borrowed("--pretty-print in a nested shell"),
 		};
-		k.diag(cx, vp, line, diag);
+		k.diag(cx, vp, line, crate::bash::diag::Producer::ErrorProlog, diag);
 		let s = st(vp);
 		s.status = 2;
 		s.stage = Stage::Output;
@@ -121,13 +121,23 @@ pub fn start(
 		Input::Stdin => (BString::default(), true, "s"),
 		Input::Script(name) => {
 			let path = probe::absolute(&vp.cwd, name);
+			let regular =
+				match command_probe(k, cx, vp, &Probe::Stat { path: path.clone(), follow: true }) {
+					Err(key) => return Some(Flow::Block(key)),
+					Ok(ProbeResult::Stat(Some(stat))) => stat.kind == crate::bash::fs::StatKind::File,
+					_ => false,
+				};
 			match command_probe(k, cx, vp, &Probe::Read { path }) {
 				Err(key) => return Some(Flow::Block(key)),
 				Ok(ProbeResult::Bytes(Ok(text))) => {
-					if super::command::looks_binary(
-						&text,
-						args.mode.dialect() != crate::bash::Dialect::Zsh,
-					) {
+					// Bash 5.2.21/5.3.0 nested script operands use the
+					// same measured 79/80 boundary and regular-file-only
+					// ELF refusal as a top-level operand (including FIFOs).
+					if super::command::looks_binary(&text, super::command::BinaryCheck {
+						sample_len:      80,
+						elf_magic:       args.mode.dialect() != crate::bash::Dialect::Zsh,
+						sniff_file_kind: regular,
+					}) {
 						let text = message(&dollar0, name, b"cannot execute binary file");
 						return reply(vp, 2, text, 126);
 					}
@@ -238,10 +248,10 @@ fn launch(
 			for candidates in files {
 				for path in candidates {
 					let path = probe::absolute(&vp.cwd, &path);
-					match command_probe(k, cx, vp, &Probe::Read { path }) {
+					match command_probe(k, cx, vp, &Probe::Read { path: path.clone() }) {
 						Err(key) => return Some(Flow::Block(key)),
 						Ok(ProbeResult::Bytes(Ok(text))) => {
-							startup.push(text);
+							startup.push((path, text));
 							break;
 						},
 						Ok(_) => {},
@@ -273,7 +283,13 @@ fn launch(
 			.out
 			.push_back(PendingWrite { fd: 2, bytes: notes.into(), off: 0 });
 	}
-	let mut kind = FrameKind::script(src, crate::bash::syntax::Pos::START, ScriptKind::Run);
+	let input = match &args.input {
+		Input::Command(_) => crate::bash::diag::ParserInput::new(&b"-c"[..], args.interactive),
+		Input::Script(name) => crate::bash::diag::ParserInput::new(Vec::from(name.clone()), false),
+		Input::Stdin => crate::bash::diag::ParserInput::new(dollar0.to_vec(), args.interactive),
+	};
+	let input = k.inputs.insert(src, input);
+	let mut kind = FrameKind::script(input, crate::bash::syntax::Pos::START, ScriptKind::Run);
 	if let FrameKind::Script { stdin: s, .. } = &mut kind {
 		*s = stdin;
 	}
@@ -288,8 +304,15 @@ fn launch(
 			.or_default()
 			.insert(child.frames.len(), origin);
 	}
-	for text in startup.iter().rev() {
-		push_script(&mut child, text, 1, ScriptKind::Source);
+	for (path, text) in startup.iter().rev() {
+		push_script(
+			crate::bash::diag::ParserInput::new(Vec::from(path.clone()), false),
+			k,
+			&mut child,
+			text,
+			1,
+			ScriptKind::Source,
+		);
 	}
 	let vpid = child.vpid;
 	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
@@ -356,6 +379,7 @@ fn fresh_shell(
 	let interactive = if args.interactive { "1" } else { "0" };
 	for (key, value) in [
 		(MiscKey::Argv0, BString::from(dollar0)),
+		(MiscKey::InvocationName, args.shell_name.clone()),
 		(MiscKey::Dollar0, BString::from(dollar0)),
 		(MiscKey::ShellPid, vpid_text.clone()),
 		(MiscKey::NestedShell, vpid_text),

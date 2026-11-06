@@ -556,7 +556,14 @@ pub fn push_call(
 		quote(a, &mut src);
 	}
 	src.push(b'\n');
-	push_script(vp, &src, 1, ScriptKind::Hook);
+	push_script(
+		crate::bash::diag::ParserInput::new(&b"PROMPT_COMMAND"[..], false),
+		k,
+		vp,
+		&src,
+		1,
+		ScriptKind::Hook,
+	);
 	if widget {
 		let null = k
 			.null_input
@@ -1385,7 +1392,14 @@ fn key_step(zw: &mut Zw<'_, '_>, mut t: KeyTask) -> Next {
 				}
 				let depth = zw.vp.frames.len();
 				let status = zw.vp.status;
-				push_script(zw.vp, &ev.cmd, 1, ScriptKind::Eval);
+				push_script(
+					crate::bash::vm::exec::eval_input(zw.k, zw.vp),
+					zw.k,
+					zw.vp,
+					&ev.cmd,
+					1,
+					ScriptKind::Eval,
+				);
 				t.watched = true;
 				return Next::CallFrame(
 					Task::Key(t),
@@ -1534,9 +1548,15 @@ fn key_done(zw: &mut Zw<'_, '_>, mut t: KeyTask, eof: bool) -> Next {
 		Some(Bind::Str(s)) => {
 			t.hops += 1;
 			if t.hops == 20 {
-				zw.k.diag(zw.cx, zw.vp, 0, crate::bash::diag::Diag::Usage {
-					msg: "string inserting another one too many times".into(),
-				});
+				zw.k.diag(
+					zw.cx,
+					zw.vp,
+					0,
+					crate::bash::diag::Producer::ErrorProlog,
+					crate::bash::diag::Diag::Usage {
+						msg: "string inserting another one too many times".into(),
+					},
+				);
 				zw.ed.keybuf = std::mem::take(&mut t.buf);
 				return Next::Finish(Got::Key(None));
 			}

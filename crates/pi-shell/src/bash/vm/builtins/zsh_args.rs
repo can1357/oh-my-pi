@@ -341,9 +341,10 @@ pub fn zx<T>(
 /// A zsh `zerr` from inside a builtin: the message without the builtin's
 /// name, status 1, and the rest of the command line abandoned (zsh's
 /// `errflag` unwinds to the enclosing `eval` or the top level).
+/// Zsh `zerr`, classified as `ErrorProlog` (the Bash `error_prolog` class).
 #[allow(clippy::unnecessary_wraps, reason = "a handler's result: `return zerr(ctx, d)` ends it")]
 pub fn zerr(ctx: &mut Ctx<'_, '_>, d: Diag) -> R {
-	ctx.diag(d);
+	ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 	Ok(Outcome { status: 1, control: Control::DiscardAll })
 }
 

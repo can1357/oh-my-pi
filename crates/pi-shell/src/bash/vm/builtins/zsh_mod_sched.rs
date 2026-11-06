@@ -259,7 +259,7 @@ fn parse_time(ctx: &mut Ctx<'_, '_>, s: &[u8]) -> Result<Option<i64>, super::Nee
 	let (offset, _) = match zx(ctx, |ex| local_zone(ex, now))? {
 		Ok(z) => z,
 		Err(d) => {
-			ctx.diag(d);
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 			return Ok(None);
 		},
 	};
@@ -290,7 +290,7 @@ fn list(ctx: &mut Ctx<'_, '_>) -> R {
 			Ok(t) => t,
 			Err(d) => {
 				ctx.out(&out);
-				ctx.diag(d);
+				ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 				return done(1);
 			},
 		};

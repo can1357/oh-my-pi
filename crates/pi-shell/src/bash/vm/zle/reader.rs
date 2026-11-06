@@ -438,7 +438,7 @@ impl Reader {
 			},
 			Err(Stop::Fail(d) | Stop::Fatal(d)) => {
 				self.sc.recycle();
-				k.diag(cx, vp, 0, d);
+				k.diag(cx, vp, 0, crate::bash::diag::Producer::ErrorProlog, d);
 				Ok(None)
 			},
 			Err(Stop::Store(e)) => {
@@ -593,7 +593,14 @@ impl Reader {
 						Some(ev) => {
 							let depth = vp.frames.len();
 							let status = vp.status;
-							crate::bash::vm::exec::push_script(vp, &ev.cmd, 1, ScriptKind::Eval);
+							crate::bash::vm::exec::push_script(
+								crate::bash::vm::exec::eval_input(k, vp),
+								k,
+								vp,
+								&ev.cmd,
+								1,
+								ScriptKind::Eval,
+							);
 							self.running = Some((depth, status));
 							return None;
 						},
@@ -730,7 +737,14 @@ impl Reader {
 		}
 		if !src.is_empty() {
 			let depth = vp.frames.len();
-			crate::bash::vm::exec::push_script(vp, &src, 1, ScriptKind::Hook);
+			crate::bash::vm::exec::push_script(
+				crate::bash::diag::ParserInput::new(&b"PROMPT_COMMAND"[..], false),
+				k,
+				vp,
+				&src,
+				1,
+				ScriptKind::Hook,
+			);
 			// Its status is kept: bash's `$?` after PROMPT_COMMAND is the
 			// last command's, before it ran.
 			self.running = Some((depth, vp.status));
@@ -772,7 +786,13 @@ impl Reader {
 			if file.is_empty() {
 				let mut m = BString::from("empty MAILPATH component: ");
 				m.extend_from_slice(entry);
-				k.diag(cx, vp, 0, crate::bash::diag::Diag::Usage { msg: m.to_string().into() });
+				k.diag(
+					cx,
+					vp,
+					0,
+					crate::bash::diag::Producer::ErrorProlog,
+					crate::bash::diag::Diag::Usage { msg: m.to_string().into() },
+				);
 				continue;
 			}
 			let probe = Probe::Stat { path: BString::from(file), follow: true };
@@ -846,7 +866,8 @@ impl Reader {
 								| Stop::Wait(_)),
 							) => Err(e),
 							Err(Stop::Fail(d) | Stop::Fatal(d)) => {
-								ex.k.diag(ex.cx, ex.vp, 0, d);
+								ex.k
+									.diag(ex.cx, ex.vp, 0, crate::bash::diag::Producer::ErrorProlog, d);
 								Ok(Default::default())
 							},
 							Err(Stop::Store(e)) => {
@@ -897,7 +918,7 @@ impl Reader {
 		let ignoreeof = isset(k, cx, vp, ZshOpt::Ignoreeof);
 		let promptcr = isset(k, cx, vp, ZshOpt::Promptcr);
 		let curhist = super::hist::curhist(cx.store, vp);
-		let hline = self.hline(vp);
+		let hline = self.hline(k, vp);
 		// zsh `inputline`: the editor gets the prompt parameters (`raw_lp`,
 		// `raw_rp`); the right one only when it is set now.
 		let (lname, rname): (&'static [u8], &'static [u8]) = if self.cont {
@@ -982,13 +1003,14 @@ impl Reader {
 	}
 
 	/// zsh `hgetline()`: the earlier lines of the command being continued.
-	fn hline(&self, vp: &Vproc) -> Option<BString> {
+	fn hline(&self, k: &Kernel, vp: &Vproc) -> Option<BString> {
 		if !self.cont {
 			return None;
 		}
-		let Some(FrameKind::Script { src, pos, .. }) = vp.frames.last().map(|f| &f.kind) else {
+		let Some(FrameKind::Script { input, pos, .. }) = vp.frames.last().map(|f| &f.kind) else {
 			return None;
 		};
+		let src = &k.inputs.get(*input).source;
 		let from = (pos.0 as usize).min(src.len());
 		Some(BString::from(&src[from..])).filter(|s| !s.is_empty())
 	}
@@ -1046,7 +1068,13 @@ impl Reader {
 			if kind != std::io::ErrorKind::UnexpectedEof {
 				let e = std::io::Error::from(kind);
 				let msg = format!("error on TTY read: {}", crate::bash::diag::strerror(&e));
-				k.diag(cx, vp, 0, crate::bash::diag::Diag::Usage { msg: msg.into() });
+				k.diag(
+					cx,
+					vp,
+					0,
+					crate::bash::diag::Producer::ErrorProlog,
+					crate::bash::diag::Diag::Usage { msg: msg.into() },
+				);
 			}
 			return Ok(Line::Lost);
 		}
@@ -1135,9 +1163,11 @@ impl Reader {
 			return None;
 		}
 		self.abandon_editor(k, cx, vp);
-		k.diag(cx, vp, 0, crate::bash::diag::Diag::Usage { msg: "timeout".into() });
+		k.diag(cx, vp, 0, crate::bash::diag::Producer::ErrorProlog, crate::bash::diag::Diag::Usage {
+			msg: "timeout".into(),
+		});
 		vp.status = 128 + 14;
-		end_input(vp);
+		end_input(k, vp);
 		None
 	}
 
@@ -1183,10 +1213,10 @@ impl Reader {
 			Line::Abort => {
 				// The command being continued goes with the line (zsh's
 				// `errflag` ends the event).
-				if let Some(FrameKind::Script { src, pos, aux, .. }) =
+				if let Some(FrameKind::Script { input, pos, aux, .. }) =
 					vp.frames.last_mut().map(|f| &mut f.kind)
 				{
-					src.truncate(pos.0 as usize);
+					k.inputs.get_mut(*input).source.truncate(pos.0 as usize);
 					if let Some(a) = aux {
 						a.pending = None;
 					}
@@ -1200,7 +1230,7 @@ impl Reader {
 					self.phase = Phase::Logout(0);
 					return self.step(k, cx, vp, false, Vec::new());
 				}
-				end_input(vp);
+				end_input(k, vp);
 				None
 			},
 		}
@@ -1227,13 +1257,14 @@ impl Reader {
 				Ok(hz::Expanded::Line(t)) => text = t,
 				Ok(hz::Expanded::Failed(d)) => {
 					if let Some(d) = d {
-						k.diag(cx, vp, 0, d);
+						k.diag(cx, vp, 0, crate::bash::diag::Producer::ErrorProlog, d);
 					}
 					text = BString::default();
 					// The event's earlier lines go with it.
-					if let Some(FrameKind::Script { src, pos, aux, .. }) =
+					if let Some(FrameKind::Script { input, pos, aux, .. }) =
 						vp.frames.last_mut().map(|f| &mut f.kind)
 					{
+						let src = &k.inputs.get(*input).source;
 						let skipped = src[(pos.0 as usize).min(src.len())..]
 							.iter()
 							.filter(|&&c| c == b'\n')
@@ -1254,9 +1285,10 @@ impl Reader {
 			text = crate::bash::vm::builtins::history::bash::reader_line(k, cx, vp, text);
 		}
 		self.phase = Phase::Idle;
-		if let Some(FrameKind::Script { src, stdin, .. }) = vp.frames.last_mut().map(|f| &mut f.kind)
+		if let Some(FrameKind::Script { input, stdin, .. }) =
+			vp.frames.last_mut().map(|f| &mut f.kind)
 		{
-			src.extend_from_slice(&text);
+			k.inputs.get_mut(*input).source.extend_from_slice(&text);
 			if eof {
 				*stdin = false;
 			}
@@ -1298,7 +1330,13 @@ impl Reader {
 						"Use \"exit\" to leave the shell."
 					};
 					if zsh {
-						k.diag(cx, vp, 0, crate::bash::diag::Diag::Usage { msg: msg.into() });
+						k.diag(
+							cx,
+							vp,
+							0,
+							crate::bash::diag::Producer::ErrorProlog,
+							crate::bash::diag::Diag::Usage { msg: msg.into() },
+						);
 					} else {
 						let mut m = BString::from(msg);
 						m.push(b'\n');
@@ -1317,7 +1355,7 @@ impl Reader {
 			self.phase = Phase::Logout(0);
 			return self.step(k, cx, vp, false, Vec::new());
 		}
-		end_input(vp);
+		end_input(k, vp);
 		None
 	}
 
@@ -1341,19 +1379,26 @@ impl Reader {
 			1 if login && isset(k, cx, vp, ZshOpt::Globalrcs) => Some(BString::from("/etc/zlogout")),
 			0 | 1 => None,
 			_ => {
-				end_input(vp);
+				end_input(k, vp);
 				return None;
 			},
 		};
 		if let Some(path) = file {
-			let probe = Probe::Read { path };
+			let probe = Probe::Read { path: path.clone() };
 			match probe::perform(k, cx, vp, &mut self.sc, &probe) {
 				Err(key) => return Some(key),
 				Ok(ProbeResult::Bytes(Ok(text))) => {
 					self.sc.recycle();
 					self.phase = Phase::Logout(i + 1);
 					let depth = vp.frames.len();
-					crate::bash::vm::exec::push_script(vp, &text, 1, ScriptKind::Source);
+					crate::bash::vm::exec::push_script(
+						crate::bash::diag::ParserInput::new(Vec::from(path), false),
+						k,
+						vp,
+						&text,
+						1,
+						ScriptKind::Source,
+					);
 					self.running = Some((depth, vp.status));
 					return None;
 				},
@@ -1411,8 +1456,8 @@ pub fn logout_on_exit(
 	}
 	let mut texts = Vec::new();
 	for path in files {
-		if let ProbeResult::Bytes(Ok(text)) = ctx.probe(Probe::Read { path })? {
-			texts.push(text);
+		if let ProbeResult::Bytes(Ok(text)) = ctx.probe(Probe::Read { path: path.clone() })? {
+			texts.push((path, text));
 		}
 	}
 	if let Some(r) = ctx
@@ -1429,24 +1474,33 @@ pub fn logout_on_exit(
 	ctx.vp.status = status;
 	let line = ctx.line;
 	crate::bash::vm::exec::push_script(
+		crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
+		ctx.k,
 		ctx.vp,
 		format!("builtin exit {status}\n").as_bytes(),
 		line,
 		ScriptKind::Eval,
 	);
-	for text in texts.iter().rev() {
-		crate::bash::vm::exec::push_script(ctx.vp, text, 1, ScriptKind::Source);
+	for (path, text) in texts.iter().rev() {
+		crate::bash::vm::exec::push_script(
+			crate::bash::diag::ParserInput::new(Vec::from(path.clone()), false),
+			ctx.k,
+			ctx.vp,
+			text,
+			1,
+			ScriptKind::Source,
+		);
 	}
 	Ok(Some(Outcome { status, control: Control::Frame }))
 }
 
 /// The stdin frame reads no more: the shell's script ends.
-fn end_input(vp: &mut Vproc) {
-	if let Some(FrameKind::Script { stdin, src, pos, .. }) =
+fn end_input(k: &mut Kernel, vp: &mut Vproc) {
+	if let Some(FrameKind::Script { stdin, input, pos, .. }) =
 		vp.frames.last_mut().map(|f| &mut f.kind)
 	{
 		*stdin = false;
-		src.truncate(pos.0 as usize);
+		k.inputs.get_mut(*input).source.truncate(pos.0 as usize);
 	}
 }
 

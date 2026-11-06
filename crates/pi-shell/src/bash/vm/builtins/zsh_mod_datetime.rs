@@ -574,7 +574,7 @@ pub fn strftime(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 						.strip_prefix(b"-")
 						.or_else(|| digits.strip_prefix(b"+"))
 						.unwrap_or(digits);
-					ctx.diag(Diag::Warning {
+					ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Warning {
 						msg: format!("number truncated after {d} digits: {}", digits.as_bstr()).into(),
 					});
 					// zsh then reports the `errno` the warning's output left.
@@ -648,7 +648,7 @@ fn reverse(
 		// `strptime` (its date fixups included).
 		match crate::sys::langinfo::strptime(&locale, fmt, input) {
 			None => {
-				ctx.diag(Diag::Unsupported {
+				ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Unsupported {
 					what: format!("strftime -r in locale `{}' on this platform", locale.as_bstr())
 						.into(),
 				});

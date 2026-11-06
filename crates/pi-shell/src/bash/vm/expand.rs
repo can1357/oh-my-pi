@@ -1714,7 +1714,13 @@ impl<'e, 'c> Expander<'e, 'c> {
 					}
 					return self.read_atom(|ex| {
 						let msg = format!("{}: bad array subscript", name.as_bstr()).into();
-						ex.k.diag(ex.cx, ex.vp, ex.line, Diag::Usage { msg });
+						ex.k.diag(
+							ex.cx,
+							ex.vp,
+							ex.line,
+							crate::bash::diag::Producer::ErrorProlog,
+							Diag::Usage { msg },
+						);
 						Ok(Val::Unset)
 					});
 				}
@@ -1844,7 +1850,13 @@ impl<'e, 'c> Expander<'e, 'c> {
 				let src = word_source(unit, elems[i - 2].value);
 				self.read_atom(|ex| {
 					let msg = format!("{}: bad array subscript", src.as_bstr()).into();
-					ex.k.diag(ex.cx, ex.vp, ex.line, Diag::Usage { msg });
+					ex.k.diag(
+						ex.cx,
+						ex.vp,
+						ex.line,
+						crate::bash::diag::Producer::ErrorProlog,
+						Diag::Usage { msg },
+					);
 					Ok(Val::Unset)
 				})?;
 				continue;
@@ -2458,9 +2470,13 @@ impl<'e, 'c> Expander<'e, 'c> {
 			state::Deref::Circular => {
 				let msg =
 					BString::from(format!("warning: {}: circular name reference", name.as_bstr()));
-				self
-					.k
-					.diag(self.cx, self.vp, self.line, Diag::Warning { msg });
+				self.k.diag(
+					self.cx,
+					self.vp,
+					self.line,
+					crate::bash::diag::Producer::ErrorProlog,
+					Diag::Warning { msg },
+				);
 				// A function's reference to its own name (`typeset -n v=v`)
 				// reads the global variable of that name, as its assignment
 				// writes it.
@@ -2500,9 +2516,13 @@ impl<'e, 'c> Expander<'e, 'c> {
 				&& !self.is_assoc(name)?
 			{
 				let msg = format!("{}: bad array subscript", name.as_bstr()).into();
-				self
-					.k
-					.diag(self.cx, self.vp, self.line, Diag::Usage { msg });
+				self.k.diag(
+					self.cx,
+					self.vp,
+					self.line,
+					crate::bash::diag::Producer::ErrorProlog,
+					Diag::Usage { msg },
+				);
 			}
 			return Ok(Val::Unset);
 		};
@@ -2527,9 +2547,13 @@ impl<'e, 'c> Expander<'e, 'c> {
 						// bash warns and expands to nothing (`${c[-4]}` of a
 						// 2-element array).
 						let msg = format!("{}: bad array subscript", name.as_bstr()).into();
-						self
-							.k
-							.diag(self.cx, self.vp, self.line, Diag::Usage { msg });
+						self.k.diag(
+							self.cx,
+							self.vp,
+							self.line,
+							crate::bash::diag::Producer::ErrorProlog,
+							Diag::Usage { msg },
+						);
 						return Ok(Val::Unset);
 					}
 					var.index(n)
@@ -3981,13 +4005,15 @@ impl arith::Env for Vars<'_, '_> {
 		Err(arith::Error::Expand { diag: Box::new(diag) })
 	}
 
+	/// Supply `BuiltinError` / Bash `builtin_error_prolog` when expansion
+	/// belongs to a builtin, otherwise `ErrorProlog` / Bash `error_prolog`.
 	fn warn(&mut self, diag: Diag) {
-		let diag = match self.prefix {
-			Some(cmd) => diag.by(cmd),
-			None => diag,
+		let (diag, producer) = match self.prefix {
+			Some(cmd) => (diag.by(cmd), crate::bash::diag::Producer::BuiltinError),
+			None => (diag, crate::bash::diag::Producer::ErrorProlog),
 		};
 		let line = super::exec::current_line(self.vp);
-		self.k.diag(self.cx, self.vp, line, diag);
+		self.k.diag(self.cx, self.vp, line, producer, diag);
 	}
 
 	fn get(

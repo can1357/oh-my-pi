@@ -20,9 +20,11 @@ use crate::bash::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextError {
 	/// Line within the text.
-	pub line: u32,
+	pub line:    u32,
 	/// bash's message.
-	pub msg:  BString,
+	pub msg:     BString,
+	/// Source line echoed for a token error, if Bash prints one.
+	pub context: Option<BString>,
 }
 
 /// Engine-wide settings.
@@ -242,8 +244,9 @@ impl Engine {
 			return Ok(Arc::clone(u));
 		}
 		let unsupported = |what: &str| TextError {
-			line: 1,
-			msg:  BString::from(format!("{what}: not supported by this engine yet")),
+			line:    1,
+			msg:     BString::from(format!("{what}: not supported by this engine yet")),
+			context: None,
 		};
 		let unit = match kind {
 			TextKind::Arith | TextKind::HereDoc => {
@@ -252,8 +255,14 @@ impl Engine {
 				} else {
 					TextMode::HereDoc
 				};
-				let word = crate::bash::syntax::parse_text(text, Features::NONE, tmode)
-					.map_err(|e| TextError { line: e.line, msg: BString::from(e.bash_msg()) })?;
+				let word =
+					crate::bash::syntax::parse_text(text, Features::NONE, tmode).map_err(|e| {
+						TextError {
+							line:    e.line,
+							msg:     BString::from(e.bash_msg()),
+							context: e.context(text).map(BString::from),
+						}
+					})?;
 				let unit = ir::lower_text(&word, text, mode, Features::NONE).map_err(unsupported)?;
 				if observed {
 					let syntax = crate::bash::trace::syntax::UnitSyntax::new(
@@ -278,7 +287,11 @@ impl Engine {
 				let cc = match parser.next_command() {
 					Some(Ok(cc)) => cc,
 					Some(Err(e)) => {
-						return Err(TextError { line: e.line, msg: BString::from(e.bash_msg()) });
+						return Err(TextError {
+							line:    e.line,
+							msg:     BString::from(e.bash_msg()),
+							context: e.context(text).map(BString::from),
+						});
 					},
 					None => return Err(unsupported("an empty compound array value")),
 				};

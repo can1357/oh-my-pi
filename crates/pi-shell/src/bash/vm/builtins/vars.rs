@@ -7,7 +7,7 @@ use bstr::{BStr, BString, ByteSlice};
 
 use super::{Ctx, Need, R, done, number, opts};
 use crate::bash::{
-	diag::Diag,
+	diag::{Diag, Producer},
 	event::{AssignScope, EventData, EventKind},
 	ids::IntrinsicId,
 	ir::{self, FuncIr},
@@ -313,7 +313,7 @@ pub fn set_value(
 				if is_ref {
 					let line = exec::current_line(vp);
 					let msg = format!("warning: {}: removing nameref attribute", name.as_bstr());
-					k.diag(cx, vp, line, Diag::Warning { msg: msg.into() });
+					k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Warning { msg: msg.into() });
 					drop_nameref(k, cx, vp, name, VarValue::Indexed(Vec::new()))?;
 				}
 			}
@@ -353,7 +353,7 @@ pub fn set_value(
 			if target_is_ref {
 				let line = exec::current_line(vp);
 				let msg = format!("warning: {}: removing nameref attribute", target.as_bstr());
-				k.diag(cx, vp, line, Diag::Warning { msg: msg.into() });
+				k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Warning { msg: msg.into() });
 				drop_nameref(k, cx, vp, &target, VarValue::Str(BString::default()))?;
 			}
 			// A reference to an element takes neither a list nor another
@@ -387,7 +387,7 @@ pub fn set_value(
 			if let Some(idx) = element_of_chain_start(k, cx, vp, name)? {
 				let line = exec::current_line(vp);
 				let msg = format!("warning: {}: removing nameref attribute", name.as_bstr());
-				k.diag(cx, vp, line, Diag::Warning { msg: msg.into() });
+				k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Warning { msg: msg.into() });
 				drop_nameref(k, cx, vp, name, VarValue::Str(BString::default()))?;
 				let lhs = Lhs { name, index: Some(idx.as_slice()), append: lhs.append };
 				return set_value_plain(k, cx, vp, lhs, value, Level::Dynamic);
@@ -400,10 +400,10 @@ pub fn set_value(
 				},
 			};
 			if self_ref && in_func_scope {
-				k.diag(cx, vp, line, Diag::NamerefDepth { name: name.into() });
+				k.diag(cx, vp, line, Producer::ErrorProlog, Diag::NamerefDepth { name: name.into() });
 				return set_value_plain(k, cx, vp, lhs, value, Level::Global);
 			}
-			k.diag(cx, vp, line, Diag::CircularNameref { name: name.into() });
+			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::CircularNameref { name: name.into() });
 			// A reference to an element of its own name (`local -n a=a[0]`)
 			// then names no variable bash can assign.
 			if let Some(v) = ref_value
@@ -678,7 +678,7 @@ fn set_value_plain(
 						// `declare` got it (single-quoted), drops the pair
 						// and goes on.
 						if key.is_empty() {
-							k.diag(cx, vp, exec::current_line(vp), Diag::Usage {
+							k.diag(cx, vp, exec::current_line(vp), Producer::ErrorProlog, Diag::Usage {
 								msg: "'': bad array subscript".into(),
 							});
 							continue;
@@ -799,7 +799,7 @@ fn set_value_plain(
 	if let Some(v) = bad_tracefd {
 		let line = exec::current_line(vp);
 		let msg = format!("BASH_XTRACEFD: {}: invalid value for trace file descriptor", v.as_bstr());
-		k.diag(cx, vp, line, Diag::Usage { msg: msg.into() });
+		k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Usage { msg: msg.into() });
 	}
 	state::store_var(&mut k.root, cx.store, vp, name, Some(var), level);
 	emit_assignment(k, cx, vp, name, level);
@@ -1149,7 +1149,7 @@ pub fn define_function(
 		None
 	};
 	if let Some(d) = rejected {
-		k.diag(cx, vp, line, d);
+		k.diag(cx, vp, line, Producer::ErrorProlog, d);
 		if posix {
 			return Flow::Exit(2);
 		}
@@ -1180,7 +1180,7 @@ pub fn define_function(
 	};
 	if attrs.contains(Attrs::READONLY) {
 		let msg = format!("{}: readonly function", f.name.as_bstr());
-		k.diag(cx, vp, line, Diag::Usage { msg: msg.into() });
+		k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Usage { msg: msg.into() });
 		vp.status = 1;
 		return Flow::Next;
 	}
@@ -1810,7 +1810,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				_ => false,
 			};
 			if !target_set && let Some(mut r) = raw.clone() {
-				ctx.diag(Diag::Warning {
+				ctx.diag(Producer::ErrorProlog, Diag::Warning {
 					msg: format!("warning: {}: removing nameref attribute", name.as_bstr()).into(),
 				});
 				r.attrs = r.attrs.without(Attrs::NAMEREF).with(Attrs::INVISIBLE);
@@ -1962,7 +1962,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			if !in_scope && global {
 				if compound_word {
 					// The array assignment fails first, bare.
-					ctx.diag(Diag::Readonly { name: name.into() });
+					ctx.diag(Producer::ErrorProlog, Diag::Readonly { name: name.into() });
 				}
 				ctx.err(Diag::Readonly { name: name.into() });
 				status = 1;
@@ -1999,9 +1999,9 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				match func.filter(|_| array_flag) {
 					Some(f) => {
 						let f = String::from_utf8_lossy(&f).into_owned();
-						ctx.diag(d.by(f));
+						ctx.diag(Producer::BuiltinError, d.by(f));
 					},
-					None => ctx.diag(d),
+					None => ctx.diag(Producer::ErrorProlog, d),
 				}
 			} else if value.is_some()
 				&& matches!(kind, DeclareKind::Readonly | DeclareKind::Export)
@@ -2009,7 +2009,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			{
 				// A plain value through `readonly`/`export` fails as an
 				// assignment would.
-				ctx.diag(d);
+				ctx.diag(Producer::ErrorProlog, d);
 			} else {
 				ctx.err(d);
 			}
@@ -2051,10 +2051,10 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				let func = state::func_name(&ctx.k.root, ctx.cx.store, ctx.vp)?;
 				match func.map(|f| String::from_utf8_lossy(&f).into_owned()) {
 					Some(f) => {
-						ctx.diag(Diag::Usage { msg: msg.clone().into() }.by(f));
+						ctx.diag(Producer::BuiltinError, Diag::Usage { msg: msg.clone().into() }.by(f));
 						ctx.err(Diag::Usage { msg: msg.into() });
 					},
-					None => ctx.diag(Diag::Usage { msg: msg.into() }),
+					None => ctx.diag(Producer::ErrorProlog, Diag::Usage { msg: msg.into() }),
 				}
 			} else {
 				ctx.err(Diag::Usage { msg: msg.into() });
@@ -2195,7 +2195,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					.is_some_and(|rest| rest.starts_with(b"[") && rest.ends_with(b"]"));
 				if append && (value == name || element_of_self) {
 					if !in_function {
-						ctx.diag(Diag::Usage {
+						ctx.diag(Producer::ErrorProlog, Diag::Usage {
 							msg: format!(
 								"{}: nameref variable self references not allowed",
 								name.as_bstr()
@@ -2205,7 +2205,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 						status = 1;
 						continue;
 					}
-					ctx.diag(Diag::CircularNameref { name: name.into() });
+					ctx.diag(Producer::ErrorProlog, Diag::CircularNameref { name: name.into() });
 				} else if value == name || element_of_self {
 					if level != Level::Local || !in_function {
 						ctx.usage(format!(
@@ -2220,7 +2220,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					// resolves to the global of that name).
 					ctx.err(Diag::CircularNameref { name: name.into() });
 					if value == name {
-						ctx.diag(Diag::CircularNameref { name: name.into() });
+						ctx.diag(Producer::ErrorProlog, Diag::CircularNameref { name: name.into() });
 					}
 				}
 				if value.is_empty() {
@@ -2317,7 +2317,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 				// `declare a[1]='(var)'` on no array: a plain element value,
 				// with bash's warning naming the word.
 				if parens && !compound_word && index.is_some() && !array_flag && !array_exists {
-					ctx.diag(Diag::Warning {
+					ctx.diag(Producer::ErrorProlog, Diag::Warning {
 						msg: format!(
 							"warning: {}: quoted compound array assignment deprecated",
 							arg.as_bstr()
@@ -2356,7 +2356,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					// An arithmetic error in a subscript abandons the rest of
 					// the line (bash `jump_to_top_level (DISCARD)`).
 					Err(d @ Diag::ArithSubscript { .. }) => {
-						ctx.diag(d);
+						ctx.diag(Producer::ErrorProlog, d);
 						return Ok(super::Outcome { status: 1, control: super::Control::DiscardAll });
 					},
 					Err(d) => {
@@ -2429,7 +2429,7 @@ pub fn indexed_array_target(ctx: &mut Ctx<'_, '_>, name: &[u8]) -> Result<Option
 		&& raw.attrs.contains(Attrs::NAMEREF)
 	{
 		if raw.attrs.contains(Attrs::INVISIBLE) {
-			ctx.diag(Diag::Warning {
+			ctx.diag(Producer::ErrorProlog, Diag::Warning {
 				msg: format!("warning: {}: removing nameref attribute", name.as_bstr()).into(),
 			});
 			strip = true;
@@ -2448,7 +2448,7 @@ pub fn indexed_array_target(ctx: &mut Ctx<'_, '_>, name: &[u8]) -> Result<Option
 		return Ok(Some(strip));
 	};
 	if var.attrs.contains(Attrs::READONLY) {
-		ctx.diag(Diag::Readonly { name: target });
+		ctx.diag(Producer::ErrorProlog, Diag::Readonly { name: target });
 		return Ok(None);
 	}
 	if !strip && (matches!(var.value, VarValue::Assoc(_)) || var.attrs.contains(Attrs::ASSOC)) {
@@ -3022,7 +3022,7 @@ pub fn shift(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	};
 	if args.len() > 1 {
 		// Not fatal to a posix shell (errors10).
-		ctx.diag(Diag::TooManyArgs { cmd: "shift".into() });
+		ctx.diag(Producer::BuiltinError, Diag::TooManyArgs { cmd: "shift".into() });
 		return done(2);
 	}
 	let n = match args.first() {
@@ -3036,7 +3036,10 @@ pub fn shift(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				return done(1);
 			},
 			None => {
-				ctx.diag(Diag::NumericArg { cmd: "shift".into(), arg: a.clone() });
+				ctx.diag(Producer::BuiltinError, Diag::NumericArg {
+					cmd: "shift".into(),
+					arg: a.clone(),
+				});
 				ctx.usage_error = true;
 				return done(2);
 			},
@@ -3314,12 +3317,12 @@ pub fn let_(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			// `bash -c` the whole string (bash's `top_level_cleanup` before
 			// `jump_to_top_level (DISCARD)` in `array_expand_index`).
 			Err(d @ Diag::ArithSubscript { .. }) => {
-				ctx.diag(d);
+				ctx.diag(Producer::ErrorProlog, d);
 				return Ok(super::Outcome { status: 1, control: super::Control::DiscardAll });
 			},
 			// bash prints a readonly assignment without the `let: ` prefix.
 			Err(d @ Diag::Readonly { .. }) => {
-				ctx.diag(d);
+				ctx.diag(Producer::ErrorProlog, d);
 				return done(1);
 			},
 			Err(d) => {

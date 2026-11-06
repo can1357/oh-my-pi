@@ -482,7 +482,14 @@ pub fn fc(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			*entry = command.clone();
 			list.save(&mut ctx.k.root, ctx.cx.store, ctx.vp);
 		}
-		push_script(ctx.vp, &command, ctx.line, ScriptKind::Eval);
+		push_script(
+			crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
+			ctx.k,
+			ctx.vp,
+			&command,
+			ctx.line,
+			ScriptKind::Eval,
+		);
 		return Ok(Outcome { status: 0, control: Control::Frame });
 	}
 	let Some(last) = count.checked_sub(1) else {
@@ -581,14 +588,19 @@ fn display(ctx: &mut Ctx<'_, '_>, list: &List, rest: &[BString]) -> R {
 		[] => None,
 		[n] => {
 			let Some(n) = number(n) else {
-				ctx.diag(Diag::NumericArg { cmd: "history".into(), arg: n.clone() });
+				ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::NumericArg {
+					cmd: "history".into(),
+					arg: n.clone(),
+				});
 				ctx.usage_error = true;
 				return done(2);
 			};
 			Some(n.unsigned_abs())
 		},
 		_ => {
-			ctx.diag(Diag::TooManyArgs { cmd: "history".into() });
+			ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::TooManyArgs {
+				cmd: "history".into(),
+			});
 			ctx.usage_error = true;
 			return done(2);
 		},

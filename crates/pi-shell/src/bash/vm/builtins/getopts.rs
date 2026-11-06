@@ -78,7 +78,7 @@ pub fn getopts(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	ctx.vp.getopts.optind = Some(shown.clone());
 	ctx.vp.getopts.next = next;
 	if let Err(d) = assign(ctx.k, ctx.vp, ctx.cx, b"OPTIND", shown, Level::Dynamic) {
-		ctx.diag(d);
+		ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 	}
 	ctx.vp.getopts.at = optind_scope(ctx)?;
 	match found {
@@ -231,7 +231,7 @@ fn bind(ctx: &mut Ctx<'_, '_>, name: &[u8], value: &[u8]) -> i32 {
 			2
 		},
 		Err(d) => {
-			ctx.diag(d);
+			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 			2
 		},
 	}
@@ -239,7 +239,7 @@ fn bind(ctx: &mut Ctx<'_, '_>, name: &[u8], value: &[u8]) -> i32 {
 
 fn set_optarg(ctx: &mut Ctx<'_, '_>, value: BString) {
 	if let Err(d) = assign(ctx.k, ctx.vp, ctx.cx, b"OPTARG", value, Level::Dynamic) {
-		ctx.diag(d);
+		ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
 	}
 }
 

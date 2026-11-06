@@ -864,7 +864,9 @@ fn expand_globs_with<T>(
 			&& failglob
 			&& let Some(item) = items.get(i)
 		{
-			k.diag(cx, vp, line, Diag::NoMatch { pattern: BString::from(word(item)) });
+			k.diag(cx, vp, line, crate::bash::diag::Producer::ErrorProlog, Diag::NoMatch {
+				pattern: BString::from(word(item)),
+			});
 			return Err(Flow::Discard(1));
 		}
 		found.push((i, paths));
