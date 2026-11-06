@@ -1382,6 +1382,7 @@ export class MCPManager implements MCPManagerApi {
 							() => this.waitForConnection(name),
 							this.#sources.get(name),
 							reconnect,
+							this.#observeToolCall(name),
 						),
 					);
 					// Only a real connect writes the cache, and a lazy server may go
