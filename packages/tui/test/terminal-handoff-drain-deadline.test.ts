@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { HANDOFF_DRAIN_DEADLINE_MS } from "@oh-my-pi/pi-tui/terminal-handoff";
+import { HANDOFF_DRAIN_DEADLINE_MS, HANDOFF_DRAIN_IDLE_MS } from "@oh-my-pi/pi-tui/terminal-handoff";
 
 const FIXTURE = path.join(import.meta.dir, "fixtures", "stalled-terminal-sigterm.ts");
 
@@ -81,11 +81,56 @@ describe.skipIf(!canOpenPty())("the exit drain on a terminal that stays open and
 		child.kill("SIGTERM");
 		// Unbounded, this never returns: the drain is synchronous, so even a
 		// second signal would not be handled.
-		const settled = await within(exited, HANDOFF_DRAIN_DEADLINE_MS + 20_000);
+		const settled = await within(exited, HANDOFF_DRAIN_DEADLINE_MS);
 		const tookMs = Date.now() - signalledAt;
 
 		expect(settled).toBe("exited");
-		expect(tookMs).toBeLessThan(HANDOFF_DRAIN_DEADLINE_MS + 15_000);
+		expect(tookMs).toBeLessThan(HANDOFF_DRAIN_DEADLINE_MS);
+	}, 180_000);
+
+	it("keeps waiting while a slow terminal is still taking the bytes", async () => {
+		const { master, slave } = openPty();
+		cleanups.push(() => fs.closeSync(master));
+		const held = Promise.withResolvers<true>();
+		const child = Bun.spawn([process.execPath, FIXTURE, "exit", String(96 * 1024)], {
+			cwd: process.cwd(),
+			env: { PATH: Bun.env.PATH ?? "", TERM: "xterm-256color", LANG: "C.UTF-8" },
+			stdin: "pipe",
+			stdout: slave,
+			stderr: slave,
+			ipc(message) {
+				if (message === "held") held.resolve(true);
+			},
+		});
+		cleanups.push(() => child.kill("SIGKILL"));
+		fs.closeSync(slave);
+		expect(await within(Promise.race([held.promise, child.exited]), 60_000)).toBe(true);
+
+		// Takes the backlog in small reads. Every one restarts the idle window,
+		// so the bound never cuts a terminal that is still taking bytes; what it
+		// cannot save is one so slow that a whole window passes without a queued
+		// chunk landing, which loses the rest exactly as a stop that could not
+		// drain did before the handoff existed.
+		let text = "";
+		const buffer = Buffer.alloc(16 * 1024);
+		const reading = (async () => {
+			for (;;) {
+				await Bun.sleep(HANDOFF_DRAIN_IDLE_MS / 25);
+				let got = 0;
+				try {
+					got = fs.readSync(master, buffer, 0, buffer.length, null);
+				} catch {
+					return;
+				}
+				text += buffer.toString("latin1", 0, got);
+				if (text.includes("TAIL-END")) return;
+			}
+		})();
+
+		expect(await within(child.exited, HANDOFF_DRAIN_DEADLINE_MS)).not.toBe("timeout");
+		await reading;
+		// Everything the handoff held reached it, last byte included.
+		expect(text).toContain("TAIL-END");
 	}, 180_000);
 
 	it("gives up on the held output and exits when the script returns", async () => {
@@ -110,9 +155,9 @@ describe.skipIf(!canOpenPty())("the exit drain on a terminal that stays open and
 		// No signal interrupts this one: the exit cleanup drains with the
 		// terminal open and silent, which unbounded never ends.
 		expect(await within(Promise.race([held.promise, exited]), 60_000)).toBe(true);
-		const settled = await within(exited, HANDOFF_DRAIN_DEADLINE_MS + 30_000);
+		const settled = await within(exited, HANDOFF_DRAIN_DEADLINE_MS);
 
 		expect(settled).toBe("exited");
-		expect(Date.now() - startedAt).toBeLessThan(HANDOFF_DRAIN_DEADLINE_MS + 25_000);
+		expect(Date.now() - startedAt).toBeLessThan(HANDOFF_DRAIN_DEADLINE_MS);
 	}, 180_000);
 });

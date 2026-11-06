@@ -17,16 +17,24 @@ import type { OutputPump, ProcessTerminal } from "./terminal";
 export const STOP_DRAIN_MS = 1000;
 
 /**
- * Upper bound on {@link drainTerminalHandoff}'s total wait. A terminal that
- * stays open but never reads again — a hung SSH session before TCP keepalive
- * gives up, a frozen emulator, a pane nobody drains — never errors a write, so
- * `pump.dead` never flips and an unbounded wait would hold the process open
- * for good. The wait is synchronous, so it also blocks postmortem's own
- * deadline timers and a second signal, leaving only SIGKILL. Past this the
- * handoff is released and its bytes abandoned, exactly as a stop that could
- * not drain did before the handoff existed.
+ * How long {@link drainTerminalHandoff} keeps waiting without the backlog
+ * getting smaller. Every byte the terminal takes starts it again. A terminal that stays open but never reads again — a hung
+ * SSH session before TCP keepalive gives up, a frozen emulator, a pane nobody
+ * drains — never errors a write, so `pump.dead` never flips and an unbounded
+ * wait would hold the process open for good. The wait is synchronous, so it
+ * also blocks postmortem's own deadline timers and a second signal, leaving
+ * only SIGKILL. Measured against progress, not elapsed time, so a terminal
+ * reading slowly keeps every byte while a stalled one costs one wait.
  */
-export const HANDOFF_DRAIN_DEADLINE_MS = 5000;
+export const HANDOFF_DRAIN_IDLE_MS = 5000;
+
+/**
+ * Backstop on {@link drainTerminalHandoff}'s total wait, for a terminal that
+ * reads just fast enough to look alive. Past either bound the handoff is
+ * released and its bytes abandoned, exactly as a stop that could not drain did
+ * before the handoff existed.
+ */
+export const HANDOFF_DRAIN_DEADLINE_MS = 30_000;
 
 let terminalHandoff: { pump: OutputPump; owner: ProcessTerminal } | undefined;
 
@@ -84,11 +92,19 @@ export function drainTerminalHandoff(): void {
 	const pump = terminalHandoff?.pump;
 	if (!pump) return;
 	const deadline = Date.now() + HANDOFF_DRAIN_DEADLINE_MS;
+	let idleDeadline = Date.now() + HANDOFF_DRAIN_IDLE_MS;
+	let pending = pump.pending();
 	for (;;) {
-		const left = deadline - Date.now();
-		// Still stalled: the next wait starts where this one ran out, until the
-		// deadline leaves nothing to wait with.
+		const left = Math.min(idleDeadline, deadline) - Date.now();
 		if (left <= 0 || pump.flushSync(Math.min(STOP_DRAIN_MS, left)) || pump.dead) break;
+		// Bytes still queued. A terminal that took some of them is alive and
+		// keeps the rest: its idle window starts again. One that took none
+		// spends what is left of that window and then loses them.
+		const remaining = pump.pending();
+		if (remaining < pending) {
+			pending = remaining;
+			idleDeadline = Date.now() + HANDOFF_DRAIN_IDLE_MS;
+		}
 	}
 	releaseTerminalHandoff();
 }
