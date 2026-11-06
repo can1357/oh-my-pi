@@ -108,7 +108,7 @@ use crate::bash::{
 /// zsh's `repeat` body keyword and the `}` and `always` of a `try`, and
 /// makes the arithmetic-`for` header and its `))` plain fields, since
 /// every parser reads them.
-pub const IR_VERSION: u32 = 22;
+pub const IR_VERSION: u32 = 23;
 
 /// Opcodes.
 #[derive(

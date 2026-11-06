@@ -1264,16 +1264,21 @@ impl<'s> Parser<'s> {
 			},
 			b'/' => {
 				self.bump();
+				// The anchor is a byte the parser reads; `json.rs` must not
+				// subtract one from the pattern's start to find it.
+				let mut anchor = None;
 				let mode = match self.peek() {
 					Some(b'/') => {
 						self.bump();
 						ReplaceMode::All
 					},
 					Some(b'#') => {
+						anchor = Some(self.off());
 						self.bump();
 						ReplaceMode::Prefix
 					},
 					Some(b'%') => {
+						anchor = Some(self.off());
 						self.bump();
 						ReplaceMode::Suffix
 					},
@@ -1301,7 +1306,7 @@ impl<'s> Parser<'s> {
 				} else {
 					None
 				};
-				p.op = ParamOp::Replace { mode, pat, rep };
+				p.op = ParamOp::Replace { mode, anchor, pat, rep };
 			},
 			b'^' | b',' | b'~' => {
 				self.bump();
@@ -1325,8 +1330,9 @@ impl<'s> Parser<'s> {
 						Some(op @ (b'Q' | b'E' | b'P' | b'A' | b'a' | b'K' | b'k' | b'U' | b'u' | b'L')),
 						Some(b'}'),
 					) => {
+						let at = self.off();
 						self.bump();
-						p.op = ParamOp::Transform(op);
+						p.op = ParamOp::Transform { op, at };
 					},
 					_ => return Ok(None),
 				}

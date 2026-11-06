@@ -1435,7 +1435,7 @@ impl Lower {
 			syn::ParamOp::Trim { suffix, longest, pat } => {
 				OpIr::Trim { suffix: *suffix, longest: *longest, pat: self.word(pat)? }
 			},
-			syn::ParamOp::Replace { mode, pat, rep } => OpIr::Replace {
+			syn::ParamOp::Replace { mode, pat, rep, .. } => OpIr::Replace {
 				mode: match mode {
 					syn::ReplaceMode::First => ReplaceIr::First,
 					syn::ReplaceMode::All => ReplaceIr::All,
@@ -1454,7 +1454,7 @@ impl Lower {
 				all:  *all,
 				pat:  pat.as_ref().map(|w| self.word(w)).transpose()?,
 			},
-			syn::ParamOp::Transform(c) => OpIr::Transform(*c),
+			syn::ParamOp::Transform { op, .. } => OpIr::Transform(*op),
 		};
 		Ok(ParamIr { param, index, op, indirect: p.indirect, quoted, braced: p.braced })
 	}
@@ -1893,7 +1893,7 @@ mod tests {
 			1, 0, 1, 99, 15, 39, 40, 1, 0, 1, 100, 1, 29, 0, 0, 0, 0, 0,
 		];
 
-		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (22, WIRE.as_slice()));
+		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (23, WIRE.as_slice()));
 	}
 
 	#[test]

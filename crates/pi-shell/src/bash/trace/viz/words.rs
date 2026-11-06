@@ -246,7 +246,7 @@ impl WordPrinter<'_> {
 				if *suffix { "suffix" } else { "prefix" },
 				self.word(pat)
 			),
-			ParamOp::Replace { mode, pat, rep } => format!(
+			ParamOp::Replace { mode, pat, rep, .. } => format!(
 				"replace_{}({v}, {}, {})",
 				match mode {
 					ReplaceMode::First => "first",
@@ -268,7 +268,7 @@ impl WordPrinter<'_> {
 				pat.as_ref()
 					.map_or_default(|w| format!(", {}", self.word(w)))
 			),
-			ParamOp::Transform(op) => {
+			ParamOp::Transform { op, .. } => {
 				format!("transform({v}, {})", quote(&char::from(*op).to_string()))
 			},
 		}

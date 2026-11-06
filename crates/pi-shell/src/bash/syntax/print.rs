@@ -1278,7 +1278,7 @@ fn param_text(p: &Param, out: &mut Vec<u8>, ctx: Ctx) {
 			}
 			parts_ctx(&pat.parts, out, word_ctx(true));
 		},
-		ParamOp::Replace { mode, pat, rep } => {
+		ParamOp::Replace { mode, pat, rep, .. } => {
 			out.extend_from_slice(match mode {
 				ReplaceMode::First => b"/",
 				ReplaceMode::All => b"//",
@@ -1305,7 +1305,7 @@ fn param_text(p: &Param, out: &mut Vec<u8>, ctx: Ctx) {
 				parts_ctx(&pat.parts, out, word_ctx(*mode != CaseMode::Toggle));
 			}
 		},
-		ParamOp::Transform(op) => {
+		ParamOp::Transform { op, .. } => {
 			out.push(b'@');
 			out.push(*op);
 		},

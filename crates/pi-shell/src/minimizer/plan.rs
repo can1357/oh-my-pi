@@ -233,7 +233,7 @@ fn param_is_safe(param: &Param) -> bool {
 			| ParamOp::Length
 			| ParamOp::Indirect
 			| ParamOp::PrefixNames { .. }
-			| ParamOp::Transform(_) => true,
+			| ParamOp::Transform { .. } => true,
 			ParamOp::Default { word, .. }
 			| ParamOp::Assign { word, .. }
 			| ParamOp::Alt { word, .. }

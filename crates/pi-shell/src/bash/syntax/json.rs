@@ -691,7 +691,7 @@ mod native {
 				("longest", V::Bool(*longest)),
 				("pat", word(m, pat)),
 			]),
-			ParamOp::Replace { mode, pat, rep } => {
+			ParamOp::Replace { mode, pat, rep, .. } => {
 				let mode: &[u8] = match mode {
 					ReplaceMode::First => b"first",
 					ReplaceMode::All => b"all",
@@ -718,7 +718,9 @@ mod native {
 					("pat", pat.as_ref().map_or(V::Null, |w| word(m, w))),
 				])
 			},
-			ParamOp::Transform(c) => V::Obj(vec![("type", s(b"transform")), ("op", s(&[*c]))]),
+			ParamOp::Transform { op, .. } => {
+				V::Obj(vec![("type", s(b"transform")), ("op", s(&[*op]))])
+			},
 		};
 		V::Obj(vec![
 			("type", s(b"param")),
@@ -2241,14 +2243,16 @@ mod shfmt {
 					};
 					f.push(("Exp", opw(op, Some(pat))));
 				},
-				ParamOp::Replace { mode, pat, rep } => {
+				ParamOp::Replace { mode, anchor, pat, rep } => {
 					let mut r = Vec::new();
 					if *mode == ReplaceMode::All {
 						r.push(("All", V::Bool(true)));
 					}
-					let orig = if matches!(mode, ReplaceMode::Prefix | ReplaceMode::Suffix) {
-						// shfmt keeps the anchor in the pattern.
-						let alo = pat.span.lo.saturating_sub(1);
+					let orig = if let Some(alo) = *anchor {
+						// shfmt keeps the anchor in the pattern. Its offset is
+						// the parser's: a byte before the pattern's start is
+						// a byte of whatever stands there, and in text an
+						// alias expanded it is not the anchor at all.
 						let spans = part_spans(self.src, pat.span.lo, pat.span.hi, &pat.parts);
 						let mut parts =
 							vec![self.lit(alo, spans.first().map_or(pat.span.lo, |s| s.0), true)];
@@ -2275,8 +2279,12 @@ mod shfmt {
 					};
 					f.push(("Exp", opw(op, pat.as_ref())));
 				},
-				ParamOp::Transform(c) => {
-					let at = hi.saturating_sub(2);
+				ParamOp::Transform { op: c, at } => {
+					// The operator letter's own offset, as the parser read it.
+					// Counting back from the word's end lands on a byte of the
+					// aliased word instead.
+					let at = *at;
+					let end = fwd(at, hi, 1);
 					f.push((
 						"Exp",
 						V::Obj(vec![
@@ -2285,8 +2293,8 @@ mod shfmt {
 								"Word",
 								V::Obj(vec![
 									("Pos", p(at)),
-									("End", p(at + 1)),
-									("Parts", V::Arr(vec![self.lit_with(at, at + 1, &[*c])])),
+									("End", p(end)),
+									("Parts", V::Arr(vec![self.lit_with(at, end, &[*c])])),
 								]),
 							),
 						]),

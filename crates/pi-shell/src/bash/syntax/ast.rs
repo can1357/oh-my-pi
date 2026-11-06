@@ -812,11 +812,14 @@ pub enum ParamOp {
 	/// `${x/p/r}` and its anchored / global forms.
 	Replace {
 		/// Which occurrences.
-		mode: ReplaceMode,
+		mode:   ReplaceMode,
+		/// Offset of the `#` or `%` anchor, as the parser read it; `None`
+		/// for the unanchored forms.
+		anchor: Option<u32>,
 		/// Pattern.
-		pat:  Word,
+		pat:    Word,
 		/// Replacement (`None` deletes).
-		rep:  Option<Word>,
+		rep:    Option<Word>,
 	},
 	/// `${x^p}` `${x^^p}` `${x,p}` `${x,,p}` `${x~}` `${x~~}`.
 	Case {
@@ -827,8 +830,14 @@ pub enum ParamOp {
 		/// Character pattern.
 		pat:  Option<Word>,
 	},
-	/// `${x@op}`: `Q E P A a K k U u L`.
-	Transform(u8),
+	/// `${x@op}`: `Q E P A a K k U u L`, with the offset the parser read
+	/// the operator letter at.
+	Transform {
+		/// The operator letter.
+		op: u8,
+		/// Where it was read.
+		at: u32,
+	},
 }
 
 /// Occurrence selector of `${x/p/r}`.

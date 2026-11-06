@@ -529,6 +529,14 @@ const SAMPLES: &[Sample] = &[
 	// are marked and must keep faulting until it lands.
 	bash(b"echo a\\bc"),
 	bash(b"echo ${a b}"),
+	// Round 1 of this change's review found two operand positions that no
+	// sample reached: a transform's operator letter and an anchored
+	// replacement's `#`/`%`. The unanchored form is the control.
+	bash(b"echo ${x@Q}"),
+	bash(b"echo ${x@P}"),
+	bash(b"echo ${x/#a/b}"),
+	bash(b"echo ${x/%a/b}"),
+	bash(b"echo ${x//a/b}"),
 	bash(b"echo 'a'"),
 	bash(b"echo \"a\""),
 	bash(b"echo $'a'"),
