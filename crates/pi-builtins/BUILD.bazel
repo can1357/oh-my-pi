@@ -107,6 +107,7 @@ rust_library(
     version = "0.2.0",
     deps = all_crate_deps(normal = True) + [
         "//crates/pi-ast",
+        "//crates/pi-diff",
         "//crates/pi-walker",
         "//crates/pi-iso",
         "//crates/pi-vfs",

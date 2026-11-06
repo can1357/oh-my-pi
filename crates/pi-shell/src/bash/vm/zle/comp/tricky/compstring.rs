@@ -88,7 +88,7 @@ fn mb_metacharlen(s: &[u8], i: usize) -> usize {
 
 /// zsh `itype_end(s, IIDENT, 1)`: past the one identifier character at
 /// `i`, or `i`.
-fn ident_once(s: &[u8], i: usize) -> usize {
+const fn ident_once(s: &[u8], i: usize) -> usize {
 	if crate::bash::syntax::zsh::iident(at(s, i)) {
 		i + 1
 	} else {
@@ -98,7 +98,7 @@ fn ident_once(s: &[u8], i: usize) -> usize {
 
 /// zsh `has_real_token`: like `has_token`, but nulls (and `$'`) do not
 /// count.
-pub fn has_real_token(s: &[u8]) -> bool {
+pub const fn has_real_token(s: &[u8]) -> bool {
 	let mut i = 0;
 	while i < s.len() {
 		if (s[i] == QSTRING && at(s, i + 1) == b'\'') || (s[i] == STRING && at(s, i + 1) == SNULL) {
@@ -134,15 +134,16 @@ pub fn parambeg(s: &[u8], offs: i32) -> Option<usize> {
 	}
 	if is_str(at(s, p)) && !matches!(at(s, p + 1), INPAR | INBRACK | b'\'') {
 		let mut b = p + 1;
-		let mut n = 0;
-		if at(s, b) == INBRACE {
+		let n = if at(s, b) == INBRACE {
 			let mut tb = b;
 			if skipparens(INBRACE, OUTBRACE, s, &mut tb) == 0 {
 				return None;
 			}
 			b += 1;
-			n = skipparens(INPAR, OUTPAR, s, &mut b);
-		}
+			skipparens(INPAR, OUTPAR, s, &mut b)
+		} else {
+			0
+		};
 		while at(s, b) != 0 && matches!(at(s, b), b'^' | HAT | b'=' | EQUALS | b'~' | TILDE) {
 			b += 1;
 		}
@@ -904,12 +905,7 @@ pub fn get_comp_string_in(
 				while at(&s, pe) != 0 && s[pe] != SNULL && i + ((pe - pu) as i64) < zcs {
 					pe += 1;
 				}
-				if at(&s, pe) != SNULL {
-					skipchars = 2;
-					if at(&s, pe) != 0 {
-						j = 1;
-					}
-				} else {
+				if at(&s, pe) == SNULL {
 					let ks = getkeystring(&s[pu + 2..], getkey::DOLLARS_QUOTE);
 					let len = ks.consumed as i64 + 2;
 					let tlen = ks.text.len() as i64;
@@ -945,6 +941,11 @@ pub fn get_comp_string_in(
 					}
 					skipchars = 2;
 					j = 1;
+				} else {
+					skipchars = 2;
+					if at(&s, pe) != 0 {
+						j = 1;
+					}
 				}
 			} else if c0 == QSTRING && at(&s, pu + 1) == SNULL {
 				skipchars = 2;
@@ -1123,11 +1124,10 @@ fn braces(t: &mut State, word: &mut Vec<u8>, offs: &mut i32, o: &CompStrOpts) {
 							}
 						} else {
 							let ie = ident_end(s, tp, false);
-							if ie != tp {
-								tp = ie;
-							} else {
+							if ie == tp {
 								break 'scan;
 							}
+							tp = ie;
 						}
 						if at(s, tp) == INBRACE {
 							cant = true;

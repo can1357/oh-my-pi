@@ -875,10 +875,11 @@ async function loadPlanReference(
 	);
 }
 
-/** Isolated runs work in ovnfs checkouts when `ovnfs.enabled` is on, else in native clones per `isolation.backend`. */
+/** Isolated runs work in ovnfs checkouts when `isolation.backend` is auto and ovnfs is found, else in native clones. */
 function openIsolatedWorkspace(settings: Settings): OpenWorkspace {
-	const ovnfs = ovnfsCommand(settings);
-	return ovnfs ? ovnfsWorkspace(ovnfs) : nativeWorkspace(parseIsolationBackend(cfgIsolationBackend.get(settings)));
+	const backend = cfgIsolationBackend.get(settings);
+	const ovnfs = backend === "auto" ? ovnfsCommand(settings) : undefined;
+	return ovnfs ? ovnfsWorkspace(ovnfs) : nativeWorkspace(parseIsolationBackend(backend));
 }
 
 function buildFailureResult(
