@@ -36,10 +36,31 @@ fn zsh_mod_example_builtin_shows_and_sets_its_parameters() {
 	assert_eq!(
 		out,
 		format!(
-			"{SETUP}+b:example\n+C:ex\n+c:len\n+f:length\n+f:sum\n+p:exarr\n+p:exint\n+p:exstr\\
-			 nOptions: afgls\nArguments: a b\nName: example\n\nInteger Parameter: 42\nString Parameter: \
-			 example\nArray Parameter: example array\n2 a a b\nOptions: \nArguments: q r\nName: \
-			 example\n\nInteger Parameter: 2\nString Parameter: a\nArray Parameter: a b\n2 q q r\n"
+			"{SETUP}{}",
+			concat!(
+				"+b:example\n",
+				"+C:ex\n",
+				"+c:len\n",
+				"+f:length\n",
+				"+f:sum\n",
+				"+p:exarr\n",
+				"+p:exint\n",
+				"+p:exstr\n",
+				"Options: afgls\n",
+				"Arguments: a b\n",
+				"Name: example\n",
+				"\nInteger Parameter: 42\n",
+				"String Parameter: example\n",
+				"Array Parameter: example array\n",
+				"2 a a b\n",
+				"Options: \n",
+				"Arguments: q r\n",
+				"Name: example\n",
+				"\nInteger Parameter: 2\n",
+				"String Parameter: a\n",
+				"Array Parameter: a b\n",
+				"2 q q r\n",
+			)
 		)
 	);
 	assert_eq!(st, 0);

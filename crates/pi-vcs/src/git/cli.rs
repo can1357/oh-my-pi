@@ -184,6 +184,19 @@ fn is_utf8_locale(value: &str) -> bool {
 	})
 }
 
+/// Start `cmd` in a new session with no controlling terminal, the embedded
+/// shell's policy for externals. Without it git and everything it starts (ssh,
+/// credential helpers, signers, hooks) share the host's terminal: any of them
+/// can read the user's keystrokes and the terminal's protocol replies out from
+/// under the TUI, or prompt on it. Detached, a `/dev/tty` open fails
+/// (`ENXIO`), so a prompt errors out instead.
+pub(crate) fn detach_from_terminal(cmd: &mut std::process::Command) {
+	#[cfg(unix)]
+	std::os::unix::process::CommandExt::setsid(cmd, true);
+	#[cfg(not(unix))]
+	let _ = cmd;
+}
+
 /// Run `git` asynchronously with bounded capture and a deadline.
 /// Non-zero exits are returned in [`CliOutput`], not raised.
 pub(crate) async fn run(cwd: &Path, args: &[String], options: &RunOptions) -> Result<CliOutput> {
@@ -200,6 +213,7 @@ pub(crate) async fn run(cwd: &Path, args: &[String], options: &RunOptions) -> Re
 		.stderr(Stdio::piped())
 		.kill_on_drop(true);
 	apply_env(&mut cmd);
+	detach_from_terminal(cmd.as_std_mut());
 	let mut child = cmd.spawn().map_err(|err| spawn_error(cwd, err))?;
 
 	if let Some(stdin) = &options.stdin
@@ -357,6 +371,7 @@ fn run_sync_impl(
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped());
 	apply_env(&mut cmd);
+	detach_from_terminal(&mut cmd);
 	if let Some(write) = write {
 		for (key, value) in write.env {
 			cmd.env(key, value);
@@ -658,6 +673,28 @@ mod tests {
 	/// Asks git to report the ambient variables it was started with. A `!`-alias
 	/// is the only way to make git print its own environment.
 	const ENV_PROBE_ALIAS: &str = r#"!printf 'LC_ALL=[%s] LC_CTYPE=[%s] LC_MESSAGES=[%s] LITERAL=[%s] ICASE=[%s]' "$LC_ALL" "$LC_CTYPE" "$LC_MESSAGES" "$GIT_LITERAL_PATHSPECS" "$GIT_ICASE_PATHSPECS""#;
+
+	/// A git left in the host's process group shares its terminal and can read
+	/// the TUI's keystrokes and terminal replies (Tern TSP events leaked into
+	/// the composer with their leading bytes missing). Both runners must start
+	/// it in its own session.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn runners_start_git_outside_the_host_process_group() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let args = ["-c".to_owned(), "alias.pgid=!ps -o pgid= -p $$".to_owned(), "pgid".to_owned()];
+		// SAFETY: getpgrp has no preconditions.
+		let host = unsafe { libc::getpgrp() };
+		let sync = run_sync(dir.path(), &args, SYNC_TIMEOUT).expect("sync runner");
+		let spawned = run(dir.path(), &args, &RunOptions::default())
+			.await
+			.expect("async runner");
+		for out in [sync, spawned] {
+			assert_eq!(out.exit_code, 0, "alias failed: {out:?}");
+			let pgid: i32 = out.stdout.trim().parse().expect("pgid");
+			assert_ne!(pgid, host, "git shares the host's process group: {out:?}");
+		}
+	}
 
 	/// Two guarantees this crate builds on top of, both of which depend on what
 	/// the child process actually receives:

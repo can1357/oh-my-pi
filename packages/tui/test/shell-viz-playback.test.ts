@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { RunTrace, Shell } from "@oh-my-pi/pi-natives";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
 import type { DescribeContext, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { isShellTrace, type ShellTrace, type ShellVizPresentation } from "@oh-my-pi/pi-wire";
@@ -50,7 +51,7 @@ function presentation(component: ToolExecutionComponent): ShellVizPresentation {
 	return value;
 }
 
-function tool(trace: ShellTrace): ToolExecutionComponent {
+function tool(trace: ShellTrace, pending = false): ToolExecutionComponent {
 	const component = new ToolExecutionComponent(
 		"bash",
 		{ command: trace.script },
@@ -63,7 +64,8 @@ function tool(trace: ShellTrace): ToolExecutionComponent {
 		},
 	);
 	components.push(component);
-	component.updateResult({ content: [{ type: "text", text: "final output" }], details: { trace } }, false);
+	if (!pending)
+		component.updateResult({ content: [{ type: "text", text: "final output" }], details: { trace } }, false);
 	return component;
 }
 
@@ -102,6 +104,30 @@ function fakeClock(): (milliseconds: number) => void {
 }
 
 describe("bash visualization playback", () => {
+	it("shows plain commands and output when visualization is disabled, including saved traces", () => {
+		setChatTranscriptDisplayPreferences({ shellVisualization: false });
+		try {
+			const trace = completedTrace();
+			const pending = tool(trace, true);
+			expect(findPresentation(pending.describe(context))).toBeUndefined();
+			expect(Bun.stripANSI(pending.render(100).join("\n"))).toContain("printf");
+
+			const component = tool(trace);
+			expect(findPresentation(component.describe(context))).toBeUndefined();
+			const rendered = Bun.stripANSI(component.render(100).join("\n"));
+			expect(rendered).toContain("printf");
+			expect(rendered).toContain("final output");
+
+			setChatTranscriptDisplayPreferences({ shellVisualization: true });
+			pending.invalidate();
+			component.invalidate();
+			expect(findPresentation(pending.describe(context))).toBeDefined();
+			expect(findPresentation(component.describe(context))).toBeDefined();
+		} finally {
+			setChatTranscriptDisplayPreferences({ shellVisualization: true });
+		}
+	});
+
 	it("resumes the remaining part of a paused event gap instead of restarting it", () => {
 		const advance = fakeClock();
 		const component = tool(completedTrace());

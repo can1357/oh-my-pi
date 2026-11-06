@@ -24,6 +24,7 @@ import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-gr
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
 import { $which, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { isShellTrace } from "@oh-my-pi/pi-wire";
 
 import { cfgBashDirenvLoadTimeoutMs, cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
 
@@ -127,6 +128,29 @@ describe("executeBash", () => {
 		expect(result.trace).toBeDefined();
 		if (!result.trace) throw new Error("Expected final native trace");
 		expect(shellVisualization(result.trace)).toBe(snapshots[0]);
+	});
+
+	it("keeps tracing and restores a run whose values are not UTF-8", async () => {
+		const result = await executeBash("v=$(printf '\\377'); : \"$v\"; echo done", {
+			cwd: tempDir,
+			timeout: 5000,
+			onTrace: () => {},
+		});
+		expect(result.output.trim()).toBe("done");
+		// The snapshot taken after the run ended still validated, byte values included.
+		expect(result.trace?.status).toBe(0);
+		const history = result.trace?.history ?? [];
+		expect(history.find(event => event.kind === "Assign" && event.name === "v")?.value).toEqual([255]);
+		expect(history.find(event => event.kind === "CmdExpanded" && event.argv?.[0] === ":")?.argv).toEqual([
+			":",
+			[255],
+		]);
+
+		// A persisted copy restores through the native owner and shows the variable.
+		const restored: unknown = JSON.parse(JSON.stringify(result.trace));
+		if (!isShellTrace(restored)) throw new Error("Expected the persisted trace to validate");
+		const presentation = readShellPresentation(shellVisualization(restored), defaultShellVizPreferences(), restored);
+		expect(presentation.watches?.some(watch => watch.name === "v")).toBe(true);
 	});
 
 	it("omits minimizer options when the feature is disabled", () => {

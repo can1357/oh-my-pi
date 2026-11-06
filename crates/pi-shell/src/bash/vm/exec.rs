@@ -24,7 +24,7 @@ use super::{
 };
 use crate::bash::{
 	diag::Diag,
-	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey},
+	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey, assign_preview},
 	fd::FdRef,
 	host::{ResolveCtx, Resolved, Via},
 	ids::{Dialect, ModeId, UnitId, Vpid},
@@ -911,9 +911,8 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			if k.trace_sources.len() < crate::bash::trace::history::HISTORY_EVENTS {
 				k.trace_sources.entry(vp.vpid).or_default().insert(depth, origin);
 			}
-		} else if vp.frames.last().is_some_and(|frame| matches!(&frame.kind, FrameKind::Script { pos, what: ScriptKind::Eval, .. } if pos.0 == 0)) {
-			if let Some(origins) = k.trace_sources.get_mut(&vp.vpid) { origins.remove(&depth); }
-		}
+		} else if vp.frames.last().is_some_and(|frame| matches!(&frame.kind, FrameKind::Script { pos, what: ScriptKind::Eval, .. } if pos.0 == 0))
+			&& let Some(origins) = k.trace_sources.get_mut(&vp.vpid) { origins.remove(&depth); }
 	}
 	let source_origin = observed
 		.then(|| {
@@ -1187,14 +1186,12 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			let hist = if zhist {
 				builtins::history::zsh::latest_text(&k.root, cx.store, vp).unwrap_or_default()
 			} else {
-				let text = match &top_frame(vp).kind {
+				match &top_frame(vp).kind {
 					FrameKind::Script { src, pos, .. } => src
 						.get(pos.0 as usize..next.offset as usize)
-						.map(|t| BString::from(t.strip_suffix(b"\n").unwrap_or(t)))
-						.unwrap_or_default(),
+						.map_or_default(|t| BString::from(t.strip_suffix(b"\n").unwrap_or(t))),
 					_ => BString::default(),
-				};
-				text
+				}
 			};
 			let jobtext = BString::from(crate::bash::syntax::zsh::getjobtext(&cc.list));
 			let permtext = BString::from(crate::bash::syntax::zsh::getpermtext(&cc.list, 0));
@@ -1554,9 +1551,9 @@ fn read_script_line(
 				// The event's earlier lines go with it.
 				if let FrameKind::Script { src, pos, aux, .. } = &mut top_frame(vp).kind {
 					let skipped = src[(pos.0 as usize).min(src.len())..]
-						.iter()
-						.filter(|&&c| c == b'\n')
-						.count();
+						.split(|&c| c == b'\n')
+						.count()
+						- 1;
 					*pos = (src.len() as u32, pos.1 + skipped as u32 + 1);
 					if let Some(a) = aux {
 						a.pending = None;
@@ -3686,10 +3683,9 @@ fn for_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		// parameter setter has separate assignment semantics.
 		if !select && vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 			let scope = assign_scope(vp);
-			let shown = &value[..value.len().min(256)];
 			k.emit_op(cx, vp, op.node, EventData::Assign {
 				name: BStr::new(&var),
-				value: BStr::new(shown),
+				value: BStr::new(assign_preview(&value)),
 				full_len: value.len(),
 				scope,
 			});

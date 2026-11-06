@@ -45,6 +45,97 @@ fn present(trace: &RunTrace, options: &Options) -> Value {
 	serde_json::from_str(&trace.presentation_json(options).unwrap()).unwrap()
 }
 
+fn rows(p: &Value) -> Vec<(String, &Value)> {
+	p["rows"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.map(|row| {
+			let text = row["segments"]
+				.as_array()
+				.unwrap()
+				.iter()
+				.map(|segment| segment["text"].as_str().unwrap())
+				.collect();
+			(text, row)
+		})
+		.collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uncompiled_script_is_parsed_ahead_without_outcomes_until_it_stops_parsing() {
+	// A command still streaming in: nothing has run, its last line is
+	// unfinished.
+	let trace =
+		RunTrace::new("cd /tmp && git add -A\nfor f in *.go; do echo \"$f\"; done\nif true; th");
+	let streaming = present(&trace, &Options::default());
+	let shown = rows(&streaming);
+	let texts: Vec<&str> = shown.iter().map(|(text, _)| text.as_str()).collect();
+	assert_eq!(texts, [
+		"cwd /tmp",
+		"and git add -A",
+		"for f in glob(\"*.go\"):",
+		"print(f\"{f}\")",
+		"if true; th"
+	]);
+	assert!(shown.iter().all(|(_, row)| row["state"].is_null()), "{streaming}");
+	assert_eq!(shown[4].1["role"], "raw", "an unfinished command stays literal");
+
+	// The engine never reaches the last line: it is drawn, but never ran.
+	let shell = Shell::new(None);
+	let trace = run(&shell, "echo a\nexit 0\necho never").await;
+	let ran = present(&trace, &Options::default());
+	let shown = rows(&ran);
+	let (text, row) = shown.last().unwrap();
+	assert_eq!(text, "print(\"never\")");
+	assert!(row["state"].is_null(), "{ran}");
+}
+
+#[test]
+fn bare_test_bracket_without_operands_renders_instead_of_panicking() {
+	// Regression for #18320: a streamed `[` with no operands sliced `words[1..0]`
+	// and aborted the host process.
+	for (script, expected) in [
+		("[", &[""][..]),
+		("a && [", &["a", "and "]),
+		("! [", &["not "]),
+		("x=$(a); [", &["x = ⟨a⟩", ""]),
+		("test", &[""]),
+	] {
+		let p = present(&RunTrace::new(script), &Options::default());
+		let texts: Vec<String> = rows(&p).into_iter().map(|(text, _)| text).collect();
+		assert_eq!(texts, expected, "{script:?}");
+	}
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn callout_scripts_are_drawn_by_their_command_but_eval_code_gets_a_frame() {
+	let frames = |p: &Value| {
+		p["rows"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.filter(|row| {
+				row["id"]
+					.as_str()
+					.is_some_and(|id| id.starts_with("frame-"))
+			})
+			.count()
+	};
+	let shell = Shell::new(None);
+	// `timeout` and `xargs` run their operands through scripts of their own.
+	let trace = run(&shell, "timeout 5 true; echo a | xargs -n1 true").await;
+	let live = present(&trace, &Options::default());
+	assert_eq!(frames(&live), 0, "{live}");
+	let stored = StoredVisualization::from_snapshot_json(&trace.snapshot_json()).unwrap();
+	let restored: Value =
+		serde_json::from_str(&stored.presentation_json(&Options::default()).unwrap()).unwrap();
+	assert_eq!(frames(&restored), 0, "{restored}");
+
+	let trace = run(&shell, "x=true; eval \"$x\"").await;
+	assert_eq!(frames(&present(&trace, &Options::default())), 1);
+}
+
 #[test]
 fn legacy_boundary_includes_heredoc_without_parsing_unannounced_future_syntax() {
 	use crate::bash::{
