@@ -17,6 +17,14 @@ export async function seedAuthDb(agentDir: string, accounts: readonly FakeAccoun
 	const storage = await AuthStorage.create(path.join(agentDir, "agent.db"));
 	try {
 		for (const account of accounts) {
+			if (account.authType === "api_key") {
+				await storage.credentials.upsert(account.provider, {
+					type: "api_key",
+					key: account.bearer,
+					source: "login",
+				});
+				continue;
+			}
 			await storage.credentials.upsert(account.provider, {
 				type: "oauth",
 				access: account.bearer,

@@ -25,6 +25,8 @@ export interface FakeAccountSpec {
 	label: string;
 	/** OAuth access token; the fake maps it to the account and the child sends it as the bearer. */
 	bearer: string;
+	/** Seed a stored login API key instead of an OAuth credential. */
+	authType?: "api_key";
 	accountId: string;
 	email: string;
 	/** Used fraction of the 60 s window at start. */

@@ -18,6 +18,12 @@ export default function govplanExtension(pi: ExtensionAPI): void {
 	// Warm the fallback in the exercising process, after extension registration
 	// invalidates its provider cache. The governor itself remains cache-only.
 	pi.on("before_agent_start", async (event, ctx) => {
+		if (event.prompt.includes("WARM_API_KEY")) {
+			await ctx.modelRegistry.authStorage.usage.reports({
+				provider: "govplan",
+				baseUrlResolver: provider => ctx.modelRegistry.getProviderBaseUrl(provider),
+			});
+		}
 		if (!event.prompt.includes("WARM_FALLBACK")) return;
 		await ctx.modelRegistry.authStorage.usage.reports({
 			provider: "govplan-g",
@@ -44,10 +50,15 @@ export default function govplanExtension(pi: ExtensionAPI): void {
 	for (const provider of ["govplan", "govplan-g"] as const) {
 		const usage: UsageProvider = {
 			id: provider,
-			governorAllowance: () => ["requests-60s", "requests-7d"],
+			governorAllowance: params => {
+				const key = params.credential.apiKey;
+				if (key?.endsWith("-unknown")) return undefined;
+				if (key?.endsWith("-metered")) return ["paid-credits"];
+				return ["requests-60s", "requests-7d"];
+			},
 			async fetchUsage(params, context): Promise<UsageReport | null> {
 				const response = await context.fetch(`${fake}/${provider}/usage`, {
-					headers: { Authorization: `Bearer ${params.credential.accessToken ?? ""}` },
+					headers: { Authorization: `Bearer ${params.credential.accessToken ?? params.credential.apiKey ?? ""}` },
 					signal: params.signal,
 				});
 				if (!response.ok) throw new Error(`govplan usage endpoint answered ${response.status}`);

@@ -10,6 +10,8 @@
  *
  * `OMP_PROOF_BINARY` runs the same scenarios against a compiled binary (spec 7.3).
  */
+import { Database } from "bun:sqlite";
+import * as path from "node:path";
 import { describe, expect, test } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { sandboxCommand } from "./fixtures/usage-governor/confinement";
@@ -644,6 +646,99 @@ describe("usage governor CLI proof: scenarios", () => {
 			proof.close();
 		}
 	}, 120_000);
+});
+
+describe("usage governor CLI proof: stored API key", () => {
+	for (const enabled of [true, false]) {
+		test(`stored API key ${enabled ? "waits on its row before chat" : "sends immediately with governor disabled"}`, async () => {
+			const spec = account("govplan", "key", {
+				authType: "api_key",
+				usedFraction: 0.6,
+				resetInMs: 35_000,
+				perRequest: 0,
+			});
+			const proof = await GovernorProof.create([spec], { enabled, fallbackChains: { default: [] } });
+			try {
+				const db = new Database(path.join(proof.agentDir, "agent.db"), { readonly: true });
+				let row: { id: number; credential_type: string } | null;
+				try {
+					row = db
+						.query<{ id: number; credential_type: string }, [string]>(
+							"SELECT id, credential_type FROM auth_credentials WHERE provider = ?",
+						)
+						.get("govplan");
+				} finally {
+					db.close();
+				}
+				expect(row?.credential_type).toBe("api_key");
+				const result = await proof.runOmp(["-p", "WARM_API_KEY key pacing"], 40_000);
+				expect(result.exitCode).toBe(0);
+				const chats = proof.chats();
+				expect(chats).toHaveLength(1);
+				expect(chats[0].bearer).toBe(spec.bearer);
+				const usage = proof.fake.records.find(record => record.kind === "usage" && record.bearer === spec.bearer);
+				expect(usage).toBeDefined();
+				const admissible =
+					usage!.resetsAt! - WINDOW_MS + ((spec.usedFraction / (1 - RESERVE) - LEAD) / (1 - LEAD)) * WINDOW_MS;
+				if (enabled) {
+					const waits = proof.readLedger().waits;
+					expect(waits).toHaveLength(1);
+					expect(waits[0].credentialId).toBe(row!.id);
+					expect(waits[0].provider).toBe("govplan");
+					expect(waits[0].outcome).toBe("admitted");
+					expect(waits[0].untilMs).not.toBeNull();
+					expect(waits[0].endedAtMs!).toBeGreaterThanOrEqual(waits[0].untilMs! - ADMISSION_SLACK_MS);
+					expect(chats[0].atMs).toBeGreaterThanOrEqual(waits[0].endedAtMs!);
+					expect(chats[0].atMs).toBeGreaterThanOrEqual(admissible - ADMISSION_SLACK_MS);
+					expect(waits[0].endedAtMs! - waits[0].startedAtMs).toBeGreaterThan(1_000);
+				} else {
+					expect(chats[0].atMs).toBeLessThan(admissible);
+					expect(proof.ledgerExists()).toBe(false);
+				}
+				expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
+				assertConfined(proof);
+			} finally {
+				proof.close();
+			}
+		}, 60_000);
+	}
+
+	for (const allowance of ["unknown", "metered"] as const) {
+		test(`stored API key ${allowance} fallback cannot proactively spend`, async () => {
+			const primary = account("govplan", "key", {
+				authType: "api_key",
+				usedFraction: 0.6,
+				resetInMs: 35_000,
+				perRequest: 0,
+			});
+			const paid = account("govplan-g", allowance, {
+				authType: "api_key",
+				usedFraction: 0,
+				perRequest: 0,
+				creditBalance: 100,
+			});
+			const proof = await GovernorProof.create([primary, paid], {
+				enabled: true,
+				modelRoles: { default: "govplan/m", task: "govplan/m" },
+				fallbackChains: { default: ["govplan-g/m"], task: [] },
+			});
+			try {
+				const result = await proof.runOmp(["-p", "WARM_API_KEY WARM_FALLBACK fallback safety"], 40_000);
+				expect(result.exitCode).toBe(0);
+				expect(proof.fake.records.some(record => record.kind === "usage" && record.bearer === paid.bearer)).toBe(
+					true,
+				);
+				expect(proof.chats().map(record => record.bearer)).toEqual([primary.bearer]);
+				expect(
+					proof.readLedger().waits.some(wait => wait.provider === "govplan" && wait.outcome === "admitted"),
+				).toBe(true);
+				expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
+				assertConfined(proof);
+			} finally {
+				proof.close();
+			}
+		}, 60_000);
+	}
 });
 
 describe("usage governor CLI proof: real home untouched", () => {
