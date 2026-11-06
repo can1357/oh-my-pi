@@ -812,6 +812,23 @@ type ResolvedTranscript =
 	| { kind: "unreadable"; reason: string };
 
 /**
+ * What separates the components of a path a `readlink` gave back. `path.sep`
+ * alone is wrong on Windows, where both separators are valid in a link target
+ * and `path.resolve` only normalises what it produced itself; the regular
+ * expression is wrong on POSIX, where a backslash is an ordinary character in
+ * a file name.
+ */
+const PATH_SEPARATORS = process.platform === "win32" ? /[\\/]/ : path.sep;
+
+/**
+ * The components of an absolute path below its root — `/`, or `C:\` on
+ * Windows, which no component-wise resolution may take for a name of its own.
+ */
+function componentsBelowRoot(absolute: string): string[] {
+	return absolute.slice(path.parse(absolute).root.length).split(PATH_SEPARATORS);
+}
+
+/**
  * Follow `file` one component at a time, recording every blob-store entry the
  * walk passes through, and answer where it ends.
  *
@@ -838,9 +855,8 @@ async function resolveRecordingBlobHops(
 	hashes: Set<string>,
 ): Promise<ResolvedTranscript> {
 	const absolute = path.resolve(file);
-	const filesystemRoot = path.parse(absolute).root;
-	let resolved = start ? start.realDir : filesystemRoot;
-	const pending = start ? [start.name] : absolute.slice(filesystemRoot.length).split(path.sep);
+	let resolved = start ? start.realDir : path.parse(absolute).root;
+	const pending = start ? [start.name] : componentsBelowRoot(absolute);
 	let hops = 0;
 	while (pending.length > 0) {
 		const name = pending.shift() as string;
@@ -869,8 +885,10 @@ async function resolveRecordingBlobHops(
 				kind: "unreadable",
 				reason: `${file} passes through more than ${MAX_SYMLINK_HOPS} symbolic links, so where it leads could not be resolved`,
 			};
-		if (path.isAbsolute(target)) resolved = path.parse(target).root;
-		pending.unshift(...target.split(path.sep));
+		if (path.isAbsolute(target)) {
+			resolved = path.parse(target).root;
+			pending.unshift(...componentsBelowRoot(target));
+		} else pending.unshift(...target.split(PATH_SEPARATORS));
 	}
 	return { kind: "resolved", real: resolved };
 }
