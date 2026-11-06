@@ -95,14 +95,7 @@ pub fn start(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> bool {
 	let z = vp.zsh.get_or_insert_with(Box::default);
 	let once = z.exit_pending.is_some() || z.exit_from_function;
 	z.zexit = Some(ZExit { status, exit: status, depth, step: Step::Zshexit, once, resumed: 0 });
-	push_script(
-		crate::bash::diag::ParserInput::new(&b"exit trap"[..], false),
-		k,
-		vp,
-		b"",
-		1,
-		ScriptKind::Hook,
-	);
+	push_script(vp, b"", 1, ScriptKind::Hook);
 	true
 }
 
@@ -186,14 +179,7 @@ pub fn advance(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<WaitKe
 					let mut src = Vec::with_capacity(name.len() + 3);
 					quote(&name, &mut src);
 					src.push(b'\n');
-					push_script(
-						crate::bash::diag::ParserInput::new(&b"exit trap"[..], false),
-						k,
-						vp,
-						&src,
-						1,
-						ScriptKind::Hook,
-					);
+					push_script(vp, &src, 1, ScriptKind::Hook);
 					return None;
 				}
 			},
@@ -272,7 +258,7 @@ fn modules(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<WaitKey> {
 				keep(vp, sc);
 				let d =
 					Diag::Unsupported { what: "a command substitution in a module exit hook".into() };
-				k.diag(cx, vp, 0, crate::bash::diag::Producer::ErrorProlog, d);
+				k.diag(cx, vp, 0, d);
 				break;
 			},
 		}
@@ -285,7 +271,7 @@ fn modules(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<WaitKey> {
 	z.step = Step::Done;
 	let (exit, depth) = (z.exit, z.depth as usize);
 	while vp.frames.len() > depth {
-		pop_frame(k, cx.store, vp);
+		pop_frame(&mut k.root, cx.store, vp);
 	}
 	vp.status = exit;
 	None
@@ -343,7 +329,7 @@ fn quote(word: &[u8], out: &mut Vec<u8>) {
 fn report(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, chunks: Vec<Chunk>) {
 	for chunk in chunks {
 		match chunk {
-			Chunk::Diag(d, producer) => k.diag(cx, vp, 0, producer, d),
+			Chunk::Diag(d) => k.diag(cx, vp, 0, d),
 			Chunk::Out(fd, bytes) => {
 				vp.out
 					.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });

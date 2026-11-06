@@ -286,8 +286,6 @@ impl<'x> Fmt<'x, '_, '_> {
 
 	/// Queue `d`, after the complete lines produced so far: bash's stdout
 	/// is line-buffered and its diagnostics go straight to stderr.
-	/// A prefixed message supplies `BuiltinError` (`builtin_error_prolog`);
-	/// a bare message supplies `ErrorProlog` (`error_prolog`).
 	fn report(&mut self, d: Diag, prefixed: bool) {
 		if !self.vflag
 			&& let Some(nl) = self.out[self.flushed..].iter().rposition(|&b| b == b'\n')
@@ -299,7 +297,7 @@ impl<'x> Fmt<'x, '_, '_> {
 		if prefixed {
 			self.ctx.err(d);
 		} else {
-			self.ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+			self.ctx.diag(d);
 		}
 	}
 

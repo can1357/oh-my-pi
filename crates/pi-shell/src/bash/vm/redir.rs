@@ -33,7 +33,7 @@ use super::{
 	state::{self, Level},
 };
 use crate::bash::{
-	diag::{Diag, Producer},
+	diag::Diag,
 	event::{EventData, RedirInfo, RedirKind, WaitKey},
 	fd::{FdOrigin, FdRef},
 	fs::{File, FileKind, FsOp, FsPoll, OpenFlags, SeekFrom, StatKind},
@@ -252,16 +252,7 @@ fn target_text(
 						reason = "one here-document per redirection; no bytecount dependency"
 					)]
 					let at = line + text.iter().filter(|&&c| c == b'\n').count() as u32 + 1;
-					k.diag(cx, vp, line, Producer::CommandSubstitution, Diag::ComsubSyntax {
-						line: at,
-						msg:  e.msg,
-					});
-					if let Some(text) = e.context {
-						k.diag(cx, vp, line, Producer::CommandSubstitution, Diag::ComsubContext {
-							line: at,
-							text,
-						});
-					}
+					k.diag(cx, vp, line, Diag::ComsubSyntax { line: at, msg: e.msg });
 					return Err(Halt::Failed);
 				},
 			};
@@ -301,9 +292,7 @@ fn target_text(
 				if let Ok([one]) = <[BString; 1]>::try_from(fields) {
 					Ok(one)
 				} else {
-					k.diag(cx, vp, line, Producer::ErrorProlog, Diag::AmbiguousRedirect {
-						word: word_text(unit, *w),
-					});
+					k.diag(cx, vp, line, Diag::AmbiguousRedirect { word: word_text(unit, *w) });
 					Err(Halt::Failed)
 				}
 			}
@@ -412,7 +401,7 @@ fn assign_fd_var(
 			(d @ Diag::InvalidIdent { .. }, Some(cmd)) => d.by(cmd),
 			(d, _) => d,
 		};
-		k.diag(cx, vp, line, Producer::ErrorProlog, d);
+		k.diag(cx, vp, line, d);
 		let msg = format!("{}: cannot assign fd to variable", name.as_bstr()).into();
 		return Err(Diag::Usage { msg });
 	}
@@ -690,10 +679,7 @@ fn start_deferral(vp: &mut Vproc, k: &mut Kernel) {
 /// (`bash: line 1: f: `), as [`Diag::Io`] renders it here.
 pub fn diag_prefix(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, line: u32, what: &[u8]) -> BString {
 	let err = std::io::Error::other("");
-	let mut text = k.render_quiet(cx, vp, line, Producer::ErrorProlog, &Diag::Io {
-		path: BString::from(what),
-		err,
-	});
+	let mut text = k.render_quiet(cx, vp, line, &Diag::Io { path: BString::from(what), err });
 	if text.last() == Some(&b'\n') {
 		text.pop();
 	}
@@ -821,10 +807,9 @@ fn child_open(
 	ChildRedir::Open { fds, path: absolute(&vp.cwd, target), flags, mode: 0o666 & !umask, diag }
 }
 
-/// Print `d` with `Producer::ErrorProlog` (Bash `error_prolog`) and fail
-/// the redirection.
+/// Print `d` and fail the redirection.
 fn fail(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, d: Diag) -> Halt {
-	k.diag(cx, vp, line, Producer::ErrorProlog, d);
+	k.diag(cx, vp, line, d);
 	Halt::Failed
 }
 
@@ -1353,7 +1338,7 @@ fn open_into(
 	}
 	if let Some(src) = dev_fd(path) {
 		let Some(h) = vp.fds.get(src).cloned().filter(FdRef::is_open) else {
-			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Io {
+			k.diag(cx, vp, line, Diag::Io {
 				path: path.clone(),
 				err:  std::io::Error::other(crate::bash::fd::BadFd),
 			});
@@ -1399,7 +1384,7 @@ fn open_into(
 				} else {
 					Diag::Io { path: path.clone(), err }
 				};
-			k.diag(cx, vp, line, Producer::ErrorProlog, d);
+			k.diag(cx, vp, line, d);
 			Err(Halt::Failed)
 		},
 	}

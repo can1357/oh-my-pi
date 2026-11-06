@@ -146,23 +146,6 @@ impl ParseError {
 			.map(|(line, msg)| ParseWarning { line: *line, bash_msg: msg.to_vec() })
 	}
 
-	/// The source line Bash echoes for a token error, without its newline.
-	pub fn context<'a>(&self, src: &'a [u8]) -> Option<&'a [u8]> {
-		if !self.echoes_line() {
-			return None;
-		}
-		let at = (self.span.lo as usize).min(src.len());
-		let start = src[..at]
-			.iter()
-			.rposition(|&c| c == b'\n')
-			.map_or(0, |i| i + 1);
-		let end = src[at..]
-			.iter()
-			.position(|&c| c == b'\n')
-			.map_or(src.len(), |i| at + i);
-		Some(&src[start..end])
-	}
-
 	/// Whether bash also echoes the offending source line (``name: line N:
 	/// `text'``) after the message.
 	///

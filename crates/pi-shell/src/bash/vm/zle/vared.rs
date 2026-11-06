@@ -109,7 +109,7 @@ pub fn vared(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	let fetched = match fetched {
 		Ok(f) => f,
 		Err(d) => {
-			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+			ctx.diag(d);
 			return done(1);
 		},
 	};
@@ -150,9 +150,7 @@ pub fn vared(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		},
 	};
 	if ops.isset(b't') {
-		ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Unsupported {
-			what: "`vared -t' (editing on another terminal)".into(),
-		});
+		ctx.diag(Diag::Unsupported { what: "`vared -t' (editing on another terminal)".into() });
 		return done(1);
 	}
 	let prompt_l = BString::from(ops.arg(b'p').unwrap_or_default());
@@ -322,7 +320,7 @@ fn run(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	match r {
 		Ok(()) => done(0),
 		Err(d) => {
-			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+			ctx.diag(d);
 			done(1)
 		},
 	}

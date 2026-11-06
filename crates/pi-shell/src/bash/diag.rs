@@ -9,9 +9,8 @@
 use std::{borrow::Cow, fmt, io};
 
 use bstr::BString;
-use serde::{Deserialize, Serialize};
 
-use crate::bash::fd::BadFd;
+use crate::bash::{event::Origin, fd::BadFd};
 
 /// A diagnostic, by catalog entry.
 #[derive(Debug, thiserror::Error, strum::EnumDiscriminants)]
@@ -438,14 +437,6 @@ pub enum Diag {
 		/// Message.
 		msg:  BString,
 	},
-	/// The source line following a command-substitution syntax error.
-	#[error("`{text}'")]
-	ComsubContext {
-		/// The script line supplied by the command-substitution reader.
-		line: u32,
-		/// Source bytes, without the newline.
-		text: BString,
-	},
 	/// An arithmetic error inside an array subscript: bash reports it
 	/// without the command's name (`let 'a[1+]=1'` → `1+: arithmetic
 	/// syntax error…`), so [`Diag::by`] leaves it as it is.
@@ -553,114 +544,65 @@ pub fn strerror(err: &io::Error) -> Cow<'static, str> {
 	})
 }
 
-/// The Bash emitter whose policy controls a diagnostic, independently of
-/// its message. `error.c` and `builtins/common.c` use shell interactivity;
-/// `parser_error` uses the current parser input's interactivity instead.
-#[derive(Clone, Copy, Debug)]
-pub enum Producer<'a> {
-	/// `report_error` / `internal_error`: `error_prolog(1)`.
-	ErrorProlog,
-	/// `builtin_error` and the `sh_` helpers: `builtin_error_prolog`.
-	BuiltinError,
-	/// `sys_error`: `error_prolog(0)`.
-	SysError,
-	/// The expansion parser already supplied its command-substitution line.
-	CommandSubstitution,
-	/// `parser_error` / `report_syntax_error`, including an offending line.
-	ParserError { input: &'a ParserInput, context_line: bool },
-}
-
-/// A parser input's identity and interactivity, captured when it is created.
-/// It travels with its script frame, including through snapshots. Eval
-/// inherits its caller's parser interactivity; file and child inputs do not.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ParserInput {
-	pub name:        Cow<'static, [u8]>,
-	pub interactive: bool,
-}
-
-impl ParserInput {
-	pub fn new(name: impl Into<Cow<'static, [u8]>>, interactive: bool) -> Self {
-		Self { name: name.into(), interactive }
-	}
-}
-
-/// A message paired with the producer that emitted it. Borrowing avoids
-/// copying a message or its parser input just to write stderr.
-#[derive(Clone, Copy, Debug)]
-pub struct Diagnostic<'a> {
-	pub message:  &'a Diag,
-	pub producer: Producer<'a>,
-}
-
 /// Where a diagnostic is printed from, for its prefix.
 #[derive(Clone, Copy, Debug)]
 pub struct DiagSite<'a> {
 	/// `$0` (bash uses it as the message prefix).
-	pub shell_name:  &'a [u8],
+	pub shell_name: &'a [u8],
+	/// Origin of the running script.
+	pub origin:     &'a Origin,
 	/// Current line.
-	pub line:        u32,
-	/// Innermost sourced or function-definition file.
-	pub sourced:     Option<&'a [u8]>,
-	/// Bash's `interactive_shell`: the invocation, not the current parser.
-	pub interactive: bool,
+	pub line:       u32,
+	/// The text being read is a `.` file, so a syntax error in it is not the
+	/// `-c` string's and bash does not print `-c`.
+	pub sourced:    bool,
 	/// The locale is UTF-8 (which bytes print as they are in names).
-	pub utf8:        bool,
+	pub utf8:       bool,
 }
 
-/// The full stderr bytes of a produced diagnostic, newline included.
-pub fn render(diagnostic: Diagnostic<'_>, site: DiagSite<'_>) -> Vec<u8> {
-	let Diagnostic { message: diag, producer } = diagnostic;
+/// The full stderr line for `diag` printed at `site`, newline included.
+///
+/// Runtime errors print as `name: line N: msg`; syntax errors in a `-c`
+/// string print as `name: -c: line N: msg`, as bash 5.3 does.
+pub fn render(diag: &Diag, site: DiagSite<'_>) -> Vec<u8> {
 	if let Diag::Several { diags } = diag {
-		return diags
-			.iter()
-			.flat_map(|message| render(Diagnostic { message, producer }, site))
-			.collect();
+		return diags.iter().flat_map(|d| render(d, site)).collect();
 	}
-	if matches!(producer, Producer::ParserError {
-		input:        ParserInput { interactive: true, .. },
-		context_line: true,
-	}) {
-		return Vec::new();
-	}
-	let name = get_name_for_error(site);
+	let syntax = matches!(diag, Diag::Syntax { .. } | Diag::SyntaxContext { .. });
 	let mut out = Vec::with_capacity(64);
-	out.extend_from_slice(name);
-	match producer {
-		Producer::ParserError { input, .. } => {
-			if !input.interactive {
-				if site.interactive || name != input.name.as_ref() {
-					out.extend_from_slice(b": ");
-					out.extend_from_slice(&input.name);
-				}
-				line_prefix(&mut out, site.line);
-			}
-		},
-		Producer::ErrorProlog | Producer::BuiltinError => {
-			if !site.interactive {
-				line_prefix(&mut out, site.line);
-			}
-		},
-		Producer::SysError | Producer::CommandSubstitution => {},
+	out.extend_from_slice(site.shell_name);
+	if let Diag::ComsubSyntax { line, msg } = diag {
+		out.extend_from_slice(b": command substitution: line ");
+		out.extend_from_slice(line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
+		out.extend_from_slice(b": ");
+		out.extend_from_slice(msg);
+		out.push(b'\n');
+		return out;
 	}
+	if let Diag::Eval { diag } = diag {
+		out.extend_from_slice(b": eval: line ");
+		out.extend_from_slice(site.line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
+		out.extend_from_slice(b": ");
+		message(diag, site.utf8, &mut out);
+		out.push(b'\n');
+		return out;
+	}
+	if let Diag::BadInterpreter { .. } = diag {
+		// bash's `sys_error`: no line number.
+		out.extend_from_slice(b": ");
+		message(diag, site.utf8, &mut out);
+		out.push(b'\n');
+		return out;
+	}
+	if syntax && !site.sourced && matches!(site.origin, Origin::Command) {
+		out.extend_from_slice(b": -c");
+	}
+	out.extend_from_slice(b": line ");
+	out.extend_from_slice(site.line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
 	out.extend_from_slice(b": ");
 	message(diag, site.utf8, &mut out);
 	out.push(b'\n');
 	out
-}
-
-/// Bash's shared `get_name_for_error`, used by all four emitters above.
-fn get_name_for_error(site: DiagSite<'_>) -> &[u8] {
-	if site.interactive {
-		site.shell_name
-	} else {
-		site.sourced.unwrap_or(site.shell_name)
-	}
-}
-
-fn line_prefix(out: &mut Vec<u8>, line: u32) {
-	out.extend_from_slice(b": line ");
-	out.extend_from_slice(line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
 }
 
 /// Where a zsh-dialect diagnostic is printed (zsh `zwarning`/`zerrmsg`).
@@ -681,13 +623,9 @@ pub struct ZshSite<'a> {
 /// The full stderr line for `diag` printed by zsh-dialect code (zsh
 /// `zwarning`): `PREFIX:LINE: msg`, or `PREFIX:CMD:LINE: msg` for a
 /// builtin's ([`Diag::Prefixed`]); without a line, `PREFIX: msg`.
-pub fn render_zsh(diagnostic: Diagnostic<'_>, site: ZshSite<'_>) -> Vec<u8> {
-	let Diagnostic { message: diag, producer } = diagnostic;
+pub fn render_zsh(diag: &Diag, site: ZshSite<'_>) -> Vec<u8> {
 	if let Diag::Several { diags } = diag {
-		return diags
-			.iter()
-			.flat_map(|message| render_zsh(Diagnostic { message, producer }, site))
-			.collect();
+		return diags.iter().flat_map(|d| render_zsh(d, site)).collect();
 	}
 	let mut out = Vec::with_capacity(64);
 	let prefixed = matches!(diag, Diag::Prefixed { .. });
@@ -849,20 +787,6 @@ fn message(diag: &Diag, utf8: bool, out: &mut Vec<u8>) {
 			out.extend_from_slice(interp);
 			write!(out, ": bad interpreter: {}", strerror(err)).expect("writing to a Vec cannot fail");
 		},
-		Diag::Eval { diag } => message(diag, utf8, out),
-		Diag::ComsubSyntax { line, msg } => {
-			out.extend_from_slice(b"command substitution: line ");
-			out.extend_from_slice(line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
-			out.extend_from_slice(b": ");
-			out.extend_from_slice(msg);
-		},
-		Diag::ComsubContext { line, text } => {
-			out.extend_from_slice(b"command substitution: line ");
-			out.extend_from_slice(line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
-			out.extend_from_slice(b": `");
-			out.extend_from_slice(text);
-			out.push(b'\'');
-		},
 		// A builtin reporting one of the above (`cd: PATH: …`).
 		Diag::Prefixed { cmd, diag } => {
 			out.extend_from_slice(cmd.as_bytes());
@@ -895,6 +819,7 @@ mod tests {
 			Diag::StartFailed { name: BString::from("x"), err: err() },
 			Diag::Refused { name: BString::from("x"), err: err() },
 			Diag::Io { path: BString::from("x"), err: err() },
+			Diag::ReadFailed { path: BString::from("x"), msg: BString::from("read error") },
 			Diag::BadInterpreter {
 				name:   BString::from("x"),
 				interp: BString::from("i"),
@@ -941,70 +866,13 @@ mod tests {
 		let mut out = Vec::new();
 		message(&Diag::NoMatch { pattern: BString::from(b"x\xffy*".to_vec()) }, true, &mut out);
 		assert_eq!(out, b"no match: x\xffy*");
-	}
 
-	/// Parser interactivity belongs to the producer, not to a message variant
-	/// or a function's retained BASH_SOURCE entry.
-	#[test]
-	fn interactive_parser_omits_eval_and_context_for_its_own_input() {
-		let site = DiagSite {
-			shell_name:  b"bash",
-			line:        1,
-			sourced:     Some(b"./defs"),
-			interactive: true,
-			utf8:        true,
-		};
-		let syntax = Diag::Syntax { msg: BString::from("syntax error near unexpected token `)'") };
-		let context = Diag::SyntaxContext { text: BString::from(")") };
-		let parser = |message, name: &'static [u8], interactive, context_line| {
-			render(
-				Diagnostic {
-					message,
-					producer: Producer::ParserError {
-						input: &ParserInput::new(name, interactive),
-						context_line,
-					},
-				},
-				site,
-			)
-		};
-		assert_eq!(
-			parser(&syntax, b"eval", true, false),
-			b"bash: syntax error near unexpected token `)'\n"
+		let mut out = Vec::new();
+		message(
+			&Diag::ReadFailed { path: BString::from(b"src\xff".to_vec()), msg: "read error".into() },
+			true,
+			&mut out,
 		);
-		assert!(parser(&context, b"eval", true, true).is_empty());
-		// Source and trap parsers keep their own input policy even though the
-		// invocation is interactive.
-		assert_eq!(
-			parser(&syntax, b"eval", false, false),
-			b"bash: eval: line 1: syntax error near unexpected token `)'\n"
-		);
-		assert_eq!(parser(&context, b"eval", false, true), b"bash: eval: line 1: `)'\n");
-		assert_eq!(
-			parser(&context, b"./source.sh", false, true),
-			b"bash: ./source.sh: line 1: `)'\n"
-		);
-		assert_eq!(
-			render(Diagnostic { message: &context, producer: Producer::ErrorProlog }, site),
-			b"bash: `)'\n"
-		);
-		let noninteractive = DiagSite { interactive: false, ..site };
-		assert_eq!(
-			render(
-				Diagnostic {
-					message:  &syntax,
-					producer: Producer::ParserError {
-						input:        &ParserInput::new(&b"./defs"[..], false),
-						context_line: false,
-					},
-				},
-				noninteractive
-			),
-			b"./defs: line 1: syntax error near unexpected token `)'\n"
-		);
-		assert_eq!(
-			render(Diagnostic { message: &syntax, producer: Producer::SysError }, noninteractive),
-			b"./defs: syntax error near unexpected token `)'\n"
-		);
+		assert_eq!(out, b"src\xff: read error");
 	}
 }

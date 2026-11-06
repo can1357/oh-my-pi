@@ -10,7 +10,8 @@ mod api;
 pub(crate) mod arith;
 mod builtins;
 mod callstack;
-pub(crate) mod command;
+mod command;
+pub(crate) use command::{BinaryCheck, looks_binary};
 mod control;
 mod exec;
 mod expand;
@@ -60,7 +61,7 @@ use self::{
 	state::{Overlay, Root, Var},
 };
 use crate::bash::{
-	diag::{Diag, DiagSite, Diagnostic, Producer, render},
+	diag::{Diag, DiagSite, render},
 	engine::Engine,
 	error::ShellError,
 	event::{AssignScope, Event, EventData, EventMask, Origin, OriginChain, OriginLink},
@@ -118,35 +119,33 @@ pub struct ShellInit {
 	/// Starting mode. A zsh-dialect shell starts with that emulation's
 	/// options, and takes [`Self::options`] as zsh option names (`no`
 	/// prefix allowed).
-	pub mode:            ModeId,
-	/// `$0`; the noninteractive diagnostic name when no source is active.
-	pub argv0:           BString,
-	/// Invocation name for interactive diagnostics (`None`: use `argv0`).
-	pub invocation_name: Option<BString>,
+	pub mode:        ModeId,
+	/// `$0`; also the prefix of diagnostics.
+	pub argv0:       BString,
 	/// Positional parameters.
-	pub args:            Vec<BString>,
+	pub args:        Vec<BString>,
 	/// Imported environment (names that are not identifiers are skipped;
 	/// `BASH_FUNC_name%%` entries define exported functions).
-	pub env:             Vec<(BString, BString)>,
+	pub env:         Vec<(BString, BString)>,
 	/// Working directory (absolute).
-	pub cwd:             BString,
+	pub cwd:         BString,
 	/// Interactive shell semantics.
-	pub interactive:     bool,
+	pub interactive: bool,
 	/// `set -o` / `shopt` names to set.
-	pub options:         Vec<(BString, bool)>,
+	pub options:     Vec<(BString, bool)>,
 	/// `$$` (persisted across restores); zero selects [`Host::shell_pid`].
-	pub shell_pid:       u32,
+	pub shell_pid:   u32,
 	/// Startup files (`path`, contents) the shell sources, in order, before
 	/// its first script: what
 	/// [`crate::bash::invocation::ShellArgs::startup_files`] names and the
 	/// host found (`BASH_ENV`, a login shell's profiles).
-	pub startup:         Vec<(BString, BString)>,
+	pub startup:     Vec<(BString, BString)>,
 	/// Unexported parameters a zsh shell sets from its command line before
 	/// its startup files: `ZSH_EXECUTION_STRING` (the `-c` string) and
 	/// `ZSH_SCRIPT` (the script file).
-	pub zsh_params:      Vec<(BString, BString)>,
+	pub zsh_params:  Vec<(BString, BString)>,
 	/// Whose shell it is: a user's, or a program's ([`Profile::Tool`]).
-	pub profile:         Profile,
+	pub profile:     Profile,
 }
 
 /// Whose shell a [`Shell`] is, which decides whether it may touch its
@@ -186,18 +185,17 @@ pub fn is_tool(store: &mut dyn StateStore, vp: &Vproc) -> Result<bool, StoreErro
 impl Default for ShellInit {
 	fn default() -> Self {
 		Self {
-			mode:            ModeId::Bash,
-			argv0:           BString::from("bash"),
-			invocation_name: None,
-			args:            Vec::new(),
-			env:             Vec::new(),
-			cwd:             BString::from("/"),
-			interactive:     false,
-			options:         Vec::new(),
-			shell_pid:       0,
-			startup:         Vec::new(),
-			zsh_params:      Vec::new(),
-			profile:         Profile::User,
+			mode:        ModeId::Bash,
+			argv0:       BString::from("bash"),
+			args:        Vec::new(),
+			env:         Vec::new(),
+			cwd:         BString::from("/"),
+			interactive: false,
+			options:     Vec::new(),
+			shell_pid:   0,
+			startup:     Vec::new(),
+			zsh_params:  Vec::new(),
+			profile:     Profile::User,
 		}
 	}
 }
@@ -395,8 +393,6 @@ pub struct Kernel {
 	/// Facts derived from the root state in the store (the state itself
 	/// lives in the store).
 	pub root:               Root,
-	/// Source text and parser identity, owned by inputs rather than frames.
-	pub inputs:             proc::Inputs,
 	pub mask:               EventMask,
 	pub seq:                u64,
 	pub next_vpid:          u32,
@@ -526,7 +522,6 @@ impl Kernel {
 			waker: control::engine_waker(&ctl),
 			ctl,
 			root,
-			inputs: proc::Inputs::default(),
 			mask: EventMask::DEFAULT,
 			seq: 0,
 			next_vpid: engine.config().vpid_base,
@@ -876,62 +871,18 @@ impl Kernel {
 		self.send(cx, &ev);
 	}
 
-	/// Queue a diagnostic with its required Bash producer and emit its event.
-	/// There is deliberately no default: each raise site selects its emitter.
-	pub fn diag(
-		&mut self,
-		cx: &mut Cx<'_>,
-		vp: &mut Vproc,
-		line: u32,
-		producer: Producer<'_>,
-		diag: Diag,
-	) {
+	/// Queue a diagnostic on the vproc's stderr and emit a `Diag` event.
+	pub fn diag(&mut self, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, diag: Diag) {
 		zle::display::trash_for_message(self, cx, vp);
-		let bytes = self.render_produced(cx, vp, line, Diagnostic { message: &diag, producer });
-		self.diag_event(cx, vp, &diag);
+		let bytes = self.render_diag(cx, vp, line, &diag);
 		vp.out
 			.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
 	}
 
-	/// Supply `Producer::ParserError`, mirroring Bash's `parser_error`.
-	/// Identity and parser interactivity come from the stored input, not
-	/// the invocation. Zsh uses its `zerr` (`Producer::ErrorProlog`) path.
-	pub fn parser_diag(
-		&mut self,
-		cx: &mut Cx<'_>,
-		vp: &mut Vproc,
-		line: u32,
-		diag: Diag,
-		context_line: bool,
-	) {
-		if vp.mode.dialect() == crate::bash::Dialect::Zsh {
-			self.diag(cx, vp, line, Producer::ErrorProlog, diag);
-			return;
-		}
-		zle::display::trash_for_message(self, cx, vp);
-		let utf8 = locale::is_utf8(self, cx.store, vp);
-		let site = self.diag_site(cx, vp, line, utf8);
-		let input = exec::parser_input(self, vp).expect("a parser diagnostic has a parser input");
-		let bytes = render(
-			Diagnostic { message: &diag, producer: Producer::ParserError { input, context_line } },
-			site,
-		);
-		self.diag_event(cx, vp, &diag);
-		vp.out
-			.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
-	}
-
-	/// Render a diagnostic through its required producer and emit its `Diag`
-	/// event. Builtin helpers queue these bytes with their own output.
-	pub fn render_diag(
-		&mut self,
-		cx: &mut Cx<'_>,
-		vp: &Vproc,
-		line: u32,
-		producer: Producer<'_>,
-		diag: &Diag,
-	) -> Vec<u8> {
-		let bytes = self.render_produced(cx, vp, line, Diagnostic { message: diag, producer });
+	/// The stderr bytes of a diagnostic; emits the `Diag` event. Builtins
+	/// queue the bytes with their own output to keep stdout/stderr order.
+	pub fn render_diag(&mut self, cx: &mut Cx<'_>, vp: &Vproc, line: u32, diag: &Diag) -> Vec<u8> {
+		let bytes = self.render_quiet(cx, vp, line, diag);
 		self.diag_event(cx, vp, diag);
 		bytes
 	}
@@ -939,24 +890,7 @@ impl Kernel {
 	/// The stderr bytes of a diagnostic, without its event: also what a
 	/// spawned process prints for a redirection it applies itself
 	/// ([`crate::bash::ChildRedir`]).
-	pub fn render_quiet(
-		&mut self,
-		cx: &mut Cx<'_>,
-		vp: &Vproc,
-		line: u32,
-		producer: Producer<'_>,
-		diag: &Diag,
-	) -> Vec<u8> {
-		self.render_produced(cx, vp, line, Diagnostic { message: diag, producer })
-	}
-
-	fn render_produced(
-		&mut self,
-		cx: &mut Cx<'_>,
-		vp: &Vproc,
-		line: u32,
-		diagnostic: Diagnostic<'_>,
-	) -> Vec<u8> {
+	pub fn render_quiet(&mut self, cx: &mut Cx<'_>, vp: &Vproc, line: u32, diag: &Diag) -> Vec<u8> {
 		if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 			let (mut prefix, mut zline) = self.zsh_site(cx, vp, line);
 			if self.zsh_shinstdin(cx, vp) {
@@ -964,60 +898,43 @@ impl Kernel {
 				zline = 0;
 			}
 			let utf8 = zsh::params::mb_in(self, cx.store, vp).unwrap_or(false);
-			return crate::bash::diag::render_zsh(diagnostic, crate::bash::diag::ZshSite {
+			return crate::bash::diag::render_zsh(diag, crate::bash::diag::ZshSite {
 				prefix: &prefix,
 				line: zline,
 				utf8,
 			});
 		}
+		static COMMAND: Origin = Origin::Command;
+		let origin = vp
+			.runs
+			.front()
+			.and_then(|r| r.chain.links.first())
+			.map_or(&COMMAND, |l| &l.origin);
 		let utf8 = locale::is_utf8(self, cx.store, vp);
-		let site = self.diag_site(cx, vp, line, utf8);
-		render(diagnostic, site)
-	}
-
-	fn diag_site<'a>(
-		&'a self,
-		cx: &'a mut Cx<'_>,
-		vp: &'a Vproc,
-		line: u32,
-		utf8: bool,
-	) -> DiagSite<'a> {
+		// A noninteractive shell names the active source file, including a
+		// function's definition file. Interactive shells keep the existing
+		// shell prefix and diagnostic format. An in-engine nested shell uses
+		// its own `$0` when no source prefix applies.
 		let nested = vp
 			.overlay
 			.as_ref()
 			.and_then(|o| o.records.get(&KeyBuf::Misc(MiscKey::Argv0)));
 		let interactive = matches!(
 			state::record(cx.store, vp, crate::bash::store::Key::Misc(MiscKey::Interactive)),
-			Ok(Some(Record::Misc(v))) if v.as_slice() == b"1"
-		) && !vp.async_compound;
-		let active_file = callstack::innermost_file(vp, false)
-			.map(|file| file.as_slice())
-			.or_else(|| {
-				vp.frames.iter().rev().find_map(|frame| match &frame.kind {
-					proc::FrameKind::Script { what: proc::ScriptKind::Source, input, .. } => {
-						Some(self.inputs.get(*input).parser.name.as_ref())
-					},
-					_ => None,
-				})
-			});
-		let sourced = active_file.or_else(|| {
-			vp.runs
-				.front()
-				.and_then(|run| run.exit_diagnostic_file.as_ref())
-				.map(|file| file.as_slice())
-		});
-		let shell_name = if interactive {
-			match state::record(cx.store, vp, crate::bash::store::Key::Misc(MiscKey::InvocationName)) {
-				Ok(Some(Record::Misc(name))) => name.as_slice(),
-				_ => self.argv0.as_slice(),
-			}
+			Ok(Some(Record::Misc(value))) if value.as_slice() == b"1"
+		);
+		let sourced = if interactive {
+			None
 		} else {
-			match nested {
-				Some(Some(Record::Misc(name))) => name.as_slice(),
-				_ => self.argv0.as_slice(),
-			}
+			callstack::innermost_file(vp)
 		};
-		DiagSite { shell_name, line, utf8, sourced, interactive }
+		let shell_name = match (sourced, nested) {
+			(Some(file), _) => file.as_slice(),
+			(None, Some(Some(Record::Misc(name)))) => name.as_slice(),
+			(None, _) => self.argv0.as_slice(),
+		};
+		let site = DiagSite { shell_name, origin, line, utf8, sourced: sourced.is_some() };
+		render(diag, site)
 	}
 
 	/// The `Diag` event of a diagnostic `vp` prints.
@@ -1531,14 +1448,6 @@ impl Shell {
 		k.root
 			.set_var(cx.store, b"SHLVL", Some(Var::scalar((shlvl + 1).to_string(), Attrs::EXPORT)));
 		startup_vars(&mut k, cx, &init)?;
-		k.root.set_misc(
-			cx.store,
-			MiscKey::InvocationName,
-			init
-				.invocation_name
-				.as_ref()
-				.map_or(init.argv0.as_slice(), |name| name.as_slice()),
-		);
 		// bash's `sv_strict_posix` at import: `POSIXLY_CORRECT` (or
 		// `POSIX_PEDANTIC`) in the environment turns POSIX mode on; explicit
 		// options below still win.
@@ -1717,7 +1626,6 @@ impl Shell {
 			env: Vec::new(),
 			started: false,
 			exit_trap_started: false,
-			exit_diagnostic_file: None,
 		};
 		let stdio = match script.vproc {
 			VprocSel::Root => {
@@ -2142,7 +2050,7 @@ impl Shell {
 					if trapped {
 						exec::mark_cancel(&mut self.procs[i], status);
 					} else {
-						exec::finish_cancel(&mut self.k, cx.store, &mut self.procs[i], status);
+						exec::finish_cancel(&mut self.k.root, cx.store, &mut self.procs[i], status);
 					}
 				} else {
 					self.kill(cx, i, sig, status);
@@ -2220,7 +2128,7 @@ impl Shell {
 				}
 			}
 		}
-		exec::unwind(&mut self.k, cx.store, p, 0);
+		exec::unwind(&mut self.k.root, cx.store, p, 0);
 		while state::drop_scope(&mut self.k.root, cx.store, p) {}
 		p.out.clear();
 		p.blocked = None;
@@ -2758,7 +2666,6 @@ impl Vproc {
 			command: None,
 			spare: Vec::new(),
 			calls: Vec::new(),
-			async_compound: false,
 			own_traps: proc::OwnTraps::EMPTY,
 			trap_frames: 0,
 			mode: ModeId::Bash,
@@ -2807,11 +2714,8 @@ impl Vproc {
 		line: u32,
 		fds: FdTable,
 	) -> Self {
-		let input = k
-			.inputs
-			.insert(src, crate::bash::diag::ParserInput::new(&b"command substitution"[..], false));
 		let kind = proc::FrameKind::script(
-			input,
+			src,
 			crate::bash::syntax::Pos { offset: 0, line },
 			proc::ScriptKind::Eval,
 		);
@@ -2857,7 +2761,6 @@ impl Vproc {
 		vp.command.clone_from(&self.command);
 		vp.rlimits.clone_from(&self.rlimits);
 		vp.lineage = self.lineage;
-		vp.async_compound = self.async_compound;
 		jobctl::inherit(k, vp.vpid, self.vpid);
 		vp.mode = self.mode;
 		vp.zle.clone_from(&self.zle);

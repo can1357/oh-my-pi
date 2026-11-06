@@ -169,9 +169,7 @@ pub fn setopt(ctx: &mut Ctx<'_, '_>, args: &[BString], unset: bool) -> R {
 		i += 1;
 	}
 	if matching {
-		ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Unsupported {
-			what: "setopt -m before zsh patterns are wired".into(),
-		});
+		ctx.diag(Diag::Unsupported { what: "setopt -m before zsh patterns are wired".into() });
 		return done(1);
 	}
 	for name in tail(args, i.min(args.len())) {
@@ -360,14 +358,7 @@ pub fn emulate(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	// The command runs as `eval` text in the new mode (zsh's `eval`:
 	// `(eval)` diagnostics, lines from 1).
 	ctx.vp.status = 0;
-	push_script(
-		crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
-		ctx.k,
-		ctx.vp,
-		&cmd,
-		1,
-		ScriptKind::Eval,
-	);
+	push_script(ctx.vp, &cmd, 1, ScriptKind::Eval);
 	ctx.vp.push_restore(*saved);
 	ctx.k.emit_op(ctx.cx, ctx.vp, 0, EventData::EvalEnter);
 	Ok(Outcome { status: 0, control: Control::Frame })

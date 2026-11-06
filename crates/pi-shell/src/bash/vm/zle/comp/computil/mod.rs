@@ -79,7 +79,7 @@ pub(super) fn px<T>(
 		Ok(v) => Ok(Some(v)),
 		Err(d) => {
 			if !*failed {
-				ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+				ctx.diag(d);
 				*failed = true;
 			}
 			Ok(None)

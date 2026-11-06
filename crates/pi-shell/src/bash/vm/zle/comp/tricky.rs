@@ -417,9 +417,7 @@ fn hascompmod(zw: &mut Zw<'_, '_>) -> bool {
 fn zwarn(zw: &mut Zw<'_, '_>, msg: &str) {
 	crate::bash::vm::zle::exec::trashzle(zw);
 	zw.k
-		.diag(zw.cx, zw.vp, 0, crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
-			msg: msg.to_string().into(),
-		});
+		.diag(zw.cx, zw.vp, 0, Diag::Usage { msg: msg.to_string().into() });
 }
 
 /// Run `r` (a widget step that may wait), then `k` with its status.

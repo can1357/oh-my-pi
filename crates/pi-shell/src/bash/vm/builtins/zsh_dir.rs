@@ -286,7 +286,7 @@ fn cd_able_vars(ctx: &mut Ctx<'_, '_>, s: &[u8]) -> Result<Option<BString>, Need
 	let dir = match zx(ctx, |ex| nameddir::getnameddir(ex, &name))? {
 		Ok(d) => d,
 		Err(d) => {
-			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+			ctx.diag(d);
 			None
 		},
 	};
@@ -619,14 +619,7 @@ fn chpwd_hooks(ctx: &mut Ctx<'_, '_>) -> R {
 		return done(0);
 	}
 	src.extend_from_slice(b":\n");
-	push_script(
-		crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
-		ctx.k,
-		ctx.vp,
-		&src,
-		ctx.line,
-		ScriptKind::Eval,
-	);
+	push_script(ctx.vp, &src, ctx.line, ScriptKind::Eval);
 	Ok(Outcome { status: 0, control: Control::Frame })
 }
 

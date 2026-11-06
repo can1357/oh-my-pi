@@ -8,7 +8,7 @@ use bstr::{BString, ByteSlice};
 
 use super::{Chunk, Ctx, Need, R, done, number};
 use crate::bash::{
-	diag::{Diag, Producer},
+	diag::Diag,
 	fs::{FileKind, Stat, StatKind},
 	ir::{CondIr, Op, Unit},
 	pattern::{PatOpts, Regex},
@@ -289,7 +289,7 @@ fn regex_match(ctx: &mut Ctx<'_, '_>, s: &[u8], re: &[u8]) -> T<bool> {
 	let cur = ctx.var(NAME)?;
 	match &cur {
 		Some(v) if v.attrs.contains(Attrs::READONLY) => {
-			ctx.diag(Producer::ErrorProlog, Diag::Readonly { name: NAME.into() });
+			ctx.diag(Diag::Readonly { name: NAME.into() });
 		},
 		Some(Var { value: VarValue::Assoc(_), .. }) => {
 			ctx.usage("BASH_REMATCH: not an indexed array");
@@ -583,7 +583,7 @@ pub fn test(ctx: &mut Ctx<'_, '_>, args: &[BString], bracket: bool) -> R {
 	match test_command(&mut *ctx, args, argc) {
 		Ok(Some(v)) => done(i32::from(!v)),
 		Ok(None) => {
-			ctx.diag(Producer::BuiltinError, Diag::TooManyArgs { cmd: ctx.name.into() });
+			ctx.diag(Diag::TooManyArgs { cmd: ctx.name.into() });
 			done(2)
 		},
 		Err(Fail::Need(n)) => Err(n),
@@ -592,7 +592,7 @@ pub fn test(ctx: &mut Ctx<'_, '_>, args: &[BString], bracket: bool) -> R {
 			done(2)
 		},
 		Err(Fail::Discard(d)) => {
-			ctx.diag(Producer::ErrorProlog, d);
+			ctx.diag(d);
 			Ok(super::Outcome { status: 1, control: super::Control::DiscardAll })
 		},
 	}
@@ -703,13 +703,13 @@ pub fn cond_test(
 			},
 			Err(Fail::Syntax(d)) => {
 				report(k, cx, vp, line, chunks);
-				k.diag(cx, vp, line, Producer::BuiltinError, d.by("[["));
+				k.diag(cx, vp, line, d.by("[["));
 				vp.status = 2;
 				break;
 			},
 			Err(Fail::Discard(d)) => {
 				report(k, cx, vp, line, chunks);
-				k.diag(cx, vp, line, Producer::ErrorProlog, d);
+				k.diag(cx, vp, line, d);
 				return Flow::Discard(1);
 			},
 			Err(Fail::Arith(d)) => {
@@ -719,7 +719,7 @@ pub fn cond_test(
 				} else {
 					d.by("[[")
 				};
-				k.diag(cx, vp, line, Producer::ErrorProlog, d);
+				k.diag(cx, vp, line, d);
 				vp.status = 1;
 				break;
 			},
@@ -763,7 +763,7 @@ pub fn cond_test(
 fn report(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, chunks: Vec<Chunk>) {
 	for chunk in chunks {
 		match chunk {
-			Chunk::Diag(d, producer) => k.diag(cx, vp, line, producer, d),
+			Chunk::Diag(d) => k.diag(cx, vp, line, d),
 			Chunk::Out(fd, bytes) => {
 				vp.out
 					.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });

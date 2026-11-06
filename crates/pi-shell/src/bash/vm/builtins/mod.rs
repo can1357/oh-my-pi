@@ -92,7 +92,7 @@ use super::{
 	state::{self, Level, Var},
 };
 use crate::bash::{
-	diag::{Diag, Producer},
+	diag::Diag,
 	ids::{IntrinsicId, Vpid},
 	store::{Key, KeyBuf, OptId, Record, StoreError},
 };
@@ -102,7 +102,7 @@ pub enum Chunk {
 	/// Bytes for an fd.
 	Out(i32, Vec<u8>),
 	/// A diagnostic for stderr (rendered when the builtin completes).
-	Diag(Diag, Producer<'static>),
+	Diag(Diag),
 }
 
 /// Why a builtin could not complete yet (or at all).
@@ -342,24 +342,19 @@ impl<'a, 'c> Ctx<'a, 'c> {
 		self.chunks.push(Chunk::Out(fd, bytes.to_vec()));
 	}
 
-	/// Queue `NAME: <diag>` for stderr. Supplies `Producer::BuiltinError`,
-	/// mirroring Bash's `builtin_error` / `builtin_error_prolog`.
+	/// Queue `NAME: <diag>` for stderr.
 	pub fn err(&mut self, d: Diag) {
-		self
-			.chunks
-			.push(Chunk::Diag(d.by(self.name), Producer::BuiltinError));
+		self.chunks.push(Chunk::Diag(d.by(self.name)));
 	}
 
-	/// Queue `NAME: msg` through [`Self::err`], supplying
-	/// `Producer::BuiltinError` as Bash's `builtin_error` does.
+	/// Queue `NAME: msg` for stderr.
 	pub fn usage(&mut self, msg: impl Into<std::borrow::Cow<'static, str>>) {
 		self.err(Diag::Usage { msg: msg.into() });
 	}
 
-	/// Queue a diagnostic without the builtin prefix. The caller must
-	/// supply its Bash producer; this transport never chooses one.
-	pub fn diag(&mut self, producer: Producer<'static>, d: Diag) {
-		self.chunks.push(Chunk::Diag(d, producer));
+	/// Queue a diagnostic without the builtin prefix.
+	pub fn diag(&mut self, d: Diag) {
+		self.chunks.push(Chunk::Diag(d));
 	}
 
 	/// A variable as this vproc sees it.
@@ -507,9 +502,7 @@ pub fn run(id: IntrinsicId, ctx: &mut Ctx<'_, '_>, argv: &[BString]) -> R {
 		I::Setopt => options::setopt(ctx, args, false),
 		I::Unsetopt => options::setopt(ctx, args, true),
 		I::Exec | I::Getln => {
-			ctx.diag(Producer::BuiltinError, Diag::Unsupported {
-				what: format!("the `{}' builtin", ctx.name).into(),
-			});
+			ctx.diag(Diag::Unsupported { what: format!("the `{}' builtin", ctx.name).into() });
 			done(2)
 		},
 		// zsh-only builtins: `zsh_args::run` handles each of them in a zsh

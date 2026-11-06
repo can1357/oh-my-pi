@@ -23,7 +23,7 @@ use super::{
 	state::{self, Level, Root, Scope, Var, VarMap},
 };
 use crate::bash::{
-	diag::{Diag, ParserInput, Producer},
+	diag::Diag,
 	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey, assign_preview},
 	fd::FdRef,
 	host::{ResolveCtx, Resolved, Via},
@@ -59,33 +59,6 @@ pub enum Flow {
 	Exit(i32),
 	/// An expansion or arithmetic error: abandon the current top-level command.
 	Discard(i32),
-}
-
-/// The input owned by the nearest parser activation. A compiled child
-/// has no parent parser input: a later eval starts noninteractive.
-pub(super) fn parser_input<'a>(k: &'a Kernel, vp: &Vproc) -> Option<&'a ParserInput> {
-	vp.frames.iter().rev().find_map(|frame| match frame.kind {
-		FrameKind::Script { input, .. } => Some(&k.inputs.get(input).parser),
-		_ => None,
-	})
-}
-
-/// Construct an eval input before pushing its new activation. This inherits
-/// the caller's parser flag, never the invocation's `interactive_shell` flag.
-pub fn eval_input(k: &Kernel, vp: &Vproc) -> ParserInput {
-	ParserInput::new(&b"eval"[..], parser_input(k, vp).is_some_and(|input| input.interactive))
-}
-
-/// A trap action is a new, noninteractive parser input.
-fn trap_input(key: TrapKey) -> ParserInput {
-	let name: &'static [u8] = match key {
-		TrapKey::Exit => b"exit trap",
-		TrapKey::Err => b"error trap",
-		TrapKey::Debug => b"debug trap",
-		TrapKey::Return => b"return trap",
-		TrapKey::Signal(_) => b"trap",
-	};
-	ParserInput::new(name, false)
 }
 
 /// Run vproc `vp` for up to `slice` ops; stops early when it parks, a
@@ -296,14 +269,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			&& let Some((src, hook_line)) = z.glob_hook.take()
 			&& matches!(flow, Flow::Call)
 		{
-			push_script(
-				ParserInput::new(&b"PROMPT_COMMAND"[..], false),
-				k,
-				vp,
-				&src,
-				hook_line,
-				ScriptKind::Hook,
-			);
+			push_script(vp, &src, hook_line, ScriptKind::Hook);
 		}
 		// Nothing failed and control goes on: no ERR trap, errexit or
 		// transfer to decide (every check below starts from a failure or a
@@ -420,11 +386,11 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				// An interactive shell's own input goes on: the command is
 				// dropped and the next one read (zsh `loop`, bash
 				// `reader_loop`).
-				unwind(k, cx.store, vp, i + 1);
+				unwind(&mut k.root, cx.store, vp, i + 1);
 				if super::zle::reader::applies(cx, vp) {
 					top_frame(vp).unit = None;
 				} else {
-					unwind(k, cx.store, vp, i);
+					unwind(&mut k.root, cx.store, vp, i);
 				}
 			},
 			Flow::Return(status) if unit.mode.dialect() == Dialect::Zsh => {
@@ -444,7 +410,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				});
 				if let Some(i) = target {
 					if vp.frames[i].kind == FrameKind::NoFork || !return_trap(k, vp, cx, i) {
-						unwind(k, cx.store, vp, i);
+						unwind(&mut k.root, cx.store, vp, i);
 					}
 				} else if vp.parent.is_some() && in_function_scope(k, cx, vp) {
 					exit_shell(k, vp, cx, status);
@@ -452,7 +418,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 					let line = line_of(vp, op.node);
 					let diag =
 						Diag::Usage { msg: "can only `return' from a function or sourced script".into() };
-					k.diag(cx, vp, line, Producer::BuiltinError, diag.by("return"));
+					k.diag(cx, vp, line, diag.by("return"));
 					vp.status = 2;
 					top_frame(vp).pc += 1;
 				}
@@ -476,19 +442,19 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 					.iter()
 					.rposition(|f| matches!(f.kind, FrameKind::Script { .. }));
 				if let Some(i) = script {
-					unwind(k, cx.store, vp, i + 1);
+					unwind(&mut k.root, cx.store, vp, i + 1);
 					clear_scratch(&mut k.root, cx.store, vp);
 					truncate(vp, Depths::default());
 					let f = top_frame(vp);
 					f.unit = None;
 					f.loops.clear();
 				} else {
-					unwind(k, cx.store, vp, 0);
+					unwind(&mut k.root, cx.store, vp, 0);
 				}
 			},
 		}
 		if cancel_transfer {
-			finish_cancel(k, cx.store, vp, cancellation.expect("checked"));
+			finish_cancel(&mut k.root, cx.store, vp, cancellation.expect("checked"));
 			continue;
 		}
 		let errexit = errexit_failed
@@ -560,7 +526,7 @@ fn zsh_return_flow(
 		// `retflag`, which `loop` clears: the rest of the command line (and
 		// a list trap that ran it, p10k's `return 130` on ^C) is dropped and
 		// the shell reads its next one.
-		unwind(k, cx.store, vp, i + 1);
+		unwind(&mut k.root, cx.store, vp, i + 1);
 		clear_scratch(&mut k.root, cx.store, vp);
 		truncate(vp, Depths::default());
 		let f = top_frame(vp);
@@ -665,7 +631,7 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		&& let Some(keep) = super::zsh::zexit::exit_in_hooks(vp, status)
 	{
 		vp.status = status;
-		unwind(k, cx.store, vp, keep);
+		unwind(&mut k.root, cx.store, vp, keep);
 		return;
 	}
 	let in_exit_trap = vp.frames.iter().any(|f| {
@@ -701,31 +667,7 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		}
 		return;
 	}
-	if !in_exit_trap
-		&& vp.mode.dialect() == Dialect::Bash
-		&& vp
-			.runs
-			.front()
-			.is_some_and(|run| run.exit_diagnostic_file.is_none())
-		&& vp.runs.front().is_some_and(|run| {
-			matches!(
-				run.chain.links.first().map(|link| &link.origin),
-				Some(Origin::File(_) | Origin::Stdin)
-			)
-		}) {
-		// Bash 5.2.21/5.3.0 keep the outermost sourced input's name
-		// while EXIT unwinds a file/stdin input (f1 -> f2 -> f3 keeps
-		// f1, not f2). `-c` instead returns to its invocation name.
-		let file = vp.calls.iter().find_map(|call| match &call.kind {
-			super::callstack::CallKind::Source { file, .. } if call.depth > 0 => Some(file.clone()),
-			_ => None,
-		});
-		vp.runs
-			.front_mut()
-			.expect("a file/stdin run")
-			.exit_diagnostic_file = file;
-	}
-	unwind(k, cx.store, vp, 0);
+	unwind(&mut k.root, cx.store, vp, 0);
 	// zsh `exit` in a subshell is its `zexit`: the hooks run after its EXIT
 	// trap (pushed below them).
 	if vp.parent.is_some() && vp.runs.is_empty() && vp.mode.dialect() == Dialect::Zsh {
@@ -777,11 +719,6 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 		let mode = run.mode;
 		super::mode::set_mode(&mut k.root, cx.store, vp, mode);
 	}
-	let interactive = vp.parent.is_none()
-		&& matches!(
-			state::record(cx.store, vp, Key::Misc(MiscKey::Interactive)),
-			Ok(Some(Record::Misc(value))) if value.as_slice() == b"1"
-		);
 	let run = vp.runs.front_mut().expect("present");
 	if vp.overlay.is_none() {
 		if let Some(args) = run.args.take() {
@@ -808,13 +745,7 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 		k.root.set_misc(cx.store, MiscKey::RunOrigin, flag);
 	}
 	let from_stdin = matches!(run.chain.links[0].origin, Origin::Stdin);
-	let input = match &run.chain.links[0].origin {
-		Origin::Command => ParserInput::new(&b"-c"[..], interactive),
-		Origin::File(path) => ParserInput::new(Vec::from(path.clone()), false),
-		_ => ParserInput::new(Vec::from(k.argv0.clone()), interactive),
-	};
-	let input = k.inputs.insert(&run.src, input);
-	let mut kind = FrameKind::script(input, Pos::START, ScriptKind::Run);
+	let mut kind = FrameKind::script(&run.src, Pos::START, ScriptKind::Run);
 	if let FrameKind::Script { stdin, .. } = &mut kind {
 		*stdin = from_stdin;
 	}
@@ -840,15 +771,8 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 				path: path.as_bstr(),
 			});
 		}
-		for (path, text) in startup.iter().rev() {
-			push_script(
-				ParserInput::new(Vec::from(path.clone()), false),
-				k,
-				vp,
-				text,
-				1,
-				ScriptKind::Source,
-			);
+		for (_, text) in startup.iter().rev() {
+			push_script(vp, text, 1, ScriptKind::Source);
 		}
 	}
 	true
@@ -980,9 +904,9 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		if let Some(origins) = k.trace_sources.get_mut(&vp.vpid) {
 			origins.retain(|at, _| *at <= depth);
 		}
-		if let Some(Frame { kind: FrameKind::Script { input, pos, what: ScriptKind::Eval, .. }, .. }) = vp.frames.last()
+		if let Some(Frame { kind: FrameKind::Script { src, pos, what: ScriptKind::Eval, .. }, .. }) = vp.frames.last()
 			&& pos.0 == 0
-			&& let Some(origin) = literal_script_origin(vp, &k.inputs.get(*input).source, false)
+			&& let Some(origin) = literal_script_origin(vp, src, false)
 		{
 			if k.trace_sources.len() < crate::bash::trace::history::HISTORY_EVENTS {
 				k.trace_sources.entry(vp.vpid).or_default().insert(depth, origin);
@@ -1062,13 +986,12 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		None
 	};
 	let frame = top_frame(vp);
-	let FrameKind::Script { input, pos, aux, stdin, .. } = &mut frame.kind else {
+	let FrameKind::Script { src, pos, aux, stdin, .. } = &mut frame.kind else {
 		// Function and subshell frames never run out of code.
 		frame.unit = None;
 		vp.frames.pop();
 		return None;
 	};
-	let src = &mut k.inputs.get_mut(*input).source;
 	if snapshot {
 		aux.get_or_insert_with(Box::default).parse =
 			Some(ParseSnapshot { features: feat.bits(), aliases: aliases.take() });
@@ -1161,7 +1084,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		if source && return_trap(k, vp, cx, top) {
 			return None;
 		}
-		pop_frame(k, cx.store, vp);
+		pop_frame(&mut k.root, cx.store, vp);
 		if debug && !vp.frames.is_empty() {
 			zsh_debug_done(k, vp, cx);
 		}
@@ -1173,7 +1096,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			return None;
 		}
 		if let Some(cancel) = cancel {
-			finish_cancel(k, cx.store, vp, cancel);
+			finish_cancel(&mut k.root, cx.store, vp, cancel);
 		} else if let Some(status) = status
 			&& exit
 		{
@@ -1185,7 +1108,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		} else if let Some(status) = status {
 			vp.status = status;
 			if let Some(target) = return_target {
-				unwind(k, cx.store, vp, target);
+				unwind(&mut k.root, cx.store, vp, target);
 			} else if debug
 				&& trap_status != 0
 				&& state::option(&mut k.root, cx.store, vp, OptId::Extdebug).unwrap_or(false)
@@ -1201,7 +1124,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 						!matches!(op.code, Opcode::ForIn | Opcode::ForNext | Opcode::CaseWord)
 					});
 				if f.debug_pc == Some(ENTRY_DEBUG) {
-					pop_frame(k, cx.store, vp);
+					pop_frame(&mut k.root, cx.store, vp);
 					vp.status = trap_status;
 				} else if f.debug_pc == Some(f.pc) && skippable {
 					f.pc += 1;
@@ -1230,10 +1153,9 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			}
 		}
 		let frame = top_frame(vp);
-		let FrameKind::Script { input, .. } = &frame.kind else {
+		let FrameKind::Script { src, .. } = &frame.kind else {
 			return None;
 		};
-		let src = &k.inputs.get(*input).source;
 		let prog = res
 			.as_ref()
 			.ok()
@@ -1265,10 +1187,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 				builtins::history::zsh::latest_text(&k.root, cx.store, vp).unwrap_or_default()
 			} else {
 				match &top_frame(vp).kind {
-					FrameKind::Script { input, pos, .. } => k
-						.inputs
-						.get(*input)
-						.source
+					FrameKind::Script { src, pos, .. } => src
 						.get(pos.0 as usize..next.offset as usize)
 						.map_or_default(|t| BString::from(t.strip_suffix(b"\n").unwrap_or(t))),
 					_ => BString::default(),
@@ -1280,10 +1199,9 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		}
 	}
 	let frame = top_frame(vp);
-	let FrameKind::Script { input, pos, aux, .. } = &mut frame.kind else {
+	let FrameKind::Script { src, pos, aux, .. } = &mut frame.kind else {
 		return None;
 	};
-	let src = &k.inputs.get(*input).source;
 	*pos = (next.offset, next.line);
 	if !resume.pending.is_empty() {
 		aux.get_or_insert_with(Box::default).pending = Some((
@@ -1554,9 +1472,7 @@ pub(crate) fn hend_output(
 	run: &mut bool,
 ) {
 	for m in out.msgs {
-		k.diag(cx, vp, 0, Producer::ErrorProlog, Diag::Usage {
-			msg: m.to_str_lossy().into_owned().into(),
-		});
+		k.diag(cx, vp, 0, Diag::Usage { msg: m.to_str_lossy().into_owned().into() });
 	}
 	if let Some(mut line) = out.print {
 		line.push(b'\n');
@@ -1629,12 +1545,11 @@ fn read_script_line(
 			Ok(hz::Expanded::Line(t)) => text = t,
 			Ok(hz::Expanded::Failed(d)) => {
 				if let Some(d) = d {
-					k.diag(cx, vp, 0, Producer::ErrorProlog, d);
+					k.diag(cx, vp, 0, d);
 				}
 				text = BString::default();
 				// The event's earlier lines go with it.
-				if let FrameKind::Script { input, pos, aux, .. } = &mut top_frame(vp).kind {
-					let src = &k.inputs.get(*input).source;
+				if let FrameKind::Script { src, pos, aux, .. } = &mut top_frame(vp).kind {
 					let skipped = src[(pos.0 as usize).min(src.len())..]
 						.split(|&c| c == b'\n')
 						.count()
@@ -1647,8 +1562,8 @@ fn read_script_line(
 			},
 		}
 	}
-	if let FrameKind::Script { input, stdin, .. } = &mut top_frame(vp).kind {
-		k.inputs.get_mut(*input).source.extend_from_slice(&text);
+	if let FrameKind::Script { src, stdin, .. } = &mut top_frame(vp).kind {
+		src.extend_from_slice(&text);
 		*stdin = !eof;
 	}
 	None
@@ -1671,42 +1586,23 @@ fn end_unit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
 		FrameKind::Function { .. } => {
 			let target = vp.frames.len() - 1;
 			if !return_trap(k, vp, cx, target) {
-				pop_frame(k, cx.store, vp);
+				pop_frame(&mut k.root, cx.store, vp);
 			}
 		},
-		FrameKind::NoFork | FrameKind::Stage => pop_frame(k, cx.store, vp),
+		FrameKind::NoFork | FrameKind::Stage => pop_frame(&mut k.root, cx.store, vp),
 		FrameKind::Subshell | FrameKind::Job { .. } => {
-			unwind(k, cx.store, vp, 0);
+			unwind(&mut k.root, cx.store, vp, 0);
 			start_trap(k, vp, cx, TrapKey::Exit);
 		},
 	}
 }
 
-/// Pop an owning frame, releasing its parser input and restoring saved fds
-/// and scopes. A store failure is kept on the kernel's root state.
-pub fn pop_frame(k: &mut Kernel, store: &mut dyn StateStore, vp: &mut Vproc) {
-	pop_frame_inner(k, store, vp, true);
-}
-
-/// Pop a job-control stand-in. Its input is still owned by the frame moved
-/// to the stopped job, so only the stand-in's saved scopes/fds are restored.
-pub fn pop_stand_in(k: &mut Kernel, store: &mut dyn StateStore, vp: &mut Vproc) {
-	pop_frame_inner(k, store, vp, false);
-}
-
-fn pop_frame_inner(
-	k: &mut Kernel,
-	store: &mut dyn StateStore,
-	vp: &mut Vproc,
-	release_input: bool,
-) {
+/// Pop the top frame, restoring the fds its redirections saved and the
+/// scope of a function call or `${ ;}`. A store failure is kept on `root`.
+pub fn pop_frame(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc) {
 	let Some(mut f) = vp.frames.pop() else {
 		return;
 	};
-	if release_input && let FrameKind::Script { input, .. } = f.kind {
-		k.inputs.remove(input);
-	}
-	let root = &mut k.root;
 	if matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. }) {
 		vp.trap_frames = vp.trap_frames.saturating_sub(1);
 	}
@@ -1903,9 +1799,9 @@ pub fn take_scratch(vp: &mut Vproc) -> Box<Scratch> {
 }
 
 /// Pop frames until `keep` remain.
-pub fn unwind(k: &mut Kernel, store: &mut dyn StateStore, vp: &mut Vproc, keep: usize) {
+pub fn unwind(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc, keep: usize) {
 	while vp.frames.len() > keep {
-		pop_frame(k, store, vp);
+		pop_frame(root, store, vp);
 	}
 }
 
@@ -2035,7 +1931,7 @@ fn break_loops(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, n: u32, cont: bo
 			FrameKind::Script { what: ScriptKind::Eval, .. } | FrameKind::NoFork | FrameKind::Stage
 		);
 		if crossable && vp.frames.len() > 1 {
-			pop_frame(k, cx.store, vp);
+			pop_frame(&mut k.root, cx.store, vp);
 			// The caller's op (`eval`) is abandoned with the loop.
 			clear_scratch(&mut k.root, cx.store, vp);
 			continue;
@@ -2047,7 +1943,7 @@ fn break_loops(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, n: u32, cont: bo
 		let line = line_of(vp, op.node);
 		let name = if cont { "continue" } else { "break" };
 		let diag = Diag::Usage { msg: "only meaningful in a `for', `while', or `until' loop".into() };
-		k.diag(cx, vp, line, Producer::BuiltinError, diag.by(name));
+		k.diag(cx, vp, line, diag.by(name));
 	}
 	vp.status = 0;
 	top_frame(vp).pc += 1;
@@ -2183,19 +2079,13 @@ fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 
 /// The flow for an expansion error (the diagnostic is printed).
 pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, stop: Stop) -> Flow {
-	let producer = match &stop {
-		Stop::Fail(Diag::ComsubSyntax { .. }) | Stop::Fatal(Diag::ComsubSyntax { .. }) => {
-			Producer::CommandSubstitution
-		},
-		_ => Producer::ErrorProlog,
-	};
 	match stop {
 		Stop::Sub { .. } | Stop::ZshSub { .. } => unreachable!("handled by the caller"),
 		// An expansion that cannot park (a glob qualifier's) met a math
 		// function.
 		Stop::MathCall(call) => {
 			let what = format!("a call of math function {} in this expansion", call.argzero);
-			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Unsupported { what: what.into() });
+			k.diag(cx, vp, line, Diag::Unsupported { what: what.into() });
 			Flow::Discard(1)
 		},
 		// `$!` of a job still deciding on its pid: the op runs again (and
@@ -2203,19 +2093,17 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		Stop::Wait(key) => Flow::Block(key),
 		// An expansion that cannot park (a glob qualifier's) met `=cmd`.
 		Stop::Probe(_) => {
-			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Unsupported {
-				what: "`=cmd` in this expansion".into(),
-			});
+			k.diag(cx, vp, line, Diag::Unsupported { what: "`=cmd` in this expansion".into() });
 			Flow::Discard(1)
 		},
 		// A non-interactive posix shell exits on an expansion error (bash's
 		// `posixly_correct && !interactive_shell`), as on a fatal one.
 		Stop::Fail(d) if !posix_exits(k, cx, vp) => {
-			k.diag(cx, vp, line, producer, d);
+			k.diag(cx, vp, line, d);
 			Flow::Discard(1)
 		},
 		Stop::Fail(d) | Stop::Fatal(d) => {
-			k.diag(cx, vp, line, producer, d);
+			k.diag(cx, vp, line, d);
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
 			// failure status); a nested shell (depth 0) is its own `-c` shell.
@@ -2435,14 +2323,7 @@ pub fn start_zsh_sub(
 ) -> Flow {
 	if here {
 		sc.sub = Some(PendingSub::Here { status: vp.status });
-		push_script(
-			ParserInput::new(&b"PROMPT_COMMAND"[..], false),
-			k,
-			vp,
-			text,
-			line,
-			ScriptKind::Hook,
-		);
+		push_script(vp, text, line, ScriptKind::Hook);
 		return Flow::Call;
 	}
 	let capture = Capture::default();
@@ -2744,7 +2625,7 @@ pub fn settle_sub(
 	if out.contains(&0) && vp.mode.dialect() != Dialect::Zsh {
 		out.retain(|&c| c != 0);
 		let line = line_of(vp, 0);
-		k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Warning {
+		k.diag(cx, vp, line, Diag::Warning {
 			msg: "warning: command substitution: ignored null byte in input".into(),
 		});
 	}
@@ -2878,7 +2759,7 @@ fn plain_arith(
 				d
 			};
 			let line = line_of(vp, op.node);
-			k.diag(cx, vp, line, Producer::ErrorProlog, d);
+			k.diag(cx, vp, line, d);
 			vp.status = 1;
 			// `((…))` continues; an arith-for header error leaves the loop
 			// (approximated by discarding the command).
@@ -3061,10 +2942,10 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 		Opcode::Spawn => spawn(k, vp, cx, unit, op),
 		Opcode::SubExit => {
 			if matches!(top_frame(vp).kind, FrameKind::NoFork | FrameKind::Stage) {
-				pop_frame(k, cx.store, vp);
+				pop_frame(&mut k.root, cx.store, vp);
 			} else {
 				// A subshell, pipeline stage or job ends: its EXIT trap runs.
-				unwind(k, cx.store, vp, 0);
+				unwind(&mut k.root, cx.store, vp, 0);
 				start_trap(k, vp, cx, TrapKey::Exit);
 			}
 			Flow::Call
@@ -3131,7 +3012,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					} else {
 						d
 					};
-					k.diag(cx, vp, line, Producer::ErrorProlog, d);
+					k.diag(cx, vp, line, d);
 					vp.status = 1;
 					// `((…))` continues; an arith-for header error leaves the
 					// loop (approximated by discarding the command).
@@ -3163,7 +3044,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			if special_name(k, vp, cx, &f.name) {
 				// POSIX interpretation 383: fatal in a non-interactive shell.
 				let msg = format!("`{}': is a special builtin", f.name).into();
-				k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Usage { msg });
+				k.diag(cx, vp, line, Diag::Usage { msg });
 				return Flow::Exit(2);
 			}
 			// zsh: defining `TRAPNAL` sets the trap (`localtraps` saves the
@@ -3203,11 +3084,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					d
 				}
 			};
-			if op.flags & Op::SYNTAX != 0 {
-				k.parser_diag(cx, vp, op.b, wrap(diag), false);
-			} else {
-				k.diag(cx, vp, op.b, Producer::ErrorProlog, diag);
-			}
+			k.diag(cx, vp, op.b, wrap(diag));
 			if op.flags & Op::CONTEXT != 0 {
 				// A recovered syntax error: the offending line follows.
 				let text = unit
@@ -3215,7 +3092,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					.get(op.a as usize + 1)
 					.cloned()
 					.unwrap_or_default();
-				k.parser_diag(cx, vp, op.b, wrap(Diag::SyntaxContext { text }), true);
+				k.diag(cx, vp, op.b, wrap(Diag::SyntaxContext { text }));
 			}
 			Flow::Next
 		},
@@ -3237,18 +3114,14 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					d
 				}
 			};
-			if op.flags & Op::SYNTAX != 0 {
-				k.parser_diag(cx, vp, op.node, wrap(diag), false);
-			} else {
-				k.diag(cx, vp, op.node, Producer::ErrorProlog, wrap(diag));
-			}
+			k.diag(cx, vp, op.node, wrap(diag));
 			if op.flags & Op::CONTEXT != 0 {
 				let text = unit
 					.strs
 					.get(op.a as usize + 1)
 					.cloned()
 					.unwrap_or_default();
-				k.parser_diag(cx, vp, op.node, wrap(Diag::SyntaxContext { text }), true);
+				k.diag(cx, vp, op.node, wrap(Diag::SyntaxContext { text }));
 			}
 			Flow::Abort(op.b as i32)
 		},
@@ -3398,7 +3271,7 @@ fn time_end(
 			.push_back(PendingWrite { fd: 2, bytes: text.into(), off: 0 }),
 		Err(c) => {
 			let msg = format!("TIMEFORMAT: `{}': invalid format character", char::from(c));
-			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Usage { msg: msg.into() });
+			k.diag(cx, vp, line, Diag::Usage { msg: msg.into() });
 		},
 	}
 }
@@ -3710,7 +3583,7 @@ fn for_in(
 				.map_or(line, |first| line_of(vp, first.node)),
 			_ => line,
 		};
-		k.diag(cx, vp, shown, Producer::ErrorProlog, Diag::InvalidIdent { name: var.clone() });
+		k.diag(cx, vp, shown, Diag::InvalidIdent { name: var.clone() });
 		if state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
 			// Fatal to a posix shell.
 			clear_scratch(&mut k.root, cx.store, vp);
@@ -3785,7 +3658,7 @@ fn for_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		builtins::assign_loop_var(k, vp, cx, &var, value.clone())
 	};
 	if let Err(d) = assigned {
-		k.diag(cx, vp, line, Producer::ErrorProlog, d);
+		k.diag(cx, vp, line, d);
 		// An assignment error ends a posix shell.
 		if state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
 			return Flow::Exit(1);
@@ -4046,13 +3919,6 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 				}
 				let mut child = vp.child(k, cx.store, Arc::clone(unit), info.stages[0].entry, fds);
 				if info.kind == SpawnKind::Background {
-					// Bash 5.2.21/5.3.0 retain interactive prologs for a
-					// simple async builtin (including source), but not an
-					// async compound command such as `{ ...; }` or `( ... )`.
-					let head = unit.ops[info.stages[0].entry as usize..]
-						.iter()
-						.find(|op| op.code != Opcode::Redir);
-					child.async_compound |= head.is_some_and(|op| op.code != Opcode::Exec);
 					let level = stage_level(unit, info.stages[0].entry, true);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
 					// A job of its own: its processes get their own group.
@@ -4324,7 +4190,7 @@ fn start_coproc(
 			Some(Diag::InvalidIdent { name: var.clone() })
 		};
 		if let Some(d) = diag {
-			k.diag(cx, vp, line, Producer::ErrorProlog, d);
+			k.diag(cx, vp, line, d);
 			// bash's coproc_setvars returns at the first failure: no NAME_PID.
 			break;
 		}
@@ -4367,7 +4233,7 @@ pub fn reap_coproc(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, waited: Vpid
 			.is_some_and(|v| v.attrs.contains(Attrs::READONLY));
 		if readonly {
 			let line = current_line(vp);
-			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Usage {
+			k.diag(cx, vp, line, Diag::Usage {
 				msg: format!("{}: cannot unset: readonly variable", var.as_bstr()).into(),
 			});
 		} else {
@@ -4395,7 +4261,7 @@ pub fn coproc_fd_closed(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, fd: i32
 		let value = AssignValue::Scalar(BString::from("-1"));
 		if let Err(d) = builtins::set_value(k, cx, vp, lhs, value, Level::Dynamic) {
 			let line = current_line(vp);
-			k.diag(cx, vp, line, Producer::ErrorProlog, d);
+			k.diag(cx, vp, line, d);
 		}
 	}
 }
@@ -4689,7 +4555,7 @@ fn push_trap(
 	state::push_scope(&mut k.root, cx.store, vp, scope);
 	let status = vp.status;
 	vp.blocked = None;
-	push_script(trap_input(key), k, vp, action, 1, ScriptKind::Trap {
+	push_script(vp, action, 1, ScriptKind::Trap {
 		key,
 		status,
 		cancel: None,
@@ -4830,8 +4696,8 @@ pub fn mark_cancel(vp: &mut Vproc, status: i32) {
 /// none; `Shell::apply_requests`): unwind everything with `status`. The
 /// started run still runs its EXIT trap, as bash does when a signal ends
 /// the shell; scripts queued behind it end unstarted.
-pub fn finish_cancel(k: &mut Kernel, store: &mut dyn StateStore, vp: &mut Vproc, status: i32) {
-	unwind(k, store, vp, 0);
+pub fn finish_cancel(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc, status: i32) {
+	unwind(root, store, vp, 0);
 	vp.status = status;
 	vp.blocked = None;
 	for (i, run) in vp.runs.iter_mut().enumerate() {
@@ -4843,20 +4709,12 @@ pub fn finish_cancel(k: &mut Kernel, store: &mut dyn StateStore, vp: &mut Vproc,
 }
 
 /// Push a script frame running `src` (`eval`, `source`).
-pub fn push_script(
-	input: ParserInput,
-	k: &mut Kernel,
-	vp: &mut Vproc,
-	src: &[u8],
-	line: u32,
-	what: ScriptKind,
-) {
+pub fn push_script(vp: &mut Vproc, src: &[u8], line: u32, what: ScriptKind) {
 	if matches!(what, ScriptKind::Trap { .. }) {
 		vp.trap_frames += 1;
 	}
-	let input = k.inputs.insert(src, input);
-	let kind = FrameKind::script(input, Pos { offset: 0, line }, what);
-	vp.frames.push(Frame::new(None, 0, kind));
+	vp.frames
+		.push(Frame::new(None, 0, FrameKind::script(src, Pos { offset: 0, line }, what)));
 }
 
 // zsh control flow (zsh-dialect units only). Ported from zsh 5.9 (MIT-style
@@ -4928,7 +4786,7 @@ fn zsh_arith(
 				Ok(super::zsh::math::Number::Int(i)) => i32::from(i == 0),
 				Ok(super::zsh::math::Number::Float(f)) => i32::from(f == 0.0),
 				Err(d) => {
-					k.diag(cx, vp, line, Producer::ErrorProlog, d);
+					k.diag(cx, vp, line, d);
 					2
 				},
 			};
@@ -4966,7 +4824,7 @@ fn zsh_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 			clear_scratch(&mut k.root, cx.store, vp);
 			for (var, value) in pairs {
 				if let Err(d) = builtins::assign_zsh_loop_var(k, vp, cx, &var, &value, line) {
-					k.diag(cx, vp, line, Producer::ErrorProlog, d);
+					k.diag(cx, vp, line, d);
 					if let Some(rec) = top_frame(vp).loops.last_mut() {
 						rec.status = 1;
 					}
@@ -5057,7 +4915,7 @@ fn run_always(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, floor: usize, end
 	let Some((fi, ri)) = found else {
 		return false;
 	};
-	unwind(k, cx.store, vp, fi + 1);
+	unwind(&mut k.root, cx.store, vp, fi + 1);
 	// The op of that frame (a call, the op that ended the list) is over.
 	clear_scratch(&mut k.root, cx.store, vp);
 	let f = top_frame(vp);
@@ -5104,7 +4962,7 @@ pub fn zsh_return(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) 
 /// trap it set runs afterwards in its caller (zsh `endtrapscope`).
 #[inline(never)]
 fn zsh_leave(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) {
-	unwind(k, cx.store, vp, target + 1);
+	unwind(&mut k.root, cx.store, vp, target + 1);
 	let zsh_function = vp.trap_frames == 0
 		&& matches!(
 			vp.frames.get(target),
@@ -5127,7 +4985,7 @@ fn zsh_leave(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) {
 	) {
 		restore_local_specials(k, vp, cx);
 	}
-	pop_frame(k, cx.store, vp);
+	pop_frame(&mut k.root, cx.store, vp);
 	match exit {
 		Some(builtins::trap::ScopeExit::Text { action, mode }) => {
 			push_trap(k, vp, cx, TrapKey::Exit, &action, mode);
@@ -5232,7 +5090,7 @@ fn zsh_break(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, n: u32, cont: bool
 		if !crossable || vp.frames.len() < 2 {
 			break;
 		}
-		pop_frame(k, cx.store, vp);
+		pop_frame(&mut k.root, cx.store, vp);
 		// zsh `doshfunc`: with `localloops` (as restored on return) the
 		// break ends with the function; the call completes.
 		if function
@@ -5241,7 +5099,7 @@ fn zsh_break(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, n: u32, cont: bool
 			let what = if cont { "continue" } else { "break" };
 			let msg = format!("`{what}' active at end of function scope").into();
 			let line = current_line(vp);
-			k.diag(cx, vp, line, Producer::ErrorProlog, Diag::Usage { msg });
+			k.diag(cx, vp, line, Diag::Usage { msg });
 			return;
 		}
 		// The caller's op (the call, `eval`) is abandoned with the loop.
@@ -5334,7 +5192,7 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		// Code a builtin runs (`ScriptKind::Code`): the builtin learns of
 		// the error (zsh's `errflag` after `execode`) when it runs again.
 		let code = matches!(vp.frames[i].kind, FrameKind::Script { what: ScriptKind::Code(_), .. });
-		unwind(k, cx.store, vp, i);
+		unwind(&mut k.root, cx.store, vp, i);
 		if code {
 			state::store_record(
 				&mut k.root,
@@ -5349,7 +5207,7 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		&& (state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Continueonerror).unwrap_or(false)
 			|| super::zle::reader::input_frame(cx, vp, i))
 	{
-		unwind(k, cx.store, vp, i + 1);
+		unwind(&mut k.root, cx.store, vp, i + 1);
 		clear_scratch(&mut k.root, cx.store, vp);
 		truncate(vp, Depths::default());
 		let f = top_frame(vp);
@@ -5357,7 +5215,7 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		f.loops.clear();
 		vp.status = status;
 	} else {
-		unwind(k, cx.store, vp, 0);
+		unwind(&mut k.root, cx.store, vp, 0);
 		exit_shell(k, vp, cx, status);
 	}
 }

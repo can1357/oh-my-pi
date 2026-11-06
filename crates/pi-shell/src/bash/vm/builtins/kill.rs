@@ -84,10 +84,7 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				parse_signal(spec, platform)
 			};
 			let Some(parsed) = parsed else {
-				ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::InvalidSignal {
-					cmd:  "kill".into(),
-					spec: spec.into(),
-				});
+				ctx.diag(Diag::InvalidSignal { cmd: "kill".into(), spec: spec.into() });
 				return done(1);
 			};
 			send = parsed;
@@ -96,10 +93,7 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			}
 		} else if first.starts_with(b"-") && first.len() > 1 {
 			let Some(parsed) = parse_signal(&first[1..], platform) else {
-				ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::InvalidSignal {
-					cmd:  "kill".into(),
-					spec: first[1..].into(),
-				});
+				ctx.diag(Diag::InvalidSignal { cmd: "kill".into(), spec: first[1..].into() });
 				return done(1);
 			};
 			send = parsed;
@@ -260,10 +254,7 @@ pub fn list(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			Some(sig) if number.is_some() => ctx.out(format!("{sig}\n").as_bytes()),
 			Some(sig) => ctx.out(format!("{}\n", sig.number(platform)).as_bytes()),
 			None => {
-				ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::InvalidSignal {
-					cmd:  "kill".into(),
-					spec: spec.clone(),
-				});
+				ctx.diag(Diag::InvalidSignal { cmd: "kill".into(), spec: spec.clone() });
 				status = 1;
 			},
 		}

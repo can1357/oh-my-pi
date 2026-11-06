@@ -610,7 +610,7 @@ fn px<T>(
 	match zx(ctx, f)? {
 		Ok(v) => Ok(Some(v)),
 		Err(d) => {
-			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+			ctx.diag(d);
 			Ok(None)
 		},
 	}
@@ -802,7 +802,7 @@ fn typeset_single(
 			&& on & PM_READONLY == 0
 			&& ts.func != Func::Export
 		{
-			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Readonly { name: pname.into() });
+			ctx.diag(Diag::Readonly { name: pname.into() });
 			return Ok(Single::Abort);
 		}
 	}
@@ -1167,9 +1167,7 @@ pub fn typeset(
 		on |= PM_LOCAL;
 	}
 	let Some(asgs) = getasgs(ctx, args, base) else {
-		ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
-			msg: "bad assignment".into(),
-		});
+		ctx.diag(Diag::Usage { msg: "bad assignment".into() });
 		return Ok(Outcome { status: 1, control: Control::DiscardAll });
 	};
 	let ts = Ts {

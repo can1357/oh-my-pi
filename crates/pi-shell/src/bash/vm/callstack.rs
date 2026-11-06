@@ -240,16 +240,13 @@ pub fn listed(
 }
 
 /// `BASH_SOURCE[0]`: the `.` file being read, or the file the running
-/// function was defined in; `None` in neither. bash prefixes a diagnostic with
-/// it (`get_name_for_error`) and records it on a function it defines.
-/// With `sourced_only`, ignore function definitions: an interactive parser
-/// retains a file's identity only while a `.` file is actually executing.
+/// function was defined in; `None` in neither. Noninteractive diagnostic
+/// prefixes and function definitions use this value.
 #[must_use]
-pub fn innermost_file(vp: &Vproc, sourced_only: bool) -> Option<&BString> {
+pub fn innermost_file(vp: &Vproc) -> Option<&BString> {
 	vp.calls.iter().rev().find_map(|c| match &c.kind {
-		CallKind::Source { file, .. } => Some(file),
-		CallKind::Function { file, .. } if !sourced_only => Some(file),
-		_ => None,
+		CallKind::Function { file, .. } | CallKind::Source { file, .. } => Some(file),
+		CallKind::Args(_) => None,
 	})
 }
 
@@ -265,7 +262,7 @@ pub fn definition_file(
 	store: &mut dyn StateStore,
 	vp: &Vproc,
 ) -> Result<BString, StoreError> {
-	if let Some(file) = innermost_file(vp, false) {
+	if let Some(file) = innermost_file(vp) {
 		return Ok(file.clone());
 	}
 	if has_main(store, vp)? {

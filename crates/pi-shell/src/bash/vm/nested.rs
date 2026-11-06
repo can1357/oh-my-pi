@@ -106,7 +106,7 @@ pub fn start(
 		let diag = crate::bash::diag::Diag::Unsupported {
 			what: std::borrow::Cow::Borrowed("--pretty-print in a nested shell"),
 		};
-		k.diag(cx, vp, line, crate::bash::diag::Producer::ErrorProlog, diag);
+		k.diag(cx, vp, line, diag);
 		let s = st(vp);
 		s.status = 2;
 		s.stage = Stage::Output;
@@ -133,7 +133,7 @@ pub fn start(
 					// Bash 5.2.21/5.3.0 nested script operands use the
 					// same measured 79/80 boundary and regular-file-only
 					// ELF refusal as a top-level operand (including FIFOs).
-					if super::command::looks_binary(&text, super::command::BinaryCheck {
+					if super::looks_binary(&text, super::BinaryCheck {
 						sample_len:      80,
 						elf_magic:       args.mode.dialect() != crate::bash::Dialect::Zsh,
 						sniff_file_kind: regular,
@@ -248,10 +248,10 @@ fn launch(
 			for candidates in files {
 				for path in candidates {
 					let path = probe::absolute(&vp.cwd, &path);
-					match command_probe(k, cx, vp, &Probe::Read { path: path.clone() }) {
+					match command_probe(k, cx, vp, &Probe::Read { path }) {
 						Err(key) => return Some(Flow::Block(key)),
 						Ok(ProbeResult::Bytes(Ok(text))) => {
-							startup.push((path, text));
+							startup.push(text);
 							break;
 						},
 						Ok(_) => {},
@@ -283,13 +283,7 @@ fn launch(
 			.out
 			.push_back(PendingWrite { fd: 2, bytes: notes.into(), off: 0 });
 	}
-	let input = match &args.input {
-		Input::Command(_) => crate::bash::diag::ParserInput::new(&b"-c"[..], args.interactive),
-		Input::Script(name) => crate::bash::diag::ParserInput::new(Vec::from(name.clone()), false),
-		Input::Stdin => crate::bash::diag::ParserInput::new(dollar0.to_vec(), args.interactive),
-	};
-	let input = k.inputs.insert(src, input);
-	let mut kind = FrameKind::script(input, crate::bash::syntax::Pos::START, ScriptKind::Run);
+	let mut kind = FrameKind::script(src, crate::bash::syntax::Pos::START, ScriptKind::Run);
 	if let FrameKind::Script { stdin: s, .. } = &mut kind {
 		*s = stdin;
 	}
@@ -304,15 +298,8 @@ fn launch(
 			.or_default()
 			.insert(child.frames.len(), origin);
 	}
-	for (path, text) in startup.iter().rev() {
-		push_script(
-			crate::bash::diag::ParserInput::new(Vec::from(path.clone()), false),
-			k,
-			&mut child,
-			text,
-			1,
-			ScriptKind::Source,
-		);
+	for text in startup.iter().rev() {
+		push_script(&mut child, text, 1, ScriptKind::Source);
 	}
 	let vpid = child.vpid;
 	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
@@ -379,7 +366,6 @@ fn fresh_shell(
 	let interactive = if args.interactive { "1" } else { "0" };
 	for (key, value) in [
 		(MiscKey::Argv0, BString::from(dollar0)),
-		(MiscKey::InvocationName, args.shell_name.clone()),
 		(MiscKey::Dollar0, BString::from(dollar0)),
 		(MiscKey::ShellPid, vpid_text.clone()),
 		(MiscKey::NestedShell, vpid_text),

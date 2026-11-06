@@ -517,7 +517,7 @@ fn newptycmd(
 			let line = e.line.saturating_sub(base);
 			ctx.out_fd(2, format!("(zpty):{line}: {msg}\n").as_bytes());
 		} else {
-			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Syntax { msg });
+			ctx.diag(Diag::Syntax { msg });
 		}
 		return done(1);
 	}

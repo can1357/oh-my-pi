@@ -312,14 +312,7 @@ fn execute_with_pids(ctx: &mut Ctx<'_, '_>, words: &[BString]) -> R {
 		}
 	}
 	ctx.vp.status = 0;
-	push_script(
-		crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
-		ctx.k,
-		ctx.vp,
-		&src,
-		ctx.line,
-		ScriptKind::Eval,
-	);
+	push_script(ctx.vp, &src, ctx.line, ScriptKind::Eval);
 	ctx.k.emit_op(ctx.cx, ctx.vp, 0, EventData::EvalEnter);
 	Ok(Outcome { status: 0, control: Control::Frame })
 }
@@ -564,7 +557,7 @@ fn drop_job(ctx: &mut Ctx<'_, '_>, number: u32, nohup: bool) {
 		&& matches!(job.state, JobState::Stopped(_))
 		&& !ctx.vp.jobs.subshell
 	{
-		ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Warning {
+		ctx.diag(Diag::Warning {
 			msg: format!("warning: deleting stopped job {number} with process group {}", job.pid())
 				.into(),
 		});

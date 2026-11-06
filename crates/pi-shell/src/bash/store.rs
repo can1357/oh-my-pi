@@ -1182,9 +1182,6 @@ pub enum MiscKey {
 	/// (`Record::Misc`); absent for a user's shell. Nested shells see the
 	/// root's record.
 	Profile,
-	/// The shell invocation name, distinct from a file operand's `$0`.
-	/// Interactive `get_name_for_error` uses it (`Record::Misc`).
-	InvocationName,
 }
 
 crate::bash::packed_names::packed_names!(MiscKey);

@@ -96,7 +96,7 @@ pub fn boot(ctx: &mut Ctx<'_, '_>) -> Result<(), Need> {
 	}
 	for script in candidates {
 		if access(ctx, &script)? {
-			ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Unsupported {
+			ctx.diag(Diag::Unsupported {
 				what: format!("sourcing {} from `zmodload zsh/newuser'", script.as_bstr()).into(),
 			});
 			return Ok(());

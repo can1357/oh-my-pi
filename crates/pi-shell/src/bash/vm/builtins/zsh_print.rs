@@ -1088,7 +1088,7 @@ impl Printf<'_, '_, '_> {
 		match zx(self.ctx, |ex| arith::mathevali(ex, &text))? {
 			Ok(v) => Ok(v),
 			Err(d) => {
-				self.ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+				self.ctx.diag(d);
 				self.ret = 1;
 				Ok(0)
 			},
@@ -1101,7 +1101,7 @@ impl Printf<'_, '_, '_> {
 		match zx(self.ctx, |ex| arith::matheval(ex, &text))? {
 			Ok(v) => Ok(v.to_float()),
 			Err(d) => {
-				self.ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+				self.ctx.diag(d);
 				self.ret = 1;
 				Ok(0.0)
 			},
@@ -1306,7 +1306,7 @@ impl Printf<'_, '_, '_> {
 								params::setnparam(ex, &name, Number::Int(count), text.as_bytes(), 10)
 									.map(drop)
 							})? {
-								self.ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+								self.ctx.diag(d);
 								self.ret = 1;
 							}
 						}

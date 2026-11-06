@@ -211,8 +211,17 @@ pub fn syntax_unit(e: &syn::ParseError, src: &[u8], mode: ModeId, feat: syn::Fea
 	let a = unit.strs.len() as u32;
 	unit.strs.push(BString::from(e.bash_msg()));
 	let mut flags = Op::SYNTAX;
-	if let Some(context) = e.context(src) {
-		unit.strs.push(BString::from(context));
+	if e.echoes_line() {
+		let at = (e.span.lo as usize).min(src.len());
+		let start = src[..at]
+			.iter()
+			.rposition(|&c| c == b'\n')
+			.map_or(0, |i| i + 1);
+		let end = src[at..]
+			.iter()
+			.position(|&c| c == b'\n')
+			.map_or(src.len(), |i| at + i);
+		unit.strs.push(BString::from(&src[start..end]));
 		flags |= Op::CONTEXT;
 	}
 	if e.recovered {

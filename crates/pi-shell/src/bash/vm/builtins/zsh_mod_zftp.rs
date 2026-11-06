@@ -414,13 +414,10 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 	fn warn(&mut self, name: &str, msg: impl Into<String>) -> Z<()> {
 		let msg: String = msg.into();
 		let d = Diag::Usage { msg: msg.into() }.by(name.to_owned());
-		let bytes = self.ctx.k.render_quiet(
-			self.ctx.cx,
-			self.ctx.vp,
-			self.ctx.line,
-			crate::bash::diag::Producer::BuiltinError,
-			&d,
-		);
+		let bytes = self
+			.ctx
+			.k
+			.render_quiet(self.ctx.cx, self.ctx.vp, self.ctx.line, &d);
 		self.out(2, bytes)
 	}
 
@@ -440,13 +437,10 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		match zx(self.ctx, |ex| arith::mathevali(ex, &metafy(&text)))? {
 			Ok(n) => Ok(n),
 			Err(d) => {
-				let bytes = self.ctx.k.render_quiet(
-					self.ctx.cx,
-					self.ctx.vp,
-					self.ctx.line,
-					crate::bash::diag::Producer::BuiltinError,
-					&d,
-				);
+				let bytes = self
+					.ctx
+					.k
+					.render_quiet(self.ctx.cx, self.ctx.vp, self.ctx.line, &d);
 				self.out(2, bytes)?;
 				Ok(0)
 			},
@@ -471,13 +465,13 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		}
 		if self.no_hooks {
 			let what = format!("`{name}' called while unloading zsh/zftp");
-			let bytes = self.ctx.k.render_quiet(
-				self.ctx.cx,
-				self.ctx.vp,
-				self.ctx.line,
-				crate::bash::diag::Producer::BuiltinError,
-				&Diag::Unsupported { what: what.into() },
-			);
+			let bytes =
+				self
+					.ctx
+					.k
+					.render_quiet(self.ctx.cx, self.ctx.vp, self.ctx.line, &Diag::Unsupported {
+						what: what.into(),
+					});
 			return self.out(2, bytes);
 		}
 		let k = self.hooks;
@@ -490,14 +484,7 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		src.push(b'\'');
 		src.extend_from_slice(name.as_bytes());
 		src.extend_from_slice(b"'\n");
-		push_script(
-			crate::bash::vm::exec::eval_input(self.ctx.k, self.ctx.vp),
-			self.ctx.k,
-			self.ctx.vp,
-			&src,
-			self.ctx.line,
-			ScriptKind::Eval,
-		);
+		push_script(self.ctx.vp, &src, self.ctx.line, ScriptKind::Eval);
 		self
 			.ctx
 			.k
@@ -1409,13 +1396,10 @@ impl<'r, 'a, 'c> Zf<'r, 'a, 'c> {
 		if !matches!(self.ask(ZftpOp::Sockets)?, ZftpAns::Flag(true)) {
 			// This host's shells may not open sockets: fail loudly.
 			let d = Diag::Unsupported { what: "`zftp open' (no sockets on this host)".into() };
-			let bytes = self.ctx.k.render_quiet(
-				self.ctx.cx,
-				self.ctx.vp,
-				self.ctx.line,
-				crate::bash::diag::Producer::BuiltinError,
-				&d,
-			);
+			let bytes = self
+				.ctx
+				.k
+				.render_quiet(self.ctx.cx, self.ctx.vp, self.ctx.line, &d);
 			self.out(2, bytes)?;
 			return Ok(1);
 		}

@@ -602,9 +602,7 @@ fn transform(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	} else if args.len() < 2 {
 		-1
 	} else if args[0].as_slice() == b"tc" {
-		ctx.diag(crate::bash::diag::Producer::BuiltinError, crate::bash::diag::Diag::Unsupported {
-			what: "`zle -T tc' transformations".into(),
-		});
+		ctx.diag(crate::bash::diag::Diag::Unsupported { what: "`zle -T tc' transformations".into() });
 		return done(1);
 	} else {
 		2

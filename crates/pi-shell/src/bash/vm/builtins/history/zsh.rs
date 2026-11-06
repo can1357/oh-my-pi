@@ -451,9 +451,7 @@ pub fn in_builtin<T>(
 /// Queue zsh's messages (`zerr`/`zwarn` texts) as diagnostics.
 fn report_k(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, r: Report) {
 	for m in r.msgs {
-		k.diag(cx, vp, 0, crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
-			msg: m.to_str_lossy().into_owned().into(),
-		});
+		k.diag(cx, vp, 0, Diag::Usage { msg: m.to_str_lossy().into_owned().into() });
 	}
 }
 
@@ -894,9 +892,7 @@ pub fn exit_save_in_builtin(ctx: &mut Ctx<'_, '_>) -> Result<(), Need> {
 	h.save(&mut ctx.k.root, ctx.cx.store, ctx.vp);
 	super::zfc::stack_save(&stack, &mut ctx.k.root, ctx.cx.store, ctx.vp);
 	for m in r.msgs {
-		ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
-			msg: m.to_str_lossy().into_owned().into(),
-		});
+		ctx.diag(Diag::Usage { msg: m.to_str_lossy().into_owned().into() });
 	}
 	Ok(())
 }

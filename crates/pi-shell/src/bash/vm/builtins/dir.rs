@@ -67,7 +67,7 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	};
 	if o.rest.len() > 1 {
 		// bash's `EX_USAGE`.
-		ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::TooManyArgs { cmd: "cd".into() });
+		ctx.diag(Diag::TooManyArgs { cmd: "cd".into() });
 		return done(2);
 	}
 	let mut print = false;
@@ -145,9 +145,7 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 					let attrs = state::lookup_declared(&ctx.k.root, ctx.cx.store, ctx.vp, name)?
 						.map_or(default, |v| v.attrs.without(Attrs::INVISIBLE));
 					if attrs.contains(Attrs::READONLY) {
-						ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Readonly {
-							name: name.into(),
-						});
+						ctx.diag(Diag::Readonly { name: name.into() });
 						status = 1;
 					} else {
 						ctx.set_var(name, Some(Var::scalar(value, attrs)), Level::Dynamic);

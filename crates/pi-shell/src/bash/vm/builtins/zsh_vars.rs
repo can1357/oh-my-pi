@@ -229,7 +229,7 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: Func) -> 
 			match r {
 				Ok(n) => matched += n,
 				Err(d) => {
-					ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+					ctx.diag(d);
 					returnval = 1;
 				},
 			}
@@ -279,7 +279,7 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: Func) -> 
 			},
 			Ok(_) => {},
 			Err(d) => {
-				ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+				ctx.diag(d);
 				errflag = true;
 			},
 		}
@@ -374,7 +374,7 @@ pub fn let_(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		match zx(ctx, |ex| arith::matheval(ex, &text))? {
 			Ok(v) => val = v,
 			Err(d) => {
-				ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+				ctx.diag(d);
 				val = Number::Int(0);
 			},
 		}
@@ -531,9 +531,7 @@ pub fn getopts(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				result = Some((b"?".into(), Some(optbuf)));
 			} else {
 				let sign = if s[0] == b'+' { '+' } else { '-' };
-				ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Usage {
-					msg: format!("bad option: {sign}{}", char::from(opch)).into(),
-				});
+				ctx.diag(Diag::Usage { msg: format!("bad option: {sign}{}", char::from(opch)).into() });
 				result = Some((b"?".into(), Some(BString::default())));
 			}
 			break 'run 0;
@@ -552,7 +550,7 @@ pub fn getopts(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 						result = Some((b":".into(), Some(optbuf)));
 					} else {
 						let sign = if s[0] == b'+' { '+' } else { '-' };
-						ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Usage {
+						ctx.diag(Diag::Usage {
 							msg: format!("argument expected after {sign}{} option", char::from(opch))
 								.into(),
 						});
@@ -1089,7 +1087,7 @@ pub fn read(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 		Ok(())
 	})?;
 	if let Err(d) = r {
-		ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+		ctx.diag(d);
 		return done(1);
 	}
 	if let Some(z) = &zbuf {

@@ -56,7 +56,7 @@ pub mod store;
 pub mod term;
 mod text;
 pub mod trace;
-pub(crate) mod vm;
+mod vm;
 pub mod zshopt;
 
 pub mod pattern;
@@ -65,6 +65,9 @@ pub mod syntax;
 /// zsh/newuser's startup check: the `newuser` scripts an interactive zsh
 /// sources after `/etc/zshenv` when the user has no startup files.
 pub use crate::bash::vm::newuser_startup_scripts;
+/// bash's `check_binary_file`: shared by every place the shell decides that a
+/// file it was handed is a binary rather than a script.
+pub(crate) use crate::bash::vm::{BinaryCheck, looks_binary};
 pub use crate::bash::{
 	diag::Diag,
 	engine::{Engine, EngineConfig},

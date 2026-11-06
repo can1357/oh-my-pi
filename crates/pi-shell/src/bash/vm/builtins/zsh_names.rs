@@ -170,7 +170,7 @@ fn print_alias(
 	} else {
 		if flags & LIST != 0 {
 			if a.name.contains(&b'=') {
-				ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
+				ctx.diag(Diag::Usage {
 					msg: format!(
 						"invalid alias '{}' encountered while printing aliases",
 						a.name.as_bstr()
@@ -253,9 +253,7 @@ pub fn alias(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	}
 	for arg in args {
 		if arg.first() == Some(&b'=') {
-			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
-				msg: "bad assignment".into(),
-			});
+			ctx.diag(Diag::Usage { msg: "bad assignment".into() });
 			return done(1);
 		}
 		match arg.find_byte(b'=') {
@@ -564,10 +562,7 @@ fn print_dir(
 fn hash_dirs(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	if ops.isset(b'r') || ops.isset(b'f') {
 		if !args.is_empty() {
-			ctx.diag(
-				crate::bash::diag::Producer::BuiltinError,
-				Diag::Usage { msg: "too many arguments".into() }.by("hash"),
-			);
+			ctx.diag(Diag::Usage { msg: "too many arguments".into() }.by("hash"));
 			return done(1);
 		}
 		if ops.isset(b'r') {
@@ -661,10 +656,7 @@ pub fn hash(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 	}
 	if ops.isset(b'r') || ops.isset(b'f') {
 		if !args.is_empty() {
-			ctx.diag(
-				crate::bash::diag::Producer::BuiltinError,
-				Diag::Usage { msg: "too many arguments".into() }.by("hash"),
-			);
+			ctx.diag(Diag::Usage { msg: "too many arguments".into() }.by("hash"));
 			return done(1);
 		}
 		if ops.isset(b'r') {
@@ -675,7 +667,7 @@ pub fn hash(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 			ctx.store_record(KeyBuf::Misc(MiscKey::ZshPathChecked), None);
 		} else if let Err(d) = zx(ctx, crate::bash::vm::zsh::specials::fill_cmdnamtab)? {
 			// `-f`: zsh `fillcmdnamtable`.
-			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+			ctx.diag(d);
 			return done(1);
 		}
 		return done(0);
@@ -1037,9 +1029,7 @@ pub fn functions(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], _func: Func
 	}
 	for a in args {
 		if ops.isset(b'w') {
-			ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Unsupported {
-				what: "autoload -w (word code files)".into(),
-			});
+			ctx.diag(Diag::Unsupported { what: "autoload -w (word code files)".into() });
 			returnval = 1;
 		} else if let Some(r) = ctx.function(a)? {
 			if flagged == Attrs::NONE {
@@ -1186,7 +1176,7 @@ fn check_autoload(ctx: &mut Ctx<'_, '_>, ops: &Ops, name: &[u8]) -> Result<i32, 
 	let fpath = crate::bash::vm::command::fpath_dirs(fpath.as_ref().map(|s| s.as_slice()));
 	let cwd = ctx.vp.cwd.clone();
 	let not_found = |ctx: &mut Ctx<'_, '_>| {
-		ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
+		ctx.diag(Diag::Usage {
 			msg: format!("{}: function definition file not found", BStr::new(name)).into(),
 		});
 	};
@@ -1278,14 +1268,11 @@ fn load_stub(
 	let (dir, text) = match found {
 		Ok(found) => found,
 		Err(crate::bash::vm::command::FpFound::Dump(dump)) => {
-			ctx.diag(
-				crate::bash::diag::Producer::BuiltinError,
-				super::zsh_zcompile::word_code_only(&dump),
-			);
+			ctx.diag(super::zsh_zcompile::word_code_only(&dump));
 			return Ok(false);
 		},
 		Err(_) => {
-			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage {
+			ctx.diag(Diag::Usage {
 				msg: format!("{}: function definition file not found", BStr::new(name)).into(),
 			});
 			return Ok(false);
@@ -1294,7 +1281,7 @@ fn load_stub(
 	if ksh {
 		let what =
 			format!("loading the ksh-style autoload function {} without running it", BStr::new(name));
-		ctx.diag(crate::bash::diag::Producer::BuiltinError, Diag::Unsupported { what: what.into() });
+		ctx.diag(Diag::Unsupported { what: what.into() });
 		return Ok(false);
 	}
 	let def =
@@ -1340,14 +1327,7 @@ fn autoload_x(ctx: &mut Ctx<'_, '_>, args: &[BString], on: Attrs) -> R {
 	// zsh `bin_eval` of `NAME "$@"`.
 	let mut src = crate::bash::vm::quote::sh_single_quote(&name);
 	src.extend_from_slice(b" \"$@\"\n");
-	crate::bash::vm::exec::push_script(
-		crate::bash::vm::exec::eval_input(ctx.k, ctx.vp),
-		ctx.k,
-		ctx.vp,
-		&src,
-		1,
-		crate::bash::vm::proc::ScriptKind::Eval,
-	);
+	crate::bash::vm::exec::push_script(ctx.vp, &src, 1, crate::bash::vm::proc::ScriptKind::Eval);
 	Ok(super::Outcome { status: 0, control: super::Control::Frame })
 }
 

@@ -237,8 +237,6 @@ impl ShellApi<'_, '_> {
 
 	/// Print `name: line N: tool: msg` on the calling vproc's stderr (before
 	/// its next command) and emit a `Diag` event.
-	/// Supplies `Producer::ErrorProlog`, mirroring Bash's `error_prolog`
-	/// for an error reported by an external command implementation.
 	pub fn diag(&mut self, msg: &BStr) {
 		let vp = &mut self.shell.procs[self.vp];
 		let call = self.call;
@@ -263,10 +261,7 @@ impl ShellApi<'_, '_> {
 		self
 			.shell
 			.k
-			.diag(self.cx, vp, line, crate::bash::diag::Producer::ErrorProlog, Diag::Tool {
-				tool,
-				msg: msg.into(),
-			});
+			.diag(self.cx, vp, line, Diag::Tool { tool, msg: msg.into() });
 	}
 
 	/// Emit a host-defined event in the shell's event stream.

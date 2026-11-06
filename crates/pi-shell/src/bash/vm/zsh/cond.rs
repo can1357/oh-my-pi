@@ -138,13 +138,11 @@ enum Res {
 
 /// zsh `zwarnnam(fromtest, …)`: under the builtin's name for `test`/`[`,
 /// bare for `[[ ]]`.
-/// `test` supplies `BuiltinError` (`builtin_error_prolog`); `[[ ]]`
-/// supplies `ErrorProlog` (`error_prolog`). Zsh renders its own prolog.
 fn warn(ctx: &mut Ctx<'_, '_>, fromtest: bool, d: Diag) {
 	if fromtest {
 		ctx.err(d);
 	} else {
-		ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+		ctx.diag(d);
 	}
 }
 
@@ -275,7 +273,7 @@ fn module_cond(
 			if let Err(d) =
 				with_ex(ctx, |ex| zsh_module::ensure_feature_ex(ex, module, b'C', feature))?
 			{
-				ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+				ctx.diag(d);
 			}
 			let mut name = b"-".to_vec();
 			name.extend_from_slice(feature);
@@ -830,7 +828,7 @@ fn eval_primary(
 			},
 			Ok(Res::Zerr(d)) => {
 				report(k, cx, vp, line, chunks);
-				k.diag(cx, vp, line, crate::bash::diag::Producer::ErrorProlog, d);
+				k.diag(cx, vp, line, d);
 				return Flow::Discard(1);
 			},
 			Err(Need::Probe(p)) => match probe::perform(k, cx, vp, &mut sc, &p) {
@@ -877,7 +875,7 @@ fn eval_primary(
 fn report(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, chunks: Vec<Chunk>) {
 	for chunk in chunks {
 		match chunk {
-			Chunk::Diag(d, producer) => k.diag(cx, vp, line, producer, d),
+			Chunk::Diag(d) => k.diag(cx, vp, line, d),
 			Chunk::Out(fd, bytes) => {
 				vp.out
 					.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
@@ -1183,7 +1181,7 @@ pub fn test(ctx: &mut Ctx<'_, '_>, args: &[BString], bracket: bool) -> R {
 	let node = match p.cond() {
 		Ok(n) if p.tok != Tok::LexErr => n,
 		Err(Perr::Cond(msg)) => {
-			ctx.diag(crate::bash::diag::Producer::ErrorProlog, Diag::Usage { msg: msg.into() });
+			ctx.diag(Diag::Usage { msg: msg.into() });
 			return done(2);
 		},
 		_ => {
@@ -1203,7 +1201,7 @@ pub fn test(ctx: &mut Ctx<'_, '_>, args: &[BString], bracket: bool) -> R {
 	match evalcond(ctx, &node)? {
 		Res::St(s) => done(if s < 2 && sense { 1 - s } else { s }),
 		Res::Zerr(d) => {
-			ctx.diag(crate::bash::diag::Producer::ErrorProlog, d);
+			ctx.diag(d);
 			Ok(Outcome { status: 1, control: crate::bash::vm::builtins::Control::DiscardAll })
 		},
 	}
