@@ -84,22 +84,36 @@ parked→WORKING, aborted→CANCELED/FAILED. Убитые советники (ad
 Статусы транслируются: карточка каждого терминала содержит его живых агентов,
 так что «кто чем занят» видно через `GetTask`/карточку в любой момент.
 
-## 2. chrome-mcp — браузер в вашем реальном Chrome
+## 2. Браузер в вашем реальном Chrome (browser relay)
 
-При старте omp проверяет bridge на `127.0.0.1:12306` (расширение Chrome +
-`~/.local/share/mcp-chrome-bridge`). Если жив — 81 инструмент `chrome_*`:
-навигация, клики, чтение страниц, вкладки — в Chrome с вашими логинами и
-расширениями. Встроенный тул `browser` остаётся как изолированный fallback
-(headless-автоматизация). Настройки: `browser.chromeMcp` (default on);
-выключение: `disabledServers: ["chrome"]` или `browser.chromeMcp: false`.
+`browser.relay: true` — встроенный тул `browser` (eval) водит вкладки вашего
+реального Chrome (с логинами и расширениями) через relay-расширение:
 
-Транспорт: современная ревизия MCP 2026-07-28 (streamable-http, `/mcp-new`)
-с автоматическим откатом на 2025-06-18. Проверка bridge:
 ```bash
-curl -sS -X POST http://127.0.0.1:12306/mcp-new -H 'Content-Type: application/json' \
-  -H 'Mcp-Method: tools/list' -H 'Mcp-Protocol-Version: 2026-07-28' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}'
+bun packages/coding-agent/dist/omp browser-relay install   # запишет extension в ~/.omp/browser-relay/extension
+omp config set browser.relay true
+# затем руками: chrome://extensions → Developer mode → Load unpacked →
+#   ~/.omp/browser-relay/extension  (badge «on» = подключено к relay :9224)
 ```
+
+Relay-сервер (:9224, CDP-прокси) поднимается omp автоматически при первом
+`browser.open`. Расширение — тонкий прокси: `attach`/`detach`/`send` (любая
+CDP-команда) + tab-менеджмент, вся логика инструментов (observe, screenshots,
+cookies, route/HAR, record mp4/webm, pdf, dialogs, vitals, react*) живёт в
+харнессе поверх Puppeteer. Обход без расширения — managed-режим:
+`app: {path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"}`.
+
+**Грабли версий**: relay-сервер, extension и харнесс omp обязаны совпадать
+(проверка семвера в обе стороны: «relay out of date» / «extension is out of
+date»). На этой машине два omp — глобальный 18.10.1 (харнесс терминалов) и
+форк 18.16.0 (alias `omp`); extension ставить бинарником того omp, что гоняет
+ваши сессии. Расширение не умеет обновляться само при загрузке из копии —
+авто-update только у установленного в `~/.omp` (файл stamp'ится версией).
+
+История: до 2026-11-06 использовался chrome-mcp bridge (mcp-chrome-2026, 84
+инструмента `chrome_*`, native messaging :12306) — удалён с рабочей машины
+(759M+1G); `browser.chromeMcp` (default on) остаётся в форке для автодискавери
+сторонних bridge'ей, но у нас моста нет и настройка ни на что не влияет.
 
 ## 3. Защита обмена между агентами (ingress-guard IrcBus)
 
@@ -177,7 +191,8 @@ export default function (pi) {
 |---|---|---|
 | `a2a.enabled` / `--a2a-port` | off / 7391 | A2A-мост (только 127.0.0.1) |
 | `a2a.clientTimeoutMs` | 0 (без лимита) | таймаут клиентских спавнов |
-| `browser.chromeMcp` | on | автодискавери chrome-mcp bridge |
+| `browser.relay` | off | браузер в вашем Chrome через relay-расширение (:9224) |
+| `browser.chromeMcp` | on | автодискавери chrome-mcp bridge (см. историю в §2) |
 | `irc.ingressGuard` | on | гард сообщений agent:// |
 | `irc.rateLimitTokens` | 30 | rate per-sender за 500 мс |
 | `irc.dedupWindowMs` | 30000 | окно дедупликации |
@@ -199,7 +214,7 @@ export default function (pi) {
 | Область | upstream | форк |
 |---|---|---|
 | Кросс-терминальный обмен агентами | нет | A2A-мост (сервер+клиент) |
-| Браузер по умолчанию | изолированный Chrome for Testing | ваш Chrome (chrome-mcp) |
+| Браузер по умолчанию | изолированный Chrome for Testing | ваш Chrome (browser relay; chrome-mcp автодискавери остаётся) |
 | Anti-flood в IrcBus | нет | rate/dedup/hops/backpressure |
 | Перегруз спавнами | тихая очередь | опциональный refuse с числами |
 | Токен-бюджет | нет (только requests) | `<total_tokens>` в контексте |
