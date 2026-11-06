@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>🞄 Fork: <a href="README-EN.md">agent networking (A2A)</a> · <a href="README-EN.md">chrome-mcp base browser</a> · <a href="README-EN.md">workflow VM</a> · <a href="README-RU.md">Русская версия</a></strong>
+  <strong>Fork additions:</strong> cross-terminal A2A agent network · chrome-mcp as the base browser · deterministic workflow VM · agent-ingress guards — <a href="README-EN.md">what's new</a> · <a href="README-RU.md">RU</a>
 </p>
 
 <p align="center">
