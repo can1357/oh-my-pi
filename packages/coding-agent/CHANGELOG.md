@@ -40,8 +40,7 @@
 - `models.yml` accepts `tokenizer: cl100k` on a custom model or override ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 - Claude no longer receives the reasoning kept in a snapcompact archive whose summary an extension wrote without the reasoning legend, with or without image input, and reads that summary's own words instead of a generic one ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `~/.omp/agent/agent.db` getting corrupted (wiping stored logins) on Linux when grep, `read`, the bash tool, extensions or eval read it while omp has it open; `write` and `tts` now refuse to overwrite a database omp holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
-- The end of a model turn now forces a full viewport repaint and re-syncs the viewport anchor against the real terminal grid (tagged DSR probe where the terminal supports it), so streamed content that folded over earlier messages is restored at every yield instead of only when the ledger happens to change.
-- Superseded and still-settling turn yields also re-sync the anchor, so the next turn starts from a truthful grid.
+- The end of a model turn now forces a full viewport repaint, so streamed content that folded over earlier messages is redrawn at the yield instead of only when the ledger happens to change ([#17996](https://github.com/can1357/oh-my-pi/pull/17996) by [@ReKon64](https://github.com/ReKon64)).
 
 ## [18.15.0] - 2026-11-01
 
