@@ -613,16 +613,22 @@ describe("Python runner request dispatch", () => {
 				if (frame.type === "stdout" && frame.id === "hold" && frame.data?.includes("holding")) break;
 			}
 
-			// While `hold` occupies the main thread, `aborted` stays queued in
-			// `queue` and is not yet in `_STATE.executing_tasks` when the reader
-			// thread processes its `interrupt` request and then `release`.
+			// A late interrupt for an already-settled cell (`setup`) must be
+			// ignored instead of sticking in `_STATE.interrupt_ids`.
+			runner.send({ id: "setup", type: "interrupt" });
+
+			// While `hold` occupies the main thread, `aborted` and `setup-err`
+			// stay queued in `queue` without a running task when the reader
+			// thread processes their `interrupt` requests and then `release`.
 			runner.send({ id: "aborted", code: "seed = 0" });
 			runner.send({ id: "aborted", type: "interrupt" });
+			runner.send({ id: "setup-err", code: "seed = 0", cwd: "/nonexistent/omp-setup-err" });
+			runner.send({ id: "setup-err", type: "interrupt" });
 			runner.send({ id: "release", type: "tool", op: "call", name: "release", args: {} });
 
 			const errors: RunnerFrame[] = [];
 			const dones = new Map<string, RunnerFrame>();
-			while (dones.size < 3) {
+			while (dones.size < 4) {
 				const frame = await runner.nextFrame();
 				if (frame.type === "error" && frame.id === "aborted") {
 					errors.push(frame);
@@ -630,7 +636,10 @@ describe("Python runner request dispatch", () => {
 				if (
 					frame.type === "done" &&
 					frame.id &&
-					(frame.id === "hold" || frame.id === "aborted" || frame.id === "release")
+					(frame.id === "hold" ||
+						frame.id === "aborted" ||
+						frame.id === "setup-err" ||
+						frame.id === "release")
 				) {
 					dones.set(frame.id, frame);
 				}
@@ -651,8 +660,23 @@ describe("Python runner request dispatch", () => {
 				status: "error",
 				cancelled: true,
 			});
+			expect(dones.get("setup-err")).toMatchObject({
+				type: "done",
+				id: "setup-err",
+				status: "error",
+				cancelled: false,
+			});
 
-			runner.send({ id: "verify", code: "assert seed == 41" });
+			// Neither the late interrupt for `setup` nor the early-return
+			// setup-error cell may leave its id in `_STATE.interrupt_ids`.
+			runner.send({ id: "setup", code: "seed += 1" });
+			const [reusedSetup] = await collectDoneOrder(runner, new Set(["setup"]));
+			expect(reusedSetup).toMatchObject({ type: "done", id: "setup", status: "ok", cancelled: false });
+
+			runner.send({ id: "setup-err", code: "seed += 2" });
+			const [reusedSetupErr] = await collectDoneOrder(runner, new Set(["setup-err"]));
+			expect(reusedSetupErr).toMatchObject({ type: "done", id: "setup-err", status: "ok", cancelled: false });
+			runner.send({ id: "verify", code: "assert seed == 44" });
 			const [verify] = await collectDoneOrder(runner, new Set(["verify"]));
 			expect(verify.status).toBe("ok");
 		} finally {
