@@ -46,6 +46,7 @@ import {
 	listSessionSummaries,
 	TRACE_ETAG_VERSION,
 	type TraceFingerprint,
+	traceEtagForFingerprint,
 	traceFingerprintForEtag,
 	TracePathError,
 } from "./trace";
@@ -368,7 +369,7 @@ export async function handleApi(req: Request): Promise<Response> {
 			if (clientEtag) {
 				fingerprint = await traceFingerprintForEtag(file);
 				if (fingerprint !== undefined) {
-					const etag = `"${TRACE_ETAG_VERSION}:${fingerprint.rootMtimeMs}:${fingerprint.childFingerprint}"`;
+					const etag = `"${TRACE_ETAG_VERSION}:${traceEtagForFingerprint(fingerprint)}"`;
 					if (clientEtag === etag) return new Response(null, { status: 304 });
 				}
 			}
