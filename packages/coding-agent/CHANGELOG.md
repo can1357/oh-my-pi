@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Starting omp with a prompt (`omp "…"` or `--goal`) reports `working` from the first frame instead of `idle`, so OSC 7501 supervisors such as `hc wait` no longer treat the session as finished before the prompt runs
+- Starting omp with a prompt (`omp "…"` or `--goal`) reports `working` from the first frame instead of `idle`, so OSC 7501 supervisors such as `hc wait` no longer treat the session as finished before the prompt runs ([#18270](https://github.com/can1357/oh-my-pi/pull/18270) by [@matteoantoci](https://github.com/matteoantoci))
 
 ## [18.17.0] - 2026-11-06
 
