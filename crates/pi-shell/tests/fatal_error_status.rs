@@ -4,7 +4,11 @@
 //! `-c` string (they agree on all of them), run here through `Shell::run`.
 #![cfg(unix)]
 
-use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
+use pi_shell::{
+	Shell, ShellRunOptions,
+	cancel::CancelToken,
+	testkit::{Fault, FakeHost, run_script},
+};
 
 /// Run `script` (its diagnostics discarded) in a fresh shell: its output and
 /// exit status.
@@ -673,4 +677,26 @@ async fn round_eight_rows() {
 		(r##"declare -i I=bad!; echo O:AFTER:$?"##, "", 1),
 	])
 	.await;
+}
+
+/// The ERR-trap sample a command takes at its start (bash's
+/// `was_error_trap`, [`pi_shell::bash::vm::proc::Frame::err_trap_armed`])
+/// is per-frame state, so it must survive a snapshot: a shell suspended
+/// while a command is parked, imaged, dropped and restored must still run
+/// the ERR trap for that command. The oracle is the same script without a
+/// snapshot, and Bash 5.2.21 and 5.3.0, which both exit 23.
+#[test]
+fn a_parked_commands_err_trap_sample_survives_a_snapshot() {
+	let src = b"f(){ for i in 1 2 3; do :; done; return 1; }; trap 'exit 23' ERR; f";
+	let base = run_script(FakeHost::new(), src, &[], Fault::None);
+	assert_eq!((base.status, base.stdout.as_slice(), base.stderr.as_slice()), (23, &b""[..], &b""[..]));
+	for every in [1_u32, 3, 7] {
+		let hit = run_script(FakeHost::new(), src, &[], Fault::Snapshot { every });
+		assert!(hit.snapshots > 0, "no snapshot landed at every={every}");
+		assert_eq!(
+			(hit.status, hit.stdout.as_slice(), hit.stderr.as_slice()),
+			(base.status, base.stdout.as_slice(), base.stderr.as_slice()),
+			"snapshot every {every} ops changed the answer"
+		);
+	}
 }
