@@ -1372,15 +1372,19 @@ async function resolveMemoryModel(options: {
 	fallbackRole: string;
 }): Promise<Model | undefined> {
 	const { modelRegistry, session, fallbackRole } = options;
+	const available = modelRegistry.getAvailable();
 	const requestedModel = session.settings.getModelRole(fallbackRole) || session.settings.getModelRole("default");
 	if (requestedModel) {
-		const resolved = resolveModelRoleValue(requestedModel, modelRegistry.getAll(), {
+		const resolved = resolveModelRoleValue(requestedModel, available, {
 			settings: session.settings,
 			matchPreferences: getModelMatchPreferences(session.settings),
 		});
 		if (resolved.model) return resolved.model;
 	}
-	return session.model ?? modelRegistry.getAll()[0];
+	return (
+		available.find(model => model.provider === session.model?.provider && model.id === session.model.id) ??
+		available[0]
+	);
 }
 
 function loadMemoryConfig(settings: Settings): MemoryRuntimeConfig {

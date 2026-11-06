@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
@@ -43,7 +44,14 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { resolveSubagentRetryFallbackCandidates } from "@oh-my-pi/pi-coding-agent/task/executor";
+import {
+	coolDownExhaustedProvider,
+	isProviderExhausted,
+	providerExhaustionRecord,
+	probeUnavailableProviders,
+} from "@oh-my-pi/pi-coding-agent/session/provider-exhaustion";
+import { getProviderCooldownsPath, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
@@ -315,11 +323,14 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	afterAll(() => {
+		fs.rmSync(getProviderCooldownsPath(), { force: true });
 		authStorage.close();
 		tempDir.removeSync();
 	});
 
 	beforeEach(() => {
+		// Provider exhaustion cooldowns persist on disk; never let one test's ban reach the next.
+		fs.rmSync(getProviderCooldownsPath(), { force: true });
 		// Reset to the shared registry (a few tests reassign it to a scoped
 		// instance) and clear cooldown suppressions left by fallback-path tests
 		// (default 5-minute suppression) so state never leaks between tests.
@@ -457,13 +468,9 @@ describe("AgentSession retry fallback", () => {
 		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
 		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
 
-		let primaryCredential = false;
-		const getApiKey = modelRegistry.getApiKey.bind(modelRegistry);
-		vi.spyOn(modelRegistry, "getApiKey").mockImplementation((model, ...rest) =>
-			model.provider === primaryModel.provider && !primaryCredential
-				? Promise.resolve(undefined)
-				: getApiKey(model, ...rest),
-		);
+		const recoveryAuth = await AuthStorage.create(":memory:");
+		await recoveryAuth.credentials.set(fallbackModel.provider, { type: "api_key", key: "fallback-key" });
+		modelRegistry = new ModelRegistry(recoveryAuth, path.join(tempDir.path(), "recovery-models.yml"));
 
 		const requestedModels: string[] = [];
 		const mock = createMockModel();
@@ -496,11 +503,13 @@ describe("AgentSession retry fallback", () => {
 				from: primarySelector,
 				to: fallbackSelector,
 				role: "anthropic/*",
-				reason: "no credential for anthropic",
+				reason: "provider unavailable (auth)",
 			},
 		]);
 
-		primaryCredential = true;
+		session.addDisposer(() => recoveryAuth.close());
+		await recoveryAuth.credentials.set(primaryModel.provider, { type: "api_key", key: "replacement-key" });
+		await modelRegistry.runAvailabilityProbes();
 		await session.prompt("Work after the primary logs back in");
 		await session.waitForIdle();
 		expect(requestedModels).toEqual([fallbackSelector, primarySelector]);
@@ -9204,5 +9213,335 @@ describe("AgentSession retry fallback", () => {
 
 		expect(requestedModels).toContain("openrouter/z-ai/glm-4.7@chutes");
 		expect(getLastAssistantMessage(session).stopReason).not.toBe("error");
+	});
+	it.each([false, true])(
+		"routes stop-continuation away from a billing-cooled fallback (all cooling: %s)",
+		async allCooling => {
+			const primary = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const fallback = getBundledModel("openai", "gpt-4o-mini")!;
+			const primarySelector = `${primary.provider}/${primary.id}`;
+			const fallbackSelector = `${fallback.provider}/${fallback.id}`;
+			const requests: string[] = [];
+			const recoveryAuth = await AuthStorage.create(":memory:");
+			await recoveryAuth.credentials.set(fallback.provider, { type: "api_key", key: "fallback-key" });
+			modelRegistry = new ModelRegistry(recoveryAuth, path.join(tempDir.path(), "recovery-models.yml"));
+			const mock = createMockModel();
+			const failure = await AIError.finalize(
+				Object.assign(
+					new Error(
+						"402 You have run out of credits or need a Grok subscription. (type=personal-team-blocked:spending-limit)",
+					),
+					{ status: 402 },
+				),
+				{ api: fallback.api, provider: fallback.provider, model: fallback.id },
+			);
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requests.push(`${model.provider}/${model.id}`);
+					if (model.provider === fallback.provider) {
+						return finalizedErrorStream(model, failure);
+					} else mock.push({ content: ["recovered"] });
+					return mock.stream(model, context, options);
+				},
+			});
+			vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.usageAwareFallback": false,
+				"retry.baseDelayMs": 1,
+				"retry.maxRetries": 1,
+				"retry.maxDelayMs": 10,
+				"retry.fallbackChains": { [primarySelector]: [fallbackSelector] },
+			});
+			settings.setModelRole("default", primarySelector);
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			await session.prompt("Run while primary is logged out");
+			await session.waitForIdle();
+			expect(requests).toEqual([fallbackSelector]);
+			expect(isProviderExhausted(fallback.provider)).toBe(true);
+			session.addDisposer(() => recoveryAuth.close());
+			await recoveryAuth.credentials.set(primary.provider, { type: "api_key", key: "replacement-key" });
+			await modelRegistry.runAvailabilityProbes();
+			const waits: number[] = [];
+			const statuses: AgentSessionEvent[] = [];
+			if (allCooling) {
+				let now = Date.now();
+				vi.spyOn(Date, "now").mockImplementation(() => now);
+				coolDownExhaustedProvider(primary.provider, { status: 429, code: "quota_exceeded", resetAt: now + 20_000 });
+				vi.spyOn(scheduler, "wait").mockImplementation(async delay => {
+					expect(requests).toEqual([fallbackSelector]);
+					waits.push(delay);
+					now += delay;
+				});
+				session.subscribe(event => {
+					if (event.type === "auto_retry_start") statuses.push(event);
+				});
+			}
+			await session.sendCustomMessage(
+				{ customType: "session-stop-continuation", content: "Continue", display: false },
+				{ triggerTurn: true },
+			);
+			await session.waitForIdle();
+			expect(requests).toEqual([fallbackSelector, primarySelector]);
+			if (allCooling) {
+				expect(waits.reduce((sum, delay) => sum + delay, 0)).toBe(20_000);
+				expect(statuses).toHaveLength(1);
+				expect(isProviderExhausted(fallback.provider)).toBe(true);
+			}
+		},
+	);
+	it("ends a blocked subagent as infrastructure before any model call", async () => {
+		const primary = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let calls = 0;
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				calls++;
+				return mock.stream(model, context, options);
+			},
+		});
+		coolDownExhaustedProvider(primary.provider, { status: 402 });
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			agentKind: "sub",
+			disableModelFallback: true,
+		});
+		await expect(session.prompt("Try unavailable provider")).rejects.toMatchObject({ failureKind: "infrastructure" });
+		expect(calls).toBe(0);
+	});
+	it.each([false, true])("waits for cold discovery metadata before dispatch (fallback: %s)", async recoverFallback => {
+		const primary = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const recovered = recoverFallback ? getBundledModel("openai", "gpt-4o")! : primary;
+		let ready = false;
+		let calls = 0;
+		const mock = createMockModel();
+		mock.push({ content: ["Recovered catalog"] });
+		vi.spyOn(modelRegistry, "getAll").mockImplementation(() => (ready ? [recovered] : []));
+		coolDownExhaustedProvider(primary.provider, { discoveryFailure: true });
+		if (recoverFallback) coolDownExhaustedProvider(recovered.provider, { discoveryFailure: true });
+		mockSchedulerWaitWithClock().mockImplementationOnce(async () => {
+			expect(calls).toBe(0);
+			expect(session?.model).toBeUndefined();
+			ready = true;
+			await probeUnavailableProviders(async () => ({ available: true }), { now: Date.now() + 300_000 });
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: undefined, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				expect(ready).toBe(true);
+				calls++;
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.fallbackChains": { default: [`${recovered.provider}/${recovered.id}`] },
+		});
+		settings.setModelRole("default", `${primary.provider}/${primary.id}`);
+		session = new AgentSession({
+			agent,
+			modelRegistry,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableModelFallback: !recoverFallback,
+		});
+		const { retryStartEvents } = trackRetryEvents(session);
+		await session.prompt("Continue when discovery recovers");
+		await session.waitForIdle();
+		expect(calls).toBe(1);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(session.model?.id).toBe(recovered.id);
+	});
+
+	it.each(["stored", "runtime"] as const)(
+		"waits for changed %s credentials on initial no-key setup without dispatching an unavailable model",
+		async source => {
+			const primary = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const recoveryAuth = await AuthStorage.create(":memory:");
+			modelRegistry = new ModelRegistry(recoveryAuth, path.join(tempDir.path(), "recovery-models.yml"));
+			let ready = false;
+			let calls = 0;
+			const mock = createMockModel();
+			mock.push({ content: ["Recovered after credential replacement"] });
+			vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async () => (ready ? "test-key" : undefined));
+			mockSchedulerWaitWithClock().mockImplementationOnce(async () => {
+				expect(calls).toBe(0);
+				expect(providerExhaustionRecord(primary.provider)).toMatchObject({ class: "auth", failedCallCount: 1 });
+				if (source === "stored") {
+					await modelRegistry.authStorage.credentials.set(primary.provider, {
+						type: "api_key",
+						key: "replacement-key",
+					});
+				} else {
+					modelRegistry.authStorage.keys.setRuntime(primary.provider, "replacement-key");
+				}
+				ready = true;
+				await modelRegistry.runAvailabilityProbes();
+			});
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					calls++;
+					return mock.stream(model, context, options);
+				},
+			});
+			session = new AgentSession({
+				agent,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				disableModelFallback: true,
+			});
+			session.addDisposer(() => recoveryAuth.close());
+			const { retryStartEvents } = trackRetryEvents(session);
+			await session.prompt("Continue after provider recovery");
+			await session.waitForIdle();
+			expect(calls).toBe(1);
+			expect(retryStartEvents).toHaveLength(1);
+			expect(providerExhaustionRecord(primary.provider)).toBeUndefined();
+		},
+	);
+
+	it.each([
+		{ status: 401, expectedClass: "auth" },
+		{ status: 404, expectedClass: "entitlement" },
+	])("records terminal $status availability with retries disabled", async ({ status, expectedClass }) => {
+		const primary = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		let calls = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: model => {
+				calls++;
+				return finalizedErrorStream(model, {
+					id: status,
+					status,
+					stopReason: "error",
+					message: "opaque provider failure",
+				});
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "retry.enabled": false, "compaction.enabled": false }),
+			modelRegistry,
+		});
+		await session.prompt("Record terminal infrastructure failure");
+		await session.waitForIdle();
+		expect(calls).toBe(1);
+		expect(providerExhaustionRecord(primary.provider)).toMatchObject({ class: expectedClass, failedCallCount: 1 });
+	});
+	it.each([
+		{ status: 402, message: "Insufficient Balance", exhausted: true },
+		{ status: 429, message: "429 rate limit", exhausted: false },
+		{ status: 500, message: "500 server error", exhausted: false },
+	])(
+		"shares provider cooldowns across worker chains only for exhaustion ($status)",
+		async ({ status, message, exhausted }) => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const nextModel = getBundledModel("openai", "gpt-4o-mini");
+			const laterModel = getBundledModel("google", "gemini-1.5-pro");
+			if (!primaryModel || !nextModel || !laterModel) throw new Error("Expected bundled test models to exist");
+
+			const requestedModels: string[] = [];
+			// Mock streams use their own identity, even when passed a different model.
+			const mock = createMockModel({ provider: nextModel.provider, id: nextModel.id });
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					if (model.provider === primaryModel.provider) {
+						return finalizedErrorStream(model, {
+							id: exhausted ? AIError.create(AIError.Flag.UsageLimit) : status,
+							status,
+							stopReason: "error",
+							message,
+						});
+					} else {
+						mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+			vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: false });
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 1,
+				"retry.maxRetries": 1,
+				"retry.fallbackChains": {
+					default: [`${nextModel.provider}/${nextModel.id}`, `${laterModel.provider}/${laterModel.id}`],
+				},
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+			await session.prompt("Fail over after a provider error");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([
+				`${primaryModel.provider}/${primaryModel.id}`,
+				`${nextModel.provider}/${nextModel.id}`,
+			]);
+			expect(isProviderExhausted(primaryModel.provider)).toBe(exhausted);
+			const workerTwoCandidates = resolveSubagentRetryFallbackCandidates(
+				[
+					`${primaryModel.provider}/${primaryModel.id}`,
+					`${nextModel.provider}/${nextModel.id}`,
+					`${laterModel.provider}/${laterModel.id}`,
+				],
+				modelRegistry,
+				settings,
+			);
+			expect(workerTwoCandidates.map(candidate => candidate.model.provider)).toEqual(
+				exhausted
+					? [nextModel.provider, laterModel.provider]
+					: [primaryModel.provider, nextModel.provider, laterModel.provider],
+			);
+			expect(isProviderExhausted(nextModel.provider)).toBe(false);
+		},
+	);
+	it("does not cool a provider while credential rotation still has a sibling account", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel) throw new Error("Expected bundled test model to exist");
+
+		let calls = 0;
+		const mock = createMockModel({ provider: primaryModel.provider });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				calls++;
+				if (calls === 1)
+					mock.push({ throw: Object.assign(new Error("402 Insufficient Balance"), { status: 402 }) });
+				else mock.push({ content: ["ok"] });
+				return mock.stream(model, context, options);
+			},
+		});
+		// The first account is spent but a sibling credential takes over.
+		vi.spyOn(modelRegistry.authStorage.limits, "markReached").mockResolvedValue({ switched: true });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.maxRetries": 2,
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+		await session.prompt("Rotate to the sibling account");
+		await session.waitForIdle();
+
+		expect(calls).toBe(2);
+		expect(isProviderExhausted(primaryModel.provider)).toBe(false);
 	});
 });
