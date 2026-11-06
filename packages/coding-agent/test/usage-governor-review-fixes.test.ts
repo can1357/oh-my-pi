@@ -234,7 +234,7 @@ for (const failure of ["usage", "policy"] as const) {
 			try {
 				const owner = { kind: "role", role: "task" } as const;
 				let active = x.source;
-				let selectedSiblingId: number | undefined;
+				const selection: { siblingId?: number } = {};
 				let retryScheduled = false;
 				const routing = {
 					refresh: x.routing.refresh.bind(x.routing),
@@ -256,11 +256,11 @@ for (const failure of ["usage", "policy"] as const) {
 						),
 					evaluate: async (requestedOwner: typeof owner, sessionId: string, signal?: AbortSignal) => {
 						const result = await x.routing.evaluate(requestedOwner, sessionId, signal);
-						if (!result || siblingState === "included" || selectedSiblingId === undefined) return result;
+						if (!result || siblingState === "included" || selection.siblingId === undefined) return result;
 						return {
 							...result,
 							accounts: result.accounts.map(account =>
-								account.credentialId === selectedSiblingId
+								account.credentialId === selection.siblingId
 									? { ...account, allowance: siblingState === "later" ? ("unknown" as const) : siblingState }
 									: account,
 							),
@@ -322,7 +322,7 @@ for (const failure of ["usage", "policy"] as const) {
 				const initial = await recovery.prepareGovernedModelCall(x.source, current, owner);
 				const first = typeof initial?.resolved === "object" ? initial.resolved?.credentialId : undefined;
 				expect(first).toBeDefined();
-				selectedSiblingId = first === x.failedId ? x.pinnedId : x.failedId;
+				selection.siblingId = first === x.failedId ? x.pinnedId : x.failedId;
 				const message = {
 					role: "assistant",
 					content: [],
@@ -354,7 +354,7 @@ for (const failure of ["usage", "policy"] as const) {
 					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
 					expect(
 						typeof prepared?.resolved === "object" && prepared.resolved?.usageRouteBinding?.credentialId,
-					).toBe(selectedSiblingId);
+					).toBe(selection.siblingId);
 				} else if (siblingState === "later") {
 					expect(active.id).toBe("later");
 					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
