@@ -4,7 +4,7 @@
 
 ### Added
 
-- Edit, append to, or reset workspace and global system prompts with `/system-prompt`.
+- Edit, append to, or reset workspace and global system prompts with `/system-prompt` ([#18300](https://github.com/can1357/oh-my-pi/pull/18300) by [@ChownYourLife](https://github.com/ChownYourLife))
 
 ### Fixed
 
