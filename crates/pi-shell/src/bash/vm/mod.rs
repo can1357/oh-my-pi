@@ -2242,9 +2242,9 @@ impl Shell {
 		}
 	}
 
-	/// A pipeline's public pid names its last stage, not the virtual shell
-	/// that waits for the stages. Peel only transparent wrappers: a shell
-	/// running commands of its own must still receive its own signal.
+	/// A pipeline's public pid names its last stage, not the engine's
+	/// waiting wrapper. `transparent` preserves script-written shells, even
+	/// when their last command is a pipeline.
 	fn process_recipient(&self, mut vpid: Vpid) -> Vpid {
 		while let Some(child) = self
 			.procs
@@ -2698,8 +2698,9 @@ fn interrupt_wait(p: &mut Vproc, status: i32) {
 /// Whether the vproc is its program, or only waits for children the signal
 /// also reaches. Bash's `exec_builtin` replaces the whole shell image, even
 /// inside a function; implicit last-command exec requires one subshell
-/// frame without an EXIT action. A pipeline wrapper is transparent only
-/// when the target also reaches its stages (`children`).
+/// frame without an EXIT action. Only engine-invented waiting wrappers
+/// are transparent to their children; a frame born from script parentheses
+/// (`subshell_line`) still owns its signal while waiting for a pipeline.
 fn transparent(p: &Vproc, children: bool) -> Option<bool> {
 	if p.frames.iter().any(|frame| {
 		frame.scratch.as_ref().is_some_and(|sc| {
@@ -2723,7 +2724,9 @@ fn transparent(p: &Vproc, children: bool) -> Option<bool> {
 			let exec = sc.exec.as_ref().is_some_and(|e| e.exec_as.is_some());
 			(exec || code_at(frame.pc + 1) == Some(ir::Opcode::SubExit)).then_some(true)
 		},
-		(_, ir::Opcode::Spawn) if children && !sc.children.is_empty() => {
+		(_, ir::Opcode::Spawn)
+			if children && frame.subshell_line.is_none() && !sc.children.is_empty() =>
+		{
 			let spawn = unit.spawns.get(op.a as usize)?;
 			let end = match (spawn.kind, code_at(spawn.end)) {
 				// `( … )`: its `Leave` follows.

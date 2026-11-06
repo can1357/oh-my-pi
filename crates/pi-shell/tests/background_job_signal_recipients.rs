@@ -188,3 +188,119 @@ until [ -s "$d/left-events" ] && [ -s "$d/right-events" ]; do /bin/sleep .01; do
 		mismatches.join("\n"),
 	);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn script_written_groupings_keep_their_shell_recipient() {
+	let scratch = tempfile::tempdir().unwrap();
+	let observer = compile_observer(scratch.path());
+	let none: &[(&str, u8)] = &[("left", 0), ("right", 0)];
+	let inner: &[(&str, u8)] = &[("left", 0), ("right", 0), ("inner", 0)];
+	let group: &[(&str, u8)] = &[("left", 1), ("right", 1)];
+	let stages: &[(&str, u8)] = &[("left", 1), ("right", 0), ("inner", 0)];
+	let pipeline = r#"( "$observer" "$d" left | "$observer" "$d" right ) &"#;
+	let last_stage =
+		r#""$observer" "$d" left | ( "$observer" "$d" right | "$observer" "$d" inner ) &"#;
+	let rows = [
+		(
+			"nested",
+			r#"( ( "$observer" "$d" left | "$observer" "$d" right ) ) &"#,
+			"\"$p\"",
+			false,
+			none,
+		),
+		(
+			"last-pipeline",
+			r#"( :; "$observer" "$d" left | "$observer" "$d" right ) &"#,
+			"\"$p\"",
+			false,
+			none,
+		),
+		("brace", r#"{ "$observer" "$d" left | "$observer" "$d" right; } &"#, "\"$p\"", false, none),
+		(
+			"coprocess",
+			r#"coproc RECIPIENT { "$observer" "$d" left | "$observer" "$d" right; }"#,
+			"\"$p\"",
+			false,
+			none,
+		),
+		(
+			"function",
+			r#"recipient() ( "$observer" "$d" left | "$observer" "$d" right ); recipient &"#,
+			"\"$p\"",
+			false,
+			none,
+		),
+		("last-stage-subshell", last_stage, "\"$p\"", false, inner),
+		("subshell-job", pipeline, "%1", false, none),
+		("subshell-group", pipeline, "%1", true, group),
+		("last-stage-job", last_stage, "%1", false, stages),
+	];
+	let mut mismatches = Vec::new();
+	for (name, start, target, monitor, roles) in rows {
+		let directory = tempfile::tempdir_in(scratch.path()).unwrap();
+		let args = [observer.to_str().unwrap(), directory.path().to_str().unwrap()]
+			.map(quote)
+			.join(" ");
+		let mode = if monitor { "-m" } else { "+m" };
+		let ready = roles
+			.iter()
+			.map(|(role, _)| format!("[ -s \"$d/{role}-ready\" ]"))
+			.collect::<Vec<_>>()
+			.join(" && ");
+		let events = roles
+			.iter()
+			.map(|(role, _)| format!("[ -s \"$d/{role}-events\" ]"))
+			.collect::<Vec<_>>()
+			.join(" && ");
+		let command = format!(
+			r#"set -- {args}
+exec 2>/dev/null
+set {mode}
+observer=$1
+d=$2
+{start}
+p=$!
+until {ready}; do /bin/sleep .01; done
+kill -32 {target}
+printf 'kill=%s\n' "$?"
+: > "$d/release"
+wait "$p"
+printf 'wait=%s\n' "$?"
+until {events}; do /bin/sleep .01; done
+"#,
+		);
+		let (tx, rx) = flume::unbounded::<String>();
+		let result = Shell::new(None)
+			.run(
+				ShellRunOptions { command, ..Default::default() },
+				Some(tx),
+				CancelToken::new(Some(10_000)),
+			)
+			.await
+			.expect("run script-written grouping recipients through PiHost");
+		let output: String = rx.drain().collect();
+		let mut errors = Vec::new();
+		if (result.exit_code, output.as_str()) != (Some(0), "kill=0\nwait=160\n") {
+			errors.push(format!(
+				"expected kill=0 wait=160, status={:?} output={output:?}",
+				result.exit_code
+			));
+		}
+		for (role, count) in roles {
+			let expected = format!("15=0 32={count} 33=0 34=0 wrong=0\n");
+			let actual = fs::read_to_string(directory.path().join(format!("{role}-events")));
+			if actual.as_ref().ok() != Some(&expected) {
+				errors.push(format!("{role}: expected {expected:?}, got {actual:?}"));
+			}
+		}
+		if !errors.is_empty() {
+			mismatches.push(format!("{name}: {}", errors.join("; ")));
+		}
+	}
+	assert!(
+		mismatches.is_empty(),
+		"{} of 9 script-written grouping rows differ from Bash:\n{}",
+		mismatches.len(),
+		mismatches.join("\n"),
+	);
+}

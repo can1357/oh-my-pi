@@ -232,8 +232,9 @@ pub(super) fn target(
 	{
 		return job_target(ctx, number, send);
 	}
-	// A job's (or `$!`'s) program OS pid names the job's vproc: the signal
-	// reaches the program through it, and the job's state follows.
+	// Preserve the selected vproc on the bus. The VM's shared recipient
+	// classification forwards engine-only wrappers, not script-written
+	// shells, and chooses the same scope for named and numeric signals.
 	let named = u32::try_from(pid)
 		.ok()
 		.filter(|&p| p > 0)

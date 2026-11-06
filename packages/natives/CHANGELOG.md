@@ -5,7 +5,7 @@
 ### Fixed
 
 - Fixed the bash tool's background functions that trap a signal: without job control `kill` no longer interrupts the command the job runs, so the trap runs and the job ends with its own status; pending traps run in signal order, and `kill -s EXIT` probes like `kill -0` ([#18108](https://github.com/can1357/oh-my-pi/pull/18108) by [@sjawhar](https://github.com/sjawhar))
-- Fixed signals sent to a pipeline's saved `$!` reaching no program, and job signals without job control reaching the program's descendants; session cancellation still reaches the whole group ([#18108](https://github.com/can1357/oh-my-pi/pull/18108) by [@sjawhar](https://github.com/sjawhar))
+- Fixed signals sent to a pipeline's saved `$!` reaching no program, and job signals without job control reaching the program's descendants; explicit subshells keep their own signals even when their last command is a pipeline, and session cancellation still reaches the whole group ([#18108](https://github.com/can1357/oh-my-pi/pull/18108) by [@sjawhar](https://github.com/sjawhar))
 ### Breaking Changes
 
 - Replaced visualization-only `parseShell()` with engine-owned `RunTrace.present()` and `ShellVisualization` APIs.
