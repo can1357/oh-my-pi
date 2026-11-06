@@ -89,6 +89,8 @@ export interface PendingRun {
 	 * cancellation into the still-running `runInProcessTab` body (issue #4499).
 	 */
 	closeAc?: AbortController;
+	/** A direct `tab.waitForDownload()` call: it holds the tab until a download finishes. */
+	waitsForDownload?: boolean;
 }
 
 interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
@@ -208,7 +210,7 @@ export interface AcquireTabOptions {
 export interface AcquireTabResult {
 	tab: TabSession;
 	created: boolean;
-	/** What the open recovered from before reusing the tab, for its result. */
+	/** What the open recovered from, for its result. */
 	note?: string;
 }
 
@@ -217,6 +219,8 @@ export interface RunInTabOptions {
 	timeoutMs: number;
 	signal?: AbortSignal;
 	session: ToolSession;
+	/** The call is a direct `tab.waitForDownload()`. */
+	waitsForDownload?: boolean;
 }
 
 export interface ReleaseTabOptions {
@@ -286,6 +290,15 @@ class RecoverableWorkerError extends ToolError {}
 class WorkerMessageError extends ToolError {}
 /** A worker `tab.goto` outlasted its budget; the page stays on what loaded. */
 class NavigationTimeoutError extends ToolError {}
+/** The relay detach interrupted a call, but the same page is usable on a replacement worker. */
+class DebuggerReattachedError extends ToolError {
+	constructor(
+		message: string,
+		readonly when: "during" | "before",
+	) {
+		super(message);
+	}
+}
 /** The page's renderer crashed; the run that reports it recycles the worker. */
 class RendererCrashedError extends ToolError {}
 /** Chrome ended the debugger attachment of a relay tab; the worker runs nothing more and the tab is re-adopted. */
@@ -476,7 +489,9 @@ async function acquireTabImpl(
 				}
 				const reuseSteps: string[] = [];
 				if (opts.viewport && browser.kind.kind !== "cmux" && browser.kind.kind !== "tern") {
-					const dsf = opts.viewport.deviceScaleFactor;
+					// Only a hidden headless tab has an emulated scale to fall back on; other windows keep their own (0).
+					const ownScale = browser.kind.kind === "headless" && browser.kind.headless ? undefined : 0;
+					const dsf = opts.viewport.deviceScaleFactor ?? ownScale;
 					reuseSteps.push(
 						`await page.setViewport({ width: ${opts.viewport.width}, height: ${opts.viewport.height}, deviceScaleFactor: ${dsf === undefined ? "undefined" : String(dsf)} });`,
 					);
@@ -486,7 +501,7 @@ async function acquireTabImpl(
 						`await tab.emulate({ viewport: ${JSON.stringify({ width: opts.viewport.width, height: opts.viewport.height, scale: opts.viewport.deviceScaleFactor })} });`,
 					);
 				}
-				const reuse = async (): Promise<void> => {
+				const reuse = async (): Promise<string | undefined> => {
 					if (reuseSteps.length) {
 						await runInTabWithSnapshot(
 							name,
@@ -498,11 +513,11 @@ async function acquireTabImpl(
 							{ cwd: getProjectDir() },
 						);
 					}
-					if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt);
+					if (opts.url) return await navigateOpenedTab(name, opts.url, opts, startedAt);
 				};
 				let note: string | undefined;
 				try {
-					await reuse();
+					note = await reuse();
 				} catch (error) {
 					// The tab's renderer had crashed: the failed step reloaded the page on a new worker, so the
 					// open goes on with it once. A tab closed by the crash, or a second crash, fails the open.
@@ -511,7 +526,8 @@ async function acquireTabImpl(
 					)
 						throw error;
 					note = RENDERER_RELOADED_NOTE;
-					await reuse();
+					const navigationNote = await reuse();
+					if (navigationNote) note += `\n${navigationNote}`;
 				}
 				// The user may have navigated or switched tabs since: the result reports where the page is now.
 				if (existing.backend === "tern") existing.info = await existing.ternTab.readyInfo();
@@ -638,17 +654,17 @@ async function acquireTabImpl(
 	// this process dies abnormally before its own teardown closes the tab.
 	const scope = sharedScopeOf(browser);
 	if (scope) void recordSharedTarget(scope, info.targetId);
-	if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt, tab);
-	return { tab, created: true };
+	const note = opts.url ? await navigateOpenedTab(name, opts.url, opts, startedAt, tab) : undefined;
+	return { tab, created: true, note };
 }
 
 /**
  * Navigate a tab for an open, within what is left of the open's budget. A
  * page that outlasts it fails with goto's own report while the tab stays on
  * what loaded, instead of losing to the open's bare deadline. A tab this open
- * created (`created`) is kept only for that timeout: a navigation that fails
- * outright, or an open cancelled or past its deadline, closes it again so the
- * failed open leaves nothing behind.
+ * created (`created`) is kept for that timeout or a successfully recovered relay
+ * detach: other navigation failures, or an open cancelled or past its deadline,
+ * close it again so the failed open leaves nothing behind.
  */
 async function navigateOpenedTab(
 	name: string,
@@ -656,7 +672,7 @@ async function navigateOpenedTab(
 	opts: AcquireTabOptions,
 	startedAt: number,
 	created?: WorkerTabSession,
-): Promise<void> {
+): Promise<string | undefined> {
 	const remainingMs = opts.timeoutMs - (performance.now() - startedAt);
 	const gotoMs = Math.max(1, Math.round(remainingMs - Math.min(OPEN_NAVIGATION_REPORT_MS, remainingMs / 2)));
 	try {
@@ -671,7 +687,14 @@ async function navigateOpenedTab(
 			{ cwd: getProjectDir() },
 		);
 	} catch (error) {
-		if (created && (opts.signal?.aborted || !(error instanceof NavigationTimeoutError))) {
+		if (error instanceof DebuggerReattachedError && error.when === "during" && !opts.signal?.aborted) {
+			return error.message;
+		}
+		if (
+			created &&
+			(opts.signal?.aborted ||
+				!(error instanceof NavigationTimeoutError || error instanceof DebuggerReattachedError))
+		) {
 			await rollBackCreatedTab(name, created);
 			throw error;
 		}
@@ -881,7 +904,13 @@ async function acquireTernTab(
 export async function runInTab(name: string, opts: RunInTabOptions): Promise<RunResultOk> {
 	const result = await runInTabWithSnapshot(
 		name,
-		{ code: opts.code, timeoutMs: opts.timeoutMs, signal: opts.signal, session: opts.session },
+		{
+			code: opts.code,
+			timeoutMs: opts.timeoutMs,
+			signal: opts.signal,
+			session: opts.session,
+			waitsForDownload: opts.waitsForDownload,
+		},
 		{
 			cwd: opts.session.cwd,
 			browserScreenshotDir: expandBrowserScreenshotDir(opts.session),
@@ -907,6 +936,7 @@ async function runInTabWithSnapshot(
 		session?: ToolSession;
 		/** This run follows a re-adoption that a detach before the previous attempt caused; it is not retried again. */
 		readopted?: boolean;
+		waitsForDownload?: boolean;
 	},
 	snapshot: SessionSnapshot,
 ): Promise<RunResultOk> {
@@ -932,8 +962,11 @@ async function runInTabWithSnapshot(
 		);
 	}
 	if (tab.pending.size > 0) {
+		const waitingForDownload = [...tab.pending.values()].some(run => run.waitsForDownload);
 		throw new ToolError(
-			`Tab ${JSON.stringify(name)} is busy: another call on this tab is still running. Await each call before starting the next instead of running them together (Promise.all, asyncio.gather), or group the steps in one tab.run(...)`,
+			waitingForDownload
+				? `Tab ${JSON.stringify(name)} is busy: tab.waitForDownload() holds the tab until a download finishes, so the step that starts the download cannot run beside it. Start the wait and that step in one run: await tab.run("const download = tab.waitForDownload(); await tab.click('#export'); return await download;")`
+				: `Tab ${JSON.stringify(name)} is busy: another call on this tab is still running. Await each call before starting the next instead of running them together (Promise.all, asyncio.gather), or group the steps in one tab.run(...)`,
 		);
 	}
 	// An already-aborted call never runs: without this early exit the worker
@@ -969,6 +1002,7 @@ async function runInTabWithSnapshot(
 		signal: opts.signal,
 		toolCalls: new Map(),
 		closeAc,
+		waitsForDownload: opts.waitsForDownload,
 	};
 	// Register BEFORE the unfreeze await below. Settle-freeze guards on
 	// `pending` (and undoes a transition already in flight when it observes
@@ -1137,15 +1171,17 @@ async function runInTabWithSnapshot(
 				if (opts.signal?.aborted) throw new ToolAbortError();
 				if (!reattached) throw new ToolError(lost);
 				if (error.when === "during" || opts.readopted) {
-					throw new ToolError(
+					throw new DebuggerReattachedError(
 						`${detached}. omp reattached to the same tab on a new worker without reloading it, so the next call works; check the page before repeating this one. ${WORKER_RESETS}.`,
+						error.when,
 					);
 				}
 				// Nothing ran: run the call on the new worker, within what the re-adoption left of its budget.
 				const remainingMs = Math.floor(opts.timeoutMs - (performance.now() - startedAt));
 				if (remainingMs <= 0) {
-					throw new ToolError(
+					throw new DebuggerReattachedError(
 						`${detached}. omp reattached to the same tab on a new worker without reloading it, but that used up this call's ${opts.timeoutMs}ms budget, so the call was not run again; repeat it. ${WORKER_RESETS}.`,
+						error.when,
 					);
 				}
 				// Its pending entry must go first, or the tab reads as busy.
@@ -1896,6 +1932,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		safeDir,
 		uploadDir,
 		page,
+		viewport: opts.viewport,
 		dialogs: opts.dialogs,
 		allowedDomains: opts.allowedDomains,
 		initScripts: opts.initScripts,

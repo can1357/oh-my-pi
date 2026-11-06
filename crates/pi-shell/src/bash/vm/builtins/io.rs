@@ -207,18 +207,34 @@ struct Ch {
 #[derive(Default)]
 struct Line {
 	bytes: Vec<u8>,
+	/// One entry per character once a character is multibyte or escaped;
+	/// until then (`!wide`) character `k` is byte `k`, unescaped.
 	chars: Vec<Ch>,
+	wide:  bool,
 }
 
 impl Line {
 	/// Number of characters.
 	const fn len(&self) -> usize {
-		self.chars.len()
+		if self.wide {
+			self.chars.len()
+		} else {
+			self.bytes.len()
+		}
 	}
 
 	/// Byte offset of character `k` (the end for `k == len`).
 	fn at(&self, k: usize) -> usize {
-		self.chars.get(k).map_or(self.bytes.len(), |c| c.at)
+		if self.wide {
+			self.chars.get(k).map_or(self.bytes.len(), |c| c.at)
+		} else {
+			k.min(self.bytes.len())
+		}
+	}
+
+	/// Whether a backslash escaped character `k`.
+	fn escaped(&self, k: usize) -> bool {
+		self.wide && self.chars[k].escaped
 	}
 
 	/// The bytes of character `k`.
@@ -237,9 +253,47 @@ impl Line {
 	}
 
 	fn push(&mut self, bytes: &[u8], escaped: bool) {
-		self.chars.push(Ch { at: self.bytes.len(), escaped });
+		if !self.wide && (bytes.len() != 1 || escaped) {
+			self.chars = (0..self.bytes.len())
+				.map(|at| Ch { at, escaped: false })
+				.collect();
+			self.wide = true;
+		}
+		if self.wide {
+			self.chars.push(Ch { at: self.bytes.len(), escaped });
+		}
 		self.bytes.extend_from_slice(bytes);
 	}
+
+	/// Characters of one unescaped byte each.
+	fn push_bytes(&mut self, run: &[u8]) {
+		if self.wide {
+			let at = self.bytes.len();
+			self
+				.chars
+				.extend((at..at + run.len()).map(|at| Ch { at, escaped: false }));
+		}
+		self.bytes.extend_from_slice(run);
+	}
+}
+
+/// The length of the run at the start of `data` that [`LineState::step`]
+/// would take byte by byte as characters of their own: no backslash
+/// (unless `raw`), delimiter or NUL, and each byte a whole character of `cs`.
+fn plain_len(data: &[u8], raw: bool, delim: Option<u8>, cs: Charset) -> usize {
+	let ascii_only = match cs {
+		Charset::Utf8 => true,
+		Charset::Bytes | Charset::Latin1 => false,
+		Charset::Encoding(enc) if enc.is_single_byte() => false,
+		// A stateful or multibyte charset may give an ASCII byte meaning.
+		Charset::Encoding(_) => return 0,
+	};
+	data
+		.iter()
+		.position(|&c| {
+			Some(c) == delim || c == 0 || (c == b'\\' && !raw) || (ascii_only && !c.is_ascii())
+		})
+		.unwrap_or(data.len())
 }
 
 /// bash's `read` loop over successive chunks of input: backslash
@@ -259,8 +313,17 @@ struct LineState {
 
 impl LineState {
 	/// Feed `data`; `true` when an unescaped delimiter ended the line.
-	fn feed(&mut self, data: &[u8], raw: bool, delim: Option<u8>, cs: Charset) -> bool {
-		for &c in data {
+	fn feed(&mut self, mut data: &[u8], raw: bool, delim: Option<u8>, cs: Charset) -> bool {
+		while let Some((&c, after)) = data.split_first() {
+			if self.mb.is_empty() && !self.pass_next {
+				let run = plain_len(data, raw, delim, cs);
+				if run > 0 {
+					self.line.push_bytes(&data[..run]);
+					data = &data[run..];
+					continue;
+				}
+			}
+			data = after;
 			if self.mb.is_empty() {
 				if self.step(c, raw, delim, cs) {
 					return true;
@@ -330,13 +393,13 @@ impl LineState {
 
 	/// Whether `n` whole characters were read.
 	const fn full(&self, n: usize) -> bool {
-		self.line.chars.len() >= n && self.mb.is_empty()
+		self.line.len() >= n && self.mb.is_empty()
 	}
 
 	/// Bytes to ask for next so no more than `n` characters are read.
 	const fn want(&self, n: usize) -> usize {
 		if self.mb.is_empty() {
-			n.saturating_sub(self.line.chars.len())
+			n.saturating_sub(self.line.len())
 		} else {
 			1
 		}
@@ -365,7 +428,7 @@ impl<'a> Ifs<'a> {
 
 	/// Whether character `k` of `m` is an unescaped `IFS` character.
 	fn sep(&self, m: &Line, k: usize) -> bool {
-		!m.chars[k].escaped && self.chars.contains(&m.char_bytes(k))
+		!m.escaped(k) && self.chars.contains(&m.char_bytes(k))
 	}
 
 	/// bash's `ifs_whitesep`: space, tab and newline with the default
@@ -392,6 +455,10 @@ fn spctabnl(m: &Line, k: usize) -> bool {
 /// newline in `IFS`, and after IFS whitespace one more non-whitespace IFS
 /// character with the whitespace around it).
 fn field(ifs: &Ifs<'_>, m: &Line, mut i: usize) -> (BString, usize) {
+	// `IFS=`: nothing separates (`IFS= read -r line`).
+	if ifs.chars.is_empty() {
+		return (m.text(i.min(m.len()), m.len()), m.len());
+	}
 	while i < m.len() && ifs.sep(m, i) && ifs.whitesep(m, i) {
 		i += 1;
 	}

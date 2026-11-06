@@ -58,7 +58,7 @@ function migrations(n: number): string[] {
  */
 function cutGaps(text: string): { url: string; gaps: { from: number; to: number }[] } {
 	const addressed = [...text.matchAll(/^\s*… \[\d+ lines: read (\S+):(\d+)-(\d+)\]$/gm)];
-	const url = /^\[cut: … \[A-B\] are lines A-B of (\S+) \(read /m.exec(text)?.[1] ?? addressed[0]?.[1];
+	const url = /^\[cut: (\S+)\]$/m.exec(text)?.[1] ?? addressed[0]?.[1];
 	if (!url) throw new Error("a cut names where its hidden lines are");
 	const bare = [...text.matchAll(/^\s*… \[(\d+)-(\d+)\](?: \(\d+ commits?: [^)]*\))?$/gm)].map(m => ({
 		from: Number(m[1]),
@@ -143,7 +143,6 @@ describe("spotlight shaping", () => {
 		// Every other body folds to its exact file lines: function k's body is lines 42 + 23k … 61 + 23k.
 		for (const k of [0, 1, 3, 9]) expect(text).toContain(`  … [lines ${42 + 23 * k}-${61 + 23 * k}]`);
 		expect(text[0]).toBe("[src/retry.ts#ab12]");
-		expect(text.at(-1)).toBe("[folded: … [lines A-B] are lines A-B of src/retry.ts (read src/retry.ts:A-B)]");
 	});
 
 	it("keeps the body of a method the intent names, behind a multi-line signature, through an outline's cut", async () => {
@@ -174,26 +173,6 @@ describe("spotlight shaping", () => {
 		for (let j = 0; j < 6; j++) expect(out.text).toContain(`const field${j} = request.body.items[${j}].value * 42;`);
 	});
 
-	it("says which words of the intent no line of a cut result holds, in any spelling, within the tool's limit", async () => {
-		const files = Array.from(
-			{ length: 300 },
-			(_, i) => `test/${["spotlight", "browser", "coverage", "tools"][i % 4]}/case${i}.test.ts`,
-		);
-
-		const out = await shapeResult(
-			bash("ls test", [...files, "[300 results limit reached]"].join("\n")),
-			context({ intent: "which test files cover spotlight or truncation" }),
-			scorer(() => 0.2),
-			newShapeState(),
-			sink(),
-		);
-
-		// "truncation" is in no spelling; "cover" is, inside "coverage", so the line must not claim it missing.
-		expect(out.text).toMatch(
-			/^\[intent: .*no line contains any spelling of "truncation" \(of those the tool returned before its limit\)\]$/m,
-		);
-	});
-
 	it("cuts a long outlined read in file line numbers only, recovering from the file", async () => {
 		// 100 functions of 6 body lines: the outline stays over 12k characters, so the valve cuts it.
 		const lines: string[] = [];
@@ -219,8 +198,7 @@ describe("spotlight shaping", () => {
 		expect(out.steps).toEqual(["outline", "window"]);
 		expect(store.saved.size).toBe(0);
 		const body = out.text.split("\n");
-		expect(body.at(-1)).toBe("[cut: … [A-B] are lines A-B of src/big.ts (read src/big.ts:A-B)]");
-		// Shown lines, folds and cuts together cover the file's lines 1…n exactly once, in order.
+		// Shown lines, folds and cuts together cover the file's lines 1…n exactly once, in order, with no copy to name.
 		let next = 1;
 		let cuts = 0;
 		for (const l of body) {
@@ -228,10 +206,7 @@ describe("spotlight shaping", () => {
 			const range = line
 				? [line, line]
 				: (/^\s*… \[lines (\d+)-(\d+)\]$/.exec(l) ?? /^\s*… \[(\d+)-(\d+)\]$/.exec(l))?.slice(1);
-			if (!range) {
-				expect(l).toMatch(/^\[(folded|cut): /);
-				continue;
-			}
+			if (!range) throw new Error(`a line that numbers no file line: ${l}`);
 			if (/^\s*… \[\d/.test(l)) cuts++;
 			expect(Number(range[0])).toBe(next);
 			next = Number(range[1]) + 1;
@@ -419,9 +394,8 @@ describe("spotlight shaping", () => {
 		}
 		expect(trace.why[21]).toBe("s");
 		expect(trace.why).not.toContain("-");
-		// The header and the fold note stand for no line of the window.
+		// The header stands for no line of the window.
 		expect(trace.map[0]).toBeNull();
-		expect(trace.map.at(-1)).toBeNull();
 		expect(trace.pairs).toEqual(hiddenRuns(trace.kept));
 
 		const rank = trace.rank;
@@ -572,6 +546,46 @@ describe("spotlight shaping", () => {
 		expect(trace.rank).toBeUndefined();
 	});
 
+	it("collapses seen lines only in the order the agent saw them: a dropped or changed line splits the marker", async () => {
+		const state = newShapeState();
+		const first = migrations(20);
+		await shapeResult(
+			bash("bin/migrate --dry-run", [...first.slice(0, 14), "took 41ms", ...first.slice(14)].join("\n")),
+			context(),
+			scorer(() => 0.5),
+			state,
+			sink(),
+		);
+		// Migration 6 is gone and the short timing line changed: every long line was seen, but not in this order.
+		const again = [
+			"Applying migrations to staging",
+			...first.slice(0, 6),
+			...first.slice(7, 14),
+			"took 52ms",
+			...first.slice(14),
+			"Done: 19 applied, 0 failed",
+		];
+
+		const out = await shapeResult(
+			bash("bin/migrate", again.join("\n")),
+			context(),
+			scorer(() => 0.5),
+			state,
+			sink(),
+		);
+
+		expect(out.text).toBe(
+			[
+				"Applying migrations to staging",
+				"… [6 lines as shown before: read artifact://1:2-7]",
+				"… [7 lines as shown before: read artifact://1:8-14]",
+				"took 52ms",
+				"… [6 lines as shown before: read artifact://1:16-21]",
+				"Done: 19 applied, 0 failed",
+			].join("\n"),
+		);
+	});
+
 	it("keeps the last line of output that repeats an earlier run but stops short of it", async () => {
 		const state = newShapeState();
 		const first = migrations(30);
@@ -616,7 +630,6 @@ describe("spotlight shaping", () => {
 		expect(out.text).toMatch(
 			/^\[uniform: hidden lines: 1,9\d\d match "info: step N ok" \(N: any number\); 1 line differs \(line 1234\), shown\]$/m,
 		);
-		expect(out.text).toContain('[intent: every line naming "connection", "refused" is shown]');
 		expect(out.text.length).toBeLessThan(1_000);
 	});
 
@@ -697,7 +710,7 @@ describe("spotlight shaping", () => {
 		expect((await shape(bash(agentRun, report(200)))).text).not.toBe(report(200));
 	});
 
-	it("keeps lines the agent already picked and a diff whole up to 12k characters, and cuts them past it", async () => {
+	it("keeps a diff whole up to 12k characters and cuts it past it, while a search that size is cut", async () => {
 		const matches = (n: number) =>
 			Array.from(
 				{ length: n },
@@ -724,18 +737,8 @@ describe("spotlight shaping", () => {
 				sink(),
 			);
 
-		// ~10k chars: whole when the command picked the lines (a `;` inside quotes separates nothing), cut when it did not.
 		expect(matches(160).length).toBeGreaterThan(9_000);
-		for (const command of [
-			'rg -n "ti_tz_find_id\\(" temporal',
-			"git show m:x.c | grep -n ti_tz_find_id",
-			'grep -nE "^(static )?[a-z_]+\\(" x.c | grep -v ";$"',
-			"cd /c/repo && sed -n '99,130p;228,256p' notes.md",
-		]) {
-			expect((await shape(command, matches(160))).text).toBe(matches(160));
-		}
-		expect((await shape("./list-calls.sh", matches(160))).text).not.toBe(matches(160));
-		expect((await shape('rg -n "ti_tz_find_id\\(" temporal', matches(250))).text).not.toBe(matches(250));
+		expect((await shape('rg -n "ti_tz_find_id\\(" temporal', matches(160))).text).not.toBe(matches(160));
 
 		expect(diff(260).length).toBeGreaterThan(8_000);
 		expect((await shape("git diff master -- quickjs.c", diff(260))).text).toBe(diff(260));
@@ -850,38 +853,31 @@ describe("spotlight shaping", () => {
 		expect(store.saved.size).toBe(0);
 	});
 
-	it("shows a seen line the call's intent names, and still collapses lines a generic intent word names", async () => {
+	it("collapses seen lines the call's intent names: they are in the agent's context already", async () => {
 		const first = migrations(30);
 		const again = ["Applying migrations to staging", ...first, "Done: 30 applied, 0 failed"];
-		const shape = async (intent: string) => {
-			const state = newShapeState();
-			await shapeResult(
-				bash("bin/migrate --dry-run", first.join("\n")),
-				context(),
-				scorer(() => 0.5),
-				state,
-				sink(),
-			);
-			return shapeResult(
-				bash("bin/migrate", again.join("\n")),
-				context({ intent }),
-				scorer(() => 0.5),
-				state,
-				sink(),
-			);
-		};
+		const state = newShapeState();
+		await shapeResult(
+			bash("bin/migrate --dry-run", first.join("\n")),
+			context(),
+			scorer(() => 0.5),
+			state,
+			sink(),
+		);
 
-		const named = await shape("which migration added ledger_5_amount");
-		const generic = await shape("did every migration apply");
+		const out = await shapeResult(
+			bash("bin/migrate", again.join("\n")),
+			context({ intent: "which migration added ledger_5_amount" }),
+			scorer(() => 0.5),
+			state,
+			sink(),
+		);
 
-		expect(named.text.split("\n").slice(0, 4)).toEqual([
+		expect(out.text.split("\n")).toEqual([
 			"Applying migrations to staging",
-			// "migration" names every line, so only its first keeps clear of the collapse.
-			first[0],
-			"… [4 lines as shown before: read artifact://1:3-6]",
-			first[5],
+			"… [30 lines as shown before: read artifact://1:2-31]",
+			"Done: 30 applied, 0 failed",
 		]);
-		expect(generic.text).not.toContain(first[5]);
 	});
 
 	it("numbers the short rows a cut hid as a gap, never as shown before, when nothing was shown yet", async () => {

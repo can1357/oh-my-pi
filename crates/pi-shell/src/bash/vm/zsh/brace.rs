@@ -423,7 +423,8 @@ pub fn xpandbraces(word: &[u8], braceccl: bool) -> Vec<Vec<u8>> {
 
 /// zsh `nicechar` of a range character (`{a..z}` output).
 fn nicechar_into(c: u8, out: &mut Vec<u8>) {
-	out.extend_from_slice(&text::nicedupstring(&[c]));
+	// A single byte: a range character is never multibyte here.
+	out.extend_from_slice(&text::nicedupstring(&[c], false));
 }
 
 #[cfg(test)]

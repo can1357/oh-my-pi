@@ -1216,9 +1216,11 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"nav.expand": "+",
 	"nav.collapse": "-",
 	"nav.back": "<-",
-	// Tree Connectors
-	"tree.branch": "|--",
-	"tree.last": "'--",
+	// Tree Connectors: branches are two columns, like the Unicode `├─`, so a
+	// branch and its space match the three-column continuation (`|  `) that
+	// child rows hang under.
+	"tree.branch": "|-",
+	"tree.last": "'-",
 	"tree.vertical": "|",
 	"tree.horizontal": "-",
 	"tree.hook": "`-",

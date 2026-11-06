@@ -20,8 +20,8 @@ use super::{
 	math::Number,
 	modify::{self, HistSubst},
 	params::{
-		self, SCANPM_ASSIGNING, SCANPM_CHECKING, SCANPM_DQUOTED, SCANPM_WANTINDEX, VALFLAG_EMPTY,
-		VALFLAG_INV, VALFLAG_SUBST, Value, opt,
+		self, PValue, PmFlags, SCANPM_ASSIGNING, SCANPM_CHECKING, SCANPM_DQUOTED, SCANPM_WANTINDEX,
+		VALFLAG_EMPTY, VALFLAG_INV, VALFLAG_SUBST, Value, opt,
 	},
 	subscript, text, zpattern,
 };
@@ -189,14 +189,132 @@ fn note(ex: &mut Expander<'_, '_>, a: impl FnOnce() -> Atom) {
 	}
 }
 
-/// Run a side effect once across replays.
+/// Run a side effect once across replays. When the effect itself logged
+/// atoms (a filesystem probe of zsh/mapfile, a substitution in a
+/// subscript), it runs again on the replay, reading them, up to its `Done`.
 fn effect(ex: &mut Expander<'_, '_>, f: impl FnOnce(&mut Expander<'_, '_>) -> X<()>) -> X<()> {
-	if replay(ex).is_some() {
-		return Ok(());
+	match replay(ex) {
+		Some(Atom::Done) => return Ok(()),
+		Some(_) => ex.cursor -= 1,
+		None => {},
 	}
 	f(ex)?;
-	note(ex, || Atom::Done);
+	if ex.record && matches!(ex.log.get(ex.cursor), Some(Atom::Done)) {
+		ex.cursor += 1;
+	} else {
+		note(ex, || Atom::Done);
+	}
 	Ok(())
+}
+
+/// Run `${name::=word}`'s assignment `f` on every pass: [`begin_pass`] has
+/// put back what it replaced, so each pass sees the state the first pass
+/// saw at every point (`${x::=a}${x:-…}`, p10k's `${COLUMNS::=1024}` …
+/// `${COLUMNS::=$saved}`). The first pass logs the replaced value
+/// ([`Atom::Wrote`]); an assignment that cannot be put back (an
+/// association, a subscripted name) logs `Done`.
+fn redo(
+	ex: &mut Expander<'_, '_>,
+	name: &[u8],
+	f: impl FnOnce(&mut Expander<'_, '_>) -> X<()>,
+) -> X<()> {
+	let fresh = ex.record && ex.cursor >= ex.log.len();
+	let name = unmetafy(name);
+	let old = if fresh && !name.contains(&b'[') {
+		saved(ex, &name)?
+	} else {
+		None
+	};
+	f(ex)?;
+	if !fresh {
+		match replay(ex) {
+			Some(Atom::Done | Atom::Wrote { .. }) => {},
+			Some(_) => ex.cursor -= 1,
+			None => {},
+		}
+		return Ok(());
+	}
+	let Some(old) = old else {
+		note(ex, || Atom::Done);
+		return Ok(());
+	};
+	let new = match params::getparam(ex, &name)? {
+		Some(p) => match p.value {
+			PValue::Scalar(s) => Some(s),
+			_ => None,
+		},
+		None => None,
+	};
+	note(ex, || Atom::Wrote { name: BString::from(name), old: Box::new(old), new });
+	Ok(())
+}
+
+/// What `${name::=…}` replaces, as [`Atom::Wrote`] keeps it; `None` for an
+/// association (not put back).
+fn saved(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Atom>> {
+	Ok(match params::getparam(ex, name)? {
+		Some(p) if !p.flags.contains(PmFlags::UNSET) => match p.value {
+			PValue::Scalar(s) => Some(Atom::Str(Some(s))),
+			PValue::Array(a) => Some(Atom::List(a)),
+			PValue::Hash(_) => None,
+		},
+		_ => Some(Atom::Str(None)),
+	})
+}
+
+/// Start a pass of a recorded expansion over the log of earlier passes:
+/// put back what their `${name::=…}` assignments replaced ([`Atom::Wrote`]),
+/// newest first, so this pass sees the state the first one saw; a name
+/// something else assigned since (the substitution that ran) keeps its
+/// value.
+///
+/// # Errors
+/// A store failure, a read-only parameter.
+pub fn begin_pass(ex: &mut Expander<'_, '_>) -> X<()> {
+	if !ex.record || ex.cursor != 0 || !ex.log.iter().any(|a| matches!(a, Atom::Wrote { .. })) {
+		return Ok(());
+	}
+	let undo: Vec<(BString, Atom, Option<BString>)> = ex
+		.log
+		.iter()
+		.rev()
+		.filter_map(|a| match a {
+			Atom::Wrote { name, old, new } => Some((name.clone(), (**old).clone(), new.clone())),
+			_ => None,
+		})
+		.collect();
+	for (name, old, new) in undo {
+		if let Some(new) = new
+			&& params::getsparam(ex, &name)?.is_none_or(|now| now != new)
+		{
+			continue;
+		}
+		match old {
+			Atom::Str(None) => params::unsetparam(ex, &name)?,
+			Atom::Str(Some(v)) => params::assignsparam(ex, &name, &v, 0)?,
+			Atom::List(items) => params::assignaparam(ex, &name, items, 0)?,
+			_ => {},
+		}
+	}
+	Ok(())
+}
+
+/// Branch `now` decided once across replays: the first pass's answer is
+/// logged and the replay follows it. `${name:=word}` needs this: its
+/// assignment sets `name`, so the replay would skip the branch and leave
+/// the assignment's atoms to misalign every later atom of the log.
+fn decided(ex: &mut Expander<'_, '_>, now: bool) -> bool {
+	match replay(ex) {
+		Some(Atom::Branch(taken)) => taken,
+		Some(_) => {
+			ex.cursor -= 1;
+			now
+		},
+		None => {
+			note(ex, || Atom::Branch(now));
+			now
+		},
+	}
 }
 
 /// A value computed once across replays (`$((…))`).
@@ -204,18 +322,26 @@ fn once(
 	ex: &mut Expander<'_, '_>,
 	f: impl FnOnce(&mut Expander<'_, '_>) -> X<Vec<u8>>,
 ) -> X<Vec<u8>> {
-	if let Some(Atom::Str(Some(s))) = replay(ex) {
-		return Ok(s.to_vec());
+	match replay(ex) {
+		Some(Atom::Str(Some(s))) => return Ok(s.to_vec()),
+		// What the computation itself logged (a math function's call):
+		// it runs again, reading it.
+		Some(_) => ex.cursor -= 1,
+		None => {},
 	}
 	let v = f(ex)?;
-	note(ex, || Atom::Str(Some(BString::from(v.clone()))));
+	if ex.record && matches!(ex.log.get(ex.cursor), Some(Atom::Str(Some(_)))) {
+		ex.cursor += 1;
+	} else {
+		note(ex, || Atom::Str(Some(BString::from(v.clone()))));
+	}
 	Ok(v)
 }
 
 /// zsh `getoutput`: the output of the command substitution `body` (raw
 /// zsh source, metafied). On the first pass it parks the op
 /// ([`Stop::ZshSub`]); on the replay it is the logged output.
-fn getoutput(ex: &mut Expander<'_, '_>, body: &[u8]) -> X<Vec<u8>> {
+pub(super) fn getoutput(ex: &mut Expander<'_, '_>, body: &[u8]) -> X<Vec<u8>> {
 	let atom = if ex.record {
 		replay(ex)
 	} else {
@@ -229,7 +355,46 @@ fn getoutput(ex: &mut Expander<'_, '_>, body: &[u8]) -> X<Vec<u8>> {
 			ex.vp.status = status;
 			Ok(out.to_vec())
 		},
-		_ => Err(Stop::ZshSub { text: BString::from(unmetafy(body)) }),
+		_ => Err(Stop::ZshSub { text: BString::from(unmetafy(body)), here: false }),
+	}
+}
+
+/// zsh `subst_string_by_func`'s call of hook function code `call` (raw zsh
+/// source, metafied) in the current shell: its status, once it has run (the
+/// first pass parks the op, [`Stop::ZshSub`] with `here`; the replay reads
+/// the logged status). The caller's `$?` is kept.
+pub(super) fn call_here(ex: &mut Expander<'_, '_>, call: &[u8]) -> X<i32> {
+	let atom = if ex.record {
+		replay(ex)
+	} else {
+		let a = ex.log.get(ex.cursor).cloned();
+		ex.cursor += usize::from(a.is_some());
+		a
+	};
+	match atom {
+		Some(Atom::Sub { status, .. }) => Ok(status),
+		_ => Err(Stop::ZshSub { text: BString::from(unmetafy(call)), here: true }),
+	}
+}
+
+/// zsh `callmathfunc`'s call of a user math function's shell function
+/// ([`MathCall`](crate::bash::vm::expand::MathCall)) in the current
+/// shell: what it logged (its value's text and status) once it has run;
+/// the first pass parks the op ([`Stop::MathCall`]).
+pub(super) fn call_math(
+	ex: &mut Expander<'_, '_>,
+	call: crate::bash::vm::expand::MathCall,
+) -> X<(BString, i32)> {
+	let atom = if ex.record {
+		replay(ex)
+	} else {
+		let a = ex.log.get(ex.cursor).cloned();
+		ex.cursor += usize::from(a.is_some());
+		a
+	};
+	match atom {
+		Some(Atom::Sub { out, status }) => Ok((out, status)),
+		_ => Err(Stop::MathCall(Box::new(call))),
 	}
 }
 
@@ -251,10 +416,14 @@ fn readoutput(ex: &mut Expander<'_, '_>, out: &[u8], qt: bool) -> X<Vec<Vec<u8>>
 
 /// The options [`text::quotestring`] reads.
 pub(super) fn quote_opts(ex: &mut Expander<'_, '_>) -> X<text::QuoteOpts> {
+	let (bang, bang_special) = params::bang_quoting(&mut ex.k.root, ex.cx.store, ex.vp);
 	Ok(text::QuoteOpts {
-		rcquotes:          opt(ex, ZshOpt::Rcquotes)?,
+		rcquotes: opt(ex, ZshOpt::Rcquotes)?,
 		magic_equal_subst: opt(ex, ZshOpt::Magicequalsubst)?,
-		extended_glob:     opt(ex, ZshOpt::Extendedglob)?,
+		extended_glob: opt(ex, ZshOpt::Extendedglob)?,
+		bang,
+		bang_special,
+		mb: params::mb(ex)?,
 	})
 }
 
@@ -437,14 +606,21 @@ pub fn prefork(
 
 /// zsh `stringsubstquote`: `$'…'` at `pos` (the `String Snull`) of `w`
 /// decoded in place; the position after the decoded text. `posix`
-/// (`POSIX_STRINGS`): an embedded NUL ends the decoded text.
-fn stringsubstquote(w: &mut Vec<u8>, pos: usize, posix: bool) -> usize {
-	let how = if posix {
+/// (`POSIX_STRINGS`): an embedded NUL ends the decoded text. `narrow`: the
+/// locale is `C`, `\u` above 127 is zsh's `character not in range`.
+fn stringsubstquote(w: &mut Vec<u8>, pos: usize, posix: bool, narrow: bool) -> X<usize> {
+	let mut how = if posix {
 		text::getkey::DOLLARS_QUOTE | text::getkey::POSIX_STRINGS
 	} else {
 		text::getkey::DOLLARS_QUOTE
 	};
+	if narrow {
+		how |= text::getkey::NARROW;
+	}
 	let k = text::getkeystring(tail(w, pos + 2), how);
+	if k.range_err {
+		return Err(zerr("character not in range"));
+	}
 	let len = k.consumed + 2;
 	let rest = tail(w, pos + len).to_vec();
 	let mut sub = k.text;
@@ -456,7 +632,7 @@ fn stringsubstquote(w: &mut Vec<u8>, pos: usize, posix: bool) -> usize {
 	w.truncate(pos);
 	w.extend_from_slice(&sub);
 	w.extend_from_slice(&rest);
-	after
+	Ok(after)
 }
 
 /// zsh `stringsubst`: the substitutions in node `n` of `list` (which may
@@ -481,7 +657,13 @@ fn stringsubst(
 		if (c == INANG || c == OUTANGPROC || (i == 0 && c == EQUALS)) && at(w, i + 1) == INPAR {
 			let mut j = i + 1;
 			if !text::skipparens(INPAR, OUTPAR, w, &mut j) {
-				return Err(zerr("parse error in process substitution"));
+				// zsh `parsecmd`: no closing parenthesis.
+				let op = match c {
+					INANG => '<',
+					OUTANGPROC => '>',
+					_ => '=',
+				};
+				return Err(zerr(format!("unterminated `{op}(...)'")));
 			}
 			let body = span(w, i + 2, j - 1).to_vec();
 			let path = procsubst(ex, c, &body)?;
@@ -528,9 +710,12 @@ fn stringsubst(
 				continue;
 			} else if c1 == SNULL {
 				let posix = opt(ex, ZshOpt::Posixstrings)?;
+				let narrow = crate::bash::vm::locale::charset(ex.k, ex.cx.store, ex.vp)
+					== crate::bash::vm::locale::Charset::Bytes;
 				let mut w = list.take(n);
-				i = stringsubstquote(&mut w, i, posix);
+				let r = stringsubstquote(&mut w, i, posix, narrow);
 				list.set(n, w);
+				i = r?;
 				continue;
 			}
 			if (opt(ex, ZshOpt::Shwordsplit)? && pf_flags & PREFORK_NOSHWORDSPLIT == 0)
@@ -696,17 +881,125 @@ fn comsubst(
 fn procsubst(ex: &mut Expander<'_, '_>, c: u8, body: &[u8]) -> X<Vec<u8>> {
 	let mut b = body.to_vec();
 	untokenize(&mut b);
-	if let Some(Atom::Str(Some(p))) = replay(ex) {
-		return Ok(metafy(&p));
-	}
 	let kind = match c {
 		INANG => crate::bash::vm::exec::ZshProcSub::Input,
 		OUTANGPROC => crate::bash::vm::exec::ZshProcSub::Output,
-		_ => crate::bash::vm::exec::ZshProcSub::TempFile,
+		_ => return getoutputfile(ex, &b),
 	};
-	let p = crate::bash::vm::exec::start_zsh_procsub(ex.k, ex.vp, ex.cx, &unmetafy(&b), kind)?;
+	if let Some(Atom::Str(Some(p))) = replay(ex) {
+		return Ok(metafy(&p));
+	}
+	let p = crate::bash::vm::exec::start_zsh_procsub(ex.k, ex.vp, ex.cx, &unmetafy(&b), kind);
 	note(ex, || Atom::Str(Some(p.clone())));
 	Ok(metafy(&p))
+}
+
+/// The logged answer of the file system request `req` (the first pass
+/// parks the op, [`Stop::Probe`]): `Some` on success. `seq` is the log
+/// position, so the same request made again later is asked again.
+fn fs_request(
+	ex: &mut Expander<'_, '_>,
+	req: crate::bash::vm::fsprobe::FsReq,
+) -> X<Option<BString>> {
+	let seq = u32::try_from(ex.cursor).unwrap_or(u32::MAX);
+	match ex.log.get(ex.cursor).cloned() {
+		Some(Atom::Str(s)) => {
+			ex.cursor += 1;
+			Ok(s)
+		},
+		Some(_) => {
+			ex.cursor += 1;
+			Ok(None)
+		},
+		None => Err(Stop::Probe(crate::bash::vm::proc::Probe::Fs { seq, req: Box::new(req) })),
+	}
+}
+
+/// zsh `getoutputfile`: `=(…)`, the output of `body` (raw zsh source,
+/// metafied) in a new file `$TMPPREFIX` plus six letters (zsh
+/// `gettempname`, a name nothing has), linked to the name plus
+/// `$TMPSUFFIX` when that is set, mode 0600; its name. A body that is a
+/// lone `<<<word` writes the word and a newline without running anything.
+/// The files go when the command is over (zsh's job `filelist`). `$?`
+/// stays (zsh's `cmdoutval` is 0).
+fn getoutputfile(ex: &mut Expander<'_, '_>, body: &[u8]) -> X<Vec<u8>> {
+	use crate::bash::vm::fsprobe::FsReq;
+	/// mktemp's letters.
+	const LETTERS: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+	let raw = unmetafy(body);
+	let data = if let Some(word) = crate::bash::syntax::zsh::herestring_word(&raw) {
+		let tokenized = parse_subst_string(&metafy(&word)).unwrap_or_else(|_| metafy(&word));
+		let mut s = singsub(ex, tokenized)?;
+		untokenize(&mut s);
+		let mut s = unmetafy(&s);
+		s.push(b'\n');
+		s
+	} else {
+		let (status, sub_status) = (ex.vp.status, ex.sub_status);
+		let out = getoutput(ex, body)?;
+		ex.vp.status = status;
+		ex.sub_status = sub_status.map(|_| 0);
+		out
+	};
+	let prefix = params::getsparam(ex, b"TMPPREFIX")?.unwrap_or_else(|| BString::from("/tmp/zsh"));
+	let pid = u64::from(ex.k.shell_pid);
+	let mut name = None;
+	for n in 0..64u64 {
+		let mut h = ((pid << 32) | n).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+		let mut path = prefix.clone();
+		for _ in 0..6 {
+			path.push(LETTERS[(h % 62) as usize]);
+			h /= 62;
+		}
+		if fs_request(ex, FsReq::Stat { path: path.clone(), follow: false })?.is_none() {
+			name = Some(path);
+			break;
+		}
+	}
+	let Some(path) = name else {
+		return Err(Stop::Fail(Diag::Usage {
+			msg: "process substitution failed: file exists".into(),
+		}));
+	};
+	if fs_request(ex, FsReq::MapWrite { path: path.clone(), data: data.into(), mode: 0o600 })?
+		.is_none()
+	{
+		// The request's answer has no `errno`: the usual causes, from the
+		// directory.
+		let dir = match path.iter().rposition(|&c| c == b'/') {
+			Some(0) => BString::from("/"),
+			Some(i) => BString::from(&path[..i]),
+			None => BString::from("."),
+		};
+		let why = match fs_request(ex, FsReq::Stat { path: dir, follow: true })? {
+			None => "no such file or directory",
+			Some(_) => "permission denied",
+		};
+		return Err(Stop::Fail(Diag::Usage {
+			msg: format!("process substitution failed: {why}").into(),
+		}));
+	}
+	let depth = u32::try_from(ex.vp.frames.len()).unwrap_or(u32::MAX);
+	let keep = |ex: &mut Expander<'_, '_>, p: &BString| {
+		let files = &mut ex.vp.zsh.get_or_insert_with(Box::default).tempfiles;
+		if !files.iter().any(|(_, q)| q == p) {
+			files.push((depth, p.clone()));
+		}
+	};
+	keep(ex, &path);
+	let mut nam = path;
+	if let Some(suffix) = params::getsparam(ex, b"TMPSUFFIX")?
+		&& !suffix.is_empty()
+		&& !suffix.contains(&b'/')
+	{
+		let mut linked = nam.clone();
+		linked.extend_from_slice(&suffix);
+		if fs_request(ex, FsReq::Link { from: nam.clone(), to: linked.clone() })?.is_some() {
+			keep(ex, &linked);
+			nam = linked;
+		}
+	}
+	Ok(metafy(&nam))
 }
 
 /// zsh `arithsubst`: `$((e))` / `$[e]`: `e` substituted, evaluated, and
@@ -764,7 +1057,7 @@ fn multsub(
 				break;
 			}
 			*ms_flags |= MULTSUB_WS_AT_START;
-			i += text::charlen(&x, i);
+			i += text::charlen(&x, i, false);
 		}
 		x.drain(..i);
 		let (mut inq, mut inp) = (false, 0i32);
@@ -786,19 +1079,19 @@ fn multsub(
 					INPAR => inp += 1,
 					OUTPAR => inp -= 1,
 					BNULL | BNULLKEEP => {
-						l += text::charlen(&x, i + 1);
+						l += seps.charlen(&x, i + 1);
 					},
 					_ => {},
 				}
 				i += l;
 				continue;
 			}
-			l = text::charlen(&x, i);
-			if !inq && inp == 0 && seps.isep(text::char_at(&x, i)) {
+			l = seps.charlen(&x, i);
+			if !inq && inp == 0 && seps.sep_at(&x, i) {
 				list.nodes.push(span(&x, start, i).to_vec());
 				let mut j = i + l;
-				while j < x.len() && !is_tok(at(&x, j)) && seps.isep(text::char_at(&x, j)) {
-					j += text::charlen(&x, j);
+				while j < x.len() && seps.sep_at(&x, j) {
+					j += seps.charlen(&x, j);
 				}
 				if j >= x.len() {
 					*ms_flags |= MULTSUB_WS_AT_END;
@@ -824,7 +1117,7 @@ fn multsub(
 			return Ok(MultSub { empty: false, val: Vec::new(), arr: Some(list.nodes), isarr: 1 });
 		}
 		let ifs = params::ifs(ex)?;
-		let val = text::sepjoin(&list.nodes, sep, ifs.as_deref());
+		let val = text::sepjoin(&list.nodes, sep, ifs.as_deref(), params::mb(ex)?);
 		return Ok(MultSub { empty: false, val, arr: None, isarr: 0 });
 	}
 	let val = list.nodes.into_iter().next().unwrap_or_default();
@@ -883,7 +1176,7 @@ pub fn filesub(ex: &mut Expander<'_, '_>, s: &mut Vec<u8>, assign: u32) -> X<()>
 
 /// zsh `filesubstr`: `~…` or `=cmd` at the start of `s`; whether it was
 /// replaced.
-fn filesubstr(ex: &mut Expander<'_, '_>, s: &mut Vec<u8>, assign: u32) -> X<bool> {
+pub fn filesubstr(ex: &mut Expander<'_, '_>, s: &mut Vec<u8>, assign: u32) -> X<bool> {
 	let isend = |c: u8| c == 0 || c == b'/' || c == INPAR || (assign != 0 && c == b':');
 	let isend2 = |c: u8| c == 0 || c == INPAR || (assign != 0 && c == b':');
 	if at(s, 0) == TILDE && at(s, 1) != b'=' && at(s, 1) != EQUALS {
@@ -914,6 +1207,32 @@ fn filesubstr(ex: &mut Expander<'_, '_>, s: &mut Vec<u8>, assign: u32) -> X<bool
 			r.extend_from_slice(tail(s, 2));
 			*s = r;
 			return Ok(true);
+		}
+		// `~[arg]`: the `zsh_directory_name` hook names the directory.
+		if c1 == INBRACK
+			&& let Some(close) = tail(s, 2)
+				.iter()
+				.position(|&c| c == OUTBRACK)
+				.map(|p| p + 2)
+		{
+			let mut arg = span(s, 2, close).to_vec();
+			untokenize(&mut arg);
+			crate::bash::pattern::zsh::remnulargs(&mut arg);
+			let arg = unmetafy(&arg);
+			let res =
+				super::nameddir::dirname_hook(ex, b"n", &arg)?.and_then(|a| a.into_iter().next());
+			if let Some(res) = res {
+				let mut r = metafy(&res);
+				r.extend_from_slice(tail(s, close + 1));
+				*s = r;
+				return Ok(true);
+			}
+			if opt(ex, ZshOpt::Nomatch)? && opt(ex, ZshOpt::Exec)? {
+				return Err(Stop::Fail(Diag::ZshFileExp {
+					msg: BString::from(format!("no directory expansion: ~[{}]", BStr::new(&arg))),
+				}));
+			}
+			return Ok(false);
 		}
 		// `~N`, `~+N`, `~-N`: directory stack entries.
 		let (sign, ds) = if matches!(c1, b'+' | b'-') {
@@ -946,9 +1265,8 @@ fn filesubstr(ex: &mut Expander<'_, '_>, s: &mut Vec<u8>, assign: u32) -> X<bool
 			}
 			let mut user = span(s, 1, ue).to_vec();
 			untokenize(&mut user);
-			let me = ex.cx.host.user();
-			if unmetafy(&user) == me.name.as_slice() {
-				let mut r = metafy(&me.home);
+			if let Some(dir) = super::nameddir::getnameddir(ex, &unmetafy(&user))? {
+				let mut r = metafy(&dir);
 				r.extend_from_slice(tail(s, ue));
 				*s = r;
 				return Ok(true);
@@ -1014,7 +1332,7 @@ fn dstackent(ex: &mut Expander<'_, '_>, ch: u8, val: usize) -> X<Option<Vec<u8>>
 /// `path` (a name with a `/` is itself when executable), through the
 /// pollable file system. The first pass parks the op ([`Stop::Probe`]);
 /// the replay reads the logged answer. Raw bytes.
-fn findcmd(ex: &mut Expander<'_, '_>, name: &[u8], path: &[u8]) -> X<Option<Vec<u8>>> {
+pub fn findcmd(ex: &mut Expander<'_, '_>, name: &[u8], path: &[u8]) -> X<Option<Vec<u8>>> {
 	use crate::bash::vm::proc::Probe;
 	let atom = if ex.record {
 		replay(ex)
@@ -1065,7 +1383,6 @@ pub fn equalsubstr(
 		let why = crate::bash::host::ResolveCtx {
 			has_slash: name.contains(&b'/'),
 			via:       crate::bash::host::Via::Type,
-			path_var:  BStr::new(&path_var),
 		};
 		match ex.cx.host.resolve(BStr::new(&name), ex.vp.mode, why) {
 			crate::bash::host::Resolved::External(p) => Some(p.to_vec()),
@@ -1091,11 +1408,12 @@ pub fn equalsubstr(
 /// (its absolute value); `*pos` moves past the closing delimiter. Returns
 /// `(value, delimiter length)`; `(-1, 0)` when malformed.
 pub(super) fn get_intarg(ex: &mut Expander<'_, '_>, s: &[u8], pos: &mut usize) -> X<(i64, usize)> {
-	let (t, arglen) = subscript::get_strarg(s, *pos);
+	let mb = params::mb(ex)?;
+	let (t, arglen) = subscript::get_strarg(s, *pos, mb);
 	if t >= s.len() {
 		return Ok((-1, 0));
 	}
-	let start = (*pos + text::charlen(s, *pos)).min(t);
+	let start = (*pos + text::charlen(s, *pos, mb)).min(t);
 	let p = span(s, start, t).to_vec();
 	*pos = t + arglen;
 	let Ok(p) = crate::bash::syntax::zsh::parsestr(&p) else {
@@ -1242,7 +1560,7 @@ fn strcatsub(
 	(d, after)
 }
 
-/// zsh `dopadding` (single-byte characters, `(m)` widths equal counts).
+/// zsh `dopadding` (characters per `mb`, `(m)` widths equal counts).
 #[expect(clippy::too_many_arguments, reason = "a faithful port of one C function")]
 fn dopadding(
 	s: &[u8],
@@ -1253,10 +1571,11 @@ fn dopadding(
 	premul: &[u8],
 	postmul: &[u8],
 	ifs: Option<&[u8]>,
+	mb: bool,
 ) -> Vec<u8> {
 	let def: Vec<u8> = match ifs {
 		None => b" ".to_vec(),
-		Some(i) if !i.is_empty() => head(i, text::charlen(i, 0)).to_vec(),
+		Some(i) if !i.is_empty() => head(i, text::charlen(i, 0, mb)).to_vec(),
 		Some(_) => Vec::new(),
 	};
 	let preone = preone.map(|p| if p.is_empty() { def.as_slice() } else { p });
@@ -1271,11 +1590,12 @@ fn dopadding(
 	} else {
 		postmul
 	};
-	fn chars(x: &[u8]) -> Vec<&[u8]> {
+	/// The characters of `x`.
+	fn chars(x: &[u8], mb: bool) -> Vec<&[u8]> {
 		let mut v = Vec::new();
 		let mut i = 0;
 		while i < x.len() {
-			let l = text::charlen(x, i);
+			let l = text::charlen(x, i, mb);
 			v.push(span(x, i, i + l));
 			i += l;
 		}
@@ -1287,12 +1607,12 @@ fn dopadding(
 			out.extend_from_slice(c);
 		}
 	}
-	let sc = chars(s);
+	let sc = chars(s, mb);
 	let ls = sc.len();
-	let pre1 = preone.map_or_default(chars);
-	let post1 = postone.map_or_default(chars);
-	let pm = chars(premul);
-	let qm = chars(postmul);
+	let pre1 = preone.map_or_default(|p| chars(p, mb));
+	let post1 = postone.map_or_default(|p| chars(p, mb));
+	let pm = chars(premul, mb);
+	let qm = chars(postmul, mb);
 	if prenum + postnum == ls {
 		return s.to_vec();
 	}
@@ -1367,12 +1687,17 @@ fn dopadding(
 	out
 }
 
-/// zsh `eltpcmp` (C locale): compare `a` and `b` with `sortit`'s numeric
-/// rules.
+/// zsh `eltpcmp`: `cmp0` is the strings' `strcoll` order (their
+/// [`Collator`](crate::sys::langinfo::Collator) keys compared), which the
+/// numeric rules may override.
 #[allow(clippy::many_single_char_names, reason = "a direct port of zsh's eltpcmp")]
-fn eltpcmp(a: &[u8], b: &[u8], numeric: i32) -> std::cmp::Ordering {
+pub fn eltpcmp_coll(
+	a: &[u8],
+	b: &[u8],
+	numeric: i32,
+	cmp0: std::cmp::Ordering,
+) -> std::cmp::Ordering {
 	use std::cmp::Ordering;
-	let cmp0 = a.cmp(b);
 	if numeric == 0 {
 		return cmp0;
 	}
@@ -1444,8 +1769,12 @@ fn eltpcmp(a: &[u8], b: &[u8], numeric: i32) -> std::cmp::Ordering {
 }
 
 /// zsh `strmetasort`: sort metafied strings as `sortit` says (`(o) (O)
-/// (i) (n) (-)`).
-pub fn strmetasort(items: &mut [Vec<u8>], sortit: u32) {
+/// (i) (n) (-)`), in `coll`'s order (`strcoll`; bytes without one).
+pub fn strmetasort(
+	items: &mut [Vec<u8>],
+	sortit: u32,
+	coll: Option<&crate::sys::langinfo::Collator>,
+) {
 	let numeric = if sortit & SORTIT_NUMERICALLY_SIGNED != 0 {
 		-1
 	} else {
@@ -1461,16 +1790,30 @@ pub fn strmetasort(items: &mut [Vec<u8>], sortit: u32) {
 		}
 		k
 	};
-	let mut keyed: Vec<(Vec<u8>, Vec<u8>)> = items.iter().map(|s| (key(s), s.clone())).collect();
+	// (sort key, collation key, the string)
+	let mut keyed: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = items
+		.iter()
+		.map(|s| {
+			let k = key(s);
+			let c = coll.map_or_default(|c| c.key(&k));
+			(k, c, s.clone())
+		})
+		.collect();
 	keyed.sort_by(|x, y| {
-		let o = eltpcmp(&x.0, &y.0, numeric);
+		// Equal collation keys (`strcoll` 0) fall back to the bytes.
+		let base = if coll.is_some() {
+			x.1.cmp(&y.1).then_with(|| x.0.cmp(&y.0))
+		} else {
+			x.0.cmp(&y.0)
+		};
+		let o = eltpcmp_coll(&x.0, &y.0, numeric, base);
 		if sortit & SORTIT_BACKWARDS != 0 {
 			o.reverse()
 		} else {
 			o
 		}
 	});
-	for (slot, (_, v)) in items.iter_mut().zip(keyed) {
+	for (slot, (_, _, v)) in items.iter_mut().zip(keyed) {
 		*slot = v;
 	}
 }
@@ -1484,28 +1827,27 @@ fn uniq(a: &mut Vec<Vec<u8>>) {
 /// zsh `wordcount` and character counts for `${#x}` with `(c) (w) (W)`.
 fn count_len(seps: &text::Seps, v: &[u8], spsep: Option<&[u8]>, getlen: i32) -> usize {
 	if getlen < 3 {
-		text::strlen_chars(v)
+		text::strlen_chars(v, seps.mb)
 	} else {
 		text::wordcount(seps, v, spsep, i32::from(getlen > 3))
 	}
 }
 
-/// zsh `substnamedir` (`(D)`): a leading `$HOME` as `~`.
+/// zsh `substnamedir` (`(D)`): the longest named directory prefix as
+/// `~name`, the rest backslash-quoted.
 fn substnamedir(ex: &mut Expander<'_, '_>, s: &[u8]) -> X<Vec<u8>> {
-	let home = state::lookup(&ex.k.root, ex.cx.store, ex.vp, b"HOME")?
-		.and_then(|v| v.as_scalar().map(<[u8]>::to_vec))
-		.unwrap_or_default();
-	let home = metafy(&home);
-	if !home.is_empty()
-		&& home != b"/"
-		&& s.starts_with(&home)
-		&& matches!(s.get(home.len()), None | Some(&b'/'))
-	{
-		let mut r = vec![b'~'];
-		r.extend_from_slice(tail(s, home.len()));
-		return Ok(r);
-	}
-	Ok(s.to_vec())
+	let raw = unmetafy(s);
+	let o = quote_opts(ex)?;
+	Ok(match super::nameddir::finddir(ex, &raw)? {
+		Some(f) => {
+			let mut r = vec![b'~'];
+			r.extend_from_slice(&metafy(&f.name));
+			let rest = metafy(tail(&raw, f.dir_len));
+			r.extend_from_slice(&text::quotestring(&rest, text::Qt::Backslash, o));
+			r
+		},
+		None => text::quotestring(s, text::Qt::Backslash, o),
+	})
 }
 
 /// The match replacement of `${x/p/r}`: `r` substituted (after the
@@ -1606,6 +1948,8 @@ fn paramsubst(
 	let d = &ostr;
 	let mut s = aptr + 1;
 	let ifs = params::ifs(ex)?;
+	let mb = params::mb(ex)?;
+	let wide = mb && !opt(ex, ZshOpt::Posixidentifiers)?;
 	let mut plan9 = opt(ex, ZshOpt::Rcexpandparam)?;
 	let mut globsubst: i32 = i32::from(opt(ex, ZshOpt::Globsubst)?);
 	let shglob = opt(ex, ZshOpt::Shglob)?;
@@ -1659,7 +2003,7 @@ fn paramsubst(
 	let hist = HistSubst::default();
 
 	let c = at(d, s);
-	if text::ident_end(d, s) == s
+	if text::ident_end(d, s, wide) == s
 		&& !matches!(
 			c,
 			b'#'
@@ -1790,11 +2134,11 @@ fn paramsubst(
 					b's' | b'j' => {
 						let tt = c == b's';
 						s += 1;
-						let (t, arglen) = subscript::get_strarg(d, s);
+						let (t, arglen) = subscript::get_strarg(d, s, mb);
 						if t >= d.len() {
 							return Err(flagerr(d, aptr, s));
 						}
-						let start = (s + text::charlen(d, s)).min(t);
+						let start = (s + text::charlen(d, s, mb)).min(t);
 						let arg = untok_and_escape(ex, span(d, start, t), escapes, tok_arg)?;
 						if tt {
 							spsep = Some(arg);
@@ -1819,11 +2163,11 @@ fn paramsubst(
 						if dellen == 0 || tail(d, s).get(..dellen) != d.get(del0..del0 + dellen) {
 							s -= 1;
 						} else {
-							let (t, arglen) = subscript::get_strarg(d, s);
+							let (t, arglen) = subscript::get_strarg(d, s, mb);
 							if t >= d.len() {
 								return Err(flagerr(d, aptr, s));
 							}
-							let start = (s + text::charlen(d, s)).min(t);
+							let start = (s + text::charlen(d, s, mb)).min(t);
 							let arg = untok_and_escape(ex, span(d, start, t), escapes, tok_arg)?;
 							if tt {
 								premul = Some(arg);
@@ -1832,11 +2176,11 @@ fn paramsubst(
 							}
 							s = t + arglen;
 							if tail(d, s).get(..dellen) == d.get(del0..del0 + dellen) {
-								let (t, arglen) = subscript::get_strarg(d, s);
+								let (t, arglen) = subscript::get_strarg(d, s, mb);
 								if t >= d.len() {
 									return Err(flagerr(d, aptr, s));
 								}
-								let start = (s + text::charlen(d, s)).min(t);
+								let start = (s + text::charlen(d, s, mb)).min(t);
 								let arg = untok_and_escape(ex, span(d, start, t), escapes, tok_arg)?;
 								if tt {
 									preone = Some(arg);
@@ -1857,14 +2201,14 @@ fn paramsubst(
 					b'%' => presc += 1,
 					b'g' => {
 						s += 1;
-						let (t, arglen) = subscript::get_strarg(d, s);
+						let (t, arglen) = subscript::get_strarg(d, s, mb);
 						if getkeys < 0 {
 							getkeys = 0;
 						}
 						if t >= d.len() {
 							return Err(flagerr(d, aptr, s));
 						}
-						let mut k = s + text::charlen(d, s);
+						let mut k = s + text::charlen(d, s, mb);
 						while k < t {
 							match at(d, k) {
 								b'e' => getkeys |= 2,
@@ -1879,11 +2223,11 @@ fn paramsubst(
 					b'z' => shsplit = crate::bash::syntax::zsh::LEXFLAGS_ACTIVE,
 					b'Z' => {
 						s += 1;
-						let (t, arglen) = subscript::get_strarg(d, s);
+						let (t, arglen) = subscript::get_strarg(d, s, mb);
 						if t >= d.len() {
 							return Err(flagerr(d, aptr, s));
 						}
-						let mut k = s + text::charlen(d, s);
+						let mut k = s + text::charlen(d, s, mb);
 						while k < t {
 							match at(d, k) {
 								b'c' => shsplit |= crate::bash::syntax::zsh::LEXFLAGS_COMMENTS_KEEP,
@@ -1899,8 +2243,8 @@ fn paramsubst(
 					b'#' | POUND => evalchar = true,
 					b'_' => {
 						s += 1;
-						let (t, arglen) = subscript::get_strarg(d, s);
-						if t >= d.len() || t > s + text::charlen(d, s) {
+						let (t, arglen) = subscript::get_strarg(d, s, mb);
+						if t >= d.len() || t > s + text::charlen(d, s, mb) {
 							return Err(flagerr(d, aptr, s));
 						}
 						s = t + arglen - 1;
@@ -1941,7 +2285,7 @@ fn paramsubst(
 			}
 		} else if (c == b'#' || c == POUND) && (inbrace || !opt(ex, ZshOpt::Posixidentifiers)?) && {
 			let cc = at(d, s + 1);
-			text::ident_end(d, s + 1) != s + 1
+			text::ident_end(d, s + 1, wide) != s + 1
 				|| matches!(cc, b'*' | STAR | b'@' | b'?' | QUEST | b'$' | STRING | QSTRING)
 				|| ((cc == b'#' || cc == POUND) && at(d, s + 2) == OUTBRACE)
 				|| is_dash(cc)
@@ -1959,7 +2303,7 @@ fn paramsubst(
 				globsubst = 2;
 			}
 		} else if c == b'+' {
-			if text::ident_end(d, s + 1) != s + 1
+			if text::ident_end(d, s + 1, wide) != s + 1
 				|| (aspar && isstring(at(d, s + 1)) && matches!(at(d, s + 2), INBRACE | INPAR))
 			{
 				chkset = true;
@@ -2064,6 +2408,9 @@ fn paramsubst(
 			ps.val = fv.getstrvalue(ex)?;
 			idbeg.clone_from(&ps.val);
 			subexp = true;
+			// zsh keeps `v`: unless (P) fetches again below, its value
+			// (an array stays one) is what the substitution yields.
+			v = Some(fv);
 		} else {
 			ps.vunset = 1;
 		}
@@ -2213,8 +2560,12 @@ fn paramsubst(
 			ps.isarr = -1;
 		}
 		if qt && getlen == 0 && ps.isarr > 0 {
-			ps.val =
-				text::sepjoin(ps.aval.as_deref().unwrap_or_default(), sep.as_deref(), ifs.as_deref());
+			ps.val = text::sepjoin(
+				ps.aval.as_deref().unwrap_or_default(),
+				sep.as_deref(),
+				ifs.as_deref(),
+				mb,
+			);
 			ps.isarr = 0;
 		}
 	}
@@ -2438,12 +2789,19 @@ fn paramsubst(
 								quoted_array_with_offset,
 								ifs,
 								shglob,
+								mb,
 								hist,
 							},
 						);
 					}
 					ps.vunset = 1;
 					body.remove(0);
+				} else {
+					// `${name=word}`, `${name:=word}`: whether to assign.
+					let now = ps.vunset != 0;
+					if decided(ex, now) != now {
+						ps.vunset = i32::from(!now);
+					}
 				}
 				if ps.vunset != 0 {
 					if spsep.is_some() || arrasg == 0 {
@@ -2500,7 +2858,7 @@ fn paramsubst(
 						let mut name = idbeg.clone();
 						untokenize(&mut name);
 						let assigned = items.clone();
-						effect(ex, |ex| {
+						redo(ex, &name, |ex| {
 							if arrasg > 1 {
 								params::sethparam_meta(ex, &name, assigned)
 							} else {
@@ -2525,7 +2883,9 @@ fn paramsubst(
 						untokenize(&mut val);
 						let mut name = idbeg;
 						untokenize(&mut name);
-						effect(ex, |ex| params::assignsparam_meta(ex, &name, val, params::ASSPM_WARN))?;
+						redo(ex, &name, |ex| {
+							params::assignsparam_meta(ex, &name, val, params::ASSPM_WARN)
+						})?;
 					}
 					if ps.isarr != 0 {
 						if nojoin != 0 {
@@ -2536,6 +2896,7 @@ fn paramsubst(
 								ps.aval.as_deref().unwrap_or_default(),
 								sep.as_deref(),
 								ifs.as_deref(),
+								mb,
 							);
 							ps.isarr = 0;
 						}
@@ -2546,19 +2907,24 @@ fn paramsubst(
 				}
 			},
 			b'?' | QUEST => {
-				if ps.vunset != 0 {
-					if opt(ex, ZshOpt::Exec)? {
-						let msg = if sbody.is_empty() {
-							BString::from("parameter not set")
-						} else {
-							let mut m = singsub(ex, sbody)?;
-							untokenize(&mut m);
-							BString::from(unmetafy(&m))
-						};
-						return Err(Stop::Fatal(Diag::ParamUnset { name: idname, msg }));
+				if ps.vunset != 0 && opt(ex, ZshOpt::Exec)? {
+					let msg = if sbody.is_empty() {
+						BString::from("parameter not set")
+					} else {
+						let mut m = singsub(ex, sbody)?;
+						untokenize(&mut m);
+						BString::from(unmetafy(&m))
+					};
+					// zsh: an interactive shell goes back to its prompt;
+					// any other shell exits.
+					if opt(ex, ZshOpt::Interactive)? {
+						return Err(Stop::Fail(Diag::ParamUnset { name: idname, msg }));
 					}
-					return Err(Stop::Fail(Diag::ParamUnset { name: idname, msg: BString::default() }));
+					return Err(Stop::Fatal(Diag::ParamUnset { name: idname, msg }));
 				}
+				// `NO_EXEC`: zsh's `paramsubst` gives up on the word
+				// without an error; nothing runs it, so the (empty)
+				// value goes on unreported.
 			},
 			_ => {
 				// `%`, `#`, `/`: pattern operations.
@@ -2662,6 +3028,7 @@ fn paramsubst(
 			quoted_array_with_offset,
 			ifs,
 			shglob,
+			mb,
 			hist,
 		});
 	} else if inbrace && matches!(c, b'^' | HAT) {
@@ -2672,7 +3039,7 @@ fn paramsubst(
 			sp += 1;
 		}
 		let name = span(src, sp, expr_end).to_vec();
-		if text::ident_end(&name, 0) != name.len() {
+		if text::ident_end(&name, 0, wide) != name.len() {
 			let mut nm = name;
 			untokenize(&mut nm);
 			return Err(Stop::Fail(Diag::InvalidIdent { name: BString::from(unmetafy(&nm)) }));
@@ -2722,7 +3089,7 @@ fn paramsubst(
 		let intersect = matches!(c, b'*' | STAR);
 		sp += 1;
 		let name = span(src, sp, expr_end).to_vec();
-		if text::ident_end(&name, 0) != name.len() {
+		if text::ident_end(&name, 0, wide) != name.len() {
 			let mut nm = name;
 			untokenize(&mut nm);
 			return Err(Stop::Fail(Diag::InvalidIdent { name: BString::from(unmetafy(&nm)) }));
@@ -2805,6 +3172,7 @@ fn paramsubst(
 				quoted_array_with_offset,
 				ifs,
 				shglob,
+				mb,
 				hist,
 			},
 		);
@@ -2843,6 +3211,7 @@ fn paramsubst(
 		quoted_array_with_offset,
 		ifs,
 		shglob,
+		mb,
 		hist,
 	})
 }
@@ -2898,6 +3267,8 @@ struct Post {
 	quoted_array_with_offset: bool,
 	ifs: Option<Vec<u8>>,
 	shglob: bool,
+	/// [`params::mb`].
+	mb: bool,
 	hist: HistSubst,
 }
 
@@ -3039,7 +3410,8 @@ fn finish_colon(
 			ps.aval = Some(out);
 		} else {
 			let v = &ps.val;
-			let nchars = i64::try_from(text::strlen_chars(v)).unwrap_or(0);
+			let mb = post.mb;
+			let nchars = i64::try_from(text::strlen_chars(v, mb)).unwrap_or(0);
 			if offset < 0 {
 				offset = (offset + nchars).max(0);
 			}
@@ -3050,7 +3422,7 @@ fn finish_colon(
 			let mut b = 0;
 			let mut left = offset;
 			while b < v.len() && left > 0 {
-				b += text::charlen(v, b);
+				b += text::charlen(v, b, mb);
 				left -= 1;
 			}
 			if length_set {
@@ -3066,7 +3438,7 @@ fn finish_colon(
 				}
 				let mut e = b;
 				while e < v.len() && length > 0 {
-					e += text::charlen(v, e);
+					e += text::charlen(v, e, mb);
 					length -= 1;
 				}
 				ps.val = span(v, b, e).to_vec();
@@ -3180,11 +3552,11 @@ fn finish(
 			if p.getlen == 1 {
 				a.len()
 			} else if p.getlen == 2 {
-				let sl = p.sep.as_deref().map_or(1, text::strlen_chars);
+				let sl = p.sep.as_deref().map_or(1, |s| text::strlen_chars(s, p.mb));
 				if a.is_empty() {
 					0
 				} else {
-					a.iter().map(|e| text::strlen_chars(e)).sum::<usize>() + sl * (a.len() - 1)
+					a.iter().map(|e| text::strlen_chars(e, p.mb)).sum::<usize>() + sl * (a.len() - 1)
 				}
 			} else {
 				a.iter()
@@ -3218,7 +3590,7 @@ fn finish(
 		if ps.isarr != 0 || p.quoted_array_with_offset {
 			let a = ps.aval.clone().unwrap_or_default();
 			if p.nojoin == 0 || p.sep.is_some() {
-				ps.val = text::sepjoin(&a, p.sep.as_deref(), p.ifs.as_deref());
+				ps.val = text::sepjoin(&a, p.sep.as_deref(), p.ifs.as_deref(), p.mb);
 				ps.isarr = 0;
 			} else if force_split
 				&& (p.spsep.is_some() || p.nojoin == 2 || (p.ifs.is_none() && ps.isarr < 0))
@@ -3228,7 +3600,7 @@ fn finish(
 				} else {
 					p.spsep.as_deref()
 				};
-				ps.val = text::sepjoin(&a, j, p.ifs.as_deref());
+				ps.val = text::sepjoin(&a, j, p.ifs.as_deref(), p.mb);
 				ps.isarr = 0;
 			}
 			if ps.isarr == 0 {
@@ -3256,11 +3628,11 @@ fn finish(
 					.take()
 					.unwrap_or_default()
 					.iter()
-					.map(|e| text::casemodify(e, cm))
+					.map(|e| text::casemodify(e, cm, p.mb))
 					.collect(),
 			);
 		} else {
-			ps.val = text::casemodify(&ps.val, cm);
+			ps.val = text::casemodify(&ps.val, cm, p.mb);
 		}
 	}
 	if p.getkeys >= 0 {
@@ -3289,9 +3661,27 @@ fn finish(
 		}
 	}
 	if p.presc > 0 {
-		return Err(Stop::Fail(Diag::Unsupported {
-			what: "zsh prompt expansion in ${(%)…}".into()
-		}));
+		// `(%)`: escapes only (`PROMPT_PERCENT` alone); `(%%)`: as the
+		// shell's prompt options say.
+		let opts = (p.presc < 2).then_some((true, false, false));
+		let expand = |ex: &mut Expander<'_, '_>, s: &[u8]| -> X<Vec<u8>> {
+			let mut s = s.to_vec();
+			untokenize(&mut s);
+			let out =
+				crate::bash::vm::builtins::zsh_print::expand_prompt(ex, &unmetafy(&s), opts, false)?;
+			Ok(metafy(&out))
+		};
+		if ps.isarr != 0 {
+			let a = ps.aval.take().unwrap_or_default();
+			let mut out = Vec::with_capacity(a.len());
+			for e in a {
+				out.push(expand(ex, &e)?);
+			}
+			ps.aval = Some(out);
+		} else {
+			let v = std::mem::take(&mut ps.val);
+			ps.val = expand(ex, &v)?;
+		}
 	}
 	if p.quotemod != 0 {
 		let o = quote_opts(ex)?;
@@ -3313,10 +3703,14 @@ fn finish(
 						// (`is_mb_niceformat`, `hasspecial`).
 						let mut raw = s.to_vec();
 						untokenize(&mut raw);
+						let (bang, bang_special) =
+							params::bang_quoting(&mut ex.k.root, ex.cx.store, ex.vp);
 						let cs = zsh_quote::Charset {
-							utf8:        opt(ex, ZshOpt::Multibyte)?
+							utf8: opt(ex, ZshOpt::Multibyte)?
 								&& crate::bash::vm::locale::is_utf8(ex.k, ex.cx.store, ex.vp),
 							print_eight: opt(ex, ZshOpt::Printeightbit)?,
+							bang,
+							bang_special,
 						};
 						metafy(&zsh_quote::quotedzputs(&unmetafy(&raw), o.rcquotes, cs))
 					},
@@ -3369,7 +3763,7 @@ fn finish(
 				s = substnamedir(ex, &s)?;
 			}
 			if p.mods & 2 != 0 {
-				s = text::nicedupstring(&s);
+				s = text::nicedupstring(&s, p.mb);
 			}
 			Ok(s)
 		};
@@ -3386,16 +3780,23 @@ fn finish(
 		}
 	}
 	if p.shsplit != 0 {
+		// zsh `bufferwords` lexes under the shell's options.
+		let feat = crate::bash::vm::mode::features(
+			&mut ex.k.root,
+			ex.cx.store,
+			ex.vp,
+			crate::bash::syntax::Features::NONE,
+		)?;
 		let mut words: Vec<Vec<u8>> = Vec::new();
 		if ps.isarr != 0 {
 			for mut e in ps.aval.take().unwrap_or_default() {
 				untokenize(&mut e);
-				words.extend(crate::bash::syntax::zsh::bufferwords(&e, p.shsplit));
+				words.extend(crate::bash::syntax::zsh::bufferwords(&e, p.shsplit, feat));
 			}
 			ps.isarr = 0;
 		} else {
 			untokenize(&mut ps.val);
-			words = crate::bash::syntax::zsh::bufferwords(&ps.val, p.shsplit);
+			words = crate::bash::syntax::zsh::bufferwords(&ps.val, p.shsplit, feat);
 		}
 		if words.is_empty() {
 			ps.val = Vec::new();
@@ -3408,7 +3809,7 @@ fn finish(
 		}
 	}
 	if ps.isarr != 0 && p.ssub {
-		ps.val = text::sepjoin(ps.aval.as_deref().unwrap_or_default(), None, p.ifs.as_deref());
+		ps.val = text::sepjoin(ps.aval.as_deref().unwrap_or_default(), None, p.ifs.as_deref(), p.mb);
 		ps.isarr = 0;
 		l.array = false;
 	}
@@ -3458,7 +3859,8 @@ fn finish(
 					aval.reverse();
 				}
 			} else {
-				strmetasort(&mut aval, p.sortit);
+				let coll = params::collator(ex);
+				strmetasort(&mut aval, p.sortit, coll.as_ref());
 			}
 		}
 		let pad = |x: &[u8]| -> Vec<u8> {
@@ -3472,6 +3874,7 @@ fn finish(
 					&p.premul,
 					&p.postmul,
 					p.ifs.as_deref(),
+					p.mb,
 				)
 			} else {
 				x.to_vec()
@@ -3574,6 +3977,7 @@ fn finish(
 			&p.premul,
 			&p.postmul,
 			p.ifs.as_deref(),
+			p.mb,
 		);
 	}
 	if p.eval {
@@ -3691,9 +4095,16 @@ fn assign_target(unit: &crate::bash::ir::Unit, a: &crate::bash::ir::AssignOp) ->
 	name
 }
 
+/// A `GLOB_ASSIGN` value waiting for filename generation: the value and
+/// its glob (see [`assign_scalar`]).
+pub type GlobAssign = (Vec<BString>, Vec<(u32, BString)>);
+
 /// A zsh scalar assignment statement `name=word` / `name[sub]=word` /
 /// `name+=word` (zsh `addvars` with `PREFORK_SINGLE|PREFORK_ASSIGN`, then
-/// `assignsparam`).
+/// `assignsparam`). Under `GLOB_ASSIGN` a value with wildcards goes
+/// through filename generation instead: `Some` holds the value and its
+/// glob for that stage, then [`assign_globbed`] assigns the result.
+/// `shown` (for `xtrace`) gets the value assigned, unmetafied.
 ///
 /// # Errors
 /// Substitution and assignment errors; [`Stop::ZshSub`] parks.
@@ -3701,19 +4112,59 @@ pub fn assign_scalar(
 	ex: &mut Expander<'_, '_>,
 	unit: &crate::bash::ir::Unit,
 	a: &crate::bash::ir::AssignOp,
-) -> X<()> {
+	shown: Option<&mut BString>,
+) -> X<Option<GlobAssign>> {
 	let crate::bash::ir::AssignVal::Scalar(w) = a.value else {
-		return Ok(());
+		return Ok(None);
 	};
 	let word = zsh_word(unit, w).map_or_default(<[u8]>::to_vec);
 	let mut list = List::one(word);
 	let mut rf = 0;
 	prefork(ex, &mut list, PREFORK_SINGLE | PREFORK_ASSIGN, &mut rf)?;
+	if opt(ex, ZshOpt::Globassign)? {
+		let popts = zpattern::opts(ex)?;
+		let mut probe = list.nodes.first().cloned().unwrap_or_default();
+		if crate::bash::pattern::zsh::haswilds(&mut probe, &popts) {
+			let mut out = Vec::new();
+			let mut globs = Vec::new();
+			finish_words(ex, list, &mut out, Some(&mut globs), false)?;
+			return Ok(Some((out, globs)));
+		}
+	}
 	let mut val = list.nodes.into_iter().next().unwrap_or_default();
 	untokenize(&mut val);
+	if let Some(shown) = shown {
+		*shown = BString::from(unmetafy(&val));
+	}
 	let target = assign_target(unit, a);
 	let flags = params::ASSPM_WARN | if a.append { params::ASSPM_AUGMENT } else { 0 };
-	effect(ex, |ex| params::assignsparam_meta(ex, &target, val, flags))
+	effect(ex, |ex| params::assignsparam_meta(ex, &target, val, flags)).map(|()| None)
+}
+
+/// A `GLOB_ASSIGN` scalar assignment after filename generation (zsh
+/// `addvars`): the parameter is unset so it is created again, a scalar
+/// for one word (or none), an array for more.
+///
+/// # Errors
+/// Assignment errors.
+pub fn assign_globbed(
+	ex: &mut Expander<'_, '_>,
+	unit: &crate::bash::ir::Unit,
+	a: &crate::bash::ir::AssignOp,
+	words: Vec<BString>,
+) -> X<()> {
+	let target = assign_target(unit, a);
+	// zsh's `unsetparam` finds no parameter called `name[sub]`.
+	if a.index.is_none() {
+		params::unsetparam(ex, &target)?;
+	}
+	let flags = params::ASSPM_WARN | if a.append { params::ASSPM_AUGMENT } else { 0 };
+	if words.len() <= 1 {
+		let val = words.first().map_or_else(Vec::new, |w| metafy(w));
+		return params::assignsparam_meta(ex, &target, val, flags);
+	}
+	let val: Vec<Vec<u8>> = words.iter().map(|w| metafy(w)).collect();
+	params::assignaparam_meta(ex, &target, val, flags)
 }
 
 /// The elements of a zsh array assignment `name=(…)`, expanded (zsh
@@ -3882,10 +4333,10 @@ mod tests {
 			.iter()
 			.map(|s| s.as_bytes().to_vec())
 			.collect();
-		strmetasort(&mut v, SORTIT_SOMEHOW | SORTIT_NUMERICALLY);
+		strmetasort(&mut v, SORTIT_SOMEHOW | SORTIT_NUMERICALLY, None);
 		let got: Vec<&[u8]> = v.iter().map(Vec::as_slice).collect();
 		assert_eq!(got, [&b"a9"[..], b"a10", b"a100", b"b1"]);
-		strmetasort(&mut v, SORTIT_SOMEHOW | SORTIT_BACKWARDS);
+		strmetasort(&mut v, SORTIT_SOMEHOW | SORTIT_BACKWARDS, None);
 		let got: Vec<&[u8]> = v.iter().map(Vec::as_slice).collect();
 		assert_eq!(got, [&b"b1"[..], b"a9", b"a100", b"a10"]);
 	}
@@ -3894,12 +4345,17 @@ mod tests {
 	fn padding_matches_zsh() {
 		// zsh: x=abc; print -r
 		// "${(l:5:)x}|${(r:5::-:)x}|${(l:2:)x}|${(l:7::12:)x}"
-		assert_eq!(dopadding(b"abc", 5, 0, None, None, b" ", b" ", None), b"  abc");
-		assert_eq!(dopadding(b"abc", 0, 5, None, None, b" ", b"-", None), b"abc--");
-		assert_eq!(dopadding(b"abc", 2, 0, None, None, b" ", b" ", None), b"bc");
-		assert_eq!(dopadding(b"abc", 7, 0, None, None, b"12", b" ", None), b"1212abc");
+		assert_eq!(dopadding(b"abc", 5, 0, None, None, b" ", b" ", None, false), b"  abc");
+		assert_eq!(dopadding(b"abc", 0, 5, None, None, b" ", b"-", None, false), b"abc--");
+		assert_eq!(dopadding(b"abc", 2, 0, None, None, b" ", b" ", None, false), b"bc");
+		assert_eq!(dopadding(b"abc", 7, 0, None, None, b"12", b" ", None, false), b"1212abc");
 		// zsh: print -r "${(l:7::1::X:)x}" → 111Xabc
-		assert_eq!(dopadding(b"abc", 7, 0, Some(b"X"), None, b"1", b" ", None), b"111Xabc");
+		assert_eq!(dopadding(b"abc", 7, 0, Some(b"X"), None, b"1", b" ", None, false), b"111Xabc");
+		// zsh: x=été; print -r "${(l:4::¥:)x}" → ¥été
+		assert_eq!(
+			dopadding("été".as_bytes(), 4, 0, None, None, "¥".as_bytes(), b" ", None, true),
+			"¥été".as_bytes()
+		);
 	}
 
 	#[test]
