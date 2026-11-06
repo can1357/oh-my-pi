@@ -2,9 +2,8 @@
  * Shared utilities for Google Generative AI and Google Cloud Code Assist providers.
  */
 
-import { scheduler } from "node:timers/promises";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { findRetryRefusal, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import { ThinkingFenceStripper } from "../dialect/thinking-fence-strip";
 import * as AIError from "../error";
@@ -29,6 +28,8 @@ import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
+import { admitsReplay, gateFetch, ReplayBudget, restoreReplaced, sleepUnderBudget } from "../utils/replay-budget";
+import { providerRetryPolicy, statedRetryWaitLimit } from "../utils/retry-wait";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import type {
 	Content,
@@ -527,7 +528,7 @@ function resetGoogleStreamOutputForRetry(output: AssistantMessage): void {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	output.stopReason = "stop";
-	output.errorMessage = undefined;
+	AIError.clearErrorText(output);
 	output.timestamp = Date.now();
 }
 
@@ -1030,6 +1031,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.forCall(options);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -1050,6 +1052,12 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// The current attempt's accepted (2xx) response headers, for `finalize`:
+		// an in-band chunk error or a cut stream keeps the response's
+		// `Retry-After`. Cleared when an attempt starts (the global-endpoint
+		// fallback, each empty-response retry), so a later attempt that fails
+		// before its response never reads an earlier response's headers.
+		let streamResponseHeaders: Headers | undefined;
 
 		try {
 			const plan = await prepare();
@@ -1069,7 +1077,10 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			};
 
 			const bodyJson = JSON.stringify(paramsToWireBody(params));
-			const fetchImpl = plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl);
+			const fetchImpl = gateFetch(
+				replayBudget,
+				plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl),
+			);
 			// Bun's native fetch ceiling is disabled (`timeout: false`) so configurable
 			// watchdogs govern slow-prefill streams (issues #2422, #16991). Direct callers
 			// that bypass `register-builtins` (which installs the iterator-level
@@ -1079,6 +1090,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				options?.streamFirstEventTimeoutMs ??
 				getStreamFirstEventTimeoutMs(options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs());
 			const openStreamAt = async (requestUrl: string): Promise<ReadableStream<Uint8Array>> => {
+				streamResponseHeaders = undefined;
 				const watchdog = armPreResponseTimeout(options?.signal, firstEventTimeoutMs);
 				// `timeout` is a Bun fetch extension absent from the DOM `RequestInit`.
 				const init: RequestInit & { timeout: false } = {
@@ -1105,6 +1117,7 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					// liveness belongs to the event iterator's idle watchdog.
 					watchdog.clear();
 				}
+				streamResponseHeaders = response.headers;
 				if (!response.body) {
 					throw new AIError.ProviderResponseError("Google API returned an empty response body", {
 						provider: model.provider,
@@ -1115,13 +1128,19 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			};
 			// A regional Vertex endpoint 404s for models published only on the
 			// global endpoint; retry global once so a stale/ambient region never
-			// breaks a request that worked before regional routing existed.
+			// breaks a request that worked before regional routing existed. The
+			// global request is a replay: under a budget it must fit and is checked
+			// again at handoff, and a refusal keeps the regional failure.
 			const openStream = async (): Promise<ReadableStream<Uint8Array>> => {
 				if (!plan.fallbackUrl) return openStreamAt(plan.url);
 				try {
 					return await openStreamAt(plan.url);
 				} catch (error) {
+					if (findRetryRefusal(error)) throw restoreReplaced(error);
 					if (error instanceof AIError.GoogleApiError && error.status === 404) {
+						if (replayBudget && !(await replayBudget.replayAfter(error, 0, options?.signal, options))) {
+							throw error;
+						}
 						return openStreamAt(plan.fallbackUrl);
 					}
 					throw error;
@@ -1160,17 +1179,26 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				) {
 					break;
 				}
-				if (emptyAttempt >= MAX_EMPTY_STREAM_RETRIES) {
-					throw new AIError.ProviderResponseError(
-						`Google API returned an empty response (finishReason STOP with no content) after ${MAX_EMPTY_STREAM_RETRIES + 1} attempts`,
-						{ provider: model.provider, kind: "empty-body" },
-					);
+				const emptyRetryDelayMs = Math.min(
+					EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt,
+					statedRetryWaitLimit(providerRetryPolicy(options)).limitMs,
+				);
+				const emptyFailure = new AIError.ProviderResponseError(
+					`Google API returned an empty response (finishReason STOP with no content) after ${emptyAttempt + 1} attempts`,
+					{ provider: model.provider, kind: "empty-body" },
+				);
+				if (emptyAttempt >= MAX_EMPTY_STREAM_RETRIES || !admitsReplay(replayBudget, emptyRetryDelayMs)) {
+					throw emptyFailure;
 				}
 				try {
-					await scheduler.wait(EMPTY_STREAM_BASE_DELAY_MS * 2 ** emptyAttempt, { signal: options?.signal });
-				} catch {
-					throw new AIError.AbortError();
+					if (!(await sleepUnderBudget(replayBudget, options, emptyRetryDelayMs, options?.signal))) {
+						throw emptyFailure;
+					}
+				} catch (error) {
+					if (options?.signal?.aborted) throw new AIError.AbortError();
+					throw error;
 				}
+				replayBudget?.arm(emptyFailure);
 				resetGoogleStreamOutputForRetry(output);
 				body = await openStream();
 			}
@@ -1180,14 +1208,17 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 			stream.push({ type: "done", reason: output.stopReason as "length" | "stop" | "toolUse", message: output });
 			stream.end();
 		} catch (error) {
-			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message;
+			const result = await AIError.finalize(restoreReplaced(error, replayBudget), {
+				api: model.api,
+				signal: options?.signal,
+				rawRequestDump,
+				streamResponseHeaders,
+			});
+			AIError.applyFinalizeResult(output, result);
+			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();

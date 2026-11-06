@@ -12,10 +12,12 @@
 import { type } from "@oh-my-pi/omptype";
 import { isRecord, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import {
+	inBandErrorHeaders,
 	isOpenAIReasoningEffort,
 	isOpenAIServiceTier,
 	openAIErrorResponse,
 	resolvePromptCacheKey,
+	thrownRetryAfterMs,
 } from "../auth-gateway/http";
 import type { AuthGatewayStreamControl, AuthGatewayParsedRequest as ParsedRequest } from "../auth-gateway/types";
 import * as AIError from "../error";
@@ -1408,7 +1410,10 @@ export function encodeStream(
 								sequence_number: seq(),
 								response: {
 									...responseSnapshot("failed", finishedItems),
-									error: { message: failureMessage.errorMessage ?? "stream failed" },
+									error: {
+										message: failureMessage.errorMessage ?? "stream failed",
+										headers: inBandErrorHeaders(failureMessage.errorRetryAfterMs),
+									},
 								},
 							}),
 						),
@@ -1447,7 +1452,12 @@ export function encodeStream(
 								usage,
 								incomplete_details: incompleteDetailsForStatus(status),
 								...(status === "failed"
-									? { error: { message: message?.errorMessage ?? "response failed" } }
+									? {
+											error: {
+												message: message?.errorMessage ?? "response failed",
+												headers: inBandErrorHeaders(message?.errorRetryAfterMs),
+											},
+										}
 									: {}),
 							},
 						}),
@@ -1469,7 +1479,10 @@ export function encodeStream(
 									status: "failed",
 									model: requestedModelId,
 									output: [],
-									error: { message: err instanceof Error ? err.message : String(err) },
+									error: {
+										message: err instanceof Error ? err.message : String(err),
+										headers: inBandErrorHeaders(thrownRetryAfterMs(err)),
+									},
 									incomplete_details: null,
 								},
 							}),

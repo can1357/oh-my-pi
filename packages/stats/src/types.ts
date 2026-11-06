@@ -29,8 +29,17 @@ export interface MessageStats {
 	ttft: number | null;
 	/** Stop reason */
 	stopReason: StopReason;
-	/** Error message if stopReason is error */
+	/** Error message if stopReason is error: the failure's own text; grouping and classification read it */
 	errorMessage: string | null;
+	/**
+	 * The server's retry wait (ms) the failed turn stated (`AssistantMessage.errorRetryAfterMs`),
+	 * or `null` when it stated none. `errorMessage` stays the raw text; the UI appends the wait
+	 * at display. Always written by `rowToMessageStats` and the parser; optional only because
+	 * session fixtures that stand in for ingest input are typed as `MessageStats` too.
+	 */
+	errorRetryAfterMs?: number | null;
+	/** Shown failure text with local diagnostics, for display only; retry waits remain structured. */
+	errorDisplayMessage?: string | null;
 	/** Token usage */
 	usage: Usage;
 	/** Which agent produced this message (main agent, task subagent, advisor) */
@@ -116,6 +125,9 @@ export interface SessionModelUsageEntry {
 	usage: Usage;
 	stopReason?: StopReason;
 	errorMessage?: string;
+	/** The server's retry wait (ms) the failed call stated; `errorMessage` never carries it. */
+	errorRetryAfterMs?: number;
+	errorDisplayMessage?: string;
 }
 
 /**

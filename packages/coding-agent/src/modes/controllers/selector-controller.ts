@@ -1,6 +1,7 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, UsageReport } from "@oh-my-pi/pi-ai";
+import { errorText, retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
@@ -14,6 +15,7 @@ import {
 	logger,
 	normalizePathForComparison,
 	sanitizeText,
+	withRetryWait,
 } from "@oh-my-pi/pi-utils";
 import {
 	ADVISOR_DEFAULT_TOOL_NAMES,
@@ -743,7 +745,7 @@ export class SelectorController {
 		try {
 			await this.#applySessionModel(model, `${model.provider}/${model.id}`, thinkingLevel, overContext);
 		} catch (error) {
-			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			this.ctx.showError(errorText(error));
 		}
 	}
 
@@ -849,7 +851,7 @@ export class SelectorController {
 						try {
 							await selectOnly.onSelect(selector);
 						} catch (error) {
-							this.ctx.showError(sanitizeErrorLine(error));
+							this.ctx.showError(withRetryWait(sanitizeErrorLine(error), retryAfterMsOf(error)));
 						}
 						return;
 					}
@@ -860,7 +862,7 @@ export class SelectorController {
 						await this.#applySessionModel(model, selector, undefined, overContext);
 						if (!overContext) done();
 					} catch (error) {
-						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						this.ctx.showError(errorText(error));
 					}
 				},
 				onPickRole: async entry => {
@@ -875,7 +877,7 @@ export class SelectorController {
 						);
 						done();
 					} catch (error) {
-						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						this.ctx.showError(errorText(error));
 					}
 				},
 				onPickTask: (_model, selector) => {
@@ -1020,7 +1022,7 @@ export class SelectorController {
 						}
 						return true;
 					} catch (error) {
-						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						this.ctx.showError(errorText(error));
 						return false;
 					} finally {
 						releaseDefaultMutation?.();
@@ -1105,7 +1107,7 @@ export class SelectorController {
 							}
 						}
 					} catch (error) {
-						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						this.ctx.showError(errorText(error));
 					} finally {
 						releaseDefaultMutation?.();
 						hub?.refreshAfterExternalMutation();
@@ -1121,7 +1123,7 @@ export class SelectorController {
 								: `${roleInfo?.tag ?? roleInfo?.name ?? role} fallbacks cleared`,
 						);
 					} catch (error) {
-						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						this.ctx.showError(errorText(error));
 					}
 				},
 
@@ -1136,7 +1138,7 @@ export class SelectorController {
 							order.length > 0 ? `Quick-switch cycle: ${order.join(" → ")}` : "Quick-switch cycle cleared",
 						);
 					} catch (error) {
-						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						this.ctx.showError(errorText(error));
 					}
 				},
 				onCompactionPointChange: (model, input, confirmed) => {
@@ -1179,7 +1181,7 @@ export class SelectorController {
 						saveModelPreset(this.ctx.settings, name);
 						this.ctx.showStatus(modelPresetSavedMessage(this.ctx.settings, name));
 					} catch (error) {
-						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						this.ctx.showError(errorText(error));
 					}
 				},
 				onSwitchPreset: async name => {
@@ -1193,7 +1195,7 @@ export class SelectorController {
 						if (isCleanModelPresetSwitch(result)) this.ctx.showStatus(message);
 						else this.ctx.showWarning(message);
 					} catch (error) {
-						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						this.ctx.showError(errorText(error));
 					} finally {
 						hub?.refreshAfterExternalMutation();
 					}
@@ -1434,7 +1436,7 @@ export class SelectorController {
 			this.ctx.showStatus("Rewound to selected point");
 		} catch (error) {
 			done();
-			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			this.ctx.showError(errorText(error));
 		}
 	}
 
@@ -1652,7 +1654,7 @@ export class SelectorController {
 							this.ctx.session.resumeAfterAskReanswer();
 						}
 					} catch (error) {
-						this.ctx.showError(error instanceof Error ? error.message : String(error));
+						this.ctx.showError(errorText(error));
 					} finally {
 						if (summaryLoader) {
 							summaryLoader.stop();
@@ -1774,9 +1776,7 @@ export class SelectorController {
 			try {
 				foreignSessions = await store.list();
 			} catch (error) {
-				this.ctx.showError(
-					`Failed to list ${sourceName} sessions: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				this.ctx.showError(`Failed to list ${sourceName} sessions: ${errorText(error)}`);
 				return;
 			}
 			if (foreignSessions.length === 0) {
@@ -1789,9 +1789,7 @@ export class SelectorController {
 				try {
 					await this.ctx.settings.flush();
 				} catch (error) {
-					this.ctx.showError(
-						`Failed to save pending settings: ${error instanceof Error ? error.message : String(error)}`,
-					);
+					this.ctx.showError(`Failed to save pending settings: ${errorText(error)}`);
 					return false;
 				}
 				const foreignSession = foreignByPath.get(session.path);
@@ -1916,7 +1914,7 @@ export class SelectorController {
 					try {
 						await onSelect(session);
 					} catch (error) {
-						this.ctx.showError(sanitizeErrorLine(error));
+						this.ctx.showError(withRetryWait(sanitizeErrorLine(error), retryAfterMsOf(error)));
 					}
 					return;
 				}
@@ -1929,7 +1927,7 @@ export class SelectorController {
 						this.ctx.ui.requestRender();
 					}
 				} catch (error) {
-					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					this.ctx.showError(errorText(error));
 				} finally {
 					if (!keepOpen) done();
 				}
@@ -2005,7 +2003,7 @@ export class SelectorController {
 			try {
 				await this.ctx.settings.flush();
 			} catch (err) {
-				this.ctx.showError(`Failed to save pending settings: ${err instanceof Error ? err.message : String(err)}`);
+				this.ctx.showError(`Failed to save pending settings: ${errorText(err)}`);
 				return false;
 			}
 		}
@@ -2076,7 +2074,7 @@ export class SelectorController {
 			return { sessionPath: movedPath, movedFrom: info.cwd };
 		} catch (error) {
 			this.ctx.showError(
-				`Could not move the session out of removed worktree ${shortenPath(info.cwd)}: ${error instanceof Error ? error.message : String(error)}`,
+				`Could not move the session out of removed worktree ${shortenPath(info.cwd)}: ${errorText(error)}`,
 			);
 			return undefined;
 		}
@@ -2220,7 +2218,7 @@ export class SelectorController {
 				// surfaced "Login cancelled".
 				return false;
 			}
-			this.ctx.showError(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Login failed: ${errorText(error)}`);
 			return false;
 		} finally {
 			restoreEditor();
@@ -2259,7 +2257,7 @@ export class SelectorController {
 			}
 			this.ctx.present(block);
 		} catch (error: unknown) {
-			this.ctx.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(`Logout failed: ${errorText(error)}`);
 		}
 	}
 
@@ -2269,9 +2267,7 @@ export class SelectorController {
 		try {
 			accounts = await listLogoutAccounts(authStorage, providerId, this.ctx.session.sessionId);
 		} catch (error: unknown) {
-			this.ctx.showError(
-				`Could not load stored credentials: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.ctx.showError(`Could not load stored credentials: ${errorText(error)}`);
 			return;
 		}
 		const { getOAuthProviders, LogoutAccountSelectorComponent } = await loadProviderAuthUi();
@@ -2373,9 +2369,7 @@ export class SelectorController {
 		try {
 			accountList = await session.listCurrentProviderOAuthAccounts();
 		} catch (error) {
-			this.ctx.showError(
-				`Could not load provider accounts: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.ctx.showError(`Could not load provider accounts: ${errorText(error)}`);
 			return;
 		}
 		if (!accountList) {
@@ -2427,12 +2421,7 @@ export class SelectorController {
 			statuses = await session.listResetCredits();
 		} catch (error) {
 			this.ctx.showError(
-				sanitizeText(
-					`Could not load saved resets: ${error instanceof Error ? error.message : String(error)}`.replace(
-						/[\r\n\t]+/g,
-						" ",
-					),
-				),
+				sanitizeText(`Could not load saved resets: ${errorText(error)}`.replace(/[\r\n\t]+/g, " ")),
 			);
 			return;
 		}
@@ -2475,12 +2464,7 @@ export class SelectorController {
 			outcome = await this.ctx.session.redeemResetCredit(account.target);
 		} catch (error) {
 			this.ctx.showError(
-				sanitizeText(
-					`Reset failed for ${account.label}: ${error instanceof Error ? error.message : String(error)}`.replace(
-						/[\r\n\t]+/g,
-						" ",
-					),
-				),
+				sanitizeText(`Reset failed for ${account.label}: ${errorText(error)}`.replace(/[\r\n\t]+/g, " ")),
 			);
 			return;
 		}

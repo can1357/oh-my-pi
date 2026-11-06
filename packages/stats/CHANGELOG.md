@@ -8,6 +8,9 @@
 
 - Frustration no longer counts agent-attributed messages as user messages; history is corrected on next sync ([#18183](https://github.com/can1357/oh-my-pi/issues/18183)).
 - Sessions sync promptly while an `omp stats` dashboard page is open, without repeated page refreshes during full sync.
+### Added
+
+- Added the server's retry wait to failed requests: a new `error_retry_after_ms` column, shown beside the error in the errors and requests views ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

@@ -46,7 +46,7 @@ export interface ResponsesWebSocketTimeouts {
 	idleTimeoutMs?: number;
 }
 
-export type ResponsesWebSocketExchange = { send: Record<string, unknown> } | { receive: true };
+export type ResponsesWebSocketExchange = { send: Record<string, unknown>; beforeSend?: () => void } | { receive: true };
 
 export interface ResponsesWebSocketControlFrames {
 	consume(frame: Record<string, unknown>): boolean | Error;
@@ -424,7 +424,7 @@ export class ResponsesWebSocketConnection {
 				this.#debugResponseLog = debugSession
 					? await debugSession.openResponseLog("WebSocket 101 Switching Protocols", this.#handshakeHeaders)
 					: undefined;
-				this.sendControl(exchange.send);
+				this.sendControl(exchange.send, exchange.beforeSend);
 			}
 			let sawFirstEvent = false;
 			let lastProgressAt = Date.now();
@@ -509,7 +509,7 @@ export class ResponsesWebSocketConnection {
 		}
 	}
 
-	sendControl(frame: Record<string, unknown>): void {
+	sendControl(frame: Record<string, unknown>, beforeSend?: () => void): void {
 		const payload = JSON.stringify(frame);
 		notifyFrame(this.#streamObserver, frame, payload, "→");
 		const socket = this.#socket;
@@ -518,6 +518,8 @@ export class ResponsesWebSocketConnection {
 				cause: this.#closedError?.cause,
 			});
 		}
+		// The replay handoff runs after diagnostics, immediately before the write.
+		beforeSend?.();
 		try {
 			socket.send(payload);
 		} catch (error) {

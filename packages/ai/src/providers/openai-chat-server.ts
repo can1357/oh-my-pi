@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { type } from "@oh-my-pi/omptype";
 import {
+	inBandErrorHeaders,
 	isOpenAIReasoningEffort,
 	isOpenAIServiceTier,
 	openAIErrorResponse,
 	resolvePromptCacheKey,
+	thrownRetryAfterMs,
 } from "../auth-gateway/http";
 /**
  * Parsed inbound OpenAI chat-completions request, ready to feed into pi-ai
@@ -782,7 +784,13 @@ export function encodeStream(
 
 						case "error": {
 							const msg = event.error.errorMessage ?? "stream error";
-							writeSse(controller, { error: { message: msg, type: "upstream_error" } });
+							writeSse(controller, {
+								error: {
+									message: msg,
+									type: "upstream_error",
+									headers: inBandErrorHeaders(event.error.errorRetryAfterMs),
+								},
+							});
 							controller.close();
 							return;
 						}
@@ -803,7 +811,9 @@ export function encodeStream(
 			} catch (err) {
 				if (!cancelled) {
 					const msg = err instanceof Error ? err.message : String(err);
-					writeSse(controller, { error: { message: msg, type: "upstream_error" } });
+					writeSse(controller, {
+						error: { message: msg, type: "upstream_error", headers: inBandErrorHeaders(thrownRetryAfterMs(err)) },
+					});
 					controller.close();
 				}
 			} finally {

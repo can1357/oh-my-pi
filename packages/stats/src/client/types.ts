@@ -53,6 +53,10 @@ export interface MessageStats {
 	ttft: number | null;
 	stopReason: string;
 	errorMessage: string | null;
+	/** The server's retry wait (ms); the UI appends it to the shown text at display. */
+	errorRetryAfterMs?: number | null;
+	/** `errorMessage` as omp showed it, when that differs; for display only */
+	errorDisplayMessage?: string | null;
 	usage: Usage;
 	/** Ingest found no tariff to price this request from; its zero is unknown spend. */
 	costUnpriced?: boolean;

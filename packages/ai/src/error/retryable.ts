@@ -1,14 +1,14 @@
-import { isRetryableError, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils";
+import { isRetryableError } from "@oh-my-pi/pi-utils";
 import { getHeadersFromError, getShouldRetryFromHeaders } from "../utils/retry-after";
 import {
 	ALIYUN_MM_GATEWAY_PATTERN,
 	CODEX_HTTP_BODY_READ_ERROR_PATTERN,
 	isRetryableStreamEnvelopeError,
+	isTransientErrorText,
 	isTransientStreamDropError,
 	isTransientStreamParseError,
 	isUsageLimit,
 	status,
-	TRANSIENT_TRANSPORT_PATTERN,
 } from "./flags";
 
 /**
@@ -23,10 +23,11 @@ export function isTransientStatus(status: number | undefined): boolean {
 	return status !== undefined && (status === 408 || status === 429 || status >= 500);
 }
 
-// Provider-stream transient phrasings not covered by the shared
-// TRANSIENT_TRANSPORT_PATTERN (TLS record corruption, HTTP/2 peer stream
-// errors, upstream code 1302). The shared pattern already covers rate-limit /
-// overloaded / 5xx / timeout / first-event wording.
+// Provider-stream transient phrasings not covered by the shared transient
+// reading (TLS record corruption, HTTP/2 peer stream errors, upstream code
+// 1302). The shared reading already covers rate-limit / overloaded / 5xx /
+// timeout / first-event wording, and reads a bare status off text a count,
+// a duration or an identifier cannot forge.
 const PROVIDER_TRANSIENT_EXTRA_PATTERN = /bad record mac|stream error.*received from peer|1302/i;
 
 function isTransientTransportMessage(message: string): boolean {
@@ -46,6 +47,11 @@ function isTransientTransportMessage(message: string): boolean {
  * A captured `x-should-retry` response header overrides the status and text
  * heuristics below: a server or gateway that already retried and answered
  * `false` must not be replayed by provider retry loops.
+ *
+ * The text reading is {@link isTransientErrorText}, the same one classification
+ * uses, so a number this layer sees as a status is one classification sees as
+ * a status too — and a count, a duration or an identifier that happens to
+ * read `429` is neither.
  */
 export function isProviderRetryableError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
@@ -60,9 +66,8 @@ export function isProviderRetryableError(error: unknown): boolean {
 	}
 	const msg = error.message.toLowerCase();
 	if (
-		isUnexpectedSocketCloseMessage(msg) ||
+		isTransientErrorText(error.message) ||
 		isTransientTransportMessage(msg) ||
-		TRANSIENT_TRANSPORT_PATTERN.test(msg) ||
 		CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(msg) ||
 		PROVIDER_TRANSIENT_EXTRA_PATTERN.test(msg) ||
 		isTransientStreamParseError(error) ||

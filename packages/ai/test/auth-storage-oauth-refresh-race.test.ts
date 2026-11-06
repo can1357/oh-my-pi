@@ -1116,39 +1116,43 @@ describe("AuthStorage OAuth refresh race", () => {
 		});
 	});
 
-	test.skipIf(process.platform === "win32")("SIGTERM waits for a rotated token to reach SQLite", async () => {
-		if (!store || !tempDir) throw new Error("test setup failed");
-		const release = path.join(tempDir, "release-response");
-		const child = Bun.spawn(
-			[
-				process.execPath,
-				path.join(import.meta.dir, "fixtures/oauth-sigterm-child.ts"),
-				path.join(tempDir, "agent.db"),
-				release,
-			],
-			{ stdout: "pipe", stderr: "pipe" },
-		);
-		try {
-			const first = await Promise.race([
-				child.stdout.getReader().read(),
-				child.exited.then(() => {
-					throw new Error("OAuth child exited before the provider rotated its token");
-				}),
-			]);
-			expect(new TextDecoder().decode(first.value)).toContain("rotated");
-			child.kill("SIGTERM");
-			await Bun.write(release, "complete");
-			expect(await child.exited).toBe(143);
-			expect(store.listAuthCredentials("anthropic")[0]?.credential).toMatchObject({
-				type: "oauth",
-				access: "new",
-				refresh: "new-refresh",
-			});
-		} finally {
-			if (child.exitCode === null) child.kill();
-			await child.exited;
-		}
-	});
+	test.skipIf(process.platform === "win32")(
+		"SIGTERM waits for a rotated token to reach SQLite",
+		async () => {
+			if (!store || !tempDir) throw new Error("test setup failed");
+			const release = path.join(tempDir, "release-response");
+			const child = Bun.spawn(
+				[
+					process.execPath,
+					path.join(import.meta.dir, "fixtures/oauth-sigterm-child.ts"),
+					path.join(tempDir, "agent.db"),
+					release,
+				],
+				{ stdout: "pipe", stderr: "pipe" },
+			);
+			try {
+				const first = await Promise.race([
+					child.stdout.getReader().read(),
+					child.exited.then(() => {
+						throw new Error("OAuth child exited before the provider rotated its token");
+					}),
+				]);
+				expect(new TextDecoder().decode(first.value)).toContain("rotated");
+				child.kill("SIGTERM");
+				await Bun.write(release, "complete");
+				expect(await child.exited).toBe(143);
+				expect(store.listAuthCredentials("anthropic")[0]?.credential).toMatchObject({
+					type: "oauth",
+					access: "new",
+					refresh: "new-refresh",
+				});
+			} finally {
+				if (child.exitCode === null) child.kill();
+				await child.exited;
+			}
+		},
+		30_000,
+	); // spawns a bun child: its start time varies ten-fold with host load, past the default 5 s
 
 	for (const stage of ["during-pass", "after-pass"] as const) {
 		test.skipIf(process.platform === "win32")(

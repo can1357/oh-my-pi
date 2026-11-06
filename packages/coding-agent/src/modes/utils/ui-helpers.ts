@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { RecapNotice } from "@oh-my-pi/pi-tui/chat/recap-notice";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
@@ -1477,11 +1478,7 @@ export class UiHelpers {
 
 		const reportFailure = (count: number, error: unknown) => {
 			this.ctx.updatePendingMessagesDisplay();
-			this.ctx.showError(
-				`Failed to send queued message${count > 1 ? "s" : ""}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
+			this.ctx.showError(`Failed to send queued message${count > 1 ? "s" : ""}: ${errorText(error)}`);
 		};
 
 		const restoreQueue = (error: unknown) => {

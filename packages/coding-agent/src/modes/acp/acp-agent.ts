@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { assistantErrorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { getAgentDir, getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import {
 	type Agent,
@@ -397,6 +398,9 @@ type ReplayableMessage = {
 	role: string;
 	content?: unknown;
 	errorMessage?: string;
+	/** The failed response's retry wait in milliseconds; rendered next to `errorMessage` at replay. */
+	errorRetryAfterMs?: number;
+	errorDisplayMessage?: string;
 	toolCallId?: string;
 	toolName?: string;
 	details?: unknown;
@@ -2028,7 +2032,7 @@ export class AcpAgent implements Agent {
 		if (lastAssistant?.stopReason !== "error") {
 			return;
 		}
-		const errorMessage = lastAssistant.errorMessage;
+		const errorMessage = lastAssistant.errorDisplayMessage ?? lastAssistant.errorMessage;
 		if (!errorMessage || isSilentAbort(lastAssistant)) {
 			return;
 		}
@@ -2036,7 +2040,7 @@ export class AcpAgent implements Agent {
 			sessionId: record.protocolSessionId,
 			update: {
 				sessionUpdate: "agent_message_chunk",
-				content: { type: "text", text: errorMessage },
+				content: { type: "text", text: assistantErrorText(lastAssistant) },
 				messageId: record.liveMessageId ?? crypto.randomUUID(),
 			},
 		});
@@ -2137,6 +2141,7 @@ export class AcpAgent implements Agent {
 			case "length":
 				return "max_tokens";
 			case "error": {
+				// The unrendered error text: the server's retry wait is never in it.
 				const errorMessage = lastAssistant?.errorMessage ?? "";
 				if (/content[_ ]?filter|refus(al|ed)/i.test(errorMessage)) {
 					return "refusal";
@@ -2926,7 +2931,7 @@ export class AcpAgent implements Agent {
 				sessionId,
 				update: {
 					sessionUpdate: "agent_message_chunk",
-					content: { type: "text", text: message.errorMessage },
+					content: { type: "text", text: assistantErrorText(message) },
 					messageId,
 				},
 			});

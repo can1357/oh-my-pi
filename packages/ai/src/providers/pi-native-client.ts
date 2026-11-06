@@ -36,6 +36,8 @@ import {
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
 import { notifyProviderResponse } from "../utils/provider-response";
+import { isRetryWaitMs } from "../utils/retry-after";
+import { isRefusedRetryWait } from "../utils/retry-wait";
 
 /**
  * Fields that must not cross the wire — either non-serializable (functions,
@@ -250,7 +252,9 @@ export function streamPiNative<TApi extends Api>(
 			});
 			let sawTerminal = false;
 			for await (const frame of watchedSource) {
-				const event = isGatewayFailureFrame(frame) ? gatewayFailureEvent(model as Model<Api>, frame) : frame;
+				const event = isGatewayFailureFrame(frame)
+					? gatewayFailureEvent(model as Model<Api>, frame)
+					: sanitizeRelayedRefusal(frame);
 				if (event.type === "done" || event.type === "error") sawTerminal = true;
 				stream.push(event);
 				// `stream.push` resolves `.result()` on `done`/`error`; subsequent
@@ -292,13 +296,17 @@ export function streamPiNative<TApi extends Api>(
 
 /**
  * `encodeStream`'s transport-failure envelope (`pi-native-server.ts`): an
- * `error` event carrying only `errorMessage`, because the gateway had no
- * `AssistantMessage` to attach when the upstream iterator threw.
+ * `error` event carrying only `errorMessage`, the thrown error's header retry
+ * wait as `errorRetryAfterMs`, and a structured transport refusal when one
+ * exists, because the gateway had no `AssistantMessage` to attach when the
+ * upstream iterator threw.
  */
 interface GatewayFailureFrame {
 	type: "error";
 	reason: "error";
 	errorMessage?: string;
+	errorRetryAfterMs?: unknown;
+	errorRetryWaitRefusal?: unknown;
 	error?: undefined;
 }
 
@@ -309,11 +317,42 @@ function isGatewayFailureFrame(frame: PiNativeWireEvent): frame is GatewayFailur
 	return frame.type === "error" && frame.error === undefined;
 }
 
+/**
+ * A relayed event with any refusal it carries validated.
+ *
+ * A gateway's event is untrusted JSON. `errorRetryWaitRefusal` is read by
+ * recovery to decide not to retry (`oneshot-retry`), so a malformed one —
+ * `false`, a string, a wait shorter than its own limit — would suppress a
+ * retry that should have happened. The payload-less envelope below validates
+ * its own copy; a full event's nested message needs the same gate, because it
+ * reaches the same reader.
+ */
+function sanitizeRelayedRefusal(frame: AssistantMessageEvent): AssistantMessageEvent {
+	if (frame.type !== "error") return frame;
+	const refusal: unknown = frame.error.errorRetryWaitRefusal;
+	if (refusal === undefined) return frame;
+	if (!isRefusedRetryWait(refusal)) {
+		delete frame.error.errorRetryWaitRefusal;
+		return frame;
+	}
+	// A valid refusal arrives as the field alone from a relay that only copied
+	// fields. The recorder completes it, so a relayed refusal reads the same as
+	// one this process recorded itself.
+	AIError.recordRefusedRetryWait(frame.error, refusal);
+	return frame;
+}
+
 /** Canonical `error` event for a {@link GatewayFailureFrame}, attributed to the requested model. */
 function gatewayFailureEvent(model: Model<Api>, frame: GatewayFailureFrame): AssistantMessageEvent {
 	const error = makeSyntheticAssistant(model);
 	error.stopReason = "error";
 	error.errorMessage = frame.errorMessage || "auth-gateway stream failed";
+	if (isRetryWaitMs(frame.errorRetryAfterMs)) error.errorRetryAfterMs = frame.errorRetryAfterMs;
+	// Structured and in words together: a field no display renders tells the
+	// person nothing about why the provider stopped.
+	if (isRefusedRetryWait(frame.errorRetryWaitRefusal)) {
+		AIError.recordRefusedRetryWait(error, frame.errorRetryWaitRefusal);
+	}
 	return { type: "error", reason: "error", error };
 }
 

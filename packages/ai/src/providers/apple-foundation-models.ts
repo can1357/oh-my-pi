@@ -399,13 +399,10 @@ export const streamAppleFoundationModels: StreamFunction<"apple-foundation-model
 				provider: model.provider,
 				signal: options.signal,
 			});
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message;
+			AIError.applyFinalizeResult(output, result);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();

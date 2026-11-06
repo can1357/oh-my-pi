@@ -1,5 +1,7 @@
 import { expect, test, vi } from "bun:test";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { ollamaCloudModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/ollama";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
 
@@ -274,6 +276,37 @@ test("ollama-chat surfaces HTTP 400 response bodies", async () => {
 
 	expect(response.stopReason).toBe("error");
 	expect(response.errorStatus).toBe(400);
-	expect(response.errorMessage).toContain("HTTP 400 from https://ollama.com/api/chat");
+	expect(response.errorMessage).toContain("HTTP 400");
 	expect(response.errorMessage).toContain("num_predict exceeds model cap");
+	// The endpoint is local configuration: shown, but never in the text decisions read.
+	expect(response.errorMessage).not.toContain("ollama.com");
+	expect(errorDisplayText(response)).toContain("HTTP 400 from https://ollama.com/api/chat");
+	expect(errorDisplayText(response)).toContain("num_predict exceeds model cap");
+});
+
+test("ollama-chat decides a rejection the same whatever its configured base URL holds", async () => {
+	const reject: FetchImpl = vi.fn(
+		async () =>
+			new Response(JSON.stringify({ error: "bad parameter" }), {
+				status: 400,
+				headers: { "Content-Type": "application/json" },
+			}),
+	);
+	const run = (baseUrl: string) =>
+		streamSimple(
+			{ ...cloudModel, baseUrl },
+			{ messages: [{ role: "user", content: "Reply ok", timestamp: Date.now() }] },
+			{ apiKey: "cloud-test-key", fetch: reject },
+		).result();
+
+	const plain = await run("https://ollama.example/plain");
+	for (const path of ["retry-after-ms=3600000", "usage_limit_reached", "context_length_exceeded"]) {
+		const response = await run(`https://ollama.example/${path}`);
+		expect(response.errorMessage).toBe(plain.errorMessage);
+		expect(response.errorId).toBe(plain.errorId);
+		expect(
+			extractProviderRetryHint(response.provider, response.errorMessage, response.errorRetryAfterMs),
+		).toBeUndefined();
+		expect(errorDisplayText(response)).toContain(path);
+	}
 });

@@ -425,6 +425,42 @@ describe("branch summarization", () => {
 		expect(result).toEqual({ aborted: true });
 	});
 
+	test("reports a failed summary's shown text, with its request-dump path", async () => {
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "user-1",
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				message: { role: "user", content: "Summarize this branch.", timestamp: 0 },
+			},
+		];
+		const result = await generateBranchSummary(entries, {
+			model: MODEL,
+			apiKey: "test-api-key",
+			signal: new AbortController().signal,
+			completeImpl: async () => ({
+				role: "assistant",
+				content: [],
+				api: "mock",
+				provider: "mock",
+				model: "mock-model",
+				usage: ZERO_USAGE,
+				stopReason: "error",
+				errorStatus: 400,
+				errorMessage: "HTTP 400\nunknown model",
+				errorDisplayMessage:
+					"HTTP 400 from http://localhost:11434/api/chat\nunknown model\nraw-http-request=/tmp/1.json",
+				timestamp: 1,
+			}),
+		});
+
+		// The dump path is one of omp's own additions, so it rides on the shown
+		// text; `error` stays the provider's own words, which decisions read.
+		expect(result.errorDisplayMessage).toContain("raw-http-request=/tmp/1.json");
+		expect(result.error).toBe("HTTP 400\nunknown model");
+	});
+
 	test("returns an error for a summary that hit the output limit, without another call", async () => {
 		const entries: SessionEntry[] = [
 			{

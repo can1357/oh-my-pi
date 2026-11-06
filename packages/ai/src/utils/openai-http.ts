@@ -22,7 +22,8 @@ export { OpenAIHttpError };
 
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
-import { getShouldRetryFromHeaders } from "./retry-after";
+import { getShouldRetryFromHeaders, transportRetry } from "./retry-after";
+import { carryRetryWaitRefusal, DEFAULT_MAX_RETRY_DELAY_MS, type ProviderRetryPolicy } from "./retry-wait";
 
 /**
  * Total attempts (initial + retries). Parity with the removed SDK clients'
@@ -71,8 +72,18 @@ export interface OpenAIStreamRequestInit {
 	fetch?: FetchImpl;
 	/** Override the default transport attempt budget for this request. */
 	maxAttempts?: number;
+	/**
+	 * The caller's `StreamOptions` retry policy (`maxRetryDelayMs`,
+	 * `providerRetryWaitCeilingMs`, `providerRetryWait`): no transport retry
+	 * sleeps past its bound, a 429/5xx stating a longer wait (in a header or its
+	 * body) is surfaced at once instead, and every sleep goes through its hook
+	 * ({@link transportRetry}).
+	 */
+	retryPolicy?: ProviderRetryPolicy;
 	/** Optional caller-specific gate composed with shared transport retry exclusions. */
 	shouldRetryResponse?: (response: Response, bodyText: string) => boolean | Promise<boolean>;
+	/** Consulted before each transport retry with its wait; `false` stops retrying (`StreamOptions.replayBudgetMs`). */
+	retryGate?: (delayMs: number) => boolean;
 	/**
 	 * Raw wire-frame observer (`onSseEvent` debug pipeline). Leave it unset
 	 * when no diagnostic listener exists: any observer turns on per-line raw
@@ -99,6 +110,7 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
+	const retry = transportRetry(init.retryPolicy, DEFAULT_MAX_RETRY_DELAY_MS);
 	let response: Response;
 	try {
 		response = await fetchWithRetry(init.url, {
@@ -108,6 +120,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 			signal: init.signal,
 			fetch: init.fetch,
 			maxAttempts: init.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+			...retry.fetchOptions,
 			// A server/gateway `x-should-retry: false` verdict is terminal, as it was
 			// under the removed SDK client. A proxy concurrency-admission 429
 			// (`rate_limit_type: max_parallel_requests`) surfaces immediately instead of
@@ -117,6 +130,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 				getShouldRetryFromHeaders(response.headers) !== false &&
 				!isConcurrencyAdmissionRejection(response, bodyText) &&
 				(init.shouldRetryResponse === undefined || (await init.shouldRetryResponse(response, bodyText))),
+			retryGate: init.retryGate,
 			// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 			// Cold large-context streams legitimately exceed it; the caller's
 			// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.
@@ -128,7 +142,10 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		throw AIError.networkFailureError(error, init.url);
 	}
 	if (!response.ok) {
-		throw await captureOpenAIHttpError(response);
+		const error = await captureOpenAIHttpError(response);
+		// A refusal the caller's bounds kept from a retry says so in the failed message.
+		retry.markRefusal(error);
+		throw error;
 	}
 	if (!response.body) {
 		throw new AIError.ProviderResponseError(`OpenAI stream response has no body (status ${response.status})`, {
@@ -175,7 +192,12 @@ async function* decodeStream<TEvent>(
 	}
 }
 
-/** Decode a non-2xx response into an {@link OpenAIHttpError} without consuming it twice. */
+/**
+ * Decode a non-2xx response into an {@link OpenAIHttpError} without consuming
+ * it twice. A refusal a seam recorded on the response travels with it
+ * ({@link carryRetryWaitRefusal}): only the error reaches `AIError.finalize`,
+ * and the failed message must still say which bound refused the wait.
+ */
 export async function captureOpenAIHttpError(response: Response): Promise<AIError.OpenAIHttpError> {
 	let bodyText: string | undefined;
 	let bodyJson: unknown;
@@ -201,5 +223,7 @@ export async function captureOpenAIHttpError(response: Response): Promise<AIErro
 	const message = detail
 		? `${response.status} ${detail.length > MAX_DETAIL_CHARS ? detail.slice(0, MAX_DETAIL_CHARS) : detail}`
 		: `${response.status} status code (no body)`;
-	return new AIError.OpenAIHttpError(message, captured, code);
+	const failure = new AIError.OpenAIHttpError(message, captured, code);
+	carryRetryWaitRefusal(response, failure);
+	return failure;
 }

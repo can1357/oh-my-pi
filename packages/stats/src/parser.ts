@@ -13,6 +13,7 @@ import {
 	type ToolResultMessage,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
+import { isRetryWaitMs } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
 import type {
@@ -309,6 +310,9 @@ function extractStats(
 		// normally: classify by whether it carried an error.
 		stopReason: msg.stopReason ?? (msg.errorMessage ? "error" : "aborted"),
 		errorMessage: msg.errorMessage ?? null,
+		// The wait stays structured beside the shown text; the dashboard renders it at display.
+		errorRetryAfterMs: isRetryWaitMs(msg.errorRetryAfterMs) ? msg.errorRetryAfterMs : null,
+		errorDisplayMessage: msg.errorDisplayMessage ?? null,
 		usage,
 		agentType,
 		serviceTier: servedTier ?? null,
@@ -339,6 +343,8 @@ function extractModelUsageStats(
 				usage: entry.usage,
 				stopReason: entry.stopReason ?? "stop",
 				errorMessage: entry.errorMessage,
+				errorRetryAfterMs: entry.errorRetryAfterMs,
+				errorDisplayMessage: entry.errorDisplayMessage,
 				timestamp: Number.isFinite(timestamp) ? timestamp : 0,
 			},
 		},

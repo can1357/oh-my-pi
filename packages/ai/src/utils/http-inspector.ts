@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getLogsDir, isBunTestRuntime, isEnoent, isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error/flags";
-import { appendRetryAfterHint, errorMessageText, getHeadersFromError } from "./retry-after.js";
+import { errorMessageText } from "./retry-after.js";
 
 export type RawHttpRequestDump = {
 	provider: string;
@@ -62,22 +62,6 @@ export function shouldDumpRejectedRequest(error: unknown): boolean {
 
 const RAW_HTTP_REQUEST_LINE = "raw-http-request=";
 const RAW_HTTP_REQUEST_SAVE_FAILED_LINE = "raw-http-request-save-failed=";
-
-/**
- * Remove the local request-dump lines {@link appendRawHttpRequestDumpFor400} appends,
- * leaving only the provider-facing error text. Hosts that relay provider errors
- * (RPC `prompt_result`) must not leak OMP-local file paths.
- */
-export function stripRawHttpRequestDiagnostics(message: string): string {
-	const lines = message.split("\n");
-	let end = lines.length;
-	while (
-		end > 0 &&
-		(lines[end - 1].startsWith(RAW_HTTP_REQUEST_LINE) || lines[end - 1].startsWith(RAW_HTTP_REQUEST_SAVE_FAILED_LINE))
-	)
-		end--;
-	return end === lines.length ? message : lines.slice(0, end).join("\n");
-}
 
 export async function appendRawHttpRequestDumpFor400(
 	message: string,
@@ -161,26 +145,42 @@ export async function pruneHttpRequestDumps(dir: string, retention: HttpRequestD
 	}
 }
 
-export async function finalizeErrorMessage(
+/**
+ * The provider's error text: the thrown message, with a captured response body
+ * folded in. It carries none of omp's display additions (retry hint,
+ * request-dump path), so it is what decisions about the error read. Providers
+ * store it as `errorMessage`.
+ */
+export function formatProviderErrorText(error: unknown, capturedErrorResponse?: CapturedHttpErrorResponse): string {
+	const captured = formatCapturedHttpErrorParts(capturedErrorResponse);
+	return captured
+		? mergeCapturedBody(errorMessageText(error), captured, capturedErrorResponse?.status)
+		: errorMessageText(error);
+}
+
+/**
+ * {@link formatProviderErrorText} as omp shows it: for a 400-class rejection
+ * with a `rawRequestDump`, the path of the dumped request. Display only: the
+ * path is local text. The response's retry wait is not written in — it
+ * travels structured, as `AssistantMessage.errorRetryAfterMs`, so no
+ * classifier can read its digits as a status.
+ */
+export async function finalizeErrorDisplayMessage(
 	error: unknown,
 	rawRequestDump: RawHttpRequestDump | undefined,
 	capturedErrorResponse?: CapturedHttpErrorResponse,
 ): Promise<string> {
-	const captured = formatCapturedHttpErrorParts(capturedErrorResponse);
-	const body = captured
-		? mergeCapturedBody(errorMessageText(error), captured, capturedErrorResponse?.status)
-		: errorMessageText(error);
-	const message = appendRetryAfterHint(body, capturedErrorResponse?.headers ?? getHeadersFromError(error));
-	return appendRawHttpRequestDumpFor400(message, error, rawRequestDump);
+	const body = formatProviderErrorText(error, capturedErrorResponse);
+	return appendRawHttpRequestDumpFor400(body, error, rawRequestDump);
 }
 
 const STATUS_PREFIX_PATTERN = /^\s*\d{3}\s+/;
 
 /**
  * Fold the captured provider body into the thrown message so it prints once.
- * Works on the message before any retry hint is appended: OpenAI-family errors
- * cap the body they interpolate, so the thrown message may hold only a prefix
- * of the captured body, which the captured copy then replaces.
+ * OpenAI-family errors cap the body they interpolate, so the thrown message may
+ * hold only a prefix of the captured body, which the captured copy then
+ * replaces.
  */
 function mergeCapturedBody(message: string, captured: CapturedHttpErrorText, status: number | undefined): string {
 	if (/\bstatus code\s*\(no body\)/i.test(message)) {
@@ -200,7 +200,7 @@ function withSuffix(message: string, captured: CapturedHttpErrorText): string {
 
 /**
  * Rewrite error message for GitHub Copilot request failures.
- * Must run AFTER finalizeErrorMessage since it replaces the message entirely.
+ * Must run AFTER finalizeErrorDisplayMessage since it replaces the message entirely.
  *
  * 401 = token invalid/expired → credential removal is safe, prompt re-login.
  * 403 = token valid but access denied (plan, model policy, org restriction) →

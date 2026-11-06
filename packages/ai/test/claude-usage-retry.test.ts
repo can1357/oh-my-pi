@@ -125,6 +125,30 @@ describe("claudeUsageProvider retry contract", () => {
 		expect(retryWait.mock.calls[0]?.[0]).toBe(1000);
 	});
 
+	it.each([
+		["an IMF date without its weekday, not as 31 seconds", "31 Oct 2026 12:00:30 GMT", 30_000],
+		[
+			"an RFC 850 two-digit year decades ahead, not as the last century",
+			"Sunday, 31-Oct-60 12:00:30 GMT",
+			Date.UTC(2060, 9, 31, 12, 0, 30) - Date.UTC(2026, 9, 31, 12, 0, 0),
+		],
+	])("honours a Retry-After date with the shared reader: %s", async (_name, retryAfter, expectedWaitMs) => {
+		vi.spyOn(Date, "now").mockReturnValue(Date.UTC(2026, 9, 31, 12, 0, 0));
+		let attempt = 0;
+		const retryWait = vi.fn(async (_delayMs: number, _signal?: AbortSignal) => {});
+		const fetchMock = (async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (new URL(url).search !== "") return jsonResponse(200, VALID_PAYLOAD);
+			attempt += 1;
+			if (attempt === 1) return jsonResponse(503, { error: "unavailable" }, { "retry-after": retryAfter });
+			return jsonResponse(200, VALID_PAYLOAD);
+		}) as FetchImpl;
+
+		await claudeUsageProvider.fetchUsage(baseParams(), makeContext(fetchMock, retryWait));
+		expect(attempt).toBe(2);
+		expect(retryWait.mock.calls[0]?.[0]).toBe(expectedWaitMs);
+	});
+
 	it("aborts the retry sleep when the signal fires mid-backoff", async () => {
 		let attempt = 0;
 		const fetchMock = (async (_url: string | URL, init?: RequestInit) => {

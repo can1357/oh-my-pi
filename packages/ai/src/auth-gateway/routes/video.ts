@@ -13,7 +13,14 @@ import {
 	mirrorRequestAbort,
 	resolveGatewayApiKey,
 } from "../dispatch";
-import { gatewayResponseHeaders, json, resolveClientIdentity, codedErrorResponse } from "../http";
+import {
+	codedErrorResponse,
+	gatewayResponseHeaders,
+	json,
+	resolveClientIdentity,
+	thrownRetryAfterMs,
+	withRetryAfterHeaders,
+} from "../http";
 
 interface ResolvedVideoRequest {
 	model: Model<Api>;
@@ -173,7 +180,10 @@ export async function handleVideoSubmit(
 		if (controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway video submit failed", { format: "video-submit", error: classified.message, peer });
-		return codedErrorResponse(classified.status, classified.type, classified.message);
+		return withRetryAfterHeaders(
+			codedErrorResponse(classified.status, classified.type, classified.message),
+			thrownRetryAfterMs(error),
+		);
 	}
 }
 
@@ -205,7 +215,10 @@ export async function handleVideoPoll(
 		if (resolved.controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway video poll failed", { format: "video-poll", error: classified.message, peer });
-		return codedErrorResponse(classified.status, classified.type, classified.message);
+		return withRetryAfterHeaders(
+			codedErrorResponse(classified.status, classified.type, classified.message),
+			thrownRetryAfterMs(error),
+		);
 	}
 }
 
@@ -232,6 +245,9 @@ export async function handleVideoContent(
 		if (resolved.controller.signal.aborted) return aborted();
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway video content failed", { format: "video-content", error: classified.message, peer });
-		return codedErrorResponse(classified.status, classified.type, classified.message);
+		return withRetryAfterHeaders(
+			codedErrorResponse(classified.status, classified.type, classified.message),
+			thrownRetryAfterMs(error),
+		);
 	}
 }

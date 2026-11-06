@@ -127,6 +127,10 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
+	/** The server's retry wait (ms) the failed call stated; `errorMessage` never carries it. */
+	errorRetryAfterMs?: number;
+	/** `errorMessage` as omp showed it, when that differs (request-dump path, endpoint). Display only. */
+	errorDisplayMessage?: string;
 	/**
 	 * A cache-warm refresh that answered for the conversation as it stood: when it was sent (a hit restarts
 	 * the cache lifetime then) and whether it read the cache. Absent on a failed, replaced or outdated refresh.

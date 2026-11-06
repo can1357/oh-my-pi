@@ -311,6 +311,53 @@ describe("buildShareSnapshot", () => {
 		expect(JSON.stringify(entries)).toContain(secret);
 	});
 
+	test("redacts omp's display error text and drops the provider text older sessions kept apart", () => {
+		const secret = "share-error-secret";
+		const ts = new Date(0).toISOString();
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				timestamp: ts,
+				message: {
+					role: "assistant",
+					content: [],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "test",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "error",
+					errorMessage: `400 key ${secret} rejected`,
+					errorDisplayMessage: `400 key ${secret} rejected\nraw-http-request=/home/${secret}/dump.json`,
+					// An older session file: omp stored the provider's text under this name.
+					errorClassificationMessage: `400 key ${secret} rejected`,
+					timestamp: 1,
+				},
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "a1",
+		} as unknown as SessionManager;
+
+		const flat = JSON.stringify(
+			buildShareSnapshot(sm, { obfuscator: new SecretObfuscator([{ type: "plain", content: secret }]) }),
+		);
+
+		expect(flat).not.toContain(secret);
+		expect(flat).not.toContain("errorClassificationMessage");
+		expect(flat).toContain("raw-http-request=");
+	});
+
 	test("redacts every title-change field before sharing", () => {
 		const secret = "share-title-secret";
 		const entries: SessionEntry[] = [

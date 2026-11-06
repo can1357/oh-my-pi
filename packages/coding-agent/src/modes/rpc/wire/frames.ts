@@ -25,6 +25,10 @@ export const frameDefs = {
 			"provider?": "string",
 			"model?": "string",
 			"httpStatus?": "number.integer",
+			"retryAfterMs?": doc(
+				"number",
+				"The failed response's retry wait in milliseconds, from its headers. `message` never carries it.",
+			),
 			retryable: doc("boolean", "Transient: resubmitting later may succeed (omp's own retries are exhausted)."),
 			"code?": doc(
 				"'cost_cap'",

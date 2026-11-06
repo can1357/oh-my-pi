@@ -56,7 +56,7 @@ import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import type { OpenAIResponsesOptions } from "./providers/openai-responses";
 import type { kStreamingPartialJson } from "./utils/block-symbols";
 import type { AssistantMessageEventStream } from "./utils/event-stream";
-
+import type { RefusedRetryWait } from "./utils/retry-wait";
 export type { StopDetails } from "./providers/anthropic-wire";
 export type { AssistantMessageEventStream } from "./utils/event-stream";
 
@@ -550,6 +550,52 @@ export interface StreamOptions {
 	 */
 	maxRetryDelayMs?: number;
 	/**
+	 * Wall-clock budget, in milliseconds from the start of this call, for every
+	 * replay the call makes after a failure: a backoff retry, a pre-response
+	 * HTTP retry, a transport re-send or reconnect, an empty-response retry, a
+	 * thinking-loop re-sample, a retry with another credential, a switch to an
+	 * alternate endpoint, a fresh GitLab Duo workflow, a read-back of a stored
+	 * result, and a resend that corrects a rejected request (an uncompressed
+	 * body, another client identity, a dropped field, a rebuilt chain). One
+	 * budget governs the call and every call nested in it.
+	 *
+	 * A replay passes three checks: it is admitted only when it, wait included,
+	 * would begin inside the budget; its wait is raced against the deadline and
+	 * against `signal`, so a wait hook that never settles cannot hold the call;
+	 * and its request is checked once more at the moment the library hands it to
+	 * the transport — the call into `fetch`, the WebSocket write, the HTTP/2
+	 * stream open — after every preparation hook, signature and diagnostic
+	 * observer. A refused replay is never handed off: the provider returns the
+	 * failure it would have replaced, with
+	 * {@link AssistantMessage.replayBudgetExhausted} set — also when the refusal
+	 * lands on a token fetch or credential probe on the replay's way to the
+	 * wire, which never reads it as "no credentials". A refusal latches for
+	 * the rest of the call. A failure the provider would not have replayed is
+	 * never marked. What the transport does after the handoff — a custom `fetch`
+	 * that queues the request, a socket that buffers it — is outside the
+	 * library's control, and so outside this guarantee.
+	 *
+	 * A server's wait is never shortened to fit, because retrying sooner than
+	 * the server asked is a guaranteed failure: a requested wait that would end
+	 * past the budget ends the call at once rather than sleeping into it, and
+	 * the server's wait stays on the result for the caller as
+	 * {@link AssistantMessage.errorRetryAfterMs}, whatever rewrite the provider
+	 * applies to the message. The wait is the longest one the server named,
+	 * across every retry header and every hint in the error body, whatever
+	 * shorter or malformed hints sit beside it; an HTTP date is read by RFC
+	 * 9110's three forms, a two-digit year as at most fifty years ahead.
+	 *
+	 * A proxied call (`streamProxy`) sends the budget to the server that runs
+	 * it; whether that server keeps to it is up to the server.
+	 *
+	 * Requests inside one attempt that is already on the wire (a token fetch, a
+	 * streaming append) are not replays and are not checked. The request in
+	 * flight is never cut short. `0` (and any negative or `NaN` value) refuses
+	 * every replay. Unset or `Infinity` keeps each provider's own retry ceiling
+	 * and reads no clock.
+	 */
+	replayBudgetMs?: number;
+	/**
 	 * Optional metadata to include in API requests.
 	 * Providers extract the fields they understand and ignore the rest.
 	 * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.
@@ -731,6 +777,29 @@ export interface StreamOptions {
 	 * Optional retry delay hook for tests and transports that need custom scheduling.
 	 */
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	/**
+	 * Ceiling on a server-stated wait a provider sleeps before retrying on its
+	 * own: in the pre-output retry loops that read the stated wait, and in the
+	 * transport's retry of a 429 or 5xx. Retries of transport errors with no
+	 * stated wait (Codex's WebSocket and whitespace-loop retries) and
+	 * Anthropic's opted-in slow lane are not bounded by it. A server-stated
+	 * wait longer than it, wherever the response states it (a header,
+	 * `x-ratelimit-reset-after`, the body's `Please retry in 15s`), surfaces
+	 * the failure at once; the provider's own longer backoff is shortened to
+	 * it. The surfaced message ends with a note that the server asked for that
+	 * wait and the caller's ceiling refused it; `errorRetryAfterMs` and the
+	 * error's classification are unchanged. For a caller that recovers on its
+	 * own (waits visibly, rotates credentials, falls back) instead of letting a
+	 * provider sleep silently. When `maxRetryDelayMs` is also positive, the
+	 * smaller of the two bounds the sleep. A provider a wrapper calls with
+	 * rebuilt options keeps to the bound of the request that `stream` or
+	 * `streamSimple` started.
+	 *
+	 * Unset or non-positive (the default): a provider sleeps a stated wait up to
+	 * `maxRetryDelayMs`, as before. `providerRetryWait` plays no part in it.
+	 * omp sets 10 s; coding-agent `PROVIDER_RETRY_WAIT_CEILING_MS` says why.
+	 */
+	providerRetryWaitCeilingMs?: number;
 	/**
 	 * Accept a normal provider stop with no visible text or tool call as a
 	 * successful completion. Passive callers and zero-output cache refreshes use
@@ -1357,9 +1426,20 @@ export interface AssistantMessage {
 	elidedOutputTokens?: number;
 	stopReason: StopReason;
 	stopDetails?: StopDetails | null;
+	/**
+	 * The failure's own text: what the provider sent, or omp's text for a
+	 * failure it detected itself. Every decision about the error reads this
+	 * (classification, retry, retry timing, credential handling). It never
+	 * carries what omp adds for display; see {@link errorDisplayMessage}.
+	 */
 	errorMessage?: string;
-	/** Stable recovery-classification text when errorMessage includes display-only diagnostics. */
-	errorClassificationMessage?: string;
+	/**
+	 * `errorMessage` as omp shows it, when that differs: the rejected request's
+	 * dump path, a provider-specific explanation, the response's retry hint or
+	 * a local diagnostic added. Display only: the dump path is local text (it
+	 * names HOME), so no decision may read it. Read through `errorDisplayText`.
+	 */
+	errorDisplayMessage?: string;
 	/** True only when an exact request-body-read timeout failed on a full Responses replay, not a previous-response delta. */
 	requestBodyReadTimeoutFullReplay?: boolean;
 	/** Per-tool abort messages used when an aborted assistant turn needs different placeholder results per tool call. */
@@ -1368,6 +1448,96 @@ export interface AssistantMessage {
 	errorStatus?: number;
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
+	/**
+	 * `true` when the provider stopped replaying a transient failure because
+	 * {@link StreamOptions.replayBudgetMs} left no room for the next replay; set on
+	 * the result that replay would have replaced. Absent when the provider
+	 * stopped on its own (its retry ceiling, a failure it does not replay) or no
+	 * budget was set. A caller choosing whether to fail over reads it: the route
+	 * was not given the provider's full retry ceiling.
+	 */
+	replayBudgetExhausted?: boolean;
+	/**
+	 * The failed attempt's response-header retry wait, in milliseconds. Set from
+	 * the attempt's own response headers, never parsed from text
+	 * (`getFailureRetryAfterMs`): a refusing (non-2xx) response's headers or the
+	 * error's own (`retry-after-ms`, `Retry-After`, `x-ratelimit-reset[-ms]`),
+	 * including the structured `headers` member an in-band error object carries,
+	 * which wins over the HTTP response's. Four wire families read that member:
+	 * Codex (its error event, nested error or `response.failed` error), Anthropic
+	 * Messages (the `error` event's `error`), OpenAI Chat Completions (an `error`
+	 * chunk's `error`) and OpenAI Responses (the `error` event, or the
+	 * `response.failed` / failed terminal response's `error`). The omp auth
+	 * gateway writes it there as `{ "retry-after-ms": "<integer>" }` when its
+	 * upstream fails after it committed its `200`. Else the headers of the
+	 * accepted (2xx) response whose body the failure arrived in — an in-band
+	 * error or a stream cut — where only the explicit `retry-after-ms` and
+	 * `Retry-After` count. A free-form message or an arbitrary property on an
+	 * Error never sets it, so a body's text cannot forge it, however it is
+	 * worded. A relay (the proxy transport, the pi-native gateway, a chat-format
+	 * gateway route's in-band `headers`) can state any value here; `markReached`
+	 * caps the block it sets at `MAX_HINTED_BLOCK_MS`. Consumers that keep a
+	 * route or credential closed take the longer of this and the first wait the
+	 * message text names (`providerRetryWaitMs`). The wait is never written into
+	 * `errorMessage`: a display renders it from this field (`assistantErrorText`),
+	 * as the last step before a person reads it, so no classifier can mistake its
+	 * digits for a status.
+	 */
+	errorRetryAfterMs?: number;
+	/**
+	 * A lower retry layer rejected the server-stated wait under the recorded
+	 * bound. Outer retry layers must surface this failure instead of rebuilding
+	 * a backoff from `errorMessage`; this structured value is never inferred
+	 * from the message text.
+	 */
+	errorRetryWaitRefusal?: RefusedRetryWait;
+	/**
+	 * Request attempts a layer below the caller made beyond the first, before
+	 * this message was produced; `0` when the request went out exactly once.
+	 * `undefined` means "unknown", never "none": the provider does not report,
+	 * or its requests went through a transport it cannot see into — a
+	 * caller-supplied client, or a caller-supplied `fetch`, which may resend
+	 * inside itself — and a count taken above that cannot say the request went
+	 * out once.
+	 *
+	 * Counted where each request is issued, before it goes out, so an attempt
+	 * that never opens counts too: on the `fetch` at the bottom of the
+	 * provider's stack (the request's counted transport on the `stream()` path), or at the
+	 * provider's own socket. Every resend this repository owns sits above that
+	 * counter and is counted by where it is — the provider's own replays (a
+	 * transport reopen, a transport fallback, a checkpoint resume, rebuilt
+	 * parameters, a client's own retry budget), the replays `fetchWithRetry`
+	 * makes, the uncompressed resend of a refused compressed body, the GitHub
+	 * Copilot identity resend.
+	 *
+	 * **One count per logical request.** The counter rides on the `fetch` in
+	 * the request's options, so a layer that sends the request again by calling
+	 * the provider again with those options — `streamSimple`'s authentication
+	 * retry under another key, the replay-safe empty-completion retry — counts
+	 * into the same counter, and the provider reports the request's whole count,
+	 * not its own call's share. A request the route makes for itself (the
+	 * Vertex OAuth token) is not an attempt at the model request and is not
+	 * counted.
+	 *
+	 * **Attempts, not HTTP requests.** Below the counter one attempt may still
+	 * be several HTTP requests — a redirect hop `fetch` follows, a transport
+	 * whose logical turn is several RPCs (Cursor's `RunSSE` plus `BidiAppend`)
+	 * — and those stay one attempt: neither is a second generation of the
+	 * request. The question the count answers is whether the request was sent
+	 * again.
+	 *
+	 * Recovery above the provider has to know that — replaying again multiplies
+	 * the work below. Streamed content cannot stand in for it: each loop stops
+	 * at its own commitment boundary and those boundaries differ (the Codex
+	 * loop replays an *empty* reasoning block, while the Anthropic loop counts
+	 * the same opened block as committed), and a loop that replayed a 503
+	 * before the attempt that finally streamed leaves content the first attempt
+	 * never produced.
+	 *
+	 * Set on a successful message too: the layer above may discard it (an empty
+	 * completion it retries), and the attempts already spent still happened.
+	 */
+	providerReplays?: number;
 	/**
 	 * Stable identifiers for request features the provider silently dropped
 	 * during this turn (e.g. `"priority"`). Set when a server-side rejection

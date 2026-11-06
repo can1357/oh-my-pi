@@ -1,4 +1,5 @@
 import type { ResolvedThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import type {
 	Api,
 	ApiKeyResolver,
@@ -727,7 +728,7 @@ async function runBenchRequest(
 				firstTokenAt = now();
 			}
 			if (event.type === "error") {
-				return { ok: false, error: event.error.errorMessage ?? "request failed" };
+				return { ok: false, error: errorDisplayText(event.error) ?? "request failed" };
 			}
 			if (event.type === "done") {
 				message = event.message;
@@ -735,7 +736,7 @@ async function runBenchRequest(
 		}
 		message ??= await stream.result();
 		if (message.stopReason === "error" || message.errorMessage) {
-			return { ok: false, error: message.errorMessage ?? "request failed" };
+			return { ok: false, error: errorDisplayText(message) ?? "request failed" };
 		}
 		const rawDuration = message.duration ?? now() - startedAt;
 		const durationMs = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;

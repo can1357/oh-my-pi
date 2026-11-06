@@ -12,6 +12,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ANTHROPIC_THINKING, mapAnthropicToolChoice } from "../stream";
 import type { Context, Model, ModelSpec, SimpleStreamOptions, ThinkingControlMode } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { inheritReplayBudget, withReplayBudget } from "../utils/replay-budget";
 import { createProviderErrorMessage } from "./error-message";
 import { streamAnthropic, streamOpenAICompletions } from "./register-builtins";
 
@@ -48,6 +49,8 @@ export function streamOpenAIAnthropicShim(
 	config: OpenAIAnthropicShimConfig,
 ): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
+	// The replay budget's clock starts at this call; the delegate inherits it.
+	if (options) options = withReplayBudget(options);
 	const format = options?.format ?? config.defaultFormat;
 	// The resolver form of `apiKey` is resolved upstream in `streamSimple`;
 	// this shim only ever receives a static bearer string.
@@ -84,32 +87,38 @@ export function streamOpenAIAnthropicShim(
 					? (options?.thinkingBudgets?.[reasoningEffort] ?? ANTHROPIC_THINKING[reasoningEffort])
 					: undefined;
 
-				const innerStream = streamAnthropic(anthropicModel, context, {
-					apiKey,
-					temperature: options?.temperature,
-					topP: options?.topP,
-					topK: options?.topK,
-					minP: options?.minP,
-					presencePenalty: options?.presencePenalty,
-					repetitionPenalty: options?.repetitionPenalty,
-					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
-					signal: options?.signal,
-					headers: mergedHeaders,
-					cacheRetention: config.forwardCacheOptions ? options?.cacheRetention : undefined,
-					metadata: config.forwardCacheOptions ? options?.metadata : undefined,
-					sessionId: options?.sessionId,
-					promptCacheKey: options?.promptCacheKey,
-					onPayload: options?.onPayload,
-					onResponse: options?.onResponse,
-					onSseEvent: options?.onSseEvent,
-					fetch: options?.fetch,
-					thinkingEnabled,
-					thinkingBudgetTokens: thinkingBudget,
-					reasoning: config.anthropicThinkingMode ? reasoningEffort : undefined,
-					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
-					serviceTier: options?.serviceTier,
-					waitForTerminalDrain: options?.waitForTerminalDrain,
-				});
+				// The delegate spends this call's replay budget: same deadline, same arms.
+				const innerStream = streamAnthropic(
+					anthropicModel,
+					context,
+					inheritReplayBudget(options, {
+						apiKey,
+						temperature: options?.temperature,
+						topP: options?.topP,
+						topK: options?.topK,
+						minP: options?.minP,
+						presencePenalty: options?.presencePenalty,
+						repetitionPenalty: options?.repetitionPenalty,
+						maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
+						signal: options?.signal,
+						headers: mergedHeaders,
+						cacheRetention: config.forwardCacheOptions ? options?.cacheRetention : undefined,
+						metadata: config.forwardCacheOptions ? options?.metadata : undefined,
+						sessionId: options?.sessionId,
+						promptCacheKey: options?.promptCacheKey,
+						onPayload: options?.onPayload,
+						onResponse: options?.onResponse,
+						onSseEvent: options?.onSseEvent,
+						fetch: options?.fetch,
+						thinkingEnabled,
+						thinkingBudgetTokens: thinkingBudget,
+						reasoning: config.anthropicThinkingMode ? reasoningEffort : undefined,
+						toolChoice: mapAnthropicToolChoice(options?.toolChoice),
+						serviceTier: options?.serviceTier,
+						waitForTerminalDrain: options?.waitForTerminalDrain,
+						replayBudgetMs: options?.replayBudgetMs,
+					}),
+				);
 
 				for await (const event of innerStream) {
 					stream.push(event);
@@ -125,32 +134,37 @@ export function streamOpenAIAnthropicShim(
 					: model;
 
 				const reasoningEffort = options?.reasoning;
-				const innerStream = streamOpenAICompletions(openaiModel, context, {
-					apiKey,
-					temperature: options?.temperature,
-					topP: options?.topP,
-					topK: options?.topK,
-					minP: options?.minP,
-					presencePenalty: options?.presencePenalty,
-					repetitionPenalty: options?.repetitionPenalty,
-					maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
-					maxHttpAttempts: options?.maxHttpAttempts,
-					signal: options?.signal,
-					headers: mergedHeaders,
-					cacheRetention: config.forwardCacheOptions ? options?.cacheRetention : undefined,
-					metadata: config.forwardCacheOptions ? options?.metadata : undefined,
-					sessionId: options?.sessionId,
-					promptCacheKey: options?.promptCacheKey,
-					onPayload: options?.onPayload,
-					onResponse: options?.onResponse,
-					onSseEvent: options?.onSseEvent,
-					fetch: options?.fetch,
-					reasoning: reasoningEffort,
-					toolChoice: options?.toolChoice,
-					serviceTier: options?.serviceTier,
-					disableReasoning: options?.disableReasoning,
-					waitForTerminalDrain: options?.waitForTerminalDrain,
-				});
+				const innerStream = streamOpenAICompletions(
+					openaiModel,
+					context,
+					inheritReplayBudget(options, {
+						apiKey,
+						temperature: options?.temperature,
+						topP: options?.topP,
+						topK: options?.topK,
+						minP: options?.minP,
+						presencePenalty: options?.presencePenalty,
+						repetitionPenalty: options?.repetitionPenalty,
+						maxTokens: options?.maxTokens ?? model.maxTokens ?? undefined,
+						maxHttpAttempts: options?.maxHttpAttempts,
+						signal: options?.signal,
+						headers: mergedHeaders,
+						cacheRetention: config.forwardCacheOptions ? options?.cacheRetention : undefined,
+						metadata: config.forwardCacheOptions ? options?.metadata : undefined,
+						sessionId: options?.sessionId,
+						promptCacheKey: options?.promptCacheKey,
+						onPayload: options?.onPayload,
+						onResponse: options?.onResponse,
+						onSseEvent: options?.onSseEvent,
+						fetch: options?.fetch,
+						reasoning: reasoningEffort,
+						toolChoice: options?.toolChoice,
+						serviceTier: options?.serviceTier,
+						disableReasoning: options?.disableReasoning,
+						waitForTerminalDrain: options?.waitForTerminalDrain,
+						replayBudgetMs: options?.replayBudgetMs,
+					}),
+				);
 
 				for await (const event of innerStream) {
 					stream.push(event);

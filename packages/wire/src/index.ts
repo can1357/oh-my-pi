@@ -84,7 +84,22 @@ export interface AssistantMessage {
 	model: string;
 	usage: WireUsage;
 	stopReason: StopReason;
+	/** The failure's own text (what the provider sent). */
 	errorMessage?: string;
+	/** Shown failure text with local diagnostics, for display only. Retry waits remain structured. */
+	errorDisplayMessage?: string;
+	/** The server's retry wait (ms); renderers append it only at display time. */
+	errorRetryAfterMs?: number;
+	/** A lower retry layer refused this wait; outer layers must surface the failure. */
+	errorRetryWaitRefusal?: {
+		waitMs: number;
+		limitMs: number;
+		option: "maxRetryDelayMs" | "providerRetryWaitCeilingMs";
+	};
+	/** Extra wire attempts beyond the first; absent means unknown, not zero. */
+	providerReplays?: number;
+	/** The streaming call could not spend another replay under its shared budget. */
+	replayBudgetExhausted?: boolean;
 	timestamp: number;
 }
 
@@ -192,9 +207,35 @@ export type AgentEvent =
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: unknown; isError?: boolean }
 	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
 	| { type: "auto_compaction_start"; reason: string; action: string }
-	| { type: "auto_compaction_end"; aborted: boolean; willRetry: boolean; errorMessage?: string; skipped?: boolean }
-	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| {
+			type: "auto_compaction_end";
+			aborted: boolean;
+			willRetry: boolean;
+			errorMessage?: string;
+			/** The server's retry wait (ms) the compaction failure stated. */
+			retryAfterMs?: number;
+			skipped?: boolean;
+	  }
+	| {
+			type: "auto_retry_start";
+			attempt: number;
+			maxAttempts: number;
+			delayMs: number;
+			errorMessage: string;
+			errorId?: number;
+			/** The server's retry wait (ms) the failed turn stated, distinct from `delayMs`. */
+			retryAfterMs?: number;
+	  }
+	| {
+			type: "auto_retry_end";
+			success: boolean;
+			attempt: number;
+			finalError?: string;
+			/** The server's retry wait (ms) the final failed turn stated. */
+			finalRetryAfterMs?: number;
+			/** Persisted retry errors whose presentation changed when the retry settled. */
+			retryErrors?: Record<string, unknown>[];
+	  }
 	| { type: "thinking_level_changed"; thinkingLevel?: string };
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -238,6 +238,35 @@ describe("EventController error banner", () => {
 		expect(showPinnedError).toHaveBeenCalledWith("Retry failed after 3 attempts: Service unavailable");
 	});
 
+	it("pins and re-pins omp's display text while matching the retry end on the provider's text", async () => {
+		const errorMessage = "400 invalid_request_error: bad block";
+		const errorDisplayMessage = `${errorMessage}\nraw-http-request=/home/u/.omp/logs/http-400-requests/1.json`;
+		const message = makeAssistantMessage({
+			stopReason: "error",
+			errorId: AIError.create(AIError.Flag.Transient),
+			errorMessage,
+			errorDisplayMessage,
+		});
+		const { controller, showPinnedError, showError } = createFixture(message);
+
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		expect(showPinnedError).toHaveBeenCalledWith(errorDisplayMessage);
+		showPinnedError.mockClear();
+
+		await controller.handleEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt: 3,
+			finalError: errorMessage,
+		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(showPinnedError).toHaveBeenCalledWith(`Retry failed after 3 attempts: ${errorDisplayMessage}`);
+	});
+
 	it("surfaces a local continuation failure instead of the stale pinned provider error", async () => {
 		const providerError = "Service unavailable";
 		const message = makeAssistantMessage({
@@ -400,6 +429,115 @@ describe("EventController error banner", () => {
 		const rendered = Bun.stripANSI(component.render(120).join("\n"));
 		expect(rendered).toContain("provider error detail line 29");
 		expect(rendered).not.toContain("more lines");
+	});
+});
+
+/**
+ * The server's retry wait is structured (`errorRetryAfterMs`, `finalRetryAfterMs`,
+ * `retryAfterMs`) and is rendered only into the text a person reads. A missing
+ * field renders no wait, even when a message persisted before this change still
+ * carries ` retry-after-ms=N` in its text; and the rendered text is never what
+ * the controller compares or stores.
+ */
+describe("EventController retry wait display", () => {
+	const OLD_TEXT = "503 overloaded retry-after-ms=9000";
+
+	it("pins the wait the failed message states, and none scanned from its text", async () => {
+		const withWait = makeAssistantMessage({
+			stopReason: "error",
+			errorMessage: "503 overloaded",
+			errorRetryAfterMs: 9000,
+		});
+		const current = createFixture(withWait);
+		await current.controller.handleEvent({ type: "message_end", message: withWait } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		expect(current.showPinnedError).toHaveBeenCalledWith("503 overloaded (retry after 9.0s)");
+		expect(withWait.errorMessage).toBe("503 overloaded");
+
+		const persisted = makeAssistantMessage({ stopReason: "error", errorMessage: OLD_TEXT });
+		const old = createFixture(persisted);
+		await old.controller.handleEvent({ type: "message_end", message: persisted } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		expect(old.showPinnedError).toHaveBeenCalledWith(OLD_TEXT);
+	});
+
+	it("keeps the pinned terminal failure when its banner shows a rendered wait", async () => {
+		const message = makeAssistantMessage({
+			stopReason: "error",
+			errorId: AIError.create(AIError.Flag.Transient),
+			errorMessage: "503 overloaded",
+			errorRetryAfterMs: 9000,
+		});
+		const { controller, showPinnedError, showError, clearPinnedError } = createFixture(message);
+		await controller.handleEvent({ type: "message_end", message } as Extract<
+			AgentSessionEvent,
+			{ type: "message_end" }
+		>);
+		expect(showPinnedError).toHaveBeenCalledWith("503 overloaded (retry after 9.0s)");
+		showPinnedError.mockClear();
+		clearPinnedError.mockClear();
+
+		await controller.handleEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt: 3,
+			finalError: "503 overloaded",
+			finalRetryAfterMs: 9000,
+		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+
+		// The banner's rendered text is not what is matched against `finalError`:
+		// the same failure stays the one banner instead of a second error line.
+		expect(clearPinnedError).not.toHaveBeenCalled();
+		expect(showError).not.toHaveBeenCalled();
+		expect(showPinnedError).toHaveBeenCalledWith("Retry failed after 3 attempts: 503 overloaded (retry after 9.0s)");
+		expect(message.errorMessage).toBe("503 overloaded");
+	});
+
+	it("renders a retry failure's wait from finalRetryAfterMs, and none from finalError's text", async () => {
+		const { controller, showError } = createFixture();
+		await controller.handleEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt: 2,
+			finalError: "503 overloaded",
+			finalRetryAfterMs: 9000,
+		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+		expect(showError).toHaveBeenLastCalledWith("Retry failed after 2 attempts: 503 overloaded (retry after 9.0s)");
+
+		await controller.handleEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt: 2,
+			finalError: OLD_TEXT,
+		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
+		expect(showError).toHaveBeenLastCalledWith(`Retry failed after 2 attempts: ${OLD_TEXT}`);
+	});
+
+	it("renders a compaction failure's wait from retryAfterMs, and none from its text", async () => {
+		const { controller, ctx } = createFixture();
+		const showWarning = vi.spyOn(ctx, "showWarning");
+		await controller.handleEvent({
+			type: "auto_compaction_end",
+			action: "context-full",
+			aborted: false,
+			willRetry: false,
+			errorMessage: "Auto-compaction failed: 429 rate limited",
+			retryAfterMs: 9000,
+		} as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
+		expect(showWarning).toHaveBeenLastCalledWith("Auto-compaction failed: 429 rate limited (retry after 9.0s)");
+
+		await controller.handleEvent({
+			type: "auto_compaction_end",
+			action: "context-full",
+			aborted: false,
+			willRetry: false,
+			errorMessage: `Auto-compaction failed: ${OLD_TEXT}`,
+		} as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
+		expect(showWarning).toHaveBeenLastCalledWith(`Auto-compaction failed: ${OLD_TEXT}`);
 	});
 });
 

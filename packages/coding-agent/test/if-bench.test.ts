@@ -46,8 +46,10 @@ function replyStream(text: string): AssistantMessageEventStream {
 	})();
 	return Object.assign(iterator, { result: async () => message }) as unknown as AssistantMessageEventStream;
 }
-function errorStream(errorMessage: string): AssistantMessageEventStream {
-	const events = [{ type: "error", error: { errorMessage } }] as unknown as AssistantMessageEvent[];
+function errorStream(errorMessage: string, errorDisplayMessage?: string): AssistantMessageEventStream {
+	const events = [
+		{ type: "error", error: { errorMessage, errorDisplayMessage } },
+	] as unknown as AssistantMessageEvent[];
 	const iterator = (async function* () {
 		for (const event of events) yield event;
 	})();
@@ -225,6 +227,34 @@ describe("if-bench run", () => {
 		expect(report.turns[0]!.passed).toBe(true);
 		expect(report.turnsPassed).toBe(2);
 		expect(report.failure).toBeUndefined();
+	});
+
+	it("reports a streamed failure's shown text but decides a refusal from the provider's text", async () => {
+		let attempts = 0;
+		const summary = await runIfBenchCommand(
+			{ models: ["acme/if-bench-model"], flags: { turns: 1, par: 1 } },
+			{
+				createRuntime: async () => ({ modelRegistry: registry, close: () => {} }),
+				randomSessionId: () => "sess-d",
+				sleep: () => Promise.resolve(),
+				writeStdout: () => {},
+				writeStderr: () => {},
+				setExitCode: () => {},
+				now: () => 0,
+				stdoutIsTTY: false,
+				streamSimple: () => {
+					attempts += 1;
+					// The display text starts with omp's prefix, not "Refusal (": only the provider's text is a refusal.
+					return errorStream(
+						"Refusal (cyber): blocked",
+						"[shown] Refusal (cyber): blocked\nraw-http-request=/tmp/omp/1.json",
+					);
+				},
+			},
+		);
+		const report = summary.models[0]!;
+		expect(attempts).toBeGreaterThan(1);
+		expect(report.turns[0]!.response).toContain("raw-http-request=/tmp/omp/1.json");
 	});
 
 	it("scores a run-ending provider failure only after the refusal budget is spent", async () => {

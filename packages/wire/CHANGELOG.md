@@ -12,6 +12,13 @@
 
 - Added shell trace visualization: `ShellTrace` model and TSP `shell` kind for shell runs, node state, and layout.
 - Code views gain score-based line shading, labeled collapsible folds with notes, tones, and hover cards, and an overview strip.
+- Added `errorRetryAfterMs` to the collab `AssistantMessage` and the wait fields to the `auto_retry_start` (`retryAfterMs`) and `auto_retry_end` (`finalRetryAfterMs`) events ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+
+- `AssistantMessage.errorDisplayMessage`: a failed turn's error text as omp shows it (with the request-dump path or endpoint), beside the provider's own `errorMessage` ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
+### Added
+
+- Added the `ShellTrace` model (`shell-trace.ts`: a shell run's compiled units, per-node state and reflowed layout, byte-offset based) and the TSP `shell` kind with `TspShellProps`
 
 ## [18.16.0] - 2026-11-02
 

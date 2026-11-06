@@ -1,3 +1,6 @@
+import { retryWaitHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
+import { withRetryWait } from "@oh-my-pi/pi-utils/format";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
 import type {
@@ -66,6 +69,8 @@ export type WorkerCoreOptions =
 const RECENT_CELL_FILES_MAX = 256;
 
 function errorPayload(error: unknown): RunErrorPayload {
+	const retryAfterMs = retryAfterMsOf(error);
+	const wait = retryAfterMs === undefined ? {} : { retryAfterMs };
 	if (error instanceof Error) {
 		return {
 			name: error.name,
@@ -73,9 +78,10 @@ function errorPayload(error: unknown): RunErrorPayload {
 			stack: error.stack,
 			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
 			isToolError: error.name === "ToolError" || error instanceof ToolError,
+			...wait,
 		};
 	}
-	return { message: String(error) };
+	return { message: String(error), ...wait };
 }
 
 function errorFromPayload(payload: RunErrorPayload): Error {
@@ -83,7 +89,9 @@ function errorFromPayload(payload: RunErrorPayload): Error {
 	const error = new ctor(payload.message);
 	if (payload.name) error.name = payload.name;
 	if (payload.stack) error.stack = payload.stack;
-	return error;
+	// The wait stays structured on the error cell code catches; its message stays plain.
+	const headers = retryWaitHeaders(payload.retryAfterMs);
+	return headers ? Object.assign(error, { headers }) : error;
 }
 
 /**
@@ -105,7 +113,9 @@ function foldFloatingRejections(active: ActiveRun, result: RunResult, hooks: Run
 	}
 	for (const reason of reported) {
 		const payload = errorPayload(reason);
-		hooks.onText(`[unhandled rejection] ${payload.name ?? "Error"}: ${payload.message}\n`);
+		hooks.onText(
+			`[unhandled rejection] ${payload.name ?? "Error"}: ${withRetryWait(payload.message, payload.retryAfterMs)}\n`,
+		);
 	}
 	return folded;
 }

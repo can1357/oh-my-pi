@@ -12,6 +12,7 @@ import {
 	formatPercent,
 	formatRelativeTime,
 	formatTokensPerSecond,
+	hasRequestFailure,
 } from "../data/formatters";
 import { useQuery } from "../data/query";
 import { bucketAxis, rangeMeta } from "../data/range";
@@ -310,6 +311,6 @@ const REQUEST_COLUMNS = [
 		header: "Status",
 		align: "right" as const,
 		render: (row: MessageStats) =>
-			row.errorMessage ? <Badge tone="bad">Failed</Badge> : <Badge tone="ok">OK</Badge>,
+			hasRequestFailure(row) ? <Badge tone="bad">Failed</Badge> : <Badge tone="ok">OK</Badge>,
 	},
 ];

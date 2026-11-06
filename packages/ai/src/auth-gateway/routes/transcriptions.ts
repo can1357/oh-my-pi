@@ -11,7 +11,14 @@ import {
 	recordGatewayUsage,
 	resolveGatewayApiKey,
 } from "../dispatch";
-import { gatewayResponseHeaders, json, resolveClientIdentity, codedErrorResponse } from "../http";
+import {
+	codedErrorResponse,
+	gatewayResponseHeaders,
+	json,
+	resolveClientIdentity,
+	thrownRetryAfterMs,
+	withRetryAfterHeaders,
+} from "../http";
 
 /** OpenAI-compatible `POST /v1/audio/transcriptions` gateway handler. */
 export async function handleTranscriptions(
@@ -95,6 +102,9 @@ export async function handleTranscriptions(
 			error: classified.message,
 			peer,
 		});
-		return codedErrorResponse(classified.status, classified.type, classified.message);
+		return withRetryAfterHeaders(
+			codedErrorResponse(classified.status, classified.type, classified.message),
+			thrownRetryAfterMs(error),
+		);
 	}
 }

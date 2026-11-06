@@ -795,8 +795,10 @@ async function wrappedExecute(
 			};
 		}
 	} catch (e) {
-		// Re-throw with formatted message so agent-loop sets isError flag
-		throw new Error(renderError(e));
+		// Re-throw with formatted message so agent-loop sets isError flag. The
+		// original stays the cause, so a server retry wait its headers carry
+		// reaches the agent loop, which renders it into the tool result text.
+		throw new Error(renderError(e), { cause: e });
 	}
 	// The Spotlight experiment shapes what the agent's own calls return; calls a tool or script makes stay whole.
 	const shape = context?.spotlightShape;

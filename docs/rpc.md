@@ -351,10 +351,23 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
 - `agentInvoked: false`: the prompt finished locally (an extension or custom command that started no turn) or failed before reaching the agent.
 - `agentInvoked: true`: the prompt was dispatched or queued for agent work; normal completion reports when the agent **yielded** — see [Yield vs settled](#yield-vs-settled). An abort that wins before dispatch can still report `true` with `status: "aborted"`. A prompt dispatched as a fresh turn reports the first run that started after it was accepted, so a late `agent_end` from an earlier run never completes it. A prompt queued into a live run (`streamingBehavior`) reports at the first yield after its message left the queue. An `agent_end` with `yielded: false` (the agent is retrying, compacting, or answering a stop-time reminder) never completes a prompt.
 - `status`: `"completed"`, `"aborted"` (interrupted by `abort`, `abort_and_prompt`, or a session transition, or dropped by an abort before dispatch), or `"error"`.
-- `error` (only with `status: "error"`): `{ message, provider?, model?, httpStatus?, retryable, code? }`. `message` is the provider's error text with OMP-local diagnostics (such as saved request-dump paths) removed. `retryable` marks a transient failure; OMP's own automatic retries have already been exhausted. `code: "cost_cap"` means the session reached `session.maxCost` and OMP did not send the next request; the server keeps running, and later prompts end the same way until the cap is raised. A prompt that fails before reaching the agent also gets the legacy error response with the same `id` before its `prompt_result`.
+- `error` (only with `status: "error"`): `{ message, provider?, model?, httpStatus?, retryAfterMs?, retryable, code? }`. `message` is the failed turn's `errorMessage`: the provider's own text, without OMP-local diagnostics such as saved request-dump paths. `retryAfterMs` is the failed response's header-stated retry wait in milliseconds; the server does not append it to `message`. `retryable` marks a transient failure; OMP's own automatic retries have already been exhausted. `code: "cost_cap"` means the session reached `session.maxCost` and OMP did not send the next request; the server keeps running, and later prompts end the same way until the cap is raised. A prompt that fails before reaching the agent also gets the legacy error response with the same `id` before its `prompt_result`.
 - `sessionSettled`: whether the session is already done when the result is written — see [Yield vs settled](#yield-vs-settled). `false` means background work can still wake the agent; a `session_settled` frame follows once it has.
 
 A failed provider turn is not a failed command: the prompt response is still `success: true`, and the turn ends with a normal terminal `agent_end` whose last assistant message has `stopReason: "error"`. Use `prompt_result.status` rather than parsing that message.
+
+An assistant message's `errorMessage` is the failure's own text (the provider's, or OMP's for a failure it detected itself); retry and classification decisions read it. `errorDisplayMessage`, when present, is the shown text with local diagnostics such as the rejected request's dump path or a provider-specific explanation. Render `errorDisplayMessage ?? errorMessage`, then append the wait from `errorRetryAfterMs` at display time. Neither text field has the structured wait baked into it.
+
+The TypeScript wire type and Go, Python and Rust SDKs expose the same optional assistant failure/retry fields:
+
+- `errorMessage?: string`: provider text used for decisions.
+- `errorDisplayMessage?: string`: shown text, for display only.
+- `errorRetryAfterMs?: number`: the failed response's header-stated retry wait in milliseconds.
+- `errorRetryWaitRefusal?: { waitMs: number, limitMs: number, option: "maxRetryDelayMs" | "providerRetryWaitCeilingMs" }`: a lower layer refused the server's wait under this bound; outer retry layers surface that failure rather than reconstructing another sleep.
+- `providerReplays?: number`: extra wire attempts beyond the first. Absence means unknown, not zero.
+- `replayBudgetExhausted?: boolean`: another replay was refused by the streaming call's shared replay budget.
+
+Retry events keep timing separate too: `auto_retry_start` carries `retryAfterMs?` beside `attempt`, `maxAttempts`, `delayMs`, `errorMessage` and `errorId?`; `auto_retry_end` carries `finalRetryAfterMs?` beside `success`, `attempt`, `finalError?` and `retryErrors?`. `delayMs` is OMP's chosen backoff, not necessarily the server's stated wait. Automatic compaction failures carry `retryAfterMs?` as well.
 
 Local-only slash commands may emit `command_output` frames before completing. They do not emit `agent_end`.
 
@@ -959,7 +972,7 @@ report a manual compaction only through the `compact` response.
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | `manual_compaction_start`                      | A manual compaction began: the `compact` command, `/compact`, or an extension's `ctx.compact()`. The live turn is already aborted. | `mode?`: the `/compact <mode>` subcommand                                                                                                      |
 | `manual_compaction_end`                        | That compaction ended.                                                                                                             | `aborted`, and one of: `result` (committed), `skipped: true` with `errorMessage` (nothing to compact), or `errorMessage` (failed or cancelled) |
-| `auto_compaction_start`, `auto_compaction_end` | An automatic compaction (threshold, overflow, idle, incomplete response) began or ended. Never sent for a manual compaction.       | `reason`, `action`; `result?`, `aborted`, `willRetry`, `errorMessage?`, `skipped?`                                                             |
+| `auto_compaction_start`, `auto_compaction_end` | An automatic compaction (threshold, overflow, idle, incomplete response) began or ended. Never sent for a manual compaction.       | `reason`, `action`; `result?`, `aborted`, `willRetry`, `errorMessage?`, `retryAfterMs?` (the failed request's retry wait in ms; never in `errorMessage`), `skipped?` |
 | `retry_fallback_applied`                       | A retryable failure switched the session to the next model of a `retry.fallbackChains` chain.                                      | `from`, `to` (model selectors), `role`, `reason?` (the error)                                                                                  |
 | `retry_fallback_succeeded`                     | The fallback model answered.                                                                                                       | `model`, `role`                                                                                                                                |
 | `ttsr_triggered`                               | Rule injection: a TTSR rule matched the streamed output and its text was injected into the conversation.                           | `rules`: each rule object carries at least `name`, `path`, and `content`                                                                       |
@@ -1163,6 +1176,8 @@ interface BtwHistoryTurn {
 	createdAt: number;
 	updatedAt: number;
 	error?: string;
+	/** The failed turn's retry wait in ms; `error` never carries it. Live frames only: history read back from disk has none. */
+	errorRetryAfterMs?: number;
 }
 interface BtwHistoryRecord extends BtwHistoryTurn {
 	id: string;

@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { assistantErrorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { Markdown } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -123,9 +124,15 @@ export async function runCommitAgentSession(input: CommitAgentInput): Promise<Co
 					messageCount += 1;
 					isThinking = false;
 					clearThinkingLine();
-					const assistantMessage = event.message as { stopReason?: string; errorMessage?: string };
-					if (assistantMessage.stopReason === "error" && assistantMessage.errorMessage) {
-						process.stdout.write(`● Error: ${assistantMessage.errorMessage}\n`);
+					const assistantMessage = event.message as {
+						stopReason?: string;
+						errorMessage?: string;
+						errorDisplayMessage?: string;
+						errorRetryAfterMs?: number;
+					};
+					const shownError = assistantMessage.errorDisplayMessage ?? assistantMessage.errorMessage;
+					if (assistantMessage.stopReason === "error" && shownError) {
+						process.stdout.write(`● Error: ${assistantErrorText(assistantMessage)}\n`);
 					}
 					const messageText = extractMessageText(event.message?.content ?? []);
 					if (messageText) {

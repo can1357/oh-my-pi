@@ -12,7 +12,13 @@ import {
 	recordGatewayUsage,
 	resolveGatewayApiKey,
 } from "../dispatch";
-import { gatewayResponseHeaders, resolveClientIdentity, codedErrorResponse } from "../http";
+import {
+	codedErrorResponse,
+	gatewayResponseHeaders,
+	resolveClientIdentity,
+	thrownRetryAfterMs,
+	withRetryAfterHeaders,
+} from "../http";
 
 export async function handleSpeech(bootOpts: AuthGatewayRouteOptions, req: Request, peer: string): Promise<Response> {
 	const startedAt = performance.now();
@@ -96,6 +102,9 @@ export async function handleSpeech(bootOpts: AuthGatewayRouteOptions, req: Reque
 		}
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway speech failed", { format: "speech", error: classified.message, peer });
-		return codedErrorResponse(classified.status, classified.type, classified.message);
+		return withRetryAfterHeaders(
+			codedErrorResponse(classified.status, classified.type, classified.message),
+			thrownRetryAfterMs(error),
+		);
 	}
 }

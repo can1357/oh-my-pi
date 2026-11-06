@@ -10,6 +10,16 @@
  * sentinel makes classification source-agnostic and refactor-stable.
  */
 
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { retryWaitHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
+import {
+	carryRetryWaitRefusal,
+	hasRefusedRetryWaitNote,
+	markRetryWaitRefused,
+	refusedRetryWaitNote,
+} from "@oh-my-pi/pi-ai/utils/retry-wait";
+
 export class CompactionCancelledError extends Error {
 	override readonly name = "CompactionCancelledError" as const;
 
@@ -31,7 +41,37 @@ export class NativeCompactionError extends Error {
 
 	constructor(cause: unknown) {
 		super(cause instanceof Error ? cause.message : String(cause), { cause });
+		// The wrapper is what reaches a reader, so a refused wait the cause was
+		// marked with travels onto it; otherwise compaction stops on the caller's
+		// bound and the turn says only that the provider refused.
+		carryRetryWaitRefusal(cause, this);
 	}
+}
+
+/**
+ * The Error a compaction step throws for a model response that ended in
+ * `stopReason: "error"`. It keeps the provider's HTTP status on `.status`, so
+ * callers can route auth failures without scraping the text, and the failed
+ * response's header retry wait (`errorRetryAfterMs`) as a `retry-after-ms`
+ * header, which the session's compaction retry reads through
+ * `getHeadersFromError`; the text never stands in for that wait.
+ */
+export function failedResponseError(text: string, response: AssistantMessage): Error {
+	const headers = retryWaitHeaders(response.errorRetryAfterMs);
+	const refused = response.errorRetryWaitRefusal;
+	// Two conversions stand between this message and a person — this one and
+	// `NativeCompactionError`, which keeps only the text and the cause — so the
+	// refusal is written into the text as well as marked on the error. Without
+	// the words, a compaction refused for exceeding the caller's bound reads as
+	// a bare provider failure.
+	const shown =
+		refused !== undefined && !hasRefusedRetryWaitNote(text) ? `${text} ${refusedRetryWaitNote(refused)}` : text;
+	const error =
+		response.errorStatus === undefined
+			? Object.assign(new Error(shown), { headers })
+			: new AIError.ProviderHttpError(shown, response.errorStatus, { headers });
+	if (refused !== undefined) markRetryWaitRefused(error, refused);
+	return error;
 }
 
 /**

@@ -125,7 +125,12 @@ export interface AssistantMessage {
 	responseId?: string;
 	upstreamProvider?: string;
 	upstreamModel?: string;
+	/** The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this. */
 	errorMessage?: string;
+	/** `errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths. */
+	errorDisplayMessage?: string;
+	/** The delay, in milliseconds, the failed response's headers asked for before a retry. Retry decisions read this with `errorMessage`. */
+	errorRetryAfterMs?: number;
 	errorStatus?: number;
 	errorId?: number;
 	providerPayload?: Record<string, unknown>;
@@ -752,6 +757,8 @@ export interface BtwHistoryTurn {
 	/** Images attached to the question. */
 	images?: ImageContent[];
 	error?: string;
+	/** The failed turn's retry wait in milliseconds, from the error's response headers. `error` never carries it. Live frames only: history read back from disk has none. */
+	errorRetryAfterMs?: number;
 }
 
 /** A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record. */
@@ -766,6 +773,8 @@ export interface BtwHistoryRecord {
 	/** Images attached to the question. */
 	images?: ImageContent[];
 	error?: string;
+	/** The failed turn's retry wait in milliseconds, from the error's response headers. `error` never carries it. Live frames only: history read back from disk has none. */
+	errorRetryAfterMs?: number;
 	followUps?: BtwHistoryTurn[];
 }
 
@@ -903,6 +912,8 @@ export interface AutoCompactionEndEvent {
 	willRetry: boolean;
 	result?: CompactionResult;
 	errorMessage?: string;
+	/** The failed compaction request's retry wait in milliseconds. `errorMessage` never carries it. */
+	retryAfterMs?: number;
 	/** Compaction was skipped for a benign reason. */
 	skipped?: boolean;
 }
@@ -933,6 +944,8 @@ export interface AutoRetryStartEvent {
 	delayMs: number;
 	errorMessage: string;
 	errorId?: number;
+	/** The retry wait the failed response stated, in milliseconds; distinct from `delayMs`. `errorMessage` never carries it. */
+	retryAfterMs?: number;
 }
 
 export interface AutoRetryEndEvent {
@@ -940,6 +953,8 @@ export interface AutoRetryEndEvent {
 	success: boolean;
 	attempt: number;
 	finalError?: string;
+	/** The retry wait the final failed response stated, in milliseconds. `finalError` never carries it. */
+	finalRetryAfterMs?: number;
 	/** Persisted retry errors whose presentation changed when the retry settled. */
 	retryErrors?: Record<string, unknown>[];
 }
@@ -1072,6 +1087,8 @@ export interface PromptError {
 	provider?: string;
 	model?: string;
 	httpStatus?: number;
+	/** The failed response's retry wait in milliseconds, from its headers. `message` never carries it. */
+	retryAfterMs?: number;
 	/** `cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request. */
 	code?: "cost_cap";
 }

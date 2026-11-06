@@ -263,6 +263,42 @@ describe("PI_REQ_DEBUG request/response recording", () => {
 		expect(new TextDecoder().decode(log.body)).toBe("ok");
 	});
 
+	it("keeps one debug layer when a prebuilt transport is rebound and streamSimple re-enters", async () => {
+		Bun.env.PI_REQ_DEBUG = "1";
+		let previousHooks = 0;
+		let currentHooks = 0;
+		let sent = 0;
+		const model = debugModel();
+		const prebuilt = transportFetch(
+			model,
+			async () => {
+				sent++;
+				return new Response("ok");
+			},
+			{
+				beforeDispatch: () => {
+					previousHooks++;
+				},
+			},
+		);
+		const rebound = transportFetch(model, prebuilt, {
+			beforeDispatch: () => {
+				currentHooks++;
+			},
+		});
+		registerDebugApi();
+		await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{ apiKey: async () => "key", fetch: rebound, replayBudgetMs: 10_000 },
+		).result();
+		expect(sent).toBe(1);
+		expect(previousHooks).toBe(0);
+		expect(currentHooks).toBe(1);
+		const entries = await fs.readdir(tempDir!);
+		expect(entries.filter(f => /^rr-session-\d+\.json$/.test(f))).toHaveLength(1);
+	});
+
 	it("records one dump per request when streamSimple re-enters the request path for auth retry", async () => {
 		Bun.env.PI_REQ_DEBUG = "1";
 		let calls = 0;

@@ -9,6 +9,7 @@ import {
 	type ComputerAction,
 	type ComputerSafetyCheck,
 	type Context,
+	errorText,
 	EventStream,
 	isApiKeyResolver,
 	type Model,
@@ -2778,6 +2779,8 @@ function recoverTransientErrorToolTurn(
 						explanation: message.stopDetails?.explanation ?? message.errorMessage ?? null,
 					},
 		errorMessage: undefined,
+		errorDisplayMessage: undefined,
+		errorRetryAfterMs: undefined,
 		errorId: undefined,
 		errorStatus: undefined,
 	};
@@ -3732,7 +3735,8 @@ async function executeToolCalls(
 			} catch (e) {
 				caughtError = e;
 				result = {
-					content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
+					// A tool result is display to the model: a wait the error's headers carry renders here.
+					content: [{ type: "text", text: errorText(e) }],
 					details: {},
 				};
 				isError = true;
@@ -3772,7 +3776,7 @@ async function executeToolCalls(
 				} catch (e) {
 					caughtError = e;
 					result = {
-						content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
+						content: [{ type: "text", text: errorText(e) }],
 						details: {},
 					};
 					isError = true;

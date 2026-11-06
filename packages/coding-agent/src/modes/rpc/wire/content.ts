@@ -115,7 +115,18 @@ export const messageDefs = {
 		"upstreamModel?": "string",
 		usage: "Usage",
 		stopReason: "StopReason",
-		"errorMessage?": "string",
+		"errorMessage?": doc(
+			"string",
+			"The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this.",
+		),
+		"errorDisplayMessage?": doc(
+			"string",
+			"`errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths.",
+		),
+		"errorRetryAfterMs?": doc(
+			"number",
+			"The delay, in milliseconds, the failed response's headers asked for before a retry. Retry decisions read this with `errorMessage`.",
+		),
 		"errorStatus?": "number.integer",
 		"errorId?": "number",
 		"providerPayload?": JSON_OBJECT,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { gunzipSync } from "node:zlib";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -382,7 +383,12 @@ describe("streamDevin router assignment", () => {
 			fetch: fetchImpl,
 		}).result();
 
-		expect(result.errorMessage).toBe("Devin API error 504 Gateway Time-out retry-after-ms=1000");
+		expect(result.errorMessage).toBe("Devin API error 504 Gateway Time-out");
+		// The wait is not written into the shown text — a status classifier would
+		// read its digits — it travels structured.
+		expect(errorDisplayText(result)).toBe("Devin API error 504 Gateway Time-out");
+		expect(result.errorRetryAfterMs).toBe(1000);
+		expect(errorDisplayText(result)).not.toContain("<html>");
 		expect(result.errorMessage).not.toContain("<html>");
 	});
 

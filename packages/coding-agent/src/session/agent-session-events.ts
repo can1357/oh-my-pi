@@ -41,6 +41,8 @@ export type AgentSessionEvent =
 			aborted: boolean;
 			willRetry: boolean;
 			errorMessage?: string;
+			/** The server's retry wait (ms) the compaction failure stated; render it only at display. */
+			retryAfterMs?: number;
 			/** True when compaction was skipped for a benign reason. */
 			skipped?: boolean;
 	  }
@@ -69,12 +71,16 @@ export type AgentSessionEvent =
 			delayMs: number;
 			errorMessage: string;
 			errorId?: number;
+			/** The server's retry wait (ms) the failed message stated (`errorRetryAfterMs`), distinct from `delayMs`. */
+			retryAfterMs?: number;
 	  }
 	| {
 			type: "auto_retry_end";
 			success: boolean;
 			attempt: number;
 			finalError?: string;
+			/** The server's retry wait (ms) the final failed message stated; render it only at display. */
+			finalRetryAfterMs?: number;
 			retryErrors?: RetryErrorUpdate[];
 	  }
 	| ({ type: "cache_warming_start" } & CacheWarmingRefreshStart)

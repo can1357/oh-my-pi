@@ -381,7 +381,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 				costUsd: 0.01,
 			},
 		]);
-	});
+	}, 30_000); // spawns a bun child: its start time varies ten-fold with host load, past the default 5 s
 
 	test("background sync parks after the idle window and resumes on the next store use", async () => {
 		const client = new AuthBrokerClient({ url: handle!.url, token });

@@ -1,8 +1,9 @@
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { assistantErrorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { type Component, Loader, TERMINAL } from "@oh-my-pi/pi-tui";
-import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, isRecord, logger, sanitizeText, withRetryWait } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
@@ -277,7 +278,19 @@ export class EventController {
 	// restored when the banner clears at the next `agent_start` (see
 	// #handleMessageEnd / #handleAgentStart).
 	#pinnedErrorComponent: AssistantMessageComponent | undefined = undefined;
-	#pinnedErrorMessage: AssistantMessage | undefined = undefined;
+	/**
+	 * The pinned failure: the live message, and its text as it was when pinned.
+	 * Turn recovery later rewrites the live message. A retry-cap failure gets a
+	 * new text that `auto_retry_end` names; a spent retry budget gets a
+	 * "Retry budget exhausted" prefix while `auto_retry_end` names the text at
+	 * pin time. Either names the pinned failure.
+	 */
+	#pinnedErrorMessage:
+		| {
+				live: AssistantMessage;
+				atPin: Pick<AssistantMessage, "errorMessage" | "errorDisplayMessage" | "errorRetryAfterMs">;
+		  }
+		| undefined = undefined;
 	#restorePinnedErrorInline = true;
 	#retrySupersededAssistantComponents = new Map<string, AssistantMessageComponent>();
 	#retrySupersededAssistantQueue: AssistantMessageComponent[] = [];
@@ -1827,7 +1840,8 @@ export class EventController {
 				// AgentSession.#handleAgentEvent already stamped the SilentAbort flag
 				// for expected internal transitions (plan-compact, TTSR rule
 				// interruption) before this controller ran, so reaching this branch
-				// implies the abort was NOT a silent internal transition.
+				// implies the abort was NOT a silent internal transition. The label is
+				// unrendered text (never a retry wait), so it may be stored back.
 				errorMessage = resolveAbortLabel(this.ctx.streamingMessage, this.ctx.viewSession.retryAttempt);
 				this.ctx.streamingMessage.errorMessage = errorMessage;
 			}
@@ -1970,9 +1984,16 @@ export class EventController {
 					AIError.is(AIError.classifyMessage(event.message), AIError.Flag.EmptyResponse);
 				this.#lastAssistantComponent?.setErrorPinned(true);
 				this.#pinnedErrorComponent = this.#lastAssistantComponent;
-				this.#pinnedErrorMessage = event.message;
+				this.#pinnedErrorMessage = {
+					live: event.message,
+					atPin: {
+						errorMessage: event.message.errorMessage,
+						errorDisplayMessage: event.message.errorDisplayMessage,
+						errorRetryAfterMs: event.message.errorRetryAfterMs,
+					},
+				};
 				this.#restorePinnedErrorInline = !recoverableEmptyOutput;
-				if (!recoverableEmptyOutput) this.ctx.showPinnedError(event.message.errorMessage);
+				if (!recoverableEmptyOutput) this.ctx.showPinnedError(assistantErrorText(event.message));
 			}
 			this.ctx.statusLine.invalidate();
 			this.ctx.ui.requestRender();
@@ -2552,7 +2573,8 @@ export class EventController {
 	#settledRunStatus(event: Extract<AgentSessionEvent, { type: "agent_end" }>): RunStatus {
 		if (this.#retryPending) return { state: "idle" };
 		const last = event.messages.findLast((message): message is AssistantMessage => message.role === "assistant");
-		if (last?.stopReason === "error") return { state: "error", msg: last.errorMessage };
+		if (last?.stopReason === "error")
+			return { state: "error", msg: AIError.errorDisplayText(last) && assistantErrorText(last) };
 		if (!last || last.stopReason === "aborted") return { state: "idle" };
 		return { state: "done" };
 	}
@@ -2746,7 +2768,7 @@ export class EventController {
 					this.ctx.statusLine.invalidate();
 					this.ctx.ui.requestRender(true, { clearScrollback: true });
 				}
-				this.ctx.showWarning(event.errorMessage);
+				this.ctx.showWarning(withRetryWait(event.errorMessage, event.retryAfterMs));
 			} else if (!event.skipped) {
 				this.ctx.lastAssistantUsage = undefined;
 				this.ctx.rebuildChatFromMessages();
@@ -2769,7 +2791,7 @@ export class EventController {
 			// matters too: post-clear the frame looks unchanged to the diff.
 			this.ctx.ui.requestRender(true, { clearScrollback: true });
 		} else if (event.errorMessage) {
-			this.ctx.showWarning(event.errorMessage);
+			this.ctx.showWarning(withRetryWait(event.errorMessage, event.retryAfterMs));
 		} else if (isHandoffAction) {
 			this.ctx.clearTransientSessionUi();
 			this.ctx.lastAssistantUsage = undefined;
@@ -2850,12 +2872,18 @@ export class EventController {
 			this.ctx.retryLoader = undefined;
 			this.ctx.statusContainer.disposeChildren();
 		}
-		const pinnedError = this.#pinnedErrorMessage?.errorMessage;
+		const pinned = this.#pinnedErrorMessage;
+		// Match failures on their unrendered text, then show the matching live or pinned text and wait.
+		const pinnedFailure =
+			event.finalError === undefined || pinned === undefined
+				? undefined
+				: pinned.live.errorMessage === event.finalError
+					? pinned.live
+					: pinned.atPin.errorMessage === event.finalError
+						? pinned.atPin
+						: undefined;
 		const terminalFailurePinned =
-			!event.success &&
-			this.#pinnedErrorComponent !== undefined &&
-			pinnedError !== undefined &&
-			pinnedError === event.finalError;
+			!event.success && this.#pinnedErrorComponent !== undefined && pinnedFailure !== undefined;
 		let stalePinnedErrorCleared = false;
 		if (!event.success && this.#pinnedErrorComponent && !terminalFailurePinned) {
 			this.#pinnedErrorComponent.setErrorPinned(false);
@@ -2887,13 +2915,18 @@ export class EventController {
 		this.#clearRetrySupersededAssistantComponents();
 		if (!event.success) {
 			if (terminalFailurePinned) {
+				// The banner shows omp's display text for the same failure, which
+				// names the request dump and any provider explanation.
+				const shown = (pinnedFailure && AIError.errorDisplayText(pinnedFailure)) ?? event.finalError;
 				const terminalError = this.#restorePinnedErrorInline
-					? `Retry failed after ${event.attempt} attempts: ${event.finalError || pinnedError || "Unknown error"}`
-					: (pinnedError ?? event.finalError);
+					? `Retry failed after ${event.attempt} attempts: ${withRetryWait(shown || "Unknown error", event.finalRetryAfterMs)}`
+					: withRetryWait(shown || "Unknown error", pinnedFailure?.errorRetryAfterMs ?? event.finalRetryAfterMs);
 				if (terminalError) this.ctx.showPinnedError(terminalError);
 				this.#restorePinnedErrorInline = true;
 			} else {
-				this.ctx.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
+				this.ctx.showError(
+					`Retry failed after ${event.attempt} attempts: ${withRetryWait(event.finalError || "Unknown error", event.finalRetryAfterMs)}`,
+				);
 			}
 		}
 		this.#ensureWorkingLoaderWhileStreaming();

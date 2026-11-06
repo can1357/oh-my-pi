@@ -31,6 +31,28 @@ export function formatDuration(ms: number): string {
 }
 
 /**
+ * `retry after 30.0s`: a server's retry wait as a person reads it.
+ *
+ * Display only. The wait is structured data everywhere else; text from this
+ * function is never classified, compared, persisted as a machine field or
+ * parsed back into a wait.
+ */
+export function formatRetryWait(retryAfterMs: number): string {
+	return `retry after ${formatDuration(retryAfterMs)}`;
+}
+
+/**
+ * `text` with ` (retry after 30.0s)` for a positive, finite wait; `text`
+ * unchanged otherwise. Reads only the number: a missing wait renders nothing,
+ * never a default and never one scanned out of `text`. Tolerates an untyped
+ * value, since a wait read from JSON (a wire frame, a transcript) is untrusted.
+ */
+export function withRetryWait(text: string, retryAfterMs: number | undefined): string {
+	if (typeof retryAfterMs !== "number" || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0) return text;
+	return `${text} (${formatRetryWait(retryAfterMs)})`;
+}
+
+/**
  * Format a number with K/M/B suffix for compact display.
  * Uses 1 decimal for small leading digits when non-zero, rounded otherwise.
  * Values below 1,000 print as-is unless `maxFractionDigits` caps their decimals.

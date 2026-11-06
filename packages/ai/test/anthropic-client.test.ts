@@ -1,8 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { scheduler } from "node:timers/promises";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { AnthropicMessagesClient } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type { MessageCreateParamsStreaming } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { withProviderRetryPolicy } from "@oh-my-pi/pi-ai/utils/retry-wait";
 
 const params: MessageCreateParamsStreaming = {
 	model: "claude-sonnet-4-5",
@@ -283,6 +285,142 @@ describe("AnthropicMessagesClient request assembly", () => {
 		expect(headers.authorization).toBe("Bearer right-token");
 		expect(headers.Authorization).toBeUndefined();
 		expect(calls[0].url).toBe("https://api.anthropic.com/v1/messages");
+	});
+});
+
+// One reader. The wire client keeps no retry-header grammar of its own, so
+// the wait it sleeps between attempts is the wait every other reader of the
+// same response sees: a value that is not `delay-seconds` leaves it its own
+// backoff instead of becoming a wait, a self-contradicting pair is resolved
+// once, and a rate-window reset is honoured here as it is above.
+describe("AnthropicMessagesClient reads one server-stated wait", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+	const at = Date.UTC(2026, 9, 31, 12, 0, 0);
+	/** The client's own first-attempt backoff with jitter pinned to its longest. */
+	const OWN_BACKOFF_MS = 500;
+
+	/**
+	 * The wait the client commands between a retryable 429 and its next
+	 * attempt, with the cap disabled so every stated wait is slept rather than
+	 * refused.
+	 */
+	async function commandedWait(init: Record<string, string>): Promise<number> {
+		vi.spyOn(Date, "now").mockReturnValue(at);
+		vi.spyOn(Math, "random").mockReturnValue(0);
+		const commanded: number[] = [];
+		const { calls, fetch } = createFetchMock([
+			new Response(anthropicOverloadedErrorBody, { status: 429, headers: init }),
+			new Response("{}", { status: 200 }),
+		]);
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 1, fetch });
+		await withProviderRetryPolicy(
+			{
+				maxRetryDelayMs: 0,
+				providerRetryWait: async ms => {
+					commanded.push(ms);
+				},
+			},
+			() => client.messages.create(params).asResponse(),
+		);
+		expect(calls.length).toBe(2);
+		expect(commanded.length).toBe(1);
+		return commanded[0];
+	}
+
+	it.each([
+		["an IMF date without its weekday, not as 31 seconds", { "retry-after": "31 Oct 2026 12:00:30 GMT" }, 30_000],
+		[
+			"an RFC 850 two-digit year decades ahead",
+			{ "retry-after": "Sunday, 31-Oct-60 12:00:30 GMT" },
+			Date.UTC(2060, 9, 31, 12, 0, 30) - at,
+		],
+		["a zoned RFC 3339 timestamp, not as 2026 seconds", { "retry-after": "2026-10-31T12:00:30Z" }, 30_000],
+		["plain seconds", { "retry-after": "30" }, 30_000],
+		["seconds with trailing text as no wait at all", { "retry-after": "30abc" }, OWN_BACKOFF_MS],
+		[
+			"a 31 November that never was as no wait at all",
+			{ "retry-after": "Sat, 31 Nov 2026 12:00:30 GMT" },
+			OWN_BACKOFF_MS,
+		],
+		["a hex-spelled retry-after-ms as no wait, never as retry now", { "retry-after-ms": "0x0" }, OWN_BACKOFF_MS],
+		["an exponent-form retry-after-ms as no wait", { "retry-after-ms": "1e3" }, OWN_BACKOFF_MS],
+		["a retry-after-ms with trailing text as no wait", { "retry-after-ms": "30abc" }, OWN_BACKOFF_MS],
+		["the exact wait when both headers state one wait", { "retry-after-ms": "100", "retry-after": "1" }, 100],
+		["the longer wait when the two headers contradict", { "retry-after-ms": "100", "retry-after": "9" }, 9_000],
+		["a reset-after counter when nothing states an explicit wait", { "x-ratelimit-reset-after": "30" }, 30_000],
+		["a reset window when nothing states an explicit wait", { "x-ratelimit-reset-ms": "45000" }, 45_000],
+	])("reads %s", async (_name, init, expected) => {
+		expect(await commandedWait(init)).toBe(expected);
+	});
+});
+
+// One wait ceiling. The call's ceiling bounds the wire client's own retry
+// ladder too: a per-attempt wire budget must not multiply against the
+// per-call ceiling, so the total commanded wait of one call never exceeds it.
+describe("AnthropicMessagesClient wire retries under the call's wait ceiling", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("never commands more total wait than the call's ceiling allows", async () => {
+		const ceilingMs = 10_000;
+		const commanded: number[] = [];
+		vi.spyOn(scheduler, "wait").mockImplementation(async (ms?: number) => {
+			commanded.push(ms ?? 0);
+		});
+		const { calls, fetch } = createFetchMock([
+			new Response(anthropicOverloadedErrorBody, { status: 429, headers: { "retry-after": "30" } }),
+		]);
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 5, fetch });
+
+		const error = await withProviderRetryPolicy(
+			{
+				maxRetryDelayMs: 60_000,
+				providerRetryWaitCeilingMs: ceilingMs,
+				providerRetryWait: async ms => {
+					commanded.push(ms);
+				},
+			},
+			() => client.messages.create(params).asResponse(),
+		).catch(err => err as AIError.AnthropicApiError);
+
+		// A 30 s stated wait is past the 10 s ceiling, so it is refused and the
+		// failure surfaces on the first attempt rather than being slept once per
+		// wire retry.
+		expect(error).toBeInstanceOf(AIError.AnthropicApiError);
+		expect(commanded.reduce((total, ms) => total + ms, 0)).toBeLessThanOrEqual(ceilingMs);
+		expect(calls.length).toBe(1);
+	});
+
+	it("sleeps a within-ceiling stated wait through the call's retry-wait hook", async () => {
+		const hookWaits: number[] = [];
+		const clockWaits: number[] = [];
+		vi.spyOn(scheduler, "wait").mockImplementation(async (ms?: number) => {
+			clockWaits.push(ms ?? 0);
+		});
+		const { calls, fetch } = createFetchMock([
+			new Response(anthropicOverloadedErrorBody, { status: 429, headers: { "retry-after": "2" } }),
+			new Response('{"type":"message_start"}', { status: 200 }),
+		]);
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 2, fetch });
+
+		const response = await withProviderRetryPolicy(
+			{
+				maxRetryDelayMs: 60_000,
+				providerRetryWaitCeilingMs: 10_000,
+				providerRetryWait: async ms => {
+					hookWaits.push(ms);
+				},
+			},
+			() => client.messages.create(params).asResponse(),
+		);
+
+		expect(response.status).toBe(200);
+		expect(calls.length).toBe(2);
+		expect(hookWaits).toEqual([2_000]);
+		expect(clockWaits).toEqual([]);
 	});
 });
 

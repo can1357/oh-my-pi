@@ -8,6 +8,13 @@
 
 - Added `Agent.queuedMessageGate` to filter queued messages before delivery and observe claimed messages returned undelivered.
 - Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
+- Added `wireToolsFingerprint()`, a hash of the tool specs a request sends ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
+- Added `errorDisplayMessage` and `errorRetryAfterMs` to the proxy `error` event, copied onto the failed turn so a proxied failure keeps omp's shown text and the response's header retry delay apart from the provider's `errorMessage` ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed steering and follow-up queue notifications observing a batch before its preparation claim was installed and missing the transition to delivery, leaving pending-message snapshots stale after asynchronous preparation.
 
 ## [18.16.0] - 2026-11-02
 
@@ -28,7 +35,11 @@
 
 ### Fixed
 
+- `streamProxy` now carries a failure's status, replay count and stated retry wait, so retries and compaction behind a proxy wait as the server asked ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- `streamProxy` now sends the caller's `maxRetryDelayMs` and `providerRetryWaitCeilingMs`, so the server's provider retries keep to them ([#17569](https://github.com/can1357/oh-my-pi/pull/17569) by [@sjawhar](https://github.com/sjawhar))
 - Fixed OpenAI remote compaction (`/responses/compact`) replaying backend-only `internal_chat_message_metadata_passthrough` metadata that Codex rejects as an unknown parameter ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe))
+- `streamProxy` now forwards `replayBudgetMs`, so the server that runs a proxied call keeps its replays inside the caller's budget ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+- A failed turn built from a thrown error keeps its structured retry wait as `errorRetryAfterMs` ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.14.2] - 2026-10-31
 

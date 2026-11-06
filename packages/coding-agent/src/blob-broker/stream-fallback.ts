@@ -5,6 +5,7 @@
  */
 
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import type { Context } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -64,7 +65,8 @@ export function wrapStreamFnWithBlobUrlFallback(
 								model: model.id,
 								source,
 								fallback: fallbackSource,
-								error: event.error.errorMessage?.slice(0, 200),
+								error: errorDisplayText(event.error)?.slice(0, 200),
+								retryAfterMs: event.error.errorRetryAfterMs,
 							});
 							attemptContext = fallback;
 							failedSourceAwaitingProof = source;

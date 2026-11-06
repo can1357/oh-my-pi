@@ -1,4 +1,5 @@
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error/error-text";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { type Component, Container } from "../tui";
 import { Image, type ImageBudget } from "../components/image";
@@ -15,7 +16,7 @@ import {
 } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
-import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, logger, withRetryWait } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AssistantTextRenderer, AssistantTextRendering, AssistantThinkingRenderer } from "./extension-types";
@@ -1150,9 +1151,14 @@ export class AssistantMessageComponent extends Container {
 		const presentation = resolveAssistantErrorPresentation(message);
 		if (presentation.kind === "compact-recovered") {
 			const attempt = message.retryRecovery?.attempt ?? 1;
-			const body = [message.errorMessage?.trim(), presentation.text].filter(
-				(line, index, all): line is string => !!line && all.indexOf(line) === index,
-			);
+			// Compare the shown error before appending the structured server wait.
+			const error = errorDisplayText(message)?.trim();
+			const note = presentation.text;
+			const body = !error
+				? [note]
+				: error === note
+					? [withRetryWait(note, message.errorRetryAfterMs)]
+					: [withRetryWait(error, message.errorRetryAfterMs), note];
 			return node(
 				"section",
 				{
@@ -1170,7 +1176,9 @@ export class AssistantMessageComponent extends Container {
 		if (message.stopReason === "aborted") {
 			return text([span(presentation.text, "error")], { wrap: "word", key: "error", role: "omp.assistant.abort" });
 		}
-		const lines = presentation.text
+		// The status chip and the duplicate-line filter read the error without its
+		// wait (`presentation.body`); the server's wait is rendered last.
+		const lines = presentation.body
 			.split("\n")
 			.map(line => line.trim())
 			.filter(line => line.length > 0);
@@ -1179,7 +1187,7 @@ export class AssistantMessageComponent extends Container {
 		const code = /^(\d{3})\s+/.exec(lines[0] ?? "");
 		if (code) lines[0] = lines[0]!.slice(code[0].length);
 		const detail = lines.filter((line, index) => !lines.slice(index + 1).some(next => next.startsWith(line)));
-		const errorText = detail.join("\n") || "Unknown error";
+		const errorText = withRetryWait(detail.join("\n") || "Unknown error", presentation.retryAfterMs);
 		const children: NativeChild[] = [
 			node(
 				"row",

@@ -20,6 +20,29 @@
 - `ptree` commands with `subreaper: true` now reliably terminate all descendants on graceful shutdown.
 - `fatal()` in a worker thread now reaches the parent's `error` listeners instead of only exiting with code 1.
 - Fixed the terminal stderr guard leaking a copy of the terminal into processes spawned from native code.
+- Added `longestRetryHint`, the longest wait a response names across every retry header and every hint in its body ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Added `getRetryAfterMsFromHeaders` and the `excludeDates` hint option, which read a response's retry wait as `fetchWithRetry` does ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Added `retryWait` and `onRefusedWait` to `fetchWithRetry`'s options: every retry delay sleeps through `retryWait`, with the request's signal, in place of the built-in timer, and `onRefusedWait` names the stated wait it refused for exceeding `maxDelayMs` ([#17569](https://github.com/can1357/oh-my-pi/pull/17569) by [@sjawhar](https://github.com/sjawhar))
+- Added `parseRetryAfterHeaderMs`, the wait one `retry-after-ms` or `Retry-After` header value states, as every retry-hint reader now reads it ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Added a `retryGate` option to `fetchWithRetry` that can refuse a retry before its wait and again just before it is sent ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+- Added `RetryRefusedError` and `findRetryRefusal` for a transport that refuses a retry at handoff ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+- Added `parseRetryAfter`, the one reading of a `Retry-After` value; `parseRetryDateMs` now reads RFC 9110 dates field by field instead of with `Date.parse` ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- `extractRetryHint` and `longestRetryHint` read a `Retry-After` date with no zone as GMT, as an HTTP-date is, instead of in this machine's zone, and read no wait from a date with no zone in a message body (`reset at 2026-11-01 01:40:17`, `将在 … 重置`, `retry-after: 2026-11-01T01:40:17`) unless the provider declares the zone its stamps use; read as UTC, such a date once gave eight hours where the server's header said 750 ms ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `extractRetryHint` misreading `Retry-After` dates (two-digit years, leap seconds, impossible dates, dates in error text) ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
+- `fetchWithRetry` and `extractRetryHint` read a `Retry-After` or `retry-after-ms` header sent twice (`9, 120`) at its longest value when every part is a bare delay; before, it read as no wait and the request was retried after 500 ms ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A `Retry-After` that is neither digits nor a valid HTTP or ISO date (`0x0`, `-1`, `0,`, `0/1`, 30 February) states no wait instead of "retry now", and a date whose weekday contradicts its day is ignored rather than slept on ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- `extractRetryHint` reads `x-ratelimit-reset: 3600` as an hour from now rather than an instant in 1970, so a window reset that is past the caller's cap stops the retry loop instead of letting it run at its own backoff ([#17396](https://github.com/can1357/oh-my-pi/pull/17396) by [@sjawhar](https://github.com/sjawhar))
+- A `Retry-After` date whose day of month is one digit (`Thursday, 5 November 2026 13:27:03 GMT`) is read, as RFC 5322's `1*2DIGIT` day and this reader's own body-text form already allow; before, it stated no wait and the server was retried on the caller's own backoff ([#18195](https://github.com/can1357/oh-my-pi/pull/18195) by [@sjawhar](https://github.com/sjawhar))
+
+### Added
+
+- Added `getUpdateStateDir()` (`~/.omp/update`), holding the auto-update status file, its worker log, and the update install lock
+- Added `logger.setLogForwarder(forwarder)` (`LogForwarder { emit, flush }`), which routes a thread's records — `withContext` fields merged, context reduced to clone-safe JSON — to another thread instead of its own file and sinks, and `logger.emitForeign(event)`, which writes such a record with its original timestamp and runs the sinks without the caller's `withContext` fields
+- Added `expandTilde(path, home?)` (`@oh-my-pi/pi-utils/path`), which expands a leading `~` to the home directory; `@oh-my-pi/pi-coding-agent/tools/path-utils` re-exports it ([#17931](https://github.com/can1357/oh-my-pi/pull/17931) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `headerRetryAfterMs` to `RetryHintOptions`: `extractRetryHint` merges an already parsed response-header delay with the body's signals, longest first ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

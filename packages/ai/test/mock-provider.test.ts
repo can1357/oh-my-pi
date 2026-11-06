@@ -95,6 +95,18 @@ describe("mock provider", () => {
 		expect(result.errorMessage).toBe("boom");
 	});
 
+	test("an error response carries its scripted header retry wait as errorRetryAfterMs", async () => {
+		const mock = createMockModel({
+			responses: [
+				{ stopReason: "error", errorMessage: "usage_limit_reached retry-after-ms=200", errorRetryAfterMs: 9000 },
+			],
+		});
+
+		const result = await mock.stream(mock.model, emptyContext()).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorRetryAfterMs).toBe(9000);
+	});
+
 	test("calling without a configured response rejects on the next call", async () => {
 		const mock = createMockModel({});
 		const stream = mock.stream(mock.model, emptyContext());

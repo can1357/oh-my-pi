@@ -15,6 +15,7 @@
  *   - `status` — prints the locally-stored gateway token and bind hint.
  */
 import * as fs from "node:fs/promises";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import * as path from "node:path";
 import {
 	type Api,
@@ -788,7 +789,7 @@ async function probeOneModel(
 	if (response.stopReason === "error" || response.stopReason === "aborted") {
 		return {
 			ok: false,
-			reason: response.errorMessage ?? `chat probe ended with stopReason=${response.stopReason}`,
+			reason: errorDisplayText(response) ?? `chat probe ended with stopReason=${response.stopReason}`,
 			modelId: model.id,
 			latencyMs,
 		};

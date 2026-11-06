@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import { assistantTurnError, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getSegmenter } from "@oh-my-pi/pi-tui";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
@@ -256,7 +256,7 @@ async function runSharpshooterExtraction(
 		{ provider: model.provider },
 	);
 	if (response.stopReason === "error") {
-		throw new Error(response.errorMessage || "Sharpshooter extraction model error");
+		throw assistantTurnError(response, response.errorMessage || "Sharpshooter extraction model error");
 	}
 
 	for (const block of response.content) {

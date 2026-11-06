@@ -497,6 +497,37 @@
         return s.replace(/[\n\t]/g, ' ').trim();
       }
 
+		function formatDuration(ms) {
+			const SEC = 1000;
+			const MIN = 60 * SEC;
+			const HOUR = 60 * MIN;
+			const DAY = 24 * HOUR;
+			if (!Number.isFinite(ms) || ms <= 0) return "0ms";
+			if (ms < SEC) return `${Math.floor(ms)}ms`;
+			if (ms < MIN) {
+				const tenths = Math.round(ms / 100);
+				return tenths < 600 ? `${(tenths / 10).toFixed(1)}s` : "1m";
+			}
+			if (ms < HOUR) {
+				const mins = Math.floor(ms / MIN);
+				const secs = Math.floor((ms % MIN) / SEC);
+				return secs > 0 ? `${mins}m${secs}s` : `${mins}m`;
+			}
+			if (ms < DAY) {
+				const hours = Math.floor(ms / HOUR);
+				const mins = Math.floor((ms % HOUR) / MIN);
+				return mins > 0 ? `${hours}h${mins}m` : `${hours}h`;
+			}
+			const days = Math.floor(ms / DAY);
+			const hours = Math.floor((ms % DAY) / HOUR);
+			return hours > 0 ? `${days}d${hours}h` : `${days}d`;
+		}
+
+		function withRetryWait(text, retryAfterMs) {
+			if (typeof retryAfterMs !== "number" || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0) return text;
+			return `${text} (retry after ${formatDuration(retryAfterMs)})`;
+		}
+
       /**
        * Get display text for tree node (returns HTML string).
        */
@@ -522,8 +553,11 @@
               if (msg.stopReason === 'aborted') {
                 return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(aborted)</span>`;
               }
-              if (msg.errorMessage) {
-                return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(truncate(msg.errorMessage))}</span>`;
+              // Whether the turn failed, not whether the provider sent words
+              // about it: a refused wait with no provider text is a failure
+              // whose only text is omp's own explanation.
+              if (msg.errorDisplayMessage || msg.errorMessage) {
+                return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(withRetryWait(truncate(msg.errorDisplayMessage ?? msg.errorMessage), msg.errorRetryAfterMs))}</span>`;
               }
               return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(no text)</span>`;
             }
@@ -879,315 +913,346 @@
               <div class="output-preview"><pre><code class="hljs">${previewHighlighted}</code></pre>
               <div class="expand-hint">... (${remaining} more lines)</div></div>
               <div class="output-full"><pre><code class="hljs">${highlighted}</code></pre></div></div>`;
-          }
+				}
 
-          return `<div class="tool-output"><pre><code class="hljs">${highlighted}</code></pre></div>`;
-        }
+				return `<div class="tool-output"><pre><code class="hljs">${highlighted}</code></pre></div>`;
+			}
 
-        // Plain text output
-        if (remaining > 0) {
-          let out = '<div class="tool-output expandable" onclick="this.classList.toggle(\'expanded\')">';
-          out += '<div class="output-preview">';
-          for (const line of displayLines) {
-            out += `<div>${escapeHtml(replaceTabs(line))}</div>`;
-          }
-          out += `<div class="expand-hint">... (${remaining} more lines)</div></div>`;
-          out += '<div class="output-full">';
-          for (const line of lines) {
-            out += `<div>${escapeHtml(replaceTabs(line))}</div>`;
-          }
-          out += '</div></div>';
-          return out;
-        }
+			// Plain text output
+			if (remaining > 0) {
+				let out = '<div class="tool-output expandable" onclick="this.classList.toggle(\'expanded\')">';
+				out += '<div class="output-preview">';
+				for (const line of displayLines) {
+					out += `<div>${escapeHtml(replaceTabs(line))}</div>`;
+				}
+				out += `<div class="expand-hint">... (${remaining} more lines)</div></div>`;
+				out += '<div class="output-full">';
+				for (const line of lines) {
+					out += `<div>${escapeHtml(replaceTabs(line))}</div>`;
+				}
+				out += "</div></div>";
+				return out;
+			}
 
-        let out = '<div class="tool-output">';
-        for (const line of displayLines) {
-          out += `<div>${escapeHtml(replaceTabs(line))}</div>`;
-        }
-        out += '</div>';
-        return out;
-      }
+			let out = '<div class="tool-output">';
+			for (const line of displayLines) {
+				out += `<div>${escapeHtml(replaceTabs(line))}</div>`;
+			}
+			out += "</div>";
+			return out;
+		}
 
-      // ============================================================
-      // TOOL CALL RENDERING
-      // ============================================================
-      //
-      // Tool calls use the hosted viewer's <omp-tool-view> web component,
-      // shared with collab-web.
-      // Payloads are handed over via a global store keyed by data-key, which
-      // survives innerHTML serialization and cloneNode round trips.
+		// ============================================================
+		// TOOL CALL RENDERING
+		// ============================================================
+		//
+		// Tool calls use the hosted viewer's <omp-tool-view> web component,
+		// shared with collab-web.
+		// Payloads are handed over via a global store keyed by data-key, which
+		// survives innerHTML serialization and cloneNode round trips.
 
-      const TOOL_VIEW_DATA = new Map();
-      globalThis.__OMP_TOOL_VIEW_DATA = TOOL_VIEW_DATA;
-      let toolViewSeq = 0;
+		const TOOL_VIEW_DATA = new Map();
+		globalThis.__OMP_TOOL_VIEW_DATA = TOOL_VIEW_DATA;
+		let toolViewSeq = 0;
 
-      function renderToolCall(call, sctx, blockId) {
-        const result = findToolResult(call.id, sctx.entries);
-        const statusClass = result ? (result.isError ? 'error' : 'success') : 'pending';
-        const key = 'tv' + (++toolViewSeq);
-        TOOL_VIEW_DATA.set(key, {
-          name: call.name,
-          args: call.arguments || {},
-          result: result || undefined,
-          host: {
-            hasAgent: (id) => !!lookupSubSession(sctx.prefix, id),
-            openAgent: (id) => openSubSession(joinKey(sctx.prefix, id)),
-          },
-        });
-        return '<omp-tool-view class="tool-execution ' + statusClass + '" id="' + blockId + '" data-key="' + key + '" open></omp-tool-view>';
-      }
+		function renderToolCall(call, sctx, blockId) {
+			const result = findToolResult(call.id, sctx.entries);
+			const statusClass = result ? (result.isError ? "error" : "success") : "pending";
+			const key = "tv" + ++toolViewSeq;
+			TOOL_VIEW_DATA.set(key, {
+				name: call.name,
+				args: call.arguments || {},
+				result: result || undefined,
+				host: {
+					hasAgent: id => !!lookupSubSession(sctx.prefix, id),
+					openAgent: id => openSubSession(joinKey(sctx.prefix, id)),
+				},
+			});
+			return (
+				'<omp-tool-view class="tool-execution ' +
+				statusClass +
+				'" id="' +
+				blockId +
+				'" data-key="' +
+				key +
+				'" open></omp-tool-view>'
+			);
+		}
 
-      // Session destinations share the transcript tree and renderer. Only one
-      // transcript is mounted, so entry IDs may repeat across agents safely.
-      function joinKey(prefix, id) {
-        return prefix ? prefix + '/' + id : id;
-      }
+		// Session destinations share the transcript tree and renderer. Only one
+		// transcript is mounted, so entry IDs may repeat across agents safely.
+		function joinKey(prefix, id) {
+			return prefix ? prefix + "/" + id : id;
+		}
 
-      function lookupSubSession(prefix, id) {
-        return subSessions ? subSessions[joinKey(prefix, id)] : undefined;
-      }
+		function lookupSubSession(prefix, id) {
+			return subSessions ? subSessions[joinKey(prefix, id)] : undefined;
+		}
 
-      const sessionPositions = new Map();
+		const sessionPositions = new Map();
 
-      function sessionUrl(key) {
-        const url = new URL(window.location.href);
-        if (key) url.searchParams.set('session', key);
-        else url.searchParams.delete('session');
-        url.searchParams.delete('leafId');
-        url.searchParams.delete('targetId');
-        return url;
-      }
+		function sessionUrl(key) {
+			const url = new URL(window.location.href);
+			if (key) url.searchParams.set("session", key);
+			else url.searchParams.delete("session");
+			url.searchParams.delete("leafId");
+			url.searchParams.delete("targetId");
+			return url;
+		}
 
-      function updateLocation() {
-        const url = sessionUrl(activeSessionKey);
-        if (currentLeafId) url.searchParams.set('leafId', currentLeafId);
-        if (currentTargetId) url.searchParams.set('targetId', currentTargetId);
-        if (currentView === 'trace') url.searchParams.set('view', 'trace');
-        else url.searchParams.delete('view');
-        if (timelineOpen) url.searchParams.set('timeline', 'open');
-        else url.searchParams.delete('timeline');
-        try { history.replaceState(null, '', url); } catch {}
-      }
+		function updateLocation() {
+			const url = sessionUrl(activeSessionKey);
+			if (currentLeafId) url.searchParams.set("leafId", currentLeafId);
+			if (currentTargetId) url.searchParams.set("targetId", currentTargetId);
+			if (currentView === "trace") url.searchParams.set("view", "trace");
+			else url.searchParams.delete("view");
+			if (timelineOpen) url.searchParams.set("timeline", "open");
+			else url.searchParams.delete("timeline");
+			try {
+				history.replaceState(null, "", url);
+			} catch {}
+		}
 
-      function renderSessionList() {
-        const list = document.getElementById('session-list');
-        list.replaceChildren();
-        const sessions = [['', { agentId: 'Main session', entries: data.entries }], ...Object.entries(subSessions || {})];
-        document.getElementById('session-count').textContent = sessions.length;
-        for (const [key, session] of sessions) {
-          const link = document.createElement('a');
-          link.className = 'session-link';
-          link.href = sessionUrl(key).href;
-          link.dataset.session = key;
-          link.style.setProperty('--depth', Math.min(key ? key.split('/').length : 0, 6));
-          link.title = key || 'Main session';
-          const name = document.createElement('span');
-          name.className = 'session-name';
-          name.textContent = session.agentId;
-          const meta = document.createElement('span');
-          meta.className = 'session-meta';
-          meta.textContent = session.aborted ? 'Stopped' : String(session.entries.filter(e => e.type === 'message').length);
-          link.append(name, meta);
-          link.addEventListener('click', event => {
-            if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-            event.preventDefault();
-            switchSession(key);
-            setView('transcript');
-            closeSidebar();
-          });
-          list.appendChild(link);
-        }
-      }
+		function renderSessionList() {
+			const list = document.getElementById("session-list");
+			list.replaceChildren();
+			const sessions = [
+				["", { agentId: "Main session", entries: data.entries }],
+				...Object.entries(subSessions || {}),
+			];
+			document.getElementById("session-count").textContent = sessions.length;
+			for (const [key, session] of sessions) {
+				const link = document.createElement("a");
+				link.className = "session-link";
+				link.href = sessionUrl(key).href;
+				link.dataset.session = key;
+				link.style.setProperty("--depth", Math.min(key ? key.split("/").length : 0, 6));
+				link.title = key || "Main session";
+				const name = document.createElement("span");
+				name.className = "session-name";
+				name.textContent = session.agentId;
+				const meta = document.createElement("span");
+				meta.className = "session-meta";
+				meta.textContent = session.aborted
+					? "Stopped"
+					: String(session.entries.filter(e => e.type === "message").length);
+				link.append(name, meta);
+				link.addEventListener("click", event => {
+					if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+					event.preventDefault();
+					switchSession(key);
+					setView("transcript");
+					closeSidebar();
+				});
+				list.appendChild(link);
+			}
+		}
 
-      function switchSession(key, targetId = null, requestedLeafId = null) {
-        const session = key ? subSessions?.[key] : data;
-        if (!session) return;
-        sessionPositions.set(activeSessionKey, { leafId: currentLeafId, scrollTop: document.getElementById('content').scrollTop });
-        activeSessionKey = key;
-        header = session.header;
-        entries = session.entries;
-        leafId = session.leafId || entries.at(-1)?.id || null;
-        sessionContext = { entries, prefix: key, idPrefix: 'entry-' };
-        indexSession();
-        entryCache.clear();
-        TOOL_VIEW_DATA.clear();
-        globalStats = computeStats(entries);
-        treeRendered = false;
-        searchQuery = '';
-        searchInput.value = '';
-        const saved = sessionPositions.get(key);
-        const requested = requestedLeafId || saved?.leafId || leafId;
-        let destination = byId.has(requested) ? requested : leafId;
-        let anchorId = null;
-        // Tool results render inside their originating assistant card.
-        const target = byId.get(targetId);
-        if (target?.type === 'message' && target.message.role === 'toolResult') {
-          const call = toolCallMap.get(target.message.toolCallId);
-          if (call) anchorId = assistantBlockDomId(call.entryId, call.blockIndex, sessionContext);
-        }
-        if (targetId && byId.has(targetId) && !buildActivePathIds(destination).has(targetId)) destination = targetId;
-        navigateTo(destination, targetId ? 'target' : 'none', targetId, anchorId);
-        if (!targetId) document.getElementById('content').scrollTop = saved?.scrollTop || 0;
-        document.querySelectorAll('.session-link').forEach(link => {
-          if (link.dataset.session === key) link.setAttribute('aria-current', 'page');
-          else link.removeAttribute('aria-current');
-        });
-        updateLocation();
-      }
+		function switchSession(key, targetId = null, requestedLeafId = null) {
+			const session = key ? subSessions?.[key] : data;
+			if (!session) return;
+			sessionPositions.set(activeSessionKey, {
+				leafId: currentLeafId,
+				scrollTop: document.getElementById("content").scrollTop,
+			});
+			activeSessionKey = key;
+			header = session.header;
+			entries = session.entries;
+			leafId = session.leafId || entries.at(-1)?.id || null;
+			sessionContext = { entries, prefix: key, idPrefix: "entry-" };
+			indexSession();
+			entryCache.clear();
+			TOOL_VIEW_DATA.clear();
+			globalStats = computeStats(entries);
+			treeRendered = false;
+			searchQuery = "";
+			searchInput.value = "";
+			const saved = sessionPositions.get(key);
+			const requested = requestedLeafId || saved?.leafId || leafId;
+			let destination = byId.has(requested) ? requested : leafId;
+			let anchorId = null;
+			// Tool results render inside their originating assistant card.
+			const target = byId.get(targetId);
+			if (target?.type === "message" && target.message.role === "toolResult") {
+				const call = toolCallMap.get(target.message.toolCallId);
+				if (call) anchorId = assistantBlockDomId(call.entryId, call.blockIndex, sessionContext);
+			}
+			if (targetId && byId.has(targetId) && !buildActivePathIds(destination).has(targetId)) destination = targetId;
+			navigateTo(destination, targetId ? "target" : "none", targetId, anchorId);
+			if (!targetId) document.getElementById("content").scrollTop = saved?.scrollTop || 0;
+			document.querySelectorAll(".session-link").forEach(link => {
+				if (link.dataset.session === key) link.setAttribute("aria-current", "page");
+				else link.removeAttribute("aria-current");
+			});
+			updateLocation();
+		}
 
-      function openSubSession(key) {
-        switchSession(key);
-        setView('transcript');
-        closeSidebar();
-      }
+		function openSubSession(key) {
+			switchSession(key);
+			setView("transcript");
+			closeSidebar();
+		}
 
+		/**
+		 * Build a shareable URL for a specific message.
+		 * URL format: base?gistId&leafId=<leafId>&targetId=<entryId>
+		 */
+		function buildShareUrl(entryId) {
+			// Check for injected base URL (used when loaded in iframe via srcdoc)
+			const baseUrlMeta = document.querySelector('meta[name="pi-share-base-url"]');
+			const baseUrl = baseUrlMeta ? baseUrlMeta.content : window.location.href.split("?")[0];
 
-      /**
-       * Build a shareable URL for a specific message.
-       * URL format: base?gistId&leafId=<leafId>&targetId=<entryId>
-       */
-      function buildShareUrl(entryId) {
-        // Check for injected base URL (used when loaded in iframe via srcdoc)
-        const baseUrlMeta = document.querySelector('meta[name="pi-share-base-url"]');
-        const baseUrl = baseUrlMeta ? baseUrlMeta.content : window.location.href.split('?')[0];
+			const url = new URL(window.location.href);
+			// Find the gist ID (first query param without value, e.g., ?abc123)
+			const gistId = Array.from(url.searchParams.keys()).find(k => !url.searchParams.get(k));
 
-        const url = new URL(window.location.href);
-        // Find the gist ID (first query param without value, e.g., ?abc123)
-        const gistId = Array.from(url.searchParams.keys()).find(k => !url.searchParams.get(k));
+			// Build the share URL
+			const params = new URLSearchParams();
+			params.set("leafId", currentLeafId);
+			params.set("targetId", entryId);
+			if (activeSessionKey) params.set("session", activeSessionKey);
 
-        // Build the share URL
-        const params = new URLSearchParams();
-        params.set('leafId', currentLeafId);
-        params.set('targetId', entryId);
-        if (activeSessionKey) params.set('session', activeSessionKey);
+			// If we have an injected base URL (iframe context), use it directly
+			if (baseUrlMeta) {
+				return `${baseUrl}&${params.toString()}`;
+			}
 
-        // If we have an injected base URL (iframe context), use it directly
-        if (baseUrlMeta) {
-          return `${baseUrl}&${params.toString()}`;
-        }
+			// Otherwise build from current location (direct file access)
+			url.search = gistId ? `?${gistId}&${params.toString()}` : `?${params.toString()}`;
+			return url.toString();
+		}
 
-        // Otherwise build from current location (direct file access)
-        url.search = gistId ? `?${gistId}&${params.toString()}` : `?${params.toString()}`;
-        return url.toString();
-      }
+		/**
+		 * Copy text to clipboard with visual feedback.
+		 * Uses navigator.clipboard with fallback to execCommand for HTTP contexts.
+		 */
+		async function copyToClipboard(text, button) {
+			let success = false;
+			try {
+				if (navigator.clipboard && navigator.clipboard.writeText) {
+					await navigator.clipboard.writeText(text);
+					success = true;
+				}
+			} catch {
+				// Clipboard API failed, try fallback
+			}
 
-      /**
-       * Copy text to clipboard with visual feedback.
-       * Uses navigator.clipboard with fallback to execCommand for HTTP contexts.
-       */
-      async function copyToClipboard(text, button) {
-        let success = false;
-        try {
-          if (navigator.clipboard && navigator.clipboard.writeText) {
-            await navigator.clipboard.writeText(text);
-            success = true;
-          }
-        } catch {
-          // Clipboard API failed, try fallback
-        }
+			// Fallback for HTTP or when Clipboard API is unavailable
+			if (!success) {
+				try {
+					const textarea = document.createElement("textarea");
+					textarea.value = text;
+					textarea.style.position = "fixed";
+					textarea.style.opacity = "0";
+					document.body.appendChild(textarea);
+					textarea.select();
+					success = document.execCommand("copy");
+					document.body.removeChild(textarea);
+				} catch {}
+			}
 
-        // Fallback for HTTP or when Clipboard API is unavailable
-        if (!success) {
-          try {
-            const textarea = document.createElement('textarea');
-            textarea.value = text;
-            textarea.style.position = 'fixed';
-            textarea.style.opacity = '0';
-            document.body.appendChild(textarea);
-            textarea.select();
-            success = document.execCommand('copy');
-            document.body.removeChild(textarea);
-          } catch {
-          }
-        }
+			if (success && button) {
+				const originalHtml = button.innerHTML;
+				button.innerHTML = "✓";
+				button.classList.add("copied");
+				setTimeout(() => {
+					button.innerHTML = originalHtml;
+					button.classList.remove("copied");
+				}, 1500);
+			}
+		}
 
-        if (success && button) {
-          const originalHtml = button.innerHTML;
-          button.innerHTML = '✓';
-          button.classList.add('copied');
-          setTimeout(() => {
-            button.innerHTML = originalHtml;
-            button.classList.remove('copied');
-          }, 1500);
-        }
-      }
-
-      /**
-       * Render the copy-link button HTML for a message.
-       */
-      function renderCopyLinkButton(entryId) {
-        return `<button class="copy-link-btn" data-entry-id="${entryId}" title="Copy link to this message">
+		/**
+		 * Render the copy-link button HTML for a message.
+		 */
+		function renderCopyLinkButton(entryId) {
+			return `<button class="copy-link-btn" data-entry-id="${entryId}" title="Copy link to this message">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
             <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
           </svg>
         </button>`;
-      }
+		}
 
-      function renderEntry(entry, sctx) {
-        const ts = formatTimestamp(entry.timestamp);
-        const tsHtml = ts ? `<div class="message-timestamp">${ts}</div>` : '';
-        const entryId = `${sctx.idPrefix}${entry.id}`;
-        // Share links target main-session entries only; overlays skip them.
-        const copyBtnHtml = sctx.prefix === '' ? renderCopyLinkButton(entry.id) : '';
+		function renderEntry(entry, sctx) {
+			const ts = formatTimestamp(entry.timestamp);
+			const tsHtml = ts ? `<div class="message-timestamp">${ts}</div>` : "";
+			const entryId = `${sctx.idPrefix}${entry.id}`;
+			// Share links target main-session entries only; overlays skip them.
+			const copyBtnHtml = sctx.prefix === "" ? renderCopyLinkButton(entry.id) : "";
 
-        if (entry.type === 'message') {
-          const msg = entry.message;
+			if (entry.type === "message") {
+				const msg = entry.message;
 
-          if (msg.role === 'user') {
-            let html = `<div class="user-message" id="${entryId}">${copyBtnHtml}${tsHtml}`;
-            const content = msg.content;
+				if (msg.role === "user") {
+					let html = `<div class="user-message" id="${entryId}">${copyBtnHtml}${tsHtml}`;
+					const content = msg.content;
 
-            if (Array.isArray(content)) {
-              const images = content.filter(c => c.type === 'image');
-              if (images.length > 0) {
-                html += '<div class="message-images">';
-                for (const img of images) {
-                  html += `<img src="data:${img.mimeType};base64,${img.data}" class="message-image" />`;
-                }
-                html += '</div>';
-              }
-            }
+					if (Array.isArray(content)) {
+						const images = content.filter(c => c.type === "image");
+						if (images.length > 0) {
+							html += '<div class="message-images">';
+							for (const img of images) {
+								html += `<img src="data:${img.mimeType};base64,${img.data}" class="message-image" />`;
+							}
+							html += "</div>";
+						}
+					}
 
-            const text = typeof content === 'string' ? content : 
-              content.filter(c => c.type === 'text').map(c => c.text).join('\n');
-            if (text.trim()) {
-              html += `<div class="markdown-content">${safeMarkedParse(text)}</div>`;
-            }
-            html += '</div>';
-            return html;
-          }
+					const text =
+						typeof content === "string"
+							? content
+							: content
+									.filter(c => c.type === "text")
+									.map(c => c.text)
+									.join("\n");
+					if (text.trim()) {
+						html += `<div class="markdown-content">${safeMarkedParse(text)}</div>`;
+					}
+					html += "</div>";
+					return html;
+				}
 
-          if (msg.role === 'developer') {
-            let html = `<div class="user-message developer-message" id="${entryId}">${copyBtnHtml}${tsHtml}`;
-            const content = msg.content;
-            const text = typeof content === 'string' ? content :
-              content.filter(c => c.type === 'text').map(c => c.text).join('\n');
-            if (text.trim()) {
-              html += `<div class="markdown-content">${safeMarkedParse(text)}</div>`;
-            }
-            html += '</div>';
-            return html;
-          }
+				if (msg.role === "developer") {
+					let html = `<div class="user-message developer-message" id="${entryId}">${copyBtnHtml}${tsHtml}`;
+					const content = msg.content;
+					const text =
+						typeof content === "string"
+							? content
+							: content
+									.filter(c => c.type === "text")
+									.map(c => c.text)
+									.join("\n");
+					if (text.trim()) {
+						html += `<div class="markdown-content">${safeMarkedParse(text)}</div>`;
+					}
+					html += "</div>";
+					return html;
+				}
 
-          if (msg.role === 'assistant') {
-            let html = `<div class="assistant-message" id="${entryId}">${copyBtnHtml}${tsHtml}`;
+				if (msg.role === "assistant") {
+					let html = `<div class="assistant-message" id="${entryId}">${copyBtnHtml}${tsHtml}`;
 
-            // Walk message.content once. Do not bucket blocks by type.
-            for (let blockIndex = 0; blockIndex < msg.content.length; blockIndex++) {
-              const block = msg.content[blockIndex];
-              const blockId = assistantBlockDomId(entry.id, blockIndex, sctx);
-              // Narration is prose for the user that the provider returned as thinking.
-              const answerText = block.type === 'text' ? block.text : block.type === 'thinking' && block.narration ? block.thinking : undefined;
-              if (answerText !== undefined) {
-                const canon = canonicalizeMessage(answerText);
-                if (canon) {
-                  html += `<div class="assistant-text markdown-content" id="${blockId}">${safeMarkedParse(answerText)}</div>`;
-                }
-              } else if (block.type === 'thinking') {
-                const thinking = canonicalizeMessage(block.thinking);
-                if (!thinking) continue;
-                html += `<div class="thinking-block" id="${blockId}">
+					// Walk message.content once. Do not bucket blocks by type.
+					for (let blockIndex = 0; blockIndex < msg.content.length; blockIndex++) {
+						const block = msg.content[blockIndex];
+						const blockId = assistantBlockDomId(entry.id, blockIndex, sctx);
+						// Narration is prose for the user that the provider returned as thinking.
+						const answerText =
+							block.type === "text"
+								? block.text
+								: block.type === "thinking" && block.narration
+									? block.thinking
+									: undefined;
+						if (answerText !== undefined) {
+							const canon = canonicalizeMessage(answerText);
+							if (canon) {
+								html += `<div class="assistant-text markdown-content" id="${blockId}">${safeMarkedParse(answerText)}</div>`;
+							}
+						} else if (block.type === "thinking") {
+							const thinking = canonicalizeMessage(block.thinking);
+							if (!thinking) continue;
+							html += `<div class="thinking-block" id="${blockId}">
                   <div class="thinking-text">${escapeHtml(thinking)}</div>
                   <div class="thinking-collapsed">Thinking ...</div>
                 </div>`;
@@ -1201,7 +1266,7 @@
             if (msg.stopReason === 'aborted') {
               html += '<div class="error-text">Aborted</div>';
             } else if (msg.stopReason === 'error') {
-              html += `<div class="error-text">Error: ${escapeHtml(msg.errorMessage || 'Unknown error')}</div>`;
+              html += `<div class="error-text">Error: ${escapeHtml(withRetryWait((msg.errorDisplayMessage ?? msg.errorMessage) || 'Unknown error', msg.errorRetryAfterMs))}</div>`;
             }
 
             html += '</div>';
@@ -1256,553 +1321,579 @@
             <div class="compaction-collapsed">Compacted from ${entry.tokensBefore.toLocaleString()} tokens</div>
             <div class="compaction-content"><strong>Compacted from ${entry.tokensBefore.toLocaleString()} tokens</strong>\n\n${escapeHtml(entry.summary)}</div>
           </div>`;
-        }
+			}
 
-        if (entry.type === 'branch_summary') {
-          return `<div class="branch-summary" id="${entryId}">${tsHtml}
+			if (entry.type === "branch_summary") {
+				return `<div class="branch-summary" id="${entryId}">${tsHtml}
             <div class="branch-summary-header">Branch Summary</div>
             <div class="markdown-content">${safeMarkedParse(entry.summary)}</div>
           </div>`;
-        }
+			}
 
-        if (entry.type === 'custom_message' && entry.display) {
-          return `<div class="hook-message" id="${entryId}">${tsHtml}
+			if (entry.type === "custom_message" && entry.display) {
+				return `<div class="hook-message" id="${entryId}">${tsHtml}
             <div class="hook-type">[${escapeHtml(entry.customType)}]</div>
-            <div class="markdown-content">${safeMarkedParse(typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content))}</div>
+            <div class="markdown-content">${safeMarkedParse(typeof entry.content === "string" ? entry.content : JSON.stringify(entry.content))}</div>
           </div>`;
-        }
+			}
 
-        return '';
-      }
+			return "";
+		}
 
-      // ============================================================
-      // HEADER / STATS
-      // ============================================================
+		// ============================================================
+		// HEADER / STATS
+		// ============================================================
 
-      function computeStats(entryList) {
-        let userMessages = 0, developerMessages = 0, assistantMessages = 0, toolResults = 0;
-        let customMessages = 0, compactions = 0, branchSummaries = 0, toolCalls = 0;
-        const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-        const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-        const models = new Set();
+		function computeStats(entryList) {
+			let userMessages = 0,
+				developerMessages = 0,
+				assistantMessages = 0,
+				toolResults = 0;
+			let customMessages = 0,
+				compactions = 0,
+				branchSummaries = 0,
+				toolCalls = 0;
+			const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+			const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+			const models = new Set();
 
-        for (const entry of entryList) {
-          if (entry.type === 'message') {
-            const msg = entry.message;
-            if (msg.role === 'user') userMessages++;
-            if (msg.role === 'developer') developerMessages++;
-            if (msg.role === 'assistant') {
-              assistantMessages++;
-              if (msg.model) models.add(msg.provider ? `${msg.provider}/${msg.model}` : msg.model);
-              if (msg.usage) {
-                tokens.input += msg.usage.input || 0;
-                tokens.output += msg.usage.output || 0;
-                tokens.cacheRead += msg.usage.cacheRead || 0;
-                tokens.cacheWrite += msg.usage.cacheWrite || 0;
-                if (msg.usage.cost) {
-                  cost.input += msg.usage.cost.input || 0;
-                  cost.output += msg.usage.cost.output || 0;
-                  cost.cacheRead += msg.usage.cost.cacheRead || 0;
-                  cost.cacheWrite += msg.usage.cost.cacheWrite || 0;
-                }
-              }
-              toolCalls += msg.content.filter(c => c.type === 'toolCall').length;
-            }
-            if (msg.role === 'toolResult') toolResults++;
-          } else if (entry.type === 'compaction') {
-            compactions++;
-          } else if (entry.type === 'branch_summary') {
-            branchSummaries++;
-          } else if (entry.type === 'custom_message') {
-            customMessages++;
-          }
-        }
+			for (const entry of entryList) {
+				if (entry.type === "message") {
+					const msg = entry.message;
+					if (msg.role === "user") userMessages++;
+					if (msg.role === "developer") developerMessages++;
+					if (msg.role === "assistant") {
+						assistantMessages++;
+						if (msg.model) models.add(msg.provider ? `${msg.provider}/${msg.model}` : msg.model);
+						if (msg.usage) {
+							tokens.input += msg.usage.input || 0;
+							tokens.output += msg.usage.output || 0;
+							tokens.cacheRead += msg.usage.cacheRead || 0;
+							tokens.cacheWrite += msg.usage.cacheWrite || 0;
+							if (msg.usage.cost) {
+								cost.input += msg.usage.cost.input || 0;
+								cost.output += msg.usage.cost.output || 0;
+								cost.cacheRead += msg.usage.cost.cacheRead || 0;
+								cost.cacheWrite += msg.usage.cost.cacheWrite || 0;
+							}
+						}
+						toolCalls += msg.content.filter(c => c.type === "toolCall").length;
+					}
+					if (msg.role === "toolResult") toolResults++;
+				} else if (entry.type === "compaction") {
+					compactions++;
+				} else if (entry.type === "branch_summary") {
+					branchSummaries++;
+				} else if (entry.type === "custom_message") {
+					customMessages++;
+				}
+			}
 
-        return { userMessages, developerMessages, assistantMessages, toolResults, customMessages, compactions, branchSummaries, toolCalls, tokens, cost, models: Array.from(models) };
-      }
+			return {
+				userMessages,
+				developerMessages,
+				assistantMessages,
+				toolResults,
+				customMessages,
+				compactions,
+				branchSummaries,
+				toolCalls,
+				tokens,
+				cost,
+				models: Array.from(models),
+			};
+		}
 
-      let globalStats = computeStats(entries);
+		let globalStats = computeStats(entries);
 
-      function renderHeader() {
-        const title = header?.title || (activeSessionKey ? subSessions[activeSessionKey].agentId : 'Session transcript');
-        document.title = `${title} · omp`;
-        const totalCost = globalStats.cost.input + globalStats.cost.output + globalStats.cost.cacheRead + globalStats.cost.cacheWrite;
+		function renderHeader() {
+			const title =
+				header?.title || (activeSessionKey ? subSessions[activeSessionKey].agentId : "Session transcript");
+			document.title = `${title} · omp`;
+			const totalCost =
+				globalStats.cost.input + globalStats.cost.output + globalStats.cost.cacheRead + globalStats.cost.cacheWrite;
 
-        const tokenParts = [];
-        if (globalStats.tokens.input) tokenParts.push(`↑${formatTokens(globalStats.tokens.input)}`);
-        if (globalStats.tokens.output) tokenParts.push(`↓${formatTokens(globalStats.tokens.output)}`);
-        if (globalStats.tokens.cacheRead) tokenParts.push(`R${formatTokens(globalStats.tokens.cacheRead)}`);
-        if (globalStats.tokens.cacheWrite) tokenParts.push(`W${formatTokens(globalStats.tokens.cacheWrite)}`);
+			const tokenParts = [];
+			if (globalStats.tokens.input) tokenParts.push(`↑${formatTokens(globalStats.tokens.input)}`);
+			if (globalStats.tokens.output) tokenParts.push(`↓${formatTokens(globalStats.tokens.output)}`);
+			if (globalStats.tokens.cacheRead) tokenParts.push(`R${formatTokens(globalStats.tokens.cacheRead)}`);
+			if (globalStats.tokens.cacheWrite) tokenParts.push(`W${formatTokens(globalStats.tokens.cacheWrite)}`);
 
-        const msgParts = [];
-        if (globalStats.userMessages) msgParts.push(`${globalStats.userMessages} user`);
-        if (globalStats.developerMessages) msgParts.push(`${globalStats.developerMessages} developer`);
-        if (globalStats.assistantMessages) msgParts.push(`${globalStats.assistantMessages} assistant`);
-        if (globalStats.toolResults) msgParts.push(`${globalStats.toolResults} tool results`);
-        if (globalStats.customMessages) msgParts.push(`${globalStats.customMessages} custom`);
-        if (globalStats.compactions) msgParts.push(`${globalStats.compactions} compactions`);
-        if (globalStats.branchSummaries) msgParts.push(`${globalStats.branchSummaries} branch summaries`);
+			const msgParts = [];
+			if (globalStats.userMessages) msgParts.push(`${globalStats.userMessages} user`);
+			if (globalStats.developerMessages) msgParts.push(`${globalStats.developerMessages} developer`);
+			if (globalStats.assistantMessages) msgParts.push(`${globalStats.assistantMessages} assistant`);
+			if (globalStats.toolResults) msgParts.push(`${globalStats.toolResults} tool results`);
+			if (globalStats.customMessages) msgParts.push(`${globalStats.customMessages} custom`);
+			if (globalStats.compactions) msgParts.push(`${globalStats.compactions} compactions`);
+			if (globalStats.branchSummaries) msgParts.push(`${globalStats.branchSummaries} branch summaries`);
 
-        let html = `
+			let html = `
           <div class="header">
-            <div class="session-eyebrow">${escapeHtml(activeSessionKey || 'Main session')}</div>
+            <div class="session-eyebrow">${escapeHtml(activeSessionKey || "Main session")}</div>
             <h1>${escapeHtml(title)}</h1>
-            <div class="help-bar">${escapeHtml(shortenPath(header?.cwd || ''))} · T thinking · O tool output</div>
+            <div class="help-bar">${escapeHtml(shortenPath(header?.cwd || ""))} · T thinking · O tool output</div>
             <div class="header-info">
-              <div class="info-item"><span class="info-label">Date:</span><span class="info-value">${header?.timestamp ? new Date(header.timestamp).toLocaleString() : 'unknown'}</span></div>
-              <div class="info-item"><span class="info-label">Models:</span><span class="info-value">${escapeHtml(globalStats.models.join(', ') || 'unknown')}</span></div>
-              <div class="info-item"><span class="info-label">Messages:</span><span class="info-value">${msgParts.join(', ') || '0'}</span></div>
+              <div class="info-item"><span class="info-label">Date:</span><span class="info-value">${header?.timestamp ? new Date(header.timestamp).toLocaleString() : "unknown"}</span></div>
+              <div class="info-item"><span class="info-label">Models:</span><span class="info-value">${escapeHtml(globalStats.models.join(", ") || "unknown")}</span></div>
+              <div class="info-item"><span class="info-label">Messages:</span><span class="info-value">${msgParts.join(", ") || "0"}</span></div>
               <div class="info-item"><span class="info-label">Tool Calls:</span><span class="info-value">${globalStats.toolCalls}</span></div>
-              <div class="info-item"><span class="info-label">Tokens:</span><span class="info-value">${tokenParts.join(' ') || '0'}</span></div>
+              <div class="info-item"><span class="info-label">Tokens:</span><span class="info-value">${tokenParts.join(" ") || "0"}</span></div>
               <div class="info-item"><span class="info-label">Cost:</span><span class="info-value">$${totalCost.toFixed(3)}</span></div>
             </div>
           </div>`;
 
-        if (!activeSessionKey && systemPrompt) {
-          html += `<div class="system-prompt">
+			if (!activeSessionKey && systemPrompt) {
+				html += `<div class="system-prompt">
             <div class="system-prompt-header">System Prompt</div>
             <div class="system-prompt-content">${escapeHtml(systemPrompt)}</div>
           </div>`;
-        }
+			}
 
-        if (!activeSessionKey && tools && tools.length > 0) {
-          const namesHtml = tools.map(t => `<span class="tool-name-chip">${escapeHtml(t.name)}</span>`).join('');
-          const fullHtml = tools.map(t => `<div class="tool-item"><span class="tool-item-name">${escapeHtml(t.name)}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span></div>`).join('');
-          html += `<div class="tools-list collapsed" onclick="this.classList.toggle('collapsed')">
+			if (!activeSessionKey && tools && tools.length > 0) {
+				const namesHtml = tools.map(t => `<span class="tool-name-chip">${escapeHtml(t.name)}</span>`).join("");
+				const fullHtml = tools
+					.map(
+						t =>
+							`<div class="tool-item"><span class="tool-item-name">${escapeHtml(t.name)}</span> - <span class="tool-item-desc">${escapeHtml(t.description)}</span></div>`,
+					)
+					.join("");
+				html += `<div class="tools-list collapsed" onclick="this.classList.toggle('collapsed')">
             <div class="tools-header">Available Tools (${tools.length})</div>
             <div class="tools-collapsed">${namesHtml}</div>
             <div class="tools-content">${fullHtml}</div>
           </div>`;
-        }
+			}
 
-        return html;
-      }
+			return html;
+		}
 
-      // ============================================================
-      // NAVIGATION
-      // ============================================================
+		// ============================================================
+		// NAVIGATION
+		// ============================================================
 
-      // Cache for rendered entry DOM nodes
-      const entryCache = new Map();
+		// Cache for rendered entry DOM nodes
+		const entryCache = new Map();
 
-      function renderEntryToNode(entry, sctx) {
-        if (entryCache.has(entry.id)) {
-          return entryCache.get(entry.id).cloneNode(true);
-        }
+		function renderEntryToNode(entry, sctx) {
+			if (entryCache.has(entry.id)) {
+				return entryCache.get(entry.id).cloneNode(true);
+			}
 
-        // Render to HTML string, then parse to node
-        const html = renderEntry(entry, sctx);
-        if (!html) return null;
+			// Render to HTML string, then parse to node
+			const html = renderEntry(entry, sctx);
+			if (!html) return null;
 
-        const template = document.createElement('template');
-        template.innerHTML = html;
-        const node = template.content.firstElementChild;
+			const template = document.createElement("template");
+			template.innerHTML = html;
+			const node = template.content.firstElementChild;
 
-        // Cache the node
-        if (node) {
-          entryCache.set(entry.id, node.cloneNode(true));
-        }
-        return node;
-      }
+			// Cache the node
+			if (node) {
+				entryCache.set(entry.id, node.cloneNode(true));
+			}
+			return node;
+		}
 
-      function navigateTo(targetId, scrollMode = 'target', scrollToEntryId = null, scrollTargetDomId = null) {
-        setView('transcript');
-        const leafChanged = currentLeafId !== targetId;
-        currentLeafId = targetId;
-        currentTargetId = scrollToEntryId || targetId;
-        currentTargetAnchorId = scrollTargetDomId;
-        const path = getPath(targetId);
-        updateLocation();
+		function navigateTo(targetId, scrollMode = "target", scrollToEntryId = null, scrollTargetDomId = null) {
+			setView("transcript");
+			const leafChanged = currentLeafId !== targetId;
+			currentLeafId = targetId;
+			currentTargetId = scrollToEntryId || targetId;
+			currentTargetAnchorId = scrollTargetDomId;
+			const path = getPath(targetId);
+			updateLocation();
 
-        if (leafChanged) {
-          forceTreeRerender();
-        } else {
-          renderTree();
-        }
+			if (leafChanged) {
+				forceTreeRerender();
+			} else {
+				renderTree();
+			}
 
-        document.getElementById('header-container').innerHTML = renderHeader();
+			document.getElementById("header-container").innerHTML = renderHeader();
 
-        // Build messages using cached DOM nodes
-        const messagesEl = document.getElementById('messages');
-        const fragment = document.createDocumentFragment();
+			// Build messages using cached DOM nodes
+			const messagesEl = document.getElementById("messages");
+			const fragment = document.createDocumentFragment();
 
-        const renderContext = sessionContext;
-        for (const entry of path) {
-          const node = renderEntryToNode(entry, sessionContext);
-          if (node) {
-            fragment.appendChild(node);
-          }
-        }
+			const renderContext = sessionContext;
+			for (const entry of path) {
+				const node = renderEntryToNode(entry, sessionContext);
+				if (node) {
+					fragment.appendChild(node);
+				}
+			}
 
-        messagesEl.innerHTML = '';
-        messagesEl.appendChild(fragment);
-        if (!messagesEl.firstChild) {
-          const empty = document.createElement('p');
-          empty.className = 'empty-session';
-          empty.textContent = 'This session has no transcript messages.';
-          messagesEl.appendChild(empty);
-        }
+			messagesEl.innerHTML = "";
+			messagesEl.appendChild(fragment);
+			if (!messagesEl.firstChild) {
+				const empty = document.createElement("p");
+				empty.className = "empty-session";
+				empty.textContent = "This session has no transcript messages.";
+				messagesEl.appendChild(empty);
+			}
 
-        // Attach click handlers for copy-link buttons
-        messagesEl.querySelectorAll('.copy-link-btn').forEach(btn => {
-          btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const entryId = btn.dataset.entryId;
-            const shareUrl = buildShareUrl(entryId);
-            copyToClipboard(shareUrl, btn);
-          });
-        });
+			// Attach click handlers for copy-link buttons
+			messagesEl.querySelectorAll(".copy-link-btn").forEach(btn => {
+				btn.addEventListener("click", e => {
+					e.stopPropagation();
+					const entryId = btn.dataset.entryId;
+					const shareUrl = buildShareUrl(entryId);
+					copyToClipboard(shareUrl, btn);
+				});
+			});
 
-        // Use setTimeout(0) to ensure DOM is fully laid out before scrolling
-        setTimeout(() => {
-          const content = document.getElementById('content');
-          if (scrollMode === 'bottom') {
-            content.scrollTop = content.scrollHeight;
-          } else if (scrollMode === 'target') {
-            const scrollTargetId = scrollToEntryId || targetId;
-            if (sessionContext !== renderContext) return;
-            const targetEl = document.getElementById(scrollTargetDomId || `${renderContext.idPrefix}${scrollTargetId}`);
-            if (targetEl) {
-              targetEl.scrollIntoView({ block: 'center' });
-              if (scrollToEntryId) {
-                targetEl.classList.add('highlight');
-                setTimeout(() => targetEl.classList.remove('highlight'), 2000);
-              }
-            }
-          }
-        }, 0);
-      }
+			// Use setTimeout(0) to ensure DOM is fully laid out before scrolling
+			setTimeout(() => {
+				const content = document.getElementById("content");
+				if (scrollMode === "bottom") {
+					content.scrollTop = content.scrollHeight;
+				} else if (scrollMode === "target") {
+					const scrollTargetId = scrollToEntryId || targetId;
+					if (sessionContext !== renderContext) return;
+					const targetEl = document.getElementById(
+						scrollTargetDomId || `${renderContext.idPrefix}${scrollTargetId}`,
+					);
+					if (targetEl) {
+						targetEl.scrollIntoView({ block: "center" });
+						if (scrollToEntryId) {
+							targetEl.classList.add("highlight");
+							setTimeout(() => targetEl.classList.remove("highlight"), 2000);
+						}
+					}
+				}
+			}, 0);
+		}
 
-      // ============================================================
-      // INITIALIZATION
-      // ============================================================
+		// ============================================================
+		// INITIALIZATION
+		// ============================================================
 
-      // Escape HTML tags in text (but not code blocks)
-      function escapeHtmlTags(text) {
-        return text.replace(/<(?=[a-zA-Z\/])/g, '&lt;');
-      }
+		// Escape HTML tags in text (but not code blocks)
+		function escapeHtmlTags(text) {
+			return text.replace(/<(?=[a-zA-Z\/])/g, "&lt;");
+		}
 
-      // Configure marked with syntax highlighting and HTML escaping for text
-      marked.use({
-        breaks: true,
-        gfm: true,
-        renderer: {
-          // Code blocks: syntax highlight, no HTML escaping
-          code(token) {
-            const code = token.text;
-            const lang = token.lang;
-            let highlighted;
-            if (lang && hljs.getLanguage(lang)) {
-              try {
-                highlighted = hljs.highlight(code, { language: lang }).value;
-              } catch {
-                highlighted = escapeHtml(code);
-              }
-            } else {
-              // Auto-detect language if not specified
-              try {
-                highlighted = hljs.highlightAuto(code).value;
-              } catch {
-                highlighted = escapeHtml(code);
-              }
-            }
-            return `<pre><code class="hljs">${highlighted}</code></pre>`;
-          },
-          // Text content: escape HTML tags
-          text(token) {
-            if (token.tokens) return this.parser.parseInline(token.tokens);
-            return token.escaped ? token.text : escapeHtmlTags(escapeHtml(token.text));
-          },
-          // Inline code: escape HTML
-          codespan(token) {
-            return `<code>${escapeHtml(token.text)}</code>`;
-          }
-        }
-      });
+		// Configure marked with syntax highlighting and HTML escaping for text
+		marked.use({
+			breaks: true,
+			gfm: true,
+			renderer: {
+				// Code blocks: syntax highlight, no HTML escaping
+				code(token) {
+					const code = token.text;
+					const lang = token.lang;
+					let highlighted;
+					if (lang && hljs.getLanguage(lang)) {
+						try {
+							highlighted = hljs.highlight(code, { language: lang }).value;
+						} catch {
+							highlighted = escapeHtml(code);
+						}
+					} else {
+						// Auto-detect language if not specified
+						try {
+							highlighted = hljs.highlightAuto(code).value;
+						} catch {
+							highlighted = escapeHtml(code);
+						}
+					}
+					return `<pre><code class="hljs">${highlighted}</code></pre>`;
+				},
+				// Text content: escape HTML tags
+				text(token) {
+					if (token.tokens) return this.parser.parseInline(token.tokens);
+					return token.escaped ? token.text : escapeHtmlTags(escapeHtml(token.text));
+				},
+				// Inline code: escape HTML
+				codespan(token) {
+					return `<code>${escapeHtml(token.text)}</code>`;
+				},
+			},
+		});
 
-      // Simple marked parse (escaping handled in renderers)
-      function safeMarkedParse(text) {
-        return marked.parse(text);
-      }
+		// Simple marked parse (escaping handled in renderers)
+		function safeMarkedParse(text) {
+			return marked.parse(text);
+		}
 
-      // Search input
-      const searchInput = document.getElementById('tree-search');
-      searchInput.addEventListener('input', (e) => {
-        searchQuery = e.target.value;
-        forceTreeRerender();
-      });
+		// Search input
+		const searchInput = document.getElementById("tree-search");
+		searchInput.addEventListener("input", e => {
+			searchQuery = e.target.value;
+			forceTreeRerender();
+		});
 
-      // Filter buttons
-      document.querySelectorAll('.filter-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-          document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-          btn.classList.add('active');
-          filterMode = btn.dataset.filter;
-          forceTreeRerender();
-        });
-      });
+		// Filter buttons
+		document.querySelectorAll(".filter-btn").forEach(btn => {
+			btn.addEventListener("click", () => {
+				document.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
+				btn.classList.add("active");
+				filterMode = btn.dataset.filter;
+				forceTreeRerender();
+			});
+		});
 
-      // Sidebar toggle
-      const sidebar = document.getElementById('sidebar');
-      const overlay = document.getElementById('sidebar-overlay');
-      const hamburger = document.getElementById('hamburger');
-      const sidebarResizer = document.getElementById('sidebar-resizer');
-      const SIDEBAR_WIDTH_STORAGE_KEY = 'omp-export:sidebar-width';
-      const MIN_CONTENT_WIDTH = 320;
+		// Sidebar toggle
+		const sidebar = document.getElementById("sidebar");
+		const overlay = document.getElementById("sidebar-overlay");
+		const hamburger = document.getElementById("hamburger");
+		const sidebarResizer = document.getElementById("sidebar-resizer");
+		const SIDEBAR_WIDTH_STORAGE_KEY = "omp-export:sidebar-width";
+		const MIN_CONTENT_WIDTH = 320;
 
-      function isMobileLayout() {
-        return window.matchMedia('(max-width: 900px)').matches;
-      }
+		function isMobileLayout() {
+			return window.matchMedia("(max-width: 900px)").matches;
+		}
 
-      function getSidebarBounds() {
-        const rootStyles = getComputedStyle(document.documentElement);
-        const minWidth = parseFloat(rootStyles.getPropertyValue('--sidebar-min-width')) || 240;
-        const maxWidth = parseFloat(rootStyles.getPropertyValue('--sidebar-max-width')) || 720;
-        const viewportMaxWidth = window.innerWidth - MIN_CONTENT_WIDTH;
-        return {
-          minWidth,
-          maxWidth: Math.max(minWidth, Math.min(maxWidth, viewportMaxWidth))
-        };
-      }
+		function getSidebarBounds() {
+			const rootStyles = getComputedStyle(document.documentElement);
+			const minWidth = parseFloat(rootStyles.getPropertyValue("--sidebar-min-width")) || 240;
+			const maxWidth = parseFloat(rootStyles.getPropertyValue("--sidebar-max-width")) || 720;
+			const viewportMaxWidth = window.innerWidth - MIN_CONTENT_WIDTH;
+			return {
+				minWidth,
+				maxWidth: Math.max(minWidth, Math.min(maxWidth, viewportMaxWidth)),
+			};
+		}
 
-      function clampSidebarWidth(width) {
-        const { minWidth, maxWidth } = getSidebarBounds();
-        return Math.max(minWidth, Math.min(maxWidth, width));
-      }
+		function clampSidebarWidth(width) {
+			const { minWidth, maxWidth } = getSidebarBounds();
+			return Math.max(minWidth, Math.min(maxWidth, width));
+		}
 
-      function applySidebarWidth(width) {
-        document.documentElement.style.setProperty('--sidebar-width', `${Math.round(clampSidebarWidth(width))}px`);
-      }
+		function applySidebarWidth(width) {
+			document.documentElement.style.setProperty("--sidebar-width", `${Math.round(clampSidebarWidth(width))}px`);
+		}
 
-      function loadSidebarWidth() {
-        try {
-          const raw = localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
-          if (raw === null) return null;
-          const width = Number(raw);
-          return Number.isFinite(width) ? width : null;
-        } catch {
-          return null;
-        }
-      }
+		function loadSidebarWidth() {
+			try {
+				const raw = localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+				if (raw === null) return null;
+				const width = Number(raw);
+				return Number.isFinite(width) ? width : null;
+			} catch {
+				return null;
+			}
+		}
 
-      function saveSidebarWidth(width) {
-        try {
-          localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(Math.round(clampSidebarWidth(width))));
-        } catch {
-          // Ignore storage failures (e.g. private browsing restrictions)
-        }
-      }
+		function saveSidebarWidth(width) {
+			try {
+				localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(Math.round(clampSidebarWidth(width))));
+			} catch {
+				// Ignore storage failures (e.g. private browsing restrictions)
+			}
+		}
 
-      function setupSidebarResize() {
-        const savedWidth = loadSidebarWidth();
-        if (savedWidth !== null) {
-          applySidebarWidth(savedWidth);
-        }
+		function setupSidebarResize() {
+			const savedWidth = loadSidebarWidth();
+			if (savedWidth !== null) {
+				applySidebarWidth(savedWidth);
+			}
 
-        if (!sidebarResizer) return;
+			if (!sidebarResizer) return;
 
-        let cleanupDrag = null;
+			let cleanupDrag = null;
 
-        const stopDrag = (pointerId) => {
-          if (cleanupDrag) {
-            cleanupDrag(pointerId);
-            cleanupDrag = null;
-          }
-        };
+			const stopDrag = pointerId => {
+				if (cleanupDrag) {
+					cleanupDrag(pointerId);
+					cleanupDrag = null;
+				}
+			};
 
-        sidebarResizer.addEventListener('pointerdown', (e) => {
-          if (isMobileLayout()) return;
+			sidebarResizer.addEventListener("pointerdown", e => {
+				if (isMobileLayout()) return;
 
-          e.preventDefault();
-          const startX = e.clientX;
-          const startWidth = sidebar.getBoundingClientRect().width;
-          document.body.classList.add('sidebar-resizing');
-          sidebarResizer.setPointerCapture?.(e.pointerId);
+				e.preventDefault();
+				const startX = e.clientX;
+				const startWidth = sidebar.getBoundingClientRect().width;
+				document.body.classList.add("sidebar-resizing");
+				sidebarResizer.setPointerCapture?.(e.pointerId);
 
-          const onPointerMove = (event) => {
-            applySidebarWidth(startWidth + (event.clientX - startX));
-          };
+				const onPointerMove = event => {
+					applySidebarWidth(startWidth + (event.clientX - startX));
+				};
 
-          cleanupDrag = (pointerIdToRelease) => {
-            document.body.classList.remove('sidebar-resizing');
-            sidebarResizer.releasePointerCapture?.(pointerIdToRelease);
-            window.removeEventListener('pointermove', onPointerMove);
-            window.removeEventListener('pointerup', onPointerUp);
-            window.removeEventListener('pointercancel', onPointerCancel);
-            saveSidebarWidth(sidebar.getBoundingClientRect().width);
-          };
+				cleanupDrag = pointerIdToRelease => {
+					document.body.classList.remove("sidebar-resizing");
+					sidebarResizer.releasePointerCapture?.(pointerIdToRelease);
+					window.removeEventListener("pointermove", onPointerMove);
+					window.removeEventListener("pointerup", onPointerUp);
+					window.removeEventListener("pointercancel", onPointerCancel);
+					saveSidebarWidth(sidebar.getBoundingClientRect().width);
+				};
 
-          const onPointerUp = (event) => stopDrag(event.pointerId);
-          const onPointerCancel = (event) => stopDrag(event.pointerId);
+				const onPointerUp = event => stopDrag(event.pointerId);
+				const onPointerCancel = event => stopDrag(event.pointerId);
 
-          window.addEventListener('pointermove', onPointerMove);
-          window.addEventListener('pointerup', onPointerUp);
-          window.addEventListener('pointercancel', onPointerCancel);
-        });
+				window.addEventListener("pointermove", onPointerMove);
+				window.addEventListener("pointerup", onPointerUp);
+				window.addEventListener("pointercancel", onPointerCancel);
+			});
 
-        sidebarResizer.addEventListener('dblclick', () => {
-          if (isMobileLayout()) return;
-          applySidebarWidth(280);
-          saveSidebarWidth(280);
-        });
+			sidebarResizer.addEventListener("dblclick", () => {
+				if (isMobileLayout()) return;
+				applySidebarWidth(280);
+				saveSidebarWidth(280);
+			});
 
-        window.addEventListener('resize', () => {
-          if (isMobileLayout()) return;
-          applySidebarWidth(sidebar.getBoundingClientRect().width);
-        });
-      }
+			window.addEventListener("resize", () => {
+				if (isMobileLayout()) return;
+				applySidebarWidth(sidebar.getBoundingClientRect().width);
+			});
+		}
 
-      setupSidebarResize();
+		setupSidebarResize();
 
-      hamburger.addEventListener('click', () => {
-        sidebar.classList.add('open');
-        overlay.classList.add('open');
-        hamburger.style.display = 'none';
-      });
+		hamburger.addEventListener("click", () => {
+			sidebar.classList.add("open");
+			overlay.classList.add("open");
+			hamburger.style.display = "none";
+		});
 
-      const closeSidebar = () => {
-        sidebar.classList.remove('open');
-        overlay.classList.remove('open');
-        hamburger.style.display = '';
-      };
+		const closeSidebar = () => {
+			sidebar.classList.remove("open");
+			overlay.classList.remove("open");
+			hamburger.style.display = "";
+		};
 
-      overlay.addEventListener('click', closeSidebar);
-      document.getElementById('sidebar-close').addEventListener('click', closeSidebar);
+		overlay.addEventListener("click", closeSidebar);
+		document.getElementById("sidebar-close").addEventListener("click", closeSidebar);
 
-      // Toggle states
-      let thinkingExpanded = false;
-      let toolOutputsExpanded = false;
+		// Toggle states
+		let thinkingExpanded = false;
+		let toolOutputsExpanded = false;
 
-      const toggleThinking = () => {
-        thinkingExpanded = !thinkingExpanded;
-        document.querySelectorAll('.thinking-text').forEach(el => {
-          el.style.display = thinkingExpanded ? 'block' : 'none';
-        });
-        document.querySelectorAll('.thinking-collapsed').forEach(el => {
-          el.style.display = thinkingExpanded ? 'none' : 'block';
-        });
-      };
+		const toggleThinking = () => {
+			thinkingExpanded = !thinkingExpanded;
+			document.querySelectorAll(".thinking-text").forEach(el => {
+				el.style.display = thinkingExpanded ? "block" : "none";
+			});
+			document.querySelectorAll(".thinking-collapsed").forEach(el => {
+				el.style.display = thinkingExpanded ? "none" : "block";
+			});
+		};
 
-      const toggleToolOutputs = () => {
-        toolOutputsExpanded = !toolOutputsExpanded;
-        document.querySelectorAll('.tool-output.expandable').forEach(el => {
-          el.classList.toggle('expanded', toolOutputsExpanded);
-        });
-        document.querySelectorAll('.compaction').forEach(el => {
-          el.classList.toggle('expanded', toolOutputsExpanded);
-        });
-      };
+		const toggleToolOutputs = () => {
+			toolOutputsExpanded = !toolOutputsExpanded;
+			document.querySelectorAll(".tool-output.expandable").forEach(el => {
+				el.classList.toggle("expanded", toolOutputsExpanded);
+			});
+			document.querySelectorAll(".compaction").forEach(el => {
+				el.classList.toggle("expanded", toolOutputsExpanded);
+			});
+		};
 
-      // Keyboard shortcuts
-      document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') {
-          if (e.defaultPrevented || e.composedPath().some(node => node.tagName === 'OMP-SESSION-TRACE')) return;
-          if (e.target?.matches('input, textarea, [contenteditable="true"]')) return;
-          if (currentView === 'trace' || timelineOpen) {
-            setView('transcript');
-            setTimelineOpen(false);
-            return;
-          }
-          if (sidebar.classList.contains('open')) {
-            closeSidebar();
-            return;
-          }
-          searchInput.value = '';
-          searchQuery = '';
-          navigateTo(leafId, 'bottom');
-        }
-        if (e.key === 't' || e.key === 'T' || e.key === 'o' || e.key === 'O') {
-          // Skip when typing in the sidebar search (or any other editable target)
-          // so the chord can't fire on a user's letter input. Avoid Ctrl/Cmd-based
-          // chords entirely — every major browser reserves Ctrl+T (new tab) and
-          // Ctrl+O (open file), so the shortcut would never reach the page.
-          if (e.defaultPrevented || e.composedPath().some(node => node.tagName === 'OMP-SESSION-TRACE')) return;
-          const t = e.target;
-          const editable =
-            t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
-          if (editable) return;
-          if (e.ctrlKey || e.metaKey || e.altKey) return;
-          e.preventDefault();
-          if (e.key === 't' || e.key === 'T') toggleThinking();
-          else toggleToolOutputs();
-        }
-      });
+		// Keyboard shortcuts
+		document.addEventListener("keydown", e => {
+			if (e.key === "Escape") {
+				if (e.defaultPrevented || e.composedPath().some(node => node.tagName === "OMP-SESSION-TRACE")) return;
+				if (e.target?.matches('input, textarea, [contenteditable="true"]')) return;
+				if (currentView === "trace" || timelineOpen) {
+					setView("transcript");
+					setTimelineOpen(false);
+					return;
+				}
+				if (sidebar.classList.contains("open")) {
+					closeSidebar();
+					return;
+				}
+				searchInput.value = "";
+				searchQuery = "";
+				navigateTo(leafId, "bottom");
+			}
+			if (e.key === "t" || e.key === "T" || e.key === "o" || e.key === "O") {
+				// Skip when typing in the sidebar search (or any other editable target)
+				// so the chord can't fire on a user's letter input. Avoid Ctrl/Cmd-based
+				// chords entirely — every major browser reserves Ctrl+T (new tab) and
+				// Ctrl+O (open file), so the shortcut would never reach the page.
+				if (e.defaultPrevented || e.composedPath().some(node => node.tagName === "OMP-SESSION-TRACE")) return;
+				const t = e.target;
+				const editable = t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+				if (editable) return;
+				if (e.ctrlKey || e.metaKey || e.altKey) return;
+				e.preventDefault();
+				if (e.key === "t" || e.key === "T") toggleThinking();
+				else toggleToolOutputs();
+			}
+		});
 
-      // The same embedded snapshot drives both transcript navigation and trace inspection.
-      const tracePanel = document.getElementById('trace-panel');
-      const traceBody = document.getElementById('trace-body');
-      const traceElement = document.querySelector('omp-session-trace');
-      const timelineToggle = document.getElementById('timeline-toggle');
-      const traceExpand = document.getElementById('trace-expand');
-      let currentView = 'transcript';
-      let timelineOpen = urlParams.get('timeline') === 'open';
+		// The same embedded snapshot drives both transcript navigation and trace inspection.
+		const tracePanel = document.getElementById("trace-panel");
+		const traceBody = document.getElementById("trace-body");
+		const traceElement = document.querySelector("omp-session-trace");
+		const timelineToggle = document.getElementById("timeline-toggle");
+		const traceExpand = document.getElementById("trace-expand");
+		let currentView = "transcript";
+		let timelineOpen = urlParams.get("timeline") === "open";
 
-      function setTimelineOpen(open) {
-        timelineOpen = open;
-        traceBody.hidden = currentView !== 'trace' && !open;
-        timelineToggle.setAttribute('aria-expanded', String(!traceBody.hidden));
-        updateLocation();
-      }
+		function setTimelineOpen(open) {
+			timelineOpen = open;
+			traceBody.hidden = currentView !== "trace" && !open;
+			timelineToggle.setAttribute("aria-expanded", String(!traceBody.hidden));
+			updateLocation();
+		}
 
-      function setView(view) {
-        currentView = trace && view === 'trace' ? 'trace' : 'transcript';
-        const full = currentView === 'trace';
-        document.getElementById('content').hidden = full;
-        document.getElementById('workspace').classList.toggle('trace-view', full);
-        document.getElementById('transcript-tab').setAttribute('aria-pressed', String(!full));
-        document.getElementById('trace-tab').setAttribute('aria-pressed', String(full));
-        traceElement.setAttribute('view', full ? 'full' : 'timeline');
-        traceExpand.textContent = full ? 'Back to transcript' : 'Open trace view';
-        timelineToggle.disabled = full;
-        setTimelineOpen(timelineOpen);
-      }
+		function setView(view) {
+			currentView = trace && view === "trace" ? "trace" : "transcript";
+			const full = currentView === "trace";
+			document.getElementById("content").hidden = full;
+			document.getElementById("workspace").classList.toggle("trace-view", full);
+			document.getElementById("transcript-tab").setAttribute("aria-pressed", String(!full));
+			document.getElementById("trace-tab").setAttribute("aria-pressed", String(full));
+			traceElement.setAttribute("view", full ? "full" : "timeline");
+			traceExpand.textContent = full ? "Back to transcript" : "Open trace view";
+			timelineToggle.disabled = full;
+			setTimelineOpen(timelineOpen);
+		}
 
-      if (trace) {
-        traceElement.sessionData = data;
-        tracePanel.hidden = false;
-        document.getElementById('trace-tab').hidden = false;
-        document.getElementById('trace-summary').textContent =
-          `${trace.summary.requests} calls · ${trace.summary.toolCalls} tools · ${trace.summary.subagents} agents`;
-      }
-      timelineToggle.addEventListener('click', () => setTimelineOpen(!timelineOpen));
-      traceExpand.addEventListener('click', () => setView(currentView === 'trace' ? 'transcript' : 'trace'));
-      document.getElementById('transcript-tab').addEventListener('click', () => setView('transcript'));
-      document.getElementById('trace-tab').addEventListener('click', () => setView('trace'));
-      document.getElementById('home-link').addEventListener('click', event => {
-        event.preventDefault();
-        switchSession('');
-        setView('transcript');
-      });
-      traceElement.addEventListener('trace-navigate', event => {
-        const { trackId, entryId } = event.detail;
-        setView('transcript');
-        switchSession(trackId === 'main' ? '' : trackId, entryId);
-      });
+		if (trace) {
+			traceElement.sessionData = data;
+			tracePanel.hidden = false;
+			document.getElementById("trace-tab").hidden = false;
+			document.getElementById("trace-summary").textContent =
+				`${trace.summary.requests} calls · ${trace.summary.toolCalls} tools · ${trace.summary.subagents} agents`;
+		}
+		timelineToggle.addEventListener("click", () => setTimelineOpen(!timelineOpen));
+		traceExpand.addEventListener("click", () => setView(currentView === "trace" ? "transcript" : "trace"));
+		document.getElementById("transcript-tab").addEventListener("click", () => setView("transcript"));
+		document.getElementById("trace-tab").addEventListener("click", () => setView("trace"));
+		document.getElementById("home-link").addEventListener("click", event => {
+			event.preventDefault();
+			switchSession("");
+			setView("transcript");
+		});
+		traceElement.addEventListener("trace-navigate", event => {
+			const { trackId, entryId } = event.detail;
+			setView("transcript");
+			switchSession(trackId === "main" ? "" : trackId, entryId);
+		});
 
-      renderSessionList();
-      switchSession(subSessions?.[urlParams.get('session')] ? urlParams.get('session') : '', urlTargetId, urlLeafId);
-      setView(urlParams.get('view'));
-      } // end bootSession
+		renderSessionList();
+		switchSession(subSessions?.[urlParams.get("session")] ? urlParams.get("session") : "", urlTargetId, urlLeafId);
+		setView(urlParams.get("view"));
+	} // end bootSession
 
-      function showLoadError(err) {
-        const messages = document.getElementById('messages');
-        if (!messages) return;
-        const div = document.createElement('div');
-        div.className = 'share-load-error';
-        div.textContent = 'Failed to load session: ' + (err && err.message ? err.message : String(err));
-        messages.appendChild(div);
-      }
+	function showLoadError(err) {
+		const messages = document.getElementById("messages");
+		if (!messages) return;
+		const div = document.createElement("div");
+		div.className = "share-load-error";
+		div.textContent = "Failed to load session: " + (err && err.message ? err.message : String(err));
+		messages.appendChild(div);
+	}
 
-      const pending = window.__OMP_SESSION_DATA__;
-      if (pending && typeof pending.then === 'function') {
-        pending.then(bootSession, showLoadError);
-      } else {
-        const base64 = document.getElementById('session-data').textContent;
-        const binary = atob(base64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-        bootSession(JSON.parse(new TextDecoder('utf-8').decode(bytes)));
-      }
-    })();
+	const pending = window.__OMP_SESSION_DATA__;
+	if (pending && typeof pending.then === "function") {
+		pending.then(bootSession, showLoadError);
+	} else {
+		const base64 = document.getElementById("session-data").textContent;
+		const binary = atob(base64);
+		const bytes = new Uint8Array(binary.length);
+		for (let i = 0; i < binary.length; i++) {
+			bytes[i] = binary.charCodeAt(i);
+		}
+		bootSession(JSON.parse(new TextDecoder("utf-8").decode(bytes)));
+	}
+})();

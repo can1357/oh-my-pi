@@ -125,6 +125,9 @@ const COST_UNPRICED_BACKFILL_KEY = "messages_cost_unpriced_v1";
 // Rows predating the `cost_no_cache_input` column are NULL; ingest always
 // writes a value, so one pass settles the column for good.
 const NO_CACHE_INPUT_BACKFILL_KEY = "cost_no_cache_input_v1";
+// Rows ingested before `error_display_message` existed have none; one full
+// re-parse fills it through the refreshing UPSERT in `insertMessageStats`.
+const ERROR_DISPLAY_BACKFILL_KEY = "messages_error_display_v1";
 // Zero-cost rows are repriced from the bundled catalog once per release (the
 // value stored is the version that ran it), since only a catalog update can
 // price a model it could not price before.
@@ -199,6 +202,8 @@ export async function initDb(): Promise<Database> {
 			ttft INTEGER,
 			stop_reason TEXT NOT NULL,
 			error_message TEXT,
+			error_retry_after_ms INTEGER,
+			error_display_message TEXT,
 			input_tokens INTEGER NOT NULL,
 			output_tokens INTEGER NOT NULL,
 			cache_read_tokens INTEGER NOT NULL,
@@ -432,10 +437,21 @@ export async function initDb(): Promise<Database> {
 	if (!messageColumns.some(column => column.name === "cost_no_cache_input")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_no_cache_input REAL");
 	}
+	// Rows ingested before this column existed carry no shown error text; a
+	// re-parse fills it from the session's assistant messages.
+	if (!messageColumns.some(column => column.name === "error_display_message")) {
+		db.run("ALTER TABLE messages ADD COLUMN error_display_message TEXT");
+	}
 	// Rows ingested before this column existed carry no served tier; a re-parse
 	// fills them from the session's assistant messages.
 	if (!messageColumns.some(column => column.name === "service_tier")) {
 		db.run("ALTER TABLE messages ADD COLUMN service_tier TEXT");
+	}
+	// The server's retry wait the failed turn stated, kept beside the raw
+	// `error_message`. Rows ingested before this column existed carry none; a
+	// re-parse fills them from the session's assistant messages.
+	if (!messageColumns.some(column => column.name === "error_retry_after_ms")) {
+		db.run("ALTER TABLE messages ADD COLUMN error_retry_after_ms INTEGER");
 	}
 	// Rows ingested before this column existed default to 0 (not unpriced), so
 	// their epoch-sentinel zeros read as free until a re-parse rewrites them.
@@ -529,6 +545,7 @@ export async function initDb(): Promise<Database> {
 	backfillToolCalls(db);
 	backfillReingestCosts(db);
 	backfillUnpricedCosts(db);
+	backfillErrorDisplayMessages(db);
 	repairUserMessageLinks(db);
 	backfillPriorityPremiumRequests(db);
 	backfillAgentType(db);
@@ -1151,6 +1168,8 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			"ttft",
 			"stop_reason",
 			"error_message",
+			"error_retry_after_ms",
+			"error_display_message",
 			"input_tokens",
 			"output_tokens",
 			"cache_read_tokens",
@@ -1177,7 +1196,9 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			cost_total = excluded.cost_total,
 			cost_no_cache_input = excluded.cost_no_cache_input,
 			cost_unpriced = excluded.cost_unpriced,
-			service_tier = excluded.service_tier`,
+			service_tier = excluded.service_tier,
+			error_retry_after_ms = excluded.error_retry_after_ms,
+			error_display_message = excluded.error_display_message`,
 	});
 	return atomically(db, () => {
 		for (const s of stats) {
@@ -1198,6 +1219,8 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 					s.ttft,
 					s.stopReason,
 					s.errorMessage,
+					s.errorRetryAfterMs ?? null,
+					s.errorDisplayMessage ?? null,
 					s.usage.input,
 					s.usage.output,
 					s.usage.cacheRead,
@@ -1254,6 +1277,8 @@ function rowToMessageStats(row: any): MessageStats {
 		ttft: row.ttft,
 		stopReason: row.stop_reason as any,
 		errorMessage: row.error_message,
+		errorRetryAfterMs: row.error_retry_after_ms ?? null,
+		errorDisplayMessage: row.error_display_message ?? null,
 		usage: {
 			input: row.input_tokens,
 			output: row.output_tokens,
@@ -1466,6 +1491,23 @@ function backfillUnpricedCosts(database: Database): void {
 }
 
 /**
+ * One-shot `file_offsets` wipe so the next sync re-parses every session and
+ * fills `error_display_message` on rows ingested before the column existed.
+ * Same sentinel protocol as {@link backfillUnpricedCosts}.
+ */
+function backfillErrorDisplayMessages(database: Database): void {
+	const row = database.query("SELECT value FROM meta WHERE key = ?").get(ERROR_DISPLAY_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (!shouldResetBackfill(row?.value)) return;
+
+	database.run("DELETE FROM file_offsets");
+	database
+		.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+		.run(ERROR_DISPLAY_BACKFILL_KEY, BACKFILL_PENDING);
+}
+
+/**
  * Reclassify pre-existing `messages` rows by agent type once, after the
  * `agent_type` column is added to an older database (every prior row defaulted
  * to 'main' on the ALTER). Classification is purely path-based — derived from
@@ -1592,6 +1634,7 @@ export function markSessionBackfillsComplete(): void {
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
 			COST_REINGEST_BACKFILL_KEY,
 			COST_UNPRICED_BACKFILL_KEY,
+			ERROR_DISPLAY_BACKFILL_KEY,
 		]) {
 			markComplete.run(key, BACKFILL_COMPLETE);
 		}

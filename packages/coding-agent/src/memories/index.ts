@@ -3,7 +3,15 @@ import type * as fsNode from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type ApiKey, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
+import {
+	type ApiKey,
+	assistantTurnError,
+	completeSimple,
+	Effort,
+	type Model,
+	retryTransientCompletion,
+} from "@oh-my-pi/pi-ai";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
 	getAgentDbPath,
@@ -915,7 +923,7 @@ async function runStage1Job(options: {
 		);
 
 		if (response.stopReason === "error") {
-			return { kind: "failed", reason: response.errorMessage || "stage1 model error" };
+			return { kind: "failed", reason: errorDisplayText(response) || "stage1 model error" };
 		}
 		const text = response.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -1058,7 +1066,7 @@ async function runConsolidationModel(options: {
 		{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
 	);
 	if (response.stopReason === "error") {
-		throw new Error(response.errorMessage || "phase2 model error");
+		throw assistantTurnError(response, response.errorMessage || "phase2 model error");
 	}
 	const text = response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")

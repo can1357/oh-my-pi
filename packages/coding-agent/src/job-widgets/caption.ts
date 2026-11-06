@@ -5,6 +5,7 @@
  * started with; it never sees the job's output.
  */
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import type { UserMessage } from "@oh-my-pi/pi-ai";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { shortenEmbeddedPaths } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -103,7 +104,7 @@ export function createModelJobCaptionWriter(options: ModelJobWidgetAuthorOptions
 		costGate?.record(response.usage.cost.total);
 		options.onUsage?.(response);
 		if (response.stopReason === "error" || response.stopReason === "aborted") {
-			throw new Error(response.errorMessage ?? `job caption request ${response.stopReason}`);
+			throw new Error(errorDisplayText(response) ?? `job caption request ${response.stopReason}`);
 		}
 		return extractTextContent(response);
 	};

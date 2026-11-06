@@ -120,3 +120,44 @@ describe("read URL refused for one user agent", () => {
 		expect(agents).toEqual(["omp/test", "omp/test"]);
 	});
 });
+
+// A 429's Retry-After date is read with the one reader every retry parser shares:
+// the zone-less asctime form is GMT, so a machine in another zone does not read
+// it as hours away and wait out the full 10 s cap.
+describe("loadPage waiting out a 429", () => {
+	const savedZone = process.env.TZ;
+	afterEach(() => {
+		if (savedZone === undefined) delete process.env.TZ;
+		else process.env.TZ = savedZone;
+	});
+
+	it("reads a zone-less asctime Retry-After as GMT", async () => {
+		process.env.TZ = "America/New_York";
+		let requests = 0;
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => {
+				requests++;
+				if (requests > 1) return new Response(ARTICLE, { headers: { "content-type": "text/html" } });
+				const soon = new Date(Date.now() + 1_000).toUTCString();
+				const asctime = soon.replace(
+					/^(\w{3}), (\d{2}) (\w{3}) (\d{4}) (\S+) GMT$/,
+					(_match, day, date, month, year, time) => `${day} ${month} ${Number(date)} ${time} ${year}`,
+				);
+				return new Response("Too Many Requests", { status: 429, headers: { "retry-after": asctime } });
+			},
+		});
+		try {
+			const started = performance.now();
+			const result = await loadPage(`http://127.0.0.1:${server.port}/api`, {
+				headers: { "User-Agent": "omp/test" },
+			});
+
+			expect(result.ok).toBe(true);
+			expect(requests).toBe(2);
+			expect(performance.now() - started).toBeLessThan(5_000);
+		} finally {
+			server.stop(true);
+		}
+	});
+});

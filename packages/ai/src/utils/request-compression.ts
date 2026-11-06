@@ -5,8 +5,11 @@ import {
 	type RequestCompressionPolicy,
 	resolveRequestCompression,
 } from "@oh-my-pi/pi-catalog/compat/request-compression";
-import { $flag, logger } from "@oh-my-pi/pi-utils";
+import { $flag, findRetryRefusal, logger, longestRetryHint } from "@oh-my-pi/pi-utils";
 import type { FetchImpl, Model } from "../types";
+import { type ReplayBudget, sleepUnderBudget } from "./replay-budget";
+import { retryWaitBounds } from "./retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS, type ProviderRetryPolicy } from "./retry-wait";
 
 const gzip = promisify(zlib.gzip);
 
@@ -131,8 +134,20 @@ async function suspectEncodingRejection(
  * host, so a genuine 400 never disables compression. When a non-JSON refusal
  * recurs uncompressed with the same status and a non-JSON body, that status
  * stops being re-checked for the host.
+ *
+ * A resend honors the rejection's longest stated wait without shortening it;
+ * a wait above the retry-policy ceiling returns the readable rejection.
+ * `replayBudget` also bounds the resend by this call's wall-clock deadline.
+ * `retryPolicy` is the call's own cap, ceiling and retry-wait hook; without
+ * it the resend falls back to the request's ambient policy, which only
+ * `stream()` and `streamSimple()` install.
  */
-export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): FetchImpl {
+export function wrapFetchForRequestCompression(
+	base: FetchImpl,
+	model: Model,
+	replayBudget?: ReplayBudget,
+	retryPolicy?: ProviderRetryPolicy,
+): FetchImpl {
 	const wrapped: FetchImpl = async (input, init) => {
 		const body = init?.body;
 		const url = requestUrl(input);
@@ -173,9 +188,29 @@ export function wrapFetchForRequestCompression(base: FetchImpl, model: Model): F
 		if (!suspect) return response;
 		const refusal = `${origin} ${response.status}`;
 		if (suspect === "proxy" && encodingUnrelatedRefusals.has(refusal)) return response;
+		const serverWaitMs = longestRetryHint(response, await bodyText(response)) ?? 0;
+		if (retryWaitBounds(retryPolicy, DEFAULT_MAX_RETRY_DELAY_MS).declines(serverWaitMs, response)) return response;
 
-		await response.body?.cancel().catch(() => {});
-		const plain = await base(input, init);
+		let plain: Response;
+		if (!replayBudget) {
+			if (serverWaitMs > 0) await sleepUnderBudget(undefined, retryPolicy, serverWaitMs, init?.signal ?? undefined);
+			await response.body?.cancel().catch(() => {});
+			plain = await base(input, init);
+		} else {
+			if (!(await replayBudget.replayAfterDelay(serverWaitMs, response, init?.signal ?? undefined, retryPolicy))) {
+				return response;
+			}
+			// Under a budget the rejection stays readable until the resend clears
+			// the transport's check, so a refusal there can hand it back.
+			try {
+				plain = await base(input, init);
+			} catch (error) {
+				if (findRetryRefusal(error)) return response;
+				await response.body?.cancel().catch(() => {});
+				throw error;
+			}
+			await response.body?.cancel().catch(() => {});
+		}
 		if (plain.ok) {
 			rejectedEncodings.add(`${origin} ${encoding}`);
 			logger.warn("Endpoint rejected compressed request body; disabling this encoding for the host", {

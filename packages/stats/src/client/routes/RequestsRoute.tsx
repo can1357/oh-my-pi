@@ -9,6 +9,7 @@ import {
 	formatInteger,
 	formatMessageCost,
 	formatRelativeTime,
+	formatRequestError,
 	formatTimestamp,
 } from "../data/formatters";
 import { useQuery } from "../data/query";
@@ -298,7 +299,7 @@ const REQUEST_COLUMNS: readonly Column<MessageStats>[] = [
 		render: row => {
 			const status = REQUEST_STATUS[requestStatus(row)];
 			return (
-				<span title={row.errorMessage ?? undefined}>
+				<span title={formatRequestError(row) ?? undefined}>
 					<LabelCell
 						lead={<Dot tone={status.tone} />}
 						primary={status.label}

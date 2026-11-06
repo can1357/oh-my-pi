@@ -14,6 +14,11 @@ import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
 
+/** A provider failure whose server wait arrives as a `retry-after-ms` response header, as a real one does. */
+function rateLimitError(text: string, retryAfterMs: number): Error {
+	return Object.assign(new Error(text), { headers: new Headers({ "retry-after-ms": String(retryAfterMs) }) });
+}
+
 interface Harness {
 	session: AgentSession;
 	sessionManager: SessionManager;
@@ -235,7 +240,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		let attempts = 0;
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
 			if (++attempts === 1) {
-				throw new compactionModule.NativeCompactionError(new Error("429 rate_limit_error retry-after-ms=60144000"));
+				throw new compactionModule.NativeCompactionError(rateLimitError("429 rate_limit_error", 60_144_000));
 			}
 			return {
 				summary: "fallback summary",
@@ -263,14 +268,19 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		const compactSpy = vi
 			.spyOn(compactionModule, "compact")
 			.mockRejectedValue(
-				new compactionModule.NativeCompactionError(new Error("429 rate_limit_error retry-after-ms=60144000")),
+				new compactionModule.NativeCompactionError(rateLimitError("429 rate_limit_error", 60_144_000)),
 			);
-		const end = Promise.withResolvers<string | undefined>();
+		const end = Promise.withResolvers<{ errorMessage?: string; retryAfterMs?: number }>();
 		session.subscribe(event => {
-			if (event.type === "auto_compaction_end") end.resolve(event.errorMessage);
+			if (event.type === "auto_compaction_end")
+				end.resolve({ errorMessage: event.errorMessage, retryAfterMs: event.retryAfterMs });
 		});
 		harness.triggerThreshold();
-		expect(await end.promise).toContain("429 rate_limit_error retry-after-ms=60144000");
+		const ended = await end.promise;
+		// The text is the provider's; the wait rides structured beside it, never in it.
+		expect(ended.errorMessage).toContain("429 rate_limit_error");
+		expect(ended.errorMessage).not.toContain("60144000");
+		expect(ended.retryAfterMs).toBe(60_144_000);
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(waitSpy).not.toHaveBeenCalled();
 	});
@@ -285,7 +295,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		let attempts = 0;
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
 			if (++attempts === 1) {
-				throw new compactionModule.NativeCompactionError(new Error("429 rate_limit_error retry-after-ms=45000"));
+				throw new compactionModule.NativeCompactionError(rateLimitError("429 rate_limit_error", 45_000));
 			}
 			return {
 				summary: "retried summary",
@@ -312,7 +322,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
 			if (++attempts === 1) {
 				throw new compactionModule.NativeCompactionError(
-					new Error("429 usage limit reached; quota exceeded retry-after-ms=7200000"),
+					rateLimitError("429 usage limit reached; quota exceeded", 7_200_000),
 				);
 			}
 			return {

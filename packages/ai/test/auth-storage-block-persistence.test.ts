@@ -10,9 +10,16 @@ const PROVIDER = "anthropic";
 const PROVIDER_KEY = "anthropic:oauth";
 const CODEX_PROVIDER = "openai-codex";
 const CODEX_PROVIDER_KEY = "openai-codex:oauth";
-const FUTURE_BLOCK_MS = 1_899_999_999_000;
+/** A live deadline inside `MAX_HINTED_BLOCK_MS`, which caps every block the store is handed. */
+const FUTURE_BLOCK_MS = Date.now() + 3 * 24 * 60 * 60 * 1000;
 const EXPIRED_BLOCK_MS = 1;
-const LEGACY_TIMESTAMP = 1_700_000_000;
+/**
+ * `updated_at` (epoch seconds) for rows written by an older schema. Recent: the
+ * store reads every block as ending no later than `MAX_HINTED_BLOCK_MS` after
+ * its write, so a row written long ago would read as expired however far its
+ * deadline. These tests prove the schema migrations carry rows over intact.
+ */
+const LEGACY_TIMESTAMP = Math.floor(Date.now() / 1000) - 3600;
 
 function oauthCredential(suffix: string): OAuthCredential {
 	return {

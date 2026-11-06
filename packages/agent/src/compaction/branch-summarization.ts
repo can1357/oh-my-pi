@@ -6,6 +6,7 @@
  */
 
 import type { Api, ApiKey, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -42,6 +43,10 @@ export interface BranchSummaryResult {
 	modifiedFiles?: string[];
 	aborted?: boolean;
 	error?: string;
+	/** Display-only failure text; `error` remains the provider's raw text. */
+	errorDisplayMessage?: string;
+	/** The server's retry wait (ms) the failed summarization response stated; `error` never carries it. */
+	errorRetryAfterMs?: number;
 }
 
 /** Details stored in BranchSummaryEntry.details for file tracking */
@@ -379,7 +384,11 @@ export async function generateBranchSummary(
 		return { aborted: true };
 	}
 	if (response.stopReason === "error") {
-		return { error: response.errorMessage || "Summarization failed" };
+		return {
+			error: response.errorMessage || "Summarization failed",
+			errorDisplayMessage: AIError.errorDisplayText(response),
+			errorRetryAfterMs: response.errorRetryAfterMs,
+		};
 	}
 	if (response.stopReason === "length") {
 		return { error: incompleteOutputError("Summarization failed") };

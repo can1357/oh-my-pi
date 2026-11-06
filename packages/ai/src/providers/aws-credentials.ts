@@ -18,7 +18,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $env, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $env, findRetryRefusal, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -102,7 +102,16 @@ export async function resolveAwsCredentials(opts: CredentialResolveOptions = {})
 	// request must not fail every waiter — and bounded by its own timeout instead; each caller
 	// races its own signal against the shared promise.
 	const existing = inflight.get(cacheKey);
-	if (existing) return raceWithSignal(existing, opts.signal);
+	if (existing) {
+		try {
+			return await raceWithSignal(existing, opts.signal);
+		} catch (error) {
+			// The shared resolution ran on another call's fetch, and that call's
+			// replay budget refused it. This call was not refused: resolve again.
+			if (!findRetryRefusal(error)) throw error;
+			return resolveAwsCredentials(opts);
+		}
+	}
 
 	const fetchImpl = opts.fetch ?? (globalThis.fetch as FetchImpl);
 	const promise = (async () => {
@@ -581,6 +590,9 @@ async function refreshSsoToken(
 			signal,
 		});
 	} catch (err) {
+		// The caller's replay budget refused the refresh: that is not a failed
+		// refresh, and the call must answer with the failure its replay replaced.
+		if (findRetryRefusal(err)) throw err;
 		logger.debug("aws-credentials: SSO token refresh request failed", { err: String(err) });
 		return undefined;
 	}
@@ -1117,7 +1129,10 @@ async function readImdsCredentials(
 			sessionToken: body.Token,
 			expiresAt,
 		};
-	} catch {
+	} catch (error) {
+		// The caller's replay budget refused the probe: that is not "no instance
+		// role", and the call must answer with the failure its replay replaced.
+		if (findRetryRefusal(error)) throw error;
 		return undefined;
 	}
 }

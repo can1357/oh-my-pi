@@ -8,6 +8,9 @@
 - A failed refresh no longer replaces a cached catalog whose models carry request headers with an empty snapshot; the next launch refetches it instead ([#18227](https://github.com/can1357/oh-my-pi/issues/18227))
 
 ## [18.17.0] - 2026-11-06
+### Fixed
+
+- Fixed an Antigravity version lookup that a streaming call's replay budget (`StreamOptions.replayBudgetMs`) refused counting as a failed lookup and holding back every caller's version lookups for ten minutes ([#17643](https://github.com/can1357/oh-my-pi/pull/17643) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 

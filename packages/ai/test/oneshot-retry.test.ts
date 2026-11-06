@@ -77,6 +77,27 @@ describe("retryTransientCompletion", () => {
 		expect(final.stopReason).toBe("stop");
 	});
 
+	it("surfaces a lower layer's refused server wait without replacing it with one-shot backoff", async () => {
+		let calls = 0;
+		const refused = message({
+			stopReason: "error",
+			errorStatus: 503,
+			errorMessage: "busy",
+			errorRetryWaitRefusal: {
+				waitMs: 15_000,
+				limitMs: 10_000,
+				option: "providerRetryWaitCeilingMs",
+			},
+		});
+		const final = await retryTransientCompletion(() => {
+			calls += 1;
+			return Promise.resolve(refused);
+		}, fast);
+
+		expect(calls).toBe(1);
+		expect(final.errorRetryWaitRefusal).toEqual(refused.errorRetryWaitRefusal);
+	});
+
 	it("re-issues a status-only 503 error-stop", async () => {
 		let calls = 0;
 		const final = await retryTransientCompletion(() => {
@@ -420,38 +441,39 @@ describe("retryTransientCompletion", () => {
 		expect(observedDelay).toBe(90);
 	});
 
-	it("applies the provider reset-timezone policy to a naive absolute reset", async () => {
-		// "2099-09-01 06:00:00" with no offset: Z.AI reads it as Beijing time
-		// (2099-08-31T22:00Z, already elapsed → discarded → normal backoff retry),
-		// while a provider with no declared offset reads it as UTC (now+6h, over
-		// the 3h cap → fail fast). Same body; provider policy flips the flow.
+	it("applies the provider reset-timezone policy to a zone-less absolute reset", async () => {
+		// "2099-09-01 12:00:00" with no zone: Z.AI declares Beijing time
+		// (2099-09-01T04:00Z, four hours out, over the 3 h cap → fail fast).
+		// A provider with no declared zone reads no wait from it — a zone-less
+		// date in a body names no instant — so it retries on its own backoff.
+		// Same body; provider policy flips the flow.
 		const fixedNow = Date.parse("2099-09-01T00:00:00Z");
 		const realNow = Date.now;
 		Date.now = () => fixedNow;
 		try {
-			const errorMessage = "rate_limit_error: too many requests. Your limit will reset at 2099-09-01 06:00:00";
+			const errorMessage = "rate_limit_error: too many requests. Your limit will reset at 2099-09-01 12:00:00";
 			const opts = { baseDelayMs: 1, maxAttempts: 2, maxDelayMs: 3 * 60 * 60_000 } as const;
 
 			let genericCalls = 0;
 			const generic = await retryTransientCompletion(() => {
 				genericCalls += 1;
-				return Promise.resolve(message({ stopReason: "error", errorStatus: 429, errorMessage }));
+				return Promise.resolve(
+					genericCalls === 1 ? message({ stopReason: "error", errorStatus: 429, errorMessage }) : message(),
+				);
 			}, opts);
-			expect(genericCalls).toBe(1);
-			expect(generic.stopReason).toBe("error");
+			expect(genericCalls).toBe(2);
+			expect(generic.stopReason).toBe("stop");
 
 			let zaiCalls = 0;
 			const zai = await retryTransientCompletion(
 				() => {
 					zaiCalls += 1;
-					return Promise.resolve(
-						zaiCalls === 1 ? message({ stopReason: "error", errorStatus: 429, errorMessage }) : message(),
-					);
+					return Promise.resolve(message({ stopReason: "error", errorStatus: 429, errorMessage }));
 				},
 				{ ...opts, provider: "zai" },
 			);
-			expect(zaiCalls).toBe(2);
-			expect(zai.stopReason).toBe("stop");
+			expect(zaiCalls).toBe(1);
+			expect(zai.stopReason).toBe("error");
 		} finally {
 			Date.now = realNow;
 		}

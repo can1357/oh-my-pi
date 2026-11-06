@@ -11,6 +11,7 @@
  */
 
 import type { Model } from "@oh-my-pi/pi-ai";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import type { TspPickerAction, TspPickerColumn, TspPickerItem, TspPickerScope, TspSpan } from "@oh-my-pi/pi-wire";
 import {
 	type Component,
@@ -678,7 +679,7 @@ export class AgentsHubComponent implements Component {
 			this.#createSpec = spec;
 			this.#notice = null;
 		} catch (error) {
-			this.#createError = error instanceof Error ? error.message : String(error);
+			this.#createError = errorText(error);
 		} finally {
 			this.#createGenerating = false;
 			this.#requestRender();
@@ -890,7 +891,7 @@ export class AgentsHubComponent implements Component {
 			}
 			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 				void this.#saveGeneratedAgent().catch(error => {
-					this.#createError = error instanceof Error ? error.message : String(error);
+					this.#createError = errorText(error);
 					this.#requestRender();
 				});
 			}

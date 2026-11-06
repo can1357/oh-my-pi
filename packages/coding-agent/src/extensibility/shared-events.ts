@@ -254,6 +254,8 @@ export interface AutoCompactionEndEvent {
 	aborted: boolean;
 	willRetry: boolean;
 	errorMessage?: string;
+	/** The server's retry wait (ms) the compaction failure stated. Display text renders it; `errorMessage` never carries it. */
+	retryAfterMs?: number;
 	/** True when compaction was skipped for a benign reason (no model, no candidates, nothing to compact). */
 	skipped?: boolean;
 }
@@ -266,6 +268,8 @@ export interface AutoRetryStartEvent {
 	delayMs: number;
 	errorMessage: string;
 	errorId?: number;
+	/** The server's retry wait (ms) the failed message stated, distinct from the backoff `delayMs`. */
+	retryAfterMs?: number;
 }
 
 /** Persisted retry error whose transcript presentation changed when the retry saga settled. */
@@ -282,6 +286,8 @@ export interface AutoRetryEndEvent {
 	success: boolean;
 	attempt: number;
 	finalError?: string;
+	/** The server's retry wait (ms) the final failed message stated. `finalError` never carries it. */
+	finalRetryAfterMs?: number;
 	retryErrors?: RetryErrorUpdate[];
 }
 

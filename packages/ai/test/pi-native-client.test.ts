@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, type Mock, mock, spyOn } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { markRetryWaitRefused } from "@oh-my-pi/pi-ai/utils/retry-wait";
 import { streamPiNative } from "@oh-my-pi/pi-ai/providers/pi-native-client";
 import { encodeStream } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
@@ -566,6 +567,29 @@ describe("streamPiNative event flow", () => {
 			provider: "anthropic",
 			model: "claude-sonnet-4-5",
 		});
+	});
+
+	it("carries a refused transport wait through a payload-less gateway failure frame", async () => {
+		const refused = {
+			waitMs: 15_000,
+			limitMs: 10_000,
+			option: "providerRetryWaitCeilingMs" as const,
+		};
+		const failure = new Error("upstream connection reset");
+		markRetryWaitRefused(failure, refused);
+		const broken = (async function* () {
+			yield { type: "start", partial: baseAssistant() } satisfies AssistantMessageEvent;
+			throw failure;
+		})() as unknown as AssistantMessageEventStream;
+		const fetchImpl: FetchImpl = (async () =>
+			new Response(encodeStream(broken), {
+				status: 200,
+				headers: { "Content-Type": "text/event-stream" },
+			})) as FetchImpl;
+
+		const result = await streamPiNative(fakeModel(), baseContext, { apiKey: "k", fetch: fetchImpl }).result();
+
+		expect(result.errorRetryWaitRefusal).toEqual(refused);
 	});
 
 	it("fails fast when the caller's signal is already aborted before fetch fires", async () => {

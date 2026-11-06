@@ -100,6 +100,7 @@ interface MessageView {
 	provider?: string;
 	stopReason?: string;
 	errorMessage?: string;
+	errorDisplayMessage?: string;
 }
 
 /** `tool_execution_start` marker facts joined to tool spans by call id. */

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { PerplexityProvider, searchPerplexity } from "@oh-my-pi/pi-coding-agent/web/search/providers/perplexity";
 import { getAvailableAuthMethods } from "@oh-my-pi/pi-coding-agent/web/search/providers/perplexity-auth";
 
@@ -186,6 +187,32 @@ describe("Perplexity API-key request shape", () => {
 			searchPerplexity({ query: "quic vs tcp", authStorage: apiKeyAuthStorage, fetch: fetchMock, explicit: true }),
 		).rejects.toThrow();
 		expect(urls).toEqual([API_URL]);
+	});
+	it("reports a failed request's shown text, with the response's retry hint", async () => {
+		delete process.env.OPENROUTER_API_KEY;
+		const fetchMock: FetchImpl = async input => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			if (url === API_URL)
+				return new Response("bad parameter", { status: 400, headers: { "retry-after-ms": "1500" } });
+			return new Response("not mocked", { status: 500 });
+		};
+
+		// The wait is not written into the text any more — a status reader would
+		// take its digits — so it travels on the failure's headers, and the report
+		// carries the provider's own words.
+		const failure = await searchPerplexity({
+			query: "quic vs tcp",
+			authStorage: apiKeyAuthStorage,
+			fetch: fetchMock,
+			explicit: true,
+		}).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		if (!(failure instanceof Error)) throw new Error("Expected the Perplexity failure to surface");
+		expect(failure.message).toContain("bad parameter");
+		expect(failure.message).not.toContain("retry-after-ms=");
+		expect(getRetryAfterMsFromHeaders(getHeadersFromError(failure))).toBe(1500);
 	});
 	it("rejects with the classified upstream error instead of a generic 401 when the only method fails", async () => {
 		delete process.env.OPENROUTER_API_KEY;

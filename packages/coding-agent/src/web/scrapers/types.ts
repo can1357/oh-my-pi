@@ -2,7 +2,7 @@
  * Shared types and utilities for web-fetch handlers
  */
 import { scheduler } from "node:timers/promises";
-import { ptree } from "@oh-my-pi/pi-utils";
+import { parseRetryAfter, ptree } from "@oh-my-pi/pi-utils";
 import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 
 import type { ModelRegistry } from "../../config/model-registry";
@@ -91,14 +91,10 @@ export interface LoadPageResult {
 
 const RETRY_AFTER_MAX_MS = 10_000;
 
-/** Parse a Retry-After header (seconds or HTTP-date) into a bounded delay. */
+/** A Retry-After header, read by the shared `parseRetryAfter`, as a delay bounded to this loader's cap. */
 function parseRetryAfterMs(value: string | null): number {
-	if (!value) return 1_000;
-	const seconds = Number(value);
-	if (Number.isFinite(seconds)) return Math.min(Math.max(seconds, 0) * 1000, RETRY_AFTER_MAX_MS);
-	const date = Date.parse(value);
-	if (!Number.isNaN(date)) return Math.min(Math.max(date - Date.now(), 0), RETRY_AFTER_MAX_MS);
-	return 1_000;
+	const serverMs = value ? parseRetryAfter(value) : undefined;
+	return serverMs === undefined ? 1_000 : Math.min(serverMs, RETRY_AFTER_MAX_MS);
 }
 
 /**

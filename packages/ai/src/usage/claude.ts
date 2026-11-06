@@ -1,6 +1,6 @@
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { isAnthropicOAuthToken, toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { slugify } from "@oh-my-pi/pi-utils";
+import { parseRetryAfter, slugify } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import {
 	type CredentialRankingContext,
@@ -224,11 +224,9 @@ function isAbortError(error: unknown, signal?: AbortSignal): boolean {
 
 function retryDelayMs(attempt: number, retryAfter: string | null): number {
 	const baseline = BASE_RETRY_DELAY_MS * 2 ** attempt;
-	if (!retryAfter?.trim()) return baseline;
-	const seconds = Number.parseFloat(retryAfter);
-	if (Number.isFinite(seconds)) return Math.max(baseline, Math.max(0, seconds * 1000));
-	const dateDelay = Date.parse(retryAfter) - Date.now();
-	return Number.isFinite(dateDelay) ? Math.max(baseline, Math.max(0, dateDelay)) : baseline;
+	// The shared reading of the header; the backoff baseline is this poll's floor.
+	const serverMs = retryAfter ? parseRetryAfter(retryAfter) : undefined;
+	return serverMs === undefined ? baseline : Math.max(baseline, serverMs);
 }
 
 async function waitBeforeRetry(

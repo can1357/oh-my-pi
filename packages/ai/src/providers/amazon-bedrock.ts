@@ -47,6 +47,9 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../utils/idle-iterator";
+import { admitsReplay, gateOptionalFetch, ReplayBudget, restoreReplaced } from "../utils/replay-budget";
+import { type TransportRetry, transportRetry } from "../utils/retry-after";
+import { DEFAULT_MAX_RETRY_DELAY_MS } from "../utils/retry-wait";
 import { toolWireSchema } from "../utils/schema/wire";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
@@ -193,7 +196,11 @@ function resolveBedrockRequestUrl(
 /**
  * Sign and send one Bedrock Runtime request. A non-OK InvokeModel response's
  * body is read under the same pre-response deadline, so a stalled error body
- * cannot hang the caller.
+ * cannot hang the caller. `replayBudget` gates each transport retry and the
+ * handoff of every request; `replayOf`, the rejection this request corrects, is
+ * thrown as-is when the budget is already spent before the request is signed.
+ * `markRefusal` records on the error a non-OK response becomes the wait the
+ * transport refused under the caller's retry bounds.
  */
 async function sendBedrockRequest(
 	model: Model<"bedrock-converse-stream">,
@@ -203,7 +210,9 @@ async function sendBedrockRequest(
 	input: unknown,
 	endpoint: BedrockRequestEndpoint,
 	signal: AbortSignal | undefined = options.signal,
-): Promise<{ response: Response; responseBody?: string }> {
+	replayBudget: ReplayBudget | undefined,
+	replayOf?: unknown,
+): Promise<{ response: Response; responseBody?: string; markRefusal: TransportRetry["markRefusal"] }> {
 	const host = base.host;
 	const { urlPath, url } = resolveBedrockRequestUrl(model, base, endpoint);
 	const query = base.search.slice(1) || undefined;
@@ -298,7 +307,9 @@ async function sendBedrockRequest(
 			: getStreamFirstEventTimeoutMs(
 					options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs),
 				));
+	if (replayOf !== undefined && !admitsReplay(replayBudget, 0)) throw replayOf;
 	const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
+	const retry = transportRetry(options, DEFAULT_MAX_RETRY_DELAY_MS);
 	let response: Response;
 	let responseBody: string | undefined;
 	try {
@@ -307,7 +318,9 @@ async function sendBedrockRequest(
 			headers: requestHeaders,
 			body,
 			signal: watchdog.signal,
-			fetch: options.fetch,
+			fetch: gateOptionalFetch(replayBudget, options.fetch),
+			retryGate: replayBudget?.admits,
+			...retry.fetchOptions,
 			timeout: false,
 		});
 		if (!response.ok && endpoint === "invoke-with-response-stream")
@@ -318,7 +331,7 @@ async function sendBedrockRequest(
 		// liveness belongs to the event iterator's idle watchdog.
 		watchdog.clear();
 	}
-	return { response, responseBody };
+	return { response, responseBody, markRefusal: retry.markRefusal };
 }
 
 function inferRegionFromBedrockArn(modelId: string): string | undefined {
@@ -704,6 +717,7 @@ function createBedrockAnthropicCompactionClient(
 	region: string,
 	base: URL,
 	getPayload: () => unknown,
+	replayBudget: ReplayBudget | undefined,
 ): AnthropicMessagesClientLike {
 	return {
 		messages: {
@@ -722,6 +736,7 @@ function createBedrockAnthropicCompactionClient(
 							input,
 							"invoke-with-response-stream",
 							requestOptions?.signal ?? options.signal,
+							replayBudget,
 						);
 						if (!sent.response.ok) {
 							if (
@@ -730,11 +745,13 @@ function createBedrockAnthropicCompactionClient(
 							) {
 								invalidateAwsCredentialCache({ profile: options.profile, region });
 							}
-							throw new AIError.BedrockApiError(
+							const error = new AIError.BedrockApiError(
 								`Bedrock HTTP ${sent.response.status}: ${(sent.responseBody ?? "").slice(0, 1000)}`,
 								sent.response.status,
 								{ headers: sent.response.headers },
 							);
+							sent.markRefusal(error);
+							throw error;
 						}
 						if (!sent.response.body) {
 							throw new AIError.BedrockApiError("Bedrock response has no body", sent.response.status);
@@ -774,9 +791,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				const { base } = getRequestLocation();
 				return prepareBedrockAnthropicCompactionRequest(model, options, base, params, betas);
 			},
-			getPayload => {
+			(getPayload, replayBudget) => {
 				const { region, base } = getRequestLocation();
-				return createBedrockAnthropicCompactionClient(model, options, region, base, getPayload);
+				return createBedrockAnthropicCompactionClient(model, options, region, base, getPayload, replayBudget);
 			},
 			anthropicOptions => {
 				const reasoning = options.reasoning;
@@ -802,6 +819,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 
 	(async () => {
 		const startTime = performance.now();
+		const replayBudget = ReplayBudget.forCall(options);
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -825,6 +843,11 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 		const blocks = output.content as Block[];
 		const contentIndexByBlockIndex = new Map<number, number>();
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// The accepted (2xx) response's headers, for `finalize`: an in-band
+		// exception frame or a cut stream keeps the response's `Retry-After`.
+		// Cleared when an attempt starts, so a retry refused before its response
+		// never reads an earlier response's headers.
+		let streamResponseHeaders: Headers | undefined;
 		const region = resolveBedrockRegion(model.id, options);
 
 		try {
@@ -890,7 +913,11 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 
 			let prefixBindingRetryAttempted = false;
 			let response: Response;
+			// The rejection a corrected request replaces; asked against the budget again
+			// right before the corrected request goes out, after it is signed.
+			let correctionOf: unknown;
 			while (true) {
+				streamResponseHeaders = undefined;
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
@@ -899,8 +926,22 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					url: resolveBedrockRequestUrl(model, base, "converse-stream").url,
 					body: commandInput,
 				};
-				({ response } = await sendBedrockRequest(model, options, region, base, commandInput, "converse-stream"));
-				if (response.ok) break;
+				const sent = await sendBedrockRequest(
+					model,
+					options,
+					region,
+					base,
+					commandInput,
+					"converse-stream",
+					options.signal,
+					replayBudget,
+					correctionOf,
+				);
+				response = sent.response;
+				if (response.ok) {
+					streamResponseHeaders = response.headers;
+					break;
+				}
 				if (!bearerToken && (response.status === 401 || response.status === 403)) {
 					// Stale cached credentials (e.g. rotated session keys in ~/.aws/credentials) —
 					// drop the cache entry so the next attempt re-resolves from scratch.
@@ -908,10 +949,15 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				}
 				const errBody = await response.text().catch(() => "");
 				const errorMessage = `Bedrock HTTP ${response.status}: ${errBody.slice(0, 1000)}`;
+				const rejection = new AIError.BedrockApiError(errorMessage, response.status, {
+					headers: response.headers,
+				});
+				sent.markRefusal(rejection);
 				if (
 					!prefixBindingRetryAttempted &&
 					options.anthropicPrefixMismatchBehavior !== "error" &&
-					isThinkingPrefixBindingError(errorMessage)
+					isThinkingPrefixBindingError(errorMessage) &&
+					(!replayBudget || (await replayBudget.replayAfter(rejection, 0, options.signal, options)))
 				) {
 					prefixBindingRetryAttempted = true;
 					logger.warn("bedrock: thinking prefix changed, stripping bound thinking and retrying", {
@@ -923,11 +969,10 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 						...commandInput,
 						messages: dropBedrockReasoningContent(commandInput.messages),
 					};
+					correctionOf = rejection;
 					continue;
 				}
-				throw new AIError.BedrockApiError(errorMessage, response.status, {
-					headers: response.headers,
-				});
+				throw rejection;
 			}
 			if (!response.body) throw new AIError.BedrockApiError("Bedrock response has no body", response.status);
 
@@ -1061,7 +1106,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
-		} catch (error) {
+		} catch (caught) {
+			// A request the budget refused at handoff stands for the failure it replaced.
+			const error = restoreReplaced(caught, replayBudget);
 			for (const block of output.content) {
 				if (block.type === "toolCall") clearStreamingPartialJson(block);
 			}
@@ -1091,14 +1138,18 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					diagnostics = `\n[thinking-diag] ${JSON.stringify(thinkingBlocks)}`;
 				}
 			}
-			const result = await AIError.finalize(error, { api: model.api, signal: options.signal, rawRequestDump });
-			output.stopReason = result.stopReason;
-			output.errorStatus = result.status;
-			output.errorId = result.id;
-			output.errorMessage = result.message + diagnostics;
+			const result = await AIError.finalize(error, {
+				api: model.api,
+				signal: options.signal,
+				rawRequestDump,
+				streamResponseHeaders,
+			});
+			// The thinking-block diagnostic is omp's local text: shown, never classified.
+			AIError.applyFinalizeResult(output, result, (result.displayMessage ?? result.message) + diagnostics);
+			replayBudget?.stamp(output);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.push({ type: "error", reason: result.stopReason, error: output });
 			stream.end();
 		}
 	})();

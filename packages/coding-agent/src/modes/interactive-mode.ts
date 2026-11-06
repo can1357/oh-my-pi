@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { type Agent, AgentBusyError, type AgentMessage, agentPauseGate, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import { errorText, retryAfterMsOf } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
@@ -71,6 +72,7 @@ import {
 	prompt,
 	sanitizeText,
 	setProjectDir,
+	withRetryWait,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { pickTableChart } from "../auto-graph/planner";
@@ -2626,14 +2628,13 @@ export class InteractiveMode implements InteractiveModeContext {
 					return;
 				case "resume":
 					this.handleResumeSession(action.path, { followContinuation: true }).catch((error: unknown) =>
-						this.showError(error instanceof Error ? error.message : String(error)),
+						this.showError(errorText(error)),
 					);
 					return;
 				case "copy":
 					copyToClipboard(action.text).then(
 						() => this.showStatus("Copied to clipboard"),
-						(error: unknown) =>
-							this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
+						(error: unknown) => this.showWarning(`Copy failed: ${errorText(error)}`),
 					);
 					return;
 				case "spotlight":
@@ -3217,9 +3218,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			setProjectDir(newCwd);
 		} catch (error) {
-			this.showError(
-				`Cannot change working directory to ${newCwd}: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.showError(`Cannot change working directory to ${newCwd}: ${errorText(error)}`);
 			return false;
 		}
 		// Everything after chdir is a rescope of cwd-derived state. If any of it
@@ -3269,15 +3268,13 @@ export class InteractiveMode implements InteractiveModeContext {
 					await this.session.refreshSkillsAndCommands();
 				} catch {}
 				this.showError(
-					`Failed to switch to ${newCwd} (${error instanceof Error ? error.message : String(error)}), and restoring the previous workspace failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+					`Failed to switch to ${newCwd} (${errorText(error)}), and restoring the previous workspace failed: ${errorText(restoreError)}`,
 				);
 				throw new Error(
 					`Failed to restore workspace after failed switch to ${newCwd}: ${restoreError instanceof Error ? restoreError.message : String(restoreError)} (workspace may be inconsistent at ${actual})`,
 				);
 			}
-			this.showError(
-				`Cannot change working directory to ${newCwd}: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.showError(`Cannot change working directory to ${newCwd}: ${errorText(error)}`);
 			return false;
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
@@ -5845,9 +5842,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				try {
 					await this.session.setModelTemporary(transition.model, transition.thinkingLevel);
 				} catch (error) {
-					this.showWarning(
-						`Failed to switch to plan model for plan mode: ${error instanceof Error ? error.message : String(error)}`,
-					);
+					this.showWarning(`Failed to switch to plan model for plan mode: ${errorText(error)}`);
 				}
 				return;
 		}
@@ -5862,9 +5857,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
 		} catch (error) {
-			this.showWarning(
-				`Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.showWarning(`Failed to switch model after streaming: ${errorText(error)}`);
 		}
 	}
 
@@ -6665,9 +6658,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			await copyToClipboard(content);
 			this.showStatus("Copied plan to clipboard");
 		} catch (error) {
-			this.showWarning(
-				`Failed to copy plan to clipboard: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.showWarning(`Failed to copy plan to clipboard: ${errorText(error)}`);
 		}
 	}
 
@@ -6717,25 +6708,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			destination = resolveToCwd(selectedPath, this.sessionManager.getCwd());
 		} catch (error) {
-			this.showError(`Invalid plan save path: ${error instanceof Error ? error.message : String(error)}`);
+			this.showError(`Invalid plan save path: ${errorText(error)}`);
 			return;
 		}
 		try {
 			await Bun.write(destination, planContent);
 		} catch (error) {
-			this.showError(
-				`Failed to save plan to ${shortenPath(destination)}: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.showError(`Failed to save plan to ${shortenPath(destination)}: ${errorText(error)}`);
 			return;
 		}
 		try {
 			await this.#exitPlanMode({ silent: true });
 		} catch (error) {
-			this.showError(
-				`Saved plan to ${shortenPath(destination)}, but could not exit plan mode: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
+			this.showError(`Saved plan to ${shortenPath(destination)}, but could not exit plan mode: ${errorText(error)}`);
 			return;
 		}
 
@@ -6745,9 +6730,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showStatus(`Saved plan to ${shortenPath(destination)}.`);
 		} catch (error) {
 			this.showError(
-				`Saved plan to ${shortenPath(destination)}, but could not start a new session: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
+				`Saved plan to ${shortenPath(destination)}, but could not start a new session: ${errorText(error)}`,
 			);
 		}
 	}
@@ -6768,7 +6751,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showError(`Plan file not found at ${planFilePath}`);
 				return;
 			}
-			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
+			this.showWarning(`Failed to open external editor: ${errorText(error)}`);
 			return;
 		}
 
@@ -6784,7 +6767,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showStatus("Plan updated in external editor.");
 			}
 		} catch (error) {
-			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
+			this.showWarning(`Failed to open external editor: ${errorText(error)}`);
 		} finally {
 			this.ui.start();
 			this.ui.requestRender(true);
@@ -6805,7 +6788,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				commit(result);
 			}
 		} catch (error) {
-			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
+			this.showWarning(`Failed to open external editor: ${errorText(error)}`);
 		} finally {
 			this.ui.start();
 			this.ui.requestRender(true);
@@ -6820,9 +6803,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.updateEditorBorderColor();
 			this.showStatus(`Continuing with ${entry.role}: ${entry.model.name || entry.model.id}`);
 		} catch (error) {
-			this.showWarning(
-				`Could not switch to the ${entry.role} model: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.showWarning(`Could not switch to the ${entry.role} model: ${errorText(error)}`);
 		}
 	}
 
@@ -6938,6 +6919,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showStatus(`Saved plan to ${displayPath}.`);
 			}
 		} catch (error) {
+			// Cut the error first, then add the server's wait, so a long error keeps it.
 			const detail = truncateToWidth(
 				shortenEmbeddedPaths(
 					replaceTabs(error instanceof Error ? error.message : String(error))
@@ -6946,7 +6928,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				),
 				TRUNCATE_LENGTHS.CONTENT,
 			);
-			this.showWarning(`Failed to autosave plan: ${detail}`);
+			this.showWarning(`Failed to autosave plan: ${withRetryWait(detail, retryAfterMsOf(error))}`);
 		}
 
 		// Resolve the deferred plan-approval model transition. On the compact path
@@ -7461,7 +7443,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return true;
 		} catch (error) {
 			this.#guidedGoalInterviewActive = false;
-			this.showError(error instanceof Error ? error.message : String(error));
+			this.showError(errorText(error));
 			return false;
 		}
 	}
@@ -7738,7 +7720,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			() => opened.resolve(fromExtension && this.#hasAnswerablePlanReview()),
 			error => {
 				opened.resolve(false);
-				const message = error instanceof Error ? error.message : String(error);
+				const message = errorText(error);
 				this.showError(isOpen ? `Plan review failed: ${message}` : `Failed to open plan review: ${message}`);
 			},
 		);
@@ -7951,7 +7933,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					remote?.choice === "save" ? planSaveFileName(details.title) : undefined,
 				);
 			} catch (error) {
-				this.showError(`Failed to save plan: ${error instanceof Error ? error.message : String(error)}`);
+				this.showError(`Failed to save plan: ${errorText(error)}`);
 			}
 			return;
 		}
@@ -8008,9 +7990,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				});
 				if (executionDispatched) this.#planReviewAnnotationState.delete(annotationStateKey);
 			} catch (error) {
-				this.showError(
-					`Failed to finalize approved plan: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				this.showError(`Failed to finalize approved plan: ${errorText(error)}`);
 			}
 			closePlanReview();
 			return;
@@ -8032,7 +8012,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.showStatus("Refine plan: enter a follow-up prompt.");
 				}
 			} catch (error) {
-				this.showError(`Failed to refine plan: ${error instanceof Error ? error.message : String(error)}`);
+				this.showError(`Failed to refine plan: ${errorText(error)}`);
 			}
 			closePlanReview();
 			return;
@@ -8273,7 +8253,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#handleTeardownError(action: "close" | "restart", error: unknown): void {
 		this.#isShuttingDown = false;
-		const detail = error instanceof Error ? error.message : String(error);
+		const detail = errorText(error);
 		// Arm the escape hatch only once dispose() has begun: its promise is
 		// memoized, so a retry can only re-fail. A failure BEFORE dispose (a
 		// transient BTW/live-command flush) leaves the session undisposed and
@@ -8300,7 +8280,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.session.abort();
 			await this.#liveCommandController.stop();
 		} catch (err) {
-			this.showWarning(err instanceof Error ? err.message : String(err));
+			this.showWarning(errorText(err));
 		}
 		return planWorktreeExit(
 			this.#ownedWorktrees,
@@ -8457,7 +8437,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Background extensions do not submit terminal input. Start the same
 		// settled-boundary check without waiting for another user keystroke.
 		void this.checkShutdownRequested().catch(error => {
-			this.showError(`Shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.showError(`Shutdown failed: ${errorText(error)}`);
 		});
 	}
 
@@ -9307,7 +9287,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			await this.handleWorktreeCommand(undefined, { keepChanges: false });
 		} catch (err) {
-			this.showWarning(`Worktree not created: ${err instanceof Error ? err.message : String(err)}`);
+			this.showWarning(`Worktree not created: ${errorText(err)}`);
 		}
 	}
 
@@ -9421,7 +9401,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				path: newRecordingPath(this.sessionManager.getSessionId()),
 			});
 		} catch (error) {
-			this.showError(`Could not start recording: ${error instanceof Error ? error.message : String(error)}`);
+			this.showError(`Could not start recording: ${errorText(error)}`);
 			return;
 		} finally {
 			this.#recorderStarting = false;
@@ -9740,7 +9720,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				result.sessionFile ? `Branched /btw to ${path.basename(result.sessionFile)}` : "Branched /btw",
 			);
 		} catch (error) {
-			this.showError(`Cannot branch /btw: ${error instanceof Error ? error.message : String(error)}`);
+			this.showError(`Cannot branch /btw: ${errorText(error)}`);
 		}
 	}
 

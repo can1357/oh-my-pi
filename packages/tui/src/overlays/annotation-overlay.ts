@@ -16,6 +16,7 @@ import { wrapLiteralLine } from "../utils";
 import { editorKey } from "../chrome/keybinding-hints";
 import { formatKeyHint, formatKeyHints, type KeybindingsManager } from "../app-keybindings";
 import type { Keybinding } from "../keybindings";
+import { errorText } from "@oh-my-pi/pi-ai/utils/retry-wait-display";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { type Theme } from "../theme/theme";
 import type {
@@ -1010,9 +1011,7 @@ export class AnnotationOverlay implements Focusable {
 				if (text !== null) this.#editor.setText(text);
 			});
 		} catch (error) {
-			this.#callbacks.onWarning?.(
-				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.#callbacks.onWarning?.(`Failed to open external editor: ${errorText(error)}`);
 		} finally {
 			this.#externalOperation = false;
 			this.#tui.requestRender(true);
@@ -1026,9 +1025,7 @@ export class AnnotationOverlay implements Focusable {
 		try {
 			await openEditor();
 		} catch (error) {
-			this.#callbacks.onWarning?.(
-				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			this.#callbacks.onWarning?.(`Failed to open external editor: ${errorText(error)}`);
 		} finally {
 			this.#externalOperation = false;
 			this.#tui.requestRender(true);

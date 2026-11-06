@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as vm from "node:vm";
 import { type Document, Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
 import { Marked } from "@oh-my-pi/pi-utils/marked";
+import { withRetryWait } from "@oh-my-pi/pi-utils";
 import type { SessionEntry } from "../src/session/session-entries";
 import type { SubSession } from "../src/session/sub-sessions";
 
@@ -483,5 +484,108 @@ describe("HTML export assistant content ordering", () => {
 		expect(renderedSidebarOrder(rendered)).toEqual(["assistant: root", "user: branch-b", "user: branch-a"]);
 		const updatedRows = Array.from(rendered.document.querySelectorAll("#tree-container .tree-node"));
 		expect(updatedRows.map(row => row.classList.contains("in-path"))).toEqual([true, true, false]);
+	});
+
+	test("renders a failed turn's retry wait from errorRetryAfterMs with pi-utils' wording, and none from its text", () => {
+		// One wait per duration branch of the viewer's port (seconds, minutes, hours),
+		// then a message persisted before the wait was structured: its text stays and no wait is added.
+		for (const [message, expected] of [
+			[{ errorMessage: "503 overloaded", errorRetryAfterMs: 9_000 }, withRetryWait("503 overloaded", 9_000)],
+			[{ errorMessage: "503 overloaded", errorRetryAfterMs: 90_000 }, withRetryWait("503 overloaded", 90_000)],
+			[{ errorMessage: "503 overloaded", errorRetryAfterMs: 4_000_000 }, withRetryWait("503 overloaded", 4_000_000)],
+			[{ errorMessage: "503 overloaded retry-after-ms=9000" }, "503 overloaded retry-after-ms=9000"],
+		] as const) {
+			const rendered = renderSession(
+				[
+					{
+						type: "message",
+						id: "assistant-1",
+						parentId: null,
+						timestamp: "2026-01-01T00:00:01.000Z",
+						message: { role: "assistant", content: [], stopReason: "error", timestamp: 1, ...message },
+					},
+				],
+				"assistant-1",
+			);
+			expect(rendered.assistant.querySelector(".error-text")?.textContent?.trim()).toBe(`Error: ${expected}`);
+			expect(renderedSidebarOrder(rendered)).toEqual([`assistant: ${expected}`]);
+		}
+	});
+
+	test("cuts a long error in the sidebar row before adding its retry wait", () => {
+		const longError = `503 ${"overloaded ".repeat(20)}`.trim();
+		const rendered = renderSession(
+			[
+				{
+					type: "message",
+					id: "assistant-1",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:01.000Z",
+					message: {
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						timestamp: 1,
+						errorMessage: longError,
+						errorRetryAfterMs: 9_000,
+					},
+				},
+			],
+			"assistant-1",
+		);
+		// The row keeps 100 characters of the error, then its wait; the message block keeps the whole error.
+		expect(renderedSidebarOrder(rendered)).toEqual([
+			`assistant: ${withRetryWait(`${longError.slice(0, 100)}...`, 9_000)}`,
+		]);
+		expect(rendered.assistant.querySelector(".error-text")?.textContent?.trim()).toBe(
+			`Error: ${withRetryWait(longError, 9_000)}`,
+		);
+	});
+
+	// A refused wait can be a failure's only text: omp records the explanation
+	// and the provider sent no words of its own. The tree asked whether the
+	// provider had sent words to decide whether the turn failed, so it showed
+	// "(no text)" for exactly that failure while the message view explained it.
+	test("marks a failure whose only text is omp's own explanation", () => {
+		const note =
+			"(server asked to wait 30 s before retrying; the caller's 10 s providerRetryWaitCeilingMs refused it, so the provider did not retry)";
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "ask",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:01.000Z",
+				message: { role: "user", content: "hi", timestamp: 1 },
+			},
+			{
+				type: "message",
+				id: "failed",
+				parentId: "ask",
+				timestamp: "2026-01-01T00:00:02.000Z",
+				message: {
+					role: "assistant",
+					content: [],
+					model: "test-model",
+					provider: "test",
+					api: "openai-completions",
+					timestamp: 2,
+					stopReason: "error",
+					errorDisplayMessage: note,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				},
+			},
+		];
+		const rendered = renderSession(entries, "failed", {});
+		const order = renderedSidebarOrder(rendered);
+
+		expect(order[1]).toContain("providerRetryWaitCeilingMs refused it");
+		expect(order[1]).not.toContain("(no text)");
 	});
 });

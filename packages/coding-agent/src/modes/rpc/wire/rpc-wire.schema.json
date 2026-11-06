@@ -1284,7 +1284,16 @@
 					"type": "string"
 				},
 				"errorMessage": {
-					"type": "string"
+					"type": "string",
+					"description": "The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this."
+				},
+				"errorDisplayMessage": {
+					"type": "string",
+					"description": "`errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths."
+				},
+				"errorRetryAfterMs": {
+					"type": "number",
+					"description": "The delay, in milliseconds, the failed response's headers asked for before a retry. Retry decisions read this with `errorMessage`."
 				},
 				"errorStatus": {
 					"type": "integer"
@@ -3489,6 +3498,10 @@
 				},
 				"error": {
 					"type": "string"
+				},
+				"errorRetryAfterMs": {
+					"type": "number",
+					"description": "The failed turn's retry wait in milliseconds, from the error's response headers. `error` never carries it. Live frames only: history read back from disk has none."
 				}
 			},
 			"required": [
@@ -3540,6 +3553,10 @@
 				},
 				"error": {
 					"type": "string"
+				},
+				"errorRetryAfterMs": {
+					"type": "number",
+					"description": "The failed turn's retry wait in milliseconds, from the error's response headers. `error` never carries it. Live frames only: history read back from disk has none."
 				},
 				"followUps": {
 					"type": "array",
@@ -3962,6 +3979,10 @@
 				"errorMessage": {
 					"type": "string"
 				},
+				"retryAfterMs": {
+					"type": "number",
+					"description": "The failed compaction request's retry wait in milliseconds. `errorMessage` never carries it."
+				},
 				"skipped": {
 					"type": "boolean",
 					"description": "Compaction was skipped for a benign reason."
@@ -4038,6 +4059,10 @@
 				},
 				"errorId": {
 					"type": "integer"
+				},
+				"retryAfterMs": {
+					"type": "number",
+					"description": "The retry wait the failed response stated, in milliseconds; distinct from `delayMs`. `errorMessage` never carries it."
 				}
 			},
 			"required": [
@@ -4062,6 +4087,10 @@
 				},
 				"finalError": {
 					"type": "string"
+				},
+				"finalRetryAfterMs": {
+					"type": "number",
+					"description": "The retry wait the final failed response stated, in milliseconds. `finalError` never carries it."
 				},
 				"retryErrors": {
 					"type": "array",
@@ -4561,6 +4590,10 @@
 				},
 				"httpStatus": {
 					"type": "integer"
+				},
+				"retryAfterMs": {
+					"type": "number",
+					"description": "The failed response's retry wait in milliseconds, from its headers. `message` never carries it."
 				},
 				"code": {
 					"const": "cost_cap",

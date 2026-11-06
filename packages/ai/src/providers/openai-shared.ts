@@ -89,6 +89,7 @@ import {
 	kStreamingPartialJson,
 } from "../utils/block-symbols";
 import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
+import { withErrorEventHeaders } from "../utils/error-event-headers";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import {
 	escapeHarmonyControlTokens,
@@ -4497,10 +4498,13 @@ export function throwOpenAIResponsesEventError(
 	if (event.type === "error") {
 		const error = isRecord(envelope.error) ? envelope.error : envelope;
 		const inBand = AIError.createInBandProviderError(event);
-		if (inBand) throw inBand;
-		throw new AIError.ProviderResponseError(
-			`Error Code ${error.code ?? "unknown"}: ${error.message ?? "no message"}`,
-			{ provider, kind: "output" },
+		if (inBand) throw withErrorEventHeaders(inBand, error);
+		throw withErrorEventHeaders(
+			new AIError.ProviderResponseError(`Error Code ${error.code ?? "unknown"}: ${error.message ?? "no message"}`, {
+				provider,
+				kind: "output",
+			}),
+			error,
 		);
 	}
 	const response = isRecord(envelope.response) ? envelope.response : undefined;
@@ -4513,7 +4517,7 @@ export function throwOpenAIResponsesEventError(
 			: undefined;
 	const details = isRecord(response?.incomplete_details) ? response.incomplete_details : undefined;
 	const inBand = details ? undefined : AIError.createInBandProviderError({ ...response, error });
-	if (inBand) throw inBand;
+	if (inBand) throw withErrorEventHeaders(inBand, error);
 	const message = error
 		? `${error.code || "unknown"}: ${error.message || "no message"}`
 		: details?.reason
@@ -4523,5 +4527,5 @@ export function throwOpenAIResponsesEventError(
 				  statusDetails.reason.length > 0
 				? `status_details: ${statusDetails.reason}`
 				: "Unknown error (no error details in response)";
-	throw new AIError.ProviderResponseError(message, { provider, kind: "output" });
+	throw withErrorEventHeaders(new AIError.ProviderResponseError(message, { provider, kind: "output" }), error);
 }

@@ -1,8 +1,9 @@
 import { Database, type Statement } from "bun:sqlite";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
-import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { type Api, type AssistantMessage, assistantTurnError, type Model } from "@oh-my-pi/pi-ai";
 import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import {
 	getAgentDir,
@@ -128,7 +129,7 @@ export function createSkillDescriptionCompressor(
 						temperature: 0,
 						signal: AbortSignal.any([AbortSignal.timeout(30_000), refused.signal]),
 						beforeDispatch: gate ? refuseAttempt : undefined,
-						fetch: gate ? transportFetch(model, undefined, refuseAttempt) : undefined,
+						fetch: gate ? transportFetch(model, undefined, { beforeDispatch: refuseAttempt }) : undefined,
 						onAttempt: message => gate?.record(message.usage.cost.total),
 					},
 					{ telemetry: options.getTelemetry?.(), oneshotKind: "skill_description" },
@@ -142,7 +143,10 @@ export function createSkillDescriptionCompressor(
 				throw new SkillDescriptionLengthError("Model stopped: length");
 			}
 			if (response.stopReason !== "stop") {
-				throw new Error(`Model stopped: ${response.stopReason} ${response.errorMessage ?? ""}`);
+				throw Object.assign(
+					assistantTurnError(response, `Model stopped: ${response.stopReason} ${response.errorMessage ?? ""}`),
+					{ errorDisplayMessage: `Model stopped: ${response.stopReason} ${errorDisplayText(response) ?? ""}` },
+				);
 			}
 			return response.content
 				.filter(block => block.type === "text")

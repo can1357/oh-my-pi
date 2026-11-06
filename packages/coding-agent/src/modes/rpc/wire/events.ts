@@ -87,6 +87,10 @@ export const eventDefs = {
 		aborted: "boolean",
 		willRetry: "boolean",
 		"errorMessage?": "string",
+		"retryAfterMs?": doc(
+			"number",
+			"The failed compaction request's retry wait in milliseconds. `errorMessage` never carries it.",
+		),
 		"skipped?": doc("boolean", "Compaction was skipped for a benign reason."),
 	},
 	ManualCompactionStartEvent: doc(
@@ -113,12 +117,20 @@ export const eventDefs = {
 		delayMs: "number.integer",
 		errorMessage: "string",
 		"errorId?": "number.integer",
+		"retryAfterMs?": doc(
+			"number",
+			"The retry wait the failed response stated, in milliseconds; distinct from `delayMs`. `errorMessage` never carries it.",
+		),
 	},
 	AutoRetryEndEvent: {
 		type: "'auto_retry_end'",
 		success: "boolean",
 		attempt: "number.integer",
 		"finalError?": "string",
+		"finalRetryAfterMs?": doc(
+			"number",
+			"The retry wait the final failed response stated, in milliseconds. `finalError` never carries it.",
+		),
 		retryErrors: absentAs(
 			doc(`${JSON_OBJECT}[]`, "Persisted retry errors whose presentation changed when the retry settled."),
 			[],

@@ -38,6 +38,7 @@ import {
 	type NativeJudge,
 	type Question,
 	type Questions,
+	retryAfterMsOf,
 	type TextBackend,
 	type TextCompletion,
 	type TextPrompt,
@@ -79,6 +80,10 @@ export interface JudgmentUsage {
 	usage: Usage;
 	stopReason: AssistantMessage["stopReason"];
 	errorMessage?: string;
+	/** The server's retry wait (ms) the failed attempt stated; `errorMessage` never carries it. */
+	errorRetryAfterMs?: number;
+	/** `errorMessage` as omp showed it, when that differs. Display only. */
+	errorDisplayMessage?: string;
 }
 
 export interface JudgeDeps {
@@ -512,7 +517,7 @@ export class ChainJudge implements Judge {
 					timeouts.set(timeoutKey, Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
 					timedOutBefore = true;
 				}
-				lastFailure = error instanceof Error ? error.message : String(error);
+				lastFailure = AIError.thrownErrorDisplayText(error);
 				logger.warn("judgment candidate failed", {
 					candidate: identity,
 					status: AIError.status(error),
@@ -554,6 +559,7 @@ export class ChainJudge implements Judge {
 			usage: usage.usage,
 			stopReason: usage.stopReason,
 			errorMessage: usage.errorMessage,
+			errorRetryAfterMs: usage.errorRetryAfterMs,
 			startTime: startedAt,
 			questions,
 			cachedQuestions,
@@ -625,6 +631,8 @@ export class ChainJudge implements Judge {
 					usage: attempt.usage,
 					stopReason: attempt.stopReason,
 					errorMessage: attempt.errorMessage,
+					errorRetryAfterMs: attempt.errorRetryAfterMs,
+					errorDisplayMessage: attempt.errorDisplayMessage,
 					startedAt: attempt.timestamp,
 				}),
 		});
@@ -759,6 +767,8 @@ function nativeJudge(
 						usage: partial,
 						stopReason: isAbortOrTimeout(error) ? "aborted" : "error",
 						errorMessage: error instanceof Error ? error.message : String(error),
+						errorRetryAfterMs: retryAfterMsOf(error),
+						errorDisplayMessage: AIError.thrownErrorDisplayText(error),
 					});
 					throw error;
 				}
