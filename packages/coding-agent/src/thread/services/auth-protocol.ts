@@ -102,10 +102,15 @@ export type BaseUrlTable = Record<string, string>;
 /** Provider → `[include when not explicit, include when explicit]`: a worker's `sessions.inherit` filter, evaluated before the call. */
 export type InheritTable = Record<string, readonly [boolean, boolean]>;
 
-/** One provider's answers to `keys.source` with the default `env` mode (absent = no auth) and `keys.keyless`. */
+/**
+ * One provider's answers to `keys.source` with the default `env` mode (absent = no auth),
+ * `keys.keyless` and `credentials.hasOAuth`.
+ */
 export interface ProviderAuthAvailability {
 	readonly source?: AuthSource;
 	readonly keyless: boolean;
+	/** Without a stored OAuth credential no session has an OAuth account (`oauth.identity`, `usage.ingestHeaders`). */
+	readonly oauth: boolean;
 }
 
 /** Provider → {@link ProviderAuthAvailability}, for every provider main reports at once. */
@@ -174,6 +179,8 @@ export type AuthStorageProtocol = {
 	 * provider with stored credentials, and `providers`, in one call (a worker caches it).
 	 */
 	"keys.availability": RpcMethod<[providers: readonly string[]], AuthAvailabilityTable>;
+	/** {@link ProviderAuthAvailability} of one provider the cached table lacks. */
+	"keys.availabilityOf": RpcMethod<[provider: string], ProviderAuthAvailability>;
 	"keys.describe": RpcMethod<[provider: string, sessionId?: string], string | undefined>;
 	"keys.setRuntime": RpcMethod<[provider: string, apiKey: string], void>;
 	"keys.removeRuntime": RpcMethod<[provider: string], void>;
