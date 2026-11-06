@@ -860,12 +860,12 @@ pub struct LaunchSlot(Option<super::Launch>);
 
 impl LaunchSlot {
 	/// The slot a submitted script asks for.
-	pub fn new(launch: Option<super::Launch>) -> Self {
+	pub const fn new(launch: Option<super::Launch>) -> Self {
 		Self(launch)
 	}
 
 	/// Whether a launch is still to run. Says nothing about what it is.
-	pub fn pending(&self) -> bool {
+	pub const fn pending(&self) -> bool {
 		self.0.is_some()
 	}
 
@@ -877,13 +877,13 @@ impl LaunchSlot {
 
 	/// Read the launch without consuming it (the text the shell reports
 	/// for the command, recorded before the DEBUG trap can read it).
-	pub(super) fn peek(&self, _: &Carrier) -> Option<&super::Launch> {
+	pub(super) const fn peek(&self, _: &Carrier) -> Option<&super::Launch> {
 		self.0.as_ref()
 	}
 
 	/// Take the launch. The token is consumed with it: one carrier, one
 	/// read.
-	pub(super) fn take(&mut self, _: Carrier) -> Option<super::Launch> {
+	pub(super) const fn take(&mut self, _: Carrier) -> Option<super::Launch> {
 		self.0.take()
 	}
 }
