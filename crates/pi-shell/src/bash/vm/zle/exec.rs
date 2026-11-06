@@ -447,12 +447,13 @@ fn native_step(zw: &mut Zw<'_, '_>, mut t: NativeTask) -> Next {
 					let child = ExecTask::from_zle(zw.zle, name, args, false, false);
 					Next::Call(Task::Native(t), Task::Exec(Box::new(child)))
 				},
-				Await::Function { name, args } => match function_task(zw, &name, &args) {
-					Some(task) => Next::CallFrame(Task::Native(t), task),
-					None => {
+				Await::Function { name, args } => {
+					if let Some(task) = function_task(zw, &name, &args) {
+						Next::CallFrame(Task::Native(t), task)
+					} else {
 						zw.ed.got = Some(Got::Status(1));
 						Next::Again(Task::Native(t))
-					},
+					}
 				},
 				Await::Refresh => {
 					refresh(zw);
@@ -573,7 +574,7 @@ pub fn push_call(
 	(depth, status)
 }
 
-fn frame_step(zw: &mut Zw<'_, '_>, t: FrameTask) -> Next {
+const fn frame_step(zw: &mut Zw<'_, '_>, t: FrameTask) -> Next {
 	if zw.vp.frames.len() > t.depth {
 		// Not ours to wait for here: the caller drives only once the frame
 		// has returned.
@@ -620,10 +621,10 @@ pub struct ExecTask {
 	pub(crate) restore_zmod: Option<super::Modifier>,
 	/// `zle name -K km`: the keymap to select again afterwards.
 	pub(crate) restore_keymap: Option<BString>,
-	/// WidgetsVi: zsh `execzlefunc`'s `nestedvichg` and `isrepeat`, taken
+	/// `WidgetsVi`: zsh `execzlefunc`'s `nestedvichg` and `isrepeat`, taken
 	/// when the widget starts ([`widgets::vi::exec_begin`]).
 	vichg: Option<(bool, bool)>,
-	/// WidgetsVi: `viinrepeat` to put back afterwards (zsh `redrawhook`).
+	/// `WidgetsVi`: `viinrepeat` to put back afterwards (zsh `redrawhook`).
 	keep_viinrepeat: Option<u8>,
 }
 
@@ -649,7 +650,7 @@ enum ExecState {
 
 impl ExecTask {
 	/// zsh `execzlefunc(name, args, set_bindk, set_lbindk)`.
-	pub fn new(
+	pub const fn new(
 		name: BString,
 		args: Vec<BString>,
 		from_key: bool,
@@ -721,7 +722,7 @@ pub fn hook_task(zle: &Zle, name: &[u8], arg: Option<&[u8]>) -> Option<Task> {
 	if !zle.widgets.exists(name) {
 		return None;
 	}
-	let args = arg.map(|a| vec![BString::from(a)]).unwrap_or_default();
+	let args = arg.map_or_default(|a| vec![BString::from(a)]);
 	Some(Task::Exec(Box::new(ExecTask::new(BString::from(name), args, false, true, false))))
 }
 
@@ -779,20 +780,20 @@ fn exec_step(zw: &mut Zw<'_, '_>, mut t: Box<ExecTask>) -> Next {
 					w.flags = 0;
 				}
 			}
-			exec_finish(zw, t)
+			exec_finish(zw, *t)
 		},
 		ExecState::Immortal => {
 			t.ret = match zw.ed.got.take() {
 				Some(Got::Status(s)) => s,
 				_ => 1,
 			};
-			exec_finish(zw, t)
+			exec_finish(zw, *t)
 		},
 		ExecState::Hooks => {
 			let _ = zw.ed.got.take();
 			exec_hooks(zw, t)
 		},
-		ExecState::Finish => exec_finish(zw, t),
+		ExecState::Finish => exec_finish(zw, *t),
 		ExecState::Done => {
 			let _ = zw.ed.got.take();
 			Next::Finish(Got::Status(t.ret))
@@ -810,16 +811,16 @@ fn exec_immortal(zw: &mut Zw<'_, '_>, mut t: Box<ExecTask>) -> Next {
 		return Next::Call(Task::Exec(t), Task::Exec(Box::new(child)));
 	}
 	t.ret = 1;
-	exec_finish(zw, t)
+	exec_finish(zw, *t)
 }
 
 fn exec_start(zw: &mut Zw<'_, '_>, mut t: Box<ExecTask>) -> Next {
 	t.vichg = Some(widgets::vi::exec_begin(zw.zle));
 	if t.set_bindk {
-		t.saved_bindk = std::mem::replace(&mut zw.ed.bindk, Some(t.name.clone()));
+		t.saved_bindk = zw.ed.bindk.replace(t.name.clone());
 	}
 	if t.set_lbindk {
-		t.saved_lbindk = zw.ed.lbindk.clone();
+		t.saved_lbindk.clone_from(&zw.ed.lbindk);
 	}
 	let Some(w) = zw.zle.widgets.get(&t.name).cloned() else {
 		let mut msg = BString::from("No such widget `");
@@ -849,7 +850,7 @@ fn exec_start(zw: &mut Zw<'_, '_>, mut t: Box<ExecTask>) -> Next {
 				zw.ed.use_exit_printed = true;
 				zw.ed.eofsent = true;
 				t.ret = 1;
-				return exec_finish(zw, t);
+				return exec_finish(zw, *t);
 			}
 			super::utils::pre_widget(zw, w.flags);
 			match w.kind {
@@ -910,11 +911,7 @@ fn exec_start(zw: &mut Zw<'_, '_>, mut t: Box<ExecTask>) -> Next {
 									ed:   &mut *zw.ed,
 									args: &args,
 								};
-								super::comp::compresult::suffix::widget_prologue(
-									&mut inner,
-									w.flags,
-									move |zw| f(zw),
-								)
+								super::comp::compresult::suffix::widget_prologue(&mut inner, w.flags, f)
 							};
 							t.args = args;
 							native_result(zw, t, r)
@@ -1006,12 +1003,13 @@ fn native_result(zw: &mut Zw<'_, '_>, mut t: Box<ExecTask>, r: WResult) -> Next 
 				Await::Command { name, args } => {
 					Next::CallFrame(Task::Exec(t), Task::Frame(call_function(zw, &name, &args, true)))
 				},
-				Await::Function { name, args } => match function_task(zw, &name, &args) {
-					Some(task) => Next::CallFrame(Task::Exec(t), task),
-					None => {
+				Await::Function { name, args } => {
+					if let Some(task) = function_task(zw, &name, &args) {
+						Next::CallFrame(Task::Exec(t), task)
+					} else {
 						zw.ed.got = Some(Got::Status(1));
 						Next::Again(Task::Exec(t))
-					},
+					}
 				},
 				Await::Refresh => {
 					refresh(zw);
@@ -1020,20 +1018,20 @@ fn native_result(zw: &mut Zw<'_, '_>, mut t: Box<ExecTask>, r: WResult) -> Next 
 				},
 				Await::Recursive => Next::Call(Task::Exec(t), Task::Core(CoreTask::new())),
 				Await::Hook { name, arg } => {
-					match hook_task(zw.zle, &name, arg.as_deref().map(|a| &a[..])) {
-						Some(task) => Next::Call(Task::Exec(t), task),
-						None => {
-							zw.ed.got = Some(Got::Status(0));
-							Next::Again(Task::Exec(t))
-						},
-					}
-				},
-				Await::RedrawHook => match redrawhook(zw) {
-					Some(task) => Next::Call(Task::Exec(t), task),
-					None => {
+					if let Some(task) = hook_task(zw.zle, &name, arg.as_deref().map(|a| &a[..])) {
+						Next::Call(Task::Exec(t), task)
+					} else {
 						zw.ed.got = Some(Got::Status(0));
 						Next::Again(Task::Exec(t))
-					},
+					}
+				},
+				Await::RedrawHook => {
+					if let Some(task) = redrawhook(zw) {
+						Next::Call(Task::Exec(t), task)
+					} else {
+						zw.ed.got = Some(Got::Status(0));
+						Next::Again(Task::Exec(t))
+					}
 				},
 				Await::Wait(key) => {
 					zw.ed.got = Some(Got::Refreshed);
@@ -1065,10 +1063,10 @@ fn exec_hooks(zw: &mut Zw<'_, '_>, mut t: Box<ExecTask>) -> Next {
 			return Next::Call(Task::Exec(t), task);
 		}
 	}
-	exec_finish(zw, t)
+	exec_finish(zw, *t)
 }
 
-fn exec_finish(zw: &mut Zw<'_, '_>, mut t: Box<ExecTask>) -> Next {
+fn exec_finish(zw: &mut Zw<'_, '_>, mut t: ExecTask) -> Next {
 	if t.set_lbindk {
 		zw.ed.lbindk = t.saved_lbindk.take();
 	} else if t.ran {
@@ -1315,15 +1313,16 @@ fn lookup(zle: &Zle, ed: &Editor, seq: &[u8]) -> (Option<Bind>, bool) {
 	let km = &zle.keymaps;
 	let undefined = |b: &Bind| matches!(b, Bind::Widget(w) if w.as_slice() == b"undefined-key");
 	let mut found = None;
-	let mut ispfx = false;
-	if let Some(local) = ed.localkeymap.as_deref() {
-		found = km.lookup(local, seq).filter(|b| !undefined(*b)).cloned();
-		ispfx = km.is_prefix(local, seq);
-	}
+	let mut ispfx = if let Some(local) = ed.localkeymap.as_deref() {
+		found = km.lookup(local, seq).filter(|b| !undefined(b)).cloned();
+		km.is_prefix(local, seq)
+	} else {
+		false
+	};
 	if found.is_none() && !ispfx {
 		found = km
 			.lookup(&ed.keymap, seq)
-			.filter(|b| !undefined(*b))
+			.filter(|b| !undefined(b))
 			.cloned();
 	}
 	ispfx |= km.is_prefix(&ed.keymap, seq);
@@ -1403,14 +1402,13 @@ fn key_step(zw: &mut Zw<'_, '_>, mut t: KeyTask) -> Next {
 					t.watched = false;
 					continue;
 				}
-				return match function_task(zw, &w.func, &[fd]) {
-					Some(task) => Next::CallFrame(Task::Key(t), task),
-					None => {
-						t.watched = false;
-						// A handler that is gone would make every poll fire.
-						zw.zle.watches.remove(i);
-						continue;
-					},
+				return if let Some(task) = function_task(zw, &w.func, &[fd]) {
+					Next::CallFrame(Task::Key(t), task)
+				} else {
+					t.watched = false;
+					// A handler that is gone would make every poll fire.
+					zw.zle.watches.remove(i);
+					continue;
 				};
 			},
 			Byte::Eof => return key_done(zw, t, true),
@@ -1722,7 +1720,7 @@ fn core_step(zw: &mut Zw<'_, '_>, mut t: CoreTask) -> Next {
 
 /// zsh `redrawhook`: `zle-line-pre-redraw`, if defined, run without
 /// changing `LASTWIDGET` (zsh restores `lbindk`, `bindk` and `lastcmd`).
-fn redrawhook(zw: &mut Zw<'_, '_>) -> Option<Task> {
+fn redrawhook(zw: &Zw<'_, '_>) -> Option<Task> {
 	if !zw.zle.widgets.exists(b"zle-line-pre-redraw") {
 		return None;
 	}

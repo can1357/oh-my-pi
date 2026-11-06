@@ -110,7 +110,7 @@ impl Lifecycle {
 
 	/// The waiter observed a stop or continue of the running process.
 	/// Returns the waker to wake (outside the lock).
-	pub fn changed(&mut self, change: ProcEvent) -> Option<Waker> {
+	pub const fn changed(&mut self, change: ProcEvent) -> Option<Waker> {
 		self.change = Some(change);
 		self.waker.take()
 	}
