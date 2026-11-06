@@ -25,11 +25,12 @@ export const GC_BLOBS_WARNING =
 // while sessions are being written. Deciding that a blob is unreferenced
 // means reading every session that could refer to it, and a session can be
 // created, forked, moved to a sibling or appended to while that reading is
-// happening — so the answer describes a tree that no longer exists. Guards
-// that notice the change make the phase refuse whenever anything is
-// writing, which is useless rather than wrong; guards that do not, delete
-// live data. Neither is a thing to run by default. `--blobs`, or
-// `gc.blobs`, turns it on for a machine whose sessions are quiescent.
+// happening — so the answer describes a tree that no longer exists. Measured
+// at the head of #18224, which rewrites that walk: a live transcript stored
+// in the blob store and linked into the sessions tree is deleted with
+// `errors: []` and exit 0, and so are the link hops a session's path runs
+// through. `--blobs`, or `gc.blobs`, turns the phase on for a machine whose
+// sessions are quiescent.
 export const cfgGcBlobs = register({
 	id: "gc.blobs",
 	type: "boolean",
@@ -43,14 +44,7 @@ export const cfgGcBlobs = register({
 	},
 });
 
-// Opt-in, like `gc.stale` and for a stronger reason: archiving is the one
-// phase that moves a session out of the sessions tree, and nothing in this
-// release — or in any release up to and including 18.14.0 — can find or read
-// what it leaves in `archive/sessions`. An unqualified `omp gc --apply`
-// therefore leaves cold sessions where they are — unless `gc.archive: true`
-// is configured in any layer, which enables the phase without the flag the
-// same way `gc.blobs` does. `--archive --apply` asks for it by name.
-export const cfgGcArchive = register({ id: "gc.archive", type: "boolean", default: false });
+export const cfgGcArchive = register({ id: "gc.archive", type: "boolean", default: true });
 
 export const cfgGcWal = register({ id: "gc.wal", type: "boolean", default: true });
 
