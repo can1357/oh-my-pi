@@ -14,7 +14,7 @@
  * shown, and (TUI only) where manual code input comes from.
  */
 import * as path from "node:path";
-import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, getProjectDir, toError } from "@oh-my-pi/pi-utils";
 import type { OAuthController } from "@oh-my-pi/pi-ai/oauth/types";
 import { expandEnvVarsDeep } from "../discovery/helpers";
 import { connectToServer, disconnectServer } from "./client";
@@ -406,7 +406,7 @@ export async function resolveMcpOAuthEndpointsFromServer(
 		});
 		connectionSucceeded = true;
 	} catch (error) {
-		connectionError = error instanceof Error ? error : new Error(String(error));
+		connectionError = toError(error);
 	}
 
 	if (connectionSucceeded && !opts.authChallenge) {

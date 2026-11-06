@@ -89,6 +89,7 @@ function makeCtx(): RenderInitialMessagesTestContext {
 				buildSessionContext: llmContextSpy,
 				getEntries: vi.fn(() => []),
 				getCwd: vi.fn(() => "/tmp"),
+				getConversationTip: () => undefined,
 			},
 		},
 		sessionManager: {
@@ -200,6 +201,7 @@ function makeRenderCtx(
 			sessionManager: {
 				getEntries: vi.fn(() => []),
 				getCwd: vi.fn(() => "/tmp"),
+				getConversationTip: () => undefined,
 				putBlobSync: vi.fn(() => ({
 					hash: "hash",
 					path: "/tmp/hash",

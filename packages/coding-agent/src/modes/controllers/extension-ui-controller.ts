@@ -29,7 +29,6 @@ import type {
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
 	type AskDialogPrompt,
@@ -150,28 +149,19 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * Redraw every transcript component of the reply sent at `timestamp` (one per tool-call segment).
-	 * A plain terminal cannot repaint rows it already moved into scrollback, so a reply with retired
-	 * rows rebuilds the scrollback, as the thinking-visibility toggle does; one still in the live
-	 * viewport (and any block in Tern's native view) just repaints.
+	 * Redraw every transcript component of the reply sent at `timestamp` (one per tool-call segment),
+	 * and the link browser's copy while it is open. A plain terminal cannot repaint rows it already
+	 * moved into scrollback, so a reply with retired rows rebuilds the scrollback, as the
+	 * thinking-visibility toggle does (once the link browser closes, if it covers the screen); one
+	 * still in the live viewport (and any block in Tern's native view) just repaints.
 	 */
 	#rerenderAssistantMessage(timestamp: number): void {
 		if (!cfgExtensionAssistantTextRenderers.get(this.ctx.settings)) return;
-		const native = isNativeRendering();
-		let redrawn = false;
-		let retired = false;
-		for (const child of this.ctx.chatContainer.children) {
-			if (!(child instanceof AssistantMessageComponent)) continue;
-			if (!child.rerenderMessage(timestamp)) continue;
-			redrawn = true;
-			retired ||= !native && !this.ctx.chatContainer.canRemoveBlock(child);
-		}
-		if (retired) {
-			this.ctx.chatContainer.resetStableEmission();
-			this.ctx.ui.resetDisplay();
-		} else if (redrawn) {
-			this.ctx.ui.requestRender();
-		}
+		this.ctx.rerenderInLinkBrowser(timestamp);
+		this.ctx.redrawTranscriptBlocks(
+			this.ctx.chatContainer.children,
+			child => child instanceof AssistantMessageComponent && child.rerenderMessage(timestamp),
+		);
 	}
 
 	/**
@@ -190,6 +180,7 @@ export class ExtensionUiController {
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
 			rerenderMessage: timestamp => this.#rerenderAssistantMessage(timestamp),
+			refreshTranscript: ids => this.ctx.refreshTranscriptPresentation(new Set(ids)),
 			getLinkClicksAvailable: extensionLinkClicksAvailable,
 			setStatus: (key, text) => this.setHookStatus(key, text),
 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
@@ -284,6 +275,7 @@ export class ExtensionUiController {
 			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			sessionModes: this.ctx.sessionModes,
+			keybindings: this.ctx.keybindings,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
@@ -517,6 +509,7 @@ export class ExtensionUiController {
 			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			sessionModes: this.ctx.sessionModes,
+			keybindings: this.ctx.keybindings,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
@@ -773,6 +766,7 @@ export class ExtensionUiController {
 							},
 						},
 					);
+					this.ctx.closeLinkBrowser();
 					this.ctx.editorContainer.clear();
 					this.ctx.editorContainer.addChild(dialog);
 					this.ctx.editorContainer.addChild(editor);
@@ -893,6 +887,7 @@ export class ExtensionUiController {
 					() => finishPrompt(undefined),
 					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
 				);
+				this.ctx.closeLinkBrowser();
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(promptEditor);
 				this.ctx.ui.setFocus(promptEditor);
@@ -938,6 +933,7 @@ export class ExtensionUiController {
 					inputGuard,
 				},
 			);
+			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(askDialog);
 			if (inputGuard) this.ctx.editorContainer.addChild(this.ctx.editor);
@@ -1194,6 +1190,7 @@ export class ExtensionUiController {
 					slider: extra?.slider,
 				},
 			);
+			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.hookSelector);
 			this.ctx.ui.setFocus(this.ctx.hookSelector);
@@ -1246,6 +1243,7 @@ export class ExtensionUiController {
 					tui: this.ctx.ui,
 				},
 			);
+			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.hookInput);
 			this.ctx.ui.setFocus(this.ctx.hookInput);
@@ -1284,6 +1282,7 @@ export class ExtensionUiController {
 				() => settle(undefined),
 				{ ...editorOptions, externalEditor: editDialogExternally },
 			);
+			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.hookEditor);
 			this.ctx.ui.setFocus(this.ctx.hookEditor);
@@ -1393,6 +1392,7 @@ export class ExtensionUiController {
 					return;
 				}
 				editorReplaced = true;
+				this.ctx.closeLinkBrowser();
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(component);
 				this.ctx.ui.setFocus(component);

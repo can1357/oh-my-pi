@@ -117,6 +117,9 @@ import { cfgLspRequestTimeout } from "./settings";
 
 const MAX_RENAME_PAIRS = 1000;
 
+/** File actions whose answer can draw on other open documents; those are synced from disk first. */
+const CROSS_FILE_ACTIONS: ReadonlySet<string> = new Set([...PROJECT_INDEXED_ACTIONS, "code_actions"]);
+
 interface FileRenamePair {
 	oldUri: string;
 	newUri: string;
@@ -1092,6 +1095,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				throwIfAborted(signal);
 				try {
 					const workspaceClient = await getOrCreateClient(workspaceServerConfig, workspaceRoot, undefined, signal);
+					// Results point into every open document, so sync those edited outside OMP first.
+					await reconcileOpenFilesFromDisk(workspaceClient, signal, undefined, "close");
 					const workspaceResult = (await sendRequest(
 						workspaceClient,
 						"workspace/symbol",
@@ -1278,6 +1283,17 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			if (needsProjectIndex && !isRustAnalyzerServer) {
 				await waitForProjectLoaded(client, signal);
+			}
+
+			// Answers that span files are computed from every open document, and one
+			// edited outside OMP still holds its stale overlay: references and
+			// definitions then point at old lines, and a rename or code action
+			// writes its edits onto them. Sync them all after the waits, right
+			// before the request. An action that writes edits fails on an open file
+			// it cannot read; a read-only query closes that file and goes on.
+			if (CROSS_FILE_ACTIONS.has(action)) {
+				const writesEdits = action === "rename" || (action === "code_actions" && apply === true);
+				await reconcileOpenFilesFromDisk(client, signal, undefined, writesEdits ? "throw" : "close");
 			}
 
 			switch (action) {
@@ -1577,15 +1593,6 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							details: { action, serverName, success: false },
 						};
 					}
-
-					// A project-wide rename answers with ranges for every file it
-					// touches. An already-open consumer that was edited outside OMP
-					// still holds its stale overlay, so those ranges point at the old
-					// text and the edit lands on the wrong lines while the rename
-					// reports success (#15772). Sync every open document, not just
-					// the requested target, so the server computes the workspace
-					// edit against current disk text.
-					await reconcileOpenFilesFromDisk(client, signal);
 
 					const result = (await sendRequest(
 						client,

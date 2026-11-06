@@ -29,10 +29,8 @@ function newHarness(initial: TodoPhase[] = []): Harness {
 		cwd: "/tmp",
 		tools: new Map(),
 		getTodoPhases: () => phases,
-		setTodoPhases: next => {
+		commitTodoPhases: next => {
 			phases = next;
-		},
-		persistTodoPhases: next => {
 			entries.push({
 				type: "custom",
 				customType: USER_TODO_EDIT_CUSTOM_TYPE,
@@ -165,25 +163,6 @@ describe("cursor todo persistence", () => {
 		);
 
 		expect(h.reload()[0].tasks.every(task => task.status === "pending")).toBe(true);
-	});
-
-	it("writes nothing when the session exposes no todo state", () => {
-		const entries: SessionEntry[] = [];
-		const handlers = new CursorExecHandlers({
-			cwd: "/tmp",
-			tools: new Map(),
-			persistTodoPhases: next => {
-				entries.push({
-					type: "custom",
-					customType: USER_TODO_EDIT_CUSTOM_TYPE,
-					data: { phases: next },
-				} as SessionEntry);
-			},
-		});
-
-		handlers.todoSync({ merged: false, todos: [{ content: "a", status: "pending" }] }, "call-1");
-
-		expect(entries).toEqual([]);
 	});
 
 	it("refreshes the interactive todo panel, which only reacts to tool_execution_end", () => {

@@ -59,12 +59,12 @@ const SLEEP = Bun.which("sleep") ?? "/bin/sleep";
 
 /**
  * Starts a kernel on a pip-less venv. `ensurepipMain` shadows the stdlib `ensurepip`'s
- * `__main__` and `uvScript` (POSIX sh) becomes `uv`; PATH holds nothing else, so a
- * system uv never runs.
+ * `__main__`, `sitecustomize` runs at interpreter startup, and `uvScript` (POSIX sh)
+ * becomes `uv`; PATH holds nothing else, so a system uv never runs.
  */
 async function startPiplessKernel(
 	dir: string,
-	fakes: { ensurepipMain?: string; uvScript?: string },
+	fakes: { ensurepipMain?: string; sitecustomize?: string; uvScript?: string },
 ): Promise<{ kernel: PythonKernel; python: string; sitePackages: string }> {
 	const python = await createPiplessVenv(dir);
 	const purelib = Bun.spawnSync([python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"]);
@@ -76,12 +76,17 @@ async function startPiplessKernel(
 		await Bun.write(path.join(binDir, "uv"), `#!/bin/sh\nPATH=/usr/bin:/bin\n${fakes.uvScript}\n`);
 		await fs.chmod(path.join(binDir, "uv"), 0o755);
 	}
+	const fakeRoot = path.join(dir, "fake");
 	if (fakes.ensurepipMain !== undefined) {
-		const fakeDir = path.join(dir, "fake", "ensurepip");
+		const fakeDir = path.join(fakeRoot, "ensurepip");
 		await fs.mkdir(fakeDir, { recursive: true });
 		await Bun.write(path.join(fakeDir, "__init__.py"), "");
 		await Bun.write(path.join(fakeDir, "__main__.py"), fakes.ensurepipMain);
-		env.PYTHONPATH = path.dirname(fakeDir);
+		env.PYTHONPATH = fakeRoot;
+	}
+	if (fakes.sitecustomize !== undefined) {
+		await Bun.write(path.join(fakeRoot, "sitecustomize.py"), fakes.sitecustomize);
+		env.PYTHONPATH = fakeRoot;
 	}
 	const kernel = await PythonKernel.start({ cwd: dir, interpreter: python, env });
 	return { kernel, python, sitePackages };
@@ -89,6 +94,33 @@ async function startPiplessKernel(
 
 /** An `ensurepip` that fails the way Debian's disabled system copy does. */
 const DISABLED_ENSUREPIP = 'import sys\nprint("ensurepip is disabled")\nsys.exit(1)\n';
+
+/**
+ * Like the real `ensurepip`, runs pip in a child process; prints both pids for `cancelInstall`
+ * and writes them to `installer-pids` in its working directory.
+ */
+const CHILD_SPAWNING_ENSUREPIP = [
+	"import os, subprocess",
+	`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"])`,
+	'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
+	'with open("installer-pids.tmp", "w") as f: f.write(f"{os.getpid()},{child.pid}")',
+	'os.replace("installer-pids.tmp", "installer-pids")',
+	"child.wait()",
+].join("\n");
+
+// Both poll real processes and files outside the kernel's protocol, which emits no event for them.
+
+/** The pids a fake installer wrote to `file` as `<pid>,<pid>`, once it exists. */
+async function readPids(file: string): Promise<number[]> {
+	for (let i = 0; i < 200 && !(await Bun.file(file).exists()); i++) await Bun.sleep(50);
+	return (await Bun.file(file).text()).split(",").map(Number);
+}
+
+/** Which of `pids` still run after a moment: a guard kills its group once it notices the kernel gone. */
+async function survivors(pids: number[]): Promise<number[]> {
+	for (let i = 0; i < 40 && pids.some(isRunning); i++) await Bun.sleep(50);
+	return pids.filter(isRunning);
+}
 
 /** Running and not a zombie: a killed process may wait a moment for its reaper. */
 function isRunning(pid: number): boolean {
@@ -147,7 +179,10 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 
 		const next = await executePython("print(21 * 2)", options);
 		expect(next.exitCode).toBe(0);
-		expect(next.output.trim()).toBe("42");
+		// The crash ended the kernel, so the next cell runs on a new one and says its state is gone.
+		const [notice, value] = next.output.trim().split("\n");
+		expect(notice).toStartWith("Kernel restarted: the previous Python kernel is dead; state is unavailable.");
+		expect(value).toBe("42");
 		expect(await Bun.file(path.join(tempDir.path(), "effects.txt")).text()).toBe("once\n");
 	}, 30_000);
 
@@ -205,6 +240,73 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			const next = await executePythonWithKernel(kernel, "print('alive')");
 			expect(next.exitCode).toBe(0);
 			expect(next.output).toContain("alive");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("cancels a cell parked on top-level await via SIGINT and keeps its state", async () => {
+		using tempDir = TempDir.createSync("@python-runner-cancel-await-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await executePythonWithKernel(kernel, "seed = 41");
+			const ac = new AbortController();
+			// Abort once the cell reports it is parked, so SIGINT lands while the
+			// main thread idles in the event loop rather than in sync code.
+			const pending = executePythonWithKernel(
+				kernel,
+				"import asyncio\nprint('parked', flush=True)\nawait asyncio.sleep(30)",
+				{
+					signal: ac.signal,
+					onChunk: chunk => {
+						if (chunk.includes("parked")) ac.abort(new DOMException("user cancelled", "AbortError"));
+					},
+				},
+			);
+			const result = await pending;
+			expect(result.cancelled).toBe(true);
+			// The same kernel process must survive with its namespace intact.
+			expect(kernel.isAlive()).toBe(true);
+			const next = await executePythonWithKernel(kernel, "print(seed + 1)");
+			expect(next.exitCode).toBe(0);
+			expect(next.output).toContain("42");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("interrupts only the aborted cell when several are parked on await", async () => {
+		using tempDir = TempDir.createSync("@python-runner-cancel-one-of-two-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const { promise: siblingParked, resolve: onSiblingParked } = Promise.withResolvers<void>();
+			const sibling = executePythonWithKernel(
+				kernel,
+				"import asyncio\ngate = asyncio.Event()\nprint('sibling parked', flush=True)\nawait gate.wait()\nprint('sibling done')",
+				{
+					onChunk: chunk => {
+						if (chunk.includes("sibling parked")) onSiblingParked();
+					},
+				},
+			);
+			await siblingParked;
+			const ac = new AbortController();
+			const target = executePythonWithKernel(
+				kernel,
+				"import asyncio\nprint('target parked', flush=True)\nawait asyncio.sleep(30)",
+				{
+					signal: ac.signal,
+					onChunk: chunk => {
+						if (chunk.includes("target parked")) ac.abort(new DOMException("user cancelled", "AbortError"));
+					},
+				},
+			);
+
+			expect((await target).cancelled).toBe(true);
+			await executePythonWithKernel(kernel, "gate.set()");
+			const siblingResult = await sibling;
+			expect(siblingResult.cancelled).toBe(false);
+			expect(siblingResult.output).toContain("sibling done");
 		} finally {
 			await kernel.shutdown();
 		}
@@ -336,15 +438,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		"cancelling %pip during the ensurepip bootstrap stops ensurepip and the pip it spawned",
 		async () => {
 			using tempDir = TempDir.createSync("@python-runner-pip-cancel-ensurepip-");
-			// Like the real `ensurepip`, runs pip in a child process.
-			const { kernel } = await startPiplessKernel(tempDir.path(), {
-				ensurepipMain: [
-					"import os, subprocess",
-					`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"])`,
-					'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
-					"child.wait()",
-				].join("\n"),
-			});
+			const { kernel } = await startPiplessKernel(tempDir.path(), { ensurepipMain: CHILD_SPAWNING_ENSUREPIP });
 			try {
 				const pids = await cancelInstall(kernel, "%pip install six");
 				expect(pids.filter(isRunning)).toEqual([]);
@@ -354,6 +448,210 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		},
 		30_000,
 	);
+
+	// A procfs inherited from a parent PID namespace: every pid and parent pid it reports is the outer one.
+	const outerNamespaceStat = [
+		"import builtins, io, re",
+		"_open = builtins.open",
+		"def _open_outer(file, mode='r', *args, **kwargs):",
+		"    handle = _open(file, mode, *args, **kwargs)",
+		"    if isinstance(file, str) and re.fullmatch(r'/proc/(self|\\d+)/stat', file) and 'b' in mode:",
+		"        pid, rest = handle.read().split(b' ', 1)",
+		"        handle.close()",
+		"        name, fields = rest.rsplit(b')', 1)",
+		"        fields = fields.split()",
+		"        fields[1] = str(int(fields[1]) + 100000).encode()",
+		"        return io.BytesIO(str(int(pid) + 100000).encode() + b' ' + name + b') ' + b' '.join(fields))",
+		"    return handle",
+		"builtins.open = _open_outer",
+	];
+	for (const [procfs, listing, extra] of [
+		["cannot be listed", "raise PermissionError(13, 'Permission denied', '/proc')", []],
+		["is an empty, unmounted directory", "return []", []],
+		["belongs to a parent PID namespace", "return _listdir(path)", outerNamespaceStat],
+	] as const) {
+		// What a kernel sees without a procfs of its own (some containers and
+		// chroots, nested PID namespaces): /proc lists nothing, or nothing it can
+		// match, and Linux `ps` reads /proc too, so it is hidden as well.
+		const noProcfs = [
+			"import os",
+			"_listdir = os.listdir",
+			"def _listdir_without_procfs(path='.'):",
+			"    if os.fspath(path) == '/proc':",
+			`        ${listing}`,
+			"    return _listdir(path)",
+			"os.listdir = _listdir_without_procfs",
+			"_exists = os.path.exists",
+			"os.path.exists = lambda path: os.fspath(path) != '/bin/ps' and _exists(path)",
+			...extra,
+		].join("\n");
+
+		it.skipIf(process.platform !== "linux")(
+			`cancelling %pip stops the installer tree when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-cancel-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+					sitecustomize: noProcfs,
+				});
+				try {
+					const pids = await cancelInstall(kernel, "%pip install six");
+					expect(pids.filter(isRunning)).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			30_000,
+		);
+
+		// Every unusable /proc routes to the same guarded installer: exercise the guard under one of them.
+		if (procfs !== "cannot be listed") continue;
+
+		// Any `uv` fallback `_bootstrap_pip` starts once ensurepip dies leaves its tree's pids too.
+		const uvFallback = `${JSON.stringify(SLEEP)} 30 &\necho "$$,$!" > uv-pids.tmp && mv uv-pids.tmp uv-pids\nwait`;
+		for (const [where, code] of [
+			["", "%pip install six"],
+			[
+				" started off the main thread",
+				// As a `%pip` inside a tool call runs: on another thread, which SIGINT never reaches.
+				[
+					"import contextvars, threading",
+					"worker = threading.Thread(target=contextvars.copy_context().run, args=(__omp_magic, 'pip', 'install six'))",
+					"worker.start()",
+					"worker.join()",
+				].join("\n"),
+			],
+			[
+				" with SIGTERM blocked",
+				"import signal\nsignal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})\n%pip install six",
+			],
+			[" with SIGTERM ignored", "import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n%pip install six"],
+		] as const) {
+			it.skipIf(process.platform !== "linux")(
+				`kernel shutdown during %pip${where} stops the installer tree when /proc ${procfs}`,
+				async () => {
+					using tempDir = TempDir.createSync("@python-runner-pip-shutdown-no-procfs-");
+					const { kernel } = await startPiplessKernel(tempDir.path(), {
+						ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+						sitecustomize: noProcfs,
+						uvScript: uvFallback,
+					});
+					try {
+						const pending = executePythonWithKernel(kernel, code);
+						const pids = await readPids(path.join(tempDir.path(), "installer-pids"));
+						await kernel.shutdown();
+						await pending;
+						const uvPids = path.join(tempDir.path(), "uv-pids");
+						if (await Bun.file(uvPids).exists()) pids.push(...(await readPids(uvPids)));
+						expect(await survivors(pids)).toEqual([]);
+					} finally {
+						await kernel.shutdown();
+					}
+				},
+				30_000,
+			);
+		}
+
+		it.skipIf(process.platform !== "linux")(
+			`a kernel killed during %pip takes the installer tree with it when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-killed-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+					sitecustomize: noProcfs,
+				});
+				try {
+					const kernelPid = Promise.withResolvers<number>();
+					let streamed = "";
+					const pending = executePythonWithKernel(
+						kernel,
+						'import os\nprint(f"kernel-pid:{os.getpid()}", flush=True)\n%pip install six',
+						{
+							onChunk: chunk => {
+								streamed += chunk;
+								const match = /kernel-pid:(\d+)/.exec(streamed);
+								if (match) kernelPid.resolve(Number(match[1]));
+							},
+						},
+					);
+					const pids = await readPids(path.join(tempDir.path(), "installer-pids"));
+					// Nothing in the kernel runs: no handler, no finally.
+					process.kill(await kernelPid.promise, "SIGKILL");
+					await pending;
+					expect(await survivors(pids)).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			30_000,
+		);
+
+		it.skipIf(process.platform !== "linux")(
+			`a cancel landing as the installer spawns stops its tree when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-spawn-cancel-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+					sitecustomize: noProcfs,
+				});
+				try {
+					// The SIGINT arrives just as the kernel's Popen returns, once the installer runs.
+					const result = await executePythonWithKernel(
+						kernel,
+						[
+							"import os, subprocess, time",
+							"_popen = subprocess.Popen",
+							"class _InterruptedPopen(_popen):",
+							"    def __init__(self, *args, **kwargs):",
+							"        subprocess.Popen = _popen",
+							"        super().__init__(*args, **kwargs)",
+							"        while not os.path.exists('installer-pids'):",
+							"            time.sleep(0.05)",
+							"        raise KeyboardInterrupt",
+							"subprocess.Popen = _InterruptedPopen",
+							"%pip install six",
+						].join("\n"),
+					);
+					expect(result.output).toContain("KeyboardInterrupt");
+					expect(await survivors(await readPids(path.join(tempDir.path(), "installer-pids")))).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			30_000,
+		);
+
+		it.skipIf(process.platform !== "linux")(
+			`kernel shutdown after %pip stops what the installer left running when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-leftover-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					// Leaves a helper running, its output redirected, and exits.
+					ensurepipMain: [
+						"import os, subprocess",
+						`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)`,
+						'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
+					].join("\n"),
+					sitecustomize: noProcfs,
+				});
+				try {
+					let streamed = "";
+					await executePythonWithKernel(kernel, "%pip install six", {
+						onChunk: chunk => {
+							streamed += chunk;
+						},
+					});
+					const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
+					expect(match).not.toBeNull();
+					await kernel.shutdown();
+					expect(await survivors([Number(match?.[1]), Number(match?.[2])])).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			30_000,
+		);
+	}
 
 	it.skipIf(process.platform === "win32")(
 		"cancelling %pip while uv installs pip stops uv and what it spawned",
@@ -479,6 +777,79 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			expect(kernel.isAlive()).toBe(true);
 			const alive = await executePythonWithKernel(kernel, "print('still here')");
 			expect(alive.output).toContain("still here");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("coordinates concurrent async tool calls through a kernel-global asyncio lock", async () => {
+		using tempDir = TempDir.createSync("@python-runner-tool-lock-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const defined = await executePythonWithKernel(
+				kernel,
+				[
+					"GATE = asyncio.Lock()",
+					"@tool",
+					"async def gated(n: int) -> int:",
+					"    async with GATE:",
+					"        await asyncio.sleep(0.2)",
+					"    return n",
+				].join("\n"),
+			);
+			expect(defined.exitCode).toBe(0);
+
+			// Subagents call tools in parallel. The call that waits on GATE must be
+			// woken when the holder releases it, not parked until its caller gives up.
+			const calls = await Promise.all(
+				[1, 2].map(n => kernel.invokeTool({ op: "call", name: "gated", args: { n } }, { timeoutMs: 2_000 })),
+			);
+			expect(calls.map(call => call.reply)).toEqual([
+				{ ok: true, value: 1 },
+				{ ok: true, value: 2 },
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("cancels an async tool call so it releases what it holds", async () => {
+		using tempDir = TempDir.createSync("@python-runner-tool-cancel-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const defined = await executePythonWithKernel(
+				kernel,
+				[
+					"import threading",
+					"GATE = asyncio.Lock()",
+					"HELD = threading.Event()",
+					"@tool",
+					"async def hold() -> str:",
+					"    async with GATE:",
+					"        HELD.set()",
+					"        await asyncio.sleep(30)",
+					"    return 'held'",
+					"@tool",
+					"def wait_held() -> bool:",
+					"    return HELD.wait(5)",
+					"@tool",
+					"async def gated(n: int) -> int:",
+					"    async with GATE:",
+					"        return n",
+				].join("\n"),
+			);
+			expect(defined.exitCode).toBe(0);
+
+			// An interrupted subagent abandons `hold`; its coroutine must not keep GATE for 30s.
+			const controller = new AbortController();
+			const held = kernel.invokeTool({ op: "call", name: "hold", args: {} }, { signal: controller.signal });
+			const holding = await kernel.invokeTool({ op: "call", name: "wait_held", args: {} });
+			expect(holding.reply).toEqual({ ok: true, value: true });
+			controller.abort();
+			expect((await held).cancelled).toBe(true);
+
+			const next = await kernel.invokeTool({ op: "call", name: "gated", args: { n: 7 } }, { timeoutMs: 2_000 });
+			expect(next.reply).toEqual({ ok: true, value: 7 });
 		} finally {
 			await kernel.shutdown();
 		}

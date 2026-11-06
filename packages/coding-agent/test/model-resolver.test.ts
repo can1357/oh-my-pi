@@ -22,6 +22,7 @@ import {
 	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
 	resolveModelFromSettings,
+	resolveExactModelIdentity,
 	resolveModelFromString,
 	resolveModelOverride,
 	resolveModelRoleValue,
@@ -834,6 +835,19 @@ describe("parseModelPattern", () => {
 				expect(result.model?.id).toBe("anthropic/claude-fable-5.1");
 			});
 		});
+
+		test("ids differing only by case on one provider each resolve their exact selector (#17580)", () => {
+			// A models.yml entry `MiMo-V2.6-Pro` beside the bundled `mimo-v2.6-pro`:
+			// the case-insensitive lookup sees two candidates, but an exact id is
+			// never ambiguous, so role assignments written by the hub must resolve.
+			const bundled = createOpusModel("xiaomi", "mimo-v2.6-pro", "MiMo-V2.6-Pro");
+			const custom = createOpusModel("xiaomi", "MiMo-V2.6-Pro", "MiMo V2.6 Pro");
+			const models = [bundled, custom];
+			expect(resolveModelRoleValue("xiaomi/MiMo-V2.6-Pro", models).model).toBe(custom);
+			expect(resolveModelRoleValue("xiaomi/mimo-v2.6-pro:high", models).model).toBe(bundled);
+			// A spelling matching neither id exactly stays ambiguous and fails closed.
+			expect(resolveModelRoleValue("xiaomi/MIMO-V2.6-PRO", models).model).toBeUndefined();
+		});
 	});
 
 	describe("edge cases", () => {
@@ -1456,6 +1470,19 @@ describe("resolveModelFromString", () => {
 });
 
 describe("resolveModelOverride", () => {
+	test("exactOnly keeps an @upstream pin on the resolved model", () => {
+		const registry = { getAvailable: () => allModels } as Parameters<typeof resolveModelOverride>[1];
+
+		const pinned = resolveModelOverride(["openrouter/z-ai/glm-4.7@cerebras:high"], registry, undefined, {
+			exactOnly: true,
+		});
+		const unpinned = resolveModelOverride(["openrouter/z-ai/glm-4.7"], registry, undefined, { exactOnly: true });
+
+		expect(pinned.model && formatModelStringWithRouting(pinned.model)).toBe("openrouter/z-ai/glm-4.7@cerebras");
+		expect(pinned.thinkingLevel).toBe(Effort.High);
+		expect(unpinned.model && formatModelStringWithRouting(unpinned.model)).toBe("openrouter/z-ai/glm-4.7");
+	});
+
 	test("preserves explicit off and explicit-thinking metadata", () => {
 		const registry = {
 			getAvailable: () => allModels,
@@ -1479,6 +1506,38 @@ describe("resolveModelOverride", () => {
 		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
 		expect(result.thinkingLevel).toBe(Effort.High);
 		expect(result.explicitThinkingLevel).toBe(true);
+	});
+});
+
+describe("resolveExactModelIdentity", () => {
+	const model = (id: string) =>
+		buildModel({
+			id,
+			name: id,
+			api: "anthropic-messages",
+			provider: "mock",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+		});
+
+	test("never treats a level-shaped suffix as thinking", () => {
+		const base = model("router");
+		const literal = model("router:low");
+		expect(resolveExactModelIdentity("mock/router", { getAvailable: () => [literal] })).toBeUndefined();
+		expect(resolveExactModelIdentity("mock/router:low", { getAvailable: () => [base] })).toBeUndefined();
+		expect(resolveExactModelIdentity("mock/router:low", { getAvailable: () => [base, literal] })).toBe(literal);
+	});
+
+	test("restores canonical aggregator routing exactly", () => {
+		const routed = resolveExactModelIdentity("openrouter/z-ai/glm-4.7@cerebras", { getAvailable: () => allModels });
+		expect(routed && formatModelStringWithRouting(routed)).toBe("openrouter/z-ai/glm-4.7@cerebras");
+		expect(
+			resolveExactModelIdentity("openrouter/z-ai/glm-4.7@cerebras:high", { getAvailable: () => allModels }),
+		).toBeUndefined();
 	});
 });
 describe("resolveCliModel", () => {

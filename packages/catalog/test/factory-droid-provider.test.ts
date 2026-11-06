@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setSystemTime } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -21,7 +21,7 @@ import {
 } from "../src/discovery/factory-droid";
 import { Effort } from "../src/effort";
 import { resolveProviderModels } from "../src/model-manager";
-import { getBundledModel } from "../src/models";
+import { getBundledModel, getFactoryDroidCreditRate } from "../src/models";
 import { resolveModelCacheProviderId } from "../src/provider-models/cache-provider-id";
 import { factoryDroidModelManagerOptions } from "../src/provider-models/special";
 import type { FetchImpl, ModelSpec } from "../src/types";
@@ -201,6 +201,64 @@ describe("Factory Droid model builder", () => {
 		expect(unknown.cost).toEqual(zeroCost);
 	});
 
+	describe("dated credit rates", () => {
+		const startsAt = Date.parse("2026-08-22T00:00:00Z");
+		const endsAt = Date.parse("2026-11-22T00:00:00Z");
+		const model = buildFactoryDroidModel(
+			syntheticModel({
+				creditRates: {
+					input: 2,
+					output: 5,
+					effectiveRates: [
+						{ effectiveFrom: startsAt, input: 1.6 },
+						{ effectiveFrom: endsAt, input: 2 },
+					],
+				},
+			}),
+		);
+
+		it("keeps the base rate on the model and applies the card due at each time", () => {
+			expect(model.factoryDroidCredits).toBe(2);
+			expect(getFactoryDroidCreditRate(model, startsAt - 1)).toEqual({ rate: 2, next: { rate: 1.6, at: startsAt } });
+			expect(getFactoryDroidCreditRate(model, startsAt)).toEqual({ rate: 1.6, next: { rate: 2, at: endsAt } });
+			expect(getFactoryDroidCreditRate(model, endsAt)).toEqual({ rate: 2 });
+		});
+
+		it("drops a discount cached while it was due once the next card takes over", async () => {
+			const entry = factoryDroidRegistry().find(model => model.policy.creditRates?.effectiveRates);
+			const rates = entry?.policy.creditRates;
+			const [discounted, restored] = rates?.effectiveRates ?? [];
+			if (!entry || !rates || !discounted || !restored) throw new Error("no registry model with dated credit rates");
+			const id = entry.spec.id;
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "factory-credit-cards-"));
+			const cacheDbPath = path.join(dir, "models.db");
+			const up = factoryEndpoints();
+			const down: FetchImpl = async () => new Response("down", { status: 503 });
+			const resolve = (fetch: FetchImpl, mode: "online" | "offline") =>
+				resolveProviderModels(
+					{ ...factoryDroidModelManagerOptions({ apiKey: "token", fetch }), cacheDbPath },
+					mode,
+				);
+			try {
+				setSystemTime(new Date(discounted.effectiveFrom));
+				const inside = (await resolve(up, "online")).models.find(model => model.id === id);
+				expect(inside && getFactoryDroidCreditRate(inside)?.rate).toBe(discounted.input);
+
+				setSystemTime(new Date(restored.effectiveFrom));
+				for (const [fetch, mode] of [
+					[down, "offline"],
+					[down, "online"],
+				] as const) {
+					const cached = (await resolve(fetch, mode)).models.find(model => model.id === id);
+					expect(cached && getFactoryDroidCreditRate(cached)?.rate).toBe(restored.input ?? rates.input);
+				}
+			} finally {
+				setSystemTime();
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		});
+	});
+
 	it("builds Haiku 5.5 with an Off rung and Anthropic's list price on the Standard pool", () => {
 		const model = buildFactoryDroidModel(registryModel("claude-haiku-5-5"));
 		expect(model.thinking).toMatchObject({
@@ -258,6 +316,10 @@ describe("Factory Droid route policy scoping", () => {
 			resolveModelPolicy(messages, { upstream: "bedrock_anthropic" }).catalog.serverSideFallbackModels,
 		).toBeUndefined();
 		expect(serverSideFallbackModels(buildModel(fable))).toEqual([]);
+		// The shared reader resolves the chain per upstream, memoized apart from the bare model.
+		expect(serverSideFallbackModels(messages, { upstream: "anthropic" })).toEqual(["claude-opus-5"]);
+		expect(serverSideFallbackModels(messages, { upstream: "bedrock_anthropic" })).toEqual([]);
+		expect(serverSideFallbackModels(messages)).toEqual([]);
 		// Direct Anthropic keeps its own thinking contract.
 		const direct = resolveModelPolicy({ ...messages, provider: "anthropic" }, { upstream: "snowflake" }).compat;
 		expect(direct?.stripThinkingHistory).toBeUndefined();
@@ -409,6 +471,20 @@ describe("Factory Droid discovery gates", () => {
 		expect(denied).toEqual(allowed.filter(id => !fastIds.includes(id)));
 	});
 
+	it("offers a refusal fallback only while the account can run the fallback model", async () => {
+		const open = await discover({ modelPolicy: { allowAllFactoryModels: true } });
+		const openIds = open?.map(model => model.id) ?? [];
+		const withFallback = open?.filter(model => model.factoryDroidRefusalFallbacks?.length) ?? [];
+		expect(withFallback.map(model => model.id)).toContain("claude-opus-5-5");
+		const fallbackIds = [...new Set(withFallback.flatMap(model => model.factoryDroidRefusalFallbacks ?? []))];
+		for (const id of fallbackIds) expect(openIds).toContain(id);
+
+		const blocked = await discover({ modelPolicy: { allowAllFactoryModels: true, blockedModelIds: fallbackIds } });
+		for (const { id } of withFallback) {
+			expect(blocked?.find(model => model.id === id)?.factoryDroidRefusalFallbacks).toEqual([]);
+		}
+	});
+
 	describe("image generation models", () => {
 		const imageIds = factoryDroidRegistry()
 			.filter(({ policy }) => policy.image)
@@ -501,6 +577,96 @@ describe("Factory Droid discovery gates", () => {
 		const ids = await discoverIds({ flags: { gpt_6_luna: false, deepseek_v4_1_flash: false } });
 		expect(ids).toContain("gpt-6-luna");
 		expect(ids).toContain("deepseek-v4.1-flash");
+	});
+
+	it("lists models whose flags droid 1.1.0 retired with those flags off", async () => {
+		const ids = await discoverIds({
+			flags: {
+				claude_opus_5_5_fast: false,
+				gpt_6_1_sol: false,
+				minimax_m3: false,
+				gpt_6_fast_modes: false,
+				muse_spark_1_2: false,
+			},
+		});
+		const retired = [
+			"claude-opus-5-5-fast",
+			"gpt-6.1-sol",
+			"minimax-m3",
+			"gpt-6-sol-fast",
+			"gpt-6-luna-fast",
+			"muse-spark-1.2",
+		];
+		for (const id of retired) expect(ids).toContain(id);
+	});
+
+	it("gates droid 1.1.0's new models on their live flags and Ultra Fast on the high-cost opt-in", async () => {
+		const gated = ["gpt-6.1-terra", "nemotron-3.5-super", "muse-spark-open", "beam-1.0", "gpt-6-astra-ultrafast"];
+		const ultraFast = ["gpt-6-astra-ultrafast", "gpt-6.1-sol-ultrafast"];
+		const flagsOff = await discoverIds({ flags: {}, modelPolicy: { allowAllFactoryModels: true } });
+		for (const id of gated) expect(flagsOff).not.toContain(id);
+		const unconsented = await discoverIds({
+			modelPolicy: { allowAllFactoryModels: true, requireExplicitOptInModelIds: ultraFast },
+		});
+		for (const id of gated.filter(id => !ultraFast.includes(id))) expect(unconsented).toContain(id);
+		for (const id of ultraFast) expect(unconsented).not.toContain(id);
+		const consented = await discoverIds({ modelPolicy: { allowAllFactoryModels: true } });
+		for (const id of [...gated, ...ultraFast]) expect(consented).toContain(id);
+	});
+
+	it("serves Muse Spark 1.3 from Vertex, Global only, behind its flag, on its own effort ladder", async () => {
+		const muse = registryModel("muse-spark-1.3");
+		expect(buildFactoryDroidModel(muse).thinking).toMatchObject({
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			requiresEffort: true,
+			defaultLevel: Effort.High,
+		});
+		const global = (await discover())?.find(model => model.id === "muse-spark-1.3");
+		expect(global?.factoryDroidApiProviders).toEqual(["google"]);
+		expect(global?.input).toEqual(["text"]);
+		expect(await discoverIds({ flags: {}, modelPolicy: { allowAllFactoryModels: true } })).not.toContain(
+			"muse-spark-1.3",
+		);
+		for (const inferenceRegion of ["us", "eu"] as const) {
+			const regional = await discover({}, { inferenceRegion });
+			expect(regional?.map(model => model.id)).not.toContain("muse-spark-1.3");
+		}
+	});
+
+	it("falls back to the registry upstream when family defaults name none of the model's upstreams", async () => {
+		const models = await discover({
+			routing: { defaults: { factory: ["baseten", "fireworks"] }, models: { "beam-1.0": ["fireworks"] } },
+		});
+		const muse = models?.find(model => model.id === "muse-spark-1.3");
+		expect(muse?.factoryDroidApiProviders).toEqual(["google"]);
+		expect(muse?.factoryDroidRoutingSource).toBeUndefined();
+		const nemotron = models?.find(model => model.id === "nemotron-3.5-super");
+		expect(nemotron?.factoryDroidApiProviders).toEqual(["baseten"]);
+		expect(nemotron?.factoryDroidRoutingSource).toBe("configured_order");
+		// A model route the registry cannot serve still hides the model.
+		expect(models?.find(model => model.id === "beam-1.0")).toBeUndefined();
+	});
+
+	it("falls back to the registry upstream when a family default is explicitly empty", async () => {
+		const models = await discover({
+			modelPolicy: { allowAllFactoryModels: true },
+			routing: { defaults: { factory: [] }, models: { "glm-5.3": [] } },
+		});
+		const kimi = models?.find(model => model.id === "kimi-k3");
+		expect(kimi?.factoryDroidApiProviders?.[0]).toBe("fireworks");
+		expect(kimi?.factoryDroidRoutingSource).toBeUndefined();
+		// An explicitly empty model route still disables the model.
+		expect(models?.find(model => model.id === "glm-5.3")).toBeUndefined();
+	});
+
+	it("falls back to the region's registry upstreams when the family default serves none of them", async () => {
+		const models = await discover(
+			{ modelPolicy: { allowAllFactoryModels: true }, routing: { defaults: { anthropic: ["anthropic"] } } },
+			{ region: "eu" },
+		);
+		const sonnet = models?.find(model => model.id === "claude-sonnet-5");
+		expect(sonnet?.factoryDroidApiProviders).toEqual(["vertex_anthropic", "bedrock_anthropic"]);
+		expect(sonnet?.factoryDroidRoutingSource).toBeUndefined();
 	});
 
 	it("keeps global overrides restrictive without removing the EU Mistral route", async () => {
