@@ -619,3 +619,58 @@ async fn round_seven_rows() {
 	])
 	.await;
 }
+
+/// Round-8 review rows, each the output and status of Bash 5.2.21 and 5.3.0
+/// for the same `-c` string. The `was_error_trap` sample is taken once, before
+/// the DEBUG trap that runs between it and the command, so a trap the DEBUG
+/// action installs does not arm the command it ran before; and `readonly` and
+/// `export` reject a subscripted name as no identifier instead of evaluating
+/// its subscript.
+#[tokio::test(flavor = "multi_thread")]
+async fn round_eight_rows() {
+	check(&[
+		// A DEBUG action that installs an ERR trap does not arm this command.
+		(
+			r##"trap 'trap '"'"'set -e; echo E:$?'"'"' ERR; trap - DEBUG' DEBUG; false; echo O:AFTER:$?"##,
+			"O:AFTER:1\n",
+			0,
+		),
+		(
+			r##"trap 'echo T:$?' EXIT; trap 'trap '"'"': ${review_missing?BOOM}'"'"' ERR; trap - DEBUG' DEBUG; false; echo O:AFTER:$?"##,
+			"O:AFTER:1\nT:0\n",
+			0,
+		),
+		(
+			r##"trap 'echo T:$?' EXIT; trap 'trap '"'"'declare -i I=bad!'"'"' ERR; trap - DEBUG' DEBUG; false; echo O:AFTER:$?"##,
+			"O:AFTER:1\nT:0\n",
+			0,
+		),
+		// A DEBUG trap that installs nothing still runs on every command.
+		(
+			r##"trap 'echo T:$?' EXIT; trap 'echo D' DEBUG; false; echo O:AFTER:$?"##,
+			"D\nD\nO:AFTER:1\nD\nT:0\n",
+			0,
+		),
+		// `readonly` and `export` reject a subscripted name without
+		// evaluating the subscript.
+		(r##"readonly "A[bad!]=3"; echo O:AFTER:$?"##, "O:AFTER:1\n", 0),
+		(r##"export "A[bad!]=3"; echo O:AFTER:$?"##, "O:AFTER:1\n", 0),
+		(r##"eval 'readonly "A[bad!]=3"'; echo O:AFTER:$?"##, "O:AFTER:1\n", 0),
+		(r##"eval 'export "A[bad!]=3"'; echo O:AFTER:$?"##, "O:AFTER:1\n", 0),
+		(r##"declare -a A; readonly "A[bad!]=3"; echo O:AFTER:$?"##, "O:AFTER:1\n", 0),
+		(r##"declare -i A; readonly "A[1/0]=3"; echo O:AFTER:$?"##, "O:AFTER:1\n", 0),
+		(r##"readonly "A[1/0]=3"; echo O:AFTER:$?"##, "O:AFTER:1\n", 0),
+		(
+			r##"trap 'readonly "A[bad!]=3"; echo O:AFTER:$?' EXIT; exit 7"##,
+			"O:AFTER:1\n",
+			7,
+		),
+		// A declaration builtin that does evaluate the subscript keeps the
+		// assignment jump.
+		(r##"declare "A[bad!]=3"; echo O:AFTER:$?"##, "", 1),
+		(r##"typeset "A[bad!]=3"; echo O:AFTER:$?"##, "", 1),
+		(r##"f(){ local "A[bad!]=3"; }; f; echo O:AFTER:$?"##, "", 1),
+		(r##"declare -i I=bad!; echo O:AFTER:$?"##, "", 1),
+	])
+	.await;
+}
