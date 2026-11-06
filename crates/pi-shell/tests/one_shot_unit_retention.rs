@@ -233,6 +233,43 @@ async fn a_function_defined_in_an_eval_keeps_its_parent_when_it_runs_again() {
 	);
 }
 
+/// The same, one level deeper and through a sourced file: a definition
+/// nested inside an `eval` inside an `eval`, and one inside an `eval` in a
+/// sourced file, each first called only after the whole replay window has
+/// passed. The body is announced then for the first time, and the source it
+/// names as its parent must still be there to be named.
+#[tokio::test]
+async fn a_definition_nested_in_a_retired_source_keeps_its_parent() {
+	let count = HISTORY_EVENTS / 4;
+	let script = format!(
+		"eval 'eval '\\''nested() {{ printf \"nested\\n\"; }}'\\'''; . ./def.sh; for \
+		 ((i=0;i<{count};i++)); do eval \"printf '%0512d' $i\" >/dev/null; done; nested; sourced; \
+		 echo {count}"
+	);
+	let trace = trace(
+		&script,
+		&[("def.sh", "eval 'sourced() { printf \"sourced\\n\"; }'\n")],
+		&format!("nested\nsourced\n{count}"),
+	)
+	.await;
+	let snapshot = trace.snapshot();
+	for label in ["nested", "sourced"] {
+		let event = snapshot
+			.history
+			.iter()
+			.rev()
+			.find(|event| matches!(&event.data, HistoryData::Output { text, .. } if text.starts_with(label.as_bytes())))
+			.expect("the deferred definition produced output");
+		let unit = &snapshot.units[event.u.expect("it resolves to a source") as usize];
+		assert!(
+			unit.syntax
+				.as_ref()
+				.is_some_and(|syntax| syntax.parent.is_some()),
+			"{label}'s body still names the source that defined it"
+		);
+	}
+}
+
 /// A row the presentation parsed ahead of the engine can be selected and
 /// expanded: it names no compiled unit, so the key/index boundary must leave
 /// its identity alone rather than read it as a source that has gone.

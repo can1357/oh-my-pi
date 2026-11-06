@@ -1416,10 +1416,20 @@ pub(super) fn retire_sources(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) {
 		.filter_map(|f| f.unit.as_ref().map(|u| u.id))
 		.chain(vp.command.as_ref().map(|(unit, _)| unit.id))
 		.collect();
+	// A source that is some other source's recorded origin is still the
+	// parent an announcement of that other source will name, which can
+	// happen the first time a function defined inside it is called. Its
+	// record is kept for the same reason, below.
+	let parents: std::collections::HashSet<crate::bash::ids::UnitId> = k
+		.trace_unit_origins
+		.get(&vp.vpid)
+		.into_iter()
+		.flat_map(|origins| origins.values().map(|origin| origin.span.unit))
+		.collect();
 	let retired: std::collections::HashSet<crate::bash::ids::UnitId> = announced
 		.iter()
 		.map(|(unit, _)| *unit)
-		.filter(|unit| !live.contains(unit))
+		.filter(|unit| !live.contains(unit) && !parents.contains(unit))
 		.collect();
 	if retired.is_empty() {
 		return;

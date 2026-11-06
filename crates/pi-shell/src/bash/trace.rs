@@ -493,6 +493,7 @@ impl EventSink for RunTrace {
 		EventMask::NONE
 			.with(EventKind::UnitCompiled)
 			.with(EventKind::UnitRetired)
+			.with(EventKind::Restored)
 			.with(EventKind::RunStart)
 			.with(EventKind::RunEnd)
 			.with(EventKind::CmdStart)
@@ -758,6 +759,14 @@ impl Inner {
 				if let Some(units) = self.by_id.get_mut(&ev.vpid) {
 					units.retain(|(_, id), _| *id != unit);
 				}
+			},
+			// A restored kernel remembers none of the announcements the
+			// previous one made, so it can never retire them; an observer
+			// that keeps them would pin every source the old kernel had
+			// announced for ever. A restored frame announces its source
+			// again when it executes, so forgetting them costs nothing.
+			EventData::Restored { .. } => {
+				self.by_id.clear();
 			},
 			EventData::Diag { code, message } => {
 				if self.diags.len() == DIAGS {
