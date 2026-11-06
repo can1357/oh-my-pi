@@ -40,7 +40,13 @@ import {
 } from "../ida";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
-import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
+import {
+	extractUriScheme,
+	InternalUrlRouter,
+	type SchemeSpec,
+	sessionCallerId,
+	sessionResolveContext,
+} from "../internal-urls";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -1888,7 +1894,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					: undefined,
 			},
 		);
-		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
+		// Located for this session: an extension scheme routes each session to its own handler.
+		const displayTarget = InternalUrlRouter.instance().locateSync(params.path, {
+			sessionId: sessionCallerId(this.session),
+		});
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
 		appendRepeatReadHint(this.session, params.path, result);
 		return result;
