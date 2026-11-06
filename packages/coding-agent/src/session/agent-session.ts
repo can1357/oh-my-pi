@@ -11088,9 +11088,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#todo.setPhases(phases);
 	}
 
-	/** Queue a todo write; see {@link TodoWrites.run}. */
+	/** Run a todo write, inline for native todos and queued with a backend; see {@link TodoWrites.run}. */
 	runTodoWrite<T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }): Promise<T> {
 		return this.#todoWrites.run(write, options);
+	}
+
+	/** Whether todo writes wait for an extension todo backend; see {@link TodoWrites.queued}. */
+	get todoWritesQueued(): boolean {
+		return this.#todoWrites.queued;
 	}
 
 	/** Arm todo backend resolution; see {@link TodoWrites.arm}. Call once, after {@link setDeferredExtensionLoader}. */
@@ -11823,6 +11828,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				} else {
 					await this.sessionManager.flush();
 				}
+				// A queued todo write settling during the awaits below must not land in the new file.
 				this.#todoWrites.invalidate();
 				await this.sessionManager.newSession({
 					...options,
@@ -11840,8 +11846,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 			this.#clearSessionScopedToolState();
 			this.#clearCheckpointRuntimeState();
-			this.#todoWrites.invalidate();
-			this.setTodoPhases([]);
+			// Writes enqueued during the transition's awaits were planned against the old list.
+			this.#todoWrites.clear();
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();

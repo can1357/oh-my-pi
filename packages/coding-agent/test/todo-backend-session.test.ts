@@ -90,6 +90,19 @@ describe("todo backends in a real session", () => {
 		});
 	}
 
+	test("native todos commit inline, without waiting for deferred extensions", async () => {
+		const deferred = await writeSource("deferred.ts", "export default function() {}\n");
+		const session = await createSessionWithDeferred(deferred, "native");
+		const list: TodoPhase[] = [{ name: "Work", tasks: [{ content: "a", status: "pending" }] }];
+
+		const committed = session.commitTodoPhases(list);
+
+		expect(session.getTodoPhases()).toEqual(list);
+		expect(session.hasPendingDeferredExtensions).toBe(true);
+		expect(await committed).toEqual(list);
+		expect(session.todoWritesQueued).toBe(false);
+	});
+
 	test("concurrent todo calls reach the backend one at a time, in call order, with `next` equal to the committed list", async () => {
 		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
@@ -570,9 +583,11 @@ export default function(pi) {
 			"The session changed before the todo edit was saved",
 		);
 
+		await flushTodoWrites(session);
 		expect(session.getTodoPhases()).toEqual([]);
 		expect(userTodoEdits(session)).toHaveLength(0);
-		expect(recorder.calls.some(call => call.method === "replace")).toBe(false);
+		// Only the reset reaches the backend: the stale edit never does.
+		expect(recorder.calls.filter(call => call.method === "replace").map(call => call.phases)).toEqual([[]]);
 	});
 
 	test("a commit whose replace settles while switchSession is swapping files never lands in the target session", async () => {

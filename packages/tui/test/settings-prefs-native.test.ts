@@ -26,6 +26,18 @@ const ENTRIES: SettingsDisplayEntry[] = [
 		ui: { tab: "appearance", group: "Theme", label: "Color-blind mode", description: "Blue additions" },
 	},
 	{
+		path: "todo.backend",
+		type: "string",
+		defaultValue: "native",
+		ui: {
+			tab: "appearance",
+			group: "Theme",
+			label: "Todo backend",
+			description: "Where todos live",
+			options: "runtime",
+		},
+	},
+	{
 		path: "display.risky",
 		type: "boolean",
 		defaultValue: false,
@@ -87,11 +99,12 @@ interface Harness {
 	previews: string[];
 }
 
-function harness(
-	initial: Record<string, unknown> = {},
-	themeOptions: RuntimeSettingOptionsProvider = () =>
-		["dark", "light", "titanium"].map(value => ({ value, label: value })),
-): Harness {
+const BACKENDS: RuntimeSettingOptionsProvider = () => [
+	{ value: "native", label: "Native" },
+	{ value: "ext", label: "Ext\x1b[31m Backend\x1b]0;title\x07", description: "line one\nline\x1b[2J two" },
+];
+
+function harness(initial: Record<string, unknown> = {}, backends: RuntimeSettingOptionsProvider = BACKENDS): Harness {
 	const values = new Map<string, unknown>();
 	for (const entry of ENTRIES) values.set(entry.path, entry.defaultValue);
 	for (const key in initial) values.set(key, initial[key]);
@@ -125,8 +138,10 @@ function harness(
 		{
 			settings,
 			plugins,
+			availableThinkingLevels: [],
 			thinkingLevel: undefined,
-			runtimeOptions: new Map([["theme.dark", themeOptions]]),
+			runtimeOptions: new Map([["todo.backend", backends]]),
+			availableThemes: ["dark", "light", "titanium"],
 			providers: [],
 		},
 		{
@@ -203,20 +218,26 @@ describe("settings as a native prefs page", () => {
 	});
 
 	it("selects runtime choices by value and strips control sequences from their labels and descriptions", () => {
-		const { selector } = harness({ "theme.dark": "evil" }, () => [
-			{ value: "dark", label: "dark" },
-			{ value: "evil", label: "Evil\x1b[31m red\x1b]0;title\x07", description: "line one\nline\x1b[2J two" },
-		]);
-		const control = row(prefs(selector).props, "theme.dark").control;
+		const { selector } = harness({ "todo.backend": "ext" });
+		const control = row(prefs(selector).props, "todo.backend").control;
 		if (control.k !== "choice") throw new Error(`expected a choice control, got ${control.k}`);
-		expect(control.value).toBe("evil");
-		const evil = control.options.find(option => option.value === "evil");
-		if (!evil) throw new Error("expected the evil option");
-		for (const text of [evil.label, evil.detail]) {
+		expect(control.value).toBe("ext");
+		const ext = control.options.find(option => option.value === "ext");
+		if (!ext) throw new Error("expected the ext option");
+		for (const text of [ext.label, ext.detail]) {
 			expect(text).toBeString();
 			expect(text).not.toMatch(/[\x00-\x1f\x7f]/);
 		}
-		expect(evil.detail).toBe("line one line two");
+		expect(ext.detail).toBe("line one line two");
+	});
+
+	it("shows a runtime row's label and opens its submenu on the stored value", () => {
+		const { selector, values, changes } = harness({ "todo.backend": "ext" });
+		send(selector, { type: "activate", key: "", item: "todo.backend" });
+		expect(prefs(selector).props.editing).toEqual({ row: "todo.backend", option: "ext" });
+		send(selector, { type: "change", key: "", item: "todo.backend", value: "native" });
+		expect(values.get("todo.backend")).toBe("native");
+		expect(changes.at(-1)).toEqual(["todo.backend", "native"]);
 	});
 
 	it("puts the status-line preview after its section on Appearance only", () => {

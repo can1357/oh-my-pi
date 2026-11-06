@@ -5,11 +5,7 @@ import { all } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { getSettingsForTab, SETTING_TABS, TAB_GROUPS } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
-import {
-	type RuntimeSettingOptionsProvider,
-	SettingsSelectorComponent,
-} from "@oh-my-pi/pi-tui/overlays/settings-selector";
-import { getComposerShapeOptions } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { initTheme, setTheme } from "@oh-my-pi/pi-tui/theme";
 import { cfgRetryUsageAwareFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
@@ -104,11 +100,9 @@ describe("settings layout", () => {
 		await setTheme("dark");
 		const selector = new SettingsSelectorComponent(
 			{
+				availableThinkingLevels: [],
 				thinkingLevel: undefined,
-				runtimeOptions: new Map<string, RuntimeSettingOptionsProvider>([
-					["theme.dark", () => ["dark", "light"].map(value => ({ value, label: value }))],
-					["composer.shape", () => getComposerShapeOptions()],
-				]),
+				availableThemes: ["dark", "light"],
 				providers: [],
 				settings: createSettingsHost(),
 				plugins: createPluginSettingsHost(process.cwd()),

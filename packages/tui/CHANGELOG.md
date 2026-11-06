@@ -11,7 +11,6 @@
 - Removed `formatMeta` from `render/render-utils`.
 - `TranscriptContainer.nativeBlocks()` and `Composer.describeSurface()` now require the frame's `DescribeContext`.
 - `GradientHighlightSpec.lightness` now maps gradient position to lightness like `hue` instead of taking a fixed percentage.
-- `SettingsSelectorComponent` gets runtime submenu choices from `runtimeOptions` (a map from setting path to a `RuntimeSettingOptionsProvider`) instead of the `availableThemes` and `availableThinkingLevels` context fields; a runtime setting with no provider shows its declared options ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Added
 
@@ -29,6 +28,7 @@
 - Frame-rate ceiling (`frame-rate`: `setMaxFps`, `minFrameIntervalMs`) for rendering and animations; frames awaited by a keystroke keep 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - `setMotionEffects` (`motion-effects`) turns off decorative motion: status-line blink, brand fade, magic-keyword sweep and native `fx` spans ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - `CompactTranscriptBlock` (`chrome/transcript-container`): consecutive blocks whose `isTranscriptBlockCompact()` is true render without blank rows between them, in terminal and native (TSP) surfaces ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
+- `SettingsRuntimeContext.runtimeOptions` supplies runtime submenu choices for settings without built-in ones; those rows show the chosen option's label ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Changed
 
@@ -38,7 +38,6 @@
 - Grep and AST Grep headers show the search scope after the pattern, errors show the tool title and pattern, and collapsed AST Grep drops `meta:` rows ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - AST Edit's header shows the search scope; the `proposed` state and replacement counts move to the card's bottom border ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Centered sheets and dialogs on narrow native terminals fill the pane only once their content reaches half the screen height.
-- Settings rows whose choices come from the running session show the chosen option's label instead of its stored value, so Composer Shape reads "Status Band (Default)" rather than `band` and Todo Backend shows the backend's label ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Fixed
 

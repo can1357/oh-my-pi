@@ -349,11 +349,14 @@ describe("todo writers reach the selected backend's replace", () => {
 		]);
 	});
 
-	it("resets and transcript reloads never call replace", async () => {
+	it("/new and a session switch send replace the list the session now holds", async () => {
 		const h = await createHarness();
 		await seedList(h);
 
 		await h.session.newSession();
+		await flushTodoWrites(h.session);
+		expect(h.session.getTodoPhases()).toEqual([]);
+		expect(h.recorder.calls).toEqual([{ backend: "recorder", method: "replace", phases: [] }]);
 
 		const target = SessionManager.create(h.dir, h.dir);
 		target.appendMessage({ role: "user", content: "resumed", timestamp: 1 });
@@ -367,9 +370,10 @@ describe("todo writers reach the selected backend's replace", () => {
 		if (!targetFile) throw new Error("Expected the target session to be on disk");
 
 		await h.session.switchSession(targetFile);
+		await flushTodoWrites(h.session);
 
 		expect(h.session.getTodoPhases()).toEqual(stored);
-		expect(h.recorder.calls).toEqual([]);
+		expect(h.recorder.calls.at(-1)).toEqual({ backend: "recorder", method: "replace", phases: stored });
 	});
 
 	it("an eval-bridged todo call reaches apply once and never replace, and does not undo a /todo edit queued behind it", async () => {
@@ -542,7 +546,11 @@ describe("interactive mode with a backend", () => {
 		await h.session.newSession();
 		await flushTodoWrites(h.session);
 
-		expect(h.recorder.calls.filter(call => call.method === "replace")).toHaveLength(1);
+		// The reconcile commit's replace, then the reset's.
+		expect(h.recorder.calls.filter(call => call.method === "replace").map(call => call.phases.length > 0)).toEqual([
+			true,
+			false,
+		]);
 		expect(h.session.getTodoPhases()).toEqual([]);
 		expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("The session changed"));
 	});

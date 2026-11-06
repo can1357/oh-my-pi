@@ -353,6 +353,7 @@ describe("RpcInputDispatcher", () => {
 			if (command.type === "abort") return { id: command.id, type: "response", command: "abort", success: true };
 			throw new Error(`unexpected command type: ${command.type}`);
 		});
+		deps.todoWritesQueued = () => true;
 		const dispatcher = new RpcInputDispatcher({ deps });
 
 		dispatcher.dispatch({ ...slow, id: "slow" });
@@ -365,6 +366,31 @@ describe("RpcInputDispatcher", () => {
 		accepted.resolve();
 		await flushMicrotasks();
 		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["abort", "slow"]);
+	});
+
+	test("a set_todos with native todos finishes before a later command starts", async () => {
+		const release = Promise.withResolvers<void>();
+		const started: string[] = [];
+		const { deps, outputs } = makeDeps(async command => {
+			started.push(command.type);
+			if (command.type === "set_todos") {
+				await release.promise;
+				return { id: command.id, type: "response", command: "set_todos", success: true, data: { todoPhases: [] } };
+			}
+			if (command.type === "abort") return { id: command.id, type: "response", command: "abort", success: true };
+			throw new Error(`unexpected command type: ${command.type}`);
+		});
+		deps.todoWritesQueued = () => false;
+		const dispatcher = new RpcInputDispatcher({ deps });
+
+		dispatcher.dispatch({ id: "todos", type: "set_todos", phases: [] });
+		dispatcher.dispatch({ id: "abort", type: "abort" });
+		await flushMicrotasks();
+		expect(started).toEqual(["set_todos"]);
+
+		release.resolve();
+		await flushMicrotasks();
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["todos", "abort"]);
 	});
 
 	test("a pending predict_word does not hold back later commands", async () => {

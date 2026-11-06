@@ -1,4 +1,5 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { Effort } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
 	Container,
@@ -42,8 +43,10 @@ import {
 import type { TspPrefsControl, TspPrefsProps } from "@oh-my-pi/pi-wire";
 import { prefsSectionId } from "../components/settings-list";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../thinking";
 import { getTabBarTheme } from "../chrome/shared";
 import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./composer-shape-preview";
+import { getComposerShapeOptions } from "./composer-shape-registry";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
 import { sanitizeDisplayLineField, sanitizeDisplaySingleLine } from "./extensions/display-text";
 import { PluginSettingsComponent, type PluginSettingsHost } from "./plugin-settings";
@@ -567,11 +570,15 @@ export type RuntimeSettingOptionsProvider = (def: SubmenuSettingDef) => readonly
 export interface SettingsRuntimeContext {
 	settings: SettingsHost;
 	plugins: PluginSettingsHost;
+	/** Available thinking levels (from session) */
+	availableThinkingLevels: Effort[];
 	/** Current thinking level (from session) */
 	thinkingLevel: ThinkingLevel | undefined;
+	/** Available themes */
+	availableThemes: string[];
 	/**
-	 * Runtime choices for submenu settings, keyed by setting path. A setting with
-	 * no entry shows its declared options.
+	 * Runtime choices for submenu settings without built-in ones, keyed by setting path.
+	 * A setting with no entry shows its declared options.
 	 */
 	runtimeOptions?: ReadonlyMap<string, RuntimeSettingOptionsProvider>;
 	/** Provider/source ids shown in /model. */
@@ -945,11 +952,13 @@ export class SettingsSelectorComponent implements Component {
 					detail: o.description,
 				}));
 				// Few short plain choices segment; described ones and live-previewed ones
-				// (hovering the menu previews, see #createSubmenu) keep the menu. The control
-				// selects by option value; `shown` is the row's label for runtime choices.
+				// (hovering the menu previews, see #createSubmenu) keep the menu. Runtime-choice
+				// rows select by option value; `shown` is their label.
 				return {
 					k: "choice",
-					value: this.#getSubmenuCurrentValue(def.path, value),
+					value: this.#context.runtimeOptions?.has(def.path)
+						? this.#getSubmenuCurrentValue(def.path, value)
+						: shown,
 					options,
 					style: PREVIEWED_SETTINGS.has(def.path) || options.some(o => o.detail) ? "menu" : "auto",
 					mono: options.every(o => o.label === o.value),
@@ -1571,14 +1580,20 @@ export class SettingsSelectorComponent implements Component {
 		return rawValue;
 	}
 
-	/**
-	 * A submenu's choices: the provider registered for its path, else the declared ones. Runtime
-	 * choices can come from extensions, so their labels and descriptions are sanitized like other
-	 * untrusted display text.
-	 */
-	#submenuOptions(def: SubmenuSettingDef): readonly SubmenuOption[] {
+	/** A submenu's choices: the built-in runtime ones, the provider's, or the declared ones. */
+	#submenuOptions(def: SettingDef & { type: "submenu" }): readonly SubmenuOption[] {
+		if (def.path === "defaultThinkingLevel") {
+			// Prepend `auto`; the rest are the model's runtime-supported efforts.
+			const levels: ConfiguredThinkingLevel[] = [AUTO_THINKING, ...this.#context.availableThinkingLevels];
+			return levels.map(level => def.options.find(o => o.value === level) ?? { value: level, label: level });
+		}
+		if (def.path === "theme.dark" || def.path === "theme.light") {
+			return this.#context.availableThemes.map(t => ({ value: t, label: t }));
+		}
+		if (def.path === "composer.shape") return getComposerShapeOptions();
 		const provider = this.#context.runtimeOptions?.get(def.path);
 		if (!provider) return def.options;
+		// Runtime choices can come from extensions, so sanitize them like other untrusted display text.
 		return provider(def).map(option => ({
 			...option,
 			label: sanitizeDisplaySingleLine(option.label),

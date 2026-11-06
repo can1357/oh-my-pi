@@ -44,27 +44,36 @@ export interface TodoWritesHost extends SettingsScope {
 	bindDeferredExtensions(): Promise<boolean>;
 }
 
+/** Whether `id` names an extension backend rather than native todos. */
+function isBackendId(id: string): boolean {
+	return id.trim() !== "" && id !== NATIVE_TODO_BACKEND_ID;
+}
+
 /**
  * Every write to a session's todo list, and the todo backend those writes reach.
  *
- * Writes run one at a time. Each receives the backend resolved when it starts (`undefined` = native
- * todos) and a guard that fails once the list was reset or reloaded. The backend resolves lazily
- * from `todo.backend` once {@link arm}ed, and again whenever the setting changes or the backend's
- * extension is suspended or resumed.
+ * With native todos a write runs inline, as a plain list update. Once a non-native backend is
+ * selected in the main session, writes run one at a time: each receives the backend resolved when
+ * it starts (`undefined` = native todos) and a guard that fails once the list was reset or
+ * reloaded. The backend resolves from `todo.backend` once {@link arm}ed and {@link resolveBackend}
+ * allowed it, and again whenever the setting changes or the backend's extension is suspended or
+ * resumed.
  */
 export class TodoWrites {
 	readonly #host: TodoWritesHost;
 	readonly #queue = new Serial();
 	/** Backend mirroring the list; `undefined` = native todos. */
 	#active: ActiveTodoBackend | undefined;
-	/** Latest `todo.backend` value a resolution was queued for. */
+	/** Latest `todo.backend` value observed. */
 	#requestedId: string | undefined;
-	/** Whether an enabled extension registered {@link #requestedId} when its resolution was queued. */
+	/** Whether an enabled extension registered {@link #requestedId} when it was observed. */
 	#requestedAvailable = false;
 	/** Set by {@link arm}; resolution stays dormant until then. */
 	#armed = false;
-	/** The queued first resolution; every write awaits it. Set once, by {@link resolveBackend}. */
-	#initial: Promise<void> | undefined;
+	/** Set by {@link resolveBackend}: startup-deferred extensions are bound, so ids can be resolved. */
+	#resolvable = false;
+	/** Queued writes and resolutions not yet settled. Native writes run inline only at zero. */
+	#pending = 0;
 	/** Bumped whenever the list is reset or reloaded; queued writes from an older epoch must not land. */
 	#epoch = 0;
 
@@ -73,11 +82,8 @@ export class TodoWrites {
 	}
 
 	/**
-	 * Enable backend resolution and watch `todo.backend`. Call once, after the deferred extension
-	 * loader is set. Resolution itself is lazy: it runs at the first prompt admission, after the
-	 * deferred-extension load, or at the first write, whichever comes first. All of them happen after
-	 * the mode subscribed its event listeners, so the fallback notice reaches the client. Sessions
-	 * without an extension runner never use a backend.
+	 * Watch `todo.backend`. Call once, after the deferred extension loader is set. Sessions without an
+	 * extension runner never use a backend.
 	 */
 	arm(): void {
 		const runner = this.#host.extensionRunner();
@@ -87,21 +93,37 @@ export class TodoWrites {
 		runner.onSuspensionChange(() => this.#observeSetting());
 	}
 
-	/** Queue the first backend resolution, once armed. Later calls do nothing. */
+	/**
+	 * Allow backend resolution once startup-deferred extensions are bound: at the first prompt
+	 * admission, after the deferred load, or at the first queued write. These all run after the mode
+	 * subscribed its event listeners, so a fallback notice reaches the client. Resolves `todo.backend`
+	 * now unless it is native.
+	 */
 	resolveBackend(): void {
-		if (!this.#armed || this.#initial) return;
-		this.#initial = this.#queueResolve(cfgTodoBackend.get(this.#host.settings), "resolution");
+		if (!this.#armed || this.#resolvable) return;
+		this.#resolvable = true;
+		this.#observeSetting();
 	}
 
 	/**
-	 * Queue a write. It starts after every earlier write and backend switch settled (a rejected one
-	 * does not block the next), waits for the first backend resolution, and receives the backend
-	 * resolved at that moment plus a guard whose `assertCurrent()` must run before committing.
+	 * Whether writes go through the queue: a non-native backend is selected in the main session or
+	 * still active, or queued work has not settled. Otherwise they run inline.
+	 */
+	get queued(): boolean {
+		if (this.#pending > 0 || this.#active) return true;
+		return this.#armed && this.#host.isMainAgent() && isBackendId(cfgTodoBackend.get(this.#host.settings));
+	}
+
+	/**
+	 * Run a write. While {@link queued} is false it runs now, with no backend.
 	 *
-	 * A write whose list was reset or reloaded (`/new`, switch, rewind, tree navigation, fork) since
-	 * this call rejects without starting. `options.signal` races the caller against the queue: the
-	 * returned promise rejects at once on abort, a not-yet-started write is skipped, and a started one
-	 * keeps the queue slot until it settles but fails `assertCurrent()` so it never commits.
+	 * Otherwise it is queued: it starts after every earlier write and backend switch settled (a
+	 * rejected one does not block the next) and after startup-deferred extensions bound, and receives
+	 * the backend resolved at that moment plus a guard whose `assertCurrent()` must run before
+	 * committing. A write whose list was reset or reloaded (`/new`, switch, rewind, tree navigation,
+	 * fork) since this call rejects without starting. `options.signal` races the caller against the
+	 * queue: the returned promise rejects at once on abort, a not-yet-started write is skipped, and a
+	 * started one keeps the queue slot until it settles but fails `assertCurrent()` so it never commits.
 	 */
 	run<T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }): Promise<T> {
 		const signal = options?.signal;
@@ -110,23 +132,31 @@ export class TodoWrites {
 			signal?.throwIfAborted();
 			if (this.#epoch !== epoch) throw new TodoListChangedError();
 		};
-		const queued = (async () => {
-			await this.#ready();
-			this.#observeSetting();
-			return this.#queue.run(() => {
+		if (!this.queued) {
+			return (async () => {
 				assertCurrent();
-				return write(this.#active, { assertCurrent });
-			});
-		})();
+				return write(undefined, { assertCurrent });
+			})();
+		}
+		const queued = this.#track(
+			(async () => {
+				await this.#ready();
+				this.#observeSetting();
+				return this.#queue.run(() => {
+					assertCurrent();
+					return write(this.#active, { assertCurrent });
+				});
+			})(),
+		);
 		return untilAborted(signal, queued);
 	}
 
 	/**
-	 * Replace the list from outside the `todo` tool, as a queued write. A function `update` receives
-	 * the committed list at that moment (returning `undefined` declines: nothing is sent or
-	 * committed); the backend's `replace` then receives a copy of the full list, the list updates and
-	 * a `user_todo_edit` entry is recorded so reloads keep it. A throwing `replace` rejects (naming
-	 * the backend) and commits nothing; so does a reset while queued. `mirrored` (eval bridge) only
+	 * Replace the list from outside the `todo` tool, as a write. A function `update` receives the
+	 * committed list at that moment (returning `undefined` declines: nothing is sent or committed);
+	 * the backend's `replace` then receives a copy of the full list, the list updates and a
+	 * `user_todo_edit` entry is recorded so reloads keep it. A throwing `replace` rejects (naming the
+	 * backend) and commits nothing; so does a reset while queued. `mirrored` (eval bridge) only
 	 * records the entry: the bridged `todo` call already updated the list and reached `apply`.
 	 * Resolves with the committed list.
 	 */
@@ -152,11 +182,12 @@ export class TodoWrites {
 	}
 
 	/**
-	 * Call after saving a `todo` tool result. The tool's write left the queue before the agent loop
+	 * Call after saving a `todo` tool result. A queued tool write left the queue before the agent loop
 	 * saved its result, so a commit that ran in between (a `/todo` edit) saved its entry first, and a
 	 * rebuild from the branch would restore the tool's older list. Record the live list again then.
 	 */
 	keepLiveListAfterToolResult(): void {
+		if (!this.queued) return;
 		const live = this.#host.todo.phases;
 		if (Bun.deepEquals(getLatestTodoPhasesFromEntries(this.#host.sessionManager.getBranchView()), live)) return;
 		this.#host.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: live });
@@ -171,40 +202,81 @@ export class TodoWrites {
 		this.#epoch++;
 	}
 
-	/** Reload the list for a different list identity (reset, switch, rewind, navigation, fork), invalidating queued writes. */
+	/** Empty the list for a new session, invalidating queued writes; a backend receives the empty list. */
+	clear(): void {
+		this.invalidate();
+		this.#host.todo.setPhases([]);
+		this.#replaceAfterReset();
+	}
+
+	/**
+	 * Reload the list for a different list identity (switch, rewind, navigation, fork from a message),
+	 * invalidating queued writes; a backend receives the reloaded list.
+	 */
 	reload(): void {
 		this.invalidate();
 		this.#host.todo.syncFromBranch();
+		this.#replaceAfterReset();
+	}
+
+	/**
+	 * Queue a `replace` with the list as of its queue slot, so the backend follows a reset or reload.
+	 * The list cannot be refused at that point, so a failure only warns.
+	 */
+	#replaceAfterReset(): void {
+		if (!this.queued) return;
+		const todo = this.#host.todo;
+		this.run(async active => {
+			if (!active) return;
+			try {
+				await active.replace(todo.clonePhases(todo.phases));
+			} catch (error) {
+				this.#host.emitNotice(
+					"warning",
+					`Todo backend "${active.label}" did not take the todo list after the session changed: ${todoBackendText(error)}`,
+					TODO_BACKEND_NOTICE_SOURCE,
+				);
+			}
+		}).catch((error: unknown) => {
+			// A later reset invalidated this one and queued its own replace.
+			if (!(error instanceof TodoListChangedError))
+				logger.warn("Todo backend sync after a reset failed", { error: String(error) });
+		});
 	}
 
 	async #ready(): Promise<void> {
 		if (!this.#armed) return;
 		if (!(await this.#host.bindDeferredExtensions())) return;
 		this.resolveBackend();
-		await this.#initial;
+	}
+
+	/** Count `work` in {@link #pending} until it settles. */
+	#track<T>(work: Promise<T>): Promise<T> {
+		this.#pending++;
+		const settle = (): void => {
+			this.#pending--;
+		};
+		work.then(settle, settle);
+		return work;
 	}
 
 	/**
-	 * Queue a re-resolution when `todo.backend` no longer matches the id last resolved, or its backend
-	 * appeared or disappeared since (its extension was suspended or resumed).
+	 * Queue a resolution when `todo.backend` no longer matches the id last observed, or its backend
+	 * appeared or disappeared since (its extension was suspended or resumed). Going from native to
+	 * native resolves nothing.
 	 */
 	#observeSetting(): void {
-		// Before the first resolution runs, it reads the setting itself.
-		if (!this.#initial || this.#host.isDisposed()) return;
+		if (!this.#resolvable || !this.#host.isMainAgent() || this.#host.isDisposed()) return;
 		const id = cfgTodoBackend.get(this.#host.settings);
-		if (id === this.#requestedId && this.#isAvailable(id) === this.#requestedAvailable) return;
-		void this.#queueResolve(id, "switch");
-	}
-
-	/** Record `id` as requested and queue its resolution; a failure is logged, never thrown. */
-	#queueResolve(id: string, what: "resolution" | "switch"): Promise<void> {
+		const available = this.#isAvailable(id);
+		if (id === this.#requestedId && available === this.#requestedAvailable) return;
+		const wasBackend = this.#requestedId !== undefined && isBackendId(this.#requestedId);
 		this.#requestedId = id;
-		this.#requestedAvailable = this.#isAvailable(id);
-		return this.#queue
-			.run(() => this.#resolve(id))
-			.catch((error: unknown) => {
-				logger.warn(`Todo backend ${what} failed`, { id, error: String(error) });
-			});
+		this.#requestedAvailable = available;
+		if (!isBackendId(id) && !wasBackend && !this.#active) return;
+		this.#track(this.#queue.run(() => this.#resolve(id))).catch((error: unknown) => {
+			logger.warn("Todo backend resolution failed", { id, error: String(error) });
+		});
 	}
 
 	#isAvailable(id: string): boolean {
@@ -218,8 +290,7 @@ export class TodoWrites {
 	async #resolve(id: string): Promise<void> {
 		this.#active = undefined;
 		const runner = this.#host.extensionRunner();
-		if (!runner || !this.#host.isMainAgent() || this.#host.isDisposed()) return;
-		if (id.trim() === "" || id === NATIVE_TODO_BACKEND_ID) return;
+		if (!runner || this.#host.isDisposed() || !isBackendId(id)) return;
 		const definition = runner.getTodoBackend(id);
 		if (!definition) {
 			this.#host.emitNotice(

@@ -129,7 +129,6 @@ import {
 	type RuntimeSettingOptionsProvider,
 	SettingsSelectorComponent,
 } from "@oh-my-pi/pi-tui/overlays/settings-selector";
-import { getComposerShapeOptions } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { ThinkingSelectorComponent } from "@oh-my-pi/pi-tui/overlays/thinking-selector";
@@ -326,14 +325,6 @@ export class SelectorController {
 		const menu = this.#claimMenu("settings");
 		getAvailableThemes()
 			.then(availableThemes => {
-				const themeOptions: RuntimeSettingOptionsProvider = () =>
-					availableThemes.map(name => ({ value: name, label: name }));
-				// `auto` first; the rest are the model's runtime-supported efforts. Labels come from the declared options.
-				const availableLevels = [...this.ctx.session.getAvailableThinkingLevels()];
-				const thinkingLevelOptions: RuntimeSettingOptionsProvider = def => {
-					const levels: ConfiguredThinkingLevel[] = [AUTO_THINKING, ...availableLevels];
-					return levels.map(level => def.options.find(o => o.value === level) ?? { value: level, label: level });
-				};
 				// `native` first, then backends of enabled extensions in registration order.
 				const todoBackendOptions: RuntimeSettingOptionsProvider = () => {
 					return [
@@ -356,12 +347,10 @@ export class SelectorController {
 				};
 				const selector = new SettingsSelectorComponent(
 					{
+						availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
 						thinkingLevel: this.ctx.session.thinkingLevel,
+						availableThemes,
 						runtimeOptions: new Map<string, RuntimeSettingOptionsProvider>([
-							["theme.dark", themeOptions],
-							["theme.light", themeOptions],
-							["composer.shape", () => getComposerShapeOptions()],
-							["defaultThinkingLevel", thinkingLevelOptions],
 							["todo.backend", todoBackendOptions],
 						]),
 						providers: [...new Set(this.ctx.session.getAvailableModels().map(model => model.provider))].sort(

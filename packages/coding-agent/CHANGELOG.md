@@ -51,7 +51,7 @@
 - "What's New" release notes now appear just after the first frame; quitting before it keeps them for the next start
 - Subagents can no longer broadcast (`write agent://all` fails, pointing to a direct `agent://<id>` message) and are no longer told to announce shared-file edits; the main agent can still broadcast
 - Factory Droid Gemini 4 Argon sessions keep earlier turns intact across save and reload, with correct image clamping ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
-- RPC `set_todos` waits for a selected todo backend, so its response can arrive after the responses to commands sent later; match it by `id` ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
+- With an extension todo backend selected, RPC `set_todos` waits for it, so its response can arrive after the responses to commands sent later; match it by `id`. With native todos it is unchanged ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Fixed
 
