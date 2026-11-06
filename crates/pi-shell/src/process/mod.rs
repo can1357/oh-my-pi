@@ -126,10 +126,10 @@ fn search_path(env: &[(BString, BString)]) -> BString {
 /// Read the script operand as bash's `open_shell_script` does (zsh's
 /// `setupshin` for the zsh dialect, [`read_zsh_script`]): a name without
 /// `/` that is not in the current directory is looked up in `PATH` (bash's
-/// default when unset); a directory or a binary file (a NUL on the first
-/// line of the first 80 bytes) is refused (126); a missing file is 127.
-/// Errors before the file opens are prefixed with the shell's name, later
-/// ones with the script's (`$0`). Returns the path opened and the text.
+/// default when unset); a directory or a binary file (ELF magic or a NUL
+/// on the first line of the first 128 bytes) is refused (126); a missing file
+/// is 127. Errors before the file opens are prefixed with the shell's name,
+/// later ones with the script's (`$0`). Returns the path opened and the text.
 ///
 /// # Errors
 ///
@@ -179,9 +179,7 @@ pub fn read_script(
 	file
 		.read_to_end(&mut text)
 		.map_err(|err| ScriptError::new(dollar0, &path, &strerror(&err), 126))?;
-	let head = &text[..text.len().min(80)];
-	let first_line = head.split(|&c| c == b'\n').next().unwrap_or(head);
-	if first_line.contains(&0) {
+	if crate::bash::vm::command::looks_binary(&text, args.mode.dialect() != Dialect::Zsh) {
 		return Err(ScriptError::new(dollar0, &path, "cannot execute binary file", 126));
 	}
 	Ok((path, text))

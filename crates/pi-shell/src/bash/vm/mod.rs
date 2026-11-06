@@ -10,7 +10,7 @@ mod api;
 pub(crate) mod arith;
 mod builtins;
 mod callstack;
-mod command;
+pub(crate) mod command;
 mod control;
 mod exec;
 mod expand;
@@ -60,7 +60,7 @@ use self::{
 	state::{Overlay, Root, Var},
 };
 use crate::bash::{
-	diag::{Diag, DiagSite, render},
+	diag::{Diag, DiagSite, Diagnostic, Producer, render},
 	engine::Engine,
 	error::ShellError,
 	event::{AssignScope, Event, EventData, EventMask, Origin, OriginChain, OriginLink},
@@ -872,8 +872,47 @@ impl Kernel {
 
 	/// Queue a diagnostic on the vproc's stderr and emit a `Diag` event.
 	pub fn diag(&mut self, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, diag: Diag) {
+		self.diag_from(cx, vp, line, Producer::ErrorProlog, diag);
+	}
+
+	/// Emit a message from a producer with an explicit prefix policy.
+	pub fn diag_from(
+		&mut self,
+		cx: &mut Cx<'_>,
+		vp: &mut Vproc,
+		line: u32,
+		producer: Producer<'_>,
+		diag: Diag,
+	) {
 		zle::display::trash_for_message(self, cx, vp);
-		let bytes = self.render_diag(cx, vp, line, &diag);
+		let bytes = self.render_produced(cx, vp, line, Diagnostic { message: &diag, producer });
+		self.diag_event(cx, vp, &diag);
+		vp.out
+			.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+	}
+
+	/// The parser supplies its input identity and current interactivity;
+	/// the invocation's interactivity is independent of those facts.
+	pub fn parser_diag(
+		&mut self,
+		cx: &mut Cx<'_>,
+		vp: &mut Vproc,
+		line: u32,
+		diag: Diag,
+		context_line: bool,
+	) {
+		if vp.mode.dialect() == crate::bash::Dialect::Zsh {
+			self.diag(cx, vp, line, diag);
+			return;
+		}
+		zle::display::trash_for_message(self, cx, vp);
+		let site = self.diag_site(cx, vp, line);
+		let input = exec::parser_input(vp, site);
+		let bytes = render(
+			Diagnostic { message: &diag, producer: Producer::ParserError { input, context_line } },
+			site,
+		);
+		self.diag_event(cx, vp, &diag);
 		vp.out
 			.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
 	}
@@ -881,7 +920,10 @@ impl Kernel {
 	/// The stderr bytes of a diagnostic; emits the `Diag` event. Builtins
 	/// queue the bytes with their own output to keep stdout/stderr order.
 	pub fn render_diag(&mut self, cx: &mut Cx<'_>, vp: &Vproc, line: u32, diag: &Diag) -> Vec<u8> {
-		let bytes = self.render_quiet(cx, vp, line, diag);
+		let bytes = self.render_produced(cx, vp, line, Diagnostic {
+			message:  diag,
+			producer: Producer::BuiltinError,
+		});
 		self.diag_event(cx, vp, diag);
 		bytes
 	}
@@ -890,6 +932,20 @@ impl Kernel {
 	/// spawned process prints for a redirection it applies itself
 	/// ([`crate::bash::ChildRedir`]).
 	pub fn render_quiet(&mut self, cx: &mut Cx<'_>, vp: &Vproc, line: u32, diag: &Diag) -> Vec<u8> {
+		self.render_produced(cx, vp, line, Diagnostic {
+			message:  diag,
+			producer: Producer::ErrorProlog,
+		})
+	}
+
+	fn render_produced(
+		&mut self,
+		cx: &mut Cx<'_>,
+		vp: &Vproc,
+		line: u32,
+		diagnostic: Diagnostic<'_>,
+	) -> Vec<u8> {
+		let diag = diagnostic.message;
 		if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 			let (mut prefix, mut zline) = self.zsh_site(cx, vp, line);
 			if self.zsh_shinstdin(cx, vp) {
@@ -903,16 +959,12 @@ impl Kernel {
 				utf8,
 			});
 		}
-		static COMMAND: Origin = Origin::Command;
-		let origin = vp
-			.runs
-			.front()
-			.and_then(|r| r.chain.links.first())
-			.map_or(&COMMAND, |l| &l.origin);
+		let site = self.diag_site(cx, vp, line);
+		render(diagnostic, site)
+	}
+
+	fn diag_site<'a>(&'a mut self, cx: &mut Cx<'_>, vp: &'a Vproc, line: u32) -> DiagSite<'a> {
 		let utf8 = locale::is_utf8(self, cx.store, vp);
-		// Keep the shell and source names separate: runtime errors use
-		// `get_name_for_error`, while parser errors retain the parsed file
-		// even in an interactive shell. The renderer selects by class.
 		let nested = vp
 			.overlay
 			.as_ref()
@@ -921,13 +973,12 @@ impl Kernel {
 			state::record(cx.store, vp, crate::bash::store::Key::Misc(MiscKey::Interactive)),
 			Ok(Some(Record::Misc(v))) if v.as_slice() == b"1"
 		);
-		let sourced = callstack::innermost_file(vp).map(|file| file.as_slice());
+		let sourced = callstack::innermost_file(vp, false).map(|file| file.as_slice());
 		let shell_name = match nested {
 			Some(Some(Record::Misc(name))) => name.as_slice(),
 			_ => self.argv0.as_slice(),
 		};
-		let site = DiagSite { shell_name, origin, line, utf8, sourced, interactive };
-		render(diag, site)
+		DiagSite { shell_name, line, utf8, sourced, interactive }
 	}
 
 	/// The `Diag` event of a diagnostic `vp` prints.

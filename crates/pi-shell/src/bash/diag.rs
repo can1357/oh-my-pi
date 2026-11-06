@@ -10,7 +10,7 @@ use std::{borrow::Cow, fmt, io};
 
 use bstr::BString;
 
-use crate::bash::{event::Origin, fd::BadFd};
+use crate::bash::fd::BadFd;
 
 /// A diagnostic, by catalog entry.
 #[derive(Debug, thiserror::Error, strum::EnumDiscriminants)]
@@ -536,79 +536,108 @@ pub fn strerror(err: &io::Error) -> Cow<'static, str> {
 	})
 }
 
+/// The Bash emitter whose policy controls a diagnostic, independently of
+/// its message. `error.c` and `builtins/common.c` use shell interactivity;
+/// `parser_error` uses the current parser input's interactivity instead.
+#[derive(Clone, Copy, Debug)]
+pub enum Producer<'a> {
+	/// `report_error` / `internal_error`: `error_prolog(1)`.
+	ErrorProlog,
+	/// `builtin_error` and the `sh_` helpers: `builtin_error_prolog`.
+	BuiltinError,
+	/// `sys_error`: `error_prolog(0)`.
+	SysError,
+	/// The expansion parser already supplied its command-substitution line.
+	CommandSubstitution,
+	/// `parser_error` / `report_syntax_error`, including an offending line.
+	ParserError { input: ParserInput<'a>, context_line: bool },
+}
+
+/// `yy_input_name()` and Bash's current `interactive`, not
+/// `interactive_shell`. Eval inherits its caller's parser interactivity;
+/// sourced files and trap actions run a noninteractive parser.
+#[derive(Clone, Copy, Debug)]
+pub struct ParserInput<'a> {
+	pub name:        &'a [u8],
+	pub interactive: bool,
+}
+
+/// A message paired with the producer that emitted it. Borrowing avoids
+/// copying a message or its parser input just to write stderr.
+#[derive(Clone, Copy, Debug)]
+pub struct Diagnostic<'a> {
+	pub message:  &'a Diag,
+	pub producer: Producer<'a>,
+}
+
 /// Where a diagnostic is printed from, for its prefix.
 #[derive(Clone, Copy, Debug)]
 pub struct DiagSite<'a> {
 	/// `$0` (bash uses it as the message prefix).
 	pub shell_name:  &'a [u8],
-	/// Origin of the running script.
-	pub origin:      &'a Origin,
 	/// Current line.
 	pub line:        u32,
-	/// Innermost sourced file, retained for syntax errors even in an
-	/// interactive shell. Its text is not the `-c` string.
+	/// Innermost sourced or function-definition file.
 	pub sourced:     Option<&'a [u8]>,
-	/// Runtime errors name an interactive shell without a line; syntax
-	/// errors in a sourced file retain that file's name and line.
+	/// Bash's `interactive_shell`: the invocation, not the current parser.
 	pub interactive: bool,
 	/// The locale is UTF-8 (which bytes print as they are in names).
 	pub utf8:        bool,
 }
 
-/// The full stderr line for `diag` printed at `site`, newline included.
-///
-/// Runtime errors print as `name: line N: msg`; syntax errors in a `-c`
-/// string print as `name: -c: line N: msg`, as bash 5.3 does.
-pub fn render(diag: &Diag, site: DiagSite<'_>) -> Vec<u8> {
+/// The full stderr bytes of a produced diagnostic, newline included.
+pub fn render(diagnostic: Diagnostic<'_>, site: DiagSite<'_>) -> Vec<u8> {
+	let Diagnostic { message: diag, producer } = diagnostic;
 	if let Diag::Several { diags } = diag {
-		return diags.iter().flat_map(|d| render(d, site)).collect();
+		return diags
+			.iter()
+			.flat_map(|message| render(Diagnostic { message, producer }, site))
+			.collect();
 	}
-	let syntax = matches!(diag, Diag::Syntax { .. } | Diag::SyntaxContext { .. });
-	let interactive = site.interactive && !(syntax && site.sourced.is_some());
-	let name = site
-		.sourced
-		.filter(|_| !interactive)
-		.unwrap_or(site.shell_name);
+	if matches!(producer, Producer::ParserError {
+		input:        ParserInput { interactive: true, .. },
+		context_line: true,
+	}) {
+		return Vec::new();
+	}
+	let name = get_name_for_error(site);
 	let mut out = Vec::with_capacity(64);
-	if site.interactive && !interactive {
-		out.extend_from_slice(site.shell_name);
-		out.extend_from_slice(b": ");
-	}
 	out.extend_from_slice(name);
-	if let Diag::ComsubSyntax { line, msg } = diag {
-		out.extend_from_slice(b": command substitution: line ");
-		out.extend_from_slice(line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
-		out.extend_from_slice(b": ");
-		out.extend_from_slice(msg);
-		out.push(b'\n');
-		return out;
-	}
-	if let Diag::Eval { diag } = diag {
-		out.extend_from_slice(b": eval: line ");
-		out.extend_from_slice(site.line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
-		out.extend_from_slice(b": ");
-		message(diag, site.utf8, &mut out);
-		out.push(b'\n');
-		return out;
-	}
-	if let Diag::BadInterpreter { .. } = diag {
-		// bash's `sys_error`: no line number.
-		out.extend_from_slice(b": ");
-		message(diag, site.utf8, &mut out);
-		out.push(b'\n');
-		return out;
-	}
-	if syntax && !interactive && site.sourced.is_none() && matches!(site.origin, Origin::Command) {
-		out.extend_from_slice(b": -c");
-	}
-	if !interactive {
-		out.extend_from_slice(b": line ");
-		out.extend_from_slice(site.line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
+	match producer {
+		Producer::ParserError { input, .. } => {
+			if !input.interactive {
+				if site.interactive || name != input.name {
+					out.extend_from_slice(b": ");
+					out.extend_from_slice(input.name);
+				}
+				line_prefix(&mut out, site.line);
+			}
+		},
+		Producer::ErrorProlog | Producer::BuiltinError => {
+			if !site.interactive {
+				line_prefix(&mut out, site.line);
+			}
+		},
+		Producer::SysError | Producer::CommandSubstitution => {},
 	}
 	out.extend_from_slice(b": ");
 	message(diag, site.utf8, &mut out);
 	out.push(b'\n');
 	out
+}
+
+/// Bash's shared `get_name_for_error`, used by all four emitters above.
+fn get_name_for_error(site: DiagSite<'_>) -> &[u8] {
+	if site.interactive {
+		site.shell_name
+	} else {
+		site.sourced.unwrap_or(site.shell_name)
+	}
+}
+
+fn line_prefix(out: &mut Vec<u8>, line: u32) {
+	out.extend_from_slice(b": line ");
+	out.extend_from_slice(line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
 }
 
 /// Where a zsh-dialect diagnostic is printed (zsh `zwarning`/`zerrmsg`).
@@ -771,6 +800,10 @@ fn message(diag: &Diag, utf8: bool, out: &mut Vec<u8>) {
 		},
 		Diag::NoClobber { path } => named(out, path, ": cannot overwrite existing file"),
 		Diag::AmbiguousRedirect { word } => named(out, word, ": ambiguous redirect"),
+		Diag::NoMatch { pattern } => {
+			out.extend_from_slice(b"no match: ");
+			out.extend_from_slice(pattern);
+		},
 		Diag::CannotExecute { name, err } => {
 			named(out, name, &format!(": cannot execute: {}", strerror(err)));
 		},
@@ -783,6 +816,13 @@ fn message(diag: &Diag, utf8: bool, out: &mut Vec<u8>) {
 			out.extend_from_slice(b": ");
 			out.extend_from_slice(interp);
 			write!(out, ": bad interpreter: {}", strerror(err)).expect("writing to a Vec cannot fail");
+		},
+		Diag::Eval { diag } => message(diag, utf8, out),
+		Diag::ComsubSyntax { line, msg } => {
+			out.extend_from_slice(b"command substitution: line ");
+			out.extend_from_slice(line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
+			out.extend_from_slice(b": ");
+			out.extend_from_slice(msg);
 		},
 		// A builtin reporting one of the above (`cd: PATH: …`).
 		Diag::Prefixed { cmd, diag } => {
@@ -811,6 +851,7 @@ mod tests {
 			Diag::RequiredFileMissing { name: BString::from("x") },
 			Diag::NoClobber { path: BString::from("x") },
 			Diag::AmbiguousRedirect { word: BString::from("x") },
+			Diag::NoMatch { pattern: BString::from("x*") },
 			Diag::CannotExecute { name: BString::from("x"), err: err() },
 			Diag::StartFailed { name: BString::from("x"), err: err() },
 			Diag::Refused { name: BString::from("x"), err: err() },
@@ -857,5 +898,74 @@ mod tests {
 		let mut out = Vec::new();
 		message(&Diag::CommandNotFound { name }, true, &mut out);
 		assert_eq!(out, b"$\'bad\\377\': command not found".to_vec());
+
+		let mut out = Vec::new();
+		message(&Diag::NoMatch { pattern: BString::from(b"x\xffy*".to_vec()) }, true, &mut out);
+		assert_eq!(out, b"no match: x\xffy*");
+	}
+
+	/// Parser interactivity belongs to the producer, not to a message variant
+	/// or a function's retained BASH_SOURCE entry.
+	#[test]
+	fn interactive_parser_omits_eval_and_context_for_its_own_input() {
+		let site = DiagSite {
+			shell_name:  b"bash",
+			line:        1,
+			sourced:     Some(b"./defs"),
+			interactive: true,
+			utf8:        true,
+		};
+		let syntax = Diag::Syntax { msg: BString::from("syntax error near unexpected token `)'") };
+		let context = Diag::SyntaxContext { text: BString::from(")") };
+		let parser = |message, name, interactive, context_line| {
+			render(
+				Diagnostic {
+					message,
+					producer: Producer::ParserError {
+						input: ParserInput { name, interactive },
+						context_line,
+					},
+				},
+				site,
+			)
+		};
+		assert_eq!(
+			parser(&syntax, b"eval", true, false),
+			b"bash: syntax error near unexpected token `)'\n"
+		);
+		assert!(parser(&context, b"eval", true, true).is_empty());
+		// Source and trap parsers keep their own input policy even though the
+		// invocation is interactive.
+		assert_eq!(
+			parser(&syntax, b"eval", false, false),
+			b"bash: eval: line 1: syntax error near unexpected token `)'\n"
+		);
+		assert_eq!(parser(&context, b"eval", false, true), b"bash: eval: line 1: `)'\n");
+		assert_eq!(
+			parser(&context, b"./source.sh", false, true),
+			b"bash: ./source.sh: line 1: `)'\n"
+		);
+		assert_eq!(
+			render(Diagnostic { message: &context, producer: Producer::ErrorProlog }, site),
+			b"bash: `)'\n"
+		);
+		let noninteractive = DiagSite { interactive: false, ..site };
+		assert_eq!(
+			render(
+				Diagnostic {
+					message:  &syntax,
+					producer: Producer::ParserError {
+						input:        ParserInput { name: b"./defs", interactive: false },
+						context_line: false,
+					},
+				},
+				noninteractive
+			),
+			b"./defs: line 1: syntax error near unexpected token `)'\n"
+		);
+		assert_eq!(
+			render(Diagnostic { message: &syntax, producer: Producer::SysError }, noninteractive),
+			b"./defs: syntax error near unexpected token `)'\n"
+		);
 	}
 }

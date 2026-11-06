@@ -56,7 +56,7 @@ pub mod store;
 pub mod term;
 mod text;
 pub mod trace;
-mod vm;
+pub(crate) mod vm;
 pub mod zshopt;
 
 pub mod pattern;

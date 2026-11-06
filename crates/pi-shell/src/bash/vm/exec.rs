@@ -23,7 +23,7 @@ use super::{
 	state::{self, Level, Root, Scope, Var, VarMap},
 };
 use crate::bash::{
-	diag::Diag,
+	diag::{Diag, DiagSite, ParserInput, Producer},
 	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey},
 	fd::FdRef,
 	host::{ResolveCtx, Resolved, Via},
@@ -59,6 +59,55 @@ pub enum Flow {
 	Exit(i32),
 	/// An expansion or arithmetic error: abandon the current top-level command.
 	Discard(i32),
+}
+
+/// The input passed to Bash's parser. Eval changes its input name but
+/// inherits `interactive`; file, trap and prompt-command entry points use
+/// noninteractive parsing (`FEVAL_NONINT` / `SEVAL_NONINT`).
+pub(super) fn parser_input<'a>(vp: &'a Vproc, site: DiagSite<'a>) -> ParserInput<'a> {
+	let mut name = None;
+	for frame in vp.frames.iter().rev() {
+		let FrameKind::Script { what, .. } = frame.kind else {
+			continue;
+		};
+		let (input_name, interactive) = match what {
+			ScriptKind::Eval => {
+				name.get_or_insert(&b"eval"[..]);
+				continue;
+			},
+			ScriptKind::Source => (
+				super::callstack::innermost_file(vp, true).map_or(site.shell_name, |f| f.as_slice()),
+				false,
+			),
+			ScriptKind::Trap { key, .. } => (
+				match key {
+					TrapKey::Exit => &b"exit trap"[..],
+					TrapKey::Err => &b"error trap"[..],
+					TrapKey::Debug => &b"debug trap"[..],
+					TrapKey::Return => &b"return trap"[..],
+					TrapKey::Signal(_) => &b"trap"[..],
+				},
+				false,
+			),
+			ScriptKind::Hook => (&b"PROMPT_COMMAND"[..], false),
+			ScriptKind::Code(kind) => (kind.context().as_bytes(), false),
+			ScriptKind::Run => {
+				let origin = vp
+					.runs
+					.front()
+					.and_then(|r| r.chain.links.first())
+					.map(|link| &link.origin);
+				let input_name = match origin {
+					Some(Origin::Command) => &b"-c"[..],
+					Some(Origin::File(path)) => path.as_slice(),
+					_ => site.shell_name,
+				};
+				(input_name, site.interactive)
+			},
+		};
+		return ParserInput { name: name.unwrap_or(input_name), interactive };
+	}
+	ParserInput { name: name.unwrap_or(site.shell_name), interactive: site.interactive }
 }
 
 /// Run vproc `vp` for up to `slice` ops; stops early when it parks, a
@@ -2082,6 +2131,12 @@ fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 
 /// The flow for an expansion error (the diagnostic is printed).
 pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, stop: Stop) -> Flow {
+	let producer = match &stop {
+		Stop::Fail(Diag::ComsubSyntax { .. }) | Stop::Fatal(Diag::ComsubSyntax { .. }) => {
+			Producer::CommandSubstitution
+		},
+		_ => Producer::ErrorProlog,
+	};
 	match stop {
 		Stop::Sub { .. } | Stop::ZshSub { .. } => unreachable!("handled by the caller"),
 		// An expansion that cannot park (a glob qualifier's) met a math
@@ -2102,11 +2157,11 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		// A non-interactive posix shell exits on an expansion error (bash's
 		// `posixly_correct && !interactive_shell`), as on a fatal one.
 		Stop::Fail(d) if !posix_exits(k, cx, vp) => {
-			k.diag(cx, vp, line, d);
+			k.diag_from(cx, vp, line, producer, d);
 			Flow::Discard(1)
 		},
 		Stop::Fail(d) | Stop::Fatal(d) => {
-			k.diag(cx, vp, line, d);
+			k.diag_from(cx, vp, line, producer, d);
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
 			// failure status); a nested shell (depth 0) is its own `-c` shell.
@@ -3087,7 +3142,11 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					d
 				}
 			};
-			k.diag(cx, vp, op.b, wrap(diag));
+			if op.flags & Op::SYNTAX != 0 {
+				k.parser_diag(cx, vp, op.b, wrap(diag), false);
+			} else {
+				k.diag(cx, vp, op.b, diag);
+			}
 			if op.flags & Op::CONTEXT != 0 {
 				// A recovered syntax error: the offending line follows.
 				let text = unit
@@ -3095,7 +3154,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					.get(op.a as usize + 1)
 					.cloned()
 					.unwrap_or_default();
-				k.diag(cx, vp, op.b, wrap(Diag::SyntaxContext { text }));
+				k.parser_diag(cx, vp, op.b, wrap(Diag::SyntaxContext { text }), true);
 			}
 			Flow::Next
 		},
@@ -3117,14 +3176,18 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					d
 				}
 			};
-			k.diag(cx, vp, op.node, wrap(diag));
+			if op.flags & Op::SYNTAX != 0 {
+				k.parser_diag(cx, vp, op.node, wrap(diag), false);
+			} else {
+				k.diag(cx, vp, op.node, wrap(diag));
+			}
 			if op.flags & Op::CONTEXT != 0 {
 				let text = unit
 					.strs
 					.get(op.a as usize + 1)
 					.cloned()
 					.unwrap_or_default();
-				k.diag(cx, vp, op.node, wrap(Diag::SyntaxContext { text }));
+				k.parser_diag(cx, vp, op.node, wrap(Diag::SyntaxContext { text }), true);
 			}
 			Flow::Abort(op.b as i32)
 		},

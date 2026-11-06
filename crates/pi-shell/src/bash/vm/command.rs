@@ -4700,10 +4700,11 @@ fn is_enoexec(err: &std::io::Error) -> bool {
 	err.raw_os_error() == Some(code)
 }
 
-/// bash `check_binary_file`: a NUL before the first newline in the first
-/// 80 bytes.
-fn looks_binary(text: &[u8], elf_magic: bool) -> bool {
-	let head = &text[..text.len().min(80)];
+/// bash `check_binary_file`: ELF magic or a NUL before the first newline.
+/// The 128-byte sample is measured against Bash 5.2.21 and 5.3.0, not
+/// read from bash's source.
+pub(crate) fn looks_binary(text: &[u8], elf_magic: bool) -> bool {
+	let head = &text[..text.len().min(128)];
 	// An ELF image is binary however it reads: bash checks its magic before
 	// looking for a NUL. zsh has no such rule.
 	if elf_magic && head.starts_with(b"\x7fELF") {
@@ -4914,6 +4915,7 @@ fn refused(
 	};
 	let enoent = err.kind() == ErrorKind::NotFound;
 	let mut status = if enoent { 127 } else { 126 };
+	let mut producer = crate::bash::diag::Producer::ErrorProlog;
 	let stat = match command_probe(k, cx, vp, &Probe::Stat { path: path.clone(), follow: true }) {
 		Err(key) => return Some(Flow::Block(key)),
 		Ok(ProbeResult::Stat(stat)) => stat,
@@ -4941,6 +4943,7 @@ fn refused(
 			};
 			if text.starts_with(b"#!") {
 				status = 126;
+				producer = crate::bash::diag::Producer::SysError;
 				Diag::BadInterpreter { name, interp: interpreter(&text), err }
 			} else if enoent {
 				Diag::RequiredFileMissing { name }
@@ -4949,7 +4952,7 @@ fn refused(
 			}
 		}
 	};
-	k.diag(cx, vp, line, diag);
+	k.diag_from(cx, vp, line, producer, diag);
 	let s = st(vp);
 	s.status = status;
 	s.stage = Stage::Output;
@@ -5127,8 +5130,8 @@ fn build_env(k: &Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Result<EnvView, StoreEr
 mod tests {
 	use super::looks_binary;
 
-	// bash `check_binary_file`: only a NUL on the first line (within 80
-	// bytes) makes a file binary.
+	// NUL sampling stops at the first newline and the measured byte boundary;
+	// the ELF magic check is bash-only.
 	#[test]
 	fn binary_check_looks_at_the_first_line_only() {
 		assert!(!looks_binary(b"(echo \"$1\")\n", true));
@@ -5139,5 +5142,12 @@ mod tests {
 		// has no ELF rule, runs it as text (its own `$'\177ELF'` report).
 		assert!(looks_binary(b"\x7fELF text\n", true));
 		assert!(!looks_binary(b"\x7fELF text\n", false));
+		assert!(!looks_binary(b"\x7fEL", true));
+		let mut text = [b' '; 129];
+		text[127] = 0;
+		assert!(looks_binary(&text, true));
+		text[127] = b' ';
+		text[128] = 0;
+		assert!(!looks_binary(&text, true));
 	}
 }
