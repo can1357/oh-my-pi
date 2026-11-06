@@ -244,8 +244,12 @@ impl ExtProc for CountedExt {
 		self.ext.pgid()
 	}
 
-	fn signal(&mut self, sig: Signal) -> io::Result<()> {
-		self.ext.signal(sig)
+	fn signal(&mut self, sig: Signal, scope: crate::bash::SignalScope) -> io::Result<()> {
+		self.ext.signal(sig, scope)
+	}
+
+	fn signal_number(&mut self, number: u8, scope: crate::bash::SignalScope) -> io::Result<()> {
+		self.ext.signal_number(number, scope)
 	}
 
 	fn stop(&mut self) -> io::Result<()> {

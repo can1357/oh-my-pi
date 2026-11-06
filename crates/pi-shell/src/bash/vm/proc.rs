@@ -15,42 +15,43 @@ use crate::bash::{
 	ids::{CallId, CmdTag, IntrinsicId, JobId, ModeId, NativeRef, RunId, ToolRef, Vpid},
 	ir::Unit,
 	mem::Capture,
-	signal::SigSet,
+	signal::{SigSet, Signal},
 	syntax::Pos,
 };
 
 /// A green thread: its scripts, frames, fds, cwd and state overlay.
 pub struct Vproc {
-	pub vpid:          Vpid,
-	pub parent:        Option<Vpid>,
+	pub vpid:         Vpid,
+	pub parent:       Option<Vpid>,
 	/// Scripts queued on this vproc (root only); the front one runs.
-	pub runs:          VecDeque<Run>,
+	pub runs:         VecDeque<Run>,
 	/// Activation stack.
-	pub frames:        Vec<Frame>,
+	pub frames:       Vec<Frame>,
 	/// Function-local scopes, innermost last.
-	pub scopes:        Vec<Scope>,
-	pub fds:           FdTable,
-	pub cwd:           BString,
+	pub scopes:       Vec<Scope>,
+	pub fds:          FdTable,
+	pub cwd:          BString,
 	/// `$?`.
-	pub status:        i32,
+	pub status:       i32,
 	/// `PIPESTATUS` of the last pipeline.
-	pub pipestatus:    Vec<i32>,
+	pub pipestatus:   Vec<i32>,
 	/// `None` for the root vproc (writes go to the root cache).
-	pub overlay:       Option<Overlay>,
+	pub overlay:      Option<Overlay>,
 	/// Diagnostics waiting to be written to their fds.
-	pub out:           VecDeque<PendingWrite>,
-	pub blocked:       Option<Blocked>,
-	/// Signal traps deferred until the foreground command completes.
-	pub pending_traps: SigSet,
+	pub out:          VecDeque<PendingWrite>,
+	pub blocked:      Option<Blocked>,
+	/// Bash's pending-trap queue of this shell: the deliveries waiting to
+	/// run and the scans running them.
+	pub traps:        PendingTraps,
 	/// Stopped by a virtual `STOP` (job control).
-	pub stopped:       bool,
+	pub stopped:      bool,
 	/// Exit once its frames are done (subshell vprocs).
-	pub transient:     bool,
+	pub transient:    bool,
 	/// Background jobs not yet waited for or reported, current/previous
 	/// job and the `SIGCHLD` trap runs owed.
-	pub jobs:          JobTable,
+	pub jobs:         JobTable,
 	/// `$!`: the last asynchronous child and the OS pid it is known by.
-	pub last_bg:       LastBg,
+	pub last_bg:      LastBg,
 	/// Cleared scratches kept for the next ops (allocation reuse), at most
 	/// one per nesting level a caller's op parks at (a function call keeps
 	/// its op's scratch while the body needs another); never serialized.
@@ -58,63 +59,63 @@ pub struct Vproc {
 		clippy::vec_box,
 		reason = "the boxes move between frames (`Frame::scratch`) and this pool without copying"
 	)]
-	pub spare:         Vec<Box<Scratch>>,
+	pub spare:        Vec<Box<Scratch>>,
 	/// `getopts` progress between calls.
-	pub getopts:       GetoptsState,
+	pub getopts:      GetoptsState,
 	/// Open process-substitution fds: `(frame depth, fd)`, the depth being
 	/// the frame count when the op that opened it ran.
-	pub procsubs:      Vec<(u32, i32)>,
+	pub procsubs:     Vec<(u32, i32)>,
 	/// Coprocesses not reaped yet.
-	pub coprocs:       Vec<Coproc>,
+	pub coprocs:      Vec<Coproc>,
 	/// `set -o` states saved by `local -` in functions that returned, to
 	/// restore before the next op.
-	pub restore_opts:  Vec<BString>,
+	pub restore_opts: Vec<BString>,
 	/// Limits `ulimit` set in this vproc or inherited from its parent;
 	/// passed to externals, never applied to the host process.
-	pub rlimits:       Vec<(crate::bash::host::Rlimit, Option<u64>, Option<u64>)>,
+	pub rlimits:      Vec<(crate::bash::host::Rlimit, Option<u64>, Option<u64>)>,
 	/// Host lineage, inherited from the parent (set by
 	/// [`super::ShellApi::run_subshell_in`]) and passed to externals.
-	pub lineage:       crate::bash::host::Lineage,
+	pub lineage:      crate::bash::host::Lineage,
 	/// `set -x` nesting this vproc starts at, beyond the first level (bash's
 	/// `indirection_level`): its parent's, plus one in a command
 	/// substitution.
-	pub trace_base:    u32,
+	pub trace_base:   u32,
 	/// `$BASH_SUBSHELL`: the subshell nesting (0 for the shell itself and a
 	/// nested shell). A field, not an overlay record: a record would cost
 	/// every subshell a ~530-byte map allocation (idle vproc ≤ 2 KiB).
-	pub subshell:      u32,
+	pub subshell:     u32,
 	/// The command being run (`BASH_COMMAND`): its unit and syntax node.
 	/// Externalized by unit id (a trap action continuing after a restore
 	/// still names the trapped command).
-	pub command:       Option<(Arc<Unit>, u32)>,
+	pub command:      Option<(Arc<Unit>, u32)>,
 	/// Pushes onto bash's call-stack arrays (`FUNCNAME`, `BASH_SOURCE`,
 	/// `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`), oldest first; a subshell
 	/// starts with its parent's.
-	pub calls:         Vec<super::callstack::Call>,
+	pub calls:        Vec<super::callstack::Call>,
 	/// The traps this vproc set itself: a subshell lists its parent's but
 	/// runs only its own (ERR, DEBUG and RETURN also under
 	/// `errtrace`/`functrace`; bash 5.3 keeps listing inherited signal
 	/// traps until the subshell changes one).
-	pub own_traps:     OwnTraps,
+	pub own_traps:    OwnTraps,
 	/// Trap-action frames ([`ScriptKind::Trap`]) on `frames`: zero lets
 	/// the per-op checks (cancellation, `BASH_COMMAND`, a trap inside its
 	/// own action) skip their frame scans. Kept by
 	/// [`super::exec::push_script`], [`super::exec::pop_frame`] and the
 	/// frame restore; never serialized (recounted from the frames).
-	pub trap_frames:   u32,
+	pub trap_frames:  u32,
 	/// Current mode: the emulation its code runs under, set by
 	/// `emulate`, a mode-switching function call (restored on return) and
 	/// a run's explicit mode; inherited by children. The root's is written
 	/// through as `MiscKey::Mode`. Every event reports it.
-	pub mode:          ModeId,
+	pub mode:         ModeId,
 	/// zsh state of a vproc running zsh or mode-switching code (`None` for
 	/// pure bash: nothing to keep, nothing to check).
-	pub zsh:           Option<Box<VprocZsh>>,
+	pub zsh:          Option<Box<VprocZsh>>,
 	/// The line editor's state ([`super::zle::Zle`]): keymaps, widgets,
 	/// kill ring and the line being edited; created when ZLE is first used.
 	/// Inherited (copied) by children; never serialized: a restored shell
 	/// starts with zsh's defaults and no line in progress.
-	pub zle:           Option<Box<super::zle::Zle>>,
+	pub zle:          Option<Box<super::zle::Zle>>,
 }
 
 /// The terminal of the session a vproc runs in when it is not the shell's
@@ -339,6 +340,115 @@ pub struct GetoptsState {
 	pub at:     Option<u32>,
 }
 
+/// Bash's pending-trap queue of one shell (`trap.c`).
+///
+/// `trap_handler` records the delivery in `pending_traps[sig]` and raises
+/// `catch_flag`; `run_pending_traps` is the only thing that runs actions.
+/// It returns at once while `catch_flag` is clear, clears it when it
+/// starts, then scans the signal numbers upwards once, running the action
+/// of each signal still queued when the scan reaches it. A delivery that
+/// arrives while an action runs raises `catch_flag` again and so starts a
+/// nested scan, which reads the same queue; a `return` out of an action
+/// jumps past the scan that started it, abandoning what it had not
+/// reached.
+///
+/// The whole queue is behind one pointer: a vproc that never receives a
+/// trapped signal keeps the same eight bytes the bare signal set took,
+/// and the per-op check is a null test.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PendingTraps(Option<Box<TrapQueue>>);
+
+/// The queue and its scans, allocated at a vproc's first delivery.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrapQueue {
+	/// bash `pending_traps[sig]`: the signals delivered and not yet run.
+	/// Only `SIGCHLD` keeps a count of its deliveries, in
+	/// [`JobTable::chld`], as bash's `run_sigchld_trap` counter.
+	pub queued:       SigSet,
+	/// bash `catch_flag`: a delivery that no scan has taken yet.
+	pub catch:        bool,
+	/// bash's `SIG_INPROGRESS` for `SIGCHLD`: its action is running, so a
+	/// nested scan leaves the signal queued instead of re-entering it.
+	pub chld_running: bool,
+	/// The activations of `run_pending_traps`, innermost last.
+	pub scans:        Vec<Scan>,
+}
+
+/// One activation of bash's `run_pending_traps`: its `for (sig = 1; sig <
+/// NSIG; sig++)` scan, suspended while the action it started runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scan {
+	/// The lowest signal number the scan has still to examine.
+	pub cursor:      u32,
+	/// `Vproc::frames.len()` when the scan started: the action it started
+	/// has ended once the stack is back to this depth, and the scan is
+	/// abandoned once the stack is below it (bash's `longjmp` out of
+	/// `run_pending_traps`, from a `return` in the action).
+	pub depth:       usize,
+	/// bash `running_trap - 1`: the signal whose action is running.
+	pub running:     Option<Signal>,
+	/// Runs of the `SIGCHLD` action this scan still owes (bash's
+	/// `run_sigchld_trap (nchild)` loop).
+	pub chld_left:   u32,
+	/// A captured text action and dialect. `None` uses zsh's function-trap
+	/// dispatch, whose surrounding trap script is empty.
+	pub chld_action: Option<(BString, ModeId)>,
+}
+
+impl PendingTraps {
+	/// bash `trap_handler`: record the delivery and raise `catch_flag`.
+	pub fn deliver(&mut self, sig: Signal) {
+		let q = self.get();
+		q.queued = q.queued.with(sig);
+		q.catch = true;
+	}
+
+	/// Nothing to take and no scan in progress (the common case, tested
+	/// once per op).
+	pub fn is_idle(&self) -> bool {
+		self
+			.0
+			.as_deref()
+			.is_none_or(|q| !q.catch && q.scans.is_empty())
+	}
+
+	/// The signals queued, for the frames image. The existing child count
+	/// includes an active batch's remainder: older readers need its bit
+	/// set too, or they never run those owed actions.
+	pub fn queued(&self, chld: u32) -> SigSet {
+		let queued = self.0.as_deref().map_or(SigSet::EMPTY, |q| q.queued);
+		if chld > 0 {
+			queued.with(Signal::Chld)
+		} else {
+			queued
+		}
+	}
+
+	/// Version-29 images save pending bits and a child-action count, not
+	/// the scan's cursor, catch flag or captured batch. Resume that debt
+	/// as unscanned deliveries rather than inventing a scan that can drop
+	/// an action. Only the active CHLD exclusion is known from its trap
+	/// frame; the original scan's nesting relationship is not recoverable.
+	pub fn restore_legacy(&mut self, queued: SigSet, chld: u32, chld_running: bool) {
+		let queued = if chld > 0 {
+			queued.with(Signal::Chld)
+		} else {
+			queued
+		};
+		if queued != SigSet::EMPTY || chld_running {
+			let q = self.get();
+			q.queued = queued;
+			q.catch = queued != SigSet::EMPTY;
+			q.chld_running = chld_running;
+		}
+	}
+
+	/// The queue, allocated on first use.
+	pub fn get(&mut self) -> &mut TrapQueue {
+		self.0.get_or_insert_with(Box::default)
+	}
+}
+
 /// The job table of one shell: bash's `jobs` array with `js.j_current` and
 /// `js.j_previous`. Called by the job builtins, `wait`, `kill`, the
 /// scheduler (state changes) and `$!`/`\j`. The root vproc's table is
@@ -353,8 +463,8 @@ pub struct JobTable {
 	pub current:  Option<u32>,
 	/// The previous job (`%-`), by number.
 	pub previous: Option<u32>,
-	/// `SIGCHLD` trap runs owed: bash runs the trap once per child that
-	/// finished while it was set, however many finished at once.
+	/// Unstarted `SIGCHLD` actions, including the running batch's remainder.
+	/// Decremented when each action starts, so a snapshot retains the debt.
 	pub chld:     u32,
 	/// A forked subshell (`( )`, `&`, a pipeline stage, `<( )`): bash runs
 	/// it without job control and with an empty job table. A command

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool's background functions that trap a signal: without job control `kill` no longer interrupts the command the job runs, so the trap runs and the job ends with its own status; pending traps run in signal order, and `kill -s EXIT` probes like `kill -0` ([#18108](https://github.com/can1357/oh-my-pi/pull/18108) by [@sjawhar](https://github.com/sjawhar))
+- Fixed signals sent to a pipeline's saved `$!` reaching no program, and job signals without job control reaching the program's descendants; session cancellation still reaches the whole group ([#18108](https://github.com/can1357/oh-my-pi/pull/18108) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's pending trap actions: a signal's action can run inside its own action as Bash allows, a `SIGCHLD` batch finishes with the action it captured, a `return` or `exit` out of an action drops the rest of the queue, a trap reset to the default while its signal waits takes that default (a stop disposition really parks the job), and restoring a snapshot keeps a running `SIGCHLD` action nonrecursive and runs pending signal actions instead of dropping a different signal that arrived during an action; snapshots resume pending work as unscanned deliveries, not exact scan replay ([#18171](https://github.com/can1357/oh-my-pi/pull/18171) by [@sjawhar](https://github.com/sjawhar))
+### Breaking Changes
+
+- Replaced visualization-only `parseShell()` with engine-owned `RunTrace.present()` and `ShellVisualization` APIs.
+- Custom `pi-shell` hosts must accept the explicit process/group scope in `ExtProc::signal` and `ExtProc::signal_number` ([#18108](https://github.com/can1357/oh-my-pi/pull/18108) by [@sjawhar](https://github.com/sjawhar))
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes

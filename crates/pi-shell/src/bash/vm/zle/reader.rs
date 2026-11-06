@@ -1110,7 +1110,7 @@ impl Reader {
 			Ok(Some(Record::Trap { .. }))
 		) || exec::function_exists(cx, vp, b"TRAPALRM");
 		if trapped {
-			vp.pending_traps = vp.pending_traps.with(crate::bash::signal::Signal::Alrm);
+			vp.traps.deliver(crate::bash::signal::Signal::Alrm);
 			let tmout = scalar(k, cx, vp, b"TMOUT").map_or(0, |v| params::parse_int(&v));
 			if let Ok(t) = u64::try_from(tmout)
 				&& t > 0

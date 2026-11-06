@@ -728,7 +728,7 @@ impl ExtProc for WinProc {
 		self.tracker.poll(cx)
 	}
 
-	fn signal(&mut self, sig: Signal) -> io::Result<()> {
+	fn signal(&mut self, sig: Signal, _scope: crate::bash::SignalScope) -> io::Result<()> {
 		match sig {
 			Signal::Kill => {
 				self.tracker.lock().signalled(Signal::Kill);
