@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Zig syntax highlighting, so fenced Zig code in markdown renders with colors ([#14964](https://github.com/can1357/oh-my-pi/issues/14964), [#18319](https://github.com/can1357/oh-my-pi/pull/18319) by [@hellopoisonx](https://github.com/hellopoisonx))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes
