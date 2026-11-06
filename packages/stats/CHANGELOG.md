@@ -8,6 +8,10 @@
 
 - Fixed the trace dashboard returning HTTP 431 for sessions with many subagents.
 
+### Changed
+
+- Heavy trace sessions reuse parsed transcripts and parse only appended tails, keep an LRU of recent traces, and look up span-drawer entries by index instead of rescanning the transcript. ([#18279](https://github.com/can1357/oh-my-pi/pull/18279) by [@aleister1102](https://github.com/aleister1102))
+
 ## [18.17.0] - 2026-11-06
 
 ### Fixed

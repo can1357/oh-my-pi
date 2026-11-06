@@ -496,11 +496,27 @@ function visitSessionEntriesLenient(bytes: Uint8Array, visit: (entry: SessionEnt
 	return read;
 }
 
+/** Entries parsed from a transcript buffer plus the bytes consumed through the last complete line. */
+export interface SessionEntriesTail {
+	entries: SessionEntry[];
+	/** Byte offset after the last complete parsed line; a partial trailing line is left for the next read. */
+	read: number;
+}
+
+/**
+ * Parse complete lines from `bytes` and report how much was consumed. Trace
+ * caching uses `read` as the resume offset so an appended partial line is
+ * re-read with its continuation instead of being dropped.
+ */
+export function parseSessionEntriesTail(bytes: Uint8Array): SessionEntriesTail {
+	const entries: SessionEntry[] = [];
+	const read = visitSessionEntriesLenient(bytes, entry => entries.push(entry));
+	return { entries, read };
+}
+
 /** Parse every well-formed entry in a transcript buffer (malformed lines skipped). */
 export function parseAllSessionEntries(bytes: Uint8Array): SessionEntry[] {
-	const entries: SessionEntry[] = [];
-	visitSessionEntriesLenient(bytes, entry => entries.push(entry));
-	return entries;
+	return parseSessionEntriesTail(bytes).entries;
 }
 
 /** Rebuild the cursor state of `bytes` (a transcript prefix): the last service tier and the Spotlight state. */
