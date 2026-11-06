@@ -97,6 +97,8 @@ export interface UsageRouteTarget {
 	provider: string;
 	modelId: string;
 	baseUrl?: string;
+	/** Discovered account identities for this model, when account access is scoped. */
+	accountIds?: readonly string[];
 }
 
 /** The routes belonging to a single role. */
