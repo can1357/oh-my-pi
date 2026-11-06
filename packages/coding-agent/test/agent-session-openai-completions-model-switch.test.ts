@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import { type Context, type FetchImpl, type Model, type ProviderSessionState, stream } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -161,4 +162,131 @@ describe("AgentSession openai-completions provider session eviction", () => {
 		expect(proCloseSpy).not.toHaveBeenCalled();
 		expect(session.providerSessionState.has(completionsSessionKey(deepseekPro))).toBe(true);
 	});
+	it.each([
+		["default Responses", "strict tools"],
+		["default Responses", "reasoning effort"],
+		["explicit chat fallback", "strict tools"],
+		["explicit chat fallback", "reasoning effort"],
+	] as const)(
+		"renegotiates %s %s after an OpenRouter upstream switch, but not an unchanged route",
+		async (transport, downgrade) => {
+			const base = modelRegistry.find("openrouter", "deepseek/deepseek-v4-flash-0731");
+			if (!base) throw new Error("Expected bundled OpenRouter model");
+			const source = parseModelPattern("openrouter/deepseek/deepseek-v4-flash-0731@deepseek", [base]).model;
+			const target = parseModelPattern("openrouter/deepseek/deepseek-v4-flash-0731@fireworks", [base]).model;
+			if (!source || !target) throw new Error("Expected routed OpenRouter models");
+			expect(source.api).toBe("openrouter");
+			session = buildSession(source);
+			const context: Context = {
+				messages: [{ role: "user", content: "Hello", timestamp: 0 }],
+				tools: [
+					{
+						name: "echo",
+						description: "Echo text",
+						parameters: {
+							type: "object",
+							properties: { text: { type: "string" } },
+							required: ["text"],
+							additionalProperties: false,
+						},
+					},
+				],
+			};
+			const bodies: Array<{
+				tools: Array<{ strict?: boolean; function?: { strict?: boolean } }>;
+				reasoning?: { effort?: string };
+				provider?: { only?: string[] };
+			}> = [];
+			const fetchMock: FetchImpl = Object.assign(
+				async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+					expect(String(input)).toEndWith(transport === "default Responses" ? "/responses" : "/chat/completions");
+					bodies.push(JSON.parse(String(init?.body)));
+					if (bodies.length === 1) {
+						const message =
+							downgrade === "strict tools"
+								? "Invalid tool parameters schema : field `anyOf`: missing field `type`"
+								: 'reasoning.effort: Invalid option: expected one of "low"';
+						return new Response(JSON.stringify({ error: { message, type: "invalid_request_error" } }), {
+							status: 400,
+							headers: { "content-type": "application/json" },
+						});
+					}
+					if (transport === "default Responses") {
+						const item = {
+							type: "message",
+							id: "msg_route_switch",
+							role: "assistant",
+							content: [{ type: "output_text", text: "OK" }],
+						};
+						const events = [
+							{ type: "response.output_item.added", output_index: 0, item: { ...item, content: [] } },
+							{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+							{ type: "response.output_text.delta", delta: "OK" },
+							{ type: "response.output_item.done", output_index: 0, item },
+							{
+								type: "response.completed",
+								response: {
+									id: "resp_route_switch",
+									status: "completed",
+									output: [item],
+									usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+								},
+							},
+						];
+						return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+							headers: { "content-type": "text/event-stream" },
+						});
+					}
+					return new Response(
+						`data: ${JSON.stringify({
+							id: "chatcmpl-route-switch",
+							object: "chat.completion.chunk",
+							created: 0,
+							model: base.id,
+							choices: [{ index: 0, delta: { content: "OK" }, finish_reason: "stop" }],
+						})}\n\ndata: [DONE]\n\n`,
+						{ headers: { "content-type": "text/event-stream" } },
+					);
+				},
+				{ preconnect: fetch.preconnect },
+			);
+			const request = async () => {
+				const result = await stream(session.model!, context, {
+					apiKey: "test-key",
+					reasoning: "high",
+					providerSessionState: session.providerSessionState,
+					fetch: fetchMock,
+				}).result();
+				expect(result.stopReason).toBe("stop");
+			};
+			const advertised = (body: (typeof bodies)[number]) =>
+				downgrade === "strict tools"
+					? (transport === "default Responses" ? body.tools[0].strict : body.tools[0].function?.strict) === true
+					: body.reasoning?.effort;
+			const original = downgrade === "strict tools" ? true : "high";
+			const fallback = downgrade === "strict tools" ? false : "low";
+			const previous = Bun.env.PI_OPENROUTER_RESPONSES;
+			if (transport === "default Responses") delete Bun.env.PI_OPENROUTER_RESPONSES;
+			else Bun.env.PI_OPENROUTER_RESPONSES = "0";
+			try {
+				await request();
+				expect(bodies.map(advertised)).toEqual([original, fallback]);
+				await session.setModel(source);
+				await request();
+				expect(bodies.map(advertised)).toEqual([original, fallback, fallback]);
+				await session.setModel(target);
+				await request();
+				expect(bodies.map(body => body.provider?.only)).toEqual([
+					["deepseek"],
+					["deepseek"],
+					["deepseek"],
+					["fireworks"],
+				]);
+				expect(bodies.map(advertised)).toEqual([original, fallback, fallback, original]);
+			} finally {
+				if (previous === undefined) delete Bun.env.PI_OPENROUTER_RESPONSES;
+				else Bun.env.PI_OPENROUTER_RESPONSES = previous;
+			}
+		},
+	);
 });

@@ -1,16 +1,20 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { resolveDelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
+import { resolveEditMode } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
@@ -181,19 +185,20 @@ describe("AgentSession model-change prompt refresh", () => {
 	function newSession(
 		model: Model,
 		settings: Settings,
-		rebuild: () => Promise<{ systemPrompt: string[] }>,
+		rebuild: (toolNames: string[]) => Promise<{ systemPrompt: string[] }>,
+		tools: AgentTool[] = [],
 	): AgentSession {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["initial"], tools: [], messages: [] },
+			initialState: { model, systemPrompt: ["initial"], tools, messages: [] },
 		});
 		const created = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			toolRegistry: new Map(),
-			rebuildSystemPrompt: async () => rebuild(),
+			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+			rebuildSystemPrompt: async toolNames => rebuild(toolNames),
 		});
 		return created;
 	}
@@ -257,5 +262,94 @@ describe("AgentSession model-change prompt refresh", () => {
 		await session.setModel(modelB);
 		expect(rebuildCount).toBe(1);
 		expect(session.agent.state.systemPrompt).toEqual(["policy changed"]);
+	});
+
+	it("converges hidden-model edit instructions after a durable selection loses live ownership during reconciliation", async () => {
+		const base = modelRegistry.getAll().find(model => model.provider === "anthropic");
+		if (!base) throw new Error("Expected an Anthropic model in the registry");
+		const source = { ...base, id: `${base.id}-source` };
+		const durable = {
+			...base,
+			id: `${base.id}-durable`,
+			reasoning: true,
+			thinking: { mode: "effort" as const, efforts: [Effort.Low, Effort.Medium, Effort.High] },
+		};
+		const temporary = {
+			...durable,
+			id: `${base.id}-temporary`,
+			thinking: { mode: "effort" as const, efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max] },
+		};
+		expect(resolveDelegationBias(source)).toBe(resolveDelegationBias(durable));
+		expect(resolveDelegationBias(durable)).toBe(resolveDelegationBias(temporary));
+		authStorage.keys.setRuntime(base.provider, "test-key");
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			includeModelInPrompt: false,
+			inlineToolDescriptors: "off",
+			"edit.modelVariants": { [source.id]: "patch", [durable.id]: "hashline", [temporary.id]: "hashline" },
+		});
+		const edit: AgentTool = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit a file",
+			parameters: type({}),
+			async execute() {
+				throw new Error("This regression does not execute edits");
+			},
+		};
+		session = newSession(
+			source,
+			settings,
+			async toolNames => ({
+				systemPrompt: [
+					JSON.stringify({
+						editProtocol: toolNames.includes("edit")
+							? resolveEditMode({
+									settings,
+									getActiveModelString: () => `${session!.model!.provider}/${session!.model!.id}`,
+								})
+							: null,
+					}),
+				],
+			}),
+			[edit],
+		);
+		await session.refreshBaseSystemPrompt();
+		expect(session.agent.state.systemPrompt).toEqual([JSON.stringify({ editProtocol: "patch" })]);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const reconcile = SessionTools.prototype.reconcileThinkTool;
+		let held = false;
+		const reconciliation = vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (
+			this: SessionTools,
+			...args
+		) {
+			if (!held && session?.model?.id === durable.id) {
+				held = true;
+				entered.resolve();
+				await release.promise;
+			}
+			return reconcile.apply(this, args);
+		});
+		const pending = session.setModel(durable, "default", { persist: true, thinkingLevel: Effort.Low });
+		let result: { switched: boolean } | undefined;
+		try {
+			await entered.promise;
+			await session.setModelTemporary(temporary, Effort.Max, { ephemeral: true });
+			// The newer selection sees hashline → hashline, so only the older continuation can repair this prompt.
+			expect(session.agent.state.systemPrompt).toEqual([JSON.stringify({ editProtocol: "patch" })]);
+		} finally {
+			release.resolve();
+			try {
+				result = await pending;
+			} finally {
+				reconciliation.mockRestore();
+			}
+		}
+		expect(session.model?.id).toBe(temporary.id);
+		expect(session.agent.state.systemPrompt).toEqual([JSON.stringify({ editProtocol: "hashline" })]);
+		expect(session.configuredThinkingLevel()).toBe(Effort.Max);
+		expect(session.thinkingLevel).toBe(Effort.Max);
+		expect(result).toEqual({ switched: false });
 	});
 });

@@ -431,7 +431,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					);
 				}
 				try {
-					await runtime.session.setModel(match);
+					const { switched } = await runtime.session.setModel(match);
+					if (!switched) return commandConsumed();
 					if (resolved.thinkingLevel !== undefined) runtime.session.setThinkingLevel(resolved.thinkingLevel);
 					await runtime.output(`Model set to ${match.provider}/${match.id}.`);
 					await runtime.notifyTitleChanged?.();
@@ -479,7 +480,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			const resolved = resolveSessionModelSelector(selector, runtime.session, runtime.settings);
 			if (!resolved.model) return usage(`Unknown model: ${selector}`, runtime);
 			try {
-				await runtime.session.setModelTemporary(resolved.model, resolved.thinkingLevel);
+				if (!(await runtime.session.setModelTemporary(resolved.model, resolved.thinkingLevel))) {
+					return commandConsumed();
+				}
 				await runtime.output(`Session-only model: ${formatModelString(resolved.model)}.`);
 				await runtime.notifyTitleChanged?.();
 				await runtime.notifyConfigChanged?.();

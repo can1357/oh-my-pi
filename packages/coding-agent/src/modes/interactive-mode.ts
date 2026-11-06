@@ -6815,7 +6815,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #applyPlanExecutionModel(entry: ResolvedRoleModel | undefined): Promise<void> {
 		if (!entry) return;
 		try {
-			await this.session.applyRoleModel(entry);
+			if (!(await this.session.applyRoleModel(entry))) return;
 			this.statusLine.invalidate();
 			this.updateEditorBorderColor();
 			this.showStatus(`Continuing with ${entry.role}: ${entry.model.name || entry.model.id}`);

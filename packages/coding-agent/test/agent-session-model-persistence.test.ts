@@ -1,22 +1,34 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { setImmediate } from "node:timers/promises";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, type Context, Effort, type ImageContent, type Model } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgModelRoleStorage } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import { createSetupHost } from "@oh-my-pi/pi-coding-agent/modes/setup";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionMemory } from "@oh-my-pi/pi-coding-agent/session/session-memory";
+import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
+import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { AUTO_THINKING, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 describe("AgentSession model persistence", () => {
 	let tempDir: TempDir;
@@ -34,6 +46,7 @@ describe("AgentSession model persistence", () => {
 		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
 		sharedAuthStorage.keys.setRuntime("anthropic", "test-key");
 		sharedAuthStorage.keys.setRuntime("zai", "test-key");
+		sharedAuthStorage.keys.setRuntime("openrouter", "test-key");
 		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
 	});
 
@@ -102,6 +115,8 @@ describe("AgentSession model persistence", () => {
 		selectInitialModel?: (availableModels: Model<Api>[]) => Model<Api>;
 		modelRoles?: Record<string, string>;
 		persist?: boolean;
+		scopedModels?: Array<{ model: Model<Api>; thinkingLevel?: Effort }>;
+		settings?: Settings;
 	}): Promise<{ modelRegistry: ModelRegistry; settings: Settings; session: AgentSession }> {
 		const modelRegistry = sharedModelRegistry;
 		const model =
@@ -118,7 +133,7 @@ describe("AgentSession model persistence", () => {
 			},
 		});
 
-		sessionSettings = Settings.isolated();
+		sessionSettings = options?.settings ?? Settings.isolated();
 		const modelRoles = options?.modelRoles;
 		if (modelRoles) {
 			for (const role in modelRoles) {
@@ -135,6 +150,7 @@ describe("AgentSession model persistence", () => {
 				: SessionManager.inMemory(),
 			settings: sessionSettings,
 			modelRegistry,
+			scopedModels: options?.scopedModels,
 		});
 
 		return { modelRegistry, settings: sessionSettings, session };
@@ -143,13 +159,14 @@ describe("AgentSession model persistence", () => {
 	async function createStartupResumeSession(
 		targetSessionFile: string,
 		settings: Settings = Settings.isolated(),
+		modelRegistry: ModelRegistry = sharedModelRegistry,
 	): Promise<CreateAgentSessionResult> {
 		const sessionManager = await SessionManager.open(targetSessionFile, path.join(tempDir.path(), "startup"));
 		const result = await createAgentSession({
 			cwd: tempDir.path(),
 			agentDir: tempDir.path(),
 			authStorage: sharedAuthStorage,
-			modelRegistry: sharedModelRegistry,
+			modelRegistry,
 			sessionManager,
 			settings,
 			disableExtensionDiscovery: true,
@@ -188,6 +205,97 @@ describe("AgentSession model persistence", () => {
 		expect(modelChangedCount).toBe(1);
 	});
 
+	it("emits model_changed when only the upstream route changes", async () => {
+		const selector = "openrouter/anthropic/claude-sonnet-4.5";
+		const available = sharedModelRegistry.getAvailable();
+		const source = parseModelPattern(`${selector}@anthropic`, available).model;
+		const routed = parseModelPattern(`${selector}@google`, available).model;
+		if (!source || !routed) throw new Error("Expected routed OpenRouter models");
+		const created = await createSession({ initialModel: source });
+		let modelChangedCount = 0;
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") modelChangedCount++;
+		});
+
+		await created.session.setModelTemporary(routed);
+
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(`${selector}@google`);
+		expect(modelChangedCount).toBe(1);
+
+		await created.session.setModelTemporary(routed);
+		expect(modelChangedCount).toBe(1);
+	});
+
+	it("notifies subscribers of route-only same-session switches and reloads without duplicate events", async () => {
+		const selector = "openrouter/anthropic/claude-sonnet-4.5";
+		const available = sharedModelRegistry.getAvailable();
+		const source = parseModelPattern(`${selector}@anthropic`, available).model;
+		const target = parseModelPattern(`${selector}@google`, available).model;
+		if (!source || !target) throw new Error("Expected routed OpenRouter models");
+		const created = await createSession({ initialModel: source, persist: true });
+		const manager = created.session.sessionManager;
+		manager.appendModelChange(`${selector}@anthropic`, "default");
+		manager.appendMessage({ role: "user", content: "preserve this conversation", timestamp: Date.now() });
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session");
+		const routes: string[] = [];
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") {
+				const model = created.session.model;
+				if (!model) throw new Error("Expected an active model when notified");
+				routes.push(formatModelStringWithRouting(model));
+			}
+		});
+
+		expect(await created.session.switchSession(sessionFile, { model: target })).toBe(true);
+		expect(routes).toEqual([`${selector}@google`]);
+		expect(await created.session.switchSession(sessionFile, { model: target })).toBe(true);
+		expect(routes).toEqual([`${selector}@google`]);
+
+		manager.appendModelChange(`${selector}@anthropic`);
+		await manager.ensureOnDisk();
+		await created.session.reload();
+		expect(routes).toEqual([`${selector}@google`, `${selector}@anthropic`]);
+		await created.session.reload();
+		expect(routes).toEqual([`${selector}@google`, `${selector}@anthropic`]);
+	});
+
+	it("tells subscribers when a rolled-back switch had changed only the upstream route", async () => {
+		const selector = "openrouter/anthropic/claude-sonnet-4.5";
+		const available = sharedModelRegistry.getAvailable();
+		const source = parseModelPattern(`${selector}@anthropic`, available).model;
+		if (!source) throw new Error("Expected a routed OpenRouter model");
+		const created = await createSession({ initialModel: source, persist: true });
+		const targetDir = TempDir.createSync("@pi-route-rollback-target-");
+		const targetManager = SessionManager.create(targetDir.path(), targetDir.path());
+		targetManager.appendModelChange(`${selector}@google`, "default");
+		targetManager.appendMessage({ role: "user", content: "route-only transcript", timestamp: Date.now() });
+		await targetManager.ensureOnDisk();
+		const targetFile = targetManager.getSessionFile();
+		await targetManager.close();
+		if (!targetFile) throw new Error("Expected a target session");
+		let modelChangedCount = 0;
+		created.session.subscribe(event => {
+			if (event.type === "model_changed") modelChangedCount++;
+		});
+		const targetReset = vi
+			.spyOn(SessionMemory.prototype, "resetContextForNewTranscript")
+			.mockRejectedValueOnce(new Error("target reset failed"));
+		try {
+			await expect(created.session.switchSession(targetFile, { preserveLocalCwd: true })).rejects.toThrow(
+				"target reset failed",
+			);
+		} finally {
+			targetReset.mockRestore();
+			targetDir.removeSync();
+		}
+
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(`${selector}@anthropic`);
+		// One event announces the target's route, a second undoes it.
+		expect(modelChangedCount).toBe(2);
+	});
+
 	it("persists the default role when explicitly requested", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const nextModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
@@ -202,6 +310,457 @@ describe("AgentSession model persistence", () => {
 		expect(created.session.model?.id).toBe(nextModel.id);
 		expect(created.settings.getModelRole("default")).toBe(modelValue(nextModel));
 	});
+
+	it.each(["global", "project"] as const)("setup preserves %s omitted-effort selector semantics", async scope => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const created = await createSession({ modelRoles: { default: `${modelValue(source)}:high` } });
+		cfgModelRoleStorage.set(created.settings, scope);
+		const host = createSetupHost(
+			createInteractiveModeContext({ session: created.session, settings: created.settings }),
+		);
+		await host.selectModel(target, modelValue(target));
+		expect(created.settings.getModelRole("default")).toBe(
+			`${modelValue(target)}${scope === "global" ? ":high" : ""}`,
+		);
+		if (scope === "project") {
+			expect(created.settings.getProjectModelRole("default")).toBe(modelValue(target));
+			expect(created.settings.getGlobalModelRole("default")).toBe(`${modelValue(source)}:high`);
+		}
+	});
+
+	it.each(
+		(["global", "project"] as const).flatMap(persistScope =>
+			(["temporary", "persistent"] as const).map(takeover => ({ persistScope, takeover })),
+		),
+	)(
+		"a later $takeover publication preserves the latest durable $persistScope selection",
+		async ({ persistScope, takeover }) => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const older = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const newer = getAnthropicModelOrThrow("claude-opus-4-6");
+			const agentDir = path.join(tempDir.path(), "config");
+			const diskSettings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir });
+			cfgDefaultThinkingLevel.set(diskSettings, Effort.High);
+			const created = await createSession({ initialModel: source, settings: diskSettings });
+			cfgModelRoleStorage.set(created.settings, persistScope);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === older.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const pending = created.session.setModel(older, "default", {
+				persist: true,
+				persistScope,
+				persistAutoThinking: true,
+			});
+			try {
+				await entered.promise;
+				if (takeover === "temporary") {
+					await created.session.setModelTemporary(newer, Effort.Max);
+				} else {
+					await created.session.setModel(newer, "default", { persist: true, persistScope });
+					created.session.setThinkingLevel(Effort.Low, true);
+				}
+			} finally {
+				release.resolve();
+				await pending;
+				reconciliation.mockRestore();
+			}
+			expect(await pending).toEqual({ switched: false });
+			expect(created.session.model?.id).toBe(newer.id);
+			const expectedModel = modelValue(takeover === "temporary" ? older : newer);
+			const expectedEffort = takeover === "temporary" ? Effort.Max : Effort.Low;
+			expect(created.session.configuredThinkingLevel()).toBe(expectedEffort);
+			expect(created.session.agent.state.thinkingLevel).toBe(expectedEffort);
+			expect(created.settings.getModelRole("default")).toBe(expectedModel);
+			expect(
+				persistScope === "project"
+					? created.settings.getProjectModelRole("default")
+					: created.settings.getGlobalModelRole("default"),
+			).toBe(expectedModel);
+			expect(
+				created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change"),
+			).toMatchObject({ model: modelValue(newer) });
+			await diskSettings.flush();
+			const reloaded = await Settings.loadReadOnly({ cwd: tempDir.path(), agentDir });
+			expect(reloaded.getModelRole("default")).toBe(expectedModel);
+			expect(cfgDefaultThinkingLevel.get(reloaded)).toBe(takeover === "temporary" ? AUTO_THINKING : Effort.Low);
+		},
+	);
+
+	it.each(
+		(["global", "project"] as const).flatMap(persistScope =>
+			(["reload", "switch"] as const).flatMap(transition =>
+				(["none", "before", "after"] as const).map(newer => ({ persistScope, transition, newer })),
+			),
+		),
+	)(
+		"a published $persistScope save across $transition respects a newer save $newer the transition",
+		async ({ persistScope, transition, newer }) => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const older = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const latest = getAnthropicModelOrThrow("claude-haiku-4-5");
+			const created = await createSession({
+				initialModel: source,
+				persist: true,
+				modelRoles: { default: modelValue(source) },
+			});
+			if (persistScope === "project") created.settings.setProjectModelRole("default", modelValue(source));
+			const manager = created.session.sessionManager;
+			manager.appendModelChange(modelValue(source), "default");
+			manager.appendMessage({ role: "user", content: "origin transcript", timestamp: Date.now() });
+			manager.appendMessage(createAssistantMessage("ready"));
+			await manager.flush();
+			const targetFile = await writeRoleModelSession(modelValue(source), modelValue(source), "default");
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === older.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const pending = created.session.setModel(older, "default", { persist: true, persistScope });
+			let result: unknown;
+			try {
+				await entered.promise;
+				if (newer === "before") {
+					await created.session.setModel(latest, "default", { persist: true, persistScope });
+				}
+				if (transition === "reload") await created.session.reload();
+				else expect(await created.session.switchSession(targetFile)).toBe(true);
+				if (newer === "after") {
+					await created.session.setModel(latest, "default", { persist: true, persistScope });
+				}
+			} finally {
+				release.resolve();
+				result = await pending;
+				reconciliation.mockRestore();
+			}
+			expect(result).toEqual({ switched: false });
+			const expected = newer !== "none" ? latest : persistScope === "global" ? older : source;
+			expect(
+				persistScope === "global"
+					? created.settings.getGlobalModelRole("default")
+					: created.settings.getProjectModelRole("default"),
+			).toBe(modelValue(expected));
+			if (persistScope === "project") {
+				expect(created.settings.getGlobalModelRole("default")).toBe(modelValue(source));
+			}
+			expect(created.session.model?.id).not.toBe(older.id);
+			expect(
+				manager.getBranch().some(entry => entry.type === "model_change" && entry.model === modelValue(older)),
+			).toBe(false);
+		},
+	);
+
+	it.each(
+		(["global", "project"] as const).flatMap(persistScope =>
+			[false, true].map(sameLevel => ({ persistScope, sameLevel })),
+		),
+	)(
+		"a newer persisted effort owns the global preference without canceling an older $persistScope Auto role save (same level: $sameLevel)",
+		async ({ persistScope, sameLevel }) => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const created = await createSession({ initialModel: source, modelRoles: { default: modelValue(source) } });
+			cfgDefaultThinkingLevel.set(created.settings, Effort.High);
+			if (sameLevel) created.session.setThinkingLevel(Effort.Low);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === target.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const pending = created.session.setModel(target, "default", {
+				persist: true,
+				persistScope,
+				persistAutoThinking: true,
+			});
+			let result: unknown;
+			try {
+				await entered.promise;
+				created.session.setThinkingLevel(Effort.Low, true);
+			} finally {
+				release.resolve();
+				result = await pending;
+				reconciliation.mockRestore();
+			}
+			expect(result).toEqual({ switched: false });
+			expect(created.session.model?.id).toBe(target.id);
+			expect(created.session.configuredThinkingLevel()).toBe(Effort.Low);
+			expect(created.session.agent.state.thinkingLevel).toBe(Effort.Low);
+			expect(cfgDefaultThinkingLevel.get(created.settings)).toBe(Effort.Low);
+			expect(
+				persistScope === "project"
+					? created.settings.getProjectModelRole("default")
+					: created.settings.getGlobalModelRole("default"),
+			).toBe(modelValue(target));
+			if (persistScope === "project") {
+				expect(created.settings.getGlobalModelRole("default")).toBe(modelValue(source));
+			}
+			expect(
+				created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change"),
+			).toMatchObject({
+				model: modelValue(target),
+			});
+		},
+	);
+
+	it.each(["global", "project"] as const)(
+		"a newer %s model-only save does not cancel an older global Auto preference",
+		async scope => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const older = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const newer = getAnthropicModelOrThrow("claude-haiku-4-5");
+			const created = await createSession({ initialModel: source });
+			cfgDefaultThinkingLevel.set(created.settings, Effort.High);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === older.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const pending = created.session.setModel(older, "default", {
+				persist: true,
+				persistAutoThinking: true,
+			});
+			try {
+				await entered.promise;
+				await created.session.setModel(newer, "default", { persist: true, persistScope: scope });
+			} finally {
+				release.resolve();
+				await pending;
+				reconciliation.mockRestore();
+			}
+			expect(await pending).toEqual({ switched: false });
+			expect(created.session.model?.id).toBe(newer.id);
+			expect(cfgDefaultThinkingLevel.get(created.settings)).toBe(AUTO_THINKING);
+			expect(created.settings.getGlobalModelRole("default")).toBe(modelValue(scope === "global" ? newer : older));
+			if (scope === "project") expect(created.settings.getProjectModelRole("default")).toBe(modelValue(newer));
+		},
+	);
+
+	it.each(
+		(["setModel", "scoped cycle", "available cycle"] as const).flatMap(publication =>
+			[false, true].flatMap(newSession => [false, true].map(takeover => ({ publication, takeover, newSession }))),
+		),
+	)(
+		"$publication reapplies its effort only without a newer selection (takeover: $takeover, newSession: $newSession)",
+		async ({ publication, takeover, newSession }) => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const bundled = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			if (!bundled.thinking) throw new Error("Expected a model with configurable thinking");
+			const target = { ...bundled, thinking: { ...bundled.thinking, defaultLevel: Effort.Low } };
+			const created = await createSession({
+				initialModel: source,
+				scopedModels:
+					publication === "scoped cycle"
+						? [{ model: source }, { model: target, thinkingLevel: Effort.Low }]
+						: undefined,
+			});
+			created.session.setThinkingLevel(Effort.High);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === target.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const syncing = vi.spyOn(SessionTools.prototype, "syncAfterModelChange");
+			const availableModels =
+				publication === "available cycle"
+					? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, target])
+					: undefined;
+			const pending = publication === "setModel" ? created.session.setModel(target) : created.session.cycleModel();
+			let result: unknown;
+			let syncCount = 0;
+			try {
+				await entered.promise;
+				if (newSession) expect(await created.session.newSession()).toBe(true);
+				if (takeover) created.session.setThinkingLevel(Effort.Medium);
+			} finally {
+				release.resolve();
+				result = await pending;
+				syncCount = syncing.mock.calls.length;
+				reconciliation.mockRestore();
+				availableModels?.mockRestore();
+				syncing.mockRestore();
+			}
+			const effort = takeover ? Effort.Medium : publication === "available cycle" ? Effort.High : Effort.Low;
+			expect(created.session.model?.id).toBe(target.id);
+			expect(created.session.configuredThinkingLevel()).toBe(effort);
+			expect(created.session.agent.state.thinkingLevel).toBe(effort);
+			expect(
+				created.session.sessionManager.getBranch().findLast(entry => entry.type === "thinking_level_change"),
+			).toMatchObject({ thinkingLevel: effort, configured: effort });
+			expect(
+				created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change"),
+			).toMatchObject({
+				model: modelValue(target),
+			});
+			expect(syncCount).toBeGreaterThan(0);
+			if (publication === "setModel") expect(result).toEqual({ switched: !takeover });
+			else if (takeover) expect(result).toBeUndefined();
+			else expect(result).toMatchObject({ model: { id: target.id }, thinkingLevel: effort });
+		},
+	);
+
+	it.each(
+		(["global", "project"] as const).flatMap(scope =>
+			[false, true].flatMap(auto => (["ephemeral", "effort"] as const).map(takeover => ({ scope, auto, takeover }))),
+		),
+	)(
+		"model hub persists a durable $scope default (auto: $auto) after an $takeover takeover without stale effort or status",
+		async ({ scope, auto, takeover }) => {
+			await Settings.init({ inMemory: true });
+			await initTheme(false);
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const durable = getAnthropicModelOrThrow("claude-haiku-4-5");
+			const ephemeral = getAnthropicModelOrThrow("claude-opus-4-6");
+			expect(ephemeral.thinking?.efforts).toContain(Effort.Max);
+			const agentDir = path.join(tempDir.path(), "config");
+			const diskSettings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir });
+			cfgModelRoleStorage.set(diskSettings, scope);
+			diskSettings.setModelRole("default", `${modelValue(source)}:high`);
+			cfgDefaultThinkingLevel.set(diskSettings, Effort.High);
+			const created = await createSession({ initialModel: source, settings: diskSettings });
+			const shown: Component[] = [];
+			const showStatus = vi.fn();
+			const ctx = createInteractiveModeContext({
+				session: created.session,
+				settings: diskSettings,
+				showStatus,
+				ui: {
+					terminal: { rows: 30, columns: 120 },
+					showOverlay: component => {
+						shown.push(component);
+						return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
+					},
+				},
+			});
+			const entered = Promise.withResolvers<void>();
+			let finished = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			let holdPublication = !auto;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (holdPublication && !held && created.session.model?.id === durable.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const setModel = created.session.setModel.bind(created.session);
+			const publication = vi.spyOn(created.session, "setModel").mockImplementation(async (...args) => {
+				try {
+					return await setModel(...args);
+				} finally {
+					finished.resolve();
+				}
+			});
+			const controller = new SelectorController(ctx);
+			controller.showModelSelector();
+			const hub = shown[0]!;
+			hub.handleInput?.(durable.id);
+			hub.handleInput?.("\r"); // selected catalog row → role strip
+			hub.handleInput?.("\r"); // first chip: default in the configured scope
+			if (auto) {
+				await finished.promise;
+				await setImmediate();
+				finished = Promise.withResolvers<void>();
+				holdPublication = true;
+				// Project starts at inherit; global retains the saved high suffix.
+				const steps = scope === "project" ? 2 : getSupportedEfforts(durable).indexOf(Effort.High) + 1;
+				for (let index = 0; index < steps; index++) {
+					hub.handleInput?.(scope === "project" ? "\x1b[C" : "\x1b[D");
+				}
+				showStatus.mockClear();
+				hub.handleInput?.("\r");
+			}
+			let staleThinkingEvents = 0;
+			let takenOver = false;
+			const unsubscribe = created.session.subscribe(event => {
+				if (takenOver && event.type === "thinking_level_changed") staleThinkingEvents++;
+			});
+			try {
+				await entered.promise;
+				if (takeover === "effort") created.session.setThinkingLevel(Effort.Low, true);
+				else await created.session.setModelTemporary(ephemeral, Effort.Max, { ephemeral: true });
+				expect(created.session.configuredThinkingLevel()).toBe(takeover === "effort" ? Effort.Low : Effort.Max);
+				takenOver = true;
+			} finally {
+				release.resolve();
+				await finished.promise;
+				await setImmediate();
+				reconciliation.mockRestore();
+				publication.mockRestore();
+				unsubscribe();
+				hub.handleInput?.("\x1b");
+			}
+			expect(created.session.model?.id).toBe(takeover === "effort" ? durable.id : ephemeral.id);
+			expect(created.session.configuredThinkingLevel()).toBe(takeover === "effort" ? Effort.Low : Effort.Max);
+			expect(created.session.agent.state.thinkingLevel).toBe(takeover === "effort" ? Effort.Low : Effort.Max);
+			expect(showStatus).not.toHaveBeenCalled();
+			expect(staleThinkingEvents).toBe(0);
+			expect(diskSettings.getModelRole("default")).toBe(
+				`${modelValue(durable)}${!auto && scope === "global" ? ":high" : ""}`,
+			);
+			await diskSettings.flush();
+			const reloaded = await Settings.loadReadOnly({ cwd: tempDir.path(), agentDir });
+			expect(reloaded.getModelRole("default")).toBe(diskSettings.getModelRole("default"));
+			expect(cfgDefaultThinkingLevel.get(reloaded)).toBe(
+				takeover === "effort" ? Effort.Low : auto ? AUTO_THINKING : Effort.High,
+			);
+			if (scope === "project") {
+				expect(reloaded.getProjectModelRole("default")).toBe(modelValue(durable));
+				expect(reloaded.getGlobalModelRole("default")).toBe(`${modelValue(source)}:high`);
+			}
+		},
+	);
 
 	it("switches the active model even when the live context is over the target window", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
@@ -416,6 +975,1380 @@ describe("AgentSession model persistence", () => {
 		const result = await createStartupResumeSession(targetSessionFile, settings);
 
 		expect(result.session.model?.id).toBe(temporaryModel.id);
+	});
+
+	it.each(["options.model", "deferred pattern"] as const)(
+		"startup resume preserves the initial SDK upstream selected by %s without a later model change",
+		async selection => {
+			const selector = "openrouter/anthropic/claude-sonnet-4.5@anthropic";
+			const model = parseModelPattern(selector, sharedModelRegistry.getAvailable()).model;
+			if (!model) throw new Error("Expected routed OpenRouter model");
+			const role = "subagent:initial-route";
+			const result = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				authStorage: sharedAuthStorage,
+				modelRegistry: sharedModelRegistry,
+				sessionManager: SessionManager.create(tempDir.path(), path.join(tempDir.path(), "initial-sdk")),
+				settings: Settings.isolated(),
+				...(selection === "options.model"
+					? { model }
+					: { modelPattern: selector, modelPatternFallbackRole: role, modelPatternDefaultFallbackChain: [] }),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			});
+			session = result.session;
+			expect(formatModelStringWithRouting(session.model!)).toBe(selector);
+			const manager = session.sessionManager;
+			manager.appendMessage({ role: "user", content: "preserve the initial route", timestamp: Date.now() });
+			manager.appendMessage(createAssistantMessage("ready"));
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session");
+			await session.dispose();
+			session = undefined;
+
+			const resumed = await createStartupResumeSession(sessionFile);
+
+			expect(formatModelStringWithRouting(resumed.session.model!)).toBe(selector);
+			const models = resumed.session.sessionManager.buildSessionContext().models;
+			expect(models.default).toBe(selector);
+			if (selection === "deferred pattern") expect(models[role]).toBe(selector);
+		},
+	);
+
+	it("startup resume preserves an explicit routed switchSession selection", async () => {
+		const selector = "openrouter/anthropic/claude-sonnet-4.5";
+		const target = parseModelPattern(`${selector}@anthropic`, sharedModelRegistry.getAvailable()).model;
+		if (!target) throw new Error("Expected routed OpenRouter model");
+		const targetSessionFile = await writeRoleModelSession(`${selector}@google`, `${selector}@google`);
+		const created = await createSession({ persist: true });
+
+		await expect(created.session.switchSession(targetSessionFile, { model: target })).resolves.toBe(true);
+		expect(formatModelStringWithRouting(created.session.model!)).toBe(`${selector}@anthropic`);
+		created.session.sessionManager.appendMessage({
+			role: "user",
+			content: "preserve the explicit restore route",
+			timestamp: Date.now(),
+		});
+		created.session.sessionManager.appendMessage(createAssistantMessage("ready"));
+		await created.session.dispose();
+		session = undefined;
+
+		const resumed = await createStartupResumeSession(targetSessionFile);
+
+		expect(formatModelStringWithRouting(resumed.session.model!)).toBe(`${selector}@anthropic`);
+	});
+
+	it.each(["setModel", "setModelTemporary", "scoped cycle", "available cycle"] as const)(
+		"startup resume preserves the upstream selected by a route-only %s publication",
+		async publication => {
+			const selector = "openrouter/anthropic/claude-sonnet-4.5";
+			const available = sharedModelRegistry.getAvailable();
+			const source = parseModelPattern(`${selector}@google`, available).model;
+			const target = parseModelPattern(`${selector}@anthropic`, available).model;
+			if (!source || !target) throw new Error("Expected routed OpenRouter models");
+			const created = await createSession({
+				initialModel: source,
+				modelRoles: { default: `${selector}@google` },
+				persist: true,
+				scopedModels: publication === "scoped cycle" ? [{ model: source }, { model: target }] : undefined,
+			});
+			const manager = created.session.sessionManager;
+			manager.appendMessage({ role: "user", content: "preserve this route", timestamp: Date.now() });
+			manager.appendMessage(createAssistantMessage("ready"));
+			if (publication === "setModel") {
+				await created.session.setModel(target);
+			} else if (publication === "setModelTemporary") {
+				await created.session.setModelTemporary(target);
+			} else {
+				const availableModels =
+					publication === "available cycle"
+						? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, target])
+						: undefined;
+				try {
+					await created.session.cycleModel();
+				} finally {
+					availableModels?.mockRestore();
+				}
+			}
+			expect(formatModelStringWithRouting(created.session.model!)).toBe(`${selector}@anthropic`);
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session");
+			await created.session.dispose();
+			session = undefined;
+
+			const resumed = await createStartupResumeSession(sessionFile);
+
+			expect(formatModelStringWithRouting(resumed.session.model!)).toBe(`${selector}@anthropic`);
+		},
+	);
+
+	it.each(["setModel", "setModelTemporary", "scoped cycle", "available cycle"] as const)(
+		"a late %s receipt cannot replace the newer routed model on resume",
+		async publication => {
+			const selector = "openrouter/anthropic/claude-sonnet-4.5";
+			const available = sharedModelRegistry.getAvailable();
+			const source = parseModelPattern(selector, available).model;
+			const older = parseModelPattern(`${selector}@google`, available).model;
+			const newer = parseModelPattern(`${selector}@anthropic`, available).model;
+			if (!source || !older || !newer) throw new Error("Expected routed OpenRouter models");
+			const created = await createSession({
+				initialModel: source,
+				persist: true,
+				scopedModels: publication === "scoped cycle" ? [{ model: source }, { model: older }] : undefined,
+			});
+			const manager = created.session.sessionManager;
+			manager.appendMessage({ role: "user", content: "keep the latest model", timestamp: Date.now() });
+			manager.appendMessage(createAssistantMessage("ready"));
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (
+						!held &&
+						created.session.model &&
+						formatModelStringWithRouting(created.session.model) === `${selector}@google`
+					) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const availableModels =
+				publication === "available cycle"
+					? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, older])
+					: undefined;
+			const pending =
+				publication === "setModel"
+					? created.session.setModel(older)
+					: publication === "setModelTemporary"
+						? created.session.setModelTemporary(older)
+						: created.session.cycleModel();
+			try {
+				await entered.promise;
+				await created.session.setModelTemporary(newer);
+			} finally {
+				release.resolve();
+				await pending;
+				reconciliation.mockRestore();
+				availableModels?.mockRestore();
+			}
+
+			const receipts = manager.getBranch().filter(entry => entry.type === "model_change");
+			expect(receipts.at(-1)?.model).toBe(`${selector}@anthropic`);
+			expect(receipts.some(entry => entry.model === `${selector}@google`)).toBe(false);
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session");
+			await created.session.dispose();
+			session = undefined;
+
+			const resumed = await createStartupResumeSession(sessionFile);
+			expect(formatModelStringWithRouting(resumed.session.model!)).toBe(`${selector}@anthropic`);
+		},
+	);
+
+	it.each([
+		"setModel",
+		"setModelTemporary",
+		"scoped cycle",
+		"available cycle",
+		"prewalk",
+		"prewalk with ephemeral",
+	] as const)("a late durable %s receipt survives later ephemeral publications on SDK resume", async publication => {
+		const selector = "openrouter/anthropic/claude-sonnet-4.5";
+		const available = sharedModelRegistry.getAvailable();
+		const source = parseModelPattern(selector, available).model;
+		const durable = parseModelPattern(`${selector}@google`, available).model;
+		const fallback = parseModelPattern(`${selector}@anthropic`, available).model;
+		if (!source || !durable || !fallback) throw new Error("Expected routed OpenRouter models");
+		const created = await createSession({
+			initialModel: source,
+			persist: true,
+			scopedModels: publication === "scoped cycle" ? [{ model: source }, { model: durable }] : undefined,
+		});
+		const manager = created.session.sessionManager;
+		manager.appendMessage({ role: "user", content: "keep the durable route", timestamp: Date.now() });
+		manager.appendMessage(createAssistantMessage("ready"));
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const reconcile = SessionTools.prototype.reconcileThinkTool;
+		let held = false;
+		const reconciliation = vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (
+			this: SessionTools,
+			...args
+		) {
+			if (
+				!held &&
+				created.session.model &&
+				formatModelStringWithRouting(created.session.model) === `${selector}@google`
+			) {
+				held = true;
+				entered.resolve();
+				await release.promise;
+			}
+			return reconcile.apply(this, args);
+		});
+		const availableModels =
+			publication === "available cycle"
+				? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, durable])
+				: undefined;
+		const options = {
+			prewalk: publication === "prewalk" || publication === "prewalk with ephemeral",
+			ephemeral: publication === "prewalk with ephemeral",
+		};
+		const pending =
+			publication === "setModel"
+				? created.session.setModel(durable)
+				: publication === "scoped cycle" || publication === "available cycle"
+					? created.session.cycleModel()
+					: created.session.setModelTemporary(durable, undefined, options);
+		try {
+			await entered.promise;
+			await created.session.setModelTemporary(source, undefined, { ephemeral: true });
+			await created.session.setModelTemporary(fallback, undefined, { ephemeral: true });
+		} finally {
+			release.resolve();
+			await pending;
+			reconciliation.mockRestore();
+			availableModels?.mockRestore();
+		}
+
+		const liveModel = created.session.model;
+		if (!liveModel) throw new Error("Expected a live model");
+		expect(formatModelStringWithRouting(liveModel)).toBe(`${selector}@anthropic`);
+		expect(manager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+			model: `${selector}@google`,
+			role: options.prewalk
+				? "prewalk"
+				: publication === "setModelTemporary"
+					? "temporary"
+					: publication === "setModel"
+						? "default"
+						: undefined,
+		});
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session");
+		await created.session.dispose();
+		session = undefined;
+
+		const resumed = await createStartupResumeSession(sessionFile);
+		const resumedModel = resumed.session.model;
+		if (!resumedModel) throw new Error("Expected a resumed model");
+		expect(formatModelStringWithRouting(resumedModel)).toBe(`${selector}@google`);
+	});
+
+	const receiptPublications = ["setModel", "setModelTemporary", "scoped cycle", "available cycle"] as const;
+	type ReceiptPublication = (typeof receiptPublications)[number];
+
+	function publishReceipt(target: AgentSession, publication: ReceiptPublication, model: Model<Api>) {
+		if (publication === "setModel") return target.setModel(model);
+		if (publication === "setModelTemporary") return target.setModelTemporary(model);
+		return target.cycleModel();
+	}
+
+	it.each([...receiptPublications])(
+		"a published routed %s receipt survives newSession and a successful turn on SDK resume",
+		async publication => {
+			const selector = "openrouter/anthropic/claude-sonnet-4.5";
+			const available = sharedModelRegistry.getAvailable();
+			const source = parseModelPattern(`${selector}@anthropic`, available).model;
+			const durable = parseModelPattern(`${selector}@google`, available).model;
+			if (!source || !durable) throw new Error("Expected routed OpenRouter models");
+			const created = await createSession({
+				initialModel: source,
+				persist: true,
+				modelRoles: { default: `${selector}@anthropic` },
+				scopedModels: publication === "scoped cycle" ? [{ model: source }, { model: durable }] : undefined,
+			});
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && formatModelStringWithRouting(created.session.model!) === `${selector}@google`) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const availableModels =
+				publication === "available cycle"
+					? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, durable])
+					: undefined;
+			const pending = publishReceipt(created.session, publication, durable);
+			try {
+				await entered.promise;
+				expect(await created.session.newSession()).toBe(true);
+			} finally {
+				release.resolve();
+				await pending;
+				reconciliation.mockRestore();
+				availableModels?.mockRestore();
+			}
+			const result = await pending;
+			if (publication === "setModel") expect(result).toEqual({ switched: true });
+			else if (publication === "scoped cycle" || publication === "available cycle") {
+				expect(result).toMatchObject({ model: durable });
+			}
+			expect(formatModelStringWithRouting(created.session.model!)).toBe(`${selector}@google`);
+			expect(
+				created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change"),
+			).toMatchObject({
+				model: `${selector}@google`,
+			});
+			created.session.agent.streamFn = model => {
+				expect(formatModelStringWithRouting(model)).toBe(`${selector}@google`);
+				const stream = new AssistantMessageEventStream();
+				const message = {
+					...createAssistantMessage("done"),
+					provider: model.provider,
+					model: model.id,
+					api: model.api,
+				};
+				stream.push({ type: "done", reason: "stop", message });
+				stream.end(message);
+				return stream;
+			};
+			await created.session.agent.prompt("successful inherited selection turn");
+			expect(created.session.messages.findLast(message => message.role === "assistant")).toMatchObject({
+				stopReason: "stop",
+			});
+			const sessionFile = created.session.sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session");
+			await created.session.dispose();
+			session = undefined;
+			const resumed = await createStartupResumeSession(sessionFile);
+			expect(formatModelStringWithRouting(resumed.session.model!)).toBe(`${selector}@google`);
+		},
+	);
+
+	it.each([...receiptPublications])(
+		"an unpublished %s preparation cannot select a model after newSession",
+		async publication => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const created = await createSession({
+				initialModel: source,
+				scopedModels: publication === "scoped cycle" ? [{ model: source }, { model: target }] : undefined,
+			});
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const availableModels =
+				publication === "available cycle"
+					? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, target])
+					: undefined;
+			const hold = async () => {
+				entered.resolve();
+				await release.promise;
+			};
+			const preparation =
+				publication === "scoped cycle"
+					? vi.spyOn(sharedModelRegistry, "getApiKeyForProvider").mockImplementation(async () => {
+							await hold();
+							return "test-key";
+						})
+					: publication === "available cycle"
+						? vi.spyOn(sharedModelRegistry, "getApiKey").mockImplementation(async () => {
+								await hold();
+								return "test-key";
+							})
+						: vi.spyOn(sharedModelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => {
+								await hold();
+								return model;
+							});
+			const pending = publishReceipt(created.session, publication, target);
+			let result: unknown;
+			try {
+				await entered.promise;
+				expect(await created.session.newSession()).toBe(true);
+			} finally {
+				release.resolve();
+				result = await pending;
+				preparation.mockRestore();
+				availableModels?.mockRestore();
+			}
+			expect(created.session.model?.id).toBe(source.id);
+			if (publication === "setModel") expect(result).toEqual({ switched: false });
+			if (publication === "scoped cycle" || publication === "available cycle") expect(result).toBeUndefined();
+			expect(
+				created.session.sessionManager
+					.getBranch()
+					.some(entry => entry.type === "model_change" && entry.model === modelValue(target)),
+			).toBe(false);
+		},
+	);
+
+	it.each(["setModel", "setModelTemporary", "role"] as const)(
+		"an unpublished %s preparation cannot publish while the new journal is being persisted",
+		async publication => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const created = await createSession({ initialModel: source, persist: true });
+			const manager = created.session.sessionManager;
+			await manager.ensureOnDisk();
+			const previousId = manager.getSessionId();
+			const previousFile = manager.getSessionFile()!;
+			const previousJournal = await Bun.file(previousFile).text();
+			const metadataEntered = Promise.withResolvers<void>();
+			const releaseMetadata = Promise.withResolvers<void>();
+			const resetEntered = Promise.withResolvers<void>();
+			const releasePersistence = Promise.withResolvers<void>();
+			const preparation = vi
+				.spyOn(sharedModelRegistry, "refreshSelectedModelMetadata")
+				.mockImplementation(async model => {
+					metadataEntered.resolve();
+					await releaseMetadata.promise;
+					return model;
+				});
+			const ensureOnDisk = manager.ensureOnDisk.bind(manager);
+			const persistence = vi.spyOn(manager, "ensureOnDisk").mockImplementation(async () => {
+				expect(manager.getSessionId()).not.toBe(previousId);
+				expect(manager.getSessionFile()).not.toBe(previousFile);
+				expect(manager.getEntries()).toHaveLength(0);
+				resetEntered.resolve();
+				await releasePersistence.promise;
+				return ensureOnDisk();
+			});
+			const pending =
+				publication === "role"
+					? created.session.applyRoleModel({
+							role: "slow",
+							model: target,
+							thinkingLevel: Effort.Low,
+							explicitThinkingLevel: true,
+						})
+					: publication === "setModelTemporary"
+						? created.session.setModelTemporary(target, Effort.Low)
+						: created.session.setModel(target);
+			let fresh: Promise<boolean> | undefined;
+			try {
+				await metadataEntered.promise;
+				fresh = created.session.newSession();
+				await resetEntered.promise;
+				releaseMetadata.resolve();
+				expect(await pending).toEqual(publication === "setModel" ? { switched: false } : false);
+				expect(created.session.model?.id).toBe(source.id);
+				expect(manager.getEntries()).toHaveLength(0);
+			} finally {
+				releaseMetadata.resolve();
+				releasePersistence.resolve();
+				await pending;
+				await fresh;
+				preparation.mockRestore();
+				persistence.mockRestore();
+			}
+			await manager.flush();
+			expect(await Bun.file(previousFile).text()).toBe(previousJournal);
+			const journal = await Bun.file(manager.getSessionFile()!).text();
+			expect(journal).not.toContain(modelValue(target));
+			expect(JSON.parse(journal.split("\n")[1]!).id).toBe(manager.getSessionId());
+			const newer = getAnthropicModelOrThrow("claude-haiku-4-5");
+			expect(await created.session.setModelTemporary(newer, Effort.High)).toBe(true);
+			expect(created.session.model?.id).toBe(newer.id);
+			expect(created.session.configuredThinkingLevel()).toBe(Effort.High);
+			expect(manager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+				model: modelValue(newer),
+			});
+		},
+	);
+
+	it("a failed new journal reset does not invalidate outgoing metadata preparation", async () => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const created = await createSession({ initialModel: source, persist: true });
+		const manager = created.session.sessionManager;
+		await manager.ensureOnDisk();
+		const previousId = manager.getSessionId();
+		const previousFile = manager.getSessionFile()!;
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const preparation = vi
+			.spyOn(sharedModelRegistry, "refreshSelectedModelMetadata")
+			.mockImplementation(async model => {
+				entered.resolve();
+				await release.promise;
+				return model;
+			});
+		const pending = created.session.setModel(target);
+		try {
+			await entered.promise;
+			await expect(
+				created.session.newSession({ sessionDir: path.join(previousFile, "not-a-directory") }),
+			).rejects.toThrow();
+			expect(manager.getSessionId()).toBe(previousId);
+			expect(manager.getSessionFile()).toBe(previousFile);
+		} finally {
+			release.resolve();
+			preparation.mockRestore();
+		}
+		expect(await pending).toEqual({ switched: true });
+		expect(created.session.model?.id).toBe(target.id);
+	});
+
+	it("an unpublished role cycle preparation cannot select its model or effort after newSession", async () => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const created = await createSession({
+			initialModel: source,
+			modelRoles: { default: modelValue(source), slow: `${modelValue(target)}:high` },
+		});
+		const thinkingLevel = created.session.configuredThinkingLevel();
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const preparation = vi
+			.spyOn(sharedModelRegistry, "refreshSelectedModelMetadata")
+			.mockImplementation(async model => {
+				entered.resolve();
+				await release.promise;
+				return model;
+			});
+		const pending = created.session.cycleRoleModels(["default", "slow"]);
+		let result: unknown;
+		try {
+			await entered.promise;
+			expect(await created.session.newSession()).toBe(true);
+		} finally {
+			release.resolve();
+			result = await pending;
+			preparation.mockRestore();
+		}
+		expect(result).toBeUndefined();
+		expect(created.session.model?.id).toBe(source.id);
+		expect(created.session.configuredThinkingLevel()).toBe(thinkingLevel);
+	});
+
+	it("a newer durable selection after newSession supersedes an inherited pending receipt", async () => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const inherited = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const newer = getAnthropicModelOrThrow("claude-haiku-4-5");
+		const created = await createSession({ initialModel: source, persist: true });
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const reconcile = SessionTools.prototype.reconcileThinkTool;
+		let held = false;
+		const reconciliation = vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (
+			this: SessionTools,
+			...args
+		) {
+			if (!held && created.session.model?.id === inherited.id) {
+				held = true;
+				entered.resolve();
+				await release.promise;
+			}
+			return reconcile.apply(this, args);
+		});
+		const pending = created.session.setModel(inherited, "default", { persist: true });
+		try {
+			await entered.promise;
+			expect(await created.session.newSession()).toBe(true);
+			expect(await created.session.setModel(newer, "default", { persist: true })).toEqual({ switched: true });
+		} finally {
+			release.resolve();
+			await pending;
+			reconciliation.mockRestore();
+		}
+		expect(created.session.model?.id).toBe(newer.id);
+		expect(created.settings.getModelRole("default")).toBe(modelValue(newer));
+		expect(created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject(
+			{
+				model: modelValue(newer),
+			},
+		);
+	});
+
+	it.each([...receiptPublications])(
+		"a published %s receipt survives clearing context on SDK resume",
+		async publication => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const durable = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const created = await createSession({
+				initialModel: source,
+				persist: true,
+				modelRoles: { default: modelValue(source) },
+				scopedModels: publication === "scoped cycle" ? [{ model: source }, { model: durable }] : undefined,
+			});
+			const manager = created.session.sessionManager;
+			manager.appendModelChange(modelValue(source), "default");
+			manager.appendMessage({ role: "user", content: "clear keeps the selected model", timestamp: Date.now() });
+			manager.appendMessage(createAssistantMessage("ready"));
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === durable.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const availableModels =
+				publication === "available cycle"
+					? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, durable])
+					: undefined;
+			const pending =
+				publication === "setModel"
+					? created.session.setModel(durable, "default", { persist: true })
+					: publishReceipt(created.session, publication, durable);
+			let result: unknown;
+			try {
+				await entered.promise;
+				expect(await created.session.resetSessionContext()).toBeDefined();
+			} finally {
+				release.resolve();
+				result = await pending;
+				reconciliation.mockRestore();
+				availableModels?.mockRestore();
+			}
+			expect(created.session.model?.id).toBe(durable.id);
+			if (publication === "setModel") {
+				expect(result).toEqual({ switched: true });
+				expect(created.settings.getModelRole("default")).toBe(modelValue(durable));
+			}
+			if (publication === "scoped cycle" || publication === "available cycle") {
+				expect(result).toMatchObject({ model: { id: durable.id }, isScoped: publication === "scoped cycle" });
+			}
+			expect(manager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+				model: modelValue(durable),
+			});
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session");
+			await created.session.dispose();
+			session = undefined;
+			const resumed = await createStartupResumeSession(sessionFile);
+			expect(resumed.session.model?.id).toBe(durable.id);
+		},
+	);
+
+	it.each([...receiptPublications])(
+		"a rejected cwd hook publication preserves the pending %s receipt on SDK resume",
+		async publication => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const durable = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const rejected = getAnthropicModelOrThrow("claude-haiku-4-5");
+			const created = await createSession({
+				initialModel: source,
+				persist: true,
+				scopedModels: publication === "scoped cycle" ? [{ model: source }, { model: durable }] : undefined,
+			});
+			const manager = created.session.sessionManager;
+			manager.appendModelChange(modelValue(source), "default");
+			manager.appendMessage({ role: "user", content: "rollback keeps the selected model", timestamp: Date.now() });
+			manager.appendMessage(createAssistantMessage("ready"));
+			const targetDir = TempDir.createSync("@pi-receipt-cwd-target-");
+			const targetManager = SessionManager.create(targetDir.path(), targetDir.path());
+			targetManager.appendMessage({ role: "user", content: "rejected transcript", timestamp: Date.now() });
+			await targetManager.ensureOnDisk();
+			const targetFile = targetManager.getSessionFile();
+			await targetManager.close();
+			if (!targetFile) throw new Error("Expected a target session");
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === durable.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const availableModels =
+				publication === "available cycle"
+					? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, durable])
+					: undefined;
+			const pending = publishReceipt(created.session, publication, durable);
+			let result: unknown;
+			try {
+				await entered.promise;
+				expect(
+					await created.session.switchSession(targetFile, {
+						onCwdChange: async () => {
+							expect(await created.session.setModel(rejected)).toEqual({ switched: true });
+							expect(created.session.model?.id).toBe(rejected.id);
+							return false;
+						},
+					}),
+				).toBe(false);
+				expect(created.session.model?.id).toBe(durable.id);
+			} finally {
+				release.resolve();
+				result = await pending;
+				reconciliation.mockRestore();
+				availableModels?.mockRestore();
+				targetDir.removeSync();
+			}
+			if (publication === "setModel") expect(result).toEqual({ switched: true });
+			if (publication === "scoped cycle" || publication === "available cycle") {
+				expect(result).toMatchObject({ model: { id: durable.id }, isScoped: publication === "scoped cycle" });
+			}
+			expect(created.session.model?.id).toBe(durable.id);
+			expect(manager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+				model: modelValue(durable),
+			});
+			expect(
+				manager.getBranch().some(entry => entry.type === "model_change" && entry.model === modelValue(rejected)),
+			).toBe(false);
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session");
+			await created.session.dispose();
+			session = undefined;
+			const resumed = await createStartupResumeSession(sessionFile);
+			expect(resumed.session.model?.id).toBe(durable.id);
+		},
+	);
+
+	it("a newer durable selection after cwd rollback supersedes the restored pending receipt", async () => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const pendingModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const newer = getAnthropicModelOrThrow("claude-haiku-4-5");
+		const created = await createSession({ initialModel: source, persist: true });
+		const manager = created.session.sessionManager;
+		manager.appendModelChange(modelValue(source), "default");
+		manager.appendMessage({ role: "user", content: "new selection after rollback", timestamp: Date.now() });
+		manager.appendMessage(createAssistantMessage("ready"));
+		const targetDir = TempDir.createSync("@pi-receipt-newer-cwd-target-");
+		const targetManager = SessionManager.create(targetDir.path(), targetDir.path());
+		targetManager.appendMessage({ role: "user", content: "rejected transcript", timestamp: Date.now() });
+		await targetManager.ensureOnDisk();
+		const targetFile = targetManager.getSessionFile();
+		await targetManager.close();
+		if (!targetFile) throw new Error("Expected a target session");
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const reconcile = SessionTools.prototype.reconcileThinkTool;
+		let held = false;
+		const reconciliation = vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (
+			this: SessionTools,
+			...args
+		) {
+			if (!held && created.session.model?.id === pendingModel.id) {
+				held = true;
+				entered.resolve();
+				await release.promise;
+			}
+			return reconcile.apply(this, args);
+		});
+		const pending = created.session.setModel(pendingModel);
+		try {
+			await entered.promise;
+			expect(
+				await created.session.switchSession(targetFile, {
+					onCwdChange: async () => {
+						await created.session.setModel(newer);
+						return false;
+					},
+				}),
+			).toBe(false);
+			expect(created.session.model?.id).toBe(pendingModel.id);
+			expect(await created.session.setModel(newer)).toEqual({ switched: true });
+		} finally {
+			release.resolve();
+			await pending;
+			reconciliation.mockRestore();
+			targetDir.removeSync();
+		}
+		expect(created.session.model?.id).toBe(newer.id);
+		expect(manager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+			model: modelValue(newer),
+		});
+		expect(
+			manager.getBranch().some(entry => entry.type === "model_change" && entry.model === modelValue(pendingModel)),
+		).toBe(false);
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session");
+		await created.session.dispose();
+		session = undefined;
+		const resumed = await createStartupResumeSession(sessionFile);
+		expect(resumed.session.model?.id).toBe(newer.id);
+	});
+
+	it.each([
+		["keeps its requested effort when a rejected cwd hook rolls the switch back", "hook", undefined, Effort.Low],
+		["keeps its requested effort when a late failure rolls the switch back", "late", undefined, Effort.Low],
+		["yields to an effort selected after the rollback", "hook", Effort.High, Effort.High],
+	] as const)("a pending setModelTemporary %s", async (_name, failure, later, expected) => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const pendingModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const created = await createSession({ initialModel: source, persist: true });
+		const manager = created.session.sessionManager;
+		manager.appendMessage({ role: "user", content: "rollback keeps the requested effort", timestamp: Date.now() });
+		manager.appendMessage(createAssistantMessage("ready"));
+		const targetDir = TempDir.createSync("@pi-effort-rollback-target-");
+		const targetManager = SessionManager.create(targetDir.path(), targetDir.path());
+		targetManager.appendMessage({ role: "user", content: "rolled back transcript", timestamp: Date.now() });
+		await targetManager.ensureOnDisk();
+		const targetFile = targetManager.getSessionFile();
+		await targetManager.close();
+		if (!targetFile) throw new Error("Expected a target session");
+		expect(created.session.configuredThinkingLevel()).not.toBe(Effort.Low);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const reconcile = SessionTools.prototype.reconcileThinkTool;
+		let held = false;
+		const reconciliation = vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (
+			this: SessionTools,
+			...args
+		) {
+			if (!held && created.session.model?.id === pendingModel.id) {
+				held = true;
+				entered.resolve();
+				await release.promise;
+			}
+			return reconcile.apply(this, args);
+		});
+		const targetReset =
+			failure === "late"
+				? vi
+						.spyOn(SessionMemory.prototype, "resetContextForNewTranscript")
+						.mockRejectedValueOnce(new Error("target reset failed"))
+				: undefined;
+		const pending = created.session.setModelTemporary(pendingModel, Effort.Low);
+		try {
+			await entered.promise;
+			if (failure === "hook") {
+				expect(await created.session.switchSession(targetFile, { onCwdChange: async () => false })).toBe(false);
+			} else {
+				await expect(created.session.switchSession(targetFile, { preserveLocalCwd: true })).rejects.toThrow(
+					"target reset failed",
+				);
+			}
+			expect(created.session.model?.id).toBe(pendingModel.id);
+			if (later) created.session.setThinkingLevel(later);
+		} finally {
+			release.resolve();
+			await pending;
+			reconciliation.mockRestore();
+			targetReset?.mockRestore();
+			targetDir.removeSync();
+		}
+		expect(created.session.configuredThinkingLevel()).toBe(expected);
+	});
+
+	it.each([...receiptPublications])(
+		"a failed %s assignment does not steal an earlier durable SDK resume receipt",
+		async publication => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const durable = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const rejected = getAnthropicModelOrThrow("claude-haiku-4-5");
+			const created = await createSession({
+				initialModel: source,
+				persist: true,
+				scopedModels: publication === "scoped cycle" ? [{ model: durable }, { model: rejected }] : undefined,
+			});
+			const manager = created.session.sessionManager;
+			manager.appendMessage({ role: "user", content: "keep the successful assignment", timestamp: Date.now() });
+			manager.appendMessage(createAssistantMessage("ready"));
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === durable.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const pending = created.session.setModelTemporary(durable);
+			let failure: unknown;
+			let availableModels: { mockRestore(): void } | undefined;
+			try {
+				await entered.promise;
+				created.session.agent.setModelResolver(model => {
+					if (model.id === rejected.id) throw new Error("rejected model assignment");
+					return model;
+				});
+				if (publication === "available cycle") {
+					availableModels = vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([durable, rejected]);
+				}
+				try {
+					await publishReceipt(created.session, publication, rejected);
+				} catch (error) {
+					failure = error;
+				}
+			} finally {
+				release.resolve();
+				await pending;
+				created.session.agent.setModelResolver(undefined);
+				reconciliation.mockRestore();
+				availableModels?.mockRestore();
+			}
+			expect(failure).toBeInstanceOf(Error);
+			expect(String(failure)).toContain("rejected model assignment");
+			expect(manager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+				model: modelValue(durable),
+			});
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session");
+			await created.session.dispose();
+			session = undefined;
+			const resumed = await createStartupResumeSession(sessionFile);
+			expect(resumed.session.model?.id).toBe(durable.id);
+		},
+	);
+
+	it.each([...receiptPublications])(
+		"an outgoing %s receipt cannot cross a committed switch, reload, or round trip",
+		async publication => {
+			for (const transition of ["switch", "reload", "round trip"] as const) {
+				const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+				const durable = getAnthropicModelOrThrow("claude-sonnet-4-6");
+				const created = await createSession({
+					initialModel: source,
+					persist: true,
+					scopedModels: publication === "scoped cycle" ? [{ model: source }, { model: durable }] : undefined,
+				});
+				const manager = created.session.sessionManager;
+				manager.appendModelChange(modelValue(source), "default");
+				manager.appendMessage({ role: "user", content: "origin transcript", timestamp: Date.now() });
+				manager.appendMessage(createAssistantMessage("ready"));
+				await manager.flush();
+				const originFile = manager.getSessionFile();
+				if (!originFile) throw new Error("Expected an origin session");
+				const targetFile = await writeRoleModelSession(modelValue(source), modelValue(source));
+				const entered = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const reconcile = SessionTools.prototype.reconcileThinkTool;
+				let held = false;
+				const reconciliation = vi
+					.spyOn(SessionTools.prototype, "reconcileThinkTool")
+					.mockImplementation(async function (this: SessionTools, ...args) {
+						if (!held && created.session.model?.id === durable.id) {
+							held = true;
+							entered.resolve();
+							await release.promise;
+						}
+						return reconcile.apply(this, args);
+					});
+				const availableModels =
+					publication === "available cycle"
+						? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, durable])
+						: undefined;
+				const pending = publishReceipt(created.session, publication, durable);
+				let result: unknown;
+				try {
+					await entered.promise;
+					await created.session.setModelTemporary(source, undefined, { ephemeral: true });
+					await created.session.switchSession(transition === "reload" ? originFile : targetFile);
+					if (transition === "round trip") await created.session.switchSession(originFile);
+				} finally {
+					release.resolve();
+					result = await pending;
+					reconciliation.mockRestore();
+					availableModels?.mockRestore();
+				}
+				expect(
+					manager.getBranch().some(entry => entry.type === "model_change" && entry.model === modelValue(durable)),
+				).toBe(false);
+				expect(created.session.model?.id).toBe(source.id);
+				if (publication === "setModel") expect(result).toEqual({ switched: false });
+				else if (publication === "setModelTemporary") expect(result).toBe(false);
+				else expect(result).toBeUndefined();
+				const activeFile = manager.getSessionFile();
+				if (!activeFile) throw new Error("Expected an active session");
+				await created.session.dispose();
+				session = undefined;
+				const resumed = await createStartupResumeSession(activeFile);
+				expect(resumed.session.model?.id).toBe(source.id);
+				await resumed.session.dispose();
+				session = undefined;
+			}
+		},
+	);
+
+	it.each([...receiptPublications])(
+		"a preparation-pending %s belongs to its origin generation, including switch rollback",
+		async publication => {
+			for (const rollback of [false, true]) {
+				const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+				const durable = getAnthropicModelOrThrow("claude-sonnet-4-6");
+				const created = await createSession({
+					initialModel: source,
+					persist: true,
+					scopedModels: publication === "scoped cycle" ? [{ model: source }, { model: durable }] : undefined,
+				});
+				const manager = created.session.sessionManager;
+				manager.appendModelChange(modelValue(source), "default");
+				manager.appendMessage({ role: "user", content: "metadata origin", timestamp: Date.now() });
+				manager.appendMessage(createAssistantMessage("ready"));
+				const targetFile = await writeRoleModelSession(modelValue(source), modelValue(source));
+				const entered = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const refresh = sharedModelRegistry.refreshSelectedModelMetadata.bind(sharedModelRegistry);
+				const metadata = vi
+					.spyOn(sharedModelRegistry, "refreshSelectedModelMetadata")
+					.mockImplementation(async model => {
+						if (model.id === durable.id) {
+							entered.resolve();
+							await release.promise;
+						}
+						return refresh(model);
+					});
+				const getApiKey = sharedModelRegistry.getApiKey.bind(sharedModelRegistry);
+				const apiKey = vi.spyOn(sharedModelRegistry, "getApiKey").mockImplementation(async (...args) => {
+					if (publication === "available cycle") {
+						entered.resolve();
+						await release.promise;
+					}
+					return getApiKey(...args);
+				});
+				const getProviderKey = sharedModelRegistry.getApiKeyForProvider.bind(sharedModelRegistry);
+				const providerKey = vi
+					.spyOn(sharedModelRegistry, "getApiKeyForProvider")
+					.mockImplementation(async (...args) => {
+						if (publication === "scoped cycle") {
+							entered.resolve();
+							await release.promise;
+						}
+						return getProviderKey(...args);
+					});
+				const availableModels =
+					publication === "available cycle"
+						? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, durable])
+						: undefined;
+				const switchEntered = Promise.withResolvers<void>();
+				const releaseSwitch = Promise.withResolvers<void>();
+				const setSessionFile = manager.setSessionFile.bind(manager);
+				const switching = vi.spyOn(manager, "setSessionFile").mockImplementation(async file => {
+					if (rollback) {
+						switchEntered.resolve();
+						await releaseSwitch.promise;
+						throw new Error("receipt switch rollback");
+					}
+					return setSessionFile(file);
+				});
+				const pending = publishReceipt(created.session, publication, durable);
+				let transition: Promise<unknown> | undefined;
+				let failure: unknown;
+				try {
+					await entered.promise;
+					transition = created.session.switchSession(targetFile).catch(error => {
+						failure = error;
+					});
+					if (rollback) {
+						await switchEntered.promise;
+						release.resolve();
+					} else {
+						await transition;
+					}
+				} finally {
+					release.resolve();
+					releaseSwitch.resolve();
+					await transition;
+					await pending;
+					metadata.mockRestore();
+					apiKey.mockRestore();
+					providerKey.mockRestore();
+					switching.mockRestore();
+					availableModels?.mockRestore();
+				}
+				if (rollback) expect(String(failure)).toContain("receipt switch rollback");
+				expect(created.session.model?.id).toBe(rollback ? durable.id : source.id);
+				expect(
+					manager.getBranch().some(entry => entry.type === "model_change" && entry.model === modelValue(durable)),
+				).toBe(rollback);
+				const activeFile = manager.getSessionFile();
+				if (!activeFile) throw new Error("Expected an active session");
+				await created.session.dispose();
+				session = undefined;
+				const resumed = await createStartupResumeSession(activeFile);
+				expect(resumed.session.model?.id).toBe(rollback ? durable.id : source.id);
+				await resumed.session.dispose();
+				session = undefined;
+			}
+		},
+	);
+
+	it("waits for a pending switch rollback before recording an eligible durable receipt", async () => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const durable = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const created = await createSession({ initialModel: source, persist: true });
+		const manager = created.session.sessionManager;
+		manager.appendMessage({ role: "user", content: "receipt rollback origin", timestamp: Date.now() });
+		manager.appendMessage(createAssistantMessage("ready"));
+		const targetFile = await writeRoleModelSession(modelValue(source), modelValue(source));
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const reconcile = SessionTools.prototype.reconcileThinkTool;
+		let held = false;
+		const reconciliation = vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (
+			this: SessionTools,
+			...args
+		) {
+			if (!held && created.session.model?.id === durable.id) {
+				held = true;
+				entered.resolve();
+				await release.promise;
+			}
+			return reconcile.apply(this, args);
+		});
+		const switchEntered = Promise.withResolvers<void>();
+		const releaseSwitch = Promise.withResolvers<void>();
+		const switching = vi.spyOn(manager, "setSessionFile").mockImplementation(async () => {
+			switchEntered.resolve();
+			await releaseSwitch.promise;
+			throw new Error("receipt rollback");
+		});
+		let published = false;
+		const pending = created.session.setModelTemporary(durable).then(result => {
+			published = true;
+			return result;
+		});
+		let transition: Promise<unknown> | undefined;
+		let failure: unknown;
+		try {
+			await entered.promise;
+			await created.session.setModelTemporary(source, undefined, { ephemeral: true });
+			transition = created.session.switchSession(targetFile).catch(error => {
+				failure = error;
+			});
+			await switchEntered.promise;
+			release.resolve();
+			await setImmediate();
+			expect(published).toBe(false);
+			expect(
+				manager.getBranch().some(entry => entry.type === "model_change" && entry.model === modelValue(durable)),
+			).toBe(false);
+		} finally {
+			release.resolve();
+			releaseSwitch.resolve();
+			await transition;
+			await pending;
+			reconciliation.mockRestore();
+			switching.mockRestore();
+		}
+		expect(String(failure)).toContain("receipt rollback");
+		expect(manager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+			model: modelValue(durable),
+		});
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session");
+		await created.session.dispose();
+		session = undefined;
+		const resumed = await createStartupResumeSession(sessionFile);
+		expect(resumed.session.model?.id).toBe(durable.id);
+	});
+
+	it("retains a successful model result when final tool sync crosses a rejected switch", async () => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const durable = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const created = await createSession({ initialModel: source, persist: true });
+		const manager = created.session.sessionManager;
+		manager.appendMessage({ role: "user", content: "final sync origin", timestamp: Date.now() });
+		manager.appendMessage(createAssistantMessage("ready"));
+		const targetDir = TempDir.createSync("@pi-final-sync-target-");
+		const targetManager = SessionManager.create(targetDir.path(), targetDir.path());
+		targetManager.appendMessage({ role: "user", content: "other transcript", timestamp: Date.now() });
+		await targetManager.ensureOnDisk();
+		const targetFile = targetManager.getSessionFile();
+		await targetManager.close();
+		if (!targetFile) throw new Error("Expected a target session");
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const sync = SessionTools.prototype.syncAfterModelChange;
+		let held = false;
+		const syncing = vi.spyOn(SessionTools.prototype, "syncAfterModelChange").mockImplementation(async function (
+			this: SessionTools,
+			...args
+		) {
+			await sync.apply(this, args);
+			if (!held && created.session.model?.id === durable.id) {
+				held = true;
+				entered.resolve();
+				await release.promise;
+			}
+		});
+		const switchEntered = Promise.withResolvers<void>();
+		const releaseSwitch = Promise.withResolvers<void>();
+		const pending = created.session.setModel(durable);
+		let transition: Promise<boolean> | undefined;
+		let result: { switched: boolean } | undefined;
+		let switched: boolean | undefined;
+		try {
+			await entered.promise;
+			transition = created.session.switchSession(targetFile, {
+				onCwdChange: async () => {
+					switchEntered.resolve();
+					await releaseSwitch.promise;
+					return false;
+				},
+			});
+			await switchEntered.promise;
+			release.resolve();
+			await setImmediate();
+		} finally {
+			release.resolve();
+			releaseSwitch.resolve();
+			switched = await transition;
+			result = await pending;
+			syncing.mockRestore();
+			targetDir.removeSync();
+		}
+		expect(switched).toBe(false);
+		expect(result).toEqual({ switched: true });
+		expect(created.session.model?.id).toBe(durable.id);
+		expect(manager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+			model: modelValue(durable),
+		});
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session");
+		await created.session.dispose();
+		session = undefined;
+		const resumed = await createStartupResumeSession(sessionFile);
+		expect(resumed.session.model?.id).toBe(durable.id);
+	});
+
+	it("keeps live subscriber publications distinct from durable SDK resume ownership", async () => {
+		const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const durable = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const created = await createSession({ initialModel: source, persist: true });
+		const manager = created.session.sessionManager;
+		manager.appendMessage({ role: "user", content: "subscriber handoff", timestamp: Date.now() });
+		manager.appendMessage(createAssistantMessage("ready"));
+		let ephemeral: Promise<boolean> | undefined;
+		const unsubscribe = created.session.subscribe(event => {
+			if (event.type === "model_changed" && created.session.model?.id === durable.id) {
+				ephemeral = created.session.setModelTemporary(source, undefined, { ephemeral: true });
+			}
+		});
+		try {
+			await created.session.setModel(durable);
+			await ephemeral;
+		} finally {
+			unsubscribe();
+		}
+		expect(ephemeral).toBeDefined();
+		expect(created.session.model?.id).toBe(source.id);
+		expect(
+			manager
+				.getBranch()
+				.filter(entry => entry.type === "model_change" && entry.role !== EPHEMERAL_MODEL_CHANGE_ROLE)
+				.at(-1),
+		).toMatchObject({
+			model: modelValue(durable),
+		});
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session");
+		await created.session.dispose();
+		session = undefined;
+		const resumed = await createStartupResumeSession(sessionFile);
+		expect(resumed.session.model?.id).toBe(durable.id);
+	});
+
+	it.each(["setModel", "setModelTemporary", "scoped cycle", "available cycle"] as const)(
+		"an effort-only selection still journals the current %s model for resume",
+		async publication => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const created = await createSession({
+				initialModel: source,
+				persist: true,
+				scopedModels: publication === "scoped cycle" ? [{ model: source }, { model: target }] : undefined,
+			});
+			const manager = created.session.sessionManager;
+			manager.appendMessage({ role: "user", content: "keep the selected model", timestamp: Date.now() });
+			manager.appendMessage(createAssistantMessage("ready"));
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === target.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const availableModels =
+				publication === "available cycle"
+					? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, target])
+					: undefined;
+			const pending =
+				publication === "setModel"
+					? created.session.setModel(target)
+					: publication === "setModelTemporary"
+						? created.session.setModelTemporary(target)
+						: created.session.cycleModel();
+			try {
+				await entered.promise;
+				created.session.setThinkingLevel(Effort.Low);
+			} finally {
+				release.resolve();
+				await pending;
+				reconciliation.mockRestore();
+				availableModels?.mockRestore();
+			}
+
+			expect(manager.getBranch().findLast(entry => entry.type === "model_change")).toMatchObject({
+				model: modelValue(target),
+			});
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session");
+			await created.session.dispose();
+			session = undefined;
+
+			const resumed = await createStartupResumeSession(sessionFile);
+			expect(resumed.session.model?.id).toBe(target.id);
+		},
+	);
+
+	it("startup resume preserves configured routing fields for an already pinned upstream", async () => {
+		const selector = "openrouter/anthropic/claude-sonnet-4.5";
+		const modelsPath = path.join(tempDir.path(), "models.yml");
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					openrouter: {
+						modelOverrides: {
+							"anthropic/claude-sonnet-4.5": {
+								compat: { openRouterRouting: { only: ["anthropic"], order: ["anthropic", "google"] } },
+							},
+						},
+					},
+				},
+			}),
+		);
+		const modelRegistry = new ModelRegistry(sharedAuthStorage, modelsPath);
+		const configured = modelRegistry.find("openrouter", "anthropic/claude-sonnet-4.5");
+		if (!configured) throw new Error("Expected configured OpenRouter model");
+		expect(configured.compat).toMatchObject({
+			openRouterRouting: { only: ["anthropic"], order: ["anthropic", "google"] },
+		});
+		const sessionFile = await writeRoleModelSession(`${selector}@anthropic`, `${selector}@anthropic`, "temporary");
+
+		const resumed = await createStartupResumeSession(sessionFile, Settings.isolated(), modelRegistry);
+
+		expect(formatModelStringWithRouting(resumed.session.model!)).toBe(`${selector}@anthropic`);
+		expect(resumed.session.model?.compat).toMatchObject({
+			openRouterRouting: { only: ["anthropic"], order: ["anthropic", "google"] },
+		});
 	});
 
 	it("activates auto thinking on startup resume when modelRoles.default carries an explicit :auto suffix", async () => {

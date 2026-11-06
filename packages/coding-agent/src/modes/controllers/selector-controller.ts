@@ -763,33 +763,35 @@ export class SelectorController {
 		selector: string,
 		thinkingLevel: ConfiguredThinkingLevel | undefined,
 		compactFirst: boolean,
-	): Promise<void> {
+	): Promise<boolean> {
 		const target = this.ctx.viewSession;
 		const focusedAgentId = this.ctx.focusedAgentId;
 		const apply = async () => {
 			const level = thinkingLevel ?? target.resolveTemporaryModelThinkingLevel(model);
-			await target.setModelTemporary(model, level);
+			if (!(await target.setModelTemporary(model, level))) return false;
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
 			if (focusedAgentId) {
 				this.ctx.showStatus(`Agent ${focusedAgentId} model: ${selector}`);
-				return;
+				return true;
 			}
 			const roleSelectorHint = appKey(this.ctx.keybindings, "app.model.select") || formatKeyHint("alt+m");
 			this.ctx.showStatus(`Session-only model: ${selector}. Use ${roleSelectorHint} or /model for roles.`);
+			return true;
 		};
 		if (!compactFirst || focusedAgentId) {
-			await apply();
-			return;
+			return apply();
 		}
 		let switched = false;
+		let applied = false;
 		const switchAfterCompaction = async (outcome: CompactionOutcome) => {
 			if (switched || outcome !== "ok") return;
 			switched = true;
-			await apply();
+			applied = await apply();
 		};
 		const outcome = await this.ctx.handleCompactCommand(undefined, undefined, switchAfterCompaction);
 		await switchAfterCompaction(outcome);
+		return applied;
 	}
 
 	/**
@@ -857,8 +859,8 @@ export class SelectorController {
 						// Over-context pick: close the picker first so the compaction
 						// loader is visible.
 						if (overContext) done();
-						await this.#applySessionModel(model, selector, undefined, overContext);
-						if (!overContext) done();
+						const applied = await this.#applySessionModel(model, selector, undefined, overContext);
+						if (!overContext && applied) done();
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
@@ -866,7 +868,7 @@ export class SelectorController {
 				onPickRole: async entry => {
 					if (!isCurrent() || selectOnly) return;
 					try {
-						await this.ctx.viewSession.applyRoleModel(entry);
+						if (!(await this.ctx.viewSession.applyRoleModel(entry))) return;
 						this.ctx.statusLine.invalidate();
 						this.ctx.updateEditorBorderColor();
 						this.ctx.showModelCycleTrack(
@@ -986,18 +988,17 @@ export class SelectorController {
 							} else {
 								const { switched } = await this.ctx.session.setModel(model, role, {
 									selector,
-									thinkingLevel: isAuto ? ThinkingLevel.Inherit : concreteThinking,
-									persist: targetScope === "global",
+									thinkingLevel:
+										isAuto || (targetScope === "project" && concreteThinking === undefined)
+											? ThinkingLevel.Inherit
+											: concreteThinking,
+									persist: true,
+									persistAutoThinking: isAuto,
+									persistScope: targetScope,
 								});
 								if (!switched) return false;
-								if (targetScope === "project") {
-									this.ctx.settings.setProjectModelRole(
-										"default",
-										formatModelSelectorValue(selectorValue, concreteThinking),
-									);
-								}
 								if (isAuto) {
-									this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
+									this.ctx.session.setThinkingLevel(AUTO_THINKING);
 								} else if (concreteThinking && concreteThinking !== ThinkingLevel.Inherit) {
 									this.ctx.session.setThinkingLevel(concreteThinking);
 								}

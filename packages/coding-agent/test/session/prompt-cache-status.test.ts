@@ -211,6 +211,31 @@ describe("AgentSession prompt-cache status", () => {
 			expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject(expected());
 		});
 
+		it("stops warming the old upstream route when only the route changes", async () => {
+			const base = getBundledModel("openrouter", "anthropic/claude-sonnet-4.5");
+			model = {
+				...base,
+				promptCache: { short: 300 },
+				compat: { openRouterRouting: { only: ["google"] } },
+			} as Model;
+			await createSession(model);
+			session.setCacheWarmingMode("idle");
+			send();
+			session.agent.setModel({
+				...model,
+				compat: { openRouterRouting: { only: ["anthropic"] } },
+			} as Model);
+
+			expect(session.getPromptCacheStatus()).toMatchObject({
+				state: "cold",
+				reason: { kind: "model", from: model.name, to: model.name },
+				warming: { state: "inactive", reason: "conversation context changed" },
+			});
+			vi.advanceTimersByTime(REFRESH_DELAY_MS);
+			await drain();
+			expect(session.sessionManager.getEntries().some(entry => entry.type === "model_usage")).toBe(false);
+		});
+
 		it("follows a refresh that hits past the first lifetime, and turns cold when one misses", async () => {
 			session.setCacheWarmingMode("idle");
 			const sentAt = send();

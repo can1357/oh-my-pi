@@ -2501,10 +2501,13 @@ export class SessionManager {
 	 * Materializing the successor there would only leave a zero-turn stub
 	 * behind when the user quits, so it keeps the ordinary lazy gate and writes
 	 * once it has content.
+	 * `onReset` runs synchronously after journal replacement, before persistence
+	 * yields, so callers can retire work owned by the outgoing journal.
 	 */
-	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
+	async newSession(options?: NewSessionOptions, onReset?: () => void): Promise<string | undefined> {
 		await this.#drainAndCloseWriter();
 		const sessionFile = this.#resetToNewSession(options);
+		onReset?.();
 		if (options?.drop !== true) await this.ensureOnDisk();
 		return sessionFile;
 	}

@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a rejected transcript switch reviving an automatic prewalk target after an explicit model or thinking selection consumed its arm, while preserving pending handoffs when no selection intervenes ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed outgoing model selections publishing into a new session while its journal header is being persisted, without canceling selections when the journal reset fails ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed superseded session-only and role selections confirming an obsolete model in `/switch`, model pickers, or plan approval, including selections on worker sessions ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed published global model saves being lost across reloads or session switches while keeping project saves bound to their original session scope ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed delayed model saves overwriting a newer saved thinking preference with Auto, and model-hub callbacks or scoped cycles applying stale effort or status after an effort-only selection, without treating `/new` effort restoration as a new selection ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed saved global and project default models and automatic-thinking preferences being lost when a session-only model switch overtakes their selection ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed overlapping model cycles overriding a newer temporary model's thinking effort or reporting a stale model selection ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed `/prewalk restart` silently cancelling after a superseded planning-model selection or a changed arm; it now explains the cancellation and reports the current model ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed overlapping model selections and model cycles restoring an older model instead of the latest resume-eligible selection, including when a later ephemeral fallback is active ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed delayed model selections writing into a switched or reloaded session, or losing the last successful resume selection when another model assignment fails ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed `/clear` or a rejected session switch losing an already-applied model selection on resume ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed a rolled-back session switch dropping the thinking level requested by a model selection that was still completing ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed `/new` losing upstream pins on resume while a model selection finishes ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed prewalk skipping a handoff to a target that differs from the active model only by its upstream route, in main sessions and subagents ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed SDK, RPC, and ACP clients missing route-only model changes, including when reloading or selecting a model in the current session ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed route-only prewalk handoffs resetting the configured thinking effort when the target did not specify one ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed OpenRouter upstream switches retaining strict-tool and reasoning-effort downgrades in both the default Responses transport and chat fallback ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed idle prompt-cache warming refreshing the previous upstream after a route-only model switch ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed a slow automatic thinking classification overriding a model or thinking level selected meanwhile ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed an explicit model or thinking selection leaving a pending auto-prewalk handoff that later switched away from it ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed an automatic prewalk handoff overriding a newer model, thinking level, or `/prewalk` selection, including SDK selections and takeovers during a rolled-back session switch ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed overlapping model switches delivering a stale prewalk checklist, overriding a newer SDK subscriber's thinking selection, or restoring over an explicit model pick on `/new` ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed delayed model or role selections overriding a newer temporary selection's thinking effort or leaving stale editing instructions ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed project default model choices being lost when a temporary model selection takes over ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed automatic-thinking choices being lost when a temporary model switch overtakes a saved default-model selection ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed a superseded manual prewalk handoff switching away from an explicit model pick again on a later edit/write ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed a successful matching `/prewalk restart` losing its pending handoff when an older switch finished afterward ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed auto-prewalk leaving later tasks on a context-promoted handoff model instead of the model the task started on ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed an automatic prewalk handoff not returning to its planning model after `prewalk.auto` was set to `suggest` or `off`, or after `/prewalk off` ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed losing pinned upstream routes after initial model selection, explicit session restoration, or parked-subagent revival ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed cycling thinking on models without effort selectors canceling a pending automatic prewalk handoff ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed automatic prewalk restoring the planning model after a retry fallback had selected a different upstream route ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed switching sessions after an automatic prewalk handoff overriding the opened session's saved model and thinking level on its first prompt ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 ## [18.17.0] - 2026-11-06
 
 ### Added

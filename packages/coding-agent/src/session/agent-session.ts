@@ -127,7 +127,9 @@ import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mod
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	disabledProviderIds,
+	formatModelStringWithRouting,
 	getModelMatchPreferences,
+	getSingleUpstreamRoute,
 	type ResolvedModelRoleValue,
 	resolveCliModel,
 	resolveSessionModelSelector,
@@ -2198,7 +2200,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			settings: this.settings,
 			model: () => this.model,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
-			restoreThinkingLevel: level => this.#models.restoreThinkingLevel(level),
 			resolveDefaultPrewalk: () => this.#resolveDefaultPrewalk(),
 			resolveAutoPrewalkTarget: () => this.#resolveAutoPrewalkTarget(),
 			classifyAutoPrewalk: (request, signal) =>
@@ -2216,6 +2217,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			setModelTemporary: (model, thinkingLevel) =>
 				this.#models.setModelTemporary(model, thinkingLevel, { prewalk: true }, "automatic"),
+			invalidateAutomaticSelection: () => this.#models.invalidateAutomaticSelection(),
 			setActiveToolsByName: names => this.setActiveToolsByName(names),
 			restoreNonMCPToolPresentation: (nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames) =>
 				this.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames),
@@ -2271,13 +2273,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			model: () => this.model,
 			sessionId: () => this.sessionId,
 			promptGeneration: () => this.#promptGeneration,
+			sessionGenerationSettled: () => this.#sessionGenerationSettled,
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
-			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
-				await this.#setModelWithProviderSessionReset(model);
-				// Only a completed explicit selection, including same-model reselection, takes ownership.
-				if (selection === "explicit") this.#prewalk.releaseHandoff();
-			},
+			setModelWithProviderSessionReset: (model, selection, onPublished) =>
+				this.#setModelWithProviderSessionReset(model, selection, onPublished),
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
 			magicKeywordEnabled: keyword => this.#magicKeywordEnabled(keyword),
@@ -2976,8 +2976,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			runRecoveryCompactionWithRollback: (reason, message, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, options),
 			parseRetryAfterMsFromError: errorMessage => this.#recovery.parseRetryAfterMsFromError(errorMessage),
+			// Maintenance switches models only to promote context.
 			setModelTemporary: (model, thinkingLevel, options) =>
-				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
+				this.#prewalk.followContextPromotion(() =>
+					this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
+				),
 			abort: options => this.abort(options),
 			abortHandoff: () => this.abortHandoff(),
 		};
@@ -6105,7 +6108,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return memo.shape;
 		}
 		const shape: PromptCacheShape = {
-			model: model ? `${model.provider}/${model.id}` : "",
+			model: model ? formatModelStringWithRouting(model) : "",
 			modelName: model?.name ?? "no model",
 			thinkingLevel,
 			// The specs as the wire carries them: a refreshed MCP tool keeps its name.
@@ -11789,10 +11792,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				} else {
 					await this.sessionManager.flush();
 				}
-				await this.sessionManager.newSession({
-					...options,
-					additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
-				});
+				await this.sessionManager.newSession(
+					{
+						...options,
+						additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
+					},
+					() => this.#models.invalidatePendingModelSelections(),
+				);
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
 				// conversation's advisor spend is retired with it. Clearing at the commit
@@ -12054,6 +12060,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * always take effect; if the current transcript is too large for the target
 	 * model, the next prompt's compaction/error path owns that recovery instead
 	 * of leaving the session pinned to the old model.
+	 * With persist, writes global model roles unless persistScope is "project".
+	 * Published global saves survive reload/session switches unless a newer global save owns them;
+	 * project model-role saves remain bound to their originating session scope. Temporary takeovers do not
+	 * discard still-owned model-role saves. A newer persisted effort independently supersedes
+	 * persistAutoThinking without canceling the model-role save.
+	 * @returns Whether this call still owns the live model and effort in the current session scope;
+	 * false does not imply that a still-owned durable save was discarded.
 	 * @throws Error if no API key available for the model
 	 */
 	async setModel(
@@ -12063,17 +12076,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			/** With persist, saves global Auto unless a newer persisted effort supersedes it; never changes live thinking. */
+			persistAutoThinking?: boolean;
+			persistScope?: "global" | "project";
 		},
 	): Promise<{ switched: boolean }> {
 		return this.#models.setModel(model, role, options);
 	}
 
-	/** Selects a model for this session without updating persisted model settings. */
-	setModelTemporary(
+	/** Selects a session-only model; returns whether this call still owns the active selection. */
+	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
-	): Promise<void> {
+	): Promise<boolean> {
 		return this.#models.setModelTemporary(model, thinkingLevel, options);
 	}
 
@@ -12087,8 +12103,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#models.getRoleModelCycle(roleOrder);
 	}
 
-	/** Applies a resolved role model without changing global settings. */
-	applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
+	/** Applies a role model; returns whether this call still owns the active selection. */
+	async applyRoleModel(entry: ResolvedRoleModel): Promise<boolean> {
 		return this.#models.applyRoleModel(entry);
 	}
 
@@ -12107,14 +12123,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Selects the session thinking level and optionally persists it as the default. */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
-		this.#prewalk.releaseHandoff();
+		this.#prewalk.releaseHandoffAndAutoArm();
 		this.#models.setThinkingLevel(level, persist);
 	}
 
 	/** Advances through the thinking selectors supported by the active model. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
-		this.#prewalk.releaseHandoff();
-		return this.#models.cycleThinkingLevel();
+		const level = this.#models.cycleThinkingLevel();
+		if (level !== undefined) this.#prewalk.releaseHandoffAndAutoArm();
+		return level;
 	}
 
 	/** Lists all selectable effort selectors for the active model. */
@@ -12690,9 +12707,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
+	async #setModelWithProviderSessionReset(
+		model: Model,
+		selection?: "explicit" | "automatic",
+		onPublished?: () => void,
+	): Promise<void> {
 		const currentModel = this.model;
-		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
+		const isChanging =
+			!currentModel || formatModelStringWithRouting(currentModel) !== formatModelStringWithRouting(model);
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 			if (isChanging) {
@@ -12700,6 +12722,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 		this.agent.setModel(model);
+		// Consume the old auto arm before capturing this publication's selection epoch.
+		if (selection === "explicit") this.#prewalk.releaseHandoffAndAutoArm();
+		onPublished?.();
 		// Model mutations driven through ModelControls (explicit /model, prewalk
 		// hand-offs, retry-fallback, model cycling) funnel through this method,
 		// so this is the single point that notifies subscribers (ACP config
@@ -12810,15 +12835,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// `openai-completions` sessions are keyed `openai-completions:<provider>:<resolvedBaseUrl>:<modelId>`
 		// and cache backend-specific decisions (strict-tools disable scopes, reasoning-effort
 		// fallbacks). The resolved request base URL can differ from the catalog `model.baseUrl`
-		// (Moonshot env override, Alibaba Coding Plan enterprise URL, Azure deployment URL),
-		// so evict by provider prefix when the user moves away from that completions backend.
+		// (Moonshot env override, Alibaba Coding Plan enterprise URL, Azure deployment URL).
+		// OpenRouter's chat fallback owns the same cache; both transports negotiate per upstream.
+		// Evict by provider prefix when the user moves away from that completions backend.
 		let completionsPrefixToEvict: string | undefined;
-		if (currentModel.api === "openai-completions") {
+		if (currentModel.api === "openai-completions" || currentModel.api === "openrouter") {
 			const currentScope = `${currentModel.provider}:${currentModel.baseUrl ?? ""}`;
 			const nextScope =
-				nextModel.api === "openai-completions" ? `${nextModel.provider}:${nextModel.baseUrl ?? ""}` : undefined;
-			if (currentScope !== nextScope) {
+				nextModel.api === currentModel.api ? `${nextModel.provider}:${nextModel.baseUrl ?? ""}` : undefined;
+			if (currentScope !== nextScope || getSingleUpstreamRoute(currentModel) !== getSingleUpstreamRoute(nextModel)) {
 				completionsPrefixToEvict = `openai-completions:${currentModel.provider}:`;
+				if (currentModel.api === "openrouter") {
+					providerKeys.add(`openai-responses:${currentModel.provider}`);
+				}
 			}
 		}
 
@@ -13564,6 +13593,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// record on success but stays valid if the switch is rolled back to this same session.
 		const previousIrcPending = this.#irc.clearPending();
 		const previousSessionGeneration = this.#sessionGeneration++;
+		const previousModelPublication = this.#models.beginPublicationScope();
 		const generationSettled = Promise.withResolvers<void>();
 		const previousSessionGenerationSettled = this.#sessionGenerationSettled;
 		this.#sessionGenerationSettled = generationSettled.promise;
@@ -13680,8 +13710,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const shouldResetProviderState =
 					switchingToDifferentSession ||
 					(currentModel !== undefined &&
-						(currentModel.provider !== targetModel.provider ||
-							currentModel.id !== targetModel.id ||
+						(formatModelStringWithRouting(currentModel) !== formatModelStringWithRouting(targetModel) ||
 							currentModel.api !== targetModel.api));
 				if (shouldResetProviderState) {
 					await this.#setModelWithProviderSessionReset(targetModel);
@@ -13693,8 +13722,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					targetModelStrings.length > 0
 						? resolveSessionModelSelector(this.#modelRegistry, targetModelStrings[0])?.model
 						: undefined;
-				if (explicitModel && !(savedModel && modelsAreEqual(savedModel, targetModel))) {
-					this.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`);
+				if (
+					explicitModel &&
+					(!savedModel || formatModelStringWithRouting(savedModel) !== formatModelStringWithRouting(targetModel))
+				) {
+					this.sessionManager.appendModelChange(formatModelStringWithRouting(targetModel));
 				}
 			}
 
@@ -13792,6 +13824,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			if (switchingToDifferentSession) this.#prewalk.releaseHandoffAndAutoArm();
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
@@ -13809,6 +13842,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			);
 			this.#irc.restorePending(previousIrcPending);
 			this.#sessionGeneration = previousSessionGeneration;
+			this.#models.restorePublicationScope(previousModelPublication);
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
@@ -13840,7 +13874,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (previousModel) {
 				const rolledBackModel = this.model;
 				this.agent.setModel(previousModel);
-				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
+				modelRolledBack =
+					!rolledBackModel ||
+					formatModelStringWithRouting(rolledBackModel) !== formatModelStringWithRouting(previousModel);
 			}
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);

@@ -14,7 +14,7 @@ import { AUTO_THINKING, clampAutoThinkingEffort, resolveProvisionalAutoLevel } f
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
-import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgDefaultThinkingLevel, cfgPrewalkAuto } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("AgentSession role model thinking behavior", () => {
 	let tempDir: TempDir;
@@ -398,6 +398,125 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.thinkingLevel).toBe(Effort.Medium);
 		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Medium);
 		expect(session.agent.state.thinkingLevel).toBe(Effort.Medium);
+	});
+
+	it.each(["same model", "other model", "auto effort", "concrete-to-auto effort"] as const)(
+		"discards a delayed auto-thinking judgment after explicit %s selection",
+		async selection => {
+			const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const otherModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			await createSession({
+				initialModelId: model.id,
+				initialThinkingLevel: Effort.High,
+				modelRoles: { default: `${model.provider}/${model.id}` },
+			});
+			cfgDefaultThinkingLevel.set(sessionSettings, AUTO_THINKING);
+			cfgPrewalkAuto.set(sessionSettings, "off");
+			session.setThinkingLevel(AUTO_THINKING);
+			vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			const classifierStarted = Promise.withResolvers<void>();
+			const releaseClassifier = Promise.withResolvers<void>();
+			vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async () => {
+				classifierStarted.resolve();
+				await releaseClassifier.promise;
+				return Effort.Low;
+			});
+			const events: Array<{ thinkingLevel: unknown; configured: unknown; resolved: unknown }> = [];
+			session.subscribe(event => {
+				if (event.type === "thinking_level_changed") {
+					events.push({
+						thinkingLevel: event.thinkingLevel,
+						configured: event.configured,
+						resolved: event.resolved,
+					});
+				}
+			});
+
+			const prompt = session.prompt("Classify this turn");
+			let eventBoundary = 0;
+			let selectedEffort: Agent["state"]["thinkingLevel"];
+			let selectedEntries = session.sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "thinking_level_change");
+			try {
+				await classifierStarted.promise;
+				if (selection === "concrete-to-auto effort") session.setThinkingLevel(session.thinkingLevel);
+				if (selection === "auto effort" || selection === "concrete-to-auto effort") {
+					session.setThinkingLevel(AUTO_THINKING);
+				} else {
+					await session.setModel(selection === "same model" ? model : otherModel);
+				}
+				eventBoundary = events.length;
+				selectedEffort = session.agent.state.thinkingLevel;
+				selectedEntries = session.sessionManager
+					.getEntries()
+					.filter(entry => entry.type === "thinking_level_change");
+			} finally {
+				releaseClassifier.resolve();
+			}
+			await prompt;
+
+			expect(session.model?.id).toBe(selection === "other model" ? otherModel.id : model.id);
+			expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+			expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+			expect(session.thinkingLevel).toBe(selectedEffort);
+			expect(session.agent.state.thinkingLevel).toBe(selectedEffort);
+			expect(events.slice(eventBoundary)).toEqual([]);
+			expect(session.sessionManager.getEntries().filter(entry => entry.type === "thinking_level_change")).toEqual(
+				selectedEntries,
+			);
+		},
+	);
+
+	it("applies a delayed auto-thinking judgment across a same-identity model metadata refit", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		cfgDefaultThinkingLevel.set(sessionSettings, AUTO_THINKING);
+		cfgPrewalkAuto.set(sessionSettings, "off");
+		session.setThinkingLevel(AUTO_THINKING);
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		const classifierStarted = Promise.withResolvers<void>();
+		const releaseClassifier = Promise.withResolvers<void>();
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async () => {
+			classifierStarted.resolve();
+			await releaseClassifier.promise;
+			return Effort.Low;
+		});
+		const events: Array<{ thinkingLevel: unknown; configured: unknown; resolved: unknown }> = [];
+		session.subscribe(event => {
+			if (event.type === "thinking_level_changed") {
+				events.push({
+					thinkingLevel: event.thinkingLevel,
+					configured: event.configured,
+					resolved: event.resolved,
+				});
+			}
+		});
+		const receiptsBefore = session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "thinking_level_change");
+
+		const prompt = session.prompt("Classify this turn");
+		try {
+			await classifierStarted.promise;
+			session.agent.setModel({ ...model, contextWindow: (model.contextWindow ?? 0) + 1 });
+		} finally {
+			releaseClassifier.resolve();
+		}
+		await prompt;
+
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Low);
+		expect(session.thinkingLevel).toBe(Effort.Low);
+		expect(session.agent.state.thinkingLevel).toBe(Effort.Low);
+		expect(events).toEqual([{ thinkingLevel: Effort.Low, configured: AUTO_THINKING, resolved: Effort.Low }]);
+		const receipts = session.sessionManager.getEntries().filter(entry => entry.type === "thinking_level_change");
+		expect(receipts).toHaveLength(receiptsBefore.length + 1);
+		expect(receipts.at(-1)).toMatchObject({ thinkingLevel: Effort.Low, configured: AUTO_THINKING });
 	});
 
 	it("does not record late classifier usage in a replacement session after abort", async () => {

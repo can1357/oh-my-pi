@@ -28,6 +28,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
@@ -1942,6 +1943,80 @@ describe("InteractiveMode plan review rendering", () => {
 		// selected tier, not the restored default.
 		expect(session.model?.id).toBe(slow.id);
 	});
+
+	it.each([false, true])(
+		"confirms the execution role only while it owns the model (superseded: %s)",
+		async superseded => {
+			const slow = modelRegistry.find("anthropic", "claude-opus-4-5")!;
+			const newer = modelRegistry.find("anthropic", "claude-sonnet-4-6")!;
+			vi.spyOn(modelRegistry, "refreshSelectedModelMetadata").mockImplementation(async model => model);
+			session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+			session.settings.setModelRole("plan", "anthropic/claude-sonnet-4-5");
+			session.settings.setModelRole("slow", "anthropic/claude-opus-4-5:low");
+			await mode.handlePlanModeCommand();
+			const planFilePath = mode.planModePlanFilePath!;
+			await Bun.write(
+				resolveLocalUrlToPath(planFilePath, {
+					getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+					getSessionId: () => session.sessionManager.getSessionId(),
+				}),
+				"# Plan\n\nExecute on the selected role.",
+			);
+			vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
+			const dispatchedModels: string[] = [];
+			vi.spyOn(session, "prompt").mockImplementation(async () => {
+				dispatchedModels.push(session.model!.id);
+				return true;
+			});
+			vi.spyOn(mode, "showPlanReview").mockImplementation(async (_plan, _title, options, _dialog, extra) => {
+				const slider = extra!.slider!;
+				slider.onChange?.(slider.segments.findIndex(segment => segment.label === "slow"));
+				return options[2];
+			});
+			const status = vi.spyOn(mode, "showStatus");
+			const warning = vi.spyOn(mode, "showWarning");
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (
+				this: SessionTools,
+				...args
+			) {
+				if (superseded && !held && session.model?.id === slow.id) {
+					held = true;
+					entered.resolve();
+					await release.promise;
+				}
+				return reconcile.apply(this, args);
+			});
+			const applying = mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+			try {
+				if (superseded) {
+					await entered.promise;
+					expect(await session.setModel(newer)).toEqual({ switched: true });
+					session.setThinkingLevel(ThinkingLevel.High);
+					release.resolve();
+				}
+				await applying;
+				expect(session.model?.id).toBe(superseded ? newer.id : slow.id);
+				expect(session.configuredThinkingLevel()).toBe(superseded ? ThinkingLevel.High : ThinkingLevel.Low);
+				expect(session.sessionManager.buildSessionContext().models[superseded ? "default" : "slow"]).toBe(
+					`anthropic/${superseded ? newer.id : slow.id}`,
+				);
+				expect(dispatchedModels).toEqual([superseded ? newer.id : slow.id]);
+				if (superseded) {
+					expect(status).not.toHaveBeenCalledWith(`Continuing with slow: ${slow.name || slow.id}`);
+				} else {
+					expect(status).toHaveBeenCalledWith(`Continuing with slow: ${slow.name || slow.id}`);
+				}
+				expect(warning).not.toHaveBeenCalled();
+			} finally {
+				release.resolve();
+				await applying;
+			}
+		},
+	);
 
 	it("retains the plan model when the slider selection matches the active plan tier", async () => {
 		const planModel = session.modelRegistry.find("anthropic", "claude-opus-4-5");
