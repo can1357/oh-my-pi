@@ -13,7 +13,7 @@
 
 ### Changed
 
-- Eval `browser` calls now run extension `tool_call` handlers like regular tool calls, so an extension that blocks or rewrites `browser` calls (for example to point `app.cdp_url` at a per-agent endpoint) also covers calls made from eval. Calls a `browser` approval policy already denies skip the handlers. Other eval preludes are unchanged, and prelude calls get no matching `tool_result` ([#18277](https://github.com/can1357/oh-my-pi/pull/18277) by [@aleister1102](https://github.com/aleister1102))
+- Eval `browser` calls run the extension `tool_call` handlers that opt in with `pi.on("tool_call", handler, { evalPreludes: true })`, so an extension that blocks or rewrites `browser` calls (for example to point `app.cdp_url` at a per-agent endpoint) also covers calls made from eval. Handlers that do not opt in never see eval prelude calls, and calls a `browser` approval policy already denies skip the handlers. Other eval preludes are unchanged, and prelude calls get no matching `tool_result` ([#18277](https://github.com/can1357/oh-my-pi/pull/18277) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.17.0] - 2026-11-06
 

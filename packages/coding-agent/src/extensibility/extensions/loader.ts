@@ -55,6 +55,7 @@ import type {
 	RegisteredCommand,
 	ShortcutConflict,
 	SourceInfo,
+	ToolCallHandlerOptions,
 	ToolDefinition,
 	ToolInfo,
 	TranscriptPresenter,
@@ -237,10 +238,15 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		}
 	}
 
-	on<F extends HandlerFn>(event: string, handler: F): void {
+	on<F extends HandlerFn>(event: string, handler: F, options?: ToolCallHandlerOptions): void {
 		const list = this.extension.handlers.get(event) ?? [];
 		list.push(handler);
 		this.extension.handlers.set(event, list);
+		if (event === "tool_call" && options?.evalPreludes === true) {
+			const indexes = this.extension.toolCallEvalPreludeIndexes ?? new Set<number>();
+			indexes.add(list.length - 1);
+			this.extension.toolCallEvalPreludeIndexes = indexes;
+		}
 	}
 
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {

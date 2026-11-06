@@ -2686,7 +2686,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				session?.extensionRunner?.emitBeforeSubagentSpawn(event, signal) ?? Promise.resolve(undefined),
 			emitToolCall: (event, signal) => {
 				const runner = session?.extensionRunner;
-				return runner?.hasHandlers("tool_call") ? runner.emitToolCall(event, signal) : Promise.resolve(undefined);
+				return runner?.hasToolCallHandlers(event.source)
+					? runner.emitToolCall(event, signal)
+					: Promise.resolve(undefined);
 			},
 			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
 			queueLaunchCompletion: notification =>

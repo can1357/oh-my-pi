@@ -1514,6 +1514,8 @@ export interface ModeChangedEvent {
 interface ToolCallEventBase {
 	type: "tool_call";
 	toolCallId: string;
+	/** `"eval-prelude"` when an eval prelude made the call (e.g. `browser` from eval); absent for model-issued calls. */
+	source?: "eval-prelude";
 }
 
 export interface BashToolCallEvent extends ToolCallEventBase {
@@ -1560,6 +1562,15 @@ export type ToolCallEvent =
 	| GrepToolCallEvent
 	| GlobToolCallEvent
 	| CustomToolCallEvent;
+
+/**
+ * Options for `pi.on("tool_call", handler, options)`.
+ * `evalPreludes: true` also delivers calls made from eval preludes (e.g. `browser`). Off by default, so a
+ * handler that does not opt in sees only model-issued calls.
+ */
+export interface ToolCallHandlerOptions {
+	evalPreludes?: boolean;
+}
 
 interface ToolResultEventBase {
 	type: "tool_result";
@@ -1911,7 +1922,11 @@ export interface ExtensionAPI {
 	on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
 	on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
 	on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
-	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
+	on(
+		event: "tool_call",
+		handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>,
+		options?: ToolCallHandlerOptions,
+	): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
@@ -2463,6 +2478,11 @@ export interface Extension {
 	resolvedPath: string;
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
+	/**
+	 * Indexes into `handlers.get("tool_call")` for handlers registered with `{ evalPreludes: true }`. Indexes
+	 * stay exact because a handler list is append-only. Absent when no handler opted in.
+	 */
+	toolCallEvalPreludeIndexes?: Set<number>;
 	tools: Map<string, RegisteredTool<any, any>>;
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];

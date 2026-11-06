@@ -151,11 +151,10 @@ async function approvePreludeInvocation(
 }
 
 /**
- * Runs the session's extension `tool_call` handlers for an opted-in prelude call, as the agent loop
- * does for tool calls, so an extension that blocks or revises e.g. `browser` calls also sees the ones
- * made from eval. A call its approval policy already denies never reaches extensions, matching the
- * loop; the approval gate that follows throws the denial. Otherwise the gate resolves against the
- * input that executes.
+ * Runs the `tool_call` handlers that opted in with `{ evalPreludes: true }` for an opted-in prelude
+ * call, so an extension that blocks or revises e.g. `browser` calls also sees the ones made from eval.
+ * A call its approval policy already denies never reaches extensions, matching the loop; the approval
+ * gate that follows throws the denial. Otherwise the gate resolves against the input that executes.
  */
 async function applyToolCallHooks(
 	definition: EvalPreludeDefinition,
@@ -170,6 +169,7 @@ async function applyToolCallHooks(
 		context.session,
 		{
 			type: "tool_call",
+			source: "eval-prelude",
 			toolName: definition.name,
 			toolCallId: context.toolCallId,
 			input: parameters as Record<string, unknown>,

@@ -1499,6 +1499,15 @@ export class ExtensionRunner {
 		return false;
 	}
 
+	/**
+	 * Whether `tool_call` has a handler for this source. Eval-prelude calls reach only handlers that
+	 * registered with `{ evalPreludes: true }`, so they short-circuit on those alone.
+	 */
+	hasToolCallHandlers(source?: ToolCallEvent["source"]): boolean {
+		if (source !== "eval-prelude") return this.hasHandlers("tool_call");
+		return this.extensions.some(ext => (ext.toolCallEvalPreludeIndexes?.size ?? 0) > 0);
+	}
+
 	getMessageRenderer(customType: string): MessageRenderer | undefined {
 		for (const ext of this.extensions) {
 			const renderer = ext.messageRenderers.get(customType);
@@ -2216,12 +2225,15 @@ export class ExtensionRunner {
 		);
 		let result: ToolCallEventResult | undefined;
 		const aggregated = { input: undefined as ToolCallEventResult["input"], additionalContext: [] as string[] };
+		// Eval-prelude calls reach only handlers that opted in with `{ evalPreludes: true }`.
+		const preludeCall = event.source === "eval-prelude";
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_call");
 			if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
+			for (const [index, handler] of handlers.entries()) {
+				if (preludeCall && !ext.toolCallEvalPreludeIndexes?.has(index)) continue;
 				const handlerResult = (await this.#runHandlerWithTimeout(
 					handler,
 					event,
