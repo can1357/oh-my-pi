@@ -136,6 +136,15 @@ const ANY_FILE_GLOB = new Glob("**/*");
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
 const GC_WRITE_GRACE_MS = 5 * 60_000;
+/**
+ * How many symbolic links one transcript name may be followed through before
+ * the sweep stops and reports it. 32 is `MAXSYMLINKS` on the BSDs and macOS,
+ * the smallest limit omp runs under; Linux allows 40. A sweep deletes on the
+ * strength of what it resolved, so it takes the smallest limit everywhere: a
+ * chain past it is a chain some host cannot open at all, and guessing where
+ * it leads is how a blob on an unresolvable path gets swept.
+ */
+const MAX_SYMLINK_HOPS = 32;
 const SESSION_SUFFIX = ".jsonl";
 const COMPRESSED_SESSION_SUFFIX = ".jsonl.gz";
 /** Bytes sampled to rule out a session header before streaming an artifact. */
@@ -721,9 +730,21 @@ const BLOB_REFERENCE_GLOBS = ["**/*.jsonl", "**/*.jsonl.gz", "**/*.jsonl.*.bak",
 	pattern => new Glob(pattern),
 );
 
-/** Transcript names a walk found, and names it could not look at or list. */
+/** A transcript name a walk found, and the real directory it found it in. */
+interface BlobReferenceName {
+	/** The name as the walk reached it: what the reader opens and what a message names. */
+	file: string;
+	/** The real directory the walk listed {@link name} in, where resolving it starts. */
+	realDir: string;
+	/** The entry name in that directory. */
+	name: string;
+}
+
+/** Transcript names a walk found, the directories it listed, and names it could not look at or list. */
 interface BlobReferenceNames {
-	files: string[];
+	files: BlobReferenceName[];
+	/** Every real directory the walk listed, so a name that resolves out of them can be told apart. */
+	directories: Set<string>;
 	unreadable: string[];
 }
 
@@ -737,7 +758,7 @@ interface BlobReferenceNames {
  * {@link collectReferencedBlobHashes}.
  */
 async function collectBlobReferenceNames(root: string): Promise<BlobReferenceNames> {
-	const files: string[] = [];
+	const files: BlobReferenceName[] = [];
 	const unreadable: string[] = [];
 	const directories = new Set<string>();
 	const walk = async (dir: string): Promise<void> => {
@@ -762,7 +783,8 @@ async function collectBlobReferenceNames(root: string): Promise<BlobReferenceNam
 		for (const entry of entries) {
 			const file = path.join(dir, entry.name);
 			if (entry.isDirectory()) await walk(file);
-			else if (BLOB_REFERENCE_GLOBS.some(glob => glob.match(entry.name))) files.push(file);
+			else if (BLOB_REFERENCE_GLOBS.some(glob => glob.match(entry.name)))
+				files.push({ file, realDir: real, name: entry.name });
 			else if (entry.isSymbolicLink()) {
 				// A dangling non-transcript artifact cannot hide a readable tree.
 				// Only transcript-pattern names are passed on to the strict reader.
@@ -777,7 +799,91 @@ async function collectBlobReferenceNames(root: string): Promise<BlobReferenceNam
 		}
 	};
 	await walk(root);
-	return { files, unreadable };
+	return { files, directories, unreadable };
+}
+
+/** Where a transcript name led, or why the sweep could not say. */
+type ResolvedTranscript =
+	/** The real file the name stands for. */
+	| { kind: "resolved"; real: string }
+	/** Nothing is at the name; the strict reader reports a dangling link by name. */
+	| { kind: "absent" }
+	/** The name could not be followed to the end; the sweep deletes nothing. */
+	| { kind: "unreadable"; reason: string };
+
+/**
+ * Follow `file` one component at a time, recording every blob-store entry the
+ * walk passes through, and answer where it ends.
+ *
+ * The reference walk reads a transcript *through* its links, so every blob the
+ * transcript's bytes name survives. What the link itself stands on does not: a
+ * blob-store entry that **is** the transcript, and every entry a hop of its
+ * path runs through, is a hash-named file in the blob directory that no
+ * transcript mentions. The candidate scan lists it, nothing references it, and
+ * the sweep deletes the session out from under its own link. So the walk
+ * records what it traversed as well as what it read: a name the filesystem
+ * needs in order to reach a transcript is referenced, whether or not any
+ * transcript's bytes name it.
+ *
+ * `start` is the real directory a walk listed the name in, so the common case
+ * resolves one component. A name from a pointer has no such directory and is
+ * resolved from the filesystem root. Nothing is cached: a resolution reused
+ * across names would answer for an instant that has passed, which is the bug
+ * this is here to close.
+ */
+async function resolveRecordingBlobHops(
+	file: string,
+	start: BlobReferenceName | undefined,
+	blobRealDir: string | undefined,
+	hashes: Set<string>,
+): Promise<ResolvedTranscript> {
+	const absolute = path.resolve(file);
+	const filesystemRoot = path.parse(absolute).root;
+	let resolved = start ? start.realDir : filesystemRoot;
+	const pending = start ? [start.name] : absolute.slice(filesystemRoot.length).split(path.sep);
+	let hops = 0;
+	while (pending.length > 0) {
+		const name = pending.shift() as string;
+		if (name === "" || name === ".") continue;
+		if (name === "..") {
+			resolved = path.dirname(resolved);
+			continue;
+		}
+		const hash = blobRealDir === undefined ? undefined : name.match(BLOB_FILE_RE)?.[1];
+		if (hash !== undefined && normalizePathForComparison(resolved) === blobRealDir) hashes.add(hash);
+		const next = path.join(resolved, name);
+		let target: string | undefined;
+		try {
+			if ((await fs.lstat(next)).isSymbolicLink()) target = await fs.readlink(next);
+		} catch (error) {
+			const code = codeOf(error);
+			if (code === "ENOENT" || code === "ENOTDIR") return { kind: "absent" };
+			return { kind: "unreadable", reason: `${next} could not be looked at (${errorMessage(error)})` };
+		}
+		if (target === undefined) {
+			resolved = next;
+			continue;
+		}
+		if (++hops > MAX_SYMLINK_HOPS)
+			return {
+				kind: "unreadable",
+				reason: `${file} passes through more than ${MAX_SYMLINK_HOPS} symbolic links, so where it leads could not be resolved`,
+			};
+		if (path.isAbsolute(target)) resolved = path.parse(target).root;
+		pending.unshift(...target.split(path.sep));
+	}
+	return { kind: "resolved", real: resolved };
+}
+
+/** Where `file` leads once it has been read, by the kernel's own resolution. */
+async function resolveAfterReading(file: string): Promise<ResolvedTranscript> {
+	try {
+		return { kind: "resolved", real: await fs.realpath(file) };
+	} catch (error) {
+		const code = codeOf(error);
+		if (code === "ENOENT" || code === "ENOTDIR") return { kind: "absent" };
+		return { kind: "unreadable", reason: `${file} could not be resolved after it was read (${errorMessage(error)})` };
+	}
 }
 
 /**
@@ -785,13 +891,34 @@ async function collectBlobReferenceNames(root: string): Promise<BlobReferenceNam
  * name it could not. A sweep with one unreadable name deletes nothing: all
  * roots share one blob store, so a transcript nobody could read may
  * reference any blob in it.
+ *
+ * Each name is resolved before it is read, which records the blob-store
+ * entries the sweep had to traverse to reach it — see
+ * {@link resolveRecordingBlobHops} — and again after, which proves the name
+ * still leads where it led. A name that leads somewhere else by the time its
+ * bytes are in hand was read for a tree that no longer exists, so what it read
+ * cannot answer for what is in the store now: that is reported, not swept
+ * past. A name that now leads nowhere is not: the transcript went away after
+ * the sweep read every reference it held.
+ *
+ * A name in a session tree that leads out of every directory the walk listed
+ * takes its own neighbours with it: the rotated backups, `.leaving` copies and
+ * archived forms of that same session sit beside it there, any one of them can
+ * hold the only reference to a blob (see {@link BLOB_REFERENCE_GLOBS}), and
+ * none of them was listed. So that one directory is listed and its transcript
+ * names are read the same way — never what is below it, so a session linked
+ * into a home directory costs one `readdir`, not a descent through it. A name
+ * a pointer gave is left alone: the registry says which file is a session,
+ * never which directory holds sessions.
  */
 async function collectReferencedBlobHashes(
 	sessionRoots: { root: string; noFollow: boolean }[],
 	exactSessionFiles: string[],
+	blobRealDir: string | undefined,
 ): Promise<{ hashes: Set<string>; unreadable: string[] }> {
 	const unreadable: string[] = [];
-	const files = new Map<string, { file: string; noFollow: boolean }>();
+	const files = new Map<string, { file: string; found?: BlobReferenceName; noFollow: boolean }>();
+	const walked = new Set<string>();
 	const decoder = new TextDecoder();
 	for (const { root, noFollow } of sessionRoots) {
 		// Every root is walked, never globbed. A following glob skips a
@@ -804,8 +931,9 @@ async function collectReferencedBlobHashes(
 		// meaning: how that reader opens a name once the walk has found it.
 		const found = await collectBlobReferenceNames(root);
 		unreadable.push(...found.unreadable);
-		for (const file of found.files) {
-			files.set(normalizePathForComparison(file), { file, noFollow });
+		for (const directory of found.directories) walked.add(normalizePathForComparison(directory));
+		for (const entry of found.files) {
+			files.set(normalizePathForComparison(entry.file), { file: entry.file, found: entry, noFollow });
 		}
 	}
 	for (const file of exactSessionFiles) {
@@ -817,7 +945,16 @@ async function collectReferencedBlobHashes(
 	}
 
 	const hashes = new Set<string>();
-	for (const { file, noFollow } of files.values()) {
+	// Grows as a name leads out of the walked trees and its neighbours join it.
+	const pending = [...files.values()];
+	const seen = new Set(files.keys());
+	const listed = new Set<string>();
+	for (let at = 0; at < pending.length; at++) {
+		const entry = pending[at];
+		if (!entry) continue;
+		const { file, found, noFollow } = entry;
+		const before = await resolveRecordingBlobHops(file, found, blobRealDir, hashes);
+		if (before.kind === "unreadable") unreadable.push(before.reason);
 		try {
 			// Keep raw-text matching: recoverable malformed records can still own blobs.
 			await scanSessionLinesIfPresent(
@@ -836,6 +973,32 @@ async function collectReferencedBlobHashes(
 			unreadable.push(
 				error instanceof NotARegularFile ? error.message : `${file} could not be read (${errorMessage(error)})`,
 			);
+		}
+		if (before.kind === "unreadable") continue;
+		const after = await resolveAfterReading(file);
+		if (after.kind === "unreadable") unreadable.push(after.reason);
+		else if (after.kind === "resolved" && (before.kind !== "resolved" || after.real !== before.real))
+			unreadable.push(
+				`${file} led to ${before.kind === "resolved" ? before.real : "nothing"} when the sweep found it and ` +
+					`to ${after.real} once it had read it, so what it read is not what the name stands for`,
+			);
+		if (found === undefined || before.kind !== "resolved") continue;
+		seen.add(normalizePathForComparison(before.real));
+		const directory = path.dirname(before.real);
+		const key = normalizePathForComparison(directory);
+		if (walked.has(key) || key === blobRealDir || listed.has(key)) continue;
+		listed.add(key);
+		const neighbours = await fs.readdir(directory, { withFileTypes: true }).catch((error: unknown) => {
+			unreadable.push(`${directory}, which ${file} leads into, could not be listed (${errorMessage(error)})`);
+			return undefined;
+		});
+		for (const neighbour of neighbours ?? []) {
+			if (neighbour.isDirectory() || !BLOB_REFERENCE_GLOBS.some(glob => glob.match(neighbour.name))) continue;
+			const beside = path.join(directory, neighbour.name);
+			const besideKey = normalizePathForComparison(beside);
+			if (seen.has(besideKey)) continue;
+			seen.add(besideKey);
+			pending.push({ file: beside, found: { file: beside, realDir: directory, name: neighbour.name }, noFollow });
 		}
 	}
 	return { hashes, unreadable };
@@ -1027,7 +1190,15 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 			`the terminal breadcrumbs in ${getTerminalSessionsDir(options.agentDir)} could not be read (${errorMessage(error)})`,
 		);
 	}
-	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()]);
+	// Where the store really is, so an entry reached under another name for
+	// it — a linked `blobs` directory — is still recognised as one of its own.
+	// A store nothing can resolve has no candidates either: the scan below
+	// reports that, and until then no name can be taken for an entry of it.
+	const blobRealDir = await fs
+		.realpath(blobDir)
+		.then(normalizePathForComparison)
+		.catch(() => undefined);
+	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()], blobRealDir);
 	unreadable.push(...referenced.unreadable);
 	const result: BlobGcResult = {
 		referenced: referenced.hashes.size,
