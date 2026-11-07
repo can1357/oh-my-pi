@@ -13,6 +13,7 @@ import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 
 import todoDescription from "../prompts/tools/todo.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
+import { type ActiveTodoBackend, sanitizeTodoBackendText } from "./todo-backend";
 import type { SessionEntry } from "../session/session-entries";
 
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
@@ -69,8 +70,13 @@ const todoSchema = type({
 	"reason?": type("string").describe("blocker note for block"),
 });
 
-type TodoParams = TodoSchema;
+export type TodoParams = TodoSchema;
 type TodoSchema = typeof todoSchema.infer;
+
+// Lenient arg validation lets undeclared keys reach `execute`. Validating with this variant drops
+// them, inside `list` entries too, so the native op and a backend's `apply` get the same params.
+const todoParams = todoSchema.onDeepUndeclaredKey("delete");
+
 /** A single todo op entry (the params object itself). */
 type TodoOpEntryValue = TodoParams;
 
@@ -249,7 +255,7 @@ export function createTodoHudStateData(
 	return { ...snapshot, visibility };
 }
 
-export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
+export function getLatestTodoPhasesFromEntries(entries: readonly SessionEntry[]): TodoPhase[] {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const phases = canonicalTodoPhases(entries[i]);
 		if (phases) return clonePhases(phases);
@@ -497,12 +503,12 @@ function inferTodoOp(args: Record<string, unknown>, hasExistingPhases: boolean):
  * for a normal model retry.
  */
 function resolveTodoParams(raw: unknown, hasExistingPhases: boolean): TodoOpEntryValue | string {
-	const direct = todoSchema(raw);
+	const direct = todoParams(raw);
 	if (!(direct instanceof type.errors)) return direct;
 	if (isRecord(raw) && raw.op === undefined) {
 		const inferred = inferTodoOp(raw, hasExistingPhases);
 		if (inferred) {
-			const repaired = todoSchema({ ...raw, op: inferred });
+			const repaired = todoParams({ ...raw, op: inferred });
 			if (!(repaired instanceof type.errors)) return repaired;
 		}
 	}
@@ -731,9 +737,42 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	async execute(
 		_toolCallId: string,
 		params: TodoParams,
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<TodoToolDetails>,
 		_context?: AgentToolContext,
+	): Promise<AgentToolResult<TodoToolDetails>> {
+		if (!this.session.runTodoWrite) return this.#write(params, undefined, undefined, signal);
+		try {
+			return await this.session.runTodoWrite(
+				(active, assertCurrent) => this.#write(params, active, assertCurrent, signal),
+				{ signal },
+			);
+		} catch (error) {
+			// The queued write can no longer commit, and its backend call (if any) saw the same abort.
+			if (signal?.aborted) return this.#abortedResult(params);
+			throw error;
+		}
+	}
+
+	#abortedResult(params: TodoParams): AgentToolResult<TodoToolDetails> {
+		const phases = clonePhases(this.session.getTodoPhases?.() ?? []);
+		const resolved = resolveTodoParams(params, phases.length > 0);
+		return {
+			content: [{ type: "text", text: "The todo call was aborted. The todo list is unchanged." }],
+			details: {
+				op: typeof resolved === "string" ? undefined : resolved.op,
+				phases,
+				storage: this.session.getSessionFile() ? "session" : "memory",
+			},
+			isError: true,
+		};
+	}
+
+	async #write(
+		params: TodoParams,
+		active: ActiveTodoBackend | undefined,
+		assertCurrent: (() => void) | undefined,
+		signal: AbortSignal | undefined,
 	): Promise<AgentToolResult<TodoToolDetails>> {
 		const previousPhases = clonePhases(this.session.getTodoPhases?.() ?? []);
 		const storage = this.session.getSessionFile() ? "session" : "memory";
@@ -758,7 +797,26 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const failed = errors.length > 0;
 		const effective = failed ? previousPhases : updated;
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
-		if (!readOnly && !failed) this.session.setTodoPhases?.(updated);
+		if (active && !readOnly && !failed) {
+			try {
+				await active.apply(op, entry, clonePhases(updated), signal);
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Todo backend "${active.label}" failed to apply "${op}": ${sanitizeTodoBackendText(error)}. The todo list is unchanged.`,
+						},
+					],
+					details: { op, phases: previousPhases, storage },
+					isError: true,
+				};
+			}
+		}
+		if (!readOnly && !failed) {
+			assertCurrent?.();
+			this.session.setTodoPhases?.(updated);
+		}
 		const details: TodoToolDetails = { op, phases: effective, storage };
 		if (completedTasks.length > 0) details.completedTasks = completedTasks;
 

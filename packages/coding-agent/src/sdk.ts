@@ -2702,6 +2702,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getFileMutationVersion: path => fileMutationVersions.get(path) ?? 0,
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
+			runTodoWrite: (write, options) => session.runTodoWrite(write, options),
 			commitTodoPhases: phases => session.commitTodoPhases(phases),
 			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
 			getLastAssistantText: () => session?.getLastAssistantText(),
@@ -5938,6 +5939,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				await extensionRunner.addExtensions(loaded.extensions);
 			});
 		}
+		// Extensions are bound now, or bind on the deferred load; the session resolves `todo.backend` then.
+		session.initializeTodoBackend();
 		startDeferredMCPDiscovery?.(session);
 
 		startupCleanup.move();

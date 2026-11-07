@@ -759,7 +759,7 @@ fallback when enabling fails.
 
 ### `set_todos` payload
 
-Replaces the todo state for the current session and returns `{ todoPhases }`. The list is recorded on the current session branch and restored when that branch is reloaded, compacted, or resumed, like an interactive `/todo` edit.
+Replaces the todo state for the current session and returns `{ todoPhases }`. The list is recorded on the current session branch and restored when that branch is reloaded, compacted, or resumed, like an interactive `/todo` edit. With an extension todo backend selected, the response waits for the backend to accept the list, and commands sent after `set_todos` do not wait for it (see [Prompt/Queue Concurrency and Ordering](#promptqueue-concurrency-and-ordering)), so read the list from this response, not from a `get_state` sent right after.
 Phases use `{ name, tasks }`; tasks retain `{ content, status, blocker? }`. There
 are no phase or task IDs. Status is `"pending"`, `"in_progress"`, `"completed"`,
 `"abandoned"`, or `"blocked"`. Snapshot cloning drops extra fields, including
@@ -1241,7 +1241,10 @@ tool/URI updates/results bypass that queue, so they can complete a request
 while its command handler is waiting. `bash` also bypasses the serial queue and
 is tracked as background command work; its response may arrive out of order.
 `prompt` and `steer_subagent` start in queue order but await admission in the
-background, so their responses may also arrive after later commands'.
+background, so their responses may also arrive after later commands'. With an
+extension todo backend selected, `set_todos` likewise starts in queue order and
+waits for the backend's `replace` in the background, so `abort` and `get_state`
+sent after it are not held behind it; with native todos it runs inline.
 
 ### Immediate ack vs completion
 

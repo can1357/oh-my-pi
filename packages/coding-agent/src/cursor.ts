@@ -33,7 +33,7 @@ import {
 	piTimeout,
 	shellDeadlineSeconds,
 } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
 import {
@@ -51,6 +51,7 @@ import {
 	splitPathAndSelPreferringLiteral,
 } from "./tools/path-utils";
 import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoPhasesUpdate } from "./tools/todo-backend";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
 const CURSOR_TODO_PHASE = "Tasks";
@@ -120,7 +121,7 @@ interface CursorExecBridgeOptions {
 	 * emits no local `todo` toolResult, so without this bridge the provider's
 	 * list and the local `todo` state diverge silently and reloads lose it.
 	 */
-	commitTodoPhases?: (phases: TodoPhase[]) => void;
+	commitTodoPhases?: (update: TodoPhasesUpdate) => Promise<TodoPhase[] | undefined>;
 	getTodoPhases?: () => TodoPhase[];
 	/**
 	 * Build a `grep` tool honoring a frame's own context width and match cap.
@@ -514,6 +515,34 @@ function formatTodoSyncSummary(phases: TodoPhase[]): string {
 	if (tasks.length === 0) return "No todos";
 	const done = tasks.filter(task => task.status === "completed").length;
 	return `${done}/${tasks.length} tasks completed`;
+}
+
+function mapCursorTodoSnapshot(snapshot: CursorTodoSnapshot, local: TodoPhase[]): TodoPhase[] {
+	const phaseByContent = new Map<string, string>();
+	for (const phase of local) {
+		for (const task of phase.tasks) phaseByContent.set(task.content, phase.name);
+	}
+
+	const grouped = new Map<string, TodoPhase["tasks"]>();
+	for (const todo of snapshot.todos) {
+		const name = phaseByContent.get(todo.content) ?? CURSOR_TODO_PHASE;
+		let tasks = grouped.get(name);
+		if (!tasks) {
+			tasks = [];
+			grouped.set(name, tasks);
+		}
+		tasks.push({ content: todo.content, status: todo.status as TodoStatus });
+	}
+
+	const next: TodoPhase[] = [];
+	for (const phase of local) {
+		const tasks = grouped.get(phase.name);
+		if (!tasks) continue;
+		next.push({ name: phase.name, tasks });
+		grouped.delete(phase.name);
+	}
+	for (const [name, tasks] of grouped) next.push({ name, tasks });
+	return next;
 }
 
 /**
@@ -1013,35 +1042,16 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// or a host with no local todo state must still resolve it.
 		let phases: TodoPhase[] | undefined;
 		if (snapshot && commitPhases) {
-			const phaseByContent = new Map<string, string>();
-			for (const phase of existing) {
-				for (const task of phase.tasks) phaseByContent.set(task.content, phase.name);
-			}
-
-			const grouped = new Map<string, TodoPhase["tasks"]>();
-			for (const todo of snapshot.todos) {
-				const name = phaseByContent.get(todo.content) ?? CURSOR_TODO_PHASE;
-				let tasks = grouped.get(name);
-				if (!tasks) {
-					tasks = [];
-					grouped.set(name, tasks);
-				}
-				tasks.push({ content: todo.content, status: todo.status as TodoStatus });
-			}
-
-			// Preserve the local phase order; phases new to this snapshot append.
-			const next: TodoPhase[] = [];
-			for (const phase of existing) {
-				const tasks = grouped.get(phase.name);
-				if (!tasks) continue;
-				next.push({ name: phase.name, tasks });
-				grouped.delete(phase.name);
-			}
-			for (const [name, tasks] of grouped) next.push({ name, tasks });
+			const next = mapCursorTodoSnapshot(snapshot, existing);
 			if (origin === "read" && JSON.stringify(next) === JSON.stringify(existing)) {
 				phases = undefined;
 			} else {
-				commitPhases(next);
+				// Stays synchronous: the result below is returned mid-parse. The commit settles later
+				// and maps the snapshot again onto the list committed at its queue slot, so an earlier
+				// queued edit that renamed or regrouped phases survives.
+				commitPhases(current => mapCursorTodoSnapshot(snapshot, current)).catch((commitError: unknown) => {
+					logger.warn("Could not record the Cursor todo list", { error: String(commitError) });
+				});
 				phases = next;
 			}
 		}

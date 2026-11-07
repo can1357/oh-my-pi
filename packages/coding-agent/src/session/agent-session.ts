@@ -268,7 +268,7 @@ import {
 } from "../tools/resolve";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
+import type { TodoPhasesUpdate, TodoWrite } from "../tools/todo-backend";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
@@ -527,6 +527,7 @@ const TITLE_DRIFT_JUDGE_TIMEOUT_MS = 15_000;
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
 import { EAGER_TODO_PRELUDE_MESSAGE_TYPE, TodoTracker, type TodoTrackerHost } from "./todo-tracker";
+import { TodoWrites } from "./todo-writes";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
@@ -1151,6 +1152,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
+	readonly #todoWrites: TodoWrites;
 	readonly #modelMentions: ModelMentionRegistry;
 	#workPoolYieldItems: readonly WorkPoolYieldItem[] = [];
 	/** Item set matching the last successfully rebuilt provider prompt. The base
@@ -2258,6 +2260,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
 		};
 		this.#todo = new TodoTracker(todoHost);
+		this.#todoWrites = new TodoWrites({
+			settings: this.settings,
+			addDisposer: dispose => this.addDisposer(dispose),
+			sessionManager: this.sessionManager,
+			todo: this.#todo,
+			extensionRunner: () => this.#extensionRunner,
+			isMainAgent: () => this.#agentKind === "main",
+			isDisposed: () => this.#isDisposed,
+			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
+			bindDeferredExtensions: async () => {
+				// A write issued from inside the deferred load must not wait on that load.
+				if (deferredExtensionLoadScope.getStore()) return false;
+				if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
+				return true;
+			},
+		});
 		this.#modelMentions = new ModelMentionRegistry({
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
@@ -2957,6 +2975,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			resetPlanReference: () => {
 				this.#planReferenceSent = false;
 			},
+			// Maintenance (prune, compaction) rewrites history but keeps the list's identity, so
+			// the todo epoch stays put and in-flight todo commits are not invalidated.
 			syncTodoPhasesFromBranch: () => {
 				this.#todo.syncFromBranch();
 				this.#modelMentions.syncFromBranch();
@@ -3672,6 +3692,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#admittedSubmissionCount++;
 		try {
 			if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
+			if (!this.hasPendingDeferredExtensions) this.#todoWrites.allowBackendResolution();
 			return await this.#inLogContext(work);
 		} finally {
 			if (--this.#admittedSubmissionCount === 0 && this.#admittedSubmissionsSettled) {
@@ -4413,6 +4434,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return;
 		}
 		this.#persistSessionMessageIfMissing(message);
+		if (message.role === "toolResult" && message.toolName === "todo") this.#todoWrites.keepLiveListAfterToolResult();
 	}
 
 	/**
@@ -7589,6 +7611,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						});
 					},
 				)
+				.then(() => this.#todoWrites.allowBackendResolution())
 				.finally(() => {
 					if (this.#deferredExtensionLoad === pending) this.#deferredExtensionLoad = undefined;
 				});
@@ -11067,10 +11090,26 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#todo.setPhases(phases);
 	}
 
+	runTodoWrite<T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }): Promise<T> {
+		return this.#todoWrites.run(write, options);
+	}
+
+	get todoWritesQueued(): boolean {
+		return this.#todoWrites.queued;
+	}
+
+	/** Call once, after {@link setDeferredExtensionLoader}. */
+	initializeTodoBackend(): void {
+		this.#todoWrites.arm();
+	}
+
 	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
-	commitTodoPhases(phases: TodoPhase[]): void {
-		this.#todo.setPhases(phases);
-		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
+	commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
+		return this.#todoWrites.commit(update);
+	}
+
+	editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
+		return this.#todoWrites.edit(update);
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */
@@ -11811,6 +11850,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				} else {
 					await this.sessionManager.flush();
 				}
+				// A queued todo write settling during the awaits below must not land in the new file.
+				this.#todoWrites.invalidate();
 				await this.sessionManager.newSession({
 					...options,
 					additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
@@ -11827,7 +11868,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 			this.#clearSessionScopedToolState();
 			this.#clearCheckpointRuntimeState();
-			this.setTodoPhases([]);
+			// Writes enqueued during the transition's awaits were planned against the old list.
+			this.#todoWrites.clear();
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
@@ -12606,7 +12648,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		this.agent.replaceMessages(activeMessages ?? sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
-		this.#todo.syncFromBranch();
+		this.#todoWrites.reload();
 		this.#modelMentions.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		this.#checkpointState = undefined;
@@ -13605,6 +13647,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// The file may be reloaded at the same path with a different latest contract (or the
 			// switch rolled back via restoreState); re-read it on the next model call either way.
 			this.#sessionInit = undefined;
+			this.#todoWrites.invalidate();
 			await this.sessionManager.setSessionFile(sessionPath);
 			this.#bash.markSessionTransition(bashTransition);
 			const newCwd = this.sessionManager.getCwd();
@@ -13689,7 +13732,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#reseedTokenRate();
 			this.#advisors.resetSessionState({ preserveCost: true });
-			this.#todo.syncFromBranch();
+			this.#todoWrites.reload();
 			this.#modelMentions.syncFromBranch();
 			if (switchingToDifferentSession) {
 				this.#closeAllProviderSessions("session switch");
@@ -13869,7 +13912,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (modelRolledBack) {
 				this.#emit({ type: "model_changed" });
 			}
-			this.#todo.syncFromBranch();
+			this.#todoWrites.reload();
 			this.#modelMentions.syncFromBranch();
 			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
@@ -14021,6 +14064,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// A prompt admitted during the drain awaits above belongs to the history
 				// being replaced; the generation bump drops its pending setup.
 				this.#promptGeneration++;
+				this.#todoWrites.invalidate();
 				if (!leafId) {
 					const title = this.sessionManager.getSessionName();
 					const titleSource = this.sessionManager.titleSource;
@@ -14037,7 +14081,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			this.#clearSessionScopedToolState();
 			this.#rehydrateCheckpointRewindState();
-			this.#todo.syncFromBranch();
+			this.#todoWrites.reload();
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
@@ -14168,7 +14212,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				timestamp: Date.now(),
 			});
 			this.sessionManager.appendMessage(sanitizeAssistantForReparentedHistory(assistantMessage));
-			this.#todo.syncFromBranch();
+			this.#todoWrites.reload();
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
@@ -14500,7 +14544,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.agent.replaceMessages(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
-		this.#todo.syncFromBranch();
+		this.#todoWrites.reload();
 		this.#modelMentions.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 

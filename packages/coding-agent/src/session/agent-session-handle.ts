@@ -14,6 +14,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoPhasesUpdate } from "../tools/todo-backend";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
@@ -366,7 +367,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	/** Replace the todo phases of the session. */
 	setTodoPhases(phases: TodoPhase[]): void;
 	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
-	commitTodoPhases(phases: TodoPhase[]): void;
+	commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined>;
+	editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined>;
 	/** Whether the user approved approval scope `key` for the rest of this session, so its prompt is skipped. */
 	hasSessionApproval(key: string): boolean;
 	/** Remembered `always-ask-cached` grants this session's tool calls are checked against. */

@@ -48,6 +48,7 @@ import { getTabBarTheme } from "../chrome/shared";
 import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./composer-shape-preview";
 import { getComposerShapeOptions } from "./composer-shape-registry";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
+import { sanitizeDisplayLineField, sanitizeDisplaySingleLine } from "./extensions/display-text";
 import { PluginSettingsComponent, type PluginSettingsHost } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
@@ -559,6 +560,9 @@ function getSettingsTabs(): Tab[] {
 	];
 }
 
+/** Supplies the live choices of a submenu setting whose options are only known at runtime. */
+export type RuntimeSettingOptionsProvider = () => readonly SubmenuOption[];
+
 /**
  * Dynamic context for settings that need runtime data.
  * Some settings (like thinking level) are managed by the session, not Settings.
@@ -572,6 +576,8 @@ export interface SettingsRuntimeContext {
 	thinkingLevel: ThinkingLevel | undefined;
 	/** Available themes */
 	availableThemes: string[];
+	/** Runtime choices for submenu settings without built-in ones, keyed by setting path. */
+	runtimeOptions?: ReadonlyMap<string, RuntimeSettingOptionsProvider>;
 	/** Provider/source ids shown in /model. */
 	providers: string[];
 	/** Active model (api + id); resolves what the snapcompact `auto` shape maps to. */
@@ -946,7 +952,9 @@ export class SettingsSelectorComponent implements Component {
 				// (hovering the menu previews, see #createSubmenu) keep the menu.
 				return {
 					k: "choice",
-					value: shown,
+					value: this.#context.runtimeOptions?.has(def.path)
+						? this.#getSubmenuCurrentValue(def.path, value)
+						: shown,
 					options,
 					style: PREVIEWED_SETTINGS.has(def.path) || options.some(o => o.detail) ? "menu" : "auto",
 					mono: options.every(o => o.label === o.value),
@@ -1503,12 +1511,17 @@ export class SettingsSelectorComponent implements Component {
 						createSettingsSelectField(def.label, def.description, enumOptions(def), cv, done, () => done()),
 				};
 
-			case "submenu":
+			case "submenu": {
+				const raw = this.#getSubmenuCurrentValue(def.path, currentValue);
+				const runtimeLabel = this.#context.runtimeOptions?.has(def.path)
+					? this.#submenuOptions(def).find(option => option.value === raw)?.label
+					: undefined;
 				return {
 					...item,
-					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
-					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
+					currentValue: runtimeLabel ?? raw,
+					submenu: (cv, done) => this.#createSubmenu(def, runtimeLabel === undefined ? cv : raw, done),
 				};
+			}
 
 			case "text":
 				return {
@@ -1562,7 +1575,7 @@ export class SettingsSelectorComponent implements Component {
 		return rawValue;
 	}
 
-	/** A submenu's choices: the declared ones, or the runtime ones (thinking levels, themes, composer shapes). */
+	/** A submenu's choices: the built-in runtime ones, the provider's, or the declared ones. */
 	#submenuOptions(def: SettingDef & { type: "submenu" }): readonly SubmenuOption[] {
 		if (def.path === "defaultThinkingLevel") {
 			// Prepend `auto`; the rest are the model's runtime-supported efforts.
@@ -1573,7 +1586,14 @@ export class SettingsSelectorComponent implements Component {
 			return this.#context.availableThemes.map(t => ({ value: t, label: t }));
 		}
 		if (def.path === "composer.shape") return getComposerShapeOptions();
-		return def.options;
+		const provider = this.#context.runtimeOptions?.get(def.path);
+		if (!provider) return def.options;
+		// Runtime choices can come from extensions, so sanitize them like other untrusted display text.
+		return provider().map(option => ({
+			...option,
+			label: sanitizeDisplaySingleLine(option.label),
+			description: sanitizeDisplayLineField(option.description),
+		}));
 	}
 
 	/**

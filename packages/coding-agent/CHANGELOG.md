@@ -9,6 +9,11 @@
 ### Added
 
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+- Extensions can register a todo backend with `pi.registerTodoBackend()`, selected by the `todo.backend` setting; the main session sends every todo write to it and falls back to native todos with one notice when it isn't available ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
+
+### Changed
+
+- With an extension todo backend selected, RPC `set_todos` waits for it, so its response can arrive after the responses to commands sent later; match it by `id`. With native todos it is unchanged ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Fixed
 

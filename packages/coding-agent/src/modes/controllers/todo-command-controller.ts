@@ -1,15 +1,10 @@
 import * as fs from "node:fs/promises";
-import {
-	applyOpsToPhases,
-	getLatestTodoPhasesFromEntries,
-	markdownToPhases,
-	phasesToMarkdown,
-	resolveTodoMarkdownPath,
-} from "../../tools/todo";
+import { applyOpsToPhases, markdownToPhases, phasesToMarkdown, resolveTodoMarkdownPath } from "../../tools/todo";
 import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import type { InteractiveModeContext } from "../types";
+import { commitTodoEdit } from "../../slash-commands/helpers/todo";
 
 const USAGE = [
 	"Usage: /todo <verb> [args]",
@@ -130,18 +125,10 @@ function buildSystemReminder(action: string, phases: TodoPhase[], removed = fals
 	return lines.join("\n");
 }
 
+type TodoPlan = { phases: TodoPhase[]; action: string; status: string; removed?: boolean } | { error: string };
+
 export class TodoCommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
-
-	/**
-	 * True latest todo state for the user-facing /todo verbs. Reads from session
-	 * entries or falls back to the active session state.
-	 */
-	#currentPhases(): TodoPhase[] {
-		const fromEntries = getLatestTodoPhasesFromEntries(this.ctx.sessionManager.getBranch());
-		if (fromEntries.length > 0) return fromEntries;
-		return this.ctx.session.getTodoPhases();
-	}
 
 	async handleTodoCommand(args: string): Promise<void> {
 		const trimmed = args.trim();
@@ -178,19 +165,19 @@ export class TodoCommandController {
 				this.ctx.showStatus(USAGE);
 				return;
 			case "append":
-				this.#append(rest);
+				await this.#edit(current => this.#append(rest, current));
 				return;
 			case "start":
-				this.#start(rest);
+				await this.#edit(current => this.#start(rest, current));
 				return;
 			case "done":
-				this.#mutateStatus(rest, "completed");
+				await this.#edit(current => this.#mutateStatus(rest, "completed", current));
 				return;
 			case "drop":
-				this.#mutateStatus(rest, "abandoned");
+				await this.#edit(current => this.#mutateStatus(rest, "abandoned", current));
 				return;
 			case "rm":
-				this.#remove(rest);
+				await this.#edit(current => this.#remove(rest, current));
 				return;
 			default:
 				this.ctx.showError(`Unknown /todo verb "${verb}".\n${USAGE}`);
@@ -198,7 +185,7 @@ export class TodoCommandController {
 	}
 
 	#showCurrent(): void {
-		const phases = this.#currentPhases();
+		const phases = this.ctx.session.getTodoPhases();
 		if (phases.length === 0) {
 			this.ctx.showStatus("No todos. Use /todo append <task> to start one.");
 			return;
@@ -207,7 +194,7 @@ export class TodoCommandController {
 	}
 
 	#copyMarkdown(): void {
-		const phases = this.#currentPhases();
+		const phases = this.ctx.session.getTodoPhases();
 		if (phases.length === 0) {
 			this.ctx.showWarning("No todos to copy.");
 			return;
@@ -225,7 +212,7 @@ export class TodoCommandController {
 	}
 
 	async #exportToFile(rest: string): Promise<void> {
-		const phases = this.#currentPhases();
+		const phases = this.ctx.session.getTodoPhases();
 		if (phases.length === 0) {
 			this.ctx.showWarning("No todos to export.");
 			return;
@@ -254,21 +241,22 @@ export class TodoCommandController {
 			this.ctx.showError(`Could not parse ${source}:\n  ${errors.join("\n  ")}`);
 			return;
 		}
-		this.#commit(phases, `/todo import ${source}`);
 		const taskCount = phases.reduce((sum, p) => sum + p.tasks.length, 0);
-		this.ctx.showStatus(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${source}.`);
+		await this.#edit(() => ({
+			phases,
+			action: `/todo import ${source}`,
+			status: `Imported ${phases.length} phase(s), ${taskCount} task(s) from ${source}.`,
+		}));
 	}
 
 	// ------------------------------------------------------------- append
 
-	#append(rest: string): void {
+	#append(rest: string, current: TodoPhase[]): TodoPlan {
 		const tokens = tokenize(rest);
 		if (tokens.length === 0) {
-			this.ctx.showError("Usage: /todo append [<phase>] <task...>");
-			return;
+			return { error: "Usage: /todo append [<phase>] <task...>" };
 		}
 
-		const current = this.#currentPhases();
 		let phaseName: string | undefined;
 		let content: string;
 
@@ -301,106 +289,99 @@ export class TodoCommandController {
 			status: "pending",
 		});
 
-		this.#commit(next, `/todo append → ${targetPhase.name}`);
-		this.ctx.showStatus(`Appended to ${targetPhase.name}: ${finalContent}`);
+		return {
+			phases: next,
+			action: `/todo append → ${targetPhase.name}`,
+			status: `Appended to ${targetPhase.name}: ${finalContent}`,
+		};
 	}
 
 	// ------------------------------------------------------------- start / done / drop / rm
 
-	#start(rest: string): void {
+	#start(rest: string, current: TodoPhase[]): TodoPlan {
 		if (!rest) {
-			this.ctx.showError("Usage: /todo start <task>");
-			return;
+			return { error: "Usage: /todo start <task>" };
 		}
-		const current = this.#currentPhases();
 		const hit = findTaskFuzzy(current, rest);
 		if (!hit) {
-			this.ctx.showError(`No task matched "${rest}". Use /todo to list current tasks.`);
-			return;
+			return { error: `No task matched "${rest}". Use /todo to list current tasks.` };
 		}
 		const { phases, errors } = applyOpsToPhases(current, [{ op: "start", task: hit.task.content }]);
 		if (errors.length > 0) {
-			this.ctx.showError(errors.join("; "));
-			return;
+			return { error: errors.join("; ") };
 		}
-		this.#commit(phases, `/todo start ${hit.task.content}`);
-		this.ctx.showStatus(`Started: ${hit.task.content}`);
+		return { phases, action: `/todo start ${hit.task.content}`, status: `Started: ${hit.task.content}` };
 	}
 
-	#mutateStatus(rest: string, target: "completed" | "abandoned"): void {
+	#mutateStatus(rest: string, target: "completed" | "abandoned", current: TodoPhase[]): TodoPlan {
 		const op = target === "completed" ? "done" : "drop";
-		const current = this.#currentPhases();
 		const trimmed = rest.trim();
 		if (!trimmed) {
 			// no-arg: apply to all
 			const { phases, errors } = applyOpsToPhases(current, [{ op }]);
 			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
+				return { error: errors.join("; ") };
 			}
-			this.#commit(phases, `/todo ${op} (all)`);
-			this.ctx.showStatus(`Marked all tasks ${target}.`);
-			return;
+			return { phases, action: `/todo ${op} (all)`, status: `Marked all tasks ${target}.` };
 		}
 
 		const taskHit = findTaskFuzzy(current, trimmed);
 		if (taskHit) {
 			const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }]);
 			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
+				return { error: errors.join("; ") };
 			}
-			this.#commit(phases, `/todo ${op} ${taskHit.task.content}`);
-			this.ctx.showStatus(`Marked ${target}: ${taskHit.task.content}`);
-			return;
+			return {
+				phases,
+				action: `/todo ${op} ${taskHit.task.content}`,
+				status: `Marked ${target}: ${taskHit.task.content}`,
+			};
 		}
 
 		const phaseHit = findPhaseFuzzy(current, trimmed);
 		if (phaseHit) {
 			const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }]);
 			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
+				return { error: errors.join("; ") };
 			}
-			this.#commit(phases, `/todo ${op} ${phaseHit.name}`);
-			this.ctx.showStatus(`Marked phase ${phaseHit.name} ${target}.`);
-			return;
+			return { phases, action: `/todo ${op} ${phaseHit.name}`, status: `Marked phase ${phaseHit.name} ${target}.` };
 		}
 
-		this.ctx.showError(`No task or phase matched "${trimmed}".`);
+		return { error: `No task or phase matched "${trimmed}".` };
 	}
 
-	#remove(rest: string): void {
-		const current = this.#currentPhases();
+	#remove(rest: string, current: TodoPhase[]): TodoPlan {
 		const trimmed = rest.trim();
 		if (!trimmed) {
-			this.#commit([], "/todo rm (all)", { removed: true });
-			this.ctx.showStatus("Cleared all todos.");
-			return;
+			return { phases: [], action: "/todo rm (all)", removed: true, status: "Cleared all todos." };
 		}
 		const taskHit = findTaskFuzzy(current, trimmed);
 		if (taskHit) {
 			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }]);
 			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
+				return { error: errors.join("; ") };
 			}
-			this.#commit(phases, `/todo rm ${taskHit.task.content}`, { removed: true });
-			this.ctx.showStatus(`Removed: ${taskHit.task.content}`);
-			return;
+			return {
+				phases,
+				action: `/todo rm ${taskHit.task.content}`,
+				removed: true,
+				status: `Removed: ${taskHit.task.content}`,
+			};
 		}
 		const phaseHit = findPhaseFuzzy(current, trimmed);
 		if (phaseHit) {
 			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }]);
 			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
+				return { error: errors.join("; ") };
 			}
-			this.#commit(phases, `/todo rm ${phaseHit.name}`, { removed: true });
-			this.ctx.showStatus(`Removed phase: ${phaseHit.name}`);
-			return;
+			return {
+				phases,
+				action: `/todo rm ${phaseHit.name}`,
+				removed: true,
+				status: `Removed phase: ${phaseHit.name}`,
+			};
 		}
-		this.ctx.showError(`No task or phase matched "${trimmed}".`);
+		return { error: `No task or phase matched "${trimmed}".` };
 	}
 
 	// ------------------------------------------------------------- editor
@@ -412,7 +393,7 @@ export class TodoCommandController {
 			return;
 		}
 
-		const current = this.#currentPhases();
+		const current = this.ctx.session.getTodoPhases();
 		const initialMarkdown =
 			current.length > 0 ? phasesToMarkdown(current) : "# Todos\n- [ ] (replace this with your tasks)\n";
 
@@ -428,9 +409,12 @@ export class TodoCommandController {
 				this.ctx.showError(`Could not parse Markdown:\n  ${errors.join("\n  ")}`);
 				return;
 			}
-			this.#commit(parsed, "/todo edit");
 			const taskCount = parsed.reduce((sum, p) => sum + p.tasks.length, 0);
-			this.ctx.showStatus(`Todos updated from editor: ${parsed.length} phase(s), ${taskCount} task(s).`);
+			await this.#edit(() => ({
+				phases: parsed,
+				action: "/todo edit",
+				status: `Todos updated from editor: ${parsed.length} phase(s), ${taskCount} task(s).`,
+			}));
 		} catch (error) {
 			this.ctx.showWarning(
 				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
@@ -441,15 +425,23 @@ export class TodoCommandController {
 		}
 	}
 
-	#commit(nextPhases: TodoPhase[], action: string, opts?: { removed?: boolean }): void {
+	/** The user may focus another agent mid-commit, so the HUD only updates if the focused one is unchanged. */
+	async #edit(compute: (current: TodoPhase[]) => TodoPlan): Promise<void> {
+		const { viewSession } = this.ctx;
 		// Commit first so HUD visibility binds to the new canonical source.
-		this.ctx.session.commitTodoPhases(nextPhases);
-		this.ctx.setTodos(nextPhases);
+		const outcome = await commitTodoEdit(this.ctx.session, compute);
+		if ("error" in outcome) {
+			this.ctx.showError(outcome.error);
+			return;
+		}
+		const { plan, committed } = outcome;
+		// The HUD shows the focused agent's list; one focused mid-commit keeps it, and the main list returns on switching back.
+		if (this.ctx.viewSession === viewSession) this.ctx.setTodos(committed);
 
-		// 3. Inject system reminder so the agent learns about the change next turn.
-		//    Removals carry explicit intent so the agent does not rebuild the
-		//    cleared/removed items on its next turn (issue #5258).
-		const reminderText = buildSystemReminder(action, nextPhases, opts?.removed ?? false);
+		// Inject system reminder so the agent learns about the change next turn.
+		// Removals carry explicit intent so the agent does not rebuild the
+		// cleared/removed items on its next turn (issue #5258).
+		const reminderText = buildSystemReminder(plan.action, committed, plan.removed ?? false);
 		const message = {
 			role: "developer" as const,
 			content: [{ type: "text" as const, text: reminderText }],
@@ -458,6 +450,7 @@ export class TodoCommandController {
 		};
 		this.ctx.agent.appendMessage(message);
 		this.ctx.sessionManager.appendMessage(message);
+		this.ctx.showStatus(plan.status);
 	}
 }
 
