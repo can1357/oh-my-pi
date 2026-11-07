@@ -210,8 +210,26 @@ async function handleAccountCommand(
 		for (const account of accounts) {
 			lines.push(`${account.position + 1}. ${account.label}${account.active ? " (active)" : ""}`);
 		}
-		lines.push("", "Use `/account <number|email|email local-part>` to switch accounts.");
+		lines.push(
+			"",
+			"Use `/account <number|email|email local-part>` to lock an account, or `/account auto` for automatic routing.",
+		);
 		await output(lines.join("\n"));
+		return;
+	}
+
+	if (selector.toLowerCase() === "auto") {
+		if (!session.useAutomaticProviderAccountRouting()) {
+			await output(
+				session.isStreaming
+					? "Cannot change account routing while the session is streaming."
+					: `${providerName} does not use OAuth account routing in this session.`,
+			);
+			return;
+		}
+		await output(
+			`${providerName} now uses automatic account routing for this session; pins, strict locks, and auth.defaultAccounts no longer apply to it.`,
+		);
 		return;
 	}
 
@@ -260,9 +278,9 @@ function launchSessionStatsDashboard(
 export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "account",
-		description: "Show or strictly select the OAuth account for this session",
+		description: "Show, strictly select, or unlock (auto) the OAuth account for this session",
 		allowArgs: true,
-		inlineHint: "[status|number|email]",
+		inlineHint: "[status|auto|number|email]",
 		handle: async (command, runtime) => {
 			try {
 				await handleAccountCommand(command.args, runtime.session, runtime.output);

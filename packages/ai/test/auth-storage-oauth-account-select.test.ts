@@ -148,6 +148,39 @@ describe("AuthStorage OAuth account selection", () => {
 		expect(storage.oauth.identity(PROVIDER, "strict-child")?.email).toBe("b@example.com");
 	});
 
+	test("release re-ranks within the session's routing mode instead of switching it", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
+		});
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const [accountA, accountB] = storage.oauth.accounts(PROVIDER);
+		if (!accountA || !accountB) throw new Error("expected two OAuth accounts");
+
+		// Usage-aware preflight releases an ordinary session: it re-ranks, it does not opt out.
+		expect(storage.sessions.pin(PROVIDER, "released", accountB.credentialId)).toBe(true);
+		expect(storage.sessions.release(PROVIDER, "released")).toBe(true);
+		expect(storage.sessions.mode(PROVIDER, "released")).toBe("affinity");
+		expect(storage.sessions.release(PROVIDER, "released")).toBe(false);
+		expect(await storage.keys.get(PROVIDER, "released")).toMatch(/^access-[ab]$/);
+		expect(storage.sessions.mode(PROVIDER, "released")).toBe("affinity");
+		expect(storage.sessions.inherit("released", "released-child")).toBe(1);
+		expect(storage.sessions.mode(PROVIDER, "released-child")).toBe("affinity");
+
+		// An explicit automatic opt-out survives a release of the account it later used.
+		expect(storage.sessions.automatic(PROVIDER, "opted-out")).toBe(true);
+		expect(await storage.keys.get(PROVIDER, "opted-out")).toMatch(/^access-[ab]$/);
+		expect(storage.sessions.release(PROVIDER, "opted-out")).toBe(true);
+		expect(storage.sessions.mode(PROVIDER, "opted-out")).toBe("automatic");
+
+		// A strict lock is never released.
+		expect(storage.sessions.pin(PROVIDER, "locked", accountA.credentialId, { strict: true })).toBe(true);
+		expect(storage.sessions.release(PROVIDER, "locked")).toBe(false);
+		expect(storage.sessions.mode(PROVIDER, "locked")).toBe("strict");
+	});
+
 	test("authentication invalidation preserves a strict pin instead of retrying another credential", async () => {
 		const storage = authStorage;
 		const credentialStore = store;

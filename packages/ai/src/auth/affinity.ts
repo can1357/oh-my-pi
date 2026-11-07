@@ -504,15 +504,17 @@ export class SessionAffinity implements SessionsApi {
 
 	/**
 	 * Release a session's sticky credential so its next `KeyCascade.get` call
-	 * uses native automatic routing. Returns false for strict pins — a strict
-	 * lock is the user's explicit no-fallback choice and must not be silently
-	 * erased by usage-aware preflight or internal retry logic.
+	 * re-runs native pool ranking. It never changes the session's routing mode:
+	 * a strict lock is refused (it is the user's explicit no-fallback choice and
+	 * must not be erased by usage-aware preflight or internal retry logic), and an
+	 * explicit automatic opt-out stays in place.
 	 */
 	release(provider: string, sessionId: string): boolean {
 		const credential = this.get(provider, sessionId);
-		if (credential?.strict === true) return false;
-		const hadAffinity = credential !== undefined || this.isAutomatic(provider, sessionId);
-		this.automatic(provider, sessionId);
-		return hadAffinity;
+		if (!credential || credential.strict === true) return false;
+		const wasAutomatic = this.isAutomatic(provider, sessionId);
+		this.clear(provider, sessionId);
+		if (wasAutomatic) this.#automaticSessions.get(provider)?.add(sessionId);
+		return true;
 	}
 }

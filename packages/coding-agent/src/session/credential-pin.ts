@@ -84,16 +84,17 @@ export function recordCredentialPin(
  * are left alone; an unavailable strict journal account fails adoption before
  * configured defaults or sibling credentials can route a request. A warm sticky
  * for the same account is advanced to the pin's effective last-use time.
- * `restoreMode: "strict"` carries only explicit locks onto a fresh provider id.
+ * `explicitOnly` carries only explicit routing choices — a strict lock or an
+ * automatic-routing opt-out — onto a fresh provider id.
  */
 export function seedCredentialPins(
 	authStorage: AuthStorage,
 	sessionManager: SessionManager,
 	sessionId: string,
-	restoreMode?: "strict",
+	explicitOnly = false,
 ): void {
 	for (const [provider, pin] of sessionManager.getCredentialPins()) {
-		if (restoreMode && pin.mode !== restoreMode) continue;
+		if (explicitOnly && pin.mode === undefined) continue;
 		// The spawning parent's explicit choice wins over a revived child's journal,
 		// including an automatic-routing opt-out or an older pin for the same account.
 		const liveMode = authStorage.sessions.mode(provider, sessionId);

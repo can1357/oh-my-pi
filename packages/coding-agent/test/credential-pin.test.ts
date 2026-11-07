@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -48,6 +49,7 @@ function assistantMessage(provider: string, timestamp: number) {
 describe("credential pins", () => {
 	let tempDir: TempDir;
 	let storage: AuthStorage;
+	let store: SqliteAuthCredentialStore;
 
 	beforeEach(async () => {
 		for (const key of ANTHROPIC_ENV) {
@@ -55,7 +57,7 @@ describe("credential pins", () => {
 			delete process.env[key];
 		}
 		tempDir = TempDir.createSync("@pi-credential-pin-");
-		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		await store.saveOAuth("anthropic", mintOAuthCredential("a"));
 		await store.saveOAuth("anthropic", mintOAuthCredential("b"));
 		storage = new AuthStorage(store);
@@ -287,13 +289,13 @@ describe("credential pins", () => {
 		expect(storage.oauth.accounts("anthropic", sessionId).some(account => account.active)).toBe(false);
 	});
 
-	test.each([undefined, "strict"] as const)("unavailable strict pins fail restoration in mode %s", restoreMode => {
+	test.each([false, true])("unavailable strict pins fail restoration (explicit only: %s)", explicitOnly => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		const sessionId = manager.getSessionId();
 		const hash = credentialPinHash("anthropic", { accountId: "account-gone" })!;
 		manager.appendCredentialPin("anthropic", hash, "strict");
 
-		expect(() => seedCredentialPins(storage, manager, sessionId, restoreMode)).toThrow(Error);
+		expect(() => seedCredentialPins(storage, manager, sessionId, explicitOnly)).toThrow(Error);
 		expect(storage.sessions.mode("anthropic", sessionId)).toBe("affinity");
 		expect(storage.oauth.accounts("anthropic", sessionId).some(account => account.active)).toBe(false);
 	});
@@ -370,6 +372,76 @@ describe("credential pins", () => {
 			expect(storage.sessions.mode("anthropic", sessionId)).toBe("strict");
 			expect(storage.oauth.accounts("anthropic", sessionId).some(item => item.active)).toBe(false);
 			expect(await registry.getApiKey(model, sessionId)).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("automatic routing outlives /fresh and resume despite a configured default account", async () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		manager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
+		manager.appendMessage(assistantMessage("anthropic", Date.now()));
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic model");
+		const settings = Settings.isolated({ "auth.defaultAccounts": { anthropic: "b" } });
+		const createSession = (authStorage: AuthStorage, sessionManager: SessionManager) =>
+			new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "unused-key",
+					initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				}),
+				sessionManager,
+				modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+				settings,
+			});
+		const session = createSession(storage, manager);
+		try {
+			expect(storage.sessions.mode("anthropic", session.sessionId)).toBe("strict");
+			expect(session.useAutomaticProviderAccountRouting()).toBe(true);
+			expect(storage.sessions.mode("anthropic", session.sessionId)).toBe("automatic");
+
+			// `/fresh` mints a provider session id; the default must not re-lock it.
+			const fresh = session.freshSession();
+			expect(fresh).toBeDefined();
+			expect(storage.sessions.mode("anthropic", session.sessionId)).toBe("automatic");
+			await manager.flush();
+		} finally {
+			await session.dispose();
+		}
+
+		// A new process has no live routing state; only the reopened journal carries the opt-out.
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("expected a persisted session file");
+		const resumedStorage = new AuthStorage(store);
+		await resumedStorage.credentials.reload();
+		const resumed = createSession(resumedStorage, await SessionManager.open(file));
+		try {
+			expect(resumedStorage.sessions.mode("anthropic", resumed.sessionId)).toBe("automatic");
+		} finally {
+			await resumed.dispose();
+		}
+	});
+
+	test("an unmatched configured default warns without the selector and leaves routing automatic", async () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic model");
+		const selector = "nobody@corp.example";
+		const session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "unused-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: manager,
+			modelRegistry: new ModelRegistry(storage, path.join(tempDir.path(), "models.yml")),
+			settings: Settings.isolated({ "auth.defaultAccounts": { anthropic: selector } }),
+		});
+		try {
+			const warnings = session.configWarnings.filter(warning => warning.startsWith("auth.defaultAccounts.anthropic"));
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain("matches no stored anthropic OAuth account");
+			expect(warnings[0]).not.toContain(selector);
+			expect(storage.sessions.mode("anthropic", session.sessionId)).toBe("affinity");
 		} finally {
 			await session.dispose();
 		}

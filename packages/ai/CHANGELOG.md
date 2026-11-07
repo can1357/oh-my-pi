@@ -11,6 +11,7 @@
 
 - Preserved filtered deletion of broker session-affinity caches with bounded-cache accounting, so clearing ordinary affinity keeps strict pins and releases the deleted rows' capacity.
 - Strict account locks now survive gateway authentication invalidation and broker cache pressure; ordinary broker cache rows remain bounded while strict locks expire or are explicitly cleared.
+- `sessions.release()` no longer switches an ordinary session to automatic routing: usage-aware re-ranking clears only the sticky account and keeps the session's routing mode, so subagents still inherit the re-ranked account.
 - ChatGPT Pro Max (`promax`) counts as Pro for Codex account routing, so a blocked Pro account no longer wins over an open or pinned Pro Max account ([#18399](https://github.com/can1357/oh-my-pi/pull/18399) by [@serverinspector](https://github.com/serverinspector))
 - A 429 or 402 worded like a context overflow (Bedrock's "429 Too many tokens, please wait…") is treated as a rate limit, so it retries and walks the fallback chain instead of compacting ([#18345](https://github.com/can1357/oh-my-pi/pull/18345) by [@nick-maderight](https://github.com/nick-maderight))
 - `auth-gateway stdio` and `serve` no longer reject credentialless Apple on-device models ([#18370](https://github.com/can1357/oh-my-pi/issues/18370))
