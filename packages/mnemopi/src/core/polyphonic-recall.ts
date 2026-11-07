@@ -7,7 +7,21 @@ import type { BeamMemoryState, JsonValue, Metadata, RecallResult, RecallTierLabe
 import { EpisodicGraph, extractProperNouns } from "./episodic-graph";
 import { STOP_WORDS } from "./synonyms";
 import { VeracityConsolidator } from "./veracity-consolidation";
-
+import {
+	CJK_CLAUSE_PARTICLE_RE,
+	CJK_PARTICLE_SPLIT_RE,
+	CJK_RUN_RE,
+	CJK_STOP_SEGMENTS,
+	CJK_TEMPORAL_QUERY_RE,
+	cjkCodePointShingles,
+	codePointLength,
+	expandCjkCandidateSegments,
+	hasCjk,
+	RECALL_RAW_TOKEN_RE,
+	splitMixedScriptToken,
+	stripCjkQuestionAffixes,
+	unicodeCaseVariants,
+} from "../util/regex";
 export type PolyphonicVoice = "hybrid" | "vector" | "graph" | "fact" | "temporal";
 
 export interface VoiceRecallResult {
@@ -216,32 +230,210 @@ function cosineAgainstUnit(unit: Float32Array, raw: unknown): number | null {
 
 function queryTokens(query: string): string[] {
 	const tokens: string[] = [];
-	for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}_-]+/gu)) tokens.push(match[0]);
+	for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}\u30FC\u3005\uFF66-\uFF9F_-]+/gu)) {
+		tokens.push(match[0]);
+	}
+	return tokens;
+}
+
+function rawQueryTokens(query: string): string[] {
+	const tokens: string[] = [];
+	for (const match of query.matchAll(RECALL_RAW_TOKEN_RE)) {
+		const trimmed = match[0].replace(/^\.+|\.+$/gu, "");
+		if (trimmed.length > 0) tokens.push(trimmed);
+	}
 	return tokens;
 }
 
 /**
- * Subject candidates for the fact voice: every 3+ char query word plus adjacent word pairs.
+ * Subject candidates for the fact voice: every 3+ char query word plus adjacent word pairs,
+ * plus 2-6 code-point CJK sub-clauses and 2/3/4-code-point shingles for unspaced CJK queries.
  * Stopwords never anchor a subject on their own — the regex extractor stores sentence-initial
  * words like `That` as subjects, so a bare `that` in the query would pull in unrelated memories.
  */
-function factSubjectCandidates(query: string): string[] {
-	const tokens = queryTokens(query);
+function factSubjectCandidateGroups(query: string): {
+	all: string[];
+	primarySubjects: Set<string>;
+} {
+	const normalized = query.normalize("NFC");
+	const rawTokens = rawQueryTokens(normalized);
+	const tokens = rawTokens.map(t => t.toLowerCase());
 	const seen = new Set<string>();
+	const primary = new Set<string>();
+
+	const addPrimary = (val: string): void => {
+		seen.add(val);
+		primary.add(val.toLowerCase());
+		primary.add(val.normalize("NFKC").toLowerCase());
+	};
+
 	for (let i = 0; i < tokens.length; i++) {
 		const word = tokens[i] as string;
+		const rawWord = rawTokens[i] ?? word;
 		const isContent = !STOP_WORDS.has(word);
-		if (isContent && word.length >= 3) seen.add(word);
+		const isCjk = hasCjk(word);
+		const wordLen = isCjk ? codePointLength(word) : word.length;
+		const minLen = isCjk ? 2 : 3;
+		if (isContent && wordLen >= minLen && !CJK_STOP_SEGMENTS.has(word)) {
+			for (const variant of unicodeCaseVariants(rawWord)) addPrimary(variant);
+		}
+		if (isCjk) {
+			const { nonCjk, cjkRuns } = splitMixedScriptToken(rawWord);
+			for (const latin of nonCjk) {
+				if (latin.length >= 3 && !STOP_WORDS.has(latin.toLowerCase())) addPrimary(latin);
+			}
+			if (nonCjk.length > 0 && cjkRuns.length > 0) {
+				for (const sourceForm of new Set([word, rawWord])) {
+					const strippedWord = stripCjkQuestionAffixes(sourceForm);
+					for (const seg of [sourceForm, strippedWord]) {
+						if (codePointLength(seg) >= 2 && !CJK_STOP_SEGMENTS.has(seg)) addPrimary(seg);
+					}
+					for (const clauseRaw of strippedWord.split(CJK_CLAUSE_PARTICLE_RE)) {
+						const clause = stripCjkQuestionAffixes(clauseRaw);
+						if (codePointLength(clause) >= 2 && !CJK_STOP_SEGMENTS.has(clause)) addPrimary(clause);
+						for (const sub of clause.split(CJK_PARTICLE_SPLIT_RE)) {
+							const strippedSub = stripCjkQuestionAffixes(sub);
+							if (codePointLength(strippedSub) >= 2 && !CJK_STOP_SEGMENTS.has(strippedSub))
+								addPrimary(strippedSub);
+						}
+					}
+				}
+			}
+			if (wordLen >= 2) expandCjkCandidateSegments(rawWord, seen, primary);
+		}
 		const next = tokens[i + 1];
-		if (next !== undefined && (isContent || !STOP_WORDS.has(next))) seen.add(`${word} ${next}`);
+		if (next !== undefined) {
+			if (isContent || !STOP_WORDS.has(next)) addPrimary(`${word} ${next}`);
+			const nextIsCjk = hasCjk(next);
+			if (isContent && !isCjk && nextIsCjk) {
+				const firstClause = stripCjkQuestionAffixes(next.split(CJK_PARTICLE_SPLIT_RE)[0] ?? "");
+				if (codePointLength(firstClause) >= 2 && firstClause !== next) {
+					addPrimary(`${word} ${firstClause}`);
+				}
+			} else if (isContent && isCjk && !nextIsCjk && !STOP_WORDS.has(next)) {
+				const clauses = word.split(CJK_PARTICLE_SPLIT_RE);
+				const lastClause = stripCjkQuestionAffixes(clauses[clauses.length - 1] ?? "");
+				if (codePointLength(lastClause) >= 2 && lastClause !== word) {
+					addPrimary(`${lastClause} ${next}`);
+				}
+			}
+		}
 	}
-	return [...seen];
+	return { all: [...seen], primarySubjects: primary };
 }
 
+export function factSubjectCandidates(query: string): string[] {
+	return factSubjectCandidateGroups(query).all;
+}
 function contentTokens(text: string): Set<string> {
 	const out = new Set<string>();
-	for (const token of queryTokens(text)) if (token.length >= 2) out.add(token);
+	for (const token of queryTokens(text)) {
+		if (codePointLength(token) < 2) continue;
+		if (hasCjk(token)) {
+			const { nonCjk, cjkRuns } = splitMixedScriptToken(token);
+			for (const latin of nonCjk) {
+				if (latin.length >= 1) out.add(latin.toLowerCase());
+			}
+			if (cjkRuns.length === 0) {
+				out.add(token);
+			}
+			for (const run of cjkRuns) {
+				const normalizedRun = run.normalize("NFKC");
+				if (codePointLength(normalizedRun) === 2) {
+					out.add(normalizedRun);
+				} else {
+					for (const bigram of cjkCodePointShingles(normalizedRun, [2])) out.add(bigram);
+				}
+			}
+		} else {
+			out.add(token);
+		}
+	}
 	return out;
+}
+const CJK_VARIANT_DESIGNATOR_RE =
+	/[甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥一二三四五六七八九十百千萬零〇壹貳參肆伍陸柒捌玖拾]+[型號号級级類类期版區区組组部篇卷章節节階段步課课條条項项款]/gu;
+const CJK_CLASSIFIER_SUFFIX_RE =
+	/(?:[\p{Script=Han}\p{Script=Katakana}\u30FC]{2,3})(?:區域|区域|地區|地区|分區|分区|環境|环境|節點|节点|機房|机房|叢集|集群|中心|分部|支部|支店|拠点)/gu;
+
+function latinIdentifierTokens(text: string): Set<string> {
+	const out = new Set<string>();
+	for (const match of text.matchAll(/[a-z0-9][a-z0-9_.:/#+-]*/gi)) {
+		const lower = match[0].replace(/[.:/-]+$/, "").toLowerCase();
+		if (lower.length > 0 && !STOP_WORDS.has(lower) && !/^\d+$/.test(lower)) {
+			out.add(lower);
+		}
+	}
+	for (const match of text.matchAll(/[\p{L}\p{N}][\p{L}\p{N}_.#+-]*/gu)) {
+		const rawMatch = match[0];
+		const token = rawMatch.replace(/[.:/-]+$/, "").toLowerCase();
+		if (token.length === 0) continue;
+		if (!hasCjk(token)) {
+			if (!STOP_WORDS.has(token) && !/^\d+$/.test(token)) {
+				out.add(token);
+			}
+		} else {
+			for (const part of splitMixedScriptToken(rawMatch).nonCjk) {
+				const lowerPart = part.replace(/[.:/-]+$/, "").toLowerCase();
+				if (lowerPart.length > 0 && !STOP_WORDS.has(lowerPart) && !/^\d+$/.test(lowerPart)) {
+					out.add(lowerPart);
+				}
+			}
+		}
+	}
+	return out;
+}
+
+function cjkVariantIdentifierTokens(text: string): Set<string> {
+	const out = new Set<string>();
+	for (const match of text.matchAll(CJK_VARIANT_DESIGNATOR_RE)) {
+		const matched = match[0];
+		if (matched) out.add(matched);
+	}
+	for (const match of text.matchAll(CJK_CLASSIFIER_SUFFIX_RE)) {
+		const matched = match[0];
+		if (matched) out.add(matched);
+	}
+	const firstCjkRun = text.match(CJK_RUN_RE)?.[0];
+	if (firstCjkRun && codePointLength(firstCjkRun) >= 2) {
+		const firstBigram = Array.from(firstCjkRun).slice(0, 2).join("");
+		out.add(firstBigram);
+	}
+	return out;
+}
+
+export function hasDistinctInternalCjkSubstitution(leftText: string, rightText: string): boolean {
+	const a = Array.from(leftText.normalize("NFKC"));
+	const b = Array.from(rightText.normalize("NFKC"));
+
+	let prefixLen = 0;
+	while (prefixLen < a.length && prefixLen < b.length && a[prefixLen] === b[prefixLen]) {
+		prefixLen++;
+	}
+
+	let suffixLen = 0;
+	while (
+		suffixLen < (a.length - prefixLen) &&
+		suffixLen < (b.length - prefixLen) &&
+		a[a.length - 1 - suffixLen] === b[b.length - 1 - suffixLen]
+	) {
+		suffixLen++;
+	}
+
+	if (prefixLen < 2 || suffixLen < 2) {
+		return false;
+	}
+
+	const midA = a.slice(prefixLen, a.length - suffixLen).join("");
+	const midB = b.slice(prefixLen, b.length - suffixLen).join("");
+
+	const midALen = codePointLength(midA);
+	const midBLen = codePointLength(midB);
+	if (midALen < 1 || midALen > 8 || midBLen < 1 || midBLen > 8) {
+		return false;
+	}
+
+	return hasCjk(midA) && hasCjk(midB);
 }
 
 function tokenJaccard(left: ReadonlySet<string>, right: ReadonlySet<string>): number {
@@ -258,11 +450,29 @@ function anchorTime(queryTime: string | Date | null | undefined): number | null 
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
+const TEMPORAL_QUERY_RE = CJK_TEMPORAL_QUERY_RE;
 function looksTemporal(query: string): boolean {
-	const lower = query.toLowerCase();
-	return ["yesterday", "today", "recent", "last", "latest", "this week", "this month", "ago", "before"].some(keyword =>
-		lower.includes(keyword),
-	);
+	const normalized = query.normalize("NFC");
+	const lower = normalized.toLowerCase();
+	if (
+		[
+			"yesterday",
+			"today",
+			"tomorrow",
+			"recent",
+			"last",
+			"latest",
+			"this week",
+			"next week",
+			"this month",
+			"next month",
+			"ago",
+			"before",
+		].some(keyword => lower.includes(keyword))
+	) {
+		return true;
+	}
+	return TEMPORAL_QUERY_RE.test(normalized);
 }
 
 export class PolyphonicRecallEngine {
@@ -463,18 +673,40 @@ export class PolyphonicRecallEngine {
 		}
 		return results;
 	}
-	factVoice(query: string): VoiceRecallResult[] {
+	factVoice(query: string, topK?: number): VoiceRecallResult[] {
 		if (envDisabled("MNEMOPI_VOICE_FACT")) return [];
+		const { all: candidates, primarySubjects } = factSubjectCandidateGroups(query);
+		const rawFacts = this.consolidator.getConsolidatedFactsBySubjects(candidates, 0.5);
+
+		const isPrimaryMatch = (subj: string): boolean => {
+			const lower = subj.toLowerCase();
+			const nfkc = subj.normalize("NFKC").toLowerCase();
+			return primarySubjects.has(lower) || primarySubjects.has(nfkc);
+		};
+
+		const sortedFacts = [...rawFacts].sort((a, b) => {
+			const aPrimary = isPrimaryMatch(a.subject) ? 1 : 0;
+			const bPrimary = isPrimaryMatch(b.subject) ? 1 : 0;
+			if (aPrimary !== bPrimary) return bPrimary - aPrimary;
+			const aLen = codePointLength(a.subject);
+			const bLen = codePointLength(b.subject);
+			if (aLen !== bLen) return bLen - aLen;
+			return b.confidence - a.confidence;
+		});
+
 		const byId = new Map<string, VoiceRecallResult>();
-		for (const fact of this.consolidator.getConsolidatedFactsBySubjects(factSubjectCandidates(query), 0.5)) {
+		for (const fact of sortedFacts) {
+			const primary = isPrimaryMatch(fact.subject);
+			const specificityBonus = primary ? Math.min(codePointLength(fact.subject.trim()), 64) * 0.001 : 0;
+			const factScore = (primary ? 1.0 : 0) + fact.confidence + specificityBonus;
 			for (const source of fact.sources) {
 				const memoryId = source.trim();
 				if (memoryId.length === 0) continue;
 				const existing = byId.get(memoryId);
-				if (existing !== undefined && existing.score >= fact.confidence) continue;
+				if (existing !== undefined && existing.score >= factScore) continue;
 				byId.set(memoryId, {
 					memoryId,
-					score: fact.confidence,
+					score: factScore,
 					voice: "fact",
 					metadata: {
 						fact_id: fact.id ?? "",
@@ -486,7 +718,8 @@ export class PolyphonicRecallEngine {
 				});
 			}
 		}
-		return [...byId.values()].sort((a, b) => b.score - a.score || a.memoryId.localeCompare(b.memoryId));
+		const results = [...byId.values()].sort((a, b) => b.score - a.score || a.memoryId.localeCompare(b.memoryId));
+		return typeof topK === "number" ? results.slice(0, topK) : results;
 	}
 	temporalVoice(query: string, options: PolyphonicCallOptions = {}): VoiceRecallResult[] {
 		if (envDisabled("MNEMOPI_VOICE_TEMPORAL") || !looksTemporal(query)) return [];
@@ -573,16 +806,35 @@ export class PolyphonicRecallEngine {
 			(a, b) => b.combinedScore - a.combinedScore || a.memoryId.localeCompare(b.memoryId),
 		);
 		const selected: PolyphonicMemoryResult[] = [];
-		const selectedTokens: Set<string>[] = [];
+		const selectedTokens: { content: string; tokens: Set<string>; latinIds: Set<string>; cjkVariantIds: Set<string> }[] = [];
 		const limit = Math.max(0, Math.trunc(topK));
 		for (const candidate of sorted) {
 			if (selected.length >= limit) break;
 			const hydrated = hydrate(candidate);
 			if (hydrated === null) continue;
 			const tokens = contentTokens(hydrated.content);
-			if (selectedTokens.some(prior => tokenJaccard(tokens, prior) > NEAR_DUPLICATE_JACCARD)) continue;
+			const latinIds = latinIdentifierTokens(hydrated.content);
+			const cjkVariantIds = cjkVariantIdentifierTokens(hydrated.content);
+			const isNearDuplicate = selectedTokens.some(prior => {
+				if (hasDistinctInternalCjkSubstitution(hydrated.content, prior.content)) {
+					return false;
+				}
+				if (tokenJaccard(tokens, prior.tokens) <= NEAR_DUPLICATE_JACCARD) return false;
+				if (latinIds.size > 0 && prior.latinIds.size > 0) {
+					if (tokenJaccard(latinIds, prior.latinIds) < NEAR_DUPLICATE_JACCARD) {
+						return false;
+					}
+				}
+				if (cjkVariantIds.size > 0 && prior.cjkVariantIds.size > 0) {
+					if (tokenJaccard(cjkVariantIds, prior.cjkVariantIds) < NEAR_DUPLICATE_JACCARD) {
+						return false;
+					}
+				}
+				return true;
+			});
+			if (isNearDuplicate) continue;
 			selected.push(hydrated);
-			selectedTokens.push(tokens);
+			selectedTokens.push({ content: hydrated.content, tokens, latinIds, cjkVariantIds });
 		}
 		return selected;
 	}

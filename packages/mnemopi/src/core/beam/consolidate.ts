@@ -2,6 +2,24 @@ import type { SQLQueryBindings } from "bun:sqlite";
 import { logger } from "@oh-my-pi/pi-utils";
 import { polyphonicRecallEnabled } from "../../config";
 import { generateId, stableMemoryId } from "../../util/ids";
+import {
+	CJK_CHAR_RE,
+	CJK_CLAUSE_PARTICLE_RE,
+	CJK_PARTICLE_SPLIT_RE,
+	CJK_STOP_SEGMENTS,
+	CJK_TEMPORAL_QUERY_RE,
+	CJK_TEMPORAL_ROUTING_PHRASES,
+	cjkCodePointShingles,
+	codePointLength,
+	extractCjkNonTemporalSegments,
+	hasCjk,
+	RECALL_RAW_TOKEN_RE,
+	splitCjkClausesPreservingPossessiveCompounds,
+	splitMixedScriptToken,
+	stripCjkQuestionAffixes,
+	unicodeCaseVariants,
+} from "../../util/regex";
+import { STOP_WORDS } from "../synonyms";
 import { aaakEncode } from "../aaak";
 import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "../entities";
 import { EpisodicGraph } from "../episodic-graph";
@@ -200,9 +218,15 @@ function asRows(value: unknown): Row[] {
 function escapeLike(value: string): string {
 	return value.replace(/[\\%_]/g, m => `\\${m}`);
 }
-
-function makeQuestionTokens(query: string): string[] {
+function makeQuestionTokenGroups(query: string): {
+	exactPrimary: string[];
+	primary: string[];
+	shingles: string[];
+	all: string[];
+} {
+	const normalizedQuery = query.normalize("NFC");
 	const stop = new Set([
+		...STOP_WORDS,
 		"a",
 		"an",
 		"and",
@@ -235,11 +259,199 @@ function makeQuestionTokens(query: string): string[] {
 		"who",
 		"with",
 	]);
-	return [...query.toLowerCase().matchAll(/[\p{L}\p{N}_.-]+/gu)]
-		.map(m => m[0] ?? "")
-		.filter(token => token.length > 1 && !stop.has(token))
-		.slice(0, 8);
+	const rawTokens = [...normalizedQuery.matchAll(RECALL_RAW_TOKEN_RE)]
+		.map(m => m[0]?.replace(/^\.+|\.+$/gu, "") ?? "")
+		.filter(token => {
+			const lower = token.toLowerCase();
+			return codePointLength(lower) > 1 && !stop.has(lower) && !CJK_STOP_SEGMENTS.has(lower);
+		});
+
+	const primary: string[] = [];
+	const shingles: string[] = [];
+	const seen = new Set<string>();
+
+	const pushUnique = (target: string[], token: string): void => {
+		if (token.length > 0 && !seen.has(token) && !CJK_STOP_SEGMENTS.has(token)) {
+			seen.add(token);
+			target.push(token);
+		}
+	};
+
+	for (const rawToken of rawTokens.slice(0, 8)) {
+		const token = rawToken.toLowerCase();
+		if (hasCjk(token)) {
+			const { nonCjk, cjkRuns } = splitMixedScriptToken(rawToken);
+			const hasAnyCjk = CJK_CHAR_RE.test(token);
+			if (nonCjk.length > 0 && hasAnyCjk) {
+				const strippedToken = stripCjkQuestionAffixes(token);
+				for (const clauseRaw of splitCjkClausesPreservingPossessiveCompounds(strippedToken)) {
+					const clause = stripCjkQuestionAffixes(clauseRaw);
+					if (codePointLength(clause) >= 2 && !CJK_STOP_SEGMENTS.has(clause)) {
+						pushUnique(primary, clause);
+					}
+					for (const seg of extractCjkNonTemporalSegments(clause)) {
+						pushUnique(primary, seg);
+						if (codePointLength(seg) >= 4) {
+							for (const shingle of cjkCodePointShingles(seg, [2])) {
+								pushUnique(primary, shingle);
+							}
+						}
+					}
+				}
+				if (!CJK_CLAUSE_PARTICLE_RE.test(token)) {
+					pushUnique(primary, token);
+				}
+			}
+			for (const latin of nonCjk) {
+				const lowerLatin = latin.toLowerCase();
+				if (lowerLatin.length > 1 && !stop.has(lowerLatin)) pushUnique(primary, lowerLatin);
+			}
+			for (const rawRun of cjkRuns) {
+				for (const run of new Set([rawRun, rawRun.normalize("NFKC")])) {
+					const runLen = codePointLength(run);
+					if (runLen < 2) continue;
+					const strippedRun = stripCjkQuestionAffixes(run);
+					for (const clauseRaw of splitCjkClausesPreservingPossessiveCompounds(strippedRun)) {
+						const clause = stripCjkQuestionAffixes(clauseRaw);
+						const clauseLen = codePointLength(clause);
+						if (clauseLen < 2 || CJK_STOP_SEGMENTS.has(clause)) continue;
+						const validSubsegs = clause
+							.split(CJK_PARTICLE_SPLIT_RE)
+							.map(stripCjkQuestionAffixes)
+							.filter(s => codePointLength(s) >= 2 && !CJK_STOP_SEGMENTS.has(s));
+						if (validSubsegs.length <= 1) {
+							pushUnique(primary, clause);
+							for (const sub of validSubsegs) {
+								pushUnique(primary, sub);
+							}
+						} else {
+							pushUnique(primary, clause);
+							for (const sub of validSubsegs) {
+								pushUnique(primary, sub);
+							}
+							pushUnique(shingles, clause);
+						}
+						for (const seg of extractCjkNonTemporalSegments(clause)) {
+							pushUnique(primary, seg);
+							if (codePointLength(seg) >= 4) {
+								for (const shingle of cjkCodePointShingles(seg, [2])) {
+									pushUnique(primary, shingle);
+								}
+							}
+						}
+						if (clauseLen >= 3) {
+							for (const shingle of cjkCodePointShingles(clause, [2, 3, 4])) pushUnique(shingles, shingle);
+						}
+					}
+					if (runLen >= 3) {
+						for (const shingle of cjkCodePointShingles(run, [2, 3, 4])) pushUnique(shingles, shingle);
+					}
+				}
+			}
+			pushUnique(shingles, token);
+		} else {
+			pushUnique(primary, token);
+		}
+	}
+
+	const all = primary.length >= 8 ? primary : [...primary, ...shingles.slice(0, 8 - primary.length)];
+	const primarySet = new Set(primary);
+	const primaryInAll = all.filter(t => primarySet.has(t));
+	const exactPrimary = primaryInAll.filter(t => !primaryInAll.some(other => other !== t && other.includes(t)));
+	return {
+		exactPrimary,
+		primary: primaryInAll,
+		shingles: all.filter(t => !primarySet.has(t)),
+		all,
+	};
 }
+
+function makeQuestionTokens(query: string): string[] {
+	return makeQuestionTokenGroups(query).all;
+}
+
+export const TR_ROUTING_PHRASES = [
+	"how many days",
+	"how many weeks",
+	"how many months",
+	"how long",
+	"what date",
+	"what day",
+	"when did",
+	"when does",
+	"deadline",
+	"timeline",
+	"how far apart",
+	...CJK_TEMPORAL_ROUTING_PHRASES,
+] as const;
+
+export const EO_ROUTING_PHRASES = [
+	"list the order",
+	"walk me through",
+	"chronological",
+	"in what order",
+	"sequence of events",
+	"先後順序",
+	"先后顺序",
+	"時間順序",
+	"时间顺序",
+	"事件順序",
+	"事件顺序",
+	"發生順序",
+	"发生顺序",
+	"先後",
+	"先后",
+	"歷程",
+	"历程",
+] as const;
+
+const EXTRA_GENERIC_TIMELINE_WORDS = [
+	"timelines",
+	"chronology",
+	"chronologically",
+	"history",
+	"historical",
+	"before",
+	"after",
+	"first",
+	"latest",
+	"recent",
+	"recently",
+	"last",
+	"newest",
+	"時序",
+	"时序",
+	"順序",
+	"顺序",
+	"最近",
+	"近期",
+	"最新",
+	"いつ",
+	"언제",
+	"최신",
+	"최근",
+	"タイムライン",
+	"時系列",
+	"타임라인",
+	"연표",
+] as const;
+
+export const GENERIC_TIMELINE_WORDS: ReadonlySet<string> = (() => {
+	const set = new Set<string>();
+	for (const phrase of [...TR_ROUTING_PHRASES, ...EO_ROUTING_PHRASES]) {
+		for (const token of makeQuestionTokens(phrase)) {
+			set.add(token.toLowerCase());
+		}
+		for (const part of phrase.toLowerCase().split(/\s+/g)) {
+			const trimmed = part.trim();
+			if (trimmed.length > 0) set.add(trimmed);
+		}
+	}
+	for (const word of EXTRA_GENERIC_TIMELINE_WORDS) {
+		set.add(word.toLowerCase());
+	}
+	return set;
+})();
 
 function emitEvent(
 	beam: BeamMemoryState,
@@ -756,104 +968,217 @@ export function extractAndStoreFacts(
 	return counts;
 }
 function classifyAbility(query: string): string {
-	const q = query.toLowerCase();
+	const normalized = query.normalize("NFC");
+	const q = normalized.toLowerCase();
+	if (CJK_TEMPORAL_QUERY_RE.test(normalized) || TR_ROUTING_PHRASES.some(w => q.includes(w))) return "TR";
+	if (EO_ROUTING_PHRASES.some(w => q.includes(w))) return "EO";
 	if (
 		[
-			"how many days",
-			"how many weeks",
-			"how many months",
-			"how long",
-			"what date",
-			"what day",
-			"when did",
-			"when does",
-			"deadline",
-			"timeline",
-			"how far apart",
+			"have i",
+			"did i",
+			"am i",
+			"has this",
+			"contradict",
+			"contradiction",
+			"conflict",
+			"矛盾",
+			"衝突",
+			"冲突",
+			"不一致",
 		].some(w => q.includes(w))
 	)
-		return "TR";
-	if (
-		["list the order", "walk me through", "chronological", "in what order", "sequence of events"].some(w =>
-			q.includes(w),
-		)
-	)
-		return "EO";
-	if (["have i", "did i", "am i", "has this", "contradict", "contradiction", "conflict"].some(w => q.includes(w)))
 		return "CR";
-	if (["across my", "across all", "in my project", "in my sessions", "across sessions"].some(w => q.includes(w)))
+	if (
+		[
+			"across my",
+			"across all",
+			"in my project",
+			"in my sessions",
+			"across sessions",
+			"跨會話",
+			"跨会话",
+			"所有專案",
+			"所有项目",
+			"所有對話",
+			"所有对话",
+			"所有會話",
+			"所有会话",
+		].some(w => q.includes(w))
+	)
 		return "MR";
 	if (
 		/^(what|when|where|which|who|how)\s/.test(q) ||
-		["how many", "what is", "what was", "which version", "how much"].some(w => q.includes(w))
+		["how many", "what is", "what was", "which version", "how much"].some(w => q.includes(w)) ||
+		(hasCjk(q) && makeQuestionTokens(q).length > 0)
 	)
 		return "IE";
 	return "";
 }
 
 function factRetrieve(beam: BeamMemoryState, query: string, topK: number): MemoriaRetrieveResult {
-	const tokens = makeQuestionTokens(query);
+	const { exactPrimary, primary, all: tokens } = makeQuestionTokenGroups(query);
 	const clauses: string[] = [];
 	const params: SQLQueryBindings[] = [sourceSession(beam)];
 	for (const token of tokens) {
-		clauses.push(
-			"(lower(key) LIKE ? ESCAPE '\\' OR lower(value) LIKE ? ESCAPE '\\' OR lower(context_snippet) LIKE ? ESCAPE '\\')",
-		);
-		const like = `%${escapeLike(token)}%`;
-		params.push(like, like, like);
+		const variants = /^[\x00-\x7f]*$/.test(token) ? [token] : unicodeCaseVariants(token);
+		const subClauses: string[] = [];
+		for (const v of variants) {
+			subClauses.push("(key LIKE ? ESCAPE '\\' OR value LIKE ? ESCAPE '\\' OR context_snippet LIKE ? ESCAPE '\\')");
+			const like = `%${escapeLike(v)}%`;
+			params.push(like, like, like);
+		}
+		clauses.push(subClauses.length === 1 ? (subClauses[0] as string) : `(${subClauses.join(" OR ")})`);
 	}
 	const where = clauses.length === 0 ? "1=1" : clauses.join(" OR ");
-	params.push(topK);
+	const trimmed = query.trim().toLowerCase();
+	const scoreExprs: string[] = [];
+	const orderParams: SQLQueryBindings[] = [];
+	if (trimmed.length > 0) {
+		const trimmedLike = `%${escapeLike(trimmed)}%`;
+		scoreExprs.push(
+			"(CASE WHEN lower(key) = ? OR lower(value) = ? THEN 100 WHEN lower(key) LIKE ? ESCAPE '\\' OR lower(value) LIKE ? ESCAPE '\\' THEN 80 ELSE 0 END)",
+		);
+		orderParams.push(trimmed, trimmed, trimmedLike, trimmedLike);
+	}
+	const exactPrimarySet = new Set(exactPrimary);
+	for (const p of primary) {
+		const w = codePointLength(p);
+		const exactBonus = exactPrimarySet.has(p) ? w * 2 : 0;
+		const variants = /^[\x00-\x7f]*$/.test(p) ? [p] : unicodeCaseVariants(p);
+		const inPlaceholders = variants.map(() => "?").join(", ");
+		const likePairs = variants.flatMap(() => ["key LIKE ? ESCAPE '\\'", "value LIKE ? ESCAPE '\\'"]).join(" OR ");
+		const contextLikes = variants.map(() => "context_snippet LIKE ? ESCAPE '\\'").join(" OR ");
+		scoreExprs.push(
+			`(CASE WHEN lower(key) IN (${inPlaceholders}) OR lower(value) IN (${inPlaceholders}) THEN ${w * 8 + exactBonus} WHEN ${likePairs} THEN ${w * 4 + exactBonus} WHEN ${contextLikes} THEN ${w} ELSE 0 END)`,
+		);
+		orderParams.push(
+			...variants,
+			...variants,
+			...variants.flatMap(v => [`%${escapeLike(v)}%`, `%${escapeLike(v)}%`]),
+			...variants.map(v => `%${escapeLike(v)}%`),
+		);
+	}
+	const exactMatchClause = scoreExprs.length > 0 ? `(${scoreExprs.join(" + ")}) DESC, ` : "";
+	const allParams = [...params, ...orderParams, topK];
 	const results = asRows(
 		beam.db
 			.query(
-				`SELECT * FROM memoria_facts WHERE session_id = ? AND (${where}) ORDER BY importance DESC, id DESC LIMIT ?`,
+				`SELECT * FROM memoria_facts WHERE session_id = ? AND (${where}) ORDER BY ${exactMatchClause}importance DESC, id DESC LIMIT ?`,
 			)
-			.all(...params),
+			.all(...allParams),
 	);
 	return { ability: "IE", query, results };
 }
 
-function timelineRetrieve(beam: BeamMemoryState, query: string, topK: number): MemoriaRetrieveResult {
-	const tokens = makeQuestionTokens(query);
+function timelineRetrieve(
+	beam: BeamMemoryState,
+	query: string,
+	topK: number,
+	ability: string = "TR",
+): MemoriaRetrieveResult {
+	const { exactPrimary, primary, all: tokens } = makeQuestionTokenGroups(query);
 	const clauses: string[] = [];
 	const params: SQLQueryBindings[] = [sourceSession(beam)];
 	for (const token of tokens) {
-		clauses.push("(lower(description) LIKE ? ESCAPE '\\' OR date LIKE ? ESCAPE '\\')");
-		const like = `%${escapeLike(token)}%`;
-		params.push(like, like);
+		const variants = /^[\x00-\x7f]*$/.test(token) ? [token] : unicodeCaseVariants(token);
+		const subClauses: string[] = [];
+		for (const v of variants) {
+			subClauses.push("(description LIKE ? ESCAPE '\\' OR date LIKE ? ESCAPE '\\')");
+			const like = `%${escapeLike(v)}%`;
+			params.push(like, like);
+		}
+		clauses.push(subClauses.length === 1 ? (subClauses[0] as string) : `(${subClauses.join(" OR ")})`);
 	}
 	const where = clauses.length === 0 ? "1=1" : clauses.join(" OR ");
-	params.push(topK);
+	const trimmed = query.trim().toLowerCase();
+	const scoreExprs: string[] = [];
+	const orderParams: SQLQueryBindings[] = [];
+	if (trimmed.length > 0) {
+		const trimmedLike = `%${escapeLike(trimmed)}%`;
+		scoreExprs.push(
+			"(CASE WHEN lower(description) LIKE ? ESCAPE '\\' OR date LIKE ? ESCAPE '\\' THEN 80 ELSE 0 END)",
+		);
+		orderParams.push(trimmedLike, trimmedLike);
+	}
+	const exactPrimarySet = new Set(exactPrimary);
+	for (const p of primary) {
+		const lowerP = p.toLowerCase();
+		const isGeneric = GENERIC_TIMELINE_WORDS.has(lowerP) || CJK_TEMPORAL_QUERY_RE.test(lowerP);
+		const w = isGeneric ? 1 : codePointLength(p);
+		const exactBonus = exactPrimarySet.has(p) && !isGeneric ? w * 2 : 0;
+		const variants = /^[\x00-\x7f]*$/.test(p) ? [p] : unicodeCaseVariants(p);
+		const descLikes = variants
+			.flatMap(() => ["description LIKE ? ESCAPE '\\'", "date LIKE ? ESCAPE '\\'"])
+			.join(" OR ");
+		scoreExprs.push(`(CASE WHEN ${descLikes} THEN ${w * 4 + exactBonus} ELSE 0 END)`);
+		orderParams.push(...variants.flatMap(v => [`%${escapeLike(v)}%`, `%${escapeLike(v)}%`]));
+	}
+	const rankClause = scoreExprs.length > 0 ? `(${scoreExprs.join(" + ")}) DESC, ` : "";
+	const isRecencyQuery =
+		ability === "TR" &&
+		/(?:最新|近期|最近|剛剛|剛才|刚刚|刚才|최신|최근|\blatest\b|\brecent(?:ly)?\b|\blast\b|\bnewest\b)/iu.test(
+			query,
+		);
+	const tieOrder = isRecencyQuery ? "date DESC, event_id DESC" : "date ASC, event_id ASC";
+	const allParams = [...params, ...orderParams, topK];
 	const results = asRows(
 		beam.db
 			.query(
-				`SELECT * FROM memoria_timelines WHERE session_id = ? AND (${where}) ORDER BY date ASC, event_id ASC LIMIT ?`,
+				`SELECT * FROM memoria_timelines WHERE session_id = ? AND (${where}) ORDER BY ${rankClause}${tieOrder} LIMIT ?`,
 			)
-			.all(...params),
+			.all(...allParams),
 	);
-	return { ability: "TR", query, results };
+	return { ability, query, results };
 }
 
 function kgRetrieve(beam: BeamMemoryState, query: string, topK: number): MemoriaRetrieveResult {
-	const tokens = makeQuestionTokens(query);
+	const { exactPrimary, primary, all: tokens } = makeQuestionTokenGroups(query);
 	const clauses: string[] = [];
 	const params: SQLQueryBindings[] = [sourceSession(beam)];
 	for (const token of tokens) {
-		clauses.push(
-			"(lower(subject) LIKE ? ESCAPE '\\' OR lower(predicate) LIKE ? ESCAPE '\\' OR lower(object) LIKE ? ESCAPE '\\')",
-		);
-		const like = `%${escapeLike(token)}%`;
-		params.push(like, like, like);
+		const variants = /^[\x00-\x7f]*$/.test(token) ? [token] : unicodeCaseVariants(token);
+		const subClauses: string[] = [];
+		for (const v of variants) {
+			subClauses.push("(subject LIKE ? ESCAPE '\\' OR predicate LIKE ? ESCAPE '\\' OR object LIKE ? ESCAPE '\\')");
+			const like = `%${escapeLike(v)}%`;
+			params.push(like, like, like);
+		}
+		clauses.push(subClauses.length === 1 ? (subClauses[0] as string) : `(${subClauses.join(" OR ")})`);
 	}
 	const where = clauses.length === 0 ? "1=1" : clauses.join(" OR ");
-	params.push(topK);
+	const trimmed = query.trim().toLowerCase();
+	const scoreExprs: string[] = [];
+	const orderParams: SQLQueryBindings[] = [];
+	if (trimmed.length > 0) {
+		scoreExprs.push("(CASE WHEN lower(subject) = ? OR lower(object) = ? THEN 100 ELSE 0 END)");
+		orderParams.push(trimmed, trimmed);
+	}
+	const exactPrimarySet = new Set(exactPrimary);
+	for (const p of primary) {
+		const w = codePointLength(p);
+		const exactBonus = exactPrimarySet.has(p) ? w * 2 : 0;
+		const variants = /^[\x00-\x7f]*$/.test(p) ? [p] : unicodeCaseVariants(p);
+		const inPlaceholders = variants.map(() => "?").join(", ");
+		const likeParts = variants
+			.flatMap(() => ["subject LIKE ? ESCAPE '\\'", "predicate LIKE ? ESCAPE '\\'", "object LIKE ? ESCAPE '\\'"])
+			.join(" OR ");
+		scoreExprs.push(
+			`(CASE WHEN lower(subject) IN (${inPlaceholders}) OR lower(object) IN (${inPlaceholders}) THEN ${w * 8 + exactBonus} WHEN ${likeParts} THEN ${w * 4 + exactBonus} ELSE 0 END)`,
+		);
+		orderParams.push(
+			...variants,
+			...variants,
+			...variants.flatMap(v => [`%${escapeLike(v)}%`, `%${escapeLike(v)}%`, `%${escapeLike(v)}%`]),
+		);
+	}
+	const rankClause = scoreExprs.length > 0 ? `(${scoreExprs.join(" + ")}) DESC, ` : "";
+	const allParams = [...params, ...orderParams, topK];
 	const results = asRows(
 		beam.db
 			.query(
-				`SELECT * FROM memoria_kg WHERE session_id = ? AND (${where}) ORDER BY confidence DESC, id DESC LIMIT ?`,
+				`SELECT * FROM memoria_kg WHERE session_id = ? AND (${where}) ORDER BY ${rankClause}confidence DESC, id DESC LIMIT ?`,
 			)
-			.all(...params),
+			.all(...allParams),
 	);
 	return { ability: "MR", query, results };
 }
@@ -865,7 +1190,7 @@ export function memoriaRetrieve(
 	topK = 10,
 ): MemoriaRetrieveResult {
 	const selected = ability ?? classifyAbility(query);
-	if (selected === "TR" || selected === "EO") return timelineRetrieve(beam, query, topK);
+	if (selected === "TR" || selected === "EO") return timelineRetrieve(beam, query, topK, selected);
 	if (selected === "MR") return kgRetrieve(beam, query, topK);
 	if (selected === "IE" || selected === "KU" || selected === "PF" || selected === "IF" || selected === "CR")
 		return factRetrieve(beam, query, topK);
