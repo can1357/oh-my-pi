@@ -9,11 +9,6 @@
  * plain result for the call, and the trace (`holdout: true`) records the would-be cut. Of the rest, a random share
  * (`spotlight.experiment.scoreFree`) is shaped without Spotlight by the no-score rules (`scoreFree: true`). Every
  * trace sizes the plain result (`plainChars`, `plainTokens`); savings count against it.
- *
- * Every read is traced `editLikely` or not ({@link SpotlightExperiment.noteRead}). Of the edit-likely reads not held
- * out, a random share (`spotlight.experiment.editGate`) is kept whole when shaping would cut it: the model gets the
- * plain page, and the trace (`gated: true`) records the would-be cut with no saving. Score-free is drawn after both.
- * Edits are tracked from every `edit`, `write` and `ast_edit` call the agent makes, shaped or not.
  */
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
@@ -22,7 +17,6 @@ import { formatOutputNotice, type OutputMeta } from "@oh-my-pi/pi-tui/tools/outp
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
 import { buildCallContext, callSummary } from "./context";
-import { EDIT_TOOLS, editTargets } from "./edit-gate";
 import { RecordingScorer, SCORE_FREE_SCORER } from "./scorer";
 import { SpotlightExperiment } from "./session";
 import { countTokens, shapeResult, syncSeen } from "./shape";
@@ -85,10 +79,6 @@ export interface ShapedText {
  * (`original.shapedUrl`); a result shaping keeps is never held out. When the score-free coin lands instead, shaping
  * runs without asking Spotlight and the entry and trace say `scoreFree: true`, changed or not.
  *
- * A read the session is likely to edit is traced `editLikely: true` (any other read `false`). When the edit gate's coin
- * lands for it (drawn after the holdout coin) and shaping changes the text, the text stays unchanged like a holdout's
- * and the entry and trace say `gated: true`, with the would-be cut's sizes and no saving.
- *
  * A cut saving fewer than `MIN_SAVED_TOKENS` against the plain text is never applied (nor held out, since applying it
  * would show the plain text too): the text stays unchanged, `steps` ends with `plain-cap`, and
  * `cappedChars`/`cappedTokens` size the would-be cut. A short cut of a result whose plain text was cut to the column
@@ -104,10 +94,8 @@ export async function shapeToolText(
 	const experiment = shapingExperiment(session);
 	if (!experiment?.shapesTool(request.tool)) return { text: request.text };
 	experiment.claimCall(toolCallId);
-	const editLikely = request.tool === "read" ? experiment.noteRead(request.path ?? "", session.cwd) : undefined;
-	// Drawn before shaping, so held-out, gated and score-free results are random shares of the results shaping would
-	// cut.
-	const coins = experiment.drawCoins(editLikely === true);
+	// Drawn before shaping, so held-out and score-free results are random shares of the results shaping would cut.
+	const coins = experiment.drawCoins();
 	const scorer = new RecordingScorer(experiment.client, experiment.thinking);
 	const started = performance.now();
 	const { source, plain: plainText, plainWidthCut, ...input } = request;
@@ -129,8 +117,7 @@ export async function shapeToolText(
 			experiment.shapeState,
 			experiment.sink,
 			signal,
-			// A gated read, like a held-out result, shows `plain`: the cut is traced, not applied.
-			coins.holdout || coins.gate,
+			coins.holdout,
 			plainTokens === undefined ? undefined : { text: plain, tokens: plainTokens, widthCut: plainWidthCut },
 		);
 	} catch (caught) {
@@ -141,8 +128,7 @@ export async function shapeToolText(
 	const capped = outcome?.capped === true;
 	const cut = shaped !== request.text && !capped;
 	const holdout = coins.holdout && cut;
-	const gated = coins.gate && cut;
-	const text = cut && !holdout && !gated ? shaped : request.text;
+	const text = cut && !holdout ? shaped : request.text;
 	const inTokens = outcome?.inTokens ?? countTokens(request.text);
 	const plainTokensOrIn = plainTokens ?? inTokens;
 	// A kept or capped result's model got the plain text (a capped cut's own sizes go to `cappedChars`/`cappedTokens`);
@@ -153,9 +139,7 @@ export async function shapeToolText(
 	const traceFields = {
 		...(capped ? { cappedChars: shaped.length, cappedTokens: outcome?.outTokens ?? inTokens } : {}),
 		...(holdout ? { holdout: true } : {}),
-		...(gated ? { gated: true } : {}),
 		...(coins.scoreFree ? { scoreFree: true } : {}),
-		...(editLikely !== undefined ? { editLikely } : {}),
 	};
 	experiment.log(SPOTLIGHT_ENTRY.shape, {
 		toolCallId,
@@ -182,9 +166,9 @@ export async function shapeToolText(
 		outTokens,
 		plainChars: plain.length,
 		plainTokens: plainTokensOrIn,
-		// A result the model got plain (kept, capped or gated) saves nothing; a held-out one is traced with the saving
-		// it would have made. A cut longer than plain (a width-cut plain) saves negative tokens.
-		savedTokens: cut && !gated ? plainTokensOrIn - outTokens : 0,
+		// A result the model got plain (kept or capped) saves nothing; a held-out one is traced with the saving it would
+		// have made. A cut longer than plain (a width-cut plain) saves negative tokens.
+		savedTokens: cut ? plainTokensOrIn - outTokens : 0,
 		...traceFields,
 	};
 	const lines = outcome?.lines;
@@ -195,7 +179,7 @@ export async function shapeToolText(
 			const url =
 				(!read && outcome?.textUrl) ||
 				(await experiment.sink.save(read ? read.lines.join("\n") : request.text, request.tool));
-			const shapedUrl = holdout || gated ? await experiment.sink.save(shaped, request.tool) : undefined;
+			const shapedUrl = holdout ? await experiment.sink.save(shaped, request.tool) : undefined;
 			spotlight.original = {
 				url,
 				lines: lines.kept.length,
@@ -285,8 +269,6 @@ export interface CalledToolResult {
 	/** The model-facing result the wrapper built from {@link own}: what the `plain` arm shows. */
 	result: AgentToolResult;
 	signal?: AbortSignal;
-	/** The files the call targets as the tool reads its arguments (`AgentTool.matcherPaths`), when it can. */
-	targets?: () => readonly string[] | undefined;
 }
 
 /** Shapes the model-facing result of one of the agent's own tool calls; never throws. */
@@ -300,21 +282,11 @@ export type CalledToolShaper = (call: CalledToolResult) => Promise<AgentToolResu
  * included. A result the wrapper spilled is shaped whole from the tool's own text, up to
  * {@link SPOTLIGHT_FULL_OUTPUT_MAX_BYTES}, and a cut of it no longer carries the spill's truncation. A result whose
  * details are not an object, or already carry a trace, is returned as is. Each call is shaped at most once.
- *
- * An `edit`, `write` or `ast_edit` call's targets are recorded for the edit gate first, whether or not its result is
- * shaped.
  */
 export async function shapeCalledTool(session: ToolSession, call: CalledToolResult): Promise<AgentToolResult> {
 	const { tool, toolCallId, own, result } = call;
 	const experiment = shapingExperiment(session);
 	if (!experiment) return result;
-	if (Object.hasOwn(EDIT_TOOLS, tool)) {
-		try {
-			experiment.noteEdits(editTargets(call.args, call.targets?.()), session.cwd);
-		} catch (error) {
-			logger.debug("spotlight: edit targets unread", { tool, error: String(error) });
-		}
-	}
 	if (shapesItself(tool) || !experiment.shapesTool(tool)) return result;
 	const details: unknown = result.details;
 	if (details != null && (!isRecord(details) || details.spotlight !== undefined)) return result;

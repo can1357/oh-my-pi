@@ -36,6 +36,21 @@ pub fn command_text(cmd: &Command) -> Vec<u8> {
 	t.out
 }
 
+/// zsh `JOBTEXTSIZE - 1`: the end of `getjobtext`'s buffer.
+const JOB_LIMIT: usize = 79;
+
+/// zsh `getjobtext`: the one-line text a job started from `list` shows.
+///
+/// Used by `jobs` and `$jobtexts`: separators instead of newlines, function
+/// bodies as `{ ... }`, here-documents as here-strings, words that do not fit
+/// in zsh's 80-byte buffer dropped.
+pub fn getjobtext(list: &List) -> Vec<u8> {
+	let mut t = Text::new(Vec::new(), 0, 0);
+	t.job = true;
+	t.list(list);
+	t.out
+}
+
 /// What `functions NAME` prints for function `f` defined as `name`.
 ///
 /// `name () {`, the body indented by a tab, `}` and the function's
@@ -68,11 +83,19 @@ pub fn function_text_expand(name: &[u8], f: &FuncDef, expand: i32) -> Vec<u8> {
 }
 
 /// The value of `$functions[NAME]` for function `f`: its body as
-/// [`function_text`] indents it, with the leading tab.
+/// [`function_text`] indents it, with the leading tab; a definition with
+/// redirections is shown as `{` body `}` and them (zsh `getfunction`).
 pub fn body_text(f: &FuncDef) -> Vec<u8> {
-	let mut t = Text::new(alloc::vec![b'\t'], 1, 0);
-	t.func_body(&f.body);
+	let braced = matches!(f.body.kind, CommandKind::Brace(_)) && !f.body.redirs.is_empty();
+	let start: &[u8] = if braced { b"{\n\t" } else { b"\t" };
+	let mut t = Text::new(start.to_vec(), 1, 0);
+	let redirs = t.func_body(&f.body);
 	t.dopending();
+	if !redirs.is_empty() {
+		t.out.extend_from_slice(b"\n}");
+		t.redirs(redirs, false);
+		t.dopending();
+	}
 	t.out
 }
 
@@ -83,6 +106,20 @@ pub fn body_text(f: &FuncDef) -> Vec<u8> {
 /// For `functions -x N` / `which -x N`, which only have the source; `None`
 /// when `source` is not one function definition.
 pub fn reindent_function(name: &[u8], source: &[u8], expand: i32) -> Option<Vec<u8>> {
+	with_function(source, |f| function_text_expand(name, f, expand))
+}
+
+/// A stored function source ([`function_text`]) as `$functions[NAME]`
+/// shows it ([`body_text`]); `None` when `source` is not one function
+/// definition.
+pub fn source_body_text(source: &[u8]) -> Option<Vec<u8>> {
+	with_function(source, body_text)
+}
+
+/// zsh `getpermtext` of the command line `source` (the text of a list as
+/// written, as `$ZSH_DEBUG_CMD` shows the list about to run); `None` when
+/// it is not one command line.
+pub fn list_text(source: &[u8]) -> Option<Vec<u8>> {
 	let feat = crate::bash::syntax::Features::ZSH
 		| crate::bash::syntax::Features::ZSH_SHORT_LOOPS
 		| crate::bash::syntax::Features::ZSH_MULTI_FUNC_DEF
@@ -92,26 +129,69 @@ pub fn reindent_function(name: &[u8], source: &[u8], expand: i32) -> Option<Vec<
 	if p.next_command().is_some() {
 		return None;
 	}
-	let [item] = &cc.list.items[..] else {
+	Some(getpermtext(&cc.list, 0))
+}
+
+/// `run` over the definition a stored function source holds; `None` when
+/// `source` is not one function definition.
+fn with_function<T>(source: &[u8], run: impl FnOnce(&FuncDef) -> T) -> Option<T> {
+	let CommandKind::FuncDef(f) = &lone_command(source)?.kind else {
 		return None;
 	};
-	let pipe = &item.and_or.first;
+	Some(run(f))
+}
+
+/// zsh `simple_redir_name(prog, REDIR_HERESTR)`: the word (as written) of
+/// zsh source that is one simple command made of a lone `<<<word` on
+/// fd 0, nothing else (`=(<<<word)` writes the word to the file itself).
+pub fn herestring_word(source: &[u8]) -> Option<Vec<u8>> {
+	let cmd = lone_command(source)?;
+	let CommandKind::Simple(s) = &cmd.kind else {
+		return None;
+	};
+	let [r] = &cmd.redirs[..] else {
+		return None;
+	};
+	if !s.words.is_empty()
+		|| !s.assigns.is_empty()
+		|| r.op != RedirOp::HereString
+		|| !matches!(r.fd, None | Some(RedirFd::Num(0)))
+	{
+		return None;
+	}
+	let RedirTarget::Word(w) = &r.target else {
+		return None;
+	};
+	source
+		.get(w.span.lo as usize..w.span.hi as usize)
+		.map(<[u8]>::to_vec)
+}
+
+/// The command of zsh source that is one command alone (no list, `&&`,
+/// pipe, `!` or `time`).
+fn lone_command(source: &[u8]) -> Option<Command> {
+	let feat = crate::bash::syntax::Features::ZSH
+		| crate::bash::syntax::Features::ZSH_SHORT_LOOPS
+		| crate::bash::syntax::Features::ZSH_MULTI_FUNC_DEF
+		| crate::bash::syntax::Features::ZSH_INTERACTIVE_COMMENTS;
+	let mut p = super::driver::ZshParser::new(source, feat, crate::bash::syntax::NO_ALIASES);
+	let cc = p.next_command()?.ok()?;
+	if p.next_command().is_some() {
+		return None;
+	}
+	let [item] = <[_; 1]>::try_from(cc.list.items).ok()?;
+	let pipe = item.and_or.first;
 	if !item.and_or.rest.is_empty() || pipe.bang || pipe.time.is_some() {
 		return None;
 	}
-	let [stage] = &pipe.stages[..] else {
-		return None;
-	};
-	let CommandKind::FuncDef(f) = &stage.cmd.kind else {
-		return None;
-	};
-	Some(function_text_expand(name, f, expand))
+	let [stage] = <[_; 1]>::try_from(pipe.stages).ok()?;
+	Some(stage.cmd)
 }
 
 /// zsh `quotedzputs` for a function name (no `rcquotes`): as is when it
 /// has no special character, `$'…'` when it has an unprintable one, else
 /// single-quoted.
-fn quoted_name(s: &[u8], out: &mut Vec<u8>) {
+pub fn quoted_name(s: &[u8], out: &mut Vec<u8>) {
 	if s.is_empty() {
 		out.extend_from_slice(b"''");
 		return;
@@ -174,7 +254,8 @@ fn is_typeset_assign(w: &Word) -> bool {
 	match &w.parts[..] {
 		[WordPart::Zsh(_), WordPart::Compound(_)] => true,
 		[WordPart::Zsh(s)] => {
-			let mut i = super::lex::ident_end(s, 0);
+			// The parser made it an assignment: whatever name it took.
+			let mut i = super::lex::ident_end(s, 0, true);
 			if i == 0 {
 				return false;
 			}
@@ -198,11 +279,13 @@ struct Text {
 	pending: Option<Vec<u8>>,
 	/// zsh `text_expand_tabs`.
 	expand:  i32,
+	/// zsh `getjobtext` (`tnewlins` off, `tjob` on, a fixed buffer).
+	job:     bool,
 }
 
 impl Text {
 	const fn new(out: Vec<u8>, indent: usize, expand: i32) -> Self {
-		Self { out, indent, pending: None, expand }
+		Self { out, indent, pending: None, expand, job: false }
 	}
 
 	/// zsh `zoutputtab`: one level of indentation.
@@ -214,19 +297,45 @@ impl Text {
 		}
 	}
 
-	/// zsh `taddstr`.
+	/// zsh `taddstr`: in a job text a string that does not fit is dropped
+	/// and newlines become spaces.
 	fn s(&mut self, s: &[u8]) {
-		self.out.extend_from_slice(s);
+		if !self.job {
+			self.out.extend_from_slice(s);
+			return;
+		}
+		if self.out.len() + s.len() >= JOB_LIMIT {
+			return;
+		}
+		self
+			.out
+			.extend(s.iter().map(|&c| if c == b'\n' { b' ' } else { c }));
 	}
 
-	/// zsh `taddchr`.
+	/// zsh `taddchr`: a job text's last byte is overwritten once it is full.
 	fn c(&mut self, c: u8) {
 		self.out.push(c);
+		if self.job && self.out.len() == JOB_LIMIT {
+			self.out.pop();
+		}
+	}
+
+	/// zsh `taddnl(1)`: after an opening `(` or `{` a job text has a space.
+	fn nl1(&mut self) {
+		if self.job {
+			self.s(b" ");
+		} else {
+			self.nl();
+		}
 	}
 
 	/// zsh `taddnl` with `tnewlins`: pending here-documents, a newline and
-	/// the indentation.
+	/// the indentation; `; ` in a job text.
 	fn nl(&mut self) {
+		if self.job {
+			self.s(b"; ");
+			return;
+		}
 		self.dopending();
 		self.out.push(b'\n');
 		for _ in 0..self.indent {
@@ -260,16 +369,23 @@ impl Text {
 	/// A word (zsh: its token string, untokenized when the text is done).
 	fn word(&mut self, w: &Word) {
 		for p in &w.parts {
+			let mut text = Vec::new();
 			match p {
-				WordPart::Zsh(s) => zsh_text(s, &mut self.out),
+				WordPart::Zsh(s) => zsh_text(s, &mut text),
 				WordPart::Compound(elems) => {
 					self.c(b'(');
 					self.elems(elems);
 					self.c(b')');
+					continue;
 				},
 				other => {
-					crate::bash::syntax::print::parts_text(core::slice::from_ref(other), &mut self.out);
+					crate::bash::syntax::print::parts_text(core::slice::from_ref(other), &mut text);
 				},
+			}
+			if self.job {
+				self.s(&text);
+			} else {
+				self.out.extend_from_slice(&text);
 			}
 		}
 	}
@@ -304,13 +420,18 @@ impl Text {
 		let n = l.items.len();
 		for (i, item) in l.items.iter().enumerate() {
 			self.sublist(&item.and_or);
+			let mut async_ = true;
 			match item.sep {
 				Sep::Amp => self.s(b" &"),
 				Sep::Disown => self.s(b" &|"),
-				_ => {},
+				_ => async_ = false,
 			}
 			if i + 1 < n {
-				self.nl();
+				if self.job && async_ {
+					self.s(b" ");
+				} else {
+					self.nl();
+				}
 			}
 		}
 	}
@@ -394,6 +515,15 @@ impl Text {
 				self.nl();
 				self.s(b"}");
 			},
+			CommandKind::FuncDef(f) if self.job => {
+				self.s(&f.name);
+				for n in &f.extra_names {
+					self.c(b' ');
+					self.s(n);
+				}
+				self.s(b" () { ... }");
+			},
+			CommandKind::AnonFunc(_) if self.job => self.s(b"() { ... }"),
 			CommandKind::FuncDef(f) => {
 				self.s(&f.name);
 				for n in &f.extra_names {
@@ -533,7 +663,7 @@ impl Text {
 	fn group(&mut self, open: &[u8], l: &List, close: &[u8]) {
 		self.s(open);
 		self.indent += 1;
-		self.nl();
+		self.nl1();
 		self.list(l);
 		self.dec();
 		self.nl();
@@ -768,6 +898,25 @@ impl Text {
 			RedirOp::DupIn => b"<&",
 			RedirOp::DupOut => b">&",
 		};
+		if self.job
+			&& let RedirTarget::HereDoc(d) = &r.target
+		{
+			// zsh: a here-document's body as a quoted here-string.
+			self.s(b"<<<");
+			let body: &[u8] = &d.text;
+			let body = body.strip_suffix(b"\n").unwrap_or(body);
+			let mut q = alloc::vec![b'\''];
+			for &c in body {
+				if c == b'\'' {
+					q.extend_from_slice(b"'\\''");
+				} else {
+					q.push(c);
+				}
+			}
+			q.push(b'\'');
+			self.s(&q);
+			return;
+		}
 		self.s(op);
 		match &r.target {
 			RedirTarget::HereDoc(d) => {

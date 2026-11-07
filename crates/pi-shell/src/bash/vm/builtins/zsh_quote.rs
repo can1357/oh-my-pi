@@ -17,14 +17,19 @@ const fn zisprint(c: u8) -> bool {
 }
 
 /// How characters are classified: a UTF-8 locale with `MULTIBYTE`, and
-/// `PRINT_EIGHT_BIT`.
+/// `PRINT_EIGHT_BIT`, plus the history character's classification for
+/// `quotedzputs`. Non-listing text conversions ignore the history fields.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Charset {
 	/// Characters are UTF-8 sequences (`MULTIBYTE` in a UTF-8 locale).
-	pub utf8:        bool,
+	pub utf8:         bool,
 	/// `PRINT_EIGHT_BIT`: bytes and characters above 0x7f print as they
 	/// are.
-	pub print_eight: bool,
+	pub print_eight:  bool,
+	/// History expansion character (`0` when `BANG_HIST` is unset).
+	pub bang:         u8,
+	/// The history character is special in an interactive shell reading stdin.
+	pub bang_special: bool,
 }
 
 /// The next character of `s` at `i`: its length and code, `None` for a
@@ -137,7 +142,8 @@ pub fn needs_niceformat(s: &[u8], cs: Charset) -> bool {
 /// zsh `quotedzputs`: `s` as a shell word for listings (`typeset -p`,
 /// `alias`, `trap`): `''` when empty, `$'…'` when it has unprintable
 /// characters, as is without special characters, else single-quoted
-/// (`'\''` for a quote, or `''` under `RC_QUOTES`).
+/// (`'\''` for a quote, or `''` under `RC_QUOTES`). The history character
+/// is special under `BANG_HIST` in an interactive shell reading stdin.
 pub fn quotedzputs(s: &[u8], rcquotes: bool, cs: Charset) -> Vec<u8> {
 	if s.is_empty() {
 		return b"''".to_vec();
@@ -148,7 +154,10 @@ pub fn quotedzputs(s: &[u8], rcquotes: bool, cs: Charset) -> Vec<u8> {
 		out.push(b'\'');
 		return out;
 	}
-	if !s.iter().any(|&c| ispecial(c)) {
+	if !s
+		.iter()
+		.any(|&c| ispecial(c) || (cs.bang_special && c == cs.bang))
+	{
 		return s.to_vec();
 	}
 	let mut out = Vec::with_capacity(s.len() + 4);
@@ -291,5 +300,12 @@ mod tests {
 		assert_eq!(quotedzputs(b"a b", false, cs), b"'a b'");
 		assert_eq!(quotedzputs(b"it's", false, cs), b"'it'\\''s'");
 		assert_eq!(quotedzputs(b"l\0o", false, cs), b"$'l\\C-@o'");
+		let cs = Charset { bang: b'!', bang_special: true, ..cs };
+		assert_eq!(quotedzputs(b"!", false, cs), b"'!'");
+		assert_eq!(quotedzputs(b"x!y", false, cs), b"'x!y'");
+		assert_eq!(quotedzputs(b"!", false, Charset { bang_special: false, ..cs }), b"!");
+		let cs = Charset { bang: b'^', ..cs };
+		assert_eq!(quotedzputs(b"!", false, cs), b"!");
+		assert_eq!(quotedzputs(b"x^y", false, cs), b"'x^y'");
 	}
 }
