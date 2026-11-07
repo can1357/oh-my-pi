@@ -40,6 +40,7 @@ mod json;
 mod parser;
 mod print;
 mod span;
+pub mod tree;
 mod util;
 pub mod zsh;
 
