@@ -308,7 +308,19 @@ pub enum TextMode {
 /// line relative to `src`; the engine adds the context (`command
 /// substitution: `) and the base line.
 pub fn parse_text(src: &[u8], feat: Features, mode: TextMode) -> Result<(Tree, u32), ParseError> {
+	parse_text_at(src, feat, mode, 0)
+}
+
+/// [`parse_text`] of text that starts at offset `base` of a larger
+/// source: every span is an offset into that source.
+pub(crate) fn parse_text_at(
+	src: &[u8],
+	feat: Features,
+	mode: TextMode,
+	base: u32,
+) -> Result<(Tree, u32), ParseError> {
 	let mut p = Parser::new(src, feat, NO_ALIASES);
+	p.base = base;
 	p.virt = 0;
 	let word = p.text_word(mode)?;
 	debug_assert_eq!(p.t.scratch_len(), 0, "a builder left children on the scratch stack");
