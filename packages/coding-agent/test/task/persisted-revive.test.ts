@@ -40,7 +40,7 @@ import {
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
+import { createPersistedSubagentReviverFactory, resolveSpawner } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { PerCallModelError, PerCallModelUnavailableError } from "@oh-my-pi/pi-coding-agent/task/model-approval";
 import { cfgTaskMaxEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -242,8 +242,8 @@ interface ReviveOwnerOptions {
 
 function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptions = {}) {
 	const parentSession = {
-		sessionId: "parent-session-1",
 		sessionManager: {
+			getSessionId: () => "parent-session-1",
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
 		},
@@ -541,6 +541,30 @@ describe("persisted subagent revival", () => {
 		expect(captured?.parentSessionId).toBe(spawnerSessionId);
 		expect(captured?.parentSessionFile).toBe(spawnerFile);
 		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("resolves a live peer-shaped nested parent's identity without a transcript fallback", async () => {
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Spawner",
+			displayName: "Spawner",
+			kind: "sub",
+			parentId: "Main",
+			session: {
+				sessionManager: { getSessionId: () => "peer-spawner-session" },
+			} as unknown as AgentSession,
+			sessionFile: null,
+			status: "running",
+		});
+		const spawner = await resolveSpawner(
+			registry,
+			{} as AgentSession,
+			{ ...createRef("child.jsonl"), parentId: "Spawner" },
+			undefined,
+		);
+
+		expect(spawner.sessionId).toBe("peer-spawner-session");
+		expect(spawner.sessionFile).toBeUndefined();
 	});
 
 	it("leaves a nested child's parent identity unset rather than guessing the top-level session", async () => {
