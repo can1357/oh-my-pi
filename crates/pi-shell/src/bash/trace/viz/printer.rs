@@ -1594,7 +1594,7 @@ impl<S: VizSource> Printer<'_, S> {
 					false,
 				)];
 				let names = std::iter::once(v.var.as_slice())
-					.chain(v.extra_vars.iter().map(Vec::as_slice))
+					.chain(v.extra_vars.iter().map(|n| n.text.as_slice()))
 					.map(String::from_utf8_lossy)
 					.collect::<Vec<_>>()
 					.join(", ");
@@ -1760,8 +1760,10 @@ impl<S: VizSource> Printer<'_, S> {
 						cmd.span,
 						format!(
 								"coprocess {}:",
-								v.name
-									.as_deref().map_or_else(|| "COPROC".into(), String::from_utf8_lossy)
+								v.name.as_ref().map_or_else(
+									|| "COPROC".into(),
+									|n| String::from_utf8_lossy(&n.text)
+								)
 							),
 						"kw",
 						false,

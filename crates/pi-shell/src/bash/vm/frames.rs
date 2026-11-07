@@ -512,7 +512,7 @@ impl Shell {
 			if !self.k.written.contains(&id)
 				&& let Some(unit) = self.k.engine.cached(&id)
 			{
-				let bytes = postcard::to_stdvec(&*unit).map_err(ExtError::Encode)?;
+				let bytes = postcard::to_stdvec(&(IR_VERSION, &*unit)).map_err(ExtError::Encode)?;
 				cx.store.put_blob(BlobSlot::Unit(id), &bytes)?;
 				self.k.written.insert(id);
 				report.units_written += 1;
@@ -527,7 +527,7 @@ impl Shell {
 				if let Some(unit) = &f.unit
 					&& self.k.written.insert(unit.id)
 				{
-					let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
+					let bytes = postcard::to_stdvec(&(IR_VERSION, &**unit)).map_err(ExtError::Encode)?;
 					cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
 					report.units_written += 1;
 				}
@@ -575,7 +575,8 @@ impl Shell {
 			let command = match &p.command {
 				Some((unit, node)) => {
 					if self.k.written.insert(unit.id) {
-						let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
+						let bytes =
+							postcard::to_stdvec(&(IR_VERSION, &**unit)).map_err(ExtError::Encode)?;
 						cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
 						report.units_written += 1;
 					}
@@ -736,6 +737,14 @@ impl Shell {
 		if !restored {
 			shell.lose_running(cx, &mut report)?;
 		}
+		// The frames header's IR version covers the frames blob only, and
+		// a restore from the root store alone has none. Nothing else has
+		// looked at the serialized function bodies the store holds, and a
+		// body this build cannot read is recompiled from its canonical
+		// text at its first call, which moves the line numbers inside it.
+		// Report those bodies here: a restore that changes what a
+		// function does must not read as a clean one.
+		lose_unreadable_units(cx, &mut report)?;
 		shell.k.sync_root(cx.store, &shell.procs[0]);
 		if let Some(err) = shell.k.root.take_fault() {
 			return Err(RestoreError::Store(err));
@@ -1160,8 +1169,18 @@ pub fn load_unit(
 	let bytes = store
 		.get_blob(BlobSlot::Unit(id))?
 		.ok_or(RestoreError::MissingUnit { unit: id })?;
-	let unit: Unit = postcard::from_bytes(&bytes)
+	// The frames header's version check covers the frames blob only; a
+	// restore from the root store alone reaches this path, so each unit
+	// blob carries the version that wrote it.
+	let (version, unit): (u32, Unit) = postcard::from_bytes(&bytes)
 		.map_err(|source| RestoreError::CorruptUnit { unit: id, source })?;
+	if version != IR_VERSION {
+		return Err(RestoreError::UnitVersion {
+			unit:     id,
+			found:    version,
+			expected: IR_VERSION,
+		});
+	}
 	if unit.id != id || !valid(&unit) {
 		return Err(RestoreError::InvalidUnit { unit: id });
 	}
@@ -1173,6 +1192,38 @@ pub fn load_unit(
 		unit
 	};
 	Ok(engine.intern(unit))
+}
+
+/// Report, and drop, every stored function body this build cannot read.
+///
+/// A dropped body is recompiled from the function's canonical text at its
+/// first call, which is what happened before in silence; the restore now
+/// says so. The decode is the one [`load_unit`] would make at that call,
+/// so nothing is read twice.
+fn lose_unreadable_units(cx: &mut Cx<'_>, report: &mut RestoreReport) -> Result<(), RestoreError> {
+	let mut units: Vec<UnitId> = Vec::new();
+	cx.store.scan(Table::Func, &mut |_, rec| {
+		if let Record::Func { unit, .. } = rec {
+			units.push(*unit);
+		}
+	})?;
+	units.sort_unstable();
+	units.dedup();
+	for unit in units {
+		let Some(bytes) = cx.store.get_blob(BlobSlot::Unit(unit))? else {
+			continue;
+		};
+		// A blob with no version in front is one an older build wrote;
+		// its first bytes are a unit, which no version can be read from.
+		let found = match postcard::from_bytes::<(u32, Unit)>(&bytes) {
+			Ok((version, u)) if version == IR_VERSION && u.id == unit && valid(&u) => continue,
+			Ok((version, _)) => Some(version),
+			Err(_) => None,
+		};
+		report.lost.push(Lost::Unit { unit, found });
+		cx.store.del_blob(BlobSlot::Unit(unit))?;
+	}
+	Ok(())
 }
 
 /// Every operand of every op and every index inside the side tables points
@@ -1372,5 +1423,57 @@ mod tests {
 		assert!(r.poll_read(&mut cx, &mut buf).is_pending(), "the duplicate writer keeps it open");
 		drop(w2);
 		assert!(matches!(r.poll_read(&mut cx, &mut buf), Poll::Ready(Ok(0))), "then EOF");
+	}
+
+	#[test]
+	fn a_unit_blob_of_another_ir_version_is_refused_rather_than_decoded() {
+		// A restore that has only the root store never reads the frames
+		// header, so the header's version check does not cover this path.
+		// An older build's blob decoded here looked like a success and gave
+		// a function built from a different layout. The bytes below are
+		// that older build's: the unit alone, with no version in front.
+		use crate::bash::{
+			ids::ModeId,
+			ir::{IR_VERSION, lower_deferred},
+			mem_store::MemStore,
+			store::{BlobSlot, StateStore},
+			syntax as syn,
+		};
+		struct Aliases;
+		impl syn::AliasLookup for Aliases {
+			fn alias(&self, name: &[u8]) -> Option<&[u8]> {
+				(name == b"emit").then_some(b"echo frozen")
+			}
+		}
+		let src = b"f() { emit; [[ ! a && -n b ]]; }\n".as_slice();
+		let mut parser = syn::Parser::new(src, syn::Features::NONE, &Aliases);
+		let cc = parser.next_command().unwrap().unwrap();
+		let lazy = lower_deferred(&cc, src, ModeId::Bash, syn::Features::NONE).unwrap();
+		let unit = &lazy.funcs[0].body;
+		let id = unit.id;
+		let engine = crate::bash::Engine::new(crate::bash::EngineConfig::default());
+		let mut store = MemStore::new();
+
+		let old = postcard::to_stdvec(unit).unwrap();
+		store.put_blob(BlobSlot::Unit(id), &old).unwrap();
+		let refused = super::load_unit(&engine, &mut store, id, false);
+		assert!(
+			refused.is_err(),
+			"a blob without this build's IR version must not be decoded as if it had it"
+		);
+
+		let stale = postcard::to_stdvec(&(IR_VERSION - 1, unit)).unwrap();
+		store.put_blob(BlobSlot::Unit(id), &stale).unwrap();
+		let found = match super::load_unit(&engine, &mut store, id, false) {
+			Err(crate::bash::RestoreError::UnitVersion { found, .. }) => found,
+			other => panic!("expected a version refusal, got {other:?}"),
+		};
+		assert_eq!(found, IR_VERSION - 1, "the refusal names the version that wrote the blob");
+
+		let current = postcard::to_stdvec(&(IR_VERSION, unit)).unwrap();
+		store.put_blob(BlobSlot::Unit(id), &current).unwrap();
+		let back =
+			super::load_unit(&engine, &mut store, id, false).expect("this build's own blob loads");
+		assert_eq!(back.id, id);
 	}
 }

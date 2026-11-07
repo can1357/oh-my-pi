@@ -204,8 +204,8 @@ pub(super) struct Tok {
 	pub hi:    u32,
 	/// 1-based line of the first byte.
 	pub line:  u32,
-	/// Word value of `Word`, `Assign` and `RedirWord` (the name, as a plain
-	/// word).
+	/// Parsed word value of `Word`, `Assign`, `RedirWord` and `Number`.
+	/// Numeric tokens keep their text as well as their numeric value.
 	pub word:  Option<WordTok>,
 	/// `Number` value.
 	pub num:   u32,
@@ -379,6 +379,7 @@ impl<'s> Parser<'s> {
 			None => self.lex()?,
 		};
 		self.last_hi = t.hi;
+		self.last_lo = t.lo;
 		Ok(t)
 	}
 
@@ -525,7 +526,7 @@ impl<'s> Parser<'s> {
 				self.lx.alexpnext = false;
 				self.lx.assignok = false;
 				self.lx.cmdbltin = false;
-				return Ok(Tok::new(T::Newline, nlo, nlo + 1, line));
+				return Ok(Tok::new(T::Newline, nlo, self.off(), line));
 			}
 			if self.lx.regexp {
 				if let Some(t) = self.read_word_token(lo, line)? {
@@ -546,7 +547,7 @@ impl<'s> Parser<'s> {
 			if c == b'-' && matches!(self.lx.last, T::LtAnd | T::GtAnd) {
 				self.bump();
 				self.lx.cmdbltin = false;
-				return Ok(Tok::new(T::Dash, lo, lo + 1, line));
+				return Ok(Tok::new(T::Dash, lo, self.off(), line));
 			}
 			if let Some(t) = self.read_word_token(lo, line)? {
 				return Ok(t);
@@ -672,7 +673,7 @@ impl<'s> Parser<'s> {
 			b'(' => T::LParen,
 			_ => T::RParen,
 		};
-		Ok(Some(Tok::new(kind, lo, lo + 1, line)))
+		Ok(Some(Tok::new(kind, lo, self.off(), line)))
 	}
 
 	/// `((` after `(` was consumed (`parse_dparen`): an arithmetic `for`, an
@@ -690,7 +691,7 @@ impl<'s> Parser<'s> {
 			let semis = core::mem::replace(&mut self.arith_semis, outer).unwrap_or_default();
 			self.raw_depth = depth;
 			let text = text?;
-			let ahi = self.off().saturating_sub(1);
+			let ahi = self.raw_close;
 			if self.peek() != Some(b')') {
 				return Err(self.near_error());
 			}
@@ -705,7 +706,7 @@ impl<'s> Parser<'s> {
 			let alo = self.off();
 			let start = self.bash_line();
 			let text = self.raw_arith(b'(', b')', start)?;
-			let ahi = self.off().saturating_sub(1);
+			let ahi = self.raw_close;
 			if self.peek() == Some(b')') {
 				self.bump();
 				let mut t = Tok::new(T::ArithCmd, lo, self.off(), line);
@@ -717,7 +718,7 @@ impl<'s> Parser<'s> {
 			if self.reset(m) && !self.lx.casepat && !self.lx.condcmd {
 				self.open_compound(T::LParen, line);
 			}
-			return Ok(Some(Tok::new(T::LParen, lo, lo + 1, line)));
+			return Ok(Some(Tok::new(T::LParen, lo, self.off(), line)));
 		}
 		Ok(None)
 	}
@@ -747,6 +748,7 @@ impl<'s> Parser<'s> {
 		{
 			let mut t = Tok::new(T::Number, lo, hi, line);
 			t.num = n;
+			t.word = w;
 			return Ok(Some(t));
 		}
 		if let Some(text) = plain

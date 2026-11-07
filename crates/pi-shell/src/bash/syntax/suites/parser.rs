@@ -183,10 +183,11 @@ fn collect_cond(e: &CondExpr, out: &mut Vec<u32>) {
 			collect_word(rhs, out);
 		},
 		CondExpr::Word(w) => collect_word(w, out),
-		CondExpr::Not(x) | CondExpr::Group(x) => collect_cond(x, out),
-		CondExpr::And(a, b) | CondExpr::Or(a, b) => {
-			collect_cond(a, out);
-			collect_cond(b, out);
+		CondExpr::Not { expr, .. } | CondExpr::Group { expr, .. } => collect_cond(expr, out),
+		CondExpr::And(terms, _) | CondExpr::Or(terms, _) => {
+			for term in terms {
+				collect_cond(term, out);
+			}
 		},
 	}
 }
@@ -565,7 +566,7 @@ fn functions_coprocs_and_conditionals() {
 	let CommandKind::Coproc(c) = first_cmd(b"coproc N { a; }").kind else {
 		panic!()
 	};
-	assert_eq!(c.name.as_deref(), Some(&b"N"[..]));
+	assert_eq!(c.name.map(|n| n.text), Some(b"N".to_vec()));
 	let CommandKind::Coproc(c) = first_cmd(b"coproc a b").kind else {
 		panic!()
 	};

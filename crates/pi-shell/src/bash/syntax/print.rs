@@ -549,7 +549,7 @@ impl<'a> Bp<'a> {
 			CommandKind::Coproc(c) => {
 				self.put(b"coproc ");
 				if !matches!(c.body.kind, CommandKind::Simple(_)) {
-					self.put(c.name.as_deref().unwrap_or(b"COPROC"));
+					self.put(c.name.as_ref().map_or(&b"COPROC"[..], |n| &n.text));
 					self.put(b" ");
 				}
 				self.skip_this_indent += 1;
@@ -593,7 +593,7 @@ impl<'a> Bp<'a> {
 		self.put(&f.var);
 		for v in &f.extra_vars {
 			self.put(b" ");
-			self.put(v);
+			self.put(&v.text);
 		}
 		self.put(b" in ");
 		match &f.words {
@@ -747,35 +747,38 @@ impl<'a> Bp<'a> {
 	fn cond(&mut self, e: &CondExpr) {
 		let mut e = e;
 		let mut invert = false;
-		while let CondExpr::Not(inner) = e {
-			invert = !invert;
-			e = inner;
+		while let CondExpr::Not { rest, expr, .. } = e {
+			invert ^= rest.len() % 2 == 0;
+			e = expr;
 		}
 		if invert {
 			self.put(b"! ");
 		}
 		match e {
-			CondExpr::Group(inner) => {
+			CondExpr::Group { expr, .. } => {
 				self.put(b"( ");
-				self.cond(inner);
+				self.cond(expr);
 				self.put(b" )");
 			},
-			CondExpr::And(a, b) => {
-				self.cond(a);
-				self.put(b" && ");
-				self.cond(b);
+			CondExpr::And(terms, _) | CondExpr::Or(terms, _) => {
+				let op: &[u8] = if matches!(e, CondExpr::And(..)) {
+					b" && "
+				} else {
+					b" || "
+				};
+				for (i, term) in terms.iter().enumerate() {
+					if i > 0 {
+						self.put(op);
+					}
+					self.cond(term);
+				}
 			},
-			CondExpr::Or(a, b) => {
-				self.cond(a);
-				self.put(b" || ");
-				self.cond(b);
-			},
-			CondExpr::Unary { op, arg } => {
+			CondExpr::Unary { op, arg, .. } => {
 				self.put(op);
 				self.put(b" ");
 				word_text(arg, &mut self.out);
 			},
-			CondExpr::Binary { op, lhs, rhs } => {
+			CondExpr::Binary { op, lhs, rhs, .. } => {
 				word_text(lhs, &mut self.out);
 				self.put(b" ");
 				self.put(op);
@@ -786,7 +789,7 @@ impl<'a> Bp<'a> {
 				self.put(b"-n ");
 				word_text(w, &mut self.out);
 			},
-			CondExpr::Not(_) => {},
+			CondExpr::Not { .. } => {},
 		}
 	}
 
@@ -901,7 +904,7 @@ impl<'a> Bp<'a> {
 	fn extra_names(&mut self, f: &FuncDef) {
 		for n in &f.extra_names {
 			self.put(b" ");
-			self.put(n);
+			self.put(&n.text);
 		}
 	}
 
@@ -1461,7 +1464,7 @@ impl<'a> Compact<'a> {
 				self.put(&f.var);
 				for v in &f.extra_vars {
 					self.put(b" ");
-					self.put(v);
+					self.put(&v.text);
 				}
 				if let Some(words) = &f.words {
 					self.put(b" in");
@@ -1529,7 +1532,7 @@ impl<'a> Compact<'a> {
 				self.put(&f.name);
 				for n in &f.extra_names {
 					self.put(b" ");
-					self.put(n);
+					self.put(&n.text);
 				}
 				self.put(b" () ");
 				self.command(&f.body);
@@ -1537,7 +1540,7 @@ impl<'a> Compact<'a> {
 			CommandKind::Coproc(c) => {
 				self.put(b"coproc ");
 				if let Some(name) = &c.name {
-					self.put(name);
+					self.put(&name.text);
 					self.put(b" ");
 				}
 				self.command(&c.body);

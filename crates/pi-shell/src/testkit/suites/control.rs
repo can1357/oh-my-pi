@@ -2,8 +2,10 @@
 
 use crate::{
 	bash::{
-		Budget, Cx, Engine, EngineConfig, Incompatibility, MemStore, RestoreError, RestoreOpts,
-		Script, Shell, SigTarget, Signal, StateStore, Step, store::BlobSlot,
+		Budget, Cx, Engine, EngineConfig, Incompatibility, Lost, MemStore, RestoreError, RestoreOpts,
+		Script, Shell, SigTarget, Signal, StateStore, Step,
+		ir::{IR_VERSION, Unit},
+		store::{BlobSlot, Key, Record, Table},
 	},
 	testkit::{
 		FakeHost, Fault, Rig,
@@ -169,4 +171,92 @@ fn restore_drop_frames_abandons_the_running_script_with_255() {
 		shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()),
 		Step::Done { run, status: 255 } if run == id
 	));
+}
+
+#[test]
+fn a_root_only_restore_reports_a_function_body_it_cannot_read() {
+	// A restore from the root store alone never reads the frames header,
+	// where the IR version is checked. An older build's function body
+	// then decodes as nothing this build knows and is recompiled from the
+	// function's canonical text, which is alias-free and shorter than the
+	// text it was defined from: `$LINENO` inside the function changes.
+	// That must be reported, not read as a clean restore.
+	let engine = Engine::new(EngineConfig::default());
+	let mut host = FakeHost::new();
+	let mut store = MemStore::new();
+	let mut shell =
+		Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, skeleton_init(&[]))
+			.unwrap();
+	let id = shell.submit(Script::command(&b"\n\nf() {\n\techo $LINENO\n}\nf\n"[..]));
+	assert_eq!(advance(&mut shell, &mut host, &mut store, id, Budget::default()), Stop::Done(0));
+	shell
+		.externalize(&mut Cx { host: &mut host, store: &mut store })
+		.unwrap();
+	drop(shell);
+	store.del_blob(BlobSlot::Frames).unwrap();
+	assert_eq!(host.stdout.bytes(), b"4\n", "the defined body keeps its own line numbers");
+
+	// The store as this build wrote it: no body is lost.
+	let (mut shell, report) = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	)
+	.unwrap();
+	assert!(
+		!report.lost.iter().any(|l| matches!(l, Lost::Unit { .. })),
+		"this build's own bodies are readable: {:?}",
+		report.lost
+	);
+	let id = shell.submit(Script::command(&b"f"[..]));
+	assert_eq!(advance(&mut shell, &mut host, &mut store, id, Budget::default()), Stop::Done(0));
+	assert_eq!(host.stdout.bytes(), b"4\n4\n", "a readable body still reports line 4");
+	shell
+		.externalize(&mut Cx { host: &mut host, store: &mut store })
+		.unwrap();
+	drop(shell);
+	store.del_blob(BlobSlot::Frames).unwrap();
+
+	// The same store with that body written as an older build wrote it:
+	// the unit alone, with no version in front of it.
+	let mut found = None;
+	store
+		.scan(Table::Func, &mut |key, rec| {
+			if let (Key::Func(name), Record::Func { unit, .. }) = (key, rec)
+				&& &**name == b"f"
+			{
+				found = Some(*unit);
+			}
+		})
+		.unwrap();
+	let unit_id = found.expect("the store holds the function");
+	let bytes = store.get_blob(BlobSlot::Unit(unit_id)).unwrap().unwrap();
+	let (version, unit): (u32, Unit) = postcard::from_bytes(&bytes).unwrap();
+	assert_eq!(version, IR_VERSION, "this build tags the blob it wrote");
+	let old = postcard::to_stdvec(&unit).unwrap();
+	store.put_blob(BlobSlot::Unit(unit_id), &old).unwrap();
+
+	// A fresh engine, as a new process has: the body can only come from
+	// the store, not from the engine's cache of this one.
+	let engine = Engine::new(EngineConfig::default());
+	let (mut shell, report) = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	)
+	.unwrap();
+	assert!(
+		report
+			.lost
+			.contains(&Lost::Unit { unit: unit_id, found: None }),
+		"the body this build cannot read is reported: {:?}",
+		report.lost
+	);
+	let id = shell.submit(Script::command(&b"f"[..]));
+	assert_eq!(advance(&mut shell, &mut host, &mut store, id, Budget::default()), Stop::Done(0));
+	assert_eq!(
+		host.stdout.bytes(),
+		b"4\n4\n3\n",
+		"the function still runs, from its canonical text, on the line that text puts it on"
+	);
 }

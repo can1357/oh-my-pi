@@ -235,6 +235,13 @@ pub struct Parser<'s> {
 	la:             Option<Tok>,
 	/// End offset of the last token taken.
 	last_hi:        u32,
+	/// Start offset of the last token taken. A compound command's closing
+	/// token is the last one its grammar rule takes, and the text an alias
+	/// expands to has no bytes in the source, so the position cannot be
+	/// derived from `last_hi`.
+	last_lo:        u32,
+	/// Offset of the closing byte the last `raw_matched` scan consumed.
+	raw_close:      u32,
 	/// Gathered here-document texts, by sequence number.
 	docs:           Vec<Vec<u8>>,
 	/// Here-documents waiting for the next newline.
@@ -255,6 +262,11 @@ pub struct Parser<'s> {
 	cond_line:      u32,
 	/// Whether the last `[[ … ]]` token read was the end of input.
 	cond_eof:       bool,
+	/// Offset of the last token read inside `[[ … ]]`: the position the
+	/// caller's `tok` kind was read at.
+	cond_tok_lo:    u32,
+	/// Offset after that token, as the cursor reported it.
+	cond_tok_hi:    u32,
 	/// The zsh grammar under [`Features::ZSH`]: every call goes to it
 	/// (boxed: a bash parser stays as small as it was).
 	zsh:            Option<Box<crate::bash::syntax::zsh::ZshParser<'s>>>,
@@ -341,6 +353,8 @@ impl<'s> Parser<'s> {
 			lx: LexState::new(),
 			la: None,
 			last_hi: 0,
+			last_lo: 0,
+			raw_close: 0,
 			docs: Vec::new(),
 			pending: Vec::new(),
 			compound: Vec::new(),
@@ -353,6 +367,8 @@ impl<'s> Parser<'s> {
 			arith_semis: None,
 			cond_line: 0,
 			cond_eof: false,
+			cond_tok_lo: 0,
+			cond_tok_hi: 0,
 			virt_comment: false,
 			discard_line: false,
 			zsh: feat

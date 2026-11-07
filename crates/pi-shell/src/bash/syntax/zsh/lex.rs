@@ -25,6 +25,7 @@ use super::tok::{
 use crate::bash::syntax::{
 	ast::AliasUse,
 	features::{AliasLookup, Features},
+	span::Span,
 };
 
 /// zsh `enum lextok`: the token kinds `gettok` returns and `exalias` turns
@@ -658,27 +659,33 @@ pub(super) struct PendingDoc {
 #[derive(Clone, Debug, Default)]
 pub(super) struct LexState {
 	/// `tok`
-	pub(super) tok:       T,
+	pub(super) tok:          T,
 	/// `lexbuf` / `tokstr` (metafied, tokenized).
-	pub(super) buf:       Vec<u8>,
+	pub(super) buf:          Vec<u8>,
 	/// `tokstr != NULL`.
-	pub(super) has_str:   bool,
+	pub(super) has_str:      bool,
 	/// `zshlextext`: untokenized text of the last token `exalias` saw.
-	pub(super) lextext:   Option<Vec<u8>>,
+	pub(super) lextext:      Option<Vec<u8>>,
 	/// `tokfd`: explicit fd of a redirection operator, or -1.
-	pub(super) tokfd:     i32,
+	pub(super) tokfd:        i32,
+	/// The explicit descriptor byte and its span, read before the operator.
+	pub(super) redir_fd:     Option<(u8, Span)>,
+	/// Offset of the redirection operator, excluding its descriptor.
+	pub(super) redir_op_pos: u32,
 	/// `dbparens`
-	pub(super) dbparens:  bool,
+	pub(super) dbparens:     bool,
 	/// `toklineno`
-	pub(super) toklineno: u32,
+	pub(super) toklineno:    u32,
 	/// Source offset of the token.
-	pub(super) lo:        u32,
+	pub(super) lo:           u32,
 	/// Source offset after the token.
-	pub(super) hi:        u32,
+	pub(super) hi:           u32,
+	/// Body read by `dquote_parse`, ending at the consumed delimiter.
+	pub(super) quote_span:   Span,
 	/// End of the token before this one (end of the last consumed token).
-	pub(super) last_hi:   u32,
+	pub(super) last_hi:      u32,
 	/// The `SEPER` was a newline.
-	pub(super) sep_nl:    bool,
+	pub(super) sep_nl:       bool,
 }
 
 /// Parser globals zsh saves in `parse_context_save`.
@@ -737,6 +744,9 @@ pub(super) struct Ctx<'s> {
 	pub(super) msgs:       Vec<(u32, Vec<u8>)>,
 	/// `noaliases`
 	pub(super) noaliases:  bool,
+	/// Offset of the token that closes the compound command being parsed,
+	/// as the lexer read it; taken by `par_cmd` when it builds the command.
+	pub(super) cmd_close:  Option<u32>,
 	/// `inalmore`
 	inalmore:              bool,
 	/// `inpartime` of `par_cmd`.
@@ -960,6 +970,7 @@ impl<'s> Ctx<'s> {
 			errflag: false,
 			msgs: Vec::new(),
 			noaliases: false,
+			cmd_close: None,
 			inalmore: false,
 			inpartime: false,
 			docs: Vec::new(),
@@ -1446,6 +1457,8 @@ impl<'s> Ctx<'s> {
 			}
 			self.lx.toklineno = self.line;
 			self.lx.lo = self.last_src_off;
+			self.lx.redir_fd = None;
+			self.lx.redir_op_pos = self.lx.lo;
 			if self.lexstop {
 				self.lx.lo = self.src_off();
 				return if self.errflag { T::Lexerr } else { T::Endinput };
@@ -1480,11 +1493,15 @@ impl<'s> Ctx<'s> {
 				return T::Doutpar;
 			}
 			if c.is_ascii_digit() {
+				let fd_span = Span::new(self.lx.lo, self.src_off());
 				let mut d = self.hgetc();
 				if d == b'&' {
+					let op_pos = self.last_src_off;
 					d = self.hgetc();
 					if d == b'>' {
 						peekfd = i32::from(c - b'0');
+						self.lx.redir_fd = Some((c, fd_span));
+						self.lx.redir_op_pos = op_pos;
 						self.hungetc(b'>');
 						c = b'&';
 					} else {
@@ -1494,6 +1511,8 @@ impl<'s> Ctx<'s> {
 					}
 				} else if d == b'>' || d == b'<' {
 					peekfd = i32::from(c - b'0');
+					self.lx.redir_fd = Some((c, fd_span));
+					self.lx.redir_op_pos = self.last_src_off;
 					c = d;
 				} else {
 					self.hungetc(d);
@@ -2313,11 +2332,15 @@ impl<'s> Ctx<'s> {
 				.zle
 				.is_some_and(|z| z.zlemetacs > z.zlemetall + z.addedx - self.inbufct());
 		let mut c;
+		let quote_lo = self.src_off();
 		loop {
 			c = self.hgetc();
 			let more = (c != endchar || bct > 0 || (math && (pct > 0 || brct > 0)) || intick > 0)
 				&& !self.lexstop;
 			if !more {
+				if !self.lexstop && c == endchar {
+					self.lx.quote_span = Span::new(quote_lo, self.last_src_off);
+				}
 				break;
 			}
 			// `continue` of zsh's loop: the byte is dropped.

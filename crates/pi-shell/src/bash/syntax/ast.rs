@@ -147,13 +147,24 @@ pub struct Stage {
 	pub pipe_stderr: bool,
 }
 
-/// A command with its trailing redirections.
+/// A command with its redirections.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Command {
 	/// Preorder id.
 	pub id:     NodeId,
 	/// Source span, redirections included.
 	pub span:   Span,
+	/// The command proper, recorded before/after its grammar rule, excluding
+	/// surrounding redirections. Absent for simple commands and synthesized
+	/// groups, which have no compound tokens of their own.
+	pub extent: Option<Span>,
+	/// Offset of the token that closes this compound command (`)`, `}`,
+	/// `done`, `esac`, `fi`, `))`, `]]`), as the parser read it. `None` when
+	/// the command has no closing token (a simple command) or the parser
+	/// synthesized it rather than reading it (zsh's implicit groups). The
+	/// text an alias expands to has no bytes in the source, so this offset
+	/// cannot be derived from the span's end.
+	pub close:  Option<u32>,
 	/// What kind of command.
 	pub kind:   CommandKind,
 	/// Redirections in source order.
@@ -202,19 +213,26 @@ pub enum CommandKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Repeat {
 	/// The count, evaluated arithmetically once at the start.
-	pub count: Word,
+	pub count:  Word,
 	/// Loop body.
-	pub body:  List,
+	pub body:   List,
+	/// Offset of `do` (or of the `{` of a brace body), as the parser read
+	/// it. `None` for a short form that writes neither.
+	pub do_pos: Option<u32>,
 }
 
 /// zsh `{ try-list } always { always-list }`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Try {
 	/// The try list.
-	pub body:   List,
+	pub body:       List,
 	/// Runs after the try list however it ended (error, `return`, `break`,
 	/// `exit` in a subshell), then that ending resumes.
-	pub always: List,
+	pub always:     List,
+	/// Offset of the `}` that closes the try list, as the parser read it.
+	pub rbrace:     u32,
+	/// Offset of `always`, as the parser read it.
+	pub always_pos: u32,
 }
 
 /// zsh anonymous function.
@@ -249,26 +267,36 @@ pub struct If {
 	pub arms:      Vec<IfArm>,
 	/// The `else` body.
 	pub else_body: Option<List>,
+	/// Offset of `else`, as the parser read it.
+	pub else_pos:  Option<u32>,
 }
 
 /// One `if`/`elif` condition with its body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IfArm {
 	/// Condition list.
-	pub cond: List,
+	pub cond:     List,
 	/// `then` body.
-	pub body: List,
+	pub body:     List,
+	/// Offset of the `if` or `elif` that opens this arm, as the parser read
+	/// it.
+	pub kw_pos:   Option<u32>,
+	/// Offset of this arm's `then`, as the parser read it.
+	pub then_pos: Option<u32>,
 }
 
 /// `while` or `until`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct While {
 	/// `until`: loop while the condition fails.
-	pub until: bool,
+	pub until:  bool,
 	/// Condition list.
-	pub cond:  List,
+	pub cond:   List,
 	/// Loop body.
-	pub body:  List,
+	pub body:   List,
+	/// Offset of `do` (or of the `{` of zsh's brace body), as the parser
+	/// read it.
+	pub do_pos: Option<u32>,
 }
 
 /// `for`/`select` over words.
@@ -278,46 +306,77 @@ pub struct For {
 	pub var:        Vec<u8>,
 	/// zsh `for a b c in …`: the loop variables after [`For::var`], each
 	/// pass taking that many words (empty in bash grammar).
-	pub extra_vars: Vec<Vec<u8>>,
+	pub extra_vars: Vec<Name>,
 	/// Span of the variable word.
 	pub var_span:   Span,
+	/// Iterator header from the first variable through the last name,
+	/// keyword, word or closing parenthesis the parser read.
+	pub header:     Span,
 	/// `in` words; `None` means `"$@"`.
 	pub words:      Option<Vec<Word>>,
 	/// Loop body.
 	pub body:       List,
+	/// Offset of `in`, as the parser read it.
+	pub in_pos:     Option<u32>,
+	/// Offset of `do` (or of the `{` of zsh's brace body), as the parser
+	/// read it.
+	pub do_pos:     Option<u32>,
+	/// The body is a `{ … }` group (zsh's `for x { … }`) rather than
+	/// `do … done`.
+	pub braces:     bool,
 }
 
 /// Arithmetic `for ((init; cond; step))`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArithFor {
 	/// Initializer expression.
-	pub init: ArithText,
+	pub init:   ArithText,
 	/// Condition expression (empty = true).
-	pub cond: ArithText,
+	pub cond:   ArithText,
 	/// Step expression.
-	pub step: ArithText,
+	pub step:   ArithText,
 	/// Loop body.
-	pub body: List,
+	pub body:   List,
+	/// Span of the `((init; cond; step))` header, as the parser read it.
+	pub header: Span,
+	/// Offset of the header's closing `))`, as the parser read it.
+	pub rparen: u32,
+	/// Offset of `do` (or of the `{` of zsh's brace body), as the parser
+	/// read it.
+	pub do_pos: Option<u32>,
+	/// The body is a `{ … }` group rather than `do … done`.
+	pub braces: bool,
 }
 
 /// `case word in … esac`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Case {
 	/// Subject word.
-	pub word: Word,
+	pub word:   Word,
 	/// Arms in order.
-	pub arms: Vec<CaseArm>,
+	pub arms:   Vec<CaseArm>,
+	/// Offset of `in` (or of the `{` of zsh's brace body), as the parser
+	/// read it.
+	pub in_pos: Option<u32>,
 }
 
 /// One `pat | pat) body ;;` arm.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaseArm {
 	/// Alternative patterns.
-	pub patterns: Vec<Word>,
+	pub patterns:  Vec<Word>,
 	/// Arm body (may be empty).
-	pub body:     List,
+	pub body:      List,
+	/// Span of the `)` that closes the patterns, as the parser read it. An
+	/// arm with neither a body nor a terminator ends there, and the text an
+	/// alias expands to has no byte after the last pattern to end it at.
+	pub rparen:    Option<Span>,
 	/// Arm terminator.
-	pub term:     CaseTerm,
+	pub term:      CaseTerm,
+	/// Span of the terminator as the parser read it. `None` when the arm
+	/// ends at `esac` with no terminator written: [`CaseArm::term`] is then
+	/// the default, and the source holds no `;;` to point at.
+	pub term_span: Option<Span>,
 }
 
 /// Terminator of a `case` arm.
@@ -348,29 +407,70 @@ pub enum CondExpr {
 	/// `-op word` (`-f file`, `-n str`, …).
 	Unary {
 		/// Operator, e.g. `-f`.
-		op:  Vec<u8>,
+		op:    Vec<u8>,
+		/// Offset of the operator's first byte. The operator's bytes need
+		/// not be contiguous there (`-\<newline>z`), so it cannot be found
+		/// by searching the source for them.
+		op_lo: u32,
 		/// Operand.
-		arg: Word,
+		arg:   Word,
 	},
 	/// `lhs op rhs` (`==`, `=~`, `-lt`, `-nt`, …).
 	Binary {
 		/// Operator.
-		op:  Vec<u8>,
+		op:    Vec<u8>,
+		/// Offset of the operator's first byte, as for [`Self::Unary`].
+		op_lo: u32,
 		/// Left operand.
-		lhs: Word,
+		lhs:   Word,
 		/// Right operand (a pattern for `==`/`!=`, a regex for `=~`).
-		rhs: Word,
+		rhs:   Word,
 	},
 	/// A lone word: true when non-empty.
 	Word(Word),
-	/// `! expr`
-	Not(Box<Self>),
-	/// `a && b`
-	And(Box<Self>, Box<Self>),
-	/// `a || b`
-	Or(Box<Self>, Box<Self>),
-	/// `( expr )`
-	Group(Box<Self>),
+	/// `! ! … expr`: a run of `!`s, at least one, kept as one node so its
+	/// length sets no recursion depth. The operand is never itself `Not`.
+	/// The run holds `1 + rest.len()` of them.
+	Not {
+		/// Offset of the first `!`.
+		lo:   u32,
+		/// Offsets of the `!`s after the first, in source order. Empty for
+		/// a lone `!`, which allocates nothing.
+		rest: Box<[u32]>,
+		/// What the run negates.
+		expr: Box<Self>,
+	},
+	/// `a && b && …`: at least two operands in source order, and the
+	/// offset of each `&&` between them.
+	And(Vec<Self>, Box<[u32]>),
+	/// `a || b || …`: at least two operands in source order, and the
+	/// offset of each `||` between them.
+	Or(Vec<Self>, Box<[u32]>),
+	/// `( expr )`, with the offsets of both parentheses.
+	Group {
+		/// Offset of `(`.
+		lparen:    u32,
+		/// Offset of `)`.
+		rparen:    u32,
+		/// Offset after the `)`, as the parser read it. In source text that
+		/// is `rparen + 1`; in text an alias expanded it is `rparen`, since
+		/// that text has no bytes in the source and every token in it
+		/// reports the one position of the aliased word. A consumer must
+		/// not add the byte itself: a range that invents it leaves its
+		/// parent's.
+		rparen_hi: u32,
+		/// What they enclose.
+		expr:      Box<Self>,
+	},
+}
+
+/// A name the parser read, with the span it read it at.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Name {
+	/// The name as written.
+	pub text: Vec<u8>,
+	/// Where it was read.
+	pub span: Span,
 }
 
 /// Function definition.
@@ -378,11 +478,15 @@ pub enum CondExpr {
 pub struct FuncDef {
 	/// Function name.
 	pub name:        Vec<u8>,
+	/// Span of the name, as the parser read it.
+	pub name_span:   Span,
 	/// zsh `f g () { … }` / `function f g { … }`: further names defined
 	/// with the same body (empty in bash grammar).
-	pub extra_names: Vec<Vec<u8>>,
+	pub extra_names: Vec<Name>,
 	/// Defined with the `function` keyword.
 	pub keyword:     bool,
+	/// Written with `()` after the names.
+	pub parens:      bool,
 	/// zsh `function -T name { … }`: defined traced (`PM_TAGGED_LOCAL`).
 	pub traced:      bool,
 	/// Body (a compound command).
@@ -392,8 +496,9 @@ pub struct FuncDef {
 /// `coproc [NAME] cmd`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Coproc {
-	/// Explicit name (default `COPROC`).
-	pub name: Option<Vec<u8>>,
+	/// Explicit name (default `COPROC`), with the span the parser read it
+	/// at.
+	pub name: Option<Name>,
 	/// The coprocess command.
 	pub body: Box<Command>,
 }
@@ -439,14 +544,18 @@ pub struct ArrayElem {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Redir {
 	/// Source span.
-	pub span:   Span,
+	pub span:    Span,
 	/// Explicit fd (`2>`) or fd variable (`{var}>`); `None` uses the operator
 	/// default.
-	pub fd:     Option<RedirFd>,
+	pub fd:      Option<RedirFd>,
+	/// Explicit descriptor text, including braces, at its recorded span.
+	pub fd_name: Option<Name>,
+	/// Offset of the redirection operator as the parser read it.
+	pub op_pos:  u32,
 	/// Operator.
-	pub op:     RedirOp,
+	pub op:      RedirOp,
 	/// Target word or here-document.
-	pub target: RedirTarget,
+	pub target:  RedirTarget,
 }
 
 /// Explicit redirection source.

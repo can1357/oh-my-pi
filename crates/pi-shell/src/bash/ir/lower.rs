@@ -708,7 +708,7 @@ impl Lower {
 				let mut var = BString::from(f.var.as_slice());
 				for extra in &f.extra_vars {
 					var.push(b'\n');
-					var.extend_from_slice(extra);
+					var.extend_from_slice(&extra.text);
 				}
 				self.unit.names.push(var);
 				let at = self.emit(Opcode::ForIn, list, name, id);
@@ -877,7 +877,7 @@ impl Lower {
 				// zsh `f g () { … }`: every name gets the body.
 				for name in &f.extra_names {
 					let mut more = self.unit.funcs[func as usize].clone();
-					more.name = func_name(name, self.unit.mode);
+					more.name = func_name(&name.text, self.unit.mode);
 					self.unit.funcs.push(more);
 					let at = self.unit.funcs.len() as u32 - 1;
 					let pc = self.emit(Opcode::FuncDef, at, 0, id);
@@ -890,7 +890,7 @@ impl Lower {
 				self
 					.unit
 					.names
-					.push(c.name.as_deref().unwrap_or(&b"COPROC"[..]).into());
+					.push(c.name.as_ref().map_or(&b"COPROC"[..], |n| &n.text).into());
 				let spawn = self.unit.spawns.len() as u32;
 				self.unit.spawns.push(SpawnIr {
 					kind:   SpawnKind::Coproc { name },
@@ -980,12 +980,12 @@ impl Lower {
 
 	fn cond_expr(&mut self, e: &syn::CondExpr, id: u32) -> R {
 		match e {
-			syn::CondExpr::Unary { op, arg } => {
+			syn::CondExpr::Unary { op, arg, .. } => {
 				let arg = self.word(arg)?;
 				let c = self.cond_ir(CondIr::Unary { op: op.as_slice().into(), arg });
 				self.emit(Opcode::CondTest, c, 0, id);
 			},
-			syn::CondExpr::Binary { op, lhs, rhs } => {
+			syn::CondExpr::Binary { op, lhs, rhs, .. } => {
 				let lhs = self.word(lhs)?;
 				let rhs = self.word(rhs)?;
 				let c = self.cond_ir(CondIr::Binary { op: op.as_slice().into(), lhs, rhs });
@@ -996,13 +996,13 @@ impl Lower {
 				let c = self.cond_ir(CondIr::Word(w));
 				self.emit(Opcode::CondTest, c, 0, id);
 			},
-			syn::CondExpr::Not(inner) => {
+			syn::CondExpr::Not { rest, expr, .. } => {
 				// A run of `!`s, lowered at once: bash's trace shows one `!`
 				// on a primary under an odd number of them.
-				let mut nots = 1;
-				let mut leaf = inner.as_ref();
-				while let syn::CondExpr::Not(i) = leaf {
-					nots += 1;
+				let mut nots = 1 + rest.len();
+				let mut leaf = expr.as_ref();
+				while let syn::CondExpr::Not { rest: more, expr: i, .. } = leaf {
+					nots += 1 + more.len();
 					leaf = i;
 				}
 				let primary = matches!(
@@ -1022,21 +1022,32 @@ impl Lower {
 				}
 				self.emit(Opcode::Not, 0, 0, id);
 			},
-			syn::CondExpr::And(a, b) | syn::CondExpr::Or(a, b) => {
+			syn::CondExpr::And(terms, _) | syn::CondExpr::Or(terms, _) => {
 				let (code, c) = if matches!(e, syn::CondExpr::And(..)) {
 					(Opcode::BrFail, construct::AND)
 				} else {
 					(Opcode::BrOk, construct::OR)
 				};
-				self.cond += 1;
-				self.cond_expr(a, id)?;
-				self.cond -= 1;
-				let br = self.emit(code, 0, c, id);
-				self.cond_expr(b, id)?;
+				// Thread the pending branches through their target fields. They
+				// all jump to the chain's end, without a separate patch vector.
+				let mut branch = u32::MAX;
+				for (i, term) in terms.iter().enumerate() {
+					let last = i + 1 == terms.len();
+					self.cond += u32::from(!last);
+					self.cond_expr(term, id)?;
+					self.cond -= u32::from(!last);
+					if !last {
+						branch = self.emit(code, branch, c, id);
+					}
+				}
 				let end = self.here();
-				self.patch_a(br, end);
+				while branch != u32::MAX {
+					let next = self.unit.ops[branch as usize].a;
+					self.patch_a(branch, end);
+					branch = next;
+				}
 			},
-			syn::CondExpr::Group(inner) => self.cond_expr(inner, id)?,
+			syn::CondExpr::Group { expr, .. } => self.cond_expr(expr, id)?,
 		}
 		Ok(())
 	}
@@ -1521,7 +1532,7 @@ fn zsh_funcdef_words(cmd: &syn::Command, f: &syn::FuncDef, mode: ModeId) -> Opti
 		return None;
 	}
 	let toks = std::iter::once(&f.name)
-		.chain(&f.extra_names)
+		.chain(f.extra_names.iter().map(|n| &n.text))
 		.map(|n| syn::zsh::parse_subst_string(&tok::metafy(n)).ok())
 		.collect::<Option<Vec<_>>>()?;
 	let expands = |t: &Vec<u8>| {
@@ -1831,6 +1842,7 @@ mod tests {
 			b"f() { local x=${1:-default}; echo \"$x\"; }\n".as_slice(),
 			b"f() { emit \"${1:-default}\"; }\n".as_slice(),
 			b"f() { echo \"${x+'$(echo x'}\"; }\n".as_slice(),
+			b"f() { emit; [[ a && b && c || '' || d ]]; }\n".as_slice(),
 		] {
 			let mut parser = syn::Parser::new(src, syn::Features::NONE, &Aliases)
 				.with_pos(syn::Pos { offset: 0, line: 17 });
@@ -1849,6 +1861,39 @@ mod tests {
 			assert_eq!(compiled.source, eager.funcs[0].body.source);
 			assert_eq!(compiled.root, eager.funcs[0].body.root);
 		}
+	}
+
+	#[test]
+	fn the_serialized_conditional_layout_belongs_to_one_ir_version() {
+		// An alias-expanded deferred body keeps its pre-expansion syntax as
+		// these exact bytes, and another build accepts them when the frames
+		// header's IR version matches. Two layouts under one version
+		// therefore pass that check and decode as something else, which
+		// restore still reports as success. Whenever this golden changes,
+		// raise `IR_VERSION` in the same commit: the version is asserted
+		// with the bytes so the two cannot drift apart.
+		struct Aliases;
+		impl syn::AliasLookup for Aliases {
+			fn alias(&self, name: &[u8]) -> Option<&[u8]> {
+				(name == b"emit").then_some(b"echo frozen")
+			}
+		}
+		let src = b"f() { emit; [[ ! ! a && -n b || ( c == d ) ]]; }\n".as_slice();
+		let mut parser = syn::Parser::new(src, syn::Features::NONE, &Aliases);
+		let cc = parser.next_command().unwrap().unwrap();
+		let lazy = lower_deferred(&cc, src, ModeId::Bash, syn::Features::NONE).unwrap();
+		let deferred = lazy.funcs[0].body.deferred.as_ref().unwrap();
+		#[rustfmt::skip]
+		const WIRE: [u8; 133] = [
+			0, 3, 4, 48, 1, 4, 48, 1, 47, 1, 2, 4, 10, 10, 5, 10, 10, 0, 0, 1, 6, 10, 10, 0,
+			0, 0, 0, 2, 7, 10, 10, 1, 0, 4, 101, 99, 104, 111, 8, 10, 10, 1, 0, 6, 102, 114, 111,
+			122, 101, 110, 0, 0, 0, 0, 0, 9, 12, 45, 10, 12, 45, 0, 0, 1, 11, 12, 45, 1, 12, 45,
+			1, 43, 10, 5, 2, 4, 2, 3, 15, 1, 17, 2, 12, 19, 20, 1, 0, 1, 97, 0, 2, 45, 110, 24,
+			13, 27, 28, 1, 0, 1, 98, 1, 21, 6, 32, 41, 42, 1, 2, 61, 61, 36, 14, 34, 35, 1, 0, 1,
+			99, 15, 39, 40, 1, 0, 1, 100, 1, 29, 0, 0, 0, 0, 0,
+		];
+
+		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (24, WIRE.as_slice()));
 	}
 
 	#[test]
