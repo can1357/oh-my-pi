@@ -66,15 +66,15 @@ describe("xai-oauth bundled catalog (regression)", () => {
 	// (including the inclusive 200K tier) instead of the subscription zero.
 	it("prices the multi-agent SuperGrok alias from its public xAI equivalent", () => {
 		expect(bundled["grok-4.20-multi-agent-0309"]?.cost).toEqual({
-			input: 2,
-			output: 6,
+			input: 1.25,
+			output: 2.5,
 			cacheRead: 0.2,
 			cacheWrite: 0,
 			longContext: {
 				inputThreshold: 200_000,
 				inputThresholdInclusive: true,
-				input: 4,
-				output: 12,
+				input: 2.5,
+				output: 5,
 				cacheRead: 0.4,
 				cacheWrite: 0,
 			},

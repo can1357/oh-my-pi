@@ -155,7 +155,7 @@ describe("paid xai (XAI_API_KEY) Responses contract", () => {
 			...XAI_RESPONSES_SPEC,
 			id: "grok-4.20-multi-agent-beta-latest",
 			name: "Grok 4.20 (Multi-Agent)",
-			cost: { input: 2, output: 6, cacheRead: 0.2, cacheWrite: 0 },
+			cost: { input: 1.25, output: 2.5, cacheRead: 0.2, cacheWrite: 0 },
 		};
 		const oauthSpec: ModelSpec<"openai-responses"> = {
 			...paidSpec,
@@ -170,12 +170,45 @@ describe("paid xai (XAI_API_KEY) Responses contract", () => {
 		expect(buildModel(paid).cost.longContext).toEqual({
 			inputThreshold: 200_000,
 			inputThresholdInclusive: true,
-			input: 4,
-			output: 12,
+			input: 2.5,
+			output: 5,
 			cacheRead: 0.4,
 			cacheWrite: 0,
 		});
 		expect(buildModel(oauth).cost).toEqual(buildModel(paid).cost);
+	});
+
+	it("bills the three Grok 4.20 beta-latest aliases at the 0309 rates", () => {
+		for (const id of [
+			"grok-4.20-beta-latest-reasoning",
+			"grok-4.20-beta-latest-non-reasoning",
+			"grok-4.20-multi-agent-beta-latest",
+		]) {
+			const bundled = getBundledModels("xai").find(model => model.id === id);
+			if (!bundled) throw new Error(`Missing bundled xAI alias: ${id}`);
+			const corrected = buildModel({
+				...XAI_RESPONSES_SPEC,
+				id,
+				cost: { input: 2, output: 6, cacheRead: 0.2, cacheWrite: 0 },
+			});
+			for (const model of [bundled, corrected]) {
+				for (const [cachedTokens, expected] of [
+					[99_999, 0.1474998],
+					[100_000, 0.295],
+				]) {
+					const usage: Usage = {
+						input: 100_000,
+						output: 1_000,
+						cacheRead: cachedTokens,
+						cacheWrite: 0,
+						totalTokens: 101_000 + cachedTokens,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					};
+					calculateCost(model, usage);
+					expect(usage.cost.total, `${id} at ${100_000 + cachedTokens} prompt tokens`).toBeCloseTo(expected, 10);
+				}
+			}
+		}
 	});
 
 	it("drops stale Chat Completions cache rows so Responses takes effect immediately", async () => {
