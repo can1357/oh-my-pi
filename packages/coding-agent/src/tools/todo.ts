@@ -5,6 +5,7 @@ import {
 	type TodoPhase,
 	type TodoCompletionTransition,
 	type TodoToolDetails,
+	unwrappedTaskText,
 } from "@oh-my-pi/pi-tui/tools/todo";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
@@ -16,6 +17,55 @@ import type { ToolSession } from "../sdk";
 import type { SessionEntry } from "../session/session-entries";
 
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
+
+/**
+ * Resolve a raw item input to the string that gets stored, keeping content
+ * verbatim. A wrapped object item (known key) is stored as its JSON string —
+ * the same form the lenient validation entry produces — so both the literal
+ * form and the unwrapped text stay addressable (matching accepts either;
+ * display shows the unwrapped text). A JSON object without a known key is
+ * rejected: silently stringifying it would store opaque JSON with no
+ * addressable text.
+ */
+function storedItemContent(input: unknown, errors: string[], label: string): string | undefined {
+	let raw: string;
+	if (typeof input === "string") {
+		raw = input;
+	} else if (isRecord(input)) {
+		raw = JSON.stringify(input);
+	} else {
+		errors.push(`${label} must be the task text as a plain string`);
+		return undefined;
+	}
+	if (!raw.startsWith("{")) return raw;
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		if (isRecord(parsed)) {
+			const known = ["task", "content", "description", "text"].some(key => typeof parsed[key] === "string");
+			if (!known) {
+				errors.push(
+					`${label} is a JSON object with no task/content/description/text field — pass the task text as a plain string`,
+				);
+				return undefined;
+			}
+		}
+	} catch {
+		// Not JSON — a literal task text that merely starts with "{".
+	}
+	return raw;
+}
+
+/**
+ * Convert an item input to the string shape the schema validates. Object
+ * items become their JSON strings (what the lenient validation entry hands
+ * over anyway); semantic acceptance is decided later by
+ * {@link storedItemContent}, which rejects JSON objects without a known
+ * key instead of silently stringifying them.
+ */
+function itemInputToString(input: unknown): string {
+	if (typeof input === "string") return input;
+	return JSON.stringify(input);
+}
 
 /** Whether an unknown value is a persisted todo phase. */
 export function isTodoPhase(value: unknown): value is TodoPhase {
@@ -78,12 +128,29 @@ type TodoOpEntryValue = TodoParams;
 // State helpers
 // =============================================================================
 
-function findTaskByContent(phases: TodoPhase[], content: string): { task: TodoItem; phase: TodoPhase } | undefined {
+type TaskHit = { task: TodoItem; phase: TodoPhase; via: "exact" | "unwrapped" };
+
+/**
+ * Resolve a task by content, verbatim first. Stored content is never
+ * rewritten, so the exact literal always matches. Wrapped forms
+ * (JSON-stringified object items the lenient validation entry produces)
+ * additionally match by their unwrapped text — but only when exactly one
+ * candidate matches, so distinct tasks never merge.
+ */
+function findTaskByContent(phases: TodoPhase[], content: string): TaskHit | "ambiguous" | undefined {
+	let candidate: TaskHit | undefined;
+	let matches = 0;
 	for (const phase of phases) {
-		const task = phase.tasks.find(t => t.content === content);
-		if (task) return { task, phase };
+		for (const task of phase.tasks) {
+			if (task.content === content) return { task, phase, via: "exact" };
+			if (unwrappedTaskText(task.content) === content) {
+				matches++;
+				candidate ??= { task, phase, via: "unwrapped" };
+			}
+		}
 	}
-	return undefined;
+	if (matches > 1) return "ambiguous";
+	return candidate;
 }
 
 function findPhaseByName(phases: TodoPhase[], name: string): TodoPhase | undefined {
@@ -267,6 +334,12 @@ function resolveTaskOrError(
 		return undefined;
 	}
 	const hit = findTaskByContent(phases, content);
+	if (hit === "ambiguous") {
+		errors.push(
+			`Task "${content}" matches multiple items — a literal form and its unwrapped text are both stored; pass the exact stored text`,
+		);
+		return undefined;
+	}
 	if (!hit) {
 		if (/^task-\d+$/.test(content)) {
 			errors.push(
@@ -322,22 +395,31 @@ function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 		return [];
 	}
 	// Duplicate phase names / task contents would be permanently unaddressable
-	// (every targeting op resolves the first match), so reject them up front.
+	// (every targeting op resolves a unique match), so reject them up front.
+	// Storage stays verbatim; duplicates are detected in unwrapped space so a
+	// wrapped form and its plain text can never coexist as distinct tasks.
 	const seenPhases = new Set<string>();
 	const seenTasks = new Set<string>();
+	const resolved: { phase: string; items: string[] }[] = [];
 	for (const listEntry of list) {
 		if (seenPhases.has(listEntry.phase)) {
 			errors.push(`Duplicate phase "${listEntry.phase}" in init list`);
 		}
 		seenPhases.add(listEntry.phase);
-		for (const content of listEntry.items) {
-			if (seenTasks.has(content)) {
-				errors.push(`Duplicate task "${content}" in init list`);
+		const storedItems: string[] = [];
+		listEntry.items.forEach((raw, index) => {
+			const stored = storedItemContent(raw, errors, `items[${index}]`);
+			if (stored === undefined) return;
+			const text = unwrappedTaskText(stored);
+			if (seenTasks.has(text)) {
+				errors.push(`Duplicate task "${text}" in init list`);
 			}
-			seenTasks.add(content);
-		}
+			seenTasks.add(text);
+			storedItems.push(stored);
+		});
+		resolved.push({ phase: listEntry.phase, items: storedItems });
 	}
-	return list.map(listEntry => ({
+	return resolved.map(listEntry => ({
 		name: listEntry.phase,
 		tasks: listEntry.items.map<TodoItem>(content => ({ content, status: "pending" })),
 	}));
@@ -354,17 +436,21 @@ function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 	}
 
 	// Validate the whole batch before mutating so a failing op reports every
-	// duplicate and leaves nothing half-applied.
+	// duplicate and leaves nothing half-applied. Storage stays verbatim;
+	// duplicates are detected in unwrapped space.
 	const seen = new Set<string>();
-	let hasDuplicate = false;
-	for (const content of entry.items) {
-		if (seen.has(content) || findTaskByContent(phases, content)) {
-			errors.push(`Task "${content}" already exists`);
-			hasDuplicate = true;
+	const storedItems: string[] = [];
+	entry.items.forEach((raw, index) => {
+		const stored = storedItemContent(raw, errors, `items[${index}]`);
+		if (stored === undefined) return;
+		const text = unwrappedTaskText(stored);
+		if (seen.has(text) || findTaskByContent(phases, text) !== undefined) {
+			errors.push(`Task "${text}" already exists`);
 		}
-		seen.add(content);
-	}
-	if (hasDuplicate) return phases;
+		seen.add(text);
+		storedItems.push(stored);
+	});
+	if (errors.length > 0) return phases;
 
 	let phase = findPhaseByName(phases, entry.phase);
 	if (!phase) {
@@ -372,7 +458,7 @@ function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 		phases.push(phase);
 	}
 
-	for (const content of entry.items) {
+	for (const content of storedItems) {
 		phase.tasks.push({ content, status: "pending" });
 	}
 	return phases;
@@ -488,6 +574,41 @@ function inferTodoOp(args: Record<string, unknown>, hasExistingPhases: boolean):
 	return undefined;
 }
 
+/** A `list` entry decoded from the JSON string the live validation entry may hand over. */
+function parseListEntry(entry: unknown): unknown {
+	if (typeof entry !== "string" || !entry.startsWith("{")) return entry;
+	try {
+		const parsed = JSON.parse(entry);
+		return isRecord(parsed) && (Array.isArray(parsed.items) || Array.isArray(parsed.tasks)) ? parsed : entry;
+	} catch {
+		return entry;
+	}
+}
+
+/**
+ * Normalize `list` entries to `{phase, items: string[]}`. Models also send
+ * `{phase, tasks: [...]}`, or a flat list of tasks with no phases at all
+ * (`list: [{task: "a"}, {task: "b"}]`); a flat list becomes one default phase.
+ * A list mixing phases and bare tasks is left for the schema to reject.
+ */
+function normalizeListEntries(list: unknown[]): unknown[] {
+	const entries = list.map(raw => {
+		let entry = parseListEntry(raw);
+		if (isRecord(entry) && !Array.isArray(entry.items) && Array.isArray(entry.tasks)) {
+			const { tasks, ...rest } = entry;
+			entry = { ...rest, items: tasks };
+		}
+		return isRecord(entry) && Array.isArray(entry.items)
+			? { ...entry, items: entry.items.map(itemInputToString) }
+			: entry;
+	});
+	const isPhaseEntry = (entry: unknown): boolean => isRecord(entry) && Array.isArray(entry.items);
+	if (entries.length > 0 && !entries.some(isPhaseEntry)) {
+		return [{ phase: DEFAULT_INIT_PHASE, items: entries.map(itemInputToString) }];
+	}
+	return entries;
+}
+
 /**
  * Validate execute-time arguments, repairing an omitted `op`. The tool sets
  * `lenientArgValidation`, so the agent loop hands `execute()` the raw
@@ -497,6 +618,17 @@ function inferTodoOp(args: Record<string, unknown>, hasExistingPhases: boolean):
  * for a normal model retry.
  */
 function resolveTodoParams(raw: unknown, hasExistingPhases: boolean): TodoOpEntryValue | string {
+	// Normalize object items to strings before schema validation. Models
+	// routinely pass `{task: "text"}` or `{description: "text"}` objects
+	// instead of bare strings; without this repair the schema rejects the
+	// whole call and the model sees "Invalid todo arguments" instead of
+	// a working todo list (issue #16279).
+	if (isRecord(raw) && Array.isArray(raw.items)) {
+		raw = { ...raw, items: raw.items.map(itemInputToString) };
+	}
+	if (isRecord(raw) && Array.isArray(raw.list)) {
+		raw = { ...raw, list: normalizeListEntries(raw.list) };
+	}
 	const direct = todoSchema(raw);
 	if (!(direct instanceof type.errors)) return direct;
 	if (isRecord(raw) && raw.op === undefined) {
@@ -661,7 +793,7 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 	} else {
 		lines.push(`Remaining items (${remainingTasks.length}):`);
 		for (const task of remainingTasks) {
-			lines.push(`  - ${task.content} [${task.status}] (${task.phase})`);
+			lines.push(`  - ${unwrappedTaskText(task.content)} [${task.status}] (${task.phase})`);
 		}
 	}
 	// Closed = completed + abandoned, mirroring the per-phase `done` count.
@@ -700,7 +832,7 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 								? ` (blocked: ${task.blocker})`
 								: " (blocked)"
 							: "";
-			lines.push(`    - ${checkbox} ${task.content}${tag}`);
+			lines.push(`    - ${checkbox} ${unwrappedTaskText(task.content)}${tag}`);
 		}
 	}
 	return lines.join("\n");

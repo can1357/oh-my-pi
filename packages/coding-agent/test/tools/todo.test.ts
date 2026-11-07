@@ -5,12 +5,16 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
+	getLatestTodoPhasesFromEntries,
 	markdownToPhases,
 	nextActionableTask,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
 	TodoTool,
 } from "@oh-my-pi/pi-coding-agent/tools";
+import type { Tool } from "@oh-my-pi/pi-ai/types";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
+import { validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
 import {
 	selectCollapsedTodos,
 	TODO_STRIKE_HOLD_FRAMES,
@@ -150,6 +154,19 @@ it("renders completed tasks as checked before revealing strikethrough", async ()
 	const revealFrame = component.render(120).join("\n");
 	expect(Bun.stripANSI(revealFrame)).toContain("finish");
 	expect(revealFrame).toContain("\x1b[9m");
+});
+
+it("renders wrapped content as its task text in the panel", async () => {
+	const tool = new TodoTool(createSession());
+	const result = await tool.execute("call-1", {
+		op: "init",
+		items: [{ task: "Fix login bug" }] as never,
+	});
+	const options = { expanded: true, isPartial: false, spinnerFrame: 0 };
+	const component = todoToolRenderer.renderResult(result, options, theme);
+	const frame = Bun.stripANSI(component.render(120).join("\n"));
+	expect(frame).toContain("Fix login bug");
+	expect(frame).not.toContain('{"task":');
 });
 
 describe("TodoTool operations", () => {
@@ -558,6 +575,280 @@ describe("TodoTool lenient op recovery", () => {
 		if (summary?.type !== "text") throw new Error("Expected text summary");
 		expect(summary.text).toContain("Invalid todo arguments");
 		expect(summary.text).toContain("op");
+	});
+});
+describe("TodoTool verbatim item contract (issue #16279)", () => {
+	// Storage is verbatim: wrapped item forms (object items and their
+	// JSON-stringified shapes, which the validation entry produces) keep
+	// their literal content, so exact matching always works; the summary
+	// displays the unwrapped task text; targeting additionally accepts the
+	// unwrapped text, but only when exactly one candidate matches.
+	function summaryText(result: { content: Array<{ type: string; text?: string }> }): string {
+		return result.content.find(part => part.type === "text")?.text ?? "";
+	}
+
+	it("stores wrapped object items verbatim and displays the unwrapped text", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", {
+			op: "init",
+			items: [{ task: "Fix login bug" }, { description: "Add tests" }] as never,
+		});
+
+		expect(result.isError).toBeUndefined();
+		const tasks = result.details?.phases[0]?.tasks ?? [];
+		expect(tasks.map(task => task.content)).toEqual(['{"task":"Fix login bug"}', '{"description":"Add tests"}']);
+		const summary = summaryText(result);
+		expect(summary).toContain("Fix login bug");
+		expect(summary).toContain("Add tests");
+		expect(summary).not.toContain('{"task":');
+	});
+
+	it("matches a wrapped item by its unwrapped text and by its literal form", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-1", {
+			op: "init",
+			items: ['{"task":"Fix login bug","phase":"Work"}', '{"text":"Document the handler"}'] as never,
+		});
+
+		const byText = await tool.execute("call-2", { op: "done", task: "Fix login bug" });
+		expect(byText.isError).toBeUndefined();
+		const byLiteral = await tool.execute("call-3", { op: "done", task: '{"text":"Document the handler"}' });
+		expect(byLiteral.isError).toBeUndefined();
+		const tasks = byLiteral.details?.phases[0]?.tasks ?? [];
+		expect(tasks.map(task => task.status)).toEqual(["completed", "completed"]);
+	});
+
+	it("matches legacy JSON-string content by plain text without rewriting storage", async () => {
+		const session = createSession([
+			{
+				name: "Tasks",
+				tasks: [{ content: '{"task":"Fix login bug","phase":"Update omp"}', status: "pending" }],
+			},
+		]);
+		const tool = new TodoTool(session);
+
+		const result = await tool.execute("call-1", { op: "done", task: "Fix login bug" });
+		expect(result.isError).toBeUndefined();
+		const tasks = result.details?.phases[0]?.tasks ?? [];
+		expect(tasks[0]?.status).toBe("completed");
+		expect(tasks[0]?.content).toBe('{"task":"Fix login bug","phase":"Update omp"}');
+	});
+
+	it("never merges distinct tasks: an ambiguous unwrapped match errors", async () => {
+		const session = createSession([
+			{
+				name: "Tasks",
+				tasks: [
+					{ content: '{"task":"demo"}', status: "pending" },
+					{ content: '{"text":"demo"}', status: "pending" },
+				],
+			},
+		]);
+		const tool = new TodoTool(session);
+
+		const ambiguous = await tool.execute("call-1", { op: "done", task: "demo" });
+		expect(ambiguous.isError).toBe(true);
+		expect(summaryText(ambiguous)).toContain("matches multiple items");
+
+		const literal = await tool.execute("call-2", { op: "done", task: '{"task":"demo"}' });
+		expect(literal.isError).toBeUndefined();
+	});
+
+	it("rejects a wrapped form alongside its plain text as duplicates", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", {
+			op: "init",
+			items: ['{"task":"A"}', "A"] as never,
+		});
+
+		expect(result.isError).toBe(true);
+		expect(summaryText(result)).toContain("Duplicate task");
+	});
+
+	it("append rejects the unwrapped duplicate of a stored wrapped task", async () => {
+		const tool = new TodoTool(createSession());
+		await tool.execute("call-1", { op: "init", items: ['{"task":"A"}'] as never });
+
+		const asText = await tool.execute("call-2", { op: "append", phase: "Tasks", items: ["A"] });
+		expect(asText.isError).toBe(true);
+		expect(summaryText(asText)).toContain("already exists");
+
+		const asLiteral = await tool.execute("call-3", { op: "append", phase: "Tasks", items: ['{"task":"A"}'] });
+		expect(asLiteral.isError).toBe(true);
+	});
+
+	it("rejects JSON-object items with no task/content/description/text field", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", {
+			op: "init",
+			items: [{ foo: "bar" }] as never,
+		});
+
+		expect(result.isError).toBe(true);
+		expect(summaryText(result)).toContain("no task/content/description/text field");
+		const tasks = result.details?.phases[0]?.tasks ?? [];
+		expect(tasks).toHaveLength(0);
+	});
+
+	it("stores a task that merely starts with { verbatim", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", {
+			op: "init",
+			items: ["{TODO} rename handler", "plain task"],
+		});
+
+		expect(result.isError).toBeUndefined();
+		const tasks = result.details?.phases[0]?.tasks ?? [];
+		expect(tasks.map(task => task.content)).toEqual(["{TODO} rename handler", "plain task"]);
+
+		const done = await tool.execute("call-2", { op: "done", task: "{TODO} rename handler" });
+		expect(done.isError).toBeUndefined();
+	});
+
+	it("keeps wrapped items addressable when handed over by the live validation entry", async () => {
+		const tool = new TodoTool(createSession());
+		const toolSpec: Tool = { name: tool.name, description: "", parameters: tool.parameters as never };
+		const validated = validateToolArguments(toolSpec, {
+			type: "toolCall",
+			id: "call-1",
+			name: "todo",
+			arguments: { op: "init", items: [{ task: "Fix login bug" }, { description: "Add tests" }] },
+		});
+		const validatedItems =
+			validated !== null && typeof validated === "object" && "items" in validated ? validated.items : undefined;
+		expect(Array.isArray(validatedItems)).toBe(true);
+
+		const result = await tool.execute("call-1", validated as never);
+		expect(result.isError).toBeUndefined();
+		const tasks = result.details?.phases[0]?.tasks ?? [];
+		expect(tasks.map(task => task.content)).toEqual(['{"task":"Fix login bug"}', '{"description":"Add tests"}']);
+		expect(summaryText(result)).not.toContain('{"task":');
+
+		const done = await tool.execute("call-2", { op: "done", task: "Fix login bug" });
+		expect(done.isError).toBeUndefined();
+	});
+
+	it("returns wrapped content unchanged from the persisted-state load path", () => {
+		const entries = [
+			{
+				type: "custom",
+				customType: "user_todo_edit",
+				data: {
+					phases: [{ name: "Tasks", tasks: [{ content: '{"task":"Fix login bug"}', status: "pending" }] }],
+				},
+				id: "e1",
+				parentId: "p1",
+				timestamp: "2026-10-27T00:00:00.000Z",
+			},
+		] as never;
+		const loaded = getLatestTodoPhasesFromEntries(entries);
+		expect(loaded[0]?.tasks[0]?.content).toBe('{"task":"Fix login bug"}');
+	});
+	it("keeps a legacy wrapped form and its plain text distinct and both addressable", async () => {
+		const session = createSession([
+			{
+				name: "Tasks",
+				tasks: [
+					{ content: '{"task":"A"}', status: "pending" },
+					{ content: "A", status: "pending" },
+				],
+			},
+		]);
+		const tool = new TodoTool(session);
+
+		const byPlainText = await tool.execute("call-1", { op: "done", task: "A" });
+		expect(byPlainText.isError).toBeUndefined();
+		let tasks = byPlainText.details?.phases[0]?.tasks ?? [];
+		// The wrapped form is untouched as open work; the auto-advance pointer
+		// correctly moves to it as the only remaining pending task.
+		expect(tasks.map(task => task.status)).toEqual(["in_progress", "completed"]);
+
+		const byLiteral = await tool.execute("call-2", { op: "done", task: '{"task":"A"}' });
+		expect(byLiteral.isError).toBeUndefined();
+		tasks = byLiteral.details?.phases[0]?.tasks ?? [];
+		expect(tasks.map(task => task.status)).toEqual(["completed", "completed"]);
+	});
+});
+
+describe("TodoTool list-shape normalization", () => {
+	// Regression: GLM-5.3 opened a plan with a flat list of tasks and no phases,
+	// which the schema rejected as "list[0].phase must be a string (was missing)".
+	it("wraps a flat list of task objects into one default phase, stored verbatim", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", {
+			op: "init",
+			i: "Diagnosing the switch",
+			list: [{ task: "Read the implementation" }, { task: "Reproduce" }, "Report"],
+		} as never);
+
+		expect(result.isError).toBeUndefined();
+		expect(result.details?.phases.map(phase => phase.name)).toEqual(["Tasks"]);
+		const tasks = result.details?.phases[0]?.tasks ?? [];
+		expect(tasks.map(task => task.content)).toEqual([
+			'{"task":"Read the implementation"}',
+			'{"task":"Reproduce"}',
+			"Report",
+		]);
+
+		const done = await tool.execute("call-2", { op: "done", task: "Reproduce" });
+		expect(done.isError).toBeUndefined();
+	});
+
+	it("accepts tasks as an alias of items in a phase entry, stored verbatim", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", {
+			op: "init",
+			list: [{ phase: "Diagnose", tasks: ["Read", { task: "Reproduce" }] }],
+		} as never);
+
+		expect(result.isError).toBeUndefined();
+		expect(result.details?.phases[0]?.name).toBe("Diagnose");
+		const tasks = result.details?.phases[0]?.tasks ?? [];
+		expect(tasks.map(task => task.content)).toEqual(["Read", '{"task":"Reproduce"}']);
+
+		const done = await tool.execute("call-2", { op: "done", task: "Reproduce" });
+		expect(done.isError).toBeUndefined();
+	});
+
+	it("normalizes a flat list handed over by the agent loop's lenient validation", async () => {
+		const tool = new TodoTool(createSession());
+		const validated = validateAgentToolArguments(tool as never, {
+			type: "toolCall",
+			id: "call-1",
+			name: "todo",
+			arguments: { op: "init", list: [{ task: "First" }, { task: "Second" }] },
+		});
+
+		const result = await tool.execute("call-1", validated as never);
+		expect(result.isError).toBeUndefined();
+		const tasks = result.details?.phases[0]?.tasks ?? [];
+		expect(tasks.map(task => task.content)).toEqual(['{"task":"First"}', '{"task":"Second"}']);
+
+		const done = await tool.execute("call-2", { op: "done", task: "First" });
+		expect(done.isError).toBeUndefined();
+	});
+
+	it("still rejects a list mixing phases and bare tasks", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", {
+			op: "init",
+			list: [{ phase: "Work", items: ["A"] }, { task: "stray" }],
+		} as never);
+
+		const summary = result.content.find(block => block.type === "text");
+		expect(summary?.type === "text" && summary.text).toContain("Invalid todo arguments");
+	});
+
+	it("still rejects a flat list of unknown-key objects", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", {
+			op: "init",
+			list: [{ foo: "bar" }],
+		} as never);
+
+		expect(result.isError).toBe(true);
+		const tasks = result.details?.phases[0]?.tasks ?? [];
+		expect(tasks).toHaveLength(0);
 	});
 });
 
