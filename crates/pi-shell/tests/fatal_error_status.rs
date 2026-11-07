@@ -1,7 +1,8 @@
 //! The status a shell exits with after a fatal error depends on where the
 //! error is caught (bash's `top_level` jumps), not on an `exit` status: every
-//! row is the output and exit status of Bash 5.2.21 and 5.3.0 for the same
-//! `-c` string (they agree on all of them), run here through `Shell::run`.
+//! row is the output and exit status of Bash 5.3.0 for the same `-c` string,
+//! run here through `Shell::run`. Bash 5.2.21 agrees except on `${ ;}`,
+//! which it cannot parse.
 #![cfg(unix)]
 
 use pi_shell::{
@@ -46,6 +47,9 @@ async fn check(rows: &[(&str, &str, i32)]) {
 async fn fatal_error_in_exit_trap_exits_with_the_saved_status() {
 	check(&[
 		(r##"( trap ': ${nope?boom}' EXIT; exit 4 ); echo "S:$?""##, "S:4\n", 0),
+		(r##"x=$( trap ': ${nope?boom}' EXIT; exit 4 ); echo "S:$?""##, "S:4\n", 0),
+		(r##"( trap 'set -u; : $nope' EXIT; exit 4 ); echo "S:$?""##, "S:4\n", 0),
+		(r##"( trap ': ${nope?boom}' EXIT; exit 4 ) | cat; echo "S:${PIPESTATUS[0]}""##, "S:4\n", 0),
 		(r##"x=$( trap 'set -u; : $nope' EXIT; exit 4 ); echo "S:$?""##, "S:4\n", 0),
 		(
 			r##"{ trap ': ${nope:?boom}' EXIT; exit 4; } | cat; echo "S:${PIPESTATUS[0]}""##,
@@ -723,6 +727,21 @@ async fn an_arithmetic_for_header_leaves_the_status_alone() {
 		// failed header expression.
 		(r##"(exit 5); for ((i=0;i<0;i++)); do :; done; echo A:$?"##, "A:0\n", 0),
 		(r##"(exit 5); for ((i=0;i<1;i++)); do break; done; echo A:$?"##, "A:0\n", 0),
+		(
+			r##"set -o posix; (exit 5); for ((i=$(echo 0); i<1; i++)); do echo "I:$?"; done; echo A:$?"##,
+			"I:5\nA:0\n",
+			0,
+		),
+		(
+			r##"(exit 5); for ((i=$(echo 0); i<1; i++)); do echo "I:$?"; done; echo A:$?"##,
+			"I:0\nA:0\n",
+			0,
+		),
+		(
+			r##"(exit 5); for ((i=0; i<$(echo 1); i++)); do echo "I:$?"; done; echo A:$?"##,
+			"I:0\nA:0\n",
+			0,
+		),
 		(r##"(exit 5); for ((i=0; 1/0; i++)); do :; done; echo A:$?"##, "A:1\n", 0),
 		// The status an EXIT action's fatal error answers with.
 		(
@@ -734,6 +753,140 @@ async fn an_arithmetic_for_header_leaves_the_status_alone() {
 			r##"readonly __r=1; set -e; trap 'for ((j=0;j<1;j++)); do echo "I:$?"; __r=2; done' EXIT; exit 7"##,
 			"I:7\n",
 			1,
+		),
+	])
+	.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nofork_discard_resumes_the_enclosing_command_and_restores_its_state() {
+	check(&[
+		(
+			r##"x=${ echo BEFORE; : ${a.b}; echo BAD; }; echo "AFTER:$? <$x>""##,
+			"AFTER:1 <BEFORE>\n",
+			0,
+		),
+		(
+			r##"v=outer; x=${ local v=inner; echo "$v"; : ${a.b}; }; echo "AFTER:$? <$x> <$v>""##,
+			"AFTER:1 <inner> <outer>\n",
+			0,
+		),
+		(
+			r##"REPLY=outer; x=${| REPLY=inner; : ${a.b}; }; echo "AFTER:$? <$x> <$REPLY>""##,
+			"AFTER:1 <inner> <outer>\n",
+			0,
+		),
+		(
+			r##"x=${ exec >/dev/null; : ${a.b}; }; echo "AFTER:$? <$x>""##,
+			"AFTER:1 <>\n",
+			0,
+		),
+	])
+	.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nofork_fatal_expansion_does_not_become_errexit_without_inheritance() {
+	check(&[
+		(r##"set -e; x=${ : ${review_missing?BOOM}; }; echo AFTER:$?"##, "", 127),
+		(r##"set -e; set -u; x=${ : $review_missing; }; echo AFTER:$?"##, "", 127),
+	])
+	.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nofork_assignment_arithmetic_errors_are_not_caught_as_discards() {
+	check(&[
+		(r##"x=${ echo BEFORE; declare "A[bad!]=3"; }; echo "AFTER:$? <$x>""##, "", 1),
+		(r##"x=${ echo BEFORE; ((A[1/0]=3)); }; echo "AFTER:$? <$x>""##, "", 1),
+		(r##"declare "A[bad!]=3"; echo AFTER:$?"##, "", 1),
+		(r##"((A[1/0]=3)); echo AFTER:$?"##, "", 1),
+		(r##"eval '((A[1/0]=3))'; echo BAD:$?"##, "", 1),
+		(r##". /dev/stdin <<<'((A[1/0]=3))'; echo BAD:$?"##, "", 1),
+	])
+	.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nofork_inherits_errexit_only_when_the_command_substitution_options_require_it() {
+	check(&[
+		(
+			r##"set -e; shopt -s inherit_errexit; x=${ false; echo AFTER_FALSE; }; echo "DONE:$? <$x>""##,
+			"",
+			1,
+		),
+		(
+			r##"set -o posix; set -e; x=${ false; echo AFTER_FALSE; }; echo "DONE:$? <$x>""##,
+			"",
+			1,
+		),
+		(
+			r##"set -e; x=${ false; echo AFTER_FALSE; }; echo "DONE:$? <$x>""##,
+			"DONE:0 <AFTER_FALSE>\n",
+			0,
+		),
+		(
+			r##"set -e; shopt -s inherit_errexit; x=$( false; echo AFTER_FALSE; ); echo "DONE:$? <$x>""##,
+			"",
+			1,
+		),
+		(
+			r##"set -e; x=$( false; echo AFTER_FALSE; ); echo "DONE:$? <$x>""##,
+			"DONE:0 <AFTER_FALSE>\n",
+			0,
+		),
+		(r##"eval ': ${a.b}'; echo AFTER:$?"##, "AFTER:1\n", 0),
+		(r##"set -e; false; echo BAD"##, "", 1),
+	])
+	.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn async_simple_command_runs_debug_in_the_parent_before_forking() {
+	check(&[
+		(
+			r##"trap 'trap "echo TRAP:$?" ERR; trap - DEBUG' DEBUG; false & wait $!; echo AFTER:$?"##,
+			"TRAP:0\nAFTER:1\n",
+			0,
+		),
+		(
+			r##"trap 'trap "echo TRAP:$?" ERR; trap - DEBUG' DEBUG; false &
+wait $!
+echo AFTER:$?"##,
+			"TRAP:0\nAFTER:1\n",
+			0,
+		),
+		(
+			r##"trap 'trap "echo TRAP:$?" ERR; trap - DEBUG' DEBUG; /bin/false & wait $!; echo AFTER:$?"##,
+			"TRAP:0\nAFTER:1\n",
+			0,
+		),
+		(
+			r##"trap 'trap "echo TRAP:$?" ERR; trap - DEBUG' DEBUG; false & wait $!; false; echo AFTER:$?"##,
+			"TRAP:0\nTRAP:0\nAFTER:1\n",
+			0,
+		),
+		(
+			r##"trap 'trap "echo TRAP:$?" ERR' DEBUG; false & wait $!; echo AFTER:$?"##,
+			"TRAP:0\nAFTER:1\n",
+			0,
+		),
+		(
+			r##"trap 'trap '\''echo TRAP:$?'\'' ERR; trap - DEBUG' DEBUG
+false & wait $!
+echo AFTER:$?"##,
+			"TRAP:1\nAFTER:1\n",
+			0,
+		),
+		(
+			r##"shopt -s extdebug; trap '[[ $BASH_COMMAND != false ]]' DEBUG; false & echo "BG:${!:-none}""##,
+			"BG:none\n",
+			0,
+		),
+		(
+			r##"set -T; trap 'echo "D:$BASH_COMMAND"' DEBUG; false & wait $!; :"##,
+			"D:false\nD:wait $!\nD::\n",
+			0,
 		),
 	])
 	.await;
