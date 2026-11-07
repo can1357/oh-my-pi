@@ -203,40 +203,43 @@ describe("ptree signal abort handling", () => {
 		}
 	});
 
-	it.skipIf(process.platform === "win32")("keeps abort armed across the root's exit while a read is open", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-abort-open-read-"));
-		const pidFile = path.join(dir, "pid");
-		const controller = new AbortController();
-		// The root exits cleanly once its stdin closes; its descendant keeps stdout and stderr open, so no
-		// later pipe event re-arms the signal after the root's exit.
-		using child = spawn(["/bin/sh", "-c", `${BLOCK_FOREVER} & echo $! > '${pidFile}'; read _ || :`], {
-			detached: true,
-			signal: controller.signal,
-			stdin: "pipe",
-		});
-		let orphan: Process | null = null;
-		let outcome: Promise<ExecResult> | undefined;
-		try {
-			// The read is open before the root exits, so the abort listener must stay attached through that exit.
-			outcome = child.wait({ allowAbort: true });
-			child.stdin.end();
-			expect(await child.exited).toBe(0);
-			orphan = Process.fromPid(Number.parseInt(await Bun.file(pidFile).text(), 10));
-			if (!orphan) throw new Error("the fixture must expose its pipe-holding descendant");
+	it.skipIf(process.platform === "win32")(
+		"keeps abort armed across the root's exit while a read is open",
+		async () => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-abort-open-read-"));
+			const pidFile = path.join(dir, "pid");
+			const controller = new AbortController();
+			// The root exits cleanly once its stdin closes; its descendant keeps stdout and stderr open, so no
+			// later pipe event re-arms the signal after the root's exit.
+			using child = spawn(["/bin/sh", "-c", `${BLOCK_FOREVER} & echo $! > '${pidFile}'; read _ || :`], {
+				detached: true,
+				signal: controller.signal,
+				stdin: "pipe",
+			});
+			let orphan: Process | null = null;
+			let outcome: Promise<ExecResult> | undefined;
+			try {
+				// The read is open before the root exits, so the abort listener must stay attached through that exit.
+				outcome = child.wait({ allowAbort: true });
+				child.stdin.end();
+				expect(await child.exited).toBe(0);
+				orphan = Process.fromPid(Number.parseInt(await Bun.file(pidFile).text(), 10));
+				if (!orphan) throw new Error("the fixture must expose its pipe-holding descendant");
 
-			controller.abort("abort while a read is open");
-			expect(child.exitReason).toBeInstanceOf(AbortError);
+				controller.abort("abort while a read is open");
+				expect(child.exitReason).toBeInstanceOf(AbortError);
 
-			const result = await outcome;
-			expect(result.exitError).toBeInstanceOf(AbortError);
-			expect(await orphan.waitForExit(), "the detached descendant must be terminated").toBe(true);
-		} finally {
-			if (orphan) {
-				orphan.killTree(9);
-				await orphan.waitForExit();
+				const result = await outcome;
+				expect(result.exitError).toBeInstanceOf(AbortError);
+				expect(await orphan.waitForExit(), "the detached descendant must be terminated").toBe(true);
+			} finally {
+				if (orphan) {
+					orphan.killTree(9);
+					await orphan.waitForExit();
+				}
+				await outcome?.catch(() => {});
+				await fs.rm(dir, { recursive: true, force: true });
 			}
-			await outcome?.catch(() => {});
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
+		},
+	);
 });
