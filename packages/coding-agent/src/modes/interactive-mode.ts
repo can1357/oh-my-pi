@@ -8249,7 +8249,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async shutdown(options?: { skipBeforeShutdown?: boolean }): Promise<void> {
-		if (this.#isShuttingDown || this.isAwaitingShutdown) return;
+		if (this.#isShuttingDown) return;
+		if (this.isAwaitingShutdown) {
+			// Fatal/no-hook shutdown supersedes the prompt; its existing owner
+			// continues teardown once the aborted dispatch settles.
+			if (options?.skipBeforeShutdown) this.bypassBeforeShutdown();
+			return;
+		}
 		if (this.session.isDisposed && !this.#teardownFailed) return;
 		// The previous graceful teardown failed AT the memoized session.dispose()
 		// (the session is already disposing), so it re-rejects identically forever

@@ -245,6 +245,28 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		late.resolve({ cancel: true });
 	});
 
+	it("lets fatal shutdown supersede a pending gate and ignore its late cancellation", async () => {
+		const entered = Promise.withResolvers<AbortSignal>();
+		const late = Promise.withResolvers<SessionBeforeShutdownResult>();
+		beforeShutdown = async event => {
+			entered.resolve(event.signal);
+			return late.promise;
+		};
+		const quitting = mode.shutdown();
+		const signal = await entered.promise;
+		await mode.shutdown({ skipBeforeShutdown: true });
+		expect(signal.aborted).toBe(true);
+		await mode.shutdown({ skipBeforeShutdown: true });
+		await quitting;
+		expect(attempts).toBe(1);
+		expect(laterHandlers).toBe(0);
+		expect(session.isDisposed).toBe(true);
+		late.resolve({ cancel: true });
+		await Promise.resolve();
+		expect(shutdownEvents).toBe(1);
+		expect(postmortem.quit).toHaveBeenCalledTimes(1);
+	});
+
 	it("does not prompt for extension-requested shutdown", async () => {
 		mode.requestShutdown();
 		await quitCalled.promise;

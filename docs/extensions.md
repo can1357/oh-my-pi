@@ -547,6 +547,10 @@ Ctrl+C. Focusing a subagent's transcript does not change which session receives
 the event. Restart, OS signals, fatal errors, extension-requested shutdown
 (`ctx.shutdown()`), and print/JSON/RPC/SDK/subagent disposal do not emit it.
 
+Fatal/no-hook shutdown that arrives during an operator's pending quit aborts
+that gate and continues normal teardown. The hook cannot veto that independent
+shutdown, and a late cancellation result is ignored.
+
 Handlers run sequentially. The first `{ cancel: true }` stops dispatch and
 leaves the session open; a later quit attempt emits again. Errors and timeouts
 are reported but do not veto quitting. Overlapping quit requests do not emit
