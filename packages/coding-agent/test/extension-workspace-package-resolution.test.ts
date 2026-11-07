@@ -59,6 +59,36 @@ test("bare workspace-member imports resolve through the workspace root manifest"
 	expect(rewritten).toContain("/packages/contracts/src/index.ts");
 });
 
+test("workspace members declared only in pnpm-workspace.yaml resolve like package.json workspaces", async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-workspace-pnpm-"));
+	tempRoots.push(root);
+	const repoRoot = path.join(root, "monorepo-plugin");
+	const importer = path.join(repoRoot, "packages", "extension", "entry.ts");
+	const memberRoot = path.join(repoRoot, "packages", "contracts");
+	await fs.mkdir(path.dirname(importer), { recursive: true });
+	await fs.mkdir(path.join(memberRoot, "src"), { recursive: true });
+	await Bun.write(importer, "export {};\n");
+	await writeJson(path.join(repoRoot, "package.json"), { name: "monorepo-plugin", version: "1.0.0" });
+	await Bun.write(path.join(repoRoot, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n");
+	await writeJson(path.join(memberRoot, "package.json"), {
+		name: "@monorepo/contracts",
+		version: "1.0.0",
+		exports: { ".": "./src/index.ts" },
+	});
+	await Bun.write(path.join(memberRoot, "src", "index.ts"), "export const marker = 1;\n");
+
+	spyOn(Bun, "resolveSync").mockImplementation(() => {
+		throw new Error("compiled fallback");
+	});
+
+	const rewritten = await __rewriteLegacyExtensionSourceForTests(
+		'import { marker } from "@monorepo/contracts";',
+		importer,
+	);
+
+	expect(rewritten).toContain("/packages/contracts/src/index.ts");
+});
+
 test("installed node_modules copies shadow workspace members at the same level", async () => {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-workspace-shadow-"));
 	tempRoots.push(root);

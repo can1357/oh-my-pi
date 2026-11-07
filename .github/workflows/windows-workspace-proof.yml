@@ -1,0 +1,34 @@
+name: Windows workspace dependency proof
+
+on:
+   push:
+      branches: [proof/worker-workspace-windows-20261026]
+   workflow_dispatch:
+
+permissions:
+   contents: read
+
+concurrency:
+   group: windows-workspace-proof-${{ github.ref }}
+   cancel-in-progress: false
+
+jobs:
+   workspace_consumers:
+      name: Native Windows workspace and launcher consumers
+      runs-on: windows-2025
+      timeout-minutes: 10
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: 1.4.4
+         - name: Record exact candidate and native runtime
+           shell: pwsh
+           run: |
+              git rev-parse HEAD
+              bun --version
+              $PSVersionTable.PSVersion
+              & "$env:ProgramFiles\Git\bin\bash.exe" --version
+         - name: Exercise real junction startup and generated launchers
+           shell: pwsh
+           run: bun test packages/coding-agent/test/task/workspace-dependencies.windows.test.ts
