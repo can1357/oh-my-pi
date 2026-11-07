@@ -1072,9 +1072,11 @@ function findComposition(measures: readonly TableColumn[], rows: readonly number
 		};
 		const expanded = new Map([...sums.keys()].map(index => [index, leaves(index)]));
 		if ([...expanded.values()].some(parts => parts === undefined)) return undefined;
+		// Acyclic now, so some whole is nobody's part.
 		const nested = new Set([...sums.values()].flatMap(parts => parts.map(part => part.index)));
-		const roots = [...sums.keys()].filter(index => !nested.has(index));
-		const root = roots.sort((a, b) => expanded.get(b)!.length - expanded.get(a)!.length)[0] ?? [...sums.keys()][0]!;
+		const root = [...sums.keys()]
+			.filter(index => !nested.has(index))
+			.sort((a, b) => expanded.get(b)!.length - expanded.get(a)!.length)[0]!;
 		return { whole: root, parts: expanded.get(root)!.sort((a, b) => a - b), exact: true };
 	}
 	const whole = pool.find(column => WHOLE_HEADER.test(column.header));
