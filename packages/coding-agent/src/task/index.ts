@@ -25,7 +25,7 @@ import type {
 	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { $env, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { $env, hasFsCode, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Settings } from "../config/settings";
@@ -60,6 +60,13 @@ import { InternalUrlRouter } from "../internal-urls/router";
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
+import {
+	approvedTaskFile,
+	bindTaskFileApproval,
+	taskFileApprovalPath,
+	taskFileMatchesApproval,
+	taskFileRestrictionPaths,
+} from "./file-approval";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
@@ -408,6 +415,12 @@ interface SpawnParams extends TaskParams {
 	taskFileSha256?: string;
 }
 
+function submittedTaskFiles(args: unknown): string[] {
+	if (!isRecord(args)) return [];
+	const items = Array.isArray(args.tasks) ? args.tasks : [args];
+	return items.flatMap(item => (isRecord(item) && typeof item.taskFile === "string" ? [item.taskFile] : []));
+}
+
 /** The filesystem path a `taskFile` names; approval and dispatch share it so both see the same file. */
 function taskFilePath(session: ToolSession, taskFile: string): string | undefined {
 	return taskFile.startsWith("local://")
@@ -415,15 +428,27 @@ function taskFilePath(session: ToolSession, taskFile: string): string | undefine
 		: taskFile;
 }
 
-async function resolveTaskFile(session: ToolSession, item: TaskItem): Promise<ResolvedTaskItem> {
+async function resolveTaskFile(owner: object, session: ToolSession, item: TaskItem): Promise<ResolvedTaskItem> {
 	if (item.taskFile === undefined) return item;
 	try {
-		const filePath = taskFilePath(session, item.taskFile);
+		const approved = approvedTaskFile(owner, item.taskFile);
+		const filePath = approved?.path ?? taskFilePath(session, item.taskFile);
 		if (filePath === undefined) throw new Error("does not resolve to a local file");
 		// On POSIX, a non-blocking open lets fstat reject a FIFO without waiting for a writer.
-		const file = await fs.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+		const file = await fs
+			.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | (approved ? fs.constants.O_NOFOLLOW : 0))
+			.catch(error => {
+				if (approved && (hasFsCode(error, "ELOOP") || hasFsCode(error, "ENOENT") || hasFsCode(error, "ENOTDIR"))) {
+					throw new Error("changed after approval; retry the call");
+				}
+				throw error;
+			});
 		try {
-			if (!(await file.stat()).isFile()) throw new Error("must resolve to a regular file");
+			const stat = await file.stat({ bigint: true });
+			if (approved && !taskFileMatchesApproval(stat, approved)) {
+				throw new Error("changed after approval; retry the call");
+			}
+			if (!stat.isFile()) throw new Error("must resolve to a regular file");
 			const bytes = await Bun.file(file.fd)
 				.slice(0, MAX_TASK_FILE_BYTES + 1)
 				.bytes();
@@ -714,18 +739,24 @@ export async function refreshAgentDiscovery(cwd: string, extensionRoots?: Effect
 export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetails, Theme> {
 	readonly name = "task";
 	readonly approval = "exec" as const;
+	readonly bindApprovalTargets = (args: unknown): void => {
+		bindTaskFileApproval(this, submittedTaskFiles(args), taskFile => taskFilePath(this.session, taskFile));
+	};
 	// Restricted folders cover task files, but approvals are never remembered per file: the grant would
 	// cover whatever the path holds later, and inline items in the same batch.
 	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
-		if (!isRecord(args)) return undefined;
-		const items = Array.isArray(args.tasks) ? args.tasks : [args];
-		return items.flatMap(item =>
-			isRecord(item) && typeof item.taskFile === "string" ? (taskFilePath(this.session, item.taskFile) ?? []) : [],
-		);
+		return taskFileRestrictionPaths(this, submittedTaskFiles(args), taskFile => taskFilePath(this.session, taskFile));
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<TaskParams>;
 		const lines: string[] = [];
+		const formatTaskFile = (taskFile: string): string => {
+			const submitted = truncateForPrompt(sanitizeText(JSON.stringify(taskFile)));
+			const target = taskFileApprovalPath(this, taskFile);
+			return target !== undefined && target !== taskFile
+				? `${submitted} -> ${truncateForPrompt(sanitizeText(JSON.stringify(target)))}`
+				: submitted;
+		};
 		if (typeof params.agent === "string") {
 			lines.push(`Agent: ${truncateForPrompt(params.agent)}`);
 		}
@@ -739,7 +770,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			lines.push(`Task:\n${truncateForPrompt(params.task)}`);
 		}
 		if (typeof params.taskFile === "string") {
-			lines.push(`Task file: ${truncateForPrompt(sanitizeText(JSON.stringify(params.taskFile)))}`);
+			lines.push(`Task file: ${formatTaskFile(params.taskFile)}`);
 		}
 		if (typeof params.context === "string" && params.context.trim()) {
 			lines.push(`Context:\n${truncateForPrompt(params.context)}`);
@@ -777,7 +808,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					lines.push(`Task ${index + 1} model: ${truncateForPrompt(item.model)}`);
 				}
 				if (isRecord(item) && typeof item.taskFile === "string") {
-					lines.push(`Task ${index + 1} file: ${truncateForPrompt(sanitizeText(JSON.stringify(item.taskFile)))}`);
+					lines.push(`Task ${index + 1} file: ${formatTaskFile(item.taskFile)}`);
 				}
 			}
 			if (tasks.length > 1) {
@@ -1145,7 +1176,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const { params } = plan;
 		const spawnItems: ResolvedTaskItem[] = [];
 		try {
-			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this.session, item));
+			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this, this.session, item));
 		} catch (error) {
 			return createTaskModeError(error instanceof Error ? error.message : String(error));
 		}

@@ -76,6 +76,7 @@ import {
 	cfgBashInterceptorPatterns,
 	cfgBashPatterns,
 } from "../exec/settings";
+import { cfgDisplayShellVisualization } from "../modes/settings";
 import { cfgSkillful } from "../session/settings";
 import { cfgWorktreeClone, ovnfsCommand } from "../task/settings";
 import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
@@ -1072,10 +1073,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onPreview: text => {
 							void report(text, { output: text, async: { state: "running", jobId, type: "bash" } });
 						},
-						onTrace: trace => {
-							liveTrace = trace;
-							void report(latestText, { output: latestText, async: { state: "running", jobId, type: "bash" } });
-						},
+						onTrace: cfgDisplayShellVisualization.get(this.session.settings)
+							? trace => {
+									liveTrace = trace;
+									void report(latestText, {
+										output: latestText,
+										async: { state: "running", jobId, type: "bash" },
+									});
+								}
+							: undefined,
 						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 						streams,
 						onStart: probe => {
@@ -1163,6 +1169,32 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 	async execute(
 		toolCallId: string,
+		input: BashToolInput,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
+		ctx?: AgentToolContext,
+	): Promise<AgentToolResult<BashToolDetails>> {
+		// The directory the command actually ran in, set once resolved. A hoisted
+		// `cd <dir>; …` runs only the remainder, so renderers drawing the executed
+		// script read the directory from here instead of re-parsing the command.
+		const ran: { cwd?: string; cdSeparator?: ";" } = {};
+		const stamp = (details: BashToolDetails | undefined): BashToolDetails | undefined =>
+			ran.cwd === undefined
+				? details
+				: { ...details, cwd: ran.cwd, ...(ran.cdSeparator ? { cdSeparator: ran.cdSeparator } : {}) };
+		const result = await this.#execute(
+			toolCallId,
+			input,
+			ran,
+			signal,
+			onUpdate && (update => onUpdate({ ...update, details: stamp(update.details) })),
+			ctx,
+		);
+		return { ...result, details: stamp(result.details) };
+	}
+
+	async #execute(
+		toolCallId: string,
 		{
 			command: rawCommand,
 			timeout: rawTimeout,
@@ -1172,6 +1204,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			async: rawAsync,
 			pty,
 		}: BashToolInput,
+		ran: { cwd?: string; cdSeparator?: ";" },
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
 		ctx?: AgentToolContext,
@@ -1183,16 +1216,25 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const sessionId = this.session.getSessionId?.() ?? undefined;
 		const sessionEnv = this.#sessionEnv(toolCallId);
 
-		// Extract a leading `cd <path> && ...` into cwd when the model ignores the
-		// cwd parameter. The scanner captures only a single path token and defers
-		// to the shell for anything else (redirects, extra args, shell expansion),
-		// so it never absorbs shell syntax like `cd /tmp 2>/dev/null && ...` into
-		// the structured cwd. Constrained to a top-level `&&` on the first line.
+		// Extract a leading `cd <path> && ...` / `cd <path>; ...` into cwd when the
+		// model ignores the cwd parameter. The scanner captures only a single path
+		// token and defers to the shell for anything else (redirects, extra args,
+		// shell expansion), so it never absorbs shell syntax like
+		// `cd /tmp 2>/dev/null && ...` into the structured cwd. `&&` always hoists:
+		// a missing directory fails early, as the shell would short-circuit. `;`
+		// runs the rest even when `cd` fails, so it hoists only onto an existing host
+		// directory; anything else (URL targets included) stays with the shell.
 		if (!cwd) {
 			const cd = extractLeadingCdTarget(command);
-			if (cd) {
+			const hoist =
+				cd?.separator === "&&" ||
+				(cd?.separator === ";" &&
+					!InternalUrlRouter.instance().canHandle(cd.path) &&
+					(await fs.promises.stat(resolveToCwd(cd.path, this.session.cwd)).catch(() => null))?.isDirectory());
+			if (cd && hoist) {
 				cwd = cd.path;
 				command = cd.rest;
+				if (cd.separator === ";") ran.cdSeparator = ";";
 			}
 		}
 		// Mode selection runs on normalized fields: a caller that materializes
@@ -1242,6 +1284,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const router = InternalUrlRouter.instance();
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
 		const commandCwd = virtualCwd ?? (cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd);
+		if (cwd) ran.cwd = commandCwd;
 		if (virtualCwd !== undefined) {
 			if (name !== undefined || canUseInteractiveBashPty(pty === true, ctx)) {
 				throw new ToolError(
@@ -1818,12 +1861,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 								emitFrame();
 							}
 						: undefined,
-					onTrace: emitFrame
-						? next => {
-								trace = next;
-								emitFrame();
-							}
-						: undefined,
+					onTrace:
+						emitFrame && cfgDisplayShellVisualization.get(this.session.settings)
+							? next => {
+									trace = next;
+									emitFrame();
+								}
+							: undefined,
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 					onSessionShellBusy: () => pendingNotices.push(SESSION_SHELL_BUSY_NOTICE),
 				});
