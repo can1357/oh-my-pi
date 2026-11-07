@@ -9,6 +9,7 @@
 - Cursor Shell results no longer end with `Timeout clamped to 3600s (requested 86400s; …)`: Cursor's 24 h `hard_timeout` is capped at the bash tool's 3600 s ceiling before it reaches the tool ([#18433](https://github.com/can1357/oh-my-pi/pull/18433) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 - A 429 or 402 worded like a context overflow (Bedrock's "429 Too many tokens, please wait…") is treated as a rate limit, so it retries and walks the fallback chain instead of compacting ([#18345](https://github.com/can1357/oh-my-pi/pull/18345) by [@nick-maderight](https://github.com/nick-maderight))
 - `auth-gateway stdio` and `serve` no longer reject credentialless Apple on-device models ([#18370](https://github.com/can1357/oh-my-pi/issues/18370))
+- Fixed a tool call whose arguments were one complete JSON object followed by stray closing braces or brackets (e.g. `{"a":1}}`) being rejected as unparseable; the first object is now used, while trailing content still keeps the rejection and tells the model to resend exactly one JSON object ([#16644](https://github.com/can1357/oh-my-pi/pull/16644) by [@Komzpa](https://github.com/Komzpa))
 
 ## [18.17.0] - 2026-11-06
 
@@ -229,7 +230,6 @@
 
 ### Fixed
 
-- Fixed a tool call whose arguments were one complete JSON object followed by stray closing braces or brackets (e.g. `{"a":1}}`) being rejected as unparseable; the first object is now used, while trailing content still keeps the rejection and tells the model to resend exactly one JSON object ([#16644](https://github.com/can1357/oh-my-pi/pull/16644) by [@Komzpa](https://github.com/Komzpa))
 - Fixed every OpenAI Codex request failing with HTTP 404 `{"detail":"Not Found"}` on personal ChatGPT accounts whose token is not region-pinned ([#16493](https://github.com/can1357/oh-my-pi/issues/16493))
 
 ## [18.12.4] - 2026-10-20
