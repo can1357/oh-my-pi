@@ -201,6 +201,11 @@ export interface DeferredDiagnosticsEntry {
 	/** True when any message is error severity. */
 	errored: boolean;
 	/**
+	 * Servers that sent no report for this file: it was never checked, so the
+	 * entry must not be read as a clean one (#15408).
+	 */
+	unreported?: string[];
+	/**
 	 * Evaluated at injection time (in the dispatcher's stale check): drop the entry
 	 * when a newer mutation to the same file has superseded it, so the model never
 	 * sees diagnostics for stale content.

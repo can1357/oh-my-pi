@@ -42,7 +42,7 @@ import {
 	rootToggleExpanded,
 } from "../native/node";
 import { plainLine, plainText } from "../native/spans";
-import { diagnosticsSection, displayPath, resultText, toolHead } from "../tools/native-view";
+import { diagnosticsBadge, diagnosticsSection, displayPath, resultText, toolHead } from "../tools/native-view";
 import type { FileDiagnosticsResult } from "../tools/lsp";
 import { NativeImageCache, readMediaPath, shownMedia } from "../native/blobs";
 import { imageLinksEnabled, linkedImageText } from "../prompt/image-references";
@@ -1373,16 +1373,13 @@ export class ToolExecutionComponent extends Container {
 		const files = this.#lateDiagnostics;
 		if (!files || files.length === 0) return {};
 		const sections = files.map(file => diagnosticsSection(file)).filter((n): n is NativeNode => n !== undefined);
-		const count = files.reduce((sum, file) => sum + file.messages.length, 0);
-		const errored = files.some(file => file.errored);
 		const section =
 			sections.length === 1
 				? sections[0]
 				: node("col", { gap: "sm", role: "omp.tool.diagnostics" }, sections, "late");
-		return {
-			section,
-			chip: { text: count === 1 ? "1 diagnostic" : `${count} diagnostics`, tone: errored ? "error" : "warning" },
-		};
+		// The availability-aware badge: a file some server never reported on must not
+		// count as a clean zero, so an unverified report gets its own chip (#15408).
+		return { section, chip: diagnosticsBadge(files) ?? { text: "0 diagnostics", tone: "warning" } };
 	}
 
 	/**

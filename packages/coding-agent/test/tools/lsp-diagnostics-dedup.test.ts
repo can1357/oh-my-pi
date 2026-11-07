@@ -18,13 +18,14 @@ const NEW_ERROR =
 
 function makeDiagnostics(
 	messages: string[],
-	options: { summary?: string; errored?: boolean; server?: string } = {},
+	options: { summary?: string; errored?: boolean; server?: string; unreported?: string[] } = {},
 ): FileDiagnosticsResult {
 	return {
 		server: options.server ?? "pyright",
 		messages,
 		summary: options.summary ?? (messages.length === 0 ? "OK" : `${messages.length} diagnostic(s)`),
 		errored: options.errored ?? messages.some(message => message.includes("[error]")),
+		unreported: options.unreported,
 	};
 }
 
@@ -48,6 +49,27 @@ describe("DiagnosticsLedger", () => {
 		expect(reduced.messages).toEqual([]);
 		expect(reduced.summary).toBe("no issues");
 		expect(reduced.errored).toBe(false);
+	});
+
+	// A file whose server published no verdict is not a clean file. The
+	// reduction recomputes the summary from the fresh findings alone, so the
+	// unverified status has to be recomposed with it — otherwise the file comes
+	// back as "no issues" once its repeated finding was deduplicated away
+	// (issue #15408).
+	it("keeps the unverified status after the reduction drops a repeated finding", () => {
+		const ledger = new DiagnosticsLedger();
+		const reported = makeDiagnostics([TYPE_ERROR], {
+			summary: "1 error(s); no diagnostics report yet from silent-lsp",
+			errored: true,
+			unreported: ["silent-lsp"],
+		});
+		ledger.reduce(FILE_A, reported);
+
+		const reduced = ledger.reduce(FILE_A, reported);
+
+		expect(reduced.messages).toEqual([]);
+		expect(reduced.summary).toBe("no diagnostics report yet from silent-lsp");
+		expect(reduced.unreported).toEqual(["silent-lsp"]);
 	});
 
 	it("returns only genuinely new messages and recomputes summary state", () => {
