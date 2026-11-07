@@ -173,13 +173,28 @@ interface ProviderStateDocument {
 	transitions: ProviderAvailabilityTransition[];
 }
 
-function readDocument(): ProviderStateDocument {
+let cached: { file: string; mtimeMs: number; size: number; inode: number; document: ProviderStateDocument } | undefined;
+
+function readDocument(fresh = false): ProviderStateDocument {
 	const document: ProviderStateDocument = { providers: new Map(), transitions: [] };
 	const records = document.providers;
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(fs.readFileSync(getProviderCooldownsPath(), "utf8"));
+		const file = getProviderCooldownsPath();
+		const stat = fs.statSync(file);
+		if (
+			!fresh &&
+			cached?.file === file &&
+			cached.mtimeMs === stat.mtimeMs &&
+			cached.size === stat.size &&
+			cached.inode === stat.ino
+		) {
+			return cached.document;
+		}
+		parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+		cached = { file, mtimeMs: stat.mtimeMs, size: stat.size, inode: stat.ino, document };
 	} catch (error) {
+		cached = undefined;
 		if (!isEnoent(error)) logger.warn("Cannot read provider availability", { error: String(error) });
 		return document;
 	}
@@ -230,6 +245,7 @@ function readPersisted(): Map<string, ProviderExhaustionRecord> {
 }
 
 function writePersisted(document: ProviderStateDocument): void {
+	cached = undefined;
 	const file = getProviderCooldownsPath();
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -244,7 +260,7 @@ function mutate<T>(
 	operation: (records: Map<string, ProviderExhaustionRecord>, transitions: ProviderAvailabilityTransition[]) => T,
 ): T {
 	return withFileLockSync(getProviderCooldownsPath(), () => {
-		const document = readDocument();
+		const document = readDocument(true);
 		const previous = new Map(document.providers);
 		const result = operation(document.providers, document.transitions);
 		for (const [key, record] of document.providers) {
