@@ -550,6 +550,115 @@ describe("createSettingsAwareStreamFn", () => {
 			}
 		});
 
+		// The per-outcome suppression must key on the array, not on its text: a
+		// multiline YAML scalar later split into list entries yields the same
+		// joined text from a different chain, and the changed diagnostic
+		// (kept: 1 -> kept: 2) would be swallowed — the same silence this
+		// warning exists to end.
+		it("warns again when a changed chain only looks the same once its entries are joined", () => {
+			const warnings: Array<Record<string, unknown> | undefined> = [];
+			vi.spyOn(logger, "warn").mockImplementation((message, context) => {
+				if (message.includes("serverSideFallbackModels")) warnings.push(context);
+			});
+			try {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": [
+						null,
+						"claude-opus-5\nclaude-opus-4-8",
+					] as unknown as string[],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5\nclaude-opus-4-8" }]);
+
+				cfgProvidersAnthropicServerSideFallbackModels.override(settings, [
+					null,
+					"claude-opus-5",
+					"claude-opus-4-8",
+				] as unknown as string[]);
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				expect(calls[1]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }, { model: "claude-opus-4-8" }]);
+
+				expect(warnings).toEqual([
+					{ setting: "providers.anthropic.serverSideFallbackModels", dropped: 1, kept: 1 },
+					{ setting: "providers.anthropic.serverSideFallbackModels", dropped: 1, kept: 2 },
+				]);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
+		// Positive control for the test above: an ordinary changed chain whose
+		// joined text also changes already warns twice, so a passing run there
+		// cannot be explained by the suppression never firing in the first place.
+		it("warns again for an ordinary changed chain (control)", () => {
+			const warnings: Array<Record<string, unknown> | undefined> = [];
+			vi.spyOn(logger, "warn").mockImplementation((message, context) => {
+				if (message.includes("serverSideFallbackModels")) warnings.push(context);
+			});
+			try {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": [null, "claude-opus-5"] as unknown as string[],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+				cfgProvidersAnthropicServerSideFallbackModels.override(settings, [
+					null,
+					"claude-opus-4-8",
+				] as unknown as string[]);
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls.map(call => call.options?.fallbacks)).toEqual([
+					[{ model: "claude-opus-5" }],
+					[{ model: "claude-opus-4-8" }],
+				]);
+				expect(warnings).toEqual([
+					{ setting: "providers.anthropic.serverSideFallbackModels", dropped: 1, kept: 1 },
+					{ setting: "providers.anthropic.serverSideFallbackModels", dropped: 1, kept: 1 },
+				]);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
+		// Same collision in the cap warning's key: four entries whose joined text
+		// matches five separate ones hides the changed `configured` count.
+		it("warns again when a changed overlong chain only looks the same once its entries are joined", () => {
+			const warnings: Array<Record<string, unknown> | undefined> = [];
+			vi.spyOn(logger, "warn").mockImplementation((message, context) => {
+				if (message.includes("serverSideFallbackModels")) warnings.push(context);
+			});
+			try {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": ["m1\nm2", "m3", "m4", "m5"],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				expect(calls[0]?.options?.fallbacks).toEqual([{ model: "m1\nm2" }, { model: "m3" }, { model: "m4" }]);
+
+				cfgProvidersAnthropicServerSideFallbackModels.override(settings, ["m1", "m2", "m3", "m4", "m5"]);
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				expect(calls[1]?.options?.fallbacks).toEqual([{ model: "m1" }, { model: "m2" }, { model: "m3" }]);
+
+				expect(warnings).toEqual([
+					{ configured: 4, limit: 3 },
+					{ configured: 5, limit: 3 },
+				]);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
 		it("trims whitespace from configured chain entries before forwarding", () => {
 			const settings = Settings.isolated({
 				"providers.anthropic.serverSideFallback": true,

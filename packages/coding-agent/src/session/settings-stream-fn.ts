@@ -64,7 +64,12 @@ const ANTHROPIC_MAX_FALLBACK_MODELS = 3;
 
 const SERVER_SIDE_FALLBACK_MODELS_SETTING = "providers.anthropic.serverSideFallbackModels";
 
-/** Last chain warned about per reason, so each warning fires once per distinct outcome rather than per request. */
+/**
+ * Last outcome warned about per reason, so each warning fires once per distinct
+ * outcome rather than per request. Each key is JSON, not joined text: a chain
+ * whose entries contain the separator would otherwise collide with a different
+ * chain that joins to the same string and swallow its changed diagnostic.
+ */
 interface ServerSideFallbackWarnings {
 	dropped?: string;
 	overlong?: string;
@@ -93,7 +98,7 @@ function configuredServerSideFallbackModels(
 		.filter(id => id.length > 0);
 	const dropped = configured.length - models.length;
 	if (dropped > 0) {
-		const outcome = `${dropped}\u0000${models.join("\n")}`;
+		const outcome = JSON.stringify([dropped, models]);
 		if (warned.dropped !== outcome) {
 			warned.dropped = outcome;
 			logger.warn(`${SERVER_SIDE_FALLBACK_MODELS_SETTING}: ignoring entries that are not non-empty model ids`, {
@@ -104,7 +109,7 @@ function configuredServerSideFallbackModels(
 		}
 	}
 	if (models.length > ANTHROPIC_MAX_FALLBACK_MODELS) {
-		const chain = models.join("\n");
+		const chain = JSON.stringify(models);
 		if (warned.overlong !== chain) {
 			warned.overlong = chain;
 			logger.warn("providers.anthropic.serverSideFallbackModels exceeds the wire limit; using the first three", {
