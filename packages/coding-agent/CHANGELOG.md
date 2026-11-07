@@ -23,6 +23,7 @@
 - Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
 - Exhausted providers stay excluded in sessions, benchmarks, per-call workers and the auth gateway until their reset or cooldown expires.
 - Workers skip unavailable providers across their configured quality chain and continue after quota failures, including with ordinary retries disabled ([#16532](https://github.com/can1357/oh-my-pi/pull/16532) by [@Komzpa](https://github.com/Komzpa)).
+- Providers with exhausted credits remain unavailable until a recovery probe succeeds, so workers use their fallback chain without spending another turn on the blocked account.
 
 ## [19.1.0] - 2026-11-21
 
