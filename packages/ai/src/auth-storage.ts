@@ -302,6 +302,8 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 		const previous = this.#modules;
 		next.pool.adoptSubscribers(previous.pool);
 		next.usage.adoptRuntimeProviders(previous.usage);
+		// A broker URL or token change must not lift a strict lock or an automatic opt-out.
+		next.sessions.adoptExplicitRouting(previous.sessions);
 		this.#modules = next;
 		retire(previous);
 		next.pool.bump("store-replaced");

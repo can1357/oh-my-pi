@@ -179,6 +179,37 @@ export class SessionAffinity implements SessionsApi {
 	}
 
 	/**
+	 * Carry explicit routing choices over from the affinity of a replaced
+	 * credential store: automatic opt-outs as-is, strict locks re-resolved by
+	 * account identity because row ids differ between stores. A lock whose
+	 * account cannot be identified in the new store stays a lock on an
+	 * unavailable account. Ordinary affinity is not carried; the new store
+	 * re-ranks it.
+	 */
+	adoptExplicitRouting(previous: SessionAffinity): void {
+		for (const [provider, sessions] of previous.#automaticSessions) {
+			const adopted = this.#automaticSessions.get(provider) ?? new Set<string>();
+			for (const sessionId of sessions) adopted.add(sessionId);
+			this.#automaticSessions.set(provider, adopted);
+		}
+		for (const [provider, sessions] of previous.#sessionLastCredential) {
+			const previousEntries = previous.#pool.entries(provider);
+			const entries = this.#pool.entries(provider);
+			for (const sessionId of sessions.keys()) {
+				const lock = sessions.peek(sessionId);
+				if (lock?.strict !== true) continue;
+				const locked = previousEntries.find(entry => entry.id === lock.credentialId)?.credential;
+				const identityKey = locked ? resolveCredentialIdentityKey(provider, locked) : null;
+				const index =
+					identityKey === null
+						? -1
+						: entries.findIndex(entry => resolveCredentialIdentityKey(provider, entry.credential) === identityKey);
+				this.record(provider, sessionId, lock.type, index, lock.lastUsedAtMs, true, true, entries[index]?.id);
+			}
+		}
+	}
+
+	/**
 	 * Records which credential was used for a session (for rate-limit switching).
 	 * `lastUsedAtMs` backdates the sticky (session-file pin restores on resume);
 	 * it defaults to now for live selections. Automatic re-recording of the same

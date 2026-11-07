@@ -32,6 +32,9 @@
 - An eval `wait()` on jobs owned by a worker returns finished jobs and consumes their results instead of reporting them as running or delivering them again ([#18363](https://github.com/can1357/oh-my-pi/issues/18363))
 - Subagents hosted on worker threads keep a strict `/account` lock: the worker auth proxy now carries strict pins, `sessions.mode()` and `sessions.automatic()`, and a revived subagent copies its live parent's lock (including a worker-hosted parent)
 - An `auth.defaultAccounts` selector that matches no stored account, or several, now shows a config warning (without the selector) instead of silently leaving the session on automatic routing.
+- `/fresh` and in-place context resets keep a strict `/account` lock (even on an account removed since) and an `/account auto` choice on the new provider session id; if the new id cannot be routed safely, the session stays on the old id instead of continuing unlocked
+- `/session pin` (and the account selector) now saves its choice immediately, so a resume before the next reply no longer restores a strict lock the pin replaced
+- `/account` on an OAuth account with no email or account id says the lock lasts until omp exits instead of reporting a lock that resume cannot restore
 - Translator failures now write structured warning records with direction, selected model, elapsed time, source size, timeout/cancellation state, and the underlying error without logging translated content.
 - Input hooks can now reject a submission with `reject`, restoring the original draft and attachments; hook errors and timeouts fail closed instead of dispatching untranslated input. Delayed hooks cannot submit or restore drafts into another session.
 - `/restart` no longer drops running subagents: they go on with their interrupted turns in the relaunched process and deliver their results to the agent that spawned them, as `omp --restore` now also does after a normal quit

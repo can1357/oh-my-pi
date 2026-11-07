@@ -247,11 +247,16 @@ async function handleAccountCommand(
 		return;
 	}
 	const account = matches[0]!;
-	if (!session.pinCurrentProviderOAuthAccount(account.credentialId, { strict: true })) {
+	const pinned = session.pinCurrentProviderOAuthAccount(account.credentialId, { strict: true });
+	if (!pinned) {
 		await output(`${account.label} is no longer available to pin.`);
 		return;
 	}
-	await output(`Locked ${providerName} to ${account.label} for this session; sibling fallback is disabled.`);
+	await output(
+		pinned.persisted
+			? `Locked ${providerName} to ${account.label} for this session; sibling fallback is disabled.`
+			: `Locked ${providerName} to ${account.label} until omp exits; sibling fallback is disabled. This account has no email or account id, so the lock is not restored on resume.`,
+	);
 }
 
 /**

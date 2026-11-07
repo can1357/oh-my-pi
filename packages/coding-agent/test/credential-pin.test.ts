@@ -377,6 +377,92 @@ describe("credential pins", () => {
 		}
 	});
 
+	function createAnthropicSession(manager: SessionManager, registry: ModelRegistry): AgentSession {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic model");
+		return new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "unused-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: manager,
+			modelRegistry: registry,
+			settings: Settings.isolated({}),
+		});
+	}
+
+	test("/fresh keeps a strict lock on a removed account instead of routing to a sibling", async () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const registry = new ModelRegistry(storage, path.join(tempDir.path(), "models.yml"));
+		const session = createAnthropicSession(manager, registry);
+		try {
+			const accountB = storage.oauth
+				.accounts("anthropic", session.sessionId)
+				.find(account => account.accountId === "account-b");
+			if (!accountB) throw new Error("expected account b");
+			expect(session.pinCurrentProviderOAuthAccount(accountB.credentialId, { strict: true })).toEqual({
+				persisted: true,
+			});
+			expect(await storage.credentials.removeById("anthropic", accountB.credentialId)).toBe(true);
+
+			const fresh = session.freshSession();
+			expect(fresh?.sessionId).not.toBe(fresh?.previousSessionId);
+			expect(storage.sessions.mode("anthropic", session.sessionId)).toBe("strict");
+			expect(await registry.getApiKey(session.model!, session.sessionId)).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("a non-strict pin replaces a saved strict lock before the next turn", async () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const session = createAnthropicSession(manager, new ModelRegistry(storage, path.join(tempDir.path(), "models.yml")));
+		try {
+			const accounts = storage.oauth.accounts("anthropic", session.sessionId);
+			const accountA = accounts.find(account => account.accountId === "account-a")!;
+			const accountB = accounts.find(account => account.accountId === "account-b")!;
+			expect(session.pinCurrentProviderOAuthAccount(accountA.credentialId, { strict: true })).toBeTruthy();
+			expect(session.pinCurrentProviderOAuthAccount(accountB.credentialId)).toBeTruthy();
+
+			// A resume before any turn restores B without the replaced lock on A.
+			const resumed = new AuthStorage(store);
+			await resumed.credentials.reload();
+			seedCredentialPins(resumed, manager, "resumed-provider-session");
+			expect(resumed.sessions.mode("anthropic", "resumed-provider-session")).not.toBe("strict");
+			expect(
+				resumed.oauth.accounts("anthropic", "resumed-provider-session").find(account => account.active)?.accountId,
+			).toBe("account-b");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("a strict lock on an account without identity is session-only but survives /fresh", async () => {
+		await store.saveOAuth("anthropic", {
+			access: "access-anonymous",
+			refresh: "refresh-anonymous",
+			expires: Date.now() + 60_000,
+		});
+		await storage.credentials.reload();
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const registry = new ModelRegistry(storage, path.join(tempDir.path(), "models.yml"));
+		const session = createAnthropicSession(manager, registry);
+		try {
+			const anonymous = storage.oauth
+				.accounts("anthropic", session.sessionId)
+				.find(account => !account.accountId && !account.email);
+			if (!anonymous) throw new Error("expected an account without identity");
+			expect(session.pinCurrentProviderOAuthAccount(anonymous.credentialId, { strict: true })).toEqual({
+				persisted: false,
+			});
+			expect(manager.getCredentialPins().has("anthropic")).toBe(false);
+			session.freshSession();
+			expect(storage.sessions.mode("anthropic", session.sessionId)).toBe("strict");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("automatic routing outlives /fresh and resume despite a configured default account", async () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		manager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });

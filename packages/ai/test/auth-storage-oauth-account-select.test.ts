@@ -181,6 +181,41 @@ describe("AuthStorage OAuth account selection", () => {
 		expect(storage.sessions.mode(PROVIDER, "locked")).toBe("strict");
 	});
 
+	test("store replacement keeps strict locks by account identity and automatic opt-outs", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, credentials) => {
+			const credential = credentials[provider];
+			return credential ? { newCredentials: credential, apiKey: credential.access } : null;
+		});
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b")]);
+		const accountB = storage.oauth.accounts(PROVIDER).find(account => account.accountId === "acc-b");
+		if (!accountB) throw new Error("expected account b");
+		expect(storage.sessions.pin(PROVIDER, "locked", accountB.credentialId, { strict: true })).toBe(true);
+		expect(storage.sessions.automatic(PROVIDER, "opted-out")).toBe(true);
+
+		// Same accounts stored in the opposite order: row ids no longer name the same accounts.
+		const reordered = await SqliteAuthCredentialStore.open(path.join(tempDir, "reordered.db"));
+		const missing = await SqliteAuthCredentialStore.open(path.join(tempDir, "missing.db"));
+		try {
+			await reordered.saveOAuth(PROVIDER, oauthCredential("b"));
+			await reordered.saveOAuth(PROVIDER, oauthCredential("a"));
+			await storage.replaceStore(reordered);
+			expect(storage.sessions.mode(PROVIDER, "locked")).toBe("strict");
+			expect(await storage.keys.get(PROVIDER, "locked")).toBe("access-b");
+			expect(storage.sessions.mode(PROVIDER, "opted-out")).toBe("automatic");
+
+			// A store without the locked account keeps the lock and serves nothing.
+			await missing.saveOAuth(PROVIDER, oauthCredential("a"));
+			await storage.replaceStore(missing);
+			expect(storage.sessions.mode(PROVIDER, "locked")).toBe("strict");
+			expect(await storage.keys.get(PROVIDER, "locked")).toBeUndefined();
+		} finally {
+			missing.close();
+			reordered.close();
+		}
+	});
+
 	test("authentication invalidation preserves a strict pin instead of retrying another credential", async () => {
 		const storage = authStorage;
 		const credentialStore = store;

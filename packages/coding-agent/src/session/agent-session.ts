@@ -307,6 +307,7 @@ import {
 	runningJobWidgets,
 } from "./async-job-views";
 import type {
+	AccountPinResult,
 	AgentSessionConfig,
 	AgentSessionDisposeOptions,
 	AsyncJobInspection,
@@ -6412,7 +6413,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * (login/logout, token refresh that surfaces a new account UUID) without
 	 * needing to re-call `#syncAgentSessionId()` on every such event.
 	 */
-	#syncAgentSessionId(sessionId?: string, notifyChange = true): void {
+	#syncAgentSessionId(sessionId?: string, notifyChange = true, carryRoutingFrom?: string): void {
 		const currentSessionId = this.sessionManager.getSessionId();
 		if (this.#observedSessionId === undefined) {
 			this.#observedSessionId = currentSessionId;
@@ -6428,6 +6429,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A fresh or reset id becomes the pool scope's primary id, restricted
 		// before restored pins are seeded so they cannot leave the pool.
 		this.#accountPoolScope?.adopt(sid);
+		// A rotated provider id for the same transcript keeps the live explicit
+		// routing — a strict lock, even on an account removed since, or an
+		// automatic opt-out — before the journal is consulted, so `/fresh` never
+		// strands the new id without the lock.
+		if (carryRoutingFrom !== undefined && carryRoutingFrom !== sid) {
+			const sessions = this.#modelRegistry.authStorage.sessions;
+			sessions.inherit(carryRoutingFrom, sid, provider => {
+				const mode = sessions.mode(provider, carryRoutingFrom);
+				return mode === "strict" || mode === "automatic";
+			});
+		}
 		// Restore the session's recorded provider accounts before the first
 		// request routes: sticky rows are process-local under a remote auth
 		// broker, and losing them re-ranks onto a different account, cold-missing
@@ -6886,13 +6898,30 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#providerSessionState.clear();
 	}
 
+	/**
+	 * Mint a fresh provider session id for the current transcript, carrying the
+	 * live explicit account routing of `previousProviderSessionId`. If the new id
+	 * cannot be routed (an unrestorable strict journal entry), the previous id is
+	 * kept so no request runs unlocked, and the error propagates.
+	 */
+	#rotateProviderSessionId(previousProviderSessionId: string): void {
+		const previousFreshId = this.#freshProviderSessionId;
+		this.#freshProviderSessionId = Bun.randomUUIDv7();
+		try {
+			this.#syncAgentSessionId(undefined, true, previousProviderSessionId);
+		} catch (error) {
+			this.#freshProviderSessionId = previousFreshId;
+			this.#syncAgentSessionId();
+			throw error;
+		}
+	}
+
 	freshSession(): FreshSessionResult | undefined {
 		if (this.isStreaming) return undefined;
 		const previousSessionId = this.sessionId;
 		const closedProviderSessions = this.#providerSessionState.size;
 		this.#closeAllProviderSessions("fresh session");
-		this.#freshProviderSessionId = Bun.randomUUIDv7();
-		this.#syncAgentSessionId();
+		this.#rotateProviderSessionId(previousSessionId);
 		this.#memory.rekeyForCurrentSessionId();
 		this.agent.appendOnlyContext?.invalidateForModelChange();
 		return {
@@ -6974,8 +7003,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// history server-side starts a brand-new exchange rather than resuming the
 		// context we just dropped (mirrors freshSession()).
 		this.#closeAllProviderSessions("reset context");
-		this.#freshProviderSessionId = Bun.randomUUIDv7();
-		this.#syncAgentSessionId();
+		this.#rotateProviderSessionId(this.sessionId);
 		this.#memory.rekeyForCurrentSessionId();
 		this.agent.appendOnlyContext?.invalidateForModelChange();
 
@@ -14817,23 +14845,29 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Pin a stored OAuth account to the current model provider for this session.
-	 * Strict pins never rotate to a sibling account. Returns false while
-	 * streaming or when the credential is no longer available.
+	 * Strict pins never rotate to a sibling account. The choice is journaled at
+	 * once, so a later non-strict pin also replaces a saved strict lock before the
+	 * next turn. Returns false while streaming or when the credential is no longer
+	 * available.
 	 */
-	pinCurrentProviderOAuthAccount(credentialId: number, options?: { strict?: boolean }): boolean {
+	pinCurrentProviderOAuthAccount(credentialId: number, options?: { strict?: boolean }): false | AccountPinResult {
 		const provider = this.model?.provider;
 		if (!provider || this.isStreaming) return false;
 		const authStorage = this.#modelRegistry.authStorage;
 		const strict = options?.strict === true;
 		if (!authStorage.sessions.pin(provider, this.sessionId, credentialId, { strict })) return false;
-		if (strict) {
-			const account = authStorage.oauth
-				.accounts(provider, this.sessionId)
-				.find(item => item.credentialId === credentialId);
-			const hash = account ? credentialPinHash(provider, account) : undefined;
-			if (hash) this.sessionManager.appendCredentialPin(provider, hash, "strict");
+		const account = authStorage.oauth.accounts(provider, this.sessionId).find(item => item.credentialId === credentialId);
+		const hash = account ? credentialPinHash(provider, account) : undefined;
+		if (hash) {
+			this.sessionManager.appendCredentialPin(provider, hash, strict ? "strict" : undefined);
+			return { persisted: true };
 		}
-		return true;
+		// Nothing identifies this account on resume. Never let resume restore an
+		// explicit choice this pin replaced: fall back to automatic routing there.
+		if (this.sessionManager.getCredentialPins().get(provider)?.mode !== undefined) {
+			this.sessionManager.appendCredentialPin(provider, undefined, "automatic");
+		}
+		return { persisted: false };
 	}
 
 	/**
