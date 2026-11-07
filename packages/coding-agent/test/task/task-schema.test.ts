@@ -6,12 +6,14 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { cfgTaskPerCallModel, cfgTaskPerCallModelAllow } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
 import { isBundledSeance, seanceTaskSchemaFields } from "@oh-my-pi/pi-coding-agent/task/seance";
 import * as seanceModule from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { isRecord } from "@oh-my-pi/pi-utils";
 
 let taskSchemaSessionIndex = 0;
@@ -221,11 +223,17 @@ Custom prompt.`,
 			agents: [bundledSeance],
 			projectAgentsDir: null,
 		});
-		const planMode = await TaskTool.create(createSession({ parentSpawns: "task,seance", planMode: true }));
+		// The gate is on so the surviving `model` is the plain per-call one: hiding seance
+		// narrows the field back to a string rather than removing it.
+		const planMode = await TaskTool.create(
+			createSession({ parentSpawns: "task,seance", planMode: true, settings: { "task.perCallModel": "on" } }),
+		);
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
 		expect(planSchema).toContain('"model":{"type":"string"}');
+		const gatedPlanMode = await TaskTool.create(createSession({ parentSpawns: "task,seance", planMode: true }));
+		expect(JSON.stringify(gatedPlanMode.parameters.toJsonSchema())).not.toContain('"model"');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 
@@ -262,10 +270,22 @@ describe("task spawn validation", () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
 	});
-	it("rejects a model override for an ordinary task while task.perCallModel is off", async () => {
+	it("drops the per-call `model` field while task.perCallModel is off", () => {
+		const properties = getTaskSchema({
+			isolationEnabled: false,
+			batchEnabled: false,
+			perCallModelEnabled: false,
+		}).toJsonSchema().properties;
+		expect(isRecord(properties) && "model" in properties).toBe(false);
+	});
+
+	it("ignores a model override for an ordinary task while task.perCallModel is off", async () => {
+		// Seance keeps `model` declared even with the gate off — it names the historical
+		// session's model, not a per-call one — so an ordinary agent's `model` still arrives.
 		const schema = getTaskSchema({
 			isolationEnabled: false,
 			batchEnabled: false,
+			perCallModelEnabled: false,
 			seanceFields: seanceTaskSchemaFields,
 		});
 		const params = {
@@ -277,7 +297,15 @@ describe("task spawn validation", () => {
 		expect(schema(params) instanceof type.errors).toBe(false);
 		const scout = loadBundledAgents().find(agent => agent.name === "scout");
 		if (!scout) throw new Error("Expected the bundled scout agent");
-		expect(await executeText(params, [bundledSeance, scout])).toContain("task.perCallModel: off");
+		const run = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockResolvedValue({ index: 0, id: "scout-1", agent: "scout", output: "done" } as SingleResult);
+		const text = await executeText(params, [bundledSeance, scout]);
+		expect(text).not.toContain("Per-call model is disabled");
+		expect(text).toContain("`model` was ignored");
+		expect(run).toHaveBeenCalledTimes(1);
+		expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
+		expect(run.mock.calls[0]?.[0].modelOverride ?? []).not.toContain("anthropic/claude-sonnet-4-5");
 	});
 
 	it("advertises approved selectors only while task.perCallModel is on", async () => {

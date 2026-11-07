@@ -391,10 +391,10 @@ describe("task.batch validation", () => {
 	});
 
 	// The agent loop validates arguments against the wire schema before execute(),
-	// and that schema deletes undeclared keys. With per-call model off, `model` and
-	// `sourceSession` on an ordinary agent must still be refused by every call form
-	// instead of being dropped, leaving the child on its own model while the caller
-	// believes it pinned another.
+	// and that schema deletes undeclared keys. `sourceSession` on an ordinary agent
+	// must still be refused by every call form. A gated `model` is not refused: it is
+	// dropped and reported, because refusing it only bought identical retries — the
+	// caller is told which model ran, so it never believes it pinned another.
 	// `task.structured` and `task.isolation.enabled` choose between the prebuilt and
 	// generated batch schemas, each with and without `isolated`.
 	it.each([
@@ -455,12 +455,16 @@ describe("task.batch validation", () => {
 
 			const toolResult = agent.state.messages.find(message => message.role === "toolResult");
 			const text = toolResult?.role === "toolResult" ? getFirstText(toolResult) : "";
-			// `model` doubles as the per-call selector, whose disabled gate is reported first.
-			expect(text).toContain(
-				field === "model"
-					? "Per-call model is disabled for task calls (task.perCallModel: off)."
-					: `\`${field}\` is only accepted for the \`seance\` agent.`,
-			);
+			if (field === "model") {
+				// Dropped and reported, not refused; the spawn runs on the agent's own model.
+				expect(text).toContain("`model` was ignored");
+				expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(false);
+				expect(run).toHaveBeenCalledTimes(1);
+				expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
+				expect(run.mock.calls[0]?.[0].modelOverride ?? []).not.toContain("stub/model-b");
+				return;
+			}
+			expect(text).toContain(`\`${field}\` is only accepted for the \`seance\` agent.`);
 			expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(true);
 			expect(run).not.toHaveBeenCalled();
 		},
@@ -934,32 +938,50 @@ describe("batch model placement", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
-	// `off` and `eval` refuse task calls through the same gate; one mode per shape covers it.
+	// `off` and `eval` both forbid task calls through the same gate; one mode per shape covers it.
 	it.each([
 		["off", "batch"],
 		["eval", "flat"],
 	] as const)(
-		"rejects a task call's model before dispatch while task.perCallModel is %s (%s call)",
+		"drops a task call's model instead of refusing while task.perCallModel is %s (%s call)",
 		async (mode, shape) => {
 			const batch = shape === "batch";
 			mockDiscovery();
-			const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+			const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Ran"));
 			const tool = await TaskTool.create(
 				createSession({ settings: { "task.batch": batch, "async.enabled": false, "task.perCallModel": mode } }),
 			);
-			// A role alias is not an exact selector, but the disabled gate is what the caller must hear first.
-			const work = { task: "Do work", solutionSpace: "c", model: "@smol" };
-			// Through shared argument validation, as a model's tool call arrives: `model` must reach preflight in both shapes.
+			// The gate's shape is not advertised, so a model filling in optional fields never sees `model`.
+			expect((batch ? getBatchItemProperties(tool) : getSchemaProperties(tool)).model).toBeUndefined();
+			const work = { task: "Do work", solutionSpace: "c", model: "anthropic/claude-opus-4-5" };
+			// Through shared argument validation, as a model's tool call arrives: undeclared root
+			// keys are re-attached after validation, so `model` still reaches execute() in both shapes.
 			const args = validateAgentToolArguments(tool as unknown as AgentTool, {
 				type: "toolCall",
 				id: "task-model",
 				name: tool.name,
 				arguments: batch ? { context: "Shared context", tasks: [work] } : work,
 			});
+			expect(JSON.stringify(args)).toContain("anthropic/claude-opus-4-5");
 			const result = await tool.execute("task-model", args as TaskParams);
-			expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
-			expect(result.isError).toBe(true);
-			expect(run).not.toHaveBeenCalled();
+			expect(getFirstText(result)).not.toMatch(/per-call model is disabled/i);
+			expect(getFirstText(result)).toContain("`model` was ignored");
+			expect(result.isError).toBeFalsy();
+			expect(run).toHaveBeenCalledTimes(1);
+			// Dispatched on the agent's own routing: the gate is enforced by ignoring the field, not by honouring it.
+			expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
+			expect(run.mock.calls[0]?.[0].modelOverride ?? []).not.toContain("anthropic/claude-opus-4-5");
 		},
 	);
+
+	it.each([
+		["batch", true],
+		["flat", false],
+	] as const)("advertises model in the %s shape while task.perCallModel is on", async (_shape, batch) => {
+		mockDiscovery();
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": batch, "task.perCallModel": "on" } }),
+		);
+		expect((batch ? getBatchItemProperties(tool) : getSchemaProperties(tool)).model).toBeDefined();
+	});
 });

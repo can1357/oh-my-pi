@@ -150,18 +150,20 @@ describe("taskFile dispatch", () => {
 		});
 	});
 
-	// `off` and `eval` refuse task calls through the same gate; one mode per shape covers it.
+	// `off` and `eval` both forbid task calls through the same gate; one mode per shape covers it.
 	it.each([
 		["off", false],
 		["eval", true],
-	] as const)("checks the per-call gate before reading taskFile (mode=%s, batch=%s)", async (mode, batch) => {
+	] as const)("drops a gated model rather than failing the taskFile call (mode=%s, batch=%s)", async (mode, batch) => {
 		const tool = await createTool(batch, undefined, { "task.perCallModel": mode });
 		const item = { taskFile: path.join(directory, "missing.md"), model: "@review" };
 
 		const result = await tool.execute("file-model-disabled", batch ? { context: "Context.", tasks: [item] } : item);
 
+		// The gate no longer short-circuits the call, so the caller hears the real problem.
 		expect(result.isError).toBe(true);
-		expect(textOf(result)).toContain(`task.perCallModel: ${mode}`);
+		expect(textOf(result)).not.toContain("task.perCallModel");
+		expect(textOf(result)).toContain("missing.md");
 		expect(executions).toHaveLength(0);
 	});
 
