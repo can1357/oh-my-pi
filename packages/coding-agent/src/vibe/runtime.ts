@@ -363,6 +363,7 @@ export class VibeSessionRegistry {
 		const { patterns, role } = resolveAgentModelSelection({
 			settingsOverride: agentModelOverrides[agentName],
 			agentModel: agent.model,
+			agentThinkingLevel: agent.thinkingLevel,
 			settings: session.settings,
 			activeModelPattern: session.getActiveModelString?.(),
 			fallbackModelPattern: session.getModelString?.(),
