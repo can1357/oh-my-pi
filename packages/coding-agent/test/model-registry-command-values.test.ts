@@ -1119,6 +1119,30 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			expect(await resolveConfigValue(name)).toBe(name);
 		});
 
+		test("a whitespace-only credential is refused, and a padded one keeps its bytes", async () => {
+			// A variable holding only blanks passed the "is it empty" guard and reached a
+			// provider as a bare `Bearer`, indistinguishable from a wrong key. Trimmed
+			// emptiness is what disqualifies it; a credential that holds something is
+			// never rewritten, because a key's own leading or trailing bytes are its.
+			const name = `OMP_TEST_BLANK_KEY_${Snowflake.next()}`;
+			process.env[name] = " \t\n ";
+			try {
+				expect((await requestRefusal(providerWithApiKey(name))).message).toBe(
+					`No API key for provider custom-proxy: environment variable ${name} is set but only whitespace`,
+				);
+				process.env[name] = " padded-key\t";
+				expect(await resolveCredentialConfigValue(name)).toBe(" padded-key\t");
+			} finally {
+				delete process.env[name];
+			}
+			// A literal is the credential itself when no such variable exists, so blank
+			// literal text is refused by the same rule.
+			await expect(resolveCredentialConfigValue("   ")).rejects.toThrow("the configured value is only whitespace");
+			await expect(resolveCredentialConfigValue("")).rejects.toThrow("the configured value is empty");
+			// Non-credential config keeps its documented literal fallback either way.
+			expect(await resolveConfigValue("   ")).toBe("   ");
+		});
+
 		test("the failure a resolution produced survives a concurrent invalidation", async () => {
 			// The reason used to be read from a shared map only after the value came
 			// back undefined, and an invalidation landing in that window restored the
@@ -1278,6 +1302,29 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		])("the label leaks nothing for %s", async (_name, apiKeyConfig) => {
 			const refusal = await requestRefusal(providerWithApiKey(`!${apiKeyConfig}`));
 			expect(refusal.message).not.toContain("sk-live-");
+		});
+
+		test("a line continuation inside an assignment does not print the credential", async () => {
+			// A backslash before a newline is line joining: the shell removes both and
+			// runs an assignment, then `false`. Classifying the assignment on the raw
+			// text missed it, so the whole joined `LABEL=<credential>` word was rendered
+			// as the program name — into the message and into ~/.omp/logs.
+			const canary = `sk-live-${Snowflake.next()}-${Math.random().toString(36).slice(2)}`;
+			for (const spelling of [`LA\\\nBEL=${canary} false`, `LABEL\\\n=${canary} false`]) {
+				clearConfigValueCache();
+				const refusal = await requestRefusal(providerWithApiKey(`!${spelling}`));
+				expect(refusal.message).not.toContain(canary);
+				expect(refusal.message).toBe(
+					"No API key for provider custom-proxy: the command `LABEL=… false` exited with status 1",
+				);
+			}
+			// Joining continuations must not turn a quoted or escaped `=` into assignment
+			// syntax: those words are programs, and their arguments stay unprinted.
+			for (const executable of [`'LABEL=x' ${canary}`, `LABEL\\=x ${canary}`]) {
+				clearConfigValueCache();
+				const refusal = await requestRefusal(providerWithApiKey(`!${executable}`));
+				expect(refusal.message).not.toContain(canary);
+			}
 		});
 
 		test("a 401 whose re-resolution yields nothing reports the source, not the rejection", async () => {

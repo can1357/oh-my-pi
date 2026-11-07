@@ -42,6 +42,12 @@ interface CommandResult {
 	mintedAt: number;
 	/** The `exp` claim of a JWT value, in ms. Such a value is never served at or after it. */
 	expiresAt: number | undefined;
+	/**
+	 * The same deadline read on `performance.now()`, which no clock change moves. A
+	 * value is served only while BOTH deadlines are ahead, so a wall clock that is
+	 * set backwards cannot extend a credential past the lifetime it was minted with.
+	 */
+	monoExpiresAt: number | undefined;
 }
 
 /**
@@ -62,7 +68,7 @@ const commandFailureRetryAt = new Map<string, number>();
  * with it, instead of as a provider's 401 or a bare "No API key".
  */
 const commandLastFailure = new Map<string, CommandFailureRecord>();
-const commandInFlight = new Map<string, Promise<CommandResolution>>();
+const commandInFlight = new Map<string, Promise<CommandRunOutcome>>();
 const commandGeneration = new Map<string, number>();
 
 /**
@@ -75,7 +81,7 @@ export type ConfigValueInvalidation = "rejected" | "refresh";
 
 type CommandFailure = {
 	ok: false;
-	reason: "timeout" | "killed" | "exit" | "empty" | "spawn" | "cwd-unavailable";
+	reason: "timeout" | "killed" | "exit" | "empty" | "spawn" | "cwd-unavailable" | "expired";
 	exitCode?: number | null;
 	code?: string;
 };
@@ -92,6 +98,13 @@ type CommandFailureRecord = { outcome: CommandFailure; timeoutMs: number };
  * between a caller finding no value and reporting why.
  */
 type CommandResolution = { value: string } | { value: undefined; failure?: CommandFailureRecord };
+
+/**
+ * What one finished run produced: a result with its deadlines, or nothing with the
+ * reason. A result travels whole so the waiter re-checks the deadline itself; the
+ * run's own check was made at a moment that has already passed.
+ */
+type CommandRunOutcome = { result: CommandResult } | { result: undefined; failure: CommandFailureRecord };
 
 /** Materialize request headers for models and discovery without property-access side effects. */
 export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
@@ -142,7 +155,10 @@ function jwtExpiresAt(value: string): number | undefined {
 		const payload: unknown = JSON.parse(Buffer.from(match[2], "base64url").toString("utf8"));
 		if (!isRecord(header) || typeof header.alg !== "string" || !isRecord(payload)) return undefined;
 		const exp = payload.exp;
-		return typeof exp === "number" && Number.isFinite(exp) && exp > 0 ? exp * 1000 : undefined;
+		// Any finite `exp` is an expiry, including `0` and a negative one. Reading only
+		// a positive `exp` classified those as a value with NO discoverable expiry, so
+		// an already-dead token was served and then kept under the default reuse.
+		return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : undefined;
 	} catch {
 		return undefined;
 	}
@@ -161,14 +177,49 @@ function refreshAt(result: CommandResult): number {
 	return result.mintedAt + commandRefreshMs;
 }
 
-/** A result's value while it may be sent: a JWT never at or after its `exp`. */
+/**
+ * A result's value while it may be sent: a JWT never at or after its `exp`, on the
+ * wall clock and on the monotonic clock alike. A value with no discoverable expiry
+ * is always servable; only invalidation or the configured reuse retires it.
+ */
 function servable(result: CommandResult | undefined, now: number): string | undefined {
 	if (result === undefined) return undefined;
-	return result.expiresAt === undefined || now < result.expiresAt ? result.value : undefined;
+	if (result.expiresAt === undefined) return result.value;
+	const monoExpiresAt = result.monoExpiresAt ?? Number.POSITIVE_INFINITY;
+	return now < result.expiresAt && performance.now() < monoExpiresAt ? result.value : undefined;
 }
 
-/** Identify command-backed values when collecting credentials that must be invalidated together. */
-export function isCommandConfigValue(valueConfig: string | undefined): valueConfig is string {
+/** One successful run's stdout with both deadlines fixed at the moment it was minted. */
+function commandResult(value: string): CommandResult {
+	const mintedAt = Date.now();
+	const expiresAt = jwtExpiresAt(value);
+	return {
+		value,
+		mintedAt,
+		expiresAt,
+		monoExpiresAt: expiresAt === undefined ? undefined : performance.now() + (expiresAt - mintedAt),
+	};
+}
+
+/**
+ * Drop every held copy of a command's value that is past its expiry. Once a result
+ * has been observed expired it is gone, so a wall clock that is later set back
+ * before that expiry finds nothing left to revive.
+ */
+function discardExpired(command: string, now: number): void {
+	const cached = commandResultCache.get(command);
+	if (cached !== undefined && servable(cached, now) === undefined) commandResultCache.delete(command);
+	const lastGood = commandLastGood.get(command);
+	if (lastGood !== undefined && servable(lastGood, now) === undefined) commandLastGood.delete(command);
+}
+
+/**
+ * Identify command-backed values when collecting credentials that must be
+ * invalidated together. The predicate names the `!` form rather than `string`,
+ * so a caller's other branch still holds the config text it was given instead of
+ * being narrowed to nothing.
+ */
+export function isCommandConfigValue(valueConfig: string | undefined): valueConfig is `!${string}` {
 	return valueConfig?.startsWith("!") === true;
 }
 
@@ -209,6 +260,24 @@ export function invalidateAllCommandConfigs(reason: ConfigValueInvalidation): vo
 	if (reason === "rejected") commandLastGood.clear();
 }
 
+/**
+ * Note a run that produced no usable value, so the next resolution can say why
+ * instead of reporting a missing key, and hold the retry off for the backoff.
+ */
+function recordCommandFailure(
+	command: string,
+	outcome: CommandFailure,
+	timeoutMs: number,
+	current: boolean,
+): CommandRunOutcome {
+	const failure: CommandFailureRecord = { outcome, timeoutMs };
+	if (current) {
+		commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+		commandLastFailure.set(command, failure);
+	}
+	return { result: undefined, failure };
+}
+
 function errnoCode(error: unknown): string {
 	const code = (error as NodeJS.ErrnoException | null)?.code;
 	return typeof code === "string" ? code : "unknown";
@@ -220,6 +289,9 @@ async function resolveCommandResolution(
 ): Promise<CommandResolution> {
 	const command = commandKey(valueConfig);
 	const now = Date.now();
+	// Observing a value at or past its expiry retires it here: a clock set backwards
+	// afterwards must not find it again.
+	discardExpired(command, now);
 	const cached = commandResultCache.get(command);
 	// A successful run serves until its command is due again: a JWT one refresh skew
 	// before its `exp`, any other value after `providers.commandRefreshSeconds`. Past
@@ -248,10 +320,22 @@ async function resolveCommandResolution(
 	if ((commandGeneration.get(command) ?? 0) !== generation) {
 		return resolveCommandResolution(valueConfig, commandTimeout);
 	}
-	if (settled.value !== undefined) return settled;
+	if (settled.result !== undefined) {
+		// Awaiting is not instant, and this waiter may have queued behind others: a
+		// value servable when the run finished can be past its `exp` by the time the
+		// waiter resumes, so the deadline is checked again here rather than trusted.
+		const after = Date.now();
+		discardExpired(command, after);
+		const fresh = servable(settled.result, after);
+		if (fresh !== undefined) return { value: fresh };
+		return {
+			value: undefined,
+			failure: { outcome: { ok: false, reason: "expired" }, timeoutMs: commandTimeoutMsFor(commandTimeout) },
+		};
+	}
 	// A 401 during the run drops the last good value, so read it after the run.
 	const served = servable(commandLastGood.get(command), Date.now());
-	return served !== undefined ? { value: served } : settled;
+	return served !== undefined ? { value: served } : { value: undefined, failure: settled.failure };
 }
 
 async function resolveCommandValue(
@@ -261,25 +345,36 @@ async function resolveCommandValue(
 	return (await resolveCommandResolution(valueConfig, commandTimeout)).value;
 }
 
-function startCommandRun(command: string, timeoutMs: number): Promise<CommandResolution> {
+function startCommandRun(command: string, timeoutMs: number): Promise<CommandRunOutcome> {
 	const generation = commandGeneration.get(command) ?? 0;
 	const startedAt = performance.now();
-	const promise: Promise<CommandResolution> = runConfigCommand(command, timeoutMs)
+	const promise: Promise<CommandRunOutcome> = runConfigCommand(command, timeoutMs)
 		.then(outcome => {
 			const current = (commandGeneration.get(command) ?? 0) === generation;
 			if (outcome.ok) {
-				const result: CommandResult = {
-					value: outcome.value,
-					mintedAt: Date.now(),
-					expiresAt: jwtExpiresAt(outcome.value),
-				};
-				if (current) {
-					commandFailureRetryAt.delete(command);
-					commandLastFailure.delete(command);
-					commandResultCache.set(command, result);
-					commandLastGood.set(command, result);
+				const result = commandResult(outcome.value);
+				// A command can print a credential already past its `exp`: a stale cache
+				// inside the minting tool, a clock apart from the issuer's. That is a
+				// failed mint, not a value. Caching or returning it would send a
+				// credential the provider has already stopped accepting — the 401 this
+				// whole lifetime exists to prevent — under the one path, a fresh run,
+				// that never passed the expiry check.
+				if (servable(result, result.mintedAt) !== undefined) {
+					if (current) {
+						commandFailureRetryAt.delete(command);
+						commandLastFailure.delete(command);
+						commandResultCache.set(command, result);
+						commandLastGood.set(command, result);
+					}
+					return { result };
 				}
-				return { value: outcome.value };
+				// Never log the value, and never the command: both carry the secret.
+				logger.warn("config: !command value resolution produced an expired credential", {
+					expiredForMs: result.mintedAt - (result.expiresAt ?? result.mintedAt),
+					elapsedMs: Math.round(performance.now() - startedAt),
+					servingLastGoodValue: current && commandLastGood.has(command),
+				});
+				return recordCommandFailure(command, { ok: false, reason: "expired" }, timeoutMs, current);
 			}
 			// Never log the command: its arguments can carry tokens.
 			logger.warn("config: !command value resolution failed", {
@@ -290,12 +385,7 @@ function startCommandRun(command: string, timeoutMs: number): Promise<CommandRes
 				timeoutMs,
 				servingLastGoodValue: current && commandLastGood.has(command),
 			});
-			const failure: CommandFailureRecord = { outcome, timeoutMs };
-			if (current) {
-				commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
-				commandLastFailure.set(command, failure);
-			}
-			return { value: undefined, failure };
+			return recordCommandFailure(command, outcome, timeoutMs, current);
 		})
 		.finally(() => {
 			if (commandInFlight.get(command) === promise) commandInFlight.delete(command);
@@ -357,10 +447,24 @@ export async function resolveCredentialConfigValue(
 		const what = describeCommandFailure(failure.outcome, failure.timeoutMs);
 		throw new CredentialSourceError(undefined, `the command \`${commandLabel(commandKey(valueConfig))}\` ${what}`);
 	}
-	// A variable that exists was meant to hold the credential, so its empty value is a
-	// configuration failure rather than a literal key worth sending as a bearer.
-	if ($envExact(valueConfig) === "") {
-		throw new CredentialSourceError(undefined, `environment variable ${valueConfig} is set but empty`);
+	// A variable that exists was meant to hold the credential, so a value that is
+	// empty or only whitespace is a configuration failure rather than a literal key
+	// worth sending as a bearer. A whitespace-only value reached the wire as a bare
+	// `Bearer`, which a provider answers with the same 401 as a wrong key.
+	const envValue = $envExact(valueConfig);
+	if (envValue !== undefined && BLANK_VALUE.test(envValue)) {
+		throw new CredentialSourceError(
+			undefined,
+			`environment variable ${valueConfig} is set but ${envValue.length === 0 ? "empty" : "only whitespace"}`,
+		);
+	}
+	// With no such variable the config text is the credential itself, and blank text
+	// is no more a credential there than it is in a variable.
+	if (envValue === undefined && BLANK_VALUE.test(valueConfig)) {
+		throw new CredentialSourceError(
+			undefined,
+			`the configured value is ${valueConfig.length === 0 ? "empty" : "only whitespace"}`,
+		);
 	}
 	return await resolveConfigValue(valueConfig, commandTimeout);
 }
@@ -376,6 +480,14 @@ const COMMAND_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
  * program name, into the message and into `~/.omp/logs`.
  */
 const SHELL_BLANK = /[ \t\n]/;
+
+/**
+ * A value that holds no non-whitespace character: never a credential. Every kind
+ * of whitespace counts, unlike {@link SHELL_BLANK}, because none of them is a
+ * credential byte. It only tests — a credential that does hold something keeps
+ * every byte it was given, leading and trailing blanks included.
+ */
+const BLANK_VALUE = /^\s*$/;
 
 /** Unquoted shell syntax we do not parse, and will not print past. */
 const SHELL_METACHARACTER = /[$`|&;<>(){}*?!~#\n]/;
@@ -449,6 +561,41 @@ function trimShellBlanks(text: string): string {
 }
 
 /**
+ * Remove shell line continuations and nothing else. A backslash before a newline
+ * is line joining: the shell deletes both before it tokenizes anything, so
+ * `LA\<newline>BEL=secret` is the assignment `LABEL=secret`. Inside single quotes
+ * the pair is two ordinary characters and stays, and every other backslash keeps
+ * the character it escapes, so a quoted or escaped `=` still does not read as
+ * assignment syntax.
+ */
+function joinShellLines(text: string): string {
+	if (!text.includes("\\\n")) return text;
+	let joined = "";
+	let quote: '"' | "'" | undefined;
+	for (let index = 0; index < text.length; index++) {
+		const char = text[index];
+		if (quote === "'") {
+			if (char === "'") quote = undefined;
+			joined += char;
+			continue;
+		}
+		if (char === "\\" && index + 1 < text.length) {
+			if (text[index + 1] === "\n") {
+				index++;
+				continue;
+			}
+			joined += char + text[index + 1];
+			index++;
+			continue;
+		}
+		if (quote === undefined && (char === "'" || char === '"')) quote = char;
+		else if (char === quote) quote = undefined;
+		joined += char;
+	}
+	return joined;
+}
+
+/**
  * The program a command runs, for messages. Only the program is shown, never an
  * argument: a credential command's arguments carry secrets. The same is true of
  * a leading `NAME=value` assignment, so those are reported by name with the
@@ -459,11 +606,14 @@ function commandLabel(command: string): string {
 	const parts: string[] = [];
 	let elided = false;
 	while (rest.length > 0) {
-		// Whether this word is a shell assignment is decided on the RAW text, before any
-		// quote or escape removal. Deciding it on the decoded word classified `'LABEL=x'`,
-		// `LABEL\=x` and `LA'BEL'=x` — every one an executable word — as assignments, and
-		// then printed their first ARGUMENT as the program name.
-		const name = COMMAND_ASSIGNMENT.exec(rest)?.[0];
+		// Whether this word is a shell assignment is decided on the raw text with only
+		// line continuations joined, before any quote or escape removal. Deciding it on
+		// the decoded word classified `'LABEL=x'`, `LABEL\=x` and `LA'BEL'=x` — every
+		// one an executable word — as assignments, and then printed their first
+		// ARGUMENT as the program name. Deciding it on the raw text alone missed
+		// `LA\<newline>BEL=secret`, which IS an assignment, and printed the whole
+		// `LABEL=secret` word as the program name instead.
+		const name = COMMAND_ASSIGNMENT.exec(joinShellLines(rest))?.[0];
 		if (name === undefined) break;
 		const next = firstShellWord(rest);
 		if (next.word.length === 0) break;
@@ -506,6 +656,8 @@ function describeCommandFailure(failure: CommandFailure, timeoutMs: number): str
 			return `could not be started (${failure.code ?? "unknown error"})`;
 		case "cwd-unavailable":
 			return "was not run: the project directory is not accessible";
+		case "expired":
+			return "printed a credential that had already expired";
 	}
 }
 

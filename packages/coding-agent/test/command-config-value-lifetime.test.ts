@@ -44,6 +44,17 @@ function jwt(subject: string, expiresAtMs: number): string {
 		.join(".");
 }
 
+/** An unsigned JWT whose `exp` claim is exactly `exp`, including zero and negative values. */
+function jwtWithExp(subject: string, exp: number): string {
+	return [
+		{ alg: "RS256", typ: "JWT" },
+		{ sub: subject, exp },
+	]
+		.map(part => Buffer.from(JSON.stringify(part)).toString("base64url"))
+		.concat("c2ln")
+		.join(".");
+}
+
 describe("command-backed config value lifetime", () => {
 	let tempDir = "";
 	let tokenFile = "";
@@ -222,5 +233,82 @@ describe("command-backed config value lifetime", () => {
 		} finally {
 			authStorage.close();
 		}
+	});
+
+	// The boundary nothing probed: 180 tests stayed green while `now < expiresAt`
+	// was weakened to `now <= expiresAt`. A JWT is dead AT `exp`, not after it.
+	test("a JWT is not served at exactly its exp", async () => {
+		const expiresAt = now + HOUR_MS;
+		const token = jwt("minted", expiresAt);
+		fs.writeFileSync(tokenFile, token);
+		expect(await resolveCredentialConfigValue(config)).toBe(token);
+
+		fs.writeFileSync(tokenFile, "FAIL");
+		now = expiresAt;
+		await expect(resolveCredentialConfigValue(config)).rejects.toThrow(/exited with status 1/);
+	});
+
+	// The other untested guard: serving a cached value instead of running the
+	// command again. Without it every request mints, and a command that has since
+	// started failing takes the credential down with it.
+	test("a cached value inside its lifetime is served without running the command again", async () => {
+		const expiresAt = now + HOUR_MS;
+		const first = jwt("first", expiresAt);
+		fs.writeFileSync(tokenFile, first);
+		expect(await resolveConfigValue(config)).toBe(first);
+
+		// A different, still valid token, and a clock well short of the refresh point.
+		fs.writeFileSync(tokenFile, jwt("second", now + 2 * HOUR_MS));
+		now += 60_000;
+		expect(await resolveConfigValue(config)).toBe(first);
+		expect(runs()).toBe(1);
+
+		// And the cache, not the last-good path, is what served it: a failing command
+		// changes nothing while the cached token is still inside its lifetime.
+		fs.writeFileSync(tokenFile, "FAIL");
+		expect(await resolveConfigValue(config)).toBe(first);
+		expect(runs()).toBe(1);
+	});
+
+	// A fresh run was the one path that never passed the expiry check: it returned
+	// its own stdout straight to the caller and cached it as the last good value.
+	test("a command that prints an already expired JWT fails by name instead of serving it", async () => {
+		const expired = jwt("stale", now - 1_000);
+		fs.writeFileSync(tokenFile, expired);
+
+		const refusal = await resolveCredentialConfigValue(config).catch((error: unknown) => error);
+		expect(refusal).toBeInstanceOf(CredentialSourceError);
+		expect((refusal as Error).message).toContain("printed a credential that had already expired");
+		expect((refusal as Error).message).not.toContain(expired);
+		// Nor is it kept: the plain resolver gets nothing, not the dead token.
+		expect(await resolveConfigValue(config)).toBeUndefined();
+	});
+
+	test.each([0, -1])("a numeric exp of %s is an expiry, not an opaque value", async exp => {
+		fs.writeFileSync(tokenFile, jwtWithExp("stale", exp));
+		// Read as "no discoverable expiry", such a token was served and then kept for
+		// the whole process under the default reuse.
+		await expect(resolveCredentialConfigValue(config)).rejects.toThrow(
+			/printed a credential that had already expired/,
+		);
+		expect(await resolveConfigValue(config)).toBeUndefined();
+	});
+
+	test("a wall clock moved back does not revive a token already observed expired", async () => {
+		const expiresAt = now + HOUR_MS;
+		const token = jwt("minted", expiresAt);
+		fs.writeFileSync(tokenFile, token);
+		expect(await resolveCredentialConfigValue(config)).toBe(token);
+
+		fs.writeFileSync(tokenFile, "FAIL");
+		now = expiresAt;
+		await expect(resolveCredentialConfigValue(config)).rejects.toThrow(CredentialSourceError);
+
+		// The clock goes backwards — NTP stepping, a VM resuming from a snapshot, a
+		// hand-set host clock. A credential seen dead stays dead.
+		now = expiresAt - 1_000;
+		const refusal = await resolveCredentialConfigValue(config).catch((error: unknown) => error);
+		expect(refusal).toBeInstanceOf(CredentialSourceError);
+		expect((refusal as Error).message).not.toContain(token);
 	});
 });
