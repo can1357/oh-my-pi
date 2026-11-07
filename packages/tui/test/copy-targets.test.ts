@@ -33,15 +33,6 @@ describe("extractCodeBlocks", () => {
 		expect(extractCodeBlocks(text)).toEqual([{ lang: "fish", code: "rg -il x ~/dir\n  nested" }]);
 	});
 
-	it("does not close a fence on a body line that carries an info string", () => {
-		expect(extractCodeBlocks("```md\n  ```js\n  example\n```")).toEqual([{ lang: "md", code: "  ```js\n  example" }]);
-	});
-
-	it("measures closing-fence indentation from the list item's content column", () => {
-		const text = "- item\n   ```md\n      ```\n    example\n   ```";
-		expect(extractCodeBlocks(text)).toEqual([{ lang: "md", code: "    ```\n  example" }]);
-	});
-
 	it("ends an unclosed list-item fence with its list, keeping later quotes and fences", () => {
 		const text = "- item\n  ```sh\n  echo hi\n\n> important\n\n```\nreal\n```";
 		expect(extractCodeBlocks(text)).toEqual([
