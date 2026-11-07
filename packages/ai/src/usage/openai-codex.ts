@@ -856,6 +856,8 @@ function classifyOpenAICodexPlan(report: UsageReport | null): OpenAICodexPlanCla
 	if (!planType) return "unknown";
 	// Pro Lite is a paid Codex tier, but does not imply full Pro-only model access.
 	if (planType === "prolite" || planType === "pro_lite") return "paid";
+	// ChatGPT reports Pro Max as the single token `promax`, which does not split into `pro`.
+	if (planType === "promax" || planType === "pro_max") return "pro";
 	const tokens = planType.split("_");
 	if (tokens.some(token => OPENAI_CODEX_PRO_PLAN_TOKENS[token] === true)) return "pro";
 	if (tokens.some(token => OPENAI_CODEX_PAID_PLAN_TOKENS[token] === true)) return "paid";
