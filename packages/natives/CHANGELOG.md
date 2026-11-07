@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Fixed sourced-file prefixes in noninteractive shell diagnostics, preserved non-UTF-8 names and glob patterns, and corrected binary script detection using each reader's byte sample and file kinds ([#18246](https://github.com/can1357/oh-my-pi/pull/18246) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
 - Fixed `find()` missing elements more than 24 levels down, such as VS Code's editor; it now searches 64 levels deep ([#18221](https://github.com/can1357/oh-my-pi/pull/18221) by [@will-bogusz](https://github.com/will-bogusz))
 - `glob`, `grep`, `fuzzyFind`, `ast_grep` and `ast_edit` now run their directory traversal on a filesystem runtime of their own, so a search over a large or cold tree can no longer take the worker threads that the embedded shell and every other native call are scheduled on. Those threads are named `pi-fs-worker`, so a stall in a search is tellable apart from a stall elsewhere.
 - Fixed a workspace tree whose native addon does not match its checkout failing with `undefined is not a constructor` at the callsite: a class the addon lacks now throws a message naming the addon file, both releases and `bun run build:native` — from its constructor and from any static entrypoint — and the loader reports that mismatch once as it loads ([#18230](https://github.com/can1357/oh-my-pi/pull/18230) by [@sjawhar](https://github.com/sjawhar))
@@ -32,7 +38,6 @@
 
 ### Fixed
 
-- Fixed sourced-file prefixes in noninteractive shell diagnostics, preserved non-UTF-8 names and glob patterns, and corrected binary script detection using each reader's byte sample and file kinds ([#18246](https://github.com/can1357/oh-my-pi/pull/18246) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a crash on Linux when a zsh-mode sort or `strftime`/`$langinfo` named a locale that is not installed.
 - Fixed `env -i` in the bash tool passing exported shell functions (`BASH_FUNC_name%%`) and non-environment shell variables to the command.
 - Fixed `$!` in command substitutions, subshells and pipeline stages to name the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
