@@ -410,6 +410,25 @@ export function treeMetadataIndent(maxWidth: number, maxDepth: number): number {
 	return Math.min(Math.max(0, maxWidth - 1), TREE_DETAIL_BASE_INDENT + Math.max(0, maxDepth) * TREE_SEGMENT_WIDTH);
 }
 
+/**
+ * Display label for an agent row in tree mode.
+ *
+ * Shows the short name when rendered directly under its displayed parent
+ * (stripping the prefix when it actually equals the displayed parent's id).
+ * When rendered at the root (depth 0, parent missing or orphaned), the full
+ * id is preserved so lineage is not lost.
+ */
+export function treeAgentLabel(id: string, displayedParentId: string | undefined, depth: number): string {
+	if (depth <= 0 || !displayedParentId || displayedParentId === MAIN_AGENT_ID) {
+		return id;
+	}
+	const prefix = `${displayedParentId}.`;
+	if (id.startsWith(prefix) && id.length > prefix.length) {
+		return id.slice(prefix.length);
+	}
+	return id;
+}
+
 /** Right-align `text` inside a fixed-width cell, truncating overflow. */
 export function alignRightCell(text: string, width: number): string {
 	return renderTableRow([{ text }], [{ width, align: "right", overflow: "truncate" }], undefined, {
