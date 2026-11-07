@@ -59,6 +59,7 @@
 - Fixed unnecessary repainting in the setup wizard while waiting for input in ANSI terminals.
 - Fixed Windows ConPTY event handling so delayed terminal event data no longer appears in the composer.
 - Fixed OSC 8 hyperlink support in Rex terminals so transcript URLs and file paths are command-clickable.
+- The dot between two extension statuses in the status bar now uses the status line separator color instead of the statuses' accent color, matching the other status bar separators ([#15740](https://github.com/can1357/oh-my-pi/issues/15740), [#16351](https://github.com/can1357/oh-my-pi/pull/16351) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
