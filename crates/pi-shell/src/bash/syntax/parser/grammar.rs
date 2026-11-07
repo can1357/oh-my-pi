@@ -246,8 +246,13 @@ impl Parser<'_> {
 		Ok(Some(Top { list, lo, hi, line }))
 	}
 
-	/// A list inside a compound command (`compound_list`).
+	/// A list inside a compound command (`compound_list`), one nesting
+	/// level deeper.
 	pub(super) fn compound_list(&mut self) -> PResult<Id<List>> {
+		self.nested(Self::compound_items)
+	}
+
+	fn compound_items(&mut self) -> PResult<Id<List>> {
 		self.skip_newlines()?;
 		let mark = self.t.open();
 		loop {
@@ -976,7 +981,7 @@ impl Parser<'_> {
 	fn cond_or(&mut self, tok: &mut T) -> CResult<Id<Cond>> {
 		let l = self.cond_and(tok)?;
 		if *tok == T::OrOr {
-			let r = self.cond_or(tok)?;
+			let r = self.nested(|p| p.cond_or(tok))?;
 			return Ok(self.t.cond(CondB::Or(l, r)));
 		}
 		Ok(l)
@@ -985,7 +990,7 @@ impl Parser<'_> {
 	fn cond_and(&mut self, tok: &mut T) -> CResult<Id<Cond>> {
 		let l = self.cond_term(tok)?;
 		if *tok == T::AndAnd {
-			let r = self.cond_and(tok)?;
+			let r = self.nested(|p| p.cond_and(tok))?;
 			return Ok(self.t.cond(CondB::And(l, r)));
 		}
 		Ok(l)
@@ -1026,7 +1031,7 @@ impl Parser<'_> {
 		match t.kind {
 			T::CondEnd => Err(CondFail::Silent),
 			T::LParen => {
-				let inner = match self.cond_or(tok) {
+				let inner = match self.nested(|p| p.cond_or(tok)) {
 					Ok(inner) => inner,
 					Err(CondFail::Err(e)) => {
 						// bash adds ``expected `)'`` (at the line of `[[`) after
@@ -1062,13 +1067,13 @@ impl Parser<'_> {
 				Ok(self.t.cond(CondB::Group(inner)))
 			},
 			T::Bang => {
-				let inner = self.cond_term(tok)?;
+				let inner = self.nested(|p| p.cond_term(tok))?;
 				Ok(self.t.cond(CondB::Not(inner)))
 			},
 			T::Word | T::Assign | T::Number => {
 				let w = self.tok_word(t);
 				if plain_text(&self.t, w) == Some(b"!") {
-					let inner = self.cond_term(tok)?;
+					let inner = self.nested(|p| p.cond_term(tok))?;
 					return Ok(self.t.cond(CondB::Not(inner)));
 				}
 				if let Some(op) = plain_text(&self.t, w)

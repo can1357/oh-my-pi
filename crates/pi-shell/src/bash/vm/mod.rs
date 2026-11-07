@@ -84,6 +84,9 @@ pub const BASH_VERSION: &str = "5.3.0(1)-release";
 /// freed instead of held for the shell's lifetime.
 const SPARE_BUFFER_BYTES: usize = 1 << 20;
 
+/// Unit ids [`Kernel::written`] remembers before it starts over.
+const WRITTEN_MAX: usize = 1 << 16;
+
 /// Engine types are `Send`; hosts move shells between threads.
 const _: () = {
 	const fn send<T: Send>() {}
@@ -417,8 +420,8 @@ pub struct Kernel {
 	/// Origin of each currently executing source-context unit in its actual
 	/// vproc.
 	pub trace_unit_origins: HashMap<Vpid, Arc<HashMap<UnitId, crate::bash::event::SourceOrigin>>>,
-	/// Unit blobs known to be in the store ([`Kernel::persist_unit`],
-	/// `externalize`).
+	/// Unit blobs known to be in the store ([`Kernel::note_written`]); at
+	/// most [`WRITTEN_MAX`] ids.
 	pub written:            HashSet<UnitId, crate::bash::ids::UnitIdState>,
 	/// Reused buffer for encoding unit blobs ([`Kernel::persist_unit`]); not
 	/// imaged.
@@ -640,7 +643,7 @@ impl Kernel {
 	/// once per id: a function body is in the store from its definition on,
 	/// so a shell restored from the store alone keeps its line numbers.
 	pub fn persist_unit(&mut self, store: &mut dyn StateStore, unit: &Unit) {
-		if !self.written.insert(unit.id) {
+		if !self.note_written(unit.id) {
 			return;
 		}
 		let mut buf = core::mem::take(&mut self.blob_buf);
@@ -658,6 +661,17 @@ impl Kernel {
 			self.written.remove(&unit.id);
 			self.fail(err);
 		}
+	}
+
+	/// Note that `id`'s blob is in the store; `false` when it already was
+	/// known. Past [`WRITTEN_MAX`] ids the set starts over: forgetting one
+	/// only costs writing its blob again, while a long-lived shell compiles
+	/// new units without end.
+	pub(crate) fn note_written(&mut self, id: UnitId) -> bool {
+		if self.written.len() >= WRITTEN_MAX && !self.written.contains(&id) {
+			self.written.clear();
+		}
+		self.written.insert(id)
 	}
 
 	/// Lend `tree`'s buffers to the next parse ([`Kernel::spare_tree`]),

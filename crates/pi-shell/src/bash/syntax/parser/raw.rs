@@ -71,7 +71,7 @@ impl Parser<'_> {
 		line: u32,
 	) -> PResult<()> {
 		self.raw_depth += 1;
-		let res = self.raw_scan(out, qc, open, close, flags, line);
+		let res = self.nested(|p| p.raw_scan(out, qc, open, close, flags, line));
 		self.raw_depth -= 1;
 		res
 	}
@@ -341,8 +341,13 @@ impl Parser<'_> {
 
 	/// A command substitution body after `$(`, `${ `, `${|`, `<(` or `>(`
 	/// (bash `parse_comsub`): the commands and the text bash stores between
-	/// the delimiters.
+	/// the delimiters. A substitution nests a word and a list, so it counts
+	/// as a nesting level besides its list's.
 	pub(super) fn comsub(&mut self, close: u8, value: bool) -> PResult<(Id<shape::List>, Vec<u8>)> {
+		self.nested(|p| p.comsub_body(close, value))
+	}
+
+	fn comsub_body(&mut self, close: u8, value: bool) -> PResult<(Id<shape::List>, Vec<u8>)> {
 		debug_assert!(self.la.is_none(), "a command substitution starts inside a word");
 		let mut lx = LexState::new();
 		lx.extglob = self.feat.contains(Features::EXTGLOB);

@@ -711,7 +711,7 @@ impl<'s> Parser<'s> {
 				i += 1;
 			}
 		}
-		let body = super::sub_parse_list(&mut self.t, &code, self.feat, text_lo);
+		let body = super::sub_parse_list(&mut self.t, &code, self.feat, text_lo, self.depth);
 		Ok(self.t.comsub(ComsubKind::Backtick, body, &text))
 	}
 
@@ -1040,7 +1040,7 @@ impl<'s> Parser<'s> {
 				.arith(Span::new(lo + 1, hi.saturating_sub(1)), inner, false);
 			return Ok(self.t.arith_part(a));
 		}
-		let body = super::sub_parse_list(&mut self.t, &text, self.feat, lo);
+		let body = super::sub_parse_list(&mut self.t, &text, self.feat, lo, self.depth);
 		Ok(self.t.comsub(ComsubKind::Dollar, body, &text))
 	}
 
@@ -1092,7 +1092,7 @@ impl<'s> Parser<'s> {
 		let line = self.bash_line();
 		self.bump();
 		self.bump();
-		match self.param_body(dq, doc, line)? {
+		match self.nested(|p| p.param_body(dq, doc, line))? {
 			Some(p) => {
 				if self.peek() == Some(b'}') {
 					self.bump();
