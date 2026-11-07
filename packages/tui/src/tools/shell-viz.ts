@@ -11,26 +11,21 @@ import type {
 
 /** Native live-run or restored-trace owner; the UI never holds shell syntax. */
 export type ShellVisualizationSource = RunTrace | ShellVisualization;
-const kVisualization = Symbol("shellTrace.visualization");
-/** A snapshot carrying its native owner; `null` marks one the engine rejected, so it is not re-restored per paint. */
-interface TaggedShellTrace extends ShellTrace {
-	[kVisualization]?: ShellVisualizationSource | null;
-}
+/** Each snapshot's native owner; `null` marks one the engine rejected, so it is not restored again per paint. */
+const visualizations = new WeakMap<ShellTrace, ShellVisualizationSource | null>();
 
 /** Bind the immutable snapshot before publishing it; live paints borrow the actual run. */
 export function attachShellTrace(snapshot: ShellTrace, trace: RunTrace): void {
-	const tagged: TaggedShellTrace = snapshot;
-	tagged[kVisualization] = trace;
+	visualizations.set(snapshot, trace);
 }
 
 /**
  * Historical traces restore their canonical native archive only once per snapshot.
- * Returns `undefined` when the engine rejects the snapshot (e.g. a `tool_result` hook rewrote
- * `script` so unit offsets no longer fit); callers render the plain command and output instead.
+ * `undefined` when the engine rejects the snapshot (e.g. a `tool_result` hook rewrote
+ * `script`); callers then render the plain command and output.
  */
 export function shellVisualization(snapshot: ShellTrace): ShellVisualizationSource | undefined {
-	const tagged: TaggedShellTrace = snapshot;
-	let visualization = tagged[kVisualization];
+	let visualization = visualizations.get(snapshot);
 	if (visualization === undefined) {
 		try {
 			visualization = new ShellVisualization(JSON.stringify(snapshot));
@@ -40,7 +35,7 @@ export function shellVisualization(snapshot: ShellTrace): ShellVisualizationSour
 			});
 			visualization = null;
 		}
-		tagged[kVisualization] = visualization;
+		visualizations.set(snapshot, visualization);
 	}
 	return visualization ?? undefined;
 }
