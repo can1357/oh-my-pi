@@ -15,7 +15,13 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
-import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	authRetryFinalError,
+	createAuthRetryKeyState,
+	isApiKeyResolver,
+	resolvedApiKeyBearer,
+	resolveNextAuthRetryKey,
+} from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
@@ -1313,8 +1319,14 @@ function streamSimpleRequest<TApi extends Api>(
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 			} catch (error) {
-				// A thrown resolver is a broker/OAuth/network failure, not a missing
-				// key — surface the cause instead of masking it as "No API key".
+				// A resolver that deliberately reports a missing key (a configured
+				// source that produced nothing) keeps that type and its message.
+				if (error instanceof AIError.MissingApiKeyError) {
+					outer.fail(error);
+					return;
+				}
+				// Any other thrown resolver is a broker/OAuth/network failure, not a
+				// missing key — surface the cause instead of masking it as "No API key".
 				outer.fail(
 					new AIError.ConfigurationError(
 						`Failed to resolve API key for provider ${model.provider}: ${error instanceof Error ? error.message : String(error)}`,
@@ -1355,6 +1367,14 @@ function streamSimpleRequest<TApi extends Api>(
 				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;
+			}
+			const finalError = authRetryFinalError(retryState, failure.error);
+			if (finalError !== failure.error) {
+				// The re-resolution failed at our own credential source: report that,
+				// not the provider's rejection of the previous key.
+				emitBufferedEvents(outer, failure.bufferedEvents);
+				outer.fail(finalError);
+				return;
 			}
 			emitFailure(failure);
 		})();

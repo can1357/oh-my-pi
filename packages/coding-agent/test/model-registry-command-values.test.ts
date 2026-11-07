@@ -3,14 +3,29 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { streamSimple } from "@oh-my-pi/pi-ai";
+import { CredentialSourceError } from "@oh-my-pi/pi-ai/error";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
+import {
+	clearConfigValueCache,
+	invalidateAllCommandConfigs,
+	invalidateCommandConfig,
+	resolveConfigValue,
+	resolveCredentialConfigValue,
+} from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
+import { SessionAccountPoolScope } from "@oh-my-pi/pi-coding-agent/config/account-pools";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import "@oh-my-pi/pi-coding-agent/session/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import {
+	resolveAuthBrokerConfig,
+	resolveEffectiveSettings,
+} from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import * as piUtils from "@oh-my-pi/pi-utils";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { getAgentDir, removeSyncWithRetries, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
 
 function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", "'\\''")}'`;
@@ -272,13 +287,15 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(await registry.getApiKey(model)).toBe("stale-key");
 		fs.writeFileSync(tokenFile, "FAIL");
 
-		const refreshed = await registry.resolver(model)({
-			lastChance: false,
-			error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
-			previousKey: "stale-key",
-		});
-
-		expect(refreshed).toBeUndefined();
+		// The request-path resolver reports the source's own failure; the driver
+		// records it and keeps retrying (see `resolveRetryKey`).
+		await expect(
+			registry.resolver(model)({
+				lastChance: false,
+				error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+				previousKey: "stale-key",
+			}),
+		).rejects.toBeInstanceOf(CredentialSourceError);
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		expect(await registry.getApiKey(model)).toBeUndefined();
 		expect((await registry.resolveModelHeaders(model))?.Authorization).toBeUndefined();
@@ -492,7 +509,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		fs.writeFileSync(tokenFile, "rotated");
 		expect(await resolveConfigValue(config)).toBe("initial");
 
-		invalidateAllCommandConfigs();
+		invalidateAllCommandConfigs("refresh");
 		expect(await resolveConfigValue(config)).toBe("rotated");
 	});
 
@@ -821,5 +838,580 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			{ auth: "Bearer stale-bearer", tenant: "stale-tenant" },
 			{ auth: "Bearer fresh-bearer", tenant: "fresh-tenant" },
 		]);
+	});
+
+	test("a failed re-run serves the last good key, warns, and retries in the background", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "good-key");
+		fs.writeFileSync(counterFile, "");
+		const command = trackedTokenCommand(tokenFile, counterFile);
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("good-key");
+
+		// An explicit refresh re-runs the helper, which now fails (as a timeout under load does).
+		fs.writeFileSync(tokenFile, "FAIL");
+		const warn = spyOn(piUtils.logger, "warn");
+		const realNow = Date.now;
+		let clockOffsetMs = 0;
+		const clock = spyOn(Date, "now").mockImplementation(() => realNow() + clockOffsetMs);
+		try {
+			await registry.refresh("online", { refreshCommandCredentials: true });
+			expect(await registry.getApiKey(model)).toBe("good-key");
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+			const failures = warn.mock.calls.filter(([message]) => message === "config: !command value resolution failed");
+			expect(failures).toHaveLength(1);
+			expect(failures[0]?.[1]).toMatchObject({ reason: "exit", servingLastGoodValue: true });
+			expect(JSON.stringify(failures[0])).not.toContain(tokenFile);
+
+			// Within the failure backoff the last good key serves without re-running the helper.
+			expect(await registry.getApiKey(model)).toBe("good-key");
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+
+			// After the backoff, resolution answers at once from the last good key and
+			// re-runs the helper in the background; its next success replaces the key.
+			fs.writeFileSync(tokenFile, "rotated-key");
+			clockOffsetMs = 31_000;
+			expect(await registry.getApiKey(model)).toBe("good-key");
+			// The background retry is a real helper process and resolution exposes no
+			// promise for it, so wait on its observable effect with a bounded poll.
+			const deadline = realNow() + 10_000;
+			let key = await registry.getApiKey(model);
+			while (key !== "rotated-key" && realNow() < deadline) {
+				await Bun.sleep(20);
+				key = await registry.getApiKey(model);
+			}
+			expect(key).toBe("rotated-key");
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("111");
+		} finally {
+			clock.mockRestore();
+			warn.mockRestore();
+		}
+	});
+
+	test("invalidateCommandConfigs keeps the last good key on a refresh and drops it on a rejection", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "good-key");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenFile, counterFile)}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		// The owner registry: a worker thread's mirror forwards its invalidations to this method.
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("good-key");
+
+		fs.writeFileSync(tokenFile, "FAIL");
+		registry.invalidateCommandConfigs("custom-proxy", "refresh");
+		expect(await registry.getApiKey(model)).toBe("good-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+
+		registry.invalidateCommandConfigs(undefined, "rejected");
+		expect(await registry.getApiKey(model)).toBeUndefined();
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("111");
+	});
+
+	test.skipIf(process.platform === "win32")(
+		"a waiter whose run a 401 invalidated gets the fresh key, not the rejected one",
+		async () => {
+			const tokenFile = path.join(tempDir, "token.txt");
+			const readMarker = path.join(tempDir, "read");
+			fs.writeFileSync(tokenFile, "rejected-key");
+			// The helper reads the token first, signals that it did, then sleeps before printing it,
+			// so a run started before the rotation keeps printing the old value.
+			const config = `!IFS= read -r token < ${shellQuote(tokenFile)}; : > ${shellQuote(readMarker)}; sleep 1; printf %s "$token"`;
+			const waiter = resolveConfigValue(config);
+			const deadline = Date.now() + 10_000;
+			while (!fs.existsSync(readMarker) && Date.now() < deadline) await Bun.sleep(10);
+			expect(fs.existsSync(readMarker)).toBe(true);
+
+			// A 401 rejects the key while the waiter's run is still in flight, and the key rotates.
+			fs.writeFileSync(tokenFile, "fresh-key");
+			invalidateCommandConfig(config, "rejected");
+
+			expect(await waiter).toBe("fresh-key");
+			expect(await resolveConfigValue(config)).toBe("fresh-key");
+		},
+	);
+
+	test("a command that never succeeded still resolves to no key", async () => {
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(counterFile, "");
+		const config = `!${failedTrackingCommand(counterFile)}`;
+		expect(await resolveConfigValue(config)).toBeUndefined();
+		expect(await resolveConfigValue(config)).toBeUndefined();
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+	});
+
+	test.skipIf(process.platform === "win32")("providers.commandTimeoutSeconds bounds each command run", async () => {
+		const warn = spyOn(piUtils.logger, "warn");
+		const unbind = bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 0.5 }));
+		try {
+			const marker = path.join(tempDir, "slow");
+			const started = performance.now();
+			expect(await resolveConfigValue(`!sleep 3; printf %s ${shellQuote(marker)}`)).toBeUndefined();
+			expect(performance.now() - started).toBeLessThan(2_500);
+			const failure = warn.mock.calls.find(([message]) => message === "config: !command value resolution failed");
+			expect(failure?.[1]).toMatchObject({ reason: "timeout", timeoutMs: 500 });
+		} finally {
+			unbind();
+			warn.mockRestore();
+		}
+		// A longer limit lets the same kind of slow helper finish.
+		const unbindLong = bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 30 }));
+		try {
+			const marker = path.join(tempDir, "finishes");
+			expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
+		} finally {
+			unbindLong();
+			// Re-apply the default (10 s) to the process-wide limit.
+			bindEffects(Settings.isolated({}))();
+		}
+	});
+
+	/**
+	 * A source that produced nothing must say which source and what it did. The
+	 * request path refuses with that message; availability probes still resolve
+	 * `undefined` so a model picker does not throw at a broken credential.
+	 */
+	describe.skipIf(process.platform === "win32")("a credential source that produced nothing", () => {
+		/** models.json with one openai-completions provider whose `apiKey` is `config`. */
+		function providerWithApiKey(config: string): ModelRegistry {
+			fs.writeFileSync(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						"custom-proxy": {
+							baseUrl: "https://custom-proxy.example.com/v1",
+							api: "openai-completions",
+							apiKey: config,
+							authHeader: true,
+							models: [{ id: "custom-model", name: "Custom Model" }],
+						},
+					},
+				}),
+			);
+			return new ModelRegistry(authStorage, modelsPath);
+		}
+
+		/** The error the request path rejects with, or a failure if it resolved. */
+		async function requestRefusal(registry: ModelRegistry): Promise<Error> {
+			try {
+				const resolved = await registry.getApiKeyWithCredentialForProvider("custom-proxy");
+				throw new Error(`Expected a refusal, resolved ${JSON.stringify(resolved)}`);
+			} catch (error) {
+				if (error instanceof CredentialSourceError) return error;
+				throw error;
+			}
+		}
+
+		test("a command that prints nothing refuses by name instead of reporting no key", async () => {
+			const registry = providerWithApiKey("!true");
+			expect((await requestRefusal(registry)).message).toBe(
+				"No API key for provider custom-proxy: the command `true` exited 0 but printed nothing",
+			);
+			// Probes keep their old contract: no key, no throw.
+			const model = registry.find("custom-proxy", "custom-model");
+			if (!model) throw new Error("Expected custom model");
+			expect(await registry.getApiKey(model)).toBeUndefined();
+			expect(await registry.getApiKeyForProvider("custom-proxy")).toBeUndefined();
+			expect((await registry.resolveModelHeaders(model))?.Authorization).toBeUndefined();
+		});
+
+		test("a non-zero exit reads differently from a run that printed nothing", async () => {
+			expect((await requestRefusal(providerWithApiKey("!false"))).message).toBe(
+				"No API key for provider custom-proxy: the command `false` exited with status 1",
+			);
+		});
+
+		test("a run past the time limit reads as a timeout, not as an empty run", async () => {
+			const unbind = bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 0.5 }));
+			try {
+				const started = performance.now();
+				expect((await requestRefusal(providerWithApiKey("!sleep 5; printf %s late"))).message).toBe(
+					"No API key for provider custom-proxy: the command `sleep …` timed out after 0.5 s, the providers.commandTimeoutSeconds limit",
+				);
+				expect(performance.now() - started).toBeLessThan(4_000);
+			} finally {
+				unbind();
+				bindEffects(Settings.isolated({}))();
+			}
+		});
+
+		test("an environment variable set to the empty string is refused as a credential only", async () => {
+			const name = `OMP_TEST_EMPTY_KEY_${Snowflake.next()}`;
+			process.env[name] = "";
+			try {
+				// The credential path refuses: without this, the literal fallback makes the
+				// variable's own name the bearer and the user gets the provider's 401.
+				expect((await requestRefusal(providerWithApiKey(name))).message).toBe(
+					`No API key for provider custom-proxy: environment variable ${name} is set but empty`,
+				);
+				// Every other config value keeps the documented literal fallback. Changing
+				// this resolver for all of them silently turned a configured auth broker
+				// into the local store instead of failing, so the stricter rule is the
+				// credential resolver's alone.
+				expect(await resolveConfigValue(name)).toBe(name);
+				expect(await resolveCredentialConfigValue(`${name}_UNSET_LITERAL`)).toBe(`${name}_UNSET_LITERAL`);
+			} finally {
+				delete process.env[name];
+			}
+			// An unset variable keeps the literal fallback on the credential path too.
+			expect(await resolveConfigValue(name)).toBe(name);
+		});
+
+		test("the failure a resolution produced survives a concurrent invalidation", async () => {
+			// The reason used to be read from a shared map only after the value came
+			// back undefined, and an invalidation landing in that window restored the
+			// unhelpful "no key". It now travels with the resolution that produced it.
+			// The window is one await boundary wide, so this drives it exactly: start
+			// the resolution, then invalidate before its continuation runs.
+			const config = "!false";
+			clearConfigValueCache();
+			expect(await resolveConfigValue(config)).toBeUndefined();
+			const credential = resolveCredentialConfigValue(config).then(
+				value => value,
+				(error: unknown) => error,
+			);
+			invalidateAllCommandConfigs("refresh");
+			const failure = await credential;
+			expect(failure).toBeInstanceOf(CredentialSourceError);
+			expect((failure as Error).message).toBe("the command `false` exited with status 1");
+		});
+
+		test("a derived bearer header follows the credential rule, not the literal fallback", async () => {
+			// `authHeader: true` derives Authorization from the apiKey config. Resolving
+			// it generically sent the variable's own name and overwrote a valid runtime
+			// key; it must add no header instead.
+			const name = `OMP_TEST_EMPTY_HDR_${Snowflake.next()}`;
+			process.env[name] = "";
+			try {
+				const registry = providerWithApiKey(name);
+				const model = registry.find("custom-proxy", "custom-model");
+				if (!model) throw new Error("Expected custom model");
+				expect((await registry.resolveModelHeaders(model))?.Authorization).toBeUndefined();
+			} finally {
+				delete process.env[name];
+			}
+		});
+
+		test("the pool-scoped request facade reports the source too", async () => {
+			// The scope replaces getApiKeyAndHeaders with its own session-scoped copy,
+			// and every session started with oauthAccountPools gets it. A second copy
+			// of the facade is how one of them ended up back on the availability probe.
+			const registry = providerWithApiKey("!false");
+			const model = registry.find("custom-proxy", "custom-model");
+			if (!model) throw new Error("Expected custom model");
+			// The pool covers a different provider: a pooled session that also configures
+			// a models.yml apiKey for the SAME provider is refused by the restriction
+			// before the credential command ever runs, so such a fixture cannot reach
+			// the facade it claims to test. The scope's facade still serves every other
+			// provider, which is the path that was on the availability probe.
+			const scope = new SessionAccountPoolScope(
+				authStorage,
+				{ "pooled-elsewhere": ["pool-identity"] },
+				"pool-session",
+			);
+			try {
+				expect(await scope.registry(registry).getApiKeyAndHeaders(model)).toEqual({
+					ok: false,
+					error: "No API key for provider custom-proxy: the command `false` exited with status 1",
+				});
+			} finally {
+				scope.release();
+			}
+		});
+
+		test("the historical request facade reports the source, not a generic missing key", async () => {
+			// getApiKeyAndHeaders is a request path: it must not read the availability
+			// probe, or the fix stops at the edge of the new API.
+			const registry = providerWithApiKey("!false");
+			const model = registry.find("custom-proxy", "custom-model");
+			if (!model) throw new Error("Expected custom model");
+			expect(await registry.getApiKeyAndHeaders(model)).toEqual({
+				ok: false,
+				error: "No API key for provider custom-proxy: the command `false` exited with status 1",
+			});
+		});
+
+		test("the label names the program only: no argument, no assignment value, no home path", async () => {
+			// A leading `NAME=value` is as much a secret as an argument, and the message
+			// also reaches ~/.omp/logs, which users paste into bug reports.
+			expect((await requestRefusal(providerWithApiKey("!SECRET_TOKEN=hunter2 false"))).message).toBe(
+				"No API key for provider custom-proxy: the command `SECRET_TOKEN=… false` exited with status 1",
+			);
+			// A quoted program path keeps its spaces, or an operator cannot match the
+			// message against their config (and every `C:\Program Files\…` hits this).
+			const spaced = path.join(tempDir, "my scripts");
+			fs.mkdirSync(spaced, { recursive: true });
+			const script = path.join(spaced, "mint.sh");
+			fs.writeFileSync(script, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+			expect((await requestRefusal(providerWithApiKey(`!${shellQuote(script)}`))).message).toBe(
+				`No API key for provider custom-proxy: the command \`${script}\` exited with status 1`,
+			);
+			// A substitution is not parsed, and the scan desynchronises inside it, so
+			// nothing after it is printed. Showing the text there put the secret in
+			// the error and in ~/.omp/logs.
+			const subst = await requestRefusal(providerWithApiKey("!SECRET=$(echo 'sk-live-not-a-real-key') false"));
+			expect(subst.message).toBe(
+				"No API key for provider custom-proxy: the command `SECRET=… …` exited with status 1",
+			);
+			expect(subst.message).not.toContain("sk-live-not-a-real-key");
+			// The home directory is shortened out, like every other path we show. The
+			// home is a stub pointing at tempDir: a fixture must never write, or even
+			// name, a path under the real home.
+			const homed = spyOn(os, "homedir").mockReturnValue(fs.realpathSync(tempDir));
+			try {
+				// Positive, and after symlinks: the fixture must live under the temp root,
+				// whatever the path we were handed resolves to.
+				const root = fs.realpathSync(tempDir);
+				const underHome = path.join(root, "home-mint.sh");
+				expect(path.resolve(underHome).startsWith(`${root}${path.sep}`)).toBe(true);
+				fs.writeFileSync(underHome, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+				expect((await requestRefusal(providerWithApiKey(`!${underHome}`))).message).toBe(
+					"No API key for provider custom-proxy: the command `~/home-mint.sh` exited with status 1",
+				);
+			} finally {
+				homed.mockRestore();
+			}
+		});
+
+		test("the label stops at a quote it cannot close, and at an escaped quote inside one", async () => {
+			// `\"` inside double quotes is a literal quote, not the closing one. Reading
+			// it as the close desynchronised the scan and printed the rest of the
+			// assignment's value as the program name, into the message and ~/.omp/logs.
+			const escaped = await requestRefusal(providerWithApiKey('!LABEL="x\\" sk-live-escaped-not-a-real-key" false'));
+			expect(escaped.message).toBe(
+				"No API key for provider custom-proxy: the command `LABEL=… false` exited with status 1",
+			);
+			expect(escaped.message).not.toContain("sk-live-escaped-not-a-real-key");
+			// A word that ends while a quote is still open is not a word the shell would
+			// have ended either: fail closed rather than print the remaining text.
+			for (const open of ['"', "'"]) {
+				const unterminated = await requestRefusal(
+					providerWithApiKey(`!${open}false sk-live-unterminated-not-a-real-key`),
+				);
+				// The shell reports its own syntax error here, so the status is the
+				// shell's and not worth pinning; the label is the contract.
+				expect(unterminated.message).toStartWith(
+					"No API key for provider custom-proxy: the command `…` exited with status",
+				);
+				expect(unterminated.message).not.toContain("sk-live-unterminated-not-a-real-key");
+			}
+		});
+
+		// The six inputs a review arm leaked through the real CLI at round 5, each
+		// confirmed in that run's own ~/.omp/logs. They are fixtures rather than a
+		// re-survey: a 46-input survey of the label helper in isolation reported zero
+		// leaks in the same round, because none of these was among its inputs.
+		test.each([
+			// Characters JavaScript calls whitespace and /bin/sh does not. The shell sees
+			// ONE assignment followed by `false`; splitting inside the value printed the
+			// value as the program name.
+			["a nonbreaking space inside an assignment value", "LABEL=x\u00a0sk-live-nbsp false"],
+			["an em space inside an assignment value", "LABEL=x\u2003sk-live-em false"],
+			["a carriage return inside an assignment value", "LABEL=x\rsk-live-cr false"],
+			// Executable words that only LOOK like assignments once quotes and escapes are
+			// removed. The shell runs `LABEL=x` as a program; its argument is not ours to print.
+			["a quoted word that decodes to NAME=value", "'LABEL=x' sk-live-quoted"],
+			["an escaped = in a word that decodes to NAME=value", "LABEL\\=x sk-live-escaped-eq"],
+			["a partly quoted name that decodes to NAME=value", "LA'BEL'=x sk-live-split-name"],
+		])("the label leaks nothing for %s", async (_name, apiKeyConfig) => {
+			const refusal = await requestRefusal(providerWithApiKey(`!${apiKeyConfig}`));
+			expect(refusal.message).not.toContain("sk-live-");
+		});
+
+		test("a 401 whose re-resolution yields nothing reports the source, not the rejection", async () => {
+			const tokenFile = path.join(tempDir, "remint-token.txt");
+			fs.writeFileSync(tokenFile, "stale-key");
+			const script = path.join(tempDir, "mint.sh");
+			fs.writeFileSync(
+				script,
+				`#!/bin/sh\nt=$(cat ${shellQuote(tokenFile)})\n[ "$t" = FAIL ] && exit 1\nprintf %s "$t"\n`,
+				{ mode: 0o755 },
+			);
+
+			const registry = providerWithApiKey(`!${script}`);
+			const model = registry.find("custom-proxy", "custom-model");
+			if (!model) throw new Error("Expected custom model");
+			expect(await registry.getApiKey(model)).toBe("stale-key");
+			fs.writeFileSync(tokenFile, "FAIL");
+
+			const attempted: string[] = [];
+			const failure = await withAuth(registry.resolver(model), async key => {
+				attempted.push(key);
+				throw Object.assign(new Error("401 authentication_error"), { status: 401 });
+			}).then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+
+			expect(attempted).toEqual(["stale-key"]);
+			expect(failure).toBeInstanceOf(CredentialSourceError);
+			// The label shortens $HOME, so build the expectation the same way rather
+			// than assuming the OS temp dir sits outside it.
+			const label = script.startsWith(`${os.homedir()}/`) ? `~${script.slice(os.homedir().length)}` : script;
+			expect((failure as Error).message).toBe(
+				`No API key for provider custom-proxy: the command \`${label}\` exited with status 1. ` +
+					"It was re-resolved because the provider rejected the previous key: 401 authentication_error",
+			);
+			expect((failure as Error).cause).toBeInstanceOf(Error);
+		});
+	});
+
+	/** Config dir whose config.yml sets `commandTimeoutSeconds` (and optionally more YAML). */
+	function scopeWithTimeout(name: string, seconds: number, extraYaml = ""): string {
+		const agentDir = path.join(tempDir, name);
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			`providers:\n  commandTimeoutSeconds: ${seconds}\n${extraYaml}`,
+		);
+		return agentDir;
+	}
+
+	// Each case starts from a 0.5 s process limit left by an earlier owner, shorter than its 1 s helper,
+	// so only the limit the case's own settings name lets the helper finish.
+	describe.skipIf(process.platform === "win32")("standalone command time limit", () => {
+		beforeEach(() => {
+			expect(Settings.current).toBeNull();
+			bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 0.5 }))();
+		});
+		afterEach(() => {
+			bindEffects(Settings.isolated({}))();
+			clearConfigValueCache();
+		});
+
+		test("credential discovery's read-only load names the limit (omp token)", async () => {
+			const agentDir = scopeWithTimeout("standalone-agent", 30);
+			await resolveEffectiveSettings({ cwd: tempDir, agentDir });
+			const marker = path.join(tempDir, "standalone");
+			expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
+		});
+
+		test("settings a caller passes to credential discovery name the limit (omp usage)", async () => {
+			const agentDir = scopeWithTimeout("explicit-agent", 30);
+			const settings = await Settings.loadReadOnly({ cwd: tempDir, agentDir });
+			await resolveEffectiveSettings({ settings });
+			const marker = path.join(tempDir, "explicit");
+			expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
+		});
+
+		test("a !command broker token runs under the agent dir's limit (omp auth-broker, auth-gateway)", async () => {
+			const agentDir = scopeWithTimeout(
+				"broker-agent",
+				30,
+				`auth:\n  broker:\n    url: http://127.0.0.1:9\n    token: ${JSON.stringify("!sleep 1; printf broker-token")}\n`,
+			);
+			const previousAgentDir = getAgentDir();
+			const previousEnv = Object.fromEntries(
+				["PI_CODING_AGENT_DIR", "OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"].map(key => [key, process.env[key]]),
+			);
+			delete process.env.OMP_AUTH_BROKER_URL;
+			delete process.env.OMP_AUTH_BROKER_TOKEN;
+			setAgentDir(agentDir);
+			try {
+				expect(await resolveAuthBrokerConfig()).toEqual({ url: "http://127.0.0.1:9", token: "broker-token" });
+			} finally {
+				setAgentDir(previousAgentDir);
+				for (const [key, value] of Object.entries(previousEnv)) {
+					if (value === undefined) delete process.env[key];
+					else process.env[key] = value;
+				}
+			}
+		});
+
+		// A configured `auth.broker.token` that nothing was going to read must not run,
+		// and must not fail the process: making the token a credential source turned a
+		// leftover entry into a hard error for users whose broker comes from the
+		// environment, and for users with no broker at all.
+		test("a configured broker token the environment outranks is never run", async () => {
+			const agentDir = scopeWithTimeout(
+				"broker-env-wins",
+				30,
+				`auth:\n  broker:\n    url: http://127.0.0.1:9\n    token: ${JSON.stringify("!false")}\n`,
+			);
+			const previousAgentDir = getAgentDir();
+			const previousEnv = Object.fromEntries(
+				["PI_CODING_AGENT_DIR", "OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"].map(key => [key, process.env[key]]),
+			);
+			delete process.env.OMP_AUTH_BROKER_URL;
+			process.env.OMP_AUTH_BROKER_TOKEN = "environment-broker-token";
+			setAgentDir(agentDir);
+			try {
+				expect(await resolveAuthBrokerConfig()).toEqual({
+					url: "http://127.0.0.1:9",
+					token: "environment-broker-token",
+				});
+			} finally {
+				setAgentDir(previousAgentDir);
+				for (const [key, value] of Object.entries(previousEnv)) {
+					if (value === undefined) delete process.env[key];
+					else process.env[key] = value;
+				}
+			}
+		});
+
+		test("a leftover broker token with no broker URL leaves the local store alone", async () => {
+			const agentDir = scopeWithTimeout(
+				"broker-no-url",
+				30,
+				`auth:\n  broker:\n    token: ${JSON.stringify("!false")}\n`,
+			);
+			const previousAgentDir = getAgentDir();
+			const previousEnv = Object.fromEntries(
+				["PI_CODING_AGENT_DIR", "OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"].map(key => [key, process.env[key]]),
+			);
+			delete process.env.OMP_AUTH_BROKER_URL;
+			delete process.env.OMP_AUTH_BROKER_TOKEN;
+			setAgentDir(agentDir);
+			try {
+				expect(await resolveAuthBrokerConfig()).toBeNull();
+			} finally {
+				setAgentDir(previousAgentDir);
+				for (const [key, value] of Object.entries(previousEnv)) {
+					if (value === undefined) delete process.env[key];
+					else process.env[key] = value;
+				}
+			}
+		});
+
+		test("settings that drive effects keep their limit when discovery loads another scope", async () => {
+			const releaseOwner = bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 30 }));
+			try {
+				await resolveEffectiveSettings({ cwd: tempDir, agentDir: scopeWithTimeout("other-scope", 0.5) });
+				const marker = path.join(tempDir, "owned");
+				expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
+			} finally {
+				releaseOwner();
+			}
+		});
 	});
 });

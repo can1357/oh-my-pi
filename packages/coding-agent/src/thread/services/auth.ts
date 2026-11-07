@@ -29,6 +29,7 @@ import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
 	ApiKeyRequiredError,
 	ConfigurationError,
+	CredentialSourceError,
 	LoginCancelledError,
 	MissingApiKeyError,
 	OAuthError,
@@ -361,7 +362,7 @@ function serveModelRegistry(state: PeerAuthState): RpcServe<ModelRegistry, Model
 				snapshot: toWireMirrorBatch(snapshot),
 			};
 		},
-		invalidateCommandConfigs: (registry, provider) => registry.invalidateCommandConfigs(provider),
+		invalidateCommandConfigs: (registry, provider, reason) => registry.invalidateCommandConfigs(provider, reason),
 		refresh: (registry, strategy, options) => registry.refresh(strategy, options),
 		refreshProvider: (registry, providerId, strategy, options) =>
 			registry.refreshProvider(providerId, strategy, options),
@@ -417,6 +418,7 @@ function registerAuthErrors(): void {
 	if (authErrorsRegistered) return;
 	authErrorsRegistered = true;
 	registerRpcError("MissingApiKeyError", message => new MissingApiKeyError(undefined, message));
+	registerRpcError("CredentialSourceError", message => new CredentialSourceError(undefined, message));
 	registerRpcError("OAuthRefreshUnavailableError", message => {
 		const error = new OAuthRefreshUnavailableError("", undefined);
 		error.message = message;

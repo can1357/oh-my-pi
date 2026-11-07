@@ -36,12 +36,16 @@ import {
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 import { combine, type ScopeLike } from "../config/registry";
-import { resolveConfigValue } from "../config/resolve-config-value";
+import {
+	resolveConfigValue,
+	resolveCredentialConfigValue,
+	useStandaloneCommandTimeout,
+} from "../config/resolve-config-value";
 import { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
 
 import { cfgAuthAccountPolicies, cfgAuthBrokerToken, cfgAuthBrokerUrl } from "../config/model-settings";
-import { cfgRetryUsageReservePct } from "./settings";
+import { cfgProvidersCommandTimeoutSeconds, cfgRetryUsageReservePct } from "./settings";
 
 export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
 
@@ -57,13 +61,24 @@ export interface EffectiveSettingsScope {
  * Resolve the settings auth discovery must honor: the explicit instance, else the
  * global instance when it targets the same agent dir (and cwd, when given), else a
  * read-only load so `--config`/`PI_CONFIG_FILES`/project overlays still apply.
+ *
+ * The result also becomes the source of the `!command` time limit for a process
+ * whose effects no settings instance drives (`omp token`, `omp usage`, the broker
+ * and gateway commands): such a process has no effect to apply
+ * `providers.commandTimeoutSeconds`. Settings that drive effects (`Settings.init`,
+ * an SDK session's `bindEffects`) keep their own limit; this never writes over it.
  */
 export async function resolveEffectiveSettings({
 	settings,
 	cwd,
 	agentDir = getAgentDir(),
 }: EffectiveSettingsScope = {}): Promise<Settings> {
-	if (settings) return settings;
+	const effective = settings ?? (await currentOrReadOnlySettings(cwd, agentDir));
+	useStandaloneCommandTimeout(() => cfgProvidersCommandTimeoutSeconds.get(effective) * 1_000);
+	return effective;
+}
+
+async function currentOrReadOnlySettings(cwd: string | undefined, agentDir: string): Promise<Settings> {
 	const current = await Settings.current;
 	if (
 		current &&
@@ -109,9 +124,19 @@ let cachedConfigPromise: Promise<AuthBrokerClientConfig | null> | null = null;
 export function resolveAuthBrokerConfig(): Promise<AuthBrokerClientConfig | null> {
 	const key = `${process.env.OMP_AUTH_BROKER_URL ?? ""}\u0000${process.env.OMP_AUTH_BROKER_TOKEN ?? ""}\u0000${getAgentDir()}`;
 	if (cachedConfigPromise && cachedConfigKey === key) return cachedConfigPromise;
-	const promise = resolveAuthBrokerConfigShared({
-		agentDir: getAgentDir(),
-		configValueResolver: resolveConfigValue,
+	const agentDir = getAgentDir();
+	// A `!command` broker token runs under the limit of this agent dir's settings
+	// (see `resolveEffectiveSettings`): the broker and gateway commands reach here
+	// directly. Settings a caller already gave credential discovery stay the source.
+	const promise = currentOrReadOnlySettings(undefined, agentDir).then(settings => {
+		useStandaloneCommandTimeout(() => cfgProvidersCommandTimeoutSeconds.get(settings) * 1_000, {
+			keepExisting: true,
+		});
+		return resolveAuthBrokerConfigShared({
+			agentDir,
+			configValueResolver: resolveConfigValue,
+			credentialValueResolver: resolveCredentialConfigValue,
+		});
 	});
 	cachedConfigKey = key;
 	cachedConfigPromise = promise;
@@ -154,7 +179,11 @@ export interface AuthStorageSettingsSync {
 export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: AuthStorage): AuthStorageSettingsSync {
 	const settings = "settings" in scope ? scope.settings : scope;
 	const agentDir = settings.getAgentDir();
-	const resolveOptions = { agentDir, configValueResolver: resolveConfigValue };
+	const resolveOptions = {
+		agentDir,
+		configValueResolver: resolveConfigValue,
+		credentialValueResolver: resolveCredentialConfigValue,
+	};
 	// Snapshot the connection `authStorage` was opened with, before any edit lands.
 	let activeBroker: Promise<AuthBrokerClientConfig | null> = resolveAuthBrokerConfigShared(resolveOptions).catch(
 		() => null,
@@ -220,6 +249,7 @@ export function discoverAuthStorage(
 		...options,
 		agentDir,
 		configValueResolver: resolveConfigValue,
+		credentialValueResolver: resolveCredentialConfigValue,
 	});
 }
 

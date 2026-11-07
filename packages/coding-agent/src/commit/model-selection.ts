@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
+import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import type { ApiKeyResolverRegistry } from "../config/api-key-resolver";
 import {
@@ -48,13 +49,16 @@ export async function resolvePrimaryModel(
 	if (!model) {
 		throw new Error("No model available for commit generation");
 	}
-	const apiKey = await modelRegistry.getApiKey(model);
+	// The request resolver, not the availability probe: a configured source that
+	// produced nothing must reach the user naming itself, not as "no API key".
+	const apiKeyResolver = modelRegistry.resolver(model);
+	const apiKey = await resolveApiKeyOnce(apiKeyResolver);
 	if (!apiKey) {
 		throw new Error(`No API key available for model ${model.provider}/${model.id}`);
 	}
 	return {
 		model,
-		apiKey: modelRegistry.resolver(model),
+		apiKey: apiKeyResolver,
 		thinkingLevel: concreteThinkingLevel(resolved?.thinkingLevel),
 	};
 }

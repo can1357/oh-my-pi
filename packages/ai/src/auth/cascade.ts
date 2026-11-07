@@ -67,9 +67,32 @@ export class KeyOverrides {
 		return this.#configFallbacks.get(provider);
 	}
 
-	/** Resolve a config value (env var name, "!command", literal) to the secret. */
-	resolve(config: string): Promise<string | undefined> {
-		return this.#configValueResolver(config);
+	/**
+	 * Resolve a config value (env var name, "!command", literal) to the secret.
+	 * A source that produced nothing resolves `undefined`; availability probes
+	 * and usage/health checks read it this way.
+	 */
+	async resolve(config: string): Promise<string | undefined> {
+		try {
+			return await this.#configValueResolver(config);
+		} catch (error) {
+			if (error instanceof AIError.CredentialSourceError) return undefined;
+			throw error;
+		}
+	}
+
+	/**
+	 * Resolve a config value for a request. A source that produced nothing
+	 * rejects with {@link AIError.CredentialSourceError} naming the provider,
+	 * the source and what it returned, instead of resolving `undefined`.
+	 */
+	async resolveForRequest(provider: string, config: string): Promise<string | undefined> {
+		try {
+			return await this.#configValueResolver(config);
+		} catch (error) {
+			if (!(error instanceof AIError.CredentialSourceError)) throw error;
+			throw new AIError.CredentialSourceError(provider, `No API key for provider ${provider}: ${error.message}`);
+		}
 	}
 
 	/**
@@ -333,7 +356,7 @@ export class KeyCascade implements KeysApi {
 		let credentialId: number | undefined;
 		let oauthIdentity: OAuthRequestIdentity | undefined;
 		let oauthAccess: string | undefined;
-		const apiKey = await this.#resolve(provider, sessionId, options, (id, identity, access) => {
+		const apiKey = await this.#resolve(provider, sessionId, options, true, (id, identity, access) => {
 			credentialId = id;
 			oauthIdentity = identity;
 			oauthAccess = access;
@@ -361,7 +384,7 @@ export class KeyCascade implements KeysApi {
 	 */
 	async get(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
 		try {
-			return await this.#resolve(provider, sessionId, options);
+			return await this.#resolve(provider, sessionId, options, false);
 		} catch (error) {
 			if (!(error instanceof AIError.OAuthRefreshUnavailableError)) throw error;
 			logger.debug("API key probe skipped transient OAuth refresh failure", { provider, error: error.message });
@@ -376,12 +399,19 @@ export class KeyCascade implements KeysApi {
 		await this.#deps.selector.prefetchUsage(provider, sessionId, options);
 	}
 
+	/**
+	 * `forRequest`: a configured source that produced nothing rejects with
+	 * {@link AIError.CredentialSourceError} instead of resolving `undefined`.
+	 */
 	async #resolve(
 		provider: string,
-		sessionId?: string,
-		options?: AuthApiKeyOptions,
+		sessionId: string | undefined,
+		options: AuthApiKeyOptions | undefined,
+		forRequest: boolean,
 		onCredentialId?: (id: number, identity?: OAuthRequestIdentity, oauthAccess?: string) => void,
 	): Promise<string | undefined> {
+		const resolveConfig = (config: string): Promise<string | undefined> =>
+			forRequest ? this.#deps.overrides.resolveForRequest(provider, config) : this.#deps.overrides.resolve(config);
 		const restricted = this.#deps.affinity.isRestricted(provider, sessionId);
 		// Runtime override takes highest priority
 		const runtimeKey = restricted ? undefined : this.#deps.overrides.runtimeKey(provider);
@@ -402,7 +432,7 @@ export class KeyCascade implements KeysApi {
 		}
 		const configKey = restricted ? undefined : this.#deps.overrides.configKey(provider);
 		if (configKey !== undefined) {
-			return this.#deps.overrides.resolve(configKey);
+			return resolveConfig(configKey);
 		}
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
@@ -445,7 +475,7 @@ export class KeyCascade implements KeysApi {
 			const credentialId = onCredentialId
 				? this.#deps.pool.entries(provider)[loginApiKeySelection.index]?.id
 				: undefined;
-			const apiKey = await this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
+			const apiKey = await resolveConfig(loginApiKeySelection.credential.key);
 			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
 			return apiKey;
 		}
@@ -456,7 +486,7 @@ export class KeyCascade implements KeysApi {
 		if (sessionId) this.#deps.affinity.forget(provider, sessionId);
 
 		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
-		if (fallbackKey !== undefined) return this.#deps.overrides.resolve(fallbackKey);
+		if (fallbackKey !== undefined) return resolveConfig(fallbackKey);
 
 		const envKey = getEnvApiKey(provider);
 		if (envKey) return envKey;
@@ -471,7 +501,7 @@ export class KeyCascade implements KeysApi {
 				this.#deps.affinity.record(provider, sessionId, "api_key", apiKeySelection.index);
 			}
 			const credentialId = onCredentialId ? this.#deps.pool.entries(provider)[apiKeySelection.index]?.id : undefined;
-			const apiKey = await this.#deps.overrides.resolve(apiKeySelection.credential.key);
+			const apiKey = await resolveConfig(apiKeySelection.credential.key);
 			if (apiKey !== undefined && credentialId !== undefined) onCredentialId?.(credentialId);
 			return apiKey;
 		}

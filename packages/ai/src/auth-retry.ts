@@ -191,7 +191,17 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 	return isUsageLimitOutcome(status, message);
 }
 
-/** Resolve a single retry step, swallowing resolver failures into `undefined`. */
+/**
+ * Resolve a single retry step, swallowing resolver failures into `undefined`.
+ *
+ * `onSourceOutcome` is told what this step learned about the configured
+ * credential source, and is the only thing that decides the driver's view of
+ * it: a {@link AIError.CredentialSourceError} when the source produced
+ * nothing, and `undefined` when it produced a key. A step that yields a key
+ * therefore clears an earlier failure even when the key is one the operation
+ * already tried, which {@link acceptRetryKey} rejects — the source has
+ * recovered either way, and reporting it as broken would be wrong.
+ */
 export async function resolveRetryKey(
 	resolver: ApiKeyResolver,
 	lastChance: boolean,
@@ -199,13 +209,17 @@ export async function resolveRetryKey(
 	signal?: AbortSignal,
 	previousKey?: string,
 	onResolved?: (resolved: ApiKeyResolution) => void,
+	onSourceOutcome?: (failure: AIError.CredentialSourceError | undefined) => void,
 ): Promise<string | undefined> {
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
 		const resolved = await resolver({ lastChance: rotateSibling, error, signal, previousKey });
 		onResolved?.(resolved);
-		return resolvedApiKeyBearer(resolved);
-	} catch {
+		const bearer = resolvedApiKeyBearer(resolved);
+		if (bearer !== undefined) onSourceOutcome?.(undefined);
+		return bearer;
+	} catch (failure) {
+		if (failure instanceof AIError.CredentialSourceError) onSourceOutcome?.(failure);
 		return undefined;
 	}
 }
@@ -221,6 +235,12 @@ export interface AuthRetryKeyState {
 	tokenRefreshReplayUsed?: boolean;
 	/** Total outbound attempts accepted for this logical operation, including the initial request. */
 	attempts: number;
+	/**
+	 * The latest re-resolution whose configured source produced nothing (a failed
+	 * `!command`, an empty variable). Owned by {@link resolveRetryKey}: any later
+	 * step that yields a key clears it, whether or not that key is accepted.
+	 */
+	sourceFailure?: AIError.CredentialSourceError;
 }
 
 export function createAuthRetryKeyState(initialKey: string): AuthRetryKeyState {
@@ -249,6 +269,23 @@ function acceptRetryKey(
 	return key;
 }
 
+/**
+ * The error an auth retry ends with: the provider's last rejection, unless the
+ * re-resolution it prompted failed because a configured credential source
+ * produced nothing. Then that failure is the cause the user can act on, so it
+ * is reported, naming the source, with the provider's rejection kept as `cause`.
+ */
+export function authRetryFinalError(state: AuthRetryKeyState, lastError: unknown): unknown {
+	const failure = state.sourceFailure;
+	if (!failure) return lastError;
+	const rejection = lastError instanceof Error ? lastError.message : String(lastError);
+	return new AIError.CredentialSourceError(
+		failure.provider,
+		`${failure.message}. It was re-resolved because the provider rejected the previous key: ${rejection}`,
+		lastError,
+	);
+}
+
 export async function resolveNextAuthRetryKey(
 	state: AuthRetryKeyState,
 	resolver: ApiKeyResolver,
@@ -258,10 +295,21 @@ export async function resolveNextAuthRetryKey(
 ): Promise<string | undefined> {
 	if (signal?.aborted) return undefined;
 	if (state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) return undefined;
+	const recordSourceOutcome = (failure: AIError.CredentialSourceError | undefined): void => {
+		state.sourceFailure = failure;
+	};
 	if (error instanceof AIError.OAuthError && error.kind === "token-refresh") {
 		if (state.tokenRefreshReplayUsed) return undefined;
 		state.tokenRefreshReplayUsed = true;
-		const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey, onResolved);
+		const refreshed = await resolveRetryKey(
+			resolver,
+			false,
+			error,
+			signal,
+			state.lastKey,
+			onResolved,
+			recordSourceOutcome,
+		);
 		state.refreshedCurrent = true;
 		if (signal?.aborted || refreshed === undefined) return undefined;
 		return acceptRetryKey(state, refreshed, true);
@@ -269,7 +317,15 @@ export async function resolveNextAuthRetryKey(
 	const directRotation = isDirectCredentialRotationError(error);
 	if (!directRotation) {
 		if (!state.refreshedCurrent) {
-			const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey, onResolved);
+			const refreshed = await resolveRetryKey(
+				resolver,
+				false,
+				error,
+				signal,
+				state.lastKey,
+				onResolved,
+				recordSourceOutcome,
+			);
 			state.refreshedCurrent = true;
 			if (signal?.aborted) return undefined;
 			if (refreshed !== undefined) {
@@ -281,10 +337,18 @@ export async function resolveNextAuthRetryKey(
 
 	if (signal?.aborted) return undefined;
 	let afterSiblingWait = false;
-	const rotated = await resolveRetryKey(resolver, true, error, signal, state.lastKey, resolved => {
-		afterSiblingWait = typeof resolved === "object" && resolved.afterSiblingWait === true;
-		onResolved?.(resolved);
-	});
+	const rotated = await resolveRetryKey(
+		resolver,
+		true,
+		error,
+		signal,
+		state.lastKey,
+		resolved => {
+			afterSiblingWait = typeof resolved === "object" && resolved.afterSiblingWait === true;
+			onResolved?.(resolved);
+		},
+		recordSourceOutcome,
+	);
 	if (signal?.aborted || rotated === undefined) return undefined;
 	return acceptRetryKey(state, rotated, !directRotation, afterSiblingWait);
 }
@@ -376,7 +440,7 @@ export async function withAuth<T>(
 		}
 	}
 
-	throw lastError;
+	throw authRetryFinalError(state, lastError);
 }
 
 /**

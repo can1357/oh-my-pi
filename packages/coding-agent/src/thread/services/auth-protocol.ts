@@ -78,6 +78,7 @@ import type {
 	ModelRegistryRefreshOptions,
 	ProviderConfigInput,
 } from "../../config/model-registry";
+import type { ConfigValueInvalidation } from "../../config/resolve-config-value";
 import type {
 	AnthropicSlowModeAvailability,
 	AnthropicSlowModeEndReason,
@@ -359,7 +360,7 @@ export interface ModelRegistryMirrorWire extends ModelRegistryMirrorInputs {
 export type ModelRegistryProtocol = {
 	/** Sync: subscribe `listener` to main's change batches (until the worker exits) and return the mirror's inputs. */
 	mirror: RpcMethod<[listener: (batch: WireMirrorBatch) => void], ModelRegistryMirrorWire>;
-	invalidateCommandConfigs: RpcMethod<[provider?: string], void>;
+	invalidateCommandConfigs: RpcMethod<[provider: string | undefined, reason: ConfigValueInvalidation], void>;
 	refresh: RpcMethod<[strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions], void>;
 	refreshProvider: RpcMethod<
 		[providerId: string, strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions],
