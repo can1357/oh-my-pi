@@ -18,7 +18,7 @@
 import { afterEach, beforeEach } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { __resetStatsSyncWorkerPool } from "@oh-my-pi/omp-stats/aggregator";
+import { disposeStatsSyncWorkerPool } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb } from "@oh-my-pi/omp-stats/db";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -32,7 +32,7 @@ export interface StatsTestIsolation {
 }
 
 function resetWarmPool(): void {
-	__resetStatsSyncWorkerPool();
+	disposeStatsSyncWorkerPool();
 }
 
 // The sync warm pool is module state, and Bun shares module state across the

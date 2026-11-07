@@ -281,7 +281,10 @@ function pooledWorkerEnv(): PooledWorkerEnv {
 	// agent dir is the one case where equal environments resolve differently.
 	const sessionsRoot = getSessionsDir();
 	const cwd = process.cwd();
-	return { env: Object.fromEntries(entries), identity: JSON.stringify({ env: entries, sessionsRoot, cwd }) };
+	return {
+		env: Object.fromEntries(entries),
+		identity: JSON.stringify({ env: entries, sessionsRoot, cwd }),
+	};
 }
 
 /**
@@ -368,12 +371,18 @@ function releaseWorker(handle: WorkerHandle, discard: boolean): void {
 }
 
 /**
- * Test seam: terminate every idle pooled worker and cancel idle eviction.
- * A module-level pool would otherwise leak live worker threads from one `bun test`
- * file into the next (Bun shares module state across files in a run), where a
- * `globalThis.Worker` spy asserts a spawn that never happened.
+ * Terminate every idle pooled worker and cancel its idle eviction.
+ *
+ * The pool is bounded and self-evicting, so most callers never need this. It
+ * exists for the two cases the idle deadline cannot cover: a test process,
+ * where the module-level pool would leak live workers from one file into the
+ * next (Bun shares module state across files in a run), and a caller about to
+ * remove the directory its workers were spawned under. A pooled handle keeps
+ * its spawn-time cwd, and Windows refuses to remove a directory a live worker
+ * still holds as its cwd, so such a caller disposes first instead of waiting
+ * for {@link STATS_SYNC_WORKER_IDLE_MS}.
  */
-export function __resetStatsSyncWorkerPool(): void {
+export function disposeStatsSyncWorkerPool(): void {
 	for (const handle of warmPool.splice(0)) {
 		cancelIdleEviction(handle);
 		handle.worker.terminate();
@@ -400,7 +409,11 @@ export function __resetStatsSyncWorkerPool(): void {
  * parent environment rather than a snapshot): its whole job is to prove a fresh
  * spawn still loads, which is exactly what a pooled worker would no longer test.
  */
-export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: number } = {}): Promise<void> {
+export async function smokeTestSyncWorker({
+	timeoutMs = 5_000,
+}: {
+	timeoutMs?: number;
+} = {}): Promise<void> {
 	if (process.platform === "darwin") return;
 	const worker = createSyncWorker();
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
