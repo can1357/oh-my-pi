@@ -1131,3 +1131,79 @@ async fn unlistable_root_fails_the_search() {
 		);
 	}
 }
+
+/// A provider that answers at once, as native file reads do, and reports
+/// when its `at`th file is opened.
+#[derive(Debug)]
+struct OpenReported {
+	mem:    Arc<crate::testing::MemFs>,
+	opened: Arc<AtomicU64>,
+	at:     u64,
+	due:    parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+#[async_trait::async_trait]
+impl pi_vfs::FileSystem for OpenReported {
+	async fn open(
+		&self,
+		path: &Path,
+		options: &pi_vfs::OpenOptions,
+	) -> std::io::Result<pi_vfs::File> {
+		if self.opened.fetch_add(1, Ordering::Relaxed) + 1 == self.at
+			&& let Some(tx) = self.due.lock().take()
+		{
+			let _ = tx.send(());
+		}
+		self.mem.open(path, options).await
+	}
+
+	async fn metadata(&self, path: &Path) -> std::io::Result<pi_vfs::Metadata> {
+		self.mem.metadata(path).await
+	}
+
+	async fn symlink_metadata(&self, path: &Path) -> std::io::Result<pi_vfs::Metadata> {
+		self.mem.symlink_metadata(path).await
+	}
+
+	async fn read_dir(&self, path: &Path) -> std::io::Result<pi_vfs::ReadDir> {
+		self.mem.read_dir(path).await
+	}
+}
+
+/// A search raced against a deadline stops inside a directory once the
+/// deadline is due, on a runtime its walker fills: file reads that never
+/// suspend would otherwise search every file of the directory before the
+/// deadline is seen.
+#[tokio::test(flavor = "current_thread")]
+async fn a_search_raced_against_a_deadline_stops_inside_a_directory() {
+	let files: Vec<(String, &str)> = (0..1000)
+		.map(|i| (format!("mem://h/dir/f{i:04}.txt"), "needle\n"))
+		.collect();
+	let specs: Vec<(&str, &str)> = files
+		.iter()
+		.map(|(path, body)| (path.as_str(), *body))
+		.collect();
+	let (mem, _) = crate::testing::MemFs::with_files(&specs);
+	let opened = Arc::new(AtomicU64::new(0));
+	let (due_tx, due_rx) = tokio::sync::oneshot::channel();
+	let vfs = pi_vfs::Fs::new(Arc::new(OpenReported {
+		mem,
+		opened: Arc::clone(&opened),
+		at: 300,
+		due: parking_lot::Mutex::new(Some(due_tx)),
+	}));
+	let root = Path::new("mem://h/dir");
+	let fs = Fs::new(&vfs, root);
+	let engine = needle();
+	tokio::select! {
+		biased;
+		_ = due_rx => {},
+		_ = grep(&fs, root, options(&engine)) => {
+			panic!("the search ran to its end before its deadline was seen");
+		},
+	}
+	let stopped = opened.load(Ordering::Relaxed);
+	assert!(stopped < 500, "the search opened {stopped} of 1000 files before its deadline was seen");
+	tokio::time::sleep(Duration::from_millis(50)).await;
+	assert_eq!(opened.load(Ordering::Relaxed), stopped, "the search went on after it was dropped");
+}

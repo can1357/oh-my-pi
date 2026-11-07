@@ -18,7 +18,7 @@ use std::{
 use futures::{Stream, StreamExt, stream};
 use grep_matcher::Matcher;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::coop::consume_budget};
 
 use super::{
 	Engine, GrepError, GrepOptions, GrepResult, MAX_FILE_BYTES, Match, Mode,
@@ -802,6 +802,10 @@ async fn search_directory<M: Matcher + Sync>(
 		if shared.halted() {
 			break;
 		}
+		// File reads never suspend either: spend the walker task's coop budget
+		// per file, as the walk does per entry, so a deadline can stop a search
+		// of a directory full of files.
+		consume_budget().await;
 		let opened = match dir {
 			Some(dir) => session.open_file_at(dir, candidate.name()).await,
 			None => session.open_file(worker.abs_rel(&candidate.rel)).await,
