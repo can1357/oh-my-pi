@@ -95,6 +95,30 @@ use crate::bash::{
 	ids::{AstNodeId, ModeId, UnitId},
 };
 
+/// A lowering failure: a construct this engine does not run yet, or a
+/// diagnostic to report as a syntax error (the command does not run).
+#[derive(Debug)]
+pub(crate) enum LowerError {
+	Unsupported(&'static str),
+	Syntax(BString),
+}
+
+impl From<&'static str> for LowerError {
+	fn from(what: &'static str) -> Self {
+		Self::Unsupported(what)
+	}
+}
+
+impl LowerError {
+	/// The abort unit's message and op flags.
+	pub(crate) fn into_diagnostic(self) -> (BString, u8) {
+		match self {
+			Self::Unsupported(what) => (what.into(), 0),
+			Self::Syntax(msg) => (msg, Op::SYNTAX),
+		}
+	}
+}
+
 /// IR version; part of the frames header.
 pub const IR_VERSION: u32 = 16;
 
@@ -1060,8 +1084,9 @@ pub(crate) fn compile(
 	mode: ModeId,
 	features: crate::bash::syntax::Features,
 ) -> Unit {
-	lower(cc, src, mode, features).unwrap_or_else(|what| {
-		abort_unit(cc.span.slice(src), mode, features, cc.line, vec![what.into()], 0, 2)
+	lower(cc, src, mode, features).unwrap_or_else(|error| {
+		let (msg, flags) = error.into_diagnostic();
+		abort_unit(cc.span.slice(src), mode, features, cc.line, vec![msg], flags, 2)
 	})
 }
 
