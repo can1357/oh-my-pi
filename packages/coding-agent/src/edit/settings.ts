@@ -182,3 +182,24 @@ export const cfgEditAutoRepairEnabled = register({
 			"When an edit breaks a file's AST parse, ask the smol model to fix the broken region (validated by re-parse; falls back to a warning)",
 	},
 });
+
+/**
+ * On by default: the loss it insures against is unrecoverable and silent, and
+ * the store is bounded (14 days, 2 GiB of completed days, 64 MiB per file). It
+ * is a setting rather than always-on because it is a default-behaviour change
+ * that writes to the user's disk, and because the day's `index.jsonl` records
+ * the absolute path of every file a session replaced — a list some users will
+ * not want kept for a fortnight.
+ */
+export const cfgEditClobberBackup = register({
+	id: "edit.clobberBackup",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "files",
+		group: "Editing",
+		label: "Copy Before Clobber",
+		description:
+			"Before replacing or deleting a file this session did not create, copy the old content to ~/.omp/agent/clobbered/<date>/ and say where; never blocks the write",
+	},
+});

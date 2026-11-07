@@ -57,6 +57,7 @@ import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-br
 import { formatApprovalArguments, truncateForPrompt } from "./approval";
 import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
+import { backupBeforeClobber, clobberBackupNote, insureBeforeRewrite, noteOwnWrite } from "./clobber-backup";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { hasColumnTruncationClause, isColumnTruncationNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -655,6 +656,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			transformDiagnostics: dedup
 				? (path, result) => getDiagnosticsLedger(this.session).reduce(path, result)
 				: undefined,
+			onBeforeFileRewrite: dst => insureBeforeRewrite(this.session, dst),
+			onFileSettled: dst => noteOwnWrite(this.session, dst),
 			requestTimeoutSec: cfgLspRequestTimeout.get(settings),
 		});
 		return { writethrough, deferred: enableDiagnostics ? this.#deferredDiagnostics : undefined };
@@ -770,6 +773,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// Publish atomically while holding the lock; a distinct temporary
 				// path also avoids collisions with stale files left by prior runs.
 				const tmpPath = `${finalPath}.tmp-${process.pid}-${Bun.randomUUIDv7()}`;
+				// Setting one member republishes the whole container, so every other
+				// member rides on this rename and the pre-image is the only way back.
+				const archiveDisplay = formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd);
+				const clobberNote = exists
+					? clobberBackupNote(await backupBeforeClobber(this.session, finalPath), archiveDisplay)
+					: undefined;
 				try {
 					await writeArchive(tmpPath, format, entries);
 					signal?.throwIfAborted();
@@ -778,12 +787,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					await fs.rm(tmpPath, { force: true }).catch(() => {});
 					throw new ToolError(error instanceof Error ? error.message : String(error));
 				}
+				await noteOwnWrite(this.session, finalPath);
 
-				const outputPath = `${formatPathRelativeToCwd(resolvedArchivePath.absolutePath, this.session.cwd)}:${
-					resolvedArchivePath.archiveSubPath
-				}`;
+				const outputPath = `${archiveDisplay}:${resolvedArchivePath.archiveSubPath}`;
+				const writeLine = `Successfully wrote ${contentBytes} bytes to ${outputPath}`;
 				return {
-					content: [{ type: "text", text: `Successfully wrote ${contentBytes} bytes to ${outputPath}` }],
+					content: [{ type: "text", text: clobberNote ? `${writeLine}\n${clobberNote}` : writeLine }],
 					details: { resolvedPath: resolvedArchivePath.absolutePath },
 				};
 			},
@@ -1140,6 +1149,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				content,
 				cleanContent,
 			);
+			// Copy aside whatever this write is about to replace, when losing it
+			// would be unrecoverable. Taken before the ACP-bridge branch below so
+			// an editor-routed write is insured on the same terms, and after the
+			// abort check so a cancelled call leaves no orphan copy behind.
+			signal?.throwIfAborted();
+			const clobberNote = clobberBackupNote(await backupBeforeClobber(this.session, absolutePath), displayPath);
 
 			// An ACP editor saves with its buffer's own line endings and encoding, so a write routed to
 			// it goes as given. Elsewhere an unreadable file keeps today's behavior; the write reports why.
@@ -1178,6 +1193,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (madeExecutable) {
 					resultText += `\n${EXECUTABLE_NOTICE}`;
 				}
+				if (clobberNote) {
+					resultText += `\n${clobberNote}`;
+				}
+				await noteOwnWrite(this.session, absolutePath);
 				return {
 					content: [{ type: "text", text: resultText }],
 					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
@@ -1201,6 +1220,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (stripped) {
 				resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 			}
+			await noteOwnWrite(this.session, absolutePath);
 			// A non-final batch entry returns before the batch's formatter runs: claim nothing yet.
 			const conventionNote =
 				batchRequest?.flush === false ? undefined : textFileConventionNote(applied, finalContent);
@@ -1209,6 +1229,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 			if (madeExecutable) {
 				resultText += `\n${EXECUTABLE_NOTICE}`;
+			}
+			if (clobberNote) {
+				resultText += `\n${clobberNote}`;
 			}
 			if (!diagnostics.diagnostics) {
 				return {

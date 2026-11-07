@@ -1008,6 +1008,11 @@ export function getSessionsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "sessions", "data");
 }
 
+/** Get the copy-before-clobber backup store (~/.omp/agent/clobbered). */
+export function getClobberBackupsDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "clobbered", "data");
+}
+
 /** Get the content-addressed blob store directory (~/.omp/agent/blobs). */
 export function getBlobsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "blobs", "data");
