@@ -301,6 +301,7 @@ export type ResolvedRequestAuth =
 	| { ok: false; error: string };
 
 interface CachedStandardProjection {
+	validUntil: number;
 	models: Model<Api>[];
 	bundledById: Map<string, Model<Api>> | undefined;
 	cacheMatchesBundledFingerprint: boolean;
@@ -314,7 +315,8 @@ const standardCacheProjections = new WeakMap<Model<Api>[], Map<string, CachedSta
 function projectCachedStandardModels(cache: CacheEntry<Api>, providerId: string): CachedStandardProjection {
 	let byProvider = standardCacheProjections.get(cache.models);
 	const existing = byProvider?.get(providerId);
-	if (existing) return existing;
+	const now = Date.now();
+	if (existing && now < existing.validUntil) return existing;
 	const sharedCatalogProvider = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
 	const additiveSharedCatalogProvider = ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[providerId] === true;
 	// The model cache never persists request headers (#5780): restore
@@ -348,6 +350,7 @@ function projectCachedStandardModels(cache: CacheEntry<Api>, providerId: string)
 		? new Map(bundledModels.map(bundledModel => [bundledModel.id, bundledModel]))
 		: undefined;
 	const models: Model<Api>[] = [];
+	let validUntil = Number.POSITIVE_INFINITY;
 	for (const cachedModel of cache.models) {
 		// Shared catalog rows can be projected under another provider id.
 		// That changes policy inputs, so only this projection is rebuilt;
@@ -356,6 +359,9 @@ function projectCachedStandardModels(cache: CacheEntry<Api>, providerId: string)
 			cachedModel.provider === providerId
 				? cachedModel
 				: buildModel({ ...toModelSpec(cachedModel), provider: providerId });
+		if (cachedModel.provider !== providerId) {
+			validUntil = Math.min(validUntil, nextBuildPriceChange(cachedModel.cost, now));
+		}
 		if (additiveCacheStaticMismatch && bundledById?.has(model.id)) continue;
 		if (!omittedHeaderIds.has(model.id)) {
 			models.push(model);
@@ -377,6 +383,7 @@ function projectCachedStandardModels(cache: CacheEntry<Api>, providerId: string)
 		models.push({ ...model, headers: bundledHeaders });
 	}
 	const projection: CachedStandardProjection = {
+		validUntil,
 		models,
 		bundledById,
 		cacheMatchesBundledFingerprint:
