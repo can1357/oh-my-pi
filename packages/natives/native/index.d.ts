@@ -595,7 +595,7 @@ export declare class RunTrace {
    * instead of an invented primary producer. Decoding ends at capture EOF.
    * Segmented minimizer submissions share one epoch and final status;
    * their history carries `segment`, with `logicalEnd`/`logicalStatus`
-   * finalizing the last actual root RunEnd after output draining.
+   * finalizing the last actual root `RunEnd` after output draining.
    * Serialization borrows the locked model rather than cloning its history.
    */
   snapshot(): string
@@ -705,9 +705,13 @@ export declare class TextPredictor {
 /**
  * Dedicated writer thread for one terminal fd.
  *
- * `dup(2)`'d at construction and closed on drop. The duplicate keeps the
- * pump's fd alive if the original is closed or replaced; file-status flags
- * such as `O_NONBLOCK` are shared and handled by polling for `POLLOUT`.
+ * Duplicated (close-on-exec) at construction and closed on drop. The
+ * duplicate keeps the pump's fd alive if the original is closed or replaced;
+ * file-status flags such as `O_NONBLOCK` are shared and handled by polling for
+ * `POLLOUT`. Close-on-exec keeps the terminal out of every child the process
+ * spawns without explicit fd handling (`std::process::Command`, gitoxide
+ * filter drivers), which could otherwise read the user's keystrokes and
+ * terminal replies through it.
  */
 export declare class TtyWriter {
   /**
@@ -3412,7 +3416,9 @@ export declare function renderSnapcompactPng(text: string, options: SnapcompactR
 
 /**
  * Run the pi-shell engine as a process shell in this process (`omp zsh`,
- * `omp bash`, `omp sh`): `argv` is the shell's whole command line,
+ * `omp bash`, `omp sh`).
+ *
+ * `argv` is the shell's whole command line,
  * `argv[0]` naming it (`zsh`, `bash` or `sh` pick the dialect), as a real
  * shell gets it. Synchronous: blocks the calling thread until the shell
  * exits and returns the status the process should exit with (0–255; 101
