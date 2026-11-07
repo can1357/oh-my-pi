@@ -2781,6 +2781,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// callback requestRender(true) queued above (immediates are FIFO) — the
 		// spawn syscall never lands in the same loop turn ahead of the first paint.
 		setImmediate(() => {
+			// stop() can run before this fires (a fast test teardown, or a
+			// resumed-session switch right after startup); without this guard the
+			// callback re-reads live mocks/session state that the caller already
+			// tore down and can prewarm against a disposed session's settings.
+			if (!this.isInitialized) return;
 			// Resumed sessions paint their restored transcript (code blocks, diffs)
 			// right after init; warm the native syntax set (~60ms, ~24 MiB) off-thread
 			// so that paint does not build it on the JS thread. Fresh sessions skip it
