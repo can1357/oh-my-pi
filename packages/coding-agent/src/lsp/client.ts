@@ -11,6 +11,7 @@ import { getConfig } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
+import { MUX_RESTART_METHOD } from "./mux/protocol";
 import type {
 	DocumentBuildStatus,
 	LspClient,
@@ -1290,7 +1291,7 @@ export function shutdownStaleClients(
 		const stale = Array.from(clients.values()).filter(
 			client => path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name),
 		);
-		const results = await Promise.all(stale.map(client => shutdownClientInstance(client)));
+		const results = await Promise.all(stale.map(client => shutdownClientServer(client)));
 		const failed = stale.filter((_client, index) => results[index] !== true);
 		if (failed.length > 0) {
 			throw new Error(
@@ -2303,6 +2304,22 @@ export async function shutdownClientInstance(client: LspClient): Promise<boolean
 		maybeStartIdleChecker(client);
 	}
 	return exited;
+}
+
+/**
+ * Tear down a client together with the language-server process behind it.
+ *
+ * A broker-shared link's own `shutdown`/`exit` only detaches it: the mux answers
+ * both and keeps the server idle for reuse. When the server must not survive —
+ * a restart, or a superseded configuration that no reconnect will ask for —
+ * ask the mux to kill the link's server first (best-effort: the link may be the
+ * wedged part), then confirm the link exits like any other client.
+ */
+export async function shutdownClientServer(client: LspClient): Promise<boolean> {
+	if (client.proc.sharedMux) {
+		await sendNotification(client, MUX_RESTART_METHOD, undefined, AbortSignal.timeout(2_000)).catch(() => {});
+	}
+	return await shutdownClientInstance(client);
 }
 
 /**
