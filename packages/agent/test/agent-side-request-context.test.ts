@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import type { AssistantMessage, Context } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -181,5 +181,155 @@ describe("Agent — buildSideRequestContext", () => {
 
 		expect(transformSpy).toHaveBeenCalledTimes(1);
 		expect(context.systemPrompt).toEqual(["transformed-system"]);
+	});
+
+	it("reads a pinned side-request prompt after the before-side-request hooks ran", async () => {
+		// A host that refreshes the prompt in a hook (a pending system-prompt
+		// rebuild, say) must be seen by the request even when the caller pins a
+		// prompt of its own — so a pinned prompt provided by a callback is read
+		// after the hooks, not at call time.
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["system"],
+				tools: [tool],
+			},
+		});
+		let base: string[] = ["stale"];
+		agent.addBeforeSideRequestHook(async () => {
+			base = ["fresh"];
+		});
+
+		const pinned = await agent.buildSideRequestContext(
+			[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
+			["pinned"],
+		);
+		expect(pinned.systemPrompt).toEqual(["pinned"]);
+
+		// The pinned call above already ran the hook, so the base is stale again:
+		// the callback below sees the fresh value only if it is read after the
+		// hooks ran.
+		base = ["stale"];
+		const provided = await agent.buildSideRequestContext(
+			[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
+			() => base,
+		);
+		expect(provided.systemPrompt).toEqual(["fresh"]);
+	});
+
+	it("forwards the caller's signal to the before-side-request hooks", async () => {
+		// A cancelled side request must reach the hooks, so a hook that waits on
+		// something slow (a pending prompt rebuild) can unwind instead of blocking
+		// the caller forever.
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["system"],
+				tools: [tool],
+			},
+		});
+		const controller = new AbortController();
+		let seen: AbortSignal | undefined;
+		agent.addBeforeSideRequestHook(async signal => {
+			seen = signal;
+		});
+
+		await agent.buildSideRequestContext(
+			[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
+			undefined,
+			controller.signal,
+		);
+
+		expect(seen).toBe(controller.signal);
+	});
+
+	it("rejects a side request whose caller was cancelled before the hooks ran", async () => {
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["system"],
+				tools: [tool],
+			},
+		});
+		const controller = new AbortController();
+		controller.abort();
+		let hookRan = false;
+		agent.addBeforeSideRequestHook(async () => {
+			hookRan = true;
+		});
+
+		await expect(
+			agent.buildSideRequestContext(
+				[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
+				undefined,
+				controller.signal,
+			),
+		).rejects.toThrow();
+		expect(hookRan).toBe(false);
+	});
+
+	it("aborts while awaiting a slow prompt provider and skips the transforms", async () => {
+		// A provider that supplies the side-request prompt may await something slow.
+		// When the caller cancels after the hooks ran, the build must not stay
+		// blocked on that promise, and a provider that resolves late must not run
+		// the provider transforms for a request the caller already gave up on.
+		const controller = new AbortController();
+		let transformRan = false;
+		const agentWithTransform = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["system"],
+				tools: [tool],
+			},
+			transformProviderContext: () => {
+				transformRan = true;
+				return { systemPrompt: ["transformed"], messages: [], tools: [] };
+			},
+		});
+
+		const promptPromise = new Promise<string[]>(resolve => {
+			setTimeout(() => resolve(["late"]), 5_000);
+		});
+
+		const build = agentWithTransform.buildSideRequestContext(
+			[{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() }],
+			() => promptPromise,
+			controller.signal,
+		);
+		controller.abort();
+
+		await expect(build).rejects.toThrow();
+		// The late provider must not have reached the transforms.
+		await Bun.sleep(20);
+		expect(transformRan).toBe(false);
+	});
+
+	it("keeps the call-time model when a before-side-request hook switches models", async () => {
+		// The caller converted its history for the model that was active when it
+		// called, so a `/model` change landing while the hook waits must not
+		// re-normalize the request for the new model.
+		const otherModel = createMockModel({ id: "other-mock-model" });
+		let normalizedFor: unknown;
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["system"],
+				tools: [tool],
+			},
+			transformProviderContext: (ctx: Context, m: Model) => {
+				normalizedFor = m;
+				return ctx;
+			},
+		});
+		agent.addBeforeSideRequestHook(async () => {
+			agent.setModel(otherModel);
+		});
+
+		await agent.buildSideRequestContext([
+			{ role: "user", content: [{ type: "text", text: "Q?" }], timestamp: Date.now() },
+		]);
+
+		expect(agent.state.model).toBe(otherModel);
+		expect(normalizedFor).toBe(model);
 	});
 });

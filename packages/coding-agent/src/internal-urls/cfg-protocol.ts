@@ -357,6 +357,7 @@ export class CfgProtocolHandler implements ProtocolHandler {
 	}
 
 	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<InternalWriteResult> {
+		const session = callerSession(context);
 		const settings = writerSettings(context);
 		const target = parseCfgUrl(url.rawHref ?? url.href);
 		const { path, leaf } = resolveSegments(target?.segments ?? []);
@@ -429,7 +430,7 @@ export class CfgProtocolHandler implements ProtocolHandler {
 					layer === "env" && leaf.envName ? `environment variable ${leaf.envName}` : PROVENANCE_LABELS[layer];
 			}
 		}
-		const sessionId = callerSession(context).getSessionId?.() ?? undefined;
+		const sessionId = session.getSessionId?.() ?? undefined;
 		const decision = approvalQueue.then(() => decide(host, request, sessionId, context?.signal));
 		approvalQueue = decision.catch(() => undefined);
 		const answer = await decision;
@@ -443,6 +444,10 @@ export class CfgProtocolHandler implements ProtocolHandler {
 		if (!save) {
 			leaf.override(settings, value);
 			host.applied({ path: leaf.id, value: leaf.get(settings), settings, save });
+			// The prompt rebuild the change queues is asynchronous. Await it here:
+			// the turn continues with the next request, and that request must not
+			// carry the prompt this change replaced.
+			await session.awaitPromptRefresh?.();
 			// A non-fallback env var outranks runtime overrides; report it instead of claiming the change.
 			const layer = shadowingLayer(leaf, settings, value, ABOVE_SESSION);
 			return finish("applied", layer ? { layer, scope: settings } : undefined);
@@ -459,6 +464,7 @@ export class CfgProtocolHandler implements ProtocolHandler {
 			host.applied({ path: leaf.id, value: leaf.get(persistent), settings: persistent, save });
 		}
 		host.applied({ path: leaf.id, value: leaf.get(settings), settings, save });
+		await session.awaitPromptRefresh?.();
 		// Judged on the persistent instance: a separate session carries the mirrored override above.
 		const layer = shadowingLayer(leaf, persistent, value, ABOVE_GLOBAL);
 		return finish("applied", layer ? { layer, scope: persistent } : undefined);

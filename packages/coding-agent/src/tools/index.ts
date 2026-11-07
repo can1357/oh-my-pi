@@ -229,6 +229,13 @@ export interface ToolSession {
 	 * false for print, RPC, ACP, and subagent sessions. See `CreateAgentSessionOptions.tuiTranscript`.
 	 */
 	tuiTranscript?: boolean;
+	/**
+	 * Awaits the system-prompt rebuild the current settings change queued, so a
+	 * `cfg://` write returns only after the prompt the change invalidated has
+	 * been republished. Absent when the session does not rebuild its prompt on
+	 * settings changes.
+	 */
+	awaitPromptRefresh?: () => Promise<void>;
 	/** Whether this session has begun disposal. */
 	isDisposed?: () => boolean;
 	/**

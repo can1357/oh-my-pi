@@ -1,4 +1,4 @@
-Use `read` for static web; browser only if needed.
+{{#if FETCH_ENABLED}}Use `read` for static web; browser only if needed.{{/if}}
 
 Put line ranges in `path`, never a separate range/offset/limit parameter: `{"path":"notes.txt:450-455"}` reads lines 450-455; `{"path":"notes.txt:-5"}` reads the last 5. Include the selector on every ranged call; repeating a bare path does not advance through the file.
 
@@ -12,4 +12,4 @@ Sources:
 - Archives: ZIP/JAR/APK/WHL, compressed TAR, RAR/7z/ISO/CAB/DEB/RPM/CPIO/AR/LZH/ARJ/ASAR, compressed streams; member via archive.ext:member/path.
 - JSON/JSONL/NDJSON: file.json?q=<jq filter>; &raw=true unquoted strings, &compact=true one-line values, &offset=&limit= page results; `&` inside the filter → %26.
 {{#if BINARY_VIEWS}}- Executables (ELF/PE/Mach-O, extensionless ok): overview + function list; :<func|0xaddr> pseudocode, :<func>:asm, :imports, :exports, :strings, :xrefs:<func|0xaddr>; line ranges apply after the view (bin:main:10-40). Universal Mach-O: host-arch slice by default, bin:@<arch> picks another (bin:@x86_64:main).
-{{/if}}- PDF/documents: extracted text; notebooks: editable cells; images: decoded inline. URLs: reader text/markdown, :raw original HTML; bare host:port needs trailing slash.
+{{/if}}- PDF/documents: extracted text; notebooks: editable cells; images: decoded inline{{#if FETCH_ENABLED}}. URLs: reader text/markdown, :raw original HTML; bare host:port needs trailing slash.{{else}}.{{/if}}
