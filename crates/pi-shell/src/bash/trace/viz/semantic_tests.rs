@@ -7,6 +7,7 @@ use crate::bash::{
 	engine::{Engine, EngineConfig},
 	event::AssignScope,
 	ids::{ModeId, Vpid},
+	syntax::parse_all,
 	trace::{
 		Node,
 		history::{HistoryData, HistoryEvent},
@@ -34,7 +35,7 @@ impl Fixture {
 			.commands
 		{
 			let at = command.span.lo;
-			let lowered =
+			let (lowered, _) =
 				engine.compile(command, script.as_bytes(), ModeId::Bash, Features::NONE, true);
 			let parents = crate::bash::trace::nodes::parents(&lowered.nodes);
 			let nodes = lowered
@@ -58,15 +59,23 @@ impl Fixture {
 		Self { script: script.into(), units, cache: Cache::default() }
 	}
 
-	fn root(&self, unit: usize) -> &Command {
-		let SyntaxTree::List(list) = &self.units[unit].syntax.tree else {
+	fn root(&self, unit: usize) -> Command<'_> {
+		let Root::List(list) = self.units[unit].syntax.tree.view() else {
 			panic!("canonical list")
 		};
-		&list.items[0].and_or.first.stages[0].cmd
+		list
+			.items()
+			.first()
+			.unwrap()
+			.and_or()
+			.first()
+			.stages()
+			.first()
+			.unwrap()
 	}
 
 	fn key(&self, unit: usize) -> NodeKey {
-		NodeKey::engine(unit as u32, self.root(unit).id)
+		NodeKey::engine(unit as u32, self.root(unit).id())
 	}
 
 	fn present(&self, events: &[HistoryEvent], options: &Options) -> Presentation {
@@ -302,11 +311,20 @@ fn guards_suppress_only_real_builtin_status_one_and_keep_leaf_identity() {
 	] {
 		for resolved in [ResolvedKind::Intrinsic, ResolvedKind::External, ResolvedKind::Function] {
 			let f = Fixture::new(&format!("if {guard}; then echo yes; fi"));
-			let CommandKind::If(branch) = &f.root(0).kind else {
+			let CommandKind::If(branch) = f.root(0).kind() else {
 				panic!("if")
 			};
-			let tested = &branch.arms[0].cond.items[0].and_or.first.stages[0].cmd;
-			let key = NodeKey::engine(0, tested.id);
+			let cond = branch.arms().next().unwrap().cond;
+			let tested = cond
+				.items()
+				.first()
+				.unwrap()
+				.and_or()
+				.first()
+				.stages()
+				.first()
+				.unwrap();
+			let key = NodeKey::engine(0, tested.id());
 			let events = vec![expanded(1, key, resolved), end(2, key, 1)];
 			let options = Options { cursor: Some(events.len()), ..Options::default() };
 			let p = f.present(&events, &options);
@@ -341,10 +359,11 @@ fn guards_suppress_only_real_builtin_status_one_and_keep_leaf_identity() {
 #[test]
 fn fast_completions_are_real_and_never_copied_to_compound_scaffolding() {
 	let f = Fixture::new("for x in a; do true; done");
-	let CommandKind::For(loop_) = &f.root(0).kind else {
+	let CommandKind::For(loop_) = f.root(0).kind() else {
 		panic!("for")
 	};
-	let child = NodeKey::engine(0, loop_.body.items[0].and_or.first.stages[0].cmd.id);
+	let body = loop_.body().items().first().unwrap().and_or().first();
+	let child = NodeKey::engine(0, body.stages().first().unwrap().id());
 	let events = vec![end(1, child, 0), end(2, f.key(0), 0)];
 	let p = f.present(&events, &Options { cursor: Some(2), ..Options::default() });
 	assert!(

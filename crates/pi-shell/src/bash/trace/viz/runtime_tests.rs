@@ -7,8 +7,8 @@ use crate::{
 	Shell, ShellRunOptions,
 	bash::{
 		EventSink, Script,
-		syntax::CommandKind,
-		trace::{RunTrace, history::HistoryData, syntax::SyntaxTree},
+		syntax::tree::{CommandKind, List},
+		trace::{RunTrace, history::HistoryData, syntax::Root},
 	},
 	testkit::{FakeHost, Fault, Rig, fault::skeleton_init},
 };
@@ -377,35 +377,47 @@ async fn local_eval_literal_child_uses_actual_origin_and_native_node_ids() {
 		.syntax
 		.as_ref()
 		.unwrap();
-	let SyntaxTree::List(parent_list) = &parent_syntax.tree else {
+	let Root::List(parent_list) = parent_syntax.tree.view() else {
 		panic!("native parent list");
 	};
-	let CommandKind::Simple(parent_command) = &parent_list.items[0].and_or.first.stages[0].cmd.kind
-	else {
+	fn first(list: List<'_>) -> crate::bash::syntax::tree::Command<'_> {
+		list
+			.items()
+			.first()
+			.unwrap()
+			.and_or()
+			.first()
+			.stages()
+			.first()
+			.unwrap()
+	}
+	let CommandKind::Simple(parent_command) = first(parent_list).kind() else {
 		panic!("native shell invocation");
 	};
-	let word = &parent_command.words[1];
-	assert_eq!(parent.node, word.id.0);
+	let word = parent_command.words().get(1).unwrap();
+	assert_eq!(parent.node, word.id().0);
 	assert_eq!(
 		(parent.lo, parent.hi),
-		(word.span.lo - parent_syntax.offset, word.span.hi - parent_syntax.offset)
+		(word.span().lo - parent_syntax.offset, word.span().hi - parent_syntax.offset)
 	);
 	assert_eq!(
 		&script.as_bytes()[parent.lo as usize..parent.hi as usize],
 		b"'child=inside; printf \"%s\\n\" \"$child\"'"
 	);
 	let child_syntax = child.1.syntax.as_ref().unwrap();
-	let SyntaxTree::List(child_list) = &child_syntax.tree else {
+	let Root::List(child_list) = child_syntax.tree.view() else {
 		panic!("native child list");
 	};
-	let CommandKind::Simple(setter) = &child_list.items[0].and_or.first.stages[0].cmd.kind else {
+	let CommandKind::Simple(setter) = first(child_list).kind() else {
 		panic!("native child assignment");
 	};
-	let assignment = &setter.assigns[0];
-	let key = format!("{}:0:{}", child.0, assignment.id.0);
-	let owner = format!("{}:0:{}", child.0, child_list.items[0].and_or.first.stages[0].cmd.id.0);
-	let range =
-		serde_json::json!([parent.lo + 1 + assignment.span.lo, parent.lo + 1 + assignment.span.hi,]);
+	let assignment = setter.assigns().first().unwrap();
+	let key = format!("{}:0:{}", child.0, assignment.id().0);
+	let owner = format!("{}:0:{}", child.0, first(child_list).id().0);
+	let range = serde_json::json!([
+		parent.lo + 1 + assignment.span().lo,
+		parent.lo + 1 + assignment.span().hi,
+	]);
 	let model = present(&trace, &Options::default());
 	assert_eq!(model["output"], "inside\n");
 	assert!(
@@ -468,16 +480,19 @@ fn same_native_child_unit_at_two_real_origins_keeps_distinct_trace_identity() {
 		.syntax
 		.as_ref()
 		.unwrap();
-	let SyntaxTree::List(parent_list) = &parent_syntax.tree else {
+	let Root::List(parent_list) = parent_syntax.tree.view() else {
 		panic!("native parent list");
 	};
-	let mut expected = parent_list.items[..2]
+	let mut expected = parent_list
+		.items()
+		.take(2)
 		.iter()
 		.map(|item| {
-			let CommandKind::Simple(command) = &item.and_or.first.stages[0].cmd.kind else {
+			let command = item.and_or().first().stages().first().unwrap();
+			let CommandKind::Simple(command) = command.kind() else {
 				panic!("native shell invocation");
 			};
-			command.words[2].id.0
+			command.words().get(2).unwrap().id().0
 		})
 		.collect::<Vec<_>>();
 	let mut actual = children
@@ -497,11 +512,19 @@ fn same_native_child_unit_at_two_real_origins_keeps_distinct_trace_identity() {
 		assert_eq!(unit.source.as_ref().unwrap().as_slice(), b"printf same");
 		let syntax = unit.syntax.as_ref().unwrap();
 		let parent = syntax.parent.unwrap();
-		let SyntaxTree::List(list) = &syntax.tree else {
+		let Root::List(list) = syntax.tree.view() else {
 			panic!("native child list");
 		};
-		let command = &list.items[0].and_or.first.stages[0].cmd;
-		let key = format!("{index}:0:{}", command.id.0);
+		let command = list
+			.items()
+			.first()
+			.unwrap()
+			.and_or()
+			.first()
+			.stages()
+			.first()
+			.unwrap();
+		let key = format!("{index}:0:{}", command.id().0);
 		let range = serde_json::json!([parent.lo + 1, parent.hi - 1]);
 		let completion = snapshot
 			.history
@@ -635,4 +658,33 @@ async fn branch_badges_follow_real_negated_and_elif_decisions() {
 		.collect();
 	assert!(heads.iter().filter(|row| row["meta"] == "↳").count() >= 2);
 	assert!(heads.iter().any(|row| row["meta"] == "↷"));
+}
+
+#[test]
+fn a_trace_saved_by_another_build_restores_from_its_source() {
+	use base64::{Engine as _, engine::general_purpose::STANDARD};
+	let (trace, _) = run_native_shell(
+		"f() { echo \"$1\"; }\nf one\nread -r d <<E\ndoc $(echo x)\nE\necho \"$d\"\n",
+	);
+	let saved = trace.snapshot_json();
+	// Another build's archives: the same field, a version this build does
+	// not read (a session saved before an upgrade).
+	let mut other: Value = serde_json::from_str(&saved).unwrap();
+	let mut archives = 0;
+	for unit in other["units"].as_array_mut().unwrap() {
+		if let Some(text) = unit["syntax"].as_str() {
+			let mut bytes = STANDARD.decode(text).unwrap();
+			bytes[0] = bytes[0].wrapping_add(1);
+			unit["syntax"] = STANDARD.encode(bytes).into();
+			archives += 1;
+		}
+	}
+	assert!(archives > 0);
+	let present = |json: &str| {
+		StoredVisualization::from_snapshot_json(json)
+			.unwrap()
+			.presentation_json(&Options::default())
+			.unwrap()
+	};
+	assert_eq!(present(&other.to_string()), present(&saved));
 }

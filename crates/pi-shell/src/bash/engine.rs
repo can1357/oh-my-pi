@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use crate::bash::{
 	ids::{ModeId, Platform, UnitId, Vpid},
 	ir::{self, Unit},
-	syntax::{CompleteCommand, Features, NO_ALIASES, TextMode},
+	syntax::{CompleteCommand, Features, NO_ALIASES, TextMode, tree::Tree},
 	vm::{ArithCache, PatternCache, TextKind, ZshPatternCache},
 };
 
@@ -150,7 +150,9 @@ impl Engine {
 		*h.finalize().as_bytes()
 	}
 
-	/// Compile an owned command; only an observer retains its canonical tree.
+	/// Compile an owned command. Only an observer retains its canonical
+	/// tree; otherwise the tree comes back, for the next parse to reuse
+	/// ([`Parser::recycle`](crate::bash::syntax::Parser::recycle)).
 	pub(crate) fn compile(
 		&self,
 		cc: CompleteCommand,
@@ -158,7 +160,7 @@ impl Engine {
 		mode: ModeId,
 		features: Features,
 		observed: bool,
-	) -> Arc<Unit> {
+	) -> (Arc<Unit>, Option<Tree>) {
 		// A source-replayable command's unit is named by its source: one
 		// already compiled (a loop's `eval`, a re-sourced file) is reused
 		// without lowering again.
@@ -181,8 +183,10 @@ impl Engine {
 				crate::bash::trace::syntax::UnitSyntax::list(cc).with_context(mode, features.bits()),
 			);
 			Self::share_syntax(&unit, &syntax);
+			(unit, None)
+		} else {
+			(unit, Some(cc.tree))
 		}
-		unit
 	}
 
 	fn share_syntax(unit: &Unit, syntax: &Arc<crate::bash::trace::syntax::UnitSyntax>) {
@@ -238,10 +242,10 @@ impl Engine {
 						};
 						crate::bash::syntax::parse_text(text, Features::NONE, mode)
 							.ok()
-							.map(|word| {
+							.map(|(tree, root)| {
 								crate::bash::trace::syntax::UnitSyntax::new(
 									0,
-									crate::bash::trace::syntax::SyntaxTree::Word(Arc::new(word)),
+									crate::bash::trace::syntax::SyntaxTree::from_word(tree, root),
 								)
 								.with_context(u.mode, u.features)
 							})
@@ -265,13 +269,14 @@ impl Engine {
 				} else {
 					TextMode::HereDoc
 				};
-				let word = crate::bash::syntax::parse_text(text, Features::NONE, tmode)
+				let (tree, root) = crate::bash::syntax::parse_text(text, Features::NONE, tmode)
 					.map_err(|e| TextError { line: e.line, msg: BString::from(e.bash_msg()) })?;
-				let unit = ir::lower_text(&word, text, mode, Features::NONE).map_err(unsupported)?;
+				let word = crate::bash::syntax::tree::Word::at(&tree, root);
+				let unit = ir::lower_text(word, text, mode, Features::NONE).map_err(unsupported)?;
 				if observed {
 					let syntax = crate::bash::trace::syntax::UnitSyntax::new(
 						0,
-						crate::bash::trace::syntax::SyntaxTree::Word(Arc::new(word)),
+						crate::bash::trace::syntax::SyntaxTree::from_word(tree, root),
 					)
 					.with_context(mode, Features::NONE.bits());
 					let _ = unit.trace_syntax.set(Arc::new(syntax));
