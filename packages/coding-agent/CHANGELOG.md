@@ -160,6 +160,10 @@
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
 
+### Fixed
+
+- Isolated `task` agents on the git-worktree (`rcopy`) backend no longer hang setup forever when `git worktree add` never exits or its output pipes stay open after it exits; setup now fails with an error after a deadline ([#17901](https://github.com/can1357/oh-my-pi/issues/17901))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
