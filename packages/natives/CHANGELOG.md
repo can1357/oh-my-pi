@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `setValue()` on Linux reporting success in Firefox and Thunderbird when the field kept its old text, password fields included; it now reads the text back and fails naming what the field holds, or naming no text in a password field ([#18220](https://github.com/can1357/oh-my-pi/pull/18220) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
