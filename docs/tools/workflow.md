@@ -52,8 +52,10 @@ The script runs in a Bun Worker. A watchdog terminates the worker after a
 non-yielding stretch exceeds `syncTimeoutMs` (30 seconds by default), including
 stretches after an `await`. Waiting for an agent does not itself consume this
 limit. When the script ends, fails, or is cancelled, outstanding children are
-aborted and settled before the tool returns; a runner must honor cancellation
-and settle for the workflow to finish.
+aborted and the tool waits up to 10 seconds for them to settle. A child that
+ignores cancellation past that bound is abandoned: the tool returns, the result
+names the abandoned count, and the journal keeps only that call's `started`
+line, so a resume re-executes it.
 
 ## Journal and resume
 
@@ -71,5 +73,9 @@ does not change their identities. Completed calls replay with `cached: true`;
 after divergence, later calls in that scope execute again. A divergence also
 invalidates subsequent sequential work. Chained resumes are supported.
 
-Journals from before call paths were introduced cannot be resumed; start a new
-run instead. Existing journal files are not migrated.
+Journals written before call paths were introduced (lines without `callPath`)
+resume the way they were recorded: by invocation index with a strict prefix.
+A call replays only while every earlier call matched and its prompt hash is
+equal; the first mismatch executes, and so does everything after it. The
+resumed run is journaled with call paths, so later resumes of it use
+structural matching. A run whose lines mix both formats is rejected.

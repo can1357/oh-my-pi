@@ -755,19 +755,64 @@ describe("workflow worker, cancellation, and deterministic resume", () => {
 		expect(journalLines(dir).map(line => line.status)).toEqual(["started", "failed"]);
 	});
 
-	it("rejects legacy journal runs without deterministic call paths", async () => {
+	it("abandons a child that ignores cancellation once the drain bound passes", async () => {
+		const dir = tempDir();
+		const never = Promise.withResolvers<{ result: string; tokens: number }>();
+		const tool = new WorkflowTool(makeSession(dir), { runner: () => never.promise, drainTimeoutMs: 20 });
+		const result = await tool.execute("call-1", { script: `agent("stuck"); return "done";` });
+		expect(result.details?.result).toBe("done");
+		expect((result.content[0] as { text: string }).text).toContain("1 agent() call(s) ignored cancellation");
+		// A late answer after the tool returned must not be journaled as completed.
+		never.resolve({ result: "late", tokens: 1 });
+		// The journal runner subscribed to this promise first, so its late
+		// continuation has run once this await resumes.
+		await never.promise;
+		expect(journalLines(dir).map(line => line.status)).toEqual(["started"]);
+	});
+
+	it("resumes a legacy index-keyed run by strict prefix and journals it with call paths", async () => {
 		const dir = tempDir();
 		const journalPath = path.join(dir, "workflow", "session", "journal.jsonl");
 		fs.mkdirSync(path.dirname(journalPath), { recursive: true });
+		const legacyLine = (index: number, prompt: string, result: string) =>
+			JSON.stringify({
+				runId: "old",
+				index,
+				promptHash: hashAgentCall({ prompt }),
+				agent: "default",
+				result,
+				tokens: 1,
+				status: "completed",
+			});
 		fs.writeFileSync(
 			journalPath,
-			`${JSON.stringify({ runId: "old", index: 0, promptHash: "x", agent: "default", result: "old", tokens: 1, status: "completed" })}\n`,
+			`${[legacyLine(0, "a", "old-a"), legacyLine(1, "changed", "old-b"), legacyLine(2, "c", "old-c")].join("\n")}\n`,
+		);
+		const runner = recordingRunner(prompt => ({ result: `new-${prompt}`, tokens: 0 }));
+		const tool = new WorkflowTool(makeSession(dir), { runner });
+		const script = `return [(await agent("a")).result, (await agent("b")).result, (await agent("c")).result];`;
+		const result = await tool.execute("call-1", { script, resumeFrom: "old" });
+		// "b" diverges at index 1, so "c" executes even though its legacy line matches.
+		expect(result.details?.result).toEqual(["old-a", "new-b", "new-c"]);
+		expect(runner.calls).toEqual(["b", "c"]);
+		const resumed = journalLines(dir).filter(line => line.runId === result.details?.runId);
+		expect(resumed.every(line => typeof line.callPath === "string")).toBe(true);
+	});
+
+	it("rejects a run whose lines mix call-path and index-only formats", async () => {
+		const dir = tempDir();
+		const journalPath = path.join(dir, "workflow", "session", "journal.jsonl");
+		fs.mkdirSync(path.dirname(journalPath), { recursive: true });
+		const base = { runId: "old", promptHash: "x", agent: "default", result: "r", tokens: 1, status: "completed" };
+		fs.writeFileSync(
+			journalPath,
+			`${JSON.stringify({ ...base, index: 0 })}\n${JSON.stringify({ ...base, index: 1, callPath: "r:1" })}\n`,
 		);
 		const tool = new WorkflowTool(makeSession(dir), {
 			runner: recordingRunner(prompt => ({ result: prompt, tokens: 0 })),
 		});
 		await expect(tool.execute("call-1", { script: `return await agent("x");`, resumeFrom: "old" })).rejects.toThrow(
-			/legacy|incompatible/i,
+			/mixes call-path and index-only/,
 		);
 	});
 

@@ -81,6 +81,12 @@ export interface WorkflowRunOptions {
 	signal?: AbortSignal;
 	/** Watchdog bound for any non-yielding stretch, including one after an await. */
 	syncTimeoutMs?: number;
+	/**
+	 * How long a finished run waits for cancelled agent() calls to settle. A
+	 * call that ignores its abort signal past this bound is abandoned so it
+	 * cannot hold the tool call open.
+	 */
+	drainTimeoutMs?: number;
 }
 
 export interface WorkflowRunResult {
@@ -88,6 +94,8 @@ export interface WorkflowRunResult {
 	logs: string[];
 	phases: string[];
 	agentCalls: number;
+	/** agent() calls still running past the drain bound after cancellation. */
+	abandonedCalls: number;
 }
 
 /** The script itself failed (syntax gate, determinism guard, or an uncaught throw). */
@@ -100,6 +108,9 @@ export class WorkflowScriptError extends Error {
 
 /** Default watchdog bound on a non-yielding script stretch. */
 export const DEFAULT_WORKFLOW_SYNC_TIMEOUT_MS = 30_000;
+
+/** Default bound on draining cancelled agent() calls once a run ends. */
+export const DEFAULT_WORKFLOW_DRAIN_TIMEOUT_MS = 10_000;
 
 const WRAP_HEAD = "(async () => {\n";
 const WRAP_TAIL = "\n})";
@@ -536,6 +547,7 @@ export async function runWorkflowScript(options: WorkflowRunOptions): Promise<Wo
 	const phases: string[] = [];
 	let agentCalls = 0;
 	const syncTimeoutMs = options.syncTimeoutMs ?? DEFAULT_WORKFLOW_SYNC_TIMEOUT_MS;
+	const drainTimeoutMs = Math.max(0, options.drainTimeoutMs ?? DEFAULT_WORKFLOW_DRAIN_TIMEOUT_MS);
 	const controller = options.controller ?? new AbortController();
 	const heartbeatMs = Math.max(5, Math.min(200, Math.floor(syncTimeoutMs / 4)));
 	const { promise, resolve, reject } = Promise.withResolvers<WorkflowRunResult>();
@@ -573,7 +585,7 @@ export async function runWorkflowScript(options: WorkflowRunOptions): Promise<Wo
 	options.signal?.addEventListener("abort", onExternalAbort, { once: true });
 	if (options.signal?.aborted) onExternalAbort();
 
-	function settle(run: () => void): void {
+	function settle(run: (abandonedCalls: number) => void): void {
 		if (finished) return;
 		finished = true;
 		clearInterval(watchdog);
@@ -581,15 +593,33 @@ export async function runWorkflowScript(options: WorkflowRunOptions): Promise<Wo
 		// Stop script execution before cancelling and draining every bridge call.
 		worker.terminate();
 		controller.abort();
-		void Promise.allSettled(Array.from(outstanding)).then(run);
+		if (outstanding.size === 0) {
+			run(0);
+			return;
+		}
+		// Cancellation is cooperative: a call that ignores the abort signal must
+		// not hold the run open, so the drain is bounded and whatever is still
+		// running afterwards is reported as abandoned.
+		const drain = Promise.allSettled(Array.from(outstanding));
+		const { promise: drainExpired, resolve: expire } = Promise.withResolvers<void>();
+		const timer = setTimeout(expire, drainTimeoutMs);
+		void Promise.race([drain, drainExpired]).then(() => {
+			clearTimeout(timer);
+			run(outstanding.size);
+		});
 	}
 
 	function fail(error: Error): void {
-		settle(() => reject(error));
+		settle(abandonedCalls => {
+			if (abandonedCalls > 0) {
+				error.message += ` (${abandonedCalls} agent() call(s) ignored cancellation for ${drainTimeoutMs}ms and were abandoned)`;
+			}
+			reject(error);
+		});
 	}
 
 	function succeed(value: unknown): void {
-		settle(() => resolve({ value, logs, phases, agentCalls }));
+		settle(abandonedCalls => resolve({ value, logs, phases, agentCalls, abandonedCalls }));
 	}
 
 	function handleEnvelope(envelopeJson: string): void {

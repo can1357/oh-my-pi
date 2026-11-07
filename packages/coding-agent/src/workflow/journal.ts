@@ -35,10 +35,19 @@ export interface WorkflowJournalLine extends WorkflowCallRecord {
 	runId: string;
 }
 
-export interface WorkflowRunRecord {
-	runId: string;
-	calls: WorkflowCallRecord[];
-}
+/**
+ * A call recorded before structural call paths existed: identified only by
+ * its invocation index.
+ */
+export type WorkflowLegacyCallRecord = Omit<WorkflowCallRecord, "callPath">;
+
+/**
+ * A run's folded call states. `legacy` runs predate call paths; they resume
+ * the way they were written - by invocation index with a strict prefix.
+ */
+export type WorkflowRunRecord =
+	| { runId: string; format: "structural"; calls: WorkflowCallRecord[] }
+	| { runId: string; format: "legacy"; calls: WorkflowLegacyCallRecord[] };
 
 /** What the journal needs from a session; the tool session satisfies it. */
 export interface WorkflowJournalHost {
@@ -82,11 +91,13 @@ export function hashAgentCall(call: { prompt: string; agent?: string; context?: 
 	return createHash("sha256").update(canonical).digest("hex");
 }
 
-function isJournalLine(value: unknown): value is WorkflowJournalLine {
+function isJournalLine(value: unknown): value is WorkflowJournalLine | (WorkflowLegacyCallRecord & { runId: string }) {
 	if (value === null || typeof value !== "object") return false;
 	const record = value as Record<string, unknown>;
 	if (typeof record.runId !== "string") return false;
-	if (typeof record.callPath !== "string" || record.callPath.length === 0) return false;
+	if (record.callPath !== undefined && (typeof record.callPath !== "string" || record.callPath.length === 0)) {
+		return false;
+	}
 	if (typeof record.index !== "number" || !Number.isInteger(record.index) || record.index < 0) return false;
 	if (typeof record.promptHash !== "string") return false;
 	if (typeof record.agent !== "string") return false;
@@ -146,8 +157,9 @@ export class WorkflowJournal {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 			throw error;
 		}
-		const byIndex = new Map<number, WorkflowCallRecord>();
-		let found = false;
+		const byIndex = new Map<number, WorkflowLegacyCallRecord & { callPath?: string }>();
+		let structural = false;
+		let legacy = false;
 		for (const rawLine of text.split("\n")) {
 			if (rawLine.trim().length === 0) continue;
 			let parsed: unknown;
@@ -158,22 +170,13 @@ export class WorkflowJournal {
 				// it is still a valid resume source.
 				continue;
 			}
-			if (
-				parsed !== null &&
-				typeof parsed === "object" &&
-				"runId" in parsed &&
-				parsed.runId === runId &&
-				!("callPath" in parsed)
-			) {
-				throw new Error(
-					`workflow: legacy journal run ${runId} is incompatible with deterministic resume; start a new run`,
-				);
-			}
 			if (!isJournalLine(parsed) || parsed.runId !== runId) continue;
-			found = true;
+			const callPath = "callPath" in parsed ? parsed.callPath : undefined;
+			if (callPath === undefined) legacy = true;
+			else structural = true;
 			byIndex.set(parsed.index, {
 				index: parsed.index,
-				callPath: parsed.callPath,
+				...(callPath !== undefined ? { callPath } : {}),
 				promptHash: parsed.promptHash,
 				agent: parsed.agent,
 				result: parsed.result,
@@ -182,10 +185,14 @@ export class WorkflowJournal {
 				...(parsed.error !== undefined ? { error: parsed.error } : {}),
 			});
 		}
-		if (!found) return undefined;
-		return {
-			runId,
-			calls: Array.from(byIndex.values()).sort((left, right) => left.index - right.index),
-		};
+		if (!structural && !legacy) return undefined;
+		// Every run is written by one version, so its lines share one format; a
+		// mix means the journal was edited and neither identity can be trusted.
+		if (structural && legacy) {
+			throw new Error(`workflow: journal run ${runId} mixes call-path and index-only lines; start a new run`);
+		}
+		const calls = Array.from(byIndex.values()).sort((left, right) => left.index - right.index);
+		if (legacy) return { runId, format: "legacy", calls };
+		return { runId, format: "structural", calls: calls as WorkflowCallRecord[] };
 	}
 }

@@ -30,7 +30,14 @@ import { acquireSessionSpawnPermit, releaseSessionSpawnPermit } from "../task/sp
 import { runStructuredSubagent } from "../task/structured-subagent";
 import type { ToolSession } from "../tools";
 import { throwIfAborted } from "../tools/tool-errors";
-import { hashAgentCall, resolveWorkflowJournalPath, WorkflowJournal, type WorkflowCallRecord } from "./journal";
+import {
+	hashAgentCall,
+	resolveWorkflowJournalPath,
+	WorkflowJournal,
+	type WorkflowCallRecord,
+	type WorkflowLegacyCallRecord,
+	type WorkflowJournalLine,
+} from "./journal";
 import {
 	runWorkflowScript,
 	type WorkflowAgentBridge,
@@ -70,6 +77,8 @@ export interface WorkflowToolOptions {
 	journalPath?: string;
 	/** Bound on the script's synchronous portion (default: 30 s). */
 	syncTimeoutMs?: number;
+	/** Bound on draining cancelled agent() calls once the run ends (default: 10 s). */
+	drainTimeoutMs?: number;
 }
 
 export const WORKFLOW_TOOL_NAME = "workflow";
@@ -181,12 +190,23 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 			throw new ToolError(`workflow: resumeFrom run ${resumeFrom} was not found in ${journalPath}`);
 		}
 
+		// A resumed run's own prefix is recorded as `cached`; accepting it lets a
+		// run be resumed again after a second kill.
+		const isReplayable = (call: { status: string }): boolean =>
+			call.status === "completed" || call.status === "cached";
 		const cachedByPath = new Map<string, WorkflowCallRecord>();
-		for (const call of cachedRun?.calls ?? []) {
-			// A resumed run's own prefix is recorded as `cached`; accepting it
-			// lets a run be resumed again after a second kill.
-			if (call.status === "completed" || call.status === "cached") cachedByPath.set(call.callPath, call);
+		// Runs journaled before call paths existed resume as they were written:
+		// by invocation index, with a strict prefix (the prompt hash still has to
+		// match, so a reordered parallel fan-out re-executes instead of replaying
+		// another item's answer).
+		const legacyByIndex = new Map<number, WorkflowLegacyCallRecord>();
+		if (cachedRun?.format === "legacy") {
+			for (const call of cachedRun.calls) if (isReplayable(call)) legacyByIndex.set(call.index, call);
+		} else {
+			for (const call of cachedRun?.calls ?? []) if (isReplayable(call)) cachedByPath.set(call.callPath, call);
 		}
+		const legacyResume = cachedRun?.format === "legacy";
+		let legacyPrefixIntact = true;
 
 		const runId = `wf-${randomUUID()}`;
 		const controller = new AbortController();
@@ -198,6 +218,13 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 		let executed = 0;
 		let cached = 0;
 		const runner = this.#options.runner ?? createWorkflowAgentRunner(this.#session, runnerSignal);
+		// The journal closes when the tool returns: a call abandoned after
+		// ignoring cancellation keeps only its `started` line, so a resume
+		// re-executes it instead of trusting an answer nobody awaited.
+		let journalOpen = true;
+		const record = (line: WorkflowJournalLine): void => {
+			if (journalOpen) journal.append(line);
+		};
 
 		const journalRunner: WorkflowAgentBridge = async (prompt, opts, context) => {
 			throwIfAborted(context.signal);
@@ -209,13 +236,18 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 			const scope = callPath.slice(0, callPath.lastIndexOf(":"));
 			const pool = scope.slice(0, scope.lastIndexOf("."));
 			if (scope !== "r" && !poolPrefixes.has(pool)) poolPrefixes.set(pool, rootPrefixIntact);
-			const prior = (scope === "r" ? rootPrefixIntact : poolPrefixes.get(pool) && !divergentScopes.has(scope))
-				? cachedByPath.get(callPath)
-				: undefined;
+			let prior: WorkflowLegacyCallRecord | undefined;
+			if (legacyResume) {
+				prior = legacyPrefixIntact ? legacyByIndex.get(index) : undefined;
+			} else {
+				prior = (scope === "r" ? rootPrefixIntact : poolPrefixes.get(pool) && !divergentScopes.has(scope))
+					? cachedByPath.get(callPath)
+					: undefined;
+			}
 
 			if (prior !== undefined && prior.promptHash === promptHash) {
 				cached += 1;
-				journal.append({
+				record({
 					runId,
 					index,
 					callPath,
@@ -229,12 +261,13 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 			}
 
 			rootPrefixIntact = false;
+			legacyPrefixIntact = false;
 			divergentScopes.add(scope);
-			journal.append({ runId, index, callPath, promptHash, agent, result: null, tokens: 0, status: "started" });
+			record({ runId, index, callPath, promptHash, agent, result: null, tokens: 0, status: "started" });
 			executed += 1;
 			try {
 				const outcome: WorkflowAgentResult = await runner(prompt, opts, context);
-				journal.append({
+				record({
 					runId,
 					index,
 					callPath,
@@ -246,7 +279,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 				});
 				return outcome;
 			} catch (error) {
-				journal.append({
+				record({
 					runId,
 					index,
 					callPath,
@@ -270,6 +303,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 				controller,
 				...(signal !== undefined ? { signal } : {}),
 				...(this.#options.syncTimeoutMs !== undefined ? { syncTimeoutMs: this.#options.syncTimeoutMs } : {}),
+				...(this.#options.drainTimeoutMs !== undefined ? { drainTimeoutMs: this.#options.drainTimeoutMs } : {}),
 				onLog: line => onUpdate?.({ content: [{ type: "text", text: `workflow log: ${line}` }] }),
 				onPhase: name => onUpdate?.({ content: [{ type: "text", text: `workflow phase: ${name}` }] }),
 			});
@@ -278,12 +312,19 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 			if (signal?.aborted) throwIfAborted(signal);
 			const reason = error instanceof WorkflowScriptError ? error.message : errorMessage(error);
 			throw new ToolError(`workflow ${runId} failed: ${reason}\njournal: ${journalPath}`);
+		} finally {
+			journalOpen = false;
 		}
 
 		const phases = run.phases.length > 0 ? `phases: ${run.phases.join(" > ")}\n` : "";
 		const logLines = run.logs.length > 0 ? `log:\n${run.logs.map(line => `  ${line}`).join("\n")}\n` : "";
 		const text = [
 			`workflow ${runId}: ${executed} executed, ${cached} cached`,
+			...(run.abandonedCalls > 0
+				? [
+						`${run.abandonedCalls} agent() call(s) ignored cancellation and were abandoned; a resume re-executes them`,
+					]
+				: []),
 			`journal: ${journalPath}`,
 			phases + logLines,
 			`result:\n${renderValue(run.value)}`,
