@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `CursorExecFrameContext`: `CursorExecHandlers.read` and `write` receive `{ editMaterialization: true }` for the frames that materialize a native StrReplace or Write, and `CursorExecHandlers.editSettled` ends the live card of an edit the server completed without writing
+
 ### Fixed
 
 - ChatGPT Pro Max (`promax`) counts as Pro for Codex account routing, so a blocked Pro account no longer wins over an open or pinned Pro Max account ([#18399](https://github.com/can1357/oh-my-pi/pull/18399) by [@serverinspector](https://github.com/serverinspector))

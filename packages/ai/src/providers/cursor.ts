@@ -189,6 +189,7 @@ import type {
 	Api,
 	AssistantMessage,
 	Context,
+	CursorExecFrameContext,
 	CursorExecHandlerResult,
 	CursorExecHandlers,
 	CursorExecPairing,
@@ -1549,6 +1550,7 @@ function streamCursorWithWireMode(
 					if (!firstTokenTime) firstTokenTime = performance.now();
 				},
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
+				onEditSettled: options?.execHandlers?.editSettled?.bind(options.execHandlers),
 				onToolResult,
 				holdExternalCall: relay
 					? (execMsg, mcpCall) => {
@@ -2386,6 +2388,8 @@ export interface BlockState {
 	editOwnedToolCallIds?: Set<string>;
 	/** Edit blocks whose write already persisted a `toolResult`. */
 	pairedEditToolCallIds?: Set<string>;
+	/** Ends the live card of an edit the server completed without a materializing write. */
+	onEditSettled?: (result: ToolResultMessage) => void;
 	firstTokenTime: number | undefined;
 	setTextBlock: (b: (TextContent & { [kStreamingBlockIndex]: number }) | null) => void;
 	setThinkingBlock: (b: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null) => void;
@@ -2857,6 +2861,8 @@ function sendShellStreamExitFromResult(
 	}
 }
 
+const EDIT_MATERIALIZATION: CursorExecFrameContext = { editMaterialization: true };
+
 async function handleExecServerMessage(
 	execMsg: ExecServerMessage,
 	runTransport: CursorMessageWriter,
@@ -2942,9 +2948,10 @@ async function handleExecServerMessage(
 						: { path: piReadDisplayPath(args.path, args.offset, args.limit) },
 				);
 			}
+			const read = execHandlers?.read?.bind(execHandlers);
 			const { execResult: readResult, toolResult } = await resolveExecHandler(
 				handlerArgs,
-				execHandlers?.read?.bind(execHandlers),
+				read && editOwned ? (readArgs: typeof handlerArgs) => read(readArgs, EDIT_MATERIALIZATION) : read,
 				editOwned ? undefined : onToolResult,
 				result =>
 					buildReadResultFromToolResult(
@@ -3072,8 +3079,8 @@ async function handleExecServerMessage(
 			const write = execHandlers?.write?.bind(execHandlers);
 			const writeHandler = write
 				? async (writeArgs: typeof args) => {
-						const result = await write(writeArgs);
-						return editOwned ? remapExecHandlerToolName(result, "edit") : result;
+						if (!editOwned) return await write(writeArgs);
+						return remapExecHandlerToolName(await write(writeArgs, EDIT_MATERIALIZATION), "edit");
 					}
 				: undefined;
 			const { execResult } = await resolveExecHandler(
@@ -6014,14 +6021,20 @@ export function processInteractionUpdate(
 				}
 				if (!state.pairedEditToolCallIds?.has(settled.id)) {
 					const { text, isError } = describeEditResult(toolCall);
-					state.onToolResult?.({
+					const result: ToolResultMessage = {
 						role: "toolResult",
 						toolCallId: settled.id,
 						toolName: "edit",
 						content: [{ type: "text", text }],
 						isError,
 						timestamp: Date.now(),
-					});
+					};
+					state.onToolResult?.(result);
+					try {
+						state.onEditSettled?.(result);
+					} catch (error) {
+						log("error", "onEditSettled", { error: error instanceof Error ? error.message : String(error) });
+					}
 				}
 			}
 			const idx = streamedBlockIndex(output, settled);

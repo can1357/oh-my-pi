@@ -1557,11 +1557,22 @@ export interface CursorMcpResourceContent {
 	downloadPath?: string;
 }
 
+/** What the provider knows about an exec frame beyond its arguments. */
+export interface CursorExecFrameContext {
+	/**
+	 * The frame materializes a native StrReplace or Write: Cursor reads the
+	 * whole file and writes it back under the edit's call id. The streamed
+	 * `edit` block owns that id, so the frame surfaces no call of its own, and
+	 * the write reports as `edit` with the diff it made.
+	 */
+	editMaterialization?: boolean;
+}
+
 export interface CursorExecHandlers {
-	read?: (args: ReadArgs) => Promise<CursorExecHandlerResult<ReadResult>>;
+	read?: (args: ReadArgs, frame?: CursorExecFrameContext) => Promise<CursorExecHandlerResult<ReadResult>>;
 	ls?: (args: LsArgs) => Promise<CursorExecHandlerResult<LsResult>>;
 	grep?: (args: GrepArgs) => Promise<CursorExecHandlerResult<GrepResult>>;
-	write?: (args: WriteArgs) => Promise<CursorExecHandlerResult<WriteResult>>;
+	write?: (args: WriteArgs, frame?: CursorExecFrameContext) => Promise<CursorExecHandlerResult<WriteResult>>;
 	delete?: (args: DeleteArgs) => Promise<CursorExecHandlerResult<DeleteResult>>;
 	shell?: (args: ShellArgs) => Promise<CursorExecHandlerResult<ShellResult>>;
 	shellStream?: (
@@ -1617,6 +1628,12 @@ export interface CursorExecHandlers {
 	}) => Promise<CursorMcpResourceContent | null>;
 	/** Mirror Cursor's server-owned todo list into local session state. */
 	todoSync?: CursorTodoSyncHandler;
+	/**
+	 * Settle a native StrReplace or Write the server completed without a
+	 * materializing write (a failed match, a refusal). Its read surfaced no
+	 * call, so nothing else ends the live card.
+	 */
+	editSettled?: (result: ToolResultMessage) => void;
 	onToolResult?: CursorToolResultHandler;
 }
 
