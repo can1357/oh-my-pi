@@ -243,6 +243,12 @@ export class ImageBudget {
 	#placementGeometry = new Map<number, ImageDimensions>();
 	/** Ids whose owner replaced them for good ({@link release}); retired once no frame shows them. */
 	#released = new Set<number>();
+	/**
+	 * Callbacks invoked once per emitted frame from {@link limitResidentImages}.
+	 * Owners with speculative per-pass ledgers register here so discarded
+	 * discovery/retry passes never promote placements the terminal never painted.
+	 */
+	#frameCommitCallbacks = new Set<() => void>();
 
 	constructor(cap: number = DEFAULT_MAX_INLINE_IMAGES, requestRender: () => void = () => {}) {
 		this.#cap = normalizeCap(cap);
@@ -264,6 +270,17 @@ export class ImageBudget {
 	/** Ask for a repaint, e.g. once an image's off-thread encode settles. */
 	requestRender(): void {
 		this.#requestRender();
+	}
+	/**
+	 * Register `cb` to run once per emitted frame (see {@link limitResidentImages}).
+	 * Returns an unsubscribe function. Used by owners whose render pass builds
+	 * speculative placement ledgers that must commit only when the frame is emitted.
+	 */
+	onFrameCommitted(cb: () => void): () => void {
+		this.#frameCommitCallbacks.add(cb);
+		return () => {
+			this.#frameCommitCallbacks.delete(cb);
+		};
 	}
 
 	setCap(cap: number): void {
@@ -443,10 +460,20 @@ export class ImageBudget {
 			this.#forgetKeyForId(id);
 			this.#released.delete(id);
 		}
-		if (this.#cap <= 0 || transmitted.size <= this.#cap) return;
-		for (const id of transmitted) {
-			if (transmitted.size <= this.#cap) break;
-			this.#retire(id);
+		if (this.#cap > 0 && transmitted.size > this.#cap) {
+			for (const id of transmitted) {
+				if (transmitted.size <= this.#cap) break;
+				this.#retire(id);
+			}
+		}
+		// Once per emitted frame (never per discarded discovery/retry pass):
+		// promote speculative placement ledgers to last-painted.
+		for (const cb of this.#frameCommitCallbacks) {
+			try {
+				cb();
+			} catch {
+				// Commit callbacks only copy placement arrays; never let one break emission.
+			}
 		}
 	}
 
