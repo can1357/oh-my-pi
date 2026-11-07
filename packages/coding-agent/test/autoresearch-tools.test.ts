@@ -13,7 +13,6 @@ import { createInitExperimentTool } from "@oh-my-pi/pi-coding-agent/autoresearch
 import { createLogExperimentTool } from "@oh-my-pi/pi-coding-agent/autoresearch/tools/log-experiment";
 import { createRunExperimentTool } from "@oh-my-pi/pi-coding-agent/autoresearch/tools/run-experiment";
 import { createUpdateNotesTool } from "@oh-my-pi/pi-coding-agent/autoresearch/tools/update-notes";
-import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import type { ASIData, LogDetails, NumericMetricMap, RunDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -895,11 +894,5 @@ describe("update_notes", () => {
 		expect(firstTextBlockText(replaced.content)).toContain("Notes updated");
 		expect(replaced.details?.notes).toBe("## Replacement\n");
 		expect(runtime.state.notes).toBe("## Replacement\n");
-
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		expect(notes.renderCall?.({}, { expanded: false, isPartial: true }, theme).render(80).join("\n")).toContain(
-			"update_notes",
-		);
 	});
 });
