@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Faster polyphonic memory recall when scoring stored embeddings across turns ([#16994](https://github.com/can1357/oh-my-pi/pull/16994) by [@GTanger](https://github.com/GTanger))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
