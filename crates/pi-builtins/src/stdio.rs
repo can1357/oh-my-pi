@@ -493,6 +493,20 @@ impl Source {
 	pub fn metadata(&self) -> Option<&pi_vfs::Metadata> {
 		self.metadata.as_ref()
 	}
+
+	/// The identity of the file behind the opened handle, read from the handle
+	/// rather than from the path it was opened by.
+	///
+	/// [`Source::metadata`] is the stat taken before the open, which a name
+	/// replaced in between makes stale; this one names the file that was
+	/// actually opened. A descriptor or an in-process stream has no identity
+	/// beyond the one recorded at open, and is reported from that.
+	pub async fn handle_metadata(&self) -> Option<pi_vfs::Metadata> {
+		match &self.repr {
+			Repr::File(file) => file.metadata_async().await.ok(),
+			_ => self.metadata.clone(),
+		}
+	}
 }
 
 /// Whether `path` names one of the shell's descriptors in a way that opening
