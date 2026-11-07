@@ -8,7 +8,7 @@
  * a footgun that kills every Bun process on the machine). We keep the
  * `process.title` assignment (correct getter, future-proof if Bun ever fixes the
  * setter) and additionally drive `prctl` via `bun:ffi` on Linux, mirroring the
- * libc-FFI pattern in `ttyid.ts` / `stderr-guard.ts`.
+ * libc-FFI pattern in `ttyid.ts` / `terminal-output-guard.ts`.
  *
  * macOS has no clean userspace equivalent for the shebang-run path, so there
  * we only set `process.title`. Windows derives the name from the exec'd file,
@@ -38,7 +38,7 @@ export function setProcessName(name: string): void {
 
 	if (platform !== "linux") return;
 
-	// glibc first, then the generic soname for musl-style layouts (see stderr-guard.ts).
+	// glibc first, then the generic soname for musl-style layouts (see terminal-output-guard.ts).
 	for (const soname of ["libc.so.6", "libc.so"]) {
 		try {
 			const libc = dlopen(soname, {

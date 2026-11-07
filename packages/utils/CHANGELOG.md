@@ -6,6 +6,9 @@
 
 ### Fixed
 
+- Fixed unmanaged stdout and stderr corrupting interactive displays, with private bounded diagnostics across custom directories, recovery from failed log destinations, transport changes without retired sinks reclaiming output, and disabled structured file logging ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
+- Failed log rotations and guard handoffs now keep raw and structured records in the previous target and retry once the destination recovers ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
+- Disabling file logging now succeeds and releases unleased log descriptors even when storage rejects a pending batch ([#16159](https://github.com/can1357/oh-my-pi/pull/16159) by [@tommymorgan](https://github.com/tommymorgan)).
 - Fixed abort signals leaving command output reads blocked when a descendant keeps stdout or stderr open after the root process exits. ([#18309](https://github.com/can1357/oh-my-pi/pull/18309) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.17.0] - 2026-11-06

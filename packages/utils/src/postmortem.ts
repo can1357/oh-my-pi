@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
 import { restoreTerminalStderr } from "./stderr-guard";
+import { restoreTerminalOutput } from "./terminal-output-guard";
 import { toError } from "./type-guards";
 
 // Cleanup reasons, in order of priority/meaning.
@@ -644,9 +645,19 @@ function formatFatalError(label: string, err: Error): string {
 	return `\n[${label}] ${name}: ${message}${formattedStack}\n`;
 }
 
+/**
+ * Put both descriptors back for a fatal report: force-restore the unified
+ * guard, then the 16.5.1 stderr guard so a legacy suppression cannot send
+ * the crash report into the log instead of the terminal.
+ */
+export function restoreTerminalForFatalReport(): void {
+	restoreTerminalOutput(true);
+	restoreTerminalStderr();
+}
+
 /** Write a final report to stderr once terminal owners have handed the terminal back. */
 function writeTerminalReport(output: string): void {
-	restoreTerminalStderr();
+	restoreTerminalForFatalReport();
 	// A revoked terminal can make stream writes raise another fatal error. Use
 	// the descriptor directly so failure stays synchronous and contained.
 	try {
