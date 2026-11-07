@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- The Agent Hub footer names both section keys (`1:agents` / `2:activity`) in every view, and a footer too narrow for the symbol preset's spelled-out key names drops hints instead of cutting off its tail ([#12432](https://github.com/can1357/oh-my-pi/issues/12432), [#16469](https://github.com/can1357/oh-my-pi/pull/16469) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - A saved bash trace the shell visualization can no longer restore (e.g. a `tool_result` hook rewrote its `script`) renders as plain command and output instead of crashing the TUI and every `omp --resume` of that session ([#18338](https://github.com/can1357/oh-my-pi/issues/18338))
 - Tables with near-equal large numeric columns no longer crash transcript rendering during chart analysis ([#18343](https://github.com/can1357/oh-my-pi/issues/18343))
 - A JPEG truncated before its end-of-image marker is rejected when read and omitted from the request, instead of failing the whole provider request with "unsupported image" ([#18385](https://github.com/can1357/oh-my-pi/pull/18385) by [@iwangjie](https://github.com/iwangjie))
