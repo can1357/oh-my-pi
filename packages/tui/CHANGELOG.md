@@ -5,6 +5,7 @@
 ### Added
 
 - Grep headers syntax-highlight regex patterns, including incomplete patterns while a call streams, in terminal and native views ([#18392](https://github.com/can1357/oh-my-pi/pull/18392) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
+- `SettingsRuntimeContext.runtimeOptions` supplies runtime submenu choices for settings without built-in ones; those rows show the chosen option's label ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
 ## [18.18.0] - 2026-11-07
 
@@ -44,7 +45,6 @@
 - Frame-rate ceiling (`frame-rate`: `setMaxFps`, `minFrameIntervalMs`) for rendering and animations; frames awaited by a keystroke keep 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - `setMotionEffects` (`motion-effects`) turns off decorative motion: status-line blink, brand fade, magic-keyword sweep and native `fx` spans ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - `CompactTranscriptBlock` (`chrome/transcript-container`): consecutive blocks whose `isTranscriptBlockCompact()` is true render without blank rows between them, in terminal and native (TSP) surfaces ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
-- `SettingsRuntimeContext.runtimeOptions` supplies runtime submenu choices for settings without built-in ones; those rows show the chosen option's label ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Changed
 

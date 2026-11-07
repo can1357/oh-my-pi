@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extensions can register a todo backend with `pi.registerTodoBackend()`, selected by the `todo.backend` setting; the main session sends every todo write to it and falls back to native todos with one notice when it isn't available ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
+
+### Changed
+
+- With an extension todo backend selected, RPC `set_todos` waits for it, so its response can arrive after the responses to commands sent later; match it by `id`. With native todos it is unchanged ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
+
 ### Fixed
 
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
@@ -68,7 +76,6 @@
 - Exported `unwrapHashlineHeaderPath` from `@oh-my-pi/pi-coding-agent` to turn a `[path#TAG]` target into its plain path ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
 - `devin-cli` login imports Devin CLI credentials, so the `devin` provider no longer requires `DEVIN_API_KEY` ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - `devin-windsurf` login authenticates the `devin` provider with an existing Windsurf Enterprise account ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- Extensions can register a todo backend with `pi.registerTodoBackend()`, selected by the `todo.backend` setting; the main session sends every todo write to it and falls back to native todos with one notice when it isn't available ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Changed
 
@@ -92,7 +99,6 @@
 - "What's New" release notes now appear just after the first frame; quitting before it keeps them for the next start
 - Subagents can no longer broadcast (`write agent://all` fails, pointing to a direct `agent://<id>` message) and are no longer told to announce shared-file edits; the main agent can still broadcast
 - Factory Droid Gemini 4 Argon sessions keep earlier turns intact across save and reload, with correct image clamping ([#17861](https://github.com/can1357/oh-my-pi/pull/17861) by [@will-bogusz](https://github.com/will-bogusz))
-- With an extension todo backend selected, RPC `set_todos` waits for it, so its response can arrive after the responses to commands sent later; match it by `id`. With native todos it is unchanged ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Fixed
 
