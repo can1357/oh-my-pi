@@ -984,4 +984,29 @@ describe("batch model placement", () => {
 		);
 		expect((batch ? getBatchItemProperties(tool) : getSchemaProperties(tool)).model).toBeDefined();
 	});
+
+	// The gated-model pass runs before shape validation, so it sees whatever the
+	// wire delivered. A malformed item must reach validation and get its own
+	// actionable message in every mode, not make the pass throw — and that holds
+	// even when the call supplied no `model` at all.
+	it.each(["on", "off", "eval"] as const)(
+		"leaves a malformed batch item to shape validation while task.perCallModel is %s",
+		async mode => {
+			mockDiscovery();
+			const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+			const tool = await TaskTool.create(
+				createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": mode } }),
+			);
+			const lone = await tool.execute("null-item", { context: "Shared context", tasks: [null] });
+			expect(getFirstText(lone)).toContain("Task 1 is missing `task`");
+			expect(lone.isError).toBe(true);
+			const mixed = await tool.execute("mixed-items", {
+				context: "Shared context",
+				tasks: [{ task: "Do work", solutionSpace: "c" }, null],
+			});
+			expect(getFirstText(mixed)).toContain("Task 2 is missing `task`");
+			expect(mixed.isError).toBe(true);
+			expect(run).not.toHaveBeenCalled();
+		},
+	);
 });

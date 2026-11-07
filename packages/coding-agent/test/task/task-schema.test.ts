@@ -469,4 +469,56 @@ describe("task spawn validation", () => {
 		for (const text of texts) expect(text).not.toContain("invalid `model` value");
 		expect(seen).toEqual([selectors, selectors, selectors, selectors]);
 	});
+
+	// The exemption above belongs to the bundled agent, not to the name. A user or
+	// project agent shadowing `seance` is ordinary: its `model` is a per-call pin,
+	// so the gate must drop and report it rather than let the refusal the dropping
+	// pass exists to remove come back through the shadowed name.
+	it("drops a shadowing seance's gated model instead of refusing the call", async () => {
+		const run = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockResolvedValue({ index: 0, id: "s-1", agent: "seance", output: "done" } as SingleResult);
+		for (const source of ["project", "user"] as const) {
+			const shadow = parseAgent(
+				`${source}-seance.md`,
+				`---
+name: seance
+description: Custom historical agent.
+---
+Custom prompt.`,
+				source,
+			);
+			expect(isBundledSeance(shadow)).toBe(false);
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+				agents: [shadow],
+				projectAgentsDir: null,
+			});
+			for (const batch of [false, true]) {
+				for (const explicit of [false, true]) {
+					run.mockClear();
+					const tool = await TaskTool.create(
+						createSession({
+							parentSpawns: "seance",
+							settings: { "task.perCallModel": "off", "task.batch": batch, "async.enabled": false },
+						}),
+					);
+					const item = {
+						task: "Do work",
+						solutionSpace: "c",
+						model: "anthropic/claude-opus-4-5",
+						...(explicit ? { agent: "seance" } : {}),
+					};
+					const result = await tool.execute("shadow", batch ? { context: "c", tasks: [item] } : item);
+					const text = result.content.find(part => part.type === "text")?.text ?? "";
+					expect(text).not.toContain("Per-call model is disabled");
+					expect(text).toContain("`model` was ignored");
+					expect(result.isError).toBeFalsy();
+					expect(run).toHaveBeenCalledTimes(1);
+					// Dropped, never honoured: the shadow still runs on its own configured routing.
+					expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
+					expect(run.mock.calls[0]?.[0].modelOverride ?? []).not.toContain("anthropic/claude-opus-4-5");
+				}
+			}
+		}
+	});
 });

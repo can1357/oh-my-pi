@@ -504,7 +504,8 @@ function spawnParamsFor(params: TaskParams, item: ResolvedTaskItem, defaultAgent
 
 /**
  * Told to the caller when its `model` was ignored, so a dropped selector is never a
- * silent substitution: the call succeeds, and the result says which model actually ran.
+ * silent substitution: the call succeeds, and the result says the spawns ran on their
+ * configured routing rather than naming the model that served them.
  */
 const GATED_MODEL_NOTICE =
 	"`model` was ignored: per-call models are disabled here (task.perCallModel), so each agent ran on its configured model. Omit it, or pick an agent whose configured model you want.";
@@ -523,13 +524,29 @@ const GATED_MODEL_NOTICE =
  * honoured while the gate is off.
  *
  * The bundled seance agent's `model` names the historical session's model
- * rather than a per-call one, so it is kept. A top-level `model` on a batch
- * call is a placement mistake with its own message, so it is left to validation.
+ * rather than a per-call one, so it is kept — but only when `seanceAdvertised`
+ * says the name resolved to the bundled agent. A user or project agent
+ * shadowing `seance` is an ordinary agent whose `model` is a per-call pin,
+ * which is the line `validateSeanceFields` and `runStructuredSubagent` already
+ * draw. A top-level `model` on a batch call is a placement mistake with its own
+ * message, so it is left to validation.
+ *
+ * This pass runs before shape validation, so a call or an item may be anything
+ * the wire delivered: whatever is not a well-formed record is left untouched
+ * for validation to report.
  */
-function dropGatedModel(params: TaskParams, defaultAgent: string, settings: Settings): TaskParams {
-	if (perCallModelEnabled(settings, "task")) return params;
-	const gated = (item: TaskItem | TaskParams): boolean =>
-		item.model !== undefined && (item.agent?.trim() || defaultAgent) !== SEANCE_AGENT_NAME;
+function dropGatedModel(
+	params: TaskParams,
+	defaultAgent: string,
+	seanceAdvertised: boolean,
+	settings: Settings,
+): TaskParams {
+	if (perCallModelEnabled(settings, "task") || !isRecord(params)) return params;
+	const gated = (item: unknown): boolean => {
+		if (!isRecord(item) || item.model === undefined) return false;
+		const agent = typeof item.agent === "string" ? item.agent.trim() : "";
+		return !(seanceAdvertised && (agent || defaultAgent) === SEANCE_AGENT_NAME);
+	};
 	if (Array.isArray(params.tasks)) {
 		if (!params.tasks.some(gated)) return params;
 		return {
@@ -570,7 +587,7 @@ function planSpawns(
 ): SpawnPlan | string {
 	const repaired = repairTaskParams(rawParams as TaskParams);
 	// `dropGatedModel` returns its argument untouched when nothing is gated, so identity is the signal.
-	const params = dropGatedModel(repaired, defaultAgent, settings);
+	const params = dropGatedModel(repaired, defaultAgent, seanceAdvertised, settings);
 	const error =
 		validateShapeParams(batchEnabled, params) ??
 		validateSpawnParams(params, batchEnabled, fileEnabled, defaultAgent, settings) ??
