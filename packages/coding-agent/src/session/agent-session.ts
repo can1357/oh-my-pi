@@ -173,6 +173,7 @@ import {
 	loadSkillPrompt,
 	renderSkillPromptMessage,
 	type Skill,
+	type SkillDiagnostic,
 	type SkillPromptInput,
 	type SkillRediscoveryHost,
 	type SkillWarning,
@@ -2636,6 +2637,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			baseSystemPrompt: this.agent.state.systemPrompt,
 			skills: config.skills,
 			skillWarnings: config.skillWarnings,
+			skillDiagnostics: config.skillDiagnostics,
 			skillsSettings: config.skillsSettings,
 			skillsReloadable: config.skillsReloadable,
 		});
@@ -11042,6 +11044,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Skill loading warnings captured by SDK */
 	get skillWarnings(): readonly SkillWarning[] {
 		return this.#tools.skillWarnings;
+	}
+
+	/** Skill resolution diagnostics captured by SDK */
+	get skillDiagnostics(): readonly SkillDiagnostic[] {
+		return this.#tools.skillDiagnostics;
 	}
 
 	/** Session-local general-purpose agents pinned to user-tagged models. */
