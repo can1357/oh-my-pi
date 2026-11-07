@@ -658,6 +658,8 @@ impl AxBackend for AtSpiAx {
 				child_count,
 				identity: None,
 				partial: false,
+				selected: false,
+				role_name: None,
 			})
 		})
 	}

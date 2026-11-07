@@ -1010,13 +1010,20 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		active:  pending.map_or_default(|p| p.1.iter().map(|a| a.to_vec()).collect()),
 	};
 	let mut parser = (!at_end).then(|| {
-		match aliases {
+		let mut p = match aliases {
 			Some(a) => Parser::new(src, feat, a),
 			None => Parser::new(src, feat, crate::bash::syntax::NO_ALIASES),
 		}
-		.with_resume(&resume_from)
+		.with_resume(&resume_from);
+		p.recycle(core::mem::take(&mut k.spare_tree));
+		p
 	});
 	let res = parser.as_mut().and_then(Parser::next_command);
+	if res.is_none()
+		&& let Some(p) = &mut parser
+	{
+		k.keep_spare_tree(p.take_tree());
+	}
 	// zsh: the input ran out with a construct open (`a ||`, `a &&` parse as
 	// complete commands here; interactive zsh's lexer reads another line).
 	if *stdin
@@ -1200,8 +1207,9 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 					_ => BString::default(),
 				}
 			};
-			let jobtext = BString::from(crate::bash::syntax::zsh::getjobtext(&cc.list));
-			let permtext = BString::from(crate::bash::syntax::zsh::getpermtext(&cc.list, 0));
+			let list = cc.list();
+			let jobtext = BString::from(crate::bash::syntax::zsh::getjobtext(list));
+			let permtext = BString::from(crate::bash::syntax::zsh::getpermtext(list, 0));
 			return super::zle::reader::before_run(k, vp, cx, at, [hist, jobtext, permtext]);
 		}
 	}
@@ -1226,7 +1234,11 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		Ok(cc) => {
 			let line = cc.line;
 			let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
-			(k.engine.compile(cc, src, mode, feat, observed), line)
+			let (unit, tree) = k.engine.compile(cc, src, mode, feat, observed);
+			if let Some(tree) = tree {
+				k.keep_spare_tree(tree);
+			}
+			(unit, line)
 		},
 		Err(e) => {
 			// bash abandons the rest of a script after a syntax error,
@@ -2459,7 +2471,7 @@ fn nofork_unit(
 	}?
 	.ok()?;
 	let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
-	let unit = k.engine.compile(cc, &src, key.4, feat, observed);
+	let (unit, _) = k.engine.compile(cc, &src, key.4, feat, observed);
 	announce(k, cx, vp.vpid, vp.runs.front(), &unit, line);
 	if aliases.is_none() {
 		if k.nofork_units.len() >= NOFORK_UNITS {
@@ -4091,14 +4103,14 @@ pub(super) fn job_text(
 		let feat = feat | Features::ZSH;
 		return match crate::bash::syntax::parse_all(&src, feat) {
 			Ok(p) if p.commands.len() == 1 => {
-				BString::from(crate::bash::syntax::zsh::getjobtext(&p.commands[0].list))
+				BString::from(crate::bash::syntax::zsh::getjobtext(p.commands[0].list()))
 			},
 			_ => src,
 		};
 	}
 	match crate::bash::syntax::parse_all(&src, feat) {
 		Ok(p) if p.commands.len() == 1 => {
-			BString::from(crate::bash::syntax::command_string(&p.commands[0].list))
+			BString::from(crate::bash::syntax::command_string(p.commands[0].list()))
 		},
 		_ => src,
 	}
