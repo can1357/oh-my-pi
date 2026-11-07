@@ -254,6 +254,7 @@ import {
 	buildPiWriteResult,
 	cursorExecReadPath,
 	cursorRawReadPath,
+	isXdDevicePath,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,
@@ -2918,17 +2919,20 @@ async function handleExecServerMessage(
 			// The handler needs the original negative offset to resolve it against
 			// the file length; positive windows can be composed before dispatch.
 			const negativeOffset = args.offset !== undefined && args.offset < 0;
+			const xdDevice = isXdDevicePath(args.path);
 			const composed = negativeOffset
 				? cursorRawReadPath(args.path)
 				: cursorExecReadPath(args.path, args.offset, args.limit);
+			// xd:// cannot take path selectors; keep offset/limit kwargs for in-memory paging.
+			const keepRangeKwargs = negativeOffset || xdDevice;
 			const handlerArgs =
 				composed === null
 					? args
 					: {
 							...args,
 							path: composed,
-							offset: negativeOffset ? args.offset : undefined,
-							limit: negativeOffset ? args.limit : undefined,
+							offset: keepRangeKwargs ? args.offset : undefined,
+							limit: keepRangeKwargs ? args.limit : undefined,
 						};
 			if (!editOwned) {
 				synthesizeCursorExecToolCall(

@@ -22,6 +22,15 @@
 import * as path from "node:path";
 
 /**
+ * `xd://` tool-device URLs reject path selectors (`selectors: "none"`).
+ * Appending `:raw` makes `parseXdUrl` treat `tool:raw` as the device name and
+ * miss the mount (`No such tool: xd://wiki_observe:raw`).
+ */
+export function isXdDevicePath(readPath: string): boolean {
+	return readPath.trim().toLowerCase().startsWith("xd://");
+}
+
+/**
  * A `pi_read` range composed onto the path as `read`'s inline `:raw:N+K`
  * selector.
  *
@@ -33,12 +42,16 @@ import * as path from "node:path";
  * Range selectors are raw because plain ranges add context lines. Cursor
  * numbers the returned text itself, so it cannot use read's hashline gutter.
  * Use [`cursorExecReadPath`] for a range-free read, which also needs `:raw`.
+ *
+ * Device URLs cannot take path selectors: a ranged `xd://` read keeps the bare
+ * path so the caller can retain `offset`/`limit` kwargs for in-memory paging.
  */
 export function piReadPath(readPath: string, offset?: number, limit?: number): string | null {
 	if (limit !== undefined && Math.floor(limit) <= 0) return null;
 	const start = offset !== undefined ? Math.max(1, Math.floor(offset)) : undefined;
 	const count = limit !== undefined ? Math.floor(limit) : undefined;
 	if (start === undefined && count === undefined) return readPath;
+	if (isXdDevicePath(readPath)) return readPath;
 	const base = readPath.split(":").some(chunk => chunk.toLowerCase() === "raw") ? readPath : `${readPath}:raw`;
 	if (start === undefined) return `${base}:1+${count}`;
 	return count === undefined ? `${base}:${start}-` : `${base}:${start}+${count}`;
@@ -84,8 +97,12 @@ export function piReadPathHasRange(readPath: string): boolean {
  * `:raw` is the existing selector that drops both. A path that already
  * carries `raw` is left alone; a range-only selector gets `raw` inserted
  * so the range still applies without the gutter.
+ *
+ * Skipped for `xd://` devices: they advertise `selectors: "none"`, so a
+ * forced `:raw` is not peeled and becomes part of the device name.
  */
 export function cursorRawReadPath(readPath: string): string {
+	if (isXdDevicePath(readPath)) return readPath;
 	const chunks = readPath.split(":");
 	if (chunks.some(chunk => chunk.toLowerCase() === "raw")) return readPath;
 	if (piReadPathHasRange(readPath)) {
@@ -102,7 +119,8 @@ export function cursorRawReadPath(readPath: string): string {
  *
  * Compose a requested window before forcing `:raw` on whole-file reads. The
  * caller drops `offset`/`limit` after composing so the handler cannot append
- * another selector.
+ * another selector — except for `xd://` paths, which stay bare so callers must
+ * keep the kwargs for in-memory pagination.
  */
 export function cursorExecReadPath(readPath: string, offset?: number, limit?: number): string | null {
 	const ranged = piReadPath(readPath, offset, limit);
@@ -124,6 +142,7 @@ export function cursorExecReadPath(readPath: string, offset?: number, limit?: nu
 export function piReadDisplayPath(readPath: string, offset?: number, limit?: number): string {
 	const composed = piReadPath(readPath, offset, limit);
 	if (composed !== null) return composed;
+	if (isXdDevicePath(readPath)) return readPath;
 	const start = offset !== undefined ? Math.max(1, Math.floor(offset)) : 1;
 	return `${readPath}:raw:${start}+0`;
 }
