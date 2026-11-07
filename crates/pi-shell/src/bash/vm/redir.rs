@@ -714,10 +714,9 @@ fn collect(
 					.ok()
 					.and_then(|s| s.parse().ok())
 					.unwrap_or(-1);
-				if !child_fd_open(k, vp, src) {
-					let err = std::io::Error::other(crate::bash::fd::BadFd);
-					return Err(fail(k, vp, cx, line, Diag::Io { path: target.clone(), err }));
-				}
+				// A descriptor the process lacks fails there, in its turn, after
+				// the opens before it (a FIFO's reader still gets its end of
+				// file): the process has only its own descriptors by then.
 				let fd = fd_number(k, vp, cx, r, false, line)?;
 				let diag = diag_prefix(k, cx, vp, line, digits);
 				add.push(ChildRedir::Dup { fd, src, diag });
@@ -766,24 +765,6 @@ fn fd_number(
 	line: u32,
 ) -> Result<i32, Halt> {
 	target_fd(k, vp, cx, r, closing, line).map_err(|d| fail(k, vp, cx, line, d))
-}
-
-/// Whether `fd` is open in the process a command spawns at this point of
-/// its collected redirections: inherited from the vproc, or set by one
-/// collected before, and not closed since.
-fn child_fd_open(k: &Kernel, vp: &Vproc, fd: i32) -> bool {
-	let inherited = vp.fds.get(fd).is_some_and(FdRef::is_open);
-	let list = k
-		.deferrals
-		.iter()
-		.find(|d| d.vproc == vp.vpid)
-		.map_or(&[][..], |d| d.list.as_slice());
-	list.iter().fold(inherited, |open, redir| match redir {
-		ChildRedir::Open { fds, .. } if fds.contains(&fd) => true,
-		ChildRedir::Dup { fd: set, .. } if *set == fd => true,
-		ChildRedir::Close { fd: closed } if *closed == fd => false,
-		_ => open,
-	})
 }
 
 /// The open of `target` onto `fds` by the process ([`ChildRedir::Open`]),

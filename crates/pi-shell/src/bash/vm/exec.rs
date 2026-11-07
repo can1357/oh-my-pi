@@ -26,7 +26,7 @@ use crate::bash::{
 	diag::Diag,
 	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey, assign_preview},
 	fd::FdRef,
-	host::{ResolveCtx, Resolved, Via},
+	host::{ResolveCtx, Resolved, Rlimit, Via},
 	ids::{Dialect, ModeId, UnitId, Vpid},
 	ir::{self, ComsubForm, Op, Opcode, SpawnKind, Unit},
 	mem::{self, Capture},
@@ -2364,10 +2364,7 @@ pub fn start_zsh_procsub(
 	let (r, w) = mem::pipe();
 	let (r, w) = (FdRef::mem(r), FdRef::mem(w));
 	let (mine, theirs, their_fd) = if output { (w, r, 0) } else { (r, w, 1) };
-	let fd = (3..64)
-		.rev()
-		.find(|&fd| vp.fds.get(fd).is_none_or(|h| !h.is_open()))
-		.unwrap_or_else(|| vp.fds.lowest_free(64));
+	let fd = shell_fd(vp, high_fds_fit(cx), &[]);
 	// The other substitutions' fds stay open in the child (zsh `getproc`'s
 	// `closem` spares `FDT_PROC_SUBST`): its words may name them.
 	let mut fds = vp.fds.clone();
@@ -2507,10 +2504,7 @@ pub fn start_procsub(
 	let r = FdRef::mem(r);
 	let w = FdRef::mem(w);
 	let (mine, theirs, their_fd) = if output { (w, r, 0) } else { (r, w, 1) };
-	let fd = (3..64)
-		.rev()
-		.find(|&fd| vp.fds.get(fd).is_none_or(|h| !h.is_open()))
-		.unwrap_or_else(|| vp.fds.lowest_free(64));
+	let fd = shell_fd(vp, high_fds_fit(cx), &[]);
 	// The child gets the parent's fds before `fd` is set: it must not hold
 	// the parent's end (a `>( )` reader would never see end of input).
 	let mut fds = vp.fds.clone();
@@ -4130,6 +4124,44 @@ fn runs_jobs(unit: &Unit, entry: u32) -> bool {
 	})
 }
 
+/// Whether the host process's open-file limit leaves room for the
+/// descriptors bash puts at 63 and below (process substitutions,
+/// coprocesses): with a limit of 63 or less such a descriptor cannot be
+/// opened at all, and the lowest free ones are taken instead.
+///
+/// Only the host process's soft limit decides. The vproc's `ulimit -n` is
+/// deliberately not read, although bash chooses by the one limit it has,
+/// which is both. A command is given its descriptors before its own limit
+/// is applied, so a high one stays usable under a low `ulimit -n`, while
+/// the low ones take the room the command needs for its own opens:
+/// measured with `ulimit -n 10` and eight process substitutions,
+/// descriptors from 63 down run all eight, and the lowest free ones leave
+/// the command's loader no free number below the limit, so it fails with
+/// `EMFILE` and the command exits 127 (bash loses two of the eight
+/// there). The cost is the number a script sees: `ulimit -n 48;
+/// echo <(true)` prints `/dev/fd/63` where bash prints `/dev/fd/3`.
+fn high_fds_fit(cx: &mut Cx<'_>) -> bool {
+	let soft = cx
+		.host
+		.rlimit(Rlimit::Nofile)
+		.ok()
+		.and_then(|(soft, _)| soft);
+	soft.is_none_or(|soft| soft > 63)
+}
+
+/// A free descriptor for a process substitution or coprocess end, not in
+/// `taken`: the highest from 63 down when they fit ([`high_fds_fit`]),
+/// else the lowest from 3 up.
+fn shell_fd(vp: &Vproc, high: bool, taken: &[i32]) -> i32 {
+	let free = |fd: &i32| !taken.contains(fd) && vp.fds.get(*fd).is_none_or(|h| !h.is_open());
+	let found = if high {
+		(3..64).rev().find(free)
+	} else {
+		(3..).find(free)
+	};
+	found.unwrap_or_else(|| vp.fds.lowest_free(64) + taken.len() as i32)
+}
+
 /// `coproc NAME cmd`: run the body at `entry` as a background child whose
 /// stdout the shell reads from `NAME[0]` and whose stdin it writes to
 /// `NAME[1]`; `NAME_PID` and `$!` are its pid. As bash's `sh_openpipe`,
@@ -4144,12 +4176,10 @@ fn start_coproc(
 	entry: u32,
 	name: BString,
 ) {
+	let high = high_fds_fit(cx);
 	let mut taken: Vec<i32> = Vec::with_capacity(4);
 	while taken.len() < 4 {
-		let fd = (3..64)
-			.rev()
-			.find(|fd| !taken.contains(fd) && vp.fds.get(*fd).is_none_or(|h| !h.is_open()))
-			.unwrap_or_else(|| vp.fds.lowest_free(64) + taken.len() as i32);
+		let fd = shell_fd(vp, high, &taken);
 		taken.push(fd);
 	}
 	let (read, write) = (taken[0], taken[3]);

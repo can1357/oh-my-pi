@@ -26,11 +26,11 @@ fn soft_nofile() -> libc::rlim_t {
 }
 
 /// Returns `true` in the child, where the test body runs under a soft limit
-/// of [`LIMIT`] open files. In the test process, runs test `name` in that
+/// of `limit` open files. In the test process, runs test `name` in that
 /// child, checks that it ran and passed, and returns `false`.
-fn in_limited_child(name: &str) -> bool {
+fn in_limited_child(name: &str, limit: libc::rlim_t) -> bool {
 	if std::env::var_os(CHILD).is_some() {
-		assert_eq!(soft_nofile(), LIMIT, "the child must run under the lowered limit");
+		assert_eq!(soft_nofile(), limit, "the child must run under the lowered limit");
 		return true;
 	}
 
@@ -41,12 +41,12 @@ fn in_limited_child(name: &str) -> bool {
 	// SAFETY: runs in the forked child before exec; `getrlimit` and `setrlimit`
 	// are async-signal-safe and the closure allocates nothing.
 	unsafe {
-		command.pre_exec(|| {
+		command.pre_exec(move || {
 			let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
 			if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut lim) != 0 {
 				return Err(std::io::Error::last_os_error());
 			}
-			lim.rlim_cur = LIMIT;
+			lim.rlim_cur = limit;
 			if libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lim) != 0 {
 				return Err(std::io::Error::last_os_error());
 			}
@@ -58,7 +58,7 @@ fn in_limited_child(name: &str) -> bool {
 	let stderr = String::from_utf8_lossy(&output.stderr);
 	assert!(
 		output.status.success() && stdout.contains("1 passed"),
-		"child test {name} under a soft limit of {LIMIT} open files: \
+		"child test {name} under a soft limit of {limit} open files: \
 		 {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
 		output.status
 	);
@@ -92,7 +92,7 @@ fn run(command: &str) -> (Option<i32>, String) {
 /// standard streams and stopped near 40 levels under a 1,024 limit.
 #[test]
 fn nesting_holds_no_descriptor_per_level() {
-	if !in_limited_child("nesting_holds_no_descriptor_per_level") {
+	if !in_limited_child("nesting_holds_no_descriptor_per_level", LIMIT) {
 		return;
 	}
 
@@ -129,7 +129,7 @@ fn nesting_holds_no_descriptor_per_level() {
 /// command still runs. Regression: the shell printed nothing.
 #[test]
 fn running_out_of_descriptors_names_the_limit() {
-	if !in_limited_child("running_out_of_descriptors_names_the_limit") {
+	if !in_limited_child("running_out_of_descriptors_names_the_limit", LIMIT) {
 		return;
 	}
 
@@ -144,4 +144,25 @@ fn running_out_of_descriptors_names_the_limit() {
 	for part in ["/dev/null: Too many open files", "limit of 128 open files", "ulimit -n"] {
 		assert!(lines[0].contains(part), "missing {part:?} in {output}");
 	}
+}
+
+/// With the process's own open-file limit at 63 or less, a process
+/// substitution and a coprocess take the lowest free descriptors, as Bash's
+/// do, so an external command can be given them, also after a `ulimit -n`
+/// raised above 63 (the process's limit still bounds what a child is
+/// given); descriptors near the limit, up to the last one, still reach a
+/// command. Regression: they took 63 and below, and an external command
+/// reading one failed with `Invalid argument`.
+#[test]
+fn shell_chosen_descriptors_fit_a_low_process_limit() {
+	if !in_limited_child("shell_chosen_descriptors_fit_a_low_process_limit", 48) {
+		return;
+	}
+
+	let (code, output) = run(
+		"/bin/cat <(echo hi); echo s=$?; echo <(true); coproc cat; echo ${COPROC[@]}; /bin/echo x \
+		 5>/dev/null 7<&0; /bin/bash -c 'echo y >&40' 40>&1; /bin/bash -c 'echo z >&47' 47>&1; \
+		 (ulimit -n 100; /bin/cat <(echo raised))",
+	);
+	assert_eq!((code, output.as_str()), (Some(0), "hi\ns=0\n/dev/fd/3\n3 6\nx\ny\nz\nraised\n"));
 }
