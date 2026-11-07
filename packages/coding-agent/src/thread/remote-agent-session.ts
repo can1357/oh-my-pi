@@ -163,7 +163,7 @@ export function emptyMirrorState(): SessionMirrorState {
 			premiumRequests: 0,
 			cost: 0,
 		},
-		advisorOverview: { configured: false, advisors: [] },
+		advisorOverview: { configured: false, active: false, advisors: [] },
 		sessionAgents: [],
 		hindsightActive: false,
 		effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
@@ -570,6 +570,26 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#view = { ...this.#view, configuredThinkingLevel: level, isAutoThinking: level === AUTO_THINKING };
 		if (level !== AUTO_THINKING) this.#state = { ...this.#state, thinkingLevel: level };
 		this.#notify("setThinkingLevel", level, persist);
+	}
+
+	/** Applied to the mirror at once; the home worker applies it and its next patch reconciles. */
+	setAdvisorEnabled(enabled: boolean): boolean {
+		const overview = this.#state.advisorOverview;
+		const active = enabled && overview.advisors.length > 0;
+		this.#state = {
+			...this.#state,
+			advisorOverview: { ...overview, configured: enabled, active, model: active ? overview.model : undefined },
+		};
+		this.#notify("setAdvisorEnabled", enabled);
+		return active;
+	}
+
+	isAdvisorEnabled(): boolean {
+		return this.#state.advisorOverview.configured;
+	}
+
+	toggleAdvisorEnabled(): boolean {
+		return this.setAdvisorEnabled(!this.isAdvisorEnabled());
 	}
 
 	/** Next selector in the mirrored cycle order (off → auto → minimal..max → off), applied like {@link setThinkingLevel}. */
