@@ -7,15 +7,17 @@
  * - omp:// - Lists all available documentation files
  * - omp://<file>.md - Reads a specific documentation file
  */
+import { createHash } from "node:crypto";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { resolveContainedPath, resolveContainedPathSync } from "../discovery/contained-path";
+import { getDocsCacheDir, logger } from "@oh-my-pi/pi-utils";
+import { realpathIfExists, resolveContainedPath, resolveContainedPathSync } from "../discovery/contained-path";
 import ompDoc from "../prompts/internal-urls/omp.md" with { type: "text" };
 import { getDocFilenames, getDocsDiskRoot, getEmbeddedDoc } from "./docs-index";
 import { ompDocFilename, ompDocRel, ompDocsScopeEntries } from "./omp-scope";
 import type {
 	InternalResource,
 	InternalUrl,
-	LocateOptions,
 	ProtocolHandler,
 	ResolveContext,
 	SchemeSpec,
@@ -88,9 +90,10 @@ export class OmpProtocolHandler implements ProtocolHandler {
 	}
 
 	/**
-	 * File a doc is read from in a source checkout, so `omp://` links open it.
-	 * The shipped corpus is embedded, so most installs have nothing to link and
-	 * the URL stays plain text rather than being materialized on the fly.
+	 * File a doc is read from in a source checkout, so sync render paths still
+	 * have one to open. Most installs ship the corpus embedded and have nothing
+	 * to name here: materializing a copy needs the embedded body, which only
+	 * {@link getEmbeddedDoc} can inflate — off the render path.
 	 */
 	locateSync(url: InternalUrl): string | undefined {
 		try {
@@ -101,17 +104,19 @@ export class OmpProtocolHandler implements ProtocolHandler {
 		}
 	}
 
-	/** Async counterpart of {@link locateSync}; null instead of undefined. */
-	async locate(url: InternalUrl, _context?: ResolveContext, _options?: LocateOptions): Promise<string | null> {
-		// Async filesystem calls: the markdown linkifier awaits this off the
-		// render path, so blocking realpath/stat has no place here even though
-		// the first call still initializes the memoized corpus synchronously.
+	/**
+	 * Cached copy of the doc behind `url`, so a transcript hyperlink has a real
+	 * file to point at in every install, not only source checkouts. The docs
+	 * root names no file, an unknown doc yields no link at all, and the embedded
+	 * corpus is a gzip blob that only {@link getEmbeddedDoc} can inflate — async,
+	 * off the render path, where {@link locateSync} cannot follow.
+	 */
+	async locate(url: InternalUrl): Promise<string | null> {
 		const docPath = ompDocRel(url);
-		if (docPath.length === 0) return null;
-		const root = getDocsDiskRoot();
-		if (root === null || !getDocFilenames().includes(docPath)) return null;
-		const resolution = await resolveContainedPath(root, path.resolve(root, docPath));
-		return resolution.status === "ok" ? resolution.realPath : null;
+		if (!docPath) return null;
+		const content = await getEmbeddedDoc(docPath);
+		if (content === undefined) return null;
+		return materializeOmpDoc(docPath, content);
 	}
 
 	async #listDocs(url: InternalUrl): Promise<InternalResource> {
@@ -152,4 +157,50 @@ export class OmpProtocolHandler implements ProtocolHandler {
 			size: Buffer.byteLength(content, "utf-8"),
 		};
 	}
+}
+
+/**
+ * Materialize one embedded doc into the content-addressed read-only cache and
+ * return its absolute path, or `null` when the cache is unwritable (the link
+ * then falls back to plain text).
+ *
+ * The digest keys the doc body, not the install, so a rebuilt bundle or a dev
+ * tree can never serve a stale file and concurrent renders write identical
+ * bytes into distinct temp paths, racing harmlessly on the rename.
+ */
+async function materializeOmpDoc(docPath: string, content: string): Promise<string | null> {
+	const root = getDocsCacheDir();
+	// The cache root can sit behind a symlink (`/var` → `/private/var`, a
+	// symlinked `XDG_CACHE_HOME` or home directory). Containment is proven
+	// against the filesystem-resolved root, so the target is joined to that
+	// root as well: a target under the unresolved root resolves outside the
+	// resolved one, which would drop every cache hit and make the link vanish
+	// on the second render.
+	const realRoot = (await realpathIfExists(root)) ?? root;
+	const digest = createHash("sha256").update(content).digest("hex").slice(0, 16);
+	const target = path.resolve(realRoot, digest, docPath);
+	// The doc path is joined into the cache root, so containment is proven
+	// before the write: a URL escaping the root (an absolute or `..` path)
+	// degrades to a plain-text link instead of writing outside the cache.
+	// `missing` is the ordinary cache miss, which the write below fills.
+	if ((await resolveContainedPath(realRoot, target)).status === "outside") return null;
+	try {
+		await fs.access(target);
+		return target;
+	} catch {
+		// Cache miss (or an unreadable entry): write it below.
+	}
+	// The random suffix keeps concurrent writers of the same doc from colliding
+	// on one temp path before the atomic rename.
+	const tempPath = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	try {
+		await fs.mkdir(path.dirname(target), { recursive: true });
+		await Bun.write(tempPath, content, { mode: 0o444 });
+		await fs.rename(tempPath, target);
+	} catch (error) {
+		await fs.rm(tempPath, { force: true }).catch(() => undefined);
+		logger.debug("omp:// doc materialization failed", { docPath, error: String(error) });
+		return null;
+	}
+	return target;
 }
