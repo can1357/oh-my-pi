@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a subagent stopped by the session cost cap (`--max-cost` / `session.maxCost`) reporting "Subagent ended without a final message" or a prompt-dispatch failure; its task result now carries the cost-cap refusal ([#18362](https://github.com/can1357/oh-my-pi/issues/18362))
+
 ## [18.18.0] - 2026-11-07
 
 ### Added
