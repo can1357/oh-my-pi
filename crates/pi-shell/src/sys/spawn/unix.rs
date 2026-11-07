@@ -1594,8 +1594,7 @@ impl ExtProc for UnixProc {
 		if self.pidfd.is_some() && !(self.awaited && self.exited_now()) {
 			self.await_exit(cx.waker());
 		}
-		self.pumps.poll(cx, &self.tracker);
-		self.tracker.poll(cx)
+		self.pumps.poll_wait(cx, &self.tracker)
 	}
 
 	fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<ProcEvent> {
@@ -1603,8 +1602,7 @@ impl ExtProc for UnixProc {
 		if self.pidfd.is_some() && !(self.awaited && self.exited_now()) {
 			self.await_exit(cx.waker());
 		}
-		self.pumps.poll(cx, &self.tracker);
-		self.tracker.poll_event(cx)
+		self.pumps.poll_event(cx, &self.tracker)
 	}
 
 	fn pgid(&self) -> Option<u32> {
