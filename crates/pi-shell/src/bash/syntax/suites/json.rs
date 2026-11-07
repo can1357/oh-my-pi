@@ -3,7 +3,7 @@
 
 use crate::bash::syntax::*;
 
-const SHFMT: [(&str, &str); 14] = [
+const SHFMT: [(&str, &str); 15] = [
 	(include_str!("data/shfmt/case1.sh"), include_str!("data/shfmt/case1.json")),
 	(include_str!("data/shfmt/case2.sh"), include_str!("data/shfmt/case2.json")),
 	(include_str!("data/shfmt/case3.sh"), include_str!("data/shfmt/case3.json")),
@@ -18,6 +18,10 @@ const SHFMT: [(&str, &str); 14] = [
 	(include_str!("data/shfmt/case12.sh"), include_str!("data/shfmt/case12.json")),
 	(include_str!("data/shfmt/case13.sh"), include_str!("data/shfmt/case13.json")),
 	(include_str!("data/shfmt/case14.sh"), include_str!("data/shfmt/case14.json")),
+	// Compound closers before continued redirections, bare `case` arms, an
+	// empty `in` list, indexed array elements, an empty replacement, a
+	// substitution in a here-document and an empty one.
+	(include_str!("data/shfmt/case15.sh"), include_str!("data/shfmt/case15.json")),
 ];
 
 #[test]

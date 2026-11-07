@@ -5,7 +5,7 @@ use alloc::{string::String, vec, vec::Vec};
 use crate::bash::syntax::{
 	JsonDialect, Offsets,
 	ast::{AndOrOp, CaseMode, CaseTerm, ComsubKind, Program, RedirOp, ReplaceMode, Sep, Special},
-	parser::{TextMode, parse_text},
+	parser::{TextMode, parse_text_at},
 	span::Span,
 	tree::{
 		AndOr, ArithText, ArrayElem, Assign, AssignValue, Command, CommandKind, Cond, CondExpr,
@@ -769,14 +769,12 @@ mod shfmt {
 				floor = end;
 			}
 		}
-		let (pos, end) = match (prog.commands.first(), prog.commands.last()) {
-			(Some(a), Some(b)) => (a.span.lo, b.span.hi),
-			_ => (0, 0),
-		};
+		// shfmt's file ends where its last statement does.
+		let pos = prog.commands.first().map_or(0, |a| a.span.lo);
 		let mut f = vec![("Type", s(b"File"))];
 		if !stmts.is_empty() {
 			f.push(("Pos", map.pos(pos)));
-			f.push(("End", map.pos(end)));
+			f.push(("End", map.pos(floor)));
 			f.push(("Stmts", V::Arr(stmts)));
 		}
 		V::Obj(f)
@@ -828,10 +826,23 @@ mod shfmt {
 			}
 		}
 
-		/// End of the token text that ends right before `hi`, trimming blanks.
+		/// End of the token text that ends right before `hi`, trimming blanks
+		/// and line continuations.
 		fn trim_back(&self, lo: u32, mut hi: u32) -> u32 {
-			while hi > lo && matches!(self.at(hi - 1), b' ' | b'\t' | b'\n') {
-				hi -= 1;
+			while hi > lo {
+				match self.at(hi - 1) {
+					b' ' | b'\t' => hi -= 1,
+					b'\n' => {
+						hi -= 1;
+						// A newline after an odd run of backslashes ends a
+						// continuation: its backslash is not token text.
+						let run = (lo..hi).rev().take_while(|&i| self.at(i) == b'\\').count();
+						if run % 2 == 1 {
+							hi -= 1;
+						}
+					},
+					_ => break,
+				}
 			}
 			hi
 		}
@@ -1160,13 +1171,18 @@ mod shfmt {
 					} else {
 						self.text_parts(body, text_end, delim_end)
 					};
-					let mut h = vec![("Pos", self.m.pos(body)), ("End", self.m.pos(delim_end))];
+					// shfmt has no `Hdoc` for an empty body: the redirection
+					// ends at its delimiter word.
 					if !parts.is_empty() {
-						h.push(("Parts", V::Arr(parts)));
+						let h = vec![
+							("Pos", self.m.pos(body)),
+							("End", self.m.pos(delim_end)),
+							("Parts", V::Arr(parts)),
+						];
+						f[1] = ("End", self.m.pos(delim_end));
+						end = delim_end;
+						f.push(("Hdoc", V::Obj(h)));
 					}
-					f[1] = ("End", self.m.pos(delim_end));
-					end = delim_end;
-					f.push(("Hdoc", V::Obj(h)));
 				},
 			}
 			(V::Obj(f), end)
@@ -1220,8 +1236,9 @@ mod shfmt {
 		/// final literal at the end of the delimiter line (`doc_end`).
 		fn text_parts(&self, lo: u32, hi: u32, doc_end: u32) -> Vec<V> {
 			let text = &self.src[lo as usize..hi as usize];
+			// Spans of commands substituted in the body are file offsets.
 			let Ok((tree, root)) =
-				parse_text(text, crate::bash::syntax::Features::NONE, TextMode::HereDoc)
+				parse_text_at(text, crate::bash::syntax::Features::NONE, TextMode::HereDoc, lo)
 			else {
 				return vec![self.lit_with(lo, doc_end, text)];
 			};
@@ -1310,7 +1327,6 @@ mod shfmt {
 					let mut iter = vec![
 						("Type", s(b"WordIter")),
 						("Pos", p(vs.lo)),
-						("End", p(words.and_then(|w| w.last()).map_or(vs.hi, |w| w.span().hi))),
 						("Name", self.lit_value(vs.lo, vs.hi, fr.var())),
 					];
 					let extra: Vec<&[u8]> = fr.extra_vars().collect();
@@ -1318,14 +1334,19 @@ mod shfmt {
 					if let Some(extra) = extra {
 						iter.push(("ExtraNames", extra));
 					}
+					// The iterator ends at its last word, or at `in` with no
+					// words after it.
+					let mut end = vs.hi;
 					if let Some(ws) = words {
 						let in_pos = self.find(after, b"in");
 						iter.push(("InPos", p(in_pos)));
 						after = ws.last().map_or(in_pos + 2, |w| w.span().hi);
+						end = after;
 						if !ws.is_empty() {
 							iter.push(("Items", V::Arr(ws.iter().map(|w| self.word(w, false)).collect())));
 						}
 					}
+					iter.insert(2, ("End", p(end)));
 					self.for_clause(lo, hi, select, V::Obj(iter), after, fr.body())
 				},
 				CommandKind::ArithFor(a) => {
@@ -1352,8 +1373,18 @@ mod shfmt {
 					for arm in cs.arms() {
 						let pats = arm.patterns();
 						let plo = pats.first().map_or(at, |w| w.span().lo);
-						let body_end = list_end(arm.body())
-							.unwrap_or_else(|| pats.last().map_or(plo, |w| w.span().hi + 1));
+						// An empty arm's terminator follows its `)`, which may come
+						// after blanks (`x ) ;;`).
+						let body_end = list_end(arm.body()).unwrap_or_else(|| {
+							pats.last().map_or(plo, |w| {
+								let rp = self.find(w.span().hi, b")");
+								if self.at(rp) == b')' {
+									rp + 1
+								} else {
+									w.span().hi + 1
+								}
+							})
+						});
 						let op: &[u8] = match arm.term() {
 							CaseTerm::Break => b";;",
 							CaseTerm::FallThrough => b";&",
@@ -1364,12 +1395,18 @@ mod shfmt {
 							.src
 							.get(op_pos as usize..)
 							.is_some_and(|r| r.starts_with(op));
+						// shfmt ends an arm at its terminator, else at its last
+						// command; an arm with neither has no end.
 						let end = if found {
-							op_pos + op.len() as u32
+							Some(op_pos + op.len() as u32)
 						} else {
-							body_end
+							list_end(arm.body())
 						};
-						let mut f = vec![("Pos", p(plo)), ("End", p(end)), ("Op", s(op))];
+						let mut f = vec![("Pos", p(plo))];
+						if let Some(end) = end {
+							f.push(("End", p(end)));
+						}
+						f.push(("Op", s(op)));
 						if found {
 							f.push(("OpPos", p(op_pos)));
 						}
@@ -1378,7 +1415,7 @@ mod shfmt {
 							f.push(("Stmts", self.list(arm.body())));
 						}
 						items.push(V::Obj(f));
-						at = end;
+						at = end.unwrap_or(body_end);
 					}
 					let mut f = vec![
 						("Type", s(b"CaseClause")),
@@ -1791,12 +1828,14 @@ mod shfmt {
 					}
 				},
 				AssignValue::Array(elems) => {
-					let alo = self.find(span.lo, b"(");
-					let alo = if self.at(alo) == b'(' {
-						alo
-					} else {
-						span.hi.saturating_sub(1)
-					};
+					// `(` follows `name`, its `[index]`, and `=` or `+=`.
+					let mut alo = a.index().map_or(nhi, |i| i.span().hi + 1) + 1;
+					if a.append() {
+						alo += 1;
+					}
+					if self.at(alo) != b'(' {
+						alo = span.hi.saturating_sub(1);
+					}
 					f.push(("Array", self.array(alo, span.hi, elems)));
 				},
 			}
@@ -1809,9 +1848,8 @@ mod shfmt {
 				.iter()
 				.map(|e| {
 					let value = e.value();
-					let elo = e
-						.key()
-						.map_or_else(|| value.span().lo, |k| k.span().lo.saturating_sub(1));
+					// shfmt places an indexed element at its index.
+					let elo = e.key().map_or_else(|| value.span().lo, |k| k.span().lo);
 					let mut f = vec![("Pos", p(elo)), ("End", p(value.span().hi))];
 					if let Some(k) = e.key() {
 						f.push(("Index", self.word(k, true)));
@@ -2156,19 +2194,24 @@ mod shfmt {
 						r.push(("All", V::Bool(true)));
 					}
 					let ps = pat.span();
-					let orig = if matches!(mode, ReplaceMode::Prefix | ReplaceMode::Suffix) {
-						// shfmt keeps the anchor in the pattern.
+					// shfmt keeps a `#`/`%` anchor in the pattern, and has no
+					// word for an empty one or an empty replacement.
+					if matches!(mode, ReplaceMode::Prefix | ReplaceMode::Suffix) {
 						let alo = ps.lo.saturating_sub(1);
 						let spans = part_spans(self.src, ps.lo, ps.hi, pat.parts());
 						let mut parts = vec![self.lit(alo, spans.first().map_or(ps.lo, |s| s.0), true)];
 						parts.extend(self.parts(pat.parts(), &spans));
 						let merged = merge_lit_vs(parts, self);
-						V::Obj(vec![("Pos", p(alo)), ("End", p(ps.hi)), ("Parts", V::Arr(merged))])
-					} else {
-						self.word(pat, false)
-					};
-					r.push(("Orig", orig));
-					if let Some(w) = rep {
+						r.push((
+							"Orig",
+							V::Obj(vec![("Pos", p(alo)), ("End", p(ps.hi)), ("Parts", V::Arr(merged))]),
+						));
+					} else if !pat.parts().is_empty() {
+						r.push(("Orig", self.word(pat, false)));
+					}
+					if let Some(w) = rep
+						&& !w.parts().is_empty()
+					{
 						r.push(("With", self.word(w, false)));
 					}
 					f.push(("Repl", V::Obj(r)));
