@@ -433,6 +433,12 @@ export async function runCli(args: readonly string[] = Bun.argv.slice(2), contex
 }
 
 if (import.meta.main) {
+	// pi-utils defers its SIGINT/SIGTERM handlers to the CLI-owned process
+	// (upstream fa89cfb783), and embed-serve's shutdown contract depends on them:
+	// the postmortem pass releases the endpoint and SIGKILLs before onnxruntime's
+	// crashing NAPI finalizer (issue #3031). A process that imports `runCli` as a
+	// library keeps its own signal handling.
+	postmortem.installProcessHandlers();
 	const code = await runCli();
 	process.exit(code);
 }

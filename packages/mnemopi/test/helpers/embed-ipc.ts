@@ -27,6 +27,15 @@ export function spawnFixture(mode: "serve" | "client" | "host", dir: string, arg
 	});
 }
 
+export function spawnCli(args: string[], env: NodeJS.ProcessEnv = {}): FixtureProcess {
+	return Bun.spawn([process.execPath, path.resolve(import.meta.dir, "../../src/cli.ts"), ...args], {
+		env: { ...process.env, ...env },
+		stdin: "pipe",
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+}
+
 export function lines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
 	return decodeLines(stream);
 }
