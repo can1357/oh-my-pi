@@ -646,13 +646,16 @@ function classifyText(
 ): number {
 	let kinds = 0;
 	if (errorMessage) {
-		if (matchesOverflowText(errorMessage)) kinds |= Flag.ContextOverflow;
+		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
+		// A 429/402 is a throughput or quota decision, never window excess, even when
+		// worded like one (Bedrock: "429 Too many tokens, please wait…"): overflow would
+		// skip retry and the fallback chain for a compaction that cannot clear a rate cap.
+		if (matchesOverflowText(errorMessage) && !isUsageLimitStatus(statusClean)) kinds |= Flag.ContextOverflow;
 		if (matchesPayloadRejectionText(errorMessage)) kinds |= Flag.PayloadRejected;
 		if (isMalformedFunctionCallText(errorMessage)) kinds |= Flag.MalformedFunctionCall;
 		if (isProviderFinishErrorText(errorMessage)) kinds |= Flag.ProviderFinishError;
 		if (EMPTY_RESPONSE_PATTERN.test(errorMessage)) kinds |= Flag.EmptyResponse | Flag.Transient;
 		if (isContentBlockedText(errorMessage)) kinds |= Flag.ContentBlocked;
-		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
 
 		if (
 			ACCOUNT_POLICY_PATTERN.test(errorMessage) ||
@@ -1040,7 +1043,10 @@ export function attach<E extends object>(error: E, id: number): E {
 }
 
 /** Overflow-classification evidence, including errors received before token usage is available. */
-export interface ContextOverflowMessage extends Pick<AssistantMessage, "errorId" | "stopReason" | "errorMessage"> {
+export interface ContextOverflowMessage extends Pick<
+	AssistantMessage,
+	"errorId" | "errorStatus" | "stopReason" | "errorMessage"
+> {
 	readonly usage?: Pick<Usage, "input" | "cacheRead" | "cacheWrite" | "contextTokens">;
 }
 
@@ -1063,7 +1069,14 @@ export function isUsageBackedContextOverflow(message: ContextOverflowMessage, co
 export function isContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
 	if (is(message.errorId, Flag.ContextOverflow)) return true;
 	if (isUsageBackedContextOverflow(message, contextWindow)) return true;
-	return message.stopReason === "error" && !!message.errorMessage && matchesOverflowText(message.errorMessage);
+	if (message.stopReason !== "error" || !message.errorMessage || !matchesOverflowText(message.errorMessage)) {
+		return false;
+	}
+	// A rate-limit status (field, raw-status id, or the text's own "429") vetoes
+	// the text arm, as in classifyText: "tokens" wording on a 429/402 is a throughput cap.
+	const errorStatus =
+		message.errorStatus ?? statusFromId(message.errorId) ?? status({ message: message.errorMessage });
+	return !isUsageLimitStatus(errorStatus);
 }
 
 /** HTTP 413 byte/media rejection (#9235); may co-occur with {@link isContextOverflow} for bare `413 (no body)`.

@@ -37,7 +37,7 @@ use parking_lot::Mutex;
 use tokio::{sync::mpsc, task::AbortHandle};
 
 use super::{
-	Action, Batch, DirError, Entry, Options, WalkError, Worker, absolute_root,
+	Action, Batch, DirError, Entry, Options, Stop, WalkError, Worker, absolute_root,
 	arena::{Arena, Bytes},
 	cache::Cache,
 	give_session, join_child_into, join_into, pruned, take_session,
@@ -189,8 +189,9 @@ where
 #[derive(Default)]
 pub(super) struct Shared {
 	/// Ends the walk: the consumer went away, a visitor stopped it or
-	/// panicked, or the output channel closed.
-	halt:      AtomicBool,
+	/// panicked, the output channel closed, or the caller set the [`Stop`]
+	/// it kept a clone of.
+	halt:      Stop,
 	/// A visitor panicked.
 	panicked:  AtomicBool,
 	errors:    Mutex<Vec<DirError>>,
@@ -213,11 +214,11 @@ impl Shared {
 	}
 
 	fn halted(&self) -> bool {
-		self.halt.load(Ordering::Relaxed)
+		self.halt.stopped()
 	}
 
 	fn halt(&self) {
-		self.halt.store(true, Ordering::Relaxed);
+		self.halt.stop();
 	}
 }
 
@@ -506,7 +507,10 @@ pub(super) async fn start<K: Sink>(
 	cache: Option<&'static Cache>,
 	tx: Option<mpsc::Sender<Batch<K::Out>>>,
 ) -> Result<Started<K>, WalkError> {
-	let shared = Arc::new(Shared::default());
+	// The caller's flag when it kept a clone, so dropping it ends the walk in
+	// the caller's own frame rather than when a worker next polls this task.
+	let shared =
+		Arc::new(Shared { halt: opts.stop.clone().unwrap_or_default(), ..Shared::default() });
 	let halt = Halt(Arc::clone(&shared));
 	let (fs, given, opts) = (fs.clone(), root.to_path_buf(), opts.clone());
 	let begun = tokio::spawn(async move {
