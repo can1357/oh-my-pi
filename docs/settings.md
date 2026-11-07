@@ -1066,7 +1066,7 @@ Experimental tool-output shaping and `find` ranking with Stencil Spotlight (`POS
 spotlight:
    experiment:
       enabled: true
-      holdout: 0.15
+      holdout: 0.05
       scoreFree: 0.15
       tools: ["*"]
    thinking: low
@@ -1076,7 +1076,7 @@ spotlight:
 | Key                              | Type    | Default                                   | Notes                                                                                                   |
 | -------------------------------- | ------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `spotlight.experiment.enabled`   | boolean | `false`                                   | Turns the experiment on for new and resumed sessions. `PI_SPOTLIGHT_EXPERIMENT` overrides it.           |
-| `spotlight.experiment.holdout`   | number  | `0.15`                                    | Share (0–1) of would-be cuts held out at random (see below). `PI_SPOTLIGHT_HOLDOUT` overrides it. |
+| `spotlight.experiment.holdout`   | number  | `0.05`                                    | Share (0–1) of would-be cuts held out at random (see below). `PI_SPOTLIGHT_HOLDOUT` overrides it. |
 | `spotlight.experiment.scoreFree` | number  | `0.15`                                    | Share (0–1) of the results not held out that are shaped without Spotlight (see below). `PI_SPOTLIGHT_SCORE_FREE` overrides it. |
 | `spotlight.experiment.tools`     | array   | `["*"]`                                   | Tools whose results the experiment shapes and journals, by name; `*` is every tool. A tool left out returns its plain result and writes no journal entry. `PI_SPOTLIGHT_TOOLS` (comma-separated names) overrides it. |
 | `spotlight.url`                  | string  | `https://cloud.stencil.so/v1/spotlight`   | Ranking endpoint. `STENCIL_SPOTLIGHT_URL` overrides it.                                                 |

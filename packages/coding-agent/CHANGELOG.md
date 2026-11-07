@@ -32,6 +32,7 @@
 - Subagents hosted on worker threads keep a strict `/account` lock: the worker auth proxy now carries strict pins, `sessions.mode()` and `sessions.automatic()`, and a revived subagent copies its live parent's lock (including a worker-hosted parent)
 - Translator failures now write structured warning records with direction, selected model, elapsed time, source size, timeout/cancellation state, and the underlying error without logging translated content.
 - Input hooks can now reject a submission with `reject`, restoring the original draft and attachments; hook errors and timeouts fail closed instead of dispatching untranslated input. Delayed hooks cannot submit or restore drafts into another session.
+- `/restart` no longer drops running subagents: they go on with their interrupted turns in the relaunched process and deliver their results to the agent that spawned them, as `omp --restore` now also does after a normal quit
 
 ## [18.18.0] - 2026-11-07
 
