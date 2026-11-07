@@ -10,6 +10,7 @@
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
+- Parent-to-subagent messages now appear as IRC cards in live and Agent Hub transcripts instead of user cards exposing the model-facing envelope ([#18073](https://github.com/can1357/oh-my-pi/issues/18073))
 
 - Fixed transcript output freezing after provider restarts or switching sessions mid-stream ([#18358](https://github.com/can1357/oh-my-pi/pull/18358) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Bash tool cards for a command whose leading `cd <dir> &&` / `cd <dir>;` was hoisted into the working directory show that `cd` again above the visualized command, with the separator the model wrote, instead of dropping where it ran
