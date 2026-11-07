@@ -636,3 +636,79 @@ async fn branch_badges_follow_real_negated_and_elif_decisions() {
 	assert!(heads.iter().filter(|row| row["meta"] == "↳").count() >= 2);
 	assert!(heads.iter().any(|row| row["meta"] == "↷"));
 }
+
+/// Text, indentation and role of every statement or literal row: what a
+/// phase change must not move.
+fn chain_rows(p: &Value) -> Vec<(String, u64, String)> {
+	rows(p)
+		.into_iter()
+		.filter(|(_, row)| row["role"] == "stmt" || row["role"] == "raw")
+		.map(|(text, row)| {
+			(text, row["depth"].as_u64().unwrap(), row["role"].as_str().unwrap().to_owned())
+		})
+		.collect()
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_and_chain_keeps_pseudo_connectors_while_running_and_after() {
+	// Regression for #18408: the minimizer runs each `&&` operand as its own
+	// unit, and the operators between (and before) them were drawn as raw
+	// ` && ` rows instead of Pseudo `and` connectors.
+	let root = tempfile::tempdir().unwrap();
+	let gate = root.path().join("gate");
+	let wait = root.path().join("wait.sh");
+	std::fs::write(&wait, format!("while [ ! -e \"{}\" ]; do sleep 0.01; done\n", gate.display()))
+		.unwrap();
+	let command = format!("echo start && /bin/sh {} && echo middle && echo end", wait.display());
+	let pending = chain_rows(&present(&RunTrace::new(command.as_str()), &Options::default()));
+	assert_eq!(pending.len(), 4, "{pending:?}");
+	assert_eq!(pending[0], ("print(\"start\")".into(), 0, "stmt".into()));
+	assert!(
+		pending[1..]
+			.iter()
+			.all(|(text, depth, role)| text.starts_with("and ") && *depth == 1 && role == "stmt"),
+		"{pending:?}"
+	);
+
+	let trace = Arc::new(RunTrace::new(command.as_str()));
+	let shell = Shell::new(Some(crate::ShellOptions {
+		minimizer: Some(crate::minimizer::MinimizerOptions {
+			enabled: Some(true),
+			..Default::default()
+		}),
+		..Default::default()
+	}));
+	let run = shell.run(
+		ShellRunOptions {
+			command: command.clone(),
+			trace: Some(Arc::clone(&trace)),
+			..Default::default()
+		},
+		None,
+		().into(),
+	);
+	let probe = async {
+		// The gate segment is the second announced unit; the tail is unrun.
+		while trace
+			.snapshot()
+			.units
+			.iter()
+			.filter(|unit| unit.at.is_some())
+			.count()
+			< 2
+		{
+			tokio::task::yield_now().await;
+		}
+		let running = chain_rows(&present(&trace, &Options::default()));
+		std::fs::write(&gate, []).unwrap();
+		running
+	};
+	let (result, running) =
+		tokio::time::timeout(std::time::Duration::from_secs(10), async { tokio::join!(run, probe) })
+			.await
+			.unwrap();
+	assert_eq!(result.unwrap().exit_code, Some(0));
+	assert_eq!(running, pending, "running");
+	assert_eq!(chain_rows(&present(&trace, &Options::default())), pending, "finished");
+}
