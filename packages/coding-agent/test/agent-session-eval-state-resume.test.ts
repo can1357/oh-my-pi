@@ -52,6 +52,70 @@ function appendEval(manager: SessionManager, id: string): void {
 	});
 }
 
+interface Process {
+	session: AgentSession;
+	manager: SessionManager;
+	/** Every provider request this process sent, oldest first. */
+	requests: Message[][];
+}
+
+/** One omp process on the session file: reopen it and wire an eval-capable session. */
+async function openProcess(file: string, sessionDir: string, registry: ModelRegistry, label: string): Promise<Process> {
+	const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!bundled) throw new Error("Expected bundled model");
+	const manager = await SessionManager.open(file, sessionDir);
+	const requests: Message[][] = [];
+	const mock = createMockModel({ provider: "anthropic", handler: { content: ["OK"] } });
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: {
+			model: bundled,
+			systemPrompt: ["Test"],
+			tools: [],
+			messages: manager.buildSessionContext().messages,
+		},
+		convertToLlm,
+		streamFn: (model, context, options) => {
+			requests.push(structuredClone(context.messages));
+			return mock.stream(model, context, options);
+		},
+	});
+	const evalToolSession: ToolSession = {
+		cwd: temp.path(),
+		hasUI: false,
+		settings: Settings.isolated(),
+		getSessionFile: () => file,
+		getSessionSpawns: () => null,
+		getEvalSessionId: () => `eval-resume-${label}`,
+	};
+	const session = new AgentSession({
+		agent,
+		sessionManager: manager,
+		settings: Settings.isolated({ "compaction.enabled": false }),
+		modelRegistry: registry,
+		evalToolSession,
+	});
+	sessions.push(session);
+	return { session, manager, requests };
+}
+
+async function promptOnce(proc: Process, text: string): Promise<Message[]> {
+	await proc.session.prompt(text);
+	await proc.session.waitForIdle();
+	await proc.manager.flush();
+	const last = proc.requests.at(-1);
+	if (!last) throw new Error("Expected a provider request");
+	return last;
+}
+
+async function createRegistry(): Promise<ModelRegistry> {
+	auth = await AuthStorage.create(":memory:");
+	auth.keys.setRuntime("anthropic", "test-key");
+	return new ModelRegistry(auth);
+}
+
+const prefix = (messages: Message[]) => messages.map(message => ({ role: message.role, content: message.content }));
+
 /**
  * Regression for #15736: every process that resumes a session with `eval`
  * history must send the previous process's request as a prefix, or the
@@ -60,11 +124,7 @@ function appendEval(manager: SessionManager, id: string): void {
  * has lost that runtime state.
  */
 it("keeps the previous process's request as the resumed request prefix", async () => {
-	auth = await AuthStorage.create(":memory:");
-	auth.keys.setRuntime("anthropic", "test-key");
-	const registry = new ModelRegistry(auth);
-	const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
-	if (!bundled) throw new Error("Expected bundled model");
+	const registry = await createRegistry();
 	const sessionDir = path.join(temp.path(), "sessions");
 	const seed = SessionManager.create(temp.path(), sessionDir);
 	seed.appendMessage({ role: "user", content: "use eval", timestamp: Date.now() });
@@ -73,54 +133,15 @@ it("keeps the previous process's request as the resumed request prefix", async (
 	const file = seed.getSessionFile();
 	if (!file) throw new Error("Expected a persisted session");
 
-	/**
-	 * One `omp -p --continue` process: reopen the file, prompt once, optionally
-	 * record an eval call, and return the last provider request.
-	 */
+	/** One `omp -p --continue` process: prompt once, optionally record an eval call. */
 	const runProcess = async (text: string, evalCallId?: string): Promise<Message[]> => {
-		const manager = await SessionManager.open(file, sessionDir);
-		const requests: Message[][] = [];
-		const mock = createMockModel({ provider: "anthropic", handler: { content: ["OK"] } });
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: {
-				model: bundled,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: manager.buildSessionContext().messages,
-			},
-			convertToLlm,
-			streamFn: (model, context, options) => {
-				requests.push(structuredClone(context.messages));
-				return mock.stream(model, context, options);
-			},
-		});
-		const evalToolSession: ToolSession = {
-			cwd: temp.path(),
-			hasUI: false,
-			settings: Settings.isolated(),
-			getSessionFile: () => file,
-			getSessionSpawns: () => null,
-			getEvalSessionId: () => `eval-resume-${text}`,
-		};
-		const session = new AgentSession({
-			agent,
-			sessionManager: manager,
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: registry,
-			evalToolSession,
-		});
-		sessions.push(session);
-		await session.prompt(text);
-		await session.waitForIdle();
-		if (evalCallId) appendEval(manager, evalCallId);
-		await manager.flush();
-		const last = requests.at(-1);
-		if (!last) throw new Error("Expected a provider request");
-		return last;
+		const proc = await openProcess(file, sessionDir, registry, text);
+		const request = await promptOnce(proc, text);
+		if (evalCallId) appendEval(proc.manager, evalCallId);
+		await proc.manager.flush();
+		return request;
 	};
 
-	const prefix = (messages: Message[]) => messages.map(message => ({ role: message.role, content: message.content }));
 	const second = await runProcess("Reply OK 2.");
 	const third = await runProcess("Reply OK 3.", "eval-2");
 	const fourth = await runProcess("Reply OK 4.");
@@ -130,4 +151,78 @@ it("keeps the previous process's request as the resumed request prefix", async (
 	expect(prefix(fifth).slice(0, fourth.length)).toEqual(prefix(fourth));
 	const evalResult = fourth.findIndex(message => message.role === "toolResult" && message.toolCallId === "eval-2");
 	expect(fourth[evalResult + 1]?.role).toBe("developer");
+});
+
+/**
+ * A history rewrite inside a live process (an idle shake, a prune, dropping
+ * images) rebuilds the agent's messages and appends a fresh snapshot when
+ * eval ran since the last one. That snapshot must reach the session file, or
+ * the next process rebuilds a history without it and its request diverges
+ * from the live one at that slot, missing the prompt cache from there on.
+ */
+it("keeps a snapshot appended by an in-process history rewrite across resume", async () => {
+	const registry = await createRegistry();
+	const sessionDir = path.join(temp.path(), "sessions");
+	const seed = SessionManager.create(temp.path(), sessionDir);
+	seed.appendMessage({
+		role: "user",
+		content: [
+			{ type: "text", text: "use eval on this screenshot" },
+			{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+		],
+		timestamp: Date.now(),
+	});
+	appendEval(seed, "eval-1");
+	await seed.flush();
+	const file = seed.getSessionFile();
+	if (!file) throw new Error("Expected a persisted session");
+
+	const live = await openProcess(file, sessionDir, registry, "live");
+	await promptOnce(live, "Reply OK 1.");
+	appendEval(live.manager, "eval-2");
+	expect((await live.session.dropImages()).removed).toBe(1);
+	const liveRequest = await promptOnce(live, "Reply OK 2.");
+	const snapshot = liveRequest.findIndex(
+		(message, index) => index > 0 && liveRequest[index - 1]?.role === "toolResult" && message.role === "developer",
+	);
+	expect(snapshot).toBeGreaterThan(0);
+
+	const resumed = await openProcess(file, sessionDir, registry, "resumed");
+	const resumedRequest = await promptOnce(resumed, "Reply OK 3.");
+	expect(prefix(resumedRequest).slice(0, liveRequest.length)).toEqual(prefix(liveRequest));
+});
+
+/**
+ * Tree navigation rebuilds the history at the selected node and persists the
+ * snapshot that rebuild appends. Revisiting the node must reuse that entry, or
+ * every visit adds another hidden sibling and moves the leaf onto it.
+ */
+it("adds no snapshot entries when the tree revisits a node", async () => {
+	const registry = await createRegistry();
+	const sessionDir = path.join(temp.path(), "sessions");
+	const seed = SessionManager.create(temp.path(), sessionDir);
+	seed.appendMessage({ role: "user", content: "use eval", timestamp: Date.now() });
+	appendEval(seed, "eval-1");
+	await seed.flush();
+	const file = seed.getSessionFile();
+	if (!file) throw new Error("Expected a persisted session");
+
+	const live = await openProcess(file, sessionDir, registry, "tree");
+	await promptOnce(live, "Reply OK 1.");
+	const entries = live.manager.getEntries();
+	const evalResult = entries.find(entry => entry.type === "message" && entry.message.role === "toolResult");
+	const prompt = entries.findLast(entry => entry.type === "message" && entry.message.role === "user");
+	if (!evalResult || !prompt) throw new Error("Expected eval result and prompt entries");
+	const snapshotEntries = () =>
+		live.manager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message" && entry.customType === "eval-state-context");
+	const before = snapshotEntries().length;
+
+	for (let visit = 0; visit < 3; visit++) {
+		await live.session.navigateTree(prompt.id);
+		await live.session.navigateTree(evalResult.id);
+	}
+	expect(snapshotEntries()).toHaveLength(before);
+	expect(snapshotEntries().map(entry => entry.id)).toContain(live.manager.getLeafId() ?? "");
 });

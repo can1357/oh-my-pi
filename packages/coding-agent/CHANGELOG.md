@@ -19,6 +19,7 @@
 - Mistral Vibe browser sign-in shows subscription billing in the status line and advisor spend instead of pay-as-you-go pricing ([#18374](https://github.com/can1357/oh-my-pi/issues/18374))
 - Native OpenAI compaction no longer waits for a Hindsight memory recall it cannot use; fallback summaries still recall memory ([#18327](https://github.com/can1357/oh-my-pi/issues/18327))
 - An eval `wait()` on jobs owned by a worker returns finished jobs and consumes their results instead of reporting them as running or delivering them again ([#18363](https://github.com/can1357/oh-my-pi/issues/18363))
+- A session resumed after an idle shake, prune, image drop, rewind, branch switch or tree navigation now sends the same history the previous process sent, so the provider prompt cache keeps hitting instead of missing from the eval-state snapshot that rewrite added ([#18414](https://github.com/can1357/oh-my-pi/pull/18414) by [@materemias](https://github.com/materemias))
 
 ## [18.18.0] - 2026-11-07
 
