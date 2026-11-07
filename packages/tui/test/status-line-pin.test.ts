@@ -1,4 +1,6 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as path from "node:path";
+import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { StatusLineComponent } from "../src/status-line/component";
 import type { StatusLineHost, StatusLineSession } from "../src/status-line/host";
 import type { StatusLineSettings } from "../src/status-line/types";
@@ -57,8 +59,16 @@ const HOST = {
 
 describe("status line session pin", () => {
 	let component: StatusLineComponent | undefined;
+	let originalProjectDir: string;
 	beforeAll(async () => {
 		await initTheme();
+		// The border shows the project path beside the title; the filesystem root keeps the title's room
+		// independent of where the repository is checked out.
+		originalProjectDir = getProjectDir();
+		setProjectDir(path.parse(originalProjectDir).root);
+	});
+	afterAll(() => {
+		setProjectDir(originalProjectDir);
 	});
 	afterEach(() => {
 		component?.dispose();
