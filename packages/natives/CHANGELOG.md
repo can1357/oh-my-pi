@@ -6,9 +6,13 @@
 
 - Fixed background shell functions that trap signals being interrupted while running their foreground command; traps run after the command finishes and `wait` reports the function's own status ([#18108](https://github.com/can1357/oh-my-pi/pull/18108) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `kill -s EXIT` probing without signalling, `SIGEXIT` and a lone `-` being rejected before delivery, and `exec`'d programs using their own signal dispositions ([#18108](https://github.com/can1357/oh-my-pi/pull/18108) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.18.0] - 2026-11-07
+
 ### Breaking Changes
 
 - Replaced visualization-only `parseShell()` with engine-owned `RunTrace.present()` and `ShellVisualization` APIs.
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes
