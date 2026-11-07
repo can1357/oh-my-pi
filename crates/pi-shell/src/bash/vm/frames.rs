@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+pub const FRAMES_VERSION: u32 = 30;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -245,6 +245,8 @@ struct ProcImage {
 	/// A subshell's own state (`None` for the root vproc).
 	fields:        Option<Fields>,
 	out:           Vec<PendingWrite>,
+	/// Fd object index each queued write is bound to ([`PendingWrite::pin`]).
+	out_pins:      Vec<Option<u32>>,
 	pending_traps: SigSet,
 	stopped:       bool,
 	transient:     bool,
@@ -558,7 +560,13 @@ impl Shell {
 					getopts: f.getopts.as_deref().cloned().unwrap_or_default(),
 				});
 			}
-			for (fd, h) in p.fds.iter() {
+			// A queued write bound to a host object ([`PendingWrite::pin`]) is
+			// lost with it, like a slot holding one.
+			let pinned = p
+				.out
+				.iter()
+				.filter_map(|w| w.pin.as_ref().map(|h| (w.fd, h)));
+			for (fd, h) in p.fds.iter().chain(pinned) {
 				if h.origin() == FdOrigin::Host
 					&& let Some(kind) = h.kind()
 				{
@@ -602,6 +610,11 @@ impl Shell {
 				fds: slots,
 				fields,
 				out: p.out.iter().cloned().collect(),
+				out_pins: p
+					.out
+					.iter()
+					.map(|w| w.pin.as_ref().map(|h| fds.fd(h)))
+					.collect(),
 				pending_traps: p.pending_traps,
 				stopped: p.stopped,
 				transient: p.transient,
@@ -828,6 +841,14 @@ impl Shell {
 				vp
 			};
 			vp.out = p.out.into();
+			for (w, pin) in vp.out.iter_mut().zip(p.out_pins) {
+				if let Some(obj) = pin
+					&& let Some(kind) = objs.host_kind(obj)
+				{
+					report.lost.push(Lost::Fd { vpid, fd: w.fd, kind });
+				}
+				w.pin = pin.map(|i| objs.fd(cx.host, i));
+			}
 			vp.pending_traps = p.pending_traps;
 			vp.stopped = p.stopped;
 			vp.procsubs = p.procsubs;

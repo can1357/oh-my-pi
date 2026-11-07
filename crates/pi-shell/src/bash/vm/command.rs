@@ -1180,8 +1180,7 @@ fn cat_stdin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Opti
 		Ok(_) => BString::default(),
 	};
 	let s = st(vp);
-	s.writes
-		.push_back(PendingWrite { fd: 1, bytes: text, off: 0 });
+	s.writes.push_back(PendingWrite::new(1, text));
 	s.stage = Stage::Output;
 	None
 }
@@ -1933,11 +1932,10 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 						let msg = format!("-{}: invalid option", argv[0][1] as char).into();
 						let line = line_of(vp, op.node);
 						k.diag(cx, vp, line, Diag::Usage { msg }.by("builtin"));
-						vp.out.push_back(PendingWrite {
-							fd:    2,
-							bytes: BString::from("builtin: usage: builtin [shell-builtin [arg ...]]\n"),
-							off:   0,
-						});
+						vp.out.push_back(PendingWrite::new(
+							2,
+							BString::from("builtin: usage: builtin [shell-builtin [arg ...]]\n"),
+						));
 						let s = st(vp);
 						s.status = 2;
 						s.stage = Stage::Finish;
@@ -2787,7 +2785,7 @@ fn zsh_funcnest(
 		utf8:   false,
 	});
 	vp.out
-		.push_back(super::proc::PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+		.push_back(super::proc::PendingWrite::new(2, bytes.into()));
 	vp.status = 1;
 	Some(Flow::Discard(1))
 }
@@ -3008,8 +3006,7 @@ fn parse_autoload(
 					let site = crate::bash::diag::ZshSite { prefix: name, line, utf8: false };
 					bytes.extend_from_slice(&crate::bash::diag::render_zsh(&diag, site));
 				}
-				vp.out
-					.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+				vp.out.push_back(PendingWrite::new(2, bytes.into()));
 				return Err(());
 			},
 		}
@@ -3917,7 +3914,7 @@ fn settle_builtin(
 			.as_mut()
 			.expect("exec")
 			.writes
-			.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
+			.push_back(PendingWrite::new(fd, bytes.into()));
 	}
 	let e = sc.exec.as_mut().expect("exec");
 	e.status = outcome.status;
@@ -4068,10 +4065,8 @@ fn exec_builtin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> O
 		let text = k.render_diag(cx, vp, line, &Diag::Usage { msg: msg.into() }.by("exec"));
 		let s = st(vp);
 		s.argv = argv;
-		s.writes
-			.push_back(PendingWrite { fd: 2, bytes: text.into(), off: 0 });
-		s.writes
-			.push_back(PendingWrite { fd: 2, bytes: USAGE.into(), off: 0 });
+		s.writes.push_back(PendingWrite::new(2, text.into()));
+		s.writes.push_back(PendingWrite::new(2, USAGE.into()));
 		s.status = 2;
 		s.stage = Stage::Output;
 		return None;
@@ -4545,9 +4540,7 @@ fn output(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<
 					// Through the command's own fd 2 (`2>&1 >&4`), while its
 					// redirections are in place.
 					let bytes = k.render_diag(cx, vp, line, &Diag::WriteError { cmd, err });
-					st(vp)
-						.writes
-						.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+					st(vp).writes.push_back(PendingWrite::new(2, bytes.into()));
 				}
 			},
 			Poll::Pending => return Some(Flow::Block(WaitKey::Write { fd })),
@@ -4594,9 +4587,7 @@ fn zsh_write_error(
 	}
 	for d in diags {
 		let bytes = k.render_diag(cx, vp, line, &d);
-		st(vp)
-			.writes
-			.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+		st(vp).writes.push_back(PendingWrite::new(2, bytes.into()));
 	}
 }
 
@@ -4680,7 +4671,7 @@ fn print_exit_value(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32
 		&& on(k, cx, vp, ZshOpt::Shinstdin)
 	{
 		let bytes = BString::from(format!("zsh: exit {status}\n"));
-		vp.out.push_back(PendingWrite { fd: 2, bytes, off: 0 });
+		vp.out.push_back(PendingWrite::new(2, bytes));
 	}
 }
 

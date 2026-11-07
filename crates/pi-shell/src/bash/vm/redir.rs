@@ -543,7 +543,7 @@ fn install(
 				let mut msg = k.argv0.to_vec();
 				msg.extend_from_slice(b": redirection error: cannot duplicate fd: Invalid argument\n");
 				vp.out
-					.push_back(super::proc::PendingWrite { fd: 2, bytes: msg.into(), off: 0 });
+					.push_back(super::proc::PendingWrite::new(2, msg.into()));
 				let err = std::io::Error::from(std::io::ErrorKind::InvalidInput);
 				return Err(fail(k, vp, cx, line, Diag::Io { path: target.clone(), err }));
 			}

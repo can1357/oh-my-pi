@@ -246,8 +246,7 @@ pub fn before_run(
 					&& let Ok(Some(text)) = r.expand(k, cx, vp, |ex| ex.prompt(&ps0))
 				{
 					let text: Vec<u8> = text.iter().copied().filter(|&c| c != 1 && c != 2).collect();
-					vp.out
-						.push_back(PendingWrite { fd: 2, bytes: BString::from(text), off: 0 });
+					vp.out.push_back(PendingWrite::new(2, BString::from(text)));
 				}
 			}
 		}
@@ -562,11 +561,7 @@ impl Reader {
 						if let Ok(out) = crate::bash::vm::builtins::zsh_mod_watch::check(&mut ex)
 							&& !out.is_empty()
 						{
-							vp.out.push_back(PendingWrite {
-								fd:    1,
-								bytes: BString::from(out),
-								off:   0,
-							});
+							vp.out.push_back(PendingWrite::new(1, BString::from(out)));
 						}
 					}
 				},
@@ -871,8 +866,7 @@ impl Reader {
 		};
 		let text = crate::bash::vm::builtins::zsh_prompt::strip_markers(&p.lp.text);
 		if !text.is_empty() {
-			vp.out
-				.push_back(PendingWrite { fd: 2, bytes: BString::from(text), off: 0 });
+			vp.out.push_back(PendingWrite::new(2, BString::from(text)));
 		}
 	}
 
@@ -1291,7 +1285,7 @@ impl Reader {
 					} else {
 						let mut m = BString::from(msg);
 						m.push(b'\n');
-						vp.out.push_back(PendingWrite { fd: 2, bytes: m, off: 0 });
+						vp.out.push_back(PendingWrite::new(2, m));
 					}
 				}
 				return None;
@@ -1448,11 +1442,8 @@ fn put_tty(k: &Kernel, vp: &mut Vproc, bytes: &[u8]) {
 		return;
 	}
 	if !vp.out.is_empty() {
-		vp.out.push_back(PendingWrite {
-			fd:    super::tty::FD,
-			bytes: BString::from(bytes),
-			off:   0,
-		});
+		vp.out
+			.push_back(PendingWrite::new(super::tty::FD, BString::from(bytes)));
 		return;
 	}
 	if let Some(t) = vp.zle.as_deref_mut().and_then(|z| z.tty.as_mut()) {
@@ -1460,8 +1451,7 @@ fn put_tty(k: &Kernel, vp: &mut Vproc, bytes: &[u8]) {
 		let _ = t.flush(k);
 		return;
 	}
-	vp.out
-		.push_back(PendingWrite { fd: 2, bytes: BString::from(bytes), off: 0 });
+	vp.out.push_back(PendingWrite::new(2, BString::from(bytes)));
 }
 
 /// A bash prompt (readline's `\x01`…`\x02` invisible regions) as zsh's

@@ -330,10 +330,7 @@ fn report(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, chunks: Vec<Chunk>) {
 	for chunk in chunks {
 		match chunk {
 			Chunk::Diag(d) => k.diag(cx, vp, 0, d),
-			Chunk::Out(fd, bytes) => {
-				vp.out
-					.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
-			},
+			Chunk::Out(fd, bytes) => vp.out.push_back(PendingWrite::new(fd, bytes.into())),
 		}
 	}
 }

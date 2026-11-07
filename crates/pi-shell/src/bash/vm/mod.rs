@@ -874,8 +874,7 @@ impl Kernel {
 	pub fn diag(&mut self, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, diag: Diag) {
 		zle::display::trash_for_message(self, cx, vp);
 		let bytes = self.render_diag(cx, vp, line, &diag);
-		vp.out
-			.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+		vp.out.push_back(PendingWrite::new(2, bytes.into()));
 	}
 
 	/// The stderr bytes of a diagnostic; emits the `Diag` event. Builtins
@@ -1787,7 +1786,7 @@ impl Shell {
 				self.k.ctl.park(self.k.ctl.wakes());
 				return Step::Paused;
 			}
-			if !self.procs.iter().any(|p| p.has_work()) {
+			if !self.procs.iter().any(|p| p.schedulable()) {
 				return Step::Idle;
 			}
 			let wakes = self.k.ctl.wakes();
@@ -1813,7 +1812,7 @@ impl Shell {
 			let used = ops - before;
 			let p = &self.procs[i];
 			let ran = p.vpid;
-			self.slice = (used < left && p.has_work() && p.blocked.is_none() && !p.stopped)
+			self.slice = (used < left && p.schedulable() && p.blocked.is_none() && !p.stopped)
 				.then_some((ran, left - used));
 			self.adopt(cx);
 			self.end_orphans(cx, Some(ran));
@@ -1976,7 +1975,7 @@ impl Shell {
 	/// has not come.
 	fn runnable(&self, i: usize, wakes: u64) -> bool {
 		let p = &self.procs[i];
-		p.has_work() && !p.stopped && p.blocked.as_ref().is_none_or(|b| b.at != wakes)
+		p.schedulable() && !p.stopped && p.blocked.as_ref().is_none_or(|b| b.at != wakes)
 	}
 
 	/// A finished script or an outgoing callout, if any.

@@ -235,6 +235,27 @@ impl VprocZsh {
 }
 
 impl Vproc {
+	/// Bind the writes queued on `fd` to the fd object slot `fd` holds now,
+	/// before a redirection's end points the slot elsewhere: bash writes a
+	/// diagnostic at once, through the redirections in force when it is
+	/// produced, so one still queued when they are undone (a fatal error
+	/// unwinding a redirected `{ }`, function or `[[ ]]`) must not follow
+	/// the slot back to the shell's own stream.
+	pub fn pin_pending(&mut self, fd: i32) {
+		let mut pending = self
+			.out
+			.iter_mut()
+			.filter(|w| w.fd == fd && w.pin.is_none())
+			.peekable();
+		if pending.peek().is_none() {
+			return;
+		}
+		let held = self.fds.handle(fd);
+		for w in pending {
+			w.pin = Some(held.clone());
+		}
+	}
+
 	/// zsh's current sticky emulation.
 	pub fn sticky(&self) -> Option<&crate::bash::store::Sticky> {
 		self.zsh.as_ref().and_then(|z| z.sticky.as_ref())
@@ -755,6 +776,13 @@ impl Vproc {
 		!self.runs.is_empty() || !self.frames.is_empty()
 	}
 
+	/// Whether the scheduler runs this vproc: it has work, or queued writes
+	/// still to deliver (a finished subshell's pinned diagnostic waiting on
+	/// a full pipe; it is reaped only once they are written or fail).
+	pub fn schedulable(&self) -> bool {
+		self.has_work() || !self.out.is_empty()
+	}
+
 	/// Bash defers trapped signals while waiting for a foreground command.
 	pub fn waiting_foreground(&self) -> bool {
 		self.frames.iter().any(|frame| {
@@ -1117,12 +1145,40 @@ pub enum TryEnd {
 }
 
 /// Bytes still to be written to an fd.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PendingWrite {
 	pub fd:    i32,
 	pub bytes: BString,
 	pub off:   usize,
+	/// The fd object the bytes go to once slot `fd` no longer holds the one
+	/// it held when they were queued ([`Vproc::pin_pending`]); `None`: what
+	/// slot `fd` holds when they are written. The frames image keeps it by
+	/// fd object index.
+	#[serde(skip)]
+	pub pin:   Option<FdRef>,
 }
+
+impl PendingWrite {
+	/// Bytes for whatever slot `fd` holds when they are written.
+	pub const fn new(fd: i32, bytes: BString) -> Self {
+		Self { fd, bytes, off: 0, pin: None }
+	}
+}
+
+impl PartialEq for PendingWrite {
+	fn eq(&self, other: &Self) -> bool {
+		self.fd == other.fd
+			&& self.bytes == other.bytes
+			&& self.off == other.off
+			&& match (&self.pin, &other.pin) {
+				(None, None) => true,
+				(Some(a), Some(b)) => a.same(b),
+				_ => false,
+			}
+	}
+}
+
+impl Eq for PendingWrite {}
 
 /// One logged expansion step (see `expand`): replaying the log reproduces
 /// an expansion that parked on a command substitution without repeating

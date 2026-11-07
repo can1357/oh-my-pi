@@ -227,9 +227,7 @@ pub fn format_job(vp: &Vproc, number: u32, how: JobLine, platform: Platform) -> 
 pub fn notice(k: &Kernel, vp: &mut Vproc, bytes: &[u8]) {
 	match &k.jobctl.shtty {
 		Some(tty) => write_all(tty, bytes),
-		None => vp
-			.out
-			.push_back(PendingWrite { fd: 1, bytes: BString::from(bytes), off: 0 }),
+		None => vp.out.push_back(PendingWrite::new(1, BString::from(bytes))),
 	}
 }
 
@@ -1197,8 +1195,7 @@ pub fn check_before_exit(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> boo
 		(false, true) => b"There are stopped jobs.\n",
 		(false, false) => b"There are running jobs.\n",
 	};
-	vp.out
-		.push_back(PendingWrite { fd: 2, bytes: BString::from(msg), off: 0 });
+	vp.out.push_back(PendingWrite::new(2, BString::from(msg)));
 	k.jobctl.stopmsg = 2;
 	true
 }

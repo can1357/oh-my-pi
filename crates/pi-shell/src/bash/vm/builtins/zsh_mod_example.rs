@@ -157,9 +157,7 @@ pub fn boot(ctx: &mut Ctx<'_, '_>) {
 /// [`boot`] for a load an expansion autoloaded (a parameter, `length`,
 /// `sum`, `-len` or `-ex`): the message goes to standard output directly.
 pub fn boot_ex(ex: &mut Expander<'_, '_>) {
-	ex.vp
-		.out
-		.push_back(PendingWrite { fd: 1, bytes: SETUP.into(), off: 0 });
+	ex.vp.out.push_back(PendingWrite::new(1, SETUP.into()));
 	save(ex.k, ex.cx.store, ex.vp, &booted());
 }
 
