@@ -41,7 +41,7 @@ use std::{
 use libc::pid_t;
 use parking_lot::Mutex;
 
-use super::skylight;
+use super::{permission, skylight};
 use crate::desktop::control::{self, SYNTHETIC_EVENT_TAG};
 
 type Ref = *mut c_void;
@@ -221,6 +221,15 @@ struct Registry {
 	held:   Vec<Held>,
 }
 
+impl Registry {
+	fn cancel(&mut self, generation: u64, target: pid_t, generations: &AtomicU64) {
+		if self.latest == (generation, target) {
+			self.latest = (generations.fetch_add(1, Ordering::AcqRel) + 1, -1);
+			self.stolen = None;
+		}
+	}
+}
+
 static REGISTRY: Mutex<Registry> =
 	Mutex::new(Registry { latest: (0, -1), stolen: None, held: Vec::new() });
 
@@ -275,12 +284,12 @@ impl Chord {
 
 	/// The latest time ⌘ or ⌃ was down, as of `now`; `held_now` is the
 	/// system's current modifier state, in case a flags change was missed.
-	const fn last(&self, held_now: bool, now: Instant) -> Option<Instant> {
+	const fn last(&mut self, held_now: bool, now: Instant) -> Option<Instant> {
 		if held_now || self.held {
-			Some(now)
-		} else {
-			self.last
+			self.last = Some(now);
 		}
+		self.held = held_now;
+		self.last
 	}
 }
 
@@ -497,6 +506,19 @@ impl Theft {
 		if !key.physical {
 			return None;
 		}
+		// Secure input ends this repair, not just the current key's routing.
+		if secure {
+			registry.cancel(self.generation, self.target, &GENERATION);
+			self.end();
+		}
+		// A physical ⌘/⌃ press chooses the target even when it already holds
+		// the keyboard, so no new focus notification announces the choice.
+		if self.stolen()
+			&& matches!(key.stroke, Some(Stroke::Press))
+			&& matches!(key.code, 54 | 55 | 59 | 62)
+		{
+			self.holder = Holder::UserChose;
+		}
 		let fresh = self.reroutes(secure, buttons).then_some(self.user);
 		self.publish(registry);
 		let target = self.target;
@@ -574,7 +596,7 @@ struct TapContext {
 }
 
 impl TapContext {
-	fn signals(&self, now: Instant) -> UserSignals {
+	fn signals(&mut self, now: Instant) -> UserSignals {
 		let held_now = modifier_flags() & SWITCH_MODIFIERS != 0;
 		UserSignals { buttons: mouse_buttons(), last_chord: self.chord.last(held_now, now) }
 	}
@@ -664,12 +686,14 @@ unsafe extern "C" fn route_key(_proxy: Ref, kind: u32, event: Ref, user: Ref) ->
 		return event;
 	}
 	let key = Key { physical, code, stroke };
-	let secure = secure_entry();
 	let buttons = mouse_buttons();
-	let Some(to) = context
-		.theft
-		.route(&mut REGISTRY.lock(), key, secure, buttons)
-	else {
+	let to = {
+		let mut registry = REGISTRY.lock();
+		context
+			.theft
+			.route(&mut registry, key, secure_entry(), buttons)
+	};
+	let Some(to) = to else {
 		return event;
 	};
 	// SAFETY: the event is live for this callback; posting copies it to the
@@ -698,20 +722,102 @@ const SLICE_SECONDS: f64 = 0.05;
 /// Dropping it marks the action ended; the tap thread then stops on its own.
 pub(super) struct KeyReroute {
 	ended: Arc<AtomicBool>,
+	armed: Armed,
+}
+
+/// What a [`KeyReroute`] was armed with, and what one armed now would be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Armed {
+	user:       pid_t,
+	target:     pid_t,
+	/// The latest action's generation: this one's when armed.
+	generation: u64,
+	/// The mouse button counters: a change after arming is the user picking
+	/// an app ([`Theft::user_acted`]).
+	buttons:    [u32; 6],
+	/// Secure keyboard entry in this snapshot prevents tap reuse.
+	secure:     bool,
+}
+
+impl Armed {
+	/// Whether the reroute armed as `self` is still the latest action's, for
+	/// the same apps as `now`.
+	const fn serves(self, now: Self) -> bool {
+		self.user == now.user && self.target == now.target && self.generation == now.generation
+	}
+
+	/// Whether it moves the same keys as one armed `now`: it [`serves`]
+	/// `now`, secure entry is off, and no mouse button went down or up since,
+	/// which it would take for the user's choice where the new one would not.
+	///
+	/// [`serves`]: Self::serves
+	fn covers(self, now: Self) -> bool {
+		!now.secure && self.serves(now) && self.buttons == now.buttons
+	}
+
+	/// Whether the reroute armed as `self` moves the keys one armed now for
+	/// `user` and `target` would, so it can serve in its place.
+	pub(super) fn covers_now(self, user: pid_t, target: pid_t) -> bool {
+		self.covers(KeyReroute::now(user, target))
+	}
 }
 
 impl KeyReroute {
+	#[cfg(test)]
+	pub(super) fn unwatched_for_test(generation: u64) -> (Self, Arc<AtomicBool>) {
+		let ended = Arc::new(AtomicBool::new(false));
+		(
+			Self {
+				ended: Arc::clone(&ended),
+				armed: Armed { user: 100, target: 200, generation, buttons: [0; 6], secure: false },
+			},
+			ended,
+		)
+	}
+
+	fn now(user: pid_t, target: pid_t) -> Armed {
+		let generation = REGISTRY.lock().latest.0;
+		Armed { user, target, generation, buttons: mouse_buttons(), secure: secure_entry() }
+	}
+
+	/// What it was armed with.
+	pub(super) const fn armed(&self) -> Armed {
+		self.armed
+	}
+
+	/// Stop moving fresh keys immediately; held releases keep their owner.
+	pub(super) fn cancel(self) {
+		REGISTRY
+			.lock()
+			.cancel(self.armed.generation, self.armed.target, &GENERATION);
+	}
+
 	/// Starts watching for the target taking the user's keyboard. `None` when
 	/// the taps cannot be created (no Accessibility permission, or the target
 	/// exited): the action then runs as before, without key repair.
 	pub(super) fn arm(user: pid_t, target: pid_t) -> Option<Self> {
+		Self::arm_with_access(user, target, permission::post_events, secure_entry, Self::setup)
+	}
+
+	fn arm_with_access(
+		user: pid_t,
+		target: pid_t,
+		post_events: impl FnOnce() -> bool,
+		secure_entry: impl FnOnce() -> bool,
+		setup: impl FnOnce(pid_t, pid_t) -> Option<Self>,
+	) -> Option<Self> {
 		// The user is typing a password or into a secure terminal: their keys
 		// are never tapped, even after the target takes the keyboard and secure
 		// entry goes off with their app.
-		if user == target || secure_entry() {
+		if user == target || !post_events() || secure_entry() {
 			return None;
 		}
+		setup(user, target)
+	}
+
+	fn setup(user: pid_t, target: pid_t) -> Option<Self> {
 		let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+		let buttons = mouse_buttons();
 		let ended = Arc::new(AtomicBool::new(false));
 		let action_ended = Arc::clone(&ended);
 		let (ready, receive) = flume::bounded(1);
@@ -719,7 +825,7 @@ impl KeyReroute {
 			.name("desktop-key-reroute".into())
 			.spawn(move || {
 				let mut context = TapContext {
-					theft:     Theft::new(user, target, mouse_buttons(), generation),
+					theft:     Theft::new(user, target, buttons, generation),
 					chord:     Chord::new(modifier_flags(), Instant::now()),
 					focus_tap: ptr::null_mut(),
 					key_tap:   ptr::null_mut(),
@@ -836,7 +942,10 @@ impl KeyReroute {
 				}
 			})
 			.ok()?;
-		receive.recv().unwrap_or(false).then_some(Self { ended })
+		receive.recv().unwrap_or(false).then_some(Self {
+			ended,
+			armed: Armed { user, target, generation, buttons, secure: false },
+		})
 	}
 }
 
@@ -855,6 +964,25 @@ mod tests {
 	const SPOTLIGHT: pid_t = 300;
 	const BUTTONS: [u32; 6] = [5, 5, 0, 0, 0, 0];
 	const CLICKED: [u32; 6] = [6, 5, 0, 0, 0, 0];
+
+	#[test]
+	fn missing_accessibility_never_invokes_setup() {
+		let setup_calls = std::cell::Cell::new(0);
+		assert!(
+			KeyReroute::arm_with_access(
+				USER,
+				TARGET,
+				|| false,
+				|| false,
+				|_, _| {
+					setup_calls.set(setup_calls.get() + 1);
+					None
+				},
+			)
+			.is_none()
+		);
+		assert_eq!(setup_calls.get(), 0);
+	}
 
 	fn quiet() -> UserSignals {
 		UserSignals { buttons: BUTTONS, last_chord: None }
@@ -946,6 +1074,25 @@ mod tests {
 		// The next keystroke is the target's again.
 		assert_eq!(rig.key(Q, Stroke::Press), KEPT);
 		assert_eq!(rig.key(Q, Stroke::Release), KEPT);
+	}
+
+	#[test]
+	fn cancelling_for_secure_input_stops_fresh_keys_but_keeps_held_releases() {
+		let mut rig = Rig::new();
+		rig.steal();
+		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
+		let armed = Armed {
+			user:       USER,
+			target:     TARGET,
+			generation: 1,
+			buttons:    BUTTONS,
+			secure:     false,
+		};
+		rig.registry
+			.cancel(armed.generation, armed.target, &AtomicU64::new(1));
+		assert_eq!(rig.key(LEFT_SHIFT, Stroke::Press), KEPT);
+		assert_eq!(rig.key(Q, Stroke::Release), MOVED);
+		assert_eq!(rig.registry.stolen, None);
 	}
 
 	#[test]
@@ -1147,14 +1294,17 @@ mod tests {
 	}
 
 	#[test]
-	fn no_key_pressed_during_secure_entry_moves_but_a_moved_press_keeps_its_release() {
+	fn secure_input_during_a_live_reroute_ends_fresh_routing_and_keeps_held_releases() {
+		let _serial = control::OWNERSHIP_TEST.lock();
 		let mut rig = Rig::new();
 		rig.steal();
+		assert_eq!(rig.key(LEFT_SHIFT, Stroke::Press), MOVED);
 		assert_eq!(rig.key_with(Q, Stroke::Press, true), KEPT);
 		assert_eq!(rig.key_with(Q, Stroke::Repeat, true), KEPT);
 		assert_eq!(rig.key_with(Q, Stroke::Release, true), KEPT);
-		assert_eq!(rig.key(LEFT_SHIFT, Stroke::Press), MOVED);
 		assert_eq!(rig.key_with(LEFT_SHIFT, Stroke::Release, true), MOVED);
+		assert_eq!(rig.key(Q, Stroke::Press), KEPT);
+		assert_eq!(rig.registry.stolen, None);
 	}
 
 	#[test]
@@ -1221,6 +1371,16 @@ mod tests {
 		shift.flags_changed(SHIFT, t0);
 		shift.flags_changed(NONE, t0 + ms(5));
 		assert_eq!(shift.last(false, t0 + ms(10)), None);
+		// A release before the tap starts is absent from its flags events.
+		let mut missed_release = Chord::new(COMMAND, t0);
+		let released = t0 + ms(600);
+		assert_eq!(missed_release.last(false, released), Some(released));
+		let later = released + CHORD_WINDOW + ms(1);
+		let signals =
+			UserSignals { buttons: BUTTONS, last_chord: missed_release.last(false, later) };
+		let mut later_theft = self::theft();
+		later_theft.notify(NEW_FRONT, 1, TARGET, signals, later);
+		assert!(later_theft.reroutes(false, BUTTONS));
 	}
 
 	#[test]
@@ -1351,6 +1511,15 @@ mod tests {
 		rig.steal();
 		rig.notify(NEW_FRONT, 1, TARGET);
 		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
+		// A switch modifier pressed while it already holds the keyboard
+		// needs no repeated front-app notification to end the theft.
+		let mut rig = Rig::new();
+		rig.steal();
+		assert_eq!(rig.key(Q, Stroke::Press), MOVED);
+		assert_eq!(rig.key(55, Stroke::Press), KEPT);
+		assert_eq!(rig.key(LEFT_SHIFT, Stroke::Press), KEPT);
+		assert_eq!(rig.key(Q, Stroke::Release), MOVED);
+		assert_eq!(rig.key(55, Stroke::Release), KEPT);
 
 		// The same, read back after the focus tap was disabled.
 		for (front, focus, signals) in
@@ -1389,5 +1558,29 @@ mod tests {
 		assert!(!typed_by_user(0, SYNTHETIC_EVENT_TAG), "omp's own HID keys");
 		assert!(!typed_by_user(4321, 0), "an automation tool's keys");
 		assert!(!typed_by_user(4321, SYNTHETIC_EVENT_TAG));
+	}
+
+	#[test]
+	fn a_reroute_serves_its_apps_until_a_newer_action_and_stands_in_for_a_new_one_until_a_click() {
+		let armed = Armed {
+			user:       USER,
+			target:     TARGET,
+			generation: 7,
+			buttons:    BUTTONS,
+			secure:     false,
+		};
+		assert!(armed.covers(armed));
+		// The user clicked since: an action under way keeps it, but it would
+		// take the click for their choice where a new one would not.
+		let clicked = Armed { buttons: CLICKED, ..armed };
+		assert!(armed.serves(clicked) && !armed.covers(clicked));
+		let secure = Armed { secure: true, ..armed };
+		assert!(armed.serves(secure) && !armed.covers(secure));
+		for other in [Armed { generation: 8, ..armed }, Armed { user: SPOTLIGHT, ..armed }, Armed {
+			target: SPOTLIGHT,
+			..armed
+		}] {
+			assert!(!armed.serves(other) && !armed.covers(other), "{other:?}");
+		}
 	}
 }

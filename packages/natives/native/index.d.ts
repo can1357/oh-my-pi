@@ -437,10 +437,14 @@ export declare class MacOSFrontApp {
    * after the app was read, the app came from a launcher or Spotlight panel,
    * or a different app comes forward: that is the user picking an app.
    * Typing does not end it, and a hand-back macOS refuses for a key typed
-   * meanwhile is asked again. Holds nothing when called over a second after
-   * the latest read, as picks made since then went unwatched. Owns desktop
-   * input/focus control only for each hand-back, and rejects if another
-   * operation owns it then. Resolves how many times it put the app back.
+   * meanwhile is asked again. Extends the read's key reroute watch through
+   * the hold: with `browserPid` passed to `macOSFrontApp()`, the keys the
+   * user types while that browser holds the keyboard go to this app
+   * instead (when omp may tap keys: Accessibility). Holds nothing
+   * when called over a second after the latest read, as picks made since
+   * then went unwatched. Owns desktop input/focus control only for each
+   * hand-back, and rejects if another operation owns it then. Resolves how
+   * many times it put the app back.
    */
   keepInFront(durationMs: number): Promise<number>
 }
@@ -2833,9 +2837,22 @@ export declare function macOSCheckSpelling(text: string): Promise<Array<Spelling
 
 /**
  * The app macOS `WindowServer` has in front. `null` off macOS and when the
- * front-process SPI is unavailable.
+ * front-process SPI is unavailable. With `browserPid`, the app omp's input
+ * is about to reach, the keys the user types while that app holds the
+ * keyboard uninvited go to this app for the next second, or through
+ * `keepInFront` (when omp may tap keys: Accessibility).
  */
-export declare function macOSFrontApp(): MacOSFrontApp | null
+export declare function macOSFrontApp(browserPid?: number | undefined | null): MacOSFrontApp | null
+
+/**
+ * The app at the other end of a loopback TCP connection to this process
+ * from `peerAddress:peerPort` to `localAddress:localPort`, such as the browser
+ * whose extension connected to omp's relay: the pid of the process holding
+ * that exact connection, or of its nearest ancestor that is a regular app.
+ * `null` off macOS, for non-loopback addresses and when no other process holds
+ * it.
+ */
+export declare function macOSLoopbackPeerApp(localAddress: string, localPort: number, peerAddress: string, peerPort: number): Promise<number | undefined | null>
 
 /** Whether the host can use Apple's native spelling service. */
 export declare function macOSSpellCheckerAvailable(): boolean

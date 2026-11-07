@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a key or two you type in another app on macOS being lost while omp's relay tab opens a new tab or popup; they now reach your app when omp has the Accessibility permission the `computer` tool uses, and `PI_BROWSER_RELAY_KEEP_FRONT=0` turns this off with the hand-back. The browser lookup matches the extension's exact TCP connection, not another loopback connection with the same ports. Input waiting for the relay's browser lookup now fails if Chrome detached omp or the caller's session or connection closed in the meantime, instead of reaching a replacement attachment or outliving its caller ([#17894](https://github.com/can1357/oh-my-pi/pull/17894) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.0] - 2026-11-07
 
 ### Added

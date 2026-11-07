@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { relayCdpClientsOf } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import {
@@ -6,6 +6,7 @@ import {
 	type RelayUnavailableInfo,
 	startRelayServer,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
+import * as natives from "@oh-my-pi/pi-natives";
 
 const EXTENSION_HELLO = {
 	t: "hello",
@@ -97,6 +98,7 @@ async function waitForDiscovery(port: number): Promise<void> {
 }
 
 describe("browser relay discovery endpoint", () => {
+	const savedKeepFront = process.env.PI_BROWSER_RELAY_KEEP_FRONT;
 	let relay: RelayServer | undefined;
 	let extension: WebSocket | undefined;
 
@@ -105,6 +107,9 @@ describe("browser relay discovery endpoint", () => {
 		relay?.stop();
 		extension = undefined;
 		relay = undefined;
+		vi.restoreAllMocks();
+		if (savedKeepFront === undefined) delete process.env.PI_BROWSER_RELAY_KEEP_FRONT;
+		else process.env.PI_BROWSER_RELAY_KEEP_FRONT = savedKeepFront;
 	});
 
 	async function startReadyRelay(): Promise<number> {
@@ -116,7 +121,30 @@ describe("browser relay discovery endpoint", () => {
 	}
 
 	it("advertises the requested Host authority so a remote Puppeteer client dials the relay", async () => {
-		const port = await startReadyRelay();
+		process.env.PI_BROWSER_RELAY_KEEP_FRONT = "1";
+		const lookups = vi.spyOn(natives, "macOSLoopbackPeerApp").mockResolvedValue(null);
+		const serve = vi.spyOn(Bun, "serve");
+		relay = startRelayServer({ port: 0 });
+		const server = serve.mock.results[0]!.value as Bun.Server<unknown>;
+		const requestIP = server.requestIP.bind(server);
+		const acceptedPeers: Bun.SocketAddress[] = [];
+		vi.spyOn(server, "requestIP").mockImplementation(req => {
+			const peer = requestIP(req);
+			if (peer) acceptedPeers.push(peer);
+			return peer;
+		});
+		const port = server.port!;
+		extension = await connectExtension(port);
+		await waitForDiscovery(port);
+		expect(acceptedPeers).toHaveLength(1);
+		const peer = acceptedPeers[0]!;
+		expect(peer.address).toBe("127.0.0.1");
+		if (process.platform === "darwin") {
+			expect(lookups).toHaveBeenCalledTimes(1);
+			expect(lookups).toHaveBeenCalledWith("127.0.0.1", port, peer.address, peer.port);
+		} else {
+			expect(lookups).not.toHaveBeenCalled();
+		}
 		const response = await rawGet(
 			port,
 			"GET /json/version HTTP/1.1\r\nHost: 100.100.92.97:12803\r\nConnection: close\r\n\r\n",
@@ -196,4 +224,34 @@ describe("browser relay discovery endpoint", () => {
 		while (after.clients !== 0 && Date.now() < deadline) after = await discovery();
 		expect(after).toEqual({ status: 200, clients: 0 });
 	});
+});
+
+describe("browser relay with PI_BROWSER_RELAY_KEEP_FRONT=0", () => {
+	const saved = process.env.PI_BROWSER_RELAY_KEEP_FRONT;
+	let relay: RelayServer | undefined;
+	let extension: WebSocket | undefined;
+
+	afterEach(() => {
+		extension?.close();
+		relay?.stop();
+		extension = undefined;
+		relay = undefined;
+		vi.restoreAllMocks();
+		if (saved === undefined) delete process.env.PI_BROWSER_RELAY_KEEP_FRONT;
+		else process.env.PI_BROWSER_RELAY_KEEP_FRONT = saved;
+	});
+
+	// Only macOS looks up the browser behind an extension socket, to send the user's keys back from it.
+	it.skipIf(process.platform !== "darwin")(
+		"never looks up the browser behind a connecting extension, so no key reroute is set up",
+		async () => {
+			const lookups = vi.spyOn(natives, "macOSLoopbackPeerApp").mockResolvedValue(null);
+			process.env.PI_BROWSER_RELAY_KEEP_FRONT = "0";
+			const port = await findFreeCdpPort();
+			relay = startRelayServer({ port });
+			extension = await connectExtension(port);
+			await waitForDiscovery(port);
+			expect(lookups).not.toHaveBeenCalled();
+		},
+	);
 });

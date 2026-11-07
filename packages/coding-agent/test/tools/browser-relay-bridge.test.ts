@@ -80,8 +80,14 @@ function tab(overrides: Partial<TabSnapshot> & { tabId: number }): TabSnapshot {
 	};
 }
 
-function connect(bridge: RelayBridge, socket: FakeExtSocket, tabs: TabSnapshot[], attachedTabIds: number[] = []): void {
-	bridge.extConnected(socket);
+function connect(
+	bridge: RelayBridge,
+	socket: FakeExtSocket,
+	tabs: TabSnapshot[],
+	attachedTabIds: number[] = [],
+	findBrowser?: () => Promise<number | null>,
+): void {
+	bridge.extConnected(socket, undefined, findBrowser);
 	bridge.extMessage(
 		socket,
 		JSON.stringify({
@@ -97,13 +103,14 @@ function connect(bridge: RelayBridge, socket: FakeExtSocket, tabs: TabSnapshot[]
 
 function connectInstance(
 	bridge: RelayBridge,
-	socket: FakeExtSocket,
+	socket: RelaySocket,
 	instanceId: string,
 	tabs: TabSnapshot[],
 	attachedTabIds: number[] = [],
 	browserSession?: string,
+	findBrowser?: () => Promise<number | null>,
 ): void {
-	bridge.extConnected(socket);
+	bridge.extConnected(socket, undefined, findBrowser);
 	bridge.extMessage(
 		socket,
 		JSON.stringify({
@@ -2212,14 +2219,24 @@ describe("RelayBridge auto-attach gating", () => {
 });
 
 describe("RelayBridge front app on a window omp's input opens", () => {
-	/** A relay reading the front app as `n` (the read count), recording each app it holds in front and for how long. */
-	function frontAppRecorder(): { holds: Array<{ app: number; ms: number }>; frontApp: () => FrontApp } {
+	/**
+	 * A relay reading the front app as `n` (the read count), recording the browser each read takes the user's keys
+	 * back from, and each app it holds in front and for how long.
+	 */
+	function frontAppRecorder(): {
+		holds: Array<{ app: number; ms: number }>;
+		readBrowsers: Array<number | null>;
+		frontApp: (browserPid: number | null) => FrontApp;
+	} {
 		const holds: Array<{ app: number; ms: number }> = [];
+		const readBrowsers: Array<number | null> = [];
 		let reads = 0;
 		return {
 			holds,
-			frontApp: () => {
+			readBrowsers,
+			frontApp: browserPid => {
 				const app = ++reads;
+				readBrowsers.push(browserPid);
 				return {
 					keepInFront: async ms => {
 						holds.push({ app, ms });
@@ -2242,12 +2259,13 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 				}),
 			);
 		}
+		await flush();
 		ack(bridge, ext, "send");
 		await flush();
 	}
 
 	/** The tab's page (or, with `sessionId`, a frame of it on a child session) opening a window. */
-	function windowOpen(bridge: RelayBridge, ext: FakeExtSocket, tabId: number, sessionId?: string): void {
+	function windowOpen(bridge: RelayBridge, ext: RelaySocket, tabId: number, sessionId?: string): void {
 		const params = { url: "https://example.com/", windowName: "", windowFeatures: [], userGesture: true };
 		bridge.extMessage(ext, JSON.stringify({ t: "cdpEvent", tabId, sessionId, method: "Page.windowOpen", params }));
 	}
@@ -2289,6 +2307,289 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		windowOpen(bridge, ext, 1);
 		await flush();
 		expect(holds).toHaveLength(2);
+	});
+
+	it("takes the user's keys back from each browser using plain sockets without transport data", async () => {
+		const { holds, readBrowsers, frontApp } = frontAppRecorder();
+		const bridge = new RelayBridge();
+		const chrome: RelaySocket = { send() {}, close() {} };
+		const edge: RelaySocket = {
+			send(text) {
+				const msg = JSON.parse(text) as RelayToExtMessage;
+				if (msg.t === "rpc") {
+					queueMicrotask(() =>
+						bridge.extMessage(edge, JSON.stringify({ t: "rpcResult", id: msg.id, ok: true, result: {} })),
+					);
+				}
+			},
+			close() {},
+		};
+		bridge.keepFrontAppWith(frontApp);
+		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1 })], [], undefined, async () => 111);
+		connectInstance(bridge, edge, "edge", [tab({ tabId: 1 })], [], undefined, async () => 222);
+		await flush();
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const attachId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: attachId,
+				method: "Target.attachToTarget",
+				params: { targetId: `PAGE${instanceCode("edge")}.1`, flatten: true },
+			}),
+		);
+		await flush();
+		const edgeTab = cdp.sessionFor(attachId);
+		expect(edgeTab).toBeDefined();
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: edgeTab,
+				method: "Input.dispatchKeyEvent",
+				params: { type: "keyDown", key: "Enter" },
+			}),
+		);
+		await flush();
+		windowOpen(bridge, edge, 1);
+		await flush();
+		// From omp's input on (Chrome can activate before the relay hears of the window).
+		expect(readBrowsers).toEqual([222]);
+		expect(holds).toEqual([{ app: 1, ms: 500 }]);
+	});
+
+	it.each([
+		{ outcome: "found", browserPid: 222 },
+		{ outcome: "failed", browserPid: null },
+	])(
+		"preserves keyDown/keyUp forwarding order through a pending browser lookup when it $outcome",
+		async ({ outcome, browserPid }) => {
+			const { holds, readBrowsers, frontApp } = frontAppRecorder();
+			const lookup = Promise.withResolvers<number | null>();
+			const bridge = new RelayBridge();
+			bridge.keepFrontAppWith(frontApp);
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })], [], () => lookup.promise);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+			const sent = ext.rpcs("send").length;
+			for (const type of ["keyDown", "keyUp"]) {
+				bridge.cdpMessage(
+					connId,
+					JSON.stringify({
+						id: ++msgSeq,
+						sessionId,
+						method: "Input.dispatchKeyEvent",
+						params: { type, key: "Enter" },
+					}),
+				);
+			}
+			await flush();
+			expect(readBrowsers).toEqual([]);
+			expect(ext.rpcs("send")).toHaveLength(sent);
+			if (outcome === "failed") lookup.reject(new Error("browser lookup unavailable"));
+			else lookup.resolve(browserPid);
+			await flush();
+			expect(readBrowsers).toEqual([browserPid]);
+			expect(
+				ext
+					.rpcs("send")
+					.slice(sent)
+					.map(rpc => ({ method: rpc.method, type: rpc.params?.type })),
+			).toEqual([
+				{ method: "Input.dispatchKeyEvent", type: "keyDown" },
+				{ method: "Input.dispatchKeyEvent", type: "keyUp" },
+			]);
+			ack(bridge, ext, "send");
+			windowOpen(bridge, ext, 1);
+			await flush();
+			expect(holds).toEqual([{ app: 1, ms: 500 }]);
+		},
+	);
+
+	it("rejects input queued before a debugger detach while the browser lookup is pending", async () => {
+		const lookup = Promise.withResolvers<number | null>();
+		const bridge = new RelayBridge();
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], [], () => lookup.promise);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const oldPage = await attachPage(bridge, ext, cdp, connId, 1);
+		const inputId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: inputId,
+				sessionId: oldPage,
+				method: "Input.dispatchKeyEvent",
+				params: { type: "keyDown", key: "Enter" },
+			}),
+		);
+		await flush();
+		expect(ext.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
+		expect(cdp.messages.find(msg => msg.id === inputId)).toBeUndefined();
+
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed" }));
+		await flush();
+		const page = await attachPage(bridge, ext, cdp, connId, 1);
+		expect(page).not.toBe(oldPage);
+		expect(ext.rpcs("attach")).toHaveLength(2);
+
+		lookup.resolve(222);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		expect(cdp.messages.find(msg => msg.id === inputId)?.error).toMatchObject({
+			message: expect.stringContaining("debugger attachment changed"),
+		});
+		expect(ext.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
+	});
+
+	it.each([
+		{ origin: "page", removal: "session" },
+		{ origin: "child", removal: "session" },
+		{ origin: "child", removal: "ancestor" },
+		{ origin: "child", removal: "connection" },
+	])(
+		"rejects $origin input queued before $removal removal while the browser lookup is pending",
+		async ({ origin, removal }) => {
+			const lookup = Promise.withResolvers<number | null>();
+			const { readBrowsers, frontApp } = frontAppRecorder();
+			const bridge = new RelayBridge();
+			bridge.keepFrontAppWith(frontApp);
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })], [], () => lookup.promise);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const page = await attachPage(bridge, ext, cdp, connId, 1);
+			const other = new FakeCdpSocket();
+			const otherConnId = bridge.cdpConnected(other);
+			await attachPage(bridge, ext, other, otherConnId, 1);
+			if (origin === "child") {
+				bridge.cdpMessage(
+					connId,
+					JSON.stringify({
+						id: ++msgSeq,
+						sessionId: page,
+						method: "Target.setAutoAttach",
+						params: { autoAttach: true, flatten: true },
+					}),
+				);
+				for (const [sessionId, parent] of [
+					["child", undefined],
+					["nested", "child"],
+				]) {
+					bridge.extMessage(
+						ext,
+						JSON.stringify({
+							t: "cdpEvent",
+							tabId: 1,
+							sessionId: parent,
+							method: "Target.attachedToTarget",
+							params: {
+								sessionId,
+								targetInfo: { targetId: sessionId, type: "iframe", url: "https://frame.example/" },
+								waitingForDebugger: false,
+							},
+						}),
+					);
+				}
+				expect(cdp.attachedSessions()).toContain("nested");
+			}
+			const sessionId = origin === "page" ? page : "nested";
+			const inputId = ++msgSeq;
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: inputId,
+					sessionId,
+					method: "Input.dispatchKeyEvent",
+					params: { type: "keyDown", key: "Enter" },
+				}),
+			);
+			await flush();
+			expect(cdp.messages.find(msg => msg.id === inputId)).toBeUndefined();
+			expect(ext.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
+			if (removal === "connection") {
+				bridge.cdpClosed(connId);
+			} else if (origin === "child" && removal === "session") {
+				bridge.extMessage(
+					ext,
+					JSON.stringify({
+						t: "cdpEvent",
+						tabId: 1,
+						sessionId: "child",
+						method: "Target.detachedFromTarget",
+						params: { sessionId },
+					}),
+				);
+			} else {
+				bridge.cdpMessage(
+					connId,
+					JSON.stringify({ id: ++msgSeq, method: "Target.detachFromTarget", params: { sessionId: page } }),
+				);
+			}
+			expect(ext.rpcs("detach")).toEqual([]);
+			lookup.resolve(222);
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+			expect(ext.rpcs("attach")).toHaveLength(1);
+			expect(ext.rpcs("detach")).toEqual([]);
+			expect(readBrowsers).toEqual([]);
+			expect(ext.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
+			if (removal !== "connection") {
+				expect(cdp.messages.find(msg => msg.id === inputId)?.error).toMatchObject({
+					message: expect.stringContaining("session closed"),
+				});
+			}
+		},
+	);
+
+	it("does not take the user's keys back from a browser found for a socket since replaced", async () => {
+		const { holds, readBrowsers, frontApp } = frontAppRecorder();
+		const bridge = new RelayBridge();
+		const old = new FakeExtSocket();
+		const restarted = new FakeExtSocket();
+		const oldLookup = Promise.withResolvers<number | null>();
+		const restartedLookup = Promise.withResolvers<number | null>();
+		bridge.keepFrontAppWith(frontApp);
+		connect(bridge, old, [tab({ tabId: 1 })], [], () => oldLookup.promise);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const oldPage = await attachPage(bridge, old, cdp, connId, 1);
+		const inputIds: number[] = [];
+		for (const type of ["keyDown", "keyUp"]) {
+			const inputId = ++msgSeq;
+			inputIds.push(inputId);
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: inputId,
+					sessionId: oldPage,
+					method: "Input.dispatchKeyEvent",
+					params: { type, key: "Enter" },
+				}),
+			);
+		}
+		await flush();
+		// The service worker restarts while the first socket's lookup runs; that lookup ends after.
+		connect(bridge, restarted, [tab({ tabId: 1 })], [], () => restartedLookup.promise);
+		restartedLookup.resolve(222);
+		oldLookup.resolve(111);
+		await flush();
+		expect(readBrowsers).toEqual([]);
+		expect(old.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
+		expect(restarted.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
+		for (const inputId of inputIds) expect(cdp.messages.find(msg => msg.id === inputId)?.error).toBeDefined();
+		const page = await attachPage(bridge, restarted, cdp, connId, 1);
+		await sendInput(bridge, restarted, connId, page);
+		windowOpen(bridge, restarted, 1);
+		await flush();
+		expect(readBrowsers).toEqual([222, 222]);
+		expect(holds).toEqual([{ app: 2, ms: 500 }]);
 	});
 
 	it.each([

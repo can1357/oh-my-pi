@@ -22,10 +22,14 @@ impl MacosFrontApp {
 	/// after the app was read, the app came from a launcher or Spotlight panel,
 	/// or a different app comes forward: that is the user picking an app.
 	/// Typing does not end it, and a hand-back macOS refuses for a key typed
-	/// meanwhile is asked again. Holds nothing when called over a second after
-	/// the latest read, as picks made since then went unwatched. Owns desktop
-	/// input/focus control only for each hand-back, and rejects if another
-	/// operation owns it then. Resolves how many times it put the app back.
+	/// meanwhile is asked again. Extends the read's key reroute watch through
+	/// the hold: with `browserPid` passed to `macOSFrontApp()`, the keys the
+	/// user types while that browser holds the keyboard go to this app
+	/// instead (when omp may tap keys: Accessibility). Holds nothing
+	/// when called over a second after the latest read, as picks made since
+	/// then went unwatched. Owns desktop input/focus control only for each
+	/// hand-back, and rejects if another operation owns it then. Resolves how
+	/// many times it put the app back.
 	#[napi]
 	#[cfg_attr(
 		not(target_os = "macos"),
@@ -51,20 +55,60 @@ impl MacosFrontApp {
 	}
 }
 
+/// The app at the other end of a loopback TCP connection to this process
+/// from `peerAddress:peerPort` to `localAddress:localPort`, such as the browser
+/// whose extension connected to omp's relay: the pid of the process holding
+/// that exact connection, or of its nearest ancestor that is a regular app.
+/// `null` off macOS, for non-loopback addresses and when no other process holds
+/// it.
+#[napi(js_name = "macOSLoopbackPeerApp")]
+pub fn macos_loopback_peer_app(
+	local_address: String,
+	local_port: u16,
+	peer_address: String,
+	peer_port: u16,
+) -> task::Promise<Option<u32>> {
+	task::blocking("desktop.loopbackPeerApp", (), move |_| {
+		#[cfg(target_os = "macos")]
+		{
+			let (Ok(local), Ok(peer)) =
+				(local_address.parse::<std::net::IpAddr>(), peer_address.parse::<std::net::IpAddr>())
+			else {
+				return Ok(None);
+			};
+			Ok(super::macos::loopback_peer_app(
+				&std::net::SocketAddr::new(local, local_port),
+				&std::net::SocketAddr::new(peer, peer_port),
+			)
+			.and_then(|pid| u32::try_from(pid).ok()))
+		}
+		#[cfg(not(target_os = "macos"))]
+		{
+			let _ = (local_address, local_port, peer_address, peer_port);
+			Ok(None)
+		}
+	})
+}
+
 /// The app macOS `WindowServer` has in front. `null` off macOS and when the
-/// front-process SPI is unavailable.
+/// front-process SPI is unavailable. With `browserPid`, the app omp's input
+/// is about to reach, the keys the user types while that app holds the
+/// keyboard uninvited go to this app for the next second, or through
+/// `keepInFront` (when omp may tap keys: Accessibility).
 #[napi(js_name = "macOSFrontApp")]
 #[cfg_attr(
 	not(target_os = "macos"),
 	allow(clippy::missing_const_for_fn, reason = "only macOS reads the front app")
 )]
-pub fn macos_front_app() -> Option<MacosFrontApp> {
+pub fn macos_front_app(browser_pid: Option<u32>) -> Option<MacosFrontApp> {
 	#[cfg(target_os = "macos")]
 	{
-		super::macos::front_app().map(|app| MacosFrontApp { app })
+		let browser = browser_pid.and_then(|pid| libc::pid_t::try_from(pid).ok());
+		super::macos::front_app(browser).map(|app| MacosFrontApp { app })
 	}
 	#[cfg(not(target_os = "macos"))]
 	{
+		let _ = browser_pid;
 		None
 	}
 }
