@@ -343,6 +343,22 @@ async function* readSseFrames<T>(
 				return;
 			}
 			if (err instanceof SyntaxError) {
+				// Escape-split recovery: when a container-shaped frame fails strict parse
+				// with "Unrecognized token '\'" (Bun's error for a lone backslash at EOF),
+				// the TCP chunk boundary fell mid-escape. Attempt streaming recovery.
+				// Any other failure mode (missing closers, bad syntax) stays loud.
+				if (err.message.includes("Unrecognized token") && err.message.includes("'")) {
+					const first = data.trimStart().charCodeAt(0);
+					if (first === 0x7b /* { */ || first === 0x5b /* [ */) {
+						const recovered = parseStreamingJson<T>(data);
+						if (typeof recovered === "object" && recovered !== null) {
+							yield { ok: true, value: recovered };
+							continue;
+						}
+					}
+					yield { ok: false, raw: data, error: err };
+					continue;
+				}
 				yield { ok: false, raw: data, error: err };
 				continue;
 			}
