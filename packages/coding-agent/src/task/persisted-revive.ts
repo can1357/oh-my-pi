@@ -29,6 +29,7 @@ import { installRetryFallbackRole } from "../session/retry-fallback-chains";
 import type { AuthStorage } from "../session/auth-storage";
 import { revivePersistedPlaced } from "../thread/executor-routing";
 import { subagentWorkerPool } from "../thread/subagent-worker";
+import { readSessionHeaderId } from "../session/session-loader";
 import {
 	extractSessionInit,
 	hasConversationalHistory,
@@ -143,6 +144,32 @@ export function persistedAgentDefinition(displayName: string, init: PersistedSes
 		systemPrompt: init.systemPrompt.join("\n\n"),
 		source: "user",
 	};
+}
+
+
+/**
+ * The session `subagent_stop` reports as a cold-revived child's spawner. A child
+ * of the top-level session joins that live session. A nested child was spawned
+ * by another subagent: its header records that subagent's transcript as
+ * `parentSession`, and the subagent's id is on its live session or in that
+ * file's header. When neither survives the identity stays unset rather than
+ * naming the top-level session, which did not spawn it.
+ */
+export async function resolveSpawner(
+	registry: AgentRegistry,
+	topLevel: AgentSessionHandle,
+	ref: AgentRef,
+	recordedParentFile: string | undefined,
+): Promise<{ sessionId: string | undefined; sessionFile: string | undefined }> {
+	if (!ref.parentId || ref.parentId === MAIN_AGENT_ID) {
+		return { sessionId: topLevel.sessionManager.getSessionId(), sessionFile: topLevel.sessionFile };
+	}
+	const parent = registry.get(ref.parentId);
+	const sessionFile = recordedParentFile ?? parent?.sessionFile ?? undefined;
+	const sessionId =
+		parent?.session?.sessionManager.getSessionId() ??
+		(sessionFile ? await readSessionHeaderId(sessionFile).catch(() => undefined) : undefined);
+	return { sessionId, sessionFile };
 }
 
 /**
@@ -549,13 +576,19 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	// The internal run-state signal precedes deferrable public `agent_end`,
 	// keeping idle-TTL ownership synchronized even while prompts unwind.
 	registry.syncSessionStatus(ref.id, session);
+	const spawner = await resolveSpawner(registry, spec.root, expectedRef, reopened.getHeader()?.parentSession);
 	attachIrcWakeTurnMonitor(session, {
 		id: ref.id,
 		agent: persistedAgentDefinition(ref.displayName, init),
 		completionProbe: isCompletionProbeEnabled(spec.settings, taskDepth - 1),
+		// Frames keep the ref label; the stop hook reports the definition name.
+		agentType: persistedAgentName(ref.displayName, init),
 		...softRequestBudgetFor(persistedAgentName(ref.displayName, init), spec.settings),
 		eventBus: spec.eventBus,
 		subagentEventBus: spec.subagentEventBus,
+		// A nested child's spawner is its parent subagent, not the top-level session.
+		parentSessionId: spawner.sessionId,
+		parentSessionFile: spawner.sessionFile,
 		sessionFile,
 		structured,
 		outputSchema: init.outputSchema,
