@@ -4,7 +4,7 @@ import * as AIError from "../error";
 import { getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "../registry/oauth";
 import type { OAuthCredentials, OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
-import { raceSignal } from "./abort";
+import { raceWithSignal } from "../utils/abort";
 import { authCredentialEquals, type CredentialPool, credentialDisabledEvent } from "./pool";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import {
@@ -477,7 +477,7 @@ export class OAuthRefresher {
 			if (stalled) {
 				const stalledMs = stalled.until - Date.now();
 				if (stalled.refresh === current.refresh && stalledMs > 0) {
-					await raceSignal(
+					await raceWithSignal(
 						Bun.sleep(Math.min(stalledMs, waitDeadline - Date.now(), OAUTH_REFRESH_LEASE_WAIT_MAX_MS)),
 						options.signal,
 						"OAuth refresh wait for a stalled refresher aborted by caller",
@@ -512,7 +512,7 @@ export class OAuthRefresher {
 						);
 			const remainingMs = waitDeadline - Date.now();
 			if (remainingMs <= 0) return this.#budgetExceeded(provider, options, current);
-			await raceSignal(
+			await raceWithSignal(
 				Bun.sleep(Math.min(waitMs, remainingMs)),
 				options.signal,
 				"OAuth refresh ownership wait aborted by caller",
@@ -946,7 +946,7 @@ export class OAuthRefresher {
 		if (credentialId !== undefined) {
 			const existing = this.#oauthCredentialRefreshInFlight.get(credentialId);
 			if (existing) {
-				const joined = await raceSignal(existing, signal, "credential refresh aborted");
+				const joined = await raceWithSignal(existing, signal, "credential refresh aborted");
 				// A refresh started for another request may adopt the very token this
 				// request was refused with; refresh again instead of returning it.
 				if (rejectedAccess === undefined || joined.access !== rejectedAccess) return joined;
@@ -981,7 +981,7 @@ export class OAuthRefresher {
 			});
 		// Tracked apart from the caller: a refresh its caller abandoned still has to finish before the store closes.
 		this.#oauthCredentialRefreshInFlight.set(credentialId, this.#track(promise));
-		return raceSignal(promise, signal, "credential refresh aborted");
+		return raceWithSignal(promise, signal, "credential refresh aborted");
 	}
 
 	async #refreshOAuthCredentialUnshared(
@@ -1126,7 +1126,7 @@ export class OAuthRefresher {
 		if (this.#shuttingDown) throw new AIError.AbortError("OAuth refresh stopped during shutdown");
 		const existing = this.#oauthRefreshInFlight.get(id);
 		if (existing) {
-			const joined = await raceSignal(existing, signal, "credential refresh aborted");
+			const joined = await raceWithSignal(existing, signal, "credential refresh aborted");
 			// A refresh that started earlier can land on the very token this caller's
 			// request was refused with; that is no recovery, so refresh again.
 			if (
@@ -1160,7 +1160,7 @@ export class OAuthRefresher {
 		})();
 		// Saves by id itself; tracked so the store stays open until that save lands.
 		this.#oauthRefreshInFlight.set(id, this.#track(promise));
-		return raceSignal(promise, signal, "credential refresh aborted");
+		return raceWithSignal(promise, signal, "credential refresh aborted");
 	}
 
 	async #forceRefreshCredentialByIdUnshared(
