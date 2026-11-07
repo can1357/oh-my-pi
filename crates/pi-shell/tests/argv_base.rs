@@ -665,3 +665,140 @@ async fn a_key_read_lists_the_indices_and_freezes_the_base() {
 	])
 	.await;
 }
+
+/// bash's `_evalfile` pops a no-argument `.` file's FILE-NAME push before
+/// the file's RETURN trap runs, so the trap reads its caller's levels and
+/// a pop made INSIDE the trap takes the next push down — the base — not
+/// the ended file's. A `.` file WITH arguments keeps its push until
+/// `source_builtin`, after the trap. Measured on Bash 5.2.21 and 5.3.0.
+#[tokio::test]
+async fn an_ended_file_name_push_is_gone_before_its_return_trap_runs() {
+	assert_rows(&[
+		// A pop inside the trap consumes the base, as bash's does.
+		(
+			&[("lib", ":\n"), ("inner", "shopt -s extdebug\n")],
+			"set -- ROOT1 ROOT2\ntrap 'trap - RETURN; . ./inner INNER; printf \"trap C=[%s] \
+			 V=[%s] K=[%s]\\n\" \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\" \"${!BASH_ARGV[*]}\"' \
+			 RETURN\n. ./lib\nprintf 'after C=[%s] V=[%s]\\n' \"${BASH_ARGC[*]}\" \
+			 \"${BASH_ARGV[*]}\"",
+			"trap C=[] V=[] K=[]\nafter C=[] V=[]\n",
+		),
+		// No pop in the trap: the caller's levels, before and after.
+		(
+			&[("lib", ":\n")],
+			"set -- ROOT1 ROOT2\ntrap 'trap - RETURN; printf \"trap C=[%s] V=[%s]\\n\" \
+			 \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"' RETURN\n. ./lib\nprintf 'after C=[%s] \
+			 V=[%s]\\n' \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"",
+			"trap C=[2] V=[ROOT2 ROOT1]\nafter C=[2] V=[ROOT2 ROOT1]\n",
+		),
+		// A nested no-argument `.` in the trap pops its own name push.
+		(
+			&[("lib", ":\n"), ("inner", ":\n")],
+			"set -- ROOT1 ROOT2\ntrap 'trap - RETURN; . ./inner; printf \"trap C=[%s] \
+			 V=[%s]\\n\" \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"' RETURN\n. ./lib\nprintf 'after \
+			 C=[%s] V=[%s]\\n' \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"",
+			"trap C=[2] V=[ROOT2 ROOT1]\nafter C=[2] V=[ROOT2 ROOT1]\n",
+		),
+		// An ARGUMENTS push is still there in the trap, and popped after.
+		(
+			&[("lib", ":\n")],
+			"set -- ROOT1 ROOT2\nshopt -s extdebug\ntrap 'trap - RETURN; printf \"trap C=[%s] \
+			 V=[%s]\\n\" \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"' RETURN\n. ./lib S1 S2\nprintf \
+			 'after C=[%s] V=[%s]\\n' \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"",
+			"trap C=[2 2] V=[S2 S1 ROOT2 ROOT1]\nafter C=[2] V=[ROOT2 ROOT1]\n",
+		),
+	])
+	.await;
+}
+
+/// A call-stack array has no binding of its own to shadow, so bash refuses
+/// a function-LOCAL declaration of one (status 1) and leaves the live
+/// array alone; a `declare -g`, a `readonly` or an `export` of the same
+/// name is accepted and carries its attributes. Accepting the local left
+/// an invisible shadow whose attributes a later named `declare -p` stamped
+/// onto the call stack's values. Measured on Bash 5.2.21 and 5.3.0.
+#[tokio::test]
+async fn a_local_declaration_of_a_call_stack_array_is_refused() {
+	assert_rows(&[
+		(
+			&[],
+			"set -- A B\nshopt -s extdebug\nf() { declare -ar BASH_ARGV 2>/dev/null; echo \
+			 \"rc=$?\"; declare -p BASH_ARGV; }\nf X Y",
+			"rc=1\ndeclare -a BASH_ARGV=([0]=\"Y\" [1]=\"X\" [2]=\"B\" [3]=\"A\")\n",
+		),
+		(
+			&[],
+			"set -- A B\nshopt -s extdebug\nf() { local -a BASH_ARGV 2>/dev/null; echo \
+			 \"rc=$?\"; declare -p BASH_ARGV; }\nf X Y",
+			"rc=1\ndeclare -a BASH_ARGV=([0]=\"Y\" [1]=\"X\" [2]=\"B\" [3]=\"A\")\n",
+		),
+		(
+			&[],
+			"set -- A B\nshopt -s extdebug\nf() { declare -ai BASH_ARGC 2>/dev/null; echo \
+			 \"rc=$?\"; declare -p BASH_ARGC; }\nf X Y",
+			"rc=1\ndeclare -a BASH_ARGC=([0]=\"2\" [1]=\"2\")\n",
+		),
+		(
+			&[],
+			"f() { local -a FUNCNAME 2>/dev/null; echo \"rc=$?\"; printf 'F=[%s]\\n' \
+			 \"${FUNCNAME[*]}\"; }\nf",
+			"rc=1\nF=[f]\n",
+		),
+		// `declare -g` acts on the global binding: accepted, attributes kept.
+		(
+			&[],
+			"set -- A B\nshopt -s extdebug\nf() { declare -gar BASH_ARGV 2>/dev/null; echo \
+			 \"rc=$?\"; declare -p BASH_ARGV; }\nf X Y",
+			"rc=0\ndeclare -ar BASH_ARGV=([0]=\"Y\" [1]=\"X\" [2]=\"B\" [3]=\"A\")\n",
+		),
+		// So does `readonly`, inside a function.
+		(
+			&[],
+			"set -- A B\nshopt -s extdebug\nf() { readonly BASH_ARGV 2>/dev/null; echo \
+			 \"rc=$?\"; declare -p BASH_ARGV; }\nf X Y",
+			"rc=0\ndeclare -ar BASH_ARGV=([0]=\"Y\" [1]=\"X\" [2]=\"B\" [3]=\"A\")\n",
+		),
+		// And a declaration outside any function.
+		(
+			&[],
+			"set -- A B\nshopt -s extdebug\ndeclare -ar BASH_ARGV 2>/dev/null; echo \
+			 \"rc=$?\"\ndeclare -p BASH_ARGV",
+			"rc=0\ndeclare -ar BASH_ARGV=([0]=\"B\" [1]=\"A\")\n",
+		),
+	])
+	.await;
+}
+
+/// A whole-variable reference resolves BEFORE the dynamic getter runs, so
+/// a nameref to `BASH_ARGC`/`BASH_ARGV` reads the call stack and
+/// initializes the argument base, as a direct read does. Reading the
+/// stored variable instead gave an empty value and left the base
+/// uncaptured, so a later direct read froze a different set of positional
+/// parameters. Measured on Bash 5.2.21 and 5.3.0.
+#[tokio::test]
+async fn a_nameref_read_goes_through_the_dynamic_getter_and_freezes_the_base() {
+	let tail = "\nset -- LATER\nprintf 'base=[%s]\\n' \"${BASH_ARGV[*]}\"";
+	let rows: Vec<(String, String)> = [
+		("BASH_ARGV", "v=[%s]", "\"${ref[*]}\"", "v=[SECOND FIRST]"),
+		("BASH_ARGV", "e=[%s]", "\"${ref[0]}\"", "e=[SECOND]"),
+		("BASH_ARGV", "n=[%s]", "\"${#ref[@]}\"", "n=[2]"),
+		("BASH_ARGV", "k=[%s]", "\"${!ref[@]}\"", "k=[0]\nk=[1]"),
+		("BASH_ARGC", "v=[%s]", "\"${ref[*]}\"", "v=[2]"),
+		("BASH_ARGC", "e=[%s]", "\"${ref[0]}\"", "e=[2]"),
+		("BASH_ARGC", "n=[%s]", "\"${#ref[@]}\"", "n=[1]"),
+		("BASH_ARGC", "k=[%s]", "\"${!ref[@]}\"", "k=[0]"),
+	]
+	.iter()
+	.map(|(target, fmt, read, want)| {
+		(
+			format!("set -- FIRST SECOND\ndeclare -n ref={target}\nprintf '{fmt}\\n' {read}{tail}"),
+			format!("{want}\nbase=[SECOND FIRST]\n"),
+		)
+	})
+	.collect();
+	let rows: Vec<(&[(&str, &str)], &str, &str)> = rows
+		.iter()
+		.map(|(script, want)| (&[][..], script.as_str(), want.as_str()))
+		.collect();
+	assert_rows(&rows).await;
+}
