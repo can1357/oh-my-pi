@@ -1,8 +1,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { PathLike } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as natives from "@oh-my-pi/pi-natives";
 import { FileType, type GlobMatch } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { glob, grep } from "../../src/ovnfs/search";
@@ -229,8 +231,8 @@ describe("ovnfs search fast path", () => {
 
 		const realRealpath = fs.realpath;
 		const mountRealpathStarted = Promise.withResolvers<void>();
-		const never = new Promise<never>(() => {});
-		vi.spyOn(fs, "realpath").mockImplementation(target => {
+		const never = Promise.withResolvers<string>().promise;
+		vi.spyOn(fs, "realpath").mockImplementation((async (target: PathLike) => {
 			if (String(target) === path.join(root, "stalled-mount")) {
 				mountRealpathStarted.resolve();
 				return never;
@@ -238,8 +240,8 @@ describe("ovnfs search fast path", () => {
 			if (String(target) === path.join(dir, "stalled-root")) {
 				return never;
 			}
-			return realRealpath(String(target)) as Promise<never>;
-		});
+			return realRealpath(target);
+		}) as typeof fs.realpath);
 
 		const controller = new AbortController();
 		const discoverySearch = grep({ pattern: "needle", path: dir, signal: controller.signal }, null, realpathOvnfs);
@@ -354,5 +356,50 @@ describe("ovnfs search fast path", () => {
 			for (const conn of unwelcomedConns) conn.destroy();
 			await closed.promise;
 		}
+	});
+
+	it("hands native fallback only the remaining budget after a slow, unsuccessful status", async () => {
+		const writeSlowFailingStatus = async (name: string) => {
+			const command = path.join(root, name);
+			await Bun.write(command, `#!${process.execPath}\nsetTimeout(() => process.exit(1), 400);\n`);
+			await fs.chmod(command, 0o755);
+			return command;
+		};
+		// One command per search: a failed status is believed for a while, so a
+		// second search through the same command would skip the delay.
+		const grepOvnfs = await writeSlowFailingStatus("ovnfs-slow-status-grep");
+		const globOvnfs = await writeSlowFailingStatus("ovnfs-slow-status-glob");
+
+		let grepTimeoutMs: number | undefined;
+		const realGrep = natives.grep;
+		vi.spyOn(natives, "grep").mockImplementation((options, onMatch) => {
+			grepTimeoutMs = options.timeoutMs;
+			return realGrep(options, onMatch);
+		});
+		let globTimeoutMs: number | undefined;
+		const realGlob = natives.glob;
+		vi.spyOn(natives, "glob").mockImplementation((options, onMatch) => {
+			globTimeoutMs = options.timeoutMs;
+			return realGlob(options, onMatch);
+		});
+
+		const timeoutMs = 5_000;
+		const grepStarted = Date.now();
+		const grepResult = await grep({ pattern: "needle", path: dir, timeoutMs }, null, grepOvnfs);
+		expect(Date.now() - grepStarted).toBeLessThan(timeoutMs);
+		expect(grepResult.matches.map(m => m.path).sort()).toEqual(["a.txt", "sub/b.txt"]);
+		// The slow status consumed at least its 400 ms delay; the fallback may
+		// spend only what is left of the budget, never a second full timeout.
+		expect(grepTimeoutMs).toBeDefined();
+		expect(grepTimeoutMs!).toBeGreaterThan(0);
+		expect(grepTimeoutMs!).toBeLessThanOrEqual(timeoutMs - 300);
+
+		const globStarted = Date.now();
+		const globResult = await glob({ pattern: "*.txt", path: dir, timeoutMs }, null, globOvnfs);
+		expect(Date.now() - globStarted).toBeLessThan(timeoutMs);
+		expect(globResult.matches.map(m => m.path).sort()).toEqual(["a.txt", "sub/b.txt"]);
+		expect(globTimeoutMs).toBeDefined();
+		expect(globTimeoutMs!).toBeGreaterThan(0);
+		expect(globTimeoutMs!).toBeLessThanOrEqual(timeoutMs - 300);
 	});
 });
