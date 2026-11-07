@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `serviceTiers` to custom models and `modelOverrides` in models.yml, so compatible gateways can opt into Ultrafast with `/fast ultra` ([#18304](https://github.com/can1357/oh-my-pi/pull/18304) by [@Ikaleio](https://github.com/Ikaleio)).
+
 ### Fixed
 
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
