@@ -13,6 +13,13 @@
 ### Added
 
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+- Added `/account` for inspecting and strictly selecting a session's OAuth account, plus `auth.defaultAccounts` for strict per-provider defaults that persist across resume and subagents without sibling-account fallback.
+- Added `/account auto` to return the current provider to automatic account routing for this session; the choice is journaled, so resume and `/fresh` keep it and `auth.defaultAccounts` does not re-lock the session.
+- Added per-handler deadlines through `pi.on(event, handler, { timeoutMs })`, including zero for cancellable waits without a deadline. Input and assistant-message handlers can exceed 30 seconds without changing unrelated defaults, the 2-second shutdown cap, or fail-closed input/tool-call behavior.
+- Added `omp.registerAssistantTextDisplay()` for display-only assistant text projections in the existing native and classic transcript component, while preserving source messages and withholding pending prose from immutable history.
+- Exposed `ctx.abortSignal` so extension handlers can cancel external work when their handler times out or the main turn is cancelled.
+- Added an opt-in bidirectional translator extension: Chinese editor prose is translated to English before the main model, English response history stays English, and Chinese is projected only in the original assistant display.
+- Added `/translator input` for input-only Chinese-to-English translation, leaving assistant replies in their original English without output-translation requests; `/translator both` restores bidirectional translation.
 
 ### Fixed
 
@@ -23,6 +30,10 @@
 - Mistral Vibe browser sign-in shows subscription billing in the status line and advisor spend instead of pay-as-you-go pricing ([#18374](https://github.com/can1357/oh-my-pi/issues/18374))
 - Native OpenAI compaction no longer waits for a Hindsight memory recall it cannot use; fallback summaries still recall memory ([#18327](https://github.com/can1357/oh-my-pi/issues/18327))
 - An eval `wait()` on jobs owned by a worker returns finished jobs and consumes their results instead of reporting them as running or delivering them again ([#18363](https://github.com/can1357/oh-my-pi/issues/18363))
+- Subagents hosted on worker threads keep a strict `/account` lock: the worker auth proxy now carries strict pins, `sessions.mode()` and `sessions.automatic()`, and a revived subagent copies its live parent's lock (including a worker-hosted parent)
+- An `auth.defaultAccounts` selector that matches no stored account, or several, now shows a config warning (without the selector) instead of silently leaving the session on automatic routing.
+- Translator failures now write structured warning records with direction, selected model, elapsed time, source size, timeout/cancellation state, and the underlying error without logging translated content.
+- Input hooks can now reject a submission with `reject`, restoring the original draft and attachments; hook errors and timeouts fail closed instead of dispatching untranslated input. Delayed hooks cannot submit or restore drafts into another session.
 - `/restart` no longer drops running subagents: they go on with their interrupted turns in the relaunched process and deliver their results to the agent that spawned them, as `omp --restore` now also does after a normal quit
 
 ## [18.18.0] - 2026-11-07

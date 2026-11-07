@@ -382,7 +382,7 @@ import {
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
 import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate, type CostGateApi } from "./cost-gate";
-import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
+import { credentialPinHash, recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import { EvalRunner, type EvalRunnerHost, type PythonExecuteOptions } from "./eval-runner";
 import {
@@ -563,7 +563,7 @@ import type { UsageLimitState } from "./usage-limit";
 import { cfgInterruptMode } from "../modes/settings";
 import { cfgFollowUpMode } from "../modes/settings";
 import { cfgSteeringMode } from "../modes/settings";
-import { cfgDisabledProviders, cfgModelRoles } from "../config/model-settings";
+import { cfgAuthDefaultAccounts, cfgDisabledProviders, cfgModelRoles } from "../config/model-settings";
 import { cfgEvalJs, cfgEvalPy, cfgEvalToolsEnabled, cfgEvalWorkpoolFreshAgents } from "../eval/settings";
 import { cfgExtensions, type SkillsSettings } from "../extensibility/settings";
 import {
@@ -6364,6 +6364,43 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
+	/** Apply configured strict account defaults only when the session has no restored/live routing choice. */
+	#seedDefaultCredentialPins(sessionId: string): void {
+		const authStorage = this.#modelRegistry.authStorage;
+		for (const [provider, rawSelector] of Object.entries(cfgAuthDefaultAccounts.get(this.settings))) {
+			if (typeof rawSelector !== "string" || !rawSelector.trim()) continue;
+			const mode = authStorage.sessions.mode(provider, sessionId);
+			if (mode === "automatic" || mode === "strict" || mode === "pinned") continue;
+			const accounts = authStorage.oauth.accounts(provider, sessionId);
+			if (accounts.some(account => account.active)) continue;
+			const selector = rawSelector.trim().toLowerCase();
+			const matches = accounts.filter(account => {
+				const email = account.email?.trim().toLowerCase();
+				return (
+					email === selector ||
+					email?.split("@", 1)[0]?.startsWith(selector) === true ||
+					account.accountId?.trim().toLowerCase() === selector
+				);
+			});
+			if (matches.length !== 1) {
+				// The selector stays out of the message: it may be an email address.
+				const warning =
+					matches.length === 0
+						? `auth.defaultAccounts.${provider} matches no stored ${provider} OAuth account; this session uses automatic account routing.`
+						: `auth.defaultAccounts.${provider} matches ${matches.length} ${provider} OAuth accounts; use a full email or account id. This session uses automatic account routing.`;
+				if (!this.configWarnings.includes(warning)) {
+					this.configWarnings.push(warning);
+					this.#emit({ type: "config_warnings_changed" });
+				}
+				continue;
+			}
+			const account = matches[0]!;
+			if (!authStorage.sessions.pin(provider, sessionId, account.credentialId, { strict: true })) continue;
+			const hash = credentialPinHash(provider, account);
+			if (hash) this.sessionManager.appendCredentialPin(provider, hash, "strict");
+		}
+	}
+
 	/**
 	 * Set agent.sessionId from the session manager and install a dynamic
 	 * metadata resolver so every Anthropic API request carries
@@ -6394,11 +6431,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Restore the session's recorded provider accounts before the first
 		// request routes: sticky rows are process-local under a remote auth
 		// broker, and losing them re-ranks onto a different account, cold-missing
-		// the account-scoped prompt cache. Skipped for fresh provider sessions —
-		// those explicitly want new routing identity.
-		if (!this.#freshProviderSessionId) {
-			seedCredentialPins(this.#modelRegistry.authStorage, this.sessionManager, sid);
-		}
+		// the account-scoped prompt cache. Fresh provider sessions skip the
+		// normal warm-affinity restore (they intentionally want new routing
+		// identity) but MUST still carry explicit choices — a strict lock or an
+		// automatic opt-out — because `/fresh` does not constitute an account switch.
+		seedCredentialPins(
+			this.#modelRegistry.authStorage,
+			this.sessionManager,
+			sid,
+			this.#freshProviderSessionId !== undefined,
+		);
+		this.#seedDefaultCredentialPins(sid);
 		// Keep every live advisor's provider identity in lockstep with the primary's
 		// across every session-boundary transition — including branch paths that
 		// skip conversation restore — so advisors never emit the previous
@@ -14768,17 +14811,44 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return {
 			provider,
 			accounts: authStorage.oauth.accounts(provider, this.sessionId),
+			mode: authStorage.sessions.mode(provider, this.sessionId),
 		};
 	}
 
 	/**
 	 * Pin a stored OAuth account to the current model provider for this session.
-	 * Returns false while streaming or when the credential is no longer available.
+	 * Strict pins never rotate to a sibling account. Returns false while
+	 * streaming or when the credential is no longer available.
 	 */
-	pinCurrentProviderOAuthAccount(credentialId: number): boolean {
+	pinCurrentProviderOAuthAccount(credentialId: number, options?: { strict?: boolean }): boolean {
 		const provider = this.model?.provider;
 		if (!provider || this.isStreaming) return false;
-		return this.#modelRegistry.authStorage.sessions.pin(provider, this.sessionId, credentialId);
+		const authStorage = this.#modelRegistry.authStorage;
+		const strict = options?.strict === true;
+		if (!authStorage.sessions.pin(provider, this.sessionId, credentialId, { strict })) return false;
+		if (strict) {
+			const account = authStorage.oauth
+				.accounts(provider, this.sessionId)
+				.find(item => item.credentialId === credentialId);
+			const hash = account ? credentialPinHash(provider, account) : undefined;
+			if (hash) this.sessionManager.appendCredentialPin(provider, hash, "strict");
+		}
+		return true;
+	}
+
+	/**
+	 * Return the current model provider to native automatic account routing for
+	 * this session: clears any pin or strict lock and is journaled, so
+	 * `auth.defaultAccounts` does not re-lock it on resume or `/fresh`. Returns
+	 * false while streaming, without a model, or when a runtime or configured API
+	 * key bypasses OAuth account routing for the provider.
+	 */
+	useAutomaticProviderAccountRouting(): boolean {
+		const provider = this.model?.provider;
+		if (!provider || this.isStreaming) return false;
+		if (!this.#modelRegistry.authStorage.sessions.automatic(provider, this.sessionId)) return false;
+		this.sessionManager.appendCredentialPin(provider, undefined, "automatic");
+		return true;
 	}
 
 	/**

@@ -101,6 +101,19 @@ describe("agent reactions in the transcript", () => {
 		expect(Bun.stringWidth(bubbleTopRow(user))).toBe(W);
 	});
 
+	it("preserves the source reaction while projecting only the assistant's visible body", () => {
+		const user = new UserMessageComponent("ship it?");
+		const source = msg("🚀 Shipping now.");
+		const reply = new AssistantMessageComponent(undefined, false, undefined, [], undefined, true, undefined, [
+			() => ({ text: "🚀 正在交付。" }),
+		]);
+		reply.pickReactionTarget([user]);
+		reply.updateContent(source);
+		expect(bubbleTopRow(user)).toEndWith("🚀 ");
+		expect(plain(reply)).toBe("正在交付。");
+		expect(source.content[0]).toEqual({ type: "text", text: "🚀 Shipping now." });
+	});
+
 	it("withholds incomplete emoji sequences while streaming", () => {
 		const transcript = new Container();
 		const user = new UserMessageComponent("hi");

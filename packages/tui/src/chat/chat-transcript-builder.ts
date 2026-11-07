@@ -430,6 +430,7 @@ export class ChatTranscriptBuilder {
 			this.#deps.ui.imageBudget,
 			proseOnlyThinking,
 			this.#deps.linkTargets,
+			undefined,
 			expandThinkingBlocks,
 			{ renderers: this.#deps.textRenderers ?? [], contentOffset: 0 },
 		);
@@ -469,6 +470,7 @@ export class ChatTranscriptBuilder {
 				undefined,
 				proseOnlyThinking,
 				this.#deps.linkTargets,
+				undefined,
 				expandThinkingBlocks,
 				{ renderers: this.#deps.textRenderers ?? [], contentOffset: timeline.contentOffsets.get(toolCallId) ?? 0 },
 			);

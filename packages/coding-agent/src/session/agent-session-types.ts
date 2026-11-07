@@ -16,6 +16,7 @@ import type {
 	Model,
 	OAuthAccountSummary,
 	ServiceTierByFamily,
+	SessionRoutingMode,
 	SimpleStreamOptions,
 	ToolChoice,
 } from "@oh-my-pi/pi-ai";
@@ -619,6 +620,7 @@ export interface SessionStats {
 export interface SessionOAuthAccountList {
 	provider: string;
 	accounts: OAuthAccountSummary[];
+	mode: SessionRoutingMode;
 }
 
 /** IDs for a newly created session and the session it replaced. */

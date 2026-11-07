@@ -61,6 +61,7 @@ import type {
 	ResetCreditRedeemOutcome,
 	ResolvedApiKey,
 	RotateCredentialOptions,
+	SessionRoutingMode,
 	StoredAuthCredential,
 	StoredCredentialBlock,
 	UsageHistoryEntry,
@@ -213,7 +214,12 @@ export type AuthStorageProtocol = {
 	>;
 
 	"sessions.pin": RpcMethod<
-		[provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }],
+		[
+			provider: string,
+			sessionId: string,
+			credentialId: number,
+			options?: { restoredAtMs?: number; strict?: boolean },
+		],
 		boolean
 	>;
 	"sessions.inherit": RpcMethod<
@@ -225,6 +231,8 @@ export type AuthStorageProtocol = {
 	"sessions.unrestrict": RpcMethod<[provider: string, sessionId: string, lease: number], void>;
 	"sessions.permits": RpcMethod<[provider: string, sessionId: string, credentialId: number], boolean>;
 	"sessions.release": RpcMethod<[provider: string, sessionId: string], boolean>;
+	"sessions.automatic": RpcMethod<[provider: string, sessionId: string], boolean>;
+	"sessions.mode": RpcMethod<[provider: string, sessionId: string], SessionRoutingMode>;
 
 	"usage.reports": RpcMethod<[options?: WireUsageReportsOptions], UsageReport[] | null>;
 	"usage.ingestHeaders": RpcMethod<
