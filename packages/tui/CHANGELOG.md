@@ -11,6 +11,9 @@
 - A saved bash trace the shell visualization can no longer restore (e.g. a `tool_result` hook rewrote its `script`) renders as plain command and output instead of crashing the TUI and every `omp --resume` of that session ([#18338](https://github.com/can1357/oh-my-pi/issues/18338))
 - Tables with near-equal large numeric columns no longer crash transcript rendering during chart analysis ([#18343](https://github.com/can1357/oh-my-pi/issues/18343))
 - A JPEG truncated before its end-of-image marker is rejected when read and omitted from the request, instead of failing the whole provider request with "unsupported image" ([#18385](https://github.com/can1357/oh-my-pi/pull/18385) by [@iwangjie](https://github.com/iwangjie))
+### Fixed
+
+- Fixed SIXEL images from eval cells, `!` shell commands, and replay being cut, reordered, or drawn twice: payload rows are kept byte-for-byte in stream order, a frame is retained whole even past the inline budget, a frame already rendered raw no longer draws its decoded copy again, a frame now ends only at ST so a BEL inside it no longer closes the sequence early (a cancelled frame is dropped), and a frame emitted at a column the row already passed keeps that column ([#15327](https://github.com/can1357/oh-my-pi/pull/15327) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.0] - 2026-11-07
 
