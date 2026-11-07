@@ -4,7 +4,7 @@
 
 ### Added
 
-- Ghostty is recognized as an outer terminal application via `TERM_PROGRAM`, below nested multiplexers in classification, so terminal launches can target it while it keeps the direct-terminal render path
+- Ghostty is recognized as an outer terminal application via `TERM_PROGRAM`, below nested multiplexers in classification, so terminal launches can target it while it keeps the direct-terminal render path ([#18360](https://github.com/can1357/oh-my-pi/pull/18360) by [@dsayling](https://github.com/dsayling))
 
 ### Fixed
 
