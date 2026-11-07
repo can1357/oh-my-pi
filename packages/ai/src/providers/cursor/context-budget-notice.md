@@ -1,0 +1,1 @@
+Context budget reached: this conversation now holds {{contextTokens}} tokens, and the harness compacts it at {{thresholdTokens}}. Do not start another tool call. End this turn now with a brief status: what is done, what remains, and the next step. The harness will compact the conversation and continue the task automatically.
