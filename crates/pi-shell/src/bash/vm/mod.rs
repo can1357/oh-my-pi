@@ -629,7 +629,7 @@ impl Kernel {
 		if self.written.contains(&unit.id) {
 			return;
 		}
-		let written = postcard::to_stdvec(unit)
+		let written = postcard::to_stdvec(&(crate::bash::ir::IR_VERSION, unit))
 			.map_err(StoreError::Encode)
 			.and_then(|bytes| store.put_blob(crate::bash::store::BlobSlot::Unit(unit.id), &bytes));
 		match written {

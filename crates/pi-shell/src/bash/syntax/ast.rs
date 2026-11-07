@@ -348,29 +348,54 @@ pub enum CondExpr {
 	/// `-op word` (`-f file`, `-n str`, …).
 	Unary {
 		/// Operator, e.g. `-f`.
-		op:  Vec<u8>,
+		op:    Vec<u8>,
+		/// Offset of the operator's first byte. The operator's bytes need
+		/// not be contiguous there (`-\<newline>z`), so it cannot be found
+		/// by searching the source for them.
+		op_lo: u32,
 		/// Operand.
-		arg: Word,
+		arg:   Word,
 	},
 	/// `lhs op rhs` (`==`, `=~`, `-lt`, `-nt`, …).
 	Binary {
 		/// Operator.
-		op:  Vec<u8>,
+		op:    Vec<u8>,
+		/// Offset of the operator's first byte, as for [`Self::Unary`].
+		op_lo: u32,
 		/// Left operand.
-		lhs: Word,
+		lhs:   Word,
 		/// Right operand (a pattern for `==`/`!=`, a regex for `=~`).
-		rhs: Word,
+		rhs:   Word,
 	},
 	/// A lone word: true when non-empty.
 	Word(Word),
-	/// `! expr`
-	Not(Box<Self>),
-	/// `a && b`
-	And(Box<Self>, Box<Self>),
-	/// `a || b`
-	Or(Box<Self>, Box<Self>),
-	/// `( expr )`
-	Group(Box<Self>),
+	/// `! ! … expr`: a run of `!`s, at least one, kept as one node so its
+	/// length sets no recursion depth. The operand is never itself `Not`.
+	/// The run holds `1 + rest.len()` of them.
+	Not {
+		/// Offset of the first `!`.
+		lo:   u32,
+		/// Offsets of the `!`s after the first, in source order. Empty for
+		/// a lone `!`, which allocates nothing.
+		rest: Box<[u32]>,
+		/// What the run negates.
+		expr: Box<Self>,
+	},
+	/// `a && b && …`: at least two operands in source order, and the
+	/// offset of each `&&` between them.
+	And(Vec<Self>, Box<[u32]>),
+	/// `a || b || …`: at least two operands in source order, and the
+	/// offset of each `||` between them.
+	Or(Vec<Self>, Box<[u32]>),
+	/// `( expr )`, with the offsets of both parentheses.
+	Group {
+		/// Offset of `(`.
+		lparen: u32,
+		/// Offset of `)`.
+		rparen: u32,
+		/// What they enclose.
+		expr:   Box<Self>,
+	},
 }
 
 /// Function definition.

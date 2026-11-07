@@ -95,7 +95,12 @@ use crate::bash::{
 };
 
 /// IR version; part of the frames header.
-pub const IR_VERSION: u32 = 15;
+///
+/// Main's version 15 is its own layout change. On top of it, version 16
+/// gives each conditional operator the offset it was read at, version 17
+/// records every `!` of a run and every `&&`/`||` of a chain rather than
+/// deriving them, and version 18 is 17 merged with main's 15.
+pub const IR_VERSION: u32 = 18;
 
 /// Opcodes.
 #[derive(

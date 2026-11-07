@@ -72,3 +72,24 @@ fn v_tests_array_elements() {
 	let (out, ..) = zsh("arr=(1 2 3); [[ -v arr[2] && ! -v arr[5] && -v arr ]]; echo $?");
 	assert_eq!(out, "0\n");
 }
+
+#[test]
+fn long_test_chains_keep_zsh_short_circuiting_and_precedence() {
+	let and = vec!["x"; 100_000].join(" -a ");
+	let or = vec!["''"; 100_000].join(" -o ");
+	let script = format!(
+		"test {and} -a ''; echo $?\n[ {or} -o x ]; echo $?\ntest x -o 1 -eq bad; echo $?\ntest '' \
+		 -a 1 -eq bad; echo $?\ntest x -o '' -a ''; echo $?\necho alive"
+	);
+	assert_eq!(zsh(&script), ("1\n0\n0\n1\n0\nalive\n".to_owned(), String::new(), 0));
+}
+
+#[test]
+fn long_bang_runs_in_test_keep_their_parity() {
+	let script = format!(
+		"test {even}x; echo $?\n[ {odd}x ]; echo $?\n[[ {odd}a ]]; echo $?\necho alive",
+		even = "! ".repeat(100_000),
+		odd = "! ".repeat(100_001),
+	);
+	assert_eq!(zsh(&script), ("0\n1\n1\nalive\n".to_owned(), String::new(), 0));
+}

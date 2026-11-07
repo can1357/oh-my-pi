@@ -275,51 +275,104 @@ impl WordPrinter<'_> {
 	}
 
 	pub fn condition(&self, c: &CondExpr) -> String {
-		match c {
-			CondExpr::Word(w) => format!("nonempty({})", self.word(w)),
-			CondExpr::Not(c) => format!("not ({})", self.condition(c)),
-			CondExpr::Group(c) => format!("({})", self.condition(c)),
-			CondExpr::And(a, b) => format!("({} and {})", self.condition(a), self.condition(b)),
-			CondExpr::Or(a, b) => format!("({} or {})", self.condition(a), self.condition(b)),
-			CondExpr::Unary { op, arg } => {
-				let f = match op.as_slice() {
-					b"-f" => "is_file",
-					b"-d" => "is_dir",
-					b"-e" => "exists",
-					b"-n" => "nonempty",
-					b"-z" => "empty",
-					b"-r" => "readable",
-					b"-w" => "writable",
-					b"-x" => "executable",
-					b"-s" => "has_size",
-					b"-L" | b"-h" => "is_symlink",
-					b"-v" => "is_set",
-					_ => return format!("test({}, {})", quote(&text(op)), self.word(arg)),
-				};
-				format!("{f}({})", self.word(arg))
-			},
-			CondExpr::Binary { op, lhs, rhs } => {
-				let a = self.word(lhs);
-				let b = self.word(rhs);
-				match op.as_slice() {
-					b"=~" => format!("regex({a}, {b})"),
-					b"=" | b"==" => format!("matches({a}, {b})"),
-					b"!=" => format!("not matches({a}, {b})"),
-					b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge" => {
-						format!("int({a}) {} int({b})", match op.as_slice() {
-							b"-eq" => "==",
-							b"-ne" => "!=",
-							b"-lt" => "<",
-							b"-le" => "<=",
-							b"-gt" => ">",
-							_ => ">=",
-						})
-					},
-					b"<" | b">" => format!("{a} {} {b}", text(op)),
-					_ => format!("test({}, {a}, {b})", quote(&text(op))),
-				}
-			},
+		// A chain of `&&` / `||` and a run of `!` are flat and can hold
+		// 100,000 operands, so this builds the text with an explicit
+		// stack: recursing on them overflows it. A run of `k` `!` is
+		// written in one allocation rather than `k` nested ones.
+		enum Step<'a> {
+			Visit(&'a CondExpr),
+			Negate(usize),
+			Parens,
+			Join(usize, &'static str),
 		}
+		let mut work = vec![Step::Visit(c)];
+		let mut done: Vec<String> = Vec::new();
+		while let Some(step) = work.pop() {
+			let rendered = match step {
+				Step::Visit(CondExpr::Word(w)) => format!("nonempty({})", self.word(w)),
+				Step::Visit(CondExpr::Not { rest, expr, .. }) => {
+					work.push(Step::Negate(rest.len() + 1));
+					work.push(Step::Visit(expr));
+					continue;
+				},
+				Step::Visit(CondExpr::Group { expr, .. }) => {
+					work.push(Step::Parens);
+					work.push(Step::Visit(expr));
+					continue;
+				},
+				Step::Visit(CondExpr::And(terms, _)) => {
+					work.push(Step::Join(terms.len(), "and"));
+					work.extend(terms.iter().rev().map(Step::Visit));
+					continue;
+				},
+				Step::Visit(CondExpr::Or(terms, _)) => {
+					work.push(Step::Join(terms.len(), "or"));
+					work.extend(terms.iter().rev().map(Step::Visit));
+					continue;
+				},
+				Step::Visit(CondExpr::Unary { op, arg, .. }) => {
+					let f = match op.as_slice() {
+						b"-f" => "is_file",
+						b"-d" => "is_dir",
+						b"-e" => "exists",
+						b"-n" => "nonempty",
+						b"-z" => "empty",
+						b"-r" => "readable",
+						b"-w" => "writable",
+						b"-x" => "executable",
+						b"-s" => "has_size",
+						b"-L" | b"-h" => "is_symlink",
+						b"-v" => "is_set",
+						_ => "",
+					};
+					if f.is_empty() {
+						format!("test({}, {})", quote(&text(op)), self.word(arg))
+					} else {
+						format!("{f}({})", self.word(arg))
+					}
+				},
+				Step::Visit(CondExpr::Binary { op, lhs, rhs, .. }) => {
+					let a = self.word(lhs);
+					let b = self.word(rhs);
+					match op.as_slice() {
+						b"=~" => format!("regex({a}, {b})"),
+						b"=" | b"==" => format!("matches({a}, {b})"),
+						b"!=" => format!("not matches({a}, {b})"),
+						b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge" => {
+							format!("int({a}) {} int({b})", match op.as_slice() {
+								b"-eq" => "==",
+								b"-ne" => "!=",
+								b"-lt" => "<",
+								b"-le" => "<=",
+								b"-gt" => ">",
+								_ => ">=",
+							})
+						},
+						b"<" | b">" => format!("{a} {} {b}", text(op)),
+						_ => format!("test({}, {a}, {b})", quote(&text(op))),
+					}
+				},
+				Step::Negate(bangs) => {
+					let inner = done.pop().expect("a negation has its operand");
+					let mut s = String::with_capacity(inner.len() + bangs * 6);
+					for _ in 0..bangs {
+						s.push_str("not (");
+					}
+					s.push_str(&inner);
+					for _ in 0..bangs {
+						s.push(')');
+					}
+					s
+				},
+				Step::Parens => format!("({})", done.pop().expect("a group has its operand")),
+				Step::Join(terms, sep) => {
+					let operands = done.split_off(done.len() - terms);
+					format!("({})", operands.join(&format!(" {sep} ")))
+				},
+			};
+			done.push(rendered);
+		}
+		done.pop().expect("a condition is one expression")
 	}
 
 	pub fn list_inline(&self, list: &List) -> String {

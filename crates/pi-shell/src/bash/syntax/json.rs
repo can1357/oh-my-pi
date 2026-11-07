@@ -55,7 +55,16 @@ fn write_num(out: &mut String, n: u64) {
 	out.push_str(n.format_into(&mut core::fmt::NumBuffer::new()));
 }
 
-fn write(out: &mut String, v: &V, pretty: bool, depth: usize) {
+// Consume the value tree as we write it. Logical conditions retain the
+// external binary JSON shape, so both writing and dropping that shape must
+// use an explicit stack rather than the Rust call stack.
+fn write(out: &mut String, v: V, pretty: bool, depth: usize) {
+	enum Step {
+		Value(V, usize),
+		Entry(usize, bool),
+		Key(&'static str),
+		End(char, usize, bool),
+	}
 	let nl = |out: &mut String, d: usize| {
 		if pretty {
 			out.push('\n');
@@ -64,44 +73,52 @@ fn write(out: &mut String, v: &V, pretty: bool, depth: usize) {
 			}
 		}
 	};
-	match v {
-		V::Null => out.push_str("null"),
-		V::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-		V::Num(n) => write_num(out, *n),
-		V::Str(b) => write_str(out, b),
-		V::Arr(items) => {
-			out.push('[');
-			for (i, it) in items.iter().enumerate() {
-				if i > 0 {
+	let mut pending = vec![Step::Value(v, depth)];
+	while let Some(step) = pending.pop() {
+		match step {
+			Step::Entry(depth, comma) => {
+				if comma {
 					out.push(',');
 				}
-				nl(out, depth + 1);
-				write(out, it, pretty, depth + 1);
-			}
-			if !items.is_empty() {
 				nl(out, depth);
-			}
-			out.push(']');
-		},
-		V::Obj(fields) => {
-			out.push('{');
-			for (i, (k, it)) in fields.iter().enumerate() {
-				if i > 0 {
-					out.push(',');
-				}
-				nl(out, depth + 1);
-				write_str(out, k.as_bytes());
+			},
+			Step::Key(key) => {
+				write_str(out, key.as_bytes());
 				out.push(':');
 				if pretty {
 					out.push(' ');
 				}
-				write(out, it, pretty, depth + 1);
-			}
-			if !fields.is_empty() {
-				nl(out, depth);
-			}
-			out.push('}');
-		},
+			},
+			Step::End(close, depth, nonempty) => {
+				if nonempty {
+					nl(out, depth);
+				}
+				out.push(close);
+			},
+			Step::Value(value, depth) => match value {
+				V::Null => out.push_str("null"),
+				V::Bool(b) => out.push_str(if b { "true" } else { "false" }),
+				V::Num(n) => write_num(out, n),
+				V::Str(b) => write_str(out, &b),
+				V::Arr(items) => {
+					out.push('[');
+					pending.push(Step::End(']', depth, !items.is_empty()));
+					for (i, item) in items.into_iter().enumerate().rev() {
+						pending.push(Step::Value(item, depth + 1));
+						pending.push(Step::Entry(depth + 1, i > 0));
+					}
+				},
+				V::Obj(fields) => {
+					out.push('{');
+					pending.push(Step::End('}', depth, !fields.is_empty()));
+					for (i, (key, item)) in fields.into_iter().enumerate().rev() {
+						pending.push(Step::Value(item, depth + 1));
+						pending.push(Step::Key(key));
+						pending.push(Step::Entry(depth + 1, i > 0));
+					}
+				},
+			},
+		}
 	}
 }
 
@@ -166,11 +183,11 @@ pub fn to_json(src: &[u8], program: &Program, dialect: JsonDialect, offsets: Off
 	match dialect {
 		JsonDialect::Native => {
 			let v = native::program(&map, program);
-			write(&mut out, &v, false, 0);
+			write(&mut out, v, false, 0);
 		},
 		JsonDialect::Shfmt => {
 			let v = shfmt::program(&map, src, program);
-			write(&mut out, &v, true, 0);
+			write(&mut out, v, true, 0);
 			out.push('\n');
 		},
 	}
@@ -534,23 +551,38 @@ mod native {
 
 	fn cond(m: &OffMap, e: &CondExpr) -> V {
 		match e {
-			CondExpr::Unary { op, arg } => {
+			CondExpr::Unary { op, arg, .. } => {
 				V::Obj(vec![("type", s(b"unary")), ("op", s(op)), ("arg", word(m, arg))])
 			},
-			CondExpr::Binary { op, lhs, rhs } => V::Obj(vec![
+			CondExpr::Binary { op, lhs, rhs, .. } => V::Obj(vec![
 				("type", s(b"binary")),
 				("op", s(op)),
 				("lhs", word(m, lhs)),
 				("rhs", word(m, rhs)),
 			]),
 			CondExpr::Word(w) => V::Obj(vec![("type", s(b"word")), ("word", word(m, w))]),
-			CondExpr::Not(x) => V::Obj(vec![("type", s(b"not")), ("expr", cond(m, x))]),
-			CondExpr::Group(x) => V::Obj(vec![("type", s(b"group")), ("expr", cond(m, x))]),
-			CondExpr::And(a, b) => {
-				V::Obj(vec![("type", s(b"and")), ("lhs", cond(m, a)), ("rhs", cond(m, b))])
+			CondExpr::Not { rest, expr, .. } => {
+				let mut v = cond(m, expr);
+				for _ in 0..=rest.len() {
+					v = V::Obj(vec![("type", s(b"not")), ("expr", v)]);
+				}
+				v
 			},
-			CondExpr::Or(a, b) => {
-				V::Obj(vec![("type", s(b"or")), ("lhs", cond(m, a)), ("rhs", cond(m, b))])
+			CondExpr::Group { expr, .. } => {
+				V::Obj(vec![("type", s(b"group")), ("expr", cond(m, expr))])
+			},
+			CondExpr::And(terms, _) | CondExpr::Or(terms, _) => {
+				let kind: &[u8] = if matches!(e, CondExpr::And(..)) {
+					b"and"
+				} else {
+					b"or"
+				};
+				let (last, rest) = terms.split_last().expect("logical chain has operands");
+				let mut rhs = cond(m, last);
+				for lhs in rest.iter().rev() {
+					rhs = V::Obj(vec![("type", s(kind)), ("lhs", cond(m, lhs)), ("rhs", rhs)]);
+				}
+				rhs
 			},
 		}
 	}
@@ -1639,83 +1671,90 @@ mod shfmt {
 			let p = |o| self.m.pos(o);
 			match e {
 				CondExpr::Word(w) => self.word(w, true),
-				CondExpr::Unary { op, arg } => {
-					let olo = self.find_back_op(arg.span.lo, op);
-					V::Obj(vec![
-						("Type", s(b"UnaryTest")),
-						("Pos", p(olo)),
-						("End", p(arg.span.hi)),
-						("OpPos", p(olo)),
-						("Op", s(op)),
-						("X", self.word(arg, true)),
-					])
-				},
-				CondExpr::Binary { op, lhs, rhs } => V::Obj(vec![
+				CondExpr::Unary { op, op_lo, arg } => V::Obj(vec![
+					("Type", s(b"UnaryTest")),
+					("Pos", p(*op_lo)),
+					("End", p(arg.span.hi)),
+					("OpPos", p(*op_lo)),
+					("Op", s(op)),
+					("X", self.word(arg, true)),
+				]),
+				CondExpr::Binary { op, op_lo, lhs, rhs } => V::Obj(vec![
 					("Type", s(b"BinaryTest")),
 					("Pos", p(lhs.span.lo)),
 					("End", p(rhs.span.hi)),
-					("OpPos", p(self.find(lhs.span.hi, op))),
+					("OpPos", p(*op_lo)),
 					("Op", s(op)),
 					("X", self.word(lhs, true)),
 					("Y", self.word(rhs, true)),
 				]),
-				CondExpr::Not(x) => {
-					let (xlo, xhi) = test_span(x);
-					let olo = self.find_back_op(xlo, b"!");
-					V::Obj(vec![
-						("Type", s(b"UnaryTest")),
-						("Pos", p(olo)),
-						("End", p(xhi)),
-						("OpPos", p(olo)),
-						("Op", s(b"!")),
-						("X", self.test(x)),
-					])
+				CondExpr::Not { lo, rest, expr } => {
+					// Every `!` of the run carries the offset the parser read
+					// it at; wrapping from the innermost out keeps this a
+					// loop, as the run itself is.
+					let hi = Self::test_span(expr).1;
+					let mut v = self.test(expr);
+					for &olo in std::iter::once(lo).chain(rest.iter()).rev() {
+						v = V::Obj(vec![
+							("Type", s(b"UnaryTest")),
+							("Pos", p(olo)),
+							("End", p(hi)),
+							("OpPos", p(olo)),
+							("Op", s(b"!")),
+							("X", v),
+						]);
+					}
+					v
 				},
-				CondExpr::Group(x) => {
-					let (xlo, xhi) = test_span(x);
-					let lp = self.find_back_op(xlo, b"(");
-					let rp = self.find(xhi, b")");
-					V::Obj(vec![
-						("Type", s(b"ParenTest")),
-						("Pos", p(lp)),
-						("End", p(rp + 1)),
-						("Lparen", p(lp)),
-						("Rparen", p(rp)),
-						("X", self.test(x)),
-					])
-				},
-				CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+				CondExpr::Group { lparen, rparen, expr } => V::Obj(vec![
+					("Type", s(b"ParenTest")),
+					("Pos", p(*lparen)),
+					("End", p(rparen + 1)),
+					("Lparen", p(*lparen)),
+					("Rparen", p(*rparen)),
+					("X", self.test(expr)),
+				]),
+				CondExpr::And(terms, ops) | CondExpr::Or(terms, ops) => {
 					let op: &[u8] = if matches!(e, CondExpr::And(..)) {
 						b"&&"
 					} else {
 						b"||"
 					};
-					let (alo, ahi) = test_span(a);
-					let (_, bhi) = test_span(b);
-					V::Obj(vec![
-						("Type", s(b"BinaryTest")),
-						("Pos", p(alo)),
-						("End", p(bhi)),
-						("OpPos", p(self.find(ahi, op))),
-						("Op", s(op)),
-						("X", self.test(a)),
-						("Y", self.test(b)),
-					])
+					let (last, rest) = terms.split_last().expect("logical chain has operands");
+					let (_, end) = Self::test_span(last);
+					let mut rhs = self.test(last);
+					for (lhs, &olo) in rest.iter().zip(ops.iter()).rev() {
+						let (lo, _) = Self::test_span(lhs);
+						rhs = V::Obj(vec![
+							("Type", s(b"BinaryTest")),
+							("Pos", p(lo)),
+							("End", p(end)),
+							("OpPos", p(olo)),
+							("Op", s(op)),
+							("X", self.test(lhs)),
+							("Y", rhs),
+						]);
+					}
+					rhs
 				},
 			}
 		}
 
-		/// Position of `op` written before `i` (skipping blanks).
-		fn find_back_op(&self, i: u32, op: &[u8]) -> u32 {
-			let mut j = i;
-			while j > 0 && matches!(self.at(j - 1), b' ' | b'\t' | b'\n') {
-				j -= 1;
-			}
-			let n = op.len() as u32;
-			if j >= n && self.src.get((j - n) as usize..j as usize) == Some(op) {
-				j - n
-			} else {
-				i
+		/// Source extent of a `[[ ]]` expression. Every operator carries
+		/// the offset the parser read it at, so no part of the extent is
+		/// recovered by reading the source back.
+		fn test_span(e: &CondExpr) -> (u32, u32) {
+			match e {
+				CondExpr::Word(w) => (w.span.lo, w.span.hi),
+				CondExpr::Unary { op_lo, arg, .. } => (*op_lo, arg.span.hi),
+				CondExpr::Binary { lhs, rhs, .. } => (lhs.span.lo, rhs.span.hi),
+				CondExpr::Not { lo, expr, .. } => (*lo, Self::test_span(expr).1),
+				CondExpr::Group { lparen, rparen, .. } => (*lparen, rparen + 1),
+				CondExpr::And(terms, _) | CondExpr::Or(terms, _) => {
+					let first = terms.first().expect("logical chain has operands");
+					let last = terms.last().expect("logical chain has operands");
+					(Self::test_span(first).0, Self::test_span(last).1)
+				},
 			}
 		}
 
@@ -2272,24 +2311,6 @@ mod shfmt {
 	const fn is_empty_simple(c: &Command) -> bool {
 		matches!(&c.kind, CommandKind::Simple(s) if s.assigns.is_empty() && s.words.is_empty())
 			&& c.redirs.is_empty()
-	}
-
-	/// Source extent of a `[[ ]]` expression.
-	fn test_span(e: &CondExpr) -> (u32, u32) {
-		match e {
-			CondExpr::Word(w) => (w.span.lo, w.span.hi),
-			CondExpr::Unary { arg, .. } => (arg.span.lo.saturating_sub(3), arg.span.hi),
-			CondExpr::Binary { lhs, rhs, .. } => (lhs.span.lo, rhs.span.hi),
-			CondExpr::Not(x) => {
-				let (a, b) = test_span(x);
-				(a.saturating_sub(2), b)
-			},
-			CondExpr::Group(x) => {
-				let (a, b) = test_span(x);
-				(a.saturating_sub(2), b + 2)
-			},
-			CondExpr::And(a, b) | CondExpr::Or(a, b) => (test_span(a).0, test_span(b).1),
-		}
 	}
 }
 
