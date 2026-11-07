@@ -183,7 +183,7 @@ pub(crate) fn for_each_nonempty_match<M: Matcher>(
 )]
 struct GrepArgs {
 	/// Use PATTERN for matching (may be repeated; all patterns are OR-ed).
-	#[arg(short = 'e', long = "regexp", value_name = "PATTERN")]
+	#[arg(short = 'e', long = "regexp", value_name = "PATTERN", allow_hyphen_values = true)]
 	patterns: Vec<String>,
 
 	/// Read patterns from FILE, one per line.
@@ -2002,6 +2002,17 @@ mod tests {
 		let (code, out, _) = run(&["absent"], "hit\n").await;
 		assert_eq!(code, 1);
 		assert!(out.is_empty());
+	}
+
+	/// `-e` exists so a pattern may start with `-` (GNU grep); clap used to
+	/// read `-e --canary` as an unknown `--canary` flag and exit 2.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn regexp_operand_may_start_with_a_dash() {
+		let input = "x --canary\n-> y\nz\n";
+		let (code, out, err) = run(&["-e", "--canary"], input).await;
+		assert_eq!((code, out.as_str()), (0, "x --canary\n"), "{err}");
+		let (code, out, err) = run(&["-ne", "->", "--regexp", "-z"], input).await;
+		assert_eq!((code, out.as_str()), (0, "2:-> y\n"), "{err}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
