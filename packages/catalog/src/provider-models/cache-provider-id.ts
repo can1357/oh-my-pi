@@ -29,6 +29,9 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// Kimi Code's roster is plan-gated and discovery is authoritative, so a
 	// shared namespace would serve one plan's ids to another plan's credential.
 	"kimi-code": true,
+	// A keyed OpenRouter roster is `/models/user`: the account's provider,
+	// privacy and guardrail settings decide which chat models it lists.
+	openrouter: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -226,9 +229,12 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		case "factory-droid":
 			return factoryDroidModelCacheProviderId(options);
 		case "openrouter": {
-			const baseUrl = options.baseUrl?.trim().replace(/\/+$/, "");
 			const official = getDefaultModelDiscoveryBaseUrl(providerId)!;
-			if (!baseUrl || baseUrl === official) return "openrouter:pseudo-api";
+			const baseUrl = options.baseUrl?.trim().replace(/\/+$/, "") || official;
+			if (options.apiKey) {
+				return `openrouter:models-user-v1:${Bun.hash(`${options.apiKey}\u0000${baseUrl}`).toString(36)}`;
+			}
+			if (baseUrl === official) return "openrouter:pseudo-api";
 			return `openrouter:pseudo-api:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		case "vllm": {

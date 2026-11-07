@@ -18,6 +18,7 @@ import { providerEntries, seedModels } from "../compat/providers";
 import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+	type FetchOpenAICompatibleModelsOptions,
 	fetchOpenAICompatibleModels,
 	type OpenAICompatibleModelMapperContext,
 	type OpenAICompatibleModelRecord,
@@ -3548,6 +3549,35 @@ export interface OpenRouterModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	publicCatalog?: boolean;
+}
+
+/** `/models/user` answers meaning the key or gateway has no account listing, so the public roster applies. */
+const OPENROUTER_ACCOUNT_LISTING_REJECTED_STATUSES: ReadonlySet<number> = new Set([401, 403, 404]);
+
+type OpenRouterAccountListing =
+	| { kind: "account"; models: ModelSpec<"openrouter">[] }
+	| { kind: "rejected" }
+	| { kind: "unavailable" };
+
+async function fetchOpenRouterAccountListing(
+	chatListing: FetchOpenAICompatibleModelsOptions<"openrouter">,
+): Promise<OpenRouterAccountListing> {
+	const fetchImpl = discoveryFetch(chatListing.fetch);
+	let status: number | undefined;
+	const models = await fetchOpenAICompatibleModels({
+		...chatListing,
+		path: "/models/user",
+		fetch: async (input, init) => {
+			const response = await fetchImpl(input, init);
+			status = response.status;
+			return response;
+		},
+	});
+	if (models !== null) return { kind: "account", models };
+	return status !== undefined && OPENROUTER_ACCOUNT_LISTING_REJECTED_STATUSES.has(status)
+		? { kind: "rejected" }
+		: { kind: "unavailable" };
 }
 
 /**
@@ -3580,70 +3610,67 @@ function mapOpenRouterThinking(entry: OpenAICompatibleModelRecord): ThinkingConf
 
 export function openrouterModelManagerOptions(config?: OpenRouterModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
+	const accountApiKey = config?.publicCatalog ? undefined : apiKey;
 	const baseUrl = (config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("openrouter")!).replace(/\/+$/g, "");
 	const decisionsBaseUrl = openrouterDecisionsBaseUrl(baseUrl);
 	const references = createBundledReferenceMap<"openrouter">("openrouter");
+	const chatListing: FetchOpenAICompatibleModelsOptions<"openrouter"> = {
+		api: "openrouter",
+		provider: "openrouter",
+		baseUrl,
+		apiKey,
+		filterModel: entry => {
+			const params = entry.supported_parameters;
+			return Array.isArray(params) && params.includes("tools");
+		},
+		mapModel: (entry, defaults) => {
+			const reference = references.get(defaults.id);
+			const baseModel = mapWithBundledReference(entry, defaults, reference);
+			const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+			const params = Array.isArray(entry.supported_parameters)
+				? entry.supported_parameters.filter((value): value is string => typeof value === "string")
+				: [];
+			const thinking = mapOpenRouterThinking(entry);
+			const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+			const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
+				? toInputCapabilities(architecture.input_modalities)
+				: String(architecture?.modality ?? "").includes("image")
+					? ["text", "image"]
+					: ["text"];
+			const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+
+			const supportsToolChoice = params.includes("tool_choice");
+
+			return {
+				...baseModel,
+				reasoning: params.includes("reasoning"),
+				...(thinking !== undefined ? { thinking } : {}),
+				input,
+				cost: {
+					input: parseFloat(String(pricing?.prompt ?? "0")) * 1_000_000,
+					output: parseFloat(String(pricing?.completion ?? "0")) * 1_000_000,
+					cacheRead: parseFloat(String(pricing?.input_cache_read ?? "0")) * 1_000_000,
+					cacheWrite: parseFloat(String(pricing?.input_cache_write ?? "0")) * 1_000_000,
+				},
+				contextWindow: toPositiveNumber(entry.context_length, baseModel.contextWindow),
+				maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, baseModel.maxTokens),
+				...(!supportsToolChoice && {
+					compat: { ...baseModel.compat, supportsToolChoice: false },
+				}),
+			};
+		},
+		fetch: config?.fetch,
+	};
 	return {
 		providerId: "openrouter",
-		// Keep the official pseudo-API namespace, but isolate custom gateways:
-		// their authoritative catalogs can differ from OpenRouter's own roster.
-		cacheProviderId: resolveModelCacheProviderId("openrouter", { baseUrl }),
+		cacheProviderId: resolveModelCacheProviderId("openrouter", { apiKey: accountApiKey, baseUrl }),
 		// `createModelManager()` prunes bundled chat rows the live roster omits.
 		dynamicModelsAuthoritative: true,
 		fetchDynamicModels: async cachedModels => {
-			const [chatModels, imageModels, decisionModels, rerankModels, videoModels, embeddingModels] =
+			const [publicChat, accountChat, imageModels, decisionModels, rerankModels, videoModels, embeddingModels] =
 				await Promise.all([
-					fetchOpenAICompatibleModels({
-						api: "openrouter",
-						provider: "openrouter",
-						baseUrl,
-						apiKey,
-						filterModel: (entry: OpenAICompatibleModelRecord) => {
-							const params = entry.supported_parameters;
-							return Array.isArray(params) && params.includes("tools");
-						},
-						mapModel: (
-							entry: OpenAICompatibleModelRecord,
-							defaults: ModelSpec<"openrouter">,
-							_context: OpenAICompatibleModelMapperContext<"openrouter">,
-						): ModelSpec<"openrouter"> => {
-							const reference = references.get(defaults.id);
-							const baseModel = mapWithBundledReference(entry, defaults, reference);
-							const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
-							const params = Array.isArray(entry.supported_parameters)
-								? entry.supported_parameters.filter((value): value is string => typeof value === "string")
-								: [];
-							const thinking = mapOpenRouterThinking(entry);
-							const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
-							const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
-								? toInputCapabilities(architecture.input_modalities)
-								: String(architecture?.modality ?? "").includes("image")
-									? ["text", "image"]
-									: ["text"];
-							const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
-
-							const supportsToolChoice = params.includes("tool_choice");
-
-							return {
-								...baseModel,
-								reasoning: params.includes("reasoning"),
-								...(thinking !== undefined ? { thinking } : {}),
-								input,
-								cost: {
-									input: parseFloat(String(pricing?.prompt ?? "0")) * 1_000_000,
-									output: parseFloat(String(pricing?.completion ?? "0")) * 1_000_000,
-									cacheRead: parseFloat(String(pricing?.input_cache_read ?? "0")) * 1_000_000,
-									cacheWrite: parseFloat(String(pricing?.input_cache_write ?? "0")) * 1_000_000,
-								},
-								contextWindow: toPositiveNumber(entry.context_length, baseModel.contextWindow),
-								maxTokens: toPositiveNumber(topProvider?.max_completion_tokens, baseModel.maxTokens),
-								...(!supportsToolChoice && {
-									compat: { ...baseModel.compat, supportsToolChoice: false },
-								}),
-							};
-						},
-						fetch: config?.fetch,
-					}),
+					fetchOpenAICompatibleModels(chatListing),
+					accountApiKey ? fetchOpenRouterAccountListing(chatListing) : undefined,
 					fetchOpenAICompatibleModels({
 						api: "openrouter-images",
 						provider: "openrouter",
@@ -3812,6 +3839,17 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 					endpoint: `${baseUrl}/embeddings/models`,
 				});
 			}
+			if (accountChat?.kind === "unavailable") {
+				logger.warn("OpenRouter account model listing unavailable; keeping the last listed models", {
+					endpoint: `${baseUrl}/models/user`,
+				});
+			}
+			const chatModels =
+				accountChat === undefined || accountChat.kind === "rejected"
+					? publicChat
+					: accountChat.kind === "account"
+						? accountChat.models
+						: null;
 			// Authority rests on the chat roster: publishing only the other kinds
 			// would prune every chat model, so fall back to cache/bundled instead.
 			if (chatModels === null) {

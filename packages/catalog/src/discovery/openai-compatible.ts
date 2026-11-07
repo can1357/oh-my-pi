@@ -106,6 +106,8 @@ export interface FetchOpenAICompatibleModelsOptions<TApi extends Api> {
 	apiKey?: string;
 	/** Additional request headers. */
 	headers?: Record<string, string>;
+	/** Listing path appended to `baseUrl`; defaults to `/models`. */
+	path?: string;
 	/** Query parameters appended to the `/models` probe (e.g. OpenRouter's `output_modalities` roster filter). */
 	query?: Record<string, string>;
 	/** Optional AbortSignal for request cancellation; caller owns its lifecycle. */
@@ -161,7 +163,7 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 	const fetchPayload = async (signal?: AbortSignal): Promise<unknown | null> => {
 		let response: Response;
 		try {
-			response = await fetchImpl(`${baseUrl}${MODELS_PATH}${query}`, {
+			response = await fetchImpl(`${baseUrl}${options.path ?? MODELS_PATH}${query}`, {
 				method: "GET",
 				headers: requestHeaders,
 				signal,

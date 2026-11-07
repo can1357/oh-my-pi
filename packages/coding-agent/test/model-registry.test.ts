@@ -18,7 +18,7 @@ import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
 import { applyModelPatch, mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-patch";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { resolveCliModel, resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -3777,6 +3777,48 @@ describe("ModelRegistry", () => {
 			expect(registry.getAll("image").map(model => `${model.provider}/${model.id}`)).toContain(
 				"deepinfra/black-forest-labs/FLUX-2-pro",
 			);
+		});
+
+		test("offers only the OpenRouter chat models the key may use, across restart and a failed refresh", async () => {
+			authStorage.keys.setRuntime("openrouter", "sk-or-test-key");
+			const [allowed, hidden] = getBundledModels("openrouter").filter(
+				model => modelKind(model) === "chat" && !model.id.includes(":"),
+			);
+			if (!allowed || !hidden) throw new Error("Missing bundled OpenRouter chat models");
+			const listing = (...ids: string[]) =>
+				Response.json({ data: ids.map(id => ({ id, name: id, supported_parameters: ["tools"] })) });
+			const accountFetch: FetchImpl = async input => {
+				const url = String(input);
+				if (url === "https://openrouter.ai/api/v1/models/user") return listing(allowed.id);
+				if (url === "https://openrouter.ai/api/v1/models") return listing(allowed.id, hidden.id);
+				return Response.json({ data: [] });
+			};
+			const failingFetch: FetchImpl = async () => new Response(null, { status: 503 });
+			const offered = (registry: ModelRegistry, id: string) => ({
+				find: registry.find("openrouter", id) !== undefined,
+				all: registry.getAll().some(model => model.provider === "openrouter" && model.id === id),
+				available: registry.getAvailable().some(model => model.provider === "openrouter" && model.id === id),
+				resolved: resolveCliModel({ cliModel: `openrouter/${id}`, modelRegistry: registry }).model?.id === id,
+			});
+			const everywhere = { find: true, all: true, available: true, resolved: true };
+			const nowhere = { find: false, all: false, available: false, resolved: false };
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: accountFetch });
+			await registry.refreshProvider("openrouter", "online");
+			expect(offered(registry, allowed.id)).toEqual(everywhere);
+			expect(offered(registry, hidden.id)).toEqual(nowhere);
+
+			const restarted = new ModelRegistry(authStorage, modelsJsonPath, { fetch: failingFetch });
+			await restarted.hydrateCredentialScopedModelCaches();
+			expect(offered(restarted, allowed.id)).toEqual(everywhere);
+			expect(offered(restarted, hidden.id)).toEqual(nowhere);
+
+			const expiresAt = Date.now() + 3 * 60 * 60 * 1000;
+			spies.push(spyOn(Date, "now").mockReturnValue(expiresAt));
+			const expired = new ModelRegistry(authStorage, modelsJsonPath, { fetch: failingFetch });
+			await expired.refreshProvider("openrouter", "online");
+			expect(offered(expired, allowed.id)).toEqual(everywhere);
+			expect(offered(expired, hidden.id)).toEqual(nowhere);
 		});
 
 		test("does not re-add bundled Zhipu Coding Plan models after account discovery", async () => {

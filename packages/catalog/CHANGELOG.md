@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- OpenRouter discovery with an API key lists only the chat models that key may use, from `GET /models/user`, which applies the account's provider, privacy and guardrail settings and its regional host ([#15794](https://github.com/can1357/oh-my-pi/issues/15794))
+
 ### Fixed
 
 - Corrected Devin SWE-2 Flash and SWE-2 Fast token pricing, and SWE-2's promotional rates and end time ([#18332](https://github.com/can1357/oh-my-pi/pull/18332) by [@eggpeat](https://github.com/eggpeat))

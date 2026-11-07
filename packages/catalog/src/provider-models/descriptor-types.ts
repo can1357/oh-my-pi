@@ -10,6 +10,8 @@ export type ModelManagerConfig = AccountScope & {
 	fetch?: FetchImpl;
 	/** The supplied fetch already applies provider-specific authentication. */
 	authenticated?: boolean;
+	/** List the provider's public roster, never the credential's account-filtered view (catalog generation). */
+	publicCatalog?: boolean;
 };
 
 /**

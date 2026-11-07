@@ -24,7 +24,7 @@ import { providerEntries, providerEntry, seedModels } from "../src/compat/provid
 import type { CompiledProvider } from "../src/compat/types";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { encodeModelCatalog } from "../src/model-catalog-format";
-import { createModelManager } from "../src/model-manager";
+import { createModelManager, type ModelManagerOptions } from "../src/model-manager";
 import { resolveModelTokenizer } from "../src/model-tokenizer";
 import { getBundledModels, getBundledProviders } from "../src/models";
 import { toModelSpec } from "../src/provider-models/bundled-references";
@@ -33,6 +33,7 @@ import {
 	type CatalogDiscoveryConfig,
 	type CatalogProviderDescriptor,
 	isCatalogDescriptor,
+	type ModelManagerConfig,
 } from "../src/provider-models/descriptor-types";
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
@@ -212,6 +213,17 @@ async function resolveProviderApiKey(providerId: string, catalog: CatalogDiscove
 }
 type CatalogProviderFetchResult = { models: ModelSpec[]; succeeded: boolean };
 
+/** Manager options for catalog generation, which bundles public rosters and never one account's view. */
+export function catalogModelManagerOptions(
+	descriptor: CatalogProviderDescriptor,
+	config: ModelManagerConfig,
+): ModelManagerOptions<Api> {
+	const discoveryConfig = { ...config, publicCatalog: true };
+	const preparedConfig =
+		getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ?? discoveryConfig;
+	return descriptor.createModelManagerOptions(preparedConfig);
+}
+
 async function fetchProviderModelsFromCatalog(
 	descriptor: CatalogProviderDescriptor,
 ): Promise<CatalogProviderFetchResult> {
@@ -224,11 +236,7 @@ async function fetchProviderModelsFromCatalog(
 
 	try {
 		console.log(`Fetching models from ${descriptor.catalogDiscovery.label} model manager...`);
-		const discoveryConfig = { apiKey };
-		const preparedConfig =
-			getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ?? discoveryConfig;
-		const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
-		const manager = createModelManager(managerOptions);
+		const manager = createModelManager(catalogModelManagerOptions(descriptor, { apiKey }));
 		const result = await manager.refresh("online");
 		// `stale: true` means the dynamic fetch failed and the manager fell back
 		// to merging the local agent.db model cache over the static catalog —

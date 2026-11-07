@@ -7,7 +7,10 @@ import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { isCatalogDescriptor } from "@oh-my-pi/pi-catalog/provider-models/descriptor-types";
+import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { catalogModelManagerOptions } from "../scripts/generate-models";
 
 const CHAT_PAYLOAD = {
 	data: [
@@ -471,6 +474,195 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 			const result = await resolve(() => new Response(null, { status: 503 }));
 			expect(result.stale).toBe(true);
 			expect(result.models.map(model => model.id)).toContain("stealth/ox-alpha");
+		});
+	});
+
+	describe("keyed listing via /models/user (#15794)", () => {
+		const KEY_A = "sk-or-key-a";
+		const KEY_B = "sk-or-key-b";
+		const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		const ALLOWED_PUBLIC = {
+			id: "vendor/allowed",
+			name: "Allowed",
+			supported_parameters: ["tools"],
+			context_length: 200_000,
+			pricing: { prompt: "0.000001", completion: "0.000002" },
+			top_provider: { max_completion_tokens: 64_000 },
+		};
+		const ALLOWED_FOR_KEY = {
+			...ALLOWED_PUBLIC,
+			context_length: 64_000,
+			pricing: { prompt: "0.000003", completion: "0.000006" },
+			top_provider: { max_completion_tokens: 16_000 },
+		};
+		const BLOCKED = { id: "vendor/blocked", name: "Blocked", supported_parameters: ["tools"] };
+		const listed = (...rows: object[]) => Response.json({ data: rows });
+		const keyedFetch =
+			(user: () => Response, overrides: Record<string, () => Response> = {}): FetchImpl =>
+			async input => {
+				const url = String(input);
+				const override = Object.entries(overrides).find(([suffix]) => url.endsWith(suffix))?.[1];
+				if (override) return override();
+				if (url.endsWith("/v1/models/user")) return user();
+				if (url.endsWith("/v1/models")) return listed(ALLOWED_PUBLIC, BLOCKED);
+				return Response.json({ data: [] });
+			};
+		const ids = (models: readonly { id: string }[]) => models.map(model => model.id);
+		const withCacheDir = async (run: (cacheDbPath: string) => Promise<void>) => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openrouter-user-models-"));
+			try {
+				await run(path.join(dir, "models.db"));
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		};
+
+		it("drops chat models the key may not use and keeps bundled non-chat models whose listing fails", async () => {
+			const bundledBlocked: ModelSpec<"openrouter"> = {
+				id: "vendor/blocked",
+				name: "Blocked",
+				api: "openrouter",
+				provider: "openrouter",
+				baseUrl: "https://openrouter.ai/api/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: ZERO_COST,
+				contextWindow: 128_000,
+				maxTokens: 8_192,
+			};
+			const bundledVideo: ModelSpec<"openrouter-video"> = {
+				id: "google/veo-3.1",
+				name: "Google: Veo 3.1",
+				api: "openrouter-video",
+				provider: "openrouter",
+				baseUrl: "https://openrouter.ai/api/v1",
+				kind: "video",
+				reasoning: false,
+				input: ["text", "image"],
+				supportsTools: false,
+				cost: ZERO_COST,
+				contextWindow: null,
+				maxTokens: null,
+			};
+			const result = await resolveProviderModels(
+				{
+					...openrouterModelManagerOptions({
+						apiKey: KEY_A,
+						fetch: keyedFetch(() => listed(ALLOWED_FOR_KEY), {
+							"/videos/models": () => new Response(null, { status: 500 }),
+						}),
+					}),
+					staticModels: [bundledBlocked, bundledVideo],
+					cacheDbPath: ":memory:",
+				},
+				"online",
+			);
+
+			expect(ids(result.models)).toContain("vendor/allowed");
+			expect(ids(result.models)).not.toContain("vendor/blocked");
+			expect(ids(result.models)).toContain("google/veo-3.1");
+		});
+
+		it("takes price, context and output limits from the key's listing", async () => {
+			const result = await resolveProviderModels(
+				{
+					...openrouterModelManagerOptions({ apiKey: KEY_A, fetch: keyedFetch(() => listed(ALLOWED_FOR_KEY)) }),
+					staticModels: [],
+					cacheDbPath: ":memory:",
+				},
+				"online",
+			);
+
+			expect(result.models.find(model => model.id === "vendor/allowed")).toMatchObject({
+				contextWindow: 64_000,
+				maxTokens: 16_000,
+				cost: expect.objectContaining({ input: expect.closeTo(3, 6), output: expect.closeTo(6, 6) }),
+			});
+		});
+
+		it("lists the public roster when the key cannot use /models/user", async () => {
+			const result = await resolveProviderModels(
+				{
+					...openrouterModelManagerOptions({
+						apiKey: KEY_A,
+						fetch: keyedFetch(() => new Response(null, { status: 401 })),
+					}),
+					staticModels: [],
+					cacheDbPath: ":memory:",
+				},
+				"online",
+			);
+
+			expect(result.stale).toBe(false);
+			expect(ids(result.models)).toEqual(expect.arrayContaining(["vendor/allowed", "vendor/blocked"]));
+		});
+
+		it("keeps the key's last list when /models/user fails and every other listing succeeds", async () => {
+			await withCacheDir(async cacheDbPath => {
+				let userAnswer = () => listed(ALLOWED_FOR_KEY);
+				const config = {
+					...openrouterModelManagerOptions({ apiKey: KEY_A, fetch: keyedFetch(() => userAnswer()) }),
+					staticModels: [],
+					cacheDbPath,
+				};
+				await resolveProviderModels(config, "online");
+				userAnswer = () => new Response(null, { status: 503 });
+
+				const result = await resolveProviderModels(config, "online");
+
+				expect(result.stale).toBe(true);
+				expect(ids(result.models)).toContain("vendor/allowed");
+				expect(ids(result.models)).not.toContain("vendor/blocked");
+			});
+		});
+
+		it("never serves one key's or host's list to another key or host", async () => {
+			await withCacheDir(async cacheDbPath => {
+				const resolve = (
+					apiKey: string,
+					strategy: "online" | "offline",
+					userRows: object[] = [],
+					baseUrl?: string,
+				) =>
+					resolveProviderModels(
+						{
+							...openrouterModelManagerOptions({
+								apiKey,
+								baseUrl,
+								fetch: keyedFetch(() => listed(...userRows)),
+							}),
+							staticModels: [],
+							cacheDbPath,
+						},
+						strategy,
+					);
+				await resolve(KEY_A, "online", [ALLOWED_FOR_KEY]);
+				await resolve(KEY_B, "online", [BLOCKED]);
+
+				const keyB = await resolve(KEY_B, "offline");
+				const keyAOnEu = await resolve(KEY_A, "offline", [], "https://eu.openrouter.ai/api/v1");
+
+				expect(ids(keyB.models)).toEqual(["vendor/blocked"]);
+				expect(ids(keyAOnEu.models)).not.toContain("vendor/allowed");
+			});
+		});
+
+		it("catalog generation bundles the public roster even with a maintainer key", async () => {
+			const descriptor = PROVIDER_DESCRIPTORS.find(candidate => candidate.providerId === "openrouter");
+			if (!descriptor || !isCatalogDescriptor(descriptor)) throw new Error("OpenRouter catalog descriptor missing");
+			const result = await resolveProviderModels(
+				{
+					...catalogModelManagerOptions(descriptor, {
+						apiKey: KEY_A,
+						fetch: keyedFetch(() => listed(ALLOWED_FOR_KEY)),
+					}),
+					staticModels: [],
+					cacheDbPath: ":memory:",
+				},
+				"online",
+			);
+
+			expect(ids(result.models)).toContain("vendor/blocked");
 		});
 	});
 });
