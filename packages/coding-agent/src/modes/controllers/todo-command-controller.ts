@@ -4,7 +4,7 @@ import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import type { InteractiveModeContext } from "../types";
-import { commitTodoEdit } from "../../session/todo-writes";
+import { commitTodoEdit } from "../../slash-commands/helpers/todo";
 
 const USAGE = [
 	"Usage: /todo <verb> [args]",
@@ -165,19 +165,19 @@ export class TodoCommandController {
 				this.ctx.showStatus(USAGE);
 				return;
 			case "append":
-				await this.#append(rest);
+				await this.#edit(current => this.#append(rest, current));
 				return;
 			case "start":
-				await this.#start(rest);
+				await this.#edit(current => this.#start(rest, current));
 				return;
 			case "done":
-				await this.#mutateStatus(rest, "completed");
+				await this.#edit(current => this.#mutateStatus(rest, "completed", current));
 				return;
 			case "drop":
-				await this.#mutateStatus(rest, "abandoned");
+				await this.#edit(current => this.#mutateStatus(rest, "abandoned", current));
 				return;
 			case "rm":
-				await this.#remove(rest);
+				await this.#edit(current => this.#remove(rest, current));
 				return;
 			default:
 				this.ctx.showError(`Unknown /todo verb "${verb}".\n${USAGE}`);
@@ -251,11 +251,10 @@ export class TodoCommandController {
 
 	// ------------------------------------------------------------- append
 
-	async #append(rest: string): Promise<void> {
+	#append(rest: string, current: TodoPhase[]): TodoPlan {
 		const tokens = tokenize(rest);
 		if (tokens.length === 0) {
-			this.ctx.showError("Usage: /todo append [<phase>] <task...>");
-			return;
+			return { error: "Usage: /todo append [<phase>] <task...>" };
 		}
 
 		let phaseName: string | undefined;
@@ -268,123 +267,121 @@ export class TodoCommandController {
 			content = tokens.slice(1).join(" ");
 		}
 
-		await this.#edit(current => {
-			const next = current.map(phase => ({ ...phase, tasks: phase.tasks.slice() }));
-			let targetPhase: TodoPhase | undefined;
+		const next = current.map(phase => ({ ...phase, tasks: phase.tasks.slice() }));
+		let targetPhase: TodoPhase | undefined;
 
-			if (phaseName) {
-				targetPhase = findPhaseFuzzy(next, phaseName);
-				if (!targetPhase) {
-					targetPhase = { name: titleCase(phaseName), tasks: [] };
-					next.push(targetPhase);
-				}
-			} else if (next.length > 0) {
-				targetPhase = next[next.length - 1];
-			} else {
-				targetPhase = { name: "Todos", tasks: [] };
+		if (phaseName) {
+			targetPhase = findPhaseFuzzy(next, phaseName);
+			if (!targetPhase) {
+				targetPhase = { name: titleCase(phaseName), tasks: [] };
 				next.push(targetPhase);
 			}
+		} else if (next.length > 0) {
+			targetPhase = next[next.length - 1];
+		} else {
+			targetPhase = { name: "Todos", tasks: [] };
+			next.push(targetPhase);
+		}
 
-			const finalContent = titleCaseSentence(content);
-			targetPhase.tasks.push({
-				content: finalContent,
-				status: "pending",
-			});
-			return {
-				phases: next,
-				action: `/todo append → ${targetPhase.name}`,
-				status: `Appended to ${targetPhase.name}: ${finalContent}`,
-			};
+		const finalContent = titleCaseSentence(content);
+		targetPhase.tasks.push({
+			content: finalContent,
+			status: "pending",
 		});
+
+		return {
+			phases: next,
+			action: `/todo append → ${targetPhase.name}`,
+			status: `Appended to ${targetPhase.name}: ${finalContent}`,
+		};
 	}
 
 	// ------------------------------------------------------------- start / done / drop / rm
 
-	async #start(rest: string): Promise<void> {
+	#start(rest: string, current: TodoPhase[]): TodoPlan {
 		if (!rest) {
-			this.ctx.showError("Usage: /todo start <task>");
-			return;
+			return { error: "Usage: /todo start <task>" };
 		}
-		await this.#edit(current => {
-			const hit = findTaskFuzzy(current, rest);
-			if (!hit) return { error: `No task matched "${rest}". Use /todo to list current tasks.` };
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "start", task: hit.task.content }]);
-			if (errors.length > 0) return { error: errors.join("; ") };
-			return {
-				phases,
-				action: `/todo start ${hit.task.content}`,
-				status: `Started: ${hit.task.content}`,
-			};
-		});
+		const hit = findTaskFuzzy(current, rest);
+		if (!hit) {
+			return { error: `No task matched "${rest}". Use /todo to list current tasks.` };
+		}
+		const { phases, errors } = applyOpsToPhases(current, [{ op: "start", task: hit.task.content }]);
+		if (errors.length > 0) {
+			return { error: errors.join("; ") };
+		}
+		return { phases, action: `/todo start ${hit.task.content}`, status: `Started: ${hit.task.content}` };
 	}
 
-	async #mutateStatus(rest: string, target: "completed" | "abandoned"): Promise<void> {
+	#mutateStatus(rest: string, target: "completed" | "abandoned", current: TodoPhase[]): TodoPlan {
 		const op = target === "completed" ? "done" : "drop";
 		const trimmed = rest.trim();
-		await this.#edit(current => {
-			if (!trimmed) {
-				// no-arg: apply to all
-				const { phases, errors } = applyOpsToPhases(current, [{ op }]);
-				if (errors.length > 0) return { error: errors.join("; ") };
-				return { phases, action: `/todo ${op} (all)`, status: `Marked all tasks ${target}.` };
+		if (!trimmed) {
+			// no-arg: apply to all
+			const { phases, errors } = applyOpsToPhases(current, [{ op }]);
+			if (errors.length > 0) {
+				return { error: errors.join("; ") };
 			}
+			return { phases, action: `/todo ${op} (all)`, status: `Marked all tasks ${target}.` };
+		}
 
-			const taskHit = findTaskFuzzy(current, trimmed);
-			if (taskHit) {
-				const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }]);
-				if (errors.length > 0) return { error: errors.join("; ") };
-				return {
-					phases,
-					action: `/todo ${op} ${taskHit.task.content}`,
-					status: `Marked ${target}: ${taskHit.task.content}`,
-				};
+		const taskHit = findTaskFuzzy(current, trimmed);
+		if (taskHit) {
+			const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }]);
+			if (errors.length > 0) {
+				return { error: errors.join("; ") };
 			}
+			return {
+				phases,
+				action: `/todo ${op} ${taskHit.task.content}`,
+				status: `Marked ${target}: ${taskHit.task.content}`,
+			};
+		}
 
-			const phaseHit = findPhaseFuzzy(current, trimmed);
-			if (phaseHit) {
-				const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }]);
-				if (errors.length > 0) return { error: errors.join("; ") };
-				return {
-					phases,
-					action: `/todo ${op} ${phaseHit.name}`,
-					status: `Marked phase ${phaseHit.name} ${target}.`,
-				};
+		const phaseHit = findPhaseFuzzy(current, trimmed);
+		if (phaseHit) {
+			const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }]);
+			if (errors.length > 0) {
+				return { error: errors.join("; ") };
 			}
+			return { phases, action: `/todo ${op} ${phaseHit.name}`, status: `Marked phase ${phaseHit.name} ${target}.` };
+		}
 
-			return { error: `No task or phase matched "${trimmed}".` };
-		});
+		return { error: `No task or phase matched "${trimmed}".` };
 	}
 
-	async #remove(rest: string): Promise<void> {
+	#remove(rest: string, current: TodoPhase[]): TodoPlan {
 		const trimmed = rest.trim();
-		await this.#edit(current => {
-			if (!trimmed) {
-				return { phases: [], action: "/todo rm (all)", removed: true, status: "Cleared all todos." };
+		if (!trimmed) {
+			return { phases: [], action: "/todo rm (all)", removed: true, status: "Cleared all todos." };
+		}
+		const taskHit = findTaskFuzzy(current, trimmed);
+		if (taskHit) {
+			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }]);
+			if (errors.length > 0) {
+				return { error: errors.join("; ") };
 			}
-			const taskHit = findTaskFuzzy(current, trimmed);
-			if (taskHit) {
-				const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }]);
-				if (errors.length > 0) return { error: errors.join("; ") };
-				return {
-					phases,
-					action: `/todo rm ${taskHit.task.content}`,
-					removed: true,
-					status: `Removed: ${taskHit.task.content}`,
-				};
+			return {
+				phases,
+				action: `/todo rm ${taskHit.task.content}`,
+				removed: true,
+				status: `Removed: ${taskHit.task.content}`,
+			};
+		}
+		const phaseHit = findPhaseFuzzy(current, trimmed);
+		if (phaseHit) {
+			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }]);
+			if (errors.length > 0) {
+				return { error: errors.join("; ") };
 			}
-			const phaseHit = findPhaseFuzzy(current, trimmed);
-			if (phaseHit) {
-				const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }]);
-				if (errors.length > 0) return { error: errors.join("; ") };
-				return {
-					phases,
-					action: `/todo rm ${phaseHit.name}`,
-					removed: true,
-					status: `Removed phase: ${phaseHit.name}`,
-				};
-			}
-			return { error: `No task or phase matched "${trimmed}".` };
-		});
+			return {
+				phases,
+				action: `/todo rm ${phaseHit.name}`,
+				removed: true,
+				status: `Removed phase: ${phaseHit.name}`,
+			};
+		}
+		return { error: `No task or phase matched "${trimmed}".` };
 	}
 
 	// ------------------------------------------------------------- editor

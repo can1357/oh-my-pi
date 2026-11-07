@@ -18,13 +18,13 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
+	collectNotices,
 	contentsOf,
 	createTodoBackendRecorder,
 	createTodoSession,
 	disposeTodoSession,
 	flushTodoWrites,
 	hold,
-	settled,
 	todo,
 	type TodoBackendRecorder,
 	userTodoEdits,
@@ -67,7 +67,7 @@ async function createHarness(): Promise<Harness> {
 	const dir = tempDir.path();
 	const eventBus = new EventBus();
 	const sessionManager = SessionManager.create(dir, dir);
-	const recorder = createTodoBackendRecorder(BACKEND_ID, { label: "Recorder" });
+	const recorder = createTodoBackendRecorder(BACKEND_ID);
 	const session = await createTodoSession(dir, {
 		backend: BACKEND_ID,
 		extensions: [recorder.extension()],
@@ -120,23 +120,6 @@ function todoCommand(args: string) {
 	return { name: "todo", args, text: `/todo ${args}` };
 }
 
-/** Resolves once `count` todo writes (tool writes, commits and edits) were issued on the session from now. */
-function writeQueuedAt(session: AgentSession, count: number): Promise<void> {
-	const queued = Promise.withResolvers<void>();
-	let writes = 0;
-	const issued = <T>(write: T): T => {
-		if (++writes === count) queued.resolve();
-		return write;
-	};
-	const run = session.runTodoWrite.bind(session);
-	const commit = session.commitTodoPhases.bind(session);
-	const edit = session.editTodoPhases.bind(session);
-	vi.spyOn(session, "runTodoWrite").mockImplementation((...args) => issued(run(...args)));
-	vi.spyOn(session, "commitTodoPhases").mockImplementation((...args) => issued(commit(...args)));
-	vi.spyOn(session, "editTodoPhases").mockImplementation((...args) => issued(edit(...args)));
-	return queued.promise;
-}
-
 function createCursor(h: Harness) {
 	return new CursorExecHandlers({
 		cwd: h.dir,
@@ -144,14 +127,6 @@ function createCursor(h: Harness) {
 		getTodoPhases: () => h.session.getTodoPhases(),
 		commitTodoPhases: update => h.session.commitTodoPhases(update),
 	});
-}
-
-function collectNotices(session: AgentSession): string[] {
-	const notices: string[] = [];
-	session.subscribe(event => {
-		if (event.type === "notice") notices.push(event.message);
-	});
-	return notices;
 }
 
 describe("todo writers reach the selected backend's replace", () => {
@@ -218,7 +193,8 @@ describe("todo writers reach the selected backend's replace", () => {
 		expect(result.isError).not.toBe(true);
 		expect(h.session.getTodoPhases()).toEqual(kept);
 		expect(reload()).toEqual(kept);
-		expect(notices).toEqual([`Todo backend "Recorder" did not take the todo list: ${REFUSAL}`]);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain(REFUSAL);
 	});
 
 	it("a Cursor sync queued behind an edit that renames a phase keeps the new name", async () => {
@@ -228,7 +204,7 @@ describe("todo writers reach the selected backend's replace", () => {
 		const cursor = createCursor(h);
 		const renamed = seeded.map(phase => ({ ...phase, name: "Renamed" }));
 
-		const rename = h.session.commitTodoPhases(renamed);
+		const rename = h.session.commitTodoPhases(() => renamed);
 		await gate.started.promise;
 		cursor.todoSync(
 			{
@@ -255,14 +231,9 @@ describe("todo writers reach the selected backend's replace", () => {
 		]);
 	});
 
-	it("/new and a session switch send replace the list the session now holds", async () => {
+	it("a session switch sends replace the list the session now holds", async () => {
 		const h = await createHarness();
 		await seedList(h);
-
-		await h.session.newSession();
-		await flushTodoWrites(h.session);
-		expect(h.session.getTodoPhases()).toEqual([]);
-		expect(h.recorder.calls).toEqual([{ backend: "recorder", method: "replace", phases: [] }]);
 
 		const target = SessionManager.create(h.dir, h.dir);
 		target.appendMessage({ role: "user", content: "resumed", timestamp: 1 });
@@ -279,40 +250,7 @@ describe("todo writers reach the selected backend's replace", () => {
 		await flushTodoWrites(h.session);
 
 		expect(h.session.getTodoPhases()).toEqual(stored);
-		expect(h.recorder.calls.at(-1)).toEqual({ backend: "recorder", method: "replace", phases: stored });
-	});
-
-	it("a replace that throws after /new only warns, and the new list stays", async () => {
-		const h = await createHarness();
-		await seedList(h);
-		const notices = collectNotices(h.session);
-		h.recorder.replaceError = new Error(REFUSAL);
-
-		await h.session.newSession();
-		await flushTodoWrites(h.session);
-
-		expect(h.session.getTodoPhases()).toEqual([]);
-		expect(notices).toEqual([`Todo backend "Recorder" did not take the todo list: ${REFUSAL}`]);
-	});
-
-	it("a reset superseded while queued sends nothing; only the latest one reaches replace", async () => {
-		const h = await createHarness();
-		await seedList(h);
-		const notices = collectNotices(h.session);
-		const gate = hold(h.recorder, "apply");
-		const inFlight = settled(todo(h.session, { op: "append", phase: "Work", items: ["late"] }));
-		await gate.started.promise;
-
-		await h.session.newSession();
-		await h.session.newSession();
-		gate.release.resolve();
-		await inFlight;
-		await flushTodoWrites(h.session);
-
-		expect(h.recorder.calls.filter(call => call.method === "replace")).toEqual([
-			{ backend: "recorder", method: "replace", phases: [] },
-		]);
-		expect(notices).toEqual([]);
+		expect(h.recorder.calls).toEqual([{ backend: "recorder", method: "replace", phases: stored }]);
 	});
 
 	it("an eval-bridged todo call reaches apply once and never replace, and does not undo a /todo edit queued behind it", async () => {
@@ -325,7 +263,19 @@ describe("todo writers reach the selected backend's replace", () => {
 		h.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: seeded });
 		const gate = hold(h.recorder, "apply");
 		const { controller } = controllerContext(h.session);
-		const editQueued = writeQueuedAt(h.session, 2);
+		// Resolves once the bridged call and the /todo edit have both entered the session's write path.
+		const bothQueued = Promise.withResolvers<void>();
+		let writes = 0;
+		const issued = <T>(write: T): T => {
+			if (++writes === 2) bothQueued.resolve();
+			return write;
+		};
+		const run = h.session.runTodoWrite.bind(h.session);
+		const commit = h.session.commitTodoPhases.bind(h.session);
+		const edit = h.session.editTodoPhases.bind(h.session);
+		vi.spyOn(h.session, "runTodoWrite").mockImplementation((...args) => issued(run(...args)));
+		vi.spyOn(h.session, "commitTodoPhases").mockImplementation((...args) => issued(commit(...args)));
+		vi.spyOn(h.session, "editTodoPhases").mockImplementation((...args) => issued(edit(...args)));
 
 		const bridged = callSessionTool(
 			"todo",
@@ -333,10 +283,10 @@ describe("todo writers reach the selected backend's replace", () => {
 			{ session: toolSession as ToolSession },
 		);
 		await gate.started.promise;
-		const edit = controller.handleTodoCommand('append "Queued edit"');
-		await editQueued;
+		const queuedEdit = controller.handleTodoCommand('append "Queued edit"');
+		await bothQueued.promise;
 		gate.release.resolve();
-		await Promise.all([bridged, edit]);
+		await Promise.all([bridged, queuedEdit]);
 		await flushTodoWrites(h.session);
 
 		// The only replace is the /todo edit's; the bridge itself went through apply.
@@ -457,33 +407,5 @@ describe("interactive mode with a backend", () => {
 		expect(h.session.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
 		expect(started.todoPhases[0]?.tasks[0]?.status).toBe("completed");
 		expect(getLatestTodoPhasesFromEntries(h.sessionManager.getBranch())).toEqual(h.session.getTodoPhases());
-	});
-
-	it("stays quiet when /new discards the list while the reconcile commit's replace is pending", async () => {
-		const h = await createHarness();
-		const started = await startMode(h);
-		const warning = vi.spyOn(started, "showWarning").mockImplementation(() => {});
-		const gate = hold(h.recorder, "replace");
-		// The list is invalidated before the session manager starts the new file; release once it returns.
-		const newSession = h.session.sessionManager.newSession.bind(h.session.sessionManager);
-		vi.spyOn(h.session.sessionManager, "newSession").mockImplementation(async (...args) => {
-			const result = await newSession(...args);
-			gate.release.resolve();
-			return result;
-		});
-		vi.useFakeTimers();
-
-		completeSubagent(h);
-		await gate.started.promise;
-		await h.session.newSession();
-		await flushTodoWrites(h.session);
-
-		// The reconcile commit's replace, then the reset's.
-		expect(h.recorder.calls.filter(call => call.method === "replace").map(call => call.phases.length > 0)).toEqual([
-			true,
-			false,
-		]);
-		expect(h.session.getTodoPhases()).toEqual([]);
-		expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("The session changed"));
 	});
 });

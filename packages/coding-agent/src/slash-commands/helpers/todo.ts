@@ -1,6 +1,6 @@
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { applyOpsToPhases, markdownToPhases, phasesToMarkdown, resolveTodoMarkdownPath } from "../../tools/todo";
-import { commitTodoEdit } from "../../session/todo-writes";
+import type { TodoPhasesUpdate } from "../../tools/todo-backend";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./parse";
 
@@ -84,6 +84,32 @@ function findTaskFuzzy(phases: TodoPhase[], query: string): TodoTaskMatch | unde
 	return undefined;
 }
 
+/**
+ * Plan an edit inside a queued commit, so `plan` sees the list as committed at that moment and a
+ * `todo` tool write queued earlier is never overwritten. Resolves with the plan and the committed
+ * list, or `{ error }` for the plan's own error, a rejected commit, or a commit that did not apply.
+ */
+export async function commitTodoEdit<T extends { phases: TodoPhase[] }>(
+	session: { editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> },
+	plan: (current: TodoPhase[]) => T | { error: string },
+): Promise<{ plan: T; committed: TodoPhase[] } | { error: string }> {
+	const planned: { result?: T | { error: string } } = {};
+	let committed: TodoPhase[] | undefined;
+	try {
+		committed = await session.editTodoPhases(current => {
+			const result = plan(current);
+			planned.result = result;
+			return "phases" in result ? result.phases : undefined;
+		});
+	} catch (error) {
+		return { error: errorMessage(error) };
+	}
+	const result = planned.result;
+	if (result && "error" in result) return { error: result.error };
+	if (!result || !committed) return { error: "The todo edit was not applied." };
+	return { plan: result, committed };
+}
+
 type TodoEdit = { phases: TodoPhase[]; message: string } | { error: string };
 
 /** Runs `compute` inside the session's queued commit (see {@link commitTodoEdit}), then reports the outcome. */
@@ -161,25 +187,27 @@ async function handleTodoAppendCommand(restArgs: string, runtime: SlashCommandRu
 
 	const phaseName = tokens.length === 1 ? undefined : tokens[0];
 	const content = tokens.length === 1 ? tokens[0]! : tokens.slice(1).join(" ");
-	return editTodos(runtime, current => {
-		const next = current.map(phase => ({ ...phase, tasks: phase.tasks.slice() }));
-		let targetPhase: TodoPhase;
+	return editTodos(runtime, current => planTodoAppend(current, phaseName, content));
+}
 
-		if (phaseName) {
-			const existing = findPhaseFuzzy(next, phaseName);
-			targetPhase = existing ?? { name: titleCaseWords(phaseName), tasks: [] };
-			if (!existing) next.push(targetPhase);
-		} else if (next.length > 0) {
-			targetPhase = next[next.length - 1]!;
-		} else {
-			targetPhase = { name: "Todos", tasks: [] };
-			next.push(targetPhase);
-		}
+function planTodoAppend(current: TodoPhase[], phaseName: string | undefined, content: string): TodoEdit {
+	const next = current.map(phase => ({ ...phase, tasks: phase.tasks.slice() }));
+	let targetPhase: TodoPhase;
 
-		const finalContent = titleCaseSentence(content);
-		targetPhase.tasks.push({ content: finalContent, status: "pending" });
-		return { phases: next, message: `Appended to ${targetPhase.name}: ${finalContent}` };
-	});
+	if (phaseName) {
+		const existing = findPhaseFuzzy(next, phaseName);
+		targetPhase = existing ?? { name: titleCaseWords(phaseName), tasks: [] };
+		if (!existing) next.push(targetPhase);
+	} else if (next.length > 0) {
+		targetPhase = next[next.length - 1]!;
+	} else {
+		targetPhase = { name: "Todos", tasks: [] };
+		next.push(targetPhase);
+	}
+
+	const finalContent = titleCaseSentence(content);
+	targetPhase.tasks.push({ content: finalContent, status: "pending" });
+	return { phases: next, message: `Appended to ${targetPhase.name}: ${finalContent}` };
 }
 
 async function handleTodoStartCommand(restArgs: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {

@@ -8,7 +8,6 @@ import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/specu
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import { resolveTodoUpdate } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 
 function createTool(name: string, execute: AgentTool["execute"]): AgentTool {
 	return {
@@ -714,7 +713,7 @@ describe("callSessionTool", () => {
 				phases = next;
 			},
 			commitTodoPhases: async update => {
-				const next = resolveTodoUpdate(update, phases);
+				const next = update(phases);
 				if (next) persisted.push(next);
 				return next;
 			},
@@ -743,7 +742,7 @@ describe("callSessionTool", () => {
 				phases = next;
 			},
 			commitTodoPhases: async update => {
-				const next = resolveTodoUpdate(update, phases);
+				const next = update(phases);
 				if (next) persisted.push(next);
 				return next;
 			},

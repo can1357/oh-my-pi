@@ -13,7 +13,7 @@ import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 
 import todoDescription from "../prompts/tools/todo.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
-import { type ActiveTodoBackend, type TodoWriteGuard, sanitizeTodoBackendText } from "./todo-backend";
+import { type ActiveTodoBackend, sanitizeTodoBackendText } from "./todo-backend";
 import type { SessionEntry } from "../session/session-entries";
 
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
@@ -746,9 +746,10 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		// with a backend, so concurrent writes and backend switches cannot interleave with it.
 		if (!this.session.runTodoWrite) return this.#write(params, undefined, undefined, signal);
 		try {
-			return await this.session.runTodoWrite((active, guard) => this.#write(params, active, guard, signal), {
-				signal,
-			});
+			return await this.session.runTodoWrite(
+				(active, assertCurrent) => this.#write(params, active, assertCurrent, signal),
+				{ signal },
+			);
 		} catch (error) {
 			// The queued write can no longer commit, and its backend call (if any) saw the same abort.
 			if (signal?.aborted) return this.#abortedResult(params);
@@ -773,7 +774,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	async #write(
 		params: TodoParams,
 		active: ActiveTodoBackend | undefined,
-		guard: TodoWriteGuard | undefined,
+		assertCurrent: (() => void) | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<AgentToolResult<TodoToolDetails>> {
 		const previousPhases = clonePhases(this.session.getTodoPhases?.() ?? []);
@@ -816,7 +817,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 			}
 		}
 		if (!readOnly && !failed) {
-			guard?.assertCurrent();
+			assertCurrent?.();
 			this.session.setTodoPhases?.(updated);
 		}
 		const details: TodoToolDetails = { op, phases: effective, storage };

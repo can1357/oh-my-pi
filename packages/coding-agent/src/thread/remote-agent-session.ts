@@ -38,7 +38,7 @@ import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/th
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import { resolveTodoUpdate, type TodoPhasesUpdate } from "../tools/todo-backend";
+import type { TodoPhasesUpdate } from "../tools/todo-backend";
 import { getBlobsDir, logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManagerApi } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -690,7 +690,7 @@ export class RemoteAgentSession implements AgentViewSession {
 	 * list, and the optimistic entry and the mirror update reach the worker in order.
 	 */
 	commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
-		const phases = resolveTodoUpdate(update, this.getTodoPhases());
+		const phases = update(this.getTodoPhases());
 		if (phases === undefined) return Promise.resolve(undefined);
 		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
 		this.setTodoPhases(phases);

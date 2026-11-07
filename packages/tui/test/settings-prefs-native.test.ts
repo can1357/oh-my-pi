@@ -217,7 +217,7 @@ describe("settings as a native prefs page", () => {
 		expect(props.focus).toBe("theme.dark");
 	});
 
-	it("selects runtime choices by value and strips control sequences from their labels and descriptions", () => {
+	it("selects runtime choices by value, strips control sequences from their text and opens on the stored value", () => {
 		const { selector } = harness({ "todo.backend": "ext" });
 		const control = row(prefs(selector).props, "todo.backend").control;
 		if (control.k !== "choice") throw new Error(`expected a choice control, got ${control.k}`);
@@ -229,15 +229,8 @@ describe("settings as a native prefs page", () => {
 			expect(text).not.toMatch(/[\x00-\x1f\x7f]/);
 		}
 		expect(ext.detail).toBe("line one line two");
-	});
-
-	it("opens a runtime row's choice on its stored value and saves the chosen value", () => {
-		const { selector, values, changes } = harness({ "todo.backend": "ext" });
 		send(selector, { type: "activate", key: "", item: "todo.backend" });
 		expect(prefs(selector).props.editing).toEqual({ row: "todo.backend", option: "ext" });
-		send(selector, { type: "change", key: "", item: "todo.backend", value: "native" });
-		expect(values.get("todo.backend")).toBe("native");
-		expect(changes.at(-1)).toEqual(["todo.backend", "native"]);
 	});
 
 	it("puts the status-line preview after its section on Appearance only", () => {

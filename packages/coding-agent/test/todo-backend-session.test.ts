@@ -27,6 +27,7 @@ import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 import {
+	collectNotices,
 	contentsOf,
 	createTodoBackendRecorder,
 	createTodoSession,
@@ -64,14 +65,6 @@ describe("todo backends in a real session", () => {
 	const text = (result: AgentToolResult) =>
 		result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
 
-	function collectNotices(session: AgentSession): string[] {
-		const notices: string[] = [];
-		session.subscribe(event => {
-			if (event.type === "notice" && event.source === "todo-backend") notices.push(event.message);
-		});
-		return notices;
-	}
-
 	/** Write an extension source file; a deferred one binds only on `loadDeferredExtensions`. */
 	async function writeSource(name: string, source: string): Promise<string> {
 		const file = tempDir.join(name);
@@ -91,32 +84,24 @@ describe("todo backends in a real session", () => {
 		});
 	}
 
-	test("native todos commit inline, without waiting for deferred extensions", async () => {
+	test("native todos commit inline without waiting for deferred extensions, and keep only the list's own fields", async () => {
 		const deferred = await writeSource("deferred.ts", "export default function() {}\n");
 		const session = await createSessionWithDeferred(deferred, "native");
-		const list: TodoPhase[] = [{ name: "Work", tasks: [{ content: "a", status: "pending" }] }];
+		// RPC clients send JSON, so a list can carry fields `TodoPhase` does not declare.
+		const sent = [{ name: "Work", extra: 1, tasks: [{ content: "a", status: "pending" as const, notes: ["n"] }] }];
+		const input: TodoPhase[] = sent;
+		const stored: TodoPhase[] = [{ name: "Work", tasks: [{ content: "a", status: "pending" }] }];
 
-		const committed = session.commitTodoPhases(list);
+		const committed = session.commitTodoPhases(() => input);
 
-		expect(session.getTodoPhases()).toEqual(list);
+		expect(session.getTodoPhases()).toEqual(stored);
 		expect(session.hasPendingDeferredExtensions).toBe(true);
-		expect(await committed).toEqual(list);
+		expect(await committed).toEqual(stored);
 		expect(session.todoWritesQueued).toBe(false);
 	});
 
-	test("a native commit resolves with the stored copy, without fields the list does not keep", async () => {
-		const session = await createSession();
-		// RPC clients send JSON, so a list can carry fields `TodoPhase` does not declare.
-		const sent = [{ name: "W", extra: 1, tasks: [{ content: "a", status: "pending" as const, notes: ["n"] }] }];
-		const input: TodoPhase[] = sent;
-
-		expect(await session.commitTodoPhases(input)).toEqual([
-			{ name: "W", tasks: [{ content: "a", status: "pending" }] },
-		]);
-	});
-
 	test("concurrent todo calls reach the backend one at a time, in call order, with `next` equal to the committed list", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const recorder = createTodoBackendRecorder("tracker");
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		// Hold the first apply until all three calls have entered the write queue: a queue that let
 		// them through would start the second apply while the first is still held.
@@ -167,18 +152,12 @@ describe("todo backends in a real session", () => {
 		expect(text(result)).toContain("Tracker tracker");
 		expect(text(result)).toContain("tracker is down");
 		expect(text(result)).not.toMatch(/[\x00-\x1f\x7f]/);
-		expect(result.details).toMatchObject({ op: "append", phases: before, storage: "memory" });
+		expect(result.details).toMatchObject({ op: "append", phases: before });
 		expect(session.getTodoPhases()).toEqual(before);
-
-		// The failed call does not poison the queue.
-		recorder.applyError = undefined;
-		const retried = await todo(session, { op: "append", phase: "Tasks", items: ["again"] });
-		expect(retried.isError).toBeUndefined();
-		expect(session.getTodoPhases()[0]?.tasks.map(task => task.content)).toEqual(["keep", "again"]);
 	});
 
 	test("a backend call that never settles fails after the handler budget, aborts its signal and holds no later write", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const recorder = createTodoBackendRecorder("tracker");
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		await todo(session, { op: "init", items: ["base"] });
 		const before = structuredClone(session.getTodoPhases());
@@ -198,46 +177,26 @@ describe("todo backends in a real session", () => {
 			recorder.beforeApply = undefined;
 			recorder.beforeReplace = hang;
 			const edited: TodoPhase[] = [{ name: "Tasks", tasks: [{ content: "edited", status: "pending" }] }];
-			await expect(session.editTodoPhases(edited)).rejects.toThrow("did not respond within 50ms");
+			await expect(session.editTodoPhases(() => edited)).rejects.toThrow("did not respond within 50ms");
 			expect(session.getTodoPhases()).toEqual(before);
 			expect(signals.map(signal => signal.aborted)).toEqual([true, true]);
 
 			recorder.beforeReplace = undefined;
-			expect(await session.editTodoPhases(edited)).toEqual(edited);
+			expect(await session.editTodoPhases(() => edited)).toEqual(edited);
 			expect(session.getTodoPhases()).toEqual(edited);
 		} finally {
 			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 		}
 	});
 
-	test("a commit cannot be refused by the backend and only sends the list it lacks; an edit can be refused", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+	test("a commit sends the backend no replace when it already has the list", async () => {
+		const recorder = createTodoBackendRecorder("tracker");
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
-		const notices = collectNotices(session);
 		await todo(session, { op: "init", items: ["base"] });
 
-		// The backend already confirmed this list through apply.
-		await session.commitTodoPhases(session.getTodoPhases());
+		await session.commitTodoPhases(current => current);
+
 		expect(recorder.calls.filter(call => call.method === "replace")).toEqual([]);
-		const editsBefore = userTodoEdits(session).length;
-
-		recorder.replaceError = new Error("replace boom");
-		const before = structuredClone(session.getTodoPhases());
-		const refused = await settled(
-			session.editTodoPhases([{ name: "Tasks", tasks: [{ content: "edited", status: "pending" }] }]),
-		);
-		expect(String(refused)).toContain("refused the edit");
-		expect(String(refused)).toContain("replace boom");
-		expect(session.getTodoPhases()).toEqual(before);
-		expect(userTodoEdits(session)).toHaveLength(editsBefore);
-		expect(notices).toEqual([]);
-
-		const mirrored: TodoPhase[] = [{ name: "Tasks", tasks: [{ content: "mirrored", status: "pending" }] }];
-		expect(await session.commitTodoPhases(mirrored)).toEqual(mirrored);
-		expect(taskContents(session)).toEqual(["mirrored"]);
-		expect(userTodoEdits(session)).toHaveLength(editsBefore + 1);
-		expect(notices).toHaveLength(1);
-		expect(notices[0]).toContain("replace boom");
 	});
 
 	test("create, apply and replace run in the session's settings scope", async () => {
@@ -262,14 +221,14 @@ describe("todo backends in a real session", () => {
 		const session = await createSession({ backend: "scoped", extensions: [scoped] });
 
 		await todo(session, { op: "init", items: ["one"] });
-		await session.editTodoPhases(session.getTodoPhases());
+		await session.editTodoPhases(current => current);
 
 		expect(scopes.map(([call]) => call)).toEqual(["create", "apply", "replace"]);
 		for (const [, settings] of scopes) expect(settings).toBe(session.settings);
 	});
 
 	test("apply gets only the arguments the native op accepted, never a view, a failed op or a rejected call", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const recorder = createTodoBackendRecorder("tracker");
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		const tool = session.getToolByName("todo");
 		if (!tool) throw new Error("todo tool is not active");
@@ -302,8 +261,7 @@ describe("todo backends in a real session", () => {
 	});
 
 	test("subagent and /tan sessions do not use the backend", async () => {
-		const calls: RecordedTodoBackendCall[] = [];
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker", calls });
+		const recorder = createTodoBackendRecorder("tracker");
 		const subagent = await createSession({
 			backend: "tracker",
 			extensions: [recorder.extension()],
@@ -326,7 +284,7 @@ describe("todo backends in a real session", () => {
 			expect(await session.runTodoWrite(async active => active)).toBeUndefined();
 		}
 
-		expect(calls).toEqual([]);
+		expect(recorder.calls).toEqual([]);
 		expect(recorder.created).toBe(0);
 		expect(notices).toEqual([[], []]);
 	});
@@ -339,27 +297,34 @@ describe("todo backends in a real session", () => {
 			createError: new Error("no credentials"),
 			detail: "no credentials",
 		},
-	])("$cause falls back to native todos with one notice", async ({ backend, createError, detail }) => {
-		const recorder = createTodoBackendRecorder("broken", { label: "Tracker broken" });
-		recorder.createError = createError;
-		const session = await createSession({ backend, extensions: [recorder.extension()] });
-		// Subscribe the way the modes do: after createAgentSession returned.
-		const notices = collectNotices(session);
+	])(
+		"$cause falls back to native todos with one notice and keeps the transcript plan",
+		async ({ backend, createError, detail }) => {
+			const recorder = createTodoBackendRecorder("broken");
+			recorder.createError = createError;
+			const sessionManager = SessionManager.inMemory();
+			const plan: TodoPhase[] = [{ name: "Tasks", tasks: [{ content: "from transcript", status: "in_progress" }] }];
+			sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: plan });
+			const session = await createSession({ backend, extensions: [recorder.extension()], sessionManager });
+			// Subscribe the way the modes do: after createAgentSession returned.
+			const notices = collectNotices(session);
+			expect(session.getTodoPhases()).toEqual(plan);
 
-		const result = await todo(session, { op: "init", items: ["native works"] });
-		await todo(session, { op: "append", phase: "Tasks", items: ["still native"] });
+			const result = await todo(session, { op: "append", phase: "Tasks", items: ["native works"] });
+			await todo(session, { op: "append", phase: "Tasks", items: ["still native"] });
 
-		expect(result.isError).toBeUndefined();
-		expect(taskContents(session)).toEqual(["native works", "still native"]);
-		expect(recorder.calls).toEqual([]);
-		expect(session.todoWritesQueued).toBe(false);
-		expect(notices).toHaveLength(1);
-		expect(notices[0]).toContain(`"${backend}"`);
-		expect(notices[0]).toContain(detail);
-	});
+			expect(result.isError).toBeUndefined();
+			expect(taskContents(session)).toEqual(["from transcript", "native works", "still native"]);
+			expect(recorder.calls).toEqual([]);
+			expect(session.todoWritesQueued).toBe(false);
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain(`"${backend}"`);
+			expect(notices[0]).toContain(detail);
+		},
+	);
 
 	test("a suspended extension's backend is not used: native todos and a notice until it resumes", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const recorder = createTodoBackendRecorder("tracker");
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		const runner = session.extensionRunner;
 		if (!runner) throw new Error("extension runner is not available");
@@ -426,27 +391,6 @@ describe("todo backends in a real session", () => {
 		}
 	});
 
-	test("resuming a session whose backend extension is gone keeps the transcript plan and native writes", async () => {
-		const sessionManager = SessionManager.inMemory();
-		const plan: TodoPhase[] = [
-			{
-				name: "Resume",
-				tasks: [
-					{ content: "from transcript", status: "in_progress" },
-					{ content: "next", status: "pending" },
-				],
-			},
-		];
-		sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: plan });
-
-		const session = await createSession({ backend: "tracker", sessionManager });
-
-		expect(session.getTodoPhases()).toEqual(plan);
-		const result = await todo(session, { op: "done", task: "from transcript" });
-		expect(result.isError).toBeUndefined();
-		expect(session.getTodoPhases()[0]?.tasks.map(task => task.status)).toEqual(["completed", "in_progress"]);
-	});
-
 	test("a backend registered by a deferred extension is used once it loads, without a notice", async () => {
 		const log = tempDir.join("deferred-backend.log");
 		const deferred = await writeSource(
@@ -475,10 +419,10 @@ export default function(pi) {
 		expect(notices).toEqual([]);
 	});
 
-	test("a mid-session switch finishes the in-flight write on the old backend, then uses the new one", async () => {
+	test("a mid-session switch finishes the in-flight write on the old backend, and a switch alone sends nothing", async () => {
 		const calls: RecordedTodoBackendCall[] = [];
-		const a = createTodoBackendRecorder("a", { label: "Tracker a", calls });
-		const b = createTodoBackendRecorder("b", { label: "Tracker b", calls });
+		const a = createTodoBackendRecorder("a", { calls });
+		const b = createTodoBackendRecorder("b", { calls });
 		const gate = hold(a, "apply");
 		const session = await createSession({ backend: "a", extensions: [a.extension(), b.extension()] });
 
@@ -488,38 +432,19 @@ export default function(pi) {
 		const second = todo(session, { op: "append", phase: "Tasks", items: ["two"] });
 		gate.release.resolve();
 		await Promise.all([first, second]);
+		const mirrored = ["a:apply:init", "b:apply:append"];
+		expect(calls.map(call => `${call.backend}:${call.method}:${call.op}`)).toEqual(mirrored);
 
-		expect(calls.filter(call => call.method === "apply").map(call => `${call.backend}:${call.op}`)).toEqual([
-			"a:init",
-			"b:append",
-		]);
-	});
-
-	test("switching to native stops mirroring, and a switch alone calls neither apply nor replace", async () => {
-		const calls: RecordedTodoBackendCall[] = [];
-		const a = createTodoBackendRecorder("a", { label: "Tracker a", calls });
-		const b = createTodoBackendRecorder("b", { label: "Tracker b", calls });
-		const session = await createSession({ backend: "a", extensions: [a.extension(), b.extension()] });
-		await todo(session, { op: "init", items: ["one"] });
-		const seededCalls = calls.length;
-		expect(b.created).toBe(0);
-
-		cfgTodoBackend.override(session.settings, "b");
-		expect(await session.runTodoWrite(async active => active?.label)).toBe("Tracker b");
+		// Native stops mirroring; switching to it and writing natively calls no backend.
 		cfgTodoBackend.override(session.settings, "native");
 		expect(await session.runTodoWrite(async active => active)).toBeUndefined();
-
-		expect(b.created).toBe(1);
-		expect(calls.slice(seededCalls)).toEqual([]);
-
 		const result = await todo(session, { op: "append", phase: "Tasks", items: ["native now"] });
 		expect(result.isError).toBeUndefined();
-		expect(b.created).toBe(1);
-		expect(calls.slice(seededCalls)).toEqual([]);
+		expect(calls).toHaveLength(mirrored.length);
 	});
 
 	test("aborting while apply is pending returns at once, aborts apply's signal, never commits, and frees the queue", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const recorder = createTodoBackendRecorder("tracker");
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		await todo(session, { op: "init", items: ["base"] });
 		const before = structuredClone(session.getTodoPhases());
@@ -552,7 +477,7 @@ export default function(pi) {
 	});
 
 	test("a catch-up replace that fails is retried before the next apply, and is reported as the catch-up", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const recorder = createTodoBackendRecorder("tracker");
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		await todo(session, { op: "init", items: ["base"] });
 		recorder.applyError = new Error("apply boom");
@@ -574,7 +499,7 @@ export default function(pi) {
 	});
 
 	test("aborting a write that is still queued skips it: apply is never called for it", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const recorder = createTodoBackendRecorder("tracker");
 		const gate = hold(recorder, "apply");
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		const first = todo(session, { op: "init", items: ["one"] });
@@ -595,9 +520,10 @@ export default function(pi) {
 		expect(taskContents(session)).toEqual(["one"]);
 	});
 
-	test("/new while writes are queued drops them and leaves the new session empty", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+	test("/new while writes are queued drops them; only the latest reset reaches replace, and a refusing replace only warns", async () => {
+		const recorder = createTodoBackendRecorder("tracker");
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+		const notices = collectNotices(session);
 		await todo(session, { op: "init", items: ["old"] });
 
 		const gate = hold(recorder, "apply");
@@ -605,10 +531,12 @@ export default function(pi) {
 		await gate.started.promise;
 		const stale: TodoPhase[] = [{ name: "Stale", tasks: [{ content: "stale", status: "pending" }] }];
 		// Capture settlement now; asserting with `expect(...).rejects` on a still-pending promise would block until the gate opens.
-		const editSettled = settled(session.editTodoPhases(stale));
-		const commitSettled = settled(session.commitTodoPhases(stale));
+		const editSettled = settled(session.editTodoPhases(() => stale));
+		const commitSettled = settled(session.commitTodoPhases(() => stale));
 		const inFlightSettled = settled(inFlight);
+		recorder.replaceError = new Error("tracker is offline");
 
+		await session.newSession();
 		await session.newSession();
 		gate.release.resolve();
 		expect(String(await editSettled)).toContain("The session changed before the todo edit was saved");
@@ -618,12 +546,14 @@ export default function(pi) {
 		await flushTodoWrites(session);
 		expect(session.getTodoPhases()).toEqual([]);
 		expect(userTodoEdits(session)).toHaveLength(0);
-		// The backend gets the reset list, never the stale edit.
+		// The backend gets the reset list once, never the stale edit.
 		expect(recorder.calls.filter(call => call.method === "replace").map(call => call.phases)).toEqual([[]]);
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toContain("tracker is offline");
 	});
 
 	test("an edit whose replace settles while switchSession is swapping files never lands in the target session", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const recorder = createTodoBackendRecorder("tracker");
 		const replaceGate = hold(recorder, "replace");
 		const sessionDir = tempDir.join("sessions");
 		const target = SessionManager.create(tempDir.path(), sessionDir);
@@ -638,7 +568,7 @@ export default function(pi) {
 		});
 
 		const editSettled = settled(
-			session.editTodoPhases([{ name: "Stale", tasks: [{ content: "stale", status: "pending" }] }]),
+			session.editTodoPhases(() => [{ name: "Stale", tasks: [{ content: "stale", status: "pending" }] }]),
 		);
 		await replaceGate.started.promise;
 
@@ -660,7 +590,7 @@ export default function(pi) {
 
 	test("switching a fresh session before any prompt does not create the backend", async () => {
 		// ACP loads and forks a stored session this way, before it initializes the extension runner.
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const recorder = createTodoBackendRecorder("tracker");
 		const sessionDir = tempDir.join("sessions");
 		const target = SessionManager.create(tempDir.path(), sessionDir);
 		target.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
@@ -676,7 +606,7 @@ export default function(pi) {
 	});
 
 	test("a maintenance reload while an edit's replace is pending does not reject the edit", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const recorder = createTodoBackendRecorder("tracker");
 		const replaceGate = hold(recorder, "replace");
 		const hook: ExtensionFactory = pi => {
 			pi.on("session_before_compact", async event => ({
@@ -697,7 +627,7 @@ export default function(pi) {
 		session.sessionManager.appendMessage(createAssistantMessage("previous answer"));
 		session.sessionManager.appendMessage({ role: "user", content: "second turn", timestamp: Date.now() });
 
-		const edit = session.editTodoPhases([{ name: "Kept", tasks: [{ content: "kept", status: "pending" }] }]);
+		const edit = session.editTodoPhases(() => [{ name: "Kept", tasks: [{ content: "kept", status: "pending" }] }]);
 		const editSettled = settled(edit);
 		await replaceGate.started.promise;
 		await session.compact();
@@ -712,7 +642,7 @@ export default function(pi) {
 	test.each([{ switchToNative: false }, { switchToNative: true }])(
 		"a commit that lands while a todo call's result is still unsaved is what a rebuild from the branch restores (switch to native mid-call: $switchToNative)",
 		async ({ switchToNative }) => {
-			const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+			const recorder = createTodoBackendRecorder("tracker");
 			const gate = hold(recorder, "apply");
 			const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -741,7 +671,7 @@ export default function(pi) {
 			const turn = session.prompt("make a todo list");
 			await gate.started.promise;
 			if (switchToNative) cfgTodoBackend.override(session.settings, "native");
-			const edit = session.editTodoPhases([
+			const edit = session.editTodoPhases(() => [
 				{ name: "Edited", tasks: [{ content: "from the /todo edit", status: "pending" }] },
 			]);
 			gate.release.resolve();

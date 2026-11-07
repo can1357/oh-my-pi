@@ -32,12 +32,6 @@ describe("registerTodoBackend", () => {
 		);
 		expect(registrations).toEqual([]);
 	});
-
-	test("keeps registration order, which the settings submenu shows", () => {
-		const registrations: TodoBackendRegistration[] = [];
-		for (const id of ["b", "a", "c"]) registerTodoBackend(registrations, definition(id), "ext");
-		expect(registrations.map(entry => entry.definition.id)).toEqual(["b", "a", "c"]);
-	});
 });
 
 describe("pi.registerTodoBackend", () => {

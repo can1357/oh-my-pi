@@ -89,25 +89,16 @@ export interface ActiveTodoBackend {
 	sync(signal?: AbortSignal): Promise<void>;
 }
 
-/** What a commit sets the list to: a list, or an updater run on the committed list (`undefined` declines). */
-export type TodoPhasesUpdate = TodoPhase[] | ((current: TodoPhase[]) => TodoPhase[] | undefined);
-
-/** The list `update` sets when the committed list is `current`; `undefined` when it declines. */
-export function resolveTodoUpdate(update: TodoPhasesUpdate, current: TodoPhase[]): TodoPhase[] | undefined {
-	return typeof update === "function" ? update(current) : update;
-}
+/** What a commit sets the list to, given the committed list; `undefined` declines. */
+export type TodoPhasesUpdate = (current: TodoPhase[]) => TodoPhase[] | undefined;
 
 /**
- * Handed to a queued todo write. Call {@link assertCurrent} after any backend call and before
- * committing: it throws when the write's abort signal fired or the session's todo list was reset
- * or reloaded (`/new`, switch, rewind, tree navigation, fork) since the write was enqueued.
+ * A queued todo write: gets the backend resolved when it starts (`undefined` = native todos) and
+ * `assertCurrent`, which it must call after any backend call and before committing: it throws when
+ * the write's abort signal fired or the list was reset or reloaded (`/new`, switch, rewind, tree
+ * navigation, fork) since the write was enqueued.
  */
-export interface TodoWriteGuard {
-	assertCurrent(): void;
-}
-
-/** A queued todo write: gets the backend resolved when it starts (`undefined` = native todos) and its guard. */
-export type TodoWrite<T> = (active: ActiveTodoBackend | undefined, guard: TodoWriteGuard) => Promise<T>;
+export type TodoWrite<T> = (active: ActiveTodoBackend | undefined, assertCurrent: () => void) => Promise<T>;
 
 /** One registration: the backend and the resolved path of the extension that registered it. */
 export interface TodoBackendRegistration {

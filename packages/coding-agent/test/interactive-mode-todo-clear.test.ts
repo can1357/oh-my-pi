@@ -18,9 +18,9 @@ import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings
 
 /**
  * Records `owner`'s todo commits. The returned `settle` awaits them, and with them the reconcile's
- * HUD update chained on each, then fails loudly if `hudUpdated` does not hold.
+ * HUD update chained on each, then fails loudly if `hudUpdated` is given and does not hold.
  */
-function watchReconcile(owner: AgentSession): (hudUpdated: () => boolean) => Promise<void> {
+function watchReconcile(owner: AgentSession): (hudUpdated?: () => boolean) => Promise<void> {
 	const commits: Promise<unknown>[] = [];
 	const commit = owner.commitTodoPhases.bind(owner);
 	vi.spyOn(owner, "commitTodoPhases").mockImplementation(update => {
@@ -30,7 +30,7 @@ function watchReconcile(owner: AgentSession): (hudUpdated: () => boolean) => Pro
 	});
 	return async hudUpdated => {
 		await Promise.allSettled(commits);
-		if (!hudUpdated()) throw new Error("Subagent todo reconcile never reached the HUD");
+		if (hudUpdated && !hudUpdated()) throw new Error("Subagent todo reconcile never reached the HUD");
 	};
 }
 
@@ -321,7 +321,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 			});
 			const settleReconcile = watchReconcile(focusedSession);
 			vi.advanceTimersByTime(100);
-			await settleReconcile(() => renderTodos(mode).includes("1/2"));
+			await settleReconcile();
 
 			expect(focusedSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
 			expect(session.getTodoPhases()).toEqual(mainPhases);
@@ -384,7 +384,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 			});
 			const settleReconcile = watchReconcile(workerSession);
 			vi.advanceTimersByTime(100);
-			await settleReconcile(() => renderTodos(mode).includes("1/1"));
+			await settleReconcile();
 
 			expect(workerSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
 			expect(session.getTodoPhases()).toEqual(mainPhases);

@@ -4,11 +4,9 @@ import type { SettingsScope } from "../config/registry";
 import type { ExtensionRunner } from "../extensibility/extensions/runner";
 import { cfgTodoBackend } from "../tools/settings";
 import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
-import { errorMessage } from "../slash-commands/helpers/parse";
 import {
 	type ActiveTodoBackend,
 	NATIVE_TODO_BACKEND_ID,
-	resolveTodoUpdate,
 	sanitizeTodoBackendText,
 	type TodoPhasesUpdate,
 	type TodoWrite,
@@ -144,7 +142,7 @@ export class TodoWrites {
 		if (!this.queued) {
 			return (async () => {
 				assertCurrent();
-				return write(undefined, { assertCurrent });
+				return write(undefined, assertCurrent);
 			})();
 		}
 		const queued = this.#track(
@@ -154,7 +152,7 @@ export class TodoWrites {
 				return this.#queue.run(() => {
 					assertCurrent();
 					this.#queuedWriteSinceSave = true;
-					return write(this.#active, { assertCurrent });
+					return write(this.#active, assertCurrent);
 				});
 			})(),
 		);
@@ -171,8 +169,8 @@ export class TodoWrites {
 	 */
 	edit(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
 		const todo = this.#host.todo;
-		return this.run(async (active, guard) => {
-			const phases = resolveTodoUpdate(update, todo.phases);
+		return this.run(async (active, assertCurrent) => {
+			const phases = update(todo.phases);
 			if (phases === undefined) return undefined;
 			if (active) {
 				try {
@@ -183,7 +181,7 @@ export class TodoWrites {
 					});
 				}
 			}
-			guard.assertCurrent();
+			assertCurrent();
 			return this.#save(phases);
 		});
 	}
@@ -198,7 +196,7 @@ export class TodoWrites {
 	commit(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
 		const todo = this.#host.todo;
 		return this.run(async active => {
-			const phases = resolveTodoUpdate(update, todo.phases);
+			const phases = update(todo.phases);
 			if (phases === undefined) return undefined;
 			const committed = this.#save(phases);
 			await this.#sync(active);
@@ -366,8 +364,9 @@ export class TodoWrites {
 			const replace = (phases: TodoPhase[], signal?: AbortSignal) =>
 				call(phases, backendSignal => backend.replace(phases, backendSignal), signal);
 			const sync = async (signal?: AbortSignal) => {
-				if (sent && Bun.deepEquals(sent, todo.phases)) return;
-				await replace(todo.clonePhases(todo.phases), signal);
+				const committed = todo.phases;
+				if (sent && Bun.deepEquals(sent, committed)) return;
+				await replace(committed, signal);
 			};
 			this.#active = {
 				label: sanitizeTodoBackendText(definition.label),
@@ -394,30 +393,4 @@ export class TodoWrites {
 			);
 		}
 	}
-}
-
-/**
- * Plan an edit inside a queued commit, so `plan` sees the list as committed at that moment and a
- * `todo` tool write queued earlier is never overwritten. Resolves with the plan and the committed
- * list, or `{ error }` for the plan's own error, a rejected commit, or a commit that did not apply.
- */
-export async function commitTodoEdit<T extends { phases: TodoPhase[] }>(
-	session: { editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> },
-	plan: (current: TodoPhase[]) => T | { error: string },
-): Promise<{ plan: T; committed: TodoPhase[] } | { error: string }> {
-	const planned: { result?: T | { error: string } } = {};
-	let committed: TodoPhase[] | undefined;
-	try {
-		committed = await session.editTodoPhases(current => {
-			const result = plan(current);
-			planned.result = result;
-			return "phases" in result ? result.phases : undefined;
-		});
-	} catch (error) {
-		return { error: errorMessage(error) };
-	}
-	const result = planned.result;
-	if (result && "error" in result) return { error: result.error };
-	if (!result || !committed) return { error: "The todo edit was not applied." };
-	return { plan: result, committed };
 }

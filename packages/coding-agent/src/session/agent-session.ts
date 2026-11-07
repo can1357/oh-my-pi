@@ -14198,7 +14198,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// A prompt may have been admitted during the flush/drain awaits
 				// after the idle check. It still belongs to the pre-branch context.
 				this.#promptGeneration++;
-				this.#todoWrites.invalidate();
 				this.sessionManager.createBranchedSession(leafId);
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();

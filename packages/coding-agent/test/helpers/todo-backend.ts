@@ -44,8 +44,8 @@ export interface TodoBackendRecorder {
 	extension(): ExtensionFactory;
 }
 
-export interface TodoBackendRecorderOptions {
-	/** Defaults to `Recorder ${id}`. */
+interface TodoBackendRecorderOptions {
+	/** Defaults to `Tracker ${id}`. */
 	label?: string;
 	/** Append to this array instead of a private one, to see the order of calls across several backends. */
 	calls?: RecordedTodoBackendCall[];
@@ -56,7 +56,7 @@ export interface TodoBackendRecorderOptions {
  * history) and registers itself through `recorder.extension()` under `id`.
  */
 export function createTodoBackendRecorder(id: string, options: TodoBackendRecorderOptions = {}): TodoBackendRecorder {
-	const label = options.label ?? `Recorder ${id}`;
+	const label = options.label ?? `Tracker ${id}`;
 	const calls = options.calls ?? [];
 	const recorder: TodoBackendRecorder = {
 		calls,
@@ -185,4 +185,13 @@ export function taskContents(session: AgentSession): string[] {
 
 export function contentsOf(phases: TodoPhase[]): string[] {
 	return phases.flatMap(phase => phase.tasks.map(task => task.content));
+}
+
+/** Messages of the todo backend notices `session` emits from now on. */
+export function collectNotices(session: AgentSession): string[] {
+	const notices: string[] = [];
+	session.subscribe(event => {
+		if (event.type === "notice" && event.source === "todo-backend") notices.push(event.message);
+	});
+	return notices;
 }
