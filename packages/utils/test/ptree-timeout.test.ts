@@ -589,10 +589,10 @@ describe.skipIf(process.platform !== "linux")("ptree subreaper stop", () => {
 		}, 30_000);
 	}
 
+	// Only a stop with a grace period can promise the handler runs: a zero grace
+	// sends SIGKILL right after SIGTERM, racing the trap.
 	for (const [name, stop] of [
 		["an AbortSignal", (_child: ChildProcess, controller: AbortController) => controller.abort()],
-		// A zero grace still means SIGTERM, then SIGKILL at once, as on every other kill path.
-		["a zero-grace kill", (child: ChildProcess) => child.kill(new AbortError(new Error("stop"), ""), 0)],
 	] as const) {
 		it(`gives the command its SIGTERM before the hard kill on ${name}`, async () => {
 			// A command that cleans up on SIGTERM must get the chance on a graceful

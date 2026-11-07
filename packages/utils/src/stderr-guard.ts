@@ -105,6 +105,15 @@ export function suppressTerminalStderr(options?: SuppressTerminalStderrOptions):
 	const libc = libcFdOps();
 	if (!libc) return false;
 
+	// First, so a fd 2 that cannot be reopened (a socket: Linux refuses
+	// `/dev/fd/N` for those) leaves the guard inert with no redirect file made.
+	let saved: number;
+	try {
+		saved = fs.openSync(`/dev/fd/${STDERR_FILENO}`, fs.constants.O_WRONLY);
+	} catch {
+		return false;
+	}
+
 	let redirectFd: number;
 	try {
 		const redirectPath = options?.redirectPath ?? redirectTarget ?? getLogPath();
@@ -118,17 +127,11 @@ export function suppressTerminalStderr(options?: SuppressTerminalStderrOptions):
 		try {
 			redirectFd = fs.openSync("/dev/null", "w");
 		} catch {
+			fs.closeSync(saved);
 			return false;
 		}
 	}
 
-	let saved: number;
-	try {
-		saved = fs.openSync(`/dev/fd/${STDERR_FILENO}`, fs.constants.O_WRONLY);
-	} catch {
-		fs.closeSync(redirectFd);
-		return false;
-	}
 	if (libc.dup2(redirectFd, STDERR_FILENO) === -1) {
 		fs.closeSync(redirectFd);
 		fs.closeSync(saved);

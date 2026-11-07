@@ -62,11 +62,15 @@ pub fn logins() -> io::Result<Logins> {
 			}
 			let u = &*u;
 			if u.ut_type == libc::USER_PROCESS {
+				#[allow(
+					clippy::useless_conversion,
+					reason = "`ut_tv.tv_sec` is i32 on glibc and i64 on macOS"
+				)]
 				entries.push(Login {
 					user: field(&u.ut_user),
 					line: field(&u.ut_line),
 					host: field(&u.ut_host),
-					time: u.ut_tv.tv_sec,
+					time: i64::from(u.ut_tv.tv_sec),
 				});
 			}
 		}
