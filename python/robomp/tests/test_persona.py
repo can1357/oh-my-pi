@@ -133,6 +133,36 @@ def test_followup_comment_prompt_embeds_thread_context() -> None:
     assert "current request" in out
 
 
+def test_followup_review_prompt_embeds_thread_context() -> None:
+    thread = (
+        ThreadMessage(kind="pr_body", author="robomp", body="PR body", created_at=""),
+        ThreadMessage(
+            kind="review_comment",
+            author="mira",
+            body="Trailing descriptor issue",
+            created_at="2026-08-07T21:48:00Z",
+            path="internal/import/person_credit.go",
+            line=141,
+        ),
+    )
+    out = persona.followup_review(
+        repo=_Repo(),
+        workspace=_Workspace(),
+        pr_number=997,
+        comment_author="mira",
+        comment_body="Trailing descriptor parse misses the case when the imported person has no credit.",
+        comment_path="internal/import/person_credit.go",
+        comment_line_range=":L141",
+        thread=thread,
+    )
+
+    assert "Prior conversation" in out
+    assert "PR body" in out
+    assert "Trailing descriptor issue" in out
+    assert "Trailing descriptor parse misses" in out
+    assert ":L141" in out
+
+
 def test_kickoff_directive_prompt_embeds_thread_and_classify_instruction() -> None:
     thread = (ThreadMessage(kind="issue_body", author="alice", body="failing on macos", created_at=""),)
     out = persona.kickoff_directive(

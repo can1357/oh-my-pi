@@ -20,6 +20,7 @@ from robomp.manual_triage import (
     enqueue_manual_triage,
     parse_issue_ref,
 )
+from robomp.platform_utils import backend_for_repo, create_proxy_backend, proxy_credentials
 from robomp.proxy_client import GitHubProxyClient
 from robomp.sandbox import SandboxManager
 from robomp.server import create_app
@@ -44,7 +45,7 @@ def _require_proxy_mode(cfg: Settings) -> tuple[str, bytes]:
             "robomp orchestrator requires ROBOMP_GH_PROXY_URL and "
             "ROBOMP_GH_PROXY_HMAC_KEY (run gh-proxy in a sibling container)."
         )
-    return cfg.gh_proxy_url, cfg.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
+    return proxy_credentials(cfg)
 
 
 def _build_github(cfg: Settings) -> GitHubProxyClient:
@@ -98,13 +99,17 @@ def triage(issue_ref: str, wait_timeout: float | None) -> None:
 
     async def _go() -> None:
         github = _build_github(cfg)
+        forgejo_github = create_proxy_backend(cfg, "forgejo")
+        backend = backend_for_repo(cfg, repo_full, github, forgejo_github)
+        platform = "forgejo" if backend is forgejo_github else "github"
         db = get_database(cfg.sqlite_path)
         try:
             delivery = await enqueue_manual_triage(
                 db=db,
-                github=github,
+                github=backend,
                 repo_full=repo_full,
                 number=number,
+                platform=platform,
             )
         except ManualTriageError as exc:
             click.echo(f"refusing: {exc}", err=True)

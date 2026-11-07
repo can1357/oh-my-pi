@@ -51,6 +51,7 @@ _GIT_SUBPROCESS_SCRUBBED_ENV_KEYS = (
     AUTH_ENV_VAR,
     "GITHUB_TOKEN",
     "GH_TOKEN",
+    "FORGEJO_TOKEN",
     "GITHUB_WEBHOOK_SECRET",
     "ROBOMP_REPLAY_TOKEN",
     "ROBOMP_GH_PROXY_HMAC_KEY",
@@ -176,14 +177,16 @@ class GitCommandError(RuntimeError):
         super().__init__(f"git {' '.join(self.cmd[1:])} failed: {msg}")
 
 
-def _basic_auth_header(token: str) -> str:
+def _basic_auth_header(token: str, *, username: str = "x-access-token") -> str:
     """Build the `Authorization: Basic …` header value for a PAT.
 
     GitHub accepts `x-access-token:<PAT>` over HTTPS Basic auth; that form
     works for fine-grained tokens, classic PATs, and GitHub App installation
-    tokens alike.
+    tokens alike. Forgejo/Gitea expect the PAT as the *password* paired with
+    the token owner's username (or the literal `git`), so callers thread a
+    real username for the Forgejo platform.
     """
-    raw = f"x-access-token:{token}".encode()
+    raw = f"{username}:{token}".encode()
     return f"Authorization: Basic {base64.b64encode(raw).decode('ascii')}"
 
 
@@ -204,6 +207,7 @@ def _run_git(
     cwd: Path | None,
     token: str | None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     extra_env: Mapping[str, str] | None = None,
     safe_directory: Path | None = None,
     user: int | None = None,
@@ -236,7 +240,7 @@ def _run_git(
 
     cmd: list[str] = ["git", "-c", "protocol.ext.allow=never"]
     if token:
-        env[AUTH_ENV_VAR] = _basic_auth_header(token)
+        env[AUTH_ENV_VAR] = _basic_auth_header(token, username=git_auth_username or "x-access-token")
         if auth_url is not None:
             env["GIT_ALLOW_PROTOCOL"] = _TOKEN_ALLOWED_PROTOCOLS
             env["GIT_CONFIG_NOSYSTEM"] = "1"
@@ -495,6 +499,7 @@ def clone(
     default_branch: str,
     token: str | None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     safe_directory: Path | None = None,
 ) -> None:
     """Fresh `git clone --filter=blob:none` into `target`."""
@@ -508,7 +513,17 @@ def clone(
         clone_url,
         str(target),
     ]
-    _check(_run_git(args, cwd=None, token=token, auth_url=auth_url, safe_directory=safe_directory), ["git", *args])
+    _check(
+        _run_git(
+            args,
+            cwd=None,
+            token=token,
+            auth_url=auth_url,
+            git_auth_username=git_auth_username,
+            safe_directory=safe_directory,
+        ),
+        ["git", *args],
+    )
 
 
 def fetch_prune(
@@ -517,6 +532,7 @@ def fetch_prune(
     token: str | None,
     remote_url: str | None = None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     safe_directory: Path | None = None,
 ) -> None:
     """Refresh `refs/remotes/origin/*` on the shared pool clone.
@@ -546,6 +562,7 @@ def fetch_prune(
             cwd=repo_dir,
             token=token,
             auth_url=auth_url,
+            git_auth_username=git_auth_username,
             extra_env=extra_env,
             safe_directory=safe_directory,
         )
@@ -566,6 +583,7 @@ def _backfill_tip_blobs(
     *,
     token: str | None,
     auth_url: str | None,
+    git_auth_username: str | None,
     extra_env: Mapping[str, str] | None,
     safe_directory: Path | None,
 ) -> subprocess.CompletedProcess[str] | None:
@@ -602,6 +620,7 @@ def _backfill_tip_blobs(
         cwd=repo_dir,
         token=token,
         auth_url=auth_url,
+        git_auth_username=git_auth_username,
         extra_env=extra_env,
         safe_directory=safe_directory,
         input="\n".join(missing) + "\n",
@@ -615,6 +634,7 @@ def fetch_ref(
     token: str | None,
     remote_url: str | None = None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     safe_directory: Path | None = None,
 ) -> None:
     """Fetch ``<ref>`` from origin AND materialize the blobs of its tree.
@@ -640,6 +660,7 @@ def fetch_ref(
         cwd=repo_dir,
         token=token,
         auth_url=auth_url,
+        git_auth_username=git_auth_username,
         extra_env=extra_env,
         safe_directory=safe_directory,
     )
@@ -651,6 +672,7 @@ def fetch_ref(
                 remote,
                 token=token,
                 auth_url=auth_url,
+                git_auth_username=git_auth_username,
                 extra_env=extra_env,
                 safe_directory=safe_directory,
             )
@@ -666,6 +688,27 @@ def fetch_ref(
     )
 
 
+_UNSAFE_REF_BODY_RE = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
+
+
+def validate_fetch_ref(ref: str) -> str:
+    """Accept Git-valid branch names minus refspec/option-injectable characters."""
+    body = ref.removeprefix("refs/heads/")
+    if (
+        not body
+        or body.startswith(("-", "/"))
+        or body.endswith(("/", ".", ".lock"))
+        or "//" in body
+        or ".." in body
+        or "@{" in body
+        or body == "@"
+        or any(part.startswith(".") or part.endswith(".lock") for part in body.split("/"))
+        or _UNSAFE_REF_BODY_RE.search(body)
+    ):
+        raise ValueError("invalid ref")
+    return ref
+
+
 def fetch_pr_head(
     repo_dir: Path,
     pr_number: int,
@@ -673,40 +716,98 @@ def fetch_pr_head(
     token: str | None,
     remote_url: str | None = None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     safe_directory: Path | None = None,
+    head_ref: str | None = None,
+    head_sha: str | None = None,
+    same_repo: bool = False,
 ) -> None:
-    """Fetch ``refs/pull/<n>/head`` into FETCH_HEAD with all reachable blobs.
+    """Fetch the PR head, falling back to a verified same-repo branch.
 
     Immediately followed by ``git worktree add --detach FETCH_HEAD`` for PR
     review checkouts, so the head's tree blobs are backfilled the same way as
     :func:`fetch_ref`; without them the worktree-add triggers a promisor lazy
     fetch that fails under proxy-transport deployments (oh-my-pi#1818).
 
-    Raises ``GitCommandError`` when the fetch or the backfill fails.
+    Raises ``GitCommandError`` when fetching, SHA verification, or backfill fails.
     """
     if pr_number <= 0:
-        raise ValueError(f"invalid PR number: {pr_number!r}")
+        raise ValueError(f"invalid pr_number={pr_number!r}")
     remote = remote_url or "origin"
     extra_env = _explicit_remote_env(remote_url, cwd=repo_dir)
     ref = f"refs/pull/{pr_number}/head" if remote_url else f"pull/{pr_number}/head"
     args = ["fetch", "--no-tags", remote, ref]
-    _check(
-        _run_git(
-            args,
+    try:
+        _check(
+            _run_git(
+                args,
+                cwd=repo_dir,
+                token=token,
+                auth_url=auth_url,
+                extra_env=extra_env,
+                safe_directory=safe_directory,
+            ),
+            ["git", *args],
+        )
+    except GitCommandError as exc:
+        # The fallback fetches a branch named by the (webhook-supplied) PR
+        # payload, so it is only eligible when we can verify the result:
+        # same-repo PR, present head ref, present head SHA. Anything else
+        # keeps the original failure.
+        if (
+            "couldn't find remote ref" not in exc.stderr
+            or not same_repo
+            or not head_ref
+            or not head_sha
+        ):
+            raise
+        validate_fetch_ref(head_ref)
+        log.warning("PR head ref unavailable; fetching same-repo branch", extra={"pr": pr_number, "head_ref": head_ref})
+        args = ["fetch", "--no-tags", remote, "--", f"refs/heads/{head_ref}"]
+        try:
+            _check(
+                _run_git(
+                    args,
+                    cwd=repo_dir,
+                    token=token,
+                    auth_url=auth_url,
+                    extra_env=extra_env,
+                    safe_directory=safe_directory,
+                ),
+                ["git", *args],
+            )
+        except GitCommandError as fallback_exc:
+            raise GitCommandError(
+                fallback_exc.cmd,
+                fallback_exc.returncode,
+                fallback_exc.stdout,
+                f"{exc.stderr}\nBranch fallback failed: {fallback_exc.stderr}",
+            ) from fallback_exc
+        probe_args = ["rev-parse", "FETCH_HEAD"]
+        probe = _run_git(
+            probe_args,
             cwd=repo_dir,
             token=token,
             auth_url=auth_url,
+            git_auth_username=git_auth_username,
             extra_env=extra_env,
             safe_directory=safe_directory,
-        ),
-        ["git", *args],
-    )
+        )
+        _check(probe, ["git", *probe_args])
+        if probe.stdout.strip() != head_sha:
+            raise GitCommandError(
+                ["git", *probe_args],
+                1,
+                probe.stdout,
+                f"PR head SHA mismatch: expected {head_sha}, fetched {probe.stdout.strip()}",
+            )
     backfill = _backfill_tip_blobs(
         repo_dir,
         "FETCH_HEAD",
         remote,
         token=token,
         auth_url=auth_url,
+        git_auth_username=git_auth_username,
         extra_env=extra_env,
         safe_directory=safe_directory,
     )
@@ -847,6 +948,7 @@ def push(
     token: str | None,
     remote_url: str | None = None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     slot_uid: int | None = None,
     safe_directory: Path | None = None,
 ) -> PushResult:
@@ -928,6 +1030,7 @@ def push(
             cwd=repo_dir,
             token=token,
             auth_url=auth_url,
+            git_auth_username=git_auth_username,
             extra_env=push_extra_env,
             safe_directory=git_safe_directory,
             **slot_kwargs,
@@ -959,6 +1062,7 @@ def push_release(
     token: str | None,
     remote_url: str | None = None,
     auth_url: str | None = None,
+    git_auth_username: str | None = None,
     slot_uid: int | None = None,
     safe_directory: Path | None = None,
 ) -> PushResult:
@@ -1009,6 +1113,7 @@ def push_release(
             cwd=repo_dir,
             token=token,
             auth_url=auth_url,
+            git_auth_username=git_auth_username,
             extra_env=push_extra_env,
             safe_directory=git_safe_directory,
             **slot_kwargs,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -40,6 +41,7 @@ from robomp.manual_triage import (
     parse_issue_ref,
 )
 from robomp.natives_cache import NativesCache
+from robomp.platform_utils import backend_for_repo, proxy_credentials
 from robomp.proxy_client import GitHubProxyClient, ProxyGitTransport
 from robomp.queue import WorkerPool
 from robomp.sandbox import SandboxManager
@@ -218,7 +220,7 @@ def _issue_cache_mutation(
     number = issue.get("number")
     if not isinstance(number, int):
         return None
-    if "pull_request" in issue:
+    if issue.get("pull_request") is not None:
         return repo, number, None
     if str(payload.get("action") or "") == "deleted":
         return repo, number, None
@@ -268,7 +270,7 @@ def _require_proxy_mode(cfg: Settings) -> tuple[str, bytes]:
             "robomp orchestrator requires ROBOMP_GH_PROXY_URL and "
             "ROBOMP_GH_PROXY_HMAC_KEY (run gh-proxy in a sibling container)."
         )
-    return cfg.gh_proxy_url, cfg.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
+    return proxy_credentials(cfg)
 
 
 def _build_orchestrator(cfg: Settings) -> tuple[GitHubBackend, ProxyGitTransport]:
@@ -313,12 +315,17 @@ def _build_state(settings: Settings, pool_factory: _PoolFactory) -> dict[str, An
         natives_cache=natives_cache,
     )
     pool = pool_factory(settings, db, github, sandbox, git_transport)
-    autoclose = AutocloseScheduler(settings=settings, db=db, github=github)
-    index_sync = IssueIndexSync(settings=settings, db=db, github=github)
+    forgejo_github: GitHubBackend | None = None
+    if settings.forgejo_repos:
+        base_url, key = proxy_credentials(settings)
+        forgejo_github = GitHubProxyClient(base_url=base_url, hmac_key=key, platform="forgejo")
+    autoclose = AutocloseScheduler(settings=settings, db=db, github=github, forgejo_github=forgejo_github)
+    index_sync = IssueIndexSync(settings=settings, db=db, github=github, forgejo_github=forgejo_github)
     return {
         "settings": settings,
         "db": db,
         "github": github,
+        "forgejo_github": forgejo_github,
         "git_transport": git_transport,
         "sandbox": sandbox,
         "natives_cache": natives_cache,
@@ -370,17 +377,37 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
     @app.post("/webhook/github")
     async def webhook(
         request: Request,
-        x_github_event: str = Header(..., alias="X-GitHub-Event"),
-        x_github_delivery: str = Header(..., alias="X-GitHub-Delivery"),
+        x_github_event: str | None = Header(None, alias="X-GitHub-Event"),
+        x_gitea_event: str | None = Header(None, alias="X-Gitea-Event"),
+        x_forgejo_event: str | None = Header(None, alias="X-Forgejo-Event"),
+        x_github_delivery: str | None = Header(None, alias="X-GitHub-Delivery"),
+        x_gitea_delivery: str | None = Header(None, alias="X-Gitea-Delivery"),
+        x_forgejo_delivery: str | None = Header(None, alias="X-Forgejo-Delivery"),
         x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
+        x_gitea_signature: str | None = Header(None, alias="X-Gitea-Signature"),
+        x_forgejo_signature: str | None = Header(None, alias="X-Forgejo-Signature"),
     ) -> JSONResponse:
         bag = request.app.state.bag
         cfg: Settings = bag["settings"]
         body = await request.body()
+        # Event header: GitHub native name, then Gitea/Forgejo variants.
+        event = x_github_event or x_gitea_event or x_forgejo_event
+        if not event:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "missing event header (X-GitHub-Event, X-Gitea-Event, or X-Forgejo-Event)",
+            )
+        # Signature: GitHub sends `sha256=<hex>`; Gitea/Forgejo send the bare
+        # hex digest of HMAC-SHA256(body) under the same shared secret.
+        signature = x_hub_signature_256
+        if signature is None:
+            raw_digest = x_gitea_signature or x_forgejo_signature
+            if raw_digest is not None and re.fullmatch(r"[0-9a-f]{64}", raw_digest, re.IGNORECASE):
+                signature = f"sha256={raw_digest.lower()}"
         if not github_events.verify_signature(
             cfg.github_webhook_secret.get_secret_value(),
             body,
-            x_hub_signature_256,
+            signature,
         ):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid signature")
         try:
@@ -388,20 +415,47 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         except Exception as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid json: {exc}") from exc
 
+        # Detect platform from Forgejo-specific headers before assuming GitHub.
+        platform = "forgejo" if (x_gitea_delivery or x_forgejo_delivery) else "github"
+        delivery_id = x_github_delivery or x_gitea_delivery or x_forgejo_delivery
+        if not delivery_id:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "missing delivery id header (X-GitHub-Delivery, X-Gitea-Delivery, or X-Forgejo-Delivery)",
+            )
+
+        # Extract repo early for platform validation (used below).
+        repo_full = str((payload.get("repository") or {}).get("full_name") or "")
+
+        # Validate header-derived platform against repo membership (forgejo_repos).
+        # Repo membership is the source of truth; header detection can be spoofed or
+        # misconfigured. If the repo is in forgejo_repos, the platform IS forgejo
+        # regardless of what the delivery headers say.
+        if repo_full and cfg.forgejo_repos:
+            expected_platform = "forgejo" if repo_full.lower() in cfg.forgejo_repos else "github"
+            if expected_platform != platform:
+                log.warning(
+                    "platform mismatch: header says %s but repo %s is %s",
+                    platform,
+                    repo_full,
+                    expected_platform,
+                    extra={"delivery": delivery_id, "repo": repo_full},
+                )
+                platform = expected_platform
+
         db: Database = bag["db"]
         issue_cache: _IssueBrowseCache = bag["issue_browse_cache"]
         await issue_cache.apply_webhook(
-            event_type=x_github_event,
+            event_type=event,
             payload=payload,
             allowlist=cfg.repo_allowlist,
         )
         # Keep the local search index fresh from every delivery that carries an
         # issue/PR object — including ones the router will skip.
-        if x_github_event in ("issues", "issue_comment") or x_github_event.startswith("pull_request"):
-            repo_full = str((payload.get("repository") or {}).get("full_name") or "")
+        if event in ("issues", "issue_comment") or event.startswith("pull_request"):
             if repo_full and repo_full in cfg.repo_allowlist:
                 try:
-                    issue_index.ingest_webhook_payload(db, repo_full, x_github_event, payload)
+                    issue_index.ingest_webhook_payload(db, repo_full, event, payload)
                 except Exception:
                     log.exception("issue index webhook ingest failed", extra={"repo": repo_full})
 
@@ -410,7 +464,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             return row.key if row else None
 
         decision = github_events.route(
-            x_github_event,
+            event,
             payload,
             allowlist=cfg.repo_allowlist,
             bot_login=cfg.bot_login,
@@ -430,12 +484,12 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         if decision.issue_key:
             cancel_reason: str | None = None
             if (
-                x_github_event == "issue_comment"
+                event == "issue_comment"
                 and str(payload.get("action") or "") == "created"
                 and decision.task == "handle_comment"
             ):
                 cancel_reason = "user_replied"
-            elif x_github_event == "issues" and str(payload.get("action") or "") == "closed":
+            elif event == "issues" and str(payload.get("action") or "") == "closed":
                 cancel_reason = "externally_closed"
             if cancel_reason is not None:
                 cancelled = db.cancel_pending_closure(decision.issue_key, reason=cancel_reason)
@@ -445,7 +499,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                         extra={
                             "issue_key": decision.issue_key,
                             "reason": cancel_reason,
-                            "event": x_github_event,
+                            "event": event,
                         },
                     )
 
@@ -461,17 +515,18 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             }
 
         if not decision.should_queue:
-            log.info("skip", extra={"event": x_github_event, "reason": decision.reason})
+            log.info("skip", extra={"event": event, "reason": decision.reason})
             db.record_event(
-                delivery_id=x_github_delivery,
-                event_type=x_github_event,
+                delivery_id=delivery_id,
+                event_type=event,
                 repo=decision.repo,
                 issue_key=decision.issue_key,
                 payload=payload,
                 state="skipped",
                 last_error=decision.reason,
+                platform=platform,
             )
-            return JSONResponse({"delivery": x_github_delivery, "state": "skipped"}, status_code=202)
+            return JSONResponse({"delivery": delivery_id, "state": "skipped"}, status_code=202)
 
         # Per-user rate limiting. Lifecycle events (cleanup) carry no submitter
         # and are not gated. For everything user-driven, atomically record the
@@ -487,7 +542,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             )
             since = iso_seconds_ago(cfg.rate_limit_window_seconds)
             admission = db.admit_submission(
-                delivery_id=x_github_delivery,
+                delivery_id=delivery_id,
                 login=submitter,
                 repo=decision.repo,
                 since=since,
@@ -499,8 +554,8 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 log.info(
                     "rate_limited",
                     extra={
-                        "event": x_github_event,
-                        "delivery": x_github_delivery,
+                        "event": event,
+                        "delivery": delivery_id,
                         "login": submitter,
                         "association": decision.association,
                         "used": admission.used,
@@ -508,36 +563,36 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                     },
                 )
                 db.record_event(
-                    delivery_id=x_github_delivery,
-                    event_type=x_github_event,
+                    delivery_id=delivery_id,
+                    event_type=event,
                     repo=decision.repo,
                     issue_key=decision.issue_key,
                     payload=payload,
                     state="skipped",
                     last_error=reason,
+                    platform=platform,
                 )
                 return JSONResponse(
-                    {"delivery": x_github_delivery, "state": "skipped", "reason": "rate_limited"},
+                    {"delivery": delivery_id, "state": "skipped", "reason": "rate_limited"},
                     status_code=202,
                 )
 
         inserted = db.record_event(
-            delivery_id=x_github_delivery,
-            event_type=x_github_event,
+            delivery_id=delivery_id,
+            event_type=event,
             repo=decision.repo,
             issue_key=decision.issue_key,
             payload=payload,
             state="queued",
+            platform=platform,
         )
         if inserted:
             pool: _AppPool = bag["pool"]
             pool.wake()
-            log.info(
-                "queued", extra={"event": x_github_event, "delivery": x_github_delivery, "key": decision.issue_key}
-            )
+            log.info("queued", extra={"event": event, "delivery": delivery_id, "key": decision.issue_key})
         else:
-            log.info("duplicate", extra={"event": x_github_event, "delivery": x_github_delivery})
-        return JSONResponse({"delivery": x_github_delivery, "state": "queued"}, status_code=202)
+            log.info("duplicate", extra={"event": event, "delivery": delivery_id})
+        return JSONResponse({"delivery": delivery_id, "state": "queued"}, status_code=202)
 
     @app.post("/replay")
     async def replay(
@@ -588,16 +643,21 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             raise HTTPException(400, "state must be open|closed|all")
         capped = max(1, min(int(limit), 100))
         github: GitHubBackend = bag["github"]
+        forgejo_github: GitHubBackend | None = bag["forgejo_github"]
         issue_cache: _IssueBrowseCache = bag["issue_browse_cache"]
         repos = tuple(sorted(cfg.repo_allowlist))
         if not repos:
             return {"issues": [], "errors": [], "repos": [], "cache": {"hit": False, "fetched_at": time.time()}}
 
+        def _backend_for(repo: str) -> GitHubBackend:
+            return backend_for_repo(cfg, repo, github, forgejo_github)
+
         async def _fetch() -> tuple[list[IssueSummary], list[dict[str, str]]]:
             # Fan out across allowlisted repos; per-repo failures don't take down the panel.
             async def _one(repo: str) -> tuple[str, list[IssueSummary], str | None]:
+                backend = _backend_for(repo)
                 try:
-                    items = await github.list_issues(repo, state=state, limit=capped)
+                    items = await backend.list_issues(repo, state=state, limit=capped)
                     return repo, items, None
                 except Exception as exc:  # GitHubError, network, etc.
                     log.warning("list_issues failed", extra={"repo": repo, "err": str(exc)})
@@ -642,6 +702,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
 
         db: Database = bag["db"]
         github: GitHubBackend = bag["github"]
+        forgejo_github: GitHubBackend | None = bag["forgejo_github"]
         pool: _AppPool = bag["pool"]
 
         mode = str(payload.get("mode") or "").strip().lower()
@@ -660,12 +721,15 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 raise HTTPException(400, str(exc)) from exc
             if not cfg.allows(repo_full):
                 raise HTTPException(403, f"{repo_full} not in ROBOMP_REPO_ALLOWLIST")
+            backend = backend_for_repo(cfg, repo_full, github, forgejo_github)
+            platform = "forgejo" if backend is forgejo_github else "github"
             try:
                 delivery = await enqueue_manual_triage(
                     db=db,
-                    github=github,
+                    github=backend,
                     repo_full=repo_full,
                     number=number,
+                    platform=platform,
                 )
             except ManualTriageConflict as exc:
                 raise HTTPException(409, str(exc)) from exc

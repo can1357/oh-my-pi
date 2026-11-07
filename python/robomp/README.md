@@ -35,7 +35,7 @@ Two containers, one trust boundary:
   the PAT.
 - **gh-proxy** — sibling on an `internal: true` network. Holds `GITHUB_TOKEN`,
   verifies HMAC-signed requests from robomp, executes REST + `git push`.
-  Only egress to `api.github.com`.
+  Egress to `api.github.com` and the configured Forgejo API/git hosts.
 
 Flow: webhook → HMAC verify → `github_events.route` → sqlite `events`
 (dedup on `X-GitHub-Delivery`) → `WorkerPool` claims under
@@ -115,6 +115,41 @@ request review comments_, and _Workflow runs_. The last event is required
 only for the release sentinel. GitHub's `ping` should produce
 `POST /webhook/github 202` within a second.
 
+### Forgejo deployment
+
+Forgejo/Gitea instances are supported alongside GitHub in a single
+deployment. Routing is per-repo: every `owner/repo` listed in
+`ROBOMP_FORGEJO_REPOS` (comma-separated, case-insensitive) is served by the
+Forgejo backend; everything else stays on GitHub. A Forgejo repo must also
+appear in `ROBOMP_REPO_ALLOWLIST` — the allowlist gate runs first.
+
+- `ROBOMP_API_BASE` — the Forgejo API base URL, e.g.
+  `https://git.example.com/api/v1`. Leave at the default (`https://api.github.com`)
+  only when you have no Forgejo repos.
+- `ROBOMP_GIT_HOST` — the Forgejo git-over-HTTP host for clone/push URLs,
+  e.g. `git.example.com`, `git.example.com:3000`, or `git.example.com/forgejo`
+  for an instance served under a URL prefix. IPv6 literals are bracketed
+  automatically.
+- `FORGEJO_TOKEN` — the Forgejo PAT. Like `GITHUB_TOKEN` it lives only in
+  the gh-proxy container and is validated as present at startup when
+  `ROBOMP_FORGEJO_REPOS` is non-empty.
+
+**Webhook.** Point the Forgejo instance's webhook at the same
+`/webhook/github` URL with content type `application/json` and a secret
+equal to `GITHUB_WEBHOOK_SECRET`. GitHub deliveries (`X-GitHub-Event`,
+`X-Hub-Signature-256: sha256=…`) and native Forgejo/Gitea deliveries
+(`X-Forgejo-Event`/`X-Gitea-Event`, `X-Forgejo-Signature`/`X-Gitea-Signature`
+carrying the raw sha256 hex digest) are both accepted. Subscribe to
+_Issues, Issue comments, Pull requests, Pull request reviews, Pull request
+review comments_ (workflow runs are not used for Forgejo repos). Delivery
+headers (`X-Gitea-Delivery`/`X-Forgejo-Delivery`) identify the platform; a
+delivery whose repo is in `ROBOMP_FORGEJO_REPOS` is treated as Forgejo even
+if the headers disagree.
+
+**Git credentials.** The proxy sends Forgejo git-over-HTTP credentials as
+`Authorization: Basic <base64("git:<PAT>")>` (the PAT is the password);
+GitHub uses `<base64("x-access-token:<PAT>")>`. No extra configuration is needed.
+
 ### Configuration
 
 See `.env.example` for the authoritative variable list. The shipped
@@ -184,7 +219,7 @@ The integration test spawns a real `omp --mode rpc` against an
   `.git/config` stays token-free.
 - gh-proxy has no host port. The `robomp_internal` network is
   `internal: true` (no ingress, no egress); gh-proxy joins `default`
-  only to reach `api.github.com`.
+  to reach `api.github.com` and configured Forgejo API/git hosts.
 - Agent subprocess env is scrubbed of `GITHUB_TOKEN` /
   `ROBOMP_GH_PROXY_HMAC_KEY` / friends via `worker._SCRUBBED_ENV_KEYS`.
 - Webhook signatures: bad sig → `401` (so GitHub stops retrying), never
@@ -224,6 +259,11 @@ The integration test spawns a real `omp --mode rpc` against an
   `ROBOMP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS` (25s) +
   `ROBOMP_SHUTDOWN_KILL_TIMEOUT_SECONDS` (5s); compose
   `stop_grace_period: 30s` covers both.
+- **PR checkout fallback.** If the pull ref is missing, same-repository PRs
+  can fetch their source branch only when its tip matches the webhook head SHA.
+  Direct and proxy transports accept Git-valid branch characters (including
+  `+`, embedded `@`, and Unicode), while rejecting unsafe refspecs and options.
+  Proxy PR-head requests require a positive `pr_number`.
 - **Logs.** Structured JSON on stdout, rotated to
   `/data/logs/robomp.log.jsonl`.
 - **Inspection** (localhost only): `GET /events?limit=N`,
