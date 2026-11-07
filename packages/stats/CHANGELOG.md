@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Stats sync keeps its parse workers warm between runs — a worker is reused while the parent environment, sessions root, and working directory still match, and is evicted after its own 10 s idle window, so watcher-driven and back-to-back syncs no longer respawn a worker per pass ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
+- Back-to-back and watcher-driven stats syncs now reuse their parse workers instead of booting a fresh one per pass, so repeat runs start faster ([#15331](https://github.com/can1357/oh-my-pi/pull/15331) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
 ## [18.17.0] - 2026-11-06
 
