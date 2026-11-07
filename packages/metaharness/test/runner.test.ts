@@ -211,7 +211,9 @@ describe("resume", () => {
 			},
 		});
 		try {
-			const cfg = resolveResumeConfig(parseArgs(["--resume", jobName, "--jobs-dir", jobsDir]));
+			const cfg = resolveResumeConfig(
+				parseArgs(["--resume", jobName, "--jobs-dir", jobsDir, "--gateway-token", "no-auth"]),
+			);
 			expect(cfg.jobName).toBe(jobName);
 			expect(cfg.jobsDir).toBe(jobsDir);
 			expect(cfg.models).toEqual(["openai/gpt-5.6-sol"]);
@@ -229,7 +231,7 @@ describe("resume", () => {
 		const { jobsDir, jobName } = mkJob({
 			envType: "apple-container",
 			managerConfig: { model: "wrong/model" },
-			runnerConfig: { models: ["anthropic/claude-opus-4-8"], envType: "docker" },
+			runnerConfig: { models: ["anthropic/claude-opus-4-8"], envType: "docker", gatewayTokenRequired: false },
 		});
 		try {
 			const cfg = resolveResumeConfig(
@@ -255,6 +257,45 @@ describe("resume", () => {
 			expect(() => resolveResumeConfig(parseArgs(["--resume", "ghost", "--jobs-dir", jobsDir]))).toThrow(
 				/no harbor config.json/,
 			);
+		} finally {
+			fs.rmSync(jobsDir, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses to resume a run launched with a gateway token unless the token is given again", () => {
+		const { jobsDir, jobName } = mkJob({
+			runnerConfig: { models: ["openrouter/test-model"], gatewayTokenRequired: true },
+		});
+		try {
+			// Without a token the resume must not fall back to the open gateway's "no-auth".
+			expect(() => resolveResumeConfig(parseArgs(["--resume", jobName, "--jobs-dir", jobsDir]))).toThrow(
+				/launched with a gateway token/,
+			);
+			const cfg = resolveResumeConfig(
+				parseArgs(["--resume", jobName, "--jobs-dir", jobsDir, "--gateway-token", "resumed-token"]),
+			);
+			expect(cfg.gatewayToken).toBe("resumed-token");
+		} finally {
+			fs.rmSync(jobsDir, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		{
+			record: "a snapshot older than gatewayTokenRequired",
+			job: { runnerConfig: { models: ["openrouter/test-model"] } },
+		},
+		{ record: "only manager.json", job: { managerConfig: { model: "openrouter/test-model" } } },
+	])("refuses to resume a run recorded in $record until told which gateway token it used", ({ job }) => {
+		const { jobsDir, jobName } = mkJob(job);
+		try {
+			expect(() => resolveResumeConfig(parseArgs(["--resume", jobName, "--jobs-dir", jobsDir]))).toThrow(
+				/may have been launched with a gateway token/,
+			);
+			const explicit = resolveResumeConfig(
+				parseArgs(["--resume", jobName, "--jobs-dir", jobsDir, "--gateway-token", "no-auth"]),
+			);
+			expect(explicit.gatewayToken).toBe("no-auth");
 		} finally {
 			fs.rmSync(jobsDir, { recursive: true, force: true });
 		}

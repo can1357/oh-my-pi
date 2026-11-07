@@ -23,7 +23,13 @@ bun run serve --port 4700
    `dist/omp-linux-*` self-contained binaries).
 2. **Auth never enters containers.** A generated `models.yml` routes provider
    `baseUrl`s at the host pm2 auth-gateway; the gateway resolves credentials
-   host-side.
+   host-side. Give the runners the gateway token in `METAHARNESS_GATEWAY_TOKEN`
+   (`--gateway-token` also works, but an argument is visible in the process list).
+   Inside the container omp reads it from `~/.omp/agent/gateway-token` (mode 0600),
+   which `models.yml` names through a fixed `!cat` command: no generated file, shell
+   command or environment variable holds the token, so it is not inherited by the
+   processes omp starts. Anything that runs as the agent user, the agent's own tool
+   calls included, can still read that file.
 3. **Harbor owns trials.** The runner/serve layer polls each trial's
    `result.json` for progress, spend, and outcomes.
 
@@ -61,6 +67,12 @@ bun run serve --port 4700
    `benchmark` is `harbor`, `edit`, or `snapcompact`. Harbor uses `dataset`,
    `include`, `timeoutMultiplier`, and `prewalk`; edit uses `include` as task IDs;
    SnapCompact uses `conditions` and treats `tasks` as the passage limit.
+   A harbor run's gateway token goes in `gatewayToken`, which reaches the runner
+   in its environment and is never stored; `extraArgs` are stored with the run,
+   so a launch whose `extraArgs` carry the token is refused. A launch or resume is
+   also refused while any variable in the manager's own environment, other than
+   `METAHARNESS_GATEWAY_TOKEN`, holds a token the manager knows: the runner hands
+   its environment on to omp and Harbor and can check it only against its own token.
 
 - `GET /api/runs/:name` — `{ run, traces }` (syncs native artifacts on read).
 - `POST /api/runs/:name/cancel` — cancel a manager-launched run.
@@ -73,7 +85,10 @@ bun run serve --port 4700
   overrides the retry set, which defaults to every exception type in the job's
   `result.json`). The runner recovers the original launch flags from
   `_bench/<name>/runner-config.json` (snapshotted at launch) or the run's
-  `manager.json` — nothing needs re-specifying.
+  `manager.json` — nothing needs re-specifying except the gateway token, which
+  is never recorded: it is the body's `gatewayToken`, else the one this manager
+  launched the run with, else the manager's own `METAHARNESS_GATEWAY_TOKEN`. A
+  run whose record does not say it ran without a token is refused until one is given.
 - `GET /api/runs/:name/traces/:trace[?raw=1]` — normalized or native trace.
 - `GET /api/events` — SSE stream of run-list snapshots (sent on change).
 

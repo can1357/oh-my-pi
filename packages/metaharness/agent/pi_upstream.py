@@ -18,7 +18,7 @@ and the docs section (`OMP_BENCH_PI_SYSTEM_PROMPT` supplies the template; the
 `{{CWD}}` placeholder is rendered per trial).
 
 Env knobs (set by the runner; `OMP_BENCH_*` are shared with `omp_local.py`):
-`OMP_BENCH_GATEWAY_URL`, `OMP_BENCH_GATEWAY_TOKEN`, `OMP_BENCH_PI_MODELS`
+`OMP_BENCH_GATEWAY_URL`, `OMP_BENCH_GATEWAY_TOKEN_FILE`, `OMP_BENCH_PI_MODELS`
 (JSON array of model specs), `OMP_BENCH_PI_SYSTEM_PROMPT` (host path),
 `OMP_BENCH_PI_VERSION`, `OMP_BENCH_NODE_VERSION`, `OMP_BENCH_THINKING`,
 `OMP_BENCH_TOOLS`, `OMP_BENCH_AGENT_ARGS`, `OMP_BENCH_FORWARD_ENV`.
@@ -38,12 +38,20 @@ from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_templat
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-from omp_local import _Usage, _env, _loads
+from omp_local import _Usage, _env, _loads, _place_file, _refuse_gateway_token_in_inputs, _supplied_gateway_token
 
 _OUTPUT_FILENAME = "pi.txt"
 _MODELS_DST = "/tmp/pi-models.json"
 _SYSTEM_DST = "/tmp/pi-SYSTEM.md"
+_TOKEN_DST = "/tmp/pi-gateway-token"
 _NODE_DIST = "https://nodejs.org/dist"
+
+# The gateway token lives in this file under $HOME (mode 0600), and every gateway
+# provider's models.json `apiKey` is a fixed command that reads it: pi runs an
+# `apiKey` that starts with `!` and expands `$NAME` in any other, so the token
+# itself never goes into models.json.
+_GATEWAY_TOKEN_FILE = ".pi/agent/gateway-token"
+_GATEWAY_TOKEN_API_KEY = '!cat "$HOME/.pi/agent/gateway-token"'
 
 
 def _gateway_provider_name(provider: str) -> str:
@@ -59,7 +67,8 @@ class PiUpstream(BaseInstalledAgent):
         self._pkg_version = _env("OMP_BENCH_PI_VERSION", "latest")
         self._node_version = _env("OMP_BENCH_NODE_VERSION", "22.14.0")
         self._gateway_url = _env("OMP_BENCH_GATEWAY_URL", "http://host.docker.internal:4000")
-        self._gateway_token = _env("OMP_BENCH_GATEWAY_TOKEN", "no-auth")
+        supplied_token = _supplied_gateway_token()
+        self._gateway_token = supplied_token or "no-auth"
         self._model_specs = json.loads(_env("OMP_BENCH_PI_MODELS", "[]"))
         self._system_prompt_path = _env("OMP_BENCH_PI_SYSTEM_PROMPT")
         self._thinking = _env("OMP_BENCH_THINKING")
@@ -68,6 +77,7 @@ class PiUpstream(BaseInstalledAgent):
         self._agent_args = [str(a) for a in json.loads(raw_args)] if raw_args else []
         raw_env = _env("OMP_BENCH_FORWARD_ENV")
         self._forward_env = {str(k): str(v) for k, v in json.loads(raw_env).items()} if raw_env else {}
+        _refuse_gateway_token_in_inputs(self._forward_env, supplied_token)
         self._home = "/root"
         self._node_dir = "/root/.pi-bench/node"
         self._app_dir = "/root/.pi-bench/app"
@@ -93,7 +103,7 @@ class PiUpstream(BaseInstalledAgent):
         return f"node {shlex.quote(self._app_dir + '/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js')}"
 
     def _wrap(self, command: str) -> str:
-        return f'export PATH="{self._node_dir}/bin:$PATH"; {command}'
+        return f'export PATH={shlex.quote(self._node_dir + "/bin")}:"$PATH"; {command}'
 
     # ------------------------------------------------------------------ install
 
@@ -125,9 +135,11 @@ class PiUpstream(BaseInstalledAgent):
                 'arch=$(uname -m); case "$arch" in aarch64|arm64) na=arm64 ;; x86_64|amd64) na=x64 ;; '
                 '*) echo "unsupported arch $arch" >&2; exit 4 ;; esac; '
                 f"mkdir -p {q(self._node_dir)} {q(self._app_dir)}; "
-                f'curl -fsSL "{_NODE_DIST}/v{self._node_version}/node-v{self._node_version}-linux-$na.tar.xz" '
+                # The version reaches the URL through a shell variable, never as shell text.
+                f"ver={q(self._node_version)}; "
+                f'curl -fsSL "{_NODE_DIST}/v$ver/node-v$ver-linux-$na.tar.xz" '
                 f"| tar -xJ -C {q(self._node_dir)} --strip-components=1; "
-                f'export PATH="{self._node_dir}/bin:$PATH"; node --version; '
+                f'export PATH={q(self._node_dir + "/bin")}:"$PATH"; node --version; '
                 f"cd {q(self._app_dir)}; printf '{{}}' > package.json; "
                 f"npm install --silent --no-audit --no-fund {q('@earendil-works/pi-coding-agent@' + self._pkg_version)}; "
                 f"{self._pi()} --version"
@@ -148,7 +160,7 @@ class PiUpstream(BaseInstalledAgent):
                 {
                     "baseUrl": base if api == "anthropic-messages" else f"{base}/v1",
                     "api": api,
-                    "apiKey": self._gateway_token,
+                    "apiKey": _GATEWAY_TOKEN_API_KEY,
                     "models": [],
                 },
             )
@@ -166,19 +178,17 @@ class PiUpstream(BaseInstalledAgent):
         return json.dumps({"providers": providers}, indent=2)
 
     async def _write_models_json(self, environment: BaseEnvironment) -> None:
-        content = self._generate_models_json()
-        await self.exec_as_agent(
-            environment,
-            command=(
-                f"cat > {_MODELS_DST} <<'PI_MODELS_EOF'\n{content}\nPI_MODELS_EOF\n"
-                f'mkdir -p "$HOME/.pi/agent"; cp {_MODELS_DST} "$HOME/.pi/agent/models.json"'
-            ),
-        )
+        await _place_file(self, environment, self._generate_models_json(), _MODELS_DST, ".pi/agent/models.json")
+        await _place_file(self, environment, self._gateway_token, _TOKEN_DST, _GATEWAY_TOKEN_FILE)
 
     async def _write_system_prompt(self, environment: BaseEnvironment) -> None:
+        """Install the neutral system prompt, rendered with the trial's working directory
+        so it matches what the default prompt would have reported."""
         if not self._system_prompt_path:
             return
-        await environment.upload_file(self._system_prompt_path, _SYSTEM_DST)
+        cwd = (await self.exec_as_agent(environment, command='printf %s "$PWD"')).stdout or ""
+        template = Path(self._system_prompt_path).read_text(encoding="utf-8")
+        await _place_file(self, environment, template.replace("{{CWD}}", cwd), _SYSTEM_DST, ".pi/agent/SYSTEM.md")
 
     # ---------------------------------------------------------------------- run
 
@@ -208,15 +218,7 @@ class PiUpstream(BaseInstalledAgent):
         parts.extend(shlex.quote(arg) for arg in self._agent_args)
         parts.append("--")
         parts.append(shlex.quote(instruction))
-        # Render the neutral system prompt with the trial's working directory so
-        # it matches what the default prompt would have reported.
-        prelude = ""
-        if self._system_prompt_path:
-            prelude = (
-                f'mkdir -p "$HOME/.pi/agent"; '
-                f'sed "s|{{{{CWD}}}}|$PWD|" {_SYSTEM_DST} > "$HOME/.pi/agent/SYSTEM.md"; '
-            )
-        run = prelude + " ".join(parts) + f" < /dev/null > /logs/agent/{_OUTPUT_FILENAME} 2>&1"
+        run = " ".join(parts) + f" < /dev/null > /logs/agent/{_OUTPUT_FILENAME} 2>&1"
         await self.exec_as_agent(
             environment,
             command=self._wrap(run),

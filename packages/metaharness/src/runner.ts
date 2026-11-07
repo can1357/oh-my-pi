@@ -20,6 +20,18 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
  *   metaharness harbor --help
  */
 import type { Server } from "bun";
+import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
+import {
+	GATEWAY_TOKEN_INPUT_ENV,
+	gatewayModelsYaml,
+	isGatewayTokenVar,
+	knownGatewayTokens,
+	NO_AUTH_TOKEN,
+	refuseGatewayTokenIn,
+	refuseGatewayTokenInEnv,
+	refuseGatewayTokenReference,
+} from "./gateway-models";
+import { setOwn } from "./own-property";
 import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
 
 // ────────────────────────────────────────────────────────────────────── config
@@ -77,6 +89,10 @@ export interface Config {
 	jobName: string | null;
 	gatewayUrl: string;
 	gatewayToken: string;
+	/** Whether the gateway token was given (`--gateway-token` or `METAHARNESS_GATEWAY_TOKEN`), not defaulted. */
+	gatewayTokenGiven: boolean;
+	/** `-h` / `--help` was given: print the usage and do nothing else. */
+	help: boolean;
 	providers: string[];
 	gateway: boolean;
 	webSearch: boolean;
@@ -121,7 +137,9 @@ function defaultConfig(): Config {
 		jobsDir: path.join(REPO_ROOT, "runs", "harbor"),
 		jobName: null,
 		gatewayUrl: DOCKER_GATEWAY_URL,
-		gatewayToken: "no-auth",
+		gatewayToken: process.env[GATEWAY_TOKEN_INPUT_ENV] || NO_AUTH_TOKEN,
+		gatewayTokenGiven: Boolean(process.env[GATEWAY_TOKEN_INPUT_ENV]),
+		help: false,
 		providers: [],
 		gateway: true,
 		webSearch: false,
@@ -174,7 +192,8 @@ Dataset / scale:
 
 Gateway (auth, no keys in container):
       --gateway-url <url>        Default http://host.docker.internal:4000
-      --gateway-token <tok>      Default "no-auth" (gateway runs --no-auth)
+      --gateway-token <tok>      Default $${GATEWAY_TOKEN_INPUT_ENV}, else "no-auth" (gateway runs --no-auth).
+                                 The argument is visible in the process list; prefer the variable.
       --providers <csv>          Providers to route (default: model provider + anthropic,openai-codex)
       --no-gateway               Pass host provider API keys into containers instead
       --web-search               Enable omp web_search (off by default; can't auth via gateway)
@@ -275,7 +294,7 @@ export function parseArgs(argv: string[]): Config {
 				} catch {
 					// bare strings stay strings
 				}
-				cfg.settings[spec.slice(0, eq)] = value;
+				setOwn(cfg.settings, spec.slice(0, eq), value);
 				break;
 			}
 			case "--tools":
@@ -318,6 +337,7 @@ export function parseArgs(argv: string[]): Config {
 				break;
 			case "--gateway-token":
 				cfg.gatewayToken = take(arg);
+				cfg.gatewayTokenGiven = true;
 				break;
 			case "--providers":
 				cfg.providers.push(
@@ -370,18 +390,26 @@ export function parseArgs(argv: string[]): Config {
 				break;
 			case "-h":
 			case "--help":
-				process.stdout.write(HELP);
-				process.exit(0);
+				// The caller prints the help. Parsing has no side effects, since the manager
+				// also parses caller-supplied arguments in its own process, and it goes on to
+				// the end, so the arguments after it get the same checks as without it.
+				cfg.help = true;
 				break;
 			case "-e":
 			case "--env": {
 				const spec = take(arg);
 				const eq2 = spec.indexOf("=");
+				const name = eq2 === -1 ? spec : spec.slice(0, eq2);
+				if (isGatewayTokenVar(name)) {
+					throw new Error(
+						`--env ${name}: the gateway token must not reach omp's environment (omp reads it from its private file)`,
+					);
+				}
 				if (eq2 === -1) {
 					const hostVal = process.env[spec];
-					if (hostVal !== undefined) cfg.env[spec] = hostVal;
+					if (hostVal !== undefined) setOwn(cfg.env, spec, hostVal);
 				} else {
-					cfg.env[spec.slice(0, eq2)] = spec.slice(eq2 + 1);
+					setOwn(cfg.env, spec.slice(0, eq2), spec.slice(eq2 + 1));
 				}
 				break;
 			}
@@ -403,7 +431,21 @@ export function parseArgs(argv: string[]): Config {
 		// host.docker.internal doesn't exist on vmnet; containers reach the host at the bridge address.
 		if (cfg.gatewayUrl === DOCKER_GATEWAY_URL) cfg.gatewayUrl = VMNET_GATEWAY_URL;
 	}
+	refuseGatewayTokenInConfig(cfg);
 	return cfg;
+}
+
+/**
+ * Refuse a config that carries a gateway token anywhere but `gatewayToken`: the rest is
+ * stored and reaches omp. Every token the runner knows is checked, the value of an inherited
+ * token variable that `--gateway-token` overrides included, before anything is written.
+ */
+function refuseGatewayTokenInConfig(cfg: Config): void {
+	const tokens = knownGatewayTokens(process.env, cfg.gatewayToken);
+	refuseGatewayTokenInEnv(cfg.env, tokens);
+	const rest = { ...cfg, gatewayToken: undefined };
+	refuseGatewayTokenIn(rest, tokens, "the runner's arguments");
+	refuseGatewayTokenReference(rest, "the runner's arguments");
 }
 
 // ─────────────────────────────────────────────────────────────────── resume
@@ -433,8 +475,11 @@ export function resolveResumeConfig(cli: Config): Config {
 
 	let cfg: Config | null = null;
 	const saved = readJson(path.join(jobsDir, "_bench", jobName, "runner-config.json"));
+	let recordedTokenRequired: unknown;
 	if (saved && typeof saved === "object") {
-		cfg = { ...defaultConfig(), ...(saved as Partial<Config>) };
+		const { gatewayTokenRequired, ...recorded } = saved as Partial<Config> & { gatewayTokenRequired?: unknown };
+		recordedTokenRequired = gatewayTokenRequired;
+		cfg = { ...defaultConfig(), ...recorded };
 	} else {
 		const manager = readJson(path.join(jobDir, "manager.json")) as ManagerRecord | null;
 		if (manager?.config) {
@@ -464,10 +509,28 @@ export function resolveResumeConfig(cli: Config): Config {
 	}
 	// Knobs owned by the resume invocation, not the original launch.
 	cfg.filterErrorTypes = cli.filterErrorTypes;
+	// The recorded config never holds the gateway token (see runBenchmark). A run
+	// recorded as using one must get one again; a run whose record does not say
+	// (a snapshot older than that field, or the manager.json fallback) must be told
+	// which, so a tokened run never silently resumes as "no-auth".
+	const tokenMissing =
+		recordedTokenRequired === true
+			? cli.gatewayToken === NO_AUTH_TOKEN
+			: recordedTokenRequired !== false && !cli.gatewayTokenGiven;
+	if (cfg.gateway && tokenMissing) {
+		throw new Error(
+			`--resume: ${jobName} ${recordedTokenRequired === true ? "was launched with" : "may have been launched with"} ` +
+				`a gateway token, which is not recorded; give it again in ${GATEWAY_TOKEN_INPUT_ENV} or with ` +
+				"--gateway-token (--gateway-token no-auth if the run used none)",
+		);
+	}
+	cfg.gatewayToken = cli.gatewayToken;
+	cfg.gatewayTokenGiven = cli.gatewayTokenGiven;
 	cfg.passthrough = cli.passthrough;
 	cfg.dryRun = cli.dryRun;
 	cfg.cleanup = cli.cleanup;
 	cfg.cleanupForce = cli.cleanupForce;
+	refuseGatewayTokenInConfig(cfg);
 	return cfg;
 }
 // ──────────────────────────────────────────────────────────────────── helpers
@@ -1121,6 +1184,33 @@ function sourceDepsStamp(manifests: string[], bunVersion: string): string {
 }
 
 /**
+ * Container CLI arguments that bind-mount `depsDir` (under `--jobs-dir`) at `/deps`.
+ *
+ * Docker's short `-v src:dst` form splits on `:`, so a path holding one changed the
+ * mount. Docker's `--mount` value is CSV, so each field is CSV-quoted (`"` doubled)
+ * and the path stays one field whatever it holds. Apple's `container` CLI is not
+ * known to parse quoted CSV, so a path it cannot carry in `-v` is refused instead.
+ */
+export function depsMountArgs(envType: Config["envType"], depsDir: string): string[] {
+	if (envType === "apple-container") {
+		if (/[:,\n\r]/.test(depsDir)) {
+			throw new Error(
+				`--jobs-dir: Apple container mounts cannot carry ':', ',' or a line break in a path (${JSON.stringify(depsDir)})`,
+			);
+		}
+		return ["-v", `${depsDir}:/deps`];
+	}
+	// Docker's CSV reader turns a quoted CR LF into LF, which names a different directory.
+	if (depsDir.includes("\r")) {
+		throw new Error(
+			`--jobs-dir: Docker mounts cannot carry a carriage return in a path (${JSON.stringify(depsDir)})`,
+		);
+	}
+	const fields = ["type=bind", `source=${depsDir}`, "target=/deps"];
+	return ["--mount", fields.map(field => `"${field.replaceAll('"', '""')}"`).join(",")];
+}
+
+/**
  * Ensure the cached linux deps tree for source mode: a manifest-only skeleton of the
  * workspace with `bun install --production` run inside `oven/bun:<ver>` (matching the
  * daemon's native arch), plus the image's linux `bun` under `bin/`. Rebuilt only when
@@ -1164,8 +1254,7 @@ export function prepareSourceDeps(cfg: Config): SourceMount {
 						CONTAINER_DNS,
 						"-e",
 						"HOME=/tmp",
-						"-v",
-						`${depsDir}:/deps`,
+						...depsMountArgs(cfg.envType, depsDir),
 						image,
 						"sh",
 						"-c",
@@ -1179,8 +1268,7 @@ export function prepareSourceDeps(cfg: Config): SourceMount {
 						`linux/${arch === "x64" ? "amd64" : "arm64"}`,
 						"-e",
 						"HOME=/tmp",
-						"-v",
-						`${depsDir}:/deps`,
+						...depsMountArgs(cfg.envType, depsDir),
 						image,
 						"sh",
 						"-c",
@@ -1211,24 +1299,50 @@ export function prepareSourceDeps(cfg: Config): SourceMount {
 	return { arch, depsDir, nodeModules };
 }
 
+/** One compose long-syntax bind mount. */
+interface BindMount {
+	type: "bind";
+	source: string;
+	target: string;
+	read_only: true;
+}
+
+/** Read-only bind mounts that put the source repo and its linux deps tree into a task container. */
+function sourceMounts(source: SourceMount): BindMount[] {
+	const mounts: BindMount[] = [{ type: "bind", source: REPO_ROOT, target: SOURCE_SRC_MOUNT, read_only: true }];
+	for (const rel of source.nodeModules) {
+		mounts.push({
+			type: "bind",
+			source: path.join(source.depsDir, rel),
+			target: `${SOURCE_SRC_MOUNT}/${rel}`,
+			read_only: true,
+		});
+	}
+	mounts.push({ type: "bind", source: path.join(source.depsDir, "bin"), target: SOURCE_BIN_MOUNT, read_only: true });
+	return mounts;
+}
+
 /**
  * Compose overlay applied to every trial's `main` service: host networking and/or the
  * read-only source + linux-deps mounts. Returns null when nothing needs overlaying.
+ * Mounts use the long syntax and the YAML serializer, so a path (the repo checkout,
+ * `--jobs-dir`) holding `:`, `$` or a line break stays one path.
  */
-function writeComposeOverlay(benchDir: string, cfg: Config, source: SourceMount | null): string | null {
-	const lines: string[] = [];
-	if (cfg.hostNetwork) lines.push('    network_mode: "host"');
+export function writeComposeOverlay(benchDir: string, cfg: Config, source: SourceMount | null): string | null {
+	const main: { network_mode?: "host"; volumes?: BindMount[] } = {};
+	if (cfg.hostNetwork) main.network_mode = "host";
 	if (source) {
-		lines.push("    volumes:");
-		lines.push(`      - ${REPO_ROOT}:${SOURCE_SRC_MOUNT}:ro`);
-		for (const rel of source.nodeModules) {
-			lines.push(`      - ${path.join(source.depsDir, rel)}:${SOURCE_SRC_MOUNT}/${rel}:ro`);
-		}
-		lines.push(`      - ${path.join(source.depsDir, "bin")}:${SOURCE_BIN_MOUNT}:ro`);
+		// Compose interpolates `$` in every value; `$$` is its literal `$`
+		// (and `$$$$` is how String.replaceAll writes `$$`).
+		main.volumes = sourceMounts(source).map(mount => ({
+			...mount,
+			source: mount.source.replaceAll("$", "$$$$"),
+			target: mount.target.replaceAll("$", "$$$$"),
+		}));
 	}
-	if (lines.length === 0) return null;
+	if (!main.network_mode && !main.volumes) return null;
 	const file = path.join(benchDir, "omp-compose-overlay.yaml");
-	fs.writeFileSync(file, `${["services:", "  main:", ...lines].join("\n")}\n`);
+	fs.writeFileSync(file, `${stringifyYamlConfig({ services: { main } })}\n`);
 	return file;
 }
 
@@ -1239,19 +1353,7 @@ function writeComposeOverlay(benchDir: string, cfg: Config, source: SourceMount 
  */
 function buildMountsJson(source: SourceMount | null): string | null {
 	if (!source) return null;
-	const mounts: Array<{ type: "bind"; source: string; target: string; read_only: true }> = [
-		{ type: "bind", source: REPO_ROOT, target: SOURCE_SRC_MOUNT, read_only: true },
-	];
-	for (const rel of source.nodeModules) {
-		mounts.push({
-			type: "bind",
-			source: path.join(source.depsDir, rel),
-			target: `${SOURCE_SRC_MOUNT}/${rel}`,
-			read_only: true,
-		});
-	}
-	mounts.push({ type: "bind", source: path.join(source.depsDir, "bin"), target: SOURCE_BIN_MOUNT, read_only: true });
-	return JSON.stringify(mounts);
+	return JSON.stringify(sourceMounts(source));
 }
 
 /** Neutralized upstream system prompt template uploaded into `pi` trials (see pi_upstream.py). */
@@ -1300,19 +1402,37 @@ function deriveProviders(cfg: Config): string[] {
 	return [...set];
 }
 
-function writeModelsYaml(benchDir: string, cfg: Config): string {
-	const providers = deriveProviders(cfg);
-	const lines = ["# Generated by metaharness — auth via host pm2 gateway.", "providers:"];
-	for (const p of providers) {
-		lines.push(`  ${p}:`);
-		lines.push(`    baseUrl: ${cfg.gatewayUrl}`);
-		lines.push("    auth: oauth");
-		lines.push("    transport: pi-native");
-		lines.push(`    apiKey: ${cfg.gatewayToken}`);
-	}
+/**
+ * Write the gateway `models.yml` the omp agent uploads into each task container.
+ * The token is not in it: `agent/omp_local.py` writes it to `GATEWAY_TOKEN_FILE`.
+ */
+export function writeModelsYaml(benchDir: string, cfg: Config): string {
 	const file = path.join(benchDir, "models.yml");
-	fs.writeFileSync(file, `${lines.join("\n")}\n`);
+	fs.writeFileSync(file, gatewayModelsYaml(deriveProviders(cfg), cfg.gatewayUrl));
 	return file;
+}
+
+/**
+ * Write the gateway token where the Harbor agent reads it (`OMP_BENCH_GATEWAY_TOKEN_FILE`):
+ * a new mode 0600 file in the bench dir, named for this invocation so a concurrent run of
+ * the same job (a dry run, say) never replaces or removes it. The token is never put in
+ * Harbor's environment, because Harbor expands `${NAME}` from that environment in task files
+ * and agent env, so a task could name it. The file is removed when this process exits for
+ * any reason it can observe; a SIGKILL leaves it, mode 0600, until removed by hand.
+ */
+export function writeGatewayTokenFile(benchDir: string, cfg: Config): string {
+	const file = path.join(benchDir, `gateway-token-${crypto.randomUUID()}`);
+	fs.writeFileSync(file, cfg.gatewayToken, { mode: 0o600, flag: "wx" });
+	if (gatewayTokenFiles.size === 0) process.once("exit", removeGatewayTokenFiles);
+	gatewayTokenFiles.add(file);
+	return file;
+}
+
+/** Token files this process wrote; `removeGatewayTokenFiles` deletes them when it exits. */
+const gatewayTokenFiles = new Set<string>();
+
+function removeGatewayTokenFiles(): void {
+	for (const file of gatewayTokenFiles) fs.rmSync(file, { force: true });
 }
 
 function gatewayHealthOk(url: string): boolean {
@@ -1437,9 +1557,10 @@ export function collectForwardEnv(cfg: Config): Record<string, string> {
 	const out: Record<string, string> = {};
 	for (const [k, v] of Object.entries(process.env)) {
 		if (v === undefined || !k.startsWith("PI_") || FORWARD_ENV_DENYLIST.has(k)) continue;
-		out[k] = v;
+		setOwn(out, k, v);
 	}
-	for (const [k, v] of Object.entries(cfg.env)) out[k] = v;
+	for (const [k, v] of Object.entries(cfg.env)) setOwn(out, k, v);
+	refuseGatewayTokenInEnv(out, knownGatewayTokens(process.env, cfg.gatewayToken));
 	return out;
 }
 
@@ -1449,12 +1570,13 @@ export function buildHarborEnv(
 	tarball: string | null,
 	version: string,
 	source: SourceMount | null = null,
+	gatewayTokenFile: string | null = null,
 ): Record<string, string> {
 	const env: Record<string, string> = { ...(process.env as Record<string, string>) };
 	// Drop any stale OMP_BENCH_FORWARD_ENV inherited from the caller's shell before
 	// the agent-type early return, so it never leaks (incl. into the dry-run dump).
 	delete env.OMP_BENCH_FORWARD_ENV;
-	if (!MANAGED_AGENTS[cfg.agent]) return env;
+	if (!MANAGED_AGENTS[cfg.agent]) return withoutGatewayTokenCopies(env, cfg.gatewayToken);
 	const prepend = (k: string, v: string): void => {
 		env[k] = env[k] ? `${v}:${env[k]}` : v;
 	};
@@ -1483,12 +1605,38 @@ export function buildHarborEnv(
 	if (cfg.gateway) {
 		env.OMP_BENCH_MODELS_YAML = modelsYaml;
 		env.OMP_BENCH_GATEWAY_URL = cfg.gatewayUrl;
-		env.OMP_BENCH_GATEWAY_TOKEN = cfg.gatewayToken;
+		if (gatewayTokenFile) env.OMP_BENCH_GATEWAY_TOKEN_FILE = gatewayTokenFile;
 		env.OMP_BENCH_GATEWAY_PROVIDERS = deriveProviders(cfg).join(",");
 	}
 	if (cfg.envType === "apple-container") env.OMP_BENCH_CONTAINER_DNS = CONTAINER_DNS;
 	const forward = collectForwardEnv(cfg);
 	if (Object.keys(forward).length > 0) env.OMP_BENCH_FORWARD_ENV = JSON.stringify(forward);
+	return withoutGatewayTokenCopies(env, cfg.gatewayToken);
+}
+
+/**
+ * Harbor's environment without a gateway token anywhere. Harbor expands `${NAME}` in agent
+ * env (`--ae`) and in task files from its own environment, so no gateway token variable is
+ * passed on (the agent reads its token from `OMP_BENCH_GATEWAY_TOKEN_FILE`), and an inherited
+ * variable holding any token the runner knows (the run's own, or the value of either token
+ * variable, overridden or not) is refused before Harbor starts. Harbor hands the agent, and a
+ * dry run prints, every OMP_BENCH_* name, so such a name holding a token is refused too; no
+ * refusal repeats a name that holds one.
+ */
+function withoutGatewayTokenCopies(env: Record<string, string>, token: string): Record<string, string> {
+	const tokens = knownGatewayTokens(env, token);
+	for (const name of Object.keys(env)) if (isGatewayTokenVar(name)) delete env[name];
+	for (const [name, value] of Object.entries(env)) {
+		const named = tokens.some(known => name.includes(known));
+		if (named && name.startsWith("OMP_BENCH_")) {
+			throw new Error("an OMP_BENCH_* variable in Harbor's environment has the gateway token in its name; unset it");
+		}
+		refuseGatewayTokenIn(
+			value,
+			tokens,
+			named ? "a variable in Harbor's environment" : `Harbor's environment variable ${name}`,
+		);
+	}
 	return env;
 }
 
@@ -1622,13 +1770,28 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 	}
 
 	const jobName = cfg.jobName ?? defaultJobName(cfg.models[0] ?? "model");
+	// A generated name comes from the model slug; it names directories and the snapshot, so it
+	// may hold no token this process knows, an inherited one --gateway-token overrides included.
+	refuseGatewayTokenIn(jobName, knownGatewayTokens(process.env, cfg.gatewayToken), "the job name");
 	const jobDir = path.join(cfg.jobsDir, jobName);
 	const benchDir = path.join(cfg.jobsDir, "_bench", jobName);
 	fs.mkdirSync(benchDir, { recursive: true });
 	if (!cfg.resume && !cfg.dryRun) {
 		// Snapshot the resolved launch config so a later `--resume <job>` can
-		// rebuild the exact same invocation without re-specifying flags.
-		fs.writeFileSync(path.join(benchDir, "runner-config.json"), JSON.stringify({ ...cfg, jobName }, null, "\t"));
+		// rebuild the exact same invocation without re-specifying flags. The gateway
+		// token is left out: the resume invocation supplies it again, and
+		// `gatewayTokenRequired` makes a resume without one fail instead of
+		// silently running as "no-auth".
+		const snapshot = path.join(benchDir, "runner-config.json");
+		const recorded = {
+			...cfg,
+			gatewayToken: undefined,
+			gatewayTokenGiven: undefined,
+			gatewayTokenRequired: cfg.gateway && cfg.gatewayToken !== NO_AUTH_TOKEN,
+			jobName,
+		};
+		fs.writeFileSync(snapshot, JSON.stringify(recorded, null, "\t"), { mode: 0o600 });
+		fs.chmodSync(snapshot, 0o600);
 	}
 
 	const version = readPkgVersion();
@@ -1670,7 +1833,14 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 	const harborArgs = cfg.resume
 		? buildResumeArgs(cfg, jobDir)
 		: buildHarborArgs(cfg, jobName, modelsYaml, tarball, composeOverlayPath, mountsJson);
-	const harborEnv = buildHarborEnv(cfg, modelsYaml, tarball, version, source);
+	const gatewayTokenFile = cfg.gateway && MANAGED_AGENTS[cfg.agent] ? writeGatewayTokenFile(benchDir, cfg) : null;
+	let harborEnv: Record<string, string>;
+	try {
+		harborEnv = buildHarborEnv(cfg, modelsYaml, tarball, version, source, gatewayTokenFile);
+	} catch (error) {
+		if (gatewayTokenFile) fs.rmSync(gatewayTokenFile, { force: true });
+		throw error;
+	}
 	const logPath = path.join(benchDir, "harbor.log");
 	if (cfg.dryRun) {
 		process.stdout.write(bold("\nharbor command:\n"));
@@ -1693,6 +1863,7 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 			}
 		}
 		process.stdout.write(`\njob dir: ${jobDir}\nbench dir: ${benchDir}\n`);
+		if (gatewayTokenFile) fs.rmSync(gatewayTokenFile, { force: true });
 		return { exitCode: 0, jobName, jobDir, benchDir, tarball, elapsedMs: 0, totals: null, reportPath: null };
 	}
 
@@ -1743,6 +1914,8 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 		render(st); // final frame
 	} finally {
 		gatewayForward?.stop();
+		// Harbor's agent read the token when it set up each trial; nothing needs the file now.
+		if (gatewayTokenFile) fs.rmSync(gatewayTokenFile, { force: true });
 		if (isTTY) process.stdout.write(`${ESC}?25h${ESC}?1049l`); // restore cursor + screen
 		try {
 			fs.closeSync(logFd);
@@ -1784,6 +1957,10 @@ async function main(): Promise<void> {
 		return;
 	}
 	let cfg = parseArgs(argv);
+	if (cfg.help) {
+		process.stdout.write(HELP);
+		return;
+	}
 	if (cfg.resume) cfg = resolveResumeConfig(cfg);
 	const exitCode = (await runBenchmark(cfg)).exitCode;
 	process.exit(exitCode);

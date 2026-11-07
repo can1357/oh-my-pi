@@ -249,6 +249,14 @@ export class TrialVm {
 		};
 	}
 
+	/**
+	 * Run a captured shell command inside the guest with `input` on its stdin.
+	 * Data passed this way never becomes shell text, so it cannot run as a command.
+	 */
+	async execWithInput(command: string, input: string): Promise<VmonCommandResult> {
+		return this.#pipeInput(new Blob([input]), ["sh", "-c", command], 900);
+	}
+
 	/** Stream one host file into the guest without a gRPC message-size copy. */
 	async copyTo(hostPath: string, guestPath: string): Promise<void> {
 		const file = Bun.file(hostPath);
