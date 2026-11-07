@@ -177,6 +177,25 @@ def probes():
         ("unquoted-heredoc-literal-runtime", "heredoc-body", "runtime", "cat <<EOF\nmissing_naming_table_command\nEOF", {}, None),
         ("unquoted-heredoc-literal-builtin", "heredoc-body", "builtin", "cat <<EOF\ncd ./missing\nEOF", {}, None),
         ("unquoted-heredoc-literal-parser", "heredoc-body", "parser", "cat <<EOF\n)\nEOF", {}, None),
+        ("heredoc-inner-multiline", "heredoc-substitution", "parser", "cat <<EOF\nprefix $(\nif) suffix\nEOF", {}, None),
+        ("heredoc-inner-nested", "heredoc-substitution", "parser", "cat <<EOF\n$(echo $(if))\nEOF", {}, None),
+        ("heredoc-inner-backtick", "heredoc-substitution", "parser", "cat <<EOF\n`if)`\nEOF", {}, None),
+        ("heredoc-inner-unmatched", "heredoc-substitution", "parser", "cat <<EOF\n$(if\nEOF", {}, None),
+        ("heredoc-inner-eof", "heredoc-substitution", "parser", "cat <<EOF\n$(if true; then)\nEOF", {}, None),
+        ("heredoc-inner-function", "heredoc-substitution", "parser", "f() {\ncat <<EOF\n$(if)\nEOF\n}\nf", {}, None),
+        ("heredoc-inner-eval", "heredoc-substitution", "parser", "eval 'cat <<EOF\n$(if)\nEOF'", {}, None),
+        ("heredoc-inner-subshell", "heredoc-substitution", "parser", "(cat <<EOF\n$(if)\nEOF\n)", {}, None),
+        ("heredoc-inner-pipeline-left", "heredoc-substitution", "parser", "cat <<EOF | cat\n$(if)\nEOF", {}, None),
+        ("heredoc-inner-pipeline-right", "heredoc-substitution", "parser", "printf '' | cat <<EOF\n$(if)\nEOF", {}, None),
+        *[("heredoc-inner-trap-" + trap.lower(), "heredoc-substitution", "parser",
+           enable + "trap " + shlex.quote("cat <<EOF\n$(if)\nEOF") + " " + trap + "; " + trigger,
+           files, None)
+          for trap, enable, trigger, files in (
+              ("EXIT", "", "exit", {}),
+              ("ERR", "set -E; ", "false", {}),
+              ("RETURN", "set -T; ", ". ./src", {"src": "return 3\n"}),
+              ("DEBUG", "", ":", {}),
+          )],
     ]
     for name, path, kind, command, files, regression in extra:
         for mode in MODES:
