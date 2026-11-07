@@ -364,12 +364,8 @@ impl ExtProc for Relayed {
 		self.child.pgid()
 	}
 
-	fn signal(&mut self, sig: Signal, scope: crate::bash::SignalScope) -> io::Result<()> {
-		self.child.signal(sig, scope)
-	}
-
-	fn signal_number(&mut self, number: u8, scope: crate::bash::SignalScope) -> io::Result<()> {
-		self.child.signal_number(number, scope)
+	fn signal(&mut self, sig: Signal) -> io::Result<()> {
+		self.child.signal(sig)
 	}
 
 	fn stop(&mut self) -> io::Result<()> {

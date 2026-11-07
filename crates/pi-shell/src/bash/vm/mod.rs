@@ -66,7 +66,7 @@ use crate::bash::{
 	event::{AssignScope, Event, EventData, EventMask, Origin, OriginChain, OriginLink},
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::File,
-	host::{EnvView, ExtProc, Host, SignalScope, StdFd, Verdict},
+	host::{EnvView, ExtProc, Host, StdFd, Verdict},
 	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
@@ -2034,7 +2034,7 @@ impl Shell {
 							match &mut sc.live {
 								Live::Task(task) => task.signal(sig),
 								Live::Ext(ext) => {
-									let _ = ext.signal(sig, SignalScope::Group);
+									let _ = ext.signal(sig);
 									let _ = ext.cont();
 								},
 								_ => {},
@@ -2078,10 +2078,7 @@ impl Shell {
 		}
 		if req & SIGNAL != 0 {
 			for (target, sig) in self.k.ctl.take_signals() {
-				match sig {
-					control::SignalRequest::Named(sig) => self.deliver(cx, target, sig),
-					control::SignalRequest::Number(number) => self.deliver_number(cx, target, number),
-				}
+				self.deliver(cx, target, sig);
 			}
 		}
 		if req & PAUSE != 0 && !self.k.paused {
@@ -2119,7 +2116,7 @@ impl Shell {
 				match &mut sc.live {
 					Live::Task(t) => t.signal(sig),
 					Live::Ext(e) => {
-						let _ = e.signal(sig, SignalScope::Group);
+						let _ = e.signal(sig);
 						let _ = e.cont();
 					},
 					_ => {},
@@ -2187,10 +2184,8 @@ impl Shell {
 		hits.sort_unstable();
 	}
 
-	/// Bash `kill_pid` walks the job's own pipeline without job control,
-	/// never the foreground children of its shell processes. Its do/while
-	/// skips the entire walk when the first member is already dead (the
-	/// PALIVE guard's continue reaches the loop's first-member condition).
+	/// A trapped job signal reaches the job's pipeline, not the foreground
+	/// commands its trapping shell processes are running.
 	fn job_members(&self, root: Vpid) -> Vec<Vpid> {
 		let mut members = vec![root];
 		let mut i = 0;
@@ -2202,17 +2197,13 @@ impl Shell {
 			if transparent(process, true) != Some(false) {
 				continue;
 			}
-			let Some(sc) = process.frames.last().and_then(|f| f.scratch.as_ref()) else {
-				continue;
-			};
-			if sc
-				.children
-				.first()
-				.is_some_and(|(leader, _)| !self.procs.iter().any(|p| p.vpid == *leader))
-			{
-				continue;
-			}
-			members.extend(sc.children.iter().map(|(vpid, _)| *vpid));
+			members.extend(
+				self
+					.procs
+					.iter()
+					.filter(|p| p.parent == Some(member))
+					.map(|p| p.vpid),
+			);
 		}
 		members
 	}
@@ -2242,27 +2233,7 @@ impl Shell {
 		}
 	}
 
-	/// A pipeline's public pid names its last stage, not the engine's
-	/// waiting wrapper. `transparent` preserves script-written shells, even
-	/// when their last command is a pipeline.
-	fn process_recipient(&self, mut vpid: Vpid) -> Vpid {
-		while let Some(child) = self
-			.procs
-			.iter()
-			.find(|p| p.vpid == vpid)
-			.filter(|p| transparent(p, true) == Some(false))
-			.and_then(|p| p.frames.last()?.scratch.as_ref()?.children.last())
-		{
-			vpid = child.0;
-		}
-		vpid
-	}
-
-	fn signal_hits(&mut self, target: SigTarget) -> (SignalScope, Vec<usize>) {
-		let target = match target {
-			SigTarget::Vpid(vpid) => SigTarget::Vpid(self.process_recipient(vpid)),
-			other => other,
-		};
+	fn signal_hits(&mut self, target: SigTarget, sig: Signal) -> (bool, Vec<usize>) {
 		let job = match target {
 			SigTarget::Job(id) => self
 				.procs
@@ -2273,10 +2244,16 @@ impl Shell {
 			_ => None,
 		};
 		let job_root = job.map(|(v, _)| v);
-		// Only job-control jobs own a process group; otherwise walk the
-		// job's own pipeline, not its members' foreground children.
 		let group = job.is_some_and(|(_, control)| control);
-		let members = job_root.filter(|_| !group).map(|v| self.job_members(v));
+		let trapped = job_root.is_some_and(|v| {
+			self
+				.procs
+				.iter()
+				.any(|p| p.vpid == v && p.own_traps.has(crate::bash::store::TrapKey::Signal(sig)))
+		});
+		let members = job_root
+			.filter(|_| !group && (trapped || matches!(sig, Signal::Kill | Signal::Stop)))
+			.map(|v| self.job_members(v));
 		let mut hits: Vec<usize> = (0..self.procs.len())
 			.filter(|&i| match target {
 				SigTarget::Vpid(v) => self.procs[i].vpid == v,
@@ -2290,48 +2267,7 @@ impl Shell {
 			})
 			.collect();
 		self.callout_trees(&mut hits);
-		let scope = if !group && matches!(target, SigTarget::Vpid(_) | SigTarget::Job(_)) {
-			SignalScope::Process
-		} else {
-			SignalScope::Group
-		};
-		(scope, hits)
-	}
-
-	/// Unnamed numbers cannot be caught: deliver to native replacements, or
-	/// end the shell image itself without touching trap keys or pending bits.
-	fn deliver_number(&mut self, cx: &mut Cx<'_>, target: SigTarget, number: u8) {
-		let (scope, hits) = self.signal_hits(target);
-		for &i in hits.iter().rev() {
-			let program = transparent(&self.procs[i], !matches!(target, SigTarget::Vpid(_)));
-			let alone = scope == SignalScope::Process && program != Some(true);
-			if !alone {
-				for frame in &mut self.procs[i].frames {
-					if let Some(Live::Ext(ext)) = frame.scratch.as_mut().map(|sc| &mut sc.live) {
-						let _ = ext.signal_number(number, scope);
-					}
-				}
-			}
-			if program.is_some() {
-				if self.procs[i].stopped {
-					continue_signalled(&mut self.procs[i], scope);
-					self.job_changed(cx, self.procs[i].vpid, None);
-				}
-				continue;
-			}
-			if alone {
-				let owner = self.procs[i].vpid;
-				for frame in &mut self.procs[i].frames {
-					if let Some(sc) = frame.scratch.as_mut()
-						&& matches!(sc.live, Live::Ext(_))
-						&& let Live::Ext(child) = std::mem::replace(&mut sc.live, Live::None)
-					{
-						self.surviving_externals.push((owner, child));
-					}
-				}
-			}
-			self.finish_kill(cx, i, 128 + i32::from(number));
-		}
+		(group, hits)
 	}
 
 	/// Deliver a virtual signal to its target or its configured trap.
@@ -2341,7 +2277,7 @@ impl Shell {
 			.k
 			.emit(cx, root, None, EventData::Signal { sig, target });
 		let platform = self.k.engine.config().platform;
-		let (scope, hits) = self.signal_hits(target);
+		let (group, hits) = self.signal_hits(target, sig);
 		// Vprocs this signal stopped or continued (job states follow).
 		let mut changed: Vec<(Vpid, Option<Signal>)> = Vec::new();
 		for &i in hits.iter().rev() {
@@ -2360,9 +2296,12 @@ impl Shell {
 				}
 			};
 			let terminating = trap.is_none() && sig.default_action() == DefaultAction::Terminate;
-			// A process signal reaches the shell image, not its foreground
-			// command. Only a program in that image's place owns the signal.
-			let alone = scope == SignalScope::Process && program != Some(true);
+			// A trapped or untrappable process signal belongs to the shell,
+			// unless an external program has replaced that shell image.
+			let alone = !group
+				&& matches!(target, SigTarget::Vpid(_) | SigTarget::Job(_))
+				&& (trap.is_some() || matches!(sig, Signal::Kill | Signal::Stop))
+				&& program != Some(true);
 			if (target != SigTarget::Vpid(root.0) || program == Some(true)) && !terminating {
 				for frame in &mut self.procs[i].frames {
 					if let Some(sc) = frame.scratch.as_mut() {
@@ -2376,7 +2315,7 @@ impl Shell {
 								}
 							},
 							Live::Ext(ext) if !alone => {
-								let _ = ext.signal(sig, scope);
+								let _ = ext.signal(sig);
 							},
 							_ => {},
 						}
@@ -2398,13 +2337,13 @@ impl Shell {
 				if lone {
 					for frame in &mut p.frames {
 						if let Some(Live::Ext(ext)) = frame.scratch.as_mut().map(|sc| &mut sc.live) {
-							let _ = ext.signal(sig, scope);
+							let _ = ext.signal(sig);
 						}
 					}
 				}
 				if stopped {
 					// Bash's kill_pid continues a stopped job it signals.
-					continue_signalled(p, scope);
+					set_stopped(p, false, true);
 					changed.push((p.vpid, None));
 				}
 				continue;
@@ -2458,8 +2397,7 @@ impl Shell {
 					if p.stopped != stop {
 						changed.push((p.vpid, stop.then_some(sig)));
 					}
-					// The selected native recipients already received this signal.
-					set_stopped(p, stop, false);
+					set_stopped(p, stop, !alone);
 				},
 				DefaultAction::Ignore => {},
 			}
@@ -2696,11 +2634,10 @@ fn interrupt_wait(p: &mut Vproc, status: i32) {
 }
 
 /// Whether the vproc is its program, or only waits for children the signal
-/// also reaches. Bash's `exec_builtin` replaces the whole shell image, even
-/// inside a function; implicit last-command exec requires one subshell
-/// frame without an EXIT action. Only engine-invented waiting wrappers
-/// are transparent to their children; a frame born from script parentheses
-/// (`subshell_line`) still owns its signal while waiting for a pipeline.
+/// also reaches. An explicit `exec` replaces the shell even inside a function;
+/// implicit last-command exec requires one subshell frame without an EXIT
+/// action. A pipeline wrapper is transparent only when the target also reaches
+/// its stages (`children`).
 fn transparent(p: &Vproc, children: bool) -> Option<bool> {
 	if p.frames.iter().any(|frame| {
 		frame.scratch.as_ref().is_some_and(|sc| {
@@ -2724,9 +2661,7 @@ fn transparent(p: &Vproc, children: bool) -> Option<bool> {
 			let exec = sc.exec.as_ref().is_some_and(|e| e.exec_as.is_some());
 			(exec || code_at(frame.pc + 1) == Some(ir::Opcode::SubExit)).then_some(true)
 		},
-		(_, ir::Opcode::Spawn)
-			if children && frame.subshell_line.is_none() && !sc.children.is_empty() =>
-		{
+		(_, ir::Opcode::Spawn) if children && !sc.children.is_empty() => {
 			let spawn = unit.spawns.get(op.a as usize)?;
 			let end = match (spawn.kind, code_at(spawn.end)) {
 				// `( … )`: its `Leave` follows.
@@ -2743,16 +2678,6 @@ fn transparent(p: &Vproc, children: bool) -> Option<bool> {
 fn set_stopped(p: &mut Vproc, on: bool, externals: bool) {
 	p.stopped = on;
 	pause_handles(p, on, externals);
-}
-
-/// Resume the same native recipients as the signal, not their whole groups.
-fn continue_signalled(p: &mut Vproc, scope: SignalScope) {
-	for frame in &mut p.frames {
-		if let Some(Live::Ext(ext)) = frame.scratch.as_mut().map(|sc| &mut sc.live) {
-			let _ = ext.signal(Signal::Cont, scope);
-		}
-	}
-	set_stopped(p, false, false);
 }
 
 /// Pause or resume the shell's work, and externals only when targeted.

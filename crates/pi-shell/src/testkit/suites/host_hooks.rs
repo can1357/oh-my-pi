@@ -136,7 +136,7 @@ impl ExtProc for Sleeper {
 		}
 	}
 
-	fn signal(&mut self, sig: Signal, _scope: crate::bash::SignalScope) -> io::Result<()> {
+	fn signal(&mut self, sig: Signal) -> io::Result<()> {
 		self.killed = Some(sig);
 		if let Some(waker) = self.waker.take() {
 			waker.wake();
@@ -229,7 +229,7 @@ impl ExtProc for Exited {
 		Poll::Ready(ExitStatus::Exited(self.0))
 	}
 
-	fn signal(&mut self, _sig: Signal, _scope: crate::bash::SignalScope) -> io::Result<()> {
+	fn signal(&mut self, _sig: Signal) -> io::Result<()> {
 		Ok(())
 	}
 

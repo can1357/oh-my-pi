@@ -29,12 +29,6 @@ pub const CANCEL: u32 = 1 << 2;
 pub const SUSPEND: u32 = 1 << 3;
 pub const SIGNAL: u32 = 1 << 4;
 
-/// A send request, not a trap key or part of a persisted image.
-pub(crate) enum SignalRequest {
-	Named(Signal),
-	Number(u8),
-}
-
 /// Shared control state of one shell.
 pub struct Ctl {
 	word:       AtomicU32,
@@ -44,7 +38,7 @@ pub struct Ctl {
 	/// `wakes` when the shell last returned `Blocked`/`Paused`.
 	parked:     AtomicU64,
 	waiters:    Mutex<Vec<Waker>>,
-	signals:    Mutex<Vec<(SigTarget, SignalRequest)>>,
+	signals:    Mutex<Vec<(SigTarget, Signal)>>,
 }
 
 impl Ctl {
@@ -74,7 +68,7 @@ impl Ctl {
 		Signal::from_repr(self.cancel_sig.load(Ordering::Acquire)).unwrap_or(Signal::Term)
 	}
 
-	pub(crate) fn take_signals(&self) -> Vec<(SigTarget, SignalRequest)> {
+	pub(crate) fn take_signals(&self) -> Vec<(SigTarget, Signal)> {
 		std::mem::take(&mut *self.signals.lock())
 	}
 
@@ -189,21 +183,7 @@ impl ControlHandle {
 	/// Deliver a signal on the virtual signal bus (the `kill` builtin uses
 	/// the same path).
 	pub fn signal(&self, target: SigTarget, sig: Signal) {
-		self
-			.0
-			.signals
-			.lock()
-			.push((target, SignalRequest::Named(sig)));
-		self.0.request(SIGNAL, 0);
-	}
-
-	/// Send an unnamed platform number without entering the trap signal set.
-	pub(crate) fn signal_number(&self, target: SigTarget, number: u8) {
-		self
-			.0
-			.signals
-			.lock()
-			.push((target, SignalRequest::Number(number)));
+		self.0.signals.lock().push((target, sig));
 		self.0.request(SIGNAL, 0);
 	}
 

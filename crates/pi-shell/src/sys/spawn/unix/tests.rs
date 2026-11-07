@@ -269,8 +269,7 @@ fn exit_codes_and_group_signals_are_reported() {
 
 		let a = argv(&["/bin/sleep", "30"]);
 		let mut p = s.spawn(spec(&a, &env, NEW)).unwrap();
-		p.signal(Signal::Term, crate::bash::SignalScope::Group)
-			.unwrap();
+		p.signal(Signal::Term).unwrap();
 		assert_eq!(wait(&mut p), ExitStatus::Signaled(Signal::Term), "{sessions:?}");
 	}
 }
@@ -429,8 +428,7 @@ fn detached_externals_lead_their_own_sessions_without_a_terminal() {
 	let pid = stage.pid();
 	assert_eq!((pgid(pid), sid(pid)), (pid as i32, pid as i32));
 	for p in [&mut lead, &mut stage] {
-		p.signal(Signal::Kill, crate::bash::SignalScope::Group)
-			.unwrap();
+		p.signal(Signal::Kill).unwrap();
 		assert_eq!(wait(p), ExitStatus::Signaled(Signal::Kill));
 	}
 }
@@ -459,8 +457,7 @@ fn share_join_of_a_leader_in_another_session_leads_its_own_group() {
 	let pid = p.pid();
 	assert_eq!(pgid(pid), pid as i32, "leads its own group");
 	assert_eq!(sid(pid), our_sid(), "stays in our session");
-	p.signal(Signal::Kill, crate::bash::SignalScope::Group)
-		.unwrap();
+	p.signal(Signal::Kill).unwrap();
 	wait(&mut p);
 	foreign.kill().unwrap();
 	foreign.wait().unwrap();
@@ -480,9 +477,7 @@ fn share_join_of_an_exited_but_held_leader_joins_its_group() {
 		.spawn(spec(&b, &env, PgroupSpec::Join(lead.pid())))
 		.unwrap();
 	assert_eq!(pgid(stage.pid()), lead.pid() as i32, "joined the leader's group");
-	stage
-		.signal(Signal::Kill, crate::bash::SignalScope::Group)
-		.unwrap();
+	stage.signal(Signal::Kill).unwrap();
 	wait(&mut stage);
 	drop(lead);
 }
@@ -499,9 +494,7 @@ fn share_join_after_the_leader_was_reaped_leads_its_own_group() {
 	let b = argv(&["/bin/sleep", "30"]);
 	let mut stage = s.spawn(spec(&b, &env, PgroupSpec::Join(gone))).unwrap();
 	assert_eq!(pgid(stage.pid()), stage.pid() as i32);
-	stage
-		.signal(Signal::Kill, crate::bash::SignalScope::Group)
-		.unwrap();
+	stage.signal(Signal::Kill).unwrap();
 	wait(&mut stage);
 }
 
@@ -539,9 +532,7 @@ fn inherit_keeps_the_hosts_group_and_signals_only_the_child() {
 	let b = argv(&["/bin/sleep", "30"]);
 	let mut joined = s.spawn(spec(&b, &env, PgroupSpec::Join(pid))).unwrap();
 	assert_eq!(pgid(joined.pid()), pgid(0), "Join is ignored too");
-	joined
-		.signal(Signal::Kill, crate::bash::SignalScope::Group)
-		.unwrap();
+	joined.signal(Signal::Kill).unwrap();
 	assert_eq!(wait(&mut joined), ExitStatus::Signaled(Signal::Kill));
 	assert!(live(pid as i32), "a signal to one external spares its siblings");
 
@@ -550,8 +541,7 @@ fn inherit_keeps_the_hosts_group_and_signals_only_the_child() {
 	assert!(live(grandchild.pid), "stop reaches the child only");
 	p.cont().unwrap();
 	until("child continued", || live(pid as i32));
-	p.signal(Signal::Kill, crate::bash::SignalScope::Group)
-		.unwrap();
+	p.signal(Signal::Kill).unwrap();
 	assert_eq!(wait(&mut p), ExitStatus::Signaled(Signal::Kill));
 	assert!(live(grandchild.pid), "the grandchild is outside the child's scope");
 	assert!(proc::signal_pinned(&grandchild, Signal::Kill).unwrap());
@@ -612,8 +602,7 @@ fn inherit_leftovers_track_the_child_itself() {
 	let left = s.leftovers().unwrap();
 	assert_eq!(left.len(), 1, "{left:?}");
 	assert_eq!((left[0].pid, left[0].group), (pid, pid), "the pid is its own scope");
-	p.signal(Signal::Kill, crate::bash::SignalScope::Group)
-		.unwrap();
+	p.signal(Signal::Kill).unwrap();
 	wait(&mut p);
 	drop(p);
 	assert!(s.leftovers().unwrap().is_empty(), "the test process itself is never listed");
@@ -639,8 +628,7 @@ fn stop_and_cont_reach_every_member_of_the_group() {
 			.iter()
 			.all(|m| m.state != ProcState::Stopped)
 	});
-	p.signal(Signal::Kill, crate::bash::SignalScope::Group)
-		.unwrap();
+	p.signal(Signal::Kill).unwrap();
 	assert_eq!(wait(&mut p), ExitStatus::Signaled(Signal::Kill));
 	until("group gone", || live_group(group).is_empty());
 }
@@ -781,15 +769,13 @@ fn a_scripts_term_does_not_escalate() {
 			.count()
 			>= 2
 	});
-	p.signal(Signal::Term, crate::bash::SignalScope::Group)
-		.unwrap();
+	p.signal(Signal::Term).unwrap();
 	thread::sleep(Duration::from_millis(500));
 	assert!(
 		proc::info(pid).is_some_and(|i| i.state != ProcState::Zombie),
 		"`kill -TERM` alone never kills"
 	);
-	p.signal(Signal::Kill, crate::bash::SignalScope::Group)
-		.unwrap();
+	p.signal(Signal::Kill).unwrap();
 	assert_eq!(wait(&mut p), ExitStatus::Signaled(Signal::Kill));
 }
 
@@ -1369,9 +1355,7 @@ fn one_engine_reader_feeds_every_external_it_is_handed_to() {
 	let mut child = spawner.spawn(reader).unwrap();
 	assert_eq!(wait(&mut child), ExitStatus::Exited(0));
 	assert_eq!(out.captured(), data, "the bystander's copy stole nothing");
-	bystander
-		.signal(Signal::Kill, crate::bash::SignalScope::Group)
-		.unwrap();
+	bystander.signal(Signal::Kill).unwrap();
 	assert_eq!(wait(&mut bystander), ExitStatus::Signaled(Signal::Kill));
 }
 

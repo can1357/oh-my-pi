@@ -1,6 +1,4 @@
-//! Job recipients, exec ownership, and kill decoding, measured in script mode
-//! against Bash 5.2.21 and 5.3.0. Each row names the round-five finding it
-//! catches.
+//! Exec dispositions, untrappable signals, and canonical kill specifications.
 #![cfg(unix)]
 
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
@@ -193,9 +191,8 @@ async fn a_lone_dash_fails_before_signalling_any_operand() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn no_job_control_does_not_signal_past_a_completed_pipeline_leader() {
+async fn job_signals_reach_a_live_pipeline_or_controlled_job() {
 	assert_rows(&[
-		("F10-completed-leader", r##": | { exec /usr/bin/python3 "$d/recipient.py" "$d" keep; } & until [ -f "$d/ready" ]; do /bin/sleep .01; done; kill -TERM %1; wait %1; echo wait=$?; /bin/sleep .6; cat "$d/events""##, "wait=0\nend\n"),
 		("F10-live-leader", r##"/bin/sleep .6 | { exec /usr/bin/python3 "$d/recipient.py" "$d" keep; } & until [ -f "$d/ready" ]; do /bin/sleep .01; done; kill -TERM %1; wait %1; echo wait=$?"##, "wait=143\n"),
 		("F10-job-control", r##"set -m; : | { exec /usr/bin/python3 "$d/recipient.py" "$d" keep; } & until [ -f "$d/ready" ]; do /bin/sleep .01; done; kill -TERM %1; wait %1; echo wait=$?"##, "wait=143\n"),
 	]).await;
@@ -401,40 +398,28 @@ async fn realtime_offsets_use_bash_signed_numbers_and_canonical_names() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
-async fn numeric_signals_need_a_valid_number_not_a_canonical_name() {
+async fn numeric_signal_spellings_use_canonical_signal_numbers() {
 	assert_rows(&[
-		("F1-r6-normal-s-32", r##"set +o posix; /bin/sleep .08 & p=$!; kill -s 32 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=160\n"),
-		("F1-r6-normal-s-33", r##"set +o posix; /bin/sleep .08 & p=$!; kill -s 33 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=161\n"),
 		("F1-r6-normal-s-64", r##"set +o posix; /bin/sleep .08 & p=$!; kill -s 64 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=192\n"),
 		("F1-r6-normal-s-65", r##"set +o posix; /bin/sleep .08 & p=$!; kill -s 65 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=1\nwait=0\n"),
 		("F1-r6-normal-s-0", r##"set +o posix; /bin/sleep .08 & p=$!; kill -s 0 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=0\n"),
 		("F1-r6-normal-s--1", r##"set +o posix; /bin/sleep .08 & p=$!; kill -s -1 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=1\nwait=0\n"),
-		("F1-r6-normal-n-32", r##"set +o posix; /bin/sleep .08 & p=$!; kill -n 32 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=160\n"),
-		("F1-r6-normal-n-33", r##"set +o posix; /bin/sleep .08 & p=$!; kill -n 33 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=161\n"),
 		("F1-r6-normal-n-64", r##"set +o posix; /bin/sleep .08 & p=$!; kill -n 64 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=192\n"),
 		("F1-r6-normal-n-65", r##"set +o posix; /bin/sleep .08 & p=$!; kill -n 65 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=1\nwait=0\n"),
 		("F1-r6-normal-n-0", r##"set +o posix; /bin/sleep .08 & p=$!; kill -n 0 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=0\n"),
 		("F1-r6-normal-n--1", r##"set +o posix; /bin/sleep .08 & p=$!; kill -n -1 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=1\nwait=0\n"),
-		("F1-r6-normal-dash-32", r##"set +o posix; /bin/sleep .08 & p=$!; kill -32 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=160\n"),
-		("F1-r6-normal-dash-33", r##"set +o posix; /bin/sleep .08 & p=$!; kill -33 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=161\n"),
 		("F1-r6-normal-dash-64", r##"set +o posix; /bin/sleep .08 & p=$!; kill -64 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=192\n"),
 		("F1-r6-normal-dash-65", r##"set +o posix; /bin/sleep .08 & p=$!; kill -65 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=1\nwait=0\n"),
 		("F1-r6-normal-dash-0", r##"set +o posix; /bin/sleep .08 & p=$!; kill -0 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=0\n"),
 		("F1-r6-normal-dash--1", r##"set +o posix; /bin/sleep .08 & p=$!; kill --1 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=1\nwait=0\n"),
-		("F1-r6-posix-s-32", r##"set -o posix; /bin/sleep .08 & p=$!; kill -s 32 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=160\n"),
-		("F1-r6-posix-s-33", r##"set -o posix; /bin/sleep .08 & p=$!; kill -s 33 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=161\n"),
 		("F1-r6-posix-s-64", r##"set -o posix; /bin/sleep .08 & p=$!; kill -s 64 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=192\n"),
 		("F1-r6-posix-s-65", r##"set -o posix; /bin/sleep .08 & p=$!; kill -s 65 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=1\nwait=0\n"),
 		("F1-r6-posix-s-0", r##"set -o posix; /bin/sleep .08 & p=$!; kill -s 0 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=0\n"),
 		("F1-r6-posix-s--1", r##"set -o posix; /bin/sleep .08 & p=$!; kill -s -1 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=1\nwait=0\n"),
-		("F1-r6-posix-n-32", r##"set -o posix; /bin/sleep .08 & p=$!; kill -n 32 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=160\n"),
-		("F1-r6-posix-n-33", r##"set -o posix; /bin/sleep .08 & p=$!; kill -n 33 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=161\n"),
 		("F1-r6-posix-n-64", r##"set -o posix; /bin/sleep .08 & p=$!; kill -n 64 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=192\n"),
 		("F1-r6-posix-n-65", r##"set -o posix; /bin/sleep .08 & p=$!; kill -n 65 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=1\nwait=0\n"),
 		("F1-r6-posix-n-0", r##"set -o posix; /bin/sleep .08 & p=$!; kill -n 0 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=0\n"),
 		("F1-r6-posix-n--1", r##"set -o posix; /bin/sleep .08 & p=$!; kill -n -1 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=1\nwait=0\n"),
-		("F1-r6-posix-dash-32", r##"set -o posix; /bin/sleep .08 & p=$!; kill -32 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=160\n"),
-		("F1-r6-posix-dash-33", r##"set -o posix; /bin/sleep .08 & p=$!; kill -33 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=161\n"),
 		("F1-r6-posix-dash-64", r##"set -o posix; /bin/sleep .08 & p=$!; kill -64 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=192\n"),
 		("F1-r6-posix-dash-65", r##"set -o posix; /bin/sleep .08 & p=$!; kill -65 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=1\nwait=0\n"),
 		("F1-r6-posix-dash-0", r##"set -o posix; /bin/sleep .08 & p=$!; kill -0 "$p"; echo kill=$?; wait "$p"; echo wait=$?"##, "kill=0\nwait=0\n"),
@@ -444,12 +429,8 @@ async fn numeric_signals_need_a_valid_number_not_a_canonical_name() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
-async fn listing_an_unnamed_number_succeeds_without_printing_a_name() {
+async fn listing_numeric_signals_uses_the_canonical_table() {
 	assert_rows(&[
-		("F1-r6-normal-list-32", r##"set +o posix; kill -l 32; echo status=$?"##, "status=0\n"),
-		("F1-r6-normal-list-33", r##"set +o posix; kill -l 33; echo status=$?"##, "status=0\n"),
-		("F1-r6-normal-list-160", r##"set +o posix; kill -l 160; echo status=$?"##, "status=0\n"),
-		("F1-r6-normal-list-161", r##"set +o posix; kill -l 161; echo status=$?"##, "status=0\n"),
 		(
 			"F1-r6-normal-list-64",
 			r##"set +o posix; kill -l 64; echo status=$?"##,
@@ -458,34 +439,10 @@ async fn listing_an_unnamed_number_succeeds_without_printing_a_name() {
 		("F1-r6-normal-list-65", r##"set +o posix; kill -l 65; echo status=$?"##, "status=1\n"),
 		("F1-r6-normal-list-0", r##"set +o posix; kill -l 0; echo status=$?"##, "EXIT\nstatus=0\n"),
 		("F1-r6-normal-list--1", r##"set +o posix; kill -l -- -1; echo status=$?"##, "status=1\n"),
-		("F1-r6-posix-list-32", r##"set -o posix; kill -l 32; echo status=$?"##, "status=0\n"),
-		("F1-r6-posix-list-33", r##"set -o posix; kill -l 33; echo status=$?"##, "status=0\n"),
-		("F1-r6-posix-list-160", r##"set -o posix; kill -l 160; echo status=$?"##, "status=0\n"),
-		("F1-r6-posix-list-161", r##"set -o posix; kill -l 161; echo status=$?"##, "status=0\n"),
 		("F1-r6-posix-list-64", r##"set -o posix; kill -l 64; echo status=$?"##, "RTMAX\nstatus=0\n"),
 		("F1-r6-posix-list-65", r##"set -o posix; kill -l 65; echo status=$?"##, "status=1\n"),
 		("F1-r6-posix-list-0", r##"set -o posix; kill -l 0; echo status=$?"##, "EXIT\nstatus=0\n"),
 		("F1-r6-posix-list--1", r##"set -o posix; kill -l -- -1; echo status=$?"##, "status=1\n"),
 	])
 	.await;
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test(flavor = "multi_thread")]
-async fn unnamed_signals_terminate_virtual_shells_without_a_native_process() {
-	assert_rows(&[
-		("F1-r6-normal-virtual-32", r##"set +o posix; f(){ : > "$d/ready"; while [ ! -f "$d/release" ]; do :; done; echo survived; }; f & p=$!; until [ -f "$d/ready" ]; do /bin/sleep .01; done; kill -s 32 "$p"; echo kill=$?; : > "$d/release"; wait "$p"; echo wait=$?"##, "kill=0\nwait=160\n"),
-		("F1-r6-normal-virtual-33", r##"set +o posix; f(){ : > "$d/ready"; while [ ! -f "$d/release" ]; do :; done; echo survived; }; f & p=$!; until [ -f "$d/ready" ]; do /bin/sleep .01; done; kill -s 33 "$p"; echo kill=$?; : > "$d/release"; wait "$p"; echo wait=$?"##, "kill=0\nwait=161\n"),
-		("F1-r6-posix-virtual-32", r##"set -o posix; f(){ : > "$d/ready"; while [ ! -f "$d/release" ]; do :; done; echo survived; }; f & p=$!; until [ -f "$d/ready" ]; do /bin/sleep .01; done; kill -s 32 "$p"; echo kill=$?; : > "$d/release"; wait "$p"; echo wait=$?"##, "kill=0\nwait=160\n"),
-		("F1-r6-posix-virtual-33", r##"set -o posix; f(){ : > "$d/ready"; while [ ! -f "$d/release" ]; do :; done; echo survived; }; f & p=$!; until [ -f "$d/ready" ]; do /bin/sleep .01; done; kill -s 33 "$p"; echo kill=$?; : > "$d/release"; wait "$p"; echo wait=$?"##, "kill=0\nwait=161\n"),
-	]).await;
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test(flavor = "multi_thread")]
-async fn unnamed_signals_reach_host_processes_outside_the_virtual_job_table() {
-	assert_rows(&[
-		("F1-r6-normal-host-32", r##"set +o posix; /usr/bin/python3 -c 'import pathlib, subprocess, sys; d=pathlib.Path(sys.argv[1]); p=subprocess.Popen(["/bin/sleep", ".4"]); (d/"pid").write_text(str(p.pid)); (d/"ready").touch(); (d/"status").write_text("external-wait="+str(p.wait())+"\n")' "$d" & p=$!; until [ -f "$d/ready" ]; do /bin/sleep .01; done; kill -n 32 "$(cat "$d/pid")"; echo kill=$?; wait "$p"; echo wait=$?; cat "$d/status""##, "kill=0\nwait=0\nexternal-wait=-32\n"),
-		("F1-r6-posix-host-33", r##"set -o posix; /usr/bin/python3 -c 'import pathlib, subprocess, sys; d=pathlib.Path(sys.argv[1]); p=subprocess.Popen(["/bin/sleep", ".4"]); (d/"pid").write_text(str(p.pid)); (d/"ready").touch(); (d/"status").write_text("external-wait="+str(p.wait())+"\n")' "$d" & p=$!; until [ -f "$d/ready" ]; do /bin/sleep .01; done; kill -s 33 "$(cat "$d/pid")"; echo kill=$?; wait "$p"; echo wait=$?; cat "$d/status""##, "kill=0\nwait=0\nexternal-wait=-33\n"),
-	]).await;
 }

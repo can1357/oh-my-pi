@@ -108,7 +108,7 @@ impl ExtProc for Fake {
 		}
 	}
 
-	fn signal(&mut self, sig: Signal, _scope: crate::bash::SignalScope) -> io::Result<()> {
+	fn signal(&mut self, sig: Signal) -> io::Result<()> {
 		self.signals.lock().push((self.pid, sig));
 		if matches!(sig, Signal::Term | Signal::Kill) && self.status.is_none() {
 			self.status = Some(match self.trap {

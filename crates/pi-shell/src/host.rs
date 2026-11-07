@@ -619,20 +619,14 @@ impl crate::bash::Host for PiHost {
 	}
 
 	fn signal_process(&mut self, pid: i32, signal: Option<Signal>) -> io::Result<()> {
-		self.signal_process_number(
-			pid,
-			signal.map_or(0, |sig| sig.number(crate::bash::Platform::current())),
-		)
-	}
-
-	fn signal_process_number(&mut self, pid: i32, number: u8) -> io::Result<()> {
 		// As pi's `kill`: `-0` only probes, so it may name anything.
-		if number != 0 {
+		if signal.is_some() {
 			check_signal_target(pid)?;
 		}
 		#[cfg(unix)]
 		{
-			let number = i32::from(number);
+			let number =
+				signal.map_or(0, |sig| i32::from(sig.number(crate::bash::Platform::current())));
 			// SAFETY: kill accepts integer process and signal numbers.
 			if unsafe { libc::kill(pid, number) } == 0 {
 				Ok(())
@@ -642,7 +636,7 @@ impl crate::bash::Host for PiHost {
 		}
 		#[cfg(not(unix))]
 		{
-			let _ = (pid, number);
+			let _ = (pid, signal);
 			Err(io::ErrorKind::Unsupported.into())
 		}
 	}
@@ -884,12 +878,8 @@ impl ExtProc for Observed {
 		Poll::Ready(status)
 	}
 
-	fn signal(&mut self, sig: Signal, scope: crate::bash::SignalScope) -> io::Result<()> {
-		self.child.signal(sig, scope)
-	}
-
-	fn signal_number(&mut self, number: u8, scope: crate::bash::SignalScope) -> io::Result<()> {
-		self.child.signal_number(number, scope)
+	fn signal(&mut self, sig: Signal) -> io::Result<()> {
+		self.child.signal(sig)
 	}
 
 	fn stop(&mut self) -> io::Result<()> {
