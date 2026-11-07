@@ -22,6 +22,7 @@
 - `ptree` commands with `subreaper: true` now reliably terminate all descendants on graceful shutdown.
 - `fatal()` in a worker thread now reaches the parent's `error` listeners instead of only exiting with code 1.
 - Fixed the terminal stderr guard leaking a copy of the terminal into processes spawned from native code.
+- Added `stderrSharesStdoutTerminal()`, which reports whether stderr is the terminal stdout writes to ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.16.0] - 2026-11-02
 
