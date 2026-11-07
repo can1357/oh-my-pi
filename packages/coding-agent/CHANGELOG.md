@@ -15,6 +15,8 @@
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
 ### Fixed
 
+- Providers with exhausted credits remain unavailable until a recovery probe succeeds, so workers use their fallback chain without spending another turn on the blocked account.
+
 - Workers skip unavailable providers across their configured quality chain and continue after quota failures, including with ordinary retries disabled ([#16532](https://github.com/can1357/oh-my-pi/pull/16532) by [@Komzpa](https://github.com/Komzpa)).
 
 - Exhausted providers stay excluded in sessions, benchmarks, per-call workers and the auth gateway until their reset or cooldown expires.

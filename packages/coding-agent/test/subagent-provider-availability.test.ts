@@ -69,7 +69,15 @@ describe("subagent runtime fallback on a real provider error", () => {
 	async function runPinnedWorker(
 		id: string,
 		roleChain: string[] | undefined,
-		mode: "excluded" | "quota" | "race" | "all" | "all-midrun" = "quota",
+		mode:
+			| "excluded"
+			| "quota"
+			| "race"
+			| "all"
+			| "all-midrun"
+			| "billing"
+			| "expired-billing"
+			| "recovered-billing" = "quota",
 	) {
 		const authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("primary", "test-key");
@@ -95,7 +103,37 @@ describe("subagent runtime fallback on a real provider error", () => {
 					? { content: ["ok"] }
 					: { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data: "recovered" } }] },
 		});
-		const mocks = [primary, fallback];
+		const billing = mode === "billing" || mode === "expired-billing" || mode === "recovered-billing";
+		let billingRequests = 0;
+		const server = billing
+			? Bun.serve({
+					port: 0,
+					hostname: "127.0.0.1",
+					fetch() {
+						billingRequests++;
+						return Response.json(
+							{
+								error: {
+									message: "Billing account is not in good standing",
+									type: "billing_error",
+									param: "insufficient_credits",
+								},
+							},
+							{ status: 402 },
+						);
+					},
+				})
+			: undefined;
+		const billingModel = { ...primary, api: "openai-completions" as const, baseUrl: server?.url.href ?? "" };
+		const mocks = [billing ? billingModel : primary, fallback];
+		if (mode === "expired-billing" || mode === "recovered-billing") {
+			recordProviderFailure(
+				"primary",
+				{ status: 402, type: "billing_error", code: "insufficient_credits" },
+				Date.now() - 2 * availability.PROVIDER_EXHAUSTION_COOLDOWN_MS,
+			);
+			await availability.probeUnavailableProviders(async () => ({ available: mode === "recovered-billing" }));
+		}
 		if (mode === "excluded" || mode === "all") recordProviderFailure("primary", { code: "quota_exceeded" });
 		if (mode === "all" || mode === "all-midrun") recordProviderFailure("fallback", { status: 401 });
 		const originalKey = modelRegistry.getApiKey.bind(modelRegistry);
@@ -138,7 +176,7 @@ describe("subagent runtime fallback on a real provider error", () => {
 					"compaction.enabled": false,
 					"retry.baseDelayMs": 1,
 					"retry.modelFallback": false,
-					"retry.enabled": mode !== "quota" && mode !== "all-midrun",
+					"retry.enabled": !billing && mode !== "quota" && mode !== "all-midrun",
 					"retry.maxRetries": 2,
 					"todo.enabled": false,
 					"todo.reminders": false,
@@ -156,19 +194,24 @@ describe("subagent runtime fallback on a real provider error", () => {
 				enableMCP: false,
 				enableIrc: false,
 			});
-			return { result, primaryRequests: primary.calls.length, fallbackRequests: fallback.calls.length };
+			return {
+				result,
+				primaryRequests: billing ? billingRequests : primary.calls.length,
+				fallbackRequests: fallback.calls.length,
+			};
 		} finally {
+			server?.stop(true);
 			authStorage.close();
 		}
 	}
 
-	for (const mode of ["excluded", "quota", "race"] as const) {
+	for (const mode of ["excluded", "quota", "race", "billing", "expired-billing", "recovered-billing"] as const) {
 		it(`${mode}: a pinned worker continues on its configured chain without a profile switch`, async () => {
 			const { result, primaryRequests, fallbackRequests } = await runPinnedWorker(mode, undefined, mode);
 			expect(result.error).toBeUndefined();
 			expect(result.exitCode).toBe(0);
 			expect(result.resolvedModel).toBe("fallback/working-model");
-			expect(primaryRequests).toBe(mode === "quota" ? 1 : 0);
+			expect(primaryRequests).toBe(["quota", "billing", "recovered-billing"].includes(mode) ? 1 : 0);
 			expect(fallbackRequests).toBeGreaterThan(0);
 		});
 	}
