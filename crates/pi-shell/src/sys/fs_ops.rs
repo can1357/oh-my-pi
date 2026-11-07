@@ -65,6 +65,7 @@ pub fn chown(path: &Path, uid: Option<u32>, gid: Option<u32>, follow: bool) -> i
 }
 
 /// `sync(2)`.
+#[cfg_attr(not(unix), expect(clippy::missing_const_for_fn, reason = "the unix body calls sync(2)"))]
 pub fn sync() {
 	#[cfg(unix)]
 	// SAFETY: `sync` takes no arguments and cannot fail.

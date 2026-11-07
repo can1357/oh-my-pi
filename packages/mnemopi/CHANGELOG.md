@@ -7,6 +7,8 @@
 - Batched episodic graph frontier traversal in `findRelatedMemories` (1 query per depth level) and hoisted entity extraction queries in `ingestMemory` to eliminate $O(N)$ redundant queries per ingested memory ([#17570](https://github.com/can1357/oh-my-pi/pull/17570) by [@GTanger](https://github.com/GTanger))
 - Added composite index `idx_cf_spo` on `consolidated_facts(subject, predicate, object)` to accelerate subject/predicate/object lookups during veracity consolidation ([#17570](https://github.com/can1357/oh-my-pi/pull/17570) by [@GTanger](https://github.com/GTanger))
 - Cached parsed embeddings and precomputed norms on `beam.caches` in `vectorSimilarities` using content fingerprints to avoid repeated JSON parsing and norm computation on recall ([#17570](https://github.com/can1357/oh-my-pi/pull/17570) by [@GTanger](https://github.com/GTanger))
+## [18.18.0] - 2026-11-07
+
 ### Fixed
 
 - Fixed embedding rebuilds failing on hosted APIs that cap the inputs per request: `embed()` now splits large lists into requests of at most `MNEMOPI_EMBEDDING_BATCH_SIZE` texts (default 64; set `10` for DashScope) or the `embeddings.batchSize` runtime option, and returns `null` when the API returns a different number of vectors than texts ([#18278](https://github.com/can1357/oh-my-pi/pull/18278) by [@aleister1102](https://github.com/aleister1102))
