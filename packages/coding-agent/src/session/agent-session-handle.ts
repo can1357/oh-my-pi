@@ -87,8 +87,12 @@ export interface AgentSessionLoopHandle {
 
 /** Advisor overview of a session, as reported by `getAdvisorStatusOverview`. */
 export interface AgentSessionAdvisorOverview {
-	/** Whether any advisor is configured for the session. */
+	/** Whether the session's advisor switch is on. */
 	configured: boolean;
+	/** Whether at least one advisor runtime is live; set by every live session. */
+	active?: boolean;
+	/** Model of the first live advisor, when one is running. */
+	model?: Model;
 	/** Per-advisor status rows. */
 	advisors: AdvisorStatusOverviewEntry[];
 }
@@ -254,7 +258,7 @@ export function isAgentViewSession(session: AgentSessionHandle): session is Agen
 	return typeof Reflect.get(session, "activeToolExecutionUpdates") === "function";
 }
 
-/** Extra surface the TUI reads on a focused subagent (`ctx.viewSession`). */
+/** Extra surface the TUI reads and drives on a focused subagent (`ctx.viewSession`). */
 export interface AgentViewSession extends AgentSessionHandle {
 	/** Agent loop pause flag, live state, and pending tool results. */
 	readonly agent: AgentViewLoop;
@@ -399,4 +403,10 @@ export interface AgentViewSession extends AgentSessionHandle {
 	enableIdleMaintenance(options?: IdleMaintenanceOptions): void;
 	/** Re-evaluate idle maintenance scheduling. */
 	refreshIdleMaintenance(): void;
+	/** Whether this session's own advisor switch is on. */
+	isAdvisorEnabled(): boolean;
+	/** Set this session's own advisor switch; returns whether an advisor is now live. */
+	setAdvisorEnabled(enabled: boolean): boolean;
+	/** Flip this session's own advisor switch; returns whether an advisor is now live. */
+	toggleAdvisorEnabled(): boolean;
 }
