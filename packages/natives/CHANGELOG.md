@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- The edit tool's search for a missing authored path now runs on the filesystem runtime with every other traversal, so an edit whose path is not on disk no longer holds the worker threads the embedded shell and every other native call are scheduled on ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
-- A directory walk can now be given the flag it ends on, so the caller stops it from its own frame. The edit tool's missing-path search uses it: an edit tool call that goes away mid-search stops the search at its next directory entry, even where the search is deep inside a directory the ignore rules exclude, instead of reading that directory to the end ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
+- An edit whose path is missing on disk no longer stalls the embedded shell and other native calls while it searches for the file, and a cancelled edit stops that search at once ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
+- macOS spellchecking (typo underlines, autocorrect, `apple` word completion) no longer leaks native memory for the life of the process ([#18285](https://github.com/can1357/oh-my-pi/pull/18285) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.18.0] - 2026-11-07
 
@@ -14,9 +14,6 @@
 - Fixed `find()` missing elements more than 24 levels down, such as VS Code's editor; it now searches 64 levels deep ([#18221](https://github.com/can1357/oh-my-pi/pull/18221) by [@will-bogusz](https://github.com/will-bogusz))
 - `glob`, `grep`, `fuzzyFind`, `ast_grep` and `ast_edit` now run their directory traversal on a filesystem runtime of their own, so a search over a large or cold tree can no longer take the worker threads that the embedded shell and every other native call are scheduled on. Those threads are named `pi-fs-worker`, so a stall in a search is tellable apart from a stall elsewhere.
 - Fixed a workspace tree whose native addon does not match its checkout failing with `undefined is not a constructor` at the callsite: a class the addon lacks now throws a message naming the addon file, both releases and `bun run build:native` — from its constructor and from any static entrypoint — and the loader reports that mismatch once as it loads ([#18230](https://github.com/can1357/oh-my-pi/pull/18230) by [@sjawhar](https://github.com/sjawhar))
-### Fixed
-
-- Fixed macOS spellchecking (typo underlines, autocorrect and `apple` word completion) leaking every spell-server object it created for the life of the process, so long sessions grew by tens of MB of native memory ([#18285](https://github.com/can1357/oh-my-pi/pull/18285) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.17.0] - 2026-11-06
 

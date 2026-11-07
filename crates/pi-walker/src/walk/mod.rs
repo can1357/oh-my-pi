@@ -62,24 +62,12 @@ pub(crate) use self::parallel::Sink;
 use self::{arena::Arena, parallel::Stored};
 use crate::fs::{Detail, Dir, FileType, Fs, Session};
 
-/// A caller's handle on one walk's stop flag.
+/// A caller's handle on one walk's stop flag ([`Options::stop`]).
 ///
-/// A walk ends on a flag of its own, which [`walk`] and [`collect`] set when
-/// their consumer is dropped. Handing the caller a clone of that same flag
-/// lets it end the walk from its own frame, with no scheduler turn in
-/// between. That is the difference that matters when the walk is driven by a
-/// task on a saturated runtime: dropping the caller can only abort that task,
-/// and the abort reaches the walk when a worker next polls it, which is not
-/// until the workers come back out of their filesystem syscalls.
-///
-/// The flag is read before each directory and before each directory record,
-/// ahead of the prune and ignore filters, so a worker partway through a
-/// wholly ignored directory stops at its next record rather than at the end
-/// of it.
-///
-/// One per walk: a flag that is already set stops its walk at once, and a
-/// flag shared between walks stops all of them. The serial [`Tree`] does not
-/// read it.
+/// Setting it ends the walk at its next directory or record, ahead of the
+/// prune and ignore filters, with no scheduler turn in between: a task abort
+/// reaches a walk only when a worker next polls it. One flag per walk; the
+/// serial [`Tree`] does not read it.
 #[derive(Clone, Debug, Default)]
 pub struct Stop(Arc<AtomicBool>);
 
