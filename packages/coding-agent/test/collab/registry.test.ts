@@ -320,8 +320,8 @@ describe("collab registry", () => {
 
 	it("keeps a host with an oversized session name or cwd listable by bounding snapshot fields on the wire", async () => {
 		const dir = await tempDir();
-		// Each of these alone would push the snapshot JSON past the 64 KiB response cap.
-		const f = makeFixture({ sessionName: "n".repeat(100_000), cwd: `/deep/${"d".repeat(100_000)}` });
+		// Each of these alone would push the snapshot JSON past the 128 KiB response cap.
+		const f = makeFixture({ sessionName: "n".repeat(200_000), cwd: `/deep/${"d".repeat(200_000)}` });
 		await publish(dir, f);
 
 		const hosts = await listCollabHosts({ dir });

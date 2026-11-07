@@ -146,6 +146,8 @@ export function toJobWire(job: AsyncJob): AsyncJobWire {
 		resultText: job.resultText,
 		errorText: job.errorText,
 		structured: job.structured,
+		report: job.report,
+		runToken: job.runToken,
 		progressText: job.progressText,
 		latestDetails: job.latestDetails,
 		ownerId: job.ownerId,
@@ -252,7 +254,7 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 		waitForOwnerJobs: (manager, ownerId, options) => manager.waitForOwnerJobs(ownerId, options),
 		cancelAndReapOwnerJobs: (manager, ownerId, deadlineAt) => manager.cancelAndReapOwnerJobs(ownerId, deadlineAt),
 		drainDeliveries: (manager, options) => manager.drainDeliveries(options),
-		isDeliverySuppressed: (manager, jobId) => manager.isDeliverySuppressed(jobId),
+		isDeliverySuppressed: (manager, jobId, expectedJob) => manager.isDeliverySuppressed(jobId, expectedJob),
 		whenSettled: async (manager, jobId) => {
 			await manager.getJob(jobId)?.promise;
 		},

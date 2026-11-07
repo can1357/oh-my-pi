@@ -9,9 +9,12 @@
 ### Added
 
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+- Task results now carry an immutable public report (`artifact://` id, SHA-256, byte count, up to 4 MiB) in the parent's artifacts that `wait`, automatic delivery, and `proc://` keep across previews, follow-up turns, and reused job names; an unavailable or incomplete report is marked partial ([#18403](https://github.com/can1357/oh-my-pi/pull/18403) by [@ericjuta](https://github.com/ericjuta))
+- Added `omp collab send` for authenticated local agent-to-agent messages: every interactive session publishes a private local endpoint (also with `collab.autoStart: off`), and the receiver records a `collab:agent-message` entry attributed to the agent, never a human prompt ([#18403](https://github.com/can1357/oh-my-pi/pull/18403) by [@ericjuta](https://github.com/ericjuta))
 
 ### Fixed
 
+- `wait` and automatic delivery no longer treat a reused job id's new run as the earlier one: consumption, suppression, and reports stay with the run that produced them, including for subagents on worker threads ([#18403](https://github.com/can1357/oh-my-pi/pull/18403) by [@ericjuta](https://github.com/ericjuta))
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
 - A `bash.patterns` `deny` rule now blocks a command anywhere in a `;`, `|`, `||` or `&&` line even when an earlier `prompt` rule matches another part of it, and project settings can no longer override the operator's `deny` or `prompt` patterns with `allow` ([#18349](https://github.com/can1357/oh-my-pi/pull/18349) by [@asuffield](https://github.com/asuffield))
 - A subagent stopped by the session cost cap (`--max-cost` / `session.maxCost`) now reports the cap's refusal instead of "Subagent ended without a final message" ([#18362](https://github.com/can1357/oh-my-pi/issues/18362))

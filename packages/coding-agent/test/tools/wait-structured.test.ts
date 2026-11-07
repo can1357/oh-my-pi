@@ -10,9 +10,9 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import type { AsyncJobRunResult } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { StructuredSubagentOutput, TaskReportReference } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { buildJobResult } from "@oh-my-pi/pi-coding-agent/async/job-control";
+import { buildJobResult, snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";
 
 const SELF_ID = "Main";
 
@@ -118,6 +118,109 @@ describe("wait structured output rendering", () => {
 		expect(text).not.toContain("schema unavailable");
 		expect(text).not.toContain("full payload at");
 		expect(text).not.toContain("```json");
+	});
+
+	test("wait keeps each run's report after consumption and job ID reuse without retargeting old snapshots", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const session = makeSession(manager);
+		const reports = ["101", "102", "103"].map((id): TaskReportReference => ({
+			version: 1,
+			runId: `run-${id}`,
+			status: "complete",
+			artifact: { id, uri: `artifact://${id}`, sha256: "a".repeat(64), bytes: 12 },
+		}));
+		const registerTask = (report: TaskReportReference) =>
+			manager.register("task", report.runId, async () => ({ text: report.runId, report }), {
+				ownerId: SELF_ID,
+				agentId: "SharedAgent",
+				id: "RepeatedJob",
+			});
+		try {
+			const taskIds = reports.slice(0, 2).map(registerTask);
+			const taskJobs = taskIds.map(id => manager.getJob(id)!);
+			await Promise.all(taskJobs.map(job => job.promise));
+			expect(taskIds[0]).toBe("RepeatedJob");
+			expect(taskIds[1]).not.toBe(taskIds[0]);
+
+			const genericJobs = (["bash", "eval"] as const).map(type => {
+				const id = manager.register(type, type, async () => `${type} output`, { ownerId: SELF_ID });
+				return manager.getJob(id)!;
+			});
+			await Promise.all(genericJobs.map(job => job.promise));
+			const jobs = [...taskJobs, ...genericJobs];
+			const beforeConsume = snapshotJobs(session, jobs);
+			const firstWait = buildJobResult(session, manager, "wait", jobs, []);
+			const afterConsume = snapshotJobs(session, jobs);
+			const secondWait = buildJobResult(session, manager, "wait", jobs, []);
+			const expectedTasks = reports.slice(0, 2).map(report => ({
+				agentUrlId: "SharedAgent",
+				resultText: report.runId,
+				report,
+			}));
+			for (const captured of [beforeConsume, firstWait.details!.jobs!]) {
+				expect(captured.slice(0, 2)).toMatchObject(expectedTasks);
+				for (const generic of captured.slice(2)) expect(generic).not.toHaveProperty("report");
+			}
+			for (const captured of [afterConsume, secondWait.details!.jobs!]) {
+				expect(captured.slice(0, 2).map(job => job.report)).toEqual(reports.slice(0, 2));
+				for (const job of captured) expect(job).not.toHaveProperty("resultText");
+				for (const generic of captured.slice(2)) expect(generic).not.toHaveProperty("report");
+			}
+
+			// Expire retained rows through the public lifecycle API, without timing races.
+			expect(manager.evictCompletedJobs({ ownerId: SELF_ID })).toBe(4);
+			for (const id of taskIds) expect(manager.getJob(id)).toBeUndefined();
+			const newId = registerTask(reports[2]!);
+			expect(newId).toBe(taskIds[0]!);
+			const newJob = manager.getJob(newId)!;
+			await newJob.promise;
+			const newSnapshot = snapshotJobs(session, [newJob]);
+			// Re-project retained rows before the replacement result is consumed, too.
+			expect(snapshotJobs(session, taskJobs)).toMatchObject([
+				{ report: { runId: "run-101", artifact: { uri: "artifact://101" } } },
+				{ report: { runId: "run-102", artifact: { uri: "artifact://102" } } },
+			]);
+			const staleWait = buildJobResult(session, manager, "wait", taskJobs, []);
+			expect(staleWait.details!.jobs!).toMatchObject([
+				{ report: { runId: "run-101", artifact: { uri: "artifact://101" } } },
+				{ report: { runId: "run-102", artifact: { uri: "artifact://102" } } },
+			]);
+			expect(manager.isJobResultConsumed(newId)).toBe(false);
+			const newWait = buildJobResult(session, manager, "wait", [newJob], []);
+			for (const captured of [newSnapshot, newWait.details!.jobs!]) {
+				expect(captured).toMatchObject([
+					{ resultText: "run-103", report: { runId: "run-103", artifact: { uri: "artifact://103" } } },
+				]);
+			}
+			const newAfterConsume = snapshotJobs(session, [newJob]);
+			expect(newAfterConsume[0]).not.toHaveProperty("resultText");
+			expect(newAfterConsume[0]?.report).toEqual(reports[2]);
+
+			// Even re-projecting the old rows must not resolve the now-reused ID.
+			const oldRowsAfterReuse = snapshotJobs(session, taskJobs);
+			expect(oldRowsAfterReuse).toMatchObject(expectedTasks);
+			for (const captured of [
+				beforeConsume,
+				firstWait.details!.jobs!,
+				afterConsume,
+				secondWait.details!.jobs!,
+				oldRowsAfterReuse,
+			]) {
+				expect(captured.slice(0, 2)).toMatchObject([
+					{ report: { runId: "run-101", artifact: { uri: "artifact://101" } } },
+					{ report: { runId: "run-102", artifact: { uri: "artifact://102" } } },
+				]);
+			}
+			for (const captured of [beforeConsume, firstWait.details!.jobs!]) {
+				expect(captured.slice(0, 2)).toMatchObject(expectedTasks);
+			}
+			for (const captured of [afterConsume, secondWait.details!.jobs!]) {
+				expect(captured.slice(0, 2).map(job => job.report)).toEqual(reports.slice(0, 2));
+				for (const job of captured) expect(job).not.toHaveProperty("resultText");
+			}
+		} finally {
+			await manager.dispose();
+		}
 	});
 
 	test("advertises the disambiguated agentId, not the collision-suffixed job id", async () => {

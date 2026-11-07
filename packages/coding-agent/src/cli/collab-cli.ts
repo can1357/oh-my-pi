@@ -1,7 +1,6 @@
 /**
- * CLI handlers for local Collab discovery and explicit link retrieval.
- * Listing returns metadata only; capabilities travel over authenticated IPC
- * only when a caller requests a link.
+ * CLI handlers for local Collab discovery, explicit links and agent messaging.
+ * Listing returns metadata only; capabilities travel over authenticated IPC.
  */
 import { formatAge } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -10,8 +9,11 @@ import {
 	type CollabHostSnapshot,
 	type CollabListOptions,
 	type CollabResolvedLink,
+	type CollabSendReceipt,
+	type CollabSendRequest,
 	listCollabHosts,
 	resolveCollabHostLink,
+	sendCollabAgentMessage,
 } from "../collab/registry";
 import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -27,6 +29,14 @@ export interface CollabLinkCommandArgs {
 	selector: string;
 	/** Request a view-only link instead of control access. */
 	view: boolean;
+	json: boolean;
+	/** Registry overrides (tests). */
+	registry?: CollabListOptions;
+}
+
+export interface CollabSendCommandArgs {
+	sender: { instanceId: string; generation: number };
+	request: CollabSendRequest;
 	json: boolean;
 	/** Registry overrides (tests). */
 	registry?: CollabListOptions;
@@ -75,7 +85,7 @@ export async function runCollabListCommand(
 			`started ${formatAge(Math.round((Date.now() - host.startedAt) / 1000)) || "just now"}`,
 			`${guests} ${guests === 1 ? "guest" : "guests"}`,
 			host.access,
-			`relay ${host.relayConnected ? "connected" : "reconnecting"}`,
+			host.access === "local" ? "relay off" : `relay ${host.relayConnected ? "connected" : "reconnecting"}`,
 		];
 		if (host.inputRequired) details.push("input required");
 		if (host.busy !== null) details.push(host.busy ? "working" : "idle");
@@ -83,7 +93,9 @@ export async function runCollabListCommand(
 		print(`${host.instanceId}  ${session}  ${chalk.dim(cwd)}`);
 		print(`  ${chalk.dim(details.join(" · "))}`);
 	}
-	print(chalk.dim("Get a link: omp collab link <instanceId|pid> [--view]"));
+	if (hosts.some(host => host.access !== "local")) {
+		print(chalk.dim("Get a link: omp collab link <instanceId|pid> [--view]"));
+	}
 }
 
 export async function runCollabLinkCommand(
@@ -97,4 +109,20 @@ export async function runCollabLinkCommand(
 		return;
 	}
 	print(link.url);
+}
+
+/** Reports admission to the receiving session, not completion of an agent turn. */
+export async function runCollabSendCommand(
+	args: CollabSendCommandArgs,
+	print: (line: string) => void = line => console.log(line),
+): Promise<void> {
+	const receipt: CollabSendReceipt = await sendCollabAgentMessage(args.sender, args.request, args.registry);
+	if (args.json) {
+		print(JSON.stringify(receipt, null, 2));
+		return;
+	}
+	print(
+		`Admitted ${sanitizeDisplayLine(receipt.requestId)} to ${sanitizeDisplayLine(receipt.recipient.instanceId)} ` +
+			`(generation ${receipt.recipient.generation}, ${receipt.admission}); agent turn not awaited.`,
+	);
 }

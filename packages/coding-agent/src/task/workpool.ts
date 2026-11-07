@@ -416,6 +416,7 @@ export class WorkPool {
 							eventBus: this.session.eventBus,
 							subagentEventBus: this.session.subagentEventBus,
 							artifactsDir: this.session.getSessionFile()?.slice(0, -6),
+							parentArtifactManager: this.session.getArtifactManager?.() ?? undefined,
 							maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 							completionProbe: isCompletionProbeEnabled(this.session.settings, this.session.taskDepth ?? 0),
 							...softRequestBudgetFor(this.policy.agent.name, this.session.settings),

@@ -1,6 +1,8 @@
 /**
- * Contract: the CollabHost wires its lifetime to the local host registry
- * (#6099). It publishes exactly once — and only after the relay connection
+ * Contract: a standalone CollabHost wires its lifetime to the local host
+ * registry (#6099); controller-owned hosts reuse the controller's publication
+ * (covered by controller.test.ts). A standalone host publishes exactly once
+ * — and only after the relay connection
  * succeeds — serves metadata without links, hands out a link only for its
  * current generation and published access, withdraws on every teardown path
  * (explicit stop, terminal relay close), suspends without withdrawing while

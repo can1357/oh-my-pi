@@ -2473,6 +2473,38 @@ export interface AgentProgress {
 	inflightTaskDetails?: TaskToolDetails;
 }
 
+/** Numeric immutable artifact containing the run's child-owned public report. */
+export interface TaskReportArtifact {
+	readonly id: string;
+	readonly uri: string;
+	readonly sha256: string;
+	readonly bytes: number;
+}
+
+/** Producer-owned snapshot identity, independent of mutable agent and job names. */
+export type TaskReportReference = {
+	readonly version: 1;
+	readonly runId: string;
+} & (
+	| {
+			readonly status: "complete";
+			readonly artifact: TaskReportArtifact;
+			readonly reason?: never;
+	  }
+	| {
+			readonly status: "partial";
+			readonly artifact?: TaskReportArtifact;
+			readonly reason:
+				| "failed"
+				| "aborted"
+				| "schema-invalid"
+				| "too-large"
+				| "storage-unavailable"
+				| "storage-failed"
+				| "empty"
+				| "history-unavailable";
+	  }
+);
 /** Result from a single agent execution */
 export interface SingleResult {
 	index: number;
@@ -2494,6 +2526,8 @@ export interface SingleResult {
 	 * selected an output schema or strict schema mode.
 	 */
 	structuredOutput?: StructuredSubagentOutput;
+	/** Immutable public report for this invocation, captured before output previewing. */
+	report?: TaskReportReference;
 	durationMs: number;
 	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
 	tokens: number;

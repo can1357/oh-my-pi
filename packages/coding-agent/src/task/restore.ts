@@ -23,7 +23,11 @@ import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { EventBus } from "../utils/event-bus";
 import { runSubagentFollowUpTurn, softRequestBudgetFor } from "./executor";
-import { persistedAgentDefinition, persistedAgentName } from "./persisted-revive";
+import {
+	persistedAgentDefinition,
+	persistedAgentName,
+	resolvePersistedReportArtifactManager,
+} from "./persisted-revive";
 import { formatTaskResultSummary } from "./result-summary";
 import { cfgTaskMaxRuntimeMs } from "./settings";
 
@@ -99,6 +103,10 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 					signal,
 					eventBus: options.eventBus,
 					subagentEventBus: options.subagentEventBus,
+					parentArtifactManager: resolvePersistedReportArtifactManager(
+						ref,
+						session.sessionManager.getArtifactManager() ?? undefined,
+					),
 					artifactsDir: path.dirname(sessionFileOfRef),
 					maxRuntimeMs: cfgTaskMaxRuntimeMs.get(session.settings),
 					...softRequestBudgetFor(agentName, session.settings),
@@ -106,9 +114,9 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 				const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 				const structuredOutput = result.structuredOutput;
 				if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
-					throw new AsyncJobError(text, structuredOutput);
+					throw new AsyncJobError(text, structuredOutput, result.report);
 				}
-				return structuredOutput ? { text, structured: structuredOutput } : text;
+				return { text, structured: structuredOutput, report: result.report };
 			},
 			{ id, agentId: id, ownerId: ref.parentId },
 		);

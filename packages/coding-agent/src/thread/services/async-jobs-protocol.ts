@@ -46,6 +46,8 @@ export interface AsyncJobWire {
 	readonly resultText?: string;
 	readonly errorText?: string;
 	readonly structured?: AsyncJob["structured"];
+	readonly report?: AsyncJob["report"];
+	readonly runToken?: string;
 	readonly progressText?: string;
 	readonly latestDetails?: AsyncJobDetails;
 	readonly ownerId?: string;
@@ -156,7 +158,10 @@ export type AsyncJobManagerProtocol = {
 	>;
 	cancelAndReapOwnerJobs: RpcMethod<[ownerId: string, deadlineAt: number], AsyncJobReapResult>;
 	drainDeliveries: RpcMethod<[options: { timeoutMs?: number; filter?: AsyncJobFilter } | undefined], boolean>;
-	isDeliverySuppressed: RpcMethod<[jobId: string], boolean>;
+	isDeliverySuppressed: RpcMethod<
+		[jobId: string, expectedJob: Pick<AsyncJob, "runToken" | "report"> | undefined],
+		boolean
+	>;
 	/** Resolves once the job's run promise settled (immediately for unknown ids). */
 	whenSettled: RpcMethod<[jobId: string], void>;
 	/** The job's abort signal in wire form, or undefined for unknown ids. */

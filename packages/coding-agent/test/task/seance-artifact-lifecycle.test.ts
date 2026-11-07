@@ -8,7 +8,9 @@ import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { sessionResolveContext } from "@oh-my-pi/pi-coding-agent/internal-urls/context";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { ArtifactManager, type ArtifactManagerApi } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -16,12 +18,14 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { readTaskReportHistory } from "@oh-my-pi/pi-coding-agent/task/report";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { PreparedSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import type { TaskReportReference } from "@oh-my-pi/pi-tui/tools/task";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { localSession } from "../helpers/local-session";
 
@@ -351,6 +355,281 @@ describe("seance artifact lifecycle", () => {
 				.catch(() => false);
 			authStorage.close();
 			setAgentDir(previousAgentDir);
+		}
+	});
+
+	it("keeps public reports in the parent namespace through real warm and cold revival and release", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-report-owner-");
+		const cwd = path.join(tempDir.path(), "project");
+		const sourceFile = path.join(tempDir.path(), "source", "historical.jsonl");
+		const id = "SeanceReportOwner";
+		const parentId = "Main";
+		await fs.mkdir(cwd, { recursive: true });
+		await fs.mkdir(path.dirname(sourceFile), { recursive: true });
+		const timestamp = "2026-10-01T00:00:00.000Z";
+		const sourceEntries = [
+			{ type: "session", version: CURRENT_SESSION_VERSION, id: "report-source", timestamp, cwd },
+			{
+				type: "session_init",
+				id: "source-init",
+				parentId: null,
+				timestamp,
+				systemPrompt: ["historical source contract"],
+				task: "historical task",
+				tools: ["read"],
+				agent: "task",
+				spawns: "*",
+			},
+			{
+				type: "message",
+				id: "source-message",
+				parentId: "source-init",
+				timestamp,
+				message: { role: "user", content: "historical request", timestamp: 1 },
+			},
+		];
+		const sourceText = `${sourceEntries.map(entry => JSON.stringify(entry)).join("\n")}\n`;
+		await Bun.write(sourceFile, sourceText);
+
+		const mock = createMockModel({
+			provider: "mock",
+			id: "seance-report-owner",
+			responses: [{ content: ["Initial public report: café."] }],
+		});
+		registerMockApi(MOCK_API_SOURCE);
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime(mock.model.provider, "test-key");
+		const modelRegistry = makeModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"), mock.model);
+		const settings = Settings.isolated({
+			"task.agentIdleTtlMs": 0,
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+			"launch.enabled": false,
+		});
+		const eventBus = new EventBus();
+		const previousAgentDir = getAgentDir();
+		let parentManager: SessionManager | undefined;
+
+		try {
+			setAgentDir(path.join(tempDir.path(), "agent"));
+			const agent = getBundledAgent("seance");
+			if (!agent) throw new Error("Expected the bundled seance agent");
+			parentManager = SessionManager.create(cwd, path.join(tempDir.path(), "parent-sessions"));
+			const parentArtifactManager = new ArtifactManager(path.join(tempDir.path(), "parent-reports"));
+			parentManager.adoptArtifactManager(parentArtifactManager);
+			await parentManager.ensureOnDisk();
+			const parentSessionFile = parentManager.getSessionFile();
+			if (!parentSessionFile) throw new Error("Expected a persisted parent session");
+			// Source, child transcripts, and public numeric reports have independent roots.
+			const artifactsDir = parentSessionFile.slice(0, -".jsonl".length);
+			const parentInbox: Array<Parameters<AgentSession["deliverIrcMessage"]>[0]> = [];
+			const parentSession = {
+				...revivalParent(cwd),
+				getAgentId: () => parentId,
+				sessionManager: parentManager,
+				isDisposed: false,
+				deliverIrcMessage: async (message: Parameters<AgentSession["deliverIrcMessage"]>[0]) => {
+					parentInbox.push(message);
+					return "injected" as const;
+				},
+			} as AgentSession;
+			AgentRegistry.global().register({
+				id: parentId,
+				displayName: "parent",
+				kind: "main",
+				session: parentSession,
+				sessionFile: parentSessionFile,
+				status: "idle",
+			});
+			const parentZeroText = "Unrelated parent artifact zero.\n";
+			const parentOneText = "Unrelated parent artifact one.\n";
+			const privateText = "Private child artifact zero; never public.\n";
+			const parentZero = await parentArtifactManager.save(parentZeroText, "read");
+			const parentOne = await parentArtifactManager.save(parentOneText, "bash");
+			expect([parentZero, parentOne]).toEqual(["0", "1"]);
+
+			async function artifactBytes(manager: ArtifactManagerApi, artifactId: string): Promise<Buffer> {
+				const file = await manager.getPath(artifactId);
+				if (!file) throw new Error(`Missing artifact ${artifactId} in ${manager.dir}`);
+				return fs.readFile(file);
+			}
+
+			async function expectReport(
+				report: TaskReportReference | undefined,
+				text: string,
+			): Promise<TaskReportReference> {
+				if (!report) throw new Error("Expected a typed public report");
+				expect(report.status).toBe("complete");
+				expect(report.runId).toMatch(/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/i);
+				if (!report.artifact) throw new Error("Expected a numeric public report artifact");
+				expect(report.artifact.id).toMatch(/^\d+$/);
+				expect(report.artifact.uri).toBe(`artifact://${report.artifact.id}`);
+				const bytes = await artifactBytes(parentArtifactManager, report.artifact.id);
+				expect(bytes).toEqual(Buffer.from(text));
+				expect(report.artifact.bytes).toBe(bytes.byteLength);
+				expect(report.artifact.sha256).toBe(new Bun.SHA256().update(bytes).digest("hex"));
+				return report;
+			}
+
+			const runtimeManagers: Array<{
+				session: AgentSession;
+				manager: SessionManager;
+				artifacts: ArtifactManagerApi;
+			}> = [];
+			let privateId: string | undefined;
+			let privateFiles: string[] = [];
+			const createAgentSession = sdk.createAgentSession;
+			vi.spyOn(sdk, "createAgentSession").mockImplementation(async options => {
+				const created = await createAgentSession(options);
+				const manager = created.session.sessionManager;
+				const artifacts = manager.getArtifactManager();
+				if (!artifacts) throw new Error("Expected the real child's private artifact manager");
+				expect(artifacts).not.toBe(parentArtifactManager);
+				expect(artifacts.dir).toBe(path.join(artifactsDir, id));
+				runtimeManagers.push({ session: created.session, manager, artifacts });
+				if (runtimeManagers.length === 1) {
+					// The source has no reserved numeric ids: the actual private namespace starts at zero.
+					privateId = await artifacts.save(privateText, "private");
+					expect(privateId).toBe(parentZero);
+					const privateBytes = await artifactBytes(artifacts, privateId);
+					const parentBytes = await artifactBytes(parentArtifactManager, parentZero);
+					expect(privateBytes).toEqual(Buffer.from(privateText));
+					expect(parentBytes).toEqual(Buffer.from(parentZeroText));
+					expect(privateBytes).not.toEqual(parentBytes);
+					privateFiles = (await artifacts.listFiles()).toSorted();
+					expect(privateFiles).toEqual(["0.private.log"]);
+				}
+				return created;
+			});
+
+			async function expectNamespacesUnchanged(): Promise<void> {
+				if (privateId === undefined) throw new Error("Expected the private collision seed");
+				expect(await artifactBytes(parentArtifactManager, parentZero)).toEqual(Buffer.from(parentZeroText));
+				expect(await artifactBytes(parentArtifactManager, parentOne)).toEqual(Buffer.from(parentOneText));
+				for (const { manager, artifacts } of runtimeManagers) {
+					expect(manager.getArtifactManager()).toBe(artifacts);
+					expect(artifacts).not.toBe(parentArtifactManager);
+					expect((await artifacts.listFiles()).toSorted()).toEqual(privateFiles);
+					expect(await artifactBytes(artifacts, privateId)).toEqual(Buffer.from(privateText));
+				}
+			}
+
+			let lifecycle = AgentLifecycleManager.global();
+			const initial = await runSubprocess({
+				cwd,
+				agent,
+				task: "Consult the historical source.",
+				assignment: "Return a public report as a final message.",
+				index: 0,
+				id,
+				settings,
+				modelRegistry,
+				authStorage,
+				getApiKey: async () => "test-key",
+				modelOverride: [`${mock.model.provider}/${mock.model.id}`],
+				preparedSession: preparedSession(sourceFile, "report-source"),
+				artifactsDir,
+				parentArtifactManager,
+				parentAgentId: parentId,
+				structured: false,
+				enableIrc: true,
+				enableLsp: false,
+				enableMCP: false,
+				eventBus,
+			});
+			expect(initial.exitCode).toBe(0);
+			const first = await expectReport(initial.report, "Initial public report: café.");
+			expect(runtimeManagers).toHaveLength(1);
+			expect(AgentRegistry.global().get(id)?.session).toBe(runtimeManagers[0].session);
+			await expectNamespacesUnchanged();
+
+			await lifecycle.park(id);
+			expect(AgentRegistry.global().get(id)).toMatchObject({ status: "parked", session: null });
+			mock.push({ content: ["Warm public continuation."] });
+			const warm = await runSubagentFollowUpTurn({
+				id,
+				agent,
+				message: "Continue the public report.",
+				structured: false,
+				artifactsDir,
+				parentArtifactManager,
+				eventBus,
+			});
+			expect(warm.exitCode).toBe(0);
+			const second = await expectReport(warm.report, "Initial public report: café.\n\nWarm public continuation.");
+			expect(second.runId).not.toBe(first.runId);
+			expect(second.artifact?.id).not.toBe(first.artifact?.id);
+			expect(runtimeManagers).toHaveLength(2);
+			expect(runtimeManagers[1].manager).not.toBe(runtimeManagers[0].manager);
+			expect(AgentRegistry.global().get(id)?.session).toBe(runtimeManagers[1].session);
+			await expectReport(first, "Initial public report: café.");
+			await expectNamespacesUnchanged();
+
+			await lifecycle.park(id);
+			expect(AgentRegistry.global().get(id)).toMatchObject({ status: "parked", session: null });
+			AgentLifecycleManager.resetGlobalForTests();
+			lifecycle = AgentLifecycleManager.global();
+			lifecycle.setPersistedSubagentReviverFactory(
+				createPersistedSubagentReviverFactory({
+					session: parentSession,
+					authStorage,
+					modelRegistry,
+					settings,
+					enableLsp: false,
+					eventBus,
+				}),
+				() => 0,
+			);
+			// IRC uses the cold factory's registered-parent sink, not a follow-up option override.
+			const coldSession = await lifecycle.ensureLive(id);
+			mock.push({ content: ["Cold public continuation."] });
+			const coldSettlement = waitForSettlement(eventBus, id);
+			expect(
+				await coldSession.deliverIrcMessage({
+					id: "cold-report-owner-follow-up",
+					from: parentId,
+					to: id,
+					body: "Continue the public report after cold revival.",
+					ts: Date.now(),
+				}),
+			).toBe("woken");
+			expect(await coldSettlement).toBe("completed");
+			const coldRuntime = runtimeManagers[2]!;
+			expect(coldSession).toBe(coldRuntime.session);
+			await coldRuntime.session.waitForIdle();
+			const third = await expectReport(
+				readTaskReportHistory(coldRuntime.manager, id),
+				"Initial public report: café.\n\nWarm public continuation.\n\nCold public continuation.",
+			);
+			expect(new Set([first.runId, second.runId, third.runId]).size).toBe(3);
+			expect(new Set([first.artifact?.id, second.artifact?.id, third.artifact?.id]).size).toBe(3);
+			expect(runtimeManagers).toHaveLength(3);
+			expect(runtimeManagers[2].manager).not.toBe(runtimeManagers[1].manager);
+			await expectNamespacesUnchanged();
+
+			expect(await lifecycle.release(id)).toBe(true);
+			expect(lifecycle.has(id)).toBe(false);
+			expect(AgentRegistry.global().get(id)).toBeUndefined();
+			await expectReport(first, "Initial public report: café.");
+			await expectReport(second, "Initial public report: café.\n\nWarm public continuation.");
+			await expectReport(
+				third,
+				"Initial public report: café.\n\nWarm public continuation.\n\nCold public continuation.",
+			);
+			await expectNamespacesUnchanged();
+			expect(await fs.readFile(sourceFile, "utf8")).toBe(sourceText);
+		} finally {
+			try {
+				await AgentLifecycleManager.global()
+					.release(id)
+					.catch(() => false);
+				await parentManager?.close();
+			} finally {
+				AgentRegistry.global().unregister(parentId);
+				authStorage.close();
+				setAgentDir(previousAgentDir);
+			}
 		}
 	});
 

@@ -25,7 +25,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import type { AsyncJob, AsyncJobManagerApi, AsyncJobRunResult } from "../async/job-manager";
+import { AsyncJobError, type AsyncJob, type AsyncJobManagerApi, type AsyncJobRunResult } from "../async/job-manager";
 import { validateAgentAccountPools } from "../config/account-pools";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
@@ -243,8 +243,8 @@ function mergeTrace(turn: VibeTurn, progress: AgentProgress): void {
 	}
 }
 
-/** Thrown from a turn job body so the job manager marks the job failed while carrying the formatted result. */
-export class VibeTurnError extends Error {}
+/** Marks a turn job failed while carrying its formatted result and any settled report. */
+export class VibeTurnError extends AsyncJobError {}
 
 /**
  * Process-global registry of vibe worker sessions, scoped by both owner agent
@@ -1377,6 +1377,7 @@ export class VibeSessionRegistry {
 				record.state = "running";
 				record.turnCount = turnIndex;
 				record.lastActivityAt = Date.now();
+				let result: SingleResult | undefined;
 				try {
 					const turnStartedPersisted = await this.#appendLifecycleEvent(
 						session,
@@ -1390,7 +1391,7 @@ export class VibeSessionRegistry {
 					if (record.childSessionFile && !turnStartedPersisted) {
 						throw new ToolError(`Vibe session "${record.id}" changed parent scope before its turn started.`);
 					}
-					const result = options.first
+					result = options.first
 						? await runSubprocess(await this.#buildSpawnOptions(session, record, message, signal, onProgress))
 						: await runSubagentFollowUpTurn({
 								id: record.id,
@@ -1402,15 +1403,29 @@ export class VibeSessionRegistry {
 								eventBus: session.eventBus,
 								subagentEventBus: session.subagentEventBus,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
+								parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 							});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {
 					if (error instanceof VibeTurnError) throw error;
-					await this.#finishTurn(session, manager, record, ownJobId);
+					// The producer's published snapshot survives even if turn bookkeeping fails.
+					const report = result?.report;
+					try {
+						await this.#finishTurn(session, manager, record, ownJobId);
+					} catch (cleanupError) {
+						if (!report) throw cleanupError;
+						throw new VibeTurnError(
+							cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+							undefined,
+							report,
+						);
+					}
 					const reason = error instanceof Error ? error.message : String(error);
 					record.lastActivity = firstLine(`turn failed: ${reason}`);
 					throw new VibeTurnError(
 						`[vibe:${record.id} cli=${record.cli} turn=${turnIndex}] turn failed: ${reason}`,
+						undefined,
+						report,
 					);
 				}
 			},
@@ -1537,11 +1552,11 @@ export class VibeSessionRegistry {
 				response,
 			].join("\n");
 		}
-		if (failed) throw new VibeTurnError(text);
+		if (failed) throw new VibeTurnError(text, undefined, result.report);
 		// A vibe turn job's id is never the agent id, so the delivery names the
 		// agent's handles. A follow-up turn that ends in prose writes no
 		// `<id>.md`, leaving an earlier turn's output under `agent://<id>`.
-		return { text, agentOutputPublished: result.outputPath !== undefined };
+		return { text, agentOutputPublished: result.outputPath !== undefined, report: result.report };
 	}
 }
 

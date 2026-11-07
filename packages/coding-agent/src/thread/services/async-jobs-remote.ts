@@ -117,6 +117,8 @@ export class RemoteAsyncJob implements AsyncJob {
 	readonly resultText?: string;
 	readonly errorText?: string;
 	readonly structured?: AsyncJob["structured"];
+	readonly report?: AsyncJob["report"];
+	readonly runToken?: string;
 	readonly progressText?: string;
 	readonly latestDetails?: AsyncJobDetails;
 	readonly ownerId?: string;
@@ -141,6 +143,8 @@ export class RemoteAsyncJob implements AsyncJob {
 		this.resultText = wire.resultText;
 		this.errorText = wire.errorText;
 		this.structured = wire.structured;
+		this.report = wire.report;
+		this.runToken = wire.runToken;
 		this.progressText = wire.progressText;
 		this.latestDetails = wire.latestDetails;
 		this.ownerId = wire.ownerId;
@@ -373,8 +377,10 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return this.#remote.call("drainDeliveries", options);
 	}
 
-	isDeliverySuppressed(jobId: string): boolean {
-		return this.#remote.callSync("isDeliverySuppressed", jobId);
+	isDeliverySuppressed(jobId: string, expectedJob?: Pick<AsyncJob, "runToken" | "report">): boolean {
+		// Only the identity fields cross: a held row is a class instance.
+		const expected = expectedJob && { runToken: expectedJob.runToken, report: expectedJob.report };
+		return this.#remote.callSync("isDeliverySuppressed", jobId, expected);
 	}
 
 	/** One main `whenSettled` call per job id while it is pending; resolves (never rejects) on settle or link loss. */

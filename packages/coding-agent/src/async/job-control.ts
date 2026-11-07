@@ -6,11 +6,17 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
-import type { AsyncJob, AsyncJobDetails, AsyncJobManagerApi, AsyncJobType } from "./job-manager";
+import {
+	type AsyncJob,
+	type AsyncJobDetails,
+	type AsyncJobManagerApi,
+	type AsyncJobType,
+	isSameJobRun,
+} from "./job-manager";
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { StructuredSubagentOutput, TaskReportReference } from "@oh-my-pi/pi-tui/tools/task";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
 import type { ToolSession } from "../tools";
@@ -159,14 +165,21 @@ interface TrackedJobLike {
 	structured?: StructuredSubagentOutput;
 	/** See {@link AsyncJob.agentOutputPublished}. */
 	agentOutputPublished?: boolean;
+	report?: TaskReportReference;
+	agentId?: string;
+	/** See {@link AsyncJob.runToken}. */
+	runToken?: string;
 }
 
 export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
 	const now = Date.now();
 	return jobs.map(j => {
-		const current = session.asyncJobManager?.getJob(j.id);
+		const fetched = session.asyncJobManager?.getJob(j.id);
+		// The caller holds this run's row; an expired id may already name another run.
+		// A worker's held row is a stale projection, so read the run's current one.
+		const current = fetched && isSameJobRun(fetched, j) ? fetched : undefined;
 		const latest = current ?? j;
-		const resultConsumed = session.asyncJobManager?.isJobResultConsumed(latest.id) === true;
+		const resultConsumed = current !== undefined && session.asyncJobManager?.isJobResultConsumed(latest.id) === true;
 		let resolvedModel: string | undefined;
 		const exitCode = typeof latest.latestDetails?.exitCode === "number" ? latest.latestDetails.exitCode : undefined;
 		let resolvedModelIdentity: string | undefined;
@@ -183,7 +196,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			if (Array.isArray(progressValue)) {
 				// A batch job's progress lists every spawn of the call, keyed by agent id.
 				// A collided job id is suffixed (`Foo-2`) while its agent id stays `Foo`.
-				const agentId = current?.agentId ?? latest.id;
+				const agentId = latest.agentId ?? latest.id;
 				let progressRecord: Record<string, unknown> | undefined;
 				for (const item of progressValue) {
 					if (!item || typeof item !== "object") continue;
@@ -249,7 +262,8 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
 			...(!resultConsumed && latest.latestDetails?.meta ? { meta: latest.latestDetails.meta } : {}),
 			...(!resultConsumed && latest.structured ? { structured: latest.structured } : {}),
-			...(latest.type === "task" ? { agentUrlId: current?.agentId ?? latest.id } : {}),
+			...(latest.report ? { report: latest.report } : {}),
+			...(latest.type === "task" ? { agentUrlId: latest.agentId ?? latest.id } : {}),
 			...(latest.agentOutputPublished !== undefined ? { agentOutputPublished: latest.agentOutputPublished } : {}),
 		};
 	});
@@ -302,16 +316,25 @@ export function buildJobResult(
 		return true;
 	});
 	const jobResults = snapshotJobs(session, uniqueJobs);
-	const alreadyConsumed = new Set(jobResults.filter(job => manager.isJobResultConsumed(job.id)).map(job => job.id));
+	// Manager state under an id speaks for a held row only while it is still that id's run.
+	const currentRuns = new Set(uniqueJobs.filter(job => isSameJobRun(manager.getJob(job.id), job)).map(job => job.id));
+	const alreadyConsumed = new Set(
+		jobResults.filter(job => currentRuns.has(job.id) && manager.isJobResultConsumed(job.id)).map(job => job.id),
+	);
 	const watchedByWait = new Set(
 		op === "wait"
 			? jobResults
-					.filter(job => !alreadyConsumed.has(job.id) && manager.isDeliverySuppressed(job.id))
+					.filter(
+						job =>
+							currentRuns.has(job.id) && !alreadyConsumed.has(job.id) && manager.isDeliverySuppressed(job.id),
+					)
 					.map(job => job.id)
 			: [],
 	);
 
-	manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
+	manager.consumeJobResults(
+		jobResults.filter(job => job.status !== "running" && currentRuns.has(job.id)).map(job => job.id),
+	);
 
 	const completed = jobResults.filter(j => j.status !== "running");
 	const running = jobResults.filter(j => j.status === "running");
