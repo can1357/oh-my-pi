@@ -20,9 +20,11 @@ export function getEditStore(session: EditStoreOwner): EditStore {
 const SEEN_ROW_PREFIX = /^[ *]?(\d+)(?:-(\d+))?:/;
 
 /**
- * Seen-line entry that no edit can anchor (lines are 1-based). An empty seen set
- * means unrestricted provenance (a `write` tag), so a display whose every row was
- * column-cut records this instead: provenance present, no source line fully shown.
+ * Seen-line entry that no edit can anchor (lines are 1-based). A display whose
+ * every row was column-cut records this: the display happened, but it showed no
+ * source line whole, so every anchor on it is unseen. An empty seen set says
+ * the same to the guard — only a snapshot with no seen-line record at all
+ * (`None`) means unrestricted provenance.
  */
 const NO_FULL_LINE = 0;
 

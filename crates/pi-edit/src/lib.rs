@@ -65,3 +65,27 @@ pub const fn grammar(mode: EditMode) -> Option<&'static str> {
 		EditMode::Replace | EditMode::Patch => None,
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::{EditMode, description};
+
+	/// The hashline prompt must accept every tool that hands the model a
+	/// snapshot tag. A `write` mints a tag of its own and numbers the lines it
+	/// wrote; a prompt that named only `read`/`search` would tell the model to
+	/// discard that tag and read the file again.
+	#[test]
+	fn hashline_prompt_accepts_write_issued_tags() {
+		let prompt = description(EditMode::Hashline);
+		let tag_contract = prompt
+			.lines()
+			.find(|line| line.contains("`TAG`"))
+			.expect("hashline prompt states the tag contract");
+		for source in ["`read`", "`search`", "`write`"] {
+			assert!(
+				tag_contract.contains(source),
+				"hashline prompt must accept {source} as a snapshot tag source"
+			);
+		}
+	}
+}
