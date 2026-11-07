@@ -624,7 +624,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 	}
 
 	async #settleMentalModelsLoadWithinDeadline(
-		load: Promise<void>,
+		load: Promise<unknown>,
 		generation: number,
 		previousSnippet: string | undefined,
 	): Promise<void> {
@@ -646,17 +646,17 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		generation: number,
 		previousSnippet: string | undefined,
 		reason: "MM load" | "MM reload" | "MM transcript reload",
-	): Promise<void> {
+	): Promise<boolean> {
 		const result = await tryLoadMentalModelsBlock(
 			this.client,
 			this.bankId,
 			this.config.mentalModelMaxRenderChars,
 			this.recallTags,
 		);
-		if (generation !== this.#mentalModelsLoadGeneration) return;
+		if (generation !== this.#mentalModelsLoadGeneration) return false;
 		if (!result.ok) {
 			this.mentalModelsLoadedAt = Date.now();
-			return;
+			return false;
 		}
 
 		this.mentalModelsSnippet = result.block;
@@ -664,38 +664,45 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 			reason,
 			() => generation === this.#mentalModelsLoadGeneration,
 		);
-		if (generation !== this.#mentalModelsLoadGeneration) return;
+		if (generation !== this.#mentalModelsLoadGeneration) return false;
 		if (!published) this.mentalModelsSnippet = previousSnippet;
 		this.mentalModelsLoadedAt = Date.now();
+		if (published && result.refreshWarning) {
+			this.session.emitNotice("warning", result.refreshWarning, "Hindsight", { retainUntilSubscribed: true });
+		}
+		return published;
 	}
 
+	/** Reloads guidance, returning true only when the fetched snapshot was published to the prompt. */
 	async reloadMentalModels(): Promise<boolean> {
 		if (this.aliasOf) return false;
 		if (!this.config.mentalModelsEnabled) return false;
 		const generation = ++this.#mentalModelsLoadGeneration;
 		const previousSnippet = this.mentalModelsSnippet;
-		await this.#loadAndPublishMentalModels(generation, previousSnippet, "MM reload");
-		return generation === this.#mentalModelsLoadGeneration;
+		return this.#loadAndPublishMentalModels(generation, previousSnippet, "MM reload");
 	}
 
 	attachSessionListeners(): void {
 		this.unsubscribe?.();
-		this.unsubscribe = this.session.subscribe(event => {
-			if (event.type === "agent_end") {
-				void this.maybeRetainOnAgentEnd();
-				// Drain any queued tool-initiated retain calls now that the turn
-				// is settled. The queue is also debounced/size-bounded, but
-				// flushing here keeps the bank fresh between turns.
-				void this.flushRetainQueue();
-				// Mental models are deliberately NOT re-listed here. Rewriting the
-				// cached <mental_models> block mid-session changes the base system
-				// prompt bytes and busts the provider prompt-cache prefix (#11961).
-				// The block is frozen for the current transcript — like local-memory
-				// guidance after #3745 — so a background reflect applies when the
-				// next transcript/session boundary reloads it. `/memory mm reload`
-				// stays the explicit in-session invalidation.
-			}
-		});
+		this.unsubscribe = this.session.subscribe(
+			event => {
+				if (event.type === "agent_end") {
+					void this.maybeRetainOnAgentEnd();
+					// Drain any queued tool-initiated retain calls now that the turn
+					// is settled. The queue is also debounced/size-bounded, but
+					// flushing here keeps the bank fresh between turns.
+					void this.flushRetainQueue();
+					// Mental models are deliberately NOT re-listed here. Rewriting the
+					// cached <mental_models> block mid-session changes the base system
+					// prompt bytes and busts the provider prompt-cache prefix (#11961).
+					// The block is frozen for the current transcript — like local-memory
+					// guidance after #3745 — so a background reflect applies when the
+					// next transcript/session boundary reloads it. `/memory mm reload`
+					// stays the explicit in-session invalidation.
+				}
+			},
+			{ internal: true },
+		);
 	}
 
 	dispose(): void {

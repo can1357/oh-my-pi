@@ -3,7 +3,10 @@
  *
  * Mental models are persisted, named summaries on the Hindsight server. They
  * are populated by a background reflect at create time and refreshed
- * automatically when consolidation runs (`refresh_after_consolidation: true`).
+ * automatically by their trigger (`refresh_after_consolidation` and/or
+ * `refresh_cron`). A failed refresh pauses both automatic triggers until a
+ * manual refresh succeeds, so {@link mentalModelRefreshState} surfaces that
+ * instead of letting preserved content read as current.
  *
  * This module:
  *   1. **Seeds** a small, curated set of mental models on first session boot
@@ -40,13 +43,14 @@
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
+import { Semaphore } from "../task/parallel";
 import type { BankScope } from "./bank";
 import type {
 	HindsightClientApi,
 	MentalModelListResponse,
-	MentalModelMode,
 	MentalModelSummary,
 	MentalModelTrigger,
+	WaitForOperationOptions,
 } from "./client";
 import type { HindsightScoping } from "./config";
 import seedsData from "./seeds.json" with { type: "json" };
@@ -57,7 +61,7 @@ interface RawSeed {
 	source_query: string;
 	scopes: HindsightScoping[];
 	projectTagged: boolean;
-	trigger?: { mode?: MentalModelMode; refresh_after_consolidation?: boolean };
+	trigger?: MentalModelTrigger;
 	max_tokens?: number;
 	extra_tags?: string[];
 }
@@ -198,7 +202,9 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
 export const MENTAL_MODEL_RENDER_BUDGET_CHARS_DEFAULT = 16_000;
 
 /** Outcome of loading a rendered mental-model block with fetch failure kept distinct from empty content. */
-export type MentalModelsBlockLoadResult = { ok: true; block: string | undefined } | { ok: false };
+export type MentalModelsBlockLoadResult =
+	| { ok: true; block: string | undefined; refreshWarning?: string }
+	| { ok: false };
 
 /**
  * Pull the current mental-model snapshot while preserving whether the server
@@ -226,7 +232,7 @@ export async function tryLoadMentalModelsBlock(
 
 	models.sort((a, b) => a.name.localeCompare(b.name));
 	const block = renderMentalModelsBlock(models, budgetChars);
-	return { ok: true, block: block || undefined };
+	return { ok: true, block: block || undefined, refreshWarning: mentalModelRefreshWarning(models) };
 }
 
 /**
@@ -352,11 +358,96 @@ function truncateTo(text: string, maxChars: number): string {
 	return `${text.slice(0, Math.max(0, maxChars - 1))}…`;
 }
 
+/** What the server's refresh metadata says about whether a model's content can be trusted as current. */
+export type MentalModelRefreshState = "paused" | "stale" | "unsourced" | "fresh";
+
+/**
+ * `paused`: the last refresh failed, so automatic triggers skip the model until a manual refresh succeeds.
+ * `stale`: in-scope memories were written after the content was last synthesized.
+ * `unsourced`: no refresh has stamped a source-memory watermark, so the content was not synthesized from memories.
+ */
+export function mentalModelRefreshState(model: MentalModelSummary): MentalModelRefreshState {
+	if (model.last_refresh_failed_at) return "paused";
+	if (model.is_stale === true) return "stale";
+	if (!model.last_memory_seen_at) return "unsourced";
+	return "fresh";
+}
+
+/** Whether a trigger refreshes the model without operator action. Manual-only models have neither trigger. */
+export function isAutoRefreshedMentalModel(model: MentalModelSummary): boolean {
+	const trigger = model.trigger;
+	return trigger?.refresh_after_consolidation === true || (trigger?.refresh_cron?.trim().length ?? 0) > 0;
+}
+
+export function describeMentalModelRefreshState(model: MentalModelSummary): string {
+	switch (mentalModelRefreshState(model)) {
+		case "paused":
+			return `paused: refresh failed ${model.last_refresh_failed_at}, automatic refresh stopped until a manual refresh succeeds`;
+		case "stale":
+			return "stale: newer memories are not reflected yet";
+		case "unsourced":
+			return "no source memories seen yet";
+		case "fresh":
+			return "fresh";
+	}
+}
+
 /** Inventory line used by the `/memory mm list` command. */
 export function summarizeMentalModel(model: MentalModelSummary): string {
 	const tags = model.tags && model.tags.length > 0 ? ` [${model.tags.join(", ")}]` : "";
-	const refreshed = model.last_refreshed_at ? ` (refreshed ${model.last_refreshed_at})` : " (never refreshed)";
-	return `- ${model.id}: ${model.name}${tags}${refreshed}`;
+	const refreshed = model.last_refreshed_at ? `refreshed ${model.last_refreshed_at}` : "never refreshed";
+	return `- ${model.id}: ${model.name}${tags} (${describeMentalModelRefreshState(model)}; ${refreshed})`;
+}
+
+/**
+ * Models whose injected content will not recover on its own: paused after a failed refresh, or stale with no
+ * trigger to refresh them. Stale models an active trigger will refresh are routine and not reported.
+ */
+export function mentalModelRefreshWarning(models: readonly MentalModelSummary[]): string | undefined {
+	const paused = models.filter(model => mentalModelRefreshState(model) === "paused");
+	const stuckStale = models.filter(
+		model => mentalModelRefreshState(model) === "stale" && !isAutoRefreshedMentalModel(model),
+	);
+	if (paused.length === 0 && stuckStale.length === 0) return undefined;
+	const parts: string[] = [];
+	if (paused.length > 0) parts.push(`refresh failed, automatic refresh paused: ${paused.map(m => m.id).join(", ")}`);
+	if (stuckStale.length > 0) parts.push(`stale with no automatic refresh: ${stuckStale.map(m => m.id).join(", ")}`);
+	return `Mental-model guidance may be out of date (${parts.join("; ")}). Run /memory mm refresh <id> to recover.`;
+}
+
+export interface MentalModelRefreshOutcome {
+	id: string;
+	/** Present when the refresh could not be queued or did not complete; absent after a completed operation. */
+	error?: string;
+}
+
+/**
+ * Queue a refresh for each id with at most four concurrent refresh/poll tasks and wait for its terminal
+ * state, so callers act only after content was rewritten. Failure, cancellation and timeout are reported per id.
+ */
+export async function refreshMentalModelsAndWait(
+	client: HindsightClientApi,
+	bankId: string,
+	ids: readonly string[],
+	options?: WaitForOperationOptions,
+): Promise<MentalModelRefreshOutcome[]> {
+	const slots = new Semaphore(4);
+	return Promise.all(
+		ids.map(async (id): Promise<MentalModelRefreshOutcome> => {
+			try {
+				await slots.acquire(options?.signal);
+				try {
+					const { operation_id } = await client.refreshMentalModel(bankId, id, { signal: options?.signal });
+					await client.waitForOperation(bankId, operation_id, options);
+					return { id };
+				} finally {
+					slots.release();
+				}
+			} catch (error) {
+				return { id, error: error instanceof Error ? error.message : String(error) };
+			}
+		}),
+	);
 }
 
 /**

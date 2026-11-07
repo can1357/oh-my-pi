@@ -69,7 +69,7 @@ export class AutoLearnController {
 		this.#capture = options.capture;
 		// The listener closure captures `this`, so the session's listener array
 		// keeps the controller alive — no stored unsubscribe needed.
-		this.#session.subscribe(event => this.#onEvent(event));
+		this.#session.subscribe(event => this.#onEvent(event), { internal: true });
 	}
 
 	#onEvent(event: AgentSessionEvent): void {
