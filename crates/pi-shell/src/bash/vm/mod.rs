@@ -79,6 +79,14 @@ const SLICE: u32 = 1024;
 /// bash version this engine implements (`$BASH_VERSION`).
 pub const BASH_VERSION: &str = "5.3.0(1)-release";
 
+/// Largest buffer a kernel keeps for reuse (the spare syntax tree, the unit
+/// blob encoder): every ordinary command fits, and a huge one's buffers are
+/// freed instead of held for the shell's lifetime.
+const SPARE_BUFFER_BYTES: usize = 1 << 20;
+
+/// Unit ids [`Kernel::written`] remembers before it starts over.
+const WRITTEN_MAX: usize = 1 << 16;
+
 /// Engine types are `Send`; hosts move shells between threads.
 const _: () = {
 	const fn send<T: Send>() {}
@@ -412,9 +420,12 @@ pub struct Kernel {
 	/// Origin of each currently executing source-context unit in its actual
 	/// vproc.
 	pub trace_unit_origins: HashMap<Vpid, Arc<HashMap<UnitId, crate::bash::event::SourceOrigin>>>,
-	/// Unit blobs known to be in the store ([`Kernel::persist_unit`],
-	/// `externalize`).
-	pub written:            HashSet<UnitId>,
+	/// Unit blobs known to be in the store ([`Kernel::note_written`]); at
+	/// most [`WRITTEN_MAX`] ids.
+	pub written:            HashSet<UnitId, crate::bash::ids::UnitIdState>,
+	/// Reused buffer for encoding unit blobs ([`Kernel::persist_unit`]); not
+	/// imaged.
+	blob_buf:               Vec<u8>,
 	/// The `next_vpid` value last written as `MiscKey::NextVpid`
 	/// ([`Kernel::vpid`], [`Kernel::sync_root`]).
 	pub written_vpid:       u32,
@@ -446,6 +457,10 @@ pub struct Kernel {
 	pub pseudo_traps:       exec::PseudoTraps,
 	/// Re-parsed `${ ;}` bodies ([`exec::NoforkUnits`]); not imaged.
 	pub nofork_units:       exec::NoforkUnits,
+	/// Syntax-tree buffers of the last command run, lent to the next parse
+	/// ([`Parser::recycle`](crate::bash::syntax::Parser::recycle); at most
+	/// [`SPARE_BUFFER_BYTES`], see [`Kernel::keep_spare_tree`]); not imaged.
+	pub spare_tree:         crate::bash::syntax::Tree,
 	/// The arithmetic this shell evaluated last ([`arith::Recent`]); not
 	/// imaged.
 	pub arith_recent:       arith::Recent,
@@ -534,7 +549,8 @@ impl Kernel {
 			announced: HashSet::new(),
 			trace_sources: HashMap::new(),
 			trace_unit_origins: HashMap::new(),
-			written: HashSet::new(),
+			written: HashSet::default(),
+			blob_buf: Vec::new(),
 			written_vpid: engine.config().vpid_base,
 			paused: false,
 			argv0,
@@ -546,6 +562,7 @@ impl Kernel {
 			startup: Vec::new(),
 			pseudo_traps: exec::PseudoTraps::default(),
 			nofork_units: HashMap::new(),
+			spare_tree: crate::bash::syntax::Tree::default(),
 			arith_recent: arith::Recent::default(),
 			clock: None,
 			null_input: None,
@@ -626,17 +643,43 @@ impl Kernel {
 	/// once per id: a function body is in the store from its definition on,
 	/// so a shell restored from the store alone keeps its line numbers.
 	pub fn persist_unit(&mut self, store: &mut dyn StateStore, unit: &Unit) {
-		if self.written.contains(&unit.id) {
+		if !self.note_written(unit.id) {
 			return;
 		}
-		let written = postcard::to_stdvec(unit)
+		let mut buf = core::mem::take(&mut self.blob_buf);
+		buf.clear();
+		let written = postcard::to_extend(unit, buf)
 			.map_err(StoreError::Encode)
-			.and_then(|bytes| store.put_blob(crate::bash::store::BlobSlot::Unit(unit.id), &bytes));
-		match written {
-			Ok(()) => {
-				self.written.insert(unit.id);
-			},
-			Err(err) => self.fail(err),
+			.and_then(|buf| {
+				let put = store.put_blob(crate::bash::store::BlobSlot::Unit(unit.id), &buf);
+				if buf.capacity() <= SPARE_BUFFER_BYTES {
+					self.blob_buf = buf;
+				}
+				put
+			});
+		if let Err(err) = written {
+			self.written.remove(&unit.id);
+			self.fail(err);
+		}
+	}
+
+	/// Note that `id`'s blob is in the store; `false` when it already was
+	/// known. Past [`WRITTEN_MAX`] ids the set starts over: forgetting one
+	/// only costs writing its blob again, while a long-lived shell compiles
+	/// new units without end.
+	pub(crate) fn note_written(&mut self, id: UnitId) -> bool {
+		if self.written.len() >= WRITTEN_MAX && !self.written.contains(&id) {
+			self.written.clear();
+		}
+		self.written.insert(id)
+	}
+
+	/// Lend `tree`'s buffers to the next parse ([`Kernel::spare_tree`]),
+	/// unless they outgrew [`SPARE_BUFFER_BYTES`]: one huge command's tree
+	/// is freed rather than held for the shell's lifetime.
+	pub(crate) fn keep_spare_tree(&mut self, tree: crate::bash::syntax::Tree) {
+		if tree.heap_bytes() <= SPARE_BUFFER_BYTES {
+			self.spare_tree = tree;
 		}
 	}
 

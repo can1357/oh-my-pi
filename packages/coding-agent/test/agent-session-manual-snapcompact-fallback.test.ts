@@ -39,9 +39,9 @@ describe.each([
 	},
 	{
 		label: "wire-stripped",
-		provider: "venice",
-		id: "deepseek-v4-1-flash",
-		reason: "deepseek-v4-1-flash's provider strips image input",
+		provider: "deepseek",
+		id: "deepseek-v4-flash",
+		reason: "deepseek-v4-flash's provider strips image input",
 	},
 ] as const)("AgentSession manual snapcompact $label fallback", ({ provider, id, reason }) => {
 	let session: AgentSession | undefined;

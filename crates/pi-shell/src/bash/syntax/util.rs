@@ -4,8 +4,8 @@ use alloc::vec::Vec;
 use core::fmt;
 
 /// Append the decimal form of `n`.
-pub fn push_u32(out: &mut Vec<u8>, n: u32) {
-	out.extend_from_slice(n.format_into(&mut fmt::NumBuffer::new()).as_bytes());
+pub fn push_u32(out: &mut impl Extend<u8>, n: u32) {
+	out.extend(n.format_into(&mut fmt::NumBuffer::new()).bytes());
 }
 
 /// `[A-Za-z_]`: may start a variable name.
