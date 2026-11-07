@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed macOS window screenshots drawing the window smaller than it appears, so clicks aimed from them missed by tens of points; windows spanning displays or partly off screen are captured whole at their on-screen size, except while a sheet larger than the window is open ([#17757](https://github.com/can1357/oh-my-pi/pull/17757) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
