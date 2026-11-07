@@ -91,6 +91,23 @@ async fn uncompiled_script_is_parsed_ahead_without_outcomes_until_it_stops_parsi
 	assert!(row["state"].is_null(), "{ran}");
 }
 
+#[test]
+fn bare_test_bracket_without_operands_renders_instead_of_panicking() {
+	// Regression for #18320: a streamed `[` with no operands sliced `words[1..0]`
+	// and aborted the host process.
+	for (script, expected) in [
+		("[", &[""][..]),
+		("a && [", &["a", "and "]),
+		("! [", &["not "]),
+		("x=$(a); [", &["x = ⟨a⟩", ""]),
+		("test", &[""]),
+	] {
+		let p = present(&RunTrace::new(script), &Options::default());
+		let texts: Vec<String> = rows(&p).into_iter().map(|(text, _)| text).collect();
+		assert_eq!(texts, expected, "{script:?}");
+	}
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn callout_scripts_are_drawn_by_their_command_but_eval_code_gets_a_frame() {
 	let frames = |p: &Value| {
