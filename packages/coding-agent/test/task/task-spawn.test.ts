@@ -26,7 +26,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, SingleResult, TaskParams, TaskReportReference } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/async/job-control";
@@ -216,6 +216,91 @@ describe("task spawn routing", () => {
 		});
 	});
 
+	it.each(["completed", "failed", "cancelled"] as const)(
+		"preserves the immutable numeric report through a %s task's async routing",
+		async status => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+				agents: [taskAgent],
+				projectAgentsDir: null,
+			});
+			const artifact = Object.freeze({
+				id: "701",
+				uri: "artifact://701",
+				sha256: "a".repeat(64),
+				bytes: 143,
+			});
+			const report: TaskReportReference =
+				status === "completed"
+					? Object.freeze({ version: 1, runId: "report-success-run", status: "complete", artifact })
+					: Object.freeze({
+							version: 1,
+							runId: `report-${status}-run`,
+							status: "partial",
+							artifact,
+							reason: status === "cancelled" ? "aborted" : "failed",
+						});
+			const started = deferred();
+			const gate = deferred();
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				started.resolve();
+				await gate.promise;
+				return makeResult(options.id ?? "?", {
+					output: "See my earlier report.",
+					exitCode: status === "completed" ? 0 : 1,
+					...(status === "cancelled" ? { aborted: true } : {}),
+					report,
+				});
+			});
+			const manager = createManager();
+			const session = createSession({ manager });
+			const tool = await TaskTool.create(session);
+			const spawned = await tool.execute(`tc-report-${status}`, {
+				agent: "task",
+				name: "ReportWorker",
+				task: "Publish the report.",
+			} as TaskParams);
+			const job = manager.getJob(spawned.details!.async!.jobId)!;
+			try {
+				await started.promise;
+				expect(job.status).toBe("running");
+				expect(job.report).toBeUndefined();
+				if (status === "cancelled") expect(manager.cancel(job.id)).toBe(true);
+			} finally {
+				gate.resolve();
+				await job.promise;
+			}
+
+			expect(job.status).toBe(status);
+			expect(job.report).toEqual(report);
+			expect(snapshotJobs(session, [job])[0]).toMatchObject({ status, report });
+			expect(job.report?.artifact?.uri).toBe("artifact://701");
+		},
+	);
+
+	it("exposes a partial report when the executor fails before returning a SingleResult", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(executorModule, "runSubprocess").mockRejectedValue(
+			new Error("Executor failed before producing a result"),
+		);
+		const manager = createManager();
+		const session = createSession({ manager });
+		const tool = await TaskTool.create(session);
+		const spawned = await tool.execute("tc-early-report-failure", {
+			agent: "task",
+			name: "EarlyFailure",
+			task: "Publish the report.",
+		} as TaskParams);
+		const job = manager.getJob(spawned.details!.async!.jobId)!;
+		await job.promise;
+
+		expect(job.status).toBe("failed");
+		expect(job.report).toEqual({ version: 1, runId: expect.any(String), status: "partial", reason: "failed" });
+		expect(job.report?.artifact).toBeUndefined();
+		expect(snapshotJobs(session, [job])[0]?.report).toEqual(job.report);
+	});
 	it("uses the persisted /agents model after replacing a session-only task selection", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [{ ...taskAgent, model: ["@task"] }],
@@ -766,6 +851,9 @@ describe("task spawn routing", () => {
 		expect(placeholder!.retainedArtifactsCleanup).toBeUndefined();
 
 		placeholderGate.resolve();
+		await placeholder!.promise;
+		expect(placeholder!.report).toBeUndefined();
+		expect(snapshotJobs(createSession({ manager }), [placeholder!])[0]).not.toHaveProperty("report");
 		if (capturedArtifactsDir) await fs.rm(capturedArtifactsDir, { recursive: true, force: true });
 	});
 
@@ -852,6 +940,9 @@ describe("task spawn routing", () => {
 		expect(queuedResult).toBe("settled");
 		expect(started).toEqual(["First"]);
 		expect(secondJob.status).toBe("cancelled");
+		expect(secondJob.report).toEqual({ version: 1, runId: expect.any(String), status: "partial", reason: "aborted" });
+		expect(secondJob.report?.artifact).toBeUndefined();
+		expect(snapshotJobs(createSession({ manager }), [secondJob])[0]?.report).toEqual(secondJob.report);
 	});
 
 	it("keeps the concurrency cap intact when a queued spawn is cancelled (no permit leak)", async () => {

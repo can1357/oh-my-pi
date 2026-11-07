@@ -3,6 +3,7 @@ import { scheduler } from "node:timers/promises";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AsyncJobError, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import type { TaskReportReference } from "@oh-my-pi/pi-tui/tools/task";
 
 async function waitForJobEviction(manager: AsyncJobManager, jobId: string): Promise<void> {
 	const deadline = Date.now() + 2_000;
@@ -177,6 +178,12 @@ describe("AsyncJobManager", () => {
 	});
 
 	test("preserves native metadata in a delayed delivery rebuilt after eviction", async () => {
+		const report: TaskReportReference = {
+			version: 1,
+			runId: "evicted-run",
+			status: "complete",
+			artifact: { id: "201", uri: "artifact://201", sha256: "a".repeat(64), bytes: 9 },
+		};
 		// A collision-suffixed job id still writes artifacts under the
 		// unsuffixed agentId. Force the first delivery to fail, wait for the
 		// short test-only retention to evict the live row, then inspect the
@@ -208,7 +215,7 @@ describe("AsyncJobManager", () => {
 			},
 		});
 
-		const jobId = manager.register("task", "agent task", async () => "task done", {
+		const jobId = manager.register("task", "agent task", async () => ({ text: "task done", report }), {
 			id: "Foo-t1-2",
 			agentId: "Foo-t1",
 		});
@@ -231,10 +238,150 @@ describe("AsyncJobManager", () => {
 					agentId: "Foo-t1",
 					label: "agent task",
 					durationMs: expect.any(Number),
+					report,
 				},
 			},
 		]);
 	});
+
+	test("a queued report survives job-id reuse without consuming the replacement run", async () => {
+		const oldReport: TaskReportReference = {
+			version: 1,
+			runId: "old-run",
+			status: "complete",
+			artifact: { id: "202", uri: "artifact://202", sha256: "b".repeat(64), bytes: 10 },
+		};
+		const newReport: TaskReportReference = {
+			version: 1,
+			runId: "new-run",
+			status: "complete",
+			artifact: { id: "203", uri: "artifact://203", sha256: "c".repeat(64), bytes: 10 },
+		};
+		const replacement = Promise.withResolvers<void>();
+		const delivered: Array<{ text: string; report: unknown }> = [];
+		let failedRetry: { report: unknown; currentStatus: string | undefined } | undefined;
+		let attempts = 0;
+		const manager = new AsyncJobManager({
+			retentionMs: 25,
+			onJobComplete: async (jobId, text, job) => {
+				attempts += 1;
+				if (attempts === 1) throw new Error("queue old run for retry");
+				if (attempts === 2) {
+					failedRetry = { report: job?.report, currentStatus: manager.getJob(jobId)?.status };
+					throw new Error("reconstructed old run delivery failed once");
+				}
+				const message = buildAsyncResultBatchMessage([
+					{ jobId, result: text, job, durationMs: undefined, epoch: 0 },
+				]);
+				delivered.push({ text, report: message?.details?.jobs[0]?.report });
+			},
+		});
+		try {
+			const oldId = manager.register("task", "old run", async () => ({ text: "old result", report: oldReport }), {
+				id: "SameAgent",
+				agentId: "SameAgent",
+			});
+			await manager.waitForAll();
+			await waitForCondition(() => manager.getDeliveryState().nextRetryAt !== undefined);
+			await waitForJobEviction(manager, oldId);
+			const newId = manager.register(
+				"task",
+				"replacement run",
+				async () => {
+					await replacement.promise;
+					return { text: "new result", report: newReport };
+				},
+				{ id: "SameAgent", agentId: "SameAgent" },
+			);
+			expect(newId).toBe(oldId);
+			expect(await manager.drainDeliveries({ timeoutMs: 4_000 })).toBe(true);
+			expect(failedRetry).toEqual({ report: oldReport, currentStatus: "running" });
+			expect(delivered).toEqual([{ text: "old result", report: oldReport }]);
+			expect(manager.getJob(newId)?.status).toBe("running");
+			expect(manager.isJobResultConsumed(newId)).toBe(false);
+
+			replacement.resolve();
+			await manager.waitForAll();
+			expect(await manager.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
+			expect(delivered).toEqual([
+				{ text: "old result", report: oldReport },
+				{ text: "new result", report: newReport },
+			]);
+			expect(manager.isJobResultConsumed(newId)).toBe(true);
+			expect(attempts).toBe(4);
+		} finally {
+			replacement.resolve();
+			await manager.dispose();
+		}
+	});
+
+	test.each(["generic", "report-bearing"] as const)(
+		"keeps %s snapshot suppression semantics when a replacement reuses an expired id",
+		async kind => {
+			vi.useFakeTimers();
+			const manager = new AsyncJobManager({ retentionMs: 60_000, consumedResultEvictionMs: 25 });
+			const report: TaskReportReference | undefined =
+				kind === "report-bearing"
+					? {
+							version: 1,
+							runId: "old-run",
+							status: "complete",
+							artifact: { id: "204", uri: "artifact://204", sha256: "d".repeat(64), bytes: 10 },
+						}
+					: undefined;
+			try {
+				const jobId = manager.register("task", "old run", async () => ({ text: "old result", report }), {
+					id: "ReusedAgent",
+				});
+				await manager.waitForAll();
+				await manager.drainDeliveries({ timeoutMs: 500 });
+				const oldJob = manager.getJob(jobId);
+				if (!oldJob) throw new Error("Old job expired before its snapshot was captured");
+				const oldSnapshot = { ...oldJob };
+				vi.advanceTimersByTime(60_000);
+				expect(manager.getJob(jobId)).toBeUndefined();
+
+				const replacementId = manager.register(
+					"task",
+					"replacement run",
+					async () => ({ text: "new result", report: report && { ...report, runId: "new-run" } }),
+					{ id: jobId },
+				);
+				expect(replacementId).toBe(jobId);
+				await manager.waitForAll();
+				await manager.drainDeliveries({ timeoutMs: 500 });
+				const replacementJob = manager.getJob(jobId);
+				if (!replacementJob) throw new Error("Replacement expired before its snapshot was captured");
+				const replacementSnapshot = { ...replacementJob };
+
+				expect(manager.isDeliverySuppressed(jobId)).toBe(false);
+				expect(manager.watchJobs([jobId])).toBe(1);
+				expect(manager.isDeliverySuppressed(jobId)).toBe(true);
+				expect(manager.isDeliverySuppressed(jobId, replacementSnapshot)).toBe(true);
+				expect(manager.isDeliverySuppressed(jobId, oldSnapshot)).toBe(kind === "generic");
+				expect(manager.isJobResultConsumed(jobId)).toBe(false);
+
+				expect(manager.unwatchJobs([jobId])).toBe(1);
+				expect(manager.isDeliverySuppressed(jobId)).toBe(false);
+				expect(manager.isDeliverySuppressed(jobId, replacementSnapshot)).toBe(false);
+				expect(manager.isDeliverySuppressed(jobId, oldSnapshot)).toBe(false);
+				expect(manager.isJobResultConsumed(jobId)).toBe(false);
+
+				expect(manager.consumeJobResults([jobId])).toBe(1);
+				expect(manager.isDeliverySuppressed(jobId)).toBe(true);
+				expect(manager.isDeliverySuppressed(jobId, replacementSnapshot)).toBe(true);
+				expect(manager.isDeliverySuppressed(jobId, oldSnapshot)).toBe(kind === "generic");
+				expect(manager.isJobResultConsumed(jobId)).toBe(true);
+				expect(manager.consumeJobResults([jobId])).toBe(0);
+			} finally {
+				try {
+					await manager.dispose();
+				} finally {
+					vi.useRealTimers();
+				}
+			}
+		},
+	);
 
 	test("defers retained artifacts cleanup until this job's delivery settles", async () => {
 		// Regression: job-row eviction runs on its own retention timer,
@@ -383,6 +530,82 @@ describe("AsyncJobManager", () => {
 		expect(job?.status).toBe("failed");
 		expect(job?.errorText).toBe("schema_violation: missing required fields: count");
 		expect(job?.structured?.status).toBe("invalid");
+	});
+
+	test("retains per-run reports when task failures and cancelled bodies settle", async () => {
+		const failedReport: TaskReportReference = {
+			version: 1,
+			runId: "failed-run",
+			status: "partial",
+			reason: "failed",
+			artifact: { id: "204", uri: "artifact://204", sha256: "d".repeat(64), bytes: 11 },
+		};
+		const cancelledReport: TaskReportReference = {
+			version: 1,
+			runId: "cancelled-run",
+			status: "partial",
+			reason: "aborted",
+			artifact: { id: "205", uri: "artifact://205", sha256: "e".repeat(64), bytes: 12 },
+		};
+		const returnedReport: TaskReportReference = {
+			version: 1,
+			runId: "cancelled-return-run",
+			status: "partial",
+			reason: "empty",
+		};
+		const deliveries: Array<{ jobId: string; report: unknown }> = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: async (jobId, text, job) => {
+				const message = buildAsyncResultBatchMessage([
+					{ jobId, result: text, job, durationMs: undefined, epoch: 0 },
+				]);
+				deliveries.push({ jobId, report: message?.details?.jobs[0]?.report });
+			},
+		});
+		try {
+			const failedId = manager.register(
+				"task",
+				"failed",
+				async () => {
+					throw new AsyncJobError("provider failed", undefined, failedReport);
+				},
+				{ agentId: "SameAgent" },
+			);
+			const cancelledId = manager.register(
+				"task",
+				"cancelled rejection",
+				async ({ signal }) => {
+					const aborted = Promise.withResolvers<void>();
+					signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+					await aborted.promise;
+					throw new AsyncJobError("aborted with partial output", undefined, cancelledReport);
+				},
+				{ agentId: "SameAgent" },
+			);
+			const returnedId = manager.register(
+				"task",
+				"cancelled return",
+				async ({ signal }) => {
+					const aborted = Promise.withResolvers<void>();
+					signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+					await aborted.promise;
+					return { text: "cancelled before output", report: returnedReport };
+				},
+				{ agentId: "SameAgent" },
+			);
+			expect(manager.cancel(cancelledId)).toBe(true);
+			expect(manager.cancel(returnedId)).toBe(true);
+			await manager.waitForAll();
+			expect(await manager.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
+
+			expect(manager.getJob(failedId)).toMatchObject({ status: "failed", report: failedReport });
+			expect(manager.getJob(cancelledId)).toMatchObject({ status: "cancelled", report: cancelledReport });
+			expect(manager.getJob(returnedId)).toMatchObject({ status: "cancelled", report: returnedReport });
+			// Cancellation suppresses delivery, not the report retained for recovery reads.
+			expect(deliveries).toEqual([{ jobId: failedId, report: failedReport }]);
+		} finally {
+			await manager.dispose();
+		}
 	});
 
 	test("cancels a running job by id", async () => {

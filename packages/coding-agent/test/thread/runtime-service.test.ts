@@ -16,6 +16,7 @@ import { asyncJobsThreadService } from "../../src/thread/services/async-jobs";
 import { runtimeThreadService } from "../../src/thread/services/runtime";
 import { settingsThreadService } from "../../src/thread/services/settings";
 import { EventBus } from "../../src/utils/event-bus";
+import type { TaskReportReference } from "@oh-my-pi/pi-tui/tools/task";
 
 /** Main-side view of the fixture's probe: every call is async across the link. */
 type Probe = (op: string, ...args: unknown[]) => Promise<unknown>;
@@ -239,6 +240,61 @@ describe("runtime thread services: async jobs", () => {
 		const [final] = inputs.sources();
 		expect(final?.read(0)).toMatchObject({ text: "line one\nlast line\n", open: false });
 		expect(job.process?.pids()).toEqual([]);
+	});
+
+	it("keeps a worker's held row bound to its own run and report across job-id reuse", async () => {
+		const manager = newManager();
+		const probe = await startWorker();
+		const firstReport: TaskReportReference = Object.freeze({
+			version: 1,
+			runId: "first-run",
+			status: "complete",
+			artifact: Object.freeze({ id: "7", uri: "artifact://7", sha256: "a".repeat(64), bytes: 5 }),
+		});
+		const replacementReport: TaskReportReference = Object.freeze({
+			version: 1,
+			runId: "replacement-run",
+			status: "partial",
+			reason: "failed",
+		});
+		const id = manager.register("task", "first", async () => ({ text: "first", report: firstReport }), {
+			id: "Reused",
+			ownerId: "Worker",
+		});
+		await manager.getJob(id)?.promise;
+		expect(await probe("hold", manager, id)).toBe(true);
+
+		// A worker's every read is a fresh projection; it must still recognize the same run.
+		expect(await probe("heldRun", manager, id)).toMatchObject({ sameRun: true });
+		expect(await probe("waitHeld", manager, id)).toEqual({
+			status: "completed",
+			report: firstReport,
+			consumed: true,
+		});
+
+		manager.evictCompletedJobs({ ownerId: "Worker" });
+		const replacement = manager.register(
+			"task",
+			"replacement",
+			async () => ({ text: "replacement", report: replacementReport }),
+			{ id, ownerId: "Worker" },
+		);
+		expect(replacement).toBe(id);
+		await manager.getJob(id)?.promise;
+		manager.watchJobs([id]);
+
+		// The replacement's markers never speak for the held run, and waiting on it consumes nothing.
+		expect(await probe("heldRun", manager, id)).toEqual({
+			sameRun: false,
+			suppressedForHeld: false,
+			suppressed: true,
+		});
+		expect(await probe("waitHeld", manager, id)).toEqual({
+			status: "completed",
+			report: firstReport,
+			consumed: false,
+		});
+		expect(manager.getJob(id)?.report).toBe(replacementReport);
 	});
 
 	it("dead-letters a dead worker's owned deliveries instead of calling its closed sink", async () => {

@@ -51,7 +51,11 @@ async function createRuntimeHarness(options?: { collabHost?: NonNullable<Interac
 		showError,
 		present,
 		settings: Settings.isolated({ "collab.relayUrl": "wss://relay.example.com" }),
-		session: { registerSessionChangeCallback: () => () => {} },
+		session: {
+			registerSessionChangeCallback: () => () => {},
+			sessionTransitionEpoch: 0,
+			registerSessionTransitionCallback: () => () => {},
+		},
 		sessionManager: { getSessionId: () => "sess-qrcode", onPersistenceNotice: () => () => {} },
 		statusLine: { setCollabStatus: () => {}, invalidate: () => {} },
 		ui: { requestRender: () => {} },

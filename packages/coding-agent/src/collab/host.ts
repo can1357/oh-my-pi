@@ -159,6 +159,8 @@ export interface CollabHostOptions {
 	instanceId?: string;
 	generation?: number;
 	access?: CollabAccess;
+	/** Internal ownership: controllers publish their own always-local endpoint. */
+	registryOwner?: "host" | "controller";
 	/**
 	 * Whether guests may drive the session yet: prompts, interrupts, and agent
 	 * commands are refused with an error frame while this returns false. Joins,
@@ -214,6 +216,7 @@ export class CollabHost {
 	readonly #guestActionsReady: () => boolean;
 	readonly #onEnded: (() => void) | undefined;
 	readonly #access: CollabAccess;
+	readonly #registryOwner: "host" | "controller";
 	#relayConnected = false;
 	#registryPublication: CollabHostPublication | null = null;
 	/** Publication still being created; teardown awaits and withdraws it. */
@@ -258,6 +261,7 @@ export class CollabHost {
 		this.#instanceId = options.instanceId ?? randomBytes(8).toString("hex");
 		this.#generation = options.generation ?? 1;
 		this.#access = options.access ?? "control";
+		this.#registryOwner = options.registryOwner ?? "host";
 		this.#guestActionsReady = options.guestActionsReady ?? (() => true);
 		this.#onEnded = options.onEnded;
 		// The room mirrors the session that is active when it is created; the
@@ -308,6 +312,11 @@ export class CollabHost {
 
 	get relayConnected(): boolean {
 		return this.#relayConnected;
+	}
+
+	/** First relay connection time, shared with the controller-owned local snapshot. */
+	get startedAt(): number {
+		return this.#startedAt;
 	}
 
 	get link(): string {
@@ -510,6 +519,8 @@ export class CollabHost {
 			this.#scheduleStateBroadcast();
 		};
 		this.#updateStatusSegment();
+
+		if (this.#registryOwner === "controller") return;
 
 		// Publish to the local host registry only after the relay connection
 		// succeeded. Publication failure warns but never breaks hosting (#6099).

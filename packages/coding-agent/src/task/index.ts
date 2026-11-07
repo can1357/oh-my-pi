@@ -150,7 +150,14 @@ export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
 export * from "./read-only-policy";
 export type { AgentDefinition, SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "./types";
-export type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+export type {
+	AgentProgress,
+	SingleResult,
+	TaskParams,
+	TaskReportArtifact,
+	TaskReportReference,
+	TaskToolDetails,
+} from "@oh-my-pi/pi-tui/tools/task";
 export * from "./result-summary";
 export {
 	TASK_SUBAGENT_EVENT_CHANNEL,
@@ -1683,19 +1690,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						else void cleanup();
 					},
 				});
-				// An acquire-time abort and a post-acquire abort take the same
-				// path: progress + onSettled have to fire even when the spawn
-				// never reached the executor, otherwise the batch aggregate state
-				// stays "running" forever.
+				// A run that acquired its permit owns a terminal result, even if
+				// cancellation raced adoption. Await it below so its partial report
+				// survives; only an acquire-time abort has no executor result.
 				const permitHeld = await activeRun.started.then(
 					() => true,
 					() => false,
 				);
-				if (!permitHeld || runSignal.aborted) {
+				if (!permitHeld) {
 					progress.status = "aborted";
 					onSettled?.(true);
 					throw new Error("Aborted before execution");
 				}
+				let settledResult: SingleResult | undefined;
 				try {
 					markRunning();
 					progress.status = "running";
@@ -1705,7 +1712,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					);
 					const result = await activeRun.result;
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
-					const singleResult = result.details?.results[0];
+					const singleResult = (settledResult = result.details?.results[0]);
 					// A missing result means the sync path failed at the tool level
 					// (results: []) — treat it as a failure, not success. A runner
 					// error on a zero exit (changes captured but not landed, or a
@@ -1750,11 +1757,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true)}`;
 					const structured = singleResult?.structuredOutput;
+					const report = singleResult?.report;
 					if (resultFailed) {
 						// Mark the job itself failed; the failed agent stays interrogable.
-						throw new TaskJobError(deliveryText, structured);
+						throw new TaskJobError(deliveryText, structured, report);
 					}
-					return structured ? { text: deliveryText, structured } : deliveryText;
+					return structured || report ? { text: deliveryText, structured, report } : deliveryText;
 				} catch (error) {
 					if (error instanceof TaskJobError) {
 						throw error;
@@ -1766,7 +1774,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
 					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
-					throw new TaskJobError(`${message}${hint}`);
+					throw new TaskJobError(`${message}${hint}`, settledResult?.structuredOutput, settledResult?.report);
 				}
 			},
 			{

@@ -23,7 +23,7 @@ import {
 	createCachedComponent,
 	type ConfiguredThinkingLevel,
 } from "../render/render-utils";
-import type { StructuredSubagentOutput } from "./task";
+import type { StructuredSubagentOutput, TaskReportReference } from "./task";
 import { describeJobTiles, type JobTile, type JobWidgetView, renderJobTileLines } from "./job-widget";
 import type { RenderResultOptions, ToolRenderer, ToolActivitySummary } from "./renderer";
 import type { IrcDeliveryReceipt, IrcMessage } from "./irc";
@@ -85,6 +85,8 @@ export interface JobSnapshot {
 	/** Capture error in historical snapshots; new snapshots store source metadata in `meta`. */
 	artifactError?: OutputMeta["artifactError"];
 	structured?: StructuredSubagentOutput;
+	/** Immutable public report reference, retained even after result text is consumed. */
+	report?: TaskReportReference;
 	/**
 	 * `agent://<id>` handle backing this job's artifacts — the job-row's
 	 * registry `agentId` when the manager disambiguated a requested job id

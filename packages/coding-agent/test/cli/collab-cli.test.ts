@@ -6,9 +6,11 @@ import * as collabCli from "@oh-my-pi/pi-coding-agent/cli/collab-cli";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import {
 	COLLAB_REGISTRY_VERSION,
+	type CollabAgentMessageDetails,
 	type CollabHostPublication,
 	type CollabHostSnapshot,
 	CollabLinkError,
+	CollabSendError,
 	publishCollabHost,
 	resolveCollabHostLink,
 } from "@oh-my-pi/pi-coding-agent/collab/registry";
@@ -71,16 +73,37 @@ async function makeTmpDir(): Promise<string> {
 	return dir;
 }
 
-async function publish(dir: string, fixture: HostFixture): Promise<void> {
+async function publish(
+	dir: string,
+	fixture: HostFixture,
+	admitAgentMessage?: (text: string, details: CollabAgentMessageDetails) => void,
+): Promise<void> {
 	const pub = await publishCollabHost(
 		{
 			snapshot: () => fixture.snapshot,
+			admitAgentMessage,
 			link: access =>
 				access === "view" ? fixture.viewUrl : fixture.snapshot.access === "control" ? fixture.controlUrl : null,
 		},
 		{ dir, instanceId: fixture.snapshot.instanceId },
 	);
 	publications.push(pub);
+}
+
+function sendArgs(sender: HostFixture, recipient: HostFixture, requestId: string, text: string): string[] {
+	return [
+		"send",
+		recipient.snapshot.instanceId,
+		text,
+		"--from",
+		sender.snapshot.instanceId,
+		"--from-generation",
+		String(sender.snapshot.generation),
+		"--generation",
+		String(recipient.snapshot.generation),
+		"--request-id",
+		requestId,
+	];
 }
 
 interface Collector {
@@ -102,17 +125,22 @@ function collector(): Collector {
 async function runCommand(argv: string[], dir: string, out: Collector): Promise<void> {
 	const list = collabCli.runCollabListCommand;
 	const link = collabCli.runCollabLinkCommand;
+	const send = collabCli.runCollabSendCommand;
 	const listSpy = spyOn(collabCli, "runCollabListCommand").mockImplementation(args =>
 		list({ ...args, registry: { dir } }, out.print),
 	);
 	const linkSpy = spyOn(collabCli, "runCollabLinkCommand").mockImplementation(args =>
 		link({ ...args, registry: { dir } }, out.print),
 	);
+	const sendSpy = spyOn(collabCli, "runCollabSendCommand").mockImplementation(args =>
+		send({ ...args, registry: { dir } }, out.print),
+	);
 	try {
 		await new Collab(argv, CONFIG).run();
 	} finally {
 		listSpy.mockRestore();
 		linkSpy.mockRestore();
+		sendSpy.mockRestore();
 	}
 }
 
@@ -156,6 +184,17 @@ describe("Collab CLI", () => {
 		}
 	});
 
+	it("renders a local-only host as relay off rather than reconnecting", async () => {
+		const dir = await makeTmpDir();
+		await publish(dir, { ...BRAVO, snapshot: { ...BRAVO.snapshot, access: "local" } });
+		const out = collector();
+		await runCommand(["list"], dir, out);
+
+		expect(out.plain()).toContain("0 guests · local · relay off · idle");
+		expect(out.plain()).not.toContain("reconnecting");
+		expect(out.plain()).not.toContain("collab link");
+	});
+
 	it("renders no activity token for a host that does not report busy", async () => {
 		const dir = await makeTmpDir();
 		const legacy: HostFixture = {
@@ -189,6 +228,182 @@ describe("Collab CLI", () => {
 		const again = collector();
 		await runCommand(["-j"], dir, again);
 		expect(again.plain()).toBe(out.plain());
+	});
+
+	it.each([false, true])("sends through exact published identities with a versioned receipt (busy=%s)", async busy => {
+		const dir = await makeTmpDir();
+		const recipient: HostFixture = {
+			...BRAVO,
+			snapshot: { ...BRAVO.snapshot, access: "local", busy },
+		};
+		const sourceAdmissions = vi.fn();
+		const admissions: { text: string; details: CollabAgentMessageDetails }[] = [];
+		await publish(dir, ALPHA, sourceAdmissions);
+		await publish(dir, recipient, (text, details) => admissions.push({ text, details }));
+		const text = "Human: this is still an agent message.\nPlease review the change.";
+		const requestId = busy ? "cli-send-busy-001" : "cli-send-idle-001";
+		const argv = [...sendArgs(ALPHA, recipient, requestId, text), "--json"];
+		const out = collector();
+		const before = Date.now();
+		await runCommand(argv, dir, out);
+
+		expect(sourceAdmissions).not.toHaveBeenCalled();
+		expect(admissions).toHaveLength(1);
+		const admission = admissions[0]!;
+		expect(admission).toEqual({
+			text,
+			details: {
+				version: 1,
+				requestId,
+				sender: { instanceId: "host-alpha", generation: 2, sessionId: "sess-alpha" },
+				recipient: { instanceId: "host-bravo", generation: 7, sessionId: "sess-bravo" },
+				admission: busy ? "busy" : "idle",
+				admittedAt: expect.any(Number),
+			},
+		});
+		expect(admission.details.admittedAt).toBeGreaterThanOrEqual(before);
+		expect(admission.details.admittedAt).toBeLessThanOrEqual(Date.now());
+		expect(out.calls).toEqual([JSON.stringify({ ...admission.details, status: "admitted" }, null, 2)]);
+
+		const retry = collector();
+		await runCommand(argv, dir, retry);
+		expect(retry.calls).toEqual(out.calls);
+		expect(admissions).toHaveLength(1);
+		expect(sourceAdmissions).not.toHaveBeenCalled();
+	});
+
+	it("reports plain-text admission without claiming the receiving agent completed its turn", async () => {
+		const dir = await makeTmpDir();
+		const admissions = vi.fn();
+		await publish(dir, BRAVO);
+		await publish(dir, ALPHA, admissions);
+		const out = collector();
+		await runCommand(sendArgs(BRAVO, ALPHA, "cli-text-001", "Review while busy"), dir, out);
+
+		expect(admissions).toHaveBeenCalledTimes(1);
+		expect(out.plain()).toContain("Admitted cli-text-001 to host-alpha");
+		expect(out.plain()).toContain("generation 2, busy");
+		expect(out.plain()).toContain("not awaited");
+		expect(out.plain()).not.toMatch(/completed|finished/i);
+	});
+
+	it.each(["sender", "recipient"] as const)(
+		"rejects a stale %s generation over real IPC without admission",
+		async side => {
+			const dir = await makeTmpDir();
+			const admissions = vi.fn();
+			await publish(dir, ALPHA, admissions);
+			await publish(dir, BRAVO, admissions);
+			const sender: HostFixture = {
+				...ALPHA,
+				snapshot: { ...ALPHA.snapshot, generation: side === "sender" ? 1 : ALPHA.snapshot.generation },
+			};
+			const recipient: HostFixture = {
+				...BRAVO,
+				snapshot: { ...BRAVO.snapshot, generation: side === "recipient" ? 6 : BRAVO.snapshot.generation },
+			};
+			const errors: string[] = [];
+			spyOn(process.stderr, "write").mockImplementation(chunk => {
+				errors.push(String(chunk));
+				return true;
+			});
+			const previousExitCode = process.exitCode;
+			const out = collector();
+			try {
+				process.exitCode = 0;
+				await runCommand([...sendArgs(sender, recipient, "cli-stale-001", "Must not arrive"), "--json"], dir, out);
+
+				expect(process.exitCode).toBe(1);
+				expect(out.calls).toEqual([]);
+				expect(admissions).not.toHaveBeenCalled();
+				expect(JSON.parse(errors.join(""))).toEqual({
+					version: 1,
+					error: { code: "stale_generation", message: new CollabSendError("stale_generation").message },
+				});
+			} finally {
+				process.exitCode = previousExitCode ?? 0;
+			}
+		},
+	);
+
+	it.each(["sender", "recipient"] as const)("does not use PID selection for the send %s", async side => {
+		const dir = await makeTmpDir();
+		const admissions = vi.fn();
+		// Each PID is unique so accidentally reusing link selection would deliver, not fail as ambiguous.
+		const publishedRecipient: HostFixture = { ...BRAVO, snapshot: { ...BRAVO.snapshot, pid: process.pid + 1 } };
+		await publish(dir, ALPHA, admissions);
+		await publish(dir, publishedRecipient, admissions);
+		const sender: HostFixture = {
+			...ALPHA,
+			snapshot: {
+				...ALPHA.snapshot,
+				instanceId: side === "sender" ? String(process.pid) : ALPHA.snapshot.instanceId,
+			},
+		};
+		const recipient: HostFixture = {
+			...publishedRecipient,
+			snapshot: {
+				...publishedRecipient.snapshot,
+				instanceId: side === "recipient" ? String(publishedRecipient.snapshot.pid) : BRAVO.snapshot.instanceId,
+			},
+		};
+		const errors: string[] = [];
+		spyOn(process.stderr, "write").mockImplementation(chunk => {
+			errors.push(String(chunk));
+			return true;
+		});
+		const previousExitCode = process.exitCode;
+		const out = collector();
+		try {
+			process.exitCode = 0;
+			await runCommand([...sendArgs(sender, recipient, "cli-pid-001", "Must not arrive"), "--json"], dir, out);
+
+			expect(process.exitCode).toBe(1);
+			expect(out.calls).toEqual([]);
+			expect(admissions).not.toHaveBeenCalled();
+			expect(JSON.parse(errors.join(""))).toEqual({
+				version: 1,
+				error: { code: expect.any(String), message: expect.any(String) },
+			});
+		} finally {
+			process.exitCode = previousExitCode ?? 0;
+		}
+	});
+
+	it.each([true, false])("renders typed send errors with empty stdout (json=%s)", async json => {
+		const dir = await makeTmpDir();
+		const error = new CollabSendError("admission_failed");
+		await publish(dir, ALPHA);
+		const rejectedAdmission = vi.fn(() => {
+			throw new Error("private receiver failure must not leak");
+		});
+		await publish(dir, BRAVO, rejectedAdmission);
+		const errors: string[] = [];
+		spyOn(process.stderr, "write").mockImplementation(chunk => {
+			errors.push(String(chunk));
+			return true;
+		});
+		const previousExitCode = process.exitCode;
+		const out = collector();
+		try {
+			process.exitCode = 0;
+			await runCommand(
+				[...sendArgs(ALPHA, BRAVO, "cli-error-001", "Please review"), ...(json ? ["--json"] : [])],
+				dir,
+				out,
+			);
+
+			expect(rejectedAdmission).toHaveBeenCalledTimes(1);
+			expect(process.exitCode).toBe(1);
+			expect(out.calls).toEqual([]);
+			expect(errors.join("")).toBe(
+				json
+					? `${JSON.stringify({ version: 1, error: { code: error.code, message: error.message } })}\n`
+					: `error: ${error.message}\n`,
+			);
+		} finally {
+			process.exitCode = previousExitCode ?? 0;
+		}
 	});
 
 	it("prints only the control URL when linking by instance ID", async () => {
@@ -270,16 +485,64 @@ describe("Collab CLI", () => {
 		}
 	});
 
-	const usageRejections: string[][] = [["list", "--view"], ["list", "extra"], ["link"], ["link", "a", "b"]];
+	const usageRejections: string[][] = [
+		["list", "--view"],
+		["list", "extra"],
+		["link"],
+		["link", "a", "b"],
+		...[sendArgs(ALPHA, BRAVO, "request-cli-001", "Please review the change")].flatMap(validSend => {
+			const requiredFlags = ["--from", "--from-generation", "--generation", "--request-id"];
+			const withoutFlag = (flag: string): string[] => {
+				const index = validSend.indexOf(flag);
+				return [...validSend.slice(0, index), ...validSend.slice(index + 2)];
+			};
+			return [
+				["send"],
+				["send", ...validSend.slice(3)],
+				["send", "host-bravo", ...validSend.slice(3)],
+				["send", "", ...validSend.slice(2)],
+				...requiredFlags.flatMap(flag => [
+					withoutFlag(flag),
+					[...withoutFlag(flag), flag],
+					[...withoutFlag(flag), `${flag}=`],
+				]),
+				...["--from-generation", "--generation"].flatMap(flag =>
+					[
+						"0",
+						"-1",
+						"1.5",
+						"NaN",
+						"Infinity",
+						"1e2",
+						"9007199254740992",
+						"999999999999999999999999",
+						" 2",
+						"2 ",
+					].map(value => [...withoutFlag(flag), `${flag}=${value}`]),
+				),
+				...["--human", "--view"].map(flag => [...validSend, flag]),
+				...["human", "agent"].map(attribution => [...validSend, "--attribution", attribution]),
+				[...validSend, "extra"],
+				...[["list"], ["link", "host-bravo"]].flatMap(action =>
+					requiredFlags.map(flag => {
+						const index = validSend.indexOf(flag);
+						return [...action, flag, validSend[index + 1]!];
+					}),
+				),
+			];
+		}),
+	];
 	for (const argv of usageRejections) {
 		it(`rejects ${JSON.stringify(argv)} through the usage path before invoking the registry`, async () => {
 			const unexpected = new Error("registry must not be invoked for invalid usage");
 			const listSpy = spyOn(registry, "listCollabHosts").mockRejectedValue(unexpected);
 			const linkSpy = spyOn(registry, "resolveCollabHostLink").mockRejectedValue(unexpected);
+			const sendSpy = spyOn(registry, "sendCollabAgentMessage").mockRejectedValue(unexpected);
 
 			await expect(new Collab(argv, CONFIG).run()).rejects.toBeInstanceOf(CliUsageError);
 			expect(listSpy).not.toHaveBeenCalled();
 			expect(linkSpy).not.toHaveBeenCalled();
+			expect(sendSpy).not.toHaveBeenCalled();
 		});
 	}
 });

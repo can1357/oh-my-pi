@@ -6,6 +6,7 @@
  * progress tracking.
  */
 
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
@@ -122,6 +123,7 @@ import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
+import { MAX_TASK_REPORT_BYTES, publishTaskReport, readTaskReportHistory, recordTaskReportHistory } from "./report";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { WorkPoolYieldItem } from "./workpool-yield";
@@ -141,6 +143,7 @@ import {
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
+	type TaskReportReference,
 	type TaskToolDetails,
 	type YieldItem,
 } from "@oh-my-pi/pi-tui/tools/task";
@@ -595,9 +598,9 @@ export interface ExecutorOptions {
 	/** Override local:// protocol options so subagent shares parent's local:// root */
 	localProtocolOptions?: LocalProtocolOptions;
 	/**
-	 * Parent session's ArtifactManager. Subagent adopts it so artifact IDs are
-	 * unique across the whole agent tree and all artifacts land in the parent's
-	 * artifacts directory (no per-subagent subdir).
+	 * Parent-owned sink for public report snapshots. Ordinary subagents also
+	 * adopt it for runtime artifacts; prepared sessions keep their private
+	 * runtime manager and use this sink only for parent-visible reports.
 	 */
 	parentArtifactManager?: ArtifactManagerApi;
 	parentHindsightSessionState?: HindsightSessionStateApi;
@@ -710,6 +713,8 @@ interface FinalizeSubprocessOutputArgs {
 
 interface FinalizeSubprocessOutputResult {
 	rawOutput: string;
+	/** Canonical explicit yield output only; rawOutput may also contain private mid-work narration. */
+	publicOutput?: string;
 	exitCode: number;
 	stderr: string;
 	abortedViaYield: boolean;
@@ -755,6 +760,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 	const source = args.outputSchemaSource ?? (outputSchema === undefined ? "none" : "session");
 	const includeStructuredOutput = source !== "none";
 	let structuredOutput: StructuredSubagentOutput | undefined;
+	let publicOutput: string | undefined;
 	let abortedViaYield = false;
 	const hasYield = Array.isArray(yieldItems) && yieldItems.length > 0;
 	const hadFailureBeforeYield = exitCode !== 0 && stderr.trim().length > 0;
@@ -770,6 +776,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 			} catch {
 				rawOutput = `{"aborted":true,"error":"${lastYield.error || "Unknown error"}"}`;
 			}
+			publicOutput = rawOutput;
 		} else {
 			const assembled = assembleYieldResult(yieldItems, lastAssistantText, yieldSectionShapes(outputSchema));
 			if (!assembled || assembled.missingData) {
@@ -845,6 +852,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 						stderr = "Subagent failed after yielding a result.";
 					}
 				}
+				publicOutput = rawOutput;
 			}
 		}
 	} else if (args.structured === false) {
@@ -903,7 +911,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 		}
 	}
 
-	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
+	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput, publicOutput };
 }
 
 function formatToolArgsPreview(value: string, key: string): { value: string; key: string } {
@@ -1328,6 +1336,10 @@ interface RunMonitorArgs {
  */
 interface SubagentRunMonitor {
 	readonly progress: AgentProgress;
+	/** Distinguishes invocations even when a kept-alive child keeps its registry id. */
+	readonly reportRunId: string;
+	/** Bounded qualifying public turns, optionally followed by the canonical explicit yield. */
+	publicReportOutput(canonicalOutput?: string): { text: string; overflow: boolean };
 	/** Fires when the run was asked to stop (caller signal, timeout, budget, terminate). */
 	readonly abortSignal: AbortSignal;
 	readonly accumulatedUsage: Usage;
@@ -1499,6 +1511,30 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// finalize the preceding report.
 	let lastReportTurnText: string | undefined;
 	let sawAssistantMessage = false;
+	const reportRunId = randomUUID();
+	const publicReportTurns: string[] = [];
+	let publicReportBytes = 0;
+	let publicReportOverflow = false;
+	let publishedReportTurnCount = 0;
+	let publishedReportBytes = 0;
+	let publishedReportOverflow = false;
+	const resetPublicReport = (): void => {
+		// More work invalidates provisional prose, never an explicit yield
+		// publication that a later report may refer back to.
+		publicReportTurns.length = publishedReportTurnCount;
+		publicReportBytes = publishedReportBytes;
+		publicReportOverflow = publishedReportOverflow;
+	};
+	const capturePublicReportTurn = (text: string): void => {
+		if (publicReportOverflow) return;
+		const bytes = Buffer.byteLength(text) + (publicReportTurns.length > 0 ? 2 : 0);
+		if (bytes > MAX_TASK_REPORT_BYTES - publicReportBytes) {
+			publicReportOverflow = true;
+			return;
+		}
+		publicReportTurns.push(text);
+		publicReportBytes += bytes;
+	};
 	let activeSessionAbortPromise: Promise<void> | undefined;
 
 	const abortActiveSession = (): Promise<void> => {
@@ -1811,6 +1847,26 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		progress.extractedToolData[toolName] = existing;
 		if (toolName === "yield") {
 			const item = isRecord(data) ? data : undefined;
+			// Canonical assembly is latest-wins. Recovery also retains each
+			// accepted publication, including a table later replaced by a pointer.
+			const publication = finalizeSubprocessOutput({
+				rawOutput: "",
+				exitCode: 0,
+				stderr: "",
+				doneAborted: false,
+				signalAborted: false,
+				yieldItems: [data as YieldItem],
+				outputSchema: undefined,
+				lastAssistantText: lastReportTurnText,
+			});
+			if (publication.publicOutput !== undefined) {
+				if (publication.publicOutput !== publicReportTurns.at(-1)) {
+					capturePublicReportTurn(publication.publicOutput);
+				}
+				publishedReportTurnCount = publicReportTurns.length;
+				publishedReportBytes = publicReportBytes;
+				publishedReportOverflow = publicReportOverflow;
+			}
 			const incremental = Array.isArray(item?.type) && item.type.length > 0;
 			// A forced final yield ends the run. Once the reminder ladder has
 			// pinned `toolChoice` to `yield`, an incremental section satisfies
@@ -2179,9 +2235,12 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						// text after the last one is a report; without such text, prior
 						// prose predates that work and is invalidated.
 						const text = turnText.join("\n");
+						if (startedMoreWork || completedServerWork) resetPublicReport();
 						if (startedMoreWork) lastReportTurnText = undefined;
-						else if (text.trim()) lastReportTurnText = text;
-						else if (completedServerWork) lastReportTurnText = undefined;
+						else if (text.trim()) {
+							lastReportTurnText = text;
+							capturePublicReportTurn(text);
+						} else if (completedServerWork) lastReportTurnText = undefined;
 					}
 					// A yield awaiting validation suppresses the budget check for
 					// its own turn (#5006). Defer it rather than drop it: every
@@ -2359,6 +2418,16 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 	return {
 		progress,
+		reportRunId,
+		publicReportOutput: canonicalOutput => {
+			const suffix = canonicalOutput && canonicalOutput !== publicReportTurns.at(-1) ? canonicalOutput : undefined;
+			const bytes = suffix ? Buffer.byteLength(suffix) + (publicReportTurns.length > 0 ? 2 : 0) : 0;
+			if (publicReportOverflow || bytes > MAX_TASK_REPORT_BYTES - publicReportBytes) {
+				return { text: "", overflow: true };
+			}
+			const text = publicReportTurns.join("\n\n");
+			return { text: suffix ? (text ? `${text}\n\n${suffix}` : suffix) : text, overflow: false };
+		},
 		abortSignal,
 		accumulatedUsage,
 		hasUsage: () => hasUsage,
@@ -2897,8 +2966,112 @@ interface FinalizeRunArgs {
 	 */
 	followUpTurn?: boolean;
 	publishMessageResult?: boolean;
+	/** Live child journal; publication must commit before lifecycle disposal seals it. */
+	reportSessionManager?: SessionManager;
+	/** Parent-owned public sink, independent of the child's runtime artifact namespace. */
+	reportArtifactManager?: ArtifactManagerApi;
+	/** Initial runs publish before teardown, then retain the reference through final status delivery. */
+	report?: TaskReportReference;
 	sessionFile?: string;
 	startTime: number;
+}
+
+function finalizeMonitoredOutput(args: FinalizeRunArgs): FinalizeSubprocessOutputResult {
+	const { monitor, done } = args;
+	const structured = args.structured !== false;
+	pushLoopPhase(`subagent:${args.id}`);
+	try {
+		return finalizeSubprocessOutput({
+			rawOutput: structured ? monitor.rawOutput() : (monitor.lastReportTurnText() ?? ""),
+			exitCode: done.exitCode,
+			stderr: done.error ?? "",
+			doneAborted: Boolean(done.aborted),
+			signalAborted: Boolean(args.signal?.aborted),
+			yieldItems: monitor.progress.extractedToolData?.yield as YieldItem[] | undefined,
+			outputSchema: args.outputSchema,
+			outputSchemaMode: args.outputSchemaMode,
+			outputSchemaSource: args.outputSchemaSource,
+			lastAssistantText: monitor.lastReportTurnText(),
+			structured,
+		});
+	} finally {
+		popLoopPhase();
+	}
+}
+
+function reportPartialReason(
+	args: FinalizeRunArgs,
+	finalized: FinalizeSubprocessOutputResult,
+): TaskReportReference["reason"] {
+	if (
+		args.monitor.runtimeLimitExceeded() ||
+		args.done.aborted ||
+		finalized.abortedViaYield ||
+		(!finalized.hasYield && args.signal?.aborted)
+	) {
+		return "aborted";
+	}
+	if (finalized.structuredOutput && finalized.structuredOutput.status !== "valid") return "schema-invalid";
+	return finalized.exitCode !== 0 ? "failed" : undefined;
+}
+
+function withReportPartialReason(
+	report: TaskReportReference,
+	reason: TaskReportReference["reason"],
+): TaskReportReference {
+	return reason && report.status === "complete" ? Object.freeze({ ...report, status: "partial", reason }) : report;
+}
+
+async function publishRunReport(
+	args: FinalizeRunArgs,
+	finalized = finalizeMonitoredOutput(args),
+): Promise<TaskReportReference> {
+	const { monitor } = args;
+	const publicInvocation = !args.followUpTurn || finalized.hasYield || args.publishMessageResult === true;
+	const partialReason = reportPartialReason(args, finalized);
+	const sessionManager = args.reportSessionManager;
+	const manager = args.reportArtifactManager;
+	let previous: TaskReportReference | undefined;
+	if (publicInvocation && args.followUpTurn && sessionManager) {
+		try {
+			previous = readTaskReportHistory(sessionManager, args.id);
+		} catch {
+			// An unreadable journal leaves the continuation partial ("history-unavailable"), never the run failed.
+		}
+	}
+	let report = await publishTaskReport({
+		runId: monitor.reportRunId,
+		manager,
+		...(publicInvocation ? monitor.publicReportOutput(finalized.publicOutput) : { text: "", overflow: false }),
+		partialReason:
+			partialReason ?? (publicInvocation && args.followUpTurn && !previous ? "history-unavailable" : undefined),
+		previous,
+	});
+	// Snapshot IO can outlast cancellation or a wall-clock deadline.
+	report = withReportPartialReason(report, reportPartialReason(args, finalized));
+	// Only an explicit public result becomes history. A peer-only response or
+	// failed message follow-up must not replace the prior accepted publication.
+	const hasMessageResult =
+		args.structured === false &&
+		args.publishMessageResult &&
+		reportPartialReason(args, finalized) !== "aborted" &&
+		finalized.exitCode === 0 &&
+		Boolean(monitor.lastReportTurnText()?.trim());
+	if (sessionManager && (!args.followUpTurn || finalized.hasYield || hasMessageResult)) {
+		try {
+			recordTaskReportHistory(sessionManager, args.id, report);
+			await sessionManager.flush();
+			const settled = withReportPartialReason(report, reportPartialReason(args, finalized));
+			if (settled !== report) {
+				report = settled;
+				recordTaskReportHistory(sessionManager, args.id, report);
+				await sessionManager.flush();
+			}
+		} catch {
+			return Object.freeze({ ...report, status: "partial", reason: "storage-failed" });
+		}
+	}
+	return report;
 }
 
 /**
@@ -2910,39 +3083,13 @@ interface FinalizeRunArgs {
 async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	const { monitor, done, index, id, agent, task, assignment, signal, modelOverride, modelRole } = args;
 	const progress = monitor.progress;
-	let exitCode = done.exitCode;
-	let stderr = done.error ?? "";
-
-	// A structured run finalizes from its yield (falling back to the run's
-	// output); a message-result run is exactly its final report turn, never
-	// the narration of earlier turns.
 	const structured = args.structured !== false;
-	let rawOutput = structured ? monitor.rawOutput() : (monitor.lastReportTurnText() ?? "");
 	const yieldItems = progress.extractedToolData?.yield as YieldItem[] | undefined;
-	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
-	// here is attributed to this subagent rather than logged as "unknown".
-	pushLoopPhase(`subagent:${id}`);
-	let finalized: FinalizeSubprocessOutputResult;
-	try {
-		finalized = finalizeSubprocessOutput({
-			rawOutput,
-			exitCode,
-			stderr,
-			doneAborted: Boolean(done.aborted),
-			signalAborted: Boolean(signal?.aborted),
-			yieldItems,
-			outputSchema: args.outputSchema,
-			outputSchemaMode: args.outputSchemaMode,
-			outputSchemaSource: args.outputSchemaSource,
-			lastAssistantText: monitor.lastReportTurnText(),
-			structured,
-		});
-	} finally {
-		popLoopPhase();
-	}
-	rawOutput = finalized.rawOutput;
-	exitCode = finalized.exitCode;
-	stderr = finalized.stderr;
+	const finalized = finalizeMonitoredOutput(args);
+	let { rawOutput, exitCode } = finalized;
+	const stderr = finalized.stderr;
+	// Snapshot and journal the selected public report before preview truncation.
+	let report = args.report ?? (await publishRunReport(args, finalized));
 	// Salvage for cancelled/aborted children that produced no completed output:
 	// surface the last assistant text + stats instead of "(no output)" so the
 	// parent doesn't redo work the child already finished.
@@ -3064,6 +3211,9 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 						? monitor.resolveSignalAbortReason()
 						: monitor.resolveAbortReasonText()
 		: undefined;
+	// Cleanup or named-artifact IO may have crossed a deadline after the
+	// immutable snapshot was saved. Refine metadata, never rewrite its bytes.
+	report = withReportPartialReason(report, reportPartialReason(args, finalized));
 	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
 	monitor.scheduleProgress(true);
 
@@ -3095,6 +3245,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		stderr,
 		truncated: Boolean(truncated),
 		...(finalized.structuredOutput ? { structuredOutput: finalized.structuredOutput } : {}),
+		report,
 		durationMs: Date.now() - args.startTime,
 		tokens: progress.tokens,
 		requests: progress.requests,
@@ -3148,6 +3299,8 @@ export interface IrcWakeTurnMonitorOptions {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	artifactsDir?: string;
+	/** Parent-owned public report sink; never inferred from the child runtime. */
+	parentArtifactManager?: ArtifactManagerApi;
 }
 
 /** Sender + message id of one `irc:incoming` record that woke a turn. */
@@ -3542,6 +3695,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					detached: true,
 					followUpTurn: true,
 					publishMessageResult: ownerWoken || ownerPrompted || userPrompted,
+					reportSessionManager: session.sessionManager,
+					reportArtifactManager: options.parentArtifactManager,
 					// A cancelled wake job must not replace the accepted result.
 					signal: jobCancel.signal,
 					sessionFile,
@@ -3554,6 +3709,14 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					error: caught instanceof Error ? caught.message : String(caught),
 				});
 			} finally {
+				const report =
+					result?.report ??
+					(await publishTaskReport({
+						runId: turnMonitor.reportRunId,
+						manager: options.parentArtifactManager,
+						text: "",
+						partialReason: aborted ? "aborted" : "failed",
+					}));
 				// A focused-user result can complete without a registered wake job;
 				// enqueue its delivery without reserving an execution slot.
 				const messageResult =
@@ -3561,7 +3724,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					try {
-						session.asyncJobManager.publishCompleted("task", id, { text }, { id, agentId: id, ownerId });
+						session.asyncJobManager.publishCompleted("task", id, { text, report }, { id, agentId: id, ownerId });
 					} catch (error) {
 						logger.warn("User-resumed subagent result delivery failed", {
 							id,
@@ -3581,17 +3744,20 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					const structured = result.structuredOutput;
 					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
-						wakeJob.outcome.reject(new AsyncJobError(text, structured));
+						wakeJob.outcome.reject(new AsyncJobError(text, structured, report));
 					} else {
 						wakeJob.outcome.resolve({
 							text,
 							agentOutputPublished: outputPublished,
 							...(structured ? { structured } : {}),
+							report,
 						});
 					}
 				} else if (wakeJob && yielded) {
 					const message = finalizeError instanceof Error ? finalizeError.message : String(finalizeError);
-					wakeJob.outcome.reject(new Error(`Wake turn of ${id} failed to finalize: ${message}`));
+					wakeJob.outcome.reject(
+						new AsyncJobError(`Wake turn of ${id} failed to finalize: ${message}`, undefined, report),
+					);
 				} else if (wakeJob) {
 					const outcome = { error: errorForPeer, aborted, finalizeError };
 					const text = buildWakeRelayBody({
@@ -3603,8 +3769,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						abortReason,
 						alreadyMessaged: IrcBus.global().sentSince(id, wakeJob.ownerId, turnStartTime),
 					});
-					if (wakeTurnFailed(outcome)) wakeJob.outcome.reject(new Error(text));
-					else wakeJob.outcome.resolve({ text, agentOutputPublished: outputPublished });
+					if (wakeTurnFailed(outcome)) wakeJob.outcome.reject(new AsyncJobError(text, undefined, report));
+					else wakeJob.outcome.resolve({ text, agentOutputPublished: outputPublished, report });
 				}
 				// Unconditional: a failed, cancelled, empty, or even un-finalized
 				// wake turn must still tell whoever woke it, or a `send await:true`
@@ -3797,6 +3963,8 @@ export interface FollowUpTurnOptions {
 	 * existing artifact intact.
 	 */
 	artifactsDir?: string;
+	/** Parent-owned public report sink; never inferred from the child runtime. */
+	parentArtifactManager?: ArtifactManagerApi;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
 	/** Periodically ask for a completion estimate during this turn; see {@link isCompletionProbeEnabled}. */
@@ -4032,6 +4200,8 @@ async function driveFollowUpTurn(
 			detached: true,
 			followUpTurn: true,
 			publishMessageResult: true,
+			reportSessionManager: session.sessionManager,
+			reportArtifactManager: options.parentArtifactManager,
 			sessionFile,
 			startTime,
 		});
@@ -4240,6 +4410,7 @@ interface WarmReviveCapture {
 	perCallModel: boolean;
 	/** Re-captured whenever the live session is disposed, so a revive restores its latest settings writes. */
 	settings: SubagentSettingsRecipe;
+	/** Runtime adoption only; prepared sessions retain the public sink separately in wake. */
 	parentArtifactManager: ArtifactManagerApi | undefined;
 	/** Todos are parent-owned and stripped from subagents, except under prewalk (its todo gate needs them). */
 	keepTodo: boolean;
@@ -4483,6 +4654,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			error: "Cancelled before start",
 			aborted: true,
 			abortReason: "Cancelled before start",
+			report: await publishTaskReport({
+				runId: randomUUID(),
+				manager: options.parentArtifactManager,
+				text: "",
+				partialReason: "aborted",
+			}),
 		};
 	}
 
@@ -4625,6 +4802,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	let openedSessionManager: SessionManager | undefined;
 	let untrackedSession: AgentSession | undefined;
 	let pendingSessionDisposal: Promise<void> | undefined;
+	let reportSessionManager: SessionManager | undefined;
+	const reportArtifactManager = options.parentArtifactManager;
+	let report: TaskReportReference | undefined;
 	const wakeOptions: IrcWakeTurnMonitorOptions = {
 		id,
 		index,
@@ -4645,6 +4825,29 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		outputSchemaMode: options.outputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,
 		artifactsDir: options.artifactsDir,
+		parentArtifactManager: options.parentArtifactManager,
+	};
+	const finalizationArgs = {
+		monitor,
+		index,
+		id,
+		agent,
+		task,
+		assignment,
+		modelOverride,
+		modelRole,
+		structured,
+		outputSchema,
+		outputSchemaMode: options.outputSchemaMode,
+		outputSchemaSource: options.outputSchemaSource,
+		signal,
+		artifactsDir: options.artifactsDir,
+		eventBus: options.eventBus,
+		subagentEventBus: options.subagentEventBus,
+		parentToolCallId: options.parentToolCallId,
+		detached: options.detached,
+		sessionFile: subtaskSessionFile,
+		startTime,
 	};
 
 	const runSubagent = async (): Promise<{
@@ -5038,6 +5241,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			if (options.parentArtifactManager && !preparedSession) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
+			reportSessionManager = sessionManager;
 			sessionOpenedAt = performance.now();
 			await refreshSubagentIrcRoot(sessionSpec.prompt, sessionManager, sessionFile);
 
@@ -5368,6 +5572,15 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				}
 			}
 			const session = monitor.takeActiveSession();
+			// Disposal seals and may release the child journal. Commit its public
+			// snapshot while this invocation still owns it, before any wake/revival.
+			// The canonical result remains finalized after cleanup, as before.
+			report = await publishRunReport({
+				...finalizationArgs,
+				done: { exitCode, error, aborted, abortReason: abortReasonText, durationMs: Date.now() - startTime },
+				reportSessionManager,
+				reportArtifactManager,
+			});
 			if (session) {
 				monitor.captureSalvage(session);
 				if (options.keepAlive !== false && (!preparedSession || readyAt !== undefined)) {
@@ -5515,27 +5728,11 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		monitor.finish();
 
 		const result = await finalizeRunResult({
-			monitor,
+			...finalizationArgs,
 			done,
-			index,
-			id,
-			agent,
-			task,
-			assignment,
-			modelOverride,
-			modelRole,
-			structured,
-			outputSchema,
-			outputSchemaMode: options.outputSchemaMode,
-			outputSchemaSource: options.outputSchemaSource,
-			signal,
-			artifactsDir: options.artifactsDir,
-			eventBus: options.eventBus,
-			subagentEventBus: options.subagentEventBus,
-			parentToolCallId: options.parentToolCallId,
-			detached: options.detached,
-			sessionFile: subtaskSessionFile,
-			startTime,
+			report,
+			reportSessionManager,
+			reportArtifactManager,
 		});
 		AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });
 		return result;

@@ -1,11 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	runEvalAgent,
-	type EvalAgentBridgeOptions,
-	type EvalAgentResult,
-} from "@oh-my-pi/pi-coding-agent/eval/agent-bridge";
+import { runEvalAgent } from "@oh-my-pi/pi-coding-agent/eval/agent-bridge";
 import { runEvalWait } from "@oh-my-pi/pi-coding-agent/eval/handle-bridge";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as taskDiscovery from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -13,44 +9,12 @@ import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult, TaskReportReference } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 import { cfgTaskIsolationEnabled } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 const jobManagers = new Set<AsyncJobManager>();
-
-function isEvalAgentResult(value: unknown): value is EvalAgentResult {
-	return (
-		value !== null &&
-		typeof value === "object" &&
-		"details" in value &&
-		"text" in value &&
-		typeof value.text === "string" &&
-		value.details !== null &&
-		typeof value.details === "object"
-	);
-}
-
-async function runEvalAgentAndWait(args: unknown, options: EvalAgentBridgeOptions): Promise<EvalAgentResult> {
-	let manager = options.session.asyncJobManager;
-	if (!manager) {
-		const created = new AsyncJobManager({});
-		Object.assign(options.session, { asyncJobManager: created });
-		jobManagers.add(created);
-		manager = created;
-	}
-	const handle = await runEvalAgent(args, options);
-	const waited = await runEvalWait({ items: [{ kind: "agent", id: handle.id }] }, options);
-	const snapshot = waited.items[0];
-	if (!snapshot || snapshot.status === "running") throw new Error(`Agent handle ${handle.id} did not settle`);
-	if (snapshot.status === "failed" || snapshot.status === "cancelled") {
-		throw new Error(snapshot.error || `Agent handle ${handle.id} failed`);
-	}
-	const result = manager.getJob(handle.id)?.latestDetails?.evalResult;
-	if (!isEvalAgentResult(result)) throw new Error(`Agent handle ${handle.id} returned no eval result`);
-	return result;
-}
 
 function createResult(overrides: Partial<SingleResult> = {}): SingleResult {
 	return {
@@ -108,10 +72,27 @@ describe("runEvalAgent", () => {
 		};
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.beginTurnBudget(100_000, true);
+		const manager = new AsyncJobManager({});
+		jobManagers.add(manager);
+		const session = Object.assign(createBudgetSession(sessionManager), { asyncJobManager: manager });
+		const report: TaskReportReference = Object.freeze({
+			version: 1,
+			runId: "eval-budget-success",
+			status: "complete",
+			artifact: Object.freeze({ id: "101", uri: "artifact://101", sha256: "a".repeat(64), bytes: 4 }),
+		});
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
-		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(createResult({ usage: createUsage(1_234) }));
+		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(createResult({ usage: createUsage(1_234), report }));
 
-		await runEvalAgentAndWait({ prompt: "do work", agent: "task" }, { session: createBudgetSession(sessionManager) });
+		const handle = await runEvalAgent({ prompt: "do work", agent: "task" }, { session });
+		const waited = await runEvalWait({ items: [{ kind: "agent", id: handle.id }] }, { session });
+		expect(waited.items[0]).toMatchObject({ status: "completed" });
+		const job = manager.getJob(handle.id);
+		expect(job?.status).toBe("completed");
+		expect(job?.resultText).toBe("done");
+		expect(job?.errorText).toBeUndefined();
+		expect(job?.latestDetails?.evalResult).toMatchObject({ text: "done", details: { structured: false } });
+		expect(job?.report).toBe(report);
 
 		expect(sessionManager.getTurnBudget()).toEqual({
 			total: 100_000,
@@ -129,6 +110,15 @@ describe("runEvalAgent", () => {
 		};
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.beginTurnBudget(100_000, false);
+		const manager = new AsyncJobManager({});
+		jobManagers.add(manager);
+		const session = Object.assign(createBudgetSession(sessionManager), { asyncJobManager: manager });
+		const report: TaskReportReference = Object.freeze({
+			version: 1,
+			runId: "eval-budget-failure",
+			status: "partial",
+			reason: "failed",
+		});
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 		vi.spyOn(taskExecutor, "runSubprocess").mockResolvedValue(
 			createResult({
@@ -136,12 +126,18 @@ describe("runEvalAgent", () => {
 				error: "agent failed",
 				stderr: "agent failed",
 				usage: createUsage(2_345),
+				report,
 			}),
 		);
 
-		await expect(
-			runEvalAgentAndWait({ prompt: "do work", agent: "task" }, { session: createBudgetSession(sessionManager) }),
-		).rejects.toThrow("agent failed");
+		const handle = await runEvalAgent({ prompt: "do work", agent: "task" }, { session });
+		const waited = await runEvalWait({ items: [{ kind: "agent", id: handle.id }] }, { session });
+		expect(waited.items[0]).toMatchObject({ status: "failed", error: "agent failed" });
+		const job = manager.getJob(handle.id);
+		expect(job?.status).toBe("failed");
+		expect(job?.errorText).toBe("agent failed");
+		expect(job?.resultText).toBeUndefined();
+		expect(job?.report).toBe(report);
 
 		expect(sessionManager.getTurnBudget().spent).toBe(2_345);
 	});
@@ -155,18 +151,36 @@ describe("runEvalAgent", () => {
 		};
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.beginTurnBudget(100_000, true);
-		const session = createBudgetSession(sessionManager);
+		const manager = new AsyncJobManager({});
+		jobManagers.add(manager);
+		const session = Object.assign(createBudgetSession(sessionManager), { asyncJobManager: manager });
+		const report: TaskReportReference = Object.freeze({
+			version: 1,
+			runId: "eval-budget-cleanup-failure",
+			status: "complete",
+			artifact: Object.freeze({ id: "102", uri: "artifact://102", sha256: "b".repeat(64), bytes: 4 }),
+		});
 		cfgTaskIsolationEnabled.set(session.settings, true);
 		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" });
 		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async options => {
-			options.onSubprocessResult?.(createResult({ usage: createUsage(4_567) }));
+			options.onSubprocessResult?.(createResult({ usage: createUsage(4_567), report }));
 			throw new Error("cleanup failed");
 		});
 
-		await expect(
-			runEvalAgentAndWait({ prompt: "do work", agent: "task", isolated: true }, { session }),
-		).rejects.toThrow("cleanup failed");
+		const handle = await runEvalAgent({ prompt: "do work", agent: "task", isolated: true }, { session });
+		const waited = await runEvalWait({ items: [{ kind: "agent", id: handle.id }] }, { session });
+		expect(waited.items[0]).toMatchObject({
+			status: "failed",
+			error: expect.stringContaining("Subagent execution failed: cleanup failed"),
+		});
+		const job = manager.getJob(handle.id);
+		expect(job?.status).toBe("failed");
+		expect(job?.errorText).toContain("Subagent execution failed: cleanup failed");
+		expect(job?.resultText).toBeUndefined();
+		expect(job?.report).toBe(report);
+		expect(job?.report?.status).toBe("complete");
+		expect(job?.report?.reason).toBeUndefined();
 
 		expect(sessionManager.getTurnBudget().spent).toBe(4_567);
 	});

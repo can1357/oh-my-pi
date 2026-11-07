@@ -1,14 +1,8 @@
 /**
- * Owns collaboration hosting for one interactive process: manual `/collab`,
- * the opt-in `collab.autoStart` policy, and room rotation when the active
- * session changes or a room ends on its own.
- *
- * Every room the relay opens for this process shares one random `instanceId`
- * and gets the next `generation`, which is what the local registry keys
- * capabilities by; a room the relay never opened gives its generation back.
- * A session change stops the current room — withdrawing its registry entry
- * and telling guests goodbye — before a replacement room for the new session
- * is started, so a card that names generation N can never reach session N+1.
+ * Owns one local agent endpoint for every ordinary interactive session and,
+ * independently, opt-in relay hosting. Session and room changes revoke the
+ * previous publication before exposing a new monotonically increasing
+ * generation. Stopping a relay room does not disable local agent messaging.
  */
 import { randomBytes } from "node:crypto";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -16,7 +10,15 @@ import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/displa
 import type { InteractiveModeContext } from "../modes/types";
 import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { CollabHost, CollabHostStoppedError, CollabRelayUnavailableError } from "./host";
-import type { CollabAccess } from "./registry";
+import {
+	COLLAB_AGENT_MESSAGE_TYPE,
+	type CollabAccess,
+	type CollabHostPublication,
+	type CollabHostRegistrySource,
+	type CollabHostSnapshot,
+	CollabSendError,
+	publishCollabHost,
+} from "./registry";
 
 import { cfgCollabAutoStart, cfgCollabRelayUrl, cfgCollabWebUrl } from "./settings";
 
@@ -40,18 +42,37 @@ export interface CollabStartOptions {
 	relay?: string;
 }
 
+interface LocalPublicationIdentity {
+	generation: number;
+	sessionId: string;
+	transitionEpoch: number;
+	startedAt: number;
+	revoked: PromiseWithResolvers<void>;
+}
+
 export class CollabController {
 	readonly instanceId: string;
 	#ctx: InteractiveModeContext;
 	#generation = 0;
 	#host: CollabHost | undefined;
+	/** A retained room outlives local transcript capabilities; only stopping it cancels startup. */
+	#hostStartRevocation: PromiseWithResolvers<void> | undefined;
+	#localIdentity: LocalPublicationIdentity | undefined;
+	#localPublication: CollabHostPublication | undefined;
+	/** Serializes publication/withdrawal, including publications overtaken while awaiting IPC setup. */
+	#localOps: Promise<void> = Promise.resolve();
+	/** Cleanup can finish without proving the outcome of a previously authorized delivery. */
+	#localRevocationFailure: CollabSendError | undefined;
 	/** Serializes stop/start sequences so a rotation never interleaves with another. */
 	#ops: Promise<void> = Promise.resolve();
 	/** Explicit stop invalidates launch requests, not the saved auto-start policy. */
 	#stopEpoch = 0;
-	/** Installed when the first room starts; a process that never hosts never subscribes. */
+	/** Observes ordinary local sessions even when relay auto-start is disabled. */
 	#unsubscribeSessionChange: (() => void) | undefined;
 	#unsubscribeSessionMove: (() => void) | undefined;
+	#unsubscribeSessionTransition: (() => void) | undefined;
+	/** Preserve a stop made during a transition, including before its identity callback. */
+	#transitionStopEpoch: number | undefined;
 	/** Guests may drive the session only once interactive startup has finished. */
 	#startupComplete = false;
 	#shutdown = false;
@@ -76,7 +97,7 @@ export class CollabController {
 		return host && !host.ending && host.sessionId === this.#ctx.sessionManager.getSessionId() ? host : undefined;
 	}
 
-	/** Registry generation of the most recently started room; 0 before the first. */
+	/** Most recent local/room generation; never reused after publication. */
 	get generation(): number {
 		return this.#generation;
 	}
@@ -101,7 +122,10 @@ export class CollabController {
 		// next `/new`, `/resume`, or branch without restarting omp.
 		this.#observeSessionChanges();
 		const access = this.autoStartMode;
-		if (access === "off" || this.#shutdown || this.host || this.#ctx.collabGuest) return;
+		if (access === "off" || this.#shutdown || this.host || this.#ctx.collabGuest) {
+			this.#ensureLocal();
+			return;
+		}
 		const started = this.#launchReporting(access, this.#stopEpoch);
 		this.#ops = this.#ops.then(() => started);
 	}
@@ -110,16 +134,22 @@ export class CollabController {
 	resumeAfterGuest(restoration: Promise<boolean>): void {
 		if (this.#shutdown) return;
 		this.#observeSessionChanges();
+		this.#withdrawLocal();
 		const stopEpoch = this.#stopEpoch;
 		const shutdown = (this.#shutdownWake ??= Promise.withResolvers<void>()).promise;
 		// The guest reports restoration failures to its caller/UI. Observe them
 		// here only to prevent hosting; shutdown must not await a stalled hook.
 		const restored = Promise.race([restoration.catch(() => false), shutdown]);
 		this.#ops = this.#ops.then(async () => {
-			if ((await restored) !== true) return;
-			if (this.#shutdown || stopEpoch !== this.#stopEpoch || this.host || this.#ctx.collabGuest) return;
+			const didRestoreReplica = await restored;
+			if (this.#shutdown || this.#ctx.collabGuest) return;
+			await this.#waitForSessionTransition();
 			const access = this.autoStartMode;
-			if (access !== "off") await this.#launchReporting(access, stopEpoch);
+			if (didRestoreReplica === true && stopEpoch === this.#stopEpoch && !this.host && access !== "off") {
+				await this.#launchReporting(access, stopEpoch);
+			} else {
+				this.#ensureLocal();
+			}
 		});
 	}
 
@@ -128,13 +158,30 @@ export class CollabController {
 	 * from now on guests in any room of this process may drive the session.
 	 */
 	startupComplete(): void {
+		if (this.#shutdown) return;
 		this.#startupComplete = true;
+		this.#observeSessionChanges();
+		this.#ensureLocal();
 	}
 
 	#observeSessionChanges(): void {
 		this.#unsubscribeSessionChange ??= this.#ctx.session.registerSessionChangeCallback(() =>
 			this.#onSessionChanged(),
 		);
+		if (!this.#unsubscribeSessionTransition) {
+			this.#transitionStopEpoch = this.#ctx.session.isSessionTransitioning ? this.#stopEpoch : undefined;
+			this.#unsubscribeSessionTransition = this.#ctx.session.registerSessionTransitionCallback(() => {
+				if (this.#ctx.session.isSessionTransitioning) {
+					this.#transitionStopEpoch ??= this.#stopEpoch;
+					this.#withdrawLocal();
+				} else {
+					this.#transitionStopEpoch = undefined;
+					// Transcript settlement only republishes local capabilities. Remote room policy
+					// remains tied to committed identity callbacks, not failed or same-ID transitions.
+					this.#ops = this.#ops.then(() => this.#ensureLocal()).catch(err => this.#reportFailure(err));
+				}
+			});
+		}
 		// A write that finds the session file open in another omp process (or
 		// replaced/contested on disk) moves the session to a sibling file under a
 		// new id without an AgentSession transition; rotate the room for it too.
@@ -159,6 +206,7 @@ export class CollabController {
 		if (existing && (existing.access === "control" || options.access === "view")) return existing;
 		const stopEpoch = this.#stopEpoch;
 		// Abort an in-flight or stale room before queuing behind its startup.
+		if (this.#host) this.#withdrawLocal();
 		const stopping =
 			this.#host && this.#stopHost(this.#host, existing ? "restarting with control access" : SESSION_SWITCH_REASON);
 		const started = this.#ops.then(async () => {
@@ -169,13 +217,16 @@ export class CollabController {
 			// this request waited. Reuse or upgrade it rather than racing its launch.
 			const current = this.host;
 			if (current && (current.access === "control" || options.access === "view")) return current;
-			if (current) await this.#stopHost(current, "restarting with control access");
+			if (current) {
+				this.#withdrawLocal();
+				await this.#stopHost(current, "restarting with control access");
+			}
 			return this.#launch(options.access, stopEpoch, options.relay);
 		});
 		// Report manual failures to the caller without poisoning later rotations.
 		this.#ops = started.then(
 			() => {},
-			() => {},
+			() => this.#ensureLocal(),
 		);
 		return started;
 	}
@@ -183,10 +234,18 @@ export class CollabController {
 	/** Cancel pending launches and stop the current room, including a stop already in flight. */
 	async stop(reason: string): Promise<void> {
 		this.#stopEpoch++;
-		if (this.#host) await this.#stopHost(this.#host, reason);
+		const host = this.#host;
+		if (host) {
+			const stopping = this.#stopHost(host, reason);
+			this.#rotateLocal();
+			await stopping;
+		}
+		await this.#localOps;
+		if (this.#localRevocationFailure) throw this.#localRevocationFailure;
 	}
 
 	async #stopHost(host: CollabHost, reason: string): Promise<void> {
+		if (this.#host === host) this.#hostStartRevocation?.resolve();
 		try {
 			await host.stop(reason);
 		} finally {
@@ -196,14 +255,17 @@ export class CollabController {
 		}
 	}
 
-	/** Resolves once no stop/start sequence is in flight. */
-	idle(): Promise<void> {
-		return this.#ops;
+	/** Drain stop/start and publication cleanup, then report any retained delivery uncertainty. */
+	async idle(): Promise<void> {
+		await this.#ops;
+		await this.#localOps;
+		if (this.#localRevocationFailure) throw this.#localRevocationFailure;
 	}
 
 	/** Stop hosting for good; no further rooms are started for this process. */
 	async shutdown(reason: string): Promise<void> {
 		this.#shutdown = true;
+		this.#withdrawLocal();
 		this.#shutdownWake?.resolve();
 		clearTimeout(this.#relaunchTimer);
 		this.#relaunchTimer = undefined;
@@ -211,10 +273,152 @@ export class CollabController {
 		this.#unsubscribeSessionChange = undefined;
 		this.#unsubscribeSessionMove?.();
 		this.#unsubscribeSessionMove = undefined;
+		this.#unsubscribeSessionTransition?.();
+		this.#unsubscribeSessionTransition = undefined;
 		// Stop before draining the chain: a room still connecting is aborted at
 		// once instead of holding shutdown for the relay connect timeout.
-		await this.stop(reason);
-		await this.#ops;
+		try {
+			await this.stop(reason);
+		} finally {
+			// A failed acknowledgement must not skip queued publication or room cleanup.
+			await this.idle();
+		}
+	}
+
+	async #waitForSessionTransition(revoked?: Promise<void>): Promise<void> {
+		if (!this.#ctx.session.isSessionTransitioning) return;
+		const shutdown = (this.#shutdownWake ??= Promise.withResolvers<void>()).promise;
+		const transition = this.#ctx.session.waitForSessionTransition();
+		await Promise.race(revoked ? [transition, shutdown, revoked] : [transition, shutdown]);
+	}
+
+	#isLocalIdentityCurrent(identity: LocalPublicationIdentity): boolean {
+		return (
+			this.#localIdentity === identity &&
+			!this.#shutdown &&
+			!this.#ctx.collabGuest &&
+			!this.#ctx.session.isSessionTransitioning &&
+			identity.transitionEpoch === this.#ctx.session.sessionTransitionEpoch &&
+			identity.sessionId === this.#ctx.sessionManager.getSessionId()
+		);
+	}
+
+	#assertLocalIdentity(identity: LocalPublicationIdentity): void {
+		if (!this.#isLocalIdentityCurrent(identity)) throw new Error("local collab session unavailable");
+	}
+
+	#remoteHost(identity: LocalPublicationIdentity): CollabHost | undefined {
+		const host = this.host;
+		// Same-session transitions revoke local capabilities without replacing the remote room.
+		return host && host.sessionId === identity.sessionId && host.startedAt > 0 ? host : undefined;
+	}
+
+	#localSnapshot(identity: LocalPublicationIdentity): CollabHostSnapshot {
+		this.#assertLocalIdentity(identity);
+		const host = this.#remoteHost(identity);
+		// Preserve early remote dialog discovery, but local agent admission is
+		// unavailable until the ordinary interactive startup has fully settled.
+		if (!this.#startupComplete && !host) throw new Error("interactive startup in progress");
+		const model = this.#ctx.session.model;
+		return {
+			instanceId: this.instanceId,
+			generation: identity.generation,
+			pid: process.pid,
+			sessionId: identity.sessionId,
+			sessionName: this.#ctx.session.sessionName ?? null,
+			cwd: this.#ctx.sessionManager.getCwd(),
+			model: model ? { provider: model.provider, id: model.id } : null,
+			startedAt: host?.startedAt ?? identity.startedAt,
+			participants: host?.participants.length ?? 1,
+			relayConnected: host?.relayConnected ?? false,
+			inputRequired: host?.inputRequired ?? false,
+			busy: this.#ctx.session.isStreaming,
+			access: host?.access ?? "local",
+		};
+	}
+
+	#localSource(identity: LocalPublicationIdentity): CollabHostRegistrySource {
+		return {
+			snapshot: () => this.#localSnapshot(identity),
+			link: access => {
+				this.#assertLocalIdentity(identity);
+				const host = this.#remoteHost(identity);
+				if (!host || (access === "control" && host.access !== "control")) return null;
+				return access === "view" ? host.webViewLink : host.webLink;
+			},
+			admitAgentMessage: (text, details) => {
+				this.#assertLocalIdentity(identity);
+				if (!this.#startupComplete) throw new Error("interactive startup in progress");
+				this.#ctx.session.admitAgentMessage(
+					{ customType: COLLAB_AGENT_MESSAGE_TYPE, content: text, display: true, details },
+					identity.sessionId,
+					identity.transitionEpoch,
+				);
+			},
+		};
+	}
+
+	#ensureLocal(): void {
+		if (this.#localIdentity && this.#isLocalIdentityCurrent(this.#localIdentity)) return;
+		if (this.#shutdown || this.#ctx.collabGuest || this.#ctx.session.isSessionTransitioning) return;
+		this.#rotateLocal();
+	}
+
+	#withdrawLocal(): void {
+		// Invalidate before any await: outstanding authenticated deliveries cannot
+		// cross session/room changes, including a publication still being created.
+		this.#localIdentity?.revoked.resolve();
+		this.#localIdentity = undefined;
+		const publication = this.#localPublication;
+		this.#localPublication = undefined;
+		const closing = publication?.close().catch(err => this.#reportLocalFailure(err));
+		this.#localOps = this.#localOps.then(() => closing).catch(err => this.#reportLocalFailure(err));
+	}
+
+	#rotateLocal(): void {
+		this.#withdrawLocal();
+		if (this.#shutdown || this.#ctx.collabGuest || this.#ctx.session.isSessionTransitioning) return;
+		const identity: LocalPublicationIdentity = {
+			generation: ++this.#generation,
+			sessionId: this.#ctx.sessionManager.getSessionId(),
+			transitionEpoch: this.#ctx.session.sessionTransitionEpoch,
+			startedAt: Date.now(),
+			revoked: Promise.withResolvers<void>(),
+		};
+		this.#localIdentity = identity;
+		this.#localOps = this.#localOps
+			.then(async () => {
+				if (this.#ctx.session.isSessionTransitioning)
+					await this.#waitForSessionTransition(identity.revoked.promise);
+				if (!this.#isLocalIdentityCurrent(identity)) return;
+				const publication = await publishCollabHost(this.#localSource(identity), { instanceId: this.instanceId });
+				if (this.#ctx.session.isSessionTransitioning)
+					await this.#waitForSessionTransition(identity.revoked.promise);
+				if (!this.#isLocalIdentityCurrent(identity)) {
+					await publication.close();
+					return;
+				}
+				this.#localPublication = publication;
+			})
+			.catch(err => this.#reportLocalFailure(err));
+	}
+
+	#reportLocalFailure(err: unknown): void {
+		if (err instanceof CollabSendError && err.code === "revocation_incomplete") {
+			// Keep the serial cleanup chain usable, but never turn incomplete revocation
+			// into a successful public drain, even after another generation is published.
+			this.#localRevocationFailure ??= err;
+			const message = "Local collab endpoint revoked; previously authorized message delivery outcome is uncertain";
+			logger.warn(message, { error: String(err) });
+			if (!this.#shutdown) this.#ctx.showStatus(message, { dim: true });
+			return;
+		}
+		logger.warn("Collab local registry unavailable", { error: String(err) });
+		if (!this.#shutdown) {
+			this.#ctx.showStatus("Local collab discovery unavailable (omp collab list/send cannot reach this session)", {
+				dim: true,
+			});
+		}
 	}
 
 	#resolveRelayUrl(relay?: string): string {
@@ -238,10 +442,7 @@ export class CollabController {
 		if (stopEpoch !== this.#stopEpoch) throw new CollabHostStoppedError("collab controller stopped");
 		// Identity cleanup callbacks can precede awaited hooks and message replacement.
 		// Pin and expose only the session left after commit or rollback.
-		if (this.#ctx.session.isSessionTransitioning) {
-			const shutdown = (this.#shutdownWake ??= Promise.withResolvers<void>()).promise;
-			await Promise.race([this.#ctx.session.waitForSessionTransition(), shutdown]);
-		}
+		if (this.#ctx.session.isSessionTransitioning) await this.#waitForSessionTransition();
 		// Manual upgrades may reach this after awaiting the old room's stop.
 		// Shutdown or an explicit stop may have overtaken either wait.
 		if (this.#shutdown) throw new CollabHostStoppedError("collab controller shut down");
@@ -251,10 +452,15 @@ export class CollabController {
 		const webUrl = cfgCollabWebUrl.get(this.#ctx.settings) || "";
 		this.#observeSessionChanges();
 		const previous = this.#host;
+		this.#rotateLocal();
+		this.#hostStartRevocation?.resolve();
+		const startupRevocation = Promise.withResolvers<void>();
+		this.#hostStartRevocation = startupRevocation;
 		const host: CollabHost = new CollabHost(this.#ctx, {
 			instanceId: this.instanceId,
-			generation: ++this.#generation,
+			generation: this.#generation,
 			access,
+			registryOwner: "controller",
 			guestActionsReady: () => this.#startupComplete && !this.#ctx.session.isSessionTransitioning,
 			onEnded: () => this.#onHostEnded(host),
 		});
@@ -265,13 +471,29 @@ export class CollabController {
 			// state after a fatal close. Finish that before installing new taps.
 			if (previous) await this.#stopHost(previous, "replaced");
 			await host.start(relayUrl, webUrl);
+			await this.#localOps;
+			// A provisional switch can roll back without an identity callback.
+			// Keep the room suspended until the final identity is known.
+			if (this.#ctx.session.isSessionTransitioning) await this.#waitForSessionTransition(startupRevocation.promise);
+			if (
+				host.ending ||
+				this.#shutdown ||
+				stopEpoch !== this.#stopEpoch ||
+				host.sessionId !== this.#ctx.sessionManager.getSessionId()
+			) {
+				throw new CollabHostStoppedError("collab host replaced during startup");
+			}
 		} catch (err) {
+			// A provisional session switch may overtake start() without its commit
+			// callback having run. Never abandon a connected room and its taps.
+			await this.#stopHost(host, "collab startup did not settle").catch(stopError => {
+				logger.warn("Collab failed startup teardown failed", { error: String(stopError) });
+			});
 			if (this.#host === host) this.#host = undefined;
 			if (this.#ctx.collabHost === host) this.#ctx.collabHost = undefined;
-			// No guest or registry reader ever saw this room, so its successor takes
-			// its generation: a recovered process still publishes generation 1 first.
-			if (err instanceof CollabRelayUnavailableError && this.#generation === host.generation) this.#generation--;
 			throw err;
+		} finally {
+			if (this.#hostStartRevocation === startupRevocation) this.#hostStartRevocation = undefined;
 		}
 		return host;
 	}
@@ -289,6 +511,7 @@ export class CollabController {
 		try {
 			await this.#launch(access, stopEpoch);
 		} catch (err) {
+			this.#ensureLocal();
 			this.#reportFailure(err);
 			if (!this.#shutdown && err instanceof CollabRelayUnavailableError) this.#scheduleRelaunch(stopEpoch);
 		}
@@ -311,10 +534,14 @@ export class CollabController {
 	 */
 	#onSessionChanged(): void {
 		const previous = this.#host;
-		if (this.host) return;
+		if (this.#localIdentity && this.#isLocalIdentityCurrent(this.#localIdentity)) return;
+		this.#withdrawLocal();
 		// Stop synchronously so a room still connecting is aborted now rather than
 		// after the queued start settles; the chain then waits for that stop.
-		this.#reapplyAutoStart(previous && this.#stopHost(previous, SESSION_SWITCH_REASON));
+		this.#reapplyAutoStart(
+			previous && this.#stopHost(previous, SESSION_SWITCH_REASON),
+			this.#transitionStopEpoch ?? this.#stopEpoch,
+		);
 	}
 
 	/**
@@ -324,6 +551,8 @@ export class CollabController {
 	 */
 	#onHostEnded(host: CollabHost): void {
 		if (host !== this.#host) return;
+		this.#hostStartRevocation?.resolve();
+		this.#rotateLocal();
 		this.#scheduleRelaunch(this.#stopEpoch);
 	}
 
@@ -360,10 +589,12 @@ export class CollabController {
 	#reapplyAutoStart(stopping: Promise<void> | undefined, stopEpoch = this.#stopEpoch): void {
 		this.#ops = this.#ops
 			.then(async () => {
-				await stopping;
-				if (this.#shutdown || stopEpoch !== this.#stopEpoch || this.host || this.#ctx.collabGuest) return;
+				await stopping?.catch(err => this.#reportFailure(err));
+				await this.#waitForSessionTransition();
+				if (this.#shutdown || this.#ctx.collabGuest) return;
 				const access = this.autoStartMode;
-				if (access !== "off") await this.#launchReporting(access, stopEpoch);
+				if (stopEpoch !== this.#stopEpoch || this.host || access === "off") this.#ensureLocal();
+				else await this.#launchReporting(access, stopEpoch);
 			})
 			.catch(err => this.#reportFailure(err));
 	}

@@ -21,6 +21,12 @@ import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { JsStatusEvent } from "./js/shared/types";
 
+import { AsyncJobError } from "../async/job-manager";
+
+/**
+ * Host-side handler for the eval `agent()` helper.
+ */
+
 /** Synthetic bridge name reserved for the `agent()` helper across both runtimes. */
 export const EVAL_AGENT_BRIDGE_NAME = "__agent__";
 
@@ -220,6 +226,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			async ({ signal, reportProgress, markRunning }) => {
 				markRunning();
 				let latestProgress: AgentProgress | undefined;
+				let settled: SingleResult | undefined;
 				try {
 					const execution = await runStructuredSubagent({
 						session: options.session,
@@ -240,13 +247,20 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 							void reportProgress(`Running agent ${progress.id}...`, { progress: [progress] });
 						},
 					});
+					settled = execution.result;
 					const result = await buildEvalAgentResult(execution);
 					await reportProgress(result.text, {
 						progress: latestProgress ? [latestProgress] : [],
 						evalResult: result,
 					});
-					return result.text;
+					return { text: result.text, ...(settled.report ? { report: settled.report } : {}) };
 				} catch (error) {
+					// Retain the child's immutable report even when isolation/apply fails after it settles.
+					const report =
+						settled?.report ?? (error instanceof StructuredSubagentError ? error.result?.report : undefined);
+					if (report) {
+						throw new AsyncJobError(error instanceof Error ? error.message : String(error), undefined, report);
+					}
 					if (error instanceof StructuredSubagentError) throw new ToolError(error.message);
 					throw error;
 				}

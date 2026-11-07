@@ -1101,6 +1101,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#settledAgentEnd: AgentEndEvent | undefined;
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
+	#sessionTransitionCallbacks = new Set<() => void>();
 	#observedSessionId: string | undefined;
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
@@ -1405,6 +1406,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#sessionTransitionSettled: Promise<void> | undefined;
 	#resolveSessionTransition: (() => void) | undefined;
 	#sessionTransitionDepth = 0;
+	/** Transcript capability lifetime; unlike provider generations, rollback never restores it. */
+	#sessionTransitionEpoch = 0;
+	/** Pending synchronous admissions belong to this transcript, never to its successor. */
+	readonly #sessionBoundAgentMessages = new WeakSet<AgentMessage>();
 	/** Each using declaration disposes one depth, so nested transitions reuse this token. */
 	readonly #sessionTransitionScope: Disposable = {
 		[Symbol.dispose]: () => {
@@ -1413,6 +1418,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#sessionTransitionSettled = undefined;
 			this.#resolveSessionTransition = undefined;
 			resolve?.();
+			this.#notifySessionTransitionCallbacks();
 			// Deliveries held while the transcript was swapped go to whichever session it settled on.
 			this.yieldQueue.requestIdleFlush();
 		},
@@ -2721,7 +2727,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#inLogContext(() => this.#deliverAsyncJobResult(manager, jobId, text, job)),
 			);
 			this.yieldQueue.register<AsyncResultEntry>("async-result", {
-				isStale: entry => entry.epoch !== this.#asyncDeliveryEpoch || manager.isDeliverySuppressed(entry.jobId),
+				isStale: entry =>
+					entry.epoch !== this.#asyncDeliveryEpoch || manager.isDeliverySuppressed(entry.jobId, entry.job),
 				build: buildAsyncResultBatchMessage,
 			});
 		}
@@ -3711,7 +3718,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		job?: AsyncJob,
 	): Promise<void> {
 		if (this.#isDisposed) return;
-		if (manager.isDeliverySuppressed(jobId)) return;
+		if (manager.isDeliverySuppressed(jobId, job)) return;
 		// Snapshot the generation before the async format step: a `/new` during it
 		// bumps the epoch, so this delivery belongs to the replaced session and
 		// must not enqueue — the suppression marker alone is unreliable because
@@ -3720,7 +3727,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const formatted = await this.#formatAsyncResultForFollowUp(text, job?.latestDetails?.meta);
 		if (this.#isDisposed) return;
 		if (epoch !== this.#asyncDeliveryEpoch) return;
-		if (manager.isDeliverySuppressed(jobId)) return;
+		if (manager.isDeliverySuppressed(jobId, job)) return;
 		const durationMs = job ? Math.max(0, (job.endTime ?? Date.now()) - job.startTime) : undefined;
 		await this.yieldQueue.enqueueWithReceipt<AsyncResultEntry>("async-result", {
 			jobId,
@@ -6269,6 +6276,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#sessionTransitionDepth > 0;
 	}
 
+	/** Monotonic lifetime of the local transcript, revoked at every outer transition's beginning. */
+	get sessionTransitionEpoch(): number {
+		return this.#sessionTransitionEpoch;
+	}
+
+	/** Observe outer transition begin/end synchronously; read isSessionTransitioning for the phase.
+	 *  Begin advances sessionTransitionEpoch before notifying; end follows commit or rollback.
+	 *  Nested transitions share the epoch. Observer failures never interrupt the transition. */
+	registerSessionTransitionCallback(callback: () => void): () => void {
+		this.#sessionTransitionCallbacks.add(callback);
+		return () => this.#sessionTransitionCallbacks.delete(callback);
+	}
+
 	/** Wait until all active session/transcript transitions have settled, including rollback. */
 	async waitForSessionTransition(): Promise<void> {
 		while (this.#sessionTransitionSettled) await this.#sessionTransitionSettled;
@@ -6282,6 +6302,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const settled = Promise.withResolvers<void>();
 			this.#sessionTransitionSettled = settled.promise;
 			this.#resolveSessionTransition = settled.resolve;
+			this.#sessionTransitionEpoch++;
+			// Drop unconsumed admissions before any transition await, including forks that
+			// otherwise preserve queues. A receipt acknowledges admission, not delivery;
+			// even a cancelled transition cannot carry these records into another transcript.
+			const steering = this.agent.peekSteeringQueue();
+			const followUp = this.agent.peekFollowUpQueue();
+			if (
+				steering.some(message => this.#sessionBoundAgentMessages.has(message)) ||
+				followUp.some(message => this.#sessionBoundAgentMessages.has(message))
+			) {
+				this.agent.replaceQueues(
+					steering.filter(message => !this.#sessionBoundAgentMessages.has(message)),
+					followUp.filter(message => !this.#sessionBoundAgentMessages.has(message)),
+				);
+			}
+			this.#notifySessionTransitionCallbacks();
 		}
 		return this.#sessionTransitionScope;
 	}
@@ -6411,6 +6447,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				callback();
 			} catch (error) {
 				logger.warn("Session change callback failed", { error: String(error) });
+			}
+		}
+	}
+
+	#notifySessionTransitionCallbacks(): void {
+		for (const callback of Array.from(this.#sessionTransitionCallbacks)) {
+			try {
+				callback();
+			} catch (error) {
+				logger.warn("Session transition callback failed", { error: String(error) });
 			}
 		}
 	}
@@ -6726,6 +6772,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#runStateListeners.clear();
 		this.#ircWakeHoldListeners.clear();
 		this.#sessionChangeCallbacks.clear();
+		this.#sessionTransitionCallbacks.clear();
 
 		// A dispose triggered mid-turn (Ctrl-C / timeout / hard-killed subagent)
 		// only *signals* the agent loop via the earlier abort(); the loop and the
@@ -6873,7 +6920,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * streaming or a foreground bash/python execution is in flight.
 	 */
 	async resetSessionContext(): Promise<ResetSessionContextResult | undefined> {
-		using _transition = this.#beginSessionTransition();
 		// Refuse while a response streams OR a foreground user bash/python
 		// execution is in flight: those complete via recordBashResult()/
 		// recordPythonResult(), which append directly to agent.state when not
@@ -6881,6 +6927,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// after the boundary and re-enter the supposedly empty context. The
 		// sibling boundary op (branchFromBtw) guards on the same predicates.
 		if (this.isStreaming || this.isBashRunning || this.isEvalRunning) return undefined;
+		using _transition = this.#beginSessionTransition();
 		const droppedCount = this.agent.state.messages.length;
 
 		// Tear down the same per-turn runtime state that newSession() resets across
@@ -10266,6 +10313,42 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				`Extension command "/${commandName}" cannot be queued. Use prompt() or execute the command when not streaming.`,
 			);
 		}
+	}
+
+	/**
+	 * Synchronously admit a text-only agent record to the current session's steering queue.
+	 * Returning acknowledges queue admission, not model delivery. Pending records are dropped
+	 * when a transcript transition begins; no image normalization or user-prompt path runs here.
+	 * Both the persisted identity and captured transition epoch must still match at admission.
+	 * Busy turns consume the queue normally, while idle delivery uses the existing continuation
+	 * scheduler (including its maintenance and client-owned-turn gates).
+	 */
+	admitAgentMessage<T = unknown>(
+		message: Pick<CustomMessage<T>, "customType" | "display" | "details"> & { content: string },
+		expectedSessionId: string,
+		expectedSessionTransitionEpoch: number,
+	): void {
+		if (
+			this.#isDisposed ||
+			this.isSessionTransitioning ||
+			this.#sessionTransitionEpoch !== expectedSessionTransitionEpoch ||
+			this.sessionManager.getSessionId() !== expectedSessionId
+		) {
+			throw new Error("Session unavailable for agent message admission");
+		}
+		const record: CustomMessage<T> = {
+			role: "custom",
+			customType: message.customType,
+			content: message.content,
+			display: message.display,
+			details: message.details,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		this.#sessionBoundAgentMessages.add(record);
+		this.#allowQueuedMessageDrainRetry();
+		this.agent.steer(record);
+		this.#scheduleIdleQueueDrain();
 	}
 
 	/** @returns true iff `agent.prompt` was actually invoked. An abort or session-generation

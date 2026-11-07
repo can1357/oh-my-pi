@@ -104,6 +104,8 @@ export interface PersistedReviveSpec {
 	readonly asyncJobManager: AsyncJobManagerApi | undefined;
 	/** The root's artifact manager at revive time; a revived non-seance agent adopts it. */
 	readonly artifactManager: ArtifactManagerApi | undefined;
+	/** Store of the live immediate parent that owns this transcript, for public task reports. */
+	readonly reportArtifactManager: ArtifactManagerApi | undefined;
 	readonly preparedExtensions: readonly PreparedExtension[] | undefined;
 	readonly authStorage: AuthStorage;
 	readonly modelRegistry: ModelRegistry;
@@ -143,6 +145,36 @@ export function persistedAgentDefinition(displayName: string, init: PersistedSes
 		systemPrompt: init.systemPrompt.join("\n\n"),
 		source: "user",
 	};
+}
+
+/**
+ * Reports belong only to the live immediate parent owning the expected transcript.
+ * Runs on main: the parent may be homed on another thread, so its store is proven
+ * by directory against the root's manager, which every session of the tree adopts.
+ */
+export function resolvePersistedReportArtifactManager(
+	ref: Pick<AgentRef, "parentId" | "sessionFile">,
+	rootArtifactManager: ArtifactManagerApi | undefined,
+): ArtifactManagerApi | undefined {
+	if (!rootArtifactManager || !ref.parentId || !ref.sessionFile) return undefined;
+	const owner = AgentRegistry.global().get(ref.parentId);
+	// A registry ref holds a session exactly while that agent is live.
+	const session = owner?.session;
+	if (!owner || !session) return undefined;
+	const expectedTranscript = path.resolve(`${path.dirname(ref.sessionFile)}.jsonl`);
+	const liveSessionFile = session.sessionManager.getSessionFile();
+	if (
+		!owner.sessionFile ||
+		!liveSessionFile ||
+		path.resolve(owner.sessionFile) !== expectedTranscript ||
+		path.resolve(liveSessionFile) !== expectedTranscript
+	) {
+		return undefined;
+	}
+	const ownerArtifactsDir = session.sessionManager.getArtifactsDir();
+	if (!ownerArtifactsDir || path.resolve(ownerArtifactsDir) !== path.resolve(rootArtifactManager.dir))
+		return undefined;
+	return rootArtifactManager;
 }
 
 /**
@@ -215,6 +247,7 @@ export function createPersistedSubagentReviverFactory(
 		}
 		return async expectedRef => {
 			// Live root state is read per revive, so a later `/new` or cwd move is followed.
+			const artifactManager = ctx.session.sessionManager.getArtifactManager() ?? undefined;
 			const spec: PersistedReviveSpec = {
 				id: ref.id,
 				displayName: ref.displayName,
@@ -226,7 +259,8 @@ export function createPersistedSubagentReviverFactory(
 				rootAgentId: ctx.session.getAgentId?.() ?? MAIN_AGENT_ID,
 				costGate: ctx.session.costGate,
 				asyncJobManager: ctx.session.asyncJobManager,
-				artifactManager: ctx.session.sessionManager.getArtifactManager() ?? undefined,
+				artifactManager,
+				reportArtifactManager: resolvePersistedReportArtifactManager(ref, artifactManager),
 				preparedExtensions: ctx.session.preparedExtensions,
 				authStorage: ctx.authStorage,
 				modelRegistry: ctx.modelRegistry,
@@ -551,6 +585,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	registry.syncSessionStatus(ref.id, session);
 	attachIrcWakeTurnMonitor(session, {
 		id: ref.id,
+		parentArtifactManager: spec.reportArtifactManager,
 		agent: persistedAgentDefinition(ref.displayName, init),
 		completionProbe: isCompletionProbeEnabled(spec.settings, taskDepth - 1),
 		...softRequestBudgetFor(persistedAgentName(ref.displayName, init), spec.settings),

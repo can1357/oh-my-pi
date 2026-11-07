@@ -1,8 +1,11 @@
 import { type MessagePort, parentPort } from "node:worker_threads";
+import { buildJobResult } from "../../src/async/job-control";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
+	type AsyncJob,
 	type AsyncJobManagerApi,
 	type AsyncJobRunResult,
+	isSameJobRun,
 } from "../../src/async/job-manager";
 import { Settings } from "../../src/config/settings";
 import { runEvalWait } from "../../src/eval/handle-bridge";
@@ -34,6 +37,8 @@ interface Body {
 }
 
 const bodies = new Map<string, Body>();
+/** Rows read once and held, as a `wait` holds the rows it started watching. */
+const heldRows = new Map<string, AsyncJob>();
 const deliveries: unknown[] = [];
 const events: unknown[] = [];
 const waitStarts = new Map<string, PromiseWithResolvers<void>>();
@@ -173,6 +178,32 @@ const probe: RuntimeProbe = async (op, ...args) => {
 		case "cancelAllShutdown":
 			manager(args[0]).cancelAll(undefined, ASYNC_JOB_MANAGER_SHUTDOWN_REASON);
 			return true;
+		case "hold": {
+			const job = manager(args[0]).getJob(String(args[1]));
+			if (!job) return false;
+			heldRows.set(job.id, job);
+			return true;
+		}
+		case "heldRun": {
+			const jobs = manager(args[0]);
+			const id = String(args[1]);
+			const held = heldRows.get(id);
+			if (!held) throw new Error(`no held row ${id}`);
+			return {
+				sameRun: isSameJobRun(jobs.getJob(id), held),
+				suppressedForHeld: jobs.isDeliverySuppressed(id, held),
+				suppressed: jobs.isDeliverySuppressed(id),
+			};
+		}
+		case "waitHeld": {
+			const jobs = manager(args[0]);
+			const id = String(args[1]);
+			const held = heldRows.get(id);
+			if (!held) throw new Error(`no held row ${id}`);
+			const session = { asyncJobManager: jobs } as unknown as ToolSession;
+			const [snapshot] = buildJobResult(session, jobs, "wait", [held], []).details?.jobs ?? [];
+			return { status: snapshot?.status, report: snapshot?.report, consumed: jobs.isJobResultConsumed(id) };
+		}
 		case "sink":
 			manager(args[0]).registerDeliverySink(String(args[1]), (jobId, text, job) => {
 				deliveries.push({ jobId, text, status: job?.status, isRow: job instanceof RemoteAsyncJob });

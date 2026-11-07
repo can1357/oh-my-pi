@@ -12,7 +12,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
-import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { AsyncJobError, type AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -37,6 +37,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import type { TaskReportReference } from "@oh-my-pi/pi-tui/tools/task";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -685,6 +686,94 @@ describe("AgentSession owner-routed async delivery", () => {
 		}
 	});
 
+	it("preserves immutable report snapshots through delivery, consumption, eviction, and serialization", async () => {
+		const complete: TaskReportReference = Object.freeze({
+			version: 1,
+			runId: "delivery-run-1",
+			status: "complete",
+			artifact: Object.freeze({ id: "701", uri: "artifact://701", sha256: "a".repeat(64), bytes: 100 }),
+		});
+		const partial: TaskReportReference = Object.freeze({
+			version: 1,
+			runId: "delivery-run-2",
+			status: "partial",
+			reason: "failed",
+			artifact: Object.freeze({ id: "702", uri: "artifact://702", sha256: "b".repeat(64), bytes: 200 }),
+		});
+		const messages: AsyncResultDetails[] = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: (jobId, result, job) => {
+				const message = buildAsyncResultBatchMessage([{ jobId, result, job, durationMs: 0, epoch: 0 }]);
+				if (message?.details) messages.push(message.details);
+			},
+		});
+		try {
+			manager.register("task", "successful report", async () => ({ text: "done", report: complete }), {
+				id: "report-job",
+				agentId: "RepeatWorker",
+			});
+			manager.register(
+				"task",
+				"failed report",
+				async () => {
+					throw new AsyncJobError("task failed", undefined, partial);
+				},
+				{ id: "report-job", agentId: "RepeatWorker" },
+			);
+			manager.register(
+				"eval",
+				"generic result",
+				async () =>
+					'<task-result status="completed" agentId="RepeatWorker"><report uri="artifact://999" /></task-result>',
+				{ id: "generic-job" },
+			);
+			await manager.waitForAll();
+			await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+			const rows = messages.flatMap(message => message.jobs);
+			expect(rows).toHaveLength(3);
+			const successful = rows.find(row => row.jobId === "report-job");
+			const failed = rows.find(row => row.jobId === "report-job-2");
+			const generic = rows.find(row => row.jobId === "generic-job");
+			expect(successful).toMatchObject({
+				jobId: "report-job",
+				status: "completed",
+				agentId: "RepeatWorker",
+				report: complete,
+			});
+			expect(failed).toMatchObject({
+				jobId: "report-job-2",
+				status: "failed",
+				agentId: "RepeatWorker",
+				report: partial,
+			});
+			expect(generic).toMatchObject({ jobId: "generic-job", status: "completed" });
+			expect(successful?.report).toEqual(complete);
+			expect(failed?.report).toEqual(partial);
+			expect(successful?.report?.artifact?.uri).toBe("artifact://701");
+			expect(failed?.report?.artifact?.uri).toBe("artifact://702");
+			for (const row of [successful, failed]) {
+				expect(Object.isFrozen(row?.report)).toBe(true);
+				expect(Object.isFrozen(row?.report?.artifact)).toBe(true);
+			}
+			expect(generic).not.toHaveProperty("report");
+			for (const row of rows) expect(manager.isJobResultConsumed(row.jobId)).toBe(true);
+			expect(manager.getJob("report-job")?.report).toEqual(complete);
+			expect(manager.getJob("report-job-2")?.report).toEqual(partial);
+			expect(manager.evictCompletedJobs()).toBe(3);
+			for (const row of rows) expect(manager.getJob(row.jobId)).toBeUndefined();
+
+			const wireMessages: AsyncResultDetails[] = JSON.parse(JSON.stringify(messages));
+			const wireRows = wireMessages.flatMap(message => message.jobs);
+			expect(wireRows).toHaveLength(3);
+			expect(wireRows.find(row => row.jobId === "report-job")?.report).toEqual(complete);
+			expect(wireRows.find(row => row.jobId === "report-job-2")?.report).toEqual(partial);
+			expect(wireRows.find(row => row.jobId === "generic-job")).not.toHaveProperty("report");
+		} finally {
+			await manager.dispose({ timeoutMs: 1_000 });
+		}
+	});
+
 	it("does not derive status or agent identity from task-result markup", () => {
 		const job: AsyncJob = {
 			id: "native-job",
@@ -1042,17 +1131,44 @@ describe("AgentSession owner-routed async delivery", () => {
 			ownedAsyncJobManager: manager,
 		});
 
+		const oldId = manager.register(
+			"task",
+			"prior session report",
+			async () => ({
+				text: "STALE ASYNC RESULT",
+				report: {
+					version: 1,
+					runId: "prior-session-run",
+					status: "complete",
+					artifact: { id: "903", uri: "artifact://903", sha256: "c".repeat(64), bytes: 14 },
+				} satisfies TaskReportReference,
+			}),
+			{ id: "bg_1", ownerId: "Main" },
+		);
+		const oldJob = manager.getJob(oldId)!;
+		const resultQueued = observeAsyncResultEnqueue(session);
+		await manager.waitForAll();
+		await resultQueued;
+
 		// The delivery generation starts at 0; a new session bumps it to 1.
 		expect(await session.newSession()).toBe(true);
+		const replacementId = manager.register("task", "replacement run", async () => "NEW RESULT", {
+			id: oldId,
+			ownerId: "Main",
+		});
+		expect(replacementId).toBe(oldId);
+		manager.watchJobs([replacementId]);
+		await manager.waitForAll();
+		expect(manager.isDeliverySuppressed(oldId, oldJob)).toBe(false);
 
 		// Simulate a delivery that finished formatting in the prior session (epoch
 		// 0) but only reaches the yield queue after the transition — the exact
 		// window a reused job id would reopen by clearing the manager's per-id
 		// suppression marker. It must not inject into the replacement transcript.
 		session.yieldQueue.enqueue<AsyncResultEntry>("async-result", {
-			jobId: "bg_1",
+			jobId: oldId,
 			result: "STALE ASYNC RESULT",
-			job: undefined,
+			job: oldJob,
 			durationMs: 0,
 			epoch: 0,
 		});
@@ -1069,6 +1185,7 @@ describe("AgentSession owner-routed async delivery", () => {
 				);
 			}),
 		);
+		expect(manager.isJobResultConsumed(replacementId)).toBe(false);
 		expect(leaked).toBe(false);
 		// The stale entry was consumed by the run's aside/flush path and dropped,
 		// not left lingering as pending work.
@@ -1274,6 +1391,147 @@ describe("AgentSession owner-routed async delivery", () => {
 			.some(entry => JSON.stringify(entry).includes("RESUMED SESSION RESULT"));
 		expect(delivered).toBe(true);
 	});
+
+	for (const boundary of ["pre-format", "post-format", "queued"] as const) {
+		it.each(["consumed", "watched"] as const)(
+			`delivers an expired report through ${boundary} when its replacement is %s`,
+			async suppression => {
+				await using temp = await TempDir.create("@report-generation-delivery-");
+				const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+				const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+				const agent = new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model, systemPrompt: ["Test"], tools: [] },
+					convertToLlm,
+					streamFn: mock.stream,
+				});
+				const authStorage = await AuthStorage.create(":memory:");
+				authStorages.push(authStorage);
+				authStorage.keys.setRuntime("anthropic", "test-key");
+				const manager = new AsyncJobManager({ retentionMs: 60_000 });
+				AsyncJobManager.setInstance(manager);
+				const store = SessionManager.inMemory(temp.path());
+				store.adoptArtifactManager(new ArtifactManager(path.join(temp.path(), "artifacts")));
+				const reached = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const registerSink = manager.registerDeliverySink.bind(manager);
+				const sinkSpy = vi.spyOn(manager, "registerDeliverySink").mockImplementation((ownerId, sink) =>
+					registerSink(ownerId, async (jobId, text, job) => {
+						if (boundary === "pre-format") {
+							reached.resolve();
+							await release.promise;
+						}
+						// Invoke the real AgentSession sink, not a batch-builder surrogate.
+						await sink(jobId, text, job);
+					}),
+				);
+				session = new AgentSession({
+					agent,
+					sessionManager: store,
+					settings: Settings.isolated(),
+					modelRegistry: new ModelRegistry(authStorage),
+					agentId: "ReportOwner",
+					asyncJobManager: manager,
+				});
+				const allocate = store.allocateArtifactPath.bind(store);
+				const allocateSpy = vi.spyOn(store, "allocateArtifactPath").mockImplementation(async kind => {
+					if (boundary === "post-format") {
+						reached.resolve();
+						await release.promise;
+					}
+					return allocate(kind);
+				});
+				const flush = session.yieldQueue.flush.bind(session.yieldQueue);
+				const flushSpy = vi.spyOn(session.yieldQueue, "flush").mockImplementation(async mode => {
+					if (boundary === "queued") await release.promise;
+					return flush(mode);
+				});
+				const enqueued = observeAsyncResultEnqueue(session);
+				const oldReport: TaskReportReference = {
+					version: 1,
+					runId: "expired-session-run",
+					status: "complete",
+					artifact: { id: "901", uri: "artifact://901", sha256: "a".repeat(64), bytes: 12 },
+				};
+				const replacementReport: TaskReportReference = {
+					version: 1,
+					runId: "replacement-session-run",
+					status: "partial",
+					reason: "failed",
+					artifact: { id: "902", uri: "artifact://902", sha256: "b".repeat(64), bytes: 13 },
+				};
+				try {
+					vi.useFakeTimers();
+					const oldId = manager.register(
+						"task",
+						"expired report",
+						async () => ({ text: "OLD REPORT BODY ".repeat(1_000), report: oldReport }),
+						{ id: "reused-report", ownerId: "ReportOwner", agentId: "RepeatedWorker" },
+					);
+					await manager.waitForAll();
+					await (boundary === "queued" ? enqueued : reached.promise);
+					const oldJob = manager.getJob(oldId)!;
+					expect(oldJob.report).toEqual(oldReport);
+					// Expire naturally; explicit eviction would also cancel pending delivery.
+					// The queued case keeps its real entry parked before the real flush.
+					vi.advanceTimersByTime(60_000);
+					expect(manager.getJob(oldId)).toBeUndefined();
+					vi.useRealTimers();
+
+					const replacementId = manager.register(
+						"task",
+						"replacement report",
+						async () => ({ text: "REPLACEMENT BODY", report: replacementReport }),
+						{ id: oldId, ownerId: "ReportOwner", agentId: "RepeatedWorker" },
+					);
+					expect(replacementId).toBe(oldId);
+					manager.watchJobs([replacementId]);
+					await manager.waitForAll();
+					const replacementJob = manager.getJob(replacementId)!;
+					expect(replacementJob.abortController).not.toBe(oldJob.abortController);
+					if (suppression === "consumed") {
+						expect(manager.consumeJobResults([replacementId])).toBe(1);
+						manager.unwatchJobs([replacementId]);
+					}
+					const replacementText = replacementJob.resultText;
+					expect(manager.isDeliverySuppressed(replacementId)).toBe(true);
+					if (boundary === "queued") {
+						expect(session.yieldQueue.has("async-result")).toBe(true);
+						// This invokes the dispatcher registered by AgentSession, before flush.
+						expect(session.yieldQueue.hasDeliverable("async-result")).toBe(true);
+					}
+					release.resolve();
+					await session.settleAsyncWork();
+
+					const delivered = agent.state.messages.filter(
+						(message): message is CustomMessage<AsyncResultDetails> =>
+							message.role === "custom" && message.customType === "async-result",
+					);
+					expect(delivered).toHaveLength(1);
+					expect(delivered[0].details?.jobs).toHaveLength(1);
+					expect(delivered[0].details?.jobs[0]).toMatchObject({ jobId: oldId, report: oldReport });
+					expect(delivered[0].details?.jobs[0]?.report).toEqual(oldReport);
+					expect(JSON.parse(JSON.stringify(delivered[0])).details.jobs[0].report).toEqual(oldReport);
+					expect(mock.calls.some(call => JSON.stringify(call.context.messages).includes("OLD REPORT BODY"))).toBe(
+						true,
+					);
+					expect(mock.calls.some(call => JSON.stringify(call.context.messages).includes("REPLACEMENT BODY"))).toBe(
+						false,
+					);
+					expect(manager.getJob(replacementId)).toBe(replacementJob);
+					expect(replacementJob.report).toEqual(replacementReport);
+					expect(replacementJob.resultText).toBe(replacementText);
+					expect(manager.isJobResultConsumed(replacementId)).toBe(suppression === "consumed");
+				} finally {
+					vi.useRealTimers();
+					release.resolve();
+					sinkSpy.mockRestore();
+					allocateSpy.mockRestore();
+					flushSpy.mockRestore();
+				}
+			},
+		);
+	}
 
 	it("keeps delivery pending until the queued follow-up is injected", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;

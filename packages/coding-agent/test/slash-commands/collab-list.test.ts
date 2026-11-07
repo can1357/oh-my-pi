@@ -48,6 +48,11 @@ function createHarness() {
 		showStatus,
 		showError,
 		settings: { get: () => "" },
+		session: {
+			sessionTransitionEpoch: 0,
+			registerSessionTransitionCallback: () => () => {},
+			registerSessionChangeCallback: () => () => {},
+		},
 	} as unknown as InteractiveModeContext;
 	ctx.collabController = new CollabController(ctx);
 	return { ctx, setText, showStatus, showError, runtime: { ctx } as BuiltinSlashCommandRuntime };
@@ -104,6 +109,22 @@ describe("/collab list slash command", () => {
 		expect(details[1]).toContain("relay connected, idle,");
 		// An older host reports nothing, and the row guesses nothing.
 		expect(details[2]).not.toMatch(/working|idle/);
+	});
+
+	it("renders local-only metadata with relay off and no remote link instruction", async () => {
+		vi.spyOn(registry, "listCollabHosts").mockResolvedValue([
+			snapshot({ access: "local", relayConnected: false, participants: 1 }),
+		]);
+		const harness = createHarness();
+
+		await executeBuiltinSlashCommand("/collab list", harness.runtime);
+
+		const text = Bun.stripANSI(String(harness.showStatus.mock.calls.at(-1)?.[0] ?? ""));
+		expect(text).toContain("TUI Session (sess-tui)");
+		expect(text).toContain("gen 2");
+		expect(text).toContain("test/model-1");
+		expect(text).toContain("pid 42, 0 guests, local, relay off, idle,");
+		expect(text).not.toMatch(/relay connected|relay reconnecting|collab link|https?:\/\//);
 	});
 
 	it("points view-only hosts at the --view link command", async () => {

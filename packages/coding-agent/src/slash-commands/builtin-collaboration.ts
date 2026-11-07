@@ -408,7 +408,11 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 						`pid ${host.pid}`,
 						`${guests} guest${guests === 1 ? "" : "s"}`,
 						host.access,
-						host.relayConnected ? "relay connected" : "relay reconnecting",
+						host.access === "local"
+							? "relay off"
+							: host.relayConnected
+								? "relay connected"
+								: "relay reconnecting",
 						...(host.inputRequired ? ["input required"] : []),
 						...(host.busy === null ? [] : [host.busy ? "working" : "idle"]),
 						truncateToWidth(sanitizeDisplayLine(shortenPath(host.cwd)), TRUNCATE_LENGTHS.TITLE),
@@ -418,8 +422,12 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 						// fixed details can never push it past one transcript line.
 						truncateToWidth(` ${bullet} ${session} ${theme.fg("muted", `— ${room}`)}`, TRUNCATE_LENGTHS.LINE),
 						truncateToWidth(`   ${theme.fg("muted", detail)}`, TRUNCATE_LENGTHS.LINE),
-						`   ${theme.fg("dim", `${APP_NAME} collab link ${host.instanceId}${host.access === "view" ? " --view" : ""}`)}`,
 					);
+					if (host.access !== "local") {
+						lines.push(
+							`   ${theme.fg("dim", `${APP_NAME} collab link ${host.instanceId}${host.access === "view" ? " --view" : ""}`)}`,
+						);
+					}
 				}
 				ctx.showStatus(lines.join("\n"), { dim: false });
 				return;

@@ -11,7 +11,7 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
-import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { StructuredSubagentOutput, TaskReportReference } from "@oh-my-pi/pi-tui/tools/task";
 import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -59,6 +59,8 @@ type AsyncResultJobDetails = {
 	meta?: OutputMeta;
 	/** Full structured payload (source/mode/status/data/error), when the job used an output schema. */
 	schema?: StructuredSubagentOutput;
+	/** Immutable run-bound public report; never derived from an agent handle. */
+	report?: TaskReportReference;
 };
 
 export type AsyncResultDetails = {
@@ -158,6 +160,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			durationMs: entry.durationMs,
 			meta: entry.job?.latestDetails?.meta,
 			structured,
+			report: entry.job?.report,
 			structuredJson: structuredJson === undefined ? undefined : escapeHarnessTags(structuredJson),
 			hasStructuredData,
 			schemaStatus: structured?.status,
@@ -177,6 +180,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			durationMs: job.durationMs,
 			...(job.meta ? { meta: job.meta } : {}),
 			...(job.structured ? { schema: job.structured } : {}),
+			...(job.report ? { report: job.report } : {}),
 		})),
 	};
 	const text = prompt.render(asyncResultTemplate, {

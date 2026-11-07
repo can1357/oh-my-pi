@@ -39,7 +39,7 @@ export const cleanseHelp = {
 
 export const collabHelp = {
 	description:
-		"List active local Collab host metadata without URLs; use collab link <instanceId|pid> to retrieve a control link (--view for view-only)",
+		"List local session metadata without URLs; collab link retrieves remote links (--view for view-only); collab send delivers agent messages using exact instance IDs, generations and a request ID",
 } satisfies CommandMetadata;
 
 export const clipHelp = {

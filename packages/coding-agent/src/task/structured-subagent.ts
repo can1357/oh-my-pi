@@ -858,7 +858,7 @@ function buildExecutorOptions(
 		preloadedPreparedExtensions: session.preparedExtensions,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,
-		parentArtifactManager: preparedSession ? undefined : (session.getArtifactManager?.() ?? undefined),
+		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		onRelease:
@@ -1030,15 +1030,17 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	let completedSuccessfully = false;
 	let hasValidStructuredOutput = false;
 	let deferredCleanup: Promise<void> | undefined;
-	// Set once the child returns: every later step (structured-output
-	// metadata, isolation merge, nested patch apply) can still throw, and the
+	// Set as soon as the child returns: isolation cleanup, structured-output
+	// metadata, isolation merge, and nested patch apply can still throw, and the
 	// failure must carry the exit status and artifact the child produced.
 	let settled: SingleResult | undefined;
 	let retainSalvagedArtifact = false;
-	const onSubprocessResult =
-		request.invocationKind === "eval"
-			? (result: SingleResult) => request.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0)
-			: undefined;
+	const onSubprocessResult = (result: SingleResult): void => {
+		settled = result;
+		if (request.invocationKind === "eval") {
+			request.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0);
+		}
+	};
 	try {
 		const id = await reserveStructuredSubagentId(request.session, {
 			...request.identity,
@@ -1077,7 +1079,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		try {
 			if (!isolationContext) {
 				result = await runSubprocess(baseOptions);
-				onSubprocessResult?.(result);
+				onSubprocessResult(result);
 			} else {
 				result = await runIsolatedSubprocess({
 					baseOptions,
