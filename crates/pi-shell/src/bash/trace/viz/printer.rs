@@ -499,8 +499,16 @@ impl<S: VizSource> Printer<'_, S> {
 				continue;
 			};
 			let start = at as usize;
+			// The minimizer runs each `&&` operand as its own unit; a gap that
+			// holds only the operator continues the chain into the next unit.
+			let mut lead = None;
 			if start > cursor {
-				self.ahead(cursor, start.min(source.script().len()));
+				let end = start.min(source.script().len());
+				let gap = &source.script()[cursor..end];
+				match chain_operator(gap) {
+					Some((op, len)) if len == gap.len() => lead = Some(op),
+					_ => self.ahead(cursor, end),
+				}
 			}
 			if self.options.layers.idioms
 				&& let Some(end) = self.setup_units(roots, position)
@@ -519,7 +527,11 @@ impl<S: VizSource> Printer<'_, S> {
 					origin:   None,
 					analysis: self.analysis,
 				};
-				self.tree(&syntax.tree, &context, 0);
+				if let Root::List(list) = syntax.tree.view() {
+					self.chain_list(list, &context, 0, lead);
+				} else {
+					self.tree(&syntax.tree, &context, 0);
+				}
 			} else {
 				let end = (start + unit.source.len()).min(source.script().len());
 				self.pending(&source.script()[start.min(end)..end], at, 0);
@@ -536,23 +548,27 @@ impl<S: VizSource> Printer<'_, S> {
 	/// has an outcome until the engine announces it; the first command that
 	/// does not parse and everything after it stay literal, as does a unit
 	/// the engine announced without syntax (its parse may have used aliases
-	/// or features this one lacks) and everything after that.
+	/// or features this one lacks) and everything after that. A leading
+	/// `&&`/`||` continues the chain of the unit before it.
 	fn ahead(&mut self, lo: usize, hi: usize) {
 		if lo >= hi {
 			return;
 		}
 		let source = self.source;
 		let script: &[u8] = source.script().as_ref();
+		let (mut lead, from) =
+			chain_operator(&script[lo..hi]).map_or((None, lo), |(op, len)| (Some(op), lo + len));
 		let stop = (0..source.unit_count())
 			.filter_map(|index| source.unit(index)?.at)
 			.map(|at| at as usize)
-			.filter(|at| (lo..hi).contains(at))
+			.filter(|at| (from..hi).contains(at))
 			.min()
 			.unwrap_or(hi);
-		let Some(ahead) = self.parsed_ahead(lo, stop) else {
+		let Some(ahead) = self.parsed_ahead(from, stop) else {
 			self.pending(&script[lo..hi], lo as u32, 0);
 			return;
 		};
+		let lo = from;
 		let bytes = &script[lo..stop];
 		let mut cursor = 0;
 		for (((tree, root), span), id) in ahead.commands.iter().zip(&ahead.spans).zip(&ahead.ids) {
@@ -569,7 +585,7 @@ impl<S: VizSource> Printer<'_, S> {
 				origin: None,
 				analysis: &ahead.analysis,
 			};
-			self.list(List::at(tree, *root), &context, 0);
+			self.chain_list(List::at(tree, *root), &context, 0, lead.take());
 			cursor = span.hi as usize;
 		}
 		self.pending(&script[lo + cursor..hi], (lo + cursor) as u32, 0);
@@ -889,10 +905,17 @@ impl<S: VizSource> Printer<'_, S> {
 	}
 
 	fn list(&mut self, list: List<'_>, c: &Context<'_>, depth: u32) {
+		self.chain_list(list, c, depth, None);
+	}
+
+	/// Draws `list`; its first chain continues the one `after` cut off before
+	/// it (see [`Self::and_or`]).
+	fn chain_list(&mut self, list: List<'_>, c: &Context<'_>, depth: u32, mut after: Option<AndOrOp>) {
 		let items = list.items();
 		let mut i = 0;
 		while let Some(item) = items.get(i) {
-			if self.options.layers.idioms
+			if after.is_none()
+				&& self.options.layers.idioms
 				&& let (Some(start), Some(loader), Some(end)) = (
 					single(item.and_or()),
 					items.get(i + 1).and_then(|it| single(it.and_or())),
@@ -925,15 +948,27 @@ impl<S: VizSource> Printer<'_, S> {
 				i += 3;
 				continue;
 			}
-			self.and_or(item.and_or(), c, depth, matches!(item.sep(), Sep::Amp | Sep::Disown));
+			let background = matches!(item.sep(), Sep::Amp | Sep::Disown);
+			self.and_or(item.and_or(), c, depth, background, after.take());
 			i += 1;
 		}
 	}
 
-	fn and_or(&mut self, a: AndOr<'_>, c: &Context<'_>, depth: u32, background: bool) {
+	/// Draws one chain. `after` is the operator of an earlier chain this one
+	/// continues (a minimizer segment, or script not reached yet): the first
+	/// pipeline then reads as a continuation row too.
+	fn and_or(
+		&mut self,
+		a: AndOr<'_>,
+		c: &Context<'_>,
+		depth: u32,
+		background: bool,
+		after: Option<AndOrOp>,
+	) {
 		let first = a.first();
 		let rest: Vec<(AndOrOp, Pipeline<'_>)> = a.rest().collect();
-		if rest.is_empty()
+		if after.is_none()
+			&& rest.is_empty()
 			&& let Some(cmd) = first.stages().one()
 			&& !first.bang()
 			&& first.time().is_none()
@@ -953,11 +988,14 @@ impl<S: VizSource> Printer<'_, S> {
 			// One row per pipeline: `and`/`or` lead each continuation row, so a
 			// chain reads down the page and every command keeps its own status.
 			let mut lead = Vec::new();
+			if let Some(op) = after {
+				lead.push(self.segment(c, a.id(), a.span(), connector(op), "op", false));
+			}
 			if background {
 				lead.push(self.segment(c, a.id(), a.span(), "spawn ", "kw", false));
 			}
 			lead.extend(self.pipeline(first, c));
-			let mut rows = vec![(first, depth, lead)];
+			let mut rows = vec![(first, depth + u32::from(after.is_some()), lead)];
 			for (index, &(op, p)) in rest.iter().enumerate() {
 				let lone = p.stages().one();
 				if self.options.layers.idioms
@@ -979,8 +1017,7 @@ impl<S: VizSource> Printer<'_, S> {
 						segments.push(s);
 					}
 				} else {
-					let connector = if op == AndOrOp::And { "and " } else { "or " };
-					let mut segments = vec![self.segment(c, a.id(), a.span(), connector, "op", false)];
+					let mut segments = vec![self.segment(c, a.id(), a.span(), connector(op), "op", false)];
 					segments.extend(self.pipeline(p, c));
 					rows.push((p, depth + 1, segments));
 				}
@@ -992,23 +1029,19 @@ impl<S: VizSource> Printer<'_, S> {
 			}
 		} else {
 			for (pi, p) in a.pipelines().iter().enumerate() {
+				// The operator this pipeline follows, within the chain or before it.
+				let op = if pi > 0 { Some(rest[pi - 1].0) } else { after };
 				let mut prev_stderr = false;
 				for (si, stage) in p.stages().iter().enumerate() {
 					let start = self.rows.len();
-					self.command(stage, c, depth + u32::from(pi > 0 || si > 0), background);
-					let connector = if si > 0 {
+					self.command(stage, c, depth + u32::from(op.is_some() || si > 0), background);
+					let link = if si > 0 {
 						if prev_stderr { "→& " } else { "→ " }
-					} else if pi > 0 {
-						if rest[pi - 1].0 == AndOrOp::And {
-							"and "
-						} else {
-							"or "
-						}
 					} else {
-						""
+						op.map_or("", connector)
 					};
 					prev_stderr = stage.pipe_stderr();
-					let mut prefix = connector.to_owned();
+					let mut prefix = link.to_owned();
 					if si == 0 && p.bang() {
 						prefix.push_str("not ");
 					}
@@ -2431,6 +2464,25 @@ fn style_for(style: &str, color: bool) -> Option<String> {
 			.join(" ")
 	};
 	(!text.is_empty()).then_some(text)
+}
+/// Pseudo word drawn for a chain operator.
+const fn connector(op: AndOrOp) -> &'static str {
+	match op {
+		AndOrOp::And => "and ",
+		AndOrOp::Or => "or ",
+	}
+}
+/// The `&&`/`||` opening `bytes` after blanks, with the byte length through
+/// it and the whitespace following it.
+fn chain_operator(bytes: &[u8]) -> Option<(AndOrOp, usize)> {
+	let at = bytes.iter().position(|byte| !matches!(byte, b' ' | b'\t'))?;
+	let op = match bytes.get(at..at + 2)? {
+		b"&&" => AndOrOp::And,
+		b"||" => AndOrOp::Or,
+		_ => return None,
+	};
+	let end = at + 2;
+	Some((op, end + bytes[end..].iter().take_while(|byte| byte.is_ascii_whitespace()).count()))
 }
 fn single(a: AndOr<'_>) -> Option<Command<'_>> {
 	let first = a.first();
