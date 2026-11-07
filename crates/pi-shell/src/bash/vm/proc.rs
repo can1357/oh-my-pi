@@ -803,7 +803,7 @@ pub struct Run {
 }
 
 /// What kind of activation a frame is.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, strum::VariantNames)]
 pub enum FrameKind {
 	/// Parses and runs commands from source one at a time: the run's
 	/// script, `eval`, `source`.
