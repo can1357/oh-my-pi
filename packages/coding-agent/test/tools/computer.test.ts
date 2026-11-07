@@ -4255,7 +4255,13 @@ describe("menu.items beneath a named menu", () => {
 				case "":
 					return [item("Edit", true), item("View", true)];
 				case "Edit":
-					return [item("Undo"), item("List", true), item("Speech", true, false), item("Services", true), item("Help", true)];
+					return [
+						item("Undo"),
+						item("List", true),
+						item("Speech", true, false),
+						item("Services", true),
+						item("Help", true),
+					];
 				case "Edit/List":
 					return [item("Local", true)];
 				case "Edit/List/Local":
