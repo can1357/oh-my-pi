@@ -13,6 +13,8 @@ export const BLOB_BROKER_WORKER_ARG = "__omp_worker_blob_broker";
 export const COMPUTER_WORKER_ARG = "__omp_worker_computer";
 /** Daemon-broker selector shared by the CLI dispatcher and worker launcher. */
 export const DAEMON_BROKER_WORKER_ARG = "__omp_worker_daemon_broker";
+/** Exit-context reader thread selector shared by the CLI dispatcher and `readExitContext`. */
+export const EXIT_CONTEXT_WORKER_ARG = "__omp_worker_exit_context";
 /** IDA-host selector shared by the CLI dispatcher and the broker daemon spec. */
 export const IDA_HOST_WORKER_ARG = "__omp_worker_ida_host";
 /** Mnemopi shared embedding-server selector shared by the CLI dispatcher and `embed-client.ts`. */

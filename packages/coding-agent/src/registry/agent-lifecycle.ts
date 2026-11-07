@@ -23,7 +23,7 @@
  */
 
 import * as fs from "node:fs/promises";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, type postmortem, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
@@ -37,6 +37,22 @@ import {
 import { getAgentTombstonePath } from "./agent-tombstone";
 
 export type AgentReviver = (expected: AgentRef) => Promise<AgentSessionHandle>;
+
+/** Options of {@link AgentLifecycleApi.release}. */
+export interface AgentReleaseOptions {
+	/** Keep a terminal `aborted` row instead of unregistering the ref (an explicit kill). */
+	tombstone?: boolean;
+	/** The postmortem reason that ends the agent; its `session_exit` records it instead of `dispose`. */
+	reason?: postmortem.Reason;
+}
+
+/** Options of {@link AgentLifecycleApi.dispose}. */
+export interface AgentLifecycleDisposeOptions {
+	/** Epoch ms after which teardown stops waiting for a session (default: 5 s from now). */
+	deadlineAt?: number;
+	/** The postmortem reason the owner is torn down for (a signal, a fatal error); every adopted agent records it. */
+	reason?: postmortem.Reason;
+}
 
 const AGENT_RELEASE_GRACE_MS = 5000;
 
@@ -149,9 +165,9 @@ export interface AgentLifecycleApi {
 	/** Return the live session, reviving it if parked or killed. */
 	ensureLive(id: string): Promise<AgentSessionHandle>;
 	/** Dispose if live and drop timers; `tombstone` keeps a terminal `aborted` row. */
-	release(id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }): Promise<boolean>;
+	release(id: string, expected?: AgentRefExpectation, options?: AgentReleaseOptions): Promise<boolean>;
 	/** Tear down every adopted agent. */
-	dispose(deadlineAt?: number): Promise<void>;
+	dispose(options?: AgentLifecycleDisposeOptions): Promise<void>;
 }
 
 export class AgentLifecycleManager implements AgentLifecycleApi {
@@ -225,6 +241,8 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	#persistedReviveTtlMs: () => number = () => 0;
 	/** Set once {@link dispose} runs; blocks late revivals from adopting into a torn-down manager. */
 	#disposed = false;
+	/** The reason {@link dispose} was given; a revival that lands after teardown disposes its session with it. */
+	#disposeReason: postmortem.Reason | undefined;
 
 	constructor(registry: AgentRegistryApi = AgentRegistry.global()) {
 		this.#registry = registry;
@@ -618,7 +636,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	 * it does not destroy it: {@link ensureLive} (a message, Hub revive/focus)
 	 * reopens the transcript.
 	 */
-	async release(id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }): Promise<boolean> {
+	async release(id: string, expected?: AgentRefExpectation, options?: AgentReleaseOptions): Promise<boolean> {
 		const adopted = this.#adopted.get(id);
 		const current = this.#registry.get(id);
 		const currentMatches =
@@ -666,7 +684,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			// dispose the captured session, even when tombstone persistence fails.
 			if (live) {
 				try {
-					await live.dispose();
+					await live.dispose(options?.reason ? { reason: options.reason } : undefined);
 				} catch (error) {
 					logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
 				}
@@ -684,15 +702,22 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		return true;
 	}
 
-	/** Teardown everything; disposing the global manager makes its next owner a fresh instance. */
-	async dispose(deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<void> {
+	/**
+	 * Teardown everything; disposing the global manager makes its next owner a fresh instance.
+	 * Every adopted agent's session is disposed with `reason`, so a signal that ends the owner
+	 * is what each of their `session_exit` entries records.
+	 */
+	async dispose(options: AgentLifecycleDisposeOptions = {}): Promise<void> {
+		const deadlineAt = options.deadlineAt ?? Date.now() + AGENT_RELEASE_GRACE_MS;
+		const reason = options.reason;
 		this.#unsubscribe?.();
 		this.#disposed = true;
+		this.#disposeReason = reason;
 		this.#unsubscribe = undefined;
 		const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])];
 		await Promise.all(
 			ids.map(async id => {
-				const release = this.release(id).then(() => {});
+				const release = this.release(id, undefined, reason ? { reason } : undefined).then(() => {});
 				try {
 					await untilAborted(AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())), () => release);
 				} catch (error) {
@@ -717,7 +742,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		if (this.#disposed) {
 			// The owning lifecycle tore down while the reviver was in flight; dispose
 			// the freshly built session instead of attaching it, and fail the waiter.
-			await session.dispose();
+			await session.dispose(this.#disposeReason ? { reason: this.#disposeReason } : undefined);
 			throw new Error(
 				`Agent "${id}" revival aborted: its lifecycle was disposed while its persisted session was reviving.`,
 			);

@@ -61,6 +61,63 @@ async function replaceAfterWindowsRenameFailure(
 }
 
 /**
+ * Synchronous sibling of {@link replaceFileAtomically} for callers that cannot
+ * await. POSIX publishes with the one rename; only a Windows `EPERM`/`EEXIST`
+ * refusal takes the move-aside path, which restores the destination when the
+ * retry fails.
+ */
+export function replaceFileAtomicallySync(tempPath: string, targetPath: string): void {
+	try {
+		fs.renameSync(tempPath, targetPath);
+		return;
+	} catch (error) {
+		if (!hasFsCode(error, "EPERM") && !isEexist(error)) throw error;
+		replaceAfterWindowsRenameFailureSync(tempPath, targetPath, error);
+	}
+}
+
+function replaceAfterWindowsRenameFailureSync(tempPath: string, targetPath: string, renameError: unknown): void {
+	const backupPath = `${targetPath}.${process.pid}.${crypto.randomUUID()}.bak`;
+	try {
+		fs.renameSync(targetPath, backupPath);
+	} catch (error) {
+		if (isEnoent(error)) {
+			fs.renameSync(tempPath, targetPath);
+			return;
+		}
+		throw renameError;
+	}
+
+	try {
+		fs.renameSync(tempPath, targetPath);
+	} catch (replaceError) {
+		try {
+			fs.renameSync(backupPath, targetPath);
+		} catch (rollbackError) {
+			throw new Error(
+				`Failed to replace file after ${toError(renameError).message} (retry: ${
+					toError(replaceError).message
+				}; rollback: ${toError(rollbackError).message})`,
+				{ cause: toError(renameError) },
+			);
+		}
+		throw replaceError;
+	}
+
+	try {
+		fs.rmSync(backupPath);
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.warn("Failed to remove atomic replacement backup", {
+				path: targetPath,
+				backupPath,
+				error: toError(error).message,
+			});
+		}
+	}
+}
+
+/**
  * Write a file through a private temp sibling and publish it with a single
  * rename, so a reader never observes a half-written file and a failed write
  * leaves the destination untouched.
@@ -107,7 +164,7 @@ export function writeFileAtomicallySync(filePath: string, content: string, mode:
 		fd = undefined;
 		// The umask narrows the mode passed to open(); restore it explicitly.
 		fs.chmodSync(tempPath, mode);
-		fs.renameSync(tempPath, filePath);
+		replaceFileAtomicallySync(tempPath, filePath);
 	} catch (error) {
 		if (fd !== undefined) {
 			try {

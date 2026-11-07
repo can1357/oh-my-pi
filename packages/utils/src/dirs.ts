@@ -1160,6 +1160,17 @@ export function getSessionOwnersDir(): string {
 	return dirs.baseRootSubdir(path.join("run", "session-owners"), "state");
 }
 
+/**
+ * Directory of exit-intent files (~/.omp/run/exit-intent; XDG default:
+ * $XDG_STATE_HOME/omp/run/exit-intent). `<dir>/<pid>` holds one word a sender
+ * leaves before it signals omp process `<pid>`; that process records the word in
+ * its `session_exit` entry and deletes the file. Shared across profiles: the
+ * sender does not know which profile the process runs.
+ */
+export function getExitIntentDir(): string {
+	return dirs.baseRootSubdir(path.join("run", "exit-intent"), "state");
+}
+
 /** Get the provider in-flight root directory (~/.omp/run/provider-inflight; XDG default: $XDG_STATE_HOME/omp/run/provider-inflight). */
 export function getProviderInFlightRoot(): string {
 	return dirs.rootSubdir(path.join("run", "provider-inflight"), "state");

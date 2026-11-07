@@ -102,6 +102,11 @@ export class MainSessionBridge {
 		return this.#open.get(key)?.session;
 	}
 
+	/** Mirrors of every session open on this worker. */
+	sessions(): RemoteAgentSession[] {
+		return [...this.#open.values()].map(open => open.session);
+	}
+
 	/** A publisher opened a session: create and hold its canonical mirror. */
 	opened(opened: SessionOpened): void {
 		if (!(opened.host instanceof SessionHostClient)) throw new Error("Session opened without a host");
@@ -305,6 +310,11 @@ function serveBus(bridge: MainSessionBridge): RpcServe<IrcBus, IrcBusProtocol> {
 }
 
 const bridges = new Map<WorkerPeer["threadId"], MainSessionBridge>();
+
+/** Main-thread mirrors of the sessions open on worker `threadId` (none once it exited). */
+export function sessionsHomedOn(threadId: WorkerPeer["threadId"]): RemoteAgentSession[] {
+	return bridges.get(threadId)?.sessions() ?? [];
+}
 
 function installMain(peer: WorkerPeer): void {
 	registerSessionErrors();
