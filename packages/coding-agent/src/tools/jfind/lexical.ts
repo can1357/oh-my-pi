@@ -4,6 +4,9 @@
  * judgment is spent.
  */
 import * as natives from "@oh-my-pi/pi-natives";
+import { logger } from "@oh-my-pi/pi-utils";
+import { resolveSearchResultPath } from "../path-utils";
+import { throwIfAborted } from "../tool-errors";
 import { countOccurrences } from "./text";
 
 export interface GrepIndex {
@@ -24,9 +27,16 @@ export interface GrepIndexOptions {
 	includeHidden: boolean;
 	/** Filesystem URL roots and their entries resolve through. */
 	filesystem: natives.ShellFilesystem;
+	maxScanFiles?: number;
+	maxScanBytes?: number;
+	/** Walk-relative globs for files that are neither searched nor counted toward the scan budget. */
+	excludeGlobs?: readonly string[];
 	signal?: AbortSignal;
 	timeoutMs?: number;
 }
+
+/** Largest file the truncated-line recount reopens: the native scan's own read window. */
+const RECOUNT_MAX_BYTES = 4 * 1024 * 1024;
 
 /**
  * Count keyword occurrences (case-insensitive, any keyword) in every file under
@@ -45,14 +55,22 @@ export async function grepIndex(
 	const index: GrepIndex = { keywords, perFileKw: new Map(), filesScanned: 0 };
 	if (keywords.length === 0) return index;
 	const { perFileKw } = index;
+	const pattern = keywords.map(escapeRegex).join("|");
+	const truncated = new Set<string>();
+	// One deadline covers the initial scan and every recount.
+	const deadline = options.timeoutMs === undefined ? undefined : Date.now() + options.timeoutMs;
 	const result = await natives.grep({
-		pattern: keywords.map(escapeRegex).join("|"),
+		pattern,
 		path: root,
 		ignoreCase: true,
 		hidden: options.includeHidden,
 		gitignore: true,
 		mode: natives.GrepOutputMode.Content,
 		filesystem: options.filesystem,
+		maxScanFiles: options.maxScanFiles,
+		maxScanBytes: options.maxScanBytes,
+		excludeGlobs: options.excludeGlobs ? [...options.excludeGlobs] : undefined,
+		maxColumns: 512,
 		signal: options.signal,
 		timeoutMs: options.timeoutMs,
 		onMatches: matches => {
@@ -62,6 +80,7 @@ export async function grepIndex(
 					counts = Array.from({ length: keywords.length }, () => 0);
 					perFileKw.set(match.path, counts);
 				}
+				if (match.truncated) truncated.add(match.path);
 				const line = match.line.toLowerCase();
 				for (let k = 0; k < keywords.length; k++) {
 					counts[k]! += countOccurrences(line, keywords[k]!);
@@ -70,6 +89,45 @@ export async function grepIndex(
 		},
 	});
 	index.filesScanned = result.filesSearched + (result.skippedOversized ?? 0);
+	// A truncated matching line hides occurrences past the retained prefix, so
+	// recount the affected files over their untruncated lines. The recount is a
+	// best-effort refinement of the prefix counts already folded in: it never
+	// reopens a file larger than the native scan's own read window (that would
+	// stream the whole file, and a single huge line can fail the grep), it shares
+	// the scan's deadline, and a failed recount keeps the lower-bound counts.
+	for (const rel of truncated) {
+		throwIfAborted(options.signal);
+		const remaining = deadline === undefined ? undefined : Math.max(0, deadline - Date.now());
+		if (remaining === 0) break;
+		let recount: Awaited<ReturnType<typeof natives.grep>>;
+		try {
+			recount = await natives.grep({
+				pattern,
+				path: resolveSearchResultPath(root, rel),
+				ignoreCase: true,
+				hidden: options.includeHidden,
+				gitignore: true,
+				mode: natives.GrepOutputMode.Content,
+				filesystem: options.filesystem,
+				maxScanFiles: 1,
+				maxScanBytes: RECOUNT_MAX_BYTES,
+				signal: options.signal,
+				timeoutMs: remaining,
+			});
+		} catch (error) {
+			throwIfAborted(options.signal);
+			logger.debug("jfind: truncated-line recount skipped", { rel, error });
+			continue;
+		}
+		const counts = Array.from({ length: keywords.length }, () => 0);
+		for (const match of recount.matches) {
+			const line = match.line.toLowerCase();
+			for (let k = 0; k < keywords.length; k++) {
+				counts[k]! += countOccurrences(line, keywords[k]!);
+			}
+		}
+		perFileKw.set(rel, counts);
+	}
 	return index;
 }
 

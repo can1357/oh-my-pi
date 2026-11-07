@@ -194,6 +194,12 @@ pub struct GrepOptions {
 	pub max_count:          Option<u64>,
 	/// Keep at most this many matches per file ([`Mode::Content`]).
 	pub max_count_per_file: Option<u64>,
+	/// Fail with [`GrepError::ScanLimit`] instead of searching more than this
+	/// many files; only files the filters keep count.
+	pub max_scan_files:     Option<u64>,
+	/// Fail with [`GrepError::ScanLimit`] before searching files whose sizes
+	/// add up to more than this many bytes; only files the filters keep count.
+	pub max_scan_bytes:     Option<u64>,
 	/// Traversal: `hidden`, `gitignore`, `workers`, `cache` are honoured;
 	/// `.git` is always pruned and `node_modules` unless the glob names it.
 	pub walk:               walk::Options,
@@ -221,6 +227,8 @@ impl GrepOptions {
 			offset: 0,
 			max_count: None,
 			max_count_per_file: None,
+			max_scan_files: None,
+			max_scan_bytes: None,
 			walk: walk::Options { hidden: true, gitignore: true, ..walk::Options::default() },
 			sink: None,
 		}
@@ -260,6 +268,9 @@ pub enum GrepError {
 	Walk(WalkError),
 	/// The sink failed.
 	Sink(String),
+	/// More files or bytes than `max_scan_files` / `max_scan_bytes` would be
+	/// searched.
+	ScanLimit,
 	/// Searching a file root failed (a PCRE2 limit, or a line over 64 MiB in
 	/// a streamed oversized file).
 	Search(String),
@@ -276,6 +287,7 @@ impl fmt::Display for GrepError {
 			Self::NotFound(err) => write!(f, "Path not found: {err}"),
 			Self::Walk(err) => err.fmt(f),
 			Self::Sink(reason) => f.write_str(reason),
+			Self::ScanLimit => f.write_str("Grep scan limit reached; narrow the search path"),
 			Self::Search(reason) => write!(f, "Search failed: {reason}"),
 		}
 	}
