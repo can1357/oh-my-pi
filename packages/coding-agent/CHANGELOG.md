@@ -283,6 +283,10 @@
 - `omp gc --strip` and `--compress` start work immediately instead of first reading every session's metadata, and `--strip` processes several sessions at once with a running tally of transcripts stripped.
 - `omp gc` without `--apply` now says up front that it is a dry run.
 
+### Added
+
+- Added the resolved `provider/model[:level]` and a retry-fallback flag to each subagent's `<task-result>` envelope and to a background delivery's `details`, so a parent can verify which model actually ran ([#16017](https://github.com/can1357/oh-my-pi/issues/16017), [#16135](https://github.com/can1357/oh-my-pi/pull/16135) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ### Fixed
 
 - Fixed `omp --resume` showing `(no messages)` for sessions whose first prompt follows a large memory recall, image-only message, or `/skill:` reply ([#16495](https://github.com/can1357/oh-my-pi/issues/16495))
