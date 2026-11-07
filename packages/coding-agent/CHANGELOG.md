@@ -5,6 +5,11 @@
 ### Breaking Changes
 
 - Rust SDK: `BashCommand` and `ReadyEvent` struct literals need `exclude_from_context: None` and `supports_bash_exclude_from_context: None` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+### Fixed
+
+- Fixed a subagent stopped by the session cost cap (`--max-cost` / `session.maxCost`) reporting "Subagent ended without a final message" or a prompt-dispatch failure; its task result now carries the cost-cap refusal ([#18362](https://github.com/can1357/oh-my-pi/issues/18362))
+
+## [18.18.0] - 2026-11-07
 
 ### Added
 
