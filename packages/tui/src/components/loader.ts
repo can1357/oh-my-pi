@@ -377,7 +377,11 @@ export class Loader extends Text {
 			// A static spinner still re-reads a dynamic message (countdown, elapsed) on its 1 s tick.
 			const animated = spinnerAnimated();
 			if (advanced || !animated) this.#syncText();
-			if (advanced || !animated || this.#ui?.synchronizedOutput === true) {
+			// A working row can use a static interrupt hint instead of a spinner.
+			// Its shimmer is then the only animation producer: waiting for a glyph
+			// change leaves it frozen until unrelated input requests a frame.
+			const messageOnlyAnimation = this.#frames.length === 1 && this.messageColorFn.animated === true;
+			if (advanced || !animated || messageOnlyAnimation || this.#ui?.synchronizedOutput === true) {
 				this.#requestPaint();
 			}
 
