@@ -19,6 +19,7 @@
 - Mistral Vibe browser sign-in shows subscription billing in the status line and advisor spend instead of pay-as-you-go pricing ([#18374](https://github.com/can1357/oh-my-pi/issues/18374))
 - Native OpenAI compaction no longer waits for a Hindsight memory recall it cannot use; fallback summaries still recall memory ([#18327](https://github.com/can1357/oh-my-pi/issues/18327))
 - An eval `wait()` on jobs owned by a worker returns finished jobs and consumes their results instead of reporting them as running or delivering them again ([#18363](https://github.com/can1357/oh-my-pi/issues/18363))
+- Fixed the edit tool failing to match a line written with fullwidth characters, the match error now names the differing codepoints instead of printing two lines that look identical, a whitespace-only patch keeps the file's own body when the width fold leaves a residual difference, and a line that holds nothing but whitespace keeps its whitespace once ([#16113](https://github.com/can1357/oh-my-pi/issues/16113), [#16466](https://github.com/can1357/oh-my-pi/pull/16466) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.0] - 2026-11-07
 
