@@ -12,6 +12,7 @@ export interface ExecutorBackendExecOptions {
 	sessionId: string;
 	sessionFile: string | undefined;
 	kernelOwnerId: string | undefined;
+	asyncJobId?: string;
 	signal?: AbortSignal;
 	session: ToolSession;
 	/**

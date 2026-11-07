@@ -383,6 +383,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #consumedJobResults = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #releasedForegroundJobs = new Set<string>();
+	readonly #forcedEvalFailures = new Map<string, (error: unknown) => void>();
 	#nextAutoId = 1;
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
@@ -511,9 +512,11 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 				});
 			}
 		};
+		const forcedFailure = type === "eval" ? Promise.withResolvers<never>() : undefined;
+		if (forcedFailure) this.#forcedEvalFailures.set(id, forcedFailure.reject);
 		job.promise = (async () => {
 			try {
-				const outcome = await run({
+				const runPromise = run({
 					jobId: id,
 					signal: abortController.signal,
 					reportProgress,
@@ -521,7 +524,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 						job.queued = false;
 					},
 				});
-				job.endTime = Date.now();
+				const outcome = await (forcedFailure ? Promise.race([runPromise, forcedFailure.promise]) : runPromise);
 				const text = typeof outcome === "string" ? outcome : outcome.text;
 				const structured = typeof outcome === "string" ? undefined : outcome.structured;
 				if (structured) job.structured = structured;
@@ -529,24 +532,29 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 					job.agentOutputPublished = outcome.agentOutputPublished;
 				}
 				if (job.status === "cancelled") {
+					job.endTime = Date.now();
 					job.resultText = text;
-				} else {
+				} else if (job.status === "running") {
+					job.endTime = Date.now();
 					job.status = "completed";
 					job.resultText = text;
 					this.#recordAgentReply(job);
 					this.#enqueueDelivery(id, text);
 				}
 			} catch (error) {
-				job.endTime = Date.now();
-				if (error instanceof AsyncJobError && error.structured) job.structured = error.structured;
-				const errorText = error instanceof Error ? error.message : String(error);
-				job.errorText = errorText;
-				if (job.status !== "cancelled") {
-					job.status = "failed";
-					this.#recordAgentReply(job);
-					this.#enqueueDelivery(id, errorText);
+				if (job.status !== "failed") {
+					job.endTime = Date.now();
+					if (error instanceof AsyncJobError && error.structured) job.structured = error.structured;
+					const errorText = error instanceof Error ? error.message : String(error);
+					job.errorText = errorText;
+					if (job.status !== "cancelled") {
+						job.status = "failed";
+						this.#recordAgentReply(job);
+						this.#enqueueDelivery(id, errorText);
+					}
 				}
 			}
+			this.#forcedEvalFailures.delete(id);
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
 			else this.#scheduleEviction(id);
 			for (const listener of this.#settleListeners) {
@@ -560,9 +568,32 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 				}
 			}
 		})();
-
 		this.#jobs.set(id, job);
 		return id;
+	}
+
+	failEvalJob(jobId: string, error: unknown, filter?: AsyncJobFilter): boolean {
+		const job = this.#jobs.get(jobId);
+		if (
+			!job ||
+			job.type !== "eval" ||
+			job.status !== "running" ||
+			(filter?.ownerId && job.ownerId !== filter.ownerId)
+		)
+			return false;
+		const rejectFailure = this.#forcedEvalFailures.get(jobId);
+		if (!rejectFailure) return false;
+
+		if (error instanceof AsyncJobError && error.structured) job.structured = error.structured;
+		const errorText = error instanceof Error ? error.message : String(error);
+		job.endTime = Date.now();
+		job.errorText = errorText;
+		job.status = "failed";
+		this.#recordAgentReply(job);
+		this.#enqueueDelivery(jobId, errorText);
+		rejectFailure(error);
+		job.abortController.abort(error);
+		return true;
 	}
 
 	/**
@@ -962,6 +993,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		// process exit, since dispose does not await these cleanups).
 		for (const job of this.#jobs.values()) this.#runRetainedArtifactsCleanup(job, { bypassGrace: true });
 		this.#jobs.clear();
+		this.#forcedEvalFailures.clear();
 		this.#deliveries.length = 0;
 		this.#notifyDeliveryQueueChanged();
 		this.#inFlightDeliveries.length = 0;

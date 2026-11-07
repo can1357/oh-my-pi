@@ -590,6 +590,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			runSignal: AbortSignal | undefined,
 			emitUpdate: ((text: string, details: EvalToolDetails) => void) | undefined,
 			foreground: () => boolean,
+			asyncJobId?: string,
 		): Promise<AgentToolResult<EvalToolDetails | undefined>> => {
 			// Re-check the retained namespace against the streamed planning snapshot:
 			// timers, background work, or concurrent session users may have changed
@@ -620,6 +621,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					sessionAbortController,
 					emitUpdate,
 					foreground,
+					asyncJobId,
 				}),
 			);
 			return session.trackEvalExecution?.(execution, sessionAbortController) ?? execution;
@@ -680,6 +682,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							else emitToolUpdate?.(text, details);
 						},
 						() => !backgrounded,
+						jobId,
 					);
 					const finalText =
 						(result.content.find(block => block.type === "text")?.text ?? "") +
@@ -824,13 +827,24 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		notice: string | undefined;
 		excludeWebP: boolean | undefined;
 		signal: AbortSignal | undefined;
+		asyncJobId?: string;
 		sessionAbortController: AbortController;
 		emitUpdate?: (text: string, details: EvalToolDetails) => void;
 		/** Whether the call still waits on the cells; `out://` replies are drawn only then. */
 		foreground: () => boolean;
 	}): Promise<AgentToolResult<EvalToolDetails | undefined>> {
-		const { session, cells, languages, notice, excludeWebP, signal, sessionAbortController, emitUpdate, foreground } =
-			options;
+		const {
+			session,
+			cells,
+			languages,
+			notice,
+			excludeWebP,
+			signal,
+			sessionAbortController,
+			emitUpdate,
+			foreground,
+			asyncJobId,
+		} = options;
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;
 		let outputDumped = false;
@@ -985,6 +999,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						sessionId,
 						sessionFile: sessionFile ?? undefined,
 						kernelOwnerId,
+						asyncJobId,
 						signal: combinedSignal,
 						session,
 						idleTimeoutMs,
