@@ -42,6 +42,9 @@ spyOn(fastembedRuntime, "loadFastembed").mockResolvedValue(fakeRuntime);
 spyOn(fastembedRuntime, "withEmbedSessionBudget").mockImplementation((_cache, work) => work());
 
 if (mode === "serve") {
+	// A real `mnemopi embed-serve` runs as the CLI entry point, which installs
+	// pi-utils' SIGINT/SIGTERM handlers; this fixture calls runCli directly.
+	utils.postmortem.installProcessHandlers();
 	try {
 		process.exit(await runCli(["embed-serve", ...args]));
 	} catch (error) {
