@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Running the package's test suite no longer leaves one `pi-codex-stream-*` directory per Codex streaming test behind in the system temp directory
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
