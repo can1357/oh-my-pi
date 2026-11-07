@@ -2383,3 +2383,58 @@ fn unrecorded_conditional_keywords_are_not_replaced_with_operand_positions() {
 		}
 	}
 }
+
+#[test]
+fn a_backquoted_body_reports_the_bytes_it_was_read_from() {
+	// The body of a backquote is parsed from a buffer the parser rebuilt:
+	// `\$` is stored as `$`, so every byte after it sits one place earlier
+	// in that buffer than in the source. A position derived as
+	// `start + <index in the buffer>` therefore names a neighbouring byte
+	// — here the blank before the quoted string, which a consumer styles
+	// as part of it.
+	let src = b"echo `echo \\$x \"quoted\"`\n";
+	let program = parse_all(src, Features::NONE).expect("the backquote parses");
+	for offsets in [Offsets::Bytes, Offsets::Utf16] {
+		let json = to_json(src, &program, JsonDialect::Shfmt, offsets);
+		let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
+		let inner = &shfmt["Stmts"][0]["Cmd"]["Args"][1]["Parts"][0]["Stmts"][0]["Cmd"]["Args"][2]
+			["Parts"][0];
+		assert_eq!(inner["Type"], "DblQuoted", "{offsets:?}: {json}");
+		assert_eq!(token_range(inner), Some((15, 23)), "{offsets:?}: {json}");
+	}
+}
+
+#[test]
+fn a_here_document_body_tells_alias_bytes_from_the_source_after_them() {
+	// The document opens inside an alias expansion and ends in the source:
+	// `${x:-one}` has no bytes in the source and `${y:-two}` has its own.
+	// One flag for the whole body cannot hold both answers, so the
+	// source-backed expansion collapsed onto the aliased word.
+	let text = b"cat <<EOF\n${x:-one}\n".as_slice();
+	let src = b"check\n${y:-two}\nEOF\n".as_slice();
+	let sample = Sample { src, text, zsh: false };
+	let program = parse_sample(&sample, true);
+	for offsets in [Offsets::Bytes, Offsets::Utf16] {
+		let json = to_json(src, &program, JsonDialect::Shfmt, offsets);
+		let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
+		let parts = shfmt["Stmts"][0]["Redirs"][0]["Hdoc"]["Parts"]
+			.as_array()
+			.unwrap_or_else(|| panic!("the body has parts: {json}"));
+		let named = |name: &str| {
+			parts
+				.iter()
+				.find(|p| p["Param"]["Value"] == name)
+				.unwrap_or_else(|| panic!("${{{name}}} is exported: {json}"))
+		};
+		assert_eq!(
+			token_range(named("y")),
+			Some((6, 15)),
+			"a source-backed expansion after alias text keeps its own range: {offsets:?}: {json}"
+		);
+		assert_eq!(
+			token_range(named("x")),
+			Some((5, 5)),
+			"an alias-owned expansion has no bytes in the source: {offsets:?}: {json}"
+		);
+	}
+}
