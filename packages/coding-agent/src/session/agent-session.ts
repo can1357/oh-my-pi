@@ -8665,7 +8665,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
 				throw new AgentBusyError();
 			}
-			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
+			// The early streaming branch above already treats the queue's answer as the
+			// prompt's outcome; this one is the same shape and must not be the place
+			// that reports a refused message as submitted. Today the prepared content
+			// leaves no await before the queue's generation check, so it cannot refuse.
+			const queued = await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
 				attribution: promptAttribution,
 				prependMessages: prependNotices,
@@ -8678,7 +8682,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				onPromptAdmitted: options?.onPromptAdmitted,
 				onPromptQueued: options?.onPromptQueued,
 			});
-			outcome.sessionClaimed = true;
+			outcome.sessionClaimed = queued;
+			if (!queued) {
+				if (!options?.synthetic) {
+					this.#promptDropped?.({ text: typedText, images: options?.images, tag: options?.tag });
+				}
+				if (options?.throwOnDrop) throw new PromptDroppedError();
+			}
 			return true;
 		}
 
@@ -8866,14 +8876,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				throw new AgentBusyError();
 			}
 
-			await this.#queueCustomMessage(message, streamingBehavior, {
+			// A queue that discards the record (the session changed while its images were
+			// normalized) admitted nothing; reporting `true` here would tell
+			// sendUserMessage the skill was delivered.
+			const admitted = await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
 				prependMessages: queuedNotices,
 				onPromptAdmitted: options?.onPromptAdmitted,
 				onPromptQueued: options?.onPromptQueued,
 			});
-			outcome.sessionClaimed = true;
-			return true;
+			outcome.sessionClaimed = admitted;
+			return admitted;
 		}
 
 		const customMessage: CustomMessage<T> = {
@@ -8915,15 +8928,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
 				throw new AgentBusyError();
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, {
+			// Same contract as the early branch: the queue's answer is the caller's.
+			// Today this call cannot be refused — the prepared content means no await
+			// precedes the queue's generation check, so the generation it captures is
+			// always the current one — but the branch must not be the one place that
+			// turns a refusal back into a submitted prompt if that ever changes.
+			const admitted = await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
 				preprocessed: { content: preparedMessage.content, descriptionNotice },
 				prependMessages: queuedNotices,
 				onPromptAdmitted: options?.onPromptAdmitted,
 				onPromptQueued: options?.onPromptQueued,
 			});
-			outcome.sessionClaimed = true;
-			return true;
+			outcome.sessionClaimed = admitted;
+			return admitted;
 		}
 		outcome.sessionClaimed = await this.#promptWithMessage(preparedMessage, textContent, {
 			...options,
@@ -10351,7 +10369,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			/** Called synchronously with the messages pushed onto the queue. See {@link PromptOptions.onPromptQueued}. */
 			onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 		},
-	): Promise<void> {
+	): Promise<boolean> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
 		const details =
@@ -10385,7 +10403,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			? preprocessed.descriptionNotice
 			: await this.#buildSkillImageDescriptionNotice(normalizedAppMessage);
 		if (deliverAs === "aside") {
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
+			// The session this record was meant for is gone; dropping it here is what the
+			// caller reports, so a `sendUserMessage` answers `dropped` instead of claiming
+			// the skill was delivered.
+			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			// Non-interrupting: rides the same step-boundary aside poll as
 			// sendCustomMessage's streaming aside branch — not an agent-core queue
 			// entry, so no drain-retry latch and no idle-queue drain scheduling.
@@ -10400,7 +10421,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// left to drain it. Resuming here is a no-op while streaming and wakes/folds
 			// correctly once idle, matching #queueUserMessage's aside branch.
 			this.#resumeStrandedIrcAsides();
-			return;
+			return true;
 		}
 		this.#allowQueuedMessageDrainRetry();
 		// Keyword notices and their user message must enter the queue in one synchronous phase.
@@ -10416,6 +10437,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		onPromptQueued?.([...prependMessages, ...(descriptionNotice ? [descriptionNotice] : []), normalizedAppMessage]);
 		onPromptAdmitted?.();
 		this.#scheduleIdleQueueDrain();
+		return true;
 	}
 
 	/**
