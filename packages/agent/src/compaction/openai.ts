@@ -66,6 +66,8 @@ import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai
 import { prepareBedrockCompactionRequest } from "./bedrock";
 import { isOpenAiRemoteCompactionApi, remoteCompactionPolicyModel } from "./compaction-v2-streaming";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
+import { RemoteCompactionPayloadError } from "./errors";
+import { parseChatCompletionsUsage, parseResponsesUsage, type RemoteCompactionUsage } from "./remote-usage";
 
 export * from "./compaction-v2-streaming";
 
@@ -372,7 +374,15 @@ export interface OpenAiRemoteCompactionRequest {
 	include?: string[];
 }
 
-export interface OpenAiRemoteCompactionResponse extends OpenAiRemoteCompactionPreserveData {}
+export interface OpenAiRemoteCompactionResponse extends OpenAiRemoteCompactionPreserveData {
+	/**
+	 * What the provider billed for this request.
+	 *
+	 * The endpoint reports the same Responses `usage` object a normal turn
+	 * returns; without it the session ledger under-reports the compaction.
+	 */
+	usage?: RemoteCompactionUsage;
+}
 
 export interface RemoteCompactionRequest {
 	systemPrompt: string;
@@ -383,6 +393,13 @@ export interface RemoteCompactionRequest {
 export interface RemoteCompactionResponse {
 	summary: string;
 	shortSummary?: string;
+	/**
+	 * What the provider billed for this request.
+	 *
+	 * Only the OpenAI-compatible chat-completions shape reports it; the
+	 * purpose-built omp summarizer replies with the summary alone.
+	 */
+	usage?: RemoteCompactionUsage;
 }
 
 // ============================================================================
@@ -1020,8 +1037,15 @@ export async function requestOpenAiRemoteCompaction(
 		);
 	}
 
-	const data = (await response.json()) as { output?: unknown[] } | undefined;
-	const rawOutput = data?.output ?? [];
+	const data = (await response.json()) as { output?: unknown[]; usage?: unknown } | undefined;
+	// The compact endpoint bills the request like any other Responses call and
+	// reports the same `usage` object. The parser used to drop it, so the
+	// session ledger never saw what this request cost.
+	const usage = parseResponsesUsage(data?.usage, model);
+	// `output` is not guaranteed to be an array: a malformed response carries an
+	// object, and the unchecked `.filter` below would throw a bare TypeError
+	// that loses the usage the provider already billed.
+	const rawOutput = Array.isArray(data?.output) ? data.output : [];
 	const replacementHistory = rawOutput.filter(
 		(item): item is Record<string, unknown> =>
 			!!item && typeof item === "object" && shouldKeepOpenAiCompactOutputItem(item as Record<string, unknown>),
@@ -1043,9 +1067,9 @@ export async function requestOpenAiRemoteCompaction(
 			outputTypes,
 			replacementHistoryLength: replacementHistory.length,
 		});
-		throw new Error("Remote compaction response missing compaction item");
+		throw new RemoteCompactionPayloadError("Remote compaction response missing compaction item", usage);
 	}
-	return { provider: model.provider, replacementHistory, compactionItem };
+	return { provider: model.provider, replacementHistory, compactionItem, ...(usage ? { usage } : {}) };
 }
 
 /**
@@ -1125,8 +1149,13 @@ export async function requestRemoteCompaction(
 					content?: string | Array<{ type?: string; text?: string }> | null;
 				};
 			}>;
+			usage?: unknown;
 		};
 		const data = (await response.json()) as ChatCompletionsResponse | undefined;
+		// A chat-completions server reports the standard `usage` object. The
+		// parser used to drop it, so the session ledger never saw what this
+		// soft-compaction request cost.
+		const usage = opts?.model ? parseChatCompletionsUsage(data?.usage, opts.model) : undefined;
 		const choice = data?.choices?.[0]?.message?.content;
 		let summary: string | undefined;
 		if (typeof choice === "string") {
@@ -1138,15 +1167,22 @@ export async function requestRemoteCompaction(
 				.join("");
 		}
 		if (typeof summary !== "string" || summary.length === 0) {
-			throw new Error("Remote compaction response missing choices[0].message.content");
+			throw new RemoteCompactionPayloadError("Remote compaction response missing choices[0].message.content", usage);
 		}
-		return { summary };
+		return { summary, ...(usage ? { usage } : {}) };
 	}
 
-	const data = (await response.json()) as RemoteCompactionResponse | undefined;
+	const data = (await response.json()) as { summary?: unknown; shortSummary?: unknown; usage?: unknown } | undefined;
 	if (!data || typeof data.summary !== "string") {
 		throw new Error("Remote compaction response missing summary");
 	}
-
-	return data;
+	// The generic summarizer protocol has no usage field. A server that sends
+	// one anyway is not speaking it, so normalize it or drop it — never pass an
+	// unnormalized object on to the ledger.
+	const usage = opts?.model ? parseChatCompletionsUsage(data.usage, opts.model) : undefined;
+	return {
+		summary: data.summary,
+		...(typeof data.shortSummary === "string" ? { shortSummary: data.shortSummary } : {}),
+		...(usage ? { usage } : {}),
+	};
 }
