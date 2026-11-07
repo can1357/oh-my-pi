@@ -18,18 +18,29 @@ import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
  * other host falls back to {@link CODEX_BASE_URL}.
  */
 export function normalizeCodexBaseUrl(baseUrl?: string): string {
+	const origin = chatGptOrigin(baseUrl);
+	// wham/usage always lives at `${origin}/backend-api/...` on the canonical
+	// ChatGPT origin, so ignore any extra path (e.g. `/backend-api/codex/responses`
+	// from a streaming baseUrl) — otherwise we'd build `.../codex/responses/wham/usage`.
+	return origin ? `${origin}/backend-api` : CODEX_BASE_URL;
+}
+
+/** Whether `baseUrl` is on the canonical ChatGPT origin over HTTPS, the only host a Codex bearer may reach. */
+export function isChatGptBaseUrl(baseUrl: string): boolean {
+	return chatGptOrigin(baseUrl) !== undefined;
+}
+
+function chatGptOrigin(baseUrl?: string): string | undefined {
 	const trimmed = baseUrl?.trim().replace(/\/+$/, "");
-	if (!trimmed) return CODEX_BASE_URL;
+	if (!trimmed) return undefined;
 	let parsed: URL;
 	try {
 		parsed = new URL(trimmed);
 	} catch {
-		return CODEX_BASE_URL;
+		return undefined;
 	}
 	const host = parsed.host.toLowerCase();
-	if (host !== "chatgpt.com" && host !== "chat.openai.com") return CODEX_BASE_URL;
-	// wham/usage always lives at `${origin}/backend-api/...` on the canonical
-	// ChatGPT origin, so ignore any extra path (e.g. `/backend-api/codex/responses`
-	// from a streaming baseUrl) — otherwise we'd build `.../codex/responses/wham/usage`.
-	return `${parsed.origin}/backend-api`;
+	// The Codex bearer must never travel over plain HTTP.
+	if (parsed.protocol !== "https:" || (host !== "chatgpt.com" && host !== "chat.openai.com")) return undefined;
+	return parsed.origin;
 }

@@ -1,6 +1,7 @@
 export * from "./clients";
 export * from "./dispatch";
 export * from "./http";
+export * from "./routable";
 export * from "./session-state";
 export * from "./stdio";
 export * from "./server";
