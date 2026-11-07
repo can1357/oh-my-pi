@@ -569,6 +569,10 @@ pub enum StdioSpec {
 	Inherit(OsHandle),
 	/// `/dev/null`.
 	Null,
+	/// Closed in the process (the script closed it: `cmd 2>&-`), as bash's
+	/// child inherits it. A host that cannot express a closed standard
+	/// stream gives the null device.
+	Closed,
 	/// Engine fd object without an OS handle (in-memory pipe, VFS file): the
 	/// host creates an OS pipe and pumps between it and this object.
 	Pipe(FdRef),
