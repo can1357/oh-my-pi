@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the SQLite auth credential store leaving its database handle open on Windows after `close()`, which blocked temporary-directory cleanup with `EBUSY`; closing the store now finalizes outstanding statements ([#14828](https://github.com/can1357/oh-my-pi/pull/14828) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
