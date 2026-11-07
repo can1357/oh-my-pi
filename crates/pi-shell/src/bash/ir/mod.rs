@@ -87,7 +87,8 @@ use serde::{Deserialize, Serialize};
 use self::lower::lower;
 pub(crate) use self::lower::{
 	ANON, abort_unit, ansi_c, ansi_c_with, function_from_parsed, function_from_source,
-	function_from_source_at, lower_compound, lower_deferred, lower_text, materialize, syntax_unit,
+	function_from_source_at, lower_compound, lower_deferred, lower_deferred_hashed, lower_text,
+	materialize, replay_hasher, replay_id, syntax_unit,
 };
 use crate::bash::{
 	event::{EventKind, EventMask, NodeKind, RedirKind},
@@ -294,6 +295,30 @@ pub struct Unit {
 	pub funcs:               Vec<FuncIr>,
 }
 
+/// The hash of a unit's source context (see [`Unit::source_hasher`]).
+pub(crate) fn source_hasher(
+	mode: ModeId,
+	features: u32,
+	source: &[u8],
+	aliases: &[(BString, BString)],
+	line: u32,
+) -> blake3::Hasher {
+	let mut h = blake3::Hasher::new();
+	h.update(&IR_VERSION.to_le_bytes());
+	h.update(<&'static str>::from(mode).as_bytes());
+	h.update(&features.to_le_bytes());
+	h.update(&(source.len() as u64).to_le_bytes());
+	h.update(source);
+	for (name, value) in aliases {
+		h.update(&(name.len() as u64).to_le_bytes());
+		h.update(name);
+		h.update(&(value.len() as u64).to_le_bytes());
+		h.update(value);
+	}
+	h.update(&line.to_le_bytes());
+	h
+}
+
 impl Unit {
 	/// An empty unit for `mode`/`features` over `source`.
 	pub(crate) fn empty(source: &[u8], mode: ModeId, features: u32) -> Self {
@@ -331,20 +356,7 @@ impl Unit {
 
 	/// Hash the source context shared by a command and its function bodies.
 	pub(crate) fn source_hasher(&self) -> blake3::Hasher {
-		let mut h = blake3::Hasher::new();
-		h.update(&IR_VERSION.to_le_bytes());
-		h.update(<&'static str>::from(self.mode).as_bytes());
-		h.update(&self.features.to_le_bytes());
-		h.update(&(self.source.len() as u64).to_le_bytes());
-		h.update(&self.source);
-		for (name, value) in &self.aliases {
-			h.update(&(name.len() as u64).to_le_bytes());
-			h.update(name);
-			h.update(&(value.len() as u64).to_le_bytes());
-			h.update(value);
-		}
-		h.update(&self.line.to_le_bytes());
-		h
+		source_hasher(self.mode, self.features, &self.source, &self.aliases, self.line)
 	}
 
 	/// Seal a source-replayable command from lowering without serializing its
@@ -358,6 +370,17 @@ impl Unit {
 			h.update(&root.to_le_bytes());
 		}
 		self.id = UnitId(*h.finalize().as_bytes());
+	}
+
+	/// [`Unit::seal_source_from`] for a top-level command whose id the
+	/// caller already derived from its source context
+	/// ([`lower::replay_id`]): the digest is not computed twice.
+	pub(crate) fn seal_source_as(&mut self, id: UnitId) {
+		for word in &mut self.words {
+			word.classify();
+		}
+		debug_assert!(self.root.is_none(), "a top-level command has no root");
+		self.id = id;
 	}
 
 	/// Seal using the hash of this unit's source context.
