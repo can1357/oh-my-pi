@@ -234,7 +234,15 @@ export const grepToolRenderer = {
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
-		const meta = [formatCount("match", matchCount), formatCount("file", fileCount)];
+		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";
+		const allLines = textContent.split("\n");
+		// Classify the whole output so nested directory headers resolve across blank-line
+		// groups. Display paths are cwd-relative (`searchPath` for results that predate
+		// `cwd`); a single-file search's headerless lines belong to the searched file.
+		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
+		const singleFileScope = fileCount === 1 && contexts.every(ctx => ctx.kind === "content");
+		const meta = [formatCount("match", matchCount)];
+		if (!singleFileScope) meta.push(formatCount("file", fileCount));
 		if (truncated) meta.push(uiTheme.fg("warning", "truncated"));
 		const header = renderStatusLine(
 			{
@@ -246,13 +254,6 @@ export const grepToolRenderer = {
 			},
 			uiTheme,
 		);
-
-		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";
-		const allLines = textContent.split("\n");
-		// Classify the whole output so nested directory headers resolve across blank-line
-		// groups. Display paths are cwd-relative (`searchPath` for results that predate
-		// `cwd`); a single-file search's headerless lines belong to the searched file.
-		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
 		const styleCodeFrame = createCodeFrameStyler(allLines, contexts, "toolOutput", uiTheme);
 		const styleLine = createGroupedRowStyler(allLines, contexts, uiTheme, {
 			linkTarget: groupedLinkTargets(contexts, textContent, details, rawDetails),
@@ -329,9 +330,13 @@ export const grepToolRenderer = {
 		const truncated = Boolean(
 			details?.truncated || details?.meta?.truncation || details?.meta?.limits?.columnTruncated,
 		);
+		const lines = textContent.split("\n");
 		const fileCount = details?.fileCount ?? 0;
+		const singleFileScope = fileCount === 1 && lines.every(line => !line.startsWith("#"));
 		const counts = hasDetailedData
-			? `${formatCount("match", matchCount)} · ${formatCount("file", fileCount)}`
+			? singleFileScope
+				? formatCount("match", matchCount)
+				: `${formatCount("match", matchCount)} · ${formatCount("file", fileCount)}`
 			: undefined;
 		const head = grepNativeHead(args, compact([scope, counts]));
 		const hiddenFiles = options.expanded ? 0 : Math.max(0, fileCount - NATIVE_COLLAPSED_FILES);
@@ -343,7 +348,7 @@ export const grepToolRenderer = {
 			tool: truncated ? { ...head, badges: [{ text: "truncated", tone: "warning" }] } : head,
 			inline: true,
 			body: compact<NativeChild>([
-				...describeGroupedOutput(textContent.split("\n"), {
+				...describeGroupedOutput(lines, {
 					maxFiles: options.expanded ? undefined : NATIVE_COLLAPSED_FILES,
 					file: details?.files?.length === 1 ? details.files[0] : undefined,
 				}),

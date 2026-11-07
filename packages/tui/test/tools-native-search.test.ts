@@ -127,11 +127,18 @@ describe("grep native view", () => {
 		const view = grepToolRenderer.describeResult(
 			{
 				content: [{ type: "text", text: single }],
-				details: { matchCount: 2, fileCount: 1, files: ["src/a.ts"], displayContent: single },
+				details: {
+					matchCount: 2,
+					fileCount: 1,
+					scopePath: "src/a.ts",
+					files: ["src/a.ts"],
+					displayContent: single,
+				},
 			},
 			expanded,
 			{ pattern: "hit" },
 		);
+		expect((view.tool?.meta ?? []).map(plain)).toEqual(["in src/a.ts", "2 matches"]);
 		const body = (view.body ?? []).filter(isNode);
 		expect(body.map(role)).toEqual(["omp.tool.search.file"]);
 		const kinds = (body[0]!.c ?? []).filter(isNode).map(n => n.k);

@@ -84,6 +84,27 @@ describe("grepToolRenderer", () => {
 				.render(120)[0]!,
 		);
 		expect(call).toContain("Grep: needle in lib case:insensitive");
+		// A single-file search prints no `#` headers and omits the redundant file count.
+		const singleHeader = sanitizeText(
+			grepToolRenderer
+				.renderResult(
+					{
+						content: [{ type: "text", text: "" }],
+						details: {
+							matchCount: 2,
+							fileCount: 1,
+							scopePath: "src/a.ts",
+							displayContent: "*1│needle\n*5│needle",
+						},
+					},
+					{ expanded: false, isPartial: false },
+					uiTheme,
+					{ pattern: "needle" },
+				)
+				.render(120)[0]!,
+		);
+		expect(singleHeader).toContain("Grep: needle in src/a.ts 2 matches");
+		expect(singleHeader).not.toContain("1 file");
 	});
 
 	it("colors partial regex syntax without treating escaped punctuation as an operator", async () => {
