@@ -703,24 +703,30 @@ fn nesting_is_a_syntax_error_past_the_limit_and_fits_a_default_stack_at_it() {
 		},
 	};
 	let zsh = Features::ZSH | Features::ZSH_SHORT_LOOPS | Features::ZSH_INTERACTIVE_COMMENTS;
-	// (prefix, open, inner, close, suffix, features, levels per repeat):
-	// `open`/`close` repeat once per level; a bash substitution is two.
-	let shapes: [(&str, &str, &str, &str, &str, Features, u32); 11] = [
-		("", "( ", ":", " )", "", Features::NONE, 1),
-		("", "{ ", ":", "; }", "", Features::NONE, 1),
-		("", "if :; then ", ":", "; fi", "", Features::NONE, 1),
-		("", "echo $(", "echo x", ")", "", Features::NONE, 2),
-		("", "echo ${x:-", "y", "}", "", Features::NONE, 1),
-		("[[ ", "( ", "a", " )", " ]]", Features::NONE, 1),
-		("[[ ", "! ", "a", "", " ]]", Features::NONE, 1),
-		("[[ ", "a || ", "a", "", " ]]", Features::NONE, 1),
-		("", "( ", ":", " )", "", zsh, 1),
-		("", "echo $(", "echo x", ")", "", zsh, 1),
-		("[[ ", "( ", "a", " )", " ]]", zsh, 1),
+	// (prefix, open, inner, close, suffix, features, levels per repeat,
+	// levels of the prefix): `open`/`close` repeat once per level; a bash
+	// substitution is two; text re-parsed as a list (a backquote, a `$((`
+	// that is not arithmetic) is one more.
+	type Shape =
+		(&'static str, &'static str, &'static str, &'static str, &'static str, Features, u32, u32);
+	let shapes: [Shape; 13] = [
+		("", "( ", ":", " )", "", Features::NONE, 1, 0),
+		("", "{ ", ":", "; }", "", Features::NONE, 1, 0),
+		("", "if :; then ", ":", "; fi", "", Features::NONE, 1, 0),
+		("", "echo $(", "echo x", ")", "", Features::NONE, 2, 0),
+		("", "echo ${x:-", "y", "}", "", Features::NONE, 1, 0),
+		("[[ ", "( ", "a", " )", " ]]", Features::NONE, 1, 0),
+		("[[ ", "! ", "a", "", " ]]", Features::NONE, 1, 0),
+		("[[ ", "a || ", "a", "", " ]]", Features::NONE, 1, 0),
+		("echo `", "( ", ":", " )", "`", Features::NONE, 1, 1),
+		("echo $(", "( ", "echo x", " )", " )", Features::NONE, 1, 1),
+		("", "( ", ":", " )", "", zsh, 1, 0),
+		("", "echo $(", "echo x", ")", "", zsh, 1, 0),
+		("[[ ", "( ", "a", " )", " ]]", zsh, 1, 0),
 	];
 	let check = move || {
-		for (pre, open, inner, close, suf, feat, cost) in shapes {
-			let n = (MAX_NESTING / cost) as usize;
+		for (pre, open, inner, close, suf, feat, cost, extra) in shapes {
+			let n = ((MAX_NESTING - extra) / cost) as usize;
 			let src = |k: usize| format!("{pre}{}{inner}{}{suf}\n", open.repeat(k), close.repeat(k));
 			let at = src(n);
 			let prog = parse_all(at.as_bytes(), feat).unwrap_or_else(|e| {
@@ -747,14 +753,16 @@ fn nesting_is_a_syntax_error_past_the_limit_and_fits_a_default_stack_at_it() {
 				let (trace, _) = run_native_shell(&at);
 				present(&trace, &Options::default());
 			}
-			let past = parse_all(src(n + 1).as_bytes(), feat).expect_err(open);
+			let past = parse_all(src(n + 1).as_bytes(), feat)
+				.map(|_| ())
+				.expect_err(&format!("{pre}{open} {feat:?} nested {} deep parsed", n + 1));
 			// zsh's lexer reports a substitution it cannot parse as `parse
 			// error near …`, whatever the reason.
 			let msg = past.bash_msg();
 			assert!(
 				msg.ends_with(b"maximum nesting level exceeded")
 					|| (feat.contains(Features::ZSH) && open == "echo $("),
-				"{open:?} nested {} deep: {}",
+				"{pre}{open:?} nested {} deep: {}",
 				n + 1,
 				String::from_utf8_lossy(&msg)
 			);
