@@ -12,11 +12,7 @@ import type { NativeNode } from "../native/node";
 import { theme } from "../theme/theme";
 import type { ThemeColor } from "../theme";
 import { truncateToWidth, visibleWidth } from "../utils";
-import {
-	type ContextViewCategory,
-	type ContextViewData,
-	contextCategoryDescriptor,
-} from "../chrome/context-view-model";
+import type { ContextViewCategory, ContextViewData } from "../chrome/context-view-model";
 import { safeLine, safeText } from "./context-viewer-format";
 
 /** The map is hidden below this body width. */
@@ -92,11 +88,6 @@ export function allocateUsage(
 	return allocate(categories, usage) ? allocation : undefined;
 }
 
-/** Overview row label for a category: its Overview-specific label when the weight differs from its content. */
-export function overviewLabel(category: ContextViewCategory): string {
-	return contextCategoryDescriptor(category.id).overviewLabel ?? category.label;
-}
-
 function formatShare(tokens: number, window: number): string {
 	if (window <= 0) return "—";
 	const percent = (tokens / window) * 100;
@@ -110,14 +101,13 @@ export function buildOverviewRows(
 ): OverviewRow[] {
 	const rows: Omit<OverviewRow, "tokenColumn" | "shareColumn">[] = [];
 	for (const category of data.categories) {
-		const openable = contextCategoryDescriptor(category.id).openable !== false;
 		rows.push({
 			key: category.id,
 			id: category.id,
-			label: overviewLabel(category),
+			label: category.label,
 			tokens: allocation?.get(category),
 			// Empty categories have nothing to open.
-			category: openable && category.entries.length > 0 ? category : undefined,
+			category: category.entries.length > 0 ? category : undefined,
 		});
 		for (const child of category.children ?? [])
 			rows.push({
@@ -125,7 +115,7 @@ export function buildOverviewRows(
 				id: category.id,
 				label: child.label,
 				tokens: allocation?.get(child),
-				category: openable ? child : undefined,
+				category: child,
 				child: true,
 			});
 	}

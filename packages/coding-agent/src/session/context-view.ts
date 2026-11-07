@@ -8,9 +8,11 @@ import {
 	type ContextViewCategory,
 	type ContextViewData,
 	type ContextViewEntry,
+	type ContextViewSourceMarker,
 } from "@oh-my-pi/pi-tui/chrome/context-view-model";
 import { type ContextBreakdown, toolSchemaFragments } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
+import type { SystemPromptSource, SystemPromptSources } from "../system-prompt";
 import type { AgentSession } from "./agent-session";
 import { computeSessionContextBreakdown } from "./context-usage-runtime";
 import { type ContextViewMessage, convertMessagesForContextView } from "./messages";
@@ -107,21 +109,128 @@ function appendToolOutput(state: SnapshotBuildState, toolName: string, entry: Co
 	appendEntry(state, "tool-output", entry);
 }
 
-function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildState, skillListingTokens: number): void {
-	for (const [index, block] of session.systemPrompt.entries()) {
+/** A located source fragment inside one effective system block. */
+interface SourceClaim {
+	readonly start: number;
+	readonly end: number;
+	readonly source: SystemPromptSource;
+	/** Repeated sources only reserve their locations; they are never attributed. */
+	readonly ambiguous: boolean;
+}
+
+function countBlocks(blocks: readonly string[]): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const block of blocks) counts.set(block, (counts.get(block) ?? 0) + 1);
+	return counts;
+}
+
+/**
+ * Claims each source fragment in the effective prompt. A source is claimed only when it occurs once
+ * in the built prompt, in a block that is unchanged at its original index and unique in the
+ * effective prompt, and overlaps no other source. A repeated fragment reserves every occurrence.
+ * `complete` is false when a source the effective prompt may still hold stays unattributed.
+ */
+function claimPromptSources(
+	effective: readonly string[],
+	metadata: SystemPromptSources,
+): { claims: Map<number, SourceClaim[]>; complete: boolean } {
+	let complete = true;
+	const effectiveCounts = countBlocks(effective);
+	const candidates = new Map<number, SourceClaim[]>();
+	for (const source of metadata.sources) {
+		const { fragment } = source;
+		const located: { index: number; start: number }[] = [];
+		for (const [index, block] of metadata.blocks.entries())
+			for (let start = block.indexOf(fragment); start >= 0; start = block.indexOf(fragment, start + 1))
+				located.push({ index, start });
+		const ambiguous = located.length > 1;
+		let unattributed = located.length === 0 || ambiguous;
+		let remains = effective.some(text => text.includes(fragment));
+		for (const { index, start } of located) {
+			const block = metadata.blocks[index]!;
+			// An in-place edit keeps the block text around the fragment; a replacement prompt drops it.
+			const before = block.slice(0, start);
+			const after = block.slice(start + fragment.length);
+			remains ||= effective.some(text => text.includes(before) && text.includes(after));
+			// Never remap moved or changed blocks, even when the fragment text still appears.
+			if (effective[index] !== block || effectiveCounts.get(block) !== 1) {
+				unattributed = true;
+				continue;
+			}
+			const ranges = candidates.get(index) ?? [];
+			ranges.push({ start, end: start + fragment.length, source, ambiguous });
+			candidates.set(index, ranges);
+		}
+		// Absent from the built prompt: the template omitted it, or whole-prompt formatting (an unclosed
+		// fence) changed it. Otherwise only a source the effective prompt may still hold is left behind.
+		if (unattributed && (located.length === 0 || remains)) complete = false;
+	}
+	const claims = new Map<number, SourceClaim[]>();
+	for (const [index, ranges] of candidates) {
+		// Validate the whole block before claiming: every participant in an overlap stays unattributed.
+		const accepted = ranges.filter(range => {
+			const overlaps = ranges.some(other => other !== range && range.start < other.end && range.end > other.start);
+			if (overlaps) complete = false;
+			return !range.ambiguous && !overlaps;
+		});
+		claims.set(
+			index,
+			accepted.sort((a, b) => a.start - b.start),
+		);
+	}
+	return { claims, complete };
+}
+
+/**
+ * System blocks with claimed instruction-file and skill fragments moved to their own categories.
+ * Each fragment leaves a colored marker in its block; markers are display-only and carry no tokens.
+ * Returns false when some source could not be attributed.
+ */
+function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildState): boolean {
+	const tokenizer = session.agent.tokenizer;
+	const effective = session.systemPrompt;
+	const metadata = session.systemPromptSources;
+	const { claims, complete } = metadata
+		? claimPromptSources(effective, metadata)
+		: { claims: new Map<number, SourceClaim[]>(), complete: true };
+	for (const [index, block] of effective.entries()) {
+		const blockClaims = claims.get(index) ?? [];
+		const remaining: string[] = [];
+		const display: string[] = [];
+		const sourceMarkers: ContextViewSourceMarker[] = [];
+		let displayLength = 0;
+		let cursor = 0;
+		for (const { start, end, source } of blockClaims) {
+			const before = block.slice(cursor, start);
+			const category = state.categoriesById.get(source.kind)!;
+			const marker = `[Shown in ${category.label}: ${source.label}]`;
+			remaining.push(before);
+			display.push(before, marker);
+			displayLength += before.length;
+			sourceMarkers.push({ start: displayLength, end: displayLength + marker.length, category: source.kind });
+			displayLength += marker.length;
+			cursor = end;
+			appendEntry(state, source.kind, {
+				id: `${source.kind}/${source.id}`,
+				label: source.label,
+				path: source.path,
+				text: source.fragment,
+				tokens: tokenizer.countTokens(source.fragment),
+			});
+		}
+		const tail = block.slice(cursor);
+		remaining.push(tail);
+		display.push(tail);
+		const remainingText = remaining.join("");
 		appendEntry(state, "system-prompt", {
 			id: `system-prompt/${index}`,
 			label: `System Block ${index + 1}`,
-			text: block,
-			tokens: session.agent.tokenizer.countTokens(block),
+			text: display.join(""),
+			tokens: tokenizer.countTokens(remainingText),
+			sourceMarkers: sourceMarkers.length > 0 ? sourceMarkers : undefined,
 		});
 	}
-	const skillsCategory = state.categoriesById.get("skills")!;
-	skillsCategory.tokens = skillListingTokens;
-	const systemPromptCategory = state.categoriesById.get("system-prompt")!;
-	// Skills estimates the prompt's skill listing, not full skill files or additional context.
-	// Subtract it only from the category weight; entries retain complete blocks and unscaled estimates.
-	systemPromptCategory.tokens = Math.max(0, systemPromptCategory.tokens - skillListingTokens);
+	return complete;
 }
 
 function appendToolDefinitionEntries(session: AgentSession, state: SnapshotBuildState): void {
@@ -383,10 +492,11 @@ export function buildSessionContextView(
 		serverToolNamesByCallId: new Map(),
 	};
 
-	appendSystemPromptEntries(session, state, breakdown.categories.find(category => category.id === "skills")!.tokens);
+	const notices: string[] = [];
+	if (!appendSystemPromptEntries(session, state)) notices.push("Some prompt sources could not be attributed.");
 	appendToolDefinitionEntries(session, state);
 	appendMessageEntries(session, state);
 	finalizeToolOutputGroups(state);
 
-	return { breakdown, categories };
+	return { breakdown, categories, notices };
 }
