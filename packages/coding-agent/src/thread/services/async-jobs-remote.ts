@@ -377,6 +377,14 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		return this.#remote.callSync("isDeliverySuppressed", jobId);
 	}
 
+	isDeliveryPending(jobId: string): boolean {
+		return this.#remote.callSync("isDeliveryPending", jobId);
+	}
+
+	isDeliverySuperseded(jobId: string): boolean {
+		return this.#remote.callSync("isDeliverySuperseded", jobId);
+	}
+
 	/** One main `whenSettled` call per job id while it is pending; resolves (never rejects) on settle or link loss. */
 	whenSettled(jobId: string): Promise<void> {
 		let settled = this.#settled.get(jobId);
