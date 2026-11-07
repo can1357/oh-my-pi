@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A page calling `window.print()` in a Chromium tab no longer freezes behind the print preview and times out the browser call: omp holds it, the page carries on as after a finished print, and the call says so (pointing at `tab.pdf()`) ([#15508](https://github.com/can1357/oh-my-pi/pull/15508) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.0] - 2026-11-07
 
 ### Added

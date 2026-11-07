@@ -72,6 +72,7 @@ import {
 	readPageViewport,
 } from "./launch";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "./readable";
+import { PrintHold } from "./print-hold";
 import { assertTabPressArgs } from "./tab-arguments";
 import {
 	type BrowserCookie,
@@ -240,6 +241,7 @@ import {
 	type Observation,
 	type ObservationEntry,
 	ownsPage,
+	printHoldScope,
 	type ReadyInfo,
 	type RunErrorPayload,
 	type ScreenshotResult,
@@ -1546,6 +1548,7 @@ export class WorkerCore {
 	#webmcp?: WebMcpController;
 	/** Session holding `ignore_https_errors`; Chromium drops the override once it detaches. */
 	#certificateOverride?: CDPSession;
+	#printHold?: PrintHold;
 	readonly #recording = new RecordingController();
 	/** Set once the core stops for good: by {@link terminate}, or by a close. */
 	#stopped = false;
@@ -1787,10 +1790,15 @@ export class WorkerCore {
 				if (!page)
 					throw new ToolError(`Target ${payload.page.targetId} is no longer available on the attached browser`);
 				this.#page = page;
+				// A page already loaded runs its own timers while omp sets up: the hold goes in before any other step.
+				this.#printHold = await PrintHold.install(page, printHoldScope(payload));
 				await this.#claimRelayTarget(page);
 				this.#observeDialogs();
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			}
+			// The hold comes first: it covers the setup below, and its script must reach new documents before any init
+			// script the tab adds.
+			this.#printHold ??= await PrintHold.install(this.#page, printHoldScope(payload));
 			const client = this.#page.mainFrame().client;
 			client.on("Page.frameNavigated", this.#onFrameNavigated);
 			client.on("Page.frameRequestedNavigation", this.#onFrameRequestedNavigation);
@@ -1841,6 +1849,7 @@ export class WorkerCore {
 			}
 			const info = await this.#currentReadyInfo();
 			this.#started = true;
+			void this.#printHold.endCall();
 			this.#transport.send({ type: "ready", info });
 		} catch (error) {
 			// A page this attempt created would be orphaned (the supervisor retries
@@ -1849,6 +1858,8 @@ export class WorkerCore {
 			const page = this.#page;
 			await this.#webmcp?.dispose().catch(() => undefined);
 			this.#webmcp = undefined;
+			await this.#printHold?.dispose().catch(() => undefined);
+			this.#printHold = undefined;
 			if (payload.mode === "headless" && page && !page.isClosed()) {
 				await page.close().catch(() => undefined);
 			}
@@ -2040,8 +2051,12 @@ export class WorkerCore {
 		let failure: { error: unknown } | undefined;
 		let recoverTab = false;
 		let runPage: RunPageScope | undefined;
+		let holding: Promise<void> | undefined;
 		try {
 			throwIfAborted(signal);
+			// The hold starts with the run, ahead of the emulation round trips the page runs on through.
+			holding = this.#printHold?.beginCall(msg.timeoutMs);
+			holding?.catch(() => undefined);
 			await untilAborted(signal, () => this.#emulation?.reapply() ?? Promise.resolve());
 			runPage = createRunPageScope(this.#requirePage(), () => this.#requireNetwork().restoreInterception());
 			const browser = this.#requireBrowser();
@@ -2108,6 +2123,8 @@ export class WorkerCore {
 			if (signal.aborted) onCancel();
 			else signal.addEventListener("abort", onCancel, { once: true });
 			try {
+				// A renderer already blocked in a print nobody held never answers; the run's timeout reports that.
+				await Promise.race([holding, cancelRejection]);
 				const hooks = this.#hooksForActiveRun();
 				if (!hooks) throw new ToolError("Browser runtime started without an active run");
 				returnValue = await withBrowserPromiseCombinatorTracking(
@@ -2157,6 +2174,7 @@ export class WorkerCore {
 			}
 			failure = this.#foldFloatingRejections(active, failure);
 			if (this.#active?.id === msg.id) this.#active = null;
+			void this.#printHold?.endCall();
 		}
 		// A renderer crash or a debugger detach answers the run itself.
 		if (this.#unanswered !== active) return;
@@ -2180,6 +2198,8 @@ export class WorkerCore {
 			return;
 		}
 		if (completed) {
+			const printNotice = this.#printHold?.takeNotice();
+			if (printNotice) output.pushText(`${printNotice}\n`);
 			await this.#postReadyInfo();
 			if (this.#unanswered !== active) return;
 			this.#unanswered = null;
@@ -3655,6 +3675,8 @@ export class WorkerCore {
 		});
 		await this.#webmcp?.dispose().catch(() => undefined);
 		this.#webmcp = undefined;
+		await this.#printHold?.dispose().catch(() => undefined);
+		this.#printHold = undefined;
 		this.#dialogs?.dispose();
 		await this.#network?.close();
 		await this.#downloads?.close();
