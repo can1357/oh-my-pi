@@ -1553,7 +1553,9 @@ export class CommandController {
 				await this.ctx.sessionManager.ensureOnDisk();
 				await fs.access(sourceSessionFile);
 			} catch {
-				this.ctx.showError("Cannot open a fork in another terminal: the persisted session transcript is unavailable.");
+				this.ctx.showError(
+					"Cannot open a fork in another terminal: the persisted session transcript is unavailable.",
+				);
 				return;
 			}
 		}

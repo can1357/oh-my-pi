@@ -26,10 +26,10 @@ async function makeHarness(options: { preMaterialized: boolean; ensureFails?: bo
 	const launched: TerminalLaunchRequest[] = [];
 	const errors: string[] = [];
 	let ensureOnDiskCalls = 0;
-	if (options.preMaterialized) await writeFile(sessionFile, '{}\n');
+	if (options.preMaterialized) await writeFile(sessionFile, "{}\n");
 
 	const materialize = async () => {
-		await writeFile(sessionFile, '{}\n');
+		await writeFile(sessionFile, "{}\n");
 	};
 	// Mirror the real SessionManager lazily-persisted contract: an allocated
 	// path that leads nowhere until ensureOnDisk (or a first assistant message).
