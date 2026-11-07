@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Prewarm Google (`google`, `google-gemini-cli`) API connections before the first turn, compress opted-in Google request payloads with `gzip` at or above 1 KiB (`1,024` bytes, with automatic plaintext fallback on `"Unsupported Content-Encoding"` rejections), and memoize normalized Gemini/Claude Code Assist tool schemas ([#17102](https://github.com/can1357/oh-my-pi/pull/17102) by [@GTanger](https://github.com/GTanger))
+
 ### Fixed
 
 - A 429 or 402 worded like a context overflow (Bedrock's "429 Too many tokens, please wait…") is treated as a rate limit, so it retries and walks the fallback chain instead of compacting ([#18345](https://github.com/can1357/oh-my-pi/pull/18345) by [@nick-maderight](https://github.com/nick-maderight))
