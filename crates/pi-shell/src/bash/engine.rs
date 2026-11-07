@@ -173,9 +173,8 @@ impl Engine {
 				Some((id, h)) => ir::lower_deferred_hashed(&cc, src, mode, features, h, id),
 				None => ir::lower_deferred(&cc, src, mode, features),
 			};
-			let compiled = lowered.unwrap_or_else(|error| {
-				let (msg, flags) = error.into_diagnostic();
-				ir::abort_unit(cc.span.slice(src), mode, features, cc.line, vec![msg], flags, 2)
+			let compiled = lowered.unwrap_or_else(|what| {
+				ir::abort_unit(cc.span.slice(src), mode, features, cc.line, vec![what.into()], 0, 2)
 			});
 			self.intern(compiled)
 		});
@@ -263,10 +262,6 @@ impl Engine {
 			line: 1,
 			msg:  BString::from(format!("{what}: not supported by this engine yet")),
 		};
-		let lower_error = |error| match error {
-			ir::LowerError::Unsupported(what) => unsupported(what),
-			ir::LowerError::Syntax(msg) => TextError { line: 1, msg },
-		};
 		let unit = match kind {
 			TextKind::Arith | TextKind::HereDoc => {
 				let tmode = if kind == TextKind::Arith {
@@ -277,7 +272,7 @@ impl Engine {
 				let (tree, root) = crate::bash::syntax::parse_text(text, Features::NONE, tmode)
 					.map_err(|e| TextError { line: e.line, msg: BString::from(e.bash_msg()) })?;
 				let word = crate::bash::syntax::tree::Word::at(&tree, root);
-				let unit = ir::lower_text(word, text, mode, Features::NONE).map_err(lower_error)?;
+				let unit = ir::lower_text(word, text, mode, Features::NONE).map_err(unsupported)?;
 				if observed {
 					let syntax = crate::bash::trace::syntax::UnitSyntax::new(
 						0,
@@ -308,7 +303,10 @@ impl Engine {
 				if parser.next_command().is_some() {
 					return Err(unsupported("a compound array value that is not one word list"));
 				}
-				let unit = ir::lower_compound(&cc, &src, mode, Features::NONE).map_err(lower_error)?;
+				let unit = ir::lower_compound(&cc, &src, mode, Features::NONE).map_err(unsupported)?;
+				if let Some(msg) = unit.syntax_abort() {
+					return Err(TextError { line: 1, msg: msg.clone() });
+				}
 				if observed {
 					let _ = unit.trace_syntax.set(Arc::new(
 						crate::bash::trace::syntax::UnitSyntax::list(cc)

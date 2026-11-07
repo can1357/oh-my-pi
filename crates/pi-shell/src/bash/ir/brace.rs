@@ -315,10 +315,10 @@ fn expand_toks(toks: &[Tok], alts: &[Vec<u32>], out: &mut Vec<Vec<Tok>>) -> Resu
 			continue;
 		};
 		let inner = &toks[s + 1..e];
-		let (pieces, alternatives) = if let Some(p) = split_commas(inner) {
-			(p, true)
-		} else if let Some(p) = sequence(inner)? {
-			(p, false)
+		let body = if let Some(p) = split_commas(inner) {
+			Body::Alts(p)
+		} else if let Some(q) = sequence(inner) {
+			Body::Seq(q)
 		} else {
 			// Neither alternatives nor a sequence: this brace is literal.
 			start = s + 1;
@@ -333,9 +333,14 @@ fn expand_toks(toks: &[Tok], alts: &[Vec<u32>], out: &mut Vec<Vec<Tok>>) -> Resu
 		if !expand_toks(rest, alts, &mut posts)? {
 			posts.push(rest.to_vec());
 		}
-		if !alternatives {
-			check_count(out.len() as u128 + pieces.len() as u128 * posts.len() as u128)?;
-		}
+		let (pieces, alternatives) = match body {
+			Body::Alts(p) => (p, true),
+			Body::Seq(q) => {
+				// Counted before an item is built.
+				check_count(out.len() as u128 + q.count() * posts.len() as u128)?;
+				(q.items(), false)
+			},
+		};
 		for piece in pieces {
 			let mut items = Vec::new();
 			if !(alternatives && expand_toks(&piece, alts, &mut items)?) {
@@ -399,32 +404,48 @@ fn split_commas(inner: &[Tok]) -> Option<Vec<Vec<Tok>>> {
 	comma.then_some(alts)
 }
 
-/// `x..y[..incr]` over integers (zero-padded when either end is) or single
-/// characters.
-fn sequence(inner: &[Tok]) -> Result<Option<Vec<Vec<Tok>>>, u128> {
-	let Some(text) = inner
+/// What a closed brace holds.
+enum Body {
+	Alts(Vec<Vec<Tok>>),
+	Seq(Sequence),
+}
+
+/// A brace sequence, `x..y[..incr]`, over integers or single characters.
+#[derive(Clone, Copy)]
+enum Sequence {
+	/// Zero-padded to `width` when either end is.
+	Ints {
+		a:     i64,
+		b:     i64,
+		step:  u64,
+		width: usize,
+	},
+	Chars {
+		a:    u8,
+		b:    u8,
+		step: u8,
+	},
+}
+
+/// The sequence a brace body spells, if any.
+fn sequence(inner: &[Tok]) -> Option<Sequence> {
+	let text = inner
 		.iter()
 		.map(|t| match t {
 			Tok::Ch(c) => Some(*c),
 			Tok::Src(_) | Tok::Out(_) | Tok::Empty | Tok::Alts(..) => None,
 		})
-		.collect::<Option<Vec<u8>>>()
-	else {
-		return Ok(None);
-	};
+		.collect::<Option<Vec<u8>>>()?;
 	let parts: Vec<&[u8]> = split_dots(&text);
 	if !(2..=3).contains(&parts.len()) {
-		return Ok(None);
+		return None;
 	}
 	let incr = match parts.get(2) {
-		Some(i) => match parse_int(i) {
-			Some(i) => i,
-			None => return Ok(None),
-		},
+		Some(i) => parse_int(i)?,
 		None => 1,
 	};
 	let step = incr.unsigned_abs().max(1);
-	let items: Vec<Vec<u8>> = match (parse_int(parts[0]), parse_int(parts[1])) {
+	match (parse_int(parts[0]), parse_int(parts[1])) {
 		(Some(a), Some(b)) => {
 			let padded = |p: &[u8]| {
 				let digits = p
@@ -438,9 +459,30 @@ fn sequence(inner: &[Tok]) -> Result<Option<Vec<Vec<Tok>>>, u128> {
 			} else {
 				0
 			};
-			let count = a.abs_diff(b) as u128 / step as u128 + 1;
-			check_count(count)?;
-			(0..count as u64)
+			Some(Sequence::Ints { a, b, step, width })
+		},
+		(None, None) if parts[0].len() == 1 && parts[1].len() == 1 => Some(Sequence::Chars {
+			a:    parts[0][0],
+			b:    parts[1][0],
+			step: u8::try_from(step).unwrap_or(u8::MAX).max(1),
+		}),
+		_ => None,
+	}
+}
+
+impl Sequence {
+	/// How many items [`Self::items`] makes.
+	fn count(self) -> u128 {
+		match self {
+			Self::Ints { a, b, step, .. } => a.abs_diff(b) as u128 / step as u128 + 1,
+			Self::Chars { a, b, step } => u128::from(a.abs_diff(b) / step) + 1,
+		}
+	}
+
+	/// The items, as tokens.
+	fn items(self) -> Vec<Vec<Tok>> {
+		match self {
+			Self::Ints { a, b, step, width } => (0..self.count() as u64)
 				.map(|k| {
 					let off = i64::try_from(k * step).unwrap_or(i64::MAX);
 					let v = if a <= b {
@@ -448,50 +490,28 @@ fn sequence(inner: &[Tok]) -> Result<Option<Vec<Vec<Tok>>>, u128> {
 					} else {
 						a.saturating_sub(off)
 					};
-					if v < 0 {
-						format!("-{:0w$}", v.unsigned_abs(), w = width.saturating_sub(1)).into_bytes()
+					let text = if v < 0 {
+						format!("-{:0w$}", v.unsigned_abs(), w = width.saturating_sub(1))
 					} else {
-						format!("{v:0width$}").into_bytes()
+						format!("{v:0width$}")
+					};
+					text.bytes().map(Tok::Ch).collect()
+				})
+				.collect(),
+			Self::Chars { a, b, step } => (0..=a.abs_diff(b) / step)
+				.map(|k| {
+					let c = if a <= b { a + k * step } else { a - k * step };
+					// bash re-reads expanded text: a lone `\` is quote-removed
+					// to an empty word.
+					if c == b'\\' {
+						vec![Tok::Empty]
+					} else {
+						vec![Tok::Ch(c)]
 					}
 				})
-				.collect()
-		},
-		(None, None) if parts[0].len() == 1 && parts[1].len() == 1 => {
-			let (a, b) = (parts[0][0], parts[1][0]);
-			let step = u8::try_from(step).unwrap_or(u8::MAX).max(1);
-			let mut out = Vec::new();
-			let mut c = a;
-			loop {
-				out.push(vec![c]);
-				if c == b {
-					break;
-				}
-				let next = if a <= b {
-					c.checked_add(step)
-				} else {
-					c.checked_sub(step)
-				};
-				match next {
-					Some(n) if (a <= b && n <= b) || (a > b && n >= b) => c = n,
-					_ => break,
-				}
-			}
-			out
-		},
-		_ => return Ok(None),
-	};
-	Ok(Some(
-		items
-			.into_iter()
-			.map(|w| {
-				if w == b"\\" {
-					vec![Tok::Empty]
-				} else {
-					w.into_iter().map(Tok::Ch).collect()
-				}
-			})
-			.collect(),
-	))
+				.collect(),
+		}
+	}
 }
 
 /// Split at `..` (exactly two dots).
