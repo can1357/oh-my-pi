@@ -9,6 +9,11 @@
 ### Added
 
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+- `omp auth-gateway serve --model-fallback` retries a failed request on the requested model's `retry.fallbackChains` from the gateway host's settings, so clients that cannot fall back by themselves keep working when a provider fails ([#18406](https://github.com/can1357/oh-my-pi/pull/18406) by [@enieuwy](https://github.com/enieuwy))
+
+### Changed
+
+- `omp auth-gateway stdio` now moves past a fallback that rejects the request, answers with the requested model's error when no fallback succeeds, and no longer retries a request refused with `413` ([#18406](https://github.com/can1357/oh-my-pi/pull/18406) by [@enieuwy](https://github.com/enieuwy))
 
 ### Fixed
 

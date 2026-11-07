@@ -6,12 +6,17 @@
  * Unlike `serve` it runs on this omp's own credentials (the broker when one is
  * configured, else the local store), models (`models.yml` and extension
  * providers included) and settings. A request's `model` is an omp model
- * selector, as `--model` takes it ({@link selectorCandidates}); an attempt
- * that fails before its reply starts moves on to the next candidate. Serving
- * ends when stdin does.
+ * selector, as `--model` takes it ({@link selectorCandidates}); when the
+ * chosen model fails before its reply starts, its fallbacks are tried in turn
+ * ({@link answerWithFallbacks}). Serving ends when stdin does.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { createAuthGatewayRouter, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
+import {
+	answerWithFallbacks,
+	createAuthGatewayRouter,
+	serveAuthGatewayStdio,
+	shouldTryFallbackModel,
+} from "@oh-my-pi/pi-ai/auth-gateway";
 import { getProjectDir, isRecord, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, normalizeModelPatternList, resolveCliModel } from "../config/model-resolver";
@@ -81,25 +86,34 @@ export async function runAuthGatewayStdio(): Promise<void> {
 			: undefined;
 		if (!isRecord(body) || typeof body.model !== "string") return router.route(req, STDIO_PEER);
 		const selector = body.model;
-		const candidates = selectorCandidates(selector, settings, registry);
-		let response = Response.json(
-			{ error: { message: `No available model matches "${selector}"`, type: "invalid_request_error" } },
-			{ status: 404 },
-		);
-		for (const model of candidates) {
+		const [requested, ...fallbacks] = selectorCandidates(selector, settings, registry);
+		if (!requested) {
+			return Response.json(
+				{ error: { message: `No available model matches "${selector}"`, type: "invalid_request_error" } },
+				{ status: 404 },
+			);
+		}
+		const attempt = (model: Model<Api>): Promise<Response> => {
 			const key = formatModelStringWithRouting(model);
 			routed.set(key, model);
-			const attempt = new Request(req.url, {
+			const request = new Request(req.url, {
 				method: req.method,
 				headers: req.headers,
 				body: JSON.stringify({ ...body, model: key }),
 			});
-			response = await router.route(attempt, STDIO_PEER);
-			// 400 is the request's own fault and 499 its caller's: another model would fare no better.
-			if (response.status <= 400 || response.status === 499) return response;
-			logger.warn("auth-gateway stdio attempt failed", { selector, model: key, status: response.status });
-		}
-		return response;
+			return router.route(request, STDIO_PEER);
+		};
+		const failure = await attempt(requested);
+		if (!shouldTryFallbackModel(failure.status)) return failure;
+		const model = formatModelStringWithRouting(requested);
+		logger.warn("auth-gateway stdio attempt failed", { selector, model, status: failure.status });
+		return answerWithFallbacks(failure, fallbacks, attempt, (fallback, status) =>
+			logger.warn("auth-gateway stdio attempt failed", {
+				selector,
+				model: formatModelStringWithRouting(fallback),
+				status,
+			}),
+		);
 	};
 
 	try {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Auth-gateway hosts can pass `fallbackModels` to resend a failed request to other models; `shouldTryFallbackModel()` and `answerWithFallbacks()` are the status rule and walk that the router and `stdio` share ([#18406](https://github.com/can1357/oh-my-pi/pull/18406) by [@enieuwy](https://github.com/enieuwy))
+
 ### Fixed
 
 - ChatGPT Pro Max (`promax`) counts as Pro for Codex account routing, so a blocked Pro account no longer wins over an open or pinned Pro Max account ([#18399](https://github.com/can1357/oh-my-pi/pull/18399) by [@serverinspector](https://github.com/serverinspector))

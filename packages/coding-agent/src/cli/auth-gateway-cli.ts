@@ -8,7 +8,7 @@
  * `OMP_AUTH_BROKER_URL` / `auth.broker.url` precedence used elsewhere).
  *
  * Sub-verbs:
- *   - `serve [--bind=…] [--trust-proxy-headers] [--clients=<file>]` — boots the gateway against the configured broker.
+ *   - `serve [--bind=…] [--trust-proxy-headers] [--clients=<file>] [--model-fallback]` — boots the gateway against the configured broker.
  *   - `stdio` — serves the same routes as JSON lines on stdin/stdout with this omp's own credentials
  *     and model roles (`auth-gateway-stdio.ts`).
  *   - `token` / `token --regenerate` — manages the gateway bearer token file.
@@ -55,6 +55,8 @@ import {
 	resolveAuthBrokerConfig,
 	resolveEffectiveSettings,
 } from "../session/auth-broker-config";
+import { cfgRetryFallbackChains, cfgRetryModelFallback } from "../session/settings";
+import { expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 import { runAuthGatewayStdio } from "./auth-gateway-stdio";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
@@ -86,6 +88,12 @@ export interface AuthGatewayCommandArgs {
 		 * models and broker OAuth accounts. Re-read while serving.
 		 */
 		clients?: string;
+		/**
+		 * `serve`: retry a request whose model fails on that model's
+		 * `retry.fallbackChains` from this host's settings, for every caller.
+		 * Off by default.
+		 */
+		modelFallback?: boolean;
 	};
 }
 
@@ -449,6 +457,15 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	});
 	await rebuildCatalog();
 
+	// `--model-fallback` opts in to walking this host's `retry.fallbackChains`
+	// for every caller, as `stdio` walks them. The settings are read once, so a
+	// chain change applies after a restart.
+	const chainCount = Object.keys(cfgRetryFallbackChains.get(settings) ?? {}).length;
+	let fallbackOff: string | undefined;
+	if (cfgRetryModelFallback.get(settings) === false) fallbackOff = "retry.modelFallback is false";
+	else if (chainCount === 0) fallbackOff = "no retry.fallbackChains are configured";
+	const modelFallback = flags.modelFallback === true && fallbackOff === undefined;
+
 	const handle = startAuthGateway({
 		storage,
 		bind,
@@ -458,6 +475,10 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		resolveModel: (id, options) => resolveGatewayModel(id, index, options),
 		listModels: () => index.qualified.values(),
 		excludeProviders: new Set(cfgDisabledProviders.get(settings)),
+		// The expansion leads with `model` itself. Read only after a request fails.
+		fallbackModels: modelFallback
+			? model => expandOnlineTinyModelFallbacks(model, settings, [...index.models]).slice(1)
+			: undefined,
 		clients,
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
@@ -469,6 +490,13 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	if (clientsPath !== undefined && clients !== undefined) {
 		process.stdout.write(
 			`client tokens: ${clients.length} from ${clientsPath} (re-read every ${CLIENTS_RELOAD_INTERVAL_MS / 1000}s)\n`,
+		);
+	}
+	if (flags.modelFallback) {
+		process.stdout.write(
+			modelFallback
+				? `model fallback: on, ${chainCount} retry.fallbackChains entries (read at startup)\n`
+				: `model fallback: off — ${fallbackOff}\n`,
 		);
 	}
 	process.stdout.write(`upstream broker: ${brokerConfig.url}\n`);
