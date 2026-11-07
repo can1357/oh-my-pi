@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import * as agentPluginFormat from "@oh-my-pi/pi-coding-agent/discovery/agent-plugin-format";
 import {
 	AGENT_PLUGIN_MANIFEST_SCHEMA,
 	AGENT_PLUGIN_MCP_SCHEMA,
@@ -13,9 +14,12 @@ import {
 } from "@oh-my-pi/pi-coding-agent/discovery/agent-plugin-format";
 import {
 	clearClaudePluginRootsCache,
+	clearPluginRootsAndCaches,
 	injectPluginDirRoots,
 	listClaudePluginRoots,
+	preloadPluginRoots,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { configFileSources } from "@oh-my-pi/pi-coding-agent/utils/config-file-sources";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { getPluginsDir, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "../helpers/settings-test-state";
@@ -527,6 +531,104 @@ describe("agent-plugins discovery", () => {
 			const greet = skills.all.find(skill => skill.name === "greet");
 			expect(greet?._source.provider).toBe("agent-plugins");
 		} finally {
+			await injectPluginDirRoots(tempDir, []);
+		}
+	});
+
+	test("names a --plugin-dir root from its standard manifest even beside a Claude manifest (§5.1)", async () => {
+		const dirPath = path.join(tempDir, "plugins", "dual-dir");
+		await fs.mkdir(path.join(dirPath, ".claude-plugin"), { recursive: true });
+		await fs.writeFile(
+			path.join(dirPath, "plugin.json"),
+			JSON.stringify({ $schema: AGENT_PLUGIN_MANIFEST_SCHEMA, name: "standard-name" }),
+		);
+		await fs.writeFile(path.join(dirPath, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "claude-name" }));
+
+		try {
+			await injectPluginDirRoots(tempDir, [dirPath], tempDir);
+			const { roots } = await listClaudePluginRoots(tempDir, tempDir);
+			expect(roots.find(root => root.path === dirPath)?.plugin).toBe("standard-name");
+		} finally {
+			await injectPluginDirRoots(tempDir, []);
+		}
+	});
+
+	test("revalidates injected LSP/DAP config immediately on refresh and restores repaired packages", async () => {
+		const writeRoot = async (dirName: string, name: string) => {
+			const dirPath = path.join(tempDir, "plugins", dirName);
+			await fs.mkdir(dirPath, { recursive: true });
+			await fs.writeFile(
+				path.join(dirPath, "plugin.json"),
+				JSON.stringify({ $schema: AGENT_PLUGIN_MANIFEST_SCHEMA, name }),
+			);
+			await fs.writeFile(path.join(dirPath, "lsp.json"), JSON.stringify({ servers: {} }));
+			return dirPath;
+		};
+		const valid = await writeRoot("valid-dir", "valid-plugin");
+		const changing = await writeRoot("changing-dir", "changing-plugin");
+
+		const readLspPaths = () =>
+			configFileSources("lsp", tempDir, (_content, filePath) => filePath)
+				.map(source => source.read())
+				.filter(filePath => filePath !== null);
+
+		try {
+			await injectPluginDirRoots(tempDir, [valid, changing], tempDir);
+			expect(readLspPaths()).toContain(path.join(changing, "lsp.json"));
+
+			await Bun.write(
+				path.join(changing, "plugin.json"),
+				JSON.stringify({ $schema: AGENT_PLUGIN_MANIFEST_SCHEMA, name: "Bad--Name" }),
+			);
+			clearPluginRootsAndCaches();
+			// No await: synchronous consumers must see the new rejection immediately,
+			// while an unchanged valid package remains available.
+			expect(readLspPaths()).toContain(path.join(valid, "lsp.json"));
+			expect(readLspPaths()).not.toContain(path.join(changing, "lsp.json"));
+			await preloadPluginRoots(tempDir, tempDir);
+			expect(readLspPaths()).not.toContain(path.join(changing, "lsp.json"));
+
+			await Bun.write(
+				path.join(changing, "plugin.json"),
+				JSON.stringify({ $schema: AGENT_PLUGIN_MANIFEST_SCHEMA, name: "changing-plugin" }),
+			);
+			clearPluginRootsAndCaches();
+			expect(readLspPaths()).toContain(path.join(valid, "lsp.json"));
+			expect(readLspPaths()).toContain(path.join(changing, "lsp.json"));
+			await preloadPluginRoots(tempDir, tempDir);
+			expect(readLspPaths()).toContain(path.join(changing, "lsp.json"));
+		} finally {
+			await injectPluginDirRoots(tempDir, []);
+		}
+	});
+
+	test("an older asynchronous preload cannot restore config rejected by a later refresh", async () => {
+		await writeManifest();
+		await Bun.write(path.join(pluginPath, "lsp.json"), JSON.stringify({ servers: {} }));
+		await injectPluginDirRoots(tempDir, [pluginPath], tempDir);
+		const admitted = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const original = agentPluginFormat.legacyProviderAllowed;
+		vi.spyOn(agentPluginFormat, "legacyProviderAllowed").mockImplementationOnce(async (root, surface) => {
+			const allowed = await original(root, surface);
+			admitted.resolve();
+			await release.promise;
+			return allowed;
+		});
+		const oldPreload = preloadPluginRoots(tempDir, tempDir);
+		try {
+			await admitted.promise;
+			await writeManifest({ name: "Bad--Name" });
+			clearPluginRootsAndCaches();
+			await preloadPluginRoots(tempDir, tempDir);
+			release.resolve();
+			await oldPreload;
+
+			const paths = configFileSources("lsp", tempDir, (_content, filePath) => filePath).map(source => source.read());
+			expect(paths).not.toContain(path.join(pluginPath, "lsp.json"));
+		} finally {
+			release.resolve();
+			await oldPreload;
 			await injectPluginDirRoots(tempDir, []);
 		}
 	});

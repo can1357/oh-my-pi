@@ -24,7 +24,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
-import { pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
+import { legacyProviderAllowed, pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
 import { loadBundledAgents, parseAgent } from "./agents";
@@ -112,12 +112,15 @@ export async function discoverAgents(
 
 	// Extension-package agents use the same effective root set as sibling
 	// skills/hooks/tools, threaded whole so explicit roots and mode survive.
+	// A package with a fatally invalid Agent Plugins manifest is rejected whole
+	// (§5.2, §11.3), agents included, on both root lists below.
 	const packageRoots = isProviderEnabled("omp-plugins")
 		? await listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null, extensionRoots })
 		: [];
-	for (const root of packageRoots) {
-		orderedDirs.push({ dir: path.join(root.path, "agents"), source: root.level });
-	}
+	const packageRootsAllowed = await Promise.all(packageRoots.map(root => legacyProviderAllowed(root.path, "other")));
+	packageRoots.forEach((root, index) => {
+		if (packageRootsAllowed[index]) orderedDirs.push({ dir: path.join(root.path, "agents"), source: root.level });
+	});
 
 	// Load agents from Claude Code marketplace plugins (respects disabledProviders and opt-in).
 	// User-scope roots whose origin is not the foreign ~/.claude/plugins tree (omp's own
@@ -128,9 +131,13 @@ export async function discoverAgents(
 	const { roots: pluginRoots } = isProviderEnabled("claude-plugins")
 		? await listClaudePluginRoots(home, resolvedCwd)
 		: { roots: [] };
-	const filteredPluginRoots = pluginRoots.filter(
+	const scopedPluginRoots = pluginRoots.filter(
 		r => r.scope === "project" || claudePluginsUserEnabled || r.origin !== "claude",
 	);
+	const pluginRootsAllowed = await Promise.all(
+		scopedPluginRoots.map(root => legacyProviderAllowed(root.path, "other")),
+	);
+	const filteredPluginRoots = scopedPluginRoots.filter((_, index) => pluginRootsAllowed[index]);
 	const sortedPluginRoots = [...filteredPluginRoots].sort((a, b) => {
 		if (a.scope === b.scope) return 0;
 		return a.scope === "project" ? -1 : 1;

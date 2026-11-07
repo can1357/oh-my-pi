@@ -11,6 +11,7 @@ import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { type Extension, type ExtensionManifest, extensionCapability } from "../capability/extension";
 import { type ExtensionModule, extensionModuleCapability } from "../capability/extension-module";
+import { legacyProviderAllowed } from "./agent-plugin-format";
 import { readDirEntries, readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type Instruction, instructionCapability } from "../capability/instruction";
@@ -553,9 +554,16 @@ async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<Extens
 		}
 	}
 
+	// A listed package directory with a fatally invalid Agent Plugins manifest
+	// is rejected whole (§5.2, §11.3), matching configured paths in the loader.
+	const admitted = await Promise.all(
+		settingsExtensions.map(({ resolvedPath }) => legacyProviderAllowed(resolvedPath, "other")),
+	);
+	const loadableSettingsExtensions = settingsExtensions.filter((_, index) => admitted[index]);
+
 	const [entriesResults, fileContents] = await Promise.all([
-		Promise.all(settingsExtensions.map(({ resolvedPath }) => readDirEntries(resolvedPath))),
-		Promise.all(settingsExtensions.map(({ resolvedPath }) => readFile(resolvedPath))),
+		Promise.all(loadableSettingsExtensions.map(({ resolvedPath }) => readDirEntries(resolvedPath))),
+		Promise.all(loadableSettingsExtensions.map(({ resolvedPath }) => readFile(resolvedPath))),
 	]);
 
 	const dirDiscoveryPromises: Array<{
@@ -563,8 +571,8 @@ async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<Extens
 		level: "user" | "project";
 	}> = [];
 
-	for (let i = 0; i < settingsExtensions.length; i++) {
-		const { resolvedPath, level } = settingsExtensions[i];
+	for (let i = 0; i < loadableSettingsExtensions.length; i++) {
+		const { resolvedPath, level } = loadableSettingsExtensions[i];
 		const entries = entriesResults[i];
 		const content = fileContents[i];
 
