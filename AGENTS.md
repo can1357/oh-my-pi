@@ -281,6 +281,17 @@ Profiles live in the root `Cargo.toml`; `.cargo/config.toml` carries the setting
 
 Rejected, with measurements, so nobody re-litigates them: **sccache** (cannot cache incremental, bin, or proc-macro crates — measured slower than not using it), **mold** (ELF-only; no Mach-O support), and **`panic = "abort"` on `dev`** (Cargo ignores `panic` for the test profile, so the whole dep graph builds twice — 131 MB → 214 MB).
 
+## Fast iteration across worktrees
+
+Several agents share this clone. Do not cold-build or retest the world. Bun does not store pass/fail results, and sccache stays rejected.
+
+- TypeScript, while iterating: in the package you changed, `bun test --parallel --changed=origin/main`. Bun runs only the test files its graph says that diff affects, including uncommitted edits. Run that package's full `bun test --parallel` once before you push, not on every edit.
+- Rust: point every worktree at one target directory so the dependency graph is compiled once per clone:
+  `export CARGO_TARGET_DIR="$(cd "$(git rev-parse --git-common-dir)" && pwd)/cargo-target"`
+  `bun run test:rs` and `cargo build` then reuse it. Cargo locks that directory, so one Rust build or test at a time. A release-like binary while iterating uses `--profile local`, not `--release`.
+- `bun check` already skips its Rust half when the branch has not changed a Rust-affecting file. Do not set `OMP_FORCE_RUST_TASKS=1` to be thorough.
+- `bun install --frozen-lockfile` reuses Bun's global package cache. Do not delete `node_modules` to start clean.
+
 ## Testing Guidance
 
 Test the contract the system exposes — not the easiest internal detail to assert.
