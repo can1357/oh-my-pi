@@ -18,6 +18,7 @@ import {
 	formatExpandHint,
 	formatMoreItems,
 	PREVIEW_LIMITS,
+	previewWindowRows,
 	type RenderedStringCache,
 	replaceTabs,
 	shortenPath,
@@ -42,8 +43,10 @@ import type { FileDiagnosticsResult } from "./lsp";
 import type { OutputMeta } from "./output-meta";
 import type { CardToolResult } from "./result-card";
 import type {
+	FirstResultViewportRepaint,
 	NativeToolHead,
 	NativeToolView,
+	RenderResultContextOptions,
 	RenderResultOptions,
 	ToolActivityContext,
 	ToolActivitySummary,
@@ -53,10 +56,12 @@ import type {
 import { splitUrlScheme } from "./url-scheme-host";
 import { couldBecomeXdUrl, parseXdUrl } from "./xd-url";
 import {
+	decodeInnerArgs,
 	describeXdevCall,
 	describeXdevResult,
 	renderXdevCall,
 	renderXdevResult,
+	resolveXdevDelegatedRenderer,
 	xdevActivitySummary,
 	type XdevRenderDispatch,
 	type XdevMountedRenderer,
@@ -96,6 +101,23 @@ interface WriteRenderArgs {
 const WRITE_PREVIEW_LINES = 6;
 /** Collapsed native write body: the first lines of the file (§7.3). */
 const NATIVE_WRITE_PREVIEW = { lines: 8 } as const;
+
+/**
+ * Tail window of the collapsed streaming write preview: the viewport-sized
+ * budget, capped at the shared preview limit.
+ *
+ * The streaming renderer and the first-result repaint predicate must agree on
+ * it. A pending card whose content outgrows the window is tail-anchored
+ * (`… (N earlier lines)` + the last rows); when the first result re-anchors
+ * that frame to the head of the file, the tail rows already committed to
+ * viewport/native scrollback survive as stale content above the new frame
+ * unless the predicate asks for a full replay. Using a different threshold
+ * than the renderer leaves exactly those stale rows behind.
+ */
+function writeStreamingPreviewBudget(): number {
+	return Math.min(PREVIEW_LIMITS.EXPANDED_LINES, previewWindowRows());
+}
+
 /**
  * Collapsed clamp of a write drawn as a figure: Tern's model figure (its head
  * over a 320px stage) clears the clamp's fade at 16px lines.
@@ -173,19 +195,57 @@ function describeSource(rawPath: string, content: string): NativeNode {
 	return { ...code(content, { path: rawPath || undefined, numbers: true, wrap: true }), key: "source" };
 }
 
-function countLines(text: string): number {
-	if (!text) return 0;
-	return text.split("\n").length;
+/**
+ * The logical lines the write preview draws.
+ *
+ * A terminating newline closes the last line instead of opening an empty one,
+ * so the row the split would produce from it is dropped. The pending preview
+ * and the settled result both read their body and their `N lines` header from
+ * here, so a card cannot grow an empty numbered row when its result lands.
+ */
+function displayLines(text: string): string[] {
+	const normalized = normalizeDisplayText(text);
+	if (normalized.length === 0) return [];
+	return (normalized.endsWith("\n") ? normalized.slice(0, -1) : normalized).split("\n");
 }
 
 /** Bounded newline scan: whether `text` spans more than `maxLines` lines.
  *  Runs on every live compose (the repaint predicate below), so it must not
- *  materialize the split the way `countLines` does. */
+ *  materialize the split the way `displayLines` does.
+ *
+ *  A terminating newline closes the last line instead of opening an empty one,
+ *  and the collapsed preview drops that empty row — so the threshold must not
+ *  count it either. Counting it classifies a write that still renders
+ *  top-anchored as tail-anchored right at the budget boundary, and asks for a
+ *  scrollback-wiping repaint the render never needs. */
 function exceedsLineCount(text: string, maxLines: number): boolean {
 	if (!text) return false;
+	// The bounded scan decides everything except the boundary case: a text that
+	// spans more than `maxLines + 1` lines is over the threshold whether or not
+	// its last line is terminated.
 	let lines = 1;
 	for (let index = text.indexOf("\n"); index !== -1; index = text.indexOf("\n", index + 1)) {
-		if (++lines > maxLines) return true;
+		if (++lines > maxLines + 1) return true;
+	}
+	if (lines <= maxLines) return false;
+	// Only the boundary can turn on the terminator — and only here, so the
+	// carriage-return scan below never runs on a long stream.
+	return !endsWithTerminator(text);
+}
+
+/**
+ * Whether the text ends in a newline once the preview's carriage-return
+ * normalization is applied.
+ *
+ * The preview strips every `\r` before it counts lines, so a newline that is
+ * only followed by carriage returns still terminates the last line — and the
+ * threshold has to agree with the render it guards.
+ */
+function endsWithTerminator(text: string): boolean {
+	for (let index = text.length - 1; index >= 0; index--) {
+		const code = text.charCodeAt(index);
+		if (code === 13) continue;
+		return code === 10;
 	}
 	return false;
 }
@@ -194,6 +254,76 @@ function writeContentOf(args: unknown): string {
 	if (args == null || typeof args !== "object" || !("content" in args)) return "";
 	const content = args.content;
 	return typeof content === "string" ? content : "";
+}
+
+/** The `content` field as the renderer displays it, whatever type it arrived as. */
+function writeDisplayContent(args: unknown): string {
+	if (args == null || typeof args !== "object" || !("content" in args)) return "";
+	return normalizeDisplayText(args.content);
+}
+
+/**
+ * Whether the collapsed preview of a write is the filesystem tail window the
+ * first result re-anchors — and therefore whether that result has to replay
+ * the viewport.
+ *
+ * The routing mirrors `renderCall`:
+ *
+ *  - a call without a path renders nothing at all (the renderer's
+ *    missing-path guard), so no preview reached the terminal;
+ *  - a URL card (`agent://`, `proc://`, `cfg://`) keeps its own head preview;
+ *  - an `xd://` dispatch delegates to the device's renderer and stays queued
+ *    until the dispatch starts executing, so it paints no tail window before
+ *    that — and only a delegation back to this renderer paints one, with the
+ *    delegated payload rather than the dispatch's own.
+ *
+ * The delegation chain is walked iteratively and without a depth cap: the
+ * renderer (`renderXdevCall`) keeps delegating as deep as the payload nests,
+ * so a cap here would decide "no tail window" for a card the renderer does
+ * paint. Each nested payload is a JSON-encoded subset of the one above it, so
+ * the chain always ends.
+ */
+function writeRendersTailWindow(args: unknown, options: RenderResultOptions): boolean {
+	let current: unknown = args;
+	for (;;) {
+		const writeArgs = current as WriteRenderArgs | undefined;
+		// The renderer draws nothing without a path, so no preview reached the
+		// terminal.
+		if (writeArgs?.path === undefined && writeArgs?.file_path === undefined) return false;
+		const rawPath =
+			typeof writeArgs?.file_path === "string"
+				? writeArgs.file_path
+				: typeof writeArgs?.path === "string"
+					? writeArgs.path
+					: "";
+		if (writeUrlCard(rawPath)) return false;
+		if (rawPath !== "" && couldBecomeXdUrl(rawPath)) {
+			const xdev = parseXdUrl(rawPath);
+			if (!xdev?.name) return false;
+			// The delegated card stays queued until the dispatch starts executing.
+			if (options.executionStarted !== true) return false;
+			const renderContext = (options as RenderResultContextOptions).renderContext as WriteRenderContext | undefined;
+			const mounted = renderContext?.resolveXdevMounted?.(xdev.name);
+			const delegated = resolveXdevDelegatedRenderer(xdev.name, mounted);
+			if (delegated !== (writeToolRenderer as unknown as XdevMountedRenderer)) {
+				// Another renderer owns the card this dispatch paints. The
+				// dispatch's own preview is not a tail window, but that renderer
+				// may have opted into the same first-result replay for its own
+				// shape — so its hook decides, over the payload it receives.
+				const hook = (delegated as { forceFirstResultViewportRepaint?: FirstResultViewportRepaint } | undefined)
+					?.forceFirstResultViewportRepaint;
+				if (typeof hook === "function") return hook(decodeInnerArgs(writeContentOf(current)), options);
+				return hook === true;
+			}
+			current = decodeInnerArgs(writeContentOf(current));
+			continue;
+		}
+		// The renderer displays a non-string `content` through
+		// `normalizeDisplayText`, so the threshold has to read the same text it
+		// draws: `writeContentOf` reports "" for anything but a string, which
+		// would classify a streamed multi-line array payload as no preview.
+		return exceedsLineCount(writeDisplayContent(current), writeStreamingPreviewBudget());
+	}
 }
 
 function formatLineCountSuffix(lineCount: number, uiTheme: Theme): string {
@@ -231,8 +361,6 @@ const writeStreamingPreviewStateKey = Symbol("writeStreamingPreviewState");
 interface WriteStreamingPreviewState {
 	/** Prior full content; append-only growth is validated with an exact prefix check. */
 	previous: string;
-	/** `1 + count("\n")` over the scanned content. */
-	lineCount: number;
 	/** Raw offset immediately after the last newline consumed by `highlighter`. */
 	completeLength: number;
 	/** Highlighted, complete logical lines; the unfinished trailing line is rendered plain. */
@@ -254,7 +382,6 @@ interface WriteStreamingPreviewStateCarrier {
 function createWriteStreamingPreviewState(language: string | undefined, uiTheme: Theme): WriteStreamingPreviewState {
 	return {
 		previous: "",
-		lineCount: 1,
 		completeLength: 0,
 		highlightedLines: [],
 		highlighter: createHighlightStream(language, uiTheme),
@@ -266,7 +393,7 @@ function createWriteStreamingPreviewState(language: string | undefined, uiTheme:
 }
 
 /**
- * Advance line counting and syntax highlighting only across newly appended
+ * Advance the line split and syntax highlighting only across newly appended
  * content. Complete lines are retained because Ctrl+O can expand the preview;
  * the current partial line stays plain until its terminating newline arrives.
  * Once args are final, the trailing line is flushed through the highlighter
@@ -299,10 +426,7 @@ function updateStreamingPreview(
 
 	let completeLength = state.completeLength;
 	for (let i = state.previous.length; i < content.length; i++) {
-		if (content.charCodeAt(i) === 10) {
-			state.lineCount++;
-			completeLength = i + 1;
-		}
+		if (content.charCodeAt(i) === 10) completeLength = i + 1;
 	}
 	if (completeLength > state.completeLength) {
 		const chunk = content.slice(state.completeLength, completeLength).replace(/\r/g, "");
@@ -348,24 +472,50 @@ function formatStreamingContent(
 	argsComplete?: boolean,
 ): string {
 	if (!content) return "";
-	return cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
+	// One viewport-sized budget for both streaming paths, so a short terminal
+	// caps them the same way.
+	const budget = writeStreamingPreviewBudget();
+	// A collapsed window is the only shape the budget changes, so it is the only
+	// one that salts the memo: a row-only resize must re-slice the window rather
+	// than keep serving the old one (the edit renderer salts its budget too),
+	// but an expanded preview renders every line either way and would only pay
+	// for a full rebuild on each resize frame.
+	const salt = expanded ? (language ?? "") : `${language ?? ""}:${budget}`;
+	return cachedRenderedString(cache, uiTheme, expanded, salt, content, () => {
 		const state = updateStreamingPreview(streamKey, content, language, uiTheme, argsComplete === true);
 		let totalLines: number;
 		let startIndex: number;
 		let visibleLines: string[];
 		if (state) {
-			totalLines = state.lineCount;
-			startIndex = expanded ? 0 : Math.max(0, totalLines - PREVIEW_LIMITS.EXPANDED_LINES);
+			// The partial tail is not a complete line yet (no newline), so budget
+			// it explicitly instead of appending it: a complete line always yields
+			// exactly `budget` rows, so the block height stops oscillating
+			// line-by-line as the stream advances.
 			const flushed = argsComplete === true && state.finalFlushedLength === content.length;
 			const trailingLine = flushed ? state.finalTrailing : content.slice(state.completeLength).replace(/\r/g, "");
-			if (totalLines === 1 && trailingLine.length === 0) return "";
-			visibleLines = [...state.highlightedLines.slice(startIndex), trailingLine];
+			const partial = trailingLine.length > 0;
+			// The rows the preview draws are the retained complete lines plus a
+			// real partial tail. The terminating newline that closes the last
+			// line opens no row of its own — it is dropped — so it must not
+			// count towards the line total either: at the 1000-line crossing it
+			// would widen the gutter a token early and wrap the visible rows.
+			const completeLines = state.highlightedLines.length;
+			totalLines = completeLines + (partial ? 1 : 0);
+			startIndex = expanded ? 0 : Math.max(0, completeLines - (partial ? budget - 1 : budget));
+			if (completeLines === 0 && !partial) return "";
+			visibleLines = partial
+				? [...state.highlightedLines.slice(startIndex), trailingLine]
+				: state.highlightedLines.slice(startIndex);
 		} else {
-			const normalized = normalizeDisplayText(content);
-			if (normalized.length === 0) return "";
-			const lines = normalized.split("\n");
+			// The terminating newline closes the last line instead of opening an
+			// empty one, so it is dropped here exactly as the incremental path
+			// drops it: both streaming paths must hold the same rows, and a
+			// phantom row would step the height on the very newline this branch
+			// stabilizes.
+			const lines = displayLines(content);
+			if (lines.length === 0) return "";
 			totalLines = lines.length;
-			startIndex = expanded ? 0 : Math.max(0, totalLines - PREVIEW_LIMITS.EXPANDED_LINES);
+			startIndex = expanded ? 0 : Math.max(0, totalLines - budget);
 			visibleLines = highlightCode(lines.slice(startIndex).join("\n"), language);
 		}
 		const hidden = startIndex;
@@ -402,7 +552,8 @@ function renderContentPreview(
 ): string {
 	if (!content) return "";
 	return cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
-		const rawLines = normalizeDisplayText(content).split("\n");
+		const rawLines = displayLines(content);
+		if (rawLines.length === 0) return "";
 		const totalLines = rawLines.length;
 		const maxLines = expanded ? totalLines : Math.min(totalLines, WRITE_PREVIEW_LINES);
 		const visibleLines = rawLines.slice(0, maxLines);
@@ -562,7 +713,7 @@ function writeToolHead(
 	content: string,
 	details?: Pick<WriteToolDetails, "madeExecutable" | "resolvedPath" | "diagnostics">,
 ): NativeToolHead {
-	const lineCount = countLines(content);
+	const lineCount = displayLines(content).length;
 	const badges: { text: string; tone?: TspTone }[] = [];
 	if (details?.madeExecutable) badges.push({ text: "executable", tone: "success" });
 	const diagnostics = diagnosticsBadge([details?.diagnostics]);
@@ -738,7 +889,7 @@ export const writeToolRenderer = {
 
 		const isPartial = options.isPartial === true;
 		const progressText = result.content?.find(c => c.type === "text")?.text ?? "";
-		const lineCount = countLines(fileContent);
+		const lineCount = displayLines(fileContent).length;
 		const lineSuffix = formatLineCountSuffix(lineCount, uiTheme);
 		const execSuffix =
 			!isPartial && result.details?.madeExecutable
@@ -867,6 +1018,14 @@ export const writeToolRenderer = {
 	// tail rows already committed to viewport/native scrollback would survive
 	// as stale content above the new frame without a full replay. Expanded and
 	// short previews stay top-anchored and skip the (scrollback-wiping) reset.
+	// The threshold is the renderer's own tail budget: a card that is already
+	// tail-anchored must be repainted, so a stricter threshold would leave the
+	// stale tail rows behind.
+	// Only a preview the tail-window formatter draws re-anchors: a URL card
+	// (`agent://`, `proc://`, `cfg://`) keeps its head preview and an `xd://`
+	// dispatch paints the device's own card, so neither re-anchors and neither
+	// may wipe the scrollback — unless the dispatch delegates back to this
+	// renderer, which paints the same tail window.
 	forceFirstResultViewportRepaint: (args: unknown, options: RenderResultOptions) =>
-		!options.expanded && exceedsLineCount(writeContentOf(args), PREVIEW_LIMITS.EXPANDED_LINES),
+		!options.expanded && writeRendersTailWindow(args, options),
 } satisfies ToolRenderer<WriteRenderArgs, WriteToolDetails>;
