@@ -2488,16 +2488,6 @@ impl<'e, 'c> Expander<'e, 'c> {
 				};
 				return self.var_value(&target, Some(key.as_slice()), false);
 			},
-			// A whole-variable reference to a DYNAMIC variable: bash
-			// resolves the reference first and then runs the target's
-			// getter (`get_bashargcv` for the argument arrays, which also
-			// initializes their base). Reading the stored variable instead
-			// gave its empty value and left the base uncaptured, so a
-			// later direct read froze a different set of positional
-			// parameters.
-			state::Deref::To { name: target, index: None } if is_dynamic(&target) => {
-				return self.var_value(&target, index, list);
-			},
 			state::Deref::To { .. } | state::Deref::Plain => {},
 		}
 		let Some(var) = state::lookup(&self.k.root, self.cx.store, self.vp, name)? else {
@@ -2579,12 +2569,6 @@ impl<'e, 'c> Expander<'e, 'c> {
 			let name = name.clone();
 			let star = matches!(p.index, Some(SubIr::Star));
 			let v = self.read_atom(|ex| {
-				// A whole-variable reference resolves BEFORE the dynamic
-				// getter runs, exactly as it does for a value read.
-				let name = match state::deref(&ex.k.root, ex.cx.store, ex.vp, &name)? {
-					state::Deref::To { name: target, index: None } if is_dynamic(&target) => target,
-					_ => name.clone(),
-				};
 				if let Some(table) = dynamic_table(&name) {
 					let items = ex.hash_table(table)?.into_iter().map(|(k, _)| k).collect();
 					return Ok(Val::List { items, star });

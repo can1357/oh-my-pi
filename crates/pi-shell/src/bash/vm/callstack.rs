@@ -139,17 +139,6 @@ const fn level_visible(kind: &CallKind) -> bool {
 	}
 }
 
-/// The call-stack arrays bash refuses a function-LOCAL binding of (its
-/// `att_noassign`): each one is computed from the call stack and has no
-/// value of its own to shadow, so `local`/`declare` names one inside a
-/// function with `NAME: variable may not be assigned value` and status 1,
-/// changing nothing. A `declare -g`, a `readonly` or an `export` of the
-/// same name is accepted and carries its attributes, since those act on
-/// the global binding. Measured on Bash 5.2.21 and 5.3.0, which agree.
-pub const fn no_local_binding(name: &[u8]) -> bool {
-	matches!(name, b"BASH_ARGC" | b"BASH_ARGV" | b"BASH_LINENO" | b"BASH_SOURCE" | b"FUNCNAME")
-}
-
 /// One of bash's call-stack arrays as `vp` sees it, innermost level first
 /// (`FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`).
 /// `None` for another name, and for `FUNCNAME` outside any function (bash
