@@ -28,6 +28,7 @@ import type {
 	ProviderConfigInput,
 } from "../../config/model-registry";
 import { declaredTools } from "../../utils/tool-declarations";
+import type { ConfigValueInvalidation } from "../../config/resolve-config-value";
 import { type RemoteObject, registerRpcError, rpcSync } from "../rpc";
 import type {
 	MainStreamSimple,
@@ -269,8 +270,8 @@ export class RemoteModelRegistryOwner implements ModelRegistryOwner {
 		this.#remote = remote;
 	}
 
-	invalidateCommandConfigs(provider?: string): void {
-		this.#remote.notify("invalidateCommandConfigs", provider);
+	invalidateCommandConfigs(provider: string | undefined, reason: ConfigValueInvalidation): void {
+		this.#remote.notify("invalidateCommandConfigs", provider, reason);
 	}
 
 	refresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): Promise<void> {

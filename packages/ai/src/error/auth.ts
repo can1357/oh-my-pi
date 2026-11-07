@@ -20,6 +20,22 @@ export class MissingApiKeyError extends Error {
 }
 
 /**
+ * A configured credential source (a `!command`, an environment variable) was
+ * consulted and produced nothing: the command timed out, exited non-zero or
+ * printed nothing, or the variable is set but empty. The message names the
+ * source and what it returned, so the user is not shown a provider's 401 or a
+ * generic "No API key" for a failure of their own configuration. `cause` holds
+ * the provider error that prompted a re-resolution, when there was one.
+ */
+export class CredentialSourceError extends MissingApiKeyError {
+	constructor(provider: string | undefined, message: string, cause?: unknown) {
+		super(provider, message);
+		this.name = "CredentialSourceError";
+		if (cause !== undefined) this.cause = cause;
+	}
+}
+
+/**
  * Every usable OAuth credential for a provider failed to refresh with a
  * retryable error (network blip, timeout, 5xx). The stored credentials are
  * intact, so this is classified transient: retrying the request can succeed,

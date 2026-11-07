@@ -20,7 +20,7 @@ function delayedValueCommand(value: string): string {
 
 afterEach(() => {
 	for (const key of TEMP_ENV_KEYS.splice(0)) delete process.env[key];
-	invalidateAllCommandConfigs();
+	invalidateAllCommandConfigs("rejected");
 });
 
 describe("async config header materialization", () => {

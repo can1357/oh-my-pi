@@ -344,6 +344,9 @@ class RemoteKeys implements KeysApi {
 	setResolver(resolver: (config: string) => Promise<string | undefined>): void {
 		this.#remote.notify("keys.setResolver", resolver);
 	}
+	resolverConfigured(): boolean {
+		return this.#remote.callSync("keys.resolverConfigured");
+	}
 	resolver(provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }): ApiKeyResolver {
 		return this.#remote.callSync("keys.resolver", provider, options);
 	}

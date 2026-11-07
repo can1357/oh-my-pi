@@ -15,6 +15,7 @@
 import { type } from "@oh-my-pi/omptype";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
+import { CredentialSourceError } from "@oh-my-pi/pi-ai/error";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
@@ -385,9 +386,28 @@ async function executeCompletion(
 			const apiKey = await registry.getApiKey(model, session.getSessionId?.() ?? undefined, { signal });
 			if (!apiKey) {
 				attempt.outcome = "no-credentials";
+				// `getApiKey` is the availability probe and is quiet by contract, so it
+				// cannot say WHY. Ask the request path for the reason: a source that
+				// failed names itself, and the user hears that their mint command is
+				// broken instead of that they have no credentials. The command does not
+				// run twice — its failure backoff short-circuits this walk.
 				lastError = new ToolError(
 					`completion() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another tier.`,
 				);
+				try {
+					await registry.getApiKeyWithCredentialForProvider(
+						model.provider,
+						session.getSessionId?.() ?? undefined,
+						{
+							baseUrl: model.baseUrl,
+							modelId: model.id,
+							accountIds: model.accountAccess && Object.keys(model.accountAccess),
+							signal,
+						},
+					);
+				} catch (error) {
+					if (error instanceof CredentialSourceError) lastError = error;
+				}
 				continue;
 			}
 			if (index > 0) retriesUsed += 1;

@@ -382,7 +382,7 @@ The runtime vocabulary is not filtered by the provider's `api`: a wire key that 
 
 ### Command-resolved secrets
 
-Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. Commands run asynchronously with a 10 s timeout; stdout is trimmed, and empty/failing commands are omitted. Loading or inspecting the catalog does not execute them: credentials resolve when a request or online credential probe needs them.
+Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. Commands run asynchronously under a time limit of `providers.commandTimeoutSeconds` (default 10 s; on Linux the limit includes starting the process supervisor); stdout is trimmed. Loading or inspecting the catalog does not execute them: credentials resolve when a request or online credential probe needs them.
 
 ```yaml
 providers:
@@ -392,7 +392,37 @@ providers:
          X-Team-Key: "!bw get password omp-team-key"
 ```
 
-Successful command outputs are cached for the process lifetime, and concurrent requests share an in-flight execution. Failures back off for 30 seconds. Refresh callers that request `refreshCommandCredentials` (including the model hub's explicit refresh) and 401 credential recovery invalidate the relevant cached API keys and headers; an ordinary catalog refresh does not. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
+Concurrent requests share one in-flight execution, and a successful output is reused:
+
+- Output that is a JWT (bare, or after a scheme such as `Bearer`) with an `exp` claim is reused until the OAuth refresh skew (60 s) before `exp`; the next request then runs the command again, before a provider would reject the token. Re-runs are at least 30 s apart, and an expired token is never sent.
+- Any other output is reused for `providers.commandRefreshSeconds` (see [Settings](./settings.md)). The default `0` keeps it until it is invalidated, so a password-manager command such as `op read` is not run again on a timer.
+
+A command that fails, times out or prints nothing before it ever succeeded leaves its value omitted and backs off for 30 seconds. Refresh callers that request `refreshCommandCredentials` (including the model hub's explicit refresh), and forced credential renewals that are not a 401, re-run the relevant commands but keep the last good output if a re-run fails: omp logs a warning with the failure reason and elapsed time (never the command text), waits out the 30 s backoff, then re-runs the command in the background while requests keep the last good value — a JWT only until its `exp`. 401 credential recovery re-runs them and drops the last good output, so a rejected key is never served again. An ordinary catalog refresh does neither. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
+
+### When a credential source produces nothing
+
+A request never sends a credential that a configured source failed to produce, and it never reports that failure as a missing key or as the provider's rejection. It fails with a message naming the source and what it did:
+
+```
+No API key for provider openai: the command `op …` timed out after 10 s, the providers.commandTimeoutSeconds limit
+No API key for provider openai: the command `mint-token.sh` exited with status 1
+No API key for provider openai: the command `mint-token.sh` exited 0 but printed nothing
+No API key for provider openai: environment variable OPENAI_API_KEY is set but empty
+```
+
+Only the program appears, never an argument: a credential command's arguments carry secrets, and so does the value of a leading `NAME=value` assignment, which is shown as `NAME=…`. A quoted program path keeps its spaces and the home directory is shortened, so the label still matches what you wrote in `models.yml`.
+
+This covers a variable that is **set and empty**. An **unset** variable still falls back to the literal, so `apiKey: MY_PROVIDER_API_KEY` with nothing exported still sends `Authorization: Bearer MY_PROVIDER_API_KEY` and still earns the provider's 401 — the literal fallback is what makes a plain inline key work, and OMP cannot tell the two uses apart. Export the variable, even empty, to get the named refusal instead.
+
+When a 401 prompted the re-resolution, the message says so and keeps the provider's rejection, so a stale token whose re-mint is broken reads as the broken re-mint rather than as wrong credentials:
+
+```
+No API key for provider openai: the command `mint-token.sh` exited 0 but printed nothing.
+It was re-resolved because the provider rejected the previous key: 401 Request had invalid
+authentication credentials.
+```
+
+Availability probes keep their old behavior — `ModelRegistry.getApiKey`, `getApiKeyForProvider`, the model picker and `omp token` see no key rather than an error — so one broken source does not break listing models. Header and MCP config values also keep dropping an unresolved value; only credential resolution refuses.
 
 ## Merge and override order
 
@@ -704,20 +734,24 @@ in `models.yml` belong to tier 2, not this fallback tier.
 `models.yml` `apiKey` behavior:
 
 - Value is first treated as an environment variable name.
-- If the env var is unset or empty, the literal string is used as the token.
+- If the env var is unset, the literal string is used as the token.
+- If the env var is set to the empty string, the literal fallback still applies here, but **credential** resolution refuses instead: a variable that exists is meant to hold the credential, so its empty value is not sent as the variable's own name. A `headers` value, an MCP value and the auth broker's URL are unchanged — an empty variable still resolves to the variable's name for them, exactly as before.
 
 If `authHeader: true` and provider `apiKey` is set, models get:
 
 - `Authorization: Bearer <resolved-key>` header injected.
 
 Resolution does not fail for a missing variable: with `apiKey: MY_PROVIDER_API_KEY`
-and `authHeader: true`, an unset or empty `MY_PROVIDER_API_KEY` produces
+and `authHeader: true`, an unset `MY_PROVIDER_API_KEY` produces
 `Authorization: Bearer MY_PROVIDER_API_KEY`. Launchers using env-backed keys must
-check that the variable is set and non-empty before starting OMP.
+check that the variable is set before starting OMP.
 
 [Command-resolved secrets](#command-resolved-secrets) do not use this literal
 fallback: a failing command or empty trimmed stdout resolves to no value, so it
 does not add a derived bearer header.
+
+See [When a credential source produces nothing](#when-a-credential-source-produces-nothing)
+for what a request reports when a configured source yields no value.
 
 Keyless providers:
 

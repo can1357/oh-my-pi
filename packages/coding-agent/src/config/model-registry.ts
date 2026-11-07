@@ -7,7 +7,7 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oaut
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
-import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
+import { CredentialSourceError, OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
 import type {
 	Api,
 	Context,
@@ -65,12 +65,13 @@ import {
 	resolveModelOverrideWithAliases,
 } from "./custom-models";
 import {
+	type ConfigValueInvalidation,
 	createConfigHeaderResolver,
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
 	isCommandConfigValue,
 	resolveConfigHeaders,
-	resolveConfigValue,
+	resolveCredentialConfigValue,
 } from "./resolve-config-value";
 import {
 	DISCOVERY_DEFAULT_MAX_TOKENS,
@@ -296,6 +297,28 @@ export type ResolvedRequestAuth =
 	| { ok: false; error: string };
 
 /**
+ * The historical Pi extension facade's body. It is a request path, so it reads
+ * the credential the way a request does and lets a configured source that
+ * produced nothing be reported by name instead of flattened into "No API key
+ * found". The account-pool scope overrides the method with its own session
+ * scoping, so the body lives here: two copies is how one of them ended up back
+ * on the availability probe.
+ */
+export async function requestAuthFromCredential(
+	provider: string,
+	resolveCredential: () => Promise<ResolvedApiKey | undefined>,
+	resolveHeaders: () => Promise<Record<string, string> | undefined>,
+): Promise<ResolvedRequestAuth> {
+	try {
+		const apiKey = (await resolveCredential())?.apiKey;
+		if (apiKey === undefined) return { ok: false, error: `No API key found for "${provider}"` };
+		return { ok: true, apiKey, headers: await resolveHeaders() };
+	} catch (error) {
+		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+/**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
 export class ModelRegistry {
@@ -510,26 +533,28 @@ export class ModelRegistry {
 	/**
 	 * Drop the process-cached results of every command-backed config value a
 	 * provider carries (apiKey plus provider/model-override header commands) so
-	 * the next resolve re-runs them. Invoked on the 401 force-refresh path: the
-	 * apiKey alone was refreshed before, leaving command-backed header
-	 * credentials pinned to their stale value across the retry (#9760).
+	 * the next resolve re-runs them, on this thread and every mirror. Invoked on
+	 * the 401 force-refresh path (`rejected`: the apiKey alone was refreshed
+	 * before, leaving command-backed header credentials pinned to their stale
+	 * value across the retry, #9760; a command's last good value goes too) and on
+	 * an explicit user refresh (`refresh`: a failing re-run keeps serving it).
 	 */
-	#invalidateProviderCommandConfigs(provider: string): void {
-		this.#owner?.invalidateCommandConfigs(provider);
-		this.#invalidateLocalProviderCommandConfigs(provider);
-		this.#recordMirrorChange({ kind: "invalidateCommands", provider });
+	#invalidateProviderCommandConfigs(provider: string, reason: ConfigValueInvalidation): void {
+		this.#owner?.invalidateCommandConfigs(provider, reason);
+		this.#invalidateLocalProviderCommandConfigs(provider, reason);
+		this.#recordMirrorChange({ kind: "invalidateCommands", provider, reason });
 	}
 
 	/** Drop only this process's cached results for `provider`'s command-backed values. */
-	#invalidateLocalProviderCommandConfigs(provider: string): void {
-		invalidateCommandConfig(this.#customProviderApiKeys.get(provider));
+	#invalidateLocalProviderCommandConfigs(provider: string, reason: ConfigValueInvalidation): void {
+		invalidateCommandConfig(this.#customProviderApiKeys.get(provider), reason);
 		const configs = this.#commandConfigsByProvider.get(provider);
 		if (configs) {
-			for (const config of configs) invalidateCommandConfig(config);
+			for (const config of configs) invalidateCommandConfig(config, reason);
 		}
 		const runtimeConfigs = this.#runtimeCommandConfigsByProvider.get(provider);
 		if (!runtimeConfigs) return;
-		for (const config of runtimeConfigs) invalidateCommandConfig(config);
+		for (const config of runtimeConfigs) invalidateCommandConfig(config, reason);
 	}
 
 	#recordRuntimeCommandConfigs(providerName: string, config: ProviderConfigInput): void {
@@ -557,8 +582,8 @@ export class ModelRegistry {
 
 	#reloadStaticModelsForRefresh(options?: ModelRegistryRefreshOptions, providerId?: string): void {
 		if (options?.refreshCommandCredentials) {
-			if (providerId) this.#invalidateProviderCommandConfigs(providerId);
-			else this.#invalidateAllCommandConfigs();
+			if (providerId) this.#invalidateProviderCommandConfigs(providerId, "refresh");
+			else this.#invalidateAllCommandConfigs("refresh");
 			this.#reloadStaticModels({ force: true, preserveRuntimeDiscovery: true });
 			return;
 		}
@@ -570,20 +595,22 @@ export class ModelRegistry {
 		if (!this.#owner) this.authStorage.keys.setConfig(provider, keyConfig, options);
 	}
 
-	#invalidateAllCommandConfigs(): void {
-		this.#owner?.invalidateCommandConfigs();
-		invalidateAllCommandConfigs();
-		this.#recordMirrorChange({ kind: "invalidateCommands", provider: undefined });
+	#invalidateAllCommandConfigs(reason: ConfigValueInvalidation): void {
+		this.#owner?.invalidateCommandConfigs(undefined, reason);
+		invalidateAllCommandConfigs(reason);
+		this.#recordMirrorChange({ kind: "invalidateCommands", provider: undefined, reason });
 	}
 
 	/**
-	 * Drop this process's cached `!command` results (one provider's, or all) so
-	 * the next key or header resolve re-runs them. A mirror registry forwards
-	 * this to its {@link ModelRegistryOwner}, whose resolver mints the keys.
+	 * Drop this process's cached `!command` results (one provider's, or all when
+	 * `provider` is undefined) so the next key or header resolve re-runs them.
+	 * `rejected` also drops each command's last good value; `refresh` keeps it for
+	 * a failing re-run to serve. A mirror registry forwards this to its
+	 * {@link ModelRegistryOwner}, whose resolver mints the keys.
 	 */
-	invalidateCommandConfigs(provider?: string): void {
-		if (provider === undefined) this.#invalidateAllCommandConfigs();
-		else this.#invalidateProviderCommandConfigs(provider);
+	invalidateCommandConfigs(provider: string | undefined, reason: ConfigValueInvalidation): void {
+		if (provider === undefined) this.#invalidateAllCommandConfigs(reason);
+		else this.#invalidateProviderCommandConfigs(provider, reason);
 	}
 
 	/**
@@ -641,7 +668,14 @@ export class ModelRegistry {
 		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath ?? path.join(getAgentDir(), "models.yml"));
 		this.#cacheDbPath =
 			options?.cacheDbPath ?? (modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined);
-		if (!this.#owner) this.authStorage.keys.setResolver(resolveConfigValue);
+		// Upgrade a storage that was created without a host resolver so its stored and
+		// config credential references can run `!command` at all. A storage that already
+		// HAS one keeps it: discovery binds that resolver to the settings the storage was
+		// opened for, and replacing it here took `omp token` and `omp usage` back to the
+		// process-wide time limit.
+		if (!this.#owner && !this.authStorage.keys.resolverConfigured()) {
+			this.authStorage.keys.setResolver(resolveCredentialConfigValue);
+		}
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
 	}
@@ -717,8 +751,8 @@ export class ModelRegistry {
 				return;
 			case "invalidateCommands":
 				// Local caches only: forwarding to the owner would echo the invalidation back.
-				if (change.provider === undefined) invalidateAllCommandConfigs();
-				else this.#invalidateLocalProviderCommandConfigs(change.provider);
+				if (change.provider === undefined) invalidateAllCommandConfigs(change.reason);
+				else this.#invalidateLocalProviderCommandConfigs(change.provider, change.reason);
 				return;
 		}
 	}
@@ -3685,23 +3719,24 @@ export class ModelRegistry {
 
 	/** Resolve request authentication through the historical Pi extension facade. */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
-		try {
-			const apiKey = await this.getApiKey(model);
-			if (apiKey === undefined) {
-				return { ok: false, error: `No API key found for "${model.provider}"` };
-			}
-			const headers = await this.getProviderHeaders(model.provider);
-			return { ok: true, apiKey, headers };
-		} catch (error) {
-			return { ok: false, error: error instanceof Error ? error.message : String(error) };
-		}
+		return await requestAuthFromCredential(
+			model.provider,
+			() =>
+				this.getApiKeyWithCredentialForProvider(model.provider, undefined, {
+					baseUrl: model.baseUrl,
+					modelId: model.id,
+					accountIds: model.accountAccess && Object.keys(model.accountAccess),
+				}),
+			() => this.getProviderHeaders(model.provider),
+		);
 	}
 
 	/**
 	 * Resolve a provider's credential or the no-auth sentinel, for availability
-	 * checks. A transient OAuth refresh failure resolves `undefined` (like
+	 * checks. A transient OAuth refresh failure, and a configured credential
+	 * source that produced nothing, both resolve `undefined` (like
 	 * `authStorage.keys.get`); request paths use
-	 * {@link getApiKeyWithCredentialForProvider}, which surfaces it.
+	 * {@link getApiKeyWithCredentialForProvider}, which surfaces them.
 	 *
 	 * `options.forceRefresh` re-mints the session-sticky OAuth token even when
 	 * the cached copy still looks valid. `options.signal` is threaded into any
@@ -3715,7 +3750,7 @@ export class ModelRegistry {
 		try {
 			return (await this.getApiKeyWithCredentialForProvider(provider, sessionId, options))?.apiKey;
 		} catch (error) {
-			if (error instanceof OAuthRefreshUnavailableError) return undefined;
+			if (error instanceof OAuthRefreshUnavailableError || error instanceof CredentialSourceError) return undefined;
 			throw error;
 		}
 	}
@@ -3733,15 +3768,24 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		if (options?.forceRefresh) this.#invalidateProviderCommandConfigs(provider);
+		if (options?.forceRefresh) {
+			// Only a provider 401 proves the key stale; a generic forced renewal keeps the last good value.
+			this.#invalidateProviderCommandConfigs(
+				provider,
+				options.refreshReason === "auth-recovery" ? "rejected" : "refresh",
+			);
+		}
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
+		// A caller holding the model passes its own entitlements: looking them up by
+		// id loses what a supplied model object carries, and the account chosen then
+		// need not list that model.
 		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
 		return this.authStorage.keys.getWithCredential(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
-			accountIds: accountAccess && Object.keys(accountAccess),
+			accountIds: options?.accountIds ?? (accountAccess && Object.keys(accountAccess)),
 			forceRefresh: options?.forceRefresh,
 			refreshReason: options?.refreshReason,
 			rejectedAccessToken: options?.rejectedAccessToken,
@@ -4209,8 +4253,11 @@ export class ModelRegistry {
  * refresh, whose results reach the mirror through change batches.
  */
 export interface ModelRegistryOwner {
-	/** Drop the owner's cached `!command` results for `provider` (every provider when omitted). */
-	invalidateCommandConfigs(provider?: string): void;
+	/**
+	 * Drop the owner's cached `!command` results for `provider` (every provider
+	 * when undefined); `rejected` also drops each command's last good value.
+	 */
+	invalidateCommandConfigs(provider: string | undefined, reason: ConfigValueInvalidation): void;
 	/** {@link ModelRegistry.refresh} on the owner. */
 	refresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): Promise<void>;
 	/** {@link ModelRegistry.refreshProvider} on the owner. */
@@ -4264,7 +4311,11 @@ type ModelRegistryMirrorChangeInput =
 	/** A static (models.yml + cache) reload outside the other changes. */
 	| { readonly kind: "reload" }
 	/** Owner dropped cached `!command` results (one provider's, or all when `provider` is undefined). */
-	| { readonly kind: "invalidateCommands"; readonly provider: string | undefined };
+	| {
+			readonly kind: "invalidateCommands";
+			readonly provider: string | undefined;
+			readonly reason: ConfigValueInvalidation;
+	  };
 
 /** A runtime change of an owner registry, as {@link ModelRegistry.applyMirrorBatch} replays it. */
 export type ModelRegistryMirrorChange = ModelRegistryMirrorChangeInput & { readonly seq: number };

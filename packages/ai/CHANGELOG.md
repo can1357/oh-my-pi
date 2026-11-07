@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A 401 retry whose credential re-resolution fails now reports that failure — a broken re-mint command, an empty variable — instead of re-raising the provider's "invalid authentication credentials" ([#18375](https://github.com/can1357/oh-my-pi/pull/18375) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

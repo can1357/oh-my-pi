@@ -29,6 +29,7 @@ import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
 	ApiKeyRequiredError,
 	ConfigurationError,
+	CredentialSourceError,
 	LoginCancelledError,
 	MissingApiKeyError,
 	OAuthError,
@@ -230,6 +231,7 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"keys.removeConfig": (storage, provider) => storage.keys.removeConfig(provider),
 		"keys.clearConfig": storage => storage.keys.clearConfig(),
 		"keys.setResolver": (storage, resolver) => storage.keys.setResolver(resolver),
+		"keys.resolverConfigured": storage => storage.keys.resolverConfigured(),
 		"keys.resolver": (storage, provider, options) => storage.keys.resolver(provider, options),
 
 		"oauth.login": (storage, provider, ctrl) => storage.oauth.login(provider, ctrl),
@@ -361,7 +363,7 @@ function serveModelRegistry(state: PeerAuthState): RpcServe<ModelRegistry, Model
 				snapshot: toWireMirrorBatch(snapshot),
 			};
 		},
-		invalidateCommandConfigs: (registry, provider) => registry.invalidateCommandConfigs(provider),
+		invalidateCommandConfigs: (registry, provider, reason) => registry.invalidateCommandConfigs(provider, reason),
 		refresh: (registry, strategy, options) => registry.refresh(strategy, options),
 		refreshProvider: (registry, providerId, strategy, options) =>
 			registry.refreshProvider(providerId, strategy, options),
@@ -417,6 +419,7 @@ function registerAuthErrors(): void {
 	if (authErrorsRegistered) return;
 	authErrorsRegistered = true;
 	registerRpcError("MissingApiKeyError", message => new MissingApiKeyError(undefined, message));
+	registerRpcError("CredentialSourceError", message => new CredentialSourceError(undefined, message));
 	registerRpcError("OAuthRefreshUnavailableError", message => {
 		const error = new OAuthRefreshUnavailableError("", undefined);
 		error.message = message;

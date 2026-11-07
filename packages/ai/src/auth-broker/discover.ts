@@ -39,11 +39,15 @@ export interface AuthBrokerClientConfig {
 export interface ResolveAuthBrokerConfigOptions {
 	agentDir?: string;
 	configValueResolver?: (config: string) => Promise<string | undefined>;
+	/** Resolver for credential-shaped values (the broker token). Defaults to {@link configValueResolver}. */
+	credentialValueResolver?: (config: string) => Promise<string | undefined>;
 }
 
 export interface DiscoverAuthStorageOptions {
 	agentDir?: string;
 	configValueResolver?: (config: string) => Promise<string | undefined>;
+	/** Resolver for credential-shaped values (the broker token). Defaults to {@link configValueResolver}. */
+	credentialValueResolver?: (config: string) => Promise<string | undefined>;
 	cachePath?: string;
 	sourceLabel?: string;
 	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
@@ -384,27 +388,39 @@ export async function resolveAuthBrokerConfig(
 ): Promise<AuthBrokerClientConfig | null> {
 	const agentDir = options.agentDir ?? getAgentDir();
 	const resolveConfig = options.configValueResolver ?? defaultResolveConfigValue;
+	// The broker's token is a credential and the URL is not, so they do not read
+	// the same resolver: a token naming an empty variable must not be sent as the
+	// variable's own name.
+	const resolveCredential = options.credentialValueResolver ?? resolveConfig;
 
 	const envUrl = process.env.OMP_AUTH_BROKER_URL;
 	const envToken = process.env.OMP_AUTH_BROKER_TOKEN;
 
 	let url = envUrl && envUrl.length > 0 ? envUrl : undefined;
-	let configToken: string | undefined;
-	if (!url || !envToken) {
+	const envBearer = envToken && envToken.length > 0 ? envToken : undefined;
+	let tokenConfig: string | undefined;
+	if (!url || !envBearer) {
 		const fromConfig = await readConfigYaml(agentDir);
 		if (!url && fromConfig.url) {
 			const resolved = await resolveConfig(fromConfig.url);
 			if (resolved && resolved.length > 0) url = resolved;
 		}
-		if (fromConfig.token) {
-			const resolved = await resolveConfig(fromConfig.token);
-			if (resolved && resolved.length > 0) configToken = resolved;
-		}
+		tokenConfig = fromConfig.token;
 	}
+	// No broker is configured, so the local store is used and no bearer is needed:
+	// a leftover `auth.broker.token` must not run, let alone fail the process.
 	if (!url) return null;
 
-	const token =
-		(envToken && envToken.length > 0 ? envToken : undefined) ?? configToken ?? (await readTokenFile()) ?? undefined;
+	// Precedence is environment, then config, then the token file. A source is
+	// resolved only when it is the one that would be used — a configured
+	// `!command` the environment token outranks is never executed, so it cannot
+	// refuse on behalf of a credential nothing was going to read.
+	let token = envBearer;
+	if (token === undefined && tokenConfig !== undefined) {
+		const resolved = await resolveCredential(tokenConfig);
+		if (resolved && resolved.length > 0) token = resolved;
+	}
+	token ??= (await readTokenFile()) ?? undefined;
 	if (!token) {
 		throw new AIError.MissingApiKeyError(
 			undefined,
@@ -517,6 +533,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 	const brokerConfig = await resolveAuthBrokerConfig({
 		agentDir,
 		configValueResolver: options.configValueResolver,
+		credentialValueResolver: options.credentialValueResolver,
 	});
 	const { accountPolicies, defaultReservePct } = await loadAuthAccountPolicyConfig({
 		agentDir,
@@ -531,8 +548,13 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		accountPool: options.accountPool,
 	});
 	const storage = new AuthStorage(store, {
+		// A storage resolves credentials, so it gets the credential resolver when the
+		// host supplies one: it carries that scope's `!command` time limit AND refuses by
+		// name when a source produces nothing. Without this the host's credential rule
+		// reached only the broker token, and a storage's own key references fell back to
+		// the plain config resolver.
+		configValueResolver: options.credentialValueResolver ?? options.configValueResolver,
 		...options.authStorageOptions,
-		configValueResolver: options.configValueResolver,
 		sourceLabel,
 		accountPolicies,
 		defaultReservePct,

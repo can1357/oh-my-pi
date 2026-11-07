@@ -161,10 +161,10 @@ describe("mergeDiscoveredModel", () => {
 			expect((await merged.resolveHeaders?.())?.["X-Token"]).toBe("token-A");
 			// ...and a 401 auth-retry rotation (cache invalidation) reaches it.
 			await Bun.write(tokenFile, "token-B");
-			invalidateCommandConfig(command);
+			invalidateCommandConfig(command, "rejected");
 			expect((await merged.resolveHeaders?.())?.["X-Token"]).toBe("token-B");
 		} finally {
-			invalidateCommandConfig(command);
+			invalidateCommandConfig(command, "rejected");
 			await fs.rm(tokenFile, { force: true });
 		}
 	});
@@ -188,10 +188,10 @@ describe("mergeDiscoveredModel", () => {
 			expect((await merged.resolveHeaders?.())?.Authorization).toBe("Bearer token-A");
 			// ...and a 401 force-refresh (command-cache invalidation) reaches it.
 			await Bun.write(tokenFile, "token-B");
-			invalidateCommandConfig(apiKey);
+			invalidateCommandConfig(apiKey, "rejected");
 			expect((await merged.resolveHeaders?.())?.Authorization).toBe("Bearer token-B");
 		} finally {
-			invalidateCommandConfig(apiKey);
+			invalidateCommandConfig(apiKey, "rejected");
 			await fs.rm(tokenFile, { force: true });
 		}
 	});

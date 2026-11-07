@@ -1,6 +1,11 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, effect, register, type SettingValueOf } from "../config/registry";
 import {
+	configureCommandRefreshMs,
+	configureCommandTimeoutMs,
+	DEFAULT_COMMAND_TIMEOUT_MS,
+} from "../config/resolve-config-value";
+import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
 	SERVICE_TIER_GOOGLE_OPTIONS,
@@ -1327,6 +1332,47 @@ export const cfgProvidersStreamIdleTimeoutSeconds = register({
 		],
 	},
 });
+
+export const cfgProvidersCommandTimeoutSeconds = register({
+	id: "providers.commandTimeoutSeconds",
+	type: "number",
+	default: DEFAULT_COMMAND_TIMEOUT_MS / 1_000,
+	ui: {
+		tab: "providers",
+		group: "Timeouts",
+		label: "Config Command Timeout",
+		description:
+			"Seconds a `!command` config value (provider apiKey or headers, MCP env or headers) may run before the run counts as failed",
+		options: [
+			{ value: "10", label: "10 seconds" },
+			{ value: "30", label: "30 seconds" },
+			{ value: "60", label: "1 minute" },
+			{ value: "120", label: "2 minutes" },
+		],
+	},
+});
+effect(cfgProvidersCommandTimeoutSeconds, seconds => configureCommandTimeoutMs(seconds * 1_000));
+
+export const cfgProvidersCommandRefreshSeconds = register({
+	id: "providers.commandRefreshSeconds",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "providers",
+		group: "Timeouts",
+		label: "Config Command Refresh",
+		description:
+			"Seconds a `!command` config value is reused before its command runs again when its output carries no JWT expiry; 0 reuses it until a 401 or an explicit credential refresh",
+		options: [
+			{ value: "0", label: "Off", description: "Reuse until a 401 or an explicit credential refresh" },
+			{ value: "300", label: "5 minutes" },
+			{ value: "900", label: "15 minutes" },
+			{ value: "1800", label: "30 minutes" },
+			{ value: "3000", label: "50 minutes" },
+		],
+	},
+});
+effect(cfgProvidersCommandRefreshSeconds, seconds => configureCommandRefreshMs(seconds * 1_000));
 
 export const cfgProvidersOpenrouterVariant = register({
 	id: "providers.openrouterVariant",

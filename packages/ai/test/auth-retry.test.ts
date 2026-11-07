@@ -8,7 +8,7 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { MissingApiKeyError, OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { CredentialSourceError, MissingApiKeyError, OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 
 function authError(status = 401): Error & { status: number } {
 	return Object.assign(new Error(`${status} authentication_error`), { status });
@@ -565,6 +565,53 @@ describe("withAuth", () => {
 		);
 		expect(result).toBe("ok");
 		expect(keys).toEqual(["k0", "k1"]);
+	});
+});
+
+describe("withAuth and a configured credential source", () => {
+	it("reports the source that produced nothing instead of the provider's rejection", async () => {
+		const resolver = async (ctx: ApiKeyResolveContext): Promise<string | undefined> => {
+			if (ctx.error === undefined) return "stale-key";
+			throw new CredentialSourceError(
+				"openai",
+				"No API key for provider openai: the command `mint` exited 0 but printed nothing",
+			);
+		};
+		const failure = await withAuth(resolver, async () => {
+			throw authError();
+		}).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(failure).toBeInstanceOf(CredentialSourceError);
+		expect((failure as Error).message).toBe(
+			"No API key for provider openai: the command `mint` exited 0 but printed nothing. " +
+				"It was re-resolved because the provider rejected the previous key: 401 authentication_error",
+		);
+		expect((failure as Error).cause).toBeInstanceOf(Error);
+	});
+
+	it("drops the diagnosis once the source yields a key again, even an already-tried one", async () => {
+		// The refresh step fails at the source, then the rotation step resolves. The key
+		// it returns is the one already attempted, so no further request is made — but
+		// the source has recovered, and the user's problem is the provider's rejection.
+		// Reporting the mint command as broken here sends them to fix the wrong thing.
+		let call = 0;
+		const resolver = async (ctx: ApiKeyResolveContext): Promise<string | undefined> => {
+			if (ctx.error === undefined) return "stale-key";
+			call += 1;
+			if (call === 1) throw new CredentialSourceError("openai", "the command `mint` exited with status 7");
+			return "stale-key";
+		};
+		const failure = await withAuth(resolver, async () => {
+			throw authError();
+		}).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(call).toBeGreaterThanOrEqual(2);
+		expect(failure).not.toBeInstanceOf(CredentialSourceError);
+		expect((failure as Error).message).toBe("401 authentication_error");
 	});
 });
 

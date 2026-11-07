@@ -2,8 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `providers.commandTimeoutSeconds` (default 10): the time limit of each `!command` config value run — provider `apiKey` and `headers`, MCP `env` and `headers` — so a machine where minting a key is slow can raise it ([#18375](https://github.com/can1357/oh-my-pi/pull/18375) by [@sjawhar](https://github.com/sjawhar))
+- Added `providers.commandRefreshSeconds` (default `0`, off): how long a `!command` value whose output carries no JWT `exp` is reused before its command runs again ([#18375](https://github.com/can1357/oh-my-pi/pull/18375) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
+- A `!command` config value that prints a JWT is now re-run a minute before the token expires, instead of being sent until a provider answers 401 ([#18375](https://github.com/can1357/oh-my-pi/pull/18375) by [@sjawhar](https://github.com/sjawhar))
+- A provider whose `!command` key succeeded once keeps serving that key when a later run fails or times out, and re-runs the command in the background, instead of dropping the provider to its fallback model; a 401 still drops it ([#18375](https://github.com/can1357/oh-my-pi/pull/18375) by [@sjawhar](https://github.com/sjawhar))
+- A request that joined a `!command` run before a 401 or an explicit refresh invalidated it no longer receives that run's rejected key ([#18375](https://github.com/can1357/oh-my-pi/pull/18375) by [@sjawhar](https://github.com/sjawhar))
+- Each credential operation now runs its `!command` under its own scope's time limit, so two agent directories or SDK credential stores resolving in one process no longer decide each other's limit — including for `omp token` and `omp usage` ([#18375](https://github.com/can1357/oh-my-pi/pull/18375) by [@sjawhar](https://github.com/sjawhar))
+- A credential your configuration failed to produce now fails by name — `the command \`mint-token.sh\` exited 0 but printed nothing`, `environment variable OPENAI_API_KEY is set but empty` — instead of reading as a missing key or as the provider's 401; a set-but-empty variable is no longer sent as a bearer token ([#18375](https://github.com/can1357/oh-my-pi/pull/18375) by [@sjawhar](https://github.com/sjawhar))
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
 - A `bash.patterns` `deny` rule now blocks a command anywhere in a `;`, `|`, `||` or `&&` line even when an earlier `prompt` rule matches another part of it, and project settings can no longer override the operator's `deny` or `prompt` patterns with `allow` ([#18349](https://github.com/can1357/oh-my-pi/pull/18349) by [@asuffield](https://github.com/asuffield))
 
