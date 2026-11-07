@@ -461,3 +461,36 @@ export function zaiModelManagerOptions(
 ): ModelManagerOptions<"anthropic-messages" | "openai-completions"> {
 	return { providerId: "zai" };
 }
+
+// ---------------------------------------------------------------------------
+// Zed Hosted
+// ---------------------------------------------------------------------------
+
+export interface ZedHostedModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function zedHostedModelManagerOptions(
+	config: ZedHostedModelManagerConfig = {},
+): ModelManagerOptions<"zed-hosted"> {
+	const { apiKey, baseUrl, fetch } = config;
+	const staticModels = seedModels<"zed-hosted">("zed-hosted");
+	return {
+		providerId: "zed-hosted",
+		cacheProviderId: resolveModelCacheProviderId("zed-hosted", { apiKey, baseUrl }),
+		staticModels,
+		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
+		...(apiKey
+			? {
+					fetchDynamicModels: async () => {
+						const { fetchZedHostedModels } = await zedHostedDiscovery();
+						return fetchZedHostedModels({ apiKey, baseUrl, fetch });
+					},
+				}
+			: undefined),
+	};
+}
+
+const zedHostedDiscovery = once(() => import("../discovery/zed-hosted"));

@@ -17,6 +17,7 @@ import type {
 export * from "./anthropic";
 export * from "./device-code";
 export type * from "./types";
+export * from "./zed-hosted";
 
 const builtInOAuthProviders: OAuthProviderInfo[] = PROVIDER_REGISTRY.filter(
 	provider => provider.login && provider.showInLoginList !== false,

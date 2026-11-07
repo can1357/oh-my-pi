@@ -320,3 +320,10 @@ export const streamBedrock = createLazyProviderStream(
 		(model, context, options) =>
 			(bedrockStreamOverride ?? builtin.streamBedrock)(model, context, options),
 );
+
+/** Stream Zed Hosted models with provider-owned timeout handling. */
+export const streamZedHosted = createLazyProviderStream(
+	() => import("./zed-hosted"),
+	mod => mod.streamZedHosted,
+	PROVIDER_HANDLED_STREAM_TIMEOUTS,
+);

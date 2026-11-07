@@ -1,0 +1,5 @@
+auth "zed-hosted" {
+	name "Zed Hosted (Claude, Gemini, GPT)"
+	login "custom" hook="zed-hosted"
+	refresh "none"
+}

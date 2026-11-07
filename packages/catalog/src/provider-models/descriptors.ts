@@ -91,6 +91,7 @@ import {
 	typesafeModelManagerOptions,
 	webModelManagerOptions,
 	zaiModelManagerOptions,
+	zedHostedModelManagerOptions,
 } from "./special";
 
 export type { KnownProvider } from "../compat/provider-ids";
@@ -180,6 +181,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	zai: config => zaiModelManagerOptions(config),
 	zenmux: config => zenmuxModelManagerOptions(config),
 	"zhipu-coding-plan": config => zhipuCodingPlanModelManagerOptions(config),
+	"zed-hosted": config => zedHostedModelManagerOptions(config),
 };
 
 function isKnownProvider(id: string): id is KnownProvider {
