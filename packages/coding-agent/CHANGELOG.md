@@ -14,6 +14,7 @@
 
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
 - A `bash.patterns` `deny` rule now blocks a command anywhere in a `;`, `|`, `||` or `&&` line even when an earlier `prompt` rule matches another part of it, and project settings can no longer override the operator's `deny` or `prompt` patterns with `allow` ([#18349](https://github.com/can1357/oh-my-pi/pull/18349) by [@asuffield](https://github.com/asuffield))
+- On models that bind thinking to the prompt prefix (e.g. Claude Opus 5.5), MCP tools a session loads mid-session no longer enter the eval description and system prompt at the next unrelated prompt rebuild (a body-only `manage_skill update`, an unchanged memory or settings refresh), which read zero cached tokens and dropped all earlier thinking; they keep arriving through the hidden notice ([#18396](https://github.com/can1357/oh-my-pi/issues/18396))
 
 ## [18.18.0] - 2026-11-07
 

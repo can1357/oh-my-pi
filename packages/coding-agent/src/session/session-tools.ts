@@ -149,6 +149,17 @@ export interface SettingsGatedToolDelta {
 	readonly xdev: XdevState | undefined;
 }
 
+/**
+ * Renders the base prompt for an active tool set. `xdev` is the `xd://` state
+ * to render: the live state, or a frozen prefix's committed roster when a
+ * rebuild re-renders it. Supplied by `sdk.ts`; called on every prompt rebuild.
+ */
+export type SystemPromptRebuilder = (
+	toolNames: string[],
+	tools: Map<string, AgentTool>,
+	xdev: XdevState | undefined,
+) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+
 interface SessionToolsOptions {
 	autoApprove?: boolean;
 	toolRegistry?: Map<string, AgentTool>;
@@ -170,10 +181,7 @@ interface SessionToolsOptions {
 	 * registry; `isBuiltIn` reports this session's built-in provenance.
 	 */
 	reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
-	rebuildSystemPrompt?: (
-		toolNames: string[],
-		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	rebuildSystemPrompt?: SystemPromptRebuilder;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
@@ -279,6 +287,11 @@ function systemPromptDigest(blocks: readonly string[]): string {
 	return hash.toString(16);
 }
 
+/** Whether two prompts carry the same blocks in the same order. */
+function samePromptBlocks(left: readonly string[], right: readonly string[]): boolean {
+	return left.length === right.length && left.every((block, index) => block === right[index]);
+}
+
 /** The digest a branch entry records, `undefined` for a malformed record, or `null` when it is not a record. */
 export function promptDigestOfEntry(entry: SessionEntry): string | undefined | null {
 	if (entry.type !== "custom" || entry.customType !== SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE) return null;
@@ -329,6 +342,20 @@ interface PromptSurface {
 	sessionAgents: readonly AgentDefinition[];
 	/** Tool names the eval description lists as callable from cells. */
 	evalToolNames: readonly string[];
+}
+
+/**
+ * Tool roster a committed base prompt rendered, captured for prefix-bound
+ * models. While a roster change is held out of that prompt, a forced rebuild
+ * re-renders this roster first (see `SessionTools.#prepareHeldRosterPrompt`).
+ */
+interface PromptRoster {
+	/** Active tool names the render listed. */
+	readonly toolNames: string[];
+	/** Registry entries the render could read. */
+	readonly tools: Map<string, AgentTool>;
+	/** `xd://` state over {@link tools} with the mounts the render listed. */
+	readonly xdev: XdevState | undefined;
 }
 
 interface PendingNoticePreview<T> {
@@ -414,6 +441,10 @@ export class SessionTools {
 	/** The latest per-turn override and the base its hook was given; kept after the turn ends. */
 	#lastTurnSystemPromptOverride: { prompt: string[]; base: string[] } | undefined;
 	#lastAppliedToolSignature: string | undefined;
+	/** Roster {@link #baseSystemPrompt} rendered; captured only for prefix-bound models. */
+	#basePromptRoster: PromptRoster | undefined;
+	/** A frozen roster change is held out of {@link #baseSystemPrompt}, riding notices instead. */
+	#promptRosterHeld = false;
 	/** Full enabled set, including tools demoted from the model-visible surface. */
 	#enabledToolNames = new Set<string>();
 	/**
@@ -1451,7 +1482,7 @@ export class SessionTools {
 					const built = await untilAborted(
 						signal,
 						this.#promptSurfaceScope.run(candidate, () =>
-							rebuildSystemPrompt(validToolNames, this.#toolRegistry),
+							rebuildSystemPrompt(validToolNames, this.#toolRegistry, this.#xdev),
 						),
 					);
 					rebuiltSystemPrompt = built.systemPrompt;
@@ -1511,6 +1542,7 @@ export class SessionTools {
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
 				this.#lastAppliedToolSignature = rebuiltSignature;
+				this.#recordPromptRoster(validToolNames);
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 				this.#setBasePromptXdevNames(rebuiltXdevCatalogNames);
@@ -1525,6 +1557,7 @@ export class SessionTools {
 			} else if (frozenSignature) {
 				this.#notifyToolRosterDelta(previousActiveToolNames, validToolNames);
 				this.#lastAppliedToolSignature = frozenSignature;
+				this.#promptRosterHeld = true;
 			}
 			if (restoreDormantDeviceOnlyWrite) {
 				this.#setDeviceOnlyWrite?.(true);
@@ -1670,6 +1703,30 @@ export class SessionTools {
 		const latest = this.#latestReply();
 		if (latest === undefined) return "free";
 		return latest === this.#restoredTranscript?.reply ? this.#restoredTranscript : "frozen";
+	}
+
+	/**
+	 * Records the roster a just-committed base prompt rendered and ends any hold.
+	 * Only prefix-bound models hold roster changes, so others skip the copy.
+	 */
+	#recordPromptRoster(toolNames: readonly string[]): void {
+		this.#promptRosterHeld = false;
+		if (this.#host.model()?.thinking?.prefixBinding !== true) {
+			this.#basePromptRoster = undefined;
+			return;
+		}
+		const tools = new Map(this.#toolRegistry);
+		const xdev = this.#xdev;
+		this.#basePromptRoster = {
+			toolNames: [...toolNames],
+			tools,
+			xdev: xdev && {
+				tools,
+				mountedNames: new Set(xdev.mountedNames),
+				builtInNames: xdev.builtInNames,
+				isActive: xdev.isActive,
+			},
+		};
 	}
 
 	#notifyToolRosterDelta(previousActiveToolNames: readonly string[], appliedNames: readonly string[]): void {
@@ -2317,6 +2374,12 @@ export class SessionTools {
 		const activeToolNames = this.getActiveToolNames();
 		this.#setActiveToolNames?.(activeToolNames);
 		const previousBaseSystemPrompt = this.#baseSystemPrompt;
+		const heldRoster =
+			this.#promptRosterHeld && this.#implicitRebuildBinding() !== "free" ? this.#basePromptRoster : undefined;
+		if (heldRoster) {
+			const kept = await this.#prepareHeldRosterPrompt(heldRoster, rebuildSystemPrompt, isCurrent);
+			if (kept) return kept;
+		}
 		// Derive the candidate and run the awaited render inside its scope: the
 		// tool getters read the candidate while the prompt renders, so the built
 		// prompt and the captured signature describe the same state. Nothing is
@@ -2326,7 +2389,7 @@ export class SessionTools {
 		// winner.
 		const candidate = this.#derivePromptSurface();
 		const built = await this.#promptSurfaceScope.run(candidate, () =>
-			rebuildSystemPrompt(activeToolNames, this.#toolRegistry),
+			rebuildSystemPrompt(activeToolNames, this.#toolRegistry, this.#xdev),
 		);
 		const promptTools = activeToolNames
 			.map(name => this.#toolRegistry.get(name))
@@ -2352,10 +2415,7 @@ export class SessionTools {
 				this.#promptSurface = candidate;
 				this.#setBasePromptXdevNames(built.xdevCatalogNames);
 				this.#host.clearMemoryPromotionSnapshot();
-				if (
-					previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||
-					previousBaseSystemPrompt.some((part, index) => part !== this.#baseSystemPrompt[index])
-				) {
+				if (!samePromptBlocks(previousBaseSystemPrompt, this.#baseSystemPrompt)) {
 					this.#host.clearInheritedProviderPromptCacheKey();
 				}
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
@@ -2368,6 +2428,45 @@ export class SessionTools {
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 				this.#lastAppliedToolSignature = signature;
+				this.#recordPromptRoster(activeToolNames);
+				return true;
+			},
+		};
+	}
+
+	/**
+	 * Re-renders a frozen prefix's base prompt against the roster it was
+	 * committed with, so a forced rebuild that changes nothing else (a body-only
+	 * skill update, an unchanged memory refresh) keeps the held roster change
+	 * out of the bound prefix — eval description included — and leaves it to its
+	 * notices. Returns `undefined` when the rebuild changes the prompt anyway:
+	 * the prefix breaks regardless, so the caller absorbs the live roster.
+	 */
+	async #prepareHeldRosterPrompt(
+		roster: PromptRoster,
+		rebuildSystemPrompt: SystemPromptRebuilder,
+		isCurrent: (() => boolean) | undefined,
+	): Promise<SystemPromptPreparation | undefined> {
+		const previousBaseSystemPrompt = this.#baseSystemPrompt;
+		const candidate: PromptSurface = {
+			...this.#derivePromptSurface(),
+			evalToolNames: this.#promptSurface.evalToolNames,
+		};
+		const built = await this.#promptSurfaceScope.run(candidate, () =>
+			rebuildSystemPrompt(roster.toolNames, roster.tools, roster.xdev),
+		);
+		if (!samePromptBlocks(built.systemPrompt, previousBaseSystemPrompt)) return undefined;
+		return {
+			systemPrompt: previousBaseSystemPrompt,
+			commit: () => {
+				if (this.#host.isDisposed() || isCurrent?.() === false) return false;
+				if (this.#baseSystemPrompt !== previousBaseSystemPrompt) return true;
+				this.#promptSurface = candidate;
+				this.#host.clearMemoryPromotionSnapshot();
+				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
+				this.#promptModelKey = this.#currentPromptModelKey();
+				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 				return true;
 			},
 		};
