@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Browser relay tabs report their downloads: `tab.waitForDownload()` and `tab.downloads()` return each file where Chrome saved it instead of failing with "Browser target is not found", and an open with `downloads` says the relay cannot choose Chrome's folder ([#17893](https://github.com/can1357/oh-my-pi/pull/17893) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.0] - 2026-11-07
 
 ### Added

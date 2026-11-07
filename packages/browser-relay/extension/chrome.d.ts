@@ -46,6 +46,15 @@ interface ChromeDebuggerTargetInfo {
 	url?: string;
 }
 
+interface ChromeDownloadItem {
+	id: number;
+	/** The URL the file was served from, after redirects. */
+	finalUrl: string;
+	/** Absolute path of the saved file; empty until Chrome has chosen it. */
+	filename: string;
+	state: "in_progress" | "interrupted" | "complete";
+}
+
 declare const chrome: {
 	tabs: {
 		query(queryInfo: { url?: string; groupId?: number }): Promise<ChromeTab[]>;
@@ -78,6 +87,11 @@ declare const chrome: {
 		getTargets(): Promise<ChromeDebuggerTargetInfo[]>;
 		onEvent: ChromeEvent<(source: ChromeDebuggerSession, method: string, params?: Record<string, unknown>) => void>;
 		onDetach: ChromeEvent<(source: ChromeDebuggerSession, reason: string) => void>;
+	};
+	downloads: {
+		search(query: { id?: number }): Promise<ChromeDownloadItem[]>;
+		onCreated: ChromeEvent<(item: ChromeDownloadItem) => void>;
+		onChanged: ChromeEvent<(delta: { id: number; state?: { current: ChromeDownloadItem["state"] } }) => void>;
 	};
 	storage: {
 		local: {
