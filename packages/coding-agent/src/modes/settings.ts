@@ -3,6 +3,7 @@ import type { Settings } from "../config/settings";
 import { MOTION_MODES, MOTION_PRESETS } from "../config/motion-presets";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { cfgReadToolResultPreview } from "../tools/settings";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_DIMENSION, setImageResizeLimits } from "../utils/image-resize";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
 import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import {
@@ -321,9 +322,26 @@ export const cfgImagesAutoResize = register({
 		tab: "appearance",
 		group: "Images",
 		label: "Auto-Resize Images",
-		description: "Resize large images to 2000x2000 max for better model compatibility",
+		description: "Resize large images for better model compatibility (limits: images.maxDimension, images.maxBytes)",
 	},
 });
+
+export const cfgImagesMaxDimension = register({
+	id: "images.maxDimension",
+	type: "number",
+	default: DEFAULT_MAX_DIMENSION,
+	description:
+		"Longest edge in pixels that images are resized to before they reach a model (default 1568). Raise it for OCR or fine detail; providers may enforce their own caps. Non-positive values restore the default.",
+});
+
+export const cfgImagesMaxBytes = register({
+	id: "images.maxBytes",
+	type: "number",
+	default: DEFAULT_MAX_BYTES,
+	description:
+		"Encoded-size budget in bytes for resized images (default 512000, i.e. 500KB). Raise it to keep more detail in large images. Non-positive values restore the default.",
+});
+effect(combine({ maxDimension: cfgImagesMaxDimension, maxBytes: cfgImagesMaxBytes }), setImageResizeLimits);
 
 export const cfgImagesBlockImages = register({
 	id: "images.blockImages",
