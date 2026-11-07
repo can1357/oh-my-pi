@@ -43,6 +43,22 @@ describe("proactive memory linking", () => {
 			beam.close();
 		}
 	});
+	it("does not create references or ctx edges between unrelated memories sharing only a sentence-initial stopword subject", () => {
+		delete process.env.MNEMOPI_PROACTIVE_LINKING;
+		configureRecallFeatures({ proactiveLinking: false });
+		const beam = new BeamMemory({ sessionId: "proactive-stopword-isolation", dbPath: ":memory:" });
+		try {
+			const first = beam.remember("This is a database migration.", { importance: 0.5 });
+			const second = beam.remember("This is a gardening note.", { importance: 0.5 });
+
+			const edges = graphOf(beam).findRelatedMemories(second, 1);
+			expect(
+				edges.some(edge => edge.memoryId === first && (edge.edgeType === "references" || edge.edgeType === "ctx")),
+			).toBe(false);
+		} finally {
+			beam.close();
+		}
+	});
 
 	it("honors host configuration when the environment variable is unset", () => {
 		delete process.env.MNEMOPI_PROACTIVE_LINKING;
