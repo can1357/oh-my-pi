@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `auth-gateway stdio` and `serve` rejecting credentialless Apple on-device models ([#18370](https://github.com/can1357/oh-my-pi/issues/18370))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
