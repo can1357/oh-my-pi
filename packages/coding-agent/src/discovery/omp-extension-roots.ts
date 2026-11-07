@@ -21,10 +21,16 @@ import * as path from "node:path";
 import { getAgentDir, isEnoent, logger, MAIN_CONFIG_FILENAMES, tryParseJson } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { readDirEntries, readFile } from "../capability/fs";
-import type { ExtensionRootMode, LoadContext } from "../capability/types";
+import type { EffectiveExtensionRoots, ExtensionRootMode, LoadContext } from "../capability/types";
 import { getEnabledPlugins } from "../extensibility/plugins/loader";
 import { expandTilde } from "../tools/path-utils";
 import { listClaudePluginRoots } from "./helpers";
+import {
+	dropExcludedPaths,
+	globalResourceExclusions,
+	NO_RESOURCE_EXCLUSIONS,
+	type ResourceExclusions,
+} from "./resource-exclusions";
 
 /** A resolved extension package directory wired into the discovery surfaces. */
 export interface OmpExtensionRoot {
@@ -60,6 +66,8 @@ interface InvocationRootScope {
 	configuredExtensions?: readonly string[];
 	/** Provenance of {@link configuredExtensions}, from `Settings`. Defaults to `user` when unset. */
 	configuredLevel?: "user" | "project";
+	/** Live-at-startup `diagnostics.resourceExclusions` of the owning session. */
+	resourceExclusions?: ResourceExclusions;
 }
 
 const invocationRootScope = new AsyncLocalStorage<InvocationRootScope>();
@@ -99,12 +107,26 @@ export function withOmpExtensionRootScope<T>(
  * providers without reading the process-global settings singleton. No-op
  * outside a {@link withOmpExtensionRootScope} callback.
  */
-export function setInvocationConfiguredExtensions(paths: readonly string[], level: "user" | "project" = "user"): void {
+export function setInvocationConfiguredExtensions(
+	paths: readonly string[],
+	level: "user" | "project" = "user",
+	resourceExclusions?: ResourceExclusions,
+): void {
 	const scope = invocationRootScope.getStore();
 	if (scope) {
 		scope.configuredExtensions = [...paths];
 		scope.configuredLevel = level;
+		scope.resourceExclusions = resourceExclusions;
 	}
+}
+
+/**
+ * Reviewed-resource exclusions in effect for a discovery pass: the session's
+ * live roots value (reload), else the construction-time invocation scope, else
+ * the global settings. Read once per pass, never per candidate.
+ */
+export function activeResourceExclusions(roots?: EffectiveExtensionRoots): ResourceExclusions {
+	return roots?.resourceExclusions ?? invocationRootScope.getStore()?.resourceExclusions ?? globalResourceExclusions();
 }
 
 /**
@@ -336,7 +358,7 @@ export async function listOmpExtensionRoots(ctx: LoadContext): Promise<OmpExtens
 		const { path: p, level } = unique[i];
 		roots.push({ path: p, level, name: path.basename(p) });
 	}
-	return roots;
+	return dropExcludedPaths(roots, root => root.path, activeResourceExclusions(ctx.extensionRoots));
 }
 
 /**
@@ -363,7 +385,8 @@ async function listInstalledPluginRoots(ctx: LoadContext): Promise<InjectedRoot[
 	try {
 		const [plugins, marketplaceRoots] = await Promise.all([
 			getEnabledPlugins(ctx.cwd, { home: ctx.home }),
-			listClaudePluginRoots(ctx.home, ctx.cwd),
+			// Exclusions are not applied here: this set only de-duplicates runtime links.
+			listClaudePluginRoots(ctx.home, ctx.cwd, NO_RESOURCE_EXCLUSIONS),
 		]);
 		const marketplaceRealpaths = new Set(
 			await Promise.all(marketplaceRoots.roots.map(root => realpathOrResolved(root.path))),

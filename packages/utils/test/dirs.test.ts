@@ -9,6 +9,7 @@ import {
 	getLogPath,
 	getProjectDir,
 	localDay,
+	pathIsWithin,
 	relativePathWithinRoot,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils/dirs";
@@ -73,6 +74,13 @@ describe("project directory state", () => {
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
+	});
+
+	it("contains children whose names merely begin with two dots, but not parents", () => {
+		const root = path.join(os.tmpdir(), "omp-dirs-dotdot-containment");
+		expect(pathIsWithin(root, path.join(root, "..cache", "SKILL.md"))).toBe(true);
+		expect(pathIsWithin(root, path.join(root, "..", "sibling"))).toBe(false);
+		expect(pathIsWithin(root, path.dirname(root))).toBe(false);
 	});
 
 	it("keeps the previous directory when chdir fails", () => {
