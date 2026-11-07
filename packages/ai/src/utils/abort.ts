@@ -62,15 +62,23 @@ export function createAbortSourceTracker(callerSignal?: AbortSignal): AbortSourc
  * underlying work to that signal. The shared promise keeps running (and caches
  * its result) even when an individual caller bails out, and stays observed so
  * its later rejection is never unhandled.
+ *
+ * A provided `message` (including `""`) is carried on a fresh `AbortError`; only an
+ * omitted message surfaces the signal's own reason, falling back to a generic
+ * `AbortError`. The empty string is a legitimate caller-supplied message, so the
+ * check is `!== undefined`, not truthiness.
  */
-export function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+export function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined, message?: string): Promise<T> {
 	if (!signal) return promise;
 	if (signal.aborted) {
 		void promise.catch(() => {});
-		return Promise.reject(signal.reason ?? new AIError.AbortError());
+		return Promise.reject(
+			message !== undefined ? new AIError.AbortError(message) : (signal.reason ?? new AIError.AbortError()),
+		);
 	}
 	const { promise: aborted, reject } = Promise.withResolvers<never>();
-	const onAbort = () => reject(signal.reason ?? new AIError.AbortError());
+	const onAbort = () =>
+		reject(message !== undefined ? new AIError.AbortError(message) : (signal.reason ?? new AIError.AbortError()));
 	signal.addEventListener("abort", onAbort, { once: true });
 	return Promise.race([promise, aborted]).finally(() => signal.removeEventListener("abort", onAbort));
 }
