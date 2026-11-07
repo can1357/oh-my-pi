@@ -5,13 +5,13 @@
  * when a woken subagent re-yields, so a parent reads the same shape (status,
  * preview, `agent://` pointer) regardless of which path delivered it.
  */
-import { prompt } from "@oh-my-pi/pi-utils";
+import { escapeXmlAttribute, prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { ASYNC_INLINE_RESULT_MAX_CHARS } from "../session/async-job-delivery";
 import { escapeHarnessTags } from "../session/harness-tags";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import { type SingleResult, resolvedModelDisplay } from "@oh-my-pi/pi-tui/tools/task";
 
 /**
  * Largest output inlined whole. A cut output costs the parent a
@@ -48,7 +48,12 @@ function previewHead(output: string): string {
 	return lastNewline >= PREVIEW_CHARS / 2 ? slice.slice(0, lastNewline) : slice;
 }
 
-/** Render the `<task-result>` envelope for a settled run. */
+/**
+ * `provider/model[:level]` plus the fallback verdict ride the envelope as
+ * attributes, so a parent can verify which model actually ran instead of
+ * parsing the child's raw session JSONL (`model_change` → `model`/
+ * `resolvedModelIsFallback`) as it used to (#16017).
+ */
 export function formatTaskResultSummary(
 	result: SingleResult,
 	options: { totalDurationMs: number; mergeSummary?: string },
@@ -71,12 +76,18 @@ export function formatTaskResultSummary(
 	// irc instead of redoing the work. Isolated runs are parked without a
 	// reviver (their worktree is gone), so they must not read as resumable.
 	const resumable = result.aborted && !result.isolated && isResumable(AgentRegistry.global().get(result.id));
+	// The envelope renders attributes unescaped, so the selector is escaped
+	// here — at the one XML render site. The projection keeps the raw model id
+	// so a JSON consumer (`details.jobs[].model.selector`) reads the id the
+	// parent is meant to verify, not `&quot;` (#16135 review).
+	const model = resolvedModelDisplay(result);
 	const render = (truncated: boolean): string =>
 		prompt.render(taskSummaryTemplate, {
 			agentName: result.agent,
 			id: result.id,
 			status,
 			duration: formatDuration(options.totalDurationMs),
+			model: model && { ...model, selector: escapeXmlAttribute(model.selector) },
 			abortReason: result.aborted ? escapeHarnessTags(result.abortReason ?? "") || undefined : undefined,
 			error: error === undefined ? undefined : escapeHarnessTags(error),
 			resumable,

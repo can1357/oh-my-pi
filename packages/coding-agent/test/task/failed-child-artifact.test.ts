@@ -142,6 +142,8 @@ describe("failed child evidence", () => {
 				requests: 2,
 				outputPath: artifactPath,
 				patchPath: path.join(artifactsDir, `${agentId}.patch`),
+				resolvedModel: "anthropic/claude-opus-5-5:high",
+				resolvedModelIsFallback: false,
 			};
 		});
 
@@ -158,6 +160,13 @@ describe("failed child evidence", () => {
 		expect(salvaged?.exitCode).toBe(0);
 		expect(salvaged?.outputPath).toBe(artifactPath);
 		expect(text?.type === "text" ? text.text : "").toContain(`exit 0. Its output is at \`agent://${salvaged?.id}\``);
+		// The child resolved a model before the merge threw, so the failure the
+		// parent reads carries the model and the fallback verdict: the parent
+		// verifies which model ran without parsing the child's session JSONL
+		// (#16135 review).
+		expect(text?.type === "text" ? text.text : "").toContain(
+			'model="anthropic/claude-opus-5-5:high" fallback="false"',
+		);
 		// The artifact the failure points at survives the run's cleanup.
 		const resolved = await new AgentProtocolHandler().resolve(parseInternalUrl(`agent://${salvaged?.id}`));
 		expect(resolved.content).toBe("Findings: 42 rows.");
