@@ -96,7 +96,7 @@ use crate::bash::{
 };
 
 /// IR version; part of the frames header.
-pub const IR_VERSION: u32 = 15;
+pub const IR_VERSION: u32 = 17;
 
 /// Opcodes.
 #[derive(
@@ -295,31 +295,18 @@ pub struct Unit {
 	pub funcs:               Vec<FuncIr>,
 }
 
-/// The hash of a unit's source context (see [`Unit::source_hasher`]).
-pub(crate) fn source_hasher(
-	mode: ModeId,
-	features: u32,
-	source: &[u8],
-	aliases: &[(BString, BString)],
-	line: u32,
-) -> blake3::Hasher {
-	let mut h = blake3::Hasher::new();
-	h.update(&IR_VERSION.to_le_bytes());
-	h.update(<&'static str>::from(mode).as_bytes());
-	h.update(&features.to_le_bytes());
-	h.update(&(source.len() as u64).to_le_bytes());
-	h.update(source);
-	for (name, value) in aliases {
-		h.update(&(name.len() as u64).to_le_bytes());
-		h.update(name);
-		h.update(&(value.len() as u64).to_le_bytes());
-		h.update(value);
-	}
-	h.update(&line.to_le_bytes());
-	h
-}
-
 impl Unit {
+	/// The message of a syntax-error `Abort` in the code (a brace
+	/// expansion over the limit), for units whose code does not run as a
+	/// whole: a compound value's words are expanded, not executed.
+	pub(crate) fn syntax_abort(&self) -> Option<&BString> {
+		self
+			.ops
+			.iter()
+			.find(|op| op.code == Opcode::Abort && op.flags & Op::SYNTAX != 0)
+			.and_then(|op| self.strs.get(op.a as usize))
+	}
+
 	/// An empty unit for `mode`/`features` over `source`.
 	pub(crate) fn empty(source: &[u8], mode: ModeId, features: u32) -> Self {
 		Self {
@@ -452,6 +439,30 @@ impl Unit {
 				.map(|f| f.body.weight() + f.definition.as_ref().map_or(0, FuncDefinition::weight))
 				.sum::<usize>()
 	}
+}
+
+/// The hash of a unit's source context (see [`Unit::source_hasher`]).
+pub(crate) fn source_hasher(
+	mode: ModeId,
+	features: u32,
+	source: &[u8],
+	aliases: &[(BString, BString)],
+	line: u32,
+) -> blake3::Hasher {
+	let mut h = blake3::Hasher::new();
+	h.update(&IR_VERSION.to_le_bytes());
+	h.update(<&'static str>::from(mode).as_bytes());
+	h.update(&features.to_le_bytes());
+	h.update(&(source.len() as u64).to_le_bytes());
+	h.update(source);
+	for (name, value) in aliases {
+		h.update(&(name.len() as u64).to_le_bytes());
+		h.update(name);
+		h.update(&(value.len() as u64).to_le_bytes());
+		h.update(value);
+	}
+	h.update(&line.to_le_bytes());
+	h
 }
 
 /// A syntax node's location.
@@ -1041,7 +1052,11 @@ pub fn compile_all(src: &[u8], mode: ModeId, features: crate::bash::syntax::Feat
 	let mut units = Vec::new();
 	while let Some(res) = parser.next_command() {
 		units.push(match res {
-			Ok(cc) => compile(&cc, src, mode, features),
+			Ok(cc) => {
+				let unit = compile(&cc, src, mode, features);
+				parser.recycle(cc.tree);
+				unit
+			},
 			Err(e) => syntax_unit(&e, src, mode, features),
 		});
 	}
@@ -1078,6 +1093,34 @@ mod tests {
 			.collect()
 	}
 
+	/// A definition's stored syntax is its own: one written inside another
+	/// function does not carry the text around it (stored per definition,
+	/// that grows with the square of a command's nested functions).
+	#[test]
+	fn nested_definition_stores_only_its_own_syntax() {
+		use crate::bash::syntax::{Features, NO_ALIASES, Parser, PrintStyle};
+
+		let parse = |src: &'static [u8]| {
+			Parser::new(src, Features::NONE, NO_ALIASES)
+				.next_command()
+				.unwrap()
+				.unwrap()
+		};
+		let src = b"outer() { echo OUTER_ONLY_TEXT; inner() { echo in \"$x\" 'q'; } >&2; }\n";
+		let unit = lower(&parse(src), src, ModeId::Bash, Features::NONE).unwrap();
+		let inner = &unit.funcs[0].body.funcs[0];
+		let Some(FuncDefinition::Parsed(bytes)) = &inner.definition else {
+			panic!("a definition lowered without replay is stored parsed");
+		};
+		assert!(!bytes.windows(15).any(|w| w == b"OUTER_ONLY_TEXT"), "{bytes:?}");
+		// What is stored prints as the definition written.
+		let alone = parse(b"inner() { echo in \"$x\" 'q'; } >&2\n");
+		let first = alone.list().items().first().unwrap().and_or().first();
+		let written =
+			crate::bash::syntax::print(first.stages().first().unwrap(), PrintStyle::DeclareF);
+		assert_eq!(FuncText::of(inner).as_slice(), written);
+	}
+
 	#[test]
 	fn lazy_function_text_keeps_a_body_redirections_external_heredoc() {
 		use crate::bash::syntax::{Features, NO_ALIASES, Parser, PrintStyle};
@@ -1087,10 +1130,9 @@ mod tests {
 			.next_command()
 			.unwrap()
 			.unwrap();
-		let expected = crate::bash::syntax::print(
-			&command.list.items[0].and_or.first.stages[0].cmd,
-			PrintStyle::DeclareF,
-		);
+		let first = command.list().items().first().unwrap().and_or().first();
+		let expected =
+			crate::bash::syntax::print(first.stages().first().unwrap(), PrintStyle::DeclareF);
 		let unit = lower_deferred(&command, source, ModeId::Bash, Features::NONE).unwrap();
 		assert_eq!(FuncText::of(&unit.funcs[0]).as_slice(), expected);
 	}
@@ -1186,5 +1228,66 @@ mod tests {
 			(false, true),  // "a$*"
 		];
 		assert_eq!(got, want);
+	}
+
+	/// Node ids reach observers (`NodeRef.node` of events): each id names
+	/// the same syntax across parser rewrites. Ids in order: assignments
+	/// before words, redirection targets after them, `for` words and
+	/// `case` patterns before the bodies; here-document and arithmetic
+	/// contents carry none.
+	#[test]
+	fn node_ids_number_syntax_in_walk_order() {
+		let src: &[u8] = b"a=1 cmd ${x[i]:-d} >o | tr a b && (( z + 1 )); for v in w; do :; done; \
+		                   case s in p|q) :;; esac; cat <<E\n$y\nE\n";
+		let units = compile_all(src, ModeId::Bash, crate::bash::syntax::Features::NONE);
+		let got: Vec<String> = units[0]
+			.nodes
+			.iter()
+			.map(|n| {
+				let text = &units[0].source[n.lo as usize..n.hi as usize];
+				format!("{:?} {}", n.kind, core::str::from_utf8(text).unwrap())
+			})
+			.collect();
+		assert_eq!(units.len(), 1);
+		assert_eq!(got, [
+			"AndOr a=1 cmd ${x[i]:-d} >o | tr a b && (( z + 1 ))",
+			"Pipeline a=1 cmd ${x[i]:-d} >o | tr a b",
+			"Simple a=1 cmd ${x[i]:-d} >o",
+			"Assign a=1",
+			"Word 1",
+			"Word cmd",
+			"Word ${x[i]:-d}",
+			"Word i",
+			"Word d",
+			"Word o",
+			"Simple tr a b",
+			"Word tr",
+			"Word a",
+			"Word b",
+			"Pipeline (( z + 1 ))",
+			"Arith (( z + 1 ))",
+			"AndOr for v in w; do :; done",
+			"Pipeline for v in w; do :; done",
+			"For for v in w; do :; done",
+			"Word w",
+			"AndOr :",
+			"Pipeline :",
+			"Simple :",
+			"Word :",
+			"AndOr case s in p|q) :;; esac",
+			"Pipeline case s in p|q) :;; esac",
+			"Case case s in p|q) :;; esac",
+			"Word s",
+			"Word p",
+			"Word q",
+			"AndOr :",
+			"Pipeline :",
+			"Simple :",
+			"Word :",
+			"AndOr cat <<E",
+			"Pipeline cat <<E",
+			"Simple cat <<E",
+			"Word cat",
+		]);
 	}
 }

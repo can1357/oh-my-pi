@@ -540,10 +540,12 @@ function liveEventStream(headers: Record<string, string>, signal: AbortSignal): 
 	});
 }
 
-/** A dashboard this process started or found; `port` is where it listens, which may differ from the one requested. */
+/** A dashboard this process started or found; `reused` distinguishes another process's server from one we own. */
 export interface StatsServerHandle {
 	hostname: string;
 	port: number;
+	/** True when the dashboard belongs to another process and this process has no server to keep alive. */
+	reused: boolean;
 	stop: () => void;
 }
 
@@ -587,6 +589,7 @@ export async function startServer(
 		const handle: StatsServerHandle = {
 			hostname,
 			port: boundPort,
+			reused: false,
 			stop: () => {
 				for (const key of keys) activeServers.delete(key);
 				server.stop(true);
@@ -606,7 +609,7 @@ export async function startServer(
 		if (server) return register(server);
 		claim = await recoverStatsPort(port, hostname);
 	}
-	if (claim === "reuse") return { hostname, port, stop: () => {} };
+	if (claim === "reuse") return { hostname, port, reused: true, stop: () => {} };
 	if (claim === "bind") {
 		const server = bindDashboardServer(port, hostname);
 		if (server) return register(server);

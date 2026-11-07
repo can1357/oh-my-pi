@@ -1,5 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { AsyncJob, AsyncJobManagerApi } from "../async";
+import { type AsyncJob, type AsyncJobManagerApi, agentProgress } from "../async";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -140,18 +140,18 @@ function emitProgress(
 	previousProgress: unknown,
 ): unknown {
 	if (!emitStatus || !("job" in resolved)) return previousProgress;
-	const progress = resolved.job.latestDetails?.progress;
-	const first = Array.isArray(progress) ? progress[0] : undefined;
-	if (!isRecord(first) || first === previousProgress) return previousProgress;
-	const task = typeof first.assignment === "string" ? first.assignment : first.task;
+	const id = resolved.job.agentId ?? resolved.job.id;
+	const progress = agentProgress(resolved.job.latestDetails, id);
+	if (!progress || progress === previousProgress) return previousProgress;
+	const task = typeof progress.assignment === "string" ? progress.assignment : progress.task;
 	const taskPreview = typeof task === "string" ? task.split("\n")[0]?.slice(0, 120) : undefined;
 	emitStatus({
-		...first,
+		...progress,
 		op: "agent",
-		id: resolved.job.agentId ?? resolved.job.id,
+		id,
 		taskPreview: taskPreview || undefined,
 	});
-	return first;
+	return progress;
 }
 
 /** Largest setTimeout delay before 32-bit overflow (Node/Bun warn and fire in ~1ms past this). */
