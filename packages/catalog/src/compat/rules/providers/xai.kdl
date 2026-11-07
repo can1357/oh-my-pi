@@ -29,6 +29,17 @@ provider "xai" {
 		kind "tts"
 	}
 
+	// xAI lists these beta-latest IDs as aliases of the 0309 SKUs; upstream
+	// snapshot pricing incorrectly assigns Grok 4.7's $2/$6 rates.
+	models "grok-4.20-beta-latest-reasoning" "grok-4.20-beta-latest-non-reasoning" \
+		"grok-4.20-multi-agent-beta-latest" {
+		cost-patch {
+			input 1.25
+			output 2.5
+			cache-read 0.2
+		}
+	}
+
 	// Replaces the provider-keyed prompt-cache session-header baseline.
 	prompt-cache-session-header "x-grok-conv-id"
 	// xAI's function-calling validator 400s on leftover root anyOf/oneOf tool

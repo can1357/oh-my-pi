@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Corrected xAI Grok 4.20 beta-latest alias pricing to match the 0309 models, including the long-context tier ([#18404](https://github.com/can1357/oh-my-pi/issues/18404))
 - Corrected Devin SWE-2 Flash and SWE-2 Fast token pricing, and SWE-2's promotional rates and end time ([#18332](https://github.com/can1357/oh-my-pi/pull/18332) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.18.0] - 2026-11-07
