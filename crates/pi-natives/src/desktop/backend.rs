@@ -16,11 +16,27 @@ use super::{
 	},
 };
 
-/// Whether an AX `perform` action names a raise: `raise` in any case, or the
-/// native `AXRaise`. Matches the macOS action naming, so a raise that arms the
+/// The macOS action an AX `perform` action names, which runs whichever of
+/// the element's own actions matches it regardless of case: `press`, `raise`
+/// and `showmenu` (or `show_menu`) name `AXPress`, `AXRaise` and
+/// `AXShowMenu`, and any other name gains an `AX` prefix unless it starts with
+/// one in any case. The tool's refusals of foreground actions name them by the
+/// same rule.
+pub(crate) fn native_action_name(action: &str) -> String {
+	let action = action.trim();
+	match action.to_ascii_lowercase().as_str() {
+		"press" => "AXPress".to_owned(),
+		"raise" => "AXRaise".to_owned(),
+		"showmenu" | "show_menu" => "AXShowMenu".to_owned(),
+		lower if lower.starts_with("ax") => format!("AX{}", &action[2..]),
+		_ => format!("AX{action}"),
+	}
+}
+
+/// Whether an AX `perform` action names a raise, so a raise that arms the
 /// physical-Escape stop is exactly a raise that runs as `AXRaise`.
 pub(crate) fn is_raise_action(action: &str) -> bool {
-	action.trim().eq_ignore_ascii_case("raise") || action == "AXRaise"
+	native_action_name(action).eq_ignore_ascii_case("AXRaise")
 }
 
 /// How window-targeted input reaches its target.
@@ -455,5 +471,15 @@ pub trait AxBackend {
 	/// a `StaleRef` name the one element left with its fields.
 	fn destroyed(&mut self, _h: &AxHandle) -> bool {
 		false
+	}
+	/// The element that holds keyboard focus in `h`'s application, when the
+	/// backend reads focus per application rather than per element.
+	fn focused_within(&mut self, _h: &AxHandle) -> Option<AxHandle> {
+		None
+	}
+	/// Whether the element answers that `setValue` can write its value;
+	/// `None` when it gave no answer or the backend cannot ask.
+	fn value_settable(&mut self, _h: &AxHandle) -> Option<bool> {
+		None
 	}
 }
