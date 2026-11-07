@@ -209,8 +209,8 @@ export async function runEvalWait(
 ): Promise<{ items: EvalHandleSnapshot[] }> {
 	const { items, timeoutMs } = parseRefs(args);
 	const resolved = items.map(item => resolveHandle(item, options));
-	// Worker job rows are snapshots. Capture each row when its own promise settles
-	// before another handle can keep this wait open past the row's retention.
+	// Worker job rows are snapshots: re-read each row when it settles, before
+	// another handle can hold this wait open past the row's retention.
 	const refresh = (handle: ResolvedHandle): void => {
 		if ("job" in handle) handle.job = handle.manager.getJob(handle.ref.id) ?? handle.job;
 	};
@@ -251,8 +251,10 @@ export async function runEvalWait(
 				clearInterval(interval);
 				for (const release of releaseHolds) release();
 			}
-			if (!options.emitStatus) for (const handle of resolved) refresh(handle);
-			for (const handle of resolved) emitLatestProgress(handle);
+			for (const handle of resolved) {
+				refresh(handle);
+				emitLatestProgress(handle);
+			}
 			if (outcome === "aborted") {
 				for (const handle of resolved) cancelResolved(handle, options.signal?.reason);
 				await Promise.allSettled(
