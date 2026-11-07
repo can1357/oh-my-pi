@@ -190,12 +190,18 @@ fn is_utf8_locale(value: &str) -> bool {
 /// can read the user's keystrokes and the terminal's protocol replies out from
 /// under the TUI, or prompt on it. Detached, a `/dev/tty` open fails
 /// (`ENXIO`), so a prompt errors out instead.
+#[cfg(unix)]
 pub(crate) fn detach_from_terminal(cmd: &mut std::process::Command) {
-	#[cfg(unix)]
 	std::os::unix::process::CommandExt::setsid(cmd, true);
-	#[cfg(not(unix))]
-	let _ = cmd;
 }
+
+#[cfg(not(unix))]
+#[allow(
+	clippy::needless_pass_by_ref_mut,
+	reason = "no controlling terminal to detach from off unix; the signature matches the unix \
+	          variant"
+)]
+pub(crate) const fn detach_from_terminal(_cmd: &mut std::process::Command) {}
 
 /// Run `git` asynchronously with bounded capture and a deadline.
 /// Non-zero exits are returned in [`CliOutput`], not raised.
