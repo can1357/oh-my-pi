@@ -16,6 +16,9 @@
 - Fixed Codex Responses requests losing tool namespaces and developer-provided additional tools when replayed through the authentication gateway.
 - Fixed Gemini malformed responses being treated as unhandled stop reasons and losing token usage; they are now handled as transient transport errors.
 - Improved Cursor compatibility with TLS-intercepting proxies that block HTTP/2 by falling back to HTTP/1 for subsequent turns.
+### Changed
+
+- `SqliteAuthCredentialStore` declares the row type at each prepared statement instead of asserting it with `as` at the read site, so a consumer that reads a field the declaration does not cover stops typechecking instead of being papered over ([#15437](https://github.com/can1357/oh-my-pi/pull/15437) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
