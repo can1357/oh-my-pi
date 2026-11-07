@@ -3640,6 +3640,45 @@ describe("ACP agent", () => {
 		await harness.agent.dispose();
 	});
 
+	it("reports a failed extension compaction through onError exactly once", async () => {
+		// The ACP host hands its own action sets to the extension runner; the
+		// compaction entry point is one of them (issue #12041).
+		const initializeSpy = spyOn(ExtensionRunner.prototype, "initialize");
+		try {
+			// Inside the guard: a setup failure must not leave the prototype spy
+			// installed for every later test in the process.
+			const harness = await createHarness({ extensionRunners: true });
+			try {
+				const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+				const session = harness.findSession(created.sessionId);
+				if (!session) throw new Error("Expected an ACP session");
+				session.compact = async () => {
+					throw new Error("Compaction already in progress");
+				};
+
+				const contexts = initializeSpy.mock.calls.at(-1);
+				const contextActions = contexts?.[1];
+				const commandActions = contexts?.[2];
+				if (!contextActions || !commandActions) throw new Error("Expected extension contexts");
+
+				for (const compact of [contextActions.compact, commandActions.compact]) {
+					const errors: Error[] = [];
+					const outcome = await compact({ onError: error => errors.push(error) }).then(
+						() => "resolved" as const,
+						() => "rejected" as const,
+					);
+					expect(outcome).toBe("resolved");
+					expect(errors).toHaveLength(1);
+					expect(errors[0]?.message).toBe("Compaction already in progress");
+				}
+			} finally {
+				await harness.agent.dispose();
+			}
+		} finally {
+			initializeSpy.mockRestore();
+		}
+	});
+
 	describe("ACP elicitation bridge", () => {
 		const FORM_CAPABILITIES: ClientCapabilities = { elicitation: { form: {} } };
 
