@@ -27,7 +27,7 @@ use bstr::{BStr, BString};
 use serde::{Deserialize, Serialize};
 
 use super::{
-	CallOutcome, Cx, Kernel, Shell, host_stdio,
+	CallOutcome, Cx, Kernel, Shell, exec, host_stdio,
 	proc::{
 		Atom, Awaited, ExecState, Frame, FrameKind, JobState, Live, LoopRec, PendingSub,
 		PendingWrite, Probe, ProbeResult, RedirProgress, Run, Saved, Scratch, ScratchIo, ScratchZsh,
@@ -38,7 +38,7 @@ use super::{
 use crate::bash::{
 	engine::Engine,
 	error::{ExtError, Incompatibility, RestoreError},
-	event::{EventData, EventMask, OriginChain, WaitKey},
+	event::{EventData, EventMask, OriginChain, SourceOrigin, SpanOwned, WaitKey},
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::FileKind,
 	host::{Host, StdFd},
@@ -94,6 +94,24 @@ struct Image {
 	bangs:     Vec<super::proc::Bang>,
 	/// Their commands' redirections still deciding ([`Kernel::deferrals`]).
 	deferrals: Vec<super::proc::Deferral>,
+}
+
+type OriginImage = (Vpid, u32, SpanOwned);
+
+fn origin_image(origin: SourceOrigin) -> OriginImage {
+	(origin.vpid, origin.node, origin.span)
+}
+
+fn restore_origin((vpid, node, span): OriginImage) -> SourceOrigin {
+	SourceOrigin { vpid, node, span }
+}
+
+/// Optional trailing origin metadata, absent in older images. A body first
+/// called after restore still needs the source that defined it. Only the
+/// reachable part is saved: dead origin records are never liveness roots.
+#[derive(Default, Serialize, Deserialize)]
+struct TraceImage {
+	origins: Vec<(Vpid, Vec<(UnitId, OriginImage)>)>,
 }
 
 /// One fd object.
@@ -492,24 +510,13 @@ impl Shell {
 			reissued_fs: std::mem::take(&mut self.k.dropped_fs),
 			..ExternalizeReport::default()
 		};
-		// Function bodies: a restored shell loads them by id rather than
-		// recompiling the canonical text, which would lose the definition's
-		// line numbers.
-		let mut funcs = Vec::new();
-		cx.store.scan(Table::Func, &mut |_, rec| {
-			if let Record::Func { unit, .. } = rec {
-				funcs.push(*unit);
-			}
-		})?;
-		for ov in self.procs.iter().filter_map(|p| p.overlay.as_ref()) {
-			for rec in ov.records.values().flatten() {
-				if let Record::Func { unit, .. } = rec {
-					funcs.push(*unit);
-				}
-			}
-		}
-		let mut live: std::collections::HashSet<UnitId> = funcs.iter().copied().collect();
-		for id in funcs {
+		let live = exec::live_units(
+			&mut self.k,
+			cx.store,
+			self.procs.iter().map(Box::as_ref),
+			exec::UnitScope::All,
+		)?;
+		for &id in &live {
 			if !self.k.written.contains(&id)
 				&& let Some(unit) = self.k.engine.cached(&id)
 			{
@@ -525,14 +532,12 @@ impl Shell {
 		for p in &mut self.procs {
 			let mut frames = Vec::with_capacity(p.frames.len());
 			for f in &mut p.frames {
-				if let Some(unit) = &f.unit {
-					live.insert(unit.id);
-				}
 				if let Some(unit) = &f.unit
-					&& self.k.written.insert(unit.id)
+					&& !self.k.written.contains(&unit.id)
 				{
 					let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
 					cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
+					self.k.written.insert(unit.id);
 					report.units_written += 1;
 				}
 				let scratch = f
@@ -578,10 +583,10 @@ impl Shell {
 			runs.extend(p.runs.iter().map(|r| r.id));
 			let command = match &p.command {
 				Some((unit, node)) => {
-					live.insert(unit.id);
-					if self.k.written.insert(unit.id) {
+					if !self.k.written.contains(&unit.id) {
 						let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
 						cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
+						self.k.written.insert(unit.id);
 						report.units_written += 1;
 					}
 					Some((unit.id, *node))
@@ -624,24 +629,6 @@ impl Shell {
 				blocked: p.blocked.as_ref().map(|b| (b.key.clone(), b.at)),
 			});
 		}
-		// A unit blob exists for the frames and function records that name
-		// it. One-shot sources (an `eval`, a trap action, a sourced file,
-		// the script a callout runs) are a fresh unit per distinct text, so
-		// without this the image grows with the texts a run ever compiled
-		// rather than with what a restore needs.
-		if self.k.written.len() > live.len() {
-			let stale: Vec<UnitId> = self
-				.k
-				.written
-				.iter()
-				.filter(|id| !live.contains(id))
-				.copied()
-				.collect();
-			for id in stale {
-				cx.store.del_blob(BlobSlot::Unit(id))?;
-				self.k.written.remove(&id);
-			}
-		}
 		let k = &self.k;
 		let header = Header {
 			magic: MAGIC,
@@ -670,7 +657,37 @@ impl Shell {
 		};
 		let mut bytes = postcard::to_stdvec(&header).map_err(ExtError::Encode)?;
 		bytes.extend_from_slice(&postcard::to_stdvec(&image).map_err(ExtError::Encode)?);
+		let trace = TraceImage {
+			origins: k
+				.trace_unit_origins
+				.iter()
+				.map(|(&vpid, origins)| {
+					(
+						vpid,
+						origins
+							.iter()
+							.filter(|(unit, _)| live.contains(unit))
+							.map(|(&unit, &origin)| (unit, origin_image(origin)))
+							.collect(),
+					)
+				})
+				.collect(),
+		};
+		bytes.extend_from_slice(&postcard::to_stdvec(&trace).map_err(ExtError::Encode)?);
 		cx.store.put_blob(BlobSlot::Frames, &bytes)?;
+		// No deletion may precede the successful replacement Frames write:
+		// until then, the last committed image still owns its unit blobs.
+		let stale: Vec<_> = self
+			.k
+			.written
+			.iter()
+			.filter(|unit| !live.contains(unit))
+			.copied()
+			.collect();
+		for unit in stale {
+			cx.store.del_blob(BlobSlot::Unit(unit))?;
+			self.k.written.remove(&unit);
+		}
 		report.bytes = bytes.len();
 		Ok(report)
 	}
@@ -749,9 +766,30 @@ impl Shell {
 				report.abandoned = header.runs;
 			} else {
 				check(&header).map_err(|why| RestoreError::Incompatible { why })?;
-				let image: Image = postcard::from_bytes(body).map_err(RestoreError::Corrupt)?;
+				let (image, trailing) =
+					postcard::take_from_bytes::<Image>(body).map_err(RestoreError::Corrupt)?;
+				let trace = if trailing.is_empty() {
+					TraceImage::default()
+				} else {
+					postcard::from_bytes(trailing).map_err(RestoreError::Corrupt)?
+				};
 				shell.apply(engine, cx, image, &mut stdio, &mut report)?;
 				shell.seed_orphans();
+				shell.k.trace_unit_origins = trace
+					.origins
+					.into_iter()
+					.map(|(vpid, origins)| {
+						(
+							vpid,
+							Arc::new(
+								origins
+									.into_iter()
+									.map(|(unit, origin)| (unit, restore_origin(origin)))
+									.collect(),
+							),
+						)
+					})
+					.collect();
 				restored = true;
 			}
 			cx.store.del_blob(BlobSlot::Frames)?;
@@ -764,10 +802,25 @@ impl Shell {
 			return Err(RestoreError::Store(err));
 		}
 		reinstall_signal_traps(cx)?;
+		// Replace the observer's old engine roots with what this restored
+		// shell actually reaches, including provenance. This also removes
+		// mappings from arbitrary work discarded after the checkpoint,
+		// without needing the discarded kernel's announcement record.
+		let mut live = HashMap::new();
+		for vp in &shell.procs {
+			let units = exec::live_units(
+				&mut shell.k,
+				cx.store,
+				shell.procs.iter().map(Box::as_ref),
+				exec::UnitScope::One(vp.vpid),
+			)?;
+			live.insert(vp.vpid, units);
+		}
 		let root = (shell.procs[0].vpid, shell.procs[0].mode);
 		shell
 			.k
-			.emit(cx, root, None, EventData::Restored { report: &report });
+			.emit(cx, root, None, EventData::Restored { report: &report, live: &live });
+		shell.k.restored_claims = live;
 		Ok((shell, report))
 	}
 

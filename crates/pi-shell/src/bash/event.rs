@@ -14,7 +14,10 @@
 //! Output bytes are not events: hosts tag what commands write with the
 //! [`CmdTag`](crate::bash::CmdTag) of the command that produced it.
 
-use std::fmt;
+use std::{
+	collections::{HashMap, HashSet},
+	fmt,
+};
 
 use bstr::{BStr, BString};
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
@@ -972,6 +975,15 @@ pub enum EventData<'a> {
 	Restored {
 		/// What was restored and lost.
 		report: &'a RestoreReport,
+		/// Exact engine-derived unit roots after restore, including origin
+		/// closure. Replaces the observer's previous engine-derived roots.
+		///
+		/// In-process only: it addresses the engine's own identifiers, which
+		/// mean nothing to a host, and a serialized copy would put every live
+		/// unit id of every vproc into the restore event a host already reads.
+		/// The serialized shape of this event is therefore unchanged.
+		#[serde(skip)]
+		live:   &'a HashMap<Vpid, HashSet<UnitId>>,
 	},
 	/// Something could not be restored.
 	Lost {

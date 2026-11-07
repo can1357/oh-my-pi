@@ -2,7 +2,7 @@
 //! per-op semantics, and frame control (calls, returns, unwinding).
 
 use std::{
-	collections::HashMap,
+	collections::{HashMap, HashSet},
 	fmt::NumBuffer,
 	sync::Arc,
 	task::{Context, Poll},
@@ -31,7 +31,7 @@ use crate::bash::{
 	ir::{self, ComsubForm, Op, Opcode, SpawnKind, Unit},
 	mem::{self, Capture},
 	pattern::PatOpts,
-	store::{Attrs, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
+	store::{Attrs, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, Table, TrapKey},
 	syntax::{CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume},
 	zshopt::ZshOpt,
 };
@@ -63,7 +63,14 @@ pub enum Flow {
 
 /// Run vproc `vp` for up to `slice` ops; stops early when it parks, a
 /// script finishes, a control request arrives or a store fault is pending.
-pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, ops: &mut u32) {
+pub fn run_slice(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	others: (&[Box<Vproc>], &[Box<Vproc>]),
+	cx: &mut Cx<'_>,
+	slice: u32,
+	ops: &mut u32,
+) {
 	let mut n = 0u32;
 	// The running unit, held across ops: consecutive ops of one unit reuse
 	// it instead of an `Arc` increment and decrement per op (xeon profile:
@@ -137,7 +144,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				}
 				continue;
 			}
-			match next_command(k, vp, cx) {
+			match next_command(k, vp, others, cx) {
 				Some(key) => return park(k, cx, vp, key, at),
 				None => unblock(k, cx, vp),
 			}
@@ -897,11 +904,16 @@ pub(super) fn features(
 /// Parse and compile the next command of the top script frame; pop the
 /// frame at end of input. A script read from stdin first reads lines until
 /// the command is complete; `Some` is the wait key while fd 0 has none.
-fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitKey> {
+fn next_command(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	others: (&[Box<Vproc>], &[Box<Vproc>]),
+	cx: &mut Cx<'_>,
+) -> Option<WaitKey> {
 	let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
 	let depth = vp.frames.len();
 	if observed {
-		retire_sources(k, cx, vp);
+		retire_sources(k, cx, vp, others);
 	}
 	if observed {
 		if let Some(origins) = k.trace_sources.get_mut(&vp.vpid) {
@@ -1363,16 +1375,7 @@ fn announce_at(
 		} else {
 			clear_source_origin(k, unit, vpid);
 		}
-		let fresh = {
-			let announced = k.announced.entry(vpid).or_default();
-			// A vproc that reaches this many distinct sources without any of
-			// them falling out of reach starts again. Reannouncements are
-			// safe; an already-known key needs no eviction.
-			if announced.len() >= 20_000 && !announced.contains(&key) {
-				announced.clear();
-			}
-			announced.insert(key)
-		};
+		let fresh = k.announced.entry(vpid).or_default().insert(key);
 		if fresh {
 			if unit.trace_syntax.get().is_none()
 				&& let Some(syntax) = crate::bash::trace::syntax::UnitSyntax::restore(unit)
@@ -1389,85 +1392,185 @@ fn announce_at(
 	}
 }
 
-/// Retire the sources this vproc can no longer reach.
-///
-/// A one-shot source — an `eval` string, a trap action, a sourced file, the
-/// script a host callout runs, the text of a command substitution — is a
-/// fresh compiled unit for every distinct text, while what an observer can
-/// still replay is bounded. Without this the observer's own source table
-/// grows with the number of texts rather than with what it can show, for a
-/// program whose own text never changes.
-///
-/// A source on a live frame, or the command in flight, is never retired.
-/// Retiring one early is safe and self-correcting: the next execution
-/// announces it again, because the announcement record goes with it.
-pub(super) fn retire_sources(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) {
-	let Some(announced) = k.announced.get(&vp.vpid) else {
-		return;
-	};
-	// One source per frame plus the command in flight is all a vproc can
-	// reach, so nothing below that can be stale.
-	if announced.len() <= vp.frames.len() + 1 {
-		return;
-	}
-	let live: std::collections::HashSet<crate::bash::ids::UnitId> = vp
-		.frames
-		.iter()
-		.filter_map(|f| f.unit.as_ref().map(|u| u.id))
-		.chain(vp.command.as_ref().map(|(unit, _)| unit.id))
-		.collect();
-	// A source that is some other source's recorded origin is still the
-	// parent an announcement of that other source will name, which can
-	// happen the first time a function defined inside it is called. Its
-	// record is kept for the same reason, below.
-	let parents: std::collections::HashSet<crate::bash::ids::UnitId> = k
-		.trace_unit_origins
-		.get(&vp.vpid)
-		.into_iter()
-		.flat_map(|origins| origins.values().map(|origin| origin.span.unit))
-		.collect();
-	let retired: std::collections::HashSet<crate::bash::ids::UnitId> = announced
-		.iter()
-		.map(|(unit, _)| *unit)
-		.filter(|unit| !live.contains(unit) && !parents.contains(unit))
-		.collect();
-	if retired.is_empty() {
-		return;
-	}
-	if let Some(announced) = k.announced.get_mut(&vp.vpid) {
-		announced.retain(|(unit, _)| !retired.contains(unit));
-	}
-	// The origin record stays. It is keyed by unit but it is the DEFINITION's
-	// provenance, recorded for a unit and every function body inside it, and
-	// a body is announced when it is first called, which can be long after
-	// the defining source was retired. Dropping it with the announcement
-	// costs a re-entered function its parent, measured on
-	// `eval 'f() { …; }; f'; …; f`.
-	for unit in retired {
-		k.emit(cx, (vp.vpid, vp.mode), vp.runs.front(), EventData::UnitRetired { unit });
-	}
+/// Which live execution stacks contribute roots. Callable definitions are
+/// shell-wide roots in either scope.
+#[derive(Clone, Copy)]
+pub(super) enum UnitScope {
+	One(Vpid),
+	All,
 }
 
-/// Retire every source a vproc that is gone had announced. A vproc the
-/// engine forks for a command substitution or a subshell ends without a
-/// `RunEnd` of its own, so this is the only point at which an observer
-/// learns that what it keeps for that vproc can go.
-pub(super) fn retire_vproc_sources(
+/// The compiled units a shell can still reach. This is the only root rule.
+///
+/// R1: units on live frames of the selected live vprocs.
+/// R2: their compiled commands in flight, even before their first event.
+/// R3: callable function records in the root store and every live overlay.
+/// R4: recorded origins of those units, transitively. A dead origin record
+/// is not itself a root.
+///
+/// The function-table scan is cached across commands until a function
+/// write, external store invalidation or vproc removal changes its epoch.
+/// Observer mappings are always claimed by the live kernel, which claims
+/// only units in this set; a restore rebuilds those claims from this rule.
+pub(super) fn live_units<'a>(
+	k: &'a mut Kernel,
+	store: &mut dyn StateStore,
+	procs: impl Iterator<Item = &'a Vproc> + Clone,
+	scope: UnitScope,
+) -> Result<HashSet<UnitId>, StoreError> {
+	let procs = procs.chain(k.spawned.iter().map(Box::as_ref));
+	if k.func_units_epoch != Some(k.root.func_epoch) {
+		let mut funcs = HashSet::new();
+		store.scan(Table::Func, &mut |_, record| {
+			if let Record::Func { unit, .. } = record {
+				funcs.insert(*unit);
+			}
+		})?;
+		for overlay in procs.clone().filter_map(|vp| vp.overlay.as_ref()) {
+			for record in overlay.records.values().flatten() {
+				if let Record::Func { unit, .. } = record {
+					funcs.insert(*unit);
+				}
+			}
+		}
+		k.func_units = funcs;
+		k.func_units_epoch = Some(k.root.func_epoch);
+	}
+	let mut live = k.func_units.clone();
+	for vp in procs.filter(|vp| match scope {
+		UnitScope::One(vpid) => vp.vpid == vpid,
+		UnitScope::All => true,
+	}) {
+		live.extend(
+			vp.frames
+				.iter()
+				.filter_map(|frame| frame.unit.as_ref().map(|unit| unit.id)),
+		);
+		live.extend(vp.command.as_ref().map(|(unit, _)| unit.id));
+	}
+	let mut pending: Vec<_> = live.iter().copied().collect();
+	while let Some(unit) = pending.pop() {
+		for origins in k.trace_unit_origins.values() {
+			if let Some(origin) = origins.get(&unit)
+				&& live.insert(origin.span.unit)
+			{
+				pending.push(origin.span.unit);
+			}
+		}
+	}
+	Ok(live)
+}
+
+/// Apply the shared root set to one observer mapping. Origins remain
+/// provenance for a future announcement, never independent roots.
+pub(super) fn retire_announced(
 	k: &mut Kernel,
 	cx: &mut Cx<'_>,
 	vpid: Vpid,
-	mode: crate::bash::ids::ModeId,
+	mode: ModeId,
+	run: Option<&Run>,
+	live: &HashSet<UnitId>,
 ) {
-	let Some(announced) = k.announced.remove(&vpid) else {
-		return;
-	};
-	if !k.mask.contains(crate::bash::event::EventKind::UnitRetired) {
+	let mut retired = HashSet::new();
+	if let Some(announced) = k.announced.get_mut(&vpid) {
+		announced.retain(|(unit, _)| {
+			if live.contains(unit) {
+				true
+			} else {
+				retired.insert(*unit);
+				false
+			}
+		});
+		if announced.is_empty() {
+			k.announced.remove(&vpid);
+		}
+	}
+	if let Some(claims) = k.restored_claims.get_mut(&vpid) {
+		claims.retain(|unit| {
+			if live.contains(unit) {
+				true
+			} else {
+				retired.insert(*unit);
+				false
+			}
+		});
+		if claims.is_empty() {
+			k.restored_claims.remove(&vpid);
+		}
+	}
+	for unit in retired {
+		k.emit(cx, (vpid, mode), run, EventData::UnitRetired { unit });
+	}
+}
+
+/// Retire this vproc's unreachable sources, and any mappings left by gone
+/// vprocs. The bookkeeping set avoids visiting every vproc's announcements
+/// on each command. A gone vproc may still have a reachable source, so its
+/// mapping must remain sweepable when the final live owner releases it.
+pub(super) fn retire_sources(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	others: (&[Box<Vproc>], &[Box<Vproc>]),
+) {
+	if !k.announced.contains_key(&vp.vpid)
+		&& !k.restored_claims.contains_key(&vp.vpid)
+		&& k.retiring_vpids.is_empty()
+	{
 		return;
 	}
-	let units: std::collections::HashSet<crate::bash::ids::UnitId> =
-		announced.into_iter().map(|(unit, _)| unit).collect();
-	for unit in units {
-		k.emit(cx, (vpid, mode), None, EventData::UnitRetired { unit });
+	let procs = std::iter::once(vp).chain(others.0.iter().chain(others.1).map(Box::as_ref));
+	let live = match live_units(k, cx.store, procs.clone(), UnitScope::One(vp.vpid)) {
+		Ok(live) => live,
+		Err(error) => {
+			k.fail(error);
+			return;
+		},
+	};
+	retire_announced(k, cx, vp.vpid, vp.mode, vp.runs.front(), &live);
+	if !k.retiring_vpids.is_empty() {
+		let live = match live_units(k, cx.store, procs, UnitScope::All) {
+			Ok(live) => live,
+			Err(error) => {
+				k.fail(error);
+				return;
+			},
+		};
+		let gone: Vec<_> = k
+			.retiring_vpids
+			.iter()
+			.map(|(&vpid, &mode)| (vpid, mode))
+			.collect();
+		for (vpid, mode) in gone {
+			retire_announced(k, cx, vpid, mode, None, &live);
+			if !k.announced.contains_key(&vpid) && !k.restored_claims.contains_key(&vpid) {
+				k.retiring_vpids.remove(&vpid);
+				k.trace_unit_origins.remove(&vpid);
+			}
+		}
+	}
+}
+
+/// A gone vproc retires only sources the remaining live shell cannot reach.
+pub(super) fn retire_vproc_sources(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	procs: &[Box<Vproc>],
+	vpid: Vpid,
+	mode: ModeId,
+) {
+	// Removing an overlay can remove callable definitions from the cache.
+	k.root.func_epoch += 1;
+	let live = match live_units(k, cx.store, procs.iter().map(Box::as_ref), UnitScope::All) {
+		Ok(live) => live,
+		Err(error) => {
+			k.fail(error);
+			return;
+		},
+	};
+	retire_announced(k, cx, vpid, mode, None, &live);
+	if k.announced.contains_key(&vpid) || k.restored_claims.contains_key(&vpid) {
+		k.retiring_vpids.insert(vpid, mode);
 	}
 }
 

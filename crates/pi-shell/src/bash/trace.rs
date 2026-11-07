@@ -642,8 +642,8 @@ impl Inner {
 			.enumerate()
 			.map(|(index, unit)| unit.at.map(|_| index as u32))
 			.collect();
-		// A vproc that can still execute needs its announced units, even if
-		// their last execution has already left the journal.
+		// Only the engine decides liveness. These are the mappings it has
+		// announced and not retired, or explicitly retained at restore.
 		for units in self.by_id.values() {
 			for &index in units.values() {
 				remap[index as usize] = Some(index);
@@ -760,13 +760,24 @@ impl Inner {
 					units.retain(|(_, id), _| *id != unit);
 				}
 			},
-			// A restored kernel remembers none of the announcements the
-			// previous one made, so it can never retire them; an observer
-			// that keeps them would pin every source the old kernel had
-			// announced for ever. A restored frame announces its source
-			// again when it executes, so forgetting them costs nothing.
-			EventData::Restored { .. } => {
-				self.by_id.clear();
+			EventData::Restored { live, .. } => {
+				// Resolve kept indices before replacing mappings, preserving the
+				// source keys a presentation already offered. The restored kernel
+				// claims each replacement and can later retire it.
+				let previous = std::mem::take(&mut self.by_id);
+				for (&vpid, units) in live {
+					let mut mapped = HashMap::new();
+					for old in previous.get(&vpid).into_iter().chain(previous.values()) {
+						for (&key, &index) in old {
+							if units.contains(&key.1) {
+								mapped.entry(key).or_insert(index);
+							}
+						}
+					}
+					if !mapped.is_empty() {
+						self.by_id.insert(vpid, mapped);
+					}
+				}
 			},
 			EventData::Diag { code, message } => {
 				if self.diags.len() == DIAGS {
