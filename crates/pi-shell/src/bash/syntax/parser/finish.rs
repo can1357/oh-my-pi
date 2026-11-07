@@ -328,7 +328,11 @@ mod tests {
 		assert_eq!(source.raw, b"hello\n");
 		assert_eq!(source.span, crate::bash::syntax::Span::new(3, 3));
 		assert_eq!(source.close, Some(crate::bash::syntax::Span::new(3, 3)));
-		assert!(source.flat);
+		// Every byte of the body is alias text: one run that consumes no
+		// source, so each reports the offset after the aliased word.
+		assert_eq!(source.origins.at(0, 0), 3);
+		assert_eq!(source.origins.at(source.raw.len() as u32, 0), 3);
+		assert!(source.origins.flat_at(0));
 		assert_eq!(doc.text, b"hello\n");
 	}
 

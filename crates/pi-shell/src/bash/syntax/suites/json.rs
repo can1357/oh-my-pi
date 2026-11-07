@@ -2397,8 +2397,8 @@ fn a_backquoted_body_reports_the_bytes_it_was_read_from() {
 	for offsets in [Offsets::Bytes, Offsets::Utf16] {
 		let json = to_json(src, &program, JsonDialect::Shfmt, offsets);
 		let shfmt: serde_json::Value = serde_json::from_str(&json).unwrap();
-		let inner = &shfmt["Stmts"][0]["Cmd"]["Args"][1]["Parts"][0]["Stmts"][0]["Cmd"]["Args"][2]
-			["Parts"][0];
+		let inner =
+			&shfmt["Stmts"][0]["Cmd"]["Args"][1]["Parts"][0]["Stmts"][0]["Cmd"]["Args"][2]["Parts"][0];
 		assert_eq!(inner["Type"], "DblQuoted", "{offsets:?}: {json}");
 		assert_eq!(token_range(inner), Some((15, 23)), "{offsets:?}: {json}");
 	}

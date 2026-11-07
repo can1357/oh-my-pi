@@ -16,7 +16,7 @@ use crate::bash::{ids::ModeId, ir, syntax as syn};
 /// postcard reports as a corrupt value rather than as an old archive. This
 /// number rises with the tree, beside `ir::IR_VERSION`, so an older archive
 /// is refused by its version instead.
-const ARCHIVE_VERSION: u8 = 6;
+const ARCHIVE_VERSION: u8 = 7;
 
 /// Exact originating region, when the engine supplies one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -666,6 +666,102 @@ pub struct HereDoc {
 	pub source:    Option<HereDocSource>,
 }
 
+/// One run of a reconstructed buffer whose bytes came from one place.
+///
+/// `len` source bytes starting at `off` produced the buffer bytes starting at
+/// `raw`; a run of `len == 0` came from text with no bytes in the source (an
+/// alias expansion), whose every byte is reported at `off`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OriginRun {
+	/// First index in the reconstructed buffer this run covers.
+	pub raw: u32,
+	/// Source offset its first byte was read at.
+	pub off: u32,
+	/// Source bytes the run consumed; 0 for text outside the source.
+	pub len: u32,
+}
+
+/// Where each byte of a reconstructed buffer was read, recorded as it was
+/// read rather than derived from the byte's index.
+///
+/// A buffer the parser rebuilds (a here-document body, the code of a
+/// backquoted substitution) is not a slice of the source: escape bytes and
+/// line continuations are dropped and alias text is spliced in, so its own
+/// indices are bytes of another buffer. A sub-parser over it reports
+/// positions through this map.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Origins {
+	/// Runs in buffer order.
+	pub runs: Vec<OriginRun>,
+	/// Bytes covered.
+	pub len:  u32,
+}
+
+impl Origins {
+	/// Record that the next `count` buffer bytes were read at `off`.
+	///
+	/// `flat` marks text with no bytes in the source: the cursor reports one
+	/// offset for all of it, so the run consumes no source.
+	pub fn push(&mut self, off: u32, count: usize, flat: bool) {
+		let count = count as u32;
+		if count == 0 {
+			return;
+		}
+		let len = if flat { 0 } else { count };
+		if let Some(last) = self.runs.last_mut() {
+			let joins = if len == 0 {
+				last.len == 0 && last.off == off
+			} else {
+				last.len != 0 && last.raw + last.len == self.len && last.off + last.len == off
+			};
+			if joins {
+				last.len += len;
+				self.len += count;
+				return;
+			}
+		}
+		self.runs.push(OriginRun { raw: self.len, off, len });
+		self.len += count;
+	}
+
+	/// Drop everything after the first `len` buffer bytes.
+	pub fn truncate(&mut self, len: u32) {
+		if len >= self.len {
+			return;
+		}
+		self.runs.retain(|r| r.raw < len);
+		if let Some(last) = self.runs.last_mut()
+			&& last.len != 0
+		{
+			last.len = last.len.min(len - last.raw);
+		}
+		self.len = len;
+	}
+
+	/// Source offset of buffer index `i`, or `base` when nothing was
+	/// recorded. `i == len` reports the offset just after the last byte.
+	pub fn at(&self, i: u32, base: u32) -> u32 {
+		let idx = self.runs.partition_point(|r| r.raw <= i);
+		let Some(run) = idx.checked_sub(1).and_then(|k| self.runs.get(k)) else {
+			return base;
+		};
+		if run.len == 0 {
+			run.off
+		} else {
+			run.off + (i - run.raw).min(run.len)
+		}
+	}
+
+	/// Whether buffer index `i` came from text with no bytes in the source,
+	/// so every byte of its run reports one offset.
+	pub fn flat_at(&self, i: u32) -> bool {
+		let idx = self.runs.partition_point(|r| r.raw <= i);
+		idx.checked_sub(1)
+			.and_then(|k| self.runs.get(k))
+			.is_none_or(|run| run.len == 0)
+	}
+}
+
 /// The input consumed for a here-document, independent of its stored text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HereDocSource {
@@ -679,8 +775,18 @@ pub struct HereDocSource {
 	pub close:      Option<Span>,
 	/// Start of the closing delimiter's line, before any stripped tabs.
 	pub close_line: Option<u32>,
-	/// The body includes alias text or inherits a flat-position parser context.
-	pub flat:       bool,
+	/// Where each byte of `raw` was read, recorded line by line: an alias's
+	/// own bytes and the source bytes after it are told apart per byte, not
+	/// per body.
+	pub origins:    Origins,
+}
+
+impl HereDocSource {
+	/// Drop raw bytes past `len`, and the origins that described them.
+	pub fn truncate_raw(&mut self, len: usize) {
+		self.raw.truncate(len);
+		self.origins.truncate(len as u32);
+	}
 }
 
 /// A word's own recorded range, or only its enclosing source context when

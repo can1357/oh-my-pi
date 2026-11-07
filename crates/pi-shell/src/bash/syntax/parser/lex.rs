@@ -1115,7 +1115,7 @@ impl<'s> Parser<'s> {
 			raw:        Vec::new(),
 			close:      None,
 			close_line: None,
-			flat:       self.flat,
+			origins:    crate::bash::syntax::ast::Origins::default(),
 		};
 		let mut text = Vec::new();
 		let mut line = Vec::new();
@@ -1140,7 +1140,7 @@ impl<'s> Parser<'s> {
 					source.close = Some(Span::new(line_lo, line_span.hi));
 					source.close_line = Some(line_lo);
 					source.span.hi = line_lo;
-					source.raw.truncate(raw_start);
+					source.truncate_raw(raw_start);
 					break;
 				}
 				while body.first() == Some(&b'\t') {
@@ -1159,7 +1159,7 @@ impl<'s> Parser<'s> {
 				source.close = Some(Span::new(close_lo, line_span.hi));
 				source.close_line = Some(line_lo);
 				source.span.hi = close_lo;
-				source.raw.truncate(raw_close);
+				source.truncate_raw(raw_close);
 				break;
 			}
 			if self.lx.eof_token != 0
@@ -1182,7 +1182,7 @@ impl<'s> Parser<'s> {
 				}
 				source.close_line = Some(line_lo);
 				source.span.hi = close_lo;
-				source.raw.truncate(raw_close);
+				source.truncate_raw(raw_close);
 				self.doc_eof_warning(doc, at_line);
 				break;
 			}
@@ -1225,19 +1225,21 @@ impl<'s> Parser<'s> {
 				.position(|&c| c == b'\n' || (unquoted && c == b'\\') || c == 0)
 				.unwrap_or(rest.len());
 			if n > 0 {
-				source.flat |= self.flat_positions();
+				let flat = self.flat_positions();
 				let tabs = if content.is_none() {
 					rest[..n].iter().take_while(|&&c| c == b'\t').count()
 				} else {
 					0
 				};
 				out.extend_from_slice(&rest[..tabs]);
+				source.origins.push(self.off(), tabs, flat);
 				source.raw.extend_from_slice(&rest[..tabs]);
 				self.advance(tabs);
 				if tabs < n && content.is_none() {
 					content = Some((self.off(), source.raw.len()));
 				}
 				out.extend_from_slice(&rest[tabs..n]);
+				source.origins.push(self.off(), n - tabs, flat);
 				source.raw.extend_from_slice(&rest[tabs..n]);
 				self.advance(n - tabs);
 				source.span.hi = self.off();
@@ -1256,7 +1258,7 @@ impl<'s> Parser<'s> {
 			let real = self.pos < self.buf.len();
 			let alias_space = core::ptr::eq(self.buf.as_ptr(), cursor::END_ALIAS_SPACE.as_ptr());
 			if real && !alias_space {
-				source.flat |= self.flat_positions();
+				source.origins.push(at, 1, self.flat_positions());
 				source.raw.push(c);
 			}
 			self.bump();
@@ -1277,7 +1279,7 @@ impl<'s> Parser<'s> {
 				b'\\' => match self.peek() {
 					Some(b'\n') => {
 						if self.pos < self.buf.len() {
-							source.flat |= self.flat_positions();
+							source.origins.push(self.off(), 1, self.flat_positions());
 							source.raw.push(b'\n');
 						}
 						self.bump();
@@ -1292,7 +1294,7 @@ impl<'s> Parser<'s> {
 						out.push(b'\\');
 						out.push(d);
 						if self.pos < self.buf.len() {
-							source.flat |= self.flat_positions();
+							source.origins.push(self.off(), 1, self.flat_positions());
 							source.raw.push(d);
 						}
 						self.bump();

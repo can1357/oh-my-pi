@@ -145,10 +145,15 @@ impl<'s> Parser<'s> {
 	/// Offset of the cursor in the source, plus the sub-parser base; inside an
 	/// alias expansion, the offset just after the aliased word.
 	///
-	/// A sub-parser over text that is not in the source at all (the code of a
-	/// backquoted substitution inside alias text) reports its base for every
-	/// token: its buffer's own offsets are bytes of another buffer.
+	/// A sub-parser over a buffer the parser rebuilt (the code of a
+	/// backquoted substitution, a here-document body) reads its position out
+	/// of the origin map recorded while the buffer was built: the buffer's
+	/// own indices are not source offsets, because escape bytes are dropped
+	/// and alias text is spliced in.
 	pub(super) fn off(&self) -> u32 {
+		if let Some(origin) = self.origin {
+			return origin.at(self.src_pos() as u32, self.base);
+		}
 		if self.flat {
 			return self.base;
 		}
@@ -163,8 +168,16 @@ impl<'s> Parser<'s> {
 		}
 	}
 
-	/// This buffer has no source bytes, including inherited sub-parser state.
-	pub(super) const fn flat_positions(&self) -> bool {
+	/// Whether the byte at the cursor has no source bytes behind it, so a
+	/// construct recorded from here reports one offset for all of it.
+	///
+	/// Under an origin map the answer is per byte, not per buffer: the code
+	/// of a backquote inside alias text is flat, and the same buffer may
+	/// continue in the source.
+	pub(super) fn flat_positions(&self) -> bool {
+		if let Some(origin) = self.origin {
+			return origin.flat_at(self.src_pos() as u32);
+		}
 		self.flat || !self.in_source()
 	}
 

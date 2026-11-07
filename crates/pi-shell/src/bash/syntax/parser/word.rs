@@ -713,6 +713,12 @@ impl<'s> Parser<'s> {
 		self.bump();
 		let text_lo = self.off();
 		let mut text = Vec::new();
+		// Where each byte of `text` was read. The code the sub-parser gets
+		// is shorter than the source it came from (escape bytes are
+		// dropped) and may mix alias text with source text, so its byte
+		// index is not an offset: each byte carries the position it was
+		// read at.
+		let mut text_origin = crate::bash::syntax::ast::Origins::default();
 		let close = loop {
 			let Some(c) = self.peek() else {
 				return Err(unmatched_error(self.eof_span(), line, "`"));
@@ -724,43 +730,71 @@ impl<'s> Parser<'s> {
 					break Span::new(at, self.off());
 				},
 				b'\\' => {
+					let at = self.off();
+					let at_flat = self.flat_positions();
 					self.bump();
 					match self.peek() {
 						Some(b'\n') => self.bump(),
 						Some(d) => {
+							text_origin.push(at, 1, at_flat);
 							text.push(b'\\');
+							text_origin.push(self.off(), 1, self.flat_positions());
 							text.push(d);
 							self.bump();
 						},
-						None => text.push(b'\\'),
+						None => {
+							text_origin.push(at, 1, at_flat);
+							text.push(b'\\');
+						},
 					}
 				},
 				_ => {
+					let at = self.off();
+					let at_flat = self.flat_positions();
+					let before = text.len();
 					self.take_char_into(c, &mut text);
+					text_origin.push(at, text.len() - before, at_flat);
 				},
 			}
 		};
 		let mut code = Vec::with_capacity(text.len());
+		let mut origin = crate::bash::syntax::ast::Origins::default();
 		let mut i = 0;
 		while i < text.len() {
 			if text[i] == b'\\'
 				&& i + 1 < text.len()
 				&& (matches!(text[i + 1], b'$' | b'`' | b'\\') || (dq && text[i + 1] == b'"'))
 			{
+				Self::push_origin(&mut origin, &text_origin, i + 1);
 				code.push(text[i + 1]);
 				i += 2;
 			} else {
+				Self::push_origin(&mut origin, &text_origin, i);
 				code.push(text[i]);
 				i += 1;
 			}
 		}
-		let body = super::sub_parse_list(&code, self.feat, text_lo, flat).unwrap_or_default();
+		// A position at the end of the buffer comes out of the last run:
+		// its own recorded extent ends just after its last byte.
+		let body =
+			super::sub_parse_list(&code, self.feat, text_lo, flat, Some(&origin)).unwrap_or_default();
 		Ok(WordPart::Comsub(Located::new(
 			Box::new(Comsub { kind: ComsubKind::Backtick, body, text }),
 			Span::new(lo, close.hi),
 			Span::new(text_lo, close.lo),
 			Some(close),
 		)))
+	}
+
+	/// Copy the origin of byte `i` of a recorded buffer onto the end of
+	/// `out`, so a rebuilt buffer keeps the positions of the bytes it kept.
+	fn push_origin(
+		out: &mut crate::bash::syntax::ast::Origins,
+		src: &crate::bash::syntax::ast::Origins,
+		i: usize,
+	) {
+		let i = i as u32;
+		out.push(src.at(i, 0), 1, src.flat_at(i));
 	}
 
 	/// Parts up to the terminator of `stop`.
@@ -1146,7 +1180,7 @@ impl<'s> Parser<'s> {
 				Some(Span::new(content.hi, self.off())),
 			)));
 		}
-		let body = super::sub_parse_list(&text, self.feat, lo, flat).unwrap_or_default();
+		let body = super::sub_parse_list(&text, self.feat, lo, flat, None).unwrap_or_default();
 		Ok(WordPart::Comsub(Located::new(
 			Box::new(Comsub { kind: ComsubKind::Dollar, body, text }),
 			Span::new(start, self.off()),

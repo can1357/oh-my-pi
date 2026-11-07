@@ -102,8 +102,11 @@ use crate::bash::{
 /// enclosing command span, which also contains redirections. Version 25 adds
 /// word-part boundaries and values, parameter and assignment prefixes,
 /// compound-array delimiters and element starts, trimmed arithmetic extents,
-/// and original here-document buffers.
-pub const IR_VERSION: u32 = 25;
+/// and original here-document buffers. Version 26 replaces a here-document
+/// body's one whole-body flat flag with the per-byte origin map the lexer
+/// records, so an alias-owned line and the source lines after it are told
+/// apart.
+pub const IR_VERSION: u32 = 26;
 
 /// Opcodes.
 #[derive(

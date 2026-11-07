@@ -1899,7 +1899,7 @@ mod tests {
 			1, 29, 0, 0, 0, 0, 0,
 		];
 
-		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (25, WIRE.as_slice()));
+		assert_eq!((crate::bash::ir::IR_VERSION, deferred.as_slice()), (26, WIRE.as_slice()));
 		let (offset, body): (u32, syn::Command) = postcard::from_bytes(&WIRE).unwrap();
 		let syn::CommandKind::FuncDef(function) = &cc.list.items[0].and_or.first.stages[0].cmd.kind
 		else {

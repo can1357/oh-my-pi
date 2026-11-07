@@ -216,6 +216,11 @@ pub struct Parser<'s> {
 	base:              u32,
 	/// This parser's buffer is not in the source: every offset is `base`.
 	flat:              bool,
+	/// Where this parser's buffer was read, byte by byte, when it is a
+	/// buffer the parser rebuilt rather than a slice of the source. It
+	/// replaces the `base + index` derivation, which a rebuilt buffer's
+	/// own indices do not support.
+	origin:            Option<&'s crate::bash::syntax::ast::Origins>,
 	feat:              Features,
 	aliases:           &'s dyn AliasLookup,
 	/// Current input buffer: `src` or an alias value.
@@ -355,7 +360,7 @@ pub(crate) fn parse_doc_text(source: &HereDocSource, feat: Features) -> Result<W
 	let mut p = Parser::new(&source.raw, feat, NO_ALIASES);
 	p.virt = 0;
 	p.base = source.span.lo;
-	p.flat = source.flat;
+	p.origin = Some(&source.origins);
 	let mut word = p.text_word(TextMode::HereDoc)?;
 	finish::finish_word(&mut word, &p.docs);
 	Ok(word)
@@ -379,6 +384,7 @@ impl<'s> Parser<'s> {
 			src,
 			base: 0,
 			flat: false,
+			origin: None,
 			feat,
 			aliases,
 			buf: src,
@@ -585,10 +591,17 @@ const fn empty_word(lo: u32, hi: u32) -> Word {
 /// Parse `code` (text bash re-parses at run time: a backquoted command, a
 /// `$((…))` that is not arithmetic) as one list; spans are shifted by
 /// `base`. Aliases are not expanded.
-fn sub_parse_list(code: &[u8], feat: Features, base: u32, flat: bool) -> PResult<List> {
+fn sub_parse_list(
+	code: &[u8],
+	feat: Features,
+	base: u32,
+	flat: bool,
+	origin: Option<&crate::bash::syntax::ast::Origins>,
+) -> PResult<List> {
 	let mut p = Parser::new(code, feat, NO_ALIASES);
 	p.base = base;
 	p.flat = flat;
+	p.origin = origin;
 	let mut list = List::default();
 	while let Some(cc) = p.next_command() {
 		list.items.extend(cc?.list.items);
