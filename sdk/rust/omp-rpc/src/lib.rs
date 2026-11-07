@@ -11,6 +11,8 @@ pub mod client;
 mod frame;
 pub mod host_tool;
 pub mod host_uri;
+#[cfg(target_os = "linux")]
+mod procfs;
 pub mod turn;
 
 pub use client::{Client, ClientOptions, DEFAULT_PROMPT_TIMEOUT, Error, Event, encode_command};
