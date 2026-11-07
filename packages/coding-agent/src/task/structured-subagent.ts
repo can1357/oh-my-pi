@@ -28,7 +28,7 @@ import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
-import { registerArtifactsDir } from "../internal-urls/registry-helpers";
+import { registerTemporaryArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
@@ -733,12 +733,22 @@ async function leaseArtifacts(
 		await fs.mkdir(artifactsDir, { recursive: true });
 		return { sessionFile, artifactsDir, temporary: false, unregister: undefined };
 	}
+	// No session file: the run gets its own directory under the OS temp dir.
+	// `registerTemporaryArtifactsDir` bounds its life by the process, so a
+	// lease deliberately retained past the run (`retainArtifacts`, an isolated
+	// failure's recovery artifacts) still goes away with the process that is
+	// the only thing able to resolve it.
 	const artifactsDir = path.join(
 		os.tmpdir(),
 		`${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${Snowflake.next()}`,
 	);
 	await fs.mkdir(artifactsDir, { recursive: true });
-	return { sessionFile: null, artifactsDir, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
+	return {
+		sessionFile: null,
+		artifactsDir,
+		temporary: true,
+		unregister: registerTemporaryArtifactsDir(artifactsDir),
+	};
 }
 
 /**

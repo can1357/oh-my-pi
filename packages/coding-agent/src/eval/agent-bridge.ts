@@ -217,7 +217,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		manager.register(
 			"task",
 			id,
-			async ({ signal, reportProgress, markRunning }) => {
+			async ({ jobId, signal, reportProgress, markRunning }) => {
 				markRunning();
 				let latestProgress: AgentProgress | undefined;
 				try {
@@ -233,6 +233,15 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						...(isolation ? { isolation } : {}),
 						...(customTools ? { customTools } : {}),
 						retainArtifacts: true,
+						// The handle outlives the run so a delayed `agent://<id>`
+						// in the delivery still resolves; the job row owns the
+						// directory from here and removes it once the result has
+						// been delivered and the row is evicted.
+						onArtifactsRetained: cleanup => {
+							const job = manager.getJob(jobId);
+							if (job) job.retainedArtifactsCleanup = cleanup;
+							else void cleanup();
+						},
 						keepAlive: true,
 						signal,
 						onProgress: progress => {
