@@ -4117,6 +4117,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 			return;
 		}
+		// Input an extension forwarded with a `tag` (`sendUserMessage`) belongs to the sender: its
+		// call answers `dropped`, so it owns the retry. Handing the text to the editor would make
+		// the person responsible for a message they never typed — the same reason the queue never
+		// hands tagged messages back (see isRestorableQueuedMessage).
+		if (prompt.tag !== undefined) {
+			if (prompt.reason) this.showError(prompt.reason);
+			this.ui.requestRender();
+			return;
+		}
 		// The rebuild drops transient notices, including the one that refused this prompt.
 		if (prompt.reason) this.showError(prompt.reason);
 		// The drop arrives asynchronously (after the abort settles); never clobber

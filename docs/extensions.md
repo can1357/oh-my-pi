@@ -381,6 +381,7 @@ text can report a refusal instead of guessing:
 | `"skill"` | `/skill:<name>` was submitted as the user's skill prompt message, carrying the `tag`. |
 | `"terminal-only"` | A built-in only the interactive terminal runs; nothing was sent. |
 | `"unavailable"` | The host does not run typed input here — the interactive TUI joined to a collab session as a guest, where extension-initiated turns are host-only; nothing was sent or run. |
+| `"dropped"` | The session cancelled the message before the agent saw it — an abort, a session switch, a usage-preflight denial or the cost cap raced its admission. Nothing was submitted or persisted, so the caller may send it again. |
 
 `tag` is recorded on the message the call submits (the user message, or the skill
 prompt message) and so appears on its `message_start`/`message_end` events and in the
@@ -390,7 +391,9 @@ RPC clients carry only text and the tag would be lost: it still shows as a queue
 but Alt+Up steps over it and RPC `remove_queued_message` does not match it, so it stays
 queued and is delivered with its tag. When the person interrupts (Esc, or RPC
 `abort_and_restore_queue`), the abort records it in the transcript without starting a
-turn, tag included, so the bridge can still match it.
+turn, tag included, so the bridge can still match it. Tagged input that never reached
+the queue is not handed back either: a send answered `"dropped"` leaves the editor
+untouched, because its caller learns of the drop from that answer and owns the retry.
 
 Payloads passed to `pi.sendMessage` are normalized before delivery
 (`normalizeCustomMessagePayload` in `packages/tui/src/chat/messages.ts`,

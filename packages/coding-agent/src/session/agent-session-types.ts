@@ -506,6 +506,10 @@ export interface DroppedPrompt {
 	images?: ImageContent[];
 	/** Why the session refused it (e.g. the cost cap), for hosts to show beside the restored text; absent for an abort. */
 	reason?: string;
+	/** The `tag` the caller submitted the prompt with (`sendUserMessage`). Tagged input belongs to
+	 *  the sender, which learns of the drop from its own result and owns the retry, so a host must
+	 *  not hand it back as editable text. */
+	tag?: string;
 }
 
 /** Options for AgentSession.followUp(). */
@@ -555,9 +559,12 @@ export interface SendUserMessageOptions {
  * - `skill`: `/skill:<name>` was submitted as the user's skill prompt message, carrying the `tag`.
  * - `terminal-only`: a built-in only the interactive terminal runs; nothing was sent.
  * - `unavailable`: the host does not run typed input for this caller; nothing was sent or run.
+ * - `dropped`: the session cancelled the message before it reached the agent (an abort, a session
+ *   switch, a usage-preflight denial or the cost cap raced its admission). Nothing was submitted or
+ *   persisted, so the caller may send it again.
  */
 export interface SendUserMessageResult {
-	handled: "prompt" | "command" | "skill" | "terminal-only" | "unavailable";
+	handled: "prompt" | "command" | "skill" | "terminal-only" | "unavailable" | "dropped";
 	/** Text a built-in command printed, when it printed any. */
 	output?: string;
 	/** True when a `command` started an agent turn without submitting a message, as `/retry` does. */

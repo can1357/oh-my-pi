@@ -8595,8 +8595,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				tag: options?.tag,
 			});
 			outcome.sessionClaimed = queued;
-			if (!queued && this.#promptGeneration !== queueGeneration && !options?.synthetic) {
-				this.#promptDropped?.({ text: typedText, images: options?.images });
+			if (!queued) {
+				if (this.#promptGeneration !== queueGeneration && !options?.synthetic) {
+					this.#promptDropped?.({ text: typedText, images: options?.images, tag: options?.tag });
+				}
+				if (options?.throwOnDrop) throw new PromptDroppedError();
 			}
 			return true;
 		}
@@ -8642,8 +8645,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.#promptGeneration !== preflightGeneration) {
 			outcome.sessionClaimed = false;
 			if (!options?.synthetic) {
-				this.#promptDropped?.({ text: typedText, images: options?.images });
+				this.#promptDropped?.({ text: typedText, images: options?.images, tag: options?.tag });
 			}
+			if (options?.throwOnDrop) throw new PromptDroppedError();
 			return true;
 		}
 
@@ -8749,7 +8753,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				(error instanceof AgentStartPolicyChangedError || error instanceof PromptPreflightError) &&
 				message.role === "user"
 			) {
-				this.#promptDropped?.({ text: typedText, images: options?.images });
+				this.#promptDropped?.({ text: typedText, images: options?.images, tag: options?.tag });
 			}
 			throw error;
 		} finally {
@@ -8767,7 +8771,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// host so the user can edit/resubmit instead of losing it (tree/branch
 			// can't offer a message that was never persisted).
 			const refusal = this.#costCapRefusal !== refusalBeforeDispatch ? this.#costCapRefusal : undefined;
-			this.#promptDropped?.({ text: typedText, images: options?.images, reason: refusal?.message });
+			this.#promptDropped?.({
+				text: typedText,
+				images: options?.images,
+				reason: refusal?.message,
+				tag: options?.tag,
+			});
 		}
 		if (!dispatched && options?.throwOnDrop) throw new PromptDroppedError();
 		return true;
@@ -8887,10 +8896,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			? await this.#buildSkillImageDescriptionNotice(preparedMessage)
 			: undefined;
 		// Same drop as #dispatchPrompt: abort() during normalization or the vision
-		// description must not publish the skill or start a turn afterwards.
+		// description must not publish the skill or start a turn afterwards. The
+		// documented `false` (no agent turn will pick this message up) is what lets
+		// sendUserMessage report the drop instead of claiming the skill was sent.
 		if (hasSkillImages && (this.#promptGeneration !== preparationGeneration || this.#isDisposed)) {
 			outcome.sessionClaimed = false;
-			return true;
+			return false;
 		}
 
 		// Image normalization and the vision-description call suspend after the
@@ -10653,6 +10664,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * With `expand`, the text runs as typed input instead (see {@link #sendExpandedUserInput}),
 	 * and `deliverAs` becomes the submitted prompt's streaming behavior, as for typed input.
 	 * `tag` rides onto whichever message the call submits.
+	 *
+	 * A message the session cancels before the agent sees it — an abort, a session switch, a
+	 * usage-preflight denial or the cost cap racing its admission — answers `dropped`, never
+	 * `prompt`: nothing was submitted or persisted, and the caller may send it again. A `tag`ged
+	 * drop is never handed to the host's editor either, so the caller is its only owner.
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
@@ -10684,18 +10700,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let deliveredAsAside = false;
 		if (options?.deliverAs === "aside") {
 			if (this.isStreaming) {
-				await this.#queueUserMessage(text, images, "aside", queued);
-				return { handled: "prompt" };
+				const admitted = await this.#queueUserMessage(text, images, "aside", queued);
+				return { handled: admitted ? "prompt" : "dropped" };
 			}
 			// Idle: fall through to the prompt flow below (starts a turn, like an omitted
 			// deliverAs) — there is no live run to inject an aside into.
 			deliveredAsAside = true;
 		} else if (options?.deliverAs === "followUp") {
-			await this.#queueUserMessage(text, images, "followUp", queued);
-			return { handled: "prompt" };
+			const admitted = await this.#queueUserMessage(text, images, "followUp", queued);
+			return { handled: admitted ? "prompt" : "dropped" };
 		} else if (options?.deliverAs === "steer") {
-			await this.#queueUserMessage(text, images, "steer", queued);
-			return { handled: "prompt" };
+			const admitted = await this.#queueUserMessage(text, images, "steer", queued);
+			return { handled: admitted ? "prompt" : "dropped" };
 		}
 
 		// Use prompt() with expandPromptTemplates: false to skip command handling and template
@@ -10705,14 +10721,31 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// `streamingBehavior` when it does. Passing "aside" through (instead of hard-coding
 		// "steer") keeps that race from degrading a non-interrupting aside into a
 		// tool-batch-aborting steer.
-		await this.prompt(text, {
+		const submitted = await this.#submitAsPrompt(text, {
 			attribution: options?.attribution,
 			expandPromptTemplates: false,
 			images,
 			streamingBehavior: deliveredAsAside ? "aside" : "steer",
 			tag: options?.tag,
 		});
-		return { handled: "prompt" };
+		// Command handling is off on this path, so prompt() cannot answer "command".
+		return { handled: submitted === "dropped" ? "dropped" : "prompt" };
+	}
+
+	/**
+	 * {@link prompt} for {@link sendUserMessage}, which must tell three outcomes apart rather than
+	 * two: `prompt` submitted, `command` handled locally by an extension or custom command, and
+	 * `dropped` — cancelled before the agent saw it (an abort, a session switch, a preflight or
+	 * cost-cap refusal), which plain `prompt()` reports as `true` so typed input can stay on the
+	 * optimistic path and let {@link setPromptDropped} restore it.
+	 */
+	async #submitAsPrompt(text: string, options: PromptOptions): Promise<"prompt" | "command" | "dropped"> {
+		try {
+			return (await this.prompt(text, { ...options, throwOnDrop: true })) ? "prompt" : "command";
+		} catch (error) {
+			if (error instanceof PromptDroppedError) return "dropped";
+			throw error;
+		}
 	}
 
 	/**
@@ -10757,7 +10790,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const invocation = resolveSkillInvocation(this, text);
 		if (invocation) {
 			const built = await this.buildUserSkillPrompt(invocation.skill, invocation);
-			await this.promptCustomMessage(
+			const dispatched = await this.promptCustomMessage(
 				{
 					customType: SKILL_PROMPT_MESSAGE_TYPE,
 					content: images?.length ? [{ type: "text", text: built.message }, ...images] : built.message,
@@ -10768,7 +10801,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				},
 				{ streamingBehavior, queueChipText: text },
 			);
-			return { handled: "skill" };
+			return { handled: dispatched ? "skill" : "dropped" };
 		}
 
 		const builtin = await runHeadlessBuiltinSlashCommand(
@@ -10790,14 +10823,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return { handled: "command", ...agentInvoked, ...output };
 		}
 
-		// prompt() answers false only when an extension or custom command handled the text locally.
-		const submitted = await this.prompt(text, {
+		// prompt() answers "command" only when an extension or custom command handled the text
+		// locally, and "dropped" when an abort or refusal cancelled it before the agent saw it.
+		const submitted = await this.#submitAsPrompt(text, {
 			attribution: options?.attribution,
 			images,
 			streamingBehavior,
 			tag,
 		});
-		return { handled: submitted ? "prompt" : "command" };
+		return { handled: submitted };
 	}
 
 	/** Clear queued messages and return the user-restorable ones (text plus any attached images).
