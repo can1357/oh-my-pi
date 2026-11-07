@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `lfm3-1.7b` to the local memory models: LiquidAI's LFM3 ONNX export now generates on Windows and Linux ([#17258](https://github.com/can1357/oh-my-pi/issues/17258), [#17647](https://github.com/can1357/oh-my-pi/pull/17647) by [@thejjw](https://github.com/thejjw))
+
+### Changed
+
+- The MLX backend now skips a model whose pinned `mlx-lm` release cannot load its architecture and falls back to ONNX CPU for that model alone, instead of downloading the MLX weights and failing (`lfm3-1.7b` is the first such entry) ([#17258](https://github.com/can1357/oh-my-pi/issues/17258), [#17647](https://github.com/can1357/oh-my-pi/pull/17647) by [@thejjw](https://github.com/thejjw))
+
 ### Fixed
 
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))

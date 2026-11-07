@@ -19,6 +19,7 @@ import type {
 	CompiledProvider,
 	CompiledProviderDiscovery,
 	CompiledSeed,
+	CompiledSeedBackendRefusal,
 	CompiledSeedModel,
 	SeedBundlePolicy,
 } from "../../src/compat/types";
@@ -163,6 +164,15 @@ function parseInput(node: KdlNodeView): ("text" | "image")[] {
 	return input;
 }
 
+/** `unsupported "<backend>" reason="…"`: a reviewed backend refusal for this seed row. */
+function parseUnsupported(node: KdlNodeView): CompiledSeedBackendRefusal {
+	validateProps(node, ["reason"]);
+	if (node.children || node.args.length !== 1) malformed(node);
+	const backend = node.args[0];
+	if (backend !== "onnx" && backend !== "mlx") malformed(node);
+	return { backend, reason: requiredProp(node, "reason") };
+}
+
 function parseModel(node: KdlNodeView, provider: string, defaults: SeedDefaults): CompiledSeedModel {
 	validateProps(node, MODEL_PROPS);
 	const id = requiredName(node);
@@ -181,6 +191,7 @@ function parseModel(node: KdlNodeView, provider: string, defaults: SeedDefaults)
 	let limits: { contextWindow: number | null; maxTokens: number | null } | undefined;
 	let supportsTools: boolean | undefined;
 	let requestModelId: string | undefined;
+	const unsupportedBackends: CompiledSeedBackendRefusal[] = [];
 	const axes: RuleAxes = { wire: {}, thinking: {}, catalog: {} };
 	for (const child of node.children) {
 		switch (child.name) {
@@ -213,6 +224,12 @@ function parseModel(node: KdlNodeView, provider: string, defaults: SeedDefaults)
 				if (requestModelId !== undefined) malformed(child);
 				requestModelId = singleString(child);
 				break;
+			case "unsupported": {
+				const refusal = parseUnsupported(child);
+				if (unsupportedBackends.some(entry => entry.backend === refusal.backend)) malformed(child);
+				unsupportedBackends.push(refusal);
+				break;
+			}
 			default: {
 				const axis = axisFor(child);
 				if (axis.set === "catalog") {
@@ -258,6 +275,7 @@ function parseModel(node: KdlNodeView, provider: string, defaults: SeedDefaults)
 		input,
 		...(requestModelId !== undefined && { requestModelId }),
 		...(supportsTools !== undefined && { supportsTools }),
+		...(unsupportedBackends.length > 0 && { unsupportedBackends }),
 		cost,
 		contextWindow: limits.contextWindow,
 		maxTokens: limits.maxTokens,
