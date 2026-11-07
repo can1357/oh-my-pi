@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { type ImageContent, type TextContent, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { createSessionRuntime } from "@oh-my-pi/pi-coding-agent/autoresearch/state";
 import {
 	type AutoresearchStorage,
@@ -13,6 +13,7 @@ import { createInitExperimentTool } from "@oh-my-pi/pi-coding-agent/autoresearch
 import { createLogExperimentTool } from "@oh-my-pi/pi-coding-agent/autoresearch/tools/log-experiment";
 import { createRunExperimentTool } from "@oh-my-pi/pi-coding-agent/autoresearch/tools/run-experiment";
 import { createUpdateNotesTool } from "@oh-my-pi/pi-coding-agent/autoresearch/tools/update-notes";
+import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import type { ASIData, LogDetails, NumericMetricMap, RunDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -870,14 +871,35 @@ describe("update_notes", () => {
 		await notes.execute("n", { body: "## Plan\n- step one\n" }, undefined, undefined, createCtx(dir));
 		expect(runtime.state.notes).toContain("step one");
 
-		const append = await notes.execute(
-			"n2",
-			{ body: "", append_idea: "try caching" },
+		const validated = validateToolArguments(notes, {
+			type: "toolCall",
+			id: "n2",
+			name: notes.name,
+			arguments: { append_idea: "try caching" },
+		}) as typeof notes.parameters.infer;
+		const append = await notes.execute("n2", validated, undefined, undefined, createCtx(dir));
+		expect(append.details?.notes).toContain("- try caching");
+		expect(runtime.state.notes).toContain("- try caching");
+
+		const empty = await notes.execute("n3", { append_idea: "   " }, undefined, undefined, createCtx(dir));
+		expect(firstTextBlockText(empty.content)).toContain("Error:");
+		expect(runtime.state.notes).toContain("- try caching");
+
+		const replaced = await notes.execute(
+			"n4",
+			{ body: "## Replacement\n", append_idea: "   " },
 			undefined,
 			undefined,
 			createCtx(dir),
 		);
-		expect(append.details?.notes).toContain("- try caching");
-		expect(runtime.state.notes).toContain("- try caching");
+		expect(firstTextBlockText(replaced.content)).toContain("Notes updated");
+		expect(replaced.details?.notes).toBe("## Replacement\n");
+		expect(runtime.state.notes).toBe("## Replacement\n");
+
+		const theme = await getThemeByName("dark");
+		if (!theme) throw new Error("Expected dark theme");
+		expect(notes.renderCall?.({}, { expanded: false, isPartial: true }, theme).render(80).join("\n")).toContain(
+			"update_notes",
+		);
 	});
 });
