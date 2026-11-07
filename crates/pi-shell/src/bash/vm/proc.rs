@@ -1136,9 +1136,9 @@ pub struct LoopRec {
 	pub kind:       LoopKind,
 	/// Status of the last completed body.
 	pub status:     i32,
-	/// The status when the loop started. An arithmetic-`for` body's first
-	/// pass sees it: bash's `execute_arith_for_command` evaluates the three
-	/// header expressions without touching `last_command_exit_value`.
+	/// Status for the next arithmetic-`for` body: initially the loop's
+	/// incoming status, then the preceding body's, or the status of a
+	/// command substitution in the header outside posix mode.
 	pub entry:      i32,
 	pub iterations: u32,
 	pub exit:       u32,

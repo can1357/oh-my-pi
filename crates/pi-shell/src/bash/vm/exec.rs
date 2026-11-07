@@ -213,10 +213,11 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			frame.pc += 1;
 			continue;
 		}
-		let starts = starts_command(unit, op);
+		let command = command_start(unit, op);
+		let starts = command.is_some();
 		let fresh = vp.frames[fi].scratch.is_none();
 		if fresh && starts {
-			note_command(vp, unit, op);
+			note_command(vp, unit, command.expect("checked"));
 			// bash samples `was_error_trap` before the command runs
 			// (`execute_cmd.c`), so a trap the command itself installs does
 			// not fire for that command. The DEBUG trap runs between that
@@ -519,20 +520,22 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			},
 			Flow::Discard(status) | Flow::DiscardArith(status) | Flow::DiscardKeep(status) => {
 				vp.status = status;
-				// bash's `parse_and_execute` (the script, `-c`, `eval`, `.`,
-				// a trap action) catches the jump: the innermost script goes
-				// on with its next command.
-				let script = vp
-					.frames
-					.iter()
-					.rposition(|f| matches!(f.kind, FrameKind::Script { .. }));
-				if let Some(i) = script {
+				// Bash 5.3 builtins/evalstring.c:423-442 catches DISCARD;
+				// subst.c:7094 runs `${ ;}` through that same catch.
+				let catch = vp.frames.iter().rposition(is_parse_and_execute_catch);
+				if let Some(i) = catch {
 					unwind(&mut k.root, cx.store, vp, i + 1);
-					clear_scratch(&mut k.root, cx.store, vp);
-					truncate(vp, Depths::default());
-					let f = top_frame(vp);
-					f.unit = None;
-					f.loops.clear();
+					if top_frame(vp).kind == FrameKind::NoFork {
+						// subst.c:7109-7118 reads REPLY before restoring the
+						// scope and stdout, just as normal completion does.
+						pop_frame(&mut k.root, cx.store, vp);
+					} else {
+						clear_scratch(&mut k.root, cx.store, vp);
+						truncate(vp, Depths::default());
+						let f = top_frame(vp);
+						f.unit = None;
+						f.loops.clear();
+					}
 				} else {
 					unwind(&mut k.root, cx.store, vp, 0);
 				}
@@ -545,9 +548,9 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		let zsh = unit.mode.dialect() == Dialect::Zsh;
 		let errexit = errexit_failed && (errexit_on(k, cx, vp) || (zsh && zsh_errreturn_exits(k, cx, vp)));
 		// bash's `was_error_trap`, sampled before the command ran: a trap
-		// the command itself installs does not fire for it. Only an `Exec`
-		// samples at its own start (`starts_command` is unconditional for
-		// it), so only an `Exec` is gated; zsh's ZERR has no such test.
+		// the command itself installs does not fire for it. A simple command
+		// samples at its own start, or before its background fork; its Exec
+		// reads that sample. zsh's ZERR has no such test.
 		// A `(( ))` and a `[[ ]]` are not gated yet: their sample is taken
 		// on another frame than the one their completion reads, so gating
 		// them here loses the trap a command before them installed.
@@ -675,7 +678,7 @@ pub fn set_trap_line(vp: &mut Vproc, line: u32) {
 }
 
 /// Record the command `op` starts (a simple command, `[[ ]]` or `(( ))`:
-/// the caller checked [`starts_command`]) as `BASH_COMMAND`; not while a
+/// the caller checked [`command_start`]) as `BASH_COMMAND`; not while a
 /// trap action runs (bash keeps the trapped command).
 fn note_command(vp: &mut Vproc, unit: &Arc<Unit>, op: Op) {
 	if vp.trap_frames == 0
@@ -694,16 +697,27 @@ fn note_command(vp: &mut Vproc, unit: &Arc<Unit>, op: Op) {
 	}
 }
 
-/// Whether `op` starts a command bash reports on its own (`BASH_COMMAND`,
+/// The command `op` starts and bash reports on its own (`BASH_COMMAND`,
 /// the ERR trap): a simple command, `[[ ]]` or `(( ))`.
-fn starts_command(unit: &Unit, op: Op) -> bool {
+fn command_start(unit: &Unit, op: Op) -> Option<Op> {
 	match op.code {
-		Opcode::Exec => true,
+		Opcode::Exec => Some(op),
 		Opcode::Enter => unit
 			.nodes
 			.get(op.node as usize)
-			.is_some_and(|n| matches!(n.kind, NodeKind::Cond | NodeKind::Arith)),
-		_ => false,
+			.is_some_and(|n| matches!(n.kind, NodeKind::Cond | NodeKind::Arith))
+			.then_some(op),
+		// Bash 5.3 execute_cmd.c:4504-4528 runs a simple command's DEBUG
+		// trap in the parent, before its asynchronous fork.
+		Opcode::Spawn if unit.mode.dialect() == Dialect::Bash => {
+			let info = unit.spawns.get(op.a as usize)?;
+			if info.kind != SpawnKind::Background {
+				return None;
+			}
+			let pc = forked_simple_command(unit, info.stages.first()?.entry)?;
+			unit.ops.get(pc as usize).copied()
+		},
+		_ => None,
 	}
 }
 
@@ -1243,7 +1257,14 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 					pop_frame(&mut k.root, cx.store, vp);
 					vp.status = trap_status;
 				} else if f.debug_pc == Some(f.pc) && skippable {
-					f.pc += 1;
+					if let Some(unit) = f.unit.as_ref()
+						&& let Some(op) = unit.ops.get(f.pc as usize)
+						&& op.code == Opcode::Spawn
+					{
+						f.pc = unit.spawns[op.a as usize].end;
+					} else {
+						f.pc += 1;
+					}
 					f.debug_pc = None;
 				}
 			}
@@ -2401,18 +2422,21 @@ fn jump_status(cx: &mut Cx<'_>, vp: &mut Vproc, code: JumpCode) -> i32 {
 	}
 }
 
+/// Bash 5.3 builtins/evalstring.c:423-442 catches a discarded command;
+/// subst.c:7094 uses the same `parse_and_execute` for `${ ;}`.
+const fn is_parse_and_execute_catch(frame: &Frame) -> bool {
+	matches!(frame.kind, FrameKind::Script { .. } | FrameKind::NoFork)
+}
+
 /// Whether `errexit` raises bash's `ERREXIT` for a jump out of where `vp`
-/// is now. bash's `builtin_ignoring_errexit`: an `eval` or a `.` whose own
-/// status is ignored (a condition, `&&`, `||`, `!`) turns `errexit` off
-/// for everything it runs, which a function's ignored status does not do.
+/// is now. An ignored `parse_and_execute` frame turns it off for everything
+/// it runs, unlike a function's ignored status (`builtin_ignoring_errexit`;
+/// Bash 5.3 subst.c:7013-7020 also clears `-e` for `${ ;}` unless inherited).
 fn errexit_jump(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
-	let ignored = vp.frames.iter().any(|frame| {
-		frame.ignore_errexit
-			&& matches!(
-				frame.kind,
-				FrameKind::Script { what: ScriptKind::Eval | ScriptKind::Source, .. }
-			)
-	});
+	let ignored = vp
+		.frames
+		.iter()
+		.any(|frame| frame.ignore_errexit && is_parse_and_execute_catch(frame));
 	!ignored && errexit_on(k, cx, vp)
 }
 
@@ -2495,28 +2519,29 @@ fn fork_landing(cx: &mut Cx<'_>, vp: &Vproc, simple: bool) -> Landing {
 	}
 }
 
-/// Whether the pipeline stage or job body at `entry` is one simple command
-/// (`!` before it for a job): bash forks it before it expands anything
-/// (`execute_simple_command`), so it has no `top_level` of its own.
+/// The `Exec` pc if the pipeline stage or job body at `entry` is one
+/// simple command (`!` before it for a job): bash forks it before it
+/// expands anything (`execute_simple_command`), with no `top_level` of its own.
 ///
 /// A command substitution or process substitution in the command's own
 /// words, assignments or redirections lowers to a block the main flow
 /// jumps over, before the command's `Exec`: those jumps are part of the
 /// one simple command, so follow them.
-fn forks_simple(unit: &Unit, entry: u32) -> bool {
+fn forked_simple_command(unit: &Unit, entry: u32) -> Option<u32> {
 	let code = |at: u32| unit.ops.get(at as usize).map(|op| op.code);
 	let mut at = entry;
 	// Each jump goes forward, over its own block, so this ends.
 	while code(at) == Some(Opcode::Jmp) {
 		let over = unit.ops[at as usize].a;
 		if over <= at {
-			return false;
+			return None;
 		}
 		at = over;
 	}
-	code(at) == Some(Opcode::Exec)
+	(code(at) == Some(Opcode::Exec)
 		&& (code(at + 1) == Some(Opcode::SubExit)
-			|| (code(at + 1) == Some(Opcode::Not) && code(at + 2) == Some(Opcode::SubExit)))
+			|| (code(at + 1) == Some(Opcode::Not) && code(at + 2) == Some(Opcode::SubExit))))
+	.then_some(at)
 }
 
 /// Expansion errors end the shell: posix mode, not interactive.
@@ -2547,12 +2572,22 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 			k.diag(cx, vp, line, Diag::Unsupported { what: "`=cmd` in this expansion".into() });
 			Flow::Discard(1)
 		},
+		// Bash 5.3 arrayfunc.c:1381-1388 calls top_level_cleanup before
+		// DISCARD, bypassing parse_and_execute. Word arithmetic instead
+		// returns expand_word_error (subst.c:10874-10882), which reaches
+		// exp_jump_to_top_level without that cleanup at an active catch
+		// (subst.c:12440-12443). Preserve that distinction at the source.
+		Stop::Fail(d @ Diag::ArithSubscript { .. })
+		| Stop::Fatal(d @ Diag::ArithSubscript { .. }) => {
+			k.diag(cx, vp, line, d);
+			assign_jump(vp, cx)
+		},
 		// A non-interactive posix shell exits on an expansion error (bash's
 		// `posixly_correct && !interactive_shell`), as on a fatal one.
 		Stop::Fail(d) if !posix_exits(k, cx, vp) => {
 			// An arithmetic error is abandoned the same way, but `errexit`
 			// does not raise `ERREXIT` in its place.
-			let arith = matches!(d, Diag::Arith { .. } | Diag::ArithSubscript { .. });
+			let arith = matches!(d, Diag::Arith { .. });
 			k.diag(cx, vp, line, d);
 			if arith {
 				return Flow::DiscardArith(1);
@@ -2564,7 +2599,7 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		// `set -o posix; set -e; : $((1/0))` 127, not the status at the
 		// site that a converted jump would answer with.
 		Stop::Fail(d) | Stop::Fatal(d) => {
-			let arith = matches!(d, Diag::Arith { .. } | Diag::ArithSubscript { .. });
+			let arith = matches!(d, Diag::Arith { .. });
 			k.diag(cx, vp, line, d);
 			if arith {
 				return fatal_arith(k, vp, cx);
@@ -3156,7 +3191,7 @@ fn control_flow(
 		Opcode::Enter if !k.mask.any_op(op.ev) => {
 			// `[[ ]]` and `(( ))` start a command: `BASH_COMMAND` and the
 			// DEBUG trap point.
-			let starts = starts_command(unit, op);
+			let starts = command_start(unit, op).is_some();
 			if starts && pseudo_trap_maybe(k, cx, TrapKey::Debug) {
 				return None;
 			}
@@ -3269,13 +3304,11 @@ const fn branch(op: Op, jump: bool) -> Flow {
 	if jump { Flow::Jump(op.a) } else { Flow::Next }
 }
 
-/// The status an arithmetic-`for` body starts a pass with, restored when
-/// the header's branch falls into the body: bash's
-/// `execute_arith_for_command` evaluates the initialisation, test and step
-/// expressions without touching `last_command_exit_value`, so the first
-/// pass sees the status from before the loop and a later pass the previous
-/// pass's. The engine evaluates those expressions with the same `Arith` op
-/// a `(( ))` command uses, which does set the status for `BrFail` to read.
+/// The status an arithmetic-`for` body starts a pass with. Bash 5.3's
+/// `eval_arith_for_expr` (execute_cmd.c:3163-3206) leaves the status alone,
+/// except that a command substitution changes it outside posix mode
+/// (subst.c:7442-7447). The shared `Arith` op temporarily sets the status
+/// for `BrFail`; restore the header's preserved status on entering the body.
 fn arith_for_body(vp: &mut Vproc, unit: &Unit, op: Op) -> Option<i32> {
 	if op.code != Opcode::BrFail
 		|| !unit.nodes.get(op.node as usize).is_some_and(|n| n.kind == NodeKind::ArithFor)
@@ -3283,7 +3316,7 @@ fn arith_for_body(vp: &mut Vproc, unit: &Unit, op: Op) -> Option<i32> {
 		return None;
 	}
 	let rec = top_frame(vp).loops.last()?;
-	Some(if rec.iterations == 0 { rec.entry } else { rec.status })
+	Some(rec.entry)
 }
 
 /// `LoopNote`/`LoopBack`: the innermost loop's status and iteration count;
@@ -3292,6 +3325,7 @@ fn loop_note(vp: &mut Vproc, op: Op) -> Flow {
 	let status = vp.status;
 	if let Some(rec) = top_frame(vp).loops.last_mut() {
 		rec.status = status;
+		rec.entry = status;
 		rec.iterations += 1;
 	}
 	if op.code == Opcode::LoopBack {
@@ -3481,15 +3515,22 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					trace_arith(ex.k, ex.cx, ex.vp, line, &expanded, arith_for);
 				}
 				match ex.arith_eval(&expanded) {
-					Ok(v) => Ok(Ok(v)),
-					// An error in a subscript abandons the line (an expansion
-					// failure).
+					Ok(v) => Ok(Ok((v, ex.sub_status))),
+					// Preserve a subscript error's identity for stop_flow's
+					// assignment-discard landing; ordinary evaluation can fail.
 					Err(Stop::Fail(d @ (Diag::Arith { .. } | Diag::Readonly { .. }))) => Ok(Err(d)),
 					Err(stop) => Err(stop),
 				}
 			});
 			match res {
-				Ok(Ok(v)) => {
+				Ok(Ok((v, sub))) => {
+					if arith_for
+						&& let Some(status) = sub
+						&& !state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false)
+						&& let Some(rec) = top_frame(vp).loops.last_mut()
+					{
+						rec.entry = status;
+					}
 					clear_scratch(&mut k.root, cx.store, vp);
 					vp.status = i32::from(v == 0);
 					Flow::Next
@@ -4406,13 +4447,30 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 						.get_or_insert_with(|| FdRef::mem(mem::MemBuf::new(Vec::new())));
 					fds.set(0, Some(null.clone()));
 				}
-				let mut child = vp.child(k, cx.store, Arc::clone(unit), info.stages[0].entry, fds);
+				let simple = if info.kind == SpawnKind::Background && unit.mode.dialect() == Dialect::Bash {
+					forked_simple_command(unit, info.stages[0].entry)
+				} else {
+					None
+				};
+				let mut child = vp.child(
+					k,
+					cx.store,
+					Arc::clone(unit),
+					simple.unwrap_or(info.stages[0].entry),
+					fds,
+				);
 				child.fork_landing = Some(fork_landing(cx, vp, false));
 				if info.kind == SpawnKind::Background {
 					let level = stage_level(unit, info.stages[0].entry, true);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
-					if unit.mode.dialect() == Dialect::Bash && forks_simple(unit, info.stages[0].entry) {
+					if let Some(pc) = simple {
 						child.fork_landing = Some(fork_landing(cx, vp, true));
+						// DEBUG already ran before the fork (execute_cmd.c:4506);
+						// the child resumes the same command, with its ERR sample.
+						let armed = top_frame(vp).err_trap_armed;
+						let frame = top_frame(&mut child);
+						frame.debug_pc = Some(pc);
+						frame.err_trap_armed = armed;
 					}
 					// A job of its own: its processes get their own group.
 					super::jobctl::own_job(k, child.vpid);
@@ -4500,7 +4558,8 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					let mut child = vp.child(k, cx.store, Arc::clone(unit), stage.entry, fds);
 					let level = stage_level(unit, stage.entry, false);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
-					let simple = unit.mode.dialect() == Dialect::Bash && forks_simple(unit, stage.entry);
+					let simple = unit.mode.dialect() == Dialect::Bash
+						&& forked_simple_command(unit, stage.entry).is_some();
 					child.fork_landing = Some(fork_landing(cx, vp, simple));
 					// bash keeps the job list for a `jobs` builtin run as a pipeline
 					// stage (`jobs -p | xargs kill`).

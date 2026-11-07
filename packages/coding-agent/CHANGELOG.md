@@ -30,6 +30,7 @@
 
 ### Fixed
 
+- Fixed `${ ;}` error recovery, background-command DEBUG trap ordering, and command-substitution statuses in arithmetic `for` headers in the bash tool ([#18268](https://github.com/can1357/oh-my-pi/pull/18268))
 - In the bash tool, a fatal error (`${x?}`, `set -u`, a posix-mode assignment error) now exits with Bash's status: the status an EXIT trap started with when it happens inside that trap, and 127 for a background job or pipeline stage that is one command; an arithmetic error or bad substitution in a subshell ends the subshell, and a failed `exec` of a program it found no longer runs the EXIT trap
 - Bash commands starting with `cd <dir>; ...` now run in `<dir>` as their working directory when it exists, so its direnv environment loads and the directory shows on the tool card ([#18329](https://github.com/can1357/oh-my-pi/pull/18329) by [@harshaygadekar](https://github.com/harshaygadekar))
 - Task-file approvals show and keep the checked file target through dispatch, so retargeted symlinks cannot silently substitute another assignment; replaced files require a retry ([#18314](https://github.com/can1357/oh-my-pi/pull/18314) by [@iliaal](https://github.com/iliaal)).
