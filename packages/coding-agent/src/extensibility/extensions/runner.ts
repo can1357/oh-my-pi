@@ -848,8 +848,6 @@ export class ExtensionRunner {
 		this.runtime.appendEntry = actions.appendEntry;
 		this.runtime.agentsList = actions.agentsList ?? throwUnsupportedAgentsAction;
 		this.runtime.agentsGet = actions.agentsGet ?? throwUnsupportedAgentsAction;
-		this.runtime.agentsEnsureLive = actions.agentsEnsureLive ?? throwUnsupportedAgentsAction;
-		this.runtime.agentsPrompt = actions.agentsPrompt ?? throwUnsupportedAgentsAction;
 		this.runtime.getActiveTools = actions.getActiveTools;
 		this.runtime.getAllTools = actions.getAllTools;
 		this.runtime.setActiveTools = async toolNames => {

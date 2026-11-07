@@ -157,14 +157,6 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
-	agentsEnsureLive(): Promise<never> {
-		throw new ExtensionRuntimeNotInitializedError();
-	}
-
-	agentsPrompt(): Promise<never> {
-		throw new ExtensionRuntimeNotInitializedError();
-	}
-
 	setLabel(): void {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
@@ -238,9 +230,6 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly agents = {
 		list: () => this.runtime.agentsList(),
 		get: (id: string) => this.runtime.agentsGet(id),
-		ensureLive: (id: string) => this.runtime.agentsEnsureLive(id),
-		prompt: (id: string, text: string, options?: { deliverAs?: "steer" | "followUp" }) =>
-			this.runtime.agentsPrompt(id, text, options),
 	};
 
 	constructor(
@@ -414,14 +403,6 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	agentsGet(id: string) {
 		return this.runtime.agentsGet(id);
-	}
-
-	agentsEnsureLive(id: string) {
-		return this.runtime.agentsEnsureLive(id);
-	}
-
-	agentsPrompt(id: string, text: string, options?: { deliverAs?: "steer" | "followUp" }) {
-		return this.runtime.agentsPrompt(id, text, options);
 	}
 
 	exec(command: string, args: string[], options?: ExecOptions) {

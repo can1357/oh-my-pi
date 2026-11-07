@@ -16,7 +16,6 @@ import type {
 	ExtensionMode,
 	ExtensionUIContext,
 } from "../extensibility/extensions/types";
-import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
 import {
 	type AgentRef,
 	AgentRegistry,
@@ -25,7 +24,6 @@ import {
 	MAIN_AGENT_ID,
 } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
-import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
 function toExtensionAgentInfo(ref: AgentRef): ExtensionAgentInfo {
@@ -37,12 +35,10 @@ function toExtensionAgentInfo(ref: AgentRef): ExtensionAgentInfo {
 	};
 }
 
-/** The registry family and lifecycle one extension call may address. */
+/** The registry family one extension call may address. */
 interface ResolvedAgentScope {
 	/** The registry the owning session registered its own agent in. */
 	registry: AgentRegistryApi;
-	/** Revives parked and killed refs; absent when no manager owns {@link registry}. */
-	lifecycle: AgentLifecycleApi | undefined;
 	/** The owning agent's id plus every registry descendant of it. */
 	family: ReadonlySet<string>;
 }
@@ -57,7 +53,7 @@ interface ResolvedAgentScope {
  * past another session taking over its agent id — addresses nothing: a
  * subagent id is only unique inside its owning session's tree, and a host may
  * run several top-level sessions at once, so a stale handle would otherwise
- * list, revive and prompt whatever reused the id.
+ * project whatever reused the id.
  */
 function resolveAgentScope(session: AgentSession): ResolvedAgentScope {
 	if (session.isDisposed) {
@@ -71,62 +67,13 @@ function resolveAgentScope(session: AgentSession): ResolvedAgentScope {
 	if (ownerRef !== undefined && ownerRef.session !== session) {
 		throw new Error(`Agent "${ownerId}" now belongs to a different session, not the one this extension runs in.`);
 	}
-	const lifecycle = AgentLifecycleManager.global();
-	return {
-		registry,
-		lifecycle: lifecycle.manages(registry) ? lifecycle : undefined,
-		family: collectAgentFamily(registry, ownerId),
-	};
-}
-
-function assertVisible(scope: ResolvedAgentScope, id: string): void {
-	if (!scope.family.has(id)) throw new Error(`Agent "${id}" is not visible to this session.`);
-}
-
-async function ensureLiveInScope(scope: ResolvedAgentScope, id: string): Promise<AgentSessionHandle> {
-	if (scope.lifecycle) return await scope.lifecycle.ensureLive(id);
-	// A session created with its own registry gets no lifecycle manager — one
-	// bound to the process-global registry would release an unrelated ref — so
-	// only an already-live agent of that registry can be addressed.
-	const ref = scope.registry.get(id);
-	if (ref?.session) return ref.session;
-	throw new Error(
-		`Agent "${id}" is not live, and no lifecycle manager owns this session's agent registry, so it cannot be revived.`,
-	);
-}
-
-/**
- * Re-resolve the target after the revival await and prove it is the agent this
- * call actually addressed.
- *
- * An id is not an identity. {@link ensureLiveInScope} yields, and across that
- * yield the owning session can be disposed, another live session can take over
- * the owner's agent id, and `AgentRegistry.register` can replace the target's
- * ref with one under a different parent — ids are unique only inside one
- * owning session's tree. Resolving the target by bare id afterwards would
- * project whatever now holds the id, so admission re-runs the entry checks
- * against the session that authorised the call and then demands that the
- * current ref carry the very handle the revival returned. A replacement ref
- * carries a different handle (or none), so it can never be admitted.
- *
- * This refuses admission; it does not cancel work already done. A revival that
- * completed stays completed, and a prompt already handed to the target runs to
- * its end.
- */
-function admitLiveTarget(owner: AgentSession, id: string, live: AgentSessionHandle): AgentRef {
-	const scope = resolveAgentScope(owner);
-	assertVisible(scope, id);
-	const ref = scope.registry.get(id);
-	if (ref?.session !== live) {
-		throw new Error(`Agent "${id}" was replaced while it was being revived; this call no longer addresses it.`);
-	}
-	return ref;
+	return { registry, family: collectAgentFamily(registry, ownerId) };
 }
 
 /** Actions backing {@link ExtensionAPI.agents}, scoped to one session's own registry family. */
 export function createExtensionAgentActions(
 	owner: () => AgentSession,
-): Required<Pick<ExtensionActions, "agentsList" | "agentsGet" | "agentsEnsureLive" | "agentsPrompt">> {
+): Required<Pick<ExtensionActions, "agentsList" | "agentsGet">> {
 	return {
 		agentsList: () => {
 			const scope = resolveAgentScope(owner());
@@ -140,23 +87,6 @@ export function createExtensionAgentActions(
 			if (!scope.family.has(id)) return undefined;
 			const ref = scope.registry.get(id);
 			return ref ? toExtensionAgentInfo(ref) : undefined;
-		},
-		agentsEnsureLive: async id => {
-			// The session that authorises the call is the one admission revalidates:
-			// a host that swapped sessions mid-await did not authorise this one.
-			const session = owner();
-			const scope = resolveAgentScope(session);
-			assertVisible(scope, id);
-			const live = await ensureLiveInScope(scope, id);
-			return toExtensionAgentInfo(admitLiveTarget(session, id, live));
-		},
-		agentsPrompt: async (id, text, agentOptions) => {
-			const session = owner();
-			const scope = resolveAgentScope(session);
-			assertVisible(scope, id);
-			const live = await ensureLiveInScope(scope, id);
-			admitLiveTarget(session, id, live);
-			await live.prompt(text, { streamingBehavior: agentOptions?.deliverAs ?? "steer" });
 		},
 	};
 }

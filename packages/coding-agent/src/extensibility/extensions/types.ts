@@ -1827,19 +1827,6 @@ export interface ExtensionAgentsApi {
 	list(): ExtensionAgentInfo[];
 	/** The visible agent with this registry id, or `undefined`. */
 	get(id: string): ExtensionAgentInfo | undefined;
-	/**
-	 * Revive a parked, idle or killed (`aborted`) agent to a live session.
-	 * Resolves when the agent is live; rejects when the agent is not visible
-	 * to this session, with the underlying error when it has no ref or no
-	 * reviver, and — for a session created with its own agent registry, which
-	 * no lifecycle manager owns — when the agent is not already live.
-	 */
-	ensureLive(id: string): Promise<ExtensionAgentInfo>;
-	/**
-	 * Deliver a follow-up turn to a visible live or revivable agent, without
-	 * going through the hub UI.
-	 */
-	prompt(id: string, text: string, options?: { deliverAs?: "steer" | "followUp" }): Promise<void>;
 }
 
 /**
@@ -2410,14 +2397,6 @@ export type AgentsListHandler = () => ExtensionAgentInfo[];
 
 export type AgentsGetHandler = (id: string) => ExtensionAgentInfo | undefined;
 
-export type AgentsEnsureLiveHandler = (id: string) => Promise<ExtensionAgentInfo>;
-
-export type AgentsPromptHandler = (
-	id: string,
-	text: string,
-	options?: { deliverAs?: "steer" | "followUp" },
-) => Promise<void>;
-
 export type GetActiveToolsHandler = () => string[];
 
 export type GetAllToolsHandler = () => ToolInfo[];
@@ -2456,8 +2435,6 @@ export interface ExtensionActions {
 	appendEntry: AppendEntryHandler;
 	agentsList?: AgentsListHandler;
 	agentsGet?: AgentsGetHandler;
-	agentsEnsureLive?: AgentsEnsureLiveHandler;
-	agentsPrompt?: AgentsPromptHandler;
 	setLabel: (targetId: string, label: string | undefined) => void;
 	getActiveTools: GetActiveToolsHandler;
 	getAllTools: GetAllToolsHandler;
@@ -2516,8 +2493,6 @@ export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionAction
 	getServiceTiers: GetServiceTiersHandler;
 	agentsList: AgentsListHandler;
 	agentsGet: AgentsGetHandler;
-	agentsEnsureLive: AgentsEnsureLiveHandler;
-	agentsPrompt: AgentsPromptHandler;
 	setServiceTier: SetServiceTierHandler;
 }
 
