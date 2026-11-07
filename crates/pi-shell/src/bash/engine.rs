@@ -304,6 +304,9 @@ impl Engine {
 					return Err(unsupported("a compound array value that is not one word list"));
 				}
 				let unit = ir::lower_compound(&cc, &src, mode, Features::NONE).map_err(unsupported)?;
+				if let Some(msg) = unit.syntax_abort() {
+					return Err(TextError { line: 1, msg: msg.clone() });
+				}
 				if observed {
 					let _ = unit.trace_syntax.set(Arc::new(
 						crate::bash::trace::syntax::UnitSyntax::list(cc)

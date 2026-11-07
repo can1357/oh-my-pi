@@ -296,6 +296,17 @@ pub struct Unit {
 }
 
 impl Unit {
+	/// The message of a syntax-error `Abort` in the code (a brace
+	/// expansion over the limit), for units whose code does not run as a
+	/// whole: a compound value's words are expanded, not executed.
+	pub(crate) fn syntax_abort(&self) -> Option<&BString> {
+		self
+			.ops
+			.iter()
+			.find(|op| op.code == Opcode::Abort && op.flags & Op::SYNTAX != 0)
+			.and_then(|op| self.strs.get(op.a as usize))
+	}
+
 	/// An empty unit for `mode`/`features` over `source`.
 	pub(crate) fn empty(source: &[u8], mode: ModeId, features: u32) -> Self {
 		Self {
