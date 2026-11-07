@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- JavaScript eval keeps its variables when an unawaited promise, such as a tool call, rejects after its cell ends, and reports late errors in the next cell's output instead of restarting the kernel ([#18223](https://github.com/can1357/oh-my-pi/pull/18223) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.0] - 2026-11-07
 
 ### Added
