@@ -12,7 +12,7 @@ use gix::{
 	bstr::ByteSlice,
 	filter::plumbing::{
 		driver::apply::Delay,
-		pipeline::convert::{ToGitOutcome, ToWorktreeOutcome},
+		pipeline::convert::{ToGitOutcome, ToWorktreeOutcome, to_worktree},
 	},
 };
 
@@ -87,7 +87,12 @@ impl<'repo> WorktreeFilter<'repo> {
 	pub(crate) fn git_to_worktree(&mut self, path: &str, bytes: Vec<u8>) -> Result<Vec<u8>> {
 		let converted = match self
 			.pipeline
-			.convert_to_worktree(&bytes, path.as_bytes().as_bstr(), Delay::Forbid)
+			.convert_to_worktree(&bytes, path.as_bytes().as_bstr(), to_worktree::Options {
+				can_delay:        Delay::Forbid,
+				// gix otherwise writes the bytes unconverted with only a trace
+				// warning; surface the failure instead.
+				unknown_encoding: to_worktree::UnknownEncoding::Fail,
+			})
 			.map_err(|err| Error::backend(self.op, err))?
 		{
 			ToWorktreeOutcome::Unchanged(_) => None,

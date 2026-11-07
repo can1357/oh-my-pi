@@ -29,6 +29,13 @@
 - `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.
 - The bash execution visualization keeps updating, and saved traces still restore, after a command handles bytes that aren't valid UTF-8 (e.g. `v=$(printf '\377')`)
 - On Windows, `grep`, `glob` and isolated subagents no longer flash a console window when they query or start the ovnfs daemon.
+### Changed
+
+- Merging a task's changes back (three-way patch apply, cherry-picking its branch, and restoring stashed edits) now reports a conflict when both sides edit adjacent lines, as git does, instead of merging both edits ([#16410](https://github.com/can1357/oh-my-pi/pull/16410) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed other colocated jj workspaces losing their working-copy change (moving to a new empty change) after omp read a repository with concurrent `jj` operations ([#16410](https://github.com/can1357/oh-my-pi/pull/16410) by [@sjawhar](https://github.com/sjawhar))
 - A bash command containing a bare `[` (e.g. `a && [` while still streaming) no longer crashes omp in the Pseudo shell visualization ([#18320](https://github.com/can1357/oh-my-pi/issues/18320))
 - Fixed a prompt that mentions an internal-scheme URL with `@` (e.g. `@local://x`, `@vault://x`) aborting the run with "uses internal scheme ... not as a filesystem path"; such a mention is now left as plain text ([#16071](https://github.com/can1357/oh-my-pi/issues/16071))
 - Fixed MCP OAuth login and token refresh failing with `JSON Parse error: Unexpected identifier "access_token"` against GitHub's token endpoint ([#18292](https://github.com/can1357/oh-my-pi/issues/18292))
