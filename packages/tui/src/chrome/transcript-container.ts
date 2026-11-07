@@ -384,6 +384,23 @@ export class TranscriptContainer extends Container {
 	#historyEnd: RowsAbove;
 	/** Native wrappers of compact runs keyed by their first member; see {@link nativeBlocks}. */
 	#nativeRuns: ReadonlyMap<Component, CompactRun> = NO_RUNS;
+	/**
+	 * Live-entry wrapper list for the per-frame walk. The per-frame readers
+	 * (`liveRowCount`, `#composeViewport`, `#peekBatch`) each iterate the live
+	 * tail, so without this each one allocates one wrapper object per live
+	 * block — up to 3 × 256 short-lived objects plus arrays per frame at
+	 * 30 fps.
+	 *
+	 * Wrappers carry positional indexes, so every mutation of `#entries` or
+	 * `#frontier` invalidates them through {@link #invalidateLiveWrappers}:
+	 * dropping the array there also releases the removed entries instead of
+	 * pinning them until the next live read. {@link #liveEntries} additionally
+	 * re-checks start and length, which is what catches a mutation site that
+	 * forgot to reset.
+	 */
+	#liveWrappers: Array<{ entry: TranscriptEntry; index: number }> = [];
+	#liveWrappersStart = -1;
+	#liveEntryWalkBuilds = 0;
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
 		super.addChild(component);
@@ -402,6 +419,8 @@ export class TranscriptContainer extends Container {
 		// list once instead of trusting positions. Insert-after-anchor callers
 		// use insertChildAt, which keeps both arrays in lockstep.
 		this.#entriesUnverified = true;
+		// The live tail grew by one positional wrapper.
+		this.#invalidateLiveWrappers();
 	}
 
 	/**
@@ -419,6 +438,8 @@ export class TranscriptContainer extends Container {
 		if (moved) this.children.splice(index, 0, moved);
 		const [entry] = this.#entries.splice(this.#entries.length - 1, 1);
 		if (entry) this.#entries.splice(index, 0, entry);
+		// `#entries` moved under the cached wrappers: their indexes are positional.
+		this.#invalidateLiveWrappers();
 		// Both arrays moved in lockstep, so the live-tail check applies again.
 		this.#entriesUnverified = false;
 	}
@@ -434,6 +455,8 @@ export class TranscriptContainer extends Container {
 		this.#entries.splice(index, 1);
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
+		// The live tail shifted: wrapper indexes cached by #liveEntries are stale.
+		this.#invalidateLiveWrappers();
 	}
 
 	override clear(): void {
@@ -447,6 +470,8 @@ export class TranscriptContainer extends Container {
 		this.#replayRequested = false;
 		this.#lastViewportSpans = [];
 		this.#historyEnd = undefined;
+		// No entries remain, so no cached wrapper is valid.
+		this.#invalidateLiveWrappers();
 	}
 
 	setToolActivityVisible(visible: boolean): void {
@@ -539,6 +564,15 @@ export class TranscriptContainer extends Container {
 	emittedStableRows(): readonly number[] {
 		this.#syncEntries();
 		return this.#entries.map(entry => entry.emitted);
+	}
+
+	/**
+	 * Live-entry walk rebuilds so far (diagnostics and tests). One rebuilt walk
+	 * serves every reader in a frame; a frame that rebuilds per reader is the
+	 * regression this exposes.
+	 */
+	get liveEntryWalkBuilds(): number {
+		return this.#liveEntryWalkBuilds;
 	}
 
 	/** Whether any block is still streaming or otherwise unfinalized. */
@@ -1136,6 +1170,10 @@ export class TranscriptContainer extends Container {
 			const head = offered.split ? this.#entries[offered.end] : undefined;
 			if (head !== undefined) head.split = offered.split;
 			this.#historyEnd = offered.historyEnd;
+			// No reset here: this frame's earlier readers already cached the tail
+			// starting at `offered.end`, which is exactly where `#frontier` lands.
+			// A cache primed before the offer started earlier and fails the start
+			// check in #liveEntries.
 		} else {
 			this.#releaseCommittedRenderCaches();
 			this.#historyEnd = offered.historyEnd;
@@ -1622,6 +1660,8 @@ export class TranscriptContainer extends Container {
 			}
 			this.#retireEntry(entry);
 			this.#frontier++;
+			// The live tail's start moved under the cached wrappers.
+			this.#invalidateLiveWrappers();
 		}
 	}
 
@@ -1789,9 +1829,25 @@ export class TranscriptContainer extends Container {
 
 	#liveEntries(): Array<{ entry: TranscriptEntry; index: number }> {
 		const start = this.#offered?.kind === "commit" ? this.#offered.end : this.#frontier;
+		if (start === this.#liveWrappersStart && this.#liveWrappers.length === this.#entries.length - start) {
+			return this.#liveWrappers;
+		}
 		const live: Array<{ entry: TranscriptEntry; index: number }> = [];
 		for (let index = start; index < this.#entries.length; index++) live.push({ entry: this.#entries[index]!, index });
+		this.#liveWrappers = live;
+		this.#liveWrappersStart = start;
+		this.#liveEntryWalkBuilds++;
 		return live;
+	}
+
+	/**
+	 * Drop the cached walk: `#entries` or `#frontier` moved, so cached indexes
+	 * point at the wrong blocks. Clearing the array also releases the entries it
+	 * held, which a lazily detected mismatch would not do until the next read.
+	 */
+	#invalidateLiveWrappers(): void {
+		this.#liveWrappers = [];
+		this.#liveWrappersStart = -1;
 	}
 
 	#liveCount(): number {
@@ -1836,6 +1892,8 @@ export class TranscriptContainer extends Container {
 		);
 		this.#frontier = this.#entries.findIndex(entry => entry.state !== "committed");
 		if (this.#frontier < 0) this.#frontier = this.#entries.length;
+		// Entry identities moved: cached wrappers may point at dropped entries.
+		this.#invalidateLiveWrappers();
 	}
 
 	/** Whether `#entries` has `children`'s length and components from `start` on. */
