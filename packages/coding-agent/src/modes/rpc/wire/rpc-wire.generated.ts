@@ -1060,6 +1060,8 @@ export interface ReadyEvent {
 	supportedProtocolVersions?: number[];
 	maxFrameBytes?: number;
 	maxReassembledFrameBytes?: number;
+	/** `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands. */
+	supportsBashExcludeFromContext?: boolean;
 }
 
 export type PromptStatus = "completed" | "aborted" | "error";
@@ -1771,6 +1773,7 @@ export interface SetAutoRetryParams {
 
 export interface BashParams {
 	command: string;
+	excludeFromContext?: boolean;
 }
 
 export interface GetSessionLeaseParams {

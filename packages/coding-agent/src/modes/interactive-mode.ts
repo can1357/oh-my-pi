@@ -4753,7 +4753,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				autoThinking: thinking === AUTO_THINKING,
 				// A fresh session derives tiers from settings, not this session's `/fast` toggles.
 				fastMode: this.session.isFastModeConfiguredFor(model),
-				usingSubscription: this.session.modelRegistry.isUsingOAuth(model),
+				usingSubscription: this.session.modelRegistry.isUsingSubscription(model),
 				autoCompactEnabled: this.session.autoCompactionEnabled,
 				compactionBoundaries: model.contextWindow
 					? statusLineHost.computeCompactionBoundaries(this.session, model.contextWindow, model)
