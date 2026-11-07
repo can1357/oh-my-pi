@@ -40,8 +40,11 @@ unrelated ref that happens to share a handle.
   If `workspace` is omitted, no team `TASKS.md` is created automatically;
 - **commands**: `/team list`, `/team start <name> [assignment]`,
   `/team status [name]`, `/team stop <name|all>`. A spawn whose registry ref
-  does not appear in time is reported as *pending* (with its reserved id) and
-  never as failed; a retry skips it instead of spawning a duplicate.
+  does not appear in time is reported as *pending* (with its reserved id); a
+  retry skips it instead of spawning a duplicate. Once the run registers, the
+  member is live; if the run ends without registering, `/team status` and
+  `/team stop` report it as failed and the next `/team start` starts it again.
+  Member ids are reserved exclusively across every session in the process.
   `team.maxTeammates` (default 4) caps members per start.
 
 ## What it is not

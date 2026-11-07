@@ -29,15 +29,19 @@ const SPAWN_REF_TIMEOUT_MS = 15_000;
 /**
  * The run was reserved but its registry ref did not appear in time. The run is
  * still live: callers must report the reserved id as pending/submitted instead
- * of failing, or a client retry would spawn a duplicate agent.
+ * of failing, or a client retry would spawn a duplicate agent. `registration`
+ * settles with the ref once it registers, or rejects when the run ends
+ * without ever registering, so a pending entry can be resolved either way.
  */
 export class SpawnPendingError extends Error {
 	readonly agentId: string;
+	readonly registration: Promise<AgentRef>;
 
-	constructor(agentId: string) {
+	constructor(agentId: string, registration: Promise<AgentRef>) {
 		super(`Subagent ${agentId} was reserved but did not register in time; the run is still starting`);
 		this.name = "SpawnPendingError";
 		this.agentId = agentId;
+		this.registration = registration;
 	}
 }
 
@@ -135,39 +139,63 @@ export async function spawnSubagentViaExecutor(
 		});
 	});
 	void settled.finally(() => releaseSessionSpawnPermit(session));
-	return awaitRegisteredRef(
-		registry,
-		id,
-		run.then(() => undefined),
-		refTimeoutMs,
-	);
+	return awaitRegisteredRef(registry, id, watchRegistration(registry, id, run), refTimeoutMs);
+}
+
+function describeUnregisteredRun(result: StructuredSubagentResult | undefined): string {
+	const run = result?.result;
+	if (run?.error) return run.error;
+	if (run?.aborted) return run.abortReason?.trim() || "the run was aborted before it registered";
+	return run !== undefined && run.exitCode !== 0
+		? `the run exited with code ${run.exitCode} before it registered`
+		: "the run ended before it registered";
+}
+
+/**
+ * Settle with the ref once the executor registers `id`, or reject when the run
+ * ends (resolved or rejected) without having registered. Independent of any
+ * caller timeout, so a pending spawn still reaches a final outcome.
+ */
+function watchRegistration(
+	registry: AgentRegistryApi,
+	id: string,
+	run: Promise<StructuredSubagentResult>,
+): Promise<AgentRef> {
+	const existing = registry.get(id);
+	if (existing) return Promise.resolve(existing);
+	const { promise, resolve, reject } = Promise.withResolvers<AgentRef>();
+	const unsubscribe = registry.onChange(event => {
+		if (event.ref.id === id) resolve(event.ref);
+	});
+	run.then(result => {
+		const ref = registry.get(id);
+		if (ref) resolve(ref);
+		else reject(new Error(describeUnregisteredRun(result)));
+	}, reject);
+	void promise.then(unsubscribe, unsubscribe);
+	return promise;
 }
 
 /**
  * Resolve the ref once the executor registers it. The executor registers the
  * child before its first model request, so this normally resolves immediately
- * after session construction; a run that rejects first fails the spawn.
+ * after session construction; a run that ends first fails the spawn.
  */
 async function awaitRegisteredRef(
 	registry: AgentRegistryApi,
 	id: string,
-	failure: Promise<undefined>,
+	registration: Promise<AgentRef>,
 	timeoutMs: number,
 ): Promise<AgentRef> {
 	const existing = registry.get(id);
 	if (existing) return existing;
-	const { promise, resolve, reject } = Promise.withResolvers<AgentRef>();
-	const timer = setTimeout(() => reject(new SpawnPendingError(id)), timeoutMs);
+	const { promise: expired, reject: expire } = Promise.withResolvers<never>();
+	const timer = setTimeout(() => expire(new SpawnPendingError(id, registration)), timeoutMs);
 	// A spawn must not pin the event loop for the whole timeout.
 	timer.unref?.();
-	const unsubscribe = registry.onChange(event => {
-		if (event.ref.id === id) resolve(event.ref);
-	});
-	failure.catch(reject);
 	try {
-		return await promise;
+		return await Promise.race([registration, expired]);
 	} finally {
 		clearTimeout(timer);
-		unsubscribe();
 	}
 }

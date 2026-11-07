@@ -999,10 +999,31 @@ describe("spawnSubagent seam", () => {
 			},
 			0,
 		);
-		await expect(spawn).rejects.toBeInstanceOf(SpawnPendingError);
-		await spawn.catch(error => {
-			expect((error as SpawnPendingError).agentId).toBe("Spawn-late");
+		const error = (await spawn.catch(caught => caught)) as SpawnPendingError;
+		expect(error).toBeInstanceOf(SpawnPendingError);
+		expect(error.agentId).toBe("Spawn-late");
+		// The run ends without ever registering: the pending outcome turns final.
+		never.resolve({ result: { exitCode: 1, error: "model unavailable" } } as unknown as StructuredSubagentResult);
+		await expect(error.registration).rejects.toThrow("model unavailable");
+	});
+
+	it("settles a pending spawn with the ref once it registers late", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const never = Promise.withResolvers<StructuredSubagentResult>();
+		const spawn = spawnSubagentViaExecutor(
+			{} as unknown as ToolSession,
+			{ prompt: "slow start" },
+			{ reserveId: async () => "Spawn-late", run: async () => await never.promise },
+			0,
+		);
+		const error = (await spawn.catch(caught => caught)) as SpawnPendingError;
+		const ref = AgentRegistry.global().register({
+			id: "Spawn-late",
+			displayName: "late",
+			kind: "sub",
+			session: null,
 		});
+		expect(await error.registration).toBe(ref);
 		never.resolve(undefined as unknown as StructuredSubagentResult);
 	});
 
@@ -1102,7 +1123,7 @@ describe("A2A streaming a pending spawn", () => {
 		const { handle } = startServer({
 			registry,
 			spawn: async () => {
-				throw new SpawnPendingError("Spawn-late");
+				throw new SpawnPendingError("Spawn-late", Promise.withResolvers<AgentRef>().promise);
 			},
 		});
 		const response = await fetch(handle.url, {

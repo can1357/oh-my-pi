@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { type AgentRef, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import {
 	BUILTIN_TEAMS_SLASH_COMMANDS,
 	resetTeamMembershipsForTests,
@@ -12,7 +12,12 @@ import {
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { sanitizeAgentId } from "@oh-my-pi/pi-coding-agent/task/name-generator";
 import * as spawnSubagent from "@oh-my-pi/pi-coding-agent/task/spawn-subagent";
-import { withTeamIrcTools } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import {
+	releaseStructuredSubagentId,
+	reserveStructuredSubagentId,
+	withTeamIrcTools,
+} from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	discoverTeams,
 	parseTeamFile,
@@ -452,9 +457,10 @@ describe("/team start and stop", () => {
 		const { team, root, cleanup } = await teamFixture({ handles: ["Scout"] });
 		try {
 			mockTeamDiscovery(team);
+			const registration = Promise.withResolvers<AgentRef>();
 			const spawn = vi
 				.spyOn(spawnSubagent, "spawnSubagentForSession")
-				.mockRejectedValue(new spawnSubagent.SpawnPendingError("Scout-pending"));
+				.mockRejectedValue(new spawnSubagent.SpawnPendingError("Scout-pending", registration.promise));
 			const { runtime, outputs } = teamRuntime(root);
 
 			await TEAM_HANDLE({ args: "start audit" }, runtime);
@@ -476,11 +482,63 @@ describe("/team start and stop", () => {
 				kind: "sub",
 				session: null,
 			});
+			registration.resolve(ref);
+			await registration.promise;
 			await TEAM_HANDLE({ args: "stop audit" }, runtime);
 			expect(release).toHaveBeenCalledWith("Scout-pending", ref, { tombstone: true });
 		} finally {
 			await cleanup();
 		}
+	});
+
+	it("marks a pending member failed when its run ends unregistered, and starts it again", async () => {
+		const { team, root, cleanup } = await teamFixture({ handles: ["Scout"] });
+		try {
+			mockTeamDiscovery(team);
+			const registration = Promise.withResolvers<AgentRef>();
+			const spawn = vi
+				.spyOn(spawnSubagent, "spawnSubagentForSession")
+				.mockRejectedValueOnce(new spawnSubagent.SpawnPendingError("Scout", registration.promise));
+			const { runtime, outputs } = teamRuntime(root);
+
+			await TEAM_HANDLE({ args: "start audit" }, runtime);
+			registration.reject(new Error("model unavailable"));
+			await registration.promise.catch(() => {});
+			await TEAM_HANDLE({ args: "status audit" }, runtime);
+			expect(outputs.at(-1)).toContain("failed: model unavailable");
+
+			spawn.mockImplementation(async (_session, options) =>
+				AgentRegistry.global().register({
+					id: options.teamReservedId!,
+					displayName: "Scout",
+					kind: "sub",
+					session: null,
+				}),
+			);
+			await TEAM_HANDLE({ args: "start audit" }, runtime);
+			expect(outputs.at(-1)).toContain("Scout → spawned (Scout-2)");
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("reserves distinct ids for the same handle across sessions sharing a registry", async () => {
+		const session = () => ({ getArtifactsDir: () => null }) as unknown as ToolSession;
+		const first = session();
+		const second = session();
+		const [a, b] = await Promise.all([
+			reserveStructuredSubagentId(first, { label: "Scout" }),
+			reserveStructuredSubagentId(second, { label: "Scout" }),
+		]);
+		expect([a, b].sort()).toEqual(["Scout", "Scout-2"]);
+		// A finished run frees its claim, so a fresh session can take the id again...
+		releaseStructuredSubagentId(a === "Scout" ? first : second, "Scout");
+		const third = session();
+		expect(await reserveStructuredSubagentId(third, { label: "Scout" })).toBe("Scout");
+		// ...but a registered ref keeps it taken once every claim is gone.
+		releaseStructuredSubagentId(third, "Scout");
+		AgentRegistry.global().register({ id: "Scout", displayName: "Scout", kind: "sub", session: null });
+		expect(await reserveStructuredSubagentId(session(), { label: "Scout" })).not.toBe("Scout");
 	});
 
 	it("creates TASKS.md in the workspace and interpolates the owner handle", async () => {

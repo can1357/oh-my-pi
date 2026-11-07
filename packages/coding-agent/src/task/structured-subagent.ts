@@ -35,7 +35,7 @@ import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" wit
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { AUTO_THINKING, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
@@ -727,7 +727,34 @@ async function applySpawnHook(
 	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
 }
 
-/** Reserve a session-global agent id only after preflight has succeeded. */
+/**
+ * Ids handed out but not registered yet, per registry. Each session allocates
+ * from its own output manager, so two sessions sharing a registry would both
+ * reserve `Scout`; the claim makes reservation exclusive until the run ends,
+ * after which the registered ref itself keeps the id taken.
+ */
+const pendingIdClaims = new WeakMap<AgentRegistryApi, Set<string>>();
+
+function idClaimsFor(session: ToolSession): Set<string> {
+	const registry = session.agentRegistry ?? AgentRegistry.global();
+	let claims = pendingIdClaims.get(registry);
+	if (!claims) {
+		claims = new Set();
+		pendingIdClaims.set(registry, claims);
+	}
+	return claims;
+}
+
+/** Drop a reservation that will never register (or already has). */
+export function releaseStructuredSubagentId(session: ToolSession, id: string): void {
+	idClaimsFor(session).delete(id);
+}
+
+/**
+ * Reserve a registry-wide agent id only after preflight has succeeded. The id
+ * is unique against registered refs and every other session's pending
+ * reservations; the check and the claim run without an await in between.
+ */
 export async function reserveStructuredSubagentId(
 	session: ToolSession,
 	identity: StructuredSubagentIdentity | undefined,
@@ -735,7 +762,17 @@ export async function reserveStructuredSubagentId(
 	if (identity?.id) return identity.id;
 	const manager = session.agentOutputManager ?? new AgentOutputManager(session.getArtifactsDir ?? (() => null));
 	session.agentOutputManager ??= manager;
-	return manager.allocate(sanitizeAgentId(identity?.label) ?? generateTaskName());
+	const registry = session.agentRegistry ?? AgentRegistry.global();
+	const label = sanitizeAgentId(identity?.label) ?? generateTaskName();
+	for (;;) {
+		// Each allocate() marks its candidate taken, so a collision moves on to
+		// the next suffix (`Scout-2`, `Scout-3`, ...).
+		const id = await manager.allocate(label);
+		const claims = idClaimsFor(session);
+		if (registry.get(id) || claims.has(id)) continue;
+		claims.add(id);
+		return id;
+	}
 }
 
 interface ArtifactLease {
@@ -1044,6 +1081,22 @@ function describeSalvagedWork(result: SingleResult): string {
  * lease or child dispatch; callers keep responsibility for their result text.
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
+	let reservedId = request.identity?.id;
+	try {
+		return await executeStructuredSubagent(request, id => {
+			reservedId = id;
+		});
+	} finally {
+		// Registered or not, the run is over: a registered ref now holds the id
+		// itself, and an unregistered one must not keep it from other sessions.
+		if (reservedId !== undefined) releaseStructuredSubagentId(request.session, reservedId);
+	}
+}
+
+async function executeStructuredSubagent(
+	request: StructuredSubagentRequest,
+	onReserved: (id: string) => void,
+): Promise<StructuredSubagentResult> {
 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
@@ -1066,6 +1119,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			...request.identity,
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
+		onReserved(id);
 		if (policy.preparedSession === undefined) await refreshSkillsForAutoload(request.session, policy.agent);
 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
 		baseOptions.onCleanupDeferred = completion => {

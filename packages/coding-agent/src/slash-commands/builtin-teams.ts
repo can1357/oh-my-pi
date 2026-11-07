@@ -16,7 +16,7 @@ import {
 	sanitizeTeamHandle,
 } from "../task/teams";
 import { SpawnPendingError, spawnSubagentForSession } from "../task/spawn-subagent";
-import { reserveStructuredSubagentId } from "../task/structured-subagent";
+import { releaseStructuredSubagentId, reserveStructuredSubagentId } from "../task/structured-subagent";
 import { cfgTeamEnabled, cfgTeamMaxTeammates } from "../task/settings";
 import { commandConsumed, parseSubcommand, usage } from "./helpers/parse";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
@@ -36,7 +36,8 @@ function teamRuntimeError(message: string): string {
 interface TeamMembership {
 	id: string;
 	ref?: AgentRef;
-	unsubscribe?: () => void;
+	/** Why a pending spawn ended without registering. */
+	failure?: string;
 }
 
 let teamMemberships = new WeakMap<object, Map<string, Map<string, TeamMembership>>>();
@@ -147,12 +148,11 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				for (const member of members) {
 					const handle = sanitizeTeamHandle(member.handle);
 					let entry = recorded.get(handle);
-					if (!entry) {
-						let id: string;
-						do {
-							id = await reserveStructuredSubagentId(toolSession, { label: handle });
-						} while (AgentRegistry.global().get(id));
-						entry = { id };
+					// A member whose pending spawn failed is started again.
+					if (!entry || entry.failure !== undefined) {
+						// Registry-wide reservation: unique against live refs and every
+						// other session's pending ids.
+						entry = { id: await reserveStructuredSubagentId(toolSession, { label: handle }) };
 						recorded.set(handle, entry);
 						newlyReserved.add(handle);
 					}
@@ -181,21 +181,25 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					} catch (error) {
 						if (error instanceof SpawnPendingError) {
 							entry.id = error.agentId;
-							const registry = AgentRegistry.global();
-							entry.ref = registry.get(entry.id);
-							if (!entry.ref) {
-								entry.unsubscribe = registry.onChange(event => {
-									if (event.type === "registered" && event.ref.id === entry.id) {
-										entry.ref = event.ref;
-										entry.unsubscribe?.();
-										entry.unsubscribe = undefined;
-									}
-								});
-							}
+							entry.ref = AgentRegistry.global().get(entry.id);
+							// The run keeps starting after the timeout: record whichever
+							// outcome it reaches so status and stop never report a dead
+							// member as still starting.
+							error.registration.then(
+								ref => {
+									if (recorded.get(handle) === entry) entry.ref = ref;
+								},
+								(failure: unknown) => {
+									if (recorded.get(handle) !== entry) return;
+									entry.failure = failure instanceof Error ? failure.message : String(failure);
+									releaseStructuredSubagentId(toolSession, entry.id);
+								},
+							);
 							lines.push(`${handle} → pending (${error.agentId}); the run is still starting`);
 							continue;
 						}
 						recorded.delete(handle);
+						releaseStructuredSubagentId(toolSession, entry.id);
 						failures += 1;
 						lines.push(`${handle} → FAILED: ${error instanceof Error ? error.message : String(error)}`);
 					}
@@ -229,7 +233,13 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						const handle = sanitizeTeamHandle(member.handle);
 						const entry = recorded?.get(handle);
 						const ref = entry?.ref && registry.get(entry.id) === entry.ref ? entry.ref : undefined;
-						const status = ref ? `${ref.status} (${ref.kind})` : entry && !entry.ref ? "pending" : "not spawned";
+						const status = ref
+							? `${ref.status} (${ref.kind})`
+							: entry?.failure !== undefined
+								? `failed: ${entry.failure}`
+								: entry && !entry.ref
+									? "pending"
+									: "not spawned";
 						lines.push(`  ${entry?.id ?? handle} - ${status} - agent: ${member.agent}`);
 					}
 				}
@@ -257,6 +267,11 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						continue;
 					}
 					for (const [handle, entry] of recorded) {
+						if (entry.failure !== undefined) {
+							lines.push(`  ${handle} - failed before registering: ${entry.failure}`);
+							recorded.delete(handle);
+							continue;
+						}
 						const ref = entry.ref;
 						if (!ref) {
 							lines.push(`  ${handle} - pending (${entry.id}); retry stop after registration`);
