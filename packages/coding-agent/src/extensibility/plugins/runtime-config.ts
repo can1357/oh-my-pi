@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { replaceFileAtomically } from "../../utils/atomic-file";
+import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import type { PluginRuntimeConfig } from "./types";
 
 /** Normalizes persisted plugin runtime config across legacy lockfile shapes. */

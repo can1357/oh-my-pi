@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger, toError } from "@oh-my-pi/pi-utils";
-import { replaceFileAtomically } from "../utils/atomic-file";
+import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 
 /**
  * Sanitize a tool name for safe use as the middle segment of the artifact

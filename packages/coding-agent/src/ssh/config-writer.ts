@@ -6,6 +6,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 
 export interface SSHHostConfig {
 	host: string;
@@ -50,13 +51,7 @@ export async function writeSSHConfigFile(filePath: string, config: SSHConfigFile
 	const dir = path.dirname(filePath);
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
 
-	// Write to temp file first (atomic write)
-	const tmpPath = `${filePath}.tmp`;
-	const content = JSON.stringify(config, null, 2);
-	await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
-
-	// Rename to final path (atomic on most systems)
-	await fs.promises.rename(tmpPath, filePath);
+	await writeFileAtomically(filePath, JSON.stringify(config, null, 2));
 }
 
 /**

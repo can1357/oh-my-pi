@@ -4,6 +4,7 @@ import { type } from "@oh-my-pi/omptype";
 import { completeSimple, Effort, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
+import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -288,7 +289,8 @@ async function applyReplacementFiles(bankDir: string, files: readonly Replacemen
 	}));
 	try {
 		await Promise.all(staged.map(file => Bun.write(file.tempPath, file.content)));
-		for (const file of staged) await fs.rename(file.tempPath, path.join(bankDir, file.name));
+		// Every file is staged before any is published, so a failure mid-write leaves the bank as it was.
+		for (const file of staged) await replaceFileAtomically(file.tempPath, path.join(bankDir, file.name));
 	} finally {
 		await Promise.all(staged.map(file => fs.rm(file.tempPath, { force: true }).catch(() => {})));
 	}

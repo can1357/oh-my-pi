@@ -12,7 +12,7 @@ import { type BtwHistoryRecord, BtwHistoryStore, getBtwTurns } from "@oh-my-pi/p
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import * as atomicFile from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
+import * as atomicFile from "@oh-my-pi/pi-utils/atomic-file";
 import { Container, Input, type KeyId, type TUI } from "@oh-my-pi/pi-tui";
 import type { DictationTarget } from "@oh-my-pi/pi-coding-agent/stt/push-to-talk";
 import { SPACE_HOLD_MECHANICAL_RUN, type SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";

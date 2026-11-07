@@ -10,7 +10,7 @@ import licenseText from "./extension-assets/LICENSE.txt" with { type: "text" };
 import manifestJson from "./extension-assets/manifest.json.txt" with { type: "text" };
 import optionsHtml from "./extension-assets/options.html.txt" with { type: "text" };
 import optionsJs from "./extension-assets/options.js.txt" with { type: "text" };
-import { replaceFileAtomically } from "../../../utils/atomic-file";
+import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import { stampRelayExtensionManifest, stampRelayExtensionScript } from "./protocol";
 
 /** The extension files `omp browser-relay install` writes, stamped with the installing omp's version. */
