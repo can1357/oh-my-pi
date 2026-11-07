@@ -200,20 +200,53 @@ fn keeps_the_placement_rejection_when_dropping_the_comma_does_not_parse() {
 }
 
 #[test]
-fn drops_duplicated_leading_and_trailing_boundary_lines_around_a_range_replacement() {
+fn keeps_duplicated_leading_and_trailing_boundary_lines_as_final_content() {
 	let file = "function f() {\n  keepA();\n  old1();\n  old2();\n  keepB();\n}";
 	let result = apply(
 		file,
 		&replacement(3, 4, &["  keepA();", "  new1();", "  new2();", "  keepB();"], 1),
 		Some("x.ts"),
 	);
-	assert_eq!(result.text, "function f() {\n  keepA();\n  new1();\n  new2();\n  keepB();\n}");
+	assert_eq!(
+		result.text,
+		"function f() {\n  keepA();\n  keepA();\n  new1();\n  new2();\n  keepB();\n  keepB();\n}"
+	);
 	assert!(
 		result
 			.warnings
 			.iter()
-			.any(|warning| warning.contains("boundary echo"))
+			.all(|warning| !warning.contains("boundary echo")),
+		"{:?}",
+		result.warnings
 	);
+}
+
+/// A multi-line replacement whose first or last row repeats the surviving line
+/// just outside the range is that range's final content. Dropping the row used
+/// to rewrite the edit, often into a no-op, and only warn afterwards.
+#[test]
+fn keeps_an_intentional_boundary_repeat_as_final_content() {
+	let file = "alpha\nbeta\ngamma\nomega";
+	let leading =
+		apply(file, &replacement(2, 3, &["alpha", "beta", "gamma"], 1), Some("example.txt"));
+	assert_eq!(leading.text, "alpha\nalpha\nbeta\ngamma\nomega");
+	assert!(
+		leading
+			.warnings
+			.iter()
+			.all(|warning| !warning.contains("boundary echo")),
+		"{:?}",
+		leading.warnings
+	);
+
+	let trailing =
+		apply(file, &replacement(2, 3, &["beta", "gamma", "omega"], 1), Some("example.txt"));
+	assert_eq!(trailing.text, "alpha\nbeta\ngamma\nomega\nomega");
+
+	let code = "function f() {\n  keep();\n  old();\n  next();\n}\n";
+	let parsed =
+		apply(code, &replacement(3, 4, &["  keep();", "  fresh();", "  next();"], 1), Some("f.ts"));
+	assert_eq!(parsed.text, "function f() {\n  keep();\n  keep();\n  fresh();\n  next();\n}\n");
 }
 
 #[test]
@@ -358,14 +391,11 @@ fn refuses_a_too_short_echo_a_dropped_copy_exposed() {
 	}
 }
 
-/// A body that restates the line above its range, fills the range, and adds
-/// a new line equal to that neighbour: a `break;` above a new `case`, a second
-/// `@property`, a second `#[test]` on a one-row range. Dropping the echo keeps
-/// no range row, so the new copy is content the body asks for, not a
-/// duplicate: the edit applies. It was refused as holding "one more copy" of
-/// the neighbour.
+/// A body that restates the line above its range and also adds a later copy of
+/// that neighbour. The restated row is final content of the range, so it is
+/// kept; the later copy is kept too.
 #[test]
-fn applies_a_dropped_echo_whose_body_adds_a_new_copy_of_the_neighbour() {
+fn keeps_a_boundary_repeat_when_the_body_also_adds_another_copy() {
 	// (path, file, start, end, body, expected)
 	type Case<'a> = (&'a str, &'a str, u32, u32, &'a [&'a str], &'a str);
 	let cases: [Case; 3] = [
@@ -375,7 +405,7 @@ fn applies_a_dropped_echo_whose_body_adds_a_new_copy_of_the_neighbour() {
 			5,
 			6,
 			&["\t\tbreak;", "\tcase 2:", "\t\tc();", "\t\tbreak;", "\tdefault:", "\t\tb();"],
-			"switch (x) {\n\tcase 1:\n\t\ta();\n\t\tbreak;\n\tcase \
+			"switch (x) {\n\tcase 1:\n\t\ta();\n\t\tbreak;\n\t\tbreak;\n\tcase \
 			 2:\n\t\tc();\n\t\tbreak;\n\tdefault:\n\t\tb();\n}\n",
 		),
 		(
@@ -392,8 +422,8 @@ fn applies_a_dropped_echo_whose_body_adds_a_new_copy_of_the_neighbour() {
 				"    def b(self):",
 				"        return 3",
 			],
-			"class C:\n    @property\n    def a(self):\n        return 2\n\n    @property\n    def \
-			 b(self):\n        return 3\n",
+			"class C:\n    @property\n    @property\n    def a(self):\n        return 2\n\n    \
+			 @property\n    def b(self):\n        return 3\n",
 		),
 		(
 			"t.rs",
@@ -401,7 +431,7 @@ fn applies_a_dropped_echo_whose_body_adds_a_new_copy_of_the_neighbour() {
 			2,
 			2,
 			&["#[test]", "fn a() { x(); }", "", "#[test]", "fn b() {}"],
-			"#[test]\nfn a() { x(); }\n\n#[test]\nfn b() {}\n",
+			"#[test]\n#[test]\nfn a() { x(); }\n\n#[test]\nfn b() {}\n",
 		),
 	];
 	for (path, file, start, end, body, expected) in cases {
@@ -411,10 +441,10 @@ fn applies_a_dropped_echo_whose_body_adds_a_new_copy_of_the_neighbour() {
 }
 
 #[test]
-fn drops_a_trailing_attribute_echo_in_a_single_line_replacement() {
+fn keeps_a_trailing_attribute_repeat_in_a_single_line_replacement() {
 	let file = "/// Old summary.\n#[napi]\npub fn f() {}";
 	let result = apply(file, &replacement(1, 1, &["/// New summary.", "#[napi]"], 1), Some("x.rs"));
-	assert_eq!(result.text, "/// New summary.\n#[napi]\npub fn f() {}");
+	assert_eq!(result.text, "/// New summary.\n#[napi]\n#[napi]\npub fn f() {}");
 }
 
 #[test]
