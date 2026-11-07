@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The edit tool's search for a missing authored path now runs on the filesystem runtime with every other traversal, so an edit whose path is not on disk no longer holds the worker threads the embedded shell and every other native call are scheduled on ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
+- A directory walk can now be given the flag it ends on, so the caller stops it from its own frame. The edit tool's missing-path search uses it: an edit tool call that goes away mid-search stops the search at its next directory entry, even where the search is deep inside a directory the ignore rules exclude, instead of reading that directory to the end ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed

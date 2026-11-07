@@ -542,24 +542,58 @@ async fn resolve_one(resolver: &ResolverCallback, url: &str) -> UrlResolution {
 /// pruned). `None` when there is no match, more than one, or the search
 /// outlives [`RECOVERY_TIMEOUT`]; the walk stops at the second match.
 async fn recover_one(cwd: &Path, authored: &str) -> Option<Resolved> {
+	recover_one_stopped(cwd, authored, walk::Stop::new()).await
+}
+
+/// [`recover_one`] with the walk's stop flag supplied, so a test can watch
+/// the flag this frame owns.
+async fn recover_one_stopped(cwd: &Path, authored: &str, stop: walk::Stop) -> Option<Resolved> {
 	let glob = RecoveryGlob::new(authored)?;
-	let opts = Options { hidden: true, gitignore: true, skip_git: true, ..Options::default() };
 	let matches = Arc::new(AtomicUsize::new(0));
 	let seen = Arc::clone(&matches);
-	let fs = Fs::Native;
-	let search = walk::collect(&fs, cwd, &opts, false, move |_, entry| {
-		if !glob.matches(entry.path, entry.name(), entry.file_type) {
-			return Action::Skip;
-		}
-		if seen.fetch_add(1, Ordering::AcqRel) == 0 {
-			Action::Continue
-		} else {
-			Action::Stop
-		}
+	let root = cwd.to_path_buf();
+	// Dropping this future must stop the walk at its next entry, as it did
+	// when the walk was polled inline. The guard sets the walk's own flag,
+	// here in the caller's frame: aborting the spawned task instead reaches
+	// that flag only once a filesystem worker polls the task again, and
+	// those workers sit in filesystem syscalls that do not yield. The walker
+	// reads the flag before its prune and ignore filters, so a worker inside
+	// a wholly ignored directory stops at its next record — where a check in
+	// the visitor is never reached at all, because an ignored entry is
+	// dropped before the visitor runs.
+	let _stop_on_drop = stop.clone().on_drop();
+	// Off the host scheduler, where every other walk in the addon already
+	// runs: the walker runs its directory work in tasks spawned onto the
+	// runtime that polls it (up to eight on Linux, capped by the machine's
+	// parallelism), and those tasks end in `getdents64`/`statx`, so a walk
+	// here holds every host worker for as long as it lasts and nothing else
+	// native gets polled.
+	let search = crate::task::on_filesystem_runtime("edit.recover", async move {
+		let opts = Options {
+			hidden: true,
+			gitignore: true,
+			skip_git: true,
+			stop: Some(stop),
+			..Options::default()
+		};
+		let fs = Fs::Native;
+		walk::collect(&fs, &root, &opts, false, move |_, entry| {
+			if !glob.matches(entry.path, entry.name(), entry.file_type) {
+				return Action::Skip;
+			}
+			if seen.fetch_add(1, Ordering::AcqRel) == 0 {
+				Action::Continue
+			} else {
+				Action::Stop
+			}
+		})
+		.await
 	});
+	// The deadline stays on the caller's runtime, which is free to fire it;
+	// dropping the timed-out future stops the walk.
 	let found = tokio::time::timeout(RECOVERY_TIMEOUT, search)
 		.await
-		.ok()?
+		.ok()??
 		.ok()?;
 	if matches.load(Ordering::Acquire) != 1 {
 		return None;
@@ -1151,6 +1185,55 @@ mod tests {
 		assert_eq!(recover_one(&tree.0, "a.ts").await.unwrap().display, "deep/a.ts");
 	}
 
+	/// The recovery walk, and the directory tasks the walker spawns for it,
+	/// must stay off the host scheduler pool: a walk there holds every host
+	/// worker in a filesystem syscall, and nothing else native is polled while
+	/// it lasts. PR #18301 moved every other walk off that pool; this call
+	/// site was out of its scope.
+	///
+	/// Proof without a timing threshold: a host runtime with one worker, and
+	/// that worker occupied for the whole test. A recovery that needs a host
+	/// worker cannot run at all; one on the filesystem runtime answers. The
+	/// wait is bounded off the runtime, because the host's timers do not fire
+	/// either while its only worker is occupied — so a regression fails here
+	/// instead of hanging.
+	#[test]
+	fn recovery_walks_off_the_host_scheduler() {
+		let tree = Scratch::new("placement");
+		tree.write("deep/src/a.ts", "");
+		let host = napi::tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.unwrap();
+		let (occupied_tx, occupied_rx) = std::sync::mpsc::channel::<()>();
+		let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+		// The host's only scheduler worker, busy the way a filesystem syscall
+		// makes it busy: not yielding.
+		host.spawn(async move {
+			let _ = occupied_tx.send(());
+			let _ = release_rx.recv();
+		});
+		occupied_rx.recv().unwrap();
+
+		let (done_tx, done_rx) = std::sync::mpsc::channel();
+		let root = tree.0.clone();
+		std::thread::spawn(move || {
+			let recovered = host.block_on(recover_one(&root, "src/a.ts"));
+			let _ = done_tx.send(recovered.map(|resolved| resolved.display));
+		});
+		let recovered = done_rx.recv_timeout(Duration::from_secs(30));
+		// Let the occupying task go, so the walk this test may have left
+		// queued on the host finishes instead of outliving the test.
+		let _ = release_tx.send(());
+		assert_eq!(
+			recovered.ok().flatten().as_deref(),
+			Some("deep/src/a.ts"),
+			"the recovery walk needed a host scheduler worker, so it runs where it can starve every \
+			 other native call"
+		);
+	}
+
 	/// The preview settles on the recovered path: the first pass misses
 	/// `src/a.ts`, the search answers it, and the rerun previews the match.
 	#[tokio::test(flavor = "multi_thread")]
@@ -1179,6 +1262,83 @@ mod tests {
 				.iter()
 				.all(|file| !file.display.ends_with("/src/a.ts")),
 			"{batch:?}"
+		);
+	}
+
+	/// Dropping the caller stops the recovery walk in the caller's own frame,
+	/// with no filesystem worker free to notice.
+	///
+	/// Round two of #18386. The walk runs in a task on the filesystem
+	/// runtime, so dropping the caller can only abort that task, and an abort
+	/// lands when a worker next polls it — never, while every worker is in a
+	/// `getdents64`. A check inside the visitor cannot cover it either: the
+	/// walker drops an entry the ignore rules exclude before the visitor
+	/// runs, so a worker inside a wholly ignored directory reaches no check
+	/// of its own. What stops the walk is the walk's own flag, which this
+	/// frame holds a clone of and sets on the way out.
+	///
+	/// Every filesystem worker is held here, so nothing of the walk can be
+	/// polled: the flag is either set by the caller's frame or not at all.
+	#[test]
+	fn dropping_the_caller_stops_the_recovery_walk_in_the_callers_frame() {
+		use std::{sync::atomic::AtomicBool, time::Duration};
+
+		let tree = Scratch::new("stop-in-callers-frame");
+		tree.write(".gitignore", "bulk/*\n");
+		tree.write("bulk/a.ts", "");
+
+		let workers = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+		let host = napi::tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(2)
+			.enable_all()
+			.build()
+			.unwrap();
+		let hold = Arc::new(AtomicBool::new(true));
+		let (busy_tx, busy_rx) = flume::unbounded::<()>();
+		let occupiers: Vec<_> = (0..workers)
+			.map(|_| {
+				let hold = Arc::clone(&hold);
+				let busy_tx = busy_tx.clone();
+				host.spawn(crate::task::on_filesystem_runtime("test.occupy", async move {
+					let _ = busy_tx.send(());
+					while hold.load(Ordering::SeqCst) {
+						std::thread::sleep(Duration::from_millis(1));
+					}
+				}))
+			})
+			.collect();
+		for _ in 0..workers {
+			busy_rx
+				.recv_timeout(Duration::from_secs(30))
+				.expect("every filesystem worker is occupied");
+		}
+
+		let stop = walk::Stop::new();
+		let root = tree.0.clone();
+		let watched = stop.clone();
+		// Every assertion waits until the workers are free again: a failure
+		// that left them held would starve every other test in this binary.
+		let (answered, before_drop, after_drop) = host.block_on(async move {
+			let mut search = Box::pin(recover_one_stopped(&root, "bulk/a.ts", watched));
+			let answered = napi::tokio::select! {
+				_ = &mut search => true,
+				() = napi::tokio::time::sleep(Duration::from_millis(50)) => false,
+			};
+			let before_drop = stop.stopped();
+			drop(search);
+			(answered, before_drop, stop.stopped())
+		});
+		hold.store(false, Ordering::SeqCst);
+		for occupier in occupiers {
+			occupier.abort();
+		}
+
+		assert!(!answered, "the recovery answered with no filesystem worker free");
+		assert!(!before_drop, "the walk was stopped before its caller let go of it");
+		assert!(
+			after_drop,
+			"dropping the caller left the walk running: it stops only once a filesystem worker polls \
+			 the aborted task, so a walk inside an ignored directory runs to the end of it"
 		);
 	}
 
