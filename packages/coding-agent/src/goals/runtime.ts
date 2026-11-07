@@ -425,6 +425,34 @@ export class GoalRuntime {
 		});
 	}
 
+	async updateGoalObjective(
+		input: { objective: string; expectedGoalId: string; expectedObjective: string },
+		assertAuthorized: () => void,
+	): Promise<GoalModeState> {
+		const objective = input.objective.trim();
+
+		if (!objective) throw new Error("objective is required when op=update");
+
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+
+			if (!state?.enabled || !isAccountingStatus(state.goal)) {
+				throw new Error("cannot update objective because no goal is active");
+			}
+
+			if (state.goal.id !== input.expectedGoalId || state.goal.objective !== input.expectedObjective) {
+				throw new Error("goal changed while the objective update was awaiting approval; request the edit again");
+			}
+
+			assertAuthorized();
+			state.goal.objective = objective;
+			state.goal.updatedAt = this.#now();
+			await this.#commitState(state, { persist: "goal" });
+
+			return state;
+		});
+	}
+
 	async resumeGoal(): Promise<GoalModeState> {
 		return await this.#withAccounting(async () => {
 			const state = this.#getStateClone();
