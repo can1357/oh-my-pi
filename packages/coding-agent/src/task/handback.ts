@@ -6,8 +6,9 @@
  * structure to submit, so `handback` is a thin wrapper over it: it submits one
  * terminal `yield` (`{ type: "result", data: <framed report> }`), adds the
  * "model output, not user text" frame, escapes harness tags in the report, and
- * allows one delivery per run. With an output schema `yield` already is the
- * structured exit, so the tool is not registered there (see `tools/index.ts`).
+ * allows one delivery until the report is superseded or a new run starts.
+ * With an output schema `yield` is the structured exit, so the tool is not registered
+ * there (see `tools/index.ts`).
  */
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { TSchema } from "@oh-my-pi/pi-ai/types";
@@ -63,7 +64,7 @@ export class HandbackTool implements AgentTool<TSchema, YieldDetails> {
 		return new HandbackTool(session);
 	}
 
-	/** A kept-alive session reuses the tool across turns: a new run may hand back again. */
+	/** Re-arm for a new run or when an async result supersedes the report. */
 	resetTurnState(): void {
 		this.#delivered = false;
 	}

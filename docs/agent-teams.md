@@ -1,38 +1,59 @@
 # Agent Teams
 
-> A lead session coordinating several persistent teammates — full agent
-> sessions with their own context — that message each other directly over a
-> shared workspace. Enabled with `team.enabled: true` (off by default).
+> Declarative, in-session teams: `/team start` spawns subagents from one
+> markdown file and gives them handles for `agent://` messaging. An optional
+> workspace supplies a shared `TASKS.md` list. Enable with `team.enabled: true`
+> (off by default).
+
+## Status
+
+Implemented. A team is a group of **in-session teammates** spawned through the
+shared subagent seam (`spawnSubagentForSession`) - not separate terminals, not
+A2A peers, and not a new kind of session. They are ordinary kept-alive
+subagents with their own context, registry rows and transcripts. `/team start`
+records which ref ids belong to the team; `/team stop` releases exactly those
+ids with tombstones (transcripts kept, revive available) and never touches an
+unrelated ref that happens to share a handle.
 
 ## What it is
 
-The unit of delegation is a *team*, not a single spawn:
+- a **team file** `.omp/teams/<name>.md` or `~/.omp/agent/teams/<name>.md` (project scope wins by team name)
+  listing `name`, `description`, optional `workspace`, optional `context`, and
+  `members` (each an existing agent definition + `handle` + optional `role`);
+- **teammates**: one subagent per member, spawned with the normalized handle as
+  its registry id. The handle is normalized by the same `sanitizeAgentId` the
+  registry uses (48-character cap), so `agent://<handle>` always addresses the
+  real id, and status, stop and the rendered context/peer list agree on it;
+- **direct messaging**: team spawns grant the full `write` tool for `agent://`
+  sends even when the agent definition is read-only. This grant is **not
+  restricted to `agent://`**: it also permits ordinary file writes subject to
+  the applicable tool and access policies. In plan mode the grant is withheld:
+  members started there can receive peer messages but not send them, and keep
+  the read-only plan-mode tools. Bundled scout/reviewer spawns outside teams
+  are unchanged. Messages use the existing IrcBus and ingress guard;
+- an optional **shared workspace**: `workspace:` is resolved relative to the
+  team file and added to each child's additional directories, not substituted
+  for its working directory. `/team start` creates the directory and `TASKS.md`
+  if missing, without overwriting an existing list. Members are instructed to
+  claim a task by writing `owner: <normalized-handle>` under it and not to edit
+  another member's tasks. This is a convention, not an atomic claim or lock.
+  If `workspace` is omitted, no team `TASKS.md` is created automatically;
+- **commands**: `/team list`, `/team start <name> [assignment]`,
+  `/team status [name]`, `/team stop <name|all>`. A spawn whose registry ref
+  does not appear in time is reported as *pending* (with its reserved id) and
+  never as failed; a retry skips it instead of spawning a duplicate.
+  `team.maxTeammates` (default 4) caps members per start.
 
-- a **lead** session the human talks to, which carries the team's task list
-  and configuration;
-- several **teammates**, each a separate full session with its own context
-  window, spawned from an existing subagent definition (the same markdown
-  frontmatter — `tools`, `model`, `effort`, and the prompt body — that the fork's
-  agent discovery already reads);
-- **direct teammate-to-teammate messaging** — a teammate can message another
-  teammate without routing everything through the lead;
-- a **shared task list** that teammates claim items from, so the team
-  self-schedules instead of the lead dispatching every unit of work;
-- a **mailbox per agent** (file-backed message queue) so messages survive while
-  their recipient is busy, plus an **idle notification**: a teammate that goes
-  idle notifies the lead with its final answer;
-- a **team config file** listing the members (the lead carries type
-  `team-lead`), and a **shutdown request/approve flow** for ending a teammate
-  cleanly;
-- an **in-process vs split-pane** display: teammates either render as inline
-  cards in the lead's TUI or as separate tmux/iTerm2 panes;
-- the whole surface gated behind an experimental env flag, not on by default.
+## What it is not
 
-The fork's analog keeps that shape but grounds it in mechanisms omp already
-has: teammates are real omp sessions reachable over the A2A bridge (full
-context, own transcript, steerable — unlike an in-context subagent spawn),
-coordination rides the same `agent://`/IrcBus messaging, and the shared
-workspace is the plain filesystem the sessions already share.
+- **Not cross-terminal.** Teammates live in the lead's process. Cross-terminal
+  delegation is the separate `a2a:<name>` spawn path.
+- **No file-backed mailbox, idle notification, split-pane display, or
+  shutdown request/approve flow.** Delivery uses the existing IRC queues and
+  wake turns; termination is `/team stop` (a lifecycle release), not a
+  negotiation.
+- **No team-lead type or team config file beyond the `.md` itself.** The lead
+  is whatever session ran `/team`.
 
 ## Quick start
 
@@ -57,53 +78,26 @@ context: |
 Audit covers services X and Y; the lead collects the final report.
 ```
 
-3. `/team start audit "run the audit"` — members spawn with stable handles
-   (`Scout`, `Reviewer`), visible in the Agent Hub; message them via
-   `write agent://Scout`; `/team status audit`, `/team stop audit`.
+3. `/team start audit run the audit` - members spawn with handles `Scout` and
+   `Reviewer`, `.omp/teams/ws/TASKS.md` is created, and they appear in the Agent
+   Hub. Message them with `write agent://Scout`; inspect with `/team status audit`;
+   release them with `/team stop audit`.
 
 ## Implementation
 
-Members spawn through the shared subagent seam (`handle` → registry id,
-`teamWorkspace` → the child's additional directories); teammate↔teammate and
-lead↔teammate messaging ride the existing `agent://` IrcBus with its ingress
-guard; the lead receives final answers through the existing wake relay;
-`/team stop` releases members through the lifecycle manager with tombstones
-(transcripts kept, revive available). Files: `task/teams.ts` (discovery +
-parsing + render), `slash-commands/builtin-teams.ts` (`/team`), settings
-`team.enabled` / `team.maxTeammates`. Design contract:
-[`specs/2026-11-06-agent-teams-design.md`](./specs/2026-11-06-agent-teams-design.md).
-
-### Built on
-
-These primitives were already implemented and are reused:
-
-| Primitive | What it provides | Where |
-| --- | --- | --- |
-| A2A bridge | Every terminal runs an Agent2Agent v1.0 JSON-RPC server on `127.0.0.1` (bearer-token auth); sessions in different processes discover and address each other | [`a2a/` sources](#source) |
-| Peer auto-registration | Live local bridges register each other's skills as spawnable `a2a:<name>` agents at session start | `a2a.autoRegister` |
-| Addressed delivery + reply channel | A message to a peer's agent is delivered into its chat; the peer's reply comes back as an incoming message via a reply-envelope spawn | `sendA2aMessage` |
-| IrcBus | In-session `agent://` messaging between any two agents, with the ingress guard (rate, dedup, hop limits) | `irc/bus.ts` |
-| Markdown agent definitions | Teammate definitions would reuse the existing per-agent frontmatter (`tools`, `model`, `effort`, prompt body) from agent discovery | [task agent discovery](./task-agent-discovery.md) |
-| Workflow orchestration | Deterministic `agent()`/`parallel()`/`pipeline()` scripting with journal resume — a lead-side fan-out mechanism already exists | [workflow](./tools/workflow.md) |
-| Agent Hub | The human-facing live roster for watching and steering agents | [Agent Hub](./agent-hub.md) |
-
-What separates today's state from a team: there is no persistent team
-membership (the roster is a flat set of discovered peers), no shared task list
-or claim protocol, no per-agent mailbox with idle notification, no team
-config file, and no lifecycle flow for asking a teammate to shut down. The
-`a2a:` agents that exist today are request/response spawn targets; a teammate
-must be a long-lived peer with standing membership.
-
-## Design
-
-The design for this feature is being developed in
+`task/teams.ts` discovers and parses team files, normalizes handles, renders
+the per-member context/prompt, and creates `TASKS.md` in the workspace.
+`slash-commands/builtin-teams.ts` implements `/team` and records team
+membership. `task/spawn-subagent.ts` forwards `handle`, `teamWorkspace` and
+the team-only `teamIrc` grant into `task/structured-subagent.ts`, which adds
+`write` to the effective agent tools for team spawns only. Settings:
+`team.enabled` / `team.maxTeammates`. The design contract is
 [`docs/specs/2026-11-06-agent-teams-design.md`](./specs/2026-11-06-agent-teams-design.md).
-Once implemented, that document is the contract and this page becomes the
-user-facing reference.
 
 ## Source
 
-- Bridge: `packages/coding-agent/src/a2a/` (server, client, agent bridge, RPC)
-- Peer messaging: `packages/coding-agent/src/irc/` (bus, ingress guard)
-- Agent definitions: `packages/coding-agent/src/discovery/agent-plugin-format.ts`
-- Fork notes: `README-fork.md`, `FORK-RU.md`
+- Teams: `packages/coding-agent/src/task/teams.ts`, `packages/coding-agent/src/slash-commands/builtin-teams.ts`
+- Spawn seam: `packages/coding-agent/src/task/spawn-subagent.ts`, `packages/coding-agent/src/task/structured-subagent.ts`
+- Peer messaging: `packages/coding-agent/src/irc/`
+- Registry / lifecycle: `packages/coding-agent/src/registry/`
+- Fork notes: `README-EN.md`, `README-RU.md`, `FORK-RU.md`

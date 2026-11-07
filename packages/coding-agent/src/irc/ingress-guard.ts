@@ -71,11 +71,13 @@ export class IrcIngressGuard {
 
 	/**
 	 * Refuse `message` under `limits`, or return `undefined` to let it through.
-	 * An accepted send spends its caller's rate budget and claims its dedup key.
+	 * Only an accepted send spends its caller's rate budget and claims its
+	 * dedup key; a refusal of any kind leaves both untouched.
 	 *
-	 * Order: hops (a chain over the ceiling never reaches anyone), then rate
-	 * (flooding costs the recipient the most), then dedup. Refusals spend
-	 * nothing, so a refused message is not counted against the next attempt.
+	 * Order: hops (a chain over the ceiling never reaches anyone), then dedup
+	 * (a repeat never reaches its recipient, so it must not charge the sender's
+	 * rate window), then rate. The three checks are pure; {@link #accept}
+	 * commits both pieces of state only once every check has passed.
 	 *
 	 * Windows run on send time, clamped to the highest time already seen: a
 	 * backward wall-clock step (NTP correction, resume from sleep) must not
@@ -87,9 +89,13 @@ export class IrcIngressGuard {
 		this.#lastNow = now;
 		const hopped = this.#checkHops(message, limits.maxHops);
 		if (hopped) return hopped;
+		const dedupKey = this.#dedupKey(message, limits.dedupWindowMs);
+		const duplicate = this.#checkDedup(message, dedupKey, limits.dedupWindowMs, now);
+		if (duplicate) return duplicate;
 		const rate = this.#checkRate(message, limits.rateLimitTokens, now);
 		if (rate) return rate;
-		return this.#checkDedup(message, limits.dedupWindowMs, now);
+		this.#accept(message, dedupKey, limits, now);
+		return undefined;
 	}
 
 	#checkHops(message: IrcMessage, maxHops: number): IrcIngressRefusal | undefined {
@@ -99,6 +105,47 @@ export class IrcIngressGuard {
 			reason: "hop-limit",
 			error: `hop limit: the message chain reached ${hops} hops (max ${maxHops}) — answer the sender you were asked by instead of relaying further`,
 		};
+	}
+
+	/** `undefined` when dedup does not apply to this message (disabled or exempt). */
+	#dedupKey(message: IrcMessage, windowMs: number): string | undefined {
+		// Progress notes and automated wake relays are meant to repeat: an agent
+		// may send the same interim line twice, and two wake turns can end with
+		// identical output. Neither is the repetition loop dedup exists to stop.
+		// An external bridge request is identified by its own A2A `messageId`, so
+		// the same text twice is two requests, not a loop.
+		if (windowMs <= 0 || message.progress || message.wakeRelay || message.external) return undefined;
+		return `${message.from}\u0000${message.to}\u0000${createHash("sha256").update(message.body).digest("hex")}`;
+	}
+
+	#checkDedup(
+		message: IrcMessage,
+		key: string | undefined,
+		windowMs: number,
+		now: number,
+	): IrcIngressRefusal | undefined {
+		while (this.#dedupHead < this.#dedupOrder.length) {
+			const entry = this.#dedupOrder[this.#dedupHead]!;
+			if (now - entry.ts < windowMs) break;
+			// A refreshed key has a newer entry later in the FIFO; only drop the
+			// mapping when this is still the entry it belongs to.
+			if (this.#dedup.get(entry.key) === entry.ts) this.#dedup.delete(entry.key);
+			this.#dedupHead++;
+		}
+		if (this.#dedupHead >= COMPACT_THRESHOLD) {
+			this.#dedupOrder.splice(0, this.#dedupHead);
+			this.#dedupHead = 0;
+		}
+		if (key === undefined) return undefined;
+		if (this.#dedup.has(key)) {
+			// A refusal spends nothing: do not restart the window on the repeat,
+			// so the original key still expires on schedule.
+			return {
+				reason: "duplicate",
+				error: `duplicate: "${message.from}" already sent this text to "${message.to}" within ${windowMs} ms - change the message or wait`,
+			};
+		}
+		return undefined;
 	}
 
 	#checkRate(message: IrcMessage, limit: number, now: number): IrcIngressRefusal | undefined {
@@ -113,6 +160,43 @@ export class IrcIngressGuard {
 		// Bridge deliveries are external client requests, not agent-loop traffic:
 		// they have no shared sender budget to spend.
 		if (message.broadcast || message.wakeRelay || message.external) return undefined;
+		const window = this.#rates.get(message.from);
+		if (window) {
+			// Drop sends that left the sliding window, then compact the arrays.
+			while (window.head < window.times.length && now - window.times[window.head]! >= IRC_RATE_WINDOW_MS) {
+				window.total -= window.costs[window.head]!;
+				window.head++;
+			}
+			if (window.head >= COMPACT_THRESHOLD) {
+				window.times = window.times.slice(window.head);
+				window.costs = window.costs.slice(window.head);
+				window.head = 0;
+			}
+		}
+		// A message costs its body length in characters / 4, at least one token.
+		const cost = Math.max(1, Math.ceil(message.body.length / CHARS_PER_TOKEN));
+		// An empty window always admits one message, however expensive: a single
+		// long report (a subagent's answer, a 500-character summary) must never be
+		// refused by a budget it alone exceeds. Flood semantics are unchanged -
+		// the message spends the whole window, so the rest of the burst is cut
+		// until the window slides past it.
+		const total = window?.total ?? 0;
+		if (total > 0 && total + cost > limit) {
+			return {
+				reason: "rate-limited",
+				error: `rate limited: "${message.from}" may send ${limit} tokens per ${IRC_RATE_WINDOW_MS} ms and this message costs ${cost} - wait a moment or send less`,
+			};
+		}
+		return undefined;
+	}
+
+	/** Commit an accepted send: claim the dedup key and charge the rate window. */
+	#accept(message: IrcMessage, dedupKey: string | undefined, limits: IrcIngressLimits, now: number): void {
+		if (dedupKey !== undefined) {
+			this.#dedup.set(dedupKey, now);
+			this.#dedupOrder.push({ key: dedupKey, ts: now });
+		}
+		if (limits.rateLimitTokens <= 0 || message.broadcast || message.wakeRelay || message.external) return;
 		let window = this.#rates.get(message.from);
 		if (!window) {
 			// Agent ids are unique per spawn, so a long-lived process would keep one
@@ -140,66 +224,9 @@ export class IrcIngressGuard {
 			window = { times: [], costs: [], head: 0, total: 0 };
 			this.#rates.set(message.from, window);
 		}
-		// Drop sends that left the sliding window, then compact the arrays.
-		while (window.head < window.times.length && now - window.times[window.head]! >= IRC_RATE_WINDOW_MS) {
-			window.total -= window.costs[window.head]!;
-			window.head++;
-		}
-		if (window.head >= COMPACT_THRESHOLD) {
-			window.times = window.times.slice(window.head);
-			window.costs = window.costs.slice(window.head);
-			window.head = 0;
-		}
-		// A message costs its body length in characters / 4, at least one token.
 		const cost = Math.max(1, Math.ceil(message.body.length / CHARS_PER_TOKEN));
-		// An empty window always admits one message, however expensive: a single
-		// long report (a subagent's answer, a 500-character summary) must never be
-		// refused by a budget it alone exceeds. Flood semantics are unchanged —
-		// the message spends the whole window, so the rest of the burst is cut
-		// until the window slides past it.
-		if (window.total > 0 && window.total + cost > limit) {
-			return {
-				reason: "rate-limited",
-				error: `rate limited: "${message.from}" may send ${limit} tokens per ${IRC_RATE_WINDOW_MS} ms and this message costs ${cost} — wait a moment or send less`,
-			};
-		}
 		window.times.push(now);
 		window.costs.push(cost);
 		window.total += cost;
-		return undefined;
-	}
-
-	#checkDedup(message: IrcMessage, windowMs: number, now: number): IrcIngressRefusal | undefined {
-		// Progress notes and automated wake relays are meant to repeat: an agent
-		// may send the same interim line twice, and two wake turns can end with
-		// identical output. Neither is the repetition loop dedup exists to stop.
-		// An external bridge request is identified by its own A2A `messageId`, so
-		// the same text twice is two requests, not a loop.
-		if (windowMs <= 0 || message.progress || message.wakeRelay || message.external) return undefined;
-		while (this.#dedupHead < this.#dedupOrder.length) {
-			const entry = this.#dedupOrder[this.#dedupHead]!;
-			if (now - entry.ts < windowMs) break;
-			// A refreshed key has a newer entry later in the FIFO; only drop the
-			// mapping when this is still the entry it belongs to.
-			if (this.#dedup.get(entry.key) === entry.ts) this.#dedup.delete(entry.key);
-			this.#dedupHead++;
-		}
-		if (this.#dedupHead >= COMPACT_THRESHOLD) {
-			this.#dedupOrder.splice(0, this.#dedupHead);
-			this.#dedupHead = 0;
-		}
-		const key = `${message.from}\u0000${message.to}\u0000${createHash("sha256").update(message.body).digest("hex")}`;
-		if (this.#dedup.has(key)) {
-			// Keep a repeat offender blocked: the window restarts on the repeat.
-			this.#dedup.set(key, now);
-			this.#dedupOrder.push({ key, ts: now });
-			return {
-				reason: "duplicate",
-				error: `duplicate: "${message.from}" already sent this text to "${message.to}" within ${windowMs} ms — change the message or wait`,
-			};
-		}
-		this.#dedup.set(key, now);
-		this.#dedupOrder.push({ key, ts: now });
-		return undefined;
 	}
 }

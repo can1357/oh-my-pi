@@ -261,6 +261,36 @@ describe("IrcBus ingress guard", () => {
 		expect((await bus.send({ from: "0-Sender", to: "0-Sink", body: "the same text" })).outcome).toBe("injected");
 	});
 
+	it("a duplicate refusal spends no rate budget, so a later distinct message is not rate-limited", async () => {
+		const bus = makeBus({ "irc.rateLimitTokens": 20, "irc.dedupWindowMs": 60_000 });
+		const { sink } = registerPeers();
+		const body = "d".repeat(40); // 10 tokens
+
+		expect((await bus.send({ from: "0-Sender", to: "0-Sink", body })).outcome).toBe("injected");
+		const duplicate = await bus.send({ from: "0-Sender", to: "0-Sink", body });
+		expect(duplicate.outcome).toBe("failed");
+		expect(duplicate.error).toStartWith("duplicate");
+
+		// Before the fix the duplicate still charged 10 tokens (20 total), so this
+		// distinct 10-token send tripped the 20-token ceiling. Refusals now spend
+		// nothing: only the accepted first send is charged, leaving room.
+		const different = await bus.send({ from: "0-Sender", to: "0-Sink", body: "e".repeat(40) });
+		expect(different.outcome).toBe("injected");
+		expect(sink.delivered.map(msg => msg.body)).toEqual([body, "e".repeat(40)]);
+	});
+
+	it("does not claim a dedup key when rate limiting refuses a message", async () => {
+		const bus = makeBus({ "irc.rateLimitTokens": 10, "irc.dedupWindowMs": 60_000 });
+		const { sink } = registerPeers();
+		const first = "a".repeat(40);
+		const refused = "b".repeat(40);
+		expect((await bus.send({ from: "0-Sender", to: "0-Sink", body: first })).outcome).toBe("injected");
+		expect((await bus.send({ from: "0-Sender", to: "0-Sink", body: refused })).error).toStartWith("rate limited");
+		clock.now += 501;
+		expect((await bus.send({ from: "0-Sender", to: "0-Sink", body: refused })).outcome).toBe("injected");
+		expect(sink.delivered.map(message => message.body)).toEqual([first, refused]);
+	});
+
 	it("never dedupes progress notes or automated wake relays, which legitimately repeat", async () => {
 		const bus = makeBus();
 		const { sink } = registerPeers();
@@ -408,6 +438,30 @@ describe("IrcBus ingress guard", () => {
 		);
 		expect((await bus.send({ from: "0-Worker", to: "0-Sink", body: "two".padEnd(40, "x") })).outcome).toBe("failed");
 	});
+
+	it("returns a failed receipt for the 51st send to a full recipient queue and keeps the earlier records", async () => {
+		const bus = makeBus({ "irc.ingressGuard": false });
+		const { sink } = registerPeers();
+		// A real streaming bridge replaces the sink's fake delivery so its
+		// interrupts queue actually fills. Disabling the ingress guard keeps all
+		// 51 sends on the delivery path (no rate/dedup refusal in the way).
+		const bridge = new IrcBridge(makeBridgeHost());
+		Object.assign(sink.session, { deliverIrcMessage: (msg: IrcMessage) => bridge.deliver(msg) });
+
+		const receipts = [];
+		for (let index = 1; index <= 51; index++) {
+			receipts.push(await bus.send({ from: "0-Sender", to: "0-Sink", body: `queued-${index}` }));
+		}
+		expect(receipts.slice(0, 50).every(receipt => receipt.outcome === "injected")).toBe(true);
+		expect(receipts[50]?.outcome).toBe("failed");
+		expect(receipts[50]?.error).toContain("recipient queue full");
+		expect(bus.unreadCount("0-Sink")).toBe(0);
+		expect(bus.take("0-Sink")).toBeUndefined();
+		const drained = bridge.drainPending();
+		expect(drained).toHaveLength(50);
+		expect("details" in drained[0]! ? drained[0]!.details : undefined).toMatchObject({ message: "queued-1" });
+		expect("details" in drained[49]! ? drained[49]!.details : undefined).toMatchObject({ message: "queued-50" });
+	});
 });
 
 describe("IrcIngressGuard sender-window cap", () => {
@@ -451,19 +505,41 @@ describe("IrcBridge incoming queue backpressure", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("caps queued asides at 50, dropping the oldest", () => {
+	it("keeps every queued aside instead of silently dropping records past the cap", () => {
 		const bridge = new IrcBridge(makeBridgeHost());
 
 		for (let index = 1; index <= 61; index++) bridge.queueAside([incomingRecord(index)]);
 
 		const drained = bridge.drainPending();
-		expect(drained).toHaveLength(50);
-		const [first, last] = [drained[0]!, drained.at(-1)!];
-		expect("details" in first ? first.details : undefined).toMatchObject({ message: "queued-12" });
-		expect("details" in last ? last.details : undefined).toMatchObject({ message: "queued-61" });
+		expect(drained).toHaveLength(61);
+		expect("details" in drained[0]! ? drained[0]!.details : undefined).toMatchObject({ message: "queued-1" });
+		expect("details" in drained[60]! ? drained[60]!.details : undefined).toMatchObject({ message: "queued-61" });
 	});
 
-	it("caps interrupts queued for a busy recipient at 50, dropping the oldest", async () => {
+	it("restorePending keeps the whole rolled-back snapshot even when it exceeds the cap", () => {
+		const bridge = new IrcBridge(makeBridgeHost());
+		bridge.queueAside(Array.from({ length: 55 }, (_, index) => incomingRecord(index + 1)));
+		const snapshot = bridge.clearPending();
+		bridge.restorePending(snapshot);
+		expect(bridge.drainPending()).toHaveLength(55);
+	});
+
+	it("restores older queued records ahead of arrivals and refuses until the combined queues drain", async () => {
+		const bridge = new IrcBridge(makeBridgeHost());
+		bridge.queueAside(Array.from({ length: 30 }, (_, index) => incomingRecord(index + 1)));
+		const snapshot = bridge.clearPending();
+		bridge.queueAside(Array.from({ length: 20 }, (_, index) => incomingRecord(index + 31)));
+		bridge.queueDeferredWake([incomingRecord(51)]);
+		bridge.restorePending(snapshot);
+		const message: IrcMessage = { id: "new", from: "0-Peer", to: "0-Busy", body: "new", ts: 52 };
+		await expect(bridge.deliver(message)).rejects.toThrow("recipient queue full");
+		const drained = bridge.drainPending();
+		expect(drained).toEqual(Array.from({ length: 50 }, (_, index) => incomingRecord(index + 1)));
+		expect(bridge.drainDeferredWakes()).toHaveLength(1);
+		expect(await bridge.deliver(message)).toBe("injected");
+	});
+
+	it("refuses the 51st delivery to a full queue instead of dropping an acknowledged record", async () => {
 		const registry = AgentRegistry.global();
 		const main = makeFakeSession();
 		const busy = makeFakeSession();
@@ -478,21 +554,20 @@ describe("IrcBridge incoming queue backpressure", () => {
 		registry.register({ id: "0-Peer", displayName: "peer", kind: "sub", session: makeFakeSession().session });
 		const bridge = new IrcBridge(makeBridgeHost());
 
-		for (let index = 1; index <= 61; index++) {
-			const message: IrcMessage = {
+		const deliver = (index: number) =>
+			bridge.deliver({
 				id: `irc-${index}`,
 				from: "0-Peer",
 				to: "0-Busy",
 				body: `queued-${index}`,
 				ts: index,
-			};
-			await bridge.deliver(message);
-		}
+			});
+		for (let index = 1; index <= 50; index++) expect(await deliver(index)).toBe("injected");
+		await expect(deliver(51)).rejects.toThrow("recipient queue full");
 
 		const drained = bridge.drainPending();
 		expect(drained).toHaveLength(50);
-		const [first, last] = [drained[0]!, drained.at(-1)!];
-		expect("details" in first ? first.details : undefined).toMatchObject({ message: "queued-12" });
-		expect("details" in last ? last.details : undefined).toMatchObject({ message: "queued-61" });
+		expect("details" in drained[0]! ? drained[0]!.details : undefined).toMatchObject({ message: "queued-1" });
+		expect("details" in drained[49]! ? drained[49]!.details : undefined).toMatchObject({ message: "queued-50" });
 	});
 });

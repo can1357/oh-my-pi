@@ -14,6 +14,8 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { HandbackTool } from "@oh-my-pi/pi-coding-agent/task/handback";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
@@ -45,7 +47,7 @@ interface AsyncQuiescenceHarness {
 	prompts: string[];
 	abortCalls: () => number;
 	settleCalls: () => number;
-	emitTerminalYield: (data: unknown) => void;
+	emitTerminalYield: (data: unknown, toolName?: string) => void;
 	emitAssistant: (text: string, totalTokens?: number) => void;
 	finishJob: () => void;
 }
@@ -63,7 +65,7 @@ interface AsyncSessionOptions {
  * fresh yield — exactly the review's stale-yield scenario.
  */
 function createAsyncSession(
-	onPrompt: (params: { text: string; promptIndex: number; harness: AsyncQuiescenceHarness }) => void,
+	onPrompt: (params: { text: string; promptIndex: number; harness: AsyncQuiescenceHarness }) => void | Promise<void>,
 	options: AsyncSessionOptions = {},
 ): AsyncQuiescenceHarness {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
@@ -80,12 +82,12 @@ function createAsyncSession(
 		for (const listener of [...listeners]) listener(event);
 	};
 
-	const emitTerminalYield = (data: unknown) => {
+	const emitTerminalYield = (data: unknown, toolName = "yield") => {
 		toolCallSeq += 1;
 		emit({
 			type: "tool_execution_end",
 			toolCallId: `yield-${toolCallSeq}`,
-			toolName: "yield",
+			toolName,
 			result: {
 				content: [{ type: "text", text: "Result submitted." }],
 				details: { status: "success", data },
@@ -148,7 +150,7 @@ function createAsyncSession(
 		},
 		prompt: async (text: string) => {
 			prompts.push(text);
-			onPrompt({ text, promptIndex: prompts.length, harness });
+			await onPrompt({ text, promptIndex: prompts.length, harness });
 			return true;
 		},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
@@ -291,6 +293,39 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		expect(harness.prompts).toHaveLength(1);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("done");
+	});
+
+	it("waits for a pending owner job before completing a handback terminal report", async () => {
+		const yieldTool = {
+			execute: async (_id: string, params: { data: string }) => ({
+				content: [{ type: "text" as const, text: "Result submitted." }],
+				details: { status: "success", data: params.data },
+			}),
+		};
+		const handback = new HandbackTool({ getToolByName: () => yieldTool } as unknown as ToolSession);
+		const harness = createAsyncSession(async ({ promptIndex, harness: h }) => {
+			if (promptIndex === 2) return;
+			const report =
+				promptIndex === 1 ? "STALE: build passing (job still running)" : "FRESH: build failed, see job-1";
+			const result = await handback.execute(`handback-${promptIndex}`, { report });
+			h.emitTerminalYield(result.details?.data, "handback");
+		});
+		harness.session.getToolByName = name => (name === "handback" ? handback : undefined);
+		mockCreateAgentSession(harness.session);
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "do the work",
+			index: 0,
+			id: "quiescence-handback-pending-job",
+		});
+
+		expect(harness.prompts).toHaveLength(3);
+		expect(harness.settleCalls()).toBe(1);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("FRESH: build failed");
+		expect(result.output).not.toContain("STALE");
 	});
 
 	it("does not wait on a second idle barrier after a terminal yield", async () => {

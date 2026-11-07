@@ -1288,6 +1288,12 @@ export interface SubagentToolResult {
 
 const MAX_YIELD_TOOL_ERRORS = 6;
 
+/** `handback` delegates to `yield`: both are terminal report tools, so the
+ *  quiescence, budget-deferral and error-cap guards treat them identically. */
+function isTerminalReportTool(toolName: string): boolean {
+	return toolName === "yield" || toolName === HANDBACK_TOOL_NAME;
+}
+
 /** Inputs for the run monitor driving one subagent assignment. */
 interface RunMonitorArgs {
 	index: number;
@@ -1361,9 +1367,10 @@ interface SubagentRunMonitor {
 	 */
 	yieldInvalidatedByAsync(): boolean;
 	/**
-	 * True once a terminal yield with pending owner async work stopped the
-	 * free-running turn (recoverable, like a budget stop) instead of
-	 * terminating the run. Cleared when {@link waitForYieldTurnStop} settles.
+	 * True once a terminal report (`yield`/`handback`) with pending owner
+	 * async work stopped the free-running turn (recoverable, like a budget
+	 * stop) instead of terminating the run. Cleared when
+	 * {@link waitForYieldTurnStop} settles.
 	 */
 	yieldTurnStopRequested(): boolean;
 	/** Resolves when the yield turn-stop session abort has settled (immediately when none fired). */
@@ -1469,10 +1476,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let yieldCalled = false;
 	let yieldCallPending = false;
 	/**
-	 * A `yield` awaiting validation suppresses the soft-budget check for its
-	 * own turn (#5006). The check is deferred, not dropped: every turn that
-	 * carries a yield latches {@link yieldCallPending}, so dropping it lets a
-	 * run of yield-only turns bypass the budget entirely.
+	 * A terminal report (`yield` or `handback`) awaiting validation suppresses
+	 * the soft-budget check for its own turn (#5006). The check is deferred, not
+	 * dropped: every turn that carries a terminal report latches
+	 * {@link yieldCallPending}, so dropping it lets a run of report-only turns
+	 * bypass the budget entirely.
 	 */
 	let budgetCheckDeferred = false;
 	/** True while the reminder ladder's forced final `yield` is outstanding. */
@@ -1591,9 +1599,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		terminalError ??= message;
 		requestAbort("terminate");
 	};
-	// Yield turn-stop: a terminal yield recorded while owner async work is
-	// still pending is a scheduling pause, not run completion. Stop the
-	// free-running turn exactly like a budget stop (session abort, monitor
+	// Yield turn-stop: a terminal report (`yield` or `handback`) recorded while
+	// owner async work is still pending is a scheduling pause, not run completion.
+	// Stop the free-running turn exactly like a budget stop (session abort, monitor
 	// signal untouched) so driveSessionToResult's quiescence barrier can settle
 	// the jobs, fold their results in, and demand a fresh yield. Terminating
 	// here instead would abort the run signal and make the barrier
@@ -1952,6 +1960,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					yieldCalled = false;
 					yieldInvalidatedByAsync = true;
 					yieldAcceptedAt = undefined;
+					// A superseded handback must be deliverable again, just like yield.
+					resetHandbackTurnState(activeSession?.getToolByName(HANDBACK_TOOL_NAME));
 				}
 				break;
 
@@ -1991,7 +2001,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				if (intent) {
 					progress.lastIntent = intent;
 				}
-				if (event.toolName === "yield" && !yieldCalled) {
+				if (isTerminalReportTool(event.toolName) && !yieldCalled) {
 					yieldCallPending = true;
 				}
 				// Reset any prior in-flight task snapshot so we don't show stale
@@ -2075,7 +2085,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						}
 					}
 
-					if (event.toolName === "yield") {
+					if (isTerminalReportTool(event.toolName)) {
 						yieldCallPending = false;
 						if (budgetCheckDeferred) {
 							budgetCheckDeferred = false;
@@ -2097,11 +2107,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							result: event.result,
 							isError: event.isError,
 						}) === true;
-					const forcedFinalYield = event.toolName === "yield" && finalYieldForced && yieldCalled;
+					const forcedFinalYield = isTerminalReportTool(event.toolName) && finalYieldForced && yieldCalled;
 					endsRun = wantsTerminate || forcedFinalYield;
 					if (endsRun) {
-						if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
-							// Terminal yield with owner jobs still pending: park the
+						if (isTerminalReportTool(event.toolName) && sessionHasPendingAsyncWork()) {
+							// Terminal report with owner jobs still pending: park the
 							// run behind the quiescence barrier instead of completing
 							// it (see requestYieldTurnStop).
 							requestYieldTurnStop();
@@ -2110,7 +2120,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						}
 					}
 				}
-				if (event.toolName === "yield") {
+				if (isTerminalReportTool(event.toolName)) {
 					if (event.isError && !abortSent) {
 						consecutiveYieldToolErrors++;
 						let yieldErrorText = "";
@@ -2212,7 +2222,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 								continue;
 							}
 							if (block.type !== "toolCall" || typeof block.name !== "string") continue;
-							if (block.name === "yield") {
+							if (isTerminalReportTool(block.name)) {
 								if (!yieldCalled) {
 									yieldCallPending = true;
 									flushProgress = true;

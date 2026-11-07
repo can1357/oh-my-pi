@@ -58,12 +58,23 @@ export interface SpawnSubagentHost {
 }
 
 /**
+ * `/team start` opts a child into peer messaging: the executor grants the
+ * `write` tool (needed for `agent://` sends) even when the agent definition
+ * is read-only. Non-team spawns never set it.
+ */
+export interface TeamSpawnSubagentOptions extends SpawnSubagentOptions {
+	teamIrc?: boolean;
+	/** An ID reserved for this team before contexts were rendered. */
+	teamReservedId?: string;
+}
+
+/**
  * Spawn for a host session (extension hosts, the CLI). Throws when the session
  * has no tool view — a session that cannot run tools cannot spawn subagents.
  */
 export async function spawnSubagentForSession(
 	session: SpawnSubagentHost,
-	options: SpawnSubagentOptions,
+	options: TeamSpawnSubagentOptions,
 	executor?: SpawnSubagentExecutor,
 ): Promise<AgentRef> {
 	const toolSession = session.toolSession;
@@ -78,7 +89,7 @@ export async function spawnSubagentForSession(
  */
 export async function spawnSubagentViaExecutor(
 	session: ToolSession,
-	options: SpawnSubagentOptions,
+	options: TeamSpawnSubagentOptions,
 	executor: SpawnSubagentExecutor = defaultExecutor,
 	refTimeoutMs = SPAWN_REF_TIMEOUT_MS,
 ): Promise<AgentRef> {
@@ -95,15 +106,16 @@ export async function spawnSubagentViaExecutor(
 	let id: string;
 	let run: Promise<StructuredSubagentResult>;
 	try {
-		id = await executor.reserveId(session, { label: options.handle ?? options.agent });
+		id = options.teamReservedId ?? (await executor.reserveId(session, { label: options.handle ?? options.agent }));
 		run = executor.run({
 			session,
 			invocationKind: "task",
 			assignment: prompt,
 			agent: options.agent,
+			identity: { id, label: options.handle ?? options.agent },
 			context: options.context,
 			...(options.teamWorkspace !== undefined ? { teamWorkspace: options.teamWorkspace } : {}),
-			identity: { id },
+			...(options.teamIrc === true ? { teamIrc: true } : {}),
 			detached: true,
 			retainArtifacts: true,
 			keepAlive: true,

@@ -15,6 +15,7 @@ import type { Settings } from "../config/settings";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
+import { IrcQueueFullError } from "./errors";
 import { IrcIngressGuard, type IrcIngressLimits } from "./ingress-guard";
 import { cfgIrcDedupWindowMs, cfgIrcIngressGuard, cfgIrcMaxHops, cfgIrcRateLimitTokens } from "./settings";
 
@@ -372,11 +373,10 @@ export class IrcBus implements IrcBusApi {
 			this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
-			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer
-			// the message so a later `wait`/`inbox` from the recipient can still
-			// pick it up. The receipt stays "failed" — the recipient has not
-			// seen it.
-			this.#enqueue(message);
+			// A full queue explicitly refused this delivery; buffering it would turn
+			// the failed receipt into an unexpected later delivery.
+			// Other live hand-off failures retain their existing mailbox fallback.
+			if (!(error instanceof IrcQueueFullError)) this.#enqueue(message);
 			return {
 				to: message.to,
 				outcome: "failed",

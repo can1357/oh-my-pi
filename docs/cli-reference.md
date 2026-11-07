@@ -163,8 +163,10 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 
 With the fork defaults (`a2a.enabled: true`, `a2a.port: 0`) no flag is needed:
 every terminal starts a bridge on a free port and auto-registers its peers.
-See [settings](./settings.md#inter-terminal-agent-networking-a2a) and
-[Agent Teams (planned)](./agent-teams.md).
+See [settings](./settings.md#inter-terminal-agent-networking-a2a). Separately,
+[Agent Teams](./agent-teams.md) runs teammates within the current session:
+enable `team.enabled`, then use `/team list`, `/team start <name> [assignment]`,
+`/team status [name]`, or `/team stop <name|all>`.
 
 #### Extensions, hooks, skills, and rules
 

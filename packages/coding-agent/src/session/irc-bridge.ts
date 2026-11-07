@@ -3,6 +3,7 @@ import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
+import { IrcQueueFullError } from "../irc/errors";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "./agent-session-events";
 import { escapeHarnessTags } from "./harness-tags";
@@ -21,21 +22,14 @@ export interface IrcBridgeHost {
 }
 
 /**
- * Pending-record cap per incoming queue ({@link IrcBridge} interrupts and
- * asides). A busy recipient whose turn never reaches a step boundary cannot
- * grow either queue without bound: past the cap the oldest records are dropped
- * (the same drop-oldest bound the bus mailbox applies) so the newest traffic —
- * the part still worth reading — survives.
+ * Pending-record cap per recipient ({@link IrcBridge} interrupts, asides and
+ * deferred wakes combined). A busy recipient whose turn never reaches a step
+ * boundary cannot grow its queues without bound: once the cap is reached a new
+ * delivery is refused with a `failed` receipt ("recipient queue full") instead
+ * of silently dropping a record an earlier send already acknowledged as
+ * `injected`. The sender learns the message did not land and can retry.
  */
 const IRC_QUEUE_CAP = 50;
-
-/** Enforce {@link IRC_QUEUE_CAP} on a queue in place, dropping its oldest records. */
-function capQueue(queue: AgentMessage[], label: "interrupts" | "asides"): void {
-	const overflow = queue.length - IRC_QUEUE_CAP;
-	if (overflow <= 0) return;
-	queue.splice(0, overflow);
-	logger.debug("IrcBridge: pending queue full, dropped oldest records", { queue: label, dropped: overflow });
-}
 
 /** Owns incoming IRC queues and the session's non-interrupting aside queue. */
 export class IrcBridge {
@@ -171,15 +165,18 @@ export class IrcBridge {
 		this.#interrupts = [...snapshot.interrupts, ...this.#interrupts];
 		this.#asides = [...snapshot.asides, ...this.#asides];
 		this.#deferredWakes = [...snapshot.deferredWakes, ...this.#deferredWakes];
-		capQueue(this.#interrupts, "interrupts");
-		capQueue(this.#asides, "asides");
+		// A rollback merge is not a new delivery: never drop snapshot records an
+		// earlier send already acknowledged. New deliveries stay refused until the
+		// merged queue drains below {@link IRC_QUEUE_CAP}.
 	}
 
 	/** Queues records for the next step-boundary aside injection: IRC wakes deferred by a
 	 *  session transition, and extension `deliverAs: "aside"` sends. */
 	queueAside(records: AgentMessage[]): void {
+		// Internal records (a deferred wake, a queued prompt) are not new IRC
+		// deliveries and must not be silently dropped. The delivery boundary
+		// refuses new sends while the queues are at {@link IRC_QUEUE_CAP}.
 		this.#asides.push(...records);
-		capQueue(this.#asides, "asides");
 	}
 
 	/** Parks wake-intended records while a pooled contract owns the worker. Unlike
@@ -254,6 +251,10 @@ export class IrcBridge {
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
+		if (this.#interrupts.length + this.#asides.length + this.#deferredWakes.length >= IRC_QUEUE_CAP) {
+			logger.debug("IrcBridge: recipient queue full, refused new delivery", { to: msg.to, from: msg.from });
+			throw new IrcQueueFullError();
+		}
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		const registry = AgentRegistry.global();
@@ -337,7 +338,6 @@ export class IrcBridge {
 			} else {
 				if (quiet) this.#quietRecords.add(record);
 				this.#interrupts.push(record);
-				capQueue(this.#interrupts, "interrupts");
 			}
 			return "injected";
 		}

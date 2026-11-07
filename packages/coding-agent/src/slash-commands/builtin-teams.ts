@@ -4,17 +4,19 @@
  * stable handles as registry ids; they see each other via `agent://<handle>`
  * and share the team workspace.
  */
-import { AgentRegistry } from "../registry/agent-registry";
+import { AgentRegistry, type AgentRef } from "../registry/agent-registry";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { discoverAgents } from "../task/discovery";
 import {
 	discoverTeams,
+	ensureTeamTasksFile,
 	renderTeamMemberContext,
 	renderTeamMemberPrompt,
 	resolveTeamMembers,
 	sanitizeTeamHandle,
 } from "../task/teams";
-import { spawnSubagentForSession } from "../task/spawn-subagent";
+import { SpawnPendingError, spawnSubagentForSession } from "../task/spawn-subagent";
+import { reserveStructuredSubagentId } from "../task/structured-subagent";
 import { cfgTeamEnabled, cfgTeamMaxTeammates } from "../task/settings";
 import { commandConsumed, parseSubcommand, usage } from "./helpers/parse";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
@@ -29,6 +31,28 @@ const USAGE = [
 
 function teamRuntimeError(message: string): string {
 	return `team: ${message}`;
+}
+
+interface TeamMembership {
+	id: string;
+	ref?: AgentRef;
+	unsubscribe?: () => void;
+}
+
+let teamMemberships = new WeakMap<object, Map<string, Map<string, TeamMembership>>>();
+
+/** Test-only: clear recorded team membership between cases. */
+export function resetTeamMembershipsForTests(): void {
+	teamMemberships = new WeakMap();
+}
+
+function membershipsFor(session: object): Map<string, Map<string, TeamMembership>> {
+	let memberships = teamMemberships.get(session);
+	if (!memberships) {
+		memberships = new Map();
+		teamMemberships.set(session, memberships);
+	}
+	return memberships;
 }
 
 export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -95,23 +119,85 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				}
 				const max = cfgTeamMaxTeammates.get(runtime.settings);
 				const members = team.members.slice(0, Math.max(1, max));
+				const handles = members.map(member => sanitizeTeamHandle(member.handle));
+				if (new Set(handles).size !== handles.length) {
+					await runtime.output(teamRuntimeError("team member handles collide after normalization"));
+					return commandConsumed();
+				}
 				const skipped = team.members.length - members.length;
 				const assignment = assignmentParts.length > 0 ? assignmentParts.join(" ") : undefined;
+				await ensureTeamTasksFile(team);
 				const lines: string[] = [];
 				let failures = 0;
+				const memberships = membershipsFor(runtime.session);
+				let recorded = memberships.get(team.name);
+				if (recorded === undefined) {
+					recorded = new Map();
+					memberships.set(team.name, recorded);
+				}
+				const toolSession = runtime.session.toolSession;
+				if (!toolSession) {
+					await runtime.output(
+						teamRuntimeError("spawnSubagent is unavailable on a session without a tool session"),
+					);
+					return commandConsumed();
+				}
+				const ids = new Map<(typeof members)[number], string>();
+				const newlyReserved = new Set<string>();
 				for (const member of members) {
+					const handle = sanitizeTeamHandle(member.handle);
+					let entry = recorded.get(handle);
+					if (!entry) {
+						let id: string;
+						do {
+							id = await reserveStructuredSubagentId(toolSession, { label: handle });
+						} while (AgentRegistry.global().get(id));
+						entry = { id };
+						recorded.set(handle, entry);
+						newlyReserved.add(handle);
+					}
+					ids.set(member, entry.id);
+				}
+				for (const member of members) {
+					const handle = sanitizeTeamHandle(member.handle);
+					const entry = recorded.get(handle)!;
+					if (!newlyReserved.delete(handle)) {
+						lines.push(`${handle} - already running as ${entry.id}`);
+						continue;
+					}
 					try {
 						const ref = await spawnSubagentForSession(runtime.session, {
 							agent: member.agent,
 							prompt: renderTeamMemberPrompt(team, assignment),
-							context: renderTeamMemberContext(team, member),
-							handle: sanitizeTeamHandle(member.handle),
+							context: renderTeamMemberContext({ ...team, members }, member, ids),
+							handle,
+							teamReservedId: entry.id,
+							teamIrc: true,
 							...(team.workspace !== undefined ? { teamWorkspace: team.workspace } : {}),
 						});
-						lines.push(`${member.handle} → spawned (${ref.id})`);
+						entry.id = ref.id;
+						entry.ref = ref;
+						lines.push(`${handle} → spawned (${ref.id})`);
 					} catch (error) {
+						if (error instanceof SpawnPendingError) {
+							entry.id = error.agentId;
+							const registry = AgentRegistry.global();
+							entry.ref = registry.get(entry.id);
+							if (!entry.ref) {
+								entry.unsubscribe = registry.onChange(event => {
+									if (event.type === "registered" && event.ref.id === entry.id) {
+										entry.ref = event.ref;
+										entry.unsubscribe?.();
+										entry.unsubscribe = undefined;
+									}
+								});
+							}
+							lines.push(`${handle} → pending (${error.agentId}); the run is still starting`);
+							continue;
+						}
+						recorded.delete(handle);
 						failures += 1;
-						lines.push(`${member.handle} → FAILED: ${error instanceof Error ? error.message : String(error)}`);
+						lines.push(`${handle} → FAILED: ${error instanceof Error ? error.message : String(error)}`);
 					}
 				}
 				if (skipped > 0) {
@@ -138,12 +224,13 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				const lines: string[] = [];
 				for (const team of selected) {
 					lines.push(`${team.name}:`);
+					const recorded = membershipsFor(runtime.session).get(team.name);
 					for (const member of team.members) {
 						const handle = sanitizeTeamHandle(member.handle);
-						const ref = registry.get(handle);
-						lines.push(
-							`  ${handle} — ${ref ? `${ref.status} (${ref.kind})` : "not spawned"} — agent: ${member.agent}`,
-						);
+						const entry = recorded?.get(handle);
+						const ref = entry?.ref && registry.get(entry.id) === entry.ref ? entry.ref : undefined;
+						const status = ref ? `${ref.status} (${ref.kind})` : entry && !entry.ref ? "pending" : "not spawned";
+						lines.push(`  ${entry?.id ?? handle} - ${status} - agent: ${member.agent}`);
 					}
 				}
 				await runtime.output(lines.join("\n"));
@@ -164,18 +251,29 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				const lines: string[] = [];
 				for (const team of selected) {
 					lines.push(`${team.name}:`);
-					for (const member of team.members) {
-						const handle = sanitizeTeamHandle(member.handle);
-						const ref = registry.get(handle);
-						if (ref === undefined) {
-							lines.push(`  ${handle} — not spawned`);
+					const recorded = membershipsFor(runtime.session).get(team.name);
+					if (recorded === undefined || recorded.size === 0) {
+						lines.push("  nothing to stop (team not started in this session)");
+						continue;
+					}
+					for (const [handle, entry] of recorded) {
+						const ref = entry.ref;
+						if (!ref) {
+							lines.push(`  ${handle} - pending (${entry.id}); retry stop after registration`);
 							continue;
 						}
-						const released = await lifecycle.release(handle, ref, { tombstone: true });
+						if (registry.get(entry.id) !== ref) {
+							lines.push(`  ${handle} - no longer a team member`);
+							recorded.delete(handle);
+							continue;
+						}
+						const released = await lifecycle.release(entry.id, ref, { tombstone: true });
 						lines.push(
 							`  ${handle} — ${released ? "released (transcripts kept; revive available)" : "release refused"}`,
 						);
+						if (released) recorded.delete(handle);
 					}
+					if (recorded.size === 0) membershipsFor(runtime.session).delete(team.name);
 				}
 				await runtime.output(lines.join("\n"));
 				return commandConsumed();

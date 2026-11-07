@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { getConfigDirs, findAllNearestProjectConfigDirs } from "../config";
 import { parseFrontmatter } from "@oh-my-pi/pi-utils";
+import { sanitizeAgentId } from "./name-generator";
 
 /** One member entry from the team file's frontmatter. */
 export interface TeamMember {
@@ -166,33 +167,42 @@ export function resolveTeamMembers(team: TeamDefinition, availableAgents: readon
 	}
 }
 
-/** Sanitize a handle into a registry-safe id segment (mirrors `sanitizeAgentId`). */
+/**
+ * Normalize a handle into the exact id the spawn seam reserves
+ * (`sanitizeAgentId`, including its 48-character cap). Status, stop, the
+ * rendered context and the peer list all use this one normalizer, so members
+ * address each other by real `agent://` ids.
+ */
 export function sanitizeTeamHandle(handle: string): string {
-	const sanitized = handle
-		.trim()
-		.replace(/[^A-Za-z0-9_-]+/g, "-")
-		.replace(/^-+|-+$/g, "");
-	return sanitized.length > 0 ? sanitized : "member";
+	return sanitizeAgentId(handle) ?? "member";
 }
 
 /** Render the per-member context block: team identity, role, workspace, TASKS convention. */
-export function renderTeamMemberContext(team: TeamDefinition, member: TeamMember): string {
+export function renderTeamMemberContext(
+	team: TeamDefinition,
+	member: TeamMember,
+	memberIds?: ReadonlyMap<TeamMember, string>,
+): string {
+	const handle = memberIds?.get(member) ?? sanitizeTeamHandle(member.handle);
 	const lines: string[] = [
 		`Team: ${team.name} — ${team.description}`,
-		`Your handle: ${member.handle} (peers message you via write agent://${member.handle})`,
+		`Your handle: ${handle} (peers message you via write agent://${handle})`,
 	];
 	if (member.role !== undefined) lines.push(`Your role: ${member.role}`);
 	if (team.workspace !== undefined) {
 		lines.push(`Team workspace: ${team.workspace}`);
 		lines.push(
-			"Shared task list: TASKS.md in the team workspace — claim a task by writing `owner: ${member.handle}` under it; do not touch tasks owned by another handle.",
+			`Shared task list: TASKS.md in the team workspace - claim a task by writing \`owner: ${handle}\` under it; do not touch tasks owned by another handle.`,
 		);
 	}
 	const peers = team.members.filter(other => other.handle !== member.handle);
 	if (peers.length > 0) {
 		lines.push(
 			`Teammates (message them directly with write agent://<handle>): ${peers
-				.map(peer => `${peer.handle} (${peer.agent}${peer.role !== undefined ? ` — ${peer.role}` : ""})`)
+				.map(
+					peer =>
+						`${memberIds?.get(peer) ?? sanitizeTeamHandle(peer.handle)} (${peer.agent}${peer.role !== undefined ? ` - ${peer.role}` : ""})`,
+				)
 				.join("; ")}`,
 		);
 	}
@@ -207,6 +217,30 @@ export function renderTeamMemberPrompt(team: TeamDefinition, assignment: string 
 		parts.push("", `Team assignment from the lead: ${assignment.trim()}`);
 	}
 	return parts.join("\n").trim();
+}
+
+/** Filename of the shared task list a team's workspace keeps. */
+export const TEAM_TASKS_FILE = "TASKS.md";
+
+/** Header explaining the `owner: <handle>` claim convention, written only for a new list. */
+export const TEAM_TASKS_HEADER = `# Team tasks
+
+Claim a task by writing \`owner: <your-handle>\` on the line under it.
+Only edit tasks you own; message a peer with \`write agent://<handle>\`.
+`;
+
+/**
+ * Create `TASKS.md` in a team workspace when it is missing. Never overwrite an
+ * existing list, so re-running `/team start` keeps the team's claims.
+ */
+export async function ensureTeamTasksFile(team: TeamDefinition): Promise<void> {
+	if (team.workspace === undefined) return;
+	await fs.mkdir(team.workspace, { recursive: true });
+	try {
+		await fs.writeFile(path.join(team.workspace, TEAM_TASKS_FILE), TEAM_TASKS_HEADER, { flag: "wx" });
+	} catch (error) {
+		if (!error || typeof error !== "object" || !("code" in error) || error.code !== "EEXIST") throw error;
+	}
 }
 
 export const TEAMS_DIR_MARKER = path.join(os.homedir(), ".omp");
