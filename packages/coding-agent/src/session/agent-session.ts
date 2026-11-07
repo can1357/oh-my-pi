@@ -188,6 +188,11 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "../memory-backend/recall-entry";
+import {
+	branchRecordsMemorySnapshot,
+	rebindMemorySnapshotSessionFile,
+	recordMemorySnapshotOnCurrentBranch,
+} from "../memories";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from "../modes/magic-keywords";
@@ -1868,6 +1873,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return;
 				}
 				observation = this.#startTurnObservation(records);
+				// A wake prompts the agent directly, bypassing the user-prompt
+				// preparation: the branch it runs on records the memory block that
+				// prompt carries, or a later resume rereads the memory files.
+				this.#restageMemorySnapshotOnCurrentBranch();
 				return this.agent.prompt(records);
 			})
 			.catch(error => {
@@ -2547,6 +2556,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				let turnError: unknown;
 				const inFlightEpoch = this.#beginInFlight();
 				try {
+					// The delivery sends the session's system prompt: the branch it
+					// runs on must record the memory block that prompt carries, or
+					// a later resume rereads the memory files and rebuilds a
+					// different prompt. A branch move leaves the branch without a
+					// snapshot of its own.
+					this.#restageMemorySnapshotOnCurrentBranch();
 					await this.agent.prompt(messages.length === 1 ? first : messages);
 				} catch (error) {
 					turnError = error;
@@ -2968,6 +2983,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			},
 			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
 			buildLiveProviderContext: async (summarized, retained, signal, model) => {
+				// The compaction request carries the session's base system prompt:
+				// the branch must record the memory block that prompt holds, so a
+				// later resume rebuilds the block the persisted compaction was
+				// generated under instead of rereading the memory files.
+				this.#restageMemorySnapshotOnCurrentBranch();
 				// compact() rebuilds the previous summary message; send the live
 				// agent's own one. Conversion caches key on message identity, so a
 				// copy would re-render the bytes the live turns already sent.
@@ -3015,8 +3035,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			getContextUsage: options => this.getContextUsage(options),
 			shake: (mode, options) => this.shake(mode, options),
 			dropImages: () => this.dropImages(),
-			generateHandoffDocument: (customInstructions, options) =>
-				this.#handoff.generateDocument(customInstructions, options),
+			generateHandoffDocument: (customInstructions, options) => {
+				// The handoff request carries the session's base system prompt, so
+				// the branch must record the memory block that prompt holds: the
+				// document it produces is persisted and outlives the run.
+				this.#restageMemorySnapshotOnCurrentBranch();
+				return this.#handoff.generateDocument(customInstructions, options);
+			},
 			removeAssistantMessageFromActiveContext: message =>
 				this.#recovery.removeAssistantMessageFromActiveContext(message),
 			dropPersistedAssistantTurn: message => this.#recovery.dropPersistedAssistantTurn(message),
@@ -3078,6 +3103,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#handoff = new SessionHandoff(handoffHost);
 
 		this.#rehydrateCheckpointRewindState();
+
+		// A persistence recovery moves the session off its file — another
+		// process took it, the file was replaced, writes kept conflicting —
+		// while the base prompt, and the memory block it carries, stays. The
+		// staged snapshot must follow the file, or the branch the session keeps
+		// writing records no snapshot and a later resume rereads the memory
+		// files and rebuilds a different prompt.
+		this.addDisposer(
+			this.sessionManager.onPersistenceNotice(() => rebindMemorySnapshotSessionFile(this.sessionManager)),
+		);
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, hooks, auto-compaction, retry logic)
@@ -5496,6 +5531,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 				return { status: "skipped", reason: "session-unavailable" };
 			}
+			// The continuation sends the session's system prompt: the branch it
+			// runs on must record a snapshot of the memory block that prompt
+			// carries, or a later resume rereads the memory files and rebuilds a
+			// different prompt. A branch move — an `ask` re-answer, a manual tool
+			// replay — leaves the branch without a snapshot of its own.
+			this.#restageMemorySnapshotOnCurrentBranch();
 			for (;;) {
 				try {
 					if (!this.agent.state.isStreaming) onStart?.();
@@ -5540,6 +5581,36 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			});
 			return { status: "failed", error };
 		}
+	}
+
+	/**
+	 * Record the memory block the session's prompt carries on the branch the
+	 * session continues on.
+	 *
+	 * A branch move — a rewind, an `ask` re-answer, a manual tool replay — leaves
+	 * the prompt carrying the memory block while the branch holds no snapshot of
+	 * its own: a later resume rereads the memory files and rebuilds a different
+	 * prompt.
+	 */
+	#restageMemorySnapshotOnCurrentBranch(): void {
+		// A base rebuilt while the session was idle carries the memory block its
+		// prompt sends, and that block is recorded now that a request is about to
+		// carry it — never when the base was merely applied.
+		this.#tools.commitPendingMemorySnapshot();
+		recordMemorySnapshotOnCurrentBranch(this.sessionManager, this.#tools.effectiveSystemPrompt);
+	}
+
+	/**
+	 * Rebuild the base prompt from the memory block the active branch records.
+	 *
+	 * A leaf move keeps the base prompt, so a branch that records a block of its
+	 * own would still be sent the block of the branch the leaf left, and its
+	 * transcript would end up carrying both. Rebuilding reselects the recorded
+	 * block; a branch that records none keeps the block this process built.
+	 */
+	async #reselectMemoryBlockForBranch(): Promise<void> {
+		if (!branchRecordsMemorySnapshot(this.sessionManager)) return;
+		await this.#tools.refreshBaseSystemPrompt();
 	}
 
 	#scheduleAgentContinue(options: ScheduledAgentContinueOptions): void {
@@ -9307,7 +9378,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				commit: () => {
 					// No await may separate ownership validation from publishing memory and policy.
 					if (!isCurrent() || !overrideIsCurrent()) return undefined;
-					if (basePreparation.commit?.() === false) return undefined;
+					// The prompt the turn actually sends decides whether a staged
+					// memory block may be recorded: an extension that replaced the
+					// base prompt may have dropped the block entirely, and a
+					// transcript must not claim memory the provider never received.
+					const finalPrompt = result?.systemPrompt ?? basePreparation.systemPrompt;
+					if (basePreparation.commit?.(finalPrompt) === false) return undefined;
 					if (result?.systemPrompt !== undefined) {
 						this.#tools.setTurnSystemPromptOverride(result.systemPrompt, basePreparation.systemPrompt);
 					} else {
@@ -9591,6 +9667,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#planReferenceSent = true;
 			}
 			try {
+				// The turn is dispatched now: the branch it sends the prompt on
+				// must record the memory block that prompt carries, or a later
+				// resume rereads the memory files and rebuilds a different prompt.
+				this.#restageMemorySnapshotOnCurrentBranch();
 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
 					// `agent.prompt` claims streaming synchronously before its
 					// first await: this callback fires exactly when THIS
@@ -10501,6 +10581,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#resetPromptMaintenanceState();
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
+			// The turn sends the session's system prompt: the branch it runs on
+			// must record the memory block that prompt carries, or a later
+			// resume rereads the memory files and rebuilds a different prompt.
+			// An extension-triggered turn bypasses the user-prompt preparation,
+			// so it applies the same gate here.
+			this.#restageMemorySnapshotOnCurrentBranch();
 			const prepared = await this.#prepareUserAuthoredWake(message, setupAbort.signal, sessionGeneration);
 			if (!prepared) return false;
 			const run = this.agent.prompt(prepared.length > 1 ? prepared : message);
@@ -14324,6 +14410,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				} else {
 					this.sessionManager.createBranchedSession(leafId, { copyArtifacts: options?.copyArtifacts });
 				}
+				// The new file replaces the source file, but the base prompt — and
+				// with it the memory block it carries — is kept: the staged memory
+				// snapshot must move to the file that will carry it, or the branch's
+				// transcript records no snapshot and a later resume rereads the
+				// memory files and rebuilds a different prompt.
+				rebindMemorySnapshotSessionFile(this.sessionManager);
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
@@ -14332,6 +14424,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			this.#clearSessionScopedToolState();
 			this.#rehydrateCheckpointRewindState();
+			// A forked branch that records a memory block of its own decides what
+			// the prompt carries; one that records none keeps the source's block,
+			// which the next dispatch records on the new file.
+			await this.#reselectMemoryBlockForBranch();
 			this.#todo.syncFromBranch();
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
@@ -14449,6 +14545,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// after the idle check. It still belongs to the pre-branch context.
 				this.#promptGeneration++;
 				this.sessionManager.createBranchedSession(leafId);
+				// The promoted file replaces the source file while the base prompt
+				// — and the memory block it carries — is kept: the staged snapshot
+				// must move to the file that will carry it, or the promoted branch
+				// records no snapshot and a later resume rereads the memory files.
+				rebindMemorySnapshotSessionFile(this.sessionManager);
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
@@ -14801,6 +14902,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
 		this.replaceMessagesFromSessionContext(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
+		// A branch that records a memory block of its own decides what the prompt
+		// carries: entering it must rebuild the base prompt from that block, or
+		// the next turn would send the block of the branch the leaf left and
+		// append it after the destination's snapshot.
+		await this.#reselectMemoryBlockForBranch();
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();
 		this.#modelMentions.syncFromBranch();

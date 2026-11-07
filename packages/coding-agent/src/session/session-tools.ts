@@ -69,7 +69,7 @@ import {
 	PERMISSION_REQUIRED_TOOLS,
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
-import { toolReadsSkillUris } from "../system-prompt";
+import { type BuildSystemPromptResult, toolReadsSkillUris } from "../system-prompt";
 
 import type { CustomMessage } from "./messages";
 import { SESSION_AGENT_NOTICE_TYPE } from "./queued-messages";
@@ -167,7 +167,7 @@ export type SystemPromptRebuilder = (
 	toolNames: string[],
 	tools: Map<string, AgentTool>,
 	xdev: XdevState | undefined,
-) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+) => Promise<BuildSystemPromptResult>;
 
 interface SessionToolsOptions {
 	autoApprove?: boolean;
@@ -205,8 +205,14 @@ interface SystemPromptPreparation {
 	systemPrompt: string[];
 	/** Memory backend note to deliver with the turn ({@link MemoryPromptPreparation.notice}). */
 	memoryNotice?: MemoryPromptPreparation["notice"];
-	/** Publish staged state at validated delivery; false declines the prepared turn without mutation. */
-	commit?(): boolean;
+	/**
+	 * Publish staged state at validated delivery; false declines the prepared turn without mutation.
+	 *
+	 * `finalPrompt` is the prompt the turn actually sends: a `before_agent_start`
+	 * extension may have replaced the base prompt, and only the prompt that
+	 * reaches the provider may claim to carry a staged memory block.
+	 */
+	commit?(finalPrompt: readonly string[]): boolean;
 }
 
 export interface MountedMCPToolRouteSource {
@@ -463,6 +469,13 @@ export class SessionTools {
 	#turnSystemPromptOverride: string[] | undefined;
 	/** The latest per-turn override and the base its hook was given; kept after the turn ends. */
 	#lastTurnSystemPromptOverride: { prompt: string[]; base: string[] } | undefined;
+	/**
+	 * Records the memory block a rebuilt base prompt carries, once a request
+	 * actually sends that base. Publishing a rebuilt base — an idle tool, MCP or
+	 * policy reconcile — is not a dispatch, so the recorder waits here instead of
+	 * leaving a snapshot of a prompt no provider request carried.
+	 */
+	#pendingBaseMemoryCommit: (() => void) | undefined;
 	#lastAppliedToolSignature: string | undefined;
 	/** Roster {@link #baseSystemPrompt} rendered; captured only for prefix-bound models. */
 	#basePromptRoster: PromptRoster | undefined;
@@ -619,9 +632,34 @@ export class SessionTools {
 		return this.#baseSystemPrompt;
 	}
 
+	/**
+	 * The system prompt the agent sends right now: the per-turn override while
+	 * one is active, else the base.
+	 */
+	get effectiveSystemPrompt(): string[] {
+		return this.#turnSystemPromptOverride ?? this.#baseSystemPrompt;
+	}
+
 	/** Replaces the controller-owned base prompt without applying it to the agent. */
 	setBaseSystemPrompt(prompt: string[]): void {
 		this.#baseSystemPrompt = prompt;
+	}
+
+	/**
+	 * Records the memory block the live prompt carries, now that a request is
+	 * about to send it.
+	 *
+	 * The recorder of the last base rebuild runs here rather than when that base
+	 * was applied: a session opened and left idle, or a base rebuilt by an idle
+	 * reconcile, must not leave a snapshot behind that a later resume would
+	 * restore instead of the current memory. An active per-turn override replaces
+	 * the base, so its block is left to the turn's own preparation.
+	 */
+	commitPendingMemorySnapshot(): void {
+		if (this.#turnSystemPromptOverride !== undefined) return;
+		const commit = this.#pendingBaseMemoryCommit;
+		this.#pendingBaseMemoryCommit = undefined;
+		commit?.();
 	}
 
 	/**
@@ -1523,6 +1561,7 @@ export class SessionTools {
 		this.#setActiveToolNames?.(validToolNames);
 
 		let rebuiltSystemPrompt: string[] | undefined;
+		let rebuiltCommit: (() => void) | undefined;
 		let rebuiltSignature: string | undefined;
 		let frozenSignature: string | undefined;
 		// Trigger of an implicit (non-forced) rebuild, rechecked at commit.
@@ -1574,6 +1613,7 @@ export class SessionTools {
 						),
 					);
 					rebuiltSystemPrompt = built.systemPrompt;
+					rebuiltCommit = built.commit;
 					if (!forcePromptRefresh) implicitRebuildSignature = triggerSignature;
 					rebuiltSignature = signature;
 					rebuiltXdevCatalogNames = built.xdevCatalogNames;
@@ -1628,6 +1668,10 @@ export class SessionTools {
 				this.#baseSystemPrompt = rebuiltSystemPrompt;
 				this.#host.clearMemoryPromotionSnapshot();
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+				// The memory block this prompt carries is recorded when a provider
+				// request actually sends it, never by publishing a rebuilt base, so
+				// the recorder waits for the dispatch instead.
+				this.#pendingBaseMemoryCommit = rebuiltCommit;
 				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
 				this.#lastAppliedToolSignature = rebuiltSignature;
 				this.#recordPromptRoster(validToolNames);
@@ -2501,7 +2545,9 @@ export class SessionTools {
 		return this.runToolRegistryMutation(async () => {
 			const prepared = await this.#prepareBaseSystemPrompt();
 			if (commitIf && !commitIf()) return;
-			prepared?.commit?.();
+			// Publishing a rebuilt base is not a dispatch: the memory block it
+			// carries is recorded by the first request that actually sends it.
+			prepared?.commit?.(prepared.systemPrompt);
 		});
 	}
 
@@ -2557,6 +2603,12 @@ export class SessionTools {
 					this.#host.clearInheritedProviderPromptCacheKey();
 				}
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+				// The memory block this prompt carries is recorded when a provider
+				// request actually sends it, never by publishing a rebuilt base:
+				// an idle refresh — a tool, MCP or policy reconcile — must not
+				// leave a snapshot behind that a later resume would restore
+				// instead of the current memory.
+				this.#pendingBaseMemoryCommit = built.commit;
 				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
 				// The rebuilt prompt is a fresh roster snapshot. Keep the complete pending
 				// delta for a turn override that hides it, while separately tracking any
@@ -2617,7 +2669,26 @@ export class SessionTools {
 		signal?: AbortSignal,
 	): Promise<SystemPromptPreparation> {
 		const backend = await resolveMemoryBackend(this.#host.settings);
-		if (!isCurrent() || !backend.beforeAgentStartPrompt) return { systemPrompt: this.#baseSystemPrompt };
+		if (!isCurrent() || !backend.beforeAgentStartPrompt) {
+			// The local memory backend keeps its block in the base prompt, so a
+			// branch that moved off the staged snapshot — a `/tree` navigation
+			// or a checkpoint rewind — records a snapshot of its own when this
+			// turn is dispatched.
+			//
+			// Committing the preparation only validates the prompt the turn
+			// sends: a `before_agent_start` extension may replace the base with
+			// one that carries no memory block, and a transcript must not claim
+			// a block the provider never received. The block itself is recorded
+			// at the dispatch, so a turn that bails after this commit — an
+			// auto-thinking or pre-prompt compaction exit — leaves none behind.
+			return {
+				systemPrompt: this.#baseSystemPrompt,
+				commit: finalPrompt => {
+					backend.pendingInstructionsCommit?.(this.#host.sessionManager)?.commit(finalPrompt);
+					return true;
+				},
+			};
+		}
 
 		try {
 			const memory = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText, signal);
@@ -2649,7 +2720,9 @@ export class SessionTools {
 				memoryNotice: memory.notice,
 				commit: () => {
 					if (!isCurrent() || !memory.commit()) return false;
-					refreshed?.commit?.();
+					// The refreshed base is the prompt that goes live, so it is
+					// the prompt a staged memory block may be recorded against.
+					refreshed?.commit?.(refreshed.systemPrompt);
 					// A handler may have refreshed tools or policy. Promote the recall onto
 					// that winning base, never replace it with the preparation's snapshot.
 					const currentBase = this.#baseSystemPrompt;
