@@ -39,6 +39,80 @@ describe("capability/fs readFile on special files", () => {
 		expect(result).toBeNull();
 	});
 
+	it.skipIf(isWindows)(
+		"skips FIFO manifests through classification, plugin-dir naming and update checks",
+		async () => {
+			const root = path.join(dir, "plugin");
+			await fs.promises.mkdir(root);
+			const fifo = path.join(root, "plugin.json");
+			expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+			await Bun.write(
+				path.join(dir, ".omp-plugin", "marketplace.json"),
+				JSON.stringify({
+					name: "fifo-market",
+					owner: { name: "test" },
+					plugins: [{ name: "plugin", source: "./plugin", version: "1.0.0" }],
+				}),
+			);
+			await Bun.write(
+				path.join(dir, "installed.json"),
+				JSON.stringify({
+					version: 2,
+					plugins: {
+						"plugin@fifo-market": [{ scope: "user", installPath: root, version: "1.0.0", enabled: true }],
+					},
+				}),
+			);
+			// A regressed synchronous FIFO read blocks the event loop. Isolate it
+			// in a killable child; fake timers cannot interrupt a kernel read.
+			const moduleUrl = new URL("../../src/discovery/agent-plugin-format.ts", import.meta.url).href;
+			const helpersUrl = new URL("../../src/discovery/helpers.ts", import.meta.url).href;
+			const managerUrl = new URL("../../src/extensibility/plugins/marketplace/manager.ts", import.meta.url).href;
+			const child = Bun.spawn(
+				[
+					process.execPath,
+					"--eval",
+					`import { classifyAgentPluginRoot, readAgentPluginRootStatus, readAgentPluginRootStatusSync } from ${JSON.stringify(moduleUrl)};
+				import { injectPluginDirRoots, listClaudePluginRoots } from ${JSON.stringify(helpersUrl)};
+				import { MarketplaceManager } from ${JSON.stringify(managerUrl)};
+				const root = ${JSON.stringify(root)};
+				const dir = ${JSON.stringify(dir)};
+				const statuses = [
+					await classifyAgentPluginRoot(root),
+					await readAgentPluginRootStatus(root),
+					readAgentPluginRootStatusSync(root),
+				];
+				await injectPluginDirRoots(dir, [root], dir);
+				const { roots } = await listClaudePluginRoots(dir, dir);
+				const manager = new MarketplaceManager({
+					marketplacesRegistryPath: dir + "/marketplaces.json",
+					installedRegistryPath: dir + "/installed.json",
+					marketplacesCacheDir: dir + "/marketplaces",
+					pluginsCacheDir: dir + "/cache",
+				});
+				await manager.addMarketplace(dir);
+				console.log(JSON.stringify({
+					statuses,
+					name: roots.find(item => item.path === root)?.plugin,
+					updates: await manager.checkForUpdates(),
+				}));`,
+				],
+				{ stdout: "pipe", stderr: "pipe", timeout: 3000, killSignal: "SIGKILL" },
+			);
+			const [exitCode, output, errors] = await Promise.all([
+				child.exited,
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+			]);
+			expect({ exitCode, errors }).toEqual({ exitCode: 0, errors: "" });
+			expect(JSON.parse(output)).toEqual({
+				statuses: [{ kind: "none" }, { kind: "none" }, { kind: "none" }],
+				name: "plugin",
+				updates: [],
+			});
+		},
+	);
+
 	// Symlinked context files (CLAUDE.md -> AGENTS.md) are common; the type
 	// gate must follow links rather than rejecting them.
 	it.skipIf(isWindows)("still reads regular files through symlinks", async () => {

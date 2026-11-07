@@ -16,6 +16,7 @@ import {
 	normalizePathForComparison,
 } from "@oh-my-pi/pi-utils";
 import { getConfigDirPaths } from "../../config";
+import { legacyProviderAllowed } from "../../discovery/agent-plugin-format";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { findExtensionDirectoryIndex, resolveExtensionDirectory } from "../extensions/directory-resolution";
 import { installLegacyPiSpecifierShim } from "./legacy-pi-compat";
@@ -427,10 +428,21 @@ export function resolvePluginExtensionPaths(plugin: InstalledPlugin): string[] {
 // =============================================================================
 
 /**
+ * Enabled plugins whose modules may load. A package with a fatally invalid
+ * Agent Plugins manifest is rejected whole (§5.2, §11.3): none of its tools,
+ * hooks, commands, or extension modules may load.
+ */
+async function getLoadablePlugins(cwd: string): Promise<ScopedInstalledPlugin[]> {
+	const plugins = await getEnabledPlugins(cwd);
+	const allowed = await Promise.all(plugins.map(plugin => legacyProviderAllowed(plugin.path, "other")));
+	return plugins.filter((_, index) => allowed[index]);
+}
+
+/**
  * Get all tool paths from all enabled plugins.
  */
 export async function getAllPluginToolPaths(cwd: string): Promise<string[]> {
-	const plugins = await getEnabledPlugins(cwd);
+	const plugins = await getLoadablePlugins(cwd);
 	const paths: string[] = [];
 
 	for (const plugin of plugins) {
@@ -444,7 +456,7 @@ export async function getAllPluginToolPaths(cwd: string): Promise<string[]> {
  * Get all hook paths from all enabled plugins.
  */
 export async function getAllPluginHookPaths(cwd: string): Promise<string[]> {
-	const plugins = await getEnabledPlugins(cwd);
+	const plugins = await getLoadablePlugins(cwd);
 	const paths: string[] = [];
 
 	for (const plugin of plugins) {
@@ -458,7 +470,7 @@ export async function getAllPluginHookPaths(cwd: string): Promise<string[]> {
  * Get all command paths from all enabled plugins.
  */
 export async function getAllPluginCommandPaths(cwd: string): Promise<string[]> {
-	const plugins = await getEnabledPlugins(cwd);
+	const plugins = await getLoadablePlugins(cwd);
 	const paths: string[] = [];
 
 	for (const plugin of plugins) {
@@ -472,7 +484,7 @@ export async function getAllPluginCommandPaths(cwd: string): Promise<string[]> {
  * Get all extension module paths from all enabled plugins.
  */
 export async function getAllPluginExtensionPaths(cwd: string): Promise<string[]> {
-	const plugins = await getEnabledPlugins(cwd);
+	const plugins = await getLoadablePlugins(cwd);
 	const paths: string[] = [];
 
 	for (const plugin of plugins) {
