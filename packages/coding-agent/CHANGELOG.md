@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Worker-homed eval `wait()` returns finished jobs and consumes their results instead of reporting them as running or delivering them again ([#18363](https://github.com/can1357/oh-my-pi/issues/18363))
+
 ## [18.18.0] - 2026-11-07
 
 ### Added
