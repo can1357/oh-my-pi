@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
+import type { Message, StopReason, Usage, UserMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { SessionManager } from "../session/session-manager";
@@ -276,6 +276,42 @@ export class AdvisorTranscriptRecorder {
 				this.#file = file;
 			}
 			this.#manager?.appendMessage(persisted);
+		});
+	}
+
+	/**
+	 * Persist one billed request the advisor made on its own.
+	 *
+	 * The advisor's overflow compaction bypasses the advisor `Agent`, so its
+	 * usage never reaches the transcript as a message. Recording it as a usage
+	 * entry keeps that spend in the advisor's ledger, where the stats parser
+	 * reads it like any other advisor call.
+	 */
+	recordUsage(usage: {
+		purpose: string;
+		api: string;
+		provider: string;
+		model: string;
+		usage: Usage;
+		stopReason: StopReason;
+		errorMessage?: string;
+	}): void {
+		const sessionFile = this.resolveSessionFile();
+		if (!sessionFile?.endsWith(JSONL_SUFFIX)) return;
+		const file = path.join(sessionFile.slice(0, -JSONL_SUFFIX.length), this.#filename);
+		const cwd = this.resolveCwd();
+		this.#enqueue(async () => {
+			if (file !== this.#file) {
+				await this.#closeManager();
+				this.#manager = await SessionManager.open(file, undefined, undefined, {
+					initialCwd: cwd,
+					suppressBreadcrumb: true,
+				});
+				this.#file = file;
+			}
+			const manager = this.#manager;
+			if (!manager) return;
+			manager.appendModelUsage(usage, { sessionId: manager.getSessionId(), parentId: manager.getLeafId() });
 		});
 	}
 
