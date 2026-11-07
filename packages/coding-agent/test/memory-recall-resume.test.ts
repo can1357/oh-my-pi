@@ -442,6 +442,7 @@ describe("Hindsight recall across a resume", () => {
 		bankId: null,
 		bankIdPrefix: "",
 		scoping: "global",
+		globalScope: false,
 		bankMission: "",
 		retainMission: null,
 		autoRecall: true,

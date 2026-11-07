@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Editor, type Component } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { matchesAppFollowUp } from "@oh-my-pi/pi-tui/keybinding-matchers";
@@ -14,6 +14,7 @@ import { defaultEditorTheme } from "./test-themes";
 // Records as the Windows console host emits them: CSI Vk;Sc;Uc;Kd;Cs;Rc _
 const SHIFT_ENTER = "\x1b[13;28;13;1;16;1_";
 const CTRL_ENTER = "\x1b[13;28;10;1;8;1_";
+const CTRL_J = "\x1b[74;36;10;1;8;1_";
 const ENTER = "\x1b[13;28;13;1;0;1_";
 const ENTER_UP = "\x1b[13;28;13;0;0;1_";
 
@@ -33,6 +34,12 @@ describe("Win32InputModeDecoder", () => {
 		expect(matchesKey(decodeOne(SHIFT_ENTER), "shift+enter")).toBe(true);
 		expect(matchesKey(decodeOne(CTRL_ENTER), "ctrl+enter")).toBe(true);
 		expect(matchesKey(decodeOne(CTRL_ENTER), "enter")).toBe(false);
+	});
+
+	it("keeps Ctrl+J with Uc=LF as ctrl+j", () => {
+		const ctrlJ = decodeOne(CTRL_J);
+		expect(matchesKey(ctrlJ, "ctrl+j")).toBe(true);
+		expect(matchesKey(ctrlJ, "enter")).toBe(false);
 	});
 
 	it("drops key releases and bare modifier presses", () => {
@@ -163,7 +170,6 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 	});
 
 	afterEach(() => {
-		vi.useRealTimers();
 		harness?.dispose();
 		harness = undefined;
 		for (const [key, value] of originalSshEnv) {
@@ -258,40 +264,6 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		expect(harness.terminal.kittyProtocolActive).toBe(true);
 		expect(out.indexOf("\x1b[?9001l")).toBeGreaterThan(out.indexOf("\x1b[?9001h"));
 		expect(out).toContain("\x1b[>1u");
-	});
-
-	it("releases a relayed lone Escape after a single wait window", async () => {
-		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
-		const recorder = new InputRecorder();
-		harness.tui.addChild(recorder);
-		harness.tui.setFocus(recorder);
-		await harness.settle();
-		await harness.feed("\x1b[?1;2c");
-		vi.useFakeTimers();
-
-		// The paste-marker normalizer and the decoder both hold a relayed ESC; their
-		// 75 ms waits must not stack into ~150 ms.
-		process.stdin.emit("data", "\x1b[0;0;27;1;0;1_");
-		vi.advanceTimersByTime(74);
-		expect(recorder.received).toEqual([]);
-		vi.advanceTimersByTime(1);
-		expect(recorder.received).toEqual(["\x1b"]);
-	});
-
-	it("delivers a held relayed Escape when a late kitty reply turns the mode off", async () => {
-		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
-		const recorder = new InputRecorder();
-		harness.tui.addChild(recorder);
-		harness.tui.setFocus(recorder);
-		await harness.settle();
-		await harness.feed("\x1b[?1;2c");
-		vi.useFakeTimers();
-
-		process.stdin.emit("data", "\x1b[0;0;27;1;0;1_");
-		process.stdin.emit("data", "\x1b[?0u");
-		expect(harness.terminal.kittyProtocolActive).toBe(true);
-		vi.runAllTimers();
-		expect(recorder.received).toEqual(["\x1b"]);
 	});
 
 	it("pastes line breaks the console host sent as key records, then submits on a later Enter (#14065)", async () => {

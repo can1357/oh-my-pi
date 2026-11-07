@@ -162,7 +162,9 @@ export interface ProbeCandidate {
 }
 
 /** Outcome of probing an ordered candidate list under one shared deadline. */
-export type CandidateProbeResult = { ok: true; index: number } | { ok: false; aborted: boolean; failures: string[] };
+export type CandidateProbeResult =
+	| { ok: true; index: number }
+	| { ok: false; aborted: boolean; timedOut?: boolean; failures: string[] };
 
 /**
  * Probe candidates in priority order and return the first that exits 0, sharing
@@ -178,6 +180,7 @@ export async function probeCandidates(
 	const bound = Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : DEFAULT_PROBE_TIMEOUT_MS, DEFAULT_PROBE_TIMEOUT_MS);
 	const deadline = Date.now() + bound;
 	const failures: string[] = [];
+	let timedOut = false;
 	for (let index = 0; index < candidates.length; index++) {
 		const candidate = candidates[index];
 		if (signal?.aborted) return { ok: false, aborted: true, failures };
@@ -186,6 +189,7 @@ export async function probeCandidates(
 			// Discovery budget exhausted by earlier candidates; stop rather than
 			// let each remaining candidate spend the full timeout again.
 			failures.push(`${candidate.label} (probe budget exhausted)`);
+			timedOut = true;
 			break;
 		}
 		try {
@@ -197,6 +201,7 @@ export async function probeCandidates(
 			});
 			if (probe.exitCode === 0) return { ok: true, index };
 			if (probe.aborted) return { ok: false, aborted: true, failures };
+			if (probe.timedOut) timedOut = true;
 			failures.push(
 				probe.timedOut
 					? `${candidate.label} (probe timed out)`
@@ -206,5 +211,5 @@ export async function probeCandidates(
 			failures.push(`${candidate.label} (${err instanceof Error ? err.message : String(err)})`);
 		}
 	}
-	return { ok: false, aborted: false, failures };
+	return { ok: false, aborted: false, ...(timedOut ? { timedOut: true } : {}), failures };
 }

@@ -15,10 +15,19 @@ import { __resetDirsFromEnvForTests, getAgentDir, setAgentDir, TempDir } from "@
 const PRIMARY_MARKER = "primary-context-marker-7f3a";
 const EXTRA_ROOT_MARKER = "extra-root-context-marker-2c9d";
 const IMPORTED_MARKER = "imported-context-marker-5e1b";
+const USER_AGENTS_MARKER = "user-agents-marker-9b41";
+const EXTRA_CLAUDE_MARKER = "extra-claude-marker-6a07";
 const NESTED_DIR = "nested-context-dir-4d8e";
 // A nested AGENTS.md is not inlined; the prompt lists its path for the agent to read.
 const NESTED_LISTING = `${NESTED_DIR}/AGENTS.md`;
-const MARKERS = [PRIMARY_MARKER, EXTRA_ROOT_MARKER, IMPORTED_MARKER, NESTED_LISTING];
+const MARKERS = [
+	PRIMARY_MARKER,
+	EXTRA_ROOT_MARKER,
+	IMPORTED_MARKER,
+	USER_AGENTS_MARKER,
+	EXTRA_CLAUDE_MARKER,
+	NESTED_LISTING,
+];
 const ENV_KEYS = ["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 
 describe("--no-context-files", () => {
@@ -39,6 +48,8 @@ describe("--no-context-files", () => {
 			Bun.write(tempDir.join(`project/${NESTED_DIR}/AGENTS.md`), "nested\n"),
 			Bun.write(tempDir.join("extra/AGENTS.md"), `${EXTRA_ROOT_MARKER}\n@imported.md\n`),
 			Bun.write(tempDir.join("extra/imported.md"), `${IMPORTED_MARKER}\n`),
+			Bun.write(tempDir.join("home/.omp/agent/AGENTS.md"), `${USER_AGENTS_MARKER}\n`),
+			Bun.write(tempDir.join("extra-claude/CLAUDE.md"), `${EXTRA_CLAUDE_MARKER}\n`),
 		]);
 		authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 		authStorage.keys.setRuntime("openai", "test-key");
@@ -67,7 +78,15 @@ describe("--no-context-files", () => {
 			"retry.enabled": false,
 			includeWorkspaceTree: true,
 		});
-		const args = parseArgs(["--cwd", tempDir.join("project"), "--add-dir", tempDir.join("extra"), ...flags]);
+		const args = parseArgs([
+			"--cwd",
+			tempDir.join("project"),
+			"--add-dir",
+			tempDir.join("extra"),
+			"--add-dir",
+			tempDir.join("extra-claude"),
+			...flags,
+		]);
 		const options = await buildSessionOptions(args, [], SessionManager.inMemory(args.cwd), modelRegistry, settings);
 		const { session } = await sdkModule.createAgentSession({
 			...options,
@@ -111,8 +130,13 @@ describe("--no-context-files", () => {
 		try {
 			const prompt = ambient.systemPrompt.join("\n");
 			for (const marker of MARKERS) expect(prompt).toContain(marker);
-			// Subagents drop the parent's AGENTS.md but rediscover additional roots.
-			expect(await subagentPrompt(ambient)).toContain(EXTRA_ROOT_MARKER);
+			// Subagents rediscover additional roots but never receive an AGENTS.md: not the
+			// parent's, not the user-level one, and not one found under an additional root.
+			const childPrompt = await subagentPrompt(ambient);
+			expect(childPrompt).toContain(EXTRA_CLAUDE_MARKER);
+			for (const marker of [PRIMARY_MARKER, EXTRA_ROOT_MARKER, IMPORTED_MARKER, USER_AGENTS_MARKER]) {
+				expect(childPrompt).not.toContain(marker);
+			}
 		} finally {
 			await ambient.dispose();
 		}

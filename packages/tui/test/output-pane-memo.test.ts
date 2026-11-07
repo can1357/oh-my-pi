@@ -94,6 +94,21 @@ describe("OutputPane render memo", () => {
 		expect(pane.render(80)).toEqual(fresh.render(80));
 	});
 
+	it("re-renders when only the padding changes at the same width", () => {
+		// The memo key must carry the content width, not the raw width: two
+		// panes at the same width with different paddings wrap differently,
+		// and a key on `width` alone would serve one's render to the other.
+		const rows = Array.from({ length: 6 }, (_, i) => `row ${i} ${"x".repeat(60)}`);
+		const narrow = makePane(rows, { ...DEFAULT_OPTIONS, collapsedMaxLines: 4, paddingX: 0, leadingBlank: false });
+		const wide = makePane(rows, { ...DEFAULT_OPTIONS, collapsedMaxLines: 4, paddingX: 6, leadingBlank: false });
+		narrow.render(40);
+
+		expect(wide.render(40)).toEqual(
+			makePane(rows, { ...DEFAULT_OPTIONS, collapsedMaxLines: 4, paddingX: 6, leadingBlank: false }).render(40),
+		);
+		expect(wide.render(40)).not.toEqual(narrow.render(40));
+	});
+
 	it("renders what a fresh pane renders when the width configuration changes", () => {
 		// The visual cap counts visual lines, and the width of a Hangul
 		// Compatibility Jamo depends on the width-affecting runtime
@@ -137,7 +152,11 @@ describe("OutputPane render memo", () => {
 		// The styled rows bake in the active theme's colors, so a theme switch
 		// must re-shape them even though the rows themselves did not change.
 		const [dark, light] = await Promise.all([getThemeByName("dark"), getThemeByName("light")]);
-		if (dark === undefined || light === undefined) return;
+		// Builtin themes: if either is missing the theme-epoch case would pass
+		// silently without asserting anything, so fail loudly instead.
+		expect(dark).toBeDefined();
+		expect(light).toBeDefined();
+		if (dark === undefined || light === undefined) throw new Error("builtin dark/light themes must exist");
 		const previous = theme;
 		try {
 			setThemeInstance(dark);

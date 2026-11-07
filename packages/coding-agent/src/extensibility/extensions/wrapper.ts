@@ -10,10 +10,11 @@ import {
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { prompt, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { prompt, sanitizeText, untilAborted, toError } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import nativeDelegationTemplate from "../../prompts/tools/native-delegation.md" with { type: "text" };
 import {
+	approvalRestrictions,
 	denyError,
 	recordApprovalGrant,
 	requestApproval,
@@ -23,6 +24,7 @@ import {
 	truncateForPrompt,
 } from "../../tools/approval";
 import { getApprovalGrants } from "../../tools/approval-cache";
+import { withToolApprovalScope } from "../../tools/approval-scope";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
@@ -237,6 +239,16 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<TDetails, TParameters>> {
+		return withToolApprovalScope(() => this.#execute(toolCallId, params, signal, onUpdate, context));
+	}
+
+	async #execute(
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<TDetails, TParameters>> {
 		// The agent loop emits `tool_call` at arg-prep time (session
 		// `beforeToolCall` wiring) so a handler revision lands before concurrency
 		// scheduling and `tool_execution_start`. Consume the marker
@@ -254,24 +266,25 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
 		// newly prompt-gated command and have it run unapproved.
+		const approvalSettings = context?.settings ?? this.runner.sessionSettings;
 		const { approvalMode, userPolicies } = resolveApprovalFromContext(
-			context ?? (this.runner.sessionSettings ? { settings: this.runner.sessionSettings } : undefined),
+			context ?? (approvalSettings ? { settings: approvalSettings } : undefined),
 		);
 		// `always-ask-cached` grants for this conversation, shared by the pre-check, the full gate,
 		// and the record after an approval.
 		const approvalGrants =
 			approvalMode === "always-ask-cached"
-				? getApprovalGrants(
-						(context?.settings ?? this.runner.sessionSettings)?.getAgentDir(),
-						this.runner.sessionId,
-					)
+				? getApprovalGrants(approvalSettings?.getAgentDir(), this.runner.sessionId)
 				: undefined;
+		const restrictions = approvalRestrictions(approvalSettings, this.runner.cwd);
 		const preResolved = resolveApproval(
 			this.tool,
 			approvalArgs(params, context),
 			approvalMode,
 			userPolicies,
 			approvalGrants,
+			restrictions,
+			context,
 		);
 		if (preResolved.policy === "deny") {
 			throw denyError(preResolved, this.tool.name);
@@ -344,7 +357,16 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// input that newly resolves to `deny` is caught here even though the original passed the
 		// short-circuit above.
 		const resolvedArgs = approvalArgs(effectiveParams, context);
-		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies, approvalGrants);
+		this.tool.bindApprovalTargets?.(resolvedArgs);
+		const resolved = resolveApproval(
+			this.tool,
+			resolvedArgs,
+			approvalMode,
+			userPolicies,
+			approvalGrants,
+			restrictions,
+			context,
+		);
 		context?.xdevTierResolved?.(resolved.tier);
 		if (resolved.policy === "deny") {
 			cancelPreflight();
@@ -432,6 +454,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
 					);
 				}
+				if (resolved.source === "restriction") {
+					throw new Error(
+						`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
+							`Reason: ${resolved.reason}\n` +
+							`A restricted folder (tools.restrictedFolders) asks in every approval mode.`,
+					);
+				}
 				throw new Error(
 					`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
 						`Options:\n` +
@@ -491,7 +520,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				),
 			);
 		} catch (err) {
-			executionError = err instanceof Error ? err : new Error(String(err));
+			executionError = toError(err);
 			result = {
 				content: [{ type: "text", text: executionError.message }],
 				details: undefined as TDetails,

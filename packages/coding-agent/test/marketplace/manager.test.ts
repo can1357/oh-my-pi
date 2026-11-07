@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -1347,6 +1348,32 @@ describe("MarketplaceManager", () => {
 			const installed = await ctx.manager.listInstalledPlugins();
 			expect(installed).toHaveLength(1);
 			expect(installed[0].entries[0].version).toBe("2.0.0");
+		});
+
+		it("upgradePlugin names the new version in the registry before it removes the old version's files", async () => {
+			await ctx.manager.addMarketplace(mktDir);
+			const first = await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
+			await setPluginJsonVersion("2.0.0");
+			// A running session that reads the registry while the old directory goes must still find the plugin.
+			const registeredAtRemoval: string[][] = [];
+			const rm = fsp.rm;
+			const rmSpy = spyOn(fsp, "rm").mockImplementation(async (target, options) => {
+				if (target === first.installPath) {
+					const reg = await readInstalledPluginsRegistry(path.join(ctx.tmpDir, "installed_plugins.json"));
+					registeredAtRemoval.push(
+						(reg.plugins["hello-plugin@test-marketplace"] ?? []).map(entry => entry.version),
+					);
+				}
+				return rm(target, options);
+			});
+			try {
+				await ctx.manager.upgradePlugin("hello-plugin@test-marketplace");
+			} finally {
+				rmSpy.mockRestore();
+			}
+
+			expect(registeredAtRemoval).toEqual([["2.0.0"]]);
+			expect(fs.existsSync(first.installPath)).toBe(false);
 		});
 
 		it("upgradePlugin rejects invalid plugin ID", async () => {

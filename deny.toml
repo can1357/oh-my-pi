@@ -33,15 +33,14 @@ allow = [
     "Unicode-3.0",
     "Zlib",
 ]
-# inferno is CDDL-1.0-licensed. Keep this
-# package-scoped: distributions disclose source availability in the aggregate
-# notice rather than globally admitting CDDL dependencies.
+# Copyleft exceptions stay package-scoped: distributions disclose source
+# availability in the native addon's notices
+# (packages/natives/THIRD-PARTY-NOTICES.txt) rather than globally admitting
+# copyleft dependencies.
 exceptions = [
-    { allow = ["CDDL-1.0"], crate = "inferno@0.12.8" },
-    { allow = ["WTFPL"], crate = "terminfo@0.9.0" },
     # uluru (via pi-vcs → jj-lib → gix → gix-pack) is MPL-2.0: file-level
     # copyleft, satisfied by upstream source availability; no obligations
-    # attach to our unmodified use. Keep it package-scoped like inferno.
+    # attach to our unmodified use.
     { allow = ["MPL-2.0"], crate = "uluru@3.1.0" },
 ]
 

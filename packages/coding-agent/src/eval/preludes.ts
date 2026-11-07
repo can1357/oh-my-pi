@@ -1,7 +1,13 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
-import { denyError, requestApproval, resolveApproval, resolveApprovalFromContext } from "../tools/approval";
+import {
+	approvalRestrictions,
+	denyError,
+	requestApproval,
+	resolveApproval,
+	resolveApprovalFromContext,
+} from "../tools/approval";
 
 /** Host context supplied when an eval prelude calls back out of its language VM. */
 export interface EvalPreludeContext {
@@ -28,6 +34,11 @@ export interface EvalPreludeDefinition {
 	name: string;
 	/** Static Markdown documentation shown only while this prelude is enabled. */
 	documentation: string;
+	/**
+	 * Render `documentation` in the eval tool description instead of linking it
+	 * as an `xd://eval/<name>` topic, so the first call needs no `read`.
+	 */
+	inlineDocumentation?: boolean;
 	/** JavaScript source installed into an ordinary JavaScript eval realm. */
 	javascript: string;
 	/** Python source installed into a Python eval kernel. */
@@ -89,12 +100,21 @@ async function approvePreludeInvocation(
 	// Fourth execute-time site: same helper as wrapper/cursor/mcp so a missing
 	// context cannot silently yolo. Empty `context.context` fail-closes;
 	// omitting it inherits the live session settings (schema default yolo).
+	const settings = context.context?.settings ?? context.session.settings;
 	const { approvalMode: mode, userPolicies: policies } = resolveApprovalFromContext(
-		context.context ?? (context.session.settings ? { settings: context.session.settings } : undefined),
+		context.context ?? (settings ? { settings } : undefined),
 	);
 	const subject: { name: string; approval?: ToolApproval } = { name: definition.name };
 	if (definition.approval !== undefined) subject.approval = definition.approval;
-	const resolved = resolveApproval(subject, parameters, mode, policies);
+	// A prelude names no path of its own, so a restricted folder matches it by the session's directory.
+	const resolved = resolveApproval(
+		subject,
+		parameters,
+		mode,
+		policies,
+		undefined,
+		approvalRestrictions(settings, context.session.cwd),
+	);
 	if (resolved.policy === "deny") throw denyError(resolved, definition.name);
 	if (resolved.policy !== "prompt") return;
 

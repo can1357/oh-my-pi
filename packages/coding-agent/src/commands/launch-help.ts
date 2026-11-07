@@ -16,7 +16,7 @@ export const launchHelp = {
 	},
 	flags: {
 		model: Flags.string({
-			description: 'Model to use (fuzzy match: "opus", "gpt-5.2", or "openai/gpt-5.2")',
+			description: 'Model to use (fuzzy match: "opus", "gpt-5.2"; exact with a provider: "openai/gpt-5.2")',
 		}),
 		smol: Flags.string({ description: "Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)" }),
 		slow: Flags.string({ description: "Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)" }),
@@ -114,6 +114,18 @@ export const launchHelp = {
 		"no-context-files": Flags.boolean({ description: "Disable context files (AGENTS.md, CLAUDE.md, ...)" }),
 		export: Flags.string({ description: "Export session file to HTML and exit" }),
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
+		"spinner-interval": Flags.string({
+			description:
+				"Milliseconds between spinner frames (default 80; 0 = static). Overrides tui.spinnerInterval and PI_SPINNER_INTERVAL for this run",
+		}),
+		"max-fps": Flags.string({
+			description:
+				"Repaint ceiling in frames per second (default 30; 1-120); keystroke echo keeps 30 fps. Overrides tui.maxFps and PI_MAX_FPS for this run",
+		}),
+		motion: Flags.string({
+			description:
+				"Animation preset: full (default), reduced (250 ms spinners, no shimmer or blink), or none (static). Overrides tui.motion and PI_MOTION for this run",
+		}),
 		"no-ui": Flags.boolean({
 			description: "With --mode rpc or rpc-ui: run extensions headless (rpc-ui tool UI remains enabled)",
 		}),

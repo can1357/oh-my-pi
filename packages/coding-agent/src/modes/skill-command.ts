@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../session/messages";
@@ -41,6 +42,8 @@ interface InvokeSkillCommandOptions {
 	 * does not leave the submission invisible (issue #8895).
 	 */
 	optimistic?: boolean;
+	/** With `queueOnly`: called with the messages the skill prompt pushed onto a queue (see `PromptOptions.onPromptQueued`). */
+	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 }
 
 /** Built custom-message payload and delivery options for a `/skill:` command. */
@@ -95,7 +98,9 @@ export async function invokeSkillCommandFromText(
 	try {
 		const built = await buildSkillCommandPrompt(ctx, text, streamingBehavior, options?.images);
 		if (!built) return false;
-		const promptOptions = options?.queueOnly ? { ...built.options, queueOnly: true } : built.options;
+		const promptOptions = options?.queueOnly
+			? { ...built.options, queueOnly: true, onPromptQueued: options.onPromptQueued }
+			: built.options;
 		optimistic = options?.optimistic === true && !options?.queueOnly && !ctx.session.isStreaming;
 		if (optimistic) {
 			ctx.renderOptimisticSkillMessage(

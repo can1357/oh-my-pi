@@ -3,10 +3,12 @@
 //! Samples are continuously collected into a fixed-size circular buffer.
 //! Call `get_work_profile()` to retrieve the last N seconds of profiling data.
 
-use std::{cmp::Reverse, collections::HashMap, sync::LazyLock, time::Instant};
+use std::{cmp::Reverse, collections::HashMap, fmt::NumBuffer, sync::LazyLock, time::Instant};
 
 use napi_derive::napi;
 use parking_lot::Mutex;
+
+mod flamegraph;
 
 /// Maximum samples to keep (roughly 60s at high activity).
 const MAX_SAMPLES: usize = 10_000;
@@ -116,10 +118,11 @@ fn generate_folded(samples: &[ProfileSample]) -> String {
 	sorted.sort_by_key(|x| Reverse(x.1));
 
 	let mut output = String::new();
+	let mut buf = NumBuffer::new();
 	for (region, count) in sorted {
 		output.push_str(region);
 		output.push(' ');
-		output.push_str(&count.to_string());
+		output.push_str(count.format_into(&mut buf));
 		output.push('\n');
 	}
 
@@ -167,23 +170,6 @@ fn generate_summary(samples: &[ProfileSample], window_ms: f64) -> String {
 	lines.join("\n")
 }
 
-fn generate_svg(folded: &str) -> Option<String> {
-	use inferno::flamegraph::{self, Options};
-
-	let mut options = Options::default();
-	options.title = "Work Profile".to_string();
-	options.count_name = "μs".to_string();
-	options.min_width = 0.1;
-
-	let mut svg_output = Vec::new();
-	let reader = std::io::Cursor::new(folded.as_bytes());
-
-	match flamegraph::from_reader(&mut options, reader, &mut svg_output) {
-		Ok(()) => String::from_utf8(svg_output).ok(),
-		Err(_) => None,
-	}
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // N-API Exports
 // ─────────────────────────────────────────────────────────────────────────────
@@ -205,7 +191,7 @@ pub fn get_work_profile(last_seconds: f64) -> WorkProfile {
 	let svg = if folded.is_empty() {
 		None
 	} else {
-		generate_svg(&folded)
+		flamegraph::generate(&folded)
 	};
 
 	let total_ms = samples.iter().map(|s| (s.duration_us as f64) * 0.001).sum();

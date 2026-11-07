@@ -436,6 +436,19 @@ impl GitRepo {
 		Ok(summary)
 	}
 
+	/// Whether the repository's own config file contains `key`, without
+	/// includes, global configuration, or environment overrides. Never invokes
+	/// git.
+	pub fn config_has_local(&self, key: &str) -> Result<bool> {
+		let path = self.info().common_dir.join("config");
+		if !path.exists() {
+			return Ok(false);
+		}
+		let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
+			.map_err(|e| Error::backend("git config", e))?;
+		Ok(config.string(key).is_some())
+	}
+
 	/// Read a scalar git config value.
 	pub fn config_get(&self, key: &str) -> Result<Option<String>> {
 		if self.is_reftable() {
@@ -547,6 +560,18 @@ impl GitRepo {
 			out.push(commit_subject(&commit).map_err(|err| Error::backend("git log", err))?);
 		}
 		Ok(out)
+	}
+
+	/// Return each stash entry's commit subject, `stash@{0}` first: git's
+	/// `WIP on <branch>: …` or `On <branch>: <message>`.
+	pub fn stash_subjects(&self) -> Result<Vec<String>> {
+		if !self.ref_exists("refs/stash")? {
+			return Ok(Vec::new());
+		}
+		Ok(cli_text(self.root(), &["log", "--walk-reflogs", "--format=%s", "refs/stash"])?
+			.lines()
+			.map(str::to_owned)
+			.collect())
 	}
 
 	/// Return recent commits as `<short-sha> <subject>` lines.

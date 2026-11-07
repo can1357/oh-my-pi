@@ -38,6 +38,77 @@ afterEach(async () => {
 });
 
 describe("EditTool details", () => {
+	test("apply_patch keeps numeric prefixes in exact old and new lines", async () => {
+		const target = path.join(tempDir, "states.txt");
+		await Bun.write(target, "69 named states\n");
+		const result = await new EditTool(makeSession(tempDir), "apply_patch").execute("numeric-prefix", {
+			input: "*** Begin Patch\n*** Update File: states.txt\n@@\n-69 named states\n+79 named states\n*** End Patch",
+		});
+		expect(result.isError).not.toBe(true);
+		expect(await Bun.file(target).text()).toBe("79 named states\n");
+	});
+
+	test("apply_patch moves a file before recreating its old path", async () => {
+		await Bun.write(path.join(tempDir, "a.txt"), "old\n");
+		const result = await new EditTool(makeSession(tempDir), "apply_patch").execute("move-add", {
+			input: "*** Begin Patch\n*** Update File: a.txt\n*** Move to: b.txt\n@@\n-old\n+moved\n*** Add File: a.txt\n+replacement\n*** End Patch",
+		});
+		expect(result.isError).not.toBe(true);
+		expect(await Bun.file(path.join(tempDir, "a.txt")).text()).toBe("replacement\n");
+		expect(await Bun.file(path.join(tempDir, "b.txt")).text()).toBe("moved\n");
+	});
+
+	test("apply_patch moves a file without hunks and preserves its bytes and mode", async () => {
+		const source = path.join(tempDir, "source.sh");
+		const destination = path.join(tempDir, "moved.sh");
+		const before = "\uFEFF#!/bin/sh\r\nprintf 'alpha\\n'\r\n";
+		await Bun.write(source, before);
+		if (process.platform !== "win32") await fs.chmod(source, 0o750);
+		const result = await new EditTool(makeSession(tempDir), "apply_patch").execute("move-only", {
+			input: "*** Begin Patch\n*** Update File: source.sh\n*** Move to: moved.sh\n*** End Patch",
+		});
+		expect(result.isError).not.toBe(true);
+		expect(await Bun.file(source).exists()).toBe(false);
+		expect(await fs.readFile(destination)).toEqual(Buffer.from(before));
+		if (process.platform !== "win32") expect((await fs.stat(destination)).mode & 0o777).toBe(0o750);
+	});
+
+	test("apply_patch deletes an import line including its newline", async () => {
+		const target = path.join(tempDir, "imports.py");
+		await Bun.write(target, "from x import (\n    A,\n    B,\n)\n");
+		const result = await new EditTool(makeSession(tempDir), "apply_patch").execute("delete-line", {
+			input: "*** Begin Patch\n*** Update File: imports.py\n@@\n-    A,\n*** End Patch",
+		});
+		expect(result.isError).not.toBe(true);
+		expect(await Bun.file(target).text()).toBe("from x import (\n    B,\n)\n");
+	});
+
+	test("apply_patch rejects wrong old lines without changing any file", async () => {
+		const before = '{\n    "sha": "0123456789abcdef0123456789abcdef01234567",\n    "ref": "refs/heads/main"\n}\n';
+		await Bun.write(path.join(tempDir, "fixture.py"), before);
+		await Bun.write(path.join(tempDir, "first.txt"), "before\n");
+		const input = [
+			"*** Begin Patch",
+			"*** Update File: first.txt",
+			"@@",
+			"-before",
+			"+after",
+			"*** Update File: fixture.py",
+			"@@",
+			'-    sha="0123456789abcdef0123456789abcdef01234567",',
+			'-    ref="refs/heads/main"',
+			'+    sha="changed",',
+			'+    ref="refs/heads/next"',
+			"*** End Patch",
+		].join("\n");
+		const session = makeSession(tempDir, { "edit.fuzzyThreshold": 0.8 });
+		const result = await new EditTool(session, "apply_patch").execute("wrong-context", { input });
+		expect(result.isError).toBe(true);
+		expect(result.details).toEqual({ diff: "", errorKind: "apply" });
+		expect(await Bun.file(path.join(tempDir, "fixture.py")).text()).toBe(before);
+		expect(await Bun.file(path.join(tempDir, "first.txt")).text()).toBe("before\n");
+	});
+
 	test("apply_patch reports complete per-file update, move, and create details", async () => {
 		await Bun.write(path.join(tempDir, "update.txt"), "old\n");
 		await Bun.write(path.join(tempDir, "move.txt"), "move me\n");

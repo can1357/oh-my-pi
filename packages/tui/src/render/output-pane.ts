@@ -296,8 +296,8 @@ export class OutputPane implements Component {
 	 * *without* the pane hearing about it, and every one of them shapes the
 	 * content:
 	 *
-	 * - `width` — the wrapping width, which feeds the visual cap as well as
-	 *   the inner `Text` render.
+	 * - `contentWidth` — the wrapping width that feeds the visual cap as well
+	 *   as the inner `Text` render: `width` minus both horizontal paddings.
 	 * - `widthConfigEpoch` — the width-affecting runtime configuration (the
 	 *   Hangul compatibility-Jamo width), which `visibleWidth` — and so the
 	 *   visual cap — depends on.
@@ -317,7 +317,7 @@ export class OutputPane implements Component {
 	render(width: number): readonly string[] {
 		const paddingX = getPaddingX(this.#options.paddingX ?? 0);
 		const contentWidth = Math.max(1, width - paddingX * 2);
-		const content = this.#memo.get([...this.#renderDeps(), width], () => {
+		const content = this.#memo.get([...this.#renderDeps(), contentWidth], () => {
 			const formatted = formatOutputPaneLines(
 				{
 					...this.#options,

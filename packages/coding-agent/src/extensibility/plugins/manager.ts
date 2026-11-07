@@ -77,12 +77,10 @@ function validateGitSpec(spec: string): void {
 }
 
 function gitInstallSpec(original: string, source: GitSource): string {
-	// bun resolves GitHub specs natively (shorthand → tarball, inline-credential
-	// URLs → git clone with those credentials); forward them untouched.
-	if (source.host === "github.com") {
-		return original;
-	}
 	const withRef = !source.ref || source.repo.includes("#") ? source.repo : `${source.repo}#${source.ref}`;
+	// bun accepts GitHub shorthands and URLs verbatim, but reads pi's `git:`
+	// prefix as a host named "git"; only that form takes the parsed URL.
+	if (source.host === "github.com") return /^git:(?!\/\/)/i.test(original) ? withRef : original;
 	if (/^(https?|ssh):\/\//i.test(withRef) && !/^git\+/i.test(withRef)) {
 		// bun auto-detects git only for GitHub-hosted URLs — prefix `git+` so any
 		// git host is cloned via git instead of being misread as an npm tarball
@@ -492,6 +490,7 @@ export class PluginManager {
 	 * - npm specs: `pkg`, `pkg@1.2.3`, `@scope/pkg`, `pkg[features]`
 	 * - namespaced git shorthand: `github:user/repo[#ref]`, `gitlab:`, `bitbucket:`,
 	 *   `codeberg:`, `sourcehut:`/`srht:`
+	 * - pi-style git shorthand: `git:github.com/user/repo`, `git:git@github.com:user/repo`
 	 * - full git URLs: `https://github.com/user/repo`, `git@github.com:user/repo`,
 	 *   `ssh://…`, `git+https://…`
 	 *
@@ -512,8 +511,6 @@ export class PluginManager {
 			validatePackageName(spec.packageName);
 		}
 
-		await this.#ensurePackageJson();
-
 		if (options.dryRun) {
 			return {
 				name: spec.packageName,
@@ -524,6 +521,9 @@ export class PluginManager {
 				enabled: true,
 			};
 		}
+
+		await this.#ensurePackageJson();
+
 		const pkgJsonPath = getPluginsPackageJson();
 		const packageJsonBefore = await Bun.file(pkgJsonPath).text();
 		// Snapshot bun's lockfile so the rollback path can restore the pin. Every
@@ -740,19 +740,7 @@ export class PluginManager {
 	 * `bun.lock` resolution.
 	 */
 	async upgrade(name: string): Promise<{ from: string | undefined; plugin: InstalledPlugin; changed: boolean }> {
-		validatePackageName(name);
-		const deps = await this.#readDeps(getPluginsPackageJson());
-		const config = await this.#ensureConfigLoaded();
-		const recorded = deps[name];
-		if (recorded === undefined) {
-			if (config.plugins[name]) {
-				throw new Error(`${name} is linked from a local path; there is nothing to upgrade`);
-			}
-			throw new Error(`${name} is not installed`);
-		}
-		if (/^(file|link|workspace|portal):/i.test(recorded)) {
-			throw new Error(`${name} is installed from a local path (${recorded}); there is nothing to upgrade`);
-		}
+		const { recorded, config } = await this.#resolveUpgradeSource(name);
 
 		const previous = config.plugins[name];
 		let from = previous?.version;
@@ -774,6 +762,28 @@ export class PluginManager {
 		const resolutionAfter = await readBunLockResolution(name);
 		const changed = from !== plugin.version || resolutionBefore !== resolutionAfter;
 		return { from, plugin, changed };
+	}
+
+	/** Throws the error `upgrade(name)` would throw before it changes anything (unknown, linked or local plugin). */
+	async validateUpgrade(name: string): Promise<void> {
+		await this.#resolveUpgradeSource(name);
+	}
+
+	async #resolveUpgradeSource(name: string): Promise<{ recorded: string; config: PluginRuntimeConfig }> {
+		validatePackageName(name);
+		const deps = await this.#readDeps(getPluginsPackageJson());
+		const config = await this.#ensureConfigLoaded();
+		const recorded = deps[name];
+		if (recorded === undefined) {
+			if (config.plugins[name]) {
+				throw new Error(`${name} is linked from a local path; there is nothing to upgrade`);
+			}
+			throw new Error(`${name} is not installed`);
+		}
+		if (/^(file|link|workspace|portal):/i.test(recorded)) {
+			throw new Error(`${name} is installed from a local path (${recorded}); there is nothing to upgrade`);
+		}
+		return { recorded, config };
 	}
 
 	/**

@@ -4,11 +4,11 @@ import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { splitPathAndSel, isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
 import {
+	expandTilde,
 	hasFsCode,
 	isEnoent,
 	isEnotdir,
@@ -104,17 +104,7 @@ function stripFileUrl(filePath: string): string {
 	}
 }
 
-export function expandTilde(filePath: string, home?: string): string {
-	const h = home ?? os.homedir();
-	if (filePath === "~") return h;
-	if (filePath.startsWith("~/") || filePath.startsWith("~\\")) {
-		return h + filePath.slice(1);
-	}
-	if (filePath.startsWith("~")) {
-		return path.join(h, filePath.slice(1));
-	}
-	return filePath;
-}
+export { expandTilde };
 
 export function expandPath(filePath: string): string {
 	// Some models intermittently prefix an otherwise-valid path with a stray
@@ -822,6 +812,8 @@ export interface ParsedFindPattern {
 	basePath: string;
 	globPattern: string;
 	hasGlob: boolean;
+	/** A trailing separator restricts glob matches to directories. */
+	directoryOnly?: boolean;
 }
 
 export interface ResolvedSearchTarget {
@@ -842,6 +834,7 @@ export interface ResolvedFindTarget {
 	basePath: string;
 	globPattern: string;
 	hasGlob: boolean;
+	directoryOnly?: boolean;
 }
 
 export interface ResolvedMultiFindPattern {
@@ -938,6 +931,12 @@ export async function parseSearchPathPreferringLiteral(filePath: string, cwd: st
 	}
 }
 
+function globFindPattern(basePath: string, globPattern: string): ParsedFindPattern {
+	return globPattern.endsWith("/")
+		? { basePath, globPattern: globPattern.replace(/\/+$/, ""), hasGlob: true, directoryOnly: true }
+		: { basePath, globPattern, hasGlob: true };
+}
+
 // Parse a find pattern into a base directory path and a glob pattern.
 // Examples:
 //   src/app/**/\*.tsx -> { basePath: "src/app", globPattern: "**/*.tsx", hasGlob: true }
@@ -952,7 +951,7 @@ export function parseFindPattern(pattern: string): ParsedFindPattern {
 		// A URL names its root explicitly, so its glob stays anchored there like `dir/*`.
 		return urlPath.glob === undefined
 			? { basePath: urlPath.basePath, globPattern: "**/*", hasGlob: false }
-			: { basePath: urlPath.basePath, globPattern: urlPath.glob, hasGlob: true };
+			: globFindPattern(urlPath.basePath, urlPath.glob);
 	}
 	const normalizedPattern = normalizePathSeparators(pattern);
 	const segments = normalizedPattern.split("/");
@@ -964,18 +963,10 @@ export function parseFindPattern(pattern: string): ParsedFindPattern {
 
 	if (firstGlobIndex === 0) {
 		const needsRecursive = !normalizedPattern.startsWith("**/");
-		return {
-			basePath: ".",
-			globPattern: needsRecursive ? `**/${normalizedPattern}` : normalizedPattern,
-			hasGlob: true,
-		};
+		return globFindPattern(".", needsRecursive ? `**/${normalizedPattern}` : normalizedPattern);
 	}
 
-	return {
-		basePath: segments.slice(0, firstGlobIndex).join("/"),
-		globPattern: segments.slice(firstGlobIndex).join("/"),
-		hasGlob: true,
-	};
+	return globFindPattern(segments.slice(0, firstGlobIndex).join("/"), segments.slice(firstGlobIndex).join("/"));
 }
 
 export function combineSearchGlobs(prefixGlob?: string, suffixGlob?: string): string | undefined {
@@ -1162,6 +1153,7 @@ async function resolveFindPatternItems(
 			basePath: resolveSearchBase(parsedPattern.basePath, cwd),
 			globPattern: parsedPattern.globPattern,
 			hasGlob: parsedPattern.hasGlob,
+			directoryOnly: parsedPattern.directoryOnly,
 		};
 	});
 

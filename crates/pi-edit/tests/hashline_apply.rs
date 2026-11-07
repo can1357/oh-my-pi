@@ -358,6 +358,58 @@ fn refuses_a_too_short_echo_a_dropped_copy_exposed() {
 	}
 }
 
+/// A body that restates the line above its range, fills the range, and adds
+/// a new line equal to that neighbour: a `break;` above a new `case`, a second
+/// `@property`, a second `#[test]` on a one-row range. Dropping the echo keeps
+/// no range row, so the new copy is content the body asks for, not a
+/// duplicate: the edit applies. It was refused as holding "one more copy" of
+/// the neighbour.
+#[test]
+fn applies_a_dropped_echo_whose_body_adds_a_new_copy_of_the_neighbour() {
+	// (path, file, start, end, body, expected)
+	type Case<'a> = (&'a str, &'a str, u32, u32, &'a [&'a str], &'a str);
+	let cases: [Case; 3] = [
+		(
+			"s.ts",
+			"switch (x) {\n\tcase 1:\n\t\ta();\n\t\tbreak;\n\tdefault:\n\t\tb();\n}\n",
+			5,
+			6,
+			&["\t\tbreak;", "\tcase 2:", "\t\tc();", "\t\tbreak;", "\tdefault:", "\t\tb();"],
+			"switch (x) {\n\tcase 1:\n\t\ta();\n\t\tbreak;\n\tcase \
+			 2:\n\t\tc();\n\t\tbreak;\n\tdefault:\n\t\tb();\n}\n",
+		),
+		(
+			"c.py",
+			"class C:\n    @property\n    def a(self):\n        return 1\n",
+			3,
+			4,
+			&[
+				"    @property",
+				"    def a(self):",
+				"        return 2",
+				"",
+				"    @property",
+				"    def b(self):",
+				"        return 3",
+			],
+			"class C:\n    @property\n    def a(self):\n        return 2\n\n    @property\n    def \
+			 b(self):\n        return 3\n",
+		),
+		(
+			"t.rs",
+			"#[test]\nfn a() {}\n",
+			2,
+			2,
+			&["#[test]", "fn a() { x(); }", "", "#[test]", "fn b() {}"],
+			"#[test]\nfn a() { x(); }\n\n#[test]\nfn b() {}\n",
+		),
+	];
+	for (path, file, start, end, body, expected) in cases {
+		let result = apply(file, &replacement(start, end, body, 1), Some(path));
+		assert_eq!(result.text, expected, "{path}");
+	}
+}
+
 #[test]
 fn drops_a_trailing_attribute_echo_in_a_single_line_replacement() {
 	let file = "/// Old summary.\n#[napi]\npub fn f() {}";
@@ -519,6 +571,16 @@ fn syntax_helpers_use_pi_ast() {
 	assert!(parses_cleanly(Some("x.rs"), &lines.join("\n")));
 	assert!(!parses_cleanly(Some("x.rs"), "fn broken("));
 	assert!(!parses_cleanly(None, "fn f() {}"));
+}
+
+#[test]
+fn markdown_edits_never_warn_of_a_syntax_error() {
+	// tree-sitter-md marks a GFM table row with an empty `||` cell as an
+	// `ERROR`, yet every input is valid Markdown.
+	let file = "# Results\n\n| case | before | after |\n|---|---|---|\n| a | 1 | 2 |\n";
+	let result = apply(file, &[insert_after(5, "| b |||", 1)], Some("notes.md"));
+	assert_eq!(result.text, format!("{file}| b |||\n"));
+	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 }
 
 #[test]

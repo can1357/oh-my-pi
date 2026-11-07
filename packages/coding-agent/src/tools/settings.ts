@@ -1,6 +1,7 @@
 import { combine, register } from "../config/registry";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgBashEnabled } from "../exec/settings";
+import { cfgEditMode } from "../edit/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
 import { cfgIdaAvailable } from "../ida/install";
@@ -346,6 +347,28 @@ export const cfgToolsApprovalMode = register({
 					"Auto-approve read, write, and exec tools. User policy can still require confirmation or block calls.",
 			},
 		],
+	},
+});
+
+// Folders where every action asks, in every approval mode and whatever was remembered.
+export const cfgToolsRestrictedFolders = register({
+	id: "tools.restrictedFolders",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	ui: {
+		tab: "interaction",
+		group: "Approvals",
+		label: "Restricted Folders",
+		editor: "json",
+		description:
+			'Folders where every read, write, edit, search, or command needs an explicit approval, whatever the approval mode or a remembered grant. The folder and everything under it is restricted; commands are matched by the directory they run in. A JSON list of paths, e.g. ["~/secrets"].',
+		condition: "restrictedFoldersNotProject",
+	},
+	validate: raw => {
+		if (raw === undefined) return;
+		if (!Array.isArray(raw) || raw.some(entry => typeof entry !== "string" || entry.trim().length === 0)) {
+			throw new Error("tools.restrictedFolders must be a list of folder paths");
+		}
 	},
 });
 
@@ -845,6 +868,19 @@ export const cfgAskEnabled = register({
 	},
 });
 
+export const cfgOutEnabled = register({
+	id: "out.enabled",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Out",
+		description:
+			"Let the agent reply mid-task by writing to out://, shown like a response without ending its turn. Unset: on in the interactive TUI, off in print, RPC, and ACP",
+	},
+});
+
 // Tool execution
 export const cfgToolsIntentTracing = register({
 	id: "tools.intentTracing",
@@ -970,7 +1006,7 @@ export const cfgAsyncWidgets = register({
 		group: "Execution",
 		label: "Live Job Widgets",
 		description:
-			"Draw a live widget for each running background job (charts, bars, status grids derived from its output) in the wait card, the jobs pill and the jobs sheet. The `widget` model role (default: `smol`) writes one spec per job; updates need no further model calls",
+			"Draw a live widget for each running background job (charts, bars, status grids derived from its output) in the wait card, the jobs pill and the jobs sheet, and caption long shell commands with one line on what they do. The `widget` model role (default: `smol`) writes one spec and at most one caption per job; updates need no further model calls",
 	},
 });
 
@@ -1020,6 +1056,19 @@ export const cfgToolsXdevInlineDevices = register({
 		label: "xd:// Inline Devices",
 		description:
 			"When xd:// Prompt Docs is Built-ins Only, inline dynamic devices whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only ignores this setting.",
+	},
+});
+
+export const cfgToolsXdevNotices = register({
+	id: "tools.xdevNotices",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Discovery & MCP",
+		label: "xd:// Mount Notices",
+		description:
+			"Show an `xd://: mounted …` notice when MCP or extension tools are mounted or unmounted. The model still learns of the change with its next prompt.",
 	},
 });
 
@@ -1087,6 +1136,7 @@ export const cfgBuiltinToolGates = combine({
 	checkpoint: cfgCheckpointEnabled,
 	contextManagement: cfgCompactionExperimentalContextManagement,
 	debug: cfgDebugEnabled,
+	editMode: cfgEditMode,
 	evalJs: cfgEvalJs,
 	evalPy: cfgEvalPy,
 	find: cfgFindEnabled,

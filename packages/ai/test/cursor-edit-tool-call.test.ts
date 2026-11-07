@@ -9,6 +9,7 @@ import {
 	processInteractionUpdate,
 	type ToolCallState,
 } from "@oh-my-pi/pi-ai/providers/cursor";
+import { CursorExecOrder } from "@oh-my-pi/pi-ai/providers/cursor/exec-order";
 import type {
 	AssistantMessage,
 	CursorExecHandlers,
@@ -25,6 +26,7 @@ import {
 	EditToolCallSchema,
 	ExecServerMessageSchema,
 	ReadArgsSchema,
+	ShellArgsSchema,
 	ToolCallSchema,
 	WriteArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
@@ -563,5 +565,180 @@ describe("cursor native editToolCall (StrReplace)", () => {
 		);
 
 		expect(readPaths).toEqual([`${TARGET}:raw:2+1`]);
+	});
+});
+
+describe("cursor exec frames keep tool-batch order", () => {
+	function execShell(toolCallId: string, command: string) {
+		return create(AgentServerMessageSchema, {
+			message: {
+				case: "execServerMessage",
+				value: create(ExecServerMessageSchema, {
+					id: 2,
+					execId: `exec-${toolCallId}`,
+					message: { case: "shellArgs", value: create(ShellArgsSchema, { toolCallId, command }) },
+				}),
+			},
+		});
+	}
+
+	function toolResult(toolCallId: string, toolName: string): ToolResultMessage {
+		return {
+			role: "toolResult",
+			toolCallId,
+			toolName,
+			content: [{ type: "text", text: "ok" }],
+			isError: false,
+			timestamp: 1,
+		};
+	}
+
+	function setup(execHandlers: CursorExecHandlers) {
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState(result => result);
+		state.execOrder = new CursorExecOrder();
+		const { h2Request } = mockH2();
+		const dispatch = (msg: ReturnType<typeof execShell>) =>
+			handleServerMessage(
+				msg,
+				output,
+				stream,
+				state,
+				new Map(),
+				h2Request,
+				execHandlers,
+				result => result,
+				{
+					sawTokenDelta: false,
+				},
+				[],
+			);
+		return { output, stream, state, dispatch };
+	}
+
+	it("runs a call issued after a StrReplace against the written file", async () => {
+		const log: string[] = [];
+		const { output, stream, state, dispatch } = setup({
+			async read(args) {
+				log.push("read");
+				return toolResult(args.toolCallId, "read");
+			},
+			async write(args) {
+				log.push("write");
+				await Bun.sleep(5);
+				log.push("written");
+				return toolResult(args.toolCallId, "write");
+			},
+			async shell(args) {
+				log.push("shell");
+				return toolResult(args.toolCallId, "bash");
+			},
+		});
+
+		startEdit(output, stream, state);
+		const read = dispatch(execRead({ path: TARGET, toolCallId: EDIT_ID }));
+		const shell = dispatch(execShell("call-shell", "luac -p note.txt"));
+		await read;
+		expect(log).toEqual(["read"]);
+
+		await Promise.all([dispatch(execWrite({ path: TARGET, toolCallId: EDIT_ID, fileText: "orange\n" })), shell]);
+		expect(log).toEqual(["read", "write", "written", "shell"]);
+	});
+
+	it("reads a StrReplace's file only after a call issued before it finished", async () => {
+		const log: string[] = [];
+		const { promise: shellGate, resolve: openShell } = Promise.withResolvers<void>();
+		const { output, stream, state, dispatch } = setup({
+			async read(args) {
+				log.push("read");
+				return toolResult(args.toolCallId, "read");
+			},
+			async shell(args) {
+				log.push("shell");
+				await shellGate;
+				log.push("shell done");
+				return toolResult(args.toolCallId, "bash");
+			},
+		});
+
+		const shell = dispatch(execShell("call-shell", "sed -i s/apple/orange/ note.txt"));
+		startEdit(output, stream, state);
+		const read = dispatch(execRead({ path: TARGET, toolCallId: EDIT_ID }));
+		await Bun.sleep(5);
+		expect(log).toEqual(["shell"]);
+
+		openShell();
+		await Promise.all([shell, read]);
+		expect(log).toEqual(["shell", "shell done", "read"]);
+	});
+
+	it("drops the calls still waiting behind a StrReplace when the run ends", async () => {
+		const log: string[] = [];
+		const { output, stream, state, dispatch } = setup({
+			async read(args) {
+				log.push("read");
+				return toolResult(args.toolCallId, "read");
+			},
+			async shell(args) {
+				log.push("shell");
+				return toolResult(args.toolCallId, "bash");
+			},
+		});
+
+		startEdit(output, stream, state);
+		await dispatch(execRead({ path: TARGET, toolCallId: EDIT_ID }));
+		const shell = dispatch(execShell("call-shell", "cat note.txt"));
+		state.execOrder?.close();
+		await shell;
+
+		expect(log).toEqual(["read"]);
+		expect(output.content.filter(block => block.type === "toolCall").map(block => block.name)).toEqual(["edit"]);
+	});
+
+	it("releases the calls behind a StrReplace the server completes without writing", async () => {
+		const log: string[] = [];
+		const { output, stream, state, dispatch } = setup({
+			async read(args) {
+				log.push("read");
+				return toolResult(args.toolCallId, "read");
+			},
+			async shell(args) {
+				log.push("shell");
+				return toolResult(args.toolCallId, "bash");
+			},
+		});
+
+		startEdit(output, stream, state);
+		await dispatch(execRead({ path: TARGET, toolCallId: EDIT_ID }));
+		const shell = dispatch(execShell("call-shell", "cat note.txt"));
+		await Bun.sleep(5);
+		expect(log).toEqual(["read"]);
+
+		const failed = create(ToolCallSchema, {
+			toolCallId: EDIT_ID,
+			tool: {
+				case: "editToolCall",
+				value: create(EditToolCallSchema, {
+					args: { path: TARGET, streamContent: "orange" },
+					result: create(EditResultSchema, {
+						result: {
+							case: "error",
+							value: create(EditErrorSchema, { path: TARGET, error: "old_string not found" }),
+						},
+					}),
+				}),
+			},
+		});
+		processInteractionUpdate(
+			{ message: { case: "toolCallCompleted", value: { callId: ENVELOPE_ID, toolCall: failed } } },
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+		await shell;
+
+		expect(log).toEqual(["read", "shell"]);
 	});
 });

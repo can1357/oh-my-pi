@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { type EditStore, type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
+import { type EditStore, type GrepMatch, GrepOutputMode, type GrepResult } from "@oh-my-pi/pi-natives";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
@@ -17,6 +17,7 @@ import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
+import { grep } from "../ovnfs/search";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import {
 	DEFAULT_MAX_BYTES,
@@ -52,6 +53,7 @@ import {
 	splitPathAndSelPreferringLiteral,
 	splitPathAndSelPreferringLiteralSync,
 } from "./path-utils";
+import { RACY_STAMP_WINDOW_MS } from "./racy-stamp";
 import {
 	APPROVAL_ROOT_DELIMITERS,
 	approvalRootCandidates,
@@ -66,7 +68,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
 import { cfgGrepContextAfter, cfgGrepContextBefore } from "./settings";
-import { cfgTaskDisabledAgents } from "../task/settings";
+import { cfgTaskDisabledAgents, ovnfsCommand } from "../task/settings";
 
 const searchSchema = type({
 	pattern: type("string"),
@@ -389,12 +391,6 @@ interface SnapshotStamp {
 }
 
 const SNAPSHOT_STAMP_MAX = 256;
-/**
- * Stats younger than this are never memoized (git's racy-clean rule): on
- * coarse-timestamp filesystems a same-size rewrite inside one timestamp
- * granule leaves the stamp unchanged.
- */
-const RACY_STAMP_WINDOW_NS = 2_000_000_000n;
 const snapshotStampsByStore = new WeakMap<EditStore, LRUCache<string, SnapshotStamp>>();
 
 /**
@@ -429,7 +425,7 @@ async function recordSnapshotTags(store: EditStore, snapshotPaths: readonly stri
 		}
 		const tag = store.recordSnapshotFile(filePath);
 		const changedNs = st.mtimeNs > st.ctimeNs ? st.mtimeNs : st.ctimeNs;
-		if (tag && BigInt(Date.now()) * 1_000_000n - changedNs >= RACY_STAMP_WINDOW_NS) {
+		if (tag && BigInt(Date.now() - RACY_STAMP_WINDOW_MS) * 1_000_000n >= changedNs) {
 			stamps.set(filePath, { size: st.size, mtimeNs: st.mtimeNs, ctimeNs: st.ctimeNs, ino: st.ino, tag });
 		} else {
 			stamps.delete(filePath);
@@ -732,6 +728,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const normalizedContextAfter = this.#contextAfterOverride ?? cfgGrepContextAfter.get(this.session.settings);
 				const ignoreCase = !(caseSensitive ?? true);
 				const useGitignore = gitignore ?? true;
+				const ovnfs = ovnfsCommand(this.session.settings);
 				const patternHasNewline = normalizedPattern.includes("\n") || normalizedPattern.includes("\\n");
 				const effectiveMultiline = patternHasNewline;
 
@@ -863,6 +860,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 									filesystem,
 								},
 								undefined,
+								ovnfs,
 							);
 							skippedOversizedCount += targetResult.skippedOversized ?? 0;
 							limitReached = limitReached || Boolean(targetResult.limitReached);
@@ -913,6 +911,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								filesystem,
 							},
 							undefined,
+							ovnfs,
 						);
 						skippedOversizedCount = result.skippedOversized ?? 0;
 						totalCapReached = result.matches.length >= nativeMaxCount;

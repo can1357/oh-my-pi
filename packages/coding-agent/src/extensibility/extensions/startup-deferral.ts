@@ -5,19 +5,23 @@
  * Only a previous load can tell whether an extension's factory registers state
  * that must exist before the first frame: model providers (startup model
  * resolution), keyboard shortcuts (bound once at editor setup), composer shapes
- * (installed at UI init), or file-mutation fallbacks (installed at runner
- * init). Each load records that verdict in agent.db, keyed by the module's
- * resolved path and fingerprinted by its size and mtime. A source with no
- * verdict for its current fingerprint loads eagerly and records one, so a
- * changed module is never deferred on stale knowledge.
+ * (installed at UI init), file-mutation fallbacks (installed at runner init), or
+ * custom message renderers, assistant reply renderers and link schemes (the
+ * first frame replays the transcript with them, and the schemes reach the
+ * markdown renderer at UI init). Each load records that verdict in agent.db,
+ * keyed by the module's resolved path and fingerprinted by its size and mtime.
+ * A source with no verdict for its current fingerprint loads eagerly and
+ * records one, so a changed module is never deferred on stale knowledge.
  */
 import * as fs from "node:fs/promises";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
-import type { AgentStorage } from "../../session/agent-storage";
+import type { AgentStorageApi } from "../../session/agent-storage";
 import { resolvePath } from "../utils";
 import type { Extension } from "./types";
 
-const CACHE_PREFIX = "extension_startup:v1:";
+// Bumped whenever canBindAfterStartup counts a new registration, so verdicts recorded without it
+// are not trusted.
+const CACHE_PREFIX = "extension_startup:v2:";
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface StartupVerdict {
@@ -40,7 +44,7 @@ async function fingerprintSource(resolvedPath: string): Promise<string | undefin
 	}
 }
 
-function readVerdict(storage: AgentStorage, resolvedPath: string): StartupVerdict | undefined {
+function readVerdict(storage: AgentStorageApi, resolvedPath: string): StartupVerdict | undefined {
 	const raw = storage.getCache(`${CACHE_PREFIX}${resolvedPath}`);
 	if (!raw) return undefined;
 	try {
@@ -61,7 +65,11 @@ export function canBindAfterStartup(extension: Extension): boolean {
 		extension.shortcuts.size === 0 &&
 		extension.composerShapes.size === 0 &&
 		extension.fileWriteFallbackHandlers.length === 0 &&
-		extension.fileDeleteFallbackHandlers.length === 0
+		extension.fileDeleteFallbackHandlers.length === 0 &&
+		extension.assistantTextRenderers.length === 0 &&
+		extension.assistantThinkingRenderers.length === 0 &&
+		extension.linkSchemes.length === 0 &&
+		extension.messageRenderers.size === 0
 	);
 }
 
@@ -71,7 +79,7 @@ export function canBindAfterStartup(extension: Extension): boolean {
  * Order within each list follows `paths`.
  */
 export async function partitionStartupExtensions(
-	storage: AgentStorage,
+	storage: AgentStorageApi,
 	paths: readonly string[],
 	cwd: string,
 ): Promise<StartupExtensionPartition> {
@@ -94,7 +102,7 @@ export async function partitionStartupExtensions(
  * Record each freshly bound file-backed extension's startup verdict. Call right
  * after binding: registrations made later (session_start) never affect startup.
  */
-export async function recordStartupVerdicts(storage: AgentStorage, extensions: readonly Extension[]): Promise<void> {
+export async function recordStartupVerdicts(storage: AgentStorageApi, extensions: readonly Extension[]): Promise<void> {
 	const expiresAtSec = Math.floor((Date.now() + CACHE_TTL_MS) / 1000);
 	await Promise.all(
 		extensions.map(async extension => {

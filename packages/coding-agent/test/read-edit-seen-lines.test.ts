@@ -86,3 +86,42 @@ describe("read → edit seen-line guard under default settings", () => {
 		expect(await Bun.file(file).text()).toBe(SOURCE.replace("0.230", "0.240"));
 	});
 });
+
+// Regression: an edit under a stale tag went through snapshot recovery without
+// the seen-line check, so after one edit changed the file, a header copied
+// from the earlier read anchored lines that read never displayed.
+describe("read → edit seen-line guard under a stale tag", () => {
+	let cwd: string;
+	let file: string;
+	const LINES = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`);
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stale-seen-"));
+		file = path.join(cwd, "list.txt");
+		await Bun.write(file, `${LINES.join("\n")}\n`);
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("reveals a line the earlier read never displayed, then applies the retry", async () => {
+		const session = createSession(cwd);
+		const header = textOutput(await new ReadTool(session).execute("read", { path: "list.txt:18-22" })).split("\n")[0];
+		expect(header).toMatch(/^\[list\.txt#[0-9A-F]{4}\]$/);
+		const edit = new EditTool(session, "hashline");
+		await edit.execute("edit-1", { input: `${header}\nPUT 20.=20:\n+LINE TWENTY\n` });
+		const afterFirst = await Bun.file(file).text();
+		expect(afterFirst).toContain("LINE TWENTY");
+
+		// The header now names a stale version, whose read showed lines 18-22.
+		const stale = `${header}\nPUT 3.=3:\n+LINE THREE\n`;
+		const refused = await edit.execute("edit-2", { input: stale });
+		expect(textOutput(refused)).toContain("never displayed");
+		expect(textOutput(refused)).toContain("3:line 3");
+		expect(await Bun.file(file).text()).toBe(afterFirst);
+
+		await edit.execute("edit-3", { input: stale });
+		expect(await Bun.file(file).text()).toBe(afterFirst.replace("line 3\n", "LINE THREE\n"));
+	});
+});

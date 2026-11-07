@@ -393,6 +393,38 @@ describe("LSP diagnostics freshness", () => {
 		expect(await Bun.file(filePath).text()).toBe("export const value = 1;\n");
 	});
 
+	it("does not report a formatted write as clean when its diagnostics server never answered", async () => {
+		const filePath = path.join(tempDir.path(), "formatted.ts");
+		const uri = fileToUri(filePath);
+		const client = createClient(tempDir.path(), TEST_SERVER);
+		client.serverCapabilities = { documentFormattingProvider: true };
+		installVirtualTime(new VirtualClock(Date.now()));
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
+		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+		vi.spyOn(lspClient, "sendRequest").mockResolvedValue([
+			{
+				range: { start: { line: 0, character: 0 }, end: { line: 1, character: 0 } },
+				newText: "export const value = 1;\n",
+			},
+		]);
+		vi.spyOn(lspClient, "syncContent").mockImplementation(async mockClient => {
+			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
+		});
+		// The server formats the file but never publishes diagnostics for it.
+		vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: true,
+		});
+		const result = await writethrough(filePath, "export const value=1\n");
+
+		expect(result?.diagnostics?.formatter).toBe(FileFormatResult.FORMATTED);
+		expect(result?.diagnostics?.summary).not.toBe("OK");
+	});
+
 	it("announces batched sibling writes before syncing the diagnostic target", async () => {
 		const stylesPath = path.join(tempDir.path(), "probe.module.scss");
 		const tsPath = path.join(tempDir.path(), "probe.tsx");

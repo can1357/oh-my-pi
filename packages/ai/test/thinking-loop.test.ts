@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { clearCustomApis, registerCustomApi } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -10,8 +10,8 @@ import { wrapLeakedThinkingStream } from "@oh-my-pi/pi-ai/utils/leaked-thinking-
 import {
 	GEMINI_HEADER_RUNAWAY_THRESHOLD,
 	GeminiHeaderRunDetector,
-	isLoopGuardedModel,
 	isReasoningSummaryHeader,
+	loopGuardLevel,
 	THINKING_LOOP_ERROR_MARKER,
 	ThinkingLoopDetector,
 	withThinkingLoopGuard,
@@ -355,6 +355,16 @@ describe("ThinkingLoopDetector", () => {
 		expect(feed(`${vrmlDraft(8)}${loop}`)).toBe(detail);
 	});
 
+	test("does not trip on a summarizer repeating one status line", () => {
+		// Claude's summarized thinking restated this line seven times back to back
+		// while hidden reasoning ran; the short-stutter floor misread it as a loop.
+		const lead = "The helper goes in `tools/browser/tern/user-page.ts` beside the dock code.\n\n";
+		const status = "Still writing the Tern page helper...\n\n";
+		expect(feed(`${lead}${status.repeat(20)}`, 9)).toBeNull();
+		// Whole-line repetition still trips once it covers the long-cycle floor.
+		expect(feed(`${lead}${status.repeat(40)}`, 9)).toContain("back-to-back");
+	});
+
 	test("does not trip on short requested repetitive text", () => {
 		// Below the repeated-char floor: a brief on-purpose repeat is not a loop.
 		const detector = new ThinkingLoopDetector();
@@ -442,6 +452,23 @@ describe("thinking-loop guard (stream wrapper)", () => {
 			expect(events.some(e => e.type === "thinking_end")).toBe(false);
 			expect(events.some(e => e.type === "done")).toBe(false);
 			if (terminal?.type === "error") expect(terminal.error.content).toEqual([]);
+		} finally {
+			clearCustomApis();
+		}
+	});
+
+	test("passes a Claude stream through untouched even with an exact cycle", async () => {
+		registerMockApi();
+		try {
+			const mock = createMockModel({ provider: "anthropic", id: "claude-opus-5-5" });
+			// Trips the exact-cycle check at the default level (see the verbatim
+			// back-to-back detector test).
+			mock.push({ content: [{ type: "thinking", thinking: "🌊 ".repeat(120) }] });
+
+			const result = await stream(mock.model, context()).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(result.content.some(b => b.type === "thinking")).toBe(true);
 		} finally {
 			clearCustomApis();
 		}
@@ -623,6 +650,19 @@ describe("withThinkingLoopGuard (Vertex transport)", () => {
 
 describe("thinking-loop error accounting", () => {
 	const model = createMockModel({ provider: "google-vertex", id: "gemini-2.5-pro" }).model;
+	// The guard times attempts with `Date.now()`; a virtual clock keeps these assertions independent of host load.
+	let clock = 1_700_000_000_000;
+	beforeEach(() => {
+		spyOn(Date, "now").mockImplementation(() => clock);
+	});
+	afterEach(() => {
+		mock.restore();
+	});
+	/** Lets the guard drain already-pushed events at the current time, then advances the clock. */
+	const elapse = async (ms: number): Promise<void> => {
+		await scheduler.yield();
+		clock += ms;
+	};
 	const usage = (input: number, output: number, total: number): AssistantMessage["usage"] => ({
 		input,
 		output,
@@ -651,10 +691,10 @@ describe("thinking-loop error accounting", () => {
 			const inner = new AssistantMessageEventStream();
 			void (async () => {
 				inner.push({ type: "start", partial });
-				await scheduler.wait(30);
+				await elapse(30);
 				inner.push({ type: "thinking_start", contentIndex: 0, partial });
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Checking the module.\n\n", partial });
-				await scheduler.wait(30);
+				await elapse(30);
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial });
 			})();
 			return inner;
@@ -669,8 +709,8 @@ describe("thinking-loop error accounting", () => {
 		expect(result.usage).toEqual(usage(116_000, 2_400, 0.169));
 		expect(result.timestamp).toBe(partial.timestamp);
 		expect(result.responseId).toBe("resp-looping");
-		expect(result.ttft).toBeGreaterThanOrEqual(25);
-		expect(result.duration).toBeGreaterThanOrEqual((result.ttft ?? 0) + 20);
+		expect(result.ttft).toBe(30);
+		expect(result.duration).toBe(60);
 	});
 
 	test("reports the attempt that tripped, not the time spent on an earlier retried attempt", async () => {
@@ -682,7 +722,7 @@ describe("thinking-loop error accounting", () => {
 				inner.push({ type: "start", partial: first });
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: first });
 				// A replay-safe provider retry: a fresh output after a backoff.
-				await scheduler.wait(80);
+				await elapse(80);
 				second = { ...attempt("attempt-2"), usage: usage(50_000, 100, 0.05) };
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: second });
 			})();
@@ -693,8 +733,8 @@ describe("thinking-loop error accounting", () => {
 		expect(result.responseId).toBe("attempt-2");
 		expect(result.timestamp).toBe(second?.timestamp ?? Number.NaN);
 		expect(result.usage.input).toBe(50_000);
-		expect(result.duration).toBeLessThan(60);
-		expect(result.ttft).toBeLessThan(60);
+		expect(result.duration).toBe(0);
+		expect(result.ttft).toBe(0);
 	});
 
 	test("restarts attempt timing when a provider resets its output in place for a retry", async () => {
@@ -705,11 +745,11 @@ describe("thinking-loop error accounting", () => {
 			void (async () => {
 				inner.push({ type: "start", partial: output });
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: output });
-				await scheduler.wait(80);
+				await elapse(80);
 				output.timestamp = Date.now();
 				output.responseId = "attempt-2";
 				inner.push({ type: "start", partial: output });
-				await scheduler.wait(30);
+				await elapse(30);
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: output });
 			})();
 			return inner;
@@ -717,8 +757,8 @@ describe("thinking-loop error accounting", () => {
 
 		const result = await guarded.result();
 		expect(result.responseId).toBe("attempt-2");
-		expect(result.ttft).toBeGreaterThanOrEqual(25);
-		expect(result.duration).toBeLessThan(80);
+		expect(result.ttft).toBe(30);
+		expect(result.duration).toBe(30);
 	});
 
 	test("takes the final message when the loop only shows at the end-of-stream flush", async () => {
@@ -757,7 +797,7 @@ describe("thinking-loop error accounting", () => {
 			void (async () => {
 				inner.push({ type: "start", partial: output });
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: "Reading the file.\n\n", partial: output });
-				await scheduler.wait(10);
+				await elapse(10);
 				output.usage = usage(116_000, 2_500, 0.17);
 				inner.push({ type: "thinking_delta", contentIndex: 0, delta: nearDuplicateLoop(12), partial: output });
 			})();
@@ -899,8 +939,8 @@ describe("withThinkingLoopGuard (thinking after toolcall)", () => {
 	});
 });
 
-describe("isLoopGuardedModel", () => {
-	test("guards models with Gemini, DeepSeek, and xAI structured identity", () => {
+describe("loopGuardLevel", () => {
+	test("runs semantic heuristics for Gemini, DeepSeek, and xAI structured identity", () => {
 		const gemini = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
 		const deepseek = createMockModel({ provider: "deepseek", id: "deepseek-reasoner" }).model;
 		const grok46 = createMockModel({ provider: "venice", id: "grok-4-6" }).model;
@@ -913,27 +953,43 @@ describe("isLoopGuardedModel", () => {
 		const openaiNamespacedDeepseek = createMockModel({ provider: "custom", id: "openai/deepseek-r1" }).model;
 		const openaiNamespacedGrok = createMockModel({ provider: "custom", id: "openai/grok-4.6" }).model;
 
-		expect(isLoopGuardedModel(gemini)).toBe(true);
-		expect(isLoopGuardedModel(deepseek)).toBe(true);
-		expect(isLoopGuardedModel(grok46)).toBe(true);
+		expect(loopGuardLevel(gemini)).toBe("semantic");
+		expect(loopGuardLevel(deepseek)).toBe("semantic");
+		expect(loopGuardLevel(grok46)).toBe("semantic");
 		// Cursor's wrapped per-tier Grok ids carry structured xai identity
 		// (`taxonomy/xai.kdl` cursor-grok- prefix), so the guard applies.
-		expect(isLoopGuardedModel(cursorGrok46)).toBe(true);
-		expect(isLoopGuardedModel(grok460)).toBe(true);
-		expect(isLoopGuardedModel(grok45)).toBe(true);
-		expect(isLoopGuardedModel(opaqueDeepseek)).toBe(false);
-		expect(isLoopGuardedModel(other)).toBe(false);
+		expect(loopGuardLevel(cursorGrok46)).toBe("semantic");
+		expect(loopGuardLevel(grok460)).toBe("semantic");
+		expect(loopGuardLevel(grok45)).toBe("semantic");
+		expect(loopGuardLevel(opaqueDeepseek)).toBe("exact");
+		expect(loopGuardLevel(other)).toBe("exact");
 
-		expect(isLoopGuardedModel(openaiNamespacedGemini)).toBe(true);
-		expect(isLoopGuardedModel(openaiNamespacedDeepseek)).toBe(true);
-		expect(isLoopGuardedModel(openaiNamespacedGrok)).toBe(true);
+		expect(loopGuardLevel(openaiNamespacedGemini)).toBe("semantic");
+		expect(loopGuardLevel(openaiNamespacedDeepseek)).toBe("semantic");
+		expect(loopGuardLevel(openaiNamespacedGrok)).toBe("semantic");
 		// enabled: false disables every guarded family.
-		expect(isLoopGuardedModel(gemini, { loopGuard: { enabled: false } })).toBe(false);
-		expect(isLoopGuardedModel(deepseek, { loopGuard: { enabled: false } })).toBe(false);
-		expect(isLoopGuardedModel(grok45, { loopGuard: { enabled: false } })).toBe(false);
+		expect(loopGuardLevel(gemini, { loopGuard: { enabled: false } })).toBe("off");
+		expect(loopGuardLevel(deepseek, { loopGuard: { enabled: false } })).toBe("off");
+		expect(loopGuardLevel(grok45, { loopGuard: { enabled: false } })).toBe("off");
 
-		// enabled: true does not opt unrelated models into the guard.
-		expect(isLoopGuardedModel(other, { loopGuard: { enabled: true } })).toBe(false);
+		// enabled: true does not opt unrelated models into the semantic heuristics.
+		expect(loopGuardLevel(other, { loopGuard: { enabled: true } })).toBe("exact");
+	});
+
+	test("turns the guard off for Claude on every host", () => {
+		// Claude's summarized thinking repeats one status line verbatim, which the
+		// exact-cycle check misread as a runaway and discarded whole turns.
+		for (const [provider, id] of [
+			["anthropic", "claude-opus-5-5"],
+			["anthropic", "claude-fable-5-1"],
+			["amazon-bedrock", "us.anthropic.claude-opus-5-5"],
+			["openrouter", "anthropic/claude-opus-5-5"],
+		]) {
+			expect(loopGuardLevel(createMockModel({ provider, id }).model)).toBe("off");
+		}
+		// enabled: true is the default, not an opt-in that overrides the lineage rule.
+		const claude = createMockModel({ provider: "anthropic", id: "claude-opus-5-5" }).model;
+		expect(loopGuardLevel(claude, { loopGuard: { enabled: true } })).toBe("off");
 	});
 });
 
