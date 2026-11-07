@@ -183,7 +183,7 @@ describe("subagent warning injection", () => {
 		expect(permissive.structuredOutput?.status).toBe("invalid");
 	});
 
-	it("does not inject missing-submit warning when no schema and raw text exists", () => {
+	it("marks no-yield prose as a protocol warning while preserving its success status", () => {
 		const result = finalizeSubprocessOutput({
 			rawOutput: "plain text notes",
 			exitCode: 0,
@@ -194,8 +194,8 @@ describe("subagent warning injection", () => {
 			outputSchema: undefined,
 		});
 
-		expect(result.rawOutput).toBe("plain text notes");
-		expect(result.rawOutput.includes("SYSTEM WARNING")).toBe(false);
+		expect(result.rawOutput).toBe(`${SUBAGENT_WARNING_MISSING_YIELD}\n\nplain text notes`);
+		expect(result.stderr).toBe(SUBAGENT_WARNING_MISSING_YIELD);
 		expect(result.exitCode).toBe(0);
 	});
 

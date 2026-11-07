@@ -64,8 +64,17 @@ export function formatTaskResultSummary(
 	// The preview prefers `output` over `stderr`, so a run that failed after
 	// streaming prose (provider stream error, missing yield) would otherwise
 	// show only the half-written text and no reason. Aborts carry their own
-	// <abort-reason>; an empty output already previews the error itself.
-	const error = result.exitCode !== 0 && !result.aborted && result.output.trim().length > 0 ? result.error : undefined;
+	// <abort-reason>; an empty output previews the error itself, and so does a
+	// missing-yield output, which is the warning alone or the warning and a
+	// blank line before the report.
+	const streamed = result.output.trim();
+	const errorText = result.error?.trim();
+	const outputStatesError =
+		result.missingYield !== undefined &&
+		errorText !== undefined &&
+		(streamed === errorText || streamed.startsWith(`${errorText}\n\n`));
+	const error =
+		result.exitCode !== 0 && !result.aborted && streamed.length > 0 && !outputStatesError ? result.error : undefined;
 	const outputCharCount = result.outputMeta?.charCount ?? output.length;
 	// A stopped agent stays messageable; tell the parent so it can resume via
 	// irc instead of redoing the work. Isolated runs are parked without a
@@ -76,6 +85,7 @@ export function formatTaskResultSummary(
 			agentName: result.agent,
 			id: result.id,
 			status,
+			missingYield: result.missingYield,
 			duration: formatDuration(options.totalDurationMs),
 			abortReason: result.aborted ? escapeHarnessTags(result.abortReason ?? "") || undefined : undefined,
 			error: error === undefined ? undefined : escapeHarnessTags(error),

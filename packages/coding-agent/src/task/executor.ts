@@ -13,6 +13,7 @@ import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-ag
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import type { MissingYield } from "@oh-my-pi/pi-wire";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
 	AsyncJobError,
@@ -704,6 +705,8 @@ interface FinalizeSubprocessOutputArgs {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	lastAssistantText?: string;
+	/** The structured result protocol was not submitted. */
+	missingYield?: MissingYield;
 	/** `false` = no `yield` tool: `rawOutput` is the final assistant message, returned verbatim. Default `true`. */
 	structured?: boolean;
 }
@@ -714,6 +717,7 @@ interface FinalizeSubprocessOutputResult {
 	stderr: string;
 	abortedViaYield: boolean;
 	hasYield: boolean;
+	missingYield?: MissingYield;
 	structuredOutput?: StructuredSubagentOutput;
 }
 export const SUBAGENT_WARNING_SCHEMA_OVERRIDDEN =
@@ -721,6 +725,7 @@ export const SUBAGENT_WARNING_SCHEMA_OVERRIDDEN =
 export const SUBAGENT_WARNING_NULL_YIELD = "SYSTEM WARNING: Subagent called yield with null data.";
 export const SUBAGENT_WARNING_MISSING_YIELD =
 	"SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
+export const SUBAGENT_WARNING_MISSING_YIELD_WAKE = "SYSTEM WARNING: Structured subagent replied without calling yield.";
 export const SUBAGENT_WARNING_EMPTY_MESSAGE = "SYSTEM WARNING: Subagent ended without a final message.";
 
 /** Build a schema_violation outcome — surfaced as a non-zero exit so callers treat it as a failure. */
@@ -751,11 +756,14 @@ function buildSchemaViolationOutcome(
 export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): FinalizeSubprocessOutputResult {
 	let { rawOutput, exitCode, stderr } = args;
 	const { yieldItems, doneAborted, signalAborted, outputSchema, lastAssistantText } = args;
+	const missingYieldWarning =
+		args.missingYield === "wake" ? SUBAGENT_WARNING_MISSING_YIELD_WAKE : SUBAGENT_WARNING_MISSING_YIELD;
 	const mode = args.outputSchemaMode ?? "permissive";
 	const source = args.outputSchemaSource ?? (outputSchema === undefined ? "none" : "session");
 	const includeStructuredOutput = source !== "none";
 	let structuredOutput: StructuredSubagentOutput | undefined;
 	let abortedViaYield = false;
+	let resultMissingYield: MissingYield | undefined;
 	const hasYield = Array.isArray(yieldItems) && yieldItems.length > 0;
 	const hadFailureBeforeYield = exitCode !== 0 && stderr.trim().length > 0;
 
@@ -891,19 +899,41 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 				stderr = "";
 			}
 		} else if (!hasOutputSchema && allowFallback && rawOutput.trim().length > 0) {
-			exitCode = 0;
-			stderr = "";
+			resultMissingYield = args.missingYield ?? "initial";
+			rawOutput = `${missingYieldWarning}\n\n${rawOutput}`;
+			stderr = missingYieldWarning;
 		} else if (exitCode === 0) {
 			const hasRawOutput = rawOutput.trim().length > 0;
-			rawOutput = rawOutput ? `${SUBAGENT_WARNING_MISSING_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_MISSING_YIELD;
-			if (hasOutputSchema || !hasRawOutput) {
-				exitCode = 1;
-				stderr = SUBAGENT_WARNING_MISSING_YIELD;
+			if (args.missingYield === "wake") {
+				// A parent-owned wake answers a follow-up; its yielded result is
+				// already accepted. Prose is marked but keeps the turn's status,
+				// schema or not, and a turn with no prose (an IRC-only reply) is
+				// not marked: the wake relay reports it as before.
+				if (hasRawOutput) {
+					resultMissingYield = "wake";
+					rawOutput = `${missingYieldWarning}\n\n${rawOutput}`;
+					stderr = missingYieldWarning;
+				}
+			} else {
+				resultMissingYield = "initial";
+				rawOutput = rawOutput ? `${missingYieldWarning}\n\n${rawOutput}` : missingYieldWarning;
+				if (hasOutputSchema || !hasRawOutput) {
+					exitCode = 1;
+					stderr = missingYieldWarning;
+				}
 			}
 		}
 	}
 
-	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
+	return {
+		rawOutput,
+		exitCode,
+		stderr,
+		abortedViaYield,
+		hasYield,
+		missingYield: resultMissingYield,
+		structuredOutput,
+	};
 }
 
 function formatToolArgsPreview(value: string, key: string): { value: string; key: string } {
@@ -2840,6 +2870,26 @@ async function driveSessionToResult(
 	return { exitCode, error, aborted, abortReasonText };
 }
 
+function truncateResultOutput(
+	rawOutput: string,
+	missingYield: SingleResult["missingYield"],
+): { content: string; truncated: boolean } {
+	if (!missingYield) {
+		const { content, truncated } = truncateTail(rawOutput, {
+			maxBytes: MAX_OUTPUT_BYTES,
+			maxLines: MAX_OUTPUT_LINES,
+		});
+		return { content, truncated: Boolean(truncated) };
+	}
+	const warning = missingYield === "wake" ? SUBAGENT_WARNING_MISSING_YIELD_WAKE : SUBAGENT_WARNING_MISSING_YIELD;
+	const prefix = `${warning}\n\n`;
+	const { content, truncated } = truncateTail(rawOutput.slice(prefix.length), {
+		maxBytes: MAX_OUTPUT_BYTES - Buffer.byteLength(prefix),
+		maxLines: MAX_OUTPUT_LINES - 2,
+	});
+	return { content: `${prefix}${content}`, truncated: Boolean(truncated) };
+}
+
 interface FinalizeRunArgs {
 	monitor: SubagentRunMonitor;
 	done: { exitCode: number; error?: string; aborted?: boolean; abortReason?: string; durationMs: number };
@@ -2856,6 +2906,14 @@ interface FinalizeRunArgs {
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
+	/** The structured result protocol was not submitted. */
+	missingYield?: MissingYield;
+	/**
+	 * Output to finalize in place of the monitor's accumulated text. A structured
+	 * wake passes its final report turn, so narration set aside before later
+	 * tool calls never reaches the parent.
+	 */
+	rawOutput?: string;
 	signal?: AbortSignal;
 	artifactsDir?: string;
 	eventBus?: EventBus;
@@ -2888,10 +2946,10 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	let stderr = done.error ?? "";
 
 	// A structured run finalizes from its yield (falling back to the run's
-	// output); a message-result run is exactly its final report turn, never
-	// the narration of earlier turns.
+	// output, or the caller's final report turn); a message-result run is
+	// exactly its final report turn, never the narration of earlier turns.
 	const structured = args.structured !== false;
-	let rawOutput = structured ? monitor.rawOutput() : (monitor.lastReportTurnText() ?? "");
+	let rawOutput = args.rawOutput ?? (structured ? monitor.rawOutput() : (monitor.lastReportTurnText() ?? ""));
 	const yieldItems = progress.extractedToolData?.yield as YieldItem[] | undefined;
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
 	// here is attributed to this subagent rather than logged as "unknown".
@@ -2909,6 +2967,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			outputSchemaMode: args.outputSchemaMode,
 			outputSchemaSource: args.outputSchemaSource,
 			lastAssistantText: monitor.lastReportTurnText(),
+			missingYield: args.missingYield,
 			structured,
 		});
 	} finally {
@@ -2931,10 +2990,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	const lastYield = yieldItems?.[yieldItems.length - 1];
 	const yieldAbortReason = lastYield?.status === "aborted" ? lastYield.error || "Subagent aborted task" : undefined;
 	const { abortedViaYield, hasYield } = finalized;
-	const { content: truncatedOutput, truncated } = truncateTail(rawOutput, {
-		maxBytes: MAX_OUTPUT_BYTES,
-		maxLines: MAX_OUTPUT_LINES,
-	});
+	const { content: truncatedOutput, truncated } = truncateResultOutput(rawOutput, finalized.missingYield);
 
 	// Write output artifact (input and jsonl already written in real-time).
 	// Compute output metadata for agent:// URL integration.
@@ -3039,6 +3095,12 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 						: monitor.resolveAbortReasonText()
 		: undefined;
 	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
+	// The settled row carries the same protocol mark as the summary. An
+	// autonomous wake job publishes this progress record itself, with no
+	// `TaskTool` run to copy the finalized result onto a row of its own, so
+	// this is where every view of the row — terminal, native, web, exported
+	// HTML — learns that the turn skipped `yield`.
+	progress.missingYield = finalized.missingYield;
 	monitor.scheduleProgress(true);
 
 	// Emit lifecycle end event after finalization so yield status is reflected
@@ -3068,6 +3130,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		output: truncatedOutput,
 		stderr,
 		truncated: Boolean(truncated),
+		...(finalized.missingYield ? { missingYield: finalized.missingYield } : {}),
 		...(finalized.structuredOutput ? { structuredOutput: finalized.structuredOutput } : {}),
 		durationMs: Date.now() - args.startTime,
 		tokens: progress.tokens,
@@ -3157,12 +3220,13 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 
 /**
  * Hand a woken subagent's turn output to whoever woke it, when the subagent
- * did not answer them itself. A re-`yield` delivers the `<task-result>`
+ * did not answer them itself: the peers whose messages started the turn, and
+ * the parent whose steer joined it. A re-`yield` delivers the `<task-result>`
  * envelope (the artifact was just rewritten, so it carries the `agent://`
  * pointer); a plain turn delivers its final assistant text. Without this, a
- * recipients without a dedicated messaging tool can still answer a sender;
- * otherwise their re-yield silently
- * updates the artifact nobody is told to re-read.
+ * recipient without a dedicated messaging tool is never told that the turn
+ * answered it, and the subagent's re-yield silently updates an artifact
+ * nobody is asked to re-read.
  */
 async function relayWakeTurnOutput(args: {
 	id: string;
@@ -3179,24 +3243,54 @@ async function relayWakeTurnOutput(args: {
 	abortReason: string | undefined;
 	/** A {@link finalizeRunResult} throw, so the waiter is notified instead of stranded. */
 	finalizeError: unknown;
-	/** Waker already receiving this turn's outcome as an async job delivery. */
+	/**
+	 * Recipient the async job manager already hands this turn's outcome to: the
+	 * registered wake job's owner, or the owner of a message result published as
+	 * a completed job when registration was refused. It is the single
+	 * already-delivered gate — a relay on top of it is one report delivered
+	 * twice, however the recipient entered {@link wakeSources}.
+	 */
 	jobOwnerId: string | undefined;
+	/**
+	 * Parent whose steer entered this turn, making it the turn's owner. Its
+	 * request was consumed and answered here, so it is a recipient like any
+	 * waker — including when a peer started the turn, which leaves the parent
+	 * out of the wake records entirely. {@link jobOwnerId} still decides whether
+	 * it is relayed to.
+	 */
+	joinedOwnerId: string | undefined;
+	/**
+	 * Parent that owns a wake carrying the missing-yield mark. When no wake job
+	 * could carry the outcome, the parent gets the finalized summary (warning
+	 * and `missing-yield` attribute) in the relay; peers still get the turn text.
+	 */
+	markedWakeOwnerId: string | undefined;
 }): Promise<void> {
 	const bus = IrcBus.global();
 	const sources = wakeSources(args.records, args.id);
+	if (args.joinedOwnerId !== undefined && !sources.some(source => source.from === args.joinedOwnerId))
+		sources.push({ from: args.joinedOwnerId });
 	if (sources.length === 0) return;
 	const failed = wakeTurnFailed(args);
 	for (const source of sources) {
 		if (source.from === args.jobOwnerId) continue;
-		const alreadyMessaged = bus.sentSince(args.id, source.from, args.turnStartTime);
-		// A completed turn's answer would duplicate what the agent already sent
-		// this waker, so dedup stays. A failed/cancelled turn is a distinct
-		// lifecycle fact: `sentSince` cannot tell "already answered you" from
-		// "pinged you 'on it'", and suppressing the failure notice on a mere ping
-		// strands the waker exactly as before — one message later. So the failure
-		// lane always notifies, flavoured to acknowledge the earlier message.
-		if (alreadyMessaged && !failed) continue;
-		const body = buildWakeRelayBody({ ...args, alreadyMessaged });
+		let body: string;
+		if (source.from === args.markedWakeOwnerId && args.result && !failed) {
+			// A marked owner wake always gets its finalized summary, even after an
+			// interim message this turn: that message was not the report, and the
+			// relay is the parent's only way to see the `missing-yield` warning.
+			body = formatTaskResultSummary(args.result, { totalDurationMs: args.result.durationMs });
+		} else {
+			const alreadyMessaged = bus.sentSince(args.id, source.from, args.turnStartTime);
+			// A completed turn's answer would duplicate what the agent already sent
+			// this waker, so dedup stays. A failed/cancelled turn is a distinct
+			// lifecycle fact: `sentSince` cannot tell "already answered you" from
+			// "pinged you 'on it'", and suppressing the failure notice on a mere ping
+			// strands the waker exactly as before — one message later. So the failure
+			// lane always notifies, flavoured to acknowledge the earlier message.
+			if (alreadyMessaged && !failed) continue;
+			body = buildWakeRelayBody({ ...args, alreadyMessaged });
+		}
 		if (!body) continue;
 		const receipt = await bus.send({
 			from: args.id,
@@ -3477,15 +3571,19 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				// even when the run-state mirror never delivers `idle`.
 				AgentRegistry.global().markResultAccepted(id, session, turnMonitor.yieldAcceptedAt());
 			}
-			// Read before finalization: a schema-bearing agent that answered in
-			// prose gets a missing-yield warning prepended to `result.output`.
-			// Like a first run's message result, the answer is the final report
-			// turn; the session's last assistant text stands in only when the
-			// monitor saw no assistant message, never for narration it set aside.
+			// Read the final report turn before finalization. Like a first run's
+			// message result, the answer is the final report turn; the session's
+			// last assistant text stands in only when the monitor saw no assistant
+			// message, never for narration it set aside. Peers get it verbatim; a
+			// parent-owned structured wake finalizes it, so its protocol warning
+			// reaches the parent's task job without changing peer conversation.
 			const turnText =
 				turnMonitor.lastReportTurnText() ??
 				(turnMonitor.sawAssistantMessage() ? undefined : turnMonitor.lastAssistantSalvageText()) ??
 				"";
+			// The parent owns this turn when its message woke the agent or its
+			// queued steer entered the turn a peer started.
+			const parentStructuredWake = (ownerWoken || ownerPrompted) && options.structured !== false;
 			const abortReason = aborted ? turnMonitor.resolveAbortReasonText() : undefined;
 			let result: SingleResult | undefined;
 			let finalizeError: unknown;
@@ -3509,6 +3607,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					outputSchema: options.outputSchema,
 					outputSchemaMode: options.outputSchemaMode,
 					outputSchemaSource: options.outputSchemaSource,
+					missingYield: parentStructuredWake ? "wake" : undefined,
+					rawOutput: options.structured !== false ? turnText : undefined,
 					artifactsDir: options.artifactsDir,
 					eventBus: options.eventBus,
 					subagentEventBus: options.subagentEventBus,
@@ -3532,10 +3632,12 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				// enqueue its delivery without reserving an execution slot.
 				const messageResult =
 					(userPrompted || ownerPrompted) && options.structured === false && result?.outputPath !== undefined;
+				let messageResultPublished = false;
 				if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					try {
 						session.asyncJobManager.publishCompleted("task", id, { text }, { id, agentId: id, ownerId });
+						messageResultPublished = true;
 					} catch (error) {
 						logger.warn("User-resumed subagent result delivery failed", {
 							id,
@@ -3545,13 +3647,17 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				}
 				// Once registered, the wake job carries this turn's outcome to the
 				// parent whatever it is: the yield result, the failure that
-				// superseded it, or, for a turn that never yielded, the answer a
-				// relay would have carried. `agentOutputPublished` tells the
-				// delivery whether this turn wrote `<id>.md`: a turn that neither
-				// yielded nor produced a message result leaves the previous turn's
-				// output there, which `agent://<id>` must not be offered for.
+				// superseded it, or a structured parent wake's finalized
+				// missing-yield warning. A failed or cancelled parent wake that
+				// left no mark takes the relay body below, which carries the
+				// short peer error and the transcript pointer, not the stack.
+				// `agentOutputPublished` tells the delivery whether this turn
+				// wrote `<id>.md`: a turn that neither yielded nor produced a
+				// message result leaves the previous turn's output there, which
+				// `agent://<id>` must not be offered for.
 				const outputPublished = result?.outputPath !== undefined;
-				if (wakeJob && (yielded || messageResult) && result) {
+				const markedWake = parentStructuredWake && result?.missingYield !== undefined;
+				if (wakeJob && result && (yielded || messageResult || markedWake)) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					const structured = result.structuredOutput;
 					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
@@ -3595,7 +3701,19 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						aborted,
 						abortReason,
 						finalizeError,
-						jobOwnerId: wakeJob?.ownerId,
+						// The job manager already carries the outcome to the owner
+						// when the wake job registered, and equally when registration
+						// was refused at capacity and the message result went out as
+						// a completed job instead. Both leave the owner out of the
+						// relay, whether it woke the turn or only steered into it.
+						jobOwnerId: wakeJob?.ownerId ?? (messageResultPublished ? ownerId : undefined),
+						// A parent that steered a turn a peer started owns the turn
+						// but woke nothing, so no wake record names it; the relay is
+						// its only answer unless the gate above already delivered —
+						// and a marked wake hands it the finalized summary, warning
+						// included.
+						joinedOwnerId: ownerPrompted ? ownerId : undefined,
+						markedWakeOwnerId: markedWake ? ownerId : undefined,
 					});
 				} catch (relayError) {
 					logger.warn("IRC wake-turn relay threw", {

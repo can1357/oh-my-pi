@@ -17,6 +17,7 @@ import {
 	SUBAGENT_WARNING_EMPTY_MESSAGE,
 	SUBAGENT_WARNING_MISSING_YIELD,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { formatTaskResultSummary } from "@oh-my-pi/pi-coding-agent/task/result-summary";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -562,6 +563,72 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.output).toContain('"done": true');
 		expect(result.output.includes("SYSTEM WARNING")).toBe(false);
 	});
+	it("H1 preserves a structured report when reminder replies only refer to it", async () => {
+		const report = "## Review\n\nThe attestation gate has no blocking findings.";
+		const reminderReply = "See the summary above.";
+		const prompts: string[] = [];
+		const session = createMockSession(({ text, promptIndex, emit, state }) => {
+			prompts.push(text);
+			const assistant = createAssistantStopMessage(promptIndex === 1 ? report : reminderReply);
+			state.messages.push(assistant);
+			emit({ type: "message_end", message: assistant });
+		});
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-h1" });
+		const expected = `${SUBAGENT_WARNING_MISSING_YIELD}\n\n${report}${reminderReply.repeat(3)}`;
+		const summary = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+
+		expect(prompts).toHaveLength(4);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe(expected);
+		expect(result.stderr).toBe(SUBAGENT_WARNING_MISSING_YIELD);
+		expect(summary).toContain('status="completed"');
+		expect(summary).toContain(`<output>\n${expected}\n</output>`);
+	});
+
+	it("H2 warns when a structured child only says it is writing the report", async () => {
+		const status = "Everything verified; writing the report now.";
+		const reminderReply = "See the summary above.";
+		const prompts: string[] = [];
+		const session = createMockSession(({ text, promptIndex, emit, state }) => {
+			prompts.push(text);
+			const assistant = createAssistantStopMessage(promptIndex === 1 ? status : reminderReply);
+			state.messages.push(assistant);
+			emit({ type: "message_end", message: assistant });
+		});
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-h2" });
+		const expected = `${SUBAGENT_WARNING_MISSING_YIELD}\n\n${status}${reminderReply.repeat(3)}`;
+
+		expect(prompts).toHaveLength(4);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe(expected);
+		expect(result.stderr).toBe(SUBAGENT_WARNING_MISSING_YIELD);
+	});
+	it.each([
+		["line cap", "finding\n".repeat(5001)],
+		["byte cap", "x".repeat(500_001)],
+	])("keeps the missing-yield warning in a %s result", async (_kind, report) => {
+		const session = createMockSession(({ promptIndex, emit, state }) => {
+			const assistant = createAssistantStopMessage(promptIndex === 1 ? report : "See the summary above.");
+			state.messages.push(assistant);
+			emit({ type: "message_end", message: assistant });
+		});
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: `subagent-${_kind}` });
+		const summary = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.truncated).toBe(true);
+		expect(result.output.startsWith(SUBAGENT_WARNING_MISSING_YIELD)).toBe(true);
+		expect(summary).toContain(SUBAGENT_WARNING_MISSING_YIELD);
+	});
 
 	it("returns the final message verbatim, with no yield tool or reminders, when unstructured", async () => {
 		const report = "## Summary\nAuth lives in `src/auth.ts:10-40`.";
@@ -740,6 +807,51 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.output).toBe(report);
 		expect(result.output).not.toContain("SYSTEM WARNING");
 	});
+	it.each(["yielded", "unstructured"])(
+		"does not infer missing-yield provenance from a warning-looking %s report",
+		async kind => {
+			const report = `${SUBAGENT_WARNING_MISSING_YIELD}\n\n${"x".repeat(500_001)}`;
+			const session = createMockSession(({ promptIndex, emit, state }) => {
+				if (kind === "unstructured" || promptIndex === 1) {
+					const assistant = createAssistantStopMessage(report);
+					state.messages.push(assistant);
+					emit({ type: "message_end", message: assistant });
+					return;
+				}
+				const finalize: AssistantMessage = {
+					...createAssistantStopMessage(""),
+					content: [{ type: "toolCall", id: "tool-finalize", name: "yield", arguments: { type: "result" } }],
+					stopReason: "toolUse",
+				};
+				state.messages.push(finalize);
+				emit({ type: "message_end", message: finalize });
+				emit({
+					type: "tool_execution_end",
+					toolCallId: "tool-finalize",
+					toolName: "yield",
+					result: {
+						content: [{ type: "text", text: "Result submitted." }],
+						details: { status: "success", type: "result", useLastTurn: true },
+					},
+					isError: false,
+				});
+			});
+
+			mockCreateAgentSession(session);
+
+			const result = await runSubprocess({
+				...baseOptions,
+				id: `warning-looking-${kind}`,
+				...(kind === "unstructured" ? { structured: false } : {}),
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(result.stderr).toBe("");
+			expect(result.truncated).toBe(true);
+			expect(result.missingYield).toBeUndefined();
+			expect(result.output.startsWith(SUBAGENT_WARNING_MISSING_YIELD)).toBe(false);
+		},
+	);
 
 	it("never harvests mid-work narration as the final result", async () => {
 		// Counterpart to the test above: the report turn is the one that started

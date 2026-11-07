@@ -15,6 +15,7 @@ import { Markdown } from "../components/markdown";
 import { Text } from "../components/text";
 import { visibleWidth, wrapTextWithAnsi } from "../utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { type MissingYield, splitMissingYieldWarning } from "@oh-my-pi/pi-wire";
 import type { RenderResultOptions } from "./renderer";
 import { formatAgentStatRun, renderAgentTreeRow } from "./agent-tree";
 import { getMarkdownTheme, type Theme } from "../theme/theme";
@@ -289,21 +290,6 @@ export function formatTaskId(id: string): string {
 	const sanitizedId = sanitizeText(id);
 	const segments = sanitizedId.split(".");
 	return segments.length < 2 ? sanitizedId : segments.join(">");
-}
-
-const MISSING_YIELD_WARNING_PREFIX = "SYSTEM WARNING: Subagent exited without calling yield tool";
-
-function extractMissingYieldWarning(output: string): { warning?: string; rest: string } {
-	const lines = output.split("\n");
-	const firstLine = lines[0]?.trim() ?? "";
-	if (!firstLine.startsWith(MISSING_YIELD_WARNING_PREFIX)) {
-		return { rest: output };
-	}
-	const rest = lines
-		.slice(1)
-		.join("\n")
-		.replace(/^\s*\n+/, "");
-	return { warning: firstLine, rest };
 }
 
 const BASH_WALL_TIME_NOTICE_RE = /^Wall time: \d+(?:\.\d+)? seconds$/u;
@@ -736,6 +722,8 @@ function renderAgentProgress(
 		statusBadge = ` ${formatBadge("retrying", "warning", theme)}`;
 	} else if (progress.retryFailure && (progress.status === "failed" || progress.status === "aborted")) {
 		statusBadge = ` ${formatBadge("rate-limited", "error", theme)}`;
+	} else if (progress.missingYield && progress.status === "completed") {
+		statusBadge = ` ${formatBadge("warning", "warning", theme)}`;
 	}
 	const row = renderAgentTreeRow(
 		{
@@ -1053,7 +1041,10 @@ function renderAgentResult(
 ): string[] {
 	const lines: string[] = [];
 
-	const { warning: missingCompleteWarning, rest: outputWithoutWarning } = extractMissingYieldWarning(result.output);
+	const { warning: missingCompleteWarning, rest: outputWithoutWarning } = splitMissingYieldWarning(
+		result.output,
+		result.missingYield,
+	);
 	const aborted = result.aborted ?? false;
 	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
 	const success = !aborted && result.exitCode === 0 && !result.error;
@@ -1270,8 +1261,13 @@ function renderAgentResult(
 		}
 	}
 
-	// Error message
-	if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
+	// Error message; a failed missing-yield result's error is the warning already shown above.
+	if (
+		result.error &&
+		(!success || mergeFailed) &&
+		(!aborted || result.error !== result.abortReason) &&
+		result.error.trim() !== missingCompleteWarning
+	) {
 		lines.push(
 			`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", clipCollapsed(flattenLine(sanitizeText(result.error)), 70, expanded))}`,
 		);
@@ -1335,8 +1331,8 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
 
 /**
  * Pick the agent rows that stay visible when a finalized batch is collapsed:
- * problem rows (aborted/failed/merge-failed) claim slots first so they are
- * never folded away, then fastest finishers fill the remainder. The pick is
+ * problem rows (aborted/failed/merge-failed/missing-yield) claim slots first so
+ * they are never folded away, then fastest finishers fill the remainder. The pick is
  * filtered out of the display order, so visible rows keep the expanded layout.
  */
 function selectCollapsedResults(ordered: readonly SingleResult[]): readonly SingleResult[] {
@@ -1344,7 +1340,7 @@ function selectCollapsedResults(ordered: readonly SingleResult[]): readonly Sing
 	const picked = new Set<SingleResult>();
 	for (const result of ordered) {
 		if (picked.size >= COLLAPSED_AGENT_LIMIT) break;
-		if (result.aborted || result.exitCode !== 0 || result.error) picked.add(result);
+		if (result.aborted || result.exitCode !== 0 || result.error || result.missingYield) picked.add(result);
 	}
 	for (const result of ordered) {
 		if (picked.size >= COLLAPSED_AGENT_LIMIT) break;
@@ -1931,7 +1927,10 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				...(running ? { age: runningAge(progress, nowMs) } : { took: progress.durationMs }),
 			},
 			retry,
-			badges: agentBadges(state.background, undefined),
+			badges:
+				progress.missingYield && progress.status === "completed"
+					? [...(agentBadges(state.background, undefined) ?? []), { text: "warning", tone: "warning" }]
+					: agentBadges(state.background, undefined),
 			depth: depth > 0 ? depth : undefined,
 			collapsible: true,
 			collapsed: !state.expanded,
@@ -1958,7 +1957,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 }
 
 function describeResultAgent(result: SingleResult, state: AgentDescribeState, depth: number): NativeNode {
-	const { warning, rest } = extractMissingYieldWarning(result.output);
+	const { warning, rest } = splitMissingYieldWarning(result.output, result.missingYield);
 	const aborted = result.aborted ?? false;
 	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
 	const success = !aborted && result.exitCode === 0 && !result.error;
@@ -2001,7 +2000,7 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 			result.resolvedModelRoute ? noteText(result.resolvedModelRoute, "dim") : undefined,
 			aborted && result.abortReason ? errorLine(result.abortReason) : undefined,
 			warning ? errorLine(warning, "warning") : undefined,
-			result.error ? errorLine(result.error) : undefined,
+			result.error && result.error.trim() !== warning ? errorLine(result.error) : undefined,
 			result.retryFailure ? errorLine(`auto-retry gave up: ${result.retryFailure.errorMessage}`) : undefined,
 			// The structured result is the agent's answer: its containers open one level, as in the fallback tree.
 			structured !== undefined
@@ -2009,7 +2008,9 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 				: output
 					? md(output, { role: "omp.task.output" })
 					: undefined,
-			result.stderr.trim() && !success ? node("ansi", { text: result.stderr, preview: { lines: 6 } }) : undefined,
+			result.stderr.trim() && result.stderr.trim() !== warning && !success
+				? node("ansi", { text: result.stderr, preview: { lines: 6 } })
+				: undefined,
 			kv([
 				[
 					"Patch",
@@ -2408,6 +2409,8 @@ export interface AgentProgress {
 	/** Cumulative billing cost in USD, accumulated incrementally from message_end events. */
 	cost: number;
 	durationMs: number;
+	/** The settled run's structured result protocol was not submitted (see {@link SingleResult.missingYield}). */
+	missingYield?: MissingYield;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
@@ -2489,6 +2492,8 @@ export interface SingleResult {
 	output: string;
 	stderr: string;
 	truncated: boolean;
+	/** A structured child bypassed its required yield protocol. */
+	missingYield?: MissingYield;
 	/**
 	 * Parsed structured completion and validation metadata, when this invocation
 	 * selected an output schema or strict schema mode.

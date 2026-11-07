@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The web view and HTML export show a warning when a structured subagent's task result omitted `yield`; such a result still counts as succeeded unless it failed ([#16928](https://github.com/can1357/oh-my-pi/pull/16928) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Changed

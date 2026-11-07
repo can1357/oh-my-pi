@@ -186,6 +186,127 @@ describe("ToolView xd:// dispatches", () => {
 	});
 });
 
+describe("ToolView task missing-yield provenance", () => {
+	const initialWarning = "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
+	const wakeWarning = "SYSTEM WARNING: Structured subagent replied without calling yield.";
+
+	function renderTask(result: Record<string, unknown>): string {
+		return renderToStaticMarkup(
+			<ToolView
+				name="task"
+				defaultOpen
+				args={{}}
+				result={{ content: [], details: { results: [result], totalDurationMs: 1 } }}
+			/>,
+		);
+	}
+
+	it("renders metadata-backed initial and wake warnings as callouts", () => {
+		for (const [missingYield, warning] of [
+			["initial", initialWarning],
+			["wake", wakeWarning],
+		] as const) {
+			const html = renderTask({
+				id: missingYield,
+				agent: "task",
+				exitCode: 0,
+				output: `${warning}\n\nreport`,
+				missingYield,
+			});
+			expect(html).toContain("tv-note--warn");
+			expect(html).toContain(warning);
+			expect(html).toContain("1 succeeded");
+			expect(html).not.toContain("1 failed");
+		}
+	});
+
+	it("takes a marked result's warning from its output, not from a copied literal", () => {
+		const warning = "SYSTEM WARNING: reworded missing-yield warning.";
+		const html = renderTask({
+			id: "reworded",
+			agent: "task",
+			exitCode: 0,
+			output: `${warning}\n\nreport`,
+			missingYield: "initial",
+		});
+		expect(html).toContain("tv-note--warn");
+		expect(html.split(warning).length - 1).toBe(1);
+		expect(html).toContain("report");
+		expect(html).not.toContain("after 3 reminders");
+	});
+
+	it.each([
+		["schema-bearing prose", "Everything verified; writing the report now."],
+		["empty output", ""],
+	])("shows a failed missing-yield warning once (%s)", (_label, prose) => {
+		const html = renderTask({
+			id: "failed",
+			agent: "task",
+			exitCode: 1,
+			output: `${initialWarning}\n\n${prose}`,
+			stderr: initialWarning,
+			error: initialWarning,
+			missingYield: "initial",
+		});
+		expect(html).toContain("1 failed");
+		expect(html.split(initialWarning).length - 1).toBe(1);
+		if (prose) expect(html).toContain(prose);
+	});
+
+	it("leaves warning-looking report text alone without provenance", () => {
+		const html = renderTask({
+			id: "yielded",
+			agent: "task",
+			exitCode: 0,
+			output: `${initialWarning}\n\nordinary yielded report`,
+		});
+		expect(html).not.toContain("tv-note--warn");
+		expect(html).toContain(initialWarning);
+	});
+
+	it("badges a settled background row whose run omitted yield", () => {
+		const renderProgress = (progress: Record<string, unknown>): string =>
+			renderToStaticMarkup(
+				<ToolView
+					name="task"
+					defaultOpen
+					args={{}}
+					result={{ content: [], details: { results: [], totalDurationMs: 1, progress: [progress] } }}
+				/>,
+			);
+		const marked = renderProgress({ id: "bg", agent: "task", status: "completed", missingYield: "wake" });
+		expect(marked).toContain(">warning<");
+		const plain = renderProgress({ id: "bg", agent: "task", status: "completed" });
+		expect(plain).not.toContain(">warning<");
+	});
+
+	it("renders background progress rows next to a blocking result in a mixed batch", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="task"
+				defaultOpen
+				args={{}}
+				result={{
+					content: [],
+					details: {
+						results: [{ id: "Inline", agent: "task", exitCode: 0, output: "inline report" }],
+						totalDurationMs: 1,
+						progress: [
+							{ id: "Inline", agent: "task", status: "completed" },
+							{ id: "Background", agent: "task", status: "completed", missingYield: "initial" },
+						],
+					},
+				}}
+			/>,
+		);
+		expect(html).toContain("inline report");
+		expect(html).toContain("Background");
+		expect(html).toContain(">warning<");
+		// The blocking agent's row comes from its result, not a second progress row.
+		expect(html.split(">completed<").length - 1).toBe(1);
+	});
+});
+
 describe("ToolView ask renderer", () => {
 	const questions = [
 		{

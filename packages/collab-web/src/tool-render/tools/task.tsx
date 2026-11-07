@@ -1,10 +1,9 @@
 /** `task` — spawn subagents: batch shape, streamed progress, per-agent results. */
+import { isMissingYield, splitMissingYieldWarning } from "@oh-my-pi/pi-wire";
 import type { ReactNode } from "react";
 import { AgentLink, Badge, Note, Output, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderHost, ToolRenderProps } from "../types";
 import { detailsRecord, isRecord, normalizeWs, num, str, truncate } from "../util";
-
-const MISSING_YIELD_PREFIX = "SYSTEM WARNING: Subagent exited without calling yield tool";
 
 /** One spawned unit of work, normalized across the batch and flat/legacy arg shapes. */
 interface TaskItemView {
@@ -58,7 +57,9 @@ function fmtCount(n: number): string {
 function resultStatus(res: Record<string, unknown>): { label: string; tone: "ok" | "err" | "warn" } {
 	if (res.aborted === true) return { label: "aborted", tone: "err" };
 	if (num(res.exitCode) === 0) {
-		return str(res.error) ? { label: "merge failed", tone: "warn" } : { label: "done", tone: "ok" };
+		if (str(res.error)) return { label: "merge failed", tone: "warn" };
+		if (isMissingYield(res.missingYield)) return { label: "warning", tone: "warn" };
+		return { label: "done", tone: "ok" };
 	}
 	return { label: "failed", tone: "err" };
 }
@@ -94,17 +95,12 @@ function AgentResult({ res, host }: { res: Record<string, unknown>; host?: ToolR
 	const model = str(res.resolvedModel);
 	if (model) stats.push(model);
 
-	// The runtime prepends a one-line warning when a subagent never called
-	// yield; lift it out of the output preview like the TUI does.
-	let output = str(res.output) ?? "";
-	let warning: string | null = null;
-	const nl = output.indexOf("\n");
-	const firstLine = (nl === -1 ? output : output.slice(0, nl)).trim();
-	if (firstLine.startsWith(MISSING_YIELD_PREFIX)) {
-		warning = firstLine;
-		output = nl === -1 ? "" : output.slice(nl + 1).replace(/^\s*\n+/, "");
-	}
-	const error = str(res.error);
+	const split = splitMissingYieldWarning(str(res.output) ?? "", res.missingYield);
+	const output = split.rest;
+	const warning = split.warning ?? null;
+	// A failed missing-yield result's error is the warning the callout already shows.
+	const rawError = str(res.error);
+	const error = rawError && rawError.trim() !== warning ? rawError : null;
 	const aborted = res.aborted === true;
 	const abortReason = str(res.abortReason);
 	const patchPath = str(res.patchPath);
@@ -161,7 +157,9 @@ function AgentProgressRow({ p, host }: { p: Record<string, unknown>; host?: Tool
 				</AgentLink>
 			}
 		>
-			<Badge tone={tone}>{status}</Badge> {description && <span>{truncate(normalizeWs(description), 96)}</span>}{" "}
+			<Badge tone={tone}>{status}</Badge>{" "}
+			{status === "completed" && isMissingYield(p.missingYield) && <Badge tone="warn">warning</Badge>}{" "}
+			{description && <span>{truncate(normalizeWs(description), 96)}</span>}{" "}
 			{intent && <span className="tv-muted">{truncate(normalizeWs(intent), 64)}</span>}{" "}
 			{bits.length > 0 && <span className="tv-faint">{bits.join(" · ")}</span>}
 		</Row>
@@ -175,7 +173,13 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 	const details = detailsRecord(result);
 	const results = details && Array.isArray(details.results) ? details.results.filter(isRecord) : [];
 	const progress = details && Array.isArray(details.progress) ? details.progress.filter(isRecord) : [];
-	const showProgress = results.length === 0 && progress.length > 0;
+	// A mixed batch settles its blocking agents into `results` while background
+	// agents stay progress rows; show every agent that has no result yet.
+	const resultIds = new Set(results.map(res => str(res.id)));
+	const progressRows = progress.filter(p => {
+		const id = str(p.id);
+		return id === null || !resultIds.has(id);
+	});
 
 	// Run footer: outcome counts + total wall time (mirrors the TUI's bracket line).
 	let footer: ReactNode = null;
@@ -185,11 +189,14 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 		let aborted = 0;
 		let failed = 0;
 		for (const res of results) {
-			const { label } = resultStatus(res);
-			if (label === "done") ok++;
-			else if (label === "merge failed") mergeFailed++;
-			else if (label === "aborted") aborted++;
-			else failed++;
+			if (res.aborted === true) {
+				aborted++;
+			} else if (num(res.exitCode) === 0) {
+				if (str(res.error)) mergeFailed++;
+				else ok++;
+			} else {
+				failed++;
+			}
 		}
 		const total = details ? num(details.totalDurationMs) : null;
 		footer = (
@@ -243,14 +250,14 @@ function Body({ args, result, host }: ToolRenderProps): ReactNode {
 					{footer}
 				</div>
 			)}
-			{showProgress && (
+			{progressRows.length > 0 && (
 				<div className="tv-list">
-					{progress.map((p, i) => (
+					{progressRows.map((p, i) => (
 						<AgentProgressRow key={str(p.id) ?? i} p={p} host={host} />
 					))}
 				</div>
 			)}
-			{ordered.length === 0 && !showProgress && <ResultText result={result} maxLines={12} />}
+			{ordered.length === 0 && progressRows.length === 0 && <ResultText result={result} maxLines={12} />}
 		</>
 	);
 }

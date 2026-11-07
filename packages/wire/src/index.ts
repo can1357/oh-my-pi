@@ -474,4 +474,5 @@ export type RelayControlMessage = RelayControlToHost | RelayControlToGuest;
 export * from "./shell-trace";
 export * from "./shell-viz";
 export * from "./stream";
+export * from "./task-result";
 export * from "./tsp";
