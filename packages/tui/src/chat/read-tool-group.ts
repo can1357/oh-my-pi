@@ -21,27 +21,30 @@ import {
 	PREVIEW_LIMITS,
 	shortenPath,
 } from "../render/render-utils";
-import { fileHyperlink, renderCodeCell, renderMarkdownCell } from "../render";
+import { fileHyperlink, renderCodeCell, renderMarkdownCell, urlHyperlinkAlways } from "../render";
 import { wrapTreeLine } from "../render/hanging-wrap";
 import { wrapTextWithAnsi } from "../utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { internalUrlSchemeSpec, splitUrlScheme } from "../tools/url-scheme-host";
+import { SpotlightNotices } from "./spotlight";
 import type { ToolExecutionHandle } from "./tool-execution";
 import { formatUsageRow } from "../overlays/usage-row";
 import { formatCount, isUrlLikePath, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { TspCardStatus, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeToolHead } from "../tools/renderer";
-import { card, code, keyed, md, node, span, text, withHidden } from "../native/describe";
+import { card, code, col, keyed, md, node, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
 	type NativeChild,
 	type NativeNode,
 	type NativeUiEvent,
+	leafKey,
 	rootToggleExpanded,
 } from "../native/node";
 import { plainText } from "../native/spans";
 import { Memo } from "../native/memo";
-import { fileHref, fileRow, inlineErrorView, urlHref } from "../tools/native-view";
+import { fileHref, fileRow, inlineErrorView, resultText, urlHref } from "../tools/native-view";
+import { compactHead, compactRows, presentNative, TranscriptPresentationState } from "./transcript-presentation";
 
 /**
  * Extract the read call's target path. `path` is the canonical arg; `file_path`
@@ -110,6 +113,8 @@ type ReadToolSuffixResolution = {
 
 type ReadToolGroupOptions = {
 	showContentPreview?: boolean;
+	/** Ask the extension transcript presenters; false for a replayed transcript (overlays). Default: true. */
+	transcriptPresenters?: boolean;
 };
 
 function getSuffixResolution(details: ReadToolDetails | undefined): ReadToolSuffixResolution | undefined {
@@ -137,6 +142,15 @@ type ReadEntry = {
 	conflictCount?: number;
 	codeStartLine?: number;
 	codeLineNumbers?: Array<number | null>;
+	/** The call as presenters see it. */
+	args?: unknown;
+	result?: { content: readonly unknown[]; details?: unknown };
+	presentation: TranscriptPresentationState;
+	/**
+	 * The user opened this read (Ctrl+O, the `full` rows' toggle or its own compact row): it draws
+	 * in full whatever presenters answer, its content preview unclamped.
+	 */
+	expanded: boolean;
 };
 
 /**
@@ -386,6 +400,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#usageRows = new Map<string, ReadUsageRow>();
 	#usageBatchByToolCallId = new Map<string, string>();
 	#text: Text;
+	/** Whether presenters draw these reads (not a replayed transcript). */
+	#presented: boolean;
 	#expanded = false;
 	#toolActivityVisible = true;
 	#showContentPreview: boolean;
@@ -405,21 +421,85 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#blockVersion = 0;
 	#displayVersion = 0;
 	readonly #native = new Memo();
-	/** Content previews toggled in the terminal, by tool call id. */
-	#previewCollapsed = new Map<string, boolean>();
+	// The reads' Spotlight notices, drawn after the group in a native transcript (see nativeTrailers).
+	readonly #spotlight = new SpotlightNotices();
 
 	constructor(options: ReadToolGroupOptions = {}) {
 		super();
 		this.#showContentPreview = options.showContentPreview ?? false;
+		this.#presented = options.transcriptPresenters ?? true;
 		this.#text = new Text("", 0, 0);
 		this.addChild(this.#text);
 		this.#updateDisplay();
 	}
 
+	/**
+	 * Reads a presenter leaves full draw as the group, at the first full read's place; a compact
+	 * read is a row of its own; hidden draws nothing.
+	 */
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible) return [];
-		return super.render(width);
+		const entries = [...this.#entries.values()];
+		const drawn = entries.map(entry => entry.presentation.draw());
+		if (drawn.every(shown => shown.mode === "full")) return super.render(width);
+		const lines: string[] = [];
+		let fullDrawn = false;
+		for (const [index, entry] of entries.entries()) {
+			const shown = drawn[index]!;
+			if (shown.mode === "compact") {
+				const glyph = entry.status === "success" ? undefined : formatStatusIcon(entry.status, theme);
+				lines.push(...compactRows(compactHead("Read", shortenPath(entry.path)), shown, width, glyph));
+			} else if (shown.mode === "full" && !fullDrawn) {
+				fullDrawn = true;
+				lines.push(...super.render(width));
+			}
+		}
+		return lines;
 	}
+
+	refreshTranscriptPresentation(ids?: ReadonlySet<string>): boolean {
+		const entries = [...this.#entries.values()];
+		const before = entries.map(entry => entry.presentation.resolved);
+		let changed = false;
+		for (const entry of entries) {
+			if (entry.presentation.refresh(ids)) changed = true;
+		}
+		// Rebuild the full subset even for a group not drawn yet, so its first draw is current.
+		if (changed || entries.some((entry, index) => entry.presentation.resolved !== before[index])) {
+			this.#updateDisplay();
+		}
+		if (!changed) return false;
+		this.#blockVersion++;
+		return true;
+	}
+
+	#newEntry(toolCallId: string, displayPath: string): ReadEntry {
+		const entry: ReadEntry = {
+			toolCallId,
+			path: displayPath,
+			status: "pending",
+			presentation: new TranscriptPresentationState(
+				() =>
+					!this.#presented
+						? undefined
+						: {
+								type: "toolCall",
+								id: entry.toolCallId,
+								toolName: "read",
+								args: entry.args,
+								result: entry.result,
+								isError: entry.status === "error",
+								isPartial: entry.status === "pending",
+							},
+				() => entry.expanded,
+				this,
+			),
+			// A read joining an open group opens too: the group's own Ctrl+O, or any read the user opened.
+			expanded: this.#entries.size === 0 ? this.#expanded : [...this.#entries.values()].some(read => read.expanded),
+		};
+		return entry;
+	}
+
 	isTranscriptBlockFinalized(): boolean {
 		if (this.#sealed) return true;
 		if (!this.#finalized) return false;
@@ -428,6 +508,18 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		// breaks the run) before a read's `tool_execution_end` lands. Keep the block
 		// active so the late result updates the pending preview.
 		return !this.#hasPendingEntries();
+	}
+
+	/** Compact only while every read it draws is a compact row. */
+	isTranscriptBlockCompact(): boolean {
+		if (!this.#toolActivityVisible) return false;
+		let compact = false;
+		for (const entry of this.#entries.values()) {
+			const mode = entry.presentation.shown.mode;
+			if (mode === "full") return false;
+			if (mode === "compact") compact = true;
+		}
+		return compact;
 	}
 
 	#hasPendingEntries(): boolean {
@@ -462,14 +554,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const rawPath =
 			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
 		const displayPath = sanitizeText(rawPath);
-		const entry: ReadEntry = this.#entries.get(toolCallId) ?? {
-			toolCallId,
-			path: displayPath,
-			status: "pending",
-		};
+		const entry = this.#entries.get(toolCallId) ?? this.#newEntry(toolCallId, displayPath);
 		entry.path = displayPath;
 		entry.linkPath = path.isAbsolute(rawPath) ? rawPath : undefined;
 		entry.raw = args.raw === true;
+		entry.args = args;
+		entry.presentation.markStale();
 		this.#entries.set(toolCallId, entry);
 		this.#updateDisplay();
 	}
@@ -485,6 +575,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const entry = this.#entries.get(oldId);
 		if (!entry || this.#entries.has(newId)) return;
 		entry.toolCallId = newId;
+		entry.presentation.markStale();
 		const reordered = [...this.#entries].map(([key, value]): [string, ReadEntry] => [
 			key === oldId ? newId : key,
 			value,
@@ -496,6 +587,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	/** Remove one call without discarding successful siblings in the shared group. */
 	removeEntry(toolCallId: string): boolean {
 		if (!this.#entries.delete(toolCallId)) return this.#entries.size === 0;
+		this.#spotlight.set(toolCallId, undefined, "");
 		this.#updateDisplay();
 		return this.#entries.size === 0;
 	}
@@ -510,6 +602,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (!entry) return;
 		if (isPartial) return;
 		this.#blockVersion++;
+		this.#spotlight.set(toolCallId, result.details, resultText(result));
 		// `details` can contain raw file text and filesystem paths. Keep the
 		// latter for links while only the sanitized copy supplies display labels.
 		const rawDetails = result.details as ReadToolDetails | undefined;
@@ -529,6 +622,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			typeof details?.conflictCount === "number" && details.conflictCount > 0 ? details.conflictCount : undefined;
 		entry.conflictCount = conflictCount;
 		entry.status = result.isError ? "error" : suffixResolution ? "warning" : "success";
+		entry.result = { content: result.content, details: rawDetails };
+		entry.presentation.markStale();
 		entry.contentType = details?.contentType;
 		// Store clean display content for preview/expanded display when the read
 		// tool provides it; fall back to model-facing text for legacy results.
@@ -540,6 +635,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			entry.codeLineNumbers = displayContent?.lineNumbers;
 		}
 		this.#updateDisplay();
+		// A late result can land after the group retired to scrollback, which is never drawn again.
+		entry.presentation.recheck();
 	}
 
 	/**
@@ -586,15 +683,23 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	setExpanded(expanded: boolean): void {
-		if (this.#expanded !== expanded) this.#blockVersion++;
+		const entries = [...this.#entries.values()];
+		if (this.#expanded !== expanded || entries.some(entry => entry.expanded !== expanded)) this.#blockVersion++;
 		this.#expanded = expanded;
-		this.#previewCollapsed.clear();
+		for (const entry of entries) entry.expanded = expanded;
 		this.#updateDisplay();
 	}
 
 	setToolActivityVisible(visible: boolean): void {
 		this.#toolActivityVisible = visible;
+		this.#spotlight.setHidden(!visible);
 		super.invalidate();
+	}
+
+	/** The reads' Spotlight notices, in order: blocks of their own right after the group's card. */
+	nativeTrailers(): readonly Component[] {
+		// A read a presenter hides takes its notice with it.
+		return this.#spotlight.list(id => this.#entries.get(id)?.presentation.shown.mode !== "hidden");
 	}
 
 	getComponent(): Component {
@@ -604,7 +709,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	/**
 	 * Mirrors the terminal's toggles: the `tool` head (the group's root) is
 	 * `Ctrl+O`'s expansion; a fallback preview card collapses on its own
-	 * (`setExpanded` resets those).
+	 * (`setExpanded` resets those). A compact read's row (`c<id>`) opens that
+	 * read; the full rows beside compact ones (`full`) open and close their reads.
 	 */
 	handleNativeEvent(event: NativeUiEvent): void {
 		const expanded = rootToggleExpanded(event);
@@ -612,11 +718,34 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			this.setExpanded(expanded);
 			return;
 		}
-		if (event.type !== "toggle" || !event.key.startsWith("p")) return;
-		const toolCallId = event.key.slice(1);
-		if (!this.#entries.has(toolCallId)) return;
-		this.#previewCollapsed.set(toolCallId, event.collapsed);
-		this.#displayVersion++;
+		if (event.type !== "toggle") return;
+		const key = leafKey(event.key);
+		if (key === "full") {
+			const open = !event.collapsed;
+			const reads = [...this.#entries.values()].filter(
+				entry => entry.presentation.shown.mode === "full" && entry.expanded !== open,
+			);
+			if (reads.length === 0) return;
+			for (const entry of reads) entry.expanded = open;
+			this.#blockVersion++;
+			this.#updateDisplay();
+			return;
+		}
+		const opened = key.startsWith("c") ? this.#entries.get(key.slice(1)) : undefined;
+		if (opened) {
+			if (event.collapsed) return;
+			opened.expanded = true;
+			this.#blockVersion++;
+			this.#updateDisplay();
+			return;
+		}
+		// `p<id>`: the fallback card's preview; `m<id>`: a Markdown preview's own card.
+		if (!key.startsWith("p") && !key.startsWith("m")) return;
+		const preview = this.#entries.get(key.slice(1));
+		if (!preview || preview.expanded === !event.collapsed) return;
+		preview.expanded = !event.collapsed;
+		this.#blockVersion++;
+		this.#updateDisplay();
 	}
 
 	/**
@@ -624,14 +753,40 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 * the fallback: a bare `card` (role `omp.tool.read`) with `Read <path>` or
 	 * `Read (N)` in the head, a `list` of path items (status tone, link,
 	 * correction and conflict detail, nested usage) and a clamped preview per
-	 * read when content previews are on.
+	 * read when content previews are on. Compact reads become rows of their
+	 * own (keyed `c<toolCallId>`) beside that group.
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		const dataFirst = cx?.supports("tool") === true;
 		const key = [dataFirst, this.#displayVersion, this.#toolActivityVisible, this.#sealed];
-		return this.#native.get(key, () =>
-			withHidden(dataFirst ? this.#describeTool() : this.#describeGroup(), !this.#toolActivityVisible),
-		);
+		return this.#native.get(key, () => {
+			const describeEntries = (entries: readonly ReadEntry[]): NativeNode =>
+				dataFirst ? this.#describeTool(entries) : this.#describeGroup(entries);
+			const entries = [...this.#entries.values()];
+			const drawn = new Map(entries.map(entry => [entry, entry.presentation.draw()]));
+			const full = entries.filter(entry => drawn.get(entry)!.mode === "full");
+			const visible = entries.filter(entry => drawn.get(entry)!.mode !== "hidden");
+			if (full.length === entries.length) return withHidden(describeEntries(full), !this.#toolActivityVisible);
+			if (visible.length === 0) return withHidden(describeEntries(entries), true);
+			const children: NativeNode[] = [];
+			let fullDrawn = false;
+			for (const entry of visible) {
+				const shown = drawn.get(entry)!;
+				if (shown.mode === "compact") {
+					const own = presentNative(describeEntries([entry]), shown, {
+						role: "omp.tool.read",
+						title: "Read",
+						target: shortenPath(entry.path) || "…",
+					});
+					children.push(keyed(own, `c${entry.toolCallId}`));
+				} else if (!fullDrawn) {
+					fullDrawn = true;
+					children.push(keyed(describeEntries(full), "full"));
+				}
+			}
+			// Always the column: each child keeps its key, so its toggle reaches only its own reads.
+			return withHidden(col(children, { role: "omp.tool.read" }), !this.#toolActivityVisible);
+		});
 	}
 
 	/**
@@ -641,8 +796,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 * (glyph, dim dir, strong name, range). Each content preview is numbered
 	 * code or rendered Markdown, clamped per file while collapsed.
 	 */
-	#describeTool(): NativeNode {
-		const entries = [...this.#entries.values()];
+	#describeTool(entries: readonly ReadEntry[]): NativeNode {
 		const rows = this.#buildSummaryRows(this.#displayTargetsForEntries(entries));
 		const status = this.#groupStatus(entries);
 		const previews = entries.filter(entry => entry.status !== "error" && this.#shouldRenderPreview(entry));
@@ -701,7 +855,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				tone: status === "error" ? "error" : undefined,
 				frame: "inline",
 				collapsible,
-				collapsed: collapsible ? !this.#expanded : undefined,
+				collapsed: collapsible ? !entries.some(entry => entry.expanded) : undefined,
 				preview: collapsible ? TRIMMED_BODY_PREVIEW : undefined,
 			},
 			body,
@@ -764,20 +918,23 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#nativePreview(entry: ReadEntry): NativeChild[] {
 		if (previewsMarkdown(entry)) {
 			return [
-				card(
-					{
-						variant: "bare",
-						collapsible: true,
-						collapsed: !this.#expanded,
-						preview: { lines: COLLAPSED_PREVIEW_LINES },
-					},
-					[md(entry.contentText ?? "")],
+				keyed(
+					card(
+						{
+							variant: "bare",
+							collapsible: true,
+							collapsed: !entry.expanded,
+							preview: { lines: COLLAPSED_PREVIEW_LINES },
+						},
+						[md(entry.contentText ?? "")],
+					),
+					`m${entry.toolCallId}`,
 				),
 			];
 		}
 		const split = splitPathAndSel(entry.path);
 		const lines = (entry.contentText ?? "").split("\n");
-		const shown = this.#expanded ? lines.length : Math.min(lines.length, COLLAPSED_PREVIEW_LINES);
+		const shown = entry.expanded ? lines.length : Math.min(lines.length, COLLAPSED_PREVIEW_LINES);
 		const blocks: NativeChild[] = readContentCode(
 			lines.slice(0, shown).join("\n"),
 			entry.codeStartLine ?? firstSelectorLine(split.sel) ?? 1,
@@ -793,8 +950,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return blocks;
 	}
 
-	#describeGroup(): NativeNode {
-		const entries = [...this.#entries.values()];
+	#describeGroup(entries: readonly ReadEntry[]): NativeNode {
 		const rows = this.#buildSummaryRows(this.#displayTargetsForEntries(entries));
 		const usageByRow = this.#usageRowsBySummaryRow(rows);
 		const previews = entries.filter(entry => this.#shouldRenderPreview(entry));
@@ -850,7 +1006,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 						tone: READ_STATUS_TONE[entry.status],
 						head: pathValue ? [title, span(" "), span(pathValue, "path")] : [title],
 						collapsible: true,
-						collapsed: this.#previewCollapsed.get(entry.toolCallId) ?? !this.#expanded,
+						collapsed: !entry.expanded,
 						preview: { lines: COLLAPSED_PREVIEW_LINES },
 					},
 					[
@@ -917,7 +1073,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	#updateDisplay(): void {
 		this.#displayVersion++;
-		const entries = [...this.#entries.values()];
+		const entries = [...this.#entries.values()].filter(entry => entry.presentation.shown.mode === "full");
 		const displayTargets = this.#displayTargetsForEntries(entries);
 		const displayRows = this.#buildSummaryRows(displayTargets);
 
@@ -972,7 +1128,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		}
 	}
 
-	#displayTargetsForEntries(entries: ReadEntry[]): ReadDisplayTarget[] {
+	#displayTargetsForEntries(entries: readonly ReadEntry[]): ReadDisplayTarget[] {
 		const targets: ReadDisplayTarget[] = [];
 		for (const entry of entries) {
 			const pathSpecs: ReadDisplayPathSpec[] =
@@ -1183,6 +1339,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (filePath && options.linkPath) {
 			const linkOptions = options.line !== undefined ? { line: options.line } : undefined;
 			pathDisplay = fileHyperlink(options.linkPath, pathDisplay, linkOptions);
+		} else if (filePath && isUrlLikePath(target.path)) {
+			// Text mode needs the same URL fallback as the native head, or a
+			// transcript without native rendering keeps the URL unclickable.
+			pathDisplay = urlHyperlinkAlways(urlHref(target.path) ?? target.path, pathDisplay);
 		}
 		if (selectors) pathDisplay += theme.fg(paint.selectors, selectors);
 		if (options.correctedFrom) {
@@ -1221,7 +1381,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			cachedWidth = undefined;
 			cachedLines = undefined;
 		};
-		const expanded = this.#expanded;
+		const expanded = entry.expanded;
 		const component: Component = {
 			render: (width: number) => {
 				if (cachedLines && cachedWidth === width) return cachedLines;

@@ -1,104 +1,111 @@
 {
-  "type": "module",
-  "name": "@oh-my-pi/pi-tui",
-  "version": "18.16.0",
-  "description": "Terminal User Interface library with differential rendering for efficient text-based applications",
-  "homepage": "https://omp.sh",
-  "author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
-  "contributors": [
-    "Mario Zechner"
-  ],
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/can1357/oh-my-pi.git",
-    "directory": "packages/tui"
-  },
-  "bugs": {
-    "url": "https://github.com/can1357/oh-my-pi/issues"
-  },
-  "keywords": [
-    "tui",
-    "terminal",
-    "ui",
-    "text-editor",
-    "differential-rendering",
-    "typescript",
-    "cli"
-  ],
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
-  "scripts": {
-    "check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
-    "check:types": "tsgo -p tsconfig.json --noEmit",
-    "lint": "oxlint .",
-    "test": "bun test --parallel test/*.test.ts",
-    "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
-    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'",
-    "gen:glyphs": "bun scripts/gen-glyphs.ts"
-  },
-  "dependencies": {
-    "@oh-my-pi/omptype": "catalog:",
-    "@oh-my-pi/pi-agent-core": "catalog:",
-    "@oh-my-pi/pi-ai": "catalog:",
-    "@oh-my-pi/pi-catalog": "catalog:",
-    "@oh-my-pi/pi-natives": "catalog:",
-    "@oh-my-pi/pi-utils": "catalog:",
-    "@oh-my-pi/pi-wire": "catalog:",
-    "@oh-my-pi/snapcompact": "catalog:"
-  },
-  "devDependencies": {
-    "kitty-vt-wasm": "catalog:"
-  },
-  "engines": {
-    "bun": ">=1.4.4"
-  },
-  "files": [
-    "src",
-    "README.md",
-    "CHANGELOG.md"
-  ],
-  "exports": {
-    ".": {
-      "types": "./src/index.ts",
-      "import": "./src/index.ts"
-    },
-    "./theme": {
-      "types": "./src/theme/index.ts",
-      "import": "./src/theme/index.ts"
-    },
-    "./theme/*": {
-      "types": "./src/theme/*.ts",
-      "import": "./src/theme/*.ts"
-    },
-    "./render": {
-      "types": "./src/render/index.ts",
-      "import": "./src/render/index.ts"
-    },
-    "./chrome": {
-      "types": "./src/chrome/index.ts",
-      "import": "./src/chrome/index.ts"
-    },
-    "./tools": {
-      "types": "./src/tools/index.ts",
-      "import": "./src/tools/index.ts"
-    },
-    "./status-line": {
-      "types": "./src/status-line/index.ts",
-      "import": "./src/status-line/index.ts"
-    },
-    "./*": {
-      "types": "./src/*.ts",
-      "import": "./src/*.ts"
-    },
-    "./components/*": {
-      "types": "./src/components/*.ts",
-      "import": "./src/components/*.ts"
-    },
-    "./native/*": {
-      "types": "./src/native/*.ts",
-      "import": "./src/native/*.ts"
-    },
-    "./*.js": "./src/*.ts"
-  }
+	"name": "@oh-my-pi/pi-tui",
+	"version": "18.18.0",
+	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
+	"keywords": [
+		"cli",
+		"differential-rendering",
+		"terminal",
+		"text-editor",
+		"tui",
+		"typescript",
+		"ui"
+	],
+	"homepage": "https://omp.sh",
+	"bugs": {
+		"url": "https://github.com/can1357/oh-my-pi/issues"
+	},
+	"license": "MIT",
+	"author": {
+		"name": "Stencil Labs, Inc.",
+		"url": "https://stencil.so"
+	},
+	"contributors": [
+		"Mario Zechner"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/can1357/oh-my-pi.git",
+		"directory": "packages/tui"
+	},
+	"files": [
+		"src",
+		"README.md",
+		"CHANGELOG.md"
+	],
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"import": "./src/index.ts"
+		},
+		"./theme": {
+			"types": "./src/theme/index.ts",
+			"import": "./src/theme/index.ts"
+		},
+		"./theme/*": {
+			"types": "./src/theme/*.ts",
+			"import": "./src/theme/*.ts"
+		},
+		"./render": {
+			"types": "./src/render/index.ts",
+			"import": "./src/render/index.ts"
+		},
+		"./chrome": {
+			"types": "./src/chrome/index.ts",
+			"import": "./src/chrome/index.ts"
+		},
+		"./tools": {
+			"types": "./src/tools/index.ts",
+			"import": "./src/tools/index.ts"
+		},
+		"./tools/shell-viz": {
+			"types": "./src/tools/shell-viz.ts",
+			"import": "./src/tools/shell-viz.ts"
+		},
+		"./status-line": {
+			"types": "./src/status-line/index.ts",
+			"import": "./src/status-line/index.ts"
+		},
+		"./*": {
+			"types": "./src/*.ts",
+			"import": "./src/*.ts"
+		},
+		"./components/*": {
+			"types": "./src/components/*.ts",
+			"import": "./src/components/*.ts"
+		},
+		"./native/*": {
+			"types": "./src/native/*.ts",
+			"import": "./src/native/*.ts"
+		},
+		"./*.js": "./src/*.ts"
+	},
+	"scripts": {
+		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
+		"check:types": "bun check --no-script -p tsconfig.json",
+		"lint": "oxlint .",
+		"test": "bun test --parallel test/*.test.ts",
+		"fix": "oxlint --fix --fix-suggestions . && bun run fmt",
+		"fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'",
+		"gen:glyphs": "bun scripts/gen-glyphs.ts"
+	},
+	"dependencies": {
+		"@oh-my-pi/omptype": "catalog:",
+		"@oh-my-pi/pi-agent-core": "catalog:",
+		"@oh-my-pi/pi-ai": "catalog:",
+		"@oh-my-pi/pi-catalog": "catalog:",
+		"@oh-my-pi/pi-natives": "catalog:",
+		"@oh-my-pi/pi-utils": "catalog:",
+		"@oh-my-pi/pi-wire": "catalog:",
+		"@oh-my-pi/snapcompact": "catalog:"
+	},
+	"devDependencies": {
+		"kitty-vt-wasm": "catalog:"
+	},
+	"engines": {
+		"bun": ">=1.4.4"
+	}
 }

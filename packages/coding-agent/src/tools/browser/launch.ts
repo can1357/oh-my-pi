@@ -10,8 +10,10 @@ import {
 	removeWithRetries,
 	toError,
 	untilAborted,
+	withTimeout,
 } from "@oh-my-pi/pi-utils";
 import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
+import type { BunFile } from "bun";
 import type {
 	Browser,
 	CDPSession,
@@ -41,7 +43,7 @@ import stealthCodecsScript from "../puppeteer/12_stealth_codecs.txt" with { type
 import stealthWorkerScript from "../puppeteer/13_stealth_worker.txt" with { type: "text" };
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withDownload } from "../../downloads/activity";
-import { probeCdpResponse } from "./attach";
+import { findUserDataDirInArgs, gracefulKillTreeOnce, probeCdpResponse } from "./attach";
 
 export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1.25 };
 
@@ -98,10 +100,26 @@ export function stealthIgnoreDefaultArgs(executablePath: string | undefined): st
 /** Launch arg that keeps `navigator.webdriver` false; pair with {@link stealthIgnoreDefaultArgs}. */
 export const DISABLE_AUTOMATION_CONTROLLED_ARG = "--disable-blink-features=AutomationControlled";
 
+/**
+ * Chromium switches that keep every renderer at normal scheduling priority. On macOS, Chromium up
+ * to M152 moves the renderers of background tabs and spare processes into the Darwin background
+ * band (priority 4) behind `MacAllowBackgroundingRenderProcesses`, ignoring Puppeteer's
+ * `--disable-renderer-backgrounding`. On a busy host the kernel then barely runs them: Tracing.start
+ * waits out Chromium's 10s ack timeout for them, and CDP calls into a tab opened beside another
+ * stall. Unknown feature names are ignored, so builds without the feature are unaffected; Puppeteer
+ * merges every `--disable-features` switch it is given.
+ */
+export const RENDERER_PRIORITY_ARGS: readonly string[] =
+	process.platform === "darwin" ? ["--disable-features=MacAllowBackgroundingRenderProcesses"] : [];
+
 const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
 
 const USER_AGENT_TARGET_TIMEOUT_MS = 5_000;
 const USER_AGENT_TARGET_TYPES = new Set(["page", "webview", "background_page"]);
+/** How long a pipe-launched Chromium may take to publish its DevTools port after launch. */
+const DEVTOOLS_ACTIVE_PORT_TIMEOUT_MS = 10_000;
+/** Upper bound on `browser.close()`, which resolves only once Chromium exits; a wedged one never does (issue #5260). */
+const HEADLESS_CLOSE_TIMEOUT_MS = 5_000;
 
 /**
  * Lazy-import puppeteer while hiding the user's cwd from cosmiconfig. The
@@ -595,6 +613,8 @@ export interface LaunchHeadlessOptions extends HeadlessLaunchFeatures {
 /** Result of a headless Chromium launch. */
 export interface LaunchHeadlessResult {
 	browser: Browser;
+	/** Browser-level WebSocket endpoint for other CDP clients, such as tab workers. */
+	wsEndpoint: string;
 	/**
 	 * OMP-owned temporary Chromium profile directory to remove after the browser
 	 * process tree exits, or `undefined` when the caller supplied its own
@@ -619,6 +639,7 @@ export function buildHeadlessLaunchArgs(
 		"--hide-scrollbars",
 		"--enable-features=WebMCPTesting,DevToolsWebMCPSupport",
 		`--window-size=${viewport.width},${viewport.height}`,
+		...RENDERER_PRIORITY_ARGS,
 	];
 	if (features.ignoreHttpsErrors) launchArgs.push("--ignore-certificate-errors");
 	if (features.allowFileAccess) launchArgs.push("--allow-file-access-from-files");
@@ -664,11 +685,28 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	// unhandled EBUSY when Chromium still holds the profile lock on Windows
 	// (issue #7058). `removeUserDataDir` cleans it up on our terms instead.
 	let userDataDir: string | undefined;
-	if (!launchArgs.some(arg => arg.startsWith("--user-data-dir"))) {
+	let profileDir = findUserDataDirInArgs(launchArgs);
+	if (!profileDir) {
 		userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-"));
+		profileDir = userDataDir;
 		launchArgs.push(`--user-data-dir=${userDataDir}`);
 	}
+	// Puppeteer picks the pipe transport from `--remote-debugging-pipe`. Chromium
+	// exits when the pipe closes, so it dies with this process even on SIGKILL;
+	// over a WebSocket it runs detached in its own process group and outlives
+	// it. The free port serves the WebSocket that tab workers attach through.
+	// A port the caller picked keeps the WebSocket launch, which fails when
+	// another process holds that port; over the pipe Chromium would run on
+	// without it, and the port would answer for the other process. Chromium
+	// reads the port only inline: after a bare switch the value is a URL to open.
+	if (!launchArgs.some(arg => arg.startsWith("--remote-debugging-port=") && Number(arg.split("=")[1]) > 0)) {
+		launchArgs.push("--remote-debugging-pipe", "--remote-debugging-port=0");
+	}
+	const pipe = launchArgs.includes("--remote-debugging-pipe");
+	const activePortFile = Bun.file(path.join(profileDir, "DevToolsActivePort"));
 	try {
+		// A reused profile can hold the file of a browser that was killed.
+		const staleActivePort = pipe ? await readActivePort(activePortFile) : undefined;
 		if (userDataDir) await seedOwnedProfilePreferences(userDataDir);
 		const executablePath = await ensureChromiumExecutable();
 		const browser = await puppeteer.launch({
@@ -681,9 +719,54 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 			],
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
 		});
-		return { browser, userDataDir };
+		try {
+			const wsEndpoint = pipe ? await activePortEndpoint(activePortFile, staleActivePort) : browser.wsEndpoint();
+			return { browser, wsEndpoint, userDataDir };
+		} catch (error) {
+			await closeLaunchedBrowser(browser);
+			throw error;
+		}
 	} catch (error) {
 		if (userDataDir) await removeUserDataDir(userDataDir);
+		throw error;
+	}
+}
+
+/** Close a browser {@link launchHeadlessBrowser} started, force-killing its process tree when the close hangs. */
+export async function closeLaunchedBrowser(browser: Browser): Promise<void> {
+	const proc = browser.process();
+	try {
+		await withTimeout(browser.close(), HEADLESS_CLOSE_TIMEOUT_MS, "Timed out closing headless browser");
+	} catch (err) {
+		logger.debug("Failed to close headless browser; force-killing", { error: toError(err).message });
+		if (proc?.pid !== undefined) await gracefulKillTreeOnce(proc.pid).catch(() => undefined);
+	}
+}
+
+/**
+ * The browser WebSocket endpoint Chromium publishes in `DevToolsActivePort` (port,
+ * then browser target path) once its `--remote-debugging-port=0` server listens.
+ * Every launch publishes a new browser target path, so `stale`, the file found
+ * before the launch, is never this browser's.
+ */
+async function activePortEndpoint(file: BunFile, stale: string | undefined): Promise<string> {
+	const deadline = Date.now() + DEVTOOLS_ACTIVE_PORT_TIMEOUT_MS;
+	for (;;) {
+		const published = await readActivePort(file);
+		if (published !== undefined && published !== stale) {
+			const [port, browserPath] = published.split("\n");
+			if (port && browserPath) return `ws://127.0.0.1:${port}${browserPath}`;
+		}
+		if (Date.now() >= deadline) throw new Error(`Chromium did not publish its DevTools port in ${file.name}`);
+		await Bun.sleep(50);
+	}
+}
+
+async function readActivePort(file: BunFile): Promise<string | undefined> {
+	try {
+		return await file.text();
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
 		throw error;
 	}
 }

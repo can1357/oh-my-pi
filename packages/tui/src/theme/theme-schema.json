@@ -419,7 +419,7 @@
 				},
 				"ansi": {
 					"type": "array",
-					"description": "ANSI colors 0-15",
+					"description": "ANSI colors 0-15; also the palette colorful Markdown (tui.colorfulMarkdown) paints headings, emphasis, inline code and table headers from",
 					"items": { "$ref": "#/$defs/colorValue" },
 					"minItems": 16,
 					"maxItems": 16

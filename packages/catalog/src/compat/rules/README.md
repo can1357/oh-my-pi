@@ -415,6 +415,8 @@ auth "anthropic" {
 
 `org-scoped-identity #true` keeps credentials and usage reports for different organizations separate even when they share an email; absent or `#false` uses ordinary account identity. `oauth-token-env` takes one or more ordered, non-empty env names carrying this provider's own OAuth bearer. When present, availability ignores other provider-env aliases, and usage probes accept only stored OAuth credentials or the first set bearer from that list; absent providers keep the ordinary API-key env behavior.
 
+`login-subscription #true` marks login-sourced API keys as subscription billing, leaving pasted and environment keys metered; absent or `#false` keeps all API keys metered.
+
 Login kinds:
 
 - `login "api-key" { auth-url "…"; instructions "…"; prompt "…" placeholder="…"; empty-fallback "…"; normalize "strip-bearer"; validate … }` — `validate "chat-completions" base-url= model= tolerate-model-denied= max-tokens-field= max-tokens=`, `validate "anthropic-messages" base-url= model=`, or `validate "models-endpoint" url= base-url-env= base-url-path= headers-hook=` (`base-url-path`, default `/models`, is appended to the `base-url-env` value and needs it); all accept `label=` (error-message label, defaults to `name`), `optional=#true` (only auth failures reject), and `trust-forbidden=#true` (requires `optional=#true`; a 403 no longer rejects, so only a 401 does).

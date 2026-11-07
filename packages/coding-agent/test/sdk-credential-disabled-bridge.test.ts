@@ -457,6 +457,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 				assistantThinkingRenderers: [],
 				assistantTextDisplayRenderers: [],
 				assistantTextRenderers: [],
+				transcriptPresenters: [],
 				linkSchemes: [],
 				fileWriteFallbackHandlers: [],
 				fileDeleteFallbackHandlers: [],

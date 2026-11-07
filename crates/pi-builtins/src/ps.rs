@@ -13,14 +13,13 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use brush_core::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
 use clap::Parser;
 use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
 
 use crate::{
-	host::ShellPaths,
+	host::{INTERRUPTED_EXIT_CODE, ProcContext, Process, ShellPaths},
 	proc_select::{parse_group_list, parse_i32_list, parse_terminal_list, parse_user_list},
-	proc_snapshot::{ProcInfo, ThreadInfo},
+	proc_snapshot::{CpuTimes, ProcInfo, ThreadInfo},
 };
 
 #[derive(Parser)]
@@ -255,7 +254,7 @@ struct PsProcessRow {
 	start_time:    u64,
 	started_at:    Option<SystemTime>,
 	age:           Option<Duration>,
-	cpu_time:      Option<Duration>,
+	cpu_times:     Option<CpuTimes>,
 	virtual_size:  Option<u64>,
 	resident_size: Option<u64>,
 	thread_count:  Option<u32>,
@@ -311,7 +310,7 @@ impl PsProcessRow {
 			start_time: process.start_time(),
 			started_at: age.and_then(|age| now.checked_sub(age)),
 			age,
-			cpu_time: process.cpu_time(),
+			cpu_times: process.cpu_times(),
 			virtual_size: process.virtual_bytes(),
 			resident_size: process.resident_bytes(),
 			thread_count: process.thread_count(),
@@ -341,9 +340,13 @@ impl PsProcessRow {
 		process.into_iter().chain(threads)
 	}
 
+	fn cpu_time(&self) -> Option<Duration> {
+		self.cpu_times.map(CpuTimes::total)
+	}
+
 	fn cpu_percent(&self) -> Option<f64> {
 		let age = self.age?.as_secs_f64();
-		let cpu_time = self.cpu_time?.as_secs_f64();
+		let cpu_time = self.cpu_time()?.as_secs_f64();
 		Some(if age > 0.0 { 100.0 * cpu_time / age } else { 0.0 })
 	}
 
@@ -353,33 +356,28 @@ impl PsProcessRow {
 	}
 }
 
-impl builtins::Command for PsCommand {
-	type Error = brush_core::Error;
+impl Process for PsCommand {
+	const USES_PATHS: bool = true;
 
-	fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
-		let argv = self.argv.clone();
-		let paths = ShellPaths::new(&context);
+	fn run(&self, context: &ProcContext) -> impl Future<Output = io::Result<i32>> + Send {
 		async move {
-			let options = match parse_ps_args(&argv, &paths) {
+			let options = match parse_ps_args(&self.argv, context.paths()) {
 				Ok(ParsePsResult::Options(options)) => *options,
 				Ok(ParsePsResult::Help) => {
 					write_ps_help(context.stdout())?;
-					return Ok(ExecutionResult::success());
+					return Ok(0);
 				},
 				Ok(ParsePsResult::Version) => {
 					writeln!(context.stdout(), "ps {}", env!("CARGO_PKG_VERSION"))?;
-					return Ok(ExecutionResult::success());
+					return Ok(0);
 				},
 				Err((code, message)) => {
 					writeln!(context.stderr(), "ps: {message}")?;
-					return Ok(ExecutionResult::new(code));
+					return Ok(code.into());
 				},
 			};
 			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
+				return Ok(INTERRUPTED_EXIT_CODE);
 			}
 
 			let mut processes = ProcInfo::all();
@@ -425,16 +423,21 @@ impl builtins::Command for PsCommand {
 			sort_ps_rows(&mut rows, &options.sort);
 			let columns = ps_columns(&options);
 			let output = render_ps_table(&rows, &columns, options.no_headers);
-			if let Err(err) = write!(context.stdout(), "{output}") {
+			let write_result = context.stdout().write_all(output.as_bytes());
+			let written = match write_result {
+				Ok(()) => context.flush_output().await,
+				Err(err) => Err(err),
+			};
+			if let Err(err) = written {
 				if err.kind() == io::ErrorKind::BrokenPipe {
-					return Ok(ExecutionResult::new(crate::host::SIGPIPE_EXIT_CODE as u8));
+					return Ok(crate::host::SIGPIPE_EXIT_CODE);
 				}
-				return Err(err.into());
+				return Err(err);
 			}
 			Ok(if rows.is_empty() {
-				ExecutionResult::new(1)
+				1
 			} else {
-				ExecutionResult::success()
+				0
 			})
 		}
 	}
@@ -697,6 +700,7 @@ fn parse_ps_format(
 			"etimes" => PsField::ElapsedSeconds,
 			"time" | "cputime" | "bsdtime" => PsField::CpuTime,
 			"times" | "cputimes" => PsField::CpuSeconds,
+			"utime" | "putime" => PsField::UserTime,
 			"pcpu" | "%cpu" => PsField::CpuPercent,
 			"c" => PsField::CpuInteger,
 			"pmem" | "%mem" => PsField::MemPercent,
@@ -924,7 +928,7 @@ fn sort_ps_rows(rows: &mut [PsProcessRow], sort: &[PsSort]) {
 					(left, right) => left.is_some().cmp(&right.is_some()),
 				},
 				PsSortField::Mem => left.resident_size.cmp(&right.resident_size),
-				PsSortField::Time => left.cpu_time.cmp(&right.cpu_time),
+				PsSortField::Time => left.cpu_time().cmp(&right.cpu_time()),
 				PsSortField::Start => left.start_time.cmp(&right.start_time),
 				PsSortField::Command => left.command.cmp(&right.command),
 			};
@@ -1101,7 +1105,7 @@ fn render_ps_value(
 			.age
 			.map_or_else(|| "?".to_string(), |age| age.as_secs().to_string()),
 		PsField::CpuTime => row
-			.cpu_time
+			.cpu_time()
 			.map_or_else(|| "?".to_string(), format_ps_elapsed),
 		PsField::CpuPercent => row
 			.cpu_percent()
@@ -1159,7 +1163,7 @@ fn render_ps_value(
 			.major_faults
 			.map_or_else(|| "?".to_string(), |value| value.to_string()),
 		PsField::CpuSeconds => row
-			.cpu_time
+			.cpu_time()
 			.map_or_else(|| "?".to_string(), |time| time.as_secs().to_string()),
 		PsField::Size => row
 			.virtual_size
@@ -1167,8 +1171,12 @@ fn render_ps_value(
 			.map_or_else(|| "?".to_string(), |(bytes, page)| bytes.div_ceil(page).to_string()),
 		PsField::Command => row.command.clone(),
 		PsField::Args => row.args.clone(),
-		// Only threads split CPU time into user and system.
-		PsField::UserTime | PsField::SystemTime => "?".to_string(),
+		PsField::UserTime => row
+			.cpu_times
+			.map_or_else(|| "?".to_string(), |times| format_ps_split_time(times.user)),
+		PsField::SystemTime => row
+			.cpu_times
+			.map_or_else(|| "?".to_string(), |times| format_ps_split_time(times.system)),
 	}
 }
 
@@ -1185,14 +1193,14 @@ fn render_ps_thread_value(index: usize, thread: &ThreadInfo, field: PsField) -> 
 			Some(policy) => format!("{priority}{policy}"),
 			None => priority.to_string(),
 		})),
-		PsField::UserTime => known(thread.user_time.map(format_ps_thread_time)),
-		PsField::SystemTime => known(thread.system_time.map(format_ps_thread_time)),
+		PsField::UserTime => known(thread.user_time.map(format_ps_split_time)),
+		PsField::SystemTime => known(thread.system_time.map(format_ps_split_time)),
 		_ => return None,
 	})
 }
 
-/// CPU time as `M:SS.cc`, Apple `ps`'s UTIME/STIME format.
-fn format_ps_thread_time(time: Duration) -> String {
+/// User or system CPU time as `M:SS.cc`, Apple `ps`'s UTIME/STIME format.
+fn format_ps_split_time(time: Duration) -> String {
 	let centis = (time.as_micros() + 5_000) / 10_000;
 	format!("{}:{:02}.{:02}", centis / 6_000, centis / 100 % 60, centis % 100)
 }
@@ -1391,6 +1399,13 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_apple_user_time_field() {
+		let mut columns = Vec::new();
+		parse_ps_format("utime,putime", &mut columns).expect("Apple user-time keywords");
+		assert!(columns.iter().all(|column| matches!(column.field, PsField::UserTime)));
+	}
+
+	#[test]
 	fn rejects_unknown_output_field() {
 		let error = parse_ps_format("pid,definitely_not_a_field", &mut Vec::new())
 			.expect_err("unknown fields must fail");
@@ -1466,11 +1481,11 @@ mod tests {
 	}
 
 	#[test]
-	fn formats_thread_time_with_centisecond_rounding() {
-		assert_eq!(format_ps_thread_time(Duration::from_micros(4_999)), "0:00.00");
-		assert_eq!(format_ps_thread_time(Duration::from_micros(5_000)), "0:00.01");
-		assert_eq!(format_ps_thread_time(Duration::from_micros(59_995_000)), "1:00.00");
-		assert_eq!(format_ps_thread_time(Duration::from_secs(3_725)), "62:05.00");
+	fn formats_split_time_with_centisecond_rounding() {
+		assert_eq!(format_ps_split_time(Duration::from_micros(4_999)), "0:00.00");
+		assert_eq!(format_ps_split_time(Duration::from_micros(5_000)), "0:00.01");
+		assert_eq!(format_ps_split_time(Duration::from_micros(59_995_000)), "1:00.00");
+		assert_eq!(format_ps_split_time(Duration::from_secs(3_725)), "62:05.00");
 	}
 
 	#[test]

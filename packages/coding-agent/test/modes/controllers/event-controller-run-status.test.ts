@@ -167,4 +167,29 @@ describe("EventController run status while prompts wait on the user", () => {
 
 		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
 	});
+
+	it("judges a focused subagent's tool call by the subagent's own settings and session approvals", async () => {
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
+		let approved = false;
+		const controller = new EventController(
+			createInteractiveModeContext({
+				viewSession: {
+					getToolByName: () => bash,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+					hasSessionApproval: (key: string) => approved && key === "bash\0exec",
+				},
+			}),
+		);
+
+		// The root session runs yolo; the focused subagent asks before exec-tier calls.
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "make" }));
+		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
+
+		approved = true;
+		report.mockClear();
+		await controller.handleEvent(toolStart("bash-2", "bash", { command: "make" }));
+		expect(report).not.toHaveBeenCalledWith(expect.objectContaining({ state: "blocked" }));
+	});
 });

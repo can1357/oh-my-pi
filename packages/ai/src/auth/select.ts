@@ -972,22 +972,16 @@ export class CredentialSelector {
 			}
 		}
 
-		const passes: Array<{
-			allowBlocked: boolean;
-			enforcePlanRequirement: boolean;
-			enforceAccounts: boolean;
-		}> =
-			strictCredentialIndex === undefined
-				? [
-						{ allowBlocked: false, enforcePlanRequirement, enforceAccounts },
-						{ allowBlocked: true, enforcePlanRequirement, enforceAccounts },
-					]
-				: [{ allowBlocked: false, enforcePlanRequirement, enforceAccounts }];
-		if (strictCredentialIndex === undefined && enforcePlanRequirement) {
-			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
-		}
-		if (strictCredentialIndex === undefined && enforceAccounts) {
-			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		const passes = [{ allowBlocked: false, enforcePlanRequirement, enforceAccounts }];
+		// A strict pin keeps only that pass: no blocked retry, and no discovery or
+		// plan-gate relaxation for an account known not to serve this model.
+		if (strictCredentialIndex === undefined) {
+			// Discovery may have observed only part of the pool. Try other unblocked
+			// accounts before reusing a blocked discovery match, without relaxing plan gates.
+			if (enforceAccounts) passes.push({ allowBlocked: false, enforcePlanRequirement, enforceAccounts: false });
+			passes.push({ allowBlocked: true, enforcePlanRequirement, enforceAccounts });
+			if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
+			if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
 		}
 		// Blocked candidates rank earliest-unblock first, which would route a
 		// blocked explicit pin to an equally blocked sibling. Only non-strict

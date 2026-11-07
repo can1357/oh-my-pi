@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-catalog",
-	"version": "18.16.0",
+	"version": "18.18.0",
 	"description": "Model catalog for omp: bundled model database, provider discovery descriptors, model identity, classification, and equivalence",
 	"keywords": [
 		"ai",
@@ -73,7 +73,7 @@
 	},
 	"scripts": {
 		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
-		"check:types": "tsgo -p tsconfig.json --noEmit",
+		"check:types": "bun check --no-script -p tsconfig.json",
 		"lint": "oxlint .",
 		"test": "bun test --parallel",
 		"fix": "oxlint --fix --fix-suggestions . && bun run fmt",

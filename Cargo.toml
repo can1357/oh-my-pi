@@ -16,8 +16,6 @@ members = [
    "crates/pi-vfs",
    "crates/pi-voice",
    "crates/pi-walker",
-   "crates/vendor/brush-core",
-   "crates/vendor/brush-parser",
    "crates/vendor/cfg_aliases",
    "crates/vendor/grep-searcher",
    "crates/vendor/napi",
@@ -26,18 +24,15 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.16.0"
+version = "18.18.0"
 edition = "2024"
+rust-version = "1.101"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
 homepage = "https://omp.sh/"
 repository = "https://github.com/can1357/oh-my-pi"
 
 [patch.crates-io]
-brush-core = { path = "crates/vendor/brush-core" }
-# brush-parser 0.4.0 (latest release) re-parses `$(...)` bodies without
-# here-document awareness; the vendored copy fixes it (see its README.md).
-brush-parser = { path = "crates/vendor/brush-parser" }
 # portable-pty 0.9.0 pins nix 0.28, whose cfg_aliases 0.1.1 expansion emits
 # future-incompatible trailing semicolons.
 cfg_aliases = { path = "crates/vendor/cfg_aliases" }
@@ -128,6 +123,12 @@ split-debuginfo = "unpacked"
 opt-level = 2
 codegen-units = 256
 debug = false
+
+# pi-shell's bash engine recurses per nesting level (arithmetic, parser);
+# unoptimized frames overflow the 2 MiB test-thread stack before its recursion
+# limits hit.
+[profile.dev.package.pi-shell]
+opt-level = 1
 
 [workspace.lints.rust]
 # ──────────────────────────────────────────────────────────────────────────────
@@ -235,6 +236,7 @@ assert_is_empty = "allow" # `is_empty()` states intent without brittle type anno
 # ──────────────────────────────────────────────────────────────────────────────
 missing_errors_doc = "allow" # Documenting every error return is often redundant
 missing_panics_doc = "allow" # Not every panic needs docs, especially assert!
+tabs_in_doc_comments = "allow" # rustfmt formats doc examples with hard tabs (format_code_in_doc_comments)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Complexity
@@ -257,8 +259,18 @@ pi-voice = { path = "crates/pi-voice" }
 pi-walker = { path = "crates/pi-walker" }
 pi-vcs = { path = "crates/pi-vcs" }
 pi-vfs = { path = "crates/pi-vfs" }
-brush-core = { path = "crates/vendor/brush-core" }
 pi-builtins = { path = "crates/pi-builtins" }
+# Third-party crates of pi-shell's bash engine (`crates/pi-shell/src/bash`),
+# at the versions of the workspace it came from.
+blake3 = { version = "1.8.7", features = ["rayon"] }
+bstr = { version = "1.13.1", features = ["serde"] }
+encoding_rs = "0.8.42"
+hashbrown = "0.17.1"
+jiff = "0.2.38"
+libm = "0.2.16"
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+strum = { version = "0.28.0", features = ["derive"] }
+tempfile = "3.27.0"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Async Runtime & Concurrency
@@ -289,21 +301,19 @@ bytes = "1"
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI & Configuration
 # ──────────────────────────────────────────────────────────────────────────────
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Text Processing & Parsing
 # ──────────────────────────────────────────────────────────────────────────────
 pdf-inspector = "1"
 regex = "1"
-similar = "3.2.0"
 fontdue = { version = "0.9", default-features = false }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data Structures - Collections
 # ──────────────────────────────────────────────────────────────────────────────
 phf = { version = "0.14", features = ["macros"] }
-heapless = "0.9"
 smallvec = { version = "1.16.1", features = [
    "serde",
    "write",
@@ -325,7 +335,7 @@ webrtc = "0.17.2"
 # ──────────────────────────────────────────────────────────────────────────────
 # System & Platform
 # ──────────────────────────────────────────────────────────────────────────────
-libc = "0.2"
+libc = "0.2.191"
 windows-sys = { version = "0.61", features = [
    "Win32_Foundation",
    "Win32_Globalization",
@@ -335,9 +345,13 @@ windows-sys = { version = "0.61", features = [
    "Win32_Storage_FileSystem",
    "Win32_Storage_ProjectedFileSystem",
    "Win32_System_Com",
+   "Win32_System_Console",
    "Win32_System_LibraryLoader",
    "Win32_System_IO",
    "Win32_System_Ioctl",
+   "Win32_System_JobObjects",
+   "Win32_System_Pipes",
+   "Win32_System_SystemInformation",
    "Win32_System_Threading",
 ] }
 # Transitive-only pin (wired through crates/pi-natives' `cfg(false)` target
@@ -362,7 +376,6 @@ napi-derive = "3"
 # ──────────────────────────────────────────────────────────────────────────────
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 clipboard-win = "5.4"
-icy_sixel = "0.7"
 portable-pty = "0.9"
 shlex = "2"
 
@@ -372,6 +385,7 @@ shlex = "2"
 globset = "0.4"
 grep-matcher = "0.1"
 grep-pcre2 = "0.1"
+pcre2-sys = "0.2.10"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
@@ -394,7 +408,6 @@ zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
 # (cannot find macro `vec` in alloc-only context).
 tinyvec = "=1.13.3"
 png = "0.18"
-inferno = { version = "0.12", default-features = false }
 # Oniguruma, not fancy-regex: onig is already linked (pi-builtins), and its
 # compiled grammar regexes are ~5x smaller and faster (TS+TSX warm: 29 vs 149 MB
 # RSS; a 16.8k-line .d.ts highlights in 226 vs 1166 ms). When upgrading, re-sync
@@ -418,14 +431,9 @@ html-to-markdown-rs = { version = "3.18.3", default-features = false }
 # ──────────────────────────────────────────────────────────────────────────────
 xutf = "1.5"
 zstd = "0.14"
-# The version brush-core builds on; bump with it.
 fancy-regex = "0.17"
 tiktoken-rs = "0.12"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Shell Parsing
-# ──────────────────────────────────────────────────────────────────────────────
-brush-parser = { path = "crates/vendor/brush-parser" }
 # ──────────────────────────────────────────────────────────────────────────────
 # Version Control (in-process git + jujutsu)
 # ──────────────────────────────────────────────────────────────────────────────

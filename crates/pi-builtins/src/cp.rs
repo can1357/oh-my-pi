@@ -20,7 +20,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, value_parser};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use pi_vfs::{
@@ -40,7 +39,7 @@ use uucore::{
 
 use crate::{
 	file_backup::{backup_display, backup_path, determine_backup_mode, determine_backup_suffix},
-	host::{Host, Utility, format_usage, matches_parser, strip_errno, util},
+	host::{Host, Utility, format_usage, matches_parser, strip_errno},
 	progress::stderr_draw_target,
 };
 
@@ -398,11 +397,6 @@ impl Utility for Cp {
 			},
 		}
 	}
-}
-
-/// Creates the `cp` builtin registration.
-pub(crate) fn cp_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Cp, SE>()
 }
 
 /// Writes `<utility>: <message>` to stderr, named after the running utility

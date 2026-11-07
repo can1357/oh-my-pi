@@ -46,6 +46,7 @@ function extension(name: string, handler: (event: BeforeAgentStartEvent) => Prom
 		assistantThinkingRenderers: [],
 		assistantTextDisplayRenderers: [],
 		assistantTextRenderers: [],
+		transcriptPresenters: [],
 		linkSchemes: [],
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],

@@ -53,6 +53,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { localSession } from "../helpers/local-session";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
@@ -67,7 +68,11 @@ function makeTempDir(prefix: string): string {
 
 /** Inert shared manager exposing the members a revived subagent reads: its tools and change feed. */
 function fakeMcpManager(getTools: () => Array<{ name: string; label: string }>): MCPManager {
-	return { getTools, addToolsChangedListener: () => () => {} } as unknown as MCPManager;
+	return {
+		getTools,
+		addToolsChangedListener: () => () => {},
+		openToolScope: () => {},
+	} as unknown as MCPManager;
 }
 
 function createRef(sessionFile: string): AgentRef {
@@ -79,6 +84,7 @@ function createRef(sessionFile: string): AgentRef {
 		status: "parked",
 		session: null,
 		sessionFile,
+		generation: 0,
 		createdAt: 0,
 		lastActivity: 0,
 	};
@@ -297,7 +303,12 @@ describe("persisted subagent revival", () => {
 			displayName: "Parent",
 			kind: "sub",
 			parentId: "Main",
-			session: { get sessionId() { return directParentSessionId; } } as AgentSession,
+			session: {
+				get sessionId() {
+					return directParentSessionId;
+				},
+				activeToolExecutionUpdates: () => [],
+			} as unknown as AgentSession,
 		}) : undefined;
 		const ref = registry.register({ ...createRef(sessionFile), parentId: parent?.id ?? "Main" });
 		let revived: AgentSession | undefined;
@@ -315,7 +326,8 @@ describe("persisted subagent revival", () => {
 				strict: true,
 			});
 			authStorage.sessions.pin("anthropic", directParentSessionId, accountB.credentialId, { strict: true });
-			revived = await reviver(ref);
+			// No worker pool in tests: the reviver returns the in-process session.
+			revived = (await reviver(ref)) as AgentSession;
 			expect(authStorage.sessions.mode("anthropic", revived.sessionId)).toBe("strict");
 			expect(authStorage.oauth.accounts("anthropic", revived.sessionId).find(account => account.active)?.accountId)
 				.toBe("parent-b");
@@ -400,7 +412,7 @@ describe("persisted subagent revival", () => {
 		};
 		let revived: AgentSession | undefined;
 		try {
-			revived = await reviver(ref);
+			revived = localSession(await reviver(ref));
 			const read = revived.getToolByName("read");
 			if (!read) throw new Error("Missing revived read tool");
 			await expect(read.execute("denied", { path: blockedPath })).rejects.toThrow("Owner policy denied the read");
@@ -455,7 +467,7 @@ describe("persisted subagent revival", () => {
 
 		let revived: AgentSession | undefined;
 		try {
-			revived = await reviver(ref);
+			revived = localSession(await reviver(ref));
 			const read = revived.getToolByName("read");
 			if (!read) throw new Error("Missing restricted read tool");
 			await expect(read.execute("denied", { path: blockedPath })).rejects.toThrow(
@@ -649,6 +661,25 @@ describe("persisted subagent revival", () => {
 		// Restricted") for a cold-revived ref, not the durable agent definition
 		// name. `agents: [scout]` rule scoping must key on the latter.
 		expect(capturedOptions?.agentName).toBe("scout");
+	});
+
+	it("keys a revived subagent's soft request budget on its persisted agent name, not the ref display name", async () => {
+		const cwd = makeTempDir("@pi-revive-soft-budget-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "scout" });
+		let capturedBudget: number | undefined;
+		vi.spyOn(executorModule, "attachIrcWakeTurnMonitor").mockImplementation((_session, options) => {
+			capturedBudget = options.softRequestBudget;
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () => ({ session: createRevivedSession([]).session }) as CreateAgentSessionResult,
+		);
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedBudget).toBe(100);
 	});
 
 	it("restores the live account pool for the persisted agent name, so a revived agent stays restricted", async () => {
@@ -2092,7 +2123,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		const ref = { ...createRef(path.join(cwd, "prompt-blocks.jsonl")), id: "prompt-blocks" };
 		const reviver = await createFactory(cwd)(ref);
 		if (!reviver) throw new Error("Expected a persisted reviver");
-		const session = await reviver(ref);
+		const session = localSession(await reviver(ref));
 		await session.prompt("follow-up");
 		await session.waitForIdle();
 		if (!revived) throw new Error("Expected the revive to create a session");
@@ -2143,7 +2174,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 			warm = createRecordingSession(options!.sessionManager!, buildPrompt, [{ content: ["next"] }]);
 			return { session: warm.session } as CreateAgentSessionResult;
 		});
-		const live = await lifecycle.ensureLive("prompt-blocks");
+		const live = localSession(await lifecycle.ensureLive("prompt-blocks"));
 		if (!warm || live !== warm.session) throw new Error("Expected a warm revive through the lifecycle");
 		// The next work-pool batch installs its yield contract, which rebuilds the base prompt.
 		batch = 2;
@@ -2177,7 +2208,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 			]);
 			return { session: warm.session } as CreateAgentSessionResult;
 		});
-		const live = await lifecycle.ensureLive("prompt-blocks");
+		const live = localSession(await lifecycle.ensureLive("prompt-blocks"));
 		if (!warm || live !== warm.session) throw new Error("Expected a warm revive through the lifecycle");
 		expect(live.getEnabledToolNames()).toEqual(spawnedTools);
 		await live.prompt("next");
@@ -2222,7 +2253,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 			);
 			return { session: warm.session } as CreateAgentSessionResult;
 		});
-		const live = await lifecycle.ensureLive("prompt-blocks");
+		const live = localSession(await lifecycle.ensureLive("prompt-blocks"));
 		if (!warm || live !== warm.session) throw new Error("Expected a warm revive through the lifecycle");
 		await live.prompt("next");
 		await live.waitForIdle();

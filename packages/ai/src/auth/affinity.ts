@@ -1,7 +1,13 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { getEnvApiKey } from "../env-api-key";
-import type { AuthCredential, OAuthCredential, SessionRestrictionLease, SessionsApi } from "./types";
+import type {
+	AuthCredential,
+	OAuthCredential,
+	SessionRestrictionLease,
+	SessionRoutingMode,
+	SessionsApi,
+} from "./types";
 import type { AuthCredentialStore } from "./store";
 import type { CredentialPool } from "./pool";
 import type { KeyOverrides } from "./cascade";
@@ -489,7 +495,7 @@ export class SessionAffinity implements SessionsApi {
 		return true;
 	}
 
-	mode(provider: string, sessionId: string): "automatic" | "strict" | "pinned" | "affinity" {
+	mode(provider: string, sessionId: string): SessionRoutingMode {
 		if (this.isAutomatic(provider, sessionId)) return "automatic";
 		const credential = this.get(provider, sessionId);
 		if (credential?.strict === true) return "strict";

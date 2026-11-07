@@ -4,7 +4,7 @@ import * as url from "node:url";
 import { applyHyperlinkSetting } from "../src/render/hyperlink";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { grepToolRenderer } from "@oh-my-pi/pi-tui/tools/grep";
+import { type GrepToolDetails, grepToolRenderer } from "@oh-my-pi/pi-tui/tools/grep";
 
 function extractLinkUris(text: string): string[] {
 	return [...text.matchAll(/\x1b\]8;[^;]*;([^\x1b]+)\x1b\\/g)].map(match => match[1]!);
@@ -59,6 +59,87 @@ describe("grepToolRenderer", () => {
 			.map(line => line.trimEnd());
 		const fileRows = plainLines.filter(line => line.endsWith(".ts"));
 		expect(fileRows).toEqual([`${uiTheme.tree.branch} src/a.ts`, `${uiTheme.tree.last} src/b.ts`]);
+	});
+
+	it("names the search scope right after the pattern, before the counts", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const result = {
+			content: [{ type: "text", text: "" }],
+			details: { matchCount: 1, fileCount: 1, scopePath: "src", displayContent: "## src/a.ts\n*1│needle" },
+		};
+		const header = sanitizeText(
+			grepToolRenderer
+				.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { pattern: "needle" })
+				.render(120)[0]!,
+		);
+		expect(header).toContain("Grep: needle in src 1 match · 1 file");
+		// A result rendered without its call args names only the scope, never a `?` pattern.
+		const argless = sanitizeText(
+			grepToolRenderer.renderResult(result, { expanded: false, isPartial: false }, uiTheme).render(120)[0]!,
+		);
+		expect(argless).toContain("Grep: in src 1 match · 1 file");
+		const call = sanitizeText(
+			grepToolRenderer
+				.renderCall({ pattern: "needle", path: "lib", case: false }, { expanded: false, isPartial: true }, uiTheme)
+				.render(120)[0]!,
+		);
+		expect(call).toContain("Grep: needle in lib case:insensitive");
+	});
+
+	it("omits the file count only when the header already names the single searched file", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const header = (details: GrepToolDetails) =>
+			sanitizeText(
+				grepToolRenderer
+					.renderResult(
+						{ content: [{ type: "text", text: "" }], details },
+						{ expanded: false, isPartial: false },
+						uiTheme,
+						{
+							pattern: "needle",
+						},
+					)
+					.render(120)[0]!,
+			);
+		// A single-file search prints no `#` headers; its scope already names the file.
+		const single = { matchCount: 2, fileCount: 1, displayContent: "*1│needle\n*5│needle" };
+		expect(header({ ...single, scopePath: "src/a.ts" })).toContain("Grep: needle in src/a.ts 2 matches");
+		expect(header({ ...single, scopePath: "src/a.ts" })).not.toContain("1 file");
+		// Without a scope in the header, `1 file` is the only file information left.
+		expect(header(single)).toContain("Grep: needle 2 matches · 1 file");
+	});
+
+	it("colors partial regex syntax without treating escaped punctuation as an operator", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const pattern = String.raw`^file\.(?:ts|tsx`;
+		const header = grepToolRenderer
+			.renderCall({ pattern, path: "src" }, { expanded: false, isPartial: true }, uiTheme)
+			.render(120)[0]!;
+
+		expect(sanitizeText(header)).toContain(`${pattern} in src`);
+		expect(header).toContain(`${uiTheme.getFgAnsi("syntaxKeyword")}^`);
+		expect(header).toContain(`${uiTheme.getFgAnsi("syntaxString")}\\.`);
+	});
+
+	it("shows the title and subject on an error, with the message on the next row", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const result = {
+			content: [{ type: "text", text: "Invalid regex pattern: unclosed group" }],
+			isError: true,
+		};
+		const lines = sanitizeText(
+			grepToolRenderer
+				.renderResult(result, { expanded: false, isPartial: false }, uiTheme, {
+					pattern: "(needle",
+					path: "src",
+				})
+				.render(120)
+				.join("\n"),
+		)
+			.split("\n")
+			.map(line => line.trimEnd());
+		expect(lines[0]).toContain("Grep: (needle in src");
+		expect(lines[1]).toContain("Invalid regex pattern: unclosed group");
 	});
 
 	it("keeps truncation status in the header without a bottom notice", async () => {

@@ -48,6 +48,22 @@ export type PrepareQueuedMessages = (
 	queue: QueuedMessageQueue,
 ) => QueuedMessagePreparation | undefined | Promise<QueuedMessagePreparation | undefined>;
 
+/**
+ * Synchronous arbiter over queued messages leaving a queue for delivery, for a
+ * queue whose messages someone else may withdraw concurrently (a session homed
+ * on another thread whose view pops them).
+ */
+export interface QueuedMessageGate {
+	/**
+	 * Called with the batch about to be removed from `queue` for delivery; returns
+	 * the candidates that must be dropped from the queue instead. The others are
+	 * claimed for delivery.
+	 */
+	claim(queue: QueuedMessageQueue, candidates: readonly AgentMessage[]): readonly AgentMessage[];
+	/** Called with claimed messages that left delivery undelivered (requeued, withdrawn, or cancelled). */
+	release(messages: readonly AgentMessage[]): void;
+}
+
 /** Called once an aside has been inserted into the agent's live context. */
 export const ASIDE_MESSAGE_COMMIT = Symbol("aside-message-commit");
 /** Symbol-keyed handoff for one finalized, tool-owned stream speculation session. */
@@ -278,6 +294,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getSteeringMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
 
+	/** Whether input is still owned by a queue and must be restored if a model call is aborted before it starts. */
+	isUndeliveredQueuedMessage?: (message: AgentMessage) => boolean;
+
 	/**
 	 * Peeks whether steering messages are queued, without consuming them.
 	 *
@@ -457,6 +476,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * then strips from arguments before executing tools.
 	 */
 	intentTracing?: boolean;
+	/** Schema description of the injected intent field; `PI_INTENT_DESC` overrides it. Default `concise intent`. */
+	intentDescription?: string;
 	/**
 	 * Strip tool descriptions (top-level + nested schema annotations) from the
 	 * provider-bound tool specs. Use when the full catalog is rendered into the
@@ -1255,8 +1276,16 @@ export interface AgentTool<
 	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
 
 	/**
-	 * Paths a call reads beyond its working directory, matched against restricted folders when it
-	 * reports no `approvalCacheTargets`. Unlike cache targets they never key a remembered grant.
+	 * Capture per-invocation targets after extension preflight, before final approval and execution.
+	 * The coding-agent wrapper calls this once with the final approval args, even without a prompt
+	 * or restricted folders. Restriction queries and approval details may then read the binding.
+	 */
+	bindApprovalTargets?: (args: unknown) => void;
+
+	/**
+	 * Query paths a call reads beyond its working directory, matched against restricted folders when
+	 * it reports no `approvalCacheTargets`. Never capture bindings here: this also runs before preflight.
+	 * Unlike cache targets these paths never key a remembered grant.
 	 */
 	approvalRestrictionPaths?: (args: unknown) => readonly string[] | undefined;
 

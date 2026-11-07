@@ -485,7 +485,10 @@ export interface ModelUsageHealthOptions {
 export type AuthApiKeyOptions = {
 	baseUrl?: string;
 	modelId?: string;
-	/** {@link oauthAccountKey}s of accounts known to serve `modelId` from multi-account discovery; OAuth selection prefers them and tries other accounts only as a last resort. */
+	/**
+	 * {@link oauthAccountKey}s known to serve `modelId` from discovery.
+	 * Unblocked matches win, then other unblocked plan-eligible accounts, before blocked fallbacks.
+	 */
 	accountIds?: readonly string[];
 	/**
 	 * Caller's cancel signal. Threaded into any broker-bound OAuth refresh so
@@ -887,6 +890,8 @@ export interface CredentialsApi {
 	 * Check if OAuth credentials are configured for a provider.
 	 */
 	hasOAuth(provider: string): boolean;
+	/** Check whether stored credentials use a subscription (OAuth or an opted-in login API key). */
+	hasSubscription(provider: string): boolean;
 	/**
 	 * Get OAuth credentials for a provider.
 	 */
@@ -1180,6 +1185,13 @@ export interface OAuthApi {
  */
 export type SessionRestrictionLease = symbol;
 
+/**
+ * Account-routing mode of one provider in one session: `automatic` = native routing
+ * (pinning disabled), `affinity` = automatic sticky account, `pinned` = explicit
+ * preference that may still fall back, `strict` = locked account with no fallback.
+ */
+export type SessionRoutingMode = "automatic" | "strict" | "pinned" | "affinity";
+
 /** Session credential affinity operations. */
 export interface SessionsApi {
 	/**
@@ -1255,7 +1267,7 @@ export interface SessionsApi {
 	/** Disable account pinning for this provider in this session and use native automatic routing. */
 	automatic(provider: string, sessionId: string): boolean;
 	/** Current account-routing mode for this provider and session. */
-	mode(provider: string, sessionId: string): "automatic" | "strict" | "pinned" | "affinity";
+	mode(provider: string, sessionId: string): SessionRoutingMode;
 }
 
 /** Usage reporting, observation, and provider configuration. */

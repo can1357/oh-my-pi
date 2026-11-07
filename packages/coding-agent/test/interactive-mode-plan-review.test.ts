@@ -109,6 +109,7 @@ function planReviewExtension(
 		assistantThinkingRenderers: [],
 		assistantTextDisplayRenderers: [],
 		assistantTextRenderers: [],
+		transcriptPresenters: [],
 		linkSchemes: [],
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],

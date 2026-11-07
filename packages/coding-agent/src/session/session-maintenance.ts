@@ -408,8 +408,8 @@ export interface SessionMaintenanceHost {
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
 	providerSessionState: Map<string, ProviderSessionState>;
-	/** Live `providers.openaiWebsockets` hint for provider calls. */
-	preferWebsockets(): boolean | undefined;
+	/** Codex-only request preference from the live session setting. */
+	preferWebsockets(model: Model): boolean | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
@@ -1546,6 +1546,7 @@ export class SessionMaintenance {
 						{
 							promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 							extraContext: compactionPrep.hookContext,
+							loadExtraContext: compactionPrep.loadMemoryContext,
 							// The prompt the live turn actually sent — a per-turn
 							// `before_agent_start` override included — so a provider-native
 							// compaction shares the live request's cached prefix.
@@ -1750,9 +1751,7 @@ export class SessionMaintenance {
 		) {
 			throw new CompactionCancelledError(undefined, { cause: signalController.signal.reason });
 		}
-		const prepared = await this.#prepareCompactionFromHooks(preparation, hookCompaction, signalController.signal, {
-			collectMemoryContext: false,
-		});
+		const prepared = await this.#prepareCompactionFromHooks(preparation, hookCompaction, signalController.signal);
 		if (
 			signalController.signal.aborted ||
 			!this.#usesExperimentalContextManagement() ||
@@ -1916,9 +1915,7 @@ export class SessionMaintenance {
 				return COMPACTION_CHECK_NONE;
 			}
 
-			const prepared = await this.#prepareCompactionFromHooks(preparation, hookCompaction, controller.signal, {
-				collectMemoryContext: false,
-			});
+			const prepared = await this.#prepareCompactionFromHooks(preparation, hookCompaction, controller.signal);
 			if (
 				controller.signal.aborted ||
 				!this.#usesExperimentalContextManagement() ||
@@ -2036,9 +2033,8 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Ask the active memory backend for an extra-context block to splice into
-	 * the compaction summary prompt. Both the manual and auto compaction paths
-	 * funnel through this helper so the behaviour stays identical.
+	 * Ask the active memory backend for context when a compaction summary
+	 * consumes it. Native OpenAI compaction uses the live prompt instead.
 	 *
 	 * Failures are swallowed: a memory backend going sideways MUST NOT block
 	 * compaction (which is itself the recovery path for context overflow).
@@ -2443,6 +2439,7 @@ export class SessionMaintenance {
 				{
 					promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 					extraContext: compactionPrep.hookContext,
+					loadExtraContext: compactionPrep.loadMemoryContext,
 					remoteSystemPrompt: this.#host.agent.state.systemPrompt,
 					codexCompaction,
 					// Isolate from the live turn: remote compaction transports key
@@ -2748,16 +2745,8 @@ export class SessionMaintenance {
 		);
 		// The live summary, not one rebuilt from the entry: a resumed session's
 		// archive frames are blob references only the session manager resolves.
-		// Context notes can precede it. An archive with frames but no source text
-		// (written before `Archive.text`) cannot be re-rendered into the new one,
-		// so its frames are not counted as replaced: crediting them would let a
-		// smaller candidate drop the only copy of that history.
-		const previousArchive = snapcompact.getPreservedArchive(preparation.previousPreserveData);
-		const carriesStandingSummary =
-			!previousArchive ||
-			previousArchive.frames.length === 0 ||
-			snapcompact.archiveSourceText(previousArchive) !== undefined;
-		const standingSummary = carriesStandingSummary
+		// Context notes can precede it.
+		const standingSummary = this.#replacesStandingSummary(preparation)
 			? this.#host.messages().find(message => message.role === "compactionSummary")
 			: undefined;
 		if (standingSummary) tokens += this.#tokenizer.countMessage(standingSummary);
@@ -2765,6 +2754,18 @@ export class SessionMaintenance {
 		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages, opts);
 		tokens += this.#tokenizer.countMessages(preparation.recentMessages, opts);
 		return tokens;
+	}
+
+	/**
+	 * Whether a new snapcompact archive replaces the standing summary. An archive
+	 * with frames but no source text (written before `Archive.text`) cannot be
+	 * re-rendered into the new one: its text edges carry over, its imaged middle
+	 * does not. Its summary is not counted as replaced: crediting it would let a
+	 * smaller candidate drop the only copy of that history.
+	 */
+	#replacesStandingSummary(preparation: CompactionPreparation): boolean {
+		const previousArchive = snapcompact.getPreservedArchive(preparation.previousPreserveData);
+		return !previousArchive || previousArchive.frames.length === 0 || previousArchive.text !== undefined;
 	}
 
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
@@ -3753,7 +3754,7 @@ export class SessionMaintenance {
 						promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
 						remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(remoteCompactionPolicyModel(candidate)),
 						providerSessionState: this.#host.providerSessionState,
-						preferWebsockets: this.#host.preferWebsockets(),
+						preferWebsockets: this.#host.preferWebsockets(candidate),
 						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 						// Route every summarization HTTP request through the
 						// session's side-stream transport so the provider
@@ -3787,20 +3788,8 @@ export class SessionMaintenance {
 	async #prepareCompactionFromHooks(
 		preparation: CompactionPreparation,
 		hookCompaction: CompactionResult | undefined,
-		/** Aborts the backend recall when this compaction pass is cancelled or superseded. */
+		/** Aborts backend recall when compaction is cancelled or superseded. */
 		signal: AbortSignal,
-		options?: {
-			/**
-			 * Collect built-in remote memory-backend recall context for the LLM
-			 * summary. Notes-backed rollover consumes only preservation data, so
-			 * it passes `false`: no remote `recallForCompaction()` round-trip
-			 * whose recalled context would be discarded. Extension
-			 * `session.compacting` handlers still run for their preservation
-			 * data; this does not promise arbitrary extension hooks are
-			 * network-free.
-			 */
-			collectMemoryContext?: boolean;
-		},
 	): Promise<
 		| {
 				kind: "fromHook";
@@ -3815,6 +3804,7 @@ export class SessionMaintenance {
 		| {
 				kind: "needsLlm";
 				hookContext: string[] | undefined;
+				loadMemoryContext: () => Promise<string[] | undefined>;
 				hookPrompt: string | undefined;
 				preserveData: Record<string, unknown> | undefined;
 		  }
@@ -3836,13 +3826,6 @@ export class SessionMaintenance {
 			preserveData = result?.preserveData;
 		}
 
-		if (options?.collectMemoryContext !== false) {
-			const memoryBackendContext = await this.#collectMemoryBackendContext(preparation, signal);
-			if (memoryBackendContext) {
-				hookContext = hookContext ? [...hookContext, memoryBackendContext] : [memoryBackendContext];
-			}
-		}
-
 		if (hookCompaction) {
 			preserveData ??= hookCompaction.preserveData;
 			return {
@@ -3857,7 +3840,17 @@ export class SessionMaintenance {
 			};
 		}
 
-		return { kind: "needsLlm", hookContext, hookPrompt, preserveData };
+		let memoryContext: Promise<string[] | undefined> | undefined;
+		return {
+			kind: "needsLlm",
+			hookContext,
+			hookPrompt,
+			preserveData,
+			loadMemoryContext: () =>
+				(memoryContext ??= this.#collectMemoryBackendContext(preparation, signal).then(context =>
+					context ? [context] : undefined,
+				)),
+		};
 	}
 
 	/**
@@ -5638,9 +5631,23 @@ export class SessionMaintenance {
 									excludeEncryptedReasoning: true,
 								},
 							);
+							// A stored trigger estimate counts the whole standing summary; take
+							// back one a new archive cannot replace, as the local baseline does
+							// (which also prices the prepared region when that is set).
+							const unreplacedSummary =
+								options.triggerContextTokens !== undefined &&
+								options.preparedContextTokens === undefined &&
+								!this.#replacesStandingSummary(preparation)
+									? this.#host.messages().find(message => message.role === "compactionSummary")
+									: undefined;
 							const reductionBaseline =
 								options.triggerContextTokens !== undefined
-									? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
+									? Math.max(
+											0,
+											options.triggerContextTokens -
+												(options.pendingContextTokens ?? 0) -
+												(unreplacedSummary ? this.#tokenizer.countMessage(unreplacedSummary) : 0),
+										)
 									: this.#projectPreSnapcompactContextTokens(preparation);
 							const preparedReductionBaseline =
 								options.preparedContextTokens === undefined
@@ -5806,6 +5813,7 @@ export class SessionMaintenance {
 								{
 									promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 									extraContext: compactionPrep.hookContext,
+									loadExtraContext: compactionPrep.loadMemoryContext,
 									remoteSystemPrompt: this.#host.agent.state.systemPrompt,
 									metadata: this.#host.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
@@ -5828,7 +5836,7 @@ export class SessionMaintenance {
 										remoteCompactionPolicyModel(candidate),
 									),
 									providerSessionState: this.#host.providerSessionState,
-									preferWebsockets: this.#host.preferWebsockets(),
+									preferWebsockets: this.#host.preferWebsockets(candidate),
 									codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 									codexCompaction,
 									// This loop already retries the whole compaction attempt on
