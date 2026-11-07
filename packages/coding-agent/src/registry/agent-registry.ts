@@ -82,6 +82,8 @@ export interface AgentRef {
 	history?: AgentHistorySummary;
 	/** Run lifecycle milestones (launch is {@link createdAt}). */
 	lifecycle?: AgentRunLifecycle;
+	/** Executor owns the first prompt until provider dispatch or settlement, never inferred from running status. */
+	initialPromptPending?: boolean;
 }
 
 export type AgentRefExpectation = AgentRef | AgentSessionHandle;
@@ -130,6 +132,7 @@ export interface RegisterInput {
 	history?: AgentHistorySummary;
 	/** Run lifecycle milestones restored from persisted history, when known. */
 	lifecycle?: AgentRunLifecycle;
+	initialPromptPending?: boolean;
 }
 
 /** Public surface of the process-global agent registry, implemented locally on main and by a proxy in workers. */
@@ -146,6 +149,8 @@ export interface AgentRegistryApi {
 	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean;
 	/** Transition `id` to `status` when it still matches `expected`. */
 	setStatus(id: string, status: AgentStatus, expected?: AgentRefExpectation): boolean;
+	/** Release the initial brief reservation only for its owning session. */
+	clearInitialPromptPending(id: string, session: AgentSessionHandle): boolean;
 	/** Record that the current run handed over its final result. */
 	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean;
 	/** Accepted-but-running refs whose run already finished. */
@@ -230,6 +235,7 @@ export class AgentRegistry implements AgentRegistryApi {
 			activity: input.activity,
 			history: input.history,
 			lifecycle: input.lifecycle,
+			initialPromptPending: input.initialPromptPending,
 		};
 		Object.defineProperty(ref, kMintedRef, { value: true });
 		this.#refs.set(ref.id, ref);
@@ -297,6 +303,13 @@ export class AgentRegistry implements AgentRegistryApi {
 		}
 		ref.history = { ...ref.history, ...definedHistory };
 		this.#emit({ type: "metadata_changed", ref });
+		return true;
+	}
+
+	clearInitialPromptPending(id: string, session: AgentSessionHandle): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref || ref.session !== session) return false;
+		ref.initialPromptPending = false;
 		return true;
 	}
 

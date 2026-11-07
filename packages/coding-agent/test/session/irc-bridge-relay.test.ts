@@ -57,7 +57,10 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 	function makeStreamingChild() {
 		const steered: AgentMessage[] = [];
 		const host = {
-			agent: { steer: (message: AgentMessage) => steered.push(message) } as unknown as Agent,
+			agent: {
+				steer: (message: AgentMessage) => steered.push(message),
+				peekFollowUpQueue: () => [],
+			} as unknown as Agent,
 			isDisposed: () => false,
 			isStreaming: () => true,
 			planModeEnabled: () => false,

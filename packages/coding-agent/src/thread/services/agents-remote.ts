@@ -121,6 +121,10 @@ export class RemoteAgentRegistry implements AgentRegistryApi {
 		return this.#remote.callSync("markResultAccepted", id, expected, responseAt);
 	}
 
+	clearInitialPromptPending(id: string, session: AgentSessionHandle): boolean {
+		return this.#remote.callSync("clearInitialPromptPending", id, session);
+	}
+
 	staleAcceptedRuns(): AgentRef[] {
 		return this.#remote.callSync("staleAcceptedRuns");
 	}

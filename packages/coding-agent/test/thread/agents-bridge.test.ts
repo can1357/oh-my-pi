@@ -214,6 +214,26 @@ describe("agent bridging across subagent workers", () => {
 		);
 	});
 
+	it("queues IRC behind a worker child's brief and releases only the owning session's reservation", async () => {
+		const { probe } = await startWorker();
+		await probe.open("W1", { initialPromptPending: true });
+		await probe.open("Other", {});
+		const ref = liveRef("W1");
+		const remote = mirrorOf(ref.session);
+		expect(await probe.clearInitialPromptPending("W1", "Other")).toBe(false);
+		const receipt = await IrcBus.global().send({ from: "Main", to: "W1", body: "after the brief" });
+		expect(receipt.outcome).toBe("injected");
+		expect(await probe.localCustomTypes("W1")).toEqual([]);
+		await probe.prompt("W1", "initial brief");
+		await waitFor(() => remote.messages.some(message => message.role === "custom"));
+		expect(remote.messages.map(message => message.role)).toEqual(["user", "assistant", "custom", "assistant"]);
+		expect(await probe.clearInitialPromptPending("W1", "W1")).toBe(true);
+		expect(ref.initialPromptPending).toBe(false);
+		AgentRegistry.global().setStatus("W1", "running", ref);
+		const wake = await IrcBus.global().send({ from: "Main", to: "W1", body: "a later turn" });
+		expect(wake.outcome).toBe("woken");
+	});
+
 	it("detaches refs and rejects in-flight commands when the worker dies", async () => {
 		const { worker, probe } = await startWorker();
 		await probe.open("Parked", { sessionFile: "/tmp/agents-bridge-parked.jsonl", gated: true });
