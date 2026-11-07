@@ -1,4 +1,5 @@
 import { maskNonProse } from "./markdown-prose";
+import { isLocalExecutionDraft } from "./skill-tokens";
 import type { TypingWord } from "./typing-word";
 
 /**
@@ -60,6 +61,7 @@ export function lineContext(lines: readonly string[], line: number): SpellingDec
 export class ProseSource {
 	#text = "";
 	#mask = "";
+	#isLocalExecution = false;
 	#lineOffsets: number[] = [];
 
 	/** True when `[startCol, endCol)` of `context.line` is prose and the buffer is within the caps. */
@@ -70,6 +72,8 @@ export class ProseSource {
 		const line = context.lines[context.line];
 		if (line === undefined || line.length > MAX_PROSE_LINE_LENGTH || endCol > line.length) return false;
 		this.#prepare(context);
+		// Local-execution drafts are executable text, same reason isProseWord skips command lines.
+		if (this.#isLocalExecution) return false;
 		const lineOffset = this.#lineOffsets[context.line];
 		if (lineOffset === undefined) return false;
 		return this.#mask.slice(lineOffset + startCol, lineOffset + endCol).trim().length > 0;
@@ -78,6 +82,7 @@ export class ProseSource {
 	#prepare(context: SpellingDecorationContext): void {
 		if (this.#text === context.editorText) return;
 		this.#text = context.editorText;
+		this.#isLocalExecution = isLocalExecutionDraft(context.editorText);
 		this.#mask = maskNonProse(context.editorText);
 		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		this.#lineOffsets = new Array<number>(context.lines.length);

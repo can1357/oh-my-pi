@@ -102,6 +102,10 @@
 - F2 now opens the rename dialog in the resume picker in Ghostty, kitty and other terminals using the kitty keyboard protocol; F1 and F4 shortcuts work there too ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
 - Added `Component.nativeTrailers()`, which lets a transcript block add native blocks of its own directly after it. Trailing blocks stay visible while the block is collapsed.
 
+### Fixed
+
+- Disabled macOS spelling assistance for command execution with `!` and Python execution with `$` ([#12474](https://github.com/can1357/oh-my-pi/pull/12474) by [@aleister1102](https://github.com/aleister1102)).
+
 ## [18.15.0] - 2026-11-01
 
 ### Breaking Changes
