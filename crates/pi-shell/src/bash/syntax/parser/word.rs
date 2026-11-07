@@ -978,7 +978,10 @@ impl<'s> Parser<'s> {
 
 	/// `$(` seen: parse the command substitution.
 	fn dollar_paren(&mut self) -> PResult<WordPart> {
-		let (body, text) = self.comsub(b')', false)?;
+		let start = self.off();
+		let (body, text) = self
+			.comsub(b')', false)
+			.inspect_err(|_| self.comsub_start = start)?;
 		Ok(WordPart::Comsub(Box::new(Comsub { kind: ComsubKind::Dollar, body, text })))
 	}
 

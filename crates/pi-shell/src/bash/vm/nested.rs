@@ -121,12 +121,23 @@ pub fn start(
 		Input::Stdin => (BString::default(), true, "s"),
 		Input::Script(name) => {
 			let path = probe::absolute(&vp.cwd, name);
+			let regular =
+				match command_probe(k, cx, vp, &Probe::Stat { path: path.clone(), follow: true }) {
+					Err(key) => return Some(Flow::Block(key)),
+					Ok(ProbeResult::Stat(Some(stat))) => stat.kind == crate::bash::fs::StatKind::File,
+					_ => false,
+				};
 			match command_probe(k, cx, vp, &Probe::Read { path }) {
 				Err(key) => return Some(Flow::Block(key)),
 				Ok(ProbeResult::Bytes(Ok(text))) => {
-					let head = &text[..text.len().min(80)];
-					let first = head.split(|&c| c == b'\n').next().unwrap_or(head);
-					if first.contains(&0) {
+					// Bash 5.2.21/5.3.0 nested script operands use the
+					// same measured 79/80 boundary and regular-file-only
+					// ELF refusal as a top-level operand (including FIFOs).
+					if super::looks_binary(&text, super::BinaryCheck {
+						sample_len:      80,
+						elf_magic:       args.mode.dialect() != crate::bash::Dialect::Zsh,
+						sniff_file_kind: regular,
+					}) {
 						let text = message(&dollar0, name, b"cannot execute binary file");
 						return reply(vp, 2, text, 126);
 					}

@@ -4699,10 +4699,24 @@ fn is_enoexec(err: &std::io::Error) -> bool {
 	err.raw_os_error() == Some(code)
 }
 
-/// bash `check_binary_file`: a NUL before the first newline in the first
-/// 80 bytes.
-fn looks_binary(text: &[u8]) -> bool {
-	let head = &text[..text.len().min(80)];
+/// A reader's measured binary sample and file-kind policy.
+#[derive(Clone, Copy)]
+pub(crate) struct BinaryCheck {
+	pub sample_len:      usize,
+	pub elf_magic:       bool,
+	/// The caller selects the file kinds it sniffs, before reading bytes.
+	pub sniff_file_kind: bool,
+}
+
+/// Bash `check_binary_file`: ELF magic or a NUL before the first newline.
+pub(crate) fn looks_binary(text: &[u8], policy: BinaryCheck) -> bool {
+	if !policy.sniff_file_kind {
+		return false;
+	}
+	let head = &text[..text.len().min(policy.sample_len)];
+	if policy.elf_magic && head.starts_with(b"\x7fELF") {
+		return true;
+	}
 	let line = head
 		.iter()
 		.position(|&c| c == b'\n')
@@ -4741,7 +4755,13 @@ fn run_script_file(
 		},
 		Ok(_) => BString::default(),
 	};
-	if looks_binary(&text) {
+	// Bash 5.2.21/5.3.0 ENOEXEC: NUL at 127 is refused, at 128 runs;
+	// four ELF magic bytes suffice. FIFOs fail execution before this reader.
+	if looks_binary(&text, BinaryCheck {
+		sample_len:      128,
+		elf_magic:       vp.mode.dialect() != crate::bash::ids::Dialect::Zsh,
+		sniff_file_kind: true,
+	}) {
 		let name = st(vp).argv[0].clone();
 		k.diag(cx, vp, line, Diag::BinaryFile { name });
 		let s = st(vp);
@@ -5119,15 +5139,27 @@ fn build_env(k: &Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Result<EnvView, StoreEr
 
 #[cfg(test)]
 mod tests {
-	use super::looks_binary;
+	use super::{BinaryCheck, looks_binary};
 
-	// bash `check_binary_file`: only a NUL on the first line (within 80
-	// bytes) makes a file binary.
+	// NUL sampling stops at the first newline and the measured byte boundary;
+	// the ELF magic check is bash-only.
 	#[test]
 	fn binary_check_looks_at_the_first_line_only() {
-		assert!(!looks_binary(b"(echo \"$1\")\n"));
-		assert!(looks_binary(b"\x7fELF\x02\x01\x01\0\0"));
-		assert!(!looks_binary(b"echo hi\n\0binary after the first line"));
-		assert!(!looks_binary(b""));
+		let bash = BinaryCheck { sample_len: 128, elf_magic: true, sniff_file_kind: true };
+		assert!(!looks_binary(b"(echo \"$1\")\n", bash));
+		assert!(looks_binary(b"\x7fELF\x02\x01\x01\0\0", bash));
+		assert!(!looks_binary(b"echo hi\n\0binary after the first line", bash));
+		assert!(!looks_binary(b"", bash));
+		assert!(looks_binary(b"\x7fELF text\n", bash));
+		assert!(!looks_binary(b"\x7fELF text\n", BinaryCheck { elf_magic: false, ..bash }));
+		assert!(!looks_binary(b"\x7fELF text\n", BinaryCheck { sniff_file_kind: false, ..bash }));
+		assert!(!looks_binary(b"\x7fEL", bash));
+		let mut text = [b' '; 129];
+		text[127] = 0;
+		assert!(looks_binary(&text, bash));
+		assert!(!looks_binary(&text, BinaryCheck { sample_len: 80, ..bash }));
+		text[127] = b' ';
+		text[128] = 0;
+		assert!(!looks_binary(&text, bash));
 	}
 }

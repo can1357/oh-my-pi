@@ -246,13 +246,22 @@ fn target_text(
 			) {
 				Ok(u) => u,
 				Err(e) => {
-					// bash reports the script line after the document.
+					// An inner `$(` syntax error uses that input's line and context.
+					// Other producers retain their line after the document.
 					#[expect(
 						clippy::naive_bytecount,
 						reason = "one here-document per redirection; no bytecount dependency"
 					)]
-					let at = line + text.iter().filter(|&&c| c == b'\n').count() as u32 + 1;
-					k.diag(cx, vp, line, Diag::ComsubSyntax { line: at, msg: e.msg });
+					let at = if e.context.is_some() {
+						line + e.line
+					} else {
+						line + text.iter().filter(|&&c| c == b'\n').count() as u32 + 1
+					};
+					k.diag(cx, vp, line, Diag::ComsubSyntax {
+						line:    at,
+						msg:     e.msg,
+						context: e.context,
+					});
 					return Err(Halt::Failed);
 				},
 			};

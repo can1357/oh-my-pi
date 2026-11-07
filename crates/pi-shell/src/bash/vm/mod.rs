@@ -11,6 +11,7 @@ pub(crate) mod arith;
 mod builtins;
 mod callstack;
 mod command;
+pub(crate) use command::{BinaryCheck, looks_binary};
 mod control;
 mod exec;
 mod expand;
@@ -910,16 +911,39 @@ impl Kernel {
 			.and_then(|r| r.chain.links.first())
 			.map_or(&COMMAND, |l| &l.origin);
 		let utf8 = locale::is_utf8(self, cx.store, vp);
-		// An in-engine nested shell names itself (its `$0`).
-		let shell_name = match vp
+		// Noninteractive diagnostics name the active source file. Interactive
+		// parser errors keep the shell name and add their source input name;
+		// diagnostic-naming-table: source.parser and nested-source.parser.
+		let nested = vp
 			.overlay
 			.as_ref()
-			.and_then(|o| o.records.get(&KeyBuf::Misc(MiscKey::Argv0)))
-		{
-			Some(Some(Record::Misc(name))) => name.as_slice(),
-			_ => self.argv0.as_slice(),
+			.and_then(|o| o.records.get(&KeyBuf::Misc(MiscKey::Argv0)));
+		let interactive = matches!(
+			state::record(cx.store, vp, crate::bash::store::Key::Misc(MiscKey::Interactive)),
+			Ok(Some(Record::Misc(value))) if value.as_slice() == b"1"
+		);
+		let sourced = if interactive {
+			None
+		} else {
+			callstack::innermost_file(vp)
 		};
-		render(diag, DiagSite { shell_name, origin, line, utf8 })
+		let parser_source = if interactive
+			&& matches!(diag, Diag::Syntax { .. } | Diag::SyntaxContext { .. })
+			&& vp.frames.last().is_some_and(|frame| {
+				matches!(frame.kind, FrameKind::Script { what: ScriptKind::Source, .. })
+			}) {
+			callstack::innermost_file(vp).map(|file| file.as_slice())
+		} else {
+			None
+		};
+		let shell_name = match (sourced, nested) {
+			(Some(file), _) => file.as_slice(),
+			(None, Some(Some(Record::Misc(name)))) => name.as_slice(),
+			(None, _) => self.argv0.as_slice(),
+		};
+		let site =
+			DiagSite { shell_name, origin, line, utf8, sourced: sourced.is_some(), parser_source };
+		render(diag, site)
 	}
 
 	/// The `Diag` event of a diagnostic `vp` prints.
