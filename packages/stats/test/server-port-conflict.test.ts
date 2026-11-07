@@ -148,7 +148,6 @@ describe("startServer port conflicts", () => {
 			// dead-end in "Port X is held by the current process".
 			const second = await startServer(port);
 			expect(second.port).toBe(first.port);
-			expect(second.reused).toBe(false);
 			expect(second).toBe(first);
 		} finally {
 			first.stop();

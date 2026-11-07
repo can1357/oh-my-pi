@@ -113,24 +113,28 @@ export async function runStatsCommand(cmd: StatsCommandArgs): Promise<void> {
 	const url = formatStatsDashboardUrl(hostname, port);
 	console.log(chalk.green(`Dashboard available at: ${url}`));
 
-	// Only a locally owned dashboard can be stopped by this process.
-	// Install Close before the page loads, but never expose it on a reused dashboard.
-	if (!reused) setStatsCloseHandler(() => void postmortem.quit(0));
+	// Another process owns a reused dashboard: show it, never stop it.
+	if (reused) {
+		const page = await openTernPage(url, "over");
+		if (!page) {
+			openPath(url);
+			return;
+		}
+		console.log("Showing it in place of this block: close it to return\n");
+		await page.closed();
+		return;
+	}
+
+	// Close is on before the page first loads, and off again for the system
+	// browser, where closing would leave a dead tab.
+	setStatsCloseHandler(() => void postmortem.quit(0));
 	const page = await openTernPage(url, "over");
 	if (page) {
-		console.log(
-			reused
-				? "Showing it in place of this block: close it to return\n"
-				: "Showing it in place of this block: close it to stop\n",
-		);
+		console.log("Showing it in place of this block: close it to stop\n");
 	} else {
-		if (!reused) setStatsCloseHandler(undefined);
+		setStatsCloseHandler(undefined);
 		openPath(url);
-		if (!reused) console.log(`Press ${formatKeyHint("ctrl+c")} to stop\n`);
-	}
-	if (reused) {
-		await page?.closed();
-		return;
+		console.log(`Press ${formatKeyHint("ctrl+c")} to stop\n`);
 	}
 
 	// Ctrl+C and the other signals exit through omp's cleanup, which takes the
