@@ -691,6 +691,12 @@ pub fn snapshot(
 	Ok(AxSnapshot { text, node_count, truncated: state.truncated })
 }
 
+/// How many elements `find()` reads; bounds its work.
+const FIND_MAX_NODES: u32 = 5_000;
+/// How many levels below the window `find()` reads; bounds `walk_raw`'s
+/// recursion, deep enough for the levels Electron nests its content in.
+const FIND_MAX_DEPTH: u32 = 64;
+
 pub fn query(
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
@@ -700,7 +706,7 @@ pub fn query(
 	let target = &window.id;
 	let generation = registry.current_generation(target);
 	let root = backend.window_root(window)?;
-	let mut state = WalkState::new(5_000, 24, WalkBounds::Read);
+	let mut state = WalkState::new(FIND_MAX_NODES, FIND_MAX_DEPTH, WalkBounds::Read);
 	let Some(tree) = walk_raw(backend, root.clone(), 0, &mut state)? else {
 		return Ok(Vec::new());
 	};
@@ -823,8 +829,8 @@ pub fn refind(
 		return Ok(None);
 	}
 	let mut state = WalkState::new(
-		proof.walk.max_nodes.max(5_000),
-		proof.walk.max_depth.max(24),
+		proof.walk.max_nodes.max(FIND_MAX_NODES),
+		proof.walk.max_depth.max(FIND_MAX_DEPTH),
 		WalkBounds::Skip,
 	)
 	.cancellable();
@@ -1602,39 +1608,61 @@ mod tests {
 		assert_eq!(result.err().map(|error| error.code), Some(ErrorCode::Cancelled));
 		assert_eq!(m.root_reads, reads);
 	}
-	/// A window with a "Go" button, node 100, 31 levels down: past the 24
-	/// `find()` reads.
-	fn deep_go() -> Mock {
+	/// A window with a "Go" button, node 1000, `depth` levels down.
+	fn deep_go(depth: u32) -> Mock {
+		let depth = u64::from(depth);
 		let mut m = Mock {
-			props: [(1, p("window", Some("Title"))), (100, p("button", Some("Go")))].into(),
+			props: [(1, p("window", Some("Title"))), (1_000, p("button", Some("Go")))].into(),
 			..Default::default()
 		};
-		for group in 2..=31 {
+		for group in 2..=depth {
 			m.props.insert(group, p("group", None));
 			m.children.insert(group - 1, vec![group]);
 		}
-		m.children.insert(31, vec![100]);
+		m.children.insert(depth, vec![1_000]);
 		m
 	}
-	/// The app destroys the deep button `old` and puts an identical `new` in
-	/// its place.
-	fn rebuild_deep(m: &mut Mock, old: u64, new: u64) {
+	/// The app destroys the button `old` `depth` levels down and puts an
+	/// identical `new` in its place.
+	fn rebuild_deep(m: &mut Mock, depth: u32, old: u64, new: u64) {
 		m.destroyed.insert(old);
 		m.props.insert(new, p("button", Some("Go")));
-		m.children.insert(31, vec![new]);
+		m.children.insert(u64::from(depth), vec![new]);
+	}
+	#[test]
+	fn find_reaches_content_as_deep_as_electron_nests_it() {
+		// Deeper than `ax()` reads by default, as Electron nests its content.
+		let mut m = deep_go(31);
+		let mut registry = AxRegistry::default();
+		let buttons = AxQuery { role: Some("button".into()), ..Default::default() };
+		let found = query(&mut m, &mut registry, &window(), &buttons).unwrap();
+		assert_eq!(
+			found
+				.iter()
+				.map(|node| node.title.as_deref())
+				.collect::<Vec<_>>(),
+			[Some("Go")]
+		);
+		let mut m = deep_go(FIND_MAX_DEPTH + 1);
+		assert!(
+			query(&mut m, &mut registry, &window(), &buttons)
+				.unwrap()
+				.is_empty()
+		);
 	}
 	#[test]
 	fn a_ref_from_a_read_deeper_than_find_reads_is_searched_as_deep() {
-		let mut m = deep_go();
+		let depth = FIND_MAX_DEPTH + 7;
+		let mut m = deep_go(depth);
 		let mut registry = AxRegistry::default();
-		let options = AxSnapshotOptions { max_depth: Some(40), ..Default::default() };
+		let options = AxSnapshotOptions { max_depth: Some(depth + 9), ..Default::default() };
 		let read = snapshot(&mut m, &mut registry, &window(), &options).unwrap();
 		assert!(!read.truncated && read.text.contains("\"Go\" [ref=e2]"), "{}", read.text);
-		rebuild_deep(&mut m, 100, 101);
+		rebuild_deep(&mut m, depth, 1_000, 1_001);
 		let found = refind(&mut m, &mut registry, &window(), "e2")
 			.unwrap()
 			.expect("the one copy");
-		assert!(matches!(registry.resolve(&found).unwrap(), AxHandle::Test(101)));
+		assert!(matches!(registry.resolve(&found).unwrap(), AxHandle::Test(1_001)));
 	}
 	#[test]
 	fn a_read_that_missed_part_of_the_window_cannot_make_a_ref_refindable() {

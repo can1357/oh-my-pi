@@ -4,4 +4,5 @@ auth "mistral" {
 	name "Mistral"
 	env "MISTRAL_API_KEY"
 	login "custom" hook="mistral-vibe-sign-in"
+	login-subscription #true
 }

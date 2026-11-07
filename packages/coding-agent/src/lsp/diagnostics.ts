@@ -239,11 +239,13 @@ interface WaitForDiagnosticsOptions {
  * Distinguishes a usable report from a failed request so a timeout or RPC error
  * is never mistaken for a clean file. `diagnostics` holds the report's items (an
  * empty array means the server reported the file clean); `failed` carries the
- * error when the pull could not complete.
+ * error when the pull could not complete; `declined` marks an answer that carries
+ * no report at all.
  */
 interface PullDiagnosticsOutcome {
 	diagnostics?: Diagnostic[];
 	failed?: unknown;
+	declined?: boolean;
 }
 
 function requestDocumentDiagnostics(
@@ -254,7 +256,10 @@ function requestDocumentDiagnostics(
 ): Promise<PullDiagnosticsOutcome> {
 	return sendRequest(client, "textDocument/diagnostic", { textDocument: { uri } }, signal, timeoutMs)
 		.then(report => {
-			if (!report || typeof report !== "object" || !("kind" in report) || report.kind !== "full") {
+			// LSP requires a report, but ruby-lsp answers `null` for a document it does not
+			// diagnose (ERB, or outside its workspace) and when its own diagnostics fail.
+			if (report === null || report === undefined) return { declined: true };
+			if (typeof report !== "object" || !("kind" in report) || report.kind !== "full") {
 				return {};
 			}
 			if (!("items" in report) || !Array.isArray(report.items)) return {};
@@ -319,7 +324,8 @@ function isProvisionalColdPublish(
 /**
  * Wait for a fresh diagnostics report for `uri`: a pull answer, or a publish that
  * passes the freshness checks. Resolves `undefined` when none arrives within the
- * budget, which callers MUST NOT read as a clean file; `[]` is a clean report.
+ * budget, or within one settle window of the server answering the pull without a
+ * report, which callers MUST NOT read as a clean file; `[]` is a clean report.
  */
 export async function waitForDiagnostics(
 	client: LspClient,
@@ -392,6 +398,11 @@ export async function waitForDiagnostics(
 			if (pullResult.diagnostics !== undefined) {
 				pulled = pullResult.diagnostics;
 				break;
+			}
+			if (pullResult.declined) {
+				// A pull answered without a report is the server's answer for this document, not a
+				// failed attempt: give a publish already on its way one settle window, not the budget.
+				deadline = Math.min(deadline, Date.now() + settleMs);
 			}
 			if (pullResult.failed !== undefined) {
 				if (shouldRetriggerPull(pullResult.failed)) {

@@ -691,6 +691,8 @@ function shouldRetryHandoffWithAutoToolChoice(response: AssistantMessage): boole
 export interface SummaryOptions {
 	promptOverride?: string;
 	extraContext?: string[];
+	/** Additional summary context fetched only when a compaction request consumes it. */
+	loadExtraContext?: () => Promise<string[] | undefined>;
 	remoteEndpoint?: string;
 	/** Stable system-prompt segments from the live turn, preserved for provider cache reuse. */
 	remoteSystemPrompt?: string[];
@@ -1781,6 +1783,14 @@ export async function compact(
 		// an outer retry loop multiplies with the inner one (see SummaryOptions).
 		oneshotRetry: options?.oneshotRetry,
 	};
+	let extraContextLoaded = false;
+	const ensureExtraContext = async (): Promise<void> => {
+		if (extraContextLoaded || !options?.loadExtraContext) return;
+		const context = await options.loadExtraContext();
+		signal?.throwIfAborted();
+		if (context?.length) summaryOptions.extraContext = [...(summaryOptions.extraContext ?? []), ...context];
+		extraContextLoaded = true;
+	};
 
 	// An archive keeps the reasoning policy of the model it was rendered for;
 	// Claude refuses inputs that reproduce reasoning (issue #6093), so a
@@ -2214,6 +2224,7 @@ export async function compact(
 			].filter(files => files.after >= filesDueBefore);
 			if (carried.length > 0) nativeRetainedFiles = carried;
 		}
+		await ensureExtraContext();
 		try {
 			// The live turn's own system prompt, wire tools and transformed
 			// history when the host can build them: kept thinking remains valid
@@ -2274,6 +2285,7 @@ export async function compact(
 	if (!usedRemoteCompaction && nativeCompactionError !== undefined && !summaryOptions.remoteEndpoint) {
 		throw new NativeCompactionError(nativeCompactionError);
 	}
+	if (!usedRemoteCompaction && nativeSummary === undefined) await ensureExtraContext();
 
 	// Generate summaries (can be parallel if both needed) and merge into one
 	let summary: string;
@@ -2332,11 +2344,7 @@ export async function compact(
 
 	const shortSummary = usedRemoteCompaction
 		? "Remote compaction"
-		: await generateShortSummary(recentMessages, summary, model, reserveTokens, apiKey, signal, {
-				...summaryOptions,
-				extraContext: options?.extraContext,
-				thinkingLevel: options?.thinkingLevel,
-			});
+		: await generateShortSummary(recentMessages, summary, model, reserveTokens, apiKey, signal, summaryOptions);
 
 	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);
