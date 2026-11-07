@@ -88,6 +88,14 @@ export interface BashToolDetails {
 	 * latest snapshot and the final result the last one. Absent on the PTY and user-shell paths.
 	 */
 	trace?: ShellTrace;
+	/**
+	 * Working directory the command ran in when the call set one, explicitly or by the
+	 * executor hoisting a leading `cd <dir>`; absent when it ran in the session cwd.
+	 * Pairs with {@link trace}: the traced script is the command after hoisting.
+	 */
+	cwd?: string;
+	/** `;` when the hoisted leading cd was `cd <dir>;`, so the card redraws it as written; absent means `&&`. */
+	cdSeparator?: ";";
 	/** What the session's Spotlight shaping did to the output. */
 	spotlight?: SpotlightDetails;
 	/** Live ACP update only; completed results refer to released terminals. */
@@ -234,6 +242,8 @@ export interface BashRenderArgs {
 	env?: Record<string, unknown>;
 	timeout?: number;
 	cwd?: string;
+	/** How the `cd <dir>` prefix joins the command: `;` as written by the model, else `&&`. */
+	cdSeparator?: ";";
 	__partialJson?: string;
 	[key: string]: unknown;
 }
@@ -297,7 +307,7 @@ export function bashCommandPrefix(args: BashRenderArgs, uiTheme: Theme): string 
 	const displayWorkdir = formatToolWorkingDirectory(args.cwd, getProjectDir());
 	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
 	const prefixParts = ["$"];
-	if (displayWorkdir) prefixParts.push(`cd ${shellVizText(displayWorkdir)} &&`);
+	if (displayWorkdir) prefixParts.push(cdPrefix(displayWorkdir, args.cdSeparator));
 	if (envAssignments) prefixParts.push(envAssignments);
 	return uiTheme.fg("dim", `${prefixParts.join(" ")} `);
 }
@@ -310,10 +320,15 @@ export function formatBashCommandText(args: BashRenderArgs): string {
 	const displayWorkdir = formatToolWorkingDirectory(args.cwd, getProjectDir());
 	const envAssignments = formatBashEnvAssignments(getBashEnvForDisplay(args));
 	const parts: string[] = [];
-	if (displayWorkdir) parts.push(`cd ${shellVizText(displayWorkdir)} &&`);
+	if (displayWorkdir) parts.push(cdPrefix(displayWorkdir, args.cdSeparator));
 	if (envAssignments) parts.push(envAssignments);
 	parts.push(replaceTabs(sanitizeText(args.command || "…")));
 	return parts.join(" ");
+}
+
+/** `cd <dir> &&`, or `cd <dir>;` when the model wrote the hoisted cd with `;`. */
+function cdPrefix(displayWorkdir: string, separator: ";" | undefined): string {
+	return `cd ${shellVizText(displayWorkdir)}${separator ?? " &&"}`;
 }
 
 /** Bash output with the LLM-facing notices (background, exit, wall time, artifact, truncation) removed. */
@@ -462,16 +477,28 @@ function toBashRenderArgs<TArgs>(args: TArgs | undefined, config: ShellRendererC
 	};
 }
 
+/** Command-pane lines for the traced script, prefixed with the directory it actually ran in. */
 function visualCommandLines(
 	presentation: ShellVizPresentation,
 	args: BashRenderArgs,
+	details: BashToolDetails | undefined,
 	uiTheme: Theme,
 	width: number,
 ): string[] {
-	const prefix = bashCommandPrefix(args, uiTheme);
+	const scriptArgs = executedScriptArgs(args, details);
+	const prefix = bashCommandPrefix(scriptArgs, uiTheme);
 	const hasContext =
-		!!formatToolWorkingDirectory(args.cwd, getProjectDir()) || !!formatBashEnvAssignments(getBashEnvForDisplay(args));
+		!!formatToolWorkingDirectory(scriptArgs.cwd, getProjectDir()) ||
+		!!formatBashEnvAssignments(getBashEnvForDisplay(scriptArgs));
 	return [...(hasContext ? [prefix.trimEnd()] : []), ...renderShellVisualization(presentation, uiTheme, width, false)];
+}
+
+/**
+ * Display args for the executed script: the trace holds the command after the executor
+ * hoisted any leading `cd`, so its directory comes from the result, not the raw args.
+ */
+function executedScriptArgs(args: BashRenderArgs, details: BashToolDetails | undefined): BashRenderArgs {
+	return details?.cwd === undefined ? args : { ...args, cwd: details.cwd, cdSeparator: details.cdSeparator };
 }
 
 /** Builds a shell transcript renderer with caller-supplied command labels. */
@@ -486,7 +513,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			return framedToolCard(uiTheme, ({ contentWidth }) => {
 				const presentation = options.shellPresentation;
 				cmdLines = presentation
-					? visualCommandLines(presentation, renderArgs, uiTheme, contentWidth)
+					? visualCommandLines(presentation, renderArgs, undefined, uiTheme, contentWidth)
 					: (cmdLines ?? formatBashCommandLines(renderArgs, uiTheme));
 				const header =
 					config.showHeader === false
@@ -684,7 +711,13 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 								// render identically; only ctrl+o uncaps.
 								content: capPreviewLines(
 									trace !== undefined && options.shellPresentation
-										? visualCommandLines(options.shellPresentation, renderArgs, uiTheme, contentWidth)
+										? visualCommandLines(
+												options.shellPresentation,
+												renderArgs,
+												details,
+												uiTheme,
+												contentWidth,
+											)
 										: args
 											? (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme))
 											: [],
@@ -784,7 +817,10 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			// segment draws what ran: the live result, or the output retained up
 			// to the replay cursor while one is held.
 			const shownOutput = presentation?.preferences.cursor !== undefined ? presentation.output.trimEnd() : output;
-			const displayWorkdir = formatToolWorkingDirectory(renderArgs.cwd, getProjectDir());
+			const displayWorkdir = formatToolWorkingDirectory(
+				executedScriptArgs(renderArgs, details).cwd,
+				getProjectDir(),
+			);
 			const box = runBox(
 				[
 					presentation
