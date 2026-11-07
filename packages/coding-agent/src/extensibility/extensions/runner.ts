@@ -811,17 +811,13 @@ export class ExtensionRunner {
 		return this.sessionManager.getCwd();
 	}
 
-	/**
-	 * Todo backends of this runner's extensions (including deferred ones), in registration order. A
-	 * suspended extension's backends are left out until it resumes, like its tools and commands.
-	 */
+	/** A suspended extension's backends are left out until it resumes, like its tools and commands. */
 	listTodoBackends(): TodoBackendDefinition[] {
 		return this.runtime.todoBackends
 			.filter(registration => !this.isExtensionSuspended(registration.sourceId))
 			.map(registration => registration.definition);
 	}
 
-	/** The backend `id` names, unless no extension registered it or its extension is suspended. */
 	getTodoBackend(id: string): TodoBackendDefinition | undefined {
 		return this.listTodoBackends().find(definition => definition.id === id);
 	}
@@ -1712,10 +1708,8 @@ export class ExtensionRunner {
 	}
 
 	/**
-	 * Run a todo backend callback (`create`, `apply`, `replace`) the way event handlers run: within
-	 * this session's settings scope and the generic handler budget. `work` gets a signal that aborts
-	 * when the budget runs out or `signal` aborts; the call then rejects at once without waiting for
-	 * `work`, so a backend that never settles cannot hold the session's todo queue.
+	 * A backend that never settles must not hold the session's todo queue: the call rejects at once
+	 * when the budget runs out or `signal` aborts, without waiting for `work`.
 	 */
 	async runTodoBackendCall<T>(work: (signal: AbortSignal) => Promise<T> | T, signal?: AbortSignal): Promise<T> {
 		const timeoutMs = extensionHandlerTimeoutMs;
@@ -1727,10 +1721,6 @@ export class ExtensionRunner {
 		return result;
 	}
 
-	/**
-	 * Run a todo backend's `create` like an event handler (see {@link runTodoBackendCall}): its
-	 * context's `ui` dialogs close when the budget runs out, as a handler's do.
-	 */
 	createTodoBackend(definition: TodoBackendDefinition): Promise<TodoBackend> {
 		const ctx = this.createContext();
 		return this.runTodoBackendCall(handlerSignal => definition.create(createHandlerContext(ctx, handlerSignal)));

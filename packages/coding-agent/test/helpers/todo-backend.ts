@@ -12,23 +12,17 @@ import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./agent-session-setup";
 
-/** One backend call as the recorder saw it. `phases` is `next` for `apply` and the replacement list for `replace`. */
 export interface RecordedTodoBackendCall {
-	/** Id the backend was registered under. */
 	backend: string;
 	method: "apply" | "replace";
-	/** Operation name; only set for `apply`. */
 	op?: TodoOp;
-	/** Params as the backend received them; only set for `apply`. */
 	params?: TodoBackendParams;
 	phases: TodoPhase[];
 }
 
-/** A recording todo backend plus the switches a test flips to hold or fail its calls. */
 export interface TodoBackendRecorder {
 	/** Every recorded call, in arrival order. Shared between recorders when `options.calls` is passed. */
 	readonly calls: RecordedTodoBackendCall[];
-	/** Number of times `create` ran. */
 	created: number;
 	/** `create` throws this when set. */
 	createError?: Error;
@@ -40,21 +34,15 @@ export interface TodoBackendRecorder {
 	beforeReplace?: (signal: AbortSignal) => void | Promise<void>;
 	/** `replace` throws this after `beforeReplace` settled; the call is still recorded. */
 	replaceError?: Error;
-	/** Extension factory that registers this backend under `id` with `label`. */
 	extension(): ExtensionFactory;
 }
 
 interface TodoBackendRecorderOptions {
-	/** Defaults to `Tracker ${id}`. */
 	label?: string;
 	/** Append to this array instead of a private one, to see the order of calls across several backends. */
 	calls?: RecordedTodoBackendCall[];
 }
 
-/**
- * Builds a todo backend that records every call (deep-cloned, so later mutation cannot rewrite
- * history) and registers itself through `recorder.extension()` under `id`.
- */
 export function createTodoBackendRecorder(id: string, options: TodoBackendRecorderOptions = {}): TodoBackendRecorder {
 	const label = options.label ?? `Tracker ${id}`;
 	const calls = options.calls ?? [];
@@ -95,10 +83,6 @@ export function createTodoBackendRecorder(id: string, options: TodoBackendRecord
 	return recorder;
 }
 
-/**
- * Resolves once every todo write already queued on `session` has settled. Waits on the session's
- * own serial queue, so it needs no timers and no guess at how many microtask turns are enough.
- */
 export async function flushTodoWrites(session: Pick<AgentSession, "runTodoWrite">): Promise<void> {
 	await session.runTodoWrite(async () => {});
 }
@@ -108,11 +92,6 @@ export interface TodoSessionOptions extends Partial<CreateAgentSessionOptions> {
 	backend?: string;
 }
 
-/**
- * A real session from `createAgentSession` with isolated settings, an in-memory auth store and
- * only the `read` and `todo` tools. Uses an in-memory transcript unless `sessionManager` is passed.
- * Pair with {@link disposeTodoSession}.
- */
 export async function createTodoSession(dir: string, options: TodoSessionOptions = {}): Promise<AgentSession> {
 	const { backend, ...rest } = options;
 	const authStorage = createInMemoryAuthStorage();
@@ -144,14 +123,12 @@ export async function disposeTodoSession(session: AgentSession): Promise<void> {
 	session.modelRegistry.authStorage.close();
 }
 
-/** Run one `todo` call through the session's real tool. */
 export function todo(session: AgentSession, params: TodoParams, signal?: AbortSignal): Promise<AgentToolResult> {
 	const tool = session.getToolByName("todo");
 	if (!tool) throw new Error("todo tool is not active");
 	return tool.execute(`call-${Snowflake.next()}`, params, signal);
 }
 
-/** Holds the recorder's next and later `apply` or `replace` calls until `release` resolves. `started` carries the first held call's signal. */
 export function hold(recorder: TodoBackendRecorder, method: "apply" | "replace") {
 	const started = Promise.withResolvers<AbortSignal>();
 	const release = Promise.withResolvers<void>();
@@ -172,7 +149,6 @@ export function settled(promise: Promise<unknown>): Promise<unknown> {
 	);
 }
 
-/** The `/todo` edits recorded on the session's current branch. */
 export function userTodoEdits(session: AgentSession): unknown[] {
 	return session.sessionManager
 		.getBranch()
@@ -187,7 +163,6 @@ export function contentsOf(phases: TodoPhase[]): string[] {
 	return phases.flatMap(phase => phase.tasks.map(task => task.content));
 }
 
-/** Messages of the todo backend notices `session` emits from now on. */
 export function collectNotices(session: AgentSession): string[] {
 	const notices: string[] = [];
 	session.subscribe(event => {

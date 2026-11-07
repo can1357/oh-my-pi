@@ -366,14 +366,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	getTodoPhases(): TodoPhase[];
 	/** Replace the todo phases of the session. */
 	setTodoPhases(phases: TodoPhase[]): void;
-	/**
-	 * Record a list change made outside the `todo` tool that already happened elsewhere (Cursor, a finished
-	 * subagent): update the cache and record a `user_todo_edit` entry so reloads keep it. A function `update`
-	 * runs against the committed list; `undefined` declines. Resolves with the committed list. See
-	 * `AgentSession.commitTodoPhases` for the todo backend and queue semantics.
-	 */
+	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
 	commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined>;
-	/** Like {@link commitTodoPhases}, for an edit by the user or an RPC client, which a todo backend can refuse. */
 	editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined>;
 	/** Whether the user approved approval scope `key` for the rest of this session, so its prompt is skipped. */
 	hasSessionApproval(key: string): boolean;

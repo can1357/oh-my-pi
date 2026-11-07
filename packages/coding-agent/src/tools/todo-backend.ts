@@ -5,7 +5,6 @@ import type { ExtensionContext } from "../extensibility/extensions/types";
 import { errorMessage } from "../slash-commands/helpers/parse";
 import type { TodoParams } from "./todo";
 
-/** Id of omp's built-in todo list. Reserved: extensions cannot register it. */
 export const NATIVE_TODO_BACKEND_ID = "native";
 
 /**
@@ -64,7 +63,6 @@ export interface TodoBackendDefinition {
 	 * another extension is skipped with a warning.
 	 */
 	id: string;
-	/** Human-readable name. */
 	label: string;
 	description?: string;
 	/**
@@ -77,19 +75,16 @@ export interface TodoBackendDefinition {
 
 /**
  * A resolved backend for the main session. Each call runs within the extension handler budget and
- * the session's settings scope, and rejects as soon as `signal` aborts. `undefined` in its place
- * means native todos.
+ * the session's settings scope, and rejects as soon as `signal` aborts.
  */
 export interface ActiveTodoBackend {
 	readonly label: string;
 	/** Sends the committed list first if this backend does not have it. */
 	apply(op: TodoOp, params: TodoBackendParams, next: TodoPhase[], signal?: AbortSignal): Promise<void>;
 	replace(phases: TodoPhase[], signal?: AbortSignal): Promise<void>;
-	/** Send the committed list unless this backend confirmed it last. */
 	sync(signal?: AbortSignal): Promise<void>;
 }
 
-/** What a commit sets the list to, given the committed list; `undefined` declines. */
 export type TodoPhasesUpdate = (current: TodoPhase[]) => TodoPhase[] | undefined;
 
 /**
@@ -100,17 +95,15 @@ export type TodoPhasesUpdate = (current: TodoPhase[]) => TodoPhase[] | undefined
  */
 export type TodoWrite<T> = (active: ActiveTodoBackend | undefined, assertCurrent: () => void) => Promise<T>;
 
-/** One registration: the backend and the resolved path of the extension that registered it. */
 export interface TodoBackendRegistration {
 	readonly definition: TodoBackendDefinition;
 	readonly sourceId: string;
 }
 
 /**
- * Add a backend to `registrations` (registration order). A malformed definition or the reserved
- * `native` id throws. An id already taken is skipped with a warning: the first registration stays,
- * and the second extension keeps its other registrations, as a conflicting command or shortcut does
- * not fail its extension either.
+ * An id already taken is skipped with a warning: the first registration stays, and the second
+ * extension keeps its other registrations, as a conflicting command or shortcut does not fail its
+ * extension either.
  */
 export function registerTodoBackend(
 	registrations: TodoBackendRegistration[],

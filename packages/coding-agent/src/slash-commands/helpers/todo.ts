@@ -85,9 +85,8 @@ function findTaskFuzzy(phases: TodoPhase[], query: string): TodoTaskMatch | unde
 }
 
 /**
- * Plan an edit inside a queued commit, so `plan` sees the list as committed at that moment and a
- * `todo` tool write queued earlier is never overwritten. Resolves with the plan and the committed
- * list, or `{ error }` for the plan's own error, a rejected commit, or a commit that did not apply.
+ * Plans inside a queued commit, so `plan` sees the list as committed at that moment and a `todo`
+ * tool write queued earlier is never overwritten.
  */
 export async function commitTodoEdit<T extends { phases: TodoPhase[] }>(
 	session: { editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> },
@@ -112,7 +111,6 @@ export async function commitTodoEdit<T extends { phases: TodoPhase[] }>(
 
 type TodoEdit = { phases: TodoPhase[]; message: string } | { error: string };
 
-/** Runs `compute` inside the session's queued commit (see {@link commitTodoEdit}), then reports the outcome. */
 async function editTodos(
 	runtime: SlashCommandRuntime,
 	compute: (current: TodoPhase[]) => TodoEdit,

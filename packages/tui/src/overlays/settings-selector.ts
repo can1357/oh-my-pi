@@ -576,10 +576,7 @@ export interface SettingsRuntimeContext {
 	thinkingLevel: ThinkingLevel | undefined;
 	/** Available themes */
 	availableThemes: string[];
-	/**
-	 * Runtime choices for submenu settings without built-in ones, keyed by setting path.
-	 * A setting with no entry shows its declared options.
-	 */
+	/** Runtime choices for submenu settings without built-in ones, keyed by setting path. */
 	runtimeOptions?: ReadonlyMap<string, RuntimeSettingOptionsProvider>;
 	/** Provider/source ids shown in /model. */
 	providers: string[];
@@ -952,8 +949,7 @@ export class SettingsSelectorComponent implements Component {
 					detail: o.description,
 				}));
 				// Few short plain choices segment; described ones and live-previewed ones
-				// (hovering the menu previews, see #createSubmenu) keep the menu. Runtime-choice
-				// rows select by option value; `shown` is their label.
+				// (hovering the menu previews, see #createSubmenu) keep the menu.
 				return {
 					k: "choice",
 					value: this.#context.runtimeOptions?.has(def.path)
@@ -1517,7 +1513,6 @@ export class SettingsSelectorComponent implements Component {
 
 			case "submenu": {
 				const raw = this.#getSubmenuCurrentValue(def.path, currentValue);
-				// Runtime-choice rows show the choice's label; the submenu still receives the raw value.
 				const runtimeLabel = this.#context.runtimeOptions?.has(def.path)
 					? this.#submenuOptions(def).find(option => option.value === raw)?.label
 					: undefined;

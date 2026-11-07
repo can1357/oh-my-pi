@@ -517,11 +517,6 @@ function formatTodoSyncSummary(phases: TodoPhase[]): string {
 	return `${done}/${tasks.length} tasks completed`;
 }
 
-/**
- * Lay a Cursor snapshot's flat todos over the local phases: a task keeps the phase it is in
- * locally, tasks new to the snapshot go to {@link CURSOR_TODO_PHASE}, the local phase order is
- * kept and phases new to the snapshot append.
- */
 function mapCursorTodoSnapshot(snapshot: CursorTodoSnapshot, local: TodoPhase[]): TodoPhase[] {
 	const phaseByContent = new Map<string, string>();
 	for (const phase of local) {

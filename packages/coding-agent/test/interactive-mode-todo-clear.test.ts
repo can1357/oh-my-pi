@@ -16,10 +16,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
-/**
- * Records `owner`'s todo commits. The returned `settle` awaits them, and with them the reconcile's
- * HUD update chained on each, then fails loudly if `hudUpdated` is given and does not hold.
- */
+/** `settle` awaits the commits and the reconcile's HUD update chained on each. */
 function watchReconcile(owner: AgentSession): (hudUpdated?: () => boolean) => Promise<void> {
 	const commits: Promise<unknown>[] = [];
 	const commit = owner.commitTodoPhases.bind(owner);

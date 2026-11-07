@@ -379,7 +379,6 @@ export interface RpcInputFrameDeps {
 	output: RpcOutput;
 	errorResponse: (id: string | undefined, command: string, message: string) => RpcResponse;
 	trackBackgroundTask?: (task: Promise<void>) => void;
-	/** Whether `set_todos` would wait for an extension todo backend; it is backgrounded only then. */
 	todoWritesQueued?: () => boolean;
 	pendingExtensionRequests: Map<string, PendingExtensionRequest>;
 	onHostToolResult: (frame: RpcHostToolResult) => void;

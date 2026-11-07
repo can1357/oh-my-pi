@@ -439,10 +439,6 @@ export const cfgTodoEager = register({
 	},
 });
 
-/**
- * Id of the todo backend that mirrors the session todo list. `native` keeps omp's own list only;
- * any other id must be registered by an extension via `pi.registerTodoBackend`.
- */
 export const cfgTodoBackend = register({
 	id: "todo.backend",
 	type: "string",

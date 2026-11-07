@@ -81,7 +81,6 @@ async function createHarness(): Promise<Harness> {
 	return { session, recorder, dir, eventBus, sessionManager };
 }
 
-/** Seeds a list through the `todo` tool, then forgets what the backend saw. */
 async function seedList(h: Harness): Promise<TodoPhase[]> {
 	await todo(h.session, { op: "init", list: [{ phase: "Work", items: ["first", "second"] }] });
 	h.recorder.calls.length = 0;
@@ -263,7 +262,6 @@ describe("todo writers reach the selected backend's replace", () => {
 		h.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: seeded });
 		const gate = hold(h.recorder, "apply");
 		const { controller } = controllerContext(h.session);
-		// Resolves once the bridged call and the /todo edit have both entered the session's write path.
 		const bothQueued = Promise.withResolvers<void>();
 		let writes = 0;
 		const issued = <T>(write: T): T => {

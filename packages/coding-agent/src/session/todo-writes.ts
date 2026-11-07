@@ -15,10 +15,8 @@ import type { SessionManager } from "./session-manager";
 import type { TodoTracker } from "./todo-tracker";
 
 const SESSION_CHANGED_MESSAGE = "The session changed before the todo edit was saved; nothing was changed.";
-/** `source` of session notices about todo backends. */
 const NOTICE_SOURCE = "todo-backend";
 
-/** Thrown by a write's `assertCurrent` when the todo list was reset or reloaded after the write was enqueued. */
 class TodoListChangedError extends Error {
 	constructor() {
 		super(SESSION_CHANGED_MESSAGE);
@@ -26,14 +24,11 @@ class TodoListChangedError extends Error {
 	}
 }
 
-/** What {@link TodoWrites} needs from its session. The session is the scope `todo.backend` is watched in. */
 export interface TodoWritesHost extends SettingsScope {
 	readonly sessionManager: SessionManager;
-	/** Holds the committed list. */
 	readonly todo: TodoTracker;
 	/** Read live: the runner is attached after the session is built. */
 	extensionRunner(): ExtensionRunner | undefined;
-	/** Only the main session uses a backend. */
 	isMainAgent(): boolean;
 	isDisposed(): boolean;
 	emitNotice(level: "warning", message: string, source: string): void;
@@ -44,51 +39,28 @@ export interface TodoWritesHost extends SettingsScope {
 	bindDeferredExtensions(): Promise<boolean>;
 }
 
-/** Whether `id` names an extension backend rather than native todos. */
 function isBackendId(id: string): boolean {
 	return id.trim() !== "" && id !== NATIVE_TODO_BACKEND_ID;
 }
 
-/**
- * Every write to a session's todo list, and the todo backend those writes reach.
- *
- * With native todos a write runs inline, as a plain list update. Once a non-native backend is
- * selected in the main session, writes run one at a time: each receives the backend resolved when
- * it starts (`undefined` = native todos) and an `assertCurrent` that throws once the list was reset or
- * reloaded. The backend resolves from `todo.backend` once {@link arm}ed and
- * {@link allowBackendResolution} allowed it, and again whenever the setting changes or the
- * backend's extension is suspended or resumed.
- */
 export class TodoWrites {
 	readonly #host: TodoWritesHost;
 	readonly #queue = new Serial();
-	/** Backend mirroring the list; `undefined` = native todos. */
 	#active: ActiveTodoBackend | undefined;
-	/** Latest `todo.backend` value observed. */
 	#requestedId: string | undefined;
-	/** Whether an enabled extension registered {@link #requestedId} when it was observed. */
 	#requestedAvailable = false;
-	/** Set by {@link arm}; resolution stays dormant until then. */
 	#armed = false;
-	/** Set by {@link allowBackendResolution}: startup-deferred extensions are bound, so ids can be resolved. */
 	#resolvable = false;
-	/** Queued writes and resolutions not yet settled. Native writes run inline only at zero. */
 	#pending = 0;
-	/** The id the last resolution settled on, with a backend or after falling back to native todos. */
 	#resolvedId: string | undefined;
-	/** A queued write ran since {@link keepLiveListAfterToolResult} last looked. */
 	#queuedWriteSinceSave = false;
-	/** Bumped whenever the list is reset or reloaded; queued writes from an older epoch must not land. */
 	#epoch = 0;
 
 	constructor(host: TodoWritesHost) {
 		this.#host = host;
 	}
 
-	/**
-	 * Watch `todo.backend`. Call once, after the deferred extension loader is set. Sessions without an
-	 * extension runner never use a backend.
-	 */
+	/** Call once, after the deferred extension loader is set. */
 	arm(): void {
 		const runner = this.#host.extensionRunner();
 		if (this.#armed || !runner) return;
@@ -98,10 +70,8 @@ export class TodoWrites {
 	}
 
 	/**
-	 * Allow backend resolution once startup-deferred extensions are bound: at the first prompt
-	 * admission, after the deferred load, or at the first queued write. These all run after the mode
-	 * subscribed its event listeners, so a fallback notice reaches the client. Resolves `todo.backend`
-	 * now unless it is native.
+	 * Call at the first prompt admission, after the deferred load, or at the first queued write: these
+	 * all run after the mode subscribed its event listeners, so a fallback notice reaches the client.
 	 */
 	allowBackendResolution(): void {
 		if (!this.#armed || this.#resolvable) return;
@@ -109,11 +79,6 @@ export class TodoWrites {
 		this.#observeSetting();
 	}
 
-	/**
-	 * Whether writes go through the queue: a backend is active, queued work has not settled, or a
-	 * non-native id is selected in the main session and not yet resolved. Otherwise, including after
-	 * an id fell back to native todos, they run inline.
-	 */
 	get queued(): boolean {
 		if (this.#pending > 0 || this.#active) return true;
 		if (!this.#armed || !this.#host.isMainAgent()) return false;
@@ -121,17 +86,6 @@ export class TodoWrites {
 		return isBackendId(id) && id !== this.#resolvedId;
 	}
 
-	/**
-	 * Run a write. While {@link queued} is false it runs now, with no backend.
-	 *
-	 * Otherwise it is queued: it starts after every earlier write and backend switch settled (a
-	 * rejected one does not block the next) and after startup-deferred extensions bound, and receives
-	 * the backend resolved at that moment plus an `assertCurrent` that must run before
-	 * committing. A write whose list was reset or reloaded (`/new`, switch, rewind, tree navigation,
-	 * fork) since this call rejects without starting. `options.signal` races the caller against the
-	 * queue: the returned promise rejects at once on abort, a not-yet-started write is skipped, and a
-	 * started one keeps the queue slot until it settles but fails `assertCurrent()` so it never commits.
-	 */
 	run<T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }): Promise<T> {
 		const signal = options?.signal;
 		const epoch = this.#epoch;
@@ -159,14 +113,6 @@ export class TodoWrites {
 		return untilAborted(signal, queued);
 	}
 
-	/**
-	 * An edit the user or an RPC client made outside the `todo` tool, as a write. `update`
-	 * receives the committed list at that moment (returning `undefined` declines: nothing is sent or
-	 * committed); the backend's `replace` then receives a copy of the full list, the list updates and
-	 * a `user_todo_edit` entry is recorded so reloads keep it. A throwing `replace` refuses the edit:
-	 * it rejects (naming the backend) and commits nothing; so does a reset while queued. Resolves with
-	 * the committed list.
-	 */
 	edit(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
 		const todo = this.#host.todo;
 		return this.run(async (active, assertCurrent) => {
@@ -186,13 +132,6 @@ export class TodoWrites {
 		});
 	}
 
-	/**
-	 * Record a change that already happened elsewhere (Cursor's server list, a finished subagent, a
-	 * bridged `todo` call), as a write: `update` receives the committed list at that moment
-	 * (`undefined` declines), then the list updates and a `user_todo_edit` entry is recorded. A backend
-	 * cannot refuse it: it gets the list if it does not have it yet, and a throw only warns. Resolves
-	 * with the committed list, or `undefined` when it declined or the list was reset while queued.
-	 */
 	commit(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
 		const todo = this.#host.todo;
 		return this.run(async active => {
@@ -207,14 +146,13 @@ export class TodoWrites {
 		});
 	}
 
-	/** Set the list and record it so reloads keep it. Returns the stored copy (`setPhases` keeps only a todo list's fields). */
+	/** `setPhases` keeps only a todo list's fields, so return the stored copy. */
 	#save(phases: TodoPhase[]): TodoPhase[] {
 		this.#host.todo.setPhases(phases);
 		this.#host.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
 		return this.#host.todo.phases;
 	}
 
-	/** Send the committed list to `active` unless it has it; the list is already in place, so a throw only warns. */
 	async #sync(active: ActiveTodoBackend | undefined): Promise<void> {
 		if (!active) return;
 		try {
@@ -229,10 +167,9 @@ export class TodoWrites {
 	}
 
 	/**
-	 * Call after saving a `todo` tool result. A queued tool write left the queue before the agent loop
-	 * saved its result, so a commit that ran in between (a `/todo` edit) saved its entry first, and a
-	 * rebuild from the branch would restore the tool's older list. Record the live list again then.
-	 * Native writes run inline, so with no queued write since the last call there is nothing to check.
+	 * A queued tool write left the queue before the agent loop saved its result, so a commit that ran
+	 * in between (a `/todo` edit) saved its entry first, and a rebuild from the branch would restore the
+	 * tool's older list.
 	 */
 	keepLiveListAfterToolResult(): void {
 		if (!this.#queuedWriteSinceSave) return;
@@ -242,26 +179,17 @@ export class TodoWrites {
 		this.#host.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: live });
 	}
 
-	/**
-	 * Make every queued write fail its `assertCurrent`. Call synchronously before switching to a different list
-	 * (new session, session switch, branch), so a write settling mid-swap cannot land in it. A
-	 * whole-session fork keeps the same list, so queued writes stay valid there.
-	 */
+	/** A whole-session fork keeps the same list, so queued writes stay valid there. */
 	invalidate(): void {
 		this.#epoch++;
 	}
 
-	/** Empty the list for a new session, invalidating queued writes; a backend receives the empty list. */
 	clear(): void {
 		this.invalidate();
 		this.#host.todo.setPhases([]);
 		this.#syncAfterReset();
 	}
 
-	/**
-	 * Reload the list for a different list identity (switch, rewind, navigation, fork from a message),
-	 * invalidating queued writes; a backend receives the reloaded list.
-	 */
 	reload(): void {
 		this.invalidate();
 		this.#host.todo.syncFromBranch();
@@ -269,7 +197,6 @@ export class TodoWrites {
 	}
 
 	/**
-	 * Queue a {@link #sync} with the list as of its queue slot, so the backend follows a reset or reload.
 	 * Before the first resolution there is no backend to follow the list, and a host may still be
 	 * setting up its extensions (ACP loads a session before initializing them), so nothing is queued then.
 	 */
@@ -288,7 +215,6 @@ export class TodoWrites {
 		this.allowBackendResolution();
 	}
 
-	/** Count `work` in {@link #pending} until it settles. */
 	#track<T>(work: Promise<T>): Promise<T> {
 		this.#pending++;
 		const settle = (): void => {
@@ -298,11 +224,6 @@ export class TodoWrites {
 		return work;
 	}
 
-	/**
-	 * Queue a resolution when `todo.backend` no longer matches the id last observed, or its backend
-	 * appeared or disappeared since (its extension was suspended or resumed). Going from native to
-	 * native resolves nothing.
-	 */
 	#observeSetting(): void {
 		if (!this.#resolvable || !this.#host.isMainAgent() || this.#host.isDisposed()) return;
 		const id = cfgTodoBackend.get(this.#host.settings);
@@ -321,13 +242,8 @@ export class TodoWrites {
 		return this.#host.extensionRunner()?.getTodoBackend(id) !== undefined;
 	}
 
-	/**
-	 * Resolve `todo.backend` into the active backend. Never throws: an unregistered id or a failing
-	 * `create` leaves native todos in place and emits one notice. Does not touch the list.
-	 */
 	async #resolve(id: string): Promise<void> {
 		this.#active = undefined;
-		// Runs inside a tracked queue slot, so writes stay queued until this resolution settles.
 		this.#resolvedId = id;
 		const runner = this.#host.extensionRunner();
 		if (!runner || this.#host.isDisposed() || !isBackendId(id)) return;
@@ -348,8 +264,7 @@ export class TodoWrites {
 			const todo = this.#host.todo;
 			// The list the backend last confirmed, or `undefined` while a call is pending or after one
 			// failed, timed out or was abandoned. `sync` sends the committed list when it differs (that
-			// call was lost, or its write did not commit). It starts at the committed list, so switching
-			// backends does not copy the list.
+			// call was lost, or its write did not commit).
 			let sent: TodoPhase[] | undefined = todo.phases;
 			const call = async (
 				phases: TodoPhase[],

@@ -65,7 +65,6 @@ describe("todo backends in a real session", () => {
 	const text = (result: AgentToolResult) =>
 		result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
 
-	/** Write an extension source file; a deferred one binds only on `loadDeferredExtensions`. */
 	async function writeSource(name: string, source: string): Promise<string> {
 		const file = tempDir.join(name);
 		await Bun.write(file, source);
@@ -411,7 +410,6 @@ export default function(pi) {
 		const session = await createSessionWithDeferred(deferred, "late");
 		const notices = collectNotices(session);
 
-		// A write starts the deferred load and waits for the resolution; "late" is unregistered until the load binds it.
 		const result = await todo(session, { op: "init", items: ["via deferred backend"] });
 
 		expect(result.isError).toBeUndefined();
@@ -435,7 +433,6 @@ export default function(pi) {
 		const mirrored = ["a:apply:init", "b:apply:append"];
 		expect(calls.map(call => `${call.backend}:${call.method}:${call.op}`)).toEqual(mirrored);
 
-		// Native stops mirroring; switching to it and writing natively calls no backend.
 		cfgTodoBackend.override(session.settings, "native");
 		expect(await session.runTodoWrite(async active => active)).toBeUndefined();
 		const result = await todo(session, { op: "append", phase: "Tasks", items: ["native now"] });
@@ -546,7 +543,6 @@ export default function(pi) {
 		await flushTodoWrites(session);
 		expect(session.getTodoPhases()).toEqual([]);
 		expect(userTodoEdits(session)).toHaveLength(0);
-		// The backend gets the reset list once, never the stale edit.
 		expect(recorder.calls.filter(call => call.method === "replace").map(call => call.phases)).toEqual([[]]);
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("tracker is offline");

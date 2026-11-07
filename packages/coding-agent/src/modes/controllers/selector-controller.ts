@@ -325,7 +325,6 @@ export class SelectorController {
 		const menu = this.#claimMenu("settings");
 		getAvailableThemes()
 			.then(availableThemes => {
-				// `native` first, then backends of enabled extensions in registration order.
 				const todoBackendOptions: RuntimeSettingOptionsProvider = () => {
 					return [
 						{ value: NATIVE_TODO_BACKEND_ID, label: "Native", description: "omp's built-in todo list" },

@@ -488,16 +488,8 @@ export interface ToolSession {
 	 * record it on the session branch. Direct `todo` calls persist via their
 	 * toolResult entry; callers that produce none (the eval bridge, Cursor sync)
 	 * use this so branch rehydration agrees with the in-memory list.
-	 * `update` runs inside the queued write against the committed list; returning
-	 * `undefined` declines (nothing committed). Resolves with the committed list.
 	 */
 	commitTodoPhases?: (update: TodoPhasesUpdate) => Promise<TodoPhase[] | undefined>;
-	/**
-	 * Run a todo write (see `AgentSession.runTodoWrite`): inline with native todos, on the session's
-	 * serial todo queue with an extension backend. `active` is the backend resolved when the write
-	 * starts; `undefined` means native todos. The `todo` tool runs compute → backend `apply` → commit
-	 * inside it. `options.signal` abandons a queued call without releasing its slot early.
-	 */
 	runTodoWrite?: <T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }) => Promise<T>;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];

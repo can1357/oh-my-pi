@@ -624,11 +624,6 @@ const HUD_NOTE_SUP_DIGITS: Record<string, string> = {
 	"9": "\u2079",
 };
 
-/**
- * Completes every open task (pending/in_progress/blocked) that matches a finished subagent description.
- * Returns `undefined` when nothing changes. A blocker note is dropped with the blocked status: the wait it
- * described is over.
- */
 function completeFinishedSubagentTodos(phases: TodoPhase[], completedDescs: string[]): TodoPhase[] | undefined {
 	let mutated = false;
 	const next: TodoPhase[] = phases.map(phase => ({
@@ -5156,7 +5151,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			.commitTodoPhases(current => completeFinishedSubagentTodos(current, completedDescs))
 			.then(
 				committed => {
-					// Nothing to change against the committed list, or the HUD now belongs to another owner.
 					if (!committed || (this.#todoPhasesOwner ?? this.session) !== owner) return;
 					this.todoPhases = committed;
 					this.#syncTodoHudState(owner);

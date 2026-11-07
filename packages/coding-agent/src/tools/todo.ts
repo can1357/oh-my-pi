@@ -70,7 +70,6 @@ const todoSchema = type({
 	"reason?": type("string").describe("blocker note for block"),
 });
 
-/** The `todo` tool's validated params (schema keys only). */
 export type TodoParams = TodoSchema;
 type TodoSchema = typeof todoSchema.infer;
 
@@ -742,8 +741,6 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		_onUpdate?: AgentToolUpdateCallback<TodoToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<TodoToolDetails>> {
-		// Compute → backend apply → commit runs as one write: inline with native todos, one queued unit
-		// with a backend, so concurrent writes and backend switches cannot interleave with it.
 		if (!this.session.runTodoWrite) return this.#write(params, undefined, undefined, signal);
 		try {
 			return await this.session.runTodoWrite(

@@ -425,10 +425,7 @@ export class TodoCommandController {
 		}
 	}
 
-	/**
-	 * Runs `compute` inside the session's queued commit (see {@link commitTodoEdit}), then reports the
-	 * outcome. The user may focus another agent mid-commit, so the HUD only updates if the focused one is unchanged.
-	 */
+	/** The user may focus another agent mid-commit, so the HUD only updates if the focused one is unchanged. */
 	async #edit(compute: (current: TodoPhase[]) => TodoPlan): Promise<void> {
 		const { viewSession } = this.ctx;
 		// Commit first so HUD visibility binds to the new canonical source.

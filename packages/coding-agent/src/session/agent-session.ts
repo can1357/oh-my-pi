@@ -1152,7 +1152,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
-	/** Every todo write and the todo backend those writes reach. */
 	readonly #todoWrites: TodoWrites;
 	readonly #modelMentions: ModelMentionRegistry;
 	#workPoolYieldItems: readonly WorkPoolYieldItem[] = [];
@@ -7612,7 +7611,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						});
 					},
 				)
-				// Extensions are bound (or failed to load): the todo backend can now resolve.
 				.then(() => this.#todoWrites.allowBackendResolution())
 				.finally(() => {
 					if (this.#deferredExtensionLoad === pending) this.#deferredExtensionLoad = undefined;
@@ -11092,27 +11090,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#todo.setPhases(phases);
 	}
 
-	/** Run a todo write, inline for native todos and queued with a backend; see {@link TodoWrites.run}. */
 	runTodoWrite<T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }): Promise<T> {
 		return this.#todoWrites.run(write, options);
 	}
 
-	/** Whether todo writes wait for an extension todo backend; see {@link TodoWrites.queued}. */
 	get todoWritesQueued(): boolean {
 		return this.#todoWrites.queued;
 	}
 
-	/** Arm todo backend resolution; see {@link TodoWrites.arm}. Call once, after {@link setDeferredExtensionLoader}. */
+	/** Call once, after {@link setDeferredExtensionLoader}. */
 	initializeTodoBackend(): void {
 		this.#todoWrites.arm();
 	}
 
-	/** Record a todo list change that already happened elsewhere; see {@link TodoWrites.commit}. */
+	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
 	commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
 		return this.#todoWrites.commit(update);
 	}
 
-	/** Apply a user's or RPC client's todo edit, which a backend can refuse; see {@link TodoWrites.edit}. */
 	editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
 		return this.#todoWrites.edit(update);
 	}

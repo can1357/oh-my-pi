@@ -2404,7 +2404,7 @@ export interface ExtensionRuntimeState {
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
 	/** Remove a queued or initialized provider registration. */
 	unregisterProvider(name: string, sourceId: string): void;
-	/** Todo backends registered by extensions, in registration order. Lives on the runtime so deferred extensions register into the same list. */
+	/** Lives on the runtime so deferred extensions register into the same list. */
 	todoBackends: TodoBackendRegistration[];
 	/** What holds `shortcut` for the extension at `extensionPath`; answered by the runner once it exists. */
 	getShortcutConflict(shortcut: KeyId, extensionPath: string): ShortcutConflict | undefined;
