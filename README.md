@@ -401,7 +401,7 @@ Full provider & routing reference at [omp.sh/docs/providers](https://omp.sh/docs
 
 ### Search providers
 
-Twenty-four backends. Pin one, or let `auto` walk the chain in order.
+Twenty-three backends. Pin one, or let `auto` walk the chain in order.
 
 | provider     | auth                                      |
 | ------------ | ----------------------------------------- |

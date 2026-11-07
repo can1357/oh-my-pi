@@ -203,7 +203,7 @@ _[观看录屏 ↗](https://omp.sh/clips/web.mp4)_
 
 ### 10 · 带优先级和结论的代码评审
 
-明确告诉你这次改动能否发布，每个问题按 P0 到 P3 排序并给出置信度评分。/review 会派生专门的评审子智能体，并行审查分支、单个提交或未提交的修改。你先处理阻碍发布的问题；重要内容不会淹没在大段文字里。
+明确告诉你这次改动能否发布，每个问题按 P0 到 P3 排序并给出置信度评分。[/review](docs/slash-command-internals.md#15-bundled-command-note-review) 会派生专门的评审子智能体，并行审查分支、单个提交或未提交的修改。你先处理阻碍发布的问题；重要内容不会淹没在大段文字里。
 
 想自己主导评审？`/annotate code-review` 会打开 diff，让你在评审者运行前把批注钉在具体行上。`/annotate` 还可以针对最新回复、某条会话消息、某个文件或引用文本，把你的批注粘贴进提示词。参见 [`/annotate`](docs/slash-command-internals.md#12-bundled-command-note-annotate)。
 
@@ -343,7 +343,7 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 直连 API 和网关。可按角色混用不同提供商。
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway
 
 ### 编程套餐
 
@@ -411,6 +411,7 @@ modelRoles:
 | `zai`        | `ZAI_API_KEY`                             |
 | `exa`        | `EXA_API_KEY`（或 mcp）                   |
 | `tinyfish`   | `TINYFISH_API_KEY`                        |
+| `keenable`   | `KEENABLE_API_KEY`（可无密钥回退）        |
 | `jina`       | `JINA_API_KEY`                            |
 | `kagi`       | `KAGI_API_KEY`                            |
 | `tavily`     | `TAVILY_API_KEY`                          |
