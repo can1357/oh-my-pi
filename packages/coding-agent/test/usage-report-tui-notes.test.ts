@@ -178,7 +178,7 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 		// Antigravity's Google counter: a drained Gemini 4 Argon weekly bucket
 		// beside a barely-used shared Gemini weekly bucket. Both limits share the
 		// label and window, so label|window-keyed grouping merged them into one
-		// group whose "% free" was the mean (50%), hiding the drained bucket. The
+		// group whose "% used" was the mean (50%), hiding the drained bucket. The
 		// provider now labels the Argon bucket itself, but the grouping must hold
 		// even for two limits that share a label (pre-label-fix reports).
 		const bucket = (id: string, frac: number) => ({
@@ -200,9 +200,9 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 
 		const geminiRows = text.split("\n").filter(line => line.includes("Gemini"));
 		expect(geminiRows).toHaveLength(2);
-		expect(text).toContain("0% free");
-		expect(text).toContain("100% free");
-		expect(text).not.toContain("50% free");
+		expect(text).toContain("0% used");
+		expect(text).toContain("100% used");
+		expect(text).not.toContain("50% used");
 	});
 });
 
