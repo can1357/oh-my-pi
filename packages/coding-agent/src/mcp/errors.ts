@@ -31,7 +31,8 @@ interface MCPTransportErrorOptions {
 	cause?: unknown;
 }
 
-const MAX_MESSAGE_CHARS = 1_000;
+/** Longest MCP error message; the constructor cuts a longer one at its end. */
+export const MCP_ERROR_MESSAGE_MAX_CHARS = 1_000;
 const MAX_DATA_CHARS = 2_000;
 const MAX_TRACE_ID_CHARS = 128;
 const MAX_DATA_STRING_CHARS = 256;
@@ -64,7 +65,7 @@ export class MCPTransportError extends Error {
 
 	constructor(options: MCPTransportErrorOptions) {
 		super(
-			sanitizeDiagnosticText(options.message, MAX_MESSAGE_CHARS),
+			sanitizeDiagnosticText(options.message, MCP_ERROR_MESSAGE_MAX_CHARS),
 			options.cause === undefined ? undefined : { cause: options.cause },
 		);
 		this.name = "MCPTransportError";
@@ -100,10 +101,15 @@ function errorCode(error: unknown): string | number | undefined {
 	return error.cause === undefined ? undefined : errorCode(error.cause);
 }
 
-function sanitizeDiagnosticText(value: string, maxChars: number): string {
+/**
+ * Replace credential values in text: bearer and basic credentials, credential
+ * query parameters, and `key: value` / `key=value` pairs whose key names a
+ * secret. A value is found from its label, so text must be redacted whole,
+ * before any of it is cut away. Idempotent.
+ */
+export function redactCredentials(value: string): string {
 	return (
 		value
-			.replace(FETCH_VERBOSE_ADVICE, "")
 			// A credential is token68 and never contains `"`; `Bearer name="…"` is a
 			// WWW-Authenticate challenge whose params (resource_metadata, scope, error)
 			// drive OAuth discovery, so leave it intact.
@@ -113,9 +119,11 @@ function sanitizeDiagnosticText(value: string, maxChars: number): string {
 				/((?:authorization|api[-_]?key|private[-_]?key|access[-_]?key|token|secret|passw(?:or)?d|pwd|credential)\s*[:=]\s*)[^\s,;}]+/gi,
 				"$1[redacted]",
 			)
-			.slice(0, maxChars)
-			.trim()
 	);
+}
+
+function sanitizeDiagnosticText(value: string, maxChars: number): string {
+	return redactCredentials(value.replace(FETCH_VERBOSE_ADVICE, "")).slice(0, maxChars).trim();
 }
 
 function sanitizeData(value: unknown, depth: number, seen: WeakSet<object>): unknown {
@@ -210,7 +218,10 @@ export function normalizeMCPTransportError(
 	options: { transport: MCPTransportKind; stage: MCPFailureStage; traceId?: string },
 ): MCPTransportError {
 	if (error instanceof MCPTransportError) return error;
-	const message = sanitizeDiagnosticText(error instanceof Error ? error.message : String(error), MAX_MESSAGE_CHARS);
+	const message = sanitizeDiagnosticText(
+		error instanceof Error ? error.message : String(error),
+		MCP_ERROR_MESSAGE_MAX_CHARS,
+	);
 	let code = errorCode(error);
 	const normalizedCode = typeof code === "string" ? code.toUpperCase() : code;
 	const httpStatusMatch = /^HTTP (\d{3}):/i.exec(message);
@@ -310,8 +321,8 @@ export function formatMCPToolFailure(error: unknown, serverName: string, toolNam
 			: normalizeMCPTransportError(error, { transport: "unknown", stage: "protocol" });
 	const lines = [
 		"MCP failure",
-		`server: ${sanitizeDiagnosticText(serverName, MAX_MESSAGE_CHARS)}`,
-		`tool: ${sanitizeDiagnosticText(toolName, MAX_MESSAGE_CHARS)}`,
+		`server: ${sanitizeDiagnosticText(serverName, MCP_ERROR_MESSAGE_MAX_CHARS)}`,
+		`tool: ${sanitizeDiagnosticText(toolName, MCP_ERROR_MESSAGE_MAX_CHARS)}`,
 		`transport: ${diagnostic.transport}`,
 		`stage: ${diagnostic.stage}`,
 		`failure: ${diagnostic.failure}`,
