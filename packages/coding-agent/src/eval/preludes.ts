@@ -53,6 +53,13 @@ export interface EvalPreludeDefinition {
 	guidance?: string;
 	/** Approval tier or argument-dependent approval decision for host calls. */
 	approval?: ToolApproval;
+	/**
+	 * Fire the session's extension `tool_call` handlers for each host call under this prelude's name, as
+	 * for a loop-dispatched tool call, then an observe-only `tool_result` once it settles. Opt in only when
+	 * extensions already see this name with the same input shape: a prelude sharing a native tool's name
+	 * with a different shape (`computer`) would mislead them. Handler `additionalContext` is ignored.
+	 */
+	extensionToolCalls?: boolean;
 	/** Live availability predicate. Omission means enabled. */
 	enabled?: () => boolean;
 	/** Execute a host call outside the language VM. */
@@ -91,12 +98,15 @@ export function findEnabledEvalPrelude(session: ToolSession, name: string): Eval
 	return definition?.enabled?.() === false ? undefined : definition;
 }
 
-async function approvePreludeInvocation(
+/**
+ * Resolve the approval policy for a prelude call against the session's settings. The subject is the
+ * prelude name, so a restricted folder matches it by the session's directory.
+ */
+function resolvePreludePolicy(
 	definition: EvalPreludeDefinition,
 	parameters: unknown,
 	context: EvalPreludeContext,
-): Promise<void> {
-	context.signal?.throwIfAborted();
+): { subject: { name: string; approval?: ToolApproval }; resolved: ReturnType<typeof resolveApproval> } {
 	// Fourth execute-time site: same helper as wrapper/cursor/mcp so a missing
 	// context cannot silently yolo. Empty `context.context` fail-closes;
 	// omitting it inherits the live session settings (schema default yolo).
@@ -106,7 +116,6 @@ async function approvePreludeInvocation(
 	);
 	const subject: { name: string; approval?: ToolApproval } = { name: definition.name };
 	if (definition.approval !== undefined) subject.approval = definition.approval;
-	// A prelude names no path of its own, so a restricted folder matches it by the session's directory.
 	const resolved = resolveApproval(
 		subject,
 		parameters,
@@ -115,6 +124,16 @@ async function approvePreludeInvocation(
 		undefined,
 		approvalRestrictions(settings, context.session.cwd),
 	);
+	return { subject, resolved };
+}
+
+async function approvePreludeInvocation(
+	definition: EvalPreludeDefinition,
+	parameters: unknown,
+	context: EvalPreludeContext,
+): Promise<void> {
+	context.signal?.throwIfAborted();
+	const { subject, resolved } = resolvePreludePolicy(definition, parameters, context);
 	if (resolved.policy === "deny") throw denyError(resolved, definition.name);
 	if (resolved.policy !== "prompt") return;
 
@@ -132,6 +151,71 @@ async function approvePreludeInvocation(
 }
 
 /**
+ * Runs the `tool_call` handlers that opted in with `{ evalPreludes: true }` for an opted-in prelude
+ * call, so an extension that blocks or revises e.g. `browser` calls also sees the ones made from eval.
+ * A call its approval policy already denies never reaches extensions, matching the loop; the approval
+ * gate that follows throws the denial. Otherwise the gate resolves against the input that executes.
+ * `announced` is set once handlers saw the call: every outcome from then on, a later handler's block
+ * included, follows as a `tool_result` so a handler that set something up for the call can release it.
+ */
+async function applyToolCallHooks(
+	definition: EvalPreludeDefinition,
+	parameters: unknown,
+	context: EvalPreludeContext,
+): Promise<{ parameters: unknown; announced: boolean; blockReason?: string }> {
+	const emit = context.session.emitToolCall;
+	const unchanged = { parameters, announced: false };
+	if (definition.extensionToolCalls !== true || !emit) return unchanged;
+	if (parameters === null || typeof parameters !== "object" || Array.isArray(parameters)) return unchanged;
+	if (resolvePreludePolicy(definition, parameters, context).resolved.policy === "deny") return unchanged;
+	const result = await emit.call(
+		context.session,
+		{
+			type: "tool_call",
+			source: "eval-prelude",
+			toolName: definition.name,
+			toolCallId: context.toolCallId,
+			input: parameters as Record<string, unknown>,
+		},
+		context.signal,
+	);
+	if (result?.block) {
+		return {
+			parameters,
+			announced: true,
+			blockReason: result.reason || `Eval prelude call blocked by an extension: ${definition.name}`,
+		};
+	}
+	return { parameters: result?.input ?? parameters, announced: true };
+}
+
+/** Reports an announced prelude call's outcome to opted-in `tool_result` handlers; their failures never mask it. */
+async function emitPreludeResult(
+	definition: EvalPreludeDefinition,
+	parameters: unknown,
+	context: EvalPreludeContext,
+	outcome: { result: AgentToolResult<unknown> } | { error: unknown },
+): Promise<void> {
+	const emit = context.session.emitToolResult;
+	if (!emit) return;
+	const failed = "error" in outcome;
+	await emit
+		.call(context.session, {
+			type: "tool_result",
+			source: "eval-prelude",
+			toolName: definition.name,
+			toolCallId: context.toolCallId,
+			input: parameters as Record<string, unknown>,
+			content: failed
+				? [{ type: "text", text: outcome.error instanceof Error ? outcome.error.message : String(outcome.error) }]
+				: outcome.result.content,
+			details: failed ? undefined : outcome.result.details,
+			isError: failed,
+		})
+		.catch(() => undefined);
+}
+
+/**
  * Invoke a prelude through the live session registry. Authorization is resolved
  * before the handler runs and repeated when an awaited approval raced with a
  * replacement, so a disabled or replaced captured function cannot retain host
@@ -139,13 +223,35 @@ async function approvePreludeInvocation(
  */
 export async function invokeEvalPrelude(
 	name: string,
-	parameters: unknown,
+	rawParameters: unknown,
 	context: EvalPreludeContext,
 ): Promise<AgentToolResult<unknown>> {
 	context.signal?.throwIfAborted();
-	let definition = findEnabledEvalPrelude(context.session, name);
+	const definition = findEnabledEvalPrelude(context.session, name);
 	if (!definition) throw new Error(`Eval prelude "${name}" is not enabled in the current session.`);
 
+	const hooked = await applyToolCallHooks(definition, rawParameters, context);
+	const { parameters } = hooked;
+	if (!hooked.announced) return authorizeAndInvoke(name, definition, parameters, context);
+	let result: AgentToolResult<unknown>;
+	try {
+		if (hooked.blockReason !== undefined) throw new Error(hooked.blockReason);
+		result = await authorizeAndInvoke(name, definition, parameters, context);
+	} catch (error) {
+		await emitPreludeResult(definition, parameters, context, { error });
+		throw error;
+	}
+	await emitPreludeResult(definition, parameters, context, { result });
+	return result;
+}
+
+async function authorizeAndInvoke(
+	name: string,
+	initial: EvalPreludeDefinition,
+	parameters: unknown,
+	context: EvalPreludeContext,
+): Promise<AgentToolResult<unknown>> {
+	let definition = initial;
 	await approvePreludeInvocation(definition, parameters, context);
 	context.signal?.throwIfAborted();
 	const current = findEnabledEvalPrelude(context.session, name);

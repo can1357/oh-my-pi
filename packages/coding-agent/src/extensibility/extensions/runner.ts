@@ -1499,6 +1499,15 @@ export class ExtensionRunner {
 		return false;
 	}
 
+	/**
+	 * Whether `tool_call` or `tool_result` has a handler for this source. Eval-prelude calls reach only
+	 * handlers that registered with `{ evalPreludes: true }`, so they short-circuit on those alone.
+	 */
+	hasToolEventHandlers(event: "tool_call" | "tool_result", source?: ToolCallEvent["source"]): boolean {
+		if (source !== "eval-prelude") return this.hasHandlers(event);
+		return this.extensions.some(ext => (ext.evalPreludeHandlerIndexes?.get(event)?.size ?? 0) > 0);
+	}
+
 	getMessageRenderer(customType: string): MessageRenderer | undefined {
 		for (const ext of this.extensions) {
 			const renderer = ext.messageRenderers.get(customType);
@@ -2143,12 +2152,17 @@ export class ExtensionRunner {
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
 		const contexts: string[] = [];
+		// Eval-prelude results reach only handlers that opted in with `{ evalPreludes: true }`.
+		const preludeIndexes = (ext: Extension) =>
+			event.source === "eval-prelude" ? (ext.evalPreludeHandlerIndexes?.get("tool_result") ?? new Set()) : undefined;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_result");
 			if (!handlers || handlers.length === 0) continue;
+			const allowed = preludeIndexes(ext);
 
-			for (const handler of handlers) {
+			for (const [index, handler] of handlers.entries()) {
+				if (allowed && !allowed.has(index)) continue;
 				const handlerResult = (await this.#runHandlerWithTimeout(
 					handler,
 					currentEvent,
@@ -2216,12 +2230,17 @@ export class ExtensionRunner {
 		);
 		let result: ToolCallEventResult | undefined;
 		const aggregated = { input: undefined as ToolCallEventResult["input"], additionalContext: [] as string[] };
+		// Eval-prelude calls reach only handlers that opted in with `{ evalPreludes: true }`.
+		const preludeIndexes = (ext: Extension) =>
+			event.source === "eval-prelude" ? (ext.evalPreludeHandlerIndexes?.get("tool_call") ?? new Set()) : undefined;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_call");
 			if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
+			const allowed = preludeIndexes(ext);
+			for (const [index, handler] of handlers.entries()) {
+				if (allowed && !allowed.has(index)) continue;
 				const handlerResult = (await this.#runHandlerWithTimeout(
 					handler,
 					event,

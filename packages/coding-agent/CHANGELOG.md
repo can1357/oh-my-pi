@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- The ask dialog's "Other" answer box and hook editors now get macOS spelling assistance (typo undercurls, Tab completions, on-space autocorrect), following the `spelling.*` settings when opened; open hook editors also update live when those settings change ([#12517](https://github.com/can1357/oh-my-pi/pull/12517) by [@aleister1102](https://github.com/aleister1102))
+- Supported invoking multiple skills in a single prompt submission (`/skill:foo /skill:bar`); every registered `/skill:<name>` token in the prompt is loaded, and unknown tokens stay in the prompt text ([#12535](https://github.com/can1357/oh-my-pi/pull/12535) by [@aleister1102](https://github.com/aleister1102))
+- Eval `browser` calls run the extension `tool_call` and `tool_result` handlers that opt in with `{ evalPreludes: true }`, so an extension that blocks or rewrites `browser` calls (for example to point `app.cdp_url` at a per-agent endpoint) also covers calls made from eval and can release what it set up when the call ends; the `tool_result` is observe-only ([#18277](https://github.com/can1357/oh-my-pi/pull/18277) by [@aleister1102](https://github.com/aleister1102))
+
+### Changed
+
+- Resuming a long session reads only the entry types it needs for transcript replay, the compaction notice, Hindsight message extraction and vibe session recovery, instead of decoding the whole journal
+- Extension event handlers run under a loop phase naming the extension and event, so `ui.loop-blocked` attributes a synchronous block in their handler to that extension instead of "unknown".
+- Per-turn tool-output pruning now walks only the entries kept by the latest compaction (plus the earlier calls kept results refer to) instead of the whole branch ([#16517](https://github.com/can1357/oh-my-pi/pull/16517) by [@Komzpa](https://github.com/Komzpa))
+- `omp` starts faster: the browser's accessibility audit now loads its `axe-core` engine on demand, so a launch no longer pays for it ([#16775](https://github.com/can1357/oh-my-pi/pull/16775) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ### Fixed
 
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
@@ -37,6 +50,10 @@
 - An extension provider with `authHeader: true` keeps its cached `fetchDynamicModels` catalog when `omp models refresh` fails, instead of showing 0 models until the next successful forced refresh ([#18227](https://github.com/can1357/oh-my-pi/issues/18227))
 - A session whose request carries no titleable text of its own — an attached `@brief.md`, a greeting, a bare number — is now named once from the assistant's reading of it, instead of staying untitled until the next message that happens to be titleable (which, for an agent launched from one brief and left to run, never came) ([#18238](https://github.com/can1357/oh-my-pi/pull/18238) by [@sjawhar](https://github.com/sjawhar))
 - Prewalk no longer hands a subagent to its cheap model when the subagent messages its parent or another agent (`write agent://…`) before its first file edit ([#18322](https://github.com/can1357/oh-my-pi/pull/18322) by [@1vivy](https://github.com/1vivy))
+
+### Changed
+
+- Eval `browser` calls run the extension `tool_call` handlers that opt in with `pi.on("tool_call", handler, { evalPreludes: true })`, so an extension that blocks or rewrites `browser` calls (for example to point `app.cdp_url` at a per-agent endpoint) also covers calls made from eval. Handlers that do not opt in never see eval prelude calls, and calls a `browser` approval policy already denies skip the handlers. Other eval preludes are unchanged, and prelude calls get no matching `tool_result` ([#18277](https://github.com/can1357/oh-my-pi/pull/18277) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.17.0] - 2026-11-06
 
