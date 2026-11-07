@@ -462,7 +462,7 @@ type McpNotificationEntry = {
 };
 
 type LateDiagnosticsDetails = {
-	files: Array<{ path: string; summary: string; errored: boolean; messages: string[] }>;
+	files: Array<{ path: string; summary: string; errored: boolean; messages: string[]; unreported?: string[] }>;
 };
 
 function buildLateDiagnosticsBatchMessage(
@@ -474,6 +474,7 @@ function buildLateDiagnosticsBatchMessage(
 		summary: entry.summary,
 		messages: entry.messages,
 		errored: entry.errored,
+		unreported: entry.unreported,
 	}));
 	const details: LateDiagnosticsDetails = {
 		files: files.map(file => ({
@@ -481,6 +482,7 @@ function buildLateDiagnosticsBatchMessage(
 			summary: file.summary,
 			errored: file.errored,
 			messages: file.messages,
+			unreported: file.unreported,
 		})),
 	};
 	return {
