@@ -21,6 +21,7 @@ mod cond;
 mod ids;
 mod list;
 mod redir;
+mod stored;
 mod word;
 
 use alloc::vec::Vec;
@@ -79,7 +80,7 @@ pub enum K {
 }
 
 /// One node.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Node {
 	pub kind:  K,
 	pub flags: u8,
@@ -316,15 +317,15 @@ impl<S> fmt::Debug for Run<S> {
 
 // ─── the tree ──────────────────────────────────────────────────────────
 
-/// Nodes of one top-level command (or one run-time parsed word).
-#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Nodes of one top-level command (or one run-time parsed word). Stored in
+/// a packed form of its own ([`stored`]).
+#[derive(Clone, Default)]
 pub struct Tree {
 	/// The text of every text-carrying node.
 	pub text:  Vec<u8>,
 	pub nodes: Vec<Node>,
 	pub kids:  Vec<u32>,
 	/// Builder stack of children not yet committed.
-	#[serde(skip)]
 	scratch:   Vec<u32>,
 }
 
@@ -335,6 +336,26 @@ impl fmt::Debug for Tree {
 			.finish_non_exhaustive()
 	}
 }
+
+/// The same nodes over the same text: where a node's children sit in
+/// [`Tree::kids`] (`a`) is layout, which a stored tree does not keep.
+impl PartialEq for Tree {
+	fn eq(&self, other: &Self) -> bool {
+		self.text == other.text
+			&& self.nodes.len() == other.nodes.len()
+			&& self
+				.nodes
+				.iter()
+				.zip(&other.nodes)
+				.enumerate()
+				.all(|(i, (a, b))| {
+					Node { a: 0, ..*a } == Node { a: 0, ..*b }
+						&& self.kids_of(i as u32) == other.kids_of(i as u32)
+				})
+	}
+}
+
+impl Eq for Tree {}
 
 // Building blocks the family modules encode nodes with.
 impl Tree {

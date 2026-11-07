@@ -75,6 +75,9 @@ pub fn json(src: &[u8], dialect: Dialect) -> u8 {
 			},
 		}
 	}
+	// The parser's token buffers grew with the largest command; free them
+	// before the export builds its own.
+	drop(parser);
 	let d = match dialect {
 		Dialect::Native => JsonDialect::Native,
 		Dialect::Shfmt => JsonDialect::Shfmt,
