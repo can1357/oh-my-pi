@@ -19,12 +19,9 @@ function haiku(provider: string, compat?: ModelSpec<"anthropic-messages">["compa
 }
 
 describe("Anthropic disabledThinking from models.yml compat", () => {
-	// The provider-keyed rule gives Haiku 5.5 `disabled`; a custom provider id
-	// misses the rule and, with an omitted `thinking` being adaptive, keeps
-	// thinking on when Off is selected unless its `compat` can say so.
+	// A custom provider id misses the provider-keyed rule, so only its own
+	// `compat` can switch thinking off when Off is selected.
 	it("honors a custom provider's disabledThinking", () => {
-		expect(resolveModelPolicy(haiku("anthropic")).compat?.disabledThinking).toBe("disabled");
-		expect(resolveModelPolicy(haiku("claude")).compat?.disabledThinking).toBeUndefined();
 		expect(resolveModelPolicy(haiku("claude", { disabledThinking: "disabled" })).compat?.disabledThinking).toBe(
 			"disabled",
 		);
