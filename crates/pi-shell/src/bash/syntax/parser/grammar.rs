@@ -523,7 +523,7 @@ impl Parser<'_> {
 			}
 		}
 		let body = self.do_body()?;
-		let n = self.t.for_at(var, var_span, words.then_some(mark), body);
+		let n = self.t.for_at(&[var], var_span, words.then_some(mark), body);
 		Ok(n)
 	}
 
