@@ -35,7 +35,7 @@ use crate::bash::syntax::{
 	features::Features,
 	span::Span,
 	tree::{
-		AssignB, CondB, FdB, Id, Payload, Run, TargetB, TextPk, Tree,
+		AssignB, CondB, FdB, Id, Mark, Payload, Run, TargetB, TextPk, Tree,
 		shape::{self, Command as CommandS, Pipeline as PipelineS},
 	},
 };
@@ -52,7 +52,7 @@ enum Cmd {
 /// Result of `par_pline`.
 enum Pline {
 	/// The stage commands.
-	Stages(Vec<Id<CommandS>>),
+	Stages(Mark<CommandS>),
 	/// A lone `time` pipeline.
 	Timed(Id<PipelineS>),
 }
@@ -69,7 +69,10 @@ enum Loop {
 }
 
 /// The placeholder a failed construct leaves (the token is `LEXERR`, so it
-/// never reaches a successful parse).
+/// never reaches a successful parse). A construct that fails part way
+/// (`par_case`, `par_if`, `par_for`) leaves the children it had opened on
+/// the scratch stack for the enclosing builder to take; that tree is
+/// thrown away with the failed event, as `LEXERR` sticks until then.
 fn failed(t: &mut Tree) -> Payload {
 	Payload::Simple(t.simple(&[], &[], false))
 }
@@ -263,9 +266,9 @@ impl Ctx<'_> {
 		self.lx.tok = T::Endinput;
 		self.ps = ParseFlags { incmdpos: true, ..ParseFlags::default() };
 		self.zshlex();
-		let mut items = Vec::new();
-		let ok = self.par_event(T::Endinput, &mut items);
-		(ok, self.t.list(&items))
+		let items = self.t.open();
+		let ok = self.par_event(T::Endinput, items);
+		(ok, self.t.list_at(items))
 	}
 
 	/// zsh `parse_event(OUTPAR)` as `skipcomm` runs it: validates a command
@@ -277,14 +280,15 @@ impl Ctx<'_> {
 		self.lx.tok = T::Endinput;
 		self.ps.incmdpos = true;
 		self.zshlex();
-		let mut items = Vec::new();
-		let ok = self.par_event(endtok, &mut items);
+		let items = self.t.open();
+		let ok = self.par_event(endtok, items);
+		self.t.drop_opened(items);
 		self.leave();
 		ok
 	}
 
 	/// zsh `par_event` (its tail recursion as a loop).
-	fn par_event(&mut self, endtok: T, items: &mut Vec<Id<shape::Item>>) -> bool {
+	fn par_event(&mut self, endtok: T, items: Mark<shape::Item>) -> bool {
 		let mut first = true;
 		loop {
 			while self.lx.tok == T::Seper {
@@ -311,7 +315,8 @@ impl Ctx<'_> {
 					self.item_sep()
 				};
 				if let Some(sep) = sep {
-					items.push(self.t.item(and_or, sep));
+					let item = self.t.item(and_or, sep);
+					self.t.kid(items, item);
 					r = true;
 					match tok {
 						T::Seper => {
@@ -351,14 +356,15 @@ impl Ctx<'_> {
 	}
 
 	fn par_list_items(&mut self) -> Id<shape::List> {
-		let mut items = Vec::new();
+		let items = self.t.open();
 		loop {
 			self.skip_seps();
 			let Some(and_or) = self.par_sublist() else {
 				break;
 			};
 			if let Some(sep) = self.item_sep() {
-				items.push(self.t.item(and_or, sep));
+				let item = self.t.item(and_or, sep);
+				self.t.kid(items, item);
 				self.ps.incmdpos = true;
 				loop {
 					self.zshlex();
@@ -367,11 +373,12 @@ impl Ctx<'_> {
 					}
 				}
 			} else {
-				items.push(self.t.item(and_or, Sep::None));
+				let item = self.t.item(and_or, Sep::None);
+				self.t.kid(items, item);
 				break;
 			}
 		}
-		self.t.list(&items)
+		self.t.list_at(items)
 	}
 
 	/// zsh `par_list1`: one sublist.
@@ -389,7 +396,8 @@ impl Ctx<'_> {
 	fn par_sublist(&mut self) -> Option<Id<shape::AndOr>> {
 		let lo = self.lx.lo;
 		let first = self.par_sublist2()?;
-		let mut pipelines = vec![first];
+		let pipelines = self.t.open();
+		self.t.kid(pipelines, first);
 		// zsh recurses with each `&&`/`||` on the cmdstack until it returns.
 		let mut pushed = 0usize;
 		while matches!(self.lx.tok, T::Dbar | T::Damper) {
@@ -405,7 +413,7 @@ impl Ctx<'_> {
 			match self.par_sublist2() {
 				Some(p) => {
 					self.t.set_connector(p, op);
-					pipelines.push(p);
+					self.t.kid(pipelines, p);
 				},
 				None => break,
 			}
@@ -413,7 +421,7 @@ impl Ctx<'_> {
 		for _ in 0..pushed {
 			self.cmdpop();
 		}
-		Some(self.t.and_or(Span::new(lo, self.lx.last_hi), &pipelines))
+		Some(self.t.and_or_at(Span::new(lo, self.lx.last_hi), pipelines))
 	}
 
 	/// zsh `par_sublist2`: `[ COPROC | BANG ] pline`.
@@ -432,19 +440,25 @@ impl Ctx<'_> {
 			return None;
 		}
 		let span = Span::new(lo, self.lx.last_hi);
-		let stages = match pl {
+		let mut p = match pl {
 			Some(Pline::Timed(tp)) if !coproc => {
 				self.t.set_start(tp, lo);
 				if !bang {
 					return Some(tp);
 				}
-				vec![self.t.pipeline_command(tp)]
+				let c = self.t.pipeline_command(tp);
+				self.t.pipeline(span, false, None, &[c])
 			},
-			Some(Pline::Timed(tp)) => vec![self.t.pipeline_command(tp)],
-			Some(Pline::Stages(stages)) => stages,
-			None => vec![self.t.empty_command(Span::new(span.hi, span.hi))],
+			Some(Pline::Timed(tp)) => {
+				let c = self.t.pipeline_command(tp);
+				self.t.pipeline(span, false, None, &[c])
+			},
+			Some(Pline::Stages(stages)) => self.t.pipeline_at(span, false, None, stages),
+			None => {
+				let c = self.t.empty_command(Span::new(span.hi, span.hi));
+				self.t.pipeline(span, false, None, &[c])
+			},
 		};
-		let mut p = self.t.pipeline(span, false, None, &stages);
 		if coproc {
 			let body = self.t.pipeline_command(p);
 			let cp = self.t.coproc(None, body);
@@ -459,12 +473,12 @@ impl Ctx<'_> {
 
 	/// zsh `par_pline`: `cmd [ ( BAR | BARAMP ) { SEPER } pline ]`.
 	fn par_pline(&mut self) -> Option<Pline> {
-		let mut stages = Vec::new();
+		let stages = self.t.open();
 		// zsh recurses with each `|`/`|&` on the cmdstack until it returns.
 		let mut pushed = 0usize;
 		loop {
 			let Some(c) = self.par_cmd(false) else {
-				if stages.is_empty() {
+				if self.t.opened_len(stages) == 0 {
 					return None;
 				}
 				self.lx.tok = T::Lexerr;
@@ -476,20 +490,20 @@ impl Ctx<'_> {
 				if pipe_stderr {
 					self.t.set_pipe_stderr(cmd);
 				}
-				stages.push(cmd);
+				self.t.kid(stages, cmd);
 				self.cmdpush(if pipe_stderr { CS_ERRPIPE } else { CS_PIPE });
 				pushed += 1;
 				self.zshlex();
 				self.skip_seps();
 				continue;
 			}
-			if stages.is_empty()
+			if self.t.opened_len(stages) == 0
 				&& let Cmd::Timed(tp) = c
 			{
 				return Some(Pline::Timed(tp));
 			}
 			let cmd = self.stage_command(c);
-			stages.push(cmd);
+			self.t.kid(stages, cmd);
 			break;
 		}
 		for _ in 0..pushed {
@@ -719,7 +733,7 @@ impl Ctx<'_> {
 		} else {
 			vars.iter().map(Vec::as_slice).collect()
 		};
-		let fr = self.t.for_(&names, var_span, words.as_deref(), body);
+		let fr = self.t.for_at(&names, var_span, words, body);
 		Some(if sel {
 			Payload::Select(fr)
 		} else {
@@ -750,7 +764,7 @@ impl Ctx<'_> {
 		self.ps.incmdpos = false;
 		self.noaliases = ona;
 		self.zshlex();
-		let mut arms = Vec::new();
+		let arms = self.t.open();
 		loop {
 			self.skip_seps();
 			if self.lx.tok == T::Outbrace {
@@ -771,7 +785,7 @@ impl Ctx<'_> {
 				}
 				self.tw()
 			};
-			let mut patterns = Vec::new();
+			let patterns = self.t.open();
 			self.ps.incasepat = -1;
 			self.ps.incmdpos = true;
 			if !skip_lex {
@@ -779,21 +793,24 @@ impl Ctx<'_> {
 			}
 			loop {
 				if self.lx.tok == T::Outpar {
-					patterns.push(self.t.zword(&core::mem::take(&mut s.0), s.1));
+					let w = self.t.zword(&core::mem::take(&mut s.0), s.1);
+					self.t.kid(patterns, w);
 					self.ps.incasepat = 0;
 					self.ps.incmdpos = true;
 					self.zshlex();
 					break;
 				} else if self.lx.tok == T::Bar {
-					patterns.push(self.t.zword(&core::mem::take(&mut s.0), s.1));
+					let w = self.t.zword(&core::mem::take(&mut s.0), s.1);
+					self.t.kid(patterns, w);
 					self.ps.incasepat = 1;
 					self.ps.incmdpos = false;
 				} else {
-					if patterns.is_empty() && s.0.first() == Some(&INPAR) {
+					if self.t.opened_len(patterns) == 0 && s.0.first() == Some(&INPAR) {
 						if !case_paren_pattern(&mut s.0) {
 							return self.yyerr();
 						}
-						patterns.push(self.t.zword(&core::mem::take(&mut s.0), s.1));
+						let w = self.t.zword(&core::mem::take(&mut s.0), s.1);
+						self.t.kid(patterns, w);
 						break;
 					}
 					return self.yyerr();
@@ -816,7 +833,8 @@ impl Ctx<'_> {
 				T::Semibar => CaseTerm::Continue,
 				_ => CaseTerm::Break,
 			};
-			arms.push(self.t.case_arm(&patterns, body, term));
+			let arm = self.t.case_arm_at(body, term, patterns);
+			self.t.kid(arms, arm);
 			if (self.lx.tok == T::Esac && !brflag) || (self.lx.tok == T::Outbrace && brflag) {
 				break;
 			}
@@ -830,13 +848,13 @@ impl Ctx<'_> {
 		self.ps.incmdpos = true;
 		self.ps.incasepat = 0;
 		self.zshlex();
-		Some(Payload::Case(self.t.case(word, &arms)))
+		Some(Payload::Case(self.t.case_at(word, arms)))
 	}
 
 	/// zsh `par_if`.
 	#[allow(clippy::cognitive_complexity, reason = "a direct port of zsh's par_if")]
 	fn par_if(&mut self) -> Option<Payload> {
-		let mut arms = Vec::new();
+		let arms = self.t.open();
 		let mut usebrace = false;
 		let mut xtok;
 		// Each pass pushes `if`/`elif` (zsh pushes `elif` for `fi` and
@@ -880,7 +898,8 @@ impl Ctx<'_> {
 				let body = self.par_list();
 				self.ps.incmdpos = true;
 				self.cmdpop();
-				arms.push((cond, body));
+				self.t.kid(arms, cond);
+				self.t.kid(arms, body);
 			} else if self.lx.tok == T::Inbrace {
 				usebrace = true;
 				self.cmdpop();
@@ -891,7 +910,8 @@ impl Ctx<'_> {
 					self.cmdpop();
 					return self.yyerr();
 				}
-				arms.push((cond, body));
+				self.t.kid(arms, cond);
+				self.t.kid(arms, body);
 				self.zshlex();
 				self.ps.incmdpos = true;
 				if self.lx.tok == T::Seper {
@@ -905,7 +925,8 @@ impl Ctx<'_> {
 				self.cmdpop();
 				self.cmdpush(then);
 				let body = self.par_list1();
-				arms.push((cond, body));
+				self.t.kid(arms, cond);
+				self.t.kid(arms, body);
 				self.ps.incmdpos = true;
 				break;
 			}
@@ -936,10 +957,10 @@ impl Ctx<'_> {
 			self.zshlex();
 			self.cmdpop();
 		}
-		if arms.is_empty() {
+		if self.t.opened_len(arms) == 0 {
 			return self.yyerr();
 		}
-		Some(Payload::If(self.t.if_(&arms, else_body)))
+		Some(Payload::If(self.t.if_at(else_body, arms)))
 	}
 
 	/// zsh `par_while`.
@@ -1438,21 +1459,23 @@ impl Ctx<'_> {
 	}
 
 	/// zsh `par_wordlist`: `{ STRING }`.
-	fn par_wordlist(&mut self) -> Vec<Id<shape::Word>> {
-		let mut words = Vec::new();
+	fn par_wordlist(&mut self) -> Mark<shape::Word> {
+		let words = self.t.open();
 		while self.lx.tok == T::String {
-			words.push(self.tok_word());
+			let w = self.tok_word();
+			self.t.kid(words, w);
 			self.zshlex();
 		}
 		words
 	}
 
 	/// zsh `par_nl_wordlist`: `{ STRING | SEPER }`.
-	fn par_nl_wordlist(&mut self) -> Vec<Id<shape::Word>> {
-		let mut words = Vec::new();
+	fn par_nl_wordlist(&mut self) -> Mark<shape::Word> {
+		let words = self.t.open();
 		while matches!(self.lx.tok, T::String | T::Seper) {
 			if self.lx.tok == T::String {
-				words.push(self.tok_word());
+				let w = self.tok_word();
+				self.t.kid(words, w);
 			}
 			self.zshlex();
 		}

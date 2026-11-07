@@ -231,20 +231,6 @@ impl Tree {
 		self.nodes[cmd.index() as usize].flags |= PIPE_STDERR;
 	}
 
-	/// `if`: `(cond, body)` lists per arm, then the `else` body.
-	pub fn if_(
-		&mut self,
-		arms: &[(Id<ListS>, Id<ListS>)],
-		else_body: Option<Id<ListS>>,
-	) -> Id<shape::If> {
-		let mark = self.open();
-		for &(c, b) in arms {
-			self.kid(mark, c);
-			self.kid(mark, b);
-		}
-		self.if_at(else_body, mark)
-	}
-
 	/// `if` over `cond, body, …` lists collected since `mark`, then the
 	/// `else` body.
 	pub fn if_at(&mut self, else_body: Option<Id<ListS>>, mark: Mark<ListS>) -> Id<shape::If> {
@@ -274,15 +260,16 @@ impl Tree {
 	}
 
 	/// `for`/`select`: the variables (zsh takes several), their span, the
-	/// `in` words (`None` for `"$@"`) and the body.
-	pub fn for_(
+	/// `in` words when written (collected since `words`; `None` for `"$@"`)
+	/// and the body.
+	pub fn for_at(
 		&mut self,
 		vars: &[&[u8]],
 		var_span: Span,
-		words: Option<&[Id<WordS>]>,
+		words: Option<Mark<WordS>>,
 		body: Id<ListS>,
 	) -> Id<shape::For> {
-		let words = words.map(|ws| self.words(ws));
+		let words = words.map(|m| self.words_at(m));
 		let var = self.text(vars[0]);
 		let mark = self.open::<()>();
 		debug_assert_eq!((FOR_VAR, FOR_BODY, FOR_WORDS), (0, 1, 2));
@@ -295,24 +282,6 @@ impl Tree {
 			self.scratch.push(t.index());
 		}
 		Id::new(self.close(for_node(var_span, words.is_some()), mark))
-	}
-
-	/// `for`/`select` over one variable; the `in` words, when written, were
-	/// collected since `words`.
-	pub fn for_at(
-		&mut self,
-		var: &[u8],
-		var_span: Span,
-		words: Option<Mark<WordS>>,
-		body: Id<ListS>,
-	) -> Id<shape::For> {
-		let words = words.map(|m| self.words_at(m));
-		let mut k = [NONE; 3];
-		k[FOR_VAR] = self.text(var).index();
-		k[FOR_BODY] = body.index();
-		k[FOR_WORDS] = opt(words);
-		let n = 2 + usize::from(words.is_some());
-		Id::new(self.push_with(for_node(var_span, words.is_some()), &k[..n]))
 	}
 
 	pub fn arith_for(
@@ -330,20 +299,6 @@ impl Tree {
 		Id::new(self.push_with(Node::new(K::ArithFor), &k))
 	}
 
-	/// A `case` arm: its patterns and body.
-	pub fn case_arm(
-		&mut self,
-		patterns: &[Id<WordS>],
-		body: Id<ListS>,
-		term: CaseTerm,
-	) -> Id<shape::CaseArm> {
-		let mark = self.open();
-		for &p in patterns {
-			self.kid(mark, p);
-		}
-		self.case_arm_at(body, term, mark)
-	}
-
 	/// A `case` arm over the patterns collected since `mark`.
 	pub fn case_arm_at(
 		&mut self,
@@ -354,14 +309,6 @@ impl Tree {
 		debug_assert_eq!(ARM_BODY, 0, "the body goes before the patterns");
 		self.kid_first(mark, body.index());
 		Id::new(self.close(Node { x: term.code(), ..Node::new(K::CaseArm) }, mark))
-	}
-
-	pub fn case(&mut self, word: Id<WordS>, arms: &[Id<shape::CaseArm>]) -> Id<shape::Case> {
-		let mark = self.open();
-		for &a in arms {
-			self.kid(mark, a);
-		}
-		self.case_at(word, mark)
 	}
 
 	/// A `case` over `word` and the arms collected since `mark`.
