@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.0] - 2026-11-07
+
 ### Fixed
 
 - Ctrl+J from a win32-input-mode record with `VK_J` and `Uc=LF` now decodes as `ctrl+j`, so Windows Terminal / mini-term insert a newline instead of submitting ([#18253](https://github.com/can1357/oh-my-pi/pull/18253) by [@Clannad47](https://github.com/Clannad47))

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.0] - 2026-11-07
+
 ### Added
 
 - Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
