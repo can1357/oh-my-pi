@@ -11,6 +11,9 @@ async fn brace_limit_preserves_complete_expansions() {
 		("a=( {1..1048577} ); echo ${#a[@]}", "1048577"),
 		("for i in {1..3000000}; do :; done; echo \"i=$i\"", "i=3000000"),
 		("a=( {x,{1..1024}}{1..1024} ); echo ${#a[@]}", "1049600"),
+		// Refused only where the word runs.
+		("if false; then echo {1..5000000}; fi; echo after", "after"),
+		("f() { echo {1..5000000}; }; echo defined", "defined"),
 	] {
 		let (result, output) = run_command_capture_within(
 			Duration::from_secs(120),
@@ -39,7 +42,10 @@ async fn brace_limit_reports_oversized_expansions() {
 	let mut failures = Vec::new();
 	for (command, status) in [
 		("echo {1..5000000}", 2),
+		("f() { echo {1..5000000}; }; f", 2),
 		("a=( {x,{1..2048}}{1..2048} ); echo ${#a[@]}", 2),
+		// The sequence is counted before its items are built.
+		(": {1..4194304}{1,2}", 2),
 		("a=( \"${x:-\"{1..2049}\"}${x:-\"{1..2048}\"}\" ); echo ${#a[@]}", 2),
 		("declare -a a='({1..5000000})'", 1),
 	] {
