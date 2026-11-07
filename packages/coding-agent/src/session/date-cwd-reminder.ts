@@ -240,6 +240,84 @@ export class DateCwdReminderInjector {
 	#states = new Map<string, RootState>();
 	readonly #journal: DateCwdReminderJournal | undefined;
 	#scope: string | undefined;
+	/**
+	 * Bumped by every build that is not a replay, so a signature recorded under
+	 * an older version was derived from state another preparation has since
+	 * moved: a side request that appended a changed reminder, a root the
+	 * eviction cap dropped and the journal rebuilt, a journal scope switch.
+	 * Conservative on purpose — one counter instead of a bump at every
+	 * `RootState` mutation — because a replay is only valid while nothing else
+	 * has prepared a request in between.
+	 */
+	#version = 0;
+	/**
+	 * The conversation whose wire the last build judged, so the verdict below is
+	 * dropped when the injector serves a different one.
+	 */
+	#rootKey: string | undefined;
+	/**
+	 * Set when a replay check failed while the version and both boundaries still
+	 * matched: the wire's interior messages are rebuilt on every preparation, so
+	 * the boundary signature cannot tell two preparations apart. A memo admitted
+	 * from such a wire is never replayed — the admission only pays the copy it
+	 * costs — so the injector stops admitting from it until the conversation
+	 * changes.
+	 */
+	#interiorRebuilt = false;
+	/**
+	 * O(1) signature of the wire the last build was handed (see `#memo`): its
+	 * length plus the identity of its boundary messages. The boundary refs are
+	 * weak because the wire is not the transcript — a provider transform can
+	 * hand the injector a normalized clone of the turn that was sent — and an
+	 * ordinary turn commits with nothing else holding that clone (the prepared
+	 * context is dropped, the transcript grows). A strong ref would pin the
+	 * clone and everything it owns until the next request or disposal, for a
+	 * signature that can no longer match.
+	 */
+	#pending:
+		| {
+				length: number;
+				first: WeakRef<Message>;
+				last: WeakRef<Message>;
+				root: UserMessage;
+				reminder: string;
+				version: number;
+		  }
+		| undefined;
+	/**
+	 * Last output built, tagged with the inputs that produced it. A repeat of
+	 * that exact (message set, root, reminder, version) tuple — a provider retry
+	 * replaying the same request, or a chain step that keeps the element
+	 * identities — reuses the layout instead of re-running the per-message work.
+	 * `refs` is a snapshot, never the caller's live array: element identity is
+	 * what makes an in-place push/splice a miss, and the array reference alone
+	 * would survive it.
+	 *
+	 * The memo is admitted on the second identical build only (`#pending`): an
+	 * ordinary turn appends new messages, so its snapshot would never replay and
+	 * would cost an extra O(n) copy plus O(n) retained slots per request. The
+	 * pending signature is O(1) — length plus first/last element identity — and
+	 * a replayable miss rebuilds `out` directly without snapshotting anything.
+	 *
+	 * `output` is private to this injector: it is the array a replay copies, and
+	 * it is never the array a caller is handed. Sharing it (or the caller's own
+	 * array) would let one provider request append to, splice, or reorder what a
+	 * previous request was sent, because a provider keeps the `Context` it was
+	 * handed — `packages/ai/src/providers/mock.ts` records one per call, as do
+	 * retry wrappers and every consumer that inspects the wire after the fact.
+	 * Holding it private is also why nothing downstream of the caller has to be
+	 * re-validated: no external reference can reach it.
+	 */
+	#memo:
+		| {
+				refs: Message[];
+				root: UserMessage;
+				reminder: string;
+				version: number;
+				changed: boolean;
+				output: Message[];
+		  }
+		| undefined;
 
 	constructor(journal?: DateCwdReminderJournal) {
 		this.#journal = journal;
@@ -251,8 +329,12 @@ export class DateCwdReminderInjector {
 		if (!context.systemPrompt || context.systemPrompt.length === 0 || context.messages.length === 0) return context;
 		const scope = this.#journal?.scope?.();
 		if (scope !== this.#scope) {
+			// A different task scope starts from the journal, so the state this
+			// injector held is gone and a replay of the last layout could no
+			// longer be what a rebuild produces.
 			this.#states.clear();
 			this.#scope = scope;
+			this.#version++;
 		}
 		const reminder = renderDateCwdReminder(date, cwd);
 		const messages = this.#inject(context.messages, reminder);
@@ -567,8 +649,38 @@ export class DateCwdReminderInjector {
 		const firstIndex = messages.findIndex(message => message.role === "user");
 		if (firstIndex === -1) return messages;
 		const firstUser = messages[firstIndex] as UserMessage;
+		// Replay first, before `#keysOf` pays an O(n) key per message: an exact
+		// repeat of the last build's inputs (same elements, root, reminder, and
+		// no other preparation in between) reuses the layout. The caller gets a
+		// copy of the memo's array, never the array itself (see `#memo`).
+		const memo = this.#memo;
+		if (memo !== undefined) {
+			const sameInputs = memo.root === firstUser && memo.reminder === reminder && memo.version === this.#version;
+			if (sameInputs && this.#replayable(memo, messages)) {
+				return memo.changed ? memo.output.slice() : messages;
+			}
+			// The version and the root matched but an interior message did not: a
+			// provider transform that recreates the interior tool results does that
+			// on every preparation, so this wire can never replay the memo admitted
+			// from it. Remember the verdict and stop admitting (see
+			// `#interiorRebuilt`); a boundary that no longer matches is an ordinary
+			// miss and carries no such verdict.
+			if (sameInputs) this.#interiorRebuilt = true;
+			// The memo's inputs are gone — an ordinary turn appended messages, the
+			// transcript changed shape, or another preparation moved the state — so
+			// it can never hit again. Drop it now instead of pinning both O(n)
+			// arrays (and any provider clones snapshotted before this injector).
+			// Re-admission stays two-hit: the rebuild below records `#pending`, and
+			// the next identical build admits.
+			this.#memo = undefined;
+		}
 		const { keys, counts } = this.#keysOf(messages);
 		const root = keys[firstIndex]!;
+		// A different conversation starts from a wire this injector has not judged.
+		if (root !== this.#rootKey) {
+			this.#rootKey = root;
+			this.#interiorRebuilt = false;
+		}
 		let state = this.#states.get(root);
 		if (state) {
 			this.#followOrdinals(state, counts, false);
@@ -646,7 +758,6 @@ export class DateCwdReminderInjector {
 		let perCallTail = messages.length;
 		while (perCallTail > 0 && isPerCallContextMessage(messages[perCallTail - 1])) perCallTail--;
 		const trailing: Message[] = [];
-
 		let changed = false;
 		const out: Message[] = [];
 		for (const [index, message] of messages.entries()) {
@@ -675,6 +786,84 @@ export class DateCwdReminderInjector {
 			state.seen.add(key);
 		}
 		out.push(...trailing);
+		// Two-hit admission: an exact re-preparation of the just-built inputs
+		// promotes to a full memo; anything else returns what it built — the
+		// single array the ordinary path allocated — recording only the O(1)
+		// boundary signature. Ordinary turns (new messages appended) never match
+		// the signature, so they pay no snapshot and retain no transcript.
+		const pending = this.#pending;
+		const admit =
+			!this.#interiorRebuilt &&
+			pending !== undefined &&
+			pending.version === this.#version &&
+			pending.root === firstUser &&
+			pending.reminder === reminder &&
+			pending.length === messages.length &&
+			// Weak on purpose: a boundary message nothing else holds any more (a
+			// provider-normalized clone whose turn has committed) derefs to
+			// undefined, so the signature can never match a message it is not —
+			// see the retention contract on `#pending` above.
+			pending.first.deref() === messages[0] &&
+			pending.last.deref() === messages[messages.length - 1];
+		this.#version++;
+		if (admit) {
+			// Second identical build: admit the memo. `out` becomes the array a
+			// replay copies, so this injector is the only holder: every caller
+			// gets a fresh slice of it, and a provider that appends to, splices,
+			// or reorders what it was handed cannot reach back into the memo or
+			// into another request's array. A middle-element swap that slips past
+			// the boundary signature only admits a memo `#replayable` then misses
+			// exactly, so the hit contract below is unchanged.
+			this.#pending = undefined;
+			this.#memo = {
+				refs: messages.slice(),
+				root: firstUser,
+				reminder,
+				version: this.#version,
+				changed,
+				output: out,
+			};
+			return changed ? out.slice() : messages;
+		}
+		this.#pending = this.#interiorRebuilt
+			? undefined
+			: {
+					length: messages.length,
+					first: new WeakRef(messages[0]!),
+					last: new WeakRef(messages[messages.length - 1]!),
+					root: firstUser,
+					reminder,
+					version: this.#version,
+				};
 		return changed ? out : messages;
+	}
+
+	/**
+	 * Whether the inputs are still the ones this memo was built from. The
+	 * memo's output needs no such check: it is never handed out, so it cannot
+	 * have been mutated by a consumer.
+	 */
+	#replayable(memo: { refs: Message[] }, messages: Message[]): boolean {
+		const { refs } = memo;
+		if (refs.length !== messages.length) return false;
+		for (let index = 0; index < refs.length; index++) {
+			if (refs[index] !== messages[index]) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Invalidate the replay memo. The injection/control state is deliberately
+	 * preserved: a queue-only edit (`replaceQueues`) fires this callback without
+	 * changing the live transcript, and discarding the state would rewrite the
+	 * first historical user turn with the current reminder and drop later
+	 * injected reminders or developer controls. Stale entries for messages that
+	 * are no longer in the transcript are cleaned up lazily on the next
+	 * `transform()` when the root changes.
+	 */
+	release(): void {
+		this.#memo = undefined;
+		this.#pending = undefined;
+		this.#interiorRebuilt = false;
 	}
 }

@@ -210,7 +210,6 @@ import {
 } from "./session/credential-disabled-notice";
 import {
 	createSessionDateCwdReminderJournal,
-	type DateCwdReminderJournal,
 	DateCwdReminderInjector,
 } from "./session/date-cwd-reminder";
 import { createInterruptedToolResults, createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
@@ -4658,6 +4657,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			model => modelRegistry.getApiKey(model, providerSessionId),
 		);
 		disposeCallbacks.add(() => blobBroker.dispose());
+		// The main loop's injector outlives every request of the session, so its
+		// replay memo releases as soon as the history changes: a committed /compact
+		// (or any other wholesale replaceMessages) swaps the transcript under it and
+		// a committed turn grows it, and either way the memo would keep the previous
+		// wire reachable until the next request.
+		const dateCwdReminder = new DateCwdReminderInjector(createSessionDateCwdReminderJournal(sessionManager));
+
 		// Always installed; the getter-backed options are snapshotted per request,
 		// so `snapcompact.*` changes apply on the next call (a no-op while both are off).
 		const snapcompactInline = new SnapcompactInlineTransformer(
@@ -4682,8 +4688,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// One transform per conversation: the date/cwd reminder remembers what each
 		// conversation was sent, so the main loop and every advisor get their own.
 		// Only the main loop journals its reminders in the session.
-		const createTransformProviderContext = (journal?: DateCwdReminderJournal) => {
-			const dateCwdReminder = new DateCwdReminderInjector(journal);
+		const createTransformProviderContext = (dateCwdReminder: DateCwdReminderInjector) => {
 			return async (context: Context, transformModel: Model): Promise<Context> => {
 				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 				// The archive was sized for the model active at the last context build; a model switch may have lowered the budget.
@@ -4708,9 +4713,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			};
 		};
-		const transformProviderContext = createTransformProviderContext(
-			createSessionDateCwdReminderJournal(sessionManager),
-		);
+		const transformProviderContext = createTransformProviderContext(dateCwdReminder);
 		const onPayload = async (payload: unknown, model?: Model, signal?: AbortSignal) => {
 			return await extensionRunner.emitBeforeProviderRequest(payload, model, signal);
 		};
@@ -4826,6 +4829,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const speculativeToolExecution = createSpeculativeToolExecutionConfig(settings, toolSession, extensionRunner);
 
 		agent = new Agent({
+			onHistoryChanged: () => dateCwdReminder.release(),
 			initialState: {
 				systemPrompt,
 				model,
@@ -5162,7 +5166,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,
 			transformProviderContext,
-			createAdvisorTransformProviderContext: () => createTransformProviderContext(),
+			createAdvisorTransformProviderContext: () => createTransformProviderContext(new DateCwdReminderInjector()),
 			onPayload,
 			onResponse,
 			sideStreamFn: settingsAwareStreamFn,
@@ -5724,6 +5728,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (!captureModel || !captureSessionId) throw new Error("Auto-learn capture identity is incomplete");
 				return new Agent({
 					...captureOptions,
+					onHistoryChanged: () => captureDateCwdReminder.release(),
 					cwd: sessionManager.getCwd(),
 					cwdResolver: () => sessionManager.getCwd(),
 					convertToLlm: convertToLlmFinal,

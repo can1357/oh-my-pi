@@ -39,6 +39,7 @@
 - `omp gc` now shows a progress bar for each slow step (listing and scanning sessions, scanning transcripts for blob refs, archiving) on interactive terminals.
 - `omp gc --strip` and `--compress` start work immediately instead of first reading every session's metadata, and `--strip` processes several sessions at once with a running tally of transcripts stripped.
 - `omp gc` without `--apply` now says up front that it is a dry run.
+- Reduced the work done when a provider request is prepared again, so long sessions use less CPU and allocate less on retries and side requests, and the cache behind it is released as soon as the conversation changes ([#15225](https://github.com/can1357/oh-my-pi/pull/15225) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
