@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { OAUTH_REFRESH_SKEW_MS } from "@oh-my-pi/pi-ai/auth/refresh";
 import { CredentialSourceError } from "@oh-my-pi/pi-ai/error";
 import { executeShell } from "@oh-my-pi/pi-natives";
@@ -43,12 +42,6 @@ interface CommandResult {
 	mintedAt: number;
 	/** The `exp` claim of a JWT value, in ms. Such a value is never served at or after it. */
 	expiresAt: number | undefined;
-	/**
-	 * The same deadline read on `performance.now()`, which no clock change moves. A
-	 * value is served only while BOTH deadlines are ahead, so a wall clock that is
-	 * set backwards cannot extend a credential past the lifetime it was minted with.
-	 */
-	monoExpiresAt: number | undefined;
 }
 
 /**
@@ -71,18 +64,6 @@ const commandFailureRetryAt = new Map<string, number>();
 const commandLastFailure = new Map<string, CommandFailureRecord>();
 const commandInFlight = new Map<string, Promise<CommandRunOutcome>>();
 const commandGeneration = new Map<string, number>();
-/**
- * The monotonic deadline the value a command currently prints was FIRST given,
- * keyed by a digest of that value. A helper that prints the same credential again
- * has minted nothing: re-running it is not evidence of a new token, so the value
- * keeps the deadline it was given when it first appeared and a stale minting tool
- * cannot hand the same dead JWT an unlimited series of fresh leases.
- *
- * It outlives the caches deliberately — retiring an expired result is exactly when
- * the next run would otherwise mint a new deadline for the same bytes — so a digest
- * is held rather than the credential, and nothing needs the bytes to compare them.
- */
-const commandMonoDeadline = new Map<string, { digest: string; monoExpiresAt: number }>();
 
 /**
  * Why cached command values are dropped. `rejected`: a 401 proved the value
@@ -113,7 +94,7 @@ type CommandFailureRecord = { outcome: CommandFailure; timeoutMs: number };
 type CommandResolution = { value: string } | { value: undefined; failure?: CommandFailureRecord };
 
 /**
- * What one finished run produced: a result with its deadlines, or nothing with the
+ * What one finished run produced: a result with its deadline, or nothing with the
  * reason. A result travels whole so the waiter re-checks the deadline itself; the
  * run's own check was made at a moment that has already passed.
  */
@@ -191,36 +172,14 @@ function refreshAt(result: CommandResult): number {
 }
 
 /**
- * A result's value while it may be sent: a JWT never at or after its `exp`, on the
- * wall clock and on the monotonic clock alike. A value with no discoverable expiry
- * is always servable; only invalidation or the configured reuse retires it.
+ * A result's value while it may be sent: a JWT never at or after its `exp`. A value
+ * with no discoverable expiry is always servable; only invalidation or the
+ * configured reuse retires it.
  */
 function servable(result: CommandResult | undefined, now: number): string | undefined {
 	if (result === undefined) return undefined;
 	if (result.expiresAt === undefined) return result.value;
-	const monoExpiresAt = result.monoExpiresAt ?? Number.POSITIVE_INFINITY;
-	return now < result.expiresAt && performance.now() < monoExpiresAt ? result.value : undefined;
-}
-
-/**
- * One successful run's stdout with its deadlines. The wall deadline is the value's
- * own `exp`; the monotonic one is carried from the first time this command printed
- * this exact value, so repeating a run cannot extend a credential's life.
- */
-function commandResult(command: string, value: string): CommandResult {
-	const mintedAt = Date.now();
-	const expiresAt = jwtExpiresAt(value);
-	if (expiresAt === undefined) {
-		commandMonoDeadline.delete(command);
-		return { value, mintedAt, expiresAt: undefined, monoExpiresAt: undefined };
-	}
-	const digest = createHash("sha256").update(value).digest("base64");
-	const held = commandMonoDeadline.get(command);
-	// Same bytes, same credential, same deadline. Different bytes are a real mint
-	// and start their own.
-	const monoExpiresAt = held?.digest === digest ? held.monoExpiresAt : performance.now() + (expiresAt - mintedAt);
-	commandMonoDeadline.set(command, { digest, monoExpiresAt });
-	return { value, mintedAt, expiresAt, monoExpiresAt };
+	return now < result.expiresAt ? result.value : undefined;
 }
 
 /**
@@ -243,8 +202,7 @@ function discardExpired(command: string, now: number): void {
  * to remember. Placing {@link discardExpired} at each read site left the failed-run
  * continuation without one, so a refresh that failed as the clock crossed `exp`
  * read the last good value, saw it dead, left it in the map — and served it again
- * once the wall clock stepped back, which the monotonic deadline cannot catch
- * because it has not elapsed.
+ * once the wall clock stepped back.
  */
 function servableHeld(store: Map<string, CommandResult>, command: string, now: number): CommandResult | undefined {
 	const held = store.get(command);
@@ -312,9 +270,7 @@ function recordCommandFailure(
 ): CommandRunOutcome {
 	const failure: CommandFailureRecord = { outcome, timeoutMs };
 	if (current) {
-		// The backoff is a duration, so it is measured on the clock no step can move:
-		// recording it on the wall clock made a one-year forward jump a one-year wait.
-		commandFailureRetryAt.set(command, performance.now() + COMMAND_FAILURE_RETRY_MS);
+		commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
 		commandLastFailure.set(command, failure);
 	}
 	return { result: undefined, failure };
@@ -339,7 +295,7 @@ async function resolveCommandResolution(
 	if (cached !== undefined && now < refreshAt(cached)) return { value: cached.value };
 	const lastGood = servableHeld(commandLastGood, command, now)?.value;
 	const retryAt = commandFailureRetryAt.get(command);
-	if (retryAt !== undefined && performance.now() < retryAt) {
+	if (retryAt !== undefined && now < retryAt) {
 		// Inside the backoff window no run happens, so the recorded failure is this
 		// resolution's reason. It is read with no await in between, so nothing can clear
 		// it between deciding there is no value and saying why.
@@ -386,7 +342,11 @@ function startCommandRun(command: string, timeoutMs: number): Promise<CommandRun
 		.then(outcome => {
 			const current = (commandGeneration.get(command) ?? 0) === generation;
 			if (outcome.ok) {
-				const result = commandResult(command, outcome.value);
+				const result: CommandResult = {
+					value: outcome.value,
+					mintedAt: Date.now(),
+					expiresAt: jwtExpiresAt(outcome.value),
+				};
 				// A command can print a credential already past its `exp`: a stale cache
 				// inside the minting tool, a clock apart from the issuer's. That is a
 				// failed mint, not a value. Caching or returning it would send a
@@ -836,5 +796,4 @@ export function clearConfigValueCache(): void {
 	invalidateAllCommandConfigs("rejected");
 	commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
 	commandRefreshMs = 0;
-	commandMonoDeadline.clear();
 }

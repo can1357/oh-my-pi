@@ -902,12 +902,8 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		fs.writeFileSync(tokenFile, "FAIL");
 		const warn = spyOn(piUtils.logger, "warn");
 		const realNow = Date.now;
-		const realMonotonic = performance.now;
 		let clockOffsetMs = 0;
 		const clock = spyOn(Date, "now").mockImplementation(() => realNow() + clockOffsetMs);
-		// The failure backoff is a duration, measured on the clock no step can move, so
-		// skipping it means letting time pass on both clocks rather than stepping one.
-		const monotonic = spyOn(performance, "now").mockImplementation(() => realMonotonic() + clockOffsetMs);
 		try {
 			await registry.refresh("online", { refreshCommandCredentials: true });
 			expect(await registry.getApiKey(model)).toBe("good-key");
@@ -938,7 +934,6 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			expect(fs.readFileSync(counterFile, "utf8")).toBe("111");
 		} finally {
 			clock.mockRestore();
-			monotonic.mockRestore();
 			warn.mockRestore();
 		}
 	});
