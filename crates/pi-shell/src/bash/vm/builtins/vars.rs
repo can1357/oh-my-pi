@@ -1805,6 +1805,16 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			}
 			continue;
 		}
+		// bash's `att_noassign`: a call-stack array has no binding of its
+		// own to shadow, so a function-local declaration of one is refused
+		// and nothing changes. Creating the shadow left an invisible local
+		// whose attributes the named `declare -p` below then stamped onto
+		// the call stack's live values.
+		if level == Level::Local && crate::bash::vm::callstack::no_local_binding(name) {
+			ctx.usage(format!("{}: variable may not be assigned value", name.as_bstr()));
+			status = 1;
+			continue;
+		}
 		// The binding this declaration acts on: a new local shadows rather
 		// than follows an outer reference.
 		let new_local = level == Level::Local && !func_binds_local(ctx, name)?;

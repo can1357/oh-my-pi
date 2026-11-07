@@ -99,29 +99,20 @@ pub struct SourceSave {
 }
 
 impl CallKind {
-	/// The `BASH_ARGV` push, in argument order. This is the push itself,
-	/// which the pop accounting owns; what a READER sees of it while a
-	/// `.` file's RETURN trap runs is [`CallKind::visible_argv`].
+	/// The `BASH_ARGV` push, in argument order: both what a read of
+	/// `BASH_ARGC`/`BASH_ARGV` sees and what the pop accounting owns.
+	///
+	/// A `.` file whose RETURN trap is running has no FILE-NAME push left
+	/// to hide: bash pops that one in `_evalfile`, before the trap, and so
+	/// does [`end_source`]. An ARGUMENTS push survives until
+	/// `source_builtin`, which runs after the trap, so it is still read
+	/// and still poppable there. Measured on Bash 5.2.21 and 5.3.0: `. f`
+	/// shows the caller's levels in its trap, `. f A B` still shows
+	/// `C=[2 0] V=[B A]`.
 	fn argv(&self) -> Option<&[BString]> {
 		match self {
 			Self::Function { argv, .. } | Self::Source { argv, .. } => argv.as_deref(),
 			Self::Args(args) => Some(args),
-		}
-	}
-
-	/// What a read of `BASH_ARGC`/`BASH_ARGV` sees of this push.
-	///
-	/// A `.` file whose RETURN trap is running (`ended`) has already lost
-	/// its FILE-NAME push: bash pops that one in `_evalfile`, before the
-	/// trap. An ARGUMENTS push survives until `source_builtin`, which runs
-	/// after the trap, so it is still read there. Measured on Bash 5.2.21
-	/// and 5.3.0: `. f` shows the caller's levels in its trap, `. f A B`
-	/// still shows `C=[2 0] V=[B A]`. The push itself is untouched, so the
-	/// pop accounting still owns and still pops it.
-	fn visible_argv(&self) -> Option<&[BString]> {
-		match self {
-			Self::Source { ended: true, name_push: true, .. } => None,
-			other => other.argv(),
 		}
 	}
 }
@@ -146,6 +137,20 @@ const fn level_visible(kind: &CallKind) -> bool {
 		CallKind::Source { ended, .. } => !*ended,
 		CallKind::Function { .. } => true,
 	}
+}
+
+/// The call-stack arrays bash refuses a function-LOCAL binding of (its
+/// `att_noassign`): each one is computed from the call stack and has no
+/// value of its own to shadow, so `local`/`declare` names one inside a
+/// function with `NAME: variable may not be assigned value` and status 1,
+/// changing nothing. A `declare -g`, a `readonly` or an `export` of the
+/// same name is accepted and carries its attributes, since those act on
+/// the global binding. Measured on Bash 5.2.21 and 5.3.0, which agree.
+pub const fn no_local_binding(name: &[u8]) -> bool {
+	matches!(
+		name,
+		b"BASH_ARGC" | b"BASH_ARGV" | b"BASH_LINENO" | b"BASH_SOURCE" | b"FUNCNAME"
+	)
 }
 
 /// One of bash's call-stack arrays as `vp` sees it, innermost level first
@@ -226,7 +231,7 @@ fn argcv(vp: &Vproc, name: &[u8], base: Option<&[BString]>) -> Vec<BString> {
 		.calls
 		.iter()
 		.rev()
-		.filter_map(|c| c.kind.visible_argv())
+		.filter_map(|c| c.kind.argv())
 		.chain(base);
 	if name == b"BASH_ARGC" {
 		pushes
@@ -548,19 +553,35 @@ pub fn source_argzero(vp: &Vproc) -> Option<&BString> {
 }
 
 /// Take the `.` file read by frame `frames - 1` out of `FUNCNAME`,
-/// `BASH_SOURCE`, `BASH_LINENO` and `caller`, leaving its `BASH_ARGV` push
-/// and the positional parameters it saved: bash runs the file's RETURN
-/// trap between the two (`_evalfile` pops the level, `source_builtin`
-/// puts the parameters back afterwards).
+/// `BASH_SOURCE`, `BASH_LINENO` and `caller`, leaving the positional
+/// parameters it saved: bash runs the file's RETURN trap between the two
+/// (`_evalfile` pops the level, `source_builtin` puts the parameters back
+/// afterwards).
+///
+/// `_evalfile` also pops the `BASH_ARGV` push a no-argument `.` made of
+/// the FILE NAME, before the trap runs, so the trap reads its caller's
+/// levels and a pop inside the trap takes the next push down rather than
+/// this one. The pop is registered here and the level then owes none, as
+/// bash's one `pop_args` per `.` file does. A `.` file WITH arguments
+/// keeps its push: `source_builtin` pops that one after the trap, which
+/// is where [`truncate`] pops it. Measured on Bash 5.2.21 and 5.3.0.
 pub fn end_source(vp: &mut Vproc, frames: usize) {
-	if let Some(Call { kind: CallKind::Source { ended, .. }, .. }) = vp
+	let Some(owner) = vp
 		.calls
-		.iter_mut()
-		.rev()
-		.find(|c| c.depth as usize == frames)
-	{
-		*ended = true;
+		.iter()
+		.rposition(|c| c.depth as usize == frames && matches!(c.kind, CallKind::Source { .. }))
+	else {
+		return;
+	};
+	let CallKind::Source { ended, name_push, .. } = &mut vp.calls[owner].kind else {
+		return;
+	};
+	*ended = true;
+	if !*name_push {
+		return;
 	}
+	let owner = pop_argv(vp, owner);
+	vp.calls[owner].pop_args = false;
 }
 
 /// The calls a subshell of `vp` starts with: all of them, none tied to its
