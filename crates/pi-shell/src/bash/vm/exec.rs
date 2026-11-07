@@ -24,7 +24,7 @@ use super::{
 };
 use crate::bash::{
 	diag::Diag,
-	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey},
+	event::{CompiledUnit, Construct, EventData, NodeKind, Origin, WaitKey, assign_preview},
 	fd::FdRef,
 	host::{ResolveCtx, Resolved, Via},
 	ids::{Dialect, ModeId, UnitId, Vpid},
@@ -911,9 +911,8 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			if k.trace_sources.len() < crate::bash::trace::history::HISTORY_EVENTS {
 				k.trace_sources.entry(vp.vpid).or_default().insert(depth, origin);
 			}
-		} else if vp.frames.last().is_some_and(|frame| matches!(&frame.kind, FrameKind::Script { pos, what: ScriptKind::Eval, .. } if pos.0 == 0)) {
-			if let Some(origins) = k.trace_sources.get_mut(&vp.vpid) { origins.remove(&depth); }
-		}
+		} else if vp.frames.last().is_some_and(|frame| matches!(&frame.kind, FrameKind::Script { pos, what: ScriptKind::Eval, .. } if pos.0 == 0))
+			&& let Some(origins) = k.trace_sources.get_mut(&vp.vpid) { origins.remove(&depth); }
 	}
 	let source_origin = observed
 		.then(|| {
@@ -1002,29 +1001,42 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		None => (feat, aliases.as_ref()),
 	};
 	let pending = aux.as_deref().and_then(|a| a.pending.as_ref());
+	// Text read to its end has no command left: no parser needed (each
+	// `eval` would otherwise build one just to see the end).
+	let at_end = !*stdin && pending.is_none() && pos.0 as usize >= src.len();
 	let resume_from = Resume {
 		pos:     Pos { offset: pos.0, line: pos.1 },
 		pending: pending.map_or_default(|p| p.0.to_vec()),
 		active:  pending.map_or_default(|p| p.1.iter().map(|a| a.to_vec()).collect()),
 	};
-	let mut parser = match aliases {
-		Some(a) => Parser::new(src, feat, a),
-		None => Parser::new(src, feat, crate::bash::syntax::NO_ALIASES),
+	let mut parser = (!at_end).then(|| {
+		let mut p = match aliases {
+			Some(a) => Parser::new(src, feat, a),
+			None => Parser::new(src, feat, crate::bash::syntax::NO_ALIASES),
+		}
+		.with_resume(&resume_from);
+		p.recycle(core::mem::take(&mut k.spare_tree));
+		p
+	});
+	let res = parser.as_mut().and_then(Parser::next_command);
+	if res.is_none()
+		&& let Some(p) = &mut parser
+	{
+		k.keep_spare_tree(p.take_tree());
 	}
-	.with_resume(&resume_from);
-	let res = parser.next_command();
 	// zsh: the input ran out with a construct open (`a ||`, `a &&` parse as
 	// complete commands here; interactive zsh's lexer reads another line).
 	if *stdin
-		&& (needs_more_input(src, res.as_ref(), parser.resume().pos)
-			|| parser.zsh_cmdstack().is_some_and(|s| !s.is_empty()))
+		&& let Some(p) = &parser
+		&& (needs_more_input(src, res.as_ref(), p.resume().pos)
+			|| p.zsh_cmdstack().is_some_and(|s| !s.is_empty()))
 	{
 		if reader {
 			// A command left open continues on a `PS2` line; `%_` shows
 			// what is open.
 			let cont = res.is_some();
 			let cmdstack = if cont {
-				parser.zsh_cmdstack().unwrap_or_default()
+				p.zsh_cmdstack().unwrap_or_default()
 			} else {
 				Vec::new()
 			};
@@ -1136,7 +1148,8 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		return None;
 	};
 	let from_stdin = *stdin;
-	let resume = parser.resume();
+	// A command came, so a parser read it.
+	let resume = parser.as_ref().expect("a command was parsed").resume();
 	let next = resume.pos;
 	let read = (history && !zhist).then(|| input_lines(src, pos.0 as usize, next.offset as usize));
 	// zsh `hend`: the event joins the history; `:p` and `histverify` keep
@@ -1187,17 +1200,16 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			let hist = if zhist {
 				builtins::history::zsh::latest_text(&k.root, cx.store, vp).unwrap_or_default()
 			} else {
-				let text = match &top_frame(vp).kind {
+				match &top_frame(vp).kind {
 					FrameKind::Script { src, pos, .. } => src
 						.get(pos.0 as usize..next.offset as usize)
-						.map(|t| BString::from(t.strip_suffix(b"\n").unwrap_or(t)))
-						.unwrap_or_default(),
+						.map_or_default(|t| BString::from(t.strip_suffix(b"\n").unwrap_or(t))),
 					_ => BString::default(),
-				};
-				text
+				}
 			};
-			let jobtext = BString::from(crate::bash::syntax::zsh::getjobtext(&cc.list));
-			let permtext = BString::from(crate::bash::syntax::zsh::getpermtext(&cc.list, 0));
+			let list = cc.list();
+			let jobtext = BString::from(crate::bash::syntax::zsh::getjobtext(list));
+			let permtext = BString::from(crate::bash::syntax::zsh::getpermtext(list, 0));
 			return super::zle::reader::before_run(k, vp, cx, at, [hist, jobtext, permtext]);
 		}
 	}
@@ -1222,7 +1234,11 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		Ok(cc) => {
 			let line = cc.line;
 			let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
-			(k.engine.compile(cc, src, mode, feat, observed), line)
+			let (unit, tree) = k.engine.compile(cc, src, mode, feat, observed);
+			if let Some(tree) = tree {
+				k.keep_spare_tree(tree);
+			}
+			(unit, line)
 		},
 		Err(e) => {
 			// bash abandons the rest of a script after a syntax error,
@@ -1554,9 +1570,9 @@ fn read_script_line(
 				// The event's earlier lines go with it.
 				if let FrameKind::Script { src, pos, aux, .. } = &mut top_frame(vp).kind {
 					let skipped = src[(pos.0 as usize).min(src.len())..]
-						.iter()
-						.filter(|&&c| c == b'\n')
-						.count();
+						.split(|&c| c == b'\n')
+						.count()
+						- 1;
 					*pos = (src.len() as u32, pos.1 + skipped as u32 + 1);
 					if let Some(a) = aux {
 						a.pending = None;
@@ -2455,7 +2471,7 @@ fn nofork_unit(
 	}?
 	.ok()?;
 	let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
-	let unit = k.engine.compile(cc, &src, key.4, feat, observed);
+	let (unit, _) = k.engine.compile(cc, &src, key.4, feat, observed);
 	announce(k, cx, vp.vpid, vp.runs.front(), &unit, line);
 	if aliases.is_none() {
 		if k.nofork_units.len() >= NOFORK_UNITS {
@@ -3686,10 +3702,9 @@ fn for_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		// parameter setter has separate assignment semantics.
 		if !select && vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 			let scope = assign_scope(vp);
-			let shown = &value[..value.len().min(256)];
 			k.emit_op(cx, vp, op.node, EventData::Assign {
 				name: BStr::new(&var),
-				value: BStr::new(shown),
+				value: BStr::new(assign_preview(&value)),
 				full_len: value.len(),
 				scope,
 			});
@@ -4088,14 +4103,14 @@ pub(super) fn job_text(
 		let feat = feat | Features::ZSH;
 		return match crate::bash::syntax::parse_all(&src, feat) {
 			Ok(p) if p.commands.len() == 1 => {
-				BString::from(crate::bash::syntax::zsh::getjobtext(&p.commands[0].list))
+				BString::from(crate::bash::syntax::zsh::getjobtext(p.commands[0].list()))
 			},
 			_ => src,
 		};
 	}
 	match crate::bash::syntax::parse_all(&src, feat) {
 		Ok(p) if p.commands.len() == 1 => {
-			BString::from(crate::bash::syntax::command_string(&p.commands[0].list))
+			BString::from(crate::bash::syntax::command_string(p.commands[0].list()))
 		},
 		_ => src,
 	}

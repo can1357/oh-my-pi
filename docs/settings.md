@@ -212,7 +212,9 @@ The opt-in accepts only a flat `&&` chain with literal arguments, including quot
 
 The opt-in requires a positively identified POSIX-quoting shell: `sh`, `bash`, `dash`, `ash`, `ksh`, or `zsh`, including their `.exe` names. The centralized classifier checks the executable basename across Windows and POSIX paths. Other shells, including cmd, PowerShell, fish, and unknown wrappers, retain legacy approval behavior. Their quoting can differ from the recognizer: fish treats `\'` inside single quotes as an escaped quote, while POSIX shells do not.
 
-Valid rule approvals are `allow`, `prompt`, and `deny`. Regardless of the opt-in, `deny` and `prompt` rules can match the whole command or a tokenized segment of other compound forms (split on `&&`, `||`, `;`, `|`, a single `&`, subshells, and newlines). This lets `match: "rm -rf *"` deny `cd /tmp && rm -rf build` and `sleep 1 & rm -rf build`.
+Valid rule approvals are `allow`, `prompt`, and `deny`. Regardless of the opt-in, `deny` and `prompt` rules can match the whole command or a tokenized segment of other compound forms (split on `&&`, `||`, `;`, `|`, a single `&`, subshells, and newlines), resolving each segment by its first matching restriction rule and combining restrictions across segments so any `deny` overrides a `prompt`. This lets `match: "rm -rf *"` deny `cd /tmp && rm -rf build`, `sleep 1 & rm -rf build`, and `curl http://example.com; rm -rf build` even when `curl *` is configured as `prompt` earlier in the list.
+
+Project settings can tighten `bash.patterns` but never loosen them: `deny` and `prompt` rules from the operator's layers (global config, `--config` overlays, and runtime overrides) still apply when a project's `bash.patterns` would allow the command, because repository settings files are writable by the agent.
 
 `bash.patterns` is an approval policy, not containment. An allowed program still has the bash process's filesystem, network, and subprocess access, and a seemingly narrow program can perform broader actions through its own options or configuration. The rules govern the `bash` tool only; they do not cover shells started through `eval`. To close that path, add a `tools.approval.eval` policy (`prompt` or `deny`) as well; see [Tool approval mode](./approval-mode.md).
 
@@ -535,7 +537,7 @@ For the numeric sampling settings, a negative value (normally `-1`) means "use t
 | `minP`                           | number | `-1`      | Minimum-probability cutoff.                                                                                                                                                                                                                                                                                                                                                                               |
 | `presencePenalty`                | number | `-1`      | Presence penalty.                                                                                                                                                                                                                                                                                                                                                                                         |
 | `repetitionPenalty`              | number | `-1`      | Repetition penalty.                                                                                                                                                                                                                                                                                                                                                                                       |
-| `textVerbosity`                  | enum   | `medium`  | `low`, `medium`, `high`. Sent by OpenAI Responses; Codex forwards it only when explicitly configured, otherwise leaving its model/provider default.                                                                                                                                                                                                                                                       |
+| `textVerbosity`                  | enum   | `low`     | `low`, `medium`, `high`. Sent by OpenAI Responses and Codex.                                                                                                                                                                                                                                                                                                                                              |
 | `tier.openai`                    | enum   | `none`    | `none`, `auto`, `default`, `flex`, `scale`, `priority`, `ultrafast`. Sent as `service_tier` for OpenAI / OpenAI-Codex and OpenAI-family OpenRouter models. `ultrafast` is sent only to the OpenAI API, and to Codex models and OpenAI-compatible relay models whose discovered `service_tiers` lists it (`/fast ultra`). Launch with `--service-tier <value>` for a one-session OpenAI override; the flag is not persisted (`none` omits `service_tier`). |
 | `tier.anthropic`                 | enum   | `none`    | `none`, `priority`. `priority` realizes fast mode on supported direct Claude models (ignored on Bedrock/Vertex and via OpenRouter).                                                                                                                                                                                                                                                                       |
 | `tier.google`                    | enum   | `none`    | `none`, `flex`, `priority`. Gemini API sends it in the body; Vertex sends `priority` via header (`flex` is a no-op on Vertex).                                                                                                                                                                                                                                                                            |
@@ -677,6 +679,8 @@ computer:
 Computer settings and the active model's coordinate-safe image limits are read for every call; runtime changes and successfully reloaded file edits apply to the next call. Direct `computer` helpers and code passed to `computer.run(fnOrCode, options)` select a target through the desktop root or `window(...)`. Switching targets invalidates the prior coordinate frame, so capture the new target before pointer input. Before enabling input, configure `tools.approvalMode` or `tools.approval.computer` and grant platform permissions. See [Window-scoped computer use](computer-use.md).
 
 ### Shell, eval, and LSP
+
+Set `display.shellVisualization: false` to show bash commands as plain shell text instead of the interactive execution visualization. The setting applies to streaming calls and saved transcripts; execution traces are still recorded for replay if visualization is re-enabled.
 
 ```yaml
 bash:
@@ -1062,7 +1066,7 @@ Experimental tool-output shaping and `find` ranking with Stencil Spotlight (`POS
 spotlight:
    experiment:
       enabled: true
-      holdout: 0.15
+      holdout: 0.05
       scoreFree: 0.15
       tools: ["*"]
    thinking: low
@@ -1072,7 +1076,7 @@ spotlight:
 | Key                              | Type    | Default                                   | Notes                                                                                                   |
 | -------------------------------- | ------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `spotlight.experiment.enabled`   | boolean | `false`                                   | Turns the experiment on for new and resumed sessions. `PI_SPOTLIGHT_EXPERIMENT` overrides it.           |
-| `spotlight.experiment.holdout`   | number  | `0.15`                                    | Share (0–1) of would-be cuts held out at random (see below). `PI_SPOTLIGHT_HOLDOUT` overrides it. |
+| `spotlight.experiment.holdout`   | number  | `0.05`                                    | Share (0–1) of would-be cuts held out at random (see below). `PI_SPOTLIGHT_HOLDOUT` overrides it. |
 | `spotlight.experiment.scoreFree` | number  | `0.15`                                    | Share (0–1) of the results not held out that are shaped without Spotlight (see below). `PI_SPOTLIGHT_SCORE_FREE` overrides it. |
 | `spotlight.experiment.tools`     | array   | `["*"]`                                   | Tools whose results the experiment shapes and journals, by name; `*` is every tool. A tool left out returns its plain result and writes no journal entry. `PI_SPOTLIGHT_TOOLS` (comma-separated names) overrides it. |
 | `spotlight.url`                  | string  | `https://cloud.stencil.so/v1/spotlight`   | Ranking endpoint. `STENCIL_SPOTLIGHT_URL` overrides it.                                                 |

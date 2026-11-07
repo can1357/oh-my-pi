@@ -804,7 +804,9 @@ function costSummary(ctx: SegmentContext): string | undefined {
 	const pricingPeriod = state.model?.cost
 		? getTimeBasedPricingPeriod(state.model.cost, ctx.now?.getTime())
 		: undefined;
-	const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
+	const usingSubscription = state.model
+		? (ctx.session.modelRegistry?.isUsingSubscription(state.model) ?? false)
+		: false;
 	// Resolve the advisor subscription flag lazily: with no active advisor
 	// it walks the whole model catalog (getAvailable → hasAuth per provider
 	// → credential-file reads), and the status line re-renders at the

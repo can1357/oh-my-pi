@@ -370,6 +370,7 @@ import {
 	getMarkdownTheme,
 	onTerminalAppearanceChange,
 	onThemeChange,
+	setMarkdownColorful,
 	setMarkdownMermaidRendering,
 	setSymbolPreset,
 	startMacOSAppearanceReprobeFallback,
@@ -407,6 +408,7 @@ import {
 	cfgDisplayCollapseCompacted,
 	cfgDisplayHideToolActivity,
 	cfgDisplayPinnedAgents,
+	cfgDisplayShellVisualization,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
 	cfgDisplaySubagentLivePreview,
@@ -440,6 +442,7 @@ import {
 	cfgTuiMaxInlineImages,
 	cfgTuiAutoGraph,
 	cfgTuiMouse,
+	cfgTuiColorfulMarkdown,
 	cfgTuiRenderMermaid,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
@@ -504,6 +507,7 @@ const cfgLiveUiSettings = combine({
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
+	"display.shellVisualization": cfgDisplayShellVisualization,
 	"terminal.showImages": cfgTerminalShowImages,
 	"terminal.programStatus": cfgTerminalProgramStatus,
 	hideThinkingBlock: cfgHideThinkingBlock,
@@ -514,6 +518,7 @@ const cfgLiveUiSettings = combine({
 	"display.collapseCompacted": cfgDisplayCollapseCompacted,
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
+	"tui.colorfulMarkdown": cfgTuiColorfulMarkdown,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.renderSvg": cfgTuiRenderSvg,
 	"extensionRenderers.assistantText": cfgExtensionAssistantTextRenderers,
@@ -2160,6 +2165,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		setTuiTight(cfgTuiTight.get(settings));
+		setMarkdownColorful(cfgTuiColorfulMarkdown.get(settings));
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
 		setSvgFigureRendering(cfgTuiRenderSvg.get(settings));
 		this.#applyAutoGraphSetting();
@@ -4332,12 +4338,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (
 			any(
 				"display.advisorCollapsedLines",
+				"display.shellVisualization",
 				"display.cacheMissMarker",
 				"display.collapseCompacted",
 				"display.showTokenUsage",
 				"display.showTurnTime",
 			)
 		) {
+			rebuildChat = true;
+		}
+		if (any("tui.colorfulMarkdown")) {
+			setMarkdownColorful(cfgTuiColorfulMarkdown.get(this.settings));
 			rebuildChat = true;
 		}
 		if (any("tui.renderMermaid")) {
@@ -4742,7 +4753,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				autoThinking: thinking === AUTO_THINKING,
 				// A fresh session derives tiers from settings, not this session's `/fast` toggles.
 				fastMode: this.session.isFastModeConfiguredFor(model),
-				usingSubscription: this.session.modelRegistry.isUsingOAuth(model),
+				usingSubscription: this.session.modelRegistry.isUsingSubscription(model),
 				autoCompactEnabled: this.session.autoCompactionEnabled,
 				compactionBoundaries: model.contextWindow
 					? statusLineHost.computeCompactionBoundaries(this.session, model.contextWindow, model)
@@ -8302,7 +8313,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * Tear down like {@link shutdown}, then relaunch the CLI with the original
 	 * launch argv (session-source flags and positional prompts stripped, see
-	 * {@link restartArgv}), resuming this session when it exists on disk.
+	 * {@link restartArgv}), restoring this session (`--restore`) when it exists on
+	 * disk: subagents the teardown cut off mid-turn go on in the new process.
 	 *
 	 * On POSIX the relaunch is a true `execvp(3)` image replacement: same PID,
 	 * same terminal, no lingering parent. Postmortem cleanups and stdout are

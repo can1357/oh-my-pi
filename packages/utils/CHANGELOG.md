@@ -2,15 +2,26 @@
 
 ## [Unreleased]
 
+## [18.18.0] - 2026-11-07
+
 ### Fixed
 
-- `ptree` commands spawned with `subreaper: true` no longer leave a descendant that ignores SIGTERM running after a graceful stop (an `AbortSignal`, `kill()` without a hard grace, or dispose); the subreaper stays alive through the grace period and the hard sweep then ends every descendant ([#18018](https://github.com/can1357/oh-my-pi/pull/18018) by [@sjawhar](https://github.com/sjawhar))
+- Fixed abort signals leaving command output reads blocked when a descendant keeps stdout or stderr open after the root process exits. ([#18309](https://github.com/can1357/oh-my-pi/pull/18309) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.17.0] - 2026-11-06
 
 ### Added
 
-- Added `getUpdateStateDir()` (`~/.omp/update`), holding the auto-update status file, its worker log, and the update install lock
-- Added `logger.setLogForwarder(forwarder)` (`LogForwarder { emit, flush }`), which routes a thread's records — `withContext` fields merged, context reduced to clone-safe JSON — to another thread instead of its own file and sinks, and `logger.emitForeign(event)`, which writes such a record with its original timestamp and runs the sinks without the caller's `withContext` fields
-- Added `expandTilde(path, home?)` (`@oh-my-pi/pi-utils/path`), which expands a leading `~` to the home directory; `@oh-my-pi/pi-coding-agent/tools/path-utils` re-exports it ([#17931](https://github.com/can1357/oh-my-pi/pull/17931) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `getUpdateStateDir()`, returning the auto-update state directory (`~/.omp/update`).
+- Added `logger.setLogForwarder()` and `logger.emitForeign()` to forward log records across threads, preserving context and timestamps.
+- Added `expandTilde()` to expand a leading `~` to the home directory.
+
+### Fixed
+
+- Fixed `spawn`/`exec` timeouts never firing when the command's root exited before `spawn()` returned, which let a descendant holding stdout or stderr stall output reads until it exited.
+- `ptree` commands with `subreaper: true` now reliably terminate all descendants on graceful shutdown.
+- `fatal()` in a worker thread now reaches the parent's `error` listeners instead of only exiting with code 1.
+- Fixed the terminal stderr guard leaking a copy of the terminal into processes spawned from native code.
 
 ## [18.16.0] - 2026-11-02
 

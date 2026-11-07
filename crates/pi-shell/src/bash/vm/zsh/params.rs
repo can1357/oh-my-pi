@@ -667,9 +667,9 @@ pub fn set_tie_sep(ex: &mut Expander<'_, '_>, scalar: &[u8], sep: u8) -> X<bool>
 
 /// The partner and separator of a `typeset -T` tie of `name`.
 fn tie_of(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<(BString, BString, u8)>> {
-	let words = match state::record(ex.cx.store, ex.vp, Key::Misc(MiscKey::ZshTies))? {
-		Some(Record::Words(w)) => w,
-		_ => return Ok(None),
+	let Some(Record::Words(words)) = state::record(ex.cx.store, ex.vp, Key::Misc(MiscKey::ZshTies))?
+	else {
+		return Ok(None);
 	};
 	for t in words.as_chunks::<3>().0 {
 		if t[0].as_slice() == name || t[1].as_slice() == name {
