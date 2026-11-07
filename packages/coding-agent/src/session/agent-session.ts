@@ -316,7 +316,7 @@ import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener, WakeSources } from "./agent-session-events";
-import { type AgentViewSession, isLocalAgentSession } from "./agent-session-handle";
+import { type AgentSessionAdvisorOverview, type AgentViewSession, isLocalAgentSession } from "./agent-session-handle";
 import {
 	asyncJobSnapshot,
 	asyncJobTree,
@@ -477,7 +477,6 @@ import type { ServingModel } from "./retry-fallback-chains";
 import {
 	type AdvisorCatchupOptions,
 	type AdvisorStats,
-	type AdvisorStatusOverviewEntry,
 	SessionAdvisors,
 	type SessionAdvisorsHost,
 } from "./session-advisors";
@@ -16879,7 +16878,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * flag and per-advisor name/status without computing token/cost breakdowns.
 	 * Avoids re-tokenizing the advisor transcript on every render frame.
 	 */
-	getAdvisorStatusOverview(): { configured: boolean; advisors: AdvisorStatusOverviewEntry[] } {
+	getAdvisorStatusOverview(): AgentSessionAdvisorOverview {
 		return this.#advisors.getAdvisorStatusOverview();
 	}
 
