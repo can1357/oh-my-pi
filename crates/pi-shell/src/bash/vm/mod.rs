@@ -414,7 +414,10 @@ pub struct Kernel {
 	pub trace_unit_origins: HashMap<Vpid, Arc<HashMap<UnitId, crate::bash::event::SourceOrigin>>>,
 	/// Unit blobs known to be in the store ([`Kernel::persist_unit`],
 	/// `externalize`).
-	pub written:            HashSet<UnitId>,
+	pub written:            HashSet<UnitId, crate::bash::ids::UnitIdState>,
+	/// Reused buffer for encoding unit blobs ([`Kernel::persist_unit`]); not
+	/// imaged.
+	blob_buf:               Vec<u8>,
 	/// The `next_vpid` value last written as `MiscKey::NextVpid`
 	/// ([`Kernel::vpid`], [`Kernel::sync_root`]).
 	pub written_vpid:       u32,
@@ -534,7 +537,8 @@ impl Kernel {
 			announced: HashSet::new(),
 			trace_sources: HashMap::new(),
 			trace_unit_origins: HashMap::new(),
-			written: HashSet::new(),
+			written: HashSet::default(),
+			blob_buf: Vec::new(),
 			written_vpid: engine.config().vpid_base,
 			paused: false,
 			argv0,
@@ -626,17 +630,21 @@ impl Kernel {
 	/// once per id: a function body is in the store from its definition on,
 	/// so a shell restored from the store alone keeps its line numbers.
 	pub fn persist_unit(&mut self, store: &mut dyn StateStore, unit: &Unit) {
-		if self.written.contains(&unit.id) {
+		if !self.written.insert(unit.id) {
 			return;
 		}
-		let written = postcard::to_stdvec(unit)
+		let mut buf = core::mem::take(&mut self.blob_buf);
+		buf.clear();
+		let written = postcard::to_extend(unit, buf)
 			.map_err(StoreError::Encode)
-			.and_then(|bytes| store.put_blob(crate::bash::store::BlobSlot::Unit(unit.id), &bytes));
-		match written {
-			Ok(()) => {
-				self.written.insert(unit.id);
-			},
-			Err(err) => self.fail(err),
+			.and_then(|buf| {
+				let put = store.put_blob(crate::bash::store::BlobSlot::Unit(unit.id), &buf);
+				self.blob_buf = buf;
+				put
+			});
+		if let Err(err) = written {
+			self.written.remove(&unit.id);
+			self.fail(err);
 		}
 	}
 
