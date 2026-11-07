@@ -9,6 +9,9 @@
 ### Added
 
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+### Added
+
+- Added a debug log line for successful Hindsight recalls, carrying the recalled item count and the recall latency, so `hindsight.debug: true` sessions can measure how much memory was recalled and how long it took ([#16456](https://github.com/can1357/oh-my-pi/pull/16456) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
