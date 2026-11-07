@@ -190,7 +190,8 @@ The per-command child environment is then built by `buildNonInteractiveEnv()` (`
 - editor prompts disabled (`GIT_EDITOR=true`, `GIT_SEQUENCE_EDITOR=true`, `EDITOR=true`, `VISUAL=true`),
 - terminal/credential prompts reduced (`TERM=dumb`, `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, `SSH_ASKPASS` set to the resolved `false` executable or `"false"`, `NO_COLOR=1`, `CI=true` unless `PI_BASH_NO_CI`/`CLAUDE_BASH_NO_CI` is set),
 - package-manager/tooling automation flags for non-interactive behavior (npm/pnpm/yarn/pip/cargo/terraform/gh, …),
-- on Windows, UTF-8 locale/codepage defaults are added when absent.
+- locale pinned to `LANG=C.UTF-8`/`LC_ALL=C.UTF-8` (byte-order collation, `C` numbers and messages, UTF-8 text) over any inherited locale, unless the caller or direnv env sets `LANG` or an `LC_*` variable; user `!` commands keep the inherited locale, with the UTF-8 default applied on Windows only when none is set,
+- on Windows, Python UTF-8 stdio defaults (`PYTHONIOENCODING`, `PYTHONUTF8`) are added when neither is inherited or passed.
 
 ## Streaming and cancellation
 
