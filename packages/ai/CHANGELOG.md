@@ -21,6 +21,9 @@
 - Requests waiting for maxInFlightRequests capacity now begin immediately when capacity is released, rather than relying on periodic polling.
 - omp auth-gateway now preserves Codex session and thread headers and uses Claude Code and OpenCode session identifiers for prompt-cache affinity, improving cache reuse through the gateway.
 - Anthropic (Claude Pro/Max) logins now refresh the way Claude Code 2.1.332 does and are disabled only when Anthropic rejects the refresh token with `invalid_grant`; a failed background refresh no longer fails requests while the access token is still valid, and a 403 "OAuth token has been revoked" refreshes the same login before switching accounts.
+### Added
+
+- Auth-gateway hosts can pass `fallbackModels` to resend a failed request to other models; `shouldTryFallbackModel()` and `answerWithFallbacks()` are the status rule and walk that the router and `stdio` share ([#18406](https://github.com/can1357/oh-my-pi/pull/18406) by [@enieuwy](https://github.com/enieuwy))
 
 ### Fixed
 
@@ -334,9 +337,6 @@
 - Cursor Shell results no longer end with `Timeout clamped to 3600s (requested 86400s; …)`: Cursor's 24 h `hard_timeout` is capped at the bash tool's 3600 s ceiling before it reaches the tool ([#18433](https://github.com/can1357/oh-my-pi/pull/18433) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 - A 429 or 402 worded like a context overflow (Bedrock's "429 Too many tokens, please wait…") is treated as a rate limit, so it retries and walks the fallback chain instead of compacting ([#18345](https://github.com/can1357/oh-my-pi/pull/18345) by [@nick-maderight](https://github.com/nick-maderight))
 - `auth-gateway stdio` and `serve` no longer reject credentialless Apple on-device models ([#18370](https://github.com/can1357/oh-my-pi/issues/18370))
-### Added
-
-- Auth-gateway hosts can pass `fallbackModels` to resend a failed request to other models; `shouldTryFallbackModel()` and `answerWithFallbacks()` are the status rule and walk that the router and `stdio` share
 
 ## [18.17.0] - 2026-11-06
 
