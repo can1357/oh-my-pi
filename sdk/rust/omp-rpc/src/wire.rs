@@ -3050,9 +3050,6 @@ pub struct SessionState {
 	pub session_id: String,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub model: Option<ModelInfo>,
-	/// `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands.
-	#[serde(rename = "supportsBashExcludeFromContext", default, skip_serializing_if = "Option::is_none")]
-	pub supports_bash_exclude_from_context: Option<bool>,
 	#[serde(rename = "thinkingLevel", default, skip_serializing_if = "Option::is_none")]
 	pub thinking_level: Option<ThinkingLevel>,
 	#[serde(rename = "isStreaming", default = "default_session_state_is_streaming")]
@@ -4091,6 +4088,9 @@ pub struct ReadyEvent {
 	pub max_frame_bytes: Option<i64>,
 	#[serde(rename = "maxReassembledFrameBytes", default, skip_serializing_if = "Option::is_none")]
 	pub max_reassembled_frame_bytes: Option<i64>,
+	/// `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands.
+	#[serde(rename = "supportsBashExcludeFromContext", default, skip_serializing_if = "Option::is_none")]
+	pub supports_bash_exclude_from_context: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -6927,7 +6927,7 @@ impl Command for AbortRetryCommand {
 	}
 }
 
-/// Run a shell command. Before excluding output, require get_state.supportsBashExcludeFromContext to be true.
+/// Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BashCommand {
 	pub command: String,

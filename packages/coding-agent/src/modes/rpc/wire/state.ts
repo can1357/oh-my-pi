@@ -104,10 +104,6 @@ export const stateDefs = {
 	),
 	SessionState: {
 		"model?": "ModelInfo",
-		"supportsBashExcludeFromContext?": doc(
-			"boolean",
-			"`bash` accepts `excludeFromContext`; require exactly true before sending excluded commands.",
-		),
 		"thinkingLevel?": "ThinkingLevel",
 		isStreaming: absentAs("boolean", false),
 		isCompacting: absentAs("boolean", false),

@@ -10,11 +10,16 @@
 ## [18.18.0] - 2026-11-07
 ### Breaking Changes
 
-- Rust SDK: `BashCommand` has a new `exclude_from_context: Option<bool>` field, so struct literals must add `exclude_from_context: None` to keep the old behavior ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+- Rust SDK: `BashCommand` and `ReadyEvent` struct literals must add `exclude_from_context: None` and `supports_bash_exclude_from_context: None`, respectively, to keep the old behavior ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
 
 ### Added
 
-- RPC clients can run bash commands without adding the execution to model context, matching terminal `!!` behavior ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+- RPC clients can run bash commands without adding the execution to model context, matching terminal `!!` behavior. Support is advertised once in the startup `ready` frame ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+
+## [18.18.0] - 2026-11-07
+
+### Added
+
 - Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
 - Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))
 - Bash commands now visualize execution incrementally in Raw or Python-like Pseudo, with variable values beside their latest setter and bounded replay history for foreground and background jobs; PTY and user-shell runs retain their plain command view.

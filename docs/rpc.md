@@ -46,7 +46,8 @@ The initial ready frame uses protocol v1 and advertises the opt-in lossless tran
 	"protocolVersion": 1,
 	"supportedProtocolVersions": [1, 2],
 	"maxFrameBytes": 1048576,
-	"maxReassembledFrameBytes": 67108864
+	"maxReassembledFrameBytes": 67108864,
+	"supportsBashExcludeFromContext": true
 }
 ```
 
@@ -227,14 +228,15 @@ ordinary `bash` response and retained in the session transcript. This is not
 secret storage: transcript readers and extensions can still see it.
 A provided non-boolean value is rejected before the command executes.
 
-Before sending `excludeFromContext: true`, clients MUST query `get_state` and
-require `supportsBashExcludeFromContext === true`. Older runtimes omit this
-capability and silently ignore unknown command fields; do not execute an excluded
-command on them or fall back to sharing its output.
-The TypeScript client enforces this check in
-`bash(command, { excludeFromContext: true })`; omitted/false options do not
-require a capability request. The generated Python, Rust and Go command clients
-expose the option; their callers must perform the capability check.
+Before sending `excludeFromContext: true`, clients MUST capture the startup
+`ready` frame and require `ready.supportsBashExcludeFromContext === true`. This
+static connection capability is not session state. Older runtimes omit it and
+silently ignore unknown command fields; do not execute an excluded command on
+them or fall back to sharing its output.
+The TypeScript client captures the capability once in `start()` and checks it in
+`bash(command, { excludeFromContext: true })` without a `get_state` round-trip.
+The generated Python, Rust and Go command clients expose the option; their callers
+must check the capability on their client's ready frame.
 
 ```json
 { "id": "private-run", "type": "bash", "command": "printf private", "excludeFromContext": true }
@@ -510,7 +512,6 @@ field is absent outside both stages. No event carries it, so re-read
 	"thinkingLevel": "off|minimal|low|medium|high|xhigh|max",
 	"isStreaming": false,
 	"isCompacting": false,
-	"supportsBashExcludeFromContext": true,
 	"steeringMode": "all|one-at-a-time",
 	"followUpMode": "all|one-at-a-time",
 	"interruptMode": "immediate|wait",

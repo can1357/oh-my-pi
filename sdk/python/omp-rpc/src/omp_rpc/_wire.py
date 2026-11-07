@@ -641,8 +641,6 @@ class UsageLimitWrapUp:
 class SessionState:
     session_id: str
     model: ModelInfo | None = None
-    supports_bash_exclude_from_context: bool | None = None
-    """`bash` accepts `excludeFromContext`; require exactly true before sending excluded commands."""
     thinking_level: ThinkingLevel | None = None
     is_streaming: bool = False
     is_compacting: bool = False
@@ -1269,6 +1267,8 @@ class ReadyEvent:
     supported_protocol_versions: tuple[int, ...] | None = None
     max_frame_bytes: int | None = None
     max_reassembled_frame_bytes: int | None = None
+    supports_bash_exclude_from_context: bool | None = None
+    """`bash` accepts `excludeFromContext`; require exactly true before sending excluded commands."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2025,7 +2025,6 @@ def parse_session_state(value: object, path: str = "SessionState") -> SessionSta
     return SessionState(
         session_id=required(payload, "sessionId", decode_str, path),
         model=optional(payload, "model", parse_model_info, path),
-        supports_bash_exclude_from_context=optional(payload, "supportsBashExcludeFromContext", decode_bool, path),
         thinking_level=optional(payload, "thinkingLevel", _decode_thinking_level, path),
         is_streaming=defaulted(payload, "isStreaming", decode_bool, path, False),
         is_compacting=defaulted(payload, "isCompacting", decode_bool, path, False),
@@ -2717,6 +2716,7 @@ def parse_ready_event(value: object, path: str = "ReadyEvent") -> ReadyEvent:
         supported_protocol_versions=optional(payload, "supportedProtocolVersions", array(decode_int), path),
         max_frame_bytes=optional(payload, "maxFrameBytes", decode_int, path),
         max_reassembled_frame_bytes=optional(payload, "maxReassembledFrameBytes", decode_int, path),
+        supports_bash_exclude_from_context=optional(payload, "supportsBashExcludeFromContext", decode_bool, path),
     )
 
 
@@ -3600,7 +3600,7 @@ class WireClient:
         self._command("abort_retry", params)
 
     def bash(self, command: str, *, exclude_from_context: bool | None = None) -> BashResult:
-        """Run a shell command. Before excluding output, require get_state.supportsBashExcludeFromContext to be true."""
+        """Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true."""
         params: dict[str, object] = {}
         params["command"] = command
         if exclude_from_context is not None:

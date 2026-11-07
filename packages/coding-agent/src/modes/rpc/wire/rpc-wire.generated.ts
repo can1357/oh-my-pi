@@ -484,8 +484,6 @@ export type UsageLimitState = UsageLimitLowPriority | UsageLimitWrapUp;
 export interface SessionState {
 	sessionId: string;
 	model?: ModelInfo;
-	/** `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands. */
-	supportsBashExcludeFromContext?: boolean;
 	thinkingLevel?: ThinkingLevel;
 	isStreaming?: boolean;
 	isCompacting?: boolean;
@@ -1062,6 +1060,8 @@ export interface ReadyEvent {
 	supportedProtocolVersions?: number[];
 	maxFrameBytes?: number;
 	maxReassembledFrameBytes?: number;
+	/** `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands. */
+	supportsBashExcludeFromContext?: boolean;
 }
 
 export type PromptStatus = "completed" | "aborted" | "error";

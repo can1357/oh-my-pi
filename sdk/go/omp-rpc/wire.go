@@ -2500,21 +2500,19 @@ func (v *UsageLimitState) decodeFrom(raw map[string]json.RawMessage) error {
 }
 
 type SessionState struct {
-	SessionID string     `json:"sessionId"`
-	Model     *ModelInfo `json:"model,omitempty"`
-	// `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands.
-	SupportsBashExcludeFromContext *bool          `json:"supportsBashExcludeFromContext,omitempty"`
-	ThinkingLevel                  *ThinkingLevel `json:"thinkingLevel,omitempty"`
-	IsStreaming                    bool           `json:"isStreaming"`
-	IsCompacting                   bool           `json:"isCompacting"`
-	SteeringMode                   QueueMode      `json:"steeringMode"`
-	FollowUpMode                   QueueMode      `json:"followUpMode"`
-	InterruptMode                  InterruptMode  `json:"interruptMode"`
-	SessionFile                    *string        `json:"sessionFile,omitempty"`
-	SessionName                    *string        `json:"sessionName,omitempty"`
-	AutoCompactionEnabled          bool           `json:"autoCompactionEnabled"`
-	FastModeEnabled                bool           `json:"fastModeEnabled"`
-	FastModeActive                 bool           `json:"fastModeActive"`
+	SessionID             string         `json:"sessionId"`
+	Model                 *ModelInfo     `json:"model,omitempty"`
+	ThinkingLevel         *ThinkingLevel `json:"thinkingLevel,omitempty"`
+	IsStreaming           bool           `json:"isStreaming"`
+	IsCompacting          bool           `json:"isCompacting"`
+	SteeringMode          QueueMode      `json:"steeringMode"`
+	FollowUpMode          QueueMode      `json:"followUpMode"`
+	InterruptMode         InterruptMode  `json:"interruptMode"`
+	SessionFile           *string        `json:"sessionFile,omitempty"`
+	SessionName           *string        `json:"sessionName,omitempty"`
+	AutoCompactionEnabled bool           `json:"autoCompactionEnabled"`
+	FastModeEnabled       bool           `json:"fastModeEnabled"`
+	FastModeActive        bool           `json:"fastModeActive"`
 	// `/slow` applies to the active model.
 	SlowModeSupported bool `json:"slowModeSupported"`
 	// `/slow` is on for the active model; always `false` when `slowModeSupported` is `false`.
@@ -2549,7 +2547,6 @@ func (v *SessionState) decodeFrom(raw map[string]json.RawMessage) error {
 	d := fieldDecoder{raw: raw, owner: "SessionState"}
 	d.required("sessionId", &out.SessionID)
 	d.optional("model", &out.Model)
-	d.optional("supportsBashExcludeFromContext", &out.SupportsBashExcludeFromContext)
 	d.optional("thinkingLevel", &out.ThinkingLevel)
 	d.defaulted("isStreaming", &out.IsStreaming, `false`)
 	d.defaulted("isCompacting", &out.IsCompacting, `false`)
@@ -4701,6 +4698,8 @@ type ReadyEvent struct {
 	SupportedProtocolVersions []int64 `json:"supportedProtocolVersions,omitempty"`
 	MaxFrameBytes             *int64  `json:"maxFrameBytes,omitempty"`
 	MaxReassembledFrameBytes  *int64  `json:"maxReassembledFrameBytes,omitempty"`
+	// `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands.
+	SupportsBashExcludeFromContext *bool `json:"supportsBashExcludeFromContext,omitempty"`
 }
 
 func (v *ReadyEvent) UnmarshalJSON(data []byte) error {
@@ -4715,6 +4714,7 @@ func (v *ReadyEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("supportedProtocolVersions", &out.SupportedProtocolVersions)
 	d.optional("maxFrameBytes", &out.MaxFrameBytes)
 	d.optional("maxReassembledFrameBytes", &out.MaxReassembledFrameBytes)
+	d.optional("supportsBashExcludeFromContext", &out.SupportsBashExcludeFromContext)
 	if d.err != nil {
 		return d.err
 	}
@@ -8230,7 +8230,7 @@ type BashCommand struct {
 	ExcludeFromContext *bool  `json:"excludeFromContext,omitempty"`
 }
 
-// Bash sends "bash": Run a shell command. Before excluding output, require get_state.supportsBashExcludeFromContext to be true.
+// Bash sends "bash": Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true.
 func (c Commands) Bash(ctx context.Context, p BashCommand) (BashResult, error) {
 	var out BashResult
 	err := c.call(ctx, "bash", p, 0, &out)

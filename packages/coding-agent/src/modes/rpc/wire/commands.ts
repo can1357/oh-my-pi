@@ -266,7 +266,7 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	{ name: "abort_retry", doc: "Abort a pending auto-retry." },
 	{
 		name: "bash",
-		doc: "Run a shell command. Before excluding output, require get_state.supportsBashExcludeFromContext to be true.",
+		doc: "Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true.",
 		params: { command: "string", "excludeFromContext?": "boolean" },
 		result: "BashResult",
 	},

@@ -172,8 +172,6 @@ export type RpcCommand =
 
 export interface RpcSessionState {
 	model?: Model;
-	/** `bash` accepts `excludeFromContext`; require exactly `true` before sending excluded commands. */
-	supportsBashExcludeFromContext?: boolean;
 	thinkingLevel: ThinkingLevel | undefined;
 	isStreaming: boolean;
 	isCompacting: boolean;
@@ -381,6 +379,8 @@ export interface RpcReadyFrame {
 	supportedProtocolVersions: [1, 2];
 	maxFrameBytes: number;
 	maxReassembledFrameBytes: number;
+	/** `bash` accepts `excludeFromContext`; older runtimes omit this capability. Require exactly `true`. */
+	supportsBashExcludeFromContext?: boolean;
 }
 
 export interface RpcChunkFrame {

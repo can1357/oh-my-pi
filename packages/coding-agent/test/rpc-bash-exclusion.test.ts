@@ -9,11 +9,13 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 describe("RPC bash context exclusion", () => {
 	let client: RpcClient;
 	let directory: string;
+	let command: string[];
 
 	beforeEach(async () => {
 		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-bash-exclusion-"));
+		command = [process.execPath, path.join(import.meta.dir, "fixtures", "bash-rpc-agent.ts")];
 		client = new RpcClient({
-			command: [process.execPath, path.join(import.meta.dir, "fixtures", "bash-rpc-agent.ts")],
+			command,
 			cwd: directory,
 			env: { PI_CODING_AGENT_DIR: directory, PI_NO_TITLE: "1" },
 		});
@@ -28,8 +30,9 @@ describe("RPC bash context exclusion", () => {
 
 	test("returns and records every output but keeps excluded commands out of model context", async () => {
 		await client.start();
-		const state = await client.getState();
-		expect(state.supportsBashExcludeFromContext).toBe(true);
+		client.getState = async () => {
+			throw new Error("Excluded bash must not depend on a session-state request");
+		};
 		const ordinary = await client.bash("printf default-context-marker");
 		const shared = await client.bash("printf explicit-context-marker", { excludeFromContext: false });
 		const excluded = await client.bash("printf private-output-marker", { excludeFromContext: true });
@@ -65,6 +68,17 @@ describe("RPC bash context exclusion", () => {
 		}
 		expect(await Bun.file(path.join(directory, "refused.txt")).exists()).toBe(false);
 		expect(await client.getMessages()).toEqual([]);
+	}, 30_000);
+
+	test("does not reuse exclusion support after restarting against an older runtime", async () => {
+		await client.start();
+		expect((await client.bash("printf first-runtime", { excludeFromContext: true })).output).toBe("first-runtime");
+		await client.stop();
+		command[1] = path.join(import.meta.dir, "fixtures", "mock-rpc-agent.ts");
+		await client.start();
+		await expect(client.bash("printf private", { excludeFromContext: true })).rejects.toThrow(
+			"RPC runtime does not support bash context exclusion",
+		);
 	}, 30_000);
 });
 
