@@ -376,7 +376,11 @@ export class SelectorController {
 							// The bar exactly as the active composer shape renders it (box top
 							// border, claude rule + chip, or the plain standalone bottom bar).
 							const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
-							return this.ctx.statusLine.getPreviewLines(availableWidth).join("\n");
+							// Two-line overflow adds a second row to each entry; the preview shows line 1 of each.
+							return this.ctx.statusLine
+								.getPreviewLines(availableWidth)
+								.map(line => line.split("\n")[0])
+								.join("\n");
 						},
 						describeStatusLinePreview: () => this.ctx.statusLine.describePreview(),
 						onPluginsChanged: async () => {
