@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `exec` and `wait` take `stdout: "ignore"` to drain a child's output without retaining it, and `maxStdoutBytes` to cap what a `capture` keeps ([#15337](https://github.com/can1357/oh-my-pi/pull/15337) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
