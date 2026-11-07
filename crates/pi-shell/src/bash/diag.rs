@@ -432,10 +432,13 @@ pub enum Diag {
 	/// rendered as `NAME: command substitution: line N: MSG`.
 	#[error("{msg}")]
 	ComsubSyntax {
-		/// Script line bash reports (the line after the document).
-		line: u32,
+		/// Script line of the inner error, or the fallback line after the
+		/// document.
+		line:    u32,
 		/// Message.
-		msg:  BString,
+		msg:     BString,
+		/// Inner parser input to echo; absent for producers without that context.
+		context: Option<BString>,
 	},
 	/// An arithmetic error inside an array subscript: bash reports it
 	/// without the command's name (`let 'a[1+]=1'` → `1+: arithmetic
@@ -548,16 +551,19 @@ pub fn strerror(err: &io::Error) -> Cow<'static, str> {
 #[derive(Clone, Copy, Debug)]
 pub struct DiagSite<'a> {
 	/// `$0` (bash uses it as the message prefix).
-	pub shell_name: &'a [u8],
+	pub shell_name:    &'a [u8],
 	/// Origin of the running script.
-	pub origin:     &'a Origin,
+	pub origin:        &'a Origin,
 	/// Current line.
-	pub line:       u32,
+	pub line:          u32,
 	/// The text being read is a `.` file, so a syntax error in it is not the
 	/// `-c` string's and bash does not print `-c`.
-	pub sourced:    bool,
+	pub sourced:       bool,
+	/// Interactive source parser input, distinct from the shell's diagnostic
+	/// name.
+	pub parser_source: Option<&'a [u8]>,
 	/// The locale is UTF-8 (which bytes print as they are in names).
-	pub utf8:       bool,
+	pub utf8:          bool,
 }
 
 /// The full stderr line for `diag` printed at `site`, newline included.
@@ -571,12 +577,19 @@ pub fn render(diag: &Diag, site: DiagSite<'_>) -> Vec<u8> {
 	let syntax = matches!(diag, Diag::Syntax { .. } | Diag::SyntaxContext { .. });
 	let mut out = Vec::with_capacity(64);
 	out.extend_from_slice(site.shell_name);
-	if let Diag::ComsubSyntax { line, msg } = diag {
+	if let Diag::ComsubSyntax { line, msg, context } = diag {
 		out.extend_from_slice(b": command substitution: line ");
 		out.extend_from_slice(line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
 		out.extend_from_slice(b": ");
+		let prefix_len = out.len();
 		out.extend_from_slice(msg);
 		out.push(b'\n');
+		if let Some(context) = context {
+			out.extend_from_within(..prefix_len);
+			out.push(b'`');
+			out.extend_from_slice(context);
+			out.extend_from_slice(b"'\n");
+		}
 		return out;
 	}
 	if let Diag::Eval { diag } = diag {
@@ -594,8 +607,13 @@ pub fn render(diag: &Diag, site: DiagSite<'_>) -> Vec<u8> {
 		out.push(b'\n');
 		return out;
 	}
-	if syntax && !site.sourced && matches!(site.origin, Origin::Command) {
-		out.extend_from_slice(b": -c");
+	if syntax {
+		if let Some(source) = site.parser_source {
+			out.extend_from_slice(b": ");
+			out.extend_from_slice(source);
+		} else if !site.sourced && matches!(site.origin, Origin::Command) {
+			out.extend_from_slice(b": -c");
+		}
 	}
 	out.extend_from_slice(b": line ");
 	out.extend_from_slice(site.line.format_into(&mut fmt::NumBuffer::new()).as_bytes());

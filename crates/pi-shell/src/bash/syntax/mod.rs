@@ -45,6 +45,8 @@ pub mod zsh;
 
 use alloc::vec::Vec;
 
+pub(crate) use parser::parse_text_with_context;
+
 pub(crate) use crate::bash::syntax::util::ansi_decode_all;
 pub use crate::bash::syntax::{
 	ast::*,

@@ -263,6 +263,8 @@ pub struct Parser<'s> {
 	/// The error being raised is one bash recovers from by dropping the
 	/// rest of the input line.
 	discard_line:   bool,
+	/// Start of the outer `$(` input whose parse failed in a text word.
+	comsub_start:   u32,
 }
 
 /// Where the next top-level command starts, alias text included.
@@ -305,9 +307,17 @@ pub enum TextMode {
 /// line relative to `src`; the engine adds the context (`command
 /// substitution: `) and the base line.
 pub fn parse_text(src: &[u8], feat: Features, mode: TextMode) -> Result<Word, ParseError> {
+	parse_text_with_context(src, feat, mode).map_err(|(error, _)| error)
+}
+
+pub(crate) fn parse_text_with_context(
+	src: &[u8],
+	feat: Features,
+	mode: TextMode,
+) -> Result<Word, (ParseError, u32)> {
 	let mut p = Parser::new(src, feat, NO_ALIASES);
 	p.virt = 0;
-	let mut word = p.text_word(mode)?;
+	let mut word = p.text_word(mode).map_err(|error| (error, p.comsub_start))?;
 	finish::finish_word(&mut word, &p.docs);
 	Ok(word)
 }
@@ -355,6 +365,7 @@ impl<'s> Parser<'s> {
 			cond_eof: false,
 			virt_comment: false,
 			discard_line: false,
+			comsub_start: 0,
 			zsh: feat
 				.contains(Features::ZSH)
 				.then(|| Box::new(crate::bash::syntax::zsh::ZshParser::new(src, feat, aliases))),

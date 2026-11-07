@@ -1,5 +1,6 @@
 //! Diagnostic segments are pinned to observations in diagnostic-naming-table.
-//! All engine observations pass through the same Shell::run consumer as the bash tool.
+//! All engine observations pass through the same Shell::run consumer as the
+//! bash tool.
 
 #![cfg(unix)]
 
@@ -16,17 +17,17 @@ struct Table {
 #[derive(Deserialize)]
 struct Row {
 	command: String,
-	files: HashMap<String, String>,
-	mode: String,
-	bash: HashMap<String, Observation>,
+	files:   HashMap<String, String>,
+	mode:    String,
+	bash:    HashMap<String, Observation>,
 }
 
 #[derive(Deserialize)]
 struct Observation {
-	status: i32,
+	status:  i32,
 	emitted: Bytes,
 	#[serde(default)]
-	stdout: Option<Bytes>,
+	stdout:  Option<Bytes>,
 }
 
 #[derive(Deserialize)]
@@ -39,8 +40,9 @@ fn quote(text: &str) -> String {
 }
 
 async fn assert_rows(ids: &[String]) {
-	let table: Table = serde_json::from_str(include_str!("diagnostic-naming-table/naming-table.json"))
-		.expect("recorded Bash table");
+	let table: Table =
+		serde_json::from_str(include_str!("diagnostic-naming-table/naming-table.json"))
+			.expect("recorded Bash table");
 	let mut differences = Vec::new();
 	for id in ids {
 		let row = table.rows.get(id).expect("measured row");
@@ -54,9 +56,15 @@ async fn assert_rows(ids: &[String]) {
 		} else if row.mode == "interactive-read-pty" {
 			std::fs::write(directory.path().join("input"), format!("{}\n", row.command))
 				.expect("interactive input");
-			format!("PS1= PS2= exec -a bash {engine} --noprofile --norc --noediting -i < input > stdout 2> stderr")
+			format!(
+				"PS1= PS2= exec -a bash {engine} --noprofile --norc --noediting -i < input > stdout \
+				 2> stderr"
+			)
 		} else {
-			format!("exec -a bash {engine} --noprofile --norc --noediting -i -c {} > stdout 2> stderr", quote(&row.command))
+			format!(
+				"exec -a bash {engine} --noprofile --norc --noediting -i -c {} > stdout 2> stderr",
+				quote(&row.command)
+			)
 		};
 		let env = HashMap::from([
 			("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
@@ -92,9 +100,13 @@ async fn assert_rows(ids: &[String]) {
 			.copied()
 			.collect();
 		let expected = &row.bash["5.3.0"];
-		let expected_stdout = expected.stdout.as_ref().map_or("", |bytes| bytes.text.as_str());
+		let expected_stdout = expected
+			.stdout
+			.as_ref()
+			.map_or("", |bytes| bytes.text.as_str());
 		// A terminal shell's `exit` notice is not a diagnostic segment.
-		// The corpus measurement retains it; this diagnostic assertion excludes it on both sides.
+		// The corpus measurement retains it; this diagnostic assertion excludes
+		// it on both sides.
 		let expected_stderr: Vec<u8> = expected
 			.emitted
 			.text
@@ -109,7 +121,8 @@ async fn assert_rows(ids: &[String]) {
 			|| stderr != expected_stderr
 		{
 			differences.push(format!(
-				"{id}: Bash 5.3.0 status={} stdout={expected_stdout:?} stderr={:?}; Shell::run status={:?} stdout={:?} stderr={:?}",
+				"{id}: Bash 5.3.0 status={} stdout={expected_stdout:?} stderr={:?}; Shell::run \
+				 status={:?} stdout={:?} stderr={:?}",
 				expected.status,
 				expected.emitted.text,
 				result.exit_code,

@@ -1005,8 +1005,9 @@ impl<'e, 'c> Expander<'e, 'c> {
 			},
 			Part::ComsubSyntax { line, msg } => {
 				return Err(Stop::Fail(Diag::ComsubSyntax {
-					line: self.line + line,
-					msg:  msg.clone(),
+					line:    self.line + line,
+					msg:     msg.clone(),
+					context: None,
 				}));
 			},
 		}

@@ -20,9 +20,12 @@ use crate::bash::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextError {
 	/// Line within the text.
-	pub line: u32,
+	pub line:    u32,
 	/// bash's message.
-	pub msg:  BString,
+	pub msg:     BString,
+	/// The inner input line to echo for a here-document substitution syntax
+	/// error.
+	pub context: Option<BString>,
 }
 
 /// Engine-wide settings.
@@ -242,8 +245,9 @@ impl Engine {
 			return Ok(Arc::clone(u));
 		}
 		let unsupported = |what: &str| TextError {
-			line: 1,
-			msg:  BString::from(format!("{what}: not supported by this engine yet")),
+			line:    1,
+			msg:     BString::from(format!("{what}: not supported by this engine yet")),
+			context: None,
 		};
 		let unit = match kind {
 			TextKind::Arith | TextKind::HereDoc => {
@@ -252,8 +256,30 @@ impl Engine {
 				} else {
 					TextMode::HereDoc
 				};
-				let word = crate::bash::syntax::parse_text(text, Features::NONE, tmode)
-					.map_err(|e| TextError { line: e.line, msg: BString::from(e.bash_msg()) })?;
+				let word = crate::bash::syntax::parse_text_with_context(text, Features::NONE, tmode)
+					.map_err(|(e, start)| {
+						let mut error = TextError {
+							line:    e.line,
+							msg:     BString::from(e.bash_msg()),
+							context: None,
+						};
+						if kind == TextKind::HereDoc && start != 0 && e.echoes_line() {
+							// diagnostic-naming-table: round6-heredoc-exact,
+							// heredoc-inner-*,
+							// and (nested-)source-heredoc-substitution.parser.
+							let start = start as usize;
+							let before = &text[..e.span.lo as usize];
+							let lo = before
+								.iter()
+								.rposition(|&c| c == b'\n')
+								.map_or(start, |i| (i + 1).max(start));
+							let rest = &text[lo..];
+							let end = rest.iter().position(|&c| c == b'\n').unwrap_or(rest.len());
+							error.context = Some(BString::from(&rest[..end]));
+							error.line -= text[..start].split(|&c| c == b'\n').count() as u32 - 1;
+						}
+						error
+					})?;
 				let unit = ir::lower_text(&word, text, mode, Features::NONE).map_err(unsupported)?;
 				if observed {
 					let syntax = crate::bash::trace::syntax::UnitSyntax::new(
@@ -278,7 +304,11 @@ impl Engine {
 				let cc = match parser.next_command() {
 					Some(Ok(cc)) => cc,
 					Some(Err(e)) => {
-						return Err(TextError { line: e.line, msg: BString::from(e.bash_msg()) });
+						return Err(TextError {
+							line:    e.line,
+							msg:     BString::from(e.bash_msg()),
+							context: None,
+						});
 					},
 					None => return Err(unsupported("an empty compound array value")),
 				};
