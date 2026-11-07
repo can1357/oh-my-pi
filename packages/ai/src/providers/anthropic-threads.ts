@@ -97,6 +97,8 @@ interface AnthropicThreadAnchor {
 	fingerprint: ThreadFingerprint;
 	/** When the response was stored (`Date.now()`). */
 	storedAt: number;
+	/** Create breakpoints retained by the server, excluding its last message. */
+	retainedBreakpoints: number;
 }
 
 /**
@@ -229,7 +231,10 @@ export class AnthropicThreadTurn {
 			if (this.#chain.anchor === anchor) this.#chain.anchor = undefined;
 			const body: MessageCreateParamsStreaming = {
 				...params,
-				messages: continueBreakpoints(params.messages.slice(anchor.messages.length)),
+				messages: continueBreakpoints(
+					params.messages.slice(anchor.messages.length),
+					4 - anchor.retainedBreakpoints,
+				),
 				thread: { type: "continue", previous_message_id: anchor.messageId },
 			};
 			if (!this.#resendSystemAndTools) {
@@ -306,6 +311,10 @@ export class AnthropicThreadTurn {
 			messages: [...planned.params.messages, stored.message],
 			fingerprint: planned.fingerprint,
 			storedAt: now,
+			retainedBreakpoints:
+				planned.request.kind === "continue"
+					? (this.#claimed?.retainedBreakpoints ?? 0)
+					: retainedCreateBreakpoints(planned.params),
 		};
 	}
 
@@ -413,6 +422,24 @@ function isCacheable(block: ContentBlockParam): block is CacheableBlock {
 	return block.type === "text" || block.type === "image" || block.type === "tool_use" || block.type === "tool_result";
 }
 
+/** Count the create breakpoints the server carries into every continue. */
+function retainedCreateBreakpoints(params: MessageCreateParamsStreaming): number {
+	let count = 0;
+	for (const block of params.system ?? []) {
+		if (typeof block !== "string" && block.cache_control) count++;
+	}
+	for (const tool of params.tools ?? []) {
+		if (tool.cache_control) count++;
+	}
+	for (const message of params.messages.slice(0, -1)) {
+		if (typeof message.content === "string") continue;
+		for (const block of message.content) {
+			if ("cache_control" in block && block.cache_control) count++;
+		}
+	}
+	return count;
+}
+
 /**
  * Breakpoints for the messages a continue appends. Prompt caching placed the
  * request's breakpoints for a full upload, but on a continue the trailing one
@@ -420,11 +447,11 @@ function isCacheable(block: ContentBlockParam): block is CacheableBlock {
  * plus the appended blocks fit its ~20-block lookback; a turn of parallel tool
  * calls does not, and would rewrite the whole conversation. This keeps the
  * newest breakpoint, which writes the turn, adds one on the first appended
- * block, which reads up to the previous request, and drops the rest: with the
- * create's system and tools breakpoints that stays within the four a request
+ * block, which reads up to the previous request, only when the create's
+ * retained breakpoints leave room for both. This stays within the four a request
  * may count. Messages without a breakpoint (caching off) pass through.
  */
-function continueBreakpoints(appended: MessageParam[]): MessageParam[] {
+function continueBreakpoints(appended: MessageParam[], budget: number): MessageParam[] {
 	let template: CacheControlEphemeral | undefined;
 	let newest: [number, number] | undefined;
 	let first: [number, number] | undefined;
@@ -443,9 +470,10 @@ function continueBreakpoints(appended: MessageParam[]): MessageParam[] {
 	}
 	if (!template || !first) return appended;
 	const marked = (m: number, b: number) =>
-		(m === first[0] && b === first[1]) || (newest !== undefined && m === newest[0] && b === newest[1]);
+		(budget > 1 && m === first[0] && b === first[1]) ||
+		(budget > 0 && newest !== undefined && m === newest[0] && b === newest[1]);
 	return appended.map((message, m) => {
-		if (m !== first[0] && typeof message.content === "string") return message;
+		if ((budget < 2 || m !== first[0]) && typeof message.content === "string") return message;
 		const content: ContentBlockParam[] =
 			typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
 		let changed = typeof message.content === "string";

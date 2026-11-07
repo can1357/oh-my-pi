@@ -233,6 +233,35 @@ describe("anthropic message threads", () => {
 		}
 	});
 
+	it.each(["sk-ant-api03-test", "sk-ant-oat01-test"])(
+		"counts retained create breakpoints on repeated continues (%s)",
+		async apiKey => {
+			const { fetch, sent } = endpoint();
+			const chat = session(fetch, { apiKey });
+			// Starting a thread after history accumulated retains an interior message
+			// breakpoint as well as the system and tools breakpoints.
+			for (let n = 0; n < 16; n++) {
+				chat.messages.push({ role: "user", content: `earlier ${n}`, timestamp: n });
+			}
+			await chat.turn("create after resume");
+			await chat.turn("continue after resume", [{ role: "user", content: "appended detail", timestamp: 99 }]);
+			// Persist the extra input before continuing once more.
+			chat.messages.splice(chat.messages.length - 1, 0, { role: "user", content: "appended detail", timestamp: 99 });
+			await chat.turn("third", [{ role: "user", content: "third detail", timestamp: 100 }]);
+			const [create, ...continues] = sent.map(request => request.body);
+			const breakpoints = (value: unknown): number =>
+				(JSON.stringify(value ?? null).match(/"cache_control":\{/g) ?? []).length;
+			const retained =
+				breakpoints(create.system) + breakpoints(create.tools) + breakpoints(create.messages.slice(0, -1));
+			expect(retained).toBe(3);
+			expect(breakpoints(create)).toBeLessThanOrEqual(4);
+			for (const next of continues) {
+				expect(next.thread?.type).toBe("continue");
+				expect(retained + breakpoints(next.messages)).toBeLessThanOrEqual(4);
+			}
+		},
+	);
+
 	it("keeps system and tools on continues for Claude Code OAuth traffic", async () => {
 		const { fetch, sent } = endpoint();
 		const chat = session(fetch, { apiKey: "sk-ant-oat01-test" });
