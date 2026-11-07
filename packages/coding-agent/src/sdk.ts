@@ -2627,6 +2627,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skills() {
 				return session?.skills ?? skills;
 			},
+			get messages() {
+				return agent?.state.messages ?? [];
+			},
 			refreshSkills: () => session.refreshSkills(),
 			skillRediscoveryHost: () => session.skillRediscoveryHost(),
 			rules: allRules,
