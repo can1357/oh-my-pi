@@ -1,4 +1,4 @@
-Use `read` for static web; browser only if needed.
+{{#if FETCH_ENABLED}}Use `read` for static web; browser only if needed.{{/if}}
 
 Put line ranges in `path`, never a separate range/offset/limit parameter:
 - `{"path":"notes.txt:450-455"}` reads lines 450-455; `{"path":"notes.txt:-5"}` reads the last 5.
@@ -18,7 +18,6 @@ Sources:
 - Selected file: `[foo.ts#1A2B]` snapshot+lines. Copy `[FILENAME#TAG]` for anchored edits; NEVER invent tag.
 {{/if}}
 - Directory: complete root; child listings cap at 12 (`… N more`), read child; page via :N-M/:-N.
-- URLs: reader text/markdown, :raw original HTML; bare host:port needs trailing slash.
-- PDF/documents: extracted text; notebooks: editable cells; images: decoded inline.
+- PDF/documents: extracted text; notebooks: editable cells; images: decoded inline{{#if FETCH_ENABLED}}. URLs: reader text/markdown, :raw original HTML; bare host:port needs trailing slash.{{else}}.{{/if}}
 - Also, with selectors in xd://read/sources (read it before first use):
   - SQLite, archives (ZIP, TAR, 7z, RAR and more), JSON/JSONL by jq filter, {{#if BINARY_VIEWS}}executables, {{/if}}video, SVG as image, merge conflicts.
