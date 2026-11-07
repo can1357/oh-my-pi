@@ -1,10 +1,9 @@
 import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { quotePosixArgvAsciiSafe } from "../../utils/shell-quote";
-import { launchError } from "./shared";
+import { launchError, runStep } from "./shared";
 import type {
 	SupportedMultiplexerCapabilities,
 	TerminalLaunchBackend,
-	TerminalLaunchCliResult,
 	TerminalLaunchCliRunner,
 	TerminalLaunchProvider,
 	TerminalLaunchRequest,
@@ -31,8 +30,9 @@ const capabilities = {
 type GhosttyLaunchRequest = Extract<TerminalLaunchRequest, { multiplexer: "ghostty" }>;
 
 /**
- * Ghostty's AppleScript dictionary (`split`, `new tab`, surface configuration
- * records) ships with Ghostty 1.4.0; older builds cannot be scripted at all.
+ * Ghostty's AppleScript dictionary ships with Ghostty 1.3.0, but the terminal
+ * `pid` and `tty` properties the host resolution below reads were added in
+ * Ghostty 1.4.0; older builds can be scripted, just not targeted this way.
  */
 const MINIMUM_GHOSTTY_VERSION = "1.4.0";
 
@@ -51,34 +51,58 @@ function isAtLeast(version: readonly number[], minimum: readonly number[]): bool
 	return true;
 }
 
-async function runGhosttyStep(
+/**
+ * Run one AppleScript step and return its stdout. The script runs inside a
+ * try/on-error envelope that reports failures as `ERR|<number>|<message>` on
+ * stdout, so a denied Automation permission (-1743) maps to its guidance at
+ * every step — version check and terminal listing included — instead of
+ * surfacing as a bare osascript exit code.
+ */
+async function runAppleScriptStep(
 	request: GhosttyLaunchRequest,
 	operation: string,
-	argv: readonly string[],
+	script: string,
 	runCli: TerminalLaunchCliRunner,
 ): Promise<string> {
-	let result: TerminalLaunchCliResult;
-	try {
-		result = await runCli(argv, request.cwd);
-	} catch {
-		throw launchError(request, operation, `ghostty ${operation} could not start its CLI.`);
+	const wrapped = [
+		"try",
+		script,
+		"on error errMessage number errNumber",
+		'\treturn "ERR|" & errNumber & "|" & errMessage',
+		"end try",
+	].join("\n");
+	const stdout = await runStep(request, operation, ["osascript", "-e", wrapped], request.cwd, runCli);
+	const line = stdout.trim();
+	if (line.startsWith("ERR|")) {
+		const [, code] = line.split("|");
+		if (code === "-1743") {
+			throw launchError(
+				request,
+				operation,
+				`ghostty ${operation} was denied Automation permission. Allow it in System Settings → Privacy & Security → Automation; the first launch prompts once.`,
+			);
+		}
+		if (code === "-2700") {
+			throw launchError(
+				request,
+				"resolve host terminal",
+				"ghostty launch could not find the terminal hosting this process; it may have been started outside Ghostty or headless.",
+			);
+		}
+		throw launchError(request, operation, `ghostty ${operation} failed (AppleScript error ${code ?? "unknown"}).`);
 	}
-	if (result.exitCode !== 0) {
-		const exit = result.exitCode === null ? "did not exit successfully" : `failed (exit ${result.exitCode})`;
-		throw launchError(request, operation, `ghostty ${operation} ${exit}.`, result.exitCode);
-	}
-	return result.stdout;
+	return stdout;
 }
 
-// Older Ghostty has no scripting dictionary; name the required version instead
-// of failing later with an AppleScript compile error.
+// The version gate runs before anything is created, so an unsupported Ghostty
+// fails naming the required version instead of mid-launch.
 async function requireGhosttyVersion(request: GhosttyLaunchRequest, runCli: TerminalLaunchCliRunner): Promise<void> {
 	let version = ghosttyVersions.get(runCli);
 	if (!version) {
-		const output = await runGhosttyStep(
+		const output = await runAppleScriptStep(
 			request,
 			"version",
-			["osascript", "-e", 'tell application "Ghostty" to return version'],
+			'tell application "Ghostty" to return version',
 			runCli,
 		);
 		version = parseVersion(output);
@@ -88,14 +112,14 @@ async function requireGhosttyVersion(request: GhosttyLaunchRequest, runCli: Term
 		throw launchError(
 			request,
 			"version",
-			`Ghostty terminal launches require Ghostty ${MINIMUM_GHOSTTY_VERSION} or newer (the first release with its AppleScript dictionary), and the installed version could not be determined. Update Ghostty.`,
+			`Ghostty terminal launches require Ghostty ${MINIMUM_GHOSTTY_VERSION} or newer (the first release whose AppleScript dictionary exposes the terminal pid and tty properties host resolution reads), and the installed version could not be determined. Update Ghostty.`,
 		);
 	}
 	if (!isAtLeast(version, parseVersion(MINIMUM_GHOSTTY_VERSION)!)) {
 		throw launchError(
 			request,
 			"version",
-			`Ghostty terminal launches require Ghostty ${MINIMUM_GHOSTTY_VERSION} or newer (the first release with its AppleScript dictionary); found ${version.join(".")}. Update Ghostty.`,
+			`Ghostty terminal launches require Ghostty ${MINIMUM_GHOSTTY_VERSION} or newer (the first release whose AppleScript dictionary exposes the terminal pid and tty properties host resolution reads); found ${version.join(".")}. Update Ghostty.`,
 		);
 	}
 }
@@ -142,10 +166,9 @@ function parseTerminalList(request: GhosttyLaunchRequest, stdout: string): Ghost
 		if (!line.trim()) continue;
 		const [id, pid, tty, windowId] = line.split("|");
 		const pidNumber = Number(pid);
-		// A surface whose foreground process is gone reports `pid` 0 or `missing
-		// value` (Ghostty keeps windows open after `wait after command:false`
-		// commands exit). Such a surface cannot host this process, so skip it
-		// instead of failing the whole listing.
+		// A surface whose process has exited reports `pid` 0 or `missing value`
+		// while its window stays open. Such a surface cannot host this process,
+		// so skip it instead of failing the whole listing.
 		if (!id || !windowId || !Number.isSafeInteger(pidNumber) || pidNumber <= 0) continue;
 		terminals.push({ id, windowId, pid: pidNumber, tty: tty ?? "" });
 	}
@@ -216,14 +239,26 @@ function resolveHostTerminal(
 	);
 }
 
+/**
+ * The fork command is delivered as the new surface's initial input —
+ * `exec <command>` typed into the default shell — not through the surface
+ * configuration `command` property. Ghostty's embedded runtime forces
+ * `wait-after-command` on for any configured command (see the `command`
+ * field of the surface options in Ghostty's apprt/embedded.zig), which
+ * would leave the split/tab sitting on "Process exited; press any key to
+ * close" after the fork child exits. With no configured command the
+ * surface keeps the default `wait-after-command: false`, `exec` makes the
+ * fork child the surface's own process, and Ghostty closes the surface
+ * when that process exits.
+ */
 function buildPlacementScript(request: GhosttyLaunchRequest, host: GhosttyTerminal): string {
 	const configuration = [
-		`command:${appleScriptString(request, "placement", quotePosixArgvAsciiSafe(request.command))}`,
 		`initial working directory:${appleScriptString(request, "placement", request.cwd)}`,
-		"wait after command:false",
+		"initial input:forkInput",
 	].join(", ");
 	const lines = [
 		'tell application "Ghostty"',
+		`\tset forkInput to "exec " & ${appleScriptString(request, "placement", quotePosixArgvAsciiSafe(request.command))} & return`,
 		"\tset hostWindow to missing value",
 		"\tset hostTerm to missing value",
 		"\trepeat with w in windows",
@@ -251,13 +286,7 @@ function buildPlacementScript(request: GhosttyLaunchRequest, host: GhosttyTermin
 	if (request.focus === true) lines.push("\tfocus newTerm");
 	if (request.focus === false) lines.push("\tfocus hostTerm");
 	lines.push('\treturn "OK|" & (id of newTerm as text)', "end tell");
-	return [
-		"try",
-		...lines,
-		"on error errMessage number errNumber",
-		'\treturn "ERR|" & errNumber & "|" & errMessage',
-		"end try",
-	].join("\n");
+	return lines.join("\n");
 }
 
 function parsePlacementResult(request: GhosttyLaunchRequest, stdout: string): string {
@@ -273,24 +302,6 @@ function parsePlacementResult(request: GhosttyLaunchRequest, stdout: string): st
 		const id = line.slice("OK|".length);
 		if (id && !/[\r\n]/u.test(id)) return id;
 		throw launchError(request, "placement", "ghostty placement did not return a valid terminal ID.");
-	}
-	if (line.startsWith("ERR|")) {
-		const [, code] = line.split("|");
-		if (code === "-1743") {
-			throw launchError(
-				request,
-				"placement",
-				"ghostty placement was denied Automation permission. Allow it in System Settings → Privacy & Security → Automation; the first launch prompts once.",
-			);
-		}
-		if (code === "-2700") {
-			throw launchError(
-				request,
-				"resolve host terminal",
-				"ghostty launch could not find the terminal hosting this process; it may have been started outside Ghostty or headless.",
-			);
-		}
-		throw launchError(request, "placement", `ghostty placement failed (AppleScript error ${code ?? "unknown"}).`);
 	}
 	throw launchError(request, "placement", "ghostty placement returned an unexpected response.");
 }
@@ -308,11 +319,11 @@ const launchGhostty: TerminalLaunchBackend<"ghostty", typeof capabilities> = asy
 	await requireGhosttyVersion(request, runCli);
 	const table = parseProcessTable(
 		request,
-		await runGhosttyStep(request, "process table", ["ps", "-axo", "pid=,ppid=,tty="], runCli),
+		await runStep(request, "process table", ["ps", "-axo", "pid=,ppid=,tty="], request.cwd, runCli),
 	);
 	const terminals = parseTerminalList(
 		request,
-		await runGhosttyStep(request, "list terminals", ["osascript", "-e", LIST_TERMINALS_SCRIPT], runCli),
+		await runAppleScriptStep(request, "list terminals", LIST_TERMINALS_SCRIPT, runCli),
 	);
 	if (terminals.length === 0) {
 		throw launchError(
@@ -322,12 +333,7 @@ const launchGhostty: TerminalLaunchBackend<"ghostty", typeof capabilities> = asy
 		);
 	}
 	const host = resolveHostTerminal(request, terminals, table);
-	const output = await runGhosttyStep(
-		request,
-		"placement",
-		["osascript", "-e", buildPlacementScript(request, host)],
-		runCli,
-	);
+	const output = await runAppleScriptStep(request, "placement", buildPlacementScript(request, host), runCli);
 	const id = parsePlacementResult(request, output);
 	return { multiplexer: "ghostty", placement: request.placement, id };
 };

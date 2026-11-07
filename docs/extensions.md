@@ -1092,12 +1092,18 @@ outside an Orca terminal, and `orca` otherwise.
 
 Ghostty launches are macOS-only and drive Ghostty's AppleScript dictionary
 (`split`, `new tab`, surface configuration records) through `osascript`; there is
-no Ghostty CLI for placement on macOS. The dictionary ships with Ghostty 1.4.0,
-so older versions fail before anything is created with an error naming the
-required version. Ghostty's surface configuration `command` is shell text, so
-Ghostty requests require `shellGrammar: "posix"` like CMUX and Orca; the working
-directory travels as its own configuration field rather than inside the shell
-text. The adapter finds the surface to split by intersecting this process's
+no Ghostty CLI for placement on macOS. The dictionary ships with Ghostty 1.3.0,
+but the terminal `pid` and `tty` properties the adapter reads to find the host
+surface were added in Ghostty 1.4.0, so older versions fail before anything is
+created with an error naming the required version. Ghostty requests require
+`shellGrammar: "posix"` like CMUX and Orca: the fork command is delivered as
+the new surface's initial input — `exec …` typed into its default shell —
+rather than through the surface configuration `command` property, because
+Ghostty's embedded runtime forces `wait-after-command` on for any configured
+command, which would leave the surface open on "Process exited" after the fork
+exits. With `exec` the fork child is the surface's own process, so Ghostty
+closes the surface when it exits; the working directory travels as its own
+configuration field rather than inside the shell text. The adapter finds the surface to split by intersecting this process's
 ancestor chain with the PIDs of the terminals Ghostty hosts — `GHOSTTY_SURFACE_ID`
 is not used, as it does not equal the AppleScript terminal ID — and falls back to
 matching the process's controlling TTY when no ancestor is hosted. `window`

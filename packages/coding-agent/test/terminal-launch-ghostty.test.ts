@@ -159,9 +159,14 @@ describe("Ghostty launches", () => {
 		expect(script).toContain('"win-1"');
 		expect(script).toContain('"term-host"');
 		expect(script).toContain("split hostTerm direction right with configuration cfg");
-		expect(script).toContain('command:"\'omp\' \'--fork\' \'/repo/session.jsonl\'"');
+		// The command rides as initial input (`exec …` into the default shell),
+		// never as the configuration `command` property: Ghostty forces
+		// wait-after-command on for configured commands, which would leave the
+		// split open on "Process exited" after the fork child exits.
+		expect(script).toContain("set forkInput to \"exec \" & \"'omp' '--fork' '/repo/session.jsonl'\" & return");
+		expect(script).toContain("initial input:forkInput");
+		expect(script).not.toContain("wait after command");
 		expect(script).toContain('initial working directory:"/repo"');
-		expect(script).toContain("wait after command:false");
 	});
 
 	it("ignores surfaces without a live process when listing terminals", async () => {
@@ -201,7 +206,9 @@ describe("Ghostty launches", () => {
 		const script = calls[3]!.argv[2]!;
 		expect(script).toContain("new tab in hostWindow with configuration cfg");
 		// The branch must compile: a bare `else` cannot follow a one-line `then`.
-		expect(script).toContain("if class of created is tab then\n\t\tset newTerm to first terminal of created\n\telse\n\t\tset newTerm to created\n\tend if");
+		expect(script).toContain(
+			"if class of created is tab then\n\t\tset newTerm to first terminal of created\n\telse\n\t\tset newTerm to created\n\tend if",
+		);
 		expect(script).toContain("focus hostTerm");
 		expect(script).not.toContain("focus newTerm");
 	});
@@ -305,6 +312,26 @@ describe("Ghostty launches", () => {
 			{ stdout: "ERR|-2740|AppleScript syntax error\n", exitCode: 0 },
 		]);
 		await expect(other.launch(paneRequest())).rejects.toThrow("AppleScript error -2740");
+	});
+
+	it("maps a denied Automation permission at the version check and the terminal listing", async () => {
+		// Regression: the version check is the first AppleScript call, and it
+		// used to run without the try/on-error envelope, so a denial surfaced
+		// as a bare "ghostty version failed (exit 1)" with no guidance.
+		const deniedVersion = createHarness(GHOSTTY_ENV, [
+			{ stdout: "ERR|-1743|Not authorized to send Apple events\n", exitCode: 0 },
+		]);
+		await expect(deniedVersion.launch(paneRequest())).rejects.toThrow("Automation permission");
+		expect(deniedVersion.calls).toHaveLength(1);
+		// The denial can only be reported because the script itself is wrapped.
+		expect(deniedVersion.calls[0]!.argv[2]).toContain('return "ERR|" & errNumber & "|" & errMessage');
+
+		const deniedList = createHarness(GHOSTTY_ENV, [
+			VERSION_OK,
+			processTable(),
+			{ stdout: "ERR|-1743|Not authorized to send Apple events\n", exitCode: 0 },
+		]);
+		await expect(deniedList.launch(paneRequest())).rejects.toThrow("Automation permission");
 	});
 
 	it("fails on a nonzero osascript exit or an unexpected placement response", async () => {
