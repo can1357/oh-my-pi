@@ -396,30 +396,59 @@ fn byte_offset(src: &[u8], off: u64, offsets: Offsets) -> Option<usize> {
 	(units == off).then_some(src.len())
 }
 
-fn closing_delimiter(v: &serde_json::Value) -> Option<(&'static str, &'static [u8])> {
+/// The closing token a node kind ends with, and whether the node's own `End`
+/// is just after it. A closer that does not end its node (a C-style loop's
+/// header `))`, which the loop's body follows) is anchored differently.
+fn closing_delimiter(v: &serde_json::Value) -> Option<(&'static str, &'static [u8], bool)> {
 	Some(match v.get("Type")?.as_str()? {
-		"DblQuoted" => ("Right", b"\""),
-		"SglQuoted" => ("Right", b"'"),
-		"CmdSubst" if v["Backquotes"] == true => ("Right", b"`"),
-		"CmdSubst" if v["TempFile"] == true || v["ReplyVar"] == true => ("Right", b"}"),
-		"CmdSubst" => ("Right", b")"),
-		"ArithmExp" if v["Bracket"] == true => ("Right", b"]"),
-		"ArithmExp" | "ArithmCmd" => ("Right", b"))"),
-		"TestClause" => ("Right", b"]]"),
-		"CStyleLoop" => ("Rparen", b"))"),
-		"Subshell" | "ParenTest" | "ProcSubst" | "ArrayExpr" => ("Rparen", b")"),
-		"Block" => ("Rbrace", b"}"),
-		"ParamExp" if v.get("Rbrace").is_some() => ("Rbrace", b"}"),
+		"DblQuoted" => ("Right", b"\"".as_slice(), true),
+		"SglQuoted" => ("Right", b"'", true),
+		"CmdSubst" if v["Backquotes"] == true => ("Right", b"`", true),
+		"CmdSubst" if v["TempFile"] == true || v["ReplyVar"] == true => ("Right", b"}", true),
+		"CmdSubst" => ("Right", b")", true),
+		"ArithmExp" if v["Bracket"] == true => ("Right", b"]", true),
+		"ArithmExp" | "ArithmCmd" => ("Right", b"))", true),
+		"TestClause" => ("Right", b"]]", true),
+		"CStyleLoop" => ("Rparen", b"))", false),
+		"Subshell" | "ParenTest" | "ProcSubst" | "ArrayExpr" => ("Rparen", b")", true),
+		"Block" => ("Rbrace", b"}", true),
+		"ParamExp" if v.get("Rbrace").is_some() => ("Rbrace", b"}", true),
+		// Keyword closers (`DonePos`, `FiPos`, `Esac`) are deliberately out:
+		// the same node closes with `done`, with `}` for a brace body, and
+		// with `end` in zsh's short forms, so a byte check on them asserts
+		// the dialect's spelling rather than the position. They are covered
+		// by containment and by the fixtures compared with real shfmt.
 		_ => return None,
 	})
 }
 
-/// The ordinary buffer must really contain the claimed delimiter. For an
-/// alias, parse the independently expanded buffer and map its delimiter back
-/// through the replacement: bytes in the replacement belong to the position
-/// just after `check`, not a similarly spelled token elsewhere in the source.
-/// The reference delimiter is also checked against the expanded source bytes;
-/// a consistently wrong lexer/exporter position cannot satisfy this oracle.
+/// Read `token` at `at`, allowing the line continuations bash removes, and
+/// report the offset just after its last byte. `None` when the buffer does
+/// not hold that token there.
+fn token_end(src: &[u8], at: usize, token: &[u8]) -> Option<usize> {
+	let mut i = at;
+	for &want in token {
+		while src.get(i) == Some(&b'\\') && src.get(i + 1) == Some(&b'\n') {
+			i += 2;
+		}
+		if src.get(i) != Some(&want) {
+			return None;
+		}
+		i += 1;
+	}
+	Some(i)
+}
+
+/// The ordinary buffer must really hold the claimed delimiter THERE, and the
+/// token must be the one that closes this node: where a node ends with its
+/// closer, the token read at the exported offset must end exactly at the
+/// node's own `End`, so a similarly spelled token nested inside it — the
+/// inner `))` of `(( ((1)) + 2 ))` — cannot satisfy the check. A C-style
+/// loop's header `))` does not end its node, and is anchored after the last
+/// header expression instead. For an alias, the independently expanded
+/// buffer supplies the reference position, which is mapped back through the
+/// replacement: bytes the alias owns belong to the position just after
+/// `check`, never to a similarly spelled token elsewhere in the source.
 fn delimiter_faults(
 	v: &serde_json::Value,
 	src: &[u8],
@@ -428,16 +457,50 @@ fn delimiter_faults(
 	path: &str,
 	bad: &mut Vec<String>,
 ) {
-	if let Some((key, delimiter)) = closing_delimiter(v) {
+	if let Some((key, delimiter, ends_node)) = closing_delimiter(v)
+		&& !v[key].is_null()
+	{
 		let at = v[key]["Offset"]
 			.as_u64()
 			.and_then(|o| byte_offset(src, o, offsets));
+		// Where the node itself ends, in the same buffer and unit.
+		let node_end = v["End"]["Offset"]
+			.as_u64()
+			.and_then(|o| byte_offset(src, o, offsets));
+		// A loop or clause whose body is written `{ … }` closes with the
+		// brace rather than its keyword.
+		let spellings: &[&[u8]] = if delimiter[0].is_ascii_alphabetic() {
+			&[delimiter, b"}"]
+		} else {
+			core::slice::from_ref(&delimiter)
+		};
+		let anchored = |buffer: &[u8], i: usize, end: Option<usize>| -> bool {
+			let Some(after) = spellings
+				.iter()
+				.find_map(|token| token_end(buffer, i, token))
+			else {
+				return false;
+			};
+			if ends_node {
+				return end == Some(after);
+			}
+			// A header closer: it must follow the last header expression.
+			let last = ["Post", "Cond", "Init"].iter().find_map(|k| {
+				v[k]["End"]["Offset"]
+					.as_u64()
+					.and_then(|o| byte_offset(buffer, o, offsets))
+			});
+			last.is_none_or(|e| i >= e)
+		};
 		let valid = if let Some((reference, expanded, start, len)) = alias {
 			let expected = reference[key]["Offset"]
 				.as_u64()
 				.and_then(|o| byte_offset(expanded, o, offsets));
+			let reference_end = reference["End"]["Offset"]
+				.as_u64()
+				.and_then(|o| byte_offset(expanded, o, offsets));
 			expected.is_some_and(|i| {
-				expanded.get(i..).is_some_and(|s| s.starts_with(delimiter))
+				anchored(expanded, i, reference_end)
 					&& at
 						== Some(if i < start {
 							i
@@ -448,11 +511,11 @@ fn delimiter_faults(
 						})
 			})
 		} else {
-			at.is_some_and(|i| src.get(i..).is_some_and(|s| s.starts_with(delimiter)))
+			at.is_some_and(|i| anchored(src, i, node_end))
 		};
 		if !valid {
 			bad.push(format!(
-				"{path}.{key}: {:?} is not the source/provenance position of {:?}",
+				"{path}.{key}: {:?} is not the position of this node's own {:?}",
 				v[key]["Offset"],
 				String::from_utf8_lossy(delimiter)
 			));
