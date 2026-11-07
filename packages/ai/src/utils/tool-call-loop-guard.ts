@@ -4,6 +4,8 @@ import type { AssistantMessage, ToolCall, ToolResultMessage } from "../types";
 const LEGACY_INTENT_FIELD = "__intent";
 const RESULT_SUMMARY_LIMIT = 200;
 const ARGUMENT_SUMMARY_LIMIT = 400;
+const PATH_ARGUMENT_KEY =
+	/(?:^|[_-])(?:paths?|files?|filepaths?|filenames?|dirs?|directories?|cwd|urls?|uris?)(?:[_-]|$)/i;
 
 /** Runtime settings for cross-turn tool-call repetition detection. */
 export interface ToolCallLoopGuardOptions {
@@ -45,6 +47,39 @@ function canonicalizeToolCallValue(value: unknown): unknown {
 	return output;
 }
 
+function normalizeToolCallValue(value: unknown, key?: string): unknown {
+	if (Array.isArray(value)) {
+		return value.map(item => normalizeToolCallValue(item, key));
+	}
+	if (typeof value === "string") {
+		const normalizedValue =
+			key !== undefined && PATH_ARGUMENT_KEY.test(key.replace(/([a-z0-9])([A-Z])/g, "$1_$2"))
+				? value
+				: value.replace(/\d+/g, "<n>");
+		return ["string", normalizedValue];
+	}
+	if (typeof value === "number") return ["number"];
+	if (!value || typeof value !== "object") {
+		return value;
+	}
+
+	const input = value as Record<string, unknown>;
+	const output: Record<string, unknown> = {};
+	for (const key of Object.keys(input).sort()) {
+		if (key === INTENT_FIELD || key === LEGACY_INTENT_FIELD) continue;
+		output[key] = normalizeToolCallValue(input[key], key);
+	}
+	return output;
+}
+
+function normalizeAssistantText(message: AssistantMessage): string {
+	const textParts: string[] = [];
+	for (const part of message.content) {
+		if (part.type === "text") textParts.push(part.text);
+	}
+	return textParts.join(" ").replace(/\s+/g, " ").trim();
+}
+
 function summarizeText(text: string, limit: number): string {
 	let summary = text.replace(/\s+/g, " ").trim();
 	if (summary.length > limit) {
@@ -72,6 +107,9 @@ export class ToolCallLoopGuard {
 	#exemptTools: ReadonlySet<string>;
 	#lastHash: string | undefined;
 	#count = 0;
+	#lastNormalizedHash: string | undefined;
+	#lastAssistantText: string | undefined;
+	#normalizedCount = 0;
 
 	constructor(options: ToolCallLoopGuardOptions) {
 		this.#threshold = Math.max(1, Math.trunc(options.threshold));
@@ -84,6 +122,9 @@ export class ToolCallLoopGuard {
 		if (toolCalls.length === 0) {
 			this.#lastHash = undefined;
 			this.#count = 0;
+			this.#lastNormalizedHash = undefined;
+			this.#lastAssistantText = undefined;
+			this.#normalizedCount = 0;
 			return null;
 		}
 		if (toolCalls.every(tc => this.#exemptTools.has(tc.name))) {
@@ -98,6 +139,9 @@ export class ToolCallLoopGuard {
 			if (!idle) {
 				this.#lastHash = undefined;
 				this.#count = 0;
+				this.#lastNormalizedHash = undefined;
+				this.#lastAssistantText = undefined;
+				this.#normalizedCount = 0;
 			}
 			return null;
 		}
@@ -113,12 +157,30 @@ export class ToolCallLoopGuard {
 			this.#count = 1;
 		}
 
-		if (this.#count < this.#threshold) return null;
+		const normalizedCalls = toolCalls
+			.map(tc => JSON.stringify([tc.name, normalizeToolCallValue(tc.arguments)]))
+			.sort();
+		const normalizedHash = JSON.stringify(normalizedCalls);
+		const assistantText = normalizeAssistantText(turn.message);
+		if (
+			assistantText.length > 0 &&
+			normalizedHash === this.#lastNormalizedHash &&
+			assistantText === this.#lastAssistantText
+		) {
+			this.#normalizedCount++;
+		} else {
+			this.#lastNormalizedHash = assistantText.length > 0 ? normalizedHash : undefined;
+			this.#lastAssistantText = assistantText.length > 0 ? assistantText : undefined;
+			this.#normalizedCount = assistantText.length > 0 ? 1 : 0;
+		}
+
+		if (this.#count < this.#threshold && this.#normalizedCount < this.#threshold) return null;
+		const count = this.#count >= this.#threshold ? this.#count : this.#normalizedCount;
 		const reportCall = toolCalls.find(tc => !this.#exemptTools.has(tc.name)) ?? toolCalls[0]!;
 		return {
 			kind: "repeated_tool_call",
 			toolName: reportCall.name,
-			count: this.#count,
+			count,
 			resultSummary: summarizeToolResult(turn.toolResults, reportCall.id),
 			argumentsSummary: summarizeText(
 				JSON.stringify(canonicalizeToolCallValue(reportCall.arguments)),
