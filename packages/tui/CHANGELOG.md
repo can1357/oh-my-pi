@@ -2,8 +2,19 @@
 
 ## [Unreleased]
 
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Ctrl+J from a win32-input-mode record with `VK_J` and `Uc=LF` now decodes as `ctrl+j`, so Windows Terminal / mini-term insert a newline instead of submitting ([#18253](https://github.com/can1357/oh-my-pi/pull/18253) by [@Clannad47](https://github.com/Clannad47))
+- The BTW history page (`f` on a side answer) scrolls its reader and history list with the mouse wheel, matching the other scrolling sheets ([#18303](https://github.com/can1357/oh-my-pi/pull/18303) by [@ImAlexBlock](https://github.com/ImAlexBlock))
+- The BTW history list shows the date for questions asked before today (and the year for ones from an earlier year), instead of a bare time that read as today's; a follow-up asked on a later day than its topic shows its date too ([#18210](https://github.com/can1357/oh-my-pi/pull/18210) by [@a-glapinski](https://github.com/a-glapinski))
+
+## [18.17.0] - 2026-11-06
+
 ### Breaking Changes
 
+- `MarkdownTheme.heading` receives the heading depth (1–6) as a second argument; callers must pass it.
 - Shell visualization uses the native presentation engine: shell node IDs are opaque strings, and native shell nodes receive presentation data, not raw execution traces.
 - Replaced `CustomEditor.modelMentionLabel` with `resolveModelMention` (returns `{ label, selector }`); `collapseModelMentions` takes the same callback; `getModelMentionSuggestions` returns `ModelMentionCompletion`.
 - `SetupHost` must implement `autoUpdate`, `canAutoUpdate()` and `saveAutoUpdate()` for setup version 3's auto-update scene.
@@ -14,6 +25,7 @@
 
 ### Added
 
+- Colorful Markdown, on by default (`setMarkdownColorful`): headings by level, bold/italic, inline code and table headers take distinct hues from the theme's `terminal.ansi` palette. `MarkdownTheme` gains optional `strong`, `emphasis` and `tableHeader` roles; `Theme.ansiFg()` paints a palette slot, falling back to the terminal's own palette.
 - Bash cards show incremental Python-like pseudocode with a Raw toggle, failure marks and variable values; the inspector adds layers, split source and timestamp replay. Native hosts draw an inline segmented run box (`shell` = command, `omp.tool.bash.output` = output).
 - `VersionUpdate`, `WelcomeComponent.setVersionUpdate()` and `ComposerWelcomeUpdate.versionUpdate`: the welcome banner shows background self-update progress, readiness or failure.
 - `newSessionThinkingLevel` / `resolveConfiguredThinkingLevel` resolve a new session's starting thinking level; `ComposerCache.writeStatus` accepts `{ shared: false }` to keep a project's status out of the any-project fallback.

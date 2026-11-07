@@ -123,45 +123,6 @@ print -r -- \"[$c][$c2|$k2][$c3|$k3][$c4|$s4]\"";
 	Ok(())
 }
 
-/// Mouse reports (xterm X10): a click, a double click, a wheel, a click
-/// cut short by a key, a drag, a press with shift, and a lone release.
-#[test]
-fn zsh_mod_curses_reads_mouse_events() -> io::Result<()> {
-	let script = "zmodload zsh/curses
-zcurses init
-zcurses mouse; ms=$?
-zcurses mouse +motion -motion; mo=$?
-for i in 1 2 3 4 5 6 7 8; do zcurses input stdscr c k m; r+=(\"$?|$c|$k|$m\"); done
-zcurses input stdscr c k; r+=(\"$?|$c|$k\")
-zcurses end
-print -rl -- ms=$ms mo=$mo $r";
-	let groups: [&[u8]; 8] = [
-		b"\x1b[M !!\x1b[M#!!",
-		b"\x1b[M !!\x1b[M#!!\x1b[M !!\x1b[M#!!",
-		b"\x1b[M`!!",
-		b"\x1b[M !!\x1b[M#!!x",
-		b"\x1b[M !!\x1b[M#\"\"",
-		b"\x1b[M$\"\"",
-		b"\x1b[M#!!",
-		b"\x1b[Ma!!",
-	];
-	let Some((obash, zsh)) = both(script, |pty| {
-		pty.settle(QUIET, TIMEOUT)?;
-		for g in groups {
-			pty.write(g)?;
-			pty.settle(QUIET, TIMEOUT)?;
-		}
-		pty.wait_screen_contains("ms=", TIMEOUT)?;
-		pty.settle(QUIET, TIMEOUT)
-	})?
-	else {
-		return Ok(());
-	};
-	assert_eq!(obash, zsh);
-	assert!(zsh.contains("CLICKED1") && zsh.contains("PRESSED1 SHIFT"), "{zsh}");
-	Ok(())
-}
-
 /// The terminal's user-defined keys (`kUP5`, `kDC5`, `kHOM7`, `kRIT5`) are
 /// numbered as ncurses numbers them; standard ones keep their names.
 #[test]

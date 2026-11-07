@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Corrected Devin SWE-2 Flash and SWE-2 Fast token pricing, and SWE-2's promotional rates and end time ([#18332](https://github.com/can1357/oh-my-pi/pull/18332) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Fixed Mistral discovery listing embedding, OCR, moderation, transcription, and speech models as chat models; only rows with `capabilities.completion_chat` are offered, with context, image input, and reasoning read from the row ([#18244](https://github.com/can1357/oh-my-pi/pull/18244) by [@VeigaPunk](https://github.com/VeigaPunk))
+- A failed refresh no longer replaces a cached catalog whose models carry request headers with an empty snapshot; the next launch refetches it instead ([#18227](https://github.com/can1357/oh-my-pi/issues/18227))
+
+## [18.17.0] - 2026-11-06
+
 ### Added
 
 - Added `tool-name-prefix` compat axis for Responses hosts that reject certain tool names; Muse Code sets it to `_` ([#17435](https://github.com/can1357/oh-my-pi/issues/17435), [#17515](https://github.com/can1357/oh-my-pi/pull/17515) by [@harshav167](https://github.com/harshav167), continued in [#18053](https://github.com/can1357/oh-my-pi/pull/18053) by [@abilliontokens](https://github.com/abilliontokens))

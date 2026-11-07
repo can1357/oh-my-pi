@@ -11,6 +11,7 @@ import { resolveInitScriptSources } from "@oh-my-pi/pi-coding-agent/tools/browse
 import { DownloadManager } from "@oh-my-pi/pi-coding-agent/tools/browser/downloads";
 import {
 	buildHeadlessLaunchArgs,
+	closeLaunchedBrowser,
 	launchHeadlessBrowser,
 	removeUserDataDir,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
@@ -459,7 +460,7 @@ await Promise.withResolvers().promise;`;
 			server.stop(true);
 			recycled.stop(true);
 			later.stop(true);
-			await browser.close();
+			await closeLaunchedBrowser(browser);
 			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	}, 30_000);

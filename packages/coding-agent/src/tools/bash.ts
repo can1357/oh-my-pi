@@ -50,7 +50,12 @@ import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
-import { extractLeadingCdTarget, extractLiteralAndChainSegments, tokenizeShellSegments } from "./shell-tokenize";
+import {
+	extractLeadingCdTarget,
+	extractLiteralAndChainSegments,
+	type LiteralShellCommandSegment,
+	tokenizeShellSegments,
+} from "./shell-tokenize";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
@@ -76,6 +81,7 @@ import {
 	cfgBashInterceptorPatterns,
 	cfgBashPatterns,
 } from "../exec/settings";
+import { cfgDisplayShellVisualization } from "../modes/settings";
 import { cfgSkillful } from "../session/settings";
 import { cfgWorktreeClone, ovnfsCommand } from "../task/settings";
 import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
@@ -314,11 +320,80 @@ function bashApprovalRuleMatches(command: string, rule: BashApprovalPatternRule)
 	return commandSegmentMatchesBashApprovalPattern(command, rule.match);
 }
 
+function findNonCompoundBashRestrictionRule(
+	command: string,
+	rules: readonly BashApprovalPatternRule[],
+): BashApprovalPatternRule | undefined {
+	const segments = bashCommandSegments(command);
+	let promptRule: BashApprovalPatternRule | undefined;
+	for (const rule of rules) {
+		if (
+			rule.approval !== "allow" &&
+			commandMatchesBashApprovalPattern(command, rule.match) &&
+			!segments.some(segment => commandMatchesBashApprovalPattern(segment, rule.match))
+		) {
+			if (rule.approval === "deny") return rule;
+			promptRule ??= rule;
+		}
+	}
+	for (const segment of segments) {
+		const segmentRule = rules.find(
+			rule => rule.approval !== "allow" && commandMatchesBashApprovalPattern(segment, rule.match),
+		);
+		if (segmentRule?.approval === "deny") return segmentRule;
+		if (segmentRule?.approval === "prompt") promptRule ??= segmentRule;
+	}
+	return promptRule;
+}
+
 function findBashApprovalPatternRule(
 	command: string,
 	rules: readonly BashApprovalPatternRule[],
 ): BashApprovalPatternRule | undefined {
+	if (hasBashApprovalShellControl(command)) {
+		return findNonCompoundBashRestrictionRule(command, rules);
+	}
 	return rules.find(rule => bashApprovalRuleMatches(command, rule));
+}
+
+type BashPatternDecision =
+	| { kind: "deny"; rule: BashApprovalPatternRule }
+	| { kind: "prompt"; rule: BashApprovalPatternRule }
+	| { kind: "allow" }
+	| { kind: "unmatched" };
+
+function resolveBashPatternDecision(
+	command: string,
+	compoundSegments: readonly LiteralShellCommandSegment[] | null,
+	patternRules: readonly BashApprovalPatternRule[],
+): BashPatternDecision {
+	if (compoundSegments) {
+		let promptRule: BashApprovalPatternRule | undefined;
+		for (const rule of patternRules) {
+			if (
+				rule.approval !== "allow" &&
+				commandMatchesBashApprovalPattern(command, rule.match) &&
+				!compoundSegments.some(segment => commandSegmentMatchesBashApprovalPattern(segment.text, rule.match))
+			) {
+				if (rule.approval === "deny") return { kind: "deny", rule };
+				promptRule ??= rule;
+			}
+		}
+		let hasUnmatchedSegment = false;
+		for (const segment of compoundSegments) {
+			const segmentRule = findBashApprovalPatternRule(segment.text, patternRules);
+			if (segmentRule?.approval === "deny") return { kind: "deny", rule: segmentRule };
+			if (segmentRule?.approval === "prompt") promptRule ??= segmentRule;
+			if (!segmentRule) hasUnmatchedSegment = true;
+		}
+		if (promptRule) return { kind: "prompt", rule: promptRule };
+		return hasUnmatchedSegment ? { kind: "unmatched" } : { kind: "allow" };
+	}
+	const patternRule = findBashApprovalPatternRule(command, patternRules);
+	if (patternRule?.approval === "deny") return { kind: "deny", rule: patternRule };
+	if (patternRule?.approval === "prompt") return { kind: "prompt", rule: patternRule };
+	if (patternRule?.approval === "allow") return { kind: "allow" };
+	return { kind: "unmatched" };
 }
 
 async function saveBashOriginalArtifact(session: ToolSession, originalText: string): Promise<string | undefined> {
@@ -549,86 +624,54 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (interception) {
 			return { tier: "exec", override: true, policy: "deny", reason: interception.replace(/^Blocked:\s*/u, "") };
 		}
-		const patternRules = getBashApprovalPatternRules(cfgBashPatterns.get(this.session.settings));
+		const rawPatterns = cfgBashPatterns.get(this.session.settings);
+		const patternRules = getBashApprovalPatternRules(rawPatterns);
 		const shell = cfgBashAllowCompoundCommands.get(this.session.settings)
 			? this.session.settings.getShellConfig().shell
 			: undefined;
 		const compoundSegments = shell && isPosixShell(shell) ? extractLiteralAndChainSegments(command) : null;
-		// Segment rules keep their ordered first-match semantics. Restrictions
-		// matching only the complete chain are aggregated separately: retain the
-		// first prompt, but keep scanning because any later deny takes precedence.
-		let patternRule: BashApprovalPatternRule | undefined;
-		if (compoundSegments) {
-			for (const rule of patternRules) {
-				if (
-					rule.approval !== "allow" &&
-					commandMatchesBashApprovalPattern(command, rule.match) &&
-					!compoundSegments.some(segment => commandSegmentMatchesBashApprovalPattern(segment.text, rule.match))
-				) {
-					if (rule.approval === "deny") {
-						patternRule = rule;
-						break;
-					}
-					patternRule ??= rule;
-				}
-			}
-		} else {
-			patternRule = findBashApprovalPatternRule(command, patternRules);
-		}
-		if (patternRule?.approval === "deny") {
+		const decision = resolveBashPatternDecision(command, compoundSegments, patternRules);
+		// Project layers may tighten the operator's `bash.patterns`, never loosen
+		// them: an operator deny or prompt still applies under a project allow.
+		const authoritySettings = this.session.settings.grantAuthority?.();
+		const rawAuthorityPatterns = authoritySettings ? cfgBashPatterns.get(authoritySettings) : rawPatterns;
+		const authorityDecision =
+			rawAuthorityPatterns === rawPatterns
+				? decision
+				: resolveBashPatternDecision(command, compoundSegments, getBashApprovalPatternRules(rawAuthorityPatterns));
+		const denied =
+			authorityDecision.kind === "deny" ? authorityDecision : decision.kind === "deny" ? decision : undefined;
+		if (denied) {
 			return {
 				tier: "exec",
 				override: true,
 				policy: "deny",
-				reason: `Blocked by bash pattern: ${patternRule.match}`,
+				reason: `Blocked by bash pattern: ${denied.rule.match}`,
 			};
 		}
 		const criticalCommand = command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command));
 		if (!compoundSegments && criticalCommand) {
 			return { tier: "exec", override: true, reason: "Critical pattern detected" };
 		}
+		const prompted =
+			authorityDecision.kind === "prompt" ? authorityDecision : decision.kind === "prompt" ? decision : undefined;
+		if (prompted) {
+			return {
+				tier: "exec",
+				override: true,
+				policy: "prompt",
+				reason: `Prompt required by bash pattern: ${prompted.rule.match}`,
+			};
+		}
 		if (compoundSegments) {
-			let promptRule: BashApprovalPatternRule | undefined = patternRule;
-			let hasUnmatchedSegment = false;
-			for (const segment of compoundSegments) {
-				const segmentRule = findBashApprovalPatternRule(segment.text, patternRules);
-				if (segmentRule?.approval === "deny") {
-					return {
-						tier: "exec",
-						override: true,
-						policy: "deny",
-						reason: `Blocked by bash pattern: ${segmentRule.match}`,
-					};
-				}
-				if (segmentRule?.approval === "prompt") promptRule ??= segmentRule;
-				if (!segmentRule) hasUnmatchedSegment = true;
-			}
-			if (promptRule) {
-				return {
-					tier: "exec",
-					override: true,
-					policy: "prompt",
-					reason: `Prompt required by bash pattern: ${promptRule.match}`,
-				};
-			}
 			for (const segment of compoundSegments) {
 				const literalCommand = segment.argv.join(" ");
 				if (criticalCommand || CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(literalCommand))) {
 					return { tier: "exec", override: true, reason: "Critical pattern detected" };
 				}
 			}
-			// Unmatched segments retain the standalone tool-policy and mode fallback.
-			return hasUnmatchedSegment ? "exec" : { tier: "write", policy: "allow" };
 		}
-		if (patternRule?.approval === "allow") return { tier: "write", policy: "allow" };
-		if (patternRule?.approval === "prompt") {
-			return {
-				tier: "exec",
-				override: true,
-				policy: "prompt",
-				reason: `Prompt required by bash pattern: ${patternRule.match}`,
-			};
-		}
+		if (decision.kind === "allow") return { tier: "write", policy: "allow" };
 		return "exec";
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
@@ -1072,10 +1115,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onPreview: text => {
 							void report(text, { output: text, async: { state: "running", jobId, type: "bash" } });
 						},
-						onTrace: trace => {
-							liveTrace = trace;
-							void report(latestText, { output: latestText, async: { state: "running", jobId, type: "bash" } });
-						},
+						onTrace: cfgDisplayShellVisualization.get(this.session.settings)
+							? trace => {
+									liveTrace = trace;
+									void report(latestText, {
+										output: latestText,
+										async: { state: "running", jobId, type: "bash" },
+									});
+								}
+							: undefined,
 						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 						streams,
 						onStart: probe => {
@@ -1163,6 +1211,32 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 	async execute(
 		toolCallId: string,
+		input: BashToolInput,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
+		ctx?: AgentToolContext,
+	): Promise<AgentToolResult<BashToolDetails>> {
+		// The directory the command actually ran in, set once resolved. A hoisted
+		// `cd <dir>; …` runs only the remainder, so renderers drawing the executed
+		// script read the directory from here instead of re-parsing the command.
+		const ran: { cwd?: string; cdSeparator?: ";" } = {};
+		const stamp = (details: BashToolDetails | undefined): BashToolDetails | undefined =>
+			ran.cwd === undefined
+				? details
+				: { ...details, cwd: ran.cwd, ...(ran.cdSeparator ? { cdSeparator: ran.cdSeparator } : {}) };
+		const result = await this.#execute(
+			toolCallId,
+			input,
+			ran,
+			signal,
+			onUpdate && (update => onUpdate({ ...update, details: stamp(update.details) })),
+			ctx,
+		);
+		return { ...result, details: stamp(result.details) };
+	}
+
+	async #execute(
+		toolCallId: string,
 		{
 			command: rawCommand,
 			timeout: rawTimeout,
@@ -1172,6 +1246,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			async: rawAsync,
 			pty,
 		}: BashToolInput,
+		ran: { cwd?: string; cdSeparator?: ";" },
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
 		ctx?: AgentToolContext,
@@ -1183,16 +1258,25 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const sessionId = this.session.getSessionId?.() ?? undefined;
 		const sessionEnv = this.#sessionEnv(toolCallId);
 
-		// Extract a leading `cd <path> && ...` into cwd when the model ignores the
-		// cwd parameter. The scanner captures only a single path token and defers
-		// to the shell for anything else (redirects, extra args, shell expansion),
-		// so it never absorbs shell syntax like `cd /tmp 2>/dev/null && ...` into
-		// the structured cwd. Constrained to a top-level `&&` on the first line.
+		// Extract a leading `cd <path> && ...` / `cd <path>; ...` into cwd when the
+		// model ignores the cwd parameter. The scanner captures only a single path
+		// token and defers to the shell for anything else (redirects, extra args,
+		// shell expansion), so it never absorbs shell syntax like
+		// `cd /tmp 2>/dev/null && ...` into the structured cwd. `&&` always hoists:
+		// a missing directory fails early, as the shell would short-circuit. `;`
+		// runs the rest even when `cd` fails, so it hoists only onto an existing host
+		// directory; anything else (URL targets included) stays with the shell.
 		if (!cwd) {
 			const cd = extractLeadingCdTarget(command);
-			if (cd) {
+			const hoist =
+				cd?.separator === "&&" ||
+				(cd?.separator === ";" &&
+					!InternalUrlRouter.instance().canHandle(cd.path) &&
+					(await fs.promises.stat(resolveToCwd(cd.path, this.session.cwd)).catch(() => null))?.isDirectory());
+			if (cd && hoist) {
 				cwd = cd.path;
 				command = cd.rest;
+				if (cd.separator === ";") ran.cdSeparator = ";";
 			}
 		}
 		// Mode selection runs on normalized fields: a caller that materializes
@@ -1242,6 +1326,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const router = InternalUrlRouter.instance();
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
 		const commandCwd = virtualCwd ?? (cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd);
+		if (cwd) ran.cwd = commandCwd;
 		if (virtualCwd !== undefined) {
 			if (name !== undefined || canUseInteractiveBashPty(pty === true, ctx)) {
 				throw new ToolError(
@@ -1818,12 +1903,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 								emitFrame();
 							}
 						: undefined,
-					onTrace: emitFrame
-						? next => {
-								trace = next;
-								emitFrame();
-							}
-						: undefined,
+					onTrace:
+						emitFrame && cfgDisplayShellVisualization.get(this.session.settings)
+							? next => {
+									trace = next;
+									emitFrame();
+								}
+							: undefined,
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 					onSessionShellBusy: () => pendingNotices.push(SESSION_SHELL_BUSY_NOTICE),
 				});

@@ -58,9 +58,12 @@ function fixture(): { component: StatusLineComponent; render: () => string } {
 	return { component, render: () => component.renderBottomBar(80, "full") };
 }
 
-/** The brand glyph's truecolor foreground (the fade's only output); undefined when none is set. */
+/**
+ * The brand glyph's foreground (the fade's only output), truecolor or 256-color as the detected
+ * terminal allows; undefined when none is set.
+ */
 function brandColor(row: string): string | undefined {
-	return /\x1b\[(?:0;)?38;2;\d+;\d+;\d+m/.exec(row)?.[0];
+	return /\x1b\[(?:0;)?38;(?:2;\d+;\d+;\d+|5;\d+)m/.exec(row)?.[0];
 }
 
 describe("status line decorative motion", () => {

@@ -789,7 +789,7 @@ fn root_binding_below(
 		return Ok(None);
 	}
 	// The innermost function scope, read once a private binding needs it.
-	let mut func = None;
+	let mut func = FuncScope::Unread;
 	for depth in (SCOPE_BITS..top).rev() {
 		if root_binds(root, store, name, depth, hide_private, &mut func)? {
 			return Ok(Some(depth));
@@ -805,17 +805,26 @@ fn root_binding_below(
 	Ok(None)
 }
 
+/// [`root_binds`]' cache of the innermost function scope.
+#[derive(Clone, Copy)]
+enum FuncScope {
+	/// Not read yet.
+	Unread,
+	/// [`root_func_scope`]'s answer.
+	Read(Option<u32>),
+}
+
 /// Whether root scope `depth` binds `name` for [`root_binding_below`]:
 /// with `hide_private`, a zsh private parameter there counts only when no
 /// function scope lies above it. `func` caches the innermost function
-/// scope (`None`: not read yet).
+/// scope.
 fn root_binds(
 	root: &Root,
 	store: &mut dyn StateStore,
 	name: &[u8],
 	depth: u32,
 	hide_private: bool,
-	func: &mut Option<Option<u32>>,
+	func: &mut FuncScope,
 ) -> Result<bool, StoreError> {
 	let private = match store.get(local_key(depth, name))? {
 		None => return Ok(false),
@@ -826,10 +835,10 @@ fn root_binds(
 		return Ok(true);
 	}
 	let innermost = match *func {
-		Some(f) => f,
-		None => {
+		FuncScope::Read(f) => f,
+		FuncScope::Unread => {
 			let f = root_func_scope(root, store)?;
-			*func = Some(f);
+			*func = FuncScope::Read(f);
 			f
 		},
 	};

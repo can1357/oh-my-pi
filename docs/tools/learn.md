@@ -44,7 +44,7 @@
    - Mnemopi: for `scope: "global"`, first resolves `state.getGlobalRetainTarget()`, which throws under `per-project` scoping before anything is stored or any skill is written; then calls `rememberScoped(...)` (with that target for a global lesson) with `source: "coding-agent-learn"`, `importance: 0.8`, `scope: "bank"`, fact and entity extraction enabled, `veracity: "tool"`, `memoryType: "fact"`, and session/cwd/context metadata. A thrown storage error is reported as `Mnemopi did not store the lesson: <reason>`; the return value is not checked.
    - Local backend: calls `localBackend.save(...)`, which normalizes and writes a project-scoped `learned.md`; `stored === 0` is treated as failure.
    - Local backend: rejects `scope: "global"` with `Global memory scope is not available with the local memory backend.` before storing or writing a skill.
-   - Hindsight: enqueues retention with `state.enqueueRetain(memory, context, scope)` and reports the lesson as queued. A global lesson is retained untagged; `enqueueRetain` throws before queueing or writing a skill while `hindsight.globalScope` is off (`Hindsight global scope is off; set hindsight.globalScope to true to enable it.`) or under `per-project` scoping (`Hindsight global scope requires global or per-project-tagged scoping.`).
+   - Hindsight: awaits `state.enqueueRetain(toolCallId, [{ content: memory, context, scope }])`, which writes the lesson to the same [durable outbox as retain](./retain.md) before the lesson is reported as queued. A global lesson is retained untagged; `enqueueRetain` throws before queueing or writing a skill while `hindsight.globalScope` is off (`Hindsight global scope is off; set hindsight.globalScope to true to enable it.`), under `per-project` scoping (`Hindsight global scope requires global or per-project-tagged scoping.`), or when the outbox is full or unwritable.
 3. If `skill` is absent, the tool returns after the memory write/queue.
 4. If `skill.action == "create"`, the tool checks the lowercased/validated name against active authored skills. A conflict returns an error result after the lesson has already been stored or queued.
 5. Otherwise, it calls `writeManagedSkill(...)`. Skill-write failure is rethrown as a partial outcome because lesson persistence already happened.
@@ -63,6 +63,7 @@
    - Local backend writes `<agent-dir>/memories/<encoded-cwd>/learned.md`.
    - Managed skills write `<agent-dir>/managed-skills/<sanitized-name>/SKILL.md`; the default agent directory is `~/.omp/agent`.
    - Mnemopi writes its scoped SQLite database.
+   - Hindsight writes a private event file under `<agent-dir>/hindsight-outbox/` until the server accepts it.
 - Network: Hindsight queue flushes to the configured server later. Mnemopi can schedule configured embedding/fact-extraction provider work after the synchronous row write; local file-backed storage itself is offline.
 - Session state: reads backend state, settings, cwd, and session id. A skill created here is not immediately injected into the active skill list.
 - Background work: Hindsight retention and Mnemopi extraction/embedding can continue after the tool result.

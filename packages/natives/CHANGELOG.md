@@ -6,6 +6,17 @@
 
 - Fixed shell syntax exports pointing command delimiters into expression text or neighboring tokens, including zsh arithmetic loops and alias-expanded commands ([#18193](https://github.com/can1357/oh-my-pi/pull/18193) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool crashing on long `[[ … && … ]]`, `[[ … || … ]]`, `[` and `test` chains and long runs of `!` in `[[ ]]`, including conditions in uncalled functions and skipped commands; 100,000-term chains now run without overflowing the stack ([#17872](https://github.com/can1357/oh-my-pi/pull/17872) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Fixed `find()` missing elements more than 24 levels down, such as VS Code's editor; it now searches 64 levels deep ([#18221](https://github.com/can1357/oh-my-pi/pull/18221) by [@will-bogusz](https://github.com/will-bogusz))
+- `glob`, `grep`, `fuzzyFind`, `ast_grep` and `ast_edit` now run their directory traversal on a filesystem runtime of their own, so a search over a large or cold tree can no longer take the worker threads that the embedded shell and every other native call are scheduled on. Those threads are named `pi-fs-worker`, so a stall in a search is tellable apart from a stall elsewhere.
+- Fixed a workspace tree whose native addon does not match its checkout failing with `undefined is not a constructor` at the callsite: a class the addon lacks now throws a message naming the addon file, both releases and `bun run build:native` — from its constructor and from any static entrypoint — and the loader reports that mismatch once as it loads ([#18230](https://github.com/can1357/oh-my-pi/pull/18230) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.17.0] - 2026-11-06
+
 ### Breaking Changes
 
 - Replaced `parseShell()` with `RunTrace.present()` and `ShellVisualization`.
@@ -17,6 +28,7 @@
 - `Shell` and `executeShell` now run pi-shell's Bash engine with Bash 5.3 semantics, including aliases containing pipelines, subshells, and separators.
 - Native shell is faster across parsing, functions, expansion, redirections, arithmetic, loops, and external command startup.
 - Sixel image output now uses a built-in encoder.
+- Built-in `ps -o` accepts Apple's `utime` (alias `putime`) for user CPU time, instead of failing with `unknown output format specifier 'utime'`.
 - Shell spawn benchmarks now report median and p99 latency.
 
 ### Changed
@@ -27,8 +39,13 @@
 
 ### Fixed
 
+- Fixed a crash on Linux when a zsh-mode sort or `strftime`/`$langinfo` named a locale that is not installed.
+- Fixed `env -i` in the bash tool passing exported shell functions (`BASH_FUNC_name%%`) and non-environment shell variables to the command.
 - Fixed `$!` in command substitutions, subshells and pipeline stages to name the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
+- Fixed built-in local `rsync` output on a busy machine sometimes differing from rsync 3.5.1: `--delete`/info lines from subdirectories could print after the top-level names and the byte totals in `sent … received …`/`--stats` could be off by 4.
 - Fixed Windows `rsync` treating a one-letter daemon host like `h::module` as a drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed git, its helpers and commit hooks started by omp reading the terminal, which could swallow keystrokes and leave Tern protocol text like `_tsp;e;{"ev":"ack",…}` in the composer; they no longer inherit the terminal or share its session.
+- Fixed `ssh` started by the built-in `rsync` (and `sort --compress-program`) prompting on the user's terminal, e.g. host-key confirmations appearing after exit; they no longer share omp's terminal or session.
 - Fixed history saves hanging when a stale lock cannot be removed.
 - Fixed native addon startup on glibc 2.17–2.28, which lacks `posix_spawn_file_actions_addchdir_np` ([#18046](https://github.com/can1357/oh-my-pi/pull/18046) by [@jchanghong023](https://github.com/jchanghong023))
 - Fixed Windows `rmdir` accepting trailing-dot or trailing-space operands that could remove a different directory ([#18047](https://github.com/can1357/oh-my-pi/pull/18047) by [@jchanghong023](https://github.com/jchanghong023))
