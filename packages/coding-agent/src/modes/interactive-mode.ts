@@ -450,6 +450,7 @@ import {
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
+	cfgTuiMotion,
 	cfgMotionResolved,
 	cfgTuiTitleState,
 	cfgTuiVimMode,
@@ -1380,6 +1381,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Canonical composer shared by cold prepaint and the session-aware runtime. */
 	readonly composer: Composer;
 	ui: TUI;
+	get motion(): "full" | "reduced" | "none" {
+		return cfgTuiMotion.get(this.settings);
+	}
 	chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams; {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;

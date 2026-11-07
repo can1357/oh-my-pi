@@ -46,6 +46,7 @@
 - `CompactTranscriptBlock` (`chrome/transcript-container`): consecutive blocks whose `isTranscriptBlockCompact()` is true render without blank rows between them, in terminal and native (TSP) surfaces ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
 
 ### Changed
+- Setup splash, transition, and outro phases are skipped when `tui.motion` is `none` (`--motion none`), covering the startup splash and the `/setup` wizard ([#18066](https://github.com/can1357/oh-my-pi/issues/18066), [#18097](https://github.com/can1357/oh-my-pi/pull/18097) by [@Miruameli](https://github.com/Miruameli))
 
 - Ask cards drop per-question section headers; each question shows its id and flags inline (`(db · 3 options)`) ([#18104](https://github.com/can1357/oh-my-pi/pull/18104) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Tab in the `/usage` Details view switches back to Overview ([#17962](https://github.com/can1357/oh-my-pi/pull/17962) by [@SuperUserA](https://github.com/SuperUserA))

@@ -7,6 +7,7 @@
 - Rust SDK: `BashCommand` and `ReadyEvent` struct literals need `exclude_from_context: None` and `supports_bash_exclude_from_context: None` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
 
 ### Added
+- `--motion none` / `tui.motion: none` now also skips the setup wizard's splash, transition, and outro phases (covers both startup splash and `/setup` wizard) ([#18066](https://github.com/can1357/oh-my-pi/issues/18066), [#18097](https://github.com/can1357/oh-my-pi/pull/18097) by [@Miruameli](https://github.com/Miruameli))
 
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
 
