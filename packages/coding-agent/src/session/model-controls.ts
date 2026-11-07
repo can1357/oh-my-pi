@@ -49,6 +49,20 @@ import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "./sessio
 import type { SessionManager } from "./session-manager";
 
 import {
+	filterAvailable,
+	resolveRoutingJudge,
+	routeTurn,
+	toJevTiers,
+	type ModelTier,
+	type RouteDecision,
+	type RoutingPolicy,
+	cfgJevRoutingEnabled,
+	cfgJevRoutingMaxComplexityForDegrade,
+	cfgJevRoutingMinComplexityConfidence,
+	cfgJevRoutingMinConfidenceToDegrade,
+	cfgJevRoutingTiers,
+} from "../routing";
+import {
 	cfgDefaultThinkingLevel,
 	cfgProvidersFireworksTier,
 	cfgTierAnthropic,
@@ -177,6 +191,9 @@ export class ModelControls {
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
+	#routedTierId: string | undefined;
+	#lastRoutedAt: number | undefined;
+	#lastRoutedContextTokens: number | undefined;
 
 	constructor(
 		host: ModelControlsHost,
@@ -312,6 +329,9 @@ export class ModelControls {
 			persist?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
+		this.#routedTierId = undefined;
+		this.#lastRoutedAt = undefined;
+		this.#lastRoutedContextTokens = undefined;
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
@@ -358,6 +378,11 @@ export class ModelControls {
 		options?: { ephemeral?: boolean; prewalk?: boolean },
 		selection: "explicit" | "automatic" = "explicit",
 	): Promise<void> {
+		if (selection === "explicit") {
+			this.#routedTierId = undefined;
+			this.#lastRoutedAt = undefined;
+			this.#lastRoutedContextTokens = undefined;
+		}
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
@@ -933,5 +958,124 @@ export class ModelControls {
 	getAvailableThinkingLevels(): ReadonlyArray<Effort> {
 		if (!this.#model) return [];
 		return getSupportedEfforts(this.#model);
+	}
+
+	async applyJevRouting(promptText: string, generation: number, contextTokens?: number): Promise<void> {
+		if (!cfgJevRoutingEnabled.get(this.#host.settings)) return;
+		const configuredTiers = toJevTiers(cfgJevRoutingTiers.get(this.#host.settings));
+		if (configuredTiers.length < 2) return;
+
+		// Resolve tier models against the live registry; drop unresolvable ones.
+		const availableModels = this.#host.modelRegistry.getAvailable();
+		const tiers: ModelTier[] = [];
+		for (const t of configuredTiers) {
+			const resolved = resolveModelRoleValue(t.model, availableModels, {
+				settings: this.#host.settings,
+				matchPreferences: getModelMatchPreferences(this.#host.settings),
+			});
+			if (resolved.model) tiers.push({ ...t, model: resolved.model });
+		}
+		if (tiers.length < 2) return;
+
+		// Layer-0: deterministic availability filter before any judgment call.
+		const filtered = filterAvailable(tiers, { contextTokens });
+		if (filtered.available.length === 0) {
+			this.#host.emitNotice(
+				"warning",
+				"jev-routing: every tier is gated (window/context) — staying on current model",
+				"jev-routing",
+			);
+			return;
+		}
+		const availableTiers = tiers.filter(t => filtered.available.some(a => a.id === t.id));
+		const top = availableTiers[availableTiers.length - 1] ?? tiers[tiers.length - 1];
+		const current = this.#model;
+
+		// User override: a current model outside the pool that routing did not
+		// place is an explicit choice — leave it alone.
+		const currentInPool = current !== undefined && tiers.some(t => modelsAreEqual(t.model, current));
+		if (!currentInPool && this.#routedTierId === undefined) return;
+
+		// Sticky-session hold: preserve prefix cache across turn follow-ups.
+		// Re-evaluate when:
+		// 1. Initial turn (#routedTierId undefined),
+		// 2. Idle gap > TTL (provider cache expired),
+		// 3. Compaction occurred (contextTokens shrunk by >50%).
+		const STICKY_ROUTING_TTL_MS = 10 * 60 * 1000;
+		const isAvailable = this.#routedTierId !== undefined && filtered.available.some(t => t.id === this.#routedTierId);
+		const currentTier = isAvailable ? tiers.find(t => t.id === this.#routedTierId) : undefined;
+		const isStickyActive =
+			currentTier !== undefined &&
+			current !== undefined &&
+			modelsAreEqual(currentTier.model, current) &&
+			Date.now() - (this.#lastRoutedAt ?? 0) < STICKY_ROUTING_TTL_MS &&
+			!(
+				contextTokens !== undefined &&
+				this.#lastRoutedContextTokens !== undefined &&
+				contextTokens < this.#lastRoutedContextTokens * 0.5
+			);
+
+		if (isStickyActive) {
+			this.#lastRoutedAt = Date.now();
+			if (contextTokens !== undefined) this.#lastRoutedContextTokens = contextTokens;
+			return;
+		}
+		let decision: RouteDecision;
+		if (filtered.available.length === 1) {
+			decision = { tier: filtered.available[0].id, reason: "jev-confident" };
+		} else {
+			const judge = resolveRoutingJudge({
+				settings: this.#host.settings,
+				registry: this.#host.modelRegistry,
+				sessionModel: current,
+				sessionId: this.#host.sessionId(),
+				metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+				purpose: "routing",
+			});
+			if (!judge) return;
+			try {
+				decision = await routeTurn(judge, promptText, filtered.available, this.#routingPolicy());
+			} catch (error) {
+				if (this.#host.promptGeneration() !== generation) return;
+				logger.debug("jev-routing: routeTurn failed; staying on current model", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return;
+			}
+		}
+
+		if (this.#host.promptGeneration() !== generation) return;
+
+		const target = availableTiers.find(t => t.id === decision.tier) ?? top;
+		if (current && modelsAreEqual(target.model, current)) {
+			this.#routedTierId = target.id;
+			this.#lastRoutedAt = Date.now();
+			if (contextTokens !== undefined) this.#lastRoutedContextTokens = contextTokens;
+			return;
+		}
+		try {
+			await this.setModelTemporary(target.model, undefined, { ephemeral: true }, "automatic");
+			this.#routedTierId = target.id;
+			this.#lastRoutedAt = Date.now();
+			if (contextTokens !== undefined) this.#lastRoutedContextTokens = contextTokens;
+			this.#host.emitNotice(
+				"info",
+				`jev-routing: ${decision.reason} → ${target.model.provider}/${target.model.id}`,
+				"jev-routing",
+			);
+		} catch (error) {
+			logger.debug("jev-routing: model switch failed; staying on current model", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	#routingPolicy(): RoutingPolicy {
+		const s = this.#host.settings;
+		return {
+			minConfidenceToDegrade: cfgJevRoutingMinConfidenceToDegrade.get(s),
+			maxComplexityForDegrade: cfgJevRoutingMaxComplexityForDegrade.get(s),
+			minComplexityConfidence: cfgJevRoutingMinComplexityConfidence.get(s),
+		};
 	}
 }
