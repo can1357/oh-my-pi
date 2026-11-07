@@ -39,6 +39,9 @@
 - `omp gc` now shows a progress bar for each slow step (listing and scanning sessions, scanning transcripts for blob refs, archiving) on interactive terminals.
 - `omp gc --strip` and `--compress` start work immediately instead of first reading every session's metadata, and `--strip` processes several sessions at once with a running tally of transcripts stripped.
 - `omp gc` without `--apply` now says up front that it is a dry run.
+### Added
+
+- Added a debug log line for successful Hindsight recalls, carrying the recalled item count and the recall latency, so `hindsight.debug: true` sessions can measure how much memory was recalled and how long it took ([#16456](https://github.com/can1357/oh-my-pi/pull/16456) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
