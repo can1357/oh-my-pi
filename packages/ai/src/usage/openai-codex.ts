@@ -807,6 +807,8 @@ type OpenAICodexPlanClass = "free" | "paid" | "pro" | "unknown";
 
 const OPENAI_CODEX_PRO_PLAN_TOKENS: Record<string, true> = {
 	pro: true,
+	// ChatGPT reports Pro Max as the single token `promax`.
+	promax: true,
 };
 const OPENAI_CODEX_PAID_PLAN_TOKENS: Record<string, true> = {
 	plus: true,

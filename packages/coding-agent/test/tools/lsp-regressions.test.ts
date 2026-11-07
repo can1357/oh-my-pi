@@ -550,6 +550,27 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("opens ERB templates in the bundled ruby-lsp as erb, which it would otherwise parse as Ruby", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-erb-language-id-");
+		const filePath = path.join(tempDir.path(), "_header.html.erb");
+		try {
+			await Bun.write(filePath, "<h1><%= title %></h1>\n");
+			const server = installHandshakeLsp();
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const rubyLsp = getServersForFile(config, filePath).find(([name]) => name === "ruby-lsp")?.[1];
+			if (!rubyLsp) throw new Error("The bundled ruby-lsp does not claim .erb");
+
+			const client = await lspClient.getOrCreateClient(rubyLsp, tempDir.path(), 1_000);
+			await lspClient.ensureFileOpen(client, filePath);
+
+			const didOpen = await server.waitFor(message => message.method === "textDocument/didOpen");
+			expect(didOpen.params).toMatchObject({ textDocument: { languageId: "erb" } });
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"rejects a FIFO before an LSP document open can block",
 		async () => {
@@ -2164,6 +2185,83 @@ describe("lsp regressions", () => {
 			}
 		}, 10_000);
 	}
+
+	it("ends a diagnostics wait at a pull answered with null, leaving the file unreported", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-pull-null-");
+		const target = path.join(tempDir.path(), "_header.html.erb");
+		try {
+			await Bun.write(target, "<h1><%= title %></h1>\n");
+			installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { diagnosticProvider: true } } });
+				} else if (message.method === "textDocument/diagnostic") {
+					// ruby-lsp's answer for a document it does not diagnose, such as an ERB template.
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			const client = await lspClient.getOrCreateClient(
+				{ command: "fake-lsp", fileTypes: [".erb"], rootMarkers: [] },
+				tempDir.path(),
+				1_000,
+			);
+			await lspClient.ensureFileOpen(client, target);
+
+			const started = Date.now();
+			const diagnostics = await waitForDiagnostics(client, fileToUri(target), { timeoutMs: 5_000 });
+
+			expect(diagnostics).toBeUndefined();
+			expect(Date.now() - started).toBeLessThan(2_500);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	}, 10_000);
+
+	it("still returns a publish that arrives with a pull answered with null", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-pull-null-publish-");
+		const target = path.join(tempDir.path(), "_header.html.erb");
+		const uri = fileToUri(target);
+		const diagnostic: Diagnostic = {
+			message: "unclosed <h1>",
+			severity: 1,
+			range: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } },
+		};
+		try {
+			await Bun.write(target, "<h1><%= title %>\n");
+			installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { diagnosticProvider: true } } });
+				} else if (message.method === "textDocument/diagnostic") {
+					// A server that pushes its report and declines the pull.
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri, diagnostics: [diagnostic] },
+					});
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			const client = await lspClient.getOrCreateClient(
+				{ command: "fake-lsp", fileTypes: [".erb"], rootMarkers: [] },
+				tempDir.path(),
+				1_000,
+			);
+			await lspClient.ensureFileOpen(client, target);
+
+			expect(await waitForDiagnostics(client, uri, { timeoutMs: 5_000 })).toEqual([diagnostic]);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	}, 10_000);
 
 	for (const dynamicRegistration of [false, true]) {
 		it(`reports pull diagnostics advertised through ${dynamicRegistration ? "dynamic registration" : "server capabilities"}`, async () => {

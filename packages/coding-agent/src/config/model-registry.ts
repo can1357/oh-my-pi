@@ -3777,11 +3777,14 @@ export class ModelRegistry {
 		return this.authStorage.keys.peek(provider, options);
 	}
 
-	/**
-	 * Check if a model is using OAuth credentials (subscription).
-	 */
+	/** Whether a model uses OAuth credentials. Kept separate from subscription billing for cache-tier decisions. */
 	isUsingOAuth(model: Model<Api>): boolean {
 		return this.authStorage.credentials.hasOAuth(model.provider);
+	}
+
+	/** Whether a model's credentials represent subscription billing. */
+	isUsingSubscription(model: Model<Api>): boolean {
+		return this.authStorage.credentials.hasSubscription(model.provider);
 	}
 
 	#clearRuntimeProviderState(providerName: string): void {

@@ -514,7 +514,7 @@ impl Shell {
 			{
 				let bytes = postcard::to_stdvec(&*unit).map_err(ExtError::Encode)?;
 				cx.store.put_blob(BlobSlot::Unit(id), &bytes)?;
-				self.k.written.insert(id);
+				self.k.note_written(id);
 				report.units_written += 1;
 			}
 		}
@@ -525,7 +525,7 @@ impl Shell {
 			let mut frames = Vec::with_capacity(p.frames.len());
 			for f in &mut p.frames {
 				if let Some(unit) = &f.unit
-					&& self.k.written.insert(unit.id)
+					&& self.k.note_written(unit.id)
 				{
 					let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
 					cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
@@ -574,7 +574,7 @@ impl Shell {
 			runs.extend(p.runs.iter().map(|r| r.id));
 			let command = match &p.command {
 				Some((unit, node)) => {
-					if self.k.written.insert(unit.id) {
+					if self.k.note_written(unit.id) {
 						let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
 						cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
 						report.units_written += 1;
@@ -847,7 +847,7 @@ impl Shell {
 					id,
 					k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
 				)?;
-				k.written.insert(unit.id);
+				k.note_written(unit.id);
 				vp.command = Some((unit, node));
 			}
 			// Waits on engine objects whose wake-ups were restored (child
@@ -894,7 +894,7 @@ impl Shell {
 							id,
 							k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
 						)?;
-						k.written.insert(unit.id);
+						k.note_written(unit.id);
 						let in_range = |pc: u32| (pc as usize) < unit.ops.len();
 						if !in_range(f.pc)
 							|| !f.loops.iter().all(|l| in_range(l.exit) && in_range(l.cont))
