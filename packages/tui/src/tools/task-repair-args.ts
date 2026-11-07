@@ -79,12 +79,77 @@ export function repairDoubleEncodedJsonString(value: string): string {
 	return typeof decoded === "string" && decoded !== value ? decoded : value;
 }
 
+/** `schema` is the stale alias whose presence is still refused; `taskFileSha256` is attached by the file loader. */
+type TaskFieldKey = keyof TaskParams | keyof TaskItem | "taskFileSha256" | "schema";
+
+/**
+ * Every field a task call or a `tasks[]` item can carry that something downstream reads.
+ *
+ * A field missing here survives {@link copyTaskFields} only while the caller happens to store it
+ * as an own enumerable property, and nothing observable fails in the meantime: every wire call and
+ * every test keeps passing while the internal-caller case the helper exists for is quietly broken.
+ * A comment asking the next person to keep a list in step is exactly what did not hold last time,
+ * so the types do it: `satisfies` rejects an unknown name, and {@link TASK_FIELD_KEYS_ARE_COMPLETE}
+ * rejects a missing one. Both are checked — the first version of that second guard was a bare
+ * conditional type, which resolves silently and never fired.
+ */
+export const TASK_FIELD_KEYS = [
+	"name",
+	"agent",
+	"task",
+	"taskFile",
+	"taskFileSha256",
+	"solutionSpace",
+	"effort",
+	"outputSchema",
+	"schemaMode",
+	"tools",
+	"model",
+	"sourceSession",
+	"isolated",
+	"context",
+	"tasks",
+	"schema",
+] as const satisfies readonly TaskFieldKey[];
+
+/**
+ * Fails to compile when a field is added to `TaskParams`/`TaskItem` and not to
+ * {@link TASK_FIELD_KEYS}.
+ *
+ * The constraint is what does the work. A bare conditional type here resolves to its false branch
+ * and TypeScript reports nothing, so the guard reads as though it fires and never does; handing
+ * the leftover keys to a `T extends never` parameter is what turns a missing name into a `TS2344`.
+ */
+type AssertNoMissingTaskFieldKey<T extends never> = T;
+export type TASK_FIELD_KEYS_ARE_COMPLETE = AssertNoMissingTaskFieldKey<
+	Exclude<TaskFieldKey, (typeof TASK_FIELD_KEYS)[number]>
+>;
+
+/**
+ * Copy a call or an item, applying `changes`, and keep every field it carries however the caller
+ * stores it.
+ *
+ * A spread takes own enumerable properties only. An internal caller bypassing the wire schema may
+ * hold a real `model` on a class prototype or as a non-enumerable own property, and a spread drops
+ * it: the per-call gate then sees no selector, the spawn runs on the agent's configured model, and
+ * the approval prompt — built from the raw arguments — still names the one that was requested.
+ * Every copy of a call or an item on the dispatch path goes through here for that reason.
+ */
+export function copyTaskFields<T extends object>(source: T, changes: Record<string, unknown>): T {
+	const reachable = source as unknown as Record<string, unknown>;
+	const copy: Record<string, unknown> = { ...reachable };
+	for (const name of TASK_FIELD_KEYS) {
+		if (!Object.hasOwn(copy, name) && name in reachable) copy[name] = reachable[name];
+	}
+	return Object.assign(copy, changes) as T;
+}
+
 /** Repair a single (possibly partial) task item's prose field (`task`). */
 function repairTaskItem(item: TaskItem): TaskItem {
 	if (item === null || typeof item !== "object") return item;
 	const task = typeof item.task === "string" ? repairDoubleEncodedJsonString(item.task) : item.task;
 	if (task === item.task) return item;
-	return { ...item, task };
+	return copyTaskFields(item, { task });
 }
 
 /**
@@ -114,5 +179,5 @@ export function repairTaskParams(params: TaskParams): TaskParams {
 	if (task === params.task && context === params.context && tasks === params.tasks) {
 		return params;
 	}
-	return { ...params, task, context, tasks };
+	return copyTaskFields(params, { task, context, tasks });
 }

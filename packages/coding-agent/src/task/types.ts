@@ -72,6 +72,19 @@ function keepSeanceItemKeys<T, I>(item: FluentType<T, I>): FluentType<unknown, I
 	});
 }
 
+// `model` is declared `string | string[]` on every variant, whether or not seance is advertised.
+// It used to be widened only for seance, and that conditional was the defect: with the narrow
+// declaration, argument validation rewrites an array to its JSON text, so a `model: []` the caller
+// filled with nothing reached dispatch as the string `"[]"` — a selector the caller never wrote,
+// which the gate then refused and the gate-on message quoted back. The speculative launcher plans
+// from the raw arguments and saw the array, so the two sides disagreed in exactly the half of
+// configurations where seance is hidden: plan mode, a restricted `spawns` list, `task.disabledAgents`
+// naming it, or seance simply not discovered.
+//
+// Widening a union is backward-compatible — every call that was valid under `string` is still valid
+// — so this adds surface rather than changing any accepted call. A populated array is still refused,
+// now by `invalidModelSelectorReason` with the exact selector form, instead of being stringified
+// into one.
 export const taskItemSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
@@ -80,7 +93,7 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
+	"model?": "string | string[]",
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -91,7 +104,7 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
+	"model?": "string | string[]",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -104,7 +117,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
+	"model?": "string | string[]",
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -116,14 +129,16 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
+	"model?": "string | string[]",
 	"+": "delete",
 });
 function guardBatchAgent(schema: BaseType): BaseType {
-	// Inspect the input before undeclared-key deletion can erase the requested agent.
+	// Inspect the input before undeclared-key deletion can erase the requested agent. Presence is the
+	// value, not the key: an own `agent` holding `undefined` names no agent, and refusing it would
+	// reject a call that asked for nothing — `validateShapeParams` tests the same field the same way.
 	return schema.in
 		.narrow((params, ctx) => {
-			if (params !== null && typeof params === "object" && Object.hasOwn(params, "agent")) {
+			if (params !== null && typeof params === "object" && "agent" in params && params.agent !== undefined) {
 				return ctx.reject("a batch with `agent` specified in `tasks[].agent`, not at the top level");
 			}
 			return true;
@@ -190,9 +205,10 @@ function createTaskSchema(options: {
 		? { "outputSchema?": outputSchemaInputSchema, "schemaMode?": '"permissive" | "strict"' }
 		: {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
-	// `model` is always declared, and preflight decides whether a per-call model
-	// is allowed; seance widens it to a list.
-	const seanceFields = { "model?": "string", ...options.seanceFields };
+	// `model` is always declared, and preflight decides whether a per-call model is allowed. The
+	// list form is declared unconditionally too — see the note above `taskItemSchema` for why the
+	// seance-only widening was the defect rather than the feature.
+	const seanceFields = { "model?": "string | string[]", ...options.seanceFields };
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({

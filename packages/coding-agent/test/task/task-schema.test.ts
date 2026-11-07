@@ -169,14 +169,31 @@ describe("task schema seance fields", () => {
 			}
 		}
 	});
-	it("omits seance fields when they are not enabled", () => {
+	// What seance advertisement controls is `sourceSession`, not the shape of `model`. `model` is
+	// declared `string | string[]` on every variant now: while the list form was seance-only, the
+	// narrow schema rewrote an array to its JSON text, so a `model: []` a caller filled with nothing
+	// reached dispatch as the string `"[]"` and the speculative launcher — which plans from the raw
+	// arguments — saw the array, so the two disagreed wherever seance was hidden.
+	it("omits seance fields when they are not enabled, while `model` keeps both forms", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
-				const wireSchema = JSON.stringify(schema.toJsonSchema());
-				expect(wireSchema).not.toContain('"sourceSession"');
-				// Only the per-call `model` remains: one string, never the seance selector list.
-				expect(wireSchema).toContain('"model":{"type":"string"}');
+				expect(JSON.stringify(schema.toJsonSchema())).not.toContain('"sourceSession"');
+				// Assert the value the schema *kept*, not merely that validation passed: with `"+": "delete"`
+				// a schema that does not declare `model` at all accepts every one of these and silently
+				// drops the key, so an acceptance-only assertion passes against the field this PR exists
+				// to keep declared.
+				const kept = (model: unknown): unknown => {
+					const out = batchEnabled
+						? schema({ context: "c", tasks: [{ task: "x", solutionSpace: "c", model }] })
+						: schema({ task: "x", solutionSpace: "c", model });
+					expect(out instanceof type.errors).toBe(false);
+					const item = batchEnabled ? (out as { tasks: Array<{ model?: unknown }> }).tasks[0] : out;
+					return (item as { model?: unknown }).model;
+				};
+				expect(kept("openai/gpt-5.4")).toBe("openai/gpt-5.4");
+				expect(kept(["openai/gpt-5.4"])).toEqual(["openai/gpt-5.4"]);
+				expect(kept([])).toEqual([]);
 			}
 		}
 	});
@@ -225,7 +242,9 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		expect(planSchema).toContain('"model":{"type":"string"}');
+		// `model` stays declared in plan mode. What plan mode hides is `sourceSession` and every mention
+		// of seance; the shape of `model` is no longer what advertisement controls.
+		expect(planSchema).toContain('"model"');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 
