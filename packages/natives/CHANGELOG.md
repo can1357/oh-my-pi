@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Wayland screenshots, and the clicks, drags and scrolls that need them, failing in released Linux builds; without PipeWire installed, `capabilities()` reports `capture: false` and the capture error says why ([#18353](https://github.com/can1357/oh-my-pi/pull/18353) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Removed
+
+- Removed the `wayland-pipewire` Cargo feature and `OMP_NATIVE_FEATURES`, which only existed to pass it ([#18353](https://github.com/can1357/oh-my-pi/pull/18353) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
