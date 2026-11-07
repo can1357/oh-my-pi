@@ -9,13 +9,14 @@
  * coding-agent.
  */
 
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { initDb, isScheduledCatalogModel } from "./db";
-import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from "./parser";
+import { extractFolderFromPath, parseSessionEntriesTail, resolveUsageTotal } from "./parser";
 import { getSessionRollups } from "./rollup";
 import type {
 	SessionEntry,
@@ -26,6 +27,7 @@ import type {
 	TraceSummary,
 	TraceToolStat,
 	TraceTrack,
+	TraceTruncation,
 } from "./types";
 
 /** Client-supplied path escaped the sessions root or is not a transcript. Maps to HTTP 400. */
@@ -35,13 +37,16 @@ export class TracePathError extends Error {}
  * span assembly changes so browsers don't revalidate stale cached bodies
  * against an unchanged transcript mtime.
  */
-export const TRACE_ETAG_VERSION = 4;
+export const TRACE_ETAG_VERSION = 5;
 
 const MAX_TRACK_DEPTH = 6;
 const LABEL_MAX = 80;
 const DETAIL_MAX = 160;
 const TITLE_SCAN_BYTES = 4096;
 const LIST_FOLD_LIMIT = 300;
+/** Safety valves for pathological sessions; normal heavy traces stay far below. */
+const MAX_TRACE_TRACKS = 1024;
+const MAX_TRACE_SPANS = 100_000;
 
 // ---------------------------------------------------------------------------
 // Structural entry views (journal shapes mirrored without importing coding-agent)
@@ -172,6 +177,209 @@ function resolveSessionPath(fileParam: string): string {
 async function readTranscript(resolved: string): Promise<Uint8Array> {
 	const bytes = await Bun.file(resolved).bytes();
 	return resolved.endsWith(".gz") ? Bun.gunzipSync(bytes) : bytes;
+}
+
+// ---------------------------------------------------------------------------
+// Parsed-transcript cache
+//
+// A trace rebuild otherwise re-reads and re-parses every transcript in the
+// tree. The cache keeps parsed entries per file and, for plain JSONL, parses
+// only the appended tail. Unchanged files are served without touching disk.
+
+/**
+ * Per-file parser state. `offset` is the end of the last complete line (which
+ * can trail `size` while a final line is still being written), and
+ * `checkpoint` fingerprints the prefix up to `offset` so a same-inode rewrite
+ * is not mistaken for an append.
+ */
+interface TranscriptFileState {
+	dev: number;
+	ino: number;
+	birthtimeMs: number;
+	size: number;
+	mtimeMs: number;
+	ctimeMs: number;
+	offset: number;
+	checkpoint: string;
+	compressed: boolean;
+}
+
+interface TranscriptCacheEntry {
+	state: TranscriptFileState;
+	entries: SessionEntry[];
+	index: Map<string, SessionEntry>;
+	/** Raw on-disk bytes, used only for the cache budget. */
+	bytes: number;
+}
+
+const TRANSCRIPT_CACHE_MAX_FILES = 1024;
+const TRANSCRIPT_CACHE_MAX_RAW_BYTES = 128 * 1024 * 1024;
+const TRANSCRIPT_CACHE_MAX_ENTRIES = 500_000;
+
+const transcriptCache = new Map<string, TranscriptCacheEntry>();
+const transcriptLoads = new Map<string, Promise<TranscriptCacheEntry>>();
+/** Root transcripts stay cached while their tree is being assembled. */
+const pinnedTranscripts = new Set<string>();
+let transcriptCacheBytes = 0;
+let transcriptCacheEntries = 0;
+
+/** First entry wins, matching the linear scan `getTraceEntry` used before. */
+function indexSessionEntry(index: Map<string, SessionEntry>, entry: SessionEntry): void {
+	if (!("id" in entry)) return;
+	const id = entry.id;
+	if (typeof id === "string" && id.length > 0 && !index.has(id)) index.set(id, entry);
+}
+
+function touchTranscriptCache(file: string, entry: TranscriptCacheEntry): void {
+	transcriptCache.delete(file);
+	transcriptCache.set(file, entry);
+}
+
+function evictTranscriptCache(): void {
+	while (
+		transcriptCache.size > 1 &&
+		(transcriptCache.size > TRANSCRIPT_CACHE_MAX_FILES ||
+			transcriptCacheBytes > TRANSCRIPT_CACHE_MAX_RAW_BYTES ||
+			transcriptCacheEntries > TRANSCRIPT_CACHE_MAX_ENTRIES)
+	) {
+		let oldest: string | undefined;
+		for (const key of transcriptCache.keys()) {
+			if (pinnedTranscripts.has(key)) continue;
+			oldest = key;
+			break;
+		}
+		if (oldest === undefined) break;
+		const evicted = transcriptCache.get(oldest);
+		transcriptCache.delete(oldest);
+		if (evicted) {
+			transcriptCacheBytes -= evicted.bytes;
+			transcriptCacheEntries -= evicted.entries.length;
+		}
+	}
+}
+
+function pinTranscriptCache(file: string): void {
+	pinnedTranscripts.add(file);
+}
+
+function unpinTranscriptCache(file: string): void {
+	pinnedTranscripts.delete(file);
+	const entry = transcriptCache.get(file);
+	if (entry) touchTranscriptCache(file, entry);
+	evictTranscriptCache();
+}
+
+function storeTranscriptCache(file: string, entry: TranscriptCacheEntry): TranscriptCacheEntry {
+	const previous = transcriptCache.get(file);
+	if (previous) {
+		transcriptCacheBytes -= previous.bytes;
+		transcriptCacheEntries -= previous.entries.length;
+		transcriptCache.delete(file);
+	}
+	transcriptCache.set(file, entry);
+	transcriptCacheBytes += entry.bytes;
+	transcriptCacheEntries += entry.entries.length;
+	evictTranscriptCache();
+	return entry;
+}
+
+/**
+ * Hash the whole parsed prefix. An in-place rewrite of an earlier line can keep
+ * the size, mtime and tail unchanged, so only a full-prefix hash proves the
+ * prefix still matches what was parsed.
+ */
+function checkpointFromBytes(bytes: Uint8Array, end: number): string {
+	return Bun.hash(bytes.subarray(0, end)).toString(16);
+}
+
+function sameTranscriptIdentity(state: TranscriptFileState, info: Stats): boolean {
+	return state.dev === info.dev && state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+}
+
+/**
+ * Load parsed entries for one transcript. A matching cache entry returns
+ * immediately after a stat; a growing plain JSONL file parses only from its
+ * last complete line. Everything else (rewrite, truncation, compression,
+ * identity change) falls back to a full read. Concurrent callers share one
+ * in-flight load so a poll and a drawer click cannot append the same tail twice.
+ */
+function loadTranscriptEntries(resolved: string): Promise<TranscriptCacheEntry> {
+	const inFlight = transcriptLoads.get(resolved);
+	if (inFlight) return inFlight;
+	const load: Promise<TranscriptCacheEntry> = loadTranscriptEntriesUncached(resolved).finally(() => {
+		if (transcriptLoads.get(resolved) === load) transcriptLoads.delete(resolved);
+	});
+	transcriptLoads.set(resolved, load);
+	return load;
+}
+
+async function loadTranscriptEntriesUncached(resolved: string): Promise<TranscriptCacheEntry> {
+	const cached = transcriptCache.get(resolved);
+	const compressed = resolved.endsWith(".gz");
+	const info = await fs.stat(resolved);
+	if (
+		cached &&
+		sameTranscriptIdentity(cached.state, info) &&
+		cached.state.size === info.size &&
+		cached.state.mtimeMs === info.mtimeMs &&
+		cached.state.ctimeMs === info.ctimeMs
+	) {
+		touchTranscriptCache(resolved, cached);
+		return cached;
+	}
+	if (cached && !compressed && sameTranscriptIdentity(cached.state, info)) {
+		if (info.size > cached.state.size && cached.state.mtimeMs <= info.mtimeMs) {
+			// One read serves both the prefix check and the tail parse.
+			const fileBytes = await Bun.file(resolved).slice(0, info.size).bytes();
+			const prefixEnd = cached.state.offset;
+			if (fileBytes.length >= prefixEnd && checkpointFromBytes(fileBytes, prefixEnd) === cached.state.checkpoint) {
+				const parsed = parseSessionEntriesTail(fileBytes.subarray(prefixEnd));
+				const previousBytes = cached.bytes;
+				const previousCount = cached.entries.length;
+				for (const entry of parsed.entries) {
+					cached.entries.push(entry);
+					indexSessionEntry(cached.index, entry);
+				}
+				const offset = prefixEnd + parsed.read;
+				cached.state = {
+					...cached.state,
+					size: info.size,
+					mtimeMs: info.mtimeMs,
+					ctimeMs: info.ctimeMs,
+					offset,
+					checkpoint: checkpointFromBytes(fileBytes, offset),
+				};
+				cached.bytes = info.size;
+				transcriptCacheBytes += cached.bytes - previousBytes;
+				transcriptCacheEntries += cached.entries.length - previousCount;
+				touchTranscriptCache(resolved, cached);
+				evictTranscriptCache();
+				return cached;
+			}
+		}
+	}
+
+	const bytes = await readTranscript(resolved);
+	const parsed = parseSessionEntriesTail(bytes);
+	const index = new Map<string, SessionEntry>();
+	for (const entry of parsed.entries) indexSessionEntry(index, entry);
+	const state: TranscriptFileState = {
+		dev: info.dev,
+		ino: info.ino,
+		birthtimeMs: info.birthtimeMs,
+		size: info.size,
+		mtimeMs: info.mtimeMs,
+		ctimeMs: info.ctimeMs,
+		offset: compressed ? bytes.length : parsed.read,
+		checkpoint: compressed ? "" : checkpointFromBytes(bytes, parsed.read),
+		compressed,
+	};
+	return storeTranscriptCache(resolved, {
+		state,
+		entries: parsed.entries,
+		index,
+		bytes: compressed ? bytes.length : info.size,
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -660,15 +868,15 @@ async function buildTrackTree(
 	if (visited.has(file)) return null;
 	visited.add(file);
 
-	let bytes: Uint8Array;
+	let cached: TranscriptCacheEntry;
 	try {
-		bytes = await readTranscript(file);
+		cached = await loadTranscriptEntries(file);
 	} catch (err) {
 		if (isEnoent(err)) return null;
 		throw err;
 	}
 
-	const scan = scanTranscript(parseAllSessionEntries(bytes), trackId, parentTrackId, file);
+	const scan = scanTranscript(cached.entries, trackId, parentTrackId, file);
 	out.push(scan.track);
 	scans.push(scan);
 
@@ -759,29 +967,109 @@ function linkChildTracks(scan: TrackScan, childrenById: ReadonlyMap<string, Trac
 // ---------------------------------------------------------------------------
 // Public surface
 
-// Single-entry memo: the dashboard polls one open trace every 15s. Keyed on
-// the root file's mtime PLUS a fingerprint of the child-transcript SET under
-// the root's artifacts tree (one cheap readdir+stat walk, no parse). A
-// high-water mark alone is blind to deletions and to older-mtime
-// replacements, so the fingerprint encodes every child's (name, mtimeMs)
-// pair: any append, delete, rename, or content swap changes the key and the
-// memo misses. Membership diffs are bounded (depth + file count caps) so a
-// pathological artifacts tree cannot blow the key.
+// Small LRU: the dashboard usually polls one trace, but users also switch
+// between sessions. Keyed on the root file's mtime PLUS a fingerprint of the
+// child-transcript SET under the root's artifacts tree (one cheap
+// readdir+stat walk, no parse). A high-water mark alone is blind to deletions
+// and to older-mtime replacements, so the fingerprint encodes every child's
+// (name, mtimeMs) pair: any append, delete, rename, or content swap changes
+// the key and the memo misses. Stored traces are bounded by an estimated byte
+// budget so a few heavy sessions cannot retain unbounded span trees.
 interface TraceMemoEntry {
 	mtimeMs: number;
+	size: number;
 	childFingerprint: string;
 	trace: SessionTrace;
+	/** Estimated retained bytes, used only for the cache budget. */
+	bytes: number;
 }
 
-let traceMemo: { file: string; entry: TraceMemoEntry } | undefined;
+const TRACE_CACHE_MAX_ENTRIES = 8;
+const TRACE_CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const traceCache = new Map<string, TraceMemoEntry>();
+let traceCacheBytes = 0;
+
+/**
+ * Rough retained-size estimate. Serializing the trace just for accounting
+ * would cost as much as the cache saves; span/marker object overhead dominates
+ * and scales predictably with counts.
+ */
+function estimateTraceBytes(trace: SessionTrace): number {
+	let spans = 0;
+	let markers = 0;
+	for (const track of trace.tracks) {
+		spans += track.spans.length;
+		markers += track.markers.length;
+	}
+	return 2048 + trace.tracks.length * 768 + spans * 384 + markers * 128;
+}
+
+function storeTraceCache(file: string, entry: TraceMemoEntry): void {
+	const previous = traceCache.get(file);
+	if (previous) {
+		traceCacheBytes -= previous.bytes;
+		traceCache.delete(file);
+	}
+	traceCache.set(file, entry);
+	traceCacheBytes += entry.bytes;
+	while (
+		traceCache.size > 1 &&
+		(traceCache.size > TRACE_CACHE_MAX_ENTRIES || traceCacheBytes > TRACE_CACHE_MAX_BYTES)
+	) {
+		const oldest = traceCache.keys().next().value;
+		if (oldest === undefined) break;
+		const evicted = traceCache.get(oldest);
+		traceCache.delete(oldest);
+		if (evicted) traceCacheBytes -= evicted.bytes;
+	}
+}
+
+/**
+ * Cap a payload for pathological sessions. Summary totals are computed before
+ * this runs and stay complete; only the transport `tracks` array is reduced.
+ * Tracks are DFS-ordered with the main track first. Spans within each track are
+ * start-sorted, so the cap keeps the earliest activity.
+ */
+export function truncateTraceTracks(
+	tracks: TraceTrack[],
+	maxTracks = MAX_TRACE_TRACKS,
+	maxSpans = MAX_TRACE_SPANS,
+): TraceTruncation | undefined {
+	let omittedTracks = 0;
+	let omittedSpans = 0;
+	if (tracks.length > maxTracks) {
+		for (let index = maxTracks; index < tracks.length; index++) omittedSpans += tracks[index].spans.length;
+		omittedTracks = tracks.length - maxTracks;
+		tracks.length = maxTracks;
+	}
+	let remaining = maxSpans;
+	for (const track of tracks) {
+		if (track.spans.length > remaining) {
+			omittedSpans += track.spans.length - Math.max(remaining, 0);
+			track.spans = track.spans.slice(0, Math.max(remaining, 0));
+		}
+		remaining = Math.max(0, remaining - track.spans.length);
+	}
+	if (omittedTracks === 0 && omittedSpans === 0) return undefined;
+	// Drop links to omitted or emptied tracks so no span offers navigation it cannot perform.
+	const navigable = new Set(tracks.filter(track => track.spans.length > 0).map(track => track.id));
+	for (const track of tracks) {
+		for (const span of track.spans) {
+			if (span.childTrackId !== undefined && !navigable.has(span.childTrackId)) delete span.childTrackId;
+		}
+	}
+	return { tracks: omittedTracks, spans: omittedSpans };
+}
 
 /**
  * Fingerprint of the child-transcript set: per-directory file COUNT plus
  * sorted `name@mtimeMs` pairs, mirroring buildTrackTree's discovery (stats
- * only, no parse). The count is load-bearing: without it, children past a
- * truncation cap are invisible and appends to them never invalidate the key.
- * Best-effort: a raced gc deletion is recorded as `name@gone` (which itself
- * changes the fingerprint and misses the memo — the safe direction).
+ * only, no parse). The count makes an empty directory distinguishable from a
+ * missing one and keeps renames visible. The walk is depth-capped; the raw
+ * string still grows with child count, but the wire ETag hashes it, so a large
+ * tree cannot inflate the request header. Best-effort: a raced gc deletion is
+ * recorded as `name@gone` (which itself changes the fingerprint and misses the
+ * memo — the safe direction).
  */
 async function childTranscriptsFingerprint(rootFile: string, depth = 0): Promise<string> {
 	if (depth > MAX_TRACK_DEPTH) return "";
@@ -810,24 +1098,42 @@ async function childTranscriptsFingerprint(rootFile: string, depth = 0): Promise
 	return [`n=${transcriptNames.length}`, ...childParts].join(",");
 }
 
-/** Freshness of a root trace: root mtime plus the child-transcript set fingerprint. */
+/** Freshness of a root trace: root mtime+size plus the child-transcript set fingerprint. */
 export interface TraceFingerprint {
 	rootMtimeMs: number;
+	rootSize: number;
 	childFingerprint: string;
+}
+
+/**
+ * Compact wire ETag key. The raw child fingerprint is unbounded — a
+ * subagent-heavy session can produce tens of kilobytes of `name@mtime` pairs.
+ * Sending that string back in `If-None-Match` exceeds Bun's 16 KiB request
+ * header limit (HTTP 431), so hash it to a fixed-size key first. Root size is
+ * part of the key because a coarse mtime can miss an append.
+ */
+function traceEtagKey(rootMtimeMs: number, rootSize: number, childFingerprint: string): string {
+	const digest = new Bun.CryptoHasher("sha256").update(childFingerprint).digest("hex");
+	return `${rootMtimeMs}:${rootSize}:${digest}`;
+}
+
+/** Build the wire ETag from a fingerprint already computed by the caller. */
+export function traceEtagForFingerprint(fingerprint: TraceFingerprint): string {
+	return traceEtagKey(fingerprint.rootMtimeMs, fingerprint.rootSize, fingerprint.childFingerprint);
 }
 
 /** Stat the root and walk its child transcripts (readdir+stat, no parse). */
 async function readTraceFingerprint(resolved: string): Promise<TraceFingerprint> {
-	const rootMtimeMs = (await fs.stat(resolved)).mtimeMs;
+	const stat = await fs.stat(resolved);
 	const childFingerprint = await childTranscriptsFingerprint(resolved);
-	return { rootMtimeMs, childFingerprint };
+	return { rootMtimeMs: stat.mtimeMs, rootSize: stat.size, childFingerprint };
 }
 
 /**
  * Freshness fingerprint for the trace ETag pre-check; `SessionTrace.etag` is
- * `${rootMtimeMs}:${childFingerprint}` for an unraced build. Returns undefined
- * when the path is rejected or missing (the caller falls through to the full
- * build, which maps those to 400/404).
+ * the compact `${rootMtimeMs}:${rootSize}:${digest}` key for an unraced build. Returns
+ * undefined when the path is rejected or missing (the caller falls through to
+ * the full build, which maps those to 400/404).
  */
 export async function traceFingerprintForEtag(fileParam: string): Promise<TraceFingerprint | undefined> {
 	try {
@@ -838,8 +1144,8 @@ export async function traceFingerprintForEtag(fileParam: string): Promise<TraceF
 }
 
 export function traceMemoForTests(): { file: string; mtimeMs: number } | undefined {
-	if (!traceMemo) return undefined;
-	return { file: traceMemo.file, mtimeMs: traceMemo.entry.mtimeMs };
+	const first = traceCache.entries().next();
+	return first.done ? undefined : { file: first.value[0], mtimeMs: first.value[1].mtimeMs };
 }
 
 /**
@@ -851,21 +1157,35 @@ export function traceMemoForTests(): { file: string; mtimeMs: number } | undefin
  */
 export async function buildSessionTrace(fileParam: string, fingerprint?: TraceFingerprint): Promise<SessionTrace> {
 	const resolved = resolveSessionPath(fileParam);
-	const memo = traceMemo?.file === resolved ? traceMemo.entry : undefined;
+	const memo = traceCache.get(resolved);
 	// Pre-build child fingerprint on EVERY path (hit check and rebuild
 	// alike): the post-build race guard compares against this, so a child
 	// append landing mid-parse is detected even on first builds and
 	// memo-less rebuilds, where no prior fingerprint exists to compare.
-	const { rootMtimeMs, childFingerprint: preChildFingerprint } = fingerprint ?? (await readTraceFingerprint(resolved));
-	if (memo && memo.mtimeMs === rootMtimeMs) {
+	const {
+		rootMtimeMs,
+		rootSize,
+		childFingerprint: preChildFingerprint,
+	} = fingerprint ?? (await readTraceFingerprint(resolved));
+	if (memo && memo.mtimeMs === rootMtimeMs && memo.size === rootSize) {
 		// Equality, not <=: a LOWER mark (delete/older-mtime replace) is
 		// also stale — only an identical child set may reuse the trace.
-		if (preChildFingerprint === memo.childFingerprint) return memo.trace;
+		if (preChildFingerprint === memo.childFingerprint) {
+			traceCache.delete(resolved);
+			traceCache.set(resolved, memo);
+			return memo.trace;
+		}
 	}
 
 	const tracks: TraceTrack[] = [];
 	const scans: TrackScan[] = [];
-	const rootScan = await buildTrackTree(resolved, "main", null, 0, new Set(), tracks, scans);
+	pinTranscriptCache(resolved);
+	let rootScan: TrackScan | null = null;
+	try {
+		rootScan = await buildTrackTree(resolved, "main", null, 0, new Set(), tracks, scans);
+	} finally {
+		unpinTranscriptCache(resolved);
+	}
 	if (!rootScan) {
 		throw Object.assign(new Error(`ENOENT: session not found: ${resolved}`), { code: "ENOENT" });
 	}
@@ -874,7 +1194,8 @@ export async function buildSessionTrace(fileParam: string, fingerprint?: TraceFi
 	// neither the trace nor the key.
 	const childFingerprint = await childTranscriptsFingerprint(resolved);
 	// Root rewritten mid-build: same no-cache rule as the child race below.
-	const rootChanged = (await fs.stat(resolved).catch(() => null))?.mtimeMs !== rootMtimeMs;
+	const rootStat = await fs.stat(resolved).catch(() => null);
+	const rootChanged = rootStat === null || rootStat.mtimeMs !== rootMtimeMs || rootStat.size !== rootSize;
 	const raced = childFingerprint !== preChildFingerprint;
 	// Raced builds keep the PRE-build fingerprint as their ETag: the parsed
 	// bytes predate the racy write, so claiming the post-write state would
@@ -884,12 +1205,21 @@ export async function buildSessionTrace(fileParam: string, fingerprint?: TraceFi
 	// indefinitely cached one. Unraced builds use the post-build key, which
 	// equals the pre-build key by construction.
 	const etagFingerprint = raced || rootChanged ? preChildFingerprint : childFingerprint;
-	const trace = assembleSessionTrace(rootScan, tracks, scans, rootMtimeMs, `${rootMtimeMs}:${etagFingerprint}`);
+	const trace = assembleSessionTrace(
+		rootScan,
+		tracks,
+		scans,
+		rootMtimeMs,
+		traceEtagKey(rootMtimeMs, rootSize, etagFingerprint),
+	);
 	if (!raced && !rootChanged) {
-		traceMemo = {
-			file: resolved,
-			entry: { mtimeMs: rootMtimeMs, childFingerprint, trace },
-		};
+		storeTraceCache(resolved, {
+			mtimeMs: rootMtimeMs,
+			size: rootSize,
+			childFingerprint,
+			trace,
+			bytes: estimateTraceBytes(trace),
+		});
 	}
 	return trace;
 }
@@ -1041,6 +1371,9 @@ function assembleSessionTrace(
 		toolStats: [...toolStats.values()].sort((a, b) => b.totalMs - a.totalMs),
 	};
 
+	// `summary` above already covers the full tree; only the transport track
+	// list is capped, and `truncated` tells the client what was omitted.
+	const truncated = truncateTraceTracks(tracks);
 	return {
 		file: rootScan.track.file,
 		title: rootScan.title,
@@ -1050,6 +1383,7 @@ function assembleSessionTrace(
 		mtimeMs: rootMtimeMs,
 		etag,
 		tracks,
+		truncated,
 		summary,
 	};
 }
@@ -1057,17 +1391,13 @@ function assembleSessionTrace(
 /** Fetch one full journal entry by id from a transcript, for the span drawer. */
 export async function getTraceEntry(fileParam: string, entryId: string): Promise<SessionEntry | null> {
 	const resolved = resolveSessionPath(fileParam);
-	let bytes: Uint8Array;
 	try {
-		bytes = await readTranscript(resolved);
+		const cached = await loadTranscriptEntries(resolved);
+		return cached.index.get(entryId) ?? null;
 	} catch (err) {
 		if (isEnoent(err)) return null;
 		throw err;
 	}
-	for (const entry of parseAllSessionEntries(bytes)) {
-		if ("id" in entry && entry.id === entryId) return entry;
-	}
-	return null;
 }
 
 // ---------------------------------------------------------------------------
