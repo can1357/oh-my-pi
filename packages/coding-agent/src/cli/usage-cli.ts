@@ -30,6 +30,7 @@ import { peakBuckets, renderSparkline } from "@oh-my-pi/pi-tui/components/sparkl
 import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
+import { bindEffects } from "../config/registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
@@ -1511,6 +1512,10 @@ async function runUsageResetCommand(
 
 export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 	const settings = await Settings.loadReadOnly();
+	// This command never calls Settings.init, so nothing else applies the process-wide
+	// effects of the user's settings (such as the `!command` time limit) for this run.
+	// The hold ends with this scope on every path, a failed discovery included.
+	using _effects: Disposable = { [Symbol.dispose]: bindEffects(settings) };
 	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
 		if (cmd.action === "invalidate") {

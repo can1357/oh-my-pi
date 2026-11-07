@@ -1,10 +1,10 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, onTestFinished, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { streamSimple } from "@oh-my-pi/pi-ai";
-import { CredentialSourceError } from "@oh-my-pi/pi-ai/error";
-import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import { resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import { CredentialSourceError, OAuthError } from "@oh-my-pi/pi-ai/error";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
@@ -297,6 +297,42 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 		expect(await registry.getApiKey(model)).toBeUndefined();
 		expect((await registry.resolveModelHeaders(model))?.Authorization).toBeUndefined();
+	});
+
+	test("a forced renewal that is not a 401 keeps the last good command-backed key", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "good-key");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${trackedTokenCommand(tokenFile, counterFile)}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("good-key");
+		fs.writeFileSync(tokenFile, "FAIL");
+
+		// Step (b) of the auth retry force-refreshes without the 401 reason for this error.
+		const renewed = await registry.resolver(model)({
+			lastChance: false,
+			error: new OAuthError("token expired before request", { kind: "token-refresh" }),
+			previousKey: "good-key",
+		});
+
+		expect(resolvedApiKeyBearer(renewed)).toBe("good-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+		expect(await registry.getApiKey(model)).toBe("good-key");
 	});
 
 	test("command resolution backs off after failed executions", async () => {
@@ -970,28 +1006,26 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 	test.skipIf(process.platform === "win32")("providers.commandTimeoutSeconds bounds each command run", async () => {
 		const warn = spyOn(piUtils.logger, "warn");
-		const unbind = bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 0.5 }));
-		try {
-			const marker = path.join(tempDir, "slow");
-			const started = performance.now();
-			expect(await resolveConfigValue(`!sleep 3; printf %s ${shellQuote(marker)}`)).toBeUndefined();
-			expect(performance.now() - started).toBeLessThan(2_500);
-			const failure = warn.mock.calls.find(([message]) => message === "config: !command value resolution failed");
-			expect(failure?.[1]).toMatchObject({ reason: "timeout", timeoutMs: 500 });
-		} finally {
-			unbind();
-			warn.mockRestore();
-		}
-		// A longer limit lets the same kind of slow helper finish.
-		const unbindLong = bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 30 }));
-		try {
-			const marker = path.join(tempDir, "finishes");
-			expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
-		} finally {
-			unbindLong();
-			// Re-apply the default (10 s) to the process-wide limit.
+		const holds: Array<() => void> = [];
+		// Runs even when an assertion throws. Releasing a hold leaves the process-wide
+		// limit at its last value, so put the 10 s default back as well.
+		onTestFinished(() => {
+			for (const release of holds) release();
 			bindEffects(Settings.isolated({}))();
-		}
+			warn.mockRestore();
+		});
+		holds.push(bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 0.5 })));
+		const slowMarker = path.join(tempDir, "slow");
+		const started = performance.now();
+		expect(await resolveConfigValue(`!sleep 3; printf %s ${shellQuote(slowMarker)}`)).toBeUndefined();
+		expect(performance.now() - started).toBeLessThan(2_500);
+		const failure = warn.mock.calls.find(([message]) => message === "config: !command value resolution failed");
+		expect(failure?.[1]).toMatchObject({ reason: "timeout", timeoutMs: 500 });
+
+		// A longer limit lets the same kind of slow helper finish.
+		holds.push(bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 30 })));
+		const marker = path.join(tempDir, "finishes");
+		expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
 	});
 
 	/**

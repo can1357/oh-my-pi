@@ -3768,7 +3768,13 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		if (options?.forceRefresh) this.#invalidateProviderCommandConfigs(provider, "rejected");
+		if (options?.forceRefresh) {
+			// Only a provider 401 proves the key stale; a generic forced renewal keeps the last good value.
+			this.#invalidateProviderCommandConfigs(
+				provider,
+				options.refreshReason === "auth-recovery" ? "rejected" : "refresh",
+			);
+		}
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}

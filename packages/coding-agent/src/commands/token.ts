@@ -8,9 +8,11 @@ import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import { tokenHelp as commandHelp } from "../cli/command-help";
 import { isAuthenticated, ModelRegistry } from "../config/model-registry";
+import { bindEffects } from "../config/registry";
 import { refreshStoredManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthCredentialProfile } from "../mcp/oauth-flow";
 import { discoverAuthStorage } from "../sdk";
+import { resolveEffectiveSettings } from "../session/auth-broker-config";
 import type { AuthStorage } from "../session/auth-storage";
 import { getAvailableAuthMethods } from "../web/search/providers/perplexity-auth";
 
@@ -103,7 +105,12 @@ export default class Token extends Command {
 			}
 		}
 
-		const authStorage = await discoverAuthStorage();
+		// This command never calls Settings.init, so nothing else applies the process-wide
+		// effects of the user's settings (such as the `!command` time limit) for this run.
+		// The hold ends with this scope on every path, a failed discovery included.
+		const settings = await resolveEffectiveSettings();
+		using _effects: Disposable = { [Symbol.dispose]: bindEffects(settings) };
+		const authStorage = await discoverAuthStorage(undefined, { settings });
 		try {
 			if (flags.list || flags.account !== undefined) {
 				const accounts = authStorage.oauth.accounts(provider);
