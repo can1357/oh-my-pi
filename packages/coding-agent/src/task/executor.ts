@@ -121,7 +121,7 @@ import { TOOLS_SOURCE_ID } from "../job-widgets/types";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
-import { isReadOnlyAgent } from "./read-only-policy";
+import { isReadOnlyAgent, isReadOnlyToolNames } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { WorkPoolYieldItem } from "./workpool-yield";
@@ -4547,7 +4547,11 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		!preparedSession &&
 		options.enableIrc !== false &&
 		isIrcEnabled(subagentSettings, childDepth) &&
-		(toolNames === undefined || toolNames.includes("write"));
+		(toolNames === undefined ||
+			toolNames.includes("write") ||
+			// Read-only agents get a synthetic agent://-only `write` (createTools),
+			// i.e. outbound IRC, so their prompt needs the own-ID and # Peers roster.
+			(!options.restrictToolNames && isReadOnlyToolNames(toolNames)));
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
 	const sessionFile = subtaskSessionFile ?? null;

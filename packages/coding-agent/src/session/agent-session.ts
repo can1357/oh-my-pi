@@ -2625,6 +2625,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
 			ensureWriteRegistered: config.ensureWriteRegistered,
 			isDeviceOnlyWrite: config.isDeviceOnlyWrite,
+			isAgentOnlyWrite: config.isAgentOnlyWrite,
 			setDeviceOnlyWrite: config.setDeviceOnlyWrite,
 			setPendingFullWriteDescription: config.setPendingFullWriteDescription,
 			ensureGoalRegistered: config.ensureGoalRegistered,
@@ -7297,6 +7298,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Names of dynamic tools mounted under `xd://`. */
 	getMountedXdevToolNames(): string[] {
 		return this.#tools.getMountedXdevToolNames();
+	}
+
+	/** True when `write` is only the agent:// reply transport of a read-only agent. */
+	get isAgentOnlyWrite(): boolean {
+		return this.#tools.isAgentOnlyWrite;
+	}
+
+	/** True when `write` is currently transport-only (xd:// devices / agent:// reply). */
+	get isDeviceOnlyWrite(): boolean {
+		return this.#tools.isDeviceOnlyWrite;
 	}
 
 	/** Whether the edit tool is registered in this session. */
