@@ -1,8 +1,10 @@
 import type { Database } from "bun:sqlite";
 import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
-import { type Env, polyphonicRecallEnabled } from "../config";
+import { DENSE_CANDIDATE_LIMIT, type Env, envDisabled, polyphonicRecallEnabled } from "../config";
 import { closeQuietly, type DatabasePath, openDatabase } from "../db";
 import { backfillConsolidatedFacts, ensureVeracityConsolidator } from "./beam/consolidate";
+import { cachedEmbeddings } from "./beam/embedding-cache";
+import { recallTrustWeight, resolveTrustWeights, type TrustWeights } from "./beam/recall-trust";
 import type { BeamMemoryState, JsonValue, Metadata, RecallResult, RecallTierLabel } from "./beam/types";
 import { EpisodicGraph, extractProperNouns } from "./episodic-graph";
 import { STOP_WORDS } from "./synonyms";
@@ -101,12 +103,6 @@ interface MemoryHydrationRow {
 	readonly tier_name: "working" | "episodic";
 }
 
-interface EmbeddingRow {
-	readonly memory_id: string;
-	readonly embedding_json: string;
-	readonly embedding_tier: "working" | "episodic";
-}
-
 interface TemporalRow {
 	readonly id: string;
 	readonly timestamp: string | null;
@@ -119,7 +115,8 @@ export const POLYPHONIC_VOICES: readonly PolyphonicVoice[] = ["hybrid", "vector"
 /** Highest possible fused score: rank 1 in every voice. */
 export const POLYPHONIC_MAX_COMBINED_SCORE = POLYPHONIC_VOICES.length / (POLYPHONIC_RRF_K + 1);
 const TEMPORAL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-const NEAR_DUPLICATE_JACCARD = 0.8;
+/** Whole words only: `blast` or `Chicago` must not read as a time reference. */
+const TEMPORAL_QUERY = /\b(?:yesterday|today|recent(?:ly)?|last|latest|this (?:week|month)|ago|before)\b/i;
 /**
  * Cosine a memory needs to count as a vector-voice hit: the bar linear recall applies
  * to candidates with no keyword match. Without it the voice's nearest neighbours pad
@@ -147,11 +144,6 @@ const GRAPH_VOICE_MIN_EDGE_WEIGHT = 0.3;
  */
 export function polyphonicRecallIsEnabled(env: Env = process.env, configured?: boolean): boolean {
 	return polyphonicRecallEnabled(env, configured);
-}
-function envDisabled(name: string, env: Env = process.env): boolean {
-	const value = env[name];
-	if (value === undefined) return false;
-	return ["0", "false", "no", "off"].includes(value.trim().toLowerCase());
 }
 
 function metadataValue(value: unknown): JsonValue {
@@ -198,17 +190,14 @@ function normalizeVector(vector: readonly number[] | Float32Array): Float32Array
 	return out;
 }
 
-function cosineAgainstUnit(unit: Float32Array, raw: unknown): number | null {
-	if (!Array.isArray(raw) || raw.length !== unit.length) return null;
+function cosineAgainstUnit(unit: Float32Array, vector: Float32Array): number | null {
+	if (vector.length !== unit.length) return null;
 	let normSq = 0;
 	let dot = 0;
-	for (let i = 0; i < raw.length; i++) {
-		const value = raw[i];
-		if (typeof value !== "number" || !Number.isFinite(value)) return null;
+	for (let i = 0; i < vector.length; i++) {
+		const value = vector[i] as number;
 		normSq += value * value;
-		const unitValue = unit[i];
-		if (unitValue === undefined) return null;
-		dot += unitValue * value;
+		dot += (unit[i] as number) * value;
 	}
 	if (normSq === 0) return null;
 	return dot / Math.sqrt(normSq);
@@ -238,31 +227,11 @@ function factSubjectCandidates(query: string): string[] {
 	return [...seen];
 }
 
-function contentTokens(text: string): Set<string> {
-	const out = new Set<string>();
-	for (const token of queryTokens(text)) if (token.length >= 2) out.add(token);
-	return out;
-}
-
-function tokenJaccard(left: ReadonlySet<string>, right: ReadonlySet<string>): number {
-	if (left.size === 0 || right.size === 0) return 0;
-	let intersection = 0;
-	for (const token of left) if (right.has(token)) intersection++;
-	return intersection / (left.size + right.size - intersection);
-}
-
 /** Milliseconds for the temporal voice anchor; `null` means "now, open-ended". */
 function anchorTime(queryTime: string | Date | null | undefined): number | null {
 	if (queryTime === null || queryTime === undefined) return null;
 	const parsed = queryTime instanceof Date ? queryTime.getTime() : Date.parse(queryTime);
 	return Number.isFinite(parsed) ? parsed : null;
-}
-
-function looksTemporal(query: string): boolean {
-	const lower = query.toLowerCase();
-	return ["yesterday", "today", "recent", "last", "latest", "this week", "this month", "ago", "before"].some(keyword =>
-		lower.includes(keyword),
-	);
 }
 
 export class PolyphonicRecallEngine {
@@ -299,17 +268,19 @@ export class PolyphonicRecallEngine {
 		options: PolyphonicCallOptions = {},
 	): PolyphonicMemoryResult[] {
 		const baseline = options.baseline ?? [];
-		const combined = this.combineVoices(
+		const voices = [
 			this.hybridVoice(baseline, options),
 			this.vectorVoice(queryEmbedding, options),
 			this.graphVoice(query),
 			this.factVoice(query),
-			this.temporalVoice(query, options),
-		);
+		];
+		const surfaced = new Set(voices.flatMap(results => results.map(result => result.memoryId)));
+		const combined = this.combineVoices(...voices, this.temporalVoice(query, surfaced, options));
 		const baselineById = new Map<string, RecallResult>();
 		for (const result of baseline) if (!baselineById.has(result.id)) baselineById.set(result.id, result);
+		const trust = resolveTrustWeights();
 		const reranked = this.diversityRerank(combined, topK, candidate =>
-			this.#hydrate(candidate, baselineById, options),
+			this.#hydrate(candidate, baselineById, options, trust),
 		);
 		return this.assembleContext(reranked, contextBudget);
 	}
@@ -342,56 +313,50 @@ export class PolyphonicRecallEngine {
 		const queryUnit = normalizeVector(queryEmbedding);
 		if (queryUnit === null) return [];
 		const now = new Date().toISOString();
-		const working = this.#visibility("wm", options.channelId);
-		const episodic = this.#visibility("em", options.channelId);
-		let rows: EmbeddingRow[] = [];
-		try {
-			rows = this.db
-				.query(`
-					SELECT me.memory_id, me.embedding_json, 'working' AS embedding_tier
-					FROM memory_embeddings me
-					JOIN working_memory wm ON wm.id = me.memory_id
-					WHERE wm.superseded_by IS NULL
-						AND (wm.valid_until IS NULL OR wm.valid_until > ?)
-						AND ${working.clause}
-					UNION ALL
-					SELECT me.memory_id, me.embedding_json, 'episodic' AS embedding_tier
-					FROM memory_embeddings me
-					JOIN episodic_memory em ON em.id = me.memory_id
-					WHERE em.superseded_by IS NULL
-						AND (em.valid_until IS NULL OR em.valid_until > ?)
-						AND ${episodic.clause}
-					LIMIT 50000
-				`)
-				.all(now, ...working.params, now, ...episodic.params) as EmbeddingRow[];
-		} catch {
-			return [];
-		}
-
+		const visibility = this.#visibility("", options.channelId);
 		const byId = new Map<string, VoiceRecallResult>();
-		for (const row of rows) {
-			let parsed: unknown;
+		for (const [table, tier] of [
+			["working_memory", "working"],
+			["episodic_memory", "episodic"],
+		] as const) {
+			let vectors: Map<string, Float32Array>;
 			try {
-				parsed = JSON.parse(row.embedding_json) as unknown;
+				// Linear recall's window per tier, so both paths score the same cached vectors.
+				const rows = this.db
+					.query(`
+						SELECT id FROM ${table}
+						WHERE superseded_by IS NULL
+							AND (valid_until IS NULL OR valid_until > ?)
+							AND ${visibility.clause}
+						ORDER BY timestamp DESC
+						LIMIT ?
+					`)
+					.all(now, ...visibility.params, DENSE_CANDIDATE_LIMIT) as { id: string }[];
+				vectors = cachedEmbeddings(
+					this.db,
+					rows.map(row => row.id),
+				);
 			} catch {
-				continue;
+				return [];
 			}
-			const cosine = cosineAgainstUnit(queryUnit, parsed);
-			if (cosine === null || cosine < VECTOR_VOICE_MIN_COSINE) continue;
-			const similarity = (cosine + 1) / 2;
-			const existing = byId.get(row.memory_id);
-			if (existing === undefined || similarity > existing.score) {
-				byId.set(row.memory_id, {
-					memoryId: row.memory_id,
-					score: similarity,
-					voice: "vector",
-					metadata: {
-						similarity,
-						cosine_similarity: cosine,
-						embedding_tier: row.embedding_tier,
-						backend: "memory_embeddings",
-					},
-				});
+			for (const [memoryId, vector] of vectors) {
+				const cosine = cosineAgainstUnit(queryUnit, vector);
+				if (cosine === null || cosine < VECTOR_VOICE_MIN_COSINE) continue;
+				const similarity = (cosine + 1) / 2;
+				const existing = byId.get(memoryId);
+				if (existing === undefined || similarity > existing.score) {
+					byId.set(memoryId, {
+						memoryId,
+						score: similarity,
+						voice: "vector",
+						metadata: {
+							similarity,
+							cosine_similarity: cosine,
+							embedding_tier: tier,
+							backend: "memory_embeddings",
+						},
+					});
+				}
 			}
 		}
 		return [...byId.values()].sort((a, b) => b.score - a.score || a.memoryId.localeCompare(b.memoryId)).slice(0, 20);
@@ -488,8 +453,16 @@ export class PolyphonicRecallEngine {
 		}
 		return [...byId.values()].sort((a, b) => b.score - a.score || a.memoryId.localeCompare(b.memoryId));
 	}
-	temporalVoice(query: string, options: PolyphonicCallOptions = {}): VoiceRecallResult[] {
-		if (envDisabled("MNEMOPI_VOICE_TEMPORAL") || !looksTemporal(query)) return [];
+	/**
+	 * Re-ranks memories another voice surfaced by recency. It never adds rows of its own: a time
+	 * word says nothing about relevance, and hosts that build queries from prior turns hit one in most queries.
+	 */
+	temporalVoice(
+		query: string,
+		surfaced: ReadonlySet<string>,
+		options: PolyphonicCallOptions = {},
+	): VoiceRecallResult[] {
+		if (envDisabled("MNEMOPI_VOICE_TEMPORAL") || surfaced.size === 0 || !TEMPORAL_QUERY.test(query)) return [];
 		const anchor = anchorTime(options.queryTime);
 		const anchorMs = anchor ?? Date.now();
 		const windowStart = new Date(anchorMs - TEMPORAL_WINDOW_MS).toISOString();
@@ -503,7 +476,8 @@ export class PolyphonicRecallEngine {
 				.query(`
 					SELECT id, timestamp, importance
 					FROM working_memory
-					WHERE timestamp > ?
+					WHERE id IN (SELECT value FROM json_each(?))
+						AND timestamp > ?
 						${upperBound}
 						AND superseded_by IS NULL
 						AND (valid_until IS NULL OR valid_until > ?)
@@ -511,7 +485,13 @@ export class PolyphonicRecallEngine {
 					ORDER BY timestamp DESC
 					LIMIT 20
 				`)
-				.all(windowStart, ...upperParams, new Date().toISOString(), ...visibility.params) as TemporalRow[];
+				.all(
+					JSON.stringify([...surfaced]),
+					windowStart,
+					...upperParams,
+					new Date().toISOString(),
+					...visibility.params,
+				) as TemporalRow[];
 		} catch {
 			return [];
 		}
@@ -561,8 +541,8 @@ export class PolyphonicRecallEngine {
 	}
 	/**
 	 * Walk fused candidates best-first, hydrating each and skipping rows that are not
-	 * visible or whose content near-duplicates an already selected row, until `topK`
-	 * rows are selected.
+	 * visible or are weighted 0, until `topK` rows are selected. Distinct memory ids are
+	 * never merged, whatever their content: the id is the identity.
 	 */
 	diversityRerank(
 		results: ReadonlyMap<string, PolyphonicResult>,
@@ -573,16 +553,11 @@ export class PolyphonicRecallEngine {
 			(a, b) => b.combinedScore - a.combinedScore || a.memoryId.localeCompare(b.memoryId),
 		);
 		const selected: PolyphonicMemoryResult[] = [];
-		const selectedTokens: Set<string>[] = [];
 		const limit = Math.max(0, Math.trunc(topK));
 		for (const candidate of sorted) {
 			if (selected.length >= limit) break;
 			const hydrated = hydrate(candidate);
-			if (hydrated === null) continue;
-			const tokens = contentTokens(hydrated.content);
-			if (selectedTokens.some(prior => tokenJaccard(tokens, prior) > NEAR_DUPLICATE_JACCARD)) continue;
-			selected.push(hydrated);
-			selectedTokens.push(tokens);
+			if (hydrated !== null) selected.push(hydrated);
 		}
 		return selected;
 	}
@@ -635,12 +610,24 @@ export class PolyphonicRecallEngine {
 		candidate: PolyphonicResult,
 		baselineById: ReadonlyMap<string, RecallResult>,
 		options: PolyphonicCallOptions,
+		trust: TrustWeights,
 	): PolyphonicMemoryResult | null {
 		const voiceScores = sortedVoiceScores(candidate.voiceScores);
 		const baseline = baselineById.get(candidate.memoryId);
 		if (baseline !== undefined) {
 			const tier = baseline.tier_label ?? baseline.tier ?? "working";
-			if (options.includeFacts !== true && tier === "fact") return null;
+			if (tier === "fact") {
+				// `factRecall` already weighed the fact's source row and put its label on the fact.
+				if (options.includeFacts !== true || recallTrustWeight(trust, baseline.veracity) === 0) return null;
+			} else {
+				// The stored row, not the label the baseline claims, decides whether it may surface. A row the
+				// engine's visibility cannot see (or that is gone) falls back to the label the baseline carries.
+				const stored = this.#lookupMemory(candidate.memoryId, options.channelId);
+				const episodic = stored !== null ? stored.tier_name === "episodic" : tier === "episodic";
+				const degradation = stored !== null ? stored.tier : baseline.degradation_tier;
+				const veracity = stored?.veracity ?? baseline.veracity;
+				if (recallTrustWeight(trust, veracity, episodic ? (degradation ?? 1) : undefined) === 0) return null;
+			}
 			return {
 				...baseline,
 				metadata: {
@@ -656,6 +643,9 @@ export class PolyphonicRecallEngine {
 		}
 		const row = this.#lookupMemory(candidate.memoryId, options.channelId);
 		if (row === null) return null;
+		if (recallTrustWeight(trust, row.veracity, row.tier_name === "episodic" ? (row.tier ?? 1) : undefined) === 0) {
+			return null;
+		}
 		return {
 			...row,
 			metadata: { ...parseMetadata(row.metadata_json), polyphonic: candidate.metadata },
