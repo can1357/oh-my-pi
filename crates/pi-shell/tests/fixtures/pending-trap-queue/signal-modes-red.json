@@ -1,0 +1,39 @@
+[
+  {
+    "id": "CHLD-restore-step",
+    "script": "n=0; trap 'n=$((n+1)); if [ $n -lt 3 ]; then /bin/true; fi; echo action=$n' CHLD; /bin/true; echo end=$n",
+    "output": "action=1\nend=1\n",
+    "boundary_output": "action=1\naction=2\naction=3\nend=3\n",
+    "status": 0,
+    "mode": "step"
+  },
+  {
+    "id": "CHLD-restore-exec",
+    "script": "n=0; trap 'n=$((n+1)); if [ $n -lt 3 ]; then /bin/true; fi; echo action=$n' CHLD; /bin/true; echo end=$n",
+    "output": "action=1\nend=1\n",
+    "boundary_output": "action=1\naction=2\naction=3\nend=3\n",
+    "status": 0,
+    "mode": "exec"
+  },
+  {
+    "id": "CHLD-return-function-addon",
+    "script": "n=0; f() { trap 'n=$((n+1)); echo action=$n; return 23; echo tail' CHLD; /bin/true; echo inside; }; f; echo status=$?; /bin/true; echo end=$n",
+    "output": "action=1\nstatus=23\nend=1\n",
+    "status": 0,
+    "mode": null
+  },
+  {
+    "id": "WINCH-restore-step",
+    "script": "n=0; trap 'n=$((n+1)); if [ $n -lt 3 ]; then kill -WINCH $BASHPID; fi; echo action=$n' WINCH; kill -WINCH $BASHPID; echo end=$n",
+    "output": "action=1\nend=1\n",
+    "status": 0,
+    "mode": "step"
+  },
+  {
+    "id": "WINCH-restore-exec",
+    "script": "n=0; trap 'n=$((n+1)); if [ $n -lt 3 ]; then kill -WINCH $BASHPID; fi; echo action=$n' WINCH; kill -WINCH $BASHPID; echo end=$n",
+    "output": "action=1\nend=1\n",
+    "status": 0,
+    "mode": "exec"
+  }
+]
