@@ -20,6 +20,7 @@
 - Subagents stopped by their parent through `proc://<id>/kill` now record "Stopped by parent agent" in their transcripts instead of "Interrupted by user" ([#20012](https://github.com/can1357/oh-my-pi/pull/20012) by [@nick-maderight](https://github.com/nick-maderight))
 - Fixed the omp daemon staying alive for up to 3 seconds after shutdown, or 11 seconds after stopping a module unit such as the image URL broker, once its work was done
 - Fixed scoped provider availability snapshots staying stale after re-registering a provider whose id differs by case or whitespace ([#16511](https://github.com/can1357/oh-my-pi/pull/16511) by [@Komzpa](https://github.com/Komzpa))
+- Fixed repeated cached catalog preparation slowing down subagent launches ([#16511](https://github.com/can1357/oh-my-pi/pull/16511) by [@Komzpa](https://github.com/Komzpa))
 
 ## [19.1.0] - 2026-11-21
 
