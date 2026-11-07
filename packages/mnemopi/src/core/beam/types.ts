@@ -36,6 +36,12 @@ export interface TripleStoreLike {
 	add?(subject: string, predicate: string, object: string, options?: TripleWriteOptions): unknown;
 	query?(subject?: string, predicate?: string, asOf?: string): unknown;
 }
+export interface CachedEmbedding {
+	fp: bigint | number;
+	len: number;
+	vec: number[];
+	norm: number;
+}
 
 export interface BeamCaches {
 	timestampParse: Map<string, Date>;
@@ -49,6 +55,7 @@ export interface BeamCaches {
 	 * computed against; any other write to the database drops the cache.
 	 */
 	queryCacheToken?: string;
+	embeddings?: Map<string, CachedEmbedding>;
 	[key: string]: unknown;
 }
 

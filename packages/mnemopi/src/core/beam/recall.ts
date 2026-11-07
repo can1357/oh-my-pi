@@ -21,8 +21,8 @@ import { isQueryCacheEnabled, QueryCache } from "../query-cache";
 import { adjustWeights, classifyIntent } from "../query-intent";
 import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
-import { cosineSimilarity } from "../vector-math";
-import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
+import { cosineSimilarityWithNorms, vectorNorm } from "../vector-math";
+import type { BeamMemoryState, CachedEmbedding, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
 
 type DbValue = string | number | null | Uint8Array;
 type Row = Record<string, unknown>;
@@ -590,6 +590,8 @@ function parseEmbedding(raw: unknown): number[] | null {
 	}
 }
 
+const MAX_EMBEDDING_CACHE_SIZE = 2048;
+
 function vectorSimilarities(
 	beam: BeamMemoryState,
 	memoryIds: readonly string[],
@@ -604,6 +606,10 @@ function vectorSimilarities(
 	) {
 		return out;
 	}
+
+	const cache = (beam.caches.embeddings ??= new Map<string, CachedEmbedding>());
+	const queryNorm = vectorNorm(queryEmbedding);
+
 	for (let offset = 0; offset < memoryIds.length; offset += 500) {
 		const chunk = memoryIds.slice(offset, offset + 500);
 		const rows = queryAll(
@@ -611,11 +617,46 @@ function vectorSimilarities(
 			`SELECT memory_id, embedding_json FROM memory_embeddings WHERE memory_id IN (${placeholders(chunk.length)})`,
 			chunk,
 		);
+		const found = new Set<string>();
 		for (const row of rows) {
-			const vector = parseEmbedding(row.embedding_json);
 			const id = asString(row.memory_id);
-			if (vector !== null && id.length > 0) out.set(id, Math.max(0, cosineSimilarity(queryEmbedding, vector)));
+			if (id.length === 0) continue;
+			found.add(id);
+			const rawJson = typeof row.embedding_json === "string" ? row.embedding_json : "";
+			const fp = Bun.hash(rawJson);
+			const len = rawJson.length;
+			let cached = cache.get(id);
+			if (cached && cached.fp === fp && cached.len === len) {
+				cache.delete(id);
+				cache.set(id, cached);
+			} else {
+				const rawVec = parseEmbedding(rawJson);
+				if (rawVec === null) {
+					cache.delete(id);
+					continue;
+				}
+				const vec = rawVec.map(raw => (Number.isFinite(raw) ? raw : 0));
+				const norm = vectorNorm(vec);
+				cached = { fp, len, vec, norm };
+				cache.set(id, cached);
+			}
+			if (queryNorm === 0 || cached.norm === 0) {
+				out.set(id, 0);
+			} else {
+				const sim = cosineSimilarityWithNorms(queryEmbedding, queryNorm, cached.vec, cached.norm);
+				out.set(id, Math.max(0, sim));
+			}
 		}
+		for (const id of chunk) {
+			if (!found.has(id)) {
+				cache.delete(id);
+			}
+		}
+	}
+	while (cache.size > MAX_EMBEDDING_CACHE_SIZE) {
+		const oldest = cache.keys().next().value;
+		if (oldest === undefined) break;
+		cache.delete(oldest);
 	}
 	return out;
 }
