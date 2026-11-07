@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Providers with exhausted credits remain unavailable until a recovery probe succeeds, so workers use their fallback chain without spending another turn on the blocked account.
+
 - Workers skip unavailable providers across their configured quality chain and continue after quota failures, including with ordinary retries disabled ([#16532](https://github.com/can1357/oh-my-pi/pull/16532) by [@Komzpa](https://github.com/Komzpa)).
 
 - Exhausted providers stay excluded in sessions, benchmarks, per-call workers and the auth gateway until their reset or cooldown expires.

@@ -115,7 +115,7 @@ state.recordProviderFailure("deepseek", { status: 402, code: "insufficient_balan
 state.recordProviderFailure("deepseek", { status: 402, code: "insufficient_balance" }, 2000);
 return null;`,
 		);
-		const result = await run(directory, `return state.providerExhaustionRecord("deepseek", 3600001);`);
+		const result = await run(directory, `return state.providerExhaustionRecord("deepseek", 3602001);`);
 		expect(result).toMatchObject({
 			class: "balance",
 			firstSeen: 1000,
@@ -137,7 +137,7 @@ return [state.isProviderExhausted("known", 3000), state.isProviderExhausted("unk
 		expect(result).toEqual([false, false]);
 	});
 
-	it("shares the live abliterated billing failure until its reset, without banning transient failures", async () => {
+	it("keeps billing excluded past reported reset until a successful probe, without banning transient failures", async () => {
 		const directory = fixture();
 		await run(
 			directory,
@@ -153,7 +153,23 @@ return null;`,
 				`return [state.isProviderExhausted("abliteration", 4999), state.isProviderExhausted("transient", 1001), state.isProviderExhausted("images", 1001)];`,
 			),
 		).toEqual([true, false, false]);
-		expect(await run(directory, `return state.isProviderExhausted("abliteration", 5000);`)).toBe(false);
+		expect(await run(directory, `return state.isProviderExhausted("abliteration", 5000);`)).toBe(true);
+		expect(
+			await run(
+				directory,
+				`
+let probes = 0;
+await state.probeUnavailableProviders(async () => { probes++; return { available: false }; }, { now: 3601000 });
+const blocked = state.isProviderExhausted("abliteration", 3601000);
+const record = state.listProviderCooldowns()[0];
+const next = record.nextProbeAt;
+if (record.until !== next) throw new Error("Billing retry deadline ignores probe backoff");
+await state.probeUnavailableProviders(async () => { probes++; return { available: true }; }, { now: next - 1 });
+const stillBlocked = state.isProviderExhausted("abliteration", next - 1);
+await state.probeUnavailableProviders(async () => { probes++; return { available: true }; }, { now: next });
+return { probes, blocked, stillBlocked, recovered: !state.isProviderExhausted("abliteration", next) };`,
+			),
+		).toEqual({ probes: 2, blocked: true, stillBlocked: true, recovered: true });
 	});
 
 	it("deduplicates unavailable/recovered notices and recovers every process by probe", async () => {

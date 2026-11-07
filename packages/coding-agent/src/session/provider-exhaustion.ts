@@ -301,7 +301,10 @@ function persistProviderFailure(provider: string, evidence: ProviderFailureEvide
 			revision: crypto.randomUUID(),
 			nextProbeAt: classification === "quota" ? (normalized.resetAt ?? now + PROBE_MIN_MS) : now + PROBE_MIN_MS,
 			probeAttempts: 0,
-			until: normalized.resetAt ?? now + PROVIDER_EXHAUSTION_COOLDOWN_MS,
+			until:
+				classification === "balance" || classification === "entitlement"
+					? now + PROBE_MIN_MS
+					: (normalized.resetAt ?? now + PROVIDER_EXHAUSTION_COOLDOWN_MS),
 		};
 		records.set(key, record);
 		return changed ? record : undefined;
@@ -324,7 +327,9 @@ export function coolDownExhaustedProvider(
 
 export function providerExhaustionRecord(provider: string, now = Date.now()): ProviderExhaustionRecord | undefined {
 	const record = readPersisted().get(provider.toLowerCase());
-	if (!record || record.class === "auth" || record.class === "discovery") return record;
+	// Billing/entitlement timers schedule probes; elapsed time is no evidence
+	// that the account can serve work again. Only quota has a timed reset.
+	if (!record || record.class !== "quota") return record;
 	if ((record.resetAt ?? record.recordedAt + PROVIDER_EXHAUSTION_COOLDOWN_MS) > now) return record;
 	const cleared = mutate(records => {
 		const current = records.get(provider.toLowerCase());
@@ -417,7 +422,7 @@ export async function probeUnavailableProviders(
 	const owner = options.owner ?? `${process.pid}:${crypto.randomUUID()}`;
 	for (const snapshot of readPersisted().values()) {
 		if (options.provider && snapshot.provider.toLowerCase() !== options.provider.toLowerCase()) continue;
-		if (!options.force && snapshot.resetAt !== undefined) {
+		if (!options.force && snapshot.class === "quota" && snapshot.resetAt !== undefined) {
 			providerExhaustionRecord(snapshot.provider, now);
 			continue;
 		}
@@ -457,7 +462,7 @@ export async function probeUnavailableProviders(
 			current.probeAttempts += 1;
 			current.nextProbeAt =
 				now + Math.min(PROVIDER_EXHAUSTION_COOLDOWN_MS, PROBE_MIN_MS * 2 ** current.probeAttempts);
-			current.until = current.resetAt ?? current.nextProbeAt;
+			current.until = current.class === "quota" ? (current.resetAt ?? current.nextProbeAt) : current.nextProbeAt;
 			delete current.leaseOwner;
 			delete current.leaseUntil;
 			return undefined;
