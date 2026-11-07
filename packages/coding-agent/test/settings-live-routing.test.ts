@@ -11,8 +11,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { createAuthStorageSettingsSync } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import { getRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
-import { cfgRetryUsageReservePct } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgRetryUsageReservePct, cfgTopK } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgTaskAgentModelOverrides } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { readUserApprovalPolicies, userApprovalPolicy } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -78,6 +79,29 @@ describe("live routing config files", () => {
 		settings.startWatching();
 		return settings;
 	}
+
+	it("keeps the record of a rejected overlay value when a watched reload of the overlays fails", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		cleanups.push(() => warn.mockRestore());
+		const agentDir = tempDir.join("agent");
+		const first = tempDir.join("first.yml");
+		const second = tempDir.join("second.yml");
+		await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ topK: 1 }));
+		await Bun.write(first, YAML.stringify({ temperature: "hot" }));
+		await Bun.write(second, YAML.stringify({ topP: 0.5 }));
+		settings = await Settings.init({ cwd: tempDir.path(), agentDir, configFiles: [first, second] });
+		settings.startWatching();
+		const ignored = () => settings.ignoredValues().map(({ setting, source }) => `${setting.id}@${source}`);
+		expect(ignored()).toEqual([`temperature@${first}`]);
+
+		// The first file is fixed, the second stops parsing, and the global file changes: the watched
+		// reload adopts the global layer and keeps the overlay layer it could not read.
+		await Bun.write(first, YAML.stringify({ temperature: 0.3 }));
+		await Bun.write(second, "topP: [unterminated\n");
+		await Bun.write(path.join(agentDir, "config.yml"), YAML.stringify({ topK: 2 }));
+		await waitFor(() => cfgTopK.get(settings) === 2);
+		expect(ignored()).toEqual([`temperature@${first}`]);
+	});
 
 	it("applies atomic overlay edits to subsequent model selection, fallbacks and account health", async () => {
 		const file = tempDir.join("routing.yml");
@@ -245,6 +269,27 @@ describe("live routing config files", () => {
 		await Bun.write(file, YAML.stringify({ ...routing("third"), edit: { mode: "patch" } }));
 		await waitFor(() => settings.getModelRole("smol") === "anthropic/third");
 		expect(cfgEditMode.get(settings)).toBe("patch");
+	});
+
+	it("does not keep the last good tools.approval when a live edit makes it unreadable", async () => {
+		// Keep-last-good exists so a value this build cannot read does not move a running session to
+		// the default. For `tools.approval` the default is permissive, so keeping the old record would
+		// leave the session running unasked the very calls the broken edit was written to restrain,
+		// and only until the next launch, when a fresh load asks.
+		const agentDir = tempDir.join("agent");
+		const global = path.join(agentDir, "config.yml");
+		const file = tempDir.join("routing.yml");
+		await Bun.write(global, YAML.stringify({ topK: 1, tools: { approval: { read: "allow" } } }));
+		await Bun.write(file, YAML.stringify(routing("first")));
+		await start(file, agentDir);
+		expect(userApprovalPolicy(readUserApprovalPolicies(settings), "bash")).toBeUndefined();
+
+		await Bun.write(global, YAML.stringify({ topK: 2, tools: { approval: "deny-bash" } }));
+		await waitFor(() => cfgTopK.get(settings) === 2);
+		expect(userApprovalPolicy(readUserApprovalPolicies(settings), "bash")).toMatchObject({
+			policy: "prompt",
+			unreadable: true,
+		});
 	});
 
 	it("keeps last good routing on malformed target replacement and preserves runtime overrides on recovery", async () => {

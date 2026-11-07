@@ -78,7 +78,7 @@ export type SettingEnv<T> =
 			parse?: (raw: string) => T | undefined;
 			/**
 			 * The variable only replaces the default (env vars documented as fallbacks of a config key):
-			 *  - `true`: any settings layer configuring a non-null value wins over it.
+			 *  - `true`: any settings layer configuring a value the setting accepts wins over it.
 			 *  - `"blank"`: likewise, but a configured empty/whitespace string also yields to the variable.
 			 */
 			fallback?: true | "blank";
@@ -166,6 +166,19 @@ export interface RecordDefinition<T = unknown> extends DefinitionBase {
 	default: Readonly<Record<string, T>>;
 	env?: SettingEnv<Readonly<Record<string, T>>>;
 	ui?: UiBase;
+	/**
+	 * The default grants what a configured value restrains (`tools.approval`: `{}` means no policies),
+	 * so a value this setting cannot read must never read as unset. A key left empty (`null`) is
+	 * rejected rather than unset, and `Settings.ignoredValues` lists every rejected value a config file
+	 * holds, even one a higher layer's or file's value hides (see {@link Setting.rejects}).
+	 */
+	permissiveDefault?: true;
+	/**
+	 * Whether an entry is one this setting can read. Only writes check entries (`normalize`), so a
+	 * config file can still hold one it cannot; every surface that shows the value shows such an entry
+	 * by its shape alone (see {@link Setting.displayValue}).
+	 */
+	readableEntry?: (entry: unknown) => boolean;
 }
 
 /** Any setting definition accepted by {@link register}. */
@@ -454,6 +467,7 @@ export function combine<R extends Record<string, Derived<unknown>>, T>(
  * Handle for one registered setting. Reads resolve, in precedence order: runtime override (CLI
  * flags, session-only writes, SDK overrides), the definition's environment variable, `--config`
  * overlay, project, global, then the default.
+ * A value the setting rejects ({@link accepts}) reads as unset in the config file holding it, with a warning.
  */
 export class Setting<T, Id extends string = string> extends Derived<T> {
 	readonly id: Id;
@@ -565,6 +579,17 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return (this.definition.normalize ? this.definition.normalize(value) : value) as T;
 	}
 
+	/**
+	 * `text` as a parse error names it. What someone typed at `omp config set` is shown as written,
+	 * because the shape of a typo says nothing (`string (length 3)` for `abc`) and they have it on
+	 * screen already. A credential setting, or text long enough to be a pasted token, shows only its
+	 * shape: these messages reach the log.
+	 */
+	#describeTyped(text: string): string {
+		const couldBeSecret = this.isCredential || text.trim().length > TYPED_TEXT_SHOWN_MAX;
+		return couldBeSecret ? describeRejectedValue(text) : Bun.inspect(text);
+	}
+
 	#parseText(text: string): T {
 		const trimmed = text.trim();
 		switch (this.definition.type) {
@@ -572,11 +597,13 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				const lower = trimmed.toLowerCase();
 				if (["true", "1", "yes", "on"].includes(lower)) return true as T;
 				if (["false", "0", "no", "off"].includes(lower)) return false as T;
-				throw new Error(`Invalid boolean value: ${text}. Use true/false, yes/no, on/off, or 1/0`);
+				throw new Error(
+					`Invalid boolean value: ${this.#describeTyped(text)}. Use true/false, yes/no, on/off, or 1/0`,
+				);
 			}
 			case "number": {
 				const parsed = trimmed === "" ? Number.NaN : Number(trimmed);
-				if (!Number.isFinite(parsed)) throw new Error(`Invalid number: ${text}`);
+				if (!Number.isFinite(parsed)) throw new Error(`Invalid number: ${this.#describeTyped(text)}`);
 				return parsed as T;
 			}
 			case "array":
@@ -585,9 +612,11 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				try {
 					parsed = JSON.parse(trimmed);
 				} catch {
-					throw new Error(`Invalid ${this.definition.type} JSON: ${text}`);
+					throw new Error(`Invalid ${this.definition.type} JSON: ${this.#describeTyped(text)}`);
 				}
-				if (!this.accepts(parsed)) throw new Error(`Invalid ${this.definition.type} JSON: ${text}`);
+				if (!this.accepts(parsed)) {
+					throw new Error(`Invalid ${this.definition.type} JSON: ${this.#describeTyped(text)}`);
+				}
 				return parsed as T;
 			}
 			case "string":
@@ -603,7 +632,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				}
 				const valid = this.enumValues;
 				if (valid && !valid.includes(value)) {
-					throw new Error(`Invalid value: ${text}. Valid values: ${valid.join(", ")}`);
+					throw new Error(`Invalid value: ${this.#describeTyped(text)}. Valid values: ${valid.join(", ")}`);
 				}
 				return value as T;
 			}
@@ -628,6 +657,50 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		}
 	}
 
+	/**
+	 * Whether a config file's `value` for this setting is one the setting rejects, so it reads as unset
+	 * in that file: the wrong type, or not one of an enum's values. A key left empty (`null`) is unset,
+	 * not rejected, except where unset is permissive ({@link RecordDefinition.permissiveDefault}).
+	 */
+	rejects(value: unknown): boolean {
+		if (value === undefined) return false;
+		if (value === null) return this.definition.type === "record" && this.definition.permissiveDefault === true;
+		return !this.accepts(value);
+	}
+
+	/**
+	 * Whether this setting's unset state is permissive ({@link RecordDefinition.permissiveDefault}), so
+	 * a value it cannot read must never fall back to the default or to an older readable value:
+	 * `tools.approval` is the one such setting, where no policy means a call runs unasked.
+	 */
+	get permissiveDefault(): boolean {
+		return this.definition.type === "record" && this.definition.permissiveDefault === true;
+	}
+
+	/**
+	 * `value` as a surface may show it (the config CLI, `cfg://`, the settings panel): a record entry
+	 * this setting cannot read ({@link RecordDefinition.readableEntry}) becomes its shape,
+	 * `(unreadable: string (length 6))`, never its text, since a misplaced token is the likeliest one.
+	 */
+	displayValue(value: unknown): unknown {
+		const readable = this.definition.type === "record" ? this.definition.readableEntry : undefined;
+		if (!readable || !this.accepts(value)) return value;
+		let shown: Record<string, unknown> | undefined;
+		for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+			if (readable(entry)) continue;
+			shown ??= { ...(value as Record<string, unknown>) };
+			shown[key] = `(unreadable: ${describeRejectedValue(entry)})`;
+		}
+		return shown ?? value;
+	}
+
+	/** What {@link accepts} requires, for messages: "one of a, b", "an array", "a number". */
+	get expected(): string {
+		const values = this.enumValues;
+		if (values) return `one of ${values.join(", ")}`;
+		return this.definition.type === "array" ? "an array" : `a ${this.definition.type}`;
+	}
+
 	#parseEnvText(raw: string): unknown {
 		if (this.definition.type === "boolean") return raw === "" ? undefined : parseFlag(raw);
 		if (raw.trim() === "") return undefined;
@@ -642,19 +715,42 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return [settings.rawValue(this)];
 	}
 
-	compute(inputs: readonly unknown[], settings: Settings): T {
+	/** `Settings.rawValue` reads a value this setting rejects as unset, so only the default fills a gap. */
+	compute(inputs: readonly unknown[]): T {
 		const raw = inputs[0];
-		if (raw === undefined || this.accepts(raw)) {
-			// A fixed value re-arms this instance's warning, so breaking it again is reported again.
-			settings.warnState.invalid.delete(this.id);
-			return raw === undefined ? this.default : (raw as T);
-		}
+		return raw === undefined ? this.default : (raw as T);
+	}
+
+	/**
+	 * Registry plumbing behind `Settings.rawValue`: warns that `raw`, the value `settings` configures,
+	 * is one this setting rejects and so reads as unset, naming the config file `sourceOf` finds, and
+	 * records safe metadata for `Settings.ignoredValues`. The raw value stays only in warn-once state.
+	 * Once per instance and value, until {@link rearmRejected}, so a view that cannot name the file
+	 * (a grant view) keeps what its parent already reported.
+	 */
+	reportRejected(settings: Settings, raw: unknown, sourceOf: () => string | undefined): void {
 		const warned = settings.warnState.invalid;
-		if (!warned.has(this.id) || !Bun.deepEquals(warned.get(this.id), raw)) {
-			warned.set(this.id, raw);
-			logger.warn("Settings: ignoring invalid value, using the default", { setting: this.id, value: raw });
-		}
-		return this.default;
+		const previous = warned.get(this.id);
+		if (previous && Bun.deepEquals(previous.raw, raw)) return;
+		const source = sourceOf();
+		warned.set(this.id, { setting: this, raw, source, ...rejectedValueMetadata(raw) });
+		this.warnRejected(raw, source);
+	}
+
+	/**
+	 * Registry plumbing: logs that a config file holds a value this setting rejects. Diagnostics name
+	 * the setting, type, length and expectation, never the value: invalid data often is a misplaced token.
+	 * Callers decide how often.
+	 */
+	warnRejected(raw: unknown, source: string | undefined): void {
+		const context = { setting: this.id, ...rejectedValueMetadata(raw), expected: this.expected };
+		logger.warn("Settings: ignoring invalid value", source === undefined ? context : { ...context, source });
+	}
+
+	/** Registry plumbing: `settings` reads an accepted value or none, so breaking it again is reported again. */
+	rearmRejected(settings: Settings): void {
+		const warned = settings.warnState.invalid;
+		if (warned.size !== 0) warned.delete(this.id);
 	}
 
 	/**
@@ -672,8 +768,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		}
 		this.definition.validate?.(value);
 		if (!this.accepts(value)) {
-			const expected = this.enumValues ? `one of ${this.enumValues.join(", ")}` : `a ${this.definition.type}`;
-			throw new Error(`Invalid value for ${this.id}: ${Bun.inspect(value)} (expected ${expected})`);
+			throw new Error(`Invalid value for ${this.id}: ${describeRejectedValue(value)} (expected ${this.expected})`);
 		}
 	}
 
@@ -788,12 +883,15 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		settingsOf(scope).clearOverrideValue(this);
 	}
 
-	/** Whether the environment or any settings layer (runtime, overlay, project, global) sets this value. */
+	/**
+	 * Whether the environment or any settings layer (runtime, overlay, project, global) sets this value.
+	 * A value the setting rejects never counts: it reads as unset (see `Settings.rawValue`).
+	 */
 	isConfigured(scope: ScopeLike): boolean {
 		return this.envValue() !== undefined || settingsOf(scope).isConfigured(this);
 	}
 
-	/** Layer supplying the effective value. */
+	/** Layer supplying the effective value; a value the setting rejects supplies none. */
 	provenance(scope: ScopeLike): SettingProvenance {
 		return this.#effectiveEnv(scope) !== undefined ? "env" : settingsOf(scope).getProvenance(this);
 	}
@@ -840,27 +938,110 @@ export function all(): readonly AnySetting[] {
 // Warn-once diagnostics
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** Safe shape information about a rejected configured value; the value itself never leaves registry plumbing. */
+export interface RejectedValueMetadata {
+	readonly valueType: string;
+	readonly valueLength: number;
+}
+
+/** A config value's type and size, for diagnostics that must not disclose its contents. */
+export function rejectedValueMetadata(value: unknown): RejectedValueMetadata {
+	const valueType = Array.isArray(value) ? "array" : value === null ? "null" : typeof value;
+	const valueLength =
+		typeof value === "string" || Array.isArray(value)
+			? value.length
+			: value !== null && typeof value === "object"
+				? Object.keys(value).length
+				: String(value).length;
+	return { valueType, valueLength };
+}
+
+/** A rejected value's shape as a message shows it, `string (length 9)`: never its text. */
+export function formatRejectedValue({ valueType, valueLength }: RejectedValueMetadata): string {
+	return `${valueType} (length ${valueLength})`;
+}
+
+/** Longest typed value a parse error repeats; above it, the text could be a pasted credential. */
+const TYPED_TEXT_SHOWN_MAX = 16;
+
+/**
+ * A value a setting rejects, as an error or warning may name it. A number, a boolean or an empty key
+ * is shown as written, because there is no text in it to leak and its shape says nothing useful
+ * (`number (length 3)` for `123`). A string, list or record is shown by type and length only: a
+ * token pasted under the wrong key is the likeliest such value, and these messages reach the log and
+ * the terminal.
+ */
+export function describeRejectedValue(value: unknown): string {
+	if (value === null || typeof value === "number" || typeof value === "boolean") return Bun.inspect(value);
+	return formatRejectedValue(rejectedValueMetadata(value));
+}
+
+/** A config file's rejected setting, safe to show through `Settings.ignoredValues`. */
+export interface IgnoredValue extends RejectedValueMetadata {
+	readonly setting: AnySetting;
+	/** The config file holding it, when known. */
+	readonly source: string | undefined;
+}
+
+/** Registry-private rejected value retained only to re-arm an unchanged warning without disclosing it. */
+interface RejectedValue extends IgnoredValue {
+	readonly raw: unknown;
+}
+
 /**
  * Warn-once diagnostics of one settings instance, stored at `Settings.warnState`: each is re-armed
  * only by that instance's own values, so instances reading different values never re-trigger each other.
  */
 export interface WarnState {
-	/** Invalid configured value each setting (by id) last warned about; re-armed once the value is fixed. */
-	readonly invalid: Map<string, unknown>;
+	/** Rejected value each setting (by id) last read as unset; re-armed once the value is fixed. */
+	readonly invalid: Map<string, RejectedValue>;
 	/** Unknown `items` entries each setting (by id) warned about that are still configured. */
 	readonly items: Map<string, Set<string>>;
+	/** Per loaded layer (each `--config` file, the project): values its load dropped, by setting id (see {@link reportDropped}). */
+	readonly dropped: Map<string, ReadonlyMap<string, RejectedValue>>;
 }
 
 /**
  * Registry plumbing run by `Settings` when it derives `target` from `source` (overlays, cwd clones):
  * `target` takes over `source`'s warn-once diagnostics, so the values it inherits are not reported again.
+ * An overlay loads no files of its own and reads its parent's dropped values live
+ * (`Settings.ignoredValues`), so it passes `dropped: false` rather than take a copy that goes stale.
  */
-export function inheritWarnings(target: Settings, source: Settings): void {
-	const { invalid, items } = target.warnState;
+export function inheritWarnings(target: Settings, source: Settings, { dropped: copyDropped = true } = {}): void {
+	const { invalid, items, dropped } = target.warnState;
 	invalid.clear();
 	items.clear();
+	dropped.clear();
 	for (const [id, value] of source.warnState.invalid) invalid.set(id, value);
 	for (const [id, entries] of source.warnState.items) items.set(id, new Set(entries));
+	if (copyDropped) for (const [file, values] of source.warnState.dropped) dropped.set(file, values);
+}
+
+/**
+ * Registry plumbing run by `Settings` each time it loads `layer` (a `--config` file path, or the
+ * project): warns about each value in `dropped` (one its setting rejects, so the load left it out)
+ * that the previous load of `layer` did not already report from the same file, naming the file
+ * `sourceOf` gives (`layer` itself by default), and records the set for `Settings.ignoredValues`.
+ * An unchanged layer stays quiet on reload; a value fixed and broken again is reported again.
+ */
+export function reportDropped(
+	settings: Settings,
+	layer: string,
+	dropped: ReadonlyMap<AnySetting, unknown>,
+	sourceOf: (setting: AnySetting, value: unknown) => string = () => layer,
+): void {
+	const warned = settings.warnState.dropped;
+	const previous = warned.get(layer);
+	const reported = new Map<string, RejectedValue>();
+	for (const [setting, value] of dropped) {
+		const source = sourceOf(setting, value);
+		reported.set(setting.id, { setting, raw: value, source, ...rejectedValueMetadata(value) });
+		const before = previous?.get(setting.id);
+		if (before && before.source === source && Bun.deepEquals(before.raw, value)) continue;
+		setting.warnRejected(value, source);
+	}
+	if (reported.size === 0) warned.delete(layer);
+	else warned.set(layer, reported);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

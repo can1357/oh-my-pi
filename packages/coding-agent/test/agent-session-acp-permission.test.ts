@@ -5,7 +5,7 @@
  * `ClientBridge.requestPermission`, while regular file-editing tools keep the same no-approval
  * behavior they have in the TUI.
  */
-import { afterAll, afterEach, beforeAll, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModelOptions } from "@oh-my-pi/pi-ai/providers/mock";
@@ -30,7 +30,9 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { dispatchXdevTool, resolveMountedXdevExecutable, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
-import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { logger, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { loadHandWrittenConfig } from "./helpers/approval-config-file";
+import { type HandEditedLayers, loadHandEditedSettings } from "./helpers/hand-edited-settings";
 
 // ---------------------------------------------------------------------------
 // Shared setup
@@ -94,12 +96,14 @@ async function createSession(
 		xdev?: XdevState;
 		builtInToolNames?: string[];
 		persist?: boolean;
+		/** Settings to run with instead of an isolated instance built from `settingsOverrides`. */
+		settings?: Settings;
 	},
 ): Promise<AgentSession> {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 
-	const settings = Settings.isolated({ "compaction.enabled": false, ...settingsOverrides });
+	const settings = options?.settings ?? Settings.isolated({ "compaction.enabled": false, ...settingsOverrides });
 	const sessionManager = options?.persist
 		? SessionManager.create(tempDir.path(), `${tempDir.path()}/sessions`)
 		: SessionManager.inMemory(tempDir.path());
@@ -332,6 +336,121 @@ it("explicit yolo still gates tools whose per-tool policy requires a prompt", as
 	expect(bashTool.executeCalls).toBe(1);
 });
 
+describe("a hand-edited tools.approvalMode", () => {
+	/** ACP permission requests for one bash and one delete call, under config files holding `layers`. */
+	async function permissionRequests(layers: HandEditedLayers): Promise<{ bash: number; delete: number }> {
+		const dir = TempDir.createSync("@pi-acp-approval-mode-");
+		try {
+			const bashTool = makeFakeTool("bash");
+			const deleteTool = makeFakeTool("delete");
+			const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+			const permissionSpy = spyOn(bridge, "requestPermission");
+			const settings = await loadHandEditedSettings(dir, layers);
+			session = await createSession([bashTool, deleteTool], bridge, {}, { settings });
+			await session.setActiveToolsByName(["bash", "delete"]);
+			const live = session.agent.state.tools;
+			const bash = live.find(t => t.name === "bash")!;
+			await bash.execute("call-bash", { command: "echo hi" }, undefined, undefined as never, undefined as never);
+			const bashRequests = permissionSpy.mock.calls.length;
+			const del = live.find(t => t.name === "delete")!;
+			await del.execute("call-delete", { path: "a.txt" }, undefined, undefined as never, undefined as never);
+			expect(bashTool.executeCalls + deleteTool.executeCalls).toBe(2);
+			return { bash: bashRequests, delete: permissionSpy.mock.calls.length - bashRequests };
+		} finally {
+			await session?.dispose();
+			session = undefined;
+			dir.removeSync();
+		}
+	}
+
+	const asks = { bash: 1, delete: 1 };
+	// Each kind of value a user can type for the key, other than yolo itself: every way to miss the
+	// enum (case, whitespace, wrong type), the empty value, and every other valid mode.
+	const typed: Array<[label: string, value: unknown]> = [
+		["yolo in the wrong case", "YOLO"],
+		["yolo with a leading space", " yolo"],
+		["a number", 1],
+		["a boolean", true],
+		["a list holding yolo", ["yolo"]],
+		["an object holding yolo", { mode: "yolo" }],
+		["an empty value", null],
+		["always-ask", "always-ask"],
+		["always-ask-cached", "always-ask-cached"],
+		["write", "write"],
+	];
+
+	it.each(typed)("keeps ACP permission prompts on for %s", async (_label, value) => {
+		expect(await permissionRequests({ global: { tools: { approvalMode: value } } })).toEqual(asks);
+	});
+
+	it("keeps the mode a lower config file chose when a higher one holds a malformed value", async () => {
+		// The first --config file's always-ask outranks the global yolo; the typos in the project
+		// config and in the second --config file read as unset there.
+		expect(
+			await permissionRequests({
+				global: { tools: { approvalMode: "yolo" } },
+				project: { tools: { approvalMode: "alwasy-ask" } },
+				overlays: [{ tools: { approvalMode: "always-ask" } }, { tools: { approvalMode: 1 } }],
+			}),
+		).toEqual(asks);
+	});
+
+	it("turns ACP permission prompts off only for yolo written in some layer", async () => {
+		expect(await permissionRequests({})).toEqual(asks);
+		expect(await permissionRequests({ global: { tools: { approvalMode: "yolo" } } })).toEqual({ bash: 0, delete: 0 });
+		// A malformed value over the user's own yolo reads as unset there, so that yolo still applies.
+		expect(
+			await permissionRequests({
+				global: { tools: { approvalMode: "yolo" } },
+				project: { tools: { approvalMode: "alwasy-ask" } },
+			}),
+		).toEqual({ bash: 0, delete: 0 });
+	});
+});
+
+it("explicit yolo still gates a destructive tool whose hand-edited policy is not a policy, saying why", async () => {
+	const deleteTool = makeFakeTool("delete");
+	const requests: ClientBridgePermissionToolCall[] = [];
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(toolCall) {
+			requests.push(toolCall);
+			return { outcome: "selected", optionId: "allow_once", kind: "allow_once" };
+		},
+	};
+	const logWarn = spyOn(logger, "warn").mockImplementation(() => {});
+	try {
+		// Only a config file can hold such an entry: every write refuses it.
+		const settings = await loadHandWrittenConfig(tempDir.path(), {
+			compaction: { enabled: false },
+			tools: { approvalMode: "yolo", approval: { delete: false } },
+		});
+		session = await createSession([deleteTool], bridge, {}, { settings });
+
+		await session.setActiveToolsByName(["delete"]);
+		const wrappedDelete = session.agent.state.tools.find(t => t.name === "delete");
+		await wrappedDelete!.execute(
+			"call-1",
+			{ path: "/tmp/gone.ts" },
+			undefined,
+			undefined as never,
+			undefined as never,
+		);
+
+		expect(requests.map(request => request.content)).toEqual([
+			[
+				{
+					type: "content",
+					content: { type: "text", text: "Reason: tools.approval.delete is a boolean, not allow, deny or prompt" },
+				},
+			],
+		]);
+		expect(deleteTool.executeCalls).toBe(1);
+	} finally {
+		logWarn.mockRestore();
+	}
+});
+
 it("rejects intercepted bash command before invoking ACP requestPermission", async () => {
 	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
 	const permissionSpy = spyOn(bridge, "requestPermission");
@@ -359,7 +478,6 @@ it("rejects intercepted bash command before invoking ACP requestPermission", asy
 
 	expect(permissionSpy).not.toHaveBeenCalled();
 });
-
 /**
  * Minimal runner for wrapping a tool exactly as an ACP session does: no
  * interactive UI (so the inner tier gate fails closed) and no event handlers.

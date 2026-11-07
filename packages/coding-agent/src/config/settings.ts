@@ -46,8 +46,11 @@ import {
 	type AnySetting,
 	all as allSettings,
 	bindEffects,
+	type IgnoredValue,
 	inheritWarnings,
+	reportDropped,
 	lookup as lookupSetting,
+	rejectedValueMetadata,
 	resetRegistryForTest,
 	settingValuesEqual,
 	type ValueCacheEntry,
@@ -133,13 +136,27 @@ type MainYamlReadResult = {
 };
 
 type ProjectSettingsReadResult = {
+	/** The merged project layer, without the values its settings reject. */
 	settings: RawSettings;
+	/** The merged project layer as written, those values included (see `Settings.getProjectSettings`). */
+	asWritten: RawSettings;
 	fileSettings: RawSettings;
 	shellPathSource: string | undefined;
 	/** Files that supplied merged project-level settings items. */
 	sourcePaths: string[];
 	/** Project warnings surfaced for this read; commit with the layer as `#projectSettingsWarningsSeen`. */
 	warningsSeen: Set<string>;
+	/**
+	 * Records the values the read dropped (see `reportDropped`). Run only when the layer is committed,
+	 * so a read that fails or is not adopted keeps the record of an earlier rejection.
+	 */
+	reportDropped: () => void;
+	/**
+	 * The value the read dropped for each setting that rejected it, as written. A keep-last-good
+	 * reload reads it to restore a setting's previous value (see `#keepReadableValues`), which the
+	 * dropped layer alone can no longer show.
+	 */
+	rejected: Map<AnySetting, unknown>;
 };
 
 /** `strict` rejects on any unreadable layer; `keep-last-good` keeps each failed layer's previous value. */
@@ -154,6 +171,10 @@ const CONFIG_WATCH_DEBOUNCE_MS = 200;
 type ConfigOverlayReadResult = {
 	settings: RawSettings;
 	shellPathSource: string | undefined;
+	/** As {@link ProjectSettingsReadResult.reportDropped}, for every `--config` file the read loaded. */
+	reportDropped: () => void;
+	/** As {@link ProjectSettingsReadResult.rejected}, across every `--config` file the read loaded. */
+	rejected: Map<AnySetting, unknown>;
 };
 
 export interface SettingsOptions {
@@ -309,6 +330,14 @@ interface OwnLayers {
 /** The layers an {@link Settings.overlay} child writes locally; see {@link Settings.overlayLayers}. */
 export type OverlayLayers = Readonly<Pick<OwnLayers, "global" | "overrides"> & { derived: boolean }>;
 
+/** One {@link IgnoredValue} as a {@link SettingsMirrorState} carries it: the setting travels by id. */
+export interface MirroredIgnoredValue {
+	readonly id: string;
+	readonly source: string | undefined;
+	readonly valueType: string;
+	readonly valueLength: number;
+}
+
 /**
  * Copy of one instance's own layers and scope, from which a worker-thread {@link Settings.mirror}
  * is built and kept current ({@link Settings.mirrorState}, {@link Settings.applyMirrorState}).
@@ -321,11 +350,30 @@ export interface SettingsMirrorState {
 	readonly configFiles: readonly string[];
 	readonly global: RawSettings;
 	readonly project: RawSettings;
+	/**
+	 * The project layer as written, rejected values included, which {@link Settings.getProjectSettings}
+	 * reports. It is not derivable from `project`, where those values were dropped as the files loaded.
+	 */
+	readonly projectAsWritten: RawSettings;
+	/**
+	 * The global config file and the project files behind those layers. A mirror opens no file, so
+	 * without them it cannot name the file an ignored value came from (see `Settings.ignoredValues`)
+	 * and reports the same value a second time with no source.
+	 */
+	readonly configPath: string | null;
+	readonly projectSourcePaths: readonly string[];
 	readonly configOverlay: RawSettings;
 	readonly overrides: RawSettings;
 	readonly derived: boolean;
 	readonly projectShellPathSource: string | undefined;
 	readonly overlayShellPathSource: string | undefined;
+	/**
+	 * What the source ignores because its setting rejects it ({@link Settings.ignoredValues}). Carried
+	 * because the layers alone no longer show it: a project or `--config` file's rejected value is
+	 * dropped as it loads. Without it a worker mirror reads an unreadable `tools.approval` as unset,
+	 * which is permissive — the opposite of what the file says.
+	 */
+	readonly ignored: readonly MirroredIgnoredValue[];
 }
 
 /** A write made on a worker mirror, replayed on its main-thread instance; settings travel by id. */
@@ -368,6 +416,12 @@ interface LayerRefresh {
 	layer: "global" | "project" | "configOverlay";
 	settings: RawSettings;
 	source: string;
+	/**
+	 * What the read dropped for each setting that rejected it, where the layer drops as it loads
+	 * (project, `--config`). `settings` no longer shows those values, and a keep-last-good reload
+	 * needs them to tell "the file holds something this build cannot read" from "the file holds nothing".
+	 */
+	rejected?: Map<AnySetting, unknown>;
 	commit(): void;
 }
 
@@ -392,12 +446,14 @@ function settingsGroupOnlyPrefixes(): Readonly<Record<string, true>> {
 }
 
 /**
- * Drop entries from capability-provided project settings whose non-object
+ * Drop entries from a project settings file or a `--config` file whose non-object
  * value would shadow an entire settings group. `.claude/settings.json` is
  * shared with other tools, and a foreign leaf like `"tui": "fullscreen"`
  * deep-merges over omp's `tui` group, silently replacing every `tui.*`
- * setting for sessions rooted in that project. Values at schema leaves,
- * unknown keys, and well-formed nested objects pass through unchanged.
+ * setting for sessions rooted in that project; a `tools: false` in a `--config`
+ * file would likewise drop every lower `tools.*` setting, approval policies
+ * included. Values at schema leaves, unknown keys, and well-formed nested
+ * objects pass through unchanged.
  */
 export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, basePrefix = ""): RawSettings {
 	const result: RawSettings = {};
@@ -409,7 +465,7 @@ export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, 
 			continue;
 		}
 		if (typeof value !== "object" || value === null || Array.isArray(value)) {
-			logger.warn("Settings: ignoring project setting that would shadow a settings group", {
+			logger.warn("Settings: ignoring a value that would shadow a settings group", {
 				setting: path,
 				source: sourcePath,
 			});
@@ -542,6 +598,25 @@ function configuredValue(merged: RawSettings, setting: AnySetting, cwd: string):
 	return resolvePathScopedStringArray(setting, value, cwd) ?? value;
 }
 
+let permissiveDefaults: { registered: number; settings: AnySetting[] } | undefined;
+
+/**
+ * Settings whose unset state is permissive (`RecordDefinition.permissiveDefault`, e.g.
+ * `tools.approval`): a value one of them rejects counts wherever a config file holds it.
+ */
+function permissiveDefaultSettings(): readonly AnySetting[] {
+	const registered = allSettings();
+	if (permissiveDefaults?.registered !== registered.length) {
+		permissiveDefaults = {
+			registered: registered.length,
+			settings: registered.filter(
+				setting => setting.definition.type === "record" && setting.definition.permissiveDefault === true,
+			),
+		};
+	}
+	return permissiveDefaults.settings;
+}
+
 function resolvePathScopedStringArray(setting: AnySetting, value: unknown, cwd: string): string[] | undefined {
 	const scope = setting.definition.pathScoped;
 	if (!scope || !Array.isArray(value)) return undefined;
@@ -636,8 +711,10 @@ export class Settings {
 	#configFiles: string[] = [];
 	/** Global settings from config.yml/config.yaml */
 	#global: RawSettings = {};
-	/** Project settings from .claude/settings.yml etc */
+	/** Project settings from .claude/settings.yml etc, without the values their settings reject */
 	#project: RawSettings = {};
+	/** {@link #project} as written, those values included; see {@link getProjectSettings}. */
+	#projectAsWritten: RawSettings = {};
 	/** Last successfully loaded native .omp/config.yml contents. */
 	#projectFileSettings: RawSettings = {};
 	/** Logical config paths whose malformed targets were moved aside. */
@@ -666,7 +743,7 @@ export class Settings {
 	 */
 	readonly valueCache: (ValueCacheEntry | undefined)[] = [];
 	/** Registry-owned warn-once diagnostics of this instance; see `config/registry.ts`. */
-	readonly warnState: WarnState = { invalid: new Map(), items: new Map() };
+	readonly warnState: WarnState = { invalid: new Map(), items: new Map(), dropped: new Map() };
 	/** Change listeners bucketed by the `slot` of the setting they observe ({@link onEffectiveChange}). */
 	#changeListeners: (Set<SettingChangeListener> | undefined)[] = [];
 	/** Forwarders of every change into live {@link overlay} children. */
@@ -722,6 +799,11 @@ export class Settings {
 
 	/** Whether to persist changes */
 	#persist: boolean;
+	/**
+	 * Worker mirror: the main instance's global config file, for naming where an ignored value came
+	 * from. Kept apart from `#configPath`, which also decides whether this instance writes to disk.
+	 */
+	#mirroredConfigPath: string | null = null;
 	/** Main-thread instance this worker mirror replicates; set only by {@link Settings.mirror}. */
 	#mirror: SettingsMirrorSource | undefined;
 	/** {@link SettingsMirrorState.generation} this mirror last adopted; `-1` before the first. */
@@ -730,6 +812,11 @@ export class Settings {
 	#layerGeneration = 0;
 	/** Observers of own-layer and scope changes ({@link onLayersChange}). */
 	#layerListeners = new Set<() => void>();
+	/**
+	 * Worker mirror: what the main instance ignores because its setting rejects it, carried in
+	 * {@link SettingsMirrorState.ignored}. Empty on a main-thread instance, which reads its own layers.
+	 */
+	#mirroredIgnored: IgnoredValue[] = [];
 
 	private constructor(options: SettingsOptions = {}) {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
@@ -746,7 +833,9 @@ export class Settings {
 	/**
 	 * Runtime-override layer for dotted constructor `overrides`: legacy ids migrate first, then every
 	 * path must belong to a registered setting and every value is normalized and checked like a
-	 * handle `override`. `undefined` values are skipped; `null` stays as an unset tombstone.
+	 * handle `override`. `undefined` values are skipped; `null` stays as an unset tombstone, except
+	 * where unset is permissive (`tools.approval`): there it would erase every lower value, so it is
+	 * refused like any other value the setting rejects.
 	 *
 	 * @throws Error on an unknown setting or a value its definition rejects.
 	 */
@@ -760,7 +849,7 @@ export class Settings {
 		assertKnownSettingPaths(layer);
 		for (const setting of allSettings()) {
 			const value = getByPath(layer, setting.segments);
-			if (value === undefined || value === null) continue;
+			if (value === undefined || (value === null && !setting.rejects(value))) continue;
 			const normalized = setting.definition.normalize ? setting.definition.normalize(value) : value;
 			setting.assertWritable(normalized);
 			setByPath(layer, setting.segments, normalized);
@@ -867,7 +956,7 @@ export class Settings {
 		child.#storage = this.#storage;
 		child.#parent = this;
 		child.#derived = options.derived ?? false;
-		inheritWarnings(child, this);
+		inheritWarnings(child, this, { dropped: false });
 		child.#rebuildMerged();
 		// The parent holds only a weak reference, so a discarded child is collected without an
 		// explicit dispose; its listener unsubscribes on the next parent change.
@@ -992,11 +1081,20 @@ export class Settings {
 			configFiles: [...this.#configFiles],
 			global: structuredClone(this.#global),
 			project: structuredClone(this.#project),
+			projectAsWritten: structuredClone(this.#projectAsWritten),
+			configPath: this.#globalConfigPath() ?? null,
+			projectSourcePaths: [...this.#projectSourcePaths],
 			configOverlay: structuredClone(this.#configOverlay),
 			overrides: structuredClone(this.#overrides),
 			derived: this.#derived,
 			projectShellPathSource: this.#projectShellPathSource,
 			overlayShellPathSource: this.#overlayShellPathSource,
+			ignored: this.#ownIgnoredValues().map(({ setting, source, valueType, valueLength }) => ({
+				id: setting.id,
+				source,
+				valueType,
+				valueLength,
+			})),
 		};
 	}
 
@@ -1017,11 +1115,20 @@ export class Settings {
 		this.#configFiles = [...state.configFiles];
 		this.#global = structuredClone(state.global);
 		this.#project = structuredClone(state.project);
+		this.#projectAsWritten = structuredClone(state.projectAsWritten);
+		this.#mirroredConfigPath = state.configPath;
+		this.#projectSourcePaths = [...state.projectSourcePaths];
 		this.#configOverlay = structuredClone(state.configOverlay);
 		this.#overrides = structuredClone(state.overrides);
 		this.#derived = state.derived;
 		this.#projectShellPathSource = state.projectShellPathSource;
 		this.#overlayShellPathSource = state.overlayShellPathSource;
+		// The layers do not carry what their files hold and this build cannot read; without this a
+		// worker mirror reads an unreadable `tools.approval` as unset, which is permissive.
+		this.#mirroredIgnored = state.ignored.flatMap(({ id, source, valueType, valueLength }) => {
+			const setting = lookupSetting(id);
+			return setting ? [{ setting, source, valueType, valueLength }] : [];
+		});
 		this.#rebuildMerged();
 		if (previous) this.#fireChangesSince(previous);
 	}
@@ -1060,25 +1167,99 @@ export class Settings {
 	 * without a value (`fallbackChains:`), and no schema entry has a null
 	 * default, so returning it verbatim would hand callers a value the schema
 	 * says is impossible (#13183).
+	 *
+	 * A value the setting rejects is unset too, with a warning naming the file holding it
+	 * (`Setting.reportRejected`). Project and `--config` files drop such values as they load
+	 * ({@link #dropRejected}), so the files and layers beneath still apply; what can remain here is a
+	 * rejected global value, the lowest layer, or one a definition's `validate` keeps for its own check.
 	 */
 	rawValue(setting: AnySetting): unknown {
-		return configuredValue(this.#mergedView(), setting, this.#cwd);
+		const value = configuredValue(this.#mergedView(), setting, this.#cwd);
+		if (value === undefined || setting.accepts(value)) {
+			setting.rearmRejected(this);
+			return value;
+		}
+		setting.reportRejected(this, value, () => this.#sourceOf(setting));
+		return undefined;
+	}
+
+	/** The global config file, on a worker mirror the one its main instance reads. */
+	#globalConfigPath(): string | undefined {
+		return this.#configPath ?? this.#mirroredConfigPath ?? undefined;
+	}
+
+	/** The config file(s) holding `setting`'s merged value, as {@link getProvenance} finds its layer. */
+	#sourceOf(setting: AnySetting): string | undefined {
+		const segments = setting.segments;
+		if (getByPath(this.#overrides, segments) !== undefined) return undefined;
+		if (getByPath(this.#configOverlay, segments) !== undefined) return this.#configFiles.join(", ");
+		if (getByPath(projectLayerForMerge(this.#project), segments) !== undefined) {
+			return this.#projectSourcePaths.join(", ") || getProjectAgentDir(this.#cwd);
+		}
+		if (getByPath(this.#global, segments) !== undefined) return this.#globalConfigPath();
+		return this.#parent ? this.#parent.#sourceOf(setting) : undefined;
+	}
+
+	/**
+	 * Safe metadata for config values this instance ignores because their setting rejects them, each
+	 * with its file: those project and `--config` files dropped as they loaded, and a rejected value
+	 * read as unset (a global one, say) once its setting has been read. Where unset is permissive
+	 * (`tools.approval`), every rejected value the global file holds counts too, even one a higher
+	 * layer's value hides from every read. An overlay also reports what its parent ignores now, not only
+	 * what it ignored when the overlay was made. Never exposes the raw value.
+	 */
+	ignoredValues(): IgnoredValue[] {
+		const ignored = new Map<string, IgnoredValue>();
+		for (const value of this.#parent?.ignoredValues() ?? []) {
+			ignored.set(`${value.setting.id}\0${value.source ?? ""}`, value);
+		}
+		for (const value of this.#ownIgnoredValues()) ignored.set(`${value.setting.id}\0${value.source ?? ""}`, value);
+		return [...ignored.values()];
+	}
+
+	/**
+	 * {@link ignoredValues} without what a parent ignores, which a child reads live from that parent.
+	 * This is what a {@link mirrorState} carries: a child mirror that froze its parent's records would
+	 * keep asking after the parent's file is repaired.
+	 *
+	 * An overlay copies its parent's `invalid` records when it is made (`inheritWarnings`) and shares
+	 * its global layer, and its own writes are checked, so a rejected value it reports is always the
+	 * parent's; only a root instance contributes those.
+	 */
+	#ownIgnoredValues(): IgnoredValue[] {
+		const ignored = new Map<string, IgnoredValue>();
+		const add = ({ setting, source, valueType, valueLength }: IgnoredValue): void => {
+			ignored.set(`${setting.id}\0${source ?? ""}`, { setting, source, valueType, valueLength });
+		};
+		for (const value of this.#mirroredIgnored) add(value);
+		if (!this.#parent) for (const value of this.warnState.invalid.values()) add(value);
+		for (const layer of this.warnState.dropped.values()) for (const value of layer.values()) add(value);
+		// An overlay shares its parent's global layer, so only a root scans it.
+		if (!this.#parent) {
+			for (const setting of permissiveDefaultSettings()) {
+				const value = getByPath(this.#global, setting.segments);
+				if (setting.rejects(value)) {
+					add({ setting, source: this.#globalConfigPath(), ...rejectedValueMetadata(value) });
+				}
+			}
+		}
+		return [...ignored.values()];
 	}
 
 	/**
 	 * Whether `setting` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.
-	 * A configured `null` counts as unset, like in {@link rawValue}.
+	 * A configured `null` counts as unset, like in {@link rawValue}, and so does a
+	 * value the setting rejects.
 	 */
 	isConfigured(setting: AnySetting): boolean {
-		const value = getByPath(this.#mergedView(), setting.segments);
-		return value !== undefined && value !== null;
+		return this.rawValue(setting) !== undefined;
 	}
 
 	/**
 	 * Layer supplying the effective value of `setting`, in merge precedence order:
 	 * runtime override → config overlay → project → global → (overlay parent) → schema default.
-	 * A value that merges to `null` is unset and reports `"default"`.
+	 * A value that merges to `null`, or that the setting rejects, is unset and reports `"default"`.
 	 */
 	getProvenance(setting: AnySetting): SettingProvenance {
 		if (!this.isConfigured(setting)) return "default";
@@ -1233,14 +1414,15 @@ export class Settings {
 
 	/**
 	 * Removes from `layers.overrides` (replaced by a copy) every soft pin the persisted `layers`
-	 * (global, project, `--config` overlay, parent) now configure; returns the settled settings.
+	 * (global, project, `--config` overlay, parent) now configure with a value the setting accepts;
+	 * returns the settled settings.
 	 */
 	#settlePins(layers: OwnLayers): AnySetting[] {
 		if (this.#softPins.size === 0) return [];
 		const persisted = this.#mergeOverParent(this.#mergeOwnLayers({ ...layers, overrides: {} }));
 		const settled = [...this.#softPins].filter(setting => {
 			const value = getByPath(persisted, setting.segments);
-			return value !== undefined && value !== null;
+			return value !== undefined && value !== null && setting.accepts(value);
 		});
 		if (settled.length === 0) return settled;
 		layers.overrides = structuredClone(layers.overrides);
@@ -1515,17 +1697,26 @@ export class Settings {
 		let cloned: Settings;
 		if (this.#parent) {
 			cloned = (await this.#parent.cloneForCwd(cwd)).overlay({}, { derived: this.#derived });
+			inheritWarnings(cloned, this);
 			cloned.#project = structuredClone(this.#project);
+			cloned.#projectAsWritten = structuredClone(this.#projectAsWritten);
 		} else {
 			cloned = new Settings({
 				cwd,
 				agentDir: this.#agentDir,
 				inMemory: !this.#persist,
 			});
+			// Before the project re-read, so a file this instance already reported stays quiet.
+			inheritWarnings(cloned, this);
 			cloned.#storage = this.#storage;
 			cloned.#configPath = this.#configPath;
-			cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : structuredClone(this.#project);
-			if (!this.#persist) cloned.#projectShellPathSource = this.#projectShellPathSource;
+			if (this.#persist) {
+				cloned.#project = await cloned.#loadProjectSettings();
+			} else {
+				cloned.#project = structuredClone(this.#project);
+				cloned.#projectAsWritten = structuredClone(this.#projectAsWritten);
+				cloned.#projectShellPathSource = this.#projectShellPathSource;
+			}
 			cloned.#configFiles = [...this.#configFiles];
 			cloned.#overlayShellPathSource = this.#overlayShellPathSource;
 		}
@@ -1537,7 +1728,6 @@ export class Settings {
 		for (const setting of cloned.#settlePins(layers)) cloned.#softPins.delete(setting);
 		cloned.#overrides = layers.overrides;
 		cloned.#rebuildMerged();
-		inheritWarnings(cloned, this);
 		cloned.#validateAll();
 		return cloned;
 	}
@@ -1635,10 +1825,12 @@ export class Settings {
 			if (projectResult.status === "fulfilled") {
 				const project = projectResult.value;
 				this.#applyPendingProjectWrites(project.settings);
+				this.#applyPendingProjectWrites(project.asWritten);
 				refreshed.push({
 					layer: "project",
 					settings: project.settings,
 					source: project.sourcePaths.join(", ") || getProjectAgentDir(this.#cwd),
+					rejected: project.rejected,
 					commit: () => this.#commitProjectRead(project),
 				});
 			}
@@ -1648,8 +1840,10 @@ export class Settings {
 					layer: "configOverlay",
 					settings,
 					source: this.#configFiles.join(", "),
+					rejected: overlayResult.value.rejected,
 					commit: () => {
 						this.#overlayShellPathSource = shellPathSource;
+						overlayResult.value.reportDropped();
 					},
 				});
 			}
@@ -1660,7 +1854,7 @@ export class Settings {
 			let layers = this.#ownLayers();
 			const adopted: LayerRefresh[] = [];
 			for (const refresh of refreshed) {
-				if (keepLastGood) this.#keepReadableValues(refresh.settings, layers[refresh.layer], refresh.source);
+				if (keepLastGood) this.#keepReadableValues(refresh, layers[refresh.layer]);
 				const trial: OwnLayers = { ...layers, [refresh.layer]: refresh.settings };
 				if (keepLastGood && !this.#acceptsLayers(trial, refresh.source)) continue;
 				layers = trial;
@@ -1683,25 +1877,35 @@ export class Settings {
 	}
 
 	/**
-	 * Keeps, in a re-read layer `fresh`, the value the `live` layer holds for each setting whose new
-	 * on-disk value this build cannot read (an enum value a newer omp added, a wrong type) while its
-	 * old value was readable. Reading an unreadable value falls back to the default, so a config
-	 * written for another version would otherwise move a running session to a value neither config
-	 * chose — and rebuild every tool description and prompt derived from it, losing the session's
-	 * prompt cache. The file keeps the edit; instances loading it fresh read it as before.
+	 * Keeps, in a re-read layer, the value the `live` layer holds for each setting whose new on-disk
+	 * value this build cannot read (an enum value a newer omp added, a wrong type) while its old value
+	 * was readable. Reading an unreadable value falls back to the default, so a config written for
+	 * another version would otherwise move a running session to a value neither config chose — and
+	 * rebuild every tool description and prompt derived from it, losing the session's prompt cache.
+	 * The file keeps the edit; instances loading it fresh read it as before.
+	 *
+	 * The project and `--config` layers drop a rejected value as they load, so the new value is read
+	 * from the refresh's rejection record rather than from the layer, which no longer shows it.
+	 *
+	 * Never for a setting whose unset state is permissive ({@link Setting.permissiveDefault}): keeping
+	 * the record `tools.approval` held before the edit would let the very calls the new, unreadable
+	 * value was written to restrain keep running unasked, and only until the next launch. Such a value
+	 * stays dropped, which records the rejection that approval resolution reads and fails closed on.
 	 */
-	#keepReadableValues(fresh: RawSettings, live: RawSettings, source: string): void {
+	#keepReadableValues(refresh: LayerRefresh, live: RawSettings): void {
 		for (const setting of allSettings()) {
-			const next = getByPath(fresh, setting.segments);
-			if (next === undefined || next === null || setting.accepts(next)) continue;
+			if (setting.permissiveDefault) continue;
+			const written = getByPath(refresh.settings, setting.segments) ?? refresh.rejected?.get(setting);
+			if (written === undefined || written === null || setting.accepts(written)) continue;
 			const kept = getByPath(live, setting.segments);
 			if (kept === undefined || kept === null || !setting.accepts(kept)) continue;
-			setByPath(fresh, setting.segments, structuredClone(kept));
+			setByPath(refresh.settings, setting.segments, structuredClone(kept));
+			// Neither value's text: the rejected one is the likeliest to be a misplaced token, and the
+			// kept one can be a credential.
 			logger.warn("Settings: keeping last good value; on-disk value is invalid", {
-				path: source,
+				path: refresh.source,
 				setting: setting.id,
-				value: next,
-				kept,
+				...rejectedValueMetadata(written),
 			});
 		}
 	}
@@ -1834,13 +2038,14 @@ export class Settings {
 	}
 
 	/**
-	 * Raw project settings layer (`.claude/settings.yml`, `.omp/config.yml`,
-	 * etc.), deep-cloned. Companion to {@link getGlobalSettings} for the legacy
-	 * pi `SettingsManager` shim's `getProjectSettings()`; an {@link overlay}
-	 * likewise reports its parent's layer under its own.
+	 * Project settings layer as written (`.claude/settings.yml`, `.omp/config.yml`,
+	 * etc.), deep-cloned: a value its setting rejects stays here, though reads leave
+	 * it out. Companion to {@link getGlobalSettings} for the legacy pi
+	 * `SettingsManager` shim's `getProjectSettings()` and `omp config list
+	 * --project`; an {@link overlay} likewise reports its parent's layer under its own.
 	 */
 	getProjectSettings(): RawSettings {
-		const own = structuredClone(this.#project);
+		const own = structuredClone(this.#projectAsWritten);
 		return this.#parent ? this.#deepMerge(this.#parent.getProjectSettings(), own) : own;
 	}
 
@@ -1865,7 +2070,9 @@ export class Settings {
 			return this.#projectShellPathSource ?? "the active project configuration";
 		}
 		if (this.#parent && !Object.hasOwn(this.#global, "shellPath")) return this.#parent.#shellPathSource();
-		return this.#configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
+		// A worker mirror has no config file of its own; naming the default would send someone to a
+		// file that may not exist, when `config.yaml` is the one its main instance read.
+		return this.#globalConfigPath() ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
 	}
 
 	/**
@@ -1980,6 +2187,11 @@ export class Settings {
 		const current: Record<string, unknown> = isRecord(projectRoles) ? { ...projectRoles } : {};
 		current[role] = modelId;
 		setByPath(this.#project, ["modelRoles"], current);
+		const writtenRoles = getByPath(this.#projectAsWritten, ["modelRoles"]);
+		setByPath(this.#projectAsWritten, ["modelRoles"], {
+			...(isRecord(writtenRoles) ? writtenRoles : {}),
+			[role]: modelId,
+		});
 		this.#modifiedProjectModelRoles.add(role);
 		this.#persistedMutationGeneration++;
 		this.#rebuildMerged();
@@ -2678,6 +2890,7 @@ export class Settings {
 		for (const sourcePath of this.#projectSourcePaths) invalidateCapabilityFsCache(sourcePath);
 		let shellPathSource: string | undefined;
 		let merged: RawSettings = {};
+		const items: SettingsCapabilityItem[] = [];
 		const sourcePaths: string[] = [];
 		let rejectedWarnings: string[] | undefined;
 		let warningsSeen = this.#projectSettingsWarningsSeen;
@@ -2704,6 +2917,7 @@ export class Settings {
 				for (const item of result.items as SettingsCapabilityItem[]) {
 					if (item.level === "project") {
 						merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
+						items.push(item);
 						sourcePaths.push(item.path);
 						if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
 					}
@@ -2727,12 +2941,56 @@ export class Settings {
 		if (nativeModelRoles !== undefined) {
 			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
 		}
+		// Migrated before filtering: a legacy key or shape is valid until migration converts it, and
+		// some migrations combine keys from different files.
+		const asWritten = this.#migrateRawSettings(merged, quarantineInvalid);
+		const dropped = new Map<AnySetting, unknown>();
+		const settings = this.#dropRejected(asWritten, dropped);
+		// Where unset is permissive (`tools.approval`), a value a lower file holds counts even when a
+		// higher file's value hides it: unreadable is sticky, so it is dropped and reported like the rest.
+		for (const setting of permissiveDefaultSettings()) {
+			if (dropped.has(setting)) continue;
+			for (let index = items.length - 1; index >= 0; index--) {
+				const value = getByPath(items[index].data as RawSettings, setting.segments);
+				if (!setting.rejects(value)) continue;
+				dropped.set(setting, value);
+				break;
+			}
+		}
+		// The files merged before the filter ran, so a rejected value in a higher file has already
+		// replaced what the lower files hold for that setting. Bring back what they hold that the setting
+		// accepts, merged in file order: a `tools.approval: {bash: deny}` in one file must not vanish
+		// because a higher file holds `tools.approval: "deny-bash"`.
+		for (const setting of dropped.keys()) {
+			let kept: unknown;
+			for (const item of items) {
+				const value = getByPath(item.data as RawSettings, setting.segments);
+				if (value === undefined || value === null || !setting.accepts(value)) continue;
+				kept = isRecord(kept) && isRecord(value) ? this.#deepMerge(kept, value) : value;
+			}
+			if (kept !== undefined) setByPath(settings, setting.segments, structuredClone(kept));
+		}
+		// One key for the project layer: a re-scope to another project replaces what the last one dropped.
+		const report = () =>
+			reportDropped(this, "project", dropped, (setting, value) => {
+				// Name the highest file holding the value; a value migration renamed names the project.
+				if (setting === cfgModelRoles && Bun.deepEquals(nativeModelRoles, value)) return projectConfigPath;
+				for (let index = items.length - 1; index >= 0; index--) {
+					if (Bun.deepEquals(getByPath(items[index].data as RawSettings, setting.segments), value)) {
+						return items[index].path;
+					}
+				}
+				return projectConfigDir;
+			});
 		return {
-			settings: this.#migrateRawSettings(merged, quarantineInvalid),
+			settings,
+			asWritten,
 			fileSettings: structuredClone(nativeProject),
 			shellPathSource,
 			sourcePaths,
 			warningsSeen,
+			reportDropped: report,
+			rejected: dropped,
 		};
 	}
 
@@ -2744,26 +3002,45 @@ export class Settings {
 
 	/** Adopts the read-side state of a project read whose layer is being committed. */
 	#commitProjectRead(result: ProjectSettingsReadResult): void {
+		result.reportDropped();
 		this.#projectFileSettings = result.fileSettings;
 		this.#projectShellPathSource = result.shellPathSource;
 		this.#projectSourcePaths = result.sourcePaths;
 		this.#projectSettingsWarningsSeen = result.warningsSeen;
+		this.#projectAsWritten = result.asWritten;
 	}
 
 	async #readConfigOverlays(captureLegacyChangelogVersion = true): Promise<ConfigOverlayReadResult> {
 		let shellPathSource: string | undefined;
 		let settings: RawSettings = {};
+		const reports: (() => void)[] = [];
+		const rejected = new Map<AnySetting, unknown>();
 		for (const filePath of this.#configFiles) {
-			const overlay = await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion);
+			const written = dropSettingsGroupShadows(
+				await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion),
+				filePath,
+			);
+			const dropped = new Map<AnySetting, unknown>();
+			const overlay = this.#dropRejected(written, dropped);
+			reports.push(() => reportDropped(this, filePath, dropped));
+			for (const [setting, value] of dropped) rejected.set(setting, value);
 			settings = this.#deepMerge(settings, overlay);
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
-		return { settings, shellPathSource };
+		return {
+			settings,
+			shellPathSource,
+			reportDropped: () => {
+				for (const report of reports) report();
+			},
+			rejected,
+		};
 	}
 
 	async #loadConfigOverlays(): Promise<RawSettings> {
 		const result = await this.#readConfigOverlays();
 		this.#overlayShellPathSource = result.shellPathSource;
+		result.reportDropped();
 		return result.settings;
 	}
 
@@ -4065,7 +4342,8 @@ export class Settings {
 	 */
 	#adoptSavedGlobal(saved: RawSettings, source: string): void {
 		this.#applyPendingGlobalWrites(saved);
-		this.#keepReadableValues(saved, this.#global, source);
+		// The global layer keeps its rejected values as written, so the refresh needs no rejection record.
+		this.#keepReadableValues({ layer: "global", settings: saved, source, commit: () => {} }, this.#global);
 		if (!this.#acceptsLayers({ ...this.#ownLayers(), global: saved }, source)) return;
 		const previous = this.#snapshot();
 		this.#global = saved;
@@ -4236,6 +4514,31 @@ export class Settings {
 			}
 		}
 		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) setOwn(result, key, base[key]);
+		return result;
+	}
+
+	/**
+	 * `data`, one project or `--config` file, without the values its settings reject (see
+	 * `Setting.rejects`: the wrong type, not one of an enum's values, or a key left empty where unset is
+	 * permissive), each added to `dropped` for the caller to report. Such a value reads as unset in its
+	 * own file, so the files and layers beneath still apply rather than being replaced by it while the
+	 * layers merge. A definition with `validate` keeps its value for that check, which then fails the
+	 * load on its own terms.
+	 */
+	#dropRejected(data: RawSettings, dropped: Map<AnySetting, unknown>, prefix = ""): RawSettings {
+		const result: RawSettings = {};
+		for (const key of Object.keys(data)) {
+			const value = data[key];
+			const id = prefix === "" ? key : `${prefix}.${key}`;
+			const setting = lookupSetting(id);
+			if (!setting) {
+				setOwn(result, key, isRecord(value) ? this.#dropRejected(value, dropped, id) : value);
+			} else if (setting.definition.validate || !setting.rejects(value)) {
+				setOwn(result, key, value);
+			} else {
+				dropped.set(setting, value);
+			}
+		}
 		return result;
 	}
 }

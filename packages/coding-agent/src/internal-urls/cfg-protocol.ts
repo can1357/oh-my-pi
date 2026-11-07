@@ -147,11 +147,12 @@ async function decide(
 	return answer;
 }
 
+/** `value` as every `cfg://` read, prompt and result shows it: credentials redacted, unreadable entries by shape. */
 function formatValue(setting: AnySetting, value: unknown): string {
 	if (value === undefined || value === null) return "null";
 	if (setting.isCredential && value !== "") return REDACTED;
 	if (typeof value === "boolean" || typeof value === "number") return String(value);
-	return JSON.stringify(value);
+	return JSON.stringify(setting.displayValue(value));
 }
 
 /**

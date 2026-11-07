@@ -55,6 +55,7 @@ import {
 import {
 	approvalRestrictions,
 	formatApprovalPrompt,
+	readUserApprovalPolicies,
 	resolveApproval,
 	sessionApprovalScope,
 } from "../../tools/approval";
@@ -93,7 +94,7 @@ import {
 	cfgTerminalShowImages,
 	cfgTerminalShowProgress,
 } from "../settings";
-import { cfgReadToolResultPreview, cfgToolsApproval, cfgToolsApprovalMode } from "../../tools/settings";
+import { cfgReadToolResultPreview, cfgToolsApprovalMode } from "../../tools/settings";
 import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
 
 type AgentSessionEventKind = AgentSessionEvent["type"];
@@ -2133,7 +2134,9 @@ export class EventController {
 		if (!tool) return undefined;
 		const sessionSettings = session.settings;
 		const mode = cfgToolsApprovalMode.get(sessionSettings);
-		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(sessionSettings);
+		// Not `cfgToolsApproval.get`: a value no layer could read must reach approval resolution as the
+		// unreadable marker, not as the permissive `{}` default (see `readUserApprovalPolicies`).
+		const userPolicies = readUserApprovalPolicies(sessionSettings);
 		const grants = mode === "always-ask-cached" ? session.getApprovalGrants() : undefined;
 		const approval = resolveApproval(
 			tool,
