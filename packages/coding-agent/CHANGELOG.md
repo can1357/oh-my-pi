@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
