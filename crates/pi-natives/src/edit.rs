@@ -543,23 +543,34 @@ async fn resolve_one(resolver: &ResolverCallback, url: &str) -> UrlResolution {
 /// outlives [`RECOVERY_TIMEOUT`]; the walk stops at the second match.
 async fn recover_one(cwd: &Path, authored: &str) -> Option<Resolved> {
 	let glob = RecoveryGlob::new(authored)?;
-	let opts = Options { hidden: true, gitignore: true, skip_git: true, ..Options::default() };
 	let matches = Arc::new(AtomicUsize::new(0));
 	let seen = Arc::clone(&matches);
-	let fs = Fs::Native;
-	let search = walk::collect(&fs, cwd, &opts, false, move |_, entry| {
-		if !glob.matches(entry.path, entry.name(), entry.file_type) {
-			return Action::Skip;
-		}
-		if seen.fetch_add(1, Ordering::AcqRel) == 0 {
-			Action::Continue
-		} else {
-			Action::Stop
-		}
+	let root = cwd.to_path_buf();
+	// Off the host scheduler, where every other walk in the addon already
+	// runs: the walkers spawn a task per directory onto the runtime that
+	// polls them, and those tasks end in `getdents64`/`statx`, so a walk
+	// here holds every host worker for as long as it lasts and nothing else
+	// native gets polled.
+	let search = crate::task::on_filesystem_runtime("edit.recover", async move {
+		let opts = Options { hidden: true, gitignore: true, skip_git: true, ..Options::default() };
+		let fs = Fs::Native;
+		walk::collect(&fs, &root, &opts, false, move |_, entry| {
+			if !glob.matches(entry.path, entry.name(), entry.file_type) {
+				return Action::Skip;
+			}
+			if seen.fetch_add(1, Ordering::AcqRel) == 0 {
+				Action::Continue
+			} else {
+				Action::Stop
+			}
+		})
+		.await
 	});
+	// The deadline stays on the caller's runtime, which is free to fire it;
+	// dropping the timed-out future aborts the walk.
 	let found = tokio::time::timeout(RECOVERY_TIMEOUT, search)
 		.await
-		.ok()?
+		.ok()??
 		.ok()?;
 	if matches.load(Ordering::Acquire) != 1 {
 		return None;
@@ -1149,6 +1160,55 @@ mod tests {
 		tree.write(".git/objects/a.ts", "");
 		tree.write("deep/a.ts", "");
 		assert_eq!(recover_one(&tree.0, "a.ts").await.unwrap().display, "deep/a.ts");
+	}
+
+	/// The recovery walk, and the directory tasks the walker spawns for it,
+	/// must stay off the host scheduler pool: a walk there holds every host
+	/// worker in a filesystem syscall, and nothing else native is polled while
+	/// it lasts. PR #18301 moved every other walk off that pool; this call
+	/// site was out of its scope.
+	///
+	/// Proof without a timing threshold: a host runtime with one worker, and
+	/// that worker occupied for the whole test. A recovery that needs a host
+	/// worker cannot run at all; one on the filesystem runtime answers. The
+	/// wait is bounded off the runtime, because the host's timers do not fire
+	/// either while its only worker is occupied — so a regression fails here
+	/// instead of hanging.
+	#[test]
+	fn recovery_walks_off_the_host_scheduler() {
+		let tree = Scratch::new("placement");
+		tree.write("deep/src/a.ts", "");
+		let host = napi::tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.unwrap();
+		let (occupied_tx, occupied_rx) = std::sync::mpsc::channel::<()>();
+		let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+		// The host's only scheduler worker, busy the way a filesystem syscall
+		// makes it busy: not yielding.
+		host.spawn(async move {
+			let _ = occupied_tx.send(());
+			let _ = release_rx.recv();
+		});
+		occupied_rx.recv().unwrap();
+
+		let (done_tx, done_rx) = std::sync::mpsc::channel();
+		let root = tree.0.clone();
+		std::thread::spawn(move || {
+			let recovered = host.block_on(recover_one(&root, "src/a.ts"));
+			let _ = done_tx.send(recovered.map(|resolved| resolved.display));
+		});
+		let recovered = done_rx.recv_timeout(Duration::from_secs(30));
+		// Let the occupying task go, so the walk this test may have left
+		// queued on the host finishes instead of outliving the test.
+		let _ = release_tx.send(());
+		assert_eq!(
+			recovered.ok().flatten().as_deref(),
+			Some("deep/src/a.ts"),
+			"the recovery walk needed a host scheduler worker, so it runs where it can starve every \
+			 other native call"
+		);
 	}
 
 	/// The preview settles on the recovered path: the first pass misses

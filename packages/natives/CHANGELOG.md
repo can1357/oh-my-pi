@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The edit tool's search for a missing authored path now runs on the filesystem runtime with every other traversal, so an edit whose path is not on disk no longer holds the worker threads the embedded shell and every other native call are scheduled on.
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
