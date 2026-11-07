@@ -53,6 +53,15 @@ export interface AuthGatewayRouteOptions {
 	listModels?: () => Iterable<Model<Api>>;
 	/** Providers the host does not serve; `/v1/usage` and `/v1/credentials/check` leave their accounts out. */
 	excludeProviders?: ReadonlySet<string>;
+	/**
+	 * Models to try, in order, after a request's model fails with a status
+	 * `shouldTryFallbackModel` admits; absent turns fallback off. The router
+	 * resends the same JSON body with only `model` swapped and dispatches the
+	 * returned model itself, skipping one of another model kind or one a scoped
+	 * client may not call. `/v1/pi/stream`, multipart, and bodies without a
+	 * declared length never fall back.
+	 */
+	fallbackModels?: (model: Model<Api>) => readonly Model<Api>[];
 	/** Upstream transport for every provider call; defaults to global `fetch`. Test seam. */
 	fetch?: FetchImpl;
 	/**

@@ -150,7 +150,7 @@ The CLI broker refresh hook also handles managed `mcp_oauth:*` credentials using
 ### CLI
 
 ```
-omp auth-gateway serve   [--bind=host:port] [--no-auth] [--trust-proxy-headers] [--clients=<file>]
+omp auth-gateway serve   [--bind=host:port] [--no-auth] [--trust-proxy-headers] [--clients=<file>] [--model-fallback]
 omp auth-gateway stdio
 omp auth-gateway token   [--regenerate] [--json]
 omp auth-gateway status  [--json]
@@ -161,6 +161,26 @@ omp auth-gateway check   [--strict] [--json]
 - Logs attribute requests to the socket peer address. Behind a trusted reverse proxy, pass `--trust-proxy-headers` to use `X-Forwarded-For` / `X-Real-IP` for authenticated requests; unauthorized requests are always logged with the socket peer. An authenticated request that also carries the gateway token, or its own client token, in its URL or in a forwarded, logged, or identity header is rejected with `400` before any credential lookup. Each `auth-gateway request` log line carries the broker `credentialId` the request started on, and `client` for a [client token](#client-tokens).
 - `token` manages the token file; `--regenerate` requires a running gateway to restart before accepting the replacement. `status` checks the local token file and an authenticated broker snapshot; it does not probe the gateway listener.
 - `check` constructs its own broker-backed store and probes the credentials the gateway would use, without calling a running gateway. Without `--strict` it uses provider usage probes. `--strict` additionally tries suitable bundled chat models and can consume quota; providers with no suitable candidate (including pi-native forwarding, Bedrock, Vertex, and Cursor transports) cannot be completion-probed.
+
+### Model fallback
+
+`serve --model-fallback` retries a failed request on other models, walking `retry.fallbackChains` the way `stdio` does. Without the flag the gateway never changes the model a request names. The chains come from the gateway's effective settings (the same `config.yml` that supplies `auth.accountPolicies`), so a client that cannot fall back by itself, such as a TypeSafe or OpenAI SDK, still reaches a working model:
+
+```yaml
+retry:
+  fallbackChains:
+    typesafe/jev-latest:
+      - openrouter/typesafe/jev-1.14
+```
+
+- `serve` reads the settings once at startup, so restart it to apply a chain change. With the flag it prints how many `retry.fallbackChains` entries it read, or why fallback stays off (`retry.modelFallback: false`, or no chains). The count is of configured entries; it does not check that any chain resolves to a served model.
+- The chain key is looked up as for an omp session: an exact `provider/id` key, else the longest matching `provider/*` key, else the chain of a chat role assigned that model, else `default`. Model-kind roles such as `judge` never match by model, so key a judge chain by its model. Each fallback's own chain continues the walk, and an entry's `@upstream` pin is kept. Session-only policy does not apply: `retry.fallbackOn`, `retry.rateLimitWalksChain` and context-fit checks play no part, keys are matched without the request's effort, and an entry's thinking suffix does not change the resent request.
+- Only a POST whose JSON body names its model in `model` falls back: the three chat routes, `/v1/systemone` and `/alpha/decisions`, images, speech, transcriptions, embeddings, rerank and video submissions. The body must declare a `Content-Length` of at most 32 MiB and must not be multipart. `/v1/pi/stream` never falls back, because its omp clients walk their own chains.
+- The walk starts when the requested model fails with a status above `400` other than `413` and `499`. The gateway resends the same JSON body, with only `model` replaced, to each fallback in turn and answers with the first that succeeds. A fallback that fails, with any status, moves on to the next. When none succeeds, the client gets the requested model's own failure; a client disconnect ends the walk.
+- The gateway answers a `stream: true` chat request with `200` before the upstream replies, so such a request falls back only when it fails before that point, for example with no usable credential; an upstream error inside the stream reaches the client.
+- The gateway remembers no fallback between requests: each request tries the model it names first. In a multi-turn chat, a turn that a fallback answered returns to the requested model in the next request's history, and that model's provider may reject content another model produced, such as thinking signatures. Fallback suits single-shot requests such as judgments, embeddings and images best.
+- A fallback must be a served model of the requested model's kind. A request with a [client token](#client-tokens) also skips fallbacks outside that client's `models` and `accounts`.
+- Once on, fallback applies to every caller. The gateway logs `auth-gateway model failed; trying fallbacks` with the failed model, its status and the fallbacks, then `auth-gateway fallback model failed` for each fallback that fails, with `client` for a client token.
 
 ### Client tokens
 
@@ -200,7 +220,7 @@ omp auth-gateway check   [--strict] [--json]
 - The first output line is `{"ready": true, "version": …}`. `method` defaults to `POST` when the request has a `body`, else `GET`; every route in [Endpoints](#endpoints-1) except `/healthz` is served.
 - Requests run concurrently and answer in completion order; `id` (string or number) matches them up. A line that is not a request answers `400` with its `id` when it had one.
 - A JSON response body is embedded as JSON; a text body (the SSE of a `stream: true` request) as one string once the stream ends; anything else (audio, video) as base64 with `"encoding": "base64"`.
-- `model` takes any `--model` selector: an exact `provider/id`, a bare fuzzy name, a role (`@smol`), or a comma list whose first entry that resolves wins. An attempt that fails with a status above `400` (other than `499`) moves on along that model's `retry.fallbackChains`, the role's chain when the entry named a role; the response's `model` names the model that answered.
+- `model` takes any `--model` selector: an exact `provider/id`, a bare fuzzy name, a role (`@smol`), or a comma list whose first entry that resolves wins. When that model fails with a status above `400` other than `413` and `499`, the request moves on along its `retry.fallbackChains` (the role's chain when the entry named a role) with the same walk as [`serve --model-fallback`](#model-fallback): the first fallback that succeeds answers, and when none does, the client gets the first model's failure. The response's `model` names the model that answered.
 - The process serves until stdin ends, answers what is in flight, and exits.
 
 ### Endpoints
