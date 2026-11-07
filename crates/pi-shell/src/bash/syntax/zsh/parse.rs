@@ -271,11 +271,16 @@ impl Ctx<'_> {
 	/// zsh `parse_event(OUTPAR)` as `skipcomm` runs it: validates a command
 	/// substitution body; the nodes are not kept.
 	pub(super) fn parse_event_nested(&mut self, endtok: T) -> bool {
+		if !self.enter() {
+			return false;
+		}
 		self.lx.tok = T::Endinput;
 		self.ps.incmdpos = true;
 		self.zshlex();
 		let mut items = Vec::new();
-		self.par_event(endtok, &mut items)
+		let ok = self.par_event(endtok, &mut items);
+		self.leave();
+		ok
 	}
 
 	/// zsh `par_event` (its tail recursion as a loop).
@@ -337,6 +342,15 @@ impl Ctx<'_> {
 	/// zsh `par_list`: `{ SEPER } [ sublist [ { SEPER | AMPER | AMPERBANG }
 	/// list ] ]`.
 	fn par_list(&mut self) -> Id<shape::List> {
+		if !self.enter() {
+			return self.t.list(&[]);
+		}
+		let list = self.par_list_items();
+		self.leave();
+		list
+	}
+
+	fn par_list_items(&mut self) -> Id<shape::List> {
 		let mut items = Vec::new();
 		loop {
 			self.skip_seps();
@@ -1492,7 +1506,7 @@ impl Ctx<'_> {
 			while self.cond_sep() {
 				self.zshlex();
 			}
-			let b = self.par_cond()?;
+			let b = self.nested_cond(Self::par_cond)?;
 			return Some(self.t.cond(CondB::Or(a, b)));
 		}
 		Some(a)
@@ -1509,10 +1523,23 @@ impl Ctx<'_> {
 			while self.cond_sep() {
 				self.zshlex();
 			}
-			let b = self.par_cond_1()?;
+			let b = self.nested_cond(Self::par_cond_1)?;
 			return Some(self.t.cond(CondB::And(a, b)));
 		}
 		Some(a)
+	}
+
+	/// `f` one nesting level deeper ([`Ctx::enter`]).
+	fn nested_cond(
+		&mut self,
+		f: fn(&mut Self) -> Option<Id<shape::Cond>>,
+	) -> Option<Id<shape::Cond>> {
+		if !self.enter() {
+			return None;
+		}
+		let r = f(self);
+		self.leave();
+		r
 	}
 
 	/// zsh `par_cond_2`: `BANG cond_2 | INPAR cond OUTPAR | STRING STRING
@@ -1524,7 +1551,7 @@ impl Ctx<'_> {
 		}
 		if self.lx.tok == T::Bang {
 			self.zshlex();
-			let e = self.par_cond_2()?;
+			let e = self.nested_cond(Self::par_cond_2)?;
 			return Some(self.t.cond(CondB::Not(e)));
 		}
 		if self.lx.tok == T::Inpar {
@@ -1532,7 +1559,7 @@ impl Ctx<'_> {
 			while self.cond_sep() {
 				self.zshlex();
 			}
-			let r = self.par_cond();
+			let r = self.nested_cond(Self::par_cond);
 			while self.cond_sep() {
 				self.zshlex();
 			}
