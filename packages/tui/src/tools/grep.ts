@@ -107,9 +107,11 @@ function grepFlagMeta(args: GrepRenderArgs): string[] {
 /**
  * Header subject, `pattern in scope`. A result names the tool's display scope
  * (linked to the original search path); a call falls back to the requested paths.
+ * Callers pass the pattern already syntax-colored: the bundled regex grammar also
+ * handles incomplete, still-streaming patterns.
  */
 function grepSubject(
-	pattern: string | undefined,
+	subject: string | undefined,
 	args: GrepRenderArgs | undefined,
 	uiTheme: Theme,
 	details?: GrepToolDetails,
@@ -118,8 +120,6 @@ function grepSubject(
 	let scope = details?.scopePath || undefined;
 	if (scope && searchPath) scope = fileHyperlink(searchPath, scope);
 	scope ??= toPathList(args?.path ?? args?.paths).join(", ") || undefined;
-	// The bundled regex grammar also handles incomplete, still-streaming patterns.
-	const subject = pattern ? highlightCode(replaceTabs(pattern), "Regular Expression", uiTheme).join("\n") : undefined;
 	return formatScopedSubject(subject, scope, uiTheme);
 }
 
@@ -136,7 +136,11 @@ export const grepToolRenderer = {
 				icon: "pending",
 				title: "Grep",
 				titleColor: "toolTitle",
-				description: grepSubject(args.pattern || "?", args, uiTheme),
+				description: grepSubject(
+					args.pattern ? highlightCode(replaceTabs(args.pattern), "Regular Expression", uiTheme).join("\n") : "?",
+					args,
+					uiTheme,
+				),
 				meta: grepFlagMeta(args),
 			},
 			uiTheme,
@@ -157,7 +161,10 @@ export const grepToolRenderer = {
 			isRecord(rawDetails) && typeof rawDetails.searchPath === "string"
 				? rawDetails.searchPath
 				: details?.searchPath;
-		const description = grepSubject(args?.pattern, args, uiTheme, details, searchPath);
+		const pattern = args?.pattern
+			? highlightCode(replaceTabs(args.pattern), "Regular Expression", uiTheme).join("\n")
+			: undefined;
+		const description = grepSubject(pattern, args, uiTheme, details, searchPath);
 
 		if (result.isError || details?.error) {
 			const errorText = details?.error || result.content?.find(c => c.type === "text")?.text || "Unknown error";
