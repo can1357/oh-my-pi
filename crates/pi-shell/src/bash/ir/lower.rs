@@ -944,9 +944,16 @@ impl Lower {
 		sub.emit(Opcode::End, 0, 0, root);
 		let mut body = sub.unit;
 		// Node records filled while lowering the body belong to both units.
+		// The body's table may have grown past this one: a unit of run-time
+		// parsed text (a here-document body) records its nodes as it meets
+		// them rather than sizing the table from a parse.
+		let nodes = &mut self.unit.nodes;
+		if body.nodes.len() > nodes.len() {
+			nodes.extend_from_slice(&body.nodes[nodes.len()..]);
+		}
 		for (i, n) in body.nodes.iter().enumerate() {
 			if n.hi > 0 {
-				self.unit.nodes[i] = *n;
+				nodes[i] = *n;
 			}
 		}
 		body.seal_from(self.source_hash.clone());
