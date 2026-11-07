@@ -1057,7 +1057,9 @@ function debugBytes(bytes: Uint8Array, asHex: boolean): string {
 	try {
 		const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 		if (/^[\x20-\x7E\s]*$/.test(text)) return text;
-	} catch {}
+	} catch {
+		// Expected for binary data — fall back to hex representation.
+	}
 	return Buffer.from(bytes).toString("hex");
 }
 
@@ -4700,7 +4702,11 @@ function decodeMcpArgValue(value: Uint8Array): unknown {
 			return first === "{" || first === "[" || first === '"' ? parseToolArgsJson(jsonValue) : jsonValue;
 		}
 		return jsonValue;
-	} catch {}
+	} catch (error) {
+		logger.debug("cursor: failed to decode MCP arg value as JSON, falling back to text", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 	const text = new TextDecoder().decode(value);
 	return parseToolArgsJson(text);
 }
