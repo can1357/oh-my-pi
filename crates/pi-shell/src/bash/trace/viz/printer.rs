@@ -22,8 +22,17 @@ use super::{
 };
 use crate::bash::{
 	event::ResolvedKind,
-	syntax::*,
-	trace::{State, syntax::SyntaxTree},
+	syntax::{
+		AndOrOp, CaseTerm, Features, NO_ALIASES, NodeId, Parser, RedirOp, Sep, Span,
+		tree::{
+			AndOr, Command, CommandKind, For, HereDoc, List, Part, Pipeline, RedirFd, RedirTarget,
+			Seq, Simple, Tree, Word, WordPart,
+		},
+	},
+	trace::{
+		State,
+		syntax::{Root, SyntaxTree},
+	},
 };
 
 pub(super) fn raw_static(
@@ -139,16 +148,14 @@ impl Eq for UnitStamp {}
 fn same_tree(a: Option<&SyntaxTree>, b: Option<&SyntaxTree>) -> bool {
 	match (a, b) {
 		(None, None) => true,
-		(Some(SyntaxTree::List(a)), Some(SyntaxTree::List(b))) => Arc::ptr_eq(a, b),
-		(Some(SyntaxTree::Command(a)), Some(SyntaxTree::Command(b))) => Arc::ptr_eq(a, b),
-		(Some(SyntaxTree::Word(a)), Some(SyntaxTree::Word(b))) => Arc::ptr_eq(a, b),
+		(Some(a), Some(b)) => a.kind == b.kind && a.root == b.root && Arc::ptr_eq(&a.tree, &b.tree),
 		_ => false,
 	}
 }
 #[derive(Debug)]
 struct Nested {
 	body:     String,
-	program:  Program,
+	commands: Vec<(Tree, u32)>,
 	ids:      Vec<u32>,
 	remote:   bool,
 	origin:   ByteOrigins,
@@ -160,7 +167,8 @@ const AHEAD: u32 = u32::MAX;
 /// Script bytes the engine has not compiled yet, parsed statically.
 #[derive(Debug)]
 struct Ahead {
-	program:  Program,
+	commands: Vec<(Tree, u32)>,
+	spans:    Vec<Span>,
 	/// Source identity per command: one past its script byte offset.
 	ids:      Vec<u32>,
 	map:      SourceMap,
@@ -491,8 +499,16 @@ impl<S: VizSource> Printer<'_, S> {
 				continue;
 			};
 			let start = at as usize;
+			// The minimizer runs each `&&` operand as its own unit; a gap that
+			// holds only the operator continues the chain into the next unit.
+			let mut lead = None;
 			if start > cursor {
-				self.ahead(cursor, start.min(source.script().len()));
+				let end = start.min(source.script().len());
+				let gap = &source.script()[cursor..end];
+				match chain_operator(gap) {
+					Some((op, len)) if len == gap.len() => lead = Some(op),
+					_ => self.ahead(cursor, end),
+				}
 			}
 			if self.options.layers.idioms
 				&& let Some(end) = self.setup_units(roots, position)
@@ -511,7 +527,11 @@ impl<S: VizSource> Printer<'_, S> {
 					origin:   None,
 					analysis: self.analysis,
 				};
-				self.tree(&syntax.tree, &context, 0);
+				if let Root::List(list) = syntax.tree.view() {
+					self.chain_list(list, &context, 0, lead);
+				} else {
+					self.tree(&syntax.tree, &context, 0);
+				}
 			} else {
 				let end = (start + unit.source.len()).min(source.script().len());
 				self.pending(&source.script()[start.min(end)..end], at, 0);
@@ -528,27 +548,31 @@ impl<S: VizSource> Printer<'_, S> {
 	/// has an outcome until the engine announces it; the first command that
 	/// does not parse and everything after it stay literal, as does a unit
 	/// the engine announced without syntax (its parse may have used aliases
-	/// or features this one lacks) and everything after that.
+	/// or features this one lacks) and everything after that. A leading
+	/// `&&`/`||` continues the chain of the unit before it.
 	fn ahead(&mut self, lo: usize, hi: usize) {
 		if lo >= hi {
 			return;
 		}
 		let source = self.source;
 		let script: &[u8] = source.script().as_ref();
+		let (mut lead, from) =
+			chain_operator(&script[lo..hi]).map_or((None, lo), |(op, len)| (Some(op), lo + len));
 		let stop = (0..source.unit_count())
 			.filter_map(|index| source.unit(index)?.at)
 			.map(|at| at as usize)
-			.filter(|at| (lo..hi).contains(at))
+			.filter(|at| (from..hi).contains(at))
 			.min()
 			.unwrap_or(hi);
-		let Some(ahead) = self.parsed_ahead(lo, stop) else {
+		let Some(ahead) = self.parsed_ahead(from, stop) else {
 			self.pending(&script[lo..hi], lo as u32, 0);
 			return;
 		};
+		let lo = from;
 		let bytes = &script[lo..stop];
 		let mut cursor = 0;
-		for (command, id) in ahead.program.commands.iter().zip(&ahead.ids) {
-			let start = command.span.lo as usize;
+		for (((tree, root), span), id) in ahead.commands.iter().zip(&ahead.spans).zip(&ahead.ids) {
+			let start = span.lo as usize;
 			if start > cursor {
 				self.pending(&bytes[cursor..start], (lo + cursor) as u32, 0);
 			}
@@ -561,8 +585,8 @@ impl<S: VizSource> Printer<'_, S> {
 				origin: None,
 				analysis: &ahead.analysis,
 			};
-			self.list(&command.list, &context, 0);
-			cursor = command.span.hi as usize;
+			self.chain_list(List::at(tree, *root), &context, 0, lead.take());
+			cursor = span.hi as usize;
 		}
 		self.pending(&script[lo + cursor..hi], (lo + cursor) as u32, 0);
 	}
@@ -574,21 +598,19 @@ impl<S: VizSource> Printer<'_, S> {
 		let script: &[u8] = self.source.script().as_ref();
 		let mut parser = Parser::new(&script[lo..hi], Features::NONE, NO_ALIASES);
 		let mut commands = Vec::new();
+		let mut spans = Vec::new();
 		while let Some(Ok(command)) = parser.next_command() {
-			commands.push(command);
+			spans.push(command.span);
+			commands.push((command.tree, command.root.index()));
 		}
 		let parsed = (!commands.is_empty()).then(|| {
-			let program = Program { commands };
-			let ids: Vec<u32> = program
-				.commands
-				.iter()
-				.map(|command| lo as u32 + command.span.lo + 1)
-				.collect();
-			let mut analysis = analysis::program(&program, AHEAD, &ids);
+			let ids: Vec<u32> = spans.iter().map(|span| lo as u32 + span.lo + 1).collect();
+			let mut analysis = analysis::program(&commands, AHEAD, &ids);
 			analysis.arithmetic = Arc::clone(&self.analysis.arithmetic);
 			Arc::new(Ahead {
 				map: source::script_map(self.source, lo, hi - lo),
-				program,
+				commands,
+				spans,
 				ids,
 				analysis,
 			})
@@ -617,13 +639,13 @@ impl<S: VizSource> Printer<'_, S> {
 		{
 			return None;
 		}
-		if !self.builtin(NodeKey::engine(first.index, a.id))
-			|| !self.builtin(NodeKey::engine(middle.index, b.id))
-			|| !self.builtin(NodeKey::engine(last.index, d.id))
+		if !self.builtin(NodeKey::engine(first.index, a.id()))
+			|| !self.builtin(NodeKey::engine(middle.index, b.id()))
+			|| !self.builtin(NodeKey::engine(last.index, d.id()))
 		{
 			return None;
 		}
-		if [(first.index, a.id), (middle.index, b.id), (last.index, d.id)]
+		if [(first.index, a.id()), (middle.index, b.id()), (last.index, d.id())]
 			.iter()
 			.any(|(unit, node)| {
 				self
@@ -680,19 +702,19 @@ impl<S: VizSource> Printer<'_, S> {
 			origin:   None,
 			analysis: self.analysis,
 		};
-		let CommandKind::Simple(simple) = &b.kind else {
+		let CommandKind::Simple(simple) = b.kind() else {
 			return None;
 		};
-		let mut segments = vec![self.segment(&cb, b.id, b.span, "load_env(", "fn", true)];
-		for (index, word) in simple.words.iter().skip(1).enumerate() {
+		let mut segments = vec![self.segment(&cb, b.id(), b.span(), "load_env(", "fn", true)];
+		for (index, word) in simple.words().iter().skip(1).enumerate() {
 			if index > 0 {
-				segments.push(self.segment(&cb, b.id, b.span, ", ", "op", true));
+				segments.push(self.segment(&cb, b.id(), b.span(), ", ", "op", true));
 			}
 			segments.extend(self.word_segments(word, &cb, "str"));
 		}
-		segments.push(self.segment(&cb, b.id, b.span, ") ", "op", true));
-		let first_key = ca.key(a.id);
-		let last_key = cd.key(d.id);
+		segments.push(self.segment(&cb, b.id(), b.span(), ") ", "op", true));
+		let first_key = ca.key(a.id());
+		let last_key = cd.key(d.id());
 		let use_first = self.runtime.active(first_key)
 			|| !self.runtime.active(last_key)
 				&& self
@@ -700,9 +722,9 @@ impl<S: VizSource> Printer<'_, S> {
 					.observation(first_key)
 					.is_some_and(|observation| observation.status.is_some_and(|status| status != 0));
 		let mut badge = if use_first {
-			self.segment(&ca, a.id, a.span, "exports all", "badge", true)
+			self.segment(&ca, a.id(), a.span(), "exports all", "badge", true)
 		} else {
-			self.segment(&cd, d.id, d.span, "exports all", "badge", true)
+			self.segment(&cd, d.id(), d.span(), "exports all", "badge", true)
 		};
 		badge.expanded = source
 			.script()
@@ -710,7 +732,7 @@ impl<S: VizSource> Printer<'_, S> {
 			.map(|bytes| String::from_utf8_lossy(bytes).into_owned());
 		segments.push(badge);
 		self.emit(&cb, b, 0, "stmt", segments, None);
-		self.command_documents(b, simple, &cb, 0);
+		self.command_documents(b, Some(simple), &cb, 0);
 		Some(end)
 	}
 
@@ -773,21 +795,21 @@ impl<S: VizSource> Printer<'_, S> {
 	fn emit(
 		&mut self,
 		c: &Context<'_>,
-		cmd: &Command,
+		cmd: Command<'_>,
 		depth: u32,
 		role: &'static str,
 		segments: Vec<Segment>,
 		governor: Option<NodeKey>,
 	) {
-		let key = c.key(cmd.id);
+		let key = c.key(cmd.id());
 		let mut row = Row {
 			id: format!("row-{key}-{}", self.serial),
 			depth,
 			node: Some(key),
-			range: c.map.range(cmd.span),
+			range: c.map.range(cmd.span()),
 			role: Some(role),
 			segments,
-			detail: Some(c.text(cmd.span)),
+			detail: Some(c.text(cmd.span())),
 			..Row::default()
 		};
 		self.serial += 1;
@@ -864,16 +886,16 @@ impl<S: VizSource> Printer<'_, S> {
 	}
 
 	fn tree(&mut self, tree: &SyntaxTree, c: &Context<'_>, depth: u32) {
-		match tree {
-			SyntaxTree::List(l) => self.list(l, c, depth),
-			SyntaxTree::Command(cmd) => self.command(cmd, c, depth, false),
-			SyntaxTree::Word(w) => {
-				let s = self.segment(c, w.id, w.span, self.words(c).word(w), "str", false);
+		match tree.view() {
+			Root::List(l) => self.list(l, c, depth),
+			Root::Command(cmd) => self.command(cmd, c, depth, false),
+			Root::Word(w) => {
+				let s = self.segment(c, w.id(), w.span(), self.words(c).word(w), "str", false);
 				self.rows.push(Row {
-					id: format!("word-{}", c.key(w.id)),
+					id: format!("word-{}", c.key(w.id())),
 					depth,
-					node: Some(c.key(w.id)),
-					range: c.map.range(w.span),
+					node: Some(c.key(w.id())),
+					range: c.map.range(w.span()),
 					role: Some("document"),
 					segments: vec![s],
 					..Row::default()
@@ -882,139 +904,160 @@ impl<S: VizSource> Printer<'_, S> {
 		}
 	}
 
-	fn list(&mut self, list: &List, c: &Context<'_>, depth: u32) {
+	fn list(&mut self, list: List<'_>, c: &Context<'_>, depth: u32) {
+		self.chain_list(list, c, depth, None);
+	}
+
+	/// Draws `list`; its first chain continues the one `after` cut off before
+	/// it (see [`Self::and_or`]).
+	fn chain_list(
+		&mut self,
+		list: List<'_>,
+		c: &Context<'_>,
+		depth: u32,
+		mut after: Option<AndOrOp>,
+	) {
+		let items = list.items();
 		let mut i = 0;
-		while i < list.items.len() {
-			let item = &list.items[i];
-			if self.options.layers.idioms && i + 2 < list.items.len() {
-				let start = single(&item.and_or);
-				let loader = single(&list.items[i + 1].and_or);
-				let end = single(&list.items[i + 2].and_or);
-				if let (Some(start), Some(loader), Some(end)) = (start, loader, end)
-					&& is_simple(start, "set", Some("-a"))
-					&& (is_simple(loader, ".", None) || is_simple(loader, "source", None))
-					&& is_simple(end, "set", Some("+a"))
-					&& self.builtin(c.key(start.id))
-					&& self.builtin(c.key(loader.id))
-					&& self.builtin(c.key(end.id))
-					&& let CommandKind::Simple(simple) = &loader.kind
-				{
-					let path = simple
-						.words
-						.iter()
-						.skip(1)
-						.map(|w| self.words(c).word(w))
-						.collect::<Vec<_>>()
-						.join(", ");
-					let text = format!("load_env({path}) exports all");
-					let mut seg = self.segment(c, loader.id, loader.span, text, "fn badge", true);
-					seg.expanded = Some(format!(
-						"{}\n{}\n{}",
-						c.text(start.span),
-						c.text(loader.span),
-						c.text(end.span)
-					));
-					self.emit(c, loader, depth, "stmt", vec![seg], Some(c.key(loader.id)));
-					i += 3;
-					continue;
-				}
+		while let Some(item) = items.get(i) {
+			if after.is_none()
+				&& self.options.layers.idioms
+				&& let (Some(start), Some(loader), Some(end)) = (
+					single(item.and_or()),
+					items.get(i + 1).and_then(|it| single(it.and_or())),
+					items.get(i + 2).and_then(|it| single(it.and_or())),
+				)
+				&& is_simple(start, "set", Some("-a"))
+				&& (is_simple(loader, ".", None) || is_simple(loader, "source", None))
+				&& is_simple(end, "set", Some("+a"))
+				&& self.builtin(c.key(start.id()))
+				&& self.builtin(c.key(loader.id()))
+				&& self.builtin(c.key(end.id()))
+				&& let CommandKind::Simple(simple) = loader.kind()
+			{
+				let path = simple
+					.words()
+					.iter()
+					.skip(1)
+					.map(|w| self.words(c).word(w))
+					.collect::<Vec<_>>()
+					.join(", ");
+				let text = format!("load_env({path}) exports all");
+				let mut seg = self.segment(c, loader.id(), loader.span(), text, "fn badge", true);
+				seg.expanded = Some(format!(
+					"{}\n{}\n{}",
+					c.text(start.span()),
+					c.text(loader.span()),
+					c.text(end.span())
+				));
+				self.emit(c, loader, depth, "stmt", vec![seg], Some(c.key(loader.id())));
+				i += 3;
+				continue;
 			}
-			self.and_or(&item.and_or, c, depth, matches!(item.sep, Sep::Amp | Sep::Disown));
+			let background = matches!(item.sep(), Sep::Amp | Sep::Disown);
+			self.and_or(item.and_or(), c, depth, background, after.take());
 			i += 1;
 		}
 	}
 
-	fn and_or(&mut self, a: &AndOr, c: &Context<'_>, depth: u32, background: bool) {
-		if a.rest.is_empty() && a.first.stages.len() == 1 {
-			let cmd = &a.first.stages[0].cmd;
-			if !a.first.bang && a.first.time.is_none() {
-				self.command(cmd, c, depth, background);
-				return;
-			}
+	/// Draws one chain. `after` is the operator of an earlier chain this one
+	/// continues (a minimizer segment, or script not reached yet): the first
+	/// pipeline then reads as a continuation row too.
+	fn and_or(
+		&mut self,
+		a: AndOr<'_>,
+		c: &Context<'_>,
+		depth: u32,
+		background: bool,
+		after: Option<AndOrOp>,
+	) {
+		let first = a.first();
+		let rest: Vec<(AndOrOp, Pipeline<'_>)> = a.rest().collect();
+		if after.is_none()
+			&& rest.is_empty()
+			&& let Some(cmd) = first.stages().one()
+			&& !first.bang()
+			&& first.time().is_none()
+		{
+			self.command(cmd, c, depth, background);
+			return;
 		}
-		let all_simple = std::iter::once(&a.first)
-			.chain(a.rest.iter().map(|(_, p)| p))
-			.all(|p| {
-				p.stages.iter().all(|s| {
-					matches!(
-						s.cmd.kind,
-						CommandKind::Simple(_) | CommandKind::Cond(_) | CommandKind::Arith(_)
-					)
-				})
-			});
+		let all_simple = a.pipelines().iter().all(|p| {
+			p.stages().iter().all(|s| {
+				matches!(
+					s.kind(),
+					CommandKind::Simple(_) | CommandKind::Cond(_) | CommandKind::Arith(_)
+				)
+			})
+		});
 		if all_simple {
 			// One row per pipeline: `and`/`or` lead each continuation row, so a
 			// chain reads down the page and every command keeps its own status.
 			let mut lead = Vec::new();
-			if background {
-				lead.push(self.segment(c, a.id, a.span, "spawn ", "kw", false));
+			if let Some(op) = after {
+				lead.push(self.segment(c, a.id(), a.span(), connector(op), "op", false));
 			}
-			lead.extend(self.pipeline(&a.first, c));
-			let mut rows = vec![(&a.first, depth, lead)];
-			for (index, (op, p)) in a.rest.iter().enumerate() {
+			if background {
+				lead.push(self.segment(c, a.id(), a.span(), "spawn ", "kw", false));
+			}
+			lead.extend(self.pipeline(first, c));
+			let mut rows = vec![(first, depth + u32::from(after.is_some()), lead)];
+			for (index, &(op, p)) in rest.iter().enumerate() {
+				let lone = p.stages().one();
 				if self.options.layers.idioms
-					&& index + 1 == a.rest.len()
-					&& *op == AndOrOp::Or
-					&& !p.bang
-					&& p.time.is_none()
-					&& p.stages.len() == 1
-					&& self.builtin(c.key(p.stages[0].cmd.id))
-					&& p.stages[0].cmd.redirs.is_empty()
-					&& !self
-						.options
-						.expanded_nodes
-						.contains(&c.key(p.stages[0].cmd.id))
-					&& matches!(&p.stages[0].cmd.kind,CommandKind::Simple(s) if s.assigns.is_empty()&&s.words.len()==1&&matches!(command_name(s).as_deref(),Some("true"|":")))
+					&& index + 1 == rest.len()
+					&& op == AndOrOp::Or
+					&& !p.bang()
+					&& p.time().is_none()
+					&& let Some(cmd) = lone
+					&& self.builtin(c.key(cmd.id()))
+					&& cmd.redirs().is_empty()
+					&& !self.options.expanded_nodes.contains(&c.key(cmd.id()))
+					&& matches!(cmd.kind(), CommandKind::Simple(s) if s.assigns().is_empty()
+						&& s.words().len() == 1
+						&& matches!(command_name(s).as_deref(), Some("true" | ":")))
 				{
-					let cmd = &p.stages[0].cmd;
-					let mut s = self.segment(c, cmd.id, cmd.span, " may fail", "badge", true);
-					s.expanded = Some(format!("|| {}", c.text(cmd.span)));
+					let mut s = self.segment(c, cmd.id(), cmd.span(), " may fail", "badge", true);
+					s.expanded = Some(format!("|| {}", c.text(cmd.span())));
 					if let Some((_, _, segments)) = rows.last_mut() {
 						segments.push(s);
 					}
 				} else {
-					let connector = if *op == AndOrOp::And { "and " } else { "or " };
-					let mut segments = vec![self.segment(c, a.id, a.span, connector, "op", false)];
+					let mut segments =
+						vec![self.segment(c, a.id(), a.span(), connector(op), "op", false)];
 					segments.extend(self.pipeline(p, c));
 					rows.push((p, depth + 1, segments));
 				}
 			}
 			for (p, depth, segments) in rows {
-				self.emit(c, &p.stages[0].cmd, depth, "stmt", segments, None);
+				let head = p.stages().first().expect("pipeline stage");
+				self.emit(c, head, depth, "stmt", segments, None);
 				self.documents(p, c, depth);
 			}
 		} else {
-			for (pi, p) in std::iter::once(&a.first)
-				.chain(a.rest.iter().map(|(_, p)| p))
-				.enumerate()
-			{
-				for (si, stage) in p.stages.iter().enumerate() {
+			for (pi, p) in a.pipelines().iter().enumerate() {
+				// The operator this pipeline follows, within the chain or before
+				// it.
+				let op = if pi > 0 { Some(rest[pi - 1].0) } else { after };
+				let mut prev_stderr = false;
+				for (si, stage) in p.stages().iter().enumerate() {
 					let start = self.rows.len();
-					self.command(&stage.cmd, c, depth + u32::from(pi > 0 || si > 0), background);
-					let connector = if si > 0 {
-						if p.stages[si - 1].pipe_stderr {
-							"→& "
-						} else {
-							"→ "
-						}
-					} else if pi > 0 {
-						if a.rest[pi - 1].0 == AndOrOp::And {
-							"and "
-						} else {
-							"or "
-						}
+					self.command(stage, c, depth + u32::from(op.is_some() || si > 0), background);
+					let link = if si > 0 {
+						if prev_stderr { "→& " } else { "→ " }
 					} else {
-						""
+						op.map_or("", connector)
 					};
-					let mut prefix = connector.to_owned();
-					if si == 0 && p.bang {
+					prev_stderr = stage.pipe_stderr();
+					let mut prefix = link.to_owned();
+					if si == 0 && p.bang() {
 						prefix.push_str("not ");
 					}
-					if si == 0 && p.time.is_some() {
+					if si == 0 && p.time().is_some() {
 						prefix.push_str("timed ");
 					}
 					if !prefix.is_empty() {
-						let segment = self.segment(c, p.id, p.span, prefix, "op", false);
+						let segment = self.segment(c, p.id(), p.span(), prefix, "op", false);
 						if let Some(row) = self.rows.get_mut(start) {
 							row.segments.insert(0, segment);
 						}
@@ -1024,33 +1067,35 @@ impl<S: VizSource> Printer<'_, S> {
 		}
 	}
 
-	fn pipeline(&self, p: &Pipeline, c: &Context<'_>) -> Vec<Segment> {
+	fn pipeline(&self, p: Pipeline<'_>, c: &Context<'_>) -> Vec<Segment> {
 		let mut out = Vec::new();
-		if p.bang {
-			out.push(self.segment(c, p.id, p.span, "not ", "kw", false));
+		if p.bang() {
+			out.push(self.segment(c, p.id(), p.span(), "not ", "kw", false));
 		}
-		if p.time.is_some() {
-			out.push(self.segment(c, p.id, p.span, "timed ", "badge", false));
+		if p.time().is_some() {
+			out.push(self.segment(c, p.id(), p.span(), "timed ", "badge", false));
 		}
-		for (i, stage) in p.stages.iter().enumerate() {
-			let cmd = &stage.cmd;
+		let stages = p.stages();
+		let mut prev_stderr = false;
+		for (i, cmd) in stages.iter().enumerate() {
+			let pipe_stderr = std::mem::replace(&mut prev_stderr, cmd.pipe_stderr());
 			let fold = self.options.layers.idioms
 				&& self
 					.runtime
-					.observation(c.key(cmd.id))
+					.observation(c.key(cmd.id()))
 					.is_none_or(|observation| observation.resolved != Some(ResolvedKind::Function))
-				&& !self.options.expanded_nodes.contains(&c.key(cmd.id))
+				&& !self.options.expanded_nodes.contains(&c.key(cmd.id()))
 				&& i > 0
-				&& i + 1 == p.stages.len()
-				&& cmd.redirs.is_empty()
-				&& matches!(&cmd.kind,CommandKind::Simple(s) if tail_count(s).is_some());
+				&& i + 1 == stages.len()
+				&& cmd.redirs().is_empty()
+				&& matches!(cmd.kind(), CommandKind::Simple(s) if tail_count(s).is_some());
 			if fold {
-				if let CommandKind::Simple(s) = &cmd.kind {
+				if let CommandKind::Simple(s) = cmd.kind() {
 					let count = tail_count(s).unwrap_or(10);
 					let mut seg = self.segment(
 						c,
-						cmd.id,
-						cmd.span,
+						cmd.id(),
+						cmd.span(),
 						format!(
 							" {} {count}",
 							if command_name(s).as_deref() == Some("head") {
@@ -1062,7 +1107,7 @@ impl<S: VizSource> Printer<'_, S> {
 						"badge",
 						true,
 					);
-					seg.expanded = Some(format!("| {}", c.text(cmd.span)));
+					seg.expanded = Some(format!("| {}", c.text(cmd.span())));
 					out.push(seg);
 				}
 				continue;
@@ -1070,13 +1115,9 @@ impl<S: VizSource> Printer<'_, S> {
 			if i > 0 {
 				out.push(self.segment(
 					c,
-					p.id,
-					p.span,
-					if p.stages[i - 1].pipe_stderr {
-						" →& "
-					} else {
-						" → "
-					},
+					p.id(),
+					p.span(),
+					if pipe_stderr { " →& " } else { " → " },
 					"op",
 					false,
 				));
@@ -1086,53 +1127,55 @@ impl<S: VizSource> Printer<'_, S> {
 		out
 	}
 
-	fn inline_command(&self, cmd: &Command, c: &Context<'_>) -> Vec<Segment> {
+	fn inline_command(&self, cmd: Command<'_>, c: &Context<'_>) -> Vec<Segment> {
 		if self.outside_projection(cmd, c) {
 			return Vec::new();
 		}
-		match &cmd.kind {
+		let (id, span) = (cmd.id(), cmd.span());
+		match cmd.kind() {
 			CommandKind::Simple(s) => self.simple(cmd, s, c),
 			CommandKind::Cond(cond) => {
-				vec![self.segment(c, cmd.id, cmd.span, self.words(c).condition(cond), "var", true)]
+				vec![self.segment(c, id, span, self.words(c).condition(cond), "var", true)]
 			},
 			CommandKind::Arith(a) => {
-				vec![self.segment(c, cmd.id, cmd.span, self.arithmetic(&a.src, false), "var", true)]
+				vec![self.segment(c, id, span, self.arithmetic(a.src(), false), "var", true)]
 			},
-			_ => vec![self.segment(c, cmd.id, cmd.span, c.text(cmd.span), "kw", false)],
+			_ => vec![self.segment(c, id, span, c.text(span), "kw", false)],
 		}
 	}
 
-	fn simple(&self, cmd: &Command, s: &Simple, c: &Context<'_>) -> Vec<Segment> {
+	fn simple(&self, cmd: Command<'_>, s: Simple<'_>, c: &Context<'_>) -> Vec<Segment> {
 		let mut out = Vec::new();
+		let (id, span) = (cmd.id(), cmd.span());
 		let name = command_name(s).unwrap_or_default();
-		let values = s
-			.words
+		let words = s.words();
+		let values = words
 			.iter()
 			.map(|w| literal(w).unwrap_or_else(|| self.words(c).word(w)))
 			.collect::<Vec<_>>();
-		let expanded = self.options.expanded_nodes.contains(&c.key(cmd.id));
+		let expanded = self.options.expanded_nodes.contains(&c.key(id));
 		let idioms = self.options.layers.idioms && !expanded;
-		if s.words.is_empty() {
-			for (i, a) in s.assigns.iter().enumerate() {
+		if words.is_empty() {
+			for (i, a) in s.assigns().iter().enumerate() {
 				if i > 0 {
-					out.push(self.segment(c, cmd.id, cmd.span, ", ", "op", true));
+					out.push(self.segment(c, id, span, ", ", "op", true));
 				}
 				let mut segment =
-					self.segment(c, cmd.id, a.span, self.words(c).assignment(a), "var def", true);
-				segment.node = Some(c.key(a.id));
+					self.segment(c, id, a.span(), self.words(c).assignment(a), "var def", true);
+				segment.node = Some(c.key(a.id()));
 				out.push(segment);
 			}
-			out.extend(self.redirections(cmd, s, c));
+			out.extend(self.redirections(cmd, Some(s), c));
 			return out;
 		}
-		if !s.assigns.is_empty() {
+		if !s.assigns().is_empty() {
 			out.push(self.segment(
 				c,
-				cmd.id,
-				cmd.span,
+				id,
+				span,
 				format!(
 						"env({}) ",
-						s.assigns
+						s.assigns()
 							.iter()
 							.map(|a| self.words(c).assignment(a))
 							.collect::<Vec<_>>()
@@ -1142,14 +1185,13 @@ impl<S: VizSource> Printer<'_, S> {
 				true,
 			));
 		}
-		if idioms && self.builtin(c.key(cmd.id)) && name == "cd" && s.words.len() == 2 {
-			let mut seg =
-				self.segment(c, cmd.id, cmd.span, format!("cwd {}", values[1]), "badge", true);
-			seg.expanded = Some(c.text(cmd.span));
+		if idioms && self.builtin(c.key(id)) && name == "cd" && words.len() == 2 {
+			let mut seg = self.segment(c, id, span, format!("cwd {}", values[1]), "badge", true);
+			seg.expanded = Some(c.text(span));
 			out.push(seg);
 			return out;
 		}
-		if idioms && self.builtin(c.key(cmd.id)) && name == "set" && s.words.len() == 2 {
+		if idioms && self.builtin(c.key(id)) && name == "set" && words.len() == 2 {
 			let meaning = match values[1].as_str() {
 				"-e" => Some("stop on first error"),
 				"+e" => Some("keep going on errors"),
@@ -1163,9 +1205,8 @@ impl<S: VizSource> Printer<'_, S> {
 				_ => None,
 			};
 			if let Some(meaning) = meaning {
-				let mut seg =
-					self.segment(c, cmd.id, cmd.span, format!("# {meaning}"), "comment badge", true);
-				seg.expanded = Some(c.text(cmd.span));
+				let mut seg = self.segment(c, id, span, format!("# {meaning}"), "comment badge", true);
+				seg.expanded = Some(c.text(span));
 				out.push(seg);
 				return out;
 			}
@@ -1173,33 +1214,30 @@ impl<S: VizSource> Printer<'_, S> {
 		if idioms
 			&& self
 				.runtime
-				.observation(c.key(cmd.id))
+				.observation(c.key(id))
 				.is_none_or(|observation| observation.resolved != Some(ResolvedKind::Function))
 			&& name == "curl"
 			&& values.iter().any(|v| v == "%{http_code}")
 			&& values.iter().any(|v| v == "/dev/null")
-			&& let Some(w) = s.words.iter().find(|w| {
+			&& let Some(w) = words.iter().find(|&w| {
 				literal(w).is_some_and(|v| {
 					v.starts_with("http:") || v.starts_with("https:") || v.starts_with("localhost")
 				})
 			}) {
-			out.push(self.segment(c, cmd.id, cmd.span, "http_status(", "fn badge", true));
+			out.push(self.segment(c, id, span, "http_status(", "fn badge", true));
 			out.extend(self.word_segments(w, c, "str"));
-			out.push(self.segment(c, cmd.id, cmd.span, ")", "op", true));
+			out.push(self.segment(c, id, span, ")", "op", true));
 			return out;
 		}
-		let resolved = self
-			.runtime
-			.observation(c.key(cmd.id))
-			.and_then(|o| o.resolved);
+		let resolved = self.runtime.observation(c.key(id)).and_then(|o| o.resolved);
 		let builtin = !matches!(
 			resolved,
 			Some(ResolvedKind::External | ResolvedKind::Function | ResolvedKind::NotFound)
 		);
 		if builtin && matches!(name.as_str(), "echo" | "printf") {
-			out.push(self.segment(c, cmd.id, cmd.span, "print(", "fn", true));
+			out.push(self.segment(c, id, span, "print(", "fn", true));
 			let mut first = true;
-			for (i, w) in s.words.iter().enumerate().skip(1) {
+			for (i, w) in words.iter().enumerate().skip(1) {
 				if i == 1
 					&& literal(w).is_some_and(|v| {
 						v.len() > 1
@@ -1209,25 +1247,25 @@ impl<S: VizSource> Printer<'_, S> {
 					continue;
 				}
 				if !first {
-					out.push(self.segment(c, cmd.id, cmd.span, ", ", "op", true));
+					out.push(self.segment(c, id, span, ", ", "op", true));
 				}
 				first = false;
 				out.extend(self.word_segments(w, c, "str"));
 			}
-			out.push(self.segment(c, cmd.id, cmd.span, ")", "op", true));
+			out.push(self.segment(c, id, span, ")", "op", true));
 		} else if builtin && matches!(name.as_str(), "[" | "test") {
-			// A bare `[` (one word) yields the empty range 1..0; `get` keeps it
-			// empty.
+			// A bare `[` (one word) yields the empty range 1..0; `take`/`skip`
+			// keep it empty.
 			let end = if name == "[" {
-				s.words.len().saturating_sub(1)
+				words.len().saturating_sub(1)
 			} else {
-				s.words.len()
+				words.len()
 			};
 			out.push(self.segment(
 				c,
-				cmd.id,
-				cmd.span,
-				test_words(s.words.get(1..end).unwrap_or_default(), &self.words(c)),
+				id,
+				span,
+				test_words(words.take(end).skip(1), &self.words(c)),
 				"var",
 				true,
 			));
@@ -1238,19 +1276,19 @@ impl<S: VizSource> Printer<'_, S> {
 		{
 			out.push(self.segment(
 				c,
-				cmd.id,
-				cmd.span,
+				id,
+				span,
 				format!("{}(", if name == "." { "source" } else { &name }),
 				"fn",
 				true,
 			));
-			for (i, w) in s.words.iter().enumerate().skip(1) {
+			for (i, w) in words.iter().enumerate().skip(1) {
 				if i > 1 {
-					out.push(self.segment(c, cmd.id, cmd.span, ", ", "op", true));
+					out.push(self.segment(c, id, span, ", ", "op", true));
 				}
 				out.extend(self.word_segments(w, c, "str"));
 			}
-			out.push(self.segment(c, cmd.id, cmd.span, ")", "op", true));
+			out.push(self.segment(c, id, span, ")", "op", true));
 		} else {
 			let start = if idioms
 				&& resolved != Some(ResolvedKind::Function)
@@ -1260,8 +1298,8 @@ impl<S: VizSource> Printer<'_, S> {
 			{
 				out.push(self.segment(
 					c,
-					cmd.id,
-					cmd.span,
+					id,
+					span,
 					format!(
 						"⏱ {}{} ",
 						values[1],
@@ -1278,33 +1316,39 @@ impl<S: VizSource> Printer<'_, S> {
 			} else {
 				0
 			};
-			for (i, w) in s.words.iter().enumerate().skip(start) {
+			for (i, w) in words.iter().enumerate().skip(start) {
 				if i > start {
-					out.push(self.segment(c, cmd.id, cmd.span, " ", "", true));
+					out.push(self.segment(c, id, span, " ", "", true));
 				}
 				let language = embedded::argument_language(&name, &values, i);
 				let nested = self.nested(cmd, s, w, i, c);
 				if self.options.layers.unwrap && nested {
-					let mut seg = self.segment(c, w.id, w.span, "⟦script ↓⟧", "chip emb", true);
-					seg.expanded = Some(c.text(w.span));
+					let mut seg = self.segment(c, w.id(), w.span(), "⟦script ↓⟧", "chip emb", true);
+					seg.expanded = Some(c.text(w.span()));
 					out.push(seg);
 				} else if self.options.layers.unwrap {
 					if let (Some(language), Some(value)) = (language, literal(w)) {
 						if value.contains('\n') || value.len() > 64 {
-							let mut seg =
-								self.segment(c, w.id, w.span, format!("⟦{language} ↓⟧"), "chip emb", true);
-							seg.expanded = Some(c.text(w.span));
+							let mut seg = self.segment(
+								c,
+								w.id(),
+								w.span(),
+								format!("⟦{language} ↓⟧"),
+								"chip emb",
+								true,
+							);
+							seg.expanded = Some(c.text(w.span()));
 							out.push(seg);
 						} else {
-							out.push(self.segment(c, w.id, w.span, "‹", "emb", true));
+							out.push(self.segment(c, w.id(), w.span(), "‹", "emb", true));
 							out.extend(embedded::highlight(
 								&value,
 								language,
-								c.key(w.id),
-								c.map.range(w.span),
+								c.key(w.id()),
+								c.map.range(w.span()),
 								self.options.layers,
 							));
-							out.push(self.segment(c, w.id, w.span, "›", "emb", true));
+							out.push(self.segment(c, w.id(), w.span(), "›", "emb", true));
 						}
 					} else {
 						out.extend(self.word_segments(w, c, if i == start { "cmd" } else { "arg" }));
@@ -1314,12 +1358,12 @@ impl<S: VizSource> Printer<'_, S> {
 				}
 			}
 		}
-		out.extend(self.redirections(cmd, s, c));
+		out.extend(self.redirections(cmd, Some(s), c));
 		out
 	}
 
-	fn word_segments(&self, w: &Word, c: &Context<'_>, style: &str) -> Vec<Segment> {
-		let key = c.key(w.id);
+	fn word_segments(&self, w: Word<'_>, c: &Context<'_>, style: &str) -> Vec<Segment> {
+		let key = c.key(w.id());
 		let owner = c.analysis.owners.get(&key).copied().unwrap_or(key);
 		let expanded =
 			self.options.expanded_nodes.contains(&key) || self.options.expanded_nodes.contains(&owner);
@@ -1337,7 +1381,8 @@ impl<S: VizSource> Printer<'_, S> {
 			printer.word(w)
 		};
 		let inline = text.contains('‹');
-		let mut seg = self.segment(c, w.id, w.span, text, if inline { "chip" } else { style }, false);
+		let mut seg =
+			self.segment(c, w.id(), w.span(), text, if inline { "chip" } else { style }, false);
 		if c.untraced.is_none()
 			&& let Some(o) = self.runtime.observation(owner)
 		{
@@ -1371,7 +1416,7 @@ impl<S: VizSource> Printer<'_, S> {
 							.into_owned(),
 						)
 					})
-					.chain(std::iter::once(c.text(w.span)))
+					.chain(std::iter::once(c.text(w.span())))
 					.collect::<Vec<_>>()
 					.join("\n"),
 			);
@@ -1388,42 +1433,52 @@ impl<S: VizSource> Printer<'_, S> {
 		vec![seg]
 	}
 
-	fn literal_segments(&self, word: &Word, c: &Context<'_>, style: &str) -> Vec<Segment> {
+	fn literal_segments(&self, word: Word<'_>, c: &Context<'_>, style: &str) -> Vec<Segment> {
 		if c.source == 0
 			&& self.source.unit(c.unit as usize).is_some_and(|unit| {
 				unit.at.is_some() && unit.syntax.is_some_and(|syntax| syntax.parent.is_none())
 			})
-			&& let Some(range) = c.map.range(word.span)
+			&& let Some(range) = c.map.range(word.span())
 			&& let Some(segments) =
 				raw::literal(self.source, self.runtime, self.options, self.analysis, range)
 		{
 			return segments;
 		}
-		let key = c.key(word.id);
+		let key = c.key(word.id());
 		let owner = c.analysis.owners.get(&key).copied().unwrap_or(key);
-		let mut segment = self.segment(c, owner.node, word.span, c.text(word.span), style, true);
+		let mut segment = self.segment(c, owner.node, word.span(), c.text(word.span()), style, true);
 		segment.node = Some(key);
 		vec![segment]
 	}
 
-	fn redirections(&self, cmd: &Command, s: &Simple, c: &Context<'_>) -> Vec<Segment> {
+	fn redirections(
+		&self,
+		cmd: Command<'_>,
+		s: Option<Simple<'_>>,
+		c: &Context<'_>,
+	) -> Vec<Segment> {
 		let mut out = Vec::new();
 		let args = arguments_with_redirs(s, cmd);
-		let name = command_name(s).unwrap_or_default();
-		for redir in &cmd.redirs {
-			let text = match &redir.target {
+		let name = s.and_then(command_name).unwrap_or_default();
+		for redir in cmd.redirs() {
+			let (op, fd) = (redir.op(), redir.fd());
+			let text = match redir.target() {
 				RedirTarget::HereDoc(doc) => {
 					if self.options.layers.unwrap {
 						format!(
 							" ⟵ {} ↓",
-							embedded::heredoc_language(&name, &args, &String::from_utf8_lossy(&doc.delim))
+							embedded::heredoc_language(
+								&name,
+								&args,
+								&String::from_utf8_lossy(doc.delim())
+							)
 						)
 					} else {
-						let fd = fd_text(redir.fd.as_ref());
 						format!(
-							" {fd}{}{}",
-							redir_operator(redir.op),
-							String::from_utf8_lossy(&doc.delim_raw)
+							" {}{}{}",
+							fd_text(fd),
+							redir_operator(op),
+							String::from_utf8_lossy(doc.delim_raw())
 						)
 					}
 				},
@@ -1432,29 +1487,29 @@ impl<S: VizSource> Printer<'_, S> {
 					if self.options.layers.idioms && raw_target.as_deref() == Some("/dev/null") {
 						format!(
 							" 🔇 {}",
-							if matches!(redir.op, RedirOp::OutErr | RedirOp::AppendErr) {
+							if matches!(op, RedirOp::OutErr | RedirOp::AppendErr) {
 								"silent"
-							} else if matches!(redir.fd, Some(RedirFd::Num(2))) {
+							} else if matches!(fd, Some(RedirFd::Num(2))) {
 								"err"
 							} else {
 								"out"
 							}
 						)
 					} else if self.options.layers.idioms
-						&& matches!(redir.fd, Some(RedirFd::Num(2)))
-						&& redir.op == RedirOp::DupOut
+						&& matches!(fd, Some(RedirFd::Num(2)))
+						&& op == RedirOp::DupOut
 						&& raw_target.as_deref() == Some("1")
 					{
 						" +err".into()
 					} else {
 						format!(
 							" {}{}{}",
-							fd_text(redir.fd.as_ref()),
-							redir_operator(redir.op),
+							fd_text(fd),
+							redir_operator(op),
 							if self.options.layers.idioms {
-								literal(w).unwrap_or_else(|| self.words(c).word(w))
+								raw_target.unwrap_or_else(|| self.words(c).word(w))
 							} else {
-								c.text(w.span)
+								c.text(w.span())
 							}
 						)
 					}
@@ -1462,8 +1517,8 @@ impl<S: VizSource> Printer<'_, S> {
 			};
 			out.push(self.segment(
 				c,
-				cmd.id,
-				redir.span,
+				cmd.id(),
+				redir.span(),
 				text,
 				if self.options.layers.idioms {
 					"redir badge"
@@ -1476,80 +1531,61 @@ impl<S: VizSource> Printer<'_, S> {
 		out
 	}
 
-	fn command(&mut self, cmd: &Command, c: &Context<'_>, depth: u32, background: bool) {
+	fn command(&mut self, cmd: Command<'_>, c: &Context<'_>, depth: u32, background: bool) {
 		if self.outside_projection(cmd, c) {
 			self.projected_children(cmd, c, depth);
 			return;
 		}
-		let key = c.key(cmd.id);
-		if let CommandKind::Simple(s) = &cmd.kind {
+		let (id, span, kind) = (cmd.id(), cmd.span(), cmd.kind());
+		let key = c.key(id);
+		if let CommandKind::Simple(s) = kind {
 			if self.options.layers.inline
-				&& s.words.is_empty()
-				&& s.assigns.len() == 1
-				&& cmd.redirs.is_empty()
+				&& s.words().is_empty()
+				&& cmd.redirs().is_empty()
 				&& !self.options.expanded_nodes.contains(&key)
+				&& let Some(a) = s.assigns().one()
 				&& c
 					.analysis
 					.variables
-					.get(String::from_utf8_lossy(&s.assigns[0].name).as_ref())
+					.get(String::from_utf8_lossy(a.name()).as_ref())
 					.is_some_and(|v| v.inline)
 			{
 				return;
 			}
 			let mut segments = self.simple(cmd, s, c);
 			if background {
-				segments.insert(0, self.segment(c, cmd.id, cmd.span, "spawn ", "kw", false));
+				segments.insert(0, self.segment(c, id, span, "spawn ", "kw", false));
 			}
 			self.emit(c, cmd, depth, "stmt", segments, Some(key));
-			self.command_documents(cmd, s, c, depth);
+			self.command_documents(cmd, Some(s), c, depth);
 			return;
 		}
 		let row_start = self.rows.len();
-		match &cmd.kind {
+		let head =
+			|p: &Self, text: String, style: &str| vec![p.segment(c, id, span, text, style, false)];
+		match kind {
 			CommandKind::If(v) => {
-				for (i, arm) in v.arms.iter().enumerate() {
-					let mut seg = vec![self.segment(
-						c,
-						cmd.id,
-						cmd.span,
-						if i == 0 { "if " } else { "elif " },
-						"kw",
-						false,
-					)];
-					seg.extend(self.inline_list(&arm.cond, c));
-					seg.push(self.segment(c, cmd.id, cmd.span, ":", "op", false));
-					self.emit(c, cmd, depth, "head", seg, guard_key(&arm.cond, c));
-					self.condition_meta(
-						&arm.cond,
-						c,
-						false,
-						(v.arms.len() == 1).then_some(c.key(cmd.id)),
-					);
-					self.list(&arm.body, c, depth + 1);
+				let arms = v.arms().len();
+				for (i, arm) in v.arms().enumerate() {
+					let mut seg = head(self, (if i == 0 { "if " } else { "elif " }).into(), "kw");
+					seg.extend(self.inline_list(arm.cond, c));
+					seg.push(self.segment(c, id, span, ":", "op", false));
+					self.emit(c, cmd, depth, "head", seg, guard_key(arm.cond, c));
+					self.condition_meta(arm.cond, c, false, (arms == 1).then_some(key));
+					self.list(arm.body, c, depth + 1);
 				}
-				if let Some(body) = &v.else_body {
-					self.emit(
-						c,
-						cmd,
-						depth,
-						"mid",
-						vec![self.segment(c, cmd.id, cmd.span, "else:", "kw", false)],
-						None,
-					);
+				if let Some(body) = v.else_body() {
+					let seg = head(self, "else:".into(), "kw");
+					self.emit(c, cmd, depth, "mid", seg, None);
 					self.list(body, c, depth + 1);
 				}
 			},
 			CommandKind::While(v) => {
-				let mut seg = vec![self.segment(
-					c,
-					cmd.id,
-					cmd.span,
-					if v.until { "while not " } else { "while " },
-					"kw",
-					false,
-				)];
-				let read = single_list(&v.cond).and_then(|cmd| {
-					if let CommandKind::Simple(s) = &cmd.kind {
+				let cond = v.cond();
+				let mut seg =
+					head(self, (if v.until() { "while not " } else { "while " }).into(), "kw");
+				let read = single_list(cond).and_then(|cmd| {
+					if let CommandKind::Simple(s) = cmd.kind() {
 						(command_name(s).as_deref() == Some("read")).then_some((cmd, s))
 					} else {
 						None
@@ -1557,7 +1593,7 @@ impl<S: VizSource> Printer<'_, S> {
 				});
 				if let Some((read_cmd, read)) = read {
 					let vars = read
-						.words
+						.words()
 						.iter()
 						.skip(1)
 						.filter_map(literal)
@@ -1566,132 +1602,87 @@ impl<S: VizSource> Printer<'_, S> {
 						.join(", ");
 					seg = vec![self.segment(
 						c,
-						read_cmd.id,
-						read_cmd.span,
+						read_cmd.id(),
+						read_cmd.span(),
 						format!("for {vars} in lines:"),
 						"kw",
 						true,
 					)];
 				} else {
-					seg.extend(self.inline_list(&v.cond, c));
-					seg.push(self.segment(c, cmd.id, cmd.span, ":", "op", false));
+					seg.extend(self.inline_list(cond, c));
+					seg.push(self.segment(c, id, span, ":", "op", false));
 				}
-				self.emit(c, cmd, depth, "head", seg, guard_key(&v.cond, c));
-				self.condition_meta(&v.cond, c, v.until, Some(c.key(cmd.id)));
-				self.list(&v.body, c, depth + 1);
+				self.emit(c, cmd, depth, "head", seg, guard_key(cond, c));
+				self.condition_meta(cond, c, v.until(), Some(key));
+				self.list(v.body(), c, depth + 1);
 			},
 			CommandKind::For(v) | CommandKind::Select(v) => {
-				let mut segments = vec![self.segment(
-					c,
-					cmd.id,
-					cmd.span,
-					if matches!(cmd.kind, CommandKind::Select(_)) {
-						"select "
-					} else {
-						"for "
-					},
-					"kw",
-					false,
-				)];
-				let names = std::iter::once(v.var.as_slice())
-					.chain(v.extra_vars.iter().map(Vec::as_slice))
+				let select = matches!(kind, CommandKind::Select(_));
+				let mut segments = head(self, (if select { "select " } else { "for " }).into(), "kw");
+				let names = std::iter::once(v.var())
+					.chain(v.extra_vars())
 					.map(String::from_utf8_lossy)
 					.collect::<Vec<_>>()
 					.join(", ");
-				segments.push(self.segment(c, cmd.id, v.var_span, names, "var def", false));
-				segments.push(self.segment(c, cmd.id, cmd.span, " in ", "kw", false));
+				segments.push(self.segment(c, id, v.var_span(), names, "var def", false));
+				segments.push(self.segment(c, id, span, " in ", "kw", false));
 				segments.extend(self.loop_items(v, cmd, c));
-				segments.push(self.segment(c, cmd.id, cmd.span, ":", "op", false));
+				segments.push(self.segment(c, id, span, ":", "op", false));
 				self.emit(c, cmd, depth, "head", segments, None);
-				self.list(&v.body, c, depth + 1);
+				self.list(v.body(), c, depth + 1);
 			},
 			CommandKind::ArithFor(v) => {
-				let init = if v.init.src.trim_ascii().is_empty() {
-					"None".into()
-				} else {
-					self.arithmetic(&v.init.src, true)
+				let part = |p: &Self, text: &[u8], empty: &str| {
+					if text.trim_ascii().is_empty() {
+						empty.to_owned()
+					} else {
+						p.arithmetic(text, true)
+					}
 				};
-				let condition = if v.cond.src.trim_ascii().is_empty() {
-					"True".into()
-				} else {
-					self.arithmetic(&v.cond.src, true)
-				};
-				let step = if v.step.src.trim_ascii().is_empty() {
-					"None".into()
-				} else {
-					self.arithmetic(&v.step.src, true)
-				};
+				let init = part(self, v.init().src(), "None");
+				let condition = part(self, v.cond().src(), "True");
+				let step = part(self, v.step().src(), "None");
 				let text = format!(
 					"for _ in arithmetic_loop(init=lambda: {init}, condition=lambda: {condition}, \
 					 step=lambda: {step}):"
 				);
-				let mut head = self.segment(c, cmd.id, cmd.span, text, "kw", false);
+				let mut head = self.segment(c, id, span, text, "kw", false);
 				head.tip = Some(
 					"Initialize once; test before each iteration; step after normal completion and \
 					 continue, but not break or return."
 						.into(),
 				);
-				head.expanded = Some(c.text(cmd.span));
+				head.expanded = Some(c.text(span));
 				self.emit(c, cmd, depth, "head", vec![head], None);
-				self.list(&v.body, c, depth + 1);
+				self.list(v.body(), c, depth + 1);
 			},
 			CommandKind::Case(v) => {
-				self.emit(
-					c,
-					cmd,
-					depth,
-					"head",
-					vec![self.segment(
-						c,
-						cmd.id,
-						cmd.span,
-						format!("match {}:", self.words(c).word(&v.word)),
-						"kw",
-						false,
-					)],
-					None,
-				);
-				for arm in &v.arms {
+				let seg = head(self, format!("match {}:", self.words(c).word(v.word())), "kw");
+				self.emit(c, cmd, depth, "head", seg, None);
+				for arm in v.arms() {
 					let patterns = arm
-						.patterns
+						.patterns()
 						.iter()
 						.map(|w| self.words(c).word(w))
 						.collect::<Vec<_>>()
 						.join(" | ");
-					self.emit(
-						c,
-						cmd,
-						depth + 1,
-						"head",
-						vec![self.segment(c, cmd.id, cmd.span, format!("case {patterns}:"), "kw", false)],
-						None,
-					);
-					self.list(&arm.body, c, depth + 2);
-					if arm.term != CaseTerm::Break {
-						self.emit(
-							c,
-							cmd,
-							depth + 2,
-							"tail",
-							vec![self.segment(
-								c,
-								cmd.id,
-								cmd.span,
-								if arm.term == CaseTerm::FallThrough {
-									"fallthrough"
-								} else {
-									"continue matching"
-								},
-								"kw",
-								false,
-							)],
-							None,
-						);
+					let seg = head(self, format!("case {patterns}:"), "kw");
+					self.emit(c, cmd, depth + 1, "head", seg, None);
+					self.list(arm.body(), c, depth + 2);
+					let term = arm.term();
+					if term != CaseTerm::Break {
+						let text = if term == CaseTerm::FallThrough {
+							"fallthrough"
+						} else {
+							"continue matching"
+						};
+						let seg = head(self, text.into(), "kw");
+						self.emit(c, cmd, depth + 2, "tail", seg, None);
 					}
 				}
 			},
 			CommandKind::FuncDef(v) => {
-				let name = String::from_utf8_lossy(&v.name);
+				let name = String::from_utf8_lossy(v.name());
 				let count = c
 					.analysis
 					.functions
@@ -1702,122 +1693,60 @@ impl<S: VizSource> Printer<'_, S> {
 					.map(|i| format!("arg{i}"))
 					.collect::<Vec<_>>()
 					.join(", ");
-				self.emit(
-					c,
-					cmd,
-					depth,
-					"head",
-					vec![self.segment(c, cmd.id, cmd.span, format!("def {name}({args}):"), "fn", false)],
-					None,
-				);
-				if let CommandKind::Brace(body) = &v.body.kind {
-					self.list(body, c, depth + 1);
+				let seg = head(self, format!("def {name}({args}):"), "fn");
+				self.emit(c, cmd, depth, "head", seg, None);
+				let body = v.body();
+				if let CommandKind::Brace(list) = body.kind() {
+					self.list(list, c, depth + 1);
 				} else {
-					self.command(&v.body, c, depth + 1, false);
+					self.command(body, c, depth + 1, false);
 				}
 			},
 			CommandKind::Brace(body) => {
-				if background || !cmd.redirs.is_empty() {
-					let mut head = vec![self.segment(
-						c,
-						cmd.id,
-						cmd.span,
-						if background {
-							"spawn:"
-						} else {
-							"redirected block:"
-						},
-						"kw",
-						false,
-					)];
-					head.extend(self.redirections(cmd, &Simple::default(), c));
-					self.emit(c, cmd, depth, "head", head, None);
+				if background || !cmd.redirs().is_empty() {
+					let text = if background {
+						"spawn:"
+					} else {
+						"redirected block:"
+					};
+					let mut seg = head(self, text.into(), "kw");
+					seg.extend(self.redirections(cmd, None, c));
+					self.emit(c, cmd, depth, "head", seg, None);
 					self.list(body, c, depth + 1);
 				} else {
 					self.list(body, c, depth);
 				}
 			},
 			CommandKind::Subshell(body) => {
-				self.emit(
-					c,
-					cmd,
-					depth,
-					"head",
-					vec![self.segment(c, cmd.id, cmd.span, "subshell:", "kw", false)],
-					None,
-				);
+				let seg = head(self, "subshell:".into(), "kw");
+				self.emit(c, cmd, depth, "head", seg, None);
 				self.list(body, c, depth + 1);
 			},
 			CommandKind::Coproc(v) => {
-				self.emit(
-					c,
-					cmd,
-					depth,
-					"head",
-					vec![self.segment(
-						c,
-						cmd.id,
-						cmd.span,
-						format!(
-								"coprocess {}:",
-								v.name
-									.as_deref().map_or_else(|| "COPROC".into(), String::from_utf8_lossy)
-							),
-						"kw",
-						false,
-					)],
-					None,
-				);
-				self.command(&v.body, c, depth + 1, false);
+				let name = v
+					.name()
+					.map_or_else(|| "COPROC".into(), String::from_utf8_lossy);
+				let seg = head(self, format!("coprocess {name}:"), "kw");
+				self.emit(c, cmd, depth, "head", seg, None);
+				self.command(v.body(), c, depth + 1, false);
 			},
 			CommandKind::Repeat(v) => {
-				self.emit(
-					c,
-					cmd,
-					depth,
-					"head",
-					vec![self.segment(
-						c,
-						cmd.id,
-						cmd.span,
-						format!("repeat {}:", self.words(c).word(&v.count)),
-						"kw",
-						false,
-					)],
-					None,
-				);
-				self.list(&v.body, c, depth + 1);
+				let seg = head(self, format!("repeat {}:", self.words(c).word(v.count())), "kw");
+				self.emit(c, cmd, depth, "head", seg, None);
+				self.list(v.body(), c, depth + 1);
 			},
 			CommandKind::Try(v) => {
-				self.emit(
-					c,
-					cmd,
-					depth,
-					"head",
-					vec![self.segment(c, cmd.id, cmd.span, "try:", "kw", false)],
-					None,
-				);
-				self.list(&v.body, c, depth + 1);
-				self.emit(
-					c,
-					cmd,
-					depth,
-					"mid",
-					vec![self.segment(c, cmd.id, cmd.span, "finally:", "kw", false)],
-					None,
-				);
-				self.list(&v.always, c, depth + 1);
+				let seg = head(self, "try:".into(), "kw");
+				self.emit(c, cmd, depth, "head", seg, None);
+				self.list(v.body(), c, depth + 1);
+				let seg = head(self, "finally:".into(), "kw");
+				self.emit(c, cmd, depth, "mid", seg, None);
+				self.list(v.always(), c, depth + 1);
 			},
 			CommandKind::AnonFunc(v) => {
-				self.emit(
-					c,
-					cmd,
-					depth,
-					"head",
-					vec![self.segment(c, cmd.id, cmd.span, "call anonymous:", "fn", false)],
-					None,
-				);
-				self.command(&v.body, c, depth + 1, false);
+				let seg = head(self, "call anonymous:".into(), "fn");
+				self.emit(c, cmd, depth, "head", seg, None);
+				self.command(v.body(), c, depth + 1, false);
 			},
 			CommandKind::Cond(_) | CommandKind::Arith(_) => {
 				let segments = self.inline_command(cmd, c);
@@ -1825,21 +1754,21 @@ impl<S: VizSource> Printer<'_, S> {
 			},
 			CommandKind::Simple(_) => unreachable!(),
 		}
-		if background && !matches!(cmd.kind, CommandKind::Brace(_)) {
-			let prefix = self.segment(c, cmd.id, cmd.span, "spawn ", "kw", false);
+		let brace = matches!(kind, CommandKind::Brace(_));
+		if background && !brace {
+			let prefix = self.segment(c, id, span, "spawn ", "kw", false);
 			if let Some(row) = self.rows.get_mut(row_start) {
 				row.segments.insert(0, prefix);
 			}
 		}
-		if !cmd.redirs.is_empty() {
-			let simple = Simple::default();
-			if !matches!(cmd.kind, CommandKind::Brace(_)) {
-				let redirs = self.redirections(cmd, &simple, c);
+		if !cmd.redirs().is_empty() {
+			if !brace {
+				let redirs = self.redirections(cmd, None, c);
 				if let Some(row) = self.rows.get_mut(row_start) {
 					row.segments.extend(redirs);
 				}
 			}
-			self.command_documents(cmd, &simple, c, depth);
+			self.command_documents(cmd, None, c, depth);
 		}
 	}
 
@@ -1857,78 +1786,81 @@ impl<S: VizSource> Printer<'_, S> {
 		)
 	}
 
-	fn outside_projection(&self, command: &Command, context: &Context<'_>) -> bool {
+	fn outside_projection(&self, command: Command<'_>, context: &Context<'_>) -> bool {
 		context.source == 0
 			&& self
 				.source
 				.unit(context.unit as usize)
 				.is_some_and(|unit| unit.projection > 0)
-			&& context.map.bytes(command.span).is_none()
+			&& context.map.bytes(command.span()).is_none()
 	}
 
-	fn projected_children(&mut self, command: &Command, context: &Context<'_>, depth: u32) {
-		match &command.kind {
+	fn projected_children(&mut self, command: Command<'_>, context: &Context<'_>, depth: u32) {
+		match command.kind() {
 			CommandKind::Brace(list) | CommandKind::Subshell(list) => self.list(list, context, depth),
 			CommandKind::If(branch) => {
-				for arm in &branch.arms {
-					self.list(&arm.cond, context, depth);
-					self.list(&arm.body, context, depth);
+				for arm in branch.arms() {
+					self.list(arm.cond, context, depth);
+					self.list(arm.body, context, depth);
 				}
-				if let Some(body) = &branch.else_body {
+				if let Some(body) = branch.else_body() {
 					self.list(body, context, depth);
 				}
 			},
 			CommandKind::While(loop_) => {
-				self.list(&loop_.cond, context, depth);
-				self.list(&loop_.body, context, depth);
+				self.list(loop_.cond(), context, depth);
+				self.list(loop_.body(), context, depth);
 			},
 			CommandKind::For(loop_) | CommandKind::Select(loop_) => {
-				self.list(&loop_.body, context, depth);
+				self.list(loop_.body(), context, depth);
 			},
-			CommandKind::ArithFor(loop_) => self.list(&loop_.body, context, depth),
+			CommandKind::ArithFor(loop_) => self.list(loop_.body(), context, depth),
 			CommandKind::Case(case) => {
-				for arm in &case.arms {
-					self.list(&arm.body, context, depth);
+				for arm in case.arms() {
+					self.list(arm.body(), context, depth);
 				}
 			},
-			CommandKind::FuncDef(function) => self.command(&function.body, context, depth, false),
-			CommandKind::Coproc(coproc) => self.command(&coproc.body, context, depth, false),
-			CommandKind::Repeat(loop_) => self.list(&loop_.body, context, depth),
+			CommandKind::FuncDef(function) => self.command(function.body(), context, depth, false),
+			CommandKind::Coproc(coproc) => self.command(coproc.body(), context, depth, false),
+			CommandKind::Repeat(loop_) => self.list(loop_.body(), context, depth),
 			CommandKind::Try(attempt) => {
-				self.list(&attempt.body, context, depth);
-				self.list(&attempt.always, context, depth);
+				self.list(attempt.body(), context, depth);
+				self.list(attempt.always(), context, depth);
 			},
-			CommandKind::AnonFunc(function) => self.command(&function.body, context, depth, false),
+			CommandKind::AnonFunc(function) => self.command(function.body(), context, depth, false),
 			CommandKind::Simple(_) | CommandKind::Arith(_) | CommandKind::Cond(_) => {},
 		}
 	}
 
-	fn loop_items(&self, loop_: &For, cmd: &Command, c: &Context<'_>) -> Vec<Segment> {
-		let Some(words) = &loop_.words else {
-			return vec![self.segment(c, cmd.id, cmd.span, "args", "var", false)];
+	fn loop_items(&self, loop_: For<'_>, cmd: Command<'_>, c: &Context<'_>) -> Vec<Segment> {
+		let (id, span) = (cmd.id(), cmd.span());
+		let Some(words) = loop_.words() else {
+			return vec![self.segment(c, id, span, "args", "var", false)];
 		};
-		if let [word] = words.as_slice() {
-			if matches!(word.parts.as_slice(),[WordPart::Lit(bytes)]if bytes.iter().any(|b|matches!(*b,b'*'|b'?'|b'[')))
+		if let Some(word) = words.one() {
+			let lone = word.parts().one().map(WordPart::get);
+			if let Some(Part::Lit(bytes)) = lone
+				&& bytes.iter().any(|b| matches!(*b, b'*' | b'?' | b'['))
 			{
 				return vec![self.segment(
 					c,
-					word.id,
-					word.span,
+					word.id(),
+					word.span(),
 					format!(
 						"glob({})",
-						super::words::quote(&literal(word).unwrap_or_else(|| c.text(word.span)))
+						super::words::quote(&literal(word).unwrap_or_else(|| c.text(word.span())))
 					),
 					"fn",
 					false,
 				)];
 			}
-			if let [WordPart::Comsub(sub)] = word.parts.as_slice()
-				&& let Some(sequence) = single_list(&sub.body)
-				&& let CommandKind::Simple(simple) = &sequence.kind
+			if let Some(Part::Comsub(sub)) = lone
+				&& let Some(sequence) = single_list(sub.body())
+				&& let CommandKind::Simple(simple) = sequence.kind()
 				&& command_name(simple).as_deref() == Some("seq")
-				&& self.builtin(c.key(sequence.id))
+				&& self.builtin(c.key(sequence.id()))
 				&& let Some(args) = simple
-					.words
+					.words()
 					.iter()
 					.skip(1)
 					.map(literal)
@@ -1941,96 +1873,86 @@ impl<S: VizSource> Printer<'_, S> {
 					_ => None,
 				};
 				if let Some(range) = range {
-					return vec![self.segment(c, word.id, word.span, range, "num", false)];
+					return vec![self.segment(c, word.id(), word.span(), range, "num", false)];
 				}
 			}
 		}
-		let count =
-			if self.options.layers.inline && !self.options.expanded_nodes.contains(&c.key(cmd.id)) {
-				words.len().min(2)
-			} else {
-				words.len()
-			};
-		let mut segments = vec![self.segment(c, cmd.id, cmd.span, "[", "op", false)];
+		let count = if self.options.layers.inline && !self.options.expanded_nodes.contains(&c.key(id))
+		{
+			words.len().min(2)
+		} else {
+			words.len()
+		};
+		let mut segments = vec![self.segment(c, id, span, "[", "op", false)];
 		for (index, word) in words.iter().take(count).enumerate() {
 			if index > 0 {
-				segments.push(self.segment(c, cmd.id, cmd.span, ", ", "op", false));
+				segments.push(self.segment(c, id, span, ", ", "op", false));
 			}
 			segments.extend(self.word_segments(word, c, "str"));
 		}
 		if count < words.len() {
-			segments.push(self.segment(c, cmd.id, cmd.span, ", ", "op", false));
-			let mut more = self.segment(
-				c,
-				cmd.id,
-				cmd.span,
-				format!("+{} more", words.len() - count),
-				"chip",
-				false,
-			);
+			segments.push(self.segment(c, id, span, ", ", "op", false));
+			let mut more =
+				self.segment(c, id, span, format!("+{} more", words.len() - count), "chip", false);
 			more.expanded = Some(
 				words
 					.iter()
-					.map(|word| c.text(word.span))
+					.map(|word| c.text(word.span()))
 					.collect::<Vec<_>>()
 					.join(" "),
 			);
 			more.tip = Some(
 				words
 					.iter()
-					.map(|word| c.text(word.span))
+					.map(|word| c.text(word.span()))
 					.collect::<Vec<_>>()
 					.join("\n"),
 			);
 			segments.push(more);
 		}
-		segments.push(self.segment(c, cmd.id, cmd.span, "]", "op", false));
+		segments.push(self.segment(c, id, span, "]", "op", false));
 		segments
 	}
 
 	fn condition_meta(
 		&mut self,
-		list: &List,
+		list: List<'_>,
 		c: &Context<'_>,
 		until: bool,
 		parent: Option<NodeKey>,
 	) {
-		let Some(item) = list.items.last() else {
+		let Some(item) = list.items().last() else {
 			return;
 		};
-		let pipeline_status = |pipeline: &Pipeline| -> Option<i32> {
+		let pipeline_status = |pipeline: Pipeline<'_>| -> Option<i32> {
 			if let Some(status) = self
 				.runtime
-				.observation(c.key(pipeline.id))
+				.observation(c.key(pipeline.id()))
 				.and_then(|o| o.status)
 			{
 				return Some(status);
 			}
-			if pipeline.stages.len() != 1 {
-				return None;
-			}
-			let status = self
-				.runtime
-				.observation(c.key(pipeline.stages[0].cmd.id))?
-				.status?;
-			Some(if pipeline.bang {
+			let lone = pipeline.stages().one()?;
+			let status = self.runtime.observation(c.key(lone.id()))?.status?;
+			Some(if pipeline.bang() {
 				i32::from(status == 0)
 			} else {
 				status
 			})
 		};
-		let mut status = pipeline_status(&item.and_or.first);
-		for (op, pipeline) in &item.and_or.rest {
+		let and_or = item.and_or();
+		let mut status = pipeline_status(and_or.first());
+		for (op, pipeline) in and_or.rest() {
 			status = match status {
 				Some(status)
-					if (*op == AndOrOp::And && status == 0) || (*op == AndOrOp::Or && status != 0) =>
+					if (op == AndOrOp::And && status == 0) || (op == AndOrOp::Or && status != 0) =>
 				{
 					pipeline_status(pipeline)
 				},
 				other => other,
 			};
 		}
-		let condition = c.key(item.and_or.id);
+		let condition = c.key(and_or.id());
 		let recorded = self.runtime.branch(condition);
 		let condition_status = self.runtime.branch_status(condition);
 		let taken = recorded
@@ -2079,19 +2001,20 @@ impl<S: VizSource> Printer<'_, S> {
 		}
 	}
 
-	fn inline_list(&self, list: &List, c: &Context<'_>) -> Vec<Segment> {
+	fn inline_list(&self, list: List<'_>, c: &Context<'_>) -> Vec<Segment> {
 		let mut out = Vec::new();
-		for (i, item) in list.items.iter().enumerate() {
+		for (i, item) in list.items().iter().enumerate() {
+			let and_or = item.and_or();
 			if i > 0 {
-				out.push(self.segment(c, item.and_or.id, item.and_or.span, "; ", "op", false));
+				out.push(self.segment(c, and_or.id(), and_or.span(), "; ", "op", false));
 			}
-			out.extend(self.pipeline(&item.and_or.first, c));
-			for (op, p) in &item.and_or.rest {
+			out.extend(self.pipeline(and_or.first(), c));
+			for (op, p) in and_or.rest() {
 				out.push(self.segment(
 					c,
-					item.and_or.id,
-					item.and_or.span,
-					if *op == AndOrOp::And { " and " } else { " or " },
+					and_or.id(),
+					and_or.span(),
+					if op == AndOrOp::And { " and " } else { " or " },
 					"op",
 					false,
 				));
@@ -2178,16 +2101,23 @@ impl<S: VizSource> Printer<'_, S> {
 		self.serial += 1;
 	}
 
-	fn nested(&self, cmd: &Command, s: &Simple, w: &Word, index: usize, c: &Context<'_>) -> bool {
+	fn nested(
+		&self,
+		cmd: Command<'_>,
+		s: Simple<'_>,
+		w: Word<'_>,
+		index: usize,
+		c: &Context<'_>,
+	) -> bool {
 		if !self.options.layers.unwrap {
 			return false;
 		}
-		let key = c.key(w.id);
+		let key = c.key(w.id());
 		if c.source == 0
 			&& self.analysis.children.contains_key(&key)
 			&& self
 				.runtime
-				.observation(c.key(cmd.id))
+				.observation(c.key(cmd.id()))
 				.is_none_or(|observation| observation.resolved != Some(ResolvedKind::External))
 		{
 			return true;
@@ -2201,11 +2131,11 @@ impl<S: VizSource> Printer<'_, S> {
 		let external = c.untraced.is_some()
 			|| self
 				.runtime
-				.observation(c.key(cmd.id))
+				.observation(c.key(cmd.id()))
 				.is_some_and(|o| o.resolved == Some(ResolvedKind::External));
 		if c.source == 0
 			&& remote
-			&& self.runtime.observation(c.key(cmd.id)).is_some_and(|o| {
+			&& self.runtime.observation(c.key(cmd.id())).is_some_and(|o| {
 				matches!(o.resolved, Some(ResolvedKind::Function | ResolvedKind::NotFound))
 			}) {
 			return false;
@@ -2218,8 +2148,8 @@ impl<S: VizSource> Printer<'_, S> {
 			let parsed = (|| {
 				let body = literal(w)?;
 				let origin = if let Some(parent) = &c.origin {
-					let [start, _] = c.map.bytes(w.span)?;
-					let origins = source::literal_map(c.map.raw(c.bytes, w.span), body.as_bytes())?;
+					let [start, _] = c.map.bytes(w.span())?;
+					let origins = source::literal_map(c.map.raw(c.bytes, w.span()), body.as_bytes())?;
 					let mapped = origins
 						.into_iter()
 						.map(|at| parent.at((start as u32).checked_add(at)?))
@@ -2234,15 +2164,20 @@ impl<S: VizSource> Printer<'_, S> {
 					.iter()
 					.map(|cc| origin.base.checked_add(origin.at(cc.span.lo)?))
 					.collect::<Option<Vec<_>>>()?;
+				let commands: Vec<(Tree, u32)> = program
+					.commands
+					.into_iter()
+					.map(|cc| (cc.tree, cc.root.index()))
+					.collect();
 				let map = c
 					.map
-					.nested(w.span, c.bytes, body.as_bytes(), 0)
+					.nested(w.span(), c.bytes, body.as_bytes(), 0)
 					.unwrap_or_else(|| SourceMap::unlocated(0, body.len()));
-				let mut facts = analysis::program(&program, c.unit, &ids);
+				let mut facts = analysis::program(&commands, c.unit, &ids);
 				facts.arithmetic = Arc::clone(&self.analysis.arithmetic);
 				Some(Arc::new(Nested {
 					body,
-					program,
+					commands,
 					ids,
 					remote: remote || c.untraced.is_some_and(|s| s.contains("remote/untraced")),
 					origin,
@@ -2255,36 +2190,44 @@ impl<S: VizSource> Printer<'_, S> {
 		cache.nested.get(&key).is_some_and(Option::is_some)
 	}
 
-	fn documents(&mut self, p: &Pipeline, c: &Context<'_>, depth: u32) {
-		for stage in &p.stages {
-			if let CommandKind::Simple(s) = &stage.cmd.kind {
-				self.command_documents(&stage.cmd, s, c, depth);
+	fn documents(&mut self, p: Pipeline<'_>, c: &Context<'_>, depth: u32) {
+		for stage in p.stages() {
+			if let CommandKind::Simple(s) = stage.kind() {
+				self.command_documents(stage, Some(s), c, depth);
 			}
 		}
 	}
 
-	fn command_documents(&mut self, cmd: &Command, s: &Simple, c: &Context<'_>, depth: u32) {
-		let name = command_name(s).unwrap_or_default();
+	fn command_documents(
+		&mut self,
+		cmd: Command<'_>,
+		s: Option<Simple<'_>>,
+		c: &Context<'_>,
+		depth: u32,
+	) {
+		let name = s.and_then(command_name).unwrap_or_default();
 		let args = arguments_with_redirs(s, cmd);
-		for (i, w) in s.words.iter().enumerate() {
-			if self.options.layers.unwrap && self.nested(cmd, s, w, i, c) {
-				self.nested_document(cmd, w, c, depth);
-				continue;
-			}
-			if self.options.layers.unwrap
-				&& let (Some(language), Some(value)) =
-					(embedded::argument_language(&name, &args, i), literal(w))
-				&& (value.contains('\n') || value.len() > 64)
-			{
-				self.document(
-					&value,
-					language,
-					c,
-					w.id,
-					Some(w.span),
-					depth + 1,
-					Some("inline argument"),
-				);
+		if let Some(s) = s {
+			for (i, w) in s.words().iter().enumerate() {
+				if self.options.layers.unwrap && self.nested(cmd, s, w, i, c) {
+					self.nested_document(cmd, w, c, depth);
+					continue;
+				}
+				if self.options.layers.unwrap
+					&& let (Some(language), Some(value)) =
+						(embedded::argument_language(&name, &args, i), literal(w))
+					&& (value.contains('\n') || value.len() > 64)
+				{
+					self.document(
+						&value,
+						language,
+						c,
+						w.id(),
+						Some(w.span()),
+						depth + 1,
+						Some("inline argument"),
+					);
+				}
 			}
 		}
 		let doc_spans = {
@@ -2292,28 +2235,28 @@ impl<S: VizSource> Printer<'_, S> {
 			Arc::clone(
 				cache
 					.docs
-					.entry(c.key(cmd.id))
-					.or_insert_with(|| Arc::new(source::heredoc_spans(&c.map, c.bytes, &cmd.redirs))),
+					.entry(c.key(cmd.id()))
+					.or_insert_with(|| Arc::new(source::heredoc_spans(&c.map, c.bytes, cmd.redirs()))),
 			)
 		};
-		for (index, redir) in cmd.redirs.iter().enumerate() {
-			if let RedirTarget::HereDoc(doc) = &redir.target {
-				let body = String::from_utf8_lossy(&doc.text);
+		for (index, redir) in cmd.redirs().iter().enumerate() {
+			if let RedirTarget::HereDoc(doc) = redir.target() {
+				let body = String::from_utf8_lossy(doc.text());
 				let doc_span = doc_spans.get(index).copied().flatten();
 				if self.options.layers.unwrap {
 					let language =
-						embedded::heredoc_language(&name, &args, &String::from_utf8_lossy(&doc.delim));
+						embedded::heredoc_language(&name, &args, &String::from_utf8_lossy(doc.delim()));
 					self.document(
 						body.strip_suffix('\n').unwrap_or(&body),
 						language,
 						c,
-						cmd.id,
+						cmd.id(),
 						doc_span,
 						depth + 1,
 						Some(&format!(
 							"heredoc «{}»{}",
-							String::from_utf8_lossy(&doc.delim),
-							if !doc.quoted && body.contains('$') {
+							String::from_utf8_lossy(doc.delim()),
+							if !doc.quoted() && body.contains('$') {
 								" · $vars expand"
 							} else {
 								""
@@ -2322,7 +2265,7 @@ impl<S: VizSource> Printer<'_, S> {
 					);
 				} else {
 					let (original, span) = original_heredoc(c, doc_span, doc);
-					self.document(&original, "text", c, cmd.id, span, depth + 1, None);
+					self.document(&original, "text", c, cmd.id(), span, depth + 1, None);
 				}
 			}
 		}
@@ -2413,13 +2356,13 @@ impl<S: VizSource> Printer<'_, S> {
 		}
 	}
 
-	fn nested_document(&mut self, command: &Command, w: &Word, c: &Context<'_>, depth: u32) {
-		let range = c.map.range(w.span);
+	fn nested_document(&mut self, command: Command<'_>, w: Word<'_>, c: &Context<'_>, depth: u32) {
+		let range = c.map.range(w.span());
 		let native = c.source == 0
-			&& self.analysis.children.contains_key(&c.key(w.id))
+			&& self.analysis.children.contains_key(&c.key(w.id()))
 			&& self
 				.runtime
-				.observation(c.key(command.id))
+				.observation(c.key(command.id()))
 				.is_none_or(|observation| observation.resolved != Some(ResolvedKind::External));
 		let nested = if native {
 			None
@@ -2430,7 +2373,7 @@ impl<S: VizSource> Printer<'_, S> {
 				.inner
 				.lock()
 				.nested
-				.get(&c.key(w.id))
+				.get(&c.key(w.id()))
 				.and_then(Clone::clone)
 		};
 		if let Some(nested) = nested {
@@ -2441,7 +2384,7 @@ impl<S: VizSource> Printer<'_, S> {
 			};
 			self.frame(c.unit, depth + 1, title, range);
 			let map = nested.map.clone();
-			for (cc, id) in nested.program.commands.iter().zip(&nested.ids) {
+			for ((tree, root), id) in nested.commands.iter().zip(&nested.ids) {
 				let context = Context {
 					unit:     c.unit,
 					source:   *id,
@@ -2455,7 +2398,7 @@ impl<S: VizSource> Printer<'_, S> {
 					origin:   Some(nested.origin.clone()),
 					analysis: &nested.analysis,
 				};
-				self.list(&cc.list, &context, depth + 1);
+				self.list(List::at(tree, *root), &context, depth + 1);
 			}
 			self.close_frame(c.unit, depth + 1, range);
 			return;
@@ -2465,7 +2408,7 @@ impl<S: VizSource> Printer<'_, S> {
 		let mut children = self
 			.analysis
 			.children
-			.get(&c.key(w.id))
+			.get(&c.key(w.id()))
 			.into_iter()
 			.flatten()
 			.filter_map(|index| self.source.unit(*index as usize))
@@ -2478,7 +2421,7 @@ impl<S: VizSource> Printer<'_, S> {
 		let body = literal(w);
 		let body_map = body
 			.as_ref()
-			.and_then(|body| c.map.nested(w.span, c.bytes, body.as_bytes(), 0));
+			.and_then(|body| c.map.nested(w.span(), c.bytes, body.as_bytes(), 0));
 		let mut cursor = 0usize;
 		for unit in children {
 			self.children.insert(unit.index);
@@ -2530,33 +2473,70 @@ fn style_for(style: &str, color: bool) -> Option<String> {
 	};
 	(!text.is_empty()).then_some(text)
 }
-fn single(a: &AndOr) -> Option<&Command> {
-	(a.rest.is_empty() && a.first.stages.len() == 1 && !a.first.bang && a.first.time.is_none())
-		.then(|| &a.first.stages[0].cmd)
-}
-fn root_command<'a>(unit: &super::runtime::SourceUnit<'a>) -> Option<&'a Command> {
-	match &unit.syntax?.tree {
-		SyntaxTree::List(list)
-			if list.items.len() == 1 && !matches!(list.items[0].sep, Sep::Amp | Sep::Disown) =>
-		{
-			single(&list.items[0].and_or)
-		},
-		SyntaxTree::Command(command) => Some(command),
-		_ => None,
+/// Pseudo word drawn for a chain operator.
+const fn connector(op: AndOrOp) -> &'static str {
+	match op {
+		AndOrOp::And => "and ",
+		AndOrOp::Or => "or ",
 	}
 }
-fn single_list(l: &List) -> Option<&Command> {
-	(l.items.len() == 1)
-		.then(|| single(&l.items[0].and_or))
-		.flatten()
+/// The `&&`/`||` opening `bytes` after blanks, with the byte length through
+/// it and the whitespace following it.
+fn chain_operator(bytes: &[u8]) -> Option<(AndOrOp, usize)> {
+	let at = bytes
+		.iter()
+		.position(|byte| !matches!(byte, b' ' | b'\t'))?;
+	let op = match bytes.get(at..at + 2)? {
+		b"&&" => AndOrOp::And,
+		b"||" => AndOrOp::Or,
+		_ => return None,
+	};
+	let end = at + 2;
+	Some((
+		op,
+		end + bytes[end..]
+			.iter()
+			.take_while(|byte| byte.is_ascii_whitespace())
+			.count(),
+	))
 }
-fn guard_key(l: &List, c: &Context<'_>) -> Option<NodeKey> {
-	let a = &l.items.last()?.and_or;
-	let p = a.rest.last().map_or(&a.first, |(_, p)| p);
-	(p.stages.len() == 1).then(|| c.key(p.stages[0].cmd.id))
+fn single(a: AndOr<'_>) -> Option<Command<'_>> {
+	let first = a.first();
+	if a.rest().len() != 0 || first.bang() || first.time().is_some() {
+		return None;
+	}
+	first.stages().one()
 }
-fn is_simple(c: &Command, name: &str, arg: Option<&str>) -> bool {
-	matches!(&c.kind,CommandKind::Simple(s) if c.redirs.is_empty()&&s.assigns.is_empty()&&command_name(s).as_deref()==Some(name)&&match arg{Some(a)=>s.words.len()==2&&s.words.get(1).and_then(literal).as_deref()==Some(a),None=>s.words.len()>1})
+fn root_command<'a>(unit: &super::runtime::SourceUnit<'a>) -> Option<Command<'a>> {
+	match unit.syntax?.tree.view() {
+		Root::List(list) => {
+			let item = list.items().one()?;
+			(!matches!(item.sep(), Sep::Amp | Sep::Disown)).then(|| single(item.and_or()))?
+		},
+		Root::Command(command) => Some(command),
+		Root::Word(_) => None,
+	}
+}
+fn single_list(l: List<'_>) -> Option<Command<'_>> {
+	single(l.items().one()?.and_or())
+}
+fn guard_key(l: List<'_>, c: &Context<'_>) -> Option<NodeKey> {
+	let a = l.items().last()?.and_or();
+	let p = a.rest().last().map_or_else(|| a.first(), |(_, p)| p);
+	p.stages().one().map(|cmd| c.key(cmd.id()))
+}
+fn is_simple(c: Command<'_>, name: &str, arg: Option<&str>) -> bool {
+	let CommandKind::Simple(s) = c.kind() else {
+		return false;
+	};
+	let words = s.words();
+	c.redirs().is_empty()
+		&& s.assigns().is_empty()
+		&& command_name(s).as_deref() == Some(name)
+		&& match arg {
+			Some(a) => words.len() == 2 && words.get(1).and_then(literal).as_deref() == Some(a),
+			None => words.len() > 1,
+		}
 }
 fn timeout_duration(value: &str) -> bool {
 	let digits = value.bytes().take_while(u8::is_ascii_digit).count();
@@ -2564,12 +2544,12 @@ fn timeout_duration(value: &str) -> bool {
 		&& (digits == value.len()
 			|| digits + 1 == value.len() && matches!(value.as_bytes()[digits], b's' | b'm' | b'h'))
 }
-fn tail_count(s: &Simple) -> Option<u32> {
-	if !matches!(command_name(s).as_deref(), Some("head" | "tail")) || !s.assigns.is_empty() {
+fn tail_count(s: Simple<'_>) -> Option<u32> {
+	if !matches!(command_name(s).as_deref(), Some("head" | "tail")) || !s.assigns().is_empty() {
 		return None;
 	}
 	let args = s
-		.words
+		.words()
 		.iter()
 		.skip(1)
 		.map(literal)
@@ -2592,7 +2572,7 @@ fn tail_count(s: &Simple) -> Option<u32> {
 fn original_heredoc(
 	context: &Context<'_>,
 	span: Option<Span>,
-	doc: &HereDoc,
+	doc: HereDoc<'_>,
 ) -> (String, Option<Span>) {
 	if let Some(span) = span
 		&& let Some([start, end]) = context.map.bytes(span)
@@ -2612,21 +2592,21 @@ fn original_heredoc(
 			return (String::from_utf8_lossy(bytes).into_owned(), Some(full));
 		}
 	}
-	(String::from_utf8_lossy(&doc.text).into_owned(), None)
+	(String::from_utf8_lossy(doc.text()).into_owned(), None)
 }
-fn arguments_with_redirs(simple: &Simple, command: &Command) -> Vec<String> {
+fn arguments_with_redirs(simple: Option<Simple<'_>>, command: Command<'_>) -> Vec<String> {
 	let mut args = simple
-		.words
-		.iter()
+		.into_iter()
+		.flat_map(|s| s.words().iter())
 		.map(|word| literal(word).unwrap_or_default())
 		.collect::<Vec<_>>();
 	args.extend(
 		command
-			.redirs
+			.redirs()
 			.iter()
 			.filter(|redir| {
 				matches!(
-					redir.op,
+					redir.op(),
 					RedirOp::Out
 						| RedirOp::Append
 						| RedirOp::Clobber
@@ -2637,14 +2617,14 @@ fn arguments_with_redirs(simple: &Simple, command: &Command) -> Vec<String> {
 						| RedirOp::AppendErrClobber
 				)
 			})
-			.filter_map(|redir| match &redir.target {
+			.filter_map(|redir| match redir.target() {
 				RedirTarget::Word(word) => literal(word),
 				RedirTarget::HereDoc(_) => None,
 			}),
 	);
 	args
 }
-fn fd_text(fd: Option<&RedirFd>) -> String {
+fn fd_text(fd: Option<RedirFd<'_>>) -> String {
 	match fd {
 		None => String::new(),
 		Some(RedirFd::Num(n)) => n.to_string(),
@@ -2670,7 +2650,7 @@ const fn redir_operator(op: RedirOp) -> &'static str {
 		RedirOp::AppendErrClobber => "&>>|",
 	}
 }
-fn test_words(words: &[Word], p: &WordPrinter<'_>) -> String {
+fn test_words(words: Seq<'_, Word<'_>>, p: &WordPrinter<'_>) -> String {
 	let values = words.iter().map(|w| p.word(w)).collect::<Vec<_>>();
 	let literal_values = words
 		.iter()
@@ -2711,9 +2691,9 @@ fn test_words(words: &[Word], p: &WordPrinter<'_>) -> String {
 	}
 	values.join(" ")
 }
-fn shell_body(s: &Simple) -> Option<(usize, bool)> {
+fn shell_body(s: Simple<'_>) -> Option<(usize, bool)> {
 	let args = s
-		.words
+		.words()
 		.iter()
 		.map(|word| literal(word).unwrap_or_default())
 		.collect::<Vec<_>>();

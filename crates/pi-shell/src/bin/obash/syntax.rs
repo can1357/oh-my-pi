@@ -39,11 +39,12 @@ pub fn print(src: &[u8], argv0: &[u8], origin_is_command: bool) -> u8 {
 					let _ = out.flush();
 					let _ = io::stderr().write_all(&w);
 				}
-				let mut text = print_list(&cc.list, PrintStyle::DeclareF);
+				let mut text = print_list(cc.list(), PrintStyle::DeclareF);
 				text.push(b'\n');
 				if out.write_all(&text).is_err() {
 					return 1;
 				}
+				parser.recycle(cc.tree);
 			},
 			Err(e) => {
 				let _ = out.flush();
@@ -64,13 +65,19 @@ pub fn json(src: &[u8], dialect: Dialect) -> u8 {
 	let mut commands = Vec::new();
 	while let Some(res) = parser.next_command() {
 		match res {
-			Ok(cc) => commands.push(cc),
+			Ok(mut cc) => {
+				cc.tree.shrink_to_fit();
+				commands.push(cc);
+			},
 			Err(e) => {
 				let _ = io::stderr().write_all(&error_text(src, b"obash", false, &e));
 				return 2;
 			},
 		}
 	}
+	// The parser's token buffers grew with the largest command; free them
+	// before the export builds its own.
+	drop(parser);
 	let d = match dialect {
 		Dialect::Native => JsonDialect::Native,
 		Dialect::Shfmt => JsonDialect::Shfmt,
@@ -126,8 +133,9 @@ pub fn parse_corpus(path: &Path) -> u8 {
 		let mut parser = Parser::new(src, Features::NONE, NO_ALIASES);
 		let mut ok = true;
 		while let Some(res) = parser.next_command() {
-			if res.is_err() {
-				ok = false;
+			match res {
+				Ok(cc) => parser.recycle(cc.tree),
+				Err(_) => ok = false,
 			}
 		}
 		parse_ns += start.elapsed().as_nanos();

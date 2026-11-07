@@ -24,7 +24,7 @@ fn declare_f(src: &[u8], aliases: &dyn AliasLookup) -> Result<String, String> {
 	let mut out = Vec::new();
 	while let Some(res) = p.next_command() {
 		let cc = res.map_err(|e| String::from_utf8_lossy(&e.bash_msg()).into_owned())?;
-		out.extend(print_list(&cc.list, PrintStyle::DeclareF));
+		out.extend(print_list(cc.list(), PrintStyle::DeclareF));
 	}
 	Ok(String::from_utf8_lossy(&out).into_owned())
 }
@@ -174,8 +174,8 @@ fn recorded_alias_uses_reproduce_the_tree_and_ids() {
 		let again = q.next_command().expect("a command").expect("parses");
 		assert_eq!(again.node_count, first.node_count, "{body:?}");
 		assert_eq!(
-			print_list(&again.list, PrintStyle::Compact),
-			print_list(&first.list, PrintStyle::Compact),
+			print_list(again.list(), PrintStyle::Compact),
+			print_list(first.list(), PrintStyle::Compact),
 			"{body:?}"
 		);
 	}

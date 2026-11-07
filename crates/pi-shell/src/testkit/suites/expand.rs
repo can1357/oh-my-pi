@@ -298,6 +298,14 @@ fn here_documents_define_functions_inside_substitutions() {
 }
 
 #[test]
+fn here_documents_of_commands_in_one_backquote_keep_their_own_bodies() {
+	assert_eq!(
+		out("x=`read -r a <<E\nfirst\nE\nread -r b <<E\nsecond\nE\necho $a $b`; echo \"$x\""),
+		"first second\n"
+	);
+}
+
+#[test]
 fn substring_arithmetic_errors_name_the_parameter() {
 	let (out, err) = run("x=abc; echo ${x:%}\necho ${unset_v:1:%}.");
 	assert_eq!(out, ".\n");

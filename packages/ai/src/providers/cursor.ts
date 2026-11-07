@@ -265,6 +265,7 @@ import {
 	piTimeout,
 	shellDeadlineSeconds,
 } from "./cursor/exec-modern";
+import { CursorExecOrder } from "./cursor/exec-order";
 import { handleInteractionQuery, protoUnknownFields } from "./cursor/interaction-query";
 
 export const CURSOR_API_URL = CURSOR_DEFAULT_BASE_URL;
@@ -1550,6 +1551,7 @@ function streamCursorWithWireMode(
 				},
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
 				onToolResult,
+				execOrder: new CursorExecOrder(),
 				holdExternalCall: relay
 					? (execMsg, mcpCall) => {
 							relay.held.set(mcpCall.toolCallId, { execMsg, mcpCall });
@@ -1904,6 +1906,7 @@ function streamCursorWithWireMode(
 				clearTimeout(relay.quietTimer);
 			}
 			await h2Completion.promise;
+			state.execOrder?.close();
 			if (conversationId && baseConversationId && conversationId !== baseConversationId) {
 				successfulRotatedConversationIds.add(conversationId);
 				freshRotatedConversationIds.delete(conversationId);
@@ -2084,6 +2087,7 @@ function streamCursorWithWireMode(
 			// Resume only from a checkpoint that followed every decoded side effect
 			// and every client result write; without one, replay is safe solely
 			// before the provider emitted work.
+			openBlockState?.execOrder?.close();
 			await drainInFlightDispatches();
 			const retryAttempt = retryContext?.attempt ?? 0;
 			const hasFreshCheckpoint =
@@ -2386,6 +2390,8 @@ export interface BlockState {
 	editOwnedToolCallIds?: Set<string>;
 	/** Edit blocks whose write already persisted a `toolResult`. */
 	pairedEditToolCallIds?: Set<string>;
+	/** Orders this run's exec frames like a local tool batch. Optional so existing test harnesses stay valid. */
+	execOrder?: CursorExecOrder;
 	firstTokenTime: number | undefined;
 	setTextBlock: (b: (TextContent & { [kStreamingBlockIndex]: number }) | null) => void;
 	setThinkingBlock: (b: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null) => void;
@@ -2857,7 +2863,66 @@ function sendShellStreamExitFromResult(
 	}
 }
 
+/** Frames that mutate files: omp runs `edit`, `write` and `delete` alone. */
+const EXCLUSIVE_EXEC_CASES: Partial<Record<NonNullable<ExecServerMessage["message"]["case"]>, true>> = {
+	writeArgs: true,
+	deleteArgs: true,
+	piEditArgs: true,
+	piWriteArgs: true,
+};
+
+/** The call a frame belongs to: its tool call id, or the frame itself when it carries none. */
+function execFrameCallId(execMsg: ExecServerMessage): string {
+	const value = execMsg.message.value;
+	const toolCallId = value && "toolCallId" in value ? value.toolCallId : undefined;
+	return typeof toolCallId === "string" && toolCallId.length > 0 ? toolCallId : `exec:${execMsg.id}:${execMsg.execId}`;
+}
+
+/**
+ * Runs one exec frame in its place in the tool batch ({@link CursorExecOrder}).
+ * Must be entered synchronously as frames arrive: the order is arrival order.
+ */
 async function handleExecServerMessage(
+	execMsg: ExecServerMessage,
+	runTransport: CursorMessageWriter,
+	execHandlers: CursorExecHandlers | undefined,
+	onToolResult: CursorToolResultHandler | undefined,
+	requestContextTools: McpToolDefinition[],
+	requestContextRules: CursorRule[],
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	state: BlockState,
+	externalToolExecutor: boolean,
+): Promise<void> {
+	const run = () =>
+		runExecServerMessage(
+			execMsg,
+			runTransport,
+			execHandlers,
+			onToolResult,
+			requestContextTools,
+			requestContextRules,
+			output,
+			stream,
+			state,
+			externalToolExecutor,
+		);
+	const order = state.execOrder;
+	const execCase = execMsg.message.case;
+	if (!order || !execCase || execCase === "requestContextArgs") return run();
+	const callId = execFrameCallId(execMsg);
+	const editOwned =
+		(execCase === "readArgs" || execCase === "writeArgs") && isEditOwnedToolCallId(state, output, callId);
+	const reached = await order.enter(callId, editOwned || EXCLUSIVE_EXEC_CASES[execCase] === true);
+	try {
+		if (reached) await run();
+	} finally {
+		// An edit keeps its place past its read: its write follows, or the server completes it.
+		if (!reached || !(editOwned && execCase === "readArgs")) order.leave(callId);
+	}
+}
+
+async function runExecServerMessage(
 	execMsg: ExecServerMessage,
 	runTransport: CursorMessageWriter,
 	execHandlers: CursorExecHandlers | undefined,
@@ -6012,6 +6077,7 @@ export function processInteractionUpdate(
 						stream_content: edit.args.streamContent ?? stringToolArg(settled.arguments, "stream_content"),
 					});
 				}
+				state.execOrder?.leave(settled.id);
 				if (!state.pairedEditToolCallIds?.has(settled.id)) {
 					const { text, isError } = describeEditResult(toolCall);
 					state.onToolResult?.({
