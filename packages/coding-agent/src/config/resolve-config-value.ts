@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { OAUTH_REFRESH_SKEW_MS } from "@oh-my-pi/pi-ai/auth/refresh";
 import { CredentialSourceError } from "@oh-my-pi/pi-ai/error";
 import { executeShell } from "@oh-my-pi/pi-natives";
@@ -70,6 +71,18 @@ const commandFailureRetryAt = new Map<string, number>();
 const commandLastFailure = new Map<string, CommandFailureRecord>();
 const commandInFlight = new Map<string, Promise<CommandRunOutcome>>();
 const commandGeneration = new Map<string, number>();
+/**
+ * The monotonic deadline the value a command currently prints was FIRST given,
+ * keyed by a digest of that value. A helper that prints the same credential again
+ * has minted nothing: re-running it is not evidence of a new token, so the value
+ * keeps the deadline it was given when it first appeared and a stale minting tool
+ * cannot hand the same dead JWT an unlimited series of fresh leases.
+ *
+ * It outlives the caches deliberately — retiring an expired result is exactly when
+ * the next run would otherwise mint a new deadline for the same bytes — so a digest
+ * is held rather than the credential, and nothing needs the bytes to compare them.
+ */
+const commandMonoDeadline = new Map<string, { digest: string; monoExpiresAt: number }>();
 
 /**
  * Why cached command values are dropped. `rejected`: a 401 proved the value
@@ -189,16 +202,25 @@ function servable(result: CommandResult | undefined, now: number): string | unde
 	return now < result.expiresAt && performance.now() < monoExpiresAt ? result.value : undefined;
 }
 
-/** One successful run's stdout with both deadlines fixed at the moment it was minted. */
-function commandResult(value: string): CommandResult {
+/**
+ * One successful run's stdout with its deadlines. The wall deadline is the value's
+ * own `exp`; the monotonic one is carried from the first time this command printed
+ * this exact value, so repeating a run cannot extend a credential's life.
+ */
+function commandResult(command: string, value: string): CommandResult {
 	const mintedAt = Date.now();
 	const expiresAt = jwtExpiresAt(value);
-	return {
-		value,
-		mintedAt,
-		expiresAt,
-		monoExpiresAt: expiresAt === undefined ? undefined : performance.now() + (expiresAt - mintedAt),
-	};
+	if (expiresAt === undefined) {
+		commandMonoDeadline.delete(command);
+		return { value, mintedAt, expiresAt: undefined, monoExpiresAt: undefined };
+	}
+	const digest = createHash("sha256").update(value).digest("base64");
+	const held = commandMonoDeadline.get(command);
+	// Same bytes, same credential, same deadline. Different bytes are a real mint
+	// and start their own.
+	const monoExpiresAt = held?.digest === digest ? held.monoExpiresAt : performance.now() + (expiresAt - mintedAt);
+	commandMonoDeadline.set(command, { digest, monoExpiresAt });
+	return { value, mintedAt, expiresAt, monoExpiresAt };
 }
 
 /**
@@ -211,6 +233,24 @@ function discardExpired(command: string, now: number): void {
 	if (cached !== undefined && servable(cached, now) === undefined) commandResultCache.delete(command);
 	const lastGood = commandLastGood.get(command);
 	if (lastGood !== undefined && servable(lastGood, now) === undefined) commandLastGood.delete(command);
+}
+
+/**
+ * The only way to read a held result: it comes back while it may still be sent, and
+ * finding it past its expiry retires every copy of it.
+ *
+ * Observation and retirement are one act here rather than three calls somebody has
+ * to remember. Placing {@link discardExpired} at each read site left the failed-run
+ * continuation without one, so a refresh that failed as the clock crossed `exp`
+ * read the last good value, saw it dead, left it in the map — and served it again
+ * once the wall clock stepped back, which the monotonic deadline cannot catch
+ * because it has not elapsed.
+ */
+function servableHeld(store: Map<string, CommandResult>, command: string, now: number): CommandResult | undefined {
+	const held = store.get(command);
+	if (held !== undefined && servable(held, now) !== undefined) return held;
+	discardExpired(command, now);
+	return undefined;
 }
 
 /**
@@ -272,7 +312,9 @@ function recordCommandFailure(
 ): CommandRunOutcome {
 	const failure: CommandFailureRecord = { outcome, timeoutMs };
 	if (current) {
-		commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+		// The backoff is a duration, so it is measured on the clock no step can move:
+		// recording it on the wall clock made a one-year forward jump a one-year wait.
+		commandFailureRetryAt.set(command, performance.now() + COMMAND_FAILURE_RETRY_MS);
 		commandLastFailure.set(command, failure);
 	}
 	return { result: undefined, failure };
@@ -289,21 +331,15 @@ async function resolveCommandResolution(
 ): Promise<CommandResolution> {
 	const command = commandKey(valueConfig);
 	const now = Date.now();
-	// Observing a value at or past its expiry retires it here: a clock set backwards
-	// afterwards must not find it again.
-	discardExpired(command, now);
-	const cached = commandResultCache.get(command);
 	// A successful run serves until its command is due again: a JWT one refresh skew
 	// before its `exp`, any other value after `providers.commandRefreshSeconds`. Past
 	// that the command runs again, so a time-limited token is replaced before a
 	// provider rejects it rather than after.
-	if (cached !== undefined && now < refreshAt(cached)) {
-		const fresh = servable(cached, now);
-		if (fresh !== undefined) return { value: fresh };
-	}
-	const lastGood = servable(commandLastGood.get(command), now);
+	const cached = servableHeld(commandResultCache, command, now);
+	if (cached !== undefined && now < refreshAt(cached)) return { value: cached.value };
+	const lastGood = servableHeld(commandLastGood, command, now)?.value;
 	const retryAt = commandFailureRetryAt.get(command);
-	if (retryAt !== undefined && now < retryAt) {
+	if (retryAt !== undefined && performance.now() < retryAt) {
 		// Inside the backoff window no run happens, so the recorded failure is this
 		// resolution's reason. It is read with no await in between, so nothing can clear
 		// it between deciding there is no value and saying why.
@@ -323,18 +359,16 @@ async function resolveCommandResolution(
 	if (settled.result !== undefined) {
 		// Awaiting is not instant, and this waiter may have queued behind others: a
 		// value servable when the run finished can be past its `exp` by the time the
-		// waiter resumes, so the deadline is checked again here rather than trusted.
-		const after = Date.now();
-		discardExpired(command, after);
-		const fresh = servable(settled.result, after);
-		if (fresh !== undefined) return { value: fresh };
+		// waiter resumes, so the held copy is read again here rather than trusted.
+		const fresh = servableHeld(commandResultCache, command, Date.now());
+		if (fresh !== undefined) return { value: fresh.value };
 		return {
 			value: undefined,
 			failure: { outcome: { ok: false, reason: "expired" }, timeoutMs: commandTimeoutMsFor(commandTimeout) },
 		};
 	}
 	// A 401 during the run drops the last good value, so read it after the run.
-	const served = servable(commandLastGood.get(command), Date.now());
+	const served = servableHeld(commandLastGood, command, Date.now())?.value;
 	return served !== undefined ? { value: served } : { value: undefined, failure: settled.failure };
 }
 
@@ -352,7 +386,7 @@ function startCommandRun(command: string, timeoutMs: number): Promise<CommandRun
 		.then(outcome => {
 			const current = (commandGeneration.get(command) ?? 0) === generation;
 			if (outcome.ok) {
-				const result = commandResult(outcome.value);
+				const result = commandResult(command, outcome.value);
 				// A command can print a credential already past its `exp`: a stale cache
 				// inside the minting tool, a clock apart from the issuer's. That is a
 				// failed mint, not a value. Caching or returning it would send a
@@ -596,6 +630,22 @@ function joinShellLines(text: string): string {
 }
 
 /**
+ * One word of a label, with everything from its first `=` dropped.
+ *
+ * A word that looks like `NAME=value` is redacted whether or not it parses as an
+ * assignment. Quoting decides that — `'LABEL=secret'` and `LA'BEL'='secret'` are
+ * programs, not assignments — and each round of review has found another spelling
+ * the classifier calls a program and the scanner then printed whole. The shell has
+ * more of them than anyone will enumerate, so no printed word carries anything past
+ * its first `=`, and the label keeps what a user needs to tell their sources apart:
+ * the name, or the program path.
+ */
+function labelWord(word: string): string {
+	const assigned = word.indexOf("=");
+	return assigned === -1 ? shortenPath(word) : `${shortenPath(word.slice(0, assigned))}=…`;
+}
+
+/**
  * The program a command runs, for messages. Only the program is shown, never an
  * argument: a credential command's arguments carry secrets. The same is true of
  * a leading `NAME=value` assignment, so those are reported by name with the
@@ -629,7 +679,7 @@ function commandLabel(command: string): string {
 	}
 	if (!elided) {
 		const program = firstShellWord(rest);
-		if (program.word.length > 0 && program.safe) parts.push(shortenPath(program.word));
+		if (program.word.length > 0 && program.safe) parts.push(labelWord(program.word));
 		else elided = true;
 		if (program.rest.length > 0) elided = true;
 	}
@@ -786,4 +836,5 @@ export function clearConfigValueCache(): void {
 	invalidateAllCommandConfigs("rejected");
 	commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
 	commandRefreshMs = 0;
+	commandMonoDeadline.clear();
 }

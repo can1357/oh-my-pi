@@ -112,3 +112,61 @@ it.skipIf(process.platform === "win32").each(["token", "usage"])(
 	},
 	60_000,
 );
+
+// Releasing the hold was tested; taking it was not. A one-shot command that does not
+// bind its own settings leaves whatever already drives effects in charge, and settings
+// that drive effects outrank the operation's own scope — so the user's limit is the one
+// thing that stops applying, which is invisible unless something else is bound.
+it.skipIf(process.platform === "win32").each(["token", "usage"])(
+	"omp %s binds its own settings, so an outer scope's limit does not run its broker token",
+	async mode => {
+		tempDir = path.join(os.tmpdir(), `pi-test-effects-bind-${Snowflake.next()}`);
+		const agentDir = path.join(tempDir, "agent");
+		const projectDir = path.join(tempDir, "project");
+		await fs.mkdir(projectDir, { recursive: true });
+		const requests: string[] = [];
+		using broker = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				requests.push(new URL(request.url).pathname);
+				return Response.json({ error: "rejected" }, { status: 401 });
+			},
+		});
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			[
+				"providers:",
+				"  commandTimeoutSeconds: 0.2",
+				"auth:",
+				"  broker:",
+				`    url: http://127.0.0.1:${broker.port}`,
+				`    token: ${JSON.stringify("!sleep 1; printf %s broker-token")}`,
+				"",
+			].join("\n"),
+		);
+		const env: Record<string, string | undefined> = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
+		delete env.PI_CONFIG_FILES;
+		delete env.PI_SHELL_PREFIX;
+		delete env.PI_PROFILE;
+		delete env.OMP_AUTH_BROKER_URL;
+		delete env.OMP_AUTH_BROKER_TOKEN;
+		const proc = Bun.spawn(
+			[process.execPath, path.join(import.meta.dir, "fixtures/effects-bound-command-timeout.ts"), mode],
+			{ cwd: projectDir, env, stdout: "pipe", stderr: "pipe" },
+		);
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
+		expect(exitCode, stderr).toBe(0);
+		const result = JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}");
+
+		// The 0.2 s limit the user configured cut the 1 s token helper, so there was no
+		// token to connect with and the broker was never reached.
+		expect(result.error).toContain("timed out after 0.2 s");
+		expect(requests).toEqual([]);
+	},
+	60_000,
+);

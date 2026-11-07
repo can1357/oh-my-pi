@@ -902,8 +902,12 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		fs.writeFileSync(tokenFile, "FAIL");
 		const warn = spyOn(piUtils.logger, "warn");
 		const realNow = Date.now;
+		const realMonotonic = performance.now;
 		let clockOffsetMs = 0;
 		const clock = spyOn(Date, "now").mockImplementation(() => realNow() + clockOffsetMs);
+		// The failure backoff is a duration, measured on the clock no step can move, so
+		// skipping it means letting time pass on both clocks rather than stepping one.
+		const monotonic = spyOn(performance, "now").mockImplementation(() => realMonotonic() + clockOffsetMs);
 		try {
 			await registry.refresh("online", { refreshCommandCredentials: true });
 			expect(await registry.getApiKey(model)).toBe("good-key");
@@ -934,6 +938,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			expect(fs.readFileSync(counterFile, "utf8")).toBe("111");
 		} finally {
 			clock.mockRestore();
+			monotonic.mockRestore();
 			warn.mockRestore();
 		}
 	});
@@ -1284,9 +1289,10 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		});
 
 		// The six inputs a review arm leaked through the real CLI at round 5, each
-		// confirmed in that run's own ~/.omp/logs. They are fixtures rather than a
-		// re-survey: a 46-input survey of the label helper in isolation reported zero
-		// leaks in the same round, because none of these was among its inputs.
+		// confirmed in that run's own ~/.omp/logs, and the two a later arm leaked the
+		// same way at round 3 of the fold. They are fixtures rather than a re-survey: a
+		// 46-input survey of the label helper in isolation reported zero leaks in the
+		// same round, because none of these was among its inputs.
 		test.each([
 			// Characters JavaScript calls whitespace and /bin/sh does not. The shell sees
 			// ONE assignment followed by `false`; splitting inside the value printed the
@@ -1299,6 +1305,10 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			["a quoted word that decodes to NAME=value", "'LABEL=x' sk-live-quoted"],
 			["an escaped = in a word that decodes to NAME=value", "LABEL\\=x sk-live-escaped-eq"],
 			["a partly quoted name that decodes to NAME=value", "LA'BEL'=x sk-live-split-name"],
+			// The value quoted rather than the name: still an executable word, still a
+			// credential, and the one the round-2 classifier fix left printable.
+			["a quoted word whose value is the credential", "'LABEL=sk-live-quoted-value' false"],
+			["a split name whose quoted value is the credential", "LA'BEL'='sk-live-split-value' false"],
 		])("the label leaks nothing for %s", async (_name, apiKeyConfig) => {
 			const refusal = await requestRefusal(providerWithApiKey(`!${apiKeyConfig}`));
 			expect(refusal.message).not.toContain("sk-live-");
@@ -1324,6 +1334,27 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 				clearConfigValueCache();
 				const refusal = await requestRefusal(providerWithApiKey(`!${executable}`));
 				expect(refusal.message).not.toContain(canary);
+			}
+		});
+
+		// Round 3. Quoting is what makes `NAME=value` an executable word rather than an
+		// assignment; the scanner read that correctly and then printed the word whole,
+		// credential included, into the refusal and into ~/.omp/logs. Round 2 fixed the
+		// line-continuation spelling, this is a third of the same class, and the shell
+		// has more. So the rule is no longer "classify, then print": no printed word
+		// carries anything past its first `=`, whatever the shell calls the word.
+		test("a word that looks like an assignment is redacted whether or not it is one", async () => {
+			const canary = `sk-live-${Snowflake.next()}-${Math.random().toString(36).slice(2)}`;
+			for (const spelling of [`'LABEL=${canary}' false`, `LA'BEL'='${canary}' false`]) {
+				clearConfigValueCache();
+				const refusal = await requestRefusal(providerWithApiKey(`!${spelling}`));
+				expect(refusal.message).not.toContain(canary);
+				// Redacting everything would make the diagnostic useless, and naming the
+				// failing source is the whole reason it exists. What survives is the name
+				// the user wrote, and a `…` saying the label stopped rather than ran out.
+				expect(refusal.message).toStartWith(
+					"No API key for provider custom-proxy: the command `LABEL=… …` exited with status",
+				);
 			}
 		});
 
@@ -1520,6 +1551,29 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 				});
 				setAgentDir(longDir);
 				expect(await resolveAuthBrokerConfig()).toEqual({ url: "http://127.0.0.1:9", token: "broker-token" });
+			} finally {
+				restoreEnv();
+			}
+		}, 30_000);
+
+		// The URL is not a credential, so it goes through the plain `scopedConfigValueResolver`
+		// — which had no test of its own: ignoring its scope left every suite green. The
+		// consequence is not a slow resolve but a silent downgrade, because a URL that
+		// fails to resolve reads as "no broker configured" and the local store is used
+		// instead of the one the user asked for.
+		test("a !command broker URL runs under its own scope's limit, not the process default", async () => {
+			const agentDir = scopeWithTimeout(
+				"broker-url-command",
+				30,
+				`auth:\n  broker:\n    url: ${JSON.stringify("!sleep 1; printf %s http://127.0.0.1:9")}\n    token: url-scope-token\n`,
+			);
+			const restoreEnv = withoutBrokerEnv();
+			try {
+				setAgentDir(agentDir);
+				expect(await resolveAuthBrokerConfig()).toEqual({
+					url: "http://127.0.0.1:9",
+					token: "url-scope-token",
+				});
 			} finally {
 				restoreEnv();
 			}
