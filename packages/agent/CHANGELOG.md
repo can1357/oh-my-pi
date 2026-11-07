@@ -11,6 +11,9 @@
 - Fixed GenAI message-content capture configured in omp's own `.env` files so it continues to apply when those values are no longer exposed through the process environment.
 - Fixed compaction preparation for remote OpenAI compaction that the active model cannot replay, ensuring the content is expanded and remains available for compaction.
 - Fixed generic remote compaction requests to `/chat/completions` so gateway sessions retain the correct per-request model attribution.
+### Fixed
+
+- Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.17.0] - 2026-11-06
 
