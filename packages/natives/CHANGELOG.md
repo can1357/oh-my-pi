@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Wayland `computer.type()` now types characters your keyboard layout has no key for, such as `ä`, `日本` or emoji, on compositors that offer libei text (KDE Plasma 6.8 and later); elsewhere they are still refused before anything is typed ([#18013](https://github.com/can1357/oh-my-pi/pull/18013) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
