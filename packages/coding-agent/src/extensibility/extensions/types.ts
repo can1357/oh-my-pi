@@ -1812,10 +1812,15 @@ export interface ExtensionAgentInfo {
 
 /**
  * Named registry agents available to an extension, scoped to the calling
- * session: its own agent and that agent's registry descendants. Agents of
- * other sessions in the same process are never visible, whatever id is
- * passed — a subagent id is only unique within its own session's tree, and
- * a host may run several top-level sessions at once.
+ * session: its own agent and that agent's registry descendants, inside the
+ * agent registry that session was created with. Agents of other sessions in
+ * the same process are never visible, whatever id is passed — a subagent id
+ * is only unique within its own session's tree, and a host may run several
+ * top-level sessions at once.
+ *
+ * The owner is the live session itself: every method below throws once that
+ * session is disposed, or once another session has taken over its agent id,
+ * so a handle kept past the owning session's life reaches nothing.
  */
 export interface ExtensionAgentsApi {
 	/** Snapshot of the agents visible to this session. */
@@ -1825,8 +1830,9 @@ export interface ExtensionAgentsApi {
 	/**
 	 * Revive a parked, idle or killed (`aborted`) agent to a live session.
 	 * Resolves when the agent is live; rejects when the agent is not visible
-	 * to this session, or with the underlying error when it has no ref or no
-	 * reviver.
+	 * to this session, with the underlying error when it has no ref or no
+	 * reviver, and — for a session created with its own agent registry, which
+	 * no lifecycle manager owns — when the agent is not already live.
 	 */
 	ensureLive(id: string): Promise<ExtensionAgentInfo>;
 	/**

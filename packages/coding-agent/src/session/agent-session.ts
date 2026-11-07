@@ -3291,6 +3291,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#agentId;
 	}
 
+	/**
+	 * The registry this session registered its own agent in — the caller-supplied
+	 * `agentRegistry` when one was injected, otherwise the process-global one.
+	 * Undefined for a session constructed without any registry.
+	 */
+	getAgentRegistry(): AgentRegistryApi | undefined {
+		return this.#agentRegistry;
+	}
+
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
 	 *  (and rejecting) one whose named tool is no longer active. */
 	#nextHardToolChoice(): ToolChoice | undefined {

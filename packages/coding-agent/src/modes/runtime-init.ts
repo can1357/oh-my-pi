@@ -16,9 +16,16 @@ import type {
 	ExtensionMode,
 	ExtensionUIContext,
 } from "../extensibility/extensions/types";
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, collectAgentFamily, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
+import {
+	type AgentRef,
+	AgentRegistry,
+	type AgentRegistryApi,
+	collectAgentFamily,
+	MAIN_AGENT_ID,
+} from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
+import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
 function toExtensionAgentInfo(ref: AgentRef): ExtensionAgentInfo {
@@ -30,49 +37,94 @@ function toExtensionAgentInfo(ref: AgentRef): ExtensionAgentInfo {
 	};
 }
 
-export interface ExtensionAgentActionsScope {
-	/**
-	 * Restrict `list`/`get`/`ensureLive`/`prompt` to this agent id and its
-	 * registry descendants. A subagent id is only unique within its owning
-	 * top-level session's tree, so an unscoped view would let one session's
-	 * extension inspect, revive, or message another session's agent in a host
-	 * that runs several concurrent top-level sessions in one process.
-	 */
-	scopeAgentId?: string;
+/** The registry family and lifecycle one extension call may address. */
+interface ResolvedAgentScope {
+	/** The registry the owning session registered its own agent in. */
+	registry: AgentRegistryApi;
+	/** Revives parked and killed refs; absent when no manager owns {@link registry}. */
+	lifecycle: AgentLifecycleApi | undefined;
+	/** The owning agent's id plus every registry descendant of it. */
+	family: ReadonlySet<string>;
+}
+
+/**
+ * Resolve the calling session's own view of the agent registry, on every call.
+ *
+ * Nothing here is captured once. The registry comes from the session that owns
+ * the extension, so a caller that injected `CreateAgentSessionOptions.agentRegistry`
+ * for isolation is never handed the process-global one. The owner identity is
+ * the live session itself, so a handle kept past that session's disposal — or
+ * past another session taking over its agent id — addresses nothing: a
+ * subagent id is only unique inside its owning session's tree, and a host may
+ * run several top-level sessions at once, so a stale handle would otherwise
+ * list, revive and prompt whatever reused the id.
+ */
+function resolveAgentScope(session: AgentSession): ResolvedAgentScope {
+	if (session.isDisposed) {
+		throw new Error("The session that owns this extension's agents API is no longer live.");
+	}
+	const registry = session.getAgentRegistry() ?? AgentRegistry.global();
+	const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
+	const ownerRef = registry.get(ownerId);
+	// A host that never registered its own agent has no ref to compare against;
+	// the live session is then the whole identity.
+	if (ownerRef !== undefined && ownerRef.session !== session) {
+		throw new Error(`Agent "${ownerId}" now belongs to a different session, not the one this extension runs in.`);
+	}
+	const lifecycle = AgentLifecycleManager.global();
+	return {
+		registry,
+		lifecycle: lifecycle.manages(registry) ? lifecycle : undefined,
+		family: collectAgentFamily(registry, ownerId),
+	};
+}
+
+function assertVisible(scope: ResolvedAgentScope, id: string): void {
+	if (!scope.family.has(id)) throw new Error(`Agent "${id}" is not visible to this session.`);
+}
+
+async function ensureLiveInScope(scope: ResolvedAgentScope, id: string): Promise<AgentSessionHandle> {
+	if (scope.lifecycle) return await scope.lifecycle.ensureLive(id);
+	// A session created with its own registry gets no lifecycle manager — one
+	// bound to the process-global registry would release an unrelated ref — so
+	// only an already-live agent of that registry can be addressed.
+	const ref = scope.registry.get(id);
+	if (ref?.session) return ref.session;
+	throw new Error(
+		`Agent "${id}" is not live, and no lifecycle manager owns this session's agent registry, so it cannot be revived.`,
+	);
 }
 
 /** Actions backing {@link ExtensionAPI.agents}, scoped to one session's own registry family. */
 export function createExtensionAgentActions(
-	scope: ExtensionAgentActionsScope = {},
+	owner: () => AgentSession,
 ): Required<Pick<ExtensionActions, "agentsList" | "agentsGet" | "agentsEnsureLive" | "agentsPrompt">> {
-	const registry = AgentRegistry.global();
-	const { scopeAgentId } = scope;
-	const inScope = (id: string): boolean =>
-		scopeAgentId === undefined || collectAgentFamily(registry, scopeAgentId).has(id);
 	return {
 		agentsList: () => {
-			if (scopeAgentId === undefined) return registry.list().map(toExtensionAgentInfo);
-			const family = collectAgentFamily(registry, scopeAgentId);
-			return registry
+			const scope = resolveAgentScope(owner());
+			return scope.registry
 				.list()
-				.filter(ref => family.has(ref.id))
+				.filter(ref => scope.family.has(ref.id))
 				.map(toExtensionAgentInfo);
 		},
 		agentsGet: id => {
-			if (!inScope(id)) return undefined;
-			const ref = registry.get(id);
+			const scope = resolveAgentScope(owner());
+			if (!scope.family.has(id)) return undefined;
+			const ref = scope.registry.get(id);
 			return ref ? toExtensionAgentInfo(ref) : undefined;
 		},
 		agentsEnsureLive: async id => {
-			if (!inScope(id)) throw new Error(`Agent "${id}" is not visible to this session.`);
-			await AgentLifecycleManager.global().ensureLive(id);
-			const ref = registry.get(id);
+			const scope = resolveAgentScope(owner());
+			assertVisible(scope, id);
+			await ensureLiveInScope(scope, id);
+			const ref = scope.registry.get(id);
 			if (!ref) throw new Error(`agent ${id} not in registry after revive`);
 			return toExtensionAgentInfo(ref);
 		},
 		agentsPrompt: async (id, text, agentOptions) => {
-			if (!inScope(id)) throw new Error(`Agent "${id}" is not visible to this session.`);
-			const liveSession = await AgentLifecycleManager.global().ensureLive(id);
+			const scope = resolveAgentScope(owner());
+			assertVisible(scope, id);
+			const liveSession = await ensureLiveInScope(scope, id);
 			await liveSession.prompt(text, { streamingBehavior: agentOptions?.deliverAs ?? "steer" });
 		},
 	};
@@ -185,7 +237,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);
 			},
-			...createExtensionAgentActions({ scopeAgentId: session.getAgentId() ?? MAIN_AGENT_ID }),
+			...createExtensionAgentActions(() => session),
 			setLabel: (targetId, label) => {
 				session.sessionManager.appendLabelChange(targetId, label);
 			},
