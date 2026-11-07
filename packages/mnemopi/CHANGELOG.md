@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Mnemopi persistence paths and `sanitizeContent` storing injected harness/memory wrapper tags (`<system-*>`, `<irc>`, `<memories>`, `<private>`) or unredacted live credentials in SQLite and extracted disk blobs ([#17425](https://github.com/can1357/oh-my-pi/pull/17425) by [@GTanger](https://github.com/GTanger))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed

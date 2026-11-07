@@ -3,6 +3,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { polyphonicRecallEnabled } from "../../config";
 import { generateId, stableMemoryId } from "../../util/ids";
 import { aaakEncode } from "../aaak";
+import { redactMemorySecrets, sanitizeContent, sanitizeTextField } from "../content-sanitizer";
 import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "../entities";
 import { EpisodicGraph } from "../episodic-graph";
 import { type ExtractedFactCategories, heuristicExtractFacts } from "../extraction";
@@ -274,20 +275,36 @@ function insertFactRows(
 	importance: number,
 	sourceMemoryId: string | null,
 ): void {
+	const cleanKey = sanitizeTextField(key);
+	const cleanValue = sanitizeTextField(value);
+	const cleanContext = sanitizeTextField(context);
 	const timestamp = isoNow();
 	beam.db.run(
 		`INSERT INTO memoria_facts
 		 (session_id, message_idx, fact_type, key, value, context_snippet, importance, timestamp, source_memory_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		[sourceSession(beam), messageIdx, factType, key, value, context, importance, timestamp, sourceMemoryId],
+		[
+			sourceSession(beam),
+			messageIdx,
+			factType,
+			cleanKey,
+			cleanValue,
+			cleanContext,
+			importance,
+			timestamp,
+			sourceMemoryId,
+		],
 	);
 
-	const factId = stableMemoryId(`${sourceSession(beam)}\0${factType}\0${key}\0${value}`, sourceMemoryId ?? "");
+	const factId = stableMemoryId(
+		`${sourceSession(beam)}\0${factType}\0${cleanKey}\0${cleanValue}`,
+		sourceMemoryId ?? "",
+	);
 	beam.db.run(
 		`INSERT OR IGNORE INTO facts
 		 (fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		[factId, sourceSession(beam), key, factType, value, timestamp, sourceMemoryId, importance],
+		[factId, sourceSession(beam), cleanKey, factType, cleanValue, timestamp, sourceMemoryId, importance],
 	);
 }
 
@@ -298,10 +315,11 @@ function insertTimeline(
 	description: string,
 	sourceMemoryId: string | null,
 ): void {
+	const cleanDesc = sanitizeTextField(description);
 	beam.db.run(
 		`INSERT INTO memoria_timelines (session_id, date, message_idx, description, source, source_memory_id)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		[sourceSession(beam), date, messageIdx, description, "extraction", sourceMemoryId],
+		[sourceSession(beam), date, messageIdx, cleanDesc, "extraction", sourceMemoryId],
 	);
 }
 
@@ -313,21 +331,24 @@ function insertKg(
 	object: string,
 	sourceMemoryId: string | null,
 ): void {
+	const cleanSubject = sanitizeTextField(subject);
+	const cleanPredicate = sanitizeTextField(predicate);
+	const cleanObject = sanitizeTextField(object);
 	beam.db.run(
 		`INSERT INTO memoria_kg (session_id, subject, predicate, object, message_idx, confidence, source_memory_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		[sourceSession(beam), subject, predicate, object, messageIdx, 0.65, sourceMemoryId],
+		[sourceSession(beam), cleanSubject, cleanPredicate, cleanObject, messageIdx, 0.65, sourceMemoryId],
 	);
 	beam.db.run(
 		`INSERT INTO triples (subject, predicate, object, valid_from, source, confidence)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
-		[subject, predicate, object, isoNow(), sourceMemoryId ?? "extraction", 0.65],
+		[cleanSubject, cleanPredicate, cleanObject, isoNow(), sourceMemoryId ?? "extraction", 0.65],
 	);
-	void beam.triples?.add?.(subject, predicate, object, {
+	void beam.triples?.add?.(cleanSubject, cleanPredicate, cleanObject, {
 		source: sourceMemoryId ?? "extraction",
 		confidence: 0.65,
 	});
-	consolidateKgFact(beam, subject, predicate, object, sourceMemoryId);
+	consolidateKgFact(beam, cleanSubject, cleanPredicate, cleanObject, sourceMemoryId);
 }
 
 /** Veracity of the memory a fact was extracted from, restricted to the consolidator's vocabulary. */
@@ -432,10 +453,12 @@ function insertPreference(
 	topic: string | null,
 	sourceMemoryId: string | null,
 ): void {
+	const cleanPref = sanitizeTextField(preference);
+	const cleanTopic = topic !== null ? sanitizeTextField(topic) : null;
 	beam.db.run(
 		`INSERT INTO memoria_preferences (session_id, message_idx, preference, topic, evolution, context_snippet, source_memory_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		[sourceSession(beam), messageIdx, preference, topic, null, preference, sourceMemoryId],
+		[sourceSession(beam), messageIdx, cleanPref, cleanTopic, null, cleanPref, sourceMemoryId],
 	);
 }
 
@@ -446,10 +469,12 @@ function insertInstruction(
 	context: string,
 	sourceMemoryId: string | null,
 ): void {
+	const cleanInstruction = sanitizeTextField(instruction);
+	const cleanContext = sanitizeTextField(context);
 	beam.db.run(
 		`INSERT INTO memoria_instructions (session_id, message_idx, instruction, active, topic, context_snippet, source_memory_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		[sourceSession(beam), messageIdx, instruction, 1, null, context, sourceMemoryId],
+		[sourceSession(beam), messageIdx, cleanInstruction, 1, null, cleanContext, sourceMemoryId],
 	);
 }
 
@@ -486,12 +511,14 @@ function ingestIntoEpisodicGraph(beam: BeamMemoryState, memoryId: string, summar
 
 export function consolidateToEpisodic(
 	beam: BeamMemoryState,
-	summary: string,
+	rawSummary: string,
 	sourceWmIds: readonly string[],
 	source = "consolidation",
 	importance = 0.6,
 	options: ConsolidateOptions = {},
 ): string {
+	const [summary] = sanitizeContent(rawSummary);
+	const [cleanSource] = sanitizeContent(redactMemorySecrets(source));
 	const memoryId = generateId(summary);
 	const timestamp = isoNow();
 	const scope = options.scope ?? "session";
@@ -505,7 +532,7 @@ export function consolidateToEpisodic(
 		[
 			memoryId,
 			summary,
-			source,
+			cleanSource,
 			timestamp,
 			sourceSession(beam),
 			importance,
@@ -524,7 +551,7 @@ export function consolidateToEpisodic(
 	extractAndStoreFacts(beam, summary, 0, memoryId);
 	ingestIntoEpisodicGraph(beam, memoryId, summary);
 	scheduleEmbedding(beam, [{ memoryId, content: summary }]);
-	emitEvent(beam, "MEMORY_CONSOLIDATED", memoryId, summary, source, importance, {
+	emitEvent(beam, "MEMORY_CONSOLIDATED", memoryId, summary, cleanSource, importance, {
 		summary_of: [...sourceWmIds],
 		...metadata,
 	});
@@ -666,7 +693,7 @@ export function extractAndStoreFacts(
 		negation: 0,
 		decision: 0,
 	};
-	const text = String(content ?? "");
+	const text = sanitizeTextField(String(content ?? ""));
 	if (text.length > PATTERN_FACT_EXTRACTION_MAX_INPUT_CHARS) return counts;
 	for (const match of text.matchAll(
 		/(\d+(?:[.,]\d+)?)\s*(ms|sec|seconds?|minutes?|hours?|days?|weeks?|months?|%|KB|MB|GB|TB|rows?|columns?|roles?|features?|bugs?|commits?|cards?|users?|items?|tests?|APIs?|endpoints?|sprints?|tickets?)\b/gi,
@@ -865,11 +892,24 @@ export function memoriaRetrieve(
 	topK = 10,
 ): MemoriaRetrieveResult {
 	const selected = ability ?? classifyAbility(query);
-	if (selected === "TR" || selected === "EO") return timelineRetrieve(beam, query, topK);
-	if (selected === "MR") return kgRetrieve(beam, query, topK);
-	if (selected === "IE" || selected === "KU" || selected === "PF" || selected === "IF" || selected === "CR")
-		return factRetrieve(beam, query, topK);
-	return { ability: selected, query, results: [] };
+	let res: MemoriaRetrieveResult;
+	if (selected === "TR" || selected === "EO") res = timelineRetrieve(beam, query, topK);
+	else if (selected === "MR") res = kgRetrieve(beam, query, topK);
+	else if (selected === "IE" || selected === "KU" || selected === "PF" || selected === "IF" || selected === "CR")
+		res = factRetrieve(beam, query, topK);
+	else res = { ability: selected, query, results: [] };
+
+	const sanitizedResults = res.results.map(row => {
+		if (!row || typeof row !== "object") return row;
+		const sanitizedRow: Record<string, unknown> = { ...(row as Record<string, unknown>) };
+		for (const [k, v] of Object.entries(sanitizedRow)) {
+			if (typeof v === "string") {
+				sanitizedRow[k] = sanitizeTextField(v);
+			}
+		}
+		return sanitizedRow;
+	});
+	return { ...res, results: sanitizedResults };
 }
 export function getEpisodicStats(
 	beam: BeamMemoryState,
