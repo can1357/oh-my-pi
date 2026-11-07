@@ -5,12 +5,14 @@
 use bstr::BStr;
 use pi_shell::{
 	bash::{
-		Budget, CallId, CallOutcome, Cx, Engine, EngineConfig, Incompatibility, MemStore,
-		RestoreError, RestoreOpts, RestoreReport, Shell, StateStore, Step,
+		Budget, CallId, CallOutcome, Cx, Engine, EngineConfig, Incompatibility, Lost, MemStore,
+		RestoreError, RestoreOpts, RestoreReport, RunId, Shell, StateStore, Step,
+		snapshot::vocabulary::Entry,
 		store::{BlobSlot, Change, Key, Record, StoreError, Table},
 	},
 	testkit::FakeHost,
 };
+use serde::{Deserialize, Serialize};
 
 const BASE: &[u8] = include_bytes!("fixtures/format-vocabulary/base-parent-wait.image");
 const UNKNOWN: &[u8] = include_bytes!("fixtures/format-vocabulary/unknown-root-kept.image");
@@ -32,12 +34,13 @@ fn records(store: &mut MemStore) -> Vec<Vec<u8>> {
 	records
 }
 
-/// A real backend whose records cannot be read. An incompatible header must
-/// win over that backend error, without invoking record access or any write.
+/// A real backend that counts access and can refuse record reads. Compatibility
+/// preflight must run before either readable records or a backend error.
 struct UnreadableRecords {
-	store:  MemStore,
-	reads:  usize,
-	writes: usize,
+	store:            MemStore,
+	reads:            usize,
+	writes:           usize,
+	records_readable: bool,
 }
 
 impl UnreadableRecords {
@@ -48,12 +51,24 @@ impl UnreadableRecords {
 }
 
 impl StateStore for UnreadableRecords {
-	fn get(&mut self, _: Key<'_>) -> Result<Option<&Record>, StoreError> {
-		Err(self.refused())
+	fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
+		if !self.records_readable {
+			return Err(self.refused());
+		}
+		self.reads += 1;
+		self.store.get(key)
 	}
 
-	fn scan(&mut self, _: Table, _: &mut dyn FnMut(Key<'_>, &Record)) -> Result<(), StoreError> {
-		Err(self.refused())
+	fn scan(
+		&mut self,
+		table: Table,
+		visit: &mut dyn FnMut(Key<'_>, &Record),
+	) -> Result<(), StoreError> {
+		if !self.records_readable {
+			return Err(self.refused());
+		}
+		self.reads += 1;
+		self.store.scan(table, visit)
 	}
 
 	fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
@@ -83,8 +98,12 @@ impl StateStore for UnreadableRecords {
 fn refuse_before_records(bytes: &[u8], frames_version: bool) {
 	let engine = Engine::new(EngineConfig::default());
 	let mut host = FakeHost::new();
-	let mut store =
-		UnreadableRecords { store: MemStore::from_bytes(bytes).unwrap(), reads: 0, writes: 0 };
+	let mut store = UnreadableRecords {
+		store:            MemStore::from_bytes(bytes).unwrap(),
+		reads:            0,
+		writes:           0,
+		records_readable: false,
+	};
 	let before = store.store.to_bytes();
 	let result = Shell::restore(
 		&engine,
@@ -219,4 +238,183 @@ fn genuine_legacy_frames_keep_the_active_child_and_parent_wait() {
 	.unwrap();
 	println!("restore={report:?}");
 	assert_eq!(report, RestoreReport { vprocs: 2, runs: 1, ..RestoreReport::default() });
+}
+
+// These rows construct an envelope around a genuine legacy core. They never
+// rewrite the independent upstream fixtures or change the core's wire bytes.
+#[derive(Deserialize, Serialize)]
+struct Header {
+	magic:  [u8; 4],
+	ir:     u32,
+	frames: u32,
+	build:  [u8; 32],
+	runs:   Vec<RunId>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Envelope<'a> {
+	#[serde(borrow)]
+	core:    &'a [u8],
+	entries: Vec<Entry>,
+}
+
+fn vocabulary_store(id: u32, required: bool) -> MemStore {
+	let mut store = MemStore::from_bytes(BASE).unwrap();
+	let frames = store.get_blob(BlobSlot::Frames).unwrap().unwrap();
+	let (mut header, core) = postcard::take_from_bytes::<Header>(&frames).unwrap();
+	assert_eq!(header.magic, *b"OBF1");
+	header.magic = *b"OBF2";
+	let envelope = Envelope {
+		core,
+		entries: vec![Entry {
+			id,
+			revision: 8,
+			required,
+			vpid: None,
+			payload: vec![0, 255, 128, 2, 0, 0, 9],
+		}],
+	};
+	let mut blob = postcard::to_stdvec(&header).unwrap();
+	blob.extend(postcard::to_stdvec(&envelope).unwrap());
+	store.put_blob(BlobSlot::Frames, &blob).unwrap();
+	store
+}
+
+fn assert_vocabulary_refusal(store: &mut UnreadableRecords, id: u32) {
+	let engine = Engine::new(EngineConfig::default());
+	let mut host = FakeHost::new();
+	let before = store.store.to_bytes();
+	let result = Shell::restore(&engine, &mut Cx { host: &mut host, store }, RestoreOpts::default());
+	if let Ok((_, report)) = &result {
+		println!("shell_returned=true; restore={report:?}");
+	}
+	let error = result
+		.err()
+		.expect("a required allocation must return no shell");
+	println!(
+		"id={id}; error={error:?}; shell_returned=false; record_reads={}; writes={}; unchanged={}",
+		store.reads,
+		store.writes,
+		before == store.store.to_bytes()
+	);
+	assert_eq!(store.reads, 0, "requiredness must be checked before Root::load: {error:?}");
+	assert_eq!(store.writes, 0, "preflight must not write or delete the Frames blob");
+	assert_eq!(store.store.to_bytes(), before, "refusal must preserve the entire image");
+	assert!(
+		matches!(error, RestoreError::Incompatible {
+		why: Incompatibility::Vocabulary { id: found, revision: 8, vpid: None }
+	} if found == id),
+		"name the required allocation, not a backend failure: {error:?}"
+	);
+}
+
+#[test]
+fn allocated_required_unknown_revision_cannot_resume_when_the_writer_marks_it_optional() {
+	let mut store = UnreadableRecords {
+		store:            vocabulary_store(65536, false),
+		reads:            0,
+		writes:           0,
+		records_readable: true,
+	};
+	assert_vocabulary_refusal(&mut store, 65536);
+}
+
+#[test]
+fn allocated_required_unknown_revision_is_refused_before_records_without_consuming_the_image() {
+	let mut store = UnreadableRecords {
+		store:            vocabulary_store(65536, false),
+		reads:            0,
+		writes:           0,
+		records_readable: false,
+	};
+	assert_vocabulary_refusal(&mut store, 65536);
+}
+
+#[test]
+fn allocated_pending_trap_requiredness_survives_an_unknown_revision_and_optional_writer_flag() {
+	let mut store = UnreadableRecords {
+		store:            vocabulary_store(1, false),
+		reads:            0,
+		writes:           0,
+		records_readable: false,
+	};
+	assert_vocabulary_refusal(&mut store, 1);
+}
+
+fn preserves_optional_revision(id: u32) {
+	let engine = Engine::new(EngineConfig::default());
+	let mut host = FakeHost::new();
+	let mut store = vocabulary_store(id, false);
+	let original = store.get_blob(BlobSlot::Frames).unwrap().unwrap();
+	let (_, body) = postcard::take_from_bytes::<Header>(&original).unwrap();
+	let original_entries = postcard::from_bytes::<Envelope<'_>>(body).unwrap().entries;
+	let (mut shell, report) = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	)
+	.unwrap();
+	let loss = vec![Lost::Vocabulary { id, revision: 8, vpid: None }];
+	assert_eq!(report.lost, loss);
+	assert_eq!((report.vprocs, report.runs), (2, 1));
+	for _ in 0..2 {
+		shell.control().request_suspend();
+		assert!(matches!(
+			shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()),
+			Step::SuspendReady
+		));
+		shell
+			.externalize(&mut Cx { host: &mut host, store: &mut store })
+			.unwrap();
+		let frames = store.get_blob(BlobSlot::Frames).unwrap().unwrap();
+		let (_, body) = postcard::take_from_bytes::<Header>(&frames).unwrap();
+		let envelope = postcard::from_bytes::<Envelope<'_>>(body).unwrap();
+		assert_eq!(
+			envelope.entries, original_entries,
+			"unknown payload and declaration must survive"
+		);
+		let (restored, report) = Shell::restore(
+			&engine,
+			&mut Cx { host: &mut host, store: &mut store },
+			RestoreOpts::default(),
+		)
+		.unwrap();
+		assert_eq!(report.lost, loss);
+		shell = restored;
+	}
+	shell.complete(CallId(1), CallOutcome::Exit(0));
+	let mut idle = false;
+	for _ in 0..10_000 {
+		match shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()) {
+			Step::Idle => {
+				idle = true;
+				break;
+			},
+			Step::Done { .. } | Step::Yield => {},
+			other => panic!("preserving optional vocabulary disrupted execution: {other:?}"),
+		}
+	}
+	assert!(idle);
+	assert_eq!(host.stdout.bytes(), b"child=23\n");
+}
+
+#[test]
+fn allocated_optional_unknown_revision_is_reported_and_preserved_through_execution() {
+	preserves_optional_revision(65538);
+}
+
+#[test]
+fn unallocated_optional_identifier_keeps_its_payload_and_loss_report() {
+	preserves_optional_revision(65537);
+}
+
+#[test]
+fn unallocated_required_identifier_is_still_refused_before_records() {
+	let mut store = UnreadableRecords {
+		store:            vocabulary_store(65539, true),
+		reads:            0,
+		writes:           0,
+		records_readable: false,
+	};
+	assert_vocabulary_refusal(&mut store, 65539);
 }
