@@ -315,7 +315,7 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === DAEMON_BROKER_WORKER_ARG) {
 		// Worker selectors must dispatch before the normal command graph loads.
 		const { startDaemonBrokerFromEnvironment } = await import("./launch/broker");
-		await startDaemonBrokerFromEnvironment();
+		await startDaemonBrokerFromEnvironment({ ownScope: true });
 		return true;
 	}
 	if (arg === LSP_MUX_WORKER_ARG) {
