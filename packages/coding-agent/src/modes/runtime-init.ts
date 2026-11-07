@@ -62,9 +62,20 @@ function resolveAgentScope(session: AgentSession): ResolvedAgentScope {
 	const registry = session.getAgentRegistry() ?? AgentRegistry.global();
 	const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
 	const ownerRef = registry.get(ownerId);
-	// A host that never registered its own agent has no ref to compare against;
-	// the live session is then the whole identity.
-	if (ownerRef !== undefined && ownerRef.session !== session) {
+	// No ref, no proof of ownership — refuse rather than fall through to the
+	// family walk. Every host that reaches this (print, rpc, tui, acp) gets its
+	// session from `createAgentSession`, which registers the agent before the
+	// session exists and throws if it cannot ("is already owned by another
+	// session generation" / "was replaced during session initialization"), so a
+	// missing ref never means "this host never registered". It means the id was
+	// vacated — by the session that took it over tearing down, or by an explicit
+	// release — while this session stayed live. Proceeding would hand the caller
+	// `collectAgentFamily(registry, ownerId)`, which is every registry ref whose
+	// parent chain reaches that id: the other session's surviving children.
+	if (ownerRef === undefined) {
+		throw new Error(`Agent "${ownerId}" is no longer registered, so this extension's session owns no agents.`);
+	}
+	if (ownerRef.session !== session) {
 		throw new Error(`Agent "${ownerId}" now belongs to a different session, not the one this extension runs in.`);
 	}
 	return { registry, family: collectAgentFamily(registry, ownerId) };

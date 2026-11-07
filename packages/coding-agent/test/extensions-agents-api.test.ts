@@ -4,174 +4,32 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionAgentInfo, ExtensionAgentsApi } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { createAcpConnection } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-mode";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { removeSyncWithRetries, Snowflake, TempDir } from "@oh-my-pi/pi-utils";
-
-async function loadAgentsApi(cwd: string, agentId: string = MAIN_AGENT_ID): Promise<ExtensionAgentsApi> {
-	let agents: ExtensionAgentsApi | undefined;
-	const runtime = new ExtensionRuntime();
-	const extension = await loadExtensionFromFactory(
-		api => {
-			agents = api.agents;
-		},
-		cwd,
-		new EventBus(),
-		runtime,
-	);
-	const authStorage = await AuthStorage.create(":memory:");
-	const runner = new ExtensionRunner(
-		[extension],
-		runtime,
-		cwd,
-		SessionManager.inMemory(cwd),
-		new ModelRegistry(authStorage),
-	);
-
-	await initializeExtensions(
-		{
-			extensionRunner: runner,
-			discoverStartupSkillPaths: async () => {},
-			getAgentId: () => agentId,
-			getAgentRegistry: () => AgentRegistry.global(),
-			sessionManager: { getSessionFile: () => undefined },
-		} as unknown as AgentSession,
-		{
-			reportSendError: (_action, error) => {
-				throw error;
-			},
-			reportRuntimeError: error => {
-				throw error.error;
-			},
-		},
-	);
-	if (!agents) throw new Error("Extension factory did not receive api.agents");
-	return agents;
-}
-
-describe("ExtensionAPI agents", () => {
-	beforeEach(() => {
-		AgentRegistry.resetGlobalForTests();
-	});
-
-	afterEach(() => {
-		vi.restoreAllMocks();
-		AgentRegistry.resetGlobalForTests();
-	});
-
-	it("projects a registry ref as a detached snapshot, not the live ref", async () => {
-		using tempDir = TempDir.createSync("@omp-extension-agents-");
-		const agents = await loadAgentsApi(tempDir.path());
-		const registry = AgentRegistry.global();
-		const sessionFile = path.join(tempDir.path(), "Worker1.jsonl");
-		await Bun.write(sessionFile, "");
-		registry.register({
-			id: "Worker1",
-			displayName: "Worker 1",
-			kind: "sub",
-			parentId: MAIN_AGENT_ID,
-			session: null,
-			sessionFile,
-			status: "parked",
-		});
-
-		const snapshot: ExtensionAgentInfo = { id: "Worker1", status: "parked", kind: "sub", sessionFile };
-		expect(agents.list()).toEqual([snapshot]);
-		expect(agents.get("Worker1")).toEqual(snapshot);
-
-		// Mutating what an extension was handed must not reach registry state.
-		const projected = agents.get("Worker1");
-		if (!projected) throw new Error("Expected a projection for Worker1");
-		projected.status = "running";
-		expect(registry.get("Worker1")?.status).toBe("parked");
-		expect(agents.get("Worker1")?.status).toBe("parked");
-	});
-
-	it("scopes agents.list/get to the calling session's own family", async () => {
-		using tempDir = TempDir.createSync("@omp-extension-agents-scope-");
-		const cwd = tempDir.path();
-		const agentsA = await loadAgentsApi(cwd, "SessionA");
-		const agentsB = await loadAgentsApi(cwd, "SessionB");
-		const registry = AgentRegistry.global();
-
-		const fileA = path.join(cwd, "ChildA.jsonl");
-		const fileB = path.join(cwd, "ChildB.jsonl");
-		await Bun.write(fileA, "");
-		await Bun.write(fileB, "");
-		registry.register({
-			id: "ChildA",
-			displayName: "Child A",
-			kind: "sub",
-			parentId: "SessionA",
-			session: null,
-			sessionFile: fileA,
-			status: "parked",
-		});
-		registry.register({
-			id: "ChildB",
-			displayName: "Child B",
-			kind: "sub",
-			parentId: "SessionB",
-			session: null,
-			sessionFile: fileB,
-			status: "parked",
-		});
-
-		expect(agentsA.list().map(ref => ref.id)).toEqual(["ChildA"]);
-		expect(agentsB.list().map(ref => ref.id)).toEqual(["ChildB"]);
-		expect(agentsA.get("ChildA")).toBeDefined();
-		expect(agentsA.get("ChildB")).toBeUndefined();
-		expect(agentsB.get("ChildA")).toBeUndefined();
-	});
-
-	it("a grandchild of the scoped agent is visible, an unrelated session's descendant is not", async () => {
-		using tempDir = TempDir.createSync("@omp-extension-agents-family-");
-		const cwd = tempDir.path();
-		const agents = await loadAgentsApi(cwd, "SessionA");
-		const registry = AgentRegistry.global();
-		for (const [id, parentId] of [
-			["Child", "SessionA"],
-			["Grandchild", "Child"],
-			["Foreign", "SessionB"],
-		] as const) {
-			const sessionFile = path.join(cwd, `${id}.jsonl`);
-			await Bun.write(sessionFile, "");
-			registry.register({
-				id,
-				displayName: id,
-				kind: "sub",
-				parentId,
-				session: null,
-				sessionFile,
-				status: "parked",
-			});
-		}
-
-		expect(
-			agents
-				.list()
-				.map(ref => ref.id)
-				.sort(),
-		).toEqual(["Child", "Grandchild"]);
-		expect(agents.get("Grandchild")).toBeDefined();
-		expect(agents.get("Foreign")).toBeUndefined();
-	});
-});
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	type Client,
+	ClientSideConnection,
+	ndJsonStream,
+	type RequestPermissionResponse,
+	type SessionNotification,
+} from "@oh-my-pi/pi-utils/acp";
 
 /**
- * The same surface over real {@link createAgentSession} sessions, where the
- * registry the caller injected and the owning session's lifetime are real
- * rather than stubbed.
+ * `ExtensionAPI.agents` over real {@link createAgentSession} sessions, so the
+ * registry the caller injected, the owning session's lifetime and the ref
+ * proving it owns its agent id are all real rather than stubbed. A stubbed
+ * session has no registered ref, which is exactly the state the ownership
+ * guard must refuse — it would pass every projection assertion below without
+ * the guard ever being exercised.
  */
-describe("ExtensionAPI agents ownership", () => {
+describe("ExtensionAPI agents", () => {
 	const tempDirs: string[] = [];
 	let sharedAuthStorage: AuthStorage;
 	let sharedModelRegistry: ModelRegistry;
@@ -201,20 +59,48 @@ describe("ExtensionAPI agents ownership", () => {
 		return root;
 	}
 
-	interface StartedSession {
+	/** A parked registry row of the kind that outlives the session that spawned it. */
+	async function registerParked(
+		registry: AgentRegistryApi,
+		root: string,
+		id: string,
+		parentId: string,
+	): Promise<string> {
+		const sessionFile = path.join(root, `${id}.jsonl`);
+		await Bun.write(sessionFile, "");
+		registry.register({
+			id,
+			displayName: id,
+			kind: "sub",
+			parentId,
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		return sessionFile;
+	}
+
+	interface CreatedSession {
 		session: AgentSession;
+		/** The `pi.agents` handle the session's inline extension was given. */
 		agents: ExtensionAgentsApi;
 		sessionFile: string;
 	}
 
-	/** A real session whose single inline extension captures its `pi.agents`. */
-	async function startSession(options: {
+	interface SessionOptions {
 		root: string;
 		name: string;
 		agentId?: string;
 		parentAgentId?: string;
 		agentRegistry?: AgentRegistryApi;
-	}): Promise<StartedSession> {
+	}
+
+	/**
+	 * A real session whose single inline extension captures its `pi.agents`.
+	 * The extension runner is left uninitialized so each host below can wire
+	 * its own {@link ExtensionActions}.
+	 */
+	async function createSession(options: SessionOptions): Promise<CreatedSession> {
 		const cwd = path.join(options.root, options.name);
 		fs.mkdirSync(cwd, { recursive: true });
 		const sessionManager = SessionManager.create(cwd, path.join(options.root, `${options.name}-sessions`));
@@ -245,7 +131,14 @@ describe("ExtensionAPI agents ownership", () => {
 				},
 			],
 		});
-		await initializeExtensions(session, {
+		if (!agents) throw new Error("Extension factory did not receive api.agents");
+		return { session, agents, sessionFile };
+	}
+
+	/** {@link createSession} wired by the print/rpc host (`initializeExtensions`). */
+	async function startSession(options: SessionOptions): Promise<CreatedSession> {
+		const created = await createSession(options);
+		await initializeExtensions(created.session, {
 			reportSendError: (_action, error) => {
 				throw error;
 			},
@@ -253,9 +146,82 @@ describe("ExtensionAPI agents ownership", () => {
 				throw error.error;
 			},
 		});
-		if (!agents) throw new Error("Extension factory did not receive api.agents");
-		return { session, agents, sessionFile };
+		return created;
 	}
+
+	it("projects a registry ref as a detached snapshot, not the live ref", async () => {
+		const root = makeRoot("projection");
+		const owner = await startSession({ root, name: "owner" });
+		try {
+			const registry = AgentRegistry.global();
+			const sessionFile = await registerParked(registry, root, "Worker1", MAIN_AGENT_ID);
+
+			const snapshot: ExtensionAgentInfo = { id: "Worker1", status: "parked", kind: "sub", sessionFile };
+			expect(owner.agents.get("Worker1")).toEqual(snapshot);
+			expect(owner.agents.list().find(ref => ref.id === "Worker1")).toEqual(snapshot);
+
+			// Mutating what an extension was handed must not reach registry state.
+			const projected = owner.agents.get("Worker1");
+			if (!projected) throw new Error("Expected a projection for Worker1");
+			projected.status = "running";
+			expect(registry.get("Worker1")?.status).toBe("parked");
+			expect(owner.agents.get("Worker1")?.status).toBe("parked");
+		} finally {
+			await owner.session.dispose();
+		}
+	});
+
+	it("scopes agents.list/get to the calling session's own family", async () => {
+		const root = makeRoot("scope");
+		const a = await startSession({ root, name: "a", agentId: "SessionA" });
+		const b = await startSession({ root, name: "b", agentId: "SessionB" });
+		try {
+			const registry = AgentRegistry.global();
+			await registerParked(registry, root, "ChildA", "SessionA");
+			await registerParked(registry, root, "ChildB", "SessionB");
+
+			expect(
+				a.agents
+					.list()
+					.map(ref => ref.id)
+					.sort(),
+			).toEqual(["ChildA", "SessionA"]);
+			expect(
+				b.agents
+					.list()
+					.map(ref => ref.id)
+					.sort(),
+			).toEqual(["ChildB", "SessionB"]);
+			expect(a.agents.get("ChildA")).toBeDefined();
+			expect(a.agents.get("ChildB")).toBeUndefined();
+			expect(b.agents.get("ChildA")).toBeUndefined();
+		} finally {
+			await b.session.dispose();
+			await a.session.dispose();
+		}
+	});
+
+	it("a grandchild of the scoped agent is visible, an unrelated session's descendant is not", async () => {
+		const root = makeRoot("family");
+		const owner = await startSession({ root, name: "owner", agentId: "SessionA" });
+		try {
+			const registry = AgentRegistry.global();
+			await registerParked(registry, root, "Child", "SessionA");
+			await registerParked(registry, root, "Grandchild", "Child");
+			await registerParked(registry, root, "Foreign", "SessionB");
+
+			expect(
+				owner.agents
+					.list()
+					.map(ref => ref.id)
+					.sort(),
+			).toEqual(["Child", "Grandchild", "SessionA"]);
+			expect(owner.agents.get("Grandchild")).toBeDefined();
+			expect(owner.agents.get("Foreign")).toBeUndefined();
+		} finally {
+			await owner.session.dispose();
+		}
+	});
 
 	it("addresses the registry the session was created with, not the process-global one", async () => {
 		const root = makeRoot("injected-registry");
@@ -266,15 +232,7 @@ describe("ExtensionAPI agents ownership", () => {
 			// Each session registered its own `Main` in its own registry, and the
 			// process-global one additionally carries a child the injected registry
 			// has never heard of.
-			AgentRegistry.global().register({
-				id: "GlobalChild",
-				displayName: "Global Child",
-				kind: "sub",
-				parentId: MAIN_AGENT_ID,
-				session: null,
-				sessionFile: path.join(root, "GlobalChild.jsonl"),
-				status: "parked",
-			});
+			await registerParked(AgentRegistry.global(), root, "GlobalChild", MAIN_AGENT_ID);
 			expect(AgentRegistry.global().get(MAIN_AGENT_ID)?.session).toBe(global.session);
 			expect(ownRegistry.get(MAIN_AGENT_ID)?.session).toBe(injected.session);
 
@@ -334,4 +292,94 @@ describe("ExtensionAPI agents ownership", () => {
 			await earlier.session.dispose();
 		}
 	});
+
+	it("a live session whose own ref the registry no longer holds reaches no other session's agents", async () => {
+		const root = makeRoot("vacated-owner");
+		// Two concurrent top-level sessions on one registry, both on the `Main`
+		// id, plus a parked child of `Main` of the kind that outlives its parent.
+		const earlier = await startSession({ root, name: "earlier" });
+		const later = await startSession({ root, name: "later" });
+		await registerParked(AgentRegistry.global(), root, "LaterChild", MAIN_AGENT_ID);
+		try {
+			// `later` owns the `Main` ref; its teardown takes the ref with it
+			// (sdk.ts `unregisterUnlessParked`) and spares the parked child.
+			await later.session.dispose();
+			expect(AgentRegistry.global().get(MAIN_AGENT_ID)).toBeUndefined();
+			expect(AgentRegistry.global().get("LaterChild")?.status).toBe("parked");
+
+			// `earlier` is live and undisposed, so the disposal guard passes, but
+			// the registry holds no ref proving it owns `Main`. It must be refused,
+			// not handed every global ref whose parent chain reaches `Main`.
+			expect(earlier.session.isDisposed).toBe(false);
+			expect(() => earlier.agents.list()).toThrow(/no longer registered/);
+			expect(() => earlier.agents.get("LaterChild")).toThrow(/no longer registered/);
+		} finally {
+			await earlier.session.dispose();
+		}
+	});
+
+	it("the ACP host serves agents actions instead of an unsupported-action error", async () => {
+		const root = makeRoot("acp-host");
+		const created = await createSession({ root, name: "acp" });
+		// Until a host wires `ExtensionActions.agentsList`/`agentsGet`, every call
+		// lands on `throwUnsupportedAgentsAction` — and `ConcreteExtensionAPI.agents`
+		// is always defined, so an unwired host is indistinguishable from a wired
+		// one until that first call.
+
+		const clientToAgent = new TransformStream();
+		const agentToClient = new TransformStream();
+		const client: Client = {
+			async requestPermission(): Promise<RequestPermissionResponse> {
+				return { outcome: { outcome: "selected", optionId: "allow_once" } };
+			},
+			async sessionUpdate(_params: SessionNotification): Promise<void> {},
+		};
+		const clientConnection = new ClientSideConnection(
+			() => client,
+			ndJsonStream(clientToAgent.writable, agentToClient.readable),
+		);
+		const agentConnection = createAcpConnection(
+			ndJsonStream(agentToClient.writable, clientToAgent.readable),
+			async () => ({ session: created.session, setToolUIContext: () => {} }),
+		);
+
+		try {
+			await clientConnection.initialize({ protocolVersion: 1, clientCapabilities: {} });
+			await clientConnection.newSession({ cwd: path.join(root, "acp"), mcpServers: [] });
+
+			const childFile = await registerParked(AgentRegistry.global(), root, "AcpChild", MAIN_AGENT_ID);
+			expect(created.agents.get("AcpChild")).toEqual({
+				id: "AcpChild",
+				status: "parked",
+				kind: "sub",
+				sessionFile: childFile,
+			});
+			expect(
+				created.agents
+					.list()
+					.map(ref => ref.id)
+					.sort(),
+			).toEqual(["AcpChild", MAIN_AGENT_ID]);
+		} finally {
+			await closeTransport(clientToAgent.writable);
+			await closeTransport(agentToClient.writable);
+			await Promise.allSettled([clientConnection.closed, agentConnection.closed]);
+			await created.session.dispose();
+		}
+	});
 });
+
+/**
+ * Close one direction of the in-memory ACP transport. `ndJsonStream` acquires a
+ * transient writer per message, so right after the final response resolves the
+ * writer release is still a queued microtask; closing while it is held rejects
+ * and leaves the peer's readable open.
+ */
+async function closeTransport(writable: WritableStream<unknown>): Promise<void> {
+	for (let i = 0; i < 100 && writable.locked; i++) {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setImmediate(resolve);
+		await promise;
+	}
+	await Promise.allSettled([writable.close()]);
+}

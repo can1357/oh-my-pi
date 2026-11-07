@@ -67,6 +67,7 @@ import type {
 	UsageProvider,
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
+import type { AgentKind, AgentStatus } from "../../registry/agent-registry";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -1805,8 +1806,8 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 export interface ExtensionAgentInfo {
 	/** Registry id, which for a subagent is the name its spawn allocated. */
 	id: string;
-	status: "running" | "idle" | "parked" | "aborted";
-	kind: "main" | "sub" | "advisor";
+	status: AgentStatus;
+	kind: AgentKind;
 	sessionFile?: string;
 }
 
@@ -1819,8 +1820,9 @@ export interface ExtensionAgentInfo {
  * top-level sessions at once.
  *
  * The owner is the live session itself: every method below throws once that
- * session is disposed, or once another session has taken over its agent id,
- * so a handle kept past the owning session's life reaches nothing.
+ * session is disposed, once another session has taken over its agent id, or
+ * once that id leaves the registry altogether, so a handle kept past the
+ * owning session's life reaches nothing.
  */
 export interface ExtensionAgentsApi {
 	/** Snapshot of the agents visible to this session. */

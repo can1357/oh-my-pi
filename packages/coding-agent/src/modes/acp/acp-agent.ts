@@ -61,6 +61,7 @@ import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
+import { createExtensionAgentActions } from "../runtime-init";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
@@ -3075,6 +3076,7 @@ export class AcpAgent implements Agent {
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);
 				},
+				...createExtensionAgentActions(() => record.session),
 				setLabel: (targetId, label) => {
 					record.session.sessionManager.appendLabelChange(targetId, label);
 				},
