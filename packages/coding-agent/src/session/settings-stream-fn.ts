@@ -14,6 +14,7 @@ import { fitOutputTokensToContextWindow, type StreamFn, Tokenizer } from "@oh-my
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { serverSideFallbackModels } from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { type AnthropicSlowModeLanes, anthropicSlowModeLanes } from "./anthropic-slow-mode";
 
@@ -22,6 +23,7 @@ import {
 	cfgModelLoopGuardEnabled,
 	cfgOmitThinking,
 	cfgProvidersAnthropicServerSideFallback,
+	cfgProvidersAnthropicServerSideFallbackModels,
 	cfgProvidersAnthropicSlowMode,
 	cfgProvidersAntigravityEndpoint,
 	cfgProvidersCacheRetention,
@@ -55,6 +57,69 @@ export function resolveWebsocketPreference(
 	if (model?.api !== "openai-codex-responses") return requestPreference;
 	const setting = cfgProvidersOpenaiWebsockets.get(settings);
 	return requestPreference ?? (setting === "on" ? true : setting === "off" ? false : undefined);
+}
+
+/** Anthropic `MessageCreateParams.fallbacks` accepts at most three entries. */
+const ANTHROPIC_MAX_FALLBACK_MODELS = 3;
+
+const SERVER_SIDE_FALLBACK_MODELS_SETTING = "providers.anthropic.serverSideFallbackModels";
+
+/**
+ * Last outcome warned about per reason, so each warning fires once per distinct
+ * outcome rather than per request. Each key is JSON, not joined text: a chain
+ * whose entries contain the separator would otherwise collide with a different
+ * chain that joins to the same string and swallow its changed diagnostic.
+ */
+interface ServerSideFallbackWarnings {
+	dropped?: string;
+	overlong?: string;
+}
+
+/**
+ * Clean a configured `providers.anthropic.serverSideFallbackModels` value into
+ * the wire chain. The caller passes only a value the registry accepts as an
+ * array — a non-array one is not configured for this purpose and never reaches
+ * here — but the registry does not type its elements: hand-edited YAML can
+ * supply non-string or blank entries, which are dropped instead of throwing.
+ * Both repairs are reported — a silently cleaned chain is indistinguishable
+ * from the chain the user wrote, and an all-invalid list turns the feature off
+ * while the toggle still reads on. The wire contract allows at most three
+ * entries (MessageCreateParams.fallbacks) and an overlong chain would be
+ * rejected by the API instead of falling back, so cap deliberately too. Each
+ * warning fires once per distinct outcome, tracked in `warned`, rather than on
+ * every request.
+ */
+function configuredServerSideFallbackModels(
+	configured: readonly unknown[],
+	warned: ServerSideFallbackWarnings,
+): string[] {
+	const models = configured
+		.filter((id): id is string => typeof id === "string")
+		.map(id => id.trim())
+		.filter(id => id.length > 0);
+	const dropped = configured.length - models.length;
+	if (dropped > 0) {
+		const outcome = JSON.stringify([dropped, models]);
+		if (warned.dropped !== outcome) {
+			warned.dropped = outcome;
+			logger.warn(`${SERVER_SIDE_FALLBACK_MODELS_SETTING}: ignoring entries that are not non-empty model ids`, {
+				setting: SERVER_SIDE_FALLBACK_MODELS_SETTING,
+				dropped,
+				kept: models.length,
+			});
+		}
+	}
+	if (models.length > ANTHROPIC_MAX_FALLBACK_MODELS) {
+		const chain = JSON.stringify(models);
+		if (warned.overlong !== chain) {
+			warned.overlong = chain;
+			logger.warn("providers.anthropic.serverSideFallbackModels exceeds the wire limit; using the first three", {
+				configured: models.length,
+				limit: ANTHROPIC_MAX_FALLBACK_MODELS,
+			});
+		}
+	}
+	return models.slice(0, ANTHROPIC_MAX_FALLBACK_MODELS);
 }
 
 function timeoutSecondsToMs(value: number): number | undefined {
@@ -96,6 +161,8 @@ export function createSettingsAwareStreamFn(
 	// per-message counts are reused across requests: its prices (images,
 	// replayed thinking and reasoning) belong to that model and request state.
 	const tokenizers = new Map<string, Tokenizer>();
+	// What each fallback-chain repair last warned about, so neither warning repeats per request.
+	const fallbackChainWarnings: ServerSideFallbackWarnings = {};
 	return (model, context, streamOptions) => {
 		const openrouterRoutingPreset = cfgProvidersOpenrouterVariant.get(settings);
 		const openrouterVariant =
@@ -113,15 +180,28 @@ export function createSettingsAwareStreamFn(
 		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
 		const streamFirstEventTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamFirstEventTimeoutSeconds.get(settings));
 		const streamIdleTimeoutMs = timeoutSecondsToMs(cfgProvidersStreamIdleTimeoutSeconds.get(settings));
-		// Server-side fallback (opt-in): when the user enables it, inject the
-		// catalog-owned `fallbacks` chain (`server-side-fallback-models` axis,
-		// authored for Fable/Mythos on first-party Anthropic). The provider
-		// layer picks it up, sends the beta header, and honors the response
-		// signals. Models without a rule-assigned chain are untouched.
-		const serverSideFallbackChain =
+		// Server-side fallback (opt-in): when the user enables it AND the
+		// catalog assigns the model a chain (`server-side-fallback-models` axis,
+		// authored for Fable/Mythos on first-party Anthropic), inject `fallbacks`.
+		// A configured `providers.anthropic.serverSideFallbackModels` replaces the
+		// catalog chain, and an empty configured chain sends nothing even with the
+		// toggle on. The provider layer picks it up, sends the beta header, and
+		// honors the response signals. Models without a rule-assigned chain are
+		// untouched.
+		const catalogFallbackChain =
 			streamOptions?.fallbacks === undefined && cfgProvidersAnthropicServerSideFallback.get(settings)
 				? serverSideFallbackModels(model)
 				: [];
+		// One question — is a usable chain configured? — not presence plus value.
+		// `isConfigured` is true for a hand-edited non-list, whose `get` is the
+		// schema default, so the pair would replace the catalog chain with that
+		// default. Only the catalog knows a model's chain, so an unusable value
+		// follows it, exactly as an unset one does.
+		const configuredChain = cfgProvidersAnthropicServerSideFallbackModels.configured(settings);
+		const serverSideFallbackChain =
+			catalogFallbackChain.length > 0 && configuredChain !== undefined
+				? configuredServerSideFallbackModels(configuredChain, fallbackChainWarnings)
+				: catalogFallbackChain;
 		const fallbacks =
 			streamOptions?.fallbacks ??
 			(serverSideFallbackChain.length > 0 ? serverSideFallbackChain.map(id => ({ model: id })) : undefined);

@@ -950,6 +950,24 @@ export const cfgProvidersAnthropicServerSideFallback = register({
 	},
 });
 
+export const cfgProvidersAnthropicServerSideFallbackModels = register({
+	id: "providers.anthropic.serverSideFallbackModels",
+	type: "array",
+	// An `array` setting has no optional form, so the empty list is this registry's "no value", and
+	// it is inert: the wrapper branches on whether a usable value is configured, never on this. The
+	// chain for a model belongs to the catalog's `server-side-fallback-models` axis; naming an id
+	// here would make TypeScript a second owner of that policy and send a stale target when the
+	// catalog moved on.
+	default: [] as string[],
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Anthropic Server-Side Fallback Chain",
+		description:
+			'Ordered bare Anthropic model ids forwarded as the server-side `fallbacks` chain when Anthropic Server-Side Fallback is enabled, e.g. ["claude-opus-5", "claude-opus-4-8"]. These are API model ids, not provider/model selectors, and each must be in the requested model\'s allowed fallback models. Leave it unset to follow the catalog chain for the model; a value that is not a list is unusable and follows the catalog chain too, after one warning. An empty list is a choice, not an omission: it sends no fallbacks even when the toggle is on. The API accepts at most three entries, so longer chains use the first three. Entries that are not non-empty strings are dropped with a warning in the log, and a list that loses every entry sends no fallbacks.',
+	},
+});
+
 /**
  * Anthropic subscription slow mode (`off` | `auto`). Deliberately has no
  * `/settings` UI: `/slow on|off` on an Anthropic model is the only switch.

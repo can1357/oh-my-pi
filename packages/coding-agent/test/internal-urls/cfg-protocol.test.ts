@@ -42,6 +42,20 @@ describe("CfgProtocolHandler", () => {
 		expect(leaf.content).toContain("source: session override");
 	});
 
+	// The Anthropic server-side fallback chain belongs to the model catalog, which this reader
+	// cannot see. An unconfigured read must say so; a schema default naming a model id would
+	// publish a second, frozen answer here and keep publishing it after the catalog moved on.
+	it("reports a catalog-owned chain as unconfigured rather than naming a model", async () => {
+		const settings = Settings.isolated();
+
+		const leaf = await read("cfg://providers.anthropic.serverSideFallbackModels", settings);
+		const lines = String(leaf.content).split("\n");
+
+		expect(lines[0]).toBe("providers.anthropic.serverSideFallbackModels: []");
+		expect(lines).toContain("default: []");
+		expect(lines).toContain("source: default");
+	});
+
 	it("redacts credential values", async () => {
 		const settings = Settings.isolated({ "auth.broker.token": "sekrit" });
 		const resource = await read("cfg://auth", settings);

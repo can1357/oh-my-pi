@@ -793,6 +793,25 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return this.envValue() !== undefined || settingsOf(scope).isConfigured(this);
 	}
 
+	/**
+	 * The configured value actually in force, or `undefined` when nothing configures this setting
+	 * **and** when what does cannot be used — the two cases in which {@link get} yields the schema
+	 * default. The read goes through {@link get}, so an unusable value is still reported once.
+	 *
+	 * Ask this, not `isConfigured(scope) ? get(scope) : …`, whenever the unconfigured branch is not
+	 * the schema default. That pair disagrees on an unusable value — {@link isConfigured} is true,
+	 * {@link get} is the default — so it quietly substitutes the default for a value the user meant
+	 * as something else, and the branch that owns the real unconfigured behavior never runs. Where
+	 * the schema default *is* the unconfigured behavior the pair is equivalent, and `get` alone says
+	 * it more plainly.
+	 */
+	configured(scope: ScopeLike): T | undefined {
+		const value = this.get(scope);
+		if (this.#effectiveEnv(scope) !== undefined) return value;
+		const raw = settingsOf(scope).rawValue(this);
+		return raw !== undefined && this.accepts(raw) ? value : undefined;
+	}
+
 	/** Layer supplying the effective value. */
 	provenance(scope: ScopeLike): SettingProvenance {
 		return this.#effectiveEnv(scope) !== undefined ? "env" : settingsOf(scope).getProvenance(this);
