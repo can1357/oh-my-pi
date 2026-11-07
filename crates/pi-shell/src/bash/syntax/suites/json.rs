@@ -380,6 +380,232 @@ fn range_faults(
 	}
 }
 
+/// Decode an exported unit offset independently of the exporter's OffMap.
+fn byte_offset(src: &[u8], off: u64, offsets: Offsets) -> Option<usize> {
+	if offsets == Offsets::Bytes {
+		return usize::try_from(off).ok().filter(|&i| i <= src.len());
+	}
+	let text = core::str::from_utf8(src).ok()?;
+	let mut units = 0;
+	for (i, c) in text.char_indices() {
+		if units == off {
+			return Some(i);
+		}
+		units += c.len_utf16() as u64;
+	}
+	(units == off).then_some(src.len())
+}
+
+fn closing_delimiter(v: &serde_json::Value) -> Option<(&'static str, &'static [u8])> {
+	Some(match v.get("Type")?.as_str()? {
+		"DblQuoted" => ("Right", b"\""),
+		"SglQuoted" => ("Right", b"'"),
+		"CmdSubst" if v["Backquotes"] == true => ("Right", b"`"),
+		"CmdSubst" if v["TempFile"] == true || v["ReplyVar"] == true => ("Right", b"}"),
+		"CmdSubst" => ("Right", b")"),
+		"ArithmExp" if v["Bracket"] == true => ("Right", b"]"),
+		"ArithmExp" | "ArithmCmd" => ("Right", b"))"),
+		"TestClause" => ("Right", b"]]"),
+		"CStyleLoop" => ("Rparen", b"))"),
+		"Subshell" | "ParenTest" | "ProcSubst" | "ArrayExpr" => ("Rparen", b")"),
+		"Block" => ("Rbrace", b"}"),
+		"ParamExp" if v.get("Rbrace").is_some() => ("Rbrace", b"}"),
+		_ => return None,
+	})
+}
+
+/// The ordinary buffer must really contain the claimed delimiter. For an
+/// alias, parse the independently expanded buffer and map its delimiter back
+/// through the replacement: bytes in the replacement belong to the position
+/// just after `check`, not a similarly spelled token elsewhere in the source.
+/// The reference delimiter is also checked against the expanded source bytes;
+/// a consistently wrong lexer/exporter position cannot satisfy this oracle.
+fn delimiter_faults(
+	v: &serde_json::Value,
+	src: &[u8],
+	offsets: Offsets,
+	alias: Option<(&serde_json::Value, &[u8], usize, usize)>,
+	path: &str,
+	bad: &mut Vec<String>,
+) {
+	if let Some((key, delimiter)) = closing_delimiter(v) {
+		let at = v[key]["Offset"]
+			.as_u64()
+			.and_then(|o| byte_offset(src, o, offsets));
+		let valid = if let Some((reference, expanded, start, len)) = alias {
+			let expected = reference[key]["Offset"]
+				.as_u64()
+				.and_then(|o| byte_offset(expanded, o, offsets));
+			expected.is_some_and(|i| {
+				expanded.get(i..).is_some_and(|s| s.starts_with(delimiter))
+					&& at
+						== Some(if i < start {
+							i
+						} else if i < start + len {
+							start + b"check".len()
+						} else {
+							i - len + b"check".len()
+						})
+			})
+		} else {
+			at.is_some_and(|i| src.get(i..).is_some_and(|s| s.starts_with(delimiter)))
+		};
+		if !valid {
+			bad.push(format!(
+				"{path}.{key}: {:?} is not the source/provenance position of {:?}",
+				v[key]["Offset"],
+				String::from_utf8_lossy(delimiter)
+			));
+		}
+	}
+	if v.get("Hdoc").is_some() {
+		let reference = alias.map_or(v, |(r, ..)| r);
+		let mut delimiter = String::new();
+		if let Some(parts) = reference["Word"]["Parts"].as_array() {
+			for part in parts {
+				if let Some(value) = part["Value"].as_str() {
+					delimiter.push_str(value);
+				}
+			}
+		}
+		let end = v["Hdoc"]["End"]["Offset"]
+			.as_u64()
+			.and_then(|o| byte_offset(src, o, offsets));
+		let (check, buffer) = alias.map_or((end, src), |(r, expanded, ..)| {
+			(
+				r["Hdoc"]["End"]["Offset"]
+					.as_u64()
+					.and_then(|o| byte_offset(expanded, o, offsets)),
+				expanded,
+			)
+		});
+		let valid_bytes = check.is_some_and(|i| {
+			i.checked_sub(delimiter.len())
+				.and_then(|start| buffer.get(start..i))
+				== Some(delimiter.as_bytes())
+		});
+		let valid_provenance = alias.is_none_or(|(_, _, start, len)| {
+			check.is_some_and(|i| {
+				end == Some(if i <= start {
+					i
+				} else if i <= start + len {
+					start + 5
+				} else {
+					i - len + 5
+				})
+			})
+		});
+		if !valid_bytes || !valid_provenance {
+			bad.push(format!(
+				"{path}.Hdoc.End: {end:?} does not end delimiter {delimiter:?} at its \
+				 source/provenance position"
+			));
+		}
+	}
+	match v {
+		serde_json::Value::Object(map) => {
+			for (k, child) in map {
+				let next = alias.map(|(r, s, start, len)| (&r[k], s, start, len));
+				delimiter_faults(child, src, offsets, next, &format!("{path}.{k}"), bad);
+			}
+		},
+		serde_json::Value::Array(items) => {
+			for (i, child) in items.iter().enumerate() {
+				let next = alias.map(|(r, s, start, len)| (&r[i], s, start, len));
+				delimiter_faults(child, src, offsets, next, &format!("{path}[{i}]"), bad);
+			}
+		},
+		_ => {},
+	}
+}
+
+#[test]
+fn delimiter_oracle_rejects_a_contained_but_wrong_delimiter() {
+	let src = b"for ((i=0; i<3; i++)); do :; done";
+	let program = parse_all(src, Features::NONE).unwrap();
+	let mut document: serde_json::Value =
+		serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, Offsets::Bytes)).unwrap();
+	document["Stmts"][0]["Cmd"]["Loop"]["Rparen"]["Offset"] = 16.into();
+	let mut ranges = Vec::new();
+	range_faults(&document, None, "", &mut ranges);
+	assert!(ranges.is_empty(), "mutation stays contained: {ranges:?}");
+	let mut bad = Vec::new();
+	delimiter_faults(&document, src, Offsets::Bytes, None, "", &mut bad);
+	assert_eq!(bad.len(), 1, "{bad:?}");
+	assert!(bad[0].contains("Loop.Rparen"), "{bad:?}");
+	eprintln!("contained delimiter mutation: {}", bad[0]);
+}
+
+#[test]
+fn arithmetic_delimiters_keep_consumed_source_and_alias_positions() {
+	let mut bad = Vec::new();
+	for (name, source, text, close, utf16_close) in [
+		("ordinary", "# 😀\nfor ((i=0; i<3; i++)); do :; done\n", "", 26, 24),
+		("mixed-alias", "# 😀\ncheck i++)); do :; done\n", "for ((i=0; i<3; ", 16, 14),
+		("whole-alias", "# 😀\ncheck\n", "for ((i=0; i<3; i++)); do :; done", 12, 10),
+	] {
+		let table = AliasOne(b"check", text.as_bytes());
+		let mut parser = Parser::new(source.as_bytes(), zsh_features(), &table);
+		let commands = std::iter::from_fn(|| parser.next_command())
+			.collect::<Result<Vec<_>, _>>()
+			.unwrap();
+		let program = Program { commands };
+		for (offsets, want) in [(Offsets::Bytes, close), (Offsets::Utf16, utf16_close)] {
+			let json = to_json(source.as_bytes(), &program, JsonDialect::Shfmt, offsets);
+			let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+			let got = &document["Stmts"][0]["Cmd"]["Loop"]["Rparen"]["Offset"];
+			eprintln!("delimiter-row {name} {offsets:?}: Rparen={got}, want={want}");
+			if got != want {
+				bad.push(format!("{name} {offsets:?}: Rparen={got}, want={want}"));
+			}
+		}
+	}
+	assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn arithmetic_command_body_does_not_add_bytes_to_alias_text() {
+	let source = "# 😀\ncheck + 2 ))\n".as_bytes();
+	let table = AliasOne(b"check", b"(( 1");
+	let mut parser = Parser::new(source, zsh_features(), &table);
+	let program = Program {
+		commands: std::iter::from_fn(|| parser.next_command())
+			.collect::<Result<Vec<_>, _>>()
+			.unwrap(),
+	};
+	let mut bad = Vec::new();
+	for (offsets, want) in [(Offsets::Bytes, (12, 17)), (Offsets::Utf16, (10, 15))] {
+		let json = to_json(source, &program, JsonDialect::Native, offsets);
+		let document: serde_json::Value = serde_json::from_str(&json).unwrap();
+		let expr = &document["commands"][0]["list"][0]["and_or"]["first"]["stages"][0]["cmd"]["expr"];
+		let got = token_range(expr);
+		eprintln!("delimiter-row arithmetic-command {offsets:?}: span={got:?}, want={want:?}");
+		if got != Some(want) {
+			bad.push(format!("{offsets:?}: span={got:?}, want={want:?}"));
+		}
+	}
+	assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn heredoc_delimiter_oracle_checks_the_source_terminator() {
+	let src = "# 😀\ncat <<EOF\nbody\nEOF\n".as_bytes();
+	for features in [Features::NONE, zsh_features()] {
+		let program = parse_all(src, features).unwrap();
+		for (offsets, wrong) in [(Offsets::Bytes, 24), (Offsets::Utf16, 22)] {
+			let mut document: serde_json::Value =
+				serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, offsets)).unwrap();
+			let mut bad = Vec::new();
+			delimiter_faults(&document, src, offsets, None, "", &mut bad);
+			assert!(bad.is_empty(), "{features:?} {offsets:?}: {bad:?}");
+			document["Stmts"][0]["Redirs"][0]["Hdoc"]["End"]["Offset"] = wrong.into();
+			delimiter_faults(&document, src, offsets, None, "", &mut bad);
+			assert_eq!(bad.len(), 1, "{features:?} {offsets:?}: {bad:?}");
+			assert!(bad[0].contains("Hdoc.End"), "{bad:?}");
+		}
+	}
+}
+
 fn word_part_faults(v: &serde_json::Value, path: &str, bad: &mut Vec<String>) {
 	match v {
 		serde_json::Value::Object(map) => {
@@ -603,6 +829,9 @@ const SAMPLES: &[Sample<'static>] = &[
 	word(b"echo ${x:-d}"),
 	word(b"echo $(x)"),
 	word(b"echo $(( 1 + 1 ))"),
+	word(b"echo $[1 + 1]"),
+	word(b"echo `x`"),
+	zsh(b"echo \"a\" $((1)) $[1] $(x) `x`"),
 	word(b"cat <(x)"),
 	word(b"declare -a a=(1 2)"),
 	word(b"echo \"${a+'$('\\'}\""),
@@ -883,6 +1112,16 @@ fn exported_nodes_contain_their_children_in_source_and_alias_text() {
 	let mut faults = Vec::new();
 	let mut clean_siblings = Vec::new();
 	for_each_sample(|sample| {
+		let start = sample.src.windows(5).position(|s| s == b"check").unwrap();
+		let mut expanded = sample.src[..start].to_vec();
+		expanded.extend_from_slice(sample.text);
+		expanded.extend_from_slice(&sample.src[start + 5..]);
+		let features = if sample.zsh {
+			zsh_features()
+		} else {
+			Features::NONE
+		};
+		let reference = parse_all(&expanded, features).expect("expanded sample parses");
 		for aliased in [false, true] {
 			let program = parse_sample(sample, aliased);
 			let src = if aliased { sample.src } else { sample.text };
@@ -893,6 +1132,14 @@ fn exported_nodes_contain_their_children_in_source_and_alias_text() {
 					let document: serde_json::Value = serde_json::from_str(&json).unwrap();
 					let mut bad = Vec::new();
 					range_faults(&document, None, "", &mut bad);
+					if dialect == JsonDialect::Shfmt {
+						let reference: serde_json::Value =
+							serde_json::from_str(&to_json(&expanded, &reference, dialect, offsets))
+								.unwrap();
+						let alias =
+							aliased.then_some((&reference, expanded.as_slice(), start, sample.text.len()));
+						delimiter_faults(&document, src, offsets, alias, "", &mut bad);
+					}
 					for fault in bad {
 						here.push(format!(
 							"{} with {} (aliased={aliased}), {dialect:?}, {offsets:?}: {fault}",
