@@ -475,7 +475,7 @@ export class EventController {
 				}
 				if (this.ctx.streamingComponent && this.ctx.streamingMessage) {
 					this.ctx.streamingComponent.setHideThinkingBlock(hideThinking);
-					this.#streamingReveal.resyncVisibility();
+					this.resyncStreamingReveal();
 				}
 				this.ctx.ui.requestRender(true);
 			},
@@ -494,6 +494,21 @@ export class EventController {
 	presentIdleRecap(reply: string): void {
 		const recap = previewLine(reply, TRUNCATE_LENGTHS.RECAP);
 		if (recap) this.ctx.present(new RecapNotice(recap));
+	}
+
+	/**
+	 * Re-read the cached display flags (hide-thinking, prose-only, smooth
+	 * streaming) into the streaming reveal controller and re-render the live
+	 * message through its truncating view. Public entry point for every
+	 * mid-stream display change: the thinking toggles (Ctrl+T, /settings, the
+	 * on-disk reload) and the extension text-renderer swap. A toggle caller must
+	 * have already applied `setHideThinkingBlock` to the streaming component.
+	 * Pushing the raw cumulative message through `updateContent` here would
+	 * bypass the reveal view (text snapping to 100% then re-typing), and a
+	 * separate smooth-streaming resync would leave two paths to keep in step.
+	 */
+	resyncStreamingReveal(): void {
+		this.#streamingReveal.resyncVisibility();
 	}
 
 	dispose(): void {
@@ -610,7 +625,7 @@ export class EventController {
 	 * them changed). Renderers take the full text, so a running typing reveal is dropped first.
 	 */
 	applyAssistantTextRenderers(): void {
-		this.#streamingReveal.resyncSmoothStreaming();
+		this.resyncStreamingReveal();
 		const renderers = this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.() ?? [];
 		this.ctx.streamingComponent?.setTextRenderers(renderers);
 		for (const segment of this.liveAssistantSegments()) segment.setTextRenderers(renderers);
@@ -1636,7 +1651,7 @@ export class EventController {
 			const unlockedThinkingVisibility = this.ctx.noteDisplayableThinkingContent(message);
 			if (unlockedThinkingVisibility) {
 				this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
-				this.#streamingReveal.resyncVisibility();
+				this.resyncStreamingReveal();
 			}
 			this.ctx.streamingMessage = message;
 			const timeline = splitAssistantMessageToolTimeline(this.ctx.streamingMessage);
@@ -1845,7 +1860,7 @@ export class EventController {
 			event.message.role === "assistant" && this.ctx.noteDisplayableThinkingContent(event.message);
 		if (unlockedThinkingVisibility && this.ctx.streamingComponent) {
 			this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
-			this.#streamingReveal.resyncVisibility();
+			this.resyncStreamingReveal();
 		}
 		if (event.message.role === "assistant" && cfgSpeechEnabled.get(settings)) {
 			if (event.message.stopReason === "aborted") {
