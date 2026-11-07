@@ -168,6 +168,10 @@
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
 
+### Fixed
+
+- Fixed reading a large SQLite table freezing the harness for seconds while counting the rows behind a paged `read`; the continuation footer now shows a bounded lower bound like `[50000+ more rows]` ([#17554](https://github.com/can1357/oh-my-pi/pull/17554) by [@Bensonluo](https://github.com/Bensonluo)).
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

@@ -18,6 +18,7 @@ import {
 	getRowByRowId,
 	getTableSchema,
 	isSqliteFile,
+	formatRemainingRows,
 	listTables,
 	MAX_RAW_QUERY_ROWS,
 	openSqliteReadConnection,
@@ -137,9 +138,9 @@ export async function readSqlite(
 					columns: sampleRows.columns,
 					rows: sampleRows.rows,
 				});
-				if (sampleRows.rows.length < sampleRows.totalCount) {
-					const remaining = sampleRows.totalCount - sampleRows.rows.length;
-					output += `\n[${remaining} more rows; append :${selector.table}?limit=20&offset=${sampleRows.rows.length} to the database path to continue]`;
+				const remaining = formatRemainingRows(sampleRows.totalCount, sampleRows.rows.length);
+				if (remaining !== null) {
+					output += `\n[${remaining}; append :${selector.table}?limit=20&offset=${sampleRows.rows.length} to the database path to continue]`;
 				}
 				return toolResult<ReadToolDetails>(details)
 					.text(prependSuffixResolutionNotice(output, resolvedSqlitePath.suffixResolution))
@@ -191,7 +192,7 @@ export async function readSqlite(
 			case "raw": {
 				const result = executeReadQuery(db, selector.sql, selector.page);
 				let output = renderTable(result.columns, result.rows, {
-					totalCount: result.rows.length,
+					totalCount: { kind: "exact", rows: result.rows.length },
 					offset: 0,
 					limit: result.rows.length || DEFAULT_MAX_LINES,
 					table: "query",
