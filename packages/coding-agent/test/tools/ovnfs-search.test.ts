@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -78,6 +78,9 @@ describe("ovnfs search fast path", () => {
 		gotFrame = () => {};
 	});
 
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
 	afterAll(async () => {
 		const closed = Promise.withResolvers<void>();
 		server.close(() => closed.resolve());
@@ -167,5 +170,189 @@ describe("ovnfs search fast path", () => {
 		const result = await grep({ pattern: "needle", path: dir }, null, ovnfs);
 		expect(received).toHaveLength(1);
 		expect(result.matches.map(m => m.path).sort()).toEqual(["a.txt", "sub/b.txt"]);
+	});
+
+	it("enforces deadlines and cleans up a status command that does not finish", async () => {
+		const statusSocket = path.join(root, "status.sock");
+		const statusStarted = Promise.withResolvers<void>();
+		const statusClosed = Promise.withResolvers<void>();
+		const statusServer = net.createServer(conn => {
+			conn.on("close", () => statusClosed.resolve());
+			statusStarted.resolve();
+		});
+		const listening = Promise.withResolvers<void>();
+		statusServer.listen(statusSocket, listening.resolve);
+		await listening.promise;
+
+		try {
+			const stalledOvnfs = path.join(root, "ovnfs-stalled");
+			await Bun.write(
+				stalledOvnfs,
+				`#!${process.execPath}\nconst net = require("node:net");\nnet.connect(${JSON.stringify(statusSocket)});\nsetInterval(() => {}, 1000);\n`,
+			);
+			await fs.chmod(stalledOvnfs, 0o755);
+
+			const controller = new AbortController();
+			const aborted = glob({ pattern: "*", path: dir, signal: controller.signal }, null, stalledOvnfs);
+			const started = await Promise.race([
+				statusStarted.promise.then(() => true),
+				aborted.then(
+					() => false,
+					() => false,
+				),
+			]);
+			expect(started).toBe(true);
+
+			const timedOut = grep({ pattern: "needle", path: dir, timeoutMs: 50 }, null, stalledOvnfs);
+			timedOut.catch(() => {});
+			controller.abort();
+			await expect(aborted).rejects.toMatchObject({ name: "AbortError", message: "Aborted: Signal" });
+			await expect(timedOut).rejects.toThrow("Aborted: Timeout");
+			await statusClosed.promise;
+		} finally {
+			const closed = Promise.withResolvers<void>();
+			statusServer.close(() => closed.resolve());
+			await closed.promise;
+		}
+	});
+
+	it("enforces deadlines when realpath stalls during discovery or root resolution", async () => {
+		const realpathOvnfs = path.join(root, "ovnfs-realpath");
+		const status = JSON.stringify({
+			version: 5,
+			pid: 1,
+			socket: path.join(root, "admin.sock"),
+			mount: path.join(root, "stalled-mount", "checkouts"),
+		});
+		await Bun.write(realpathOvnfs, `#!/bin/sh\necho '${status}'\n`);
+		await fs.chmod(realpathOvnfs, 0o755);
+
+		const realRealpath = fs.realpath;
+		const mountRealpathStarted = Promise.withResolvers<void>();
+		const never = new Promise<never>(() => {});
+		vi.spyOn(fs, "realpath").mockImplementation(target => {
+			if (String(target) === path.join(root, "stalled-mount")) {
+				mountRealpathStarted.resolve();
+				return never;
+			}
+			if (String(target) === path.join(dir, "stalled-root")) {
+				return never;
+			}
+			return realRealpath(String(target)) as Promise<never>;
+		});
+
+		const controller = new AbortController();
+		const discoverySearch = grep({ pattern: "needle", path: dir, signal: controller.signal }, null, realpathOvnfs);
+		const started = await Promise.race([
+			mountRealpathStarted.promise.then(() => true),
+			discoverySearch.then(
+				() => false,
+				() => false,
+			),
+		]);
+		expect(started).toBe(true);
+		controller.abort();
+		await expect(discoverySearch).rejects.toMatchObject({ name: "AbortError", message: "Aborted: Signal" });
+
+		const rootSearch = grep({ pattern: "needle", path: path.join(dir, "stalled-root"), timeoutMs: 50 }, null, ovnfs);
+		await expect(rootSearch).rejects.toThrow("Aborted: Timeout");
+	});
+
+	it("enforces deadlines during the socket handshake without disrupting other callers", async () => {
+		const unwelcomedSocket = path.join(root, "unwelcomed.sock");
+		let helloReceived = Promise.withResolvers<net.Socket>();
+		const unwelcomedConns = new Set<net.Socket>();
+		const unwelcomedServer = net.createServer(conn => {
+			unwelcomedConns.add(conn);
+			let buffered = Buffer.alloc(0);
+			conn.on("data", (chunk: Buffer) => {
+				buffered = Buffer.concat([buffered, chunk]);
+				while (buffered.length >= 4 && buffered.length >= 4 + buffered.readUInt32LE(0)) {
+					const length = buffered.readUInt32LE(0);
+					const message = JSON.parse(buffered.subarray(4, 4 + length).toString("utf8"));
+					buffered = buffered.subarray(4 + length);
+					if (message.hello) {
+						helloReceived.resolve(conn);
+						continue;
+					}
+					if (reply && "id" in message) conn.write(frame({ id: message.id, ...reply }));
+				}
+			});
+		});
+		const listening = Promise.withResolvers<void>();
+		unwelcomedServer.listen(unwelcomedSocket, listening.resolve);
+		await listening.promise;
+
+		try {
+			const unwelcomedOvnfs = path.join(root, "ovnfs-unwelcomed");
+			const status = JSON.stringify({ version: 5, pid: 1, socket: unwelcomedSocket, mount });
+			await Bun.write(unwelcomedOvnfs, `#!/bin/sh\necho '${status}'\n`);
+			await fs.chmod(unwelcomedOvnfs, 0o755);
+
+			const firstController = new AbortController();
+			const firstAborted = grep(
+				{ pattern: "needle", path: dir, signal: firstController.signal },
+				null,
+				unwelcomedOvnfs,
+			);
+			const firstConn = await Promise.race([
+				helloReceived.promise,
+				firstAborted.then(
+					() => null,
+					() => null,
+				),
+			]);
+			expect(firstConn).not.toBeNull();
+			const firstClosed = Promise.withResolvers<void>();
+			firstConn!.on("close", () => firstClosed.resolve());
+
+			// A second caller joins the pending connection; aborting the first caller preserves it for the second,
+			// and when the second caller times out with no waiters left, the unfinished connection is closed and forgotten.
+			const timedOut = glob({ pattern: "*", path: dir, timeoutMs: 50 }, null, unwelcomedOvnfs);
+			timedOut.catch(() => {});
+			firstController.abort();
+			await expect(firstAborted).rejects.toMatchObject({ name: "AbortError", message: "Aborted: Signal" });
+			await expect(timedOut).rejects.toThrow("Aborted: Timeout");
+			await firstClosed.promise;
+
+			// A later retry opens a fresh connection; one caller aborting preserves it for another waiting caller.
+			helloReceived = Promise.withResolvers<net.Socket>();
+			const secondController = new AbortController();
+			const secondAborted = grep(
+				{ pattern: "needle", path: dir, signal: secondController.signal },
+				null,
+				unwelcomedOvnfs,
+			);
+			secondAborted.catch(() => {});
+			const survivor = grep({ pattern: "needle", path: dir }, null, unwelcomedOvnfs);
+
+			const secondConn = await Promise.race([
+				helloReceived.promise,
+				survivor.then(
+					() => null,
+					() => null,
+				),
+			]);
+			expect(secondConn).not.toBeNull();
+			expect(secondConn).not.toBe(firstConn);
+			secondController.abort();
+			await expect(secondAborted).rejects.toMatchObject({ name: "AbortError", message: "Aborted: Signal" });
+			reply = {
+				ok: {
+					matches: [{ path: "a.txt", line: 1, text: "needle here" }],
+					total_matches: 1,
+					files_with_matches: 1,
+					files_searched: 1,
+				},
+			};
+			secondConn!.write(frame({ welcome: { version: 5, ops: ["grep", "glob"] } }));
+			const result = await survivor;
+			expect(result.matches).toEqual([{ path: "a.txt", lineNumber: 1, line: "needle here" }]);
+		} finally {
+			const closed = Promise.withResolvers<void>();
+			unwelcomedServer.close(() => closed.resolve());
+			for (const conn of unwelcomedConns) conn.destroy();
+			await closed.promise;
+		}
 	});
 });
