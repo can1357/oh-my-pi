@@ -910,7 +910,13 @@ impl<S: VizSource> Printer<'_, S> {
 
 	/// Draws `list`; its first chain continues the one `after` cut off before
 	/// it (see [`Self::and_or`]).
-	fn chain_list(&mut self, list: List<'_>, c: &Context<'_>, depth: u32, mut after: Option<AndOrOp>) {
+	fn chain_list(
+		&mut self,
+		list: List<'_>,
+		c: &Context<'_>,
+		depth: u32,
+		mut after: Option<AndOrOp>,
+	) {
 		let items = list.items();
 		let mut i = 0;
 		while let Some(item) = items.get(i) {
@@ -1017,7 +1023,8 @@ impl<S: VizSource> Printer<'_, S> {
 						segments.push(s);
 					}
 				} else {
-					let mut segments = vec![self.segment(c, a.id(), a.span(), connector(op), "op", false)];
+					let mut segments =
+						vec![self.segment(c, a.id(), a.span(), connector(op), "op", false)];
 					segments.extend(self.pipeline(p, c));
 					rows.push((p, depth + 1, segments));
 				}
@@ -1029,7 +1036,8 @@ impl<S: VizSource> Printer<'_, S> {
 			}
 		} else {
 			for (pi, p) in a.pipelines().iter().enumerate() {
-				// The operator this pipeline follows, within the chain or before it.
+				// The operator this pipeline follows, within the chain or before
+				// it.
 				let op = if pi > 0 { Some(rest[pi - 1].0) } else { after };
 				let mut prev_stderr = false;
 				for (si, stage) in p.stages().iter().enumerate() {
@@ -2475,14 +2483,22 @@ const fn connector(op: AndOrOp) -> &'static str {
 /// The `&&`/`||` opening `bytes` after blanks, with the byte length through
 /// it and the whitespace following it.
 fn chain_operator(bytes: &[u8]) -> Option<(AndOrOp, usize)> {
-	let at = bytes.iter().position(|byte| !matches!(byte, b' ' | b'\t'))?;
+	let at = bytes
+		.iter()
+		.position(|byte| !matches!(byte, b' ' | b'\t'))?;
 	let op = match bytes.get(at..at + 2)? {
 		b"&&" => AndOrOp::And,
 		b"||" => AndOrOp::Or,
 		_ => return None,
 	};
 	let end = at + 2;
-	Some((op, end + bytes[end..].iter().take_while(|byte| byte.is_ascii_whitespace()).count()))
+	Some((
+		op,
+		end + bytes[end..]
+			.iter()
+			.take_while(|byte| byte.is_ascii_whitespace())
+			.count(),
+	))
 }
 fn single(a: AndOr<'_>) -> Option<Command<'_>> {
 	let first = a.first();
