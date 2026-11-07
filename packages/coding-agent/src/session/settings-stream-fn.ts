@@ -62,25 +62,51 @@ export function resolveWebsocketPreference(
 /** Anthropic `MessageCreateParams.fallbacks` accepts at most three entries. */
 const ANTHROPIC_MAX_FALLBACK_MODELS = 3;
 
+const SERVER_SIDE_FALLBACK_MODELS_SETTING = "providers.anthropic.serverSideFallbackModels";
+
+/** Last chain warned about per reason, so each warning fires once per distinct outcome rather than per request. */
+interface ServerSideFallbackWarnings {
+	dropped?: string;
+	overlong?: string;
+}
+
 /**
  * Clean a configured `providers.anthropic.serverSideFallbackModels` value into
  * the wire chain. The registry guarantees an array (a non-array configured
- * value falls back to the default), but not its element types: hand-edited
- * YAML can supply non-string entries, which are dropped instead of throwing.
- * The wire contract allows at most three entries
- * (MessageCreateParams.fallbacks) and an overlong chain would be rejected by
- * the API instead of falling back, so cap deliberately and loudly — once per
- * distinct chain, tracked in `warned`, rather than on every request.
+ * value falls back to the default, with its own warning), but not its element
+ * types: hand-edited YAML can supply non-string or blank entries, which are
+ * dropped instead of throwing. Both repairs are reported — a silently cleaned
+ * chain is indistinguishable from the chain the user wrote, and an all-invalid
+ * list turns the feature off while the toggle still reads on. The wire contract
+ * allows at most three entries (MessageCreateParams.fallbacks) and an overlong
+ * chain would be rejected by the API instead of falling back, so cap
+ * deliberately too. Each warning fires once per distinct outcome, tracked in
+ * `warned`, rather than on every request.
  */
-function configuredServerSideFallbackModels(configured: readonly unknown[], warned: { chain?: string }): string[] {
+function configuredServerSideFallbackModels(
+	configured: readonly unknown[],
+	warned: ServerSideFallbackWarnings,
+): string[] {
 	const models = configured
 		.filter((id): id is string => typeof id === "string")
 		.map(id => id.trim())
 		.filter(id => id.length > 0);
+	const dropped = configured.length - models.length;
+	if (dropped > 0) {
+		const outcome = `${dropped}\u0000${models.join("\n")}`;
+		if (warned.dropped !== outcome) {
+			warned.dropped = outcome;
+			logger.warn(`${SERVER_SIDE_FALLBACK_MODELS_SETTING}: ignoring entries that are not non-empty model ids`, {
+				setting: SERVER_SIDE_FALLBACK_MODELS_SETTING,
+				dropped,
+				kept: models.length,
+			});
+		}
+	}
 	if (models.length > ANTHROPIC_MAX_FALLBACK_MODELS) {
 		const chain = models.join("\n");
-		if (warned.chain !== chain) {
-			warned.chain = chain;
+		if (warned.overlong !== chain) {
+			warned.overlong = chain;
 			logger.warn("providers.anthropic.serverSideFallbackModels exceeds the wire limit; using the first three", {
 				configured: models.length,
 				limit: ANTHROPIC_MAX_FALLBACK_MODELS,
@@ -129,8 +155,8 @@ export function createSettingsAwareStreamFn(
 	// per-message counts are reused across requests: its prices (images,
 	// replayed thinking and reasoning) belong to that model and request state.
 	const tokenizers = new Map<string, Tokenizer>();
-	// Last overlong fallback chain warned about, so the cap warning fires once per chain.
-	const overlongFallbackWarning: { chain?: string } = {};
+	// What each fallback-chain repair last warned about, so neither warning repeats per request.
+	const fallbackChainWarnings: ServerSideFallbackWarnings = {};
 	return (model, context, streamOptions) => {
 		const openrouterRoutingPreset = cfgProvidersOpenrouterVariant.get(settings);
 		const openrouterVariant =
@@ -164,7 +190,7 @@ export function createSettingsAwareStreamFn(
 			catalogFallbackChain.length > 0 && cfgProvidersAnthropicServerSideFallbackModels.isConfigured(settings)
 				? configuredServerSideFallbackModels(
 						cfgProvidersAnthropicServerSideFallbackModels.get(settings),
-						overlongFallbackWarning,
+						fallbackChainWarnings,
 					)
 				: catalogFallbackChain;
 		const fallbacks =

@@ -961,7 +961,7 @@ export const cfgProvidersAnthropicServerSideFallbackModels = register({
 		group: "Retry & Fallback",
 		label: "Anthropic Server-Side Fallback Chain",
 		description:
-			'Ordered bare Anthropic model ids forwarded as the server-side `fallbacks` chain when Anthropic Server-Side Fallback is enabled, e.g. ["claude-opus-5", "claude-opus-4-8"]. These are API model ids, not provider/model selectors, and each must be in the requested model\'s allowed fallback models. Unset follows the catalog chain for the model (Claude Opus 5 for Fable/Mythos). An empty list sends no fallbacks even when the toggle is on; the API accepts at most three entries, so longer chains use the first three.',
+			'Ordered bare Anthropic model ids forwarded as the server-side `fallbacks` chain when Anthropic Server-Side Fallback is enabled, e.g. ["claude-opus-5", "claude-opus-4-8"]. These are API model ids, not provider/model selectors, and each must be in the requested model\'s allowed fallback models. Unset follows the catalog chain for the model (Claude Opus 5 for Fable/Mythos). An empty list sends no fallbacks even when the toggle is on; the API accepts at most three entries, so longer chains use the first three. Entries that are not non-empty strings are dropped with a warning in the log, and a list that loses every entry sends no fallbacks.',
 	},
 });
 

@@ -511,6 +511,45 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
 		});
 
+		// A silently cleaned chain is indistinguishable from a chain the user meant:
+		// an all-invalid list turns the feature off with the toggle still on, and a
+		// mixed list drops hops. Both must say so, as the cap already does.
+		it.each([
+			["every entry, so no fallbacks are sent at all", [1, null, true, {}], 4, 0, undefined],
+			[
+				"some entries, so only the surviving ids are sent",
+				[1, " claude-opus-4-8 ", null, "  "],
+				3,
+				1,
+				[{ model: "claude-opus-4-8" }],
+			],
+		])("warns when the configured chain loses %s", (_label, configured, dropped, kept, expectedFallbacks) => {
+			const warnings: Array<{ message: string; context?: Record<string, unknown> }> = [];
+			vi.spyOn(logger, "warn").mockImplementation((message, context) => {
+				if (message.includes("serverSideFallbackModels")) warnings.push({ message, context });
+			});
+			try {
+				const settings = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": configured as unknown as string[],
+				});
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(calls[0]?.options?.fallbacks).toEqual(expectedFallbacks);
+				expect(warnings).toHaveLength(1);
+				expect(warnings[0]?.context).toEqual({
+					setting: "providers.anthropic.serverSideFallbackModels",
+					dropped,
+					kept,
+				});
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
 		it("trims whitespace from configured chain entries before forwarding", () => {
 			const settings = Settings.isolated({
 				"providers.anthropic.serverSideFallback": true,
