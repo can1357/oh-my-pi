@@ -102,6 +102,10 @@
 - F2 now opens the rename dialog in the resume picker in Ghostty, kitty and other terminals using the kitty keyboard protocol; F1 and F4 shortcuts work there too ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
 - Added `Component.nativeTrailers()`, which lets a transcript block add native blocks of its own directly after it. Trailing blocks stay visible while the block is collapsed.
 
+### Fixed
+
+- Fixed the Git TUI's word wrap splitting words across rows: wrapped rows now break at whitespace and at vim's break characters, and a word is split only when it is wider than a row ([#12472](https://github.com/can1357/oh-my-pi/pull/12472) by [@aleister1102](https://github.com/aleister1102)).
+
 ## [18.15.0] - 2026-11-01
 
 ### Breaking Changes
