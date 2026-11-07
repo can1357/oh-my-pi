@@ -487,6 +487,16 @@ export type { ContextUsage };
 
 export interface CompactOptions {
 	onComplete?: (result: CompactionResult) => void;
+	/**
+	 * Invoked when the compaction fails.
+	 *
+	 * Through an extension's `ctx.compact()` it is called exactly once per failed
+	 * compaction — including a compaction rejected before it starts, such as one
+	 * that overlaps a compaction already in progress — and `ctx.compact()` itself
+	 * never rejects (issue #12041). A direct `AgentSession.compact()` call keeps
+	 * the session's own behaviour: it rejects, and a failure raised before the
+	 * compaction pass begins (the overlap guard) never reaches this callback.
+	 */
 	onError?: (error: Error) => void;
 	/**
 	 * Force a one-off compaction mode for this invocation, replacing the
@@ -766,7 +776,13 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
-	/** Compact the session context (interactive mode shows UI). */
+	/**
+	 * Compact the session context (interactive mode shows UI).
+	 *
+	 * Failures are reported through {@link CompactOptions.onError}; the returned
+	 * promise never rejects, so an unawaited `ctx.compact()` cannot become an
+	 * unhandled rejection (issue #12041).
+	 */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
 	/** Whether UI is available (false in print/RPC mode) */
 	hasUI: boolean;
@@ -943,7 +959,13 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	/** Reload the current session/runtime state. */
 	reload(): Promise<void>;
 
-	/** Compact the session context (interactive mode shows UI). */
+	/**
+	 * Compact the session context (interactive mode shows UI).
+	 *
+	 * Failures are reported through {@link CompactOptions.onError}; the returned
+	 * promise never rejects, so an unawaited `ctx.compact()` cannot become an
+	 * unhandled rejection (issue #12041).
+	 */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
 }
 
