@@ -15,10 +15,13 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 
-function session(manager?: AsyncJobManager, agentId = "Main", launch = false): ToolSession {
+function session(manager?: AsyncJobManager, agentId = "Main", launch = false, waitMaxMs?: number): ToolSession {
 	return {
 		cwd: process.cwd(),
-		settings: Settings.isolated({ "launch.enabled": launch }),
+		settings: Settings.isolated({
+			"launch.enabled": launch,
+			...(waitMaxMs === undefined ? {} : { "wait.maxMs": waitMaxMs }),
+		}),
 		agentRegistry: AgentRegistry.global(),
 		asyncJobManager: manager,
 		getAgentId: () => agentId,
@@ -794,5 +797,44 @@ describe("wait", () => {
 			expect(await idleText(waiting)).toContain("`Main` is waiting on the user");
 			closeDialog();
 		});
+	});
+
+	test("wait.maxMs bounds a wait on still-running work", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const id = manager.register("bash", "long", async () => new Promise<string>(() => {}), { ownerId: "Main" });
+		const waiting = new WaitTool(session(manager, "Main", false, 60_000)).execute("wait-capped", {});
+		vi.advanceTimersByTime(60_000);
+		const result = await waiting;
+		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
+		manager.cancel(id);
+	});
+
+	test("the default wait.maxMs still caps a wait at 30 minutes", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const id = manager.register("bash", "long", async () => new Promise<string>(() => {}), { ownerId: "Main" });
+		const waiting = new WaitTool(session(manager)).execute("wait-default-cap", {});
+		vi.advanceTimersByTime(30 * 60_000);
+		const result = await waiting;
+		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
+		manager.cancel(id);
+	});
+
+	test("wait.maxMs 0 keeps waiting past the default cap until the job settles", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const { promise, resolve } = Promise.withResolvers<string>();
+		const id = manager.register("bash", "long", async () => promise, { ownerId: "Main" });
+		let settled = false;
+		const waiting = new WaitTool(session(manager, "Main", false, 0)).execute("wait-uncapped", {}).finally(() => {
+			settled = true;
+		});
+		vi.advanceTimersByTime(2 * 60 * 60_000);
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		resolve("done after two hours");
+		const result = await waiting;
+		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "done after two hours" });
 	});
 });
