@@ -86,6 +86,18 @@ describe("grepToolRenderer", () => {
 		expect(call).toContain("Grep: needle in lib case:insensitive");
 	});
 
+	it("colors partial regex syntax without treating escaped punctuation as an operator", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const pattern = String.raw`^file\.(?:ts|tsx`;
+		const header = grepToolRenderer
+			.renderCall({ pattern, path: "src" }, { expanded: false, isPartial: true }, uiTheme)
+			.render(120)[0]!;
+
+		expect(sanitizeText(header)).toContain(`${pattern} in src`);
+		expect(header).toContain(`${uiTheme.getFgAnsi("syntaxKeyword")}^`);
+		expect(header).toContain(`${uiTheme.getFgAnsi("syntaxString")}\\.`);
+	});
+
 	it("shows the title and subject on an error, with the message on the next row", async () => {
 		const uiTheme = (await getThemeByName("dark"))!;
 		const result = {

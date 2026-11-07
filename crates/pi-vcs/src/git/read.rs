@@ -437,7 +437,8 @@ impl GitRepo {
 	}
 
 	/// Whether the repository's own config file contains `key`, without
-	/// includes, global configuration, or environment overrides. Never invokes git.
+	/// includes, global configuration, or environment overrides. Never invokes
+	/// git.
 	pub fn config_has_local(&self, key: &str) -> Result<bool> {
 		let path = self.info().common_dir.join("config");
 		if !path.exists() {

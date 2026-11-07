@@ -6,7 +6,7 @@ import {
 	configureProviderMaxInFlightRequests,
 	streamSimple,
 } from "@oh-my-pi/pi-ai/stream";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { isBunTestRuntime, TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { createAgentSession } from "../../src/sdk";
@@ -21,6 +21,8 @@ import { createAssistantMessage } from "../helpers/agent-session-setup";
 const mode = Bun.argv[2];
 if (mode !== "supplied" && mode !== "root" && mode !== "metered" && mode !== "queued")
 	throw new Error(`Unknown mode: ${mode}`);
+// Without the store no compression starts, so `supplied`/`root` would pass vacuously and `metered` would fail.
+if (isBunTestRuntime()) throw new Error("Run this fixture outside the test runtime (unset PI_TEST_RUNTIME)");
 using dir = TempDir.createSync("@omp-skill-cap-probe-");
 let calls = 0;
 const originalFetch = globalThis.fetch;
