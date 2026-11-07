@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -466,6 +467,7 @@ def _build_prompt(
     directive: DirectiveInfo | None = None,
     thread: tuple[ThreadMessage, ...] = (),
     resuming: bool = False,
+    coalesced: tuple[Mapping[str, Any], ...] = (),
 ) -> str:
     if task_kind == "handle_release_ci":
         assert inputs.release is not None
@@ -510,6 +512,7 @@ def _build_prompt(
                 directive=directive,
                 pr_status=pr_status,
                 pr_number=pr_number,
+                coalesced=coalesced,
             )
         return persona.followup_comment(
             repo=inputs.repo,
@@ -519,6 +522,7 @@ def _build_prompt(
             pr_status=pr_status,
             pr_number=pr_number,
             thread=thread,
+            coalesced=coalesced,
         )
     if task_kind == "handle_review":
         assert review_payload is not None
@@ -541,6 +545,8 @@ def _build_prompt(
             comment_body=body,
             comment_path=path,
             comment_line_range=line_range,
+            thread=thread,
+            coalesced=coalesced,
         )
     raise ValueError(f"unknown task kind: {task_kind!r}")
 
@@ -793,6 +799,7 @@ async def run_task(
     pr: PullRequestInfo | None = None,
     directive: DirectiveInfo | None = None,
     thread: tuple[ThreadMessage, ...] = (),
+    coalesced: tuple[Mapping[str, Any], ...] = (),
 ) -> str | None:
     """Async wrapper that runs the synchronous RPC driver on a worker thread."""
     review_mode = task_kind == "review_pr" or inputs.workspace.branch.startswith("review/pr-")
@@ -841,6 +848,7 @@ async def run_task(
         directive=directive,
         thread=thread,
         resuming=resuming,
+        coalesced=coalesced,
     )
     try:
         result = await asyncio.to_thread(

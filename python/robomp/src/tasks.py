@@ -183,6 +183,43 @@ async def _fetch_thread(
     return tuple(messages)
 
 
+def _coalesced_payloads(
+    db: Database,
+    *,
+    issue_key: str,
+    delivery_id: str,
+    received_at: str,
+) -> tuple[Mapping[str, Any], ...]:
+    """Stored payloads of reviewer-bot review events coalesced into this survivor.
+
+    The dispatcher marks superseded siblings `skipped` with a survivor-tagged
+    coalescing marker before the survivor runs, so their webhook payloads only
+    live in the DB. Surfacing them here keeps them in the prompt even when live
+    thread hydration is partial (a sub-fetch failure drops that sibling's message
+    from the fetched thread). Returns an empty tuple when no sibling was coalesced.
+    """
+    siblings = db.list_coalesced_siblings(
+        issue_key=issue_key, exclude_delivery=delivery_id, before_received_at=received_at
+    )
+    if not siblings:
+        return ()
+    payloads: list[Mapping[str, Any]] = []
+    for s in siblings:
+        c = s.payload.get("comment") or {}
+        user = c.get("user") or {}
+        payloads.append(
+            {
+                "author": str(user.get("login") or ""),
+                "body": str(c.get("body") or ""),
+                "path": str(c.get("path") or ""),
+                "line": c.get("line"),
+                "start_line": c.get("start_line"),
+                "original_line": c.get("original_line"),
+            }
+        )
+    return tuple(payloads)
+
+
 async def _attach_thread(
     github: GitHubBackend,
     directive: DirectiveInfo | None,
@@ -822,6 +859,21 @@ async def handle_review(
     except GitHubError as exc:
         log.warning("review fetch failed", extra={"err": str(exc)})
         return
+    thread = await _fetch_thread(github, repo_full, pr_number, is_pr=True)
+    # Siblings were coalesced under the survivor's STORED issue_key (the claim
+    # predicate matches on it), so query by that — not a key recomputed from a
+    # mapping that may have been repaired between claim and dispatch.
+    survivor = db.get_event(delivery_id)
+    coalesced = (
+        _coalesced_payloads(
+            db,
+            issue_key=survivor.issue_key,
+            delivery_id=delivery_id,
+            received_at=survivor.received_at,
+        )
+        if survivor is not None
+        else ()
+    )
     clone_url = repo.clone_url
     workspace = await _run_workspace_op(
         sandbox.ensure_workspace,
@@ -873,6 +925,8 @@ async def handle_review(
         inputs=inputs,
         pr_number=pr_number,
         review_payload=review_payload,
+        thread=thread,
+        coalesced=coalesced,
     )
 
 
@@ -1020,6 +1074,21 @@ async def handle_pr_conversation(
         thread = await _fetch_thread(github, repo_full, pr_number, is_pr=True)
     else:
         directive = await _attach_thread(github, directive, repo_full, pr_number, is_pr=True)
+    # issue_comment reviewer directives are coalesce-able review events, so a
+    # superseded sibling's finding may live ONLY in its stored webhook payload.
+    # Surface it in the prompt the same way handle_review does, so a hydration
+    # failure cannot drop a finding the dispatcher folded into this run.
+    survivor = db.get_event(delivery_id)
+    coalesced = (
+        _coalesced_payloads(
+            db,
+            issue_key=survivor.issue_key,
+            delivery_id=delivery_id,
+            received_at=survivor.received_at,
+        )
+        if survivor is not None
+        else ()
+    )
     await run_task(
         task_kind="handle_comment",
         inputs=inputs,
@@ -1027,6 +1096,7 @@ async def handle_pr_conversation(
         pr_number=pr_number,
         directive=directive,
         thread=thread,
+        coalesced=coalesced,
     )
 
 

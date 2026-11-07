@@ -140,6 +140,32 @@ def test_maintainer_logins_common_entry_forms(
     assert cfg.maintainer_logins == frozenset({expected})
 
 
+def test_reviewer_bots_normalize_csv_entries(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    monkeypatch.setenv("ROBOMP_REVIEWER_BOTS", " coderabbitai , @CODEX[bot] ,, ")
+    reset_settings_cache()
+    cfg = Settings()  # type: ignore[call-arg]
+    assert cfg.reviewer_bots == frozenset({"coderabbitai", "codex"})
+
+
+@pytest.mark.parametrize(
+    ("raw_login", "expected"),
+    [
+        ("coderabbitai", "coderabbitai"),
+        (" coderabbitai ", "coderabbitai"),
+        ("@coderabbitai", "coderabbitai"),
+        ("coderabbitai[bot]", "coderabbitai"),
+        ("@CoderabbitAI[BOT]", "coderabbitai"),
+    ],
+)
+def test_reviewer_bots_common_entry_forms(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], raw_login: str, expected: str
+) -> None:
+    monkeypatch.setenv("ROBOMP_REVIEWER_BOTS", raw_login)
+    reset_settings_cache()
+    cfg = Settings()  # type: ignore[call-arg]
+    assert cfg.reviewer_bots == frozenset({expected})
+
+
 def test_model_pool_single(env: dict[str, str]) -> None:
     cfg = Settings()  # type: ignore[call-arg]
     assert cfg.model_pool == (cfg.model,)
