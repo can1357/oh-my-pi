@@ -261,14 +261,24 @@ function brandTimer(elapsedMs: number): string {
 	return `${Math.min(99, Math.floor(seconds / 3600))}h`;
 }
 
+/** Sanitized extension/hook status values, in display order. */
+function hookStatusTexts(ctx: SegmentContext): string[] {
+	const texts: string[] = [];
+	for (const status of ctx.hookStatuses ?? []) {
+		const sanitized = sanitizeStatusText(status);
+		if (sanitized) texts.push(sanitized);
+	}
+	return texts;
+}
+
 const statusSegment: StatusLineSegment = {
 	id: "status",
 	render(ctx) {
 		// Plain statuses take the accent colour, a styled one keeps its own. The dot between
-		// statuses is dim like the segment separators; it sets its own colour, so what
+		// statuses takes the status line's separator colour; it sets its own colour, so what
 		// follows it (and a status that closed its styling) is re-opened in the accent.
 		const accent = sessionAccentAnsi(ctx) ?? theme.getFgAnsi("accent");
-		const separator = `${theme.getFgAnsi("dim")}${theme.sep.dot}${accent}`;
+		const separator = `${theme.getFgAnsi("statusLineSep")}${theme.sep.dot}${accent}`;
 		let text = "";
 		for (const status of ctx.hookStatuses ?? []) {
 			const sanitized = sanitizeInlineStatusText(status, { fg: accent, faint: Boolean(ctx.focusedAgentId) });
@@ -281,13 +291,14 @@ const statusSegment: StatusLineSegment = {
 		};
 	},
 	describe(ctx) {
-		let text = "";
-		for (const status of ctx.hookStatuses ?? []) {
-			const sanitized = sanitizeStatusText(status);
-			if (!sanitized) continue;
-			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
+		const statuses = hookStatusTexts(ctx);
+		if (statuses.length === 0) return null;
+		const spans: TspSpan[] = [];
+		for (const [index, status] of statuses.entries()) {
+			if (index > 0) spans.push(span(theme.sep.dot, "statusLineSep"));
+			spans.push(span(status, accentToken(ctx, "accent")));
 		}
-		return text ? segView([span(text, accentToken(ctx, "accent"))]) : null;
+		return segView(spans);
 	},
 };
 
