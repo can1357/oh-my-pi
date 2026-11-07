@@ -252,6 +252,8 @@ pub struct Parser<'s> {
 	last_cond_text: Option<Vec<u8>>,
 	/// Nesting of the raw scanner (`parse_matched_pair`).
 	raw_depth:      u32,
+	/// Nesting of the constructs being parsed ([`MAX_NESTING`]).
+	depth:          u32,
 	/// Top-level `;` offsets collected while scanning `for ((…))`.
 	arith_semis:    Option<Vec<usize>>,
 	/// Line of the `[[` being parsed (bash's `lineno` in its messages).
@@ -358,6 +360,7 @@ impl<'s> Parser<'s> {
 			failed: false,
 			last_cond_text: None,
 			raw_depth: 0,
+			depth: 0,
 			arith_semis: None,
 			cond_line: 0,
 			cond_eof: false,
@@ -556,27 +559,69 @@ impl Parser<'_> {
 			}
 		}
 	}
+
+	/// Run `f` one nesting level deeper. Past [`MAX_NESTING`] levels the
+	/// command is a syntax error rather than a stack overflow.
+	fn nested<T, E: From<ParseError>>(
+		&mut self,
+		f: impl FnOnce(&mut Self) -> Result<T, E>,
+	) -> Result<T, E> {
+		if self.depth >= MAX_NESTING {
+			let at = self.off();
+			return Err(E::from(ParseError::new(
+				Span::new(at, at),
+				self.bash_line(),
+				ParseErrorKind::Message(Box::from(
+					&b"syntax error: maximum nesting level exceeded"[..],
+				)),
+			)));
+		}
+		self.depth += 1;
+		let r = f(self);
+		self.depth -= 1;
+		r
+	}
 }
+
+/// Deepest nesting the parsers accept: compound commands, substitutions
+/// (two levels each: a word and a list), `${…}` operands, `[[ … ]]` groups
+/// and operator chains. Every level costs native stack in the parser and
+/// in each walk of the tree after it (lowering, printing, the trace view),
+/// so a command nested deeper is a syntax error instead of a stack
+/// overflow. The value fits a 2 MiB thread, the default the shells run
+/// on, with room to spare even in a debug build; bash's own parser
+/// rejects compound commands nested a few thousand deep and overflows on
+/// command substitutions.
+pub(crate) const MAX_NESTING: u32 = 400;
 
 /// Parse `code` (text bash re-parses at run time: a backquoted command, a
 /// `$((…))` that is not arithmetic) into `t` as one list; spans are
-/// shifted by `base`. Aliases are not expanded. An error yields an empty
-/// list.
-fn sub_parse_list(t: &mut Tree, code: &[u8], feat: Features, base: u32) -> Id<shape::List> {
+/// shifted by `base`, `depth` is the nesting it is parsed at. Aliases are
+/// not expanded. An error (one nested past [`MAX_NESTING`] too) yields
+/// an empty list.
+fn sub_parse_list(
+	t: &mut Tree,
+	code: &[u8],
+	feat: Features,
+	base: u32,
+	depth: u32,
+) -> Id<shape::List> {
 	let mut p = Parser::new(code, feat, NO_ALIASES);
 	p.base = base;
+	p.depth = depth + 1;
 	p.t = core::mem::take(t);
 	let mark = p.t.open();
-	let ok = loop {
-		match p.top_list() {
-			Ok(Some(top)) => {
-				p.fill_docs(0);
-				p.t.kid_items(mark, top.list);
-			},
-			Ok(None) => break true,
-			Err(_) => break false,
-		}
-	};
+	let ok = depth < MAX_NESTING
+		&& loop {
+			match p.top_list() {
+				Ok(Some(top)) => {
+					p.fill_docs(0);
+					p.t.kid_items(mark, top.list);
+				},
+				Ok(None) => break true,
+				Err(_) => break false,
+			}
+		};
 	if !ok {
 		p.t.drop_opened(mark);
 	}
