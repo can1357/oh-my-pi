@@ -11,7 +11,7 @@ use crate::bash::{
 	syntax::{self as syn, tree as st},
 };
 
-const ARCHIVE_VERSION: u8 = 2;
+const ARCHIVE_VERSION: u8 = 3;
 
 /// Exact originating region, when the engine supplies one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
