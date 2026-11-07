@@ -61,8 +61,27 @@ describe("command-backed config value lifetime", () => {
 	let counterFile = "";
 	let config = "";
 	let now = 0;
+	let mono = 0;
 
 	const runs = () => fs.readFileSync(counterFile, "utf8").length;
+
+	/**
+	 * Let time pass: the wall clock moves to `next` and the monotonic clock moves
+	 * with it. Used wherever a test means "an hour went by".
+	 */
+	function setWall(next: number): void {
+		mono += Math.max(next - now, 0);
+		now = next;
+	}
+
+	/**
+	 * Step the wall clock without any time passing — an NTP correction, a VM
+	 * resuming from a snapshot, a hand-set host clock. `performance.now()` does not
+	 * move, which is what tells a step from an hour.
+	 */
+	function stepWall(next: number): void {
+		now = next;
+	}
 
 	beforeEach(() => {
 		clearConfigValueCache();
@@ -74,7 +93,9 @@ describe("command-backed config value lifetime", () => {
 		config = `!${trackedTokenCommand(tokenFile, counterFile)}`;
 		// Whole seconds, so a JWT `exp` built from it round-trips exactly.
 		now = Math.floor(Date.now() / 1000) * 1000;
+		mono = performance.now();
 		spyOn(Date, "now").mockImplementation(() => now);
+		spyOn(performance, "now").mockImplementation(() => mono);
 	});
 
 	afterEach(() => {
@@ -93,12 +114,12 @@ describe("command-backed config value lifetime", () => {
 
 		fs.writeFileSync(tokenFile, second);
 		// Outside the skew the cached token is served without a process per request.
-		now = expiresAt - OAUTH_REFRESH_SKEW_MS - 1_000;
+		setWall(expiresAt - OAUTH_REFRESH_SKEW_MS - 1_000);
 		expect(await resolveConfigValue(config)).toBe(first);
 		expect(runs()).toBe(1);
 
 		// Inside the skew the command runs again while the old token is still valid.
-		now = expiresAt - OAUTH_REFRESH_SKEW_MS + 1_000;
+		setWall(expiresAt - OAUTH_REFRESH_SKEW_MS + 1_000);
 		expect(await resolveConfigValue(config)).toBe(second);
 		expect(runs()).toBe(2);
 	});
@@ -109,7 +130,7 @@ describe("command-backed config value lifetime", () => {
 		await resolveConfigValue(config);
 		const second = jwt("second", now + 2 * HOUR_MS);
 		fs.writeFileSync(tokenFile, second);
-		now = expiresAt - 1_000;
+		setWall(expiresAt - 1_000);
 
 		const values = await Promise.all(Array.from({ length: 8 }, () => resolveConfigValue(config)));
 
@@ -124,7 +145,7 @@ describe("command-backed config value lifetime", () => {
 		await resolveConfigValue(config);
 
 		fs.writeFileSync(tokenFile, "FAIL");
-		now = expiresAt - 10_000;
+		setWall(expiresAt - 10_000);
 		expect(await resolveConfigValue(config)).toBe(first);
 		expect(runs()).toBe(2);
 		// The failure backoff holds: no process per request while the old token serves.
@@ -132,7 +153,7 @@ describe("command-backed config value lifetime", () => {
 		expect(runs()).toBe(2);
 
 		// Past exp the token is never served, even though the refresh still fails.
-		now = expiresAt + 30_000;
+		setWall(expiresAt + 30_000);
 		expect(await resolveConfigValue(config)).toBeUndefined();
 		expect(runs()).toBe(3);
 	});
@@ -141,7 +162,7 @@ describe("command-backed config value lifetime", () => {
 		fs.writeFileSync(tokenFile, "opaque-1");
 		expect(await resolveConfigValue(config)).toBe("opaque-1");
 		fs.writeFileSync(tokenFile, "opaque-2");
-		now += 30 * 24 * HOUR_MS;
+		setWall(now + 30 * 24 * HOUR_MS);
 		expect(await resolveConfigValue(config)).toBe("opaque-1");
 		expect(runs()).toBe(1);
 
@@ -150,15 +171,15 @@ describe("command-backed config value lifetime", () => {
 			// The lifetime counts from the last successful run, so the 30-day-old value is due now.
 			expect(await resolveConfigValue(config)).toBe("opaque-2");
 			fs.writeFileSync(tokenFile, "opaque-3");
-			now += 299_000;
+			setWall(now + 299_000);
 			expect(await resolveConfigValue(config)).toBe("opaque-2");
-			now += 2_000;
+			setWall(now + 2_000);
 			expect(await resolveConfigValue(config)).toBe("opaque-3");
 			expect(runs()).toBe(3);
 
 			// Without an expiry, a failed refresh keeps the last value: only a 401 proves it stale.
 			fs.writeFileSync(tokenFile, "FAIL");
-			now += 301_000;
+			setWall(now + 301_000);
 			expect(await resolveConfigValue(config)).toBe("opaque-3");
 			expect(runs()).toBe(4);
 		} finally {
@@ -180,13 +201,13 @@ describe("command-backed config value lifetime", () => {
 
 		// Re-mint fails inside the skew: the token is still valid, so it keeps serving.
 		fs.writeFileSync(tokenFile, "FAIL");
-		now = expiresAt - 10_000;
+		setWall(expiresAt - 10_000);
 		expect(await resolveCredentialConfigValue(config)).toBe(token);
 		expect(runs()).toBe(2);
 
 		// Past `exp`, inside the same failure backoff: the last good value is not a way
 		// to send an expired credential, and the caller is told which source failed.
-		now = expiresAt + 1_000;
+		setWall(expiresAt + 1_000);
 		await expect(resolveCredentialConfigValue(config)).rejects.toThrow(CredentialSourceError);
 		await expect(resolveCredentialConfigValue(config)).rejects.toThrow(/exited with status 1/);
 		expect(runs()).toBe(2);
@@ -244,7 +265,7 @@ describe("command-backed config value lifetime", () => {
 		expect(await resolveCredentialConfigValue(config)).toBe(token);
 
 		fs.writeFileSync(tokenFile, "FAIL");
-		now = expiresAt;
+		setWall(expiresAt);
 		await expect(resolveCredentialConfigValue(config)).rejects.toThrow(/exited with status 1/);
 	});
 
@@ -259,7 +280,7 @@ describe("command-backed config value lifetime", () => {
 
 		// A different, still valid token, and a clock well short of the refresh point.
 		fs.writeFileSync(tokenFile, jwt("second", now + 2 * HOUR_MS));
-		now += 60_000;
+		setWall(now + 60_000);
 		expect(await resolveConfigValue(config)).toBe(first);
 		expect(runs()).toBe(1);
 
@@ -306,12 +327,12 @@ describe("command-backed config value lifetime", () => {
 		expect(await resolveCredentialConfigValue(config)).toBe(token);
 
 		fs.writeFileSync(tokenFile, "FAIL");
-		now = expiresAt;
+		setWall(expiresAt);
 		await expect(resolveCredentialConfigValue(config)).rejects.toThrow(CredentialSourceError);
 
 		// The clock goes backwards — NTP stepping, a VM resuming from a snapshot, a
 		// hand-set host clock. A credential seen dead stays dead.
-		now = expiresAt - 1_000;
+		stepWall(expiresAt - 1_000);
 		const refusal = await resolveCredentialConfigValue(config).catch((error: unknown) => error);
 		expect(refusal).toBeInstanceOf(CredentialSourceError);
 		expect((refusal as Error).message).not.toContain(token);
@@ -329,14 +350,14 @@ describe("command-backed config value lifetime", () => {
 
 		// The host clock jumps to ten seconds before `exp`: the refresh is due and the
 		// token still serves. No time has actually passed.
-		now = expiresAt - 10_000;
+		stepWall(expiresAt - 10_000);
 		fs.writeFileSync(tokenFile, "FAIL");
 		const realExec = ptree.exec;
 		const exec = spyOn(ptree, "exec").mockImplementation(async (...args: Parameters<typeof ptree.exec>) => {
 			const result = await realExec(...args);
 			// The clock reaches `exp` while the failing refresh is in flight, so the
 			// failure path is the one that observes the expiry.
-			now = expiresAt;
+			stepWall(expiresAt);
 			return result;
 		});
 		try {
@@ -345,7 +366,7 @@ describe("command-backed config value lifetime", () => {
 			exec.mockRestore();
 		}
 
-		now = expiresAt - 1_000;
+		stepWall(expiresAt - 1_000);
 		const refusal = await resolveCredentialConfigValue(config).catch((error: unknown) => error);
 		expect(refusal).toBeInstanceOf(CredentialSourceError);
 		expect((refusal as Error).message).not.toContain(token);

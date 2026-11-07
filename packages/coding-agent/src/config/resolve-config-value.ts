@@ -38,7 +38,7 @@ export type CommandTimeoutSource = () => number;
  */
 interface CommandResult {
 	value: string;
-	/** `Date.now()` when the run finished. */
+	/** {@link expiryNow} when the run finished. */
 	mintedAt: number;
 	/** The `exp` claim of a JWT value, in ms. Such a value is never served at or after it. */
 	expiresAt: number | undefined;
@@ -172,6 +172,58 @@ function refreshAt(result: CommandResult): number {
 }
 
 /**
+ * The share of a gap between two clock readings that the two clocks may disagree
+ * over before the difference is read as a step rather than as slew. Every clock
+ * slews; NTP's own discipline is capped near 500 ppm, a thousandth of this.
+ */
+const CLOCK_SLEW_SHARE = 0.05;
+/** Floor and ceiling on that share, so a gap of milliseconds and a gap of days both behave. */
+const CLOCK_STEP_FLOOR_MS = 1_000;
+const CLOCK_STEP_CEILING_MS = 60_000;
+/** The wall and monotonic clocks as {@link expiryNow} last read them; `0` before the first read. */
+let lastWallMs = 0;
+let lastMonoMs = 0;
+/** What backward wall-clock steps have taken away from this process's notion of now, in ms; never negative. */
+let wallStepBackMs = 0;
+
+/**
+ * The wall clock as every expiry decision reads it: `Date.now()` plus whatever a
+ * backward step took away from it.
+ *
+ * A credential's deadline is a wall-clock instant, because its issuer wrote one
+ * into the `exp` claim and nothing else is comparable with it. But the wall clock
+ * is movable, and moving it backwards hands every held credential the difference.
+ * So the two clocks are read together: the monotonic one says how much time really
+ * passed, `Date.now()` says how much the wall clock claims passed, and the
+ * shortfall between them is a step this process declines to follow.
+ *
+ * A forward step pays back what is carried before it adds anything, so a correction
+ * that undoes an earlier one leaves nothing behind — and a host whose clock was
+ * genuinely fast is only ever judged early, never late, with the next mint's own
+ * `exp` clearing it. Disagreement inside {@link CLOCK_SLEW_SHARE} of the gap is
+ * left alone, so two clocks parts per million apart never accumulate into a step.
+ *
+ * Nothing here identifies a credential, which is the point: a deadline that belongs
+ * to the clock cannot be renewed by what a helper prints, and no record of a dead
+ * token has to be kept in order to recognise it again.
+ */
+function expiryNow(): number {
+	const wall = Date.now();
+	const mono = performance.now();
+	if (lastMonoMs !== 0) {
+		const elapsedMs = mono - lastMonoMs;
+		const stepMs = elapsedMs - (wall - lastWallMs);
+		// Proportional, because slew is a rate and the gaps here run from one
+		// resolution to the next up to a whole idle session.
+		const toleranceMs = Math.min(Math.max(elapsedMs * CLOCK_SLEW_SHARE, CLOCK_STEP_FLOOR_MS), CLOCK_STEP_CEILING_MS);
+		if (Math.abs(stepMs) > toleranceMs) wallStepBackMs = Math.max(wallStepBackMs + stepMs, 0);
+	}
+	lastWallMs = wall;
+	lastMonoMs = mono;
+	return wall + wallStepBackMs;
+}
+
+/**
  * A result's value while it may be sent: a JWT never at or after its `exp`. A value
  * with no discoverable expiry is always servable; only invalidation or the
  * configured reuse retires it.
@@ -270,7 +322,9 @@ function recordCommandFailure(
 ): CommandRunOutcome {
 	const failure: CommandFailureRecord = { outcome, timeoutMs };
 	if (current) {
-		commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+		// The backoff is a duration, not a deadline, so it is measured where durations
+		// belong: recording it on the wall clock made a forward step a wait that long.
+		commandFailureRetryAt.set(command, performance.now() + COMMAND_FAILURE_RETRY_MS);
 		commandLastFailure.set(command, failure);
 	}
 	return { result: undefined, failure };
@@ -286,7 +340,7 @@ async function resolveCommandResolution(
 	commandTimeout: CommandTimeoutSource | undefined,
 ): Promise<CommandResolution> {
 	const command = commandKey(valueConfig);
-	const now = Date.now();
+	const now = expiryNow();
 	// A successful run serves until its command is due again: a JWT one refresh skew
 	// before its `exp`, any other value after `providers.commandRefreshSeconds`. Past
 	// that the command runs again, so a time-limited token is replaced before a
@@ -295,7 +349,7 @@ async function resolveCommandResolution(
 	if (cached !== undefined && now < refreshAt(cached)) return { value: cached.value };
 	const lastGood = servableHeld(commandLastGood, command, now)?.value;
 	const retryAt = commandFailureRetryAt.get(command);
-	if (retryAt !== undefined && now < retryAt) {
+	if (retryAt !== undefined && performance.now() < retryAt) {
 		// Inside the backoff window no run happens, so the recorded failure is this
 		// resolution's reason. It is read with no await in between, so nothing can clear
 		// it between deciding there is no value and saying why.
@@ -316,7 +370,7 @@ async function resolveCommandResolution(
 		// Awaiting is not instant, and this waiter may have queued behind others: a
 		// value servable when the run finished can be past its `exp` by the time the
 		// waiter resumes, so the held copy is read again here rather than trusted.
-		const fresh = servableHeld(commandResultCache, command, Date.now());
+		const fresh = servableHeld(commandResultCache, command, expiryNow());
 		if (fresh !== undefined) return { value: fresh.value };
 		return {
 			value: undefined,
@@ -324,7 +378,7 @@ async function resolveCommandResolution(
 		};
 	}
 	// A 401 during the run drops the last good value, so read it after the run.
-	const served = servableHeld(commandLastGood, command, Date.now())?.value;
+	const served = servableHeld(commandLastGood, command, expiryNow())?.value;
 	return served !== undefined ? { value: served } : { value: undefined, failure: settled.failure };
 }
 
@@ -344,7 +398,7 @@ function startCommandRun(command: string, timeoutMs: number): Promise<CommandRun
 			if (outcome.ok) {
 				const result: CommandResult = {
 					value: outcome.value,
-					mintedAt: Date.now(),
+					mintedAt: expiryNow(),
 					expiresAt: jwtExpiresAt(outcome.value),
 				};
 				// A command can print a credential already past its `exp`: a stale cache
@@ -796,4 +850,7 @@ export function clearConfigValueCache(): void {
 	invalidateAllCommandConfigs("rejected");
 	commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
 	commandRefreshMs = 0;
+	lastWallMs = 0;
+	lastMonoMs = 0;
+	wallStepBackMs = 0;
 }
