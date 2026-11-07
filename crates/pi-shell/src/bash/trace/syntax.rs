@@ -267,6 +267,27 @@ impl<'de> Deserialize<'de> for UnitSyntax {
 	}
 }
 
+impl UnitSyntax {
+	/// The root kind of an archive in any version, this build's or not:
+	/// every version starts with the same header (version, offset, parent,
+	/// context) and then the root's kind, in this order of kinds. `None`
+	/// when not even that decodes.
+	pub(crate) fn archived_kind(encoded: &str) -> Option<RootKind> {
+		#[derive(Deserialize)]
+		struct Header {
+			_version: u8,
+			_offset:  u32,
+			_parent:  Option<SourceParent>,
+			_context: SyntaxContext,
+			kind:     RootKind,
+		}
+		let bytes = STANDARD.decode(encoded).ok()?;
+		postcard::take_from_bytes::<Header>(&bytes)
+			.ok()
+			.map(|(header, _)| header.kind)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
