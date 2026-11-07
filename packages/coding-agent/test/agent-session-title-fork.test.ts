@@ -9,6 +9,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as titleDriftClassifier from "@oh-my-pi/pi-coding-agent/session/title-drift-classifier";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -306,5 +307,333 @@ describe("AgentSession title fork", () => {
 		expect(target.sessionName).toBeUndefined();
 		expect(side.calls).toHaveLength(0);
 		expect(titleModel).not.toHaveBeenCalled();
+	});
+
+	describe("with a plan written while the fork title is open", () => {
+		const todoInit = (task: string): MockResponse => ({
+			content: [
+				{ type: "toolCall", name: "todo", arguments: { op: "init", list: [{ phase: "Work", items: [task] }] } },
+			],
+		});
+		const planWritten: MockResponse = { content: ["Plan saved."] };
+
+		/** A fork that answers a plain title once `release` resolves. */
+		function heldFork(release: Promise<void>): MockModel {
+			return createMockModel({
+				handler: async () => {
+					await release;
+					return { content: ["<title>Initial parser title</title>"] };
+				},
+			});
+		}
+
+		/** The title model names the plan a request carries; `hold` makes the first request wait for `release()`. */
+		function titleModel(hold: boolean) {
+			const requests: string[] = [];
+			const firstRequested = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+				const input = titleRequestInput(context);
+				requests.push(input);
+				if (requests.length === 1) {
+					firstRequested.resolve();
+					if (hold) await release.promise;
+				}
+				const task = input.match(/<plan>\s*Work: ([^<\n]+)/)?.[1];
+				return createAssistantMessage(`<title>${task ?? "Initial parser title"}</title>`);
+			});
+			return { requests, firstRequested: firstRequested.promise, release: () => release.resolve() };
+		}
+
+		async function settleTitles(): Promise<void> {
+			for (let i = 0; i < 100; i++) {
+				const tick = Promise.withResolvers<void>();
+				setImmediate(tick.resolve);
+				await tick.promise;
+			}
+		}
+
+		it("titles only the newest plan when a plan is written while the fork title is being saved", async () => {
+			const forkReply = Promise.withResolvers<void>();
+			const main = createMockModel({
+				responses: [todoInit("Prepare migration"), planWritten, todoInit("Prove eta rule"), planWritten],
+				handler: planWritten,
+			});
+			const target = await createSession(
+				main,
+				heldFork(forkReply.promise),
+				{ "title.generator": "fork", "title.icons": "boring", "title.refreshOnReplan": true, "todo.enabled": true },
+				{ todo: true },
+			);
+			const model = titleModel(false);
+			const names: string[] = [];
+			target.sessionManager.onSessionNameChanged(() => names.push(target.sessionName ?? ""));
+
+			// The first plan is written while the fork names the session, so it waits.
+			await target.prompt("continue the parser project");
+			const saving = Promise.withResolvers<void>();
+			const saved = Promise.withResolvers<void>();
+			const setSessionName = target.sessionManager.setSessionName.bind(target.sessionManager);
+			vi.spyOn(target.sessionManager, "setSessionName").mockImplementation(async (name, source) => {
+				if (name === "Initial parser title") {
+					saving.resolve();
+					await saved.promise;
+				}
+				return setSessionName(name, source);
+			});
+			forkReply.resolve();
+			await saving.promise;
+			// A newer plan is written while the fork's title is being saved.
+			await target.prompt("now prove the eta rule");
+			saved.resolve();
+			await settleTitles();
+
+			expect(names).toEqual(["Initial parser title", "Prove eta rule"]);
+			expect(model.requests).toHaveLength(1);
+			expect(model.requests[0]).toContain("Work: Prove eta rule");
+		});
+
+		it("drops the fork title and the waiting plan when an interrupt lands during the card request", async () => {
+			const forkReply = Promise.withResolvers<void>();
+			const main = createMockModel({ responses: [todoInit("Prove eta rule"), planWritten], handler: planWritten });
+			const target = await createSession(
+				main,
+				heldFork(forkReply.promise),
+				{ "title.generator": "fork", "title.icons": "emoji", "title.refreshOnReplan": true, "todo.enabled": true },
+				{ todo: true },
+			);
+			const model = titleModel(true);
+
+			await target.prompt("continue the parser project");
+			forkReply.resolve();
+			// The first title-model request is the fork title's card request.
+			await model.firstRequested;
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			model.release();
+			await settleTitles();
+
+			expect(target.sessionName).toBeUndefined();
+			expect(model.requests).toHaveLength(1);
+			expect(model.requests[0]).not.toContain("<plan>");
+		});
+
+		/** The title model answers `replies` in order; the request at `holdAt` (0-based) waits for `release()`. */
+		function heldTitleModel(replies: string[], holdAt: number) {
+			const requests: string[] = [];
+			const held = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+				const index = requests.push(titleRequestInput(context)) - 1;
+				if (index === holdAt) {
+					held.resolve();
+					await release.promise;
+				}
+				return createAssistantMessage(replies[index] ?? "<title/>");
+			});
+			return { requests, held: held.promise, release: () => release.resolve() };
+		}
+
+		it("drops the title-model title when an interrupt lands during its card request", async () => {
+			// The fork declines, so the title model names the session and a card request follows.
+			const main = createMockModel({ responses: [{ content: ["Reading the park tests first."] }] });
+			const target = await createSession(main, createMockModel({ handler: { content: ["<title/>"] } }));
+			const model = heldTitleModel(["<title>Fix flaky park tests</title>", "<title>🧪 FLAKY</title>"], 1);
+
+			await target.prompt(FIRST_MESSAGE);
+			await model.held;
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			model.release();
+			await settleTitles();
+
+			expect(target.sessionName).toBeUndefined();
+			expect(model.requests).toHaveLength(2);
+		});
+
+		it("keeps the title when an interrupt lands during a replan retitle's card request", async () => {
+			const main = createMockModel({ responses: [todoInit("Prove eta rule"), planWritten], handler: planWritten });
+			const target = await createSession(
+				main,
+				createMockModel({ handler: { content: [CARD_REPLY] } }),
+				{ "title.generator": "fork", "title.refreshOnReplan": true, "todo.enabled": true },
+				{ todo: true },
+			);
+			await target.setSessionName("Fix flaky park tests", "auto");
+			// The retitle names the plan plainly, so a card request follows it.
+			const model = heldTitleModel(["<title>Prove eta rule</title>", "<title>🧪 ETA</title>"], 1);
+
+			await target.prompt("now prove the eta rule");
+			await model.held;
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			model.release();
+			await settleTitles();
+
+			expect(target.sessionName).toBe("Fix flaky park tests");
+			expect(model.requests).toHaveLength(2);
+		});
+
+		it("titles a plan written after an interrupt while the cancelled fork title is still being saved", async () => {
+			const forkReply = Promise.withResolvers<void>();
+			const main = createMockModel({
+				responses: [planWritten, todoInit("Prove eta rule"), planWritten],
+				handler: planWritten,
+			});
+			const target = await createSession(
+				main,
+				heldFork(forkReply.promise),
+				{ "title.generator": "fork", "title.icons": "boring", "title.refreshOnReplan": true, "todo.enabled": true },
+				{ todo: true },
+			);
+			const model = titleModel(false);
+			await target.prompt("continue the parser project");
+			const saving = Promise.withResolvers<void>();
+			const saved = Promise.withResolvers<void>();
+			const setSessionName = target.sessionManager.setSessionName.bind(target.sessionManager);
+			vi.spyOn(target.sessionManager, "setSessionName").mockImplementation(async (name, source) => {
+				if (name === "Initial parser title") {
+					saving.resolve();
+					await saved.promise;
+				}
+				return setSessionName(name, source);
+			});
+			forkReply.resolve();
+			await saving.promise;
+
+			// The interrupt lands while the fork's name is written; the next turn writes a plan.
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			await target.prompt("now prove the eta rule");
+			saved.resolve();
+			await settleTitles();
+
+			expect(target.sessionName).toBe("Prove eta rule");
+			expect(model.requests).toHaveLength(1);
+		});
+
+		it("starts no request for the plans that waited for a replan retitle an interrupt cancelled", async () => {
+			const main = createMockModel({
+				responses: [
+					todoInit("Prepare migration"),
+					planWritten,
+					todoInit("Fix tokenizer"),
+					todoInit("Prove eta rule"),
+					planWritten,
+				],
+				handler: planWritten,
+			});
+			const target = await createSession(
+				main,
+				createMockModel({ handler: { content: [CARD_REPLY] } }),
+				{ "title.refreshOnReplan": true, "title.icons": "boring", "todo.enabled": true },
+				{ todo: true },
+			);
+			await target.setSessionName("Original auto title", "auto");
+			const model = titleModel(true);
+
+			await target.prompt("continue the parser project");
+			await model.firstRequested;
+			// Two newer plans wait for the open retitle.
+			await target.prompt("now prove the eta rule");
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			model.release();
+			await settleTitles();
+
+			expect(target.sessionName).toBe("Original auto title");
+			expect(model.requests).toHaveLength(1);
+		});
+
+		it.each([
+			["tiny", { "title.generator": "tiny" }],
+			["fork", { "title.generator": "fork", "title.icons": "boring" }],
+		])(
+			"titles a message sent after an interrupt once the cancelled %s title request settles",
+			async (_route, config) => {
+				const firstTitle = Promise.withResolvers<void>();
+				const main = createMockModel({ handler: { content: ["Reading the code first."] } });
+				// Under `fork` the first title request is the fork itself; it waits until released.
+				const side = createMockModel({
+					responses: [
+						async () => {
+							await firstTitle.promise;
+							return { content: ["<title>Fix the parser</title>"] };
+						},
+					],
+					handler: { content: ["<title>Verify the kernel checker</title>"] },
+				});
+				const target = await createSession(main, side, config);
+				const requests: string[] = [];
+				vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+					const input = titleRequestInput(context);
+					requests.push(input);
+					if (input.includes("fix the parser")) await firstTitle.promise;
+					return createAssistantMessage(
+						`<title>${input.includes("kernel checker") ? "Verify the kernel checker" : "Fix the parser"}</title>`,
+					);
+				});
+
+				await target.prompt("fix the parser");
+				await target.abort({ reason: USER_INTERRUPT_LABEL });
+				// The next message's reply finishes while the cancelled request is still open.
+				await target.prompt("verify the kernel checker");
+				firstTitle.resolve();
+				await settleTitles();
+
+				expect(target.sessionName).toBe("Verify the kernel checker");
+			},
+		);
+
+		it("starts no title request for a drift check an interrupt cancelled while the judge decided", async () => {
+			const main = createMockModel({ handler: { content: ["Reading the code first."] } });
+			const target = await createSession(main, createMockModel({ handler: { content: [CARD_REPLY] } }), {
+				"title.generator": "tiny",
+				"title.refreshAfterPrompts": 1,
+			});
+			await target.setSessionName("Original auto title", "auto");
+			const judging = Promise.withResolvers<void>();
+			const verdict = Promise.withResolvers<void>();
+			vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockImplementation(async () => {
+				judging.resolve();
+				await verdict.promise;
+				return true;
+			});
+			const titleModel = vi
+				.spyOn(ai, "completeSimple")
+				.mockResolvedValue(createAssistantMessage("<title>Obsolete parser title</title>"));
+
+			await target.prompt("continue the parser project");
+			await judging.promise;
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			verdict.resolve();
+			await settleTitles();
+
+			expect(titleModel).not.toHaveBeenCalled();
+			expect(target.sessionName).toBe("Original auto title");
+		});
+
+		it("drops a title retry deferred before an idle interrupt", async () => {
+			const longReply = "Reading the parser and its tests before changing anything. ".repeat(20);
+			const main = createMockModel({
+				responses: [{ content: ["Reading the code first."] }, { content: [longReply] }],
+				handler: { content: ["done"] },
+			});
+			const target = await createSession(main, createMockModel({ handler: { content: [CARD_REPLY] } }), {
+				"title.generator": "tiny",
+			});
+			const requests: string[] = [];
+			vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+				requests.push(titleRequestInput(context));
+				// The first message is declined, so a retry from the conversation waits for its reply.
+				return createAssistantMessage(requests.length === 1 ? "<title/>" : "<title>Obsolete parser title</title>");
+			});
+
+			await target.prompt("continue the parser project");
+			await settleTitles();
+			expect(requests).toHaveLength(1);
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			// A low-signal message names nothing itself; only the deferred retry could.
+			await target.prompt("hi");
+			await settleTitles();
+
+			expect(requests).toHaveLength(1);
+			expect(target.sessionName).toBeUndefined();
+		});
 	});
 });
