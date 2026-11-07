@@ -1712,8 +1712,13 @@ def _resolve_bash() -> str:
 
 
 @cell_magic("bash")
-def _magic_cell_bash(args: str, body: str) -> int:
-    return _run_shell_body(body, shell_arg=_resolve_bash())
+def _magic_cell_bash(args: str, body: str) -> None:
+    # Like IPython's %%bash the cell has no value: a returned status would be
+    # displayed as the cell's result, a stray `0` after every run. A failure
+    # is still reported, since a command can fail without printing anything.
+    code = _run_shell_body(body, shell_arg=_resolve_bash())
+    if code != 0:
+        sys.stderr.write(f"%%bash: exit status {code}\n")
 
 
 @cell_magic("capture")
