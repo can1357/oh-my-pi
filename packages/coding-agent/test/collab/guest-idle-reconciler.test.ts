@@ -73,7 +73,7 @@ function makeSession(): ConstructorParameters<typeof StatusLineComponent>[0] {
 		isFastModeEnabled: () => false,
 		getGoalModeState: () => null,
 		getAsyncJobSnapshot: () => ({ running: [] }),
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingSubscription: () => false },
 		sessionFile: "/tmp/collab-guest-idle.jsonl",
 		sessionManager: {
 			getSessionName: () => "collab guest idle test",

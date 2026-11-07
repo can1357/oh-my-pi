@@ -27,7 +27,10 @@ static SPELLING_THREAD: LazyLock<flume::Sender<Job>> = LazyLock::new(|| {
 		.name("pi-native-spelling".into())
 		.spawn(move || {
 			while let Ok(job) = receiver.recv() {
-				job();
+				// A spawned thread has no autorelease pool: without one per job,
+				// every autoreleased AppKit/XPC object a spelling call
+				// creates lives until exit.
+				objc2::rc::autoreleasepool(|_| job());
 			}
 		})
 		.expect("failed to spawn the native spelling thread");
