@@ -11065,6 +11065,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	setTodoPhases(phases: TodoPhase[]): void {
 		this.#todo.setPhases(phases);
+		// The terminal title is NOT touched here: the tab shows the session the UI
+		// displays, so InteractiveMode (which knows the focused session) derives the
+		// title's task half from the todo list it renders.
 	}
 
 	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
