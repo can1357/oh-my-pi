@@ -292,9 +292,9 @@ async function ensureLspMuxDaemon(projectDir: string, signal?: AbortSignal): Pro
 }
 
 /**
- * Open a broker-shared transport for one language server, ensuring the mux
- * daemon first. Returns null (after a debug log) when the shared path is
- * unavailable so the caller falls back to a process-local spawn.
+ * Open a broker-shared transport for one language server at a cwd already
+ * validated by getOrCreateClient, ensuring the mux daemon first. Returns null
+ * (after a debug log) when unavailable so the caller falls back to a local spawn.
  */
 export async function connectSharedLspTransport(opts: {
 	command: string;
