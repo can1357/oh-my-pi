@@ -1767,6 +1767,20 @@ type ContextValidationResult =
 	| { success: true; value: unknown }
 	| { success: false; flatIssues: FlatIssue[]; messages: string[] };
 
+/**
+ * Re-attach the root keys a schema's own output dropped, so a tool can refuse an argument its
+ * schema never declared instead of running as if it were never sent.
+ *
+ * Unconditional, unlike its repair-path sibling {@link restoreDroppedRootKeys}, which only runs
+ * under `keepUnknownRootKeys`. The asymmetry is the contract, not an oversight. An ArkType object
+ * that deletes undeclared keys (`"+": "delete"`) *succeeds* here, so the repair path never runs and
+ * this is the only place the key can come back — and the task tool's batch schema is exactly that
+ * shape. Five of its refusals read a key this pass restores: a `model`, `sourceSession`, `task`,
+ * `taskFile` or stale `schema` sent at a batch call's top level is answered with its own message
+ * because the caller named it, and each one goes silent, not louder, if this is narrowed to the
+ * option. Pinned by Contract A2 in `test/schema-arktype.test.ts`, which is the only row that
+ * measures this pass: a plain ArkType object keeps undeclared keys without help.
+ */
 function preserveUnknownRootFields(input: unknown, parsed: unknown): unknown {
 	if (!isRecord(input) || !isRecord(parsed)) return parsed;
 	return { ...input, ...parsed };
