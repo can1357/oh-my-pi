@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -26,7 +26,8 @@ import {
 	discoverOpenAIModelsList,
 	discoveryProbeTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
-import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ConfigFile } from "@oh-my-pi/pi-coding-agent/config/config-file";
+import { kNoAuth, ModelRegistry, type ModelRegistryOwner } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -344,6 +345,269 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(await registry.refreshIfStale()).toBe(true);
 		expect(registry.find("gateway", "added-model")).toBeDefined();
 		expect(await registry.refreshIfStale()).toBe(false);
+	});
+
+	test("refreshIfStale keeps the last models config that parsed while the file is broken", async () => {
+		const gateway = (modelId: string, apiKey: string) => ({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				apiKey,
+				models: [{ id: modelId, reasoning: false, input: ["text"] }],
+			},
+		});
+		const bumpMtime = () => {
+			const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+			fs.utimesSync(modelsJsonPath, next, next);
+		};
+		writeRawModelsJson(gateway("first-model", "first-key"));
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(registry.find("gateway", "first-model")).toBeDefined();
+
+		// A half-saved edit: the file no longer parses.
+		fs.writeFileSync(modelsJsonPath, '{"providers": {"gateway": {"baseUrl": ');
+		bumpMtime();
+		expect(await registry.refreshIfStale()).toBe(true);
+
+		expect(registry.getError()?.message).toContain("Failed to load config file models");
+		expect(registry.find("gateway", "first-model")).toBeDefined();
+		expect(await registry.getApiKeyForProvider("gateway")).toBe("first-key");
+
+		// Fixing the file applies the new config in full, including removals.
+		writeRawModelsJson(gateway("second-model", "second-key"));
+		bumpMtime();
+		expect(await registry.refreshIfStale()).toBe(true);
+
+		expect(registry.getError()).toBeUndefined();
+		expect(registry.find("gateway", "second-model")).toBeDefined();
+		expect(registry.find("gateway", "first-model")).toBeUndefined();
+		expect(await registry.getApiKeyForProvider("gateway")).toBe("second-key");
+	});
+
+	test("refreshIfStale drops a provider that a valid models config edit removes", async () => {
+		const provider = (baseUrl: string, apiKey: string, modelId: string) => ({
+			baseUrl,
+			api: "openai-completions",
+			apiKey,
+			models: [{ id: modelId, reasoning: false, input: ["text"] }],
+		});
+		writeRawModelsJson({
+			gateway: provider("http://127.0.0.1:9991", "gateway-key", "gateway-model"),
+			other: provider("http://127.0.0.1:9992", "other-key", "other-model"),
+		});
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(registry.find("other", "other-model")).toBeDefined();
+
+		writeRawModelsJson({ gateway: provider("http://127.0.0.1:9991", "gateway-key", "gateway-model") });
+		const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+		fs.utimesSync(modelsJsonPath, next, next);
+		expect(await registry.refreshIfStale()).toBe(true);
+
+		expect(registry.find("other", "other-model")).toBeUndefined();
+		expect(await registry.getApiKeyForProvider("other")).toBeUndefined();
+		expect(registry.find("gateway", "gateway-model")).toBeDefined();
+	});
+
+	test("refreshIfStale does not bring back a deleted models config when a broken one replaces it", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				apiKey: "first-key",
+				models: [{ id: "first-model", reasoning: false, input: ["text"] }],
+			},
+		});
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(registry.find("gateway", "first-model")).toBeDefined();
+
+		fs.rmSync(modelsJsonPath);
+		expect(await registry.refreshIfStale()).toBe(true);
+		expect(registry.find("gateway", "first-model")).toBeUndefined();
+
+		fs.writeFileSync(modelsJsonPath, '{"providers": {"gateway": {"baseUrl": ');
+		const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+		fs.utimesSync(modelsJsonPath, next, next);
+		expect(await registry.refreshIfStale()).toBe(true);
+
+		expect(registry.getError()?.message).toContain("Failed to load config file models");
+		expect(registry.find("gateway", "first-model")).toBeUndefined();
+		expect(await registry.getApiKeyForProvider("gateway")).toBeUndefined();
+	});
+
+	test("reloadIfConfigChanged reports the edit it rejected through getError, as refreshIfStale does", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				apiKey: "first-key",
+				models: [{ id: "first-model", reasoning: false, input: ["text"] }],
+			},
+		});
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+		expect(registry.getError()).toBeUndefined();
+
+		fs.writeFileSync(modelsJsonPath, '{"providers": {"gateway": {"baseUrl": ');
+		const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+		fs.utimesSync(modelsJsonPath, next, next);
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+
+		// The catalog is the last one that loaded, and the rejected edit is visible to callers.
+		expect(registry.find("gateway", "first-model")).toBeDefined();
+		expect(await registry.getApiKeyForProvider("gateway")).toBe("first-key");
+		expect(registry.getError()?.message).toContain("Failed to load config file models");
+	});
+
+	test("an edit that lands after a reload's parse is still seen by the next check", async () => {
+		const gateway = (modelId: string) => ({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				apiKey: `${modelId}-key`,
+				models: [{ id: modelId, reasoning: false, input: ["text"] }],
+			},
+		});
+		const touch = () => {
+			const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+			fs.utimesSync(modelsJsonPath, next, next);
+		};
+		writeRawModelsJson(gateway("first-model"));
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		writeRawModelsJson(gateway("second-model"));
+		touch();
+
+		// A writer lands a third version between the reload's parse and the rebuild that follows it.
+		// The catalog is built from the second; recording it under the third's file version would
+		// make that version compare equal for ever, so the third edit would never be applied.
+		const realTryLoad = ConfigFile.prototype.tryLoad;
+		let landed = false;
+		const spy = spyOn(ConfigFile.prototype, "tryLoad").mockImplementation(function (this: ConfigFile<unknown>) {
+			const result = realTryLoad.call(this);
+			if (!landed && this.path() === modelsJsonPath) {
+				landed = true;
+				writeRawModelsJson(gateway("third-model"));
+				touch();
+			}
+			return result;
+		});
+		let reloaded: boolean;
+		try {
+			reloaded = await registry.reloadIfConfigChanged();
+		} finally {
+			spy.mockRestore();
+		}
+		expect(landed).toBe(true);
+		expect(reloaded).toBe(true);
+		expect(registry.find("gateway", "second-model")).toBeDefined();
+
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		expect(registry.find("gateway", "third-model")).toBeDefined();
+		expect(registry.find("gateway", "second-model")).toBeUndefined();
+		expect(await registry.getApiKeyForProvider("gateway")).toBe("third-model-key");
+	});
+
+	test("reloadIfConfigChanged folds a models config edit into a running registry and keeps the last good one when an edit does not load", async () => {
+		const gateway = (compat?: Record<string, unknown>) => ({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				apiKey: "TEST_KEY",
+				api: "anthropic-messages",
+				...(compat ? { compat } : {}),
+				models: [{ id: "claude-gateway", reasoning: false, input: ["text"] }],
+			},
+		});
+		const touch = () => {
+			const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+			fs.utimesSync(modelsJsonPath, next, next);
+		};
+		const longRetention = () =>
+			(registry.find("gateway", "claude-gateway")?.compat as { supportsLongCacheRetention?: boolean } | undefined)
+				?.supportsLongCacheRetention;
+		writeRawModelsJson(gateway());
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		const startGeneration = registry.configGeneration;
+		expect(longRetention()).toBe(false);
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+
+		writeRawModelsJson(gateway({ supportsLongCacheRetention: true }));
+		touch();
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		expect(longRetention()).toBe(true);
+		expect(registry.configGeneration).toBeGreaterThan(startGeneration);
+		const goodGeneration = registry.configGeneration;
+
+		// A half-written edit: the provider and its flag stay as last loaded.
+		fs.writeFileSync(modelsJsonPath, "providers:\n  gateway: [unterminated\n");
+		touch();
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+		expect(longRetention()).toBe(true);
+		expect(registry.configGeneration).toBe(goodGeneration);
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+
+		// The next good edit loads again.
+		writeRawModelsJson(gateway());
+		touch();
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		expect(longRetention()).toBe(false);
+	});
+
+	test("a worker mirror's reloadIfConfigChanged reloads on the owner, which pushes the rebuilt catalog to the mirror", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				apiKey: "TEST_KEY",
+				api: "anthropic-messages",
+				models: [{ id: "claude-gateway", reasoning: false, input: ["text"] }],
+			},
+		});
+		const owner = new ModelRegistry(authStorage, modelsJsonPath);
+		// The owner surface the worker bridge serves (thread/services/auth.ts); only the reload is exercised.
+		const ownerSurface = {
+			reloadIfConfigChanged: () => owner.reloadIfConfigChanged(),
+		} as unknown as ModelRegistryOwner;
+		const mirror = new ModelRegistry(authStorage, modelsJsonPath, { owner: ownerSurface });
+		// A writer truncates models.yml after main validated it and before the mirror replays the reload:
+		// the mirror must rebuild from main's parse, not from what the file now holds.
+		let truncateBeforeReplay = false;
+		const subscription = owner.subscribeMirror(batch => {
+			if (truncateBeforeReplay && batch.changes.some(change => change.kind === "reload")) {
+				fs.writeFileSync(modelsJsonPath, "providers:\n  gateway: [unterminated\n");
+			}
+			mirror.applyMirrorBatch(batch);
+		});
+		mirror.applyMirrorBatch(subscription.snapshot);
+		const longRetention = () =>
+			(mirror.find("gateway", "claude-gateway")?.compat as { supportsLongCacheRetention?: boolean } | undefined)
+				?.supportsLongCacheRetention;
+		try {
+			const startGeneration = mirror.configGeneration;
+			expect(longRetention()).toBe(false);
+
+			writeRawModelsJson({
+				gateway: {
+					baseUrl: "http://127.0.0.1:9991",
+					apiKey: "TEST_KEY",
+					api: "anthropic-messages",
+					compat: { supportsLongCacheRetention: true },
+					models: [{ id: "claude-gateway", reasoning: false, input: ["text"] }],
+				},
+			});
+			const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+			fs.utimesSync(modelsJsonPath, next, next);
+			truncateBeforeReplay = true;
+			expect(await mirror.reloadIfConfigChanged()).toBe(true);
+			// The owner flushes its change batch on a microtask; the bridge delivers it before answering.
+			await Bun.sleep(0);
+			expect(longRetention()).toBe(true);
+			expect(mirror.configGeneration).toBeGreaterThan(startGeneration);
+			// The reload ran on the owner, so main and every other mirror see the edit too.
+			expect(
+				(owner.find("gateway", "claude-gateway")?.compat as { supportsLongCacheRetention?: boolean } | undefined)
+					?.supportsLongCacheRetention,
+			).toBe(true);
+		} finally {
+			subscription.unsubscribe();
+		}
 	});
 
 	test("refreshProvider online refreshes expired anthropic OAuth before model discovery", async () => {

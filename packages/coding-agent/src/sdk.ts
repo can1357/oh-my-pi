@@ -4786,10 +4786,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Outbound credential-pattern redaction follows THIS session's `secrets.enabled` per
 		// request, not the process-wide switch (the newest effect holder's): concurrent ACP/SDK
 		// sessions in one process each keep their own policy.
-		const settingsAwareStreamFn: StreamFn = (streamModel, context, streamOptions) =>
-			withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
+		// Every request of this session (main loop, side requests, advisors, cache warming,
+		// fallbacks) first folds in an on-disk models.yml edit, so it is sent against the catalog
+		// the file describes now rather than the one this process started with.
+		const settingsAwareStreamFn: StreamFn = async (streamModel, context, streamOptions) => {
+			await modelRegistry.reloadIfConfigChanged();
+			return withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
 				settingsBoundStreamFn(streamModel, context, streamOptions),
 			);
+		};
 		// Primary-agent (and its auto-learn capture twin) provider options read per
 		// request, so `/settings` changes to budgets, Kimi format, or the Codex
 		// websocket policy reach the next call without a session recreate.

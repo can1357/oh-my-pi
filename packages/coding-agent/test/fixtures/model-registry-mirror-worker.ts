@@ -48,6 +48,10 @@ export interface MirrorProbe {
 	resolveHeaders(registry: ModelRegistry, provider: string, id: string): Promise<Record<string, string> | undefined>;
 	/** `refreshRuntimeProviders` on the mirror (runs on main). */
 	refreshRuntimeProviders(registry: ModelRegistry): Promise<void>;
+	/** `reloadIfConfigChanged` on the mirror (runs on main); returns its result and the mirror's generation after. */
+	reloadIfConfigChanged(registry: ModelRegistry): Promise<{ reloaded: boolean; generation: number }>;
+	/** The mirror's `configGeneration`. */
+	configGeneration(registry: ModelRegistry): Promise<number>;
 	/** Register a provider on the mirror itself; returns whether the mirror then serves it. */
 	registerLocally(registry: ModelRegistry, provider: string): Promise<boolean>;
 }
@@ -134,6 +138,11 @@ const probe: MirrorProbe = {
 		return registry.resolveModelHeaders(model);
 	},
 	refreshRuntimeProviders: registry => registry.refreshRuntimeProviders("online"),
+	reloadIfConfigChanged: async registry => {
+		const reloaded = await registry.reloadIfConfigChanged();
+		return { reloaded, generation: registry.configGeneration };
+	},
+	configGeneration: async registry => registry.configGeneration,
 	registerLocally: async (registry, provider) => {
 		registry.registerProvider(
 			provider,

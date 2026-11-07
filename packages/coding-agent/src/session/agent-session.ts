@@ -11478,6 +11478,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			: this.#titleGenerationAbortController.signal;
 		// A capped session sends no further model requests, titles included.
 		if (titleSignal.aborted || this.#costGate.check()) return null;
+		// Title models are picked from the registry: fold in a models.yml edit first.
+		await this.#modelRegistry.reloadIfConfigChanged();
 		// The title request carries user text, so it follows this session's own credential
 		// redaction policy like its conversation requests (see `settingsAwareStreamFn`).
 		const title = await withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>

@@ -375,6 +375,7 @@ export type ModelRegistryProtocol = {
 	isBackgroundRefreshPending: RpcMethod<[], boolean>;
 	awaitBackgroundRefresh: RpcMethod<[], void>;
 	refreshIfStale: RpcMethod<[], boolean>;
+	reloadIfConfigChanged: RpcMethod<[], boolean>;
 	awaitInitialBackgroundRefresh: RpcMethod<[signal?: AbortSignal], void>;
 };
 

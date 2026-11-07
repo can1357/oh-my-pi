@@ -510,7 +510,12 @@ describe("structured subagent primitive", () => {
 		const untagged: AgentDefinition = { ...AGENT, name: "m2", model: [selector], thinkingLevel: Effort.Medium };
 		const settings = Settings.isolated({ "task.maxEffort": "low", "task.isolation.enabled": false });
 		const parent = Object.assign(session({ settings, sessionAgents: [tagged, untagged] }), {
-			modelRegistry: { authStorage: {}, refresh: async () => {}, getAvailable: () => [model] },
+			modelRegistry: {
+				authStorage: {},
+				refresh: async () => {},
+				reloadIfConfigChanged: async () => false,
+				getAvailable: () => [model],
+			},
 			getApiKey: async () => "test-key",
 		});
 		const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
@@ -1591,6 +1596,7 @@ describe("per-call model preflight", () => {
 					getAll: () => [target, painter],
 					getAvailable: (kind?: string) => (!warm ? [] : kind === "chat" ? [target] : [target, painter]),
 					isBackgroundRefreshPending: () => refreshPending,
+					reloadIfConfigChanged: async () => false,
 				},
 			},
 		);

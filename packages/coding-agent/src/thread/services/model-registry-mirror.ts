@@ -317,6 +317,10 @@ export class RemoteModelRegistryOwner implements ModelRegistryOwner {
 		return this.#remote.call("refreshIfStale");
 	}
 
+	reloadIfConfigChanged(): Promise<boolean> {
+		return this.#remote.call("reloadIfConfigChanged");
+	}
+
 	awaitInitialBackgroundRefresh(signal?: AbortSignal): Promise<void> {
 		return this.#remote.call("awaitInitialBackgroundRefresh", signal);
 	}

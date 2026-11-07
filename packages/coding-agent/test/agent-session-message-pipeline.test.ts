@@ -67,6 +67,7 @@ function createModelRegistryStub(key = "key") {
 		resolver: vi.fn(() => async () => key),
 		authStorage: { usage: { ingestHeaders: vi.fn() }, oauth: { identity: vi.fn() } },
 		hasLazyRuntimeMetadata: vi.fn(() => false),
+		reloadIfConfigChanged: vi.fn(async () => false),
 	};
 }
 
@@ -1876,6 +1877,7 @@ describe("AgentSession message pipeline", () => {
 			modelRegistry: {
 				getApiKey: vi.fn(async () => "old-key"),
 				resolver,
+				reloadIfConfigChanged: async () => false,
 			} as never,
 		});
 		sessions.push(session);

@@ -375,6 +375,7 @@ function serveModelRegistry(state: PeerAuthState): RpcServe<ModelRegistry, Model
 		isBackgroundRefreshPending: registry => registry.isBackgroundRefreshPending(),
 		awaitBackgroundRefresh: registry => registry.awaitBackgroundRefresh(),
 		refreshIfStale: registry => registry.refreshIfStale(),
+		reloadIfConfigChanged: registry => registry.reloadIfConfigChanged(),
 		awaitInitialBackgroundRefresh: (registry, signal) => registry.awaitInitialBackgroundRefresh(signal),
 	};
 }

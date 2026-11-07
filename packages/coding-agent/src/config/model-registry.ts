@@ -263,6 +263,12 @@ function contextWindowKey(model: { provider: string; id: string }): string {
 	return `${model.provider}\u0000${model.id}`;
 }
 
+/**
+ * Recorded for a catalog built from a file that appeared between the stamp and the read: no file
+ * version describes it, so the next check re-reads rather than comparing equal to either.
+ */
+const UNSETTLED_CONFIG_STAMP = "\u0000unsettled";
+
 /** The context window a model runs with by default, and the larger one extended context opts it into. */
 export interface ContextWindowTiers {
 	standard: number;
@@ -371,7 +377,19 @@ export class ModelRegistry {
 	#warnedCompatKeys = new Set<string>();
 	#configWarnings: string[] = [];
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
+	/** Last models config that loaded, served while a later edit fails to load. */
+	#lastLoadedModelsConfig: ModelsConfig | undefined;
 	#lastStaticLoadMtime: number | null = null;
+	/** File version (see `ConfigFile.getStamp`) the static catalog was last built from. */
+	#loadedConfigStamp: string | null = null;
+	/** The file version a rebuild in progress read the file at, so a later edit is not recorded as loaded. */
+	#pendingConfigStamp: string | null | undefined;
+	/** A models.yml version that failed to load; skipped until the file changes again. */
+	#rejectedConfigStamp: string | null = null;
+	#configReload?: Promise<boolean>;
+	#configGeneration = 0;
+	/** The models.yml parse the static catalog was last built from; undefined when it was missing or invalid. */
+	#loadedConfig: ModelsConfig | undefined;
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
@@ -668,7 +686,14 @@ export class ModelRegistry {
 		if (this.#mirrorListeners.size === 0) this.#mirroredDiscovery = discovery;
 		this.#mirrorListeners.add(listener);
 		return {
-			snapshot: { seq: this.#mirrorSeq, changes: [...this.#runtimeRegistrations], discovery },
+			snapshot: {
+				seq: this.#mirrorSeq,
+				changes: [...this.#runtimeRegistrations],
+				discovery,
+				// The owner's models.yml as it last built from it, `null` when missing or invalid: never what a
+				// new mirror happens to read from disk.
+				staticConfig: this.#loadedConfig ?? null,
+			},
 			unsubscribe: () => {
 				this.#mirrorListeners.delete(listener);
 			},
@@ -682,6 +707,13 @@ export class ModelRegistry {
 	 */
 	applyMirrorBatch(batch: ModelRegistryMirrorBatch): void {
 		if (!this.#owner) throw new Error("applyMirrorBatch: this registry is not a mirror");
+		// A new mirror read models.yml itself while it was built; the owner's parse wins (the file may have
+		// changed since the owner loaded it, or hold an edit the owner rejected).
+		if (batch.staticConfig !== undefined) {
+			if (batch.staticConfig === null) this.#modelsConfigFile.adoptMissing();
+			else this.#modelsConfigFile.adopt(batch.staticConfig);
+			this.#reloadStaticModels({ force: true, configLoaded: true });
+		}
 		for (const change of batch.changes) {
 			if (change.seq <= this.#mirrorSeq) continue;
 			try {
@@ -713,7 +745,10 @@ export class ModelRegistry {
 				this.#syncExtensionSources(change.activeSourceIds);
 				return;
 			case "reload":
-				this.#reloadStaticModels({ force: true });
+				// Main's parse, not this thread's read: the file may have changed (or been truncated) since.
+				if (change.config === null) this.#modelsConfigFile.adoptMissing();
+				else if (change.config !== undefined) this.#modelsConfigFile.adopt(change.config);
+				this.#reloadStaticModels({ force: true, configLoaded: change.config !== undefined });
 				return;
 			case "invalidateCommands":
 				// Local caches only: forwarding to the owner would echo the invalidation back.
@@ -978,6 +1013,80 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Fold an on-disk models.yml edit into a running process before its next
+	 * model request or subagent spawn, as settings are re-read at the same
+	 * points. One `stat` when nothing changed (about 5 µs). The file version is
+	 * its mtime, ctime, size and inode, so an edit that keeps the mtime still
+	 * counts. The rebuild uses the exact parse it validated, so a writer that
+	 * truncates the file after the check cannot strip the catalog; an edit that
+	 * does not load keeps the last good catalog and is reported once per file
+	 * version. Concurrent callers share one rebuild. Resolves whether the
+	 * catalog was rebuilt; a session compares {@link configGeneration} to learn
+	 * that another caller did.
+	 */
+	reloadIfConfigChanged(): Promise<boolean> {
+		// A worker mirror reloads on main, which pushes the reload before it answers.
+		if (this.#owner) return this.#owner.reloadIfConfigChanged();
+		if (this.#configReload) return this.#configReload;
+		if (this.#ignoreLocalModelConfig) return Promise.resolve(false);
+		const stamp = this.#modelsConfigFile.getStamp();
+		if (stamp === this.#loadedConfigStamp) {
+			// The version this catalog was built from is the one on disk again, so an edit rejected in
+			// between is gone with it and its error no longer describes the file.
+			if (this.#rejectedConfigStamp !== null && this.#rejectedConfigStamp !== stamp) {
+				this.#rejectedConfigStamp = null;
+				this.#configError = undefined;
+			}
+			return Promise.resolve(false);
+		}
+		if (stamp !== null && stamp === this.#rejectedConfigStamp) return Promise.resolve(false);
+		this.#modelsConfigFile.invalidate();
+		const probe = this.#modelsConfigFile.tryLoad();
+		if (probe.status === "error") {
+			this.#rejectedConfigStamp = stamp;
+			// The catalog is the last one that loaded; getError() says why the newer file is not in it,
+			// as the same rejection through #loadCustomModels does.
+			this.#configError = probe.error;
+			logger.warn("models.yml changed on disk but does not load; keeping the last good model catalog", {
+				error: probe.error?.message,
+			});
+			return Promise.resolve(false);
+		}
+		this.#rejectedConfigStamp = null;
+		const reload = this.#rebuildFromLoadedConfig(stamp).then(
+			() => true,
+			error => {
+				logger.warn("models.yml reload failed; keeping the catalog built so far", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return false;
+			},
+		);
+		this.#configReload = reload.finally(() => {
+			this.#configReload = undefined;
+		});
+		return this.#configReload;
+	}
+
+	/**
+	 * Offline rebuild from the config parse already cached in {@link ModelsConfigFile}. `configStamp`
+	 * is the file version read *before* that parse: the rebuild must record it rather than take its
+	 * own, because a writer between the parse and the rebuild would otherwise have the catalog
+	 * recorded under a version it does not hold, and that version is already on disk — so no later
+	 * check would ever see the edit.
+	 */
+	async #rebuildFromLoadedConfig(configStamp: string | null): Promise<void> {
+		this.#reloadStaticModels({ force: true, configLoaded: true, configStamp });
+		this.#suppressedSelectors.clear();
+		await this.#refreshRuntimeDiscoveries("offline");
+	}
+
+	/** Increments on every rebuild of the static catalog (models.yml load). */
+	get configGeneration(): number {
+		return this.#configGeneration;
+	}
+
+	/**
 	 * Resolve once the initial background discovery has settled, arming a waiter
 	 * even when the refresh has not started yet. In the CLI path
 	 * {@link refreshInBackground} runs after the session is constructed
@@ -1194,15 +1303,40 @@ export class ModelRegistry {
 		await this.#refreshRuntimeDiscoveries(strategy, new Set(this.#runtimeModelManagers.keys()));
 	}
 
-	#reloadStaticModels(options?: { force?: boolean; preserveRuntimeDiscovery?: boolean }): void {
+	#reloadStaticModels(options?: {
+		force?: boolean;
+		preserveRuntimeDiscovery?: boolean;
+		configLoaded?: boolean;
+		/** The file version the caller's already-cached parse was read at; see `#rebuildFromLoadedConfig`. */
+		configStamp?: string | null;
+	}): void {
 		const currentMtime = this.#modelsConfigFile.getMtimeMs();
 		const staticConfigUnchanged = currentMtime === this.#lastStaticLoadMtime;
 		if (!options?.force && currentMtime !== null && staticConfigUnchanged) {
 			// Models config unchanged since last load; reloading would be redundant.
 			return;
 		}
-		// Inside a runtime-change entry point the mirror replays the reload with the change itself.
-		if (this.#mirrorChangeDepth === 0) this.#recordMirrorChange({ kind: "reload" });
+		// The version the parse this rebuild uses was read at: the caller's when it already parsed,
+		// else the file's now — taken before the read, so an edit that lands during this rebuild is
+		// still a change at the next check rather than one the catalog is wrongly recorded as holding.
+		this.#pendingConfigStamp =
+			options?.configStamp !== undefined ? options.configStamp : this.#modelsConfigFile.getStamp();
+		// A live reload already parsed and validated the file; re-reading it could pick up a half-written
+		// edit. A mirror never reads the file at all: its config is the one its owner adopted into it.
+		if (!options?.configLoaded && !this.#owner) this.#modelsConfigFile.invalidate();
+		// Every rebuild carries the parse it uses to the mirrors, including one nested in a runtime
+		// change: the mirror replays that change too, and without the parse its own rebuild would read
+		// a later version of the file (or, for a deleted file, keep a config its owner has dropped).
+		const loaded = this.#modelsConfigFile.tryLoad();
+		// An edit that does not load leaves the catalog on the last config that loaded, so the
+		// mirror rebuilds from that one too; a file that is gone clears both sides.
+		const config =
+			loaded.status === "ok"
+				? loaded.value
+				: loaded.status === "error"
+					? (this.#lastLoadedModelsConfig ?? null)
+					: null;
+		this.#recordMirrorChange({ kind: "reload", config });
 		let preservedRuntimeState:
 			| {
 					models: Model<Api>[];
@@ -1227,7 +1361,6 @@ export class ModelRegistry {
 				keylessProviders: new Set(this.#keylessProviders),
 			};
 		}
-		this.#modelsConfigFile.invalidate();
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
 		this.#discoverableProviders = [];
@@ -1309,6 +1442,11 @@ export class ModelRegistry {
 	}
 
 	#loadModels() {
+		// The stamp the rebuild that called us read the file at, else the file's current one. `null`
+		// is a stamp of its own (the file was missing), so only `undefined` means none was taken.
+		const configStamp =
+			this.#pendingConfigStamp !== undefined ? this.#pendingConfigStamp : this.#modelsConfigFile.getStamp();
+		this.#pendingConfigStamp = undefined;
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
 		const {
@@ -1339,6 +1477,16 @@ export class ModelRegistry {
 			this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels()),
 		);
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
+		// The file was missing when the stamp was taken and present when it was read, so no version
+		// of it describes this catalog: neither the missing stamp (a later deletion would compare
+		// equal) nor the current one (an edit that landed after the parse would). A stamp no file
+		// can equal costs one extra reload and never skips a change.
+		this.#loadedConfigStamp =
+			configStamp === null && this.#lastLoadedModelsConfig !== undefined ? UNSETTLED_CONFIG_STAMP : configStamp;
+		// The config #loadCustomModels built from: the file's own parse when it loaded, the last one
+		// that loaded while a later edit does not, and nothing once the file is gone.
+		this.#loadedConfig = this.#ignoreLocalModelConfig ? undefined : this.#lastLoadedModelsConfig;
+		this.#configGeneration++;
 	}
 
 	#resetStaticComposition(): void {
@@ -2034,20 +2182,9 @@ export class ModelRegistry {
 				found: false,
 			};
 		}
-		const { value, error, status } = this.#modelsConfigFile.tryLoad();
-
-		if (status === "error") {
-			return {
-				models: [],
-				overrides: new Map(),
-				modelOverrides: new Map(),
-				keylessProviders: new Set(),
-				discoverableProviders: [],
-				configuredProviders: new Set(),
-				error,
-				found: true,
-			};
-		} else if (status === "not-found") {
+		const loaded = this.#modelsConfigFile.tryLoad();
+		if (loaded.status === "not-found") {
+			this.#lastLoadedModelsConfig = undefined;
 			return {
 				models: [],
 				overrides: new Map(),
@@ -2056,6 +2193,34 @@ export class ModelRegistry {
 				discoverableProviders: [],
 				configuredProviders: new Set(),
 				found: false,
+			};
+		}
+		let value: ModelsConfig;
+		let error: ConfigError | undefined;
+		if (loaded.status === "ok") {
+			value = loaded.value;
+			this.#lastLoadedModelsConfig = value;
+		} else if (this.#lastLoadedModelsConfig) {
+			// A models config that stops loading mid-session (typically a
+			// half-saved edit) keeps serving the last config that loaded, so its
+			// providers, overrides and API keys survive until the file loads
+			// again. The error is still reported through getError().
+			value = this.#lastLoadedModelsConfig;
+			error = loaded.error;
+			logger.warn("Models config failed to load; keeping the last config that loaded", {
+				path: this.#modelsConfigFile.path(),
+				error: String(loaded.error),
+			});
+		} else {
+			return {
+				models: [],
+				overrides: new Map(),
+				modelOverrides: new Map(),
+				keylessProviders: new Set(),
+				discoverableProviders: [],
+				configuredProviders: new Set(),
+				error: loaded.error,
+				found: true,
 			};
 		}
 
@@ -2178,6 +2343,7 @@ export class ModelRegistry {
 			keylessProviders,
 			discoverableProviders,
 			configuredProviders,
+			error,
 			found: true,
 		};
 	}
@@ -3363,7 +3529,7 @@ export class ModelRegistry {
 
 	/**
 	 * Get all models (built-in + custom) of one catalog kind.
-	 * If custom config had errors, returns only built-in models. The default
+	 * If models.yml failed to load when the registry was built, custom config is absent; a later reload that fails keeps the last config that loaded. The default
 	 * excludes role-specific runners so existing session callers remain chat-only.
 	 * Pass `"all"` to retrieve the complete catalog.
 	 */
@@ -4238,6 +4404,8 @@ export interface ModelRegistryOwner {
 	awaitBackgroundRefresh(): Promise<void>;
 	/** {@link ModelRegistry.refreshIfStale} on the owner. */
 	refreshIfStale(): Promise<boolean>;
+	/** {@link ModelRegistry.reloadIfConfigChanged} on the owner. */
+	reloadIfConfigChanged(): Promise<boolean>;
 	/** {@link ModelRegistry.awaitInitialBackgroundRefresh} on the owner. */
 	awaitInitialBackgroundRefresh(signal?: AbortSignal): Promise<void>;
 }
@@ -4264,8 +4432,11 @@ type ModelRegistryMirrorChangeInput =
 	| { readonly kind: "unregister"; readonly name: string }
 	| { readonly kind: "clearSources"; readonly sourceIds: readonly string[] }
 	| { readonly kind: "syncSources"; readonly activeSourceIds: readonly string[] }
-	/** A static (models.yml + cache) reload outside the other changes. */
-	| { readonly kind: "reload" }
+	/**
+	 * A static (models.yml + cache) reload outside the other changes. `config` is the parse the owner
+	 * reloaded from, `null` when the file was missing or invalid; a mirror reloads from it, not from disk.
+	 */
+	| { readonly kind: "reload"; readonly config?: ModelsConfig | null }
 	/** Owner dropped cached `!command` results (one provider's, or all when `provider` is undefined). */
 	| { readonly kind: "invalidateCommands"; readonly provider: string | undefined };
 
@@ -4297,6 +4468,11 @@ export interface ModelRegistryMirrorBatch {
 	readonly seq: number;
 	readonly changes: readonly ModelRegistryMirrorChange[];
 	readonly discovery?: ModelRegistryDiscoveryLayer;
+	/**
+	 * In a snapshot only: the owner's models.yml as it last built from it, `null` when missing or
+	 * invalid. A new mirror builds from this, never from its own read of the file.
+	 */
+	readonly staticConfig?: ModelsConfig | null;
 }
 
 /** Same length and pairwise identical or deeply equal (functions by identity). */

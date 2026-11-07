@@ -23,6 +23,8 @@
 - Mistral Vibe browser sign-in shows subscription billing in the status line and advisor spend instead of pay-as-you-go pricing ([#18374](https://github.com/can1357/oh-my-pi/issues/18374))
 - Native OpenAI compaction no longer waits for a Hindsight memory recall it cannot use; fallback summaries still recall memory ([#18327](https://github.com/can1357/oh-my-pi/issues/18327))
 - An eval `wait()` on jobs owned by a worker returns finished jobs and consumes their results instead of reporting them as running or delivering them again ([#18363](https://github.com/can1357/oh-my-pi/issues/18363))
+- Fixed a `models.yml` edit that does not parse (such as a half-saved file) removing every custom provider, override and API key it defines from the running session the next time it re-reads the file; the session now keeps the last config that loaded and still shows the error until the file loads again ([#16401](https://github.com/can1357/oh-my-pi/pull/16401) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a running session never re-reading `models.yml`: a provider edit (a compat flag such as `supportsLongCacheRetention`, a new model, a key) reached only sessions started after it, and their subagents inherited the stale catalog. A session now re-reads the file when it changed on disk before each model request and each subagent spawn (one `stat` when it did not); an edit that does not load keeps the last good catalog, and a worker's mirror serves the same catalog its owner does ([#16401](https://github.com/can1357/oh-my-pi/pull/16401) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.18.0] - 2026-11-07
 

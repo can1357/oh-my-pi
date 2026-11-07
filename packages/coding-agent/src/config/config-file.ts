@@ -206,6 +206,22 @@ export class ConfigFile<T> implements IConfigFile<T> {
 		}
 	}
 
+	/**
+	 * Identity of the file version on disk: mtime, ctime, size and inode, so an
+	 * edit that keeps the mtime (a coarse clock, `touch -r`, a copy preserving
+	 * times) or replaces the file by rename still reads as a change. `null` when
+	 * the file is missing.
+	 */
+	getStamp(): string | null {
+		try {
+			const stat = fs.statSync(this.#resolveReadPath());
+			return `${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}:${stat.ino}`;
+		} catch (err) {
+			if (isEnoent(err)) return null;
+			throw err;
+		}
+	}
+
 	withValidation(name: string, validate: (value: T) => void): this {
 		const prev = this.#auxValidate;
 		this.#auxValidate = (value: T) => {
@@ -311,5 +327,15 @@ export class ConfigFile<T> implements IConfigFile<T> {
 
 	invalidate() {
 		this.#cache = undefined;
+	}
+
+	/** Serve `value` as this file's parsed contents until the next {@link invalidate}, without reading the file. */
+	adopt(value: T) {
+		this.#cache = { value, status: "ok" };
+	}
+
+	/** Read as missing until the next {@link invalidate}, whatever is on disk. */
+	adoptMissing() {
+		this.#cache = { status: "not-found" };
 	}
 }
