@@ -60,10 +60,15 @@ export async function resolveCallbackOptions(
 		});
 	}
 	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-		throw new AIError.OAuthError(`Redirect URI override must use http:// or https://, got: ${redirectUri}`, {
-			kind: "configuration",
-			provider,
-		});
+		// Custom-scheme (deep-link) redirects are legitimate overrides. Some
+		// providers only allowlist a first-party desktop scheme — Z.AI's coding
+		// plan registers `zcode://` for its reused OAuth client, and its rule
+		// documents `redirect-uri-env` as the way to "adapt to further allowlist
+		// shifts without a release" — but an http(s)-only check makes that escape
+		// hatch unable to express the very value it exists for. Delivery is still
+		// governed by the rule's `manual-only` / `native-scheme` flags, so a
+		// non-web scheme here changes only the advertised redirect target.
+		return { ...base, redirectUri, allowPortFallback: false };
 	}
 	const loopback = isLoopbackHost(parsed.hostname);
 	if (loopback && parsed.protocol !== "http:") {
