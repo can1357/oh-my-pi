@@ -186,6 +186,7 @@
 - Eval `wait()` progress rows for agents spawned by one `task` call show each agent's own tool count, context, cost and activity instead of the first agent's ([#18393](https://github.com/can1357/oh-my-pi/issues/18393))
 - In the Pseudo shell visualization, an `&&` chain keeps its `and` rows while it runs and after it finishes, instead of switching to literal `&&` rows and a raw-bash tail when the output minimizer runs it one command at a time ([#18408](https://github.com/can1357/oh-my-pi/issues/18408))
 - Autoresearch `update_notes` calls can now append an idea with only `append_idea`, without passing a replacement `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
+- Fixed Mnemopi embedding requests sending the name of an environment variable instead of its value when `mnemopi.embeddingApiKey` references one; the setting now resolves like a provider `apiKey` ([#16334](https://github.com/can1357/oh-my-pi/issues/16334), [#16424](https://github.com/can1357/oh-my-pi/pull/16424) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.0] - 2026-11-07
 
