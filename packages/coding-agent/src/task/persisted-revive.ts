@@ -162,12 +162,12 @@ export async function resolveSpawner(
 	recordedParentFile: string | undefined,
 ): Promise<{ sessionId: string | undefined; sessionFile: string | undefined }> {
 	if (!ref.parentId || ref.parentId === MAIN_AGENT_ID) {
-		return { sessionId: topLevel.sessionId, sessionFile: topLevel.sessionFile };
+		return { sessionId: topLevel.sessionManager.getSessionId(), sessionFile: topLevel.sessionFile };
 	}
 	const parent = registry.get(ref.parentId);
 	const sessionFile = recordedParentFile ?? parent?.sessionFile ?? undefined;
 	const sessionId =
-		parent?.session?.sessionId ??
+		parent?.session?.sessionManager.getSessionId() ??
 		(sessionFile ? await readSessionHeaderId(sessionFile).catch(() => undefined) : undefined);
 	return { sessionId, sessionFile };
 }
