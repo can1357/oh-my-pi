@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- The edit tool's search for a missing authored path now runs on the filesystem runtime with every other traversal, so an edit whose path is not on disk no longer holds the worker threads the embedded shell and every other native call are scheduled on.
+- The edit tool's search for a missing authored path now runs on the filesystem runtime with every other traversal, so an edit whose path is not on disk no longer holds the worker threads the embedded shell and every other native call are scheduled on ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.18.0] - 2026-11-07
 

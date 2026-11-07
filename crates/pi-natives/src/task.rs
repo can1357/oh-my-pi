@@ -830,6 +830,10 @@ mod tests {
 	/// Dropping the caller stops work placed on the filesystem runtime. A bare
 	/// `JoinHandle` detaches on drop, so without the abort guard a recovery
 	/// walk would run on after the session that asked for it closed.
+	///
+	/// The start is a handshake rather than a sleep, so a slow scheduler
+	/// cannot fail it; only the span between the drop and the work's own
+	/// completion is a wait, and it is generous.
 	#[test]
 	fn dropping_the_caller_stops_work_on_the_filesystem_runtime() {
 		use std::{
@@ -845,27 +849,26 @@ mod tests {
 			.enable_all()
 			.build()
 			.unwrap();
-		let started = Arc::new(AtomicBool::new(false));
+		let (started_tx, started_rx) = flume::bounded::<()>(1);
 		let ran_on = Arc::new(AtomicBool::new(false));
-		let started_probe = Arc::clone(&started);
 		let ran_on_probe = Arc::clone(&ran_on);
 
 		host.block_on(async move {
 			let work = Box::pin(on_filesystem_runtime("dropped", async move {
-				started_probe.store(true, Ordering::SeqCst);
+				let _ = started_tx.send(());
 				// The yield point a walker has between directories.
-				tokio::time::sleep(Duration::from_millis(200)).await;
+				tokio::time::sleep(Duration::from_secs(2)).await;
 				ran_on_probe.store(true, Ordering::SeqCst);
 			}));
 			let mut work = Some(work);
+			// Let go the moment the work is in flight.
 			tokio::select! {
 				_ = work.as_mut().unwrap() => panic!("the work finished before it was dropped"),
-				() = tokio::time::sleep(Duration::from_millis(60)) => {},
+				started = started_rx.recv_async() => started.expect("the work never started"),
 			}
-			assert!(started.load(Ordering::SeqCst), "the work never started");
 			drop(work.take());
 
-			tokio::time::sleep(Duration::from_millis(400)).await;
+			tokio::time::sleep(Duration::from_secs(3)).await;
 			assert!(
 				!ran_on.load(Ordering::SeqCst),
 				"the work ran on after its caller was dropped, so a closed session leaves filesystem \

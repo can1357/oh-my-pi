@@ -54,6 +54,7 @@ use pi_walker::{
 	Fs,
 	walk::{self, Action, Options},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::memory::{self, Settled, native_work};
 
@@ -546,15 +547,26 @@ async fn recover_one(cwd: &Path, authored: &str) -> Option<Resolved> {
 	let matches = Arc::new(AtomicUsize::new(0));
 	let seen = Arc::clone(&matches);
 	let root = cwd.to_path_buf();
+	// Dropping this future must stop the walk at its next entry, as it did
+	// when the walk was polled inline. Aborting the spawned task is not
+	// enough on its own: the abort only reaches the walker's own stop flag
+	// once a filesystem worker polls that task again, and the walker's
+	// workers sit in filesystem syscalls that do not yield.
+	let cancellation = CancellationToken::new();
+	let _stop_on_drop = cancellation.clone().drop_guard();
 	// Off the host scheduler, where every other walk in the addon already
-	// runs: the walkers spawn a task per directory onto the runtime that
-	// polls them, and those tasks end in `getdents64`/`statx`, so a walk
+	// runs: the walker runs its directory work in tasks spawned onto the
+	// runtime that polls it (up to eight on Linux, capped by the machine's
+	// parallelism), and those tasks end in `getdents64`/`statx`, so a walk
 	// here holds every host worker for as long as it lasts and nothing else
 	// native gets polled.
 	let search = crate::task::on_filesystem_runtime("edit.recover", async move {
 		let opts = Options { hidden: true, gitignore: true, skip_git: true, ..Options::default() };
 		let fs = Fs::Native;
 		walk::collect(&fs, &root, &opts, false, move |_, entry| {
+			if cancellation.is_cancelled() {
+				return Action::Stop;
+			}
 			if !glob.matches(entry.path, entry.name(), entry.file_type) {
 				return Action::Skip;
 			}
@@ -567,7 +579,7 @@ async fn recover_one(cwd: &Path, authored: &str) -> Option<Resolved> {
 		.await
 	});
 	// The deadline stays on the caller's runtime, which is free to fire it;
-	// dropping the timed-out future aborts the walk.
+	// dropping the timed-out future stops the walk.
 	let found = tokio::time::timeout(RECOVERY_TIMEOUT, search)
 		.await
 		.ok()??
