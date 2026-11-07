@@ -567,21 +567,26 @@ impl Parser<'_> {
 		f: impl FnOnce(&mut Self) -> Result<T, E>,
 	) -> Result<T, E> {
 		if self.depth >= MAX_NESTING {
-			let at = self.off();
-			return Err(E::from(ParseError::new(
-				Span::new(at, at),
-				self.bash_line(),
-				ParseErrorKind::Message(Box::from(
-					&b"syntax error: maximum nesting level exceeded"[..],
-				)),
-			)));
+			return Err(E::from(self.too_deep()));
 		}
 		self.depth += 1;
 		let r = f(self);
 		self.depth -= 1;
 		r
 	}
+
+	/// The error for input nested past [`MAX_NESTING`], here.
+	fn too_deep(&self) -> ParseError {
+		let at = self.off();
+		ParseError::new(
+			Span::new(at, at),
+			self.bash_line(),
+			ParseErrorKind::Message(Box::from(TOO_DEEP)),
+		)
+	}
 }
+
+const TOO_DEEP: &[u8] = b"syntax error: maximum nesting level exceeded";
 
 /// Deepest nesting the parsers accept: compound commands, substitutions
 /// (two levels each: a word and a list), `${…}` operands, `[[ … ]]` groups
@@ -597,36 +602,41 @@ pub(crate) const MAX_NESTING: u32 = 400;
 /// Parse `code` (text bash re-parses at run time: a backquoted command, a
 /// `$((…))` that is not arithmetic) into `t` as one list; spans are
 /// shifted by `base`, `depth` is the nesting it is parsed at. Aliases are
-/// not expanded. An error (one nested past [`MAX_NESTING`] too) yields
-/// an empty list.
+/// not expanded. A syntax error yields an empty list, as bash reports it
+/// only when the text runs; text nested past [`MAX_NESTING`] yields
+/// `None`, the caller's syntax error (the stack limit is not bash's).
 fn sub_parse_list(
 	t: &mut Tree,
 	code: &[u8],
 	feat: Features,
 	base: u32,
 	depth: u32,
-) -> Id<shape::List> {
+) -> Option<Id<shape::List>> {
 	let mut p = Parser::new(code, feat, NO_ALIASES);
 	p.base = base;
 	p.depth = depth + 1;
 	p.t = core::mem::take(t);
 	let mark = p.t.open();
-	let ok = depth < MAX_NESTING
-		&& loop {
-			match p.top_list() {
-				Ok(Some(top)) => {
-					p.fill_docs(0);
-					p.t.kid_items(mark, top.list);
-				},
-				Ok(None) => break true,
-				Err(_) => break false,
-			}
-		};
-	if !ok {
+	let mut too_deep = depth >= MAX_NESTING;
+	let mut failed = too_deep;
+	while !failed {
+		match p.top_list() {
+			Ok(Some(top)) => {
+				p.fill_docs(0);
+				p.t.kid_items(mark, top.list);
+			},
+			Ok(None) => break,
+			Err(e) => {
+				too_deep = matches!(&e.kind, ParseErrorKind::Message(m) if **m == *TOO_DEEP);
+				failed = true;
+			},
+		}
+	}
+	if failed {
 		p.t.drop_opened(mark);
 	}
 	let list = p.t.list_at(mark);
 	debug_assert_eq!(p.t.opened_len(mark), 0, "a builder left children on the scratch stack");
 	*t = p.t;
-	list
+	(!too_deep).then_some(list)
 }
