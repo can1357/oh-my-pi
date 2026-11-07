@@ -594,6 +594,7 @@ fn plain_statement(
 		let mut ctx = Ctx::new(k, cx, vp, &[], line, id.into());
 		ctx.arrayref.clone_from(&arrayref);
 		let r = builtins::run(id, &mut ctx, &argv);
+		let r = settle_subscript_error(&mut ctx, r);
 		(r, std::mem::take(&mut ctx.chunks))
 	};
 	let written = match &res {
@@ -633,6 +634,29 @@ fn plain_statement(
 		Err(_) => vp.frames.last_mut().expect("frame").scratch = Some(sc),
 	}
 	Some(exec(k, vp, cx, unit, op, line))
+}
+
+/// A builtin's fatal indexed-subscript error is its answer, not a request for
+/// more input: keep the output produced before the failed binding, then use
+/// the same transfer as `let`/`declare`'s subscript failures.
+///
+/// Both builtin dispatch paths go through this. The fast path
+/// ([`plain_statement`]) otherwise treats every `Err` as "run me again with
+/// your answers", and a builtin that already applied its side effects
+/// (`getopts` advancing `OPTIND`) then repeats its work and reports nothing.
+fn settle_subscript_error(
+	ctx: &mut Ctx<'_, '_>,
+	r: Result<builtins::Outcome, Need>,
+) -> Result<builtins::Outcome, Need> {
+	match r {
+		Err(Need::Sub(
+			Stop::Fail(d @ Diag::ArithSubscript { .. }) | Stop::Fatal(d @ Diag::ArithSubscript { .. }),
+		)) if ctx.vp.mode.dialect() == crate::bash::ids::Dialect::Bash => {
+			ctx.diag(d);
+			Ok(builtins::Outcome { status: 1, control: Control::ArithSubscript })
+		},
+		r => r,
+	}
 }
 
 /// The exec state of a command whose words a fast path expanded
@@ -1067,6 +1091,11 @@ fn expand(
 			if let Err(d) =
 				assign_now(k, vp, cx, &name, index.as_ref().map(|i| i.as_slice()), append, value)
 			{
+				if vp.mode.dialect() == crate::bash::ids::Dialect::Bash
+					&& matches!(d, Diag::ArithSubscript { .. })
+				{
+					return Some(exec::stop_flow(k, vp, cx, line, Stop::Fail(d)));
+				}
 				k.diag(cx, vp, line, d);
 				// bash abandons the rest of the command line after a failed
 				// assignment statement; a posix shell exits.
@@ -3811,6 +3840,7 @@ fn run_builtin(
 			ctx.arrayref.clone_from(&e.arrayref);
 			ctx.resumed = e.resumed;
 			let r = builtins::run(id, &mut ctx, &e.argv);
+			let r = settle_subscript_error(&mut ctx, r);
 			// Not through `command`.
 			let fatal = ctx.usage_error && !e.via_command;
 			let log = std::mem::take(&mut ctx.log);
@@ -3957,6 +3987,11 @@ fn settle_builtin(
 		},
 		Control::Break { n, cont } => {
 			e.control = Some(Transfer::Break { n, cont });
+			e.stage = Stage::Output;
+			None
+		},
+		Control::ArithSubscript => {
+			e.control = Some(Transfer::ArithSubscript(outcome.status));
 			e.stage = Stage::Output;
 			None
 		},
@@ -4643,11 +4678,11 @@ fn finish(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Flow {
 		Some(Transfer::Return(n)) => Flow::Return(n),
 		Some(Transfer::Break { n, cont }) => Flow::Break { n, cont },
 		Some(Transfer::Exit(n)) => Flow::Exit(n),
-		Some(Transfer::DiscardAll(n)) => {
-			let command = matches!(
-				state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
-				Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
-			);
+		Some(Transfer::ArithSubscript(n)) if vp.mode.dialect() == crate::bash::ids::Dialect::Bash => {
+			Flow::DiscardAll(n)
+		},
+		Some(Transfer::DiscardAll(n) | Transfer::ArithSubscript(n)) => {
+			let command = exec::run_is_command(cx, vp);
 			let in_run = vp
 				.frames
 				.iter()

@@ -79,6 +79,9 @@ fn lower_command(
 		let idx = l.str(&w.bash_msg);
 		l.emit(Opcode::Warn, idx, w.line, w.line);
 	}
+	if cc.word_eof {
+		l.emit(Opcode::SetStatus, 2, 0, 0);
+	}
 	l.list(&cc.list)?;
 	l.emit(Opcode::End, 0, 0, 0);
 	if deferred && cc.source_replay {
@@ -242,6 +245,13 @@ pub fn syntax_unit(e: &syn::ParseError, src: &[u8], mode: ModeId, feat: syn::Fea
 			.ops
 			.push(Op { code: Opcode::End, flags: 0, ev: 0, a: 0, b: 0, node: 0 });
 	} else {
+		// Bash's status for this is 2, except in a `-c` string, where the
+		// failing command substitution's 127 is what the shell exits with.
+		// Which of the two applies is a run-time fact, so the op carries
+		// where the error came from and `Abort` reads the run's origin.
+		if e.command_substitution {
+			flags |= Op::COMSUB;
+		}
 		unit
 			.ops
 			.push(Op { code: Opcode::Abort, flags, ev: 0, a, b: 2, node: e.line });
@@ -732,13 +742,16 @@ impl Lower {
 				// The header's expressions are not commands: a zero value
 				// neither runs the ERR trap nor exits under `set -e`.
 				self.cond += 1;
-				if !f.init.src.trim_ascii().is_empty() {
+				if !f.init.src.is_empty() {
 					let (a, b) = self.arith(&f.init.src);
 					self.emit(Opcode::Arith, a, b, id);
 				}
 				let enter = self.emit(Opcode::LoopEnter, 0, 0, id);
 				let cond = self.here();
-				if f.cond.src.trim_ascii().is_empty() {
+				// The parser removes leading spaces and tabs. A remaining
+				// newline is an expression evaluating to zero, not an omitted
+				// condition (which is true).
+				if f.cond.src.is_empty() {
 					self.emit(Opcode::SetStatus, 0, 0, id);
 				} else {
 					let (a, b) = self.arith(&f.cond.src);
@@ -749,7 +762,7 @@ impl Lower {
 				self.list(&f.body)?;
 				let step = self.emit(Opcode::LoopNote, 0, 0, id);
 				self.patch_b(enter, step);
-				if !f.step.src.trim_ascii().is_empty() {
+				if !f.step.src.is_empty() {
 					let (a, b) = self.arith(&f.step.src);
 					self.cond += 1;
 					self.emit(Opcode::Arith, a, b, id);
@@ -943,12 +956,16 @@ impl Lower {
 		sub.command(cmd)?;
 		sub.emit(Opcode::End, 0, 0, root);
 		let mut body = sub.unit;
-		// Node records filled while lowering the body belong to both units.
-		for (i, n) in body.nodes.iter().enumerate() {
+		// A function lowered from run-time text (for example a here-document
+		// substitution) may add node ids beyond the enclosing unit's records.
+		// Preserve existing records and append the newly discovered ones.
+		let shared = self.unit.nodes.len();
+		for (i, n) in body.nodes[..shared].iter().enumerate() {
 			if n.hi > 0 {
 				self.unit.nodes[i] = *n;
 			}
 		}
+		self.unit.nodes.extend_from_slice(&body.nodes[shared..]);
 		body.seal_from(self.source_hash.clone());
 		Ok(body)
 	}
@@ -1355,6 +1372,7 @@ impl Lower {
 				let entry = self.block(&c.body)?;
 				let kind = match c.kind {
 					syn::ComsubKind::Dollar | syn::ComsubKind::Backtick => ComsubForm::Fork,
+					syn::ComsubKind::DollarDeferred => ComsubForm::ForkReparse,
 					syn::ComsubKind::NoFork => ComsubForm::NoFork,
 					syn::ComsubKind::ValueSub => ComsubForm::Value,
 				};

@@ -272,6 +272,12 @@ impl Cache {
 	}
 }
 
+/// Bash arithmetic ignores only spaces, tabs and newlines, not every ASCII
+/// whitespace byte (in particular, a carriage return is an invalid token).
+const fn is_space(c: u8) -> bool {
+	matches!(c, b' ' | b'\t' | b'\n')
+}
+
 /// The value of `text` (leading blanks removed) when it is a plain decimal
 /// constant with an optional sign and trailing blanks (` -42 `, bash's
 /// `legal_number` shape, base prefixes excluded), as compiling and
@@ -281,7 +287,7 @@ impl Cache {
 fn decimal_value(text: &[u8], depth: u32) -> Option<i64> {
 	let end = text
 		.iter()
-		.rposition(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
+		.rposition(|&c| !is_space(c))
 		.map_or(0, |p| p + 1);
 	let text = &text[..end];
 	let (neg, digits) = match text.split_first() {
@@ -395,8 +401,12 @@ pub fn eval(text: &[u8], env: &mut dyn Env) -> Result<i64, Error> {
 }
 
 fn eval_depth(text: &[u8], env: &mut dyn Env, depth: u32) -> Result<i64, Error> {
-	let text = text.trim_ascii_start();
-	if text.trim_ascii().is_empty() {
+	let start = text
+		.iter()
+		.position(|&c| !is_space(c))
+		.unwrap_or(text.len());
+	let text = &text[start..];
+	if text.is_empty() {
 		return Ok(0);
 	}
 	if let Some(v) = decimal_value(text, depth) {
@@ -650,7 +660,7 @@ impl Compiler<'_> {
 		}
 		rest[2..]
 			.iter()
-			.find(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
+			.find(|&&c| !is_space(c))
 			.is_some_and(|&c| c == b'_' || c.is_ascii_alphabetic())
 	}
 
@@ -668,11 +678,7 @@ impl Compiler<'_> {
 	}
 
 	fn skip_ws(&mut self) {
-		while self
-			.src
-			.get(self.pos)
-			.is_some_and(|c| matches!(c, b' ' | b'\t' | b'\n' | b'\r'))
-		{
+		while self.src.get(self.pos).is_some_and(|&c| is_space(c)) {
 			self.pos += 1;
 		}
 	}
@@ -976,6 +982,9 @@ impl Compiler<'_> {
 			let Some(lv) = self.lvalue() else {
 				return self.fail("identifier expected after pre-increment or pre-decrement");
 			};
+			if let Some(fail) = self.invalid_lookahead() {
+				return fail;
+			}
 			let node = Node::PreInc(Box::new(lv), delta);
 			// `--x++`: the incremented value is no lvalue.
 			self.skip_ws();
@@ -1017,6 +1026,9 @@ impl Compiler<'_> {
 			return self.primary();
 		};
 		self.last = start;
+		if let Some(fail) = self.invalid_lookahead() {
+			return fail;
+		}
 		self.skip_ws();
 		let rest = &self.src[self.pos..];
 		if rest.starts_with(b"++") || rest.starts_with(b"--") {
@@ -1063,6 +1075,19 @@ impl Compiler<'_> {
 		self.fail("arithmetic syntax error: operand expected")
 	}
 
+	/// Bash reads the next token before returning a number or variable.
+	/// A lexical error therefore prevents its enclosing assignment or prefix
+	/// increment, without undoing earlier comma operands or postfix increments.
+	fn invalid_lookahead(&mut self) -> Option<Node> {
+		self.skip_ws();
+		let &ch = self.src.get(self.pos)?;
+		if ch.is_ascii_alphanumeric() || ch == b'_' || b"+-*/%<>=!&|^~?:,()".contains(&ch) {
+			return None;
+		}
+		self.last = self.pos;
+		Some(self.fail("arithmetic syntax error: invalid arithmetic operator"))
+	}
+
 	/// A numeric constant (bash's `strlong`): `0` octal, `0x` hex,
 	/// `BASE#DIGITS`. bash's lexer cuts the expression at the end of the
 	/// constant while converting it, so its errors show the text only up to
@@ -1076,7 +1101,7 @@ impl Compiler<'_> {
 		let end = start + n;
 		self.pos = end;
 		match strlong(&self.src[start..end]) {
-			Ok(v) => Node::Num(v),
+			Ok(v) => self.invalid_lookahead().unwrap_or(Node::Num(v)),
 			Err(msg) => {
 				self.failed = true;
 				Node::Fail(Box::new(SyntaxError {
@@ -1387,7 +1412,7 @@ impl Walk<'_> {
 		}
 		let raw = match self.env.get(&lv.name, key)? {
 			None => return Ok(0),
-			Some(Value::Text(raw)) if raw.trim_ascii().is_empty() => return Ok(0),
+			Some(Value::Text(raw)) if raw.iter().all(|&c| is_space(c)) => return Ok(0),
 			Some(raw) => raw,
 		};
 		let depth = self.depth + lv.level + 1;

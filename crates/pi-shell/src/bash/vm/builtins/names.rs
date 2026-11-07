@@ -675,7 +675,7 @@ pub fn compgen(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	if let Some(name) = o.arg(b'V') {
 		let items = words.into_iter().map(|w| (None, false, w)).collect();
 		let lhs = Lhs { name, index: None, append: false };
-		return done(if bind_lhs(ctx, lhs, AssignValue::Array(items)) {
+		return done(if bind_lhs(ctx, lhs, AssignValue::Array(items))? {
 			status
 		} else {
 			1

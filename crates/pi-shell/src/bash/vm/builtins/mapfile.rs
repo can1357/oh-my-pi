@@ -164,7 +164,7 @@ pub fn mapfile(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	// The first run empties the array (but for `-O`); later ones add to
 	// it, whatever the callbacks did to it.
 	let lhs = Lhs { name, index: None, append: run > 0 || !spec.clear };
-	if !bind_lhs(ctx, lhs, AssignValue::Array(items)) {
+	if !bind_lhs(ctx, lhs, AssignValue::Array(items))? {
 		return done(1);
 	}
 	let (Some(cb), Some((n, line))) = (spec.callback, callback) else {

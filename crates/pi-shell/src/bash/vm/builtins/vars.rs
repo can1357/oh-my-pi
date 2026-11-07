@@ -1885,6 +1885,11 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					AssignValue::Scalar(BString::from(value)),
 					level,
 				) {
+					if ctx.vp.mode.dialect() == crate::bash::ids::Dialect::Bash
+						&& matches!(d, Diag::ArithSubscript { .. })
+					{
+						return Err(Need::Sub(expand::Stop::Fail(d)));
+					}
 					ctx.err(d);
 					status = 1;
 					continue;
@@ -2362,7 +2367,10 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 					// the line (bash `jump_to_top_level (DISCARD)`).
 					Err(d @ Diag::ArithSubscript { .. }) => {
 						ctx.diag(d);
-						return Ok(super::Outcome { status: 1, control: super::Control::DiscardAll });
+						return Ok(super::Outcome {
+							status:  1,
+							control: super::Control::ArithSubscript,
+						});
 					},
 					Err(d) => {
 						ctx.err(d);
@@ -2985,6 +2993,13 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 							status = 1;
 							continue;
 						},
+						Err(d @ Diag::ArithSubscript { .. }) => {
+							ctx.diag(d);
+							return Ok(super::Outcome {
+								status:  1,
+								control: super::Control::ArithSubscript,
+							});
+						},
 						Err(d) => {
 							ctx.err(d);
 							status = 1;
@@ -3320,7 +3335,7 @@ pub fn let_(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			// `jump_to_top_level (DISCARD)` in `array_expand_index`).
 			Err(d @ Diag::ArithSubscript { .. }) => {
 				ctx.diag(d);
-				return Ok(super::Outcome { status: 1, control: super::Control::DiscardAll });
+				return Ok(super::Outcome { status: 1, control: super::Control::ArithSubscript });
 			},
 			// bash prints a readonly assignment without the `let: ` prefix.
 			Err(d @ Diag::Readonly { .. }) => {

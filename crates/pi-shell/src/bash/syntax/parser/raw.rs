@@ -97,6 +97,9 @@ impl Parser<'_> {
 		// `${…}` operator state: whether single quotes quote (`#`, `%`, `/`…).
 		let mut dolbrace_quote = false;
 		let mut dolbrace_op = false;
+		// Arithmetic counts a parameter word's parentheses as header text,
+		// but its semicolons do not separate the three `for` clauses.
+		let mut arith_braces = 0u32;
 		loop {
 			let Some(ch) = self.peek() else {
 				let close_str: &'static str = match close {
@@ -145,10 +148,18 @@ impl Parser<'_> {
 				out.pop();
 				return Ok(());
 			}
+			if flags.has(Flags::ARITH) {
+				if wasdol && ch == b'{' && !self.funsub_next() {
+					arith_braces += 1;
+				} else if ch == b'}' {
+					arith_braces = arith_braces.saturating_sub(1);
+				}
+			}
 			// `for ((…))` splits at the `;`s of its own text (bash
 			// `skip_to_delim`), not those of nested quotes or substitutions.
 			if ch == b';'
 				&& self.raw_depth == 1
+				&& arith_braces == 0
 				&& let Some(semis) = &mut self.arith_semis
 			{
 				semis.push(out.len() - 1);
@@ -181,7 +192,12 @@ impl Parser<'_> {
 						rflags
 					};
 					self.raw_into(&mut nested, ch, ch, ch, nflags, line)?;
-					if ansi {
+					if ansi && open == b'[' && flags.has(Flags::ARITH) {
+						// `$[ … ]` expands ANSI-C quotes as shell words; `((…))`
+						// instead stores their single-quoted decoded text.
+						out.extend_from_slice(&nested);
+						out.push(ch);
+					} else if ansi {
 						let decoded = ansi_decode(&nested);
 						out.truncate(out.len() - 2);
 						if !dq || (flags.has(Flags::DOLBRACE) && dolbrace_quote) {
@@ -240,7 +256,10 @@ impl Parser<'_> {
 					self.raw_into(&mut nested, 0, b'(', b')', Flags::ARITH, line)?;
 					nested
 				} else {
-					self.comsub(b')', false)?.1
+					self
+						.comsub(b')', false)
+						.map_err(super::ParseError::in_command_substitution)?
+						.1
 				};
 				out.extend_from_slice(&nested);
 				out.push(b')');
@@ -294,7 +313,8 @@ impl Parser<'_> {
 					self.bump();
 					out.push(c);
 				},
-				b':' | b'}' if depth == 0 => return Ok((out, c == b':')),
+				b'}' => return Ok((out, false)),
+				b':' if depth == 0 => return Ok((out, true)),
 				b'\\' => {
 					self.bump();
 					match self.peek() {
@@ -345,6 +365,13 @@ impl Parser<'_> {
 	/// (bash `parse_comsub`): the commands and the text bash stores between
 	/// the delimiters.
 	pub(super) fn comsub(&mut self, close: u8, value: bool) -> PResult<(List, Vec<u8>)> {
+		self.comsub_depth += 1;
+		let result = self.comsub_inner(close, value);
+		self.comsub_depth -= 1;
+		result
+	}
+
+	fn comsub_inner(&mut self, close: u8, value: bool) -> PResult<(List, Vec<u8>)> {
 		debug_assert!(self.la.is_none(), "a command substitution starts inside a word");
 		let mut lx = LexState::new();
 		lx.extglob = self.feat.contains(Features::EXTGLOB);
@@ -362,27 +389,39 @@ impl Parser<'_> {
 		self.expand_aliases = saved_expand && self.feat.contains(Features::POSIX);
 		let close_tok = if close == b'}' { T::RBrace } else { T::RParen };
 
-		self.skip_newlines()?;
-		let mut list = if self.peek_kind()? == close_tok {
-			List::default()
-		} else {
-			self.compound_list()?
+		let parsed = (|| {
+			self.skip_newlines()?;
+			let mut list = if self.peek_kind()? == close_tok {
+				List::default()
+			} else {
+				self.compound_list()?
+			};
+			let t = self.take()?;
+			if t.kind != close_tok {
+				return Err(self.token_error(&t));
+			}
+			let last = self.lx.last;
+			let before = self.lx.before;
+			if !self.pending.is_empty() {
+				self.gather_ahead();
+			}
+			super::finish::fill_docs(&mut list, &self.docs);
+			Ok((list, last, before))
+		})();
+		let parsed = match parsed {
+			Err(e) if e.recovery == super::Recovery::ArithmeticFor && saved_pending.is_empty() => {
+				Err(self.recover_arith_for(e))
+			},
+			// Bash crashes if this recovery invalidates an outer pending
+			// here-document. Keep the approved safe syntax error instead.
+			result => result,
 		};
-		let t = self.take()?;
-		if t.kind != close_tok {
-			return Err(self.token_error(&t));
-		}
-		let last = self.lx.last;
-		let before = self.lx.before;
-		if !self.pending.is_empty() {
-			self.gather_ahead();
-		}
-		super::finish::fill_docs(&mut list, &self.docs);
 
 		self.lx = saved_lx;
 		self.compound = saved_compound;
 		self.pending = saved_pending;
 		self.expand_aliases = saved_expand;
+		let (list, last, before) = parsed?;
 
 		let tcmd = crate::bash::syntax::print::comsub_text(&list);
 		let mut text = Vec::with_capacity(tcmd.len() + 4);
@@ -408,6 +447,32 @@ impl Parser<'_> {
 			text.push(b' ');
 		}
 		Ok((list, text))
+	}
+
+	/// `YYERROR` in `make_arith_for_command` discards tokens, not characters:
+	/// a quote can carry recovery past newlines to EOF. In that case
+	/// `parse_comsub` returns `matched_pair_error` and the outer `yylex` drops
+	/// its unfinished word. A newline token instead forces bash -c to exit.
+	fn recover_arith_for(&mut self, mut error: super::ParseError) -> super::ParseError {
+		loop {
+			match self.take() {
+				Ok(t) if t.kind == T::Newline => break,
+				Ok(t) if t.kind == T::Eof => {
+					error.recovery = super::Recovery::WordEof;
+					return error;
+				},
+				Ok(_) => {},
+				Err(e) => {
+					if e.recovery == super::Recovery::WordEof || self.peek().is_none() {
+						error.recovery = super::Recovery::WordEof;
+						return error;
+					}
+					break;
+				},
+			}
+		}
+		error.recovery = super::Recovery::None;
+		error.in_command_substitution()
 	}
 
 	/// `name=(` seen: the elements up to the closing `)` (bash

@@ -210,8 +210,11 @@ pub(super) enum Stop {
 	Brace { dq: bool, slash: bool, pat: bool, doc: bool },
 	/// `[…]` subscript: the matching `]` (not consumed).
 	Bracket,
-	/// Extglob / regexp group: the matching `)` (consumed).
+	/// Extglob group: the matching `)` (consumed).
 	Group,
+	/// A regexp group whose raw parentheses are already paired: parse all
+	/// captured bytes, including unmatched `)` left after parameter expansion.
+	RegexpContent,
 	/// End of input ([`parse_text`](super::parse_text)).
 	Text(TextMode),
 }
@@ -270,8 +273,8 @@ impl<'s> Parser<'s> {
 		let mut first = true;
 		loop {
 			// Fast path: a run of ordinary bytes in the current buffer.
-			if self.pos < self.buf.len() {
-				let buf: &'s [u8] = self.buf;
+			if self.pos < self.bytes().len() {
+				let buf = self.bytes();
 				let rest = &buf[self.pos..];
 				let n = run_len(self.feat, rest, |c| !plain_word_byte(c));
 				if n > 0 {
@@ -355,7 +358,7 @@ impl<'s> Parser<'s> {
 					self.bump();
 					acc.lit.push(c);
 					if c == b'(' {
-						self.group_into(&mut acc)?;
+						self.regexp_group_into(&mut acc)?;
 					}
 					scan = Scan::No;
 				},
@@ -546,7 +549,7 @@ impl<'s> Parser<'s> {
 				self.bump();
 				let mut s = Vec::new();
 				loop {
-					let buf: &'s [u8] = self.buf;
+					let buf = self.bytes();
 					let rest = buf.get(self.pos..).unwrap_or_default();
 					if let Some(n) = rest.iter().position(|&c| c == b'\'') {
 						s.extend_from_slice(&rest[..n]);
@@ -665,6 +668,20 @@ impl<'s> Parser<'s> {
 		self.parts_into(acc, Stop::Group, line)
 	}
 
+	/// Bash pairs a regexp group's raw parentheses before expanding its
+	/// words. In particular `${v:-(}` contributes a parenthesis to that scan.
+	fn regexp_group_into(&mut self, acc: &mut Acc) -> PResult<()> {
+		let lo = self.off();
+		let line = self.bash_line();
+		let mut text = self.raw_matched(b'(', b')', super::raw::Flags::NONE, line)?;
+		text.push(b')');
+		let mut sub = Parser::new(&text, self.feat, self.aliases);
+		sub.base = lo;
+		sub.line = line;
+		sub.virt = 0;
+		sub.parts_into(acc, Stop::RegexpContent, line)
+	}
+
 	/// The part loop shared by every quoting context.
 	#[allow(clippy::cognitive_complexity, reason = "one state machine over bash's quoting rules")]
 	fn parts_into(&mut self, acc: &mut Acc, stop: Stop, line: u32) -> PResult<()> {
@@ -673,8 +690,8 @@ impl<'s> Parser<'s> {
 		let mut lit_sq = false;
 		let mut sq_line = line;
 		loop {
-			if self.pos < self.buf.len() {
-				let buf: &'s [u8] = self.buf;
+			if self.pos < self.bytes().len() {
+				let buf = self.bytes();
 				let rest = &buf[self.pos..];
 				let n = run_len(self.feat, rest, |c| {
 					matches!(
@@ -706,7 +723,7 @@ impl<'s> Parser<'s> {
 					return Err(unmatched_error(self.eof_span(), sq_line, "'"));
 				}
 				return match stop {
-					Stop::Text(_) => Ok(()),
+					Stop::Text(_) | Stop::RegexpContent => Ok(()),
 					Stop::DQuote { .. } => Err(unmatched_error(self.eof_span(), line, "\"")),
 					Stop::Brace { .. } => Err(unmatched_error(self.eof_span(), line, "}")),
 					Stop::Bracket => Err(unmatched_error(self.eof_span(), line, "]")),
@@ -839,7 +856,9 @@ impl<'s> Parser<'s> {
 					}
 					let ansi_ok = !matches!(
 						stop,
-						Stop::DQuote { .. } | Stop::Text(_) | Stop::Brace { doc: true, pat: false, .. }
+						Stop::DQuote { .. }
+							| Stop::Text(TextMode::DoubleQuote | TextMode::HereDoc)
+							| Stop::Brace { doc: true, pat: false, .. }
 					);
 					if let Some(part) = self.dollar(stop, !ansi_ok)? {
 						acc.push(part);
@@ -972,13 +991,20 @@ impl<'s> Parser<'s> {
 				bracket: false,
 			}));
 		}
-		let body = super::sub_parse_list(&text, self.feat, lo).unwrap_or_default();
-		Ok(WordPart::Comsub(Box::new(Comsub { kind: ComsubKind::Dollar, body, text })))
+		let (kind, body) = match super::sub_parse_list(&text, self.feat, lo) {
+			Ok(body) => (ComsubKind::Dollar, body),
+			// Keep the source for the child parser. A malformed fallback is
+			// still lazy inside a parameter word, not an empty substitution.
+			Err(_) => (ComsubKind::DollarDeferred, List::default()),
+		};
+		Ok(WordPart::Comsub(Box::new(Comsub { kind, body, text })))
 	}
 
 	/// `$(` seen: parse the command substitution.
 	fn dollar_paren(&mut self) -> PResult<WordPart> {
-		let (body, text) = self.comsub(b')', false)?;
+		let (body, text) = self
+			.comsub(b')', false)
+			.map_err(super::ParseError::in_command_substitution)?;
 		Ok(WordPart::Comsub(Box::new(Comsub { kind: ComsubKind::Dollar, body, text })))
 	}
 
@@ -1007,7 +1033,7 @@ impl<'s> Parser<'s> {
 	/// the part keeps the error for expansion time and the cursor moves to
 	/// the `}` ending the word.
 	fn bad_comsub(&mut self) -> Option<WordPart> {
-		let buf: &'s [u8] = self.buf;
+		let buf = self.bytes();
 		let rest = buf.get(self.pos..).unwrap_or_default();
 		let len = word_end_in_quote(rest)?;
 		let text = &rest[..len];
@@ -1158,7 +1184,7 @@ impl<'s> Parser<'s> {
 
 	/// After `${!`: whether the name is followed directly by `*}` / `@}`.
 	fn prefix_names_end(&self) -> bool {
-		let Some(rest) = self.buf.get(self.pos..) else {
+		let Some(rest) = self.bytes().get(self.pos..) else {
 			return false;
 		};
 		if !rest.first().is_some_and(|&c| is_name_start(c)) {

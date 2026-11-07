@@ -1,18 +1,41 @@
-//! The input cursor: the source bytes plus a stack of alias expansions.
+//! The input cursor: source bytes and pushed alias or arithmetic-replay text.
 //!
-//! bash reads characters through `shell_getc`, which switches to a pushed
-//! alias string and back transparently. Here the current buffer is either
-//! the source or an alias value (both borrowed for `'s`), and reaching the
-//! end of an alias value pops back to the text after the aliased word.
+//! Borrowed source and alias values need no allocation. A failed arithmetic
+//! recognition pushes its normalized text, as bash's `PSH_DPAREN` does;
+//! small handles refer to those parser-owned buffers without self-borrows.
 
 use alloc::vec::Vec;
 
 use super::Parser;
 
+/// A borrowed source/alias value or normalized text owned by the parser.
+#[derive(Clone, Copy)]
+pub(super) enum Buffer<'s> {
+	Borrowed(&'s [u8]),
+	Replay(usize),
+}
+
+impl Buffer<'_> {
+	fn bytes<'a>(&'a self, replay: &'a [Vec<u8>]) -> &'a [u8] {
+		match self {
+			Self::Borrowed(bytes) => bytes,
+			Self::Replay(index) => &replay[*index],
+		}
+	}
+
+	fn same(self, other: Self) -> bool {
+		match (self, other) {
+			(Self::Borrowed(a), Self::Borrowed(b)) => core::ptr::eq(a, b),
+			(Self::Replay(a), Self::Replay(b)) => a == b,
+			_ => false,
+		}
+	}
+}
+
 /// The buffer that was current when an alias expansion was pushed.
 pub(super) struct Frame<'s> {
 	/// Outer buffer.
-	pub buf:         &'s [u8],
+	pub buf:         Buffer<'s>,
 	/// Cursor in the outer buffer (just after the aliased word).
 	pub pos:         usize,
 	/// Alias being expanded by the pushed buffer (recursion guard).
@@ -34,7 +57,7 @@ pub(super) struct Skip {
 /// A cursor position to come back to.
 #[derive(Clone, Copy)]
 pub(super) struct Mark<'s> {
-	buf:       &'s [u8],
+	buf:       Buffer<'s>,
 	pos:       usize,
 	line:      u32,
 	depth:     usize,
@@ -50,10 +73,40 @@ pub(super) static END_ALIAS_SPACE: [u8; 1] = *b" ";
 pub(super) const EMPTY: &[u8] = &[];
 
 impl<'s> Parser<'s> {
+	/// The current buffer, borrowed only until the next cursor mutation.
+	#[inline]
+	pub(super) fn bytes(&self) -> &[u8] {
+		self.buf.bytes(&self.replay)
+	}
+
+	/// Whether pushed arithmetic text is active, including under an alias.
+	pub(super) fn replaying(&self) -> bool {
+		matches!(self.buf, Buffer::Replay(_))
+			|| self
+				.frames
+				.iter()
+				.any(|f| matches!(f.buf, Buffer::Replay(_)))
+	}
+
+	/// Push normalized arithmetic text, without an alias recursion guard or
+	/// the synthetic end-of-alias blank.
+	pub(super) fn push_replay(&mut self, text: Vec<u8>) {
+		let index = self.replay.len();
+		self.replay.push(text);
+		self.frames.push(Frame {
+			buf:         self.buf,
+			pos:         self.pos,
+			alias:       Vec::new(),
+			expand_next: false,
+		});
+		self.buf = Buffer::Replay(index);
+		self.pos = 0;
+	}
+
 	/// The next byte, without consuming it; pops finished alias buffers.
 	#[inline]
 	pub(super) fn peek(&mut self) -> Option<u8> {
-		match self.buf.get(self.pos) {
+		match self.bytes().get(self.pos) {
 			Some(&c) => Some(c),
 			None => self.peek_slow(),
 		}
@@ -62,7 +115,7 @@ impl<'s> Parser<'s> {
 	#[cold]
 	fn peek_slow(&mut self) -> Option<u8> {
 		loop {
-			if let Some(&c) = self.buf.get(self.pos) {
+			if let Some(&c) = self.bytes().get(self.pos) {
 				return Some(c);
 			}
 			let Some(frame) = self.frames.pop() else {
@@ -83,14 +136,14 @@ impl<'s> Parser<'s> {
 	/// The byte `n` places after the cursor in the current buffer.
 	#[inline]
 	pub(super) fn peek_at(&self, n: usize) -> Option<u8> {
-		self.buf.get(self.pos + n).copied()
+		self.bytes().get(self.pos + n).copied()
 	}
 
 	/// Consume the byte [`Parser::peek`] returned.
 	#[inline]
-	pub(super) const fn bump(&mut self) {
-		if self.pos < self.buf.len() {
-			let nl = self.buf[self.pos] == b'\n';
+	pub(super) fn bump(&mut self) {
+		if self.pos < self.bytes().len() {
+			let nl = self.bytes()[self.pos] == b'\n';
 			self.pos += 1;
 			if nl && self.in_source() {
 				self.base_newline();
@@ -131,7 +184,7 @@ impl<'s> Parser<'s> {
 				return;
 			}
 			#[allow(clippy::naive_bytecount, reason = "dependency-free no_std crate")]
-			let nls = self.buf[self.pos..end]
+			let nls = self.bytes()[self.pos..end]
 				.iter()
 				.filter(|&&c| c == b'\n')
 				.count();
@@ -204,7 +257,7 @@ impl<'s> Parser<'s> {
 	/// Return to `m`; fails (and leaves the cursor alone) when an alias
 	/// buffer was popped in between.
 	pub(super) fn reset(&mut self, m: Mark<'s>) -> bool {
-		if self.frames.len() != m.depth || !core::ptr::eq(self.buf.as_ptr(), m.buf.as_ptr()) {
+		if self.frames.len() != m.depth || !self.buf.same(m.buf) {
 			return false;
 		}
 		self.pos = m.pos;
@@ -216,7 +269,7 @@ impl<'s> Parser<'s> {
 	/// Skip blanks and line continuations.
 	pub(super) fn skip_blanks(&mut self) {
 		loop {
-			while let Some(&c) = self.buf.get(self.pos) {
+			while let Some(c) = self.bytes().get(self.pos).copied() {
 				if !matches!(c, b' ' | b'\t') {
 					if c != b'\\' {
 						return;
@@ -239,7 +292,7 @@ impl<'s> Parser<'s> {
 	/// Skip a comment up to (not including) the newline.
 	pub(super) fn skip_comment(&mut self) {
 		loop {
-			let buf: &'s [u8] = self.buf;
+			let buf = self.bytes();
 			let rest = &buf[self.pos.min(buf.len())..];
 			if let Some(n) = rest.iter().position(|&c| c == b'\n') {
 				self.advance(n);
@@ -264,9 +317,9 @@ impl<'s> Parser<'s> {
 		if self.frames.is_empty() {
 			return out;
 		}
-		out.extend_from_slice(self.buf.get(self.pos..).unwrap_or_default());
+		out.extend_from_slice(self.bytes().get(self.pos..).unwrap_or_default());
 		for f in self.frames.iter().skip(1).rev() {
-			out.extend_from_slice(f.buf.get(f.pos..).unwrap_or_default());
+			out.extend_from_slice(f.buf.bytes(&self.replay).get(f.pos..).unwrap_or_default());
 		}
 		out
 	}
@@ -284,7 +337,7 @@ impl<'s> Parser<'s> {
 
 	/// Whether the byte just consumed was the end-of-alias space.
 	pub(super) fn at_alias_space(&self) -> bool {
-		self.pos == 1 && core::ptr::eq(self.buf.as_ptr(), END_ALIAS_SPACE.as_ptr())
+		self.pos == 1 && core::ptr::eq(self.bytes().as_ptr(), END_ALIAS_SPACE.as_ptr())
 	}
 
 	/// Whether alias `name` is being expanded.

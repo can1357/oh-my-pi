@@ -1131,7 +1131,7 @@ fn part_text(p: &WordPart, out: &mut Vec<u8>, ctx: Ctx) {
 		},
 		WordPart::Param(p) => param_text(p, out, ctx),
 		WordPart::Comsub(c) => match c.kind {
-			ComsubKind::Dollar => {
+			ComsubKind::Dollar | ComsubKind::DollarDeferred => {
 				out.extend_from_slice(b"$(");
 				out.extend_from_slice(&c.text);
 				out.push(b')');

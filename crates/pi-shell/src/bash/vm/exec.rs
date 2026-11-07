@@ -59,6 +59,9 @@ pub enum Flow {
 	Exit(i32),
 	/// An expansion or arithmetic error: abandon the current top-level command.
 	Discard(i32),
+	/// An indexed-subscript arithmetic error: unwind past functions, eval
+	/// and source to the run's input loop, or end a `-c` string or child.
+	DiscardAll(i32),
 }
 
 /// Run vproc `vp` for up to `slice` ops; stops early when it parks, a
@@ -299,7 +302,10 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		// An `exit N` in the cancel trap is `exit_shell`'s (the EXIT trap, then
 		// status N, as bash).
 		let cancel_transfer = cancellation.is_some()
-			&& matches!(flow, Flow::Return(_) | Flow::Abort(_) | Flow::Discard(_));
+			&& matches!(
+				flow,
+				Flow::Return(_) | Flow::Abort(_) | Flow::Discard(_) | Flow::DiscardAll(_)
+			);
 		let failing = !ignore_errexit && vp.status != 0 && matches!(flow, Flow::Next | Flow::Jump(_));
 		let failed_command = failing
 			&& match op.code {
@@ -312,7 +318,19 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				},
 				Opcode::CallAnon => !vp.frames.get(fi).is_some_and(|frame| frame.err_reported),
 				Opcode::Redir => matches!(flow, Flow::Jump(_)),
-				Opcode::Leave | Opcode::Arith | Opcode::CondTest => {
+				// bash runs no ERR trap for a loop, `if`, `case` or group:
+				// only for a command, a `[[ ]]` and a `(( ))`. `judged`
+				// below gates `set -e` on the same node kinds, and the two
+				// must agree — a loop whose body left a non-zero status
+				// would otherwise report an error bash never reports.
+				Opcode::Leave => {
+					!vp.frames.get(fi).is_some_and(|frame| frame.err_reported)
+						&& unit
+							.nodes
+							.get(op.node as usize)
+							.is_some_and(|n| matches!(n.kind, NodeKind::Cond | NodeKind::Arith))
+				},
+				Opcode::Arith | Opcode::CondTest => {
 					!vp.frames.get(fi).is_some_and(|frame| frame.err_reported)
 				},
 				_ => false,
@@ -429,6 +447,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			Flow::Break { n, cont } => break_loops(k, vp, cx, n, cont, op),
 			Flow::Exit(status) if unit.mode.dialect() == Dialect::Zsh => zsh_exit(k, vp, cx, status),
 			Flow::Exit(status) => exit_shell(k, vp, cx, status),
+			Flow::DiscardAll(status) => discard_all(k, vp, cx, status),
 			Flow::Discard(status) if unit.mode.dialect() == Dialect::Zsh => {
 				zsh_discard(k, vp, cx, status);
 			},
@@ -441,16 +460,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 					.frames
 					.iter()
 					.rposition(|f| matches!(f.kind, FrameKind::Script { .. }));
-				if let Some(i) = script {
-					unwind(&mut k.root, cx.store, vp, i + 1);
-					clear_scratch(&mut k.root, cx.store, vp);
-					truncate(vp, Depths::default());
-					let f = top_frame(vp);
-					f.unit = None;
-					f.loops.clear();
-				} else {
-					unwind(&mut k.root, cx.store, vp, 0);
-				}
+				discard_script(k, vp, cx, script);
 			},
 		}
 		if cancel_transfer {
@@ -2077,6 +2087,75 @@ fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 		)
 }
 
+/// Bash's DISCARD after `top_level_cleanup`: pass through functions, eval
+/// and source to the run's input loop. A `-c` string is one command, and a
+/// child without its own run frame ends instead of returning to its caller.
+fn discard_all(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
+	// Inside the EXIT trap the shell is already exiting with a status it
+	// saved: bash abandons the trap's command without touching it, so a
+	// subscript error in cleanup must not become the shell's status and
+	// must not destroy an explicit `exit N`. Only the trap's own frame is
+	// discarded, and its end restores the saved status.
+	if let Some(i) = exit_trap_frame(vp) {
+		discard_script(k, vp, cx, Some(i));
+		return;
+	}
+	vp.status = status;
+	let run = vp
+		.frames
+		.iter()
+		.position(|f| matches!(f.kind, FrameKind::Script { what: ScriptKind::Run, .. }));
+	if let Some(i) = run {
+		// `top_level_cleanup` runs before the shell exits, not after it:
+		// the function scopes and redirections the failing command was
+		// under are gone by the time the EXIT trap runs, so the trap sees
+		// the global scope and the run's own descriptors.
+		discard_script(k, vp, cx, Some(i));
+		if !run_is_command(cx, vp) {
+			return;
+		}
+	}
+	exit_shell(k, vp, cx, status);
+}
+
+/// The innermost running EXIT trap's frame, if this shell is in one.
+///
+/// A shell already running its own EXIT trap is already exiting with a
+/// status it saved, and bash leaves that status alone when the trap's own
+/// command fails. Measured against Bash 5.2.21 and against main:
+/// `( trap '((a[1+]))' EXIT; exit 7 )` gives 7 in both, and gives 1 here
+/// if a child is excluded from this guard — so the rule is the vproc's own
+/// trap, whether or not it has a parent.
+fn exit_trap_frame(vp: &Vproc) -> Option<usize> {
+	vp.frames.iter().rposition(|f| {
+		matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { key: TrapKey::Exit, .. }, .. })
+	})
+}
+
+/// Whether this run is a `-c` string rather than a script, a file or an
+/// interactive session: one command, so abandoning it ends the shell.
+pub fn run_is_command(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+	matches!(
+		state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
+		Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
+	)
+}
+
+/// Abandon the current command in `script`, restoring its expansion and
+/// redirection state before it reads another command.
+fn discard_script(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, script: Option<usize>) {
+	if let Some(i) = script {
+		unwind(&mut k.root, cx.store, vp, i + 1);
+		clear_scratch(&mut k.root, cx.store, vp);
+		truncate(vp, Depths::default());
+		let f = top_frame(vp);
+		f.unit = None;
+		f.loops.clear();
+	} else {
+		unwind(&mut k.root, cx.store, vp, 0);
+	}
+}
+
 /// The flow for an expansion error (the diagnostic is printed).
 pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, stop: Stop) -> Flow {
 	match stop {
@@ -2095,6 +2174,13 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		Stop::Probe(_) => {
 			k.diag(cx, vp, line, Diag::Unsupported { what: "`=cmd` in this expansion".into() });
 			Flow::Discard(1)
+		},
+		Stop::Fail(d @ Diag::ArithSubscript { .. })
+		| Stop::Fatal(d @ Diag::ArithSubscript { .. })
+			if vp.mode.dialect() == Dialect::Bash =>
+		{
+			k.diag(cx, vp, line, d);
+			Flow::DiscardAll(1)
 		},
 		// A non-interactive posix shell exits on an expansion error (bash's
 		// `posixly_correct && !interactive_shell`), as on a fatal one.
@@ -2200,7 +2286,7 @@ pub fn start_sub(
 	let inherit =
 		posix || state::option(&mut k.root, cx.store, vp, OptId::InheritErrexit).unwrap_or(false);
 	match form {
-		ComsubForm::Fork => {
+		ComsubForm::Fork | ComsubForm::ForkReparse => {
 			let mut fds = vp.fds.clone();
 			fds.set(1, Some(out));
 			// Outside posix mode bash parses `$( )` without aliases and
@@ -2214,9 +2300,10 @@ pub fn start_sub(
 				.get(entry as usize)
 				.is_some_and(|op| op.flags & ir::Op::CAT != 0);
 			let reparse = text.and_then(|i| unit.strs.get(i as usize)).filter(|_| {
-				!posix
-					&& !cat
-					&& (base != line || matches!(builtins::alias_table(k, cx, vp), Ok(Some(_))))
+				form == ComsubForm::ForkReparse
+					|| (!posix
+						&& !cat
+						&& (base != line || matches!(builtins::alias_table(k, cx, vp), Ok(Some(_)))))
 			});
 			let mut child = if let Some(src) = reparse {
 				vp.child_text(k, cx.store, src, base, fds)
@@ -2752,26 +2839,8 @@ fn plain_arith(
 			Flow::Next
 		},
 		Err(d @ (Diag::Arith { .. } | Diag::Readonly { .. })) => {
-			clear_scratch(&mut k.root, cx.store, vp);
-			let d = if matches!(d, Diag::Arith { .. }) {
-				d.by("((")
-			} else {
-				d
-			};
 			let line = line_of(vp, op.node);
-			k.diag(cx, vp, line, d);
-			vp.status = 1;
-			// `((…))` continues; an arith-for header error leaves the loop
-			// (approximated by discarding the command).
-			if unit
-				.nodes
-				.get(op.node as usize)
-				.is_some_and(|n| n.kind == NodeKind::ArithFor)
-			{
-				Flow::Discard(1)
-			} else {
-				Flow::Next
-			}
+			arith_failed(k, vp, cx, unit, op, line, d)
 		},
 		Err(d @ Diag::Unbound { .. }) => {
 			let line = line_of(vp, op.node);
@@ -2782,6 +2851,57 @@ fn plain_arith(
 			stop_flow(k, vp, cx, line, Stop::Fail(d))
 		},
 	})
+}
+
+/// An `Arith` op's evaluation error (printed here): `((…))` fails and the
+/// line continues; an arith-`for` header error ends its loop with status 1,
+/// not the rest of the line.
+fn arith_failed(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	unit: &Unit,
+	op: Op,
+	line: u32,
+	d: Diag,
+) -> Flow {
+	clear_scratch(&mut k.root, cx.store, vp);
+	let d = if matches!(d, Diag::Arith { .. }) {
+		d.by("((")
+	} else {
+		d
+	};
+	k.diag(cx, vp, line, d);
+	vp.status = 1;
+	if !unit
+		.nodes
+		.get(op.node as usize)
+		.is_some_and(|n| n.kind == NodeKind::ArithFor)
+	{
+		return Flow::Next;
+	}
+	let exit = unit
+		.ops
+		.iter()
+		.enumerate()
+		.skip(top_frame(vp).pc as usize)
+		.find(|(_, next)| next.node == op.node && next.code == Opcode::LoopExit)
+		.map(|(pc, _)| pc as u32)
+		.expect("arithmetic loop exit");
+	// The header's expressions are not commands, and bash runs no ERR trap
+	// for one that fails. Nothing is suppressed here: the loop's `Leave`
+	// is an `ArithFor` node, and the ERR arm above reports only `Cond` and
+	// `Arith` nodes, so an enclosing loop's `Leave` stays silent too.
+	if let Some(rec) = top_frame(vp)
+		.loops
+		.last_mut()
+		.filter(|rec| rec.exit == exit)
+	{
+		rec.status = 1;
+		Flow::Jump(exit)
+	} else {
+		Flow::Jump(exit + 1)
+	}
 }
 
 /// Whether `op` (an `Enter`/`Leave`) brackets a zsh `[[ ]]` traced by
@@ -2993,8 +3113,8 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 				}
 				match ex.arith_eval(&expanded) {
 					Ok(v) => Ok(Ok(v)),
-					// An error in a subscript abandons the line (an expansion
-					// failure).
+					// Ordinary evaluation errors fail the command; subscript
+					// errors retain their class for `stop_flow`.
 					Err(Stop::Fail(d @ (Diag::Arith { .. } | Diag::Readonly { .. }))) => Ok(Err(d)),
 					Err(stop) => Err(stop),
 				}
@@ -3005,27 +3125,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					vp.status = i32::from(v == 0);
 					Flow::Next
 				},
-				Ok(Err(d)) => {
-					clear_scratch(&mut k.root, cx.store, vp);
-					let d = if matches!(d, Diag::Arith { .. }) {
-						d.by("((")
-					} else {
-						d
-					};
-					k.diag(cx, vp, line, d);
-					vp.status = 1;
-					// `((…))` continues; an arith-for header error leaves the
-					// loop (approximated by discarding the command).
-					if unit
-						.nodes
-						.get(op.node as usize)
-						.is_some_and(|n| n.kind == NodeKind::ArithFor)
-					{
-						Flow::Discard(1)
-					} else {
-						Flow::Next
-					}
-				},
+				Ok(Err(d)) => arith_failed(k, vp, cx, unit, op, line, d),
 				Err(flow) => flow,
 			}
 		},
@@ -3123,7 +3223,15 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					.unwrap_or_default();
 				k.diag(cx, vp, op.node, wrap(Diag::SyntaxContext { text }));
 			}
-			Flow::Abort(op.b as i32)
+			// A `-c` string exits with the failing command substitution's
+			// 127; every other origin reports the parser's own status.
+			// A fatal error inside this shell's own EXIT trap leaves the
+			// status it was exiting with alone.
+			if op.flags & Op::COMSUB != 0 && run_is_command(cx, vp) && exit_trap_frame(vp).is_none() {
+				Flow::Abort(127)
+			} else {
+				Flow::Abort(op.b as i32)
+			}
 		},
 		Opcode::End => Flow::EndUnit,
 		Opcode::Repeat => repeat(k, vp, cx, unit, op, line),
