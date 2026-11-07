@@ -212,6 +212,22 @@ export function formatModelStringWithRouting(model: Model<Api>): string {
 	return upstream ? `${selector}@${upstream}` : selector;
 }
 
+/**
+ * Compare the selected model and request target while allowing session-fitted
+ * metadata, such as its context window, to differ.
+ */
+export function modelsHaveSameRequestTarget(actual: Model<Api> | undefined, expected: Model<Api>): boolean {
+	if (!actual) return false;
+	if (actual === expected) return true;
+	return (
+		modelsAreEqual(actual, expected) &&
+		actual.api === expected.api &&
+		actual.baseUrl === expected.baseUrl &&
+		actual.requestModelId === expected.requestModelId &&
+		(actual.compat === expected.compat || getSingleUpstreamRoute(actual) === getSingleUpstreamRoute(expected))
+	);
+}
+
 /** Restore a canonical model identity without interpreting any part of its id as a thinking selector. */
 export function resolveExactModelIdentity(
 	identity: string,
