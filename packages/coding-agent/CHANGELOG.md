@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `async.maxJobs` now sets the cap on background jobs running at once in a session and its subagents without the fixed 100 ceiling, and `0` means no limit; the default stays 100 ([#17965](https://github.com/can1357/oh-my-pi/pull/17965) by [@sjawhar](https://github.com/sjawhar))
+- A background job started while running jobs fill `async.maxJobs` (async `bash`, async `task` spawns, eval `agent()`, `workpool()` batches, `judge_batch()`) is now queued instead of refused with `Background job limit reached`: the call returns its job id at once and says the job is queued, `read proc://`, `wait` and `/jobs` show it as `queued`, it counts toward nothing, and queued jobs start in arrival order as running jobs end; cancelling a queued job drops it without running its work. A task call's async subagents now also wait for a free slot, so one call can no longer start more of them than the cap allows ([#18006](https://github.com/can1357/oh-my-pi/pull/18006) by [@sjawhar](https://github.com/sjawhar))
+- A background subagent that starts work of its own at the `async.maxJobs` cap — a nested `task` spawn, an async `bash`, an eval job — now takes that subagent's own slot, one piece of work at a time, instead of queueing behind it. Before this, a subagent holding the last slot and waiting on a child it queued could never finish, and `omp -p --wait-async` never exited. A deep tree can now exceed the cap by at most one running job per level of nesting ([#18082](https://github.com/can1357/oh-my-pi/pull/18082) by [@sjawhar](https://github.com/sjawhar))
+- Raising `async.maxJobs` in a running session now starts waiting background jobs at once, instead of at the next registration or slot request ([#18082](https://github.com/can1357/oh-my-pi/pull/18082) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
 - Fixed the session crashing with `Native shell returned an invalid execution trace` when a bash command assigned a long value containing multi-byte characters such as Chinese text ([#18259](https://github.com/can1357/oh-my-pi/issues/18259))
@@ -128,13 +135,6 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
-
-### Changed
-
-- `async.maxJobs` now sets the cap on background jobs running at once in a session and its subagents without the fixed 100 ceiling, and `0` means no limit; the default stays 100 ([#17965](https://github.com/can1357/oh-my-pi/pull/17965) by [@sjawhar](https://github.com/sjawhar))
-- A background job started while running jobs fill `async.maxJobs` (async `bash`, async `task` spawns, eval `agent()`, `workpool()` batches, `judge_batch()`) is now queued instead of refused with `Background job limit reached`: the call returns its job id at once and says the job is queued, `read proc://`, `wait` and `/jobs` show it as `queued`, it counts toward nothing, and queued jobs start in arrival order as running jobs end; cancelling a queued job drops it without running its work. A task call's async subagents now also wait for a free slot, so one call can no longer start more of them than the cap allows ([#18006](https://github.com/can1357/oh-my-pi/pull/18006) by [@sjawhar](https://github.com/sjawhar))
-- A background subagent that starts work of its own at the `async.maxJobs` cap — a nested `task` spawn, an async `bash`, an eval job — now takes that subagent's own slot, one piece of work at a time, instead of queueing behind it. Before this, a subagent holding the last slot and waiting on a child it queued could never finish, and `omp -p --wait-async` never exited. A deep tree can now exceed the cap by at most one running job per level of nesting ([#18082](https://github.com/can1357/oh-my-pi/pull/18082) by [@sjawhar](https://github.com/sjawhar))
-- Raising `async.maxJobs` in a running session now starts waiting background jobs at once, instead of at the next registration or slot request ([#18082](https://github.com/can1357/oh-my-pi/pull/18082) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
