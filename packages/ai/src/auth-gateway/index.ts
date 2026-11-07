@@ -1,5 +1,6 @@
 export * from "./clients";
 export * from "./dispatch";
+export * from "./fallback";
 export * from "./http";
 export * from "./session-state";
 export * from "./stdio";
