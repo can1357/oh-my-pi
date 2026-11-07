@@ -69,7 +69,7 @@ interface FakeAcpBuiltinSession {
 	refreshSkillsAndCommands(): Promise<void>;
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 	editTodoPhases(
-		update: FakeTodoPhase[] | ((current: FakeTodoPhase[]) => FakeTodoPhase[] | undefined),
+		update: (current: FakeTodoPhase[]) => FakeTodoPhase[] | undefined,
 	): Promise<FakeTodoPhase[] | undefined>;
 	refreshBaseSystemPrompt(): Promise<void>;
 	getHindsightSessionState(): undefined;
@@ -166,7 +166,7 @@ function createRuntime() {
 			return this._todoPhases;
 		},
 		async editTodoPhases(update) {
-			const phases = typeof update === "function" ? update(this._todoPhases) : update;
+			const phases = update(this._todoPhases);
 			if (!phases) return undefined;
 			this._todoPhases = phases;
 			fakeSessionManager.appendCustomEntry("user_todo_edit", { phases });

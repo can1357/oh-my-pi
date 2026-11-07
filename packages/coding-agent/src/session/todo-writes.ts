@@ -18,7 +18,7 @@ const SESSION_CHANGED_MESSAGE = "The session changed before the todo edit was sa
 /** `source` of session notices about todo backends. */
 const NOTICE_SOURCE = "todo-backend";
 
-/** Thrown by a write's guard when the todo list was reset or reloaded after the write was enqueued. */
+/** Thrown by a write's `assertCurrent` when the todo list was reset or reloaded after the write was enqueued. */
 class TodoListChangedError extends Error {
 	constructor() {
 		super(SESSION_CHANGED_MESSAGE);
@@ -54,7 +54,7 @@ function isBackendId(id: string): boolean {
  *
  * With native todos a write runs inline, as a plain list update. Once a non-native backend is
  * selected in the main session, writes run one at a time: each receives the backend resolved when
- * it starts (`undefined` = native todos) and a guard that fails once the list was reset or
+ * it starts (`undefined` = native todos) and an `assertCurrent` that throws once the list was reset or
  * reloaded. The backend resolves from `todo.backend` once {@link arm}ed and
  * {@link allowBackendResolution} allowed it, and again whenever the setting changes or the
  * backend's extension is suspended or resumed.
@@ -126,7 +126,7 @@ export class TodoWrites {
 	 *
 	 * Otherwise it is queued: it starts after every earlier write and backend switch settled (a
 	 * rejected one does not block the next) and after startup-deferred extensions bound, and receives
-	 * the backend resolved at that moment plus a guard whose `assertCurrent()` must run before
+	 * the backend resolved at that moment plus an `assertCurrent` that must run before
 	 * committing. A write whose list was reset or reloaded (`/new`, switch, rewind, tree navigation,
 	 * fork) since this call rejects without starting. `options.signal` races the caller against the
 	 * queue: the returned promise rejects at once on abort, a not-yet-started write is skipped, and a
@@ -160,7 +160,7 @@ export class TodoWrites {
 	}
 
 	/**
-	 * An edit the user or an RPC client made outside the `todo` tool, as a write. A function `update`
+	 * An edit the user or an RPC client made outside the `todo` tool, as a write. `update`
 	 * receives the committed list at that moment (returning `undefined` declines: nothing is sent or
 	 * committed); the backend's `replace` then receives a copy of the full list, the list updates and
 	 * a `user_todo_edit` entry is recorded so reloads keep it. A throwing `replace` refuses the edit:
@@ -188,7 +188,7 @@ export class TodoWrites {
 
 	/**
 	 * Record a change that already happened elsewhere (Cursor's server list, a finished subagent, a
-	 * bridged `todo` call), as a write: a function `update` receives the committed list at that moment
+	 * bridged `todo` call), as a write: `update` receives the committed list at that moment
 	 * (`undefined` declines), then the list updates and a `user_todo_edit` entry is recorded. A backend
 	 * cannot refuse it: it gets the list if it does not have it yet, and a throw only warns. Resolves
 	 * with the committed list, or `undefined` when it declined or the list was reset while queued.
@@ -243,7 +243,7 @@ export class TodoWrites {
 	}
 
 	/**
-	 * Make every queued write fail its guard. Call synchronously before switching to a different list
+	 * Make every queued write fail its `assertCurrent`. Call synchronously before switching to a different list
 	 * (new session, session switch, branch), so a write settling mid-swap cannot land in it. A
 	 * whole-session fork keeps the same list, so queued writes stay valid there.
 	 */

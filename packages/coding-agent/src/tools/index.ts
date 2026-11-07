@@ -488,7 +488,7 @@ export interface ToolSession {
 	 * record it on the session branch. Direct `todo` calls persist via their
 	 * toolResult entry; callers that produce none (the eval bridge, Cursor sync)
 	 * use this so branch rehydration agrees with the in-memory list.
-	 * A function `update` runs inside the queued write against the committed list; returning
+	 * `update` runs inside the queued write against the committed list; returning
 	 * `undefined` declines (nothing committed). Resolves with the committed list.
 	 */
 	commitTodoPhases?: (update: TodoPhasesUpdate) => Promise<TodoPhase[] | undefined>;
