@@ -263,6 +263,7 @@ describe("ExtensionAPI agents ownership", () => {
 		root: string;
 		name: string;
 		agentId?: string;
+		parentAgentId?: string;
 		agentRegistry?: AgentRegistryApi;
 	}): Promise<StartedSession> {
 		const cwd = path.join(options.root, options.name);
@@ -287,6 +288,8 @@ describe("ExtensionAPI agents ownership", () => {
 			sessionManager,
 			agentRegistry: options.agentRegistry,
 			agentId: options.agentId ?? MAIN_AGENT_ID,
+			parentAgentId: options.parentAgentId,
+			taskDepth: options.parentAgentId === undefined ? undefined : 1,
 			extensions: [
 				api => {
 					agents = api.agents;
@@ -394,6 +397,101 @@ describe("ExtensionAPI agents ownership", () => {
 		} finally {
 			await later.session.dispose();
 			await earlier.session.dispose();
+		}
+	});
+
+	/**
+	 * `ensureLive` and `prompt` yield before they project or deliver, and
+	 * `AgentRegistry.register` replaces whatever ref holds an id. Each test here
+	 * uses that ordinary public operation inside the yield, and each starts from
+	 * a positive control proving the same call reaches the real child first.
+	 */
+	async function startFamily(label: string): Promise<{
+		registry: AgentRegistry;
+		owner: StartedSession;
+		target: StartedSession;
+		root: string;
+	}> {
+		const root = makeRoot(label);
+		const registry = new AgentRegistry();
+		const owner = await startSession({ root, name: "owner", agentRegistry: registry });
+		const target = await startSession({
+			root,
+			name: "target",
+			agentId: "Child",
+			parentAgentId: MAIN_AGENT_ID,
+			agentRegistry: registry,
+		});
+		return { registry, owner, target, root };
+	}
+
+	it("ensureLive never projects a replacement registered under another owner mid-call", async () => {
+		const { registry, owner, target, root } = await startFamily("ensure-live-foreign");
+		try {
+			expect((await owner.agents.ensureLive("Child")).sessionFile).toBe(target.sessionFile);
+
+			const pending = owner.agents.ensureLive("Child");
+			const foreignFile = path.join(root, "foreign.jsonl");
+			registry.register({
+				id: "Child",
+				displayName: "Foreign",
+				kind: "sub",
+				parentId: "OtherOwner",
+				session: null,
+				sessionFile: foreignFile,
+				status: "parked",
+			});
+
+			await expect(pending).rejects.toThrow(/not visible to this session/);
+			expect(registry.get("Child")?.sessionFile).toBe(foreignFile);
+		} finally {
+			await target.session.dispose();
+			await owner.session.dispose();
+		}
+	});
+
+	it("ensureLive never projects a same-parent replacement that is a different session", async () => {
+		const { registry, owner, target, root } = await startFamily("ensure-live-sibling");
+		try {
+			expect((await owner.agents.ensureLive("Child")).sessionFile).toBe(target.sessionFile);
+
+			const pending = owner.agents.ensureLive("Child");
+			const replacementFile = path.join(root, "replacement.jsonl");
+			// Still inside the owner's family, so visibility alone cannot catch it:
+			// only the handle the revival returned distinguishes the two.
+			registry.register({
+				id: "Child",
+				displayName: "Replacement",
+				kind: "sub",
+				parentId: MAIN_AGENT_ID,
+				session: sessionStub(),
+				sessionFile: replacementFile,
+				status: "idle",
+			});
+
+			await expect(pending).rejects.toThrow(/was replaced while it was being revived/);
+		} finally {
+			await target.session.dispose();
+			await owner.session.dispose();
+		}
+	});
+
+	it("prompt delivers nothing once its owner is disposed during the revival await", async () => {
+		const { owner, target } = await startFamily("prompt-disposal");
+		try {
+			const delivered = spyOn(target.session, "prompt").mockResolvedValue(true);
+			await owner.agents.prompt("Child", "before disposal");
+			expect(delivered).toHaveBeenCalledTimes(1);
+
+			const pending = owner.agents.prompt("Child", "after disposal");
+			const closing = owner.session.dispose();
+			await expect(pending).rejects.toThrow(/no longer live/);
+			await closing;
+
+			expect(delivered).toHaveBeenCalledTimes(1);
+		} finally {
+			await target.session.dispose();
+			await owner.session.dispose();
 		}
 	});
 });

@@ -95,6 +95,34 @@ async function ensureLiveInScope(scope: ResolvedAgentScope, id: string): Promise
 	);
 }
 
+/**
+ * Re-resolve the target after the revival await and prove it is the agent this
+ * call actually addressed.
+ *
+ * An id is not an identity. {@link ensureLiveInScope} yields, and across that
+ * yield the owning session can be disposed, another live session can take over
+ * the owner's agent id, and `AgentRegistry.register` can replace the target's
+ * ref with one under a different parent — ids are unique only inside one
+ * owning session's tree. Resolving the target by bare id afterwards would
+ * project whatever now holds the id, so admission re-runs the entry checks
+ * against the session that authorised the call and then demands that the
+ * current ref carry the very handle the revival returned. A replacement ref
+ * carries a different handle (or none), so it can never be admitted.
+ *
+ * This refuses admission; it does not cancel work already done. A revival that
+ * completed stays completed, and a prompt already handed to the target runs to
+ * its end.
+ */
+function admitLiveTarget(owner: AgentSession, id: string, live: AgentSessionHandle): AgentRef {
+	const scope = resolveAgentScope(owner);
+	assertVisible(scope, id);
+	const ref = scope.registry.get(id);
+	if (ref?.session !== live) {
+		throw new Error(`Agent "${id}" was replaced while it was being revived; this call no longer addresses it.`);
+	}
+	return ref;
+}
+
 /** Actions backing {@link ExtensionAPI.agents}, scoped to one session's own registry family. */
 export function createExtensionAgentActions(
 	owner: () => AgentSession,
@@ -114,18 +142,21 @@ export function createExtensionAgentActions(
 			return ref ? toExtensionAgentInfo(ref) : undefined;
 		},
 		agentsEnsureLive: async id => {
-			const scope = resolveAgentScope(owner());
+			// The session that authorises the call is the one admission revalidates:
+			// a host that swapped sessions mid-await did not authorise this one.
+			const session = owner();
+			const scope = resolveAgentScope(session);
 			assertVisible(scope, id);
-			await ensureLiveInScope(scope, id);
-			const ref = scope.registry.get(id);
-			if (!ref) throw new Error(`agent ${id} not in registry after revive`);
-			return toExtensionAgentInfo(ref);
+			const live = await ensureLiveInScope(scope, id);
+			return toExtensionAgentInfo(admitLiveTarget(session, id, live));
 		},
 		agentsPrompt: async (id, text, agentOptions) => {
-			const scope = resolveAgentScope(owner());
+			const session = owner();
+			const scope = resolveAgentScope(session);
 			assertVisible(scope, id);
-			const liveSession = await ensureLiveInScope(scope, id);
-			await liveSession.prompt(text, { streamingBehavior: agentOptions?.deliverAs ?? "steer" });
+			const live = await ensureLiveInScope(scope, id);
+			admitLiveTarget(session, id, live);
+			await live.prompt(text, { streamingBehavior: agentOptions?.deliverAs ?? "steer" });
 		},
 	};
 }
