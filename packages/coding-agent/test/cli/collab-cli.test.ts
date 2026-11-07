@@ -34,6 +34,7 @@ const ALPHA: HostFixture = {
 		participants: 3,
 		relayConnected: true,
 		inputRequired: true,
+		awaitingGuests: 1,
 		busy: true,
 		access: "control",
 	},
@@ -54,6 +55,7 @@ const BRAVO: HostFixture = {
 		participants: 1,
 		relayConnected: false,
 		inputRequired: false,
+		awaitingGuests: 0,
 		busy: false,
 		access: "view",
 	},
@@ -147,7 +149,7 @@ describe("Collab CLI", () => {
 		expect(text).toContain(`pid ${process.pid}`);
 		expect(text).toContain("gen 2 · test/alpha-model");
 		expect(text).toContain("gen 7 · no model");
-		expect(text).toContain("2 guests · control · relay connected · input required · working");
+		expect(text).toContain("2 guests · control · relay connected · input required · waiting on 1 guest · working");
 		expect(text).toContain("0 guests · view · relay reconnecting · idle");
 		expect(text.indexOf(ALPHA.snapshot.instanceId)).toBeLessThan(text.indexOf(BRAVO.snapshot.instanceId));
 		for (const fixture of [ALPHA, BRAVO]) {

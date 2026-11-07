@@ -69,3 +69,36 @@ it("serves a joining guest, stops serving it on departure, and serves the next o
 		relay.stop();
 	}
 }, 10000);
+
+it("delivers a frame sent in the same step as the close over a real relay", async () => {
+	const relay = startLocalRelay();
+	const key = await importRoomKey(generateRoomKey());
+	const wsUrl = `${relay.url}/r/sendthenclose`;
+	const host = new CollabSocket({ wsUrl, role: "host", key });
+	const hostOpen = Promise.withResolvers<void>();
+	const hello = Promise.withResolvers<void>();
+	const answer = Promise.withResolvers<unknown>();
+	host.onOpen = hostOpen.resolve;
+	host.onFrame = frame => {
+		if (frame.t === "hello") hello.resolve();
+		if (frame.t === "ui-response") answer.resolve(frame);
+	};
+	const guest = new CollabSocket({ wsUrl, role: "guest", key });
+	guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: "leaving" });
+	try {
+		host.connect();
+		await hostOpen.promise;
+		guest.connect();
+		await hello.promise;
+
+		// Submit and leave as one step: the answer is still being sealed when close() runs.
+		guest.send({ t: "ui-response", reqId: 7, value: "Yes" });
+		await guest.close();
+
+		expect(await answer.promise).toEqual({ t: "ui-response", reqId: 7, value: "Yes" });
+	} finally {
+		await guest.close();
+		await host.close();
+		relay.stop();
+	}
+}, 10000);

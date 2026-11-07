@@ -57,6 +57,13 @@ export const HOST_RECLAIM_CONFIRM_MS = 1_000;
 export const RELAY_PING_INTERVAL_MS = 15_000;
 /** A socket that has heard nothing, not even a pong, for this long is dropped and retried. */
 export const RELAY_SILENCE_LIMIT_MS = 40_000;
+/**
+ * How long {@link CollabSocket.close} may spend delivering the frames it already accepted. Closing sends past
+ * backpressure, so what remains is sealing — the admission cap bounds that at 16 MiB — and handing the envelopes
+ * to the socket, which does not wait for the relay. The limit therefore ends only a connection that stopped being
+ * writable without a close event, where nothing more can be delivered, while a leave or exit still ends promptly.
+ */
+export const CLOSE_DELIVERY_LIMIT_MS = 5_000;
 const MAX_PENDING_SENDS = 256;
 const MAX_PENDING_SEND_BYTES = 16 * 1024 * 1024;
 /**
@@ -129,6 +136,18 @@ export class CollabSocket {
 	/** When the current socket last received anything, pongs included. */
 	#lastHeard = 0;
 	#sending = false;
+	/**
+	 * Set while close() delivers the frames it already accepted. `deliver` settles once they are out, or once
+	 * they cannot be (the connection closed, or {@link CLOSE_DELIVERY_LIMIT_MS} passed); `finished` takes the
+	 * transport close whichever way delivery ends, a reconnect that abandons it included.
+	 */
+	#closing:
+		| { deliver: PromiseWithResolvers<void>; finished: PromiseWithResolvers<void>; deadline: number }
+		| undefined;
+	/** The current connection's close, from delivery through the transport closing; cleared by connect(). */
+	#closeDone: Promise<void> | undefined;
+	/** The current connection's transport close once it has started ({@link #closeTransport}); cleared by connect(). */
+	#transportClosed: Promise<void> | undefined;
 	#sendGeneration = 0;
 	#wakeSender: (() => void) | undefined;
 	/** Resolves once regular frames queued before flush() have been sealed. */
@@ -180,11 +199,26 @@ export class CollabSocket {
 		return !this.#retiredPeers.has(peerId);
 	}
 
+	/**
+	 * Settles once every frame this socket has received so far has been dispatched to {@link onFrame}, or dropped
+	 * as stale. Controls are applied at once while frames finish decrypting, so an owner that learns of a
+	 * `peer-left` waits on this to see the frames the relay forwarded before the peer left. Never rejects.
+	 */
+	dispatched(): Promise<void> {
+		return this.#recvChain;
+	}
+
 	/** Fires on every reconnect: the relay recreated the room and reissues peer ids from 1. */
 	onRoomRecreated?: () => void;
 
 	connect(): void {
+		// Reopening abandons a close still delivering: those frames belong to the connection that closed, and
+		// that close still settles only once its connection has closed.
+		const closing = this.#closing;
+		if (closing) closing.finished.resolve(this.#finishClose(closing.deadline));
 		if (this.#ws || this.#retryTimer) return;
+		this.#closeDone = undefined;
+		this.#transportClosed = undefined;
 		this.#closed = false;
 		this.#retryMissingRoom = false;
 		this.#hostReclaimUntil = undefined;
@@ -221,7 +255,7 @@ export class CollabSocket {
 	}
 
 	#sendOne(frame: CollabFrame | EncodedFrame, targetPeer: number, key?: string): void {
-		if (this.#closed) return;
+		if (this.#closed || this.#closing) return;
 		try {
 			const serialized = typeof frame === "string" ? frame : JSON.stringify(frame);
 			const prepared = Promise.withResolvers<void>();
@@ -244,7 +278,7 @@ export class CollabSocket {
 	 * traffic. {@link EncodedFrame} items are sealed as-is, as in {@link send}.
 	 */
 	sendBatch(frames: Iterable<CollabFrame | EncodedFrame>, targetPeer = 0): void {
-		if (this.#closed) return;
+		if (this.#closed || this.#closing) return;
 		this.#enqueueSend(frames[Symbol.iterator](), targetPeer, 0);
 	}
 
@@ -357,6 +391,7 @@ export class CollabSocket {
 				if (generation !== this.#sendGeneration) return;
 				this.#sending = false;
 				if (this.#pendingSends.length > 0) this.#pumpSends();
+				else this.#closing?.deliver.resolve();
 			});
 	}
 
@@ -433,7 +468,9 @@ export class CollabSocket {
 			const ws = await this.#waitForWritable(generation);
 			if (!ws || this.#closed || generation !== this.#sendGeneration) return "stop";
 			if (pending.cancelled) return "cancelled";
-			if (ws !== this.#ws || !this.#isWritable(ws) || ws.bufferedAmount >= WS_BACKPRESSURE_THRESHOLD) continue;
+			if (ws !== this.#ws || !this.#isWritable(ws)) continue;
+			// Closing is terminal: what close() is delivering goes out past backpressure.
+			if (!this.#closing && ws.bufferedAmount >= WS_BACKPRESSURE_THRESHOLD) continue;
 			ws.send(envelope);
 			return "sent";
 		}
@@ -444,7 +481,7 @@ export class CollabSocket {
 		let threshold = WS_BACKPRESSURE_THRESHOLD;
 		while (!this.#closed && generation === this.#sendGeneration) {
 			const ws = this.#ws;
-			if (this.#isWritable(ws) && !(ws.bufferedAmount >= threshold)) return ws;
+			if (this.#isWritable(ws) && (this.#closing || !(ws.bufferedAmount >= threshold))) return ws;
 			const wake = Promise.withResolvers<void>();
 			this.#wakeSender = wake.resolve;
 			let timer: NodeJS.Timeout | undefined;
@@ -482,6 +519,7 @@ export class CollabSocket {
 		this.#sendChain = Promise.resolve();
 		this.#clearBackpressureDrain();
 		this.#wakeSender?.();
+		this.#closing?.deliver.resolve();
 	}
 
 	/** Terminal-only: every caller is closing for good, so no peer is served any more. */
@@ -503,9 +541,46 @@ export class CollabSocket {
 		}
 	}
 
-	/** Intentional close: clears any retry timer, suppresses reconnect. A later connect() starts fresh. */
-	close(): void {
-		const hadActivity = this.#ws !== null || this.#retryTimer !== undefined;
+	/**
+	 * Intentional close: clears any retry timer, suppresses reconnect, accepts no further frame and dispatches no
+	 * further inbound one. A frame accepted before the close is still delivered while the connection is open:
+	 * the rest is sealed and written past backpressure ahead of the close frame. Resolves once the connection
+	 * has closed — the socket's buffer has drained into the close handshake, so an exiting process loses nothing
+	 * it wrote — or {@link CLOSE_DELIVERY_LIMIT_MS} after the call, whichever comes first. A connection that is
+	 * not open has nobody to deliver to, and its frames are dropped. A later connect() starts fresh.
+	 */
+	close(): Promise<void> {
+		// One close per connection: a second caller waits for the same delivery and transport close. Published
+		// before anything runs, so an owner callback that closes again (onClose) gets the same promise.
+		if (this.#closeDone) return this.#closeDone;
+		const finished = Promise.withResolvers<void>();
+		this.#closeDone = finished.promise;
+		const deadline = Date.now() + CLOSE_DELIVERY_LIMIT_MS;
+		const undelivered = this.#pendingSends.some(
+			pending => !pending.cancelled && (!pending.eager || !pending.preparedEnvelope),
+		);
+		if (this.#closed || !undelivered || !this.#isWritable(this.#ws)) {
+			finished.resolve(this.#finishClose(deadline));
+			return finished.promise;
+		}
+		const deliver = Promise.withResolvers<void>();
+		const limit = setTimeout(deliver.resolve, CLOSE_DELIVERY_LIMIT_MS);
+		void deliver.promise.then(() => {
+			clearTimeout(limit);
+			if (this.#closing?.deliver === deliver) finished.resolve(this.#finishClose(deadline));
+		});
+		this.#closing = { deliver, finished, deadline };
+		// A sender parked on backpressure goes now.
+		this.#wakeSender?.();
+		return finished.promise;
+	}
+
+	/** Terminal close; settles when the transport reports closed, or at `deadline`. */
+	#finishClose(deadline = Date.now() + CLOSE_DELIVERY_LIMIT_MS): Promise<void> {
+		const closing = this.#closing;
+		this.#closing = undefined;
+		closing?.deliver.resolve();
+		const hadActivity = closing !== undefined || this.#ws !== null || this.#retryTimer !== undefined;
 		this.#clearRetry();
 		this.#clearProvisional();
 		this.#stopHeartbeat();
@@ -518,24 +593,57 @@ export class CollabSocket {
 			pending.preparedEnvelope ? [pending.preparedEnvelope] : [],
 		);
 		this.#discardPendingSends();
-		if (ws) {
-			try {
-				// Closing is terminal, so backpressure no longer matters: every
-				// prepared envelope (typically a final `bye`) enters the socket buffer
-				// ahead of the close frame.
+		// A fatal failure may already have started closing this connection: wait for that one.
+		const transportClosed = ws
+			? this.#closeTransport(ws, prepared, deadline)
+			: (this.#transportClosed ?? Promise.resolve());
+		if (hadActivity && !wasClosed) this.onClose?.("closed", false);
+		return transportClosed;
+	}
+
+	/**
+	 * Close a detached connection: every prepared envelope (typically a final `bye`) enters its buffer ahead of
+	 * the close frame, past backpressure, since closing is terminal. Settles when the transport reports closed —
+	 * what was written has left the process — or at `deadline`. Kept for the connection's lifetime, so a close()
+	 * after a fatal failure waits for the same thing.
+	 */
+	#closeTransport(
+		ws: WebSocket,
+		prepared: Uint8Array[],
+		deadline: number,
+		how: "close" | "terminate" = "close",
+	): Promise<void> {
+		const transportClosed = Promise.withResolvers<void>();
+		this.#transportClosed = transportClosed.promise;
+		if (ws.readyState === WebSocket.CLOSED) {
+			transportClosed.resolve();
+			return transportClosed.promise;
+		}
+		// The socket is detached, so its own close handler has nothing left to do.
+		ws.onclose = () => transportClosed.resolve();
+		const limit = setTimeout(transportClosed.resolve, Math.max(0, deadline - Date.now()));
+		void transportClosed.promise.then(() => clearTimeout(limit));
+		try {
+			if (how === "terminate") {
+				// A silent connection: what it still buffers is discarded, but it is not closed until it says so.
+				ws.terminate();
+			} else {
 				if (ws.readyState === WebSocket.OPEN) {
 					for (const envelope of prepared) ws.send(envelope);
 				}
 				ws.close(1000);
-			} catch {
-				// already closing/closed
 			}
+		} catch {
+			// already closing/closed
+			transportClosed.resolve();
 		}
-		if (hadActivity && !wasClosed) this.onClose?.("closed", false);
+		return transportClosed.promise;
 	}
 
 	#openSocket(): void {
 		this.#clearBackpressureDrain();
+		// A new connection: the previous one's transport close belongs to it.
+		this.#transportClosed = undefined;
 		const url = `${this.#opts.wsUrl}?role=${this.#opts.role}`;
 		const options = {
 			proxy: getProxyForUrl("collab", new URL(url)),
@@ -556,7 +664,7 @@ export class CollabSocket {
 			this.#commitOpen(ws);
 		};
 		ws.onmessage = (event: MessageEvent) => {
-			if (this.#ws !== ws) return;
+			if (this.#ws !== ws || this.#closing) return;
 			this.#lastHeard = Date.now();
 			// The relay only talks to a host it accepted; commit before dispatching so
 			// the room reset still precedes every frame.
@@ -606,11 +714,7 @@ export class CollabSocket {
 			this.#clearProvisional();
 			this.#stopHeartbeat();
 			this.#ws = null;
-			try {
-				ws.terminate();
-			} catch {
-				// already gone
-			}
+			this.#closeTransport(ws, [], this.#closing?.deadline ?? Date.now() + CLOSE_DELIVERY_LIMIT_MS, "terminate");
 			this.#handleClose(1006, "relay stopped responding");
 		}, RELAY_PING_INTERVAL_MS);
 	}
@@ -672,7 +776,7 @@ export class CollabSocket {
 		// before the relay tears the room down. Only a terminal close or a room
 		// recreation makes it stale; a mere disconnect ahead of a retry does not.
 		const generation = this.#roomGeneration;
-		const stale = (): boolean => this.#closed || generation !== this.#roomGeneration;
+		const stale = (): boolean => this.#closed || this.#closing !== undefined || generation !== this.#roomGeneration;
 		this.#recvChain = this.#recvChain
 			.then(async () => {
 				if (stale()) return;
@@ -739,6 +843,11 @@ export class CollabSocket {
 
 	#handleClose(code: number, reason: string): void {
 		if (this.#closed) return;
+		// A close in progress has nothing left to deliver to and never reconnects.
+		if (this.#closing) {
+			this.#closing.deliver.resolve();
+			return;
+		}
 		if (code === 4009 && this.#hostReclaimUntil !== undefined && Date.now() < this.#hostReclaimUntil) {
 			logger.debug("collab: relay still holds this host's dropped connection; retrying", {
 				attempt: this.#reclaimAttempt,
@@ -784,13 +893,8 @@ export class CollabSocket {
 		this.#discardPendingSends();
 		const ws = this.#ws;
 		this.#ws = null;
-		if (ws) {
-			try {
-				ws.close(1000);
-			} catch {
-				// already closing/closed
-			}
-		}
+		// What this connection already wrote still drains: a close() waiting on it, or issued after, waits too.
+		if (ws) this.#closeTransport(ws, [], this.#closing?.deadline ?? Date.now() + CLOSE_DELIVERY_LIMIT_MS);
 		this.onClose?.(reason, false);
 	}
 

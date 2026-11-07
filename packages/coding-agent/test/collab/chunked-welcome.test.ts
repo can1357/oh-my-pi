@@ -295,14 +295,10 @@ describe("collab chunked welcome (#3144)", () => {
 		const guest = new CollabGuestLink(makeFailingGuestContext(failure));
 		const joinAttempt = guest.join(host.link);
 		try {
-			await expect(
-				Promise.race([
-					joinAttempt,
-					Bun.sleep(250).then(() => {
-						throw new Error("join did not reject");
-					}),
-				]),
-			).rejects.toThrow("replica write failed during snapshot resume");
+			// Await the join itself: a join that hangs instead of rejecting fails on the test's own timeout. A fixed
+			// 250 ms race here failed under load: the rejection takes the whole welcome round trip (36–279 ms
+			// measured over 12 parallel runs at load 300), so a correct join could lose to the clock.
+			await expect(joinAttempt).rejects.toThrow("replica write failed during snapshot resume");
 		} finally {
 			writeSpy.mockRestore();
 			await guest.leave("test cleanup").catch(() => {});

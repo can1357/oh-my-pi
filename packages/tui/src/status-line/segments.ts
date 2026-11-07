@@ -30,7 +30,14 @@ import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
 import type { StatusLineSession } from "./host";
-import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
+import type {
+	CollabStatus,
+	RenderedSegment,
+	SegmentContext,
+	SegmentView,
+	StatusLineSegment,
+	StatusLineSegmentId,
+} from "./types";
 
 export type { SegmentContext } from "./types";
 
@@ -1075,19 +1082,32 @@ const sessionNameSegment: StatusLineSegment = {
 	},
 };
 
+/** `waiting on alice`, or `waiting on 2 guests`: who a closed question still waits on ({@link CollabStatus.waitingOn}). */
+function collabWaitText(collab: CollabStatus): string {
+	const waitingOn = collab.waitingOn ?? [];
+	if (waitingOn.length === 0) return "";
+	if (waitingOn.length > 1) return `waiting on ${waitingOn.length} guests`;
+	return `waiting on ${sanitizeStatusText(waitingOn[0]!)}`;
+}
+
 const collabSegment: StatusLineSegment = {
 	id: "collab",
 	render(ctx) {
 		if (!ctx.collab) return { content: "", visible: false };
 		const participants = `${ctx.collab.participantCount}`;
 		const label = ctx.collab.role === "host" ? `⇄ collab:${participants}` : `⇄ collab guest:${participants}`;
-		return { content: accentFg(ctx, "accent", label), visible: true };
+		const wait = collabWaitText(ctx.collab);
+		const waitText = wait ? theme.fg("warning", ` · ${wait}`) : "";
+		return { content: `${accentFg(ctx, "accent", label)}${waitText}`, visible: true };
 	},
 	describe(ctx) {
 		if (!ctx.collab) return null;
 		const participants = `${ctx.collab.participantCount}`;
 		const label = ctx.collab.role === "host" ? `collab:${participants}` : `collab guest:${participants}`;
-		return segView([span(label, accentToken(ctx, "accent"))], "collab");
+		const spans = [span(label, accentToken(ctx, "accent"))];
+		const wait = collabWaitText(ctx.collab);
+		if (wait) spans.push(span(` · ${wait}`, "warning"));
+		return segView(spans, "collab");
 	},
 };
 

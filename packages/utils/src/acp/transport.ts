@@ -171,6 +171,10 @@ export class RpcConnection {
 	 * the peer via `$/cancel_request`, and drops the pending entry so a late
 	 * response is ignored. Used for agent→client requests a mid-turn event can
 	 * supersede (e.g. a permission elicit cancelled when user steering arrives).
+	 *
+	 * `withdraw()` notifies the peer the same way but keeps waiting: the peer's
+	 * response still settles the promise, a result it sent before it saw the
+	 * cancellation or its `-32800`. A later `cancel()` stops the wait.
 	 */
 	requestCancellable<Response>(
 		method: string,
@@ -178,20 +182,31 @@ export class RpcConnection {
 	): {
 		promise: Promise<Response>;
 		cancel(): void;
+		withdraw(): void;
 	} {
 		if (this.signal.aborted) {
 			return {
 				promise: Promise.reject(new Error("Connection closed")),
 				cancel: () => {},
+				withdraw: () => {},
 			};
 		}
 		const { id, deferred } = this.#beginRequest(method, params);
+		let notified = false;
+		const notifyCancel = (): void => {
+			if (notified) return;
+			notified = true;
+			void this.notify("$/cancel_request", { requestId: id }).catch(() => undefined);
+		};
 		return {
 			promise: deferred.promise as Promise<Response>,
 			cancel: () => {
 				if (!this.#pending.delete(id)) return;
 				deferred.reject(RequestError.requestCancelled({ requestId: id, method }));
-				void this.notify("$/cancel_request", { requestId: id }).catch(() => undefined);
+				notifyCancel();
+			},
+			withdraw: () => {
+				if (this.#pending.has(id)) notifyCancel();
 			},
 		};
 	}

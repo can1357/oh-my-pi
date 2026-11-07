@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { generateRoomKey, importRoomKey, open, seal } from "../../src/collab/crypto";
 import { type CollabFrame, packEnvelope, unpackEnvelope } from "../../src/collab/protocol";
-import { CollabSocket } from "../../src/collab/relay-client";
+import {
+	CLOSE_DELIVERY_LIMIT_MS,
+	CollabSocket,
+	RELAY_PING_INTERVAL_MS,
+	RELAY_SILENCE_LIMIT_MS,
+} from "../../src/collab/relay-client";
 
 const ORIGINAL_WEBSOCKET = globalThis.WebSocket;
 const HIGH_WATER_MARK = 64 * 1024;
@@ -23,6 +28,8 @@ class BackpressuredWebSocket {
 	static readonly CLOSING = 2;
 	static readonly CLOSED = 3;
 	static initialBufferedAmount = 0;
+	/** When set, close() only starts the handshake: the buffer is still draining until `drained()` runs. */
+	static deferClose = false;
 	static instances: BackpressuredWebSocket[] = [];
 
 	readonly url: string;
@@ -74,11 +81,25 @@ class BackpressuredWebSocket {
 	}
 
 	terminate(): void {
+		// As in Bun: terminating leaves the socket closing until its close event fires.
+		if (BackpressuredWebSocket.deferClose) {
+			this.readyState = BackpressuredWebSocket.CLOSING;
+			return;
+		}
 		this.readyState = BackpressuredWebSocket.CLOSED;
 	}
 
 	close(): void {
 		if (this.readyState === BackpressuredWebSocket.CLOSED) return;
+		if (BackpressuredWebSocket.deferClose) {
+			this.readyState = BackpressuredWebSocket.CLOSING;
+			return;
+		}
+		this.drained();
+	}
+
+	/** The buffer has left the process and the close handshake finished. */
+	drained(): void {
 		this.readyState = BackpressuredWebSocket.CLOSED;
 		this.onclose?.({ code: 1000, reason: "closed" } as CloseEvent);
 	}
@@ -89,6 +110,7 @@ describe("CollabSocket send backpressure", () => {
 		globalThis.WebSocket = ORIGINAL_WEBSOCKET;
 		vi.restoreAllMocks();
 		vi.useRealTimers();
+		BackpressuredWebSocket.deferClose = false;
 	});
 
 	it("ends an overloaded connection explicitly instead of silently losing pending prompts", async () => {
@@ -639,6 +661,298 @@ describe("CollabSocket send backpressure", () => {
 		// frame instead of being discarded with the queue.
 		expect(ws.sent).toHaveLength(1);
 		expect(ws.readyState).toBe(BackpressuredWebSocket.CLOSED);
+	});
+
+	it("delivers every frame it accepted before closing, in order and past backpressure, and no later one", async () => {
+		vi.spyOn(crypto.subtle, "encrypt")
+			.mockResolvedValueOnce(new Uint8Array([1, 1, 1, 1]).buffer)
+			.mockResolvedValueOnce(new Uint8Array([2, 2, 2, 2]).buffer)
+			.mockResolvedValue(new Uint8Array([3, 3, 3, 3]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/leaving", role: "guest", key: {} as CryptoKey });
+		const closes: [string, boolean][] = [];
+		socket.onClose = (reason, reconnect) => closes.push([reason, reconnect]);
+		socket.connect();
+		const ws = BackpressuredWebSocket.instances[0]!;
+		ws.open();
+
+		// A guest answers and leaves in one step: neither frame is sealed yet, and the relay is slow.
+		socket.send({ t: "ui-response", reqId: 1, value: "Yes" });
+		socket.send({ t: "prompt", text: "and one more thing" });
+		const closed = socket.close();
+		socket.send({ t: "prompt", text: "after close" });
+		await closed;
+
+		expect(ws.sent.map(bytes => Array.from(bytes.slice(-4)))).toEqual([
+			[1, 1, 1, 1],
+			[2, 2, 2, 2],
+		]);
+		expect(ws.readyState).toBe(BackpressuredWebSocket.CLOSED);
+		expect(closes).toEqual([["closed", false]]);
+	});
+
+	it("finishes a close that cannot deliver once its time runs out", async () => {
+		vi.useFakeTimers();
+		// Sealing that never finishes stands in for a connection that takes no more writes.
+		vi.spyOn(crypto.subtle, "encrypt").mockImplementation(() => new Promise<ArrayBuffer>(() => {}));
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/stuck", role: "guest", key: {} as CryptoKey });
+		socket.connect();
+		const ws = BackpressuredWebSocket.instances[0]!;
+		ws.open();
+		socket.send({ t: "ui-response", reqId: 1, value: "Yes" });
+		let finished = false;
+		void socket.close().then(() => {
+			finished = true;
+		});
+
+		vi.advanceTimersByTime(CLOSE_DELIVERY_LIMIT_MS - 1);
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(finished).toBe(false);
+		expect(ws.readyState).toBe(BackpressuredWebSocket.OPEN);
+
+		vi.advanceTimersByTime(1);
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(finished).toBe(true);
+		expect(ws.readyState).toBe(BackpressuredWebSocket.CLOSED);
+		expect(ws.sent).toEqual([]);
+	});
+
+	it("finishes a close at once when the relay drops the connection while it delivers", async () => {
+		vi.useFakeTimers();
+		const release = Promise.withResolvers<ArrayBuffer>();
+		vi.spyOn(crypto.subtle, "encrypt").mockImplementation(() => release.promise);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/gone", role: "guest", key: {} as CryptoKey });
+		socket.connect();
+		const ws = BackpressuredWebSocket.instances[0]!;
+		ws.open();
+		socket.send({ t: "ui-response", reqId: 1, value: "Yes" });
+		const closed = socket.close();
+		// The relay goes away: nothing is left to deliver to, and a closing socket never reconnects.
+		ws.close();
+		await closed;
+		release.resolve(new Uint8Array([1, 2, 3, 4]).buffer);
+		// Past any reconnect backoff.
+		vi.advanceTimersByTime(60_000);
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(ws.sent).toEqual([]);
+		expect(BackpressuredWebSocket.instances).toHaveLength(1);
+	});
+
+	it("resolves a close only once what it wrote has left the process", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		BackpressuredWebSocket.deferClose = true;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/exiting", role: "guest", key: {} as CryptoKey });
+		socket.connect();
+		const ws = BackpressuredWebSocket.instances[0]!;
+		ws.open();
+		socket.send({ t: "ui-response", reqId: 1, value: "Yes" });
+		let finished = false;
+		const closed = socket.close().then(() => {
+			finished = true;
+		});
+		await waitUntil(() => ws.readyState === BackpressuredWebSocket.CLOSING, "the socket never started closing");
+		// The answer is written but still in the socket's buffer: a process that exits now loses it.
+		expect(ws.sent).toHaveLength(1);
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(finished).toBe(false);
+
+		ws.drained();
+		await closed;
+		expect(finished).toBe(true);
+	});
+
+	it("resolves every close of one connection only once that connection has closed", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		BackpressuredWebSocket.deferClose = true;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/twice", role: "guest", key: {} as CryptoKey });
+		socket.connect();
+		const ws = BackpressuredWebSocket.instances[0]!;
+		ws.open();
+		socket.send({ t: "ui-response", reqId: 1, value: "Yes" });
+		void socket.close();
+		await waitUntil(() => ws.readyState === BackpressuredWebSocket.CLOSING, "the socket never started closing");
+		// A second owner (process teardown after a leave) closes the same socket while its buffer drains.
+		let second = false;
+		const again = socket.close().then(() => {
+			second = true;
+		});
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(second).toBe(false);
+		ws.drained();
+		await again;
+		expect(second).toBe(true);
+	});
+
+	it("keeps a close a reconnect abandoned pending until its old connection has closed", async () => {
+		const sealing = Promise.withResolvers<ArrayBuffer>();
+		vi.spyOn(crypto.subtle, "encrypt").mockImplementation(() => sealing.promise);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		BackpressuredWebSocket.deferClose = true;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/reopen", role: "guest", key: {} as CryptoKey });
+		socket.connect();
+		const old = BackpressuredWebSocket.instances[0]!;
+		old.open();
+		socket.send({ t: "ui-response", reqId: 1, value: "Yes" });
+		let closed = false;
+		const closing = socket.close().then(() => {
+			closed = true;
+		});
+		// Reopen while the close is still delivering: the old connection starts its close handshake.
+		socket.connect();
+		expect(BackpressuredWebSocket.instances).toHaveLength(2);
+		expect(old.readyState).toBe(BackpressuredWebSocket.CLOSING);
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(closed).toBe(false);
+
+		old.drained();
+		await closing;
+		expect(closed).toBe(true);
+		sealing.resolve(new Uint8Array([1, 2, 3, 4]).buffer);
+		// The frame sealed after the close belonged to the old connection: the new one never carries it.
+		BackpressuredWebSocket.instances[1]!.open();
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(BackpressuredWebSocket.instances[1]!.sent).toEqual([]);
+	});
+
+	it.each(["a later frame fails to seal", "a batch throws producing its next frame"] as const)(
+		"keeps a close pending until its connection has closed when %s while it delivers",
+		async failure => {
+			vi.spyOn(crypto.subtle, "encrypt")
+				.mockResolvedValueOnce(new Uint8Array([1, 1, 1, 1]).buffer)
+				.mockRejectedValue(new Error("sealing failed"));
+			BackpressuredWebSocket.instances = [];
+			BackpressuredWebSocket.initialBufferedAmount = 0;
+			BackpressuredWebSocket.deferClose = true;
+			globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+			const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/fatal", role: "guest", key: {} as CryptoKey });
+			const reasons: string[] = [];
+			socket.onClose = reason => reasons.push(reason);
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			socket.send({ t: "ui-response", reqId: 1, value: "Yes" });
+			if (failure === "a later frame fails to seal") {
+				socket.send({ t: "prompt", text: "fails to seal" });
+			} else {
+				socket.sendBatch(
+					(function* (): Generator<CollabFrame> {
+						throw new Error("batch frame failed");
+					})(),
+				);
+			}
+			let closed = false;
+			const closing = socket.close().then(() => {
+				closed = true;
+			});
+			await waitUntil(() => ws.readyState === BackpressuredWebSocket.CLOSING, "the failure never closed the socket");
+			// The answer was written; the connection is still draining it when the failure ends the socket.
+			expect(ws.sent.map(bytes => Array.from(bytes.slice(-4)))).toEqual([[1, 1, 1, 1]]);
+			expect(reasons).toHaveLength(1);
+			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+			expect(closed).toBe(false);
+
+			ws.drained();
+			await closing;
+			expect(closed).toBe(true);
+		},
+	);
+
+	it("keeps a close pending until its connection has closed when the heartbeat ends a silent relay while it delivers", async () => {
+		vi.useFakeTimers();
+		// Sealing that never finishes keeps the close delivering when the heartbeat fires.
+		vi.spyOn(crypto.subtle, "encrypt").mockImplementation(() => new Promise<ArrayBuffer>(() => {}));
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		BackpressuredWebSocket.deferClose = true;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/silent", role: "guest", key: {} as CryptoKey });
+		socket.connect();
+		const ws = BackpressuredWebSocket.instances[0]!;
+		ws.open();
+		// The relay answers no ping: the third heartbeat tick is past the silence limit.
+		const heartbeat = Math.ceil(RELAY_SILENCE_LIMIT_MS / RELAY_PING_INTERVAL_MS) * RELAY_PING_INTERVAL_MS;
+		vi.advanceTimersByTime(heartbeat - 1_000);
+		socket.send({ t: "ui-response", reqId: 1, value: "Yes" });
+		let closed = false;
+		void socket.close().then(() => {
+			closed = true;
+		});
+		vi.advanceTimersByTime(1_000);
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(ws.readyState).toBe(BackpressuredWebSocket.CLOSING);
+		expect(closed).toBe(false);
+
+		ws.drained();
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(closed).toBe(true);
+	});
+
+	it("gives a close from inside its own onClose callback the same pending close", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		BackpressuredWebSocket.deferClose = true;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({
+			wsUrl: "ws://localhost:8788/r/reentrant",
+			role: "guest",
+			key: {} as CryptoKey,
+		});
+		let inner: Promise<void> | undefined;
+		socket.onClose = () => {
+			inner ??= socket.close();
+		};
+		socket.connect();
+		const ws = BackpressuredWebSocket.instances[0]!;
+		ws.open();
+		void socket.close();
+		if (!inner) throw new Error("onClose did not run");
+		let innerDone = false;
+		void inner.then(() => {
+			innerDone = true;
+		});
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(innerDone).toBe(false);
+		ws.drained();
+		await inner;
+		expect(innerDone).toBe(true);
+	});
+
+	it("resolves a close whose connection never finishes closing once its time runs out", async () => {
+		vi.useFakeTimers();
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		BackpressuredWebSocket.deferClose = true;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/stalled", role: "guest", key: {} as CryptoKey });
+		socket.connect();
+		BackpressuredWebSocket.instances[0]!.open();
+		let finished = false;
+		void socket.close().then(() => {
+			finished = true;
+		});
+
+		vi.advanceTimersByTime(CLOSE_DELIVERY_LIMIT_MS - 1);
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(finished).toBe(false);
+		vi.advanceTimersByTime(1);
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		expect(finished).toBe(true);
 	});
 
 	it("drains reconnect backlog through the same backpressure gate", async () => {
