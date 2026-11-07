@@ -396,12 +396,19 @@ export class HttpTransport implements MCPTransport {
 		const contentType = response.headers.get("Content-Type") ?? "";
 		if (!response.ok) {
 			const text = await response.text().catch(() => "");
+			const authHints = [
+				response.headers.get("WWW-Authenticate") && `WWW-Authenticate: ${response.headers.get("WWW-Authenticate")}`,
+				response.headers.get("Mcp-Auth-Server") && `Mcp-Auth-Server: ${response.headers.get("Mcp-Auth-Server")}`,
+			]
+				.filter(Boolean)
+				.join("; ");
+			const suffix = authHints ? ` [${authHints}]` : "";
 			if (response.status === 401 || response.status === 403 || !contentType.includes("application/json")) {
 				throw new MCPTransportError({
 					transport: "http",
 					stage: "receive",
 					failure: "http_status",
-					message: `HTTP ${response.status}${label === "server/discover" ? " probing server/discover" : ""}: ${text}`,
+					message: `HTTP ${response.status}${label === "server/discover" ? " probing server/discover" : ""}: ${text}${suffix}`,
 					retryable: response.status === 404 || response.status === 502 || response.status === 503,
 					code: response.status,
 					traceId: mcpTraceIdFromHeaders(response.headers),
@@ -425,7 +432,7 @@ export class HttpTransport implements MCPTransport {
 				transport: "http",
 				stage: "receive",
 				failure: "http_status",
-				message: `HTTP ${response.status}${label === "server/discover" ? " probing server/discover" : ""}: ${text}`,
+				message: `HTTP ${response.status}${label === "server/discover" ? " probing server/discover" : ""}: ${text}${suffix}`,
 				retryable: response.status === 404 || response.status === 502 || response.status === 503,
 				code: response.status,
 				traceId: mcpTraceIdFromHeaders(response.headers),
@@ -478,8 +485,15 @@ export class HttpTransport implements MCPTransport {
 		let stage: MCPFailureStage = "send";
 		let traceId: string | undefined;
 		try {
+			if (options?.onProgress) this.#progressCallbacks.set(id, options.onProgress);
 			const response = await this.#fetch(
-				{ method: "POST", body: JSON.stringify(this.#modernBody(method, params, id)), signal: operation.signal },
+				{
+					method: "POST",
+					body: JSON.stringify(
+						this.#modernBody(method, options?.onProgress ? withProgressToken(params, id) : params, id),
+					),
+					signal: operation.signal,
+				},
 				this.#modernHeaders(method, params),
 			);
 			stage = "receive";
@@ -502,8 +516,12 @@ export class HttpTransport implements MCPTransport {
 				});
 			}
 			if (error instanceof Error && error.name === "AbortError") throw error;
-			throw normalizeMCPTransportError(error, { transport: "http", stage, traceId });
+			const normalized = normalizeMCPTransportError(error, { transport: "http", stage, traceId });
+			throw normalized.failure === "reset" || normalized.failure === "eof"
+				? nonRetryableMCPTransportError(normalized)
+				: normalized;
 		} finally {
+			this.#progressCallbacks.delete(id);
 			operation.clear();
 		}
 	}

@@ -7,12 +7,19 @@
  * subagent with the usual spawn policy, model approval, and concurrency
  * limits, and its final assistant message is the call's result.
  *
+ * The script runs inside a terminable Bun Worker (see vm.ts); a workflow
+ * AbortController cancels any child still outstanding when the script ends,
+ * and their journal transitions are drained before the tool returns.
+ *
  * The journal lives under the session directory
  * (`<session dir>/workflow/<session>/journal.jsonl`) and is appended
  * synchronously before and after every call, so a killed run can be resumed:
  * a matching completed prefix is replayed from the cache and only the
- * divergence tail executes. Prefix matching is strict — once one call differs
- * or failed, every later call executes even if its prompt hash matches.
+ * divergence tail executes. Each call is keyed by a deterministic call path
+ * (parallel item scope + per-scope counter), not by completion order, so an
+ * unchanged script replays all completed calls regardless of how its sibling
+ * promises settled. Prefix matching is strict - once one call differs or
+ * failed, every later call executes even if its prompt hash matches.
  */
 import { randomUUID } from "node:crypto";
 import { type } from "@oh-my-pi/omptype";
@@ -26,6 +33,7 @@ import { throwIfAborted } from "../tools/tool-errors";
 import { hashAgentCall, resolveWorkflowJournalPath, WorkflowJournal, type WorkflowCallRecord } from "./journal";
 import {
 	runWorkflowScript,
+	type WorkflowAgentBridge,
 	type WorkflowAgentCaller,
 	type WorkflowAgentResult,
 	type WorkflowRunResult,
@@ -135,7 +143,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 	readonly approval = "exec" as const;
 	readonly label = "Workflow";
 	readonly description =
-		"Run one deterministic JavaScript workflow over subagents. The script body is an async function with agent(prompt, opts?), parallel(items, fn, {concurrency}) (default 4), pipeline(items, ...stages), phase(name), log(...), clock(), and args. agent() spawns a task subagent and returns { result, tokens }. Only one parallel/pipeline fan-out may be in flight at a time; nesting or overlapping them is rejected. Determinism is enforced: require, import/import(), process, Date, Date.now, Math.random, eval, and new Function are rejected. Every call is journaled; pass resumeFrom to replay a completed prefix and execute only the divergence tail.";
+		"Run one deterministic JavaScript workflow over subagents. The script body is an async function with agent(prompt, opts?), parallel(items, fn, {concurrency}) (default 4), pipeline(items, ...stages), phase(name), log(...), clock(), and args. agent() spawns a task subagent and returns { result, tokens }. Only one parallel/pipeline fan-out may be in flight at a time; nesting or overlapping them is rejected. Determinism is enforced: require, import/import(), process, Date, Date.now, Math.random, eval, and new Function are rejected. Every call is journaled; pass resumeFrom to replay matching completed calls by structural path.";
 	readonly parameters = workflowSchema;
 	readonly strict = true;
 	readonly loadMode = "essential" as const;
@@ -173,32 +181,44 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 			throw new ToolError(`workflow: resumeFrom run ${resumeFrom} was not found in ${journalPath}`);
 		}
 
-		const cachedByIndex = new Map<number, WorkflowCallRecord>();
+		const cachedByPath = new Map<string, WorkflowCallRecord>();
 		for (const call of cachedRun?.calls ?? []) {
 			// A resumed run's own prefix is recorded as `cached`; accepting it
 			// lets a run be resumed again after a second kill.
-			if (call.status === "completed" || call.status === "cached") cachedByIndex.set(call.index, call);
+			if (call.status === "completed" || call.status === "cached") cachedByPath.set(call.callPath, call);
 		}
 
 		const runId = `wf-${randomUUID()}`;
-		let prefixIntact = true;
+		const controller = new AbortController();
+		const runnerSignal = signal !== undefined ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+		let rootPrefixIntact = true;
+		const divergentScopes = new Set<string>();
+		const poolPrefixes = new Map<string, boolean>();
 		let nextIndex = 0;
 		let executed = 0;
 		let cached = 0;
-		const runner = this.#options.runner ?? createWorkflowAgentRunner(this.#session, signal);
+		const runner = this.#options.runner ?? createWorkflowAgentRunner(this.#session, runnerSignal);
 
-		const journalRunner: WorkflowAgentCaller = async (prompt, opts) => {
+		const journalRunner: WorkflowAgentBridge = async (prompt, opts, context) => {
+			throwIfAborted(context.signal);
 			const index = nextIndex;
 			nextIndex += 1;
+			const { callPath } = context;
 			const agent = opts?.agent ?? "default";
 			const promptHash = hashAgentCall({ prompt, agent: opts?.agent, context: opts?.context });
-			const prior = prefixIntact ? cachedByIndex.get(index) : undefined;
+			const scope = callPath.slice(0, callPath.lastIndexOf(":"));
+			const pool = scope.slice(0, scope.lastIndexOf("."));
+			if (scope !== "r" && !poolPrefixes.has(pool)) poolPrefixes.set(pool, rootPrefixIntact);
+			const prior = (scope === "r" ? rootPrefixIntact : poolPrefixes.get(pool) && !divergentScopes.has(scope))
+				? cachedByPath.get(callPath)
+				: undefined;
 
 			if (prior !== undefined && prior.promptHash === promptHash) {
 				cached += 1;
 				journal.append({
 					runId,
 					index,
+					callPath,
 					promptHash,
 					agent,
 					result: prior.result,
@@ -208,14 +228,16 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 				return { result: prior.result ?? "", tokens: prior.tokens, cached: true };
 			}
 
-			prefixIntact = false;
-			journal.append({ runId, index, promptHash, agent, result: null, tokens: 0, status: "started" });
+			rootPrefixIntact = false;
+			divergentScopes.add(scope);
+			journal.append({ runId, index, callPath, promptHash, agent, result: null, tokens: 0, status: "started" });
 			executed += 1;
 			try {
-				const outcome: WorkflowAgentResult = await runner(prompt, opts);
+				const outcome: WorkflowAgentResult = await runner(prompt, opts, context);
 				journal.append({
 					runId,
 					index,
+					callPath,
 					promptHash,
 					agent,
 					result: outcome.result,
@@ -227,6 +249,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 				journal.append({
 					runId,
 					index,
+					callPath,
 					promptHash,
 					agent,
 					result: null,
@@ -244,6 +267,7 @@ export class WorkflowTool implements AgentTool<typeof workflowSchema, WorkflowTo
 				script: params.script,
 				args: params.args ?? "",
 				agent: journalRunner,
+				controller,
 				...(signal !== undefined ? { signal } : {}),
 				...(this.#options.syncTimeoutMs !== undefined ? { syncTimeoutMs: this.#options.syncTimeoutMs } : {}),
 				onLog: line => onUpdate?.({ content: [{ type: "text", text: `workflow log: ${line}` }] }),

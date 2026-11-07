@@ -1,9 +1,12 @@
 /**
- * Deterministic JavaScript orchestration VM.
+ * Deterministic JavaScript orchestration VM, hosted in a Bun Worker.
  *
  * The script runs as the body of an async function in a fresh `node:vm`
- * context. The context exposes exactly six helpers — `agent`, `parallel`,
- * `pipeline`, `phase`, `log`, `clock` — plus the call's `args` string:
+ * context created inside a Worker (worker.ts), so `runWorkflowScript` can
+ * terminate a script stuck in a non-yielding stretch at any point, including
+ * after an `await`. The context exposes exactly six helpers - `agent`,
+ * `parallel`, `pipeline`, `phase`, `log`, `clock` - plus the call's `args`
+ * string:
  *
  * - `agent(prompt, opts?)` awaits one child agent and resolves to
  *   `{ result, tokens, cached? }`;
@@ -27,7 +30,8 @@
  * runs; a bridge failure rejects with a primitive string, never a host Error.
  */
 import { parse } from "@babel/parser";
-import * as vm from "node:vm";
+import { workerHostEntry } from "@oh-my-pi/pi-utils";
+import type { WorkflowHostMessage, WorkflowWorkerMessage } from "./worker-protocol";
 
 export interface WorkflowAgentOptions {
 	/** Agent definition name; the session default when omitted. */
@@ -43,17 +47,39 @@ export interface WorkflowAgentResult {
 	cached?: boolean;
 }
 
-export type WorkflowAgentCaller = (prompt: string, opts?: WorkflowAgentOptions) => Promise<WorkflowAgentResult>;
+/** Per-call context handed to the agent bridge; the call path is the journal identity. */
+export interface WorkflowAgentContext {
+	/** Deterministic, completion-order-independent identity of this agent() call. */
+	callPath: string;
+	/** Workflow-owned cancellation signal, aborted when the run ends with outstanding calls. */
+	signal: AbortSignal;
+}
+
+/** The executor seam; a test/host override may ignore the context. */
+export type WorkflowAgentCaller = (
+	prompt: string,
+	opts?: WorkflowAgentOptions,
+	context?: WorkflowAgentContext,
+) => Promise<WorkflowAgentResult>;
+
+/** The bridge `runWorkflowScript` calls for each `agent()`; context is always supplied. */
+export type WorkflowAgentBridge = (
+	prompt: string,
+	opts: WorkflowAgentOptions | undefined,
+	context: WorkflowAgentContext,
+) => Promise<WorkflowAgentResult>;
 
 export interface WorkflowRunOptions {
 	script: string;
 	args?: string;
-	agent: WorkflowAgentCaller;
+	agent: WorkflowAgentBridge;
 	onLog?: (line: string) => void;
 	onPhase?: (name: string) => void;
-	/** Cancels the await of the script's envelope (the sandbox itself cannot be interrupted asynchronously). */
+	/** Optional workflow-owned controller; created internally when omitted. */
+	controller?: AbortController;
+	/** External abort; cancels and drains outstanding calls. */
 	signal?: AbortSignal;
-	/** Bound on the synchronous portion, i.e. until the script first awaits. */
+	/** Watchdog bound for any non-yielding stretch, including one after an await. */
 	syncTimeoutMs?: number;
 }
 
@@ -72,7 +98,7 @@ export class WorkflowScriptError extends Error {
 	}
 }
 
-/** Bound on synchronous script execution; `runInContext` interrupts a tight loop. */
+/** Default watchdog bound on a non-yielding script stretch. */
 export const DEFAULT_WORKFLOW_SYNC_TIMEOUT_MS = 30_000;
 
 const WRAP_HEAD = "(async () => {\n";
@@ -217,10 +243,14 @@ const WORKFLOW_PRELUDE = String.raw`
 	const hostAgent = __hostAgent;
 	const hostLog = __hostLog;
 	const hostPhase = __hostPhase;
+	const hostParallelFailure = __hostParallelFailure;
+	const hostWithScope = __hostWithScope;
 	const providedArgs = __hostArgs;
 	delete globalThis.__hostAgent;
 	delete globalThis.__hostLog;
 	delete globalThis.__hostPhase;
+	delete globalThis.__hostWithScope;
+	delete globalThis.__hostParallelFailure;
 	delete globalThis.__hostArgs;
 
 	const format = value => {
@@ -262,6 +292,7 @@ const WORKFLOW_PRELUDE = String.raw`
 		throw new Error(typeof reason === "string" ? reason : "agent() failed");
 	});
 
+	let poolSeq = 0;
 	const runPool = async (items, fn, opts) => {
 		if (!Array.isArray(items)) throw new TypeError("parallel(items, fn, opts?): items must be an array");
 		if (typeof fn !== "function") throw new TypeError("parallel(items, fn, opts?): fn must be a function");
@@ -273,17 +304,29 @@ const WORKFLOW_PRELUDE = String.raw`
 		if (list.length < limit) limit = list.length;
 		if (limit < 1) return [];
 		const results = new Array(list.length);
+		const scopePrefix = "p" + (poolSeq++);
 		let next = 0;
+		let stopped = false;
 		const worker = async () => {
-			while (next < list.length) {
+			while (!stopped && next < list.length) {
 				const index = next;
 				next += 1;
-				results[index] = await fn(list[index], index);
+				try {
+					results[index] = await hostWithScope(scopePrefix + "." + index, () => fn(list[index], index));
+				} catch (error) {
+					stopped = true;
+					throw error;
+				}
 			}
 		};
 		const workers = [];
 		for (let i = 0; i < limit; i += 1) workers.push(worker());
-		await Promise.all(workers);
+		try {
+			await Promise.all(workers);
+		} catch (error) {
+			hostParallelFailure();
+			throw error;
+		}
 		return results;
 	};
 
@@ -433,13 +476,6 @@ function scriptEnvelope(script: string): string {
 	);
 }
 
-function hardenBridge(fn: (...args: unknown[]) => void): (...args: unknown[]) => void {
-	// Null prototype keeps `bridge.constructor` out of reach; code generation
-	// is disabled in the context, but the host `Function` would bypass that.
-	Object.setPrototypeOf(fn, null);
-	return Object.freeze(fn);
-}
-
 function toPrimitiveString(value: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
@@ -456,26 +492,6 @@ function parseAgentOptions(value: unknown): WorkflowAgentOptions | undefined {
 function errorText(error: unknown): string {
 	if (error instanceof Error) return error.message;
 	return String(error);
-}
-
-/** Reject the wait on abort; the script's own asynchronous continuations cannot be cancelled. */
-function awaitWithSignal<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
-	if (signal === undefined) return pending;
-	if (signal.aborted) return Promise.reject(new Error("workflow run aborted"));
-	const { promise, resolve, reject } = Promise.withResolvers<T>();
-	const onAbort = (): void => reject(new Error("workflow run aborted"));
-	signal.addEventListener("abort", onAbort, { once: true });
-	pending.then(
-		value => {
-			signal.removeEventListener("abort", onAbort);
-			resolve(value);
-		},
-		error => {
-			signal.removeEventListener("abort", onAbort);
-			reject(error);
-		},
-	);
-	return promise;
 }
 
 /**
@@ -519,126 +535,180 @@ export async function runWorkflowScript(options: WorkflowRunOptions): Promise<Wo
 	const logs: string[] = [];
 	const phases: string[] = [];
 	let agentCalls = 0;
-
-	const recordLog = (line: unknown): void => {
-		if (typeof line !== "string") return;
-		logs.push(line);
-		options.onLog?.(line);
-	};
-	const recordPhase = (name: unknown): void => {
-		if (typeof name !== "string") return;
-		phases.push(name);
-		options.onPhase?.(name);
-	};
-	const callAgent = (payloadJson: unknown, resolve: unknown, reject: unknown): void => {
-		if (typeof resolve !== "function" || typeof reject !== "function") return;
-		const resolveFn = resolve as (value: string) => void;
-		const rejectFn = reject as (reason: string) => void;
-		const safeReject = (reason: string): void => {
-			try {
-				rejectFn(reason);
-			} catch {
-				// The VM realm is gone (run aborted); nothing left to settle.
-			}
-		};
-		let payload: unknown;
-		try {
-			payload = JSON.parse(String(payloadJson));
-		} catch {
-			safeReject("agent() payload was not valid JSON");
-			return;
-		}
-		if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-			safeReject("agent() payload was not an object");
-			return;
-		}
-		const record = payload as Record<string, unknown>;
-		const prompt = toPrimitiveString(record.prompt);
-		if (prompt === undefined) {
-			safeReject("agent(prompt, opts?): prompt must be a string");
-			return;
-		}
-		agentCalls += 1;
-		const settleResult = (result: WorkflowAgentResult): void => {
-			const serialized = JSON.stringify({
-				result: typeof result.result === "string" ? result.result : String(result.result ?? ""),
-				tokens: typeof result.tokens === "number" && Number.isFinite(result.tokens) ? result.tokens : 0,
-				...(result.cached === true ? { cached: true } : {}),
-			});
-			try {
-				resolveFn(serialized);
-			} catch (error) {
-				safeReject(errorText(error));
-			}
-		};
-		try {
-			options
-				.agent(prompt, parseAgentOptions(record.opts))
-				.then(settleResult, error => safeReject(errorText(error)));
-		} catch (error) {
-			safeReject(errorText(error));
-		}
-	};
-
-	const sandbox: Record<string, unknown> = Object.create(null);
-	sandbox.__hostAgent = hardenBridge(callAgent);
-	sandbox.__hostLog = hardenBridge(recordLog);
-	sandbox.__hostPhase = hardenBridge(recordPhase);
-	sandbox.__hostArgs = options.args ?? "";
-
-	let context: vm.Context;
-	try {
-		context = vm.createContext(sandbox, {
-			name: "omp-workflow",
-			codeGeneration: { strings: false, wasm: false },
-		});
-	} catch (error) {
-		throw new WorkflowScriptError(`workflow sandbox could not start: ${errorText(error)}`, { cause: error });
-	}
-
-	try {
-		new vm.Script(WORKFLOW_PRELUDE, { filename: "workflow-prelude.js" }).runInContext(context);
-		new vm.Script(WORKFLOW_HARDEN, { filename: "workflow-harden.js" }).runInContext(context);
-	} catch (error) {
-		throw new WorkflowScriptError(`workflow sandbox prelude failed: ${errorText(error)}`, { cause: error });
-	}
-
 	const syncTimeoutMs = options.syncTimeoutMs ?? DEFAULT_WORKFLOW_SYNC_TIMEOUT_MS;
-	let pending: unknown;
-	try {
-		pending = new vm.Script(scriptEnvelope(options.script), { filename: "workflow-script.js" }).runInContext(
-			context,
-			{
-				timeout: syncTimeoutMs,
-			},
-		);
-	} catch (error) {
-		const detail = errorText(error);
-		if (/timed out/i.test(detail)) {
-			throw new WorkflowScriptError(
-				`workflow script exceeded its ${syncTimeoutMs}ms synchronous time limit; move long-running work into agent() calls`,
-				{ cause: error },
+	const controller = options.controller ?? new AbortController();
+	const heartbeatMs = Math.max(5, Math.min(200, Math.floor(syncTimeoutMs / 4)));
+	const { promise, resolve, reject } = Promise.withResolvers<WorkflowRunResult>();
+
+	const hostEntry = workerHostEntry();
+	const worker = hostEntry
+		? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_workflow"] })
+		: new Worker(new URL("./worker.ts", import.meta.url).href, { type: "module" });
+	const outstanding = new Set<Promise<unknown>>();
+	const send = (message: WorkflowHostMessage): void => {
+		try {
+			worker.postMessage(message);
+		} catch {
+			// The worker is already gone; the run has been finished.
+		}
+	};
+	let finished = false;
+	let lastActivity = Date.now();
+
+	// A worker blocked in a non-yielding stretch (including one after an
+	// await) stops posting heartbeats, so the stale gap trips this watchdog
+	// and terminate() actually stops the loop. Yielding scripts keep the
+	// heartbeat alive and are bounded only by their agent() calls.
+	const watchdog = setInterval(() => {
+		if (Date.now() - lastActivity > syncTimeoutMs) {
+			fail(
+				new WorkflowScriptError(
+					`workflow script exceeded its ${syncTimeoutMs}ms synchronous time limit; move long-running work into agent() calls`,
+				),
 			);
 		}
-		throw new WorkflowScriptError(`workflow script syntax error: ${detail}`, { cause: error });
+	}, heartbeatMs);
+
+	const onExternalAbort = (): void => fail(new Error("workflow run aborted"));
+	options.signal?.addEventListener("abort", onExternalAbort, { once: true });
+	if (options.signal?.aborted) onExternalAbort();
+
+	function settle(run: () => void): void {
+		if (finished) return;
+		finished = true;
+		clearInterval(watchdog);
+		options.signal?.removeEventListener("abort", onExternalAbort);
+		// Stop script execution before cancelling and draining every bridge call.
+		worker.terminate();
+		controller.abort();
+		void Promise.allSettled(Array.from(outstanding)).then(run);
 	}
 
-	const envelopeJson = await awaitWithSignal(Promise.resolve(pending), options.signal);
-	if (typeof envelopeJson !== "string") {
-		throw new WorkflowScriptError("workflow script returned an unexpected envelope");
+	function fail(error: Error): void {
+		settle(() => reject(error));
 	}
-	let envelope: unknown;
-	try {
-		envelope = JSON.parse(envelopeJson);
-	} catch (error) {
-		throw new WorkflowScriptError(`workflow script envelope was not valid JSON: ${errorText(error)}`, {
-			cause: error,
-		});
+
+	function succeed(value: unknown): void {
+		settle(() => resolve({ value, logs, phases, agentCalls }));
 	}
-	if (!isEnvelope(envelope)) throw new WorkflowScriptError("workflow script returned an unexpected envelope");
-	if (!envelope.ok) {
-		const message = typeof envelope.error === "string" ? envelope.error : "workflow script failed";
-		throw new WorkflowScriptError(message);
+
+	function handleEnvelope(envelopeJson: string): void {
+		let envelope: unknown;
+		try {
+			envelope = JSON.parse(envelopeJson);
+		} catch (error) {
+			fail(
+				new WorkflowScriptError(`workflow script envelope was not valid JSON: ${errorText(error)}`, {
+					cause: error,
+				}),
+			);
+			return;
+		}
+		if (!isEnvelope(envelope)) {
+			fail(new WorkflowScriptError("workflow script returned an unexpected envelope"));
+			return;
+		}
+		if (!envelope.ok) {
+			fail(new WorkflowScriptError(typeof envelope.error === "string" ? envelope.error : "workflow script failed"));
+			return;
+		}
+		succeed(envelope.value);
 	}
-	return { value: envelope.value, logs, phases, agentCalls };
+
+	function handleAgent(requestId: number, callPath: string, payloadJson: string): Promise<unknown> {
+		let prompt: string;
+		let opts: WorkflowAgentOptions | undefined;
+		try {
+			const payload: unknown = JSON.parse(payloadJson);
+			if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+				throw new Error("agent() payload was not an object");
+			}
+			const record = payload as Record<string, unknown>;
+			const parsedPrompt = toPrimitiveString(record.prompt);
+			if (parsedPrompt === undefined) throw new Error("agent(prompt, opts?): prompt must be a string");
+			prompt = parsedPrompt;
+			opts = parseAgentOptions(record.opts);
+		} catch (error) {
+			send({ type: "agentError", requestId, error: errorText(error) });
+			return Promise.resolve();
+		}
+		return Promise.resolve()
+			.then(() => options.agent(prompt, opts, { callPath, signal: controller.signal }))
+			.then(
+				result => {
+					if (finished) return;
+					send({
+						type: "agentResult",
+						requestId,
+						result: JSON.stringify({
+							result: typeof result.result === "string" ? result.result : String(result.result ?? ""),
+							tokens: typeof result.tokens === "number" && Number.isFinite(result.tokens) ? result.tokens : 0,
+							...(result.cached === true ? { cached: true } : {}),
+						}),
+					});
+				},
+				error => {
+					if (finished) return;
+					send({ type: "agentError", requestId, error: errorText(error) });
+				},
+			);
+	}
+
+	worker.addEventListener("message", (event: MessageEvent): void => {
+		const message = event.data as WorkflowWorkerMessage | null;
+		if (message === null || typeof message !== "object") return;
+		if (finished) {
+			if (message.type === "agent") {
+				send({ type: "agentError", requestId: message.requestId, error: "workflow run aborted" });
+			}
+			return;
+		}
+		if (message.type === "heartbeat") lastActivity = Date.now();
+		switch (message.type) {
+			case "heartbeat":
+				break;
+			case "parallelFailure":
+				controller.abort();
+				break;
+			case "log":
+				logs.push(message.line);
+				options.onLog?.(message.line);
+				break;
+			case "phase":
+				phases.push(message.name);
+				options.onPhase?.(message.name);
+				break;
+			case "agent": {
+				agentCalls += 1;
+				const call = handleAgent(message.requestId, message.callPath, message.payload);
+				outstanding.add(call);
+				void call.finally(() => outstanding.delete(call));
+				break;
+			}
+			case "done":
+				handleEnvelope(message.envelopeJson);
+				break;
+			case "error":
+				fail(new WorkflowScriptError(message.message));
+				break;
+		}
+	});
+
+	worker.addEventListener("error", (event: ErrorEvent): void => {
+		fail(
+			new WorkflowScriptError(
+				`workflow worker crashed: ${event.error instanceof Error ? event.error.message : event.message}`,
+			),
+		);
+	});
+
+	send({
+		type: "init",
+		prelude: WORKFLOW_PRELUDE,
+		harden: WORKFLOW_HARDEN,
+		envelopeSource: scriptEnvelope(options.script),
+		args: options.args ?? "",
+		heartbeatMs,
+	});
+	return promise;
 }

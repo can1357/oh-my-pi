@@ -15,8 +15,10 @@ export type WorkflowCallStatus = "started" | "completed" | "failed" | "cached";
 
 /** One agent() call's latest known state. */
 export interface WorkflowCallRecord {
-	/** Position in the script's deterministic call order. */
+	/** Position in the script's invocation order (display/ordering only). */
 	index: number;
+	/** Deterministic, completion-order-independent identity of this call. */
+	callPath: string;
 	/** sha256 over the prompt and the call options that affect its result. */
 	promptHash: string;
 	/** Agent definition the call was routed to; `"default"` when omitted. */
@@ -84,6 +86,7 @@ function isJournalLine(value: unknown): value is WorkflowJournalLine {
 	if (value === null || typeof value !== "object") return false;
 	const record = value as Record<string, unknown>;
 	if (typeof record.runId !== "string") return false;
+	if (typeof record.callPath !== "string" || record.callPath.length === 0) return false;
 	if (typeof record.index !== "number" || !Number.isInteger(record.index) || record.index < 0) return false;
 	if (typeof record.promptHash !== "string") return false;
 	if (typeof record.agent !== "string") return false;
@@ -155,10 +158,22 @@ export class WorkflowJournal {
 				// it is still a valid resume source.
 				continue;
 			}
+			if (
+				parsed !== null &&
+				typeof parsed === "object" &&
+				"runId" in parsed &&
+				parsed.runId === runId &&
+				!("callPath" in parsed)
+			) {
+				throw new Error(
+					`workflow: legacy journal run ${runId} is incompatible with deterministic resume; start a new run`,
+				);
+			}
 			if (!isJournalLine(parsed) || parsed.runId !== runId) continue;
 			found = true;
 			byIndex.set(parsed.index, {
 				index: parsed.index,
+				callPath: parsed.callPath,
 				promptHash: parsed.promptHash,
 				agent: parsed.agent,
 				result: parsed.result,

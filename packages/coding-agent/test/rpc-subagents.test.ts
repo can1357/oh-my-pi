@@ -175,6 +175,37 @@ describe("RPC subagent registry", () => {
 		registry.dispose();
 	});
 
+	test("forwards pre-spawn refusals only to subscribers without creating a live snapshot", () => {
+		const frames: RpcSubagentFrame[] = [];
+		const eventBus = new EventBus();
+		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
+		const refusal: SubagentProgressPayload = {
+			index: 0,
+			agent: "task",
+			agentSource: "bundled",
+			task: "Do work",
+			assignment: "Implement work",
+			parentToolCallId: "toolu_parent",
+			progress: createProgress({ status: "failed" }),
+			refusalReason: "concurrency_limit",
+		};
+
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, refusal);
+		expect(frames).toEqual([]);
+		registry.setSubscriptionLevel("progress");
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, refusal);
+		registry.setSubscriptionLevel("events");
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, refusal);
+
+		expect(frames).toEqual([
+			{ type: "subagent_progress", payload: refusal },
+			{ type: "subagent_progress", payload: refusal },
+		]);
+		expect(registry.getSubagents()).toEqual([]);
+		expect(() => registry.resolveSessionFile({ subagentId: "SubagentA" })).toThrow();
+		registry.dispose();
+	});
+
 	test("clears stale snapshots after successful RPC session changes", async () => {
 		const cases: Array<{
 			command: RpcSessionChangeCommand;

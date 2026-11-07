@@ -48,21 +48,28 @@ The VM context enforces the rules:
   or poisoned — runtime-injected host helpers (`Bun`, `fetch`, timers,
   `WebSocket`, `crypto`, `performance`, …) are absent.
 
-The script's synchronous portion is bounded (`runInContext` timeout, default
-30 s). An abort signal cancels the wait on an asynchronous script, but a tight
-synchronous loop is only stopped by the VM timeout and asynchronous
-continuations already queued cannot be cancelled.
+The script runs in a Bun Worker. A watchdog terminates the worker after a
+non-yielding stretch exceeds `syncTimeoutMs` (30 seconds by default), including
+stretches after an `await`. Waiting for an agent does not itself consume this
+limit. When the script ends, fails, or is cancelled, outstanding children are
+aborted and settled before the tool returns; a runner must honor cancellation
+and settle for the workflow to finish.
 
 ## Journal and resume
 
 Calls append synchronously to
 `<session dir>/workflow/<session>/journal.jsonl` (fallback:
 `<agent dir>/workflow/<session id>/journal.jsonl`). Each transition is one
-JSONL line `{runId, index, promptHash, agent, result, tokens, status}` with
-`status` ∈ `started | completed | failed | cached`. A truncated final line from
-a kill is ignored by the reader, and the next append starts on a fresh line.
+JSONL line `{runId, index, callPath, promptHash, agent, result, tokens, status}`
+with `status` ∈ `started | completed | failed | cached`. A truncated final
+line from a kill is ignored by the reader, and the next append starts on a
+fresh line.
 
-`resumeFrom` matches by call index and prompt hash (prompt + agent + context).
-The completed/cached prefix is replayed with `cached: true` and journaled as
-`cached`; execution starts at the first divergence and continues to the end.
-Chained resumes are supported.
+`resumeFrom` matches a structural call path and prompt hash (prompt + agent +
+context). Parallel items have independent paths, so their completion order
+does not change their identities. Completed calls replay with `cached: true`;
+after divergence, later calls in that scope execute again. A divergence also
+invalidates subsequent sequential work. Chained resumes are supported.
+
+Journals from before call paths were introduced cannot be resumed; start a new
+run instead. Existing journal files are not migrated.

@@ -230,7 +230,12 @@ export class RpcSubagentRegistry {
 		const progress = payload.progress;
 		if (this.#staleSubagentIds.has(progress.id)) return;
 		const existing = this.#subagents.get(progress.id);
-		if (!existing) return;
+		if (!existing) {
+			if (payload.refusalReason && this.#subscriptionLevel !== "off") {
+				this.#output({ type: "subagent_progress", payload });
+			}
+			return;
+		}
 		if (!hasSameOwner(payload, existing)) return;
 		const sessionFile = payload.sessionFile ?? existing?.sessionFile;
 		this.#rememberTranscriptSession(progress.id, sessionFile);

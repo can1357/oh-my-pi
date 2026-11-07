@@ -425,6 +425,150 @@ describe("MCP streamable-http modern era", () => {
 });
 
 describe("MCP streamable-http SSE-framed responses", () => {
+	it("routes modern SSE progress using the request token", async () => {
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method !== "POST") return new Response(null, { status: 405 });
+				const body = (await req.json()) as {
+					id: string | number;
+					method: string;
+					params: { _meta?: { progressToken?: string | number } };
+				};
+				if (body.method === "server/discover")
+					return Response.json({
+						jsonrpc: "2.0",
+						id: body.id,
+						result: { supportedVersions: [MODERN_VERSION], capabilities: { tools: {} } },
+					});
+				if (body.method !== "tools/call") return new Response(null, { status: 202 });
+				const progress = {
+					jsonrpc: "2.0",
+					method: "notifications/progress",
+					params: { progressToken: body.params._meta?.progressToken, progress: 1, total: 2 },
+				};
+				const result = { jsonrpc: "2.0", id: body.id, result: { content: [] } };
+				return new Response(`data: ${JSON.stringify(progress)}\n\ndata: ${JSON.stringify(result)}\n\n`, {
+					headers: { "Content-Type": "text/event-stream" },
+				});
+			},
+		});
+		const connection = await connectToServer("modern-progress", {
+			type: "streamable-http",
+			url: `http://127.0.0.1:${server.port}/mcp`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		const progress: unknown[] = [];
+		await connection.transport.request(
+			"tools/call",
+			{ name: "test", arguments: {} },
+			{ onProgress: value => progress.push(value) },
+		);
+		expect(progress).toHaveLength(1);
+		expect(progress[0]).toMatchObject({ progress: 1, total: 2 });
+		await connection.transport.close();
+	});
+
+	it("preserves modern authentication challenge headers", async () => {
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method !== "POST") return new Response(null, { status: 405 });
+				const body = (await req.json()) as { id: string | number; method: string };
+				if (body.method === "server/discover")
+					return Response.json({
+						jsonrpc: "2.0",
+						id: body.id,
+						result: { supportedVersions: [MODERN_VERSION], capabilities: { tools: {} } },
+					});
+				if (body.method === "tools/list")
+					return new Response("unauthorized", {
+						status: 401,
+						headers: {
+							"WWW-Authenticate": 'Bearer resource_metadata="https://example.org/meta"',
+							"Mcp-Auth-Server": "https://example.org/auth",
+						},
+					});
+				return new Response(null, { status: 202 });
+			},
+		});
+		const connection = await connectToServer("modern-challenge", {
+			type: "streamable-http",
+			url: `http://127.0.0.1:${server.port}/mcp`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		let challenge = "";
+		try {
+			await listTools(connection);
+		} catch (error) {
+			challenge = String(error);
+		}
+		expect(challenge).toContain('WWW-Authenticate: Bearer resource_metadata="https://example.org/meta"');
+		expect(challenge).toContain("Mcp-Auth-Server: https://example.org/auth");
+		await connection.transport.close();
+	});
+
+	it("does not retry a modern request when its response stream ends without a result", async () => {
+		let calls = 0;
+		server = Bun.serve({
+			port: 0,
+			async fetch(req) {
+				if (req.method !== "POST") return new Response(null, { status: 405 });
+				const body = (await req.json()) as { id: string | number; method: string };
+				if (body.method === "server/discover")
+					return Response.json({
+						jsonrpc: "2.0",
+						id: body.id,
+						result: { supportedVersions: [MODERN_VERSION], capabilities: { tools: {} } },
+					});
+				if (body.method === "tools/call") {
+					calls++;
+					return new Response("", { headers: { "Content-Type": "text/event-stream" } });
+				}
+				return new Response(null, { status: 202 });
+			},
+		});
+		const connection = await connectToServer("modern-eof", {
+			type: "streamable-http",
+			url: `http://127.0.0.1:${server.port}/mcp`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		let failure: unknown;
+		try {
+			await connection.transport.request("tools/call", { name: "test", arguments: {} });
+		} catch (error) {
+			failure = error;
+		}
+		expect(failure).toMatchObject({ failure: "eof", retryable: false });
+		expect(calls).toBe(1);
+		await connection.transport.close();
+	});
+
+	it("marks a reset after dispatch as non-retryable", async () => {
+		startModernServer();
+		const connection = await connectToServer("modern-reset", {
+			type: "streamable-http",
+			url: `http://127.0.0.1:${server!.port}/mcp`,
+			timeout: GUARD_TIMEOUT_MS,
+		});
+		const originalFetch = globalThis.fetch;
+		try {
+			globalThis.fetch = (async () => {
+				throw Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+			}) as unknown as typeof fetch;
+			let failure: unknown;
+			try {
+				await connection.transport.request("tools/call", { name: "test", arguments: {} });
+			} catch (error) {
+				failure = error;
+			}
+			expect(failure).toMatchObject({ failure: "reset", retryable: false });
+		} finally {
+			globalThis.fetch = originalFetch;
+			await connection.transport.close();
+		}
+	});
+
 	it("reads a result framed as SSE and matches it by id", async () => {
 		server = Bun.serve({
 			port: 0,

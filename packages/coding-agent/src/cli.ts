@@ -160,6 +160,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
 	const { smokeTestTextPredictDaemon } = await import("./predict/client");
 	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
+	const { runWorkflowScript } = await import("./workflow/vm");
 	await smokeTestSyncWorker();
 	await smokeTestStatsActivityWorker();
 
@@ -189,6 +190,12 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestTerminalOutputWorker();
 	await smokeTestTextPredictDaemon();
 	await smokeTestSubagentWorker();
+	const workflow = await runWorkflowScript({
+		script: `return (await agent("workflow smoke")).result;`,
+		agent: async prompt => ({ result: prompt, tokens: 0 }),
+		syncTimeoutMs: 15_000,
+	});
+	if (workflow.value !== "workflow smoke") throw new Error("workflow worker smoke failed");
 	process.stdout.write("smoke-test: ok\n");
 }
 
@@ -200,6 +207,7 @@ const JS_EVAL_PROCESS_ARG = "__omp_worker_js_eval_process";
 const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
 const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
+const WORKFLOW_WORKER_ARG = "__omp_worker_workflow";
 
 async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === TINY_WORKER_ARG) {
@@ -222,6 +230,20 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		};
 		scope.onmessage = buffer;
 		await import("@oh-my-pi/omp-stats/sync-worker");
+		const handler = scope.onmessage;
+		if (handler && handler !== buffer) {
+			for (const event of pending) handler.call(scope, event);
+		}
+		return true;
+	}
+	if (arg === WORKFLOW_WORKER_ARG) {
+		const scope = globalThis as unknown as { onmessage: ((event: MessageEvent) => void) | null };
+		const pending: MessageEvent[] = [];
+		const buffer = (event: MessageEvent): void => {
+			pending.push(event);
+		};
+		scope.onmessage = buffer;
+		await import("./workflow/worker");
 		const handler = scope.onmessage;
 		if (handler && handler !== buffer) {
 			for (const event of pending) handler.call(scope, event);

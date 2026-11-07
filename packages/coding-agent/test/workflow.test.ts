@@ -24,7 +24,12 @@ import { hashAgentCall, WorkflowJournal, resolveWorkflowJournalPath } from "@oh-
 import { BUILTIN_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/builtin-names";
 import { BUILTIN_TOOLS } from "@oh-my-pi/pi-coding-agent/tools";
 import { WorkflowTool, type WorkflowToolDetails } from "@oh-my-pi/pi-coding-agent/workflow/tool";
-import { assertNoModuleLoading, type WorkflowAgentCaller } from "@oh-my-pi/pi-coding-agent/workflow/vm";
+import {
+	assertNoModuleLoading,
+	runWorkflowScript,
+	type WorkflowAgentCaller,
+	type WorkflowAgentResult,
+} from "@oh-my-pi/pi-coding-agent/workflow/vm";
 
 /**
  * Independent snapshot of every global the workflow contract may expose.
@@ -239,6 +244,7 @@ describe("workflow journal", () => {
 		journal.append({
 			runId: "run-1",
 			index: 0,
+			callPath: "r:0",
 			promptHash,
 			agent: "task",
 			result: null,
@@ -248,6 +254,7 @@ describe("workflow journal", () => {
 		journal.append({
 			runId: "run-1",
 			index: 0,
+			callPath: "r:0",
 			promptHash,
 			agent: "task",
 			result: "answer",
@@ -267,6 +274,7 @@ describe("workflow journal", () => {
 		journal.append({
 			runId: "run-2",
 			index: 0,
+			callPath: "r:0",
 			promptHash: "abc",
 			agent: "default",
 			result: "ok",
@@ -286,6 +294,7 @@ describe("workflow journal", () => {
 		journal.append({
 			runId: "run-3",
 			index: 0,
+			callPath: "r:0",
 			promptHash: "abc",
 			agent: "default",
 			result: "ok",
@@ -296,6 +305,7 @@ describe("workflow journal", () => {
 		journal.append({
 			runId: "run-3",
 			index: 2,
+			callPath: "r:2",
 			promptHash: "def",
 			agent: "default",
 			result: "second",
@@ -661,6 +671,241 @@ describe("workflow tool", () => {
 	});
 });
 
+describe("workflow worker, cancellation, and deterministic resume", () => {
+	it("keeps the script runner usable without supplying a controller", async () => {
+		const result = await runWorkflowScript({
+			script: `log("hello"); phase("work"); return (await agent("input")).result;`,
+			agent: async prompt => ({ result: `answer:${prompt}`, tokens: 1 }),
+		});
+		expect(result.value).toBe("answer:input");
+		expect(result.logs).toEqual(["hello"]);
+		expect(result.phases).toEqual(["work"]);
+		expect(result.agentCalls).toBe(1);
+	});
+
+	it("settles a child before returning a script error", async () => {
+		const dir = tempDir();
+		let settled = false;
+		const runner: WorkflowAgentCaller = async (_prompt, _opts, context) => {
+			const cancelled = Promise.withResolvers<void>();
+			context?.signal.addEventListener("abort", () => cancelled.resolve(), { once: true });
+			await cancelled.promise;
+			settled = true;
+			throw new Error("cancelled");
+		};
+		const tool = new WorkflowTool(makeSession(dir), { runner });
+		await expect(
+			tool.execute("call-1", { script: `agent("work"); throw new Error("script failed");` }),
+		).rejects.toThrow(/script failed/);
+		expect(settled).toBe(true);
+		expect(journalLines(dir).map(line => line.status)).toEqual(["started", "failed"]);
+	});
+
+	it("cancels parallel siblings even when the script catches the failure", async () => {
+		const dir = tempDir();
+		const siblingStarted = Promise.withResolvers<void>();
+		let aborted = false;
+		const runner: WorkflowAgentCaller = async (prompt, _opts, context) => {
+			if (prompt === "fail") {
+				await siblingStarted.promise;
+				throw new Error("item failed");
+			}
+			const cancelled = Promise.withResolvers<void>();
+			context?.signal.addEventListener(
+				"abort",
+				() => {
+					aborted = true;
+					cancelled.resolve();
+				},
+				{ once: true },
+			);
+			siblingStarted.resolve();
+			await cancelled.promise;
+			throw new Error("cancelled");
+		};
+		const tool = new WorkflowTool(makeSession(dir), { runner });
+		const result = await tool.execute("call-1", {
+			script: `try { await parallel([0, 1], i => agent(i ? "sibling" : "fail")); } catch {} return "recovered";`,
+		});
+		expect(result.details?.result).toBe("recovered");
+		expect(aborted).toBe(true);
+		expect(journalLines(dir).filter(line => line.status === "failed")).toHaveLength(2);
+	});
+
+	it("waits for an unawaited child to settle before returning", async () => {
+		const dir = tempDir();
+		const release = Promise.withResolvers<void>();
+		const aborted = Promise.withResolvers<void>();
+		let settled = false;
+		const runner: WorkflowAgentCaller = async (_prompt, _opts, context) => {
+			context?.signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+			await aborted.promise;
+			await release.promise;
+			settled = true;
+			throw new Error("cancelled");
+		};
+		const tool = new WorkflowTool(makeSession(dir), { runner });
+		const execution = tool.execute("call-1", { script: `agent("work"); return "done";` });
+		await aborted.promise;
+		expect(settled).toBe(false);
+		release.resolve();
+		const result = await execution;
+		expect(result.details?.result).toBe("done");
+		expect(settled).toBe(true);
+		expect(journalLines(dir).map(line => line.status)).toEqual(["started", "failed"]);
+	});
+
+	it("rejects legacy journal runs without deterministic call paths", async () => {
+		const dir = tempDir();
+		const journalPath = path.join(dir, "workflow", "session", "journal.jsonl");
+		fs.mkdirSync(path.dirname(journalPath), { recursive: true });
+		fs.writeFileSync(
+			journalPath,
+			`${JSON.stringify({ runId: "old", index: 0, promptHash: "x", agent: "default", result: "old", tokens: 1, status: "completed" })}\n`,
+		);
+		const tool = new WorkflowTool(makeSession(dir), {
+			runner: recordingRunner(prompt => ({ result: prompt, tokens: 0 })),
+		});
+		await expect(tool.execute("call-1", { script: `return await agent("x");`, resumeFrom: "old" })).rejects.toThrow(
+			/legacy|incompatible/i,
+		);
+	});
+
+	it("replays completed parallel siblings even if another item must be retried", async () => {
+		const dir = tempDir();
+		const script = `return await parallel([0, 1], async i => (await agent("item-" + i)).result);`;
+		const siblingFinished = Promise.withResolvers<void>();
+		const first = new WorkflowTool(makeSession(dir), {
+			runner: async prompt => {
+				if (prompt === "item-0") {
+					await siblingFinished.promise;
+					throw new Error("failed item");
+				}
+				siblingFinished.resolve();
+				return { result: "saved", tokens: 1 };
+			},
+		});
+		await expect(first.execute("first", { script })).rejects.toThrow();
+		const runId = journalLinearRunId(dir);
+		const calls: string[] = [];
+		const second = new WorkflowTool(makeSession(dir), {
+			runner: async prompt => {
+				calls.push(prompt);
+				return { result: "retried", tokens: 1 };
+			},
+		});
+		const result = await second.execute("second", { script, resumeFrom: runId });
+		expect(calls).toEqual(["item-0"]);
+		expect(result.details?.result).toEqual(["retried", "saved"]);
+	});
+
+	it("terminates a non-yielding stretch after an await via the worker watchdog", async () => {
+		const dir = tempDir();
+		const tool = new WorkflowTool(makeSession(dir), {
+			runner: recordingRunner(prompt => ({ result: prompt, tokens: 0 })),
+			syncTimeoutMs: 300,
+		});
+		// This exercises the real watchdog/terminate path against the platform
+		// clock; fake timers cannot stop a worker blocked in a tight loop.
+		const startedAt = Date.now();
+		await expect(tool.execute("call-1", { script: `await Promise.resolve(); while (true) {}` })).rejects.toThrow(
+			/synchronous time limit/,
+		);
+		expect(Date.now() - startedAt).toBeLessThan(5000);
+	}, 10_000);
+
+	it("cancels a sibling agent when its parallel item fails and drains its journal before returning", async () => {
+		const dir = tempDir();
+		let siblingAborted = false;
+		const runner: WorkflowAgentCaller = (prompt, _opts, context) => {
+			if (prompt === "fail") return Promise.reject(new Error("boom"));
+			const { promise, reject } = Promise.withResolvers<WorkflowAgentResult>();
+			context?.signal.addEventListener(
+				"abort",
+				() => {
+					siblingAborted = true;
+					reject(new Error("workflow run aborted"));
+				},
+				{ once: true },
+			);
+			return promise;
+		};
+		const tool = new WorkflowTool(makeSession(dir), { runner });
+		await expect(
+			tool.execute("call-1", {
+				script: `return await parallel([1, 2], async (n) => (await agent(n === 1 ? "fail" : "sibling")).result);`,
+			}),
+		).rejects.toThrow(/boom/);
+		expect(siblingAborted).toBe(true);
+		// Both calls have a terminal `failed` line on disk when the tool returns,
+		// i.e. the cancelled sibling was drained and nothing is left to write.
+		const lines = journalLines(dir);
+		expect(lines).toHaveLength(4);
+		expect(lines.filter(line => line.status === "started")).toHaveLength(2);
+		expect(lines.filter(line => line.status === "failed")).toHaveLength(2);
+	}, 10_000);
+
+	it("resumes an unchanged parallel script with zero new calls regardless of completion order", async () => {
+		const dir = tempDir();
+		const script = `
+			return await parallel([0, 1], async (i) => {
+				const a = (await agent("first-" + i)).result;
+				const b = (await agent("second-" + i)).result;
+				return a + "/" + b;
+			}, { concurrency: 2 });
+		`;
+		const pending = new Map<string, { resolve: (value: WorkflowAgentResult) => void }>();
+		const waiters = new Map<string, Array<() => void>>();
+		const waitFor = (prompt: string): Promise<void> =>
+			pending.has(prompt)
+				? Promise.resolve()
+				: new Promise<void>(resolve => {
+						const list = waiters.get(prompt) ?? [];
+						list.push(resolve);
+						waiters.set(prompt, list);
+					});
+		const release = (prompt: string, result: string): void => {
+			const entry = pending.get(prompt);
+			if (!entry) throw new Error(`expected a pending agent() call for ${prompt}`);
+			pending.delete(prompt);
+			entry.resolve({ result, tokens: 1 });
+		};
+		const runner1: WorkflowAgentCaller = prompt => {
+			const { promise, resolve } = Promise.withResolvers<WorkflowAgentResult>();
+			pending.set(prompt, { resolve });
+			for (const waiter of waiters.get(prompt) ?? []) waiter();
+			waiters.delete(prompt);
+			return promise;
+		};
+		const first = new WorkflowTool(makeSession(dir), { runner: runner1 });
+		const execution = first.execute("call-1", { script });
+		await waitFor("first-0");
+		await waitFor("first-1");
+		// Resolve the second item's first call before the first item's, so the
+		// second-round calls are invoked in the opposite order from a plain run.
+		release("first-1", "A1");
+		await waitFor("second-1");
+		release("first-0", "A0");
+		await waitFor("second-0");
+		release("second-0", "B0");
+		release("second-1", "B1");
+		const firstResult = await execution;
+		const runId = firstResult.details?.runId;
+		if (typeof runId !== "string") throw new Error("workflow tool returned no runId");
+
+		const callsOnResume: string[] = [];
+		const runner2: WorkflowAgentCaller = prompt => {
+			callsOnResume.push(prompt);
+			return Promise.resolve({ result: "SHOULD-NOT-RUN", tokens: 0 });
+		};
+		const second = new WorkflowTool(makeSession(dir), { runner: runner2 });
+		const resumed = await second.execute("call-2", { script, resumeFrom: runId });
+		expect(resumed.details?.executed).toBe(0);
+		expect(resumed.details?.cached).toBe(4);
+		expect(callsOnResume).toEqual([]);
+	}, 10_000);
+});
+
 describe("workflow determinism", () => {
 	const cases: Array<{ name: string; script: string; pattern: RegExp }> = [
 		{ name: "Date.now", script: `return Date.now();`, pattern: /Date\.now is disabled.*determinism.*clock\(\)/ },
@@ -705,20 +950,23 @@ describe("workflow determinism", () => {
 		await expect(tool.execute("call-1", { script: `while (true) {}` })).rejects.toThrow(/synchronous time limit/);
 	});
 
-	it("cancels the wait on a non-settling script via the abort signal", async () => {
+	it("aborts and drains a child when the external signal is cancelled", async () => {
 		const dir = tempDir();
 		const started = concurrencyGate(1);
 		const controller = new AbortController();
-		const runner: WorkflowAgentCaller = async () => {
+		const runner: WorkflowAgentCaller = async (_prompt, _opts, context) => {
+			const cancelled = Promise.withResolvers<void>();
+			context?.signal.addEventListener("abort", () => cancelled.resolve(), { once: true });
 			started.release();
-			return await new Promise<never>(() => {});
+			await cancelled.promise;
+			throw new Error("cancelled");
 		};
 		const tool = new WorkflowTool(makeSession(dir), { runner });
 		const execution = tool.execute("call-1", { script: `return await agent("hang");` }, controller.signal);
 		await started.promise;
 		controller.abort();
 		await expect(execution).rejects.toThrow(/Operation aborted/);
-		expect(journalLines(dir).map(line => line.status)).toEqual(["started"]);
+		expect(journalLines(dir).map(line => line.status)).toEqual(["started", "failed"]);
 	});
 
 	it("exposes only the documented global allowlist", async () => {
@@ -783,6 +1031,7 @@ describe("workflow determinism", () => {
 					agentBridge: typeof __hostAgent,
 					logBridge: typeof __hostLog,
 					phaseBridge: typeof __hostPhase,
+					parallelFailureBridge: typeof __hostParallelFailure,
 					argsBridge: typeof __args,
 					consoleConstructorLeak: (() => {
 						try { return console.log.constructor("return typeof process")(); } catch (e) { return e.name; }
@@ -802,6 +1051,7 @@ describe("workflow determinism", () => {
 		expect(textOf(result)).toContain('"agentBridge": "undefined"');
 		expect(textOf(result)).toContain('"logBridge": "undefined"');
 		expect(textOf(result)).toContain('"phaseBridge": "undefined"');
+		expect(textOf(result)).toContain('"parallelFailureBridge": "undefined"');
 		expect(textOf(result)).toContain('"argsBridge": "undefined"');
 		expect(textOf(result)).toContain('"consoleConstructorLeak": "EvalError"');
 		expect(textOf(result)).toContain('"globalProtoLeak": "EvalError"');

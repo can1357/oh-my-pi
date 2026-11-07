@@ -2356,13 +2356,14 @@ export async function runRootCommand(
 				: undefined;
 		daemonPresencePromise?.catch(() => {});
 
-		// Session retention GC: best-effort prune of transcripts and custom
-		// scratch older than `session.retentionDays` (default 30; 0 = off).
+		// Session retention GC: best-effort prune of old transcripts and artifacts,
+		// plus dangling custom-session markers (default 30 days; 0 = off).
 		// Never blocks startup; first run is bounded by the per-pass cap.
 		const retentionDays = cfgSessionRetentionDays.get(settingsInstance);
 		if (retentionDays > 0) {
+			const keepSessionIds = sessionManager ? new Set([sessionManager.getSessionId()]) : undefined;
 			void import("./session/session-gc")
-				.then(({ runSessionGc }) => runSessionGc({ retentionDays }))
+				.then(({ runSessionGc }) => runSessionGc({ retentionDays, keepSessionIds }))
 				.catch(() => {});
 		}
 
