@@ -62,6 +62,7 @@ function createContext(): {
 	editor: FakeEditor;
 	spies: {
 		abort: Spy;
+		abortPanel: Spy;
 		abortBash: Spy;
 		abortEval: Spy;
 		abortHandoff: Spy;
@@ -94,6 +95,7 @@ function createContext(): {
 	let editorText = "";
 	const abort = vi.fn();
 	const abortBash = vi.fn();
+	const abortPanel = vi.fn(async () => {});
 	const abortEval = vi.fn();
 	const abortHandoff = vi.fn();
 	const addMessageToChat = vi.fn();
@@ -173,6 +175,7 @@ function createContext(): {
 		retryEscapeHandler: undefined,
 		session: {
 			isStreaming: false,
+			isPanelRunning: false,
 			isCompacting: false,
 			isGeneratingHandoff: false,
 			isBashRunning: false,
@@ -185,6 +188,7 @@ function createContext(): {
 			abort,
 			abortBash,
 			abortEval,
+			abortPanel,
 			clearQueue,
 			getQueuedMessages,
 			prompt,
@@ -263,6 +267,7 @@ function createContext(): {
 		ctx,
 		editor,
 		spies: {
+			abortPanel,
 			abort,
 			abortBash,
 			abortEval,
@@ -311,6 +316,7 @@ function abortViewSession(ctx: InteractiveModeContext): AbortViewSession {
 }
 
 type MutableSessionState = InteractiveModeContext["session"] & {
+	isPanelRunning: boolean;
 	isStreaming: boolean;
 };
 
@@ -834,6 +840,22 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).not.toHaveBeenCalled();
 	});
 
+	it("aborts a running panel before main-view maintenance or a stream", () => {
+		const { ctx, editor, spies } = createContext();
+		mutableSessionState(ctx).isPanelRunning = true;
+		mutableSessionState(ctx).isStreaming = true;
+		abortViewSession(ctx).isGeneratingHandoff = true;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(spies.abortPanel).toHaveBeenCalledTimes(1);
+		expect(spies.abort).not.toHaveBeenCalled();
+		expect(spies.abortHandoff).not.toHaveBeenCalled();
+		expect(spies.showStatus).toHaveBeenCalledWith("Cancelling panel…");
+	});
+
 	it("aborts an active streaming turn on the first Esc without asking for confirmation", () => {
 		const { ctx, editor, spies } = createContext();
 		mutableSessionState(ctx).isStreaming = true;
@@ -1157,6 +1179,21 @@ describe("InputController Ctrl+C behavior", () => {
 		expect(spies.clearEditor).toHaveBeenCalledTimes(1);
 		expect(spies.flushSync).toHaveBeenCalledTimes(1);
 		expect(spies.shutdown).not.toHaveBeenCalled();
+	});
+
+	it("aborts a running panel instead of clearing the editor or shutting down", () => {
+		const { ctx, editor, spies } = createContext();
+		mutableSessionState(ctx).isPanelRunning = true;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onClear?.();
+
+		expect(spies.abortPanel).toHaveBeenCalledTimes(1);
+		expect(spies.clearEditor).not.toHaveBeenCalled();
+		expect(spies.shutdown).not.toHaveBeenCalled();
+		expect(spies.flushSync).toHaveBeenCalledTimes(1);
+		expect(spies.showStatus).toHaveBeenCalledWith("Cancelling panel…");
 	});
 
 	it("sync-flushes the session JSONL on second Ctrl+C (shutdown)", () => {
