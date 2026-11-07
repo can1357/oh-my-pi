@@ -67,7 +67,7 @@ export function createUpdateNotesTool(
 					{
 						type: "text",
 						text:
-							params.append_idea !== undefined
+							trimmedIdea.length > 0
 								? `Appended idea (${nextNotes.length} chars total).`
 								: `Notes updated (${nextNotes.length} chars).`,
 					},
