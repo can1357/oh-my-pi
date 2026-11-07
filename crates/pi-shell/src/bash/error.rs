@@ -24,8 +24,9 @@ pub enum RestoreError {
 	/// The store failed.
 	#[error("could not read the shell state")]
 	Store(#[from] StoreError),
-	/// The frames blob was written by another engine build or IR version;
-	/// retry with `RestoreOpts { drop_frames: true }`.
+	/// The frames blob has another magic, IR version, layout or engine build.
+	/// `drop_frames` bypasses only layout and build differences, never magic
+	/// or IR version differences.
 	#[error("frames blob is incompatible with this engine ({why})")]
 	Incompatible {
 		/// Which check failed.

@@ -1,18 +1,20 @@
 //! Externalize / restore: the `Frames` blob.
 //!
-//! The blob holds execution position only. The root shell's tables (its
-//! function scopes, `$?`, `PIPESTATUS`, `$!`, job table, `getopts`
-//! progress, `ulimit` values, cwd) and the kernel's counters (`next_vpid`,
-//! `next_job`, `$RANDOM`, `$SECONDS` base) and child-process table are in
-//! the store at all times; restore reads them there, with or without a
-//! blob. A subshell vproc's scopes, overlay and fields are execution
+//! The blob holds execution position and surviving external identities.
+//! The root shell's tables (its function scopes, `$?`, `PIPESTATUS`, `$!`, job
+//! table, `getopts` progress, `ulimit` values, cwd) and the kernel's counters
+//! (`next_vpid`, `next_job`, `$RANDOM`, `$SECONDS` base) and child-process
+//! table are in the store at all times; restore reads them there, with or
+//! without a blob. A subshell vproc's scopes, overlay and fields are execution
 //! position and are in the blob.
 //!
 //! Layout: a postcard [`Header`] (magic `OBF1`, IR version, frames version,
 //! engine build id, ids of the scripts in flight) followed by a postcard
-//! [`Image`] of every vproc, script, frame and staged op. The header decodes
-//! on its own, so an incompatible blob can still be abandoned with
-//! `RestoreOpts { drop_frames: true }`.
+//! [`Image`] of every vproc, script, frame, staged op and surviving external
+//! identity. Restore reports compatible survivor metadata in both modes. The
+//! header decodes on its own, so a blob with the same magic and IR version can
+//! still be abandoned with `RestoreOpts { drop_frames: true }` when its build
+//! or layout differs.
 //!
 //! Fds: the image numbers every distinct fd object once ([`FdObjImage`];
 //! slots, saved fds and substitutions refer to it by index), and every
@@ -56,7 +58,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+pub const FRAMES_VERSION: u32 = 30;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -94,6 +96,9 @@ struct Image {
 	bangs:     Vec<super::proc::Bang>,
 	/// Their commands' redirections still deciding ([`Kernel::deferrals`]).
 	deferrals: Vec<super::proc::Deferral>,
+	/// External programs whose owner frames are gone. Restore reports their
+	/// loss without resuming a completed virtual process.
+	survivors: Vec<(Vpid, u32)>,
 }
 
 /// One fd object.
@@ -478,6 +483,7 @@ impl Shell {
 	/// serialization fails.
 	pub fn externalize(&mut self, cx: &mut Cx<'_>) -> Result<ExternalizeReport, ExtError> {
 		self.see_epoch(cx);
+		self.poll_surviving_externals();
 		// Subshells a host submitted since the last step become vprocs (and
 		// proc records) first.
 		self.adopt(cx);
@@ -492,6 +498,16 @@ impl Shell {
 			reissued_fs: std::mem::take(&mut self.k.dropped_fs),
 			..ExternalizeReport::default()
 		};
+		let surviving_externals: Vec<_> = self
+			.surviving_externals
+			.iter()
+			.map(|(vpid, child)| (*vpid, child.pid()))
+			.collect();
+		report.lost.extend(
+			surviving_externals
+				.iter()
+				.map(|&(vpid, pid)| Lost::Ext { vpid, pid }),
+		);
 		// Function bodies: a restored shell loads them by id rather than
 		// recompiling the canonical text, which would lose the definition's
 		// line numbers.
@@ -644,6 +660,7 @@ impl Shell {
 			mems: fds.mems,
 			bangs: k.bangs.clone(),
 			deferrals: k.deferrals.clone(),
+			survivors: surviving_externals,
 		};
 		let mut bytes = postcard::to_stdvec(&header).map_err(ExtError::Encode)?;
 		bytes.extend_from_slice(&postcard::to_stdvec(&image).map_err(ExtError::Encode)?);
@@ -664,15 +681,56 @@ impl Shell {
 	///
 	/// # Errors
 	///
-	/// [`RestoreError::Incompatible`] for frames of another IR version or
-	/// engine build (retry with `drop_frames`), [`RestoreError::Corrupt`] /
-	/// [`RestoreError::InvalidUnit`] for undecodable or inconsistent blobs,
-	/// [`RestoreError::MissingUnit`], [`RestoreError::Store`].
+	/// [`RestoreError::Incompatible`] for frames with another magic, IR
+	/// version, layout or engine build. `drop_frames` bypasses only layout
+	/// and build differences, never magic or IR version differences.
+	/// [`RestoreError::Corrupt`] / [`RestoreError::InvalidUnit`] for
+	/// undecodable or inconsistent blobs, [`RestoreError::MissingUnit`],
+	/// [`RestoreError::Store`].
 	pub fn restore(
 		engine: &Arc<Engine>,
 		cx: &mut Cx<'_>,
 		opts: RestoreOpts,
 	) -> Result<(Self, RestoreReport), RestoreError> {
+		let bytes = cx.store.get_blob(BlobSlot::Frames)?;
+		let mut report = RestoreReport::default();
+		let frames = if let Some(bytes) = bytes.as_deref() {
+			let (header, body) =
+				postcard::take_from_bytes::<Header>(bytes).map_err(RestoreError::Corrupt)?;
+			let decoded = check(&header)
+				.map_err(|why| RestoreError::Incompatible { why })
+				.and_then(|()| postcard::from_bytes::<Image>(body).map_err(RestoreError::Corrupt));
+			let image = match decoded {
+				Ok(image) => {
+					report.lost.extend(
+						image
+							.survivors
+							.iter()
+							.map(|&(vpid, pid)| Lost::Ext { vpid, pid }),
+					);
+					for proc in &image.procs {
+						for frame in &proc.frames {
+							if let Some(scratch) = &frame.scratch
+								&& scratch.ext_live
+								&& let Some(Awaited::Ext { pid }) =
+									scratch.exec.as_ref().and_then(|exec| exec.waiting)
+							{
+								report.lost.push(Lost::Ext { vpid: proc.vpid, pid });
+							}
+						}
+					}
+					(!opts.drop_frames).then_some(image)
+				},
+				Err(
+					RestoreError::Incompatible { why: Incompatibility::Build }
+					| RestoreError::Corrupt(_),
+				) if opts.drop_frames => None,
+				Err(error) => return Err(error),
+			};
+			Some((header, image))
+		} else {
+			None
+		};
 		let root = Root::load(cx.store)?;
 		let argv0 = state::root_misc(cx.store, MiscKey::Argv0)?
 			.map_or_else(|| BString::from("bash"), BString::from);
@@ -712,24 +770,20 @@ impl Shell {
 			slice: None,
 			gone: Vec::new(),
 			orphans: Vec::new(),
+			surviving_externals: Vec::new(),
 		};
-		let mut report = RestoreReport::default();
 		let mut restored = false;
-		if let Some(bytes) = cx.store.get_blob(BlobSlot::Frames)? {
-			let (header, body) =
-				postcard::take_from_bytes::<Header>(&bytes).map_err(RestoreError::Corrupt)?;
-			if opts.drop_frames {
+		if let Some((header, image)) = frames {
+			if let Some(image) = image {
+				shell.apply(engine, cx, image, &mut stdio, &mut report)?;
+				shell.seed_orphans();
+				restored = true;
+			} else {
 				for &run in &header.runs {
 					shell.k.done.push_back((run, 255));
 					shell.k.next_run = shell.k.next_run.max(run.0 + 1);
 				}
 				report.abandoned = header.runs;
-			} else {
-				check(&header).map_err(|why| RestoreError::Incompatible { why })?;
-				let image: Image = postcard::from_bytes(body).map_err(RestoreError::Corrupt)?;
-				shell.apply(engine, cx, image, &mut stdio, &mut report)?;
-				shell.seed_orphans();
-				restored = true;
 			}
 			cx.store.del_blob(BlobSlot::Frames)?;
 		}
@@ -908,7 +962,6 @@ impl Shell {
 				let scratch = match f.scratch {
 					Some(img) => {
 						let mut live = Live::None;
-						let ext_live = img.ext_live;
 						let exec = img.exec.map(|mut state| {
 							match state.waiting {
 								Some(Awaited::Task(native)) => match state.checkpoint.take() {
@@ -920,9 +973,6 @@ impl Shell {
 										Err(_) => report.lost.push(Lost::Task { vpid, native }),
 									},
 									None => report.lost.push(Lost::Task { vpid, native }),
-								},
-								Some(Awaited::Ext { pid }) if ext_live => {
-									report.lost.push(Lost::Ext { vpid, pid });
 								},
 								Some(
 									Awaited::Ext { .. }

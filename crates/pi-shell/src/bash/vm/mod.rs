@@ -36,7 +36,7 @@ mod zsh;
 use std::{
 	collections::{HashMap, HashSet, VecDeque},
 	sync::Arc,
-	task::Waker,
+	task::{Context, Waker},
 };
 
 use bstr::{BStr, BString};
@@ -66,7 +66,7 @@ use crate::bash::{
 	event::{AssignScope, Event, EventData, EventMask, Origin, OriginChain, OriginLink},
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::File,
-	host::{EnvView, Host, StdFd, Verdict},
+	host::{EnvView, ExtProc, Host, StdFd, Verdict},
 	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
@@ -361,26 +361,30 @@ pub enum CallOutcome {
 /// caches). Persistent state lives in the [`StateStore`]. `Send`; holds no
 /// host references.
 pub struct Shell {
-	k:       Kernel,
+	k:                   Kernel,
 	/// Boxed: a `Vproc` is ~650 bytes and the vector doubles, so idle
 	/// subshells would pay up to twice that in spare capacity (target:
 	/// ≤ 2 KiB per idle vproc).
 	#[expect(clippy::vec_box, reason = "slack capacity of 8-byte slots, not of whole vprocs")]
-	procs:   Vec<Box<Vproc>>,
-	rr:      usize,
+	procs:               Vec<Box<Vproc>>,
+	rr:                  usize,
 	/// A slice cut short by the step budget or a control request: the vproc
 	/// and the ops it has left. The next step continues it, so which vproc
 	/// runs when depends only on op counts, never on where the host's steps,
 	/// pauses or snapshots fall.
-	slice:   Option<(Vpid, u32)>,
+	slice:               Option<(Vpid, u32)>,
 	/// Subshell vprocs that ended since the last orphan check: their
 	/// children are orphans ([`EngineConfig::end_orphan_jobs`] only).
 	///
 	/// [`EngineConfig::end_orphan_jobs`]: crate::bash::EngineConfig::end_orphan_jobs
-	gone:    Vec<Vpid>,
+	gone:                Vec<Vpid>,
 	/// Orphaned job trees still watched for in-engine work (see the
 	/// `orphans` module); empty unless [`Self::gone`] ever had entries.
-	orphans: Vec<Vpid>,
+	orphans:             Vec<Vpid>,
+	/// External programs still running after their owner was unwound. Their
+	/// handles stay here until exit or whole-shell cancellation, without
+	/// keeping a dead vproc or frame.
+	surviving_externals: Vec<(Vpid, Box<dyn ExtProc>)>,
 }
 
 /// Shell-wide state shared by all vprocs (kept apart from `procs` so ops can
@@ -1556,6 +1560,7 @@ impl Shell {
 			slice: None,
 			gone: Vec::new(),
 			orphans: Vec::new(),
+			surviving_externals: Vec::new(),
 		})
 	}
 
@@ -1765,6 +1770,7 @@ impl Shell {
 		let start = cx.host.now_ns();
 		let mut ops = 0u32;
 		loop {
+			self.poll_surviving_externals();
 			if let Some(err) = self.k.root.take_fault() {
 				self.fail_all(cx, &err);
 			}
@@ -2000,6 +2006,7 @@ impl Shell {
 		if req & CANCEL != 0 {
 			let sig = self.k.ctl.cancel_signal();
 			let status = sig.exit_status(self.k.engine.config().platform);
+			self.signal_work(None, sig);
 			for i in (0..self.procs.len()).rev() {
 				// A detached tree (`nohup`) outlives the cancellation.
 				if self.procs[i].lineage.detached {
@@ -2014,23 +2021,6 @@ impl Shell {
 				let unwinds = trapped
 					|| (sig != Signal::Kill && self.procs[i].has_work() && !self.procs[i].transient);
 				if unwinds {
-					for frame in &mut self.procs[i].frames {
-						if let Some(sc) = frame.scratch.as_mut() {
-							// A spawn still pending never starts: the cancelled
-							// command is not resumed (the trap is the last action).
-							if matches!(sc.live, Live::Spawn(_)) {
-								sc.live = Live::None;
-							}
-							match &mut sc.live {
-								Live::Task(task) => task.signal(sig),
-								Live::Ext(ext) => {
-									let _ = ext.signal(sig);
-									let _ = ext.cont();
-								},
-								_ => {},
-							}
-						}
-					}
 					self.procs[i].stopped = false;
 					if trapped {
 						exec::mark_cancel(&mut self.procs[i], status);
@@ -2038,7 +2028,7 @@ impl Shell {
 						exec::finish_cancel(&mut self.k.root, cx.store, &mut self.procs[i], status);
 					}
 				} else {
-					self.kill(cx, i, sig, status);
+					self.end(cx, i, status);
 				}
 			}
 			// Calls of the cancelled vprocs are void; a detached tree's go on.
@@ -2097,22 +2087,68 @@ impl Shell {
 		None
 	}
 
-	/// Terminate vproc `i` with `status`: signal its task or external, end its
-	/// scripts. Transient vprocs are removed.
-	fn kill(&mut self, cx: &mut Cx<'_>, i: usize, sig: Signal, status: i32) {
-		let p = &mut self.procs[i];
-		for f in &mut p.frames {
-			if let Some(sc) = f.scratch.as_mut() {
-				match &mut sc.live {
-					Live::Task(t) => t.signal(sig),
-					Live::Ext(e) => {
-						let _ = e.signal(sig);
-						let _ = e.cont();
-					},
-					_ => {},
+	/// Release handles whose programs have exited, also before a snapshot
+	/// taken without another scheduler step.
+	fn poll_surviving_externals(&mut self) {
+		if !self.surviving_externals.is_empty() {
+			let mut task_cx = Context::from_waker(&self.k.waker);
+			self
+				.surviving_externals
+				.retain_mut(|(_, child)| child.poll_wait(&mut task_cx).is_pending());
+		}
+	}
+
+	/// Signal an ending vproc's work, retaining live externals. With no owner,
+	/// signal all non-detached work and release retained handles to the host's
+	/// grace/KILL escalation; frame handles are released by cancellation unwind.
+	fn signal_work(&mut self, owner: Option<usize>, sig: Signal) {
+		let range = owner.map_or(0..self.procs.len(), |i| i..i + 1);
+		let mut task_cx = Context::from_waker(&self.k.waker);
+		for p in &mut self.procs[range] {
+			if owner.is_none() && p.lineage.detached {
+				continue;
+			}
+			for f in &mut p.frames {
+				if let Some(sc) = f.scratch.as_mut() {
+					if owner.is_none() && matches!(sc.live, Live::Spawn(_)) {
+						sc.live = Live::None;
+					}
+					match &mut sc.live {
+						Live::Task(t) => t.signal(sig),
+						Live::Ext(e) => {
+							let _ = e.signal(sig);
+							let _ = e.cont();
+						},
+						_ => {},
+					}
+					if owner.is_some()
+						&& let Live::Ext(child) = &mut sc.live
+						&& child.poll_wait(&mut task_cx).is_pending()
+						&& let Live::Ext(child) = std::mem::replace(&mut sc.live, Live::None)
+					{
+						self.surviving_externals.push((p.vpid, child));
+					}
 				}
 			}
 		}
+		if owner.is_none() {
+			for (_, mut child) in self.surviving_externals.drain(..) {
+				let _ = child.signal(sig);
+				let _ = child.cont();
+			}
+		}
+	}
+
+	/// Signal and end one vproc, retaining its live external programs.
+	fn kill(&mut self, cx: &mut Cx<'_>, i: usize, sig: Signal, status: i32) {
+		self.signal_work(Some(i), sig);
+		self.end(cx, i, status);
+	}
+
+	/// End vproc `i` with `status` after its work was signalled. Transient
+	/// vprocs are removed.
+	fn end(&mut self, cx: &mut Cx<'_>, i: usize, status: i32) {
+		let p = &mut self.procs[i];
 		exec::unwind(&mut self.k.root, cx.store, p, 0);
 		while state::drop_scope(&mut self.k.root, cx.store, p) {}
 		p.out.clear();
@@ -2384,29 +2420,31 @@ impl Shell {
 	}
 
 	/// Number of the root's background jobs that still wait for a running
-	/// external process, or for the host to finish starting one (`sh -c
-	/// 'sleep 9' &`, a pipeline stage); jobs that
-	/// only run in-engine work (a builtin `sleep`, a loop) are not counted.
+	/// external process, or for the host to finish starting one, plus external
+	/// programs that outlived their owner. Jobs that only run in-engine work
+	/// (a builtin `sleep`, a loop) are not counted.
 	/// A host keeping a shell alive for its externals asks this between
 	/// scripts.
 	pub fn live_external_jobs(&self) -> usize {
+		let survivors = self.surviving_externals.len();
 		let Some(root) = self.procs.first() else {
-			return 0;
+			return survivors;
 		};
-		root
-			.jobs
-			.iter()
-			.filter(|job| {
-				self.procs.iter().any(|p| {
-					self.in_job(p.vpid, job.vpid)
-						&& p.frames.iter().any(|f| {
-							f.scratch
-								.as_ref()
-								.is_some_and(|sc| matches!(sc.live, Live::Ext(_) | Live::Spawn(_)))
-						})
+		survivors
+			+ root
+				.jobs
+				.iter()
+				.filter(|job| {
+					self.procs.iter().any(|p| {
+						self.in_job(p.vpid, job.vpid)
+							&& p.frames.iter().any(|f| {
+								f.scratch
+									.as_ref()
+									.is_some_and(|sc| matches!(sc.live, Live::Ext(_) | Live::Spawn(_)))
+							})
+					})
 				})
-			})
-			.count()
+				.count()
 	}
 
 	/// Answer a [`Step::Call`]. Unknown ids (cancelled scripts) are ignored.
