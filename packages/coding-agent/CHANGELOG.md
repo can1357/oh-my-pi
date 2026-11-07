@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed repeated cached catalog preparation slowing down subagent launches ([#16511](https://github.com/can1357/oh-my-pi/pull/16511) by [@Komzpa](https://github.com/Komzpa))
+
 - Fixed scoped provider availability snapshots staying stale after re-registering a provider whose id differs by case or whitespace ([#16511](https://github.com/can1357/oh-my-pi/pull/16511) by [@Komzpa](https://github.com/Komzpa))
 
 ## [18.14.2] - 2026-10-31

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed repeated cached model parsing when startup visits many provider namespaces
+
 ## [18.14.2] - 2026-10-31
 
 ### Breaking Changes
