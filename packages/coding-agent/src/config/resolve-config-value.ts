@@ -1,10 +1,26 @@
+import { OAUTH_REFRESH_SKEW_MS } from "@oh-my-pi/pi-ai/auth/refresh";
 import { CredentialSourceError } from "@oh-my-pi/pi-ai/error";
 import { executeShell } from "@oh-my-pi/pi-natives";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import {
+	$envExact,
+	directoryIsEnterable,
+	getProjectDir,
+	isRecord,
+	logger,
+	ptree,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import { effectsSettings } from "./registry";
 
 const COMMAND_FAILURE_RETRY_MS = 30_000;
+/**
+ * Shortest time one successful run is reused before its command may run again. Without it a
+ * command printing a JWT already inside the refresh skew would run once per request.
+ */
+const COMMAND_MIN_REUSE_MS = 30_000;
+/** Reuse of a value with no discoverable expiry, in ms (`providers.commandRefreshSeconds`); 0 = until invalidated. */
+let commandRefreshMs = 0;
 /** Default of the `providers.commandTimeoutSeconds` setting, in milliseconds. */
 export const DEFAULT_COMMAND_TIMEOUT_MS = 10_000;
 /** Set by the `providers.commandTimeoutSeconds` effect of the settings that drive effects. */
@@ -16,13 +32,29 @@ let commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
  * resolve credentials in one process each keep their own limit.
  */
 export type CommandTimeoutSource = () => number;
-/** Fresh stdout, served without re-running the command until it is invalidated. */
-const commandResultCache = new Map<string, string>();
+/**
+ * One successful run of a `!command` value: what it printed, when, and when that
+ * output stops being valid.
+ */
+interface CommandResult {
+	value: string;
+	/** `Date.now()` when the run finished. */
+	mintedAt: number;
+	/** The `exp` claim of a JWT value, in ms. Such a value is never served at or after it. */
+	expiresAt: number | undefined;
+}
+
+/**
+ * Fresh stdout, served without re-running the command until the run is due
+ * again (see {@link refreshAt}) or the value is invalidated.
+ */
+const commandResultCache = new Map<string, CommandResult>();
 /**
  * The last stdout each command produced. When a re-run fails, resolution keeps
- * serving it and retries the command in the background, until a 401 rejects it.
+ * serving it and retries the command in the background, until the value expires
+ * or a 401 rejects it.
  */
-const commandLastGood = new Map<string, string>();
+const commandLastGood = new Map<string, CommandResult>();
 const commandFailureRetryAt = new Map<string, number>();
 /**
  * Why each command's latest run produced no value, kept until a run succeeds or
@@ -92,6 +124,49 @@ function commandTimeoutMsFor(source: CommandTimeoutSource | undefined): number {
 	return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_COMMAND_TIMEOUT_MS;
 }
 
+/**
+ * Set how long a `!command` value with no discoverable expiry is reused before its command runs
+ * again (setting `providers.commandRefreshSeconds`). Zero, negative or non-finite keeps such a
+ * value until a 401 or an explicit credential refresh invalidates it.
+ */
+export function configureCommandRefreshMs(refreshMs: number): void {
+	commandRefreshMs = Number.isFinite(refreshMs) && refreshMs > 0 ? refreshMs : 0;
+}
+
+/** The `exp` claim of a JWT value, bare or after an auth scheme such as `Bearer`, in ms. */
+function jwtExpiresAt(value: string): number | undefined {
+	const match = /^(?:[A-Za-z][\w-]*\s+)?([\w-]+)\.([\w-]+)\.[\w-]*$/.exec(value);
+	if (!match) return undefined;
+	try {
+		const header: unknown = JSON.parse(Buffer.from(match[1], "base64url").toString("utf8"));
+		const payload: unknown = JSON.parse(Buffer.from(match[2], "base64url").toString("utf8"));
+		if (!isRecord(header) || typeof header.alg !== "string" || !isRecord(payload)) return undefined;
+		const exp = payload.exp;
+		return typeof exp === "number" && Number.isFinite(exp) && exp > 0 ? exp * 1000 : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * When a result's command may run again. A JWT is re-minted once the OAuth refresh skew before
+ * its `exp` is reached, so the next token exists before a provider would reject the old one; any
+ * other value after the configured reuse, or never. Never sooner than {@link COMMAND_MIN_REUSE_MS}.
+ */
+function refreshAt(result: CommandResult): number {
+	if (result.expiresAt !== undefined) {
+		return Math.max(result.expiresAt - OAUTH_REFRESH_SKEW_MS, result.mintedAt + COMMAND_MIN_REUSE_MS);
+	}
+	if (commandRefreshMs === 0) return Number.POSITIVE_INFINITY;
+	return result.mintedAt + commandRefreshMs;
+}
+
+/** A result's value while it may be sent: a JWT never at or after its `exp`. */
+function servable(result: CommandResult | undefined, now: number): string | undefined {
+	if (result === undefined) return undefined;
+	return result.expiresAt === undefined || now < result.expiresAt ? result.value : undefined;
+}
+
 /** Identify command-backed values when collecting credentials that must be invalidated together. */
 export function isCommandConfigValue(valueConfig: string | undefined): valueConfig is string {
 	return valueConfig?.startsWith("!") === true;
@@ -144,11 +219,19 @@ async function resolveCommandResolution(
 	commandTimeout: CommandTimeoutSource | undefined,
 ): Promise<CommandResolution> {
 	const command = commandKey(valueConfig);
+	const now = Date.now();
 	const cached = commandResultCache.get(command);
-	if (cached !== undefined) return { value: cached };
-	const lastGood = commandLastGood.get(command);
+	// A successful run serves until its command is due again: a JWT one refresh skew
+	// before its `exp`, any other value after `providers.commandRefreshSeconds`. Past
+	// that the command runs again, so a time-limited token is replaced before a
+	// provider rejects it rather than after.
+	if (cached !== undefined && now < refreshAt(cached)) {
+		const fresh = servable(cached, now);
+		if (fresh !== undefined) return { value: fresh };
+	}
+	const lastGood = servable(commandLastGood.get(command), now);
 	const retryAt = commandFailureRetryAt.get(command);
-	if (retryAt !== undefined && Date.now() < retryAt) {
+	if (retryAt !== undefined && now < retryAt) {
 		// Inside the backoff window no run happens, so the recorded failure is this
 		// resolution's reason. It is read with no await in between, so nothing can clear
 		// it between deciding there is no value and saying why.
@@ -167,7 +250,7 @@ async function resolveCommandResolution(
 	}
 	if (settled.value !== undefined) return settled;
 	// A 401 during the run drops the last good value, so read it after the run.
-	const served = commandLastGood.get(command);
+	const served = servable(commandLastGood.get(command), Date.now());
 	return served !== undefined ? { value: served } : settled;
 }
 
@@ -185,11 +268,16 @@ function startCommandRun(command: string, timeoutMs: number): Promise<CommandRes
 		.then(outcome => {
 			const current = (commandGeneration.get(command) ?? 0) === generation;
 			if (outcome.ok) {
+				const result: CommandResult = {
+					value: outcome.value,
+					mintedAt: Date.now(),
+					expiresAt: jwtExpiresAt(outcome.value),
+				};
 				if (current) {
 					commandFailureRetryAt.delete(command);
 					commandLastFailure.delete(command);
-					commandResultCache.set(command, outcome.value);
-					commandLastGood.set(command, outcome.value);
+					commandResultCache.set(command, result);
+					commandLastGood.set(command, result);
 				}
 				return { value: outcome.value };
 			}
@@ -228,8 +316,10 @@ async function runConfigCommand(command: string, timeoutMs: number): Promise<Com
 
 /**
  * Resolve a configuration value. Command values execute asynchronously; their
- * successful stdout is cached, and a failed re-run serves the last good stdout
- * until a 401 rejects it. Environment-backed and literal values stay live.
+ * successful stdout is reused — a JWT until the OAuth refresh skew before its
+ * `exp`, any other value for `providers.commandRefreshSeconds` (by default until
+ * invalidated) — and a failed re-run serves the last good stdout until it expires
+ * or a 401 rejects it. Environment-backed and literal values stay live.
  *
  * `commandTimeout` is the time limit of THIS operation, read from the settings
  * the caller is resolving for. A caller with settings in hand binds it once (see
@@ -543,4 +633,5 @@ export function createConfigHeaderResolver(
 export function clearConfigValueCache(): void {
 	invalidateAllCommandConfigs("rejected");
 	commandTimeoutMs = DEFAULT_COMMAND_TIMEOUT_MS;
+	commandRefreshMs = 0;
 }

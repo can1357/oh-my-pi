@@ -548,8 +548,13 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		accountPool: options.accountPool,
 	});
 	const storage = new AuthStorage(store, {
+		// A storage resolves credentials, so it gets the credential resolver when the
+		// host supplies one: it carries that scope's `!command` time limit AND refuses by
+		// name when a source produces nothing. Without this the host's credential rule
+		// reached only the broker token, and a storage's own key references fell back to
+		// the plain config resolver.
+		configValueResolver: options.credentialValueResolver ?? options.configValueResolver,
 		...options.authStorageOptions,
-		configValueResolver: options.configValueResolver,
 		sourceLabel,
 		accountPolicies,
 		defaultReservePct,

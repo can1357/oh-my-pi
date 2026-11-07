@@ -1375,6 +1375,29 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			}
 		});
 
+		// The scope guard above and the named credential refusal meet here: keeping a
+		// discovered store's own resolver must keep the refusal too. Measured through
+		// `omp -p` with `apiKey: "!true"`: the store's resolver decides, and a plain
+		// config resolver turns a broken mint command back into "No API key found for
+		// <provider>" plus a pointer at /login.
+		test("a discovered store's key that resolves to nothing refuses by name on the request path", async () => {
+			const restoreEnv = withoutBrokerEnv();
+			const agentDir = scopeWithTimeout("named-failure-agent", 30);
+			const settings = await Settings.loadReadOnly({ cwd: tempDir, agentDir });
+			const storage = await discoverAuthStorage(agentDir, { settings });
+			try {
+				storage.keys.setConfig("named-probe", "!exit 3");
+				// An availability probe still sees "no key", as it did before.
+				expect(await storage.keys.get("named-probe")).toBeUndefined();
+				await expect(storage.keys.getWithCredential("named-probe")).rejects.toThrow(
+					/No API key for provider named-probe: the command `exit …` exited with status 3/,
+				);
+			} finally {
+				storage.close();
+				restoreEnv();
+			}
+		});
+
 		// Building a ModelRegistry over a discovered store used to replace that store's
 		// resolver with the unscoped one, so the scope survived discovery and died one
 		// layer out. `omp token` and `omp usage` both build this registry; a review arm
