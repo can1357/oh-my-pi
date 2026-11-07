@@ -2,9 +2,11 @@
 //!
 //! # Allocation and version rule
 //!
-//! Allocate each identifier here once; never reuse it for another meaning.
-//! Change its payload revision when its encoding or meaning changes. The owner
-//! declares required or optional at allocation; unclear necessity is required.
+//! Allocate each identifier in `ALLOCATIONS` once; never reuse it for another
+//! meaning. Change its payload revision when its encoding or meaning changes.
+//! The owner declares required or optional at allocation; unclear necessity is
+//! required. That declaration applies even when this reader has no decoder for
+//! the payload revision, and a writer cannot downgrade a required allocation.
 //! A wrongly optional entry can silently lose execution state; a wrongly
 //! required entry only refuses an image that could have been resumed.
 //!
@@ -114,6 +116,17 @@ impl Definition {
 pub const PENDING_TRAP_SCAN: Definition =
 	Definition { id: 1, revision: 1, required: true, per_vproc: true };
 
+// Requiredness belongs to the allocated identifier, not a decoder revision.
+// Add each allocation here independently of whether its codec is implemented.
+const ALLOCATIONS: &[(u32, bool)] = &[
+	(PENDING_TRAP_SCAN.id, PENDING_TRAP_SCAN.required),
+	// Reserved mechanism witnesses: these identifiers carry no state and have
+	// no codec in any build. They prove required and optional allocation policy
+	// without allocating a production consumer in the test-only range.
+	(TEST_IDENTIFIER_START, true),
+	(TEST_IDENTIFIER_START + 2, false),
+];
+
 /// One length-delimited record in the shared image vocabulary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
@@ -137,9 +150,13 @@ impl Entry {
 			}
 			return Ok(());
 		}
-		// A reserved required allocation cannot be downgraded by an optional
-		// flag; allocation alone still does not imply a decoder is present.
-		if self.required || self.id == PENDING_TRAP_SCAN.id {
+		// A writer cannot downgrade an allocation even when no decoder matches
+		// this revision. Unallocated identifiers still use the writer's flag.
+		if self.required
+			|| ALLOCATIONS
+				.iter()
+				.any(|&(id, required)| id == self.id && required)
+		{
 			return Err(RestoreError::Incompatible {
 				why: Incompatibility::Vocabulary {
 					id:       self.id,
