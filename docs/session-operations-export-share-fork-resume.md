@@ -30,7 +30,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/clear`                                  | Interactive slash command    | Yes (clears live/model conversation context)  | Retains identity/file/history; a lazy session still follows the normal persistence gate                                                                                      | Appends `reset_boundary`                                                            |
 | `/delete`                                 | Interactive slash command    | Yes (starts an empty conversation)            | Attempts to delete the current persisted session and artifacts, then switches to a lazy successor (no empty file until content)                                              | None                                                                                |
 | `/fork`                                   | Interactive slash command    | Yes (active session identity changes)         | Creates new session file and switches current session to it (persistent mode only)                                                                                           | Copies artifact directory to new session namespace when present                     |
-| `/fork pane`, `/fork window`, `/fork tab` | Interactive slash command    | No (parent session retained)                  | Opens a child OMP process from the flushed current transcript in a multiplexer pane/group (tmux window, Zellij/Herdr/Orca tab, or CMUX workspace)                            | Child receives a separate forked session                                            |
+| `/fork pane`, `/fork window`, `/fork tab` | Interactive slash command    | No (parent session retained)                  | Opens a child OMP process from the flushed current transcript in a multiplexer pane/group (tmux window, Zellij/Herdr/Orca/Ghostty tab, or CMUX workspace)                            | Child receives a separate forked session                                            |
 | `--fork <id\|path>`                       | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir                                                                                             | Copies source artifacts recursively by default                                      |
 | `/seance [id\|path] [--model sel]`        | Interactive slash command    | No (active session and model unchanged)       | Forks the source transcript into a read-only consultant subagent under the current session                                                                                   | None; the consultant reads the source's artifacts in place                          |
 | `/resume [id\|@claude\|@codex]`           | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session                                                                                                | None                                                                                |
@@ -291,7 +291,7 @@ for keyboard controls, follow-ups, persistence, and migration safety.
 Bare `/fork` creates a new session from the current one and switches the active
 session identity. `/fork pane` opens a separate OMP process in a new pane;
 `/fork window` and `/fork tab` open it in a new multiplexer group (a tmux
-window, Zellij/Herdr/Orca tab, or CMUX workspace). The child starts from the current
+window, Zellij/Herdr/Orca/Ghostty tab, or CMUX workspace). The child starts from the current
 persisted transcript, while the parent session stays active and continues
 running.
 
@@ -299,9 +299,9 @@ Typing `/fork ` shows `[pane|window|tab]` as dim inline text, and Enter still
 runs the bare in-place fork. Typing a prefix (`/fork w`) opens the suggestions
 with the rest of the selected argument as dim inline text; Tab accepts it.
 
-Placement commands autodetect tmux, Zellij, Herdr, CMUX, or Orca from the terminal;
+Placement commands autodetect tmux, Zellij, Herdr, CMUX, Orca, or Ghostty from the terminal;
 `/fork auto` is not a subcommand (valid arguments are `pane`, `window`, and
-`tab`). `window` maps to a tmux window, a Zellij/Herdr/Orca tab, or a CMUX workspace.
+`tab`). `window` maps to a tmux window, a Zellij/Herdr/Orca/Ghostty tab, or a CMUX workspace.
 Plain terminals, `screen`, and `wmux` cannot host this fork placement and receive
 an explicit error; use bare `/fork` there instead.
 

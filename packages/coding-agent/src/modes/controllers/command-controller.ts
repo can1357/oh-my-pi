@@ -1545,8 +1545,19 @@ export class CommandController {
 		try {
 			await fs.access(sourceSessionFile);
 		} catch {
-			this.ctx.showError("Cannot open a fork in another terminal: the persisted session transcript is unavailable.");
-			return;
+			// Persistence is lazy: a session with no assistant message yet holds an
+			// allocated path that leads nowhere (see SessionManager). Materialize it
+			// so forking a fresh session works, matching the isSessionOnDisk gate
+			// the in-place /fork and the Tern pane already apply.
+			try {
+				await this.ctx.sessionManager.ensureOnDisk();
+				await fs.access(sourceSessionFile);
+			} catch {
+				this.ctx.showError(
+					"Cannot open a fork in another terminal: the persisted session transcript is unavailable.",
+				);
+				return;
+			}
 		}
 
 		try {

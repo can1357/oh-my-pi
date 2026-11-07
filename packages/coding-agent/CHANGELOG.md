@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Ghostty terminal launches on macOS: `/fork pane` splits the current Ghostty surface and `/fork window` / `/fork tab` opens a tab in its window (Ghostty 1.4.0 or newer) ([#18360](https://github.com/can1357/oh-my-pi/pull/18360) by [@dsayling](https://github.com/dsayling))
+
 ## [18.18.0] - 2026-11-07
 
 ### Added
