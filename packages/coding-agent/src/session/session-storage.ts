@@ -17,6 +17,7 @@ import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
+import { inflateArchivedBytes, isArchivedSessionPath } from "./session-archive";
 import { isAssistantMessageLine } from "./session-entries";
 import {
 	overlayTitleSlotContent,
@@ -31,8 +32,9 @@ const utf8Decoder = new TextDecoder("utf-8");
 
 /**
  * Basename of a rewrite staged by {@link sessionStagingPath}; group 1 is the
- * target's basename. A live publish renames it away within milliseconds;
- * `omp gc` reclaims one a killed writer left behind.
+ * target's basename. A live publish renames it away within milliseconds; one
+ * a killed writer left behind stays until someone removes it, since nothing
+ * deletes a file by the shape of its name.
  */
 export const SESSION_STAGING_RE = /^\.(.+)\.[0-9a-f]{16}\.tmp$/;
 
@@ -649,10 +651,20 @@ export function tryAcquireSessionLease(sessionId: string): FileLockHandle | null
  */
 export function isSessionLeaseHeld(sessionId: string): boolean | null {
 	try {
+		return isSessionLeaseHeldOrThrow(sessionId);
+	} catch {
+		return null;
+	}
+}
+
+/** Observe the same ownership lease, preserving failed-check errors for maintenance reports. */
+export function isSessionLeaseHeldOrThrow(sessionId: string): boolean {
+	try {
 		return isFileLockHeld(sessionLeasePath(sessionId, false));
-	} catch (err) {
+	} catch (error) {
 		// No sidecar directory yet: nobody has ever claimed a session here.
-		return isEnoent(err) ? false : null;
+		if (isEnoent(error)) return false;
+		throw error;
 	}
 }
 
@@ -1094,7 +1106,9 @@ export class FileSessionStorage implements SessionStorage {
 		}
 	}
 
-	readText(path: string): Promise<string> {
+	async readText(path: string): Promise<string> {
+		// A `gc --archive` copy is a single gzip member; nothing can read it end-first.
+		if (isArchivedSessionPath(path)) return utf8Decoder.decode(await inflateArchivedBytes(path));
 		return Bun.file(path).text();
 	}
 
@@ -1103,6 +1117,16 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	async readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+		// A gzip member cannot be read end-first, so an archived transcript is
+		// inflated whole and then windowed. Only the listing of an archive hits
+		// this; the live tree keeps the two bounded reads.
+		if (isArchivedSessionPath(path)) {
+			const bytes = await inflateArchivedBytes(path);
+			const head = utf8Decoder.decode(bytes.subarray(0, prefixBytes));
+			const tail =
+				suffixBytes > 0 ? utf8Decoder.decode(bytes.subarray(Math.max(0, bytes.length - suffixBytes))) : "";
+			return [head, tail];
+		}
 		return peekFileEnds(path, prefixBytes, suffixBytes, (head, tail) => [
 			utf8Decoder.decode(head),
 			utf8Decoder.decode(tail),
@@ -1310,19 +1334,28 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	/**
-	 * Rename `replacement` over the session file `fpath` under the
-	 * cross-process publish lock that serializes appends and rewrites, when
-	 * `unchanged` still accepts the file there. Returns whether it renamed.
-	 * Throws {@link SessionLockError} while another writer holds the lock.
+	 * Run `task` — a swap of the session file `fpath` for another file, from
+	 * its first look through its last rename — under the cross-process
+	 * publish lock that serializes appends and rewrites, so no append from any
+	 * omp binary lands while the file is moved, checked or replaced. Held
+	 * until the task settles. Throws {@link SessionLockError} while another
+	 * writer holds the lock; an append that waits longer than the lock's
+	 * bounded wait fails with it, rather than landing in a file being swapped.
 	 */
-	replaceSessionFileSync(fpath: string, replacement: string, unchanged: () => boolean): boolean {
-		let replaced = false;
-		this.#withPublishLock(fpath, () => {
-			if (!unchanged()) return;
-			this.renameSync(replacement, fpath);
-			replaced = true;
-		});
-		return replaced;
+	async withPublishLock<T>(fpath: string, task: () => Promise<T>): Promise<T> {
+		const lockPath = this.#publishLockPath(fpath);
+		this.ensureDirSync(path.dirname(lockPath));
+		const osGate = this.#acquireOsPublishLock(fpath, this.#osGatePath(lockPath));
+		try {
+			this.#acquirePublishLock(fpath, lockPath);
+			try {
+				return await task();
+			} finally {
+				this.#releasePublishLock(fpath, lockPath);
+			}
+		} finally {
+			osGate.release();
+		}
 	}
 
 	/**
