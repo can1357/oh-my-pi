@@ -16,6 +16,8 @@
  * Each workspace keeps a record of its checkout ({@link OVNFS_CHECKOUT_FILE}) in the
  * run's task-isolation dir, beside the owner marker, so `omp worktree clear`
  * removes the checkouts of runs that crashed ({@link releaseOvnfsCheckout}).
+ * The record stays until removal is confirmed: a failed removal keeps it, and
+ * reusing the slot moves it aside instead of deleting it.
  *
  * @example
  * // Picked by the task runner when ovnfs is found and `isolation.backend` is auto:
@@ -83,6 +85,24 @@ async function removeCheckout(command: string, checkout: string): Promise<void> 
 }
 
 /**
+ * Remove `checkout`, then delete `dir`. A removal that cannot be confirmed
+ * keeps `dir` and the checkout record in it, so `omp worktree clear` can retry.
+ */
+async function releaseCheckoutRecord(dir: string, command: string, checkout: string): Promise<void> {
+	try {
+		await removeCheckout(command, checkout);
+	} catch (err) {
+		logger.warn("ovnfs checkout removal failed; `omp worktree clear` retries it", {
+			dir,
+			checkout,
+			error: err instanceof Error ? err.message : String(err),
+		});
+		return;
+	}
+	await fs.rm(dir, { recursive: true, force: true });
+}
+
+/**
  * Remove the ovnfs checkout a task-isolation dir records and report whether it
  * recorded one. Throws when the checkout cannot be removed (the record then stays
  * for a later retry); `omp worktree clear` calls this before deleting the dir.
@@ -115,16 +135,7 @@ class OvnfsWorkspace implements IsolationWorkspace {
 
 	/** Remove the checkout, then its record; a checkout that cannot be removed keeps its record for `omp worktree clear`. */
 	async cleanup(): Promise<void> {
-		try {
-			await removeCheckout(this.command, this.checkout);
-		} catch (err) {
-			logger.warn("ovnfs checkout removal failed; `omp worktree clear` retries it", {
-				checkout: this.checkout,
-				error: err instanceof Error ? err.message : String(err),
-			});
-			return;
-		}
-		await fs.rm(this.baseDir, { recursive: true, force: true });
+		await releaseCheckoutRecord(this.baseDir, this.command, this.checkout);
 	}
 }
 
@@ -136,26 +147,51 @@ class OvnfsWorkspace implements IsolationWorkspace {
 export function ovnfsWorkspace(command: string): OpenWorkspace {
 	return async (repoRoot, agentId) => {
 		const baseDir = taskIsolationBaseDir(repoRoot, agentId);
-		// An earlier run with this id that died leaves its record here: release
-		// its checkout before the slot is reused, or nothing would remember it.
-		await releaseOvnfsCheckout(baseDir).catch(err =>
-			logger.warn("releasing a stale ovnfs checkout failed", {
+		// A dead run with this id may still record a checkout. Reusing the slot
+		// deletes that record, so a removal that fails has to move the record
+		// and its owner marker aside first — or leave them and refuse the slot.
+		try {
+			await releaseOvnfsCheckout(baseDir);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			const preserved = await vacateIsolationSlot(baseDir);
+			if (!preserved) {
+				logger.warn("releasing a stale ovnfs checkout failed", {
+					dir: baseDir,
+					error: message,
+				});
+				throw new Error(
+					`ovnfs isolation failed: could not release the previous checkout (${message}); its record was kept for \`omp worktree clear\` (set isolation.backend to a native backend to bypass ovnfs)`,
+				);
+			}
+			logger.warn("moved a stale ovnfs checkout record aside after removal failed", {
 				dir: baseDir,
-				error: err instanceof Error ? err.message : String(err),
-			}),
-		);
+				preserved,
+				error: message,
+			});
+		}
 		await fs.rm(baseDir, { recursive: true, force: true });
 		await fs.mkdir(baseDir, { recursive: true });
 		await writeIsolationOwner(baseDir, agentId);
 		const checkout = checkoutName(agentId);
+		// The record is written once the daemon is reachable and before `new`
+		// returns, so a crash or a lost reply still names the checkout. It is
+		// deleted only after removal is confirmed.
+		let recorded = false;
 		try {
-			// Recorded before the checkout exists, so a crash mid-creation still names it.
+			await startDaemon(command);
 			const record: CheckoutRecord = { command, checkout };
 			await Bun.write(path.join(baseDir, OVNFS_CHECKOUT_FILE), JSON.stringify(record));
+			recorded = true;
 			const reply = await call<NewReply>(command, "new", { dir: repoRoot, name: checkout });
 			return new OvnfsWorkspace(reply.checkout.path, baseDir, command, checkout);
 		} catch (err) {
-			await fs.rm(baseDir, { recursive: true, force: true });
+			// `exists` refused the name: that checkout predates this attempt, so
+			// only the new local record goes — removing the checkout would
+			// delete the older run's work.
+			const refusedExisting = err instanceof OvnfsError && err.code === "exists";
+			if (recorded && !refusedExisting) await releaseCheckoutRecord(baseDir, command, checkout);
+			else await fs.rm(baseDir, { recursive: true, force: true });
 			throw new Error(
 				`ovnfs isolation failed: ${err instanceof Error ? err.message : String(err)} (set isolation.backend to a native backend to bypass ovnfs)`,
 			);
