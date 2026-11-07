@@ -1308,19 +1308,52 @@ impl Lower {
 		let idx = self.plain_word(w, kind)?;
 		// Run-time parsed text (here-document bodies, arithmetic) gets no
 		// brace expansion; its unit's last word must stay the text itself.
-		if !self.text
-			&& let Some((t, alts)) = super::brace::expand(w)
-		{
-			let mut indices = Vec::with_capacity(alts.len());
-			for alt in alts {
-				indices.push(self.plain_word(st::Word::at(&t, alt), kind)?);
-			}
-			let parks = indices.iter().any(|&i| self.unit.words[i as usize].parks);
-			let word = &mut self.unit.words[idx as usize];
-			word.parks |= parks;
-			word.braces = Some(indices.into_boxed_slice());
+		if self.text {
+			return Ok(idx);
+		}
+		match super::brace::expand(w) {
+			Ok(Some((t, alts))) => {
+				let mut indices = Vec::with_capacity(alts.len());
+				for alt in alts {
+					indices.push(self.plain_word(st::Word::at(&t, alt), kind)?);
+				}
+				let parks = indices.iter().any(|&i| self.unit.words[i as usize].parks);
+				let word = &mut self.unit.words[idx as usize];
+				word.parks |= parks;
+				word.braces = Some(indices.into_boxed_slice());
+			},
+			Ok(None) => {},
+			Err(count) => self.brace_limit(w, count),
 		}
 		Ok(idx)
+	}
+
+	/// bash has no limit on a brace expansion's words; this engine refuses
+	/// one over [`super::brace::MAX_WORDS`] rather than run the word as
+	/// written or cut short. The refusal is a syntax error where the word
+	/// runs, before the command using it: a branch that does not run, or a
+	/// function never called, is no error.
+	fn brace_limit(&mut self, w: st::Word<'_>, count: u128) {
+		let span = w.span().rebase(self.base);
+		let mut msg = BString::from("brace expansion: `");
+		for &byte in span.slice(&self.unit.source) {
+			match byte {
+				b'\n' => msg.extend_from_slice(b"\\n"),
+				b'\r' => msg.extend_from_slice(b"\\r"),
+				_ => msg.push(byte),
+			}
+		}
+		msg.extend_from_slice(
+			format!(
+				"' would make at least {count} words, over the limit of {}",
+				super::brace::MAX_WORDS
+			)
+			.as_bytes(),
+		);
+		let a = self.str(&msg);
+		let (line, _) = self.lines.line_col(&self.unit.source, span.lo);
+		let pc = self.emit(Opcode::Abort, a, 2, self.unit.line + line);
+		self.unit.ops[pc as usize].flags |= Op::SYNTAX;
 	}
 
 	/// Lower a word without brace expansion.
