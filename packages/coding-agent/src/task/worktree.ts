@@ -18,6 +18,7 @@ const { IsoBackendKind } = natives;
 
 const TASK_ISOLATION_DIR_PREFIX = "t";
 const TASK_ISOLATION_DIR_DIGEST_CHARS = 9;
+const TASK_ISOLATION_SOURCE_DIR = "s";
 const TASK_ISOLATION_MOUNT_DIR = "m";
 const GIT_NETWORK_TIMEOUT_MS = 30 * 60 * 1000;
 type IsoBackendKind = natives.IsoBackendKind;
@@ -591,6 +592,37 @@ export interface IsolationHandle {
 }
 
 /**
+ * A clone starts without the source repository's local settings. Carry the commit
+ * identity over so agents can commit inside an isolation when no global identity exists.
+ */
+async function copyLocalGitIdentity(source: VcsGitRepo, cloneDir: string): Promise<void> {
+	const clone = vcs.requireGit(cloneDir);
+	for (const key of ["user.name", "user.email"]) {
+		const value = await source.configGet(key);
+		if (value) await clone.configSet(key, value);
+	}
+}
+
+/**
+ * The outer clone carries neither independent nested repositories (they are
+ * usually ignored, or tracked only as plain files) nor their own history. Put
+ * each one at its own committed HEAD, so task patches for it are still captured
+ * and applied as nested-repo patches.
+ */
+async function cloneNestedRepos(repoRoot: string, cloneDir: string, nestedRepos: readonly string[]): Promise<void> {
+	for (const relativePath of nestedRepos) {
+		const nestedSource = path.join(repoRoot, relativePath);
+		const nestedHead = await vcs.requireGit(nestedSource).headSha();
+		if (!nestedHead) continue;
+		const nestedClone = path.join(cloneDir, relativePath);
+		await fs.rm(nestedClone, { recursive: true, force: true });
+		await fs.mkdir(path.dirname(nestedClone), { recursive: true });
+		await vcs.clone(nestedSource, nestedClone, { sha: nestedHead, timeoutMs: GIT_NETWORK_TIMEOUT_MS });
+		await copyLocalGitIdentity(vcs.requireGit(nestedSource), nestedClone);
+	}
+}
+
+/**
  * Materialise `merged` for a single task. `preferred` is a hint — when
  * its prerequisites are missing the PAL silently falls back, and the
  * caller learns about that through `IsolationHandle.fellBack` +
@@ -656,8 +688,14 @@ export async function ensureIsolation(
 	preferred?: IsoBackendKind,
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
-	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
+	const repo = vcs.requireGit(repoRoot);
+	const headSha = await repo.headSha();
+	if (!headSha) {
+		throw new Error("Isolated task execution requires a committed Git HEAD.");
+	}
+	const nestedRepos = await discoverNestedRepos(repoRoot, [repoRoot]);
 	const baseDir = taskIsolationBaseDir(repoRoot, id);
+	const sourceDir = path.join(baseDir, TASK_ISOLATION_SOURCE_DIR);
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = await natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
@@ -666,16 +704,20 @@ export async function ensureIsolation(
 	for (const candidate of candidates) {
 		await fs.rm(baseDir, { recursive: true, force: true });
 		// Claim ownership before the backend materialises `m`. Backends only
-		// create/replace `mergedDir` (and overlay upper/work), never the base
-		// dir, so the marker survives `isoStart` — and a concurrent
+		// create/replace `mergedDir` (and overlay upper/work), never the base dir
+		// or the clean source, so the marker survives `isoStart` — and a concurrent
 		// `omp worktree clear` never sees this sandbox without a live owner,
 		// even while a large clone is still in progress.
 		await fs.mkdir(baseDir, { recursive: true });
 		await writeIsolationOwner(baseDir, id);
 		try {
-			await natives.isoStart(candidate, repoRoot, mergedDir);
+			await vcs.clone(repoRoot, sourceDir, { sha: headSha, timeoutMs: GIT_NETWORK_TIMEOUT_MS });
+			await copyLocalGitIdentity(repo, sourceDir);
+			await cloneNestedRepos(repoRoot, sourceDir, nestedRepos);
+			const sourceCommonDir = vcs.requireGit(sourceDir).info().commonDir;
+			await natives.isoStart(candidate, sourceDir, mergedDir);
 			// Sever the isolation's git metadata from the source checkout. Copy
-			// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
+			// backends duplicate the clean source's `.git` verbatim — a linked-worktree
 			// pointer file (or the rcopy `git worktree add` registration) leaves
 			// the isolation sharing the source's HEAD/index/ref namespace, so a
 			// task's git operations would mutate the parent checkout and stack
@@ -1043,6 +1085,38 @@ export interface MergeBranchResult {
 	conflict?: string;
 }
 
+function pathsOverlap(left: string, right: string): boolean {
+	return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+}
+
+const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/**
+ * Paths a branch's merge would write. With `baseSha` that is the whole
+ * `baseSha..branch` range; without it only the tip commit is cherry-picked, so
+ * the tip against its first parent is exact (not the tip against the current HEAD).
+ */
+async function branchTouchedFiles(
+	repo: VcsGitRepo,
+	branchName: string,
+	baseSha: string | undefined,
+): Promise<string[]> {
+	if (baseSha) return patchTouchedFiles(await diffTreeOrEmpty(repo, baseSha, branchName));
+	const parent = await repo.resolveRef(`${branchName}^`);
+	return patchTouchedFiles(await diffTreeOrEmpty(repo, parent ?? EMPTY_TREE_SHA, branchName));
+}
+
+async function findUntrackedMergeCollision(
+	repo: VcsGitRepo,
+	branchName: string,
+	baseSha: string | undefined,
+	untracked: readonly string[],
+): Promise<string[]> {
+	if (untracked.length === 0) return [];
+	const touched = await branchTouchedFiles(repo, branchName, baseSha);
+	return touched.filter(file => untracked.some(localPath => pathsOverlap(file, localPath)));
+}
+
 /**
  * Cherry-pick task branch commits sequentially onto HEAD. When `baseSha` is
  * provided the cherry-pick uses the inclusive range `baseSha..branchName`,
@@ -1066,6 +1140,20 @@ export async function mergeTaskBranches(
 		const repo = vcs.requireGit(repoRoot);
 		const merged: string[] = [];
 		for (const { branchName, baseSha } of branches) {
+			// Checked per branch, in merge order, so branches ahead of a collision still land.
+			const collisions = await findUntrackedMergeCollision(
+				repo,
+				branchName,
+				baseSha,
+				await repo.lsFiles(true, true),
+			);
+			if (collisions.length > 0) {
+				return {
+					merged,
+					failed: branches.slice(merged.length).map(b => b.branchName),
+					conflict: `${branchName}: untracked path would be overwritten by task merge: ${collisions.join(", ")}`,
+				};
+			}
 			try {
 				const revisions = baseSha ? await repo.revListRange(baseSha, branchName) : [branchName];
 				for (const revision of revisions) {
