@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a browser relay tab becoming unusable once a password manager's inline autofill menu opened in it: omp re-adopts the tab after the call that opened the menu fails, instead of losing it until the menu is closed by hand (reinstall the extension with `omp browser-relay install` and reload it) ([#16908](https://github.com/can1357/oh-my-pi/pull/16908) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.0] - 2026-11-07
 
 ### Added
