@@ -46,7 +46,8 @@ The initial ready frame uses protocol v1 and advertises the opt-in lossless tran
 	"protocolVersion": 1,
 	"supportedProtocolVersions": [1, 2],
 	"maxFrameBytes": 1048576,
-	"maxReassembledFrameBytes": 67108864
+	"maxReassembledFrameBytes": 67108864,
+	"supportsBashExcludeFromContext": true
 }
 ```
 
@@ -217,8 +218,17 @@ The TypeScript client exposes `setCacheWarming(mode): Promise<CacheWarmingMode>`
 
 ### Bash
 
-- `{ id?, type: "bash", command: string }`
+- `{ id?, type: "bash", command: string, excludeFromContext?: boolean }`
 - `{ id?, type: "abort_bash" }`
+
+`excludeFromContext: true` keeps the run out of model context, like terminal
+`!!`: the output is still returned and recorded in the transcript, where
+extensions and `get_messages` see it. Non-boolean values are rejected.
+
+Older runtimes ignore unknown fields and would share the output, so send
+`excludeFromContext: true` only when the `ready` frame has
+`supportsBashExcludeFromContext: true`. `RpcClient.bash()` enforces this; with
+the Python, Go and Rust SDKs, check `client.ready` / `Ready()` / `ready()`.
 
 `bash` is dispatched concurrently: the RPC server continues reading commands
 while the shell command runs, so `abort_bash` (or any other command) sent
