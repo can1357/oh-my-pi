@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `read` on a URL that answers with a bot challenge (Reddit posts, Cloudflare, DataDome, PerimeterX) tries the next user agent before falling back to readers, and no longer returns the site's block page, or a reader's copy of it, as the page: an unrecovered read ends `blocked` or `failed` and names the protection ([#17904](https://github.com/can1357/oh-my-pi/pull/17904) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.0] - 2026-11-07
 
 ### Added
