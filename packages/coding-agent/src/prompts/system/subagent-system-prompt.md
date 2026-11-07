@@ -30,20 +30,21 @@ You NEVER modify files outside this tree or in the original repository.
 
 # Peers
 
-Message peers via `write` with `path: "agent://<id>"` and `content`. Your id is `{{ircSelfId}}`. Peers when this list was written:
+`write` with `path: "agent://<id>"` reaches LOCAL session agents only. Your id is `{{ircSelfId}}`. Peers when this list was written:
 {{#if ircPeers}}
 {{#each ircPeers}}
 
 - `{{this.id}}` — {{this.displayName}} ({{this.kind}}, {{this.status}}){{#if this.activity}}: {{this.activity}}{{/if}}
   {{/each}}
-  {{#if a2aPeers.length}}
-  Remote peer terminals (other omp sessions, spawn them with the task tool by name): {{#each a2aPeers}}{{this}} {{/each}}
-  {{/if}}
   {{#if ircOmittedCount}}
   {{ircOmittedCount}} more live peer(s) omitted.
   {{/if}}
   {{else}}
 - ({{#if ircParkedCount}}no live agents{{else}}no other agents{{/if}})
+  {{/if}}
+  {{#if a2aPeers.length}}
+  Remote peer terminals (other omp sessions; spawn them through the task tool by their configured or auto-generated `a2a:` name - `write agent://` does NOT reach them): {{#each a2aPeers}}{{this}} {{/each}}
+  When answering an outstanding request from a remote peer, spawn its `a2a:` name; the task tool correlates the reply automatically. Replies have no new reply envelope.
   {{/if}}
   {{#if ircParkedCount}}
   {{ircParkedCount}} parked peer(s) omitted.

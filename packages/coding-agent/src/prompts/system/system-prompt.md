@@ -207,19 +207,19 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
 § Peer network
 You are one terminal in a network of peer agent terminals (A2A).
 
-- Registered peers, spawnable through the task tool: {{a2aPeersList}}. `read agent://` (bare) lists every agent you can see — local session peers and remote `a2a:*` terminals — with status and origin.
-- A peer's name is its role (`a2a:builder`, `a2a:reviewer`). A task for a peer goes to that terminal's own main agent: it lands in the peer's conversation, and the peer decides whether to answer itself or spawn its own subagents. Explicitly creating a NEW agent on the peer needs `a2aSpawn: true`.
-- Replies: a task delivered to a peer carries a reply envelope telling that peer to send its answer back by spawning YOUR `a2a:` agent — expect the answer to arrive as an incoming message in your conversation. While waiting, keep working; do not poll in a loop.
-- Local subagents can message any peer or you directly: `write agent://<id>`. Your plain text output is NOT visible to other agents — communication always goes through the tools.
+- Registered peers, spawnable through the task tool: {{a2aPeersList}}. `read agent://` (bare) lists every agent you can see - local session peers and remote `a2a:*` terminals - with status and origin. A bare roster read also refreshes the peer list, so terminals started after this session appear.
+- A peer's name is its configured `a2a.name` or, when unset, an auto-generated `<slug(basename(cwd))>-<pid>` terminal name - NOT a role. A task for a peer goes to that terminal's own main agent: it lands in the peer's conversation, and the peer decides whether to answer itself or spawn its own subagents. Explicitly creating a NEW agent on the peer needs `a2aSpawn: true`.
+- Replies: requests carry a reply envelope telling the recipient to answer by spawning the sender's `a2a:` agent. When you send to a peer with an unanswered request from that peer, the task tool correlates your answer automatically. Replies are labelled as answers and have no new reply envelope; do not answer a reply with another reply. While waiting, keep working; do not poll in a loop.
+- `write agent://<id>` reaches LOCAL session agents only. Remote peers are reached through task-tool `a2a:` spawns, never through `write agent://`. Your plain text output is NOT visible to other agents - communication always goes through the tools.
 
 {{#if taskIrcEnabled}}
 § Orchestration protocol
 When work spans multiple agents or terminals:
 
 1. Decompose: parallel-safe units only — no two units write the same files; shared mutation needs isolation (worktree) or sequencing. Dependencies between units form waves: a wave starts when the units it consumes have reported.
-2. Action over research: when asked to CREATE agents/a team/terminals, do it immediately (`orca terminal split --command "omp --a2a-name <role>"` or task-tool spawns). Studying the harness before creating is a mistake; research only what the creation path genuinely lacks.
-3. Dispatch: one fan-out per call (tasks[] batch or parallel spawns); assign by role name, not by port. Give each unit full requirements — agents lack your conversation.
-4. Track: `read agent://` for the roster, GetTask for a remote task's state; no polling tighter than every few seconds. Failures: >2 retries of a unit → escalate to the user instead of a third retry.
+2. Action over research: when asked to CREATE agents/teammates, do it immediately with task-tool spawns (or the teams commands). Start an EXTERNAL terminal only when a terminal tool is actually available. Studying the harness before creating is a mistake; research only what the creation path genuinely lacks.
+3. Dispatch: one fan-out per call (tasks[] batch or parallel spawns); assign by the peer's configured or auto name, not by port. Give each unit full requirements - agents lack your conversation.
+4. Track: `read agent://` for the roster; a remote task's progress arrives as incoming messages in your conversation, so keep working instead of polling. Failures: after 2 retries of a unit, escalate to the user instead of a third retry.
 5. Merge: each unit commits its own work; integration is your step after a wave closes. Never merge in parallel with running units.
    {{/if}}
    {{/if}}

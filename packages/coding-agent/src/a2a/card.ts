@@ -37,6 +37,8 @@ export interface AgentCard {
 	/** Required by the v1.0 card contract the bridge advertises. */
 	protocolVersion: string;
 	version: string;
+	/** omp extension: stable per-process id used to verify a live bridge's port. */
+	instanceId?: string;
 	supportedInterfaces: AgentCardInterface[];
 	capabilities: { streaming: boolean };
 	defaultInputModes: string[];
@@ -62,6 +64,8 @@ export interface AgentCardInput {
 	skills: readonly AgentCardSkillInput[];
 	/** Public A2A identity: overrides the card's name (default "omp"). */
 	name?: string;
+	/** omp extension: stable per-process id for liveness verification. */
+	instanceId?: string;
 }
 
 /** Build the served card; `skills` must already exclude advisor transcripts. */
@@ -71,6 +75,7 @@ export function buildAgentCard(input: AgentCardInput): AgentCard {
 		description: CARD_DESCRIPTION,
 		protocolVersion: A2A_PROTOCOL_VERSION,
 		version: input.version,
+		...(input.instanceId !== undefined ? { instanceId: input.instanceId } : {}),
 		supportedInterfaces: [
 			{
 				url: input.url,

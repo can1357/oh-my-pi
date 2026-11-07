@@ -14,6 +14,9 @@
  * - `SendMessage` then `GetTask` polling. A2A is async-first, so the total
  *   budget is unlimited by default (`a2a.clientTimeoutMs` opts in); connect is
  *   bounded at 10s per request, and polling backs off from 2s to 30s.
+ * - The whole-run budget bounds the ENTIRE run (including the initial
+ *   `SendMessage`) through one combined abort signal; the connect timeout
+ *   stays a separate, per-request budget.
  */
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AgentCard } from "./card";
@@ -125,7 +128,6 @@ function isAgentRole(role: unknown): boolean {
 	return typeof role === "string" && (role.toUpperCase() === "ROLE_AGENT" || role.toLowerCase() === "agent");
 }
 
-/** Final text of a task: artifacts first, then the status message, then agent history. */
 /** True when a SendMessage task is an addressed delivery receipt (metadata.delivery) — the work happens in the remote session. */
 function isDeliveryReceipt(task: A2aTask): boolean {
 	const metadata =
@@ -255,6 +257,7 @@ export class A2aClient {
 	async sendMessage(
 		prompt: string,
 		options?: { contextId?: string; metadata?: Record<string, unknown> },
+		signal?: AbortSignal,
 	): Promise<A2aSendResponse> {
 		const params = {
 			message: {
@@ -265,15 +268,15 @@ export class A2aClient {
 			},
 			...(options?.metadata ? { metadata: options.metadata } : {}),
 		};
-		return asSendResponse(await this.#post("SendMessage", params));
+		return asSendResponse(await this.#post("SendMessage", params, signal));
 	}
 
-	async getTask(id: string): Promise<A2aTask> {
-		return asTask(await this.#post("GetTask", { id }));
+	async getTask(id: string, signal?: AbortSignal): Promise<A2aTask> {
+		return asTask(await this.#post("GetTask", { id }, signal));
 	}
 
-	async cancelTask(id: string): Promise<A2aTask> {
-		return asTask(await this.#post("CancelTask", { id }));
+	async cancelTask(id: string, signal?: AbortSignal): Promise<A2aTask> {
+		return asTask(await this.#post("CancelTask", { id }, signal));
 	}
 
 	/** Send one prompt and wait for the remote task to settle (or pause for input). */
@@ -281,32 +284,57 @@ export class A2aClient {
 		prompt: string,
 		options?: { contextId?: string; metadata?: Record<string, unknown> },
 	): Promise<A2aRunResult> {
-		const deadline = this.#totalTimeoutMs > 0 ? Date.now() + this.#totalTimeoutMs : undefined;
-		const sent = await this.sendMessage(prompt, options);
-		if (sent.task) {
-			const settled = this.#settled(sent.task);
-			if (settled) return settled;
-			// An addressed delivery to a running agent (the terminal's own
-			// conversation) carries the bus receipt: the work now happens in the
-			// remote session, so there is nothing left to poll here.
-			if (isDeliveryReceipt(sent.task))
+		// One combined signal bounds the WHOLE run - the initial SendMessage and
+		// every GetTask poll - so a remote that accepts a request but never answers
+		// cannot outlive `a2a.clientTimeoutMs`. Connect stays a per-request budget.
+		const controller = new AbortController();
+		const timer =
+			this.#totalTimeoutMs > 0
+				? setTimeout(
+						() => controller.abort(new A2aTimeoutError(`A2A run timed out after ${this.#totalTimeoutMs}ms`)),
+						this.#totalTimeoutMs,
+					)
+				: undefined;
+		const runSignal =
+			this.#totalTimeoutMs > 0
+				? this.#signal
+					? AbortSignal.any([this.#signal, controller.signal])
+					: controller.signal
+				: this.#signal;
+		try {
+			const deadline = this.#totalTimeoutMs > 0 ? Date.now() + this.#totalTimeoutMs : undefined;
+			const sent = await this.sendMessage(prompt, options, runSignal);
+			if (sent.task) {
+				const settled = this.#settled(sent.task);
+				if (settled) return settled;
+				// An addressed delivery to a running agent carries the bus receipt:
+				// the work now happens in the remote session, nothing left to poll.
+				if (isDeliveryReceipt(sent.task))
+					return {
+						state: sent.task.status?.state ?? TASK_STATE.WORKING,
+						task: sent.task,
+						text: taskText(sent.task),
+						interrupted: false,
+					};
+				return await this.#awaitTask(sent.task, deadline, runSignal);
+			}
+			if (sent.message) {
 				return {
-					state: sent.task.status?.state ?? TASK_STATE.WORKING,
-					task: sent.task,
-					text: taskText(sent.task),
+					state: TASK_STATE.COMPLETED,
+					message: sent.message,
+					text: partsText(sent.message.parts),
 					interrupted: false,
 				};
-			return this.#awaitTask(sent.task, deadline);
+			}
+			throw new A2aClientError("SendMessage result carried neither a task nor a message");
+		} catch (error) {
+			if (controller.signal.aborted && !(error instanceof A2aTimeoutError)) {
+				throw new A2aTimeoutError(`A2A run timed out after ${this.#totalTimeoutMs}ms`);
+			}
+			throw error;
+		} finally {
+			clearTimeout(timer);
 		}
-		if (sent.message) {
-			return {
-				state: TASK_STATE.COMPLETED,
-				message: sent.message,
-				text: partsText(sent.message.parts),
-				interrupted: false,
-			};
-		}
-		throw new A2aClientError("SendMessage result carried neither a task nor a message");
 	}
 
 	/** Terminal/interrupted view of a task, or `undefined` while it is still open. */
@@ -322,7 +350,11 @@ export class A2aClient {
 		};
 	}
 
-	async #awaitTask(initial: A2aTask, deadline: number | undefined): Promise<A2aRunResult> {
+	async #awaitTask(
+		initial: A2aTask,
+		deadline: number | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<A2aRunResult> {
 		let task = initial;
 		let interval = this.#pollIntervalMs;
 		let failures = 0;
@@ -337,10 +369,10 @@ export class A2aClient {
 					);
 				}
 			}
-			await sleep(interval, this.#signal);
+			await sleep(interval, signal);
 			interval = Math.min(Math.max(interval + 1, Math.floor(interval * 1.5)), this.#maxPollIntervalMs);
 			try {
-				task = await this.getTask(task.id);
+				task = await this.getTask(task.id, signal);
 				failures = 0;
 			} catch (error) {
 				// A JSON-RPC error is the server speaking; only transport failures retry.
@@ -351,7 +383,7 @@ export class A2aClient {
 		}
 	}
 
-	async #post(method: string, params: unknown): Promise<unknown> {
+	async #post(method: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
 		const headers: Record<string, string> = {
 			"content-type": "application/json",
 			accept: "application/json",
@@ -367,7 +399,7 @@ export class A2aClient {
 			{
 				fetch: this.#fetch,
 				connectTimeoutMs: this.#connectTimeoutMs,
-				signal: this.#signal,
+				signal: signal ?? this.#signal,
 				what: `A2A ${method}`,
 			},
 		);

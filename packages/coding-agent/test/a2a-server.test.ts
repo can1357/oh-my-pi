@@ -171,6 +171,7 @@ function startServer(options: {
 	registry?: FakeRegistry;
 	bus?: FakeBus;
 	streamPollMs?: number;
+	onIncomingRequest?: (from: string, messageId: string) => void;
 }): { handle: A2aServerHandle; registry: FakeRegistry; bus: FakeBus } {
 	const registry = options.registry ?? new FakeRegistry(options.refs ?? []);
 	const bus = options.bus ?? new FakeBus();
@@ -181,6 +182,7 @@ function startServer(options: {
 		bus,
 		spawn: options.spawn,
 		streamPollMs: options.streamPollMs ?? 20,
+		onIncomingRequest: options.onIncomingRequest,
 		card: () =>
 			buildAgentCard({
 				url: `http://${A2A_HOST}:${handle.port}/`,
@@ -228,6 +230,13 @@ async function rpc(
 		body: JSON.stringify(body),
 	});
 	return { status: response.status, json: await response.json() };
+}
+
+/** Like `rpc`, but keeps the Response so a 204 notification body can be asserted. */
+async function rpcRaw(handle: A2aServerHandle, body: unknown, token: string | null = TOKEN): Promise<Response> {
+	const headers: Record<string, string> = { "content-type": "application/json" };
+	if (token !== null) headers.authorization = `Bearer ${token}`;
+	return fetch(`${handle.url}`, { method: "POST", headers, body: JSON.stringify(body) });
 }
 
 describe("A2A agent card", () => {
@@ -447,22 +456,141 @@ describe("A2A JSON-RPC methods", () => {
 		expect(result.totalSize).toBe(2);
 	});
 
-	it("CancelTask aborts the live session and reports CANCELED", async () => {
-		let aborted = false;
+	it("ListTasks persists message.contextId, pages in stable creation order, and accepts an empty pageToken", async () => {
 		const registry = new FakeRegistry([
-			makeRef({
-				id: "beta",
-				status: "running",
-				session: { abort: async () => void (aborted = true) } as never,
-			}),
+			makeRef({ id: "beta", createdAt: 1000 }),
+			makeRef({ id: "alpha", createdAt: 2000 }),
+			makeRef({ id: "gamma", createdAt: 3000 }),
 		]);
-		const { handle } = startServer({ registry });
-		const { json } = await rpc(handle, { jsonrpc: "2.0", id: 13, method: "CancelTask", params: { id: "beta" } });
-		// The server serialized an A2aTask; assert the fields below.
+		const { handle } = startServer({ registry, spawn: async () => registry.get("beta")! });
+		// A task created by SendMessage keeps the caller's message.contextId.
+		await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 20,
+			method: "SendMessage",
+			params: {
+				message: { messageId: "m-ctx", role: "ROLE_USER", parts: [{ text: "go" }], contextId: "ctx-remote" },
+				metadata: { spawn: true },
+			},
+		});
+		const filtered = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 21,
+			method: "ListTasks",
+			params: { contextId: "ctx-remote" },
+		});
+		const filteredTasks = asObject(asObject(filtered.json, "response").result, "result").tasks as A2aTask[];
+		expect(filteredTasks.map(task => task.id)).toEqual(["beta"]);
+		// An empty pageToken is the first page, not a malformed cursor.
+		const first = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 22,
+			method: "ListTasks",
+			params: { pageToken: "", pageSize: 2 },
+		});
+		const firstResult = asObject(asObject(first.json, "response").result, "result");
+		expect((firstResult.tasks as A2aTask[]).map(task => task.id)).toEqual(["beta", "alpha"]);
+		// lastActivity churn must not reorder the page between two reads.
+		registry.setActivity("alpha", "still working");
+		const second = await rpc(handle, { jsonrpc: "2.0", id: 23, method: "ListTasks", params: { pageSize: 2 } });
+		const secondTasks = asObject(asObject(second.json, "response").result, "result").tasks as A2aTask[];
+		expect(secondTasks.map(task => task.id)).toEqual(["beta", "alpha"]);
+	});
+
+	it("CancelTask aborts only bridge-created tasks and refuses Main", async () => {
+		let aborted = false;
+		const beta = makeRef({
+			id: "beta",
+			status: "running",
+			session: { abort: async () => void (aborted = true) } as never,
+		});
+		const registry = new FakeRegistry([beta, makeRef({ id: "Main", kind: "main", status: "running" })]);
+		const { handle } = startServer({ registry, spawn: async () => beta });
+		// A2A spawns create the task, so it becomes cancelable through this bridge.
+		const created = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 12,
+			method: "SendMessage",
+			params: {
+				message: { messageId: "m-13", role: "ROLE_USER", parts: [{ text: "start" }] },
+				metadata: { spawn: true },
+			},
+		});
+		expect(taskResult(created.json).id).toBe("beta");
+		// Main and local subagents were never created by the bridge: refuse them.
+		const main = await rpc(handle, { jsonrpc: "2.0", id: 13, method: "CancelTask", params: { id: "Main" } });
+		expect(errorResult(main.json).code).toBe(RPC_ERRORS.TASK_NOT_CANCELABLE);
+		const { json } = await rpc(handle, { jsonrpc: "2.0", id: 14, method: "CancelTask", params: { id: "beta" } });
 		const task = asObject(asObject(json, "response").result, "result") as unknown as A2aTask;
 		expect(aborted).toBe(true);
 		expect(task.id).toBe("beta");
 		expect(task.status.state).toBe(TASK_STATE.CANCELED);
+	});
+
+	it("refuses to cancel an unrelated local subagent after delivery", async () => {
+		let aborted = false;
+		const local = makeRef({
+			id: "local",
+			status: "running",
+			session: { abort: async () => void (aborted = true) } as never,
+		});
+		const { handle } = startServer({ refs: [local] });
+		await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 1,
+			method: "SendMessage",
+			params: { message: { messageId: "m", parts: [{ text: "hello" }] }, metadata: { to: "local" } },
+		});
+		const result = await rpc(handle, { jsonrpc: "2.0", id: 2, method: "CancelTask", params: { id: "local" } });
+		expect(errorResult(result.json).code).toBe(RPC_ERRORS.TASK_NOT_CANCELABLE);
+		expect(aborted).toBe(false);
+	});
+
+	it("does not cancel a replacement generation that reused a bridge task id", async () => {
+		let aborted = false;
+		const original = makeRef({ id: "worker", status: "running" });
+		const registry = new FakeRegistry([original]);
+		const { handle } = startServer({ registry, spawn: async () => original });
+		await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 1,
+			method: "SendMessage",
+			params: { message: { messageId: "m", contextId: "old-context", parts: [{ text: "go" }] } },
+		});
+		const replacement = registry.register({ id: "worker", displayName: "worker", kind: "sub", status: "running" });
+		replacement.session = { abort: async () => void (aborted = true) } as never;
+		const canceled = await rpc(handle, { jsonrpc: "2.0", id: 2, method: "CancelTask", params: { id: "worker" } });
+		expect(errorResult(canceled.json).code).toBe(RPC_ERRORS.TASK_NOT_CANCELABLE);
+		expect(aborted).toBe(false);
+		const listed = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: 3,
+			method: "ListTasks",
+			params: { contextId: "old-context" },
+		});
+		expect(asObject(asObject(listed.json, "response").result, "result").tasks as A2aTask[]).toEqual([]);
+	});
+
+	it("preserves a completed task or replacement registered during cancellation", async () => {
+		for (const replace of [false, true]) {
+			const registry = new FakeRegistry();
+			const original = registry.register({ id: "worker", displayName: "worker", kind: "sub", status: "running" });
+			original.session = {
+				abort: async () => {
+					if (replace) registry.register({ id: "worker", displayName: "new", kind: "sub", status: "running" });
+					else registry.setStatus("worker", "idle");
+				},
+			} as never;
+			const { handle } = startServer({ registry, spawn: async () => original });
+			await rpc(handle, {
+				jsonrpc: "2.0",
+				id: 1,
+				method: "SendMessage",
+				params: { message: { messageId: "m", parts: [{ text: "go" }] } },
+			});
+			await rpc(handle, { jsonrpc: "2.0", id: 2, method: "CancelTask", params: { id: "worker" } });
+			expect(registry.get("worker")?.status).toBe(replace ? "running" : "idle");
+		}
 	});
 
 	it("hides advisor transcripts from GetTask", async () => {
@@ -501,6 +629,61 @@ describe("A2A JSON-RPC methods", () => {
 	});
 });
 
+describe("A2A JSON-RPC notifications and batches", () => {
+	const notify = {
+		jsonrpc: "2.0",
+		method: "SendMessage",
+		params: {
+			message: { messageId: "n-1", role: "ROLE_USER", parts: [{ text: "notify" }] },
+			metadata: { to: "Main" },
+		},
+	};
+
+	it("processes a request without an id as a notification and answers 204 with no body", async () => {
+		const registry = new FakeRegistry([makeRef({ id: "Main", status: "running" })]);
+		const bus = new FakeBus();
+		const { handle } = startServer({ registry, bus });
+		const response = await rpcRaw(handle, notify);
+		expect(response.status).toBe(204);
+		expect(await response.text()).toBe("");
+		expect(bus.sent).toHaveLength(1);
+		expect(bus.sent[0]!.body).toBe("notify");
+	});
+
+	it("executes a streaming notification without opening an SSE response", async () => {
+		const { handle, bus } = startServer({ refs: [makeRef({ id: "Main", kind: "main", status: "running" })] });
+		const response = await rpcRaw(handle, { ...notify, method: "SendStreamingMessage" });
+		expect(response.status).toBe(204);
+		expect(await response.text()).toBe("");
+		expect(bus.sent.map(message => message.body)).toEqual(["notify"]);
+	});
+
+	it("returns one response per non-notification call in a batch, omitting notifications", async () => {
+		const registry = new FakeRegistry([makeRef({ id: "Main", status: "running" })]);
+		const bus = new FakeBus();
+		const { handle } = startServer({ registry, bus });
+		const response = await rpcRaw(handle, [
+			{ jsonrpc: "2.0", id: 1, method: "ListTasks", params: {} },
+			notify,
+			{ jsonrpc: "2.0", id: 2, method: "GetTask", params: { id: "Main" } },
+		]);
+		expect(response.status).toBe(200);
+		const payload = (await response.json()) as Array<{ id: number }>;
+		expect(payload.map(row => row.id)).toEqual([1, 2]);
+		expect(bus.sent).toHaveLength(1);
+	});
+
+	it("answers an all-notification batch with 204", async () => {
+		const registry = new FakeRegistry([makeRef({ id: "Main", status: "running" })]);
+		const bus = new FakeBus();
+		const { handle } = startServer({ registry, bus });
+		const response = await rpcRaw(handle, [notify, notify]);
+		expect(response.status).toBe(204);
+		expect(await response.text()).toBe("");
+		expect(bus.sent).toHaveLength(2);
+	});
+});
+
 describe("A2A delivery ingress", () => {
 	function startWithBus(registry: FakeRegistry, bus: A2aBus): A2aServerHandle {
 		const handle = createA2aServer({
@@ -513,6 +696,29 @@ describe("A2A delivery ingress", () => {
 		handles.push(handle);
 		return handle;
 	}
+
+	it("tracks replies only for successfully delivered peer requests", async () => {
+		const incoming: string[] = [];
+		const bus = new FakeBus();
+		const { handle } = startServer({
+			refs: [makeRef({ id: "Main", kind: "main", status: "running" })],
+			bus,
+			onIncomingRequest: (from, id) => incoming.push(`${from}:${id}`),
+		});
+		const send = (id: string) =>
+			rpc(handle, {
+				jsonrpc: "2.0",
+				id,
+				method: "SendMessage",
+				params: { message: { messageId: id, parts: [{ text: "hello" }] }, metadata: { to: "Main", from: "peer" } },
+			});
+		bus.outcome = "failed";
+		await send("failed");
+		expect(incoming).toEqual([]);
+		bus.outcome = "woken";
+		await send("delivered");
+		expect(incoming).toEqual(["peer:delivered"]);
+	});
 
 	it("marks bridge deliveries external: a repeated or bursty request is not agent-guarded", async () => {
 		// A real bus with its guard on and a healthy recipient: the bridge's
@@ -976,8 +1182,10 @@ describe("A2A bearer token", () => {
 			const first = await resolveA2aToken({ agentDir: dir });
 			expect(first.length).toBeGreaterThanOrEqual(32);
 			const file = path.join(dir, "a2a.token");
-			const stat = await fs.stat(file);
-			expect(stat.mode & 0o777).toBe(0o600);
+			if (process.platform !== "win32") {
+				const stat = await fs.stat(file);
+				expect(stat.mode & 0o777).toBe(0o600);
+			}
 			expect((await fs.readFile(file, "utf8")).trim()).toBe(first);
 			const second = await resolveA2aToken({ agentDir: dir });
 			expect(second).toBe(first);
@@ -998,32 +1206,183 @@ describe("A2A bearer token", () => {
 });
 
 describe("local bridge registry", () => {
-	it("registers the bridge and prunes dead pids on read", async () => {
+	it("writes one per-process file with an instanceId mirrored on the card, and ignores the old single-file format", async () => {
+		const { readLiveBridges, readLocalBridgeEntry, autoA2aName } =
+			await import("@oh-my-pi/pi-coding-agent/a2a/server");
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "a2a-reg-"));
 		try {
 			const handle = await startA2aServer({
 				settings: Settings.isolated(),
 				agentDir,
 				port: 0,
-				registry: new FakeRegistry([]).asApi(),
+				registry: new FakeRegistry([makeRef({ id: "Main", kind: "main" })]).asApi(),
 				bus: new FakeBus(),
 			});
 			handles.push(handle);
-			// registry file written with this process's entry
-			const raw = JSON.parse(await fs.readFile(path.join(agentDir, "a2a-bridges.json"), "utf8")) as Array<{
-				pid: number;
-				port: number;
-			}>;
-			expect(raw.some(entry => entry.pid === process.pid && entry.port === handle.port)).toBe(true);
-			// readLiveBridges excludes self
-			const { readLiveBridges } = await import("@oh-my-pi/pi-coding-agent/a2a/server");
+			const file = path.join(agentDir, "a2a-bridges", `${process.pid}.json`);
+			const entry = JSON.parse(await fs.readFile(file, "utf8")) as Record<string, unknown>;
+			expect(entry.pid).toBe(process.pid);
+			expect(entry.port).toBe(handle.port);
+			expect(typeof entry.instanceId).toBe("string");
+			expect((entry.instanceId as string).length).toBeGreaterThan(0);
+			// A1: no a2a.name -> a unique, skill-id-safe auto name used for the
+			// card, the main skill, and the registry entry alike.
+			const card = (await (await fetch(`${handle.url}${AGENT_CARD_PATH}`)).json()) as {
+				name: string;
+				instanceId?: string;
+				skills: Array<{ id: string }>;
+			};
+			expect(card.name).toBe(autoA2aName(process.cwd()));
+			expect(card.name).toMatch(/^[a-z0-9-]+-\d+$/);
+			expect(entry.name).toBe(card.name);
+			expect(card.instanceId).toBe(entry.instanceId as string);
+			expect(card.skills.map(skill => skill.id)).toContain(card.name);
+			expect(await readLocalBridgeEntry(agentDir, process.pid)).toMatchObject({
+				pid: process.pid,
+				port: handle.port,
+			});
+			// Self is never registered as its own peer.
 			expect((await readLiveBridges(agentDir)).size).toBe(0);
-			// a dead pid entry is pruned (not returned)
+			// A stale single-file registry is neither written nor read.
+			await expect(fs.stat(path.join(agentDir, "a2a-bridges.json"))).rejects.toThrow();
 			await fs.writeFile(
 				path.join(agentDir, "a2a-bridges.json"),
-				JSON.stringify([{ pid: 999999, port: 1234, startedAt: 1 }]),
+				JSON.stringify([{ pid: process.ppid, port: 9999, startedAt: 1 }]),
 			);
-			expect((await readLiveBridges(agentDir)).size).toBe(0);
+			expect((await readLiveBridges(agentDir, { excludePid: -1 })).size).toBe(1);
+		} finally {
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps concurrent per-process registrations and drops only the stopped bridge", async () => {
+		const { registerLocalBridge, unregisterLocalBridge, readLiveBridges, readLocalBridgeEntry } =
+			await import("@oh-my-pi/pi-coding-agent/a2a/server");
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "a2a-reg-multi-"));
+		try {
+			const pidA = process.ppid;
+			const pidB = process.pid;
+			await Promise.all([
+				registerLocalBridge({ agentDir, pid: pidA, port: 7601, name: "peer-a", instanceId: "id-a" }),
+				registerLocalBridge({ agentDir, pid: pidB, port: 7602, name: "peer-b", instanceId: "id-b" }),
+			]);
+			// Both writes land: the old read-modify-write single file lost one.
+			expect(await readLocalBridgeEntry(agentDir, pidA)).toMatchObject({
+				pid: pidA,
+				port: 7601,
+				instanceId: "id-a",
+			});
+			expect(await readLocalBridgeEntry(agentDir, pidB)).toMatchObject({
+				pid: pidB,
+				port: 7602,
+				instanceId: "id-b",
+			});
+			expect((await readLiveBridges(agentDir, { excludePid: -1 })).size).toBe(2);
+			// Shutdown removes only the stopping bridge's own file.
+			await unregisterLocalBridge(agentDir, pidA);
+			expect(await readLocalBridgeEntry(agentDir, pidA)).toBeUndefined();
+			expect((await readLiveBridges(agentDir, { excludePid: -1 })).size).toBe(1);
+			// A dead pid entry is pruned on read, not returned as a live peer.
+			await fs.writeFile(
+				path.join(agentDir, "a2a-bridges", "999999.json"),
+				JSON.stringify({ pid: 999999, port: 1234, startedAt: 1 }),
+			);
+			expect((await readLiveBridges(agentDir, { excludePid: -1 })).size).toBe(1);
+			await expect(fs.stat(path.join(agentDir, "a2a-bridges", "999999.json"))).rejects.toThrow();
+		} finally {
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects live registry files without an instance id", async () => {
+		const { readLiveBridges, readLocalBridgeEntry } = await import("@oh-my-pi/pi-coding-agent/a2a/server");
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "a2a-reg-invalid-"));
+		try {
+			await fs.mkdir(path.join(agentDir, "a2a-bridges"));
+			await fs.writeFile(
+				path.join(agentDir, "a2a-bridges", `${process.pid}.json`),
+				JSON.stringify({ pid: process.pid, port: 7601, startedAt: 1 }),
+			);
+			expect(await readLocalBridgeEntry(agentDir, process.pid)).toBeUndefined();
+			expect((await readLiveBridges(agentDir, { excludePid: -1 })).size).toBe(0);
+		} finally {
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not remove a newer bridge entry when an older server stops", async () => {
+		const { readLocalBridgeEntry } = await import("@oh-my-pi/pi-coding-agent/a2a/server");
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "a2a-replacement-"));
+		try {
+			const options = {
+				settings: Settings.isolated(),
+				agentDir,
+				port: 0,
+				registry: new FakeRegistry().asApi(),
+				bus: new FakeBus(),
+			};
+			const old = await startA2aServer(options);
+			const current = await startA2aServer(options);
+			handles.push(old, current);
+			old.stop();
+			expect((await readLocalBridgeEntry(agentDir, process.pid))?.port).toBe(current.port);
+		} finally {
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("publishes the registered instance id even with a custom card", async () => {
+		const { readLocalBridgeEntry } = await import("@oh-my-pi/pi-coding-agent/a2a/server");
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "a2a-custom-card-"));
+		try {
+			const handle = await startA2aServer({
+				settings: Settings.isolated(),
+				agentDir,
+				port: 0,
+				registry: new FakeRegistry().asApi(),
+				bus: new FakeBus(),
+				card: () => buildAgentCard({ url: "http://127.0.0.1/", version: "1", skills: [] }),
+			});
+			handles.push(handle);
+			const entry = await readLocalBridgeEntry(agentDir, process.pid);
+			const card = (await (await fetch(`${handle.url}${AGENT_CARD_PATH}`)).json()) as { instanceId?: string };
+			expect(entry?.instanceId).toBeDefined();
+			expect(card.instanceId).toBe(entry?.instanceId);
+		} finally {
+			await fs.rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("addresses Main by the auto-generated public identity when no a2a.name is set", async () => {
+		const { autoA2aName } = await import("@oh-my-pi/pi-coding-agent/a2a/server");
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "a2a-reg-alias-"));
+		try {
+			const bus = new FakeBus();
+			const registry = new FakeRegistry([makeRef({ id: "Main", kind: "main", status: "running" })]);
+			const handle = await startA2aServer({
+				settings: Settings.isolated(),
+				agentDir,
+				port: 0,
+				registry: registry.asApi(),
+				bus,
+			});
+			handles.push(handle);
+			const { json } = await rpc(
+				handle,
+				{
+					jsonrpc: "2.0",
+					id: 1,
+					method: "SendMessage",
+					params: {
+						message: { messageId: "alias-1", role: "ROLE_USER", parts: [{ text: "ping" }] },
+						metadata: { to: autoA2aName(process.cwd()) },
+					},
+				},
+				await resolveA2aToken({ agentDir }),
+			);
+			expect(taskResult(json).id).toBe("Main");
+			expect(bus.sent).toHaveLength(1);
+			expect(bus.sent[0]!.to).toBe("Main");
 		} finally {
 			await fs.rm(agentDir, { recursive: true, force: true });
 		}
@@ -1120,6 +1479,53 @@ describe("A2A reply envelope", () => {
 		});
 		expect(bodies).toEqual(["plain text"]);
 	});
+
+	it("labels metadata.inReplyTo as a reply without a new envelope or outstanding request", async () => {
+		const bodies: string[] = [];
+		const incoming: Array<[string, string]> = [];
+		const handle = createA2aServer({
+			token: "reply-token-3",
+			port: 0,
+			onIncomingRequest: (from, messageId) => {
+				incoming.push([from, messageId]);
+			},
+			registry: {
+				list: () => [],
+				get: id => (id === "Main" ? makeRef({ id: "Main", displayName: "Main", status: "running" }) : undefined),
+				onChange: () => () => {},
+				setStatus: () => false,
+			},
+			bus: {
+				send: async (message: { to: string; body: string }) => {
+					bodies.push(message.body);
+					return { to: message.to, outcome: "injected" as const };
+				},
+			} as never,
+			card: async () => buildAgentCard({ url: "http://127.0.0.1:1/", version: "t", skills: [] }),
+		});
+		handles.push(handle);
+		const response = await fetch(handle.url + "/", {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: "Bearer reply-token-3" },
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 3,
+				method: "SendMessage",
+				params: {
+					message: { messageId: "m3", role: "ROLE_USER", parts: [{ text: "the answer is 42" }] },
+					metadata: { to: "Main", from: "builder", inReplyTo: "request-17" },
+				},
+			}),
+		});
+		expect(response.status).toBe(200);
+		expect(bodies).toHaveLength(1);
+		expect(bodies[0]).toContain("[A2A reply to your request request-17");
+		expect(bodies[0]).toContain("the answer is 42");
+		// No new reply envelope: a reply must not start an unbounded chain.
+		expect(bodies[0]).not.toContain("[A2A task from peer terminal");
+		expect(bodies[0]).not.toContain("spawning the agent");
+		expect(incoming).toEqual([]);
+	});
 });
 
 describe("agent card skill filtering", () => {
@@ -1137,6 +1543,7 @@ describe("agent card skill filtering", () => {
 				settings: Settings.isolated(),
 				agentDir: dir,
 				port: 0,
+				name: "Main",
 				registry: registry.asApi(),
 				bus: new FakeBus(),
 			});

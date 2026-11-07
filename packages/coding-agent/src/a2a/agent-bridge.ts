@@ -21,6 +21,7 @@ import type { AgentDefinition } from "../task/types";
 import { type AgentCard, A2A_PROTOCOL_VERSION, type AgentCardSkill } from "./card";
 import { A2A_CONNECT_TIMEOUT_MS, A2aClient, cardRequiresBearer, fetchAgentCard } from "./client";
 import { TASK_STATE, type TaskState } from "./rpc";
+import { readLiveBridges } from "./server";
 
 export const A2A_AGENT_PREFIX = "a2a:";
 /** The remote paused for input; omp v1 has no way to answer, so the spawn reports it. */
@@ -41,13 +42,25 @@ export interface A2aRuntimeAgent {
 	cardName: string;
 	/** Skill id as advertised by the card. */
 	skillId: string;
+	/** True for peers discovered from the local bridge registry (A4 rescan may drop them). */
+	autoRegistered?: boolean;
 }
 
-/** Read-only surface the task tool needs; implemented by {@link A2aAgentBridge}. */
+/** Bridge surface the task tool, discovery and reply correlation need; implemented by {@link A2aAgentBridge}. */
 export interface A2aBridgeApi {
 	list(): readonly A2aRuntimeAgent[];
 	get(name: string): A2aRuntimeAgent | undefined;
 	definitions(): readonly AgentDefinition[];
+	/** Register/replace one remote agent (discovery refresh, `/a2a add`). */
+	add(agent: A2aRuntimeAgent): A2aRuntimeAgent;
+	/** Forget one agent by name. */
+	remove(name: string): boolean;
+	/** Drop every entry served by one endpoint before re-registering it (A5). */
+	removeByUrl(url: string): void;
+	/** Remember an unanswered request from a peer (A2). */
+	noteIncomingRequest(from: string, messageId: string): void;
+	/** Consume the outstanding request id for a peer, if any (A2). */
+	consumeOutstandingRequest(peer: string): string | undefined;
 }
 
 /** A card skill id becomes a spawnable agent name: `a2a:<skill id>`. */
@@ -65,6 +78,8 @@ export function runtimeAgentName(skillId: string): string {
  */
 export class A2aAgentBridge implements A2aBridgeApi {
 	readonly #agents = new Map<string, A2aRuntimeAgent>();
+	/** Unanswered request messageIds keyed by the peer identity that sent them (A2). */
+	readonly #outstandingRequests = new Map<string, string[]>();
 
 	/**
 	 * Register one remote agent. Re-adding the SAME endpoint (refresh) replaces
@@ -73,6 +88,12 @@ export class A2aAgentBridge implements A2aBridgeApi {
 	 * serving the same skill ids (e.g. two `Main` agents) both stay reachable.
 	 */
 	add(agent: A2aRuntimeAgent): A2aRuntimeAgent {
+		for (const existing of this.#agents.values()) {
+			if (existing.url === agent.url && existing.skillId === agent.skillId) {
+				agent = { ...agent, name: existing.name };
+				break;
+			}
+		}
 		const existing = this.#agents.get(agent.name);
 		if (existing !== undefined && existing.url !== agent.url) {
 			let suffix = 2;
@@ -95,8 +116,31 @@ export class A2aAgentBridge implements A2aBridgeApi {
 		return this.#agents.delete(name);
 	}
 
+	/** Drop every entry served by one endpoint (A5): a refresh must not leave -2/-3 duplicates behind. */
+	removeByUrl(url: string): void {
+		for (const [name, agent] of this.#agents) {
+			if (agent.url === url) this.#agents.delete(name);
+		}
+	}
+
+	/** Remember that `from` sent a request we have not answered yet (A2). */
+	noteIncomingRequest(from: string, messageId: string): void {
+		const requests = this.#outstandingRequests.get(from);
+		if (requests) requests.push(messageId);
+		else this.#outstandingRequests.set(from, [messageId]);
+	}
+
+	/** Consume the unanswered request id for `peer`, so a reply is correlated once (A2). */
+	consumeOutstandingRequest(peer: string): string | undefined {
+		const requests = this.#outstandingRequests.get(peer);
+		const messageId = requests?.shift();
+		if (requests?.length === 0) this.#outstandingRequests.delete(peer);
+		return messageId;
+	}
+
 	clear(): void {
 		this.#agents.clear();
+		this.#outstandingRequests.clear();
 	}
 
 	/**
@@ -147,7 +191,11 @@ export const A2A_DEFAULT_MAX_PEER_SKILLS = 8;
 export interface AddA2aAgentsOptions {
 	/** Max skills to register from one peer card; default 8 (flood guard). */
 	maxPeerSkills?: number;
-	bridge: A2aAgentBridge;
+	bridge: A2aBridgeApi;
+	/** When set, the served card must report this instanceId (A3 stale-registry guard). */
+	expectedInstanceId?: string;
+	/** Mark registered agents as auto-discovered so a rescan can drop them (A4). */
+	autoRegistered?: boolean;
 	/** Base URL of the remote bridge, or its direct `agent-card.json` URL. */
 	url: string;
 	/** Explicit bearer token (`/a2a add <url> --token <token>`). */
@@ -184,6 +232,13 @@ export async function addA2aAgentsFromUrl(options: AddA2aAgentsOptions): Promise
 	if (card.protocolVersion !== undefined && card.protocolVersion !== A2A_PROTOCOL_VERSION) {
 		throw new Error(
 			`Remote agent card speaks A2A ${card.protocolVersion}; this bridge speaks ${A2A_PROTOCOL_VERSION}`,
+		);
+	}
+	// A3: a stale bridge-registry entry may point at a port now owned by a
+	// different bridge; the card's instanceId must match the recorded one.
+	if (options.expectedInstanceId !== undefined && card.instanceId !== options.expectedInstanceId) {
+		throw new Error(
+			`Bridge card instanceId mismatch: expected ${options.expectedInstanceId}, got ${card.instanceId ?? "none"}`,
 		);
 	}
 	let token = options.token?.trim() || undefined;
@@ -223,12 +278,16 @@ export async function addA2aAgentsFromUrl(options: AddA2aAgentsOptions): Promise
 						description: card.description?.trim() || card.name,
 					},
 				];
+	// A5: a refresh of the SAME endpoint replaces its prior entries instead of
+	// accumulating -2/-3 suffixed duplicates on every roster rescan.
+	options.bridge.removeByUrl(endpoint);
 	const added = entries.map(entry =>
 		options.bridge.add({
 			...entry,
 			cardName: card.name,
 			url: endpoint,
 			...(token !== undefined ? { token } : {}),
+			...(options.autoRegistered === true ? { autoRegistered: true } : {}),
 		}),
 	);
 	return { card, endpoint, added };
@@ -247,6 +306,12 @@ export interface SpawnA2aAgentOptions {
 	spawn?: boolean;
 	/** This terminal's public A2A identity (name + bridge url): stamps `from`/`fromUrl` so the remote can answer back. */
 	fromIdentity?: { name?: string; url?: string };
+	/** Shared batch context forwarded to the remote agent (A7). */
+	context?: string;
+	/** Explicit correlation id for a reply to a prior request (A2). */
+	inReplyTo?: string;
+	/** Session bridge: consumes an outstanding request from this peer automatically (A2). */
+	bridge?: A2aBridgeApi;
 	connectTimeoutMs?: number;
 	pollIntervalMs?: number;
 	signal?: AbortSignal;
@@ -288,11 +353,15 @@ export async function spawnA2aAgent(options: SpawnA2aAgentOptions): Promise<Spaw
 		// send its answer back by spawning this terminal's a2a agent (the
 		// symmetric auto-registered roster entry).
 		const from = options.fromIdentity;
+		// A2: a reply to a peer we owe an answer to is correlated automatically.
+		const inReplyTo = options.inReplyTo ?? options.bridge?.consumeOutstandingRequest(agent.skillId);
 		const run = await client.sendAndWait(options.prompt, {
 			metadata: {
 				...(options.spawn === true ? { spawn: true } : { to: agent.skillId }),
 				...(from?.name !== undefined ? { from: from.name } : {}),
 				...(from?.url !== undefined ? { fromUrl: from.url } : {}),
+				...(options.context !== undefined ? { context: options.context } : {}),
+				...(inReplyTo !== undefined ? { inReplyTo } : {}),
 			},
 		});
 		const text = run.text.trim();
@@ -305,7 +374,7 @@ export async function spawnA2aAgent(options: SpawnA2aAgentOptions): Promise<Spaw
 				const reason = typeof receipt?.error === "string" ? receipt.error : "delivery failed";
 				return { exitCode: 1, output: reason, error: reason, state: run.state, remoteTaskId };
 			}
-			const delivered = `Delivered to ${agent.name} (${agent.url}) — the task now runs in that terminal's own conversation. It answers in its session; poll GetTask ${remoteTaskId ?? ""} for its state.`;
+			const delivered = `Delivered to ${agent.name} (${agent.url}) - the task now runs in that terminal's own conversation.`;
 			return { exitCode: 0, output: delivered, state: run.state, remoteTaskId };
 		}
 		if (run.interrupted) {
@@ -337,20 +406,22 @@ export interface AutoRegisterResult {
  * the rest.
  */
 export async function autoRegisterLocalBridges(options: {
-	bridge: A2aAgentBridge;
+	bridge: A2aBridgeApi;
 	agentDir: string;
 	settings?: Settings;
 	token?: string;
 	maxPeerSkills?: number;
 	signal?: AbortSignal;
+	/** Pid to exclude from the live set (default this process). */
+	excludePid?: number;
 }): Promise<AutoRegisterResult> {
-	const { readLiveBridges } = await import("./server");
-	const live = await readLiveBridges(options.agentDir);
+	const live = await readLiveBridges(options.agentDir, { excludePid: options.excludePid });
 	const registered = new Map<string, string[]>();
 	const failed = new Map<string, string>();
 	for (const entry of live.values()) {
 		const url = `http://127.0.0.1:${entry.port}/`;
 		try {
+			if (!entry.instanceId) throw new Error("Bridge registry entry has no instanceId");
 			const result = await addA2aAgentsFromUrl({
 				bridge: options.bridge,
 				url,
@@ -359,6 +430,8 @@ export async function autoRegisterLocalBridges(options: {
 				settings: options.settings,
 				maxPeerSkills: options.maxPeerSkills,
 				signal: options.signal,
+				autoRegistered: true,
+				expectedInstanceId: entry.instanceId,
 			});
 			registered.set(
 				url,
@@ -369,4 +442,43 @@ export async function autoRegisterLocalBridges(options: {
 		}
 	}
 	return { registered, failed };
+}
+
+/** Minimum gap between on-demand rescans for each session bridge (A4). */
+const RESCAN_DEBOUNCE_MS = 2_000;
+const rescanState = new WeakMap<A2aBridgeApi, Map<string, number>>();
+
+export interface RescanLocalBridgesOptions {
+	bridge: A2aBridgeApi;
+	agentDir: string;
+	settings?: Settings;
+	token?: string;
+	maxPeerSkills?: number;
+	signal?: AbortSignal;
+	excludePid?: number;
+}
+
+/**
+ * On-demand symmetric discovery (A4): re-read the live bridge registry, drop
+ * auto-discovered peers whose bridge disappeared, and register newly started
+ * terminals. Each session's scans are debounced by at least two seconds.
+ */
+export async function rescanLocalBridges(options: RescanLocalBridgesOptions): Promise<AutoRegisterResult> {
+	const now = Date.now();
+	let scans = rescanState.get(options.bridge);
+	if (scans === undefined) {
+		scans = new Map();
+		rescanState.set(options.bridge, scans);
+	}
+	const previous = scans.get(options.agentDir);
+	if (previous !== undefined && now - previous < RESCAN_DEBOUNCE_MS) {
+		return { registered: new Map(), failed: new Map() };
+	}
+	scans.set(options.agentDir, now);
+	const result = await autoRegisterLocalBridges(options);
+	// Only a successfully verified card proves that an endpoint is still ours.
+	for (const agent of options.bridge.list()) {
+		if (agent.autoRegistered === true && !result.registered.has(agent.url)) options.bridge.remove(agent.name);
+	}
+	return result;
 }

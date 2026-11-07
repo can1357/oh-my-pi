@@ -697,8 +697,8 @@ export const cfgTaskPrewalk = register({
 	},
 });
 
-// A2A bridge. `enabled` is opt-in: the server listens on loopback with bearer
-// auth, and nothing starts unless the setting or `--a2a-port` asks for it.
+// A2A bridge. `enabled` defaults ON in this fork: every terminal serves a
+// loopback bridge with bearer auth, so peers can reach it without extra setup.
 export const cfgA2aEnabled = register({
 	id: "a2a.enabled",
 	type: "boolean",
@@ -746,7 +746,7 @@ export const cfgA2aName = register({
 		group: "A2A",
 		label: "A2A Name",
 		description:
-			"Public name for this terminal's agents in the A2A network: the main agent's skill id becomes this name (a2a:<name> on peers); empty keeps the default (Main)",
+			"Public name for this terminal's agents in the A2A network: the main agent's skill id becomes this name (a2a:<name> on peers); empty generates a unique <cwd>-<pid> terminal name",
 	},
 });
 
@@ -809,7 +809,7 @@ export const cfgA2aAutoRegister = register({
 		group: "A2A",
 		label: "Auto-Register Peers",
 		description:
-			"At session start, register every live local A2A bridge (a2a-bridges.json) as spawnable a2a: agents; no effect when no other bridges run",
+			"At session start, register every live local A2A bridge (one file per process under <agent dir>/a2a-bridges/) as spawnable a2a: agents; no effect when no other bridges run",
 	},
 });
 
@@ -822,7 +822,7 @@ export const cfgA2aClientTimeoutMs = register({
 		group: "A2A",
 		label: "A2A Client Timeout",
 		description:
-			"Total budget for a remote `a2a:` spawn in milliseconds; 0 waits indefinitely (A2A tasks can run for hours). Connect timeout stays 10s per request.",
+			"Total budget for a remote `a2a:` spawn in milliseconds, including the initial SendMessage and all GetTask polls; 0 waits indefinitely (A2A tasks can run for hours). Connect timeout stays 10s per request.",
 	},
 });
 

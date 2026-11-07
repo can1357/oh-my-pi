@@ -275,6 +275,10 @@ export interface ParsedSendMessage {
 	from?: string;
 	/** omp extension: the sender terminal's bridge url (for the reply envelope). */
 	fromUrl?: string;
+	/** omp extension: correlates a reply to a request messageId (no new reply envelope). */
+	inReplyTo?: string;
+	/** A2A grouping id from message.contextId, persisted per created task. */
+	contextId?: string;
 }
 
 /** Validate a `SendMessage` request and flatten its text parts. */
@@ -317,6 +321,11 @@ export function parseSendMessageParams(params: unknown): ParsedSendMessage {
 	const context = readString("context");
 	const from = readString("from");
 	const fromUrl = readString("fromUrl");
+	const inReplyTo = readString("inReplyTo");
+	const contextId =
+		typeof message.contextId === "string" && message.contextId.trim().length > 0
+			? message.contextId.trim()
+			: undefined;
 	const spawnRaw = metadata?.spawn ?? messageMetadata?.spawn;
 	if (spawnRaw !== undefined && typeof spawnRaw !== "boolean") {
 		throw invalidParams("metadata.spawn must be a boolean");
@@ -330,6 +339,8 @@ export function parseSendMessageParams(params: unknown): ParsedSendMessage {
 		...(from !== undefined ? { from } : {}),
 		...(fromUrl !== undefined ? { fromUrl } : {}),
 		...(spawnRaw === true ? { spawn: true } : {}),
+		...(inReplyTo !== undefined ? { inReplyTo } : {}),
+		...(contextId !== undefined ? { contextId } : {}),
 	};
 }
 
@@ -363,7 +374,7 @@ export function parseListTasksParams(params: unknown): ParsedListTasks {
 	}
 	const pageSize = Math.min(Math.max(rawPageSize ?? 50, 1), 100);
 	let offset = 0;
-	if (request.pageToken !== undefined) {
+	if (request.pageToken !== undefined && request.pageToken !== "") {
 		if (typeof request.pageToken !== "string" || !/^\d+$/.test(request.pageToken)) {
 			throw invalidParams("params.pageToken must be a token returned by ListTasks");
 		}
@@ -389,6 +400,14 @@ export interface A2aDispatchDeps {
 	senderId?: string;
 	/** This bridge's public identity (`a2a.name`): `to` by that name resolves to the main agent. */
 	identityName?: string;
+	/** Ids of tasks created through this bridge (the only cancelable ones). */
+	createdTaskIds?: Set<string>;
+	/** Generation owned by each spawned task; undefined means its registration is pending. */
+	createdTaskRefs?: Map<string, AgentRef | undefined>;
+	/** Client contextId persisted per spawned task, for ListTasks filtering. */
+	contextIds?: Map<string, string>;
+	/** Notified when a peer request with a reply identity is delivered here. */
+	noteIncomingRequest?: (from: string, messageId: string) => void;
 }
 
 export const A2A_SENDER_ID = "a2a";
@@ -426,34 +445,74 @@ function isSpawnRejection(error: unknown): error is Error {
 	);
 }
 
+/** Serialize a registered agent, applying any persisted client contextId (A9). */
+function taskFor(ref: AgentRef, deps: A2aDispatchDeps, extraMetadata?: Record<string, unknown>): A2aTask {
+	const task = taskFromAgentRef(ref, extraMetadata);
+	const contextId = deps.contextIds?.get(ref.id);
+	return contextId !== undefined ? { ...task, contextId } : task;
+}
+
+/** Record a SendMessage-created task: mark spawns cancelable (A8) and persist their contextId (A9). */
+function persistTask(
+	task: A2aTask,
+	request: ParsedSendMessage,
+	deps: A2aDispatchDeps,
+	created: boolean,
+	ref?: AgentRef,
+): A2aTask {
+	if (created) {
+		deps.createdTaskIds?.add(task.id);
+		deps.createdTaskRefs?.set(task.id, ref ?? deps.registry.get(task.id));
+		if (request.contextId !== undefined) deps.contextIds?.set(task.id, request.contextId);
+		else deps.contextIds?.delete(task.id);
+	}
+	return created && request.contextId !== undefined ? { ...task, contextId: request.contextId } : task;
+}
+
 /**
  * Deliver one SendMessage: to an addressed agent through the bus (a receipt is
  * returned in the task metadata), or as a full spawn when no recipient is named.
  */
 export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Promise<A2aTask> {
 	const request = parseSendMessageParams(params);
+	const contextBlock =
+		request.context !== undefined ? `[Shared context from the requesting terminal]\n${request.context}` : undefined;
 	if (request.to !== undefined && request.spawn !== true) {
 		const target = resolveAddressedRef(deps.registry, request.to, deps.identityName);
 		if (!target) {
 			throw new RpcError(RPC_ERRORS.TASK_NOT_FOUND, `Task not found: ${request.to}`, { httpStatus: 404 });
 		}
-		// CC-inherited reply channel (task-notification pattern): the delivered
-		// body carries instructions to answer back by spawning the sender's
-		// a2a agent — the remote's own bridge has the sender auto-registered,
-		// so the reply lands in the sender's terminal conversation.
-		const replyTo = request.from ?? (request.fromUrl !== undefined ? `the peer at ${request.fromUrl}` : undefined);
-		const body =
-			replyTo === undefined
-				? request.text
-				: `[A2A task from peer terminal ${replyTo}. This message was delivered into your conversation. When you have the answer, send it back by spawning the agent a2a:${replyTo} with the task tool — that delivers your reply to the sender's terminal. Do not answer in plain text: the sender only sees replies through the a2a agent.]\n\n${request.text}`;
+		const sections: string[] = [];
+		if (request.inReplyTo !== undefined) {
+			// A2: a correlated reply. It is labelled as the answer to one request
+			// but carries NO reply-back envelope, so it cannot start an unbounded
+			// request -> reply -> request chain. No outstanding request is recorded.
+			const from = request.from ?? "a peer terminal";
+			sections.push(
+				`[A2A reply to your request ${request.inReplyTo} from peer terminal ${from}. This is the answer, not a new task; no reply is expected.]`,
+			);
+		} else if (request.from !== undefined) {
+			// A2: a request. The envelope names the a2a: agent to spawn for the
+			// answer; this terminal's task tool attaches metadata.inReplyTo to that
+			// spawn automatically, so the model only has to send the answer.
+			sections.push(
+				`[A2A task from peer terminal ${request.from}. This message was delivered into your conversation. When you have the answer, send it back by spawning the agent a2a:${request.from} with the task tool - that delivers your reply to the sender's terminal and is correlated to this request automatically. Do not answer in plain text: the sender only sees replies through the a2a agent.]`,
+			);
+		}
+		if (contextBlock !== undefined) sections.push(contextBlock);
+		sections.push(request.text);
+		const body = sections.join("\n\n");
 		const receipt = await deps.send({
 			from: deps.senderId ?? A2A_SENDER_ID,
 			to: target.id,
 			body,
 			external: true,
 		});
+		if (receipt.outcome !== "failed" && request.from !== undefined && request.inReplyTo === undefined) {
+			deps.noteIncomingRequest?.(request.from, request.messageId);
+		}
 		const current = deps.registry.get(target.id) ?? target;
-		return taskFromAgentRef(current, { delivery: receipt, requestedTo: request.to });
+		return persistTask(taskFor(current, deps, { delivery: receipt, requestedTo: request.to }), request, deps, false);
 	}
 	if (!deps.spawn) {
 		throw new RpcError(RPC_ERRORS.INTERNAL_ERROR, "spawnSubagent is not available in this host");
@@ -469,12 +528,17 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 		// The run was reserved and is still starting: report the id as SUBMITTED
 		// rather than a failure, so a client does not retry into a duplicate agent.
 		if (error instanceof SpawnPendingError) {
-			return {
-				id: error.agentId,
-				contextId: MAIN_AGENT_ID,
-				status: { state: TASK_STATE.SUBMITTED, timestamp: new Date().toISOString() },
-				metadata: { agentId: error.agentId, spawned: true, pending: true },
-			};
+			return persistTask(
+				{
+					id: error.agentId,
+					contextId: MAIN_AGENT_ID,
+					status: { state: TASK_STATE.SUBMITTED, timestamp: new Date().toISOString() },
+					metadata: { agentId: error.agentId, spawned: true, pending: true },
+				},
+				request,
+				deps,
+				true,
+			);
 		}
 		if (isSpawnRejection(error)) {
 			throw new RpcError(RPC_ERRORS.AGENT_REJECTED, error.message, {
@@ -484,7 +548,7 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 		}
 		throw error;
 	}
-	return taskFromAgentRef(ref, { spawned: true });
+	return persistTask(taskFromAgentRef(ref, { spawned: true }), request, deps, true, ref);
 }
 
 /** The bus receipt of a delivered task, when that delivery came back `failed`. */
@@ -530,6 +594,7 @@ export function assertTaskDelivered(task: A2aTask): void {
 /** Dispatch one non-streaming A2A method; unknown methods (and the SubscribeToTask cut) throw -32601. */
 export async function dispatchA2aMethod(method: string, params: unknown, deps: A2aDispatchDeps): Promise<unknown> {
 	switch (method) {
+		case "SendStreamingMessage":
 		case "SendMessage": {
 			const task = await sendA2aMessage(params, deps);
 			assertTaskDelivered(task);
@@ -537,18 +602,20 @@ export async function dispatchA2aMethod(method: string, params: unknown, deps: A
 		}
 		case "GetTask": {
 			const id = parseTaskIdParams(params);
-			const ref = resolveAddressedRef(deps.registry, id);
+			const ref = resolveAddressedRef(deps.registry, id, deps.identityName);
 			if (!ref) throw new RpcError(RPC_ERRORS.TASK_NOT_FOUND, `Task not found: ${id}`, { httpStatus: 404 });
-			return attachOutputArtifact(taskFromAgentRef(ref), deps.readOutput);
+			return attachOutputArtifact(taskFor(ref, deps), deps.readOutput);
 		}
 		case "ListTasks": {
 			const request = parseListTasksParams(params);
 			const refs = deps.registry
 				.list()
 				.filter(ref => ref.kind !== "advisor")
-				.sort((a, b) => b.lastActivity - a.lastActivity);
+				// Stable creation order, not lastActivity: activity churn must not
+				// reorder pages between two ListTasks calls (A9).
+				.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
 			const tasks = refs
-				.map(ref => taskFromAgentRef(ref))
+				.map(ref => taskFor(ref, deps))
 				.filter(
 					task =>
 						(request.contextId === undefined || task.contextId === request.contextId) &&
@@ -566,16 +633,32 @@ export async function dispatchA2aMethod(method: string, params: unknown, deps: A
 		}
 		case "CancelTask": {
 			const id = parseTaskIdParams(params);
-			const ref = resolveAddressedRef(deps.registry, id);
+			const ref = resolveAddressedRef(deps.registry, id, deps.identityName);
 			if (!ref) throw new RpcError(RPC_ERRORS.TASK_NOT_FOUND, `Task not found: ${id}`, { httpStatus: 404 });
+			// Only tasks created through this bridge may be canceled. Main and local
+			// subagents belong to the local session, not to a remote caller (A8).
+			if (
+				ref.kind === "main" ||
+				!deps.createdTaskIds?.has(id) ||
+				(deps.createdTaskRefs && deps.createdTaskRefs.get(id) !== ref)
+			) {
+				throw new RpcError(RPC_ERRORS.TASK_NOT_CANCELABLE, `Task is not cancelable through A2A: ${id}`, {
+					httpStatus: 400,
+				});
+			}
 			if (TERMINAL_TASK_STATES.has(mapAgentStatus(ref))) {
 				throw new RpcError(RPC_ERRORS.TASK_NOT_CANCELABLE, `Task is already terminal: ${id}`, {
 					httpStatus: 400,
 				});
 			}
 			await ref.session?.abort({ reason: "a2a CancelTask" });
-			deps.registry.setStatus(ref.id, "aborted");
-			return taskFromAgentRef(deps.registry.get(ref.id) ?? ref);
+			// Re-check terminality and generation after abort: a completion or a
+			// newer ref for this id must not be stamped `aborted` (A8).
+			const current = deps.registry.get(ref.id);
+			if (current === ref && !TERMINAL_TASK_STATES.has(mapAgentStatus(current))) {
+				deps.registry.setStatus(ref.id, "aborted", ref);
+			}
+			return taskFor(ref, deps);
 		}
 		default:
 			throw new RpcError(RPC_ERRORS.METHOD_NOT_FOUND, `Method not found: ${method}`);

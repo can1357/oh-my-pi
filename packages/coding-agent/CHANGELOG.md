@@ -36,6 +36,9 @@
 
 ### Fixed
 
+- A2A terminals without `a2a.name` get a unique `<cwd>-<pid>` name, so a peer's reply address resolves to a registered `a2a:` agent instead of an unaddressable URL; a reply is correlated to the request it answers (`metadata.inReplyTo`) and carries no reply-back instruction, so two terminals no longer ping-pong indefinitely
+- A2A discovery is symmetric and race-free: each bridge writes its own registry file under `<agent dir>/a2a-bridges/` with an `instanceId` verified against its card, unknown `a2a:` names and `agent://` listings rescan live bridges, stale peers are dropped, and re-registering an endpoint replaces its agents instead of adding `Main-N` duplicates
+- `a2a.clientTimeoutMs` bounds the whole remote run including the initial `SendMessage`; remote spawns forward batch `context` and are refused in plan mode; `CancelTask` only cancels tasks the bridge created; `ListTasks` honors `contextId` and stable pagination; JSON-RPC notifications and batches are answered per spec
 - Agents using `computer` from Eval now `zoom` for a legible close-up instead of cropping the saved screenshot file, which is downscaled to the capture size on large or Retina windows ([#18158](https://github.com/can1357/oh-my-pi/pull/18158) by [@will-bogusz](https://github.com/will-bogusz))
 - Python eval `@tool` definitions with type annotations now register on Python 3.9 instead of failing with `module 'types' has no attribute 'UnionType'` ([#18143](https://github.com/can1357/oh-my-pi/pull/18143) by [@Winston-Hsiao](https://github.com/Winston-Hsiao))
 - `read` of an SEC EDGAR filing document or filing folder (`sec.gov/Archives/edgar/data/<cik>/<accession>/…`) returns that document instead of the company's profile and recent filings list ([#18150](https://github.com/can1357/oh-my-pi/pull/18150) by [@will-bogusz](https://github.com/will-bogusz))

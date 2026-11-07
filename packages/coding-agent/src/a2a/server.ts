@@ -7,11 +7,13 @@
  * - `SendStreamingMessage` answers with Server-Sent Events and closes the
  *   stream on the task's terminal state.
  *
- * `a2a.enabled` defaults off; the server starts only from the `--a2a-port` flag
- * or that setting. The bearer token is generated once under the agent directory
- * with mode 600 (`a2a.token`), unless `a2a.token` is set.
+ * The fork enables `a2a.enabled` by default: every terminal serves a loopback
+ * bridge on a free port unless the setting or `--a2a-port` says otherwise. The
+ * bearer token is generated once under the agent directory with mode 600
+ * (`a2a.token`), unless `a2a.token` is set.
  */
 
+import * as syncFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -63,6 +65,8 @@ export interface A2aServerOptions {
 	host?: string;
 	/** Public A2A identity: renames the main skill and resolves `to` by name. */
 	name?: string;
+	/** Notified when a peer request with a reply identity is delivered here (A2). */
+	onIncomingRequest?: (from: string, messageId: string) => void;
 	registry: Pick<AgentRegistryApi, "get" | "list" | "onChange" | "setStatus">;
 	bus: A2aBus;
 	spawn?: (options: SpawnSubagentOptions) => Promise<AgentRef>;
@@ -260,7 +264,22 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 		spawn: options.spawn,
 		readOutput: readPublishedOutput,
 		senderId: A2A_SENDER_ID,
+		createdTaskIds: new Set<string>(),
+		createdTaskRefs: new Map<string, AgentRef | undefined>(),
+		contextIds: new Map<string, string>(),
+		...(options.onIncomingRequest !== undefined ? { noteIncomingRequest: options.onIncomingRequest } : {}),
 	};
+	const unsubscribe = options.registry.onChange(event => {
+		if (event.type !== "registered" || !dispatchDeps.createdTaskRefs.has(event.ref.id)) return;
+		const owned = dispatchDeps.createdTaskRefs.get(event.ref.id);
+		if (owned === undefined) {
+			dispatchDeps.createdTaskRefs.set(event.ref.id, event.ref);
+		} else if (owned !== event.ref) {
+			dispatchDeps.createdTaskRefs.delete(event.ref.id);
+			dispatchDeps.createdTaskIds.delete(event.ref.id);
+			dispatchDeps.contextIds.delete(event.ref.id);
+		}
+	});
 
 	const server = Bun.serve({
 		hostname: host,
@@ -282,33 +301,86 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 			} catch {
 				return jsonResponse(rpcFailure(null, RPC_ERRORS.PARSE_ERROR, "Invalid JSON payload"));
 			}
-			let rpc: { id: JsonRpcId; method: string; params: unknown };
-			try {
-				rpc = parseRpcRequest(body);
-			} catch (error) {
-				const rpcError = error instanceof RpcError ? error : undefined;
-				return jsonResponse(
-					rpcFailure(null, rpcError?.code ?? RPC_ERRORS.INVALID_REQUEST, rpcError?.message ?? "Invalid request"),
-					rpcError?.httpStatus ?? 200,
-				);
-			}
-			try {
-				if (rpc.method === "SendStreamingMessage") {
+			// SendStreamingMessage is a single-request SSE upgrade: it has no
+			// meaning in a batch or as a notification (both need a JSON body back).
+			if (
+				!Array.isArray(body) &&
+				typeof body === "object" &&
+				body !== null &&
+				(body as Record<string, unknown>).method === "SendStreamingMessage" &&
+				Object.prototype.hasOwnProperty.call(body, "id")
+			) {
+				let rpc: { id: JsonRpcId; method: string; params: unknown };
+				try {
+					rpc = parseRpcRequest(body);
+				} catch (error) {
+					const rpcError = error instanceof RpcError ? error : undefined;
+					return jsonResponse(
+						rpcFailure(
+							null,
+							rpcError?.code ?? RPC_ERRORS.INVALID_REQUEST,
+							rpcError?.message ?? "Invalid request",
+						),
+						rpcError?.httpStatus ?? 200,
+					);
+				}
+				try {
 					const task = await sendA2aMessage(rpc.params, dispatchDeps);
 					// A refused delivery is terminal: frame the initial task and a
 					// final TASK_STATE_FAILED, then close. The task's own registry
 					// state may never change, so waiting on it would hang the stream.
 					return streamTaskResponse(rpc.id, failedDeliveryTask(task) ?? task, options, activeStreams);
+				} catch (error) {
+					if (error instanceof RpcError) {
+						return jsonResponse(rpcFailure(rpc.id, error.code, error.message, error.data), error.httpStatus);
+					}
+					const message = error instanceof Error ? error.message : String(error);
+					return jsonResponse(rpcFailure(rpc.id, RPC_ERRORS.INTERNAL_ERROR, message), 500);
 				}
-				const result = await dispatchA2aMethod(rpc.method, rpc.params, dispatchDeps);
-				return jsonResponse(rpcSuccess(rpc.id, result));
-			} catch (error) {
-				if (error instanceof RpcError) {
-					return jsonResponse(rpcFailure(rpc.id, error.code, error.message, error.data), error.httpStatus);
-				}
-				const message = error instanceof Error ? error.message : String(error);
-				return jsonResponse(rpcFailure(rpc.id, RPC_ERRORS.INTERNAL_ERROR, message), 500);
 			}
+			// A2A/JSON-RPC: single request, notification (no id -> 204), or batch.
+			const calls: unknown[] = Array.isArray(body) ? body : [body];
+			const batch = Array.isArray(body);
+			if (batch && calls.length === 0) {
+				return jsonResponse(rpcFailure(null, RPC_ERRORS.INVALID_REQUEST, "Invalid request"));
+			}
+			const responses: Array<JsonRpcSuccess | JsonRpcFailure> = [];
+			let singleStatus: number | undefined;
+			for (const call of calls) {
+				let rpc: { id: JsonRpcId; method: string; params: unknown };
+				try {
+					rpc = parseRpcRequest(call);
+				} catch (error) {
+					const rpcError = error instanceof RpcError ? error : undefined;
+					responses.push(
+						rpcFailure(
+							null,
+							rpcError?.code ?? RPC_ERRORS.INVALID_REQUEST,
+							rpcError?.message ?? "Invalid request",
+						),
+					);
+					continue;
+				}
+				// A request without an `id` is a notification: process it but never
+				// put a response on the wire (JSON-RPC 2.0, A9).
+				const notification = !Object.prototype.hasOwnProperty.call(call as object, "id");
+				try {
+					const result = await dispatchA2aMethod(rpc.method, rpc.params, dispatchDeps);
+					if (!notification) responses.push(rpcSuccess(rpc.id, result));
+				} catch (error) {
+					if (notification) continue;
+					if (error instanceof RpcError) {
+						responses.push(rpcFailure(rpc.id, error.code, error.message, error.data));
+						if (!batch) singleStatus = error.httpStatus;
+					} else {
+						const message = error instanceof Error ? error.message : String(error);
+						responses.push(rpcFailure(rpc.id, RPC_ERRORS.INTERNAL_ERROR, message));
+						if (!batch) singleStatus = 500;
+					}
+				}
+			}
+			if (responses.length === 0) return new Response(null, { status: 204 });
+			return jsonResponse(batch ? responses : responses[0], singleStatus ?? 200);
 		},
 	});
 
@@ -321,6 +393,7 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 		port,
 		url: `http://${host}:${port}/`,
 		stop(): void {
+			unsubscribe();
 			for (const stopStream of activeStreams) stopStream();
 			activeStreams.clear();
 			server.stop(true);
@@ -419,120 +492,202 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 		});
 		return descriptionsPromise;
 	};
-	const identity = options.name?.trim() || undefined;
-	const card =
-		options.card ??
-		(async (): Promise<AgentCard> => {
-			const descriptions = await loadDescriptions();
-			// Only the main agent and LIVE (running) subagents are exposed as
-			// skills: idle/parked subagents are finished one-shot workers whose
-			// transcript survives, but advertising them floods every peer's
-			// roster with dead a2a: entries (ImplTask1, reviewers, scouts…).
-			// A finished subagent is still reachable directly by agent id;
-			// only the card stops shouting about it.
-			const skills = registry
-				.list()
-				.filter(ref => ref.kind === "main" || ref.status === "running")
-				.map(ref => ({
-					id: identity !== undefined && ref.id === MAIN_AGENT_ID ? identity : ref.id,
-					displayName: ref.displayName,
-					description: descriptions.get(ref.history?.agent ?? ref.id),
-				}));
-			return buildAgentCard({
-				url: `http://${A2A_HOST}:${handle.port}/`,
-				version: options.version ?? VERSION,
-				skills,
-				...(identity !== undefined ? { name: identity } : {}),
-			});
+	const cwd = options.session?.cwd ?? process.cwd();
+	// A1: an unset/empty name becomes a unique, skill-id-safe terminal name so
+	// peers can always register a2a:<name> and address a reply back.
+	const identity = options.name?.trim() || autoA2aName(cwd);
+	// A3: a random per-process id mirrored in the served card lets a reader
+	// confirm the port it found still belongs to THIS bridge (pid reuse).
+	const instanceId = randomBytes(16).toString("hex");
+	const card = async (): Promise<AgentCard> => {
+		if (options.card) return { ...(await options.card()), instanceId };
+		const descriptions = await loadDescriptions();
+		// Only main and live subagents are advertised; finished subagents remain
+		// reachable directly by id without flooding peer rosters.
+		const skills = registry
+			.list()
+			.filter(ref => ref.kind === "main" || ref.status === "running")
+			.map(ref => ({
+				id: ref.id === MAIN_AGENT_ID ? identity : ref.id,
+				displayName: ref.displayName,
+				description: descriptions.get(ref.history?.agent ?? ref.id),
+			}));
+		return buildAgentCard({
+			url: `http://${A2A_HOST}:${handle.port}/`,
+			version: options.version ?? VERSION,
+			skills,
+			name: identity,
+			instanceId,
 		});
+	};
 
 	const handle = createA2aServer({
 		...options,
+		name: identity,
 		port: options.port ?? cfgA2aPort.get(options.settings),
 		token,
 		card,
 	});
+	const agentDir = options.agentDir ?? options.settings.getAgentDir();
 	await registerLocalBridge({
-		agentDir: options.agentDir ?? options.settings.getAgentDir(),
+		agentDir,
 		port: handle.port,
-		token,
-		...(identity !== undefined ? { name: identity } : {}),
+		name: identity,
+		instanceId,
 	});
-	return handle;
+	// A3: remove this process's own discovery file when the bridge stops.
+	return {
+		host: handle.host,
+		port: handle.port,
+		url: handle.url,
+		stop(): void {
+			try {
+				const file = bridgeEntryPath(agentDir, process.pid);
+				const entry: unknown = JSON.parse(syncFs.readFileSync(file, "utf8"));
+				if (isLocalBridgeEntry(entry, process.pid) && entry.instanceId === instanceId)
+					syncFs.rmSync(file, { force: true });
+			} catch {
+				// Discovery cleanup is best effort.
+			}
+			handle.stop();
+		},
+	};
 }
 
-/** One registry entry for a locally running bridge; written under <agent dir>. */
+/** One registry entry for a locally running bridge; one file per process (A3). */
 export interface LocalBridgeEntry {
 	pid: number;
 	port: number;
 	startedAt: number;
-	/** Public A2A identity when `a2a.name`/`--a2a-name` is set. */
+	/** Public A2A identity (configured name or the auto-generated terminal name). */
 	name?: string;
+	/** Random per-process id, mirrored in the served card for liveness checks. */
+	instanceId: string;
 }
 
-function localBridgesPath(agentDir: string): string {
-	return path.join(agentDir, "a2a-bridges.json");
+/** A2A v1.0 skill-id-safe terminal name derived from the cwd basename + pid (A1). */
+export function autoA2aName(cwd: string): string {
+	const slug = path
+		.basename(cwd)
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "");
+	return `${slug.length > 0 ? slug : "omp"}-${process.pid}`;
 }
 
-/** Record this bridge in the machine-local discovery registry (best effort). */
-async function registerLocalBridge(options: {
+function localBridgesDir(agentDir: string): string {
+	return path.join(agentDir, "a2a-bridges");
+}
+
+function bridgeEntryPath(agentDir: string, pid: number): string {
+	return path.join(localBridgesDir(agentDir), `${pid}.json`);
+}
+
+/**
+ * Record this bridge in the machine-local discovery registry (A3): one file
+ * per process, written atomically (tmp + rename) so two terminals registering
+ * at the same time never clobber each other. Best effort - a failed write never
+ * blocks the bridge.
+ */
+export async function registerLocalBridge(options: {
 	agentDir: string;
 	port: number;
-	token: string;
 	name?: string;
+	instanceId: string;
+	/** Override for tests simulating another process. */
+	pid?: number;
 }): Promise<void> {
 	try {
-		const file = localBridgesPath(options.agentDir);
-		const existing = await readLiveBridges(options.agentDir);
-		existing.set(process.pid, {
-			pid: process.pid,
+		const pid = options.pid ?? process.pid;
+		await fs.mkdir(localBridgesDir(options.agentDir), { recursive: true, mode: 0o700 });
+		const entry: LocalBridgeEntry = {
+			pid,
 			port: options.port,
 			startedAt: Date.now(),
 			...(options.name !== undefined ? { name: options.name } : {}),
-		});
-		await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-		await fs.writeFile(
-			file,
-			`${JSON.stringify([...existing.values()])}
-`,
-			{ mode: 0o600 },
-		);
+			instanceId: options.instanceId,
+		};
+		const file = bridgeEntryPath(options.agentDir, pid);
+		const tmp = `${file}.${randomBytes(6).toString("hex")}.tmp`;
+		await fs.writeFile(tmp, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+		await fs.rename(tmp, file);
 	} catch {
 		// Discovery is best effort; a failed write never blocks the bridge.
 	}
 }
 
-/** This process's own registry entry, if it registered a bridge. */
+/** Remove this process's own discovery file on shutdown (A3). */
+export async function unregisterLocalBridge(agentDir: string, pid: number = process.pid): Promise<void> {
+	try {
+		await fs.rm(bridgeEntryPath(agentDir, pid), { force: true });
+	} catch {
+		// best effort
+	}
+}
+
+function isLocalBridgeEntry(value: unknown, pid: number): value is LocalBridgeEntry {
+	if (typeof value !== "object" || value === null) return false;
+	const entry = value as Record<string, unknown>;
+	return (
+		entry.pid === pid &&
+		typeof entry.port === "number" &&
+		Number.isInteger(entry.port) &&
+		entry.port > 0 &&
+		entry.port <= 65535 &&
+		typeof entry.startedAt === "number" &&
+		typeof entry.instanceId === "string" &&
+		entry.instanceId.length > 0 &&
+		(entry.name === undefined || typeof entry.name === "string")
+	);
+}
+
+/** This process's own registry entry, read directly from its <pid>.json file (A3). */
 export async function readLocalBridgeEntry(agentDir: string, pid: number): Promise<LocalBridgeEntry | undefined> {
 	try {
-		const raw = await fs.readFile(localBridgesPath(agentDir), "utf8");
-		const entries = JSON.parse(raw) as LocalBridgeEntry[];
-		if (!Array.isArray(entries)) return undefined;
-		return entries.find(entry => entry.pid === pid);
+		const entry: unknown = JSON.parse(await fs.readFile(bridgeEntryPath(agentDir, pid), "utf8"));
+		return isLocalBridgeEntry(entry, pid) ? entry : undefined;
 	} catch {
 		return undefined;
 	}
 }
 
-/** Live local bridges: entries whose pid still exists, this process excluded. */
-export async function readLiveBridges(agentDir: string): Promise<Map<number, LocalBridgeEntry>> {
+/**
+ * Live local bridges: readers list the a2a-bridges dir (A3). Liveness is a
+ * pid-existence check; dead entries are deleted on read. `excludePid` (default
+ * this process) keeps a terminal from registering itself as its own peer.
+ */
+export async function readLiveBridges(
+	agentDir: string,
+	options: { excludePid?: number } = {},
+): Promise<Map<number, LocalBridgeEntry>> {
 	const map = new Map<number, LocalBridgeEntry>();
+	const excludePid = options.excludePid ?? process.pid;
+	let names: string[];
 	try {
-		const raw = await fs.readFile(localBridgesPath(agentDir), "utf8");
-		const entries = JSON.parse(raw) as LocalBridgeEntry[];
-		if (!Array.isArray(entries)) return map;
-		for (const entry of entries) {
-			if (typeof entry?.pid !== "number" || typeof entry?.port !== "number") continue;
-			if (entry.pid === process.pid) continue;
-			try {
-				process.kill(entry.pid, 0);
-			} catch {
-				continue; // dead pid: pruned by not being re-written
-			}
-			map.set(entry.pid, entry);
-		}
+		names = await fs.readdir(localBridgesDir(agentDir));
 	} catch {
-		// missing or unreadable registry: no bridges
+		return map;
+	}
+	for (const name of names) {
+		const match = /^(\d+)\.json$/.exec(name);
+		if (!match) continue;
+		const pid = Number(match[1]);
+		const file = path.join(localBridgesDir(agentDir), name);
+		let entry: unknown;
+		try {
+			entry = JSON.parse(await fs.readFile(file, "utf8"));
+		} catch {
+			continue; // unreadable entry: skip it
+		}
+		if (pid === excludePid) continue;
+		try {
+			process.kill(pid, 0);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ESRCH") continue;
+			await fs.rm(file, { force: true }).catch(() => {}); // dead pid: prune on read
+			continue;
+		}
+		if (isLocalBridgeEntry(entry, pid)) map.set(pid, entry);
 	}
 	return map;
 }

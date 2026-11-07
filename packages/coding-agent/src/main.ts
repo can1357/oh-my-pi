@@ -2708,9 +2708,11 @@ export async function runRootCommand(
 				authStorage.keys.setRuntime(session.model.provider, parsedArgs.apiKey);
 			}
 
-			// A2A bridge: opt-in (setting or `--a2a-port`), loopback only, and a
-			// startup failure is a notice — a bridge must never keep a session from
-			// starting. Loaded lazily so ordinary launches skip the module.
+			// A2A bridge: `a2a.enabled` is on by default in this fork, so every
+			// terminal serves a loopback bridge (free port) unless disabled or
+			// `--a2a-port` pins one. A startup failure is only a notice - a bridge
+			// must never keep a session from starting. Loaded lazily so ordinary
+			// launches skip the module.
 			const a2aPort = parsedArgs.a2aPort;
 			if (a2aPort !== undefined || cfgA2aEnabled.get(settingsInstance)) {
 				try {
@@ -2729,6 +2731,7 @@ export async function runRootCommand(
 						port: a2aPort ?? cfgA2aPort.get(settingsInstance),
 						...defaultA2aDeps(),
 						spawn: options => spawnSubagentForSession(session, options),
+						onIncomingRequest: (from, messageId) => session.a2aBridge.noteIncomingRequest(from, messageId),
 						version: VERSION,
 					});
 					postmortem.register("a2a-server", () => a2a.stop(), { exitOnly: true });

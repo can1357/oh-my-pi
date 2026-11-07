@@ -31,6 +31,8 @@ import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with 
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
+import { rescanLocalBridges } from "../a2a/agent-bridge";
+import { cfgA2aMaxPeerSkills } from "../task/settings";
 import type {
 	InternalResource,
 	InternalWriteResult,
@@ -217,6 +219,22 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			// see": the local registry (this session's peers) plus the A2A bridge
 			// registrations (agents of other live terminals, spawnable as a2a:*).
 			const registry = context?.agentRegistry ?? AgentRegistry.global();
+			// A4: a bare roster read is an on-demand discovery point - pick up
+			// terminals that started after this session (debounced, best effort).
+			const a2aBridge = context?.session?.getA2aBridge?.();
+			if (a2aBridge !== undefined && context?.settings !== undefined) {
+				try {
+					await rescanLocalBridges({
+						bridge: a2aBridge,
+						agentDir: context.settings.getAgentDir(),
+						settings: context.settings,
+						maxPeerSkills: cfgA2aMaxPeerSkills.get(context.settings),
+						signal: context.signal,
+					});
+				} catch {
+					// Discovery is best effort; the roster still renders.
+				}
+			}
 			const rows: Array<{ name: string; status: string; kind: string; origin: string }> = [];
 			for (const ref of registry.list()) {
 				if (ref.kind === "advisor") continue;
@@ -227,7 +245,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 					origin: "local session",
 				});
 			}
-			const bridge = context?.session?.getA2aBridge?.();
+			const bridge = a2aBridge;
 			for (const agent of bridge?.list() ?? []) {
 				rows.push({ name: agent.name, status: "remote", kind: "a2a", origin: agent.url });
 			}

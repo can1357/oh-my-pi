@@ -85,9 +85,17 @@ import type { SubagentToolResult } from "./executor";
 import { appendToolResult, createTaskWidgetInputs } from "./widget-inputs";
 
 import { cfgAsyncEnabled } from "../tools/settings";
-import { type A2aRuntimeAgent, spawnA2aAgent } from "../a2a/agent-bridge";
+import {
+	A2A_AGENT_PREFIX,
+	type A2aBridgeApi,
+	rescanLocalBridges,
+	type A2aRuntimeAgent,
+	spawnA2aAgent,
+} from "../a2a/agent-bridge";
+import { readLocalBridgeEntry } from "../a2a/server";
 import {
 	cfgA2aClientTimeoutMs,
+	cfgA2aMaxPeerSkills,
 	cfgTaskBatch,
 	cfgTaskDisabledAgents,
 	cfgTaskEnableEffort,
@@ -1215,6 +1223,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			}
 		}
 		const resolvedAgents = normalizedSpawnParams.map(spawn => spawn.agent ?? defaultAgent);
+		const remoteNames = resolvedAgents.filter(name => name.startsWith(A2A_AGENT_PREFIX));
+		if (remoteNames.length > 0) {
+			if (this.session.getPlanModeState?.()?.enabled === true) {
+				return createTaskModeError(
+					"Task execution failed: remote A2A agents (a2a:*) are unavailable in plan mode; a remote terminal cannot be held read-only.",
+				);
+			}
+			const bridge = this.session.getA2aBridge?.();
+			if (remoteNames.some(name => bridge?.get(name) === undefined)) await this.#rescanA2aPeers(bridge);
+		}
 		// Resolve every item before choosing an execution path. No executor or
 		// job manager may observe a batch unless every effective policy is valid.
 		const preflights = await Promise.all(
@@ -2002,11 +2020,28 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const taskFileMetadata =
 			params.taskFile !== undefined ? { taskFile: params.taskFile, taskFileSha256: params.taskFileSha256 } : {};
 		const context = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
-		const remoteAgent = this.session.getA2aBridge?.()?.get(params.agent ?? "");
+		const a2aBridge = this.session.getA2aBridge?.();
+		const agentName = params.agent ?? "";
+		// A7: a remote terminal cannot be held read-only, so plan mode refuses
+		// every a2a: dispatch before anything is sent over the wire.
+		if (agentName.startsWith(A2A_AGENT_PREFIX) && this.session.getPlanModeState?.()?.enabled === true) {
+			return createTaskModeError(
+				"Task execution failed: remote A2A agents (a2a:*) are unavailable in plan mode; a remote terminal cannot be held read-only.",
+			);
+		}
+		let remoteAgent = a2aBridge?.get(agentName);
+		if (remoteAgent === undefined && agentName.startsWith(A2A_AGENT_PREFIX)) {
+			// A4: an unknown a2a: name may belong to a terminal that started after
+			// this session; rescan the live bridges before giving up.
+			await this.#rescanA2aPeers(a2aBridge);
+			remoteAgent = a2aBridge?.get(agentName);
+		}
 		if (remoteAgent) {
 			return this.#runA2aSpawn({
 				agent: remoteAgent,
 				params,
+				context,
+				bridge: a2aBridge,
 				preAllocatedId,
 				spawnIndex,
 				startTime,
@@ -2110,32 +2145,41 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * `<task-result>` envelope. Registered remote agents declare `blocking: true`,
 	 * so this runs inline on the task call; the A2A wire itself is async-first.
 	 */
-	/** This terminal's public A2A identity for reply envelopes: the bridge name (if any) plus its loopback url from the local registry. */
+	/** This terminal's public A2A identity for reply envelopes: its own bridge registry entry (A1/A3). */
 	async #ownA2aIdentity(): Promise<{ name?: string; url?: string }> {
 		try {
-			const { readLiveBridges } = await import("../a2a/server");
-			const agentDir = this.session.settings.getAgentDir();
-			const live = await readLiveBridges(agentDir);
-			const own = [...live.values()].find(entry => entry.pid !== process.pid);
-			// Prefer this process's own registry entry: not in readLiveBridges
-			// (it excludes self), so read the raw file for our pid.
-			const { readLocalBridgeEntry } = await import("../a2a/server");
-			const entry = await readLocalBridgeEntry(agentDir, process.pid);
-			if (entry !== undefined) {
-				return {
-					...(entry.name !== undefined ? { name: entry.name } : {}),
-					url: `http://127.0.0.1:${entry.port}/`,
-				};
-			}
-			return own !== undefined ? { url: `http://127.0.0.1:${own.port}/` } : {};
+			const entry = await readLocalBridgeEntry(this.session.settings.getAgentDir(), process.pid);
+			return entry !== undefined
+				? {
+						...(entry.name !== undefined ? { name: entry.name } : {}),
+						url: `http://127.0.0.1:${entry.port}/`,
+					}
+				: {};
 		} catch {
 			return {};
+		}
+	}
+
+	/** A4: on-demand, debounced rescan so a terminal started later becomes visible. */
+	async #rescanA2aPeers(bridge: A2aBridgeApi | undefined): Promise<void> {
+		if (bridge === undefined) return;
+		try {
+			await rescanLocalBridges({
+				bridge,
+				agentDir: this.session.settings.getAgentDir(),
+				settings: this.session.settings,
+				maxPeerSkills: cfgA2aMaxPeerSkills.get(this.session.settings),
+			});
+		} catch {
+			// Discovery is best effort; a failed rescan must not fail the spawn.
 		}
 	}
 
 	async #runA2aSpawn(args: {
 		agent: A2aRuntimeAgent;
 		params: SpawnParams;
+		context?: string;
+		bridge?: A2aBridgeApi;
 		preAllocatedId?: string;
 		spawnIndex: number;
 		startTime: number;
@@ -2175,6 +2219,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			prompt: assignment,
 			spawn: args.params.a2aSpawn === true,
 			fromIdentity: await this.#ownA2aIdentity(),
+			...(args.context !== undefined ? { context: args.context } : {}),
+			...(args.bridge !== undefined ? { bridge: args.bridge } : {}),
 			timeoutMs: cfgA2aClientTimeoutMs.get(this.session.settings),
 			signal: args.signal,
 		});
