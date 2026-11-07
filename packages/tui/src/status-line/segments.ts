@@ -1065,9 +1065,10 @@ const sessionNameSegment: StatusLineSegment = {
 		const name = sessionManager?.getSessionName() || ctx.previewTitle;
 		if (!name) return { content: "", visible: false };
 
-		const title = sanitizeStatusText(name);
-		const content = ctx.isPinned ? withIcon(theme.icon.pin, title) : title;
-		return { content: accentFg(ctx, "accent", content), visible: true };
+		const styledTitle = accentFg(ctx, "accent", sanitizeStatusText(name));
+		const content =
+			ctx.isPinned && theme.icon.pin ? `${theme.fg("accent", theme.icon.pin)} ${styledTitle}` : styledTitle;
+		return { content, visible: true };
 	},
 	describe(ctx) {
 		const name = ctx.session.sessionManager?.getSessionName() || ctx.previewTitle;
