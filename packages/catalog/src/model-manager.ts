@@ -99,8 +99,8 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	 * command-backed credentials that must wait until an actual request.
 	 */
 	restoreCachedHeaders?: (model: Readonly<Model>) => Pick<Model, "headers" | "resolveHeaders"> | undefined;
-	/** Optional dynamic endpoint fetcher. */
-	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
+	/** Dynamic endpoint fetcher; receives restorable cached rows to preserve slices whose refresh fails. */
+	fetchDynamicModels?: (cachedModels?: readonly Model<Api>[]) => Promise<readonly ModelSpec<TApi>[] | null>;
 	/** Optional stencil.so fallback hook. */
 	modelsDev?: ModelsDevFallback<TApi, TModelsDevPayload>;
 	/** Clock override for deterministic tests. */
@@ -340,7 +340,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	}
 
 	const [fetchedModelsDevModels, dynamicFetch] = shouldFetchFromNetwork
-		? await Promise.all([fetchModelsDev(options), dynamicFetcher ? fetchDynamicModels(dynamicFetcher) : undefined])
+		? await Promise.all([
+				fetchModelsDev(options),
+				dynamicFetcher ? fetchDynamicModels(dynamicFetcher, usableCachedModels) : undefined,
+			])
 		: [null, undefined];
 	const fetchedDynamicModels = dynamicFetch?.models ?? null;
 	const modelsDevFetchSucceeded = fetchedModelsDevModels !== null;
@@ -532,10 +535,11 @@ async function fetchModelsDev<TApi extends Api, TModelsDevPayload>(
 
 /** The endpoint's catalog (`models: null` when it answered none), and why it threw, if it did. */
 async function fetchDynamicModels<TApi extends Api>(
-	fetcher: () => Promise<readonly ModelSpec<TApi>[] | null>,
+	fetcher: (cachedModels?: readonly Model<Api>[]) => Promise<readonly ModelSpec<TApi>[] | null>,
+	cachedModels: readonly Model<TApi>[],
 ): Promise<{ models: DiscoveredModelSet<TApi> | null; error?: string }> {
 	try {
-		const models = await fetcher();
+		const models = await fetcher(cachedModels);
 		return { models: models === null ? null : buildDiscoveredModelSpecs<TApi>(models) };
 	} catch (error) {
 		return { models: null, error: error instanceof Error ? error.message : String(error) };
