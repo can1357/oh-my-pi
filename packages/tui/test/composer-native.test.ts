@@ -139,6 +139,40 @@ describe("native composer", () => {
 		expect(input()).toMatchObject({ ghost: " the tests", placeholder: undefined });
 	});
 
+	it("offers a button for Tab's ghost step while Tab would take the ghost, and a click runs it without sending", () => {
+		const editor = composer({ running: false });
+		const accepted: number[] = [];
+		const sent: string[] = [];
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.onSubmit = text => {
+			sent.push(text);
+		};
+		editor.predictions = () => ["run the tests", "ship it"];
+		const accept = () =>
+			nodes(editor.describe(cx)).find(
+				n => n.p !== undefined && "actions" in n.p && n.p.actions?.click === "ghost.tab",
+			);
+
+		// Mid-line no ghost is drawn and Tab completes paths instead: no button.
+		editor.setText("run");
+		editor.handleInput("\x1b[D");
+		expect(accept()).toBeUndefined();
+
+		editor.handleInput("\x1b[C");
+		expect(accept()).toBeDefined();
+		editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "ghost.tab", mods: [] });
+		expect(editor.getText()).toBe("run the tests");
+		expect(accepted).toEqual([0]);
+		expect(sent).toEqual([]);
+
+		// The line now equals one of two predictions: Tab, and so the button, opens the list of them.
+		expect(accept()).toBeDefined();
+		editor.handleNativeEvent({ type: "action", key: "bar/accept", act: "ghost.tab", mods: [] });
+		expect(editor.isAutocompleteActive()).toBeTrue();
+		expect(editor.getText()).toBe("run the tests");
+		expect(accept()).toBeUndefined();
+	});
+
 	it("names the viewed subagent over the draft and routes its links to the focus handler", () => {
 		expect(byRole(composer({ running: false }).describe(cx), "omp.composer.focus")).toBeUndefined();
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- In Tern, the composer shows an Accept button while Tab would take the ghost suggestion (a prediction or word completion; More when Tab would list other predictions), so a keyboard without Tab, such as a phone's, can still accept it
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed

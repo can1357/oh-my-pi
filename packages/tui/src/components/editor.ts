@@ -5118,10 +5118,26 @@ export class Editor implements Component, Focusable {
 		return list;
 	}
 
+	/**
+	 * What Tab does with the ghost text right now: insert the shown prediction or word completion
+	 * (`accept`), or open the list of prediction alternatives (`alternatives`). Undefined when Tab
+	 * would fall through to file or slash-command completion instead.
+	 */
+	ghostTabAction(): "accept" | "alternatives" | undefined {
+		if (this.#getShownPrediction()) return "accept";
+		if (this.#getPredictionAlternatives()) return "alternatives";
+		return this.#getShownWordCompletion() ? "accept" : undefined;
+	}
+
+	/** Run Tab's ghost step ({@link ghostTabAction}) without a key; never submits. Returns whether it acted. */
+	applyGhostTab(): boolean {
+		return (
+			this.#acceptPrediction() || this.#showPredictionAlternatives() || this.#acceptWordCompletion({ space: true })
+		);
+	}
+
 	async #handleTabCompletion(): Promise<void> {
-		if (this.#acceptPrediction()) return;
-		if (this.#showPredictionAlternatives()) return;
-		if (this.#acceptWordCompletion({ space: true })) return;
+		if (this.applyGhostTab()) return;
 		if (!this.#autocompleteProvider) return;
 
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
