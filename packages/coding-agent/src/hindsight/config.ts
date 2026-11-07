@@ -23,6 +23,7 @@ import {
 	cfgHindsightRecallContextTurns,
 	cfgHindsightRecallMaxQueryChars,
 	cfgHindsightRecallMaxTokens,
+	cfgHindsightRecallMinScores,
 	cfgHindsightRecallTimeoutMs,
 	cfgHindsightRecallTypes,
 	cfgHindsightReflectTimeoutMs,
@@ -37,6 +38,14 @@ import {
 } from "./settings";
 
 export type HindsightScoping = "global" | "per-project" | "per-project-tagged";
+
+/** Optional request score floors supported by Hindsight's recall endpoint. */
+export interface RecallMinScores {
+	semantic?: number;
+	keyword?: number;
+	reranker?: number;
+	final?: number;
+}
 
 export interface HindsightConfig {
 	hindsightApiUrl: string | null;
@@ -61,6 +70,7 @@ export interface HindsightConfig {
 	recallBudget: "low" | "mid" | "high";
 	recallMaxTokens: number;
 	recallTypes: string[];
+	recallMinScores?: RecallMinScores;
 	recallContextTurns: number;
 	recallMaxQueryChars: number;
 	recallPromptPreamble: string;
@@ -112,6 +122,10 @@ export function loadHindsightConfig(settings: Settings): HindsightConfig {
 		recallBudget: cfgHindsightRecallBudget.get(settings),
 		recallMaxTokens: cfgHindsightRecallMaxTokens.get(settings),
 		recallTypes: [...cfgHindsightRecallTypes.get(settings)],
+		recallMinScores: (() => {
+			const minScores = cfgHindsightRecallMinScores.get(settings);
+			return Object.keys(minScores).length === 0 ? undefined : minScores;
+		})(),
 		recallContextTurns: cfgHindsightRecallContextTurns.get(settings),
 		recallMaxQueryChars: cfgHindsightRecallMaxQueryChars.get(settings),
 		recallPromptPreamble: DEFAULT_PREAMBLE,

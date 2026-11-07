@@ -359,6 +359,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 				types: this.config.recallTypes.length > 0 ? this.config.recallTypes : undefined,
 				tags: this.recallTags,
 				tagsMatch: this.recallTagsMatch,
+				minScores: this.config.recallMinScores,
 				signal,
 			});
 			if (signal?.aborted) return { context: null, ok: false };
