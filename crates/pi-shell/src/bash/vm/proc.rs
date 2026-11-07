@@ -323,6 +323,16 @@ impl OwnTraps {
 			_ => Self { pseudo: self.pseudo | Self::bit(key), signals: self.signals },
 		}
 	}
+
+	/// The set with `key` removed.
+	pub const fn without(self, key: crate::bash::store::TrapKey) -> Self {
+		match key {
+			crate::bash::store::TrapKey::Signal(sig) => {
+				Self { pseudo: self.pseudo, signals: self.signals.without(sig) }
+			},
+			_ => Self { pseudo: self.pseudo & !Self::bit(key), signals: self.signals },
+		}
+	}
 }
 
 /// `getopts` progress between calls (bash's `sh_optind`, `sh_curopt` and
@@ -352,26 +362,29 @@ pub struct GetoptsState {
 /// jumps past the scan that started it, abandoning what it had not
 /// reached.
 ///
-/// The whole queue is behind one pointer: a vproc that never receives a
-/// trapped signal keeps the same eight bytes the bare signal set took,
-/// and the per-op check is a null test.
+/// The queue and modes are behind one pointer. Until a trapped signal or
+/// trap action needs them, the per-op check is a null test and a vproc
+/// pays only the pointer's eight bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PendingTraps(Option<Box<TrapQueue>>);
 
-/// The queue and its scans, allocated at a vproc's first delivery.
+/// The queue, modes and scans, allocated at the first delivery or action.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TrapQueue {
 	/// bash `pending_traps[sig]`: the signals delivered and not yet run.
 	/// Only `SIGCHLD` keeps a count of its deliveries, in
 	/// [`JobTable::chld`], as bash's `run_sigchld_trap` counter.
-	pub queued:       SigSet,
+	pub queued:      SigSet,
 	/// bash `catch_flag`: a delivery that no scan has taken yet.
-	pub catch:        bool,
-	/// bash's `SIG_INPROGRESS` for `SIGCHLD`: its action is running, so a
-	/// nested scan leaves the signal queued instead of re-entering it.
-	pub chld_running: bool,
+	pub catch:       bool,
+	/// `sigmodes`' in-progress bits, maintained for every trap key. Active
+	/// frames reconstruct them on restore; a CHLD non-local return can
+	/// leave a bit set without a frame (not represented by version 29).
+	pub in_progress: OwnTraps,
+	/// The innermost active trap, independent of the transient scan stack.
+	pub running:     Option<crate::bash::store::TrapKey>,
 	/// The activations of `run_pending_traps`, innermost last.
-	pub scans:        Vec<Scan>,
+	pub scans:       Vec<Scan>,
 }
 
 /// One activation of bash's `run_pending_traps`: its `for (sig = 1; sig <
@@ -395,7 +408,119 @@ pub struct Scan {
 	pub chld_action: Option<(BString, ModeId)>,
 }
 
+/// How a trap frame leaves the stack.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TrapEnd {
+	Complete,
+	Return,
+	Abandon,
+}
+
+/// All re-entry decisions and trap-mode transitions pass through
+/// [`TrapQueue::mode`]. Callers never select a signal-specific exclusion.
+#[derive(Clone, Copy)]
+pub enum TrapMode {
+	Scan,
+	Action(crate::bash::store::TrapKey, crate::bash::ids::Dialect),
+	Enter(crate::bash::store::TrapKey),
+	Leave {
+		key:     crate::bash::store::TrapKey,
+		end:     TrapEnd,
+		active:  bool,
+		running: Option<crate::bash::store::TrapKey>,
+		owed:    u32,
+	},
+}
+
+impl TrapQueue {
+	/// bash 5.3 `trap.c`: WINCH blocks a pending scan while it is the
+	/// running trap (351); CHLD excludes re-entry and retains its mode on
+	/// a non-local return (401-435); ordinary signals are recursive (465,
+	/// `_run_trap_internal`'s `RECURSIVE_SIG`). This is the only policy
+	/// table and the only place consulting the in-progress bits.
+	pub fn mode(&mut self, event: TrapMode) -> bool {
+		use crate::bash::store::TrapKey;
+		#[derive(Clone, Copy, PartialEq, Eq)]
+		enum Policy {
+			Recursive,
+			Pending,
+			Counted,
+			Once,
+			Debug,
+			Return,
+		}
+		let key = match event {
+			TrapMode::Scan => match self.running {
+				Some(key) => key,
+				None => return true,
+			},
+			TrapMode::Action(key, _) | TrapMode::Enter(key) | TrapMode::Leave { key, .. } => key,
+		};
+		let policy = match key {
+			TrapKey::Signal(Signal::Chld) => Policy::Counted,
+			TrapKey::Signal(Signal::Winch) => Policy::Pending,
+			TrapKey::Signal(_) => Policy::Recursive,
+			TrapKey::Return => Policy::Return,
+			TrapKey::Debug => Policy::Debug,
+			_ => Policy::Once,
+		};
+		match event {
+			TrapMode::Scan => {
+				let TrapKey::Signal(sig) = key else {
+					return true;
+				};
+				policy != Policy::Pending || !self.in_progress.has(key) || !self.queued.contains(sig)
+			},
+			TrapMode::Action(_, dialect) => match policy {
+				Policy::Recursive | Policy::Pending => true,
+				Policy::Return => !self.in_progress.has(key) && !self.in_progress.has(TrapKey::Debug),
+				Policy::Debug => {
+					!self.in_progress.has(key)
+						&& (dialect != crate::bash::ids::Dialect::Zsh || self.running.is_none())
+				},
+				Policy::Counted | Policy::Once => !self.in_progress.has(key),
+			},
+			TrapMode::Enter(_) => {
+				self.in_progress = self.in_progress.with(key);
+				self.running = Some(key);
+				true
+			},
+			TrapMode::Leave { end, active, running, owed, .. } => {
+				if !active && (end != TrapEnd::Return || policy != Policy::Counted) {
+					self.in_progress = self.in_progress.without(key);
+				}
+				self.running = running;
+				if end == TrapEnd::Complete
+					&& let TrapKey::Signal(sig) = key
+				{
+					self.queued = self.queued.without(sig);
+					if policy == Policy::Counted
+						&& owed > 0
+						&& !self.scans.iter().any(|scan| scan.running == Some(sig))
+					{
+						self.queued = self.queued.with(sig);
+						self.catch = true;
+					}
+				}
+				true
+			},
+		}
+	}
+}
+
 impl PendingTraps {
+	/// Query the policy without allocating a ledger before any action runs.
+	pub fn may_run(
+		&mut self,
+		key: crate::bash::store::TrapKey,
+		dialect: crate::bash::ids::Dialect,
+	) -> bool {
+		self
+			.0
+			.as_deref_mut()
+			.is_none_or(|q| q.mode(TrapMode::Action(key, dialect)))
+	}
+
 	/// bash `trap_handler`: record the delivery and raise `catch_flag`.
 	pub fn deliver(&mut self, sig: Signal) {
 		let q = self.get();
@@ -424,22 +549,28 @@ impl PendingTraps {
 		}
 	}
 
-	/// Version-29 images save pending bits and a child-action count, not
-	/// the scan's cursor, catch flag or captured batch. Resume that debt
-	/// as unscanned deliveries rather than inventing a scan that can drop
-	/// an action. Only the active CHLD exclusion is known from its trap
-	/// frame; the original scan's nesting relationship is not recoverable.
-	pub fn restore_legacy(&mut self, queued: SigSet, chld: u32, chld_running: bool) {
+	/// Version-29 images save pending bits and child-action debt, not the
+	/// scan's cursor, catch flag or captured batch. Every active trap's
+	/// in-progress bit and the running key come from its persisted frame.
+	/// A bit left behind by a non-local return has no such representation.
+	pub fn restore(
+		&mut self,
+		queued: SigSet,
+		chld: u32,
+		in_progress: OwnTraps,
+		running: Option<crate::bash::store::TrapKey>,
+	) {
 		let queued = if chld > 0 {
 			queued.with(Signal::Chld)
 		} else {
 			queued
 		};
-		if queued != SigSet::EMPTY || chld_running {
+		if queued != SigSet::EMPTY || in_progress != OwnTraps::EMPTY {
 			let q = self.get();
 			q.queued = queued;
 			q.catch = queued != SigSet::EMPTY;
-			q.chld_running = chld_running;
+			q.in_progress = in_progress;
+			q.running = running;
 		}
 	}
 

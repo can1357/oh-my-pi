@@ -17,7 +17,7 @@ use super::{
 	proc::{
 		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, LastBg,
 		LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run, Saved,
-		Scan, Scratch, ScriptKind, Slot, TryEnd, Vproc,
+		Scan, Scratch, ScriptKind, Slot, TrapEnd, TrapMode, TryEnd, Vproc,
 	},
 	redir,
 	state::{self, Level, Root, Scope, Var, VarMap},
@@ -397,7 +397,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				});
 				if let Some(i) = target {
 					if vp.frames[i].kind == FrameKind::NoFork || !return_trap(k, vp, cx, i) {
-						unwind(&mut k.root, cx.store, vp, i);
+						unwind_with(&mut k.root, cx.store, vp, i, TrapEnd::Return);
 					}
 				} else if vp.parent.is_some() && in_function_scope(k, cx, vp) {
 					exit_shell(k, vp, cx, status);
@@ -1071,7 +1071,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		if source && return_trap(k, vp, cx, top) {
 			return None;
 		}
-		pop_frame(&mut k.root, cx.store, vp);
+		pop_frame_inner(&mut k.root, cx.store, vp, TrapEnd::Complete);
 		if debug && !vp.frames.is_empty() {
 			zsh_debug_done(k, vp, cx);
 		}
@@ -1095,7 +1095,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		} else if let Some(status) = status {
 			vp.status = status;
 			if let Some(target) = return_target {
-				unwind(&mut k.root, cx.store, vp, target);
+				unwind_with(&mut k.root, cx.store, vp, target, TrapEnd::Return);
 			} else if debug
 				&& trap_status != 0
 				&& state::option(&mut k.root, cx.store, vp, OptId::Extdebug).unwrap_or(false)
@@ -1587,28 +1587,32 @@ fn end_unit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
 /// Pop the top frame, restoring the fds its redirections saved and the
 /// scope of a function call or `${ ;}`. A store failure is kept on `root`.
 pub fn pop_frame(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc) {
+	pop_frame_inner(root, store, vp, TrapEnd::Abandon);
+}
+
+fn pop_frame_inner(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc, end: TrapEnd) {
 	let Some(mut f) = vp.frames.pop() else {
 		return;
 	};
-	if matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. }) {
+	if let FrameKind::Script { what: ScriptKind::Trap { key, .. }, .. } = f.kind {
 		vp.trap_frames = vp.trap_frames.saturating_sub(1);
-	}
-	if matches!(f.kind, FrameKind::Script {
-		what: ScriptKind::Trap { key: TrapKey::Signal(Signal::Chld), .. },
-		..
-	}) {
-		let q = vp.traps.get();
-		if q.chld_running
-			&& !q
-				.scans
-				.iter()
-				.any(|scan| scan.running == Some(Signal::Chld))
-		{
-			// A restored action has no owning scan, but its frame still
-			// excludes CHLD re-entry. Resume deferred work when it ends.
-			q.chld_running = false;
-			q.catch |= q.queued.contains(Signal::Chld);
+		let mut active = false;
+		let mut running = None;
+		if vp.trap_frames != 0 {
+			for frame in vp.frames.iter().rev() {
+				if let FrameKind::Script { what: ScriptKind::Trap { key: other, .. }, .. } = frame.kind
+				{
+					running.get_or_insert(other);
+					active |= other == key;
+					if active {
+						break;
+					}
+				}
+			}
 		}
+		vp.traps
+			.get()
+			.mode(TrapMode::Leave { key, end, active, running, owed: vp.jobs.chld });
 	}
 	if let Some(sc) = f.scratch.take() {
 		drop_scratch(root, store, vp, sc);
@@ -1804,8 +1808,18 @@ pub fn take_scratch(vp: &mut Vproc) -> Box<Scratch> {
 
 /// Pop frames until `keep` remain.
 pub fn unwind(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc, keep: usize) {
+	unwind_with(root, store, vp, keep, TrapEnd::Abandon);
+}
+
+fn unwind_with(
+	root: &mut Root,
+	store: &mut dyn StateStore,
+	vp: &mut Vproc,
+	keep: usize,
+	end: TrapEnd,
+) {
 	while vp.frames.len() > keep {
-		pop_frame(root, store, vp);
+		pop_frame_inner(root, store, vp, end);
 	}
 }
 
@@ -4371,11 +4385,8 @@ fn run_pending_traps(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 			// out of `run_pending_traps`).
 			Some(at) if depth < at => {
 				let q = vp.traps.get();
-				if let Some(scan) = q.scans.pop()
-					&& scan.running == Some(Signal::Chld)
-				{
+				if let Some(scan) = q.scans.pop() {
 					vp.jobs.chld -= scan.chld_left;
-					q.chld_running = false;
 				}
 			},
 			// Its action is still running: only a fresh delivery nests.
@@ -4408,17 +4419,12 @@ fn run_pending_traps(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 	}
 }
 
-/// bash's entry to `run_pending_traps`: a scan starts only for a delivery
-/// no scan has taken yet (`catch_flag`), and never recursively while a
-/// `SIGWINCH` action is running with another `SIGWINCH` queued.
+/// bash's entry to `run_pending_traps`: a fresh delivery starts a scan
+/// only when the shared trap-mode policy permits it.
 fn start_scan(vp: &mut Vproc) -> bool {
 	let depth = vp.frames.len();
 	let q = vp.traps.get();
-	if !q.catch {
-		return false;
-	}
-	let nested = q.scans.last();
-	if nested.is_some_and(|s| s.running == Some(Signal::Winch)) && q.queued.contains(Signal::Winch) {
+	if !q.catch || !q.mode(TrapMode::Scan) {
 		return false;
 	}
 	q.catch = false;
@@ -4453,7 +4459,7 @@ fn advance_scan(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 					Some((action, mode)) => {
 						push_trap(k, vp, cx, TrapKey::Signal(Signal::Chld), action, *mode)
 					},
-					None => start_trap(k, vp, cx, TrapKey::Signal(Signal::Chld)),
+					None => start_trap_inner(k, vp, cx, TrapKey::Signal(Signal::Chld)),
 				};
 				vp.traps
 					.get()
@@ -4468,7 +4474,6 @@ fn advance_scan(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 			}
 			q.scans.last_mut().expect("checked above").running = None;
 			if sig == Signal::Chld {
-				q.chld_running = false;
 				q.scans.last_mut().expect("checked above").chld_action = None;
 			} else {
 				q.queued = q.queued.without(sig);
@@ -4497,13 +4502,10 @@ fn advance_scan(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 /// signal arrived. A trap reset to the default makes bash resend the
 fn start_action(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) -> bool {
 	let key = TrapKey::Signal(sig);
+	if !vp.traps.may_run(key, vp.mode.dialect()) {
+		return false;
+	}
 	if sig == Signal::Chld {
-		// bash's `SIG_INPROGRESS`: a scan started inside the `SIGCHLD`
-		// action leaves the signal queued rather than re-entering it, so
-		// a child the action reaps cannot recurse into it.
-		if vp.traps.get().chld_running {
-			return false;
-		}
 		let owed = vp.jobs.chld;
 		{
 			let q = vp.traps.get();
@@ -4511,7 +4513,6 @@ fn start_action(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) ->
 			if owed == 0 {
 				return false;
 			}
-			q.chld_running = true;
 			let scan = q.scans.last_mut().expect("a scan is running");
 			scan.running = Some(sig);
 			scan.chld_left = owed - 1;
@@ -4524,7 +4525,6 @@ fn start_action(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) ->
 			Ok(_) => {
 				vp.jobs.chld = 0;
 				let q = vp.traps.get();
-				q.chld_running = false;
 				let scan = q.scans.last_mut().expect("the batch scan");
 				scan.running = None;
 				scan.chld_left = 0;
@@ -4540,7 +4540,7 @@ fn start_action(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) ->
 		vp.jobs.chld -= 1;
 		let started = match &action {
 			Some((action, mode)) => push_trap(k, vp, cx, key, action, *mode),
-			None => start_trap(k, vp, cx, key),
+			None => start_trap_inner(k, vp, cx, key),
 		};
 		vp.traps
 			.get()
@@ -4552,7 +4552,6 @@ fn start_action(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) ->
 			return true;
 		}
 		let q = vp.traps.get();
-		q.chld_running = false;
 		let scan = q.scans.last_mut().expect("a scan is running");
 		vp.jobs.chld -= scan.chld_left;
 		scan.running = None;
@@ -4574,7 +4573,7 @@ fn start_action(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) ->
 			// dispatch inside this scan before taking the default action.
 			if vp.mode.dialect() == Dialect::Zsh {
 				set_running(vp, Some(sig));
-				if start_trap(k, vp, cx, key) {
+				if start_trap_inner(k, vp, cx, key) {
 					return true;
 				}
 				set_running(vp, None);
@@ -4589,7 +4588,7 @@ fn start_action(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) ->
 		},
 	}
 	set_running(vp, Some(sig));
-	if start_trap(k, vp, cx, key) {
+	if start_trap_inner(k, vp, cx, key) {
 		return true;
 	}
 	set_running(vp, None);
@@ -4627,7 +4626,7 @@ fn resend_default(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, sig: Signal) 
 /// the list is skipped, [`zsh_debug_done`]); before the list
 /// `$ZSH_DEBUG_CMD` holds its text. Whether the trap started.
 fn zsh_debug_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Unit, op: Op) -> bool {
-	if vp.trap_frames != 0 || !pseudo_trap_maybe(k, cx, TrapKey::Debug) {
+	if !pseudo_trap_maybe(k, cx, TrapKey::Debug) || !vp.traps.may_run(TrapKey::Debug, Dialect::Zsh) {
 		return false;
 	}
 	let opt = |k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, o| {
@@ -4700,17 +4699,17 @@ fn zsh_debug_done(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
 	}
 }
 
-/// Run a configured trap in the interrupted shell. Only pseudo-traps
-/// exclude recursive entry here; signal scans own their own exclusions.
+/// Run a configured trap if the shared mode policy permits its entry.
 pub fn start_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, key: TrapKey) -> bool {
-	// A subshell lists its parent's EXIT trap but runs only its own.
-	if key == TrapKey::Exit && vp.parent.is_some() && !vp.own_traps.has(key) {
+	if !pseudo_trap_maybe(k, cx, key) || !vp.traps.may_run(key, vp.mode.dialect()) {
 		return false;
 	}
-	// The check before every command (DEBUG) and function return (RETURN):
-	// no action set anywhere, nothing to decide (xeon profile: `start_trap`
-	// ~1 % self on func, plus its store lookups in `state::record`).
-	if !pseudo_trap_maybe(k, cx, key) {
+	start_trap_inner(k, vp, cx, key)
+}
+
+fn start_trap_inner(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, key: TrapKey) -> bool {
+	// A subshell lists its parent's EXIT trap but runs only its own.
+	if key == TrapKey::Exit && vp.parent.is_some() && !vp.own_traps.has(key) {
 		return false;
 	}
 	// zsh has no `errtrace`/`functrace`: its ZERR and DEBUG traps run in
@@ -4749,18 +4748,6 @@ pub fn start_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, key: TrapKey)
 				},
 			}
 		}
-	}
-	// Pseudo-traps do not re-enter their own action; a function called
-	// from DEBUG also loses RETURN (bash's `execute_function`). Ordinary
-	// signals are recursive (`trap.c`'s RECURSIVE_SIG).
-	if !matches!(key, TrapKey::Signal(_))
-		&& vp.trap_frames != 0
-		&& vp.frames.iter().any(|f| {
-			matches!(f.kind,
-		FrameKind::Script { what: ScriptKind::Trap { key: active, .. }, .. }
-			if active == key || (key == TrapKey::Return && active == TrapKey::Debug))
-		}) {
-		return false;
 	}
 	let (action, trap_mode) = match state::record(cx.store, vp, Key::Trap(key)) {
 		Ok(Some(Record::Trap { action, mode })) if !action.is_empty() => (action.clone(), *mode),
@@ -4989,8 +4976,9 @@ pub fn finish_cancel(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc
 
 /// Push a script frame running `src` (`eval`, `source`).
 pub fn push_script(vp: &mut Vproc, src: &[u8], line: u32, what: ScriptKind) {
-	if matches!(what, ScriptKind::Trap { .. }) {
+	if let ScriptKind::Trap { key, .. } = what {
 		vp.trap_frames += 1;
+		vp.traps.get().mode(TrapMode::Enter(key));
 	}
 	vp.frames
 		.push(Frame::new(None, 0, FrameKind::script(src, Pos { offset: 0, line }, what)));

@@ -896,7 +896,8 @@ impl Shell {
 				});
 			}
 			report.runs += vp.runs.len() as u32;
-			let mut chld_running = false;
+			let mut in_progress = super::proc::OwnTraps::EMPTY;
+			let mut running = None;
 			for f in p.frames {
 				let unit = match f.unit {
 					Some(id) => {
@@ -1037,12 +1038,13 @@ impl Shell {
 					(f.getopts != super::proc::GetoptsState::default()).then(|| Box::new(f.getopts));
 				if let FrameKind::Script { what: ScriptKind::Trap { key, .. }, .. } = frame.kind {
 					vp.trap_frames += 1;
-					chld_running |= key == TrapKey::Signal(Signal::Chld);
+					in_progress = in_progress.with(key);
+					running = Some(key);
 				}
 				vp.frames.push(frame);
 			}
 			vp.traps
-				.restore_legacy(p.pending_traps, vp.jobs.chld, chld_running);
+				.restore(p.pending_traps, vp.jobs.chld, in_progress, running);
 			procs.push(Box::new(vp));
 		}
 		if procs.is_empty() {
