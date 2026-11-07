@@ -1231,6 +1231,32 @@ describe("structured subagent primitive", () => {
 		]);
 	});
 
+	it("hard-restricts capabilities declared by agent frontmatter", async () => {
+		mockDiscovery({ ...AGENT, restrictTools: true });
+		const restrictedSession = session();
+		Object.assign(restrictedSession, {
+			mcpManager: {} as NonNullable<ToolSession["mcpManager"]>,
+			extensionPaths: ["/plugins/example.ts"],
+			customToolPaths: [{ path: "/tools/example.ts", source: "project" }],
+		});
+		const options: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
+			options.push(executorOptions);
+			return result();
+		});
+
+		const settled = await runStructuredSubagent(request({ session: restrictedSession, retainArtifacts: true }));
+
+		expect(options[0]).toMatchObject({
+			enableMCP: false,
+			restrictToolNames: true,
+			preloadedExtensionPaths: [],
+			preloadedCustomToolPaths: [],
+		});
+		expect(options[0]?.mcpManager).toBeUndefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {
 		mockDiscovery();
 		const failingSession = session();
