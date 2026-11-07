@@ -2178,14 +2178,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Persist the startup snapshot at the slot this process sends it from, so
 			// the next resumed process rebuilds the same request prefix (#15736).
 			this.agent.appendMessage(initialEvalStateContext);
-			this.sessionManager.appendCustomMessageEntry(
-				initialEvalStateContext.customType,
-				initialEvalStateContext.content,
-				initialEvalStateContext.display,
-				undefined,
-				initialEvalStateContext.attribution,
-				initialEvalStateContext.timestamp,
-			);
+			this.#appendEvalStateContextEntry(initialEvalStateContext);
 		}
 		const ircHost: IrcBridgeHost = {
 			agent: this.agent,
@@ -2916,6 +2909,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			reconnectToAgent: () => this.#reconnectToAgent(),
 			drainStrandedQueuedMessages: () => this.#drainStrandedQueuedMessages(),
 			buildDisplaySessionContext: () => this.buildDisplaySessionContext(),
+			replaceMessagesFromSessionContext: messages => this.replaceMessagesFromSessionContext(messages),
 			persistEvalStateContext: () => {
 				// The rewritten history carries no snapshot yet, so always build one.
 				const message = this.#buildEvalStateContextMessage([]);
@@ -7701,10 +7695,54 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#withEvalStateContext(this.#providerBoundary.buildDisplaySessionContext(model));
 	}
 
+	/** Snapshots a rebuild appended that no session entry records yet. */
+	readonly #unpersistedEvalStateContexts = new WeakSet<AgentMessage>();
+
 	#withEvalStateContext(context: SessionContext): SessionContext {
 		const evalStateContext = this.#buildEvalStateContextMessage(context.messages);
 		if (!evalStateContext) return context;
+		this.#unpersistedEvalStateContexts.add(evalStateContext);
 		return { ...context, messages: [...context.messages, evalStateContext] };
+	}
+
+	/**
+	 * Make a rebuilt display context the live history. A snapshot the rebuild
+	 * appended is persisted first, at the slot this process sends it from, so a
+	 * resumed process rebuilds the same request prefix. Without this, an idle
+	 * shake or prune sent a snapshot the session file never held, and the next
+	 * process's request diverged there. Revisiting a tree node finds the
+	 * snapshot an earlier visit persisted under it and moves onto that entry
+	 * instead, so browsing the tree adds no duplicates.
+	 */
+	replaceMessagesFromSessionContext(messages: AgentMessage[]): void {
+		const tail = messages.at(-1);
+		if (tail && isEvalStateContext(tail) && this.#unpersistedEvalStateContexts.delete(tail)) {
+			const leafId = this.sessionManager.getLeafId();
+			const persisted = leafId
+				? this.sessionManager
+						.getChildren(leafId)
+						.find(
+							entry =>
+								entry.type === "custom_message" &&
+								entry.customType === tail.customType &&
+								entry.content === tail.content,
+						)
+				: undefined;
+			if (persisted) this.sessionManager.branch(persisted.id);
+			else this.#appendEvalStateContextEntry(tail);
+		}
+		this.agent.replaceMessages(messages);
+	}
+
+	#appendEvalStateContextEntry(message: CustomMessage): void {
+		this.sessionManager.appendCustomMessageEntry(
+			message.customType,
+			message.content,
+			message.display,
+			undefined,
+			message.attribution,
+			message.timestamp,
+		);
 	}
 
 	/**
@@ -12609,7 +12647,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (activeMessages) {
 			activeMessages.splice(0, activeMessages.length, ...sessionContext.messages);
 		}
-		this.agent.replaceMessages(activeMessages ?? sessionContext.messages);
+		this.replaceMessagesFromSessionContext(activeMessages ?? sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();
 		this.#modelMentions.syncFromBranch();
@@ -12946,7 +12984,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (abort) {
 			for (const result of createInterruptedToolResults(branch)) this.sessionManager.appendMessage(result);
 			this.sessionManager.appendMessage(abort);
-			this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
+			this.replaceMessagesFromSessionContext(this.buildDisplaySessionContext().messages);
 		}
 		return this.retry();
 	}
@@ -13691,7 +13729,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				});
 			}
 
-			this.agent.replaceMessages(sessionContext.messages);
+			this.replaceMessagesFromSessionContext(sessionContext.messages);
 			this.#reseedTokenRate();
 			this.#advisors.resetSessionState({ preserveCost: true });
 			this.#todo.syncFromBranch();
@@ -13735,7 +13773,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (interruptedTurnAbort) {
 					this.sessionManager.appendMessage(interruptedTurnAbort);
 					sessionContext = this.buildDisplaySessionContext();
-					this.agent.replaceMessages(sessionContext.messages);
+					this.replaceMessagesFromSessionContext(sessionContext.messages);
 				}
 			}
 
@@ -14063,7 +14101,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 
 			if (!skipConversationRestore) {
-				this.agent.replaceMessages(sessionContext.messages);
+				this.replaceMessagesFromSessionContext(sessionContext.messages);
 				this.#advisors.resetSessionState();
 				this.#closeCodexProviderSessionsForHistoryRewrite();
 			}
@@ -14190,7 +14228,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				});
 			}
 
-			this.agent.replaceMessages(sessionContext.messages);
+			this.replaceMessagesFromSessionContext(sessionContext.messages);
 			this.#advisors.resetSessionState();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 			advisorRecordersDetached = false;
@@ -14502,7 +14540,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			maxFrameDataBytes: frameDataBytesBudget(this.model),
 		});
 		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
-		this.agent.replaceMessages(displayContext.messages);
+		this.replaceMessagesFromSessionContext(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();

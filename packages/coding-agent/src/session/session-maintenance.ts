@@ -457,6 +457,8 @@ export interface SessionMaintenanceHost {
 	reconnectToAgent(): void;
 	drainStrandedQueuedMessages(): void;
 	buildDisplaySessionContext(): SessionContext;
+	/** Adopt a {@link buildDisplaySessionContext} result as the live history, persisting any snapshot it appended. */
+	replaceMessagesFromSessionContext(messages: AgentMessage[]): void;
 	/** Preserve the eval runtime snapshot at the history rewrite boundary for replay. */
 	persistEvalStateContext(): void;
 	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
@@ -778,7 +780,7 @@ export class SessionMaintenance {
 
 		await this.#persistPrune(result);
 		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 		this.#host.rebaseAdvisorPrefix("prune-tool-outputs");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
@@ -828,7 +830,7 @@ export class SessionMaintenance {
 
 		await this.#persistPrune(result);
 		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 		this.#host.rebaseAdvisorPrefix("prune-stale-tool-results");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
@@ -913,7 +915,7 @@ export class SessionMaintenance {
 		this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes("drop-images");
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return { removed, tokensFreed };
@@ -985,7 +987,7 @@ export class SessionMaintenance {
 			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 			await this.#host.sessionManager.rewriteEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
-			this.#host.agent.replaceMessages(sessionContext.messages);
+			this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 			this.#host.resetAdvisorRuntimes("shake");
 			this.#host.closeCodexProviderSessionsForHistoryRewrite();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed };
@@ -1096,12 +1098,12 @@ export class SessionMaintenance {
 			await this.#host.sessionManager.rewriteEntries();
 		} catch (error) {
 			for (const [entry, snapshot] of entrySnapshots) Object.assign(entry, snapshot);
-			const sessionContext = this.#host.buildDisplaySessionContext();
-			this.#host.agent.replaceMessages(sessionContext.messages);
+			// The rewrite just failed, so restore the live history without writing to the session.
+			this.#host.agent.replaceMessages(this.#host.buildDisplaySessionContext().messages);
 			throw error;
 		}
 		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes("shake");
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 
@@ -2636,7 +2638,7 @@ export class SessionMaintenance {
 		this.#failedNativeSpeculation = undefined;
 		const newEntries = this.#host.sessionManager.getEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 		this.#host.rebaseAfterCompaction();
 		// Compaction discarded the conversation history that carried the approved
 		// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
@@ -4656,7 +4658,7 @@ export class SessionMaintenance {
 		this.#host.persistEvalStateContext();
 		this.#failedNativeSpeculation = undefined;
 		const sessionContext = this.#host.buildDisplaySessionContext();
-		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 		this.#host.rebaseAfterCompaction();
 		// Same post-rewrite bookkeeping as the regular compaction append: the
 		// rebuilt context no longer carries the transient plan reference (#1246),
