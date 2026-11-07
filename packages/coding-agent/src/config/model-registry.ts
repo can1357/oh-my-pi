@@ -2906,7 +2906,7 @@ export class ModelRegistry {
 				...(failure !== undefined ? { error: failure } : {}),
 			});
 			const authoritativeProviders = new Set<string>();
-			if (options.dynamicModelsAuthoritative && !result.stale) {
+			if (options.dynamicModelsAuthoritative && (!result.stale || result.authoritativeCache)) {
 				authoritativeProviders.add(options.providerId);
 			}
 			const replaceRuntimeProviders = new Set<string>();

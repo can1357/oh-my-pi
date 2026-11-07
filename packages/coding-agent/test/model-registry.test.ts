@@ -3745,6 +3745,40 @@ describe("ModelRegistry", () => {
 			expect(registry.find("synthetic", "hf:moonshotai/Kimi-K2.5")).toBeUndefined();
 		});
 
+		test("does not resurrect bundled chat rows when an expired authoritative roster's refresh fails", async () => {
+			authStorage.keys.setRuntime("deepinfra", "deepinfra-test-key");
+			const cachedChat = buildModel({
+				id: "cached-chat",
+				name: "Cached Chat",
+				provider: "deepinfra",
+				api: "openai-completions",
+				baseUrl: "https://api.deepinfra.com/v1/openai",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 32_000,
+				maxTokens: 4096,
+			});
+			writeModelCache(
+				"deepinfra",
+				Date.now() - 25 * 60 * 60 * 1000,
+				[cachedChat],
+				true,
+				fingerprintStaticModels(getBundledModels("deepinfra"), { authoritative: true }),
+				path.join(tempDir, "models.db"),
+			);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: async () => new Response(null, { status: 503 }),
+			});
+
+			await registry.refreshProvider("deepinfra", "online");
+
+			expect(getModelsForProvider(registry, "deepinfra").map(model => model.id)).toEqual([cachedChat.id]);
+			expect(registry.getAll("image").map(model => `${model.provider}/${model.id}`)).toContain(
+				"deepinfra/black-forest-labs/FLUX-2-pro",
+			);
+		});
+
 		test("does not re-add bundled Zhipu Coding Plan models after account discovery", async () => {
 			authStorage.keys.setRuntime("zhipu-coding-plan", "zhipu-test-key");
 			const fetchMock = mockOpenAiCompatibleModels("https://open.bigmodel.cn/api/coding/paas/v4/models", [

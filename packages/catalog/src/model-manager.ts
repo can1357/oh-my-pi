@@ -129,6 +129,8 @@ export interface ModelResolutionResult<TApi extends Api = Api> {
 	updatedAt?: number;
 	/** Why the provider's endpoint fetcher threw this call; the models then come from cache, models.dev or bundled data. */
 	fetchError?: string;
+	/** The fetch did not answer, so `models` were pruned to the last authoritative snapshot's chat roster. */
+	authoritativeCache?: boolean;
 }
 
 /**
@@ -405,10 +407,12 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		mergeAuthority,
 		fetchedDynamicModels?.explicitKindModels,
 	);
+	const retainsAuthoritativeCache =
+		!dynamicFetchSucceeded && isAuthoritativeDynamicCache && usableCachedModels.length > 0;
 	const models = collapseBuiltVariants(
 		authoritativeDynamicFetchSucceeded
 			? retainModelIds(mergedModels, dynamicModels)
-			: !dynamicFetchSucceeded && isAuthoritativeDynamicCache && usableCachedModels.length > 0
+			: retainsAuthoritativeCache
 				? retainModelIds(mergedModels, usableCachedModels)
 				: mergedModels,
 	);
@@ -509,6 +513,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				? { updatedAt: cache.updatedAt }
 				: {}),
 		...(dynamicFetch?.error !== undefined ? { fetchError: dynamicFetch.error } : {}),
+		...(retainsAuthoritativeCache ? { authoritativeCache: true } : {}),
 	};
 }
 
