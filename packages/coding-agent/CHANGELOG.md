@@ -19,7 +19,7 @@
 - Mistral Vibe browser sign-in shows subscription billing in the status line and advisor spend instead of pay-as-you-go pricing ([#18374](https://github.com/can1357/oh-my-pi/issues/18374))
 - Native OpenAI compaction no longer waits for a Hindsight memory recall it cannot use; fallback summaries still recall memory ([#18327](https://github.com/can1357/oh-my-pi/issues/18327))
 - An eval `wait()` on jobs owned by a worker returns finished jobs and consumes their results instead of reporting them as running or delivering them again ([#18363](https://github.com/can1357/oh-my-pi/issues/18363))
-- The task tool no longer advertises `model` while `task.perCallModel` forbids task calls, and a `model` sent anyway is dropped with a note in the result instead of failing the call, so a model that fills in every optional field stops retrying one refusal over and over
+- The task tool no longer advertises `model` while `task.perCallModel` forbids task calls, and a `model` sent anyway is dropped with a note in the result instead of failing the call, so a model that fills in every optional field stops retrying one refusal over and over. The note reports what was ignored rather than what ran, and reaches the caller on a failed, refused or cancelled call too
 
 ## [18.18.0] - 2026-11-07
 

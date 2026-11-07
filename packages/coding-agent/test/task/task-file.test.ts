@@ -160,10 +160,13 @@ describe("taskFile dispatch", () => {
 
 		const result = await tool.execute("file-model-disabled", batch ? { context: "Context.", tasks: [item] } : item);
 
-		// The gate no longer short-circuits the call, so the caller hears the real problem.
+		// The gate no longer short-circuits the call, so the caller hears the real
+		// problem — and still learns the selector was dropped, because the file
+		// failure is one more exit the disclosure has to survive.
 		expect(result.isError).toBe(true);
-		expect(textOf(result)).not.toContain("task.perCallModel");
+		expect(textOf(result)).not.toContain("Per-call model is disabled");
 		expect(textOf(result)).toContain("missing.md");
+		expect(textOf(result)).toContain("`model` was ignored");
 		expect(executions).toHaveLength(0);
 	});
 
