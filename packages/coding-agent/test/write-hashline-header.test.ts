@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,6 +7,8 @@ import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { WRITE_MAP_MAX_CHARS, WRITE_MAP_MAX_LINES } from "@oh-my-pi/pi-coding-agent/tools/write-content";
+import * as hashlineFormat from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
@@ -45,6 +47,7 @@ describe("write tool hashline header", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await removeWithRetries(tmpDir);
 	});
 
@@ -87,6 +90,98 @@ describe("write tool hashline header", () => {
 
 		const final = await fs.readFile(filePath, "utf8");
 		expect(final).toBe("export const enabled = true;\n");
+	});
+
+	it("numbers the written lines so the model knows the line numbers it anchors on", async () => {
+		const filePath = path.join(tmpDir, "numbered.ts");
+		const session = createSession(tmpDir);
+		const content = "export const enabled = false;\nexport const flag = true;\n";
+
+		const result = await new WriteTool(session).execute("call-1", { path: filePath, content });
+		const lines = resultText(result).split("\n");
+		const match = HASHLINE_HEADER_LINE.exec(lines[0] ?? "");
+		expect(match).not.toBeNull();
+		const tag = match![2];
+
+		// The write displays the lines it wrote, numbered like a read, so the
+		// model anchors on the line numbers it just saw instead of guessing.
+		expect(lines).toContain("1:export const enabled = false;");
+		expect(lines).toContain("2:export const flag = true;");
+		expect(getEditStore(session).seenLines(filePath, tag)).toEqual([1, 2]);
+	});
+
+	it("numbers the file's own lines, not the rows the model authored", async () => {
+		const filePath = path.join(tmpDir, "copied.ts");
+		const session = createSession(tmpDir);
+
+		// Copied `read` rows: the write strips the display prefixes, so the
+		// file holds "const a = 1;" on line 1. The row must number that line,
+		// not the row the model authored.
+		const result = await new WriteTool(session).execute("call-1", {
+			path: filePath,
+			content: "1:const a = 1;\n2:const b = 2;\n",
+		});
+
+		expect(await fs.readFile(filePath, "utf8")).toBe("const a = 1;\nconst b = 2;\n");
+		const rows = resultText(result).split("\n");
+		expect(rows).toContain("1:const a = 1;");
+		expect(rows).toContain("2:const b = 2;");
+	});
+
+	it("rejects an anchor on a line the write did not display", async () => {
+		const filePath = path.join(tmpDir, "long.ts");
+		const session = createSession(tmpDir);
+		const content = `${Array.from({ length: WRITE_MAP_MAX_LINES + 1 }, (_, i) => `line ${i + 1}`).join("\n")}\n`;
+
+		const writeResult = await new WriteTool(session).execute("call-1", { path: filePath, content });
+		const headerLine = resultText(writeResult).split("\n")[0] ?? "";
+
+		// Only the first WRITE_MAP_MAX_LINES lines are numbered, so the last
+		// line is an anchor the write never displayed: the seen-line guard
+		// rejects it instead of applying the edit at a guessed line number.
+		const editResult = await new EditTool(session, "hashline").execute("call-2", {
+			input: `${headerLine}\nPUT ${WRITE_MAP_MAX_LINES + 1}.=${WRITE_MAP_MAX_LINES + 1}:\n+changed\n`,
+		});
+
+		expect(resultText(editResult)).toContain("never displayed");
+		expect(await fs.readFile(filePath, "utf8")).toBe(content);
+	});
+
+	it("records no seen line when it numbered none, so every anchor is unseen", async () => {
+		const filePath = path.join(tmpDir, "unnumbered.ts");
+		const session = createSession(tmpDir);
+		// A first line past the map's character cap leaves the write with no
+		// numbered row at all. The tag then records the empty seen set — "no
+		// line was displayed" — instead of a missing record, so the guard runs
+		// and reads every anchor on it as unseen.
+		const content = `${"x".repeat(WRITE_MAP_MAX_CHARS + 1)}\n`;
+
+		const writeResult = await new WriteTool(session).execute("call-1", { path: filePath, content });
+		const text = resultText(writeResult);
+		const headerLine = text.split("\n")[0] ?? "";
+		expect(HASHLINE_HEADER_LINE.test(headerLine)).toBe(true);
+		const tag = HASHLINE_HEADER_LINE.exec(headerLine)![2];
+
+		// No row is numbered, and the note says so instead of claiming a
+		// numbered range that does not exist.
+		expect(text).not.toContain(`1:${"x".repeat(8)}`);
+		expect(text).toContain("(1 line; none were numbered — read the file before anchoring an edit)");
+		// The empty set, not a missing one: the guard rejects every anchor.
+		expect(getEditStore(session).seenLines(filePath, tag)).toEqual([]);
+	});
+
+	it("says the file is empty when the write numbered nothing", async () => {
+		const filePath = path.join(tmpDir, "empty.ts");
+		const session = createSession(tmpDir);
+
+		const writeResult = await new WriteTool(session).execute("call-1", { path: filePath, content: "" });
+		const text = resultText(writeResult);
+		const headerLine = text.split("\n")[0] ?? "";
+		expect(HASHLINE_HEADER_LINE.test(headerLine)).toBe(true);
+		const tag = HASHLINE_HEADER_LINE.exec(headerLine)![2];
+
+		expect(text).toContain("(the file is empty; there is nothing to anchor)");
+		expect(getEditStore(session).seenLines(filePath, tag)).toEqual([]);
 	});
 
 	it("names a local:// write by its URL, and the header round-trips through edit and write", async () => {
@@ -145,5 +240,43 @@ describe("write tool hashline header", () => {
 		const echoPath = path.join(tmpDir, "echo.ts");
 		await tool.execute("call-2", { path: echoPath, content: "1:const a = 1;\n2:const b = 2;\n" });
 		expect(await Bun.file(echoPath).text()).toBe("const a = 1;\nconst b = 2;\n");
+	});
+
+	it("keeps a dump's own numbers, which are not display prefixes", async () => {
+		const filePath = path.join(tmpDir, "dump.txt");
+		const session = createSession(tmpDir);
+		const dump = "100000000: 30 00 00 54 bc.eq 0x100000004\n100000004: c0 03 5f d6 ret\n";
+
+		const result = await new WriteTool(session).execute("call-1", { path: filePath, content: dump });
+
+		// The dump's numbers do not count up by one, so they are content, not
+		// a display prefix: they stay as written, and the write numbers the
+		// file's own lines in front of them.
+		const rows = resultText(result).split("\n");
+		expect(rows).toContain("1:100000000: 30 00 00 54 bc.eq 0x100000004");
+		expect(rows).toContain("2:100000004: c0 03 5f d6 ret");
+	});
+
+	it("numbers a huge write without turning the file into a million line strings", async () => {
+		const filePath = path.join(tmpDir, "huge.ts");
+		const session = createSession(tmpDir);
+		const rows = 1_000_000;
+		const content = "row\n".repeat(rows);
+
+		// The map can only show the first WRITE_MAP_MAX_LINES rows, so the write
+		// must cut the head window before it splits anything: a file with a
+		// million rows must not become a million line strings.
+		const split = vi.spyOn(hashlineFormat, "splitAddressableFileLines");
+		const result = await new WriteTool(session).execute("call-1", { path: filePath, content });
+		const widestSplit = split.mock.calls.reduce((widest, call) => Math.max(widest, (call[0] as string).length), 0);
+		vi.restoreAllMocks();
+
+		expect(widestSplit).toBeLessThan(content.length);
+
+		// The map stays bounded, and it still names every line the file has.
+		const text = resultText(result);
+		const numbered = text.split("\n").filter(row => /^\d+:/.test(row));
+		expect(numbered.length).toBe(WRITE_MAP_MAX_LINES);
+		expect(text).toContain(`(${rows} lines; the first ${WRITE_MAP_MAX_LINES} are numbered below`);
 	});
 });
