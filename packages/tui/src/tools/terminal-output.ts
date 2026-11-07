@@ -14,7 +14,8 @@ export async function loadXtermTerminal(): Promise<typeof XtermModule.Terminal> 
 }
 
 const RESET = "\x1b[0m";
-const SGR = /\x1b\[([0-9;]*)m/g;
+/** SGR run in a rendered replay row; shared with callers that measure one. */
+export const SGR = /\x1b\[([0-9;]*)m/g;
 
 interface TerminalCell {
 	getChars(): string;
@@ -83,6 +84,23 @@ function isSafeStyle(codes: readonly number[]): boolean {
 	return true;
 }
 
+/**
+ * The safe style still active where `row` ends, as its SGR run. Row runs are
+ * complete style descriptions (see {@link readTerminalRows}), so the active
+ * style is the last one the row opened; a trailing reset leaves none.
+ */
+export function activeStyleAtRowEnd(row: string): string {
+	let active = "";
+	for (const match of row.matchAll(SGR)) {
+		if (match[1] === "0") active = "";
+		else {
+			const codes = match[1].split(";").map(Number);
+			if (codes.length > 0 && codes.every(Number.isInteger) && isSafeStyle(codes)) active = match[0];
+		}
+	}
+	return active;
+}
+
 /** Applies the active tool-output color while preserving safe styles from a virtual terminal row. */
 export function styleTerminalRow(row: string, baseForeground: string): string {
 	let output = baseForeground;
@@ -103,6 +121,30 @@ export function styleTerminalRow(row: string, baseForeground: string): string {
 	output += text;
 	hasText ||= text.length > 0;
 	return hasText ? `${output}${RESET}` : "";
+}
+
+/**
+ * Splits a replay row after `plainOffset` characters of visible text.
+ * {@link readTerminalRows} builds each row from its cells with zero-width SGR
+ * runs between them, so a character offset always lands on a cell boundary and
+ * never inside a run. An offset past the row's text returns the whole row.
+ */
+export function splitTerminalRowAt(row: string, plainOffset: number): [string, string] {
+	if (plainOffset <= 0) return ["", row];
+	let seen = 0;
+	let scan = 0;
+	let splitAt = -1;
+	for (const match of row.matchAll(SGR)) {
+		const start = match.index ?? 0;
+		if (plainOffset <= seen + (start - scan)) {
+			splitAt = scan + (plainOffset - seen);
+			break;
+		}
+		seen += start - scan;
+		scan = start + match[0].length;
+	}
+	if (splitAt < 0 && plainOffset <= seen + (row.length - scan)) splitAt = scan + (plainOffset - seen);
+	return splitAt < 0 ? [row, ""] : [row.slice(0, splitAt), row.slice(splitAt)];
 }
 
 /** Reads terminal screen rows as sanitized text plus only the styles the TUI may replay. */

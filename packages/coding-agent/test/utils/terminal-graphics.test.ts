@@ -138,6 +138,21 @@ describe("TerminalGraphicsDecoder SIXEL", () => {
 	});
 });
 
+describe("TerminalGraphicsDecoder image source", () => {
+	it("tags each decoded image with the protocol its frame arrived in", async () => {
+		// #15327 round 8 item 4: one command can emit both a raw SIXEL frame
+		// and a Kitty frame. The display layer suppresses only the decoded
+		// copies of frames it already rendered raw, so each image carries the
+		// protocol it was decoded from.
+		const sixel = `${ESC}P1;1q"1;1;3;6#1;2;100;0;0#1!3~${ESC}\\`;
+		const framedKitty = kitty("a=T,t=d,f=100", RED_1X1_PNG_BASE64);
+		const result = await decodeByCodeUnit(`before${sixel}mid${framedKitty}after`);
+		expect(result.text).toBe("beforemidafter");
+		expect(result.images).toHaveLength(2);
+		expect(result.images.map(image => image.source)).toEqual(["sixel", "kitty"]);
+	});
+});
+
 describe("encodeTerminalImage", () => {
 	it("emits interoperable direct PNG Kitty framing that the decoder round-trips", async () => {
 		const encoded = await encodeTerminalImage({ type: "image", data: RED_1X1_PNG_BASE64, mimeType: "image/png" });

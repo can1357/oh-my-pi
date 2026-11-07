@@ -156,6 +156,7 @@ type ImageContent struct {
 	Detail       *ImageContentDetail        `json:"detail,omitempty"`
 	URL          *string                    `json:"url,omitempty"`
 	ProviderFile map[string]json.RawMessage `json:"providerFile,omitempty"`
+	Source       *ImageContentSource        `json:"source,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -174,6 +175,7 @@ func (v *ImageContent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("detail", &out.Detail)
 	d.optional("url", &out.URL)
 	d.optional("providerFile", &out.ProviderFile)
+	d.optional("source", &out.Source)
 	out.Extra = d.rest()
 	if d.err != nil {
 		return d.err
@@ -207,6 +209,26 @@ func (v *ImageContentDetail) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	return unknownValue("ImageContentDetail", s)
+}
+
+type ImageContentSource string
+
+const (
+	ImageContentSourceKitty ImageContentSource = "kitty"
+	ImageContentSourceSixel ImageContentSource = "sixel"
+)
+
+func (v *ImageContentSource) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "ImageContentSource")
+	if err != nil {
+		return err
+	}
+	switch value := ImageContentSource(s); value {
+	case ImageContentSourceKitty, ImageContentSourceSixel:
+		*v = value
+		return nil
+	}
+	return unknownValue("ImageContentSource", s)
 }
 
 type ToolCall struct {
