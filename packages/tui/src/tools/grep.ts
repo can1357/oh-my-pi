@@ -10,8 +10,9 @@ import type {
 } from "./renderer";
 import { compact } from "../native/describe";
 import type { NativeChild } from "../native/node";
+import { compactText, styledSpans } from "../native/spans";
 import { footnoteText, inlineErrorView, resultText } from "./native-view";
-import { type Theme } from "../theme/theme";
+import { ensureThemeSync, highlightCode, type Theme } from "../theme/theme";
 import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
 import { fileHyperlink, renderStatusLine, renderTreeList } from "../render";
@@ -22,6 +23,7 @@ import {
 	formatEmptyMessage,
 	formatErrorDetail,
 	PREVIEW_LIMITS,
+	replaceTabs,
 	toPathList,
 } from "../render/render-utils";
 import {
@@ -116,7 +118,9 @@ function grepSubject(
 	let scope = details?.scopePath || undefined;
 	if (scope && searchPath) scope = fileHyperlink(searchPath, scope);
 	scope ??= toPathList(args?.path ?? args?.paths).join(", ") || undefined;
-	return formatScopedSubject(pattern || undefined, scope, uiTheme);
+	// The bundled regex grammar also handles incomplete, still-streaming patterns.
+	const subject = pattern ? highlightCode(replaceTabs(pattern), "Regular Expression", uiTheme).join("\n") : undefined;
+	return formatScopedSubject(subject, scope, uiTheme);
 }
 
 function grepStatusIcon(uiTheme: Theme): string {
@@ -352,5 +356,9 @@ function grepNativeHead(args: GrepRenderArgs | undefined, meta?: readonly string
 		if (paths.length) parts.push(`in ${paths.join(", ")}`);
 		parts.push(...grepFlagMeta(args));
 	}
-	return { title: "Grep", target: args?.pattern || "?", targetKind: "pattern", meta: parts };
+	ensureThemeSync();
+	const target = args?.pattern
+		? compactText(styledSpans(highlightCode(args.pattern, "Regular Expression").join("\n")))
+		: "?";
+	return { title: "Grep", target, targetKind: "pattern", meta: parts };
 }

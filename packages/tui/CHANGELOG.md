@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Grep headers syntax-highlight regex patterns, including incomplete patterns while a call streams, in terminal and native views.
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
