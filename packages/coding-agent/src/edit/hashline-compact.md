@@ -1,4 +1,4 @@
-Hashline patches. Use only lines visible in latest `read`/`search`; elisions are unseen.
+Hashline patches. Use only lines visible in latest `read`/`search`/`write`; elisions are unseen.
 
 ```text
 *** Begin Patch
