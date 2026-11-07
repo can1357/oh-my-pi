@@ -1,7 +1,9 @@
+import { cfgDisplayShowZeroUsageMeters } from "../../modes/settings";
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { filterUsageReportsForDisplay, resolveUsageModelSelectors } from "../../utils/usage-display";
 import type { SlashCommandRuntime } from "../types";
 import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
@@ -176,9 +178,16 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 			const activeAccount = currentProvider
 				? runtime.session.modelRegistry.authStorage.oauth.identity(currentProvider, runtime.session.sessionId)
 				: undefined;
-			const usageModelSelectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
+			const displayReports = filterUsageReportsForDisplay(collapseSharedUsageReports(reports), {
+				showZeroUsageMeters: cfgDisplayShowZeroUsageMeters.get(runtime.settings),
+			});
+			const usageModelSelectors = resolveUsageModelSelectors(
+				displayReports,
+				runtime.settings,
+				next => provider.getUsageReportingModelSelectors?.(next) ?? [],
+			);
 			return renderUsageReports(
-				reports,
+				displayReports,
 				Date.now(),
 				providerId => (providerId === currentProvider ? activeAccount : undefined),
 				usageModelSelectors,
