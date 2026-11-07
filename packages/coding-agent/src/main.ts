@@ -37,7 +37,6 @@ import {
 	validateToolNames,
 } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
-import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
@@ -97,7 +96,6 @@ import {
 } from "./modes/startup-composer";
 import { ensureTheme, initTheme, stopThemeWatcher } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "./modes/types";
-import { createWarpEventBridgeExtension } from "./modes/warp-events";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import {
 	type CreateAgentSessionOptions,
@@ -112,12 +110,6 @@ import type { AgentSession } from "./session/agent-session";
 import { createAuthStorageSettingsSync, describeAuthBrokerStartupError } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
-import {
-	createForeignSessionStore,
-	foreignSessionInfoToSessionInfo,
-	foreignSessionSourceName,
-	persistForeignSession,
-} from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import {
 	findSessionContinuation,
@@ -147,7 +139,6 @@ import type { LspStartupServerInfo } from "./tools";
 import { sanitizeDisplayWarnings } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getChangelogPath, readLastChangelogVersion, resolveStartupChangelogForDisplay } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
-import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
 import { CliUsageError } from "./cli/usage-error";
 import { scheduleGcAutoCompress } from "./cli/gc-auto-compress";
 import { cfgGcAutoCompress } from "./cli/gc-settings";
@@ -2153,6 +2144,14 @@ export async function runRootCommand(
 				if (isProtocolMode) {
 					throw new SessionResolutionError(`--from-${foreignSource} is not supported in ${mode} mode`);
 				}
+				// First-use boundary: only `--from-claude`/`--from-opencode` reaches the
+				// foreign-session stores, so their readers stay off the default boot graph.
+				const {
+					foreignSessionSourceName,
+					createForeignSessionStore,
+					foreignSessionInfoToSessionInfo,
+					persistForeignSession,
+				} = await import("./session/foreign-session-import");
 				const sourceName = foreignSessionSourceName(foreignSource);
 				const store = (deps.createForeignSessionStore ?? createForeignSessionStore)(foreignSource);
 				let foreignSessions: ForeignSessionInfo[];
@@ -2507,6 +2506,8 @@ export async function runRootCommand(
 			// `preloadedExtensions` so the discovery work is not repeated.
 			if (isInteractive && !parsedArgs.trustedExtensions?.length) {
 				// Top-level only: subagents, `/tan` forks, and worker threads never inherit the bridge.
+				// First-use boundary: loaded lazily so boot does not pay for the launch graph.
+				const { createWarpEventBridgeExtension } = await import("./modes/warp-events");
 				startupTopLevelExtensions = sessionOptions.topLevelExtensions = [
 					...(sessionOptions.topLevelExtensions ?? []),
 					createWarpEventBridgeExtension(),
@@ -2585,11 +2586,15 @@ export async function runRootCommand(
 			}
 			const processedFiles =
 				initialArgs.fileArgs.length > 0
-					? await logger.time("processFileArguments", () =>
-							processFileArguments(initialArgs.fileArgs, {
+					? await logger.time("processFileArguments", async () => {
+							// First-use boundary: only launches with `@file` arguments read and
+							// decode attachments, so the processor's converter graph is off the
+							// default path.
+							const { processFileArguments } = await import("./cli/file-processor");
+							return processFileArguments(initialArgs.fileArgs, {
 								autoResizeImages: cfgImagesAutoResize.get(settingsInstance),
-							}),
-						)
+							});
+						})
 					: undefined;
 			const { initialMessage, initialImages } = buildInitialMessage({
 				parsed: initialArgs,
@@ -2623,7 +2628,12 @@ export async function runRootCommand(
 					() => pythonEvalProbeAbort.abort(),
 					{ exitOnly: true },
 				);
-				pythonEvalWarningPromise = resolveFirstLaunchPythonEvalWarning({
+				// First-use boundary: the probe (changelog marker + interpreter spawn)
+				// only runs for interactive launches, so the eval settings/kernel graph
+				// stays off text, print, RPC, ACP and JSON launches.
+				const { resolveFirstLaunchPythonEvalWarning: resolvePythonEvalWarning } =
+					await import("./eval/startup-warning");
+				pythonEvalWarningPromise = resolvePythonEvalWarning({
 					args: parsedArgs,
 					lastChangelogVersion,
 					cwd: sessionOptions.cwd ?? getProjectDir(),

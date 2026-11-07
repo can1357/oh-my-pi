@@ -487,6 +487,10 @@
 - In the Pseudo shell visualization, an `&&` chain keeps its `and` rows while it runs and after it finishes, instead of switching to literal `&&` rows and a raw-bash tail when the output minimizer runs it one command at a time ([#18408](https://github.com/can1357/oh-my-pi/issues/18408))
 - Autoresearch `update_notes` calls can now append an idea with only `append_idea`, without passing a replacement `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
 
+### Changed
+
+- A launch evaluates fewer modules before its first prompt: the `@file` attachment processor, the `--from-claude`/`--from-opencode` resume importer with its two session stores, the python-eval startup probe and the warp-event bridge load on demand instead of during module evaluation ([#15224](https://github.com/can1357/oh-my-pi/pull/15224) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
