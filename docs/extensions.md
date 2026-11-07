@@ -559,9 +559,10 @@ an async custom component still counts. This does not change the budget policy
 of other `session_before_*` events.
 
 While the hook is pending, another Ctrl+D skips its remaining handlers and
-continues normal teardown, even when a dialog owns focus; no rapid double-tap
-is required. Ctrl+C takes the existing emergency-exit path instead. These keys
-follow the configured `app.exit` and `app.clear` bindings.
+continues normal teardown, even when a focused custom component reserves the
+key through `capturesInput`; no rapid double-tap is required. Ctrl+C takes the
+existing emergency-exit path instead. These keys follow the configured
+`app.exit` and `app.clear` bindings.
 
 The event's `signal` is aborted on bypass, signal-driven disposal, or UI stop.
 Supported handler dialogs are cancelled automatically. Cancellation/timeouts

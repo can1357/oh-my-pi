@@ -370,21 +370,18 @@ export class InputController {
 		this.ctx.editor.setActionKeys("app.interrupt", this.ctx.keybindings.getKeys("app.interrupt"));
 		if (!this.#beforeShutdownListenerInstalled) {
 			this.#beforeShutdownListenerInstalled = true;
-			this.ctx.ui.addInputListener(
-				data => {
-					if (!this.ctx.isAwaitingShutdown) return undefined;
-					const clear = this.ctx.keybindings.matches(data, "app.clear");
-					const exit = this.ctx.keybindings.matches(data, "app.exit");
-					if (!clear && !exit) return undefined;
-					// A held initial quit key must not bypass its own hook.
-					if (!isKeyRelease(data) && !isKeyRepeat(data)) {
-						if (clear) this.handleCtrlC();
-						else this.handleCtrlD();
-					}
-					return { consume: true };
-				},
-				{ prepend: true },
-			);
+			this.ctx.ui.onBeforeInputCapture = data => {
+				if (!this.ctx.isAwaitingShutdown) return false;
+				const clear = this.ctx.keybindings.matches(data, "app.clear");
+				const exit = this.ctx.keybindings.matches(data, "app.exit");
+				if (!clear && !exit) return false;
+				// A held initial quit key must not bypass its own hook.
+				if (!isKeyRelease(data) && !isKeyRepeat(data)) {
+					if (clear) this.handleCtrlC();
+					else this.handleCtrlD();
+				}
+				return true;
+			};
 		}
 		if (!this.#linkHintListenerInstalled) {
 			this.#linkHintListenerInstalled = true;

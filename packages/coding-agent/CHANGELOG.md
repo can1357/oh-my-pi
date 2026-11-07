@@ -8,7 +8,7 @@
 
 ### Added
 
-- Added `session_before_shutdown` so extensions can await final work, prompt the operator, or cancel an interactive quit; another Ctrl+D skips pending exit hooks ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks)).
+- Added `session_before_shutdown` so extensions can await final work, prompt the operator, or cancel an interactive quit; another Ctrl+D skips pending exit hooks even in capturing custom dialogs ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks)).
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
 
 ### Fixed

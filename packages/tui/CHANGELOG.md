@@ -4,6 +4,7 @@
 
 ### Added
 
+- Hosts can reserve critical escape keys ahead of input holding and focused-component capture using `TUI.onBeforeInputCapture` ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks)).
 - Grep headers syntax-highlight regex patterns, including incomplete patterns while a call streams, in terminal and native views ([#18392](https://github.com/can1357/oh-my-pi/pull/18392) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 
 ### Fixed

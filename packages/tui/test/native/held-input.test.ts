@@ -63,6 +63,55 @@ describe("keystrokes during a Tern startup prepaint", () => {
 		expect(log.keys).toEqual(["\x1bp", "a", "b"]);
 	});
 
+	it.each(["before", "after"] as const)(
+		"rechecks host quit arbitration across a replayed focus change when installed %s queuing",
+		async timing => {
+			const editor = new KeyLog();
+			const dialogKeys: string[] = [];
+			const dialog: Component = {
+				render: () => ["Quit prompt"],
+				capturesInput: () => true,
+				handleInput: data => dialogKeys.push(data),
+			};
+			harness = await TspHarness.start(tui => tui.setFocus(editor), TERN_PREPAINT);
+			const h = harness;
+			let pending = false;
+			let opened = 0;
+			let bypassed = 0;
+			editor.handleInput = data => {
+				if (data === "\x1bq") {
+					pending = true;
+					opened++;
+					h.tui.setFocus(dialog);
+				} else {
+					editor.keys.push(data);
+				}
+			};
+			const remap: Record<string, string> = { "\x1bp": "\x1bn", "\x1bn": "\x1bp" };
+			h.tui.addInputListener(data => {
+				const transformed = remap[data];
+				return transformed === undefined ? undefined : { data: transformed };
+			});
+			const arbitrateQuit = (data: string) => {
+				if (!pending || data !== "\x1bq") return false;
+				pending = false;
+				bypassed++;
+				h.tui.setFocus(editor);
+				return true;
+			};
+			if (timing === "before") h.tui.onBeforeInputCapture = arbitrateQuit;
+			for (const key of ["\x1bp", "\x1bq", "\x1bq", "\x1bn"]) h.terminal.send(key);
+			h.flush();
+			if (timing === "after") h.tui.onBeforeInputCapture = arbitrateQuit;
+			expect(editor.keys).toEqual([]);
+			h.tui.releaseHeldInput();
+			expect(opened).toBe(1);
+			expect(bypassed).toBe(1);
+			expect(dialogKeys).toEqual([]);
+			expect(editor.keys).toEqual(["\x1bn", "\x1bp"]);
+		},
+	);
+
 	it("still apply the cell-size reply on arrival instead of replaying it as typed text", async () => {
 		const before = getCellDimensions();
 		try {

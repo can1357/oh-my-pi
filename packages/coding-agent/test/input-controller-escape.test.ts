@@ -357,6 +357,7 @@ describe("InputController pending pre-shutdown input", () => {
 			controller,
 			dialogInput,
 			dispatch(data: string) {
+				if (ctx.ui.onBeforeInputCapture?.(data)) return;
 				for (const listener of inputListeners) {
 					if (listener(data)?.consume) return;
 				}

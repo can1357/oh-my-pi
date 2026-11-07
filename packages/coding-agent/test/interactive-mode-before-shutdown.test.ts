@@ -12,6 +12,7 @@ import type {
 	SessionBeforeShutdownEvent,
 	SessionBeforeShutdownResult,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -172,6 +173,58 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		expect(shutdownEvents).toBe(1);
 		expect(postmortem.quit).toHaveBeenCalledTimes(1);
 	});
+
+	it.each(["bypass", "emergency exit"] as const)(
+		"allows %s before a focused custom component can capture the key",
+		async action => {
+			new InputController(mode).setupKeyHandlers();
+			const presented = Promise.withResolvers<void>();
+			const captured: string[] = [];
+			let disposed = 0;
+			const component = {
+				render: () => ["Custom exit prompt"],
+				capturesInput: () => true,
+				handleInput: (data: string) => captured.push(data),
+				dispose: () => {
+					disposed++;
+				},
+			};
+			beforeShutdown = async (_event, ctx) => {
+				await ctx.ui.custom(() => {
+					presented.resolve();
+					return component;
+				});
+			};
+			const quitting = mode.shutdown();
+			await presented.promise;
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(mode.ui.getFocused()).toBe(component);
+			mode.ui.injectDebugInput("x");
+			expect(captured).toEqual(["x"]);
+
+			if (action === "bypass") {
+				mode.ui.injectDebugInput("\x04");
+				expect(captured).toEqual(["x"]);
+				await quitting;
+				expect(session.isDisposed).toBe(true);
+				expect(shutdownEvents).toBe(1);
+				expect(postmortem.quit).toHaveBeenCalledTimes(1);
+			} else {
+				const exit = vi.spyOn(postmortem, "exitProcess").mockImplementation(() => {
+					throw new Error("emergency exit");
+				});
+				expect(() => mode.ui.injectDebugInput("\x03")).toThrow("emergency exit");
+				expect(exit).toHaveBeenCalledWith(130);
+				expect(captured).toEqual(["x"]);
+				mode.stop();
+				await quitting;
+				expect(shutdownEvents).toBe(0);
+				expect(postmortem.quit).not.toHaveBeenCalled();
+			}
+			expect(disposed).toBe(1);
+		},
+	);
 
 	it("bypasses an uncooperative handler on further Ctrl+D and still performs normal teardown", async () => {
 		const entered = Promise.withResolvers<AbortSignal>();
