@@ -218,7 +218,12 @@ fn output_handle(file: &OpenFile) -> Option<OpenFile> {
 	}
 }
 
-fn output_metadata(file: &OpenFile) -> Option<Metadata> {
+/// The identity of the file behind a handle, when the handle names one.
+///
+/// The metadata is taken from the handle itself rather than from the path it
+/// was opened by, so two descriptors onto one file compare equal however they
+/// were reached.
+fn handle_metadata(file: &OpenFile) -> Option<Metadata> {
 	match file {
 		// `Metadata::from_file` keeps the handle identity a Windows path stat
 		// drops; without it `path_is_stdout` can never match on Windows.
@@ -237,6 +242,12 @@ impl StdoutFile {
 	/// Whether `path` on `fs` is this file.
 	pub async fn is(&self, fs: &pi_vfs::Fs, path: &Path) -> bool {
 		fs.metadata(path).await.is_ok_and(|candidate| self.0.same_file(&candidate))
+	}
+
+	/// Whether `candidate` — metadata read from an already-open handle — is
+	/// this file.
+	pub fn matches(&self, candidate: &Metadata) -> bool {
+		self.0.same_file(candidate)
 	}
 }
 
@@ -866,10 +877,25 @@ impl Host {
 	/// utility did not set [`Utility::CHECKS_STDOUT_PATH`].
 	pub fn stdout_file(&self) -> Option<StdoutFile> {
 		self.stdout_metadata
-			.get_or_init(|| self.stdout_handle.as_ref().and_then(output_metadata))
+			.get_or_init(|| self.stdout_handle.as_ref().and_then(handle_metadata))
 			.as_ref()
 			.filter(|stdout| stdout.is_file())
 			.map(|stdout| StdoutFile(stdout.clone()))
+	}
+
+	/// Whether standard input is the regular file currently backing stdout.
+	///
+	/// GNU grep's guard against reading the file it writes is `SAME_INODE
+	/// (st, out_stat)` — the same inode, not merely the same path — so the
+	/// comparison is made between the two handles rather than between their
+	/// paths, and a shell redirection (`< file` with `>> file`) is caught
+	/// without ever opening the file again.
+	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
+	pub fn stdin_is_stdout(&self) -> bool {
+		let Some(stdout) = self.stdout_file() else {
+			return false;
+		};
+		handle_metadata(self.stdin.file()).is_some_and(|stdin| stdout.matches(&stdin))
 	}
 
 	/// Looks up an exported shell variable.
@@ -2338,7 +2364,7 @@ pub(crate) fn run_caught<U: Utility>(parsed: U, host: &mut Host) -> i32 {
 /// All output the body left pending is delivered before the status is
 /// settled, so a closed reader still ends it with [`SIGPIPE_EXIT_CODE`]; a
 /// cancelled command delivers nothing more.
-async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
+pub(crate) async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
 	let outcome = {
 		let body = AssertUnwindSafe(async { parsed.run(host).await }).catch_unwind();
 		let mut body = pin!(body);
