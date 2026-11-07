@@ -85,7 +85,9 @@ async fn assert_growth_bounded(command: impl Fn(usize) -> String) {
 #[tokio::test]
 async fn distinct_eval_sources_stop_growing_the_trace_after_history_truncation() {
 	assert_growth_bounded(|count| {
-		format!("for ((i=0;i<{count};i++)); do eval \"printf '%0512d' $i\" >/dev/null; done; echo {count}")
+		format!(
+			"for ((i=0;i<{count};i++)); do eval \"printf '%0512d' $i\" >/dev/null; done; echo {count}"
+		)
 	})
 	.await;
 }
@@ -93,9 +95,7 @@ async fn distinct_eval_sources_stop_growing_the_trace_after_history_truncation()
 #[tokio::test]
 async fn distinct_command_substitution_texts_stop_growing_the_trace() {
 	assert_growth_bounded(|count| {
-		format!(
-			"for ((i=0;i<{count};i++)); do x=$(eval \"printf '%0512d' $i\"); done; echo {count}"
-		)
+		format!("for ((i=0;i<{count};i++)); do x=$(eval \"printf '%0512d' $i\"); done; echo {count}")
 	})
 	.await;
 }
@@ -104,8 +104,8 @@ async fn distinct_command_substitution_texts_stop_growing_the_trace() {
 async fn distinct_sourced_file_texts_stop_growing_the_trace() {
 	assert_growth_bounded(|count| {
 		format!(
-			"for ((i=0;i<{count};i++)); do printf \"printf '%%0512d' %d\\n\" \"$i\" > f.sh; . \
-			 ./f.sh >/dev/null; done; echo {count}"
+			"for ((i=0;i<{count};i++)); do printf \"printf '%%0512d' %d\\n\" \"$i\" > f.sh; . ./f.sh \
+			 >/dev/null; done; echo {count}"
 		)
 	})
 	.await;
@@ -126,8 +126,8 @@ async fn distinct_trap_action_texts_stop_growing_the_trace() {
 async fn distinct_env_prefix_values_stop_growing_the_trace() {
 	assert_growth_bounded(|count| {
 		format!(
-			"for ((i=0;i<{count};i++)); do printf -v w '%0512d' \"$i\"; env \"V=$w\" printf '%s' \
-			 '' >/dev/null; done; echo {count}"
+			"for ((i=0;i<{count};i++)); do printf -v w '%0512d' \"$i\"; env \"V=$w\" printf '%s' '' \
+			 >/dev/null; done; echo {count}"
 		)
 	})
 	.await;
@@ -186,7 +186,9 @@ async fn a_source_run_again_after_retirement_is_announced_again() {
 		.history
 		.iter()
 		.rev()
-		.find(|event| matches!(&event.data, HistoryData::Output { text, .. } if text.starts_with(b"repeated")))
+		.find(
+			|event| matches!(&event.data, HistoryData::Output { text, .. } if text.starts_with(b"repeated")),
+		)
 		.expect("the second run of the repeated source produced output");
 	let unit = &snapshot.units[event.u.expect("the second run resolves to a source") as usize];
 	let node = &unit.nodes[event.n.expect("the second run resolves to a node") as usize];
@@ -212,9 +214,8 @@ async fn a_source_run_again_after_retirement_is_announced_again() {
 async fn a_function_defined_in_an_eval_keeps_its_parent_when_it_runs_again() {
 	let count = HISTORY_EVENTS / 4;
 	let script = format!(
-		"eval 'keeper() {{ printf \"kept\\n\"; }}; keeper >/dev/null'; for \
-		 ((i=0;i<{count};i++)); do eval \"printf '%0512d' $i\" >/dev/null; done; keeper; echo \
-		 {count}"
+		"eval 'keeper() {{ printf \"kept\\n\"; }}; keeper >/dev/null'; for ((i=0;i<{count};i++)); \
+		 do eval \"printf '%0512d' $i\" >/dev/null; done; keeper; echo {count}"
 	);
 	let trace = trace(&script, &[], &format!("kept\n{count}")).await;
 	let snapshot = trace.snapshot();
@@ -222,11 +223,14 @@ async fn a_function_defined_in_an_eval_keeps_its_parent_when_it_runs_again() {
 		.history
 		.iter()
 		.rev()
-		.find(|event| matches!(&event.data, HistoryData::Output { text, .. } if text.starts_with(b"kept")))
+		.find(
+			|event| matches!(&event.data, HistoryData::Output { text, .. } if text.starts_with(b"kept")),
+		)
 		.expect("the second call of the eval-defined function produced output");
 	let unit = &snapshot.units[event.u.expect("the second call resolves to a source") as usize];
 	assert!(
-		unit.syntax
+		unit
+			.syntax
 			.as_ref()
 			.is_some_and(|syntax| syntax.parent.is_some()),
 		"the re-announced function body still names the source that defined it"
@@ -262,7 +266,8 @@ async fn a_definition_nested_in_a_retired_source_keeps_its_parent() {
 			.expect("the deferred definition produced output");
 		let unit = &snapshot.units[event.u.expect("it resolves to a source") as usize];
 		assert!(
-			unit.syntax
+			unit
+				.syntax
 				.as_ref()
 				.is_some_and(|syntax| syntax.parent.is_some()),
 			"{label}'s body still names the source that defined it"
@@ -276,9 +281,12 @@ async fn a_definition_nested_in_a_retired_source_keeps_its_parent() {
 #[tokio::test]
 async fn a_parsed_ahead_row_can_still_be_selected_and_expanded() {
 	let trace = RunTrace::new("printf 'one'; printf '%s' 'two'");
-	let first: serde_json::Value =
-		serde_json::from_str(&trace.presentation_json(&VizOptions::default()).expect("present"))
-			.expect("presentation json");
+	let first: serde_json::Value = serde_json::from_str(
+		&trace
+			.presentation_json(&VizOptions::default())
+			.expect("present"),
+	)
+	.expect("presentation json");
 	let node = first["rows"]
 		.as_array()
 		.expect("rows")
@@ -303,4 +311,28 @@ async fn a_parsed_ahead_row_can_still_be_selected_and_expanded() {
 		serde_json::json!([node]),
 		"the expanded row the renderer offered is kept"
 	);
+}
+
+/// An origin record for an unset definition must not keep its defining
+/// source in every presentation after that source leaves replay history.
+#[tokio::test]
+async fn dead_nested_definitions_do_not_grow_the_trace() {
+	let mut counts = Vec::new();
+	for count in [2_500, 5_000, 10_000] {
+		let script = format!(
+			"for ((i=0;i<{count};i++)); do eval \"eval 'f() {{ : $i; }}'\"; unset -f f; done; echo \
+			 done"
+		);
+		let trace = trace(&script, &[], "done").await;
+		let snapshot = trace.snapshot();
+		let json = trace.snapshot_json();
+		assert!(snapshot.history_truncated);
+		StoredVisualization::from_snapshot_json(&json)
+			.expect("stored trace decodes")
+			.presentation_json(&VizOptions::default())
+			.expect("stored trace renders");
+		println!("DEAD_DEFINITION n={count} units={} bytes={}", snapshot.units.len(), json.len());
+		counts.push(snapshot.units.len());
+	}
+	assert_eq!(counts, vec![counts[0]; 3], "dead-definition retention must be flat: {counts:?}");
 }

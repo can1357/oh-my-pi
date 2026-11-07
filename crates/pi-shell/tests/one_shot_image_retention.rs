@@ -11,14 +11,19 @@
 
 use std::sync::{
 	Arc,
-	atomic::{AtomicBool, Ordering},
+	atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use pi_shell::{
 	bash::{
 		Budget, Cx, Engine, EngineConfig, Event, EventData, EventMask, EventSink, MemStore,
 		RestoreOpts, Script, Shell, Step,
-		trace::{RunTrace, history::HISTORY_EVENTS},
+		store::{BlobSlot, Change, Key, Record, StateStore, StoreError, Table},
+		trace::{
+			RunTrace,
+			history::HISTORY_EVENTS,
+			viz::{Options as VizOptions, StoredVisualization},
+		},
 	},
 	testkit::{FakeHost, fault::skeleton_init},
 };
@@ -103,11 +108,7 @@ fn run_evals(rounds: usize) -> Image {
 		}
 	};
 	assert!(host.stdout.bytes().ends_with(b"done\n"), "every eval ran");
-	Image {
-		store_bytes: store.to_bytes().len(),
-		units_written,
-		frames_bytes: report.bytes,
-	}
+	Image { store_bytes: store.to_bytes().len(), units_written, frames_bytes: report.bytes }
 }
 
 /// The same fixed program checkpointed over twice as many iterations must
@@ -120,8 +121,8 @@ fn a_checkpointed_eval_loop_does_not_grow_its_image_with_the_iteration_count() {
 	let allowance = 64 * 1024;
 	assert!(
 		large.store_bytes <= small.store_bytes + allowance,
-		"the checkpoint grew with the iterations: {} -> {} bytes (frames {} -> {}, blobs written \
-		 {} -> {})",
+		"the checkpoint grew with the iterations: {} -> {} bytes (frames {} -> {}, blobs written {} \
+		 -> {})",
 		small.store_bytes,
 		large.store_bytes,
 		small.frames_bytes,
@@ -311,4 +312,303 @@ fn an_observer_kept_across_restores_does_not_pin_the_sources_it_was_shown() {
 		small_rounds / PER_RESTORE,
 		large_rounds / PER_RESTORE,
 	);
+}
+
+/// Fail one store mutation, including record writes and blob deletions,
+/// without changing the successful mutations that precede it.
+struct FailingStore {
+	inner:   MemStore,
+	writes:  usize,
+	fail_at: Option<usize>,
+}
+
+impl FailingStore {
+	fn write(&mut self) -> Result<(), StoreError> {
+		self.writes += 1;
+		if self.fail_at == Some(self.writes) {
+			Err(StoreError::Backend(Box::new(std::io::Error::other(
+				"injected checkpoint write failure",
+			))))
+		} else {
+			Ok(())
+		}
+	}
+}
+
+impl StateStore for FailingStore {
+	fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
+		self.inner.get(key)
+	}
+
+	fn scan(&mut self, table: Table, f: &mut dyn FnMut(Key<'_>, &Record)) -> Result<(), StoreError> {
+		self.inner.scan(table, f)
+	}
+
+	fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
+		self.write()?;
+		self.inner.apply(change)
+	}
+
+	fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
+		self.write()?;
+		self.inner.put_blob(slot, bytes)
+	}
+
+	fn get_blob(&mut self, slot: BlobSlot) -> Result<Option<Vec<u8>>, StoreError> {
+		self.inner.get_blob(slot)
+	}
+
+	fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
+		self.write()?;
+		self.inner.del_blob(slot)
+	}
+
+	fn epoch(&self) -> u64 {
+		self.inner.epoch()
+	}
+}
+
+struct CountCompiles(Arc<AtomicUsize>);
+
+impl EventSink for CountCompiles {
+	fn mask(&self) -> EventMask {
+		EventMask::ALL
+	}
+
+	fn event(&self, event: &Event<'_>) {
+		if matches!(event.data, EventData::UnitCompiled(_)) {
+			self.0.fetch_add(1, Ordering::SeqCst);
+		}
+	}
+}
+
+/// Start with a committed image that references the first eval, then
+/// suspend in the second so its image writes new units and retires old ones.
+fn checkpoint_before_retirement() -> (Shell, FakeHost, FailingStore) {
+	let compiled = Arc::new(AtomicUsize::new(0));
+	let mut host = FakeHost::new().with_event_sink(Arc::new(CountCompiles(Arc::clone(&compiled))));
+	let mut store = FailingStore { inner: MemStore::new(), writes: 0, fail_at: None };
+	let engine = Engine::new(EngineConfig::default());
+	let mut shell =
+		Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, skeleton_init(&[]))
+			.expect("shell");
+	shell.set_event_mask(EventMask::ALL);
+	shell.submit(Script::command(b"eval 'printf first'; eval 'printf second'; echo done".to_vec()));
+	let mut checkpointed = false;
+	for turn in 0..1_000_000 {
+		let step = shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget {
+			max_ops: 1,
+			max_ns:  u64::MAX,
+		});
+		host.events.clear();
+		assert!(!matches!(step, Step::Done { .. } | Step::Idle), "finished at turn {turn}");
+		let compiles = compiled.load(Ordering::SeqCst);
+		if checkpointed && compiles >= 3 {
+			shell.control().request_suspend();
+			assert!(matches!(
+				shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()),
+				Step::SuspendReady
+			));
+			store.writes = 0;
+			return (shell, host, store);
+		}
+		if !checkpointed && compiles >= 2 {
+			shell.control().request_suspend();
+			assert!(matches!(
+				shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()),
+				Step::SuspendReady
+			));
+			let report = shell
+				.externalize(&mut Cx { host: &mut host, store: &mut store })
+				.expect("first checkpoint");
+			assert!(report.units_written > 0);
+			checkpointed = true;
+		}
+	}
+	panic!("the checkpoint fixture did not finish");
+}
+
+#[test]
+fn a_failed_checkpoint_write_keeps_a_restorable_image() {
+	let (mut shell, mut host, mut store) = checkpoint_before_retirement();
+	shell
+		.externalize(&mut Cx { host: &mut host, store: &mut store })
+		.expect("count successful checkpoint writes");
+	let writes = store.writes;
+	assert!(writes > 0, "fault injection exercises actual writes");
+	println!("CHECKPOINT_WRITES total={writes}");
+	let mut failures = Vec::new();
+	for nth in 1..=writes {
+		let (mut shell, mut host, mut store) = checkpoint_before_retirement();
+		store.fail_at = Some(nth);
+		let error = shell
+			.externalize(&mut Cx { host: &mut host, store: &mut store })
+			.expect_err("the selected write fails");
+		drop(shell);
+		let mut remaining = MemStore::from_bytes(&store.inner.to_bytes()).expect("remaining store");
+		let fresh = Engine::new(EngineConfig::default());
+		let restored = Shell::restore(
+			&fresh,
+			&mut Cx { host: &mut host, store: &mut remaining },
+			RestoreOpts::default(),
+		);
+		let outcome = match restored {
+			Ok(_) => "restored".to_owned(),
+			Err(error) => {
+				let outcome = format!("{error:?}");
+				failures.push((nth, outcome.clone()));
+				outcome
+			},
+		};
+		println!("CHECKPOINT_WRITE nth={nth}/{writes} error={error:?} outcome={outcome}");
+	}
+	assert!(failures.is_empty(), "checkpoint failures destroyed the image: {failures:?}");
+}
+
+fn presentation(trace: &RunTrace, options: &VizOptions) -> serde_json::Value {
+	serde_json::from_str(&trace.presentation_json(options).expect("presentation"))
+		.expect("presentation JSON")
+}
+
+#[test]
+fn a_currently_offered_source_keeps_its_selection_across_restore() {
+	let source = "for ((i=0;i<5000;i++)); do eval \"printf '%s' $i\"; done; echo done";
+	let trace = Arc::new(RunTrace::new(source));
+	let compiled = Arc::new(AtomicBool::new(false));
+	let mut host = FakeHost::new()
+		.with_event_sink(Arc::new(Watch { trace: Arc::clone(&trace), flag: Arc::clone(&compiled) }));
+	let mut store = MemStore::new();
+	let engine = Engine::new(EngineConfig::default());
+	let mut shell =
+		Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, skeleton_init(&[]))
+			.expect("shell");
+	shell.set_event_mask(EventMask::ALL);
+	shell.submit(Script::command(source.as_bytes().to_vec()));
+	let mut compiles = 0;
+	for turn in 0..1_000_000 {
+		let step = shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget {
+			max_ops: 1,
+			max_ns:  u64::MAX,
+		});
+		host.events.clear();
+		assert!(!matches!(step, Step::Done { .. } | Step::Idle));
+		if compiled.swap(false, Ordering::SeqCst) {
+			compiles += 1;
+		}
+		if compiles >= 4_000 {
+			break;
+		}
+		assert!(turn < 999_999, "the run reaches the truncated-history boundary");
+	}
+	let before = presentation(&trace, &VizOptions::default());
+	let node = before["rows"]
+		.as_array()
+		.expect("rows")
+		.iter()
+		.flat_map(|row| row["segments"].as_array().expect("segments"))
+		.filter_map(|segment| segment.get("node"))
+		.filter(|node| {
+			node
+				.as_str()
+				.is_some_and(|key| !key.starts_with("4294967295:"))
+		})
+		.max_by_key(|node| {
+			node
+				.as_str()
+				.expect("key")
+				.split(':')
+				.next()
+				.expect("unit key")
+				.parse::<u64>()
+				.expect("numeric key")
+		})
+		.expect("an offered real source")
+		.clone();
+	let key = node
+		.as_str()
+		.expect("key")
+		.split(':')
+		.next()
+		.expect("unit key")
+		.parse::<u64>()
+		.expect("numeric key");
+	let snapshot: serde_json::Value =
+		serde_json::from_str(&trace.snapshot_json()).expect("snapshot");
+	assert_eq!(snapshot["historyTruncated"], true);
+	let (index, unit) = snapshot["units"]
+		.as_array()
+		.expect("units")
+		.iter()
+		.enumerate()
+		.find(|(index, unit)| unit["key"].as_u64().unwrap_or(*index as u64) == key)
+		.expect("offered source exists");
+	let entries = snapshot["history"]
+		.as_array()
+		.expect("history")
+		.iter()
+		.filter(|event| event["u"].as_u64() == Some(index as u64))
+		.count();
+	assert_eq!(entries, 0, "this source is not rooted by replay history");
+	println!(
+		"RESTORED_SELECTION offered={node} source={} retained_entries={entries}",
+		unit["source"]
+	);
+	let options: VizOptions = serde_json::from_value(serde_json::json!({
+		"selectedNode": node,
+		"expandedNodes": [node],
+	}))
+	.expect("selection options");
+	assert_eq!(presentation(&trace, &options)["preferences"]["selectedNode"], node);
+	shell.control().request_suspend();
+	assert!(matches!(
+		shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()),
+		Step::SuspendReady
+	));
+	shell
+		.externalize(&mut Cx { host: &mut host, store: &mut store })
+		.expect("externalize");
+	let bytes = store.to_bytes();
+	drop(shell);
+	store = MemStore::from_bytes(&bytes).expect("store image");
+	let fresh = Engine::new(EngineConfig::default());
+	let (mut shell, report) = Shell::restore(
+		&fresh,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	)
+	.expect("restore");
+	assert!(report.lost.is_empty(), "{report:?}");
+	shell.set_event_mask(EventMask::ALL);
+	let after = presentation(&trace, &options);
+	let stored =
+		StoredVisualization::from_snapshot_json(&trace.snapshot_json()).expect("stored trace");
+	assert_eq!(
+		after,
+		serde_json::from_str::<serde_json::Value>(
+			&stored
+				.presentation_json(&options)
+				.expect("stored presentation")
+		)
+		.expect("stored JSON")
+	);
+	for _ in 0..30 {
+		shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget {
+			max_ops: 1,
+			max_ns:  u64::MAX,
+		});
+		host.events.clear();
+		if compiled.swap(false, Ordering::SeqCst) {
+			break;
+		}
+	}
+	let resumed = presentation(&trace, &options);
+	println!(
+		"RESTORED_SELECTION immediate={} after_reannounce={} expanded={}",
+		after["preferences"]["selectedNode"],
+		resumed["preferences"]["selectedNode"],
+		after["preferences"]["expandedNodes"]
+	);
+	assert_eq!(after["preferences"]["selectedNode"], node, "immediate selection survives");
+	assert_eq!(after["preferences"]["expandedNodes"], serde_json::json!([node]));
+	assert_eq!(resumed["preferences"]["selectedNode"], node, "re-announcement preserves identity");
 }
