@@ -9,17 +9,17 @@
 ### Added
 
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
-- `/model` notes how many OpenRouter models your account settings hide, e.g. "522 openrouter models hidden by your account settings" ([#15794](https://github.com/can1357/oh-my-pi/issues/15794))
+- `/model` notes how many OpenRouter models your account settings hide, e.g. "522 openrouter models hidden by your account settings" ([#15794](https://github.com/can1357/oh-my-pi/issues/15794), [#18402](https://github.com/can1357/oh-my-pi/pull/18402) by [@younes-io](https://github.com/younes-io))
 
 ### Changed
 
-- With an OpenRouter API key, `/model` and every other model picker offer only the OpenRouter chat models your account settings allow ([#15794](https://github.com/can1357/oh-my-pi/issues/15794))
+- With an OpenRouter API key, `/model` and every other model picker offer only the OpenRouter chat models your account settings allow ([#15794](https://github.com/can1357/oh-my-pi/issues/15794), [#18402](https://github.com/can1357/oh-my-pi/pull/18402) by [@younes-io](https://github.com/younes-io))
 
 ### Fixed
 
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
 - A `bash.patterns` `deny` rule now blocks a command anywhere in a `;`, `|`, `||` or `&&` line even when an earlier `prompt` rule matches another part of it, and project settings can no longer override the operator's `deny` or `prompt` patterns with `allow` ([#18349](https://github.com/can1357/oh-my-pi/pull/18349) by [@asuffield](https://github.com/asuffield))
-- Models a provider stopped listing no longer reappear in `/model` when a refresh fails after the model cache expired; the last listed models stay in effect
+- Models a provider stopped listing no longer reappear in `/model` when a refresh fails after the model cache expired; the last listed models stay in effect ([#18402](https://github.com/can1357/oh-my-pi/pull/18402) by [@younes-io](https://github.com/younes-io))
 
 ## [18.18.0] - 2026-11-07
 

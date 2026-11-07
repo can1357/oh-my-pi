@@ -4,11 +4,11 @@
 
 ### Added
 
-- `ModelResolutionResult.hiddenChatModelCount` reports how many public OpenRouter chat models an API key's account settings hide, persisted with the model cache ([#15794](https://github.com/can1357/oh-my-pi/issues/15794))
+- `ModelResolutionResult.hiddenChatModelCount` reports how many public OpenRouter chat models an API key's account settings hide, persisted with the model cache ([#15794](https://github.com/can1357/oh-my-pi/issues/15794), [#18402](https://github.com/can1357/oh-my-pi/pull/18402) by [@younes-io](https://github.com/younes-io))
 
 ### Changed
 
-- OpenRouter discovery with an API key lists only the chat models that key may use, from `GET /models/user`, which applies the account's provider, privacy and guardrail settings and its regional host ([#15794](https://github.com/can1357/oh-my-pi/issues/15794))
+- OpenRouter discovery with an API key lists only the chat models that key may use, from `GET /models/user`, which applies the account's provider, privacy and guardrail settings and its regional host ([#15794](https://github.com/can1357/oh-my-pi/issues/15794), [#18402](https://github.com/can1357/oh-my-pi/pull/18402) by [@younes-io](https://github.com/younes-io))
 
 ### Fixed
 
