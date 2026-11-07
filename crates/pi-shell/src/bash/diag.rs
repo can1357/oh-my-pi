@@ -223,6 +223,14 @@ pub enum Diag {
 		/// OS error.
 		err:  io::Error,
 	},
+	/// A file read failed through the filesystem probe's byte-valued error.
+	#[error("{path}: {msg}")]
+	ReadFailed {
+		/// Path, kept as bytes rather than formatted into a UTF-8 message.
+		path: BString,
+		/// The filesystem's error text.
+		msg:  BString,
+	},
 	/// A redirection word expanded to zero or several fields.
 	#[error("{word}: ambiguous redirect")]
 	AmbiguousRedirect {
@@ -545,6 +553,9 @@ pub struct DiagSite<'a> {
 	pub origin:     &'a Origin,
 	/// Current line.
 	pub line:       u32,
+	/// The text being read is a `.` file, so a syntax error in it is not the
+	/// `-c` string's and bash does not print `-c`.
+	pub sourced:    bool,
 	/// The locale is UTF-8 (which bytes print as they are in names).
 	pub utf8:       bool,
 }
@@ -554,8 +565,6 @@ pub struct DiagSite<'a> {
 /// Runtime errors print as `name: line N: msg`; syntax errors in a `-c`
 /// string print as `name: -c: line N: msg`, as bash 5.3 does.
 pub fn render(diag: &Diag, site: DiagSite<'_>) -> Vec<u8> {
-	use std::io::Write;
-
 	if let Diag::Several { diags } = diag {
 		return diags.iter().flat_map(|d| render(d, site)).collect();
 	}
@@ -574,18 +583,18 @@ pub fn render(diag: &Diag, site: DiagSite<'_>) -> Vec<u8> {
 		out.extend_from_slice(b": eval: line ");
 		out.extend_from_slice(site.line.format_into(&mut fmt::NumBuffer::new()).as_bytes());
 		out.extend_from_slice(b": ");
-		write!(out, "{diag}").expect("writing to a Vec cannot fail");
+		message(diag, site.utf8, &mut out);
 		out.push(b'\n');
 		return out;
 	}
 	if let Diag::BadInterpreter { .. } = diag {
 		// bash's `sys_error`: no line number.
 		out.extend_from_slice(b": ");
-		write!(out, "{diag}").expect("writing to a Vec cannot fail");
+		message(diag, site.utf8, &mut out);
 		out.push(b'\n');
 		return out;
 	}
-	if syntax && matches!(site.origin, Origin::Command) {
+	if syntax && !site.sourced && matches!(site.origin, Origin::Command) {
 		out.extend_from_slice(b": -c");
 	}
 	out.extend_from_slice(b": line ");
@@ -698,8 +707,6 @@ fn zsh_nicezputs(s: &[u8], utf8: bool, out: &mut Vec<u8>) {
 /// zsh's text for the condition `diag` reports, where it differs from
 /// bash's (zsh 5.9 `exec.c`, `params.c`, `glob.c`, `subst.c` messages).
 fn zsh_message(diag: &Diag, utf8: bool, out: &mut Vec<u8>) {
-	use std::io::Write;
-
 	let text = |out: &mut Vec<u8>, a: &[u8], b: &[u8]| {
 		out.extend_from_slice(a);
 		zsh_nicezputs(b, utf8, out);
@@ -717,20 +724,155 @@ fn zsh_message(diag: &Diag, utf8: bool, out: &mut Vec<u8>) {
 			out.extend_from_slice(b": parameter not set");
 		},
 		Diag::BadSubst { .. } => out.extend_from_slice(b"bad substitution"),
+		// zsh's text for the rest is bash's, so the shared writer renders it and
+		// a file name keeps its bytes.
+		_ => message(diag, utf8, out),
+	}
+}
+
+/// The text of `diag`.
+///
+/// A file name is bytes and stderr is a byte stream, so bash writes the name a
+/// diagnostic reports exactly as the filesystem gave it. [`Diag`]'s `Display`
+/// cannot: its message is a `String`, so every byte the locale cannot decode
+/// becomes `U+FFFD` on the way in. Each diagnostic that names a file is
+/// therefore written here from its parts, and the rest fall back to `Display`,
+/// whose text is the same for an ASCII name (`message_matches_display`).
+/// `command not found` is bash's one exception: it shows the word through
+/// `printable_filename` (`$'…'` for a byte the locale cannot print).
+fn message(diag: &Diag, utf8: bool, out: &mut Vec<u8>) {
+	use std::io::Write;
+
+	/// `name` as it is, then the rest of the message.
+	fn named(out: &mut Vec<u8>, name: &[u8], tail: &str) {
+		out.extend_from_slice(name);
+		out.extend_from_slice(tail.as_bytes());
+	}
+
+	match diag {
+		Diag::CommandNotFound { name } => {
+			let shown = crate::bash::vm::quote::printable_filename(name, utf8, false);
+			named(out, &shown, ": command not found");
+		},
+		Diag::NoSuchFile { name } => named(out, name, ": No such file or directory"),
+		Diag::PermissionDenied { name } => named(out, name, ": Permission denied"),
+		Diag::IsADirectory { name } => named(out, name, ": Is a directory"),
+		Diag::BinaryFile { name } => {
+			named(out, name, ": cannot execute binary file: Exec format error");
+		},
+		Diag::RequiredFileMissing { name } => {
+			named(out, name, ": cannot execute: required file not found");
+		},
+		Diag::NoClobber { path } => named(out, path, ": cannot overwrite existing file"),
+		Diag::AmbiguousRedirect { word } => named(out, word, ": ambiguous redirect"),
+		Diag::NoMatch { pattern } => {
+			out.extend_from_slice(b"no match: ");
+			out.extend_from_slice(pattern);
+		},
+		Diag::CannotExecute { name, err } => {
+			named(out, name, &format!(": cannot execute: {}", strerror(err)));
+		},
+		Diag::StartFailed { name, err } | Diag::Refused { name, err } => {
+			named(out, name, &format!(": {}", strerror(err)));
+		},
+		Diag::Io { path, err } => named(out, path, &format!(": {}", strerror(err))),
+		Diag::ReadFailed { path, msg } => {
+			out.extend_from_slice(path);
+			out.extend_from_slice(b": ");
+			out.extend_from_slice(msg);
+		},
+		Diag::BadInterpreter { name, interp, err } => {
+			out.extend_from_slice(name);
+			out.extend_from_slice(b": ");
+			out.extend_from_slice(interp);
+			write!(out, ": bad interpreter: {}", strerror(err)).expect("writing to a Vec cannot fail");
+		},
+		// A builtin reporting one of the above (`cd: PATH: …`).
+		Diag::Prefixed { cmd, diag } => {
+			out.extend_from_slice(cmd.as_bytes());
+			out.extend_from_slice(b": ");
+			message(diag, utf8, out);
+		},
 		_ => write!(out, "{diag}").expect("writing to a Vec cannot fail"),
 	}
 }
 
-/// The text of `diag`. A command name prints as bash's `printable_filename`
-/// shows it (`$'…'` when it has bytes the locale cannot print), byte for
-/// byte otherwise.
-fn message(diag: &Diag, utf8: bool, out: &mut Vec<u8>) {
-	use std::io::Write;
+#[cfg(test)]
+mod tests {
+	use super::*;
 
-	if let Diag::CommandNotFound { name } = diag {
-		out.extend_from_slice(&crate::bash::vm::quote::printable_filename(name, utf8, false));
-		out.extend_from_slice(b": command not found");
-		return;
+	/// One diagnostic of every kind [`message`] writes from its parts, with an
+	/// ASCII name.
+	fn named_diags() -> Vec<Diag> {
+		let err = || io::Error::from_raw_os_error(2);
+		vec![
+			Diag::CommandNotFound { name: BString::from("x") },
+			Diag::NoSuchFile { name: BString::from("x") },
+			Diag::PermissionDenied { name: BString::from("x") },
+			Diag::IsADirectory { name: BString::from("x") },
+			Diag::BinaryFile { name: BString::from("x") },
+			Diag::RequiredFileMissing { name: BString::from("x") },
+			Diag::NoClobber { path: BString::from("x") },
+			Diag::AmbiguousRedirect { word: BString::from("x") },
+			Diag::NoMatch { pattern: BString::from("x*") },
+			Diag::CannotExecute { name: BString::from("x"), err: err() },
+			Diag::StartFailed { name: BString::from("x"), err: err() },
+			Diag::Refused { name: BString::from("x"), err: err() },
+			Diag::Io { path: BString::from("x"), err: err() },
+			Diag::ReadFailed { path: BString::from("x"), msg: BString::from("read error") },
+			Diag::BadInterpreter {
+				name:   BString::from("x"),
+				interp: BString::from("i"),
+				err:    err(),
+			},
+			Diag::Prefixed {
+				cmd:  "cd".into(),
+				diag: Box::new(Diag::NoSuchFile { name: BString::from("x") }),
+			},
+		]
 	}
-	write!(out, "{diag}").expect("writing to a Vec cannot fail");
+
+	/// Writing a diagnostic from its parts must not drift from the `#[error]`
+	/// text `Display` renders: for an ASCII name the two are the same bytes.
+	#[test]
+	fn message_matches_display() {
+		for diag in named_diags() {
+			let mut out = Vec::new();
+			message(&diag, true, &mut out);
+			assert_eq!(out, diag.to_string().into_bytes(), "{}", diag.code());
+		}
+	}
+
+	/// A name the locale cannot decode reaches stderr as its own bytes, and a
+	/// builtin's prefix does not undo that.
+	#[test]
+	fn a_names_bytes_are_not_replaced() {
+		let name = BString::from(b"bad\xff".to_vec());
+		let mut out = Vec::new();
+		message(&Diag::PermissionDenied { name: name.clone() }, true, &mut out);
+		assert_eq!(out, b"bad\xff: Permission denied".to_vec());
+
+		let mut out = Vec::new();
+		let inner = Diag::NoSuchFile { name: name.clone() };
+		message(&Diag::Prefixed { cmd: "cd".into(), diag: Box::new(inner) }, true, &mut out);
+		assert_eq!(out, b"cd: bad\xff: No such file or directory".to_vec());
+
+		// bash shows the word of `command not found` through
+		// `printable_filename`, which quotes a byte it cannot print.
+		let mut out = Vec::new();
+		message(&Diag::CommandNotFound { name }, true, &mut out);
+		assert_eq!(out, b"$\'bad\\377\': command not found".to_vec());
+
+		let mut out = Vec::new();
+		message(&Diag::NoMatch { pattern: BString::from(b"x\xffy*".to_vec()) }, true, &mut out);
+		assert_eq!(out, b"no match: x\xffy*");
+
+		let mut out = Vec::new();
+		message(
+			&Diag::ReadFailed { path: BString::from(b"src\xff".to_vec()), msg: "read error".into() },
+			true,
+			&mut out,
+		);
+		assert_eq!(out, b"src\xff: read error");
+	}
 }

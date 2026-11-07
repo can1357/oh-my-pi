@@ -102,11 +102,11 @@ pub fn source(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let text = match ctx.probe(Probe::Read { path: path.clone() })? {
 		ProbeResult::Bytes(Ok(text)) => text,
 		ProbeResult::Bytes(Err(msg)) if msg.as_slice() == b"Is a directory" => {
-			ctx.err(Diag::Usage { msg: format!("{}: is a directory", shown.as_bstr()).into() });
+			ctx.err(Diag::ReadFailed { path: shown.clone(), msg: "is a directory".into() });
 			return done(1);
 		},
 		ProbeResult::Bytes(Err(msg)) => {
-			ctx.diag(Diag::Usage { msg: format!("{}: {}", file.as_bstr(), msg.as_bstr()).into() });
+			ctx.diag(Diag::ReadFailed { path: file.clone(), msg });
 			ctx.usage_error = true;
 			return done(1);
 		},
