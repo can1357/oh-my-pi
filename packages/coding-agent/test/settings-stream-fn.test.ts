@@ -7,12 +7,16 @@
  * OpenRouter sticky-routing / response caching behaves the same on advisor turns
  * (can1357/oh-my-pi#3639).
  */
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { YAML } from "bun";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as catalogServerSideFallback from "@oh-my-pi/pi-catalog/compat/server-side-fallback";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -24,7 +28,8 @@ import {
 	createSettingsAwareStreamFn,
 	resolveWebsocketPreference,
 } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 /** Settings whose global (persisted) layer holds `storeResponses`; a runtime override would outrank the env var. */
 function persistedStore(value: boolean | undefined): Settings {
@@ -725,6 +730,111 @@ describe("createSettingsAwareStreamFn", () => {
 			wrapped(stubFableModel, stubContext, { apiKey: "k" });
 
 			expect(calls[0]?.options?.fallbacks).toBeUndefined();
+		});
+
+		/**
+		 * Settings as the loader builds them from a hand-edited `config.yml`. The load path checks
+		 * no value against its declared type, so one of the wrong shape reaches the layers exactly
+		 * as it was typed; `Settings.isolated` and `cfg://` cannot stand in, because `assertWritable`
+		 * rejects it on the way in. `loadReadOnly` runs that real path without a database or a write.
+		 *
+		 * `PI_CONFIG_FILES` is read by the constructor, which `loadReadOnly` runs synchronously, and
+		 * put back before the first suspension: whoever runs the suite may have their own overlay,
+		 * and an overlay outranks the global layer this writes.
+		 */
+		function handEdited(chain: unknown): Promise<Settings> {
+			const dir = TempDir.createSync("@pi-fallback-chain-");
+			tempDirs.push(dir);
+			const agentDir = dir.join("agent");
+			fs.mkdirSync(agentDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(agentDir, "config.yml"),
+				YAML.stringify({
+					providers: { anthropic: { serverSideFallback: true, serverSideFallbackModels: chain } },
+				}),
+			);
+			const overlays = process.env.PI_CONFIG_FILES;
+			restoreEnvValue("PI_CONFIG_FILES", undefined);
+			const loading = Settings.loadReadOnly({ cwd: dir.join("project"), agentDir });
+			restoreEnvValue("PI_CONFIG_FILES", overlays);
+			return loading;
+		}
+
+		const tempDirs: TempDir[] = [];
+		afterEach(async () => {
+			await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
+		});
+
+		// A hand-edited non-list is `isConfigured()` but fails the registry's type check, so `get()`
+		// yields the schema default. Only the catalog knows a model's chain, so the one correct
+		// outcome is the catalog chain — what an unset setting gets.
+		it.each([
+			["a bare string", "claude-opus-4-8"],
+			["a number", 3],
+			["a mapping", { model: "claude-opus-4-8" }],
+			["a boolean", true],
+		])("follows the catalog chain for %s, the same as unset", async (_label, chain) => {
+			const unset = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
+			const unusable = await handEdited(chain);
+			const { fn: base, calls } = captureBase();
+
+			createSettingsAwareStreamFn(unset, base)(stubFableModel, stubContext, { apiKey: "k" });
+			createSettingsAwareStreamFn(unusable, base)(stubFableModel, stubContext, { apiKey: "k" });
+
+			expect(calls[1]?.options?.fallbacks).toEqual(calls[0]?.options?.fallbacks);
+			expect(calls[1]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+		});
+
+		// The control that equality alone cannot give: today's catalog chain and the list a model-id
+		// default would name are the same, so such a default looks right by coincidence. Move the
+		// catalog and both unconfigured routes must move with it, while a usable value still wins.
+		it("follows a catalog chain that is not what any default would name", async () => {
+			const unusable = await handEdited("claude-opus-5");
+			const chain = vi
+				.spyOn(catalogServerSideFallback, "serverSideFallbackModels")
+				.mockReturnValue(["claude-opus-4-8", "claude-sonnet-5"]);
+			try {
+				const unset = Settings.isolated({ "providers.anthropic.serverSideFallback": true });
+				const usable = Settings.isolated({
+					"providers.anthropic.serverSideFallback": true,
+					"providers.anthropic.serverSideFallbackModels": ["claude-opus-5"],
+				});
+				const { fn: base, calls } = captureBase();
+
+				createSettingsAwareStreamFn(unset, base)(stubFableModel, stubContext, { apiKey: "k" });
+				createSettingsAwareStreamFn(unusable, base)(stubFableModel, stubContext, { apiKey: "k" });
+				createSettingsAwareStreamFn(usable, base)(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(chain).toHaveBeenCalled();
+				const moved = [{ model: "claude-opus-4-8" }, { model: "claude-sonnet-5" }];
+				expect(calls[0]?.options?.fallbacks).toEqual(moved);
+				expect(calls[1]?.options?.fallbacks).toEqual(moved);
+				expect(calls[2]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+			} finally {
+				vi.restoreAllMocks();
+			}
+		});
+
+		it("still reports an unusable value once while following the catalog chain", async () => {
+			const settings = await handEdited("claude-opus-5");
+			const invalid: unknown[] = [];
+			vi.spyOn(logger, "warn").mockImplementation((message: unknown, context?: unknown) => {
+				if (String(message).includes("ignoring invalid value")) invalid.push(context);
+			});
+			try {
+				const { fn: base, calls } = captureBase();
+				const wrapped = createSettingsAwareStreamFn(settings, base);
+
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+				wrapped(stubFableModel, stubContext, { apiKey: "k" });
+
+				expect(invalid).toEqual([
+					{ setting: "providers.anthropic.serverSideFallbackModels", value: "claude-opus-5" },
+				]);
+				expect(calls[1]?.options?.fallbacks).toEqual([{ model: "claude-opus-5" }]);
+			} finally {
+				vi.restoreAllMocks();
+			}
 		});
 	});
 

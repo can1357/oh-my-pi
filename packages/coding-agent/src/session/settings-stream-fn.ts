@@ -77,16 +77,17 @@ interface ServerSideFallbackWarnings {
 
 /**
  * Clean a configured `providers.anthropic.serverSideFallbackModels` value into
- * the wire chain. The registry guarantees an array (a non-array configured
- * value falls back to the default, with its own warning), but not its element
- * types: hand-edited YAML can supply non-string or blank entries, which are
- * dropped instead of throwing. Both repairs are reported — a silently cleaned
- * chain is indistinguishable from the chain the user wrote, and an all-invalid
- * list turns the feature off while the toggle still reads on. The wire contract
- * allows at most three entries (MessageCreateParams.fallbacks) and an overlong
- * chain would be rejected by the API instead of falling back, so cap
- * deliberately too. Each warning fires once per distinct outcome, tracked in
- * `warned`, rather than on every request.
+ * the wire chain. The caller passes only a value the registry accepts as an
+ * array — a non-array one is not configured for this purpose and never reaches
+ * here — but the registry does not type its elements: hand-edited YAML can
+ * supply non-string or blank entries, which are dropped instead of throwing.
+ * Both repairs are reported — a silently cleaned chain is indistinguishable
+ * from the chain the user wrote, and an all-invalid list turns the feature off
+ * while the toggle still reads on. The wire contract allows at most three
+ * entries (MessageCreateParams.fallbacks) and an overlong chain would be
+ * rejected by the API instead of falling back, so cap deliberately too. Each
+ * warning fires once per distinct outcome, tracked in `warned`, rather than on
+ * every request.
  */
 function configuredServerSideFallbackModels(
 	configured: readonly unknown[],
@@ -191,12 +192,15 @@ export function createSettingsAwareStreamFn(
 			streamOptions?.fallbacks === undefined && cfgProvidersAnthropicServerSideFallback.get(settings)
 				? serverSideFallbackModels(model)
 				: [];
+		// One question — is a usable chain configured? — not presence plus value.
+		// `isConfigured` is true for a hand-edited non-list, whose `get` is the
+		// schema default, so the pair would replace the catalog chain with that
+		// default. Only the catalog knows a model's chain, so an unusable value
+		// follows it, exactly as an unset one does.
+		const configuredChain = cfgProvidersAnthropicServerSideFallbackModels.configured(settings);
 		const serverSideFallbackChain =
-			catalogFallbackChain.length > 0 && cfgProvidersAnthropicServerSideFallbackModels.isConfigured(settings)
-				? configuredServerSideFallbackModels(
-						cfgProvidersAnthropicServerSideFallbackModels.get(settings),
-						fallbackChainWarnings,
-					)
+			catalogFallbackChain.length > 0 && configuredChain !== undefined
+				? configuredServerSideFallbackModels(configuredChain, fallbackChainWarnings)
 				: catalogFallbackChain;
 		const fallbacks =
 			streamOptions?.fallbacks ??
