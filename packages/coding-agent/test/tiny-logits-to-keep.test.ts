@@ -1,17 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import type { TextGenerationPipeline } from "@huggingface/transformers";
+import type { TextGenerationModel } from "@oh-my-pi/pi-coding-agent/subprocess/transformers-types";
 import {
 	ensureLogitsToKeepFeed,
 	needsLogitsToKeepFeed,
 	type TransformersRuntime,
 } from "@oh-my-pi/pi-coding-agent/tiny/worker";
-
-/** The model surface these tests read: whatever `forward` the object holds when called. */
-interface ShimTarget {
-	forward(modelInputs: Record<string, unknown>): Promise<unknown>;
-	sessions: Record<string, { inputNames: string[] }>;
-}
 
 /** Minimal Tensor stand-in: records constructor args so the feed shape is assertable. */
 function makeRuntime(): TransformersRuntime {
@@ -30,25 +24,16 @@ function makeRuntime(): TransformersRuntime {
 }
 
 /** Model stand-in: one session declaring `inputs`, and a forward that echoes what it received. */
-function makeModel(inputs: readonly string[]): {
-	model: TextGenerationPipeline["model"];
-	seen: Record<string, unknown>[];
-} {
+function makeModel(inputs: readonly string[]): { model: TextGenerationModel; seen: Record<string, unknown>[] } {
 	const seen: Record<string, unknown>[] = [];
-	const target: ShimTarget = {
+	const model: TextGenerationModel = {
 		sessions: { model: { inputNames: [...inputs] } },
 		forward: async modelInputs => {
 			seen.push(modelInputs);
 			return {};
 		},
 	};
-	return { model: target as unknown as TextGenerationPipeline["model"], seen };
-}
-
-/** Read the model's current `forward`, i.e. the shim's wrapper once installed. */
-function forwardOf(model: TextGenerationPipeline["model"]): ShimTarget["forward"] {
-	const target = model as unknown as ShimTarget;
-	return target.forward.bind(target);
+	return { model, seen };
 }
 
 describe("logits_to_keep feed gate", () => {
@@ -57,7 +42,7 @@ describe("logits_to_keep feed gate", () => {
 		expect(needsLogitsToKeepFeed(model)).toBe(false);
 		expect(ensureLogitsToKeepFeed(makeRuntime(), model)).toBe(false);
 
-		await forwardOf(model)({ input_ids: "ids", num_logits_to_keep: 7 });
+		await model.forward({ input_ids: "ids", num_logits_to_keep: 7 });
 
 		expect(seen[0]).toEqual({ input_ids: "ids", num_logits_to_keep: 7 });
 	});
