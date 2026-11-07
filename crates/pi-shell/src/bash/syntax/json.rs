@@ -170,16 +170,128 @@ pub fn to_json(src: &[u8], program: &Program, dialect: JsonDialect, offsets: Off
 	let mut out = String::new();
 	match dialect {
 		JsonDialect::Native => {
-			let v = native::program(&map, program);
+			let mut v = native::program(&map, program);
+			clip_spans(&mut v, None, None);
 			write(&mut out, &v, false, 0);
 		},
 		JsonDialect::Shfmt => {
-			let v = shfmt::program(&map, src, program);
+			let mut v = shfmt::program(&map, src, program);
+			clip(&mut v, None, None);
 			write(&mut out, &v, true, 0);
 			out.push('\n');
 		},
 	}
 	out
+}
+
+/// A shfmt position's `(Offset, Line, Col)`.
+type At = (u64, u64, u64);
+
+/// The position object `v` is, as numbers.
+fn at(v: &V) -> Option<At> {
+	let V::Obj(f) = v else { return None };
+	match f.as_slice() {
+		[("Offset", V::Num(o)), ("Line", V::Num(l)), ("Col", V::Num(c))] => Some((*o, *l, *c)),
+		_ => None,
+	}
+}
+
+/// Overwrite position object `v` with `a`.
+fn set_at(v: &mut V, a: At) {
+	if let V::Obj(f) = v {
+		f[0].1 = V::Num(a.0);
+		f[1].1 = V::Num(a.1);
+		f[2].1 = V::Num(a.2);
+	}
+}
+
+/// Text an alias expands to has no bytes of its own: every token in it
+/// reports the place after the alias, so its nodes have empty ranges. A
+/// place the export derives by counting or scanning would land in another
+/// node there; inside an empty node every range and position is that
+/// node's place (`point`). Elsewhere only a range running backwards (an
+/// end counted back from an empty one, so its start is no better) is
+/// replaced, by an empty one inside its parent's range (`outer`).
+fn clip(v: &mut V, point: Option<At>, outer: Option<(At, At)>) {
+	match v {
+		V::Arr(items) => {
+			for x in items {
+				clip(x, point, outer);
+			}
+		},
+		V::Obj(fields) => {
+			let find = |k: &str| fields.iter().position(|(n, _)| *n == k);
+			let (mut inner, mut range) = (point, outer);
+			if let (Some(p), Some(e)) = (find("Pos"), find("End"))
+				&& let (Some(lo), Some(hi)) = (at(&fields[p].1), at(&fields[e].1))
+			{
+				let (lo, hi) = match (point, outer) {
+					(Some(pt), _) => (pt, pt),
+					(None, Some((olo, ohi))) if hi.0 < lo.0 => {
+						let at = if lo.0 < olo.0 {
+							olo
+						} else if lo.0 > ohi.0 {
+							ohi
+						} else {
+							lo
+						};
+						(at, at)
+					},
+					(None, None) if hi.0 < lo.0 => (lo, lo),
+					(None, _) => (lo, hi),
+				};
+				set_at(&mut fields[p].1, lo);
+				set_at(&mut fields[e].1, hi);
+				inner = (lo.0 == hi.0).then_some(lo);
+				range = Some((lo, hi));
+			}
+			for (k, x) in fields.iter_mut() {
+				if matches!(*k, "Pos" | "End") {
+					continue;
+				}
+				match (at(x), inner) {
+					(Some(_), Some(pt)) => set_at(x, pt),
+					(Some(_), None) => {},
+					(None, _) => clip(x, inner, range),
+				}
+			}
+		},
+		_ => {},
+	}
+}
+
+/// [`clip`] for the native schema's `span` pairs.
+fn clip_spans(v: &mut V, point: Option<u64>, outer: Option<(u64, u64)>) {
+	match v {
+		V::Arr(items) => {
+			for x in items {
+				clip_spans(x, point, outer);
+			}
+		},
+		V::Obj(fields) => {
+			let (mut inner, mut range) = (point, outer);
+			if let Some((_, V::Arr(s))) = fields.iter_mut().find(|(k, _)| *k == "span")
+				&& let [V::Num(lo), V::Num(hi)] = s.as_mut_slice()
+			{
+				match (point, outer) {
+					(Some(pt), _) => (*lo, *hi) = (pt, pt),
+					(None, Some((olo, ohi))) if *hi < *lo => {
+						*lo = (*lo).clamp(olo, ohi);
+						*hi = *lo;
+					},
+					(None, _) => *hi = (*hi).max(*lo),
+				}
+				inner = (*lo == *hi).then_some(*lo);
+				range = Some((*lo, *hi));
+			}
+			for (k, x) in fields.iter_mut() {
+				if *k != "span" {
+					clip_spans(x, inner, range);
+				}
+			}
+		},
+		_ => {},
+	}
 }
 
 /// Offset conversion and line/column lookup.
