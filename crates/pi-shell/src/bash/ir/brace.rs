@@ -29,22 +29,35 @@ enum Tok {
 }
 
 /// Upper bound on the number of words one brace expression may produce
-/// (bash has none; this keeps `{1..999999999}` from exhausting memory).
-const MAX_WORDS: usize = 1 << 20;
+/// (bash has none; this keeps `{1..999999999}` from exhausting memory). A
+/// word over it is an error (`Err` with at least how many words it makes),
+/// never left as written or cut short.
+pub(super) const MAX_WORDS: usize = 1 << 22;
+
+/// `Err(count)` when `count` words are over [`MAX_WORDS`].
+const fn check_count(count: u128) -> Result<(), u128> {
+	if count > MAX_WORDS as u128 {
+		Err(count)
+	} else {
+		Ok(())
+	}
+}
 
 /// The alternatives of `w`, or `None` when it has no brace expression: a
 /// tree holding them, and their `Word` nodes (with `w`'s id and span).
 /// Parts that stay as written are copied once and shared.
-pub fn expand(w: st::Word<'_>) -> Option<(Tree, Vec<u32>)> {
+pub fn expand(w: st::Word<'_>) -> Result<Option<(Tree, Vec<u32>)>, u128> {
 	let src = w.tree();
 	let mut b = Brace { src, out: None, copied: HashMap::new(), alts: Vec::new(), empty: None };
-	let alts = b.expand_parts(w.parts())?;
+	let Some(alts) = b.expand_parts(w.parts())? else {
+		return Ok(None);
+	};
 	let out = b.out();
 	let words = alts
 		.iter()
 		.map(|parts| out.copy_over(src, w.node(), parts))
 		.collect();
-	Some((b.out.take()?, words))
+	Ok(b.out.take().map(|t| (t, words)))
 }
 
 /// The output tree being built and what it already holds.
@@ -87,7 +100,10 @@ impl<'s> Brace<'s> {
 
 	/// The alternatives of `parts` as part lists of the output tree, or
 	/// `None` when they hold no brace expression.
-	fn expand_parts(&mut self, parts: st::Seq<'s, st::WordPart<'s>>) -> Option<Vec<Vec<u32>>> {
+	fn expand_parts(
+		&mut self,
+		parts: st::Seq<'s, st::WordPart<'s>>,
+	) -> Result<Option<Vec<Vec<u32>>>, u128> {
 		// Most words hold no `{` outside quotes: skip them without building
 		// tokens. A `"…"` part may still hide one (`quoted_alternatives`).
 		let maybe = parts.iter().any(|p| match p.get() {
@@ -96,7 +112,7 @@ impl<'s> Brace<'s> {
 			_ => false,
 		});
 		if !maybe {
-			return None;
+			return Ok(None);
 		}
 		let mut toks = Vec::new();
 		let mut candidate = false;
@@ -104,7 +120,7 @@ impl<'s> Brace<'s> {
 			if let st::Part::Lit(b) = p.get() {
 				candidate |= b.contains(&b'{');
 				toks.extend(b.iter().map(|&c| Tok::Ch(c)));
-			} else if let Some(alts) = self.quoted_alternatives(p) {
+			} else if let Some(alts) = self.quoted_alternatives(p)? {
 				candidate = true;
 				self.alts.push(alts);
 				toks.push(Tok::Alts(p.node(), self.alts.len() - 1));
@@ -113,13 +129,13 @@ impl<'s> Brace<'s> {
 			}
 		}
 		if !candidate {
-			return None;
+			return Ok(None);
 		}
 		let mut words = Vec::new();
-		if !expand_toks(&toks, &self.alts, &mut words) {
-			return None;
+		if !expand_toks(&toks, &self.alts, &mut words)? {
+			return Ok(None);
 		}
-		Some(words.iter().map(|t| self.rebuild(t)).collect())
+		Ok(Some(words.iter().map(|t| self.rebuild(t)).collect()))
 	}
 
 	/// bash finds braces in the word as written with a naive quote tracker
@@ -130,19 +146,21 @@ impl<'s> Brace<'s> {
 	/// `${…}` inside double quotes (`"${x:-"{1,2}"}"`). The alternatives of
 	/// such a double-quoted part (output parts), or `None`. An unquoted
 	/// `${a["{1,2}"]}` keeps its quotes: bash skips `${`.
-	fn quoted_alternatives(&mut self, part: st::WordPart<'s>) -> Option<Vec<u32>> {
+	fn quoted_alternatives(&mut self, part: st::WordPart<'s>) -> Result<Option<Vec<u32>>, u128> {
 		let st::Part::DQuote(inner) = part.get() else {
-			return None;
+			return Ok(None);
 		};
-		let lists = self.quoted_from(inner, 0, Vec::new())?;
+		let Some(lists) = self.quoted_from(inner, 0, Vec::new())? else {
+			return Ok(None);
+		};
 		let src = self.src;
 		let out = self.out();
-		Some(
+		Ok(Some(
 			lists
 				.iter()
 				.map(|parts| out.copy_over(src, part.node(), parts))
 				.collect(),
-		)
+		))
 	}
 
 	/// [`Self::quoted_alternatives`] for the `${…}` at or after
@@ -155,7 +173,7 @@ impl<'s> Brace<'s> {
 		inner: st::Seq<'s, st::WordPart<'s>>,
 		from: usize,
 		prefix: Vec<u32>,
-	) -> Option<Vec<Vec<u32>>> {
+	) -> Result<Option<Vec<Vec<u32>>>, u128> {
 		let src = self.src;
 		for (j, p) in inner.iter().enumerate().skip(from) {
 			let st::Part::Param(param) = p.get() else {
@@ -166,7 +184,7 @@ impl<'s> Brace<'s> {
 					let st::Part::DQuote(q) = sub.get() else {
 						continue;
 					};
-					let Some(alts) = self.expand_parts(q) else {
+					let Some(alts) = self.expand_parts(q)? else {
 						continue;
 					};
 					let mut alternatives = Vec::with_capacity(alts.len());
@@ -191,7 +209,7 @@ impl<'s> Brace<'s> {
 							parts.push(self.copy(x.node()));
 						}
 						parts.push(new_param);
-						if let Some(more) = self.quoted_from(inner, j + 1, parts.clone()) {
+						if let Some(more) = self.quoted_from(inner, j + 1, parts.clone())? {
 							alternatives.extend(more);
 						} else {
 							for x in inner.iter().skip(j + 1) {
@@ -199,15 +217,13 @@ impl<'s> Brace<'s> {
 							}
 							alternatives.push(parts);
 						}
-						if alternatives.len() >= MAX_WORDS {
-							break;
-						}
+						check_count(alternatives.len() as u128)?;
 					}
-					return Some(alternatives);
+					return Ok(Some(alternatives));
 				}
 			}
 		}
-		None
+		Ok(None)
 	}
 
 	/// Parts from tokens: runs of active bytes become one `Lit`.
@@ -268,7 +284,7 @@ impl<'s> Brace<'s> {
 }
 
 /// Expand `toks` into `out`; `false` when nothing expanded.
-fn expand_toks(toks: &[Tok], alts: &[Vec<u32>], out: &mut Vec<Vec<Tok>>) -> bool {
+fn expand_toks(toks: &[Tok], alts: &[Vec<u32>], out: &mut Vec<Vec<Tok>>) -> Result<bool, u128> {
 	let mut start = 0;
 	while let Some(s) = toks[start..]
 		.iter()
@@ -278,14 +294,12 @@ fn expand_toks(toks: &[Tok], alts: &[Vec<u32>], out: &mut Vec<Vec<Tok>>) -> bool
 		if let Tok::Alts(_, i) = toks[s] {
 			let rest = &toks[s + 1..];
 			let mut posts = Vec::new();
-			if !expand_toks(rest, alts, &mut posts) {
+			if !expand_toks(rest, alts, &mut posts)? {
 				posts.push(rest.to_vec());
 			}
+			check_count(out.len() as u128 + alts[i].len() as u128 * posts.len() as u128)?;
 			for &alt in &alts[i] {
 				for post in &posts {
-					if out.len() >= MAX_WORDS {
-						return true;
-					}
 					let mut word = Vec::with_capacity(s + 1 + post.len());
 					word.extend_from_slice(&toks[..s]);
 					word.push(Tok::Out(alt));
@@ -293,7 +307,7 @@ fn expand_toks(toks: &[Tok], alts: &[Vec<u32>], out: &mut Vec<Vec<Tok>>) -> bool
 					out.push(word);
 				}
 			}
-			return true;
+			return Ok(true);
 		}
 		let Some(e) = matching_close(toks, s) else {
 			// An unclosed `{` is literal; a later brace may still expand.
@@ -303,7 +317,7 @@ fn expand_toks(toks: &[Tok], alts: &[Vec<u32>], out: &mut Vec<Vec<Tok>>) -> bool
 		let inner = &toks[s + 1..e];
 		let (pieces, alternatives) = if let Some(p) = split_commas(inner) {
 			(p, true)
-		} else if let Some(p) = sequence(inner) {
+		} else if let Some(p) = sequence(inner)? {
 			(p, false)
 		} else {
 			// Neither alternatives nor a sequence: this brace is literal.
@@ -316,19 +330,20 @@ fn expand_toks(toks: &[Tok], alts: &[Vec<u32>], out: &mut Vec<Vec<Tok>>) -> bool
 		// `{{1..3}..{7..9}}` is `{1..7} {1..8} …`.
 		let rest = &toks[e + 1..];
 		let mut posts = Vec::new();
-		if !expand_toks(rest, alts, &mut posts) {
+		if !expand_toks(rest, alts, &mut posts)? {
 			posts.push(rest.to_vec());
+		}
+		if !alternatives {
+			check_count(out.len() as u128 + pieces.len() as u128 * posts.len() as u128)?;
 		}
 		for piece in pieces {
 			let mut items = Vec::new();
-			if !(alternatives && expand_toks(&piece, alts, &mut items)) {
+			if !(alternatives && expand_toks(&piece, alts, &mut items)?) {
 				items.push(piece);
 			}
+			check_count(out.len() as u128 + items.len() as u128 * posts.len() as u128)?;
 			for item in &items {
 				for post in &posts {
-					if out.len() >= MAX_WORDS {
-						return true;
-					}
 					let mut word = Vec::with_capacity(s + item.len() + post.len());
 					word.extend_from_slice(&toks[..s]);
 					word.extend_from_slice(item);
@@ -337,9 +352,9 @@ fn expand_toks(toks: &[Tok], alts: &[Vec<u32>], out: &mut Vec<Vec<Tok>>) -> bool
 				}
 			}
 		}
-		return true;
+		return Ok(true);
 	}
-	false
+	Ok(false)
 }
 
 /// The `}` closing the `{` at `s` (nested braces counted).
@@ -386,20 +401,26 @@ fn split_commas(inner: &[Tok]) -> Option<Vec<Vec<Tok>>> {
 
 /// `x..y[..incr]` over integers (zero-padded when either end is) or single
 /// characters.
-fn sequence(inner: &[Tok]) -> Option<Vec<Vec<Tok>>> {
-	let text: Vec<u8> = inner
+fn sequence(inner: &[Tok]) -> Result<Option<Vec<Vec<Tok>>>, u128> {
+	let Some(text) = inner
 		.iter()
 		.map(|t| match t {
 			Tok::Ch(c) => Some(*c),
 			Tok::Src(_) | Tok::Out(_) | Tok::Empty | Tok::Alts(..) => None,
 		})
-		.collect::<Option<_>>()?;
+		.collect::<Option<Vec<u8>>>()
+	else {
+		return Ok(None);
+	};
 	let parts: Vec<&[u8]> = split_dots(&text);
 	if !(2..=3).contains(&parts.len()) {
-		return None;
+		return Ok(None);
 	}
 	let incr = match parts.get(2) {
-		Some(i) => parse_int(i)?,
+		Some(i) => match parse_int(i) {
+			Some(i) => i,
+			None => return Ok(None),
+		},
 		None => 1,
 	};
 	let step = incr.unsigned_abs().max(1);
@@ -417,11 +438,9 @@ fn sequence(inner: &[Tok]) -> Option<Vec<Vec<Tok>>> {
 			} else {
 				0
 			};
-			let count = a.abs_diff(b) / step + 1;
-			if count > MAX_WORDS as u64 {
-				return None;
-			}
-			(0..count)
+			let count = a.abs_diff(b) as u128 / step as u128 + 1;
+			check_count(count)?;
+			(0..count as u64)
 				.map(|k| {
 					let off = i64::try_from(k * step).unwrap_or(i64::MAX);
 					let v = if a <= b {
@@ -459,9 +478,9 @@ fn sequence(inner: &[Tok]) -> Option<Vec<Vec<Tok>>> {
 			}
 			out
 		},
-		_ => return None,
+		_ => return Ok(None),
 	};
-	Some(
+	Ok(Some(
 		items
 			.into_iter()
 			.map(|w| {
@@ -472,7 +491,7 @@ fn sequence(inner: &[Tok]) -> Option<Vec<Vec<Tok>>> {
 				}
 			})
 			.collect(),
-	)
+	))
 }
 
 /// Split at `..` (exactly two dots).
@@ -525,7 +544,7 @@ mod tests {
 			})
 			.collect();
 		let root = t.word(crate::bash::syntax::Span::default(), &ids);
-		let (out, words) = expand(st::Word::of(&t, root))?;
+		let (out, words) = expand(st::Word::of(&t, root)).expect("under the word limit")?;
 		let show = |p: st::WordPart<'_>| match p.get() {
 			st::Part::Lit(b) => String::from_utf8_lossy(b).into_owned(),
 			st::Part::SQuote(b) => format!("'{}'", String::from_utf8_lossy(b)),

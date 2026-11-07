@@ -3,9 +3,9 @@
 use bstr::{BString, ByteSlice};
 
 use super::{
-	AssignOp, AssignVal, CaseIr, Cmd, ComsubForm, CondIr, ElemIr, FuncDefinition, FuncIr, NodeInfo,
-	Op, OpIr, Opcode, ParamIr, ParamRef, Part, RedirFdIr, RedirIr, RedirTargetIr, ReplaceIr,
-	SpawnIr, SpawnKind, StageIr, SubIr, Unit, Word, WordKind,
+	AssignOp, AssignVal, CaseIr, Cmd, ComsubForm, CondIr, ElemIr, FuncDefinition, FuncIr,
+	LowerError, NodeInfo, Op, OpIr, Opcode, ParamIr, ParamRef, Part, RedirFdIr, RedirIr,
+	RedirTargetIr, ReplaceIr, SpawnIr, SpawnKind, StageIr, SubIr, Unit, Word, WordKind,
 };
 use crate::bash::{
 	event::{NodeKind, RedirKind},
@@ -37,7 +37,7 @@ pub fn lower(
 	src: &[u8],
 	mode: ModeId,
 	features: syn::Features,
-) -> Result<Unit, &'static str> {
+) -> Result<Unit, LowerError> {
 	lower_command(cc, src, mode, features, false, None)
 }
 
@@ -47,7 +47,7 @@ pub(crate) fn lower_deferred(
 	src: &[u8],
 	mode: ModeId,
 	features: syn::Features,
-) -> Result<Unit, &'static str> {
+) -> Result<Unit, LowerError> {
 	lower_command(cc, src, mode, features, true, None)
 }
 
@@ -61,7 +61,7 @@ pub(crate) fn lower_deferred_hashed(
 	features: syn::Features,
 	source_hash: blake3::Hasher,
 	id: super::UnitId,
-) -> Result<Unit, &'static str> {
+) -> Result<Unit, LowerError> {
 	lower_command(cc, src, mode, features, true, Some((source_hash, Some(id))))
 }
 
@@ -102,7 +102,7 @@ fn lower_command(
 	features: syn::Features,
 	deferred: bool,
 	source_hash: Option<(blake3::Hasher, Option<super::UnitId>)>,
-) -> Result<Unit, &'static str> {
+) -> Result<Unit, LowerError> {
 	let bytes = cc.span.slice(src);
 	let mut unit = Unit::empty(bytes, mode, features.bits());
 	unit.line = cc.line;
@@ -144,7 +144,7 @@ pub fn lower_text(
 	text: &[u8],
 	mode: ModeId,
 	features: syn::Features,
-) -> Result<Unit, &'static str> {
+) -> Result<Unit, LowerError> {
 	let mut l = Lower::new(Unit::empty(text, mode, features.bits()), 0, features, None);
 	l.text = true;
 	l.emit(Opcode::End, 0, 0, 0);
@@ -167,31 +167,31 @@ pub fn lower_compound(
 	src: &[u8],
 	mode: ModeId,
 	features: syn::Features,
-) -> Result<Unit, &'static str> {
+) -> Result<Unit, LowerError> {
 	const NOT_A_LIST: &str = "a compound array value that is not one word list";
 	let item = cc.list().items().one().ok_or(NOT_A_LIST)?;
 	let and_or = item.and_or();
 	let first = and_or.first();
 	let stage = first.stages().one().ok_or(NOT_A_LIST)?;
 	let st::CommandKind::Simple(simple) = stage.kind() else {
-		return Err(NOT_A_LIST);
+		return Err(NOT_A_LIST.into());
 	};
 	if and_or.rest().len() != 0
 		|| !stage.redirs().is_empty()
 		|| first.time().is_some()
 		|| first.bang()
 	{
-		return Err(NOT_A_LIST);
+		return Err(NOT_A_LIST.into());
 	}
 	let words = simple.words();
 	if !simple.assigns().is_empty() || words.len() != 2 {
-		return Err(NOT_A_LIST);
+		return Err(NOT_A_LIST.into());
 	}
 	let arg = words.get(1).ok_or(NOT_A_LIST)?.parts();
 	let (2, Some(st::Part::Lit(_)), Some(st::Part::Compound(elems))) =
 		(arg.len(), arg.first().map(st::WordPart::get), arg.get(1).map(st::WordPart::get))
 	else {
-		return Err(NOT_A_LIST);
+		return Err(NOT_A_LIST.into());
 	};
 	let mut unit = Unit::empty(cc.span.slice(src), mode, features.bits());
 	unit.nodes = vec![
@@ -476,8 +476,8 @@ impl Lines {
 	}
 }
 
-type R = Result<(), &'static str>;
-type Idx = Result<u32, &'static str>;
+type R = Result<(), LowerError>;
+type Idx = Result<u32, LowerError>;
 
 impl Lower {
 	fn new(
@@ -1010,7 +1010,7 @@ impl Lower {
 
 	/// Compile a function body (a compound command) defined by the command
 	/// with node `root`: a unit sharing this unit's source and node ids.
-	fn func_body(&mut self, root: u32, cmd: st::Command<'_>) -> Result<Unit, &'static str> {
+	fn func_body(&mut self, root: u32, cmd: st::Command<'_>) -> Result<Unit, LowerError> {
 		let mut body = Unit::empty(&self.unit.source, self.unit.mode, self.unit.features);
 		body.aliases.clone_from(&self.unit.aliases);
 		body.nodes.clone_from(&self.unit.nodes);
@@ -1188,7 +1188,7 @@ impl Lower {
 		Ok(idx)
 	}
 
-	fn elems(&mut self, elems: st::Seq<'_, st::ArrayElem<'_>>) -> Result<Vec<ElemIr>, &'static str> {
+	fn elems(&mut self, elems: st::Seq<'_, st::ArrayElem<'_>>) -> Result<Vec<ElemIr>, LowerError> {
 		elems
 			.iter()
 			.map(|e| {
@@ -1309,7 +1309,8 @@ impl Lower {
 		// Run-time parsed text (here-document bodies, arithmetic) gets no
 		// brace expansion; its unit's last word must stay the text itself.
 		if !self.text
-			&& let Some((t, alts)) = super::brace::expand(w)
+			&& let Some((t, alts)) =
+				super::brace::expand(w).map_err(|count| self.brace_limit_error(w, count))?
 		{
 			let mut indices = Vec::with_capacity(alts.len());
 			for alt in alts {
@@ -1321,6 +1322,28 @@ impl Lower {
 			word.braces = Some(indices.into_boxed_slice());
 		}
 		Ok(idx)
+	}
+
+	/// bash has no limit on a brace expansion's words; this engine refuses
+	/// one over [`super::brace::MAX_WORDS`] rather than run the word as
+	/// written or cut short.
+	fn brace_limit_error(&self, w: st::Word<'_>, count: u128) -> LowerError {
+		let mut msg = BString::from("brace expansion: `");
+		for &byte in w.span().rebase(self.base).slice(&self.unit.source) {
+			match byte {
+				b'\n' => msg.extend_from_slice(b"\\n"),
+				b'\r' => msg.extend_from_slice(b"\\r"),
+				_ => msg.push(byte),
+			}
+		}
+		msg.extend_from_slice(
+			format!(
+				"' would make at least {count} words, over the limit of {}",
+				super::brace::MAX_WORDS
+			)
+			.as_bytes(),
+		);
+		LowerError::Syntax(msg)
 	}
 
 	/// Lower a word without brace expansion.
@@ -1495,7 +1518,7 @@ impl Lower {
 		Ok(())
 	}
 
-	fn param(&mut self, p: st::Param<'_>, quoted: bool) -> Result<ParamIr, &'static str> {
+	fn param(&mut self, p: st::Param<'_>, quoted: bool) -> Result<ParamIr, LowerError> {
 		let param = match p.name() {
 			st::ParamName::Var(n) => ParamRef::Var(n.into()),
 			st::ParamName::Positional(n) => ParamRef::Positional(n),
