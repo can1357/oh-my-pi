@@ -835,10 +835,7 @@ pub fn hash(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	if !o.has(b'd') {
 		for name in o.rest {
 			if o.has(b't') {
-				if !reusable
-					&& let Some(Record::CmdHash { path, .. }) =
-						ctx.record(Key::CmdHash(BStr::new(name)))?
-				{
+				if let Some(Record::CmdHash { path, .. }) = ctx.record(Key::CmdHash(BStr::new(name)))? {
 					shown_hashed(ctx, &path)?;
 				}
 			} else if !name.contains(&b'/') {
@@ -866,18 +863,18 @@ pub fn hash(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		}
 		if o.has(b't') {
 			match found {
-				Some(p) if reusable => {
-					writeln!(out, "builtin hash -p {} {}", p.as_bstr(), name.as_bstr())
-						.expect("writing to a Vec cannot fail");
-				},
-				Some(p) if single => {
-					out.extend_from_slice(&shown_hashed(ctx, &p)?);
-					out.push(b'\n');
-				},
 				Some(p) => {
 					let shown = shown_hashed(ctx, &p)?;
-					writeln!(out, "{}\t{}", name.as_bstr(), shown.as_bstr())
-						.expect("writing to a Vec cannot fail");
+					if reusable {
+						writeln!(out, "builtin hash -p {} {}", shown.as_bstr(), name.as_bstr())
+							.expect("writing to a Vec cannot fail");
+					} else if single {
+						out.extend_from_slice(&shown);
+						out.push(b'\n');
+					} else {
+						writeln!(out, "{}\t{}", name.as_bstr(), shown.as_bstr())
+							.expect("writing to a Vec cannot fail");
+					}
 				},
 				None => {
 					ctx.out(&std::mem::take(&mut out));
