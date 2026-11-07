@@ -10,8 +10,9 @@ import type {
 } from "./renderer";
 import { compact } from "../native/describe";
 import type { NativeChild } from "../native/node";
+import { compactText, styledSpans } from "../native/spans";
 import { footnoteText, inlineErrorView, resultText } from "./native-view";
-import { type Theme } from "../theme/theme";
+import { ensureThemeSync, highlightCode, type Theme } from "../theme/theme";
 import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
 import { fileHyperlink, renderStatusLine, renderTreeList } from "../render";
@@ -22,6 +23,7 @@ import {
 	formatEmptyMessage,
 	formatErrorDetail,
 	PREVIEW_LIMITS,
+	replaceTabs,
 	toPathList,
 } from "../render/render-utils";
 import {
@@ -105,9 +107,11 @@ function grepFlagMeta(args: GrepRenderArgs): string[] {
 /**
  * Header subject, `pattern in scope`. A result names the tool's display scope
  * (linked to the original search path); a call falls back to the requested paths.
+ * Callers pass the pattern already syntax-colored: the bundled regex grammar also
+ * handles incomplete, still-streaming patterns.
  */
 function grepSubject(
-	pattern: string | undefined,
+	subject: string | undefined,
 	args: GrepRenderArgs | undefined,
 	uiTheme: Theme,
 	details?: GrepToolDetails,
@@ -116,7 +120,7 @@ function grepSubject(
 	let scope = details?.scopePath || undefined;
 	if (scope && searchPath) scope = fileHyperlink(searchPath, scope);
 	scope ??= toPathList(args?.path ?? args?.paths).join(", ") || undefined;
-	return formatScopedSubject(pattern || undefined, scope, uiTheme);
+	return formatScopedSubject(subject, scope, uiTheme);
 }
 
 function grepStatusIcon(uiTheme: Theme): string {
@@ -132,7 +136,11 @@ export const grepToolRenderer = {
 				icon: "pending",
 				title: "Grep",
 				titleColor: "toolTitle",
-				description: grepSubject(args.pattern || "?", args, uiTheme),
+				description: grepSubject(
+					args.pattern ? highlightCode(replaceTabs(args.pattern), "Regular Expression", uiTheme).join("\n") : "?",
+					args,
+					uiTheme,
+				),
 				meta: grepFlagMeta(args),
 			},
 			uiTheme,
@@ -153,7 +161,10 @@ export const grepToolRenderer = {
 			isRecord(rawDetails) && typeof rawDetails.searchPath === "string"
 				? rawDetails.searchPath
 				: details?.searchPath;
-		const description = grepSubject(args?.pattern, args, uiTheme, details, searchPath);
+		const pattern = args?.pattern
+			? highlightCode(replaceTabs(args.pattern), "Regular Expression", uiTheme).join("\n")
+			: undefined;
+		const description = grepSubject(pattern, args, uiTheme, details, searchPath);
 
 		if (result.isError || details?.error) {
 			const errorText = details?.error || result.content?.find(c => c.type === "text")?.text || "Unknown error";
@@ -352,5 +363,9 @@ function grepNativeHead(args: GrepRenderArgs | undefined, meta?: readonly string
 		if (paths.length) parts.push(`in ${paths.join(", ")}`);
 		parts.push(...grepFlagMeta(args));
 	}
-	return { title: "Grep", target: args?.pattern || "?", targetKind: "pattern", meta: parts };
+	ensureThemeSync();
+	const target = args?.pattern
+		? compactText(styledSpans(highlightCode(args.pattern, "Regular Expression").join("\n")))
+		: "?";
+	return { title: "Grep", target, targetKind: "pattern", meta: parts };
 }

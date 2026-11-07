@@ -53,6 +53,10 @@ function codeStarts(children: readonly NativeChild[] | undefined): (number | und
 }
 
 describe("grep native view", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
 	const display = [
 		"# src/",
 		"## a.ts",
@@ -71,6 +75,23 @@ describe("grep native view", () => {
 		content: [{ type: "text", text: display }],
 		details: { matchCount: 4, fileCount: 3, displayContent: display },
 	};
+
+	it("preserves regex escapes while coloring literals and operators as native spans", () => {
+		const pattern = String.raw`file\.ts|\d+`;
+		const view = grepToolRenderer.describeCall({ pattern });
+		const target = view.tool?.target;
+		if (target === undefined || typeof target === "string") {
+			throw new Error("Regex header must carry syntax-colored spans");
+		}
+
+		expect(plain(target)).toBe(pattern);
+		const escapedLiteral = target.find(part => part.t === String.raw`\.`);
+		const operators = target.find(part => part.t.includes("|"));
+		expect(escapedLiteral?.s).toBeDefined();
+		expect(operators?.s).toBeDefined();
+		expect(escapedLiteral?.s).not.toBe(operators?.s);
+		expect(target.some(part => part.t.includes("\x1b"))).toBe(false);
+	});
 
 	it("shows the first two files while collapsed and every file expanded", () => {
 		const small = grepToolRenderer.describeResult(result, collapsed, { pattern: "hit" });
