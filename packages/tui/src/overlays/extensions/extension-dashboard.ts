@@ -23,7 +23,7 @@ import type { Component } from "../../tui";
 import { col, keyed, node, span, text } from "../../native/describe";
 import { Memo } from "../../native/memo";
 import type { DescribeContext, NativeNode, NativeScroll, NativeUiEvent } from "../../native/node";
-import { actionBar, actionButton } from "../../native/overlay";
+import { actionBar, actionButton, iconButton } from "../../native/overlay";
 import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent } from "../../native/picker";
 import { type KeyId, matchesKey } from "../../keys";
 import { parseSgrMouse } from "../../mouse";
@@ -711,13 +711,12 @@ export class ExtensionDashboard implements Component {
 					text(DASHBOARD_TITLE, { role: "omp.app.title" }),
 					text([span(query ? `${shown} of ${total}` : `${total} extensions`, "muted")], { truncate: "end" }),
 				]),
-				node("icon", {
-					name: "x",
-					role: "omp.app.ibtn",
-					title: `Close  ${formatTooltipKey(boundKeys("app.interrupt", ["escape"])[0] ?? "escape")}`,
-					aria: "Close",
-					actions: { click: "close" },
-				}),
+				iconButton(
+					"x",
+					"close",
+					`Close  ${formatTooltipKey(boundKeys("app.interrupt", ["escape"])[0] ?? "escape")}`,
+					{ aria: "Close" },
+				),
 			],
 			"head",
 		);

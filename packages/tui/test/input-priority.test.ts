@@ -227,6 +227,41 @@ describe("TUI input priority", () => {
 		}
 	});
 
+	it("gives a foreground listener first refusal over a preexisting Ctrl+O shortcut", async () => {
+		await initTheme();
+		const terminal = new VirtualTerminal(40, 8);
+		const tui = new TUI(terminal);
+		const editor = new CustomEditor(getEditorTheme());
+		const received: string[] = [];
+		tui.addChild(editor);
+		tui.setFocus(editor);
+		tui.addInputListener(data => {
+			if (data !== "\x0f") return undefined;
+			received.push("global");
+			return { consume: true };
+		});
+		const detach = tui.addInputListener(
+			data => {
+				if (tui.getFocused() !== editor || data !== "\x0f") return undefined;
+				received.push("pty");
+				return { consume: true };
+			},
+			{ prepend: true },
+		);
+
+		try {
+			tui.start();
+			await drainNextTick();
+			terminal.sendInput("\x0f");
+			expect(received).toEqual(["pty"]);
+			detach();
+			terminal.sendInput("\x0f");
+			expect(received).toEqual(["pty", "global"]);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("keeps printable PTT keys visible to raw input listeners while the hold still records", async () => {
 		await initTheme();
 		vi.useFakeTimers();

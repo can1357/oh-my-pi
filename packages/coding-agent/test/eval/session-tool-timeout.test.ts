@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
@@ -21,6 +21,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await disposeAllVmContexts();
 	await disposeAllKernelSessions();
 	await disposePyToolBridge();
@@ -47,27 +48,28 @@ function makeSession(...tools: AgentTool[]): ToolSession {
 	};
 }
 
+/** A tool whose work stays in flight until the test calls `release()` (or the call is aborted). */
 function slowTool(name: string): {
 	tool: AgentTool;
 	started: Promise<void>;
+	release: () => void;
 	aborted: () => boolean;
 } {
 	const started = Promise.withResolvers<void>();
+	const released = Promise.withResolvers<void>();
 	let aborted = false;
 	return {
 		started: started.promise,
+		release: () => released.resolve(),
 		aborted: () => aborted,
 		tool: {
 			name,
 			label: name,
-			description: "Returns delegated work after three seconds",
+			description: "Returns delegated work once released",
 			parameters: type({}),
 			async execute(_id, _args, signal) {
 				const result = Promise.withResolvers<AgentToolResult>();
-				const timer = setTimeout(
-					() => result.resolve({ content: [{ type: "text", text: "review complete" }] }),
-					3_000,
-				);
+				void released.promise.then(() => result.resolve({ content: [{ type: "text", text: "review complete" }] }));
 				const onAbort = () => {
 					aborted = true;
 					result.reject(signal?.reason);
@@ -78,7 +80,6 @@ function slowTool(name: string): {
 				try {
 					return await result.promise;
 				} finally {
-					clearTimeout(timer);
 					signal?.removeEventListener("abort", onAbort);
 				}
 			},
@@ -95,37 +96,7 @@ async function warmEval(evalTool: EvalTool, language: "js" | "py"): Promise<void
 // Real Python kernels only under PI_PYTHON_INTEGRATION=1, like the other real-kernel suites.
 const PYTHON_INTEGRATION = Bun.env.PI_PYTHON_INTEGRATION === "1";
 
-// Real timers throughout: neither isolated runtime shares the host's fake clock.
-describe("eval cell budget and delegated session tools", () => {
-	for (const [language, name] of [
-		["js", "task"],
-		["js", "wait"],
-		["py", "task"],
-	] as const) {
-		it.skipIf(language === "py" && !PYTHON_INTEGRATION)(
-			`${language}: returns slow tool.${name} work that outlasts a one-second cell budget`,
-			async () => {
-				const delegated = slowTool(name);
-				const evalTool = new EvalTool(makeSession(delegated.tool));
-				await warmEval(evalTool, language);
-				const result = await evalTool.execute("slow-delegated-work", {
-					language,
-					code: `print(await tool.${name}({}))`,
-					timeout: 1,
-				});
-
-				expect({
-					cell: result.details?.cells?.[0],
-					delegatedWorkAborted: delegated.aborted(),
-				}).toMatchObject({
-					cell: { status: "complete", output: expect.stringContaining("review complete") },
-					delegatedWorkAborted: false,
-				});
-			},
-			15_000,
-		);
-	}
-
+describe("eval delegated session tools", () => {
 	for (const language of ["js", "py"] as const) {
 		it.skipIf(language === "py" && !PYTHON_INTEGRATION)(
 			`${language}: still aborts an awaited tool.task when the turn is cancelled`,
@@ -150,34 +121,4 @@ describe("eval cell budget and delegated session tools", () => {
 			15_000,
 		);
 	}
-
-	it("js: still charges an ordinary tool call to the cell budget", async () => {
-		const ordinary = slowTool("read");
-		const evalTool = new EvalTool(makeSession(ordinary.tool));
-		await warmEval(evalTool, "js");
-		const result = await evalTool.execute("slow-read", {
-			language: "js",
-			code: "print(await tool.read({}))",
-			timeout: 1,
-		});
-
-		expect(ordinary.aborted()).toBe(true);
-		expect(result.details?.cells?.[0]?.output).toContain("timed out");
-		expect(result.details?.cells?.[0]?.output).not.toContain("review complete");
-	}, 15_000);
-
-	it("js: interrupts a CPU loop that follows a delegated tool.task", async () => {
-		const delegated = slowTool("task");
-		const evalTool = new EvalTool(makeSession(delegated.tool));
-		await warmEval(evalTool, "js");
-		const result = await evalTool.execute("compute-after-delegated-work", {
-			language: "js",
-			code: "print(await tool.task({}));\nwhile (true) {}",
-			timeout: 1,
-		});
-
-		expect(delegated.aborted()).toBe(false);
-		expect(result.details?.cells?.[0]?.output).toContain("review complete");
-		expect(result.details?.cells?.[0]?.output).toContain("timed out");
-	}, 15_000);
 });

@@ -15,6 +15,10 @@ export const frameDefs = {
 			"supportedProtocolVersions?": "number.integer[]",
 			"maxFrameBytes?": "number.integer",
 			"maxReassembledFrameBytes?": "number.integer",
+			"supportsBashExcludeFromContext?": doc(
+				"boolean",
+				"`bash` accepts `excludeFromContext`; require exactly true before sending excluded commands.",
+			),
 		},
 		"First frame after startup; transport fields are absent on servers without protocol v2.",
 	),
@@ -26,6 +30,10 @@ export const frameDefs = {
 			"model?": "string",
 			"httpStatus?": "number.integer",
 			retryable: doc("boolean", "Transient: resubmitting later may succeed (omp's own retries are exhausted)."),
+			"code?": doc(
+				"'cost_cap'",
+				"`cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request.",
+			),
 		},
 		'Failure detail of a `prompt_result` with `status: "error"`.',
 	),
@@ -103,6 +111,18 @@ export const frameDefs = {
 		{ type: "'live_end'", "error?": "string" },
 		"Sent exactly once when a live session ends; `error` carries the failure cause.",
 	),
+	DictationStateEvent: doc(
+		{ type: "'dictation_state'", captureId: "string", state: "'starting' | 'recording' | 'transcribing'" },
+		"State of one draft-only microphone capture.",
+	),
+	DictationTranscriptEvent: doc(
+		{ type: "'dictation_transcript'", captureId: "string", text: "string" },
+		"Full accumulated draft preview; replaces the previous preview for this capture.",
+	),
+	DictationEndEvent: doc(
+		{ type: "'dictation_end'", captureId: "string", text: "string", "error?": "string" },
+		"Exactly one terminal frame per capture; text is the accumulated result.",
+	),
 	BtwDeltaEvent: doc(
 		{ type: "'btw_delta'", recordId: "string", delta: "string" },
 		"Text appended to the running side question's latest answer.",
@@ -163,6 +183,7 @@ export const frameDefs = {
 		title: "string",
 		"placeholder?": "string",
 		"timeout?": "number.integer",
+		"secret?": "boolean",
 	},
 	EditorUiRequest: {
 		type: UI,

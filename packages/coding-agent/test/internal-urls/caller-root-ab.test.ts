@@ -23,7 +23,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { resetRegisteredArtifactDirsForTests } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
-import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { ensurePersistedRoster } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -124,7 +124,7 @@ async function setupAbRoots(
 }
 
 /** Install the A/B trap: B's roster scan ran first AND the global Main ref is B. */
-async function installGlobalMainB(registry: AgentRegistry, rootB: string): Promise<void> {
+async function installGlobalMainB(registry: AgentRegistryApi, rootB: string): Promise<void> {
 	await ensurePersistedRoster(registry, rootB);
 	registry.register({
 		id: MAIN_AGENT_ID,

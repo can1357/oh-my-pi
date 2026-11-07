@@ -10,7 +10,7 @@ import { openAutoresearchStorageIfExists } from "../storage";
 import type { AutoresearchToolFactoryOptions } from "../types";
 
 const updateNotesSchema = type({
-	body: type("string").describe("replacement notes body"),
+	"body?": type("string").describe("replacement notes body"),
 	"append_idea?": type("string").describe("append as bullet under Ideas instead of replacing body"),
 });
 
@@ -40,10 +40,18 @@ export function createUpdateNotesTool(
 				};
 			}
 
-			const nextNotes =
-				params.append_idea !== undefined && params.append_idea.trim().length > 0
-					? appendIdea(session.notes, params.append_idea.trim())
-					: params.body;
+			const trimmedIdea = params.append_idea?.trim() ?? "";
+			const nextNotes = trimmedIdea.length > 0 ? appendIdea(session.notes, trimmedIdea) : params.body;
+			if (nextNotes === undefined) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Error: pass `body` to replace notes or `append_idea` to add an idea.",
+						},
+					],
+				};
+			}
 
 			storage.updateSession(session.id, { notes: nextNotes });
 			const refreshed = storage.getSessionById(session.id);
@@ -59,7 +67,7 @@ export function createUpdateNotesTool(
 					{
 						type: "text",
 						text:
-							params.append_idea !== undefined
+							trimmedIdea.length > 0
 								? `Appended idea (${nextNotes.length} chars total).`
 								: `Notes updated (${nextNotes.length} chars).`,
 					},

@@ -43,13 +43,22 @@ function withEnv(vars: Record<string, string | undefined>, fn: () => void): void
 }
 
 describe("settings registry", () => {
-	it("lets an override env beat every layer while a fallback env only replaces the default", () => {
+	it("ranks a runtime override over an override env, that env over persisted layers, and a fallback env only over the default", () => {
 		withEnv({ PI_EDIT_FUZZY: "0", SEARXNG_ENDPOINT: "https://env.example" }, () => {
-			const configured = Settings.isolated({ "edit.fuzzyMatch": true, "searxng.endpoint": "https://cfg.example" });
-			expect(cfgEditFuzzyMatch.get(configured)).toBe(false);
-			expect(cfgEditFuzzyMatch.provenance(configured)).toBe("env");
-			expect(cfgSearxngEndpoint.get(configured)).toBe("https://cfg.example");
-			expect(cfgSearxngEndpoint.provenance(configured)).toBe("runtime");
+			const settings = Settings.isolated();
+			cfgEditFuzzyMatch.set(settings, true);
+			cfgSearxngEndpoint.set(settings, "https://cfg.example");
+			expect(cfgEditFuzzyMatch.get(settings)).toBe(false);
+			expect(cfgEditFuzzyMatch.provenance(settings)).toBe("env");
+			expect(cfgSearxngEndpoint.get(settings)).toBe("https://cfg.example");
+			expect(cfgSearxngEndpoint.provenance(settings)).toBe("global");
+
+			// A CLI flag or session-only write is more specific than the environment.
+			cfgEditFuzzyMatch.override(settings, true);
+			expect(cfgEditFuzzyMatch.get(settings)).toBe(true);
+			expect(cfgEditFuzzyMatch.provenance(settings)).toBe("runtime");
+			cfgEditFuzzyMatch.clearOverride(settings);
+			expect(cfgEditFuzzyMatch.get(settings)).toBe(false);
 
 			const bare = Settings.isolated();
 			expect(cfgSearxngEndpoint.get(bare)).toBe("https://env.example");
@@ -58,10 +67,11 @@ describe("settings registry", () => {
 	});
 
 	it("parses a boolean env var like parseFlag: empty is unset, unlisted text is false", () => {
-		const configuredOff = Settings.isolated({ "eval.py": false });
+		const configuredOff = Settings.isolated();
+		cfgEvalPy.set(configuredOff, false);
 		withEnv({ PI_PY: "" }, () => {
 			expect(cfgEvalPy.get(configuredOff)).toBe(false);
-			expect(cfgEvalPy.provenance(configuredOff)).toBe("runtime");
+			expect(cfgEvalPy.provenance(configuredOff)).toBe("global");
 		});
 		withEnv({ PI_PY: "y" }, () => expect(cfgEvalPy.get(configuredOff)).toBe(true));
 		withEnv({ PI_PY: "disabled" }, () => {
@@ -169,6 +179,45 @@ describe("settings registry", () => {
 		expect(cfgTemperature.get(child)).toBe(0.1);
 		expect(childTemperatures).toEqual([0.7, 0.1]);
 		expect(cfgTopP.get(parent)).not.toBe(0.5);
+	});
+
+	it("keeps host overlays authoritative and delegates only subagent-derived views", () => {
+		const operator = Settings.isolated();
+		const host = operator.overlay({ modelRoles: { review: "mock/target" } });
+		const child = host.overlay({ modelRoles: { advisor: "mock/other" } }, { derived: true });
+		const grandchild = child.overlay({}, { derived: true });
+		expect(operator.grantAuthority().getModelRole("review")).toBeUndefined();
+		expect(host.grantAuthority().getModelRole("review")).toBe("mock/target");
+		expect(child.grantAuthority()).toBe(host.grantAuthority());
+		expect(grandchild.grantAuthority()).toBe(host.grantAuthority());
+		expect(child.grantAuthority().getModelRole("advisor")).toBeUndefined();
+	});
+
+	it("rebuilds a host overlay's grant authority after its parent changes", () => {
+		const operator = Settings.isolated({ modelRoles: { review: "mock/target" } });
+		const host = operator.overlay();
+		expect(host.grantAuthority().getModelRole("review")).toBe("mock/target");
+		operator.setModelRole("review", "mock/other");
+		expect(host.grantAuthority().getModelRole("review")).toBe("mock/other");
+	});
+
+	it.each([false, true])("preserves derived=%s when restoring overlay layers", derived => {
+		const parent = Settings.isolated();
+		const child = parent.overlay({ modelRoles: { review: "mock/target" } }, { derived });
+		const restored = parent.restoreOverlay(child.overlayLayers());
+		expect(restored.getModelRole("review")).toBe("mock/target");
+		expect(restored.grantAuthority().getModelRole("review")).toBe(derived ? undefined : "mock/target");
+	});
+
+	it("preserves a derived view's host authority when cloning for cwd", async () => {
+		const operator = Settings.isolated();
+		const host = operator.overlay({ modelRoles: { review: "mock/target" } });
+		const child = host.overlay({ modelRoles: { advisor: "mock/other" } }, { derived: true });
+		const clone = await child.cloneForCwd(host.getCwd());
+		expect(clone.grantAuthority().getModelRole("review")).toBe("mock/target");
+		expect(clone.grantAuthority().getModelRole("advisor")).toBeUndefined();
+		const hostClone = await host.cloneForCwd(host.getCwd());
+		expect(hostClone.grantAuthority().getModelRole("review")).toBe("mock/target");
 	});
 
 	it("delivers every synchronous parent write to an overlay", async () => {

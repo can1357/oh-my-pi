@@ -515,6 +515,12 @@ describe("tool-owned dynamic approval declarations", () => {
 			"rm -rf -v /",
 			"rm -rf -i /",
 			"rm -v -rf /",
+			"dd if=/dev/zero of=/dev/sda bs=1M",
+			"dd if=image.iso of=/dev/disk2 bs=4m",
+			"dd if=/dev/urandom of=/dev/nvme0n1",
+			"dd if=image.img of=/dev/ttyS0",
+			"dd if=image.img of=/dev/nullb0",
+			"dd if=big.mov of=/dev/null; dd if=image.iso of=/dev/sdb",
 		]) {
 			expect(bashApproval(command)).toEqual({ tier: "exec", override: true, reason: "Critical pattern detected" });
 		}
@@ -531,6 +537,11 @@ describe("tool-owned dynamic approval declarations", () => {
 			"rm -rf -- ./build",
 			"rm --recursive --force ./dist",
 			"rm -v /tmp/scratch",
+			"dd if=big.mov of=/dev/null bs=4m count=100",
+			"dd if=/dev/sda of=/dev/null bs=1M count=10",
+			"dd if=big.mov of=/dev/stdout",
+			"dd if=big.mov of=/dev/fd/1 status=none",
+			"dd if=big.mov of=/dev/null 2>&1",
 		]) {
 			expect(bashApproval(command)).toBe("exec");
 		}
@@ -653,6 +664,77 @@ describe("tool-owned dynamic approval declarations", () => {
 			override: true,
 			policy: "prompt",
 			reason: "Prompt required by bash pattern: curl *",
+		});
+	});
+
+	it("applies deny precedence over an earlier prompt rule across non-compound-eligible command segments", () => {
+		const settingsOverrides = {
+			"bash.patterns": [
+				{ match: "curl *", approval: "prompt" },
+				{ match: "rm -rf tmp/ok", approval: "prompt" },
+				{ match: "rm -rf *", approval: "deny" },
+			],
+		};
+
+		for (const command of [
+			"curl http://x -o out.txt; rm -rf tmp/victim",
+			"curl http://x -o out.txt | rm -rf tmp/victim",
+			"curl http://x -o out.txt && rm -rf tmp/victim",
+			"rm -rf tmp/ok; rm -rf tmp/victim",
+		]) {
+			expect(bashApproval(command, settingsOverrides)).toEqual({
+				tier: "exec",
+				override: true,
+				policy: "deny",
+				reason: "Blocked by bash pattern: rm -rf *",
+			});
+		}
+
+		// Within a single segment, first-match ordering still picks the earlier prompt over the broader deny.
+		expect(bashApproval("rm -rf tmp/ok; echo done", settingsOverrides)).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "prompt",
+			reason: "Prompt required by bash pattern: rm -rf tmp/ok",
+		});
+	});
+
+	it("keeps operator grantAuthority deny and prompt rules when project settings override bash.patterns with allow", () => {
+		const operatorSettings = Settings.isolated({
+			"bash.patterns": [
+				{ match: "rm -rf *", approval: "deny" },
+				{ match: "git push *", approval: "prompt" },
+			],
+		});
+		const sessionSettings = Settings.isolated({
+			"bash.patterns": [{ match: "*", approval: "allow" }],
+		});
+		spyOn(sessionSettings, "grantAuthority").mockReturnValue(operatorSettings);
+		spyOn(sessionSettings, "getShellConfig").mockReturnValue({
+			shell: "/bin/bash",
+			args: ["-c"],
+			env: {},
+			prefix: undefined,
+		});
+		const bash = new BashTool({ settings: sessionSettings } as unknown as ConstructorParameters<typeof BashTool>[0]);
+		const approval = bash.approval;
+		if (typeof approval !== "function") throw new Error("Bash approval must be dynamic");
+
+		expect(approval({ command: "rm -rf /tmp/victim" })).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "deny",
+			reason: "Blocked by bash pattern: rm -rf *",
+		});
+		expect(approval({ command: "git push origin main" })).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "prompt",
+			reason: "Prompt required by bash pattern: git push *",
+		});
+		expect(approval({ command: "make build" })).toEqual({
+			tier: "write",
+			policy: "allow",
 		});
 	});
 	it("never auto-approves a command that only prefixes an allow pattern", () => {

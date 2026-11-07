@@ -437,6 +437,12 @@ impl ShellFilesystem {
 	pub fn blocking(filesystem: Option<Self>) -> BlockingFs {
 		filesystem.map_or_else(BlockingFs::native, |filesystem| filesystem.into_fs().blocking())
 	}
+
+	/// Async facade for walker searches: `filesystem`'s provider, or the
+	/// native host filesystem when absent.
+	pub fn resolve(filesystem: Option<Self>) -> Fs {
+		filesystem.map_or_else(Fs::native, Self::into_fs)
+	}
 }
 
 impl ShellFsRequest {

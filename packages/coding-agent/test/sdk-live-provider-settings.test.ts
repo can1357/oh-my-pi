@@ -29,7 +29,7 @@ describe("primary-agent provider settings changed mid-session", () => {
 		else Bun.env.PI_DIALECT = previousDialectEnv;
 	});
 
-	it("applies thinking budgets, Kimi format, websocket policy, and tool format on the next request", async () => {
+	it("applies thinking budgets, Kimi format, and tool format on the next request without leaking Codex websocket policy", async () => {
 		delete Bun.env.PI_DIALECT;
 		using tempDir = TempDir.createSync("@pi-live-provider-settings-");
 		const api = "test-live-provider-settings";
@@ -99,7 +99,8 @@ describe("primary-agent provider settings changed mid-session", () => {
 		expect(second).not.toBe(first);
 		expect(second?.options?.thinkingBudgets?.low).toBe(777);
 		expect(second?.options?.kimiApiFormat).toBe("openai");
-		expect(second?.options?.preferWebsockets).toBe(false);
+		// `providers.openaiWebsockets` governs Codex only; an unrelated API keeps its own transport.
+		expect(second?.options?.preferWebsockets).toBeUndefined();
 		// Owned dialect: no native tool specs; the catalog rides in the system prompt.
 		expect(second?.context.tools).toBeUndefined();
 		expect((second?.context.systemPrompt?.length ?? 0) > (first?.context.systemPrompt?.length ?? 0)).toBe(true);

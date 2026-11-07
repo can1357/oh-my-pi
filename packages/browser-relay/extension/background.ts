@@ -9,8 +9,14 @@
  * worker alive while connected (Chrome 116+); a chrome.alarms tick revives it
  * and re-dials after Chrome reaps it while disconnected.
  */
-import type { ExtToRelayMessage, RelayToExtMessage, TabSnapshot } from "../../coding-agent/src/tools/browser/relay/protocol";
+import {
+	EXTENSION_RELOAD_PROTOCOL_VERSION,
+	type ExtToRelayMessage,
+	type RelayToExtMessage,
+	type TabSnapshot,
+} from "../../coding-agent/src/tools/browser/relay/protocol";
 import { ownedDebuggerTabs } from "./debugger-ownership";
+import { pastForeignFrames } from "./foreign-frames";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
@@ -18,6 +24,13 @@ const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 10_000;
 const REMOVE_TAB_ATTEMPTS = 3;
 const REMOVE_TAB_RETRY_MS = 500;
+
+/**
+ * The omp version that installed this script, declared by the line the installer puts above it
+ * (`stampRelayExtensionScript`); undeclared in an unstamped build. Read from the script, not the manifest:
+ * after the files change, a Chrome restart re-reads manifest.json but keeps running the old service worker.
+ */
+declare const OMP_INSTALL_VERSION: string | undefined;
 
 let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
@@ -207,6 +220,8 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		userAgent: navigator.userAgent,
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
+		ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
+		reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
 		tabs: snapshots,
 		attachedTabIds,
 	};
@@ -215,9 +230,11 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 /** Run one relay RPC; `origin` is the socket it came in on, which alone can carry its answer. */
 async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: WebSocket): Promise<unknown> {
 	switch (msg.op) {
-		case "attach":
-			await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+		case "attach": {
+			const attach = () => chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+			await (msg.clearForeignFrames ? pastForeignFrames(msg.tabId, attach) : attach());
 			return {};
+		}
 		case "detach":
 			relayInitiatedDetachTabs.add(msg.tabId);
 			try {
@@ -227,12 +244,15 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: Web
 				relayInitiatedDetachTabs.delete(msg.tabId);
 				throw error;
 			}
-		case "send":
-			return await chrome.debugger.sendCommand(
-				msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
-				msg.method,
-				msg.params,
-			);
+		case "send": {
+			const send = () =>
+				chrome.debugger.sendCommand(
+					msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
+					msg.method,
+					msg.params,
+				);
+			return await (msg.clearForeignFrames ? pastForeignFrames(msg.tabId, send) : send());
+		}
 		case "createTab": {
 			const tab = await chrome.tabs.create({ url: msg.url, active: msg.active ?? true });
 			const snap = snapshot(tab);
@@ -266,6 +286,11 @@ function handleRelayMessage(socket: WebSocket, raw: string): void {
 		return;
 	}
 	if (msg.t === "pong") return;
+	if (msg.t === "reload") {
+		// The relay rewrote this extension's files; reloading re-reads them (a Chrome restart would not).
+		chrome.runtime.reload();
+		return;
+	}
 	// Answer only on the socket the RPC came in on: RPC ids are local to that connection, and the relay already
 	// failed the call when it closed.
 	const answer = (reply: ExtToRelayMessage): void => {

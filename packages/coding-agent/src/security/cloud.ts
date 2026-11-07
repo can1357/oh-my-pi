@@ -200,12 +200,15 @@ export class CodexSecurityCloudClient {
 		for (const [key, value] of Object.entries(options.query ?? {})) {
 			if (value !== undefined) url.searchParams.set(key, String(value));
 		}
+		let rejectedAccessToken: string | undefined;
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			const access = await resolveExactSecurityOAuthAccess(this.#authStorage, this.#account, {
 				forceRefresh: attempt > 0,
 				refreshReason: attempt > 0 ? "auth-recovery" : undefined,
+				rejectedAccessToken,
 				signal: options.signal,
 			});
+			rejectedAccessToken = access.accessToken;
 			const body = typeof options.body === "function" ? options.body(access.accessToken) : options.body;
 			const headers: Record<string, string> = {
 				Accept: "application/json",

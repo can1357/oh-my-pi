@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import { AsyncJobManager, type AsyncJobManagerApi } from "@oh-my-pi/pi-coding-agent/async";
 import type { AssistantMessage, Context, ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -159,7 +159,7 @@ describe("AgentSession aside delivery", () => {
 			const nextCall = Promise.withResolvers<void>();
 			const waitStarted = Promise.withResolvers<void>();
 			const job = Promise.withResolvers<string>();
-			const manager = new AsyncJobManager({});
+			const manager: AsyncJobManagerApi = new AsyncJobManager({});
 			const settings = Settings.isolated({
 				"compaction.enabled": false,
 				"todo.enabled": false,
@@ -1762,5 +1762,11 @@ describe("AgentSession aside delivery", () => {
 		);
 		expect(notice).toBeDefined();
 		expect(notice && typeof notice.content === "string" ? notice.content : "").toContain("m1");
+		// One-at-a-time steering must deliver the notice and the steer it announces
+		// in the same model call; split, the model answers the notice alone first.
+		expect(mock.calls.length).toBe(2);
+		const steerCall = JSON.stringify(mock.calls[1]!.context.messages);
+		expect(steerCall).toContain("Now available:");
+		expect(steerCall).toContain("delegate to");
 	});
 });

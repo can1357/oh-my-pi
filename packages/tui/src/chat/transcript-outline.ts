@@ -17,6 +17,7 @@ import { type ThemeColor, theme } from "../theme";
 import type { ChatTranscriptBuilder } from "./chat-transcript-builder";
 import { padToWidth } from "../render/utils";
 import { isUsageRowBlock } from "../overlays/usage-row";
+import type { DescribeContext, NativeChild } from "../native/node";
 
 /** One selectable transcript item: a message entry plus its rendered block range. */
 export interface OutlineTarget {
@@ -146,6 +147,32 @@ export function outlineVisibility(
 		}
 		return false;
 	});
+}
+
+/**
+ * Per-target "describes something that shows" flags: {@link outlineVisibility}
+ * for a TSP page, where blocks describe nodes instead of rendering rows. An
+ * empty `col`/`row` (an interrupted turn with no output) shows nothing.
+ */
+export function describedVisibility(
+	blocks: readonly Component[],
+	targets: readonly OutlineTarget[],
+	cx: DescribeContext,
+): boolean[] {
+	return targets.map(target => {
+		for (let index = target.start; index < target.end; index++) {
+			if (shows(blocks[index]!, cx)) return true;
+		}
+		return false;
+	});
+}
+
+/** Whether `child` describes a node that shows: a layout `col`/`row` only through a child that does. */
+function shows(child: NativeChild, cx: DescribeContext): boolean {
+	const node = "k" in child ? child : child.describe?.(cx);
+	if (!node) return false;
+	if (node.k !== "col" && node.k !== "row") return true;
+	return (node.c ?? []).some(grandchild => shows(grandchild, cx));
 }
 
 /** Dotted horizontal rule with rounded corners, spanning the outline width. */

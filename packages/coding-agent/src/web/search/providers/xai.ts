@@ -234,6 +234,11 @@ function buildRequestBody(params: SearchParams): Record<string, unknown> {
 			{ role: "user", content: query },
 		],
 		tools: searchTools(parsed, params.recency),
+		// Every request here is a search. Under the default `auto`, Grok often
+		// answers keyword queries from its weights without calling a hosted tool;
+		// that answer has no sources, so the pipeline discards it and falls back
+		// to engines that cannot read X posts.
+		tool_choice: "required",
 		reasoning: { effort: XAI_SEARCH_REASONING_EFFORT },
 	};
 
