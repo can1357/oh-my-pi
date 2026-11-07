@@ -1,0 +1,79 @@
+# eng-gates project config. PROTECTED: agents must not edit this file (guard.config fails if they do).
+# Runner: python tools/eng-gates/gate.py {fast|full|doctor}
+#   Windows: use `python` (or `uv run python`); `python3` is the Microsoft Store stub there.
+# Toolchain: `bun` on PATH must satisfy package.json `packageManager` (>= 1.4.4);
+#   oxlint / oxfmt / tsgo come from node_modules (`bun install`).
+# The checks mirror the repo's own scripts (`check:ts`, `lint:rs`, `test:rs`) instead of the
+# eslint / vitest / tsc defaults, which this monorepo does not use.
+
+[gate]
+base = "origin/main" # "changed" means changed since merge-base with this ref
+timeout = 900 # seconds per check
+strict = false # true (or CI=1): a missing tool fails instead of skipping
+ts_src = "packages"
+# Lint / format / dead-code policy files are gate config too.
+protected = [".oxlintrc.json", ".oxfmtrc.json", ".fallowrc.jsonc", "bunfig.toml"]
+# paths where new suppressions are not reported (generated code, vendored code):
+suppress_ignore = [
+	"**/generated/**",
+	"**/*.generated.ts",
+	"**/*_pb2.py",
+	"**/*.gen.ts",
+	"**/vendor/**",
+	"packages/natives/native/**",
+]
+
+[ub] # Uncle Bob's gates (ub-mode); POSIX-only launchers, reported as missing on Windows
+crap = 10
+dry = 0.8
+
+[tools]
+# ub_dir = "~/.local/share/eng-gates/ub"
+
+# ---------- Rust: the repo's task runner keeps the fork / vendored crate excludes ----------
+[check."rust.clippy"]
+tool = "bun"
+cmd = "bun scripts/run-rs-task.ts lint:rs"
+
+[check."rust.test"]
+tool = "bun"
+cmd = "bun scripts/run-rs-task.ts test:rs"
+
+# ---------- TS ----------
+# tsgo per package, exactly what `bun run check:ts` runs after its lint/format step.
+[check."ts.types"]
+tool = "bun"
+cmd = "bun run --filter ./packages/* --sequential --if-present check:types"
+
+# oxlint with the repo's .oxlintrc.json; changed files must be warning-free.
+[check."ts.lint"]
+tool = "oxlint"
+cmd = "oxlint --deny-warnings {files:ts}"
+requires = [".oxlintrc.json"]
+
+# Same globs as `bun run check:tools`: the repo formats only these trees (whole set, ~3 s).
+[check."ts.fmt"]
+lang = "ts"
+tier = "fast"
+desc = "oxfmt --check"
+tool = "oxfmt"
+cmd = "oxfmt --check 'packages/*/src/**/*.{ts,tsx}' 'packages/*/{test,bench,examples,scripts}/**/*.ts' 'packages/*/*.ts' 'scripts/**/*.ts'"
+requires = [".oxfmtrc.json"]
+
+# Test files affected by the change (bun follows the import graph from changed files).
+# The whole partitioned suite is `bun run test`.
+[check."ts.test"]
+tool = "bun"
+cmd = "bun test --changed=origin/main --pass-with-no-tests"
+
+# Dead code, architecture, duplication and complexity of the change, with the repo's
+# .fallowrc.jsonc; only findings introduced since the base fail. Replaces knip.
+[check."ts.knip"]
+enabled = false
+
+[check."ts.fallow"]
+lang = "ts"
+tier = "full"
+desc = "fallow audit: dead code, cycles, duplication, complexity (introduced only)"
+tool = "bun"
+cmd = "bun x fallow@3.41.0 audit"

@@ -99,3 +99,6 @@ packages/coding-agent/bench/boot-baseline.json
 /.bazelrc.user
 
 .parity/
+.gates/last.json
+.gates/approved.json
+.metrics/

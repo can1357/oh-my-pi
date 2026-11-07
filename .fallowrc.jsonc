@@ -27,5 +27,11 @@
 		],
 		"ignoreImports": true
 	},
-	"rules": {}
+	// Complexity is advisory: it is reported, but only dead code, cycles and duplication
+	// fail `fallow audit` (the eng-gates `ts.fallow` check).
+	"rules": {
+		"complexity-cyclomatic": "warn",
+		"complexity-cognitive": "warn",
+		"complexity-crap": "warn"
+	}
 }
