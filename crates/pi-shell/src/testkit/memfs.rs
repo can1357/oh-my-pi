@@ -457,6 +457,10 @@ impl File for MemFile {
 		FileKind::Regular
 	}
 
+	fn on_filesystem(&self) -> bool {
+		true
+	}
+
 	fn os_handle(&self) -> Option<OsHandle> {
 		None
 	}
@@ -501,6 +505,10 @@ impl File for NullFile {
 
 	fn kind(&self) -> FileKind {
 		FileKind::Device
+	}
+
+	fn on_filesystem(&self) -> bool {
+		false
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {
@@ -830,6 +838,14 @@ impl File for LockedFile {
 
 	fn kind(&self) -> FileKind {
 		FileKind::Regular
+	}
+
+	fn stat(&self) -> io::Result<Stat> {
+		self.file.stat()
+	}
+
+	fn on_filesystem(&self) -> bool {
+		self.file.on_filesystem()
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {
