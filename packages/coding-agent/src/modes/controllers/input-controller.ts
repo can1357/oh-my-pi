@@ -318,6 +318,7 @@ export class InputController {
 	#expandToolsListenerInstalled = false;
 	#inlineMouseListenerInstalled = false;
 	#linkHintListenerInstalled = false;
+	#beforeShutdownListenerInstalled = false;
 
 	/** Click-candidate id the hover band currently tracks; repaint only on change. */
 	#lastHoverClickId: string | undefined;
@@ -367,6 +368,24 @@ export class InputController {
 	setupKeyHandlers(): void {
 		this.#draftText ??= this.ctx.editor.getText();
 		this.ctx.editor.setActionKeys("app.interrupt", this.ctx.keybindings.getKeys("app.interrupt"));
+		if (!this.#beforeShutdownListenerInstalled) {
+			this.#beforeShutdownListenerInstalled = true;
+			this.ctx.ui.addInputListener(
+				data => {
+					if (!this.ctx.isAwaitingShutdown) return undefined;
+					const clear = this.ctx.keybindings.matches(data, "app.clear");
+					const exit = this.ctx.keybindings.matches(data, "app.exit");
+					if (!clear && !exit) return undefined;
+					// A held initial quit key must not bypass its own hook.
+					if (!isKeyRelease(data) && !isKeyRepeat(data)) {
+						if (clear) this.handleCtrlC();
+						else this.handleCtrlD();
+					}
+					return { consume: true };
+				},
+				{ prepend: true },
+			);
+		}
 		if (!this.#linkHintListenerInstalled) {
 			this.#linkHintListenerInstalled = true;
 			// First, so a tag letter typed in link-hint mode reaches no other listener or the editor.
@@ -1087,6 +1106,10 @@ export class InputController {
 
 	setupEditorSubmitHandler(): void {
 		const submit = async (text: string) => {
+			if (this.ctx.isAwaitingShutdown) {
+				this.ctx.editor.setCollapsedText(text);
+				return;
+			}
 			const submittedText = text;
 			// The Editor resets before calling onSubmit, so this is normally empty;
 			// different editor text after an await below is a newer draft.
@@ -1717,7 +1740,7 @@ export class InputController {
 		// IPC). The 2s session_shutdown cap (see runner.ts) already bounds the
 		// common case; this is the defense-in-depth ladder for everything
 		// else. See issue #2600.
-		if (this.ctx.isShuttingDown) {
+		if (this.ctx.isShuttingDown || this.ctx.isAwaitingShutdown) {
 			// Route through postmortem: this hard-abort can fire while an
 			// extension-load guard window is open, where raw process.exit is a
 			// throwing ExtensionExitError stub (#11789). exitProcess skips the
@@ -1747,6 +1770,10 @@ export class InputController {
 	}
 
 	handleCtrlD(): void {
+		if (this.ctx.isAwaitingShutdown) {
+			this.ctx.bypassBeforeShutdown();
+			return;
+		}
 		// Editor text (if any) is snapshotted at the start of shutdown() and
 		// persisted as a draft for the next resume. Empty text is also fine —
 		// shutdown clears any stale sidecar in that case.
@@ -2090,6 +2117,7 @@ export class InputController {
 
 	/** Send editor text as a follow-up message (queued behind current stream). */
 	async handleFollowUp(): Promise<void> {
+		if (this.ctx.isAwaitingShutdown) return;
 		let text = this.#compactDraftImages(this.ctx.editor.getExpandedText().trim());
 		let images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 		let imageLinks =

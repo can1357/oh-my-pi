@@ -510,7 +510,7 @@ Canonical event unions and payload types are in `types.ts`.
 - `session_before_branch` / `session_branch`
 - `session_before_compact` / `session.compacting` / `session_compact`
 - `session_before_tree` / `session_tree`
-- `session_shutdown`
+- `session_before_shutdown` / `session_shutdown`
 
 In the interactive TUI, an extension whose factory registers no providers,
 shortcuts, composer shapes, or file fallbacks is loaded after the composer
@@ -534,8 +534,57 @@ Cancelable pre-events:
 - `session_before_branch` → `{ cancel?: boolean; skipConversationRestore?: boolean }`
 - `session_before_compact` → `{ cancel?: boolean; compaction?: CompactionResult }`
 - `session_before_tree` → `{ cancel?: boolean; summary?: { summary: string; details?: unknown } }`
+- `session_before_shutdown` → `{ cancel?: boolean }` (interactive TUI only)
 
 `session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
+
+#### Interactive pre-quit
+
+`session_before_shutdown` runs once per operator-requested quit attempt in the
+main interactive TUI, before close/disposal starts and while extension UI is
+available. It covers `/exit`, `/quit`, Ctrl+D on an empty editor, and double
+Ctrl+C. Focusing a subagent's transcript does not change which session receives
+the event. Restart, OS signals, fatal errors, extension-requested shutdown
+(`ctx.shutdown()`), and print/JSON/RPC/SDK/subagent disposal do not emit it.
+
+Handlers run sequentially. The first `{ cancel: true }` stops dispatch and
+leaves the session open; a later quit attempt emits again. Errors and timeouts
+are reported but do not veto quitting. Overlapping quit requests do not emit
+duplicate events.
+
+The normal 30-second per-handler budget pauses while awaiting supported
+omp-owned dialogs, including `ctx.ui.input`, `confirm`, `select`, `askDialog`,
+`approve`, `editor`, and a presented `custom` component. Time spent setting up
+an async custom component still counts. This does not change the budget policy
+of other `session_before_*` events.
+
+While the hook is pending, another Ctrl+D skips its remaining handlers and
+continues normal teardown, even when a dialog owns focus; no rapid double-tap
+is required. Ctrl+C takes the existing emergency-exit path instead. These keys
+follow the configured `app.exit` and `app.clear` bindings.
+
+The event's `signal` is aborted on bypass, signal-driven disposal, or UI stop.
+Supported handler dialogs are cancelled automatically. Cancellation/timeouts
+stop the host from waiting, but cannot forcibly stop arbitrary extension code
+or undo its side effects; honor the signal before persisting late results.
+
+```ts
+pi.on("session_before_shutdown", async (event, ctx) => {
+	const outcome = await ctx.ui.input("Did this session reach its goal?");
+	if (event.signal.aborted || outcome === undefined) return;
+	pi.appendEntry("session-outcome", { outcome });
+});
+```
+
+Awaiting the prompt keeps the session open; returning `{ cancel: true }` is
+only needed to veto quitting after the prompt. `appendEntry` follows normal
+session persistence: it does not force an empty or ephemeral session onto
+disk. Use extension-owned durable storage if metadata must survive those
+sessions too.
+
+`session_shutdown` remains an awaited, notification-only teardown event with
+concurrent handlers and the existing 2-second handler caps. Use the new event
+for interactive questions, not the teardown notification.
 
 ### Prompt and turn lifecycle
 

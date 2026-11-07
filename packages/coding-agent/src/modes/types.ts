@@ -381,6 +381,8 @@ export interface InteractiveModeContext {
 	/** True once `shutdown()` has started. Read-only from the context;
 	 *  controllers use this to skip work that races with teardown. */
 	readonly isShuttingDown: boolean;
+	/** True while the operator's pre-shutdown extension handlers are pending. */
+	readonly isAwaitingShutdown: boolean;
 	/** True once a graceful `shutdown()` teardown failed at the dispose stage,
 	 *  so the next single Ctrl+C must escape (force-quit) rather than re-run the
 	 *  doomed teardown or merely clear the editor (#12238). */
@@ -397,7 +399,9 @@ export interface InteractiveModeContext {
 	// Lifecycle
 	init(options?: InteractiveModeInitOptions): Promise<void>;
 	playWelcomeIntro(): void;
-	shutdown(): Promise<void>;
+	shutdown(options?: { skipBeforeShutdown?: boolean }): Promise<void>;
+	/** Cancel the pending pre-shutdown hook and continue graceful teardown. */
+	bypassBeforeShutdown(): void;
 	/** Tear down like {@link shutdown}, then relaunch the CLI with the original launch flags, resuming this session. */
 	restart(): Promise<void>;
 	/** Request graceful shutdown at the next fully settled boundary, including background turns. */

@@ -1721,6 +1721,17 @@ export class InteractiveMode implements InteractiveModeContext {
 	lastLeftTapTime = 0;
 	shutdownRequested = false;
 	#isShuttingDown = false;
+	#beforeShutdownController: AbortController | undefined;
+
+	/** True while a cancellable quit attempt is waiting for extension handlers. */
+	get isAwaitingShutdown(): boolean {
+		return this.#beforeShutdownController !== undefined;
+	}
+
+	/** Skip the pending pre-quit handlers without skipping normal teardown. */
+	bypassBeforeShutdown(): void {
+		this.#beforeShutdownController?.abort();
+	}
 	/**
 	 * Set once a graceful {@link shutdown} teardown threw. The teardown is
 	 * promise-memoized (and the session manager latches its disk error), so
@@ -2469,6 +2480,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#signalTeardown = createSessionTeardown({
 			getDraftText: () => this.#inputController.getDraftText(),
 			beginDispose: () => {
+				this.#beforeShutdownController?.abort();
 				this.session.beginDispose();
 				this.statusLine.dispose();
 			},
@@ -8146,6 +8158,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.#beforeShutdownController?.abort();
 		this.syncIdleMaintenanceView(null);
 		this.#hidePlanReview();
 		this.#appearanceRefreshRequest = undefined;
@@ -8235,8 +8248,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async shutdown(): Promise<void> {
-		if (this.#isShuttingDown) return;
+	async shutdown(options?: { skipBeforeShutdown?: boolean }): Promise<void> {
+		if (this.#isShuttingDown || this.isAwaitingShutdown) return;
+		if (this.session.isDisposed && !this.#teardownFailed) return;
 		// The previous graceful teardown failed AT the memoized session.dispose()
 		// (the session is already disposing), so it re-rejects identically forever
 		// and the process can never close (#12238: a corrupted session file makes
@@ -8246,6 +8260,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#teardownFailed) {
 			await this.#quitHostOwned(130);
 			return;
+		}
+		const runner = this.session.extensionRunner;
+		if (!options?.skipBeforeShutdown && runner?.hasHandlers("session_before_shutdown")) {
+			const controller = new AbortController();
+			const { signal } = controller;
+			this.#beforeShutdownController = controller;
+			this.showStatus(`Waiting for exit hooks… (${appKey(this.keybindings, "app.exit")} to skip)`);
+			try {
+				const result = await runner.emit({ type: "session_before_shutdown", signal });
+				if (!signal.aborted && result?.cancel) {
+					this.shutdownRequested = false;
+					this.showStatus("Session close cancelled");
+					return;
+				}
+			} catch (error) {
+				this.showError(`Exit hook failed: ${error instanceof Error ? error.message : String(error)}`);
+			} finally {
+				this.#beforeShutdownController = undefined;
+			}
+			// A signal may have disposed the session, or stop() may have closed the UI,
+			// while an extension was awaiting the operator.
+			if (this.session.isDisposed || this.#dialogLifetime.signal.aborted) return;
 		}
 		this.#beginClose();
 		const worktreePlan = await this.#planOwnedWorktreeExit();
@@ -8322,7 +8358,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * spawning the replacement and lingering only to forward its exit code.
 	 */
 	async restart(): Promise<void> {
-		if (this.#isShuttingDown) return;
+		if (this.#isShuttingDown || this.isAwaitingShutdown) return;
 		this.#beginClose();
 		try {
 			await this.#teardown();
@@ -8467,7 +8503,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async checkShutdownRequested(): Promise<void> {
-		if (!this.shutdownRequested || this.isShuttingDown) return;
+		if (!this.shutdownRequested || this.isShuttingDown || this.isAwaitingShutdown) return;
 		// Quiesce in a loop: an admitted submission that settles may have started a turn
 		// whose recovery work waitForIdle() must observe again before the final decision.
 		for (;;) {
@@ -8487,7 +8523,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			return;
 		}
-		await this.shutdown();
+		await this.shutdown({ skipBeforeShutdown: true });
 	}
 
 	// Extension UI integration

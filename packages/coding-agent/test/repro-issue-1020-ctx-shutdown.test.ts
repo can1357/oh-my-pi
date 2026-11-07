@@ -73,6 +73,7 @@ async function createHost(initializeUi: boolean) {
 		setToolsExpanded() {},
 	}) as InteractiveModeContext;
 	Object.defineProperty(host, "isShuttingDown", { get: () => state.closed });
+	Object.defineProperty(host, "isAwaitingShutdown", { value: false });
 	const controller = new ExtensionUiController(host);
 	if (initializeUi) await controller.initHooksAndCustomTools();
 	else controller.initializeHookRunner({} as ExtensionUIContext, false);
