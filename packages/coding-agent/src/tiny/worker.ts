@@ -10,6 +10,7 @@ import * as path from "node:path";
 import { getTinyModelsCacheDir, logger, setProcessName } from "@oh-my-pi/pi-utils";
 import type {
 	ProgressInfo,
+	TextGenerationModel,
 	TextGenerationPipeline,
 	TextGenerationStringOutput,
 	StoppingCriteria as TransformersStoppingCriteria,
@@ -52,39 +53,23 @@ import { TinyWorkerServer } from "./worker-server";
 
 const STOP_DECODE_WINDOW_TOKENS = 32;
 
-/** ONNX session surface read by the logits-feed shim. */
-interface LogitsFeedSession {
-	readonly inputNames: string[];
-}
-
-/** The loaded model surface the logits-feed shim reads and wraps. */
-interface LogitsFeedModel {
-	forward(modelInputs: Record<string, unknown>): Promise<Record<string, unknown>>;
-	sessions?: Record<string, LogitsFeedSession | undefined>;
-}
-
 /** Whether any loaded ONNX session takes a `logits_to_keep` input (LiquidAI LFM3)
  *  instead of `num_logits_to_keep`, which transformers.js fills in itself. */
-export function needsLogitsToKeepFeed(model: TextGenerationPipeline["model"]): boolean {
-	const sessions = Object.values((model as unknown as LogitsFeedModel).sessions ?? {});
-	return sessions.some(session => session?.inputNames.includes("logits_to_keep") === true);
+export function needsLogitsToKeepFeed(model: TextGenerationModel): boolean {
+	return Object.values(model.sessions).some(session => session.inputNames.includes("logits_to_keep"));
 }
 
 /** Feed `logits_to_keep` (last token only) to graphs that require a logits input
  *  transformers.js does not fill in. Returns false, leaving the model untouched,
  *  when no session declares that input. */
-export function ensureLogitsToKeepFeed(
-	transformers: TransformersRuntime,
-	model: TextGenerationPipeline["model"],
-): boolean {
+export function ensureLogitsToKeepFeed(transformers: TransformersRuntime, model: TextGenerationModel): boolean {
 	if (!needsLogitsToKeepFeed(model)) return false;
-	const target = model as unknown as LogitsFeedModel;
 	// One tensor for the model's lifetime: generation needs last-token logits only,
 	// and dropping the other rows keeps the logits tensor small. LFM3's export
 	// declares this input as int64 shape [1], so the dims are rank-1, not scalar.
 	const keepLast = new transformers.Tensor("int64", [1n], [1]);
-	const forward = target.forward.bind(target);
-	target.forward = modelInputs => forward({ logits_to_keep: keepLast, ...modelInputs });
+	const forward = model.forward.bind(model);
+	model.forward = modelInputs => forward({ logits_to_keep: keepLast, ...modelInputs });
 	return true;
 }
 

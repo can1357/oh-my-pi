@@ -45,10 +45,25 @@ export interface StoppingCriteria {
 /** Text-only pipeline output used by tiny chat requests. */
 export type TextGenerationStringOutput = { generated_text: string }[];
 
+/** One loaded ONNX session; only its declared graph input names are read. */
+export interface InferenceSessionInputs {
+	readonly inputNames: readonly string[];
+}
+
+/**
+ * Causal-LM surface behind a text-generation pipeline: the per-step forward pass
+ * (prefill and every decode step go through it) and the ONNX sessions it runs.
+ */
+export interface TextGenerationModel {
+	forward(modelInputs: Record<string, unknown>): Promise<Record<string, unknown>>;
+	sessions: Record<string, InferenceSessionInputs>;
+}
+
 /** Text-generation pipeline surface used by the tiny worker. */
 export interface TextGenerationPipeline {
 	(text: string, options: Record<string, unknown>): Promise<TextGenerationStringOutput>;
 	tokenizer: TextTokenizer;
+	model: TextGenerationModel;
 }
 
 /** PCM audio and sample rate returned by Kokoro synthesis. */
