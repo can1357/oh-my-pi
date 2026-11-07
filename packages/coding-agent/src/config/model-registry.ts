@@ -40,10 +40,12 @@ import {
 	isCredentialScopedModelCacheProvider,
 	MODELS_DEV_CATALOG_PROVIDER_IDS,
 	modelsDevCatalogFallback,
+	normalizeModelCacheEndpoint,
 	openaiCodexModelManagerOptions,
 	PROVIDER_DESCRIPTORS,
 	resolveModelCacheProviderId,
 	resolveOllamaModelCacheProviderId,
+	scopeModelCacheProviderIdToEndpoint,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { apiServesKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
@@ -205,6 +207,92 @@ interface CustomModelsResult {
 interface ConfiguredModelDiscoveryResult {
 	models: Model<Api>[];
 	replaceRuntimeModels: boolean;
+	/** `#providerConfigIdentity` when the discovery started; published only while it is still current. */
+	configIdentity: string;
+}
+
+/** JSON with every object's keys in sorted order: configuration identity, where member order carries no meaning. */
+function canonicalJson(value: unknown): string {
+	return JSON.stringify(value, (_key, member: unknown) =>
+		member !== null && typeof member === "object" && !Array.isArray(member)
+			? Object.fromEntries(
+					Object.entries(member as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+				)
+			: member,
+	);
+}
+
+/**
+ * Every declared header, in declaration order, with its name and value exactly
+ * as written. Nothing is dropped, lowercased or sorted: any difference refuses
+ * the discovery.
+ *
+ * This is deliberately dumber than the wire. Three rounds of trying to be
+ * exact each bought one case and sold another — canonical JSON, folded names,
+ * dropping a declaration named `Authorization` — in both directions, false
+ * acceptances and false refusals alternating. The last of those was unsound
+ * because the overwrite that justified it is conditional: discovery spreads
+ * its bearer as `apiKey ? { ...configured, Authorization: … } : configured`
+ * (`model-discovery.ts`), so on a keyless provider (`auth: none`, the
+ * documented local-vLLM shape) the configured `Authorization` IS the
+ * credential and goes on the wire.
+ *
+ * Two consequences, both accepted rather than fixed:
+ *
+ *  - Renaming a header to another case, or reordering two static ones, sends
+ *    the same bytes and still refuses. That costs one extra discovery, and it
+ *    is the error direction worth having: the alternative sends a header
+ *    resolved under a configuration that is gone.
+ *  - The `keyless` flag a few fields below would make this wire-exact. It is
+ *    deliberately not used: it would be a fourth conditional on a mechanism
+ *    that has failed on its first three, and all it buys is that extra
+ *    discovery.
+ *
+ * The resolved headers would be exact and are unavailable anyway: resolution
+ * is async and runs a process per `!command`, while this runs synchronously on
+ * every epoch read, once per provider after every configuration mutation.
+ */
+function canonicalHeaderIdentity(headers: Record<string, string>): Array<[string, string]> {
+	return Object.entries(headers);
+}
+
+/**
+ * `only` inside `openRouterRouting` and `vercelGatewayRouting` is an
+ * allowlist, which `OpenRouterRouting` and `VercelGatewayRouting` in
+ * `@oh-my-pi/pi-catalog` distinguish from `.order`, the preference sequence;
+ * both providers document the same split. Writing an allowlist's members the
+ * other way round changes no request, so it must not suppress a discovery
+ * that is still current. `.order` keeps its order.
+ *
+ * Only these typed fields are normalised, and the walk descends only into
+ * `whenThinking`, the one typed nesting of a compat record. `extraBody` is
+ * opaque JSON that the provider copies into the request body verbatim, so a
+ * member of it that happens to be called `only` is an ordered payload, not an
+ * allowlist, and a member called `headers` holds case-sensitive JSON names,
+ * not HTTP field names. Matching on a name wherever it appears reaches into
+ * that body and calls two different requests the same.
+ */
+function canonicalCompatIdentity(compat: unknown): unknown {
+	if (compat === null || typeof compat !== "object" || Array.isArray(compat)) return compat;
+	const record = compat as Record<string, unknown>;
+	const normalized: Record<string, unknown> = { ...record };
+	let changed = false;
+	for (const field of ["openRouterRouting", "vercelGatewayRouting"]) {
+		const routing = record[field];
+		if (routing === null || typeof routing !== "object" || Array.isArray(routing)) continue;
+		const only = (routing as Record<string, unknown>).only;
+		if (!Array.isArray(only)) continue;
+		normalized[field] = { ...(routing as Record<string, unknown>), only: [...only].sort() };
+		changed = true;
+	}
+	if (record.whenThinking !== undefined) {
+		const nested = canonicalCompatIdentity(record.whenThinking);
+		if (nested !== record.whenThinking) {
+			normalized.whenThinking = nested;
+			changed = true;
+		}
+	}
+	return changed ? normalized : compat;
 }
 
 /**
@@ -374,6 +462,11 @@ export class ModelRegistry {
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
+	/** Stable ids for extension registrations in `#providerConfigIdentity`; a replaced registration is a new configuration. */
+	#registrationIds = new WeakMap<object, number>();
+	#nextRegistrationId = 0;
+	/** `#configEpoch` state per provider. */
+	#configEpochs = new Map<string, { identity: string; epoch: number }>();
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
@@ -382,10 +475,9 @@ export class ModelRegistry {
 	/** Waiter armed before the initial background refresh starts (CLI kicks it off after the session is built, #10048). */
 	#initialRefreshWaiters = new Set<() => void>();
 	#credentialScopedCacheHydration?: Promise<void>;
-	#configuredDiscoveryInFlight: Map<
-		DiscoveryProviderConfig,
-		Map<ModelRefreshStrategy, Promise<ConfiguredModelDiscoveryResult>>
-	> = new Map();
+	/** In-flight configured discoveries by provider and configuration epoch, then strategy. */
+	#configuredDiscoveryInFlight: Map<string, Map<ModelRefreshStrategy, Promise<ConfiguredModelDiscoveryResult>>> =
+		new Map();
 	#policyReapply?: Promise<void>;
 	// Window tiers of models whose extended window is larger: per row as the
 	// hardcoded policies produced it (custom overlays replacing that row never
@@ -699,33 +791,38 @@ export class ModelRegistry {
 	}
 
 	#applyMirrorChange(change: ModelRegistryMirrorChange): void {
-		switch (change.kind) {
-			case "register":
-				this.#registerProvider(change.name, change.config, change.sourceId);
-				return;
-			case "unregister":
-				this.#unregisterProvider(change.name);
-				return;
-			case "clearSources":
-				this.#clearSourceRegistrations(change.sourceIds);
-				return;
-			case "syncSources":
-				this.#syncExtensionSources(change.activeSourceIds);
-				return;
-			case "reload":
-				this.#reloadStaticModels({ force: true });
-				return;
-			case "invalidateCommands":
-				// Local caches only: forwarding to the owner would echo the invalidation back.
-				if (change.provider === undefined) invalidateAllCommandConfigs();
-				else this.#invalidateLocalProviderCommandConfigs(change.provider);
-				return;
+		try {
+			switch (change.kind) {
+				case "register":
+					this.#registerProvider(change.name, change.config, change.sourceId);
+					return;
+				case "unregister":
+					this.#unregisterProvider(change.name);
+					return;
+				case "clearSources":
+					this.#clearSourceRegistrations(change.sourceIds);
+					return;
+				case "syncSources":
+					this.#syncExtensionSources(change.activeSourceIds);
+					return;
+				case "reload":
+					this.#reloadStaticModels({ force: true });
+					return;
+				case "invalidateCommands":
+					// Local caches only: forwarding to the owner would echo the invalidation back.
+					if (change.provider === undefined) invalidateAllCommandConfigs();
+					else this.#invalidateLocalProviderCommandConfigs(change.provider);
+					return;
+			}
+		} finally {
+			this.#syncConfigEpochs();
 		}
 	}
 
 	/**
 	 * Run one public runtime-change entry point; only the outermost one is
-	 * recorded for mirrors, and only when it completed.
+	 * recorded for mirrors, and only when it completed. Every one ends by
+	 * recording configuration changes (`#syncConfigEpochs`).
 	 */
 	#runtimeChange(change: ModelRegistryMirrorChangeInput, apply: () => void): void {
 		const outermost = this.#mirrorChangeDepth === 0;
@@ -734,6 +831,7 @@ export class ModelRegistry {
 			apply();
 		} finally {
 			this.#mirrorChangeDepth--;
+			this.#syncConfigEpochs();
 		}
 		if (outermost) this.#recordMirrorChange(change);
 	}
@@ -1231,20 +1329,33 @@ export class ModelRegistry {
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
 		this.#discoverableProviders = [];
-		// Drop config-sourced apiKeys from AuthStorage before reload; entries
-		// removed from models.yml must actually disappear from the resolver, not
-		// linger from the previous parse. The post-load setters below repopulate.
-		if (!this.#owner) this.authStorage.keys.clearConfig();
-		// Restore runtime API keys before #loadModels — survives because
-		// #loadModels only calls .set() on #customProviderApiKeys, never reassigns it.
-		for (const [provider, { keyConfig, fallback }] of this.#runtimeProviderApiKeys) {
-			this.#installProviderApiKey(provider, keyConfig, { fallback });
-		}
-		this.#providerOverrides.clear();
-		this.#modelOverrides.clear();
-		this.#configError = undefined;
-		this.#providerDiscoveryStates.clear();
-		this.#loadModels();
+		// One key-store batch: a provider whose key the reload leaves as it was
+		// keeps its key generation, so its in-flight discovery is not refused.
+		this.authStorage.keys.batch(() => {
+			// Drop config-sourced apiKeys from AuthStorage before reload; entries
+			// removed from models.yml must actually disappear from the resolver, not
+			// linger from the previous parse. The post-load setters below repopulate.
+			if (!this.#owner) this.authStorage.keys.clearConfig();
+			// Runtime API keys are installed on both sides of #loadModels: before, so
+			// the load sees every provider's configured auth as it did at startup;
+			// after, so a runtime key outranks the models.yml key for its provider
+			// across every reload, as registration made it (installed after the
+			// startup load), and a request never pairs a runtime endpoint with the
+			// models.yml credential.
+			const installRuntimeKeys = () => {
+				for (const [provider, { keyConfig, fallback }] of this.#runtimeProviderApiKeys) {
+					this.#installProviderApiKey(provider, keyConfig, { fallback });
+				}
+			};
+			installRuntimeKeys();
+			this.#providerOverrides.clear();
+			this.#modelOverrides.clear();
+			this.#configError = undefined;
+			this.#providerDiscoveryStates.clear();
+			this.#loadModels();
+			installRuntimeKeys();
+		});
+		this.#syncConfigEpochs();
 		if (!preservedRuntimeState) return;
 
 		const preservedProviderIds = preservedRuntimeState.runtimeProviderIds;
@@ -1632,10 +1743,150 @@ export class ModelRegistry {
 		});
 	}
 
+	/** The endpoint the operator configured for a provider: a runtime override, then models.yml. */
+	#configuredBaseUrl(providerId: string): string | undefined {
+		return (
+			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ?? this.#providerOverrides.get(providerId)?.baseUrl
+		);
+	}
+
+	/**
+	 * The provider's configuration state that a discovery request depends on,
+	 * as one canonical serialization of the whole state objects, not a list of
+	 * chosen fields: a field added to any of them is part of the identity
+	 * without anyone listing it. Included, each object whole:
+	 *  - the models.yml `discovery:` config;
+	 *  - the models.yml provider override (endpoint, key, headers, auth mode,
+	 *    compat, transport and every other override field);
+	 *  - the runtime provider override, the same way;
+	 *  - the runtime API key entry (key config and its fallback precedence);
+	 *  - the key config installed for the provider and its keyless (`auth:
+	 *    none`) membership;
+	 *  - the owning extension registration, by object identity (its fetcher is
+	 *    a function and has no value to compare);
+	 *  - AuthStorage's key generation for the provider (`keys.generation`),
+	 *    which moves on every change to the runtime key, config key or config
+	 *    fallback AuthStorage holds, however it was made: `--api-key`, another
+	 *    thread through the `keys.*` service, or an SDK caller. It is a
+	 *    counter, so a change and a change back differ here even with no
+	 *    `#syncConfigEpochs` in between. A mirror (`#owner`) sends no discovery
+	 *    request and leaves it out.
+	 * Two normalizations, both of meaning-free spelling: endpoints by
+	 * `normalizeModelCacheEndpoint`, and object member order by `canonicalJson`.
+	 * Excluded by design: stored login credentials in AuthStorage (account
+	 * state, not configuration; a token refresh or a re-login sends to the same
+	 * configured host). Not covered: provider key environment variables
+	 * changed in-process, and a `!command` key whose output changes between
+	 * runs; neither is a write to AuthStorage.
+	 *
+	 * Publication test: a discovery result or discovery state is published
+	 * only while this value equals the one captured before the discovery's
+	 * first await. The request test is stricter, `#configEpoch`.
+	 */
+	#providerConfigIdentity(providerId: string): string {
+		const registration = this.#runtimeModelManagers.get(providerId)?.options;
+		let registrationId: number | null = null;
+		if (registration) {
+			registrationId = this.#registrationIds.get(registration) ?? this.#nextRegistrationId++;
+			this.#registrationIds.set(registration, registrationId);
+		}
+		// Every spelling that does not change a request is normalised here, at
+		// the typed field that holds it, and never by matching a member's name
+		// somewhere in a subtree whose shape this code does not own.
+		const canonicalState = <
+			T extends {
+				baseUrl?: string;
+				baseUrlApis?: readonly Api[];
+				headers?: Record<string, string>;
+				compat?: unknown;
+			},
+		>(
+			state: T | undefined,
+		) =>
+			state
+				? {
+						...state,
+						baseUrl: normalizeModelCacheEndpoint(state.baseUrl),
+						// A set written as an array, canonicalised here whatever it came
+						// from: a models.yml override is already sorted where it is
+						// derived, but a runtime override arrives from `registerProvider`
+						// in whatever order its caller built it. Route resolution only
+						// ever asks `.includes` (`resolveProviderBaseUrl`), so the order
+						// two APIs appear in must not read as a change.
+						baseUrlApis: state.baseUrlApis && [...state.baseUrlApis].sort(),
+						headers: state.headers && canonicalHeaderIdentity(state.headers),
+						compat: state.compat && canonicalCompatIdentity(state.compat),
+					}
+				: null;
+		return canonicalJson({
+			registration: registrationId,
+			discovery: canonicalState(this.#discoverableProviders.find(provider => provider.provider === providerId)),
+			override: canonicalState(this.#providerOverrides.get(providerId)),
+			runtimeOverride: canonicalState(this.#runtimeProviderOverrides.get(providerId)),
+			runtimeKey: this.#runtimeProviderApiKeys.get(providerId) ?? null,
+			installedKey: this.#customProviderApiKeys.get(providerId) ?? null,
+			keyless: this.#keylessProviders.has(providerId),
+			keyGeneration: this.#owner ? null : this.authStorage.keys.generation(providerId),
+		});
+	}
+
+	/**
+	 * Number of times `providerId`'s `#providerConfigIdentity` has changed.
+	 * Every configuration mutation ends in `#syncConfigEpochs`, so a change
+	 * and a change back (A -> B -> A) are two increments even when nothing
+	 * read the identity in between.
+	 *
+	 * Request test: a discovery request leaves through `#guardedFetch` only
+	 * while the epoch is the one captured before the discovery's first await.
+	 * Its endpoint, headers and key were then all assembled under one
+	 * configuration, and a credential resolved under one configuration is
+	 * never sent to another configuration's endpoint, even one that returned
+	 * to the starting value.
+	 */
+	#configEpoch(providerId: string): number {
+		const identity = this.#providerConfigIdentity(providerId);
+		const record = this.#configEpochs.get(providerId);
+		if (!record) {
+			this.#configEpochs.set(providerId, { identity, epoch: 0 });
+			return 0;
+		}
+		if (record.identity !== identity) {
+			record.identity = identity;
+			record.epoch++;
+		}
+		return record.epoch;
+	}
+
+	/** Record every provider's configuration change; call at the end of each configuration mutation. */
+	#syncConfigEpochs(): void {
+		const providerIds = new Set<string>([
+			...this.#configEpochs.keys(),
+			...this.#providerOverrides.keys(),
+			...this.#runtimeProviderOverrides.keys(),
+			...this.#runtimeModelManagers.keys(),
+			...this.#runtimeProviderApiKeys.keys(),
+			...this.#discoverableProviders.map(provider => provider.provider),
+		]);
+		for (const providerId of providerIds) this.#configEpoch(providerId);
+	}
+
+	/** `#fetch` that refuses to send once `providerId`'s configuration epoch is no longer `epoch`. */
+	#guardedFetch(providerId: string, epoch: number): FetchImpl {
+		const fetchImpl = this.#fetch;
+		// Annotated rather than cast: `FetchImpl`'s own parameter types flow into
+		// the arrow contextually, and `preconnect` is optional on it, so the
+		// callable and the property are both checked against the real type.
+		const guarded: FetchImpl = (input, init) =>
+			this.#configEpoch(providerId) === epoch
+				? fetchImpl(input, init)
+				: Promise.reject(new Error(`Provider ${providerId}: configuration changed during model discovery`));
+		guarded.preconnect = fetchImpl.preconnect;
+		return guarded;
+	}
+
 	#descriptorBaseUrl(providerId: string): string | undefined {
 		return (
-			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
-			this.#providerOverrides.get(providerId)?.baseUrl ??
+			this.#configuredBaseUrl(providerId) ??
 			(this.#hasFullSnapshot ? this.getProviderBaseUrl(providerId) : undefined)
 		);
 	}
@@ -1646,11 +1897,10 @@ export class ModelRegistry {
 	 * credential in; those load only through their model manager.
 	 */
 	#resolveStartupModelCacheProviderId(providerId: string): string {
-		const baseUrl =
-			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
-			this.#providerOverrides.get(providerId)?.baseUrl ??
-			(this.#hasFullSnapshot ? this.getProviderBaseUrl(providerId) : undefined);
-		return resolveModelCacheProviderId(providerId, { baseUrl });
+		return scopeModelCacheProviderIdToEndpoint(
+			resolveModelCacheProviderId(providerId, { baseUrl: this.#descriptorBaseUrl(providerId) }),
+			this.#configuredBaseUrl(providerId),
+		);
 	}
 
 	#loadCachedStandardProviderModels(providerIds: readonly string[]): {
@@ -2090,7 +2340,15 @@ export class ModelRegistry {
 			if (providerConfig.api && (providerConfig.models?.length ?? 0) === 0) {
 				baseUrlApis.add(providerConfig.api);
 			}
-			const baseUrlScope = baseUrlApis.size > 0 ? [...baseUrlApis] : undefined;
+			// Sorted because this is a Set written as an array: the order two models
+			// happen to be listed in carries nothing, and the override is compared
+			// whole by `Bun.deepEquals` when a reload decides which runtime
+			// discoveries it may preserve. An insertion-ordered array makes a pure
+			// reordering look like a settings change there and throws the
+			// discovery away. `#providerConfigIdentity` canonicalises it again
+			// rather than trusting this, because a runtime override arrives from
+			// `registerProvider` and never passes through here.
+			const baseUrlScope = baseUrlApis.size > 0 ? [...baseUrlApis].sort() : undefined;
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/guardrail*/transport are present
 			if (
 				providerConfig.baseUrl ||
@@ -2213,14 +2471,29 @@ export class ModelRegistry {
 							...(await this.#discoverProviderModelsCoalesced(provider, strategy)),
 						})),
 					);
-		const [configuredDiscoveryResults, builtInDiscovery] = await Promise.all([
+		const [configuredDiscoveryResults, builtInDiscoveries] = await Promise.all([
 			configuredDiscoveriesPromise,
 			this.#discoverBuiltInProviderModels(strategy, providerFilter),
 		]);
+		// Publication point: drop every result whose configuration moved while it ran.
+		const builtInDiscovery: BuiltInDiscoveryResult = {
+			models: [],
+			authoritativeProviders: new Set(),
+			replaceRuntimeProviders: new Set(),
+		};
+		for (const { discovery, state, isCurrent } of builtInDiscoveries) {
+			if (!isCurrent()) continue;
+			this.#providerDiscoveryStates.set(state.provider, state);
+			builtInDiscovery.models.push(...discovery.models);
+			for (const provider of discovery.authoritativeProviders) builtInDiscovery.authoritativeProviders.add(provider);
+			for (const provider of discovery.replaceRuntimeProviders)
+				builtInDiscovery.replaceRuntimeProviders.add(provider);
+		}
 		this.#captureCatalogMetrics(builtInDiscovery.models, providerFilter === undefined);
-		const currentDiscoverableProviders = new Set(this.#discoverableProviders);
-		const currentConfiguredDiscoveryResults = configuredDiscoveryResults.filter(result =>
-			currentDiscoverableProviders.has(result.provider),
+		// By value, not by config object: an identical models.yml reload keeps a
+		// result current, any change to where or with what it was fetched does not.
+		const currentConfiguredDiscoveryResults = configuredDiscoveryResults.filter(
+			result => this.#providerConfigIdentity(result.provider.provider) === result.configIdentity,
 		);
 		const configuredDiscovered = currentConfiguredDiscoveryResults.flatMap(result => result.models);
 		const replacedConfiguredProviders = currentConfiguredDiscoveryResults.flatMap(result =>
@@ -2315,13 +2588,16 @@ export class ModelRegistry {
 
 	/**
 	 * Share a configured provider's discovery request between concurrent full
-	 * and provider-scoped refreshes using the same cache/network strategy.
+	 * and provider-scoped refreshes using the same cache/network strategy and
+	 * the same configuration epoch: a refresh after the configuration changed
+	 * never joins a discovery started under the previous one.
 	 */
 	#discoverProviderModelsCoalesced(
 		providerConfig: DiscoveryProviderConfig,
 		strategy: ModelRefreshStrategy,
 	): Promise<ConfiguredModelDiscoveryResult> {
-		let providerInFlight = this.#configuredDiscoveryInFlight.get(providerConfig);
+		const key = `${providerConfig.provider}\u0000${this.#configEpoch(providerConfig.provider)}`;
+		let providerInFlight = this.#configuredDiscoveryInFlight.get(key);
 		const inFlight = providerInFlight?.get(strategy);
 		if (inFlight) return inFlight;
 
@@ -2330,12 +2606,12 @@ export class ModelRegistry {
 			if (providerInFlight.get(strategy) === discovery) {
 				providerInFlight.delete(strategy);
 				if (providerInFlight.size === 0) {
-					this.#configuredDiscoveryInFlight.delete(providerConfig);
+					this.#configuredDiscoveryInFlight.delete(key);
 				}
 			}
 		});
 		providerInFlight.set(strategy, discovery);
-		this.#configuredDiscoveryInFlight.set(providerConfig, providerInFlight);
+		this.#configuredDiscoveryInFlight.set(key, providerInFlight);
 		return discovery;
 	}
 
@@ -2348,10 +2624,38 @@ export class ModelRegistry {
 		return providerConfig.discovery.advertisedReasoning === false ? "advertised-off-context-v6" : "context-v6";
 	}
 
+	/**
+	 * A models.yml `discovery:` provider as discovery must contact it: with the
+	 * endpoint and headers its requests use, a runtime provider override's
+	 * first, as for every other provider (`#configuredBaseUrl`). Taking only one
+	 * of the two would send one layer's credential header to the other layer's
+	 * endpoint.
+	 */
+	#effectiveDiscoveryConfig(providerConfig: DiscoveryProviderConfig): DiscoveryProviderConfig {
+		const runtime = this.#runtimeProviderOverrides.get(providerConfig.provider);
+		if (!runtime?.baseUrl && !runtime?.headers) return providerConfig;
+		return {
+			...providerConfig,
+			baseUrl: runtime.baseUrl ?? providerConfig.baseUrl,
+			headers: runtime.headers ? { ...providerConfig.headers, ...runtime.headers } : providerConfig.headers,
+		};
+	}
+
+	/**
+	 * Every non-Ollama namespace is scoped to the provider's effective `baseUrl`
+	 * as the built-in ones are (`scopeModelCacheProviderIdToEndpoint`): a roster
+	 * discovered from one endpoint never answers for another. Ollama's
+	 * namespace already hashes its normalized endpoint.
+	 */
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
-		if (providerConfig.discovery.type === "ollama") {
-			return resolveOllamaModelCacheProviderId(providerConfig.provider, providerConfig.baseUrl);
+		const effective = this.#effectiveDiscoveryConfig(providerConfig);
+		if (effective.discovery.type === "ollama") {
+			return resolveOllamaModelCacheProviderId(effective.provider, effective.baseUrl);
 		}
+		return scopeModelCacheProviderIdToEndpoint(this.#configuredDiscoveryNamespace(effective), effective.baseUrl);
+	}
+
+	#configuredDiscoveryNamespace(providerConfig: DiscoveryProviderConfig): string {
 		if (providerConfig.discovery.type === "openai-models-list") {
 			// context-v3 invalidates rows cached before server-advertised input
 			// modalities were parsed from `/v1/models`; warm v2 rows pinned
@@ -2404,6 +2708,24 @@ export class ModelRegistry {
 		providerConfig: DiscoveryProviderConfig,
 		strategy: ModelRefreshStrategy,
 	): Promise<ConfiguredModelDiscoveryResult> {
+		// Captured before the first await: the publication identity, the request
+		// epoch, and the endpoint and headers the request uses, all under one
+		// configuration (see `#providerConfigIdentity` and `#configEpoch`).
+		const configIdentity = this.#providerConfigIdentity(providerConfig.provider);
+		const configEpoch = this.#configEpoch(providerConfig.provider);
+		// The provider's per-model overlays are deliberately NOT captured here,
+		// and a discovery result is not transformed by them. They are live
+		// configuration, applied to the composed catalog by `#applyModelOverrides`
+		// every time it is built, and composition can only ADD a header to a row
+		// that already carries one. So a row that arrives carrying an overlay
+		// keeps it after the operator deletes it: a secret removed from models.yml
+		// would still be published and still be sent. Snapshotting the overlays
+		// instead of reading them live only moves which direction leaks — an
+		// overlay added while the request was in flight, or one removed while it
+		// was. A row that carries none of them has neither leak, and composition
+		// then applies exactly the overlays the configuration holds now.
+		const effectiveConfig = this.#effectiveDiscoveryConfig(providerConfig);
+		const isCurrent = () => this.#providerConfigIdentity(providerConfig.provider) === configIdentity;
 		const cacheProviderId = this.#configuredDiscoveryCacheProviderId(providerConfig);
 		const cached = readModelCache<Api>(cacheProviderId, 24 * 60 * 60 * 1000, Date.now, this.#cacheDbPath);
 		const cacheOlderThanConfig = cached !== null && this.#isDiscoveryCacheOlderThanModelsConfig(cached.updatedAt);
@@ -2416,18 +2738,21 @@ export class ModelRegistry {
 		if (requiresAuth && willFetch) {
 			const apiKey = await this.#peekApiKeyForProvider(providerConfig.provider);
 			if (!isAuthenticated(apiKey)) {
-				this.#providerDiscoveryStates.set(providerConfig.provider, {
-					provider: providerConfig.provider,
-					status: "unauthenticated",
-					optional: providerConfig.optional ?? false,
-					stale: cached !== null,
-					fetchedAt: cached?.updatedAt,
-					models: cached?.models.map(model => model.id) ?? [],
-				});
-				this.#lastDiscoveryWarnings.delete(providerConfig.provider);
+				if (isCurrent()) {
+					this.#providerDiscoveryStates.set(providerConfig.provider, {
+						provider: providerConfig.provider,
+						status: "unauthenticated",
+						optional: providerConfig.optional ?? false,
+						stale: cached !== null,
+						fetchedAt: cached?.updatedAt,
+						models: cached?.models.map(model => model.id) ?? [],
+					});
+					this.#lastDiscoveryWarnings.delete(providerConfig.provider);
+				}
 				return {
 					models: cached ? this.#normalizeDiscoverableModels(providerConfig, cached.models) : [],
 					replaceRuntimeModels: false,
+					configIdentity,
 				};
 			}
 		}
@@ -2437,11 +2762,11 @@ export class ModelRegistry {
 		let discoveryAuthRejected = false;
 		const fetchDynamicModels = async (): Promise<readonly ModelSpec<Api>[] | null> => {
 			try {
-				const resolvedHeaders = await resolveConfigHeaders(providerConfig.headers);
-				const requestConfig = { ...providerConfig, headers: resolvedHeaders };
-				const models = this.#applyProviderModelOverrides(
-					providerId,
-					await discoverModelsByProviderType(requestConfig, this.#discoveryContext()),
+				const resolvedHeaders = await resolveConfigHeaders(effectiveConfig.headers);
+				const requestConfig = { ...effectiveConfig, headers: resolvedHeaders };
+				const models = await discoverModelsByProviderType(
+					requestConfig,
+					this.#discoveryContext(this.#guardedFetch(providerId, configEpoch)),
 				);
 				this.#lastDiscoveryWarnings.delete(providerId);
 				return models.map(toModelSpec);
@@ -2486,33 +2811,36 @@ export class ModelRegistry {
 				: result.models.length > 0
 					? "ok"
 					: "empty";
-		this.#providerDiscoveryStates.set(providerId, {
-			provider: providerId,
-			status,
-			optional: providerConfig.optional ?? false,
-			stale: result.stale || status === "cached" || ((cacheOlderThanConfig || bypassFreshCache) && status !== "ok"),
-			fetchedAt: discoveryError ? cached?.updatedAt : Date.now(),
-			models: result.models.map(model => model.id),
-			error: discoveryError,
-		});
-		if (discoveryError) {
-			this.#warnProviderDiscoveryFailure(providerConfig, discoveryError);
+		// A superseded discovery reports nothing: neither its state nor the
+		// refusal of its own guarded request.
+		if (isCurrent()) {
+			this.#providerDiscoveryStates.set(providerId, {
+				provider: providerId,
+				status,
+				optional: providerConfig.optional ?? false,
+				stale:
+					result.stale || status === "cached" || ((cacheOlderThanConfig || bypassFreshCache) && status !== "ok"),
+				fetchedAt: discoveryError ? cached?.updatedAt : Date.now(),
+				models: result.models.map(model => model.id),
+				error: discoveryError,
+			});
+			if (discoveryError) {
+				this.#warnProviderDiscoveryFailure(providerConfig, discoveryError);
+			}
 		}
 		return {
-			models: this.#applyProviderModelOverrides(
-				providerId,
-				this.#normalizeDiscoverableModels(
-					providerConfig,
-					this.#applyProviderCompat(providerConfig.compat, result.models),
-				),
+			models: this.#normalizeDiscoverableModels(
+				providerConfig,
+				this.#applyProviderCompat(providerConfig.compat, result.models),
 			),
 			replaceRuntimeModels: result.source === "provider",
+			configIdentity,
 		};
 	}
 
-	#discoveryContext(): DiscoveryContext {
+	#discoveryContext(fetch: FetchImpl = this.#fetch): DiscoveryContext {
 		return {
-			fetch: this.#fetch,
+			fetch,
 			getBearerApiKeyResolver: async provider => {
 				const apiKey = await this.getApiKeyForProvider(provider);
 				if (!isDiscoveryBearerApiKey(apiKey)) {
@@ -2556,23 +2884,30 @@ export class ModelRegistry {
 		}
 	}
 
+	/**
+	 * One result per built-in or runtime manager, each with the check that its
+	 * configuration is still current. The caller filters at publication time,
+	 * after every await, so a result started under another configuration is
+	 * never published.
+	 */
 	async #discoverBuiltInProviderModels(
 		strategy: ModelRefreshStrategy,
 		providerFilter?: ReadonlySet<string>,
-	): Promise<BuiltInDiscoveryResult> {
+	): Promise<Array<{ discovery: BuiltInDiscoveryResult; state: ProviderDiscoveryState; isCurrent: () => boolean }>> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
-		const managerOptions = await this.#collectBuiltInModelManagerOptions(
+		const managers = await this.#collectBuiltInModelManagerOptions(
 			strategy,
 			providerFilter,
 			configuredDiscoveryProviders,
 		);
-		if (managerOptions.length === 0) {
-			return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
-		}
+		if (managers.length === 0) return [];
 		const writesBefore = getModelCacheWriteStats();
 		const discoveries = await Promise.all(
-			managerOptions.map(options => this.#discoverWithModelManager(options, strategy)),
+			managers.map(async ({ options, isCurrent }) => ({
+				...(await this.#discoverWithModelManager(options, strategy)),
+				isCurrent,
+			})),
 		);
 		const writesAfter = getModelCacheWriteStats();
 		const rewrittenRows = writesAfter.payloadWrites - writesBefore.payloadWrites;
@@ -2587,19 +2922,7 @@ export class ModelRegistry {
 				strategy,
 			});
 		}
-		const authoritativeProviders = new Set<string>();
-		const replaceRuntimeProviders = new Set<string>();
-		const models: Model<Api>[] = [];
-		for (const discovery of discoveries) {
-			models.push(...discovery.models);
-			for (const provider of discovery.authoritativeProviders) {
-				authoritativeProviders.add(provider);
-			}
-			for (const provider of discovery.replaceRuntimeProviders) {
-				replaceRuntimeProviders.add(provider);
-			}
-		}
-		return { models, authoritativeProviders, replaceRuntimeProviders };
+		return discoveries;
 	}
 
 	/**
@@ -2680,16 +3003,16 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		providerFilter: ReadonlySet<string> | undefined,
 		configuredDiscoveryProviders: ReadonlySet<string>,
-	): Promise<ModelManagerOptions<Api>[]> {
+	): Promise<Array<{ options: ModelManagerOptions<Api>; isCurrent: () => boolean }>> {
 		const specialProviderDescriptors: Array<{
 			providerId: string;
 			resolveKey: (value: string | undefined) => string | undefined;
-			createOptions: (key: string, raw: string | undefined) => ModelManagerOptions<Api>;
+			createOptions: (key: string, raw: string | undefined, fetch: FetchImpl) => ModelManagerOptions<Api>;
 		}> = [
 			{
 				providerId: "google-antigravity",
 				resolveKey: extractGoogleOAuthToken,
-				createOptions: oauthToken =>
+				createOptions: (oauthToken, _raw, fetch) =>
 					googleAntigravityModelManagerOptions({
 						resolveAccounts: async () => {
 							const accounts = await resolveOAuthDiscoveryAccounts(
@@ -2706,24 +3029,24 @@ export class ModelRegistry {
 							);
 						},
 						endpoint: this.#descriptorBaseUrl("google-antigravity"),
-						fetch: this.#fetch,
+						fetch,
 					}),
 			},
 			{
 				providerId: "google-gemini-cli",
 				resolveKey: extractGoogleOAuthToken,
-				createOptions: (oauthToken, raw) =>
+				createOptions: (oauthToken, raw, fetch) =>
 					googleGeminiCliModelManagerOptions({
 						oauthToken,
 						projectId: extractGoogleOAuthProjectId(raw) ?? this.#resolveGeminiCliDiscoveryProjectId(oauthToken),
 						endpoint: this.#descriptorBaseUrl("google-gemini-cli"),
-						fetch: this.#fetch,
+						fetch,
 					}),
 			},
 			{
 				providerId: "openai-codex",
 				resolveKey: value => value,
-				createOptions: accessToken => {
+				createOptions: (accessToken, _raw, fetch) => {
 					// A custom endpoint (models.yml `baseUrl`) receives only a configured,
 					// runtime, or command key. Official credentials (stored ChatGPT OAuth or
 					// the provider env token) keep discovering against chatgpt.com, as on a
@@ -2741,13 +3064,13 @@ export class ModelRegistry {
 							baseUrl: officialCredential ? undefined : configuredBaseUrl,
 							resolveAccounts: () =>
 								resolveOAuthDiscoveryAccounts(this.authStorage, "openai-codex", accessToken),
-							fetch: this.#fetch,
+							fetch,
 						});
 					}
 					return openaiCodexModelManagerOptions({
 						baseUrl: configuredBaseUrl,
 						resolveAccounts: async () => [{ accessToken }],
-						fetch: this.#fetch,
+						fetch,
 					});
 				},
 			},
@@ -2764,6 +3087,62 @@ export class ModelRegistry {
 			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
 			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
 		});
+		// Captured before any credential await, and carried WITH the thing it
+		// describes rather than in a lookup table beside it. A table has to answer
+		// for a provider it may not hold, and the only answers available are an
+		// assertion or a re-read after the await — and a re-read reports
+		// "unchanged" for exactly the change these guards exist to catch. Pairing
+		// makes the missing case unrepresentable.
+		//
+		// The epoch guards the request: a discovery request leaves only through a
+		// fetch guarded by it, so a key resolved under one configuration never
+		// reaches another configuration's endpoint. The identity guards
+		// publication, applied by the caller once the roster comes back.
+		const standardAtStart = standardProviderDescriptors.map(descriptor => ({
+			descriptor,
+			epoch: this.#configEpoch(descriptor.providerId),
+			configIdentity: this.#providerConfigIdentity(descriptor.providerId),
+		}));
+		const specialAtStart = enabledSpecialProviderDescriptors.map(descriptor => ({
+			descriptor,
+			epoch: this.#configEpoch(descriptor.providerId),
+			configIdentity: this.#providerConfigIdentity(descriptor.providerId),
+		}));
+		// Catalog-only providers capture their identity AT THE MOMENT THEY BECAME
+		// ELIGIBLE, which is not one fixed point, and both of the fixed choices
+		// were tried and are wrong. The contract is that a result publishes only
+		// if the configuration is, by value, the one it was fetched under.
+		//
+		//   - Already eligible up here (no runtime manager yet): capture NOW, with
+		//     the others. Their pass begins here, so a configuration change during
+		//     the awaits must still refuse them. Capturing at selection instead
+		//     made that check pass everything.
+		//   - Not eligible up here: capture at SELECTION. Such a provider becomes
+		//     eligible precisely BECAUSE its extension registration went away
+		//     during the awaits, and the identity includes that registration — so
+		//     an identity from before the unregistration cannot match, and its
+		//     discovery result is refused ON THAT PASS. Nothing is lost for ever:
+		//     the roster a consumer reads is unchanged and the next pass publishes
+		//     normally. Measured across all seven, at this capture point and at
+		//     both of the fixed ones.
+		//
+		// So `configIdentity` is undefined exactly when the provider was ineligible
+		// before the awaits, and that is a signal rather than a missing entry: the
+		// fallback at the use site is this provider's real capture point.
+		const bundledProviderIds: Record<string, true> = Object.create(null);
+		for (const providerId of getBundledProviders()) bundledProviderIds[providerId] = true;
+		const catalogOnlyCandidates = MODELS_DEV_CATALOG_PROVIDER_IDS.filter(providerId => {
+			if (BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[providerId] === true) return false;
+			if (bundledProviderIds[providerId] !== true) return false;
+			if (disabledProviders.has(providerId) || configuredDiscoveryProviders.has(providerId)) return false;
+			return !providerFilter || providerFilter.has(providerId);
+		}).map(providerId => ({
+			providerId,
+			configIdentity: this.#runtimeModelManagers.has(providerId)
+				? undefined
+				: this.#providerConfigIdentity(providerId),
+		}));
+		const isUnchanged = (providerId: string, epoch: number) => this.#configEpoch(providerId) === epoch;
 		const standardProviderKeys = await Promise.all(
 			standardProviderDescriptors.map(descriptor => {
 				const cacheProviderId = isCredentialScopedModelCacheProvider(descriptor.providerId)
@@ -2782,14 +3161,20 @@ export class ModelRegistry {
 				this.#resolveBuiltInDiscoveryApiKey(
 					descriptor.providerId,
 					strategy,
-					descriptor.providerId,
+					// Antigravity and Gemini CLI write their bare provider id, scoped below.
+					scopeModelCacheProviderIdToEndpoint(
+						descriptor.providerId,
+						this.#configuredBaseUrl(descriptor.providerId),
+					),
 					AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(descriptor.providerId),
 				),
 			),
 		);
-		const options: ModelManagerOptions<Api>[] = [];
-		for (let i = 0; i < standardProviderDescriptors.length; i++) {
-			const descriptor = standardProviderDescriptors[i];
+		const options: Array<{ options: ModelManagerOptions<Api>; configIdentity: string }> = [];
+		for (let i = 0; i < standardAtStart.length; i++) {
+			const { descriptor, epoch, configIdentity } = standardAtStart[i];
+			// The configuration moved while the key resolved: the next pass discovers it.
+			if (!isUnchanged(descriptor.providerId, epoch)) continue;
 			const apiKey = standardProviderKeys[i];
 			const hasExplicitVllmConfig =
 				descriptor.providerId === "vllm" &&
@@ -2812,7 +3197,7 @@ export class ModelRegistry {
 				const discoveryConfig = {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
-					fetch: this.#fetch,
+					fetch: this.#guardedFetch(descriptor.providerId, epoch),
 					region: identity?.region,
 					inferenceRegion: identity?.inferenceRegion,
 					orgId: identity?.orgId,
@@ -2824,39 +3209,73 @@ export class ModelRegistry {
 				const modelsDev = managerOptions.modelsDev
 					? { ...managerOptions.modelsDev, additiveOnly: true }
 					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
-				options.push(modelsDev ? { ...managerOptions, modelsDev } : managerOptions);
+				options.push({
+					options: modelsDev ? { ...managerOptions, modelsDev } : managerOptions,
+					configIdentity,
+				});
 			}
 		}
 
-		for (let i = 0; i < enabledSpecialProviderDescriptors.length; i++) {
-			const descriptor = enabledSpecialProviderDescriptors[i];
+		for (let i = 0; i < specialAtStart.length; i++) {
+			const { descriptor, epoch, configIdentity } = specialAtStart[i];
+			if (!isUnchanged(descriptor.providerId, epoch)) continue;
 			const key = descriptor.resolveKey(specialKeys[i]);
 			if (!isAuthenticated(key)) {
 				continue;
 			}
-			options.push(descriptor.createOptions(key, specialKeys[i]));
+			options.push({
+				options: descriptor.createOptions(key, specialKeys[i], this.#guardedFetch(descriptor.providerId, epoch)),
+				configIdentity,
+			});
 		}
 
 		// Catalog-only providers have no endpoint manager. Give their bundled
-		// slices the same shared remote layer without requiring credentials.
-		const bundledProviderIds: Record<string, true> = Object.create(null);
-		for (const providerId of getBundledProviders()) bundledProviderIds[providerId] = true;
-		for (const providerId of MODELS_DEV_CATALOG_PROVIDER_IDS) {
-			if (BUILT_IN_MODEL_MANAGER_PROVIDER_IDS[providerId] === true) continue;
-			if (bundledProviderIds[providerId] !== true) continue;
-			if (disabledProviders.has(providerId) || configuredDiscoveryProviders.has(providerId)) continue;
-			if (providerFilter && !providerFilter.has(providerId)) continue;
+		// slices the same shared remote layer without requiring credentials. The
+		// candidate set was settled before the awaits; the one live term and the
+		// identity are both read here, so a manager unregistered while a
+		// credential resolved makes its provider eligible on this pass — and
+		// publishable under the configuration that made it eligible.
+		for (const { providerId, configIdentity: capturedIdentity } of catalogOnlyCandidates) {
 			if (this.#runtimeModelManagers.has(providerId)) continue;
+			// Undefined means this provider was ineligible before the awaits and has
+			// only just become eligible, so here is where its pass begins. See above.
+			const configIdentity = capturedIdentity ?? this.#providerConfigIdentity(providerId);
 			const modelsDev = modelsDevCatalogFallback(providerId, this.#fetch);
 			if (!modelsDev) continue;
 			options.push({
-				providerId,
-				cacheProviderId: resolveModelCacheProviderId(providerId, {
-					baseUrl: this.#descriptorBaseUrl(providerId),
-				}),
-				modelsDev,
+				options: {
+					providerId,
+					cacheProviderId: resolveModelCacheProviderId(providerId, {
+						baseUrl: this.#descriptorBaseUrl(providerId),
+					}),
+					modelsDev,
+				},
+				configIdentity,
 			});
 		}
+
+		// Every built-in manager reads and writes a namespace scoped to the
+		// configured endpoint, as `#resolveStartupModelCacheProviderId` reads, so
+		// a roster discovered through one endpoint is never served for another
+		// (`scopeModelCacheProviderIdToEndpoint`). Each result carries the check
+		// that its configuration (`#providerConfigIdentity`) is unchanged; the
+		// caller applies it at publication, so a discovery started under another
+		// configuration never answers for this one.
+		const managers: Array<{ options: ModelManagerOptions<Api>; isCurrent: () => boolean }> = options.map(
+			({ options: managerOptions, configIdentity }) => {
+				const { providerId } = managerOptions;
+				return {
+					options: {
+						...managerOptions,
+						cacheProviderId: scopeModelCacheProviderIdToEndpoint(
+							managerOptions.cacheProviderId ?? providerId,
+							this.#configuredBaseUrl(providerId),
+						),
+					},
+					isCurrent: () => this.#providerConfigIdentity(providerId) === configIdentity,
+				};
+			},
+		);
 
 		// Append runtime model managers registered by extensions via fetchDynamicModels.
 		for (const { options: managerOpts } of this.#runtimeModelManagers.values()) {
@@ -2864,16 +3283,21 @@ export class ModelRegistry {
 				!configuredDiscoveryProviders.has(managerOpts.providerId) &&
 				(!providerFilter || providerFilter.has(managerOpts.providerId))
 			) {
-				options.push(managerOpts);
+				const identity = this.#providerConfigIdentity(managerOpts.providerId);
+				managers.push({
+					options: managerOpts,
+					isCurrent: () => this.#providerConfigIdentity(managerOpts.providerId) === identity,
+				});
 			}
 		}
-		return options;
+		return managers;
 	}
 
+	/** One manager's discovery and the state it reports; both are published only if its owner is still current. */
 	async #discoverWithModelManager(
 		options: ModelManagerOptions<Api>,
 		strategy: ModelRefreshStrategy,
-	): Promise<BuiltInDiscoveryResult> {
+	): Promise<{ discovery: BuiltInDiscoveryResult; state: ProviderDiscoveryState }> {
 		let failure: string | undefined;
 		try {
 			const manager = createModelManager({ ...options, cacheDbPath: this.#cacheDbPath });
@@ -2895,16 +3319,6 @@ export class ModelRegistry {
 								: "empty";
 			// A throwing fetcher still resolves (cache or bundled), but the failure must reach the state and the log.
 			failure = result.fetchError;
-			this.#providerDiscoveryStates.set(options.providerId, {
-				provider: options.providerId,
-				status,
-				optional: false,
-				stale: result.stale,
-				fetchedAt: result.updatedAt,
-				source: result.source,
-				models: models.map(model => model.id),
-				...(failure !== undefined ? { error: failure } : {}),
-			});
 			const authoritativeProviders = new Set<string>();
 			if (options.dynamicModelsAuthoritative && !result.stale) {
 				authoritativeProviders.add(options.providerId);
@@ -2913,7 +3327,19 @@ export class ModelRegistry {
 			if (result.source === "provider") {
 				replaceRuntimeProviders.add(options.providerId);
 			}
-			return { models, authoritativeProviders, replaceRuntimeProviders };
+			return {
+				discovery: { models, authoritativeProviders, replaceRuntimeProviders },
+				state: {
+					provider: options.providerId,
+					status,
+					optional: false,
+					stale: result.stale,
+					fetchedAt: result.updatedAt,
+					source: result.source,
+					models: models.map(model => model.id),
+					...(failure !== undefined ? { error: failure } : {}),
+				},
+			};
 		} catch (error) {
 			failure = error instanceof Error ? error.message : String(error);
 			const previous = this.#providerDiscoveryStates.get(options.providerId);
@@ -2921,17 +3347,19 @@ export class ModelRegistry {
 			// 401/403 with nothing to serve is a credential problem, not an
 			// outage (issue #12281).
 			const authRejected = (previous?.models.length ?? 0) === 0 && isDiscoveryAuthRejection(error);
-			this.#providerDiscoveryStates.set(options.providerId, {
-				provider: options.providerId,
-				status: authRejected ? "unauthenticated" : "unavailable",
-				optional: previous?.optional ?? false,
-				stale: true,
-				...(previous?.fetchedAt !== undefined ? { fetchedAt: previous.fetchedAt } : {}),
-				...(previous?.source !== undefined ? { source: previous.source } : {}),
-				models: previous?.models ?? [],
-				error: failure,
-			});
-			return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
+			return {
+				discovery: { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() },
+				state: {
+					provider: options.providerId,
+					status: authRejected ? "unauthenticated" : "unavailable",
+					optional: previous?.optional ?? false,
+					stale: true,
+					...(previous?.fetchedAt !== undefined ? { fetchedAt: previous.fetchedAt } : {}),
+					...(previous?.source !== undefined ? { source: previous.source } : {}),
+					models: previous?.models ?? [],
+					error: failure,
+				},
+			};
 		} finally {
 			if (failure !== undefined) {
 				logger.warn("model discovery failed for provider", { provider: options.providerId, error: failure });
@@ -2939,6 +3367,12 @@ export class ModelRegistry {
 		}
 	}
 
+	/**
+	 * The provider's per-model overlays as the configuration holds them now.
+	 * A discovery result is not transformed by them: they are applied to the
+	 * composed catalog, so an overlay the operator deletes stops being applied
+	 * instead of surviving in a row that was built while it existed.
+	 */
 	#applyProviderModelOverrides(provider: string, models: Model<Api>[]): Model<Api>[] {
 		const overrides = this.#modelOverrides.get(provider);
 		if (!overrides || overrides.size === 0) return models;
@@ -4071,16 +4505,62 @@ export class ModelRegistry {
 			const providerCompat = config.compat;
 			const managerOptions: ModelManagerOptions<Api> = {
 				providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
+				// Never a built-in manager's namespace, nor one written under another
+				// extension source or another declared key, API or header config: the
+				// startup read of a built-in provider id, or a later registration of
+				// this id, would otherwise serve these rows, and the endpoints baked
+				// into them, with a credential they were never discovered with. An
+				// identical re-registration (each session start re-registers every
+				// active source) keeps its cache.
+				//
+				// `headers` goes through `canonicalHeaderIdentity`, not through
+				// `canonicalJson`, because `canonicalJson` sorts member names and a
+				// header identity cannot: it has no way to tell two field names from
+				// two spellings of one, and two declarations of one name combine in
+				// declaration order into the value that is sent. Sorted, two
+				// registrations sending `Bearer one, Bearer two` and `Bearer two,
+				// Bearer one` hash to one namespace. Today that collision has no
+				// observable consequence — an extension manager has no
+				// `restoreCachedHeaders`, so a header-carrying extension row is never
+				// served from cache at all, measured at this head and at upstream —
+				// so this is fixed on the rule rather than on a failing test. It is
+				// fixed now because this namespace is introduced by this change;
+				// correcting it later would cost an `extension-v3` bump, which is a
+				// rediscovery every user pays for.
+				cacheProviderId: scopeModelCacheProviderIdToEndpoint(
+					`${providerName}:extension-v2:${Bun.hash(
+						canonicalJson([
+							sourceId ?? "",
+							providerApi,
+							providerApiKey,
+							providerAuthHeader,
+							providerHeaders && canonicalHeaderIdentity(providerHeaders),
+						]),
+					).toString(36)}`,
+					config.baseUrl,
+				),
 				staticModels: [],
 				cacheDbPath: this.#cacheDbPath,
 				cacheTtlMs: 24 * 60 * 60 * 1000,
 				dynamicModelsAuthoritative: true,
 				fetchDynamicModels: async () => {
+					const isLive = () => this.#runtimeModelManagers.get(providerName)?.options === managerOptions;
 					const apiKey = await this.#peekApiKeyForProvider(providerName);
+					// A key resolved after this registration was replaced belongs to the
+					// replacement; it never goes to this registration's fetcher.
+					if (!isLive()) {
+						throw new Error(`Provider ${providerName}: registration was replaced during model discovery`);
+					}
 					const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
 					const modelDefs = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
 						fetcher(resolvedKey),
 					);
+					// A superseded registration's roster must not reach the cache the
+					// live registration reads: failing here keeps the manager from
+					// writing it.
+					if (!isLive()) {
+						throw new Error(`Provider ${providerName}: registration was replaced during model discovery`);
+					}
 					// Dynamic rows can carry `!command` headers that are not on the
 					// registerProvider() config; track them so F5 / 401 can evict the cache.
 					this.#recordRuntimeModelHeaderCommands(providerName, modelDefs);

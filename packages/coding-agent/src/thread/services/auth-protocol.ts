@@ -188,6 +188,7 @@ export type AuthStorageProtocol = {
 	"keys.removeConfig": RpcMethod<[provider: string], void>;
 	"keys.clearConfig": RpcMethod<[], void>;
 	"keys.setResolver": RpcMethod<[resolver: (config: string) => Promise<string | undefined>], void>;
+	"keys.generation": RpcMethod<[provider: string], number>;
 	"keys.resolver": RpcMethod<
 		[provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }],
 		ApiKeyResolver
