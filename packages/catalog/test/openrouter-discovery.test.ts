@@ -578,6 +578,7 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 				maxTokens: 16_000,
 				cost: expect.objectContaining({ input: expect.closeTo(3, 6), output: expect.closeTo(6, 6) }),
 			});
+			expect(result.hiddenChatModelCount).toBe(1);
 		});
 
 		it("lists the public roster when the key cannot use /models/user", async () => {
@@ -595,6 +596,7 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 
 			expect(result.stale).toBe(false);
 			expect(ids(result.models)).toEqual(expect.arrayContaining(["vendor/allowed", "vendor/blocked"]));
+			expect(result.hiddenChatModelCount).toBeUndefined();
 		});
 
 		it("keeps the key's last list when /models/user fails and every other listing succeeds", async () => {
@@ -613,6 +615,7 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 				expect(result.stale).toBe(true);
 				expect(ids(result.models)).toContain("vendor/allowed");
 				expect(ids(result.models)).not.toContain("vendor/blocked");
+				expect(result.hiddenChatModelCount).toBe(1);
 			});
 		});
 

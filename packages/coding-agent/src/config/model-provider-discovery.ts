@@ -92,6 +92,8 @@ export interface ProviderDiscoveryState {
 	source?: ModelResolutionSource;
 	models: string[];
 	error?: string;
+	/** Public chat models the provider withholds from this credential. */
+	hiddenChatModelCount?: number;
 }
 export function extractGoogleOAuthToken(value: string | undefined): string | undefined {
 	if (!isAuthenticated(value)) return undefined;

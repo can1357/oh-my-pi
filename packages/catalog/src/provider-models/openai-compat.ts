@@ -3666,7 +3666,7 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 		cacheProviderId: resolveModelCacheProviderId("openrouter", { apiKey: accountApiKey, baseUrl }),
 		// `createModelManager()` prunes bundled chat rows the live roster omits.
 		dynamicModelsAuthoritative: true,
-		fetchDynamicModels: async cachedModels => {
+		fetchDynamicModels: async (cachedModels, report) => {
 			const [publicChat, accountChat, imageModels, decisionModels, rerankModels, videoModels, embeddingModels] =
 				await Promise.all([
 					fetchOpenAICompatibleModels(chatListing),
@@ -3854,6 +3854,10 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 			// would prune every chat model, so fall back to cache/bundled instead.
 			if (chatModels === null) {
 				return null;
+			}
+			if (report && accountChat?.kind === "account" && publicChat !== null) {
+				const accountIds = new Set(accountChat.models.map(model => model.id));
+				report.hiddenChatModelCount = publicChat.filter(model => !accountIds.has(model.id)).length;
 			}
 
 			const models = new Map<string, ModelSpec<Api>>();

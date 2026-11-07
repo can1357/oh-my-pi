@@ -127,6 +127,7 @@ export interface ModelHubRegistry extends ModelBrowserRegistry {
 				status: "idle" | "ok" | "empty" | "cached" | "unavailable" | "unauthenticated";
 				fetchedAt?: number;
 				error?: string;
+				hiddenChatModelCount?: number;
 		  }
 		| undefined;
 	find(provider: string, id: string): Model | undefined;
@@ -471,9 +472,11 @@ export class ModelHubComponent implements Component {
 			lines.push(...this.#renderLockedView(entry, width, rows - 1));
 		} else {
 			lines.push(this.#renderModelKindTabs(width));
-			this.#browser.setMaxVisible(rows - 2 - 5);
+			const note = this.#hiddenModelsNote(entry);
+			this.#browser.setMaxVisible(rows - 2 - 5 - (note ? 1 : 0));
 			this.#browser.setFocused(this.#focus === "list");
 			lines.push(...this.#browser.render(width));
+			if (note) lines.push(truncateToWidth(theme.fg("muted", ` ${note}`), width));
 		}
 		while (lines.length < rows) lines.push("");
 		return lines.slice(0, rows);
@@ -2110,6 +2113,25 @@ export class ModelHubComponent implements Component {
 		return entry.kind === "recent" || entry.kind === "all" || (entry.kind === "provider" && !entry.locked);
 	}
 
+	/** Account-hidden chat model counts for the browsed provider, or every provider under All models. */
+	#hiddenModelsNote(entry: SidebarEntry): string | undefined {
+		const providers =
+			entry.kind === "all"
+				? this.#unlockedProviderEntries
+				: entry.kind === "provider" && !entry.locked
+					? [entry]
+					: [];
+		const notes: string[] = [];
+		for (const provider of providers) {
+			const count = provider.providerId
+				? this.#registry.getProviderDiscoveryState(provider.providerId)?.hiddenChatModelCount
+				: undefined;
+			if (count)
+				notes.push(`${count} ${provider.label} model${count === 1 ? "" : "s"} hidden by your account settings`);
+		}
+		return notes.length > 0 ? notes.join(" · ") : undefined;
+	}
+
 	#handleStripInput(data: string): void {
 		const strip = this.#strip;
 		if (!strip) return;
@@ -3045,6 +3067,9 @@ export class ModelHubComponent implements Component {
 				),
 				this.#browser,
 			);
+			const note = this.#hiddenModelsNote(entry);
+			if (note)
+				children.push(node("text", { spans: [span(note, "muted")], truncate: "end" }, undefined, "hiddenModels"));
 		}
 		// Zero basis: the body takes the space left of the sidebar instead of sizing to its widest line.
 		return node("col", { gap: "sm", grow: 1, basis: 0, min: { w: 0 } }, children, "body");
@@ -3412,9 +3437,10 @@ export class ModelHubComponent implements Component {
 				),
 			];
 		}
-		if (this.#scopedModels.length > 0) return "--models scope";
+		const note = this.#hiddenModelsNote(entry);
+		if (this.#scopedModels.length > 0) return note ? `--models scope · ${note}` : "--models scope";
 		if (rolesView) return "Cleared roles fall back to auto-selection";
-		return undefined;
+		return note;
 	}
 
 	/** The sidebar as picker scopes: Roles, All models, then signed-in and signed-out providers. */

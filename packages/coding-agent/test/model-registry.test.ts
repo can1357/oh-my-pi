@@ -3807,11 +3807,13 @@ describe("ModelRegistry", () => {
 			await registry.refreshProvider("openrouter", "online");
 			expect(offered(registry, allowed.id)).toEqual(everywhere);
 			expect(offered(registry, hidden.id)).toEqual(nowhere);
+			expect(registry.getProviderDiscoveryState("openrouter")?.hiddenChatModelCount).toBe(1);
 
 			const restarted = new ModelRegistry(authStorage, modelsJsonPath, { fetch: failingFetch });
 			await restarted.hydrateCredentialScopedModelCaches();
 			expect(offered(restarted, allowed.id)).toEqual(everywhere);
 			expect(offered(restarted, hidden.id)).toEqual(nowhere);
+			expect(restarted.getProviderDiscoveryState("openrouter")?.hiddenChatModelCount).toBe(1);
 
 			const expiresAt = Date.now() + 3 * 60 * 60 * 1000;
 			spies.push(spyOn(Date, "now").mockReturnValue(expiresAt));

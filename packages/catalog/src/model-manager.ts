@@ -100,11 +100,20 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	 */
 	restoreCachedHeaders?: (model: Readonly<Model>) => Pick<Model, "headers" | "resolveHeaders"> | undefined;
 	/** Dynamic endpoint fetcher; receives restorable cached rows to preserve slices whose refresh fails. */
-	fetchDynamicModels?: (cachedModels?: readonly Model<Api>[]) => Promise<readonly ModelSpec<TApi>[] | null>;
+	fetchDynamicModels?: (
+		cachedModels?: readonly Model<Api>[],
+		report?: DynamicModelsReport,
+	) => Promise<readonly ModelSpec<TApi>[] | null>;
 	/** Optional stencil.so fallback hook. */
 	modelsDev?: ModelsDevFallback<TApi, TModelsDevPayload>;
 	/** Clock override for deterministic tests. */
 	now?: () => number;
+}
+
+/** What one dynamic fetch learned beyond its rows; the fetcher fills it in. */
+export interface DynamicModelsReport {
+	/** Chat models the provider lists publicly but withholds from this credential. */
+	hiddenChatModelCount?: number;
 }
 
 /**
@@ -131,6 +140,8 @@ export interface ModelResolutionResult<TApi extends Api = Api> {
 	fetchError?: string;
 	/** The fetch did not answer, so `models` were pruned to the last authoritative snapshot's chat roster. */
 	authoritativeCache?: boolean;
+	/** Public chat models this credential may not use, per the fetch or cache behind `models`. */
+	hiddenChatModelCount?: number;
 }
 
 /**
@@ -338,6 +349,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			stale: false,
 			source,
 			...(source === "cache" ? { updatedAt: cache.updatedAt } : {}),
+			...(cache.hiddenChatModelCount !== undefined ? { hiddenChatModelCount: cache.hiddenChatModelCount } : {}),
 		};
 	}
 
@@ -409,6 +421,9 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	);
 	const retainsAuthoritativeCache =
 		!dynamicFetchSucceeded && isAuthoritativeDynamicCache && usableCachedModels.length > 0;
+	const hiddenChatModelCount = dynamicFetchSucceeded
+		? dynamicFetch?.report.hiddenChatModelCount
+		: cache?.hiddenChatModelCount;
 	const models = collapseBuiltVariants(
 		authoritativeDynamicFetchSucceeded
 			? retainModelIds(mergedModels, dynamicModels)
@@ -429,6 +444,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				dbPath,
 				staticModels,
 				restorableHeaderFallback,
+				hiddenChatModelCount,
 			);
 		} else {
 			// Remote fetch failed. Re-persist any prior catalog as a
@@ -491,6 +507,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 					dbPath,
 					staticModels,
 					restorableHeaderFallback,
+					latestCache?.hiddenChatModelCount ?? cache?.hiddenChatModelCount,
 				);
 			}
 		}
@@ -514,6 +531,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				: {}),
 		...(dynamicFetch?.error !== undefined ? { fetchError: dynamicFetch.error } : {}),
 		...(retainsAuthoritativeCache ? { authoritativeCache: true } : {}),
+		...(hiddenChatModelCount !== undefined ? { hiddenChatModelCount } : {}),
 	};
 }
 
@@ -538,16 +556,17 @@ async function fetchModelsDev<TApi extends Api, TModelsDevPayload>(
 	}
 }
 
-/** The endpoint's catalog (`models: null` when it answered none), and why it threw, if it did. */
+/** The endpoint's catalog (`models: null` when it answered none), its report, and why it threw, if it did. */
 async function fetchDynamicModels<TApi extends Api>(
-	fetcher: (cachedModels?: readonly Model<Api>[]) => Promise<readonly ModelSpec<TApi>[] | null>,
+	fetcher: NonNullable<ModelManagerOptions<TApi>["fetchDynamicModels"]>,
 	cachedModels: readonly Model<TApi>[],
-): Promise<{ models: DiscoveredModelSet<TApi> | null; error?: string }> {
+): Promise<{ models: DiscoveredModelSet<TApi> | null; report: DynamicModelsReport; error?: string }> {
+	const report: DynamicModelsReport = {};
 	try {
-		const models = await fetcher(cachedModels);
-		return { models: models === null ? null : buildDiscoveredModelSpecs<TApi>(models) };
+		const models = await fetcher(cachedModels, report);
+		return { models: models === null ? null : buildDiscoveredModelSpecs<TApi>(models), report };
 	} catch (error) {
-		return { models: null, error: error instanceof Error ? error.message : String(error) };
+		return { models: null, report, error: error instanceof Error ? error.message : String(error) };
 	}
 }
 

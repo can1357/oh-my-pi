@@ -9,6 +9,7 @@
 ### Added
 
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+- `/model` notes how many OpenRouter models your account settings hide, e.g. "522 openrouter models hidden by your account settings" ([#15794](https://github.com/can1357/oh-my-pi/issues/15794))
 
 ### Changed
 

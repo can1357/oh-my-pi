@@ -67,6 +67,7 @@ interface CacheRowMeta {
 	header_omitted_model_ids: string;
 	unrestorable_header_model_ids: string;
 	header_restore_version: number;
+	hidden_chat_model_count: number | null;
 	/** `model_cache_refresh` columns joined onto the payload row; null when absent. */
 	refresh_payload_updated_at: number | null;
 	refresh_updated_at: number | null;
@@ -99,7 +100,8 @@ const SELECT_CACHE_ROW = `SELECT m.*, ${CACHE_ROW_REFRESH_COLUMNS} ${CACHE_ROW_F
 const SELECT_CACHE_ROW_META = `
 	SELECT m.provider_id, m.version, m.materialization_policy, m.updated_at, m.authoritative,
 		m.static_fingerprint, m.models_hash, m.header_omitted_model_ids,
-		m.unrestorable_header_model_ids, m.header_restore_version, ${CACHE_ROW_REFRESH_COLUMNS}
+		m.unrestorable_header_model_ids, m.header_restore_version, m.hidden_chat_model_count,
+		${CACHE_ROW_REFRESH_COLUMNS}
 	${CACHE_ROW_FROM}
 `;
 
@@ -170,6 +172,8 @@ export interface CacheEntry<TApi extends Api = Api> {
 	 * match — the cache already incorporates the same static state.
 	 */
 	staticFingerprint: string;
+	/** Chat models the provider lists publicly but withheld from this credential when the row was written. */
+	hiddenChatModelCount?: number;
 }
 
 let sharedDb: Database | null = null;
@@ -254,6 +258,7 @@ function initializeDb(db: Database): void {
 			unrestorable_header_model_ids TEXT NOT NULL DEFAULT '[]',
 			header_restore_version INTEGER NOT NULL DEFAULT 0,
 			models_hash TEXT NOT NULL DEFAULT '',
+			hidden_chat_model_count INTEGER,
 			models TEXT NOT NULL
 		)
 	`);
@@ -418,6 +423,9 @@ function migrateCacheSchema(db: Database): void {
 			// Older binaries rewriting a row via INSERT OR REPLACE reset it to ''.
 			db.run("ALTER TABLE model_cache ADD COLUMN models_hash TEXT NOT NULL DEFAULT ''");
 		}
+		if (!columns.some(column => column.name === "hidden_chat_model_count")) {
+			db.run("ALTER TABLE model_cache ADD COLUMN hidden_chat_model_count INTEGER");
+		}
 	} finally {
 		stmt.finalize();
 	}
@@ -575,6 +583,7 @@ function cacheRowsEqual(left: CacheRowMeta, right: CacheRowMeta): boolean {
 		left.header_omitted_model_ids === right.header_omitted_model_ids &&
 		left.unrestorable_header_model_ids === right.unrestorable_header_model_ids &&
 		left.header_restore_version === right.header_restore_version &&
+		left.hidden_chat_model_count === right.hidden_chat_model_count &&
 		left.models_hash !== "" &&
 		left.models_hash === right.models_hash
 	);
@@ -633,6 +642,7 @@ function parseCacheRow<TApi extends Api>(
 		unrestorableHeaderModelIds,
 		legacyHeaderRestoreMarkers: row.header_restore_version < HEADER_RESTORE_VERSION,
 		staticFingerprint: row.static_fingerprint ?? "",
+		...(row.hidden_chat_model_count !== null ? { hiddenChatModelCount: row.hidden_chat_model_count } : {}),
 	};
 }
 
@@ -692,6 +702,7 @@ export function writeModelCache<TApi extends Api>(
 	dbPath?: string,
 	staticHeaderSources: readonly Model<TApi>[] = [],
 	restorableHeaderFallback?: Record<string, string>,
+	hiddenChatModelCount?: number,
 ): void {
 	try {
 		invalidateReadRow(providerId, dbPath);
@@ -749,7 +760,7 @@ export function writeModelCache<TApi extends Api>(
 				.transaction((): "skipped" | "refreshed" | "written" => {
 					const matchStmt = db.prepare<
 						StoredRowState,
-						[string, number, string, string, string, string, number, string]
+						[string, number, string, string, string, string, number, string, number | null]
 					>(
 						`SELECT m.updated_at, m.authoritative,
 							r.payload_updated_at AS refresh_payload_updated_at,
@@ -759,7 +770,8 @@ export function writeModelCache<TApi extends Api>(
 						LEFT JOIN model_cache_refresh r ON r.provider_id = m.provider_id
 						WHERE m.provider_id = ? AND m.version = ? AND m.materialization_policy = ?
 							AND m.static_fingerprint = ? AND m.header_omitted_model_ids = ?
-							AND m.unrestorable_header_model_ids = ? AND m.header_restore_version = ? AND m.models_hash = ?`,
+							AND m.unrestorable_header_model_ids = ? AND m.header_restore_version = ? AND m.models_hash = ?
+							AND m.hidden_chat_model_count IS ?`,
 					);
 					let stored: StoredRowState | null;
 					try {
@@ -772,6 +784,7 @@ export function writeModelCache<TApi extends Api>(
 							serializedUnrestorable,
 							HEADER_RESTORE_VERSION,
 							modelsHash,
+							hiddenChatModelCount ?? null,
 						);
 					} finally {
 						matchStmt.finalize();
@@ -794,8 +807,8 @@ export function writeModelCache<TApi extends Api>(
 						`INSERT OR REPLACE INTO model_cache (
 							provider_id, version, materialization_policy, updated_at, authoritative, static_fingerprint,
 							header_omitted_model_ids, unrestorable_header_model_ids,
-							header_restore_version, models_hash, models
-						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+							header_restore_version, models_hash, hidden_chat_model_count, models
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 						[
 							providerId,
 							CACHE_SCHEMA_VERSION,
@@ -807,6 +820,7 @@ export function writeModelCache<TApi extends Api>(
 							serializedUnrestorable,
 							HEADER_RESTORE_VERSION,
 							modelsHash,
+							hiddenChatModelCount ?? null,
 							serializedModels,
 						],
 					);

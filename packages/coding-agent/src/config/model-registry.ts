@@ -2904,6 +2904,7 @@ export class ModelRegistry {
 				source: result.source,
 				models: models.map(model => model.id),
 				...(failure !== undefined ? { error: failure } : {}),
+				...(result.hiddenChatModelCount !== undefined ? { hiddenChatModelCount: result.hiddenChatModelCount } : {}),
 			});
 			const authoritativeProviders = new Set<string>();
 			if (options.dynamicModelsAuthoritative && (!result.stale || result.authoritativeCache)) {
@@ -2929,6 +2930,9 @@ export class ModelRegistry {
 				...(previous?.fetchedAt !== undefined ? { fetchedAt: previous.fetchedAt } : {}),
 				...(previous?.source !== undefined ? { source: previous.source } : {}),
 				models: previous?.models ?? [],
+				...(previous?.hiddenChatModelCount !== undefined
+					? { hiddenChatModelCount: previous.hiddenChatModelCount }
+					: {}),
 				error: failure,
 			});
 			return { models: [], authoritativeProviders: new Set(), replaceRuntimeProviders: new Set() };
