@@ -23,8 +23,8 @@ import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings
 function watchReconcile(owner: AgentSession): (hudUpdated: () => boolean) => Promise<void> {
 	const commits: Promise<unknown>[] = [];
 	const commit = owner.commitTodoPhases.bind(owner);
-	vi.spyOn(owner, "commitTodoPhases").mockImplementation((update, options) => {
-		const committed = commit(update, options);
+	vi.spyOn(owner, "commitTodoPhases").mockImplementation(update => {
+		const committed = commit(update);
 		commits.push(committed);
 		return committed;
 	});

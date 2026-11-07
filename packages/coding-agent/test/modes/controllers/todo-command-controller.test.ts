@@ -15,7 +15,7 @@ function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext
 		},
 		session: {
 			getTodoPhases: () => phases,
-			commitTodoPhases: vi.fn(async (update: TodoPhasesUpdate) => resolveTodoUpdate(update, phases)),
+			editTodoPhases: vi.fn(async (update: TodoPhasesUpdate) => resolveTodoUpdate(update, phases)),
 		},
 		sessionManager: {
 			appendMessage: vi.fn(),
@@ -109,7 +109,7 @@ describe("TodoCommandController", () => {
 		await controller.handleTodoCommand("import");
 
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining(`Could not parse ${target}:`));
-		expect(ctx.session.commitTodoPhases).not.toHaveBeenCalled();
+		expect(ctx.session.editTodoPhases).not.toHaveBeenCalled();
 		expect(ctx.setTodos).not.toHaveBeenCalled();
 	});
 
@@ -122,7 +122,7 @@ describe("TodoCommandController", () => {
 
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("Failed to read todos:"));
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("internal scheme"));
-		expect(ctx.session.commitTodoPhases).not.toHaveBeenCalled();
+		expect(ctx.session.editTodoPhases).not.toHaveBeenCalled();
 		expect(ctx.setTodos).not.toHaveBeenCalled();
 	});
 

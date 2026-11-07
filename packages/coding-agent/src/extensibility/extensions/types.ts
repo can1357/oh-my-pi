@@ -150,7 +150,7 @@ import type {
 } from "../shared-events";
 import type { SlashCommandInfo } from "../slash-commands";
 import type { TerminalLaunchRequest, TerminalLaunchResult } from "../../subprocess/terminal-launch";
-import type { TodoBackendDefinition, TodoBackendRegistry } from "../../tools/todo-backend";
+import type { TodoBackendDefinition, TodoBackendRegistration } from "../../tools/todo-backend";
 
 export type { Keybinding, OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -2404,8 +2404,8 @@ export interface ExtensionRuntimeState {
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
 	/** Remove a queued or initialized provider registration. */
 	unregisterProvider(name: string, sourceId: string): void;
-	/** Todo backends registered by extensions. Lives on the runtime so deferred extensions register into the same registry. */
-	todoBackends: TodoBackendRegistry;
+	/** Todo backends registered by extensions, in registration order. Lives on the runtime so deferred extensions register into the same list. */
+	todoBackends: TodoBackendRegistration[];
 	/** What holds `shortcut` for the extension at `extensionPath`; answered by the runner once it exists. */
 	getShortcutConflict(shortcut: KeyId, extensionPath: string): ShortcutConflict | undefined;
 }

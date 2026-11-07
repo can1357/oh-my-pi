@@ -10,8 +10,6 @@ import {
 	NATIVE_TODO_BACKEND_ID,
 	resolveTodoUpdate,
 	sanitizeTodoBackendText,
-	TODO_BACKEND_NOTICE_SOURCE,
-	type TodoCommitOptions,
 	type TodoPhasesUpdate,
 	type TodoWrite,
 } from "../tools/todo-backend";
@@ -19,9 +17,11 @@ import type { SessionManager } from "./session-manager";
 import type { TodoTracker } from "./todo-tracker";
 
 const SESSION_CHANGED_MESSAGE = "The session changed before the todo edit was saved; nothing was changed.";
+/** `source` of session notices about todo backends. */
+const NOTICE_SOURCE = "todo-backend";
 
 /** Thrown by a write's guard when the todo list was reset or reloaded after the write was enqueued. */
-export class TodoListChangedError extends Error {
+class TodoListChangedError extends Error {
 	constructor() {
 		super(SESSION_CHANGED_MESSAGE);
 		this.name = "TodoListChangedError";
@@ -162,20 +162,19 @@ export class TodoWrites {
 	}
 
 	/**
-	 * Replace the list from outside the `todo` tool, as a write. A function `update` receives the
-	 * committed list at that moment (returning `undefined` declines: nothing is sent or committed);
-	 * the backend's `replace` then receives a copy of the full list, the list updates and a
-	 * `user_todo_edit` entry is recorded so reloads keep it. A throwing `replace` rejects (naming the
-	 * backend) and commits nothing; so does a reset while queued. `mirrored` (eval bridge) only
-	 * records the entry: the bridged `todo` call already updated the list and reached `apply`.
-	 * Resolves with the committed list.
+	 * An edit the user or an RPC client made outside the `todo` tool, as a write. A function `update`
+	 * receives the committed list at that moment (returning `undefined` declines: nothing is sent or
+	 * committed); the backend's `replace` then receives a copy of the full list, the list updates and
+	 * a `user_todo_edit` entry is recorded so reloads keep it. A throwing `replace` refuses the edit:
+	 * it rejects (naming the backend) and commits nothing; so does a reset while queued. Resolves with
+	 * the committed list.
 	 */
-	commit(update: TodoPhasesUpdate, options?: TodoCommitOptions): Promise<TodoPhase[] | undefined> {
+	edit(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
 		const todo = this.#host.todo;
 		return this.run(async (active, guard) => {
 			const phases = resolveTodoUpdate(update, todo.phases);
 			if (phases === undefined) return undefined;
-			if (active && !options?.mirrored) {
+			if (active) {
 				try {
 					await active.replace(todo.clonePhases(phases));
 				} catch (error) {
@@ -185,11 +184,50 @@ export class TodoWrites {
 				}
 			}
 			guard.assertCurrent();
-			if (!options?.mirrored) todo.setPhases(phases);
-			this.#host.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
-			// The stored copy: `setPhases` keeps only the fields a todo list holds.
-			return options?.mirrored ? phases : todo.phases;
+			return this.#save(phases);
 		});
+	}
+
+	/**
+	 * Record a change that already happened elsewhere (Cursor's server list, a finished subagent, a
+	 * bridged `todo` call), as a write: a function `update` receives the committed list at that moment
+	 * (`undefined` declines), then the list updates and a `user_todo_edit` entry is recorded. A backend
+	 * cannot refuse it: it gets the list if it does not have it yet, and a throw only warns. Resolves
+	 * with the committed list, or `undefined` when it declined or the list was reset while queued.
+	 */
+	commit(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
+		const todo = this.#host.todo;
+		return this.run(async active => {
+			const phases = resolveTodoUpdate(update, todo.phases);
+			if (phases === undefined) return undefined;
+			const committed = this.#save(phases);
+			await this.#sync(active);
+			return committed;
+		}).catch((error: unknown) => {
+			if (error instanceof TodoListChangedError) return undefined;
+			throw error;
+		});
+	}
+
+	/** Set the list and record it so reloads keep it. Returns the stored copy (`setPhases` keeps only a todo list's fields). */
+	#save(phases: TodoPhase[]): TodoPhase[] {
+		this.#host.todo.setPhases(phases);
+		this.#host.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
+		return this.#host.todo.phases;
+	}
+
+	/** Send the committed list to `active` unless it has it; the list is already in place, so a throw only warns. */
+	async #sync(active: ActiveTodoBackend | undefined): Promise<void> {
+		if (!active) return;
+		try {
+			await active.sync();
+		} catch (error) {
+			this.#host.emitNotice(
+				"warning",
+				`Todo backend "${active.label}" did not take the todo list: ${sanitizeTodoBackendText(error)}`,
+				NOTICE_SOURCE,
+			);
+		}
 	}
 
 	/**
@@ -219,7 +257,7 @@ export class TodoWrites {
 	clear(): void {
 		this.invalidate();
 		this.#host.todo.setPhases([]);
-		this.#replaceAfterReset();
+		this.#syncAfterReset();
 	}
 
 	/**
@@ -229,31 +267,18 @@ export class TodoWrites {
 	reload(): void {
 		this.invalidate();
 		this.#host.todo.syncFromBranch();
-		this.#replaceAfterReset();
+		this.#syncAfterReset();
 	}
 
 	/**
-	 * Queue a `replace` with the list as of its queue slot, so the backend follows a reset or reload.
-	 * The list cannot be refused at that point, so a failure only warns. Before the first resolution
-	 * there is no backend to follow the list, and a host may still be setting up its extensions
-	 * (ACP loads a session before initializing them), so nothing is queued then.
+	 * Queue a {@link #sync} with the list as of its queue slot, so the backend follows a reset or reload.
+	 * Before the first resolution there is no backend to follow the list, and a host may still be
+	 * setting up its extensions (ACP loads a session before initializing them), so nothing is queued then.
 	 */
-	#replaceAfterReset(): void {
+	#syncAfterReset(): void {
 		if (!this.#resolvable || !this.queued) return;
-		const todo = this.#host.todo;
-		this.run(async active => {
-			if (!active) return;
-			try {
-				await active.replace(todo.clonePhases(todo.phases));
-			} catch (error) {
-				this.#host.emitNotice(
-					"warning",
-					`Todo backend "${active.label}" did not take the todo list after the session changed: ${sanitizeTodoBackendText(error)}`,
-					TODO_BACKEND_NOTICE_SOURCE,
-				);
-			}
-		}).catch((error: unknown) => {
-			// A later reset invalidated this one and queued its own replace.
+		this.run(active => this.#sync(active)).catch((error: unknown) => {
+			// A later reset invalidated this one and queued its own sync.
 			if (!(error instanceof TodoListChangedError))
 				logger.warn("Todo backend sync after a reset failed", { error: String(error) });
 		});
@@ -313,7 +338,7 @@ export class TodoWrites {
 			this.#host.emitNotice(
 				"warning",
 				`Todo backend "${sanitizeTodoBackendText(id)}" is not registered by any enabled extension; using native todos.`,
-				TODO_BACKEND_NOTICE_SOURCE,
+				NOTICE_SOURCE,
 			);
 			return;
 		}
@@ -324,9 +349,9 @@ export class TodoWrites {
 			}
 			const todo = this.#host.todo;
 			// The list the backend last confirmed, or `undefined` while a call is pending or after one
-			// failed, timed out or was abandoned. When it differs from the committed list (that call was
-			// lost, or its write did not commit), the next `apply` sends `replace` with the committed list
-			// first. It starts at the committed list, so switching backends does not copy the list.
+			// failed, timed out or was abandoned. `sync` sends the committed list when it differs (that
+			// call was lost, or its write did not commit). It starts at the committed list, so switching
+			// backends does not copy the list.
 			let sent: TodoPhase[] | undefined = todo.phases;
 			const call = async (
 				phases: TodoPhase[],
@@ -338,27 +363,26 @@ export class TodoWrites {
 				await runner.runTodoBackendCall(work, signal);
 				sent = snapshot;
 			};
-			const replace = (phases: TodoPhase[], signal: AbortSignal | undefined) =>
+			const replace = (phases: TodoPhase[], signal?: AbortSignal) =>
 				call(phases, backendSignal => backend.replace(phases, backendSignal), signal);
+			const sync = async (signal?: AbortSignal) => {
+				if (sent && Bun.deepEquals(sent, todo.phases)) return;
+				await replace(todo.clonePhases(todo.phases), signal);
+			};
 			this.#active = {
 				label: sanitizeTodoBackendText(definition.label),
 				apply: async (op, params, next, signal) => {
-					const committed = todo.phases;
-					if (!sent || !Bun.deepEquals(sent, committed)) {
-						try {
-							await replace(committed, signal);
-						} catch (error) {
-							throw new Error(
-								`it did not take the committed list sent first (${sanitizeTodoBackendText(error)})`,
-								{
-									cause: error,
-								},
-							);
-						}
+					try {
+						await sync(signal);
+					} catch (error) {
+						throw new Error(`it did not take the committed list sent first (${sanitizeTodoBackendText(error)})`, {
+							cause: error,
+						});
 					}
 					await call(next, backendSignal => backend.apply(op, params, next, backendSignal), signal);
 				},
 				replace,
+				sync,
 			};
 		} catch (error) {
 			const message = sanitizeTodoBackendText(error);
@@ -366,7 +390,7 @@ export class TodoWrites {
 			this.#host.emitNotice(
 				"warning",
 				`Todo backend "${sanitizeTodoBackendText(id)}" failed to start: ${message}; using native todos.`,
-				TODO_BACKEND_NOTICE_SOURCE,
+				NOTICE_SOURCE,
 			);
 		}
 	}
@@ -378,13 +402,13 @@ export class TodoWrites {
  * list, or `{ error }` for the plan's own error, a rejected commit, or a commit that did not apply.
  */
 export async function commitTodoEdit<T extends { phases: TodoPhase[] }>(
-	session: { commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> },
+	session: { editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> },
 	plan: (current: TodoPhase[]) => T | { error: string },
 ): Promise<{ plan: T; committed: TodoPhase[] } | { error: string }> {
 	const planned: { result?: T | { error: string } } = {};
 	let committed: TodoPhase[] | undefined;
 	try {
-		committed = await session.commitTodoPhases(current => {
+		committed = await session.editTodoPhases(current => {
 			const result = plan(current);
 			planned.result = result;
 			return "phases" in result ? result.phases : undefined;

@@ -51,8 +51,7 @@ import {
 	splitPathAndSelPreferringLiteral,
 } from "./tools/path-utils";
 import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
-import { errorMessage } from "./slash-commands/helpers/parse";
-import type { TodoCommitOptions, TodoPhasesUpdate } from "./tools/todo-backend";
+import type { TodoPhasesUpdate } from "./tools/todo-backend";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
 const CURSOR_TODO_PHASE = "Tasks";
@@ -122,9 +121,7 @@ interface CursorExecBridgeOptions {
 	 * emits no local `todo` toolResult, so without this bridge the provider's
 	 * list and the local `todo` state diverge silently and reloads lose it.
 	 */
-	commitTodoPhases?: (update: TodoPhasesUpdate, options?: TodoCommitOptions) => Promise<TodoPhase[] | undefined>;
-	/** Called with the backend's message when {@link commitTodoPhases} rejects a mirrored list. */
-	reportTodoRefusal?: (message: string) => void;
+	commitTodoPhases?: (update: TodoPhasesUpdate) => Promise<TodoPhase[] | undefined>;
 	getTodoPhases?: () => TodoPhase[];
 	/**
 	 * Build a `grep` tool honoring a frame's own context width and match cap.
@@ -1056,15 +1053,15 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			} else {
 				// Stays synchronous: the result below is returned mid-parse. The commit settles later
 				// and maps the snapshot again onto the list committed at its queue slot, so an earlier
-				// queued edit that renamed or regrouped phases survives; a refusal is reported then.
-				commitPhases(current => mapCursorTodoSnapshot(snapshot, current)).catch(error =>
-					this.#todoCommitRefused(result, error),
-				);
+				// queued edit that renamed or regrouped phases survives.
+				commitPhases(current => mapCursorTodoSnapshot(snapshot, current)).catch((commitError: unknown) => {
+					logger.warn("Could not record the Cursor todo list", { error: String(commitError) });
+				});
 				phases = next;
 			}
 		}
 
-		const result: ToolResultMessage = buildTodoSyncResult(toolCallId, phases, error);
+		const result = buildTodoSyncResult(toolCallId, phases, error);
 		// This completion is emitted synchronously mid-parse, while the streamed
 		// `toolcall_start` that creates the visible card rides
 		// `AssistantMessageEventStream` and lands a microtask later. When Cursor
@@ -1083,43 +1080,6 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			isError: error !== null,
 		});
 		return result;
-	}
-
-	/**
-	 * The session refused a mirrored list (a selected todo backend's `replace` threw), so it kept
-	 * its previous list. The notice says why, and the interactive HUD reloads the committed list
-	 * when it sees it. The call's toolResult must not restore the refused list on reload:
-	 * - when the loop has not persisted it yet, it is rewritten to say the update was refused and
-	 *   to carry the committed list;
-	 * - when it was persisted already, the mirrored `user_todo_edit` entry recorded here comes after
-	 *   it and wins. That identity commit is queued behind every earlier write, so it resolves with
-	 *   the list committed as of its slot.
-	 */
-	#todoCommitRefused(result: ToolResultMessage, error: unknown): void {
-		const message = errorMessage(error);
-		this.options.reportTodoRefusal?.(message);
-		const commit = this.options.commitTodoPhases;
-		if (!commit) return;
-		commit(current => current, { mirrored: true }).then(
-			committed => {
-				const phases = committed ?? [];
-				// Timing-dependent: this rewrite is what gets saved only while the agent loop has not
-				// persisted `result` yet (it does so after the stream ends); later, the entry above wins.
-				result.content = [
-					{
-						type: "text",
-						text: `Todo update refused, list unchanged (${formatTodoSyncSummary(phases)}): ${message}`,
-					},
-				];
-				result.details = { phases, storage: "session" };
-				result.isError = true;
-			},
-			(persistError: unknown) => {
-				logger.warn("Could not persist the committed todo list after a refused mirror", {
-					error: errorMessage(persistError),
-				});
-			},
-		);
 	}
 
 	async mcp(call: CursorMcpCall) {

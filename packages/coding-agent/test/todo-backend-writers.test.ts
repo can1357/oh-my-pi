@@ -1,5 +1,4 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
@@ -12,11 +11,7 @@ import { handleTodoAcp } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
 import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
-import {
-	TODO_BACKEND_NOTICE_SOURCE,
-	type TodoCommitOptions,
-	type TodoPhasesUpdate,
-} from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
+import type { TodoPhasesUpdate } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -86,11 +81,6 @@ async function createHarness(): Promise<Harness> {
 	return { session, recorder, dir, eventBus, sessionManager };
 }
 
-function phasesOf(details: unknown): TodoPhase[] | undefined {
-	if (typeof details !== "object" || details === null || !("phases" in details)) return undefined;
-	return Array.isArray(details.phases) ? details.phases : undefined;
-}
-
 /** Seeds a list through the `todo` tool, then forgets what the backend saw. */
 async function seedList(h: Harness): Promise<TodoPhase[]> {
 	await todo(h.session, { op: "init", list: [{ phase: "Work", items: ["first", "second"] }] });
@@ -130,7 +120,7 @@ function todoCommand(args: string) {
 	return { name: "todo", args, text: `/todo ${args}` };
 }
 
-/** Resolves once `count` todo writes (tool writes and commits) were issued on the session from now. */
+/** Resolves once `count` todo writes (tool writes, commits and edits) were issued on the session from now. */
 function writeQueuedAt(session: AgentSession, count: number): Promise<void> {
 	const queued = Promise.withResolvers<void>();
 	let writes = 0;
@@ -140,180 +130,95 @@ function writeQueuedAt(session: AgentSession, count: number): Promise<void> {
 	};
 	const run = session.runTodoWrite.bind(session);
 	const commit = session.commitTodoPhases.bind(session);
+	const edit = session.editTodoPhases.bind(session);
 	vi.spyOn(session, "runTodoWrite").mockImplementation((...args) => issued(run(...args)));
 	vi.spyOn(session, "commitTodoPhases").mockImplementation((...args) => issued(commit(...args)));
+	vi.spyOn(session, "editTodoPhases").mockImplementation((...args) => issued(edit(...args)));
 	return queued.promise;
 }
 
-/**
- * Cursor handlers wired to the session. `refusalSettled()` resolves once the next refusal's
- * mirrored commit landed and the bridge rewrote that call's result. `wiring` replaces the
- * recording `emitEvent`/`reportTodoRefusal` with `sdk.ts`'s session wiring.
- */
-function createCursor(h: Harness, wiring: "recorded" | "session" = "recorded") {
-	const ends: Array<Extract<AgentEvent, { type: "tool_execution_end" }>> = [];
-	const refusals: string[] = [];
-	const settled: Array<PromiseWithResolvers<void>> = [];
-	const nth = (index: number) => (settled[index] ??= Promise.withResolvers<void>());
-	let mirroredCommits = 0;
-	let awaited = 0;
-	const handlers = new CursorExecHandlers({
+function createCursor(h: Harness) {
+	return new CursorExecHandlers({
 		cwd: h.dir,
 		tools: new Map(),
 		getTodoPhases: () => h.session.getTodoPhases(),
-		commitTodoPhases: (update, options) => {
-			const run = h.session.commitTodoPhases(update, options);
-			if (options?.mirrored) {
-				const waiter = nth(mirroredCommits++);
-				// Observe after the bridge's own handler, which it attaches once this returns.
-				const settle = () => waiter.resolve();
-				queueMicrotask(() => run.then(settle, settle));
-			}
-			return run;
-		},
-		reportTodoRefusal: message => {
-			refusals.push(message);
-			if (wiring === "session") h.session.emitNotice("error", message, TODO_BACKEND_NOTICE_SOURCE);
-		},
-		emitEvent: event => {
-			if (event.type === "tool_execution_end") ends.push(event);
-			if (wiring === "session") h.session.agent.emitExternalEvent(event);
-		},
+		commitTodoPhases: update => h.session.commitTodoPhases(update),
 	});
-	return { handlers, ends, refusals, refusalSettled: () => nth(awaited++).promise };
+}
+
+function collectNotices(session: AgentSession): string[] {
+	const notices: string[] = [];
+	session.subscribe(event => {
+		if (event.type === "notice") notices.push(event.message);
+	});
+	return notices;
 }
 
 describe("todo writers reach the selected backend's replace", () => {
-	it("/todo sends the full new list to replace and commits it after replace resolves", async () => {
+	it("/todo and the slash helper send the full new list to replace and commit it once replace resolves", async () => {
 		const h = await createHarness();
 		const seeded = await seedList(h);
 		const { ctx, controller } = controllerContext(h.session);
+		const { runtime } = slashRuntime(h.session, h.dir);
 
 		await controller.handleTodoCommand('append "Third item"');
+		await handleTodoAcp(todoCommand('append "Slash item"'), runtime);
 
 		const replaces = h.recorder.calls.filter(call => call.method === "replace");
-		expect(replaces).toHaveLength(1);
-		expect(contentsOf(replaces[0]!.phases)).toEqual([...contentsOf(seeded), "Third item"]);
-		expect(h.session.getTodoPhases()).toEqual(replaces[0]!.phases);
-		expect(userTodoEdits(h.session)).toHaveLength(1);
+		expect(replaces.map(call => contentsOf(call.phases))).toEqual([
+			[...contentsOf(seeded), "Third item"],
+			[...contentsOf(seeded), "Third item", "Slash item"],
+		]);
+		expect(h.session.getTodoPhases()).toEqual(replaces[1]!.phases);
+		expect(userTodoEdits(h.session)).toHaveLength(2);
 		expect(ctx.setTodos).toHaveBeenCalledWith(replaces[0]!.phases);
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});
 
-	it("/todo surfaces the backend's message and changes nothing when replace throws", async () => {
+	it("/todo and the slash helper surface the backend's message and change nothing when replace throws", async () => {
 		const h = await createHarness();
 		const seeded = await seedList(h);
 		h.recorder.replaceError = new Error(REFUSAL);
 		const { ctx, controller } = controllerContext(h.session);
+		const { runtime, output } = slashRuntime(h.session, h.dir);
 
 		await controller.handleTodoCommand('append "Refused item"');
+		const refused = await handleTodoAcp(todoCommand("rm"), runtime);
 
 		expect(ctx.showError).toHaveBeenCalledTimes(1);
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining(REFUSAL));
 		expect(ctx.setTodos).not.toHaveBeenCalled();
 		expect(ctx.agent.appendMessage).not.toHaveBeenCalled();
+		expect(refused).toEqual({ consumed: true, failed: true });
+		expect(output).toHaveBeenCalledTimes(1);
+		expect(output).toHaveBeenCalledWith(expect.stringContaining(REFUSAL));
 		expect(h.session.getTodoPhases()).toEqual(seeded);
 		expect(userTodoEdits(h.session)).toHaveLength(0);
 	});
 
-	it("the slash helper sends the full list to replace, and reports a refusal as a failed command", async () => {
-		const h = await createHarness();
-		const seeded = await seedList(h);
-		const { runtime, output } = slashRuntime(h.session, h.dir);
-
-		const ok = await handleTodoAcp(todoCommand('append "Slash item"'), runtime);
-		expect(ok).toEqual({ consumed: true });
-		const replaces = h.recorder.calls.filter(call => call.method === "replace");
-		expect(replaces).toHaveLength(1);
-		expect(contentsOf(replaces[0]!.phases)).toEqual([...contentsOf(seeded), "Slash item"]);
-
-		const committed = h.session.getTodoPhases();
-		h.recorder.replaceError = new Error(REFUSAL);
-		output.mockClear();
-		const refused = await handleTodoAcp(todoCommand("rm"), runtime);
-
-		expect(refused).toEqual({ consumed: true, failed: true });
-		expect(output).toHaveBeenCalledTimes(1);
-		expect(output).toHaveBeenCalledWith(expect.stringContaining(REFUSAL));
-		expect(h.session.getTodoPhases()).toEqual(committed);
-	});
-
-	it("Cursor todoSync mirrors through replace; a refusal settles each call once and a reload keeps the committed list in either persist order", async () => {
+	it("Cursor todoSync mirrors through replace; a backend that throws cannot refuse it, only warns once, and a reload keeps the list", async () => {
 		const h = await createHarness();
 		await seedList(h);
 		const cursor = createCursor(h);
+		const notices = collectNotices(h.session);
+		const reload = () => getLatestTodoPhasesFromEntries(h.sessionManager.getBranch());
 		const mirroredList: TodoPhase[] = [{ name: "Tasks", tasks: [{ content: "cursor step", status: "in_progress" }] }];
 
-		const mirrored = cursor.handlers.todoSync(
-			{ merged: false, todos: [{ content: "cursor step", status: "in_progress" }] },
-			"mirrored",
-		);
-		expect(phasesOf(mirrored.details)).toEqual(mirroredList);
+		cursor.todoSync({ merged: false, todos: [{ content: "cursor step", status: "in_progress" }] }, "mirrored");
 		await flushTodoWrites(h.session);
 		expect(h.recorder.calls.map(call => [call.method, call.phases])).toEqual([["replace", mirroredList]]);
 		expect(h.session.getTodoPhases()).toEqual(mirroredList);
-		expect(cursor.refusals).toEqual([]);
+		expect(notices).toEqual([]);
 
-		h.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: mirroredList });
-		const reload = () => getLatestTodoPhasesFromEntries(h.sessionManager.getBranch());
 		h.recorder.replaceError = new Error(REFUSAL);
+		const result = cursor.todoSync({ merged: false, todos: [{ content: "kept anyway", status: "pending" }] }, "kept");
+		await flushTodoWrites(h.session);
 
-		// The loop persisted the toolResult before the refusal landed.
-		const early = cursor.handlers.todoSync(
-			{ merged: false, todos: [{ content: "refused early", status: "pending" }] },
-			"early",
-		);
-		h.sessionManager.appendMessage(early);
-		await cursor.refusalSettled();
-		expect(h.session.getTodoPhases()).toEqual(mirroredList);
-		expect(reload()).toEqual(mirroredList);
-
-		// The refusal landed before the loop persisted the toolResult.
-		const late = cursor.handlers.todoSync(
-			{ merged: false, todos: [{ content: "refused late", status: "pending" }] },
-			"late",
-		);
-		await cursor.refusalSettled();
-		h.sessionManager.appendMessage(late);
-		expect(reload()).toEqual(mirroredList);
-		expect(late.isError).toBe(true);
-		expect(cursor.refusals).toHaveLength(2);
-		expect(cursor.refusals[0]).toContain(REFUSAL);
-		// One completion per call: a refusal does not send a second one.
-		expect(cursor.ends.map(end => end.toolCallId)).toEqual(["mirrored", "early", "late"]);
-	});
-
-	it("Cursor refusal with a /todo edit queued behind it rewrites its result with, and reloads, the edited list", async () => {
-		const h = await createHarness();
-		const seeded = await seedList(h);
-		h.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: seeded });
-		const gate = hold(h.recorder, "replace");
-		const cursor = createCursor(h);
-		const { controller } = controllerContext(h.session);
-		const editQueued = writeQueuedAt(h.session, 2);
-
-		const result = cursor.handlers.todoSync(
-			{ merged: false, todos: [{ content: "refused step", status: "pending" }] },
-			"refused",
-		);
-		await gate.started.promise;
-		h.recorder.replaceError = new Error(REFUSAL);
-		h.recorder.beforeReplace = () => {
-			h.recorder.replaceError = undefined;
-		};
-		const edit = controller.handleTodoCommand('append "Queued edit"');
-		await editQueued;
-		gate.release.resolve();
-		await edit;
-		await cursor.refusalSettled();
-
-		const committed = h.session.getTodoPhases();
-		expect(contentsOf(committed)).toContain("Queued edit");
-		expect(contentsOf(committed)).not.toContain("refused step");
-		expect(getLatestTodoPhasesFromEntries(h.sessionManager.getBranch())).toEqual(committed);
-		expect(cursor.ends.filter(end => end.toolCallId === "refused")).toHaveLength(1);
-		expect(phasesOf(result.details)).toEqual(committed);
-		expect(result.isError).toBe(true);
+		const kept: TodoPhase[] = [{ name: "Tasks", tasks: [{ content: "kept anyway", status: "pending" }] }];
+		expect(result.isError).not.toBe(true);
+		expect(h.session.getTodoPhases()).toEqual(kept);
+		expect(reload()).toEqual(kept);
+		expect(notices).toEqual([`Todo backend "Recorder" did not take the todo list: ${REFUSAL}`]);
 	});
 
 	it("a Cursor sync queued behind an edit that renames a phase keeps the new name", async () => {
@@ -325,7 +230,7 @@ describe("todo writers reach the selected backend's replace", () => {
 
 		const rename = h.session.commitTodoPhases(renamed);
 		await gate.started.promise;
-		cursor.handlers.todoSync(
+		cursor.todoSync(
 			{
 				merged: false,
 				todos: [
@@ -380,28 +285,20 @@ describe("todo writers reach the selected backend's replace", () => {
 	it("a replace that throws after /new only warns, and the new list stays", async () => {
 		const h = await createHarness();
 		await seedList(h);
-		const notices: string[] = [];
-		h.session.subscribe(event => {
-			if (event.type === "notice") notices.push(event.message);
-		});
+		const notices = collectNotices(h.session);
 		h.recorder.replaceError = new Error(REFUSAL);
 
 		await h.session.newSession();
 		await flushTodoWrites(h.session);
 
 		expect(h.session.getTodoPhases()).toEqual([]);
-		expect(notices).toEqual([
-			`Todo backend "Recorder" did not take the todo list after the session changed: ${REFUSAL}`,
-		]);
+		expect(notices).toEqual([`Todo backend "Recorder" did not take the todo list: ${REFUSAL}`]);
 	});
 
 	it("a reset superseded while queued sends nothing; only the latest one reaches replace", async () => {
 		const h = await createHarness();
 		await seedList(h);
-		const notices: string[] = [];
-		h.session.subscribe(event => {
-			if (event.type === "notice") notices.push(event.message);
-		});
+		const notices = collectNotices(h.session);
 		const gate = hold(h.recorder, "apply");
 		const inFlight = settled(todo(h.session, { op: "append", phase: "Work", items: ["late"] }));
 		await gate.started.promise;
@@ -423,8 +320,7 @@ describe("todo writers reach the selected backend's replace", () => {
 		const seeded = await seedList(h);
 		const toolSession = {
 			getToolByName: (name: string) => h.session.getToolByName(name),
-			commitTodoPhases: (update: TodoPhasesUpdate, options?: TodoCommitOptions) =>
-				h.session.commitTodoPhases(update, options),
+			commitTodoPhases: (update: TodoPhasesUpdate) => h.session.commitTodoPhases(update),
 		} satisfies Pick<ToolSession, "getToolByName" | "commitTodoPhases">;
 		h.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: seeded });
 		const gate = hold(h.recorder, "apply");
@@ -546,7 +442,7 @@ describe("interactive mode with a backend", () => {
 		expect(started.todoPhases).toEqual(committed);
 	});
 
-	it("keeps the list and the HUD, and warns, when replace throws; a later tick does not repeat the refused commit", async () => {
+	it("commits the completed list and shows it on the HUD when replace throws, and warns once", async () => {
 		const h = await createHarness();
 		h.recorder.replaceError = new Error(REFUSAL);
 		const started = await startMode(h);
@@ -558,15 +454,9 @@ describe("interactive mode with a backend", () => {
 
 		expect(warning).toHaveBeenCalledTimes(1);
 		expect(warning).toHaveBeenCalledWith(expect.stringContaining(REFUSAL));
-		expect(h.session.getTodoPhases()[0]?.tasks[0]?.status).toBe("pending");
-		expect(started.todoPhases[0]?.tasks[0]?.status).toBe("pending");
-		expect(userTodoEdits(h.session)).toHaveLength(1);
-
-		completeSubagent(h);
-		await flushTodoWrites(h.session);
-
-		expect(h.recorder.calls.filter(call => call.method === "replace")).toHaveLength(1);
-		expect(warning).toHaveBeenCalledTimes(1);
+		expect(h.session.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
+		expect(started.todoPhases[0]?.tasks[0]?.status).toBe("completed");
+		expect(getLatestTodoPhasesFromEntries(h.sessionManager.getBranch())).toEqual(h.session.getTodoPhases());
 	});
 
 	it("stays quiet when /new discards the list while the reconcile commit's replace is pending", async () => {
@@ -595,20 +485,5 @@ describe("interactive mode with a backend", () => {
 		]);
 		expect(h.session.getTodoPhases()).toEqual([]);
 		expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("The session changed"));
-	});
-
-	it("a Cursor mirror the backend refuses leaves the HUD on the committed list", async () => {
-		const h = await createHarness();
-		const started = await startMode(h);
-		const errorShown = Promise.withResolvers<string>();
-		vi.spyOn(started, "showError").mockImplementation(message => errorShown.resolve(message));
-		const committed = structuredClone(h.session.getTodoPhases());
-		h.recorder.replaceError = new Error(REFUSAL);
-		const cursor = createCursor(h, "session");
-
-		cursor.handlers.todoSync({ merged: false, todos: [{ content: "refused step", status: "pending" }] }, "refused");
-		// The notice handler reloads the HUD right after showing the error.
-		expect(await errorShown.promise).toContain(REFUSAL);
-		expect(started.todoPhases).toEqual(committed);
 	});
 });

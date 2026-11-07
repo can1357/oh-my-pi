@@ -2,9 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
+	registerTodoBackend,
 	type TodoBackend,
 	type TodoBackendDefinition,
-	TodoBackendRegistry,
+	type TodoBackendRegistration,
 } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
@@ -17,71 +18,71 @@ function definition(id: string, overrides: Partial<TodoBackendDefinition> = {}):
 	return { id, label: `Label ${id}`, create: () => noopBackend, ...overrides };
 }
 
-describe("TodoBackendRegistry", () => {
-	test("an extension reusing a taken id keeps its other registrations; the first backend stays", async () => {
-		const runtime = new ExtensionRuntime();
-		const load = (factory: ExtensionFactory, name: string) =>
-			loadExtensionFromFactory(factory, process.cwd(), new EventBus(), runtime, name);
-		await load(pi => pi.registerTodoBackend({ id: "tracker", label: "First", create: () => noopBackend }), "a");
+function load(runtime: ExtensionRuntime, factory: ExtensionFactory, name: string) {
+	return loadExtensionFromFactory(factory, process.cwd(), new EventBus(), runtime, name);
+}
 
-		const second = await load(pi => {
-			pi.registerTodoBackend({ id: "tracker", label: "Second", create: () => noopBackend });
-			pi.registerCommand("second-cmd", { handler: async () => {} });
-		}, "b");
-
-		expect(second.commands.has("second-cmd")).toBe(true);
-		expect(runtime.todoBackends.list().map(entry => entry.definition.label)).toEqual(["First"]);
-	});
-
+describe("registerTodoBackend", () => {
 	test("rejects an empty id, an empty label and a non-function create", () => {
-		const registry = new TodoBackendRegistry();
-		expect(() => registry.register(definition(""), "ext")).toThrow(/id/);
-		expect(() => registry.register(definition("a", { label: "" }), "ext")).toThrow(/"a".*label/);
-		expect(() => registry.register(definition("b", { create: undefined as never }), "ext")).toThrow(/"b".*create/);
+		const registrations: TodoBackendRegistration[] = [];
+		expect(() => registerTodoBackend(registrations, definition(""), "ext")).toThrow(/id/);
+		expect(() => registerTodoBackend(registrations, definition("a", { label: "" }), "ext")).toThrow(/"a".*label/);
+		expect(() => registerTodoBackend(registrations, definition("b", { create: undefined as never }), "ext")).toThrow(
+			/"b".*create/,
+		);
+		expect(registrations).toEqual([]);
 	});
 
-	test("list keeps registration order, which the settings submenu shows", () => {
-		const registry = new TodoBackendRegistry();
-		registry.register(definition("b"), "ext");
-		registry.register(definition("a"), "ext");
-		registry.register(definition("c"), "ext");
-		expect(registry.list().map(entry => entry.definition.id)).toEqual(["b", "a", "c"]);
+	test("keeps registration order, which the settings submenu shows", () => {
+		const registrations: TodoBackendRegistration[] = [];
+		for (const id of ["b", "a", "c"]) registerTodoBackend(registrations, definition(id), "ext");
+		expect(registrations.map(entry => entry.definition.id)).toEqual(["b", "a", "c"]);
 	});
 });
 
 describe("pi.registerTodoBackend", () => {
-	test("an extension registering native fails to load", async () => {
+	test("an extension reusing a taken id keeps its other registrations; the first backend stays", async () => {
 		const runtime = new ExtensionRuntime();
-		await expect(
-			loadExtensionFromFactory(
-				pi => {
-					pi.registerTodoBackend({ id: "native", label: "Native", create: () => noopBackend });
-				},
-				process.cwd(),
-				new EventBus(),
-				runtime,
-				"bad-extension",
-			),
-		).rejects.toThrow(/native/);
-		expect(runtime.todoBackends.list()).toEqual([]);
+		await load(runtime, pi => pi.registerTodoBackend(definition("tracker", { label: "First" })), "a");
+
+		const second = await load(
+			runtime,
+			pi => {
+				pi.registerTodoBackend(definition("tracker", { label: "Second" }));
+				pi.registerCommand("second-cmd", { handler: async () => {} });
+			},
+			"b",
+		);
+
+		expect(second.commands.has("second-cmd")).toBe(true);
+		expect(runtime.todoBackends.map(entry => entry.definition.label)).toEqual(["First"]);
 	});
 
-	test("a factory that throws after registering leaves earlier backends and frees its id", async () => {
+	test("an extension registering native fails to load", async () => {
 		const runtime = new ExtensionRuntime();
-		const load = (factory: ExtensionFactory, name: string) =>
-			loadExtensionFromFactory(factory, process.cwd(), new EventBus(), runtime, name);
-		await load(pi => pi.registerTodoBackend({ id: "earlier", label: "Earlier", create: () => noopBackend }), "a");
+		await expect(load(runtime, pi => pi.registerTodoBackend(definition("native")), "bad-extension")).rejects.toThrow(
+			/native/,
+		);
+		expect(runtime.todoBackends).toEqual([]);
+	});
+
+	test("a factory that throws after registering rolls back only its own backends and frees its id", async () => {
+		const runtime = new ExtensionRuntime();
+		await load(runtime, pi => pi.registerTodoBackend(definition("earlier")), "a");
 
 		await expect(
-			load(pi => {
-				pi.registerTodoBackend({ id: "tracker", label: "Broken", create: () => noopBackend });
-				throw new Error("factory failed");
-			}, "broken"),
+			load(
+				runtime,
+				pi => {
+					pi.registerTodoBackend(definition("tracker", { label: "Broken" }));
+					throw new Error("factory failed");
+				},
+				"broken",
+			),
 		).rejects.toThrow("factory failed");
-		expect(runtime.todoBackends.list().map(entry => entry.definition.id)).toEqual(["earlier"]);
+		expect(runtime.todoBackends.map(entry => entry.definition.id)).toEqual(["earlier"]);
 
-		await load(pi => pi.registerTodoBackend({ id: "tracker", label: "Healthy", create: () => noopBackend }), "b");
-		const tracker = runtime.todoBackends.list().find(entry => entry.definition.id === "tracker");
-		expect(tracker?.definition.label).toBe("Healthy");
+		await load(runtime, pi => pi.registerTodoBackend(definition("tracker", { label: "Healthy" })), "b");
+		expect(runtime.todoBackends.map(entry => entry.definition.label)).toEqual(["Label earlier", "Healthy"]);
 	});
 });

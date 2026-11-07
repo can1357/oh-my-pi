@@ -170,10 +170,8 @@ import {
 	type WorktreeExitPlan,
 } from "../session/session-worktree";
 import type { ShakeMode } from "../session/shake-types";
-import { TodoListChangedError } from "../session/todo-writes";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
-import { errorMessage } from "../slash-commands/helpers/parse";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
@@ -2085,11 +2083,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
-	/** A subagent-completion todo commit is awaiting the session's write queue. */
-	#todoReconcileInFlight = false;
-	#todoReconcileRerun = false;
-	/** Serialized list a backend refused; suppresses re-attempting the identical commit. */
-	#todoReconcileRefusedKey: string | undefined;
 	/** Active subagent descriptions the todo HUD last rendered with (joined); see #flushObserverUiSync. */
 	#todoHudSubagentKey: string | undefined;
 	#runningSubagentCount = 0;
@@ -5152,28 +5145,17 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// The HUD snapshot only gates whether a commit is worth queueing; the committed list is
 		// recomputed inside the queued updater so a `todo` write queued ahead of it is never overwritten.
-		const next = completeFinishedSubagentTodos(this.todoPhases, completedDescs);
-		if (!next) return;
-		const nextKey = JSON.stringify(next);
-		// A refused list stays refused until the inputs change; retrying on every tick would repeat the warning.
-		if (nextKey === this.#todoReconcileRefusedKey) return;
-		// A commit in flight (the backend's `replace` may be slow) owns the list; rerun once it lands.
-		if (this.#todoReconcileInFlight) {
-			this.#todoReconcileRerun = true;
-			return;
-		}
-		// Persist into the session that owns the snapshot we derived `next` from,
+		if (!completeFinishedSubagentTodos(this.todoPhases, completedDescs)) return;
+		// Persist into the session that owns the HUD snapshot checked above,
 		// not `viewSession`: the two diverge mid focus-attach, and writing to the
 		// destination there would clobber its canonical plan. Leaving the owner
 		// bound (rather than routing through `setTodos`, which rebinds it to
 		// `viewSession`) keeps a follow-up reconcile in the same window correct.
 		const owner = this.#todoPhasesOwner ?? this.session;
-		this.#todoReconcileInFlight = true;
-		void owner
+		owner
 			.commitTodoPhases(current => completeFinishedSubagentTodos(current, completedDescs))
 			.then(
 				committed => {
-					this.#todoReconcileRefusedKey = undefined;
 					// Nothing to change against the committed list, or the HUD now belongs to another owner.
 					if (!committed || (this.#todoPhasesOwner ?? this.session) !== owner) return;
 					this.todoPhases = committed;
@@ -5181,19 +5163,10 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.#renderTodoList();
 					this.ui.requestRender();
 				},
-				error => {
-					// The list was reset or reloaded meanwhile; the new list reconciles on its own.
-					if (error instanceof TodoListChangedError) return;
-					this.#todoReconcileRefusedKey = nextKey;
-					this.showWarning(errorMessage(error));
+				(error: unknown) => {
+					logger.warn("Could not record subagent todo completions", { error: String(error) });
 				},
-			)
-			.finally(() => {
-				this.#todoReconcileInFlight = false;
-				if (!this.#todoReconcileRerun) return;
-				this.#todoReconcileRerun = false;
-				this.#reconcileTodosWithSubagents();
-			});
+			);
 	}
 
 	#cancelTodoAutoClearTimer(): void {

@@ -9,12 +9,6 @@ import type { TodoParams } from "./todo";
 export const NATIVE_TODO_BACKEND_ID = "native";
 
 /**
- * `source` of session notices about todo backends: fallbacks to native todos and Cursor-mirrored
- * lists a backend refused. The interactive HUD reloads the committed list when it sees one.
- */
-export const TODO_BACKEND_NOTICE_SOURCE = "todo-backend";
-
-/**
  * Text an extension or the user supplied (a backend id or label, a thrown error) as one
  * display-safe line. It reaches notices, `/todo` errors and tool results, which render it as is.
  */
@@ -54,10 +48,11 @@ export interface TodoBackend {
 	 */
 	apply(op: TodoOp, params: TodoBackendParams, next: TodoPhase[], signal: AbortSignal): Promise<void>;
 	/**
-	 * Called for edits made outside the `todo` tool, where a throw refuses the edit and leaves the list
-	 * unchanged; after the list was reset or reloaded (`/new`, a session switch, rewind, tree
-	 * navigation, a fork from a message), where the list is already in place and a throw only warns;
-	 * and before an `apply` that follows a lost call (see above).
+	 * Called for edits the user or an RPC client makes outside the `todo` tool, where a throw refuses
+	 * the edit and leaves the list unchanged. Also called, only when this backend does not have the
+	 * committed list yet, after a change already in place (a Cursor mirror, a subagent auto-complete,
+	 * a reset or reload: `/new`, a session switch, rewind, tree navigation, a fork from a message),
+	 * where a throw only warns, and before an `apply` that follows a lost call (see above).
 	 */
 	replace(phases: TodoPhase[], signal: AbortSignal): Promise<void>;
 }
@@ -87,8 +82,11 @@ export interface TodoBackendDefinition {
  */
 export interface ActiveTodoBackend {
 	readonly label: string;
+	/** Sends the committed list first if this backend does not have it. */
 	apply(op: TodoOp, params: TodoBackendParams, next: TodoPhase[], signal?: AbortSignal): Promise<void>;
 	replace(phases: TodoPhase[], signal?: AbortSignal): Promise<void>;
+	/** Send the committed list unless this backend confirmed it last. */
+	sync(signal?: AbortSignal): Promise<void>;
 }
 
 /** What a commit sets the list to: a list, or an updater run on the committed list (`undefined` declines). */
@@ -97,11 +95,6 @@ export type TodoPhasesUpdate = TodoPhase[] | ((current: TodoPhase[]) => TodoPhas
 /** The list `update` sets when the committed list is `current`; `undefined` when it declines. */
 export function resolveTodoUpdate(update: TodoPhasesUpdate, current: TodoPhase[]): TodoPhase[] | undefined {
 	return typeof update === "function" ? update(current) : update;
-}
-
-export interface TodoCommitOptions {
-	/** Record the entry only: the bridged `todo` call already updated the list and reached `apply` (eval bridge). */
-	mirrored?: boolean;
 }
 
 /**
@@ -122,56 +115,38 @@ export interface TodoBackendRegistration {
 	readonly sourceId: string;
 }
 
-/** Todo backends registered by extensions, in registration order. */
-export class TodoBackendRegistry {
-	readonly #byId = new Map<string, TodoBackendRegistration>();
-
-	/**
-	 * Add a backend. A malformed definition or the reserved `native` id throws. An id already taken
-	 * is skipped with a warning: the first registration stays, and the second extension keeps its
-	 * other registrations, as a conflicting command or shortcut does not fail its extension either.
-	 */
-	register(definition: TodoBackendDefinition, sourceId: string): void {
-		const id: unknown = definition.id;
-		if (typeof id !== "string" || id.trim() === "") {
-			throw new Error(`Todo backend from ${sourceId} needs a non-empty string id`);
-		}
-		if (id === NATIVE_TODO_BACKEND_ID) {
-			throw new Error(`Todo backend id "${id}" from ${sourceId} is reserved for the built-in todo list`);
-		}
-		if (typeof definition.label !== "string" || definition.label.trim() === "") {
-			throw new Error(`Todo backend "${id}" from ${sourceId} needs a non-empty label`);
-		}
-		if (typeof definition.create !== "function") {
-			throw new Error(`Todo backend "${id}" from ${sourceId} needs a create(ctx) function`);
-		}
-		const existing = this.#byId.get(id);
-		if (existing) {
-			logger.warn("Todo backend id already registered; skipping", {
-				id,
-				extensionPath: sourceId,
-				existingExtensionPath: existing.sourceId,
-			});
-			return;
-		}
-		this.#byId.set(id, { definition, sourceId });
+/**
+ * Add a backend to `registrations` (registration order). A malformed definition or the reserved
+ * `native` id throws. An id already taken is skipped with a warning: the first registration stays,
+ * and the second extension keeps its other registrations, as a conflicting command or shortcut does
+ * not fail its extension either.
+ */
+export function registerTodoBackend(
+	registrations: TodoBackendRegistration[],
+	definition: TodoBackendDefinition,
+	sourceId: string,
+): void {
+	const id: unknown = definition.id;
+	if (typeof id !== "string" || id.trim() === "") {
+		throw new Error(`Todo backend from ${sourceId} needs a non-empty string id`);
 	}
-
-	/** Every registration, in registration order. */
-	list(): readonly TodoBackendRegistration[] {
-		return Array.from(this.#byId.values());
+	if (id === NATIVE_TODO_BACKEND_ID) {
+		throw new Error(`Todo backend id "${id}" from ${sourceId} is reserved for the built-in todo list`);
 	}
-
-	/** Number of registrations; pass it to {@link rollback} to undo the ones made after it. */
-	get size(): number {
-		return this.#byId.size;
+	if (typeof definition.label !== "string" || definition.label.trim() === "") {
+		throw new Error(`Todo backend "${id}" from ${sourceId} needs a non-empty label`);
 	}
-
-	/** Drop every registration after the first `size`, e.g. those of an extension whose factory threw. */
-	rollback(size: number): void {
-		let index = 0;
-		for (const id of this.#byId.keys()) {
-			if (index++ >= size) this.#byId.delete(id);
-		}
+	if (typeof definition.create !== "function") {
+		throw new Error(`Todo backend "${id}" from ${sourceId} needs a create(ctx) function`);
 	}
+	const existing = registrations.find(registration => registration.definition.id === id);
+	if (existing) {
+		logger.warn("Todo backend id already registered; skipping", {
+			id,
+			extensionPath: sourceId,
+			existingExtensionPath: existing.sourceId,
+		});
+		return;
+	}
+	registrations.push({ definition, sourceId });
 }

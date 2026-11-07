@@ -29,7 +29,11 @@ import { getCodingAgentApi } from "../host-api";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
-import { type TodoBackendDefinition, TodoBackendRegistry } from "../../tools/todo-backend";
+import {
+	registerTodoBackend,
+	type TodoBackendDefinition,
+	type TodoBackendRegistration,
+} from "../../tools/todo-backend";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { EventBus } from "../../utils/event-bus";
@@ -124,7 +128,7 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
-	readonly todoBackends = new TodoBackendRegistry();
+	readonly todoBackends: TodoBackendRegistration[] = [];
 
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
 		this.pendingProviderRegistrations.push({ name, config, sourceId });
@@ -217,7 +221,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		sourceId: string;
 	}> = [];
 
-	get todoBackends(): TodoBackendRegistry {
+	get todoBackends(): TodoBackendRegistration[] {
 		return this.runtime.todoBackends;
 	}
 
@@ -451,7 +455,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerTodoBackend(definition: TodoBackendDefinition): void {
-		this.runtime.todoBackends.register(definition, this.extension.resolvedPath);
+		registerTodoBackend(this.runtime.todoBackends, definition, this.extension.resolvedPath);
 	}
 }
 
@@ -491,7 +495,7 @@ async function runExtensionFactory(
 	runtime: IExtensionRuntime,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
-	const todoBackendCheckpoint = runtime.todoBackends.size;
+	const todoBackendCheckpoint = runtime.todoBackends.length;
 
 	try {
 		await factory(api);
@@ -501,7 +505,7 @@ async function runExtensionFactory(
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
 		);
-		runtime.todoBackends.rollback(todoBackendCheckpoint);
+		runtime.todoBackends.length = todoBackendCheckpoint;
 		throw error;
 	}
 }

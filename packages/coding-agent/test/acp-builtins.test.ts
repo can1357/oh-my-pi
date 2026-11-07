@@ -68,7 +68,7 @@ interface FakeAcpBuiltinSession {
 	setSlashCommands(commands: unknown[]): void;
 	refreshSkillsAndCommands(): Promise<void>;
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
-	commitTodoPhases(
+	editTodoPhases(
 		update: FakeTodoPhase[] | ((current: FakeTodoPhase[]) => FakeTodoPhase[] | undefined),
 	): Promise<FakeTodoPhase[] | undefined>;
 	refreshBaseSystemPrompt(): Promise<void>;
@@ -165,7 +165,7 @@ function createRuntime() {
 		getTodoPhases() {
 			return this._todoPhases;
 		},
-		async commitTodoPhases(update) {
+		async editTodoPhases(update) {
 			const phases = typeof update === "function" ? update(this._todoPhases) : update;
 			if (!phases) return undefined;
 			this._todoPhases = phases;

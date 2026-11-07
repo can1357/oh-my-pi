@@ -817,7 +817,6 @@ export class ExtensionRunner {
 	 */
 	listTodoBackends(): TodoBackendDefinition[] {
 		return this.runtime.todoBackends
-			.list()
 			.filter(registration => !this.isExtensionSuspended(registration.sourceId))
 			.map(registration => registration.definition);
 	}

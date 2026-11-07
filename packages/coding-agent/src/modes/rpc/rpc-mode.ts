@@ -2369,7 +2369,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			}
 
 			case "set_todos": {
-				const committed = await session.commitTodoPhases(command.phases);
+				const committed = await session.editTodoPhases(command.phases);
 				// The committed list, not a later read: a write queued behind this one can land before this handler resumes.
 				return success(id, "set_todos", { todoPhases: committed ?? session.getTodoPhases() });
 			}

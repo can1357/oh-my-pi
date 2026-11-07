@@ -38,7 +38,7 @@ import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/th
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import { resolveTodoUpdate, type TodoCommitOptions, type TodoPhasesUpdate } from "../tools/todo-backend";
+import { resolveTodoUpdate, type TodoPhasesUpdate } from "../tools/todo-backend";
 import { getBlobsDir, logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManagerApi } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -689,12 +689,17 @@ export class RemoteAgentSession implements AgentViewSession {
 	 * Worker-homed sessions are subagents, which never use a todo backend: `update` runs against the mirrored
 	 * list, and the optimistic entry and the mirror update reach the worker in order.
 	 */
-	commitTodoPhases(update: TodoPhasesUpdate, options?: TodoCommitOptions): Promise<TodoPhase[] | undefined> {
+	commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
 		const phases = resolveTodoUpdate(update, this.getTodoPhases());
 		if (phases === undefined) return Promise.resolve(undefined);
 		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
-		if (!options?.mirrored) this.setTodoPhases(phases);
+		this.setTodoPhases(phases);
 		return Promise.resolve(phases);
+	}
+
+	/** Same as {@link commitTodoPhases}: with no backend, nothing can refuse an edit. */
+	editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
+		return this.commitTodoPhases(update);
 	}
 
 	/**

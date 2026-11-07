@@ -268,7 +268,7 @@ import {
 } from "../tools/resolve";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import type { TodoCommitOptions, TodoPhasesUpdate, TodoWrite } from "../tools/todo-backend";
+import type { TodoPhasesUpdate, TodoWrite } from "../tools/todo-backend";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
@@ -11107,9 +11107,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#todoWrites.arm();
 	}
 
-	/** Replace the todo list from outside the `todo` tool; see {@link TodoWrites.commit}. */
-	commitTodoPhases(update: TodoPhasesUpdate, options?: TodoCommitOptions): Promise<TodoPhase[] | undefined> {
-		return this.#todoWrites.commit(update, options);
+	/** Record a todo list change that already happened elsewhere; see {@link TodoWrites.commit}. */
+	commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
+		return this.#todoWrites.commit(update);
+	}
+
+	/** Apply a user's or RPC client's todo edit, which a backend can refuse; see {@link TodoWrites.edit}. */
+	editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
+		return this.#todoWrites.edit(update);
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */
