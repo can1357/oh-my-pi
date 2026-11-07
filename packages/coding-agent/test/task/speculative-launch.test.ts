@@ -145,8 +145,10 @@ describe("task speculative launch", () => {
 		return events;
 	};
 
-	async function openSession(): Promise<{ tool: TaskTool; manager: AsyncJobManager; session: TaskLaunchSession }> {
-		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+	async function openSession(
+		maxRunningJobs?: number,
+	): Promise<{ tool: TaskTool; manager: AsyncJobManager; session: TaskLaunchSession }> {
+		const manager = new AsyncJobManager({ onJobComplete: () => {}, maxRunningJobs });
 		managers.push(manager);
 		const tool = await TaskTool.create(createSession(manager));
 		const session = await tool.speculation.stream?.open({ coordinator: sink, parentToolCallId: toolCall.id });
@@ -206,6 +208,28 @@ describe("task speculative launch", () => {
 		await manager.getJob("Beta")!.promise;
 		expect(manager.getJob("Alpha")!.status).toBe("completed");
 		expect(manager.getJob("Beta")!.status).toBe("completed");
+	});
+
+	it("holds a streamed item past async.maxJobs until a running agent finishes", async () => {
+		const { tool, manager, session } = await openSession(1);
+		session.update(toolCall, alphaClosed);
+		await spawn("Alpha").started.promise;
+		session.finalize({ toolCall, args });
+		const result = await tool.execute(toolCall.id, args);
+		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
+
+		// Nothing signals "did not start"; at the defect Beta starts right after finalize.
+		await Bun.sleep(50);
+		expect(startedIds.has("Beta")).toBe(false);
+		expect(manager.getJob("Beta")?.queued).toBe(true);
+
+		spawn("Alpha").release.resolve();
+		await spawn("Beta").started.promise;
+		spawn("Beta").release.resolve();
+		await manager.getJob("Beta")!.promise;
+		expect(manager.getJob("Alpha")!.status).toBe("completed");
+		expect(manager.getJob("Beta")!.status).toBe("completed");
+		expect(executorModule.runSubprocess).toHaveBeenCalledTimes(2);
 	});
 
 	it("aborts launched agents when the finished call is invalid", async () => {
