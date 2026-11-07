@@ -383,6 +383,50 @@ pub struct SpawnSpec<'a> {
 	pub ctty:        Option<OsHandle>,
 }
 
+/// How many bytes of a refused program bash reads to find its `#!` line:
+/// `shell_execve` samples the file into a fixed buffer and names an
+/// interpreter out of that and nothing more.
+pub const SAMPLE: usize = 128;
+
+/// bash's `getinterp` over `sample`, the first [`SAMPLE`] bytes of a
+/// refused program: its `#!` interpreter, and whether a trailing carriage
+/// return was dropped (bash shows that one as `^M`). `None` when there is
+/// no usable `#!` line, which is bash's "not a script" answer.
+///
+/// The subtlety is bash's own: before reading the line it writes its NUL
+/// terminator over **the last byte it read** (`sample[sample_len - 1] =
+/// '\0'`), so one byte of the file is always lost. Measured on Bash
+/// 5.3.0, that is why a file of exactly `#!` names nothing at all, `#!\r`
+/// names the EMPTY interpreter while `#!\r\n` names `^M`, and an
+/// unterminated `#!/does/not/exist` is named `/does/not/exis`.
+///
+/// Allocation-free and panic-free on every input, because the forked
+/// child in `crates/pi-shell/src/sys/spawn/unix.rs` runs it after `fork`.
+pub fn shebang(sample: &[u8]) -> Option<(&[u8], bool)> {
+	let s = sample.get(..sample.len().checked_sub(1)?)?;
+	let rest = s.strip_prefix(b"#!")?;
+	let line = rest.split(|b| *b == b'\n').next().unwrap_or(rest);
+	let start = line
+		.iter()
+		.position(|b| !matches!(b, b' ' | b'\t'))
+		.unwrap_or(line.len());
+	let rest = &line[start..];
+	let end = rest
+		.iter()
+		.position(|b| matches!(b, b' ' | b'\t'))
+		.unwrap_or(rest.len());
+	let interp = &rest[..end];
+	// bash prints the name with `%s`, so an embedded NUL ends it.
+	let interp = match interp.iter().position(|b| *b == 0) {
+		Some(nul) => &interp[..nul],
+		None => interp,
+	};
+	match interp.split_last() {
+		Some((b'\r', head)) => Some((head, true)),
+		_ => Some((interp, false)),
+	}
+}
+
 /// The redirections a spawned process applies itself ([`SpawnSpec::redirs`]).
 ///
 /// Bash's forked child opens a redirection's file after the fork, so a
@@ -395,17 +439,38 @@ pub struct SpawnSpec<'a> {
 /// opens (or the exec) to complete. The process applies `list` in order;
 /// when an entry fails it writes that entry's `diag`, the error's
 /// description (`strerror`) and a newline to its fd 2 and exits with
-/// status 1. When the exec fails it writes `exec_diag`, the description and
-/// a newline and exits with 127 (not found) or 126 (any other error), as
-/// bash's child does. The engine's `ENOEXEC` fallback cannot run after this
-/// return; a host may refuse the deferred spawn to let the engine apply the
-/// redirections and retry when the executable may need that fallback.
+/// status 1.
+///
+/// When the exec fails the process reports it as bash's `shell_execve`
+/// does, on its own fd 2 so the command's redirections apply: it LOOKS at
+/// the program, because the kernel's errno alone does not say why. In
+/// bash's order: a directory is `Is a directory`; a file that is not there
+/// or may not be executed, and `E2BIG`/`ENOMEM`, keep the kernel's own
+/// words; an executable whose first [`SAMPLE`] bytes begin with `#!` is
+/// `exec_sys_diag` then `INTERP: bad interpreter: ` and the description,
+/// which is what Bash 5.3.0 reports and the only place a line number is
+/// left out (bash's `sys_error`); an `ENOEXEC` with no `#!` is `cannot
+/// execute binary file: ` and the description; an `ENOENT` for a file that
+/// IS there is `cannot execute: required file not found`. Everything else
+/// is `exec_diag` and the description.
+///
+/// The status is 126 whenever the interpreter could be named, and
+/// otherwise 127 for `ENOENT` and 126 for every other error — so a program
+/// replaced between the failed exec and the look still reports the status
+/// its own `execve` earned.
+///
+/// The engine's `ENOEXEC` fallback cannot run after this return; a host may
+/// refuse the deferred spawn to let the engine apply the redirections and
+/// retry when the executable may need that fallback.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildRedirs {
 	/// The redirections, in order.
-	pub list:      Vec<ChildRedir>,
+	pub list:          Vec<ChildRedir>,
 	/// What precedes an exec failure's description (`bash: line 1: cmd: `).
-	pub exec_diag: BString,
+	pub exec_diag:     BString,
+	/// The same without the line number (`bash: cmd: `), for the one report
+	/// bash makes with `sys_error`: `bad interpreter`.
+	pub exec_sys_diag: BString,
 }
 
 /// One redirection of [`ChildRedirs`].

@@ -2397,8 +2397,15 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				_ => None,
 			};
 			let redirs = redirs.map(|list| {
-				let name = argv0(vp);
-				ChildRedirs { list, exec_diag: super::redir::diag_prefix(k, cx, vp, line, &name) }
+				// The same name [`refused`] prints: the word as written when it
+				// has a `/`, else what the PATH search resolved it to.
+				let n = argv0(vp);
+				let name = if n.contains(&b'/') { n } else { path.clone() };
+				ChildRedirs {
+					list,
+					exec_diag: super::redir::diag_prefix(k, cx, vp, line, &name),
+					exec_sys_diag: super::redir::sys_diag_prefix(k, cx, vp, line, &name),
+				}
 			});
 			let child_redirs = redirs.is_some();
 			let spec = SpawnSpec {
@@ -4855,30 +4862,18 @@ fn not_found_hook(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) ->
 	Some(Flow::Block(WaitKey::Proc(vpid)))
 }
 
-/// The `#!` interpreter of `text` as bash's `getinterp` reads it (a
-/// trailing CR shown as `^M`).
-fn interpreter(text: &[u8]) -> BString {
-	let line = text
-		.get(2..)
-		.unwrap_or_default()
-		.split(|&c| c == b'\n')
-		.next()
-		.unwrap_or_default();
-	let start = line
-		.iter()
-		.position(|c| !matches!(c, b' ' | b'\t'))
-		.unwrap_or(line.len());
-	let rest = &line[start..];
-	let end = rest
-		.iter()
-		.position(|c| matches!(c, b' ' | b'\t'))
-		.unwrap_or(rest.len());
-	let mut interp = BString::from(&rest[..end]);
-	if interp.last() == Some(&b'\r') {
-		interp.pop();
+/// What the shell prints for the `#!` interpreter of `text`, the refused
+/// program's bytes: [`crate::bash::shebang`] over the sample bash would
+/// have read, with a dropped carriage return written back as `^M`.
+/// `None` when bash would not call this a script at all.
+fn interpreter(text: &[u8]) -> Option<BString> {
+	let sample = &text[..crate::bash::SAMPLE.min(text.len())];
+	let (head, cr) = crate::bash::shebang(sample)?;
+	let mut interp = BString::from(head);
+	if cr {
 		interp.extend_from_slice(b"^M");
 	}
-	interp
+	Some(interp)
 }
 
 /// bash's `shell_execve` after the OS refused to run `path` with `code`
@@ -4933,9 +4928,9 @@ fn refused(
 				Ok(ProbeResult::Bytes(Ok(text))) => text,
 				Ok(_) => BString::default(),
 			};
-			if text.starts_with(b"#!") {
+			if let Some(interp) = interpreter(&text) {
 				status = 126;
-				Diag::BadInterpreter { name, interp: interpreter(&text), err }
+				Diag::BadInterpreter { name, interp, err }
 			} else if enoent {
 				Diag::RequiredFileMissing { name }
 			} else {

@@ -686,6 +686,33 @@ pub fn diag_prefix(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, line: u32, what:
 	BString::from(text)
 }
 
+/// What a spawned process prints before a `bad interpreter` description
+/// for `what` (`bash: f: `): the same as [`diag_prefix`] without the line
+/// number, which is bash's `sys_error` and the form it uses for that one
+/// report. Built by rendering the report with an empty interpreter and an
+/// error whose description is empty, then dropping the fixed tail that
+/// leaves: the renderer stays the single owner of the shell's own name.
+pub fn sys_diag_prefix(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	line: u32,
+	what: &[u8],
+) -> BString {
+	/// What `Diag::BadInterpreter` renders after `<shell>: <name>: ` when
+	/// its interpreter is empty and its error's description is empty.
+	const TAIL: &[u8] = b": bad interpreter: \n";
+	let diag = Diag::BadInterpreter {
+		name:   BString::from(what),
+		interp: BString::default(),
+		err:    std::io::Error::other(""),
+	};
+	let mut text = k.render_quiet(cx, vp, line, &diag);
+	debug_assert!(text.ends_with(TAIL), "unexpected `bad interpreter` shape: {:?}", text.as_bstr());
+	text.truncate(text.len().saturating_sub(TAIL.len()));
+	BString::from(text)
+}
+
 /// Redirection `r` to `target` of a command whose process applies its
 /// redirections itself ([`DeferPhase::Collect`]): added to what the process
 /// gets; nothing changes here. Errors found here (a bad fd, an ambiguous
