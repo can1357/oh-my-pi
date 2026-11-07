@@ -6,6 +6,7 @@
 
 - A 429 or 402 worded like a context overflow (Bedrock's "429 Too many tokens, please wait…") is treated as a rate limit, so it retries and walks the fallback chain instead of compacting ([#18345](https://github.com/can1357/oh-my-pi/pull/18345) by [@nick-maderight](https://github.com/nick-maderight))
 - `auth-gateway stdio` and `serve` no longer reject credentialless Apple on-device models ([#18370](https://github.com/can1357/oh-my-pi/issues/18370))
+- Fixed requests to `.local` LAN endpoints (e.g. `gpu-box.local:8080`) being sent through an egress proxy — `PI_PROXY` or `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` — instead of staying on the local network ([#16457](https://github.com/can1357/oh-my-pi/pull/16457) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.17.0] - 2026-11-06
 
