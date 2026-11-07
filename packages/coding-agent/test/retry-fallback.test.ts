@@ -364,6 +364,7 @@ describe("retry fallback selector resolution", () => {
 		installRetryFallbackRole(settings, subagentRole, {
 			primary,
 			chain: ["xai-oauth/grok-4.7:xhigh", "openai-codex/gpt-6-astra:xhigh"],
+			shadowPrimaryKeys: true,
 		});
 
 		const configuredChains = cfgRetryFallbackChains.get(settings);
@@ -375,7 +376,6 @@ describe("retry fallback selector resolution", () => {
 		// Non-shadowing keys are preserved
 		expect(configuredChains["openai/gpt-4o"]).toEqual(["openai/gpt-4o-mini"]);
 		expect(configuredChains.reviewOpus).toEqual(["xai-oauth/grok-4.7:xhigh"]);
-	});
 	});
 });
 

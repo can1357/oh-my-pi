@@ -213,7 +213,7 @@ export function getRetryFallbackRole(settings: Settings, role: string): RetryFal
  * would be preferred by {@link resolveRetryFallbackChainKey} ahead of the
  * child role (issue #13550).
  */
-function isShadowingRetryFallbackKey(
+export function isShadowingRetryFallbackKey(
 	chainKey: string,
 	primary: RetryFallbackSelector,
 	modelLookup?: RetryFallbackModelLookup,
@@ -502,6 +502,17 @@ export function resolveRetryFallbackChainKey(
 		currentPlainSelector && currentPlainSelector !== currentSelector
 			? (parseRetryFallbackSelector(currentPlainSelector, context.modelLookup) ?? parsedCurrent)
 			: undefined;
+
+	// 0. Subagent-pinned role hint: when a subagent is explicitly pinned to its
+	//    own role and chain, that child-scoped routing must not be shadowed by
+	//    an inherited model-selector or wildcard key (issue #13550).
+	if (roleHint?.startsWith("subagent:") && Array.isArray(context.chains[roleHint])) {
+		const rolePrimary = getRetryFallbackPrimarySelector(context, roleHint);
+		const match = selectorMatchKind(rolePrimary, parsedCurrent, parsedPlainCurrent, currentModel);
+		if (match === "exact" || match === "normalized" || match === "base") {
+			return roleHint;
+		}
+	}
 
 	// 1. Model-selector keys — most specific. Parsed exact effort beats
 	//    model-normalized effort, which beats a suffixless (any-effort) key,
