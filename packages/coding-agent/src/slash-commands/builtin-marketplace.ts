@@ -26,18 +26,27 @@ import type { SlashCommandSpec } from "./types";
  * Reload the interactive session's plugin runtime: invalidate fs/plugin-root
  * caches, rediscover skills, file slash commands, and task agents, reset the
  * capability cache, and reconnect MCP servers (rebinding the session's MCP
- * tools). Shared by `/reload-plugins`'s TUI handler and the `handle`-adapter's
- * `reloadPlugins` hook so both honor the command's documented reload scope.
+ * tools). Shared by `ctx.reloadPlugins()`, `/reload-plugins`'s TUI handler,
+ * and the `handle`-adapter's `reloadPlugins` hook. Overlapping workflows
+ * reject before invalidating caches or interrupting MCP reconnects.
  */
 export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise<void> {
-	const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
-	clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-	await refreshAgentDiscovery(ctx.sessionManager.getCwd(), ctx.session.effectiveExtensionRoots);
-	await ctx.refreshSkillState();
-	await ctx.refreshSlashCommandState();
-	resetCapabilities();
-	if (ctx.mcpManager) {
-		await new MCPCommandController(ctx).reloadServers();
+	if (ctx.isReloadingPlugins) {
+		throw new Error("Cannot reload plugins while another plugin reload is in progress");
+	}
+	ctx.isReloadingPlugins = true;
+	try {
+		const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
+		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+		await refreshAgentDiscovery(ctx.sessionManager.getCwd(), ctx.session.effectiveExtensionRoots);
+		await ctx.refreshSkillState();
+		await ctx.refreshSlashCommandState();
+		resetCapabilities();
+		if (ctx.mcpManager) {
+			await new MCPCommandController(ctx).reloadServers();
+		}
+	} finally {
+		ctx.isReloadingPlugins = false;
 	}
 }
 
@@ -497,7 +506,14 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 			return commandConsumed();
 		},
 		handleTui: async (_command, runtime) => {
-			await reloadTuiPluginState(runtime.ctx);
+			try {
+				await reloadTuiPluginState(runtime.ctx);
+			} catch (error) {
+				// The follow-up caller owns restoring its detached text and images.
+				if (runtime.draftDetached) throw error;
+				runtime.ctx.showError(errorMessage(error));
+				return;
+			}
 			runtime.ctx.showStatus("Plugins reloaded.");
 			clearSubmittedText(runtime);
 		},

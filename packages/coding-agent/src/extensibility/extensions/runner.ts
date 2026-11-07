@@ -543,6 +543,7 @@ export class ExtensionRunner {
 	#hasPendingMessagesFn: () => boolean = () => false;
 	#getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
+	#reloadPluginsFn?: ExtensionContextActions["reloadPlugins"];
 	#getSystemPromptFn: () => string[] = () => [];
 	#runEphemeralTurnFn?: ExtensionContextActions["runEphemeralTurn"];
 	#startLiveFn?: ExtensionContextActions["startLive"];
@@ -878,6 +879,7 @@ export class ExtensionRunner {
 		this.#keybindings = contextActions.keybindings;
 		this.#getContextUsageFn = contextActions.getContextUsage;
 		this.#compactFn = contextActions.compact;
+		this.#reloadPluginsFn = contextActions.reloadPlugins;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
 		this.#runEphemeralTurnFn = contextActions.runEphemeralTurn;
 		this.#startLiveFn = contextActions.startLive;
@@ -1731,6 +1733,12 @@ export class ExtensionRunner {
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
+			reloadPlugins: async () => {
+				if (agent.kind !== "main" || this.#mode !== "tui" || !this.#reloadPluginsFn) {
+					throw new Error("reloadPlugins is only available in the main interactive TUI");
+				}
+				await this.#reloadPluginsFn();
+			},
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
 			hasUI: this.hasUI(),
 			cwd: this.cwd,

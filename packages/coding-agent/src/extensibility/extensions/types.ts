@@ -768,6 +768,8 @@ export interface ExtensionContext {
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
+	/** Reload plugins without changing the editor draft. Idle main-agent TUI only; overlaps and failures reject. */
+	reloadPlugins(): Promise<void>;
 	/** Whether UI is available (false in print/RPC mode) */
 	hasUI: boolean;
 	/** Current working directory */
@@ -2431,6 +2433,8 @@ export interface ExtensionContextActions {
 	keybindings?: KeybindingsManager;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
+	/** Interactive TUI plugin reload; omitted by headless hosts. */
+	reloadPlugins?: () => Promise<void>;
 	getSystemPrompt: () => string[];
 	runEphemeralTurn?: (options: EphemeralTurnOptions) => Promise<EphemeralTurnResult>;
 	startLive?: (options: ExtensionLiveStartOptions) => Promise<ExtensionLiveSession>;
