@@ -1,4 +1,5 @@
 import { RunTrace, ShellVisualization, type ShellVizOptions } from "@oh-my-pi/pi-natives";
+import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	ShellTrace,
 	ShellVizPreferences,
@@ -10,21 +11,38 @@ import type {
 
 /** Native live-run or restored-trace owner; the UI never holds shell syntax. */
 export type ShellVisualizationSource = RunTrace | ShellVisualization;
-const visualizations = new WeakMap<ShellTrace, ShellVisualizationSource>();
+const kVisualization = Symbol("shellTrace.visualization");
+/** A snapshot carrying its native owner; `null` marks one the engine rejected, so it is not re-restored per paint. */
+interface TaggedShellTrace extends ShellTrace {
+	[kVisualization]?: ShellVisualizationSource | null;
+}
 
 /** Bind the immutable snapshot before publishing it; live paints borrow the actual run. */
 export function attachShellTrace(snapshot: ShellTrace, trace: RunTrace): void {
-	visualizations.set(snapshot, trace);
+	const tagged: TaggedShellTrace = snapshot;
+	tagged[kVisualization] = trace;
 }
 
-/** Historical traces restore their canonical native archive only once per snapshot. */
-export function shellVisualization(snapshot: ShellTrace): ShellVisualizationSource {
-	let visualization = visualizations.get(snapshot);
-	if (!visualization) {
-		visualization = new ShellVisualization(JSON.stringify(snapshot));
-		visualizations.set(snapshot, visualization);
+/**
+ * Historical traces restore their canonical native archive only once per snapshot.
+ * Returns `undefined` when the engine rejects the snapshot (e.g. a `tool_result` hook rewrote
+ * `script` so unit offsets no longer fit); callers render the plain command and output instead.
+ */
+export function shellVisualization(snapshot: ShellTrace): ShellVisualizationSource | undefined {
+	const tagged: TaggedShellTrace = snapshot;
+	let visualization = tagged[kVisualization];
+	if (visualization === undefined) {
+		try {
+			visualization = new ShellVisualization(JSON.stringify(snapshot));
+		} catch (error) {
+			logger.warn("Stored shell trace cannot be restored; rendering without visualization", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			visualization = null;
+		}
+		tagged[kVisualization] = visualization;
 	}
-	return visualization;
+	return visualization ?? undefined;
 }
 
 /** Python-like Pseudo, all layers enabled, one pane, live, paused, normal speed. */
