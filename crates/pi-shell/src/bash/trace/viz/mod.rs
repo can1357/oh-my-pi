@@ -8,6 +8,8 @@ pub(crate) mod runtime;
 pub(crate) mod source;
 pub(crate) mod words;
 
+use std::borrow::Cow;
+
 use bstr::{BStr, BString};
 pub use model::Options;
 use runtime::{Runtime, SourceUnit, VizSource};
@@ -63,23 +65,35 @@ impl VizSource for Inner {
 	fn cache(&self) -> &printer::Cache {
 		&self.viz_cache
 	}
+
+	// A row the presentation parsed ahead of the engine names no unit; its
+	// index is left as it is.
+	fn unit_key(&self, index: usize) -> u32 {
+		self.units.get(index).map_or(index as u32, |unit| unit.key)
+	}
+
+	fn unit_position(&self, key: u32) -> Option<usize> {
+		self.units.binary_search_by_key(&key, |unit| unit.key).ok()
+	}
 }
 
 pub(super) fn live(inner: &Inner, options: &Options) -> Result<String, VizError> {
+	let options = indexed_options(inner, options);
 	let runtime = Runtime::reduce(
 		inner,
 		inner.journal.entries.iter(),
-		options,
+		&options,
 		inner.status,
 		inner.root_vpid,
 		inner.t_ns,
 		inner.journal.truncated,
 	);
-	Ok(serde_json::to_string(&printer::render(inner, &runtime, options))?)
+	render_json(inner, &runtime, &options)
 }
 
 #[derive(Deserialize)]
 struct StoredUnit {
+	key:        Option<u32>,
 	at:         Option<u32>,
 	#[serde(default = "first_line")]
 	line:       u32,
@@ -201,17 +215,18 @@ impl StoredVisualization {
 	/// # Errors
 	/// Reports JSON serialization failures.
 	pub fn presentation_json(&self, options: &Options) -> Result<String, VizError> {
+		let options = indexed_options(self, options);
 		let trace = &self.trace;
 		let runtime = Runtime::reduce(
 			self,
 			trace.history.iter(),
-			options,
+			&options,
 			trace.status,
 			trace.root_vpid,
 			trace.t_ns,
 			trace.history_truncated,
 		);
-		Ok(serde_json::to_string(&printer::render(self, &runtime, options))?)
+		render_json(self, &runtime, &options)
 	}
 }
 impl VizSource for StoredVisualization {
@@ -245,4 +260,89 @@ impl VizSource for StoredVisualization {
 	fn cache(&self) -> &printer::Cache {
 		&self.cache
 	}
+
+	fn unit_key(&self, index: usize) -> u32 {
+		self
+			.trace
+			.units
+			.get(index)
+			.and_then(|unit| unit.key)
+			.unwrap_or(index as u32)
+	}
+
+	// A stored table is read once per presentation of a persisted trace, not
+	// on a poll, and it is bounded by the same caps as the live one.
+	fn unit_position(&self, key: u32) -> Option<usize> {
+		self
+			.trace
+			.units
+			.iter()
+			.enumerate()
+			.position(|(index, unit)| unit.key.unwrap_or(index as u32) == key)
+	}
+}
+
+// Journal indices are snapshot-local. Inspector controls cross that boundary
+// with stable keys, so a removed source cannot redirect an existing selection.
+// A row the presentation parsed ahead of the engine names no compiled unit
+// (`printer::AHEAD`): it has no key to translate and keeps its identity.
+fn indexed_options<'a>(source: &impl VizSource, options: &'a Options) -> Cow<'a, Options> {
+	if options.selected_node.is_none() && options.expanded_nodes.is_empty() {
+		return Cow::Borrowed(options);
+	}
+	let index = |node: &mut model::NodeKey| {
+		if node.unit == printer::AHEAD {
+			return true;
+		}
+		match source.unit_position(node.unit) {
+			Some(index) => {
+				node.unit = index as u32;
+				true
+			},
+			None => false,
+		}
+	};
+	let mut indexed = options.clone();
+	indexed.selected_node = indexed
+		.selected_node
+		.and_then(|mut node| index(&mut node).then_some(node));
+	indexed.expanded_nodes.retain_mut(index);
+	Cow::Owned(indexed)
+}
+
+fn render_json(
+	source: &impl VizSource,
+	runtime: &Runtime<'_>,
+	options: &Options,
+) -> Result<String, VizError> {
+	let mut presentation = printer::render(source, runtime, options);
+	let map = |key: &mut Option<model::NodeKey>| {
+		if let Some(key) = key {
+			key.unit = source.unit_key(key.unit as usize);
+		}
+	};
+	map(&mut presentation.preferences.selected_node);
+	for key in &mut presentation.preferences.expanded_nodes {
+		key.unit = source.unit_key(key.unit as usize);
+	}
+	for row in presentation
+		.rows
+		.iter_mut()
+		.chain(&mut presentation.original)
+	{
+		map(&mut row.node);
+		for segment in &mut row.segments {
+			map(&mut segment.node);
+			map(&mut segment.execution_node);
+		}
+		if let Some(watches) = &mut row.annotations {
+			for watch in watches {
+				map(&mut watch.node);
+			}
+		}
+	}
+	for watch in &mut presentation.watches {
+		map(&mut watch.node);
+	}
+	Ok(serde_json::to_string(&presentation)?)
 }

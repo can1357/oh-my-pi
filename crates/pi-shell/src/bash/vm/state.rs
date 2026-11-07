@@ -297,6 +297,9 @@ impl Random {
 #[derive(Debug, Default)]
 pub struct Root {
 	epoch:             u64,
+	/// Generation of root or overlay function-table changes. The kernel's
+	/// unit roots are rescanned only when this counter changes.
+	pub func_epoch:    u64,
 	/// Root scopes in the store: [`Key::Scope`] `0..depth`. Only the engine
 	/// pushes and pops them; recounted on invalidation.
 	depth:             u32,
@@ -521,6 +524,7 @@ impl Root {
 	/// the derived facts and rebuild the scope facts from the store.
 	pub fn invalidate(&mut self, store: &mut dyn StateStore, epoch: u64) {
 		self.epoch = epoch;
+		self.func_epoch += 1;
 		self.opts_known = 0;
 		self.zopts_known = ZshOpts::default();
 		self.builtins_disabled = None;
@@ -605,6 +609,7 @@ impl Root {
 	/// or a scope.
 	pub fn set_record(&mut self, store: &mut dyn StateStore, key: KeyBuf, rec: Option<Record>) {
 		match &key {
+			KeyBuf::Func(_) => self.func_epoch += 1,
 			KeyBuf::Opt(opt) => {
 				let bit = opt_bit(*opt);
 				self.opts_known |= bit;
@@ -2016,6 +2021,9 @@ pub fn store_record(
 ) {
 	match &mut vp.overlay {
 		Some(ov) => {
+			if matches!(key, KeyBuf::Func(_)) {
+				root.func_epoch += 1;
+			}
 			ov.records.insert(key, rec);
 		},
 		None => root.set_record(store, key, rec),

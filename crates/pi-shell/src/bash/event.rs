@@ -14,7 +14,10 @@
 //! Output bytes are not events: hosts tag what commands write with the
 //! [`CmdTag`](crate::bash::CmdTag) of the command that produced it.
 
-use std::fmt;
+use std::{
+	collections::{HashMap, HashSet},
+	fmt,
+};
 
 use bstr::{BStr, BString};
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
@@ -486,6 +489,7 @@ pub enum EventKind {
 	Restored,
 	Lost,
 	Custom,
+	UnitRetired,
 }
 
 crate::bash::packed_names::packed_names!(EventKind, Display);
@@ -971,11 +975,28 @@ pub enum EventData<'a> {
 	Restored {
 		/// What was restored and lost.
 		report: &'a RestoreReport,
+		/// Exact engine-derived unit roots after restore, including origin
+		/// closure. Replaces the observer's previous engine-derived roots.
+		///
+		/// In-process only: it addresses the engine's own identifiers, which
+		/// mean nothing to a host, and a serialized copy would put every live
+		/// unit id of every vproc into the restore event a host already reads.
+		/// The serialized shape of this event is therefore unchanged.
+		#[serde(skip)]
+		live:   &'a HashMap<Vpid, HashSet<UnitId>>,
 	},
 	/// Something could not be restored.
 	Lost {
 		/// What.
 		lost: &'a Lost,
+	},
+	/// A compiled source that no live frame of this vproc can reach again:
+	/// what an observer keeps for it may go. The engine announces the unit
+	/// again (`UnitCompiled`) if it is ever executed again, so retiring one
+	/// early costs a repeated announcement and nothing else.
+	UnitRetired {
+		/// The source.
+		unit: UnitId,
 	},
 	/// Host callout annotation.
 	Custom(&'a CustomEvent),
@@ -1018,6 +1039,7 @@ impl EventData<'_> {
 			Self::Suspended => EventKind::Suspended,
 			Self::Restored { .. } => EventKind::Restored,
 			Self::Lost { .. } => EventKind::Lost,
+			Self::UnitRetired { .. } => EventKind::UnitRetired,
 			Self::Custom(_) => EventKind::Custom,
 		}
 	}

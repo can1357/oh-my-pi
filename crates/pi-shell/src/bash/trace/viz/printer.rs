@@ -156,7 +156,7 @@ struct Nested {
 	analysis: Analysis,
 }
 /// Unit of script parsed ahead of the engine; no compiled unit has it.
-const AHEAD: u32 = u32::MAX;
+pub(super) const AHEAD: u32 = u32::MAX;
 /// Script bytes the engine has not compiled yet, parsed statically.
 #[derive(Debug)]
 struct Ahead {
