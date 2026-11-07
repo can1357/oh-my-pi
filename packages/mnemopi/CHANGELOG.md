@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed recall scoring memories against vectors from a previous embedding model while a model-change rebuild was still running or had failed: dense search now only uses vectors stamped with the active model, falling back to lexical matching for memories awaiting re-embedding ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
