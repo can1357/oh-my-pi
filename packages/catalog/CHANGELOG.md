@@ -5,6 +5,13 @@
 ### Added
 
 - Added the `prewarm-base-url` catalog axis (`prewarmBaseUrl`) and opted `google` and `google-gemini-cli` into pre-first-turn connection prewarming and `gzip` request body compression (`google-antigravity` also opts into `gzip` compression and declares its sandbox endpoint host) ([#17102](https://github.com/can1357/oh-my-pi/pull/17102) by [@GTanger](https://github.com/GTanger))
+
+### Fixed
+
+- Corrected Devin SWE-2 Flash and SWE-2 Fast token pricing, and SWE-2's promotional rates and end time ([#18332](https://github.com/can1357/oh-my-pi/pull/18332) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.18.0] - 2026-11-07
+
 ### Fixed
 
 - Fixed Mistral discovery listing embedding, OCR, moderation, transcription, and speech models as chat models; only rows with `capabilities.completion_chat` are offered, with context, image input, and reasoning read from the row ([#18244](https://github.com/can1357/oh-my-pi/pull/18244) by [@VeigaPunk](https://github.com/VeigaPunk))

@@ -1216,7 +1216,8 @@ impl<S: VizSource> Printer<'_, S> {
 			}
 			out.push(self.segment(c, cmd.id, cmd.span, ")", "op", true));
 		} else if builtin && matches!(name.as_str(), "[" | "test") {
-			// A bare `[` (one word) yields the empty range 1..0; `get` keeps it empty.
+			// A bare `[` (one word) yields the empty range 1..0; `get` keeps it
+			// empty.
 			let end = if name == "[" {
 				s.words.len().saturating_sub(1)
 			} else {
