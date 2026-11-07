@@ -17,6 +17,7 @@ import { formatTooltipKey } from "../key-hint-format";
 import { MAIN_AGENT_ID } from "../overlays/agent-hub-types";
 import { compact, keyed, node, row, span } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
+import { actionButton } from "../native/overlay";
 import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
 import { expandModelMentionTags, MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
@@ -91,6 +92,8 @@ interface ComposerControls {
 	readonly model: NativeNode | undefined;
 	readonly effort: NativeNode | undefined;
 	readonly dictation: NativeNode | undefined;
+	/** A button for Tab's step while Tab would take the ghost suggestion: a pointer (a phone's keyboard has no Tab) runs it. */
+	readonly accept: NativeNode | undefined;
 	readonly submit: NativeNode;
 }
 
@@ -1114,9 +1117,10 @@ export class CustomEditor extends Editor {
 	 * subagent is focused, the attachment chips, a `line` row of the
 	 * shell-mode chip and the input, and the `bar`: model chip, effort chip
 	 * (or the effort glyph as the model chip's icon), the generation rate,
-	 * the other status facts, usage, dictation, then send (Stop while a turn runs).
+	 * the other status facts, usage, dictation, the Accept button while Tab
+	 * would take a ghost suggestion, then send (Stop while a turn runs).
 	 * Clicks come back as `status.model`, `thinking.cycle`, `dictation.toggle`,
-	 * `submit`, `interrupt` and `focus:<id>` actions.
+	 * `ghost.tab`, `submit`, `interrupt` and `focus:<id>` actions.
 	 */
 	override describeLayout = (input: NativeNode, cx: DescribeContext): NativeEditorLayout => {
 		const effortGlyph = cx.supports("effort");
@@ -1126,6 +1130,8 @@ export class CustomEditor extends Editor {
 		const thinkingKey = this.#actionKeys.get("app.thinking.cycle")?.[0];
 		const modelKey = this.#actionKeys.get("app.model.selectTemporary")?.[0];
 		const interruptKey = this.#actionKeys.get("app.interrupt")?.[0] ?? "escape";
+		const ghostTab = this.ghostTabAction();
+		const tabKey = getKeybindings().getKeys("tui.input.tab")[0];
 		const key = [
 			shell?.kind,
 			shell?.excluded,
@@ -1138,6 +1144,8 @@ export class CustomEditor extends Editor {
 			state.viewing?.join("\u0001"),
 			effortGlyph,
 			state.thinkingInModel,
+			ghostTab,
+			tabKey,
 		].join("\0");
 		const rate = state.rate;
 		const chips = this.attachmentChips;
@@ -1155,7 +1163,16 @@ export class CustomEditor extends Editor {
 		const controls =
 			memo?.key === key && memo.facts === facts
 				? memo.controls
-				: this.#describeComposerControls(state, facts, thinkingKey, modelKey, interruptKey, effortGlyph);
+				: this.#describeComposerControls(
+						state,
+						facts,
+						thinkingKey,
+						modelKey,
+						interruptKey,
+						effortGlyph,
+						ghostTab,
+						tabKey,
+					);
 		// The rate ticks while a turn streams: only the bar follows it.
 		const bar =
 			memo?.controls === controls && memo.rate === rate
@@ -1176,6 +1193,7 @@ export class CustomEditor extends Editor {
 								facts?.extras ?? node("row", { grow: 1 }, [], "gap"),
 								facts?.usage,
 								controls.dictation,
+								controls.accept,
 								controls.submit,
 							]),
 							{ role: "omp.composer.bar", gap: "sm", align: "center" },
@@ -1262,6 +1280,8 @@ export class CustomEditor extends Editor {
 		modelKey: KeyId | undefined,
 		interruptKey: KeyId,
 		effortGlyph: boolean,
+		ghostTab: "accept" | "alternatives" | undefined,
+		tabKey: KeyId | undefined,
 	): ComposerControls {
 		const shell = state.shell;
 		const focus = state.viewing && this.#describeViewing(state.viewing, interruptKey);
@@ -1384,7 +1404,15 @@ export class CustomEditor extends Editor {
 					undefined,
 					"send",
 				);
-		if (!shell) return { focus, mode: undefined, model, effort, dictation, submit };
+		const tabHint = tabKey ? `  ${formatTooltipKey(tabKey)}` : "";
+		const accept =
+			ghostTab &&
+			actionButton(ghostTab === "accept" ? "Accept" : "More", "ghost.tab", {
+				key: "accept",
+				keys: tabKey,
+				title: ghostTab === "accept" ? `Accept suggestion${tabHint}` : `Other suggestions${tabHint}`,
+			});
+		if (!shell) return { focus, mode: undefined, model, effort, dictation, accept, submit };
 		const runs = shell.kind === "bash" ? "Runs in your shell" : "Runs in Python";
 		const mode = keyed(
 			row(
@@ -1407,7 +1435,7 @@ export class CustomEditor extends Editor {
 			),
 			"mode",
 		);
-		return { focus, mode, model, effort, dictation, submit };
+		return { focus, mode, model, effort, dictation, accept, submit };
 	}
 
 	/**
@@ -1446,6 +1474,9 @@ export class CustomEditor extends Editor {
 			}
 			case "submit":
 				if (this.nativeSendable) this.submit();
+				return;
+			case "ghost.tab":
+				this.applyGhostTab();
 				return;
 			case "interrupt":
 				this.onEscape?.();
