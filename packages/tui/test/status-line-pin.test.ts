@@ -10,7 +10,7 @@ function createSession(id: string, name: string): StatusLineSession {
 	return {
 		state: { messages: [] },
 		isFastModeEnabled: () => false,
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingSubscription: () => false },
 		sessionManager: {
 			getSessionId: () => id,
 			getSessionName: () => name,

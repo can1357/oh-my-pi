@@ -1204,3 +1204,55 @@ async fn tree_over_a_provider_spells_urls_and_raw_names() {
 		("sub/c.rs".to_owned(), PathBuf::from("mem://root/dir/sub/c.rs")),
 	]);
 }
+
+/// A walk ends on the flag its caller holds, not only on one of its own.
+///
+/// The record loop reads [`Stop`] where it reads the walk's own halt — before
+/// the prune and ignore filters and before the visitor — so a stop set from
+/// outside lands at the next record whatever that record is. Without it, a
+/// caller can only abort the task driving the walk, and that abort waits for
+/// a worker to poll the task again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caller_held_stop_ends_the_record_loop() {
+	let names: Vec<String> = (0..512).map(|index| format!("f{index}")).collect();
+	let specs: Vec<&str> = names.iter().map(String::as_str).collect();
+	let tmp = make_tree("caller-stop", &specs);
+
+	// Set partway through the one directory, by something that is not the
+	// walk: the visitor never returns `Action::Stop`, so the walk's own halt
+	// has no reason to be set.
+	let stop = Stop::new();
+	let seen = Arc::new(AtomicUsize::new(0));
+	let counted = Arc::clone(&seen);
+	let flag = stop.clone();
+	let opts = Options { stop: Some(stop.clone()), ..Options::default() };
+	collect(&Fs::native(), tmp.path(), &opts, false, move |_, _| {
+		if counted.fetch_add(1, Ordering::AcqRel) == 0 {
+			flag.stop();
+		}
+		Action::Skip
+	})
+	.await
+	.expect("collect");
+	assert_eq!(
+		seen.load(Ordering::Acquire),
+		1,
+		"the walk examined further entries after its caller's flag was set, so a caller cannot stop \
+		 a walk it does not drive"
+	);
+	assert!(stop.stopped(), "the caller's handle no longer reads the walk it was given to");
+
+	// A flag already set is a walk that never examines an entry.
+	let before = Stop::new();
+	before.stop();
+	let opts = Options { stop: Some(before), ..Options::default() };
+	let seen = Arc::new(AtomicUsize::new(0));
+	let counted = Arc::clone(&seen);
+	collect(&Fs::native(), tmp.path(), &opts, false, move |_, _| {
+		counted.fetch_add(1, Ordering::AcqRel);
+		Action::Continue
+	})
+	.await
+	.expect("collect");
+	assert_eq!(seen.load(Ordering::Acquire), 0, "a walk started stopped still examined entries");
+}
