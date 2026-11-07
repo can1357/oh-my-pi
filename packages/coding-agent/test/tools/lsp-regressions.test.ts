@@ -2221,6 +2221,48 @@ describe("lsp regressions", () => {
 		}
 	}, 10_000);
 
+	it("still returns a publish that arrives with a pull answered with null", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-pull-null-publish-");
+		const target = path.join(tempDir.path(), "_header.html.erb");
+		const uri = fileToUri(target);
+		const diagnostic: Diagnostic = {
+			message: "unclosed <h1>",
+			severity: 1,
+			range: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } },
+		};
+		try {
+			await Bun.write(target, "<h1><%= title %>\n");
+			installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { diagnosticProvider: true } } });
+				} else if (message.method === "textDocument/diagnostic") {
+					// A server that pushes its report and declines the pull.
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri, diagnostics: [diagnostic] },
+					});
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			const client = await lspClient.getOrCreateClient(
+				{ command: "fake-lsp", fileTypes: [".erb"], rootMarkers: [] },
+				tempDir.path(),
+				1_000,
+			);
+			await lspClient.ensureFileOpen(client, target);
+
+			expect(await waitForDiagnostics(client, uri, { timeoutMs: 5_000 })).toEqual([diagnostic]);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	}, 10_000);
+
 	for (const dynamicRegistration of [false, true]) {
 		it(`reports pull diagnostics advertised through ${dynamicRegistration ? "dynamic registration" : "server capabilities"}`, async () => {
 			const tempDir = TempDir.createSync("@omp-lsp-pull-diags-");

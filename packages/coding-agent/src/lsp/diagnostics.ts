@@ -324,8 +324,8 @@ function isProvisionalColdPublish(
 /**
  * Wait for a fresh diagnostics report for `uri`: a pull answer, or a publish that
  * passes the freshness checks. Resolves `undefined` when none arrives within the
- * budget, or as soon as the server answers the pull without a report, which callers
- * MUST NOT read as a clean file; `[]` is a clean report.
+ * budget, or within one settle window of the server answering the pull without a
+ * report, which callers MUST NOT read as a clean file; `[]` is a clean report.
  */
 export async function waitForDiagnostics(
 	client: LspClient,
@@ -399,9 +399,11 @@ export async function waitForDiagnostics(
 				pulled = pullResult.diagnostics;
 				break;
 			}
-			// A pull answered without a report is the server's answer for this document, not
-			// a failed attempt: waiting out the budget for a publish would only stall.
-			if (pullResult.declined) break;
+			if (pullResult.declined) {
+				// A pull answered without a report is the server's answer for this document, not a
+				// failed attempt: give a publish already on its way one settle window, not the budget.
+				deadline = Math.min(deadline, Date.now() + settleMs);
+			}
 			if (pullResult.failed !== undefined) {
 				if (shouldRetriggerPull(pullResult.failed)) {
 					// The server asked to be asked again.
