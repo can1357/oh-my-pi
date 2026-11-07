@@ -3,9 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import type { SyncWorkerRequest, SyncWorkerResponse } from "@oh-my-pi/omp-stats/sync-worker";
-import { emptySpotlightRows } from "@oh-my-pi/omp-stats/spotlight-ingest";
 import { getOverallStats, getStatsByAgentType, getStatsByFolder } from "@oh-my-pi/omp-stats/rollup";
+import { emptySpotlightRows } from "@oh-my-pi/omp-stats/spotlight-ingest";
+import type { SyncWorkerRequest, SyncWorkerResponse } from "@oh-my-pi/omp-stats/sync-worker";
 import { getSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -76,8 +76,12 @@ async function poolOneWorker(): Promise<Worker> {
 	const spawnSpy = spyOnWorkerSpawns();
 
 	await syncAllSessions({ workers: 2, files: [sessionFile] });
+	const spawns = spawnSpy.mock.calls.length;
+	// Restore before the caller installs its own spy: the spy captures the
+	// current `globalThis.Worker`, so a still-installed mock would nest itself.
+	spawnSpy.mockRestore();
 
-	expect(spawnSpy).toHaveBeenCalled();
+	expect(spawns).toBeGreaterThan(0);
 	const pooled = spawnedWorkers.at(-1);
 	expect(pooled).toBeDefined();
 	return pooled as Worker;
@@ -166,7 +170,7 @@ function assistantMessage(options: { id?: string; output?: number; includeCost?:
 
 /** Write a one-message transcript at an explicit path. */
 async function writeTranscriptAt(file: string, options: { id?: string; output?: number } = {}): Promise<string> {
-	await fs.mkdir(path.dirname(file), { recursive: true });
+	// Bun.write creates the missing parent directories.
 	await Bun.write(file, `${JSON.stringify(assistantMessage(options))}\n`);
 	return file;
 }
@@ -277,12 +281,16 @@ describe("stats sync serial mode", () => {
 		firstRun.mockRestore();
 
 		// Track the transcript again so the second run has real parse work to hand
-		// a pooled worker; an unchanged file would parse nothing at all.
-		await fs.appendFile(sessionFile, "\n");
+		// a pooled worker; an unchanged file would parse nothing at all. A new
+		// message makes the reuse observable in the stored rows, not just in the
+		// (unobserved) absence of a constructor call.
+		await fs.appendFile(sessionFile, `${JSON.stringify(assistantMessage({ id: "assistant-2" }))}\n`);
 		const secondRun = spyOnWorkerSpawns();
-		await syncAllSessions({ workers: 2, files: [sessionFile] });
+		const secondSync = await syncAllSessions({ workers: 2, files: [sessionFile] });
 
 		expect(secondRun).not.toHaveBeenCalled();
+		expect(secondSync).toEqual({ processed: 1, files: 1 });
+		expect(getOverallStats().totalRequests).toBe(2);
 	});
 
 	// A worker that dies between two of a lane's dispatches is the one lifecycle
@@ -339,7 +347,6 @@ describe("stats sync serial mode", () => {
 		"drains on its own after the warm pool reuses a worker",
 		async () => {
 			const script = [
-				`import { readdirSync, readlinkSync } from "node:fs";`,
 				`import * as fs from "node:fs/promises";`,
 				`import * as os from "node:os";`,
 				`import * as path from "node:path";`,
@@ -349,62 +356,76 @@ describe("stats sync serial mode", () => {
 				`import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";`,
 				`import { getSessionsDir, getStatsDbPath, setAgentDir } from "@oh-my-pi/pi-utils";`,
 				"",
-				`const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stats-pool-sub-"));`,
-				`const configDir = path.join(tempDir, "config");`,
-				`await fs.mkdir(configDir, { recursive: true });`,
-				`process.env.PI_CONFIG_DIR = path.relative(os.homedir(), configDir);`,
-				`setAgentDir(path.join(os.homedir(), process.env.PI_CONFIG_DIR, "agent"));`,
-				`for (const key of ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]) delete process.env[key];`,
+				`async function main() {`,
+				`    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stats-pool-sub-"));`,
+				`    const configDir = path.join(tempDir, "config");`,
+				`    // Drop the XDG keys BEFORE setAgentDir: it caches a resolver that reads them,`,
+				`    // so deleting them afterwards would leave this child (and its worker) on the`,
+				`    // caller's shared XDG tree while only its own env looked cleaned.`,
+				`    for (const key of ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]) delete process.env[key];`,
+				`    process.env.PI_CONFIG_DIR = path.relative(os.homedir(), configDir);`,
+				`    setAgentDir(path.join(os.homedir(), process.env.PI_CONFIG_DIR, "agent"));`,
 				"",
-				`const sessionDir = path.join(getSessionsDir(), "--tmp--pool-subprocess");`,
-				`await fs.mkdir(sessionDir, { recursive: true });`,
-				`const sessionFile = path.join(sessionDir, "session.jsonl");`,
-				`const assistant = { type: "message", parentId: null, timestamp: new Date().toISOString(),`,
-				`    message: { role: "assistant", content: [{ type: "text", text: "ok" }],`,
-				`        api: "openai-responses", provider: "openai", model: "gpt-5.4",`,
-				`        usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3,`,
-				`            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },`,
-				`        stopReason: "stop", timestamp: Date.now(), duration: 10, ttft: 5 },`,
-				`};`,
-				`await Bun.write(sessionFile, JSON.stringify({ ...assistant, id: "a1" }) + "\\n");`,
-				`await syncAllSessions({ workers: 2, files: [sessionFile] });`,
-				`await fs.appendFile(sessionFile, JSON.stringify({ ...assistant, id: "a2" }) + "\\n");`,
-				`await syncAllSessions({ workers: 2, files: [sessionFile] });`,
-				`// Measured from the last parse, not from process start: the cold start above`,
-				`// is seconds of legitimate work, and the exit path is what this marker checks.`,
-				`const lastParseAt = performance.now();`,
-				`process.on("exit", () =>`,
-				`    console.log("exitAfterLastParseMs=" + Math.round(performance.now() - lastParseAt)));`,
-				`console.log("totalRequests=" + getOverallStats().totalRequests);`,
-				`// The sync opened config/stats.db through the module-global handle. Windows`,
-				`// cannot delete a still-open sqlite file (or its WAL sidecars), so close the`,
-				`// database before the recursive removal — without it the child exits nonzero`,
-				`// on Windows even when pooling is correct.`,
-				`closeDb();`,
-				`// A stdout marker cannot prove that: it prints before the removal whether`,
-				`// the handle was closed or the reference was merely dropped, and on Linux`,
-				`// the removal still succeeds against a leaked handle. What the close has to`,
-				`// leave behind is observable in the OS, so read it there instead.`,
-				`const dbPath = getStatsDbPath();`,
-				`// A released handle leaves no descriptor on stats.db or on either WAL sidecar.`,
-				`// /proc is Linux-only; elsewhere this line is simply not printed.`,
-				`try {`,
-				`    const held = readdirSync("/proc/self/fd")`,
-				`        .flatMap((fd) => {`,
-				`            try { return [readlinkSync(\`/proc/self/fd/\${fd}\`)]; } catch { return []; }`,
-				`        })`,
-				`        .filter((target) => target === dbPath || target.startsWith(dbPath));`,
-				`    console.log("leakedDbHandles=" + held.length);`,
-				`} catch { /* descriptor table not exposed on this platform */ }`,
-				`// A fresh connection on the same path is the platform-free half of the check:`,
-				`// the close has to leave the file free to open again and the synced rows`,
-				`// readable from that new connection.`,
-				`const reopened = new Database(dbPath);`,
-				`console.log("reopenedRequests=" + reopened.query("SELECT COUNT(*) AS n FROM messages").get().n);`,
-				`reopened.close();`,
-				`// No process.exit: the child must drain on its own. A pooled worker left`,
-				`// referenced would hold the event loop open and hang this script.`,
-				`await fs.rm(tempDir, { recursive: true, force: true });`,
+				`    // Bun.write creates the parent directories, so neither the session folder`,
+				`    // nor the config root needs an mkdir here.`,
+				`    const sessionFile = path.join(getSessionsDir(), "--tmp--pool-subprocess", "session.jsonl");`,
+				`    const assistant = { type: "message", parentId: null, timestamp: new Date().toISOString(),`,
+				`        message: { role: "assistant", content: [{ type: "text", text: "ok" }],`,
+				`            api: "openai-responses", provider: "openai", model: "gpt-5.4",`,
+				`            usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 3,`,
+				`                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },`,
+				`            stopReason: "stop", timestamp: Date.now(), duration: 10, ttft: 5 },`,
+				`    };`,
+				`    await Bun.write(sessionFile, JSON.stringify({ ...assistant, id: "a1" }) + "\\n");`,
+				`    await syncAllSessions({ workers: 2, files: [sessionFile] });`,
+				`    await fs.appendFile(sessionFile, JSON.stringify({ ...assistant, id: "a2" }) + "\\n");`,
+				`    await syncAllSessions({ workers: 2, files: [sessionFile] });`,
+				`    // Measured from the last parse, not from process start: the cold start above`,
+				`    // is seconds of legitimate work, and the exit path is what this marker checks.`,
+				`    const lastParseAt = performance.now();`,
+				`    process.on("exit", () =>`,
+				`        console.log("exitAfterLastParseMs=" + Math.round(performance.now() - lastParseAt)));`,
+				`    console.log("totalRequests=" + getOverallStats().totalRequests);`,
+				`    // The sync opened config/stats.db through the module-global handle. Windows`,
+				`    // cannot delete a still-open sqlite file (or its WAL sidecars), so close the`,
+				`    // database before the recursive removal — without it the child exits nonzero`,
+				`    // on Windows even when pooling is correct.`,
+				`    closeDb();`,
+				`    // A stdout marker cannot prove that: it prints before the removal whether`,
+				`    // the handle was closed or the reference was merely dropped, and on Linux`,
+				`    // the removal still succeeds against a leaked handle. What the close has to`,
+				`    // leave behind is observable in the OS, so read it there instead.`,
+				`    const dbPath = getStatsDbPath();`,
+				`    // A released handle leaves no descriptor on stats.db or on either WAL sidecar.`,
+				`    // /proc is Linux-only and may be unmounted elsewhere; the marker tells the`,
+				`    // caller whether the scan actually ran instead of inferring it from the OS.`,
+				`    // realpath, because /proc reports targets with symlinked temp dirs resolved.`,
+				`    try {`,
+				`        const dbReal = await fs.realpath(dbPath);`,
+				`        const fds = await fs.readdir("/proc/self/fd");`,
+				`        const targets = await Promise.all(fds.map(async (fd) => {`,
+				`            try { return await fs.readlink(\`/proc/self/fd/\${fd}\`); } catch { return ""; }`,
+				`        }));`,
+				`        const held = targets.filter((target) => target === dbReal || target.startsWith(dbReal));`,
+				`        console.log("procfs=available");`,
+				`        console.log("leakedDbHandles=" + held.length);`,
+				`    } catch { console.log("procfs=unavailable"); }`,
+				`    // A fresh connection on the same path is the platform-free half of the check:`,
+				`    // the close has to leave the file free to open again and the synced rows`,
+				`    // readable from that new connection.`,
+				`    const reopened = new Database(dbPath);`,
+				`    console.log("reopenedRequests=" + reopened.query("SELECT COUNT(*) AS n FROM messages").get().n);`,
+				`    reopened.close();`,
+				`    // No process.exit: the child must drain on its own. A pooled worker left`,
+				`    // referenced would hold the event loop open and hang this script.`,
+				`    await fs.rm(tempDir, { recursive: true, force: true });`,
+				`}`,
+				"",
+				`// Production calls main() without awaiting it (packages/stats/src/index.ts), so a`,
+				`// pending top-level await must not be what keeps this child alive: only the pool's`,
+				`// own reference bookkeeping may. An unawaited main() is what makes a dropped`,
+				`// worker.ref() observable as a missing second row instead of a passing child.`,
+				`void main();`,
 			].join("\n");
 			const file = path.join(import.meta.dir, ".tmp-pool-subprocess.ts");
 			await fs.writeFile(file, script);
@@ -423,7 +444,9 @@ describe("stats sync serial mode", () => {
 					]);
 					expect(exitCode).toBe(0);
 					expect(stderr).toBe("");
-					expect(stdout).toContain("totalRequests=2");
+					// Whole lines, not substrings: a leaked or duplicated database reports
+					// 20, and `toContain("totalRequests=2")` would accept it.
+					expect(stdout).toMatch(/^totalRequests=2$/m);
 					// The child left on its own steam: a referenced pooled worker would keep
 					// the loop alive until its idle deadline, so the gap between the last
 					// parse and the exit is what separates a drained loop from an evicted
@@ -436,11 +459,15 @@ describe("stats sync serial mode", () => {
 					// (where /proc exposes the table) and the file has to open again with the
 					// synced rows still in it. A `closeDb` that drops the reference instead of
 					// closing the handle fails the first; the exit status stays 0 and the old
-					// stdout marker would have passed either way.
-					if (process.platform === "linux") expect(stdout).toContain("leakedDbHandles=0");
-					expect(stdout).toContain("reopenedRequests=2");
+					// stdout marker would have passed either way. Gated on the child's own
+					// capability report: a Linux runner without procfs never scanned, and
+					// requiring the line there fails a correct pool.
+					if (stdout.includes("procfs=available")) expect(stdout).toContain("leakedDbHandles=0");
+					expect(stdout).toMatch(/^reopenedRequests=2$/m);
 				} catch (error) {
-					throw new Error("pooled worker held the process open: child did not exit within 30s", { cause: error });
+					throw new Error("pooled worker held the process open: child did not exit within 30s", {
+						cause: error,
+					});
 				}
 			} finally {
 				await fs.rm(file, { force: true });
@@ -464,6 +491,19 @@ describe("stats sync serial mode", () => {
 		isolation.resetWarmPool();
 
 		expect(terminatedWorkers.has(pooled)).toBe(true);
+
+		// A reset that terminated handles without evicting them would pass the
+		// assertion above and hand the corpse to the next checkout, where the run
+		// waits for a reply that never comes. Prove the pool is empty by driving a
+		// real sync out of a fresh worker.
+		const sessionFile = path.join(getSessionsDir(), "--tmp--sync-serial", "session.jsonl");
+		await fs.appendFile(sessionFile, `${JSON.stringify(assistantMessage({ id: "assistant-2" }))}\n`);
+		const respawn = spyOnWorkerSpawns();
+		const synced = await syncAllSessions({ workers: 2, files: [sessionFile] });
+
+		expect(respawn).toHaveBeenCalled();
+		expect(synced).toEqual({ processed: 1, files: 1 });
+		expect(getOverallStats().totalRequests).toBe(2);
 	});
 
 	// A pooled worker classifies transcripts against the sessions root it was
@@ -515,6 +555,11 @@ describe("stats sync serial mode", () => {
 				expect(getStatsByAgentType().map(byType => byType.agentType)).toEqual(["main"]);
 			} finally {
 				process.chdir(originalCwd);
+				// The second run spawns under secondRoot, so the workers it pooled still
+				// hold that cwd. Drop them before removal: Windows refuses to delete a
+				// directory a live worker was spawned under, and the isolation afterEach
+				// that would reset the pool runs only after this cleanup.
+				isolation.resetWarmPool();
 				await fs.rm(firstRoot, { recursive: true, force: true });
 				await fs.rm(secondRoot, { recursive: true, force: true });
 				vi.restoreAllMocks();
@@ -536,8 +581,14 @@ describe("stats sync serial mode", () => {
 			const firstDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-stats-cwd-first-"));
 			const secondDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-stats-cwd-second-"));
 			try {
-				await writeTranscriptAt(path.join(firstDir, "shared", "session.jsonl"), { id: "assistant-1", output: 2 });
-				await writeTranscriptAt(path.join(secondDir, "shared", "session.jsonl"), { id: "assistant-2", output: 99 });
+				await writeTranscriptAt(path.join(firstDir, "shared", "session.jsonl"), {
+					id: "assistant-1",
+					output: 2,
+				});
+				await writeTranscriptAt(path.join(secondDir, "shared", "session.jsonl"), {
+					id: "assistant-2",
+					output: 99,
+				});
 
 				process.chdir(firstDir);
 				const firstRun = spyOnWorkerSpawns();
@@ -559,6 +610,9 @@ describe("stats sync serial mode", () => {
 				expect(getOverallStats().totalOutputTokens).toBe(99);
 			} finally {
 				process.chdir(originalCwd);
+				// Same on Windows reasoning as the sessions-root case above: the last run
+				// pooled workers spawned under secondDir.
+				isolation.resetWarmPool();
 				await fs.rm(firstDir, { recursive: true, force: true });
 				await fs.rm(secondDir, { recursive: true, force: true });
 				vi.restoreAllMocks();
