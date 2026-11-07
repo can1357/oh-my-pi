@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "bun:test";
+import { afterEach, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Message } from "@oh-my-pi/pi-ai";
@@ -9,6 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionMemory } from "@oh-my-pi/pi-coding-agent/session/session-memory";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -225,4 +226,33 @@ it("adds no snapshot entries when the tree revisits a node", async () => {
 	}
 	expect(snapshotEntries()).toHaveLength(before);
 	expect(snapshotEntries().map(entry => entry.id)).toContain(live.manager.getLeafId() ?? "");
+});
+
+/** A switch that rolls back must leave the target session's journal as it found it. */
+it("writes no snapshot into the target of a failed session switch", async () => {
+	const registry = await createRegistry();
+	const sessionDir = path.join(temp.path(), "sessions");
+	const target = SessionManager.create(temp.path(), sessionDir);
+	target.appendMessage({ role: "user", content: "use eval", timestamp: Date.now() });
+	appendEval(target, "eval-1");
+	await target.flush();
+	const targetFile = target.getSessionFile();
+	const current = SessionManager.create(temp.path(), sessionDir);
+	current.appendMessage({ role: "user", content: "other", timestamp: Date.now() });
+	await current.flush();
+	const currentFile = current.getSessionFile();
+	if (!targetFile || !currentFile) throw new Error("Expected persisted sessions");
+	const before = await Bun.file(targetFile).text();
+
+	const live = await openProcess(currentFile, sessionDir, registry, "switch");
+	const reset = spyOn(SessionMemory.prototype, "resetContextForNewTranscript").mockRejectedValueOnce(
+		new Error("forced switch failure"),
+	);
+	try {
+		const switching = live.session.switchSession(targetFile, { onCwdChange: async () => true });
+		await expect(switching).rejects.toThrow("forced switch failure");
+	} finally {
+		reset.mockRestore();
+	}
+	expect(await Bun.file(targetFile).text()).toBe(before);
 });

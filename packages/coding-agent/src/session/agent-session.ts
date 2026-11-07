@@ -7715,23 +7715,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * instead, so browsing the tree adds no duplicates.
 	 */
 	replaceMessagesFromSessionContext(messages: AgentMessage[]): void {
-		const tail = messages.at(-1);
-		if (tail && isEvalStateContext(tail) && this.#unpersistedEvalStateContexts.delete(tail)) {
-			const leafId = this.sessionManager.getLeafId();
-			const persisted = leafId
-				? this.sessionManager
-						.getChildren(leafId)
-						.find(
-							entry =>
-								entry.type === "custom_message" &&
-								entry.customType === tail.customType &&
-								entry.content === tail.content,
-						)
-				: undefined;
-			if (persisted) this.sessionManager.branch(persisted.id);
-			else this.#appendEvalStateContextEntry(tail);
-		}
+		this.#persistRebuiltEvalStateContext(messages);
 		this.agent.replaceMessages(messages);
+	}
+
+	/** Persist the snapshot a rebuild appended to `messages`, if any; see {@link replaceMessagesFromSessionContext}. */
+	#persistRebuiltEvalStateContext(messages: AgentMessage[]): void {
+		const tail = messages.at(-1);
+		if (!tail || !isEvalStateContext(tail) || !this.#unpersistedEvalStateContexts.delete(tail)) return;
+		const leafId = this.sessionManager.getLeafId();
+		const persisted = leafId
+			? this.sessionManager
+					.getChildren(leafId)
+					.find(
+						entry =>
+							entry.type === "custom_message" &&
+							entry.customType === tail.customType &&
+							entry.content === tail.content,
+					)
+			: undefined;
+		if (persisted) this.sessionManager.branch(persisted.id);
+		else this.#appendEvalStateContextEntry(tail);
 	}
 
 	#appendEvalStateContextEntry(message: CustomMessage): void {
@@ -13729,7 +13733,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				});
 			}
 
-			this.replaceMessagesFromSessionContext(sessionContext.messages);
+			// Persisted once the switch can no longer roll back, below.
+			this.agent.replaceMessages(sessionContext.messages);
 			this.#reseedTokenRate();
 			this.#advisors.resetSessionState({ preserveCost: true });
 			this.#todo.syncFromBranch();
@@ -13773,7 +13778,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (interruptedTurnAbort) {
 					this.sessionManager.appendMessage(interruptedTurnAbort);
 					sessionContext = this.buildDisplaySessionContext();
-					this.replaceMessagesFromSessionContext(sessionContext.messages);
+					this.agent.replaceMessages(sessionContext.messages);
 				}
 			}
 
@@ -13809,6 +13814,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (switchingToDifferentSession) {
 				await this.#memory.resetContextForNewTranscript();
 			}
+			// The switch has committed: a rolled-back one must not write the target's journal.
+			this.#persistRebuiltEvalStateContext(this.agent.state.messages);
 			if (switchingToDifferentSession || didReloadConversationChange) {
 				this.#clearSessionScopedToolState();
 			}
