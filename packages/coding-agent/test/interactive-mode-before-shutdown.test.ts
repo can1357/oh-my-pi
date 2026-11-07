@@ -138,12 +138,10 @@ describe("InteractiveMode pre-quit extension gate", () => {
 
 	it("cancels before disposal and permits a later quit attempt", async () => {
 		beforeShutdown = () => (attempts === 1 ? { cancel: true } : undefined);
-		mode.shutdownRequested = true;
 		await mode.shutdown();
 		expect(session.isDisposed).toBe(false);
 		expect(mode.isAwaitingShutdown).toBe(false);
 		expect(mode.isShuttingDown).toBe(false);
-		expect(mode.shutdownRequested).toBe(false);
 		expect(laterHandlers).toBe(0);
 		expect(shutdownEvents).toBe(0);
 		expect(postmortem.quit).not.toHaveBeenCalled();
@@ -273,6 +271,39 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		expect(attempts).toBe(0);
 		expect(session.isDisposed).toBe(true);
 		expect(shutdownEvents).toBe(1);
+	});
+
+	it("retains an independent extension shutdown after cancellation and waits for the settled boundary", async () => {
+		const entered = Promise.withResolvers<ExtensionContext>();
+		const answer = Promise.withResolvers<SessionBeforeShutdownResult>();
+		const waiting = Promise.withResolvers<void>();
+		const idle = Promise.withResolvers<void>();
+		vi.spyOn(session, "waitForIdle").mockImplementation(() => {
+			waiting.resolve();
+			return idle.promise;
+		});
+		beforeShutdown = async (_event, ctx) => {
+			entered.resolve(ctx);
+			return answer.promise;
+		};
+		const quitting = mode.shutdown();
+		const ctx = await entered.promise;
+		ctx.shutdown();
+		expect(session.isDisposed).toBe(false);
+		expect(mode.isAwaitingShutdown).toBe(true);
+		answer.resolve({ cancel: true });
+		await quitting;
+		expect(mode.shutdownRequested).toBe(true);
+		await waiting.promise;
+		expect(session.isDisposed).toBe(false);
+		expect(postmortem.quit).not.toHaveBeenCalled();
+		idle.resolve();
+		await quitCalled.promise;
+		expect(attempts).toBe(1);
+		expect(laterHandlers).toBe(0);
+		expect(session.isDisposed).toBe(true);
+		expect(shutdownEvents).toBe(1);
+		expect(postmortem.quit).toHaveBeenCalledTimes(1);
 	});
 
 	it("abandons a pending quit when its interactive UI stops", async () => {

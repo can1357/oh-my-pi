@@ -8273,13 +8273,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			const { signal } = controller;
 			this.#beforeShutdownController = controller;
 			this.showStatus(`Waiting for exit hooks… (${appKey(this.keybindings, "app.exit")} to skip)`);
+			let cancelled = false;
 			try {
 				const result = await runner.emit({ type: "session_before_shutdown", signal });
-				if (!signal.aborted && result?.cancel) {
-					this.shutdownRequested = false;
-					this.showStatus("Session close cancelled");
-					return;
-				}
+				cancelled = result?.cancel === true;
 			} catch (error) {
 				this.showError(`Exit hook failed: ${error instanceof Error ? error.message : String(error)}`);
 			} finally {
@@ -8288,6 +8285,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			// A signal may have disposed the session, or stop() may have closed the UI,
 			// while an extension was awaiting the operator.
 			if (this.session.isDisposed || this.#dialogLifetime.signal.aborted) return;
+			if (cancelled && !signal.aborted) {
+				this.showStatus("Session close cancelled");
+				// This gate owns only the operator's quit, not another caller's
+				// settled-boundary shutdown request.
+				if (this.shutdownRequested) this.requestShutdown();
+				return;
+			}
 		}
 		this.#beginClose();
 		const worktreePlan = await this.#planOwnedWorktreeExit();

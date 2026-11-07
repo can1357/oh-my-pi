@@ -551,6 +551,11 @@ Fatal/no-hook shutdown that arrives during an operator's pending quit aborts
 that gate and continues normal teardown. The hook cannot veto that independent
 shutdown, and a late cancellation result is ignored.
 
+An independent `ctx.shutdown()` request received during the prompt remains
+queued. Cancelling the operator's quit does not cancel that request: it is
+re-evaluated at the existing fully settled boundary without running the
+pre-quit hook again.
+
 Handlers run sequentially. The first `{ cancel: true }` stops dispatch and
 leaves the session open; a later quit attempt emits again. Errors and timeouts
 are reported but do not veto quitting. Overlapping quit requests do not emit
