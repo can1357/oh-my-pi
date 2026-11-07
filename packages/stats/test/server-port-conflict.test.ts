@@ -148,6 +148,7 @@ describe("startServer port conflicts", () => {
 			// dead-end in "Port X is held by the current process".
 			const second = await startServer(port);
 			expect(second.port).toBe(first.port);
+			expect(second.reused).toBe(false);
 			expect(second).toBe(first);
 		} finally {
 			first.stop();
@@ -172,6 +173,7 @@ describe("startServer port conflicts", () => {
 		try {
 			const server = await startServer(existing.port);
 			expect(server.port).toBe(existing.port);
+			expect(server.reused).toBe(true);
 			server.stop();
 
 			// The existing dashboard is untouched: it still answers on the port.
