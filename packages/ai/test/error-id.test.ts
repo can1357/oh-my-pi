@@ -221,6 +221,24 @@ describe("error-id classification", () => {
 		expect(AIError.retriable(id)).toBe(false);
 	});
 
+	it("classifies Bedrock content_filtered stop messages as content blocks", () => {
+		const assistant = message({
+			errorMessage: "Response filtered by Amazon Bedrock content filters (stop reason: content_filtered).",
+		});
+		const id = AIError.classifyMessage(assistant);
+		expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(true);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
+	it("classifies Anthropic content filtering policy blocks as content blocks", () => {
+		const assistant = message({
+			errorMessage: "Output blocked by content filtering policy",
+		});
+		const id = AIError.classifyMessage(assistant);
+		expect(AIError.is(id, AIError.Flag.ContentBlocked)).toBe(true);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
 	it("classifies Codex cyber approval denials as account-scoped policy blocks", () => {
 		const assistant = message({
 			api: "openai-codex-responses",

@@ -2289,11 +2289,16 @@ export class TurnRecovery {
 		failedMessage: AssistantMessage,
 		options?: {
 			excludeProvider?: string;
-			pinFallback?: boolean;
 			preserveFailedTurn?: boolean;
 			wrapAround?: boolean;
 			/** This hop is a classifier-refusal walk, which visits each model at most once per turn. */
 			refusalWalk?: boolean;
+			/**
+			 * A classifier-refusal consult: only a candidate the refusal's fallback
+			 * credit can redeem may take the hop. The refusal's content judgment
+			 * replays identically on any other route, so a paid switch is never made.
+			 */
+			refusalCreditOnly?: boolean;
 			/** The retry policy retries the failed model if this hop does not switch. */
 			sameModelRetryAvailable?: boolean;
 		},
@@ -2381,6 +2386,9 @@ export class TurnRecovery {
 				const creditLive =
 					creditHandle !== undefined && creditTargets.length > 0 && Date.now() < creditHandle.expiresAt;
 				const refusalKeepsCredit = options?.refusalWalk === true && creditLive;
+				// A refusal consult only ever takes a credit redemption hop; every other
+				// candidate would re-send the refused content at full price.
+				if (options?.refusalCreditOnly === true && !canRedeemFallbackCredit) continue;
 				if (
 					(signerRetryRemains || refusalKeepsCredit) &&
 					!canRedeemFallbackCredit &&
@@ -2433,7 +2441,7 @@ export class TurnRecovery {
 					tools.every((tool, index) => tool === previousTools[index]);
 				if (
 					applied &&
-					options?.pinFallback === true &&
+					options?.refusalCreditOnly === true &&
 					creditHandle !== undefined &&
 					canRedeemFallbackCredit &&
 					requestSurfaceUnchanged
@@ -2474,8 +2482,12 @@ export class TurnRecovery {
 		if (this.#hasReplayUnsafeOutput(message)) return false;
 		// A content refusal/sensitivity stop is the model's decision, not a route
 		// failure — switching to the base model would just re-trigger it.
-		if (this.isClassifierRefusal(message)) return false;
 		const id = this.#classifyRetryMessage(message);
+		// A provider content-filter stop is the same judgment — the base model
+		// re-filters identical content. Account-policy denials carry the
+		// ContentBlocked bit too but stay eligible: another provider's account
+		// can serve the request.
+		if (AIError.is(id, AIError.Flag.ContentBlocked) && !AIError.is(id, AIError.Flag.AccountPolicy)) return false;
 		if (AIError.isContextOverflow(message, model.contextWindow ?? 0)) return false;
 		if (AIError.is(id, AIError.Flag.UsageLimit)) return false;
 		if (AIError.is(id, AIError.Flag.AuthFailed)) return false;
@@ -2513,6 +2525,11 @@ export class TurnRecovery {
 		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
 		if (this.isClassifierRefusal(message)) return false;
 		const id = this.#classifyRetryMessage(message);
+		// A provider content-filter stop is the model's judgment of the request,
+		// not a route failure — the next entry re-filters identical content.
+		// Account-policy denials carry the ContentBlocked bit too but stay
+		// eligible: another provider's account can still serve the request.
+		if (AIError.is(id, AIError.Flag.ContentBlocked) && !AIError.is(id, AIError.Flag.AccountPolicy)) return false;
 		if (AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt)) return false;
 		if (!retryFallbackAdmits(retrySettings.fallbackOn, AIError.is(id, AIError.Flag.UsageLimit))) return false;
 		// Text-ambiguous overflows waive the veto; usage-backed do not — see AIError.isTextAmbiguousContextOverflow (#9235).
@@ -2971,16 +2988,18 @@ export class TurnRecovery {
 
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// The retry budget bounds same-model retries against a failing provider. A
-			// classifier refusal is not that: retrying the same model reproduces it, and
-			// the next model in the chain is one request away and often answers. Stopping
-			// the walk at the budget ends the turn with models left untried.
+			// classifier refusal is not that — but neither is another route: the refusal
+			// is a judgment about this request's content, so a paid hop re-sends the
+			// same content and re-triggers it (or the next provider's filter, at full
+			// price — a 12-hour unattended run once walked its whole chain on one
+			// refusal this way). The chain is consulted only to redeem a live
+			// Anthropic fallback credit, the one sanctioned, zero-cost retry; every
+			// other refusal ends the turn and hands the refusal back to the agent,
+			// which can change what it asks for.
 			//
-			// The budget was also what terminated the walk: `retryFallbackChainKeys`
-			// consults the current model's own chain as well as the pinned one, so chains
-			// that name each other alternate rather than loop in place, and every hop used
-			// to spend an attempt. The walk is bounded here instead — a refusal visits any
-			// one model at most once per turn, so A -> B -> A terminates whatever the
-			// chains say.
+			// The consult stays budget-exempt and bounded: it happens even when the
+			// retry budget is spent (a refusal is not a same-model retry), and the
+			// walk-set below visits any one model at most once per turn.
 			const refusalWalkKey = this.#refusalWalkKey(currentSelector);
 			const refusalWalkRepeats = classifierRefusal && this.#refusalWalkTried.has(refusalWalkKey);
 			if (
@@ -2995,6 +3014,13 @@ export class TurnRecovery {
 			) {
 				if (classifierRefusal) {
 					this.#refusalWalkTried.add(refusalWalkKey);
+					// Suppress the refusing selector for the default window so a
+					// credit fallback this refusal moves to does not bounce straight
+					// back to the model that just refused: `cooldown-expiry` reverts
+					// to the primary once this window ends, as the policy documents.
+					// A refusal carries no provider timing, so the generic
+					// rate-limit fallback window applies.
+					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				} else {
 					// A usage-limit wait already knows when this provider can serve
 					// the session again (report reset, merged credential block,
@@ -3006,7 +3032,7 @@ export class TurnRecovery {
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
-					pinFallback: classifierRefusal,
+					refusalCreditOnly: classifierRefusal,
 					refusalWalk: classifierRefusal,
 					preserveFailedTurn,
 					wrapAround: longUsageLimitFallback,
