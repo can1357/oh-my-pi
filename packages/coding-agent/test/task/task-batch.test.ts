@@ -24,6 +24,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as seanceModule from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
@@ -38,6 +39,7 @@ const taskAgent: AgentDefinition = {
 	systemPrompt: "You are a task agent.",
 	source: "bundled",
 };
+const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
 
 function createSession(
 	options: {
@@ -74,6 +76,11 @@ function getBatchItemProperties(tool: TaskTool): Record<string, unknown> {
 function getFirstText(result: { content: Array<{ type: string; text?: string }> }): string {
 	const content = result.content.find(part => part.type === "text");
 	return content?.type === "text" ? (content.text ?? "") : "";
+}
+
+/** The gated-model notice's own paragraph, so a claim in it is not confused with one elsewhere in the result. */
+function gatedModelNotice(text: string): string {
+	return text.split("\n\n").find(part => part.startsWith("`model` was ignored")) ?? "";
 }
 
 function makeResult(id: string, overrides: Partial<SingleResult> = {}): SingleResult {
@@ -391,10 +398,10 @@ describe("task.batch validation", () => {
 	});
 
 	// The agent loop validates arguments against the wire schema before execute(),
-	// and that schema deletes undeclared keys. With per-call model off, `model` and
-	// `sourceSession` on an ordinary agent must still be refused by every call form
-	// instead of being dropped, leaving the child on its own model while the caller
-	// believes it pinned another.
+	// and that schema deletes undeclared keys. `sourceSession` on an ordinary agent
+	// must still be refused by every call form. A gated `model` is not refused: it is
+	// dropped and reported, because refusing it only bought identical retries — the
+	// caller is told the selector was ignored, so it never believes it pinned a model.
 	// `task.structured` and `task.isolation.enabled` choose between the prebuilt and
 	// generated batch schemas, each with and without `isolated`.
 	it.each([
@@ -411,7 +418,6 @@ describe("task.batch validation", () => {
 	])(
 		"refuses $field on an ordinary agent in the $form form with seance $seance (structured: $structured, isolation: $isolation)",
 		async ({ seance, batch, structured, isolation, field }) => {
-			const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
 			mockDiscovery(seance === "advertised" ? [taskAgent, bundledSeance] : taskAgent);
 			const run = vi
 				.spyOn(executorModule, "runSubprocess")
@@ -455,12 +461,16 @@ describe("task.batch validation", () => {
 
 			const toolResult = agent.state.messages.find(message => message.role === "toolResult");
 			const text = toolResult?.role === "toolResult" ? getFirstText(toolResult) : "";
-			// `model` doubles as the per-call selector, whose disabled gate is reported first.
-			expect(text).toContain(
-				field === "model"
-					? "Per-call model is disabled for task calls (task.perCallModel: off)."
-					: `\`${field}\` is only accepted for the \`seance\` agent.`,
-			);
+			if (field === "model") {
+				// Dropped and reported, not refused; the spawn runs on the agent's own model.
+				expect(text).toContain("`model` was ignored");
+				expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(false);
+				expect(run).toHaveBeenCalledTimes(1);
+				expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
+				expect(run.mock.calls[0]?.[0].modelOverride ?? []).not.toContain("stub/model-b");
+				return;
+			}
+			expect(text).toContain(`\`${field}\` is only accepted for the \`seance\` agent.`);
 			expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(true);
 			expect(run).not.toHaveBeenCalled();
 		},
@@ -934,32 +944,171 @@ describe("batch model placement", () => {
 		expect(run).not.toHaveBeenCalled();
 	});
 
-	// `off` and `eval` refuse task calls through the same gate; one mode per shape covers it.
+	// `off` and `eval` both forbid task calls through the same gate; one mode per shape covers it.
 	it.each([
 		["off", "batch"],
 		["eval", "flat"],
 	] as const)(
-		"rejects a task call's model before dispatch while task.perCallModel is %s (%s call)",
+		"drops a task call's model instead of refusing while task.perCallModel is %s (%s call)",
 		async (mode, shape) => {
 			const batch = shape === "batch";
 			mockDiscovery();
-			const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+			const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Ran"));
 			const tool = await TaskTool.create(
 				createSession({ settings: { "task.batch": batch, "async.enabled": false, "task.perCallModel": mode } }),
 			);
-			// A role alias is not an exact selector, but the disabled gate is what the caller must hear first.
-			const work = { task: "Do work", solutionSpace: "c", model: "@smol" };
-			// Through shared argument validation, as a model's tool call arrives: `model` must reach preflight in both shapes.
+			// The gate's shape is not advertised, so a model filling in optional fields never sees `model`.
+			expect((batch ? getBatchItemProperties(tool) : getSchemaProperties(tool)).model).toBeUndefined();
+			const work = { task: "Do work", solutionSpace: "c", model: "anthropic/claude-opus-4-5" };
+			// Through shared argument validation, as a model's tool call arrives: undeclared root
+			// keys are re-attached after validation, so `model` still reaches execute() in both shapes.
 			const args = validateAgentToolArguments(tool as unknown as AgentTool, {
 				type: "toolCall",
 				id: "task-model",
 				name: tool.name,
 				arguments: batch ? { context: "Shared context", tasks: [work] } : work,
 			});
+			expect(JSON.stringify(args)).toContain("anthropic/claude-opus-4-5");
 			const result = await tool.execute("task-model", args as TaskParams);
-			expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
-			expect(result.isError).toBe(true);
+			expect(getFirstText(result)).not.toMatch(/per-call model is disabled/i);
+			expect(getFirstText(result)).toContain("`model` was ignored");
+			expect(result.isError).toBeFalsy();
+			expect(run).toHaveBeenCalledTimes(1);
+			// Dispatched on the agent's own routing: the gate is enforced by ignoring the field, not by honouring it.
+			expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
+			expect(run.mock.calls[0]?.[0].modelOverride ?? []).not.toContain("anthropic/claude-opus-4-5");
+		},
+	);
+
+	it.each([
+		["batch", true],
+		["flat", false],
+	] as const)("advertises model in the %s shape while task.perCallModel is on", async (_shape, batch) => {
+		mockDiscovery();
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": batch, "task.perCallModel": "on" } }),
+		);
+		expect((batch ? getBatchItemProperties(tool) : getSchemaProperties(tool)).model).toBeDefined();
+	});
+
+	// The gated-model pass runs before shape validation, so it sees whatever the
+	// wire delivered. A malformed item must reach validation and get its own
+	// actionable message in every mode, not make the pass throw — and that holds
+	// even when the call supplied no `model` at all.
+	it.each(["on", "off", "eval"] as const)(
+		"leaves a malformed batch item to shape validation while task.perCallModel is %s",
+		async mode => {
+			mockDiscovery();
+			const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+			const tool = await TaskTool.create(
+				createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": mode } }),
+			);
+			const lone = await tool.execute("null-item", { context: "Shared context", tasks: [null] });
+			expect(getFirstText(lone)).toContain("Task 1 is missing `task`");
+			expect(lone.isError).toBe(true);
+			const mixed = await tool.execute("mixed-items", {
+				context: "Shared context",
+				tasks: [{ task: "Do work", solutionSpace: "c" }, null],
+			});
+			expect(getFirstText(mixed)).toContain("Task 2 is missing `task`");
+			expect(mixed.isError).toBe(true);
 			expect(run).not.toHaveBeenCalled();
 		},
 	);
+
+	// Every exit after the gate drops a `model` discloses the drop. Refusing or
+	// aborting a call does not establish that nothing ran first: with speculative
+	// launch a streamed item starts before the call finishes validating, and the
+	// caller asked for a model it never got either way.
+	it("discloses a dropped model on the exits that never reach a spawn", async () => {
+		const gated = { task: "Do work", solutionSpace: "c", model: "anthropic/claude-opus-4-5" };
+		const settings = { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" };
+
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(createSession({ settings }));
+
+		// Shape validation rejects the call after the drop already happened.
+		const invalid = await tool.execute("invalid-item", { context: "Shared context", tasks: [gated, null] });
+		expect(getFirstText(invalid)).toContain("Task 2 is missing `task`");
+		expect(getFirstText(invalid)).toContain("`model` was ignored");
+
+		// Preflight rejects a sibling item; the dropped item may already be running.
+		const preflight = await tool.execute("preflight-failure", {
+			context: "Shared context",
+			tasks: [gated, { task: "Do other work", solutionSpace: "c", agent: "does-not-exist" }],
+		});
+		expect(getFirstText(preflight)).toContain("failed preflight");
+		expect(getFirstText(preflight)).toContain("`model` was ignored");
+		expect(run).not.toHaveBeenCalled();
+
+		// Every background job fails to register, so the call returns having started nothing.
+		const manager = new AsyncJobManager({});
+		vi.spyOn(manager, "register").mockImplementation(() => {
+			throw new Error("register boom");
+		});
+		const asyncTool = await TaskTool.create(
+			createSession({ manager, settings: { ...settings, "async.enabled": true } }),
+		);
+		const unscheduled = await asyncTool.execute("register-failure", {
+			context: "Shared context",
+			tasks: [gated],
+		});
+		expect(getFirstText(unscheduled)).toContain("Failed to start background task job");
+		expect(getFirstText(unscheduled)).toContain("`model` was ignored");
+	});
+
+	// The notice reports what the gate dropped, never what ran: the same text is
+	// appended where nothing ran at all, and a bundled seance item keeps its own
+	// selector, so "each agent ran on its configured model" was false twice over.
+	it("says what was ignored rather than what ran", async () => {
+		const history = ["mock/history", "mock/history-fallback"];
+		const settings = { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" };
+		mockDiscovery([taskAgent, bundledSeance]);
+		// Echoes the selector it is handed, so a seance `model` the gate had dropped
+		// would reach the executor as no override at all.
+		vi.spyOn(seanceModule, "prepareSeance").mockImplementation(async context => ({
+			modelPatterns: typeof context.model === "string" ? [context.model] : [...(context.model ?? [])],
+			session: { fork: { sourceFile: "/tmp/source.jsonl" }, promptSuffix: () => "" },
+		}));
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Ran"));
+		const tool = await TaskTool.create(createSession({ settings }));
+		const seanceItem = {
+			agent: "seance",
+			sourceSession: "source-id",
+			model: [...history],
+			task: "Consult the record",
+			solutionSpace: "c",
+		};
+		const ordinaryItem = { agent: "task", model: "mock/requested", task: "Do work", solutionSpace: "c" };
+
+		for (const tasks of [
+			[seanceItem, ordinaryItem],
+			[ordinaryItem, seanceItem],
+		]) {
+			run.mockClear();
+			const result = await tool.execute("mixed-seance", { context: "Shared context", tasks });
+			const notice = gatedModelNotice(getFirstText(result));
+			expect(notice).not.toBe("");
+			// The seance item's selector is untouched; the ordinary item's is gone.
+			const overrides = run.mock.calls.map(call => call[0].modelOverride ?? []);
+			expect(overrides).toContainEqual(history);
+			expect(overrides.flat()).not.toContain("mock/requested");
+			// So the notice must not claim every agent ran on its configured model.
+			expect(notice).not.toMatch(/each agent|every agent/i);
+			expect(notice).toContain("`seance`");
+		}
+
+		// Pre-aborted: both items are cancelled before start and no executor runs.
+		run.mockClear();
+		const cancelled = await tool.execute(
+			"cancelled-batch",
+			{ context: "Shared context", tasks: [ordinaryItem, { task: "Do other work", solutionSpace: "c" }] },
+			AbortSignal.abort(),
+		);
+		expect(getFirstText(cancelled)).toContain("cancelled before start");
+		expect(run).not.toHaveBeenCalled();
+		// Nothing ran, so the notice may not say anything did.
+		expect(gatedModelNotice(getFirstText(cancelled))).not.toMatch(/\bran\b|\brunning\b/i);
+	});
 });

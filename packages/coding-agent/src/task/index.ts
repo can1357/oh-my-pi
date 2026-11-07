@@ -243,6 +243,30 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
 }
 
 /**
+ * Append `extra` to a result's first text part, adding one when it has none.
+ *
+ * Returns a fresh result (copied content array, copied text part) rather than
+ * mutating the caller's — task results are short-lived here, but an in-place
+ * edit on a shared/cached AgentToolResult would be a hidden trap.
+ */
+function appendResultText(
+	result: AgentToolResult<TaskToolDetails>,
+	extra: string | undefined,
+): AgentToolResult<TaskToolDetails> {
+	if (!extra) return result;
+	let appended = false;
+	const content = result.content.map(part => {
+		if (!appended && part.type === "text" && typeof part.text === "string") {
+			appended = true;
+			return { ...part, text: `${part.text}\n\n${extra}` };
+		}
+		return part;
+	});
+	if (!appended) content.push({ type: "text", text: extra });
+	return { ...result, content };
+}
+
+/**
  * Reject legacy fields and shape/configuration combinations the current tool
  * cannot accept. `outputSchema` is a first-class per-spawn field; stale
  * `schema` remains an eval-only alias and is rejected.
@@ -502,11 +526,86 @@ function spawnParamsFor(params: TaskParams, item: ResolvedTaskItem, defaultAgent
 	return spawn;
 }
 
+/**
+ * Told to the caller when its `model` was dropped, so a dropped selector is never a
+ * silent substitution.
+ *
+ * It reports only what the drop itself establishes — the field was removed from
+ * every ordinary spawn, and a bundled seance item's selector was left alone. It
+ * says nothing about what ran: the same text is appended to a preflight error, a
+ * cancelled batch and a call whose spawns all failed, where nothing ran at all.
+ */
+const GATED_MODEL_NOTICE =
+	"`model` was ignored: per-call models are disabled here (task.perCallModel), so no spawn was pinned to it and each keeps its agent's configured routing. A bundled `seance` item's `model` names its source session, not a per-call pin, and is kept. Omit `model`, or pick an agent whose configured model you want.";
+
+/**
+ * Drop a `model` the per-call gate forbids instead of refusing the whole call.
+ *
+ * While `task.perCallModel` forbids task calls the field leaves the advertised
+ * schema, but a schema is advice: unknown root keys are re-attached after
+ * validation, so a model that fills in every optional field still lands one
+ * here. Refusing cost 11-19 identically-reworded retries per call, the most
+ * common machine-confirmed struggle in the fleet; dropping it plus
+ * {@link GATED_MODEL_NOTICE} ends the loop without letting the caller believe
+ * it pinned a model. The gate itself is untouched: `agent()`, `workpool()` and
+ * any direct `runStructuredSubagent` still refuse, so no per-call model is ever
+ * honoured while the gate is off.
+ *
+ * The bundled seance agent's `model` names the historical session's model
+ * rather than a per-call one, so it is kept — but only when `seanceAdvertised`
+ * says the name resolved to the bundled agent. A user or project agent
+ * shadowing `seance` is an ordinary agent whose `model` is a per-call pin,
+ * which is the line `validateSeanceFields` and `runStructuredSubagent` already
+ * draw. A top-level `model` on a batch call is a placement mistake with its own
+ * message, so it is left to validation.
+ *
+ * This pass runs before shape validation, so a call or an item may be anything
+ * the wire delivered: whatever is not a well-formed record is left untouched
+ * for validation to report.
+ */
+function dropGatedModel(
+	params: TaskParams,
+	defaultAgent: string,
+	seanceAdvertised: boolean,
+	settings: Settings,
+): TaskParams {
+	if (perCallModelEnabled(settings, "task") || !isRecord(params)) return params;
+	const gated = (item: unknown): boolean => {
+		if (!isRecord(item) || item.model === undefined) return false;
+		const agent = typeof item.agent === "string" ? item.agent.trim() : "";
+		return !(seanceAdvertised && (agent || defaultAgent) === SEANCE_AGENT_NAME);
+	};
+	if (Array.isArray(params.tasks)) {
+		if (!params.tasks.some(gated)) return params;
+		return {
+			...params,
+			tasks: params.tasks.map(item => {
+				if (!gated(item)) return item;
+				const { model: _dropped, ...kept } = item;
+				return kept;
+			}),
+		};
+	}
+	if (!gated(params)) return params;
+	const { model: _dropped, ...kept } = params;
+	return kept;
+}
+
 /** A validated call's spawn list: its items and the per-spawn params each run receives. */
 interface SpawnPlan {
 	params: TaskParams;
 	items: TaskItem[];
 	spawns: TaskParams[];
+	error?: undefined;
+	/** A gated per-call `model` was dropped, so the result carries {@link GATED_MODEL_NOTICE}. */
+	droppedModel: boolean;
+}
+
+/** The validation error a call reports instead of spawning, plus what the gate already dropped from it. */
+interface SpawnPlanRejection {
+	error: string;
+	/** The gate dropped a `model` before validation rejected the call; the refusal still discloses it. */
+	droppedModel: boolean;
 }
 
 /**
@@ -521,15 +620,23 @@ function planSpawns(
 	defaultAgent: string,
 	seanceAdvertised: boolean,
 	settings: Settings,
-): SpawnPlan | string {
-	const params = repairTaskParams(rawParams as TaskParams);
+): SpawnPlan | SpawnPlanRejection {
+	const repaired = repairTaskParams(rawParams as TaskParams);
+	// `dropGatedModel` returns its argument untouched when nothing is gated, so identity is the signal.
+	const params = dropGatedModel(repaired, defaultAgent, seanceAdvertised, settings);
+	const droppedModel = params !== repaired;
 	const error =
 		validateShapeParams(batchEnabled, params) ??
 		validateSpawnParams(params, batchEnabled, fileEnabled, defaultAgent, settings) ??
 		validateSeanceParams({ params, batchEnabled, defaultAgent, seanceAdvertised });
-	if (error) return error;
+	if (error) return { error, droppedModel };
 	const items = resolveSpawnItems(params);
-	return { params, items, spawns: items.map(item => spawnParamsFor(params, item, defaultAgent)) };
+	return {
+		params,
+		items,
+		spawns: items.map(item => spawnParamsFor(params, item, defaultAgent)),
+		droppedModel,
+	};
 }
 
 /**
@@ -645,13 +752,13 @@ export function buildCoordinationAdvisory(
 }
 
 /**
- * Compose the non-blocking advisory appended to a `task` result: the
- * specialization nudge (from the per-item resolved agent types), plus — only
- * when some spawns keep running after this call (`willRunAsync`) — the
+ * Compose the text appended to a `task` result: a factual `notice` about the call
+ * itself, then the specialization nudge (from the per-item resolved agent types),
+ * plus — only when some spawns keep running after this call (`willRunAsync`) — the
  * coordination suggestion over those still-live spawns (`items`). Coordination
  * is gated on async because a sync spawn has already finished by the time the
  * call returns, so a "coordinate while they run" hint would misfire. Returns
- * undefined when neither applies.
+ * undefined when none applies.
  */
 export function composeSpawnAdvisory(args: {
 	agents: string[];
@@ -660,15 +767,18 @@ export function composeSpawnAdvisory(args: {
 	ircEnabled: boolean;
 	willRunAsync: boolean;
 	scoutAvailable?: boolean;
+	/** What the call did differently from what it asked for; carried even when the nudges are suppressed. */
+	notice?: string;
+	/** `session.suppressSpawnAdvisory`: drop the nudges, keep {@link notice}. */
+	suppressed?: boolean;
 }): string | undefined {
-	return (
-		[
-			buildSpecializationAdvisory(args.agents, args.depthCapacity, args.scoutAvailable),
-			args.willRunAsync ? buildCoordinationAdvisory(args.items, args.depthCapacity, args.ircEnabled) : undefined,
-		]
-			.filter(Boolean)
-			.join("\n\n") || undefined
-	);
+	const nudges = args.suppressed
+		? []
+		: [
+				buildSpecializationAdvisory(args.agents, args.depthCapacity, args.scoutAvailable),
+				args.willRunAsync ? buildCoordinationAdvisory(args.items, args.depthCapacity, args.ircEnabled) : undefined,
+			];
+	return [args.notice, ...nudges].filter(Boolean).join("\n\n") || undefined;
 }
 
 /** Sentinel for async jobs whose subagent finished with a failing result; progress is already updated. */
@@ -862,7 +972,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				this.#seanceSchemaFields() !== undefined,
 				this.session.settings,
 			);
-			return typeof plan === "string" ? undefined : plan.spawns;
+			return plan.error === undefined ? plan.spawns : undefined;
 		},
 		start: (toolCallId, spawn, index, signal) => this.#startSpeculative(toolCallId, spawn, index, signal),
 	};
@@ -899,6 +1009,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
+			perCallModelEnabled: perCallModelEnabled(this.session.settings, "task"),
 			structured: this.#isStructured(),
 			file: cfgTaskFile.get(this.session.settings),
 			defaultAgent: this.#defaultAgent(),
@@ -1170,28 +1281,33 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			this.#seanceSchemaFields() !== undefined,
 			this.session.settings,
 		);
-		if (typeof plan === "string") {
-			return createTaskModeError(plan);
+		// The drop happened before anything could run, so every exit below
+		// discloses it — a failed, refused or cancelled call ignored the
+		// selector exactly as a successful one did, and a speculative launch
+		// may already have started a spawn without it before the failure.
+		const gatedModelNotice = plan.droppedModel ? GATED_MODEL_NOTICE : undefined;
+		const failed = (message: string): AgentToolResult<TaskToolDetails> =>
+			appendResultText(createTaskModeError(message), gatedModelNotice);
+		if (plan.error !== undefined) {
+			return failed(plan.error);
 		}
 		const { params } = plan;
 		const spawnItems: ResolvedTaskItem[] = [];
 		try {
 			for (const item of plan.items) spawnItems.push(await resolveTaskFile(this, this.session, item));
 		} catch (error) {
-			return createTaskModeError(error instanceof Error ? error.message : String(error));
+			return failed(error instanceof Error ? error.message : String(error));
 		}
 		const normalizedSpawnParams = spawnItems.map(item => spawnParamsFor(params, item, defaultAgent));
 		const evalToolNames = spawnItems.flatMap(item => item.tools ?? []);
 		if (evalToolNames.length > 0) {
 			if (this.session.getPlanModeState?.()?.enabled === true) {
-				return createTaskModeError("Task execution failed: Eval-defined tools are unavailable in plan mode.");
+				return failed("Task execution failed: Eval-defined tools are unavailable in plan mode.");
 			}
 			try {
 				await describeEvalTools(this.session, evalToolNames, signal);
 			} catch (error) {
-				return createTaskModeError(
-					`Task execution failed: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				return failed(`Task execution failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
 		const resolvedAgents = normalizedSpawnParams.map(spawn => spawn.agent ?? defaultAgent);
@@ -1211,9 +1327,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			.filter((failure): failure is { index: number; error: string } => failure !== undefined);
 		if (preflightFailures.length > 0) {
 			if (!batchEnabled) {
-				return createTaskModeError(`Task execution failed: ${preflightFailures[0]!.error}`);
+				return failed(`Task execution failed: ${preflightFailures[0]!.error}`);
 			}
-			return createTaskModeError(
+			return failed(
 				preflightFailures
 					.map(({ index, error }) => {
 						const item = spawnItems[index]!;
@@ -1254,19 +1370,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			if (asyncEnabled && !this.session.asyncJobManager) {
 				logger.warn("task: no AsyncJobManager registered; falling back to sync execution");
 			}
-			const advisory = this.session.suppressSpawnAdvisory
-				? undefined
-				: composeSpawnAdvisory({
-						agents: resolvedAgents,
-						items: asyncItems,
-						depthCapacity,
-						ircEnabled,
-						willRunAsync: false,
-						scoutAvailable: isScoutSpawnable(
-							cfgTaskDisabledAgents.get(this.session.settings),
-							this.session.getSessionSpawns?.() ?? "*",
-						),
-					});
+			const advisory = composeSpawnAdvisory({
+				agents: resolvedAgents,
+				items: asyncItems,
+				depthCapacity,
+				ircEnabled,
+				willRunAsync: false,
+				scoutAvailable: isScoutSpawnable(
+					cfgTaskDisabledAgents.get(this.session.settings),
+					this.session.getSessionSpawns?.() ?? "*",
+				),
+				notice: gatedModelNotice,
+				suppressed: this.session.suppressSpawnAdvisory === true,
+			});
 			const result = await this.#executeSyncFanout(
 				toolCallId,
 				params,
@@ -1275,51 +1391,27 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				signal,
 				onUpdate,
 			);
-			if (!advisory) return result;
-			let appended = false;
-			const content = result.content.map(part => {
-				if (!appended && part.type === "text" && typeof part.text === "string") {
-					appended = true;
-					return { ...part, text: `${part.text}\n\n${advisory}` };
-				}
-				return part;
-			});
-			if (!appended) content.push({ type: "text", text: advisory });
-			return { ...result, content };
+			return appendResultText(result, advisory);
 		}
 
 		// Coordination only makes sense for spawns that keep running after this
 		// call returns (the async subset). Blocking items have already completed
 		// by then, so a "coordinate while they run" hint would misfire.
-		const advisory = this.session.suppressSpawnAdvisory
-			? undefined
-			: composeSpawnAdvisory({
-					agents: resolvedAgents,
-					items: asyncItems,
-					depthCapacity,
-					ircEnabled,
-					willRunAsync: asyncItems.length > 0,
-					scoutAvailable: isScoutSpawnable(
-						cfgTaskDisabledAgents.get(this.session.settings),
-						this.session.getSessionSpawns?.() ?? "*",
-					),
-				});
-		// Returns a fresh result (copied content array, copied text part) rather
-		// than mutating the caller's — task results are short-lived here, but an
-		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
-		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> => {
-			if (!advisory) return result;
-			let appended = false;
-			const content = result.content.map(part => {
-				if (!appended && part.type === "text" && typeof part.text === "string") {
-					appended = true;
-					return { ...part, text: `${part.text}\n\n${advisory}` };
-				}
-				return part;
-			});
-			if (!appended) content.push({ type: "text", text: advisory });
-			return { ...result, content };
-		};
+		const advisory = composeSpawnAdvisory({
+			agents: resolvedAgents,
+			items: asyncItems,
+			depthCapacity,
+			ircEnabled,
+			willRunAsync: asyncItems.length > 0,
+			scoutAvailable: isScoutSpawnable(
+				cfgTaskDisabledAgents.get(this.session.settings),
+				this.session.getSessionSpawns?.() ?? "*",
+			),
+			notice: gatedModelNotice,
+			suppressed: this.session.suppressSpawnAdvisory === true,
+		});
+		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> =>
+			appendResultText(result, advisory);
 		const outputManager = this.#outputManager();
 		const callStartedAt = Date.now();
 		const spawns: Array<{
@@ -1429,15 +1521,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 
 		if (started.length === 0 && syncSpawns.length === 0) {
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Failed to start background task job${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}`,
-					},
-				],
-				details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
-			};
+			// Only the notice: the spawn nudges speak about work that keeps
+			// running, and none of it does.
+			return appendResultText(
+				{
+					content: [
+						{
+							type: "text",
+							text: `Failed to start background task job${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}`,
+						},
+					],
+					details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
+				},
+				gatedModelNotice,
+			);
 		}
 
 		const scheduleFailureSummary =
