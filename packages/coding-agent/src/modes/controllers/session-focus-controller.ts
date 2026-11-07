@@ -204,7 +204,10 @@ export class SessionFocusController {
 					if (event.type === "message_end") await restoreAssistant(event.message);
 					else {
 						assistantStreamSynced = true;
-						await this.ctx.eventController.handleEvent({ type: "message_start", message: event.message });
+						// A replay `start` opens the message itself via the restart path.
+						if (event.assistantMessageEvent?.type !== "start") {
+							await this.ctx.eventController.handleEvent({ type: "message_start", message: event.message });
+						}
 					}
 					if (generation !== this.#attachGeneration) return;
 				}
