@@ -19,6 +19,7 @@ import os
 import shutil
 import sys
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,9 +31,10 @@ from omp_rpc import (
     RpcError,
     RpcProcessExitError,
     ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
 )
 
-from robomp import host_tools, persona, pragmas
+from robomp import host_tools, persona, pr_status, pragmas
 from robomp.cancellation import register_cancel_hook, unregister_cancel_hook
 from robomp.config import Settings
 from robomp.db import Database, issue_key
@@ -77,6 +79,11 @@ class TaskInputs:
     natives_cache: NativesCache | None = None
     issue: IssueInfo | None = None
     release: ReleaseTaskContext | None = None
+    pr_head_sha: str = ""
+    # App-owned phase-ladder tracker; shared with the webhook handler so the
+    # worker's `reviewing`/`publishing` posts serialize per (repo, sha) with
+    # the queue's terminal posts. `None` keeps the module-level fallback.
+    status_tracker: pr_status.StatusTracker | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -455,6 +462,28 @@ def _has_prior_session(session_dir: Path) -> bool:
         return False
 
 
+def _is_submit_pr_review_start(event: ToolExecutionStartEvent) -> bool:
+    """True if this start event begins the `submit_pr_review` host tool.
+
+    Top-level dispatch (xdev off) reports the tool by name. With the default
+    `tools.xdev=true` the tool is mounted as an `xd://` device invoked through
+    the `write` tool, and — because `tool_execution_start` precedes the
+    `host_tool_call` frame on the wire — omp_rpc only normalizes the
+    update/end events; the start event keeps the transport name `write`.
+    Match the transport shape by device path (mirrors how terminal detection
+    relies on `_on_host_tool_completed` for the same reason).
+    """
+    if event.tool_name == "submit_pr_review":
+        return True
+    if event.tool_name != "write":
+        return False
+    args = event.args
+    if not isinstance(args, Mapping):
+        return False
+    path = args.get("path")
+    return isinstance(path, str) and path.rstrip().removeprefix("xd://") == "submit_pr_review"
+
+
 def _build_prompt(
     task_kind: str,
     inputs: TaskInputs,
@@ -588,6 +617,24 @@ def _run_rpc_blocking(
             extra={"issue": bindings.issue_key, "tool": event.tool_name},
         )
 
+    def _on_tool_start(event: ToolExecutionStartEvent) -> None:
+        # `publishing` marks the one host tool that writes the review to GitHub.
+        # Fire-and-forget: this runs on the RPC reader thread, and blocking it on
+        # an HTTP round-trip would delay the submit itself.
+        if task_kind != "review_pr" or not _is_submit_pr_review_start(event):
+            return
+        asyncio.run_coroutine_threadsafe(
+            pr_status.publish_pr_status(
+                bindings.github,
+                settings=settings,
+                repo=inputs.repo.full_name,
+                sha=inputs.pr_head_sha,
+                phase="publishing",
+                tracker=inputs.status_tracker,
+            ),
+            loop,
+        )
+
     def _on_msg(event: MessageUpdateEvent) -> None:
         ev = event.assistant_message_event
         if isinstance(ev, dict) and ev.get("type") == "text_delta":
@@ -703,7 +750,21 @@ def _run_rpc_blocking(
             client.install_headless_ui()
             client.on_tool_execution_end(_on_tool_end)
             client.on_host_tool_completed(_on_host_tool_completed)
+            client.on_tool_execution_start(_on_tool_start)
             client.on_message_update(_on_msg)
+
+            if task_kind == "review_pr":
+                asyncio.run_coroutine_threadsafe(
+                    pr_status.publish_pr_status(
+                        bindings.github,
+                        settings=settings,
+                        repo=inputs.repo.full_name,
+                        sha=inputs.pr_head_sha,
+                        phase="reviewing",
+                        tracker=inputs.status_tracker,
+                    ),
+                    loop,
+                )
 
             phases = persona.seed_phases(task_kind)
             if phases:

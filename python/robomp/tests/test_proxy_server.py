@@ -637,6 +637,50 @@ async def test_close_issue_defaults_reason_to_completed(proxy_settings: Settings
     assert json.loads(captured["req"].content) == {"state": "closed", "state_reason": "completed"}
 
 
+async def test_commit_status_forwards_to_github(proxy_settings: Settings) -> None:
+    captured: dict[str, httpx.Request] = {}
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        captured["req"] = req
+        return httpx.Response(201, json={})
+
+    app = _build_app(proxy_settings, gh)
+    body = (
+        b'{"repo":"octo/widget","sha":"abc123","state":"pending","context":"robomp/pr-review","description":"Queued"}'
+    )
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/commit_status",
+            content=body,
+            headers={**_signed("POST", "/gh/v1/commit_status", body), "Content-Type": "application/json"},
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    req = captured["req"]
+    assert req.method == "POST"
+    assert req.url.path == "/repos/octo/widget/statuses/abc123"
+    import json
+
+    sent = json.loads(req.content)
+    assert sent == {
+        "state": "pending",
+        "context": "robomp/pr-review",
+        "description": "Queued",
+    }
+
+
+async def test_commit_status_rejects_bad_state(proxy_settings: Settings) -> None:
+    app = _build_app(proxy_settings, lambda req: httpx.Response(201, json={}))
+    body = b'{"repo":"octo/widget","sha":"abc123","state":"weird","context":"robomp/pr-review"}'
+    async with await _async_client(app) as client:
+        resp = await client.post(
+            "/gh/v1/commit_status",
+            content=body,
+            headers={**_signed("POST", "/gh/v1/commit_status", body), "Content-Type": "application/json"},
+        )
+    assert resp.status_code == 400
+
+
 async def test_open_pull_request(proxy_settings: Settings) -> None:
     captured: dict[str, httpx.Request] = {}
 

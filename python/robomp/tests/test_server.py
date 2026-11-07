@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -27,6 +29,9 @@ class _PausedPool:
     def __init__(self) -> None:
         self.started = False
         self.stopped = False
+        from robomp import pr_status
+
+        self.status_tracker = pr_status.StatusTracker()
 
     async def start(self) -> None:
         self.started = True
@@ -2184,6 +2189,15 @@ async def test_review_pr_skips_after_submitted_review(
     db = get_database(settings.sqlite_path)
     key = issue_key("octo/widget", 900)
     db.log_tool_call(issue_key=key, tool="submit_pr_review", args={"body": "done"}, result={"review_id": 12})
+    # The shortcut is head-scoped: the ledger must point at the CURRENT head.
+    db.upsert_issue(
+        key=key,
+        repo="octo/widget",
+        number=900,
+        state="reviewing",
+        pr_number=900,
+        last_reviewed_sha="abc12345",
+    )
     repo = RepoInfo(
         full_name="octo/widget", default_branch="main", clone_url="https://github.com/octo/widget.git", private=False
     )
@@ -2206,6 +2220,7 @@ async def test_review_pr_skips_after_submitted_review(
         state="open",
         author="alice",
         head_repo="alice/widget",
+        head_sha="abc12345",
     )
 
     async def _get_repo(self, repo_full: str):
@@ -2909,3 +2924,244 @@ def test_webhook_pr_conversation_does_not_cancel_pending_closure(settings: Setti
     assert row is not None
     assert row.state == "pending"
     close_database()
+
+
+# ---------- PR-review queued commit status ----------
+
+
+def _post_pr_opened(
+    client: TestClient,
+    *,
+    delivery: str,
+    user: str,
+    number: int,
+    sha: str,
+    draft: bool = False,
+    secret: str = "test-webhook-secret",
+):
+    payload = {
+        "action": "opened",
+        "pull_request": {
+            "number": number,
+            "state": "open",
+            "draft": draft,
+            "user": {"login": user},
+            "head": {"sha": sha},
+        },
+        "repository": {"full_name": "octo/widget"},
+    }
+    body = json.dumps(payload).encode()
+    return client.post(
+        "/webhook/github",
+        content=body,
+        headers=_signed_headers(secret, body, event="pull_request", delivery=delivery),
+    )
+
+
+def _status_recording_transport(captured: list[httpx.Request], *, delay_seconds: float = 0.0) -> httpx.MockTransport:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/repos/octo/widget/statuses/deadbeef":
+            if delay_seconds:
+                # Async sleep so the delay YIELDS the app loop — a sync
+                # `time.sleep` here would block it and prevent the webhook
+                # ack from returning before the (slow) status POST.
+                await asyncio.sleep(delay_seconds)
+            captured.append(request)
+            return httpx.Response(201, json={})
+        return httpx.Response(200, json={})
+
+    return httpx.MockTransport(handler)
+
+
+def _wait_for(condition, timeout: float = 10.0) -> None:
+    """Poll until `condition()` holds (the status POST runs as a background
+    task on the app's loop, which keeps running inside the TestClient)."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out waiting for background status post"
+        time.sleep(0.01)
+
+
+def test_webhook_queued_pr_review_posts_pending_status(settings: Settings) -> None:
+    settings.pr_review_status_enabled = True
+    captured: list[httpx.Request] = []
+    app = _create_app(settings)
+    with TestClient(app) as client:
+        _install_github_mock(app, _status_recording_transport(captured))
+        resp = _post_pr_opened(client, delivery="pr-1", user="alice", number=7, sha="deadbeef")
+        _wait_for(lambda: len(captured) == 1)
+    close_database()
+    assert resp.status_code == 202
+    assert resp.json()["state"] == "queued"
+    assert len(captured) == 1
+    body = json.loads(captured[0].content)
+    assert body["state"] == "pending"
+    assert body["context"] == "robomp/pr-review"
+
+
+def test_webhook_ack_does_not_wait_for_status_post(settings: Settings) -> None:
+    """F7: the 202 must come back BEFORE the (slow, retrying) status POST
+    completes — with 30s timeouts + backoff a status can take minutes."""
+    settings.pr_review_status_enabled = True
+    captured: list[httpx.Request] = []
+    app = _create_app(settings)
+    with TestClient(app) as client:
+        _install_github_mock(app, _status_recording_transport(captured, delay_seconds=0.5))
+        started = time.monotonic()
+        resp = _post_pr_opened(client, delivery="pr-1", user="alice", number=7, sha="deadbeef")
+        elapsed = time.monotonic() - started
+        assert captured == [], "status POST must not complete before the ack"
+        _wait_for(lambda: len(captured) == 1)
+    close_database()
+    assert resp.status_code == 202
+    assert elapsed < 0.4, f"webhook held open for the status POST ({elapsed:.2f}s)"
+
+
+def test_webhook_duplicate_pr_delivery_posts_no_second_status(settings: Settings) -> None:
+    settings.pr_review_status_enabled = True
+    captured: list[httpx.Request] = []
+    app = _create_app(settings)
+    with TestClient(app) as client:
+        _install_github_mock(app, _status_recording_transport(captured))
+        first = _post_pr_opened(client, delivery="pr-1", user="alice", number=7, sha="deadbeef")
+        _wait_for(lambda: len(captured) == 1)
+        second = _post_pr_opened(client, delivery="pr-1", user="alice", number=7, sha="deadbeef")
+        start = time.monotonic()
+        while len(captured) > 1 and time.monotonic() - start < 0.2:
+            time.sleep(0.01)
+    close_database()
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert len(captured) == 1
+
+
+def test_webhook_second_delivery_does_not_reset_active_review(settings: Settings) -> None:
+    """F3: a distinct webhook delivery for the same SHA while the first review
+    is IN FLIGHT must not clear the ladder and post `queued` over
+    `reviewing`. It only resets once the review has ended."""
+    from robomp import pr_status
+
+    settings.pr_review_status_enabled = True
+
+    captured: list[httpx.Request] = []
+    app = _create_app(settings)
+    with TestClient(app) as client:
+        _install_github_mock(app, _status_recording_transport(captured))
+        tracker = app.state.bag["status_tracker"]
+        tracker.begin_review("octo/widget", "deadbeef")
+        try:
+            _post_pr_opened(client, delivery="pr-1", user="alice", number=7, sha="deadbeef")
+            _wait_for(lambda: len(captured) == 1)
+
+            # The worker's in-flight ladder, run on the APP loop (the tracker's
+            # locks are bound to it) via the TestClient portal.
+            class _Rec:
+                async def create_commit_status(self, *a, **k):
+                    pass
+
+            client.portal.call(
+                lambda: pr_status.publish_pr_status(
+                    _Rec(),
+                    settings=app.state.bag["settings"],
+                    repo="octo/widget",
+                    sha="deadbeef",
+                    phase="reviewing",
+                    tracker=tracker,
+                )
+            )
+            # A distinct delivery for the same SHA: must land NOTHING new.
+            _post_pr_opened(client, delivery="pr-2", user="alice", number=7, sha="deadbeef")
+            start = time.monotonic()
+            while len(captured) > 1 and time.monotonic() - start < 0.2:
+                time.sleep(0.01)
+            assert len(captured) == 1, "webhook queued overwrote the in-flight review ladder"
+
+            # Once the review ends, the SAME delivery resets and posts again.
+            tracker.end_review("octo/widget", "deadbeef")
+            _post_pr_opened(client, delivery="pr-3", user="alice", number=7, sha="deadbeef")
+            _wait_for(lambda: len(captured) == 2)
+        finally:
+            tracker.end_review("octo/widget", "deadbeef")
+    close_database()
+
+
+def test_webhook_follow_on_delivery_reopens_terminal_ladder(settings: Settings) -> None:
+    """P2: a distinct delivery for the same SHA arriving while the first
+    review is active defers its `reset=None` (no rewind of the in-flight
+    ladder). When the first review ends terminal, the follow-on's
+    `begin_review` consumes the deferred reset, so the follow-on's
+    nonterminal phases land instead of being rank-skipped and leaving the
+    status stuck at the stale terminal state."""
+    from robomp import pr_status
+
+    settings.pr_review_status_enabled = True
+
+    captured: list[httpx.Request] = []
+    app = _create_app(settings)
+    with TestClient(app) as client:
+        _install_github_mock(app, _status_recording_transport(captured))
+        tracker = app.state.bag["status_tracker"]
+        tracker.begin_review("octo/widget", "deadbeef")
+        try:
+            _post_pr_opened(client, delivery="pr-1", user="alice", number=7, sha="deadbeef")
+            _wait_for(lambda: len(captured) == 1)
+
+            # First review's in-flight ladder ends terminal (app loop: the
+            # tracker's locks are bound to it). The APP's own github backend
+            # posts through the recording transport.
+            client.portal.call(
+                lambda: pr_status.publish_pr_status(
+                    app.state.bag["github"],
+                    settings=app.state.bag["settings"],
+                    repo="octo/widget",
+                    sha="deadbeef",
+                    phase="success",
+                    tracker=tracker,
+                )
+            )
+            _wait_for(lambda: len(captured) == 2)
+
+            # Follow-on delivery for the same SHA: its `queued` is
+            # rank-skipped against the terminal state and its reset is
+            # DEFERRED — nothing lands, the in-flight ladder is untouched.
+            _post_pr_opened(client, delivery="pr-2", user="alice", number=7, sha="deadbeef")
+            start = time.monotonic()
+            while len(captured) > 2 and time.monotonic() - start < 0.2:
+                time.sleep(0.01)
+            assert len(captured) == 2, "follow-on delivery rewrote the terminal ladder"
+            deadline = time.monotonic() + 10.0
+            while ("octo/widget", "deadbeef") not in tracker._reset_pending:
+                assert time.monotonic() < deadline, "timed out waiting for the follow-on's deferred reset flag"
+                time.sleep(0.01)
+
+            # First review ends; the follow-on's own bracket starts.
+            tracker.end_review("octo/widget", "deadbeef")
+            tracker.begin_review("octo/widget", "deadbeef")
+            client.portal.call(
+                lambda: pr_status.publish_pr_status(
+                    app.state.bag["github"],
+                    settings=app.state.bag["settings"],
+                    repo="octo/widget",
+                    sha="deadbeef",
+                    phase="preparing",
+                    tracker=tracker,
+                )
+            )
+            _wait_for(lambda: len(captured) == 3)
+        finally:
+            tracker.end_review("octo/widget", "deadbeef")
+    close_database()
+    body = json.loads(captured[2].content)
+    assert body["state"] == "pending", "follow-on's preparing never landed (ladder stayed terminal-stale)"
+
+
+def test_webhook_skipped_draft_pr_posts_no_status(settings: Settings) -> None:
+    captured: list[httpx.Request] = []
+    app = _create_app(settings)
+    with TestClient(app) as client:
+        _install_github_mock(app, _status_recording_transport(captured))
+        resp = _post_pr_opened(client, delivery="pr-3", user="alice", number=7, sha="deadbeef", draft=True)
+    close_database()
+    assert resp.status_code == 202
+    assert resp.json()["state"] == "skipped"
+    assert captured == []

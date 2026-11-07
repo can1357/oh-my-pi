@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     git_author_email: str = Field(..., alias="ROBOMP_GIT_AUTHOR_EMAIL")
     repo_allowlist_raw: str = Field("", alias="ROBOMP_REPO_ALLOWLIST")
     pr_review_enabled: bool = Field(True, alias="ROBOMP_PR_REVIEW_ENABLED")
+    # Off by default: posting requires commit-status write permission on the
+    # PAT, and a missing scope would 403 (logged, swallowed) on every phase.
+    pr_review_status_enabled: bool = Field(False, alias="ROBOMP_PR_REVIEW_STATUS_ENABLED")
 
     # Release sentinel
     release_sentinel_enabled: bool = Field(False, alias="ROBOMP_RELEASE_SENTINEL_ENABLED")
