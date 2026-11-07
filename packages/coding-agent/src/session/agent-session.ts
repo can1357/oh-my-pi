@@ -6724,13 +6724,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#maintenance.cancelSpeculation();
 		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();
-		this.#disconnectFromAgent();
-		// beginDispose() drained the rest; this catches registrations made during teardown.
-		for (const dispose of this.#disposers.splice(0)) dispose();
-		this.#eventListeners = [];
-		this.#runStateListeners.clear();
-		this.#ircWakeHoldListeners.clear();
-		this.#sessionChangeCallbacks.clear();
 
 		// A dispose triggered mid-turn (Ctrl-C / timeout / hard-killed subagent)
 		// only *signals* the agent loop via the earlier abort(); the loop and the
@@ -6757,6 +6750,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} catch (error) {
 			logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
 		}
+		// Forwarding stays connected through the drain above so a tool that
+		// settles inside it still reaches subscribers (issue #18450); detach now
+		// so events past the deadline are neither forwarded nor persisted.
+		this.#disconnectFromAgent();
+		// beginDispose() drained the rest; this catches registrations made during teardown.
+		for (const dispose of this.#disposers.splice(0)) dispose();
+		this.#eventListeners = [];
+		this.#runStateListeners.clear();
+		this.#ircWakeHoldListeners.clear();
+		this.#sessionChangeCallbacks.clear();
 
 		// Event handlers can reopen the append writer while they persist their
 		// terminal message; that pipeline has drained (or hit the deadline).

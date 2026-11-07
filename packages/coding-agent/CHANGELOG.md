@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Stopping a `--mode json` run with SIGTERM/SIGINT no longer drops the `tool_execution_end` of a tool that finishes during shutdown, and waits for buffered stdout so the last JSON record is not truncated ([#18450](https://github.com/can1357/oh-my-pi/issues/18450)).
 - A browser relay tab stays usable after a password manager's inline autofill menu opens in it; the call that opened the menu still fails once (reinstall the extension with `omp browser-relay install` and reload it) ([#16908](https://github.com/can1357/oh-my-pi/pull/16908) by [@will-bogusz](https://github.com/will-bogusz))
 - A `%%bash` cell in Python eval no longer prints its exit status (a stray `0`) after the command's output; a failing cell reports `%%bash: exit status N` on stderr instead.
 - Reusing an already running `omp stats` dashboard now exits successfully without stopping the existing server ([#18443](https://github.com/can1357/oh-my-pi/issues/18443)).
