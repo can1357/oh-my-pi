@@ -519,6 +519,8 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/x-www-form-urlencoded",
+				// GitHub's token endpoint replies form-encoded unless JSON is requested.
+				Accept: "application/json",
 			},
 			body: params.toString(),
 			signal: this.ctrl.signal,
@@ -830,7 +832,7 @@ export async function refreshMCPOAuthToken(
 
 	const response = await fetchImpl(tokenUrl, {
 		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
 		body: params.toString(),
 		signal: optsFromTrailing?.signal,
 	});
