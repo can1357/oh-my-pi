@@ -335,6 +335,7 @@ Slash commands shift how a whole session runs:
 
 - `/vibe` — enter [Vibe mode](docs/vibe-mode.md): act as a director driving persistent `fast`/`good` worker sessions with a `read`-only toolset.
 - `/fresh` — reset the provider stream state (stale prompt cache, wedged stream) without changing the local transcript. See [Session operations](docs/session-operations-export-share-fork-resume.md#fresh).
+- `/system-prompt` edits the workspace or global system prompt. See [System prompt customization](docs/system-prompt-customization.md#edit-in-an-interactive-session).
 
 ## Sixty-plus providers, a thousand models, _one /model away_.
 

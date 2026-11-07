@@ -215,7 +215,7 @@ describe("system prompt Handlebars templates", () => {
 		});
 	});
 
-	it("warns on an empty discovered template and falls back to the discovered literal", async () => {
+	it("keeps same-scope literal precedence over an empty template", async () => {
 		await withDiscoveryHome(async ({ cwd, projectConfig }) => {
 			await Bun.write(path.join(projectConfig, "SYSTEM_TEMPLATE.md"), " \n\t");
 			await Bun.write(path.join(projectConfig, "SYSTEM.md"), "fallback literal prompt");
@@ -224,6 +224,29 @@ describe("system prompt Handlebars templates", () => {
 			const text = result.systemPrompt.join("\n\n");
 			expect(text).toContain("fallback literal prompt");
 			expect(text).not.toContain("§ Tool Policy");
+		});
+	});
+
+	it.each(["SYSTEM.md", "SYSTEM_TEMPLATE.md"])(
+		"an empty workspace %s masks global and retains live context",
+		async filename => {
+			await withDiscoveryHome(async ({ cwd, projectConfig, userConfig }) => {
+				await Bun.write(path.join(userConfig, "SYSTEM.md"), "global instructions");
+				await Bun.write(path.join(projectConfig, filename), "");
+				const result = await buildSystemPrompt(options(cwd, { resolvedAppendSystemPrompt: "live append" }));
+				const text = result.systemPrompt.join("\n");
+				expect(text).not.toContain("global instructions");
+				expect(result.systemPrompt[0].trim()).toBe("");
+				expect(text).toContain("<project-context>");
+				expect(text).toContain("live append");
+			});
+		},
+	);
+
+	it("fails closed for strict discovered templates without changing SDK fallback behavior", async () => {
+		await withDiscoveryHome(async ({ cwd, projectConfig }) => {
+			await Bun.write(path.join(projectConfig, "SYSTEM_TEMPLATE.md"), "{{#if eagerTasks}}");
+			await expect(buildSystemPrompt(options(cwd, { strictSystemPromptTemplates: true }))).rejects.toThrow();
 		});
 	});
 
@@ -290,6 +313,19 @@ describe("system prompt Handlebars templates", () => {
 		expect(result.xdevCatalogNames).toEqual(["fetch"]);
 	});
 
+	it("does not claim mounted catalog delivery from a rule in an empty literal base", async () => {
+		using tempDir = TempDir.createSync("@omp-system-prompt-empty-literal-catalog-");
+		const result = await buildSystemPrompt(
+			options(tempDir.path(), {
+				resolvedCustomPrompt: "",
+				xdevTools: [{ name: "fetch", summary: "fetches a source" }],
+				alwaysApplyRules: [{ name: "reference", path: "reference.md", content: "Read xd://fetch when needed." }],
+			}),
+		);
+		expect(result.systemPrompt[0]).toContain("xd://fetch");
+		expect(result.xdevCatalogNames).toBeUndefined();
+	});
+
 	it("does not recursively render Handlebars syntax contained in inserted data", async () => {
 		using tempDir = TempDir.createSync("@omp-system-prompt-template-literal-");
 		const inserted = "literal data {{eagerTasks}}";
@@ -326,17 +362,16 @@ describe("system prompt Handlebars templates", () => {
 		).rejects.toThrow("systemPromptTemplate cannot be combined with a literal custom system prompt");
 	});
 
-	it("surfaces malformed and empty explicit templates", async () => {
+	it("rejects malformed explicit templates but preserves intentionally empty bases", async () => {
 		using tempDir = TempDir.createSync("@omp-system-prompt-template-invalid-");
 		await expect(
 			buildSystemPrompt(options(tempDir.path(), { systemPromptTemplate: "{{#if eagerTasks}}" })),
 		).rejects.toThrow("Invalid system prompt template");
-		await expect(buildSystemPrompt(options(tempDir.path(), { systemPromptTemplate: "" }))).rejects.toThrow(
-			"System prompt template must not be empty",
-		);
-		await expect(buildSystemPrompt(options(tempDir.path(), { systemPromptTemplate: " \n\t" }))).rejects.toThrow(
-			"System prompt template must not be empty",
-		);
+		for (const source of ["", " \n\t"]) {
+			const result = await buildSystemPrompt(options(tempDir.path(), { systemPromptTemplate: source }));
+			expect(result.systemPrompt[0].trim()).toBe("");
+			expect(result.systemPrompt.join("\n")).toContain("<project-context>");
+		}
 	});
 
 	it("keeps an existing literal custom prompt unexpanded", async () => {

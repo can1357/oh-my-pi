@@ -258,6 +258,7 @@ import {
 	buildSystemPrompt as buildSystemPromptInternal,
 	cfgSystemPromptInputs,
 	composeAppendPrompt,
+	loadAppendSystemPrompt,
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
 	withoutAgentsMd,
@@ -699,6 +700,8 @@ export interface CreateAgentSessionOptions {
 	systemPrompt?: string | string[] | ((defaultPrompt: string[]) => string | string[]);
 	/** Raw Handlebars template replacing the bundled default system prompt rendering. */
 	systemPromptTemplate?: string;
+	/** Fail closed on malformed discovered templates, as CLI sessions do. */
+	strictSystemPromptTemplates?: boolean;
 	/** Already-loaded custom prompt text rendered through the bundled custom system prompt template. */
 	customSystemPrompt?: string;
 	/** Already-loaded text appended through the bundled system prompt templates. */
@@ -4368,7 +4371,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					appendParts.push(`### ${srvName}\n${truncated}`);
 				}
 			}
-			const appendPrompt = composeAppendPrompt(appendParts, options.appendSystemPrompt);
+			const userAppend =
+				options.appendSystemPrompt ??
+				(agentKind === "main" ? (await loadAppendSystemPrompt(promptCwd, agentDir))?.content : undefined);
+			const appendPrompt = composeAppendPrompt(appendParts, userAppend);
 			// Owned/in-band tool dialects (non-native) require the full functions-
 			// namespace catalog; native tool calling lets the compact name list suffice.
 			const nativeTools = resolveDialect(cfgToolsFormat.get(settings), agent?.state.model ?? model) === undefined;
@@ -4395,6 +4401,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
+				agentDir,
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				noContextFiles: options.noContextFiles,
 				excludeAgentsMd,
@@ -4402,6 +4409,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				xdevDocs: xdevPromptDocs ? renderXdevPromptDocs(xdevPromptDocs, routedCatalogNames) : "",
 				resolvedCustomPrompt: options.customSystemPrompt,
 				systemPromptTemplate: options.systemPromptTemplate,
+				strictSystemPromptTemplates: options.strictSystemPromptTemplates,
 				skills: cfgSkillful.get(settings) ? (session?.skills ?? skills) : [],
 				skillDescriptions,
 				contextFiles,

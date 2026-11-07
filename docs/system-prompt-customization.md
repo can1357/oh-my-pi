@@ -17,6 +17,20 @@ The provider-facing prompt is an ordered block array. Static, cwd-independent bl
 
 On Anthropic, the system cache breakpoint lands on the last block before the first `<project-context>` (or `<memories>`) block, so sessions and subagent spawns of the same agent in different directories (for example one git worktree per task) share the static prompt as a cached prefix. Other providers receive the same ordered blocks.
 
+## Edit in an interactive session
+
+Use `/system-prompt` to choose Workspace or Global and edit the base prompt.
+The command also accepts an action and scope:
+
+- `/system-prompt edit local` or `/system-prompt local` edits the workspace base.
+- `/system-prompt edit global` or `/system-prompt global` edits the global base.
+- `/system-prompt append local` or `/system-prompt append global` edits plain append text.
+- `/system-prompt reset local` or `/system-prompt reset global` removes the selected base override. The next available source takes effect in normal precedence order, including a same-scope alternative if one exists. Reset leaves append text unchanged.
+
+The editor opens the selected scope's base source if it exists. Otherwise it starts from the inherited source or the bundled raw template. A plain `SYSTEM.md` stays plain text, including when inherited into a new scope. A `SYSTEM_TEMPLATE.md` contains raw Handlebars source. The editor does not use a rendered prompt dump, so template variables remain live. Save an empty base or append to keep an empty override; cancel to leave the file unchanged.
+
+Workspace saves use `<cwd>/.omp`; global saves use the active agent directory, including the selected profile. A workspace override takes precedence over a global override. Explicit CLI and SDK inputs take precedence over saved files. Successful active changes refresh the current session and persist for future sessions.
+
 ## Inputs and precedence
 
 | Input                                   | Source                 | Effect                                                                                                                             |
@@ -32,13 +46,13 @@ On Anthropic, the system cache breakpoint lands on the last block before the fir
 
 Programmatic API options use separate contracts, not CLI flags; see [Programmatic API options](#programmatic-api-options).
 
-That empty literal suppresses discovered `SYSTEM.md` and `SYSTEM_TEMPLATE.md`, but does not disable OMP-generated instructions; only the programmatic `CreateAgentSessionOptions.systemPrompt` full-replacement option does that.
+That empty literal selects the plain custom route and suppresses discovered `SYSTEM.md` and `SYSTEM_TEMPLATE.md`. The plain custom route retains generated sections; only the programmatic `CreateAgentSessionOptions.systemPrompt` full-replacement option replaces every generated block.
 
 Without an explicit custom source, discovery is project-first, then user-level. Within each scope a literal beats a template: project `SYSTEM.md` beats project `SYSTEM_TEMPLATE.md`, which beats user `SYSTEM.md`, which beats user `SYSTEM_TEMPLATE.md`. `SYSTEM.md` is the long-established override, so an existing literal keeps working until its author deliberately removes it in favor of a template. Both filenames resolve through the same capability providers, so ancestor walk-up (repo-root `.omp` from a nested cwd) and `.agent` / `.agents` directories apply to templates exactly as they do to literals. `.claude`, `.codex`, and `.gemini` project bases resolve at the launch cwd. Foreign user bases require `enabledProviders` opt-in; `CLAUDE_CONFIG_DIR` also opts in and relocates the Claude user base.
 
-The native user path follows the active profile: with `omp --profile work`, `~/.omp/agent` becomes `~/.omp/profiles/work/agent`. `PI_CONFIG_DIR` changes the native config-directory name. Capability discovery for `SYSTEM.md` and `SYSTEM_TEMPLATE.md` uses `getAgentDir()` and therefore honors `PI_CODING_AGENT_DIR`. The shared config-base lookup for `APPEND_SYSTEM.md` and `TITLE_SYSTEM.md` does not use that variable as an arbitrary replacement base. An explicit CLI flag or programmatic API option still wins over every discovered file. See [Configuration usage](./config-usage.md) for the shared config-directory contract.
+The native user path follows the active profile: with `omp --profile work`, `~/.omp/agent` becomes `~/.omp/profiles/work/agent`. `PI_CONFIG_DIR` changes the native config-directory name. Discovery for `SYSTEM.md`, `SYSTEM_TEMPLATE.md`, and `APPEND_SYSTEM.md` uses the active agent directory, including `PI_CODING_AGENT_DIR`. The shared config-base lookup for `TITLE_SYSTEM.md` does not use that variable as an arbitrary replacement base. An explicit CLI flag or programmatic API option still wins over every discovered file. See [Configuration usage](./config-usage.md) for the shared config-directory contract.
 
-`--system-prompt-template <path>` is a strict file path: a missing, unreadable, empty, or malformed template is an error, never a literal prompt. An empty discovered `SYSTEM_TEMPLATE.md` is skipped (the discovered literal, if any, already won discovery). Malformed templates discovered directly by `buildSystemPrompt()` warn and render the bundled prompt. CLI discovery forwards the loaded source as an explicit SDK template, so a malformed discovered template fails CLI startup. A same-scope literal always wins discovery, so a malformed template beside a literal is never rendered. Discovered templates are read once through capability discovery; later runtime rebuilds re-render that in-memory source.
+`--system-prompt-template <path>` is a strict file path: a missing, unreadable, or malformed template is an error, never a literal prompt. An empty template is a valid override. Malformed templates discovered directly by `buildSystemPrompt()` warn and render the bundled prompt; malformed CLI-discovered templates fail startup. A same-scope literal always wins discovery, so a malformed template beside a literal is never rendered.
 
 ### Text or file resolution
 
@@ -46,7 +60,7 @@ The existing plain-text flags keep their resolution rules. For a single-line `--
 
 ## What plain `SYSTEM.md` replaces
 
-`SYSTEM.md` does not become a raw, sole system message. The CLI stores it as `CreateAgentSessionOptions.customSystemPrompt`, and `buildSystemPrompt` renders `custom-system-prompt.md` instead of the default `system-prompt.md`.
+`SYSTEM.md` does not become a raw, sole system message. `buildSystemPrompt` renders `custom-system-prompt.md` instead of the default `system-prompt.md`.
 
 The plain custom template keeps these generated surfaces:
 
@@ -106,7 +120,7 @@ Use effective session settings and live tool data rather than copying today's re
 
 The template has the same helper set used by the bundled prompt (`if`, `each`, `unless`, `list`, `when`, `has`, `ifAny`, `includes`, and the other registered helpers). No extra helper is created for a user file. Values inserted into a template are data, not a second template pass: Handlebars-looking text inside `xdevDocs`, context files, tool descriptions, or other values is not recursively rendered.
 
-Treat both sides of this boundary as prompt input. Protect template files like other system-level configuration, and review workspace, extension, MCP, and mounted-device descriptions before treating them as trusted policy; dynamic xdev metadata can be third-party text. The CLI reads a template file once at launch. Programmatic raw source is already in memory. Later runtime prompt rebuilds re-render that in-memory source with current live data and settings, but do not re-read a changed file; restart OMP after editing the file.
+Treat both sides of this boundary as prompt input. Protect template files like other system-level configuration, and review workspace, extension, MCP, and mounted-device descriptions before treating them as trusted policy; dynamic xdev metadata can be third-party text. Programmatic raw source is already in memory. Discovered files are read when the prompt refreshes; `/system-prompt` refreshes the current session after a save.
 
 ## Plain-text and template contracts
 
@@ -124,7 +138,7 @@ on
 
 those characters reach the model literally. Internal values such as `cwd`, `skills`, `rules`, and `toolRefs` remain private implementation details for the plain route. The calendar date is not exposed as a template value — it rides a per-request reminder on the first user turn together with the session cwd.
 
-Only the opt-in `SYSTEM_TEMPLATE.md` / `--system-prompt-template` / programmatic `CreateAgentSessionOptions.systemPromptTemplate` and `buildSystemPrompt({ systemPromptTemplate })` routes compile Handlebars. An explicit malformed or empty template fails clearly and is never downgraded to plain text. Discovered empty templates are skipped. Malformed templates discovered by `buildSystemPrompt()` warn and fall back to the bundled prompt; CLI-discovered source is forwarded as explicit SDK input and therefore fails on malformed Handlebars.
+Only the opt-in `SYSTEM_TEMPLATE.md` / `--system-prompt-template` / programmatic `CreateAgentSessionOptions.systemPromptTemplate` and `buildSystemPrompt({ systemPromptTemplate })` routes compile Handlebars. An empty template is valid. An explicit malformed template fails clearly and is never downgraded to plain text. Malformed templates discovered by `buildSystemPrompt()` warn and fall back to the bundled prompt.
 
 ## Recipes
 
@@ -212,6 +226,8 @@ Generated title output has an enforced normalization contract even with a custom
 ## Programmatic API options
 
 Programmatic API callers use separate options, not CLI flags: `CreateAgentSessionOptions.systemPromptTemplate` and `buildSystemPrompt({ systemPromptTemplate })` take raw Handlebars source; `CreateAgentSessionOptions.customSystemPrompt` is already-loaded literal text, while `buildSystemPrompt`'s `customPrompt` is plain text with path-or-literal resolution (or `resolvedCustomPrompt` is already-loaded text).
+
+SDK callers can set `strictSystemPromptTemplates: true` to reject malformed discovered templates, as CLI sessions do. Without it, malformed discovered templates warn and fall back to the bundled prompt.
 
 A template source and literal custom prompt cannot be combined: `systemPromptTemplate` conflicts with `customSystemPrompt` in `CreateAgentSessionOptions`, and with `customPrompt` / `resolvedCustomPrompt` in `buildSystemPrompt`. These combinations fail clearly instead of silently choosing one.
 

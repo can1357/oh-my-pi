@@ -10,6 +10,7 @@ import { renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
 import type { DelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import {
 	$env,
+	CONFIG_DIR_NAME,
 	getAgentDir,
 	getProjectDir,
 	hasFsCode,
@@ -20,7 +21,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
-import { findConfigFile } from "./config";
+import { findConfigFile, getConfigDirs } from "./config";
 import type { SkillsSettings } from "./extensibility/settings";
 import type { Personality } from "./session/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
@@ -266,20 +267,41 @@ export interface SystemPromptOverride {
  * and `.agent/.agents` coverage come from the capability providers, so a
  * repo-root file wins from a nested cwd.
  */
-export async function discoverSystemPromptOverride(cwd?: string): Promise<SystemPromptOverride | undefined> {
+export async function discoverSystemPromptOverride(
+	cwd?: string,
+	agentDir?: string,
+	scope?: "project" | "user",
+): Promise<SystemPromptOverride | undefined> {
 	const result = await loadCapability<SystemPromptFile>(systemPromptCapability.id, {
 		cwd: cwd ?? getProjectDir(),
+		agentDir,
 	});
-	for (const level of ["project", "user"] as const) {
+	for (const level of scope ? [scope] : (["project", "user"] as const)) {
 		const text = result.items.find(item => item.level === level && (item.kind ?? "text") === "text");
 		if (text) return { kind: "text", path: text.path, content: text.content };
 		const template = result.items.find(item => item.level === level && (item.kind ?? "text") === "template");
 		if (template) {
-			if (!template.content.trim()) {
-				logger.warn("Ignoring empty system prompt template", { path: template.path });
-				continue;
-			}
 			return { kind: "template", path: template.path, content: template.content };
+		}
+	}
+	return undefined;
+}
+
+export async function loadAppendSystemPrompt(
+	cwd: string = getProjectDir(),
+	agentDir: string = getAgentDir(),
+	scope?: "project" | "user",
+): Promise<{ path: string; content: string } | undefined> {
+	const dirs = getConfigDirs("", { cwd });
+	for (const level of scope ? [scope] : (["project", "user"] as const)) {
+		for (const dir of dirs.filter(dir => dir.level === level)) {
+			const base = level === "user" && dir.source === CONFIG_DIR_NAME ? agentDir : dir.path;
+			const filePath = path.join(base, "APPEND_SYSTEM.md");
+			try {
+				return { path: filePath, content: await Bun.file(filePath).text() };
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
+			}
 		}
 	}
 	return undefined;
@@ -287,11 +309,7 @@ export async function discoverSystemPromptOverride(cwd?: string): Promise<System
 
 /** Unlike literal prompt inputs, explicit template paths never fall back to inline text. */
 export async function loadSystemPromptTemplateFile(filePath: string): Promise<string> {
-	const text = await Bun.file(filePath).text();
-	if (!text.trim()) {
-		throw new Error(`System prompt template must not be empty: ${filePath}`);
-	}
-	return text;
+	return Bun.file(filePath).text();
 }
 
 /** Resolve input as file path or literal string */
@@ -506,12 +524,16 @@ export function projectSystemPromptToolMetadata(
 }
 
 export interface BuildSystemPromptOptions {
+	/** Active session's profile or SDK-specific native config directory. */
+	agentDir?: string;
 	/** Custom system prompt (replaces default). */
 	customPrompt?: string;
 	/** Already-loaded custom system prompt text; bypasses path resolution. */
 	resolvedCustomPrompt?: string;
 	/** Raw Handlebars template rendered with the default prompt's live context. */
 	systemPromptTemplate?: string;
+	/** CLI sessions fail closed instead of falling back after a discovered template error. */
+	strictSystemPromptTemplates?: boolean;
 	/** Tools to include in prompt. */
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
@@ -719,7 +741,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		throw new Error("systemPromptTemplate cannot be combined with a literal custom system prompt");
 	}
 	if (resolvedSystemPromptTemplate === undefined && !hasExplicitCustomPrompt) {
-		const override = await discoverSystemPromptOverride(resolvedCwd);
+		const override = await discoverSystemPromptOverride(resolvedCwd, options.agentDir);
 		if (override?.kind === "template" && override.content !== undefined) {
 			resolvedSystemPromptTemplate = override.content;
 		} else if (override?.content !== undefined) {
@@ -728,15 +750,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	}
 	const hasDiscoveredTemplate =
 		resolvedSystemPromptTemplate !== undefined && options.systemPromptTemplate === undefined;
-	if (resolvedSystemPromptTemplate !== undefined && !resolvedSystemPromptTemplate.trim()) {
-		if (hasDiscoveredTemplate) {
-			logger.warn("Ignoring empty discovered system prompt template; using the bundled prompt");
-			resolvedSystemPromptTemplate = undefined;
-		} else {
-			throw new Error("System prompt template must not be empty");
-		}
-	}
-
 	const prepDefaults = {
 		resolvedCustomPrompt: undefined as string | undefined,
 		resolvedAppendPrompt: undefined as string | undefined,
@@ -1047,15 +1060,16 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		writeTransportOnly,
 		subagent,
 	};
-	const selectedTemplate = resolvedCustomPrompt
-		? customSystemPromptTemplate
-		: (resolvedSystemPromptTemplate ?? systemPromptTemplate);
+	const selectedTemplate =
+		resolvedCustomPrompt !== undefined
+			? customSystemPromptTemplate
+			: (resolvedSystemPromptTemplate ?? systemPromptTemplate);
 	let rendered: string;
 	try {
 		rendered = prompt.render(selectedTemplate, data);
 	} catch (error) {
 		if (resolvedSystemPromptTemplate === undefined) throw error;
-		if (!hasDiscoveredTemplate) {
+		if (!hasDiscoveredTemplate || options.strictSystemPromptTemplates) {
 			throw new Error(`Invalid system prompt template: ${String(error)}`, { cause: error });
 		}
 		logger.warn("Ignoring invalid discovered system prompt template; using the bundled prompt", {
@@ -1085,7 +1099,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// section, so a template that references {{xdevDocs}} keeps mount-notice
 	// dedupe while one that omits it stays honest.
 	const xdevCatalogNames =
-		!resolvedCustomPrompt && xdevTools.length > 0 && rendered.includes("xd://")
+		resolvedCustomPrompt === undefined && xdevTools.length > 0 && rendered.includes("xd://")
 			? xdevTools.map(mounted => mounted.name)
 			: undefined;
 	return { systemPrompt, xdevCatalogNames };

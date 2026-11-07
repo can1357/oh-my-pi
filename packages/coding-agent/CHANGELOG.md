@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Edit, append to, or reset workspace and global system prompts with `/system-prompt` ([#18300](https://github.com/can1357/oh-my-pi/pull/18300) by [@ChownYourLife](https://github.com/ChownYourLife))
+
 ### Fixed
 
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))

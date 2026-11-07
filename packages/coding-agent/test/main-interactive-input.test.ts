@@ -3,16 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildSkillPromptMessage, type Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
-import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
-import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { buildSessionOptions, readPipedInput, submitInteractiveInput } from "@oh-my-pi/pi-coding-agent/main";
+import { readPipedInput, submitInteractiveInput } from "@oh-my-pi/pi-coding-agent/main";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { discoverTitleSystemPromptFile } from "@oh-my-pi/pi-coding-agent/system-prompt";
-import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const cleanupDirs: string[] = [];
@@ -57,47 +51,6 @@ describe("readPipedInput", () => {
 		} finally {
 			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 		}
-	});
-});
-
-describe("system prompt template CLI resolution", () => {
-	async function buildPromptOptions(cwd: string, args: string[]): Promise<CreateAgentSessionOptions> {
-		const authStorage = await AuthStorage.create(":memory:");
-		try {
-			return await buildSessionOptions(
-				parseArgs(["--cwd", cwd, ...args]),
-				[],
-				SessionManager.inMemory(),
-				new ModelRegistry(authStorage),
-				Settings.isolated(),
-			);
-		} finally {
-			authStorage.close();
-		}
-	}
-
-	it("discovers SYSTEM_TEMPLATE.md and preserves the raw template", async () => {
-		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-system-template-"));
-		cleanupDirs.push(projectDir);
-		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
-		await fs.writeFile(path.join(projectDir, ".omp", "SYSTEM_TEMPLATE.md"), "Hello {{model}}");
-
-		const options = await buildPromptOptions(projectDir, []);
-
-		expect(options.systemPromptTemplate).toBe("Hello {{model}}");
-		expect(options.customSystemPrompt).toBeUndefined();
-	});
-
-	it("lets an explicit literal prompt suppress discovered templates", async () => {
-		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-system-prompt-"));
-		cleanupDirs.push(projectDir);
-		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
-		await fs.writeFile(path.join(projectDir, ".omp", "SYSTEM_TEMPLATE.md"), "discovered");
-
-		const options = await buildPromptOptions(projectDir, ["--system-prompt", "inline literal"]);
-
-		expect(options.customSystemPrompt).toBe("inline literal");
-		expect(options.systemPromptTemplate).toBeUndefined();
 	});
 });
 

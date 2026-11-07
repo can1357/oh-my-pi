@@ -39,6 +39,7 @@ import {
 import { StatsNotice } from "@oh-my-pi/pi-tui/overlays/stats-notice";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
+import { handleSystemPromptCommand } from "./helpers/system-prompt";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
 
 async function handleUsageResetCommand(
@@ -565,6 +566,24 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: (_command, runtime) => {
 			runtime.ctx.handleContextCommand();
 			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "system-prompt",
+		icon: "pencil",
+		description: "Edit base system prompt or append instructions; reset removes only the base override",
+		allowArgs: true,
+		subcommandOptional: true,
+		subcommands: [
+			{ name: "edit", description: "Edit raw base instructions", usage: "[local|global]" },
+			{ name: "append", description: "Edit plain appended instructions", usage: "[local|global]" },
+			{ name: "reset", description: "Remove only the saved base override", usage: "[local|global]" },
+			{ name: "local", description: "Edit workspace base instructions" },
+			{ name: "global", description: "Edit global base instructions" },
+		],
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			await handleSystemPromptCommand(command.args, runtime.ctx);
 		},
 	},
 	{
