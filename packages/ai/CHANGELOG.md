@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A 429 or 402 worded like a context overflow (Bedrock's "429 Too many tokens, please wait…") is treated as a rate limit, so it retries and walks the fallback chain instead of compacting ([#18345](https://github.com/can1357/oh-my-pi/pull/18345) by [@nick-maderight](https://github.com/nick-maderight))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

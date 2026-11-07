@@ -4083,10 +4083,7 @@ describe("AgentSession retry fallback", () => {
 			primaryAttempts: 1,
 		},
 		{
-			// Bedrock's per-minute throttle phrases its 429 with "Too many tokens",
-			// which the overflow text patterns also match. The status must veto the
-			// overflow flag or the turn skips retry and the chain for a compaction
-			// that cannot clear a rate cap.
+			// "Too many tokens" on a 429 is a throttle, not overflow: it walks the chain.
 			name: "a Bedrock 429 token-cap body with retry.rateLimitWalksChain on",
 			failure: () =>
 				AIError.finalize(

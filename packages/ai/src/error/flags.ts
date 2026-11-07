@@ -647,12 +647,9 @@ function classifyText(
 	let kinds = 0;
 	if (errorMessage) {
 		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
-		// A rate-limit status (429 or 402) proves a throughput or quota decision, never
-		// window excess. Providers phrase per-minute token caps with the same "tokens"
-		// wording the overflow patterns match (Bedrock: "429 Too many tokens, please
-		// wait before trying again. (type=rate_limit_error param=rate_limit_exceeded)").
-		// Flagging it as overflow skips retry and the fallback chain for a compaction
-		// that cannot clear a rate cap. The status vetoes the text match.
+		// A 429/402 is a throughput or quota decision, never window excess, even when
+		// worded like one (Bedrock: "429 Too many tokens, please wait…"): overflow would
+		// skip retry and the fallback chain for a compaction that cannot clear a rate cap.
 		if (matchesOverflowText(errorMessage) && !isUsageLimitStatus(statusClean)) kinds |= Flag.ContextOverflow;
 		if (matchesPayloadRejectionText(errorMessage)) kinds |= Flag.PayloadRejected;
 		if (isMalformedFunctionCallText(errorMessage)) kinds |= Flag.MalformedFunctionCall;
@@ -1072,13 +1069,14 @@ export function isUsageBackedContextOverflow(message: ContextOverflowMessage, co
 export function isContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
 	if (is(message.errorId, Flag.ContextOverflow)) return true;
 	if (isUsageBackedContextOverflow(message, contextWindow)) return true;
-	// A rate-limit status vetoes the text arm the way classifyText vetoes the flag:
-	// a 429 or 402 body with "tokens" wording reports a throughput cap. A message
-	// without a status field still carries it in the text ("429 Too many tokens").
+	if (message.stopReason !== "error" || !message.errorMessage || !matchesOverflowText(message.errorMessage)) {
+		return false;
+	}
+	// A rate-limit status (field, raw-status id, or the text's own "429") vetoes
+	// the text arm, as in classifyText: "tokens" wording on a 429/402 is a throughput cap.
 	const errorStatus =
-		message.errorStatus ?? statusFromId(message.errorId) ?? status({ message: message.errorMessage ?? "" });
-	if (isUsageLimitStatus(errorStatus)) return false;
-	return message.stopReason === "error" && !!message.errorMessage && matchesOverflowText(message.errorMessage);
+		message.errorStatus ?? statusFromId(message.errorId) ?? status({ message: message.errorMessage });
+	return !isUsageLimitStatus(errorStatus);
 }
 
 /** HTTP 413 byte/media rejection (#9235); may co-occur with {@link isContextOverflow} for bare `413 (no body)`.
