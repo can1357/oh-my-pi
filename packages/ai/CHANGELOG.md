@@ -6,7 +6,6 @@
 
 - Added Zed Hosted Models provider support (`zed-hosted`) with OAuth sign-in and streaming NDJSON wire protocol ([#18432](https://github.com/can1357/oh-my-pi/pull/18432) by [@bilkis0987](https://github.com/bilkis0987))
 
-### Fixed
 ## [18.17.0] - 2026-11-06
 
 ### Added

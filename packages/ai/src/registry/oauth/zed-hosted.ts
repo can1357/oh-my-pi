@@ -23,6 +23,10 @@ const PRIVATE_KEY_PREFIX = "zed-rsa-pkcs1:";
 function b64urlPadded(value: Buffer): string {
 	return value.toString("base64").replace(/\+/g, "-").replace(/\//g, "_");
 }
+function serializeCallbackState(state: unknown): string {
+	return JSON.stringify(state).replaceAll("<", "\\u003c");
+}
+
 
 export function encodeZedPrivateKeyVerifier(privateKeyPem: string): string {
 	return `${PRIVATE_KEY_PREFIX}${Buffer.from(privateKeyPem).toString("base64url")}`;
@@ -184,7 +188,7 @@ export async function loginZedHostedHook(ctrl: OAuthController): Promise<OAuthCr
 				});
 				return new Response(
 					(templateHtml as unknown as string).replaceAll("__OAUTH_STATE__", () =>
-						JSON.stringify({ ok: true, provider: "zed-hosted" }),
+						serializeCallbackState({ ok: true, provider: "zed-hosted" }),
 					),
 					{
 						status: 200,
@@ -195,7 +199,7 @@ export async function loginZedHostedHook(ctrl: OAuthController): Promise<OAuthCr
 				const message = err instanceof Error ? err.message : String(err);
 				return new Response(
 					(templateHtml as unknown as string).replaceAll("__OAUTH_STATE__", () =>
-						JSON.stringify({ ok: false, error: message }),
+						serializeCallbackState({ ok: false, error: message }),
 					),
 					{
 						status: 400,

@@ -243,8 +243,21 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			return "devin:models-v3";
 		case "zed-hosted": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
-			const apiKey = options.apiKey ?? "";
-			const scope = `${apiKey}\u0000${baseUrl}`;
+			let scopeKey = options.apiKey ?? "";
+			if (scopeKey.trim().startsWith("{")) {
+				try {
+					const parsed: unknown = JSON.parse(scopeKey);
+					if (
+						typeof parsed === "object" &&
+						parsed !== null &&
+						"accountId" in parsed &&
+						typeof (parsed as { accountId?: unknown }).accountId === "string"
+					) {
+						scopeKey = `account:${(parsed as { accountId: string }).accountId}`;
+					}
+				} catch {}
+			}
+			const scope = `${scopeKey}\u0000${baseUrl}`;
 			return `zed-hosted:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		default:
