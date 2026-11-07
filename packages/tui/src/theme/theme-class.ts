@@ -3,6 +3,8 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
 import {
+	ANSI_COLOR_INDEX,
+	type AnsiColor,
 	type ColorMode,
 	isValidThemeColor,
 	OPTIONAL_THEME_COLOR_RECORD,
@@ -138,9 +140,19 @@ const LANG_BRAND_COLORS: Partial<Record<SymbolKey, string>> = {
 const BACKGROUND_RESET_PATTERN = /\x1b\[(?:0|49)m/g;
 const FOREGROUND_RESET_PATTERN = /\x1b\[(?:0|39)m/g;
 
+/**
+ * Color `text` with the foreground `ansi`, restoring it after every nested reset so the rest of `text`
+ * keeps it (`fg("dim", `${fg("success", "+2")} more`)`); only the foreground is reset at the end.
+ */
+function wrapForeground(ansi: string, text: string): string {
+	const body = text.includes("\x1b[") ? text.replace(FOREGROUND_RESET_PATTERN, `$&${ansi}`) : text;
+	return `${ansi}${body}\x1b[39m`;
+}
+
 // Prebuilt stylers: each `chalk.<style>` access builds a fresh builder. Builders share the
 // root chalk context, so later `chalk.level` changes still apply.
 const boldStyler = chalk.bold;
+const faintStyler = chalk.dim;
 const italicStyler = chalk.italic;
 const underlineStyler = chalk.underline;
 const strikethroughStyler = chalk.strikethrough;
@@ -173,6 +185,8 @@ export class Theme {
 	readonly #hexFgColors: Record<ThemeColor, string>;
 	/** Resolved hex strings for background colors — populated at construction. */
 	readonly #hexBgColors: Record<ThemeBg, string>;
+	/** Foreground SGR per `terminal.ansi` index; slots the theme omits use the terminal's palette. */
+	readonly #ansiFgColors: readonly string[];
 	/** Lazily resolved `fgResolved` ANSI per color; colors and mode are fixed per instance. */
 	readonly #resolvedFgColors = new Map<ThemeColor, string>();
 	/** Lazily built, frozen `sessionAccentInputs`; every input it reads is fixed per instance. */
@@ -196,6 +210,7 @@ export class Theme {
 		private readonly symbolPreset: SymbolPreset,
 		symbolOverrides: Partial<Record<SymbolKey, string>>,
 		spinnerFramesOverrides: Partial<Record<SpinnerType, string[]>> = {},
+		ansiPalette: ReadonlyArray<string | number> = [],
 	) {
 		this.statusLineLuminance = colorLuma(bgColors.statusLineBg);
 		this.#statusLineContrastLuminance = relativeLuminance(bgColors.statusLineBg);
@@ -218,6 +233,7 @@ export class Theme {
 			this.#fgColors[key] ??= "\x1b[39m";
 			this.#hexFgColors[key] ??= "";
 		}
+		this.#ansiFgColors = Array.from({ length: 16 }, (_, index) => fgAnsi(ansiPalette[index] ?? index, mode));
 		this.#bgColors = {} as Record<ThemeBg, string>;
 		this.#hexBgColors = {} as Record<ThemeBg, string>;
 		for (const [key, value] of Object.entries(bgColors) as [ThemeBg, string | number][]) {
@@ -234,6 +250,8 @@ export class Theme {
 				logger.debug("Invalid symbol key in override", { key, availableKeys: Object.keys(this.#symbols) });
 			}
 		}
+		// `status.done` aliases `status.success` unless a theme overrides it explicitly.
+		if (!("status.done" in symbolOverrides)) this.#symbols["status.done"] = this.#symbols["status.success"];
 		this.#spinnerFramesOverrides = spinnerFramesOverrides;
 	}
 
@@ -350,7 +368,16 @@ export class Theme {
 	fg(color: ThemeColor, text: string): string {
 		const ansi = this.#fgColors[color];
 		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
-		return `${ansi}${text}\x1b[39m`; // Reset only foreground color
+		return wrapForeground(ansi, text);
+	}
+
+	/**
+	 * Color `text` with slot `color` of the theme's `terminal.ansi` palette, or
+	 * the terminal's own palette when the theme ships none. Like {@link fg}, the
+	 * color resumes after nested foreground resets.
+	 */
+	ansiFg(color: AnsiColor, text: string): string {
+		return wrapForeground(this.#ansiFgColors[ANSI_COLOR_INDEX[color]], text);
 	}
 
 	/** Apply a foreground, replacing terminal-default tokens with the theme's contrast-safe fallback. */
@@ -362,7 +389,7 @@ export class Theme {
 			resolved = ansi === "\x1b[39m" ? colorToAnsi(this.getColorHex(color), this.mode) : ansi;
 			this.#resolvedFgColors.set(color, resolved);
 		}
-		return `${resolved}${text.replace(FOREGROUND_RESET_PATTERN, `$&${resolved}`)}\x1b[39m`;
+		return wrapForeground(resolved, text);
 	}
 
 	bg(color: ThemeBg, text: string): string {
@@ -390,11 +417,16 @@ export class Theme {
 	 */
 	fgOnBg(color: ThemeColor, background: ThemeBg, text: string): string {
 		const ansi = this.getFgOnBgAnsi(color, background);
-		return `${ansi}${text.replace(FOREGROUND_RESET_PATTERN, `$&${ansi}`)}\x1b[39m`;
+		return wrapForeground(ansi, text);
 	}
 
 	bold(text: string): string {
 		return boldStyler(text);
+	}
+
+	/** Reduce terminal intensity without replacing the text's foreground colors. */
+	faint(text: string): string {
+		return faintStyler(text);
 	}
 
 	italic(text: string): string {
@@ -519,6 +551,7 @@ export class Theme {
 			running: this.#symbols["status.running"],
 			shadowed: this.#symbols["status.shadowed"],
 			aborted: this.#symbols["status.aborted"],
+			/** @deprecated Alias of `success`. */
 			done: this.#symbols["status.done"],
 		};
 	}
@@ -644,6 +677,8 @@ export class Theme {
 			job: this.#symbols["icon.job"],
 			cache: this.#symbols["icon.cache"],
 			cacheMiss: this.#symbols["icon.cacheMiss"],
+			cacheWarm: this.#symbols["icon.cacheWarm"],
+			cacheCold: this.#symbols["icon.cacheCold"],
 			input: this.#symbols["icon.input"],
 			output: this.#symbols["icon.output"],
 			throughput: this.#symbols["icon.throughput"],

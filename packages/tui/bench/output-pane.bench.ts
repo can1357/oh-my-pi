@@ -1,11 +1,11 @@
 /**
  * Benchmark: OutputPane per-frame render cost.
  *
- * `OutputPane.render()` styles every stored output row, joins the whole
- * styled set into one string, and hashes it — per frame, per live execution
- * block. The styled/joined result only changes when the pane's rows change,
- * so it is memoized on the rows' version, the width, the options object, the
- * theme epoch and the image protocol.
+ * `OutputPane.render()` styles every stored output row and joins the whole
+ * styled set into one string — per frame, per live execution block while the
+ * memo misses. The memoized result is keyed on the content width, the width
+ * config epoch, the theme epoch and the image protocol; the pane's rows reach
+ * it only through `invalidate()` dropping the memo.
  *
  * A pane re-renders every frame while it sits in the live transcript tail, so
  * this measures the repeated-frame cost of a pane whose content is settled.
@@ -57,7 +57,7 @@ function perFrameUs(lineCount: number): number {
 }
 
 const CASES: [label: string, lines: number][] = [
-	["streaming", 100],
+	["settled-small", 100],
 	["50KB-cap", KB50_LINES],
 	["large", 10_000],
 ];

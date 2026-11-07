@@ -83,7 +83,10 @@ describe("CLI RPC MCP discovery", () => {
 					break;
 				}
 				expect(ready, model.peekStderr()).toMatch(/^READY \d+/);
-				for (const phase of ["enabled", "disabled", "restored"] as const) {
+				// The denied launch runs first: the restored launch then proves the same
+				// command does spawn once the denylist is lifted, that nothing from the
+				// denied run sticks across restart, and that the mount survives switches.
+				for (const phase of ["disabled", "restored"] as const) {
 					const audit = path.join(root, `${phase}.jsonl`);
 					await Bun.write(audit, "");
 					await Bun.write(
@@ -159,18 +162,16 @@ describe("CLI RPC MCP discovery", () => {
 								expect(calls.at(-1)).toMatchObject({ params: { name: "regression_announce", arguments: {} } });
 							};
 							await invoke();
-							if (phase === "enabled") {
-								const original = (await client.getState()).sessionFile;
-								if (!original) throw new Error("Expected persisted RPC session");
-								expect(await client.openSession(path.join(root, "other-sessions"))).toMatchObject({
-									cancelled: false,
-								});
-								expect((await client.getState()).sessionFile).not.toBe(original);
-								await invoke();
-								expect(await client.switchSession(original)).toEqual({ cancelled: false });
-								expect((await client.getState()).sessionFile).toBe(original);
-								await invoke();
-							}
+							const original = (await client.getState()).sessionFile;
+							if (!original) throw new Error("Expected persisted RPC session");
+							expect(await client.openSession(path.join(root, "other-sessions"))).toMatchObject({
+								cancelled: false,
+							});
+							expect((await client.getState()).sessionFile).not.toBe(original);
+							await invoke();
+							expect(await client.switchSession(original)).toEqual({ cancelled: false });
+							expect((await client.getState()).sessionFile).toBe(original);
+							await invoke();
 						}
 						// Observe natural server teardown before allowing any client tree kill.
 						observingEof = true;

@@ -1801,7 +1801,7 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
-	it("rejects a tool call whose intent field carries the payload instead of a label", async () => {
+	it("runs a tool call with a long intent instead of rejecting it", async () => {
 		const writeSchema = type({ path: "string", content: "string" });
 		const written: Record<string, unknown>[] = [];
 		const writeTool: AgentTool<typeof writeSchema> = {
@@ -1810,75 +1810,37 @@ describe("agentLoop with AgentMessage", () => {
 			description: "Write a file",
 			parameters: writeSchema,
 			async execute(_toolCallId, params) {
-				written.push(params as Record<string, unknown>);
+				written.push(params);
 				return { content: [{ type: "text", text: `wrote ${params.content.length} bytes` }] };
 			},
 		};
-		// A tool that owns `i` as a real parameter: a long value there is not misplaced.
-		const ownedSchema = type({ value: "string", [`${INTENT_FIELD}?`]: "string" });
-		const ownedRuns: string[] = [];
-		const ownedTool: AgentTool<typeof ownedSchema> = {
-			name: "owned",
-			label: "Owned",
-			description: "Owns i",
-			parameters: ownedSchema,
-			async execute(_toolCallId, params) {
-				ownedRuns.push(params.value);
-				return { content: [{ type: "text", text: "ok" }] };
-			},
-		};
-		const body = `# Guide\n\n${"Explains how the query pipeline is reconstructed.\n".repeat(20)}`;
-		const call = (id: string, name: string, args: Record<string, unknown>) => ({
-			type: "toolCall" as const,
-			id,
-			name,
-			arguments: args,
-		});
+		const intent = `Writing reconstruction guide for ${"queries across session boundaries ".repeat(10)}`.trim();
 		const mock = createMockModel({
 			responses: [
 				{
 					content: [
-						call("swapped", "write", {
-							path: "guide.md",
-							[INTENT_FIELD]: body,
-							content: "Writing reconstruction guide",
-						}),
-						call("normal", "write", { path: "notes.md", [INTENT_FIELD]: "Writing notes", content: "hello" }),
-						call("at-limit", "write", { path: "limit.md", [INTENT_FIELD]: "x".repeat(200), content: "a" }),
-						call("over-limit", "write", { path: "over.md", [INTENT_FIELD]: "x".repeat(201), content: "b" }),
-						call("owned", "owned", { value: "kept", [INTENT_FIELD]: body }),
-						call("unknown", "nope", { [INTENT_FIELD]: body }),
+						{
+							type: "toolCall",
+							id: "write-guide",
+							name: "write",
+							arguments: { path: "guide.md", [INTENT_FIELD]: intent, content: "# Guide" },
+						},
 					],
 				},
 				{ content: ["done"] },
 			],
 		});
 		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter, intentTracing: true };
-		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [writeTool, ownedTool] };
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [writeTool] };
 
 		const messages = await agentLoop([createUserMessage("run")], context, config, undefined, mock.stream).result();
-		const results = new Map(
-			messages.filter((m): m is ToolResultMessage => m.role === "toolResult").map(r => [r.toolCallId, r]),
-		);
+		const result = messages.find((m): m is ToolResultMessage => m.role === "toolResult");
 		const assistant = messages.find((m): m is AssistantMessage => m.role === "assistant");
-		const atLimitCall = assistant?.content.find(c => c.type === "toolCall" && c.id === "at-limit");
-		const unknownText = (results.get("unknown")?.content ?? [])
-			.filter((c): c is { type: "text"; text: string } => c.type === "text")
-			.map(c => c.text)
-			.join("\n");
+		const call = assistant?.content.find(c => c.type === "toolCall");
 
-		// The swapped call must not run with the one-line `content`: the model is
-		// told to retry instead of believing the body was written.
-		expect(written).toEqual([
-			{ path: "notes.md", content: "hello" },
-			{ path: "limit.md", content: "a" },
-		]);
-		expect(results.get("swapped")?.isError).toBe(true);
-		expect(results.get("over-limit")?.isError).toBe(true);
-		expect(results.get("normal")?.isError).toBe(false);
-		expect(atLimitCall?.type === "toolCall" && atLimitCall.intent).toBe("x".repeat(200));
-		expect(ownedRuns).toEqual(["kept"]);
-		expect(unknownText).toContain("Tool nope not found");
+		expect(result?.isError).toBe(false);
+		expect(written).toEqual([{ path: "guide.md", content: "# Guide" }]);
+		expect(call?.type === "toolCall" && call.intent).toBe(intent);
 	});
 
 	it("runs shared tools in parallel and records results in call order", async () => {
@@ -7380,8 +7342,8 @@ describe("agentLoop streaming snapshots", () => {
 		// partial immediately before its push (the mutate-then-push stream
 		// contract). The producer advances in lockstep with the consumer — one
 		// step per observed assistant event — so each snapshot sees exactly the
-		// deltas delivered so far even when the loop parks in `yieldIfDue()`; a
-		// free-running timer producer would race ahead during that sleep.
+		// deltas delivered so far; a free-running timer producer could race
+		// ahead of the consumer.
 		const partial = createAssistantMessage([], "stop");
 		let advance = (): void => {};
 		const streamFn = () => {

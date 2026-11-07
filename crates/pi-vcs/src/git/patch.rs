@@ -2692,8 +2692,9 @@ mod tests {
 
 	/// Superproject tracking gitlink `module` at the first of two module
 	/// commits: checked out there when `initialized`, an empty directory
-	/// otherwise. Module commits carry fixed dates, so every fixture shares the
-	/// same `(old, new)` commit ids.
+	/// otherwise. Module commits carry fixed dates and no signature (a user's
+	/// `commit.gpgsign` stamps the signing time into the id), so every fixture
+	/// shares the same `(old, new)` commit ids.
 	fn gitlink_fixture(initialized: bool) -> (TempDir, String, String) {
 		let temp = init(&[("file.txt", b"base\n")]);
 		let module = temp.path().join("module");
@@ -2711,6 +2712,8 @@ mod tests {
 					"user.name=Patch Test",
 					"-c",
 					"user.email=patch@example.com",
+					"-c",
+					"commit.gpgsign=false",
 					"commit",
 					"-qm",
 					"module",

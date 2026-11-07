@@ -19,6 +19,13 @@ class "kimi" {
     family "k3" glob="k3"
     family "k3" glob="k3-256k"
 
+    // K3.1 Pro is a post-trained K3 with K3's full request contract (Moonshot
+    // documents identical parameter constraints), so it keeps family `k3` and
+    // inherits every K3 lineage rule. The revision gives it its own weights
+    // identity, so K3 reasoning never replays natively into K3.1 Pro. Kimi
+    // Code's bare `k3.1-pro*` ids reach no class matcher without these.
+    override id="kimi-k3-1-pro" glob="*k3.1-pro" class="kimi" family="k3" revision="3.1" rationale="K3.1 Pro is a post-trained K3 sharing K3's parameter contract" provenance="https://platform.kimi.ai/docs/api/models-overview"
+    override id="kimi-k3-1-pro-highspeed" glob="*k3.1-pro-highspeed" class="kimi" family="k3" revision="3.1" rationale="K3.1 Pro Highspeed serves K3.1 Pro faster with identical parameter constraints" provenance="https://platform.kimi.ai/docs/api/models-overview"
     override id="kilo-kimi-k2-thinking-product" provider="kilo" model="kimi-k2-thinking" logical="moonshotai/kimi-k2-thinking" class="kimi" rationale="Oracle exposes this independently priced product rather than an effort route" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
     override id="openrouter-kimi-k2-thinking-product" provider="openrouter" model="kimi-k2-thinking" logical="moonshotai/kimi-k2-thinking" class="kimi" rationale="Oracle exposes this independently priced product rather than an effort route" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
     override id="vercel-kimi-k2-thinking-product" provider="vercel-ai-gateway" model="kimi-k2-thinking" logical="moonshotai/kimi-k2-thinking" class="kimi" rationale="Oracle exposes this independently priced product rather than an effort route" provenance="fixtures/llm-oracle/catalog/models.normalized.json"

@@ -73,7 +73,7 @@ function killCall(id: string): string {
 function writeOnlyError(id: string, action: "kill" | "mode"): string {
 	if (action === "kill")
 		return `proc://${id}/kill is write-only; reading it did not stop anything. To cancel ${id}, ${killCall(id)}; read proc://${id} for its status.`;
-	return `proc://${id}/mode is write-only. To set a service's mode, call write with ${JSON.stringify({ path: `proc://${id}/mode`, content: "persist" })} (persist, session, or detached); read proc://${id} for its current mode.`;
+	return `proc://${id}/mode is write-only; modes and stdin are services-only, not available for in-process jobs or agents. To set a service's mode, call write with ${JSON.stringify({ path: `proc://${id}/mode`, content: "persist" })} (persist, session, or detached); read proc://${id} for its current mode.`;
 }
 
 function ownerJobs(session: ToolSession): AsyncJob[] {
@@ -192,7 +192,8 @@ export class ProcProtocolHandler implements ProtocolHandler {
 							? `up ${formatDuration(now - job.startTime)}`
 							: `in ${formatDuration(job.endTime - job.startTime)}`;
 					const progress = runningTaskProgressSuffix(snapshots[index], { duration: false });
-					return `${job.id} [${job.type}] ${job.status} ${duration} — ${job.label.replace(/\s+/g, " ")}${progress}`;
+					const intent = job.intent ? `${job.intent} — ` : "";
+					return `${job.id} [${job.type}] ${job.status} ${duration} — ${intent}${job.label.replace(/\s+/g, " ")}${progress}`;
 				}),
 				...runningAgentsOutsideJobs(session).map(
 					agent =>
@@ -225,7 +226,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		if (job) {
 			const snapshot = snapshotJobs(session, [job])[0];
 			const lines = [
-				`${job.id} [${job.type}] — ${job.status} — ${job.label}${runningTaskProgressSuffix(snapshot, { duration: true })}`,
+				`${job.id} [${job.type}] — ${job.status} — ${job.intent ? `${job.intent} — ` : ""}${job.label}${runningTaskProgressSuffix(snapshot, { duration: true })}`,
 			];
 			if (job.resultText) lines.push(job.resultText);
 			if (job.errorText) lines.push(`Error: ${job.errorText}`);
@@ -264,7 +265,10 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		if (!session) throw new Error("proc:// requires a tool session");
 		const { id, action } = target(url);
 		if (action === "streams") throw new Error(`proc://${id}/streams is read-only`);
-		if (!id) throw new Error("Write requires proc://<id>, proc://<id>/kill, or proc://<id>/mode");
+		if (!id)
+			throw new Error(
+				"Write requires proc://<service> for stdin, proc://<id>/kill, or proc://<service>/mode; stdin and modes are services-only.",
+			);
 		const ownerId = session.getAgentId?.() ?? undefined;
 		const jobs = ownerJobs(session);
 		const exactJob = jobs.find(item => item.id === id);
@@ -289,6 +293,10 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		const job = exactJob ?? (service ? undefined : agentJob);
 		if ((job || agent) && service)
 			throw new Error(`proc://${id} is ambiguous: both job ${id} and service ${id} exist.`);
+		if ((job || agent) && !service && action !== "kill")
+			throw new Error(
+				`${id} is an in-process ${job ? "job" : "agent"}; stdin and persist/session/detached modes are services-only. Start long-lived work as a named service when it needs stdin or lifetime controls. To cancel, ${killCall(id)}.`,
+			);
 		if (action === "mode") {
 			if (!service) throw new Error(`Service not found: ${id}`);
 			if (content !== "persist" && content !== "session" && content !== "detached")
@@ -300,7 +308,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			};
 		}
 		if (action === "stdin") {
-			if (!service) throw new Error(`stdin is only available for services. To cancel, ${killCall(id)}.`);
+			if (!service) throw new Error(`Service not found: ${id}`);
 			const updated = await sendService(session, id, content, context?.signal);
 			return {
 				content: [{ type: "text", text: `Sent input to ${serviceStatus(updated)}` }],

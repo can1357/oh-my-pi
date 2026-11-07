@@ -23,9 +23,10 @@ import { collapseVariants } from "../src/compat/collapse";
 import { providerEntries, providerEntry, seedModels } from "../src/compat/providers";
 import type { CompiledProvider } from "../src/compat/types";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
+import { encodeModelCatalog } from "../src/model-catalog-format";
 import { createModelManager } from "../src/model-manager";
 import { resolveModelTokenizer } from "../src/model-tokenizer";
-import prevModelsJson from "../src/models.json" with { type: "json" };
+import { getBundledModels, getBundledProviders } from "../src/models";
 import { toModelSpec } from "../src/provider-models/bundled-references";
 import {
 	allowsUnauthenticatedCatalogDiscovery,
@@ -60,6 +61,14 @@ import {
 } from "./generated-policies";
 
 const packageRoot = path.join(import.meta.dir, "..");
+
+// Generator policies may mutate nested specs, so each snapshot row owns its values.
+const prevModelsJson: Record<string, Record<string, Model<Api>>> = Object.fromEntries(
+	getBundledProviders().map(provider => [
+		provider,
+		Object.fromEntries(getBundledModels(provider).map(model => [model.id, structuredClone(model)])),
+	]),
+);
 
 /**
  * Local/self-hosted providers (Ollama, vLLM, LM Studio, LiteLLM). Their model
@@ -648,11 +657,7 @@ async function generateModels(selectedProvider?: string) {
 	// Previous-snapshot entries may carry an older ThinkingConfig vocabulary;
 	// applyGeneratedModelPolicies re-bakes `thinking` for every model, so the
 	// inbound shape is irrelevant beyond identity/pricing/compat fields.
-	allModels = mergePreviousSnapshotModels(
-		allModels,
-		prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>,
-		previousSnapshotExcludedProviders,
-	);
+	allModels = mergePreviousSnapshotModels(allModels, prevModelsJson, previousSnapshotExcludedProviders);
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
 	// Previous-snapshot fallbacks can retain a retired client fingerprint. Force
 	// every bundled Copilot model onto the same identity used by live discovery.
@@ -741,7 +746,7 @@ async function generateModels(selectedProvider?: string) {
 	// the requested provider in the generated output.
 	const MODELS: Record<string, Record<string, Model<Api>>> = selectedProvider === undefined
 		? {}
-		: { ...(prevModelsJson as unknown as Record<string, Record<string, Model<Api>>>) };
+		: { ...prevModelsJson };
 	if (selectedProvider !== undefined) delete MODELS[selectedProvider];
 	for (const [provider, models] of Object.entries(modelSpecs)) {
 		if (selectedProvider !== undefined && provider !== selectedProvider) continue;
@@ -751,7 +756,7 @@ async function generateModels(selectedProvider?: string) {
 	}
 
 	// Generate JSON file
-	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(sortObj(MODELS)));
+	await Bun.write(path.join(packageRoot, "src/models.json"), encodeModelCatalog(sortObj(MODELS)));
 	console.log("Generated src/models.json");
 
 	// Print statistics for the rows this run regenerated.

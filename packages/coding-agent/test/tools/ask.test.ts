@@ -1,8 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { agentLoop, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { AgentLoopConfig } from "@oh-my-pi/pi-agent-core/types";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type {
 	ExtensionAskDialogQuestion,
 	ExtensionAskDialogResult,
@@ -16,7 +18,7 @@ import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import * as ai from "@oh-my-pi/pi-ai";
-import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -64,6 +66,8 @@ function createContext(args: {
 		dialogOptions?: any,
 	) => Promise<ExtensionAskDialogResult | undefined>;
 	abort?: () => void;
+	/** The loop's cooperative steering signal for this call (`ctx.toolCall.steeringSignal`). */
+	steeringSignal?: AbortSignal;
 }): AgentToolContext {
 	// AgentToolContext includes many runtime fields; tests only need UI + abort behavior.
 	return {
@@ -79,6 +83,7 @@ function createContext(args: {
 			) => args.editor?.(title, prefill, dialogOptions, editorOptions) ?? Promise.resolve(undefined),
 		},
 		abort: args.abort ?? (() => {}),
+		...(args.steeringSignal ? { toolCall: { steeringSignal: args.steeringSignal } } : {}),
 	} as unknown as AgentToolContext;
 }
 
@@ -126,6 +131,125 @@ describe("AskTool cancellation", () => {
 			),
 		).rejects.toBeInstanceOf(ToolAbortError);
 		expect(abort).toHaveBeenCalledTimes(1);
+	});
+
+	it("closes for a message the user queued without cancelling the turn, but stays open for other interrupts", async () => {
+		const ask = (source: string) => {
+			const steering = new AbortController();
+			const abort = vi.fn();
+			const context = createContext({
+				abort,
+				steeringSignal: steering.signal,
+				select: async (_prompt, options, dialogOptions) => {
+					steering.abort(source);
+					return dialogOptions?.signal?.aborted ? undefined : selectItemLabel(options[0]);
+				},
+			});
+			const outcome = new AskTool(createSession()).execute(
+				`call-${source}`,
+				{ questions: [{ id: "choice", question: "Which database?", options: [{ label: "SQLite" }] }] },
+				undefined,
+				undefined,
+				context,
+			);
+			return { outcome, abort };
+		};
+
+		const user = ask("user");
+		await expect(user.outcome).rejects.toThrow("Ask interrupted by message");
+		expect(user.abort).not.toHaveBeenCalled();
+
+		const irc = ask("irc");
+		expect((await irc.outcome).details).toMatchObject({ selectedOptions: ["SQLite"] });
+	});
+
+	it("delivers queued steering while ask is open without cancelling the turn", async () => {
+		const question = { id: "choice", question: "Which database?", options: [{ label: "SQLite" }] };
+		const abort = vi.fn();
+		const wake = Promise.withResolvers<void>();
+		let queued = false;
+		let closed = false;
+		const context = createContext({
+			abort,
+			askDialog: async (_questions, options) => {
+				expect(options?.timeout).toBeUndefined();
+				queued = true;
+				wake.resolve();
+				const { promise, resolve } = Promise.withResolvers<undefined>();
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						closed = true;
+						resolve(undefined);
+					},
+					{ once: true },
+				);
+				return promise;
+			},
+		});
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "ask-1", name: "ask", arguments: { questions: [question] } }] },
+				{ content: ["I will revisit the database choice after handling the new request."] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: messages => messages as Message[],
+			getToolContext: toolCall => ({ ...context, toolCall }) as AgentToolContext,
+			hasSteeringMessages: () => queued,
+			waitForSteeringMessages: () => wake.promise,
+			getSteeringMessages: async () => {
+				if (!queued) return [];
+				queued = false;
+				return [{ role: "user", content: "Check the schema first", timestamp: Date.now() }];
+			},
+		};
+		const controller = new AbortController();
+		// Safety only: the real steering watcher must release the dialog before this fires.
+		const timer = setTimeout(() => controller.abort("ask stayed open"), 2000);
+		try {
+			const events = [];
+			for await (const event of agentLoop(
+				[{ role: "user", content: "Choose a database", timestamp: Date.now() }],
+				{
+					systemPrompt: ["Test"],
+					messages: [],
+					tools: [
+						new AskTool(
+							createSession({
+								settings: Settings.isolated({ "ask.timeout": 30 }),
+								getPlanModeState: () => ({ enabled: true, planFilePath: "/tmp/plan.md" }),
+							}),
+						),
+					],
+				},
+				config,
+				controller.signal,
+				mock.stream,
+			)) {
+				events.push(event);
+			}
+			expect(controller.signal.aborted).toBe(false);
+			expect(closed).toBe(true);
+			expect(abort).not.toHaveBeenCalled();
+			expect(
+				events.some(
+					event =>
+						event.type === "message_start" &&
+						event.message.role === "user" &&
+						event.message.content === "Check the schema first",
+				),
+			).toBe(true);
+			const result = events.find(event => event.type === "tool_execution_end" && event.toolName === "ask");
+			expect(result?.type).toBe("tool_execution_end");
+			if (result?.type !== "tool_execution_end") return;
+			expect(result.isError).toBe(true);
+			expect(JSON.stringify(result.result.content)).toContain("Ask interrupted by message");
+			expect(mock.calls).toHaveLength(2);
+		} finally {
+			clearTimeout(timer);
+		}
 	});
 
 	it("defaults to no timeout when ask.timeout is unset", async () => {
@@ -699,7 +823,7 @@ describe("AskTool custom input", () => {
 		const abort = vi.fn();
 		const controller = new AbortController();
 		const editor = vi.fn(async (_title: string, _prefill?: string, dialogOptions?: { signal?: AbortSignal }) => {
-			expect(dialogOptions?.signal).toBe(controller.signal);
+			expect(dialogOptions?.signal?.aborted).toBe(false);
 			return await new Promise<string | undefined>((_resolve, reject) => {
 				dialogOptions?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
 					once: true,
@@ -1411,7 +1535,7 @@ describe("askToolRenderer malformed call args", () => {
 			theme!,
 		);
 		const text = stripAnsi(rendered.render(120).join("\n"));
-		expect(text).toContain("[q1]");
+		expect(text).toContain("Ask: q1");
 		expect(text).toContain("Pick one");
 		expect(text).toContain("Alpha");
 	});
@@ -1443,10 +1567,138 @@ describe("askToolRenderer malformed call args", () => {
 			theme!,
 		);
 		const text = stripAnsi(rendered.render(120).join("\n"));
-		expect(text).toContain("[ok]");
+		expect(text).toContain("Ask: ok");
 		expect(text).toContain("Real question");
 		expect(text).toContain("BareString");
 		expect(text).toContain("Proper");
+	});
+});
+
+describe("askToolRenderer question layout", () => {
+	const questions = [
+		{
+			id: "db",
+			question: "Which database?",
+			options: [{ label: "Postgres", description: "Relational" }, { label: "SQLite" }],
+		},
+		{ id: "features", question: "Which flows?", options: [{ label: "Email" }], multi: true },
+	];
+
+	it("tags each question with its id and flags instead of a section header", () => {
+		const rendered = askToolRenderer.renderCall({ questions }, { expanded: true, isPartial: false }, darkTheme);
+		const lines = stripAnsi(rendered.render(100).join("\n")).split("\n");
+		expect(lines[0]).toContain("Ask: 2 questions");
+		expect(lines.find(line => line.includes("Which database?"))).toContain("Which database? (db · 2 options)");
+		expect(lines.find(line => line.includes("Which flows?"))).toContain("Which flows? (features · multi · 1 option)");
+		expect(lines.some(line => line.includes("[db]") || line.includes("[features]"))).toBe(false);
+	});
+
+	it("gives a tag its own row when the question ends in a list or code block, or the tag would not fit", () => {
+		const trailing = [
+			{ id: "list", question: "Which approach?\n\n- alpha\n- beta", options: [{ label: "A" }] },
+			{ id: "fence", question: "Keep this?\n\n```ts\nconst a = 1;\n```", options: [{ label: "Yes" }] },
+			// At width 60 the frame holds 56 columns: the 39-column question, its 1-column indent, a
+			// space and the 16-column tag need one more.
+			{ id: "fit", question: "x".repeat(39), options: [{ label: "A" }] },
+		];
+		const rendered = askToolRenderer.renderCall(
+			{ questions: trailing },
+			{ expanded: true, isPartial: false },
+			darkTheme,
+		);
+		const lines = stripAnsi(rendered.render(60).join("\n")).split("\n");
+		for (const tag of ["(list · 1 option)", "(fence · 1 option)", "(fit · 1 option)"]) {
+			expect(lines.find(line => line.includes(tag))).toStartWith(`│  ${tag}`);
+		}
+	});
+
+	it("wraps a tag wider than the row under its indent, without a blank row", () => {
+		const id = "which-database-should-the-new-billing-service-use-in-production";
+		const rendered = askToolRenderer.renderCall(
+			{ questions: [{ id, question: "Short?", options: [{ label: "A" }] }, questions[1]] },
+			{ expanded: true, isPartial: false },
+			darkTheme,
+		);
+		const lines = stripAnsi(rendered.render(60).join("\n")).split("\n");
+		const question = lines.findIndex(line => line.includes("Short?"));
+		expect(lines[question + 1]).toStartWith("│  (which-database");
+		expect(lines[question + 2]).toMatch(/^│ {2}\S/);
+		expect(lines.slice(question + 1, question + 3).join("")).toContain("1 option)");
+	});
+
+	it("keeps a model-supplied id with a newline on one row of the header and the tag", () => {
+		const broken = { id: "db\nchoice", question: "Which database?", options: [{ label: "Postgres" }] };
+		const lone = stripAnsi(
+			askToolRenderer
+				.renderCall({ questions: [broken] }, { expanded: true, isPartial: false }, darkTheme)
+				.render(100)
+				.join("\n"),
+		).split("\n");
+		expect(lone[0]).toContain("Ask: db choice");
+		expect(lone[1]).toStartWith("│");
+		const multi = stripAnsi(
+			askToolRenderer
+				.renderCall({ questions: [broken, questions[1]] }, { expanded: true, isPartial: false }, darkTheme)
+				.render(100)
+				.join("\n"),
+		);
+		expect(multi).toContain("Which database? (db choice · 1 option)");
+	});
+
+	it("names a lone question by its id and counts its options in the footer", () => {
+		const rendered = askToolRenderer.renderCall(
+			{ questions: [questions[0]] },
+			{ expanded: true, isPartial: false },
+			darkTheme,
+		);
+		const lines = stripAnsi(rendered.render(100).join("\n")).split("\n");
+		expect(lines[0]).toContain("Ask: db");
+		expect(lines.at(-1)).toContain("2 options");
+		expect(lines.join("\n")).not.toContain("(db");
+	});
+
+	it("tags answered questions with their id and multi flag, without option counts", () => {
+		const rendered = askToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					results: [
+						{
+							id: "db",
+							question: "Which database?",
+							options: ["Postgres"],
+							multi: false,
+							selectedOptions: ["Postgres"],
+						},
+						{
+							id: "features",
+							question: "Which flows?",
+							options: ["Email"],
+							multi: true,
+							selectedOptions: ["Email"],
+						},
+					],
+				},
+			},
+			{ expanded: true, isPartial: false },
+			darkTheme,
+		);
+		const text = stripAnsi(rendered.render(100).join("\n"));
+		expect(text).toContain("Ask: 2 questions");
+		expect(text).toContain("Which database? (db)");
+		expect(text).toContain("Which flows? (features · multi)");
+	});
+
+	it("keeps the question subject on a failed ask", () => {
+		const rendered = askToolRenderer.renderResult(
+			{ content: [{ type: "text", text: "Prompt cancelled by user" }] },
+			{ expanded: false, isPartial: false },
+			darkTheme,
+			{ questions },
+		);
+		const text = stripAnsi(rendered.render(100).join("\n"));
+		expect(text).toContain("Ask: 2 questions");
+		expect(text).toContain("Prompt cancelled by user");
 	});
 });
 
@@ -1507,6 +1759,45 @@ describe("AskTool rich ask dialog", () => {
 			note: "My Custom Note",
 			timedOut: undefined,
 		});
+	});
+
+	it("names the option a note is on in the text the model reads and in single-question details", async () => {
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{ id: "s", selectedOptions: ["Two"], note: "picked for speed", noteOption: "Two" },
+				{ id: "m", selectedOptions: ["X", "Y"], note: "Y only on weekends", noteOption: "Y" },
+				{ id: "c", selectedOptions: [], customInput: "my own", note: "about my answer" },
+			],
+		});
+		const questions = [
+			{ id: "s", question: "Single?", options: [{ label: "One" }, { label: "Two" }] },
+			{ id: "m", question: "Multi?", multi: true, options: [{ label: "X" }, { label: "Y" }] },
+			{ id: "c", question: "Custom?", options: [{ label: "A" }] },
+		];
+		const tool = new AskTool(createSession());
+		const multi = await tool.execute("call-multi", { questions }, undefined, undefined, createContext({ askDialog }));
+		expect(multi.content[0]).toEqual({
+			type: "text",
+			text: 'User answers:\ns: Two (note on Two: picked for speed)\nm: [X, Y] (note on Y: Y only on weekends)\nc: "my own" (note: about my answer)',
+		});
+
+		askDialog.mockResolvedValue({
+			kind: "submit",
+			results: [{ id: "m", selectedOptions: ["X", "Y"], note: "Y only on weekends", noteOption: "Y" }],
+		});
+		const single = await tool.execute(
+			"call-single",
+			{ questions: [questions[1]!] },
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+		expect(single.content[0]).toEqual({
+			type: "text",
+			text: "User selected: X, Y\nUser added note on Y: Y only on weekends",
+		});
+		expect(single.details?.noteOption).toBe("Y");
 	});
 
 	it("returns custom-answer and note images after text, numbering markers across answers in text and details", async () => {
@@ -2044,7 +2335,7 @@ describe("AskTool carriage-return sanitization", () => {
 			theme!,
 		);
 		const text = stripAnsi(rendered.render(120).join("\n"));
-		expect(text).toContain("[q 3a]");
+		expect(text).toContain("Ask: q 3a");
 		expect(text).toContain("Q3 A?");
 		expect(text).not.toContain("\r");
 
@@ -2098,7 +2389,7 @@ describe("AskTool carriage-return sanitization", () => {
 			theme!,
 		);
 		const multiText = stripAnsi(multi.render(120).join("\n"));
-		expect(multiText).toContain("[q 3a]");
+		expect(multiText).toContain("Ask: q 3a");
 		expect(multiText).toContain("Q3 A?");
 		expect(multiText).toContain("Abort log");
 		expect(multiText).not.toContain("\r");

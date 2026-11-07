@@ -93,6 +93,7 @@ async function createHarness(factory: ExtensionFactory) {
 		dismissCommandReport: () => false,
 		updateEditorBorderColor: vi.fn(),
 		updatePendingMessagesDisplay: vi.fn(),
+		syncIdleMaintenanceView: vi.fn(),
 		flushPendingBashComponents: vi.fn(),
 		showStatus: vi.fn(),
 		showError: vi.fn(),
@@ -755,7 +756,7 @@ describe("interactive native input ingress", () => {
 		expect(h.editor.imageLinks).toBeUndefined();
 	});
 
-	it("Enter dispatches input once, while continue shortcuts remain synthetic", async () => {
+	it("Enter dispatches input once, while continue shortcuts bypass input handlers as resumes", async () => {
 		const seen: InputEvent[] = [];
 		const h = await createHarness(pi => {
 			pi.on("input", event => {
@@ -775,7 +776,7 @@ describe("interactive native input ingress", () => {
 			await h.pressSubmit(ENTER);
 		}
 		expect(callback).toHaveBeenCalledTimes(2);
-		expect(callback.mock.calls[0][0]).toMatchObject({ synthetic: true, started: true, userInitiated: true });
+		expect(callback.mock.calls[0][0]).toMatchObject({ resume: true, started: true });
 		expect(seen).toHaveLength(1);
 		expect(h.prompt).toHaveBeenCalledTimes(1);
 	});

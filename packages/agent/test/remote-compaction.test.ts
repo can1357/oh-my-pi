@@ -4,12 +4,12 @@ import {
 	type CompactionPreparation,
 	compact,
 	createCustomMessage,
-	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	NativeCompactionError,
 	prepareCompaction,
 	type SessionEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import {
 	buildCompactionV2Request,
 	buildOpenAiNativeHistory,
@@ -27,10 +27,8 @@ import * as ai from "@oh-my-pi/pi-ai";
 import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { clearAwsCredentialCache } from "@oh-my-pi/pi-ai/providers/aws-credentials";
-import {
-	buildTransformedCodexRequestBody,
-	getOpenAICodexTransportDetails,
-} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { buildTransformedCodexRequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { getOpenAICodexTransportDetails } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
@@ -537,6 +535,37 @@ describe("buildOpenAiNativeHistory call-id tracking", () => {
 			["function_call", "call_ok"],
 			["function_call_output", "call_ok"],
 		]);
+	});
+
+	test("drops backend-only passthrough metadata from stored native items", () => {
+		// Codex 400s `Unknown parameter: 'input[N].internal_chat_message_metadata_passthrough.content_token_count'`.
+		const metadata = { content_token_count: 74, turn_id: "turn_1" };
+		const assistant = codexAssistant([{ callId: "call_a" }, { callId: "call_b" }], true);
+		const payload = assistant.providerPayload;
+		if (payload?.type !== "openaiResponsesHistory") throw new Error("expected native history");
+		payload.items[1]!.internal_chat_message_metadata_passthrough = metadata;
+		const previousReplacementHistory = [
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_text", text: "retained" }],
+				internal_chat_message_metadata_passthrough: { turn_id: "turn_0" },
+			},
+		];
+		const items = buildOpenAiNativeHistory(
+			[assistant, toolResultFor("call_a"), toolResultFor("call_b")],
+			CODEX_MODEL,
+			previousReplacementHistory,
+		);
+		expect(items.some(item => Object.hasOwn(item, "internal_chat_message_metadata_passthrough"))).toBe(false);
+		expect(items.flatMap(item => (typeof item.call_id === "string" ? [[item.type, item.call_id]] : []))).toEqual([
+			["function_call", "call_a"],
+			["function_call", "call_b"],
+			["function_call_output", "call_a"],
+			["function_call_output", "call_b"],
+		]);
+		// Stored session history is left unchanged.
+		expect(payload.items[1]!.internal_chat_message_metadata_passthrough).toBe(metadata);
 	});
 
 	test("pairs a reused call id positionally and keeps a different-kind output", () => {
@@ -1828,7 +1857,7 @@ describe("Responses Lite remote compaction", () => {
 				recentMessages: [messages[1]],
 				isSplitTurn: false,
 				tokensBefore: 100_000,
-				fileOps: createFileOps(),
+				fileOps: snapcompact.createFileOps(),
 				settings: {
 					...DEFAULT_COMPACTION_SETTINGS,
 					remoteStreamingV2Enabled: true,
@@ -2148,7 +2177,7 @@ describe("Responses Lite remote compaction", () => {
 			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
 			isSplitTurn: false,
 			tokensBefore: 100_000,
-			fileOps: createFileOps(),
+			fileOps: snapcompact.createFileOps(),
 			settings: {
 				...DEFAULT_COMPACTION_SETTINGS,
 				remoteEnabled: false,
@@ -2257,7 +2286,7 @@ describe("Responses Lite remote compaction", () => {
 				recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
 				isSplitTurn: false,
 				tokensBefore: 100_000,
-				fileOps: createFileOps(),
+				fileOps: snapcompact.createFileOps(),
 				settings: {
 					...DEFAULT_COMPACTION_SETTINGS,
 					remoteEnabled: false,
@@ -2564,7 +2593,7 @@ describe("compact() remote compaction failure handling", () => {
 			recentMessages: [{ role: "user", content: "recent", timestamp: 2 }],
 			isSplitTurn: false,
 			tokensBefore: 100_000,
-			fileOps: createFileOps(),
+			fileOps: snapcompact.createFileOps(),
 			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteStreamingV2Enabled: false },
 		};
 	}
@@ -2799,8 +2828,10 @@ describe("compact() remote compaction failure handling", () => {
 			]);
 		};
 
+		const loadExtraContext = vi.fn(async () => ["fresh pre-compaction memory"]);
 		const result = await compact(preparation, model, "test-key", undefined, undefined, {
 			fetch: fetchMock,
+			loadExtraContext,
 		});
 
 		const input = requestBody?.input ?? [];
@@ -2831,6 +2862,7 @@ describe("compact() remote compaction failure handling", () => {
 		const remote = getCompactionV2PreserveData(result.preserveData);
 		expect(remote?.usedTokens).toBe(55);
 		expect(remote?.replacementHistory.at(-1)).toEqual(compactionItem);
+		expect(loadExtraContext).not.toHaveBeenCalled();
 		expect(result.summary).toBe(
 			"Remote compaction preserved provider-native history for this session. Compaction processed 55 input tokens.",
 		);
@@ -3529,10 +3561,14 @@ describe("compact() remote compaction failure handling", () => {
 			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
 		});
 		const requestedUrls: string[] = [];
-		const fetchMock: FetchImpl = async input => {
+		const loadExtraContext = vi.fn(async () => ["fresh pre-compaction memory"]);
+		const fallbackBodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
 			const url = String(input);
 			requestedUrls.push(url);
 			if (url === preparation.settings.remoteEndpoint) {
+				if (typeof init?.body !== "string") throw new Error("missing fallback request body");
+				fallbackBodies.push(JSON.parse(init.body));
 				const summary =
 					requestedUrls.filter(requested => requested === url).length === 1
 						? "configured remote history summary"
@@ -3542,7 +3578,11 @@ describe("compact() remote compaction failure handling", () => {
 			return new Response("native compaction unavailable", { status: 400, statusText: "Bad Request" });
 		};
 
-		const result = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+		const result = await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			extraContext: ["extension context"],
+			loadExtraContext,
+		});
 
 		expect(requestedUrls.map(url => new URL(url).pathname)).toEqual([
 			"/v1/responses",
@@ -3553,6 +3593,42 @@ describe("compact() remote compaction failure handling", () => {
 		expect(result.summary).toContain("configured remote history summary");
 		expect(result.shortSummary).toBe("configured remote short summary");
 		expect(completeSpy).not.toHaveBeenCalled();
+		expect(loadExtraContext).toHaveBeenCalledTimes(1);
+		expect(
+			fallbackBodies[0]?.messages.some(
+				message =>
+					message.role === "user" &&
+					message.content.includes("extension context") &&
+					message.content.includes("fresh pre-compaction memory"),
+			),
+		).toBe(true);
+	});
+
+	test("cancels before the fallback request when recall is aborted", async () => {
+		const preparation = makePreparation();
+		preparation.settings = {
+			...preparation.settings,
+			remoteEndpoint: "http://summary.test/v1/chat/completions",
+			remoteStreamingV2Enabled: true,
+		};
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: true } });
+		const controller = new AbortController();
+		const requestedUrls: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			requestedUrls.push(String(input));
+			return new Response("native unavailable", { status: 400 });
+		};
+
+		await expect(
+			compact(preparation, model, "test-key", undefined, controller.signal, {
+				fetch: fetchMock,
+				loadExtraContext: async () => {
+					controller.abort(new Error("recall cancelled"));
+					return undefined;
+				},
+			}),
+		).rejects.toThrow("recall cancelled");
+		expect(requestedUrls).not.toContain(preparation.settings.remoteEndpoint);
 	});
 
 	test("native compaction server failure rejects without generic summarization", async () => {

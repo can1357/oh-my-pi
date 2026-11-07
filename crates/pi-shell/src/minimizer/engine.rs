@@ -518,7 +518,7 @@ thread_local! {
 fn record_unknown_command(_command: &str) {
 	UNKNOWN_COMMAND_COUNT.fetch_add(1, Ordering::Relaxed);
 	#[cfg(test)]
-	THREAD_UNKNOWN_COMMAND_COUNT.with(|count| count.set(count.get() + 1));
+	THREAD_UNKNOWN_COMMAND_COUNT.update(|count| count + 1);
 }
 
 /// Total number of commands that fell through `apply` without any matching

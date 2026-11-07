@@ -118,10 +118,12 @@ it("does not fold a const into the caller's own enum array", () => {
 		const: { b: 2 },
 	};
 
-	const normalized = normalizeSchemaForMCP(parameters) as Record<string, unknown>;
+	const normalized: unknown = normalizeSchemaForMCP(parameters);
 
 	// The caller keeps its own enum: folding `const` in must not append to the
 	// array the caller handed over.
-	expect(parameters.enum).toEqual([{ a: 1 }]);
-	expect(normalized.enum).toEqual([{ a: 1 }, { b: 2 }]);
+	expect(parameters["enum"]).toEqual([{ a: 1 }]);
+	expect(
+		normalized !== null && typeof normalized === "object" && "enum" in normalized ? normalized.enum : undefined,
+	).toEqual([{ a: 1 }, { b: 2 }]);
 });

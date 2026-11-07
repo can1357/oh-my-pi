@@ -16,7 +16,7 @@ import { plainText } from "../native/spans";
 import { errorText, noteText, truncationNotice } from "./native-view";
 import { getMarkdownTheme, type Theme } from "../theme/theme";
 import {
-	describeJsonTree,
+	describeJsonValue,
 	formatArgsInline,
 	JSON_TREE_MAX_DEPTH_COLLAPSED,
 	JSON_TREE_MAX_DEPTH_EXPANDED,
@@ -302,38 +302,46 @@ function mcpHead(title: string, entries: readonly [string, unknown][]): NativeTo
 /**
  * Native counterpart of the ANSI card's Args tree: the complete arguments,
  * folded under an `Args` section because the head summary clips each value.
+ * The host's `json` viewer, when it draws one, lists the arguments with their
+ * containers folded to one-line previews.
  */
-function mcpArgsSection(entries: readonly [string, unknown][]): NativeNode | undefined {
+function mcpArgsSection(entries: readonly [string, unknown][], json: boolean): NativeNode | undefined {
 	if (entries.length === 0) return undefined;
 	return node(
 		"section",
 		{ head: [span("Args", "muted")], collapsible: true, collapsed: true },
-		[describeJsonTree(Object.fromEntries(entries))],
+		[describeJsonValue(Object.fromEntries(entries), { native: json })],
 		"args",
 	);
 }
 
 /** Native MCP call view: the head plus the folded args, inline while pending. */
-export function describeMCPCall(args: Record<string, unknown>, label: string): NativeToolView {
+export function describeMCPCall(
+	args: Record<string, unknown>,
+	label: string,
+	options?: RenderResultOptions,
+): NativeToolView {
 	const entries = visibleMcpArgs(args);
-	const section = mcpArgsSection(entries);
+	const section = mcpArgsSection(entries, options?.json === true);
 	return { tool: mcpHead(label, entries), body: section ? [section] : undefined, inline: true };
 }
 
 const mcpResultMemo = new OwnerMemo<NativeToolView | undefined>();
 
 /**
- * Native MCP result view: JSON output as a JSON tree, Markdown when the
- * preference is on, otherwise the raw text as tool output; the folded Args
- * section follows, so the collapsed preview still leads with the output.
+ * Native MCP result view: JSON output as the host's `json` viewer (when it
+ * draws one) or a JSON tree, Markdown when the preference is on, otherwise
+ * the raw text as tool output; the folded Args section follows, so the
+ * collapsed preview still leads with the output.
  */
 export function describeMCPResult(
 	result: { content: Array<{ type: string; text?: string }>; details?: MCPToolDetails; isError?: boolean },
-	_options: RenderResultOptions,
+	options: RenderResultOptions,
 	args?: Record<string, unknown>,
 ): NativeToolView | undefined {
+	const json = options.json === true;
 	// Callers allocate a fresh args object per streamed delta, so identity is a sound dep.
-	return mcpResultMemo.get(result, [renderMarkdownResults, args], () => {
+	return mcpResultMemo.get(result, [renderMarkdownResults, args, json], () => {
 		const textContent = (result.content ?? [])
 			.filter(block => block.type === "text")
 			.map(block => block.text ?? "")
@@ -355,13 +363,13 @@ export function describeMCPResult(
 		}
 		if (!output) body.push(noteText("(no output)"));
 		else if (isError) body.push(errorText(output));
-		else if (isJson) body.push(describeJsonTree(parsed));
+		else if (isJson) body.push(describeJsonValue(parsed, { native: json }));
 		else if (renderMarkdownResults) body.push(md(output));
 		else body.push(ansi(output));
 		const warning = truncationNotice(result.details?.meta);
 		if (warning) body.push(warning);
 		const entries = visibleMcpArgs(args);
-		const section = mcpArgsSection(entries);
+		const section = mcpArgsSection(entries, json);
 		if (section) body.push(section);
 		return {
 			tool: mcpHead(title, entries),

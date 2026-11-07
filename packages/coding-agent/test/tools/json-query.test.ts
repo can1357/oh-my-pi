@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../../src/config/settings";
 import { resolveLocalUrlToPath } from "../../src/internal-urls";
+import { wrapToolWithMetaNotice } from "../../src/tools/output-meta";
 import { ReadTool } from "../../src/tools/read";
 
 type ToolTextResult = {
@@ -122,10 +123,37 @@ describe("JSON query in read tool", () => {
 		expect(lines).toEqual(["alice", "charlie"]);
 	});
 
+	it("names the byte budget when pretty-printed query output is truncated", async () => {
+		const largeJsonlFile = path.join(tempDir, "large-events.jsonl");
+		await Bun.write(
+			largeJsonlFile,
+			`${JSON.stringify({ id: 0, text: "x".repeat(60_000) })}\n${JSON.stringify({ id: 1, text: "short" })}\n`,
+		);
+
+		const tool = wrapToolWithMetaNotice(new ReadTool(session));
+		const result = await tool.execute("call_large_pretty", { path: `${largeJsonlFile}?q=.&limit=8` });
+		expect(getText(result)).toBe('{\n  "id": 0,\n\n[Showing lines 1-2 of 8 (50.0KB limit). Use :3 to continue]');
+	});
+
 	it("fails cleanly with descriptive error on invalid jq syntax", async () => {
 		await expect(readTool.execute("call_6", { path: `${jsonFile}?q=invalid [[[` })).rejects.toThrow(
 			/Failed to execute JSON query/i,
 		);
+	});
+
+	it("retains the reason and key when jaq rejects a large JSON value", async () => {
+		const largeFile = path.join(tempDir, "large.json");
+		const rows = Array.from({ length: 400 }, (_, index) => ({ label: `row ${index}`, input: "x".repeat(40) }));
+		await Bun.write(largeFile, JSON.stringify([{ rows }]));
+
+		const error = await readTool.execute("large-error", { path: `${largeFile}?q=.changedFiles` }).then(
+			() => null,
+			error => error,
+		);
+		const message = String(error);
+		expect(message).toContain("cannot index");
+		expect(message).toContain('with "changedFiles"');
+		expect(message.length).toBeLessThan(1000);
 	});
 
 	it("reads the file normally without jq query when ?q= is omitted", async () => {

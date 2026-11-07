@@ -315,6 +315,16 @@ export const LLAMA_CPP_TOOL_CALL_PARSE_PATTERN =
 // (both the NaN wording and "detected in generation") so it cannot swallow
 // genuine request-validation 400s.
 const GENERATION_NAN_PATTERN = /floating[ _-]?point nan\b.*\bdetected in generation/is;
+// Aliyun DashScope's compatible-mode multimodal gateway intermittently fails
+// perfectly valid inline image payloads with a validation-flavored 400:
+// "The provided URL does not appear to be valid" or "Download multimodal file
+// timed out" (InternalError.Algo.InvalidParameter). The gateway's internal
+// fetch/decode of the data-URL image flakes; a byte-identical replay of the
+// same payload succeeds (verified against production with the original
+// failing request). Kept narrow to these two gateway phrasings so genuine
+// request-validation 400s stay terminal; the retry budget bounds a truly bad
+// payload to maxRetries attempts before it surfaces anyway.
+export const ALIYUN_MM_GATEWAY_PATTERN = /provided url does not appear to be valid|download multimodal file timed out/i;
 // Anthropic strict-tool grammar too large / schema too complex (400 invalid_request_error).
 // Feature-gated deployments (Azure Foundry, Baseten, …) reject `strict: true`
 // tools outright when the hosted model lacks structured outputs, e.g.
@@ -636,13 +646,16 @@ function classifyText(
 ): number {
 	let kinds = 0;
 	if (errorMessage) {
-		if (matchesOverflowText(errorMessage)) kinds |= Flag.ContextOverflow;
+		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
+		// A 429/402 is a throughput or quota decision, never window excess, even when
+		// worded like one (Bedrock: "429 Too many tokens, please wait…"): overflow would
+		// skip retry and the fallback chain for a compaction that cannot clear a rate cap.
+		if (matchesOverflowText(errorMessage) && !isUsageLimitStatus(statusClean)) kinds |= Flag.ContextOverflow;
 		if (matchesPayloadRejectionText(errorMessage)) kinds |= Flag.PayloadRejected;
 		if (isMalformedFunctionCallText(errorMessage)) kinds |= Flag.MalformedFunctionCall;
 		if (isProviderFinishErrorText(errorMessage)) kinds |= Flag.ProviderFinishError;
 		if (EMPTY_RESPONSE_PATTERN.test(errorMessage)) kinds |= Flag.EmptyResponse | Flag.Transient;
 		if (isContentBlockedText(errorMessage)) kinds |= Flag.ContentBlocked;
-		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
 
 		if (
 			ACCOUNT_POLICY_PATTERN.test(errorMessage) ||
@@ -719,6 +732,9 @@ function classifyText(
 		// Fireworks mid-generation NaN 400 is a model-side decode fault, not a bad
 		// request; a byte-identical replay succeeds, so treat it as transient.
 		if (statusClean === 400 && GENERATION_NAN_PATTERN.test(cleanMessage)) kinds |= Flag.Transient;
+		// Same shape for Aliyun's multimodal gateway: a flaky 400 on valid inline
+		// images — replay succeeds (see the pattern's rationale).
+		if (statusClean === 400 && ALIYUN_MM_GATEWAY_PATTERN.test(cleanMessage)) kinds |= Flag.Transient;
 		if (matchesStrictToolsRejection(cleanMessage, statusClean)) kinds |= Flag.Grammar;
 		if (matchesFastModeUnsupported(cleanMessage, statusClean)) kinds |= Flag.FastModeUnsupported;
 		if (matchesCacheControlRejection(cleanMessage, statusClean)) kinds |= Flag.CacheControlUnsupported;
@@ -1027,7 +1043,10 @@ export function attach<E extends object>(error: E, id: number): E {
 }
 
 /** Overflow-classification evidence, including errors received before token usage is available. */
-export interface ContextOverflowMessage extends Pick<AssistantMessage, "errorId" | "stopReason" | "errorMessage"> {
+export interface ContextOverflowMessage extends Pick<
+	AssistantMessage,
+	"errorId" | "errorStatus" | "stopReason" | "errorMessage"
+> {
 	readonly usage?: Pick<Usage, "input" | "cacheRead" | "cacheWrite" | "contextTokens">;
 }
 
@@ -1050,7 +1069,14 @@ export function isUsageBackedContextOverflow(message: ContextOverflowMessage, co
 export function isContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
 	if (is(message.errorId, Flag.ContextOverflow)) return true;
 	if (isUsageBackedContextOverflow(message, contextWindow)) return true;
-	return message.stopReason === "error" && !!message.errorMessage && matchesOverflowText(message.errorMessage);
+	if (message.stopReason !== "error" || !message.errorMessage || !matchesOverflowText(message.errorMessage)) {
+		return false;
+	}
+	// A rate-limit status (field, raw-status id, or the text's own "429") vetoes
+	// the text arm, as in classifyText: "tokens" wording on a 429/402 is a throughput cap.
+	const errorStatus =
+		message.errorStatus ?? statusFromId(message.errorId) ?? status({ message: message.errorMessage });
+	return !isUsageLimitStatus(errorStatus);
 }
 
 /** HTTP 413 byte/media rejection (#9235); may co-occur with {@link isContextOverflow} for bare `413 (no body)`.

@@ -45,7 +45,10 @@ export const JOB_WIDGET_TONES: readonly TspTone[] = [
  * rules may feed one field.
  */
 export interface JobWidgetRule {
-	/** Source id (`out`, `pipe:1`, `tools`, `bg_7:pipe:1`), `*` for all, a trailing `*` for a prefix (`pipe:*`). */
+	/**
+	 * Source id (`out`, `pipe:1`, `tools`, `bg_7:pipe:1`), `*` for all, a trailing `*` for a prefix
+	 * (`pipe:*`). Wildcards never cover `tools`; see {@link ruleReadsSource}.
+	 */
 	from: string;
 	/** Rust-regex syntax with named groups, matched per line. */
 	match: string;
@@ -251,8 +254,13 @@ export function jobWidgetSkip(value: unknown): string | undefined {
 	return reason.length > 0 ? reason : undefined;
 }
 
-/** Whether a rule's `from` names the source `id`. */
+/**
+ * Whether a rule's `from` names the source `id`. A subagent's `tools` (file
+ * contents, search hits and command output mixed) is read only by a rule
+ * naming it: a wildcard written for a command's output must not reach it.
+ */
 export function ruleReadsSource(from: string, id: string): boolean {
+	if (id === TOOLS_SOURCE_ID) return from === TOOLS_SOURCE_ID;
 	if (from === "*") return true;
 	if (from.endsWith("*")) return id.startsWith(from.slice(0, -1));
 	return from === id;
@@ -451,11 +459,15 @@ function dryRun(
 		if (feeds.size > 0) percentages.set(field, false);
 	}
 	if (seen && matches === 0) {
-		errors.push("no rule matches any sample line; copy the exact text of lines that carry the numbers");
+		const wildcardMissesTools =
+			samples.some(sample => sample.id === TOOLS_SOURCE_ID) && spec.rules.some(rule => rule.from.endsWith("*"));
+		errors.push(
+			`no rule matches any sample line; copy the exact text of lines that carry the numbers${wildcardMissesTools ? ` (a wildcard \`from\` never reads \`${TOOLS_SOURCE_ID}\`: name it)` : ""}`,
+		);
 	}
 	for (const index of marked) {
 		errors.push(
-			`rules[${index}]: matches \`${TOOL_CALL_MARK}<tool> <intent>\` lines, which are omp's markers of the subagent's tool calls, not its output; read the result lines below them, or skip if none show progress`,
+			`rules[${index}]: matches \`${TOOL_CALL_MARK}<tool> <intent>\` lines, which are omp's markers of the subagent's tool calls, not its output; match the literal text of the result lines that report progress, or skip if none do`,
 		);
 	}
 	for (const [field, where] of numeric) {
@@ -745,7 +757,10 @@ function parseBlock(value: unknown, where: string, errors: string[]): JobWidgetB
 						errors.push(`${where}.tones: at most ${MAX_GRID_TONES} entries`);
 						break;
 					}
-					if (typeof tone === "string" && (JOB_WIDGET_TONES as readonly string[]).includes(tone)) {
+					if (status.trim().length === 0) {
+						// An empty status would match every cell, colouring any text as a status.
+						errors.push(`${where}.tones: an empty status matches every cell; name the status word`);
+					} else if (typeof tone === "string" && (JOB_WIDGET_TONES as readonly string[]).includes(tone)) {
 						tones[status] = tone as TspTone;
 					} else {
 						errors.push(`${where}.tones.${status}: expected one of ${JOB_WIDGET_TONES.join(", ")}`);

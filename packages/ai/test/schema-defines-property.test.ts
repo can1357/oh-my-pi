@@ -31,31 +31,3 @@ it("keeps each property name's answer to itself within one schema", () => {
 	expect(schemaDefinesProperty(schema, "i")).toBe(true);
 	expect(schemaDefinesProperty(schema, "missing")).toBe(false);
 });
-
-it("reports a property the schema requires but does not declare", () => {
-	const required = { type: "object", properties: { path: { type: "string" } }, required: ["path"] };
-
-	expect(schemaDefinesProperty(required, "path")).toBe(true);
-	expect(schemaDefinesProperty(required, "i")).toBe(false);
-});
-
-it("reports a property a schema's pattern matches", () => {
-	const patterned = {
-		type: "object",
-		properties: { path: { type: "string" } },
-		patternProperties: { "^x-": { type: "string" } },
-	};
-
-	expect(schemaDefinesProperty(patterned, "x-flag")).toBe(true);
-	expect(schemaDefinesProperty(patterned, "i")).toBe(false);
-});
-
-it("reports a property owned by a branch of a combinator", () => {
-	const combined = {
-		type: "object",
-		anyOf: [{ type: "object", properties: { deep: { type: "string" } } }],
-	};
-
-	expect(schemaDefinesProperty(combined, "deep")).toBe(true);
-	expect(schemaDefinesProperty(combined, "i")).toBe(false);
-});

@@ -13,8 +13,8 @@ import type { Element } from "@oh-my-pi/pi-utils/dom";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../sdk";
-import type { AgentStorage } from "../session/agent-storage";
-import { DEFAULT_MAX_BYTES, truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { AgentStorageApi } from "../session/agent-storage";
+import { DEFAULT_MAX_BYTES, truncateHead, truncateHeadBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
@@ -247,58 +247,13 @@ function isInlineImageMimeTypeSupported(mimeType: string): boolean {
 }
 
 /**
- * Try fetching URL with .md appended (llms.txt convention)
- */
-async function tryMdSuffix(
-	url: string,
-	timeout: number,
-	signal?: AbortSignal,
-): Promise<{ content: string; truncated: boolean } | null> {
-	const candidates: string[] = [];
-
-	try {
-		const parsed = new URL(url);
-		const pathname = parsed.pathname;
-
-		if (pathname.endsWith("/")) {
-			// /foo/bar/ -> /foo/bar/index.html.md
-			candidates.push(`${parsed.origin}${pathname}index.html.md`);
-		} else if (pathname.includes(".")) {
-			// /foo/bar.html -> /foo/bar.html.md
-			candidates.push(`${parsed.origin}${pathname}.md`);
-		} else {
-			// /foo/bar -> /foo/bar.md
-			candidates.push(`${parsed.origin}${pathname}.md`);
-		}
-	} catch {
-		return null;
-	}
-
-	if (signal?.aborted) {
-		return null;
-	}
-
-	for (const candidate of candidates) {
-		if (signal?.aborted) {
-			return null;
-		}
-		const result = await loadPage(candidate, { timeout, signal });
-		if (result.ok && result.content.trim().length > 100 && !looksLikeHtml(result.content)) {
-			return { content: result.content, truncated: Boolean(result.truncated) };
-		}
-	}
-
-	return null;
-}
-
-/**
  * Try to fetch LLM-friendly endpoints
  */
 async function tryLlmEndpoints(
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<{ content: string; endpoint: string; truncated: boolean } | null> {
+): Promise<{ content: string; endpoint: string; finalUrl: string; truncated: boolean } | null> {
 	const endpoints = buildLlmEndpointCandidates(url);
 
 	if (signal?.aborted || endpoints.length === 0) {
@@ -311,7 +266,7 @@ async function tryLlmEndpoints(
 		}
 		const result = await loadPage(endpoint, { timeout: Math.min(timeout, 5), signal });
 		if (result.ok && result.content.trim().length > 100 && !looksLikeHtml(result.content)) {
-			return { content: result.content, endpoint, truncated: Boolean(result.truncated) };
+			return { content: result.content, endpoint, finalUrl: result.finalUrl, truncated: Boolean(result.truncated) };
 		}
 	}
 	return null;
@@ -324,7 +279,7 @@ async function tryContentNegotiation(
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
-): Promise<{ content: string; type: string; truncated: boolean } | null> {
+): Promise<{ content: string; type: string; finalUrl: string; truncated: boolean } | null> {
 	if (signal?.aborted) {
 		return null;
 	}
@@ -339,7 +294,12 @@ async function tryContentNegotiation(
 
 	const mime = normalizeMime(result.contentType);
 	if ((mime.includes("markdown") || mime === "text/plain") && !looksLikeHtml(result.content)) {
-		return { content: result.content, type: result.contentType, truncated: Boolean(result.truncated) };
+		return {
+			content: result.content,
+			type: result.contentType,
+			finalUrl: result.finalUrl,
+			truncated: Boolean(result.truncated),
+		};
 	}
 
 	return null;
@@ -587,6 +547,69 @@ function stripDataUriImages(markdown: string): string {
 	return markdown.replace(DATA_URI_IMAGE_RE, (_match, alt: string) => (alt.trim() ? `![${alt}]` : ""));
 }
 
+/**
+ * Lowercased `<meta>` names whose front-matter line is worth its tokens to a reader; Open Graph,
+ * Twitter Card, viewport and verification tags are not.
+ */
+const READER_META_NAMES: Record<string, true> = {
+	description: true,
+	author: true,
+	"article:published_time": true,
+	"article:modified_time": true,
+};
+
+/** The key of a front-matter line: a plain YAML scalar, which holds no `: `, or a double-quoted one. */
+const FRONT_MATTER_KEY_RE = /^(?:("(?:\\.|[^\\"])*")|([^"][^\n]*?)): /;
+
+/** Omitted `<meta>` names the front matter lists by name; the rest are counted. */
+const MAX_OMITTED_META_NAMES = 25;
+
+/** Reader output at or under this many characters is no rendering of the page. */
+const MIN_RENDERED_CHARS = 100;
+
+/**
+ * Drop the native converter's front-matter lines for `<meta>` tags outside {@link READER_META_NAMES}
+ * (keys `meta-<name>`, YAML-escaped) and name them in one `meta_omitted` line. A page whose only
+ * content is its `<head>` is returned whole.
+ */
+function pruneFrontMatter(markdown: string): string {
+	if (!markdown.startsWith("---\n")) return markdown;
+	const end = markdown.indexOf("\n---\n", 3);
+	if (end < 0) return markdown;
+	const kept: string[] = [];
+	const omitted: string[] = [];
+	for (const line of markdown.slice(4, end).split("\n")) {
+		const key = FRONT_MATTER_KEY_RE.exec(line);
+		// No front matter: the body opens with a `---` rule.
+		if (!key) return markdown;
+		let name: string;
+		try {
+			// The converter's double-quoted escapes are JSON's.
+			name = key[1] === undefined ? key[2] : JSON.parse(key[1]);
+		} catch {
+			return markdown;
+		}
+		if (name.startsWith("meta-") && !Object.hasOwn(READER_META_NAMES, name.slice(5).toLowerCase())) {
+			omitted.push(name.slice(5));
+		} else {
+			kept.push(line);
+		}
+	}
+	if (omitted.length === 0) return markdown;
+	const rest = markdown.slice(end);
+	const head = kept.join("\n");
+	// `renderHtmlToText` already stripped data-URI images, so the length check needs no second pass.
+	if ((head ? `---\n${head}${rest}` : rest.slice(5)).trim().length <= MIN_RENDERED_CHARS) return markdown;
+	const more = omitted.length - MAX_OMITTED_META_NAMES;
+	const note = `${omitted.slice(0, MAX_OMITTED_META_NAMES).join(", ")}${more > 0 ? ` (+${more} more)` : ""}; read the URL with :raw for their values`;
+	// A JSON string is a YAML double-quoted scalar once the characters YAML reads as line breaks are escaped.
+	const value = JSON.stringify(note).replace(
+		/[\u0085\u2028\u2029]/g,
+		c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`,
+	);
+	return `---\n${head ? `${head}\n` : ""}meta_omitted: ${value}${rest}`;
+}
+
 /** Reader backends for {@link renderHtmlToText}, in default priority order. */
 export type FetchProvider = "native" | "trafilatura" | "lynx" | "parallel" | "firecrawl" | "jina";
 
@@ -620,7 +643,7 @@ export async function renderHtmlToText(
 	timeout: number,
 	settings: Settings,
 	userSignal: AbortSignal | undefined,
-	storage: AgentStorage | null,
+	storage: AgentStorageApi | null,
 	fetchOverride?: FetchImpl,
 ): Promise<{ content: string; ok: boolean; method: string }> {
 	const overallSignal = ptree.combineSignals(userSignal, timeout * 1000);
@@ -711,7 +734,7 @@ export async function renderHtmlToText(
 			const rendered = await runners[method]();
 			if (!rendered) continue;
 			const content = stripDataUriImages(rendered);
-			if (content.trim().length <= 100) continue;
+			if (content.trim().length <= MIN_RENDERED_CHARS) continue;
 			if (!isLowQualityOutput(content, method)) {
 				return { content, ok: true, method };
 			}
@@ -1084,7 +1107,7 @@ async function handleSpecialUrls(
 	url: string,
 	timeout: number,
 	signal: AbortSignal | undefined,
-	storage: AgentStorage | null,
+	storage: AgentStorageApi | null,
 	modelRegistry: ModelRegistry | undefined,
 ): Promise<FetchRenderResult | null> {
 	const specialHandlers = await loadSpecialHandlers();
@@ -1111,7 +1134,7 @@ async function renderUrl(
 	raw: boolean,
 	settings: Settings,
 	signal: AbortSignal | undefined,
-	storage: AgentStorage | null,
+	storage: AgentStorageApi | null,
 	modelRegistry: ModelRegistry | undefined,
 	fetchOverride?: FetchImpl,
 	excludeWebP?: true,
@@ -1367,13 +1390,12 @@ async function renderUrl(
 	// HTML extraction) and returns the response body verbatim. Binary-oriented branches
 	// above already ran because raw isn't useful for binary payloads.
 	if (raw) {
-		const output = finalizeOutput(rawContent);
 		return {
 			url,
 			finalUrl,
 			contentType: mime,
 			method: "raw",
-			content: output,
+			content: rawContent,
 			fetchedAt,
 			truncated,
 			notes,
@@ -1435,7 +1457,7 @@ async function renderUrl(
 				const output = finalizeOutput(altResult.content);
 				return {
 					url,
-					finalUrl,
+					finalUrl: altResult.finalUrl,
 					contentType: "text/markdown",
 					method: "alternate-markdown",
 					content: output,
@@ -1446,31 +1468,14 @@ async function renderUrl(
 			}
 		}
 
-		// 5B: Try URL.md suffix (llms.txt convention)
-		const mdSuffix = await tryMdSuffix(finalUrl, timeout, signal);
-		if (mdSuffix) {
-			notes.push("Found .md suffix version");
-			const output = finalizeOutput(mdSuffix.content);
-			return {
-				url,
-				finalUrl,
-				contentType: "text/markdown",
-				method: "md-suffix",
-				content: output,
-				fetchedAt,
-				truncated: mdSuffix.truncated,
-				notes,
-			};
-		}
-
-		// 5C: Content negotiation
+		// 5B: Content negotiation
 		const negotiated = await tryContentNegotiation(url, timeout, signal);
 		if (negotiated) {
 			notes.push(`Content negotiation returned ${negotiated.type}`);
 			const output = finalizeOutput(negotiated.content);
 			return {
 				url,
-				finalUrl,
+				finalUrl: negotiated.finalUrl,
 				contentType: normalizeMime(negotiated.type),
 				method: "content-negotiation",
 				content: output,
@@ -1480,7 +1485,7 @@ async function renderUrl(
 			};
 		}
 
-		// 5D: Check for feed alternates
+		// 5C: Check for feed alternates
 		const feedAlternates = alternates.filter(alt => alt.kind === "feed");
 		for (const alt of feedAlternates.slice(0, 2)) {
 			const resolved = new URL(alt.href, finalUrl).href;
@@ -1491,7 +1496,7 @@ async function renderUrl(
 				const output = finalizeOutput(parsed);
 				return {
 					url,
-					finalUrl,
+					finalUrl: altResult.finalUrl,
 					contentType: "application/feed",
 					method: "alternate-feed",
 					content: output,
@@ -1506,7 +1511,7 @@ async function renderUrl(
 			throw new ToolAbortError();
 		}
 
-		// 5E: Render HTML via the reader-backend chain
+		// 5D: Render HTML via the reader-backend chain
 		// (native/trafilatura/lynx/parallel/firecrawl/jina)
 		const htmlResult = await renderHtmlToText(
 			finalUrl,
@@ -1526,7 +1531,7 @@ async function renderUrl(
 				const output = finalizeOutput(llmResult.content);
 				return {
 					url,
-					finalUrl,
+					finalUrl: llmResult.finalUrl,
 					contentType: "text/plain",
 					method: "llms.txt",
 					content: output,
@@ -1611,7 +1616,10 @@ async function renderUrl(
 			notes.push("Page appears to require JavaScript or is mostly navigation");
 		}
 
-		const output = finalizeOutput(htmlResult.content);
+		// Every check above judged the rendering whole; only the copy returned is pruned.
+		const output = finalizeOutput(
+			htmlResult.method === "native" ? pruneFrontMatter(htmlResult.content) : htmlResult.content,
+		);
 		return {
 			url,
 			finalUrl,
@@ -1738,7 +1746,7 @@ export async function fetchReadUrl(
 		const cutNote = `Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`;
 		result = { ...result, notes: [...result.notes, cutNote] };
 	}
-	const output = buildUrlReadOutput(result, result.content);
+	const output = buildUrlReadOutput(result, result.content, raw);
 	const artifact = options?.ensureArtifact ? await persistReadUrlArtifact(session, output) : undefined;
 
 	return {
@@ -1750,6 +1758,7 @@ export async function fetchReadUrl(
 			finalUrl: result.finalUrl,
 			contentType: result.contentType,
 			method: result.method,
+			raw: raw || undefined,
 			truncated: Boolean(result.truncated),
 			notes: result.notes,
 		},
@@ -1773,7 +1782,8 @@ export async function materializeReadUrlToFile(
 	return { path: contentPath, details: entry.details };
 }
 
-function buildUrlReadOutput(result: FetchRenderResult, content: string): string {
+function buildUrlReadOutput(result: FetchRenderResult, content: string, raw: boolean): string {
+	if (raw) return content;
 	let output = "";
 	output += `URL: ${result.finalUrl}\n`;
 	output += `Content-Type: ${result.contentType}\n`;
@@ -1792,10 +1802,23 @@ export async function executeReadUrl(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<ReadUrlToolDetails>> {
 	let entry = await fetchReadUrl(session, params, signal);
-	const truncation = truncateHead(entry.output, {
+	let truncation = truncateHead(entry.output, {
 		maxBytes: DEFAULT_MAX_BYTES,
 		maxLines: FETCH_DEFAULT_MAX_LINES,
 	});
+	if (truncation.firstLineExceedsLimit) {
+		// `truncateHead` keeps whole lines only, so a minified page's first line left the body empty.
+		// Show that line's head instead, as file reads do; the budget's bytes all lie inside it.
+		const preview = truncateHeadBytes(entry.output, DEFAULT_MAX_BYTES);
+		const newline = entry.output.indexOf("\n");
+		truncation = {
+			...truncation,
+			content: preview.text,
+			totalBytes: Buffer.byteLength(newline === -1 ? entry.output : entry.output.slice(0, newline), "utf-8"),
+			outputLines: preview.bytes > 0 ? 1 : 0,
+			outputBytes: preview.bytes,
+		};
+	}
 	const needsArtifact = truncation.truncated;
 	if (needsArtifact && !entry.artifactId) {
 		entry = await ensureReadUrlArtifact(session, entry);

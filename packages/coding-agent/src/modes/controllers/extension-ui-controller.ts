@@ -27,6 +27,8 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
 	type AskDialogPrompt,
@@ -38,6 +40,7 @@ import { installExtensionComposerShape } from "@oh-my-pi/pi-tui/overlays/compose
 import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
 import { boundPromptTitle, HookEditorComponent, type HookEditorOptions } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
+import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
@@ -137,11 +140,28 @@ export class ExtensionUiController {
 			this.#composerShapeDisposers.push(installExtensionComposerShape(definition));
 		}
 		this.ctx.syncComposerShape();
+		this.ctx.syncExtensionLinks();
 	}
 
 	/** Remove extension-owned composer styles from the process registries. */
 	disposeComposerShapes(): void {
 		for (const dispose of this.#composerShapeDisposers.splice(0)) dispose();
+	}
+
+	/**
+	 * Redraw every transcript component of the reply sent at `timestamp` (one per tool-call segment),
+	 * and the link browser's copy while it is open. A plain terminal cannot repaint rows it already
+	 * moved into scrollback, so a reply with retired rows rebuilds the scrollback, as the
+	 * thinking-visibility toggle does (once the link browser closes, if it covers the screen); one
+	 * still in the live viewport (and any block in Tern's native view) just repaints.
+	 */
+	#rerenderAssistantMessage(timestamp: number): void {
+		if (!cfgExtensionAssistantTextRenderers.get(this.ctx.settings)) return;
+		this.ctx.rerenderInLinkBrowser(timestamp);
+		this.ctx.redrawTranscriptBlocks(
+			this.ctx.chatContainer.children,
+			child => child instanceof AssistantMessageComponent && child.rerenderMessage(timestamp),
+		);
 	}
 
 	/**
@@ -159,6 +179,9 @@ export class ExtensionUiController {
 			approve: (prompt, dialogOptions) => this.showCollabAwareApproval(prompt, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
+			rerenderMessage: timestamp => this.#rerenderAssistantMessage(timestamp),
+			refreshTranscript: ids => this.ctx.refreshTranscriptPresentation(new Set(ids)),
+			getLinkClicksAvailable: extensionLinkClicksAvailable,
 			setStatus: (key, text) => this.setHookStatus(key, text),
 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),
@@ -251,10 +274,13 @@ export class ExtensionUiController {
 			resolvePlanReview: (reviewId, choice, input) => this.ctx.resolvePlanReview(reviewId, choice, input),
 			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
+			sessionModes: this.ctx.sessionModes,
+			keybindings: this.ctx.keybindings,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
+			startLive: options => this.ctx.startRemoteLive(options),
 		};
 		const commandActions: ExtensionCommandContextActions = {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
@@ -482,10 +508,13 @@ export class ExtensionUiController {
 			resolvePlanReview: (reviewId, choice, input) => this.ctx.resolvePlanReview(reviewId, choice, input),
 			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
 			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
+			sessionModes: this.ctx.sessionModes,
+			keybindings: this.ctx.keybindings,
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
 			runEphemeralTurn: args => this.ctx.session.runEphemeralTurn(args),
+			startLive: options => this.ctx.startRemoteLive(options),
 		};
 		const commandActions: ExtensionCommandContextActions = {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
@@ -737,6 +766,7 @@ export class ExtensionUiController {
 							},
 						},
 					);
+					this.ctx.closeLinkBrowser();
 					this.ctx.editorContainer.clear();
 					this.ctx.editorContainer.addChild(dialog);
 					this.ctx.editorContainer.addChild(editor);
@@ -799,16 +829,19 @@ export class ExtensionUiController {
 			let promptResolve: ((value: AskDialogPromptValue | undefined) => void) | undefined;
 			let closed = false;
 			const draftEditor = this.ctx.editor;
+			// A draft in progress when the ask lands keeps the keyboard, so in-flight
+			// typing never answers by accident; up/down hand input to the ask and the
+			// draft stays parked beneath it until the ask closes.
 			const inputGuard =
 				draftEditor.getText().length > 0
 					? {
 							isBlocked: () => draftEditor.getText().length > 0,
 							handleInput: (keyData: string) => draftEditor.handleDraftEdit(keyData),
-							hint: "Finish or clear the current prompt to answer",
+							hint: "typing edits your prompt",
 							// Show the draft's insertion cursor while it owns input; drop it
-							// once the draft clears and the ask controls take over.
-							syncPresentation: () => {
-								draftEditor.focused = draftEditor.getText().length > 0;
+							// once the ask controls take over.
+							syncPresentation: (blocked: boolean) => {
+								draftEditor.focused = blocked;
 							},
 						}
 					: undefined;
@@ -854,6 +887,7 @@ export class ExtensionUiController {
 					() => finishPrompt(undefined),
 					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
 				);
+				this.ctx.closeLinkBrowser();
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(promptEditor);
 				this.ctx.ui.setFocus(promptEditor);
@@ -899,6 +933,7 @@ export class ExtensionUiController {
 					inputGuard,
 				},
 			);
+			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(askDialog);
 			if (inputGuard) this.ctx.editorContainer.addChild(this.ctx.editor);
@@ -1155,6 +1190,7 @@ export class ExtensionUiController {
 					slider: extra?.slider,
 				},
 			);
+			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.hookSelector);
 			this.ctx.ui.setFocus(this.ctx.hookSelector);
@@ -1203,9 +1239,11 @@ export class ExtensionUiController {
 				{
 					timeout: dialogOptions?.timeout,
 					onTimeout: dialogOptions?.onTimeout,
+					secret: dialogOptions?.secret,
 					tui: this.ctx.ui,
 				},
 			);
+			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.hookInput);
 			this.ctx.ui.setFocus(this.ctx.hookInput);
@@ -1244,6 +1282,7 @@ export class ExtensionUiController {
 				() => settle(undefined),
 				{ ...editorOptions, externalEditor: editDialogExternally },
 			);
+			this.ctx.closeLinkBrowser();
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.hookEditor);
 			this.ctx.ui.setFocus(this.ctx.hookEditor);
@@ -1353,6 +1392,7 @@ export class ExtensionUiController {
 					return;
 				}
 				editorReplaced = true;
+				this.ctx.closeLinkBrowser();
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(component);
 				this.ctx.ui.setFocus(component);

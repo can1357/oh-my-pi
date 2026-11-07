@@ -46,7 +46,11 @@ import { recentTranscriptEntries, type TranscriptEntryLike as TranscriptEntry } 
 import { theme } from "../theme/theme";
 import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { ChatTranscriptBuilder } from "../chat/chat-transcript-builder";
-import { TranscriptBrowser, type TranscriptBrowserFrame } from "../chat/transcript-browser";
+import {
+	nearestVisibleOutlineTarget,
+	TranscriptBrowser,
+	type TranscriptBrowserFrame,
+} from "../chat/transcript-browser";
 import { padToWidth } from "../render/utils";
 import { expandKeyHint } from "../render/render-utils";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
@@ -55,6 +59,7 @@ import {
 	appendOutlineEntries,
 	type ComposedColumn,
 	composeOutlineColumn,
+	describedVisibility,
 	type OutlineTarget,
 	isUserTurnEntry,
 	outlineVisibility,
@@ -682,6 +687,21 @@ export class RewindSelectorComponent implements Component {
 		return this.#mainVisible?.[index] ?? true;
 	}
 
+	/**
+	 * Adopt the main path's per-target visibility. A selection on a target
+	 * that shows nothing (the empty turn an interrupt leaves last, a turn the
+	 * expansion toggle collapsed) moves to the nearest one that shows and
+	 * leaves the strip.
+	 */
+	#adoptVisibility(visible: boolean[]): void {
+		this.#mainVisible = visible;
+		const selected = nearestVisibleOutlineTarget(visible, this.#selected);
+		if (selected === this.#selected) return;
+		this.#selected = selected;
+		this.#activeVariant = 0;
+		this.#siblingSelected = 0;
+	}
+
 	// ========================================================================
 	// Native: the transcript as a page
 	// ========================================================================
@@ -694,12 +714,13 @@ export class RewindSelectorComponent implements Component {
 	 * of branch columns, the current path first. The bar is this component's
 	 * own node, docked under the page, so the filter field keeps the caret.
 	 */
-	describeScreen(_cx: DescribeContext): NativeScreen {
-		return { role: "omp.rewind", main: this.#page(), dock: [this] };
+	describeScreen(cx: DescribeContext): NativeScreen {
+		this.#adoptVisibility(describedVisibility(this.#builder.container.children, this.#targets, cx));
+		return { role: "omp.rewind", main: this.#page(cx), dock: [this] };
 	}
 
 	/** The page's blocks, marked for the current outline. */
-	#page(): NativeChild[] {
+	#page(cx: DescribeContext): NativeChild[] {
 		const blocks = this.#builder.container.children;
 		const page: NativeChild[] = [];
 		const filter = this.#filter;
@@ -741,6 +762,9 @@ export class RewindSelectorComponent implements Component {
 		for (let index = 0; index < columns.length; index++) {
 			const column = columns[index]!;
 			const active = this.#activeVariant === index + 1;
+			if (active) {
+				this.#siblingVisible = describedVisibility(column.builder.container.children, column.targets, cx);
+			}
 			const children: NativeChild[] = [this.#columnHead(index + 1, count, column.label)];
 			const picked = active ? this.#siblingSelected : -1;
 			this.#markRun(children, column.builder.container.children, 0, column.targets, picked, column.rootId);
@@ -900,15 +924,8 @@ export class RewindSelectorComponent implements Component {
 		// rows a matching two-column left gutter so blocks never shift while stepping.
 		const children = this.#builder.container.children;
 		const prepared = this.#browser.prepareOutline(children, this.#targets, this.#selected, contentWidth);
-		this.#mainVisible = prepared.visible;
 		this.#mainRows = prepared.childRows;
-		if (prepared.selected !== this.#selected) {
-			// The current target collapsed (e.g. expansion toggle): rest on the
-			// nearest visible one and leave the strip.
-			this.#selected = prepared.selected;
-			this.#activeVariant = 0;
-			this.#siblingSelected = 0;
-		}
+		this.#adoptVisibility(prepared.visible);
 
 		if (this.#filter !== undefined) return this.#filterFrame(this.#filter, prepared.childRows, contentWidth);
 

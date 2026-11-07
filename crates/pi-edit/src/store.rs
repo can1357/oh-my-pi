@@ -2,7 +2,6 @@
 
 use std::{
 	collections::{BTreeSet, HashMap},
-	mem::size_of,
 	path::{Path, PathBuf},
 	sync::{Arc, LazyLock},
 };
@@ -64,10 +63,7 @@ impl Clipboard {
 	/// Merge named registers from a completed transaction.
 	pub fn commit_from(&mut self, fork: &Self) {
 		let Some(named) = &fork.named else { return };
-		self
-			.named
-			.get_or_insert_with(HashMap::new)
-			.extend(named.clone());
+		self.named.get_or_insert_default().extend(named.clone());
 	}
 }
 
@@ -122,6 +118,7 @@ pub fn seen_lines_from_body(body: &str) -> Vec<u32> {
 	seen
 }
 
+#[derive(Clone)]
 struct StoredSnapshot {
 	snapshot: Snapshot,
 }
@@ -145,6 +142,7 @@ impl StoredSnapshot {
 	}
 }
 
+#[derive(Clone)]
 struct PathHistory {
 	versions: Vec<StoredSnapshot>,
 	touched:  u64,
@@ -162,6 +160,7 @@ impl PathHistory {
 	}
 }
 
+#[derive(Clone)]
 struct StoreState {
 	histories:       HashMap<PathBuf, PathHistory>,
 	clipboard:       Clipboard,
@@ -204,6 +203,15 @@ impl EditStore {
 	pub fn with_limits(max_paths: usize, max_versions: usize, max_total_bytes: usize) -> Self {
 		let state = StoreState { max_paths, max_versions, max_total_bytes, ..StoreState::default() };
 		Self { inner: Arc::new(Mutex::new(state)) }
+	}
+
+	/// Independent copy of the current state (snapshot texts are shared, not
+	/// copied). A dry-run staging pass works against a fork: staging records
+	/// reveals, reply provenance, and clipboard registers, and none of that may
+	/// outlive a probe — a consumed unseen-lines reveal would let the real
+	/// apply through.
+	pub fn fork(&self) -> Self {
+		Self { inner: Arc::new(Mutex::new(self.inner.lock().clone())) }
 	}
 
 	/// Record normalized text under a canonical path and return its tag.
@@ -305,7 +313,7 @@ impl EditStore {
 	pub fn versions(&self, path: &Path) -> Vec<Snapshot> {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
-		state.histories.get(path).map_or_else(Vec::new, |history| {
+		state.histories.get(path).map_or_default(|history| {
 			history
 				.versions
 				.iter()
@@ -439,8 +447,7 @@ impl EditStore {
 fn merge_seen(snapshot: &mut Snapshot, lines: Option<&[u32]>) {
 	let Some(lines) = lines else { return };
 	// Copies the set only while a lookup still holds the previous version.
-	Arc::make_mut(snapshot.seen_lines.get_or_insert_with(Arc::default))
-		.extend(lines.iter().copied());
+	Arc::make_mut(snapshot.seen_lines.get_or_insert_default()).extend(lines.iter().copied());
 }
 
 fn touch(state: &mut StoreState, path: &Path) {
