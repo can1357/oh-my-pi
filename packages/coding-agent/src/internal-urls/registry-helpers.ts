@@ -4,12 +4,20 @@
  */
 
 import type { Dirent } from "node:fs";
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
 
 const extraArtifactsDirs = new Set<string>();
+/**
+ * Registered dirs this process created under the OS temp dir and must delete
+ * again. A retained lease deliberately outlives its run so `agent://<id>`
+ * keeps resolving, but nothing resolves it once the process is gone, so the
+ * process is its hard upper bound.
+ */
+const temporaryArtifactsDirs = new Set<string>();
+let exitSweepArmed = false;
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
 const MAX_SCAN_DEPTH = 8;
 
@@ -20,8 +28,57 @@ export function registerArtifactsDir(dir: string): () => void {
 	};
 }
 
+/**
+ * Register a directory this process created under the OS temp dir to back
+ * `agent://`/`history://`, and take responsibility for deleting it.
+ *
+ * Same resolution behaviour as {@link registerArtifactsDir}, plus a bound on
+ * the directory's life: whatever still holds a lease when the process exits is
+ * removed then. Without it a lease held past its run — a retained subagent
+ * handle, a vibe worker, a run killed by a signal mid-flight — stays on disk
+ * forever, long after the only process that could resolve it has gone.
+ *
+ * The returned callback drops the lease; an owner that removes the directory
+ * earlier (an async job row disposing its retained artifacts) calls it then.
+ */
+export function registerTemporaryArtifactsDir(dir: string): () => void {
+	const unregister = registerArtifactsDir(dir);
+	temporaryArtifactsDirs.add(dir);
+	armExitSweep();
+	return () => {
+		temporaryArtifactsDirs.delete(dir);
+		unregister();
+	};
+}
+
+function armExitSweep(): void {
+	if (exitSweepArmed) return;
+	exitSweepArmed = true;
+	// `exitOnly`: a keep-alive cleanup pass leaves the process running, and its
+	// live handles still need these directories.
+	postmortem.register("temporary-artifacts", sweepTemporaryArtifactsDirs, { exitOnly: true });
+}
+
+/**
+ * Delete every temporary artifacts directory this process still holds, and
+ * drop its registration. Runs at process exit; synchronous because the `exit`
+ * event runs no asynchronous work.
+ */
+export function sweepTemporaryArtifactsDirs(): void {
+	for (const dir of temporaryArtifactsDirs) {
+		temporaryArtifactsDirs.delete(dir);
+		extraArtifactsDirs.delete(dir);
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+		} catch (err) {
+			logger.warn("Temporary artifacts directory could not be removed at exit", { dir, err });
+		}
+	}
+}
+
 export function resetRegisteredArtifactDirsForTests(): void {
 	extraArtifactsDirs.clear();
+	temporaryArtifactsDirs.clear();
 }
 
 /**
@@ -157,7 +214,7 @@ export async function sessionFilesFromDisk(
 /** Directory entries of `dir`, or null when it is missing or not a directory. */
 async function readDirEntries(dir: string): Promise<Dirent[] | null> {
 	try {
-		return await fs.readdir(dir, { withFileTypes: true });
+		return await fs.promises.readdir(dir, { withFileTypes: true });
 	} catch (err) {
 		if (isEnoent(err) || (err as NodeJS.ErrnoException).code === "ENOTDIR") return null;
 		throw err;
@@ -199,7 +256,7 @@ export async function hasResolvableTranscript(agentId: string): Promise<boolean>
 /** True when `file` exists and is a regular file; never throws. */
 async function isReadableFile(file: string): Promise<boolean> {
 	try {
-		const stat = await fs.stat(file);
+		const stat = await fs.promises.stat(file);
 		return stat.isFile();
 	} catch {
 		return false;

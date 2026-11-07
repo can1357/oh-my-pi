@@ -130,6 +130,8 @@ export class WorkPool {
 	#poolJobStarted = false;
 	readonly #drainWaiters: PromiseWithResolvers<void>[] = [];
 	readonly #freshQueue: WorkPoolItem[] = [];
+	/** Disposal closures for worker artifacts directories the pool job owns. */
+	readonly #retainedArtifacts = new Set<() => Promise<void>>();
 
 	constructor(session: ToolSession, options: WorkPoolCreateOptions) {
 		this.name = options.name;
@@ -397,6 +399,7 @@ export class WorkPool {
 							workPoolYieldItems,
 							keepAlive: true,
 							retainArtifacts: true,
+							onArtifactsRetained: cleanup => this.#ownRetainedArtifacts(cleanup),
 							enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 							signal,
 							onProgress,
@@ -432,6 +435,38 @@ export class WorkPool {
 		batch.jobId = jobId;
 		agent.jobId = jobId;
 		manager.watchJobs([jobId]);
+	}
+
+	/**
+	 * Take ownership of a worker's retained temporary artifacts directory.
+	 *
+	 * A pool worker is keep-alive: the directory leased on its first turn is
+	 * the only home its `agent://<id>` output has for the rest of the pool's
+	 * life, and later turns write to the session's own artifacts dir. So the
+	 * aggregate pool job owns it, not the single turn that leased it — the
+	 * manager disposes it once that row's result is delivered and evicted.
+	 */
+	#ownRetainedArtifacts(cleanup: () => Promise<void>): void {
+		const job = this.session.asyncJobManager?.getJob(this.name);
+		if (!job) {
+			void cleanup();
+			return;
+		}
+		this.#retainedArtifacts.add(cleanup);
+		job.retainedArtifactsCleanup = () => this.#disposeRetainedArtifacts();
+	}
+
+	async #disposeRetainedArtifacts(): Promise<void> {
+		const pending = [...this.#retainedArtifacts];
+		this.#retainedArtifacts.clear();
+		for (const settled of await Promise.allSettled(pending.map(cleanup => cleanup()))) {
+			if (settled.status === "rejected") {
+				logger.warn("workpool: retained artifacts cleanup failed", {
+					pool: this.name,
+					error: settled.reason instanceof Error ? settled.reason.message : String(settled.reason),
+				});
+			}
+		}
 	}
 
 	async #settleTurn(agent: WorkPoolAgent, batch: WorkPoolBatch, result: TurnOutcome): Promise<string> {
