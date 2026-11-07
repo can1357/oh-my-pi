@@ -46,7 +46,10 @@ use std::{
 	fmt, io,
 	path::{Path, PathBuf},
 	pin::Pin,
-	sync::{Arc, LazyLock},
+	sync::{
+		Arc, LazyLock,
+		atomic::{AtomicBool, Ordering},
+	},
 	task::{Context, Poll},
 };
 
@@ -58,6 +61,73 @@ pub use tree::{Event, Follow, Order, Tree, TreeEntry, TreeOptions};
 pub(crate) use self::parallel::Sink;
 use self::{arena::Arena, parallel::Stored};
 use crate::fs::{Detail, Dir, FileType, Fs, Session};
+
+/// A caller's handle on one walk's stop flag.
+///
+/// A walk ends on a flag of its own, which [`walk`] and [`collect`] set when
+/// their consumer is dropped. Handing the caller a clone of that same flag
+/// lets it end the walk from its own frame, with no scheduler turn in
+/// between. That is the difference that matters when the walk is driven by a
+/// task on a saturated runtime: dropping the caller can only abort that task,
+/// and the abort reaches the walk when a worker next polls it, which is not
+/// until the workers come back out of their filesystem syscalls.
+///
+/// The flag is read before each directory and before each directory record,
+/// ahead of the prune and ignore filters, so a worker partway through a
+/// wholly ignored directory stops at its next record rather than at the end
+/// of it.
+///
+/// One per walk: a flag that is already set stops its walk at once, and a
+/// flag shared between walks stops all of them. The serial [`Tree`] does not
+/// read it.
+#[derive(Clone, Debug, Default)]
+pub struct Stop(Arc<AtomicBool>);
+
+impl Stop {
+	/// A flag that is not set.
+	#[must_use]
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Ends the walk holding this flag at its next directory or record.
+	pub fn stop(&self) {
+		self.0.store(true, Ordering::Relaxed);
+	}
+
+	/// Whether the walk has ended, whether through this flag or on its own.
+	#[must_use]
+	pub fn stopped(&self) -> bool {
+		self.0.load(Ordering::Relaxed)
+	}
+
+	/// Ends the walk when the returned guard is dropped. Kept in the frame
+	/// that owns the walk, this makes dropping that frame stop the walk
+	/// there and then.
+	#[must_use]
+	pub const fn on_drop(self) -> StopOnDrop {
+		StopOnDrop(self)
+	}
+}
+
+/// Two handles are the same flag, not two flags that happen to agree.
+impl PartialEq for Stop {
+	fn eq(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.0, &other.0)
+	}
+}
+
+impl Eq for Stop {}
+
+/// The guard [`Stop::on_drop`] returns.
+#[derive(Debug)]
+pub struct StopOnDrop(Stop);
+
+impl Drop for StopOnDrop {
+	fn drop(&mut self) {
+		self.0.stop();
+	}
+}
 
 /// Traversal options shared by [`walk`] and [`collect`]. The default walks
 /// everything except hidden entries, honouring no ignore files.
@@ -91,6 +161,10 @@ pub struct Options {
 	/// Reuse unchanged directories' listings from earlier walks ([`cache`]).
 	/// Only [`Detail::Minimal`] native walks consult it.
 	pub cache:             bool,
+	/// The flag this walk ends on, when the caller wants to hold a clone and
+	/// end the walk from its own frame ([`Stop`]). The walk makes its own
+	/// otherwise.
+	pub stop:              Option<Stop>,
 }
 
 impl Options {
