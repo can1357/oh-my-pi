@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool's `. file args` leaking a sourced file's `shift` or `set --` into its caller, and discarding a file's own arguments when it ended on them ([#18172](https://github.com/can1357/oh-my-pi/pull/18172))
+- Fixed `FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV` and `caller` being empty inside the operand of a host callout (`timeout`, `nohup`, `env`, `ifne`, `xargs`, `find -exec`, `git`) ([#18172](https://github.com/can1357/oh-my-pi/pull/18172))
+- Fixed a host callout replacing `"$@"` for its operand and for the operand's EXIT trap, so `getopts`, `shift`, `set --` and `trap 'rm -f "$@"' EXIT` inside one now act on the caller's parameters ([#18172](https://github.com/can1357/oh-my-pi/pull/18172))
+- Fixed a caller's alias, function or DEBUG trap reaching the private command a host callout runs its operand with, and `$BASH_COMMAND` and `set -x` reporting that command instead of the operand's own ([#18172](https://github.com/can1357/oh-my-pi/pull/18172))
+- Fixed the bash tool's `BASH_ARGC` and `BASH_ARGV` showing one call level's arguments for every level, and `declare -p`, a nameref and a key read of them missing the live call stack or freezing the wrong positional parameters ([#18237](https://github.com/can1357/oh-my-pi/pull/18237))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed

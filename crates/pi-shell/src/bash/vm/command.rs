@@ -14,15 +14,15 @@ use std::{
 use bstr::{BStr, BString};
 
 use super::{
-	CallOutcome, Cx, Kernel, ToolCall, assign_scope,
+	CallOutcome, Cx, Kernel, Launch, LaunchHow, ToolCall, assign_scope,
 	builtins::{self, Chunk, Control, Ctx, Lhs, Need},
 	exec::{self, Flow, expanding, line_of},
 	expand::{CompoundElem, Expander, Stop, compound_text},
 	probe::{self, Search, absolute, candidates},
 	proc::{
-		AssignValue, Awaited, BangStage, DeferPhase, ExecAs, ExecState, Frame, FrameKind, JobState,
-		Live, PathSearch, PendingWrite, Probe, ProbeResult, Scratch, ScriptKind, Slot, Stage, Target,
-		Transfer, Vproc,
+		AssignValue, Awaited, BangStage, Carrier, DeferPhase, ExecAs, ExecState, Frame, FrameKind,
+		JobState, Live, PathSearch, PendingWrite, Probe, ProbeResult, Scratch, ScriptKind, Slot,
+		Stage, Target, Transfer, Vproc,
 	},
 	state::{self, Level, Scope, Var, VarMap},
 	xtrace,
@@ -194,11 +194,18 @@ pub fn exec(
 	// alone: a block ended the slice (`run_slice` starts stale), and a called
 	// frame's ops kept it current, so a `FuncExit` shares the reading of the
 	// function's last `CmdEnd`.
+	// No command of a host callout's synthetic script takes a fast path
+	// while that script's own command is still to run: the operand's words
+	// replace the carrier's at one point in `expand`, so there is exactly
+	// one place where they can be read, and the engine's own commands in
+	// that script (which all run before it) go through the lookup that
+	// keeps them out of the caller's function table.
 	if vp
 		.frames
 		.last()
 		.and_then(|f| f.scratch.as_ref())
 		.is_none_or(|s| s.exec.is_none())
+		&& vp.runs.front().is_none_or(|r| !r.launch.pending())
 		&& let Some(flow) = assignment_statement(k, vp, cx, unit, op, line)
 			.or_else(|| plain_statement(k, vp, cx, unit, op, line))
 	{
@@ -850,6 +857,11 @@ fn expand(
 	if unit.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		zsh_last_arg(k, vp, cx);
 	}
+	// The engine's own carrier command has no words of its own, so its
+	// launch has to become its words before anything decides what kind of
+	// command this is: a word-less command is otherwise a statement of
+	// assignments and redirections.
+	take_launch(k, cx, vp);
 	let assign_only = st(vp).argv.is_empty();
 	if !assign_only && !cmd.assigns.is_empty() && !st(vp).scoped {
 		// The command's temporary scope: each prefix assignment enters it
@@ -1117,6 +1129,19 @@ fn expand(
 		s.assigns.push((name, shown));
 		s.values.push((index, value));
 	}
+	// There is deliberately no `take_launch` here. The carrier the engine
+	// builds has no assignments, no words and no substitutions, so it
+	// cannot suspend in the assignment stage and arrive with a launch
+	// still pending; the one call, in the word stage, is the only reader.
+	// Measured rather than asserted on paper: with a `debug_assert!` at
+	// this point the whole Rust suite ran 6,555 tests without reaching it
+	// once. The assertion stays, so a future resume path that does reach
+	// it fails loudly in a debug build instead of silently taking a
+	// launch at the wrong moment.
+	debug_assert!(
+		Carrier::of(vp).is_none(),
+		"the assignment stage reached a carrier with a pending launch"
+	);
 	let s = st(vp);
 	if assign_only {
 		// `$?` of `x=$(cmd)` is the status of the last substitution.
@@ -1155,6 +1180,114 @@ fn expand(
 		}
 	}
 	None
+}
+
+/// Give the carrier command of a host callout the operand's words, the
+/// dispatch the host asked for, and the operand's own text.
+///
+/// The run carries them ([`Script::launch`](crate::bash::Script::launch))
+/// and this is the only reader. It runs once, between the expansion of a
+/// command's words and everything that reads them — the `CmdExpanded`
+/// event, `set -x`, the redirections, the name lookup and the command
+/// itself — so the operand's own words are what every one of them sees,
+/// and the slot is empty before any code of the operand runs. The
+/// operand's words are therefore never positional parameters and never
+/// part of a compiled unit's source: the subshell keeps its caller's
+/// parameters, as the `( … )` subshell a callout stands for does, and one
+/// unit serves every call.
+///
+/// Nothing of the carrier reaches the user. It has no words at all, so
+/// there is no name to resolve, nothing for an alias to rewrite and no
+/// source text to read; what `BASH_COMMAND`, the DEBUG and ERR traps and
+/// the trace report is the operand's own text, which
+/// [`exec::note_command`] records before the first of them can read it.
+///
+/// The carrier is recognised by [`Carrier`]: the innermost frame is this
+/// run's own script frame and the unit it runs is the one the engine
+/// built for this launch, matched by content address. The other commands
+/// a synthetic script may carry (`env -i`'s unset sweep, its `export`
+/// assignments) run in that same frame from a different unit, so they
+/// cannot ask, and a trap, a function or an operand runs a frame deeper.
+fn take_launch(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
+	let Some(carrier) = Carrier::of(vp) else {
+		return;
+	};
+	let Some(launch) = vp.runs.front_mut().and_then(|r| r.launch.take(carrier)) else {
+		return;
+	};
+	let zsh = vp.mode.dialect() == crate::bash::ids::Dialect::Zsh;
+	// zsh `exec` is a precommand modifier: a function or builtin of the
+	// name runs (and then the shell exits); only `posixbuiltins` limits it
+	// to externals, as `exec_builtin` has it.
+	let externals_only =
+		!zsh || state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Posixbuiltins).unwrap_or(false);
+	let cwd = vp.cwd.clone();
+	let s = st(vp);
+	s.argv = launch.argv;
+	s.arrayref.clear();
+	match launch.how {
+		LaunchHow::Plain => {},
+		// What `command --` did as words, without the word: the lookup
+		// skips the caller's function table and a special builtin's
+		// failure does not end a posix shell.
+		LaunchHow::Builtin => s.via_command = true,
+		// What `exec -a name --` did as words: the program replaces the
+		// subshell and is presented as `name`.
+		// A `Launch` reaches this from a public `Script`, so an empty word
+		// list is a caller's input rather than an invariant: there is then
+		// no program to exec and no name to present, and the carrier
+		// degrades to the assignment-only statement a word-less command
+		// is, exactly as the `Plain` arm leaves it.
+		LaunchHow::Exec { argv0 } => {
+			let Some(name) = s.argv.first().cloned() else {
+				return;
+			};
+			s.target = externals_only.then(|| {
+				if name.contains(&b'/') {
+					Target::External(absolute(&cwd, &name))
+				} else {
+					Target::Search
+				}
+			});
+			s.exec_as =
+				Some(Box::new(ExecAs { clear_env: false, login: false, argv0: Some(argv0) }));
+			s.control = Some(Transfer::Exec);
+		},
+	}
+}
+
+/// A host callout's operand as the shell prints a command: each word as
+/// `set -x` prints it ([`xtrace::push_word`], bash's `printable_filename`
+/// over a word list, with a zero-length word as `''`), and the name the
+/// program is presented as (`exec -a`) rather than the path it was
+/// resolved to.
+pub(super) fn launch_text(launch: &Launch, utf8: bool) -> BString {
+	let mut out: Vec<u8> = Vec::new();
+	for (i, word) in launch.argv.iter().enumerate() {
+		if i > 0 {
+			out.push(b' ');
+		}
+		let word = match (i, &launch.how) {
+			(0, LaunchHow::Exec { argv0 }) => argv0.as_slice(),
+			_ => word.as_slice(),
+		};
+		xtrace::push_word(&mut out, word, utf8);
+	}
+	BString::from(out)
+}
+
+/// Whether the command about to run is one the engine itself wrote into a
+/// host callout's synthetic source
+/// ([`Script::engine_source`](crate::bash::Script::engine_source)): its
+/// `env` environment changes, which run in the run's own script frame and
+/// all of them before the carrier command takes the run's launch.
+///
+/// Those words are the engine's, so they resolve to the shell's builtins
+/// and never to a caller's function of the same name. The operand is not
+/// one of them: by the time it is looked up the launch is taken, and
+/// anything it calls runs in a frame of its own.
+fn engine_private(vp: &Vproc) -> bool {
+	vp.in_engine_script()
 }
 
 /// `$(< file)`: read fd 0 (the redirected file) to its end and queue it
@@ -1838,7 +1971,21 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 		let mode = exec::mode_of(vp);
 		let posix = state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 			.unwrap_or(false);
-		let mut via = Via::Plain;
+		// A host callout whose operand runs as `command` does it
+		// ([`LaunchHow::Builtin`], seeded on this state before the lookup):
+		// no function of the operand's name runs. The word `command` would
+		// mean an external of that name in the zsh dialect
+		// (`BINF_COMMAND`), which is not what a utility that resolved its
+		// operand to a builtin asked for, so the dispatch says what was
+		// meant and no word is read for it.
+		let mut via = if st(vp).via_command {
+			Via::Command
+		} else {
+			Via::Plain
+		};
+		// A command of the engine's own source resolves to the shell's
+		// builtin, never to a caller's function of the same name.
+		let engine_cmd = engine_private(vp);
 		let target = loop {
 			// Borrowed (the resolution only reads `vp`): no copy of the
 			// name per command.
@@ -1876,7 +2023,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 				false
 			};
 			// Outside posix mode a function name may contain a slash.
-			if via == Via::Plain && (!has_slash || !posix) && !special {
+			if via == Via::Plain && !engine_cmd && (!has_slash || !posix) && !special {
 				let found = match state::record(cx.store, vp, Key::Func(BStr::new(name))) {
 					Ok(Some(Record::Func { .. })) => true,
 					Ok(_) => false,

@@ -680,12 +680,17 @@ impl Inner {
 						.unit_index(ev.vpid, node.unit)
 						.map(|u| (u, node.node.0))
 				})
+				// A node with no width is a placeholder the lowering left
+				// behind, not a command — except in a unit the engine built
+				// itself ([`ir::launch_unit`]), which has no source bytes at
+				// all and whose one node is the command that ran.
 				.filter(|&(u, n)| {
-					self
-						.units
-						.get(u as usize)
-						.and_then(|unit| unit.nodes.get(n as usize))
-						.is_some_and(|node| node.hi > node.lo)
+					self.units.get(u as usize).is_some_and(|unit| {
+						unit
+							.nodes
+							.get(n as usize)
+							.is_some_and(|node| node.hi > node.lo || unit.source.is_empty())
+					})
 				});
 			let command = ev.command_tag();
 			if matches!(ev.data, EventData::Assign { .. })

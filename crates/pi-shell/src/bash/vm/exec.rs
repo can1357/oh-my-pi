@@ -15,9 +15,9 @@ use super::{
 	expand::{self, Expander, Stop},
 	is_ident, probe,
 	proc::{
-		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, LastBg,
-		LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run, Saved,
-		Scratch, ScriptKind, Slot, TryEnd, Vproc,
+		AssignValue, Atom, Bang, BangStage, Carrier, CmdSite, Coproc, Depths, Frame, FrameKind,
+		InlineStage, LastBg, LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe,
+		ProbeResult, Run, Saved, Scratch, ScriptKind, Slot, TryEnd, Vproc,
 	},
 	redir,
 	state::{self, Level, Root, Scope, Var, VarMap},
@@ -203,7 +203,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 		let starts = starts_command(unit, op);
 		let fresh = vp.frames[fi].scratch.is_none();
 		if fresh && starts {
-			note_command(vp, unit, op);
+			note_command(k, cx, vp, unit, op);
 		}
 		// bash's DEBUG trap: before a simple command, `[[ ]]`, `(( ))`, each
 		// arith-for expression, a `case` or `select` command and each `for`
@@ -570,19 +570,39 @@ pub fn set_trap_line(vp: &mut Vproc, line: u32) {
 /// Record the command `op` starts (a simple command, `[[ ]]` or `(( ))`:
 /// the caller checked [`starts_command`]) as `BASH_COMMAND`; not while a
 /// trap action runs (bash keeps the trapped command).
-fn note_command(vp: &mut Vproc, unit: &Arc<Unit>, op: Op) {
+///
+/// A host callout's carrier command is recorded as its operand's own text
+/// instead ([`CmdSite::Text`]), from this first reader on: the DEBUG trap
+/// runs before the command's words are expanded, so an empty text would
+/// otherwise be what it reports. The carrier is the command the engine
+/// built for this run ([`Carrier`]) — its own frame and its own unit, not
+/// a name and not a word of source — and the run still carries the
+/// operand until that command expands.
+fn note_command(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, unit: &Arc<Unit>, op: Op) {
 	if vp.trap_frames == 0
 		|| !vp
 			.frames
 			.iter()
 			.any(|f| matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. }))
 	{
-		if let Some((u, node)) = &mut vp.command
+		if let Some(carrier) = Carrier::of(vp) {
+			let utf8 = super::locale::is_utf8(k, cx.store, vp);
+			let text = vp
+				.runs
+				.front()
+				.and_then(|r| r.launch.peek(&carrier))
+				.map(|launch| command::launch_text(launch, utf8));
+			if let Some(text) = text {
+				vp.command = Some(CmdSite::Text(Box::new(text)));
+				return;
+			}
+		}
+		if let Some(CmdSite::Node(u, node)) = &mut vp.command
 			&& Arc::ptr_eq(u, unit)
 		{
 			*node = op.node;
 		} else {
-			vp.command = Some((Arc::clone(unit), op.node));
+			vp.command = Some(CmdSite::Node(Arc::clone(unit), op.node));
 		}
 	}
 }
@@ -942,6 +962,15 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		},
 		_ => (false, false),
 	};
+	// The engine's own source ([`Script::engine_source`]) is parsed without
+	// the shell's aliases: a caller's alias — of a host callout's carrier
+	// word, of the `unset` of its environment sweep, of a keyword in it —
+	// must not rewrite bytes the user never wrote. bash has no such source,
+	// so there is nothing to match.
+	let engine = matches!(
+		vp.frames.last().map(|f| &f.kind),
+		Some(FrameKind::Script { what: ScriptKind::Run, .. })
+	) && vp.runs.front().is_some_and(|r| r.engine);
 	let (feat, mut aliases) = if snapped {
 		(Features::NONE, None)
 	} else {
@@ -952,12 +981,16 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 				return None;
 			},
 		};
-		match builtins::alias_table(k, cx, vp) {
-			Ok(a) => (feat, a),
-			Err(err) => {
-				k.fail(err);
-				return None;
-			},
+		if engine {
+			(feat, None)
+		} else {
+			match builtins::alias_table(k, cx, vp) {
+				Ok(a) => (feat, a),
+				Err(err) => {
+					k.fail(err);
+					return None;
+				},
+			}
 		}
 	};
 	let mode = vp.mode;
@@ -1056,6 +1089,34 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 				top_frame(vp).scratch = Some(sc);
 				return Some(key);
 			}
+		}
+		// The one command of a host callout's synthetic script is not in
+		// that script: when the engine's own source (an `env` environment
+		// sweep, or nothing at all) has run out, the engine installs the
+		// command it built for the run's launch ([`ir::launch_unit`]). It
+		// has no words, so there is nothing in it to alias, shadow, trap
+		// or read, and its content address — not a name — is what lets
+		// [`Carrier`] recognise it. It is installed once: `carrier` is set
+		// here and the frame pops on the next pass.
+		let carrier_dups = vp
+			.in_engine_script()
+			.then(|| {
+				vp.runs
+					.front()
+					.filter(|r| r.carrier.is_none())
+					.map(|r| r.launch.dups())
+			})
+			.flatten();
+		if let Some(dups) = carrier_dups {
+			let unit = k.engine.intern(ir::launch_unit(mode, feat.bits(), &dups));
+			if let Some(run) = vp.runs.front_mut() {
+				run.carrier = Some(unit.id);
+			}
+			let frame = top_frame(vp);
+			frame.unit = Some(Arc::clone(&unit));
+			frame.pc = 0;
+			announce(k, cx, vp.vpid, vp.runs.front(), &unit, 1);
+			return None;
 		}
 		let frame = top_frame(vp);
 		let (status, source, cancel, return_target, exit) = match frame.kind {
@@ -1256,7 +1317,11 @@ pub(super) fn literal_script_origin(
 	source: &[u8],
 	shell: bool,
 ) -> Option<crate::bash::event::SourceOrigin> {
-	let (unit, node) = vp.command.as_ref()?;
+	// A host callout's operand has no syntax of its own
+	// ([`CmdSite::Text`]): nothing here can be proved fixed for it.
+	let Some(CmdSite::Node(unit, node)) = vp.command.as_ref() else {
+		return None;
+	};
 	let op = unit
 		.ops
 		.iter()
@@ -2696,7 +2761,7 @@ fn control_flow(
 				return None;
 			}
 			if starts {
-				note_command(vp, unit, op);
+				note_command(k, cx, vp, unit, op);
 			}
 			let f = top_frame(vp);
 			if starts {
@@ -4646,9 +4711,16 @@ pub const ENTRY_DEBUG: u32 = u32::MAX;
 
 /// Start the RETURN trap of function or `.` frame `target`, the frames
 /// above it to unwind when it ends. Its `$LINENO` is the function body's
-/// line, or the line of the `.` command, whose level of the call-stack
-/// arrays has already ended (bash runs it after `_evalfile`). `false` when
-/// no trap runs.
+/// line, or the line of the `.` command.
+///
+/// bash runs a `.` file's RETURN trap from `_evalfile`, which has already
+/// popped the file's `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO` level, and
+/// before `source_builtin` puts the positional parameters back and pops
+/// the `BASH_ARGV` push. So the level is ended here
+/// ([`super::callstack::end_source`]) rather than truncated, and the trap
+/// sees the file's own parameters and its argument push; the unwind that
+/// follows pops the frame and puts the parameters back. Measured on Bash
+/// 5.2.21 and 5.3.0.
 fn return_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) -> bool {
 	let body = match &vp.frames[target] {
 		Frame { kind: FrameKind::Function { .. }, unit: Some(unit), .. } => {
@@ -4658,7 +4730,8 @@ fn return_trap(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) -
 	};
 	let line = body.or_else(|| {
 		let line = super::callstack::source_line(vp, target + 1);
-		super::callstack::truncate(&mut k.root, cx.store, vp, target);
+		super::callstack::truncate(&mut k.root, cx.store, vp, target + 1);
+		super::callstack::end_source(vp, target + 1);
 		line
 	});
 	if !start_trap(k, vp, cx, TrapKey::Return) {

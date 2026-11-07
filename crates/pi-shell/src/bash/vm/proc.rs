@@ -83,14 +83,23 @@ pub struct Vproc {
 	/// nested shell). A field, not an overlay record: a record would cost
 	/// every subshell a ~530-byte map allocation (idle vproc ≤ 2 KiB).
 	pub subshell:      u32,
-	/// The command being run (`BASH_COMMAND`): its unit and syntax node.
-	/// Externalized by unit id (a trap action continuing after a restore
-	/// still names the trapped command).
-	pub command:       Option<(Arc<Unit>, u32)>,
+	/// The command being run (`BASH_COMMAND`): where its text comes from.
+	/// A node is externalized by unit id (a trap action continuing after a
+	/// restore still names the trapped command).
+	pub command:       Option<CmdSite>,
 	/// Pushes onto bash's call-stack arrays (`FUNCNAME`, `BASH_SOURCE`,
 	/// `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`), oldest first; a subshell
 	/// starts with its parent's.
 	pub calls:         Vec<super::callstack::Call>,
+	/// bash's `changed_dollar_vars & ARGS_SETBLTIN`: the `set` builtin
+	/// replaced the positional parameters outside any function since the
+	/// innermost `.` file started. A `.` file with arguments that ends with
+	/// it set, outside any function, keeps its own parameters instead of
+	/// putting the caller's back ([`super::callstack::truncate`]).
+	pub args_set:      bool,
+	/// bash's `bash_argv_initialized`: the base was captured once, even if
+	/// a later source-file unwind popped it. Inherited by subshells.
+	pub argv_init:     bool,
 	/// The traps this vproc set itself: a subshell lists its parent's but
 	/// runs only its own (ERR, DEBUG and RETURN also under
 	/// `errtrace`/`functrace`; bash 5.3 keeps listing inherited signal
@@ -235,6 +244,30 @@ impl VprocZsh {
 }
 
 impl Vproc {
+	/// Whether what is running right now is the engine's own synthetic
+	/// source for a host callout, before that callout's launch has been
+	/// taken: the front run is engine-authored
+	/// ([`Script::engine_source`](super::Script::engine_source)), it
+	/// still carries a launch, and the innermost — and only — frame is
+	/// that run's own script frame.
+	///
+	/// This is the whole boundary of the callout representation: which
+	/// commands resolve without the caller's aliases and function table,
+	/// which unit the engine may install as the carrier, and who may hold
+	/// a [`Carrier`]. It is one function so the three readers cannot
+	/// drift apart. A trap, a function or the operand itself runs a frame
+	/// deeper, so none of them is ever inside it.
+	pub(super) fn in_engine_script(&self) -> bool {
+		self
+			.runs
+			.front()
+			.is_some_and(|r| r.engine && r.launch.pending())
+			&& matches!(
+				self.frames.as_slice(),
+				[frame] if matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. })
+			)
+	}
+
 	/// zsh's current sticky emulation.
 	pub fn sticky(&self) -> Option<&crate::bash::store::Sticky> {
 		self.zsh.as_ref().and_then(|z| z.sticky.as_ref())
@@ -739,16 +772,33 @@ pub struct Coproc {
 	pub write: i32,
 }
 
+/// Where the text of the command a vproc runs (`BASH_COMMAND`, the DEBUG
+/// and ERR traps, the trace) comes from.
+#[derive(Clone)]
+pub enum CmdSite {
+	/// A command of a compiled unit: the source bytes its syntax node
+	/// spans, as bash reports the text it parsed.
+	Node(Arc<Unit>, u32),
+	/// A host callout's operand ([`super::Launch`]), which has no source of
+	/// its own: the words as the shell would print them, boxed so this site
+	/// stays the size of the node one (every byte here is a byte per idle
+	/// vproc). The command the engine built to run them has no words at
+	/// all, so there is nothing of the engine's to report.
+	Text(Box<BString>),
+}
+
 impl Vproc {
-	/// `BASH_COMMAND`: the source text of the current command.
+	/// `BASH_COMMAND`: the text of the current command.
 	pub fn command_text(&self) -> &[u8] {
-		self.command.as_ref().map_or(&[][..], |(unit, node)| {
-			unit
+		match &self.command {
+			None => &[],
+			Some(CmdSite::Text(text)) => text.as_slice(),
+			Some(CmdSite::Node(unit, node)) => unit
 				.nodes
 				.get(*node as usize)
 				.and_then(|n| unit.source.get(n.lo as usize..n.hi as usize))
-				.unwrap_or_default()
-		})
+				.unwrap_or_default(),
+		}
 	}
 
 	pub fn has_work(&self) -> bool {
@@ -796,10 +846,89 @@ pub struct Run {
 	/// Root scripts: positional parameters, cwd and exported variables to
 	/// install when the script starts.
 	pub args:              Option<Vec<BString>>,
+	/// What this run's carrier command runs
+	/// ([`Script::launch`](super::Script::launch)), taken by that command
+	/// once its own words are expanded and empty from then on.
+	pub launch:            LaunchSlot,
+	/// The unit the engine built for this run's carrier command, once it
+	/// has been installed ([`Carrier`]). A content address: the one thing
+	/// that identifies the carrier, in place of a name.
+	pub carrier:           Option<crate::bash::ids::UnitId>,
+	/// The source is the engine's own
+	/// ([`Script::engine_source`](super::Script::engine_source)).
+	pub engine:            bool,
 	pub cwd:               Option<BString>,
 	pub env:               Vec<(BString, BString)>,
 	pub started:           bool,
 	pub exit_trap_started: bool,
+}
+
+/// A run's pending launch, and the proof needed to take it.
+///
+/// The host writes the slot when it submits the script; it is read
+/// exactly once, by the carrier command the engine built for that run.
+/// Reading it needs a [`Carrier`], and nothing a caller writes can make
+/// one: the only constructor checks that the innermost frame is this
+/// run's own script frame and that the unit running in it is the very
+/// unit the engine installed for this launch, matched by content
+/// address. A function, an alias, a trap or an operand named like any
+/// word of the engine's own is therefore not merely rejected — it has no
+/// way to ask.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LaunchSlot(Option<super::Launch>);
+
+impl LaunchSlot {
+	/// The slot a submitted script asks for.
+	pub const fn new(launch: Option<super::Launch>) -> Self {
+		Self(launch)
+	}
+
+	/// Whether a launch is still to run. Says nothing about what it is.
+	pub const fn pending(&self) -> bool {
+		self.0.is_some()
+	}
+
+	/// The fd duplications the carrier command applies, which the engine
+	/// needs to build that command before it can prove it is running it.
+	pub(super) fn dups(&self) -> Vec<(u32, u32)> {
+		self.0.as_ref().map_or_else(Vec::new, |l| l.dups.clone())
+	}
+
+	/// Read the launch without consuming it (the text the shell reports
+	/// for the command, recorded before the DEBUG trap can read it).
+	pub(super) const fn peek(&self, _: &Carrier) -> Option<&super::Launch> {
+		self.0.as_ref()
+	}
+
+	/// Take the launch. The token is consumed with it: one carrier, one
+	/// read.
+	pub(super) const fn take(&mut self, _: Carrier) -> Option<super::Launch> {
+		self.0.take()
+	}
+}
+
+/// Proof that the command now running is the carrier of a run's launch.
+///
+/// Not a name and not a byte of text: the frame identity of the run that
+/// owns the launch, and the content address of the unit the engine built
+/// for it.
+pub(super) struct Carrier(());
+
+impl Carrier {
+	/// The proof, if this vproc is running that command right now: the
+	/// engine's own script ([`Vproc::in_engine_script`]) plus the one
+	/// thing that tells the carrier from the other commands of that
+	/// script — the content address of the unit the engine installed.
+	pub(super) fn of(vp: &Vproc) -> Option<Self> {
+		if !vp.in_engine_script() {
+			return None;
+		}
+		let carrier = vp.runs.front()?.carrier?;
+		let [frame] = vp.frames.as_slice() else {
+			return None;
+		};
+		(frame.unit.as_ref()?.id == carrier).then_some(Self(()))
+	}
 }
 
 /// What kind of activation a frame is.
@@ -1478,8 +1607,10 @@ pub struct ExecState {
 	pub exec_as:     Option<Box<ExecAs>>,
 	/// `wait -p var`: the variable that gets the waited child's pid.
 	pub wait_into:   Option<Box<BString>>,
-	/// Run through `command`: a special builtin's failure does not end a
-	/// posix shell.
+	/// Run through `command`, either because a `command` word of the source
+	/// resolved or because a host callout asked for that dispatch
+	/// ([`super::LaunchHow::Builtin`]): no function of the name runs, and a
+	/// special builtin's failure does not end a posix shell.
 	pub via_command: bool,
 	/// The awaited frame was pushed by the builtin, which runs again when
 	/// it returns ([`Control::Resume`](super::builtins::Control::Resume)).
@@ -1706,7 +1837,9 @@ impl Live {
 // (`ExecState::resumed`, 368 → 376 B): the bench measured 1,832 B per idle
 // vproc with both. The line editor's boxed state (`Vproc::zle`, 8 B) brings
 // that to at most 1,840 B.
-const _: () = assert!(size_of::<Vproc>() <= 672, "Vproc grew (idle vproc ≤ 2 KiB)");
+// The durable argument-base flag (`Vproc::argv_init`) adds 8 B. The memory
+// bench measured 1,848 B per idle vproc on 2026-11-05 (target ≤ 2,048).
+const _: () = assert!(size_of::<Vproc>() <= 680, "Vproc grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Frame>() <= 256, "Frame grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Scratch>() <= 216, "Scratch grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<ExecState>() <= 376, "ExecState grew (idle vproc ≤ 2 KiB)");

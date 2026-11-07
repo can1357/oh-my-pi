@@ -1682,6 +1682,29 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			// `local -p NAME` reports the running function's own variable.
 			let var = if kind == DeclareKind::Local {
 				func_local(ctx, name)?
+			} else if matches!(name.as_slice(), b"BASH_ARGC" | b"BASH_ARGV") {
+				// `declare_builtin`'s named lookup invokes `get_bashargcv`,
+				// unlike a listing of every variable.
+				crate::bash::vm::callstack::read_base(ctx.k, ctx.cx.store, ctx.vp)?;
+				let dynamic =
+					crate::bash::vm::callstack::listed_array(ctx.k, ctx.cx.store, ctx.vp, name)?;
+				// The value is the call stack's, but the ATTRIBUTES are the
+				// declared variable's: these two names can carry `readonly`,
+				// `export` or `integer` like any other, and bash's
+				// `declare -p` prints them (`declare -ar BASH_ARGV=…`).
+				// Reporting the dynamic value with `Attrs::NONE` dropped
+				// them, so a consumer that replays the declaration lost
+				// them too.
+				match (dynamic, declared(ctx, name)?) {
+					(Some(dynamic), Some(stored)) => Some(Var {
+						// `INVISIBLE` belongs to the stored variable, which
+						// has no value of its own: the value shown is the
+						// call stack's, so the declaration is not invisible.
+						attrs: stored.attrs.without(Attrs::INVISIBLE),
+						value: dynamic.value,
+					}),
+					(dynamic, _) => dynamic,
+				}
 			} else {
 				declared(ctx, name)?
 			};
@@ -1780,6 +1803,16 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			if special && ctx.option(OptId::Posix)? {
 				break;
 			}
+			continue;
+		}
+		// bash's `att_noassign`: a call-stack array has no binding of its
+		// own to shadow, so a function-local declaration of one is refused
+		// and nothing changes. Creating the shadow left an invisible local
+		// whose attributes the named `declare -p` below then stamped onto
+		// the call stack's live values.
+		if level == Level::Local && crate::bash::vm::callstack::no_local_binding(name) {
+			ctx.usage(format!("{}: variable may not be assigned value", name.as_bstr()));
+			status = 1;
 			continue;
 		}
 		// The binding this declaration acts on: a new local shadows rather
@@ -3138,6 +3171,11 @@ pub fn set(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		state::sync_option_vars(&mut ctx.k.root, ctx.cx.store, ctx.vp)?;
 	}
 	if let Some(p) = positional {
+		// bash's `set_dollar_vars_changed`: outside a function this is the
+		// change that makes a `.` file keep its own parameters
+		// (`ARGS_SETBLTIN`); inside one bash records `ARGS_FUNC`, which no
+		// `.` file reads.
+		ctx.vp.args_set |= state::func_scope(&ctx.k.root, ctx.cx.store, ctx.vp)?.is_none();
 		state::set_positional(&mut ctx.k.root, ctx.cx.store, ctx.vp, p);
 	}
 	done(0)
@@ -3243,7 +3281,7 @@ pub fn shopt(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				change_option(ctx, OptId::Errtrace, set);
 				change_option(ctx, OptId::Functrace, set);
 				if set {
-					crate::bash::vm::callstack::read_base(ctx.k, ctx.cx.store, ctx.vp)?;
+					crate::bash::vm::callstack::init_argv(ctx.k, ctx.cx.store, ctx.vp)?;
 				}
 			}
 		}

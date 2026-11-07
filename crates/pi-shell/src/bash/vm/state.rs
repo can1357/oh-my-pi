@@ -2402,7 +2402,8 @@ pub fn positional(
 	Ok(positional_ref(root, store, vp)?.to_vec())
 }
 
-/// [`positional`] borrowed (`$1`, `$#`: no copy of the list).
+/// [`positional`] borrowed (`$1`, `$#`: no copy of the list). What a `.`
+/// file saves and what bash's `list_rest_of_args` reads.
 ///
 /// # Errors
 /// [`StoreError`] when the store cannot be read.

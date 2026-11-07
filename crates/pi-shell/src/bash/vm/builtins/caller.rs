@@ -38,8 +38,9 @@ pub fn caller(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		.rev()
 		.filter_map(|c| match &c.kind {
 			callstack::CallKind::Function { name, .. } => Some(name.clone()),
-			callstack::CallKind::Source { .. } => Some(BString::from("source")),
-			callstack::CallKind::Args(_) => None,
+			// A `.` file whose RETURN trap is running has left the arrays.
+			callstack::CallKind::Source { ended: false, .. } => Some(BString::from("source")),
+			callstack::CallKind::Source { .. } | callstack::CallKind::Args(_) => None,
 		})
 		.collect();
 	if files.len() > names.len() {
