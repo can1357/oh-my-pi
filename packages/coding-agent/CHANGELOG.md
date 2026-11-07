@@ -160,6 +160,10 @@
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
 
+### Changed
+
+- `eval.autoBackground.enabled` now defaults to on, as `bash.autoBackground.enabled` does: an `eval` cell still running after 60 s returns control with its output so far and delivers its result when it ends, instead of holding the turn until it finishes or dies at its own deadline, which still bounds it; set it to `false` for the old behavior ([#17907](https://github.com/can1357/oh-my-pi/pull/17907) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
