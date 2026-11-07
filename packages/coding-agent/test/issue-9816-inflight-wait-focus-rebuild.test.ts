@@ -446,6 +446,67 @@ describe("live Cursor focus recovery without another delta", () => {
 		timestamp: 2,
 	};
 
+	it("keeps post-tool text streaming when a live update races with focus restoration", async () => {
+		const main = makeSession([], true);
+		main.setLiveAssistant(paused, []);
+		const { ctx, focus } = createFixture(main);
+		try {
+			await focus.focusAgent("Worker");
+			const renderInitialMessages = ctx.renderInitialMessages.bind(ctx);
+			ctx.renderInitialMessages = async options => {
+				await renderInitialMessages(options);
+				await main.emit({
+					type: "message_update",
+					message: paused,
+					assistantMessageEvent: {
+						type: "text_delta",
+						contentIndex: 2,
+						delta: "LAST_VISIBLE_TEXT",
+						partial: paused,
+					},
+				});
+				await main.emit({
+					type: "tool_execution_start",
+					toolCallId: "paused-grep",
+					toolName: "grep",
+					args: { pattern: "sample" },
+					intent: undefined,
+				});
+			};
+			await focus.unfocus();
+
+			const continued: AssistantMessage = {
+				...paused,
+				content: [...paused.content.slice(0, 2), { type: "text", text: "LAST_VISIBLE_TEXT AFTER_FOCUS" }],
+			};
+			await main.emit({
+				type: "message_update",
+				message: continued,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 2, delta: " AFTER_FOCUS", partial: continued },
+			});
+			const rendered = () => Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered()).toContain("AFTER_FOCUS");
+			expect(ctx.pendingTools.has("paused-grep")).toBe(true);
+
+			await main.emit({
+				type: "tool_execution_end",
+				toolCallId: "paused-grep",
+				toolName: "grep",
+				result: { content: result.content, details: {} },
+				isError: false,
+			});
+			await main.emit({ type: "message_end", message: continued });
+			expect(rendered().match(/AFTER_FOCUS/g)).toHaveLength(1);
+			expect(rendered().match(/COMPLETED_MATCH/g)).toHaveLength(1);
+			expect(ctx.pendingTools.size).toBe(0);
+		} finally {
+			focus.dispose();
+			ctx.unsubscribe?.();
+			ctx.eventController.dispose();
+			for (const component of ctx.pendingTools.values()) component.seal();
+		}
+	});
+
 	it("restores the paused assistant and completed card before any later event", async () => {
 		const main = makeSession([], true);
 		main.setLiveAssistant(paused, [result]);

@@ -66,7 +66,7 @@ use pi_walker::{
 )]
 pub(crate) struct Rg {
 	/// A pattern to search for. May be repeated.
-	#[arg(short = 'e', long = "regexp", value_name = "PATTERN")]
+	#[arg(short = 'e', long = "regexp", value_name = "PATTERN", allow_hyphen_values = true)]
 	patterns: Vec<String>,
 
 	/// Read patterns from a file, one pattern per line.
@@ -2313,6 +2313,14 @@ mod tests {
 		let (code, out, err) = run(&["-m1", "hit", "-"], "hit\nmiss\nhit\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "hit\n");
+	}
+
+	/// `-e` exists so a pattern may start with `-` (ripgrep); clap used to
+	/// read `-e --canary` as an unknown `--canary` flag and exit 2.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn regexp_operand_may_start_with_a_dash() {
+		let (code, out, err) = run(&["-e", "--canary", "-"], "x --canary\ny\n").await;
+		assert_eq!((code, out.as_str()), (0, "x --canary\n"), "{err}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

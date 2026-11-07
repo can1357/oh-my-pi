@@ -1166,11 +1166,7 @@ struct NodeSlot<'a> {
 
 /// `a` cut to [`ARG_BYTES`].
 fn cut(a: &BString) -> BString {
-	let mut end = a.len().min(ARG_BYTES);
-	if let Ok(text) = std::str::from_utf8(a) {
-		end = text.floor_char_boundary(end);
-	}
-	BString::from(&a[..end])
+	BString::from(text::cut(a, ARG_BYTES))
 }
 
 /// Every node's state, children before parents: its own runs, else the
