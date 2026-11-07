@@ -62,9 +62,20 @@ One-shot `<8hex>@<id>` tokens (10-minute TTL, in-memory). A destructive op (dirt
 
 Extensions can spawn subagents (`pi.spawnSubagent({agent, prompt})`) with ordinary subagent rights and the shared concurrency limit. An upstream-PR candidate.
 
-### 9. Agent Teams — planned
+### 9. Agent Teams
 
-An analog of Claude Code's Agent Teams is planned on top of the A2A bridge: a lead session plus persistent teammates (full sessions with own context), direct teammate-to-teammate messaging, a shared task list, per-agent mailboxes, and a team config file. Not implemented yet — see [docs/agent-teams.md](./docs/agent-teams.md) for the direction and the design doc.
+Implemented. `.omp/teams/<name>.md` declares members, handles and an optional
+workspace. `/team start` spawns teammates **in-session** through the shared
+subagent seam (not separate terminals or A2A peers), with normalized registry
+ids and direct `agent://` messaging over IRC. Team spawns grant the full
+`write` tool even to read-only members; it is not limited to messaging.
+With a workspace, start creates `TASKS.md` if absent without overwriting it;
+`owner: <handle>` claims are a convention, not atomic locks. `/team list`,
+`/team status` and `/team stop` manage the team; stop releases only recorded
+member refs. Gated by `team.enabled`, capped by `team.maxTeammates`. No
+file-backed mailbox, split-pane, idle notification, shutdown approve flow or
+cross-terminal team membership.
+See [docs/agent-teams.md](./docs/agent-teams.md).
 
 ## Settings summary
 

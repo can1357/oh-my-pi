@@ -64,7 +64,17 @@ omp --a2a-port 0        # терминал C: ...
 
 ### 9. Agent Teams
 
-`.omp/teams/<имя>.md` — декларативная команда (members + хэндлы + общий workspace); `/team start` спавнит участников полноценными сессиями с устойчивыми хэндлами (`agent://<хэндл>`), прямым общением teammate↔teammate и общим TASKS.md; гейт `team.enabled`. [docs/agent-teams.md](./docs/agent-teams.md).
+`.omp/teams/<имя>.md` описывает участников, хэндлы и необязательный workspace.
+Реализовано: `/team start` спавнит участников **внутри сессии** через шов
+сабагентов (не отдельные терминалы, не A2A), с нормализованными id реестра
+и прямым общением через IRC `agent://`. Team-спавн выдаёт полный `write`
+даже read-only участникам: он не ограничен сообщениями. При указанном
+workspace старт создаёт отсутствующий `TASKS.md`, не перезаписывая его;
+`owner: <хэндл>` - соглашение о заявке, а не атомарная блокировка.
+`/team list|status|stop`; стоп освобождает только записанные ref id участников.
+Гейт `team.enabled`, кап `team.maxTeammates`. Нет файлового mailbox,
+split-pane и approve-flow; команда не кросс-терминальная.
+[docs/agent-teams.md](./docs/agent-teams.md).
 
 ## Сводка настроек
 

@@ -12,6 +12,13 @@ carrying the agent-networking work on top of upstream.
   [AGENTS.md](AGENTS.md#fork-additions-this-fork).
 - **Upstream-PR candidates**: ingress guard, session spawn limiter,
   `pi.spawnSubagent`, the A2A module, modern MCP transport (PR #14172 lineage).
+- **A2A bridge**: on by default, loopback only. With no `--a2a-name` and an
+  empty `a2a.name`, each terminal gets a `<slug(basename(cwd))>-<pid>` auto
+  name. Peers auto-register; a reply to an outstanding request is correlated
+  automatically through `metadata.inReplyTo` and receives no new reply
+  envelope. Discovery is symmetric on demand, and each process owns one
+  `<pid>.json` bridge-registry file. See [docs/a2a.md](docs/a2a.md) for the
+  wire contract and settings.
 
 ## Build & install from this fork
 
