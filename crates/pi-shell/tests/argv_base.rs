@@ -677,10 +677,9 @@ async fn an_ended_file_name_push_is_gone_before_its_return_trap_runs() {
 		// A pop inside the trap consumes the base, as bash's does.
 		(
 			&[("lib", ":\n"), ("inner", "shopt -s extdebug\n")],
-			"set -- ROOT1 ROOT2\ntrap 'trap - RETURN; . ./inner INNER; printf \"trap C=[%s] \
-			 V=[%s] K=[%s]\\n\" \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\" \"${!BASH_ARGV[*]}\"' \
-			 RETURN\n. ./lib\nprintf 'after C=[%s] V=[%s]\\n' \"${BASH_ARGC[*]}\" \
-			 \"${BASH_ARGV[*]}\"",
+			"set -- ROOT1 ROOT2\ntrap 'trap - RETURN; . ./inner INNER; printf \"trap C=[%s] V=[%s] \
+			 K=[%s]\\n\" \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\" \"${!BASH_ARGV[*]}\"' RETURN\n. \
+			 ./lib\nprintf 'after C=[%s] V=[%s]\\n' \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"",
 			"trap C=[] V=[] K=[]\nafter C=[] V=[]\n",
 		),
 		// No pop in the trap: the caller's levels, before and after.
@@ -694,9 +693,9 @@ async fn an_ended_file_name_push_is_gone_before_its_return_trap_runs() {
 		// A nested no-argument `.` in the trap pops its own name push.
 		(
 			&[("lib", ":\n"), ("inner", ":\n")],
-			"set -- ROOT1 ROOT2\ntrap 'trap - RETURN; . ./inner; printf \"trap C=[%s] \
-			 V=[%s]\\n\" \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"' RETURN\n. ./lib\nprintf 'after \
-			 C=[%s] V=[%s]\\n' \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"",
+			"set -- ROOT1 ROOT2\ntrap 'trap - RETURN; . ./inner; printf \"trap C=[%s] V=[%s]\\n\" \
+			 \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"' RETURN\n. ./lib\nprintf 'after C=[%s] \
+			 V=[%s]\\n' \"${BASH_ARGC[*]}\" \"${BASH_ARGV[*]}\"",
 			"trap C=[2] V=[ROOT2 ROOT1]\nafter C=[2] V=[ROOT2 ROOT1]\n",
 		),
 		// An ARGUMENTS push is still there in the trap, and popped after.
@@ -722,20 +721,20 @@ async fn a_local_declaration_of_a_call_stack_array_is_refused() {
 	assert_rows(&[
 		(
 			&[],
-			"set -- A B\nshopt -s extdebug\nf() { declare -ar BASH_ARGV 2>/dev/null; echo \
-			 \"rc=$?\"; declare -p BASH_ARGV; }\nf X Y",
+			"set -- A B\nshopt -s extdebug\nf() { declare -ar BASH_ARGV 2>/dev/null; echo \"rc=$?\"; \
+			 declare -p BASH_ARGV; }\nf X Y",
 			"rc=1\ndeclare -a BASH_ARGV=([0]=\"Y\" [1]=\"X\" [2]=\"B\" [3]=\"A\")\n",
 		),
 		(
 			&[],
-			"set -- A B\nshopt -s extdebug\nf() { local -a BASH_ARGV 2>/dev/null; echo \
-			 \"rc=$?\"; declare -p BASH_ARGV; }\nf X Y",
+			"set -- A B\nshopt -s extdebug\nf() { local -a BASH_ARGV 2>/dev/null; echo \"rc=$?\"; \
+			 declare -p BASH_ARGV; }\nf X Y",
 			"rc=1\ndeclare -a BASH_ARGV=([0]=\"Y\" [1]=\"X\" [2]=\"B\" [3]=\"A\")\n",
 		),
 		(
 			&[],
-			"set -- A B\nshopt -s extdebug\nf() { declare -ai BASH_ARGC 2>/dev/null; echo \
-			 \"rc=$?\"; declare -p BASH_ARGC; }\nf X Y",
+			"set -- A B\nshopt -s extdebug\nf() { declare -ai BASH_ARGC 2>/dev/null; echo \"rc=$?\"; \
+			 declare -p BASH_ARGC; }\nf X Y",
 			"rc=1\ndeclare -a BASH_ARGC=([0]=\"2\" [1]=\"2\")\n",
 		),
 		(
@@ -754,8 +753,8 @@ async fn a_local_declaration_of_a_call_stack_array_is_refused() {
 		// So does `readonly`, inside a function.
 		(
 			&[],
-			"set -- A B\nshopt -s extdebug\nf() { readonly BASH_ARGV 2>/dev/null; echo \
-			 \"rc=$?\"; declare -p BASH_ARGV; }\nf X Y",
+			"set -- A B\nshopt -s extdebug\nf() { readonly BASH_ARGV 2>/dev/null; echo \"rc=$?\"; \
+			 declare -p BASH_ARGV; }\nf X Y",
 			"rc=0\ndeclare -ar BASH_ARGV=([0]=\"Y\" [1]=\"X\" [2]=\"B\" [3]=\"A\")\n",
 		),
 		// And a declaration outside any function.

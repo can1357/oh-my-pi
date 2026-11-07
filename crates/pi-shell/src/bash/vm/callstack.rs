@@ -147,10 +147,7 @@ const fn level_visible(kind: &CallKind) -> bool {
 /// same name is accepted and carries its attributes, since those act on
 /// the global binding. Measured on Bash 5.2.21 and 5.3.0, which agree.
 pub const fn no_local_binding(name: &[u8]) -> bool {
-	matches!(
-		name,
-		b"BASH_ARGC" | b"BASH_ARGV" | b"BASH_LINENO" | b"BASH_SOURCE" | b"FUNCNAME"
-	)
+	matches!(name, b"BASH_ARGC" | b"BASH_ARGV" | b"BASH_LINENO" | b"BASH_SOURCE" | b"FUNCNAME")
 }
 
 /// One of bash's call-stack arrays as `vp` sees it, innermost level first
