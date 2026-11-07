@@ -351,15 +351,18 @@ fn set_fd(vp: &mut Vproc, fd: i32, h: Option<FdRef>) {
 	vp.fds.set(fd, h);
 }
 
-/// The fd a redirection targets; `{var}` allocates one ≥ 10 and stores it
-/// (`closing`: reads the fd it holds).
+/// The fd a redirection targets. `closing` reads the fd a `{var}` holds;
+/// otherwise a `{var}` one is only *allocated* here and is **not** stored.
+/// bash assigns the variable with `F_DUPFD` as the last step of a
+/// redirection that has already succeeded, so every caller stores it with
+/// [`assign_fd_var`] past its last failure point: `ulimit -n 9; : {fd}>&1`
+/// leaves `fd` unset where bash leaves it unset.
 fn target_fd(
 	k: &mut Kernel,
 	vp: &mut Vproc,
 	cx: &mut Cx<'_>,
 	r: &RedirIr,
 	closing: bool,
-	line: u32,
 ) -> Result<i32, Diag> {
 	match &r.fd {
 		RedirFdIr::Default => Ok(default_fd(r.op)),
@@ -369,9 +372,9 @@ fn target_fd(
 				return var_fd(k, vp, cx, name)
 					.ok_or_else(|| Diag::AmbiguousRedirect { word: name.clone() });
 			}
-			let fd = super::jobctl::lowest_free_fd(k, vp, 10);
-			assign_fd_var(k, vp, cx, name, fd, line)?;
-			Ok(fd)
+			// A parked open keeps its slot free, so this is the same fd on
+			// resume.
+			Ok(super::jobctl::lowest_free_fd(k, vp, 10))
 		},
 	}
 }
@@ -404,6 +407,30 @@ fn assign_fd_var(
 		k.diag(cx, vp, line, d);
 		let msg = format!("{}: cannot assign fd to variable", name.as_bstr()).into();
 		return Err(Diag::Usage { msg });
+	}
+	Ok(())
+}
+
+/// Store a `{var}` redirection's fd, once the descriptor is installed and
+/// nothing else can fail. The order is bash's: `F_DUPFD` makes the
+/// descriptor and the assignment follows it, which is also what
+/// `BASH_XTRACEFD`'s setter needs -- it validates the number against the
+/// open descriptors. An assignment that fails (a readonly name) leaves
+/// the file made and the fd closed again, as bash leaves them.
+fn assign_var(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	target: &RedirFdIr,
+	fd: i32,
+	line: u32,
+) -> Result<(), Halt> {
+	let RedirFdIr::Var(name) = target else {
+		return Ok(());
+	};
+	if let Err(d) = assign_fd_var(k, vp, cx, name, fd, line) {
+		set_fd(vp, fd, None);
+		return Err(fail(k, vp, cx, line, d));
 	}
 	Ok(())
 }
@@ -452,15 +479,18 @@ fn install(
 ) -> Result<(), Halt> {
 	match r.op {
 		RedirKind::HereDoc | RedirKind::HereString => {
-			let fd = target_fd(k, vp, cx, r, false, line).map_err(|d| fail(k, vp, cx, line, d))?;
-			let h = FdRef::mem(MemBuf::new(target.to_vec()));
-			set_fd(vp, fd, Some(h));
-			Ok(())
+			let fd = target_fd(k, vp, cx, r, false).map_err(|d| fail(k, vp, cx, line, d))?;
+			if past_limit(vp, cx, fd) {
+				let word = BString::from(fd.to_string());
+				return Err(limit_fail(k, vp, cx, line, &r.fd, word));
+			}
+			set_fd(vp, fd, Some(FdRef::mem(MemBuf::new(target.to_vec()))));
+			assign_var(k, vp, cx, &r.fd, fd, line)
 		},
 		RedirKind::DupIn | RedirKind::DupOut => {
 			let closing = target.as_slice() == b"-";
 			if closing {
-				let fd = target_fd(k, vp, cx, r, true, line).map_err(|d| fail(k, vp, cx, line, d))?;
+				let fd = target_fd(k, vp, cx, r, true).map_err(|d| fail(k, vp, cx, line, d))?;
 				set_fd(vp, fd, None);
 				super::exec::coproc_fd_closed(k, vp, cx, fd);
 				return Ok(());
@@ -474,17 +504,25 @@ fn install(
 					.ok()
 					.and_then(|s| s.parse().ok())
 					.unwrap_or(-1);
-				let Some(h) = vp.fds.get(src).cloned().filter(FdRef::is_open) else {
-					// bash names the word as written (`$fd: Bad file descriptor`).
-					let path = match r.target {
-						RedirTargetIr::Word(w) => word_text(unit, w),
-						RedirTargetIr::HereDoc { .. } => target.clone(),
-					};
-					let err = std::io::Error::other(crate::bash::fd::BadFd);
-					return Err(fail(k, vp, cx, line, Diag::Io { path, err }));
+				// bash names the word as written (`$fd: Bad file descriptor`).
+				let word = match r.target {
+					RedirTargetIr::Word(w) => word_text(unit, w),
+					RedirTargetIr::HereDoc { .. } => target.clone(),
 				};
-				let fd = target_fd(k, vp, cx, r, false, line).map_err(|d| fail(k, vp, cx, line, d))?;
+				let Some(h) = vp.fds.get(src).cloned().filter(FdRef::is_open) else {
+					let err = std::io::Error::other(crate::bash::fd::BadFd);
+					return Err(fail(k, vp, cx, line, Diag::Io { path: word, err }));
+				};
+				let fd = target_fd(k, vp, cx, r, false).map_err(|d| fail(k, vp, cx, line, d))?;
+				// A duplication onto its own source makes no descriptor, so bash
+				// never calls `dup2` for it and it is not held to the limit
+				// (`15>&15`, `15<&15`, `15>&15-` all succeed under `ulimit -n 9`).
+				if src != fd && past_limit(vp, cx, fd) {
+					// bash's `dup2` fails; it names the source word.
+					return Err(limit_fail(k, vp, cx, line, &r.fd, word));
+				}
 				set_fd(vp, fd, Some(h));
+				assign_var(k, vp, cx, &r.fd, fd, line)?;
 				if moving && src != fd {
 					set_fd(vp, src, None);
 					super::exec::coproc_fd_closed(k, vp, cx, src);
@@ -493,29 +531,22 @@ fn install(
 			}
 			if r.op == RedirKind::DupOut && matches!(r.fd, RedirFdIr::Default) {
 				// `>&file` is `&>file`.
-				return open_into(
-					k,
-					vp,
-					cx,
-					&[1, 2],
-					target,
-					OpenFlags::WRITE
-						.with(OpenFlags::CREATE)
-						.with(OpenFlags::TRUNC),
-					line,
-				);
+				let flags = OpenFlags::WRITE
+					.with(OpenFlags::CREATE)
+					.with(OpenFlags::TRUNC);
+				return open_both(k, vp, cx, target, flags, line);
 			}
 			Err(fail(k, vp, cx, line, Diag::AmbiguousRedirect { word: target.clone() }))
 		},
 		RedirKind::Close => {
-			let fd = target_fd(k, vp, cx, r, true, line).map_err(|d| fail(k, vp, cx, line, d))?;
+			let fd = target_fd(k, vp, cx, r, true).map_err(|d| fail(k, vp, cx, line, d))?;
 			set_fd(vp, fd, None);
 			super::exec::coproc_fd_closed(k, vp, cx, fd);
 			Ok(())
 		},
 		RedirKind::OutErr | RedirKind::AppendErr => {
 			let flags = open_flags(k, vp, cx, r.op, target);
-			open_into(k, vp, cx, &[1, 2], target, flags, line)
+			open_both(k, vp, cx, target, flags, line)
 		},
 		RedirKind::In
 		| RedirKind::Out
@@ -523,40 +554,98 @@ fn install(
 		| RedirKind::Clobber
 		| RedirKind::ReadWrite => {
 			let flags = open_flags(k, vp, cx, r.op, target);
-			// bash opens the file first and assigns `{var}` after (a
-			// readonly one leaves the file created); a parked open keeps
-			// its slot free, so the fd is the same on resume.
-			let fd = match &r.fd {
-				RedirFdIr::Var(_) => super::jobctl::lowest_free_fd(k, vp, 10),
-				_ => target_fd(k, vp, cx, r, false, line).map_err(|d| fail(k, vp, cx, line, d))?,
-			};
-			// bash moves a `{var}` fd to 10 or above with `F_DUPFD`, which
-			// fails past `ulimit -n`.
-			let limit = vp
-				.rlimits
-				.iter()
-				.find(|(res, ..)| *res == crate::bash::host::Rlimit::Nofile)
-				.and_then(|&(_, soft, _)| soft);
-			if matches!(r.fd, RedirFdIr::Var(_))
-				&& limit.is_some_and(|lim| u64::try_from(fd).is_ok_and(|fd| fd >= lim))
-			{
-				let mut msg = k.argv0.to_vec();
-				msg.extend_from_slice(b": redirection error: cannot duplicate fd: Invalid argument\n");
-				vp.out
-					.push_back(super::proc::PendingWrite { fd: 2, bytes: msg.into(), off: 0 });
-				let err = std::io::Error::from(std::io::ErrorKind::InvalidInput);
-				return Err(fail(k, vp, cx, line, Diag::Io { path: target.clone(), err }));
+			let fd = target_fd(k, vp, cx, r, false).map_err(|d| fail(k, vp, cx, line, d))?;
+			// bash opens the file before anything else can fail, so a
+			// redirection that goes on to fail still leaves the file made
+			// (`ulimit -n 9; : {fd}>g` and `: 12>g` both make `g`), and a
+			// readonly `{var}` leaves it made too.
+			let h = open_handle(k, vp, cx, target, flags, line)?;
+			// bash then moves the descriptor to its number, which fails past
+			// the limit: the file is made, the fd is not, and the variable is
+			// not assigned. Nothing is installed before this guard, so the
+			// failure's own diagnostic is never written through the handle
+			// this redirection opened.
+			if past_limit(vp, cx, fd) {
+				let word = match &r.fd {
+					RedirFdIr::Var(_) => target.clone(),
+					_ => BString::from(fd.to_string()),
+				};
+				return Err(limit_fail(k, vp, cx, line, &r.fd, word));
 			}
-			open_into(k, vp, cx, &[fd], target, flags, line)?;
-			if let RedirFdIr::Var(name) = &r.fd
-				&& let Err(d) = assign_fd_var(k, vp, cx, name, fd, line)
-			{
-				set_fd(vp, fd, None);
-				return Err(fail(k, vp, cx, line, d));
-			}
-			Ok(())
+			set_fd(vp, fd, Some(h));
+			assign_var(k, vp, cx, &r.fd, fd, line)
 		},
 	}
+}
+
+/// `&>file` and `>&file`: the file goes on both standard streams. Neither
+/// is installed until both have passed the limit, so a failure's own
+/// diagnostic is not written through the descriptor that failed.
+fn open_both(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	target: &BString,
+	flags: OpenFlags,
+	line: u32,
+) -> Result<(), Halt> {
+	let h = open_handle(k, vp, cx, target, flags, line)?;
+	for fd in [1, 2] {
+		if past_limit(vp, cx, fd) {
+			return Err(bad_fd(k, vp, cx, line, BString::from(fd.to_string())));
+		}
+	}
+	set_fd(vp, 1, Some(h.clone()));
+	set_fd(vp, 2, Some(h));
+	Ok(())
+}
+
+/// Whether `fd` is at or past the open-file limit (the vproc's `ulimit -n`,
+/// else the host's), where bash's `dup2` to it fails with `EBADF`.
+fn past_limit(vp: &Vproc, cx: &Cx<'_>, fd: i32) -> bool {
+	let limit = match vp
+		.rlimits
+		.iter()
+		.find(|(res, ..)| *res == crate::bash::host::Rlimit::Nofile)
+	{
+		Some(&(_, soft, _)) => soft,
+		None => cx
+			.host
+			.rlimit(crate::bash::host::Rlimit::Nofile)
+			.ok()
+			.and_then(|(soft, _)| soft),
+	};
+	limit.is_some_and(|lim| u64::try_from(fd).is_ok_and(|fd| fd >= lim))
+}
+
+/// The redirection error `name: Bad file descriptor`.
+fn bad_fd(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, path: BString) -> Halt {
+	let err = std::io::Error::other(crate::bash::fd::BadFd);
+	fail(k, vp, cx, line, Diag::Io { path, err })
+}
+
+/// The failure a redirection whose target is at or past the open-file
+/// limit gives, naming `word`. A numbered target is bash's `dup2`, which
+/// fails `EBADF`. A `{var}` target is bash's `F_DUPFD` to 10, which fails
+/// `EINVAL` and makes bash print its own `redirection error: cannot
+/// duplicate fd` line before the redirection's.
+fn limit_fail(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	line: u32,
+	fd: &RedirFdIr,
+	word: BString,
+) -> Halt {
+	if !matches!(fd, RedirFdIr::Var(_)) {
+		return bad_fd(k, vp, cx, line, word);
+	}
+	let mut msg = k.argv0.to_vec();
+	msg.extend_from_slice(b": redirection error: cannot duplicate fd: Invalid argument\n");
+	vp.out
+		.push_back(super::proc::PendingWrite { fd: 2, bytes: msg.into(), off: 0 });
+	let err = std::io::Error::from(std::io::ErrorKind::InvalidInput);
+	fail(k, vp, cx, line, Diag::Io { path: word, err })
 }
 
 /// How a file redirection `op` to `target` opens it (`set -o noclobber`
@@ -756,7 +845,9 @@ fn collect(
 	Ok(())
 }
 
-/// The fd redirection `r` sets ([`target_fd`]); a bad one fails it.
+/// The fd redirection `r` sets ([`target_fd`]); a bad one fails it. Only
+/// [`collect`] calls this, and `childable` keeps a `{var}` redirection out
+/// of that path, so no variable is ever left to assign here.
 fn fd_number(
 	k: &mut Kernel,
 	vp: &mut Vproc,
@@ -765,7 +856,7 @@ fn fd_number(
 	closing: bool,
 	line: u32,
 ) -> Result<i32, Halt> {
-	target_fd(k, vp, cx, r, closing, line).map_err(|d| fail(k, vp, cx, line, d))
+	target_fd(k, vp, cx, r, closing).map_err(|d| fail(k, vp, cx, line, d))
 }
 
 /// Whether `fd` is open in the process a command spawns at this point of
@@ -1078,9 +1169,9 @@ fn zsh_install(
 		RedirKind::HereDoc | RedirKind::HereString => {
 			let fd = zsh_target_fd(k, vp, cx, r).map_err(|d| fail(k, vp, cx, line, d))?;
 			let h = FdRef::mem(MemBuf::new(target.to_vec()));
-			if let RedirFdIr::Var(name) = &r.fd {
+			if matches!(r.fd, RedirFdIr::Var(_)) {
 				set_fd(vp, fd, Some(h));
-				return assign_fd_var(k, vp, cx, name, fd, line).map_err(|d| fail(k, vp, cx, line, d));
+				return assign_var(k, vp, cx, &r.fd, fd, line);
 			}
 			place_on(k, vp, cx, fd, h, false)
 		},
@@ -1119,9 +1210,9 @@ fn zsh_install(
 				return Err(fail(k, vp, cx, line, zsh_msg(format!("{src}: bad file descriptor"))));
 			};
 			let fd = zsh_target_fd(k, vp, cx, r).map_err(|d| fail(k, vp, cx, line, d))?;
-			if let RedirFdIr::Var(name) = &r.fd {
+			if matches!(r.fd, RedirFdIr::Var(_)) {
 				set_fd(vp, fd, Some(h));
-				return assign_fd_var(k, vp, cx, name, fd, line).map_err(|d| fail(k, vp, cx, line, d));
+				return assign_var(k, vp, cx, &r.fd, fd, line);
 			}
 			place_on(k, vp, cx, fd, h, output)
 		},
@@ -1143,9 +1234,9 @@ fn zsh_install(
 			let fd = zsh_target_fd(k, vp, cx, r).map_err(|d| fail(k, vp, cx, line, d))?;
 			let flags = zsh_flags(k, vp, cx, r, target, line)?;
 			let h = zsh_open(k, vp, cx, target, flags, line)?;
-			if let RedirFdIr::Var(name) = &r.fd {
+			if matches!(r.fd, RedirFdIr::Var(_)) {
 				set_fd(vp, fd, Some(h));
-				return assign_fd_var(k, vp, cx, name, fd, line).map_err(|d| fail(k, vp, cx, line, d));
+				return assign_var(k, vp, cx, &r.fd, fd, line);
 			}
 			// `<>` is both: never part of a multio.
 			if r.op == RedirKind::ReadWrite {
@@ -1320,21 +1411,20 @@ impl File for Cat {
 	}
 }
 
-/// Open `path` (pollable) and install it on every fd of `fds`.
-fn open_into(
+/// Open `path` (pollable) and give back its handle, installing nothing.
+/// The open's own side effects -- the file made, its diagnostic -- happen
+/// here; the caller decides whether any descriptor takes the handle, so a
+/// guard between the two runs with the vproc's descriptors untouched.
+fn open_handle(
 	k: &mut Kernel,
 	vp: &mut Vproc,
 	cx: &mut Cx<'_>,
-	fds: &[i32],
 	path: &BString,
 	flags: OpenFlags,
 	line: u32,
-) -> Result<(), Halt> {
+) -> Result<FdRef, Halt> {
 	if let Some(h) = session_tty(vp, path) {
-		for &fd in fds {
-			set_fd(vp, fd, Some(h.clone()));
-		}
-		return Ok(());
+		return Ok(h);
 	}
 	if let Some(src) = dev_fd(path) {
 		let Some(h) = vp.fds.get(src).cloned().filter(FdRef::is_open) else {
@@ -1344,10 +1434,7 @@ fn open_into(
 			});
 			return Err(Halt::Failed);
 		};
-		for &fd in fds {
-			set_fd(vp, fd, Some(h.clone()));
-		}
-		return Ok(());
+		return Ok(h);
 	}
 	let abs = absolute(&vp.cwd, path);
 	// The vproc's own `umask` (a subshell's applies to its redirections).
@@ -1370,11 +1457,7 @@ fn open_into(
 		Poll::Pending => Err(Halt::Flow(Flow::Block(WaitKey::Fs { op: FsOp::Open, path: abs }))),
 		Poll::Ready(Ok(file)) => {
 			io(vp).redir.opening = None;
-			let h = FdRef::open(file, FdOrigin::Host);
-			for &fd in fds {
-				set_fd(vp, fd, Some(h.clone()));
-			}
-			Ok(())
+			Ok(FdRef::open(file, FdOrigin::Host))
 		},
 		Poll::Ready(Err(err)) => {
 			io(vp).redir.opening = None;

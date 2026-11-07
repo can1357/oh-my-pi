@@ -1453,3 +1453,269 @@ async fn pkill_builtin_excludes_own_pid() {
 	assert_eq!(result.exit_code, Some(0), "the shell must survive an explicit pkill");
 	assert!(output.contains("survived"), "{output:?}");
 }
+
+/// A background subshell, group or function with an EXIT trap runs it when
+/// a terminating signal ends it, then ends with the signal's status, as in
+/// Bash 5.2 and 5.3; a signal it traps does not end it. The trap sees the
+/// last completed command's `$?`, not the signal's status, and its own
+/// `exit` does not change what the job ends with: bash dies of the signal
+/// after the trap. Regression: the job ended at once and its EXIT trap
+/// never ran; `( … ) &` was killed around the subshell that held the trap;
+/// then the trap saw `$?` as the signal's status and `exit 7` in it made
+/// the job end 7.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subshell_runs_its_exit_trap_when_a_signal_ends_it() {
+	let (result, output) = execute_captured(
+		[
+			"{ trap 'echo X' EXIT; /bin/sleep 30; } & p=$!; /bin/sleep 0.3; kill \"$p\"; wait \
+			 \"$p\"; echo \"group=$?\"",
+			"( trap 'echo X' EXIT; /bin/sleep 30 ) & p=$!; /bin/sleep 0.3; kill \"$p\"; wait \"$p\"; \
+			 echo \"subshell=$?\"",
+			"f() { trap 'echo X' EXIT; /bin/sleep 30; }; f & p=$!; /bin/sleep 0.3; kill \"$p\"; wait \
+			 \"$p\"; echo \"function=$?\"",
+			"( trap 'echo X' EXIT; kill -TERM $BASHPID; echo no ) & wait $!; echo \"self=$?\"",
+			"( trap 'echo X' EXIT; kill -PIPE $BASHPID; echo no ) & wait $!; echo \"pipe=$?\"",
+			"( trap 'echo T' TERM; trap 'echo X' EXIT; kill -TERM $BASHPID; echo after ) & wait $!; \
+			 echo \"trapped=$?\"",
+			"( trap 'echo \"q=$?\"' EXIT; false; /bin/sleep 30 ) & p=$!; /bin/sleep 0.3; kill \
+			 \"$p\"; wait \"$p\"; echo \"last=$?\"",
+			"( trap 'echo \"q=$?\"; exit 7' EXIT; /bin/sleep 30 ) & p=$!; /bin/sleep 0.3; kill \
+			 \"$p\"; wait \"$p\"; echo \"trapexit=$?\"",
+			"( trap 'echo \"q=$?\"; false' EXIT; /bin/sleep 30 ) & p=$!; /bin/sleep 0.3; kill \
+			 \"$p\"; wait \"$p\"; echo \"trapfalse=$?\"",
+			"( /bin/sleep 30 ) & p=$!; /bin/sleep 0.3; kill \"$p\"; wait \"$p\"; echo \
+			 \"untrapped=$?\"",
+		]
+		.join("\n"),
+	)
+	.await;
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	let expected = [
+		"X",
+		"group=143",
+		"X",
+		"subshell=143",
+		"X",
+		"function=143",
+		"X",
+		"self=143",
+		"X",
+		"pipe=141",
+		"T",
+		"after",
+		"X",
+		"trapped=0",
+		"q=1",
+		"last=143",
+		"q=0",
+		"trapexit=143",
+		"q=0",
+		"trapfalse=143",
+		"untrapped=143",
+		"",
+	]
+	.join("\n");
+	assert_eq!(output, expected);
+}
+
+/// A redirection to a descriptor at or past `ulimit -n` fails with `N: Bad
+/// file descriptor` (the source's number for a duplication) and status 1,
+/// after a file it names is made, as in Bash 5.2 and 5.3; closing one does
+/// not fail. Regression: each succeeded, and a later redirection's word ran.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_redirection_past_the_open_file_limit_fails() {
+	let dir = tempfile::tempdir().expect("temporary directory");
+	let first = format!("cd '{}'; ulimit -n 9", dir.path().display());
+	let script = [
+		first.as_str(),
+		"/bin/true 12>g; echo \"file=$? $([ -e g ] && echo made)\"; rm -f g",
+		": 12>g; echo \"builtin=$? $([ -e g ] && echo made)\"; rm -f g",
+		"/bin/true 12>&1; echo \"dup=$?\"",
+		"/bin/true 12<&0; echo \"dupin=$?\"",
+		"/bin/true 12<<<x; echo \"herestring=$?\"",
+		"cat 12<<E",
+		"x",
+		"E",
+		"echo \"heredoc=$?\"",
+		"/bin/true 12>&-; echo \"close=$?\"",
+		"/bin/true 8>&1; echo \"below=$?\"",
+		"/bin/true 9>&1; echo \"at=$?\"",
+		"{ echo in; } 12>g; echo \"group=$?\"; rm -f g",
+		"f() { :; }; f 12>&1; echo \"function=$?\"",
+		"/bin/true 12>&1 & wait $!; echo \"background=$?\"",
+		"( exec 12>&1 ); echo \"exec=$?\"",
+		"/bin/true 2>/dev/null 12>g <<<\"$(touch marker)\" & wait $!; [ -e marker ] && echo made || \
+		 echo notmade",
+	]
+	.join("\n");
+	let (result, output) = execute_captured(script).await;
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	let expected = [
+		"bash: line 2: 12: Bad file descriptor",
+		"file=1 made",
+		"bash: line 3: 12: Bad file descriptor",
+		"builtin=1 made",
+		"bash: line 4: 1: Bad file descriptor",
+		"dup=1",
+		"bash: line 5: 0: Bad file descriptor",
+		"dupin=1",
+		"bash: line 6: 12: Bad file descriptor",
+		"herestring=1",
+		"bash: line 7: 12: Bad file descriptor",
+		"heredoc=1",
+		"close=0",
+		"below=0",
+		"bash: line 13: 1: Bad file descriptor",
+		"at=1",
+		"bash: line 14: 12: Bad file descriptor",
+		"group=1",
+		"bash: line 15: 1: Bad file descriptor",
+		"function=1",
+		"bash: line 16: 1: Bad file descriptor",
+		"background=1",
+		"bash: line 17: 1: Bad file descriptor",
+		"exec=1",
+		"notmade",
+		"",
+	]
+	.join("\n");
+	assert_eq!(output, expected);
+}
+
+/// A duplication onto its own source makes no descriptor, so it succeeds
+/// however far past `ulimit -n` that number is, as in Bash 5.2 and 5.3 --
+/// for `N>&N`, `N<&N` and `N>&N-`, on an external, a group, a function and
+/// a background job -- and a target below the limit is unaffected by a
+/// source above it. Regression: the limit was tested against the target
+/// alone, so `15>&15` under `ulimit -n 9` failed with `15: Bad file
+/// descriptor` where Bash never calls `dup2` at all.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_self_duplication_is_not_held_to_the_open_file_limit() {
+	let script = [
+		"exec 15>/dev/null 16<&0",
+		"ulimit -n 9",
+		": 15>&15; echo \"selfdup=$?\"",
+		": 16<&16; echo \"selfdupin=$?\"",
+		": 15>&15-; echo \"selfmove=$?\"",
+		"/bin/true 15>&15; echo \"external=$?\"",
+		"{ : 15>&15; }; echo \"group=$?\"",
+		"f() { :; }; f 15>&15; echo \"function=$?\"",
+		"/bin/true 15>&15 & wait $!; echo \"background=$?\"",
+		": 1>&15; echo \"below=$?\"",
+	]
+	.join("\n");
+	let (result, output) = execute_captured(script).await;
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	let expected = [
+		"selfdup=0",
+		"selfdupin=0",
+		"selfmove=0",
+		"external=0",
+		"group=0",
+		"function=0",
+		"background=0",
+		"below=0",
+		"",
+	]
+	.join("\n");
+	assert_eq!(output, expected);
+}
+
+/// A redirection that fails past `ulimit -n` commits nothing it has not
+/// already had to commit: the descriptor is not installed, so the
+/// failure's own diagnostic reaches the real standard error instead of
+/// the handle the redirection just opened, and a `{var}` is left unset
+/// rather than naming a descriptor that was never made. The file the
+/// redirection names is still created, which is the one side effect Bash
+/// 5.2.21 keeps. Every status, `{var}` value and `made=` value here is
+/// what that bash prints for the same script run as a script file.
+/// Regression: `exec 0<&-; ulimit -n 2; : 2>/dev/null` printed no
+/// diagnostic at all (it went to the `/dev/null` just installed on fd 2),
+/// `ulimit -n 9; : {fd}>&1` left `fd=10`, `: {fd}>g` failed before `g`
+/// was made, and `&>file` was not held to the limit at all.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_redirection_installs_no_descriptor_and_assigns_no_variable() {
+	let dir = tempfile::tempdir().expect("temporary directory");
+	let first = format!("cd '{}'; ulimit -n 9", dir.path().display());
+	let script = [
+		first.as_str(),
+		"unset fd; : {fd}>&1; printf 'dup=%s fd=%s\\n' \"$?\" \"${fd-unset}\"",
+		"unset fd; : {fd}<&0; printf 'dupin=%s fd=%s\\n' \"$?\" \"${fd-unset}\"",
+		"unset fd; : {fd}<<<x; printf 'herestring=%s fd=%s\\n' \"$?\" \"${fd-unset}\"",
+		"unset fd; : {fd}>g; printf 'file=%s fd=%s made=%s\\n' \"$?\" \"${fd-unset}\" \"$([ -e g ] \
+		 && echo yes || echo no)\"",
+		": 12>i; printf 'num=%s made=%s\\n' \"$?\" \"$([ -e i ] && echo yes || echo no)\"",
+		"exec 0<&-",
+		"ulimit -n 2",
+		": 2>h; echo \"swallowed=$?\"",
+		": &>/dev/null; echo \"outerr=$?\"",
+	]
+	.join("\n");
+	let (result, output) = execute_captured(script).await;
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	// bash prints `cannot duplicate fd` for a `{var}` target, whose
+	// `F_DUPFD` to 10 fails `EINVAL`, and `N: Bad file descriptor` for a
+	// numbered one, whose `dup2` fails `EBADF`. The here-string's second
+	// line names the allocated fd; bash prints uninitialised memory there
+	// (`file descriptor out of range` and `1860191664` on two runs of the
+	// same script), so there is nothing to match.
+	let expected = [
+		"bash: redirection error: cannot duplicate fd: Invalid argument",
+		"bash: line 2: 1: Invalid argument",
+		"dup=1 fd=unset",
+		"bash: redirection error: cannot duplicate fd: Invalid argument",
+		"bash: line 3: 0: Invalid argument",
+		"dupin=1 fd=unset",
+		"bash: redirection error: cannot duplicate fd: Invalid argument",
+		"bash: line 4: 10: Invalid argument",
+		"herestring=1 fd=unset",
+		"bash: redirection error: cannot duplicate fd: Invalid argument",
+		"bash: line 5: g: Invalid argument",
+		"file=1 fd=unset made=yes",
+		"bash: line 6: 12: Bad file descriptor",
+		"num=1 made=yes",
+		"bash: line 9: 2: Bad file descriptor",
+		"swallowed=1",
+		"bash: line 10: 2: Bad file descriptor",
+		"outerr=1",
+		"",
+	]
+	.join("\n");
+	assert_eq!(output, expected);
+}
+
+/// A `{var}` redirection that succeeds assigns its variable with the
+/// descriptor already installed, which is the order bash's `F_DUPFD`
+/// gives, and which `BASH_XTRACEFD` depends on: its setter validates the
+/// number against the open descriptors and rejects one that names
+/// nothing. Regression: assigning before installing made `exec
+/// {BASH_XTRACEFD}>trace.log` print `BASH_XTRACEFD: 10: invalid value
+/// for trace file descriptor` where Bash 5.2.21 is silent, and the same
+/// for `>>` and `<>`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_var_redirection_assigns_its_variable_after_installing_the_descriptor() {
+	let dir = tempfile::tempdir().expect("temporary directory");
+	let first = format!("cd '{}'", dir.path().display());
+	let script = [
+		first.as_str(),
+		"exec {BASH_XTRACEFD}>trace.log; printf 'trace=%s %s\\n' \"$?\" \"$BASH_XTRACEFD\"",
+		"exec {a}>>app.log; printf 'append=%s %s\\n' \"$?\" \"$a\"",
+		"exec {b}<>rw.log; printf 'rw=%s %s\\n' \"$?\" \"$b\"",
+		"set -x",
+		": hello",
+		"set +x",
+		"printf 'traced=%s\\n' \"$([ -s trace.log ] && echo yes || echo no)\"",
+	]
+	.join("\n");
+	let (result, output) = execute_captured(script).await;
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	// No diagnostic on any line: the trace goes to `trace.log`, which the
+	// last row proves is not empty.
+	let expected = ["trace=0 10", "append=0 11", "rw=0 12", "traced=yes", ""].join("\n");
+	assert_eq!(output, expected);
+}

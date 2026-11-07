@@ -4,7 +4,7 @@
 
 #![cfg(unix)]
 
-use std::os::unix::process::CommandExt as _;
+use std::{fmt::Write as _, os::unix::process::CommandExt as _};
 
 use pi_shell::{ShellExecuteOptions, cancel::CancelToken, execute_shell};
 
@@ -144,4 +144,97 @@ fn running_out_of_descriptors_names_the_limit() {
 	for part in ["/dev/null: Too many open files", "limit of 128 open files", "ulimit -n"] {
 		assert!(lines[0].contains(part), "missing {part:?} in {output}");
 	}
+}
+
+/// An external given many fds holds one descriptor here per distinct
+/// source, not one or two per fd: under a limit of 128, 120 fds naming one
+/// standard stream and 100 opened files run, for every spelling below, as
+/// in Bash 5.2 and 5.3. The fds still reach the child in order: a saved
+/// standard stream, a swap through the standard streams and a ring.
+/// Regression: each fd was given its own copy (or pipe) of its source, at a
+/// number above every fd given, so `Too many open files` ended each row.
+#[test]
+fn a_child_holds_one_descriptor_per_source() {
+	if !in_limited_child("a_child_holds_one_descriptor_per_source") {
+		return;
+	}
+
+	let aliases = |to: &str| {
+		(3..=122)
+			.map(|fd| format!("{fd}{to}"))
+			.collect::<Vec<_>>()
+			.join(" ")
+	};
+	let (out, err, inp) = (aliases(">&1"), aliases(">&2"), aliases("<&0"));
+	let mixed = (3..=122)
+		.map(|fd| format!("{fd}{}", ["<&0", ">&1", ">&2", ">&-"][fd % 4]))
+		.collect::<Vec<_>>()
+		.join(" ");
+	let files = (3..=102)
+		.map(|fd| format!("{fd}>/dev/null"))
+		.collect::<Vec<_>>()
+		.join(" ");
+	let rows = [
+		("stdout", format!("/bin/true {out}")),
+		("stderr", format!("/bin/true {err}")),
+		("stdin", format!("/bin/true {inp}")),
+		("mixed", format!("/bin/true {mixed}")),
+		("file stdout", format!("{{ /bin/true {out}; }} >f")),
+		("background", format!("/bin/true {out} & wait $!")),
+		("pipeline", format!("/bin/true {out} | /bin/cat")),
+		("subshell", format!("( /bin/true {err} )")),
+		("function", format!("f() {{ /bin/true; }}; f {out}")),
+		("group", format!("{{ /bin/true; }} {err}")),
+		("here-string", format!("/bin/true <<<x {inp}")),
+		("files", format!("/bin/true {files}")),
+		("files background", format!("/bin/true {files} & wait $!")),
+	];
+	let dir = tempfile::tempdir().expect("tempdir");
+	let mut script = format!("cd '{}'\n", dir.path().display());
+	let mut expected = String::new();
+	for (name, command) in &rows {
+		let _ = writeln!(script, "{command}; echo \"{name}=$?\"");
+		let _ = writeln!(expected, "{name}=0");
+	}
+	for line in [
+		"/bin/sh -c 'printf SAVED >&3' 3>&1 >redirected; echo; echo \"saved=[$(cat redirected)]\"",
+		"{ /bin/sh -c 'echo out; echo err >&2' 3>&1 1>&2 2>&3 3>&-; } >o 2>e; echo \"swap=$(cat \
+		 o),$(cat e)\"",
+		"printf A>a; printf B>b; { /bin/sh -c 'cat <&3; cat <&4' 5<&3 3<&4 4<&5 5<&-; } 3<a 4<b; \
+		 echo \" ring=$?\"",
+	] {
+		script.push_str(line);
+		script.push('\n');
+	}
+	expected.push_str("SAVED\nsaved=[]\nswap=err,out\nBA ring=0\n");
+	assert_eq!(run(&script), (Some(0), expected));
+}
+
+/// An fd already at its own number costs no descriptor here: under a limit
+/// of 128, a command given 90 of them runs, in the foreground and as a
+/// background job, and one mixed with a real duplication still reaches the
+/// child with both. Regression: each such fd was moved to a spare number
+/// first, so 90 of them needed 90 more descriptors before any `dup2` ran
+/// and the command died with `Too many open files`, which is the very cost
+/// this one-descriptor-per-source rule exists to remove.
+#[test]
+fn a_self_targeted_fd_costs_no_descriptor() {
+	if !in_limited_child("a_self_targeted_fd_costs_no_descriptor") {
+		return;
+	}
+
+	let hold = (14..=103)
+		.map(|fd| format!("{fd}>/dev/null"))
+		.collect::<Vec<_>>()
+		.join(" ");
+	let selves = (14..=103)
+		.map(|fd| format!("{fd}>&{fd}"))
+		.collect::<Vec<_>>()
+		.join(" ");
+	let mut script = format!("exec {hold}\n");
+	let _ = writeln!(script, "/bin/true {selves}; echo \"self=$?\"");
+	let _ = writeln!(script, "/bin/true {selves} & wait $!; echo \"background=$?\"");
+	script.push_str("exec 7>&1 8>&1\n");
+	script.push_str("/bin/sh -c 'printf S >&7' 7>&7 8>&8 1>/dev/null; echo \" mixed=$?\"\n");
+	assert_eq!(run(&script), (Some(0), "self=0\nbackground=0\nS mixed=0\n".to_string()));
 }
