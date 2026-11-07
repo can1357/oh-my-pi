@@ -1611,8 +1611,14 @@ async function runLoopBody(
 						(scopedAbort ? buildToolCallAbortMessages(message, scopedAbort) : undefined);
 					const toolResults: ToolResultMessage[] = [];
 					for (const toolCall of toolCalls) {
-						const errorMessage = toolCallAbortMessages?.[toolCall.id] ?? message.errorMessage;
-						const result = createAbortedToolResult(toolCall, stream, message.stopReason, errorMessage);
+						// The per-tool label is omp's own (a tool-scoped abort: a steering
+						// rule, an interrupt), so the model sees it. `message.errorMessage`
+						// is the provider's and goes only to `details` — quoting a refusal
+						// into the model's view got the next turn refused too (INFRA-1191).
+						const result = createAbortedToolResult(toolCall, stream, message.stopReason, {
+							localReason: toolCallAbortMessages?.[toolCall.id],
+							upstreamError: message.errorMessage,
+						});
 						currentContext.messages.push(result);
 						newMessages.push(result);
 						toolResults.push(result);
@@ -1694,12 +1700,9 @@ async function runLoopBody(
 					// reminder pays no message-cache invalidation. Re-engage so the loop
 					// never yields while the requirement is unmet.
 					for (const toolCall of toolCalls) {
-						const result = createAbortedToolResult(
-							toolCall,
-							stream,
-							"skipped",
-							`Not executed: call the \`${softRequiredTool}\` tool to resolve the pending action before using other tools.`,
-						);
+						const result = createAbortedToolResult(toolCall, stream, "skipped", {
+							localReason: `Not executed: call the \`${softRequiredTool}\` tool to resolve the pending action before using other tools.`,
+						});
 						currentContext.messages.push(result);
 						newMessages.push(result);
 						toolResults.push(result);
@@ -1745,9 +1748,10 @@ async function runLoopBody(
 					// Turn ended on a non-runnable reason (`length` truncation) or deadline was exceeded
 					// but left toolCall blocks behind. pair each with a placeholder result.
 					const skipReason = deadlinePassed ? "aborted" : message.stopReason === "length" ? "length" : "skipped";
-					const skipErrMsg = deadlinePassed ? "Deadline exceeded" : undefined;
+					// omp's own reason, so the model sees it.
+					const skipText = deadlinePassed ? { localReason: "Deadline exceeded" } : undefined;
 					for (const toolCall of toolCalls) {
-						const result = createAbortedToolResult(toolCall, stream, skipReason, skipErrMsg);
+						const result = createAbortedToolResult(toolCall, stream, skipReason, skipText);
 						currentContext.messages.push(result);
 						newMessages.push(result);
 						toolResults.push(result);
@@ -3994,8 +3998,10 @@ async function executeToolCalls(
  * `source` names the state that prevented execution — either an assistant-side
  * turn termination (`assistant_stop_*`) or a mid-batch interrupt that skipped a
  * still-pending call to service queued steering/peer input (`interrupt_skipped`).
- * `upstreamError` is the provider-reported message when the turn ended with
- * `stopReason === "error"`.
+ * `upstreamError` is whatever the provider reported, when it reported anything.
+ * It is local metadata and never reaches a model: the result's `content` is a
+ * fixed sentence, because `content` is replayed on every later request and a
+ * refusal quoted there makes the next turn be refused too (INFRA-1191).
  */
 export interface SyntheticToolResultDetails {
 	__synthetic: true;
@@ -4036,9 +4042,26 @@ export function isSyntheticToolResultMessage(
 	);
 }
 
+/**
+ * Where the text on a synthetic result came from. The split is the whole point:
+ * `localReason` is a sentence omp itself produced (a steering rule cancelled
+ * the call, the deadline passed, a required tool must run first) and belongs in
+ * the model's view, because it tells the model what to do next. `upstreamError`
+ * is whatever the provider said, and must never be model-visible — a refusal
+ * quoted into `content` is replayed on every later request and gets the next
+ * turn refused too, permanently (INFRA-1191).
+ *
+ * Two fields rather than one string, so no call site can route provider text
+ * into the model's view by accident.
+ */
+export interface SyntheticToolResultText {
+	localReason?: string;
+	upstreamError?: string;
+}
+
 function syntheticDetailsFor(
 	reason: "aborted" | "error" | "skipped" | "length",
-	errorMessage: string | undefined,
+	text: SyntheticToolResultText | undefined,
 ): SyntheticToolResultDetails {
 	const source: SyntheticToolResultDetails["source"] =
 		reason === "aborted"
@@ -4052,7 +4075,7 @@ function syntheticDetailsFor(
 		__synthetic: true,
 		source,
 		executed: false,
-		...(reason === "error" && errorMessage ? { upstreamError: errorMessage } : {}),
+		...(text?.upstreamError ? { upstreamError: text.upstreamError } : {}),
 	};
 }
 
@@ -4063,7 +4086,7 @@ function syntheticDetailsFor(
 export function createSyntheticToolResultMessage(
 	toolCall: Extract<AssistantMessage["content"][number], { type: "toolCall" }>,
 	reason: "aborted" | "error" | "skipped" | "length",
-	errorMessage?: string,
+	text?: SyntheticToolResultText,
 ): ToolResultMessage<SyntheticToolResultDetails> {
 	const message =
 		reason === "aborted"
@@ -4073,12 +4096,15 @@ export function createSyntheticToolResultMessage(
 				: reason === "skipped"
 					? "Tool call was not executed because the assistant ended its turn"
 					: "Tool call was not executed because the provider stream ended with an error before the tool could run";
-	const details = syntheticDetailsFor(reason, errorMessage);
+	const details = syntheticDetailsFor(reason, text);
+	const localReason = text?.localReason;
 	return {
 		role: "toolResult",
 		toolCallId: toolCall.id,
 		toolName: toolCall.name,
-		content: [{ type: "text", text: errorMessage ? `${message}: ${errorMessage}` : `${message}.` }],
+		// Only omp's own words reach the model here. The provider's stay in
+		// `details.upstreamError`, which no request carries.
+		content: [{ type: "text", text: localReason ? `${message}: ${localReason}` : `${message}.` }],
 		details,
 		isError: true,
 		timestamp: Date.now(),
@@ -4093,9 +4119,9 @@ function createAbortedToolResult(
 	toolCall: Extract<AssistantMessage["content"][number], { type: "toolCall" }>,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	reason: "aborted" | "error" | "skipped" | "length",
-	errorMessage?: string,
+	text?: SyntheticToolResultText,
 ): ToolResultMessage {
-	const toolResultMessage = createSyntheticToolResultMessage(toolCall, reason, errorMessage);
+	const toolResultMessage = createSyntheticToolResultMessage(toolCall, reason, text);
 	const result: AgentToolResult<SyntheticToolResultDetails> = {
 		content: toolResultMessage.content,
 		details: toolResultMessage.details,

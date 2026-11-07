@@ -5,6 +5,7 @@ import {
 	agentLoop,
 	agentLoopContinue,
 	agentLoopDetailed,
+	type SyntheticToolResultDetails,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core/agent-loop";
@@ -1312,7 +1313,11 @@ describe("agentLoop with AgentMessage", () => {
 		expect(text).not.toContain("Tool execution failed due to an error");
 		expect(text.toLowerCase()).toContain("not executed");
 		expect(text.toLowerCase()).toContain("provider");
-		expect(text).toContain("Codex websocket transport error: websocket closed (1000)");
+		// The provider's own words must NOT be here: `content` is replayed to the
+		// model on every later request, and a refusal quoted there gets the next
+		// turn refused too, permanently (INFRA-1191). `details.upstreamError`
+		// below keeps them for the UI, telemetry and ACP.
+		expect(text).not.toContain("Codex websocket transport error: websocket closed (1000)");
 
 		// Structured details on the synthetic result let downstream consumers
 		// (UI, telemetry, ACP) distinguish it from a real tool failure without
@@ -7007,11 +7012,15 @@ describe("agentLoop passive additionalContext", () => {
 		const toolResult = messages[2] as ToolResultMessage;
 		expect(toolResult.toolCallId).toBe("tc-late-1");
 		expect(toolResult.isError).toBe(true);
+		// The deadline is omp's own reason, not the provider's, so the model is
+		// still told it. Only provider text is withheld from `content`.
 		const text = toolResult.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
 			.map(c => c.text)
 			.join("\n");
 		expect(text).toContain("Deadline exceeded");
+		const details = toolResult.details as SyntheticToolResultDetails;
+		expect(details.upstreamError).toBeUndefined();
 		expect(events.map(event => event.type)).toContain("agent_end");
 	});
 
