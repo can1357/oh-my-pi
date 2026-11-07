@@ -18,8 +18,22 @@ function proxyLogTarget(proxyUrl: string): string {
 }
 
 /**
+ * Lowercases a hostname and drops the DNS root label, so the absolute spelling
+ * `gpu-box.local.` matches the canonical `gpu-box.local`.
+ */
+function normalizeHostname(host: string): string {
+	const lower = host.toLowerCase();
+	return lower.endsWith(".") ? lower.slice(0, -1) : lower;
+}
+
+/**
  * Checks if a host is local or cloud metadata, which should always bypass the proxy
  * (e.g. localhost, 127/8, ::1, 169.254.169.254, metadata.google.internal).
+ *
+ * mDNS `.local` names are deliberately excluded: they are only unreachable through
+ * a remote egress proxy, not trusted local addresses — any LAN peer can answer one
+ * — and this predicate also gates the plain-HTTP credential endpoint guard in
+ * `aws-credentials.ts`. Proxy routing uses {@link isLanHostname} for those.
  */
 export function isLocalOrMetadataHost(host: string): boolean {
 	const lowerHost = host.toLowerCase();
@@ -57,11 +71,24 @@ export function isLocalOrMetadataHost(host: string): boolean {
 }
 
 /**
- * Check if the url should bypass the proxy due to hard-coded localhost/metadata checks
- * or custom NO_PROXY/no_proxy environment variables rules.
+ * True for mDNS `.local` names (home-LAN inference boxes such as
+ * `gpu-box.local:8080`). Only a proxy-routing concern — see
+ * {@link isLocalOrMetadataHost} for why these names stay out of that predicate.
+ */
+export function isLanHostname(host: string): boolean {
+	return normalizeHostname(host).endsWith(".local");
+}
+
+/**
+ * Check if the url should bypass the proxy due to hard-coded localhost/metadata
+ * checks, `.local` LAN names, or custom NO_PROXY/no_proxy environment variables rules.
  */
 export function shouldBypassProxy(urlObj: URL): boolean {
-	if (isLocalOrMetadataHost(urlObj.hostname)) {
+	// The DNS root label is dropped first: `gpu-box.local.` and `gpu-box.local`
+	// name the same host, and the catalog's local-endpoint check already
+	// normalizes it that way.
+	const targetHost = normalizeHostname(urlObj.hostname);
+	if (isLocalOrMetadataHost(targetHost) || isLanHostname(targetHost)) {
 		return true;
 	}
 
@@ -74,7 +101,6 @@ export function shouldBypassProxy(urlObj: URL): boolean {
 		.split(/[,\s]+/)
 		.map(r => r.trim())
 		.filter(Boolean);
-	const targetHost = urlObj.hostname.toLowerCase();
 	const targetPort = urlObj.port || (urlObj.protocol === "https:" || urlObj.protocol === "wss:" ? "443" : "80");
 
 	for (const rule of rules) {
@@ -97,6 +123,11 @@ export function shouldBypassProxy(urlObj: URL): boolean {
 
 		// Strip IPv6 brackets
 		ruleHost = ruleHost.replace(/^\[|\]$/g, "");
+
+		// The rule's hostname is normalized the same way as the target's, so an
+		// absolute DNS spelling on either side still matches: `api.internal.example.`
+		// must exempt `https://api.internal.example./`.
+		ruleHost = normalizeHostname(ruleHost);
 
 		if (rulePort && rulePort !== targetPort) {
 			continue;
@@ -162,17 +193,46 @@ export function getProxyForUrl(provider: string, url: URL): string | undefined {
 }
 
 /**
+ * True when the environment configures a proxy that Bun's `fetch` applies on its
+ * own (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`). Such a proxy is invisible to
+ * `PI_PROXY`, so a request that has to stay direct must opt out of it explicitly.
+ */
+export function hasNativeProxyEnv(): boolean {
+	return Boolean(
+		Bun.env.HTTP_PROXY ||
+		Bun.env.http_proxy ||
+		Bun.env.HTTPS_PROXY ||
+		Bun.env.https_proxy ||
+		Bun.env.ALL_PROXY ||
+		Bun.env.all_proxy,
+	);
+}
+
+/**
+ * Pins a request to a direct connection. Bun's `fetch` resolves `HTTP_PROXY` /
+ * `HTTPS_PROXY` / `ALL_PROXY` itself whenever the request carries no
+ * per-request proxy, so `proxy: false` — Bun's documented per-request opt-out —
+ * is what actually keeps a LAN host off the egress proxy.
+ */
+export function withoutNativeProxy(init: RequestInit | undefined): RequestInit {
+	const direct: RequestInit & { proxy: false } = { ...init, proxy: false };
+	return direct;
+}
+
+/**
  * Return `init` with `proxy: proxyUrl` set when the request should tunnel.
  * A caller-supplied `init.proxy` always wins (the innermost, most specific
- * decision); Unix sockets, local/metadata hosts, NO_PROXY matches, and
- * unparseable URLs pass through unchanged.
+ * decision); Unix sockets and unparseable URLs pass through unchanged, while
+ * local/metadata hosts, `.local` LAN names and NO_PROXY matches are pinned to a
+ * direct connection (`proxy: false`), which also switches off the native
+ * `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` handling.
  */
 export function withProxyInit(
 	input: string | URL | Request,
 	init: RequestInit | undefined,
-	proxyUrl: string,
+	proxyUrl: string | undefined,
 ): RequestInit | undefined {
-	if (init && (("unix" in init && init.unix) || ("proxy" in init && init.proxy))) return init;
+	if (init && (("unix" in init && init.unix) || ("proxy" in init && init.proxy !== undefined))) return init;
 	const urlStr = input instanceof Request ? input.url : input.toString();
 	let urlObj: URL;
 	try {
@@ -184,25 +244,24 @@ export function withProxyInit(
 	if (shouldBypassProxy(urlObj)) {
 		// A NO_PROXY rule silencing a configured proxy is otherwise invisible
 		// until the unproxied egress is refused; local hosts are routine.
-		if (!isLocalOrMetadataHost(urlObj.hostname)) {
+		if (!isLocalOrMetadataHost(urlObj.hostname) && !isLanHostname(urlObj.hostname)) {
 			logger.debug("proxy bypassed by NO_PROXY", {
 				host: urlObj.host,
 				noProxy: Bun.env.NO_PROXY || Bun.env.no_proxy,
 			});
 		}
-		return init;
+		// The bypass has to be explicit: Bun applies the native proxy variables
+		// on its own whenever the request carries no per-request proxy.
+		return withoutNativeProxy(init);
 	}
 
+	if (!proxyUrl) return init;
 	const proxied: RequestInit & { proxy: string } = { ...init, proxy: proxyUrl };
 	return proxied;
 }
 
 /** Wraps `fetchImpl` so non-local requests tunnel through `proxyUrl`; see {@link withProxyInit}. */
 function wrapFetchWithProxyUrl(fetchImpl: FetchImpl, proxyUrl: string | undefined): FetchImpl {
-	if (!proxyUrl) {
-		return fetchImpl;
-	}
-
 	const wrapped = (input: string | URL | Request, init?: RequestInit): Promise<Response> =>
 		fetchImpl(input, withProxyInit(input, init, proxyUrl));
 
@@ -239,28 +298,31 @@ export function __resetGlobalProxyFetch(): void {
  *
  * A per-request `proxy` (including `PI_PROXY_<PROVIDER>` injected by
  * {@link wrapFetchForProxy}) still wins, and loopback / private-range /
- * `NO_PROXY` targets bypass, so local model servers and MCP hosts are
- * untouched. Idempotent; a no-op when `PI_PROXY` is unset.
+ * `.local` / `NO_PROXY` targets bypass, so local model servers and MCP hosts are
+ * untouched. Idempotent; a no-op when neither `PI_PROXY` nor a native proxy
+ * variable is set.
  */
 export function installGlobalProxyFetch(): void {
 	if (globalProxyFetchInstalled) return;
 	const proxyUrl = Bun.env.PI_PROXY?.trim();
+	const nativeProxy = hasNativeProxyEnv();
 	// One line naming every proxy-relevant variable this process can see: a
 	// missing PI_PROXY and a NO_PROXY rule that silences it are otherwise
 	// indistinguishable from a working proxy that the peer rejected.
 	const env = {
 		PI_PROXY: proxyUrl ? proxyLogTarget(proxyUrl) : undefined,
 		PI_PROXY_ANTHROPIC: Bun.env.PI_PROXY_ANTHROPIC ? proxyLogTarget(Bun.env.PI_PROXY_ANTHROPIC) : undefined,
+		HTTP_PROXY: Bun.env.HTTP_PROXY || Bun.env.http_proxy ? "set" : undefined,
 		HTTPS_PROXY: Bun.env.HTTPS_PROXY || Bun.env.https_proxy ? "set" : undefined,
 		ALL_PROXY: Bun.env.ALL_PROXY || Bun.env.all_proxy ? "set" : undefined,
 		NO_PROXY: Bun.env.NO_PROXY || Bun.env.no_proxy,
 	};
-	if (!proxyUrl) {
+	if (!proxyUrl && !nativeProxy) {
 		// Without any proxy variable there is nothing to diagnose; skip the
 		// per-process line. When some are set, record why none was installed.
 		if (Object.values(env).some(value => value !== undefined && value !== "")) {
 			logger.debug("global proxy fetch not installed", {
-				reason: "PI_PROXY unset",
+				reason: "no proxy configured",
 				env,
 			});
 		}
@@ -269,7 +331,7 @@ export function installGlobalProxyFetch(): void {
 	globalProxyFetchInstalled = true;
 	globalThis.fetch = wrapFetchWithProxyUrl(globalThis.fetch, proxyUrl) as typeof globalThis.fetch;
 	logger.debug("global proxy fetch installed", {
-		proxy: proxyLogTarget(proxyUrl),
+		proxy: proxyUrl ? proxyLogTarget(proxyUrl) : undefined,
 		env,
 	});
 }
