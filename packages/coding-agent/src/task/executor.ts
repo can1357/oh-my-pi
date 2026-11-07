@@ -349,8 +349,9 @@ function installSubagentRetryFallbackChain(args: {
 	inheritedFallbackChain: string[] | undefined;
 	model: Model<Api> | undefined;
 	authFallbackUsed: boolean;
+	modelRegistry?: ModelRegistry;
 }): string | undefined {
-	const { settings, id, candidates, inheritedFallbackChain, model, authFallbackUsed } = args;
+	const { settings, id, candidates, inheritedFallbackChain, model, authFallbackUsed, modelRegistry } = args;
 	if (!model || authFallbackUsed || candidates.length === 0) return undefined;
 
 	const selectedIndex = candidates.findIndex(
@@ -365,7 +366,16 @@ function installSubagentRetryFallbackChain(args: {
 	}
 
 	const role = subagentRetryFallbackRole(id);
-	installRetryFallbackRole(settings, role, { primary: candidates[selectedIndex].selector, chain: fallbackChain });
+	installRetryFallbackRole(
+		settings,
+		role,
+		{
+			primary: candidates[selectedIndex].selector,
+			chain: fallbackChain,
+			shadowPrimaryKeys: fallbackSelectors.length > 0,
+		},
+		modelRegistry,
+	);
 	return role;
 }
 
@@ -4760,6 +4770,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				inheritedFallbackChain: inheritedRetryFallbackChain,
 				model,
 				authFallbackUsed,
+				modelRegistry,
 			});
 			if (retryFallbackRole) {
 				logger.debug("Configured subagent runtime model fallback chain", {
