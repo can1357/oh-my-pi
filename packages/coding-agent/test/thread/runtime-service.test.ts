@@ -252,6 +252,144 @@ describe("runtime thread services: async jobs", () => {
 		manager.publishCompleted("task", "after exit", { text: "late" }, { ownerId: "Worker" });
 		expect(await manager.drainDeliveries({ timeoutMs: 1_000 })).toBe(true);
 	});
+
+	it("counts a worker's slot against main's cap and frees it on release, on exit, and when exit beats the grant", async () => {
+		// The RPC path is not a thin forwarder: it has its own exit race, and it
+		// is how production task subagents take slots. The deadlock this branch
+		// fixes is in subagent spawning, so this path needs its own guard. Every
+		// phase ends by proving a later request is actually granted — "nothing
+		// threw" is what let a grant-throwing regression hide here once already.
+		const manager = new AsyncJobManager({ maxRunningJobs: 1 });
+		managers.push(manager);
+		/**
+		 * Takes and returns a real slot, so a phase passes only when the cap
+		 * genuinely has one to give — "nothing threw" is what hid a regression
+		 * here once. Every caller expects the grant, so this awaits the grant
+		 * itself; the cap exists only to turn a hang into a named failure, and is
+		 * far wider than the work so a loaded box cannot read as "no slot".
+		 */
+		const slotIsFree = async (): Promise<boolean> => {
+			try {
+				(await manager.acquireSlot(AbortSignal.timeout(30_000), {}))();
+				return true;
+			} catch {
+				return false;
+			}
+		};
+
+		const probe = await startWorker();
+		const releaseMain = await manager.acquireSlot(new AbortController().signal, {});
+		let granted = false;
+		const acquired = probe("acquireSlot", manager, "Worker").then(() => {
+			granted = true;
+		});
+		await probe("noop");
+		expect(granted).toBe(false);
+
+		releaseMain();
+		await acquired;
+		expect(manager.atCapacity).toBe(true);
+		await probe("releaseSlot");
+		expect(await slotIsFree()).toBe(true);
+
+		// A worker that exits holding a slot gives it back.
+		await probe("acquireSlot", manager, "Worker");
+		expect(manager.atCapacity).toBe(true);
+		const entry = started[0];
+		if (!entry) throw new Error("no worker");
+		for (const service of SERVICES) service.onWorkerExit?.(entry.peer, "crash");
+		expect(await slotIsFree()).toBe(true);
+
+		// A worker that exits while it waits gives up its place: its request must
+		// reject at the exit, not merely once unrelated work frees a slot, or a
+		// dead worker's request could still take the next slot that comes along.
+		const releaseAgain = await manager.acquireSlot(new AbortController().signal, {});
+		const waiter = await startWorker();
+		const waiterRequest = waiter("acquireSlot", manager, "Waiter").then(
+			() => "granted",
+			() => "rejected",
+		);
+		await waiter("noop");
+		const waiting = started[1];
+		if (!waiting) throw new Error("no second worker");
+		for (const service of SERVICES) service.onWorkerExit?.(waiting.peer, "crash");
+		expect(await waiterRequest).toBe("rejected");
+		releaseAgain();
+		expect(await slotIsFree()).toBe(true);
+
+		// The exit wins the race after the grant. `releaseLast()` resolves the
+		// waiter synchronously inside the grant pump, so firing the exit before
+		// awaiting puts it between the grant and the handler resuming — the
+		// ordering that tracked the release on a cleanup set that had already
+		// run, losing the slot for the manager's life. The premise is asserted:
+		// were grants ever deferred, the exit would win before the grant and this
+		// phase would quietly become a second copy of the one above.
+		const releaseLast = await manager.acquireSlot(new AbortController().signal, {});
+		const racer = await startWorker();
+		void racer("acquireSlot", manager, "Racer").catch(() => {});
+		await racer("noop");
+		const racing = started[2];
+		if (!racing) throw new Error("no third worker");
+		releaseLast();
+		// The premise, checked rather than assumed: the racer took the slot inside
+		// `releaseLast()`. This catches the slot simply not being taken; it cannot
+		// tell a synchronous grant from a deferred one, because `atCapacity` is
+		// also true while anything is queued. Defer grants and this phase becomes
+		// exit-before-grant coverage instead, which is why the correction it
+		// guards is stated in the handler rather than left to this assertion.
+		expect(manager.atCapacity).toBe(true);
+		for (const service of SERVICES) service.onWorkerExit?.(racing.peer, "crash");
+		expect(await slotIsFree()).toBe(true);
+
+		// Three real workers, each paying module init on a shared box. Bun's
+		// default 5 s bound is a quiet-machine number: this failed on one run in
+		// two under gate contention while every assertion still held. The bound
+		// is here to turn a hang into a named failure, not to measure anything,
+		// so it is far wider than the work.
+	}, 120_000);
+
+	it("does not hand a main-side run's slot down to a job a worker registers: the worker-hosted case is uncovered", async () => {
+		// The documented boundary, asserted so a future change has to face it.
+		// The hand-down is an `AsyncLocalStorage` and does not cross a thread, so
+		// work a worker-hosted run starts queues at a full cap instead of taking
+		// the placing run's slot. Linking the two was attempted over five rounds
+		// and withdrawn; see the "Queued jobs" section of `docs/agent-hub.md`.
+		//
+		// Asserting it keeps the cap's bound honest in the other direction too: a
+		// name arriving from a worker must never buy a slot, which is what three
+		// of those rounds got wrong.
+		const manager = new AsyncJobManager({ maxRunningJobs: 1 });
+		managers.push(manager);
+		const hostRelease = Promise.withResolvers<void>();
+		const hostId = manager.register(
+			"task",
+			"MainHost",
+			async () => {
+				await hostRelease.promise;
+				return "host done";
+			},
+			{ id: "MainHost", agentId: "MainHost", ownerId: "Main" },
+		);
+		expect(manager.getJob(hostId)?.waitingForSlot).not.toBe(true);
+		expect(manager.atCapacity).toBe(true);
+
+		const worker = await startWorker();
+		const childId = await jobId(worker, manager, "MainHost");
+		// Queued, not handed down. This is the uncovered case stated as a fact.
+		expect(manager.getJob(childId)).toMatchObject({ queued: true, waitingForSlot: true });
+		expect(manager.atCapacity).toBe(true);
+
+		// And it is queued, not lost. The child's body only runs once the host's
+		// slot frees, so `finish` can only be answered after admission: awaiting
+		// the job's own promise is the real signal, not a guessed delay. Were it
+		// never admitted, this would hang to the test's bound as a named failure.
+		hostRelease.resolve();
+		await manager.getJob(hostId)!.promise;
+		await worker("finish", childId, "child done");
+		await manager.getJob(childId)!.promise;
+		expect(manager.getJob(childId)).toMatchObject({ status: "completed", waitingForSlot: false });
+		await manager.waitForAll();
+	}, 120_000);
 });
 
 describe("runtime thread services: cost gate, event bus, artifacts, storage", () => {

@@ -2,12 +2,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession, AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -61,6 +62,144 @@ describe("AsyncJobManager ownership across concurrent top-level sessions", () =>
 		});
 		return session;
 	}
+
+	/** A subagent under `root`, started as the task executor starts one: it uses the root's job manager. */
+	async function spawnSubagent(root: AgentSession) {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-async-subagent-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		fs.mkdirSync(cwd, { recursive: true });
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir: path.join(tempDir, "agent"),
+			settings: Settings.isolated(),
+			parentTaskPrefix: "0-Sub",
+			taskDepth: 1,
+			agentId: "0-Sub",
+			asyncJobManager: root.asyncJobManager,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			modelRegistry: sharedModelRegistry,
+		});
+		return session;
+	}
+
+	/**
+	 * Registers `count` background jobs owned by `session`'s agent that record their
+	 * start in `started` and run until `release` settles; returns their ids.
+	 */
+	function registerHeldJobs(
+		session: AgentSession,
+		ownerId: string,
+		count: number,
+		release: Promise<void>,
+		started?: string[],
+	): string[] {
+		const manager = session.asyncJobManager!;
+		const ids: string[] = [];
+		for (let i = 0; i < count; i++) {
+			ids.push(
+				manager.register(
+					"bash",
+					`sleep 300 (${ownerId} ${i})`,
+					async ({ jobId }) => {
+						started?.push(jobId);
+						await release;
+						return "done";
+					},
+					{ ownerId },
+				),
+			);
+		}
+		return ids;
+	}
+
+	/** Resolves once `predicate` holds; throws after `timeoutMs`. */
+	async function until(predicate: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		while (!predicate()) {
+			if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+			await scheduler.yield();
+		}
+	}
+
+	it("runs 101 background jobs between a root session with async.maxJobs 0 and a subagent under it", async () => {
+		const root = await spawnTopLevelSession({ "async.maxJobs": 0 });
+		const subagent = await spawnSubagent(root);
+		const release = Promise.withResolvers<void>();
+		const started: string[] = [];
+		try {
+			expect(subagent.asyncJobManager).toBe(root.asyncJobManager!);
+			const ids = [
+				...registerHeldJobs(root, "Main", 50, release.promise, started),
+				...registerHeldJobs(subagent, "0-Sub", 51, release.promise, started),
+			];
+			// Every body ran: with no cap, none of the 101 waits for a slot.
+			await until(() => started.length === ids.length, "all 101 jobs to start");
+			expect(started.sort()).toEqual([...ids].sort());
+			expect(root.asyncJobManager!.getRunningJobs().map(job => job.id)).toEqual(ids);
+		} finally {
+			release.resolve();
+			await root.asyncJobManager!.waitForAll();
+			await subagent.dispose();
+			await root.dispose();
+		}
+	}, 60000);
+
+	it("lets a root session's async.maxJobs above 100 cap it and its subagent", async () => {
+		const root = await spawnTopLevelSession({ "async.maxJobs": 101 });
+		const subagent = await spawnSubagent(root);
+		const release = Promise.withResolvers<void>();
+		const started: string[] = [];
+		try {
+			registerHeldJobs(root, "Main", 50, release.promise, started);
+			registerHeldJobs(subagent, "0-Sub", 51, release.promise, started);
+			// 101 is above the old fixed ceiling of 100: all of them run.
+			await until(() => started.length === 101, "all 101 jobs to start");
+			const [overflowId] = registerHeldJobs(subagent, "0-Sub", 1, release.promise, started);
+			expect(root.asyncJobManager!.getJob(overflowId!)?.waitingForSlot).toBe(true);
+			expect(started).not.toContain(overflowId);
+		} finally {
+			release.resolve();
+			await root.asyncJobManager!.waitForAll();
+			await subagent.dispose();
+			await root.dispose();
+		}
+	}, 60000);
+
+	it("queues the 101st background job of a root session and its subagent at the async.maxJobs default", async () => {
+		const root = await spawnTopLevelSession();
+		const subagent = await spawnSubagent(root);
+		const release = Promise.withResolvers<void>();
+		const finisher = Promise.withResolvers<void>();
+		const started: string[] = [];
+		try {
+			registerHeldJobs(root, "Main", 50, release.promise, started);
+			registerHeldJobs(subagent, "0-Sub", 49, release.promise, started);
+			const [finisherId] = registerHeldJobs(subagent, "0-Sub", 1, finisher.promise, started);
+			await until(() => started.length === 100, "the first 100 jobs to start");
+			const [overflowId] = registerHeldJobs(subagent, "0-Sub", 1, release.promise, started);
+			const manager = root.asyncJobManager!;
+			expect(manager.getJob(overflowId!)?.waitingForSlot).toBe(true);
+			expect(started).not.toContain(overflowId);
+
+			// It starts on its own as soon as one of the hundred ends.
+			finisher.resolve();
+			await manager.getJob(finisherId!)!.promise;
+			await until(() => started.includes(overflowId!), "the queued job to start once a slot frees");
+			expect(manager.getJob(overflowId!)?.waitingForSlot).toBe(false);
+		} finally {
+			release.resolve();
+			await root.asyncJobManager!.waitForAll();
+			await subagent.dispose();
+			await root.dispose();
+		}
+	}, 60000);
 
 	it("does not cancel the primary session's running jobs when a secondary session disposes", async () => {
 		const primary = await spawnTopLevelSession();

@@ -24,6 +24,7 @@ import {
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { getActiveProfile, getConfigDirName } from "@oh-my-pi/pi-utils/dirs";
 import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { type AsyncJobStatusLabel, asyncJobStatusLabel } from "../../async";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -2418,11 +2419,12 @@ const COLUMN_WIDTH_MIN = 4;
 
 function renderJobLine(job: AsyncJobSnapshotItem, now: number): string {
 	const duration = formatDuration(Math.max(0, (job.endTime ?? now) - job.startTime));
-	const status = formatJobStatus(job.status);
+	const status = formatJobStatus(asyncJobStatusLabel(job));
 	return `${theme.fg("dim", job.id)} ${theme.fg("dim", `[${job.type}]`)} ${status} ${theme.fg("dim", `(${duration})`)}`;
 }
 
-function formatJobStatus(status: AsyncJobSnapshotItem["status"]): string {
+function formatJobStatus(status: AsyncJobStatusLabel): string {
+	if (status === "queued") return theme.fg("muted", "queued");
 	if (status === "running") return theme.fg("warning", "running");
 	if (status === "completed") return theme.fg("success", "completed");
 	if (status === "cancelled") return theme.fg("dim", "cancelled");

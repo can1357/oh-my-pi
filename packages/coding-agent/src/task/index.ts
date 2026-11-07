@@ -53,7 +53,7 @@ import {
 	type TaskToolSchemaInstance,
 } from "./types";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { AsyncJobError, type AsyncJobManagerApi } from "../async";
+import { AsyncJobError, type AsyncJobManagerApi, queuedJobNotice } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
@@ -847,9 +847,47 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 */
 	#spawnSemaphore: Semaphore | undefined;
 	readonly #permit: SpawnPermit = {
-		acquire: signal => this.#getSpawnSemaphore().acquire(signal),
-		release: () => this.#releaseSpawnSemaphore(),
+		acquire: async signal => {
+			await this.#getSpawnSemaphore().acquire(signal);
+			return () => this.#releaseSpawnSemaphore();
+		},
 	};
+
+	/**
+	 * Permit of a job-detached spawn: the session semaphore permit, then a slot
+	 * under `async.maxJobs`, so the subagent starts only when both are held. The
+	 * slot is taken after the permit, so a spawn waiting on this session's own
+	 * `task.maxConcurrency` holds no slot other jobs could use.
+	 *
+	 * `jobId` is read when the slot is requested, not when the run is launched:
+	 * `register()` suffixes a colliding id, and a speculative launch has no job
+	 * row at all. It is also how the manager finds the run that started this
+	 * spawn — the job's recorded host — and so whether a slot can be handed down
+	 * to it rather than queued behind the run that is waiting for it.
+	 */
+	#detachedPermit(manager: AsyncJobManagerApi, jobId: () => string | undefined): SpawnPermit {
+		return {
+			acquire: async signal => {
+				const releasePermit = await this.#permit.acquire(signal);
+				try {
+					// The run starting this spawn supplies the host: on the main
+					// thread that is the manager's own run scope. A session's agent id
+					// is not that fact — it names an agent, not a job row — and the
+					// scope does not cross into a worker, so a spawn started by a
+					// worker-hosted run queues at a full cap rather than handing down.
+					const releaseSlot = await manager.acquireSlot(signal, { jobId: jobId() });
+					return () => {
+						releaseSlot();
+						releasePermit();
+					};
+				} catch (error) {
+					releasePermit();
+					throw error;
+				}
+			},
+		};
+	}
+
 	/** Streamed calls' speculative launches, keyed by tool-call id until dispatch adopts or discards them. */
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
 	readonly #launcher: TaskLauncher = {
@@ -1040,9 +1078,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		index: number;
 		agentId?: string;
 		detached: boolean;
+		/** The registered job this run belongs to, once it has one; see {@link TaskTool.#detachedPermit}. */
+		jobId?: () => string | undefined;
 	}): SpawnRun {
+		const manager = this.session.asyncJobManager;
 		return new SpawnRun(
-			this.#permit,
+			spawn.detached && manager ? this.#detachedPermit(manager, spawn.jobId ?? (() => undefined)) : this.#permit,
 			run =>
 				this.#runSpawn(
 					spawn.toolCallId,
@@ -1063,7 +1104,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/**
 	 * Start a streamed item's run ahead of dispatch. Preflight and execution
 	 * mode mirror dispatch exactly; refuses (undefined) whenever dispatch would
-	 * reject the item, so a refusal halts further speculation for the call.
+	 * reject the item, so a refusal halts further speculation for the call. A
+	 * job-detached run waits for its slot under `async.maxJobs` like any spawn.
 	 */
 	async #startSpeculative(
 		toolCallId: string,
@@ -1444,8 +1486,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			failedSchedules.length > 0
 				? ` Failed to schedule ${failedSchedules.length} spawn${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}.`
 				: "";
-		const renderSpawnFeedback = (mixed: boolean): string =>
-			prompt
+		// Spawns that have not started while running jobs fill the cap wait for a
+		// slot; the caller learns that now rather than reading a job that never
+		// moves. Only `waitingForSlot` says so: a spawn can be `queued` at a full
+		// cap and still start at once on a slot handed down from the agent that
+		// made it, and telling the caller that one is stuck would be false.
+		const queuedSummary = queuedJobNotice(started.map(({ jobId }) => manager.getJob(jobId)));
+		const renderSpawnFeedback = (mixed: boolean): string => {
+			const feedback = prompt
 				.render(taskSpawnFeedbackTemplate, {
 					mixed,
 					singular: started.length === 1,
@@ -1459,6 +1507,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					scheduleFailureSummary,
 				})
 				.trim();
+			return queuedSummary ? `${feedback}\n\n${queuedSummary}` : feedback;
+		};
 
 		if (syncSpawns.length === 0) {
 			if (spawns.length === 1) {
@@ -1594,8 +1644,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			onUpdate,
 			onSettled,
 		} = options;
-		// A queued job launches (or adopts) its run when it starts; until then
-		// its widget has no tool tap to read.
+		// The run this job launches, or adopts after a speculative launch; its
+		// widget reads the run's tool tap.
 		let spawnRun: SpawnRun | undefined = run;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			// Isolated runs are parked without a reviver once the run ends
@@ -1666,6 +1716,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					index: progress.index,
 					agentId,
 					detached: true,
+					jobId: () => jobId,
 				}));
 				activeRun.attach({
 					signal: runSignal,
@@ -1683,17 +1734,23 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						else void cleanup();
 					},
 				});
-				// An acquire-time abort and a post-acquire abort take the same
-				// path: progress + onSettled have to fire even when the spawn
-				// never reached the executor, otherwise the batch aggregate state
-				// stays "running" forever.
+				// An acquire-time abort (cancelled while waiting for its semaphore
+				// permit or its slot) and a post-acquire abort take the same path:
+				// progress, onSettled and a final update have to fire even when the
+				// spawn never reached the executor, otherwise the batch aggregate and
+				// the call's card stay "running" forever.
 				const permitHeld = await activeRun.started.then(
 					() => true,
 					() => false,
 				);
 				if (!permitHeld || runSignal.aborted) {
 					progress.status = "aborted";
+					progress.durationMs = Math.max(0, Date.now() - startedAt);
 					onSettled?.(true);
+					await reportProgress(
+						`Background task ${agentId} was cancelled before it started.`,
+						buildDetails() as unknown as Record<string, unknown>,
+					);
 					throw new Error("Aborted before execution");
 				}
 				try {

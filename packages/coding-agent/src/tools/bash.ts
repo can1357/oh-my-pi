@@ -19,7 +19,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { PipeStreams } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
-import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import { queuedJobNotice, raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { InternalUrlRouter } from "../internal-urls";
@@ -530,7 +530,6 @@ interface BashProgressDetails extends BashToolDetails {
 
 /** Pid probe of a background job with no command in flight. */
 const NO_PIDS = (): readonly number[] => [];
-
 /** Shown when a call overlapped another one (parallel or backgrounded) and could not use the session's shell. */
 const SESSION_SHELL_BUSY_NOTICE =
 	"Ran in a temporary shell while the session shell is busy with another command: session variables and functions were unavailable, and nothing set here persists.";
@@ -997,6 +996,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (options.notices?.length) {
 			lines.push(...options.notices, "");
 		}
+		const queued = queuedJobNotice([this.session.asyncJobManager?.getJob(jobId)]);
+		if (queued) lines.push(queued, "");
 		lines.push(formatBackgroundNotice(jobId, timeoutSec));
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
@@ -1129,6 +1130,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onStart: probe => {
 							pids = probe;
 						},
+						// No fastCancel: a cancelled job stays charged until its run settles.
 						onSessionShellBusy: () => notices.push(SESSION_SHELL_BUSY_NOTICE),
 					}).finally(() => {
 						pids = NO_PIDS;
@@ -1463,8 +1465,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		);
 
 		const autoBgManager = this.session.asyncJobManager;
-		// At the running-job cap, fall through to direct foreground execution
-		// instead of failing every bash call until a slot frees up.
+		// At the running-job cap (or with jobs already queued there), fall through to
+		// direct foreground execution: a foreground-backed job would queue behind them.
 		if (
 			cfgBashAutoBackgroundEnabled.get(this.session.settings) &&
 			!pty &&
@@ -1912,6 +1914,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							: undefined,
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 					onSessionShellBusy: () => pendingNotices.push(SESSION_SHELL_BUSY_NOTICE),
+					// A person watching this call must see the cancellation at once, and
+					// nothing is accounting for it. Every other caller of this path waits
+					// for the run to settle instead; that still does not prove the process
+					// is gone (#17855 owns the reaped-group signal).
+					fastCancel: this.session.hasUI === true,
 				});
 		const wallTimeMs = performance.now() - wallTimeStart;
 		if (result.cancelled) {

@@ -34,6 +34,7 @@ import {
 	type AsyncJobManagerProtocol,
 	type AsyncJobWire,
 	fromWireReason,
+	fromWireSignal,
 	type JobFeedDelta,
 	toWireSignal,
 	type WireJobFeed,
@@ -152,6 +153,7 @@ export function toJobWire(job: AsyncJob): AsyncJobWire {
 		agentId: job.agentId,
 		agentOutputPublished: job.agentOutputPublished,
 		queued: job.queued,
+		waitingForSlot: job.waitingForSlot,
 		foreground: job.foreground,
 		process: process
 			? {
@@ -182,6 +184,7 @@ function mainRegisterOptions(options: WireRegisterOptions | undefined, feed: Job
 		agentId: options?.agentId,
 		onProgress: options?.onProgress,
 		queued: options?.queued,
+		startImmediately: options?.startImmediately,
 		foreground: options?.foreground,
 		intent: options?.intent,
 		process: feed?.process,
@@ -219,6 +222,41 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 				},
 				mainRegisterOptions(options, feed),
 			);
+		},
+		// Tracked, so a worker that exits holding a slot gives it back. A worker
+		// that exits while still waiting gives up its place in line too, so a dead
+		// worker never shrinks the cap for good: the link's close aborts imported
+		// signals, and this exit watch does not depend on that ordering. An OS
+		// process the worker started and did not kill outlives both and is
+		// nobody's slot — killing a dead worker's children is process-group
+		// teardown, not job accounting.
+		acquireSlot: async (manager, signal, request) => {
+			const exited = new AbortController();
+			const stopWatchingExit = cleanups.track(threadId, () => exited.abort(new Error("Worker exited")));
+			let release: () => void;
+			// Only the worker's exit aborts `exited`; the caller's own wire signal
+			// aborts the combined signal instead. So reading it is exactly "the
+			// worker exited" — but it must be read BEFORE the teardown call, because
+			// `cleanups.track` hands back a run-once invoker of the tracked body, not
+			// an untracker, so that call aborts `exited` itself. Reading it after
+			// would be true every time and throw at the caller of every grant.
+			let exitWon: boolean;
+			try {
+				release = await manager.acquireSlot(AbortSignal.any([fromWireSignal(signal), exited.signal]), request);
+			} finally {
+				exitWon = exited.signal.aborted;
+				stopWatchingExit();
+			}
+			// The exit can also win after the grant: the slot is held, and this
+			// worker's cleanup set has already run. Tracking the release here would
+			// open a fresh set nothing will ever run, and the closed link cannot
+			// carry the release back, so the slot would be lost for the manager's
+			// life. Give it back here instead — the caller is gone either way.
+			if (exitWon) {
+				release();
+				throw exited.signal.reason;
+			}
+			return cleanups.track(threadId, release);
 		},
 		publishCompleted: (manager, type, label, result, options) =>
 			manager.publishCompleted(type, label, result, options),

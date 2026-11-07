@@ -87,6 +87,8 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 			"task",
 			id,
 			async ({ signal }) => {
+				// Cancelled while queued at the background job cap: leave the agent parked.
+				if (signal.aborted) throw new Error("Cancelled before the restored turn started");
 				const result = await runSubagentFollowUpTurn({
 					id,
 					agent: persistedAgentDefinition(ref.displayName, init),

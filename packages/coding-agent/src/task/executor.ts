@@ -181,6 +181,13 @@ export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 
 /**
+ * How long a cancelled IRC wake job waits for its turn to stop before it
+ * settles and gives up its running-job slot; bounded for the same reason the
+ * shell teardown is, so a turn that never settles cannot hold a slot forever.
+ */
+const WAKE_WINDDOWN_MAX_MS = 10_000;
+
+/**
  * Soft per-agent request budgets (assistant requests per run). Crossing the
  * budget injects a wrap-up steering notice (`task.softRequestBudgetNotice`,
  * on by default). At 1.5x the budget the free-running turn is stopped and the
@@ -3384,18 +3391,37 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				manager.register(
 					"task",
 					id,
-					({ signal, reportProgress }) => {
+					async ({ signal, reportProgress }) => {
 						signal.addEventListener("abort", () => jobCancel.abort(signal.reason), { once: true });
 						// The progress record is what `wait` reads the turn's stage and estimate from.
 						reportJobProgress = progress => {
 							void reportProgress(`Running background task ${id}...`, { progress: [progress] });
 						};
-						return untilAborted(signal, outcome.promise);
+						try {
+							return await untilAborted(signal, outcome.promise);
+						} catch (error) {
+							// Cancelled: the turn is still stopping, and this job's running-job
+							// slot stands for that work. Give the turn a bounded moment to
+							// settle so the next queued job does not start beside it. The
+							// losing timer must not keep the loop alive: a turn that settles
+							// at once would otherwise still hold the process for the window.
+							const winddown = Promise.withResolvers<void>();
+							const winddownTimer = setTimeout(() => winddown.resolve(), WAKE_WINDDOWN_MAX_MS);
+							winddownTimer.unref();
+							try {
+								await Promise.race([outcome.promise.catch(() => undefined), winddown.promise]);
+							} finally {
+								clearTimeout(winddownTimer);
+							}
+							throw error;
+						}
 					},
 					{
 						id,
 						agentId: id,
 						ownerId,
+						// The woken turn already runs; queueing its job at the cap could not hold it back.
+						startImmediately: true,
 						widgetInputs: createTaskWidgetInputs({
 							manager,
 							agentId: id,

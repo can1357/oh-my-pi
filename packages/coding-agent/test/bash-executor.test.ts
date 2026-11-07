@@ -849,6 +849,7 @@ exit 64
 			timeout: 5000,
 			signal: controller.signal,
 			sessionKey: "hung-native-abort",
+			fastCancel: true,
 		});
 		await dispatched.promise;
 		controller.abort();
@@ -894,6 +895,7 @@ exit 64
 			timeout: 5000,
 			signal: controller.signal,
 			sessionKey: "settled-native-abort",
+			fastCancel: true,
 		});
 		await dispatched.promise;
 		controller.abort();
@@ -943,6 +945,7 @@ exit 64
 			cwd: tempDir,
 			timeout: 1000,
 			sessionKey: "explicit-timeout-keeps-native-signal",
+			fastCancel: true,
 		});
 
 		expect(result.cancelled).toBe(true);
@@ -982,12 +985,14 @@ exit 64
 			cwd: tempDir,
 			timeout: 0,
 			sessionKey: "stalled-one-shot-timeout",
+			fastCancel: true,
 		});
 		await ownerDispatched.promise;
 		const overlapping = executeBash("isolated", {
 			cwd: tempDir,
 			timeout: 1000,
 			sessionKey: "stalled-one-shot-timeout",
+			fastCancel: true,
 		});
 		await isolatedDispatched.promise;
 

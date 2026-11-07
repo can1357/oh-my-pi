@@ -139,6 +139,11 @@ export async function runSubprocessPlaced(
 	}
 	const startTime = Date.now();
 	const placement = await pool.settle(placed);
+	// A run placed on a worker is outside the cap's hand-down: the manager's
+	// run scope is an `AsyncLocalStorage` and stops at this boundary, so work
+	// that run starts queues at a full cap rather than taking the placing run's
+	// slot. Linking the two across the boundary was attempted and withdrawn;
+	// see the "Queued jobs" section of `docs/agent-hub.md`.
 	try {
 		const worker = placement.worker;
 		if (!worker || !request) return await runHere(options);

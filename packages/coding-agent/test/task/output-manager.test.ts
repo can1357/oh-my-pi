@@ -5,7 +5,8 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 // Contract: subagent output ids are the requested name, used verbatim the first
 // time and suffixed (`-2`, `-3`, …) only when the same name recurs. A parent
-// prefix nests ids under it. On resume the manager scans existing output and
+// prefix nests ids under it, and a dot is that nesting separator, so a dot in a
+// requested name is replaced. On resume the manager scans existing output and
 // child-session files so it never reuses a name that would clobber prior state.
 
 describe("AgentOutputManager", () => {
@@ -17,6 +18,17 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("Anna")).toBe("Anna-3");
 		// A distinct name is untouched — no prefix, no suffix.
 		expect(await mgr.allocate("Bob")).toBe("Bob");
+	});
+
+	it("replaces a dot in a requested name, because a dot means nesting", async () => {
+		const mgr = new AgentOutputManager(() => null);
+
+		// Top-level `A` and `A.B` would otherwise coexist, and anything parsing an
+		// id — the running-job cap's hand-down among them — would read the second
+		// as the first's child and lend it the wrong agent's slot.
+		expect(await mgr.allocate("A")).toBe("A");
+		expect(await mgr.allocate("A.B")).toBe("A-B");
+		expect(await mgr.allocate("A.B")).toBe("A-B-2");
 	});
 
 	it("nests ids under a parent prefix and still suffixes repeats", async () => {

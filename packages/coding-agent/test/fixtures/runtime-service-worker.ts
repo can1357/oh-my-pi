@@ -36,6 +36,7 @@ interface Body {
 const bodies = new Map<string, Body>();
 const deliveries: unknown[] = [];
 const events: unknown[] = [];
+let releaseSlot: (() => void) | undefined;
 const waitStarts = new Map<string, PromiseWithResolvers<void>>();
 
 function waitStart(id: string): PromiseWithResolvers<void> {
@@ -180,6 +181,15 @@ const probe: RuntimeProbe = async (op, ...args) => {
 			return true;
 		case "deliveries":
 			return deliveries.splice(0);
+		case "acquireSlot":
+			releaseSlot = await manager(args[0]).acquireSlot(new AbortController().signal, {
+				jobId: args[1] === undefined ? undefined : String(args[1]),
+			});
+			return true;
+		case "releaseSlot":
+			releaseSlot?.();
+			releaseSlot = undefined;
+			return true;
 		case "cost": {
 			const gate = costGate(args[0]);
 			gate.record(Number(args[1]));
