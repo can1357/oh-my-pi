@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Pressing `n` on Other now edits the custom answer like Enter, keeping its text and images ([#16510](https://github.com/can1357/oh-my-pi/pull/16510) by [@Komzpa](https://github.com/Komzpa))
 ### Added
 
 - Grep headers syntax-highlight regex patterns, including incomplete patterns while a call streams, in terminal and native views ([#18392](https://github.com/can1357/oh-my-pi/pull/18392) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
