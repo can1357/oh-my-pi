@@ -47,6 +47,13 @@
 - Prewalk no longer hands a subagent to its cheap model when the subagent messages its parent or another agent (`write agent://…`) before its first file edit ([#18322](https://github.com/can1357/oh-my-pi/pull/18322) by [@1vivy](https://github.com/1vivy))
 
 ## [18.17.0] - 2026-11-06
+### Breaking Changes
+
+- **`omp gc --apply` no longer reclaims unreferenced blobs by default** (`gc.blobs` is now off), because the sweep can delete a blob a readable session still references when sessions are being written. Pass `--blobs`, or set `gc.blobs` in any configuration layer, on a machine whose sessions are quiescent. Cold-session archiving is unchanged and still runs on default settings ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- A reclaiming `omp gc` run now prints its data-loss warning before it deletes anything rather than after, and shows it under `--json` as well as in text ([#17398](https://github.com/can1357/oh-my-pi/pull/17398) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 
