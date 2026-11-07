@@ -295,6 +295,21 @@ export function initBeam(db: Database): void {
 		"CREATE INDEX IF NOT EXISTS idx_wm_session_recall ON working_memory(session_id, last_recalled) WHERE valid_until IS NULL",
 		"CREATE INDEX IF NOT EXISTS idx_mem_emb_type ON memory_embeddings(memory_id, model)",
 	]);
+	// Counts every embedding write from any connection, so a connection's decoded-vector cache can tell whether a
+	// peer's commit touched vectors (see embedding-cache.ts).
+	runAll(db, [
+		"CREATE TABLE IF NOT EXISTS memory_embedding_generation (id INTEGER PRIMARY KEY CHECK (id = 1), gen INTEGER NOT NULL)",
+		"INSERT OR IGNORE INTO memory_embedding_generation (id, gen) VALUES (1, 0)",
+		`CREATE TRIGGER IF NOT EXISTS mem_emb_gen_ai AFTER INSERT ON memory_embeddings BEGIN
+			UPDATE memory_embedding_generation SET gen = gen + 1;
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS mem_emb_gen_au AFTER UPDATE ON memory_embeddings BEGIN
+			UPDATE memory_embedding_generation SET gen = gen + 1;
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS mem_emb_gen_ad AFTER DELETE ON memory_embeddings BEGIN
+			UPDATE memory_embedding_generation SET gen = gen + 1;
+		END`,
+	]);
 
 	for (const table of ["working_memory", "episodic_memory"] as const) {
 		addColumnIfMissing(db, table, "author_id", "TEXT DEFAULT NULL");
