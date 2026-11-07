@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed model-change embedding rebuilds overwriting newer vectors for updated memories or recreating vectors for deleted memories ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
