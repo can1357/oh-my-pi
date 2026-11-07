@@ -4083,6 +4083,29 @@ describe("AgentSession retry fallback", () => {
 			primaryAttempts: 1,
 		},
 		{
+			// Bedrock's per-minute throttle phrases its 429 with "Too many tokens",
+			// which the overflow text patterns also match. The status must veto the
+			// overflow flag or the turn skips retry and the chain for a compaction
+			// that cannot clear a rate cap.
+			name: "a Bedrock 429 token-cap body with retry.rateLimitWalksChain on",
+			failure: () =>
+				AIError.finalize(
+					Object.assign(
+						new Error(
+							"429 Too many tokens, please wait before trying again. (type=rate_limit_error param=rate_limit_exceeded) retry-after-ms=1",
+						),
+						{ status: 429 },
+					),
+					{
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "claude-sonnet-4-5",
+					},
+				),
+			extraSettings: { "retry.rateLimitWalksChain": true },
+			primaryAttempts: 1,
+		},
+		{
 			// The default keeps the signed-thinking deferral for rate limits: the
 			// throttled model keeps its whole retry budget before the chain.
 			name: "a per-minute rate limit under the default settings",

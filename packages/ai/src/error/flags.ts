@@ -646,13 +646,19 @@ function classifyText(
 ): number {
 	let kinds = 0;
 	if (errorMessage) {
-		if (matchesOverflowText(errorMessage)) kinds |= Flag.ContextOverflow;
+		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
+		// A rate-limit status (429 or 402) proves a throughput or quota decision, never
+		// window excess. Providers phrase per-minute token caps with the same "tokens"
+		// wording the overflow patterns match (Bedrock: "429 Too many tokens, please
+		// wait before trying again. (type=rate_limit_error param=rate_limit_exceeded)").
+		// Flagging it as overflow skips retry and the fallback chain for a compaction
+		// that cannot clear a rate cap. The status vetoes the text match.
+		if (matchesOverflowText(errorMessage) && !isUsageLimitStatus(statusClean)) kinds |= Flag.ContextOverflow;
 		if (matchesPayloadRejectionText(errorMessage)) kinds |= Flag.PayloadRejected;
 		if (isMalformedFunctionCallText(errorMessage)) kinds |= Flag.MalformedFunctionCall;
 		if (isProviderFinishErrorText(errorMessage)) kinds |= Flag.ProviderFinishError;
 		if (EMPTY_RESPONSE_PATTERN.test(errorMessage)) kinds |= Flag.EmptyResponse | Flag.Transient;
 		if (isContentBlockedText(errorMessage)) kinds |= Flag.ContentBlocked;
-		const statusClean = errorStatus ? errorStatus : (status({ message: errorMessage }) ?? undefined);
 
 		if (
 			ACCOUNT_POLICY_PATTERN.test(errorMessage) ||
@@ -1040,7 +1046,10 @@ export function attach<E extends object>(error: E, id: number): E {
 }
 
 /** Overflow-classification evidence, including errors received before token usage is available. */
-export interface ContextOverflowMessage extends Pick<AssistantMessage, "errorId" | "stopReason" | "errorMessage"> {
+export interface ContextOverflowMessage extends Pick<
+	AssistantMessage,
+	"errorId" | "errorStatus" | "stopReason" | "errorMessage"
+> {
 	readonly usage?: Pick<Usage, "input" | "cacheRead" | "cacheWrite" | "contextTokens">;
 }
 
@@ -1063,6 +1072,12 @@ export function isUsageBackedContextOverflow(message: ContextOverflowMessage, co
 export function isContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
 	if (is(message.errorId, Flag.ContextOverflow)) return true;
 	if (isUsageBackedContextOverflow(message, contextWindow)) return true;
+	// A rate-limit status vetoes the text arm the way classifyText vetoes the flag:
+	// a 429 or 402 body with "tokens" wording reports a throughput cap. A message
+	// without a status field still carries it in the text ("429 Too many tokens").
+	const errorStatus =
+		message.errorStatus ?? statusFromId(message.errorId) ?? status({ message: message.errorMessage ?? "" });
+	if (isUsageLimitStatus(errorStatus)) return false;
 	return message.stopReason === "error" && !!message.errorMessage && matchesOverflowText(message.errorMessage);
 }
 
