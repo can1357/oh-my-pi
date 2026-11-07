@@ -118,6 +118,9 @@ describe("task.batch schema gating", () => {
 		expect(offProperties.outputSchema).toBeDefined();
 		expect(typeof offProperties.outputSchema).toBe("object");
 		expect(offProperties.schemaMode).toBeDefined();
+		expect(offProperties.tools).toMatchObject({
+			description: "Names of eval-defined tools only; built-in tools come from the agent profile.",
+		});
 
 		const on = await TaskTool.create(createSession({ settings: { "task.batch": true, "task.structured": true } }));
 		const onProperties = getSchemaProperties(on);
