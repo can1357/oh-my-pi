@@ -893,6 +893,21 @@ impl Host {
 			.map(|stdout| StdoutFile(stdout.clone()))
 	}
 
+	/// Whether the file behind an already-opened handle is the regular file
+	/// currently backing stdout.
+	///
+	/// The handle counterpart of [`Host::path_is_stdout`]: GNU grep's guard
+	/// against reading the file it writes is `SAME_INODE (st, out_stat)` —
+	/// the same inode, not merely the same path — and `st` is what the
+	/// *opened* input descriptor reports, not what the path it was opened by
+	/// reports. Comparing the handle that was opened therefore cannot be
+	/// defeated by a path that is replaced, or a symlink that is retargeted,
+	/// between the check and the open.
+	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
+	pub fn opened_is_stdout(&self, opened: &Metadata) -> bool {
+		self.stdout_file().is_some_and(|stdout| stdout.matches(opened))
+	}
+
 	/// Whether standard input is the regular file currently backing stdout.
 	///
 	/// GNU grep's guard against reading the file it writes is `SAME_INODE
@@ -3098,6 +3113,39 @@ mod testing {
 
 		assert_eq!(host.resolve("/c/Users/Adam/file.txt"), PathBuf::from(r"C:\Users\Adam\file.txt"));
 		assert_eq!(host.resolve("/tmp/probe"), std::env::temp_dir().join("probe"));
+	}
+
+	/// Contract: the identity of the output file is decided on the handle that
+	/// was opened, not on the path it was opened by.
+	///
+	/// GNU grep's guard against reading the file it writes is `SAME_INODE
+	/// (st, out_stat)`, where `st` is what the opened input descriptor
+	/// reports. A path replaced — or a symlink retargeted — between the check
+	/// and the open must therefore not be able to hide that the handle that
+	/// was opened is the output file, so the two checks have to disagree in
+	/// exactly that case.
+	#[tokio::test]
+	async fn an_opened_handle_is_recognised_as_the_output_file_after_its_path_changes() {
+		let tree = tempfile::tempdir().unwrap();
+		let path = tree.path().join("out.txt");
+		std::fs::write(&path, "needle\n").unwrap();
+		let stdout = std::fs::OpenOptions::new()
+			.append(true)
+			.open(&path)
+			.expect("stdout file");
+		let (mut host, _capture) = Host::for_test("grep", "", tree.path());
+		host.set_test_stdout(OpenFile::File(Arc::new(stdout)));
+		// A handle opened on the output file, while the path still names it.
+		let opened = std::fs::File::open(&path).expect("open output file");
+		let opened = pi_vfs::Metadata::from_file(&opened).expect("opened metadata");
+		// A second file, written while the first still exists so the two have
+		// distinct identities, then renamed over the first: the path now names
+		// a different file, while the handle still names the output.
+		let other = tree.path().join("other.txt");
+		std::fs::write(&other, "other\n").unwrap();
+		std::fs::rename(&other, &path).unwrap();
+		assert!(!host.path_is_stdout(&path).await, "the path no longer names the output file");
+		assert!(host.opened_is_stdout(&opened), "the handle still names the output file");
 	}
 
 	/// Parses `argv` and runs `U` against an in-memory host, mirroring what the

@@ -1078,6 +1078,15 @@ enum Input {
 }
 
 impl Input {
+	/// The identity of the file that was opened, read from the handle rather
+	/// than from the path it was opened by.
+	async fn metadata(&self) -> Option<pi_vfs::Metadata> {
+		match self {
+			Self::Listed(file) => file.metadata().ok(),
+			Self::Source(source) => source.handle_metadata().await,
+		}
+	}
+
 	/// Reads up to `buf.len()` bytes; 0 at end of input.
 	async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		match self {
@@ -1254,15 +1263,27 @@ impl<M: Matcher + Send + Sync + 'static> DirSearch<M> {
 		FileSearch { out: Vec::new(), err, had_error: true, matched: Ok(false) }
 	}
 
-	async fn search_at(&self, worker: &mut Worker, path: &Path, display_path: &Path) -> FileSearch {
-		if self.opts.refuse_output_file
-			&& let Some(stdout) = &self.stdout
-			&& stdout.is(&self.fs, path).await
-		{
-			return self.refused(display_path);
+	/// Whether `input` — already opened — is the file stdout lands in.
+	///
+	/// The decision is made on the handle that was opened, as GNU grep's
+	/// `SAME_INODE (st, out_stat)` is, so a path replaced or a symlink
+	/// retargeted between the walk and the open cannot slip past the refusal.
+	async fn is_output_file(&self, input: &Input) -> bool {
+		let Some(stdout) = &self.stdout else {
+			return false;
+		};
+		match input.metadata().await {
+			Some(opened) => stdout.matches(&opened),
+			None => false,
 		}
+	}
+
+	async fn search_at(&self, worker: &mut Worker, path: &Path, display_path: &Path) -> FileSearch {
 		match self.open(worker, path).await {
 			Ok(mut input) => {
+				if self.opts.refuse_output_file && self.is_output_file(&input).await {
+					return self.refused(display_path);
+				}
 				let searched = self
 					.push_input(&mut input, display_path.as_os_str().as_encoded_bytes(), worker)
 					.await;
