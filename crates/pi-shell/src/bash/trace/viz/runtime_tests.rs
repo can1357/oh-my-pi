@@ -659,3 +659,32 @@ async fn branch_badges_follow_real_negated_and_elif_decisions() {
 	assert!(heads.iter().filter(|row| row["meta"] == "↳").count() >= 2);
 	assert!(heads.iter().any(|row| row["meta"] == "↷"));
 }
+
+#[test]
+fn a_trace_saved_by_another_build_restores_from_its_source() {
+	use base64::{Engine as _, engine::general_purpose::STANDARD};
+	let (trace, _) = run_native_shell(
+		"f() { echo \"$1\"; }\nf one\nread -r d <<E\ndoc $(echo x)\nE\necho \"$d\"\n",
+	);
+	let saved = trace.snapshot_json();
+	// Another build's archives: the same field, a version this build does
+	// not read (a session saved before an upgrade).
+	let mut other: Value = serde_json::from_str(&saved).unwrap();
+	let mut archives = 0;
+	for unit in other["units"].as_array_mut().unwrap() {
+		if let Some(text) = unit["syntax"].as_str() {
+			let mut bytes = STANDARD.decode(text).unwrap();
+			bytes[0] = bytes[0].wrapping_add(1);
+			unit["syntax"] = STANDARD.encode(bytes).into();
+			archives += 1;
+		}
+	}
+	assert!(archives > 0);
+	let present = |json: &str| {
+		StoredVisualization::from_snapshot_json(json)
+			.unwrap()
+			.presentation_json(&Options::default())
+			.unwrap()
+	};
+	assert_eq!(present(&other.to_string()), present(&saved));
+}
