@@ -1,4 +1,8 @@
 collapse {
+	// OpenZoo publishes the same router under three selector spellings.
+	variant-family "openzoo" "auto" name="Auto" {
+		members "auto" "openzoo/auto" "openzoo-auto"
+	}
 	thinking-suffix "-thinking"
 	// Thinking-pair tokens: bounded (possibly infix) markers that name the
 	// thinking sibling of a live bare twin (`sonar-reasoning-pro` beside

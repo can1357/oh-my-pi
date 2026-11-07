@@ -36,6 +36,7 @@ import { classifyGatewayError } from "../error/gateway";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
+import { openAISamplingAllowance } from "../providers/openai-shared";
 import * as piNative from "../providers/pi-native-server";
 import { completeSimple, streamSimple } from "../stream";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
@@ -192,22 +193,22 @@ function buildStreamOptions(parsed: ParsedFormatRequest, model: Model<Api>, sign
 	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
 	// Backends that reject sampling controls (Codex: `Unsupported parameter: …`, #3117)
-	// get the full set stripped; everything else is harmless to forward —
-	// `streamSimple` ignores what the underlying provider doesn't honour.
-	const sampling = !(
-		model.compat &&
-		"supportsSamplingParams" in model.compat &&
-		model.compat.supportsSamplingParams === false
-	);
+	// lose temperature and top_p. top_k, min_p, penalties, and stop stay when
+	// the authored spec advertised that extension, matching `streamSimple`.
+	const sampling = openAISamplingAllowance(model);
 	if (options.maxOutputTokens !== undefined) opts.maxTokens = options.maxOutputTokens;
-	if (options.temperature !== undefined && sampling) opts.temperature = options.temperature;
-	if (options.topP !== undefined && sampling) opts.topP = options.topP;
-	if (options.topK !== undefined && sampling) opts.topK = options.topK;
-	if (options.minP !== undefined && sampling) opts.minP = options.minP;
-	if (options.stopSequences !== undefined && sampling) opts.stopSequences = options.stopSequences;
-	if (options.presencePenalty !== undefined && sampling) opts.presencePenalty = options.presencePenalty;
-	if (options.frequencyPenalty !== undefined && sampling) opts.frequencyPenalty = options.frequencyPenalty;
-	if (options.repetitionPenalty !== undefined && sampling) opts.repetitionPenalty = options.repetitionPenalty;
+	if (options.temperature !== undefined && sampling.core) opts.temperature = options.temperature;
+	if (options.topP !== undefined && sampling.core) opts.topP = options.topP;
+	if (options.topK !== undefined && sampling.topK) opts.topK = options.topK;
+	if (options.minP !== undefined && sampling.minP) opts.minP = options.minP;
+	if (options.stopSequences !== undefined && sampling.penaltyAndStop) opts.stopSequences = options.stopSequences;
+	if (options.presencePenalty !== undefined && sampling.penaltyAndStop) opts.presencePenalty = options.presencePenalty;
+	if (options.frequencyPenalty !== undefined && sampling.penaltyAndStop) {
+		opts.frequencyPenalty = options.frequencyPenalty;
+	}
+	if (options.repetitionPenalty !== undefined && sampling.penaltyAndStop) {
+		opts.repetitionPenalty = options.repetitionPenalty;
+	}
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
 	if (options.userProfileId !== undefined) opts.userProfileId = options.userProfileId;
 	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
@@ -627,7 +628,8 @@ async function handlePiNative(
 	});
 	// Build the SimpleStreamOptions actually handed to `streamSimple`, then
 	// normalize thinking against the resolved model. The sampling strip mirrors
-	// `buildStreamOptions` — backends with `supportsSamplingParams: false` 400 on them (#3117).
+	// `buildStreamOptions`: temperature and top_p go when the core group is off,
+	// and each extension stays only when the authored spec advertised it (#3117).
 	const streamOpts: SimpleStreamOptions = {
 		...parsed.options,
 		signal: controller.signal,
@@ -646,11 +648,14 @@ async function handlePiNative(
 		peer,
 		resolved => lease.updateAccount(resolveGatewayAccount(resolved)),
 	);
-	if (model.compat && "supportsSamplingParams" in model.compat && model.compat.supportsSamplingParams === false) {
+	const sampling = openAISamplingAllowance(model);
+	if (!sampling.core) {
 		delete streamOpts.temperature;
 		delete streamOpts.topP;
-		delete streamOpts.topK;
-		delete streamOpts.minP;
+	}
+	if (!sampling.topK) delete streamOpts.topK;
+	if (!sampling.minP) delete streamOpts.minP;
+	if (!sampling.penaltyAndStop) {
 		delete streamOpts.stopSequences;
 		delete streamOpts.presencePenalty;
 		delete streamOpts.frequencyPenalty;

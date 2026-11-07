@@ -16,6 +16,10 @@
 
 ### Fixed
 
+- Fixed `--provider openzoo` against a public tunnel that rejects the bearer exiting with an unknown-provider error instead of telling you to run /login.
+- Fixed OpenZoo public-tunnel discovery reporting a rejected bearer as a missing model instead of an authentication failure.
+- Fixed resuming a session saved on `openzoo/auto` when the OpenZoo model cache is empty.
+- Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
 - A `bash.patterns` `deny` rule now blocks a command anywhere in a `;`, `|`, `||` or `&&` line even when an earlier `prompt` rule matches another part of it, and project settings can no longer override the operator's `deny` or `prompt` patterns with `allow` ([#18349](https://github.com/can1357/oh-my-pi/pull/18349) by [@asuffield](https://github.com/asuffield))
 - A subagent stopped by the session cost cap (`--max-cost` / `session.maxCost`) now reports the cap's refusal instead of "Subagent ended without a final message" ([#18362](https://github.com/can1357/oh-my-pi/issues/18362))

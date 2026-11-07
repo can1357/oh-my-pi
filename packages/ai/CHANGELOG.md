@@ -2,8 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added keyless OpenZoo authentication, with optional credentials for protected proxy endpoints.
+
 ### Fixed
 
+- Fixed auth-gateway requests dropping an advertised `top_k`, `min_p`, penalty, or stop sequence when the model rejects temperature and top_p. Chat completions sends that advertised stop sequence as well.
+- Fixed chat-completions and Responses requests sending `top_k` or `min_p` when model compat turns that extension off. Temperature and top_p are unchanged.
+- Fixed chat-completions and Responses requests dropping an advertised `top_k`, `min_p`, or penalty when the model rejects temperature and top_p.
+- A stored OpenZoo API key, including one copied to the auth broker, is used when `OPENZOO_API_KEY` is unset. The keyless `openzoo-local` placeholder remains only when nothing is stored.
 - ChatGPT Pro Max (`promax`) counts as Pro for Codex account routing, so a blocked Pro account no longer wins over an open or pinned Pro Max account ([#18399](https://github.com/can1357/oh-my-pi/pull/18399) by [@serverinspector](https://github.com/serverinspector))
 - A 429 or 402 worded like a context overflow (Bedrock's "429 Too many tokens, please wait…") is treated as a rate limit, so it retries and walks the fallback chain instead of compacting ([#18345](https://github.com/can1357/oh-my-pi/pull/18345) by [@nick-maderight](https://github.com/nick-maderight))
 - `auth-gateway stdio` and `serve` no longer reject credentialless Apple on-device models ([#18370](https://github.com/can1357/oh-my-pi/issues/18370))
