@@ -1507,6 +1507,11 @@ const streamOpenAIResponsesOnce = (
 				chainState.lastResponseId = undefined;
 				chainState.lastResponseItems = undefined;
 			}
+			// activeParams tracks the attempt that succeeded: the compat policy, the
+			// stable-effort plan, and any reasoning-effort fallback retry already mutated it.
+			const sentEffort =
+				activeParams.reasoning && "effort" in activeParams.reasoning ? activeParams.reasoning.effort : undefined;
+			if (sentEffort != null) output.effort = sentEffort as Effort | "none";
 		} catch (error) {
 			if (chainState) resetOpenAIResponsesChainState(chainState);
 			const failure = abortTracker.getLocalAbortReason() ?? error;
