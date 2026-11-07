@@ -142,6 +142,194 @@ fn axis_tags(fixture: &serde_json::Value) -> HashSet<&str> {
 		.collect()
 }
 
+/// The row ids of the matrix.
+fn row_ids(fixture: &serde_json::Value) -> HashSet<&str> {
+	fixture
+		.get("rows")
+		.and_then(serde_json::Value::as_array)
+		.expect("the site matrix has rows")
+		.iter()
+		.filter_map(|row| row.get("id").and_then(serde_json::Value::as_str))
+		.collect()
+}
+
+/// The string list the fixture records under `axes`.
+fn axis_elements<'a>(fixture: &'a serde_json::Value, axis: &str) -> Vec<&'a str> {
+	fixture
+		.get("axes")
+		.and_then(|a| a.get(axis))
+		.and_then(serde_json::Value::as_array)
+		.unwrap_or_else(|| panic!("the site matrix records no {axis} axis"))
+		.iter()
+		.filter_map(serde_json::Value::as_str)
+		.collect()
+}
+
+/// Every element of every sampled axis has a measured row.
+///
+/// Name freshness is not coverage: without this, the recorded axis lists can
+/// agree with the crate while the rows that exercise them are gone, and a new
+/// variant can be waved through by regenerating the lists alone. The original
+/// matrix's axes are checked here, the carrier matrix's below.
+#[test]
+fn every_sampled_axis_element_has_a_measured_row() {
+	let fixture = fixture();
+	let tags = axis_tags(&fixture);
+	assert_eq!(
+		axis_elements(&fixture, "declareKind"),
+		DeclareKind::VARIANTS,
+		"the declaration axis is no longer DeclareKind; {REGENERATE}"
+	);
+	let mut missing = Vec::new();
+	for axis in ["construct", "context", "raiser", "declareKind"] {
+		let elements = axis_elements(&fixture, axis);
+		assert!(!elements.is_empty(), "the {axis} axis is empty; {REGENERATE}");
+		for element in elements {
+			if !tags.contains(format!("{axis}:{element}").as_str()) {
+				missing.push(format!("{axis}:{element}"));
+			}
+		}
+	}
+	assert!(missing.is_empty(), "the site matrix has no row for {missing:?}; {REGENERATE}");
+}
+
+/// Opcodes no sample of this matrix lowers to, each with why.
+///
+/// This list is source, not fixture: regenerating the matrix cannot grow it,
+/// so a new `Opcode` stays failing until someone writes a sample or records
+/// here that the fatal-jump model has none. Every entry is checked against
+/// the measurement below, so an entry that becomes reachable fails too.
+const OPCODES_WITH_NO_SAMPLE: &[(&str, &str)] = &[
+	("Nop", "a zsh list marker (`lower::list` emits it only in the zsh dialect)"),
+	("Redir", "a COMPOUND command's redirection list; a simple command's redirections \
+	           are part of its `Exec`, and the matrix redirects a simple command"),
+	("PopRedir", "the close of the same compound redirection"),
+	("Warn", "a parse warning's diagnostic; every sample parses without one"),
+	("Abort", "a syntax error, or a construct the engine cannot run; every sample lowers"),
+	("Repeat", "zsh `repeat`: the bash grammar has no such command"),
+	("TryEnter", "zsh `always`: the bash grammar has no such block"),
+	("AlwaysEnter", "zsh `always`: the bash grammar has no such block"),
+	("AlwaysEnd", "zsh `always`: the bash grammar has no such block"),
+	("CallAnon", "zsh anonymous function: the bash grammar has no such call"),
+];
+
+/// Every `Opcode` the engine has is lowered to by a sample, or is recorded
+/// above as one this matrix cannot reach.
+///
+/// Measured, not declared: each row's script is compiled and the opcodes of
+/// the resulting units — function bodies included — are collected.
+#[test]
+fn every_opcode_is_reached_by_a_measured_sample() {
+	fn collect(unit: &crate::bash::ir::Unit, seen: &mut HashSet<Opcode>) {
+		seen.extend(unit.ops.iter().map(|op| op.code));
+		for func in &unit.funcs {
+			collect(&func.body, seen);
+		}
+	}
+	let fixture = fixture();
+	let mut seen = HashSet::new();
+	for row in fixture.get("rows").and_then(serde_json::Value::as_array).expect("rows") {
+		let script = row.get("script").and_then(serde_json::Value::as_str).expect("script");
+		for unit in crate::bash::ir::compile_all(
+			script.as_bytes(),
+			crate::bash::ids::ModeId::Bash,
+			crate::bash::syntax::Features::NONE,
+		) {
+			collect(&unit, &mut seen);
+		}
+	}
+	let reached: HashSet<&str> = seen.iter().map(|&code| <&'static str>::from(code)).collect();
+	let excused: HashSet<&str> = OPCODES_WITH_NO_SAMPLE.iter().map(|&(name, _)| name).collect();
+	let missing: Vec<&str> = Opcode::VARIANTS
+		.iter()
+		.copied()
+		.filter(|name| !reached.contains(name) && !excused.contains(name))
+		.collect();
+	assert!(
+		missing.is_empty(),
+		"no sample of the site matrix lowers to {missing:?}; add one, or record it in \
+		 OPCODES_WITH_NO_SAMPLE with the reason"
+	);
+	let stale: Vec<&str> = OPCODES_WITH_NO_SAMPLE
+		.iter()
+		.filter(|&&(name, _)| reached.contains(name) || !Opcode::VARIANTS.contains(&name))
+		.map(|&(name, _)| name)
+		.collect();
+	assert!(
+		stale.is_empty(),
+		"OPCODES_WITH_NO_SAMPLE names {stale:?}, which a sample now reaches or which is no \
+		 longer an Opcode; remove the entry"
+	);
+}
+
+/// Which row exercises each `Stop`, or why none does. Source, not fixture,
+/// for the same reason as `OPCODES_WITH_NO_SAMPLE`: a new variant cannot be
+/// regenerated past this gate.
+const STOP_SAMPLES: &[(&str, Sample)] = &[
+	(
+		"Sub",
+		Sample::Row("carrier-direct-normal-fork_nofork-badsub", "a forked `$( )` substitution"),
+	),
+	("ZshSub", Sample::None("a zsh command substitution; the matrix is bash-dialect")),
+	("MathCall", Sample::None("a zsh user math function; the matrix is bash-dialect")),
+	("Probe", Sample::None("a zsh `=cmd` PATH probe; the matrix is bash-dialect")),
+	("Wait", Sample::Row("construct-background-fatal_unset-top-clean", "`$!` of a background job")),
+	("Fail", Sample::Row("carrier-direct-normal-plain-badsub", "an invalid parameter name")),
+	("Fatal", Sample::Row("carrier-direct-normal-plain-fatal", "`${x?word}` on an unset name")),
+	("Store", Sample::None("a state-store failure, which no script can raise")),
+];
+
+/// Which row exercises each `FrameKind`, or why none does.
+const FRAME_SAMPLES: &[(&str, Sample)] = &[
+	("Script", Sample::Row("carrier-direct-normal-source_nofork-badsub", "a sourced file")),
+	("Function", Sample::Row("construct-function-fatal_unset-top-clean", "a function call")),
+	("Subshell", Sample::Row("construct-subshell-fatal_unset-top-clean", "a forked `( )`")),
+	("NoFork", Sample::Row("carrier-direct-normal-nofork-badsub", "`${ ;}` in the current shell")),
+	("Stage", Sample::Row("construct-pipe_tail-fatal_unset-top-clean", "a pipeline's last stage")),
+	("Job", Sample::None("the base frame of a suspended job; the matrix has no job control")),
+];
+
+/// A sample for one variant of a runtime axis: the row that exercises it, or
+/// the reason the matrix has none.
+enum Sample {
+	/// The row id, and what about it reaches the variant.
+	Row(&'static str, &'static str),
+	/// Why no row reaches it.
+	None(&'static str),
+}
+
+/// Each variant of the two runtime axes names the row that exercises it, or
+/// records why none does, and every row it names exists.
+#[test]
+fn every_runtime_axis_variant_names_its_sample() {
+	let fixture = fixture();
+	let ids = row_ids(&fixture);
+	let mut wrong = Vec::new();
+	for (axis, variants, samples) in [
+		("Stop", Stop::VARIANTS, STOP_SAMPLES),
+		("FrameKind", FrameKind::VARIANTS, FRAME_SAMPLES),
+	] {
+		let named: Vec<&str> = samples.iter().map(|&(name, _)| name).collect();
+		assert_eq!(
+			named, variants,
+			"{axis} is no longer what the samples were written for; add or remove entries in \
+			 the table beside this test — regenerating the fixture cannot do it for you"
+		);
+		for (name, sample) in samples {
+			match sample {
+				Sample::Row(id, _) if !ids.contains(id) => {
+					wrong.push(format!("{axis}::{name} names row {id}, which the matrix has no"));
+				},
+				Sample::None(reason) if reason.is_empty() => {
+					wrong.push(format!("{axis}::{name} has no sample and no reason"));
+				},
+				_ => {},
+			}
+		}
+	}
+	assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 #[test]
 fn the_site_matrix_covers_every_variant_of_the_model() {
 	let fixture = fixture();

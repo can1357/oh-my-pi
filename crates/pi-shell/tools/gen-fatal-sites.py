@@ -35,9 +35,55 @@ import sys
 # ---------------------------------------------------------------- enumeration
 
 
+def _strip_noise(text: str) -> str:
+	"""`text` without comments or attributes, so delimiters can be counted.
+
+	A doc comment holding an unmatched `}` or `(`, and an attribute's own
+	parentheses, both moved the delimiter counter this parse depends on; an
+	`#[allow(dead_code)]` on the line above a variant hid that variant
+	entirely. Comments and attributes carry no variant, so they go first.
+	Conditional compilation is NOT evaluated: a `#[cfg(...)]` variant is
+	read as present, which is the safe direction for a coverage gate.
+	"""
+	out, i, n = [], 0, len(text)
+	while i < n:
+		two = text[i : i + 2]
+		if two == "//":
+			j = text.find("\n", i)
+			i = n if j < 0 else j
+		elif two == "/*":
+			j = text.find("*/", i + 2)
+			i = n if j < 0 else j + 2
+		elif text[i] == "#" and text[i + 1 : i + 2] in ("[", "!"):
+			# Skip the whole attribute, matching its brackets.
+			j = text.find("[", i)
+			if j < 0:
+				out.append(text[i])
+				i += 1
+				continue
+			depth, j = 1, j + 1
+			while j < n and depth:
+				if text[j] == "[":
+					depth += 1
+				elif text[j] == "]":
+					depth -= 1
+				j += 1
+			i = j
+		elif text[i] in "\"'":
+			quote, j = text[i], i + 1
+			while j < n and text[j] != quote:
+				j += 2 if text[j] == "\\" else 1
+			out.append(" ")
+			i = j + 1
+		else:
+			out.append(text[i])
+			i += 1
+	return "".join(out)
+
+
 def variants(path: str, enum: str) -> list[str]:
 	"""The variant names of a Rust enum, read from its declaration."""
-	src = open(path, encoding="utf-8").read()
+	src = _strip_noise(open(path, encoding="utf-8").read())
 	m = re.search(r"\benum\s+%s\s*\{" % re.escape(enum), src)
 	if not m:
 		raise SystemExit(f"gen-fatal-sites: no `enum {enum}` in {path}")
@@ -50,23 +96,38 @@ def variants(path: str, enum: str) -> list[str]:
 			depth -= 1
 		i += 1
 	body = src[body_start : i - 1]
-	# A variant name starts a line (after indentation) with an upper-case
-	# letter; a variant's payload block is skipped whole.
-	out, depth = [], 0
-	for raw in body.splitlines():
-		line = raw.strip()
-		opens = line.count("{") + line.count("(")
-		closes = line.count("}") + line.count(")")
+	# At nesting depth zero a variant is a name closed by `,`, `(`, `{`, `=`
+	# or the end of the body; a variant's payload is skipped whole.
+	out, depth, token = [], 0, ""
+
+	def take() -> None:
+		nonlocal token
+		if re.fullmatch(r"[A-Z][A-Za-z0-9_]*", token):
+			out.append(token)
+		token = ""
+
+	for ch in body:
 		if depth:
-			depth += opens - closes
+			if ch in "{(":
+				depth += 1
+			elif ch in "})":
+				depth -= 1
 			continue
-		if line and not line.startswith("//") and not line.startswith("#["):
-			m = re.match(r"([A-Z][A-Za-z0-9_]*)", line)
-			if m:
-				out.append(m.group(1))
-		depth += opens - closes
+		if ch in "{(":
+			take()
+			depth += 1
+		elif ch in ",=":
+			take()
+		elif ch.isalnum() or ch == "_":
+			token += ch
+		else:
+			take()
+	take()
 	if not out:
 		raise SystemExit(f"gen-fatal-sites: no variants parsed from `enum {enum}`")
+	# A name may be seen twice only if the scan is wrong; fail loudly.
+	if len(set(out)) != len(out):
+		raise SystemExit(f"gen-fatal-sites: duplicate variant parsed from `enum {enum}`: {out}")
 	return out
 
 
