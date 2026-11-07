@@ -13,6 +13,7 @@ import {
 	PromptDroppedError,
 	type PromptOptions,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import * as availability from "@oh-my-pi/pi-coding-agent/session/provider-exhaustion";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -172,6 +173,55 @@ describe("runSubprocess incremental yield loops", () => {
 			session,
 			sessionFile: null,
 			status: "running",
+		});
+	}
+
+	it("reports a cold unavailable provider as infrastructure before catalog resolution or child dispatch", async () => {
+		const create = vi.spyOn(sdkModule, "createAgentSession");
+		vi.spyOn(availability, "providerExhaustionExclusion").mockReturnValue({
+			provider: "codex-lb",
+			reason: "provider unavailable (discovery)",
+			until: Date.now() + 300_000,
+		});
+		vi.spyOn(availability, "providerExhaustionRecord").mockReturnValue(undefined);
+		const result = await drive(
+			runSubprocess({
+				...baseOptions("cold-provider", 10),
+				modelOverride: "codex-lb/gpt-6.1-sol",
+			}),
+		);
+		expect(result.exitCode).toBe(1);
+		expect(result.failureKind).toBe("infrastructure");
+		expect(JSON.parse(result.error!)).toMatchObject({
+			code: "provider_chain_unavailable",
+			providers: [{ provider: "codex-lb", reason: "provider unavailable (discovery)" }],
+		});
+		expect(create).not.toHaveBeenCalled();
+	});
+
+	for (const [status, errorType, expectedClass] of [
+		[402, "billing_error", "entitlement"],
+		[500, "server_error", undefined],
+	] as const) {
+		it(`classifies terminal ${status} as ${expectedClass ? "infrastructure" : "ordinary"} failure`, async () => {
+			const handle = createMockSession(({ pushMessage }) => {
+				pushMessage({
+					role: "assistant",
+					content: [],
+					stopReason: "error",
+					provider: "muse",
+					model: "test",
+					errorStatus: status,
+					errorType,
+					errorMessage: "opaque provider response",
+				});
+			});
+			mockCreateAgentSession(handle.session);
+			const result = await drive(runSubprocess(baseOptions(`terminal-${status}`, 10)));
+			expect(result.exitCode).toBe(1);
+			expect(result.failureKind).toBe(expectedClass ? "infrastructure" : undefined);
+			if (expectedClass) expect(result.error).toBe(`provider unavailable (${expectedClass})`);
+			else expect(result.error).toContain("opaque provider response");
 		});
 	}
 

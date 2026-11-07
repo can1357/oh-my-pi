@@ -6,6 +6,15 @@
  * progress tracking.
  */
 
+import {
+	type ProviderExhaustionExclusion,
+	classifyProviderFailure,
+	isProviderExhausted,
+	providerExhaustionExclusion,
+	providerExhaustionRecord,
+} from "../session/provider-exhaustion";
+import { ProviderUnavailableError } from "../session/provider-unavailable-error";
+import { parseRetryFallbackSelector } from "../session/retry-fallback-chains";
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
@@ -47,6 +56,7 @@ import {
 	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
 	resolveModelOverride,
+	resolveModelRoleValue,
 	resolveModelOverrideWithAuthFallback,
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
@@ -296,10 +306,11 @@ interface SubagentRetryFallbackCandidate {
 	selector: string;
 }
 
-function resolveSubagentRetryFallbackCandidates(
+export function resolveSubagentRetryFallbackCandidates(
 	modelPatterns: string[],
 	modelRegistry: ModelRegistry,
 	settings: Settings,
+	exclusions?: ProviderExhaustionExclusion[],
 ): SubagentRetryFallbackCandidate[] {
 	const candidates: SubagentRetryFallbackCandidate[] = [];
 	const seen = new Set<string>();
@@ -308,6 +319,11 @@ function resolveSubagentRetryFallbackCandidates(
 		const resolved = resolveModelOverride([pattern], modelRegistry, settings);
 		if (!resolved.model) continue;
 		if (disabledProviders.has(resolved.model.provider)) continue;
+		const exclusion = providerExhaustionExclusion(resolved.model.provider);
+		if (exclusion) {
+			exclusions?.push(exclusion);
+			continue;
+		}
 		const selector = resolved.explicitThinkingLevel
 			? formatModelSelectorValue(formatModelStringWithRouting(resolved.model), resolved.thinkingLevel)
 			: formatModelStringWithRouting(resolved.model);
@@ -2480,6 +2496,7 @@ interface DriveOutcome {
 	error?: string;
 	aborted: boolean;
 	abortReasonText?: string;
+	failureKind?: "infrastructure";
 }
 
 /**
@@ -2538,6 +2555,7 @@ async function driveSessionToResult(
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
 	let error: string | undefined;
+	let failureKind: "infrastructure" | undefined;
 	let aborted = false;
 	let abortReasonText: string | undefined;
 	// Cost-cap refusals are terminal: no retry or reminder can be sent until the cap is raised.
@@ -2818,7 +2836,23 @@ async function driveSessionToResult(
 				}
 			} else if (lastAssistant.stopReason === "error") {
 				exitCode = 1;
-				error ??= attributeSubagentError(lastAssistant.errorMessage, lastAssistant);
+				if (lastAssistant.errorCode === "provider_chain_unavailable") {
+					failureKind = "infrastructure";
+					error = lastAssistant.errorMessage;
+				}
+				const unavailableClass = classifyProviderFailure({
+					status: lastAssistant.errorStatus,
+					type: lastAssistant.errorType,
+					code: lastAssistant.errorCode,
+					catalogModel:
+						session.model?.provider === lastAssistant.provider && session.model.id === lastAssistant.model,
+				});
+				if (unavailableClass) {
+					failureKind = "infrastructure";
+					error ??= `provider unavailable (${unavailableClass})`;
+				} else {
+					error ??= attributeSubagentError(lastAssistant.errorMessage, lastAssistant);
+				}
 			}
 		}
 
@@ -2857,13 +2891,14 @@ async function driveSessionToResult(
 		} else {
 			exitCode = 1;
 			if (!abortSignal.aborted) {
-				// A cost-cap refusal is a reason for the parent, not a crash to diagnose.
+				// Cost-cap refusals and unavailable providers are reasons for the parent, not crashes to diagnose.
 				error =
-					err instanceof CostCapError
+					err instanceof CostCapError || err instanceof ProviderUnavailableError
 						? err.message
 						: err instanceof Error
 							? err.stack || err.message
 							: String(err);
+				if (err instanceof ProviderUnavailableError) failureKind = "infrastructure";
 			}
 		}
 	} finally {
@@ -2877,12 +2912,19 @@ async function driveSessionToResult(
 		}
 	}
 
-	return { exitCode, error, aborted, abortReasonText };
+	return { exitCode, error, aborted, abortReasonText, failureKind };
 }
 
 interface FinalizeRunArgs {
 	monitor: SubagentRunMonitor;
-	done: { exitCode: number; error?: string; aborted?: boolean; abortReason?: string; durationMs: number };
+	done: {
+		exitCode: number;
+		error?: string;
+		aborted?: boolean;
+		abortReason?: string;
+		durationMs: number;
+		failureKind?: "infrastructure";
+	};
 	index: number;
 	id: string;
 	agent: AgentDefinition;
@@ -3107,6 +3149,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		exitCode,
 		output: truncatedOutput,
 		stderr,
+		failureKind: done.failureKind,
 		truncated: Boolean(truncated),
 		...(finalized.structuredOutput ? { structuredOutput: finalized.structuredOutput } : {}),
 		durationMs: Date.now() - args.startTime,
@@ -4668,12 +4711,14 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		error?: string;
 		aborted?: boolean;
 		abortReason?: string;
+		failureKind?: "infrastructure";
 		durationMs: number;
 	}> => {
 		const sessionAbortController = new AbortController();
 		const abortSignal = monitor.abortSignal;
 		let exitCode = 0;
 		let error: string | undefined;
+		let failureKind: "infrastructure" | undefined;
 		let aborted = false;
 		let abortReasonText: string | undefined;
 		const checkAbort = () => {
@@ -4740,6 +4785,50 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 							modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings),
 						)
 					: undefined;
+			const exclusions: ProviderExhaustionExclusion[] = [];
+			// Availability applies to the complete quality chain, including a pinned
+			// worker's inherited tail. Do not fail on the pin before consulting it.
+			const qualityChain = [...new Set([...configuredModelPatterns, ...(inheritedRetryFallbackChain ?? [])])];
+			const availableModelPatterns = qualityChain.filter(pattern => {
+				const provider =
+					parseRetryFallbackSelector(pattern)?.provider ??
+					resolveModelRoleValue(pattern, modelRegistry.getAll(), { settings }).model?.provider;
+				const exclusion = provider ? providerExhaustionExclusion(provider) : undefined;
+				if (!exclusion) return true;
+				const alternative =
+					parseRetryFallbackSelector(pattern)?.provider === exclusion.provider
+						? undefined
+						: resolveModelOverride([pattern], modelRegistry, settings).model;
+				if (alternative && alternative.provider !== exclusion.provider) return true;
+				exclusions.push(exclusion);
+				return false;
+			});
+			if (exclusions.length > 0) {
+				logger.warn("Skipping unavailable subagent providers", { exclusions });
+				if (availableModelPatterns.length === 0) {
+					throw new ProviderUnavailableError(
+						exclusions[0]!.provider,
+						providerExhaustionRecord(exclusions[0]!.provider)?.class ?? "discovery",
+						exclusions,
+					);
+				}
+			}
+			// Unchanged requests keep their original patterns so alias resolution stays exactly as before.
+			const startupModelPatterns = exclusions.length > 0 ? availableModelPatterns : modelPatterns;
+			if (exclusions.length > 0 && availableModelPatterns.length > 0) {
+				logger.info("Substituting unavailable worker model within its quality chain", {
+					requested: modelPatterns,
+					replacement: availableModelPatterns[0],
+					exclusions,
+				});
+			}
+			const parentResolved = options.parentActiveModelPattern
+				? resolveModelOverride([options.parentActiveModelPattern], modelRegistry, settings)
+				: undefined;
+			const parentModelPattern =
+				parentResolved?.model && isProviderExhausted(parentResolved.model.provider)
+					? undefined
+					: options.parentActiveModelPattern;
 			const {
 				model,
 				thinkingLevel: resolvedThinkingLevel,
@@ -4748,8 +4837,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				warning: modelResolutionWarning,
 			} = await awaitAbortable(
 				resolveModelOverrideWithAuthFallback(
-					modelPatterns,
-					options.parentActiveModelPattern,
+					startupModelPatterns,
+					parentModelPattern,
 					modelRegistry,
 					settings,
 					id,
@@ -4798,7 +4887,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			const retryFallbackRole = installSubagentRetryFallbackChain({
 				settings: subagentSettings,
 				id,
-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
+				candidates: resolveSubagentRetryFallbackCandidates(qualityChain, modelRegistry, subagentSettings),
 				inheritedFallbackChain: inheritedRetryFallbackChain,
 				model,
 				authFallbackUsed,
@@ -5308,10 +5397,17 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			error = outcome.error;
 			aborted = outcome.aborted;
 			abortReasonText = outcome.abortReasonText;
+			failureKind = outcome.failureKind;
 		} catch (err) {
 			exitCode = 1;
 			if (!abortSignal.aborted) {
-				error = err instanceof Error ? err.stack || err.message : String(err);
+				error =
+					err instanceof ProviderUnavailableError
+						? err.message
+						: err instanceof Error
+							? err.stack || err.message
+							: String(err);
+				if (err instanceof ProviderUnavailableError) failureKind = "infrastructure";
 			}
 		} finally {
 			const cleanupDeadlineAt = Date.now() + cleanupGraceMs;
@@ -5522,6 +5618,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			error,
 			aborted,
 			abortReason: aborted ? abortReasonText : undefined,
+			failureKind,
 			durationMs: Date.now() - startTime,
 		};
 	};

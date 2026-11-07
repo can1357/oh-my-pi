@@ -15,9 +15,17 @@
 
 ### Added
 
+- Check provider cooldowns and probe recovery immediately with `omp providers` and `/providers`; successful inference clears billing cooldowns ([#16532](https://github.com/can1357/oh-my-pi/pull/16532) by [@Komzpa](https://github.com/Komzpa)).
+- Model selection skips unavailable providers without changing preferences; sessions wait for recovery, with shared probes and host-routable transition notices ([#16532](https://github.com/can1357/oh-my-pi/pull/16532) by [@Komzpa](https://github.com/Komzpa)).
+
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
 
 ### Fixed
+
+- Provider availability checks reuse unchanged cooldown files while observing shared recovery updates immediately.
+- Providers with exhausted credits remain unavailable until a recovery probe succeeds, so workers use their fallback chain without spending another turn on the blocked account.
+- Workers skip unavailable providers across their configured quality chain and continue after quota failures, including with ordinary retries disabled ([#16532](https://github.com/can1357/oh-my-pi/pull/16532) by [@Komzpa](https://github.com/Komzpa)).
+- Exhausted providers stay excluded in sessions, benchmarks, per-call workers and the auth gateway until their reset or cooldown expires.
 
 - A browser relay tab stays usable after a password manager's inline autofill menu opens in it; the call that opened the menu still fails once (reinstall the extension with `omp browser-relay install` and reload it) ([#16908](https://github.com/can1357/oh-my-pi/pull/16908) by [@will-bogusz](https://github.com/will-bogusz))
 - A `%%bash` cell in Python eval no longer prints its exit status (a stray `0`) after the command's output; a failing cell reports `%%bash: exit status N` on stderr instead.

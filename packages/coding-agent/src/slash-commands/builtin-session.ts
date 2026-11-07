@@ -1,3 +1,5 @@
+import { providersCommand } from "../session/providers-command";
+import { replaceTabs } from "@oh-my-pi/pi-tui";
 import { clearSubmittedText } from "./helpers/draft";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
@@ -441,6 +443,24 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			runtime.ctx.showStatus("Usage: /usage [show|reset [provider/credential-id|provider/active]]");
 			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "providers",
+		description: "List provider cooldowns or probe recovery now",
+		allowArgs: true,
+		inlineHint: "[probe [<provider>|--all]]",
+		handle: async (command, runtime) => {
+			const args = command.args.trim() ? command.args.trim().split(/\s+/) : [];
+			if (args[0] === "clear") return usage("Use omp providers clear <provider> for an explicit override.", runtime);
+			try {
+				await runtime.output(
+					replaceTabs(sanitizeText(await providersCommand(args, async () => runtime.session.modelRegistry))),
+				);
+			} catch (error) {
+				return usage(errorMessage(error), runtime);
+			}
+			return commandConsumed();
 		},
 	},
 	{

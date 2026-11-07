@@ -169,7 +169,7 @@ export async function resolveSharpshooterModel(
 ): Promise<Model | undefined> {
 	const selector = cfgSharpshooterModel.get(settings);
 	if (selector) {
-		const resolved = resolveModelRoleValue(selector, modelRegistry.getAll(), {
+		const resolved = resolveModelRoleValue(selector, modelRegistry.getAvailable(), {
 			settings,
 			matchPreferences: getModelMatchPreferences(settings),
 		});

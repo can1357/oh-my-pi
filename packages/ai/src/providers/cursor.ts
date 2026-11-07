@@ -2235,6 +2235,9 @@ function streamCursorWithWireMode(
 			}
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
+			output.errorType = result.errorType;
+			output.errorCode = result.errorCode;
+			output.errorResetAt = result.errorResetAt;
 			// The rejection is non-retriable on the poisoned id, but the fresh id
 			// is a different request. Mark this one attempt transient so the
 			// caller's retry loop actually rebuilds on the rotated id; if that id
