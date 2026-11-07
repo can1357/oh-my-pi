@@ -677,6 +677,8 @@ pub(super) struct LexState {
 	pub(super) lo:           u32,
 	/// Source offset after the token.
 	pub(super) hi:           u32,
+	/// Body read by `dquote_parse`, ending at the consumed delimiter.
+	pub(super) quote_span:   Span,
 	/// End of the token before this one (end of the last consumed token).
 	pub(super) last_hi:      u32,
 	/// The `SEPER` was a newline.
@@ -2327,11 +2329,15 @@ impl<'s> Ctx<'s> {
 				.zle
 				.is_some_and(|z| z.zlemetacs > z.zlemetall + z.addedx - self.inbufct());
 		let mut c;
+		let quote_lo = self.src_off();
 		loop {
 			c = self.hgetc();
 			let more = (c != endchar || bct > 0 || (math && (pct > 0 || brct > 0)) || intick > 0)
 				&& !self.lexstop;
 			if !more {
+				if !self.lexstop && c == endchar {
+					self.lx.quote_span = Span::new(quote_lo, self.last_src_off);
+				}
 				break;
 			}
 			// `continue` of zsh's loop: the byte is dropped.

@@ -597,9 +597,8 @@ impl Ctx<'_> {
 			T::Func => self.par_funcdef(),
 			T::Dinbrack => self.par_dinbrack(),
 			T::Dinpar => {
-				let (s, span) = self.tw();
-				let inner =
-					Span::new((span.lo + 2).min(span.hi), span.hi.saturating_sub(2).max(span.lo));
+				let s = self.lx.buf.clone();
+				let inner = self.lx.quote_span;
 				self.cmd_close = Some(inner.hi);
 				self.zshlex();
 				Some(CommandKind::Arith(ArithText { span: inner, src: s, bracket: false }))
@@ -695,10 +694,11 @@ impl Ctx<'_> {
 					return self.yyerr();
 				}
 				if want == T::Doutpar {
-					rparen = self.lx.lo;
+					rparen = self.lx.quote_span.hi;
 					header_hi = self.lx.hi;
 				}
-				let (src, span) = self.tw();
+				let src = self.lx.buf.clone();
+				let span = self.lx.quote_span;
 				exprs.push(ArithText { span, src, bracket: false });
 			}
 			self.ps.infor = 0;

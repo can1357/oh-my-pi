@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed shell syntax exports pointing command delimiters into expression text or neighboring tokens, including zsh arithmetic loops and alias-expanded commands ([#18193](https://github.com/can1357/oh-my-pi/pull/18193) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool crashing on long `[[ … && … ]]`, `[[ … || … ]]`, `[` and `test` chains and long runs of `!` in `[[ ]]`, including conditions in uncalled functions and skipped commands; 100,000-term chains now run without overflowing the stack ([#17872](https://github.com/can1357/oh-my-pi/pull/17872) by [@sjawhar](https://github.com/sjawhar))
 ### Breaking Changes
 
