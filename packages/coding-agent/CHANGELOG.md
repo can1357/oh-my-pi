@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- An eval cell that fails without anyone cancelling it (a Python kernel that exits while starting, a kernel's own startup timeout, a JavaScript cell's own `TimeoutError`) now reports the failure and its reason, such as `Python kernel init failed: Python kernel exited with code 1; its last stderr output: …`, instead of an empty cancelled result
+- A JavaScript `eval` cell that is cancelled or times out now keeps the output it printed just before it was stopped, instead of losing its last lines
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
 - A `bash.patterns` `deny` rule now blocks a command anywhere in a `;`, `|`, `||` or `&&` line even when an earlier `prompt` rule matches another part of it, and project settings can no longer override the operator's `deny` or `prompt` patterns with `allow` ([#18349](https://github.com/can1357/oh-my-pi/pull/18349) by [@asuffield](https://github.com/asuffield))
 
