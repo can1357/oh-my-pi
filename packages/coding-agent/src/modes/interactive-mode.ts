@@ -1530,8 +1530,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const name = this.sessionManager.getSessionName();
 		if (!name) return undefined;
 		const pin = this.statusLine.isSessionPinned(this.sessionManager.getSessionId()) && theme.icon.pin;
-		const title = sanitizeStatusText(name);
-		return `\x1b[2;3m${pin ? `${pin} ${title}` : title}\x1b[23;22m`;
+		const styledTitle = `\x1b[2;3m${sanitizeStatusText(name)}\x1b[23;22m`;
+		return pin ? `${theme.fg("accent", pin)} ${styledTitle}` : styledTitle;
 	}
 	/** Live gen tok/s for the working row: the viewed session's own meter, so a
 	 * focused subagent shows its own reading and the main session's survives
