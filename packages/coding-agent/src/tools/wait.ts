@@ -20,7 +20,7 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { throwIfAborted } from "./tool-errors";
 
-import { cfgLaunchEnabled } from "./settings";
+import { cfgLaunchEnabled, cfgWaitMaxMs } from "./settings";
 
 const waitSchema = type({});
 /**
@@ -285,7 +285,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				? messaging.registry.awaits.hold(messaging.senderId, watchedAgents, { interruptible: true })
 				: undefined;
 		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
-		const timer = setTimeout(timedOut, WAIT_LADDER_MS[rung]);
+		const maxMs = cfgWaitMaxMs.get(this.session.settings);
+		const timer = maxMs > 0 ? setTimeout(timedOut, Math.min(WAIT_LADDER_MS[rung], maxMs)) : undefined;
 		const abort = Promise.withResolvers<void>();
 		const onAbort = () => abort.resolve();
 		if (signal) {
