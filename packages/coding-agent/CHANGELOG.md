@@ -8,6 +8,8 @@
 - `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.
 - The bash execution visualization keeps updating, and saved traces still restore, after a command handles bytes that aren't valid UTF-8 (e.g. `v=$(printf '\377')`)
 - On Windows, `grep`, `glob` and isolated subagents no longer flash a console window when they query or start the ovnfs daemon.
+- Fixed a `models.yml` edit that does not parse (such as a half-saved file) removing every custom provider, override and API key it defines from the running session the next time it re-reads the file; the session now keeps the last config that loaded and still shows the error until the file loads again ([#16401](https://github.com/can1357/oh-my-pi/pull/16401) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a running session never re-reading `models.yml`: a provider edit (a compat flag such as `supportsLongCacheRetention`, a new model, a key) reached only sessions started after it, and their subagents inherited the stale catalog. A session now re-reads the file when it changed on disk before each model request and each subagent spawn (one `stat` when it did not); an edit that does not load keeps the last good catalog, and a worker's mirror serves the same catalog its owner does ([#16401](https://github.com/can1357/oh-my-pi/pull/16401) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.17.0] - 2026-11-06
 
@@ -130,8 +132,6 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
-- Fixed a `models.yml` edit that does not parse (such as a half-saved file) removing every custom provider, override and API key it defines from the running session the next time it re-reads the file; the session now keeps the last config that loaded and still shows the error until the file loads again ([#16401](https://github.com/can1357/oh-my-pi/pull/16401) by [@sjawhar](https://github.com/sjawhar))
-- Fixed a running session never re-reading `models.yml`: a provider edit (a compat flag such as `supportsLongCacheRetention`, a new model, a key) reached only sessions started after it, and their subagents inherited the stale catalog. A session now re-reads the file when it changed on disk before each model request and each subagent spawn (one `stat` when it did not); an edit that does not load keeps the last good catalog, and a worker's mirror serves the same catalog its owner does ([#16401](https://github.com/can1357/oh-my-pi/pull/16401) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
