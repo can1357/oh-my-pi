@@ -221,26 +221,14 @@ The TypeScript client exposes `setCacheWarming(mode): Promise<CacheWarmingMode>`
 - `{ id?, type: "bash", command: string, excludeFromContext?: boolean }`
 - `{ id?, type: "abort_bash" }`
 
-Omitting `excludeFromContext` or setting it to `false` shares the command and
-output with the model (terminal `!`). Setting it to `true` excludes the execution
-from model context (terminal `!!`); the actual output is still returned in the
-ordinary `bash` response and retained in the session transcript. This is not
-secret storage: transcript readers and extensions can still see it.
-A provided non-boolean value is rejected before the command executes.
+`excludeFromContext: true` keeps the run out of model context, like terminal
+`!!`: the output is still returned and recorded in the transcript, where
+extensions and `get_messages` see it. Non-boolean values are rejected.
 
-Before sending `excludeFromContext: true`, clients MUST capture the startup
-`ready` frame and require `ready.supportsBashExcludeFromContext === true`. This
-static connection capability is not session state. Older runtimes omit it and
-silently ignore unknown command fields; do not execute an excluded command on
-them or fall back to sharing its output.
-The TypeScript client captures the capability once in `start()` and checks it in
-`bash(command, { excludeFromContext: true })` without a `get_state` round-trip.
-The generated Python, Rust and Go command clients expose the option; their callers
-must check the capability on their client's ready frame.
-
-```json
-{ "id": "private-run", "type": "bash", "command": "printf private", "excludeFromContext": true }
-```
+Older runtimes ignore unknown fields and would share the output, so send
+`excludeFromContext: true` only when the `ready` frame has
+`supportsBashExcludeFromContext: true`. `RpcClient.bash()` enforces this; with
+the Python, Go and Rust SDKs, check `client.ready` / `Ready()` / `ready()`.
 
 `bash` is dispatched concurrently: the RPC server continues reading commands
 while the shell command runs, so `abort_bash` (or any other command) sent

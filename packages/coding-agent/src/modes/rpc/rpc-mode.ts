@@ -2634,6 +2634,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// =================================================================
 
 			case "bash": {
+				// Reject rather than coerce: a falsy non-boolean such as `null` would silently share the output.
 				if (command.excludeFromContext !== undefined && typeof command.excludeFromContext !== "boolean") {
 					return error(id, "bash", "excludeFromContext must be a boolean");
 				}

@@ -2,47 +2,20 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Rust SDK: `BashCommand` and `ReadyEvent` struct literals need `exclude_from_context: None` and `supports_bash_exclude_from_context: None` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+
+### Added
+
+- RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+
 ### Fixed
 
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
 - A `bash.patterns` `deny` rule now blocks a command anywhere in a `;`, `|`, `||` or `&&` line even when an earlier `prompt` rule matches another part of it, and project settings can no longer override the operator's `deny` or `prompt` patterns with `allow` ([#18349](https://github.com/can1357/oh-my-pi/pull/18349) by [@asuffield](https://github.com/asuffield))
 
 ## [18.18.0] - 2026-11-07
-### Breaking Changes
-
-- Rust SDK: `BashCommand` and `ReadyEvent` struct literals must add `exclude_from_context: None` and `supports_bash_exclude_from_context: None`, respectively, to keep the old behavior ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
-
-### Added
-
-- RPC clients can run bash commands without adding the execution to model context, matching terminal `!!` behavior. Support is advertised once in the startup `ready` frame ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
-
-## [18.18.0] - 2026-11-07
-
-### Added
-
-- Added `skills.manualSkills` glob patterns to keep skills available manually while hiding them from the model catalog, without editing their `SKILL.md` files ([#18114](https://github.com/can1357/oh-my-pi/pull/18114) by [@Shadorain](https://github.com/Shadorain))
-- Added Keenable as a web search engine (`web/keenable`). It uses `KEENABLE_API_KEY` or a stored `keenable` credential when present; an explicit selection without a key uses Keenable's keyless public endpoint ([#17953](https://github.com/can1357/oh-my-pi/pull/17953) by [@KGKallasmaa](https://github.com/KGKallasmaa))
-- Bash commands now visualize execution incrementally in Raw or Python-like Pseudo, with variable values beside their latest setter and bounded replay history for foreground and background jobs; PTY and user-shell runs retain their plain command view.
-- Added opt-in auto-update (`update.auto`, offered by a new setup wizard step): a launch that finds a newer release installs it in the background through whatever installed omp (standalone binary, Homebrew, mise, bun, npm), shows the version and download progress beside the welcome banner's version, and the next launch runs it. Quitting mid-update does not interrupt it. Skipped under Tern, which updates its omp itself, and on Nix and source checkouts
-- `omp update` now refuses to start while another update (including a background auto-update) is installing, instead of running two installers at once
-- Added `none` to `edit.mode` (and `PI_EDIT_VARIANT`): it removes the `edit` tool and keeps `bash` available even when `bash.enabled` is off
-- Added the default-off `providers.openaiResponsesWebsockets` setting for catalog-supported standard Responses models, independently of Codex; model/request `false` always disables it ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
-- Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
-- Extensions can choose how each tool call in the main session's transcript is drawn (full, one compact row with optional extra rows, or hidden) with `pi.registerTranscriptPresenter()`, in the terminal and in Tern, and ask again for specific blocks with `ctx.ui.refreshTranscript(ids)` ([#17960](https://github.com/can1357/oh-my-pi/pull/17960) by [@materemias](https://github.com/materemias))
-- Transcript presenters also choose how advisor notes, skill prompts, late diagnostics, `!`/`$` runs, background job and supervised process notices, TTSR and todo reminders are drawn (`message` and `event` blocks) ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
-- Consecutive compact transcript blocks draw as tight rows: no blank rows between them in the terminal (scrollback included) and no gaps in Tern. This covers blocks a transcript presenter draws compact and extension message renderers whose component implements `isTranscriptBlockCompact()` ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
-- Extensions can choose how each tool call in the main session's transcript is drawn (full, one compact row with optional extra rows, or hidden) with `pi.registerTranscriptPresenter()`, in the terminal and in Tern, and ask again for specific blocks with `ctx.ui.refreshTranscript(ids)`; opt in with the `extensionRenderers.transcriptPresenters` setting (default off) ([#17960](https://github.com/can1357/oh-my-pi/pull/17960) by [@materemias](https://github.com/materemias))
-- Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
-- Added a `cache` status-line segment (in the `full` and `nerd` presets) showing before you send whether the next message reads the prompt cache; hover it in Tern or open `/session` for why not and how much it re-sends ([#12677](https://github.com/can1357/oh-my-pi/issues/12677)) ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
-- Added a `:level` suffix to `^` model tags, such as `^openai-codex/gpt-6-astra:high`, that sets the tagged subagent's initial effort. Typing `:` after a mention lists the model's supported levels. The task tool's `effort` hint and `task.maxEffort` do not override the tagged level, and a per-call `model` for that agent fails as a conflict ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
-- Added `omp zsh`, `omp bash` and `omp sh`: run omp's built-in shell engine as that shell in your terminal. Every argument goes to the shell unchanged (`omp zsh -c 'echo $ZSH_NAME'`, `omp zsh ./script.zsh a b`, `printf 'echo hi\n' | omp zsh`, `omp bash --help`), and `omp` exits with the shell's status. Ctrl-C, `kill` and descriptors you pass (`3>file`) work as with the real shells
-- `omp zsh` keeps zsh's history: it reads and writes your `$HISTFILE` in zsh's own format and locking (shared with real zsh, `extendedhistory`, `sharehistory`, `incappendhistory` and the other history options), expands `!!`, `!$`, `^old^new` and the rest of zsh's history syntax, runs `zshaddhistory`, and has full `fc`, `history`, `r`, `print -s`, `$history` and `HISTCMD`; `omp bash` gets `history -a -n -r -w -p`, `HISTTIMEFORMAT`, `HISTIGNORE`, `fc` editing and `!` expansion
-- `omp zsh` runs interactively like zsh: zsh's line editor (emacs and vi keymaps, `bindkey`, `zle -N` widgets, `vared`), completion (`compinit`, `compdef`, `menu select`), job control (Ctrl-Z, `fg`, `bg`, `jobs`), prompts with `precmd`/`preexec` hooks, and the zsh modules plugins load (`zsh/zpty`, `zsh/system`, `zsh/terminfo`, `zsh/pcre`, `zsh/datetime`, …), so oh-my-zsh and powerlevel10k configs start
-- RPC `bash` results now say when the output was cut: `elidedBytes`/`elidedLines` for a dropped middle, and `columnTruncatedLines`, `columnTruncatedRange`, `columnDroppedBytes` and `columnMax` for lines cut to the column cap. The Go, Python and Rust SDKs decode them ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
-- Added `pi.getShortcutConflict(chord)`, which tells an extension whether a key chord is free or held by omp, a keybinding (an `app.*` action or an editing key) or another extension ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
-- `unwrapHashlineHeaderPath` is exported from `@oh-my-pi/pi-coding-agent`, turning a `[path#TAG]` write/edit target into its plain path ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
-- The `devin-cli` login imports Devin CLI credentials into a stored `devin` account, so the provider no longer requires `DEVIN_API_KEY` ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
-- The `devin-windsurf` login lets Windsurf Enterprise users authenticate the `devin` provider with their existing Windsurf account ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 
 ### Fixed
 

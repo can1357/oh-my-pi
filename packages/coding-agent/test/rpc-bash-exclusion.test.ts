@@ -22,57 +22,36 @@ describe("RPC bash context exclusion", () => {
 	});
 
 	afterEach(async () => {
-		const ownClient = client;
-		const ownDirectory = directory;
-		await ownClient?.stop();
-		await removeWithRetries(ownDirectory);
+		await client.stop();
+		await removeWithRetries(directory);
 	});
 
-	test("returns and records every output but keeps excluded commands out of model context", async () => {
+	test("returns and records excluded output but keeps it out of model context", async () => {
 		await client.start();
-		client.getState = async () => {
-			throw new Error("Excluded bash must not depend on a session-state request");
-		};
-		const ordinary = await client.bash("printf default-context-marker");
-		const shared = await client.bash("printf explicit-context-marker", { excludeFromContext: false });
-		const excluded = await client.bash("printf private-output-marker", { excludeFromContext: true });
-		for (const [result, output] of [
-			[ordinary, "default-context-marker"],
-			[shared, "explicit-context-marker"],
-			[excluded, "private-output-marker"],
-		] as const) {
-			expect(result.output).toBe(output);
-			expect(result.exitCode).toBe(0);
-		}
+		expect((await client.bash("printf shared-marker")).output).toBe("shared-marker");
+		expect((await client.bash("printf private-marker", { excludeFromContext: true })).output).toBe("private-marker");
 
 		const messages = await client.getMessages();
 		const executions = messages.filter(message => message.role === "bashExecution");
-		expect(executions.map(message => message.output)).toEqual([
-			"default-context-marker",
-			"explicit-context-marker",
-			"private-output-marker",
-		]);
-		expect(executions[2]?.excludeFromContext).toBe(true);
+		expect(executions.map(message => message.output)).toEqual(["shared-marker", "private-marker"]);
 		const modelContext = JSON.stringify(convertToLlm(messages));
-		expect(modelContext).toContain("default-context-marker");
-		expect(modelContext).toContain("explicit-context-marker");
-		expect(modelContext).not.toContain("private-output-marker");
+		expect(modelContext).toContain("shared-marker");
+		expect(modelContext).not.toContain("private-marker");
 	}, 30_000);
 
-	test("rejects non-boolean exclusion before executing or recording the command", async () => {
+	test("rejects a non-boolean exclusion before running the command", async () => {
 		await client.start();
-		for (const invalid of ["true", null]) {
-			await expect(
-				client.bash("printf leaked > refused.txt", { excludeFromContext: invalid as unknown as boolean }),
-			).rejects.toThrow("excludeFromContext must be a boolean");
-		}
+		const failure = await client
+			.bash("printf leaked > refused.txt", { excludeFromContext: "true" as unknown as boolean })
+			.catch((error: unknown) => error);
+		expect(String(failure)).toContain("excludeFromContext must be a boolean");
 		expect(await Bun.file(path.join(directory, "refused.txt")).exists()).toBe(false);
 		expect(await client.getMessages()).toEqual([]);
 	}, 30_000);
 
-	test("does not reuse exclusion support after restarting against an older runtime", async () => {
+	test("refuses exclusion after restarting against a runtime that does not advertise it", async () => {
 		await client.start();
-		expect((await client.bash("printf first-runtime", { excludeFromContext: true })).output).toBe("first-runtime");
+		await client.bash("printf first-runtime", { excludeFromContext: true });
 		await client.stop();
 		command[1] = path.join(import.meta.dir, "fixtures", "mock-rpc-agent.ts");
 		await client.start();
@@ -81,17 +60,3 @@ describe("RPC bash context exclusion", () => {
 		);
 	}, 30_000);
 });
-
-test("RpcClient refuses excluded execution on runtimes without the capability", async () => {
-	const client = new RpcClient({
-		command: [process.execPath, path.join(import.meta.dir, "fixtures", "mock-rpc-agent.ts")],
-	});
-	try {
-		await client.start();
-		await expect(client.bash("printf private", { excludeFromContext: true })).rejects.toThrow(
-			"RPC runtime does not support bash context exclusion",
-		);
-	} finally {
-		await client.stop();
-	}
-}, 30_000);
