@@ -30,6 +30,7 @@ use std::{
 	collections::HashMap,
 	ffi::{CStr, c_char, c_int, c_void},
 	mem::MaybeUninit,
+	os::unix::fs::MetadataExt,
 	sync::{
 		LazyLock,
 		atomic::{AtomicPtr, Ordering},
@@ -76,34 +77,34 @@ struct Locks {
 static INODES: LazyLock<Mutex<HashMap<Inode, Locks>>> =
 	LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// A readable mapping of this process, from `/proc/self/maps`.
+/// A readable executable mapping of this process, from `/proc/self/maps`.
 struct Mapping {
 	start:    usize,
 	end:      usize,
 	writable: bool,
-	path:     String,
 }
 
-fn mappings() -> Vec<Mapping> {
-	let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else {
-		return Vec::new();
-	};
+fn executable_mappings(maps: &str, exe: Inode) -> Vec<Mapping> {
 	maps
 		.lines()
 		.filter_map(|line| {
 			let mut fields = line.split_whitespace();
 			let (range, perms) = (fields.next()?, fields.next()?);
-			let path = fields.nth(3).unwrap_or("").to_owned();
-			let (start, end) = range.split_once('-')?;
-			let perms = perms.as_bytes();
-			if perms.first() != Some(&b'r') {
+			let (device, inode) = (fields.nth(1)?, fields.next()?);
+			let (major, minor) = device.split_once(':')?;
+			let (major, minor) =
+				(u32::from_str_radix(major, 16).ok()?, u32::from_str_radix(minor, 16).ok()?);
+			if perms.as_bytes().first() != Some(&b'r')
+				|| libc::makedev(major, minor) != exe.dev
+				|| inode.parse::<u64>().ok()? != exe.ino
+			{
 				return None;
 			}
+			let (start, end) = range.split_once('-')?;
 			Some(Mapping {
-				start: usize::from_str_radix(start, 16).ok()?,
-				end: usize::from_str_radix(end, 16).ok()?,
-				writable: perms.get(1) == Some(&b'w'),
-				path,
+				start:    usize::from_str_radix(start, 16).ok()?,
+				end:      usize::from_str_radix(end, 16).ok()?,
+				writable: perms.as_bytes().get(1) == Some(&b'w'),
 			})
 		})
 		.collect()
@@ -122,12 +123,10 @@ fn name_at(address: usize, exe: &[Mapping]) -> Option<&'static [u8]> {
 
 /// SQLite's `aSyscall` table inside the executable (Bun), found by its names.
 fn find_table() -> Option<&'static [SyscallEntry]> {
-	let maps = mappings();
-	let exe_path = std::fs::read_link("/proc/self/exe")
-		.ok()?
-		.to_string_lossy()
-		.into_owned();
-	let exe: Vec<Mapping> = maps.into_iter().filter(|m| m.path == exe_path).collect();
+	let metadata = std::fs::metadata("/proc/self/exe").ok()?;
+	let inode = Inode { dev: metadata.dev(), ino: metadata.ino() };
+	let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+	let exe = executable_mappings(&maps, inode);
 	const STRIDE: usize = size_of::<SyscallEntry>();
 	for mapping in exe.iter().filter(|m| m.writable) {
 		let mut at = mapping.start;
@@ -309,4 +308,33 @@ pub fn install() -> bool {
 		true
 	});
 	*INSTALLED
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{Inode, executable_mappings};
+
+	#[test]
+	fn selects_executable_mappings_by_identity_when_proot_rewrites_paths() {
+		let maps = "\
+00200000-0180f000 r--p 00000000 fe:51 2230756   \
+		            /data/data/com.termux/files/usr/var/lib/proot-distro/containers/ubuntu/rootfs/\
+		            root/.bun/bin/omp
+0180f000-01900000 rw-p 0160f000 fe:51 2230756   \
+		            /data/data/com.termux/files/usr/var/lib/proot-distro/containers/ubuntu/rootfs/\
+		            root/.bun/bin/omp
+01900000-01901000 rw-p 00000000 fe:52 2230756   /root/.bun/bin/omp
+01901000-01902000 rw-p 00000000 fe:51 2230757   /root/.bun/bin/omp
+01902000-01903000 rw-p 00000000 00:00 0
+";
+		let exe = Inode { dev: libc::makedev(0xfe, 0x51), ino: 2_230_756 };
+		let selected = executable_mappings(maps, exe);
+		assert_eq!(
+			selected
+				.iter()
+				.map(|m| (m.start, m.end, m.writable))
+				.collect::<Vec<_>>(),
+			[(0x0020_0000, 0x0180_f000, false), (0x0180_f000, 0x0190_0000, true)]
+		);
+	}
 }
