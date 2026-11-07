@@ -4,7 +4,7 @@
  * Gated by `PI_PYTHON_INTEGRATION=1` so CI without a real Python interpreter
  * (or sandboxes where subprocess spawning is restricted) does not fail.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -44,6 +44,10 @@ async function hasModule(cwd: string, module: string): Promise<boolean> {
 const HAS_MATPLOTLIB = await hasModule(MATPLOTLIB_TEST_CWD, "matplotlib");
 const HAS_PANDAS = await hasModule(MATPLOTLIB_TEST_CWD, "pandas");
 const HAS_ENSUREPIP = await hasModule(MATPLOTLIB_TEST_CWD, "ensurepip");
+
+// Every row here starts a real Python kernel, and some import matplotlib or pandas as well,
+// which on a loaded host outlasts bun test's 5-second default before the cell even runs.
+setDefaultTimeout(60_000);
 
 /** A venv like the ones `uv venv` makes: no pip installed. Returns its interpreter. */
 async function createPiplessVenv(dir: string): Promise<string> {
@@ -1235,6 +1239,37 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			await kernel.shutdown();
 		}
 	});
+
+	it.skipIf(!HAS_MATPLOTLIB)(
+		"skips an open figure whose drawing raises SystemExit, and the kernel keeps its variables",
+		async () => {
+			const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+			try {
+				// The figure is drawn after the cell's code ends, when the kernel flushes the figures it left open.
+				const result = await executePythonWithKernel(
+					kernel,
+					[
+						"import matplotlib.pyplot as plt",
+						"from matplotlib.artist import Artist",
+						"class Refuses(Artist):",
+						"    def draw(self, renderer):",
+						"        raise SystemExit(3)",
+						"fig = plt.figure()",
+						"fig.add_artist(Refuses())",
+						"kept = 42",
+					].join("\n"),
+				);
+				const after = await executePythonWithKernel(kernel, "print('kept', kept)");
+
+				expect(result.exitCode).toBe(0);
+				expect(result.displayOutputs.filter(output => output.type === "image")).toHaveLength(0);
+				expect(kernel.isAlive()).toBe(true);
+				expect(after.output).toContain("kept 42");
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+	);
 
 	it("translates %pwd magic to the user namespace", async () => {
 		using tempDir = TempDir.createSync("@python-runner-magic-");

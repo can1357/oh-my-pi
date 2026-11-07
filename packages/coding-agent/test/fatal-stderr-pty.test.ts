@@ -71,7 +71,7 @@ describe.skipIf(process.platform === "win32")("fatal stderr terminal handoff", (
 
 				const lines = terminalLines(screen);
 				const composerRow = lines.indexOf("╰─");
-				const errorRow = lines.findIndex(line => line?.includes("error: fatal PTY fixture") === true);
+				const errorRow = lines.findIndex(line => line?.includes("[Fatal Error] Error: fatal PTY fixture") === true);
 
 				expect(composerRow).toBeGreaterThanOrEqual(0);
 				expect(errorRow).toBeGreaterThan(composerRow);

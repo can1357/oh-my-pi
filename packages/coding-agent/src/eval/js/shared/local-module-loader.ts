@@ -3,6 +3,7 @@ import { createRequire, isBuiltin } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as vm from "node:vm";
+import { describeError } from "@oh-my-pi/pi-utils/thrown";
 import { collectModuleSourceSpecifiers, stripTypeScriptSyntax } from "./rewrite-imports";
 
 interface LocalModuleEntry {
@@ -416,8 +417,8 @@ function pathIsWithin(root: string, candidate: string): boolean {
 }
 
 function packageFallbackError(projectError: unknown, fallbackError: unknown, packageRoot: string): Error {
-	const projectMessage = projectError instanceof Error ? projectError.message : String(projectError);
-	const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+	const projectMessage = describeError(projectError).message;
+	const fallbackMessage = describeError(fallbackError).message;
 	return new Error(
 		`${projectMessage}\nJS package environment fallback ${packageRoot} also failed: ${fallbackMessage}\n` +
 			"Install the missing dependency with %bun add (select %environment project only to modify the project).",

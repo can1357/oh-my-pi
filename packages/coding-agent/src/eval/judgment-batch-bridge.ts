@@ -17,7 +17,7 @@
  * session releases it.
  */
 import type { ImageContent, JudgmentState, Question } from "@oh-my-pi/pi-ai";
-import { isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { describeError, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import type { ChainJudge } from "../judgment";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -243,7 +243,7 @@ export class JudgmentBatch {
 			} catch (error) {
 				logger.debug("judge_batch: running without an async job", {
 					id: this.id,
-					error: error instanceof Error ? error.message : String(error),
+					error: describeError(error).message,
 				});
 			}
 		}
@@ -352,7 +352,7 @@ export class JudgmentBatch {
 		try {
 			await this.#judgeAll(reportProgress);
 		} catch (error) {
-			this.#error = error instanceof Error ? error.message : String(error);
+			this.#error = describeError(error).message;
 		} finally {
 			this.#running = false;
 			this.#emitProgressEvent(true);
@@ -370,7 +370,7 @@ export class JudgmentBatch {
 				this.#cost += usage.usage.cost.total;
 			});
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			const message = describeError(error).message;
 			for (const input of this.#inputs) this.#settle({ key: input.key, error: message });
 			this.#error = message;
 			return;
@@ -410,7 +410,7 @@ export class JudgmentBatch {
 			try {
 				images = await loadEvalJudgmentImages(input.imageSources, this.#session.cwd);
 			} catch (error) {
-				return { key: input.key, error: error instanceof Error ? error.message : String(error) };
+				return { key: input.key, error: describeError(error).message };
 			}
 
 			let lastError: unknown;
@@ -435,7 +435,7 @@ export class JudgmentBatch {
 			if (signal.aborted) return { key: input.key, error: "cancelled" };
 			return {
 				key: input.key,
-				error: lastError instanceof Error ? lastError.message : String(lastError),
+				error: describeError(lastError).message,
 			};
 		} finally {
 			evalRequestSlots.release();

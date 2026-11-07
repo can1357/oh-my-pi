@@ -1,5 +1,14 @@
 import * as path from "node:path";
-import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
+import {
+	describeError,
+	inheritsFrom,
+	isErrorValue,
+	isRecord,
+	logger,
+	observeRejection,
+	Snowflake,
+	workerHostEntry,
+} from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
 	createWorkerSubprocess,
@@ -9,7 +18,7 @@ import {
 import type { ToolSession } from "../../tools";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { safeSend as safeSendIpc } from "../../utils/ipc";
+import { catchRejection, safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
 import {
@@ -24,19 +33,26 @@ import { updateEvalState } from "../state";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import type { ShadowPlan } from "../speculation/types";
-import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
+import {
+	type EvalDisplayOutput,
+	type EvalOutputConsumerFailure,
+	type EvalToolDescriptor,
+	type EvalToolInvokeResult,
+	outputConsumerFailure,
+} from "../types";
 import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
 import { projectJavaScriptShadowPlan } from "./speculation";
-import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
+import { callSessionTool, describeToolFailure, type JsStatusEvent } from "./tool-bridge";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
-import type {
-	EvalPreludeSource,
-	JsToolRequest,
-	RunErrorPayload,
-	SessionSnapshot,
-	WorkerInbound,
-	WorkerOutbound,
+import {
+	describedRunError,
+	type EvalPreludeSource,
+	type JsToolRequest,
+	type RunErrorPayload,
+	type SessionSnapshot,
+	type WorkerInbound,
+	type WorkerOutbound,
 } from "./worker-protocol";
 
 export { rewriteImports, wrapCode } from "./shared/rewrite-imports";
@@ -47,6 +63,12 @@ export interface VmRunState {
 	onDisplay?: (output: EvalDisplayOutput) => void;
 	/** Shows the user `out://` replies of the run's bridged tool calls; absent, those calls are refused. */
 	onReply?: (text: string) => void;
+	/**
+	 * Set by the context manager when `onText` or `onDisplay` threw, or returned
+	 * a promise that rejected: the first such error. The run kept going and its
+	 * later output still reached them.
+	 */
+	consumerFailure?: EvalOutputConsumerFailure;
 }
 
 /** Isolated runtime transport used by the context manager and startup regression fixtures. */
@@ -209,7 +231,9 @@ export async function executeInVmContext(options: {
 		options.ownerId,
 	);
 	if (!options.reset && lostSessions.delete(sessionKey)) {
-		options.runState.onText?.(`${formatKernelRestartNotice("JS worker")}\n`);
+		// The caller's consumer gets the notice like any chunk: through the guard that records its failure.
+		const notice = `${formatKernelRestartNotice("JS worker")}\n`;
+		deliverRunOutput(options.runState, "onChunk", () => options.runState.onText?.(notice));
 	}
 	const result = await runOnce(session, options);
 	if (session.state === "alive" && path.isAbsolute(options.filename)) {
@@ -266,7 +290,7 @@ export async function invokeJsTool(
 		if (!pending.settled) safeSend(session, { type: "tool", runId, ...request });
 		envelope = (await promise).value;
 	} catch (error) {
-		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+		return { ok: false, error: describeError(error).message };
 	} finally {
 		options.signal?.removeEventListener("abort", onAbort);
 		session.pending.delete(runId);
@@ -385,7 +409,8 @@ export async function runIfSnapshotMatches(options: {
 	try {
 		return await runOnce(session, options);
 	} catch (error) {
-		if (error instanceof ToolError && error.message === "JS shadow snapshot changed") return null;
+		if (inheritsFrom(error, ToolError.prototype) && describeError(error).message === "JS shadow snapshot changed")
+			return null;
 		throw error;
 	}
 }
@@ -665,13 +690,12 @@ async function acquireSession(
 				const failed = session.worker;
 				await failed.terminate().catch(() => undefined);
 				if (failed.mode === "worker") {
-					throw new Error(
-						`Failed to initialize isolated JS eval worker: ${error instanceof Error ? error.message : String(error)}`,
-						{ cause: error },
-					);
+					throw new Error(`Failed to initialize isolated JS eval worker: ${describeError(error).message}`, {
+						cause: error,
+					});
 				}
 				logger.warn("JS eval subprocess init failed; retrying with a Bun Worker", {
-					error: error instanceof Error ? error.message : String(error),
+					error: describeError(error).message,
 				});
 				session.worker = workerFactories.spawnWorker();
 				session.state = "alive";
@@ -746,16 +770,45 @@ async function initWorker(session: JsSession, snapshot: SessionSnapshot, timeout
 	}
 }
 
+/**
+ * Hands worker output to the run's callback. A callback that throws, or returns
+ * a promise that rejects, must not escape into the worker's message handler,
+ * where it surfaces as a process-fatal uncaught exception or unhandled
+ * rejection: the first error stays on the run state for the cell's result, and
+ * the run's later output is still delivered.
+ */
+function deliverRunOutput(
+	runState: VmRunState,
+	callback: EvalOutputConsumerFailure["callback"],
+	deliver: () => unknown,
+): void {
+	const record = (err: unknown): void => {
+		// Only the first failure is reported, but every one is described: describing observes the
+		// value and each field it reads, which may be or hold a rejected promise.
+		if (runState.consumerFailure) {
+			describeError(err);
+			return;
+		}
+		runState.consumerFailure = outputConsumerFailure(callback, err);
+		logger.warn("JS eval output callback failed", { callback, error: runState.consumerFailure.message });
+	};
+	try {
+		catchRejection(deliver(), record);
+	} catch (err) {
+		record(err);
+	}
+}
+
 function handleSessionMessage(session: JsSession, msg: WorkerOutbound): void {
 	switch (msg.type) {
 		case "text": {
-			const pending = session.pending.get(msg.runId);
-			pending?.runState.onText?.(msg.chunk);
+			const runState = session.pending.get(msg.runId)?.runState;
+			if (runState) deliverRunOutput(runState, "onChunk", () => runState.onText?.(msg.chunk));
 			return;
 		}
 		case "display": {
-			const pending = session.pending.get(msg.runId);
-			pending?.runState.onDisplay?.(msg.output);
+			const runState = session.pending.get(msg.runId)?.runState;
+			if (runState) deliverRunOutput(runState, "onDisplay", () => runState.onDisplay?.(msg.output));
 			return;
 		}
 		case "tool-call":
@@ -809,7 +862,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 		safeSend(session, {
 			type: "tool-reply",
 			id: msg.id,
-			reply: { ok: false, error: { message: "Run no longer active" } },
+			reply: { ok: false, error: describedRunError(describeError("Run no longer active")) },
 		});
 		return;
 	}
@@ -817,7 +870,7 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 		safeSend(session, {
 			type: "tool-reply",
 			id: msg.id,
-			reply: { ok: false, error: { message: "Run was interrupted" } },
+			reply: { ok: false, error: describedRunError(describeError("Run was interrupted")) },
 		});
 		return;
 	}
@@ -832,12 +885,21 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			onReply: pending.runState.onReply,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
-				pending.runState.onDisplay?.({ type: "status", event });
+				deliverRunOutput(pending.runState, "onDisplay", () =>
+					pending.runState.onDisplay?.({ type: "status", event }),
+				);
 			},
 		});
 		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: true, value } });
 	} catch (error) {
-		safeSend(session, { type: "tool-reply", id: msg.id, reply: { ok: false, error: toErrorPayload(error) } });
+		// A tool can throw any value, including one whose description throws; the reply must still go out.
+		// `callSessionTool` already described it for the status event: reading it again could answer differently.
+		const described = describeToolFailure(error);
+		const reply = {
+			ok: false as const,
+			error: describedRunError(described, inheritsFrom(error, ToolError.prototype)),
+		};
+		safeSend(session, { type: "tool-reply", id: msg.id, reply });
 	} finally {
 		pending.toolCalls.delete(msg.id);
 		// Last call of a run whose worker result was withheld: settle it now.
@@ -927,7 +989,8 @@ function safeSend(session: JsSession, msg: WorkerInbound): void {
 	try {
 		session.worker.send(msg);
 	} catch (err) {
-		logger.debug("js worker send failed", { error: err instanceof Error ? err.message : String(err) });
+		// Serializing the message runs the getters of any value a tool returned, so the failure can be anything.
+		logger.debug("js worker send failed", { error: describeError(err).message });
 	}
 }
 
@@ -942,19 +1005,6 @@ function errorFromPayload(payload: RunErrorPayload): Error {
 	if (payload.name) error.name = payload.name;
 	if (payload.stack) error.stack = payload.stack;
 	return error;
-}
-
-function toErrorPayload(error: unknown): RunErrorPayload {
-	if (error instanceof Error) {
-		return {
-			name: error.name,
-			message: error.message,
-			stack: error.stack,
-			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
-			isToolError: error instanceof ToolError || error.name === "ToolError",
-		};
-	}
-	return { message: String(error) };
 }
 
 function logWorkerMessage(msg: Extract<WorkerOutbound, { type: "log" }>): void {
@@ -982,7 +1032,7 @@ function spawnJsWorker(): JsEvalWorkerHandle {
 		// A worker thread remains isolated and can interrupt synchronous user code
 		// via terminate(), so it is the only safe recovery from subprocess spawn.
 		logger.warn("JS eval subprocess spawn failed; falling back to a Bun Worker", {
-			error: error instanceof Error ? error.message : String(error),
+			error: describeError(error).message,
 		});
 	}
 	return workerFactories.spawnWorker();
@@ -996,10 +1046,7 @@ function spawnBunWorker(): JsEvalWorkerHandle {
 			: new Worker(new URL("./worker-entry.ts", import.meta.url).href, { type: "module" });
 		return wrapBunWorker(worker);
 	} catch (error) {
-		throw new Error(
-			`Failed to start isolated JS eval worker: ${error instanceof Error ? error.message : String(error)}`,
-			{ cause: error },
-		);
+		throw new Error(`Failed to start isolated JS eval worker: ${describeError(error).message}`, { cause: error });
 	}
 }
 
@@ -1106,7 +1153,7 @@ function wrapBunWorker(worker: Worker): JsEvalWorkerHandle {
 }
 
 function errorFromWorkerEvent(event: ErrorEvent): Error {
-	if (event.error instanceof Error) return event.error;
+	if (isErrorValue(event.error)) return event.error;
 	if (event.message) return new Error(event.message);
 	return new Error("Unknown JS eval worker error");
 }

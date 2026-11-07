@@ -5,7 +5,7 @@ import {
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import { type ImageContent, toolWireSchema } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { type DescribedError, describeError, isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { committedTodoPhases } from "../../tools/todo";
@@ -220,6 +220,35 @@ function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Pr
 	return promise;
 }
 
+/**
+ * What `callSessionTool` read from each value a call failed with, by value. A
+ * failed call is reported twice: as a status event here, and to the cell by the
+ * caller. The caller takes this description ({@link describeToolFailure}), so a
+ * getter on the value runs once, not once per report, and both reports agree.
+ */
+const failureDescriptions = new WeakMap<object, DescribedError>();
+
+/** Describes the value a call failed with, for its status event, and keeps the description for the caller. */
+function describeFailedCall(error: unknown): DescribedError {
+	const described = describeError(error);
+	if (error !== null && (typeof error === "object" || typeof error === "function")) {
+		failureDescriptions.set(error, described);
+	}
+	return described;
+}
+
+/**
+ * The description `callSessionTool` made of the value a call failed with, or,
+ * for a value it did not describe, a new one ({@link describeError}).
+ */
+export function describeToolFailure(error: unknown): DescribedError {
+	if (error !== null && (typeof error === "object" || typeof error === "function")) {
+		const described = failureDescriptions.get(error);
+		if (described) return described;
+	}
+	return describeError(error);
+}
+
 export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	if (name === "__prelude__") {
 		const request = parsePreludeRequest(args);
@@ -247,7 +276,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		} catch (error) {
 			options.emitStatus?.({
 				op: request.name,
-				error: error instanceof Error ? error.message : String(error),
+				error: describeFailedCall(error).message,
 			});
 			throw error;
 		}
@@ -306,7 +335,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,
-			error: error instanceof Error ? error.message : String(error),
+			error: describeFailedCall(error).message,
 		});
 		throw error;
 	}
@@ -372,7 +401,8 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,
-			error: error instanceof Error ? error.message : String(error),
+			// A tool can throw any value; describing it must not replace the tool's own failure.
+			error: describeFailedCall(error).message,
 		});
 		throw error;
 	}

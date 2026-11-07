@@ -1,8 +1,22 @@
 import type { EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
-import { isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	describeError,
+	isErrorValue,
+	isRecord,
+	logger,
+	observeRejection,
+	readLines,
+	Snowflake,
+} from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
+import { settled } from "../utils/ipc";
 import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
-import { type EvalDisplayOutput, evalImageMetadata } from "./types";
+import {
+	type EvalDisplayOutput,
+	type EvalOutputConsumerFailure,
+	evalImageMetadata,
+	outputConsumerFailure,
+} from "./types";
 
 const STARTUP_CONTROL_TIMEOUT_MS = 5_000;
 
@@ -54,6 +68,8 @@ export interface KernelExecuteResult {
 	 * kernel died unexpectedly). When false, the kernel remains reusable.
 	 */
 	kernelKilled?: boolean;
+	/** Set when an output callback threw while this execution ran; the execution and the kernel carried on. */
+	consumerFailure?: EvalOutputConsumerFailure;
 }
 
 export interface KernelShutdownResult {
@@ -145,6 +161,7 @@ interface PendingExecution {
 	stdinRequested: boolean;
 	kernelKilled: boolean;
 	settled: boolean;
+	consumerFailure?: EvalOutputConsumerFailure;
 	escalationTimer?: NodeJS.Timeout;
 	finalize?: () => void;
 }
@@ -199,17 +216,26 @@ export function createAbortError(name: "AbortError" | "TimeoutError", message: s
 	return err;
 }
 
+// An abort reason is whatever the caller passed to `abort()`, so it can be a Proxy whose traps throw:
+// these read it only through isErrorValue() and describeError(), which never throw. DOMException's
+// prototype chain leads to Error.prototype, so it is described as an error and its `name` is read.
 export function throwIfAborted(signal: AbortSignal | undefined, fallbackReason: string): void {
 	if (!signal?.aborted) return;
 	const reason = signal.reason;
-	if (reason instanceof Error) throw reason;
+	// A rejected promise passed as the reason (even one made to look like an error) must be observed.
+	observeRejection(reason);
+	if (isErrorValue(reason)) throw reason;
 	throw createAbortError("AbortError", typeof reason === "string" ? reason : fallbackReason);
 }
 
 export function isTimeoutReason(reason: unknown): boolean {
-	if (reason instanceof DOMException) return reason.name === "TimeoutError";
-	if (reason instanceof Error) return reason.name === "TimeoutError";
-	return false;
+	return describeError(reason).name === "TimeoutError";
+}
+
+/** Whether a thrown value or abort reason is an abort or a timeout, by its error `name`. Never throws. */
+export function isAbortOrTimeout(value: unknown): boolean {
+	const { name } = describeError(value);
+	return name === "AbortError" || name === "TimeoutError";
 }
 
 /**
@@ -330,6 +356,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				admissionRejected: pending.admissionRejected,
 				reply: pending.reply,
 				kernelKilled: pending.kernelKilled,
+				consumerFailure: pending.consumerFailure,
 			});
 		};
 
@@ -362,7 +389,10 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 
 		const onAbort = () => {
 			pending.cancelled = true;
-			pending.timedOut = pending.timedOut || isTimeoutReason(options?.signal?.reason);
+			// Read the reason even when the timer already timed the cell out: describing it is what
+			// observes a rejected promise passed as the reason.
+			const reasonTimedOut = isTimeoutReason(options?.signal?.reason);
+			pending.timedOut = pending.timedOut || reasonTimedOut;
 			requestCancel();
 		};
 		const timeoutId =
@@ -408,7 +438,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				pending.kernelKilled = true;
 				pending.error = {
 					name: "TransportError",
-					value: err instanceof Error ? err.message : String(err),
+					value: describeError(err).message,
 					traceback: [],
 				};
 				finalize();
@@ -455,7 +485,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 			this.#proc.kill("SIGINT");
 		} catch (err) {
 			logger.warn(`Failed to interrupt ${this.#options.languageName.toLowerCase()} runner`, {
-				error: err instanceof Error ? err.message : String(err),
+				error: describeError(err).message,
 			});
 		}
 	}
@@ -547,16 +577,19 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		for (const entry of pending) {
 			if (entry.settled) continue;
 			entry.settled = true;
-			void entry.options?.onChunk?.(`[kernel] ${reason}\n`);
-			entry.resolve({
-				status: "error",
-				cancelled: true,
-				timedOut: entry.timedOut,
-				stdinRequested: entry.stdinRequested,
-				executionCount: entry.executionCount,
-				error: entry.error,
-				kernelKilled: entry.kernelKilled || kernelKilledDefault,
-			});
+			// Resolve once the exit message is delivered, so a callback that rejects it is reported.
+			void this.#deliver(entry, "onChunk", () => entry.options?.onChunk?.(`[kernel] ${reason}\n`)).then(() =>
+				entry.resolve({
+					status: "error",
+					cancelled: true,
+					timedOut: entry.timedOut,
+					stdinRequested: entry.stdinRequested,
+					executionCount: entry.executionCount,
+					error: entry.error,
+					kernelKilled: entry.kernelKilled || kernelKilledDefault,
+					consumerFailure: entry.consumerFailure,
+				}),
+			);
 		}
 	}
 
@@ -574,7 +607,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		const write = Promise.try(() => stdin.write(`${line}\n`));
 		void write.catch(() => {});
 		void Promise.all([write, Promise.try(() => stdin.flush())]).catch(err => {
-			logger.debug(`${this.#options.languageName} kernel stdin write failed`, { error: String(err) });
+			logger.debug(`${this.#options.languageName} kernel stdin write failed`, { error: describeError(err).message });
 			onWriteFailed?.(err);
 		});
 	}
@@ -592,7 +625,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 					} catch (err) {
 						logger.warn(`${this.#options.languageName} runner emitted invalid JSON`, {
 							line: line.slice(0, 200),
-							error: err instanceof Error ? err.message : String(err),
+							error: describeError(err).message,
 						});
 						continue;
 					}
@@ -603,7 +636,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				}
 			} catch (err) {
 				logger.warn(`${this.#options.languageName} kernel reader failed`, {
-					error: err instanceof Error ? err.message : String(err),
+					error: describeError(err).message,
 				});
 			}
 		};
@@ -636,6 +669,45 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		void loop();
 	}
 
+	/**
+	 * Hands one frame to an execution's output callback, awaiting it. A callback
+	 * that throws or rejects fails only its own execution, never the reader: the
+	 * first error is kept for that execution's result, its later frames still go
+	 * to the same callback, and the kernel keeps serving this and every later
+	 * request. The callback's result is awaited through `settled`, not `await`:
+	 * `await` ignores what a thenable's `then` returns, so an `async then()` that
+	 * throws would leave an unhandled rejection and stall the reader. Whether the
+	 * callback kept the frame is for the caller to say.
+	 */
+	async #deliver(
+		pending: PendingExecution,
+		callback: EvalOutputConsumerFailure["callback"],
+		deliver: () => Promise<void> | void,
+	): Promise<void> {
+		const record = (err: unknown): void => {
+			// Only the first failure is reported, but every one is described: describing observes the
+			// value and each field it reads, which may be or hold a rejected promise.
+			if (pending.consumerFailure) {
+				describeError(err);
+				return;
+			}
+			pending.consumerFailure = outputConsumerFailure(callback, err);
+			logger.warn(`${this.#options.languageName} execution output callback failed`, {
+				kernelId: this.id,
+				callback,
+				error: pending.consumerFailure.message,
+			});
+		};
+		let result: unknown;
+		try {
+			result = deliver();
+		} catch (err) {
+			record(err);
+			return;
+		}
+		await settled(result, record);
+	}
+
 	async #handleFrame(frame: Frame): Promise<void> {
 		const rid = frame.id;
 		if (!rid) return;
@@ -653,38 +725,38 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 			case "stdout":
 			case "stderr": {
 				const text = frame.data ?? "";
-				if (text && pending.options?.onChunk) {
-					await pending.options.onChunk(text);
-				}
+				const onChunk = pending.options?.onChunk;
+				if (text && onChunk) await this.#deliver(pending, "onChunk", () => onChunk(text));
 				return;
 			}
 			case "view": {
 				// The view's text already arrived through stdout; only the pretty view travels here.
-				if (typeof frame.text === "string" && isRecord(frame.view) && pending.options?.onDisplay) {
-					await pending.options.onDisplay({ type: "view", text: frame.text, view: frame.view });
+				const onDisplay = pending.options?.onDisplay;
+				if (typeof frame.text === "string" && isRecord(frame.view) && onDisplay) {
+					const output: EvalDisplayOutput = { type: "view", text: frame.text, view: frame.view };
+					await this.#deliver(pending, "onDisplay", () => onDisplay(output));
 				}
 				return;
 			}
 			case "image": {
 				const image = frame.image;
-				if (
-					isRecord(image) &&
-					typeof image.data === "string" &&
-					typeof image.mimeType === "string" &&
-					pending.options?.onDisplay
-				) {
-					await pending.options.onDisplay({
+				const onDisplay = pending.options?.onDisplay;
+				if (isRecord(image) && typeof image.data === "string" && typeof image.mimeType === "string" && onDisplay) {
+					const output: EvalDisplayOutput = {
 						type: "image",
 						data: image.data,
 						mimeType: image.mimeType,
 						...evalImageMetadata(image),
-					});
+					};
+					await this.#deliver(pending, "onDisplay", () => onDisplay(output));
 				}
 				return;
 			}
 			case "status": {
-				if (isRecord(frame.event) && typeof frame.event.op === "string" && pending.options?.onDisplay) {
-					await pending.options.onDisplay({ type: "status", event: frame.event });
+				const onDisplay = pending.options?.onDisplay;
+				if (isRecord(frame.event) && typeof frame.event.op === "string" && onDisplay) {
+					const output: EvalDisplayOutput = { type: "status", event: frame.event };
+					await this.#deliver(pending, "onDisplay", () => onDisplay(output));
 				}
 				return;
 			}
@@ -702,9 +774,8 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				};
 				const message =
 					traceback.length > 0 ? `${traceback.join("\n")}\n` : `${pending.error.name}: ${pending.error.value}\n`;
-				if (pending.options?.onChunk) {
-					await pending.options.onChunk(message);
-				}
+				const onChunk = pending.options?.onChunk;
+				if (onChunk) await this.#deliver(pending, "onChunk", () => onChunk(message));
 				return;
 			}
 			case "done": {

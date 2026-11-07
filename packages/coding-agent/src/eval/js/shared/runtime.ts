@@ -10,6 +10,7 @@ import * as vm from "node:vm";
 // Subpath imports only: the computer worker's readiness graph includes this runtime and must not
 // load pi_natives (verified under `--no-addons`); the `@oh-my-pi/pi-utils` barrel loads it eagerly.
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { errorClassOf } from "@oh-my-pi/pi-utils/thrown";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 
 import type { EvalTableColumn } from "@oh-my-pi/pi-tui/tools/eval";
@@ -557,7 +558,8 @@ export class JsRuntime {
 					// The engine's own compile SyntaxError has no usable cell position; surface Babel's.
 					// Sync cells run inside indirectEval, so a SyntaxError may also be a runtime one
 					// (e.g. JSON.parse); only diagnose when the source itself fails to compile as a script.
-					if (error instanceof SyntaxError && !compiles(wrapped.source)) {
+					// Not `instanceof`: a Proxy the cell threw can make that throw, or never end.
+					if (errorClassOf(error) === "SyntaxError" && !compiles(wrapped.source)) {
 						throw (await diagnoseCellSyntaxError(code)) ?? error;
 					}
 					throw error;

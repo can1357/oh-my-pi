@@ -23,7 +23,7 @@ import type {
 	Questions,
 	ScoreQuestion,
 } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { describeError, isRecord } from "@oh-my-pi/pi-utils";
 import { isEmbeddedImageContent } from "@oh-my-pi/pi-ai/images/shared";
 import type { LoadedImageInput } from "../utils/image-loading";
 import { loadImageAttachmentInput, loadImageInput, loadSvgImageInput } from "../utils/image-loading";
@@ -72,7 +72,7 @@ export async function loadEvalJudgmentImages(value: unknown, cwd: string): Promi
 					(await loadImageInput({ path: source, cwd, autoResize: false }));
 			} catch (error) {
 				throw invalidImage(
-					`images[${index}] path ${JSON.stringify(source)} could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+					`images[${index}] path ${JSON.stringify(source)} could not be loaded: ${describeError(error).message}`,
 				);
 			}
 			if (!loaded) throw invalidImage(`images[${index}] path ${JSON.stringify(source)} is not a supported image`);
@@ -91,9 +91,7 @@ export async function loadEvalJudgmentImages(value: unknown, cwd: string): Promi
 					autoResize: false,
 				});
 			} catch (error) {
-				throw invalidImage(
-					`images[${index}] attachment could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
-				);
+				throw invalidImage(`images[${index}] attachment could not be loaded: ${describeError(error).message}`);
 			}
 			if (!loaded)
 				throw invalidImage(

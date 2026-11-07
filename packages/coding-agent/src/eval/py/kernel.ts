@@ -9,7 +9,7 @@
  * timeout.
  */
 import * as path from "node:path";
-import { $env, $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, $flag, describeError, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
 import {
 	BaseKernel,
@@ -197,7 +197,7 @@ async function probePythonKernelAvailability(
 			...(result.timedOut ? { transient: true } : {}),
 		};
 	} catch (err) {
-		return { ok: false, reason: err instanceof Error ? err.message : String(err), transient: true };
+		return { ok: false, reason: describeError(err).message, transient: true };
 	}
 }
 

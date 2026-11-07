@@ -35,6 +35,10 @@
 
 - `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
 
+### Fixed
+
+- Fixed `toError()`, the fatal error handlers and cleanup failure reports throwing on a value whose conversion to text throws, such as `Object.create(null)` or a revoked `Proxy`, or on an error whose `code`, `message` or `stack` getter throws or is not text; the new `describeError()` describes any thrown value once, reading each property at most once, never throwing, and bounding its text ([#17629](https://github.com/can1357/oh-my-pi/pull/17629) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Added

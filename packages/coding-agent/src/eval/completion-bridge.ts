@@ -16,7 +16,7 @@ import { type } from "@oh-my-pi/omptype";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { describeError, isErrorValue, Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 
 import type { ModelRegistry } from "../config/model-registry";
@@ -428,7 +428,7 @@ async function executeCompletion(
 		break;
 	}
 	if (!completed || !response || !model || !attempt) {
-		if (lastError instanceof Error) throw lastError;
+		if (isErrorValue(lastError)) throw lastError;
 		throw new ToolError("completion() request failed.");
 	}
 
@@ -448,7 +448,7 @@ async function executeCompletion(
 
 function failAttempt(attempt: CompletionAttempt, error: unknown, signal: AbortSignal): void {
 	attempt.outcome = signal.aborted ? "cancelled" : "failed";
-	attempt.error = error instanceof Error ? error.message : String(error);
+	attempt.error = describeError(error).message;
 }
 
 function responseText(response: AssistantMessage, schema: Record<string, unknown> | undefined): string {
@@ -528,7 +528,7 @@ export function retainCompletionHandle(
 				entry.result = result;
 			},
 			error => {
-				entry.error = error instanceof Error ? error.message : String(error);
+				entry.error = describeError(error).message;
 			},
 		)
 		.finally(() => {
