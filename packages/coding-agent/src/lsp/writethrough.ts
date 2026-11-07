@@ -291,11 +291,6 @@ function mergeDiagnostics(
 	};
 }
 
-/** A late result that adds nothing: no diagnostics, and some server still unanswered. */
-function isUnverifiedOnly(diagnostics: FileDiagnosticsResult): boolean {
-	return diagnostics.messages.length === 0 && diagnostics.unreported !== undefined;
-}
-
 async function scheduleDeferredDiagnosticsFetch(args: {
 	dst: string;
 	cwd: string;
@@ -315,7 +310,9 @@ async function scheduleDeferredDiagnosticsFetch(args: {
 			expectedDocumentVersions: args.expectedDocumentVersions,
 			timeoutMs: args.waitMs,
 		});
-		if (args.signal.aborted || diagnostics === undefined || isUnverifiedOnly(diagnostics)) return;
+		// A result carrying only the servers that never reported is not "nothing":
+		// it says the file was left unchecked, which the model must hear (#15408).
+		if (args.signal.aborted || diagnostics === undefined) return;
 		args.callback(diagnostics);
 	} catch {
 		// Cancelled or LSP gave up; silently discard.
@@ -391,7 +388,9 @@ async function fetchDiagnosticsWithDeferral(args: {
 	// deferred sink (edit tool) applies its own dedup, so pass the raw result.
 	void fetchPromise
 		.then(diagnostics => {
-			if (diagnostics && !isUnverifiedOnly(diagnostics) && !deferred.signal.aborted) {
+			// An unverified-only result is still news: it says no server judged the
+			// file, so delivering it is what stops the silence reading as clean (#15408).
+			if (diagnostics && !deferred.signal.aborted) {
 				deferred.onDeferredDiagnostics(diagnostics);
 			}
 		})
