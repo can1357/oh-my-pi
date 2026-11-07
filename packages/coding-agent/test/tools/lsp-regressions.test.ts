@@ -550,6 +550,27 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("opens ERB templates in the bundled ruby-lsp as erb, which it would otherwise parse as Ruby", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-erb-language-id-");
+		const filePath = path.join(tempDir.path(), "_header.html.erb");
+		try {
+			await Bun.write(filePath, "<h1><%= title %></h1>\n");
+			const server = installHandshakeLsp();
+			const config = { servers: DEFAULTS as unknown as Record<string, ServerConfig> };
+			const rubyLsp = getServersForFile(config, filePath).find(([name]) => name === "ruby-lsp")?.[1];
+			if (!rubyLsp) throw new Error("The bundled ruby-lsp does not claim .erb");
+
+			const client = await lspClient.getOrCreateClient(rubyLsp, tempDir.path(), 1_000);
+			await lspClient.ensureFileOpen(client, filePath);
+
+			const didOpen = await server.waitFor(message => message.method === "textDocument/didOpen");
+			expect(didOpen.params).toMatchObject({ textDocument: { languageId: "erb" } });
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"rejects a FIFO before an LSP document open can block",
 		async () => {
