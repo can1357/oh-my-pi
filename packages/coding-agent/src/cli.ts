@@ -209,45 +209,41 @@ const TTS_WORKER_ARG = "__omp_worker_tts";
 const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
 const WORKFLOW_WORKER_ARG = "__omp_worker_workflow";
 
+/**
+ * Import a worker module that binds `self.onmessage` during its *async* dynamic
+ * import. Bun flushes the worker's initial message buffer when the entry
+ * module's top-level evaluation finishes, before this dispatch completes, so
+ * anything the parent posted right after spawning (a smoke ping, the first
+ * request) would be dropped. Park early events and replay them once the
+ * module's handler is live. Worker-thread entries using `parentPort` need the
+ * same sync-prefix buffering; the computer/tab/eval cases install that inbox
+ * in `runWorkerEntrypoint`.
+ */
+async function importWithParkedMessages(load: () => Promise<unknown>): Promise<void> {
+	const scope = globalThis as unknown as { onmessage: ((event: MessageEvent) => void) | null };
+	const pending: MessageEvent[] = [];
+	const buffer = (event: MessageEvent): void => {
+		pending.push(event);
+	};
+	scope.onmessage = buffer;
+	await load();
+	const handler = scope.onmessage;
+	if (handler && handler !== buffer) {
+		for (const event of pending) handler.call(scope, event);
+	}
+}
+
 async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === TINY_WORKER_ARG) {
 		await runTinyWorker();
 		return true;
 	}
 	if (arg === STATS_SYNC_WORKER_ARG) {
-		// The sync worker handles messages via `self.onmessage`, assigned during
-		// this *async* dynamic import. Bun flushes the worker's initial message
-		// buffer when the entry module's top-level evaluation finishes — before
-		// this dispatch completes — so anything the parent posted right after
-		// spawning (the smoke ping, the first parse request) would be dropped.
-		// Park early events and replay them once the module's handler is live.
-		// Worker-thread entries using `parentPort` need the same sync-prefix
-		// buffering; the computer/tab/eval cases install that inbox below.
-		const scope = globalThis as unknown as { onmessage: ((event: MessageEvent) => void) | null };
-		const pending: MessageEvent[] = [];
-		const buffer = (event: MessageEvent): void => {
-			pending.push(event);
-		};
-		scope.onmessage = buffer;
-		await import("@oh-my-pi/omp-stats/sync-worker");
-		const handler = scope.onmessage;
-		if (handler && handler !== buffer) {
-			for (const event of pending) handler.call(scope, event);
-		}
+		await importWithParkedMessages(() => import("@oh-my-pi/omp-stats/sync-worker"));
 		return true;
 	}
 	if (arg === WORKFLOW_WORKER_ARG) {
-		const scope = globalThis as unknown as { onmessage: ((event: MessageEvent) => void) | null };
-		const pending: MessageEvent[] = [];
-		const buffer = (event: MessageEvent): void => {
-			pending.push(event);
-		};
-		scope.onmessage = buffer;
-		await import("./workflow/worker");
-		const handler = scope.onmessage;
-		if (handler && handler !== buffer) {
-			for (const event of pending) handler.call(scope, event);
-		}
+		await importWithParkedMessages(() => import("./workflow/worker"));
 		return true;
 	}
 	// Bun flushes messages the parent posted before spawn once this entry's

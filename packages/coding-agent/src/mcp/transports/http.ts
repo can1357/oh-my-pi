@@ -49,6 +49,35 @@ import { type MCPFetchInit, mcpFetch, withoutHeader } from "./header-policy";
 const HTTP_SSE_CONNECT_TIMEOUT_MS = 1_000;
 const DEFAULT_SSE_RETRY_MS = 3_000;
 
+/**
+ * The error a failed JSON-RPC POST surfaces: a deadline becomes a timeout, a caller
+ * abort passes through, and a reset or EOF is never retried because the server may
+ * already have read the POST (only a refused connection proves it was not sent).
+ */
+function requestFailure(
+	error: unknown,
+	operation: MCPTimeoutOperation,
+	timeout: number,
+	stage: MCPFailureStage,
+	traceId: string | undefined,
+): unknown {
+	if (operation.isTimeoutAbort(error) || operation.timedOut()) {
+		return new MCPTransportError({
+			transport: "http",
+			stage,
+			failure: "timeout",
+			message: `Request timeout after ${timeout}ms`,
+			retryable: false,
+			traceId,
+			cause: error,
+		});
+	}
+	if (error instanceof Error && error.name === "AbortError") return error;
+	const normalized = normalizeMCPTransportError(error, { transport: "http", stage, traceId });
+	const lost = normalized.failure === "reset" || normalized.failure === "eof";
+	return stage === "decode" || lost ? nonRetryableMCPTransportError(normalized) : normalized;
+}
+
 /** 2026-07-28 era selected on a `streamable-http` endpoint. */
 type MCPHttpEra = "modern" | "legacy";
 
@@ -403,8 +432,8 @@ export class HttpTransport implements MCPTransport {
 				.filter(Boolean)
 				.join("; ");
 			const suffix = authHints ? ` [${authHints}]` : "";
-			if (response.status === 401 || response.status === 403 || !contentType.includes("application/json")) {
-				throw new MCPTransportError({
+			const statusError = () =>
+				new MCPTransportError({
 					transport: "http",
 					stage: "receive",
 					failure: "http_status",
@@ -413,6 +442,8 @@ export class HttpTransport implements MCPTransport {
 					code: response.status,
 					traceId: mcpTraceIdFromHeaders(response.headers),
 				});
+			if (response.status === 401 || response.status === 403 || !contentType.includes("application/json")) {
+				throw statusError();
 			}
 			let payload: unknown;
 			try {
@@ -428,15 +459,7 @@ export class HttpTransport implements MCPTransport {
 			) {
 				return { error: payload.error as unknown as JsonRpcError };
 			}
-			throw new MCPTransportError({
-				transport: "http",
-				stage: "receive",
-				failure: "http_status",
-				message: `HTTP ${response.status}${label === "server/discover" ? " probing server/discover" : ""}: ${text}${suffix}`,
-				retryable: response.status === 404 || response.status === 502 || response.status === 503,
-				code: response.status,
-				traceId: mcpTraceIdFromHeaders(response.headers),
-			});
+			throw statusError();
 		}
 		if (contentType.includes("text/event-stream") && response.body) {
 			for await (const event of readSseJson<JsonRpcMessage>(response.body, this.#operationSignal())) {
@@ -504,22 +527,7 @@ export class HttpTransport implements MCPTransport {
 			}
 			return payload.result as T;
 		} catch (error) {
-			if (operation.isTimeoutAbort(error) || operation.timedOut()) {
-				throw new MCPTransportError({
-					transport: "http",
-					stage,
-					failure: "timeout",
-					message: `Request timeout after ${timeout}ms`,
-					retryable: false,
-					traceId,
-					cause: error,
-				});
-			}
-			if (error instanceof Error && error.name === "AbortError") throw error;
-			const normalized = normalizeMCPTransportError(error, { transport: "http", stage, traceId });
-			throw normalized.failure === "reset" || normalized.failure === "eof"
-				? nonRetryableMCPTransportError(normalized)
-				: normalized;
+			throw requestFailure(error, operation, timeout, stage, traceId);
 		} finally {
 			this.#progressCallbacks.delete(id);
 			operation.clear();
@@ -945,22 +953,7 @@ export class HttpTransport implements MCPTransport {
 			return result.result as T;
 		} catch (error) {
 			if (error instanceof SSEResumeError) throw error;
-			if (operation.isTimeoutAbort(error) || operation.timedOut()) {
-				throw new MCPTransportError({
-					transport: "http",
-					stage,
-					failure: "timeout",
-					message: `Request timeout after ${timeout}ms`,
-					retryable: false,
-					traceId,
-					cause: error,
-				});
-			}
-			if (error instanceof Error && error.name === "AbortError") throw error;
-			const normalized = normalizeMCPTransportError(error, { transport: "http", stage, traceId });
-			// A reset or EOF can follow the server reading the POST; only a refused connection proves it was not sent.
-			const lost = normalized.failure === "reset" || normalized.failure === "eof";
-			throw stage === "decode" || lost ? nonRetryableMCPTransportError(normalized) : normalized;
+			throw requestFailure(error, operation, timeout, stage, traceId);
 		} finally {
 			this.#progressCallbacks.delete(id);
 			releaseCaller?.();

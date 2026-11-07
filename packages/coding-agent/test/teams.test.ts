@@ -165,7 +165,7 @@ describe("render helpers", () => {
 			expect(context).toContain(`Team workspace: ${path.join(root, "ws")}`);
 			expect(context).toContain("TASKS.md");
 			expect(context).toContain("owner: Scout");
-			expect(context).not.toContain("${member.handle}");
+			expect(context).not.toContain("{member.handle}");
 			expect(context).toContain("Teammates");
 			expect(context).toContain("Reviewer (reviewer - Проверка находок)");
 			expect(context).toContain("Общее пространство команды");

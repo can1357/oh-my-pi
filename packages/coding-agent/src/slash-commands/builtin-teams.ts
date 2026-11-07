@@ -14,6 +14,7 @@ import {
 	renderTeamMemberPrompt,
 	resolveTeamMembers,
 	sanitizeTeamHandle,
+	type TeamDefinition,
 } from "../task/teams";
 import { SpawnPendingError, spawnSubagentForSession } from "../task/spawn-subagent";
 import { releaseStructuredSubagentId, reserveStructuredSubagentId } from "../task/structured-subagent";
@@ -54,6 +55,19 @@ function membershipsFor(session: object): Map<string, Map<string, TeamMembership
 		teamMemberships.set(session, memberships);
 	}
 	return memberships;
+}
+
+/** One `<team>:` block per selected team, filled from that team's members recorded in this session. */
+async function teamReport(
+	session: object,
+	selected: readonly TeamDefinition[],
+	describe: (team: TeamDefinition, recorded: Map<string, TeamMembership> | undefined) => string[] | Promise<string[]>,
+): Promise<string> {
+	const lines: string[] = [];
+	for (const team of selected) {
+		lines.push(`${team.name}:`, ...(await describe(team, membershipsFor(session).get(team.name))));
+	}
+	return lines.join("\n");
 }
 
 export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -225,11 +239,8 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					return commandConsumed();
 				}
 				const registry = AgentRegistry.global();
-				const lines: string[] = [];
-				for (const team of selected) {
-					lines.push(`${team.name}:`);
-					const recorded = membershipsFor(runtime.session).get(team.name);
-					for (const member of team.members) {
+				const report = await teamReport(runtime.session, selected, (team, recorded) =>
+					team.members.map(member => {
 						const handle = sanitizeTeamHandle(member.handle);
 						const entry = recorded?.get(handle);
 						const ref = entry?.ref && registry.get(entry.id) === entry.ref ? entry.ref : undefined;
@@ -240,10 +251,10 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 								: entry && !entry.ref
 									? "pending"
 									: "not spawned";
-						lines.push(`  ${entry?.id ?? handle} - ${status} - agent: ${member.agent}`);
-					}
-				}
-				await runtime.output(lines.join("\n"));
+						return `  ${entry?.id ?? handle} - ${status} - agent: ${member.agent}`;
+					}),
+				);
+				await runtime.output(report);
 				return commandConsumed();
 			}
 			if (verb === "stop") {
@@ -258,14 +269,11 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				}
 				const registry = AgentRegistry.global();
 				const lifecycle = AgentLifecycleManager.global();
-				const lines: string[] = [];
-				for (const team of selected) {
-					lines.push(`${team.name}:`);
-					const recorded = membershipsFor(runtime.session).get(team.name);
+				const report = await teamReport(runtime.session, selected, async (team, recorded) => {
 					if (recorded === undefined || recorded.size === 0) {
-						lines.push("  nothing to stop (team not started in this session)");
-						continue;
+						return ["  nothing to stop (team not started in this session)"];
 					}
+					const lines: string[] = [];
 					for (const [handle, entry] of recorded) {
 						if (entry.failure !== undefined) {
 							lines.push(`  ${handle} - failed before registering: ${entry.failure}`);
@@ -289,8 +297,9 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						if (released) recorded.delete(handle);
 					}
 					if (recorded.size === 0) membershipsFor(runtime.session).delete(team.name);
-				}
-				await runtime.output(lines.join("\n"));
+					return lines;
+				});
+				await runtime.output(report);
 				return commandConsumed();
 			}
 			return usage(USAGE, runtime);
