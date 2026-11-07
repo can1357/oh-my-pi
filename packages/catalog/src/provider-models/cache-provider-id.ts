@@ -29,6 +29,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// Kimi Code's roster is plan-gated and discovery is authoritative, so a
 	// shared namespace would serve one plan's ids to another plan's credential.
 	"kimi-code": true,
+	"zed-hosted": true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -55,6 +56,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "https://opencode.ai/zen/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
+		case "zed-hosted":
+			return "https://cloud.zed.dev";
 		default:
 			return undefined;
 	}
@@ -238,6 +241,12 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// v3: rows cached before discovery read `ModelInfo.maxTokens` hold a
 			// 200K window on every model.
 			return "devin:models-v3";
+		case "zed-hosted": {
+			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			const apiKey = options.apiKey ?? "";
+			const scope = `${apiKey}\u0000${baseUrl}`;
+			return `zed-hosted:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
 		default:
 			return providerId;
 	}

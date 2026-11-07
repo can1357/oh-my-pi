@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as crypto from "node:crypto";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	buildZedProviderRequest,
 	clearZedLlmTokenCache,
@@ -17,11 +18,32 @@ import {
 	decryptZedAccessToken,
 	loginZedHostedHook,
 	parseZedCallbackPayload,
+	ZedHostedOAuthProvider,
 } from "../src/registry/oauth/zed-hosted";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { AssistantMessage, Context, FetchImpl, Model, UserMessage } from "../src/types";
 
 describe("zed-hosted provider and auth", () => {
+	it("returns structured JSON for OAuth getApiKey", () => {
+		const provider = new ZedHostedOAuthProvider();
+		const creds = {
+			access: "secret-token",
+			refresh: "",
+			expires: 12345,
+			accountId: "user-123",
+			email: "user@example.com",
+			orgId: "org-456",
+			authorizedAt: 0,
+		};
+		const apiKey = provider.getApiKey(creds);
+		const parsed = JSON.parse(apiKey);
+		expect(parsed).toEqual({
+			token: "secret-token",
+			accountId: "user-123",
+			email: "user@example.com",
+			orgId: "org-456",
+		});
+	});
+
 	it("generates native auth data with 2048-bit RSA keypair", () => {
 		const authData = createZedNativeAuthData({ nativeAppPort: 58443, systemId: "test-sys" });
 		expect(authData.authUrl).toContain("https://zed.dev/native_app_signin");
@@ -36,7 +58,6 @@ describe("zed-hosted provider and auth", () => {
 		const authData = createZedNativeAuthData();
 		const rawToken = "zed_secret_access_token_123456789";
 
-		// Encrypt with OAEP padding
 		const derBuffer = Buffer.from(authData.publicKey.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 		const encryptedBuffer = crypto.publicEncrypt(
 			{
@@ -52,7 +73,7 @@ describe("zed-hosted provider and auth", () => {
 
 		const decrypted = decryptZedAccessToken(encryptedBase64Url, authData.privateKeyPem);
 		expect(decrypted).toBe(rawToken);
-		// Also verify verifier encoding and decoding with decryptZedAccessToken
+
 		const decryptedViaVerifier = decryptZedAccessToken(encryptedBase64Url, authData.privateKeyVerifier);
 		expect(decryptedViaVerifier).toBe(rawToken);
 	});
@@ -71,9 +92,11 @@ describe("zed-hosted provider and auth", () => {
 		expect(payload3.encryptedAccessToken).toBe("enc_json");
 	});
 
-	it("unwraps zed NDJSON lines properly", () => {
+	it("unwraps zed NDJSON lines properly including stream_ended", () => {
 		expect(unwrapZedLine("data: [DONE]")).toEqual({ done: true });
 		expect(unwrapZedLine('data: {"status": "waiting"}')).toEqual({ status: { type: "waiting" } });
+		expect(unwrapZedLine('data: {"status": "stream_ended"}')).toEqual({ done: true });
+		expect(unwrapZedLine('data: {"status": {"stream_ended": true}}')).toEqual({ done: true });
 		expect(unwrapZedLine('data: {"status": {"failed": {"message": "out of quota"}}}')).toEqual({
 			status: { type: "failed", message: "out of quota" },
 		});
@@ -84,15 +107,15 @@ describe("zed-hosted provider and auth", () => {
 		});
 	});
 
-	it("normalizes provider names from model ids", () => {
-		expect(normalizeZedProvider(null, "claude-3-7-sonnet")).toBe("anthropic");
+	it("normalizes provider names from model ids to open_ai wire value", () => {
 		expect(normalizeZedProvider(null, "claude-opus-4-6")).toBe("anthropic");
-		expect(normalizeZedProvider(null, "gemini-2.5-pro")).toBe("google");
-		expect(normalizeZedProvider(null, "gpt-4o")).toBe("openai");
-		expect(normalizeZedProvider("google", "custom-model")).toBe("google");
+		expect(normalizeZedProvider(null, "gemini-3-1-pro")).toBe("google");
+		expect(normalizeZedProvider(null, "gpt-5-2")).toBe("open_ai");
+		expect(normalizeZedProvider("open_ai", "custom-model")).toBe("open_ai");
+		expect(normalizeZedProvider("openai", "gpt-6-luna")).toBe("open_ai");
 	});
 
-	it("builds provider requests correctly for anthropic, google, and openai", () => {
+	it("builds provider requests correctly for anthropic, google, and open_ai Responses dialect", () => {
 		const context: Context = {
 			systemPrompt: ["You are a helpful coding assistant."],
 			messages: [
@@ -102,7 +125,7 @@ describe("zed-hosted provider and auth", () => {
 					content: [{ type: "text", text: "Hi there!" }],
 					api: "zed-hosted",
 					provider: "zed-hosted",
-					model: "claude-3-7-sonnet",
+					model: "claude-opus-4-6",
 					usage: {
 						input: 0,
 						output: 0,
@@ -114,6 +137,14 @@ describe("zed-hosted provider and auth", () => {
 					stopReason: "stop",
 					timestamp: Date.now(),
 				} satisfies AssistantMessage,
+				{
+					role: "toolResult",
+					toolName: "test_tool",
+					toolCallId: "call_123",
+					content: [{ type: "text", text: "tool-output" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
 			],
 			tools: [
 				{
@@ -124,19 +155,21 @@ describe("zed-hosted provider and auth", () => {
 			],
 		};
 
-		const anthropicReq = buildZedProviderRequest("anthropic", "claude-3-7-sonnet", context);
-		expect(anthropicReq.model).toBe("claude-3-7-sonnet");
+		const anthropicReq = buildZedProviderRequest("anthropic", "claude-opus-4-6", context);
+		expect(anthropicReq.model).toBe("claude-opus-4-6");
 		expect(anthropicReq.system).toBe("You are a helpful coding assistant.");
 		expect(Array.isArray(anthropicReq.messages)).toBe(true);
-		expect(Array.isArray(anthropicReq.tools)).toBe(true);
 
-		const googleReq = buildZedProviderRequest("google", "gemini-2.5-pro", context);
+		const googleReq = buildZedProviderRequest("google", "gemini-3-1-pro", context);
 		expect(Array.isArray(googleReq.contents)).toBe(true);
-		expect(googleReq.systemInstruction).toBeDefined();
+		// Gemini toolResult should be role: "user"
+		const contents = googleReq.contents as Array<{ role: string }>;
+		const toolTurn = contents.find(c => c.role === "user");
+		expect(toolTurn).toBeDefined();
 
-		const openaiReq = buildZedProviderRequest("openai", "gpt-4o", context);
-		expect(Array.isArray(openaiReq.messages)).toBe(true);
-		expect(Array.isArray(openaiReq.tools)).toBe(true);
+		const openaiReq = buildZedProviderRequest("open_ai", "gpt-5-2", context);
+		expect(Array.isArray(openaiReq.input)).toBe(true);
+		expect(openaiReq.stream).toBe(true);
 	});
 
 	it("exchanges LLM tokens with caching", async () => {
@@ -166,18 +199,16 @@ describe("zed-hosted provider and auth", () => {
 		expect(token1).toBe("llm_tok_12345");
 		expect(postCount).toBe(1);
 
-		// Cache hit
 		const token2 = await fetchZedLlmToken(creds, { fetch: mockFetch });
 		expect(token2).toBe("llm_tok_12345");
 		expect(postCount).toBe(1);
 
-		// Force refresh
 		const token3 = await fetchZedLlmToken(creds, { forceRefresh: true, fetch: mockFetch });
 		expect(token3).toBe("llm_tok_12345");
 		expect(postCount).toBe(2);
 	});
 
-	it("streams zed completion events end-to-end", async () => {
+	it("streams zed completion events end-to-end for Anthropic and terminates on stream_ended", async () => {
 		clearZedLlmTokenCache();
 		const mockFetch: FetchImpl = async input => {
 			const url = String(input);
@@ -207,12 +238,11 @@ describe("zed-hosted provider and auth", () => {
 									usage: { output_tokens: 5 },
 								},
 							}),
-							"[DONE]",
+							JSON.stringify({ status: "stream_ended" }),
 						];
 						for (const l of lines) {
 							controller.enqueue(encoder.encode(`data: ${l}\n\n`));
 						}
-						controller.close();
 					},
 				});
 				return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
@@ -221,16 +251,16 @@ describe("zed-hosted provider and auth", () => {
 		};
 
 		const model = buildModel({
-			id: "claude-3-7-sonnet",
-			name: "Claude 3.7 Sonnet",
+			id: "claude-opus-4-6",
+			name: "Claude Opus 4.6",
 			api: "zed-hosted",
 			provider: "zed-hosted",
 			baseUrl: ZED_CLOUD_BASE_URL,
 			reasoning: true,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200000,
-			maxTokens: 8192,
+			contextWindow: 1000000,
+			maxTokens: 64000,
 		}) as Model<"zed-hosted">;
 
 		const context: Context = {
@@ -238,7 +268,7 @@ describe("zed-hosted provider and auth", () => {
 		};
 
 		const stream = streamZedHosted(model, context, {
-			apiKey: "usr_123:acc_456",
+			apiKey: JSON.stringify({ token: "acc_456", accountId: "usr_123" }),
 			organizationId: "org_1",
 			fetch: mockFetch,
 		});
@@ -260,7 +290,79 @@ describe("zed-hosted provider and auth", () => {
 		expect(result.usage.output).toBe(5);
 	});
 
-	it("completes loginZedHostedHook with simulated browser redirect", async () => {
+	it("streams zed completion events for OpenAI Responses dialect", async () => {
+		clearZedLlmTokenCache();
+		const mockFetch: FetchImpl = async input => {
+			const url = String(input);
+			if (url.includes(ZED_LLM_TOKEN_PATH)) {
+				return new Response(JSON.stringify({ token: "llm_mock_tok" }), { status: 200 });
+			}
+			if (url.includes(ZED_COMPLETIONS_PATH)) {
+				const stream = new ReadableStream({
+					start(controller) {
+						const encoder = new TextEncoder();
+						const lines = [
+							JSON.stringify({ event: { type: "response.output_text.delta", delta: "Hello from " } }),
+							JSON.stringify({ event: { type: "response.output_text.delta", delta: "GPT Responses!" } }),
+							JSON.stringify({
+								event: {
+									type: "response.completed",
+									response: { usage: { input_tokens: 15, output_tokens: 7 } },
+								},
+							}),
+							JSON.stringify({ status: "stream_ended" }),
+						];
+						for (const l of lines) {
+							controller.enqueue(encoder.encode(`data: ${l}\n\n`));
+						}
+					},
+				});
+				return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+			}
+			return new Response("Not found", { status: 404 });
+		};
+
+		const model = buildModel({
+			id: "gpt-5-2",
+			name: "GPT-5.2",
+			api: "zed-hosted",
+			provider: "zed-hosted",
+			baseUrl: ZED_CLOUD_BASE_URL,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 64000,
+		}) as Model<"zed-hosted">;
+
+		const context: Context = {
+			messages: [{ role: "user", content: "Hi GPT", timestamp: Date.now() } satisfies UserMessage],
+		};
+
+		const stream = streamZedHosted(model, context, {
+			apiKey: JSON.stringify({ token: "acc_456", accountId: "usr_123" }),
+			organizationId: "org_1",
+			fetch: mockFetch,
+		});
+
+		const events = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const result = await stream.result();
+		expect(result.role).toBe("assistant");
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.length).toBe(1);
+		expect(result.content[0].type).toBe("text");
+		if (result.content[0].type === "text") {
+			expect(result.content[0].text).toBe("Hello from GPT Responses!");
+		}
+		expect(result.usage.input).toBe(15);
+		expect(result.usage.output).toBe(7);
+	});
+
+	it("completes loginZedHostedHook with simulated browser redirect and validates token before stop", async () => {
 		const mockFetch: FetchImpl = async input => {
 			const url = String(input);
 			if (url.includes(ZED_USERS_ME_PATH)) {
@@ -293,7 +395,17 @@ describe("zed-hosted provider and auth", () => {
 					},
 					Buffer.from("secret_access_token_123", "utf8"),
 				);
-				void fetch(`http://127.0.0.1:${port}/?user_id=user_zed_1&access_token=${encrypted.toString("base64url")}`);
+
+				// Send an invalid forged request first; server must reject with 400 and continue listening
+				void fetch(`http://127.0.0.1:${port}/?user_id=forged&access_token=invalid_garbage`).then(res => {
+					expect(res.status).toBe(400);
+					// Now send the genuine decrypted callback
+					void fetch(
+						`http://127.0.0.1:${port}/?user_id=user_zed_1&access_token=${encrypted.toString("base64url")}`,
+					).then(res2 => {
+						expect(res2.status).toBe(200);
+					});
+				});
 			},
 		});
 

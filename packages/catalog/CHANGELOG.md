@@ -2,10 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Zed Hosted Models provider catalog rules, dynamic model discovery, and published rate cards ([#18432](https://github.com/can1357/oh-my-pi/pull/18432) by [@bilkis0987](https://github.com/bilkis0987))
+
 ### Fixed
-
-- Corrected Devin SWE-2 Flash and SWE-2 Fast token pricing, and SWE-2's promotional rates and end time ([#18332](https://github.com/can1357/oh-my-pi/pull/18332) by [@eggpeat](https://github.com/eggpeat))
-
 ## [18.18.0] - 2026-11-07
 
 ### Fixed

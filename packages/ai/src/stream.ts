@@ -39,7 +39,7 @@ import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
 import { streamSynthetic } from "./providers/synthetic";
-import type { ZedHostedOptions } from "./providers/zed-hosted";
+import { streamZedHosted, type ZedHostedOptions } from "./providers/zed-hosted";
 import {
 	streamAnthropic,
 	streamAppleFoundationModels,
@@ -54,7 +54,6 @@ import {
 	streamOpenAICodexResponses,
 	streamOpenAICompletions,
 	streamOpenAIResponses,
-	streamZedHosted,
 } from "./providers/register-builtins";
 import { getProviderDefinition } from "./registry";
 import type {

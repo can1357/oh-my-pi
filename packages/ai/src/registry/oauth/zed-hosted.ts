@@ -177,19 +177,32 @@ export async function loginZedHostedHook(ctrl: OAuthController): Promise<OAuthCr
 		const token = url.searchParams.get("access_token") || url.searchParams.get("accessToken");
 
 		if (userId && token) {
-			queueMicrotask(() => {
-				resolveCallback({ userId, encryptedAccessToken: token });
-			});
-			return new Response(
-				(templateHtml as unknown as string).replaceAll(
-					"__OAUTH_STATE__",
-					() => `window.__OAUTH_RESULT__ = { ok: true, provider: "zed-hosted" };`,
-				),
-				{
-					status: 200,
-					headers: { "Content-Type": "text/html; charset=utf-8" },
-				},
-			);
+			try {
+				decryptZedAccessToken(token, authData.privateKeyPem);
+				queueMicrotask(() => {
+					resolveCallback({ userId, encryptedAccessToken: token });
+				});
+				return new Response(
+					(templateHtml as unknown as string).replaceAll("__OAUTH_STATE__", () =>
+						JSON.stringify({ ok: true, provider: "zed-hosted" }),
+					),
+					{
+						status: 200,
+						headers: { "Content-Type": "text/html; charset=utf-8" },
+					},
+				);
+			} catch (err: unknown) {
+				const message = err instanceof Error ? err.message : String(err);
+				return new Response(
+					(templateHtml as unknown as string).replaceAll("__OAUTH_STATE__", () =>
+						JSON.stringify({ ok: false, error: message }),
+					),
+					{
+						status: 400,
+						headers: { "Content-Type": "text/html; charset=utf-8" },
+					},
+				);
+			}
 		}
 
 		return new Response("Not Found", { status: 404 });
@@ -281,6 +294,11 @@ export class ZedHostedOAuthProvider implements OAuthProviderInterface {
 	}
 
 	getApiKey(credentials: OAuthCredentials): string {
-		return credentials.access;
+		return JSON.stringify({
+			token: credentials.access,
+			accountId: credentials.accountId,
+			email: credentials.email,
+			orgId: credentials.orgId,
+		});
 	}
 }

@@ -10,6 +10,7 @@ import {
 	fetchFactoryDroidModels,
 } from "../discovery/factory-droid";
 import { fetchTypeSafeModels, TYPESAFE_DEFAULT_BASE_URL } from "../discovery/typesafe";
+import { fetchZedHostedModels } from "../discovery/zed-hosted";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
@@ -485,12 +486,9 @@ export function zedHostedModelManagerOptions(
 		...(apiKey
 			? {
 					fetchDynamicModels: async () => {
-						const { fetchZedHostedModels } = await zedHostedDiscovery();
 						return fetchZedHostedModels({ apiKey, baseUrl, fetch });
 					},
 				}
 			: undefined),
 	};
 }
-
-const zedHostedDiscovery = once(() => import("../discovery/zed-hosted"));

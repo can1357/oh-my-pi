@@ -87,6 +87,14 @@ export function resolveZedCredentials(source?: string | Record<string, unknown> 
 
 	if (typeof source === "string") {
 		const str = source.trim();
+		if (str.startsWith("{")) {
+			try {
+				const json: unknown = JSON.parse(str);
+				if (isRecord(json)) {
+					return resolveZedCredentials(json);
+				}
+			} catch {}
+		}
 		if (str.includes(":")) {
 			const idx = str.indexOf(":");
 			return { userId: str.slice(0, idx), accessToken: str.slice(idx + 1) };
@@ -103,7 +111,7 @@ export function resolveZedCredentials(source?: string | Record<string, unknown> 
 	}
 
 	const rec = source;
-	const accessToken = (rec.access || rec.accessToken || rec.apiKey) as string | undefined;
+	const accessToken = (rec.token || rec.access || rec.accessToken || rec.apiKey) as string | undefined;
 	const userId = (rec.accountId || rec.userId || rec.id) as string | undefined;
 	const organizationId = (rec.orgId || rec.organizationId || rec.defaultOrganizationId) as string | undefined;
 
@@ -239,17 +247,17 @@ export function shouldRefreshZedLlmToken(response: Response): boolean {
 	);
 }
 
-export type ZedProviderName = "anthropic" | "google" | "openai";
+export type ZedProviderName = "anthropic" | "google" | "open_ai";
 
 export function normalizeZedProvider(value: unknown, model: unknown): ZedProviderName {
 	const raw = String(value || "").toLowerCase();
 	if (raw === "anthropic" || raw === "claude") return "anthropic";
 	if (raw === "google" || raw === "gemini") return "google";
-	if (raw === "openai" || raw === "chatgpt" || raw === "gpt") return "openai";
+	if (raw === "open_ai" || raw === "openai" || raw === "chatgpt" || raw === "gpt") return "open_ai";
 	const m = String(model || "").toLowerCase();
 	if (m.includes("claude") || m.includes("anthropic")) return "anthropic";
 	if (m.includes("gemini")) return "google";
-	return "openai";
+	return "open_ai";
 }
 
 export type ZedLine = { done: true } | { status: Record<string, unknown> } | { event: unknown } | null;
@@ -265,9 +273,11 @@ export function unwrapZedLine(line: string): ZedLine {
 			if ("event" in parsed) return { event: parsed.event };
 			if ("status" in parsed) {
 				const status = parsed.status;
+				if (status === "stream_ended") return { done: true };
 				if (typeof status === "string") return { status: { type: status } };
 				if (isRecord(status)) {
 					const [key] = Object.keys(status);
+					if (key === "stream_ended") return { done: true };
 					if (key && isRecord(status[key])) {
 						return { status: { type: key, ...(status[key] as Record<string, unknown>) } };
 					}
@@ -429,8 +439,8 @@ function formatGoogleRequest(model: string, context: Context, options?: ZedHoste
 				response = { output: msg.content };
 			}
 			contents.push({
-				role: "function",
-				parts: [{ functionResponse: { name: msg.toolName, response } }],
+				role: "user",
+				parts: [{ functionResponse: { name: msg.toolName, response: { result: response } } }],
 			});
 		}
 	}
@@ -457,87 +467,96 @@ function formatGoogleRequest(model: string, context: Context, options?: ZedHoste
 		tools,
 	};
 }
-
-function formatOpenAIRequest(model: string, context: Context, options?: ZedHostedOptions): Record<string, unknown> {
-	const messages: Array<Record<string, unknown>> = [];
+function formatOpenAIResponsesRequest(
+	model: string,
+	context: Context,
+	options?: ZedHostedOptions,
+): Record<string, unknown> {
+	const input: Array<Record<string, unknown>> = [];
 	const systemText = normalizeSystemPrompts(context.systemPrompt).join("\n\n");
 	if (systemText) {
-		messages.push({ role: "developer", content: systemText });
+		input.push({ type: "message", role: "system", content: [{ type: "input_text", text: systemText }] });
 	}
 
 	for (const msg of context.messages) {
 		if (msg.role === "developer") {
-			messages.push({ role: "developer", content: extractMessageText(msg.content) });
+			input.push({
+				type: "message",
+				role: "system",
+				content: [{ type: "input_text", text: extractMessageText(msg.content) }],
+			});
 			continue;
 		}
 
 		if (msg.role === "user") {
 			if (typeof msg.content === "string") {
-				messages.push({ role: "user", content: msg.content });
+				input.push({
+					type: "message",
+					role: "user",
+					content: [{ type: "input_text", text: msg.content }],
+				});
 			} else {
 				const parts = msg.content.map(block => {
-					if (block.type === "text") return { type: "text", text: block.text };
+					if (block.type === "text") return { type: "input_text", text: block.text };
 					if (block.type === "image") {
 						const url = block.data.startsWith("data:")
 							? block.data
 							: `data:${block.mimeType || "image/png"};base64,${block.data}`;
-						return { type: "image_url", image_url: { url } };
+						return { type: "input_image", image_url: { url } };
 					}
 					return block;
 				});
-				messages.push({ role: "user", content: parts });
+				input.push({ type: "message", role: "user", content: parts });
 			}
 			continue;
 		}
 
 		if (msg.role === "assistant") {
-			let content = "";
-			const toolCalls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> = [];
+			const contentParts: unknown[] = [];
 			for (const block of msg.content) {
-				if (block.type === "text") content += block.text;
-				else if (block.type === "toolCall") {
-					toolCalls.push({
-						id: block.id,
-						type: "function",
-						function: {
-							name: block.name,
-							arguments:
-								typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments || {}),
-						},
+				if (block.type === "text") {
+					contentParts.push({ type: "output_text", text: block.text });
+				} else if (block.type === "toolCall") {
+					input.push({
+						type: "function_call",
+						call_id: block.id,
+						name: block.name,
+						arguments:
+							typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments || {}),
 					});
 				}
 			}
-			messages.push({
-				role: "assistant",
-				content: content || null,
-				tool_calls: toolCalls.length ? toolCalls : undefined,
-			});
+			if (contentParts.length) {
+				input.push({
+					type: "message",
+					role: "assistant",
+					content: contentParts,
+				});
+			}
 			continue;
 		}
 
 		if (msg.role === "toolResult") {
-			const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-			messages.push({
-				role: "tool",
-				tool_call_id: msg.toolCallId,
-				content,
+			const output = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+			input.push({
+				type: "function_call_output",
+				call_id: msg.toolCallId,
+				output,
 			});
 		}
 	}
 
 	const tools = context.tools?.map(tool => ({
 		type: "function",
-		function: {
-			name: tool.name,
-			description: tool.description,
-			parameters: tool.parameters,
-		},
+		name: tool.name,
+		description: tool.description,
+		parameters: tool.parameters,
 	}));
 
 	return {
 		model,
-		messages,
-		max_tokens: options?.maxTokens,
+		input,
+		max_output_tokens: options?.maxTokens,
 		temperature: options?.temperature,
 		stream: true,
 		tools: tools?.length ? tools : undefined,
@@ -552,7 +571,7 @@ export function buildZedProviderRequest(
 ): Record<string, unknown> {
 	if (provider === "anthropic") return formatAnthropicRequest(model, context, options);
 	if (provider === "google") return formatGoogleRequest(model, context, options);
-	return formatOpenAIRequest(model, context, options);
+	return formatOpenAIResponsesRequest(model, context, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -717,17 +736,24 @@ export const streamZedHosted: StreamFunction<"zed-hosted"> = (
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
 
+				let streamTerminated = false;
 				for (const line of lines) {
 					const parsed = unwrapZedLine(line);
 					if (!parsed) continue;
 
 					if ("done" in parsed && parsed.done) {
 						finishBlock();
+						streamTerminated = true;
 						break;
 					}
 
 					if ("status" in parsed) {
 						const status = parsed.status;
+						if (status.type === "stream_ended" || status.stream_ended !== undefined) {
+							finishBlock();
+							streamTerminated = true;
+							break;
+						}
 						const isFailed =
 							status.type === "failed" || status.failed !== undefined || status.error !== undefined;
 						if (isFailed) {
@@ -947,40 +973,12 @@ export const streamZedHosted: StreamFunction<"zed-hosted"> = (
 					// ─── 3. OpenAI Event Format ───
 					else {
 						const openaiEvent = event;
-						const choices = openaiEvent.choices as Array<Record<string, unknown>> | undefined;
-						const choice = choices?.[0];
-						const delta = choice?.delta as Record<string, unknown> | undefined;
+						const eventType = typeof openaiEvent.type === "string" ? openaiEvent.type : "";
 
-						if (delta) {
-							// Thinking / reasoning delta
-							const reasoning = (delta.reasoning_content || delta.reasoning || delta.thinking) as
-								| string
-								| undefined;
-							if (typeof reasoning === "string" && reasoning) {
-								if (currentBlock?.type !== "thinking") {
-									finishBlock();
-									const thinkingBlock: ThinkingContent = { type: "thinking", thinking: "" };
-									outputMessage.content.push(thinkingBlock);
-									currentBlockIndex = outputMessage.content.length - 1;
-									currentBlock = thinkingBlock;
-									stream.push({
-										type: "thinking_start",
-										contentIndex: currentBlockIndex,
-										partial: outputMessage,
-									});
-								}
-								currentBlock.thinking += reasoning;
-								stream.push({
-									type: "thinking_delta",
-									contentIndex: currentBlockIndex,
-									delta: reasoning,
-									partial: outputMessage,
-								});
-							}
-
-							// Text content delta
-							const text = delta.content as string | undefined;
-							if (typeof text === "string" && text) {
+						// Responses API stream format
+						if (eventType === "response.output_text.delta" || eventType === "response.text.delta") {
+							const text = (openaiEvent.delta as string) || (openaiEvent.text as string) || "";
+							if (text) {
 								if (currentBlock?.type !== "text") {
 									finishBlock();
 									const textBlock: TextContent = { type: "text", text: "" };
@@ -1001,59 +999,180 @@ export const streamZedHosted: StreamFunction<"zed-hosted"> = (
 									partial: outputMessage,
 								});
 							}
+						} else if (eventType === "response.reasoning_text.delta") {
+							const reasoning = (openaiEvent.delta as string) || "";
+							if (reasoning) {
+								if (currentBlock?.type !== "thinking") {
+									finishBlock();
+									const thinkingBlock: ThinkingContent = { type: "thinking", thinking: "" };
+									outputMessage.content.push(thinkingBlock);
+									currentBlockIndex = outputMessage.content.length - 1;
+									currentBlock = thinkingBlock;
+									stream.push({
+										type: "thinking_start",
+										contentIndex: currentBlockIndex,
+										partial: outputMessage,
+									});
+								}
+								currentBlock.thinking += reasoning;
+								stream.push({
+									type: "thinking_delta",
+									contentIndex: currentBlockIndex,
+									delta: reasoning,
+									partial: outputMessage,
+								});
+							}
+						} else if (eventType === "response.output_item.added") {
+							const item = openaiEvent.item as Record<string, unknown> | undefined;
+							if (item?.type === "function_call") {
+								finishBlock();
+								const toolCallBlock: ToolCall = {
+									type: "toolCall",
+									id: (item.call_id as string) || (item.id as string) || crypto.randomUUID(),
+									name: (item.name as string) || "",
+									arguments: {},
+									[kStreamingPartialJson]: "",
+								};
+								outputMessage.content.push(toolCallBlock);
+								currentBlockIndex = outputMessage.content.length - 1;
+								currentBlock = toolCallBlock;
+								stream.push({
+									type: "toolcall_start",
+									contentIndex: currentBlockIndex,
+									partial: outputMessage,
+								});
+							}
+						} else if (eventType === "response.function_call_arguments.delta") {
+							const part = (openaiEvent.delta as string) || "";
+							if (currentBlock?.type === "toolCall") {
+								currentBlock[kStreamingPartialJson] = (currentBlock[kStreamingPartialJson] || "") + part;
+								stream.push({
+									type: "toolcall_delta",
+									contentIndex: currentBlockIndex,
+									delta: part,
+									partial: outputMessage,
+								});
+							}
+						} else if (eventType === "response.output_item.done") {
+							finishBlock();
+						} else if (eventType === "response.completed" || eventType === "response.done") {
+							const resp = openaiEvent.response as Record<string, unknown> | undefined;
+							const usage = (resp?.usage || openaiEvent.usage) as Record<string, number> | undefined;
+							if (usage) {
+								outputMessage.usage.input =
+									usage.input_tokens || usage.prompt_tokens || outputMessage.usage.input;
+								outputMessage.usage.output =
+									usage.output_tokens || usage.completion_tokens || outputMessage.usage.output;
+							}
+							finishBlock();
+						} else {
+							// Chat Completions fallback
+							const choices = openaiEvent.choices as Array<Record<string, unknown>> | undefined;
+							const choice = choices?.[0];
+							const delta = choice?.delta as Record<string, unknown> | undefined;
 
-							// Tool calls delta
-							const toolCalls = delta.tool_calls as Array<Record<string, unknown>> | undefined;
-							if (Array.isArray(toolCalls)) {
-								for (const tc of toolCalls) {
-									const fn = tc.function as { name?: string; arguments?: string } | undefined;
-									if (currentBlock?.type !== "toolCall" || (tc.id && currentBlock.id !== tc.id)) {
+							if (delta) {
+								const reasoning = (delta.reasoning_content || delta.reasoning || delta.thinking) as
+									| string
+									| undefined;
+								if (typeof reasoning === "string" && reasoning) {
+									if (currentBlock?.type !== "thinking") {
 										finishBlock();
-										const toolCallBlock: ToolCall = {
-											type: "toolCall",
-											id: (tc.id as string) || crypto.randomUUID(),
-											name: fn?.name || "",
-											arguments: {},
-											[kStreamingPartialJson]: "",
-										};
-										outputMessage.content.push(toolCallBlock);
+										const thinkingBlock: ThinkingContent = { type: "thinking", thinking: "" };
+										outputMessage.content.push(thinkingBlock);
 										currentBlockIndex = outputMessage.content.length - 1;
-										currentBlock = toolCallBlock;
+										currentBlock = thinkingBlock;
 										stream.push({
-											type: "toolcall_start",
+											type: "thinking_start",
 											contentIndex: currentBlockIndex,
 											partial: outputMessage,
 										});
 									}
-									if (fn?.name && !currentBlock.name) currentBlock.name = fn.name;
-									if (fn?.arguments) {
-										currentBlock[kStreamingPartialJson] =
-											(currentBlock[kStreamingPartialJson] || "") + fn.arguments;
+									currentBlock.thinking += reasoning;
+									stream.push({
+										type: "thinking_delta",
+										contentIndex: currentBlockIndex,
+										delta: reasoning,
+										partial: outputMessage,
+									});
+								}
+
+								const text = delta.content as string | undefined;
+								if (typeof text === "string" && text) {
+									if (currentBlock?.type !== "text") {
+										finishBlock();
+										const textBlock: TextContent = { type: "text", text: "" };
+										outputMessage.content.push(textBlock);
+										currentBlockIndex = outputMessage.content.length - 1;
+										currentBlock = textBlock;
 										stream.push({
-											type: "toolcall_delta",
+											type: "text_start",
 											contentIndex: currentBlockIndex,
-											delta: fn.arguments,
 											partial: outputMessage,
 										});
+									}
+									currentBlock.text += text;
+									stream.push({
+										type: "text_delta",
+										contentIndex: currentBlockIndex,
+										delta: text,
+										partial: outputMessage,
+									});
+								}
+
+								const toolCalls = delta.tool_calls as Array<Record<string, unknown>> | undefined;
+								if (Array.isArray(toolCalls)) {
+									for (const tc of toolCalls) {
+										const fn = tc.function as { name?: string; arguments?: string } | undefined;
+										if (currentBlock?.type !== "toolCall" || (tc.id && currentBlock.id !== tc.id)) {
+											finishBlock();
+											const toolCallBlock: ToolCall = {
+												type: "toolCall",
+												id: (tc.id as string) || crypto.randomUUID(),
+												name: fn?.name || "",
+												arguments: {},
+												[kStreamingPartialJson]: "",
+											};
+											outputMessage.content.push(toolCallBlock);
+											currentBlockIndex = outputMessage.content.length - 1;
+											currentBlock = toolCallBlock;
+											stream.push({
+												type: "toolcall_start",
+												contentIndex: currentBlockIndex,
+												partial: outputMessage,
+											});
+										}
+										if (fn?.name && !currentBlock.name) currentBlock.name = fn.name;
+										if (fn?.arguments) {
+											currentBlock[kStreamingPartialJson] =
+												(currentBlock[kStreamingPartialJson] || "") + fn.arguments;
+											stream.push({
+												type: "toolcall_delta",
+												contentIndex: currentBlockIndex,
+												delta: fn.arguments,
+												partial: outputMessage,
+											});
+										}
 									}
 								}
 							}
-						}
 
-						if (choice?.finish_reason) {
-							const fr = String(choice.finish_reason);
-							if (fr === "tool_calls") outputMessage.stopReason = "toolUse";
-							else if (fr === "length") outputMessage.stopReason = "length";
-							else outputMessage.stopReason = "stop";
-						}
+							if (choice?.finish_reason) {
+								const fr = String(choice.finish_reason);
+								if (fr === "tool_calls") outputMessage.stopReason = "toolUse";
+								else if (fr === "length") outputMessage.stopReason = "length";
+								else outputMessage.stopReason = "stop";
+							}
 
-						const usage = openaiEvent.usage as Record<string, number> | undefined;
-						if (usage) {
-							outputMessage.usage.input = usage.prompt_tokens || outputMessage.usage.input;
-							outputMessage.usage.output = usage.completion_tokens || outputMessage.usage.output;
+							const usage = openaiEvent.usage as Record<string, number> | undefined;
+							if (usage) {
+								outputMessage.usage.input = usage.prompt_tokens || outputMessage.usage.input;
+								outputMessage.usage.output = usage.completion_tokens || outputMessage.usage.output;
+							}
 						}
 					}
 				}
+				if (streamTerminated) break;
 			}
 
 			finishBlock();

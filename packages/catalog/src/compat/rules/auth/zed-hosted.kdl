@@ -1,5 +1,6 @@
 auth "zed-hosted" {
 	name "Zed Hosted (Claude, Gemini, GPT)"
+	api-key-format "structured"
 	login "custom" hook="zed-hosted"
 	refresh "none"
 }
