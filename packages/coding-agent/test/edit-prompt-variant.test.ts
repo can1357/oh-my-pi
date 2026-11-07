@@ -16,6 +16,17 @@ describe("resolveEditToolDescription", () => {
 		expect(compact.length).toBeLessThan(editDescription("hashline").length);
 	});
 
+	test("names every snapshot source in the compact rendering", () => {
+		const compact = resolveEditToolDescription("hashline", { editPromptVariant: "compact" });
+		// A `write` hands the model a tag of its own and numbers the lines it
+		// wrote. A prompt that named only `read`/`search` would tell the model
+		// to discard that tag and read the file again.
+		const sources = compact.split("\n").find(line => line.includes("`read`")) ?? "";
+		expect(sources).toContain("`read`");
+		expect(sources).toContain("`search`");
+		expect(sources).toContain("`write`");
+	});
+
 	test("keeps the full prompt for models without the compact policy", () => {
 		const full = resolveEditToolDescription("hashline", undefined);
 		expect(full).toBe(editDescription("hashline").trimEnd());
