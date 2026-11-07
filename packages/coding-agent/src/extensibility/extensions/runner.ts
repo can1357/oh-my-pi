@@ -19,6 +19,7 @@ import type {
 	ProviderResponseMetadata,
 	TextContent,
 } from "@oh-my-pi/pi-ai";
+import { withUsageAdmission } from "@oh-my-pi/pi-ai";
 import {
 	clearContextHistoryIndex,
 	getContextHistoryIndex,
@@ -1692,7 +1693,7 @@ export class ExtensionRunner {
 	 * invoked directly by their controllers and route through here instead.
 	 */
 	runScoped<T>(fn: () => T): T {
-		return withActiveSettings(this.settings, fn);
+		return withUsageAdmission(this.modelRegistry.authStorage.governor, () => withActiveSettings(this.settings, fn));
 	}
 
 	/**
@@ -1884,7 +1885,7 @@ export class ExtensionRunner {
 		let handlerResult: R | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
 		try {
-			handlerResult = await withActiveSettings(this.settings, () =>
+			handlerResult = await this.runScoped(() =>
 				raceHandlerWithTimeout(
 					async (handlerSignal, budget) => {
 						registrationScope.signal = handlerSignal;

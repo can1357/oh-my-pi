@@ -64,6 +64,8 @@ export interface UsageLimit {
 	id: string;
 	/** Human label for display. */
 	label: string;
+	/** Time this limit was last independently observed, in epoch milliseconds. */
+	observedAt?: number;
 	scope: UsageScope;
 	window?: UsageWindow;
 	amount: UsageAmount;
@@ -119,6 +121,8 @@ export interface UsageResetCredit extends UsageResetCreditDetail {
  * separate, provider-specific action; this is the read-only state for display.
  */
 export interface UsageResetCredits {
+	/** Time the reset inventory was independently observed, in epoch milliseconds. */
+	observedAt?: number;
 	/** Number of banked resets, including grants that are not currently usable. */
 	availableCount: number;
 	/** Number of resets the provider says can be redeemed now. */
@@ -321,6 +325,7 @@ export const usageLimitSchema = type({
 	id: "string",
 	label: "string",
 	scope: usageScopeSchema,
+	"observedAt?": "number",
 	"window?": usageWindowSchema,
 	amount: usageAmountSchema,
 	"status?": usageStatusSchema,
@@ -343,6 +348,7 @@ export const usageResetCreditDetailSchema = type({
 });
 
 export const usageResetCreditsSchema = type({
+	"observedAt?": "number",
 	availableCount: "number",
 	"redeemableCount?": "number",
 	"nextCreditId?": "string",
@@ -421,6 +427,15 @@ export interface UsageProvider {
 	id: Provider;
 	/** Bump to retire cached reports of an older shape during last-good retention. */
 	cacheVersion?: number;
+	/**
+	 * Limit IDs that establish included allowance for this request. Undefined means
+	 * unknown; an empty list means no included capacity was established.
+	 */
+	governorAllowance?(
+		params: UsageFetchParams,
+		report: UsageReport,
+		context: CredentialRankingContext,
+	): readonly string[] | undefined;
 	fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null>;
 	/** Parse provider rate-limit response headers (lowercased keys) into a usage report, if supported. */
 	parseRateLimitHeaders?(

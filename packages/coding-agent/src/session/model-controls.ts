@@ -159,6 +159,7 @@ export interface ModelControlsHost {
 	resolveActiveEditMode(): EditModeSetting;
 	syncAfterModelChange(previousEditMode: EditModeSetting): Promise<void>;
 	setModelWithProviderSessionReset(model: Model, selection?: "explicit" | "automatic"): Promise<void>;
+	setRoutingRole?(role: string | undefined): void;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
 	magicKeywordEnabled(keyword: MagicKeywordId): boolean;
@@ -322,6 +323,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel);
+		this.#host.setRoutingRole?.(role);
 		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
 		if (options?.persist) {
 			this.#host.settings.setModelRole(

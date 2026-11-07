@@ -537,6 +537,22 @@ export function resolveRetryFallbackChainKey(
 }
 
 /**
+ * Under the governor, a named role owns its authorization envelope even when
+ * another role or a model-specific key happens to match the same model.
+ * Returning a role with no chain deliberately yields no fallback candidates.
+ * Unattributed requests retain the legacy lookup.
+ */
+export function resolveAuthorizedRetryFallbackChainKey(
+	context: RetryFallbackResolutionContext,
+	currentSelector: string,
+	currentModel?: Model | null,
+	roleHint?: string,
+): string | undefined {
+	if (roleHint && context.getModelRole(roleHint)) return roleHint;
+	return resolveRetryFallbackChainKey(context, currentSelector, currentModel, roleHint);
+}
+
+/**
  * Parse one configured chain entry. A `provider/*` entry keeps the failing
  * model's id and swaps the provider (google-antigravity/x → google/x); an
  * id-prefixed `provider/prefix/*` entry re-prefixes the failing model's

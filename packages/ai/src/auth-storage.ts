@@ -57,6 +57,9 @@ import { UsageService } from "./auth/usage";
 import { DEFAULT_USAGE_REQUEST_TIMEOUT_MS, UsageCache } from "./auth/usage-cache";
 import type { UsageLogger } from "./usage";
 import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
+import { CredentialGovernor } from "./auth/governor";
+import { clearUsageAdmission } from "./usage-governor/admission";
+import { DISABLED_USAGE_GOVERNOR_CONFIG, type GovernorApi } from "./usage-governor/types";
 
 export {
 	isSameOAuthAccount,
@@ -112,6 +115,8 @@ export interface AuthStorageBackend {
 	readonly resets: ResetsApi;
 	/** Persisted rate-limit blocks (auth-broker server seam). */
 	readonly blocks: BlocksApi;
+	/** Usage governor: admission of governed sends and read-only status. */
+	readonly governor: GovernorApi;
 	/** See {@link AuthStorage.setAccountPolicies}. */
 	setAccountPolicies(config: AuthAccountPolicyConfig): void;
 	/** See {@link AuthStorage.replaceStore}. */
@@ -184,6 +189,11 @@ export class AuthStorage {
 		return this.#backend.blocks;
 	}
 
+	/** Usage governor: admission of governed sends and read-only status. */
+	get governor(): GovernorApi {
+		return this.#backend.governor;
+	}
+
 	/**
 	 * Apply new account routing policy (live `auth.accountPolicies` /
 	 * `retry.usageReservePct` change). Throws a configuration error, leaving the
@@ -220,6 +230,7 @@ export class AuthStorage {
 	 * keeps the store open until it has saved the rotated token.
 	 */
 	close(): void {
+		clearUsageAdmission(this.#backend.governor);
 		this.#backend.close();
 	}
 
@@ -247,9 +258,35 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 	readonly #policies: AccountPolicies;
 	readonly #restrictions: SessionRestrictions = new Map();
 	#modules: AuthStorageModules;
+	readonly #governor: CredentialGovernor;
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions) {
 		this.#options = options;
+		this.#governor = new CredentialGovernor({
+			dbPath: options.governor?.dbPath,
+			config: options.governor?.config ?? DISABLED_USAGE_GOVERNOR_CONFIG,
+			source: () => ({
+				pool: this.#modules.pool,
+				affinity: this.#modules.sessions,
+				blocks: this.#modules.blocks,
+				usage: this.#modules.usage,
+				policies: this.#policies,
+				strategies: options.rankingStrategyResolver ?? defaultRankingStrategy,
+				permitsOAuthFingerprint: provider =>
+					this.#modules.keys.source(provider, { env: "aliases" })?.kind === "oauth",
+				permitsRoute: (binding, request) => {
+					const sessionId = request.context?.sessionId;
+					if (!sessionId) return false;
+					const { provider, modelId } = binding.target;
+					const row = this.#modules.pool.entries(provider).find(entry => entry.id === binding.credentialId);
+					return (
+						row !== undefined &&
+						this.#modules.keys.permitsRouteSnapshot(provider, sessionId, row.id) &&
+						this.#modules.blocks.isBlockedSnapshot(provider, row.credential.type, row.id, modelId) === false
+					);
+				},
+			}),
+		});
 		this.#overrides = new KeyOverrides(options.configValueResolver);
 		this.#policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
 		this.#modules = this.#compose(store, options.sourceLabel);
@@ -282,6 +319,10 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 	}
 	get blocks(): BlocksApi {
 		return this.#modules.blocks;
+	}
+
+	get governor(): GovernorApi {
+		return this.#governor;
 	}
 
 	setAccountPolicies(config: AuthAccountPolicyConfig): void {
@@ -361,6 +402,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			usage,
 			refresher,
 			strategies,
+			pacing: this.#governor,
 		});
 		const limits = new RateLimits({ store, pool, overrides, blocks, affinity, usage, strategies });
 		const keys = new KeyCascade({
@@ -400,6 +442,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 
 	close(): void {
 		retire(this.#modules);
+		this.#governor.close();
 	}
 }
 

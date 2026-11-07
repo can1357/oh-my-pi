@@ -588,6 +588,7 @@ export function parseCodexRateLimitHeaders(
 	const verdict = requestSucceeded ? { allowed: true, limitReached: false } : {};
 	if (primary) limits.push(buildUsageLimit({ key: "primary", window: primary, ...verdict, nowMs: now }));
 	if (secondary) limits.push(buildUsageLimit({ key: "secondary", window: secondary, ...verdict, nowMs: now }));
+	for (const limit of limits) limit.observedAt = now;
 	return {
 		provider: "openai-codex",
 		fetchedAt: now,
@@ -614,6 +615,13 @@ function buildPlanMeterState(
 export const openaiCodexUsageProvider: UsageProvider = {
 	id: "openai-codex",
 	// v1: credit-billed seats gained the spend-cap limit; retire their limitless reports.
+	governorAllowance(_params, report, context) {
+		// An absent credits block is not evidence that paid overage is disabled.
+		if (report.metadata?.governorNoPaidOverage !== true || context.modelId === undefined) return undefined;
+		const limits = scopeCodexLimitsForRequest(report, isCodexSparkRequest(context));
+		if (limits.length === 0 || limits.some(limit => limit.id === CODEX_SPEND_CAP_LIMIT_ID)) return undefined;
+		return limits.map(limit => limit.id);
+	},
 	cacheVersion: 1,
 	supports(params: UsageFetchParams): boolean {
 		return params.provider === "openai-codex" && params.credential.type === "oauth";
@@ -751,7 +759,9 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			limits.push(buildSpendCapLimit(parsed.spendCap, accountId, nowMs));
 		}
 
+		for (const limit of limits) limit.observedAt = nowMs;
 		const resetCredits = parseResetCredits(payload);
+		if (resetCredits) resetCredits.observedAt = nowMs;
 		if (resetCredits && resetCredits.availableCount > 0) {
 			try {
 				const list = await listCodexResetCredits({
@@ -787,6 +797,11 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			limits,
 			...(resetCredits ? { resetCredits } : {}),
 			metadata: {
+				governorNoPaidOverage:
+					isRecord(payload) &&
+					isRecord(payload.credits) &&
+					payload.credits.has_credits === false &&
+					payload.credits.unlimited === false,
 				planType,
 				...buildPlanMeterState(parsed?.allowed, parsed?.limitReached, creditOverage),
 				email,

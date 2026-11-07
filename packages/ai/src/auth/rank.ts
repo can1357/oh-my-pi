@@ -20,6 +20,8 @@ export type UsageCandidate<T extends AuthCredential> = {
 	inReserve?: boolean;
 	/** True only when reserve ranking had a usable remaining-fraction measurement. */
 	reserveMeasured?: boolean;
+	/** Governor admissible time for an account paced into the future. */
+	pacedUntil?: number;
 	/**
 	 * Present after ranking: the account's renewable allowance for this request is
 	 * spent, so if it still serves it draws on paid overage such as Codex credits.
@@ -104,6 +106,12 @@ function compareUsageRankedCandidatePriority(
 	// allowance yields to any sibling whose renewable allowance is left (#13889).
 	if (left.allowanceSpent !== right.allowanceSpent) return left.allowanceSpent ? 1 : -1;
 	if (left.inReserve !== right.inReserve) return left.inReserve ? 1 : -1;
+	// Within the reserve group, the account that clears its governor pacing soonest goes first, so a forced wait is the shortest available.
+	if (left.inReserve && right.inReserve) {
+		const leftPacedUntil = left.pacedUntil ?? 0;
+		const rightPacedUntil = right.pacedUntil ?? 0;
+		if (leftPacedUntil !== rightPacedUntil) return leftPacedUntil - rightPacedUntil;
+	}
 	if (left.hasPriorityBoost !== right.hasPriorityBoost) return left.hasPriorityBoost ? -1 : 1;
 	// Short-window guard: candidates whose primary (e.g. 5h) window is
 	// nearly exhausted rank behind cool ones regardless of drain urgency —
@@ -157,6 +165,7 @@ export function orderUsageRankedCandidates<T extends AuthCredential>(
 		usageChecked: candidate.usageChecked,
 		inReserve: candidate.inReserve,
 		reserveMeasured: candidate.reserveMeasured,
+		pacedUntil: candidate.pacedUntil,
 		allowanceSpent: candidate.allowanceSpent,
 		accountPriority: candidate.accountPriority,
 		reclaimReady: candidate.reclaimReady,

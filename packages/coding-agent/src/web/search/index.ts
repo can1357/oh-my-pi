@@ -8,6 +8,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
+import { withUsageAdmission } from "@oh-my-pi/pi-ai";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatAge, formatCount, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../config/model-registry";
@@ -197,173 +198,181 @@ async function executeSearch(
 	params: SearchQueryParams,
 	options: ExecuteSearchOptions,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchResultDetails }> {
-	const { authStorage, sessionId, signal } = options;
-	const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings });
-	const pool = roleCandidatePool("web", settings, modelRegistry);
-	const candidates = params.model
-		? (() => {
-				const resolved = resolveModelRoleValue(params.model, pool, { settings });
-				return resolved.model
-					? [{ model: resolved.model, explicit: true, thinkingLevel: resolved.thinkingLevel }]
-					: [];
-			})()
-		: resolveRoleChain("web", settings, pool);
-	const parsedQuery = parseSearchQuery(params.query);
-	let expanded = rankXAIProviders(
-		candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool)),
-		candidate => candidate.model,
-		settings,
-	);
-	// Only xAI reaches X posts; X-only queries try it first even when the role prefers another engine.
-	if (!params.model && targetsX(parsedQuery)) expanded = preferXAI(expanded, modelRegistry);
+	return withUsageAdmission(options.modelRegistry?.authStorage.governor ?? options.authStorage.governor, async () => {
+		const { authStorage, sessionId, signal } = options;
+		const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings });
+		const pool = roleCandidatePool("web", settings, modelRegistry);
+		const candidates = params.model
+			? (() => {
+					const resolved = resolveModelRoleValue(params.model, pool, { settings });
+					return resolved.model
+						? [{ model: resolved.model, explicit: true, thinkingLevel: resolved.thinkingLevel }]
+						: [];
+				})()
+			: resolveRoleChain("web", settings, pool);
+		const parsedQuery = parseSearchQuery(params.query);
+		let expanded = rankXAIProviders(
+			candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool)),
+			candidate => candidate.model,
+			settings,
+		);
+		// Only xAI reaches X posts; X-only queries try it first even when the role prefers another engine.
+		if (!params.model && targetsX(parsedQuery)) expanded = preferXAI(expanded, modelRegistry);
 
-	// Invariant across candidates; resolve once before walking the role chain.
-	let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
-	try {
-		antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
-	} catch {
-		antigravityEndpointMode = undefined;
-	}
-
-	let timeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
-	try {
-		const configuredSeconds = cfgProvidersWebSearchTimeoutSeconds.get(settings);
-		if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
-			timeoutMs = Math.ceil(Math.min(configuredSeconds, MAX_WEB_SEARCH_TIMEOUT_SECONDS) * 1_000);
-		}
-	} catch {
-		// Preserve the default for one-shot callers that do not initialize Settings.
-	}
-
-	const failures: SearchProviderFailure[] = [];
-	let availableProviderCount = 0;
-	let lastProvider: { id: string; label: string } | undefined;
-	let failedResponseProvider: SearchResponse["provider"] = "none";
-	for (const candidate of expanded) {
-		let provider: SearchProvider | undefined;
-		const candidateMeta = { id: candidate.model.id, label: candidate.model.name };
-		lastProvider = candidateMeta;
+		// Invariant across candidates; resolve once before walking the role chain.
+		let antigravityEndpointMode: "auto" | "production" | "sandbox" | undefined;
 		try {
-			const model = candidate.model;
-			if (isHostedPlaceholder(model)) {
-				if (!candidate.explicit) continue;
-				throw new Error("The session model has no web search grounding.");
-			}
-			if (modelKind(model) === "search") {
-				provider = await getSearchProvider(model.id);
-			} else if (model.webSearch) {
-				provider = await getGroundedSearchProvider(model.webSearch);
-			} else {
-				throw new Error(`Model ${model.provider}/${model.id} does not support web search`);
-			}
-			lastProvider = provider;
-			const available = candidate.explicit
-				? await provider.isExplicitlyAvailable(authStorage, model)
-				: await provider.isAvailable(authStorage, model);
-			if (!available && !candidate.explicit) continue;
-			if (!available && candidate.explicit) {
-				throw new SearchProviderError(
-					provider.id,
-					`${provider.label} web search is unavailable. Configure its credentials or select the automatic provider chain.`,
-				);
-			}
-			availableProviderCount++;
-			lastProvider = provider;
-
-			const response = await provider.search({
-				query: params.query,
-				parsedQuery,
-				limit: params.limit,
-				recency: params.recency,
-				systemPrompt: webSearchSystemPrompt,
-				maxOutputTokens: params.max_tokens,
-				numSearchResults: params.num_search_results,
-				temperature: params.temperature,
-				signal,
-				timeoutMs,
-				authStorage,
-				model,
-				thinkingLevel: candidate.thinkingLevel,
-				modelRegistry,
-				explicit: candidate.explicit,
-				sessionId,
-				antigravityEndpointMode,
-			});
-
-			// A host that silently drops the hosted search tool still answers from the
-			// model's weights; without sources that answer is not a search result.
-			if (modelKind(model) !== "search" && response.sources.length === 0 && !response.citations?.length) {
-				throw new SearchProviderError(
-					provider.id,
-					`${provider.label} returned no sources; ${model.provider}/${model.id} may not support hosted web search.`,
-					204,
-				);
-			}
-
-			// Lenient constraint pass over whatever the provider returned: enforce
-			// site:/inurl:/intitle:/filetype:/date directives the provider could
-			// not (or only partially) honor natively, relaxing any dimension that
-			// would wipe out every result. Citations/answer text stay untouched.
-			let finalResponse = response;
-			const constraintNotes: string[] = [];
-			if (parsedQuery.hasConstraints && response.sources.length > 0) {
-				const filtered = applyQueryConstraints(response.sources, parsedQuery);
-				if (filtered.sources.length !== response.sources.length) {
-					finalResponse = { ...response, sources: filtered.sources };
-				}
-				for (const label of filtered.dropped) {
-					constraintNotes.push(`no results matched \`${label}\`; the constraint was relaxed`);
-				}
-			}
-
-			if (!hasRenderableSearchContent(finalResponse)) {
-				throw new SearchProviderError(provider.id, `${provider.label} returned no renderable search content.`, 204);
-			}
-
-			const failed = failureDetails(failures);
-			const text = formatForLLM(finalResponse, [...fallbackNotes(failed, provider), ...constraintNotes]);
-
-			return {
-				content: [{ type: "text" as const, text }],
-				details: failed.length > 0 ? { response: finalResponse, failures: failed } : { response: finalResponse },
-			};
-		} catch (error) {
-			// Surface user-initiated cancellation immediately so the session sees
-			// a clean abort instead of a generic "all providers failed" message.
-			// Without this, an AbortError from `fetch()` is treated as a provider
-			// failure and the loop falls through to the next provider (or to the
-			// summary error), masking the cancellation.
-			throwIfAborted(signal);
-			failedResponseProvider = provider?.id ?? "none";
-			failures.push({ provider: provider ?? candidateMeta, error });
+			antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
+		} catch {
+			antigravityEndpointMode = undefined;
 		}
-	}
 
-	if (availableProviderCount === 0 && failures.length === 0) {
-		const message = params.model
-			? `No web search model matches selector "${params.model}".`
-			: "No web search model configured.";
+		let timeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
+		try {
+			const configuredSeconds = cfgProvidersWebSearchTimeoutSeconds.get(settings);
+			if (Number.isFinite(configuredSeconds) && configuredSeconds > 0) {
+				timeoutMs = Math.ceil(Math.min(configuredSeconds, MAX_WEB_SEARCH_TIMEOUT_SECONDS) * 1_000);
+			}
+		} catch {
+			// Preserve the default for one-shot callers that do not initialize Settings.
+		}
+
+		const failures: SearchProviderFailure[] = [];
+		let availableProviderCount = 0;
+		let lastProvider: { id: string; label: string } | undefined;
+		let failedResponseProvider: SearchResponse["provider"] = "none";
+		for (const candidate of expanded) {
+			let provider: SearchProvider | undefined;
+			const candidateMeta = { id: candidate.model.id, label: candidate.model.name };
+			lastProvider = candidateMeta;
+			try {
+				const model = candidate.model;
+				if (isHostedPlaceholder(model)) {
+					if (!candidate.explicit) continue;
+					throw new Error("The session model has no web search grounding.");
+				}
+				if (modelKind(model) === "search") {
+					provider = await getSearchProvider(model.id);
+				} else if (model.webSearch) {
+					provider = await getGroundedSearchProvider(model.webSearch);
+				} else {
+					throw new Error(`Model ${model.provider}/${model.id} does not support web search`);
+				}
+				lastProvider = provider;
+				const available = candidate.explicit
+					? await provider.isExplicitlyAvailable(authStorage, model)
+					: await provider.isAvailable(authStorage, model);
+				if (!available && !candidate.explicit) continue;
+				if (!available && candidate.explicit) {
+					throw new SearchProviderError(
+						provider.id,
+						`${provider.label} web search is unavailable. Configure its credentials or select the automatic provider chain.`,
+					);
+				}
+				availableProviderCount++;
+				lastProvider = provider;
+
+				const response = await provider.search({
+					query: params.query,
+					parsedQuery,
+					limit: params.limit,
+					recency: params.recency,
+					systemPrompt: webSearchSystemPrompt,
+					maxOutputTokens: params.max_tokens,
+					numSearchResults: params.num_search_results,
+					temperature: params.temperature,
+					signal,
+					timeoutMs,
+					authStorage,
+					model,
+					thinkingLevel: candidate.thinkingLevel,
+					modelRegistry,
+					explicit: candidate.explicit,
+					sessionId,
+					antigravityEndpointMode,
+				});
+
+				// A host that silently drops the hosted search tool still answers from the
+				// model's weights; without sources that answer is not a search result.
+				if (modelKind(model) !== "search" && response.sources.length === 0 && !response.citations?.length) {
+					throw new SearchProviderError(
+						provider.id,
+						`${provider.label} returned no sources; ${model.provider}/${model.id} may not support hosted web search.`,
+						204,
+					);
+				}
+
+				// Lenient constraint pass over whatever the provider returned: enforce
+				// site:/inurl:/intitle:/filetype:/date directives the provider could
+				// not (or only partially) honor natively, relaxing any dimension that
+				// would wipe out every result. Citations/answer text stay untouched.
+				let finalResponse = response;
+				const constraintNotes: string[] = [];
+				if (parsedQuery.hasConstraints && response.sources.length > 0) {
+					const filtered = applyQueryConstraints(response.sources, parsedQuery);
+					if (filtered.sources.length !== response.sources.length) {
+						finalResponse = { ...response, sources: filtered.sources };
+					}
+					for (const label of filtered.dropped) {
+						constraintNotes.push(`no results matched \`${label}\`; the constraint was relaxed`);
+					}
+				}
+
+				if (!hasRenderableSearchContent(finalResponse)) {
+					throw new SearchProviderError(
+						provider.id,
+						`${provider.label} returned no renderable search content.`,
+						204,
+					);
+				}
+
+				const failed = failureDetails(failures);
+				const text = formatForLLM(finalResponse, [...fallbackNotes(failed, provider), ...constraintNotes]);
+
+				return {
+					content: [{ type: "text" as const, text }],
+					details: failed.length > 0 ? { response: finalResponse, failures: failed } : { response: finalResponse },
+				};
+			} catch (error) {
+				// Surface user-initiated cancellation immediately so the session sees
+				// a clean abort instead of a generic "all providers failed" message.
+				// Without this, an AbortError from `fetch()` is treated as a provider
+				// failure and the loop falls through to the next provider (or to the
+				// summary error), masking the cancellation.
+				throwIfAborted(signal);
+				failedResponseProvider = provider?.id ?? "none";
+				failures.push({ provider: provider ?? candidateMeta, error });
+			}
+		}
+
+		if (availableProviderCount === 0 && failures.length === 0) {
+			const message = params.model
+				? `No web search model matches selector "${params.model}".`
+				: "No web search model configured.";
+			return {
+				content: [{ type: "text" as const, text: `Error: ${message}` }],
+				details: { response: { provider: "none", sources: [] }, error: message },
+			};
+		}
+
+		const lastFailure = failures[failures.length - 1];
+		const baseMessage = lastFailure
+			? formatSearchProviderFailure(lastFailure.error, lastFailure.provider)
+			: `Unknown error from ${lastProvider?.label ?? "web search provider"}`;
+		const message =
+			failures.length > 1
+				? `All web search providers failed: ${formatSearchProviderFailures(failures)}`
+				: baseMessage;
+
 		return {
 			content: [{ type: "text" as const, text: `Error: ${message}` }],
-			details: { response: { provider: "none", sources: [] }, error: message },
+			details: {
+				response: { provider: failedResponseProvider, sources: [] },
+				error: message,
+				failures: failureDetails(failures),
+			},
 		};
-	}
-
-	const lastFailure = failures[failures.length - 1];
-	const baseMessage = lastFailure
-		? formatSearchProviderFailure(lastFailure.error, lastFailure.provider)
-		: `Unknown error from ${lastProvider?.label ?? "web search provider"}`;
-	const message =
-		failures.length > 1 ? `All web search providers failed: ${formatSearchProviderFailures(failures)}` : baseMessage;
-
-	return {
-		content: [{ type: "text" as const, text: `Error: ${message}` }],
-		details: {
-			response: { provider: failedResponseProvider, sources: [] },
-			error: message,
-			failures: failureDetails(failures),
-		},
-	};
+	});
 }
 
 /**

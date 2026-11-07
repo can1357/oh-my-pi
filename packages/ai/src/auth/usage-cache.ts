@@ -221,6 +221,21 @@ export class UsageCache {
 		return report && Date.now() < retentionDeadline(report) ? report : null;
 	}
 
+	/**
+	 * Newest last-good report for one account under any base URL this process has keyed.
+	 * Cache read only: callers that cannot name the base URL selection used (status, keyless sends) use this.
+	 */
+	lastGoodForAccount(provider: Provider, credential: UsageCredential): UsageReport | null {
+		const suffix = `:${usageCacheIdentity(credential)}`;
+		let newest: UsageReport | null = null;
+		for (const key of this.#usageReportCacheKeysByProvider.get(provider) ?? []) {
+			if (!key.endsWith(suffix)) continue;
+			const report = this.lastGood(key);
+			if (report && (newest === null || report.fetchedAt > newest.fetchedAt)) newest = report;
+		}
+		return newest;
+	}
+
 	set<T>(key: string, entry: UsageCacheEntry<T>): void {
 		const value = withoutRawPayload(entry.value);
 		const deadline = value === null ? undefined : retentionDeadline(value);

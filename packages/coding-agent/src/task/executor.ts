@@ -167,6 +167,7 @@ import {
 	cfgTierOpenai,
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
+	cfgUsageGovernorEnabled,
 } from "../session/settings";
 import { cfgDisabledProviders } from "../config/model-settings";
 import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
@@ -4737,7 +4738,13 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					modelRegistry,
 					settings,
 					id,
-					options.perCallModelGrants ? { exactOnly: true } : undefined,
+					{
+						exactOnly: options.perCallModelGrants ? true : undefined,
+						allowParentFallback: !(
+							cfgUsageGovernorEnabled.get(subagentSettings) &&
+							(modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings))
+						),
+					},
 				),
 			);
 			if (options.perCallModelGrants && !model) {
@@ -4949,7 +4956,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					model,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 					modelPatternAuthFallback:
-						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+						model ||
+						modelOverride === undefined ||
+						(cfgUsageGovernorEnabled.get(subagentSettings) &&
+							(modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings)))
+							? undefined
+							: options.parentActiveModelPattern,
 					modelPatternFallbackRole:
 						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
 					modelPatternDefaultFallbackChain:
@@ -4987,6 +4999,13 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					preloadedPreparedExtensions: options.preloadedPreparedExtensions,
 					preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 					hasUI: false,
+					usageContext: {
+						source: "subagent",
+						role: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
+						routingRole:
+							retryFallbackRole ?? (modelOverride === undefined ? undefined : subagentRetryFallbackRole(id)),
+						interactive: false,
+					},
 					prewalk,
 					spawns: spawnsEnv,
 					taskDepth: childDepth,

@@ -88,11 +88,16 @@ interface HeldLease {
 	readonly lease: SessionRestrictionLease;
 }
 
+/** Scope IDs are unique per storage across workers, so one peer cannot replace or remove another's scope. */
+const routingScopeOwners = new WeakMap<AuthStorage, Map<string, PeerAuthState>>();
+
 /** Main-side auth state of one worker, released when it exits. */
 class PeerAuthState {
 	readonly leases = new Map<number, HeldLease>();
+	readonly routingScopes = new Map<AuthStorage, Set<string>>();
 	readonly subscriptions = new Set<() => void>();
 	readonly mirrorHost = Promise.withResolvers<MirrorHost>();
+	readonly lifetime = new AbortController();
 	#nextLease = 1;
 
 	constructor() {
@@ -107,6 +112,17 @@ class PeerAuthState {
 	}
 
 	release(): void {
+		this.lifetime.abort();
+		for (const [storage, scopes] of this.routingScopes) {
+			const owners = routingScopeOwners.get(storage);
+			for (const id of scopes) {
+				if (owners?.get(id) !== this) continue;
+				storage.governor.removeRoutingScope(id);
+				owners.delete(id);
+			}
+			if (owners?.size === 0) routingScopeOwners.delete(storage);
+		}
+		this.routingScopes.clear();
 		for (const held of this.leases.values())
 			held.storage.sessions.unrestrict(held.provider, held.sessionId, held.lease);
 		this.leases.clear();
@@ -242,6 +258,7 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"oauth.policy": (storage, provider, identity) => storage.oauth.policy(provider, identity),
 		"oauth.refresh": (storage, id, signal, options) => storage.oauth.refresh(id, signal, options),
 
+		"sessions.selected": (storage, provider, sessionId) => storage.sessions.selected(provider, sessionId),
 		"sessions.pin": (storage, provider, sessionId, credentialId, options) =>
 			storage.sessions.pin(provider, sessionId, credentialId, options),
 		"sessions.inherit": (storage, source, target, table) =>
@@ -274,6 +291,8 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 				signal: options?.signal,
 				baseUrlResolver: tableResolver(options?.baseUrls),
 			}),
+		"usage.cachedReport": (storage, provider, credential, options) =>
+			storage.usage.cachedReport(provider, credential, options),
 		"usage.ingestHeaders": (storage, provider, headers, options) =>
 			storage.usage.ingestHeaders(provider, headers, options),
 		"usage.invalidate": (storage, provider, signal) => storage.usage.invalidate(provider, signal),
@@ -321,6 +340,63 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"blocks.deleteAll": (storage, credentialId) => storage.blocks.deleteAll(credentialId),
 
 		setAccountPolicies: (storage, config) => storage.setAccountPolicies(config),
+		"governor.config": (storage, listener) => {
+			if (listener) {
+				trackWorkerSubscription(
+					state.subscriptions,
+					storage.governor.onEvent(event => settleQuietly(listener(event))),
+				);
+			}
+			return storage.governor.config;
+		},
+		"governor.configure": (storage, config) => storage.governor.configure(config),
+		"governor.setRoutingScope": (storage, scope) => {
+			if (state.lifetime.signal.aborted) throw new Error("Worker has exited");
+			let owners = routingScopeOwners.get(storage);
+			const owner = owners?.get(scope.id);
+			if (owner && owner !== state) throw new Error("Routing scope is owned by another worker");
+			storage.governor.setRoutingScope(scope);
+			if (!owners) {
+				owners = new Map();
+				routingScopeOwners.set(storage, owners);
+			}
+			owners.set(scope.id, state);
+			let scopes = state.routingScopes.get(storage);
+			if (!scopes) {
+				scopes = new Set();
+				state.routingScopes.set(storage, scopes);
+			}
+			scopes.add(scope.id);
+		},
+		"governor.removeRoutingScope": (storage, scopeId) => {
+			const owners = routingScopeOwners.get(storage);
+			if (owners?.get(scopeId) !== state) return;
+			storage.governor.removeRoutingScope(scopeId);
+			owners.delete(scopeId);
+			if (owners.size === 0) routingScopeOwners.delete(storage);
+			const scopes = state.routingScopes.get(storage);
+			scopes?.delete(scopeId);
+			if (scopes?.size === 0) state.routingScopes.delete(storage);
+		},
+		"governor.evaluateRoutes": (storage, request, signal) => {
+			const owner = routingScopeOwners.get(storage)?.get(request.scopeId);
+			if (owner && owner !== state) throw new Error("Routing scope is owned by another worker");
+			const lifetime = state.lifetime.signal;
+			return storage.governor.evaluateRoutes(request, signal ? AbortSignal.any([signal, lifetime]) : lifetime);
+		},
+		"governor.validateRoute": (storage, binding, request) => {
+			const owner = routingScopeOwners.get(storage)?.get(binding.scopeId);
+			if (owner && owner !== state) return false;
+			return storage.governor.validateRoute?.(binding, request) === true;
+		},
+		"governor.admit": async (storage, request, signal) => {
+			const lifetime = state.lifetime.signal;
+			const grant = await storage.governor.admit(request, signal ? AbortSignal.any([signal, lifetime]) : lifetime);
+			// A plain copy: the wire carries the grant's data, never the ledger's object.
+			return grant ? { id: grant.id, waitedMs: grant.waitedMs } : undefined;
+		},
+		"governor.settle": (storage, grantId, outcome) => storage.governor.settle(grantId, outcome),
+		"governor.status": (storage, options) => storage.governor.status(options),
 	};
 }
 
@@ -383,9 +459,9 @@ function serveModelRegistry(state: PeerAuthState): RpcServe<ModelRegistry, Model
 function mirrorModelRegistry(remote: RemoteObject<ModelRegistryProtocol>): ModelRegistry {
 	// Batches arrive as later link messages, never during this synchronous build, so `registry` exists by then.
 	const wire = remote.callSync("mirror", batch => {
-		registry.applyMirrorBatch(fromWireMirrorBatch(batch));
 		// Key config (models.yml `apiKey`, runtime providers) changes with the batches.
 		invalidateRemoteAuthAvailability(registry.authStorage);
+		registry.applyMirrorBatch(fromWireMirrorBatch(batch));
 	});
 	const registry = new ModelRegistry(wire.authStorage, wire.modelsPath, {
 		ignoreLocalModelConfig: wire.ignoreLocalModelConfig,
@@ -393,6 +469,7 @@ function mirrorModelRegistry(remote: RemoteObject<ModelRegistryProtocol>): Model
 		settings: wire.settings,
 		owner: new RemoteModelRegistryOwner(remote),
 	});
+	invalidateRemoteAuthAvailability(registry.authStorage);
 	registry.applyMirrorBatch(fromWireMirrorBatch(wire.snapshot));
 	return registry;
 }
@@ -487,10 +564,11 @@ export const authService: ThreadService = {
 
 	installWorker(link: WorkerThreadLink): void {
 		registerAuthErrors();
-		link.importClass<AuthStorage, AuthStorageProtocol>(
-			AUTH_STORAGE_KIND,
-			remote => new AuthStorage(new RemoteAuthStorageBackend(remote)),
-		);
+		link.importClass<AuthStorage, AuthStorageProtocol>(AUTH_STORAGE_KIND, remote => {
+			const storage = new AuthStorage(new RemoteAuthStorageBackend(remote));
+			// Each worker session scopes its governor by its actual owner; no global first registration.
+			return storage;
+		});
 		link.importClass<ModelRegistry, ModelRegistryProtocol>(MODEL_REGISTRY_KIND, mirrorModelRegistry);
 		link.importClass<RemoteSlowModeLanes, SlowModeLanesProtocol>(
 			SLOW_MODE_LANES_KIND,

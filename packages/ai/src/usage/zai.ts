@@ -332,10 +332,12 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 	}
 
 	if (limits.length === 0) return null;
+	const observedAt = Date.now();
+	for (const limit of limits) limit.observedAt = observedAt;
 
 	const report: UsageReport = {
 		provider: params.provider,
-		fetchedAt: Date.now(),
+		fetchedAt: observedAt,
 		limits,
 		metadata: {
 			endpoint: url,

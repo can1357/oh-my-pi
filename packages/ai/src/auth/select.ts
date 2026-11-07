@@ -72,6 +72,28 @@ export type TryOAuthOptions = {
 	onTransientRefreshFailure?: (error: unknown) => void;
 };
 
+/** Governor pacing seam for account choice. Read-only: never fetches, refreshes or writes. */
+export interface UsagePacing {
+	/** Synchronous. False keeps account choice exactly as it is without the governor. */
+	readonly active: boolean;
+	/** Pacing of one account under the background reserve, from its already-fetched report. */
+	pacing(
+		provider: string,
+		credential: AuthCredential,
+		usage: UsageReport,
+		context: CredentialRankingContext,
+		baseUrl?: string,
+	): UsagePacingMeasure;
+}
+
+/** Governor view of one account: whether its window was measured, and when it admits the next request. */
+export interface UsagePacingMeasure {
+	/** True when at least one applicable window had a fresh, measured usage fraction. */
+	measured: boolean;
+	/** Earliest admissible time (ms) when the account is paced; undefined when it admits now or does not gate. */
+	pacedUntil?: number;
+}
+
 /** Services consulted by CredentialSelector for policy, usage, blocks, refresh, and session affinity. */
 export interface CredentialSelectorDeps {
 	store: AuthCredentialStore;
@@ -82,6 +104,8 @@ export interface CredentialSelectorDeps {
 	usage: UsageService;
 	refresher: OAuthRefresher;
 	strategies: RankingStrategyResolver;
+	/** Governor pacing for account choice; absent or inactive leaves ranking unchanged. */
+	pacing?: UsagePacing;
 }
 
 /** Picks which stored credential serves a request: ordering, usage ranking, OAuth refresh ladder. */
@@ -92,6 +116,10 @@ export class CredentialSelector {
 
 	constructor(deps: CredentialSelectorDeps) {
 		this.#deps = deps;
+	}
+
+	noteResolvedApiKey(provider: string, credential: ApiKeyCredential, value: string | undefined): void {
+		this.#deps.usage.noteResolvedApiKey(provider, credential, value);
 	}
 
 	/** Restart round-robin assignments after a provider's credential set changes. */
@@ -206,6 +234,7 @@ export class CredentialSelector {
 		const nowMs = Date.now();
 		const { strategy } = args;
 		const ranked: RankedApiKeyCandidate[] = [];
+		const pacingByIndex = new Map<number, UsagePacingMeasure>();
 		const usageTimeout = Math.max(5000, this.#deps.usage.requestTimeoutMs * 1.5);
 		const usagePromise: Promise<Array<UsageRankingResult<ApiKeyCredential> | null>> = Promise.all(
 			args.order.map(async idx => {
@@ -276,6 +305,18 @@ export class CredentialSelector {
 			const secondary = windows?.secondary;
 			const usageMeasured = primary !== undefined || secondary !== undefined;
 			const primaryUncapped = primary === undefined && secondary !== undefined;
+			if (usage && this.#deps.pacing?.active) {
+				pacingByIndex.set(
+					selection.index,
+					this.#deps.pacing.pacing(
+						args.provider,
+						selection.credential,
+						usage,
+						args.rankingContext,
+						args.options?.baseUrl,
+					),
+				);
+			}
 			ranked.push({
 				selection,
 				usage,
@@ -295,6 +336,18 @@ export class CredentialSelector {
 				orderPos,
 			});
 		}
+		const available = ranked.filter(candidate => !candidate.blocked);
+		if (
+			available.length > 1 &&
+			available.every(candidate => pacingByIndex.get(candidate.selection.index)?.measured === true)
+		) {
+			for (const candidate of available) {
+				const pacing = pacingByIndex.get(candidate.selection.index)!;
+				candidate.reserveMeasured = true;
+				candidate.pacedUntil = pacing.pacedUntil;
+				candidate.inReserve = pacing.pacedUntil !== undefined;
+			}
+		}
 		return orderUsageRankedCandidates(ranked, false);
 	}
 
@@ -304,6 +357,26 @@ export class CredentialSelector {
 		options: AuthApiKeyOptions | undefined,
 		filter?: (credential: ApiKeyCredential) => boolean,
 	): Promise<ApiKeySelection | undefined> {
+		const requestedId = options?.requestCredential?.credentialId;
+		if (requestedId !== undefined) {
+			const entries = this.#deps.pool.entries(provider);
+			const index = entries.findIndex(entry => entry.id === requestedId);
+			const credential = entries[index]?.credential;
+			const pin = this.#deps.affinity.get(provider, sessionId);
+			if (
+				index < 0 ||
+				credential?.type !== "api_key" ||
+				!(filter?.(credential) ?? true) ||
+				(pin?.explicit && pin.credentialId !== requestedId)
+			)
+				return undefined;
+			const strategy = this.#deps.strategies(provider);
+			const context = { modelId: options?.modelId };
+			const scopes = credentialBlockScopesForRequest(provider, strategy, context, strategy?.blockScope?.(context));
+			if (this.#deps.blocks.isBlocked(provider, providerTypeKey(provider, "api_key"), index, scopes))
+				return undefined;
+			return { credential, index };
+		}
 		const credentials = this.#deps.pool
 			.credentials(provider)
 			.map((credential, index) => ({ credential, index }))
@@ -348,20 +421,28 @@ export class CredentialSelector {
 		return candidates[0]?.selection ?? fallback;
 	}
 
+	/** Whether the usage governor paces this selector's accounts. */
+	#governed(): boolean {
+		return this.#deps.pacing?.active === true;
+	}
+
 	#oauthUsagePolicy(
 		provider: string,
 		credentials: readonly OAuthSelection[],
 		strategy: CredentialRankingStrategy | undefined,
 		hasPlanRequirement: boolean,
 	): { policyReserveEnabled: boolean; checkUsage: boolean } {
+		const governed = this.#governed();
 		const hasAccountPolicy = credentials.some(
 			({ credential }) => this.#deps.policies.forCredential(provider, credential) !== undefined,
 		);
 		const canFetchPolicyUsage = strategy !== undefined || this.#deps.usage.canFetchOAuthUsage(provider);
-		const policyReserveEnabled = hasAccountPolicy && canFetchPolicyUsage;
+		const policyReserveEnabled = (hasAccountPolicy || governed) && canFetchPolicyUsage;
 		return {
 			policyReserveEnabled,
-			checkUsage: (strategy !== undefined || policyReserveEnabled) && (credentials.length > 1 || hasPlanRequirement),
+			checkUsage:
+				(strategy !== undefined || policyReserveEnabled) &&
+				(credentials.length > 1 || hasPlanRequirement || governed),
 		};
 	}
 
@@ -523,6 +604,11 @@ export class CredentialSelector {
 				reservePct === undefined || !Number.isFinite(reservePct)
 					? undefined
 					: Math.max(0, Math.min(1, reservePct / 100));
+			const pacing =
+				usage !== null && this.#deps.pacing?.active === true
+					? this.#deps.pacing.pacing(args.provider, selection.credential, usage, args.rankingContext)
+					: undefined;
+			const pacedUntil = pacing?.pacedUntil;
 			ranked.push({
 				selection,
 				usage,
@@ -530,10 +616,15 @@ export class CredentialSelector {
 				blocked,
 				blockedUntil,
 				inReserve:
-					reserveFraction !== undefined &&
-					remainingFraction !== undefined &&
-					isWithinUsageReserve(remainingFraction, reserveFraction),
-				reserveMeasured: reserveFraction !== undefined && remainingFraction !== undefined,
+					pacedUntil !== undefined ||
+					(reserveFraction !== undefined &&
+						remainingFraction !== undefined &&
+						isWithinUsageReserve(remainingFraction, reserveFraction)),
+				reserveMeasured:
+					pacedUntil !== undefined ||
+					pacing?.measured === true ||
+					(reserveFraction !== undefined && remainingFraction !== undefined),
+				pacedUntil,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				allowanceSpent: remainingFraction === 0,
 				reclaimReady:
@@ -590,7 +681,18 @@ export class CredentialSelector {
 		);
 		// A session restriction drops every other account before ranking, pins,
 		// and the fallback passes below, so none of them can route back to it.
-		const credentials = stored.filter(entry => this.#deps.affinity.allows(provider, sessionId, entry.credential));
+		const requestedId = options?.requestCredential?.credentialId;
+		const pin = this.#deps.affinity.get(provider, sessionId);
+		if (requestedId !== undefined && pin?.explicit && pin.credentialId !== requestedId) return undefined;
+		const credentials = stored.filter(
+			entry =>
+				this.#deps.affinity.allows(provider, sessionId, entry.credential) &&
+				(requestedId === undefined || this.#deps.pool.entries(provider)[entry.index]?.id === requestedId) &&
+				(requestedId === undefined ||
+					!options?.accountIds?.length ||
+					(oauthAccountKey(entry.credential) !== undefined &&
+						options.accountIds.includes(oauthAccountKey(entry.credential)!))),
+		);
 
 		if (credentials.length === 0) return undefined;
 		// Ranking and preflight both await provider work; preserve the row each
@@ -719,6 +821,8 @@ export class CredentialSelector {
 							? { selection, usage: sessionPreferredUsage, usageChecked: true }
 							: { selection, usage: null, usageChecked: false },
 					);
+		// Promotions mutate candidates, so keep the comparator's original order for eviction.
+		const rankedCandidates = [...candidates];
 		// Keep the candidate object: preflight may rebind its positional index
 		// after a peer changes the credential pool.
 		const explicitPin = sessionPinIsExplicit
@@ -740,14 +844,26 @@ export class CredentialSelector {
 				candidate.selection.index === sessionPreferredIndex,
 		);
 		const preferredCandidate = sessionPreferredCandidate === -1 ? undefined : candidates[sessionPreferredCandidate];
-		// A warm automatic pin normally wins. Three policies may evict it, each only
-		// while a sibling is confirmed better: reserve (sibling measured outside
-		// reserve), spent allowance (unblocked sibling with allowance left), and
-		// opt-in reclaim (the sibling ranking picks next has higher priority and is
-		// measured at or above its `reclaimAbovePct`).
+		// A warm automatic pin yields to confirmed better reserve, pacing, spent
+		// allowance or reclaim candidates.
 		const automaticPinWouldBeEvicted = (excludePreflightFailures: boolean): boolean => {
 			if (sessionPinIsExplicit || preferredCandidate === undefined) return false;
-			const rankedWinner = candidates.find(
+			const preferredRank = rankedCandidates.indexOf(preferredCandidate);
+			const preferredPacedUntil = preferredCandidate.pacedUntil;
+			if (
+				preferredPacedUntil !== undefined &&
+				rankedCandidates
+					.slice(0, preferredRank)
+					.some(
+						candidate =>
+							candidate.pacedUntil !== undefined &&
+							candidate.pacedUntil < preferredPacedUntil &&
+							!(excludePreflightFailures && preflightFailures.has(candidate)) &&
+							!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes),
+					)
+			)
+				return true;
+			const rankedWinner = rankedCandidates.find(
 				candidate =>
 					candidate !== preferredCandidate &&
 					!(excludePreflightFailures && preflightFailures.has(candidate)) &&
@@ -944,7 +1060,8 @@ export class CredentialSelector {
 		// every report is unknown or ineligible, preserve trial/grandfathered access
 		// by allowing the normal candidate fallback to attempt the request.
 		const enforcePlanRequirement =
-			hasPlanRequirement && candidates.some(candidate => planGate?.(candidate.usage) === true);
+			hasPlanRequirement &&
+			(requestedId !== undefined || candidates.some(candidate => planGate?.(candidate.usage) === true));
 
 		// Plan-gated models rank on every resolve to re-verify account tiers,
 		// so the drain-urgency order can flip between two eligible accounts as their
@@ -965,10 +1082,20 @@ export class CredentialSelector {
 		const passes = [{ allowBlocked: false, enforcePlanRequirement, enforceAccounts }];
 		// Discovery may have observed only part of the pool. Try other unblocked
 		// accounts before reusing a blocked discovery match, without relaxing plan gates.
-		if (enforceAccounts) passes.push({ allowBlocked: false, enforcePlanRequirement, enforceAccounts: false });
-		passes.push({ allowBlocked: true, enforcePlanRequirement, enforceAccounts });
-		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
-		if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		if (requestedId === undefined) {
+			if (enforceAccounts) passes.push({ allowBlocked: false, enforcePlanRequirement, enforceAccounts: false });
+			passes.push({ allowBlocked: true, enforcePlanRequirement, enforceAccounts });
+		}
+		const eligiblePreflightFailed =
+			this.#governed() &&
+			!sessionPinIsExplicit &&
+			preferredCandidate !== undefined &&
+			enforcePlanRequirement &&
+			rankedCandidates.some(candidate => preflightFailures.has(candidate) && planGate?.(candidate.usage) === true);
+		if (requestedId === undefined && enforcePlanRequirement && !eligiblePreflightFailed)
+			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
+		if (requestedId === undefined && enforceAccounts && !eligiblePreflightFailed)
+			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
 		// Blocked candidates rank earliest-unblock first, which would route a
 		// blocked explicit pin to an equally blocked sibling. Once the strict
 		// pass finds no unblocked account, the user's pin goes first.

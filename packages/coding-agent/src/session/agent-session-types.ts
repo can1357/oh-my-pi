@@ -171,6 +171,8 @@ export interface InitialRetryFallbackState {
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
 	agent: Agent;
+	/** Registry-owned resolver identity; absent for externally supplied auth callbacks. */
+	registryAuthResolver?: Agent["getApiKey"];
 	sessionManager: SessionManager;
 	settings: Settings;
 	/**
@@ -217,6 +219,8 @@ export interface AgentSessionConfig {
 	 * startup fallback, are not affected.
 	 */
 	disableModelFallback?: boolean;
+	/** Role controlling routing, distinct from the displayed request role. */
+	routingRole?: string;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
 	/** Skip retry.fallbackChains validation at construction; the host calls `validateRetryFallbackChains()` later. */
