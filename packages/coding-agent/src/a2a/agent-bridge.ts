@@ -21,7 +21,6 @@ import type { AgentDefinition } from "../task/types";
 import { type AgentCard, A2A_PROTOCOL_VERSION, type AgentCardSkill } from "./card";
 import { A2A_CONNECT_TIMEOUT_MS, A2aClient, cardRequiresBearer, fetchAgentCard } from "./client";
 import { TASK_STATE, type TaskState } from "./rpc";
-import { readLiveBridges } from "./server";
 
 export const A2A_AGENT_PREFIX = "a2a:";
 /** The remote paused for input; omp v1 has no way to answer, so the spawn reports it. */
@@ -415,6 +414,9 @@ export async function autoRegisterLocalBridges(options: {
 	/** Pid to exclude from the live set (default this process). */
 	excludePid?: number;
 }): Promise<AutoRegisterResult> {
+	// Lazy: the server module pulls the task executor and thread workers, which
+	// import this bridge, so a static import closes an import cycle.
+	const { readLiveBridges } = await import("./server");
 	const live = await readLiveBridges(options.agentDir, { excludePid: options.excludePid });
 	const registered = new Map<string, string[]>();
 	const failed = new Map<string, string>();

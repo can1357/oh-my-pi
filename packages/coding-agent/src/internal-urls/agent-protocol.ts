@@ -31,7 +31,6 @@ import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with 
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
-import { rescanLocalBridges } from "../a2a/agent-bridge";
 import { cfgA2aMaxPeerSkills } from "../task/settings";
 import type {
 	InternalResource,
@@ -224,6 +223,9 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			const a2aBridge = context?.session?.getA2aBridge?.();
 			if (a2aBridge !== undefined && context?.settings !== undefined) {
 				try {
+					// Lazy: settings load this URL router, and the bridge reaches the task
+					// executor and its thread workers, so a static import is an import cycle.
+					const { rescanLocalBridges } = await import("../a2a/agent-bridge");
 					await rescanLocalBridges({
 						bridge: a2aBridge,
 						agentDir: context.settings.getAgentDir(),

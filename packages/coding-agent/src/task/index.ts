@@ -92,7 +92,6 @@ import {
 	type A2aRuntimeAgent,
 	spawnA2aAgent,
 } from "../a2a/agent-bridge";
-import { readLocalBridgeEntry } from "../a2a/server";
 import {
 	cfgA2aClientTimeoutMs,
 	cfgA2aMaxPeerSkills,
@@ -2148,6 +2147,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/** This terminal's public A2A identity for reply envelopes: its own bridge registry entry (A1/A3). */
 	async #ownA2aIdentity(): Promise<{ name?: string; url?: string }> {
 		try {
+			// Lazy, as in `agent-bridge.ts`: a static import of the server closes an import cycle.
+			const { readLocalBridgeEntry } = await import("../a2a/server");
 			const entry = await readLocalBridgeEntry(this.session.settings.getAgentDir(), process.pid);
 			return entry !== undefined
 				? {
