@@ -93,8 +93,8 @@ async fn uncompiled_script_is_parsed_ahead_without_outcomes_until_it_stops_parsi
 
 #[test]
 fn bare_test_bracket_without_operands_renders_instead_of_panicking() {
-	// Regression for #18320: a streamed `[` with no operands sliced `words[1..0]`
-	// and aborted the host process.
+	// Regression for #18320: a streamed `[` with no operands sliced
+	// `words[1..0]` and aborted the host process.
 	for (script, expected) in [
 		("[", &[""][..]),
 		("a && [", &["a", "and "]),
