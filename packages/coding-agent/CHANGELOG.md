@@ -19,6 +19,7 @@
 - Mistral Vibe browser sign-in shows subscription billing in the status line and advisor spend instead of pay-as-you-go pricing ([#18374](https://github.com/can1357/oh-my-pi/issues/18374))
 - Native OpenAI compaction no longer waits for a Hindsight memory recall it cannot use; fallback summaries still recall memory ([#18327](https://github.com/can1357/oh-my-pi/issues/18327))
 - An eval `wait()` on jobs owned by a worker returns finished jobs and consumes their results instead of reporting them as running or delivering them again ([#18363](https://github.com/can1357/oh-my-pi/issues/18363))
+- Fixed Mnemopi embedding requests sending the name of an environment variable instead of its value when `mnemopi.embeddingApiKey` references one; the setting now resolves like a provider `apiKey` ([#16334](https://github.com/can1357/oh-my-pi/issues/16334), [#16424](https://github.com/can1357/oh-my-pi/pull/16424) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.0] - 2026-11-07
 
