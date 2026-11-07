@@ -10814,8 +10814,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const output = builtin.output === undefined ? undefined : { output: builtin.output };
 			const { result } = builtin;
 			if (result && "prompt" in result) {
-				await this.prompt(result.prompt, { streamingBehavior, images, tag });
-				return { handled: "prompt", ...output };
+				// Command handling already ran, so the only non-`prompt` answer left is a drop.
+				const submitted = await this.#submitAsPrompt(result.prompt, { streamingBehavior, images, tag });
+				return { handled: submitted === "dropped" ? "dropped" : "prompt", ...output };
 			}
 			// `/retry` and the like start a turn without submitting a message; hosts must not treat
 			// that as locally handled.

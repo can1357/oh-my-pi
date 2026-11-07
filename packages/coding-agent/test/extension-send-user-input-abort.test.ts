@@ -111,8 +111,9 @@ describe("sendUserMessage(expand) racing abort", () => {
 		return { started: started.promise, release: () => release.resolve() };
 	}
 
-	async function sendAndAbort(text: string, tag: string | undefined) {
+	async function sendAndAbort(text: string, tag: string | undefined, prepare?: (s: AgentSession) => void) {
 		const { session: s } = await start();
+		prepare?.(s);
 		const normalization = holdImageNormalization();
 		const sent = s.sendUserMessage([{ type: "text", text }, IMAGE], { expand: true, tag });
 		await withTimeout(normalization.started, 2_000, "Normalization never started");
@@ -141,5 +142,17 @@ describe("sendUserMessage(expand) racing abort", () => {
 
 		expect(mode?.editor.getText()).toBe("typed input aborted before admission");
 		expect(mode?.editor.pendingImages).toEqual([IMAGE]);
+	});
+
+	it("reports a built-in's own prompt as dropped when the abort beats it", async () => {
+		const result = await sendAndAbort("/ratchet improve the summarizer prompt", "msg-ratchet", s => {
+			// `/ratchet` arms only with the eval and task tools active and its eval prelude present;
+			// the mock agent has neither. Armed, it answers `{ prompt }` and goes through prompt().
+			vi.spyOn(s, "getEnabledToolNames").mockReturnValue(["eval", "task"]);
+			vi.spyOn(s, "getEvalPreludes").mockReturnValue([{ name: "ratchet", documentation: "ratchet" }] as never);
+		});
+
+		expect(result).toEqual({ handled: "dropped" });
+		expect(streamCalls).toBe(0);
 	});
 });
