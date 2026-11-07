@@ -20,6 +20,7 @@ members = [
    "crates/vendor/grep-searcher",
    "crates/vendor/napi",
    "crates/vendor/tree-sitter-go",
+   "sdk/rust/omp-rpc",
 ]
 resolver = "3"
 
