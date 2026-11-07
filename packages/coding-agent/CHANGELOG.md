@@ -168,6 +168,10 @@
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
 
+### Fixed
+
+- An extension that registers a link scheme but loads after startup now has its links claimed: they no longer show a trailing `(scheme:…)` URL, `Alt+O` offers their hint tags, and `link_activate` fires ([#17728](https://github.com/can1357/oh-my-pi/pull/17728) by [@rierek](https://github.com/rierek))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
