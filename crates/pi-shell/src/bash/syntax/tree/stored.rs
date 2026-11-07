@@ -137,6 +137,12 @@ impl<'de> Visitor<'de> for TreeVisitor {
 		let mut tree = Tree { text, ..Tree::default() };
 		seq.next_element_seed(NodesSeed(&mut tree))?
 			.ok_or_else(|| de::Error::invalid_length(1, &self))?;
+		// A child may follow its parent, so indices are checked once all
+		// nodes are in: a corrupt tree is an error here, not a panic on use.
+		let n = tree.nodes.len() as u32;
+		if tree.kids.iter().any(|&k| k != NONE && k >= n) {
+			return Err(de::Error::custom("a stored syntax node's child is out of range"));
+		}
 		Ok(tree)
 	}
 }
@@ -248,9 +254,27 @@ impl<'de> Visitor<'de> for KidsSeed<'_> {
 	fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
 		while let Some(code) = seq.next_element::<u64>()? {
 			let kid = kid_of(self.at, code)
-				.ok_or_else(|| de::Error::custom("a stored syntax node's child is out of range"))?;
+				.ok_or_else(|| de::Error::custom("a stored syntax node's child is not a node index"))?;
 			self.kids.push(kid);
 		}
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{K, Tree};
+
+	#[test]
+	fn a_child_past_the_last_node_is_a_load_error() {
+		// One `Word` node (head: kind, no optional fields; id, lo, length)
+		// whose child code is zigzag(0 - 7): node 7 of a one-node tree.
+		let node = (K::Word as u8, 0u32, 0u32, 0u32, vec![13u64]);
+		let bytes = postcard::to_stdvec(&(Vec::<u8>::new(), vec![node])).unwrap();
+		assert!(postcard::from_bytes::<Tree>(&bytes).is_err());
+		// Without that child the same node loads.
+		let ok = (K::Word as u8, 0u32, 0u32, 0u32, Vec::<u64>::new());
+		let bytes = postcard::to_stdvec(&(Vec::<u8>::new(), vec![ok])).unwrap();
+		assert_eq!(postcard::from_bytes::<Tree>(&bytes).unwrap().nodes.len(), 1);
 	}
 }
