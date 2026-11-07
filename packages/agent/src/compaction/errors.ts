@@ -10,6 +10,8 @@
  * sentinel makes classification source-agnostic and refactor-stable.
  */
 
+import type { RemoteCompactionUsage } from "./remote-usage";
+
 export class CompactionCancelledError extends Error {
 	override readonly name = "CompactionCancelledError" as const;
 
@@ -31,6 +33,23 @@ export class NativeCompactionError extends Error {
 
 	constructor(cause: unknown) {
 		super(cause instanceof Error ? cause.message : String(cause), { cause });
+	}
+}
+
+/**
+ * A compaction response the provider billed but whose payload is unusable.
+ *
+ * The attempt is abandoned, yet the provider charged for it. The usage rides
+ * along so the caller can bill it before the fallback runs.
+ */
+export class RemoteCompactionPayloadError extends Error {
+	override readonly name = "RemoteCompactionPayloadError" as const;
+
+	readonly usage: RemoteCompactionUsage | undefined;
+
+	constructor(message: string, usage?: RemoteCompactionUsage) {
+		super(message);
+		this.usage = usage;
 	}
 }
 
