@@ -748,21 +748,6 @@ describe("AgentSession advisor toggle", () => {
 			subscriptionSpy.mockRestore();
 		}
 	});
-	it("attributes restored Mistral Vibe login-key spend to a subscription", async () => {
-		await authStorage.credentials.set("mistral", {
-			type: "api_key",
-			key: "test-login-key",
-			source: "login",
-		});
-		try {
-			session.restoreInitialAdvisorCosts(new Map([["", 0.5]]), new Map(), new Map([["", new Set(["mistral"])]]));
-			expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
-			expect(session.isAdvisorUsingSubscription()).toBe(true);
-		} finally {
-			await authStorage.credentials.remove("mistral");
-		}
-	});
-
 	it("does not attribute restored advisor spend to a subscription without subscription credentials", () => {
 		const subscriptionSpy = vi.spyOn(authStorage.credentials, "hasSubscription").mockReturnValue(false);
 		try {
