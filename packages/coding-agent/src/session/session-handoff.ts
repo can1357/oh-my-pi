@@ -153,10 +153,14 @@ export class SessionHandoff {
 			const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, handoffSignal, model);
 			// Base system prompt, not a per-turn `before_agent_start` hook override —
 			// the document seeds the post-compaction context and must not carry
-			// prompt-specific hook state.
+			// prompt-specific hook state. Read it lazily: the side-request hooks
+			// rebuild the prompt when a setting invalidated it, so the base prompt
+			// captured before them would still advertise what the change removed.
+			const readBaseSystemPrompt = (): string[] => this.#host.baseSystemPrompt();
 			const handoffContext = await this.#host.agent.buildSideRequestContext(
 				handoffLlmMessages,
-				this.#host.baseSystemPrompt(),
+				readBaseSystemPrompt,
+				handoffSignal,
 			);
 			const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
 				{
