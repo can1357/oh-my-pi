@@ -1,8 +1,8 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { renderComposerShapePreview } from "../src/overlays/composer-shape-preview";
 import { getComposerShapeOptions, installExtensionComposerShape } from "../src/overlays/composer-shape-registry";
-import { initTheme, setTheme } from "../src/theme/theme";
-import { type ComposerStyle, visibleWidth } from "../src/index";
+import { getEditorTheme, initTheme, setTheme } from "../src/theme/theme";
+import { type ComposerStyle, Editor, visibleWidth } from "../src/index";
 
 beforeAll(async () => {
 	await initTheme();
@@ -116,6 +116,65 @@ describe("composer shape preview", () => {
 		}
 
 		expect(getComposerShapeOptions().some(option => option.value === "extension-dock")).toBe(false);
+	});
+
+	it("keeps a metadata header separate from the rule in live and preview frames", async () => {
+		await setTheme("dark");
+		const style: ComposerStyle = {
+			id: "extension-metadata-header",
+			sideBorders: false,
+			verticalChrome: 3,
+			statusAttachment: "top-border",
+			bottomBar: "none",
+			bottomBarGap: false,
+			defaultPromptGutter: undefined,
+			defaultPaddingX: () => 0,
+			sideChromeWidth: () => 0,
+			renderTop: ctx => [
+				(ctx.topBorder?.content ?? "").padEnd(ctx.width),
+				ctx.borderColor(ctx.box.horizontal.repeat(ctx.width)),
+			],
+			renderRow: ctx => [ctx.text + ctx.pad],
+			renderBottom: ctx => ctx.borderColor(ctx.box.horizontal.repeat(ctx.width)),
+		};
+		const dispose = installExtensionComposerShape({
+			label: "Metadata Header",
+			description: "Header above rule",
+			style,
+		});
+		try {
+			const editor = new Editor(getEditorTheme());
+			editor.setBorderStyle(style.id);
+			editor.setTopBorder({ content: "workflow", width: 8 });
+			editor.setMaxHeight(4);
+			editor.setText("first\nsecond");
+			for (const width of [12, 80]) {
+				const live = editor.render(width);
+				expect(live).toHaveLength(4); // three chrome rows leave one visible input row
+				expect(live[0].trimEnd()).toBe("workflow");
+				expect(live[1]).not.toContain("workflow");
+				expect(live[2]).toContain("second");
+				expect(live.every(row => !row.includes("\n"))).toBe(true);
+				expect(live.map(visibleWidth)).toEqual([width, width, width, width]);
+			}
+			// A seven-row terminal gives the editor a three-row cap: leave the
+			// host's four transcript/status rows intact, keeping the separator.
+			editor.setMaxHeight(3);
+			const short = editor.render(12);
+			expect(short).toHaveLength(3);
+			expect(short.join("\n")).not.toContain("workflow");
+			expect(short[0]).toBe(short[2]);
+			expect(short[1]).toContain("second");
+			editor.setMaxHeight(4);
+			expect(editor.render(12)[0].trimEnd()).toBe("workflow");
+			const preview = renderComposerShapePreview(style.id, 80);
+			expect(preview).toHaveLength(4);
+			expect(preview[1]).toBe(preview[3]); // full-width separators surround the input
+			expect(preview[2]).toContain("Ask anything");
+			expect(preview.every(row => !row.includes("\n"))).toBe(true);
+		} finally {
+			dispose();
+		}
 	});
 
 	it("uses the full overlay width instead of clipping the status band (issue #12500)", async () => {
