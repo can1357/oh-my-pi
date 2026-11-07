@@ -9,6 +9,9 @@
 ### Added
 
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+### Added
+
+- Added the resolved `provider/model[:level]` and a retry-fallback flag to each subagent's `<task-result>` envelope and to a background delivery's `details`, so a parent can verify which model actually ran ([#16017](https://github.com/can1357/oh-my-pi/issues/16017), [#16135](https://github.com/can1357/oh-my-pi/pull/16135) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
