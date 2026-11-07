@@ -85,6 +85,22 @@ describe("LateDiagnosticsMessageComponent", () => {
 		expect(text).toContain("bad b");
 	});
 
+	it("names the servers that sent no report instead of rendering an empty card", () => {
+		const component = new LateDiagnosticsMessageComponent([
+			{
+				path: "/abs/unchecked.ts",
+				summary: "no diagnostics report yet from silent-lsp",
+				errored: false,
+				messages: [],
+				unreported: ["silent-lsp"],
+			},
+		]);
+
+		// No findings, but the file was never checked: silence would read as clean.
+		const text = plain(component);
+		expect(text).toContain("no diagnostics report yet from silent-lsp");
+	});
+
 	it("renders nothing when no diagnostics are present", () => {
 		const component = new LateDiagnosticsMessageComponent([
 			{ path: "/abs/empty.ts", summary: "", errored: false, messages: [] },
