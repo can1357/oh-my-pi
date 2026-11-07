@@ -36,6 +36,7 @@ import {
 	groupedLinkTargets,
 	groupLineIndicesByBlank,
 	groupsByFile,
+	isGroupedHeader,
 	isMatchRow,
 } from "./grouped-file-output";
 
@@ -241,7 +242,7 @@ export const grepToolRenderer = {
 		// `cwd`); a single-file search's headerless lines belong to the searched file.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
 		const hasScope = Boolean(details?.scopePath || toPathList(args?.path ?? args?.paths).length > 0);
-		const singleFileScope = hasScope && fileCount === 1 && contexts.every(ctx => ctx.kind === "content");
+		const singleFileScope = hasScope && fileCount === 1 && !allLines.some(isGroupedHeader);
 		const meta = [formatCount("match", matchCount)];
 		if (!singleFileScope) meta.push(formatCount("file", fileCount));
 		if (truncated) meta.push(uiTheme.fg("warning", "truncated"));
@@ -333,7 +334,7 @@ export const grepToolRenderer = {
 		);
 		const lines = textContent.split("\n");
 		const fileCount = details?.fileCount ?? 0;
-		const singleFileScope = Boolean(scope) && fileCount === 1 && lines.every(line => !line.startsWith("#"));
+		const singleFileScope = Boolean(scope) && fileCount === 1 && !lines.some(isGroupedHeader);
 		const counts = hasDetailedData
 			? singleFileScope
 				? formatCount("match", matchCount)

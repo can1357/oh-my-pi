@@ -4,7 +4,7 @@ import * as url from "node:url";
 import { applyHyperlinkSetting } from "../src/render/hyperlink";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { grepToolRenderer } from "@oh-my-pi/pi-tui/tools/grep";
+import { type GrepToolDetails, grepToolRenderer } from "@oh-my-pi/pi-tui/tools/grep";
 
 function extractLinkUris(text: string): string[] {
 	return [...text.matchAll(/\x1b\]8;[^;]*;([^\x1b]+)\x1b\\/g)].map(match => match[1]!);
@@ -84,42 +84,29 @@ describe("grepToolRenderer", () => {
 				.render(120)[0]!,
 		);
 		expect(call).toContain("Grep: needle in lib case:insensitive");
-		// A single-file search prints no `#` headers and omits the redundant file count.
-		const singleHeader = sanitizeText(
-			grepToolRenderer
-				.renderResult(
-					{
-						content: [{ type: "text", text: "" }],
-						details: {
-							matchCount: 2,
-							fileCount: 1,
-							scopePath: "src/a.ts",
-							displayContent: "*1│needle\n*5│needle",
+	});
+
+	it("omits the file count only when the header already names the single searched file", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const header = (details: GrepToolDetails) =>
+			sanitizeText(
+				grepToolRenderer
+					.renderResult(
+						{ content: [{ type: "text", text: "" }], details },
+						{ expanded: false, isPartial: false },
+						uiTheme,
+						{
+							pattern: "needle",
 						},
-					},
-					{ expanded: false, isPartial: false },
-					uiTheme,
-					{ pattern: "needle" },
-				)
-				.render(120)[0]!,
-		);
-		expect(singleHeader).toContain("Grep: needle in src/a.ts 2 matches");
-		expect(singleHeader).not.toContain("1 file");
-		// Without a scope in the header, keep `1 file` so the result still reports how many files matched.
-		const scopelessHeader = sanitizeText(
-			grepToolRenderer
-				.renderResult(
-					{
-						content: [{ type: "text", text: "" }],
-						details: { matchCount: 2, fileCount: 1, displayContent: "*1│needle\n*5│needle" },
-					},
-					{ expanded: false, isPartial: false },
-					uiTheme,
-					{ pattern: "needle" },
-				)
-				.render(120)[0]!,
-		);
-		expect(scopelessHeader).toContain("Grep: needle 2 matches · 1 file");
+					)
+					.render(120)[0]!,
+			);
+		// A single-file search prints no `#` headers; its scope already names the file.
+		const single = { matchCount: 2, fileCount: 1, displayContent: "*1│needle\n*5│needle" };
+		expect(header({ ...single, scopePath: "src/a.ts" })).toContain("Grep: needle in src/a.ts 2 matches");
+		expect(header({ ...single, scopePath: "src/a.ts" })).not.toContain("1 file");
+		// Without a scope in the header, `1 file` is the only file information left.
+		expect(header(single)).toContain("Grep: needle 2 matches · 1 file");
 	});
 
 	it("colors partial regex syntax without treating escaped punctuation as an operator", async () => {

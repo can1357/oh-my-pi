@@ -8,7 +8,7 @@
 
 ### Changed
 
-- Single-file Grep results omit `1 file` from the terminal and native headers (`Grep: needle in src/a.ts 2 matches`), while multi-file searches matching a single file still show `1 file` ([#18422](https://github.com/can1357/oh-my-pi/pull/18422) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
+- Grep results for a single searched file no longer repeat `1 file` after the match count; the header already names the file ([#18422](https://github.com/can1357/oh-my-pi/pull/18422) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 
 ### Fixed
 
