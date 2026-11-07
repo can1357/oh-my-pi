@@ -8,7 +8,9 @@
  * This replaces the old single hardwired `onJobComplete` closure that routed
  * every completion — regardless of owner — into the first top-level session.
  */
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
+import { renderImageMarkedText } from "./image-marked-text";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
@@ -33,6 +35,11 @@ export const ASYNC_PREVIEW_MAX_CHARS = 4_000;
  */
 export const ASYNC_PREVIEW_TAIL_CHARS = 1_000;
 
+/** The inline preview of a result too long to deliver whole. */
+export function asyncResultPreview(text: string): string {
+	return `${text.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
+}
+
 export interface AsyncResultEntry {
 	jobId: string;
 	result: string;
@@ -46,6 +53,12 @@ export interface AsyncResultEntry {
 	 * the manager's per-id suppression marker.
 	 */
 	epoch: number;
+	/**
+	 * Set when the result is too long to deliver whole and its text is rendered at build time
+	 * (a backgrounded `ask` answer, numbered against the answers delivered with it). Saves the
+	 * rendered full text and returns its artifact id, or undefined when nothing was saved.
+	 */
+	spill?: (fullText: string) => string | undefined;
 }
 
 type AsyncResultJobDetails = {
@@ -64,6 +77,12 @@ type AsyncResultJobDetails = {
 export type AsyncResultDetails = {
 	jobs: AsyncResultJobDetails[];
 	meta?: OutputMeta;
+	/**
+	 * How many leading content images are images a person pasted into backgrounded `ask`
+	 * answers. They are numbered across the delivery (`[Image #N]` is the Nth of them), so
+	 * `attachment://N` resolves to them; images other jobs produced follow and are not attachments.
+	 */
+	answerImageCount?: number;
 };
 
 /**
@@ -123,7 +142,30 @@ function commandIdentity(command: string): string {
 
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
-	const jobs = entries.map(entry => {
+	// Each backgrounded `ask` answer numbers its pasted images from 1. In one delivery
+	// the answers share one message, so render each answer again with its markers raised
+	// past the images of the answers before it: `[Image #N]` then names one image of the
+	// whole delivery. Only runs the answer reported as markers move; file names, code spans and
+	// the person's own text stay as written, unless they read exactly like one of the composer's
+	// live tokens. An answer too long to deliver whole is cut to the usual preview, and its saved
+	// file holds the renumbered full text.
+	const answerImages: ImageContent[] = [];
+	const otherImages: ImageContent[] = [];
+	const results = entries.map(entry => {
+		const images = entry.job?.latestDetails?.images ?? [];
+		if (entry.job?.type !== "ask") {
+			otherImages.push(...images);
+			return entry.result;
+		}
+		const marked = entry.job.latestDetails?.imageMarkedText;
+		const text = marked ? renderImageMarkedText(marked, answerImages.length) : entry.result;
+		answerImages.push(...images);
+		if (!marked || !entry.spill) return text;
+		const artifactId = entry.spill(text);
+		const preview = asyncResultPreview(text);
+		return artifactId ? `${preview}\nFull output: artifact://${artifactId}` : preview;
+	});
+	const jobs = entries.map((entry, index) => {
 		const structured = entry.job?.structured;
 		const hasStructuredData = structured ? Object.hasOwn(structured, "data") : false;
 		const structuredJson = structured && structured.status !== "valid" ? renderStructuredJson(structured) : undefined;
@@ -148,7 +190,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			agentUrlId,
 			showAgentUrl: handles === "agent",
 			showHistoryUrl: handles === "history",
-			result: escapeHarnessTags(entry.result),
+			result: escapeHarnessTags(results[index]!),
 			type: entry.job?.type,
 			status: entry.job?.status,
 			agentId: entry.job?.agentId,
@@ -178,12 +220,14 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			...(job.meta ? { meta: job.meta } : {}),
 			...(job.structured ? { schema: job.structured } : {}),
 		})),
+		...(answerImages.length > 0 ? { answerImageCount: answerImages.length } : {}),
 	};
 	const text = prompt.render(asyncResultTemplate, {
 		multiple: jobs.length > 1,
 		jobs,
 	});
-	const images = entries.flatMap(entry => entry.job?.latestDetails?.images ?? []);
+	// Answer images lead, in marker order, so `[Image #N]` is also the Nth image the model sees here.
+	const images = [...answerImages, ...otherImages];
 	return {
 		role: "custom",
 		customType: ASYNC_RESULT_MESSAGE_TYPE,

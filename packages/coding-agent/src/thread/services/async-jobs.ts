@@ -222,7 +222,7 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 		},
 		publishCompleted: (manager, type, label, result, options) =>
 			manager.publishCompleted(type, label, result, options),
-		cancel: (manager, id, filter) => manager.cancel(id, filter),
+		cancel: (manager, id, filter, reason) => manager.cancel(id, filter, fromWireReason(reason)),
 		getJob: (manager, id) => {
 			const job = manager.getJob(id);
 			return job ? toJobWire(job) : undefined;

@@ -111,6 +111,7 @@ import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { isMainThread } from "../thread/identity";
 import { runFollowUpTurnOnHome, runSubprocessPlaced } from "../thread/executor-routing";
+import { rpcSync } from "../thread/rpc";
 import { existingSubagentWorkerPool, subagentWorkerPool } from "../thread/subagent-worker";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
@@ -461,6 +462,13 @@ export interface ExecutorOptions {
 	 * {@link SubagentLifecyclePayload.detached}.
 	 */
 	detached?: boolean;
+	/**
+	 * For a job-hosted spawn whose caller may still be waiting on it (a
+	 * `blocking: true` task item): true while the parent's tool call waits.
+	 * Payloads then report `detached: false`, since the call renders the
+	 * spawn inline until it hands the job to the background.
+	 */
+	parentWaits?: () => boolean;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
@@ -1308,6 +1316,7 @@ interface RunMonitorArgs {
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
 	detached?: boolean;
+	parentWaits?: () => boolean;
 	sessionFile?: string;
 	/** Soft assistant-request budget; 0 disables the guard. */
 	softRequestBudget: number;
@@ -1691,7 +1700,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			agentSource: agent.source,
 			task,
 			parentToolCallId: args.parentToolCallId,
-			detached: args.detached,
+			detached: args.detached && !args.parentWaits?.(),
 			assignment,
 			progress: { ...progress },
 			sessionFile: args.sessionFile,
@@ -2862,6 +2871,7 @@ interface FinalizeRunArgs {
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
 	detached?: boolean;
+	parentWaits?: () => boolean;
 	/**
 	 * This finalize is a revival/wake or explicit follow-up turn, not the initial
 	 * run. Structured turns only republish a real `yield`; message-result turns
@@ -3046,7 +3056,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		id,
 		agent: agent.name,
 		parentToolCallId: args.parentToolCallId,
-		detached: args.detached,
+		detached: args.detached && !args.parentWaits?.(),
 		agentSource: agent.source,
 		description: progress.description,
 		status: progress.status as "completed" | "failed" | "aborted",
@@ -4393,10 +4403,17 @@ export interface SubagentRunRequest {
 	readonly rootThresholds: RootCompactionThresholds | undefined;
 }
 
-/** Package `options` for a worker, carrying what the settings' symbol tag holds explicitly. */
+/**
+ * Package `options` for a worker, carrying what the settings' symbol tag holds explicitly.
+ * `parentWaits` is read synchronously each time a payload is built; an unmarked function
+ * would reach the worker as an async proxy whose pending promise reads as "still waited on",
+ * so a job the parent handed to the background would never report itself detached.
+ */
 export function subagentRunRequest(options: ExecutorOptions): SubagentRunRequest {
 	const settings: SubagentChainSettings | undefined = options.settings;
-	return { options, rootThresholds: settings?.[kRootCompactionThresholds] };
+	const parentWaits = options.parentWaits;
+	const routed = parentWaits ? { ...options, parentWaits: rpcSync(() => parentWaits()) } : options;
+	return { options: routed, rootThresholds: settings?.[kRootCompactionThresholds] };
 }
 
 /** Worker entry of a routed run: re-tag the settings mirror, then run here. */
@@ -4582,6 +4599,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
 		detached: options.detached,
+		parentWaits: options.parentWaits,
 		sessionFile: subtaskSessionFile,
 		softRequestBudget,
 		softRequestBudgetNotice,
@@ -5134,7 +5152,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				id,
 				agent: agent.name,
 				parentToolCallId: options.parentToolCallId,
-				detached: options.detached,
+				detached: options.detached && !options.parentWaits?.(),
 				agentSource: agent.source,
 				description: options.description,
 				status: "started" as const,
@@ -5508,6 +5526,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			subagentEventBus: options.subagentEventBus,
 			parentToolCallId: options.parentToolCallId,
 			detached: options.detached,
+			parentWaits: options.parentWaits,
 			sessionFile: subtaskSessionFile,
 			startTime,
 		});

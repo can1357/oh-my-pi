@@ -3366,6 +3366,8 @@ describe("agentLoop with AgentMessage", () => {
 		const toolSchema = type({});
 		let drained = false;
 		let steeringSignal: AbortSignal | undefined;
+		let messageSignal: AbortSignal | undefined;
+		let wakeSignal: AbortSignal | undefined;
 		let softAbortedDuringRun: boolean | undefined;
 		const peeked = Promise.withResolvers<void>();
 		const notice = createUserMessage("job bg_9 completed");
@@ -3383,6 +3385,9 @@ describe("agentLoop with AgentMessage", () => {
 				await peeked.promise;
 				await new Promise<void>(resolve => setImmediate(resolve));
 				softAbortedDuringRun = steeringSignal?.aborted === true;
+				expect(messageSignal?.aborted).toBe(false);
+				expect(wakeSignal?.aborted).toBe(true);
+				expect(wakeSignal?.reason).toBe("background");
 				return { content: [{ type: "text", text: "ran inline" }], details: {} };
 			},
 		};
@@ -3400,6 +3405,8 @@ describe("agentLoop with AgentMessage", () => {
 			interruptMode: "immediate",
 			getToolContext: toolCall => {
 				steeringSignal = toolCall?.steeringSignal;
+				messageSignal = toolCall?.messageSignal;
+				wakeSignal = toolCall?.wakeSignal;
 				return { toolCall } as AgentToolContext;
 			},
 			hasBackgroundCompletions: () => {
@@ -3501,6 +3508,8 @@ describe("agentLoop with AgentMessage", () => {
 		const toolSchema = type({});
 		let drained = false;
 		let steeringSignal: AbortSignal | undefined;
+		let messageSignal: AbortSignal | undefined;
+		let wakeSignal: AbortSignal | undefined;
 		let softAbortedDuringRun: boolean | undefined;
 		const peeked = Promise.withResolvers<void>();
 
@@ -3513,6 +3522,10 @@ describe("agentLoop with AgentMessage", () => {
 				await peeked.promise;
 				await new Promise<void>(resolve => setImmediate(resolve));
 				softAbortedDuringRun = steeringSignal?.aborted === true;
+				expect(messageSignal?.aborted).toBe(true);
+				expect(messageSignal?.reason).toBe("aside");
+				expect(wakeSignal?.aborted).toBe(true);
+				expect(wakeSignal?.reason).toBe("aside");
 				return { content: [{ type: "text", text: "ran inline" }], details: {} };
 			},
 		};
@@ -3530,6 +3543,8 @@ describe("agentLoop with AgentMessage", () => {
 			interruptMode: "immediate",
 			getToolContext: toolCall => {
 				steeringSignal = toolCall?.steeringSignal;
+				messageSignal = toolCall?.messageSignal;
+				wakeSignal = toolCall?.wakeSignal;
 				return { toolCall } as AgentToolContext;
 			},
 			hasQueuedAsides: () => {
@@ -3560,6 +3575,45 @@ describe("agentLoop with AgentMessage", () => {
 				e => e.type === "message_start" && e.message.role === "user" && e.message.content === "aside at boundary",
 			),
 		).toBe(true);
+	});
+
+	it("gives tools no wake signal in wait interrupt mode", async () => {
+		// No wake can end a call in "wait" mode, so a tool that would hand its
+		// work off must see that and keep blocking (and keep telling reply
+		// waits it is blocked) instead of holding an interruptible wait.
+		const toolSchema = type({});
+		let toolCallContext: ToolCallContext | undefined;
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "run",
+			label: "Run",
+			description: "Records its tool-call context",
+			parameters: toolSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "ran" }], details: {} };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "run", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "wait",
+			getToolContext: toolCall => {
+				toolCallContext = toolCall;
+				return { toolCall } as AgentToolContext;
+			},
+			hasQueuedAsides: () => false,
+		};
+		for await (const _event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+		}
+
+		expect(toolCallContext?.steeringSignal).toBeDefined();
+		expect(toolCallContext?.wakeSignal).toBeUndefined();
 	});
 
 	it("still raises the cooperative steering signal when a user steers after a background completion", async () => {

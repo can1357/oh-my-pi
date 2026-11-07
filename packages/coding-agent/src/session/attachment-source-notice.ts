@@ -1,5 +1,5 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import { type ImageAttachmentSource, imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { prompt } from "@oh-my-pi/pi-utils";
 import imageAttachmentPrompt from "../prompts/system/image-attachment.md" with { type: "text" };
 import videoAttachmentPrompt from "../prompts/system/video-attachment.md" with { type: "text" };
@@ -29,14 +29,22 @@ export function renderAttachmentSourceNotice(
 ): AttachmentSourceNotice | undefined {
 	const source = imageAttachmentSource(image);
 	if (!source) return undefined;
-	const isVideo = source.kind === "video";
 	return {
-		customType: isVideo ? VIDEO_ATTACHMENT_TYPE : IMAGE_ATTACHMENT_TYPE,
-		content: prompt.render(isVideo ? videoAttachmentPrompt : imageAttachmentPrompt, {
-			index: String(index),
-			path: source.path,
-			askAnswer: options?.askAnswer,
-		}),
+		customType: source.kind === "video" ? VIDEO_ATTACHMENT_TYPE : IMAGE_ATTACHMENT_TYPE,
+		content: renderAttachmentSourceNoticeText(source, index, options),
 		details: { index, path: source.path },
 	};
+}
+
+/** The notice text for the attachment numbered `index` whose file is `source`. */
+export function renderAttachmentSourceNoticeText(
+	source: ImageAttachmentSource,
+	index: number,
+	options?: { askAnswer?: boolean },
+): string {
+	return prompt.render(source.kind === "video" ? videoAttachmentPrompt : imageAttachmentPrompt, {
+		index: String(index),
+		path: source.path,
+		askAnswer: options?.askAnswer,
+	});
 }

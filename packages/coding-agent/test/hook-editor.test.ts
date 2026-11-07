@@ -270,37 +270,190 @@ describe("HookEditorComponent prompt-style mode", () => {
 		const later: ImageContent = { type: "image", data: "later", mimeType: "image/png" };
 		const earlier: ImageContent = { type: "image", data: "earlier", mimeType: "image/png" };
 		const onSubmit = vi.fn();
-		const component = new HookEditorComponent(
-			createTui(),
-			"Prompt",
-			"[Image #2] then [Image #1]",
-			onSubmit,
-			vi.fn(),
-			{
-				promptStyle: true,
-				acceptImages: true,
-				images: [later, earlier],
-			},
-		);
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+			images: [later, earlier],
+			parts: [{ kind: "image", n: 2, tail: "" }, " then ", { kind: "image", n: 1, tail: "" }],
+		});
 
 		component.handleInput("\r");
 
-		expect(onSubmit).toHaveBeenCalledWith("[Image #1] then [Image #2]", [earlier, later]);
+		expect(onSubmit).toHaveBeenCalledWith(
+			"[Image #1] then [Image #2]",
+			[earlier, later],
+			[{ kind: "image", n: 1, tail: "" }, " then ", { kind: "image", n: 2, tail: "" }],
+		);
 	});
 
 	it("drops images whose markers were deleted and renumbers the rest on submit", () => {
 		const first: ImageContent = { type: "image", data: "first", mimeType: "image/png" };
 		const second: ImageContent = { type: "image", data: "second", mimeType: "image/jpeg" };
 		const onSubmit = vi.fn();
-		const component = new HookEditorComponent(createTui(), "Prompt", "[Image #2]", onSubmit, vi.fn(), {
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
 			promptStyle: true,
 			acceptImages: true,
 			images: [first, second],
+			parts: [{ kind: "image", n: 2, tail: "" }],
 		});
 
 		component.handleInput("\r");
 
-		expect(onSubmit).toHaveBeenCalledWith("[Image #1]", [second]);
+		expect(onSubmit).toHaveBeenCalledWith("[Image #1]", [second], [{ kind: "image", n: 1, tail: "" }]);
+	});
+
+	it("refuses to open with images it has no runs for", () => {
+		// Guessing which characters of a prefill are markers is the defect #17843 is about, so a
+		// prompt handed attachments without their runs fails loudly instead of inventing them.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		expect(
+			() =>
+				new HookEditorComponent(createTui(), "Prompt", "[Image #1]", vi.fn(), vi.fn(), {
+					promptStyle: true,
+					acceptImages: true,
+					images: [image],
+				}),
+		).toThrow(/runs that name them/);
+	});
+
+	it("keeps an attachment and every typed marker across an unchanged external editor", () => {
+		// Opening and closing the editor must not change the answer. The editor is handed the
+		// attachment token, not the marker it stands for, so an identical return keeps the
+		// image a marker run and the person's own `[Image #1, 3x3]` text literal.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		let handedOut: string | undefined;
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+			externalEditor: text => {
+				handedOut = text;
+				return Promise.resolve(text);
+			},
+		});
+		const token = component.attachImage(image, { width: 3, height: 3 });
+		component.pasteText(`shot ${token} of user-[Image #1, 3x3].png`);
+
+		component.handleNativeEvent({ type: "action", key: "actions/external", act: "external", mods: [] });
+		return Promise.resolve().then(() => {
+			expect(handedOut).toBe(`shot ${token} of user-[Image #1, 3x3].png`);
+			component.handleInput("\r");
+			expect(onSubmit).toHaveBeenCalledWith(
+				"shot [Image #1, 3x3] of user-[Image #1, 3x3].png",
+				[image],
+				["shot ", { kind: "image", n: 1, tail: ", 3x3" }, " of user-[Image #1, 3x3].png"],
+			);
+		});
+	});
+
+	it("keeps an image the host delivered as its own piece of one large paste", () => {
+		// The host reserves one paste, attaches the image, and delivers its token as a piece of
+		// its own beside the pasted text: the token enters the buffer as the atom it is, even
+		// though the text beside it collapses into `[Paste #N]`.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+		});
+		const finishPaste = component.beginPaste();
+		finishPaste([{ text: "actual " }, { attachment: component.attachImage(image)! }, { text: largePasteText() }]);
+
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith(
+			`actual [Image #1]${largePasteText()}`,
+			[image],
+			["actual ", { kind: "image", n: 1, tail: "" }, largePasteText()],
+		);
+	});
+
+	it("leaves a pasted file name that reads like an attachment token as text", () => {
+		// `user-📷 #1.png` is a real file the person pasted the name of. Only the piece the host
+		// marked as an attachment is this prompt's token, and this piece is long enough to collapse,
+		// so its body — the name included — reaches the answer whole while the real image keeps its
+		// marker. Written into the buffer instead, those same characters would be read as the token.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+		});
+		const token = component.attachImage(image)!;
+		const typed = ` beside user-${token}.png\n${largePasteText()}`;
+		component.beginPaste()([{ text: "actual " }, { attachment: token }, { text: typed }]);
+
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith(
+			`actual [Image #1]${typed}`,
+			[image],
+			["actual ", { kind: "image", n: 1, tail: "" }, typed],
+		);
+	});
+
+	it("does not expand a pasted `[Paste #1]` again after the external editor returns it", async () => {
+		// The external editor is handed every paste already expanded, so its return holds the
+		// bodies. A `[Paste #N]` inside one of them is the person's own characters: expanding it
+		// a second time used to duplicate the whole body and its image reference.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		let handedOut: string | undefined;
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+			externalEditor: text => {
+				handedOut = text;
+				return Promise.resolve(text);
+			},
+		});
+		const token = component.attachImage(image)!;
+		const pasted = `literal [Paste #1]; ${largePasteText()}`;
+		component.beginPaste()([{ text: pasted }, { text: " " }, { attachment: token }]);
+		const body = `${pasted} [Image #1]`;
+
+		component.handleNativeEvent({ type: "action", key: "actions/external", act: "external", mods: [] });
+		await Promise.resolve();
+		expect(handedOut).toBe(`${pasted} ${token}`);
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith(body, [image], [`${pasted} `, { kind: "image", n: 1, tail: "" }]);
+	});
+
+	it("keeps a literal `[Paste #1]` in one piece when a later piece collapses", () => {
+		// The pieces of one delivery collapse separately. The first piece names `[Paste #1]` in
+		// the person's own JSON; the second is large enough to be stored, and must take a number
+		// their text does not already use, or their name field comes back as the body.
+		const onSubmit = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+		});
+		const head = '{"name":"[Paste #1]","body":"';
+		component.beginPaste()([{ text: head }, { text: `${largePasteText()}"}` }]);
+
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith(`${head}${largePasteText()}"}`);
+	});
+
+	it("keeps a typed marker in the same field as an attachment out of the submitted runs", () => {
+		// The answer owns one real image; everything else that reads like a marker is the
+		// person's own text and must stay a literal run, so a renumbering consumer cannot move it.
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn<(text: string, images?: ImageContent[], parts?: unknown[]) => void>();
+		const component = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, vi.fn(), {
+			promptStyle: true,
+			acceptImages: true,
+		});
+
+		component.pasteText(`shot ${component.attachImage(image, { width: 8, height: 4 })} of user-[Image #1].png`);
+		component.handleInput("\r");
+
+		expect(onSubmit).toHaveBeenCalledWith(
+			"shot [Image #1, 8x4] of user-[Image #1].png",
+			[image],
+			["shot ", { kind: "image", n: 1, tail: ", 8x4" }, " of user-[Image #1].png"],
+		);
 	});
 
 	it("hands an empty bracketed paste to the host's clipboard image read and submits once the marker lands", () => {
@@ -322,21 +475,20 @@ describe("HookEditorComponent prompt-style mode", () => {
 		expect(onSubmit).not.toHaveBeenCalled();
 		finishPaste?.(component.attachImage(image));
 
-		expect(onSubmit).toHaveBeenCalledWith("see [Image #1]", [image]);
+		expect(onSubmit).toHaveBeenCalledWith("see [Image #1]", [image], ["see ", { kind: "image", n: 1, tail: "" }]);
 	});
 
-	it("labels attached images with their size and deletes the marker as a unit", () => {
+	it("labels attached images with their size and deletes the token as a unit", () => {
 		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
 		const onSubmit = vi.fn();
 		const component = new HookEditorComponent(createTui(), "Prompt", "see ", onSubmit, vi.fn(), {
 			promptStyle: true,
 			acceptImages: true,
 		});
-		const marker = component.attachImage(image, { width: 640, height: 240 });
-		expect(marker).toBe("[Image #1, 640x240]");
-		component.pasteText(marker ?? "");
+		const token = component.attachImage(image, { width: 640, height: 240 });
+		component.pasteText(token ?? "");
 
-		// One backspace removes the whole marker, so its image is dropped on submit.
+		// One backspace removes the whole token, so its image is dropped on submit.
 		component.handleInput("\x7f");
 		component.handleInput("\r");
 

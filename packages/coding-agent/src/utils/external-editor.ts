@@ -44,7 +44,11 @@ export function getEditorName(command = getEditorCommand()): string | undefined 
 export interface OpenInEditorOptions {
 	/** File extension for the temp file (default: ".md"). */
 	extension?: string;
-	/** Keep the file's trailing newline instead of trimming it from the returned text. */
+	/**
+	 * Keep the file's trailing newline instead of trimming the one an editor adds when it
+	 * saves. A newline `content` already ended with is kept either way: that one is the
+	 * caller's own byte, not the editor's.
+	 */
 	trimTrailingNewline?: boolean;
 }
 
@@ -88,9 +92,11 @@ export async function openInEditor(
 		const exitCode = await openEditorOnPath(editorCmd, tmpFile);
 		if (exitCode === 0) {
 			const text = await Bun.file(tmpFile).text();
-			if (options?.trimTrailingNewline === false) {
-				return text;
-			}
+			// Most editors write a final newline whether or not the text had one, so a one-line
+			// answer would come back two lines. Trim that one — but only when the content handed
+			// out had no trailing newline of its own: an unchanged round trip must return the
+			// caller's bytes.
+			if (options?.trimTrailingNewline === false || content.endsWith("\n")) return text;
 			return text.replace(/\n$/, "");
 		}
 		return null;

@@ -169,6 +169,8 @@ export interface StructuredSubagentRequest {
 	index?: number;
 	parentToolCallId?: string;
 	detached?: boolean;
+	/** See `ExecutorOptions.parentWaits`: while true, a detached spawn reports itself waited on (not detached). */
+	parentWaits?: () => boolean;
 	invokedAt?: number;
 	acquiredAt?: number;
 	isolation?: StructuredSubagentIsolationControls;
@@ -792,6 +794,7 @@ function buildExecutorOptions(
 		index: request.index ?? 0,
 		parentToolCallId: request.parentToolCallId,
 		detached: request.detached,
+		parentWaits: request.parentWaits,
 		id,
 		taskDepth: session.taskDepth ?? 0,
 		invokedAt: request.invokedAt,

@@ -36,11 +36,14 @@
    - multiple questions: `User answers:` followed by one line per `id`
    - rich-dialog chat redirect: `User chose to chat about this instead of answering...`
 - Images pasted into rich-dialog custom answers and notes follow the text block, each with the source-path notice a main-editor attachment gets. `[Image #N]` markers are numbered across the whole result, in text order within each answer, and `attachment://N` resolves to them until a newer message attaches images; image data stays out of `details`.
+- Renumbering moves only the markers the dialog's prompt inserted. The ask prompt attaches an image as a composer token and reports the field as runs (`ExtensionAskDialogResultItem.customInputParts` / `noteParts`); the tool renumbers marker runs and renders every other run byte for byte, so a `user-[Image #1].png` you typed, a quotation, a fence or a code span is never rewritten. A host that attaches images to an answer without reporting runs keeps that answer's own numbering, markers and all — only the local terminal dialog attaches images today; the RPC, ACP, collab-guest and selector/editor paths answer with text only.
+- The external editor is handed the attachment tokens, not the markers they stand for, so opening and closing it leaves the answer as you wrote it — except for text that reads exactly like one of the composer's own tokens (`📷 #N`, a skill or model chip, a collapsed `[Paste #N]`), which the composer treats as that token wherever it stands, so a file name written that way still expands. A prompt re-opened on an earlier answer is prefilled with that answer's runs, and one handed attachments without their runs refuses to open rather than guess. A token the person deletes — in the prompt or in the external editor — drops its attachment, as it always has.
 - For a text-only active model with `images.describeForTextModels` on (the default), each answer image is followed by the vision-model description a pasted prompt image gets.
 - `details`:
    - single question: `{ question, options, multi, selectedOptions, customInput?, note?, timedOut? }`
    - multiple questions: `{ results: QuestionResult[] }`; each item includes `id`, `question`, `options`, `multi`, `selectedOptions`, and optional `customInput`, `note`, and `timedOut`
    - chat redirect: `{ chatRedirect: true, questions: string[] }`
+- With async jobs enabled and a manager present, a non-user delivered wake (peer IRC, queued aside, steering other than user, or a background completion) returns the call immediately while the form stays open as a hidden foreground job promoted to a visible `ask` background job. Its answer auto-delivers; `wait` can block on it. A user steer still closes the form with `Ask interrupted by message`. Once backgrounded, only the job signal controls the form: cancelling the job closes it, and a user dismissal reports that dismissal as the job result without aborting a later turn.
 - Cancellation and headless cases throw instead of returning a structured success result. The tool does not stream updates.
 
 ## Flow
@@ -55,8 +58,8 @@
    - multi-select checkbox loop plus `Done selecting` when applicable and `Other (type your own)`
 7. In fallback multi-question mode, left/right arrow handlers move backward/forward and preserve prior answers. Single-select answers advance automatically; multi-select options toggle until the user picks `Done selecting`, moves forward, or submits custom input.
 8. If a timeout fires before an answer, the fallback auto-selects the valid recommended option, or the first option otherwise; result text gets ` (auto-selected after timeout)` and `details.timedOut` is set. The rich dialog reports its own `timedOut` answers.
-9. If the user cancels without timeout, `execute()` aborts the tool context and throws `ToolAbortError("Ask tool was cancelled by the user")`.
-10.   On success it formats human-readable text plus structured `details`; the TUI renderer uses `details` for rich result display.
+9. If the user cancels without timeout while the call still owns the dialog, `execute()` aborts the tool context and throws `ToolAbortError("Ask tool was cancelled by the user")`. After a non-user wake has promoted the dialog to a background job, the same dismissal ends only that job.
+10. On success it formats human-readable text plus structured `details`; the TUI renderer uses `details` for rich result display.
 
 ## Modes / Variants
 

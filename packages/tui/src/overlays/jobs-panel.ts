@@ -12,7 +12,7 @@ import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keyb
 import { matchesKey } from "../keys";
 import { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "../utils";
 import { collapseCommand } from "../apps/ps-data";
-import { PREVIEW_LIMITS, shortenEmbeddedPaths } from "../render/render-utils";
+import { PREVIEW_LIMITS, shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../render/render-utils";
 import { ansi, code, col, compact, item, node, row, span, stableKey, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton, selectList } from "../native/overlay";
@@ -387,6 +387,14 @@ function describeJobList(rows: readonly JobTreeRow<JobsPanelJob>[], selected: Jo
 }
 
 /**
+ * A model-written label (an intent, a task's work, an `ask` question) or a command as one bounded
+ * row: terminal controls stripped, tabs and line breaks flattened to spaces, home paths shortened.
+ */
+function rowText(value: string): string {
+	return truncateToWidth(shortenEmbeddedPaths(collapseCommand(sanitizeText(value))), TRUNCATE_LENGTHS.LINE);
+}
+
+/**
  * One list row: the type icon tinted by status, the tree connector, the
  * subagent a task job runs, the one-line label (what the job is for when the
  * model said, else a process job's command in mono or a task's work in prose)
@@ -400,16 +408,19 @@ function describeJobItem(job: JobsPanelJob, agentName: string | undefined, guide
 			guide !== "" && span(guide, "mono dim"),
 			agentName !== undefined && agentName !== job.label && span(`${agentName} `, "strong"),
 			job.intent
-				? span(job.intent)
-				: job.type === "task"
-					? span(job.label)
-					: span(collapseCommand(job.label), "mono"),
+				? span(rowText(job.intent))
+				: job.type === "task" || job.type === "ask"
+					? span(rowText(job.label))
+					: span(rowText(job.label), "mono"),
 		]),
 		value: [span(age, "mono")],
 		icon: TYPE_ICON[job.type] ?? "job",
 		tone: STATUS_TONE[job.status],
-		title: `${job.intent ? `${job.intent}\n` : ""}${job.caption ? `${job.caption}\n` : ""}${job.label}\n${status} · ${job.type} · ${job.id}`,
-		aria: `${job.intent ?? job.label}, ${status.toLowerCase()}, ${age}`,
+		title: compact([job.intent || undefined, job.caption || undefined, job.label])
+			.map(line => collapseCommand(sanitizeText(line)))
+			.concat(`${status} · ${job.type} · ${job.id}`)
+			.join("\n"),
+		aria: `${collapseCommand(sanitizeText(job.intent ?? job.label))}, ${status.toLowerCase()}, ${age}`,
 	});
 }
 
@@ -455,7 +466,7 @@ function describeDetail(
 	const settled = job.status !== "running";
 	const exit = detail?.exitCode;
 	const age = Math.round(jobAge(job, nowMs));
-	const command = detail?.command ?? (job.type === "task" ? undefined : job.label);
+	const command = detail?.command ?? (job.type === "task" || job.type === "ask" ? undefined : job.label);
 	const title = job.intent ?? (command ? undefined : job.label);
 	const pids = detail?.pids ?? [];
 	const facts = compact([
@@ -486,8 +497,10 @@ function describeDetail(
 			]),
 			{ role: "omp.jobs.status", gap: "sm", align: "center" },
 		),
-		title ? text(title, { role: "omp.jobs.title", wrap: "word" }) : undefined,
-		job.caption ? text([span(job.caption, "muted")], { role: "omp.jobs.caption", wrap: "word" }) : undefined,
+		title ? text(replaceTabs(sanitizeText(title)), { role: "omp.jobs.title", wrap: "word" }) : undefined,
+		job.caption
+			? text([span(replaceTabs(sanitizeText(job.caption)), "muted")], { role: "omp.jobs.caption", wrap: "word" })
+			: undefined,
 		command
 			? code(command, { lang: "bash", wrap: true, preview: { lines: 4 }, role: "omp.jobs.command" })
 			: undefined,

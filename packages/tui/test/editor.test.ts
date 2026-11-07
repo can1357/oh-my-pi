@@ -2349,6 +2349,20 @@ describe("Editor component", () => {
 			expect(editor.getExpandedText()).toBe(pastedText);
 		});
 
+		it("gives a later paste a number the buffer does not already name", () => {
+			// The person's own `[Paste #1]` — typed, or pasted as one piece of a delivery whose
+			// next piece is large — must stay their characters. Taking that number would make
+			// their text expand into this paste's body.
+			const editor = new Editor(defaultEditorTheme);
+			const head = '{"name":"[Paste #1]","body":"';
+			editor.pasteText(head);
+			const body = `${"line\n".repeat(20)}end`;
+			editor.pasteText(`${body}"}`);
+
+			expect(editor.getText()).toBe(`${head}[Paste #2, +21 lines]`);
+			expect(editor.getExpandedText()).toBe(`${head}${body}"}`);
+		});
+
 		it("submits large pasted content literally", () => {
 			const editor = new Editor(defaultEditorTheme);
 			const pastedText = [

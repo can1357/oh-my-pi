@@ -137,6 +137,16 @@ function sanitizeLoadedText(text: string): string {
 	return replaceTabs(text.replace(/\r\n?/g, "\n")).replace(/[\x00-\x09\x0b-\x1f]/g, "");
 }
 
+/**
+ * Regex source matching every spelling of paste `id`'s collapsed marker: the bare `[Paste #1]`
+ * and the two the editor inserts (`, +12 lines`, `, 345 chars`). One definition, because the
+ * expansion pass and the id the editor hands out must agree on exactly which characters stand
+ * for a stored paste.
+ */
+function pasteMarkerSource(id: number): string {
+	return `\\[Paste #${id}(?:, (?:\\+\\d+ lines|\\d+ chars))?\\]`;
+}
+
 const segmenter = getSegmenter();
 
 /**
@@ -693,6 +703,16 @@ export interface EditorInlineReplacement {
 	insert: string;
 }
 
+/** One run of an expanded buffer ({@link Editor.getExpandedRuns}). */
+export interface ExpandedRun {
+	/** The expanded content: a paste's body, an atom's expansion, or typed text verbatim. */
+	text: string;
+	/** The registered atom label this run's characters matched; absent for a paste body and for
+	 *  text that matches no label. Text the person typed or pasted that reads exactly like a
+	 *  registered label matches it too, so this names the label, not who put the characters there. */
+	atom?: string;
+}
+
 /** Replacement candidates and the current-line span they replace. */
 export interface EditorWordReplacements {
 	line: number;
@@ -1235,6 +1255,15 @@ export class Editor implements Component, Focusable {
 				restore,
 			},
 		});
+	}
+
+	/**
+	 * Drop the collapsed-paste payloads, keeping registered atoms and the id counter. For a host
+	 * that has replaced the buffer with text in which every paste is already expanded: a
+	 * `[Paste #N]` left in that text is the person's own characters and must never expand again.
+	 */
+	clearPastes(): void {
+		this.#pastes.clear();
 	}
 
 	/** Release the current draft's expansion payloads without touching history. */
@@ -3303,23 +3332,42 @@ export class Editor implements Component, Focusable {
 	}
 
 	/** Expand collapsed markers — `[Paste #N]` tokens and registered atom labels — into their
-	 *  stored content. Single pass so replaced content is never rescanned (a pasted body that
-	 *  happens to contain another token's label must survive verbatim). Longer atom labels are
-	 *  tried first so `#1` never shadows `#10`. */
-	#expandPasteMarkers(text: string): string {
+	 *  stored content, keeping each run's origin. Single pass, so replaced content is never
+	 *  rescanned: a paste's body is the person's own characters, and text in it that reads like
+	 *  a token or another paste marker survives verbatim. Longer atom labels are tried first so
+	 *  `#1` never shadows `#10`. A host that attaches an image hands its token over as its own
+	 *  piece of the delivery ({@link PasteDelivery}) instead of burying it in a body, which is why
+	 *  a body is not searched: a token spliced into pasted text stays part of that text. */
+	#expandRuns(text: string): ExpandedRun[] {
 		const sources: string[] = [];
-		for (const pasteId of this.#pastes.keys()) {
-			sources.push(`\\[Paste #${pasteId}(?:, (?:\\+\\d+ lines|\\d+ chars))?\\]`);
+		for (const pasteId of this.#pastes.keys()) sources.push(pasteMarkerSource(pasteId));
+		for (const label of [...this.#atoms.keys()].sort((a, b) => b.length - a.length)) {
+			sources.push(RegExp.escape(label));
 		}
-		const labels = [...this.#atoms.keys()].sort((a, b) => b.length - a.length);
-		for (const label of labels) sources.push(RegExp.escape(label));
-		if (sources.length === 0) return text;
+		if (sources.length === 0) return [{ text }];
+		const runs: ExpandedRun[] = [];
+		const literal = (value: string) => {
+			if (value) runs.push({ text: value });
+		};
 		const markerRegex = new RegExp(sources.join("|"), "g");
-		return text.replace(markerRegex, match => {
-			const paste = /^\[Paste #(\d+)/.exec(match);
-			if (paste) return this.#pastes.get(Number(paste[1])) ?? match;
-			return this.#atoms.get(match) ?? match;
-		});
+		let last = 0;
+		for (const match of text.matchAll(markerRegex)) {
+			const paste = /^\[Paste #(\d+)/.exec(match[0]);
+			const expansion = paste ? this.#pastes.get(Number(paste[1])) : this.#atoms.get(match[0]);
+			if (expansion === undefined) continue;
+			literal(text.slice(last, match.index));
+			if (paste) literal(expansion);
+			else runs.push({ text: expansion, atom: match[0] });
+			last = match.index + match[0].length;
+		}
+		literal(text.slice(last));
+		return runs;
+	}
+
+	#expandedText(): string {
+		let out = "";
+		for (const run of this.#expandRuns(this.#state.lines.join("\n"))) out += run.text;
+		return out;
 	}
 
 	/** Register `label` as a collapsed atom expanding to `expansion` on submit, without inserting
@@ -3371,7 +3419,17 @@ export class Editor implements Component, Focusable {
 	 * Use this when you need the full content (e.g., for external editor).
 	 */
 	getExpandedText(): string {
-		return this.#expandPasteMarkers(this.#state.lines.join("\n"));
+		return this.#expandedText();
+	}
+
+	/**
+	 * The submitted buffer as runs, each naming the registered atom label it matched. A host
+	 * reads this instead of re-scanning {@link getExpandedText} for its own labels; text the
+	 * person typed or pasted that reads exactly like a live label is reported as that label's
+	 * run, because that is what the editor expands it to.
+	 */
+	getExpandedRuns(): ExpandedRun[] {
+		return this.#expandRuns(this.#state.lines.join("\n"));
 	}
 
 	getLines(): string[] {
@@ -3907,9 +3965,17 @@ export class Editor implements Component, Focusable {
 	}
 
 	/** Store `content` in the paste buffer and insert a collapsed `[Paste #N]` marker that expands
-	 *  back to `content` on submit. `lineCount` is the content's line count. */
+	 *  back to `content` on submit. `lineCount` is the content's line count.
+	 *
+	 *  The id skips any number the buffer already reads as a paste marker. A person who typed or
+	 *  pasted `[Paste #1]` themselves owns those characters: taking that number would make their
+	 *  own text expand into this paste's body, which is how a literal marker in one piece of a
+	 *  delivery came back as another piece's content. */
 	#storePasteMarker(content: string, lineCount: number): void {
-		this.#pasteCounter++;
+		const buffer = this.getText();
+		do {
+			this.#pasteCounter++;
+		} while (new RegExp(pasteMarkerSource(this.#pasteCounter)).test(buffer));
 		const pasteId = this.#pasteCounter;
 		this.#pastes.set(pasteId, content);
 
@@ -3992,7 +4058,7 @@ export class Editor implements Component, Focusable {
 		this.#endVimSession();
 		this.#resetKillSequence();
 
-		const result = this.#expandPasteMarkers(this.#state.lines.join("\n")).trim();
+		const result = this.#expandedText().trim();
 
 		this.#state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.clearPasteState();
