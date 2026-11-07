@@ -172,6 +172,7 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
+- Fixed `--print` mode hanging on exit instead of printing the final error line when stderr cannot take the write; the drain wait now also settles when the stream errors or closes ([#14825](https://github.com/can1357/oh-my-pi/pull/14825) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ## [18.16.0] - 2026-11-02
 
