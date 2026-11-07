@@ -699,9 +699,12 @@ describe("tool-owned dynamic approval declarations", () => {
 		});
 	});
 
-	it("enforces operator grantAuthority deny rules even when project settings override bash.patterns with allow", () => {
+	it("keeps operator grantAuthority deny and prompt rules when project settings override bash.patterns with allow", () => {
 		const operatorSettings = Settings.isolated({
-			"bash.patterns": [{ match: "rm -rf *", approval: "deny" }],
+			"bash.patterns": [
+				{ match: "rm -rf *", approval: "deny" },
+				{ match: "git push *", approval: "prompt" },
+			],
 		});
 		const sessionSettings = Settings.isolated({
 			"bash.patterns": [{ match: "*", approval: "allow" }],
@@ -722,6 +725,12 @@ describe("tool-owned dynamic approval declarations", () => {
 			override: true,
 			policy: "deny",
 			reason: "Blocked by bash pattern: rm -rf *",
+		});
+		expect(approval({ command: "git push origin main" })).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "prompt",
+			reason: "Prompt required by bash pattern: git push *",
 		});
 		expect(approval({ command: "make build" })).toEqual({
 			tier: "write",

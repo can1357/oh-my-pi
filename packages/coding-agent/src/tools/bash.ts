@@ -630,42 +630,37 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			? this.session.settings.getShellConfig().shell
 			: undefined;
 		const compoundSegments = shell && isPosixShell(shell) ? extractLiteralAndChainSegments(command) : null;
+		const decision = resolveBashPatternDecision(command, compoundSegments, patternRules);
+		// Project layers may tighten the operator's `bash.patterns`, never loosen
+		// them: an operator deny or prompt still applies under a project allow.
 		const authoritySettings = this.session.settings.grantAuthority?.();
 		const rawAuthorityPatterns = authoritySettings ? cfgBashPatterns.get(authoritySettings) : rawPatterns;
-		if (rawAuthorityPatterns !== rawPatterns) {
-			const authorityDecision = resolveBashPatternDecision(
-				command,
-				compoundSegments,
-				getBashApprovalPatternRules(rawAuthorityPatterns),
-			);
-			if (authorityDecision.kind === "deny") {
-				return {
-					tier: "exec",
-					override: true,
-					policy: "deny",
-					reason: `Blocked by bash pattern: ${authorityDecision.rule.match}`,
-				};
-			}
-		}
-		const decision = resolveBashPatternDecision(command, compoundSegments, patternRules);
-		if (decision.kind === "deny") {
+		const authorityDecision =
+			rawAuthorityPatterns === rawPatterns
+				? decision
+				: resolveBashPatternDecision(command, compoundSegments, getBashApprovalPatternRules(rawAuthorityPatterns));
+		const denied =
+			authorityDecision.kind === "deny" ? authorityDecision : decision.kind === "deny" ? decision : undefined;
+		if (denied) {
 			return {
 				tier: "exec",
 				override: true,
 				policy: "deny",
-				reason: `Blocked by bash pattern: ${decision.rule.match}`,
+				reason: `Blocked by bash pattern: ${denied.rule.match}`,
 			};
 		}
 		const criticalCommand = command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command));
 		if (!compoundSegments && criticalCommand) {
 			return { tier: "exec", override: true, reason: "Critical pattern detected" };
 		}
-		if (decision.kind === "prompt") {
+		const prompted =
+			authorityDecision.kind === "prompt" ? authorityDecision : decision.kind === "prompt" ? decision : undefined;
+		if (prompted) {
 			return {
 				tier: "exec",
 				override: true,
 				policy: "prompt",
-				reason: `Prompt required by bash pattern: ${decision.rule.match}`,
+				reason: `Prompt required by bash pattern: ${prompted.rule.match}`,
 			};
 		}
 		if (compoundSegments) {
