@@ -209,9 +209,10 @@ export class MnemosyneOssSessionState {
 
 	/** Explicit save (`retain`, `learn`, `/memory save`): one global-scope row in the retain bank. */
 	async save(input: MemoryBackendSaveInput): Promise<string> {
+		if (this.aliasOf) return this.aliasOf.save(input);
 		const content = input.content.trim();
 		if (!content) throw new Error("Memory content is empty.");
-		const primary = this.#owner;
+		const primary = this;
 		const importance = input.importance;
 		const id = await primary.remember(content, {
 			source: input.source ?? "coding-agent-memory-command",
