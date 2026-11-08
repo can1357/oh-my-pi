@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A Cursor `edit` or `write` called as an MCP tool now keeps its place in the tool batch, so a shell or read sent with it no longer runs against the old file or starts before an earlier call finishes ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.18.1] - 2026-11-08
 
 ### Fixed

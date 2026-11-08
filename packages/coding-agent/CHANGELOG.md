@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A Cursor `edit` or `write` called as an MCP tool now keeps its place in the tool batch, so a check sent right after an edit sees the new file and an edit no longer starts before an earlier read finishes ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes
