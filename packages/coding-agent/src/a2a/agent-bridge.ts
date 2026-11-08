@@ -323,8 +323,6 @@ export interface SpawnA2aAgentOptions {
 	inReplyTo?: string;
 	/** Caller-supplied wire id. Absent keeps the client's generated `omp-<uuid>`. */
 	messageId?: string;
-	/** Session bridge: consumes an outstanding request from this peer automatically (A2). */
-	bridge?: A2aBridgeApi;
 	connectTimeoutMs?: number;
 	pollIntervalMs?: number;
 	signal?: AbortSignal;
@@ -368,8 +366,6 @@ export async function spawnA2aAgent(options: SpawnA2aAgentOptions): Promise<Spaw
 		// send its answer back by spawning this terminal's a2a agent (the
 		// symmetric auto-registered roster entry).
 		const from = options.fromIdentity;
-		// A2: a reply to a peer we owe an answer to is correlated automatically.
-		const inReplyTo = options.inReplyTo ?? options.bridge?.consumeOutstandingRequest(agent.skillId);
 		const run = await client.sendAndWait(options.prompt, {
 			...(options.messageId !== undefined ? { messageId: options.messageId } : {}),
 			metadata: {
@@ -377,7 +373,7 @@ export async function spawnA2aAgent(options: SpawnA2aAgentOptions): Promise<Spaw
 				...(from?.name !== undefined ? { from: from.name } : {}),
 				...(from?.url !== undefined ? { fromUrl: from.url } : {}),
 				...(options.context !== undefined ? { context: options.context } : {}),
-				...(inReplyTo !== undefined ? { inReplyTo } : {}),
+				...(options.inReplyTo !== undefined ? { inReplyTo: options.inReplyTo } : {}),
 			},
 		});
 		const text = run.text.trim();

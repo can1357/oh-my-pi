@@ -1121,4 +1121,47 @@ describe("AgentLifecycleManager", () => {
 		expect(waitingRef.session).toBeNull();
 		expect(waiting.disposeCalls()).toBe(1);
 	});
+	it("rechecks ownership after the park yield and re-arms instead of disposing", async () => {
+		vi.useFakeTimers();
+		const waiting = makeSessionStub();
+		const waitingRef = registerIdleSub("waiter", waiting.session);
+		lifecycle.adopt("waiter", { idleTtlMs: TTL }, waitingRef);
+		const free = makeSessionStub();
+		const freeRef = registerIdleSub("free", free.session);
+		lifecycle.adopt("free", { idleTtlMs: TTL }, freeRef);
+
+		// register() commits on a microtask. Starting it before park() queues that
+		// commit ahead of the yield continuation, while park's synchronous entry
+		// check still sees no owner. Registering after park() would let the recheck
+		// run before the entry exists.
+		const registered = OutgoingRequests.global().register({
+			messageId: "raced-reply",
+			peer: "beta",
+			ownerId: "waiter",
+			jobId: "job-waiter",
+			deadline: null,
+		});
+		const parking = lifecycle.park("waiter");
+		const freeParking = lifecycle.park("free");
+		await registered;
+		await parking;
+		await freeParking;
+
+		expect(waitingRef.session).toBe(waiting.session);
+		expect(waitingRef.status).toBe("idle");
+		expect(waiting.disposeCalls()).toBe(0);
+		expect(free.disposeCalls()).toBe(1);
+		expect(lifecycle.isParking("waiter")).toBe(false);
+
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+		expect(waitingRef.session).toBe(waiting.session);
+		expect(waiting.disposeCalls()).toBe(0);
+
+		expect(await OutgoingRequests.global().cancel("raced-reply")).toBe(true);
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+		expect(waitingRef.status).toBe("parked");
+		expect(waiting.disposeCalls()).toBe(1);
+	});
 });

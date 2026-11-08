@@ -28,6 +28,7 @@ import { discoverAgents } from "../task/discovery";
 import { cfgA2aPort, cfgA2aToken } from "../task/settings";
 import type { AgentDefinition } from "../task/types";
 import { buildAgentCard, type AgentCard } from "./card";
+import { OutgoingRequests } from "./outgoing-requests";
 import {
 	A2A_SENDER_ID,
 	type A2aDispatchDeps,
@@ -279,6 +280,7 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 		contextIds: new Map<string, string>(),
 		pendingSpawns,
 		...(options.onIncomingRequest !== undefined ? { noteIncomingRequest: options.onIncomingRequest } : {}),
+		outgoing: OutgoingRequests.global(),
 	};
 	const unsubscribe = options.registry.onChange(event => {
 		if (event.type === "removed") {

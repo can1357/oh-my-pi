@@ -36,6 +36,7 @@
 
 ### Fixed
 
+- Interrupting an addressed A2A task before its delivery receipt cancels its local reply job, and delivery failures are reported once rather than repeated as asynchronous job results.
 - A `yield` or `handback` result ends the child only when that same result was accepted. A same-named custom tool replacing the built-in, or a result with missing details or an unknown status, no longer aborts the run without a report; a later valid terminal report is still accepted, and an earlier incremental section cannot authorize a later rejected result. `yield` and `handback` are reserved in child sessions so a custom tool cannot replace those built-ins
 - A clean schema-less structured child that never submits an accepted yield returns only its last assistant turn with exit 0, instead of concatenating earlier turns and reminder replies
 - A clean schema-less structured child that finishes on fallback last-turn text, with exit 0 and no abort, is stamped accepted. A missed idle update still moves that registry ref out of `running`; a schema-bearing missing yield and an aborted run stay unstamped

@@ -94,6 +94,7 @@ import {
 	spawnA2aAgent,
 } from "../a2a/agent-bridge";
 import { OutgoingRequests } from "../a2a/outgoing-requests";
+import { TASK_STATE } from "../a2a/rpc";
 import {
 	cfgA2aClientTimeoutMs,
 	cfgA2aReplyTimeoutMs,
@@ -2319,9 +2320,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const registry = OutgoingRequests.global();
 		const gate = Promise.withResolvers<{ kind: "receipt" } | { kind: "outcome"; outcome: SpawnA2aAgentResult }>();
 		let opened = false;
+		let onToolAbort: (() => void) | undefined;
+		const detachToolAbort = () => {
+			const abort = onToolAbort;
+			if (!abort) return;
+			onToolAbort = undefined;
+			args.signal?.removeEventListener("abort", abort);
+		};
 		const open = (value: { kind: "receipt" } | { kind: "outcome"; outcome: SpawnA2aAgentResult }) => {
 			if (opened) return;
 			opened = true;
+			detachToolAbort();
 			gate.resolve(value);
 		};
 		const jobId = manager.register(
@@ -2332,6 +2341,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					void registry.cancel(messageId);
 				};
 				ctx.signal.addEventListener("abort", onAbort);
+				let receipt = false;
+				let failedOutcome: SpawnA2aAgentResult | undefined;
 				try {
 					if (ctx.signal.aborted) throw new Error("cancelled");
 					await registry.register({
@@ -2343,28 +2354,29 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					});
 					const outcome = await this.#sendAddressedA2a(args, assignment, messageId, ctx.signal);
 					if (outcome.deliveryReceipt === true && outcome.exitCode === 0) {
+						receipt = true;
 						open({ kind: "receipt" });
 						return await registry.wait(messageId);
 					}
-					const reason = outcome.error ?? outcome.output;
 					if (outcome.exitCode !== 0) {
-						await registry.cancel(messageId);
-						open({ kind: "outcome", outcome });
-						throw new Error(reason);
+						failedOutcome = outcome;
+						throw new Error(outcome.error ?? outcome.output);
 					}
 					await registry.cancel(messageId);
+					manager.acknowledgeDeliveries([ctx.jobId]);
 					open({ kind: "outcome", outcome });
 					return outcome.output;
 				} catch (error) {
 					const reason = error instanceof Error ? error.message : String(error);
 					await registry.cancel(messageId);
+					if (!receipt) manager.acknowledgeDeliveries([ctx.jobId]);
 					open({
 						kind: "outcome",
-						outcome: {
+						outcome: failedOutcome ?? {
 							exitCode: 1,
 							output: reason,
 							error: reason,
-							state: "TASK_STATE_FAILED" as SpawnA2aAgentResult["state"],
+							state: TASK_STATE.FAILED,
 						},
 					});
 					throw error;
@@ -2374,12 +2386,25 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			},
 			{ ownerId },
 		);
-		const settled = await gate.promise;
-		if (settled.kind === "receipt") return this.#awaitingReplyResult(args, jobId);
-		await manager.getJob(jobId)?.promise;
-		const id =
-			args.preAllocatedId ?? (await this.#outputManager().allocate(args.params.name?.trim() || generateTaskName()));
-		return this.#packageA2aOutcome(args, assignment, id, settled.outcome);
+		onToolAbort = () => {
+			if (opened) return;
+			manager.cancel(jobId, { ownerId });
+		};
+		if (!opened && args.signal) {
+			args.signal.addEventListener("abort", onToolAbort);
+			if (args.signal.aborted) onToolAbort();
+		}
+		try {
+			const settled = await gate.promise;
+			if (settled.kind === "receipt") return this.#awaitingReplyResult(args, jobId);
+			await manager.getJob(jobId)?.promise;
+			const id =
+				args.preAllocatedId ??
+				(await this.#outputManager().allocate(args.params.name?.trim() || generateTaskName()));
+			return this.#packageA2aOutcome(args, assignment, id, settled.outcome);
+		} finally {
+			detachToolAbort();
+		}
 	}
 
 	async #awaitAddressedA2aInline(
@@ -2428,7 +2453,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				exitCode: 1,
 				output: reason,
 				error: reason,
-				state: "TASK_STATE_FAILED" as SpawnA2aAgentResult["state"],
+				state: TASK_STATE.FAILED,
 			});
 		} finally {
 			args.signal?.removeEventListener("abort", onAbort);

@@ -14,7 +14,7 @@
  */
 
 import type { SpawnSubagentOptions } from "../extensibility/extensions/types";
-import { OutgoingRequests } from "./outgoing-requests";
+import type { OutgoingRequestsApi } from "./outgoing-requests";
 import { MAIN_AGENT_ID, type AgentRef, type AgentRegistryApi } from "../registry/agent-registry";
 import { PerCallModelError } from "../task/model-approval";
 import { SpawnRefusedError } from "../task/spawn-run";
@@ -469,6 +469,8 @@ export interface A2aDispatchDeps {
 	 * spawn; the live server always installs one ledger for every view.
 	 */
 	pendingSpawns?: PendingSpawnLedger;
+	/** Process-wide outgoing reply registry. Absent leaves a correlated reply on IRC. */
+	outgoing?: OutgoingRequestsApi;
 }
 
 /** A delivered peer request that expects an answer (A2). */
@@ -707,8 +709,8 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 		if (!target) {
 			throw new RpcError(RPC_ERRORS.TASK_NOT_FOUND, `Task not found: ${request.to}`, { httpStatus: 404 });
 		}
-		if (request.inReplyTo !== undefined && request.from !== undefined) {
-			const matched = await OutgoingRequests.global().resolve(request.inReplyTo, request.from, request.text);
+		if (request.inReplyTo !== undefined && request.from !== undefined && deps.outgoing) {
+			const matched = await deps.outgoing.resolve(request.inReplyTo, request.from, request.text);
 			if (matched) {
 				const current = deps.registry.get(target.id) ?? target;
 				return persistTask(

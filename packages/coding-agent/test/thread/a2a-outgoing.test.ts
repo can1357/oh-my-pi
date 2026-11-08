@@ -194,6 +194,7 @@ describe("outgoing A2A registry across workers", () => {
 						bus.push(message.body);
 						return { to: message.to, outcome: "injected" as const };
 					},
+					outgoing: OutgoingRequests.global(),
 				},
 			);
 			expect(bus).toEqual([]);

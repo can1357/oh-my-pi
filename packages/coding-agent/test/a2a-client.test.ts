@@ -1226,7 +1226,7 @@ describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
 			expect(remoteInbox[0]!.body).toContain(`spawning the agent a2a:${alphaName}`);
 
 			// B registers A's card, then answers by spawning a2a:<A's auto name>.
-			// The bridge consumes the outstanding request and stamps inReplyTo.
+			// The caller consumes the outstanding request and passes the correlation explicitly.
 			await addA2aAgentsFromUrl({ bridge: builderReplyBridge, url: sender.url, agentDir: dir.path() });
 			const replyTarget = builderReplyBridge.get(`a2a:${alphaName}`);
 			expect(replyTarget).toBeDefined();
@@ -1234,7 +1234,7 @@ describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
 				agent: replyTarget!,
 				prompt: "the answer is 42",
 				fromIdentity: { name: builderName, url: remote.url },
-				bridge: builderReplyBridge,
+				inReplyTo: builderReplyBridge.consumeOutstandingRequest(replyTarget!.skillId),
 			});
 			expect(reply.exitCode).toBe(0);
 			expect(senderInbox).toHaveLength(1);
@@ -1715,6 +1715,7 @@ async function deliverReply(options: {
 			...(options.incoming !== undefined
 				? { noteIncomingRequest: (request: A2aIncomingRequest) => options.incoming?.push(request) }
 				: {}),
+			outgoing: OutgoingRequests.global(),
 		},
 	);
 }
@@ -1880,12 +1881,49 @@ describe("addressed A2A reply jobs", () => {
 		}
 	});
 
+	it("cancels the owned job when the tool signal aborts while SendMessage is held", async () => {
+		const hold = Promise.withResolvers<unknown>();
+		const seen = Promise.withResolvers<RpcCall>();
+		const server = mockA2a({
+			onRpc: call => {
+				seen.resolve(call);
+				return hold.promise;
+			},
+		});
+		const { bridge } = await registerFrom(server);
+		const manager = managerFor();
+		const tool = await createTaskTool(bridge, Settings.isolated(), {
+			agentId: OWNER,
+			asyncJobManager: manager,
+		});
+		const controller = new AbortController();
+		const executing = tool.execute(
+			"tc-abort",
+			{ agent: "a2a:main", task: "abort while sending" } as TaskParams,
+			controller.signal,
+		);
+		try {
+			await seen.promise;
+			expect(OutgoingRequests.global().hasOwner(OWNER)).toBe(true);
+			controller.abort();
+			await executing;
+			expect(manager.getAllJobs({ ownerId: OWNER })[0]).toMatchObject({ status: "cancelled" });
+			expect(OutgoingRequests.global().hasOwner(OWNER)).toBe(false);
+		} finally {
+			hold.resolve(rpcResult(1, { task: deliveryTask() }));
+		}
+	});
+
 	it("completes the owned job once when the matching reply arrives after the receipt, with no IRC copy", async () => {
 		const server = mockA2a({
 			onRpc: () => rpcResult(1, { task: deliveryTask() }),
 		});
 		const { bridge } = await registerFrom(server);
 		const manager = managerFor();
+		const delivered: string[] = [];
+		manager.registerDeliverySink(OWNER, (_jobId, text) => {
+			delivered.push(text);
+		});
 		const tool = await createTaskTool(bridge, Settings.isolated(), {
 			agentId: OWNER,
 			asyncJobManager: manager,
@@ -1913,6 +1951,8 @@ describe("addressed A2A reply jobs", () => {
 		});
 		expect(again).toHaveLength(1);
 		expect(manager.getJob(jobId!)?.resultText).toBe("late answer");
+		await manager.drainDeliveries({ timeoutMs: 1_000 });
+		expect(delivered).toEqual(["late answer"]);
 	});
 
 	it("matches the remote terminal identity, not the addressed skill id or display alias", async () => {
@@ -1965,6 +2005,10 @@ describe("addressed A2A reply jobs", () => {
 		});
 		const transportBridge = (await registerFrom(transport)).bridge;
 		const transportManager = managerFor();
+		const transportDelivered: string[] = [];
+		transportManager.registerDeliverySink(OWNER, (_jobId, text) => {
+			transportDelivered.push(text);
+		});
 		const transportTool = await createTaskTool(transportBridge, Settings.isolated(), {
 			agentId: OWNER,
 			asyncJobManager: transportManager,
@@ -1979,11 +2023,18 @@ describe("addressed A2A reply jobs", () => {
 		expect(transportJobs).toHaveLength(1);
 		expect(transportJobs[0]?.status).toBe("failed");
 
+		await transportManager.drainDeliveries({ timeoutMs: 1_000 });
+		expect(transportDelivered).toEqual([]);
+
 		const receipt = mockA2a({
 			onRpc: () => rpcResult(1, { task: deliveryTask("failed", "agent is gone") }),
 		});
 		const receiptBridge = (await registerFrom(receipt)).bridge;
 		const receiptManager = managerFor();
+		const receiptDelivered: string[] = [];
+		receiptManager.registerDeliverySink("caller-b", (_jobId, text) => {
+			receiptDelivered.push(text);
+		});
 		const receiptTool = await createTaskTool(receiptBridge, Settings.isolated(), {
 			agentId: "caller-b",
 			asyncJobManager: receiptManager,
@@ -1999,6 +2050,8 @@ describe("addressed A2A reply jobs", () => {
 			status: "failed",
 			errorText: expect.stringContaining("agent is gone"),
 		});
+		await receiptManager.drainDeliveries({ timeoutMs: 1_000 });
+		expect(receiptDelivered).toEqual([]);
 	});
 
 	it("fails the reply job on the reply deadline and leaves a zero deadline running", async () => {
@@ -2135,6 +2188,31 @@ describe("addressed A2A reply jobs", () => {
 		});
 		expect(bus).toEqual([]);
 		expect(textOf(await pending)).toBe("inline answer");
+		expect(OutgoingRequests.global().hasOwner(OWNER)).toBe(false);
+	});
+
+	it("fails the inline wait at the same reply deadline", async () => {
+		vi.useFakeTimers();
+		const seen = Promise.withResolvers<RpcCall>();
+		const server = mockA2a({
+			onRpc: call => {
+				seen.resolve(call);
+				return rpcResult(1, { task: deliveryTask() });
+			},
+		});
+		const { bridge } = await registerFrom(server);
+		const tool = await createTaskTool(bridge, Settings.isolated({ "a2a.replyTimeoutMs": 5_000 }), {
+			agentId: OWNER,
+		});
+		const pending = tool.execute("tc-inline-timeout", { agent: "a2a:main", task: "expire inline" } as TaskParams);
+		await seen.promise;
+		expect(OutgoingRequests.global().hasOwner(OWNER)).toBe(true);
+		vi.advanceTimersByTime(4_999);
+		await Promise.resolve();
+		expect(OutgoingRequests.global().hasOwner(OWNER)).toBe(true);
+		vi.advanceTimersByTime(1);
+		await Promise.resolve();
+		expect(textOf(await pending)).toContain("reply timeout");
 		expect(OutgoingRequests.global().hasOwner(OWNER)).toBe(false);
 	});
 
