@@ -7,6 +7,7 @@
 - Exported the Responses replay decision (`replaysNativeResponsesHistory`, `getReplayableNativeResponsesHistoryItems`, `replaysNativeResponsesTurn`), so callers that estimate or trim context can tell which turns a request sends as native payload items instead of rebuilding them from message content
 
 ## [18.18.1] - 2026-11-08
+- Added `CursorExecFrameContext`: `CursorExecHandlers.read` and `write` receive `{ editMaterialization: true }` for the frames that materialize a native StrReplace or Write, and `CursorExecHandlers.editSettled` ends the live card of an edit the server completed without writing ([#18435](https://github.com/can1357/oh-my-pi/pull/18435) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 
 ### Fixed
 
