@@ -425,10 +425,15 @@ impl File for StdFile {
 
 /// Engine path → host path (UTF-8 required on Windows). A URL path
 /// ([`crate::bash::fs::url_root_len`]) names no host file: `NotFound`, rather
-/// than a lookup relative to the process's working directory.
+/// than a lookup relative to the process's working directory. On Windows the
+/// exact path `/dev/null` is the null device `NUL`; a longer name is not.
 pub fn host_path(p: &[u8]) -> io::Result<&Path> {
 	if crate::bash::fs::url_root_len(p).is_some() {
 		return Err(io::Error::from(io::ErrorKind::NotFound));
+	}
+	#[cfg(windows)]
+	if p == b"/dev/null" {
+		return Ok(Path::new("NUL"));
 	}
 	p.to_path()
 		.map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
@@ -521,6 +526,44 @@ fn stat_of(meta: &fs::Metadata) -> Stat {
 			rdev: 0,
 			blksize: 4096,
 		}
+	}
+}
+
+/// `stat` of `path`. Windows `GetFileAttributes` does not see the null
+/// device, so a failed lookup of `NUL` is still the device `test -e` expects.
+fn stat_path(path: &BStr, follow: bool) -> io::Result<Stat> {
+	let host = host_path(path)?;
+	let meta = if follow {
+		fs::metadata(host)
+	} else {
+		fs::symlink_metadata(host)
+	};
+	#[cfg(windows)]
+	if meta.is_err() && host == Path::new("NUL") {
+		return Ok(nul_stat());
+	}
+	Ok(stat_of(&meta?))
+}
+
+/// The null device `test -e` sees when Windows cannot stat `NUL`: present
+/// and a character device.
+#[cfg(windows)]
+fn nul_stat() -> Stat {
+	Stat {
+		kind: StatKind::CharDev,
+		mode: 0o666,
+		size: 0,
+		uid: 0,
+		gid: 0,
+		dev: 0,
+		ino: 0,
+		nlink: 1,
+		mtime_ns: 0,
+		atime_ns: 0,
+		ctime_ns: 0,
+		blocks: 0,
+		rdev: 0,
+		blksize: 4096,
 	}
 }
 
@@ -1057,17 +1100,7 @@ impl Fs for StdFs {
 	}
 
 	fn stat(&mut self, path: &BStr, follow: bool) -> FsPoll<Stat> {
-		FsPoll::Ready(
-			host_path(path)
-				.and_then(|p| {
-					if follow {
-						fs::metadata(p)
-					} else {
-						fs::symlink_metadata(p)
-					}
-				})
-				.map(|m| stat_of(&m)),
-		)
+		FsPoll::Ready(stat_path(path, follow))
 	}
 
 	fn access(&mut self, path: &BStr, mode: Access) -> FsPoll<()> {
@@ -1269,6 +1302,26 @@ mod tests {
 		let missing = ready(fs.stat(b"/definitely/not/here".as_bstr(), true)).unwrap_err();
 		assert_eq!(missing.kind(), io::ErrorKind::NotFound);
 		assert!(ready(fs.chdir_check(dir_bytes.as_bstr())).is_ok());
+	}
+
+	/// Windows maps only the exact null device to `NUL`. A child or a longer
+	/// name stays a normal path, and a URL still names no host file. On Unix
+	/// `/dev/null` is unchanged. A regression makes `>/dev/null` open the wrong
+	/// file, or a URL resolve against the working directory.
+	#[test]
+	fn host_path_maps_only_dev_null_to_nul() {
+		#[cfg(windows)]
+		{
+			assert_eq!(host_path(b"/dev/null").unwrap(), Path::new("NUL"));
+			assert_eq!(host_path(b"/dev/null/child").unwrap(), Path::new("/dev/null/child"));
+			assert_eq!(host_path(b"/dev/nullx").unwrap(), Path::new("/dev/nullx"));
+		}
+		#[cfg(unix)]
+		{
+			assert_eq!(host_path(b"/dev/null").unwrap(), Path::new("/dev/null"));
+		}
+		let url = host_path(b"skill://x/y").unwrap_err();
+		assert_eq!(url.kind(), io::ErrorKind::NotFound);
 	}
 
 	#[cfg(unix)]
