@@ -135,6 +135,10 @@
 - F2 now opens the rename dialog in the resume picker in Ghostty, kitty and other terminals using the kitty keyboard protocol; F1 and F4 shortcuts work there too ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
 - Added `Component.nativeTrailers()`, which lets a transcript block add native blocks of its own directly after it. Trailing blocks stay visible while the block is collapsed.
 
+### Fixed
+
+- A prompt and its Enter that were typed or written while omp was still starting now submit instead of leaving the text in the composer with the Enter turned into a newline ([#17820](https://github.com/can1357/oh-my-pi/issues/17820))
+
 ## [18.15.0] - 2026-11-01
 
 ### Breaking Changes
