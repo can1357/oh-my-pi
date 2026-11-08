@@ -37,7 +37,7 @@ sequenceDiagram
     B->>R: SendMessage (task a2a:reviewer), messageId=m1
     Note over R: delivered into reviewer's conversation as a user turn
     R-->>B: SendMessage, metadata.inReplyTo=m1
-    Note over B: labelled as the answer; owes no reply
+    Note over B: labelled as the answer, owes no reply
 ```
 
 - Address a terminal by name: start it with `omp --a2a-name reviewer`, or let it auto-name as `<cwd-slug>-<pid>`.
