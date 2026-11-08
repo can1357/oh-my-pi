@@ -156,6 +156,39 @@ describe("detectTerminalId", () => {
 		expect(getTerminalInfo(id).notifyProtocol).toBe(NotifyProtocol.Osc9);
 	});
 
+	it("recognizes Rex from REX_SESSION instead of falling through to the base profile", () => {
+		// REX_SESSION is set in every pane Rex hosts, so it names the emulator
+		// even when TERM and TERM_PROGRAM were rewritten. The same environment
+		// without it is the `base` profile: no true color, no hyperlinks.
+		const env = { REX_SESSION: "s1", TERM: "xterm-256color" };
+		expect(detectTerminalId({ TERM: "xterm-256color" })).toBe("base");
+		expect(detectTerminalId(env)).toBe("rex");
+		const info = getTerminalInfo("rex");
+		expect(info.trueColor).toBe(true);
+		expect(info.hyperlinks).toBe(true);
+		expect(shouldEnableHyperlinksByDefault(env, "rex")).toBe(true);
+	});
+
+	it("keeps the inner emulator identity when a Rex pane hosts it", () => {
+		// A kitty window launched from a Rex pane inherits REX_SESSION but
+		// paints the grid itself, so its own marker has to win.
+		expect(detectTerminalId({ REX_SESSION: "s1", KITTY_WINDOW_ID: "1" })).toBe("kitty");
+
+		// Warp has no session marker of its own, only TERM_PROGRAM, and it
+		// paints OSC 8 as literal text. Letting the inherited REX_SESSION win
+		// would flip shouldEnableHyperlinksByDefault from false to true and
+		// leave the escape sequence visible in every transcript link.
+		const warpEnv = { REX_SESSION: "s1", TERM_PROGRAM: "WarpTerminal", COLORTERM: "truecolor" };
+		const warpId = detectTerminalId(warpEnv);
+		expect(warpId).toBe("warp");
+		expect(shouldEnableHyperlinksByDefault(warpEnv, warpId)).toBe(false);
+
+		// TERM_PROGRAM-only emulators in general: their marker outranks the
+		// inherited REX_SESSION, so none of them regresses to the Rex profile.
+		expect(detectTerminalId({ REX_SESSION: "s1", TERM_PROGRAM: "rio" })).toBe("rio");
+		expect(detectTerminalId({ REX_SESSION: "s1", TERM_PROGRAM: "tern" })).toBe("tern");
+	});
+
 	it("falls back to trueColor on VTE/Ptyxis environments — VTE OSC 9 is ConEmu progress, not a notification protocol", () => {
 		const env = { TERM: "xterm-256color", TERM_PROGRAM: "", COLORTERM: "truecolor", VTE_VERSION: "8400" };
 
@@ -171,6 +204,10 @@ it("selects Kitty graphics for Rex via TERM_PROGRAM or TERM=xterm-rex (over SSH)
 		const id = detectTerminalId(env);
 		expect(id).toBe("rex");
 		expect(resolveImageProtocol(id, env, true)).toBe(ImageProtocol.Kitty);
+		// Rex renders OSC 8 and opens the link on command-click. With the
+		// hyperlink capability off, every path and URL in the transcript is
+		// plain text instead of a link the terminal would open.
+		expect(shouldEnableHyperlinksByDefault(env, id)).toBe(true);
 	}
 });
 

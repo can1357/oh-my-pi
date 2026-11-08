@@ -14,6 +14,9 @@
 ### Fixed
 
 - On Windows, Tern events relayed through ConPTY no longer leak into the composer as fragments like `":"ack","sf":"s:1"` when their tail arrives late ([#18465](https://github.com/can1357/oh-my-pi/pull/18465) by [@NetVar1337](https://github.com/NetVar1337)).
+### Fixed
+
+- Rex terminals render OSC 8 hyperlinks: omp detected Rex for Kitty graphics but kept its hyperlink capability off, so transcript URLs and file paths stayed plain text instead of command-clickable links ([#18467](https://github.com/can1357/oh-my-pi/pull/18467) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
 ## [18.18.1] - 2026-11-08
 

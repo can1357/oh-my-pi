@@ -627,8 +627,13 @@ const KNOWN_TERMINALS = Object.freeze({
 	// OSC 99, and OSC 66 text sizing are outside rio's supported set and keep
 	// the conservative defaults.
 	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, true),
-	// Rex (TERM_PROGRAM=rex / TERM=xterm-rex): only Kitty graphics is confirmed.
-	rex: new TerminalInfo("rex", ImageProtocol.Kitty, true, false),
+	// Rex (Superlogical's terminal) identifies via REX_SESSION in every pane it
+	// hosts, TERM_PROGRAM=rex, or TERM=xterm-rex over SSH. It renders Kitty
+	// graphics and OSC 8 hyperlinks — a link opens on command-click, and
+	// Settings > Terminal > Links only decides whether an `ssh://`-style link
+	// that launches another app asks first — so links are on. Notifications
+	// keep the BEL default.
+	rex: new TerminalInfo("rex", ImageProtocol.Kitty, true, true),
 	// Tern (Stencil's terminal, `stencil-term`) sets TERM_PROGRAM=tern and
 	// implements Kitty graphics (Unicode placeholders included), OSC 8 and
 	// OSC 9/99 notifications. Whether omp renders natively (Tern Surface
@@ -680,6 +685,7 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 		ITERM_SESSION_ID,
 		VSCODE_PID,
 		ALACRITTY_WINDOW_ID,
+		REX_SESSION,
 		TERM_PROGRAM,
 		LC_TERMINAL,
 		TERM,
@@ -722,6 +728,17 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 	if (TERM?.toLowerCase().includes("ghostty")) return "ghostty";
 	if (TERM && caseEq(TERM, "monstar")) return "monstar";
 	if (TERM && caseEq(TERM, "xterm-rex")) return "rex";
+
+	// Rex sets REX_SESSION (with REX_BLOCK/REX_SERVER/REX_BIN_DIR) in every pane
+	// it hosts, so it still names the emulator when an inner program rewrote
+	// TERM and TERM_PROGRAM. Checked after every emulator marker, because a
+	// process launched from a Rex pane inherits REX_SESSION while its own
+	// emulator sets TERM_PROGRAM (e.g. WarpTerminal) and paints the grid: the
+	// inner emulator's identity has to win. Warp renders OSC 8 as literal
+	// text, so letting the inherited marker win would turn every transcript
+	// link into visible escape noise in a Warp window opened from a Rex pane.
+	// A plain Rex pane carries no such marker and resolves here.
+	if (REX_SESSION) return "rex";
 
 	if (COLORTERM) {
 		if (caseEq(COLORTERM, "truecolor") || caseEq(COLORTERM, "24bit")) return "trueColor";
