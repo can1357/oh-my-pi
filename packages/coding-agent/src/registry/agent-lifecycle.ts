@@ -24,6 +24,7 @@
 
 import * as fs from "node:fs/promises";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { OutgoingRequests } from "../a2a/outgoing-requests";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
@@ -146,6 +147,8 @@ export interface AgentReleaseOptions {
  * and release directly — `release` itself never refuses.
  */
 export function unsavedAgentWork(ref: AgentRef): string | undefined {
+	if (OutgoingRequests.global().hasOwner(ref.id))
+		return `agent ${ref.id} is waiting on an A2A reply; releasing it drops the open request`;
 	if (ref.session?.ircWakesPending)
 		return `agent ${ref.id} still owes turns to queued peer messages; releasing it drops them`;
 	if ((ref.status === "parked" || ref.status === "aborted") && ref.sessionFile === null)
@@ -398,6 +401,10 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		if (!ref || adopted.ref !== ref) return;
 		const session = ref.session;
 		if (!session) return;
+		if (OutgoingRequests.global().hasOwner(id)) {
+			this.#armTimer(id, adopted);
+			return;
+		}
 
 		if (adopted.timer) {
 			clearTimeout(adopted.timer);
@@ -431,6 +438,10 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				const live = this.#registry.get(id);
 				if (live !== ref || !live.session || live.session !== session) return;
 				if (this.#adopted.get(id)?.ref !== ref) return;
+				if (OutgoingRequests.global().hasOwner(id)) {
+					this.#armTimer(id, adopted);
+					return;
+				}
 
 				// Preserve cost before detaching the only live source. The session usage
 				// index includes off-transcript model calls; remove completed task-result
@@ -791,7 +802,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			// A session still owing turns to IRC messages (held by a run publishing
 			// its result, or queued) would drop them when parked. Try again once the
 			// TTL passes anew.
-			if (adopted.ref.session?.ircWakesPending) {
+			if (adopted.ref.session?.ircWakesPending || OutgoingRequests.global().hasOwner(id)) {
 				this.#armTimer(id, adopted);
 				return;
 			}

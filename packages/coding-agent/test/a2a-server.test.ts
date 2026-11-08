@@ -8,12 +8,13 @@
  * `send` on the bus, so a fake pins exactly the surface the bridge relies on.
  */
 
-import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
+import { afterEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
 import { A2aAgentBridge } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
+import { type OutgoingRequest, OutgoingRequests } from "@oh-my-pi/pi-coding-agent/a2a/outgoing-requests";
 import {
 	type A2aIncomingRequest,
 	type A2aTask,
@@ -178,6 +179,8 @@ const handles: A2aServerHandle[] = [];
 
 afterEach(() => {
 	while (handles.length > 0) handles.pop()?.stop();
+	vi.useRealTimers();
+	OutgoingRequests.resetGlobalForTests();
 });
 
 function startServer(options: {
@@ -2019,6 +2022,129 @@ describe("A2A reply envelope", () => {
 		expect(incoming).toEqual([]);
 		// The recipient's footer reads this mark: an answer owes no reply.
 		expect(answers).toEqual(["request-17"]);
+	});
+});
+
+describe("A2A outgoing reply correlation", () => {
+	function request(overrides: Partial<OutgoingRequest> = {}): OutgoingRequest {
+		return {
+			messageId: "req-1",
+			peer: "builder",
+			ownerId: "owner-a",
+			jobId: "job-a",
+			deadline: null,
+			...overrides,
+		};
+	}
+
+	function start() {
+		const incoming: A2aIncomingRequest[] = [];
+		const started = startServer({
+			refs: [makeRef({ id: "Main", displayName: "Main Alias", kind: "main", status: "running" })],
+			onIncomingRequest: noted => incoming.push(noted),
+		});
+		return { ...started, incoming };
+	}
+
+	async function sendReply(
+		handle: A2aServerHandle,
+		metadata: Record<string, unknown>,
+		text = "the answer",
+	): Promise<{ status: number; json: unknown }> {
+		return rpc(handle, {
+			jsonrpc: "2.0",
+			id: 1,
+			method: "SendMessage",
+			params: {
+				message: { messageId: `reply-${metadata.inReplyTo ?? "none"}`, role: "ROLE_USER", parts: [{ text }] },
+				metadata: { to: "Main", ...metadata },
+			},
+		});
+	}
+
+	function deliveryOutcome(json: unknown): string | undefined {
+		const payload = json as { result?: { task?: { metadata?: { delivery?: { outcome?: string } } } } };
+		return payload.result?.task?.metadata?.delivery?.outcome;
+	}
+
+	it("completes a matching terminal-identity reply without an IRC copy", async () => {
+		const { handle, bus, incoming } = start();
+		await OutgoingRequests.global().register(request());
+		const waiting = OutgoingRequests.global().wait("req-1");
+
+		const { status, json } = await sendReply(handle, { from: "builder", inReplyTo: "req-1" }, "exact reply");
+
+		expect(status).toBe(200);
+		expect(deliveryOutcome(json)).toBe("injected");
+		expect(bus.sent).toEqual([]);
+		expect(incoming).toEqual([]);
+		expect(await waiting).toBe("exact reply");
+		expect(OutgoingRequests.global().hasOwner("owner-a")).toBe(false);
+	});
+
+	it("keeps a wrong sender, missing sender, unknown id, or duplicate on the IRC bus", async () => {
+		const { handle, bus, incoming } = start();
+		await OutgoingRequests.global().register(request());
+		const waiting = OutgoingRequests.global().wait("req-1");
+
+		await sendReply(handle, { from: "Reviewer", inReplyTo: "req-1" }, "skill id");
+		await sendReply(handle, { from: "Main Alias", inReplyTo: "req-1" }, "display alias");
+		await sendReply(handle, { inReplyTo: "req-1" }, "missing sender");
+		await sendReply(handle, { from: "builder", inReplyTo: "unknown-id" }, "unknown id");
+		expect(bus.sent.map(message => message.body)).toEqual([
+			expect.stringContaining("skill id"),
+			expect.stringContaining("display alias"),
+			expect.stringContaining("missing sender"),
+			expect.stringContaining("unknown id"),
+		]);
+		expect(incoming).toEqual([]);
+		let settled = false;
+		void waiting.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		expect(OutgoingRequests.global().hasOwner("owner-a")).toBe(true);
+
+		const matched = await sendReply(handle, { from: "builder", inReplyTo: "req-1" }, "exact reply");
+		expect(deliveryOutcome(matched.json)).toBe("injected");
+		expect(bus.sent).toHaveLength(4);
+		expect(await waiting).toBe("exact reply");
+
+		await sendReply(handle, { from: "builder", inReplyTo: "req-1" }, "duplicate");
+		expect(bus.sent).toHaveLength(5);
+		expect(bus.sent[4]?.body).toContain("duplicate");
+	});
+
+	it("keeps a timed-out or cancelled reply on the IRC bus", async () => {
+		const { handle, bus } = start();
+		const registry = OutgoingRequests.global();
+		vi.useFakeTimers();
+		await registry.register(request({ messageId: "timed", deadline: Date.now() + 15 }));
+		await registry.register(request({ messageId: "cancelled", ownerId: "owner-b", jobId: "job-b" }));
+		const timed = registry.wait("timed");
+		const cancelled = registry.wait("cancelled");
+		vi.advanceTimersByTime(15);
+		await Promise.resolve();
+		await expect(timed).rejects.toThrow("reply timeout");
+		expect(await registry.cancel("cancelled")).toBe(true);
+		await expect(cancelled).rejects.toThrow("cancelled");
+		vi.useRealTimers();
+
+		await sendReply(handle, { from: "builder", inReplyTo: "timed" }, "after timeout");
+		await sendReply(handle, { from: "builder", inReplyTo: "cancelled" }, "after cancel");
+
+		expect(bus.sent.map(message => message.body)).toEqual([
+			expect.stringContaining("after timeout"),
+			expect.stringContaining("after cancel"),
+		]);
+		expect(registry.hasOwner("owner-a")).toBe(false);
+		expect(registry.hasOwner("owner-b")).toBe(false);
 	});
 });
 

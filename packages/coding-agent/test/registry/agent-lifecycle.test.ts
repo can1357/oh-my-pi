@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { type AgentLifecycleApi, AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import {
+	type AgentLifecycleApi,
+	AgentLifecycleManager,
+	unsavedAgentWork,
+} from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { OutgoingRequests } from "@oh-my-pi/pi-coding-agent/a2a/outgoing-requests";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -53,6 +58,7 @@ describe("AgentLifecycleManager", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+		OutgoingRequests.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 	});
@@ -1073,5 +1079,46 @@ describe("AgentLifecycleManager", () => {
 		await expect(nextLifecycle.ensureLive("Next-Owner")).resolves.toBe(revived.session);
 		expect(registry.get("Next-Owner")).toMatchObject({ status: "idle", session: revived.session });
 		expect(revived.disposeCalls()).toBe(0);
+	});
+	it("keeps an adopted agent live while it owns a pending A2A reply, then parks after settlement", async () => {
+		vi.useFakeTimers();
+		const waiting = makeSessionStub();
+		const waitingRef = registerIdleSub("waiter", waiting.session);
+		lifecycle.adopt("waiter", { idleTtlMs: TTL }, waitingRef);
+		const free = makeSessionStub();
+		const freeRef = registerIdleSub("free", free.session);
+		lifecycle.adopt("free", { idleTtlMs: TTL }, freeRef);
+		await OutgoingRequests.global().register({
+			messageId: "open-reply",
+			peer: "beta",
+			ownerId: "waiter",
+			jobId: "job-waiter",
+			deadline: null,
+		});
+
+		expect(unsavedAgentWork(waitingRef) ?? "").toContain("waiter");
+		expect(unsavedAgentWork(freeRef)).toBeUndefined();
+
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+		expect(waitingRef.status).toBe("idle");
+		expect(waitingRef.session).toBe(waiting.session);
+		expect(waiting.disposeCalls()).toBe(0);
+		expect(freeRef.status).toBe("parked");
+		expect(freeRef.session).toBeNull();
+		expect(free.disposeCalls()).toBe(1);
+
+		await lifecycle.park("waiter");
+		expect(waitingRef.session).toBe(waiting.session);
+		expect(waiting.disposeCalls()).toBe(0);
+		expect(lifecycle.isParking("waiter")).toBe(false);
+
+		expect(await OutgoingRequests.global().cancel("open-reply")).toBe(true);
+		expect(unsavedAgentWork(waitingRef)).toBeUndefined();
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+		expect(waitingRef.status).toBe("parked");
+		expect(waitingRef.session).toBeNull();
+		expect(waiting.disposeCalls()).toBe(1);
 	});
 });

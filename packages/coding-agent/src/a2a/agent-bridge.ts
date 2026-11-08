@@ -321,6 +321,8 @@ export interface SpawnA2aAgentOptions {
 	context?: string;
 	/** Explicit correlation id for a reply to a prior request (A2). */
 	inReplyTo?: string;
+	/** Caller-supplied wire id. Absent keeps the client's generated `omp-<uuid>`. */
+	messageId?: string;
 	/** Session bridge: consumes an outstanding request from this peer automatically (A2). */
 	bridge?: A2aBridgeApi;
 	connectTimeoutMs?: number;
@@ -335,6 +337,8 @@ export interface SpawnA2aAgentResult {
 	error?: string;
 	state: TaskState;
 	remoteTaskId?: string;
+	/** Addressed delivery accepted; the peer's answer is still outstanding. */
+	deliveryReceipt?: boolean;
 }
 
 /**
@@ -367,6 +371,7 @@ export async function spawnA2aAgent(options: SpawnA2aAgentOptions): Promise<Spaw
 		// A2: a reply to a peer we owe an answer to is correlated automatically.
 		const inReplyTo = options.inReplyTo ?? options.bridge?.consumeOutstandingRequest(agent.skillId);
 		const run = await client.sendAndWait(options.prompt, {
+			...(options.messageId !== undefined ? { messageId: options.messageId } : {}),
 			metadata: {
 				...(options.spawn === true ? { spawn: true } : { to: agent.skillId }),
 				...(from?.name !== undefined ? { from: from.name } : {}),
@@ -378,15 +383,17 @@ export async function spawnA2aAgent(options: SpawnA2aAgentOptions): Promise<Spaw
 		const text = run.text.trim();
 		const remoteTaskId = run.task?.id;
 		const delivery = asRecord(run.task?.metadata)?.delivery;
-		if (delivery !== undefined && run.state !== TASK_STATE.COMPLETED && run.state !== TASK_STATE.FAILED) {
+		if (delivery !== undefined) {
 			const receipt = asRecord(delivery);
 			const outcome = typeof receipt?.outcome === "string" ? receipt.outcome : "unknown";
 			if (outcome === "failed") {
 				const reason = typeof receipt?.error === "string" ? receipt.error : "delivery failed";
 				return { exitCode: 1, output: reason, error: reason, state: run.state, remoteTaskId };
 			}
-			const delivered = `Delivered to ${agent.name} (${agent.url}) - the task now runs in that terminal's own conversation.`;
-			return { exitCode: 0, output: delivered, state: run.state, remoteTaskId };
+			if (run.state !== TASK_STATE.COMPLETED && run.state !== TASK_STATE.FAILED) {
+				const delivered = `Delivered to ${agent.name} (${agent.url}) - the task now runs in that terminal's own conversation.`;
+				return { exitCode: 0, output: delivered, state: run.state, remoteTaskId, deliveryReceipt: true };
+			}
 		}
 		if (run.interrupted) {
 			const reason = run.state === TASK_STATE.AUTH_REQUIRED ? A2A_AUTH_REQUIRED_TEXT : A2A_WAITING_FOR_INPUT_TEXT;

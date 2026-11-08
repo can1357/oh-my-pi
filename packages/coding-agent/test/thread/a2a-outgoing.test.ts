@@ -3,6 +3,7 @@
  * do not cover boot, `callSync` ownership checks, or exit teardown.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { sendA2aMessage } from "../../src/a2a/rpc";
 import { type OutgoingRequest, OutgoingRequests } from "../../src/a2a/outgoing-requests";
 import type { ThreadService } from "../../src/thread/services";
 import { a2aOutgoingThreadService } from "../../src/thread/services/a2a-outgoing";
@@ -148,5 +149,61 @@ describe("outgoing A2A registry across workers", () => {
 		);
 		await waitFor(() => settled);
 		await expect(pending).rejects.toThrow("unknown outgoing request");
+	});
+	it("completes a worker-originated request from main dispatch without an IRC copy", async () => {
+		const { probe } = await startWorker();
+		const outgoing = request({
+			messageId: "from-worker",
+			peer: "beta",
+			ownerId: "worker-owner",
+			jobId: "job-worker",
+		});
+		await probe.register(outgoing);
+		const waiting = probe.wait(outgoing.messageId);
+		const settled = waiting.then(
+			text => text,
+			() => undefined,
+		);
+		const bus: string[] = [];
+		const now = Date.now();
+		const main = {
+			id: "Main",
+			generation: 1,
+			displayName: "Main Alias",
+			kind: "main" as const,
+			parentId: "Main",
+			status: "idle" as const,
+			session: null,
+			sessionFile: null,
+			createdAt: now,
+			lastActivity: now,
+		};
+		try {
+			const task = await sendA2aMessage(
+				{
+					message: { messageId: "reply-worker", role: "ROLE_USER", parts: [{ text: "worker answer" }] },
+					metadata: { to: "Main", from: "beta", inReplyTo: outgoing.messageId },
+				},
+				{
+					registry: {
+						get: (id: string) => (id === "Main" ? main : undefined),
+						list: () => [main],
+						setStatus: () => false,
+					},
+					send: async message => {
+						bus.push(message.body);
+						return { to: message.to, outcome: "injected" as const };
+					},
+				},
+			);
+			expect(bus).toEqual([]);
+			expect(task.metadata).toMatchObject({ delivery: { outcome: "injected" } });
+			expect(await waiting).toBe("worker answer");
+			expect(mainRegistry().hasOwner("worker-owner")).toBe(false);
+			expect(await probe.hasOwner("worker-owner")).toBe(false);
+		} finally {
+			await OutgoingRequests.global().cancel(outgoing.messageId);
+			await settled;
+		}
 	});
 });

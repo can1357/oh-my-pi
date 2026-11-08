@@ -90,10 +90,13 @@ import {
 	type A2aBridgeApi,
 	rescanLocalBridges,
 	type A2aRuntimeAgent,
+	type SpawnA2aAgentResult,
 	spawnA2aAgent,
 } from "../a2a/agent-bridge";
+import { OutgoingRequests } from "../a2a/outgoing-requests";
 import {
 	cfgA2aClientTimeoutMs,
+	cfgA2aReplyTimeoutMs,
 	cfgA2aMaxPeerSkills,
 	cfgTaskBatch,
 	cfgTaskDisabledAgents,
@@ -418,6 +421,18 @@ interface ResolvedTaskItem extends TaskItem {
 
 interface SpawnParams extends TaskParams {
 	taskFileSha256?: string;
+}
+
+interface A2aSpawnCall {
+	agent: A2aRuntimeAgent;
+	params: SpawnParams;
+	context?: string;
+	bridge?: A2aBridgeApi;
+	preAllocatedId?: string;
+	spawnIndex: number;
+	startTime: number;
+	signal?: AbortSignal;
+	onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
 }
 
 /** The filesystem path a `taskFile` names; approval and dispatch share it so both see the same file. */
@@ -2174,18 +2189,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 	}
 
-	async #runA2aSpawn(args: {
-		agent: A2aRuntimeAgent;
-		params: SpawnParams;
-		context?: string;
-		bridge?: A2aBridgeApi;
-		preAllocatedId?: string;
-		spawnIndex: number;
-		startTime: number;
-		signal?: AbortSignal;
-		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
-	}): Promise<AgentToolResult<TaskToolDetails>> {
+	async #runA2aSpawn(args: A2aSpawnCall): Promise<AgentToolResult<TaskToolDetails>> {
 		const assignment = (args.params.task ?? "").trim();
+		if (args.params.a2aSpawn === true) return this.#finishA2aRun(args, assignment);
+		const inReplyTo = args.bridge?.consumeOutstandingRequest(args.agent.skillId);
+		if (inReplyTo !== undefined) return this.#finishA2aRun(args, assignment, inReplyTo);
+		return this.#awaitAddressedA2aReply(args, assignment);
+	}
+
+	async #finishA2aRun(
+		args: A2aSpawnCall,
+		assignment: string,
+		inReplyTo?: string,
+	): Promise<AgentToolResult<TaskToolDetails>> {
 		const id =
 			args.preAllocatedId ?? (await this.#outputManager().allocate(args.params.name?.trim() || generateTaskName()));
 		const progress: AgentProgress = {
@@ -2219,10 +2235,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			spawn: args.params.a2aSpawn === true,
 			fromIdentity: await this.#ownA2aIdentity(),
 			...(args.context !== undefined ? { context: args.context } : {}),
-			...(args.bridge !== undefined ? { bridge: args.bridge } : {}),
+			...(inReplyTo !== undefined ? { inReplyTo } : {}),
 			timeoutMs: cfgA2aClientTimeoutMs.get(this.session.settings),
 			signal: args.signal,
 		});
+		return this.#packageA2aOutcome(args, assignment, id, outcome);
+	}
+
+	#packageA2aOutcome(
+		args: A2aSpawnCall,
+		assignment: string,
+		id: string,
+		outcome: SpawnA2aAgentResult,
+	): AgentToolResult<TaskToolDetails> {
 		const durationMs = Date.now() - args.startTime;
 		const result: SingleResult = {
 			index: args.spawnIndex,
@@ -2241,6 +2266,173 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(outcome.error !== undefined ? { error: outcome.error } : {}),
 		};
 		return this.#buildResultPayload(result, null, durationMs, "");
+	}
+
+	#replyDeadline(): number | null {
+		const timeoutMs = cfgA2aReplyTimeoutMs.get(this.session.settings);
+		return timeoutMs > 0 ? Date.now() + timeoutMs : null;
+	}
+
+	#awaitingReplyResult(args: A2aSpawnCall, jobId: string): AgentToolResult<TaskToolDetails> {
+		return {
+			content: [{ type: "text", text: `Delivered to ${args.agent.name}; awaiting reply in job '${jobId}'.` }],
+			details: {
+				projectAgentsDir: null,
+				results: [],
+				totalDurationMs: Date.now() - args.startTime,
+				async: { state: "running", jobId, type: "task" },
+			},
+		};
+	}
+
+	async #sendAddressedA2a(
+		args: A2aSpawnCall,
+		assignment: string,
+		messageId: string,
+		signal: AbortSignal | undefined,
+	): Promise<SpawnA2aAgentResult> {
+		return spawnA2aAgent({
+			agent: args.agent,
+			prompt: assignment,
+			messageId,
+			fromIdentity: await this.#ownA2aIdentity(),
+			...(args.context !== undefined ? { context: args.context } : {}),
+			timeoutMs: cfgA2aClientTimeoutMs.get(this.session.settings),
+			signal,
+		});
+	}
+
+	async #awaitAddressedA2aReply(args: A2aSpawnCall, assignment: string): Promise<AgentToolResult<TaskToolDetails>> {
+		const ownerId = this.session.getAgentId?.() ?? undefined;
+		const manager = this.session.asyncJobManager;
+		if (manager && ownerId) return this.#awaitAddressedA2aJob(args, assignment, ownerId, manager);
+		return this.#awaitAddressedA2aInline(args, assignment, ownerId ?? "");
+	}
+
+	async #awaitAddressedA2aJob(
+		args: A2aSpawnCall,
+		assignment: string,
+		ownerId: string,
+		manager: AsyncJobManagerApi,
+	): Promise<AgentToolResult<TaskToolDetails>> {
+		const messageId = `omp-${crypto.randomUUID()}`;
+		const registry = OutgoingRequests.global();
+		const gate = Promise.withResolvers<{ kind: "receipt" } | { kind: "outcome"; outcome: SpawnA2aAgentResult }>();
+		let opened = false;
+		const open = (value: { kind: "receipt" } | { kind: "outcome"; outcome: SpawnA2aAgentResult }) => {
+			if (opened) return;
+			opened = true;
+			gate.resolve(value);
+		};
+		const jobId = manager.register(
+			"task",
+			args.agent.name,
+			async ctx => {
+				const onAbort = () => {
+					void registry.cancel(messageId);
+				};
+				ctx.signal.addEventListener("abort", onAbort);
+				try {
+					if (ctx.signal.aborted) throw new Error("cancelled");
+					await registry.register({
+						messageId,
+						peer: args.agent.cardName,
+						ownerId,
+						jobId: ctx.jobId,
+						deadline: this.#replyDeadline(),
+					});
+					const outcome = await this.#sendAddressedA2a(args, assignment, messageId, ctx.signal);
+					if (outcome.deliveryReceipt === true && outcome.exitCode === 0) {
+						open({ kind: "receipt" });
+						return await registry.wait(messageId);
+					}
+					const reason = outcome.error ?? outcome.output;
+					if (outcome.exitCode !== 0) {
+						await registry.cancel(messageId);
+						open({ kind: "outcome", outcome });
+						throw new Error(reason);
+					}
+					await registry.cancel(messageId);
+					open({ kind: "outcome", outcome });
+					return outcome.output;
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					await registry.cancel(messageId);
+					open({
+						kind: "outcome",
+						outcome: {
+							exitCode: 1,
+							output: reason,
+							error: reason,
+							state: "TASK_STATE_FAILED" as SpawnA2aAgentResult["state"],
+						},
+					});
+					throw error;
+				} finally {
+					ctx.signal.removeEventListener("abort", onAbort);
+				}
+			},
+			{ ownerId },
+		);
+		const settled = await gate.promise;
+		if (settled.kind === "receipt") return this.#awaitingReplyResult(args, jobId);
+		await manager.getJob(jobId)?.promise;
+		const id =
+			args.preAllocatedId ?? (await this.#outputManager().allocate(args.params.name?.trim() || generateTaskName()));
+		return this.#packageA2aOutcome(args, assignment, id, settled.outcome);
+	}
+
+	async #awaitAddressedA2aInline(
+		args: A2aSpawnCall,
+		assignment: string,
+		ownerId: string,
+	): Promise<AgentToolResult<TaskToolDetails>> {
+		const messageId = `omp-${crypto.randomUUID()}`;
+		const registry = OutgoingRequests.global();
+		const onAbort = () => {
+			void registry.cancel(messageId);
+		};
+		args.signal?.addEventListener("abort", onAbort);
+		try {
+			await registry.register({
+				messageId,
+				peer: args.agent.cardName,
+				ownerId,
+				jobId: messageId,
+				deadline: this.#replyDeadline(),
+			});
+			const outcome = await this.#sendAddressedA2a(args, assignment, messageId, args.signal);
+			if (outcome.deliveryReceipt === true && outcome.exitCode === 0) {
+				const reply = await registry.wait(messageId);
+				return {
+					content: [{ type: "text", text: reply }],
+					details: {
+						projectAgentsDir: null,
+						results: [],
+						totalDurationMs: Date.now() - args.startTime,
+					},
+				};
+			}
+			await registry.cancel(messageId);
+			const id =
+				args.preAllocatedId ??
+				(await this.#outputManager().allocate(args.params.name?.trim() || generateTaskName()));
+			return this.#packageA2aOutcome(args, assignment, id, outcome);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			await registry.cancel(messageId);
+			const id =
+				args.preAllocatedId ??
+				(await this.#outputManager().allocate(args.params.name?.trim() || generateTaskName()));
+			return this.#packageA2aOutcome(args, assignment, id, {
+				exitCode: 1,
+				output: reason,
+				error: reason,
+				state: "TASK_STATE_FAILED" as SpawnA2aAgentResult["state"],
+			});
+		} finally {
+			args.signal?.removeEventListener("abort", onAbort);
+		}
 	}
 
 	/** Build the tool result (summary text + details) for a settled run. */

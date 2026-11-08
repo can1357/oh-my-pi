@@ -826,6 +826,19 @@ export const cfgA2aClientTimeoutMs = register({
 	},
 });
 
+export const cfgA2aReplyTimeoutMs = register({
+	id: "a2a.replyTimeoutMs",
+	type: "number",
+	default: 1_800_000,
+	ui: {
+		tab: "tasks",
+		group: "A2A",
+		label: "A2A Reply Timeout",
+		description:
+			"How long an addressed A2A request waits for the peer's reply, in milliseconds. 0 waits indefinitely. Distinct from the transport budget (`a2a.clientTimeoutMs`).",
+	},
+});
+
 export const cfgTaskShowResolvedModelBadge = register({
 	id: "task.showResolvedModelBadge",
 	type: "boolean",

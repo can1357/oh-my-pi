@@ -38,9 +38,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/a2a/server";
 import { type AgentCard, buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
-import { type A2aIncomingRequest, TASK_STATE } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
+import { type A2aIncomingRequest, type A2aTask, TASK_STATE, sendA2aMessage } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
 import { type OutgoingRequest, OutgoingRequests } from "@oh-my-pi/pi-coding-agent/a2a/outgoing-requests";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import type { SpawnSubagentOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	type AgentRef as RegistryAgentRef,
@@ -54,9 +55,10 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+import type { TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import type { IrcDeliveryReceipt } from "@oh-my-pi/pi-tui/tools/irc";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -157,6 +159,8 @@ function mockA2a(options: Parameters<typeof startMockA2a>[0]): MockA2aServer {
 afterEach(() => {
 	for (const server of servers.splice(0)) server.stop();
 	vi.restoreAllMocks();
+	vi.useRealTimers();
+	OutgoingRequests.resetGlobalForTests();
 });
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -174,7 +178,12 @@ function toolSession(
 	bridge: A2aAgentBridge,
 	settings: Settings,
 	cwd: string,
-	options: { frozenSessionAgents?: boolean; planMode?: boolean } = {},
+	options: {
+		frozenSessionAgents?: boolean;
+		planMode?: boolean;
+		agentId?: string;
+		asyncJobManager?: AsyncJobManager;
+	} = {},
 ): ToolSession {
 	return {
 		cwd,
@@ -183,6 +192,8 @@ function toolSession(
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getA2aBridge: () => bridge,
+		...(options.agentId !== undefined ? { getAgentId: () => options.agentId } : {}),
+		...(options.asyncJobManager !== undefined ? { asyncJobManager: options.asyncJobManager } : {}),
 		...(options.planMode ? { getPlanModeState: () => ({ enabled: true, planFilePath: "PLAN.md" }) } : {}),
 		...(options.frozenSessionAgents ? { getSessionAgents: () => [], advertisedSessionAgents: () => [] } : {}),
 	} as unknown as ToolSession;
@@ -191,7 +202,12 @@ function toolSession(
 async function createTaskTool(
 	bridge: A2aAgentBridge,
 	settings: Settings = Settings.isolated(),
-	options: { frozenSessionAgents?: boolean; planMode?: boolean } = {},
+	options: {
+		frozenSessionAgents?: boolean;
+		planMode?: boolean;
+		agentId?: string;
+		asyncJobManager?: AsyncJobManager;
+	} = {},
 ): Promise<TaskTool> {
 	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
 	const cwd = await tempDir();
@@ -1630,6 +1646,537 @@ function trackSettlement(promise: Promise<string>): { settled: () => boolean; re
 	);
 	return { settled: () => settled, result };
 }
+
+function deliveryTask(outcome: "injected" | "failed" = "injected", error?: string): unknown {
+	return {
+		id: "remote-main",
+		status: { state: outcome === "failed" ? TASK_STATE.FAILED : TASK_STATE.WORKING },
+		metadata: {
+			delivery: { to: "Main", outcome, ...(error !== undefined ? { error } : {}) },
+		},
+	};
+}
+
+function messageIdOf(call: { params: Record<string, unknown> }): string {
+	const message = call.params.message;
+	if (typeof message !== "object" || message === null) throw new Error("SendMessage had no message");
+	const id = Reflect.get(message, "messageId");
+	if (typeof id !== "string" || id.length === 0) throw new Error("SendMessage had no messageId");
+	return id;
+}
+
+function localMainRef(): RegistryAgentRef {
+	const now = Date.now();
+	return {
+		id: "Main",
+		displayName: "Main",
+		kind: "main",
+		parentId: "Main",
+		status: "idle",
+		session: null,
+		sessionFile: null,
+		createdAt: now,
+		lastActivity: now,
+	} as unknown as RegistryAgentRef;
+}
+
+/** Inbound reply through the real dispatcher, recording any IRC copy. */
+async function deliverReply(options: {
+	messageId: string;
+	from?: string;
+	text: string;
+	bus: Array<{ body: string }>;
+	incoming?: A2aIncomingRequest[];
+}): Promise<A2aTask> {
+	const main = localMainRef();
+	return sendA2aMessage(
+		{
+			message: {
+				messageId: `reply-to-${options.messageId}`,
+				role: "ROLE_USER",
+				parts: [{ text: options.text }],
+			},
+			metadata: {
+				to: "Main",
+				...(options.from !== undefined ? { from: options.from } : {}),
+				inReplyTo: options.messageId,
+			},
+		},
+		{
+			registry: {
+				get: (id: string) => (id === "Main" || id === "main" ? main : undefined),
+				list: () => [main],
+				setStatus: () => false,
+			},
+			send: async message => {
+				options.bus.push({ body: message.body });
+				return { to: message.to, outcome: "injected" };
+			},
+			...(options.incoming !== undefined
+				? { noteIncomingRequest: (request: A2aIncomingRequest) => options.incoming?.push(request) }
+				: {}),
+		},
+	);
+}
+
+function replyJob(result: { details?: unknown }): TaskToolDetails["async"] {
+	return (result.details as TaskToolDetails | undefined)?.async;
+}
+
+async function stillPending(promise: Promise<unknown>): Promise<boolean> {
+	let settled = false;
+	const mark = () => {
+		settled = true;
+	};
+	void promise.then(mark, mark);
+	const flushed = Promise.withResolvers<void>();
+	setImmediate(flushed.resolve);
+	await flushed.promise;
+	return !settled;
+}
+
+function captureOutgoing(): OutgoingRequest[] {
+	const real = OutgoingRequests.global();
+	const seen: OutgoingRequest[] = [];
+	OutgoingRequests.installGlobal({
+		register: async request => {
+			seen.push({ ...request });
+			await real.register(request);
+		},
+		wait: (messageId, signal) => real.wait(messageId, signal),
+		resolve: (messageId, from, text) => real.resolve(messageId, from, text),
+		fail: (messageId, reason) => real.fail(messageId, reason),
+		cancel: messageId => real.cancel(messageId),
+		hasOwner: ownerId => real.hasOwner(ownerId),
+	});
+	return seen;
+}
+
+describe("addressed A2A reply jobs", () => {
+	const OWNER = "caller-a";
+
+	function managerFor(): AsyncJobManager {
+		return new AsyncJobManager({ onJobComplete: () => {} });
+	}
+
+	it("sends a caller-supplied messageId and generates omp-<uuid> when omitted", async () => {
+		const server = mockA2a({
+			onRpc: () => rpcResult(1, { task: completedTask("ok") }),
+		});
+		const client = new A2aClient({ url: server.url });
+		await client.sendMessage("hello", { messageId: "caller-supplied" });
+		await client.sendAndWait("again", { messageId: "wait-supplied" });
+		await client.sendMessage("generated");
+
+		expect(messageIdOf(server.calls[0]!)).toBe("caller-supplied");
+		expect(messageIdOf(server.calls[1]!)).toBe("wait-supplied");
+		expect(messageIdOf(server.calls[2]!)).toMatch(
+			/^omp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+		);
+	});
+
+	it("registers an owned running reply job before SendMessage and reports that job, not a completed task", async () => {
+		const events: string[] = [];
+		const seen = Promise.withResolvers<RpcCall>();
+		const server = mockA2a({
+			onRpc: call => {
+				events.push("send");
+				seen.resolve(call);
+				return rpcResult(1, { task: deliveryTask() });
+			},
+		});
+		const { bridge } = await registerFrom(server);
+		const manager = managerFor();
+		const original = manager.register.bind(manager);
+		manager.register = ((type, label, run, options) => {
+			events.push(`register:${type}:${options?.ownerId ?? ""}`);
+			return original(type, label, run, options);
+		}) as AsyncJobManager["register"];
+		const registered = captureOutgoing();
+		const tool = await createTaskTool(bridge, Settings.isolated(), {
+			agentId: OWNER,
+			asyncJobManager: manager,
+		});
+
+		const executing = tool.execute("tc-addressed", { agent: "a2a:main", task: "ask the peer" } as TaskParams);
+		await seen.promise;
+		expect(events[0]).toBe(`register:task:${OWNER}`);
+		expect(events[1]).toBe("send");
+		expect(OutgoingRequests.global().hasOwner(OWNER)).toBe(true);
+		expect(registered[0]).toMatchObject({
+			messageId: messageIdOf(server.calls[0]!),
+			peer: "omp",
+			ownerId: OWNER,
+		});
+		const running = manager.getRunningJobs({ ownerId: OWNER });
+		expect(running).toHaveLength(1);
+		expect(running[0]?.id).toBe(registered[0]?.jobId);
+		expect(AsyncJobManager.instance()).toBeUndefined();
+
+		const result = await executing;
+		const text = textOf(result);
+		const job = replyJob(result);
+		expect(text).toContain("Delivered");
+		expect(text).toContain("awaiting reply");
+		expect(text).toContain(running[0]!.id);
+		expect(text).not.toContain("<task-result");
+		expect(job).toEqual({ state: "running", jobId: running[0]!.id, type: "task" });
+		expect(manager.getJob(job!.jobId)?.status).toBe("running");
+		expect(manager.getJob(job!.jobId)?.ownerId).toBe(OWNER);
+		expect(manager.cancel(job!.jobId, { ownerId: "other-owner" })).toBe(false);
+		manager.cancel(job!.jobId, { ownerId: OWNER });
+	});
+
+	it("completes the owned job once when the matching reply arrives before the receipt, with no IRC copy", async () => {
+		const hold = Promise.withResolvers<unknown>();
+		const seen = Promise.withResolvers<RpcCall>();
+		const server = mockA2a({
+			onRpc: call => {
+				seen.resolve(call);
+				return hold.promise;
+			},
+		});
+		const { bridge } = await registerFrom(server);
+		const manager = managerFor();
+		const tool = await createTaskTool(bridge, Settings.isolated(), {
+			agentId: OWNER,
+			asyncJobManager: manager,
+		});
+		const executing = tool.execute("tc-early", { agent: "a2a:main", task: "ask early" } as TaskParams);
+		try {
+			const call = await seen.promise;
+			const bus: Array<{ body: string }> = [];
+			const incoming: A2aIncomingRequest[] = [];
+			await deliverReply({
+				messageId: messageIdOf(call),
+				from: "omp",
+				text: "early answer",
+				bus,
+				incoming,
+			});
+			expect(bus).toEqual([]);
+			expect(incoming).toEqual([]);
+			hold.resolve(rpcResult(1, { task: deliveryTask() }));
+			const result = await executing;
+			const jobId = replyJob(result)?.jobId;
+			expect(jobId).toBeString();
+			await manager.getJob(jobId!)!.promise;
+			expect(manager.getJob(jobId!)).toMatchObject({ status: "completed", resultText: "early answer" });
+			const ownerWait = await new WaitTool(
+				toolSession(bridge, Settings.isolated(), await tempDir(), { agentId: OWNER, asyncJobManager: manager }),
+			).execute("wait-owner", {});
+			expect(textOf(ownerWait)).toContain("early answer");
+			expect(textOf(ownerWait).match(/early answer/g)).toHaveLength(1);
+			const otherWait = await new WaitTool(
+				toolSession(bridge, Settings.isolated(), await tempDir(), {
+					agentId: "other-owner",
+					asyncJobManager: manager,
+				}),
+			).execute("wait-other", {});
+			expect(textOf(otherWait)).not.toContain("early answer");
+			expect(textOf(otherWait)).toContain("Nothing to wait for");
+		} finally {
+			hold.resolve(rpcResult(1, { task: deliveryTask() }));
+		}
+	});
+
+	it("completes the owned job once when the matching reply arrives after the receipt, with no IRC copy", async () => {
+		const server = mockA2a({
+			onRpc: () => rpcResult(1, { task: deliveryTask() }),
+		});
+		const { bridge } = await registerFrom(server);
+		const manager = managerFor();
+		const tool = await createTaskTool(bridge, Settings.isolated(), {
+			agentId: OWNER,
+			asyncJobManager: manager,
+		});
+		const result = await tool.execute("tc-late", { agent: "a2a:main", task: "ask late" } as TaskParams);
+		const jobId = replyJob(result)?.jobId;
+		expect(jobId).toBeString();
+		expect(manager.getJob(jobId!)?.status).toBe("running");
+		const bus: Array<{ body: string }> = [];
+		await deliverReply({
+			messageId: messageIdOf(server.calls[0]!),
+			from: "omp",
+			text: "late answer",
+			bus,
+		});
+		expect(bus).toEqual([]);
+		await manager.getJob(jobId!)!.promise;
+		expect(manager.getJob(jobId!)).toMatchObject({ status: "completed", resultText: "late answer" });
+		const again: Array<{ body: string }> = [];
+		await deliverReply({
+			messageId: messageIdOf(server.calls[0]!),
+			from: "omp",
+			text: "late answer",
+			bus: again,
+		});
+		expect(again).toHaveLength(1);
+		expect(manager.getJob(jobId!)?.resultText).toBe("late answer");
+	});
+
+	it("matches the remote terminal identity, not the addressed skill id or display alias", async () => {
+		const alpha = mockA2a({
+			name: "alpha",
+			skills: [{ id: "Reviewer", displayName: "Reviewer Alias", description: "reviews" }],
+			onRpc: () => rpcResult(1, { task: deliveryTask() }),
+		});
+		const beta = mockA2a({
+			name: "beta",
+			skills: [{ id: "Reviewer", displayName: "Reviewer Alias", description: "reviews" }],
+			onRpc: () => rpcResult(1, { task: deliveryTask() }),
+		});
+		const bridge = new A2aAgentBridge();
+		const agentDir = await tempDir();
+		await addA2aAgentsFromUrl({ bridge, url: alpha.url, agentDir });
+		await addA2aAgentsFromUrl({ bridge, url: beta.url, agentDir });
+		const target = bridge.list().find(agent => agent.url === beta.url);
+		expect(target).toMatchObject({ name: "a2a:Reviewer-2", skillId: "Reviewer", cardName: "beta" });
+		const manager = managerFor();
+		const registered = captureOutgoing();
+		const tool = await createTaskTool(bridge, Settings.isolated(), {
+			agentId: OWNER,
+			asyncJobManager: manager,
+		});
+		const result = await tool.execute("tc-skill", {
+			agent: target!.name,
+			task: "review this",
+		} as TaskParams);
+		const jobId = replyJob(result)?.jobId;
+		expect(jobId).toBeString();
+		expect(registered[0]?.peer).toBe("beta");
+		const messageId = messageIdOf(beta.calls[0]!);
+		for (const from of ["Reviewer", "Reviewer Alias", "alpha"]) {
+			const bus: Array<{ body: string }> = [];
+			await deliverReply({ messageId, from, text: `nope-${from}`, bus });
+			expect(bus).toHaveLength(1);
+			expect(manager.getJob(jobId!)?.status).toBe("running");
+		}
+		const matched: Array<{ body: string }> = [];
+		await deliverReply({ messageId, from: "beta", text: "terminal answer", bus: matched });
+		expect(matched).toEqual([]);
+		await manager.getJob(jobId!)!.promise;
+		expect(manager.getJob(jobId!)?.resultText).toBe("terminal answer");
+	});
+
+	it("fails the job and drops the expectation when transport or the delivery receipt fails", async () => {
+		const transport = mockA2a({
+			onRpc: () => rpcResult(-32603, { message: "connection reset" }),
+		});
+		const transportBridge = (await registerFrom(transport)).bridge;
+		const transportManager = managerFor();
+		const transportTool = await createTaskTool(transportBridge, Settings.isolated(), {
+			agentId: OWNER,
+			asyncJobManager: transportManager,
+		});
+		const transportResult = await transportTool.execute("tc-transport", {
+			agent: "a2a:main",
+			task: "unreachable",
+		} as TaskParams);
+		expect(textOf(transportResult)).not.toContain("awaiting reply");
+		expect(OutgoingRequests.global().hasOwner(OWNER)).toBe(false);
+		const transportJobs = transportManager.getAllJobs({ ownerId: OWNER });
+		expect(transportJobs).toHaveLength(1);
+		expect(transportJobs[0]?.status).toBe("failed");
+
+		const receipt = mockA2a({
+			onRpc: () => rpcResult(1, { task: deliveryTask("failed", "agent is gone") }),
+		});
+		const receiptBridge = (await registerFrom(receipt)).bridge;
+		const receiptManager = managerFor();
+		const receiptTool = await createTaskTool(receiptBridge, Settings.isolated(), {
+			agentId: "caller-b",
+			asyncJobManager: receiptManager,
+		});
+		const receiptResult = await receiptTool.execute("tc-receipt", {
+			agent: "a2a:main",
+			task: "missing agent",
+		} as TaskParams);
+		expect(textOf(receiptResult)).toContain("agent is gone");
+		expect(textOf(receiptResult)).not.toContain("awaiting reply");
+		expect(OutgoingRequests.global().hasOwner("caller-b")).toBe(false);
+		expect(receiptManager.getAllJobs({ ownerId: "caller-b" })[0]).toMatchObject({
+			status: "failed",
+			errorText: expect.stringContaining("agent is gone"),
+		});
+	});
+
+	it("fails the reply job on the reply deadline and leaves a zero deadline running", async () => {
+		vi.useFakeTimers();
+		const server = mockA2a({
+			onRpc: () => rpcResult(1, { task: deliveryTask() }),
+		});
+		const { bridge } = await registerFrom(server);
+		const timed = managerFor();
+		const timedTool = await createTaskTool(bridge, Settings.isolated({ "a2a.replyTimeoutMs": 5_000 }), {
+			agentId: OWNER,
+			asyncJobManager: timed,
+		});
+		const timedResult = await timedTool.execute("tc-deadline", {
+			agent: "a2a:main",
+			task: "expire",
+		} as TaskParams);
+		const timedJobId = replyJob(timedResult)?.jobId;
+		expect(timed.getJob(timedJobId!)?.status).toBe("running");
+		vi.advanceTimersByTime(4_999);
+		await Promise.resolve();
+		expect(timed.getJob(timedJobId!)?.status).toBe("running");
+		vi.advanceTimersByTime(1);
+		await Promise.resolve();
+		await timed.getJob(timedJobId!)!.promise;
+		expect(timed.getJob(timedJobId!)).toMatchObject({
+			status: "failed",
+			errorText: expect.stringContaining("reply timeout"),
+		});
+		expect(OutgoingRequests.global().hasOwner(OWNER)).toBe(false);
+
+		const open = managerFor();
+		const openTool = await createTaskTool(bridge, Settings.isolated({ "a2a.replyTimeoutMs": 0 }), {
+			agentId: "caller-open",
+			asyncJobManager: open,
+		});
+		const openResult = await openTool.execute("tc-open", { agent: "a2a:main", task: "no deadline" } as TaskParams);
+		const openJobId = replyJob(openResult)?.jobId;
+		vi.advanceTimersByTime(60 * 60 * 1000);
+		await Promise.resolve();
+		expect(open.getJob(openJobId!)?.status).toBe("running");
+		expect(OutgoingRequests.global().hasOwner("caller-open")).toBe(true);
+		open.cancel(openJobId!, { ownerId: "caller-open" });
+	});
+
+	it("cancels only the local wait and sends no remote CancelTask", async () => {
+		const server = mockA2a({
+			onRpc: () => rpcResult(1, { task: deliveryTask() }),
+		});
+		const { bridge } = await registerFrom(server);
+		const manager = managerFor();
+		const tool = await createTaskTool(bridge, Settings.isolated(), {
+			agentId: OWNER,
+			asyncJobManager: manager,
+		});
+		const result = await tool.execute("tc-cancel", { agent: "a2a:main", task: "cancel me" } as TaskParams);
+		const jobId = replyJob(result)?.jobId;
+		expect(manager.cancel(jobId!, { ownerId: OWNER })).toBe(true);
+		await manager.getJob(jobId!)!.promise;
+		expect(manager.getJob(jobId!)?.status).toBe("cancelled");
+		expect(OutgoingRequests.global().hasOwner(OWNER)).toBe(false);
+		expect(server.calls.every(call => call.method !== "CancelTask")).toBe(true);
+		const bus: Array<{ body: string }> = [];
+		await deliverReply({
+			messageId: messageIdOf(server.calls[0]!),
+			from: "omp",
+			text: "too late",
+			bus,
+		});
+		expect(bus).toHaveLength(1);
+	});
+
+	it("does not open a reply job for an outbound reply or an a2aSpawn", async () => {
+		const server = mockA2a({
+			onRpc: call =>
+				rpcResult(1, {
+					task:
+						call.params.metadata && Reflect.get(call.params.metadata, "spawn") === true
+							? completedTask("spawned output")
+							: deliveryTask(),
+				}),
+		});
+		const { bridge } = await registerFrom(server);
+		bridge.noteIncomingRequest({ from: "main", messageId: "owed-1", to: "Main", at: 1 });
+		bridge.noteIncomingRequest({ from: "main", messageId: "owed-2", to: "Main", at: 2 });
+		const manager = managerFor();
+		const registered = captureOutgoing();
+		const tool = await createTaskTool(bridge, Settings.isolated(), {
+			agentId: OWNER,
+			asyncJobManager: manager,
+		});
+		const reply = await tool.execute("tc-reply", { agent: "a2a:main", task: "the answer" } as TaskParams);
+		expect(server.calls[0]?.params.metadata).toMatchObject({ inReplyTo: "owed-1" });
+		expect(bridge.outstandingRequests().map(request => request.messageId)).toEqual(["owed-2"]);
+		expect(registered).toEqual([]);
+		expect(manager.getAllJobs({ ownerId: OWNER })).toEqual([]);
+		expect(replyJob(reply)).toBeUndefined();
+
+		const spawned = await tool.execute("tc-spawn", {
+			agent: "a2a:main",
+			task: "create one",
+			a2aSpawn: true,
+		} as TaskParams);
+		expect(server.calls[1]?.params.metadata).toMatchObject({ spawn: true });
+		expect(server.calls[1]?.params.metadata).not.toHaveProperty("to");
+		expect(textOf(spawned)).toContain("spawned output");
+		expect(textOf(spawned)).toContain('status="completed"');
+		expect(registered).toEqual([]);
+		expect(manager.getAllJobs({ ownerId: OWNER })).toEqual([]);
+	});
+
+	it("waits inline for the reply when the session has no async manager", async () => {
+		const seen = Promise.withResolvers<RpcCall>();
+		const server = mockA2a({
+			onRpc: call => {
+				seen.resolve(call);
+				return rpcResult(1, { task: deliveryTask() });
+			},
+		});
+		const { bridge } = await registerFrom(server);
+		const tool = await createTaskTool(bridge, Settings.isolated({ "a2a.replyTimeoutMs": 0 }), {
+			agentId: OWNER,
+		});
+		const pending = tool.execute("tc-inline", { agent: "a2a:main", task: "ask inline" } as TaskParams);
+		const call = await seen.promise;
+		expect(await stillPending(pending)).toBe(true);
+		expect(OutgoingRequests.global().hasOwner(OWNER)).toBe(true);
+		const bus: Array<{ body: string }> = [];
+		await deliverReply({
+			messageId: messageIdOf(call),
+			from: "omp",
+			text: "inline answer",
+			bus,
+		});
+		expect(bus).toEqual([]);
+		expect(textOf(await pending)).toBe("inline answer");
+		expect(OutgoingRequests.global().hasOwner(OWNER)).toBe(false);
+	});
+
+	it("keeps two caller owners distinct on the process registry", async () => {
+		const server = mockA2a({
+			onRpc: () => rpcResult(1, { task: deliveryTask() }),
+		});
+		const { bridge } = await registerFrom(server);
+		const manager = managerFor();
+		const toolA = await createTaskTool(bridge, Settings.isolated(), {
+			agentId: "owner-a",
+			asyncJobManager: manager,
+		});
+		const toolB = await createTaskTool(bridge, Settings.isolated(), {
+			agentId: "owner-b",
+			asyncJobManager: manager,
+		});
+		const resultA = await toolA.execute("tc-a", { agent: "a2a:main", task: "question a" } as TaskParams);
+		const resultB = await toolB.execute("tc-b", { agent: "a2a:main", task: "question b" } as TaskParams);
+		const jobA = replyJob(resultA)?.jobId;
+		const jobB = replyJob(resultB)?.jobId;
+		expect(jobA).toBeString();
+		expect(jobB).toBeString();
+		expect(jobA).not.toBe(jobB);
+		expect(OutgoingRequests.global().hasOwner("owner-a")).toBe(true);
+		expect(OutgoingRequests.global().hasOwner("owner-b")).toBe(true);
+		const bus: Array<{ body: string }> = [];
+		await deliverReply({
+			messageId: messageIdOf(server.calls[0]!),
+			from: "omp",
+			text: "answer a",
+			bus,
+		});
+		expect(bus).toEqual([]);
+		await manager.getJob(jobA!)!.promise;
+		expect(manager.getJob(jobA!)?.resultText).toBe("answer a");
+		expect(manager.getJob(jobB!)?.status).toBe("running");
+		expect(OutgoingRequests.global().hasOwner("owner-a")).toBe(false);
+		expect(OutgoingRequests.global().hasOwner("owner-b")).toBe(true);
+		manager.cancel(jobB!, { ownerId: "owner-b" });
+	});
+});
 
 describe("outgoing request registry", () => {
 	afterEach(() => {

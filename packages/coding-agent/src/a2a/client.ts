@@ -256,12 +256,12 @@ export class A2aClient {
 
 	async sendMessage(
 		prompt: string,
-		options?: { contextId?: string; metadata?: Record<string, unknown> },
+		options?: { contextId?: string; metadata?: Record<string, unknown>; messageId?: string },
 		signal?: AbortSignal,
 	): Promise<A2aSendResponse> {
 		const params = {
 			message: {
-				messageId: `omp-${crypto.randomUUID()}`,
+				messageId: options?.messageId ?? `omp-${crypto.randomUUID()}`,
 				role: "ROLE_USER",
 				parts: [{ text: prompt }],
 				...(options?.contextId ? { contextId: options.contextId } : {}),
@@ -282,7 +282,7 @@ export class A2aClient {
 	/** Send one prompt and wait for the remote task to settle (or pause for input). */
 	async sendAndWait(
 		prompt: string,
-		options?: { contextId?: string; metadata?: Record<string, unknown> },
+		options?: { contextId?: string; metadata?: Record<string, unknown>; messageId?: string },
 	): Promise<A2aRunResult> {
 		// One combined signal bounds the WHOLE run - the initial SendMessage and
 		// every GetTask poll - so a remote that accepts a request but never answers
