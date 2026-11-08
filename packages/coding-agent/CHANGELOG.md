@@ -43,6 +43,9 @@
 ### Breaking Changes
 
 - Rust SDK: `BashCommand` and `ReadyEvent` struct literals need `exclude_from_context: None` and `supports_bash_exclude_from_context: None` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
+### Fixed
+
+- Timed-out or aborted `read` JSON queries stop evaluating `jq` filters instead of continuing to consume CPU and memory in the background ([#17943](https://github.com/can1357/oh-my-pi/issues/17943)).
 
 ### Added
 
