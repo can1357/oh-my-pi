@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use super::{
 	model::{Effect, EffectKind, NodeKey},
 	runtime::VizSource,
+	source::{self, SourceMap},
 };
 use crate::bash::{
 	syntax::{
@@ -51,6 +52,9 @@ pub struct Analysis {
 	pub leaves:            HashSet<NodeKey>,
 	/// Canonical byte spans; source projection belongs to the renderer.
 	pub colors:            Vec<(NodeKey, Span, String)>,
+	/// Here-document bodies through their closing delimiter, by the command
+	/// reading them: source that runs with the command outside its span.
+	pub heredocs:          Vec<(NodeKey, Span)>,
 }
 
 impl Analysis {
@@ -94,6 +98,26 @@ fn append_literal(parts: Seq<'_, WordPart<'_>>, quoted: bool, out: &mut Vec<u8>)
 		}
 	}
 	Some(())
+}
+
+/// The literal text `word` ends with (`"$dir/main.rs"` → `/main.rs`): enough
+/// to tell a file's extension when the rest expands at run time.
+pub fn literal_tail(word: Word<'_>) -> String {
+	let mut out = Vec::new();
+	append_tail(word.parts(), &mut out);
+	String::from_utf8_lossy_owned(out)
+}
+
+fn append_tail(parts: Seq<'_, WordPart<'_>>, out: &mut Vec<u8>) {
+	for part in parts {
+		match part.get() {
+			Part::Lit(bytes) | Part::Escaped(bytes) | Part::SQuote(bytes) => {
+				out.extend_from_slice(bytes);
+			},
+			Part::DQuote(parts) => append_tail(parts, out),
+			_ => out.clear(),
+		}
+	}
 }
 
 fn contains_parameter(parts: Seq<'_, WordPart<'_>>) -> bool {
@@ -152,6 +176,8 @@ struct Walker<'a> {
 	function_arity:  Vec<u32>,
 	command_stack:   Vec<NodeKey>,
 	source_slot:     Option<u32>,
+	/// The walked unit's byte coordinates and source, locating heredoc bodies.
+	located:         Option<(SourceMap, &'a [u8])>,
 }
 
 pub fn analyze(source: &impl VizSource) -> Analysis {
@@ -173,6 +199,7 @@ pub fn analyze(source: &impl VizSource) -> Analysis {
 				.push(unit.index);
 		}
 		walker.unit = unit.index;
+		walker.located = Some((source::unit_bytes(&unit), unit.source.as_ref()));
 		walker.root(syntax);
 	}
 	walker
@@ -322,6 +349,27 @@ impl<'a> Walker<'a> {
 			self.color(owner, Span::new(span.lo, span.lo + keyword.len() as u32), "kw");
 		}
 		let redirs = command.redirs();
+		if let Some((map, bytes)) = &self.located
+			&& redirs
+				.iter()
+				.any(|redir| matches!(redir.target(), RedirTarget::HereDoc(_)))
+		{
+			for body in source::heredoc_spans(map, bytes, redirs)
+				.into_iter()
+				.flatten()
+			{
+				let delimiter = map.bytes(body).map_or(0, |[_, end]| {
+					bytes[end..]
+						.iter()
+						.position(|byte| *byte == b'\n')
+						.unwrap_or(bytes.len() - end)
+				});
+				self
+					.result
+					.heredocs
+					.push((owner, Span::new(body.lo, body.hi + delimiter as u32)));
+			}
+		}
 		match kind {
 			CommandKind::Simple(simple) => {
 				self.simple(simple, owner, context, redirs.is_empty());
