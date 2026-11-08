@@ -376,6 +376,9 @@
 ### Fixed
 
 - Fixed coding-agent tests contacting the user's text-predict daemon and leaking interactive-host state between test files.
+### Fixed
+
+- xAI `web_search` now limits hosted search to two turns per request to reduce unexpected X search costs ([#17676](https://github.com/can1357/oh-my-pi/issues/17676)).
 
 ## [18.14.2] - 2026-10-31
 
