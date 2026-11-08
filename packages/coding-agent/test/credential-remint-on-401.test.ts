@@ -135,7 +135,7 @@ describe("a `!command` credential the provider refuses", () => {
 		counterFile: string,
 		accept: (bearer: string | undefined) => boolean,
 		extraProviderConfig: Record<string, unknown> = {},
-		refuse: () => Response = gatewayRefusal,
+		refuse: () => Response | Promise<Response> = gatewayRefusal,
 	): Rig {
 		const modelsPath = path.join(tempDir, "models.json");
 		fs.writeFileSync(
@@ -146,8 +146,8 @@ describe("a `!command` credential the provider refuses", () => {
 						baseUrl: "https://gateway.invalid/v1",
 						api: "openai-completions",
 						apiKey: apiKeyConfig,
-						...extraProviderConfig,
 						models: [{ id: "gw-model", name: "GW Model" }],
+						...extraProviderConfig,
 					},
 				},
 			}),
@@ -275,6 +275,58 @@ describe("a `!command` credential the provider refuses", () => {
 		// of a real mint is a call to the credential's issuer.
 		expect(rig.seen.length).toBe(20);
 		expect(rig.mints() - mintsBefore).toBe(1);
+	});
+
+	test.each(["provider", "model"])("shares one header mint per refusal wave (%s headers)", async scope => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "expired-token");
+		const headers = { Authorization: mintFromFile(counterFile, tokenFile) };
+		const gates = Array.from({ length: 10 }, () => Promise.withResolvers<void>());
+		gates[0].resolve();
+		let refused = 0;
+		let recovered = 0;
+		const rig = buildRig("literal-placeholder", counterFile, bearer => {
+			if (bearer !== "renewed-token") return false;
+			// Release the next refusal only after the preceding retry used its mint.
+			gates[++recovered]?.resolve();
+			return true;
+		}, {
+			...(scope === "provider" ? { headers } : { models: [{ id: "gw-model", name: "GW Model", headers }] }),
+		}, async () => {
+			await gates[refused++].promise;
+			return gatewayRefusal();
+		});
+		await rig.model.resolveHeaders?.();
+		const before = rig.mints();
+		const sends = await Promise.all(Array.from({ length: 10 }, () => rig.prepare()));
+		fs.writeFileSync(tokenFile, "renewed-token");
+
+		const results = await Promise.all(sends.map(send => send()));
+
+		expect(results.every(result => result.stopReason !== "error")).toBe(true);
+		expect(rig.seen.length).toBe(20);
+		expect(rig.mints() - before).toBe(1);
+	});
+
+	test("a new operation never sends a generation already recorded as refused", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "refused-token");
+		const rig = buildRig(mintFromFile(counterFile, tokenFile), counterFile, bearer => bearer === "accepted-token");
+
+		expect((await rig.turn()).errorStatus).toBe(401);
+		// Exhausting A's retry records generation 2, without spending an unused mint.
+		expect(rig.mints()).toBe(2);
+		fs.writeFileSync(tokenFile, "accepted-token");
+		const beforeRequests = rig.seen.length;
+
+		expect((await rig.turn()).stopReason).not.toBe("error");
+		// B obtains generation 3 before its first request, not after another 401.
+		expect(rig.seen.length - beforeRequests).toBe(1);
+		expect(rig.mints()).toBe(3);
 	});
 
 	test("gives every waiter a decisive answer when the shared re-mint fails", async () => {
