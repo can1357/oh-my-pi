@@ -361,18 +361,19 @@ async function getLocalModel(): Promise<LocalEmbeddingModel | null> {
 	}
 }
 
+const DEFAULT_LOCAL_EMBEDDING_BATCH_SIZE = 8;
 const DEFAULT_EMBEDDING_BATCH_SIZE = 64;
 
 /**
- * Max texts per `/embeddings` request. Some hosted providers cap the inputs per
- * request (DashScope: 10), and a rejected request fails the whole call. Reads the
- * runtime scope's `embeddings.batchSize`, then `MNEMOPI_EMBEDDING_BATCH_SIZE`, then 64.
+ * Max texts per embedding request. Local inference uses smaller requests so
+ * ordinary CPU batches stay below the host's hung-worker timeout. Hosted APIs
+ * default to 64; both paths honor the runtime override and environment fallback.
  */
-function embeddingBatchSize(): number {
+function embeddingBatchSize(defaultSize: number = DEFAULT_EMBEDDING_BATCH_SIZE): number {
 	return (
 		positiveBatchSize(activeEmbeddingOptions()?.batchSize) ??
 		positiveBatchSize(Number.parseInt($env.MNEMOPI_EMBEDDING_BATCH_SIZE ?? "", 10)) ??
-		DEFAULT_EMBEDDING_BATCH_SIZE
+		defaultSize
 	);
 }
 
@@ -596,7 +597,12 @@ export async function embed(texts: readonly string[]): Promise<EmbeddingMatrix |
 		return null;
 	}
 	try {
-		const vectors = await withLoopPhase("mnemopi.embed", () => collectMatrix(model.embed([...texts])));
+		const size = embeddingBatchSize(DEFAULT_LOCAL_EMBEDDING_BATCH_SIZE);
+		const vectors = await withLoopPhase("mnemopi.embed", () => collectMatrix(model.embed(texts.slice(0, size))));
+		for (let offset = size; offset < texts.length; offset += size) {
+			const part = texts.slice(offset, offset + size);
+			vectors.push(...(await withLoopPhase("mnemopi.embed", () => collectMatrix(model.embed(part)))));
+		}
 		if (vectors.length === 1) {
 			const vector = vectors[0];
 			if (vector !== undefined) {

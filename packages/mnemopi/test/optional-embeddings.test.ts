@@ -18,6 +18,7 @@ const ENV_KEYS = [
 	"BUN_ENV",
 	"MNEMOPI_NO_EMBEDDINGS",
 	"MNEMOPI_EMBEDDING_MODEL",
+	"MNEMOPI_EMBEDDING_BATCH_SIZE",
 	"MNEMOPI_EMBEDDING_API_URL",
 	"MNEMOPI_EMBEDDING_API_KEY",
 	"OPENROUTER_BASE_URL",
@@ -199,6 +200,42 @@ describe("optional embeddings", () => {
 		} finally {
 			memory.close();
 		}
+	});
+
+	it("finishes large local embedding batches without exceeding a worker request cap", async () => {
+		await withEnv(
+			{
+				NODE_ENV: undefined,
+				BUN_ENV: undefined,
+				MNEMOPI_NO_EMBEDDINGS: undefined,
+				MNEMOPI_EMBEDDING_MODEL: "intfloat/multilingual-e5-large",
+				MNEMOPI_EMBEDDING_API_URL: undefined,
+				MNEMOPI_EMBEDDING_BATCH_SIZE: undefined,
+				OPENROUTER_BASE_URL: undefined,
+			},
+			async () => {
+				const sizes: number[] = [];
+				setLocalModelInitializerForTests(async () => ({
+					async *embed(texts) {
+						sizes.push(texts.length);
+						if (texts.length > 8) throw new Error("mnemopi embed worker request timed out");
+						yield texts.map(text => [Number(text), 1]);
+					},
+				}));
+				const texts = Array.from({ length: 128 }, (_, i) => String(i));
+				const matrix = await embed(texts);
+				expect(matrix?.map(row => row[0])).toEqual(texts.map(Number));
+				expect(sizes).toEqual(Array(16).fill(8));
+
+				sizes.length = 0;
+				const override = await withMnemopiRuntimeOptions(
+					{ embeddings: { model: "intfloat/multilingual-e5-large", batchSize: 3 } },
+					() => embed(texts.slice(0, 8)),
+				);
+				expect(override?.map(row => row[0])).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+				expect(sizes).toEqual([3, 3, 2]);
+			},
+		);
 	});
 
 	it("retries local model initialization after a transient failure", async () => {
