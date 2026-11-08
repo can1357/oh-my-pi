@@ -661,7 +661,7 @@ impl Kernel {
 				self.pid_owners.push((pid, bang.vproc, bang.job));
 			}
 		}
-		jobctl::bang_settled(self, bang.job, os);
+		jobctl::bang_settled(self, bang.vproc, os);
 		self.ctl.notify();
 	}
 

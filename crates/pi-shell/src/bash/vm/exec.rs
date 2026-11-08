@@ -3963,19 +3963,39 @@ fn bang_stage(unit: &Unit, entry: u32) -> Option<BangStage> {
 }
 
 /// The pipeline a background job's body is ([`BangStage::Pipeline`])
-/// started: its last stage, run by vproc `last` (a child, or the job's own
-/// under `lastpipe`) from `entry`, decides the job's pid as a job body of
-/// its own would (bash and zsh name the last process in `$!`).
-fn retarget_bang(k: &mut Kernel, job_vproc: Vpid, unit: &Unit, last: Vpid, entry: u32) {
-	let Some(bang) = k
+/// started `stages` (`(vproc, entry)`; the last one a child, or the job's
+/// own vproc under `lastpipe`): its last stage decides the job's pid as a
+/// job body of its own would (bash and zsh name the last process in `$!`).
+/// While the job's `[n] pid…` line waits, every earlier stage decides the
+/// pid that line shows for it the same way (zsh names each process).
+fn retarget_bang(k: &mut Kernel, job_vproc: Vpid, unit: &Unit, stages: &[(Vpid, u32)]) {
+	let Some(i) = k
 		.bangs
-		.iter_mut()
-		.find(|b| b.vproc == job_vproc && b.stage == BangStage::Pipeline)
+		.iter()
+		.position(|b| b.vproc == job_vproc && b.stage == BangStage::Pipeline)
 	else {
 		return;
 	};
-	match bang_stage(unit, entry).filter(|s| *s != BangStage::Pipeline) {
+	let Some(&(last, last_entry)) = stages.last() else {
+		return;
+	};
+	let lone = |entry: u32| bang_stage(unit, entry).filter(|s| *s != BangStage::Pipeline);
+	if super::jobctl::announcing(k, job_vproc) {
+		let mut pids = Vec::with_capacity(stages.len());
+		for &(stage, entry) in stages {
+			let decides = lone(entry);
+			if let Some(kind) = decides
+				&& stage != last
+			{
+				k.bangs.push(Bang { vproc: stage, job: stage, stage: kind });
+			}
+			pids.push((stage, decides.is_some()));
+		}
+		super::jobctl::pipeline_started(k, job_vproc, &pids);
+	}
+	match lone(last_entry) {
 		Some(stage) => {
+			let bang = &mut k.bangs[i];
 			bang.vproc = last;
 			bang.stage = stage;
 		},
@@ -4099,7 +4119,13 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 				for (i, stage) in info.stages.iter().enumerate() {
 					if lastpipe && i + 1 == n {
 						if !k.bangs.is_empty() {
-							retarget_bang(k, vp.vpid, unit, vp.vpid, stage.entry);
+							let stages: Vec<(Vpid, u32)> = children
+								.iter()
+								.zip(&info.stages)
+								.map(|(&child, s)| (child, s.entry))
+								.chain([(vp.vpid, stage.entry)])
+								.collect();
+							retarget_bang(k, vp.vpid, unit, &stages);
 						}
 						k.emit_op(cx, vp, op.node, EventData::Pipeline { stages: &children });
 						let line_shift = top_frame(vp).line_shift;
@@ -4144,10 +4170,13 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					children.push(child.vpid);
 					k.spawned.push(Box::new(child));
 				}
-				if !k.bangs.is_empty()
-					&& let (Some(&last), Some(stage)) = (children.last(), info.stages.last())
-				{
-					retarget_bang(k, vp.vpid, unit, last, stage.entry);
+				if !k.bangs.is_empty() {
+					let stages: Vec<(Vpid, u32)> = children
+						.iter()
+						.zip(&info.stages)
+						.map(|(&child, s)| (child, s.entry))
+						.collect();
+					retarget_bang(k, vp.vpid, unit, &stages);
 				}
 				k.emit_op(cx, vp, op.node, EventData::Pipeline { stages: &children });
 			},
