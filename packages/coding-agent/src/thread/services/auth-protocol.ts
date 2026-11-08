@@ -370,6 +370,8 @@ export type ModelRegistryProtocol = {
 	remintCommandConfigs: RpcMethod<[provider: string, rejectedGeneration?: number], void>;
 	/** Record that the provider refused `provider`'s credential of `generation`, without minting. */
 	refuseCommandGeneration: RpcMethod<[provider: string, generation: number], void>;
+	/** Check the owner's cache without executing the provider's credential command. */
+	hasUnrefusedCommandCredential: RpcMethod<[provider: string], boolean>;
 	refresh: RpcMethod<[strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions], void>;
 	refreshProvider: RpcMethod<
 		[providerId: string, strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions],

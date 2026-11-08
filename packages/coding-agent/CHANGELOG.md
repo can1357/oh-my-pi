@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Worker retries can reuse a newer command credential already minted by the main thread ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- Provider availability checks no longer execute command-backed headers ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - Requests that share a `!command` credential and are refused together now cost one run of the command, not one per request ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - A 401 whose own error class says it is not an authentication failure no longer re-runs a provider's `!command` credentials ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - A refusal that arrives after a shared `!command` re-mint has already settled now reuses that mint and retries, instead of calling the issuer again ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))

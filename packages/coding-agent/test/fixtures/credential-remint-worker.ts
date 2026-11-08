@@ -1,4 +1,5 @@
 import { type MessagePort, parentPort } from "node:worker_threads";
+import type { ResolvedApiKey } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { type ApiKeyResolution, resolveApiKeyOnce, seedApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Context } from "@oh-my-pi/pi-ai/types";
@@ -14,11 +15,20 @@ export interface RemintProbe {
 		provider: string,
 		modelId: string,
 	): Promise<{ ok: boolean; status: number | undefined }>;
+	lastChance(
+		registry: ModelRegistry,
+		provider: string,
+		rejectedGeneration: number,
+	): Promise<ResolvedApiKey | undefined>;
 }
 
 const CONTEXT: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
 
 const probe: RemintProbe = {
+	lastChance: (registry, provider, rejectedGeneration) =>
+		registry.getApiKeyWithCredentialForProvider(provider, "s", {
+			rejectedCredentialGeneration: rejectedGeneration,
+		}),
 	turn: async (registry, provider, modelId) => {
 		const model = registry.find(provider, modelId);
 		if (!model) throw new Error(`remint fixture: no model ${provider}/${modelId}`);

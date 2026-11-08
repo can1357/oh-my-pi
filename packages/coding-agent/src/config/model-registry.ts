@@ -594,6 +594,12 @@ export class ModelRegistry {
 		refuseCommandGeneration(this.#selectedProviderApiKeyCommand(provider), generation);
 	}
 
+	/** Query the cache on the thread that owns the provider's API-key command. */
+	async hasUnrefusedCommandCredential(provider: string): Promise<boolean> {
+		if (this.#owner) return this.#owner.hasUnrefusedCommandCredential(provider);
+		return hasUnrefusedCommandCredential(this.#selectedProviderApiKeyCommand(provider));
+	}
+
 	/** Drop this process's command caches for an explicit configuration refresh. */
 	#invalidateLocalProviderCommandConfigs(provider: string): void {
 		invalidateCommandConfig(this.#customProviderApiKeys.get(provider));
@@ -3787,7 +3793,7 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<string | undefined> {
 		try {
-			return (await this.getApiKeyWithCredentialForProvider(provider, sessionId, options))?.apiKey;
+			return (await this.#getApiKeyWithCredentialForProvider(provider, sessionId, options, false))?.apiKey;
 		} catch (error) {
 			if (error instanceof OAuthRefreshUnavailableError) return undefined;
 			throw error;
@@ -3805,6 +3811,15 @@ export class ModelRegistry {
 		provider: string,
 		sessionId?: string,
 		options?: RegistryApiKeyOptions,
+	): Promise<ResolvedApiKey | undefined> {
+		return this.#getApiKeyWithCredentialForProvider(provider, sessionId, options, true);
+	}
+
+	async #getApiKeyWithCredentialForProvider(
+		provider: string,
+		sessionId: string | undefined,
+		options: RegistryApiKeyOptions | undefined,
+		includeHeaders: boolean,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		const rejectedGeneration = options?.rejectedCredentialGeneration;
@@ -3839,7 +3854,7 @@ export class ModelRegistry {
 			refusedHeader ||
 			(!options?.forceRefresh &&
 				rejectedGeneration !== undefined &&
-				!hasUnrefusedCommandCredential(this.#selectedProviderApiKeyCommand(provider)))
+				!(await this.hasUnrefusedCommandCredential(provider)))
 		)
 			return undefined;
 		const resolved = this.#isKeylessProvider(provider)
@@ -3853,7 +3868,7 @@ export class ModelRegistry {
 					rejectedAccessToken: options?.rejectedAccessToken,
 					signal: options?.signal,
 				});
-		if (!resolved || !headerResolver) return resolved;
+		if (!includeHeaders || !resolved || !headerResolver) return resolved;
 		// Values and provenance stay paired. Only a condemned prepared generation
 		// needs replacement resolution; valid snapshots never cause a new mint.
 		const headers = await headerResolver(options?.signal);
@@ -3861,6 +3876,7 @@ export class ModelRegistry {
 		if (!headers || !headerGenerations) return resolved;
 		const snapshot = {
 			resolvedHeaders: Object.freeze(headers),
+			resolvedHeaderModelId: model?.resolveHeaders ? model.id : undefined,
 			headerGenerations: Object.freeze(headerGenerations),
 		};
 		return {
@@ -4353,6 +4369,8 @@ export interface ModelRegistryOwner {
 	remintCommandConfigs(provider: string, rejectedGeneration?: number): Promise<void>;
 	/** {@link ModelRegistry.refuseCommandGeneration} on the owner. */
 	refuseCommandGeneration(provider: string, generation: number): Promise<void>;
+	/** {@link ModelRegistry.hasUnrefusedCommandCredential} on the owner. */
+	hasUnrefusedCommandCredential(provider: string): Promise<boolean>;
 	/** {@link ModelRegistry.refresh} on the owner. */
 	refresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): Promise<void>;
 	/** {@link ModelRegistry.refreshProvider} on the owner. */

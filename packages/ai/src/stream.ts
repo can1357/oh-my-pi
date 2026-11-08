@@ -16,6 +16,7 @@ import {
 import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import {
+	type ApiKeyResolver,
 	createAuthRetryKeyState,
 	isApiKeyResolver,
 	preferAuthRetryError,
@@ -1226,7 +1227,36 @@ function streamSimpleRequest<TApi extends Api>(
 		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
 	);
 
-	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
+	const requestApiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
+	const apiKeyResolver: ApiKeyResolver | undefined = requestApiKeyResolver
+		? async ctx => {
+				const resolved = await requestApiKeyResolver(ctx);
+				const resolveHeaders = model.resolveHeaders;
+				if (
+					typeof resolved !== "object" ||
+					!resolved?.resolvedHeaders ||
+					resolved.resolvedHeaderModelId === model.id ||
+					!resolveHeaders
+				)
+					return resolved;
+				// Provider-only snapshots supplement the caller's model. Resolve its
+				// missing source before rechecking the snapshot's refusal watermark.
+				const callerHeaders = await untilAborted(ctx.signal, () => resolveHeaders(ctx.signal));
+				const merge = (headers: Record<string, string> | undefined): Record<string, string> => ({
+					...model.headers,
+					...callerHeaders,
+					...headers,
+				});
+				return {
+					...resolved,
+					resolvedHeaders: merge(resolved.resolvedHeaders),
+					readHeaders: async () => {
+						const current = resolved.readHeaders ? await resolved.readHeaders() : resolved;
+						return { ...current, resolvedHeaders: merge(current.resolvedHeaders) };
+					},
+				};
+			}
+		: undefined;
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
@@ -1251,7 +1281,7 @@ function streamSimpleRequest<TApi extends Api>(
 				const attemptModel =
 					resolvedHeaders === undefined
 						? model
-						: { ...model, resolveHeaders: undefined, headers: resolvedHeaders };
+						: { ...model, resolveHeaders: undefined, headers: { ...model.headers, ...resolvedHeaders } };
 				const inner = streamSimpleRequest(attemptModel, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {

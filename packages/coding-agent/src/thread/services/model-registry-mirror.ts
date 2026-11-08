@@ -281,6 +281,10 @@ export class RemoteModelRegistryOwner implements ModelRegistryOwner {
 		return this.#remote.call("refuseCommandGeneration", provider, generation);
 	}
 
+	hasUnrefusedCommandCredential(provider: string): Promise<boolean> {
+		return this.#remote.call("hasUnrefusedCommandCredential", provider);
+	}
+
 	refresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): Promise<void> {
 		return this.#remote.call("refresh", strategy, options);
 	}

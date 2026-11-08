@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Command-backed provider headers preserve the caller's model headers, including when authentication is resolved without a model ID ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - A credential re-minted because the provider said it refused the one a request sent is now tried, even when the mint hands back the same bytes; a request still gets exactly one such retry ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - A provider error's `type`, `param` and `code` keep their own labels in the error message: an absent field used to rename the ones after it, so an OpenAI rejected key (`type=invalid_request_error`, no `param`, `code=invalid_api_key`) reached every reader as `param=invalid_api_key` ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - A bare HTTP status in `error.code` no longer overrules an explicit policy-denial class; LiteLLM's `token_not_found_in_db` and `expired_key` classes correctly identify rejected credentials ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))

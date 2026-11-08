@@ -86,6 +86,8 @@ export interface ResolvedApiKey {
 	headerGenerations?: Record<string, number>;
 	/** Header values resolved together with their command generations. */
 	resolvedHeaders?: Record<string, string>;
+	/** Model whose header resolver the snapshot includes; absent for provider-only snapshots. */
+	resolvedHeaderModelId?: string;
 	/** Read prepared headers against known refusals; never re-resolves a still-usable snapshot. */
 	readHeaders?: () => Promise<Pick<ResolvedApiKey, "resolvedHeaders" | "headerGenerations">>;
 	/** Non-secret request scope belonging to this bearer, replaced on account rotation. */

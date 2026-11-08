@@ -198,6 +198,95 @@ describe("a `!command` credential the provider refuses", () => {
 		};
 	}
 
+	for (const resolverScope of ["provider", "missing-model", "empty-snapshot"] as const) {
+		test(`a ${resolverScope} resolver keeps caller headers beside command-backed provider headers`, async () => {
+			const counterFile = path.join(tempDir, "mints");
+			const tokenFile = path.join(tempDir, "token");
+			fs.writeFileSync(counterFile, "");
+			fs.writeFileSync(tokenFile, "provider-value");
+			const { registry, model } = buildRig("literal-key", counterFile, () => true, {
+				headers: { "X-Provider": mintFromFile(counterFile, tokenFile) },
+				models: [{ id: "gw-model", name: "GW Model", headers: { "X-Model": "model-value" } }],
+			});
+			const callerModel = {
+				...model,
+				id: resolverScope === "missing-model" ? "missing-model" : model.id,
+				headers: { "X-Caller": "caller-value" },
+			};
+			const resolver = registry.resolver("probe-gw", {
+				sessionId: "s",
+				modelId: resolverScope === "provider" ? undefined : callerModel.id,
+			});
+			const sent: Headers[] = [];
+			const handle = streamSimple(callerModel, CONTEXT, {
+				apiKey:
+					resolverScope === "empty-snapshot"
+						? () => ({ apiKey: "not-a-secret-test-key", resolvedHeaders: {} })
+						: resolver,
+				fetch: async (_url, init) => {
+					sent.push(new Headers(init?.headers));
+					return okStream();
+				},
+				maxTokens: 16,
+			});
+			for await (const _event of handle) {
+				// drain
+			}
+			expect((await handle.result()).stopReason).not.toBe("error");
+			expect(sent).toHaveLength(1);
+			expect(sent[0].get("X-Provider")).toBe("provider-value");
+			expect(sent[0].get("X-Model")).toBe("model-value");
+			expect(sent[0].get("X-Caller")).toBe("caller-value");
+		});
+	}
+
+	test("availability checks do not execute provider or model header commands", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "header-value");
+		const command = mintFromFile(counterFile, tokenFile);
+		const { registry } = buildRig("literal-key", counterFile, () => true, {
+			headers: { "X-Provider": command },
+			models: [{ id: "gw-model", name: "GW Model", headers: { "X-Model": `${command}; :` } }],
+		});
+		for (const modelId of [undefined, "gw-model"]) {
+			expect(await registry.getApiKeyForProvider("probe-gw", "s", { modelId })).toBe("literal-key");
+		}
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("");
+		const requestAuth = await registry.getApiKeyWithCredentialForProvider("probe-gw", "s", {
+			modelId: "gw-model",
+		});
+		expect(requestAuth?.resolvedHeaders).toEqual({ "X-Provider": "header-value", "X-Model": "header-value" });
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+	});
+
+	test("a worker last-chance retry reuses the owner's newer mint without executing another command", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "tok-1");
+		const command = mintFromFile(counterFile, tokenFile);
+		const { registry } = buildRig(command, counterFile, () => true);
+		expect(await registry.getApiKeyForProvider("probe-gw")).toBe("tok-1");
+		fs.writeFileSync(tokenFile, "tok-2");
+		expect(await remintCommandConfig(command)).toBe("tok-2");
+		const worker = await startServiceWorker<RemintProbe>(
+			new URL("./fixtures/credential-remint-worker.ts", import.meta.url),
+			[authService],
+		);
+		try {
+			expect(await worker.probe.lastChance(registry, "probe-gw", 1)).toEqual({
+				apiKey: "tok-2",
+				credentialGeneration: 2,
+			});
+			expect(await worker.probe.lastChance(registry, "probe-gw", 2)).toBeUndefined();
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+		} finally {
+			await worker.stop();
+		}
+	});
+
 	test("a permission-only 403 does not prevent a valid prepared header request from sending", async () => {
 		const counterFile = path.join(tempDir, "mints");
 		const tokenFile = path.join(tempDir, "token");
