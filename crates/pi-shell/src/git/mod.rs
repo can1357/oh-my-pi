@@ -204,7 +204,8 @@ impl AddRequest {
 					return None;
 				}
 				match option {
-					// Force only matters for targets already in use, which git handles.
+					// Force only matters for targets already in use, which git
+					// handles.
 					"force" => {},
 					"orphan" => orphan = !negated,
 					"detach" => request.detach = !negated,

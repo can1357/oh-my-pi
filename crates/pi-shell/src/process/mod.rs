@@ -24,6 +24,7 @@ mod timer;
 use std::{
 	fs,
 	io::{self, IsTerminal, Read, Write},
+	mem,
 	path::PathBuf,
 	task::Context,
 	time::Duration,
@@ -61,7 +62,11 @@ pub struct ProcessOptions {
 	/// - exits of externals are observed by a waiter thread each, beside the
 	///   runtime's own child handling, and the process umask is read without
 	///   changing it;
-	/// - terminal modes the shell changed are restored when it ends.
+	/// - terminal modes the shell changed are restored when it ends;
+	/// - teardown: the engine's caches and the variable store are freed before
+	///   [`main`] returns. Standalone, the process is about to exit, so that
+	///   memory is left to the OS; the shell itself (its externals, tasks and
+	///   descriptors) is torn down the same either way.
 	///
 	/// Nothing outlives the call: a second [`main`] in the same process
 	/// starts from the same state.
@@ -480,6 +485,19 @@ fn run(args: &ShellArgs, env: Vec<(BString, BString)>, input: Input, opts: Proce
 	let status = drive(&mut host, &mut store, &mut shell, run, root);
 	// zsh `zexit`: hang up running jobs, give the terminal back.
 	shell.leave_job_control(&mut Cx { host: &mut host, store: &mut store });
+	// Standalone, the process exits next: let the OS reclaim the engine's
+	// unit cache and the store instead of freeing every cached unit,
+	// function and variable one by one (a quarter of a 100k-command
+	// script's run). Both are plain data. The shell still drops first: it
+	// owns the live externals (abandoning one signals its process group),
+	// task handles and the script's descriptors. Its `Arc` of the engine is
+	// not the last one, so dropping it frees no cache. Not under
+	// `alloc-stats`, whose `live=` count reads what is still allocated at exit.
+	drop(shell);
+	if !opts.embedded && !cfg!(feature = "alloc-stats") {
+		mem::forget(store);
+		mem::forget(engine);
+	}
 	status & 0xff
 }
 

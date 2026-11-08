@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { type BeamMemoryState, initBeam } from "@oh-my-pi/pi-mnemopi/core/beam";
+import { currentEmbeddingModel } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { PolyphonicRecallEngine, polyphonicRecall } from "@oh-my-pi/pi-mnemopi/core/polyphonic-recall";
 import { closeQuietly, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
 import { currentLoopPhase } from "@oh-my-pi/pi-utils";
@@ -55,13 +56,15 @@ function seedPolyphonicFixture(beam: BeamMemoryState): PolyphonicRecallEngine {
 	insertWorking(beam, "m1", "Alice owns the durable launch checklist", 0.8, old);
 	insertWorking(beam, "m2", "Alice linked the graph traversal plan", 0.7, old);
 	insertWorking(beam, "m3", "Recent operational note for this week", 0.6);
-	beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+	beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)", [
 		"m1",
 		JSON.stringify([0.8, 0.2]),
+		currentEmbeddingModel(),
 	]);
-	beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+	beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)", [
 		"m2",
 		JSON.stringify([1, 0]),
+		currentEmbeddingModel(),
 	]);
 	beam.db.run(
 		`INSERT INTO gists (id, text, timestamp, participants_json, memory_id)
@@ -185,13 +188,15 @@ describe("PolyphonicRecallEngine", () => {
 				"session-b",
 				"global",
 			);
-			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)", [
 				"wm-private-b",
 				JSON.stringify([1, 0]),
+				currentEmbeddingModel(),
 			]);
-			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)", [
 				"wm-global-b",
 				JSON.stringify([1, 0]),
+				currentEmbeddingModel(),
 			]);
 			process.env.MNEMOPI_VOICE_GRAPH = "0";
 			process.env.MNEMOPI_VOICE_FACT = "0";

@@ -6,7 +6,6 @@ import type {
 	Model,
 	ProviderPayload,
 	TextContent,
-	Tool,
 	ToolResultMessage,
 	ToolResultProviderMetadata,
 	UserMessage,
@@ -21,6 +20,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { capFrameDataBytes, frameDataBytesBudget, providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
+import { declaredTools } from "../utils/tool-declarations";
 import { imageDecodeFailureReason } from "@oh-my-pi/pi-tui/chat/image-loading";
 
 const IMAGE_OMISSION: TextContent = {
@@ -288,31 +288,6 @@ function measuredContent<T extends { type: string }>(content: readonly T[], stri
 		if (stringArguments && part.type === "toolCall" && "arguments" in part)
 			return { ...part, arguments: JSON.stringify(part.arguments) };
 		return part;
-	});
-}
-
-/**
- * Every {@link Tool} field and nothing else: `satisfies` stops compiling when `Tool` gains or drops a field, so the
- * measured declaration cannot drift from what providers serialize. Anything else on a live tool object (sessions,
- * runners, caches) is execution state that never reaches the wire (#17819).
- */
-const TOOL_DECLARATION_KEYS = Object.keys({
-	name: true,
-	description: true,
-	parameters: true,
-	strict: true,
-	deferLoading: true,
-	customFormat: true,
-	customWireName: true,
-	native: true,
-	examples: true,
-} satisfies Record<keyof Tool, true>) as (keyof Tool)[];
-
-function declaredTools(tools: readonly Tool[] | undefined): Tool[] | undefined {
-	return tools?.map(tool => {
-		const declared: Partial<Record<keyof Tool, unknown>> = {};
-		for (const key of TOOL_DECLARATION_KEYS) declared[key] = tool[key];
-		return declared as Tool;
 	});
 }
 

@@ -1104,9 +1104,10 @@ export interface SessionTrace {
 	/** Root transcript mtime, or recorded root activity/header time for offline snapshots. */
 	mtimeMs: number;
 	/**
-	 * Conditional-request fingerprint `"<rootMs>:<childHighMs>"` (see
-	 * traceFingerprintForEtag): the server ETag is built from this, so a
-	 * subagent-only append changes the ETag even when the root is untouched.
+	 * Conditional-request fingerprint `"<rootMs>:<rootSize>:<digest>"` (see
+	 * traceFingerprintForEtag): the digest folds the child-transcript set into a
+	 * fixed-size key, so a subagent-only append changes the ETag even when the
+	 * root is untouched without making `If-None-Match` unbounded.
 	 * Offline snapshots use "snapshot" and do not support HTTP revalidation.
 	 */
 	etag: string;

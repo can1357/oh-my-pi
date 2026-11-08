@@ -94,20 +94,53 @@ export function queryByTitle(node: QueryNode, selector: string): Element[] {
 
 /**
  * `role/` handler: `role[name="…" exact]` — explicit or implicit ARIA role, optionally filtered by
- * accessible name.
+ * accessible name. Anything else in the selector (a chained `>> role/…`, another attribute) is refused
+ * rather than ignored, since ignoring it would match the outer element.
  */
 export function queryByRole(node: QueryNode, selector: string): Element[] {
 	const root = node as unknown as QueryRoot;
-	const roleMatch = /^\s*([^\s[]+)/.exec(selector);
-	const wantedRole = (roleMatch?.[1] ?? "").toLocaleLowerCase();
-	const nameMatch = /\[\s*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))(?:\s+(exact))?\s*\]/i.exec(selector);
+	const parsed =
+		/^\s*([a-z][a-z0-9-]*)\s*(?:\[\s*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))(?:\s+(exact))?\s*\])?\s*$/i.exec(
+			selector,
+		);
+	if (!parsed) {
+		throw new Error(
+			`role/ selector ${JSON.stringify(selector)} is not one role with an optional [name="…"] or [name="…" exact] filter. ` +
+				"role/ selectors do not chain; to act inside a section, pass the section's selector to observe({ selector }) or ariaSnapshot(selector) and use the id or ref it returns.",
+		);
+	}
+	const wantedRole = parsed[1]!.toLocaleLowerCase();
 	const normalizeSpace = (value: string): string => value.replace(/\s+/g, " ").trim();
-	const nameText = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
+	const nameText = parsed[2] ?? parsed[3] ?? parsed[4];
 	const wantedName = nameText === undefined ? undefined : normalizeSpace(nameText).toLocaleLowerCase();
-	const exact = nameMatch?.[4]?.toLocaleLowerCase() === "exact";
-	const implicitRole = (element: Element): string | null => {
+	const exact = parsed[5]?.toLocaleLowerCase() === "exact";
+	const hasLandmarkName = (element: Element): boolean =>
+		Boolean(
+			idrefText(element) ||
+			normalizeSpace(element.getAttribute("aria-label") ?? "") ||
+			normalizeSpace(element.getAttribute("title") ?? ""),
+		);
+	const isScoped = (element: Element, includeMain: boolean): boolean => {
+		for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+			const explicit = parent.getAttribute("role")?.trim().split(/\s+/)[0]?.toLocaleLowerCase();
+			if (!explicit && parent.tagName.toLocaleLowerCase() === "section") return true;
+			// Browser ancestors have the same element interface as the queried node.
+			const ancestor = parent as Element;
+			const role = explicit || implicitRole(ancestor);
+			if (
+				role === "article" ||
+				role === "complementary" ||
+				role === "navigation" ||
+				(includeMain && role === "main")
+			) {
+				return true;
+			}
+		}
+		return false;
+	};
+	const computeImplicitRole = (element: Element): string | null => {
 		const tag = element.tagName.toLocaleLowerCase();
-		if (tag === "a" && element.hasAttribute("href")) return "link";
+		if ((tag === "a" || tag === "area") && element.hasAttribute("href")) return "link";
 		if (tag === "button") return "button";
 		if (tag === "textarea") return "textbox";
 		if (tag === "select") {
@@ -115,13 +148,74 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 			return select.multiple || select.size > 1 ? "listbox" : "combobox";
 		}
 		if (tag === "option") return "option";
-		if (tag === "img") return "img";
-		if (tag === "ul" || tag === "ol") return "list";
+		if (tag === "img") {
+			return element.getAttribute("alt") === "" &&
+				!element.hasAttribute("tabindex") &&
+				!Array.from(element.attributes).some(attribute => attribute.name.startsWith("aria-")) &&
+				!normalizeSpace(element.getAttribute("title") ?? "")
+				? "none"
+				: "img";
+		}
+		if (tag === "ul" || tag === "ol" || tag === "menu") return "list";
 		if (tag === "li") return "listitem";
 		if (tag === "nav") return "navigation";
 		if (tag === "main") return "main";
 		if (tag === "form") return "form";
-		if (tag === "article") return "article";
+		if (tag === "section") return hasLandmarkName(element) ? "region" : "generic";
+		if (tag === "aside") return hasLandmarkName(element) || !isScoped(element, false) ? "complementary" : "generic";
+		if (tag === "header" || tag === "footer") {
+			const scoped = isScoped(element, true);
+			return tag === "header" ? (scoped ? "sectionheader" : "banner") : scoped ? "sectionfooter" : "contentinfo";
+		}
+		switch (tag) {
+			case "article":
+			case "dialog":
+			case "meter":
+			case "search":
+			case "figure":
+			case "blockquote":
+			case "code":
+			case "strong":
+			case "time":
+			case "mark":
+				return tag;
+			case "fieldset":
+			case "details":
+			case "optgroup":
+			case "address":
+			case "hgroup":
+				return "group";
+			case "hr":
+				return "separator";
+			case "progress":
+				return "progressbar";
+			case "output":
+				return "status";
+			case "thead":
+			case "tbody":
+			case "tfoot":
+				return "rowgroup";
+			case "dt":
+			case "dfn":
+				return "term";
+			case "dd":
+				return "definition";
+			case "dl":
+				return "descriptionlist";
+			case "p":
+				return "paragraph";
+			case "em":
+				return "emphasis";
+			case "del":
+			case "s":
+				return "deletion";
+			case "ins":
+				return "insertion";
+			case "sub":
+				return "subscript";
+			case "sup":
+				return "superscript";
+		}
 		if (/^h[1-6]$/.test(tag)) return "heading";
 		if (tag === "table") return "table";
 		if (tag === "tr") return "row";
@@ -140,11 +234,30 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		}
 		return null;
 	};
+	/**
+	 * Each element's implicit role, computed once per query: an aside's or header's role depends on its ancestors' roles,
+	 * so nested asides would otherwise recompute every ancestor at each level.
+	 */
+	const roles = new Map<Element, string | null>();
+	const implicitRole = (element: Element): string | null => {
+		let role = roles.get(element);
+		if (role === undefined) {
+			role = computeImplicitRole(element);
+			roles.set(element, role);
+		}
+		return role;
+	};
 	// Roles named by their content, so `title` names them only when the content is empty.
 	const namedByContent =
-		/^(?:button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|row|rowheader|switch|tab|tooltip|treeitem)$/.test(
+		/^(?:button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|row|rowheader|switch|tab|term|tooltip|treeitem)$/.test(
 			wantedRole,
 		);
+	/** An image input's name: its alt, value or title, else the browser's default caption for an image submit button. */
+	const imageInputName = (element: Element): string =>
+		normalizeSpace(element.getAttribute("alt") ?? "") ||
+		normalizeSpace(element.getAttribute("value") ?? "") ||
+		normalizeSpace(element.getAttribute("title") ?? "") ||
+		"Submit";
 	// Text as the accessibility tree reads it (as the Tern kit's `contentText`): hidden subtrees and
 	// `visibility: hidden` text skipped, block children spaced apart, a child's `aria-labelledby` text,
 	// `aria-label`, an image's `alt` or an embedded control's value in place of its content. `skip` is the
@@ -157,6 +270,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		skip: Element | null,
 		visibility: unknown,
 		followRefs = true,
+		visited = new Set<Element>(),
 	): string => {
 		let text = "";
 		const walk = (element: Pick<Element, "childNodes">, visibility: unknown): void => {
@@ -175,7 +289,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				const gap = style.display === "inline" || style.display === "contents" ? "" : " ";
 				const shown = visibility === "any" || style.visibility === "visible";
 				const label = normalizeSpace(childElement.getAttribute("aria-label") ?? "");
-				const labelledBy = followRefs ? idrefText(childElement) : "";
+				const labelledBy = followRefs ? idrefText(childElement, visited) : "";
 				// Form controls expose `type`, `value` and `selectedOptions`, which the element type here does not declare.
 				const control = childElement as unknown as {
 					type?: string;
@@ -207,55 +321,119 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				} else if (valueIsText) text += shown ? (control.value ?? "") : "";
 				else if (labelledBy) text += shown ? labelledBy : "";
 				else if (label) text += shown ? label : "";
-				else if (tag === "img") text += shown ? (childElement.getAttribute("alt") ?? "") : "";
-				else if (inputButton) text += shown ? (control.value ?? "") : "";
-				else if (tag !== "input") walk(childElement, visibility === "any" ? "any" : style.visibility);
+				else if (inputType === "image") text += shown ? imageInputName(childElement) : "";
+				else if (tag === "img" || tag === "area") {
+					text += shown ? (childElement.getAttribute("alt") ?? "") : "";
+				} else if (inputButton) {
+					// Without a value, a submit or reset button shows the browser's default caption.
+					const caption =
+						normalizeSpace(control.value ?? "") ||
+						(inputType === "submit" ? "Submit" : inputType === "reset" ? "Reset" : "");
+					text += shown ? caption : "";
+				} else if (tag !== "input") walk(childElement, visibility === "any" ? "any" : style.visibility);
 				text += gap;
 			}
 		};
 		walk(start, visibility);
 		return text;
 	};
-	/** Text of the elements an `aria-labelledby` names (a hidden target read whole), without following their own references. */
-	const idrefText = (element: Element): string => {
-		const labelledBy = element.getAttribute("aria-labelledby");
-		if (!labelledBy) return "";
-		return normalizeSpace(
-			labelledBy
-				.split(/\s+/)
-				.map(id => {
-					const target = element.ownerDocument?.getElementById(id);
-					if (!target) return "";
-					// Hidden by visibility, `display: none`, or a `hidden`/`aria-hidden` ancestor: read the whole subtree.
-					const targetStyle = getComputedStyle(target);
-					const hidden =
-						targetStyle.visibility !== "visible" ||
-						targetStyle.display === "none" ||
-						target.closest("[hidden], [aria-hidden='true']") !== null;
-					return contentText(target, null, hidden ? "any" : "visible", false);
-				})
-				.join(" "),
+	/** The host-language name of an element its descendants do not name: an optgroup's label, a fieldset's legend, a table's caption. */
+	const nativeName = (element: Element, visited = new Set<Element>()): string => {
+		const tag = element.tagName.toLocaleLowerCase();
+		if (tag === "optgroup") return normalizeSpace(element.getAttribute("label") ?? "");
+		if (tag !== "fieldset" && tag !== "table") return "";
+		const caption = element.querySelector(
+			tag === "fieldset" ? ":scope > legend" : ":scope > caption",
+		) as unknown as Element | null;
+		if (!caption) return "";
+		// The caption or legend is named as an element in its own right: its references, then its label, then its text.
+		return (
+			idrefText(caption, visited) ||
+			normalizeSpace(caption.getAttribute("aria-label") ?? "") ||
+			normalizeSpace(contentText(caption, null, "visible", true, visited))
 		);
 	};
+	/**
+	 * Text of the elements an `aria-labelledby` names (a hidden target read whole), without following their own
+	 * references. Each target is read as a node embedded in a label, so a control target gives its value and an image its
+	 * alt, as its descendants would.
+	 */
+	const idrefText = (element: Element, visited = new Set<Element>()): string => {
+		const labelledBy = element.getAttribute("aria-labelledby");
+		if (!labelledBy || visited.has(element)) return "";
+		visited.add(element);
+		try {
+			return normalizeSpace(
+				labelledBy
+					.split(/\s+/)
+					.map(id => {
+						const target = element.ownerDocument?.getElementById(id);
+						if (!target) return "";
+						// Hidden by visibility, `display: none` (its own or an ancestor's, which leaves its own computed display
+						// untouched), or a `hidden`/`aria-hidden` ancestor: read the whole subtree. A `display: contents` target
+						// has no box of its own, so the nearest ancestor with one decides whether it is rendered.
+						const targetStyle = getComputedStyle(target);
+						// Browser ancestors have the same element interface as the target.
+						let box = target as Element | null;
+						while (box && getComputedStyle(box).display === "contents") box = box.parentElement as Element | null;
+						const rendered = box as unknown as { checkVisibility?: () => boolean } | null;
+						const hidden =
+							targetStyle.visibility !== "visible" ||
+							targetStyle.display === "none" ||
+							(typeof rendered?.checkVisibility === "function" && !rendered.checkVisibility()) ||
+							target.closest("[hidden], [aria-hidden='true']") !== null;
+						// A table, fieldset or optgroup target is named by its caption, legend or label, not its contents.
+						const native = normalizeSpace(target.getAttribute("aria-label") ?? "")
+							? ""
+							: nativeName(target, visited);
+						if (native) return native;
+						const text = normalizeSpace(
+							contentText(
+								{ childNodes: [target] } as unknown as Element,
+								null,
+								hidden ? "any" : "visible",
+								false,
+								visited,
+							),
+						);
+						// A target that yields no text is named by its tooltip, as the root of its own name computation.
+						return text || normalizeSpace(target.getAttribute("title") ?? "");
+					})
+					.join(" "),
+			);
+		} finally {
+			visited.delete(element);
+		}
+	};
 	const accessibleName = (element: Element): string => {
-		const ariaLabel = normalizeSpace(element.getAttribute("aria-label") ?? "");
-		if (ariaLabel) return ariaLabel;
 		const labelledBy = idrefText(element);
 		if (labelledBy) return labelledBy;
-		if (element.id) {
-			for (const label of element.ownerDocument?.querySelectorAll("label") ?? []) {
-				if (label.getAttribute("for") === element.id) {
-					return normalizeSpace(contentText(label, element, "visible"));
+		const ariaLabel = normalizeSpace(element.getAttribute("aria-label") ?? "");
+		if (ariaLabel) return ariaLabel;
+		const native = nativeName(element);
+		if (native) return native;
+		// `<label>` names only the form controls it can label, so an optgroup in a labelled select keeps its own label
+		// (or title) and a term inside a label keeps its own text.
+		const tag = element.tagName.toLocaleLowerCase();
+		const labelable =
+			["button", "meter", "output", "progress", "select", "textarea"].includes(tag) ||
+			(tag === "input" && element.getAttribute("type")?.toLocaleLowerCase() !== "hidden");
+		if (labelable) {
+			if (element.id) {
+				for (const label of element.ownerDocument?.querySelectorAll("label") ?? []) {
+					if (label.getAttribute("for") === element.id) {
+						return normalizeSpace(contentText(label, element, "visible"));
+					}
 				}
 			}
+			const wrappingLabel = element.closest("label");
+			if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel, element, "visible"));
 		}
-		const wrappingLabel = element.closest("label");
-		if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel, element, "visible"));
-		const tag = element.tagName.toLocaleLowerCase();
 		// An `<input>`'s type and value decide its name; other elements have neither.
 		const input = tag === "input" ? (element as unknown as { type: string; value: string }) : null;
 		const inputType = input?.type.toLocaleLowerCase();
-		if (tag === "img" || tag === "area" || inputType === "image") {
+		if (inputType === "image") return imageInputName(element);
+		if (tag === "img" || tag === "area") {
 			const alt = normalizeSpace(element.getAttribute("alt") ?? "");
 			if (alt) return alt;
 		}
@@ -269,12 +447,12 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 			element.getAttribute("title") ||
 				element.getAttribute("placeholder") ||
 				element.getAttribute("aria-placeholder") ||
-				content,
+				"",
 		);
 	};
 	return Array.from(root.querySelectorAll("*")).filter(element => {
 		const role = (element.getAttribute("role")?.trim().split(/\s+/)[0] ?? implicitRole(element))?.toLocaleLowerCase();
-		if (role !== wantedRole) return false;
+		if (role !== wantedRole && !(role === "img" && wantedRole === "image")) return false;
 		if (wantedName === undefined) return true;
 		const name = accessibleName(element).toLocaleLowerCase();
 		return exact ? name === wantedName : name.includes(wantedName);

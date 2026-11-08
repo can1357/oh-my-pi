@@ -378,19 +378,23 @@ mod native {
 			None
 		}
 
+		#[expect(clippy::unused_self, reason = "same shape as the locale-backed `Coll::key`")]
 		pub fn key(&self, s: &[u8]) -> Vec<u8> {
 			s.to_vec()
 		}
 	}
 
+	#[expect(clippy::missing_const_for_fn, reason = "same shape as the libc-backed `langinfo`")]
 	pub fn langinfo(_locale: &[u8], _cat: Category, _item: &str) -> Option<Vec<u8>> {
 		None
 	}
 
+	#[expect(clippy::missing_const_for_fn, reason = "same shape as the libc-backed `strftime`")]
 	pub fn strftime(_locale: &[u8], _fmt: &[u8], _tm: &Tm) -> Option<Vec<u8>> {
 		None
 	}
 
+	#[expect(clippy::missing_const_for_fn, reason = "same shape as the libc-backed `strptime`")]
 	pub fn strptime(_locale: &[u8], _fmt: &[u8], _input: &[u8]) -> Option<super::Parse> {
 		None
 	}

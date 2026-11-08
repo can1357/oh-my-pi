@@ -7,6 +7,9 @@ import { bashToolRenderer, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools
 import { previewWindowRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { RunTrace } from "@oh-my-pi/pi-natives";
+import { defaultShellVizPreferences, readShellPresentation } from "@oh-my-pi/pi-tui/tools/shell-viz";
+import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 type MutableTerminalInfo = {
 	imageProtocol: ImageProtocol | null;
@@ -319,6 +322,28 @@ describe("bashToolRenderer", () => {
 		const lines = component.render(80);
 
 		expect(lines.filter(line => line === sixel)).toHaveLength(1);
+	});
+
+	it("keeps a long embedded argument wrapped inside the pending card under its nesting indent", () => {
+		const command = `pip3 list 2>/dev/null | grep -i -E "onnx|torch|ultralytics|opencv|numpy|espeak|sounddevice|piper|mediapipe|tflite|tf-|tensorflow"; sw_vers`;
+		const shellPresentation = readShellPresentation(new RunTrace(command), defaultShellVizPreferences());
+		const component = bashToolRenderer.renderCall(
+			{ command },
+			{ expanded: false, isPartial: true, shellPresentation },
+			uiTheme,
+		);
+		const rows = component.render(77).map(row => Bun.stripANSI(row));
+		for (const row of rows) {
+			expect(visibleWidth(row)).toBeLessThanOrEqual(77);
+			expect(row).toMatch(/^[│╭╰].*[│╮╯]$/);
+		}
+		const inner = rows.slice(1, -1).map(row => row.slice(1, -1));
+		expect(inner.filter(row => row.trim().length === 0)).toEqual([]);
+		const indent = (row: string) => row.length - row.trimStart().length;
+		const topLevel = indent(inner.find(row => row.includes("sw_vers"))!);
+		const body = inner.filter(row => /onnx|tensorflow/.test(row));
+		expect(body.join("").replace(/\s/g, "")).toContain("tflite|tf-|tensorflow");
+		for (const row of body) expect(indent(row)).toBeGreaterThan(topLevel);
 	});
 
 	it("highlights every line of a multi-line bash command in renderResult", async () => {

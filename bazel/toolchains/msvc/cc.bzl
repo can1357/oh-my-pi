@@ -195,6 +195,9 @@ set(CMAKE_MT "${CMAKE_CURRENT_LIST_DIR}/bin/llvm-mt")
 set(CMAKE_TRY_COMPILE_CONFIGURATION Release)
 set(CMAKE_POLICY_DEFAULT_CMP0091 NEW)
 set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded)
+# Opus overwrites CMAKE_MSVC_RUNTIME_LIBRARY after project() according to its
+# own option (OFF by default), so selecting /MT above alone is insufficient.
+set(OPUS_STATIC_RUNTIME ON CACHE BOOL "Match the addon's static CRT")
 """
 
 _BUILD = """\

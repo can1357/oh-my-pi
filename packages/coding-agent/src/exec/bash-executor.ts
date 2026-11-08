@@ -649,7 +649,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			commandPrefix: prefix,
 		}),
 	]);
-	const commandEnv = buildNonInteractiveEnv(preflight.env);
+	const commandEnv = buildNonInteractiveEnv(preflight.env, { inheritLocale: options?.useUserShell === true });
 	const runCdInPersistentShell = options?.useUserShell === true && !prefix && isPersistentShellCdCommand(command);
 	// Never wrap in cmd.exe: it is only the Windows no-bash fallback for spawn
 	// paths, and the embedded shell runs the POSIX line better directly.

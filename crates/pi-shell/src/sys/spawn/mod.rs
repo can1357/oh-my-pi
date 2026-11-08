@@ -65,6 +65,10 @@ use crate::{
 /// changes a disposition while spawners may run calls it (the shell's trap
 /// table, an embedding runtime's reset); a change it misses leaves a newly
 /// ignored signal ignored in later children.
+#[cfg_attr(
+	not(unix),
+	expect(clippy::missing_const_for_fn, reason = "the unix body re-reads signal dispositions")
+)]
 pub fn dispositions_changed() {
 	#[cfg(unix)]
 	imp::dispositions_changed();

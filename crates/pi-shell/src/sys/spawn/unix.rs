@@ -59,7 +59,7 @@ use super::{ChildEnd, Dir, Leftover, Sessions, Shared, child_end};
 use crate::{
 	bash::{
 		ChildRedir, ChildRedirs, EnvView, ExitStatus, ExtProc, OpenFlags, OsHandle, PgroupSpec,
-		Platform, ProcEvent, Rlimit, SigSet, Signal, SpawnSpec,
+		Platform, ProcEvent, Rlimit, SigSet, Signal, SpawnSpec, StdioSpec,
 	},
 	sys::{
 		lifecycle::{Abandon, Tracker},
@@ -635,12 +635,16 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	let mut feeds = Vec::new();
 	let mut fds = Vec::with_capacity(3 + extra_fds.len());
 	let [stdin, stdout, stderr] = stdio;
-	fds.push((0, child_fd(shared, stdin, Dir::In, &mut pumps, &mut feeds)?));
-	fds.push((1, child_fd(shared, stdout, Dir::Out, &mut pumps, &mut feeds)?));
-	fds.push((2, child_fd(shared, stderr, Dir::Out, &mut pumps, &mut feeds)?));
+	for (target, spec, dir) in [(0, stdin, Dir::In), (1, stdout, Dir::Out), (2, stderr, Dir::Out)] {
+		fds.push((target, child_fd(shared, spec, dir, &mut pumps, &mut feeds)?));
+	}
 	for (fd, s) in extra_fds {
 		if fd < 3 {
 			return Err(invalid(format!("extra fd {fd} overlaps stdio")));
+		}
+		if matches!(s, StdioSpec::Closed) {
+			// Not passed: the child has no such descriptor.
+			continue;
 		}
 		fds.push((fd, child_fd(shared, s, Dir::Probe, &mut pumps, &mut feeds)?));
 	}
@@ -887,8 +891,8 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Res
 		cmd.process_group(pgid);
 	}
 	// SAFETY: the hook runs in the forked child before exec and calls only
-	// async-signal-safe functions (umask, dup2, signal, setsid, execve) on
-	// data prepared before the fork, without allocating.
+	// async-signal-safe functions (umask, dup2, close, signal, setsid,
+	// execve) on data prepared before the fork, without allocating.
 	unsafe {
 		cmd.pre_exec(move || {
 			// Use the whole value: a closure naming only `exec.argv` would
@@ -1652,10 +1656,12 @@ mod posix {
 		}
 	}
 
-	/// `posix_spawn` `exec` with `fds` installed, at `place`, with every
-	/// signal not in `ign` at its default: the ones the host ignores are
-	/// reset (`exec` resets caught ones; glibc's child spends a
-	/// `sigaction` on each signal of the set).
+	/// `posix_spawn` `exec` with `fds` installed (a closed source closes
+	/// its target), at `place`, with every signal not in `ign` at its
+	/// default: the ones the host ignores are reset (`exec` resets caught
+	/// ones; glibc's child spends a `sigaction` on each signal of the set).
+	/// `add_chdir` is the resolved libc entry point, one value for the
+	/// process, so the cached action list does not key on it.
 	pub fn spawn(
 		exec: &Exec,
 		fds: &[(i32, Source)],

@@ -1,0 +1,22 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "jaq-core",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = glob(["src/**/*.jq"]),
+    aliases = aliases(),
+    crate_features = ["std"],
+    crate_name = "jaq_core",
+    edition = "2021",
+    tags = [
+        "noclippy",
+        "norustfmt",
+    ],
+    version = "3.1.1",
+    deps = all_crate_deps(normal = True),
+)

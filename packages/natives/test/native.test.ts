@@ -256,6 +256,27 @@ describe("pi-natives", () => {
 			expect(out).toContain("<n>1");
 			expect(out).toContain("<c> add");
 		});
+
+		it("highlights Zig via the vendored syntax", () => {
+			expect(getSupportedLanguages()).toContain("Zig");
+			expect(supportsLanguage("zig")).toBe(true);
+			expect(supportsLanguage("zon")).toBe(true);
+
+			const out = highlightCode('const std = @import("std");\n// greet\n', "zig", {
+				comment: "<c>",
+				keyword: "<k>",
+				function: "<f>",
+				variable: "<v>",
+				string: "<s>",
+				number: "<n>",
+				type: "<t>",
+				operator: "<o>",
+				punctuation: "<p>",
+			});
+			expect(out).toContain("<k>const");
+			expect(out).toContain('<s>"std"');
+			expect(out).toContain("<c>// greet");
+		});
 	});
 
 	describe("HighlightStream", () => {
