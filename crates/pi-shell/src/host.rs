@@ -344,7 +344,7 @@ impl Launcher {
 			StdioSpec::Pipe(fd) => {
 				(fd.is_capture() || fd.observes_output()).then(|| TextSink::Capture(fd.clone()))
 			},
-			StdioSpec::Null | StdioSpec::File(_) => None,
+			StdioSpec::Null | StdioSpec::Closed | StdioSpec::File(_) => None,
 		}
 	}
 
