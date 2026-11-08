@@ -37,6 +37,7 @@ import {
 import { editDiffString } from "@oh-my-pi/pi-natives";
 import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
+import { normalizeToLF, stripBom } from "./edit/normalize";
 import type { MCPResourceReadResult } from "./mcp/types";
 import {
 	approvalRestrictions,
@@ -360,6 +361,11 @@ async function executeTool(
 	return bridgeContext.attach(createToolResultMessage(toolCallId, toolName, result, isError));
 }
 
+/** Tool result content as `executeTool` emits it: text passed through `sanitizeText`. */
+function sanitizedContent(content: ToolResultMessage["content"]): ToolResultMessage["content"] {
+	return content.map(c => (c.type === "text" ? { ...c, text: sanitizeText(c.text) } : c));
+}
+
 /** Bridge options whose tool runs surface no call of their own. */
 function withoutEvents(options: CursorExecBridgeOptions): CursorExecBridgeOptions {
 	return { ...options, emitEvent: undefined };
@@ -385,7 +391,12 @@ async function materializeEdit(
 	const written = await executeTool(withoutEvents(options), "write", toolCallId, { path: pathArg, content });
 	const result: ToolResultMessage = { ...written, toolName: "edit" };
 	if (!written.isError && before !== undefined) {
-		const { diff, firstChangedLine } = editDiffString(before, content, absolutePath);
+		// `write` restores the file's CRLF and BOM, so compare both sides as `edit` does.
+		const { diff, firstChangedLine } = editDiffString(
+			normalizeToLF(stripBom(before).text),
+			normalizeToLF(stripBom(content).text),
+			absolutePath,
+		);
 		const writeDetails =
 			typeof written.details === "object" && written.details !== null ? written.details : undefined;
 		const details: EditToolDetails = { ...writeDetails, diff, firstChangedLine, path: absolutePath };
@@ -395,7 +406,7 @@ async function materializeEdit(
 		type: "tool_execution_end",
 		toolCallId,
 		toolName: "edit",
-		result: { content: result.content, details: result.details },
+		result: { content: sanitizedContent(result.content), details: result.details },
 		isError: result.isError,
 	});
 	return result;
@@ -668,7 +679,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			type: "tool_execution_end",
 			toolCallId: result.toolCallId,
 			toolName: "edit",
-			result: { content: result.content, details: result.details },
+			result: { content: sanitizedContent(result.content), details: result.details },
 			isError: result.isError,
 		});
 	}

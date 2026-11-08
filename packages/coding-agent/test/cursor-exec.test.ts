@@ -1080,6 +1080,21 @@ describe("CursorExecHandlers native StrReplace materialization", () => {
 		expect(end.toolName).toBe("edit");
 		expect(end.result.details).toEqual(result.details);
 	});
+
+	it("diffs only the changed line of a CRLF file with a BOM", async () => {
+		const target = path.join(cwd, "win.txt");
+		await Bun.write(target, "\uFEFFa\r\nb\r\nc\r\n");
+		const handlers = new CursorExecHandlers({ cwd, tools: fileTools, emitEvent: () => {} });
+
+		const result = await handlers.write(
+			create(WriteArgsSchema, { toolCallId: "edit-2", path: target, fileText: "a\nB\nc\n" }),
+			{ editMaterialization: true },
+		);
+
+		const details = result.details as { diff?: string; firstChangedLine?: number };
+		expect(details.diff).toBe(" 1|a\n-2|b\n+2|B\n 3|c");
+		expect(details.firstChangedLine).toBe(2);
+	});
 });
 
 describe("CursorExecHandlers argument validation", () => {
