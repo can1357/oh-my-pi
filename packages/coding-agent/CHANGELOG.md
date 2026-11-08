@@ -84,6 +84,7 @@
 - A session whose request carries no titleable text of its own — an attached `@brief.md`, a greeting, a bare number — is now named once from the assistant's reading of it, instead of staying untitled until the next message that happens to be titleable (which, for an agent launched from one brief and left to run, never came) ([#18238](https://github.com/can1357/oh-my-pi/pull/18238) by [@sjawhar](https://github.com/sjawhar))
 - Prewalk no longer hands a subagent to its cheap model when the subagent messages its parent or another agent (`write agent://…`) before its first file edit ([#18322](https://github.com/can1357/oh-my-pi/pull/18322) by [@1vivy](https://github.com/1vivy))
 - Edit auto-repair checks the session cost cap before each retry and counts a failed retry's cost, so a cap reached while waiting stops the next request ([#18459](https://github.com/can1357/oh-my-pi/pull/18459) by [@eggpeat](https://github.com/eggpeat))
+- `lsp reload` stops the old language server when a config change supersedes one shared through the LSP mux, instead of leaving it running for 5 minutes while reporting it stopped ([#17660](https://github.com/can1357/oh-my-pi/issues/17660)) ([#18254](https://github.com/can1357/oh-my-pi/pull/18254) by [@Alex-Wengg](https://github.com/Alex-Wengg))
 
 ## [18.17.0] - 2026-11-06
 
