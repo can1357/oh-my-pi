@@ -110,7 +110,7 @@ pub fn pretty_print(src: &[u8], argv0: &[u8]) -> u8 {
 				return 0;
 			},
 			Some(Ok(cc)) => {
-				text.extend_from_slice(&command_string(&cc.list));
+				text.extend_from_slice(&command_string(cc.list()));
 				text.push(b'\n');
 			},
 			Some(Err(e)) => {

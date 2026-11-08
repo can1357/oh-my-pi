@@ -1,8 +1,9 @@
 /**
  * Code reads become outlines: bodies fold
  * to `… [lines A-B]` markers with exact file line numbers, the biggest containers open one level, and the bodies the
- * conversation names or Spotlight ranks near the window's best stay open within a keep budget. Signatures and
- * markers are structure (`s`), bodies open on a name `n` or on rank `a`, folded bodies `f`.
+ * conversation names or Spotlight ranks near the window's best stay open within a keep budget; the best body past it
+ * still shows the run around its hottest line. Signatures and markers are structure (`s`), bodies open on a name `n`
+ * or on rank `a`, folded bodies `f`.
  */
 import type { SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
 import { countNewlines } from "@oh-my-pi/pi-utils";
@@ -10,18 +11,18 @@ import { fileLines, readTargets, resolveTarget, SOURCE_PATH } from "./command";
 import { bump, noteRank, noteWhy, type Origin, type Run, scoreLines, shifted, spanShares } from "./run";
 import { renderFolds, type View } from "./view";
 
-/** Outline knobs. */
-const MIN_WINDOW = 150;
+/** Outline knobs, tuned by replaying outlined reads against later recoveries and their turn cost. */
+const MIN_WINDOW = 200;
 const TARGET_SHARE = 0.2;
-const TARGET_MIN = 30;
-const KEEP_SHARE = 0.25;
-const KEEP_MIN = 30;
+const KEEP_SHARE = 0.15;
 /** Bodies shorter than this never fold: folding a five-line body costs as much in markers as the body. */
 const MIN_FOLD = 6;
 /** A folded body opens at this share of the window's best block. */
 const KEEP_CUT = 0.5;
+/** Lines either side of its hottest line the best block shows when the keep budget cannot hold it whole. */
+const HOT_REACH = 10;
 /** Folded containers larger than this always unfold one level, so member signatures show. */
-const OPEN_ALWAYS = 80;
+const OPEN_ALWAYS = 200;
 /** An outline hiding less than this share of the window is not worth its markers: the window is shown whole. */
 const MIN_HIDDEN = 0.2;
 /** Names shorter than this are too generic to count as named in the conversation. */
@@ -29,11 +30,15 @@ const MIN_NAME = 4;
 /** The part an outline ranks bodies by: its block's hottest line as a share of the window's hottest block. */
 const OUTLINE_PARTS = ["Spotlight, block ÷ best block"];
 
-/** One foldable block: a header line and its more-indented body. 0-based window indexes. */
-interface FoldBlock {
-	head: number;
+/** Window lines `from`–`to`, 0-based and inclusive. */
+interface LineRun {
 	from: number;
 	to: number;
+}
+
+/** One foldable block: a header line and its more-indented body (`from`–`to`). 0-based window indexes. */
+interface FoldBlock extends LineRun {
+	head: number;
 	children: FoldBlock[];
 	name: string;
 }
@@ -115,6 +120,28 @@ function foldBlocks(lines: readonly string[]): FoldBlock[] {
 	return build(0, lines.length - 1, 0);
 }
 
+/**
+ * The run of `b`'s body around its hottest line: the non-blank lines next to it, at most {@link HOT_REACH} either side.
+ * Undefined when Spotlight scored no line of the body.
+ */
+function hotRun(content: readonly string[], scores: readonly (number | null)[], b: FoldBlock): LineRun | undefined {
+	let hot = -1;
+	let top = Number.NEGATIVE_INFINITY;
+	for (let i = b.from; i <= b.to; i++) {
+		const s = scores[i] ?? null;
+		if (s !== null && s > top) {
+			top = s;
+			hot = i;
+		}
+	}
+	if (hot < 0) return undefined;
+	let from = hot;
+	while (from > Math.max(b.from, hot - HOT_REACH) && content[from - 1].trim() !== "") from--;
+	let to = hot;
+	while (to < Math.min(b.to, hot + HOT_REACH) && content[to + 1].trim() !== "") to++;
+	return { from, to };
+}
+
 /** An outlined window: the view to show and the spans (1-based file lines) it folded. */
 export interface Outline {
 	view: View;
@@ -138,10 +165,10 @@ export async function outlineWindow(
 	if (n < MIN_WINDOW) return undefined;
 	const roots = foldBlocks(content);
 	if (!roots.length) return undefined;
-	const size = (b: FoldBlock) => b.to - b.from + 1;
+	const size = (r: LineRun) => r.to - r.from + 1;
 	const folded = new Set<FoldBlock>(roots);
 	let visible = n - roots.reduce((s, b) => s + size(b) - 1, 0);
-	const target = Math.max(TARGET_MIN, TARGET_SHARE * n);
+	const target = TARGET_SHARE * n;
 	// Unfold largest first: containers over OPEN_ALWAYS lines always open one level; others while the outline stays
 	// under twice the target (then the target).
 	for (;;) {
@@ -163,8 +190,9 @@ export async function outlineWindow(
 	for (const b of leaves) if (b.name.length >= MIN_NAME && run.state.names.has(b.name)) score.set(b, 2);
 	const named = new Set(score.keys());
 	let share: Map<FoldBlock, number> | undefined;
+	let scores: (number | null)[] | null = null;
 	if (leaves.some(b => !score.has(b))) {
-		const scores = await scoreLines(run, content, origin);
+		scores = await scoreLines(run, content, origin);
 		// Every leaf's share, so a named block can be the window's best; only unnamed ones take theirs. Without
 		// scores the unnamed bodies stay folded: the skeleton plus what the conversation names.
 		if (scores) {
@@ -176,7 +204,7 @@ export async function outlineWindow(
 		}
 		for (const b of leaves) if (!score.has(b)) score.set(b, share?.get(b) ?? 0);
 	}
-	const budget = Math.max(KEEP_MIN, KEEP_SHARE * n);
+	const budget = KEEP_SHARE * n;
 	let kept = 0;
 	const opened: FoldBlock[] = [];
 	for (const b of leaves.sort((a, b) => (score.get(b) ?? 0) - (score.get(a) ?? 0) || a.from - b.from)) {
@@ -186,17 +214,34 @@ export async function outlineWindow(
 		opened.push(b);
 		kept += size(b);
 	}
-	const spans = [...folded].filter(b => size(b) >= MIN_FOLD).sort((a, b) => a.from - b.from);
-	const hidden = spans.reduce((s, b) => s + size(b), 0);
+	// The best unnamed block never folds whole. Replayed outlined reads: the budget hid its hottest line in 30% of
+	// them; showing the run around that line costs 4% more tokens, opening the block 11%, dropping the budget 35%.
+	const best = leaves.find(b => !named.has(b));
+	const hot =
+		best && scores && folded.has(best) && (score.get(best) ?? 0) >= KEEP_CUT
+			? hotRun(content, scores, best)
+			: undefined;
+	const spans: LineRun[] = [...folded].filter(b => (b !== best || !hot) && size(b) >= MIN_FOLD);
+	if (best && hot) {
+		const rest = [
+			{ from: best.from, to: hot.from - 1 },
+			{ from: hot.to + 1, to: best.to },
+		].filter(r => size(r) >= MIN_FOLD);
+		spans.push(...rest);
+		kept += size(best) - rest.reduce((s, r) => s + size(r), 0);
+	}
+	spans.sort((a, b) => a.from - b.from);
+	const hidden = spans.reduce((s, r) => s + size(r), 0);
 	if (hidden < MIN_HIDDEN * n) return undefined;
 	const why = Array.from<SpotlightReason>({ length: n }).fill("s");
 	for (const b of opened) why.fill(named.has(b) ? "n" : "a", b.from, b.to + 1);
-	for (const b of spans) why.fill("f", b.from, b.to + 1);
+	if (best && hot) why.fill("a", best.from, best.to + 1);
+	for (const r of spans) why.fill("f", r.from, r.to + 1);
 	noteWhy(run, origin, why);
 	if (share) {
 		const values = Array.from<number>({ length: n }).fill(0);
 		for (const [b, s] of share) values.fill(s, b.head, b.to + 1);
-		const last = opened.findLast(b => !named.has(b));
+		const last = opened.findLast(b => !named.has(b)) ?? hot;
 		noteRank(run, origin, {
 			parts: OUTLINE_PARTS,
 			max: 1,
@@ -215,7 +260,7 @@ export async function outlineWindow(
 	if (named.size) bump(run, "outlineNamed", named.size);
 	return {
 		view: renderFolds(content, shown, first, spans, true),
-		folded: spans.map(b => [first + b.from, first + b.to]),
+		folded: spans.map(r => [first + r.from, first + r.to]),
 	};
 }
 

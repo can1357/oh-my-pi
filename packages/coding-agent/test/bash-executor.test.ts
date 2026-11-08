@@ -118,8 +118,8 @@ describe("executeBash", () => {
 			timeout: 5000,
 			onTrace: trace => {
 				const source = shellVisualization(trace);
-				expect(source).toBeInstanceOf(piNatives.RunTrace);
-				if (source instanceof piNatives.RunTrace) snapshots.push(source);
+				if (!(source instanceof piNatives.RunTrace)) throw new Error("Expected the live native owner");
+				snapshots.push(source);
 				readShellPresentation(source, defaultShellVizPreferences(), trace);
 			},
 		});
@@ -149,7 +149,9 @@ describe("executeBash", () => {
 		// A persisted copy restores through the native owner and shows the variable.
 		const restored: unknown = JSON.parse(JSON.stringify(result.trace));
 		if (!isShellTrace(restored)) throw new Error("Expected the persisted trace to validate");
-		const presentation = readShellPresentation(shellVisualization(restored), defaultShellVizPreferences(), restored);
+		const source = shellVisualization(restored);
+		if (!source) throw new Error("Expected the persisted trace to restore");
+		const presentation = readShellPresentation(source, defaultShellVizPreferences(), restored);
 		expect(presentation.watches?.some(watch => watch.name === "v")).toBe(true);
 	});
 

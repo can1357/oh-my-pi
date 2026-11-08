@@ -65,6 +65,10 @@ use crate::{
 /// changes a disposition while spawners may run calls it (the shell's trap
 /// table, an embedding runtime's reset); a change it misses leaves a newly
 /// ignored signal ignored in later children.
+#[cfg_attr(
+	not(unix),
+	expect(clippy::missing_const_for_fn, reason = "the unix body re-reads signal dispositions")
+)]
 pub fn dispositions_changed() {
 	#[cfg(unix)]
 	imp::dispositions_changed();
@@ -351,7 +355,8 @@ enum Dir {
 
 /// The child's side of one stream; pumps for engine objects go to `pumps`,
 /// shared input feeds the `ExtProc` must keep go to `held`. `None` for
-/// [`StdioSpec::Null`].
+/// [`StdioSpec::Null`] and [`StdioSpec::Closed`] (the platform installs the
+/// null device; Unix then closes a `Closed` target in the child).
 fn child_end(
 	shared: &Shared,
 	spec: StdioSpec,
@@ -361,7 +366,7 @@ fn child_end(
 ) -> io::Result<Option<fs::File>> {
 	let end = match spec {
 		StdioSpec::Inherit(h) => return imp::dup(h).map(Some),
-		StdioSpec::Null => return Ok(None),
+		StdioSpec::Null | StdioSpec::Closed => return Ok(None),
 		StdioSpec::Pipe(fd) => End::Fd(fd),
 		StdioSpec::File(f) => match f.os_handle() {
 			Some(h) => return imp::dup(h).map(Some),

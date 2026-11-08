@@ -1,4 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import type { ShellTrace, ShellVizPresentation, TspKind, TspSpan } from "@oh-my-pi/pi-wire";
 import { AssistantMessageComponent } from "../src/chat/assistant-message";
@@ -143,6 +145,51 @@ describe("bash native run box", () => {
 			).body,
 		)[0];
 		expect(sections(quiet)).toEqual(["shell:omp.tool.bash.command", "row:omp.run.foot"]);
+	});
+
+	it("prefixes a traced script with the directory the executor hoisted out of a leading cd", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		// The executor ran only `echo built` after hoisting `cd <dir>;`; the raw args still carry the cd.
+		const trace: ShellTrace = { v: 1, seq: 1, status: 0, t_ns: 1, script: "echo built", units: [] };
+		const presentation: ShellVizPresentation = {
+			preferences: {
+				view: "pseudo",
+				layers: { color: true, inline: true, idioms: true, effects: true, unwrap: false },
+				split: false,
+				playing: false,
+				speed: 1,
+				expandedNodes: [],
+			},
+			rows: [{ id: "r0", depth: 0, segments: [{ text: "echo built" }], effects: [] }],
+			original: [],
+			output: "built\n",
+			executing: false,
+			watches: [],
+			timeline: { length: 1, cursor: 1, elapsedNs: 1, durationNs: 1 },
+		};
+		const ranIn = path.join(os.tmpdir(), "hoisted-target");
+		const result = {
+			content: [{ type: "text", text: "built" }],
+			details: { trace, cwd: ranIn, cdSeparator: ";" as const },
+		};
+		const options = { ...done, shell: true, shellTrace: trace, shellPresentation: presentation };
+		const args = { command: `cd ${ranIn}; echo built` };
+		const card = (details: typeof result.details | { trace: ShellTrace; cwd: string }, command: string) =>
+			Bun.stripANSI(
+				bashToolRenderer
+					.renderResult({ ...result, details }, options, theme, { command })
+					.render(120)
+					.join("\n"),
+			);
+
+		const pane = nodes(nodes(bashToolRenderer.describeResult(result, options, args).body)[0]?.c)[0];
+		expect(props(pane).cwd).toContain("hoisted-target");
+
+		// The prefix keeps the separator the model wrote.
+		const semicolon = card(result.details, args.command);
+		expect(semicolon).toMatch(/\$ cd \S*hoisted-target;/);
+		expect(semicolon).not.toContain("hoisted-target &&");
+		expect(card({ trace, cwd: ranIn }, `cd ${ranIn} && echo built`)).toMatch(/\$ cd \S*hoisted-target &&/);
 	});
 
 	it("has no target without an intent and no foot before the command starts", () => {

@@ -459,6 +459,10 @@ fn no_such_attribute() -> io::Error {
 
 /// `err`, with the open-file limit named when it is `EMFILE` (see the module
 /// docs); any other error unchanged.
+#[cfg_attr(
+	not(unix),
+	expect(clippy::missing_const_for_fn, reason = "the unix body queries RLIMIT_NOFILE")
+)]
 fn name_the_limit(err: io::Error) -> io::Error {
 	#[cfg(unix)]
 	if err.raw_os_error() == Some(libc::EMFILE)

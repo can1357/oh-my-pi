@@ -96,7 +96,7 @@ import {
 } from "./acp-event-mapper";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
-import { cfgDisabledExtensions } from "../../extensibility/settings";
+import { cfgDisabledExtensions, cfgExtensions } from "../../extensibility/settings";
 import { cfgPlanEnabled } from "../../plan-mode/settings";
 
 const ACP_DEFAULT_MODE_ID = "default";
@@ -1497,9 +1497,14 @@ export class AcpAgent implements Agent {
 			}
 			case "_omp/extensions": {
 				const cwd = typeof params.cwd === "string" ? (params.cwd as string) : undefined;
-				const sm = await Settings.init();
+				const sm = cwd ? await Settings.loadReadOnly({ cwd }) : await Settings.init();
 				const disabledIds = cfgDisabledExtensions.get(sm);
-				const extensions = await loadAllExtensions(cwd, disabledIds);
+				const extensions = await loadAllExtensions(cwd, disabledIds, {
+					explicit: [],
+					mode: "merge",
+					configured: cfgExtensions.get(sm),
+					configuredLevel: sm.extensionsSourceLevel(),
+				});
 				return { extensions: extensions as unknown as Array<{ [key: string]: unknown }> };
 			}
 			case "_omp/extensions/toggle": {
@@ -1739,9 +1744,13 @@ export class AcpAgent implements Agent {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext, protocolSessionId);
 		// Registered before extensions start: a `session_start` handler can already replace the durable session.
 		session.registerSessionChangeCallback(() => this.#rememberHandleSession(record));
-		session.setClientBridge(
-			createAcpClientBridge(this.#connection, record.protocolSessionId, this.#clientCapabilities),
-		);
+		session.setClientBridge({
+			...createAcpClientBridge(this.#connection, record.protocolSessionId, this.#clientCapabilities),
+			get deferAgentInitiatedTurns() {
+				const promptTurn = record.promptTurn;
+				return !promptTurn || promptTurn.settled || promptTurn.cancelRequested;
+			},
+		});
 		// Client-declared servers live in `record.mcpManager`, not the session's
 		// own (ACP sessions run with `enableMCP: false`); read it live so every
 		// reconfiguration's `refreshMCPTools` rebuild renders its instructions.
@@ -3070,7 +3079,9 @@ export class AcpAgent implements Agent {
 					});
 				},
 				sendUserMessage: (content, options) => {
-					this.#trackExtensionUserMessage(record, record.session.sendUserMessage(content, options));
+					const task = record.session.sendUserMessage(content, options);
+					this.#trackExtensionUserMessage(record, task);
+					return task;
 				},
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);

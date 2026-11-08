@@ -526,7 +526,7 @@ Algorithm:
    - mode/modeData from latest `mode_change` (default mode `"none"`)
 4. Choose the emission boundary:
    - a later `reset_boundary` hides everything through that boundary from model context and collapsed live transcript
-   - otherwise the latest compaction emits its summary plus kept/post-compaction messages (provider-native replacement history may supply the kept model context)
+   - otherwise the latest compaction emits its summary plus kept/post-compaction messages (provider-native replacement history may supply the kept model context); for model context, `options.model` skips compactions whose OpenAI payload that model cannot replay, so the history behind them is emitted
    - full transcript export retains pre-reset history and renders compactions chronologically
 5. Convert `message`, `custom_message`, and `branch_summary` entries into messages. Other entry types only affect replay state or metadata.
 6. Remove dangling tool calls from replay (unless explicitly retained for a mid-turn transcript), neutralizing protected reasoning metadata on rewritten turns; drop unsafe aborted/error assistant turns and their paired tool results from model context.

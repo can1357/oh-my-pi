@@ -11,6 +11,7 @@ import { HindsightSessionState } from "../src/hindsight/state";
 import type { AgentSession, AgentSessionEventListener } from "../src/session/agent-session";
 import type { ToolSession } from "../src/tools";
 import { MemoryRetainTool } from "../src/tools/memory-retain";
+import * as atomicFile from "../src/utils/atomic-file";
 
 interface WireItem {
 	document_id: string;
@@ -298,6 +299,49 @@ describe("Hindsight retain outbox", () => {
 		await firstDrain;
 		expect(requests).toHaveLength(1);
 		expect(await events()).toHaveLength(0);
+	});
+
+	it("delivers nothing from a multi-item call that fails midway, even to a drain running alongside it", async () => {
+		const midBatch = Promise.withResolvers<void>();
+		const drainerSettled = Promise.withResolvers<void>();
+		const write = atomicFile.writeFileAtomically;
+		vi.spyOn(atomicFile, "writeFileAtomically").mockImplementation(async (filePath, content, mode) => {
+			// Park the second item's publication with the batch half-written; the
+			// concurrent drain below runs to completion before the call fails and rolls back.
+			if (content.includes("second of the failed batch")) {
+				midBatch.resolve();
+				await drainerSettled.promise;
+				throw new Error("simulated outbox write failure");
+			}
+			return write(filePath, content, mode);
+		});
+
+		const first = fixture();
+		const second = fixture({}, "session-b");
+		let enqueueError: unknown;
+		const enqueue = (async () => {
+			try {
+				await first.tool.execute("concurrent-drain-race", {
+					items: [{ content: "first of the failed batch" }, { content: "second of the failed batch" }],
+				});
+			} catch (error) {
+				enqueueError = error;
+			}
+		})();
+		// The first item is on disk and the enqueue holds the destination's queue lock mid-batch.
+		await midBatch.promise;
+		const drain = second.state.flushRetainQueue();
+		drain.then(
+			() => drainerSettled.resolve(),
+			() => drainerSettled.resolve(),
+		);
+		await enqueue;
+		await drain;
+
+		expect(enqueueError).toBeInstanceOf(Error);
+		expect((enqueueError as Error).message).toMatch(/NOT queued/);
+		expect(requests.flat().map(item => item.content)).toEqual([]);
+		expect(await events()).toEqual([]);
 	});
 
 	it("quarantines malformed events, and other destinations' events only once they are 7 days old", async () => {

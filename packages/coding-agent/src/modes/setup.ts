@@ -73,7 +73,7 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		refreshProvider: async provider => {
 			// An OAuth alias (`openai-codex-device`) stores its credential under the base provider.
 			await ctx.session.modelRegistry.refreshProvider(getOAuthCredentialProvider(provider), "online");
-			await ctx.refreshScopedModelsAfterLogin?.();
+			await ctx.session.refreshScopedModels();
 		},
 		saveComposerShape: async shape => {
 			cfgComposerShape.set(ctx.settings, shape);

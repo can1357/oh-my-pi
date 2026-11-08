@@ -656,6 +656,11 @@ export class ToolExecutionComponent extends Container {
 		const source = this.#shellTrace
 			? shellVisualization(this.#shellTrace)
 			: (this.#shellPendingTrace ??= new RunTrace(script));
+		// An unrestorable stored trace renders like visualization-off: plain command and output.
+		if (!source) {
+			this.#shellPresentation = undefined;
+			return undefined;
+		}
 		this.#shellPresentation = readShellPresentation(
 			source,
 			this.#shellPreferences,

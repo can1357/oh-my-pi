@@ -6,7 +6,13 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
-import type { AsyncJob, AsyncJobDetails, AsyncJobManagerApi, AsyncJobType } from "./job-manager";
+import {
+	type AsyncJob,
+	type AsyncJobDetails,
+	type AsyncJobManagerApi,
+	type AsyncJobType,
+	agentProgress,
+} from "./job-manager";
 
 import { renderStructuredJson, structuredStatusLabel, taskAgentHandles } from "../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -179,21 +185,9 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		let contextTokens: number | undefined;
 		let contextWindow: number | undefined;
 		if (latest.type === "task") {
-			const progressValue = latest.latestDetails?.progress;
-			if (Array.isArray(progressValue)) {
-				// A batch job's progress lists every spawn of the call, keyed by agent id.
-				// A collided job id is suffixed (`Foo-2`) while its agent id stays `Foo`.
-				const agentId = current?.agentId ?? latest.id;
-				let progressRecord: Record<string, unknown> | undefined;
-				for (const item of progressValue) {
-					if (!item || typeof item !== "object") continue;
-					const candidate = item as Record<string, unknown>;
-					if (!progressRecord) progressRecord = candidate;
-					if (candidate.id === agentId) {
-						progressRecord = candidate;
-						break;
-					}
-				}
+			// A collided job id is suffixed (`Foo-2`) while its agent id stays `Foo`.
+			const progressRecord = agentProgress(latest.latestDetails, current?.agentId ?? latest.id);
+			if (progressRecord) {
 				const modelValue = progressRecord?.resolvedModel;
 				if (typeof modelValue === "string") {
 					const trimmed = modelValue.trim();

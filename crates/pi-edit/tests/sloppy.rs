@@ -112,7 +112,8 @@ async fn end_sentinels_close_put_bodies_but_stay_literal_in_find() {
 			 End\n*** Find\nfour\n*** Replace\nFOUR\n*** End\n",
 			"ONE\nTWO\nthree\n3.5\nFOUR\n",
 		),
-		// A Find body is matched as written, so a literal sentinel line can be removed.
+		// A Find body is matched as written, so a literal sentinel line can be
+		// removed.
 		("a\n*** End\nb\n", "*** Edit File: a.txt\n*** Find\na\n*** End\n*** Replace\na\n", "a\nb\n"),
 	] {
 		let workspace = Workspace::new(EditMode::Sloppy);

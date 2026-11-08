@@ -4603,9 +4603,8 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "jaq-core"
 version = "3.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f72ba7158fe9fc1bc4baace1b71e6d0d3d27c6839dd87dc1f233dd408f5dd85b"
 dependencies = [
+ "arbitrary",
  "dyn-clone",
  "once_cell",
  "typed-arena",
@@ -6249,7 +6248,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.17.0"
+version = "18.18.1"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6291,7 +6290,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.17.0"
+version = "18.18.1"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6372,11 +6371,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.17.0"
+version = "18.18.1"
 
 [[package]]
 name = "pi-edit"
-version = "18.17.0"
+version = "18.18.1"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6395,7 +6394,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.17.0"
+version = "18.18.1"
 dependencies = [
  "async-trait",
  "libc",
@@ -6407,7 +6406,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.17.0"
+version = "18.18.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6484,6 +6483,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uiautomation",
+ "unicode-bidi",
  "windows 0.62.2",
  "windows-sys 0.61.2",
  "winreg 0.56.0",
@@ -6500,7 +6500,7 @@ dependencies = [
 
 [[package]]
 name = "pi-predict"
-version = "18.17.0"
+version = "18.18.1"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -6518,7 +6518,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.17.0"
+version = "18.18.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6556,7 +6556,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.17.0"
+version = "18.18.1"
 dependencies = [
  "futures",
  "gix",
@@ -6572,7 +6572,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vfs"
-version = "18.17.0"
+version = "18.18.1"
 dependencies = [
  "async-trait",
  "libc",
@@ -6585,7 +6585,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.17.0"
+version = "18.18.1"
 dependencies = [
  "bytes",
  "flume",
@@ -6599,7 +6599,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.17.0"
+version = "18.18.1"
 dependencies = [
  "async-trait",
  "flume",
