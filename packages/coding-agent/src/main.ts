@@ -659,7 +659,6 @@ async function runInteractiveMode(
 	startupLease?: ComposerLease,
 	startupGoal?: string,
 	startupRestore?: () => Promise<RestoreOutcome>,
-	refreshScopedModelsAfterLogin?: () => Promise<void>,
 ): Promise<void> {
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
@@ -673,7 +672,6 @@ async function runInteractiveMode(
 			eventBus,
 			startupLease?.composer,
 			subagentEventBus,
-			refreshScopedModelsAfterLogin,
 		);
 		startupLease?.adopt();
 	} catch (error) {
@@ -716,12 +714,20 @@ async function runInteractiveMode(
 			await setupWizard.markSetupWizardComplete(settings);
 		}
 		playStartupSplash = showStartupSplash && setupScenes.length === 0;
+		const offersStartupWorktree = !resuming && joinLink === undefined;
 
 		await logger.time("InteractiveMode.init", () =>
 			mode.init({
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
 				autoStartCollab: joinLink === undefined,
+				// Setup scenes and the startup worktree question wait on the user before any
+				// prompt runs, so they keep the boot `idle`. The worktree check runs before its
+				// async git check, so a folder where the question never shows also keeps `idle`.
+				startupRun:
+					setupScenes.length === 0 &&
+					!(offersStartupWorktree && mode.mayAskForStartupWorktree()) &&
+					(startupGoal !== undefined || initialMessage !== undefined || initialMessages.length > 0),
 			}),
 		);
 		startDeferredStartupWork?.(mode);
@@ -779,7 +785,7 @@ async function runInteractiveMode(
 			}
 		}
 
-		if (!resuming && joinLink === undefined) {
+		if (offersStartupWorktree) {
 			await mode.maybeAutoCreateWorktree();
 		}
 
@@ -855,6 +861,7 @@ async function runInteractiveMode(
 			mode.showError(errorMessage);
 		}
 	}
+	mode.settleStartupRun();
 
 	while (true) {
 		const input = await mode.getUserInput();
@@ -2744,9 +2751,9 @@ export async function runRootCommand(
 					);
 				}
 			};
-			const refreshScopedModelsAfterLogin = async () => {
+			session.setScopedModelsRefresher(async () => {
 				await rebuildScopedModels(session, parsedArgs, modelRegistry, settingsInstance);
-			};
+			});
 			watchScopedModelSettings(session, parsedArgs, modelRegistry, settingsInstance);
 
 			if (modelFallbackMessage) {
@@ -2882,7 +2889,6 @@ export async function runRootCommand(
 						startupLease,
 						initialArgs.goal,
 						parsedArgs.restore ? () => restoreSession(session, { eventBus, subagentEventBus }) : undefined,
-						refreshScopedModelsAfterLogin,
 					);
 				} finally {
 					startupLease?.dispose();

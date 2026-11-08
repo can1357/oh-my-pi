@@ -46,11 +46,14 @@ const runtime: {
 	disposed: boolean;
 	/** The report the terminal holds, so a repeated status writes nothing. */
 	reported: string | undefined;
+	/** The `working` status a command-line prompt holds from startup until its run reports. */
+	startup: RunStatus | undefined;
 } = {
 	status: { state: "idle" },
 	enabled: true,
 	disposed: false,
 	reported: undefined,
+	startup: undefined,
 };
 
 function titleState(status: RunStatus): TerminalTitleState {
@@ -127,9 +130,32 @@ export function resendProgramStatus(): void {
 /**
  * Claim the terminal's status record when the UI takes over the terminal: the
  * counterpart to {@link disposeProgramStatus} and the only release of its latch.
+ *
+ * `startupRun` marks a command-line prompt that runs once startup ends: the
+ * first report is then `working`, not the `idle` that a supervisor waiting on
+ * this terminal would take as "finished" before the prompt even starts.
+ * {@link settleStartupRun} ends that hold.
  */
-export function initProgramStatus(): void {
+export function initProgramStatus(options?: { startupRun?: boolean }): void {
 	runtime.disposed = false;
+	runtime.startup = undefined;
+	if (options?.startupRun) {
+		runtime.startup = { state: "working" };
+		runtime.status = runtime.startup;
+		// Not `setRunStatus`: the record waits for `setProgramStatusEnabled`, but the title follows now.
+		setTerminalTitleState(titleState(runtime.status));
+	}
+}
+
+/**
+ * End the startup hold once the command-line prompts are dispatched. A prompt
+ * that ran reported its own status, which stays; one that failed or ran no turn
+ * leaves the startup `working`, which goes back to `idle`.
+ */
+export function settleStartupRun(): void {
+	const startup = runtime.startup;
+	runtime.startup = undefined;
+	if (startup && runtime.status === startup) setRunStatus({ state: "idle" });
 }
 
 /**

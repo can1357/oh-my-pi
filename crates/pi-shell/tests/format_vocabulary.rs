@@ -1,6 +1,6 @@
-//! Cross-build images are written by independent libraries, never rewritten by
-//! these tests. The provenance manifests beside the legacy and 18.18 images
-//! identify each upstream-based writer.
+//! Current-identity images come from independent writers. Original generations
+//! remain unchanged as old-IR refusal controls. Each generation records its
+//! writer source and product tree in a provenance manifest.
 
 use bstr::BStr;
 use pi_shell::{
@@ -14,16 +14,20 @@ use pi_shell::{
 };
 use serde::{Deserialize, Serialize};
 
-const BASE: &[u8] = include_bytes!("fixtures/format-vocabulary/18.18/base-parent-wait.image");
-const UNKNOWN: &[u8] = include_bytes!("fixtures/format-vocabulary/18.18/unknown-root-kept.image");
+const BASE: &[u8] =
+	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/base-parent-wait.image");
+const UNKNOWN: &[u8] =
+	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/unknown-root-kept.image");
 const UNKNOWN_RECORD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18/unknown-root-kept.record");
+	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/unknown-root-kept.record");
 const UNKNOWN_CHILD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18/unknown-subshell-kept.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/unknown-subshell-kept.image");
 const UNKNOWN_CHILD_RECORD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18/unknown-subshell-kept.record");
-const NEWER: &[u8] = include_bytes!("fixtures/format-vocabulary/newer-parent-wait.image");
-const FOREIGN: &[u8] = include_bytes!("fixtures/format-vocabulary/foreign-parent-wait.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/unknown-subshell-kept.record");
+const NEWER: &[u8] =
+	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/newer-parent-wait.image");
+const FOREIGN: &[u8] =
+	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/foreign-parent-wait.image");
 
 fn records(store: &mut MemStore) -> Vec<Vec<u8>> {
 	let mut records = Vec::new();
@@ -423,4 +427,59 @@ fn unallocated_required_identifier_is_still_refused_before_records() {
 		records_readable: false,
 	};
 	assert_vocabulary_refusal(&mut store, 65539);
+}
+
+fn refuses_old_ir_without_mutation(images: &[&[u8]]) {
+	let engine = Engine::new(EngineConfig::default());
+	for bytes in images {
+		let mut store = UnreadableRecords {
+			store:            MemStore::from_bytes(bytes).unwrap(),
+			reads:            0,
+			writes:           0,
+			records_readable: false,
+		};
+		let before = store.store.to_bytes();
+		let epoch = store.epoch();
+		let mut host = FakeHost::new();
+		let error = Shell::restore(
+			&engine,
+			&mut Cx { host: &mut host, store: &mut store },
+			RestoreOpts::default(),
+		)
+		.err()
+		.expect("an old IR must be refused, not decoded as the current core");
+		assert!(
+			matches!(error, RestoreError::Incompatible {
+				why: Incompatibility::IrVersion { found: 15, expected: 17 },
+			}),
+			"{error:?}"
+		);
+		assert_eq!((store.reads, store.writes), (0, 0));
+		assert_eq!(store.store.to_bytes(), before);
+		assert_eq!(store.epoch(), epoch);
+	}
+}
+
+#[test]
+fn original_legacy_cores_are_refused_before_records_without_changing_the_store() {
+	refuses_old_ir_without_mutation(&[
+		include_bytes!("fixtures/frames/upstream-v29-parent-wait.image"),
+		include_bytes!("fixtures/frames/upstream-v29-no-wait.image"),
+		include_bytes!("fixtures/frames/upstream-v29-18.17-parent-wait.image"),
+		include_bytes!("fixtures/frames/upstream-v29-18.17-no-wait.image"),
+		include_bytes!("fixtures/frames/upstream-v29-18.18-parent-wait.image"),
+		include_bytes!("fixtures/frames/upstream-v29-18.18-no-wait.image"),
+		include_bytes!("fixtures/format-vocabulary/base-parent-wait.image"),
+		include_bytes!("fixtures/format-vocabulary/18.18/base-parent-wait.image"),
+		include_bytes!("fixtures/format-vocabulary/18.18/unknown-root-kept.image"),
+		include_bytes!("fixtures/format-vocabulary/18.18/unknown-subshell-kept.image"),
+	]);
+}
+
+#[test]
+fn original_required_codec_cores_are_refused_before_records_without_changing_the_store() {
+	refuses_old_ir_without_mutation(&[
+		include_bytes!("fixtures/format-vocabulary/owned-required-vocabulary.image"),
+		include_bytes!("fixtures/format-vocabulary/18.18/owned-required-vocabulary.image"),
+	]);
 }

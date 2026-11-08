@@ -440,9 +440,9 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 	}
 
 	/**
-	 * ANSI: repaint every tick and advance timed phases from it. Native: no
-	 * repaint loop; a one-shot fires when the current timed phase ends (none
-	 * while a scene is up). Call again whenever the phase changes.
+	 * ANSI: repaint during timed phases only. Native: schedule a one-shot at
+	 * each phase deadline; its renderer clocks the animation. Neither path
+	 * needs a timer while a scene waits for input.
 	 */
 	#startTimer(): void {
 		if (isNativeRendering()) {
@@ -456,6 +456,10 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 			if (limit === undefined) return;
 			const remaining = limit - (performance.now() - this.#phaseStartedAt);
 			this.#deadline = setTimeout(() => this.#tick(), Math.max(0, remaining));
+			return;
+		}
+		if (PHASE_LIMIT_MS[this.#phase] === undefined) {
+			this.#stopTimer();
 			return;
 		}
 		if (this.#timer) return;

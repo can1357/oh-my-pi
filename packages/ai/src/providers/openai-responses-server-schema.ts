@@ -122,6 +122,7 @@ const functionCallItemSchema = type({
 	"id?": "string",
 	call_id: "string >= 1",
 	name: "string >= 1",
+	"namespace?": "string >= 1",
 	"arguments?": "string",
 });
 
@@ -137,6 +138,8 @@ const customToolCallItemSchema = type({
 	"id?": "string",
 	call_id: "string >= 1",
 	name: "string >= 1",
+	"namespace?": "string >= 1",
+	"status?": "string",
 	// Raw input string — NOT JSON.stringified. apply_patch flow streams a
 	// freeform body and reading it as JSON would corrupt it.
 	input: "string",
@@ -144,6 +147,7 @@ const customToolCallItemSchema = type({
 
 const customToolCallOutputItemSchema = type({
 	type: "'custom_tool_call_output'",
+	"id?": "string",
 	call_id: "string >= 1",
 	output: type("string").or(functionCallOutputContentBlockSchema.array()),
 });
@@ -239,6 +243,13 @@ const computerCallOutputItemSchema = type({
 	"status?": "'in_progress' | 'completed' | 'incomplete' | 'failed' | null",
 });
 
+const additionalToolsItemSchema = type({
+	type: "'additional_tools'",
+	role: "'developer'",
+	tools: type({ type: "string", "[string]": "unknown" }).array(),
+	"id?": "string | null",
+});
+
 const BRIDGED_INPUT_ITEM_TYPES: Record<string, true> = {
 	message: true,
 	reasoning: true,
@@ -248,6 +259,7 @@ const BRIDGED_INPUT_ITEM_TYPES: Record<string, true> = {
 	custom_tool_call_output: true,
 	computer_call: true,
 	computer_call_output: true,
+	additional_tools: true,
 };
 
 const unbridgedInputItemSchema = type({ type: "string" }).narrow((value, ctx) =>
@@ -267,6 +279,7 @@ export const inputItemSchema = userMessageItemSchema
 	.or(customToolCallOutputItemSchema)
 	.or(computerCallItemSchema)
 	.or(computerCallOutputItemSchema)
+	.or(additionalToolsItemSchema)
 	// Tolerated but not bridged (file_search_call, web_search_call, …).
 	.or(unbridgedInputItemSchema);
 

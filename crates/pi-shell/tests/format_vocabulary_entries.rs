@@ -12,16 +12,18 @@ use pi_shell::{
 use serde::Deserialize;
 
 const REQUIRED: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18/owned-required-vocabulary.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/owned-required.image");
 const OPTIONAL: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18/owned-optional-vocabulary.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/owned-optional.image");
 const RESERVED: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18/owned-reserved-required.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/reserved-required.image");
 const FRAMELESS: &[u8] = include_bytes!("fixtures/format-vocabulary/frameless-bg-pids.image");
 const FRAMELESS_MARKS: &[u8] =
 	include_bytes!("fixtures/format-vocabulary/frameless-root-marks.image");
-const READABLE: &[u8] = include_bytes!("fixtures/format-vocabulary/18.18/base-parent-wait.image");
-const FOREIGN: &[u8] = include_bytes!("fixtures/format-vocabulary/foreign-parent-wait.image");
+const READABLE: &[u8] =
+	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/base-parent-wait.image");
+const FOREIGN: &[u8] =
+	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/foreign-parent-wait.image");
 
 struct RecordsUnavailable {
 	store:  MemStore,
@@ -132,7 +134,7 @@ fn check_preserved_payload(store: &mut MemStore) {
 	let blob = store.get_blob(BlobSlot::Frames).unwrap().unwrap();
 	let (header, body) = postcard::take_from_bytes::<Header>(&blob).unwrap();
 	assert_eq!(header.magic, *b"OBF2");
-	assert_eq!(header.frames, 29, "an optional entry must not move the core version");
+	assert_eq!(header.frames, 30, "an optional entry must not move the core version");
 	let (envelope, rest) = postcard::take_from_bytes::<Envelope<'_>>(body).unwrap();
 	assert!(rest.is_empty(), "vocabulary data must be inside the image, not a trailer");
 	assert_eq!(envelope.entries, vec![Entry {

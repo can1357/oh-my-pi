@@ -648,11 +648,13 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 			.frames
 			.iter()
 			.any(|f| matches!(f.kind, FrameKind::Function { .. }))
-		&& vp
-			.runs
-			.front()
-			.is_some_and(|r| r.started && !r.exit_trap_started)
-		&& start_trap(k, vp, cx, TrapKey::Exit)
+		&& match vp.runs.front() {
+			Some(r) => r.started && !r.exit_trap_started,
+			// A forked subshell has no run: it is its own exit, and its
+			// own flag is what keeps the trap from starting twice.
+			None => vp.transient && !vp.exit_trap_run,
+		}
+		&& start_exit_trap_once(k, vp, cx)
 	{
 		if let Some(run) = vp.runs.front_mut() {
 			run.exit_trap_started = true;
@@ -674,8 +676,23 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		super::zsh::zexit::start(k, cx, vp);
 	}
 	if !in_exit_trap && vp.transient && vp.runs.is_empty() {
-		start_trap(k, vp, cx, TrapKey::Exit);
+		start_exit_trap_once(k, vp, cx);
 	}
+}
+
+/// Start this vproc's EXIT trap, at most once for a forked subshell: it has
+/// no [`Run`](super::proc::Run) to keep `exit_trap_started` on, and
+/// `own_traps`, `trap_frames` and the frame scans all return to their
+/// pre-trap values when the trap's frame is popped. A root vproc is
+/// unaffected: its guard is its run's own flag, one per shell invocation.
+fn start_exit_trap_once(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
+	if vp.transient {
+		if vp.exit_trap_run {
+			return false;
+		}
+		vp.exit_trap_run = true;
+	}
+	start_trap(k, vp, cx, TrapKey::Exit)
 }
 
 fn top_frame(vp: &mut Vproc) -> &mut Frame {
@@ -1001,29 +1018,42 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		None => (feat, aliases.as_ref()),
 	};
 	let pending = aux.as_deref().and_then(|a| a.pending.as_ref());
+	// Text read to its end has no command left: no parser needed (each
+	// `eval` would otherwise build one just to see the end).
+	let at_end = !*stdin && pending.is_none() && pos.0 as usize >= src.len();
 	let resume_from = Resume {
 		pos:     Pos { offset: pos.0, line: pos.1 },
 		pending: pending.map_or_default(|p| p.0.to_vec()),
 		active:  pending.map_or_default(|p| p.1.iter().map(|a| a.to_vec()).collect()),
 	};
-	let mut parser = match aliases {
-		Some(a) => Parser::new(src, feat, a),
-		None => Parser::new(src, feat, crate::bash::syntax::NO_ALIASES),
+	let mut parser = (!at_end).then(|| {
+		let mut p = match aliases {
+			Some(a) => Parser::new(src, feat, a),
+			None => Parser::new(src, feat, crate::bash::syntax::NO_ALIASES),
+		}
+		.with_resume(&resume_from);
+		p.recycle(core::mem::take(&mut k.spare_tree));
+		p
+	});
+	let res = parser.as_mut().and_then(Parser::next_command);
+	if res.is_none()
+		&& let Some(p) = &mut parser
+	{
+		k.keep_spare_tree(p.take_tree());
 	}
-	.with_resume(&resume_from);
-	let res = parser.next_command();
 	// zsh: the input ran out with a construct open (`a ||`, `a &&` parse as
 	// complete commands here; interactive zsh's lexer reads another line).
 	if *stdin
-		&& (needs_more_input(src, res.as_ref(), parser.resume().pos)
-			|| parser.zsh_cmdstack().is_some_and(|s| !s.is_empty()))
+		&& let Some(p) = &parser
+		&& (needs_more_input(src, res.as_ref(), p.resume().pos)
+			|| p.zsh_cmdstack().is_some_and(|s| !s.is_empty()))
 	{
 		if reader {
 			// A command left open continues on a `PS2` line; `%_` shows
 			// what is open.
 			let cont = res.is_some();
 			let cmdstack = if cont {
-				parser.zsh_cmdstack().unwrap_or_default()
+				p.zsh_cmdstack().unwrap_or_default()
 			} else {
 				Vec::new()
 			};
@@ -1092,7 +1122,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			vp.status = 0;
 		}
 		if sub_end {
-			start_trap(k, vp, cx, TrapKey::Exit);
+			start_exit_trap_once(k, vp, cx);
 			return None;
 		}
 		if let Some(cancel) = cancel {
@@ -1135,7 +1165,8 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		return None;
 	};
 	let from_stdin = *stdin;
-	let resume = parser.resume();
+	// A command came, so a parser read it.
+	let resume = parser.as_ref().expect("a command was parsed").resume();
 	let next = resume.pos;
 	let read = (history && !zhist).then(|| input_lines(src, pos.0 as usize, next.offset as usize));
 	// zsh `hend`: the event joins the history; `:p` and `histverify` keep
@@ -1193,8 +1224,9 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 					_ => BString::default(),
 				}
 			};
-			let jobtext = BString::from(crate::bash::syntax::zsh::getjobtext(&cc.list));
-			let permtext = BString::from(crate::bash::syntax::zsh::getpermtext(&cc.list, 0));
+			let list = cc.list();
+			let jobtext = BString::from(crate::bash::syntax::zsh::getjobtext(list));
+			let permtext = BString::from(crate::bash::syntax::zsh::getpermtext(list, 0));
 			return super::zle::reader::before_run(k, vp, cx, at, [hist, jobtext, permtext]);
 		}
 	}
@@ -1219,7 +1251,11 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		Ok(cc) => {
 			let line = cc.line;
 			let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
-			(k.engine.compile(cc, src, mode, feat, observed), line)
+			let (unit, tree) = k.engine.compile(cc, src, mode, feat, observed);
+			if let Some(tree) = tree {
+				k.keep_spare_tree(tree);
+			}
+			(unit, line)
 		},
 		Err(e) => {
 			// bash abandons the rest of a script after a syntax error,
@@ -1592,7 +1628,7 @@ fn end_unit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
 		FrameKind::NoFork | FrameKind::Stage => pop_frame(&mut k.root, cx.store, vp),
 		FrameKind::Subshell | FrameKind::Job { .. } => {
 			unwind(&mut k.root, cx.store, vp, 0);
-			start_trap(k, vp, cx, TrapKey::Exit);
+			start_exit_trap_once(k, vp, cx);
 		},
 	}
 }
@@ -2077,6 +2113,27 @@ fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 		)
 }
 
+/// The status a fatal expansion error leaves when the EXIT trap is the
+/// innermost trap action running: bash's EXIT trap keeps the status the
+/// shell was exiting with (`last_command_exit_value` is saved across the
+/// trap), so the shell leaves with that status and not with the constant
+/// below. Only the EXIT trap does this, so a nested trap action of any
+/// other kind answers `None` and keeps the constant.
+///
+/// The saved status is carried as the `i32` the frame holds, exactly as
+/// every other reader of it does (`return` with no argument inside a
+/// trap, the frame-pop restore); it is already a wait status in `0..=255`
+/// on every path that arms a trap, and narrowing it here would be a
+/// silent second opinion about a value this function does not own.
+fn exit_trap_status(vp: &Vproc) -> Option<i32> {
+	vp.frames.iter().rev().find_map(|frame| match frame.kind {
+		FrameKind::Script { what: ScriptKind::Trap { key, status, .. }, .. } => {
+			Some((key == TrapKey::Exit).then_some(status))
+		},
+		_ => None,
+	})?
+}
+
 /// The flow for an expansion error (the diagnostic is printed).
 pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, stop: Stop) -> Flow {
 	match stop {
@@ -2104,6 +2161,16 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		},
 		Stop::Fail(d) | Stop::Fatal(d) => {
 			k.diag(cx, vp, line, d);
+			// The EXIT trap keeps the status the shell was exiting with.
+			// Under `set -e` bash reaches the same rows through its own
+			// errexit jump, which this change does not model, so the
+			// upstream constant stays whenever errexit is on.
+			if vp.mode.dialect() != Dialect::Zsh
+				&& let Some(status) = exit_trap_status(vp)
+				&& !errexit_on(k, cx, vp)
+			{
+				return Flow::Exit(status);
+			}
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
 			// failure status); a nested shell (depth 0) is its own `-c` shell.
@@ -2452,7 +2519,7 @@ fn nofork_unit(
 	}?
 	.ok()?;
 	let observed = k.mask.contains(crate::bash::event::EventKind::UnitCompiled);
-	let unit = k.engine.compile(cc, &src, key.4, feat, observed);
+	let (unit, _) = k.engine.compile(cc, &src, key.4, feat, observed);
 	announce(k, cx, vp.vpid, vp.runs.front(), &unit, line);
 	if aliases.is_none() {
 		if k.nofork_units.len() >= NOFORK_UNITS {
@@ -2946,7 +3013,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			} else {
 				// A subshell, pipeline stage or job ends: its EXIT trap runs.
 				unwind(&mut k.root, cx.store, vp, 0);
-				start_trap(k, vp, cx, TrapKey::Exit);
+				start_exit_trap_once(k, vp, cx);
 			}
 			Flow::Call
 		},
@@ -4084,14 +4151,14 @@ pub(super) fn job_text(
 		let feat = feat | Features::ZSH;
 		return match crate::bash::syntax::parse_all(&src, feat) {
 			Ok(p) if p.commands.len() == 1 => {
-				BString::from(crate::bash::syntax::zsh::getjobtext(&p.commands[0].list))
+				BString::from(crate::bash::syntax::zsh::getjobtext(p.commands[0].list()))
 			},
 			_ => src,
 		};
 	}
 	match crate::bash::syntax::parse_all(&src, feat) {
 		Ok(p) if p.commands.len() == 1 => {
-			BString::from(crate::bash::syntax::command_string(&p.commands[0].list))
+			BString::from(crate::bash::syntax::command_string(p.commands[0].list()))
 		},
 		_ => src,
 	}

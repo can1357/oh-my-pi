@@ -1,4 +1,5 @@
-//! bash 5.3 syntax: lexer, incremental parser, AST, printer and JSON export.
+//! bash 5.3 syntax: lexer, incremental parser, syntax tree, printer and JSON
+//! export.
 //!
 //! Shared by the engine ([`crate::bash`]), which parses and compiles one
 //! top-level command at a time, and by clients that visualize a running
@@ -28,8 +29,17 @@
 //! use pi_shell::bash::syntax::{CommandKind, Features, parse_all};
 //!
 //! let prog = parse_all(b"for i in 1 2; do echo $i; done\n", Features::NONE).unwrap();
-//! let cmd = &prog.commands[0].list.items[0].and_or.first.stages[0].cmd;
-//! assert!(matches!(cmd.kind, CommandKind::For(_)));
+//! let list = prog.commands[0].list();
+//! let cmd = list
+//! 	.items()
+//! 	.first()
+//! 	.unwrap()
+//! 	.and_or()
+//! 	.first()
+//! 	.stages()
+//! 	.first()
+//! 	.unwrap();
+//! assert!(matches!(cmd.kind(), CommandKind::For(_)));
 //! ```
 
 #![forbid(unsafe_code)]
@@ -40,19 +50,27 @@ mod json;
 mod parser;
 mod print;
 mod span;
+pub mod tree;
 mod util;
 pub mod zsh;
 
 use alloc::vec::Vec;
 
+#[cfg(test)]
+pub(crate) use crate::bash::syntax::parser::MAX_NESTING;
 pub(crate) use crate::bash::syntax::util::ansi_decode_all;
 pub use crate::bash::syntax::{
 	ast::*,
 	features::{AliasLookup, Features, NO_ALIASES, NoAliases},
 	json::to_json,
 	parser::{ParseError, ParseErrorKind, Parser, Resume, TextMode, parse_text},
-	print::{PrintStyle, command_string, print, print_list},
+	print::{PrintStyle, command_string, print, print_function_as, print_list},
 	span::{NodeId, Pos, Span},
+	tree::{
+		AndOr, ArithText, ArrayElem, Assign, AssignValue, Command, CommandKind, Cond, CondExpr,
+		HereDoc, List, ListItem, Param, ParamName, ParamOp, Part, Pipeline, Redir, RedirFd,
+		RedirTarget, Seq, Simple, Subscript, Tree, Word, WordPart,
+	},
 };
 
 /// Parse a whole source without aliases (tools, visualizers, tests).
@@ -62,7 +80,9 @@ pub fn parse_all(src: &[u8], feat: Features) -> Result<Program, ParseError> {
 	let mut parser = Parser::new(src, feat, NO_ALIASES);
 	let mut commands = Vec::new();
 	while let Some(cmd) = parser.next_command() {
-		commands.push(cmd?);
+		let mut cmd = cmd?;
+		cmd.tree.shrink_to_fit();
+		commands.push(cmd);
 	}
 	Ok(Program { commands })
 }

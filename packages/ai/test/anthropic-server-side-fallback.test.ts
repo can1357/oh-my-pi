@@ -816,6 +816,25 @@ describe("mid-turn fallback a gateway opted into", () => {
 		expect(requests).toHaveLength(2);
 		expect(JSON.stringify(requests[1]!.messages)).not.toContain('"type":"thinking"');
 	});
+
+	it("recovers when user messages follow the refused turn", async () => {
+		// A steer or reminder sent after the turn's tool result, or the next prompt,
+		// leaves that turn the latest assistant message Anthropic validates.
+		const requests: Array<{ messages: MessageParam[] }> = [];
+		refuseLatestTurnThinking(requests);
+		const steered: Message[] = [...markerlessHistory, { role: "user", content: "Also check b.txt", timestamp: 0 }];
+
+		const recovered = await streamAnthropic(
+			gatewayModel,
+			{ messages: steered },
+			{ apiKey: "sk-gateway", thinkingEnabled: true, providerSessionState: new Map<string, ProviderSessionState>() },
+		).result();
+		expect(recovered.stopReason).toBe("stop");
+		expect(requests).toHaveLength(2);
+		const [earlier, latest] = requests[1]!.messages.filter(message => message.role === "assistant");
+		expect(Array.isArray(latest?.content) && latest.content.map(block => block.type)).toEqual(["text", "tool_use"]);
+		expect(earlier?.content).toContainEqual(expect.objectContaining({ type: "thinking", signature: "sig-earlier" }));
+	});
 });
 
 describe("fallback-credit continuation after a mid-turn fallback", () => {

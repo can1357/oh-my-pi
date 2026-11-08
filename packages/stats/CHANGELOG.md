@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the trace dashboard returning HTTP 431 for sessions with many subagents.
+
 ## [18.17.0] - 2026-11-06
 
 ### Fixed

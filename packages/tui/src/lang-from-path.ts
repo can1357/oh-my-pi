@@ -37,6 +37,7 @@ const EXTENSION_LANG: Record<string, readonly [string, string]> = {
 	rb: ["ruby", "ruby"],
 	rbw: ["ruby", "ruby"],
 	gemspec: ["ruby", "ruby"],
+	erb: ["erb", "erb"],
 	lua: ["lua", "lua"],
 	sh: ["bash", "shellscript"],
 	bash: ["bash", "shellscript"],

@@ -449,6 +449,10 @@ export interface LspClient {
 	proc: LspTransport;
 	requestId: number;
 	diagnostics: Map<string, PublishedDiagnostics>;
+	/** Diagnostics delivered via `textDocument/publishDiagnostics` notifications. */
+	publishedDiagnostics: Map<string, PublishedDiagnostics>;
+	/** Diagnostics delivered via `textDocument/diagnostic` pull requests. */
+	pulledDiagnostics: Map<string, PublishedDiagnostics>;
 	diagnosticsVersion: number;
 	/** Set once a publish echoes a document version, so a wait can identify the report for a reopen. */
 	publishesDocumentVersions?: boolean;

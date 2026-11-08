@@ -1388,10 +1388,10 @@ fn lossy_echo_outcome(
 		} else if leading > 0 {
 			range_len > 1
 				|| annotation_echo(lines, path, group.start - leading as u32, group.start - 1)
-		} else if trailing > 0 {
-			range_len > 1 || annotation_echo(lines, path, group.end + 1, group.end + trailing as u32)
 		} else {
-			false
+			trailing > 0
+				&& (range_len > 1
+					|| annotation_echo(lines, path, group.end + 1, group.end + trailing as u32))
 		};
 		if !echo {
 			continue;

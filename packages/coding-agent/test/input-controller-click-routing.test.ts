@@ -14,6 +14,11 @@ const ESC = String.fromCharCode(27);
 // SGR click on viewport row 2 (1-based y=3): the pinned expander row when the
 // candidates below resolve it to the toggle sentinel.
 const EXPANDER_CLICK = `${ESC}[<0;5;3M`;
+// Wheel ticks on the same row: capture consumes them, and omp has no viewport
+// of its own to scroll (history lives in terminal scrollback), so they must not
+// reach click routing.
+const WHEEL_UP = `${ESC}[<64;5;3M`;
+const WHEEL_DOWN = `${ESC}[<65;5;3M`;
 
 function makeHarness() {
 	const listeners: Array<(data: string) => { consume?: boolean; data?: string } | undefined> = [];
@@ -58,9 +63,16 @@ function makeHarness() {
 	} as unknown as InteractiveModeContext;
 	const controller = new InputController(ctx);
 	controller.setupKeyHandlers();
+	/** Bytes each registered listener received alongside the ones that consumed them. */
+	const send = (data: string) => {
+		const consumed: string[] = [];
+		for (const listener of listeners) if (listener(data)?.consume) consumed.push(data);
+		return consumed;
+	};
 	return {
+		send,
 		click: () => {
-			for (const listener of listeners) listener(EXPANDER_CLICK);
+			send(EXPANDER_CLICK);
 		},
 		focused,
 		toggled: () => toggled,
@@ -98,5 +110,22 @@ describe("InputController click routing", () => {
 		h.click();
 		expect(h.toggled()).toBe(1);
 		expect(h.focused).toEqual([]);
+	});
+
+	it("consumes wheel ticks without scrolling or clicking", () => {
+		const h = makeHarness();
+		expect(h.send(WHEEL_UP)).toEqual([WHEEL_UP]);
+		expect(h.send(WHEEL_DOWN)).toEqual([WHEEL_DOWN]);
+		// Consumed *and* inert: capture owns the terminal's wheel, and omp has no
+		// viewport of its own to scroll (history lives in terminal scrollback).
+		expect(h.toggled()).toBe(0);
+		expect(h.focused).toEqual([]);
+	});
+
+	it("leaves wheel ticks unclaimed with capture off", () => {
+		cfgTuiMouse.set(settings, false);
+		const h = makeHarness();
+		expect(h.send(WHEEL_UP)).toEqual([]);
+		expect(h.toggled()).toBe(0);
 	});
 });
