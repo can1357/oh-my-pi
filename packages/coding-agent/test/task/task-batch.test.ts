@@ -993,6 +993,73 @@ describe("batch model placement", () => {
 		expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
 	});
 
+	for (const mode of ["off", "eval", "on"] as const) {
+		for (const batch of [false, true]) {
+			for (const agent of ["seance", "  seance  ", undefined, ""] as const) {
+				it.each([
+					["empty string", ""],
+					["whitespace", " \t\r\n"],
+					["empty array", []],
+					["one blank", [""]],
+					["all blank", ["", "  "]],
+				] as const)(
+					`refuses an empty seance override instead of using the saved model (gate ${mode}, batch ${batch}, agent ${JSON.stringify(agent)}, %s)`,
+					async (_label, model) => {
+						const seance = loadBundledAgents().find(candidate => candidate.name === "seance");
+						if (!seance) throw new Error("Expected the bundled seance agent");
+						mockDiscovery([taskAgent, seance]);
+						const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+						const tool = await TaskTool.create(
+							createSession({
+								spawns: "seance,task",
+								settings: { "task.batch": batch, "async.enabled": false, "task.perCallModel": mode },
+							}),
+						);
+						const work = {
+							agent,
+							task: "Read the saved context.",
+							solutionSpace: "read-only inspection",
+							sourceSession: "/sessions/source.jsonl",
+							model,
+						};
+						const raw = batch ? { context: "Shared context", tasks: [work] } : work;
+						const validated = validateAgentToolArguments(tool as unknown as AgentTool, {
+							type: "toolCall",
+							id: "empty-seance-override",
+							name: tool.name,
+							arguments: raw,
+						});
+						for (const args of [raw, validated]) {
+							const result = await tool.execute("empty-seance-override", args as TaskParams);
+							expect(result.isError).toBe(true);
+							expect(getFirstText(result)).toContain("invalid `model` selector");
+							expect(run).not.toHaveBeenCalled();
+						}
+					},
+				);
+			}
+		}
+	}
+
+	it.each([false, true])("drops per-call placeholders for a custom seance agent (batch %s)", async batch => {
+		mockDiscovery({ ...taskAgent, name: "seance", source: "project" });
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Custom"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": batch, "async.enabled": false, "task.perCallModel": "off" } }),
+		);
+		const work = { agent: "seance", task: "Do work.", solutionSpace: "one way", model: "" };
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "custom-seance-placeholder",
+			name: tool.name,
+			arguments: batch ? { context: "Shared context", tasks: [work] } : work,
+		});
+		const result = await tool.execute("custom-seance-placeholder", args as TaskParams);
+		expect(result.isError).toBeFalsy();
+		expect(run).toHaveBeenCalledTimes(1);
+		expect(run.mock.calls[0]?.[0].perCallModelGrants).toBeUndefined();
+	});
+
 	// The same placeholder in the other two fields whose empty string can only be filler. Each one
 	// refused the whole call before: `taskFile: ""` made `task` and `taskFile` both "provided", and
 	// `outputSchema: ""` passed its declared type and died parsing at preflight.

@@ -582,12 +582,12 @@ interface SpawnPlan {
 }
 
 /**
- * Optional fields whose empty string can only be filler: a selector, a source session and a
- * caller output schema all need a real value to mean anything.
+ * Optional fields whose empty strings are placeholders on ordinary task calls. Seance's model
+ * override is validated separately and must not fall back to the saved model when explicitly empty.
  */
 const BLANKABLE_KEYS = ["model", "sourceSession", "outputSchema"] as const;
 
-/** A field this pass may drop: the three unconditional ones, plus the conditional `task`/`taskFile` pair. */
+/** A field this pass may drop, including the conditional `task`/`taskFile` pair. */
 type BlankableKey = (typeof BLANKABLE_KEYS)[number] | "task" | "taskFile";
 
 /** An empty or whitespace-only string: the shape a model sends for a field it has nothing to put in. */
@@ -676,8 +676,8 @@ function isRealString(value: unknown): boolean {
  *
  * `null` is left alone: an `outputSchema: null` is a real signal — presence, not truthiness, makes
  * the caller's schema win, so it is how an internal caller says "no schema, and ignore the agent's
- * own". An array that names nothing is dropped, but only for `model`; see
- * {@link ARRAY_BLANKABLE_KEYS} for the two conditions a key has to meet and why no other key does.
+ * own". An array that names nothing is dropped only for a per-call `model`, not a bundled seance
+ * override; see {@link ARRAY_BLANKABLE_KEYS} for the conditions on array placeholders.
  *
  * The copy keeps every contract-bearing field however the caller stores it. A spread takes own
  * enumerable properties only, and an internal caller bypassing the wire schema may hand us an
@@ -685,12 +685,18 @@ function isRealString(value: unknown): boolean {
  * blank sibling would then delete that selector on the way to the gate, and the spawn would run
  * on the agent's configured model while the approval prompt still named the requested one.
  */
-function withoutBlankFields<T extends TaskItem | TaskParams>(item: T): T {
+function withoutBlankFields<T extends TaskItem | TaskParams>(
+	item: T,
+	defaultAgent: string,
+	seanceAdvertised: boolean,
+): T {
+	const agent = typeof item.agent === "string" ? item.agent.trim() || defaultAgent : defaultAgent;
 	const keys: BlankableKey[] = [...BLANKABLE_KEYS];
 	if (isRealString(item.taskFile)) keys.push("task");
 	if (isRealString(item.task) || isBlankString(item.task)) keys.push("taskFile");
 	let out = item;
 	for (const key of keys) {
+		if (key === "model" && seanceAdvertised && agent === SEANCE_AGENT_NAME) continue;
 		const blank = isBlankString(item[key]) || (ARRAY_BLANKABLE_KEYS[key] === true && isBlankArray(item[key]));
 		if (!blank) continue;
 		if (out === item) out = copyTaskFields(item, {});
@@ -714,10 +720,12 @@ function planSpawns(
 ): SpawnPlan | string {
 	const repaired = repairTaskParams(rawParams as TaskParams);
 	// Only object-shaped calls and items: anything else is left for the shape checks to reject.
-	const unblanked = isRecord(repaired) ? withoutBlankFields(repaired) : repaired;
+	const unblanked = isRecord(repaired) ? withoutBlankFields(repaired, defaultAgent, seanceAdvertised) : repaired;
 	const params = Array.isArray(unblanked.tasks)
 		? copyTaskFields(unblanked, {
-				tasks: unblanked.tasks.map(task => (isRecord(task) ? withoutBlankFields(task) : task)),
+				tasks: unblanked.tasks.map(task =>
+					isRecord(task) ? withoutBlankFields(task, defaultAgent, seanceAdvertised) : task,
+				),
 			})
 		: unblanked;
 	const error =
