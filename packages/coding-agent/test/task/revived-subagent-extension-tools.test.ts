@@ -8,6 +8,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { logger } from "@oh-my-pi/pi-utils";
+import * as loggerModule from "@oh-my-pi/pi-utils/logger";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -465,6 +467,8 @@ it.each(RESERVED_NAMES)(
 	async name => {
 		const hit = { called: false };
 		let description = "";
+		const errorSpy = vi.spyOn(logger, "error");
+		const moduleErrorSpy = vi.spyOn(loggerModule, "error");
 		const seen = await runProbedChild({
 			id: `Late${name}`,
 			factory: registersReservedAtSessionStart(name, hit),
@@ -473,10 +477,14 @@ it.each(RESERVED_NAMES)(
 				return index === 0 ? builtinCall(name) : { content: ["ack"] };
 			},
 		});
+		const diagnostic = [...errorSpy.mock.calls, ...moduleErrorSpy.mock.calls]
+			.map(call => call.map(part => (typeof part === "string" ? part : JSON.stringify(part))).join(" "))
+			.join("\n");
 		expect(hit.called).toBe(false);
 		expect(description).not.toContain(RESERVED_MARKER);
 		expect(description.length).toBeGreaterThan(0);
 		expect(seen.exitCode).toBe(0);
+		expect(diagnostic).toContain(reservedMessage(name));
 	},
 	30_000,
 );

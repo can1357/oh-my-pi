@@ -5318,9 +5318,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// registry and serialize activation so no update can overwrite a sibling.
 		const scheduledToolRegistrations = new WeakMap<RegisteredTool, Promise<void>>();
 		const scheduleToolRegistration = (registered: RegisteredTool, signal?: AbortSignal): Promise<void> => {
-			// A session_start registration cannot replace a child built-in. Refusing
-			// the overwrite leaves the built-in callable; it is not a task failure.
-			if (isSubagentSession && isReservedChildToolName(registered.definition.name)) return Promise.resolve();
+			// A session_start registration cannot replace a child built-in. Keep the
+			// built-in, drop the extension entry so the runner does not keep advertising
+			// the replacement, and surface the same validation error the preflight uses.
+			if (isSubagentSession && isReservedChildToolName(registered.definition.name)) {
+				const name = registered.definition.name;
+				const message = reservedChildToolMessage(name);
+				for (const extension of extensionRunner.getLoadedExtensions()) {
+					if (extension.tools.has(name)) extension.tools.delete(name);
+				}
+				session.emitNotice("error", message, "extensions");
+				logger.error(message, { event: "tool_registration", tool: name });
+				return Promise.reject(new Error(message));
+			}
 			const scheduled = scheduledToolRegistrations.get(registered);
 			if (scheduled) return scheduled;
 			const activationSignal = signal ?? AbortSignal.timeout(EXTENSION_HANDLER_TIMEOUT_MS);
