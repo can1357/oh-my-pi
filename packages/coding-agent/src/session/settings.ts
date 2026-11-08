@@ -1,5 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { combine, effect, register, type SettingValueOf } from "../config/registry";
+import { combine, describeRejectedValue, effect, register, type SettingValueOf } from "../config/registry";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -1571,7 +1571,7 @@ export const cfgThinkingBudgets = combine({
 function validateCostThreshold(id: string): (raw: unknown) => void {
 	return raw => {
 		if (raw === undefined || raw === null || (typeof raw === "number" && Number.isFinite(raw) && raw > 0)) return;
-		throw new Error(`Invalid ${id}: expected a positive USD amount, got ${Bun.inspect(raw)}.`);
+		throw new Error(`Invalid ${id}: expected a positive USD amount, got ${describeRejectedValue(raw)}.`);
 	};
 }
 

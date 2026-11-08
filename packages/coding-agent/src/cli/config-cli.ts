@@ -8,7 +8,13 @@
 import { APP_NAME, getAgentDir, isRecord } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { orderedSettings } from "../config/all-settings";
-import { type AnySetting, lookup } from "../config/registry";
+import {
+	type AnySetting,
+	describeRejectedValue,
+	formatRejectedValue,
+	lookup,
+	rejectedValueMetadata,
+} from "../config/registry";
 import { Settings, settings } from "../config/settings";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { initXdg } from "./commands/init-xdg";
@@ -161,6 +167,43 @@ function getTypeDisplay(def: CliSettingDef): string {
 	}
 }
 
+/** Safe details for one config value a setting rejects, as `--json` reports it. */
+interface IgnoredEntry {
+	valueType: string;
+	valueLength: number;
+	expected: string;
+	/** The config file holding it, when known. */
+	source?: string;
+}
+
+/** The values config files hold that `setting` (every setting when omitted) rejects, keyed by setting id. */
+function ignoredEntries(setting?: AnySetting): [id: string, entry: IgnoredEntry][] {
+	return settings
+		.ignoredValues()
+		.filter(ignored => !setting || ignored.setting === setting)
+		.map(({ setting: ignored, valueType, valueLength, source }) => [
+			ignored.id,
+			{
+				valueType,
+				valueLength,
+				expected: ignored.expected,
+				...(source === undefined ? {} : { source }),
+			},
+		]);
+}
+
+/** Prints, on stderr, safe metadata for each ignored config value: a hand-edited mistake is otherwise invisible here. */
+function warnIgnored(setting?: AnySetting): void {
+	for (const [id, entry] of ignoredEntries(setting)) {
+		const where = entry.source === undefined ? "" : ` in ${entry.source}`;
+		console.error(
+			chalk.yellow(
+				`${theme.status.warning} Ignored ${id}${where}: ${formatRejectedValue(entry)}; expected ${entry.expected}.`,
+			),
+		);
+	}
+}
+
 // =============================================================================
 // Command Handlers
 // =============================================================================
@@ -220,13 +263,20 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 		// one configured, which leaks the opposite of what redaction is for. A
 		// configured "" renders as unset, like in the settings panel (credentials
 		// are all strings).
-		const result: Record<string, { value?: unknown; redacted?: true; type: string; description: string }> = {};
+		const result: Record<
+			string,
+			{ value?: unknown; redacted?: true; type: string; description: string; ignored?: IgnoredEntry[] }
+		> = {};
 		for (const def of defs) {
-			const value = def.setting.get(settings);
+			const value = def.setting.displayValue(def.setting.get(settings));
 			result[def.path] =
 				def.setting.isCredential && value
 					? { redacted: true, type: def.type, description: def.description }
 					: { value, type: def.type, description: def.description };
+		}
+		for (const [id, entry] of ignoredEntries()) {
+			const target = result[id];
+			if (target) (target.ignored ??= []).push(entry);
 		}
 		await writeStdout(`${JSON.stringify(result, null, 2)}\n`);
 		return;
@@ -256,20 +306,23 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 			// single-value request and is left alone. An unset or cleared ("")
 			// credential keeps its ordinary rendering: masking it would imply one
 			// is configured.
-			const value = def.setting.get(settings);
+			const value = def.setting.displayValue(def.setting.get(settings));
 			const valueStr = def.setting.isCredential && value ? REDACTED : formatValue(value);
 			const typeStr = getTypeDisplay(def);
 			console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(typeStr)}`);
 		}
 		console.log("");
 	}
+	warnIgnored();
 }
 
 /**
  * The keys the `scope` layer sets, with the values as written: path-scoped arrays
  * (`enabledModels`, `enabledProviders`, `disabledProviders`) keep their `{ path, … }` entries
  * unresolved, so a host can edit the layer's own value without dropping them. Defaults, other
- * layers and the environment are not consulted. Credentials are redacted as in `list`.
+ * layers and the environment are not consulted. Credentials are redacted as in `list`. A value
+ * the setting rejects, which every read ignores, is marked so and names what was expected; an entry
+ * the setting cannot read shows by its shape (`Setting.displayValue`).
  */
 async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): Promise<void> {
 	const layer = scope === "project" ? settings.getProjectSettings() : settings.getGlobalSettings();
@@ -281,12 +334,31 @@ async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): P
 	}
 
 	if (flags.json) {
-		const result: Record<string, { value?: unknown; redacted?: true; type: string; description: string }> = {};
+		const result: Record<
+			string,
+			{
+				value?: unknown;
+				redacted?: true;
+				type: string;
+				description: string;
+				ignored?: true;
+				valueType?: string;
+				valueLength?: number;
+				expected?: string;
+			}
+		> = {};
 		for (const [def, value] of entries) {
-			result[def.path] =
-				def.setting.isCredential && value
-					? { redacted: true, type: def.type, description: def.description }
-					: { value, type: def.type, description: def.description };
+			const rejected = def.setting.rejects(value);
+			result[def.path] = {
+				...(rejected
+					? {}
+					: def.setting.isCredential && value
+						? { redacted: true }
+						: { value: def.setting.displayValue(value) }),
+				type: def.type,
+				description: def.description,
+				...(rejected ? { ignored: true, ...rejectedValueMetadata(value), expected: def.setting.expected } : {}),
+			};
 		}
 		await writeStdout(`${JSON.stringify(result, null, 2)}\n`);
 		return;
@@ -294,8 +366,14 @@ async function handleListLayer(scope: ConfigScope, flags: { json?: boolean }): P
 
 	console.log(chalk.bold(`Settings in the ${scope} layer:\n`));
 	for (const [def, value] of entries) {
-		const valueStr = def.setting.isCredential && value ? REDACTED : formatValue(value);
-		console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(getTypeDisplay(def))}`);
+		const rejected = def.setting.rejects(value);
+		const valueStr = rejected
+			? chalk.yellow(`(ignored: ${describeRejectedValue(value)})`)
+			: def.setting.isCredential && value
+				? REDACTED
+				: formatValue(def.setting.displayValue(value));
+		const note = rejected ? ` ${chalk.yellow(`(expected ${def.setting.expected})`)}` : "";
+		console.log(`  ${chalk.white(def.path)} = ${valueStr} ${chalk.dim(getTypeDisplay(def))}${note}`);
 	}
 }
 
@@ -313,14 +391,28 @@ function handleGet(key: string | undefined, flags: { json?: boolean }): void {
 		process.exit(1);
 	}
 
-	const value = def.setting.get(settings);
+	const value = def.setting.displayValue(def.setting.get(settings));
 
 	if (flags.json) {
-		console.log(JSON.stringify({ key: def.path, value, type: def.type, description: def.description }, null, 2));
+		const ignored = ignoredEntries(def.setting).map(([, entry]) => entry);
+		console.log(
+			JSON.stringify(
+				{
+					key: def.path,
+					value,
+					type: def.type,
+					description: def.description,
+					...(ignored.length > 0 ? { ignored } : {}),
+				},
+				null,
+				2,
+			),
+		);
 		return;
 	}
 
 	console.log(formatValue(value));
+	warnIgnored(def.setting);
 }
 
 async function handleSet(key: string | undefined, value: string | undefined, flags: { json?: boolean }): Promise<void> {
@@ -347,7 +439,7 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 
 	// Report the value written to config.yml. When another layer or an environment variable still
 	// supplies the effective value, say which instead of echoing its value as if it had been set.
-	const saved = globalValue(def.setting);
+	const saved = def.setting.displayValue(globalValue(def.setting));
 	const shadow = shadowingSource(def.setting);
 
 	if (flags.json) {
@@ -427,7 +519,7 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 	}
 
 	// The effective value may now come from another layer or the environment: never echo a credential.
-	const value = def.setting.get(settings);
+	const value = def.setting.displayValue(def.setting.get(settings));
 	const redacted = def.setting.isCredential && !!value;
 	if (flags.json) {
 		console.log(JSON.stringify(redacted ? { key: def.path, redacted: true } : { key: def.path, value }));

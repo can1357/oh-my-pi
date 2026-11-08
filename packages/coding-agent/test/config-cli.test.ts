@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { runConfigCommand } from "@oh-my-pi/pi-coding-agent/cli/config-cli";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getConfigRootDir, getProjectDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 let testAgentDir: TempDir | undefined;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -27,6 +28,11 @@ async function runCliProcess(args: string[], env: NodeJS.ProcessEnv): Promise<Cl
 	const [exitCode, output, error] = await Promise.all([proc.exited, stdout, stderr]);
 	return { exitCode, output, error };
 }
+
+// `omp config` initializes the theme before it runs a command; its text output uses the status symbols.
+beforeAll(async () => {
+	await initTheme();
+});
 
 beforeEach(() => {
 	resetSettingsForTest();
@@ -275,9 +281,15 @@ describe("config list --scope", () => {
 		projectDir = undefined;
 	});
 
+	/** `config list --json`, of one layer as written when `scope` is given. */
 	async function listLayer(
-		scope: "global" | "project",
-	): Promise<Record<string, { value?: unknown; redacted?: true; type: string; description: string }>> {
+		scope?: "global" | "project",
+	): Promise<
+		Record<
+			string,
+			{ value?: unknown; redacted?: true; type: string; description: string; ignored?: unknown; expected?: string }
+		>
+	> {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
 			text: string,
@@ -360,6 +372,108 @@ describe("config list --scope", () => {
 		expect(text).toContain("hindsight.apiToken = ********");
 		expect(text).not.toContain("secret-token");
 		expect(text).not.toContain("defaultThinkingLevel");
+	});
+
+	it("shows safe rejected-value metadata without echoing its file contents in any config surface", async () => {
+		if (!testAgentDir || !projectDir) throw new Error("Test directories were not initialized");
+		const globalFile = path.join(testAgentDir.path(), "config.yml");
+		const projectFile = path.join(projectDir.path(), ".omp", "config.yml");
+		const secret = "config-cli-nested-token-84e3";
+		await Bun.write(globalFile, `temperature:\n  apiToken: ${secret}\n`);
+		await Bun.write(projectFile, `steeringMode: ${secret}\n`);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const stderr = () => Bun.stripANSI(errorSpy.mock.calls.map(call => String(call[0] ?? "")).join("\n"));
+		const stdout = () => Bun.stripANSI(logSpy.mock.calls.map(call => String(call[0] ?? "")).join("\n"));
+
+		await runConfigCommand({ action: "get", key: "temperature", flags: {} });
+		expect(stderr()).toContain(`Ignored temperature in ${globalFile}: object (length 1); expected a number.`);
+
+		await runConfigCommand({ action: "get", key: "temperature", flags: { json: true } });
+		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toMatchObject({
+			key: "temperature",
+			value: -1,
+			ignored: [{ valueType: "object", valueLength: 1, expected: "a number", source: globalFile }],
+		});
+
+		errorSpy.mockClear();
+		await runConfigCommand({ action: "list", flags: {} });
+		expect(stderr()).toContain(
+			`Ignored steeringMode in ${projectFile}: string (length ${secret.length}); expected one of `,
+		);
+		expect(stderr()).not.toContain(secret);
+		expect(stdout()).not.toContain(secret);
+
+		const all = await listLayer();
+		expect(all.steeringMode.ignored).toEqual([
+			{
+				valueType: "string",
+				valueLength: secret.length,
+				expected: expect.stringContaining("one of "),
+				source: projectFile,
+			},
+		]);
+		expect(JSON.stringify(all)).not.toContain(secret);
+
+		// The layer as written never echoes a rejected value, even under `--scope`.
+		expect((await listLayer("project")).steeringMode).toMatchObject({
+			ignored: true,
+			valueType: "string",
+			valueLength: secret.length,
+			expected: expect.stringContaining("one of "),
+		});
+		logSpy.mockClear();
+		await runConfigCommand({ action: "list", flags: { scope: "global" } });
+		expect(stdout()).toContain("temperature = (ignored: object (length 1)) (number) (expected a number)");
+		expect(stdout()).not.toContain(secret);
+	});
+
+	it("shows an unreadable tools.approval entry by its shape, never its text, in every config surface", async () => {
+		if (!testAgentDir || !projectDir) throw new Error("Test directories were not initialized");
+		// A token pasted into the wrong place is the likeliest unreadable entry worth hiding.
+		const secret = "approval-entry-token-17619";
+		const shape = `(unreadable: string (length ${secret.length}))`;
+		await Bun.write(
+			path.join(testAgentDir.path(), "config.yml"),
+			`tools:\n  approval:\n    bash: deny\n    read: ${secret}\n`,
+		);
+		await Bun.write(
+			path.join(projectDir.path(), ".omp", "config.yml"),
+			`tools:\n  approval:\n    write: ${secret}\n`,
+		);
+		const printed: string[] = [];
+		vi.spyOn(console, "log").mockImplementation(
+			(...args: unknown[]) => void printed.push(args.map(String).join(" ")),
+		);
+		vi.spyOn(console, "error").mockImplementation(
+			(...args: unknown[]) => void printed.push(args.map(String).join(" ")),
+		);
+		vi.spyOn(process.stdout, "write").mockImplementation(((text: string, cb?: (error?: Error | null) => void) => {
+			printed.push(text);
+			cb?.();
+			return true;
+		}) as typeof process.stdout.write);
+		const last = () => JSON.parse(printed.at(-1) ?? "null");
+
+		await runConfigCommand({ action: "get", key: "tools.approval", flags: {} });
+		await runConfigCommand({ action: "get", key: "tools.approval", flags: { json: true } });
+		expect(last().value).toEqual({ bash: "deny", read: shape, write: shape });
+		await runConfigCommand({ action: "list", flags: {} });
+		await runConfigCommand({ action: "list", flags: { json: true } });
+		expect(last()["tools.approval"].value).toEqual({ bash: "deny", read: shape, write: shape });
+		for (const scope of ["global", "project"] as const) {
+			await runConfigCommand({ action: "list", flags: { scope } });
+			await runConfigCommand({ action: "list", flags: { scope, json: true } });
+		}
+		expect(last()["tools.approval"].value).toEqual({ write: shape });
+		// The value in effect after a reset comes from the project file.
+		await runConfigCommand({ action: "reset", key: "tools.approval", flags: {} });
+		await runConfigCommand({ action: "reset", key: "tools.approval", flags: { json: true } });
+		expect(last().value).toEqual({ write: shape });
+
+		const output = Bun.stripANSI(printed.join("\n"));
+		expect(output).toContain(`"read":"${shape}"`);
+		expect(output).not.toContain(secret);
 	});
 
 	it("rejects --scope on actions other than list", async () => {
