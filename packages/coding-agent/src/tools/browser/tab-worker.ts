@@ -1826,8 +1826,9 @@ export class WorkerCore {
 			this.#userDriven = payload.mode !== "headless" && payload.userDriven === true;
 			this.#downloads = new DownloadManager(this.#browser, this.#page, this.#targetId, {
 				perTab: !this.#userDriven,
+				pageEvents: payload.mode === "attach" && payload.relay === true,
 			});
-			if (payload.downloadsPath) await this.#downloads.enable(payload.downloadsPath);
+			await this.#downloads.start(payload.downloadsPath);
 			const baseUserAgent = await this.#page.evaluate(() => navigator.userAgent);
 			this.#emulation = new BrowserEmulationController(
 				this.#page,
