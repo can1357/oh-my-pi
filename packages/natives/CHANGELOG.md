@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed the bash tool's execution trace and its checkpoints growing without bound while a script runs many distinct one-shot sources (`eval`, a command substitution of evaluated text, a sourced file whose bytes change, a trap action, an `env NAME=value` prefix): what they keep now follows what the trace can still replay and what a restore needs ([#18321](https://github.com/can1357/oh-my-pi/pull/18321) by [@sjawhar](https://github.com/sjawhar))
 - Built-in jq filters now stop reliably when aborted or timed out, even before producing output.
 - Fixed logical directory changes with cd and pwd in native Windows shell sessions, including drive and UNC paths.
 - Fixed closed file descriptors passed to external commands on Unix so writes fail as expected; closed standard streams on Windows now use the null device.
@@ -33,12 +34,6 @@
 - An edit whose path is missing on disk no longer stalls the embedded shell and other native calls while it searches for the file, and a cancelled edit stops that search at once ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
 - macOS spellchecking (typo underlines, autocorrect, `apple` word completion) no longer leaks native memory for the life of the process ([#18285](https://github.com/can1357/oh-my-pi/pull/18285) by [@aleister1102](https://github.com/aleister1102))
 - Fixed large brace expansions running as literal text or silently dropping words: expansions support up to 4,194,304 words and report an error above that limit ([#18092](https://github.com/can1357/oh-my-pi/pull/18092) by [@sjawhar](https://github.com/sjawhar))
-
-## [18.18.0] - 2026-11-07
-
-### Fixed
-
-- Fixed the bash tool's execution trace and its checkpoints growing without bound while a script runs many distinct one-shot sources (`eval`, a command substitution of evaluated text, a sourced file whose bytes change, a trap action, an `env NAME=value` prefix): what they keep now follows what the trace can still replay and what a restore needs ([#18321](https://github.com/can1357/oh-my-pi/pull/18321) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.18.0] - 2026-11-07
 
