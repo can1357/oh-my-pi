@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { isJsonSchemaValueValid } from "@oh-my-pi/pi-ai/utils/schema";
+import { validateToolCall } from "@oh-my-pi/pi-ai/utils/validation";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	CONTEXT_NOTES_ENTRY_TYPE,
@@ -48,7 +52,60 @@ function toolSession(
 	};
 }
 
+function codexModel() {
+	return buildModel({
+		id: "gpt-5.5",
+		name: "gpt-5.5",
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api/codex/responses",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 272000,
+		maxTokens: 128000,
+	});
+}
+
 describe("experimental context notes", () => {
+	it("accepts an omitted text on the model wire and reads saved notes without modifying the journal", async () => {
+		using tempDir = TempDir.createSync("@omp-context-notes-read-");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		const manager = SessionManager.create(tempDir.path(), sessionDir);
+		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });
+		const tool = ContextNotesTool.createIf(toolSession(settings, manager));
+		if (!tool) throw new Error("expected context notes tool");
+		try {
+			await tool.execute("save", { text: "retain this notebook" });
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("expected persisted session file");
+			const before = await Bun.file(sessionFile).text();
+			const revision = getContextNotes(manager.getBranch());
+			const model = codexModel();
+			const [wireTool] = convertOpenAICodexResponsesTools([tool], model);
+			if (wireTool?.type !== "function") throw new Error("expected function schema");
+			expect(isJsonSchemaValueValid(wireTool.parameters, {})).toBe(true);
+			expect(isJsonSchemaValueValid(wireTool.parameters, { text: "" })).toBe(true);
+			expect(isJsonSchemaValueValid(wireTool.parameters, { text: null })).toBe(false);
+			const args = validateToolCall([tool], { type: "toolCall", id: "read", name: tool.name, arguments: {} });
+			const read = await tool.execute("read", tool.parameters.assert(args));
+			expect(read.content).toEqual([{ type: "text", text: "retain this notebook" }]);
+			expect(getContextNotes(manager.getBranch())).toEqual(revision);
+			expect(await Bun.file(sessionFile).text()).toBe(before);
+			await tool.execute("clear", { text: "" });
+			expect(getContextNotes(manager.getBranch())?.text).toBe("");
+			expect(getContextNotes(manager.getBranch())?.entryId).not.toBe(revision?.entryId);
+			const resumed = await SessionManager.open(sessionFile, sessionDir);
+			try {
+				expect(getContextNotes(resumed.getBranch())?.text).toBe("");
+			} finally {
+				await resumed.close();
+			}
+		} finally {
+			await manager.close();
+		}
+	});
+
 	it("rejects an oversized UTF-8 replacement while retaining the current notebook revision", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.experimentalContextManagement": true });

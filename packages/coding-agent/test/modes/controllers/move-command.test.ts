@@ -79,7 +79,7 @@ describe("CommandController /move", () => {
 			const target = path.join(sourceDir, "checkout");
 			vi.spyOn(sessionWorktree, "createSessionWorktree").mockImplementation(async () => {
 				await fs.mkdir(target);
-				return { path: target, branch: "feature" };
+				return { path: target, branch: "feature", sourceCwd: sourceDir, baseCommit: "0", keptChanges: true };
 			});
 			ctx.withBtwSessionMove = vi.fn(async () => false);
 			await new CommandController(ctx).handleWorktreeCommand("feature");
@@ -101,7 +101,7 @@ describe("CommandController /move", () => {
 		const created = Promise.withResolvers<void>();
 		const relocating = Promise.withResolvers<void>();
 		const relocated = Promise.withResolvers<void>();
-		let command: Promise<void> | undefined;
+		let command: Promise<unknown> | undefined;
 		try {
 			const { ctx, state } = createMoveContext(sourceDir);
 			const target = path.join(sourceDir, "checkout");
@@ -123,7 +123,7 @@ describe("CommandController /move", () => {
 				creating.resolve();
 				await created.promise;
 				await fs.mkdir(target);
-				return { path: target, branch: "feature" };
+				return { path: target, branch: "feature", sourceCwd: sourceDir, baseCommit: "0", keptChanges: true };
 			});
 			ctx.session.moveSession = async cwd => {
 				expect(held).toBe(true);

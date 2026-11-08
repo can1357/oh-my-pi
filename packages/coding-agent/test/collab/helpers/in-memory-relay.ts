@@ -37,6 +37,7 @@ export class FakeWebSocket {
 	onerror: (() => void) | null = null;
 	onclose: ((event: { code: number; reason: string }) => void) | null = null;
 	readonly #relay: InMemoryRelay;
+	readonly #pongListeners: Array<() => void> = [];
 
 	constructor(url: string) {
 		const relay = activeRelay;
@@ -59,6 +60,22 @@ export class FakeWebSocket {
 		// reaches peers the close will retire; delivery itself stays asynchronous.
 		const bytes = new Uint8Array(data);
 		this.#relay.forward(this, bytes);
+	}
+
+	addEventListener(type: string, listener: () => void): void {
+		if (type === "pong") this.#pongListeners.push(listener);
+	}
+
+	/** The relay answers every ping, as a live one does. */
+	ping(): void {
+		if (this.readyState !== FakeWebSocket.OPEN) return;
+		queueMicrotask(() => {
+			for (const listener of this.#pongListeners) listener();
+		});
+	}
+
+	terminate(): void {
+		this.close();
 	}
 
 	close(_code?: number): void {

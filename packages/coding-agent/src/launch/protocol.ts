@@ -1,3 +1,4 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import {
 	type DaemonState,
 	type DaemonRestartPolicy,
@@ -29,7 +30,14 @@ export type DaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT" | "SIGKIL
 /** Typed broker operation sent over the authenticated socket. */
 export type DaemonOperation =
 	| { op: "ping" }
-	| { op: "start"; spec: DaemonSpec; owner?: string; replace?: boolean }
+	| {
+			op: "start";
+			spec: DaemonSpec;
+			owner?: string;
+			replace?: boolean;
+			/** `false` answers once the process launches; follow with a `wait` for readiness. Legacy brokers ignore it and wait. */
+			awaitReady?: boolean;
+	  }
 	| { op: "list" }
 	| {
 			op: "logs";
@@ -45,10 +53,18 @@ export type DaemonOperation =
 	  }
 	| { op: "wait"; name: string; for: "ready" | "exit"; pattern?: string; timeoutMs: number }
 	| { op: "send"; name: string; data?: string; signal?: DaemonSignal }
-	| { op: "stop"; name: string; timeoutMs: number }
+	| {
+			op: "stop";
+			name: string;
+			timeoutMs: number;
+			/** Stop only this generation (`DaemonSnapshot.id`); another one is left running. Legacy brokers ignore it. */
+			id?: string;
+	  }
 	| { op: "restart"; name: string }
 	| { op: "mode"; name: string; mode: "persist" | "session" | "detached" }
 	| { op: "describe"; name: string }
+	/** Abort this connection's in-flight `wait`/follow-`logs` request `requestId`. Legacy brokers reject it. */
+	| { op: "cancel"; requestId: string }
 	| { op: "shutdown" };
 
 /** Typed broker result decoded before it reaches tool code. */
@@ -74,6 +90,7 @@ export type DaemonRpcResult =
 	| { op: "restart"; daemon: DaemonSnapshot }
 	| { op: "mode"; daemon: DaemonSnapshot }
 	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec }
+	| { op: "cancel"; cancelled: boolean }
 	| { op: "shutdown" };
 
 /** Authenticated request envelope used by socket clients. */
@@ -102,10 +119,6 @@ export interface DaemonCompletionNotification {
 }
 
 export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function record(value: unknown, label: string): Record<string, unknown> {
 	if (!isRecord(value)) throw new Error(`${label} must be an object`);
@@ -310,6 +323,8 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				spec: parseDaemonSpec(source.spec),
 				owner: optionalString(source.owner, "operation.owner"),
 				replace: source.replace === undefined ? undefined : booleanValue(source.replace, "operation.replace"),
+				awaitReady:
+					source.awaitReady === undefined ? undefined : booleanValue(source.awaitReady, "operation.awaitReady"),
 			};
 		case "logs":
 			return {
@@ -349,10 +364,13 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				op,
 				name: stringValue(source.name, "operation.name"),
 				timeoutMs: numberValue(source.timeoutMs, "operation.timeoutMs"),
+				id: optionalString(source.id, "operation.id"),
 			};
 		case "restart":
 		case "describe":
 			return { op, name: stringValue(source.name, "operation.name") };
+		case "cancel":
+			return { op, requestId: stringValue(source.requestId, "operation.requestId") };
 		case "mode": {
 			const mode = stringValue(source.mode, "operation.mode");
 			if (mode !== "persist" && mode !== "session" && mode !== "detached")
@@ -414,6 +432,8 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 				daemon: parseDaemonSnapshot(source.daemon),
 				spec: parseDaemonSpec(source.spec),
 			};
+		case "cancel":
+			return { op: "cancel", cancelled: booleanValue(source.cancelled, "result.cancelled") };
 		case "shutdown":
 			return { op: "shutdown" };
 	}

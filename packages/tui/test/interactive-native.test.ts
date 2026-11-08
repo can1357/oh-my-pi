@@ -111,8 +111,9 @@ describe("native interactive primitives", () => {
 		expect(onTick).toHaveBeenCalledTimes(1);
 		const described = countdown.describe();
 		if (described.k !== "elapsed") throw new Error("expected an elapsed node");
-		expect(described.p?.stopped).toBe(0);
-		expect(described.p?.age).toBeLessThanOrEqual(0);
+		// A live countdown: `stopped` would freeze the display at that value from the start.
+		expect(described.p?.stopped).toBeUndefined();
+		expect(described.p?.age).toBeLessThan(0);
 
 		vi.advanceTimersByTime(2000);
 		expect(onExpire).toHaveBeenCalledTimes(1);
@@ -146,6 +147,22 @@ describe("native interactive primitives", () => {
 		const input = new Input();
 		input.onSubmit = vi.fn();
 		expect(input.describe(cx).p).toMatchObject({ sendable: false });
+	});
+
+	it("leaves Vim Insert unlabelled so the host keeps native editing, labelling only modal states", () => {
+		const editor = new Editor(getEditorTheme());
+		editor.setVimMode(true);
+		editor.setText("abc");
+		expect(editorNode(editor).p?.mode).toBeUndefined();
+
+		editor.handleInput("\x1b");
+		expect(editorNode(editor).p?.mode).toBe("NORMAL");
+		editor.handleInput("v");
+		expect(editorNode(editor).p).toMatchObject({ mode: "VISUAL", anchor: expect.any(Number) });
+
+		editor.handleInput("\x1b");
+		editor.handleInput("i");
+		expect(editorNode(editor).p?.mode).toBeUndefined();
 	});
 
 	it("changes only text and cursor when typing and only the cursor when moving", () => {

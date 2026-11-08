@@ -1,9 +1,11 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { factRecall, formatContext, recall, recallEnhanced } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
+import { currentEmbeddingModel } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
 import { invalidate } from "@oh-my-pi/pi-mnemopi/core/beam/store";
 import type { BeamMemoryState } from "@oh-my-pi/pi-mnemopi/core/beam/types";
+import { currentLoopPhase } from "@oh-my-pi/pi-utils";
 
 type TestBeam = BeamMemoryState & { close(): void };
 
@@ -102,9 +104,10 @@ describe("beam recall free functions", () => {
 			[project, ["gate-status", "word-choice"]],
 		] as const) {
 			for (const id of ids) {
-				beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'fixture')", [
+				beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)", [
 					id,
 					JSON.stringify([0.5, Math.sqrt(0.75)]),
+					currentEmbeddingModel(),
 				]);
 			}
 		}
@@ -125,6 +128,60 @@ describe("beam recall free functions", () => {
 			"INSERT INTO facts (fact_id, session_id, subject, predicate, object, confidence) VALUES ('noise', 's1', 'entity', 'fact', 'A predisposition to word games.', 1)",
 		);
 		expect(factRecall(beam, "redis", 5)).toEqual([]);
+	});
+
+	it("reports its synchronous ranking to the loop watchdog as mnemopi.recall", async () => {
+		const beam = makeBeam();
+		insertWorking(beam, "build", "The build succeeded.");
+
+		const query = beam.db.query.bind(beam.db);
+		const phases: (string | undefined)[] = [];
+		const spy = spyOn(beam.db, "query").mockImplementation(((...args: Parameters<typeof beam.db.query>) => {
+			phases.push(currentLoopPhase());
+			return query(...args);
+		}) as typeof beam.db.query);
+		try {
+			await recall(beam, "build", 5, { queryEmbedding: null });
+		} finally {
+			spy.mockRestore();
+		}
+
+		expect(phases.length).toBeGreaterThan(0);
+		expect(phases.every(phase => phase === "mnemopi.recall")).toBe(true);
+		expect(currentLoopPhase()).toBeUndefined();
+	});
+
+	it("labels every default-linear enhanced recall-count update with facts included", async () => {
+		const beam = makeBeam();
+		beam.config.polyphonicRecall = false;
+		beam.config.enhancedRecall = false;
+		insertWorking(beam, "build", "The build succeeded.");
+		insertEpisodic(beam, "build-runbook", "The build rollback plan is in the runbook.");
+		beam.db.run(
+			"INSERT INTO facts (fact_id, session_id, subject, predicate, object, confidence) VALUES ('build-fact', 's1', 'build', 'status', 'succeeded', 1)",
+		);
+		const run = beam.db.run.bind(beam.db);
+		const phases: (string | undefined)[] = [];
+		const spy = spyOn(beam.db, "run").mockImplementation(((sql: string, ...params: unknown[]) => {
+			phases.push(currentLoopPhase());
+			return run(sql, ...(params as []));
+		}) as typeof beam.db.run);
+		try {
+			const results = await recallEnhanced(beam, "build", 5, {
+				includeFacts: true,
+				queryEmbedding: null,
+				useCache: false,
+			});
+			expect(results.map(result => result.id)).toContain("build");
+			expect(results.map(result => result.id)).toContain("build-runbook");
+			expect(results.some(result => result.tier_label === "fact")).toBe(true);
+		} finally {
+			spy.mockRestore();
+		}
+
+		expect(phases.length).toBeGreaterThan(0);
+		expect(phases.every(phase => phase === "mnemopi.recall")).toBe(true);
+		expect(currentLoopPhase()).toBeUndefined();
 	});
 
 	it("keeps compound synonym aliases and queried identifiers intact", async () => {
@@ -174,9 +231,9 @@ describe("beam recall free functions", () => {
 			"identifier",
 		]);
 		insertWorking(beam, "semantic", "The vault selects the personal login.");
-		beam.db.run(
-			"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES ('semantic', '[1,0]', 'fixture')",
-		);
+		beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES ('semantic', '[1,0]', ?)", [
+			currentEmbeddingModel(),
+		]);
 		expect((await recall(beam, "1Password", 5, { queryEmbedding: [1, 0] })).map(result => result.id)).toEqual([
 			"semantic",
 		]);

@@ -9,6 +9,7 @@ import {
 	processInteractionUpdate,
 	type ToolCallState,
 } from "@oh-my-pi/pi-ai/providers/cursor";
+import { CursorExecOrder } from "@oh-my-pi/pi-ai/providers/cursor/exec-order";
 import type {
 	AssistantMessage,
 	CursorExecHandlers,
@@ -25,6 +26,7 @@ import {
 	EditToolCallSchema,
 	ExecServerMessageSchema,
 	ReadArgsSchema,
+	ShellArgsSchema,
 	ToolCallSchema,
 	WriteArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
@@ -159,10 +161,12 @@ describe("cursor native editToolCall (StrReplace)", () => {
 			return result;
 		});
 		const readPaths: string[] = [];
+		const frames: unknown[] = [];
 		const { h2Request } = mockH2();
 		const execHandlers: CursorExecHandlers = {
-			async read(args) {
+			async read(args, frame) {
 				readPaths.push(args.path);
+				frames.push(frame);
 				return {
 					role: "toolResult",
 					toolCallId: args.toolCallId,
@@ -172,7 +176,8 @@ describe("cursor native editToolCall (StrReplace)", () => {
 					timestamp: 1,
 				} satisfies ToolResultMessage;
 			},
-			async write(args) {
+			async write(args, frame) {
+				frames.push(frame);
 				return {
 					role: "toolResult",
 					toolCallId: args.toolCallId,
@@ -242,6 +247,7 @@ describe("cursor native editToolCall (StrReplace)", () => {
 		expect(calls[0]?.[kCursorExecResolved]).toBe(true);
 		expect(calls[0]?.arguments).toEqual({ path: TARGET, stream_content: "orange" });
 		expect(readPaths).toEqual([`${TARGET}:raw`]);
+		expect(frames).toEqual([{ editMaterialization: true }, { editMaterialization: true }]);
 		expect(toolResults.map(result => result.toolName)).toEqual(["edit"]);
 		expect(toolResults[0]?.toolCallId).toBe(EDIT_ID);
 		expect(toolResults[0]?.isError).toBe(false);
@@ -422,6 +428,84 @@ describe("cursor native editToolCall (StrReplace)", () => {
 		).toBe(true);
 	});
 
+	it("settles the live card of an edit completed without a write, but not of one whose write landed", async () => {
+		const settled: ToolResultMessage[] = [];
+		const failedOutput = cursorAssistantMessage();
+		const failedState = newBlockState(result => result);
+		failedState.onEditSettled = result => settled.push(result);
+		const failedStream = new AssistantMessageEventStream();
+		startEdit(failedOutput, failedStream, failedState);
+		const failed = create(ToolCallSchema, {
+			toolCallId: EDIT_ID,
+			tool: {
+				case: "editToolCall",
+				value: create(EditToolCallSchema, {
+					args: { path: TARGET, streamContent: "orange" },
+					result: create(EditResultSchema, {
+						result: {
+							case: "error",
+							value: create(EditErrorSchema, { path: TARGET, error: "old_string not found" }),
+						},
+					}),
+				}),
+			},
+		});
+		processInteractionUpdate(
+			{ message: { case: "toolCallCompleted", value: { callId: ENVELOPE_ID, toolCall: failed } } },
+			failedOutput,
+			failedStream,
+			failedState,
+			{ sawTokenDelta: false },
+		);
+		expect(settled.map(result => [result.toolCallId, result.toolName, result.isError])).toEqual([
+			[EDIT_ID, "edit", true],
+		]);
+
+		settled.length = 0;
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState(result => result);
+		state.onEditSettled = result => settled.push(result);
+		const { h2Request } = mockH2();
+		startEdit(output, stream, state);
+		await handleServerMessage(
+			execWrite({ path: TARGET, toolCallId: EDIT_ID, fileText: "orange\n" }),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			{
+				async write(args) {
+					return {
+						role: "toolResult",
+						toolCallId: args.toolCallId,
+						toolName: "edit",
+						content: [{ type: "text", text: "wrote" }],
+						isError: false,
+						timestamp: 2,
+					} satisfies ToolResultMessage;
+				},
+			},
+			result => result,
+			{ sawTokenDelta: false },
+			[],
+		);
+		processInteractionUpdate(
+			{
+				message: {
+					case: "toolCallCompleted",
+					value: { callId: ENVELOPE_ID, toolCall: editToolCall(TARGET, "orange") },
+				},
+			},
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+		expect(settled).toEqual([]);
+	});
+
 	it("pairs an interrupted cursor-edit when the transport dies before writeArgs", () => {
 		const output = cursorAssistantMessage();
 		const stream = new AssistantMessageEventStream();
@@ -430,6 +514,8 @@ describe("cursor native editToolCall (StrReplace)", () => {
 			toolResults.push(result);
 			return result;
 		});
+		const settled: ToolResultMessage[] = [];
+		state.onEditSettled = result => settled.push(result);
 		startEdit(output, stream, state);
 		expect(toolResults).toHaveLength(0);
 
@@ -439,6 +525,8 @@ describe("cursor native editToolCall (StrReplace)", () => {
 		expect(toolResults[0]?.toolCallId).toBe(EDIT_ID);
 		expect(toolResults[0]?.toolName).toBe("edit");
 		expect(toolResults[0]?.isError).toBe(true);
+		// The materializing read surfaced no call, so the flush must end the live card itself.
+		expect(settled).toEqual(toolResults);
 	});
 
 	it("treats a completion with no EditResult as a failed edit", () => {
@@ -563,5 +651,180 @@ describe("cursor native editToolCall (StrReplace)", () => {
 		);
 
 		expect(readPaths).toEqual([`${TARGET}:raw:2+1`]);
+	});
+});
+
+describe("cursor exec frames keep tool-batch order", () => {
+	function execShell(toolCallId: string, command: string) {
+		return create(AgentServerMessageSchema, {
+			message: {
+				case: "execServerMessage",
+				value: create(ExecServerMessageSchema, {
+					id: 2,
+					execId: `exec-${toolCallId}`,
+					message: { case: "shellArgs", value: create(ShellArgsSchema, { toolCallId, command }) },
+				}),
+			},
+		});
+	}
+
+	function toolResult(toolCallId: string, toolName: string): ToolResultMessage {
+		return {
+			role: "toolResult",
+			toolCallId,
+			toolName,
+			content: [{ type: "text", text: "ok" }],
+			isError: false,
+			timestamp: 1,
+		};
+	}
+
+	function setup(execHandlers: CursorExecHandlers) {
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState(result => result);
+		state.execOrder = new CursorExecOrder();
+		const { h2Request } = mockH2();
+		const dispatch = (msg: ReturnType<typeof execShell>) =>
+			handleServerMessage(
+				msg,
+				output,
+				stream,
+				state,
+				new Map(),
+				h2Request,
+				execHandlers,
+				result => result,
+				{
+					sawTokenDelta: false,
+				},
+				[],
+			);
+		return { output, stream, state, dispatch };
+	}
+
+	it("runs a call issued after a StrReplace against the written file", async () => {
+		const log: string[] = [];
+		const { output, stream, state, dispatch } = setup({
+			async read(args) {
+				log.push("read");
+				return toolResult(args.toolCallId, "read");
+			},
+			async write(args) {
+				log.push("write");
+				await Bun.sleep(5);
+				log.push("written");
+				return toolResult(args.toolCallId, "write");
+			},
+			async shell(args) {
+				log.push("shell");
+				return toolResult(args.toolCallId, "bash");
+			},
+		});
+
+		startEdit(output, stream, state);
+		const read = dispatch(execRead({ path: TARGET, toolCallId: EDIT_ID }));
+		const shell = dispatch(execShell("call-shell", "luac -p note.txt"));
+		await read;
+		expect(log).toEqual(["read"]);
+
+		await Promise.all([dispatch(execWrite({ path: TARGET, toolCallId: EDIT_ID, fileText: "orange\n" })), shell]);
+		expect(log).toEqual(["read", "write", "written", "shell"]);
+	});
+
+	it("reads a StrReplace's file only after a call issued before it finished", async () => {
+		const log: string[] = [];
+		const { promise: shellGate, resolve: openShell } = Promise.withResolvers<void>();
+		const { output, stream, state, dispatch } = setup({
+			async read(args) {
+				log.push("read");
+				return toolResult(args.toolCallId, "read");
+			},
+			async shell(args) {
+				log.push("shell");
+				await shellGate;
+				log.push("shell done");
+				return toolResult(args.toolCallId, "bash");
+			},
+		});
+
+		const shell = dispatch(execShell("call-shell", "sed -i s/apple/orange/ note.txt"));
+		startEdit(output, stream, state);
+		const read = dispatch(execRead({ path: TARGET, toolCallId: EDIT_ID }));
+		await Bun.sleep(5);
+		expect(log).toEqual(["shell"]);
+
+		openShell();
+		await Promise.all([shell, read]);
+		expect(log).toEqual(["shell", "shell done", "read"]);
+	});
+
+	it("drops the calls still waiting behind a StrReplace when the run ends", async () => {
+		const log: string[] = [];
+		const { output, stream, state, dispatch } = setup({
+			async read(args) {
+				log.push("read");
+				return toolResult(args.toolCallId, "read");
+			},
+			async shell(args) {
+				log.push("shell");
+				return toolResult(args.toolCallId, "bash");
+			},
+		});
+
+		startEdit(output, stream, state);
+		await dispatch(execRead({ path: TARGET, toolCallId: EDIT_ID }));
+		const shell = dispatch(execShell("call-shell", "cat note.txt"));
+		state.execOrder?.close();
+		await shell;
+
+		expect(log).toEqual(["read"]);
+		expect(output.content.filter(block => block.type === "toolCall").map(block => block.name)).toEqual(["edit"]);
+	});
+
+	it("releases the calls behind a StrReplace the server completes without writing", async () => {
+		const log: string[] = [];
+		const { output, stream, state, dispatch } = setup({
+			async read(args) {
+				log.push("read");
+				return toolResult(args.toolCallId, "read");
+			},
+			async shell(args) {
+				log.push("shell");
+				return toolResult(args.toolCallId, "bash");
+			},
+		});
+
+		startEdit(output, stream, state);
+		await dispatch(execRead({ path: TARGET, toolCallId: EDIT_ID }));
+		const shell = dispatch(execShell("call-shell", "cat note.txt"));
+		await Bun.sleep(5);
+		expect(log).toEqual(["read"]);
+
+		const failed = create(ToolCallSchema, {
+			toolCallId: EDIT_ID,
+			tool: {
+				case: "editToolCall",
+				value: create(EditToolCallSchema, {
+					args: { path: TARGET, streamContent: "orange" },
+					result: create(EditResultSchema, {
+						result: {
+							case: "error",
+							value: create(EditErrorSchema, { path: TARGET, error: "old_string not found" }),
+						},
+					}),
+				}),
+			},
+		});
+		processInteractionUpdate(
+			{ message: { case: "toolCallCompleted", value: { callId: ENVELOPE_ID, toolCall: failed } } },
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+		await shell;
+
+		expect(log).toEqual(["read", "shell"]);
 	});
 });

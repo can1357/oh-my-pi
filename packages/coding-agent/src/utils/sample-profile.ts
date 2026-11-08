@@ -12,8 +12,8 @@
  * - a process-wide "top functions by self samples" table
  * - Rust v0 and legacy symbols demangled (best-effort, path extraction)
  *
- * Consumed by the read tool: `*.sample.txt` reads show the summary, `:raw`
- * returns the original bytes.
+ * Consumed by the read tool: whole-file `*.sample.txt` reads show the summary;
+ * `:raw` and line selectors read the original file.
  */
 
 import { formatPct, mergeInto, type ProfileNode, type RenderTreeContext, renderProfileNode } from "./profile-tree";
@@ -432,6 +432,8 @@ export function renderSampleProfile(text: string): string | null {
 	}
 
 	out.push("");
-	out.push("[Summarized view of a macOS `sample` call-tree report. Use ':raw' to read the original file.]");
+	out.push(
+		"[Summarized view of a macOS `sample` call-tree report. Use ':raw' or a line range to read the original file.]",
+	);
 	return out.join("\n");
 }

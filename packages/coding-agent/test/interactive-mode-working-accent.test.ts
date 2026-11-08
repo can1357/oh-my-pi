@@ -45,6 +45,8 @@ async function createHarness(sessionName: string): Promise<Harness> {
 	}
 
 	const tempDir = TempDir.createSync("@pi-working-accent-");
+	// Settings.init keeps an instance an earlier file loaded (e.g. from the user's config).
+	resetSettingsForTest();
 	await Settings.init({ inMemory: true, cwd: tempDir.path() });
 	await initTheme(false);
 	const sessionManager = SessionManager.inMemory(tempDir.path());
@@ -66,6 +68,8 @@ async function createHarness(sessionName: string): Promise<Harness> {
 		model: undefined,
 		thinkingLevel: undefined,
 		titleGenerationSignal: new AbortController().signal,
+		// No conversation to title: a bare /rename reports usage.
+		renameTitle: async () => null,
 	} as unknown as AgentSession;
 	const mode = new InteractiveMode(session, "test");
 	harness = { mode, sessionManager, tempDir };

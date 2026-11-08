@@ -102,6 +102,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 				resetTranscriptAnchors++;
 			},
 			restorePendingToolResults() {},
+			markViewIdle() {},
 		},
 		statusLine: {
 			setSession: (session: AgentSession, focusedAgentId?: string) => {
@@ -123,6 +124,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		},
 		updatePendingMessagesDisplay: () => uiHelpers.updatePendingMessagesDisplay(),
 		updateEditorBorderColor() {},
+		syncIdleMaintenanceView() {},
 		ui: { requestRender() {}, requestComponentRender() {} },
 		showStatus() {},
 		collabGuest: undefined,
@@ -801,6 +803,7 @@ describe("pickRecentFocusableAgentId", () => {
 			status: "running",
 			session: null,
 			sessionFile: `${id}.jsonl`,
+			generation: 0,
 			createdAt: 1000,
 			lastActivity: 1000,
 			...overrides,

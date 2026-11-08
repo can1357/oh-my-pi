@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, CursorHistoryPayload, GeminiNativeContentPayload, ImageContent } from "@oh-my-pi/pi-ai";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getBlobsDir, TempDir } from "@oh-my-pi/pi-utils";
@@ -439,6 +439,113 @@ describe("SessionManager signature persistence", () => {
 		const reloaded = await SessionManager.open(sessionFile);
 		const entry = reloaded.getEntries().find(item => item.type === "compaction");
 		expect(entry?.type === "compaction" && entry.preserveData).toEqual(preserveData);
+		await reloaded.close();
+	}, 15_000);
+
+	it("preserves oversized Cursor server records byte-for-byte across reload", async () => {
+		using tempDir = TempDir.createSync("@pi-session-cursor-records-persistence-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		// >MAX_PERSIST_CHARS: Cursor addresses each record by the SHA-256 of its bytes.
+		const output = "R".repeat(600_000);
+		const record = JSON.stringify({
+			role: "tool",
+			content: [{ type: "tool-result", toolCallId: "call-read", toolName: "Read", result: output }],
+			id: "call-read",
+		});
+		const providerPayload: CursorHistoryPayload = {
+			type: "cursorHistory",
+			wireRoute: '["kimi-k3","kimi-k3",false,false,[]]',
+			digest: "digest",
+			records: [record],
+		};
+		session.appendMessage({ role: "user", content: "read it", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-read", name: "read", arguments: { path: "/tmp/big.txt" } }],
+			api: "cursor-agent",
+			provider: "cursor",
+			model: "kimi-k3",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			providerPayload,
+			timestamp: 2,
+		});
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "call-read",
+			toolName: "read",
+			content: [{ type: "text", text: output }],
+			isError: false,
+			timestamp: 3,
+		});
+		await session.flush();
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await session.close();
+
+		const reloaded = await SessionManager.open(sessionFile);
+		expect(getAssistantMessage(reloaded).providerPayload).toEqual(providerPayload);
+		// The paired result itself is truncated, so its turn no longer matches the
+		// payload's digest and the Cursor provider rebuilds it from content.
+		const result = reloaded
+			.getEntries()
+			.flatMap(entry => (entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : []));
+		expect(result[0]?.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("[Session persistence truncated large content]"),
+		});
+		await reloaded.close();
+	}, 15_000);
+
+	it("preserves oversized Gemini native content byte-for-byte across reload", async () => {
+		using tempDir = TempDir.createSync("@pi-session-gemini-native-persistence-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		// >MAX_PERSIST_CHARS: the signed thought replays with its signature, so a cut would break it.
+		const thought = "T".repeat(600_000);
+		const providerPayload: GeminiNativeContentPayload = {
+			type: "geminiNativeContent",
+			digest: "digest",
+			content: {
+				role: "model",
+				parts: [{ text: thought, thought: true, thoughtSignature: "sig" }, { text: "done" }],
+			},
+		};
+		session.appendMessage({ role: "user", content: "think", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: thought, thinkingSignature: "sig" },
+				{ type: "text", text: "done" },
+			],
+			api: "google-generative-ai",
+			provider: "factory-droid",
+			model: "gemini-4-argon",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			providerPayload,
+			timestamp: 2,
+		});
+		await session.flush();
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		await session.close();
+
+		const reloaded = await SessionManager.open(sessionFile);
+		expect(getAssistantMessage(reloaded).providerPayload).toEqual(providerPayload);
 		await reloaded.close();
 	}, 15_000);
 });

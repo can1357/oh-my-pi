@@ -3,13 +3,16 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	type ImageTokenization,
 	imageTokens,
+	resolveImageMaxEdge,
 	resolveImageTokenization,
 } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import rules from "../src/compat/rules.json";
 
-const HIRES: ImageTokenization = { regime: "anthropic-patch", maxEdge: 2576, maxTokens: 4784 };
+const HIRES: ImageTokenization = { regime: "anthropic-patch", verified: true, maxEdge: 2576, maxTokens: 4784 };
+/** The Anthropic-wire fallback: the high-res numbers, unmeasured for the readers it prices. */
+const HIRES_FALLBACK: ImageTokenization = { regime: "anthropic-patch", maxEdge: 2576, maxTokens: 4784 };
 const STANDARD: ImageTokenization = { regime: "anthropic-patch", maxEdge: 1568, maxTokens: 1568 };
 /** GPT-5.5's sizing; `auto` sizes like `original`. */
 const GPT_PATCH: ImageTokenization = {
@@ -21,6 +24,16 @@ const GPT_PATCH: ImageTokenization = {
 	original: { maxEdge: 6000, patchBudget: 10_000 },
 };
 
+/** DeepSeek V4.1 Flash's vision config: 14px patches merged 3×3, 1,024-token cap, 544² floor. */
+const DEEPSEEK_PATCH: ImageTokenization = {
+	regime: "deepseek-patch",
+	verified: true,
+	patchSize: 14,
+	downsample: 3,
+	maxTokens: 1024,
+	minPixels: 295_936,
+};
+
 function ruleFor(provider: string, id: string): ImageTokenization {
 	const rule = resolveImageTokenization({ provider, id });
 	if (!rule) throw new Error(`no image rule for ${provider}/${id}`);
@@ -29,8 +42,11 @@ function ruleFor(provider: string, id: string): ImageTokenization {
 
 describe("resolveImageTokenization", () => {
 	it("splits Claude at 4.7: Opus 4.6 and older on the standard tier, 4.7+ and Fable/Mythos high-res", () => {
-		for (const id of ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5", "claude-3-5-sonnet-20241022"]) {
+		for (const id of ["claude-opus-4-6", "claude-haiku-4-5", "claude-3-5-sonnet-20241022", "claude-sonnet-45"]) {
 			expect(resolveImageTokenization({ provider: "anthropic", id })).toEqual(STANDARD);
+		}
+		for (const id of ["claude-sonnet-4-6", "claude-sonnet-46"]) {
+			expect(resolveImageTokenization({ provider: "anthropic", id })).toEqual({ ...STANDARD, verified: true });
 		}
 		for (const id of [
 			"claude-opus-4-7",
@@ -79,7 +95,7 @@ describe("resolveImageTokenization", () => {
 				api: "openai-completions",
 				id: "anthropic/claude-sonnet-4.6",
 			}),
-		).toEqual(STANDARD);
+		).toEqual({ ...STANDARD, verified: true });
 		expect(
 			resolveImageTokenization({
 				provider: "amazon-bedrock",
@@ -105,6 +121,47 @@ describe("resolveImageTokenization", () => {
 			expect(rule).toMatchObject({ regime: "openai-patch", multiplier: 1.2 });
 			expect(imageTokens(rule, { width: 1568, height: 1562 }, "original")).toBe(2882);
 		}
+	});
+
+	it("marks the GPT rules measured against Codex billing as verified", () => {
+		for (const id of ["gpt-6-astra", "gpt-6.1-sol", "gpt-5.6-luna", "gpt-5.5", "gpt-daybreak-blue-latest"]) {
+			expect(ruleFor("openai-codex", id).verified).toBe(true);
+		}
+		// gpt-5.4 and older follow the guide without a billing probe.
+		expect(ruleFor("openai", "gpt-5.4").verified).toBeUndefined();
+		expect(ruleFor("openai-codex", "gpt-5.3-codex").verified).toBeUndefined();
+		// Lines after 6.1 size like gpt-5.6 but are not measured yet.
+		for (const id of ["gpt-6.2-sol", "gpt-7-luna"]) {
+			const rule = ruleFor("openai-codex", id);
+			expect(rule.verified).toBeUndefined();
+			expect(imageTokens(rule, { width: 1568, height: 1562 }, "original")).toBe(2882);
+		}
+	});
+
+	it("marks the Gemini, Sonnet and Grok rules measured on Antigravity and xAI as verified", () => {
+		// Cloud Code Assist bills every Gemini image 1,089 tokens; Google's own API keeps the documented 1,120.
+		for (const id of ["gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]) {
+			expect(ruleFor("google-antigravity", id)).toEqual({ regime: "fixed", verified: true, tokens: 1089 });
+		}
+		expect(ruleFor("google", "gemini-3.8-flash")).toEqual({ regime: "fixed", tokens: 1120 });
+		// Sonnet's standard tier is verified on every host; Opus 4.6 is not measured.
+		expect(ruleFor("google-antigravity", "claude-sonnet-4-6")).toEqual({ ...STANDARD, verified: true });
+		expect(ruleFor("anthropic", "claude-sonnet-4-6").verified).toBe(true);
+		expect(ruleFor("google-antigravity", "claude-opus-4-6").verified).toBeUndefined();
+		// Grok 4.6 through 4.20 bill 32px patches resized past 2,401, plus a few tokens per image.
+		for (const [provider, id] of [
+			["xai-oauth", "grok-4.6"],
+			["xai-oauth", "grok-4.7"],
+			["xai-oauth", "grok-4.20-0309-non-reasoning"],
+			["xai", "grok-4.20-0309-reasoning"],
+		] as const) {
+			const rule = ruleFor(provider, id);
+			expect(rule.verified).toBe(true);
+			expect(imageTokens(rule, { width: 1568, height: 1562 }, "original")).toBe(2442);
+			expect(imageTokens(rule, { width: 2048, height: 2048 }, "original")).toBe(2442);
+		}
+		// Older Grok lines keep the wire's unverified GPT pricing.
+		expect(resolveImageTokenization(getBundledModel("xai-oauth", "grok-4.5"))).toEqual(GPT_PATCH);
 	});
 
 	it("sizes each detail level the way the guide lists for that model", () => {
@@ -153,8 +210,12 @@ describe("resolveImageTokenization", () => {
 			});
 		}
 		for (const api of ["anthropic-messages", "bedrock-converse-stream", "openrouter", "ollama-chat"]) {
-			expect(resolveImageTokenization({ api, id: "qwen/qwen3-vl" })).toEqual(HIRES);
+			expect(resolveImageTokenization({ api, id: "qwen/qwen3-vl" })).toEqual(HIRES_FALLBACK);
 		}
+		// Grok has no lineage rule: xAI's OpenAI-compatible wire prices it as GPT.
+		const grok = getBundledModel("xai", "grok-4");
+		if (!grok) throw new Error("Expected bundled xai/grok-4");
+		expect(resolveImageTokenization(grok)).toEqual(GPT_PATCH);
 		// The lineage rule wins over the wire carrying it.
 		expect(
 			resolveImageTokenization({
@@ -195,6 +256,29 @@ describe("resolveImageTokenization", () => {
 		expect(resolveImageTokenization(model)).toEqual(STANDARD);
 		expect(resolveImageTokenization({ ...model, identity: { ...model.identity, revision: "4.7.0" } })).toEqual(HIRES);
 	});
+
+	it("prices DeepSeek V4.1 Flash by its own vision config on every host, and V4.0 by the wire", () => {
+		for (const [provider, id] of [
+			["openrouter", "deepseek/deepseek-v4.1-flash-1017"],
+			["openrouter", "deepseek/deepseek-v4.1-flash"],
+			["deepseek", "deepseek-flash"],
+			// DeepSeek's API serves the retired preview id with the current Flash.
+			["deepseek", "deepseek-v4-flash-vision-exp"],
+			["fireworks", "deepseek-v4.1-flash"],
+			["together", "deepseek-ai/DeepSeek-V4.1-Flash"],
+		] as const) {
+			expect(resolveImageTokenization(getBundledModel(provider, id))).toEqual(DEEPSEEK_PATCH);
+		}
+		// Hosts still running the V4.0 vision preview keep their wire fallback.
+		expect(resolveImageTokenization(getBundledModel("openrouter", "deepseek/deepseek-v4-flash-vision-exp"))).toEqual(
+			HIRES_FALLBACK,
+		);
+		expect(resolveImageTokenization(getBundledModel("fireworks", "deepseek-v4-flash-vision-exp"))).toEqual(GPT_PATCH);
+		// An unmeasured later Flash release is not priced, let alone verified, by V4.1's rule.
+		expect(
+			resolveImageTokenization({ provider: "fireworks", api: "openai-completions", id: "deepseek-v4.2-flash" }),
+		).toEqual(GPT_PATCH);
+	});
 });
 
 describe("imageTokens", () => {
@@ -230,6 +314,37 @@ describe("imageTokens", () => {
 		expect(imageTokens(STANDARD, { width: 2999, height: 3000 })).toBe(39 * 39);
 		expect(imageTokens({ regime: "fixed", tokens: 1120 }, { width: 2048, height: 2048 })).toBe(1120);
 	});
+
+	it("matches DeepSeek V4.1 Flash billing measured through OpenRouter", () => {
+		// Input-token delta over a text-only request, identical on Fireworks and
+		// DeepInfra: upscaled to the 544² floor, then 42px cells up to the cap.
+		const measured: [width: number, height: number, tokens: number][] = [
+			[256, 256, 184],
+			[512, 512, 184],
+			[784, 784, 382],
+			[1024, 1024, 652],
+			[1280, 1280, 994],
+			[1568, 1562, 994],
+			[1568, 784, 743],
+			[784, 1568, 762],
+			[2576, 1716, 977],
+			[3000, 1000, 992],
+			[4000, 4000, 994],
+		];
+		for (const [width, height, tokens] of measured) {
+			expect(imageTokens(DEEPSEEK_PATCH, { width, height })).toBe(tokens);
+		}
+	});
+
+	it("resizes DeepSeek images like the reference processor at extreme aspect ratios", () => {
+		// Values from `plan_image_grid` in DeepSeek's `inference/image_processor.py`.
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 1, height: 8192 })).toBe(1024);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 8192, height: 1 })).toBe(1024);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 64, height: 8192 })).toBe(590);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 8192, height: 64 })).toBe(396);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 100, height: 2000 })).toBe(234);
+		expect(imageTokens(DEEPSEEK_PATCH, { width: 2000, height: 100 })).toBe(179);
+	});
 });
 
 function isPositiveNumber(value: unknown): boolean {
@@ -250,6 +365,9 @@ function payloadProblems(payload: unknown): string[] {
 		case "anthropic-patch":
 			requirePositive(payload, "maxEdge", "");
 			requirePositive(payload, "maxTokens", "");
+			break;
+		case "deepseek-patch":
+			for (const field of ["patchSize", "downsample", "maxTokens", "minPixels"]) requirePositive(payload, field, "");
 			break;
 		case "openai-patch":
 			requirePositive(payload, "multiplier", "");
@@ -282,5 +400,37 @@ describe("compiled image-tokenization payloads", () => {
 		}
 		expect(checked).toBeGreaterThan(0);
 		expect(offenders).toEqual([]);
+	});
+});
+
+describe("resolveImageMaxEdge", () => {
+	it("reports Cursor's 1024px edge for its Claude and GPT readers and none where images pass through", () => {
+		for (const id of [
+			"claude-opus-5-high",
+			"claude-4.6-sonnet-medium",
+			"claude-fable-5-1-high",
+			"gpt-5.4-nano",
+			"default",
+		]) {
+			const model = getBundledModel("cursor", id);
+			if (!model) throw new Error(`Expected bundled cursor/${id}`);
+			expect(resolveImageMaxEdge(model)).toBe(1024);
+		}
+		// Partial targets naming only the host or only Cursor's wire are shrunk the same way.
+		expect(resolveImageMaxEdge({ provider: "cursor", id: "claude-opus-5-high" })).toBe(1024);
+		expect(resolveImageMaxEdge({ api: "cursor-agent", id: "claude-opus-5-high" })).toBe(1024);
+		expect(resolveImageMaxEdge({ api: "cursor-agent", id: "gpt-5.4-nano" })).toBe(1024);
+		expect(resolveImageMaxEdge({ provider: "cursor", id: "composer-2.5" })).toBeUndefined();
+		expect(resolveImageMaxEdge({ api: "cursor-agent", id: "composer-2.5" })).toBeUndefined();
+		for (const [provider, id] of [
+			["cursor", "gemini-3.7-flash"],
+			["cursor", "composer-2.5"],
+			["anthropic", "claude-opus-5-5"],
+			["openai-codex", "gpt-6.1-sol"],
+		] as const) {
+			const model = getBundledModel(provider, id);
+			if (!model) throw new Error(`Expected bundled ${provider}/${id}`);
+			expect(resolveImageMaxEdge(model)).toBeUndefined();
+		}
 	});
 });

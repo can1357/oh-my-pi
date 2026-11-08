@@ -113,20 +113,7 @@ pub fn clone_open(src: &File, dst: &File) -> io::Result<()> {
 /// Distinguishes files on different devices from a source filesystem that
 /// cannot clone: only the latter holds for every later copy from it.
 pub fn is_cross_device(err: &io::Error) -> bool {
-	#[cfg(unix)]
-	{
-		err.raw_os_error() == Some(libc::EXDEV)
-	}
-	#[cfg(windows)]
-	{
-		err.raw_os_error()
-			.is_some_and(|code| code as u32 == windows_sys::Win32::Foundation::ERROR_NOT_SAME_DEVICE)
-	}
-	#[cfg(not(any(unix, windows)))]
-	{
-		let _ = err;
-		false
-	}
+	err.kind() == io::ErrorKind::CrossesDevices
 }
 
 #[cfg(target_os = "macos")]
@@ -145,18 +132,15 @@ fn check_same_device(src: &Path, dst: &Path, existing: Option<&Metadata>) -> io:
 	let dst_dev = if let Some(metadata) = existing {
 		metadata.dev()
 	} else {
-		let parent = dst.parent().filter(|parent| !parent.as_os_str().is_empty());
+		let parent = dst.parent().filter(|parent| !parent.is_empty());
 		// Let the clone itself report a missing directory.
 		let Ok(metadata) = fs::metadata(parent.unwrap_or_else(|| Path::new("."))) else {
 			return Ok(());
 		};
 		metadata.dev()
 	};
-	if fs::metadata(src)?.dev() == dst_dev {
-		Ok(())
-	} else {
-		Err(unsupported("source and destination are on different devices"))
-	}
+	(fs::metadata(src)?.dev() == dst_dev)
+		.ok_or_else(|| unsupported("source and destination are on different devices"))
 }
 
 /// Replaces the regular file `dst` (described by `metadata`) with a clone of
@@ -268,11 +252,8 @@ mod imp {
 	pub fn clone_into(src: &File, dst: &File) -> io::Result<()> {
 		// SAFETY: both descriptors are borrowed from live files for the call,
 		// and the kernel retains neither.
-		if unsafe { libc::ioctl(dst.as_raw_fd(), FICLONE, src.as_raw_fd()) } == 0 {
-			Ok(())
-		} else {
-			Err(io::Error::last_os_error())
-		}
+		(unsafe { libc::ioctl(dst.as_raw_fd(), FICLONE, src.as_raw_fd()) } == 0)
+			.ok_or_else(io::Error::last_os_error)
 	}
 
 	pub const fn is_unsupported_code(code: i32) -> bool {
@@ -294,11 +275,8 @@ mod imp {
 		let dst = CString::new(dst.as_os_str().as_bytes())?;
 		// SAFETY: both strings are NUL-terminated and outlive the call, which
 		// retains neither pointer.
-		if unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), flags) } == 0 {
-			Ok(())
-		} else {
-			Err(io::Error::last_os_error())
-		}
+		(unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), flags) } == 0)
+			.ok_or_else(io::Error::last_os_error)
 	}
 
 	pub const fn is_unsupported_code(code: i32) -> bool {
@@ -440,11 +418,7 @@ mod imp {
 				std::ptr::null_mut(),
 			)
 		};
-		if ok == 0 {
-			Err(io::Error::last_os_error())
-		} else {
-			Ok(())
-		}
+		(ok != 0).ok_or_else(io::Error::last_os_error)
 	}
 
 	pub fn is_unsupported_code(code: i32) -> bool {

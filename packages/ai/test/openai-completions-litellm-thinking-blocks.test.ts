@@ -113,7 +113,7 @@ describe("openai-completions LiteLLM thinking_blocks", () => {
 		]);
 
 		expect(assistant.content.filter(block => block.type === "thinking")).toEqual([
-			{ type: "thinking", thinking: "I should list files.", thinkingSignature: "SIG_part1_part2" },
+			{ type: "thinking", thinking: "I should list files.", thinkingSignature: "SIG_part1_part2", summary: false },
 		]);
 		expect(replayed.thinking_blocks).toEqual([
 			{ type: "thinking", thinking: "I should list files.", signature: "SIG_part1_part2" },

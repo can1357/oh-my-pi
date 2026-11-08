@@ -11,7 +11,7 @@ import {
 	type ToolResultWithAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
 import { type BlockState, handleServerMessage, type ToolCallState } from "@oh-my-pi/pi-ai/providers/cursor";
-import { piTruncation } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
+import { buildPiReadResult, piTruncation } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import {
@@ -22,10 +22,12 @@ import {
 	McpArgsSchema,
 	ReadArgsSchema,
 	ShellArgsSchema,
+	WriteArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
+import { registerArtifactsDir } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import {
 	bridgeToolMap,
 	createBridgeEditTool,
@@ -802,14 +804,15 @@ describe("legacy shell timeout unit (issue #13082)", () => {
 		await removeWithRetries(cwd);
 	});
 
-	it("converts a millisecond ShellArgs budget into bash seconds", async () => {
-		// Legacy `ShellArgs.timeout` is milliseconds (`ShellTimeout` echoes it as
-		// `timeout_ms`), so a model asking for 15s sends 15000. Forwarded as
+	it("converts a millisecond hard_timeout into the bash deadline", async () => {
+		// Cursor states shell budgets in milliseconds (`ShellTimeout` echoes them
+		// as `timeout_ms`), so a 15s hard timeout arrives as 15000. Forwarded as
 		// seconds it exceeded the bash ceiling and ran clamped to 3600s.
 		const result = await handlers.shell({
 			command: "echo hi",
 			workingDirectory: "",
-			timeout: 15_000,
+			timeout: 5_000,
+			hardTimeout: 15_000,
 			toolCallId: "s1",
 		} as never);
 		// BashTool records its resolved deadline here; shape known from `bash.ts`.
@@ -817,13 +820,39 @@ describe("legacy shell timeout unit (issue #13082)", () => {
 		expect(details.timeoutSeconds).toBe(15);
 	});
 
-	it("rounds a sub-second budget up and leaves an unset budget on the default", async () => {
+	it("does not kill a command at a short block_until_ms wait", async () => {
+		// `ShellArgs.timeout` is the model's `block_until_ms`: how long to wait
+		// before backgrounding. As the deadline it killed `make bootstrap-local`
+		// at 5s; it now leaves the bash default in place.
+		const result = await handlers.shell({
+			command: "echo hi",
+			workingDirectory: "",
+			timeout: 5_000,
+			toolCallId: "s1b",
+		} as never);
+		const details = result.details as { timeoutSeconds?: number };
+		expect(details.timeoutSeconds).toBe(300);
+	});
+
+	it("keeps a block_until_ms wait longer than the default as the deadline", async () => {
+		const result = await handlers.shell({
+			command: "echo hi",
+			workingDirectory: "",
+			timeout: 1_200_000,
+			toolCallId: "s1c",
+		} as never);
+		const details = result.details as { timeoutSeconds?: number };
+		expect(details.timeoutSeconds).toBe(1200);
+	});
+
+	it("rounds a sub-second hard timeout up and leaves an unset budget on the default", async () => {
 		// Truncating 400ms to 0 would read as `bash`'s "no deadline" instead of
 		// the shortest deadline it can honor.
 		const subSecond = await handlers.shell({
 			command: "echo hi",
 			workingDirectory: "",
-			timeout: 400,
+			timeout: 0,
+			hardTimeout: 400,
 			toolCallId: "s2",
 		} as never);
 		const subSecondDetails = subSecond.details as { timeoutDisabled?: boolean; timeoutSeconds?: number };
@@ -893,6 +922,26 @@ describe("CursorExecHandlers error results", () => {
 		expect(end?.isError).toBe(true);
 	});
 
+	it("names the granted tools when a shell frame asks for an unavailable bash", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([
+				["read", rewrittenErrorTool("read")],
+				["grep", rewrittenErrorTool("grep")],
+				["glob", rewrittenErrorTool("glob")],
+			]),
+		});
+
+		const result = await handlers.shellStream(
+			create(ShellArgsSchema, { toolCallId: "call-shell-missing", command: "echo hi" }),
+			{ onStdout: () => {}, onStderr: () => {} },
+		);
+		expect(result.isError).toBe(true);
+		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("");
+		expect(text).toContain('Tool "bash" not available to this agent');
+		expect(text).toContain("read, grep, glob");
+	});
+
 	it("omits unset optional kwargs from shellStream start events and execute args", async () => {
 		// shellStream bypasses executeTool(), so omitUndefinedArgs must be
 		// applied here directly — otherwise absent cwd/timeout become
@@ -945,7 +994,8 @@ describe("CursorExecHandlers error results", () => {
 				command: "pwd",
 				workingDirectory: "/tmp",
 				// Milliseconds on the wire; the bridge forwards bash seconds.
-				timeout: 12_000,
+				timeout: 5_000,
+				hardTimeout: 12_000,
 			}),
 			{ onStdout: () => {}, onStderr: () => {} },
 		);
@@ -954,6 +1004,96 @@ describe("CursorExecHandlers error results", () => {
 		if (keepStart?.type !== "tool_execution_start") throw new Error("expected tool_execution_start");
 		expect(keepStart.args).toEqual({ command: "pwd", cwd: "/tmp", timeout: 12 });
 		expect(executeArgs[0]).toEqual({ command: "pwd", cwd: "/tmp", timeout: 12 });
+	});
+});
+
+describe("CursorExecHandlers native StrReplace materialization", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-edit-materialize-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	const readSchema = type({ path: "string" });
+	const readTool: AgentTool<typeof readSchema> = {
+		name: "read",
+		label: "read",
+		description: "reads a file",
+		parameters: readSchema,
+		execute: async (_id, args) => ({
+			content: [{ type: "text", text: await Bun.file(args.path).text() }],
+			details: {},
+		}),
+	};
+	const writeSchema = type({ path: "string", content: "string" });
+	const writeTool: AgentTool<typeof writeSchema> = {
+		name: "write",
+		label: "write",
+		description: "writes a file",
+		parameters: writeSchema,
+		execute: async (_id, args) => {
+			await Bun.write(args.path, args.content);
+			return { content: [{ type: "text", text: "Successfully wrote" }], details: { resolvedPath: args.path } };
+		},
+	};
+	const fileTools = new Map<string, AgentTool>([
+		["read", readTool as AgentTool],
+		["write", writeTool as AgentTool],
+	]);
+
+	it("lands the write as the edit card's diff without surfacing read or write calls", async () => {
+		const target = path.join(cwd, "user.lua");
+		await Bun.write(target, "float  = true,\ncenter = true,\n");
+		const events: AgentEvent[] = [];
+		// The provider reaches the handlers through the glyph codec's Proxy, which calls them with the proxy as `this`.
+		const handlers = new Proxy(
+			new CursorExecHandlers({ cwd, tools: fileTools, emitEvent: event => events.push(event) }),
+			{},
+		);
+
+		await handlers.read(create(ReadArgsSchema, { toolCallId: "edit-1", path: target }), {
+			editMaterialization: true,
+		});
+		const result = await handlers.write(
+			create(WriteArgsSchema, {
+				toolCallId: "edit-1",
+				path: target,
+				fileText: "float  = true,\nsize   = { 1033, 628 },\ncenter = true,\n",
+			}),
+			{ editMaterialization: true },
+		);
+
+		expect(await Bun.file(target).text()).toBe("float  = true,\nsize   = { 1033, 628 },\ncenter = true,\n");
+		expect(result.toolName).toBe("edit");
+		expect(result.isError).toBe(false);
+		const details = result.details as { diff?: string; firstChangedLine?: number };
+		expect(details.diff).toBe(" 1|float  = true,\n+2|size   = { 1033, 628 },\n 2|center = true,");
+		expect(details.firstChangedLine).toBe(2);
+		expect(events).toHaveLength(1);
+		const end = events[0];
+		if (end?.type !== "tool_execution_end") throw new Error("expected one tool_execution_end");
+		expect(end.toolCallId).toBe("edit-1");
+		expect(end.toolName).toBe("edit");
+		expect(end.result.details).toEqual(result.details);
+	});
+
+	it("diffs only the changed line of a CRLF file with a BOM", async () => {
+		const target = path.join(cwd, "win.txt");
+		await Bun.write(target, "\uFEFFa\r\nb\r\nc\r\n");
+		const handlers = new CursorExecHandlers({ cwd, tools: fileTools, emitEvent: () => {} });
+
+		const result = await handlers.write(
+			create(WriteArgsSchema, { toolCallId: "edit-2", path: target, fileText: "a\nB\nc\n" }),
+			{ editMaterialization: true },
+		);
+
+		const details = result.details as { diff?: string; firstChangedLine?: number };
+		expect(details.diff).toBe(" 1|a\n-2|b\n+2|B\n 3|c");
+		expect(details.firstChangedLine).toBe(2);
 	});
 });
 
@@ -1708,7 +1848,12 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del", path: target }));
 
 		expect(result.isError).toBe(true);
-		expect(result.content).toEqual([{ type: "text", text: 'Tool "delete" not available' }]);
+		expect(result.content).toEqual([
+			{
+				type: "text",
+				text: 'Tool "delete" not available to this agent; calling it again fails the same way. Use one of: none.',
+			},
+		]);
 		expect(await Bun.file(target).exists()).toBe(true);
 	});
 
@@ -2183,6 +2328,110 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		const result = answer.message.value.message.value.result;
 		if (result.case !== "success" || result.value.output.case !== "content") throw new Error("expected read content");
 		expect(result.value.output.value.trimEnd()).toBe("line997\nline998\nline999\nline1000");
+	});
+
+	it("reads an image file as an image through both read frames instead of its bytes as text", async () => {
+		// Both frames compose `:raw`, which bypasses `read`'s image routing: the PNG
+		// reached Cursor as UTF-8 mojibake and every later request failed (#15630).
+		const seed = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+			"base64",
+		);
+		const target = path.join(cwd, "shot.png");
+		await Bun.write(target, await new Bun.Image(seed).resize(24, 24).png().bytes());
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["read", new ReadTool(createTestSession(cwd))]]),
+			getToolContext: () => yoloToolContext(),
+		});
+		const results: ToolResultMessage[] = [];
+		const written: Buffer[] = [];
+		const h2Request = {
+			write(chunk: Buffer) {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerMessage",
+					value: create(ExecServerMessageSchema, {
+						id: 8,
+						execId: "image-read",
+						message: {
+							case: "readArgs",
+							value: create(ReadArgsSchema, { path: target, toolCallId: "image-read" }),
+						},
+					}),
+				},
+			}),
+			cursorAssistantMessage(),
+			new AssistantMessageEventStream(),
+			newBlockState(),
+			new Map(),
+			h2Request,
+			handlers,
+			result => {
+				results.push(result);
+			},
+			{ sawTokenDelta: false },
+			[],
+		);
+		const frame = written[0];
+		if (!frame) throw new Error("expected read response");
+		const answer = fromBinary(AgentClientMessageSchema, frame.subarray(5, 5 + frame.readUInt32BE(1)));
+		if (answer.message.case !== "execClientMessage" || answer.message.value.message.case !== "readResult") {
+			throw new Error("expected read result");
+		}
+		const legacy = answer.message.value.message.value.result;
+		if (legacy.case !== "success" || legacy.value.output.case !== "content") throw new Error("expected read content");
+
+		const modern = await handlers.piRead({ toolCallId: "pi-image-read", args: { path: "shot.png" } } as never);
+		const ranged = await handlers.piRead({
+			toolCallId: "pi-image-range",
+			args: { path: "shot.png", offset: 1, limit: 20 },
+		} as never);
+		// A `;` list splits into nested reads; the image part must keep the flag.
+		await Bun.write(path.join(cwd, "notes.txt"), "notes\n");
+		const split = await handlers.piRead({
+			toolCallId: "pi-image-split",
+			args: { path: "notes.txt;shot.png" },
+		} as never);
+		const piFrame = buildPiReadResult(modern);
+		if (piFrame.result.case !== "success") throw new Error("expected pi_read success");
+
+		for (const output of [legacy.value.output.value, piFrame.result.value.output]) {
+			expect(output).not.toContain("IHDR");
+			expect(output).toMatch(/\[image\/\w+ image\]/);
+		}
+		for (const result of [results[0], modern, ranged, split]) {
+			expect(result?.isError).toBe(false);
+			expect(result?.content.some(part => part.type === "image")).toBe(true);
+		}
+		const splitText = split.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
+		expect(splitText).not.toContain("IHDR");
+	});
+
+	it("routes internal artifact reads through both Cursor frames", async () => {
+		const artifacts = path.join(cwd, "artifacts");
+		await fs.mkdir(artifacts);
+		await Bun.write(path.join(artifacts, "0.read.log"), "cursor-artifact-content\n");
+		const unregister = registerArtifactsDir(artifacts);
+		try {
+			const handlers = new CursorExecHandlers({
+				cwd,
+				tools: new Map<string, Tool>([["read", new ReadTool(createTestSession(cwd))]]),
+			});
+			const legacy = await handlers.read(create(ReadArgsSchema, { path: "artifact://0:raw" }));
+			const modern = await handlers.piRead({ toolCallId: "artifact-read", args: { path: "artifact://0" } });
+			for (const result of [legacy, modern]) {
+				expect(result.isError).toBe(false);
+				expect(result.content).toEqual([{ type: "text", text: "cursor-artifact-content\n" }]);
+			}
+		} finally {
+			unregister();
+		}
 	});
 
 	it("escapes pi_grep's pattern when the frame asks for a literal search", async () => {

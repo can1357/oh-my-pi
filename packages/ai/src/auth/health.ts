@@ -1,5 +1,5 @@
 import type { Provider } from "../types";
-import { resolveUsedFraction } from "../usage";
+import { isWithinUsageReserve, resolveUsedFraction } from "../usage";
 import type {
 	CredentialRankingContext,
 	UsageCredential,
@@ -224,7 +224,7 @@ export class CredentialHealth implements HealthApi {
 				return {
 					credentialId: entry.id,
 					credentialType,
-					state: remainingFraction <= resolveReserveFraction(entry) ? "reserve" : "healthy",
+					state: isWithinUsageReserve(remainingFraction, resolveReserveFraction(entry)) ? "reserve" : "healthy",
 					remainingFraction,
 				};
 			}),

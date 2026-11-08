@@ -26,13 +26,12 @@ import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ContextNotesTool, NewContextTool } from "@oh-my-pi/pi-coding-agent/tools/context-notes";
 import { BUILTIN_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/builtin-names";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
-import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const authStorage = createInMemoryAuthStorage();
 authStorage.keys.setRuntime("anthropic", "test-key");
-authStorage.keys.setRuntime("openai-codex", "test-key");
+authStorage.keys.setRuntime("mock", "test-key");
 const modelRegistry = new ModelRegistry(authStorage);
 
 afterAll(() => {
@@ -104,7 +103,7 @@ describe("experimental context management", () => {
 		session = undefined;
 	});
 
-	async function createCodeModeSession() {
+	async function createRolloverSession() {
 		const mock = createMockModel({
 			responses: [
 				{
@@ -120,7 +119,6 @@ describe("experimental context management", () => {
 			"compaction.experimentalContextManagement": true,
 			"compaction.keepRecentTokens": 128,
 			"compaction.midTurnEnabled": false,
-			"providers.openai-codex.codeMode": "on",
 		});
 		const toolSession: ToolSession = {
 			cwd: process.cwd(),
@@ -136,11 +134,9 @@ describe("experimental context management", () => {
 			new GrepTool(toolSession),
 			new ContextNotesTool(toolSession),
 			new NewContextTool(toolSession),
-			new EvalTool(toolSession),
 		];
-		const model = { ...mock.model, provider: "openai-codex" };
 		const agent = new Agent({
-			initialState: { model, systemPrompt: ["test"], tools, messages: history },
+			initialState: { model: mock.model, systemPrompt: ["test"], tools, messages: history },
 			getApiKey: () => "test-key",
 			streamFn: mock.stream,
 		});
@@ -156,14 +152,12 @@ describe("experimental context management", () => {
 		return { session, manager, mock };
 	}
 
-	it("exposes new_context directly in Code Mode and rolls over once below the automatic threshold", async () => {
-		const { session, manager, mock } = await createCodeModeSession();
+	it("rolls over once on new_context below the automatic threshold", async () => {
+		const { session, manager, mock } = await createRolloverSession();
 		const events: AgentSessionEvent[] = [];
 		session.subscribe(event => {
 			events.push(event);
 		});
-		expect(session.getActiveToolNames()).toContain("new_context");
-		expect(session.getActiveToolNames()).not.toContain("read");
 		const request = "Implement the task; preserve the public API and do not deploy.";
 		await session.prompt(request);
 		await session.waitForIdle();
@@ -186,7 +180,7 @@ describe("experimental context management", () => {
 	});
 
 	it("retains the latest request through successive rollovers and context reconstruction without notes", async () => {
-		const { session, manager, mock } = await createCodeModeSession();
+		const { session, manager, mock } = await createRolloverSession();
 		const request = "Keep the API compatible; implement this task without deploying.";
 		await session.prompt(request);
 		await session.waitForIdle();
@@ -254,7 +248,7 @@ describe("experimental context management", () => {
 	});
 
 	it("closes the lifecycle when cancellation occurs during awaited start dispatch", async () => {
-		const { session, manager } = await createCodeModeSession();
+		const { session, manager } = await createRolloverSession();
 		const events: AgentSessionEvent[] = [];
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
@@ -284,6 +278,67 @@ describe("experimental context management", () => {
 		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
 		expect(session.isCompacting).toBe(false);
 	});
+	it("does not repeatedly roll over a tool loop when fixed context exceeds the recovery band", async () => {
+		const mock = createMockModel({
+			contextWindow: 200_000,
+			responses: [
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: ["done"] },
+				{ content: [{ type: "toolCall", name: "context_notes", arguments: {} }], usage: { input: 190_000 } },
+				{ content: ["done again"] },
+			],
+		});
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([mock.model]);
+		const fixedPrompt = "fixed context ".repeat(100_000);
+		const manager = SessionManager.inMemory();
+		const settings = Settings.isolated({
+			"compaction.experimentalContextManagement": true,
+			"compaction.thresholdTokens": 100_000,
+			"compaction.keepRecentTokens": 1,
+			"compaction.midTurnEnabled": true,
+			"compaction.autoContinue": false,
+		});
+		const { tools } = createRolloverTools(manager, settings);
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: mock.model,
+				systemPrompt: [fixedPrompt],
+				tools,
+				messages: [],
+			},
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: manager,
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+			builtInToolNames: BUILTIN_TOOL_NAMES,
+		});
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(event.message);
+		});
+		await session.prompt("Continue the assignment across three tool calls.");
+		expect(mock.calls).toHaveLength(4);
+		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+		expect(notices.filter(message => message.includes("cannot create headroom"))).toHaveLength(1);
+
+		const previousSessionId = manager.getSessionId();
+		expect(await session.newSession()).toBe(true);
+		expect(manager.getSessionId()).not.toBe(previousSessionId);
+		agent.setSystemPrompt([fixedPrompt]);
+		await session.prompt("Continue the next assignment.");
+		expect(mock.calls).toHaveLength(6);
+		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+		expect(notices.filter(message => message.includes("cannot create headroom"))).toHaveLength(2);
+	});
+
 	it("keeps exact earlier requirements and the latest notebook through three real rollover boundaries", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled model");

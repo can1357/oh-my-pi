@@ -82,7 +82,7 @@ function baseOptions(cwd: string) {
 
 describe("/tan extension auth over a shared registry", () => {
 	it("keeps the extension provider's credential resolvable after a forwarded tan-like child is created", async () => {
-		using tempDir = TempDir.createSync("omp-tan-ext-auth-");
+		using tempDir = TempDir.createSync("@omp-tan-ext-auth-");
 		const cwd = path.resolve(tempDir.path());
 		const extPath = path.join(cwd, "provider-ext.ts");
 		await Bun.write(extPath, EXTENSION_SOURCE);
@@ -137,7 +137,7 @@ describe("/tan extension auth over a shared registry", () => {
 	}, 20_000);
 
 	it("preserves auth via the extension-paths fallback when no prepared factories are forwarded", async () => {
-		using tempDir = TempDir.createSync("omp-tan-ext-auth-fallback-");
+		using tempDir = TempDir.createSync("@omp-tan-ext-auth-fallback-");
 		const cwd = path.resolve(tempDir.path());
 		const extPath = path.join(cwd, "provider-ext.ts");
 		await Bun.write(extPath, EXTENSION_SOURCE);

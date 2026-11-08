@@ -53,7 +53,7 @@ describe("MCP tool strict declaration", () => {
 	it("survives the custom-tool → definition bridge into the registered session tool", () => {
 		const manager = new MCPManager(process.cwd());
 		vi.spyOn(manager, "getTools").mockReturnValue([new MCPTool(createCapturedConnection([]), STRICT_TOOL)]);
-		const [proxy] = createMCPProxyTools(manager);
+		const [proxy] = createMCPProxyTools(manager, "child");
 		if (!proxy) {
 			expect.unreachable("no proxy tool created");
 			return;
@@ -84,7 +84,7 @@ describe("Skill URI reader capability", () => {
 		const definition = customToolToDefinition(SKILL_READER);
 		const adapter = wrapRegisteredTool(
 			{ definition, extensionPath: "<sdk>" } as RegisteredTool,
-			{ createContext: () => ({}) } as unknown as ExtensionRunner,
+			{ createContext: () => ({}), getNativeDelegationGuidance: () => "" } as unknown as ExtensionRunner,
 		);
 		const tools = projectSystemPromptToolMetadata(new Map([[definition.name, adapter]]), { mode: "full" });
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-custom-reader-bridge-"));
@@ -137,7 +137,7 @@ describe("Task MCP proxy parity", () => {
 		const manager = new MCPManager(process.cwd());
 		vi.spyOn(manager, "getTools").mockReturnValue([new MCPTool(createCapturedConnection(calls), STRICT_TOOL)]);
 
-		const [proxy] = createMCPProxyTools(manager);
+		const [proxy] = createMCPProxyTools(manager, "child");
 		if (!proxy?.execute) {
 			expect.unreachable("proxy tool missing execute");
 			return;
@@ -159,7 +159,7 @@ describe("Task MCP proxy parity", () => {
 		const manager = new MCPManager(process.cwd());
 		vi.spyOn(manager, "getTools").mockReturnValue([new MCPTool(createCapturedConnection(calls), definition)]);
 
-		const [proxy] = createMCPProxyTools(manager);
+		const [proxy] = createMCPProxyTools(manager, "child");
 		if (!proxy?.execute) {
 			expect.unreachable("proxy tool missing execute");
 			return;
@@ -179,7 +179,7 @@ describe("Task MCP proxy parity", () => {
 		const freshTool = new MCPTool(createCapturedConnection(freshCalls), STRICT_TOOL);
 
 		const getTools = vi.spyOn(manager, "getTools").mockReturnValue([staleTool]);
-		const [proxy] = createMCPProxyTools(manager); // captured while stale tool is current
+		const [proxy] = createMCPProxyTools(manager, "child"); // captured while stale tool is current
 
 		// Reconnect swaps the instance in getTools() before the proxy executes.
 		getTools.mockReturnValue([freshTool]);

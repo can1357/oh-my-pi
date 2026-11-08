@@ -21,7 +21,7 @@ function emptyStream(): ReadableStream<Uint8Array> {
  * cache refresh is a no-op.
  */
 function pmCacheSubprocess(tmpRoot: string, cmd: string[]): Subprocess {
-	expect(cmd).toEqual(["bun", "pm", "cache"]);
+	expect(cmd).toEqual([process.execPath, "pm", "cache"]);
 	const body = new Response(path.join(tmpRoot, "no-such-bun-cache")).body;
 	if (!body) {
 		throw new Error("Failed to create response stream");
@@ -89,7 +89,7 @@ describe("PluginManager.install load validation", () => {
 
 	test("installs npm protocol specs with the resolved package name", async () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "--no-cache", "npm:pi-figma-remote-auth"]);
+			expect(cmd).toEqual([process.execPath, "install", "--no-cache", "npm:pi-figma-remote-auth"]);
 
 			const prepare = (async () => {
 				await Bun.write(
@@ -159,7 +159,7 @@ describe("PluginManager.install load validation", () => {
 
 		const result = await new PluginManager(tmpRoot).install("welcome-plugin@0.1.9");
 
-		expect(recordedCmd).toEqual(["bun", "install", "--no-cache", "welcome-plugin@0.1.9"]);
+		expect(recordedCmd).toEqual([process.execPath, "install", "--no-cache", "welcome-plugin@0.1.9"]);
 		expect(result.version).toBe("0.1.9");
 	});
 
@@ -200,7 +200,7 @@ describe("PluginManager.install load validation", () => {
 		}) as typeof Bun.spawn);
 
 		const result = await new PluginManager(tmpRoot).install(name, { force: true });
-		expect(recordedCmd).toEqual(["bun", "install", "--no-cache", "--force", name]);
+		expect(recordedCmd).toEqual([process.execPath, "install", "--no-cache", "--force", name]);
 		expect(recordedCwd).toBe(pluginsDir);
 
 		expect(result.version).toBe("1.0.3");
@@ -209,7 +209,7 @@ describe("PluginManager.install load validation", () => {
 
 	test("rejects and rolls back an install when the extension factory throws", async () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "--no-cache", "factory-failure-plugin"]);
+			expect(cmd).toEqual([process.execPath, "install", "--no-cache", "factory-failure-plugin"]);
 
 			const prepare = (async () => {
 				await Bun.write(
@@ -251,7 +251,7 @@ describe("PluginManager.install load validation", () => {
 
 	test("rejects an install whose extension entry cannot resolve its dependencies", async () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "--no-cache", "broken-plugin"]);
+			expect(cmd).toEqual([process.execPath, "install", "--no-cache", "broken-plugin"]);
 
 			const prepare = (async () => {
 				await Bun.write(
@@ -305,7 +305,7 @@ describe("PluginManager.install load validation", () => {
 		});
 
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "--no-cache", "broken-plugin"]);
+			expect(cmd).toEqual([process.execPath, "install", "--no-cache", "broken-plugin"]);
 
 			const prepare = (async () => {
 				await Bun.write(
@@ -371,7 +371,7 @@ describe("PluginManager.install load validation", () => {
 
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
 			if (cmd[1] === "install") {
-				expect(cmd).toEqual(["bun", "install", "github:org/plugin#v2"]);
+				expect(cmd).toEqual([process.execPath, "install", "github:org/plugin#v2"]);
 
 				const prepare = (async () => {
 					await Bun.write(
@@ -401,7 +401,7 @@ describe("PluginManager.install load validation", () => {
 			// The manager follows a git re-install with `bun update <name>` to refresh
 			// the lockfile pin (#3063). The mock treats it as a no-op exit-0 — the
 			// on-disk state already reflects the v2 install above.
-			expect(cmd).toEqual(["bun", "update", "git-plugin"]);
+			expect(cmd).toEqual([process.execPath, "update", "git-plugin"]);
 			return {
 				pid: 2,
 				stdout: emptyStream(),
@@ -427,7 +427,7 @@ describe("PluginManager.install load validation", () => {
 
 	test("rejects an install whose manifest declares a missing extension entry", async () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "--no-cache", "partial-plugin"]);
+			expect(cmd).toEqual([process.execPath, "install", "--no-cache", "partial-plugin"]);
 
 			const prepare = (async () => {
 				await Bun.write(
@@ -534,7 +534,7 @@ describe("PluginManager.install load validation", () => {
 				} as Subprocess;
 			}
 			if (cmd[1] === "pm") return pmCacheSubprocess(tmpRoot, cmd);
-			expect(cmd).toEqual(["bun", "update", "git-plugin"]);
+			expect(cmd).toEqual([process.execPath, "update", "git-plugin"]);
 			const prepare = (async () => {
 				// bun update re-resolves the ref and rewrites the lockfile pin
 				// AGAIN. Without bun.lock snapshotting this pin would survive
@@ -566,7 +566,7 @@ describe("PluginManager.install load validation", () => {
 		expect(await Bun.file(bunLockPath).exists()).toBe(false);
 
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "--no-cache", "broken-plugin"]);
+			expect(cmd).toEqual([process.execPath, "install", "--no-cache", "broken-plugin"]);
 			const prepare = (async () => {
 				await Bun.write(bunLockPath, '# bun.lock\n"broken-plugin": "1.0.0"\n');
 				await Bun.write(
@@ -648,7 +648,7 @@ describe("PluginManager.install load validation", () => {
 				} as Subprocess;
 			}
 			if (cmd[1] === "pm") return pmCacheSubprocess(tmpRoot, cmd);
-			expect(cmd).toEqual(["bun", "update", "git-plugin"]);
+			expect(cmd).toEqual([process.execPath, "update", "git-plugin"]);
 			const prepare = (async () => {
 				await Bun.write(bunLockPath, '# bun.lock\n"git-plugin": "github:org/plugin#sha-update"\n');
 			})();

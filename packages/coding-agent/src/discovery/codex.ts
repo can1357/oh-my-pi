@@ -329,6 +329,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 				path,
 				content: body,
 				...slashCommandFrontmatterDisplay(frontmatter),
+				...(frontmatter.side === true ? { side: true } : {}),
 				level,
 				_source: source,
 			};
@@ -507,15 +508,19 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 	const items: Settings[] = [];
 	if (userConfig && userConfigPath) {
 		items.push({
-			...userConfig,
+			path: userConfigPath,
+			data: userConfig,
+			level: "user",
 			_source: createSourceMeta(PROVIDER_ID, userConfigPath, "user"),
-		} as Settings);
+		});
 	}
 	if (projectConfig) {
 		items.push({
-			...projectConfig,
+			path: projectConfigPath,
+			data: projectConfig,
+			level: "project",
 			_source: createSourceMeta(PROVIDER_ID, projectConfigPath, "project"),
-		} as Settings);
+		});
 	}
 
 	return { items, warnings };

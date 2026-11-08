@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingConfig } from "@oh-my-pi/pi-ai";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveMaxContextWindow } from "@oh-my-pi/pi-catalog/compat/context-window";
@@ -23,7 +24,7 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
-import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgCompactionModelThresholds, cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 describe("ModelRegistry", () => {
 	let tempDir: string;
@@ -334,7 +335,7 @@ describe("ModelRegistry", () => {
 				Date.now(),
 				[cachedChat],
 				true,
-				fingerprintStaticModels(getBundledModels("deepinfra"), true),
+				fingerprintStaticModels(getBundledModels("deepinfra"), { authoritative: true }),
 				path.join(tempDir, "models.db"),
 			);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
@@ -688,6 +689,92 @@ describe("ModelRegistry", () => {
 	});
 
 	describe("provider compat overrides", () => {
+		test("discovered model WebSocket overrides survive refresh and cache restoration", async () => {
+			const config = {
+				api: "openai-responses",
+				baseUrl: "https://discovery.example.com/v1",
+				apiKey: "TEST_KEY",
+				authHeader: true,
+				discovery: { type: "openai-models-list" },
+				modelOverrides: {
+					"explicit-http": { preferWebsockets: false },
+					"explicit-ws": { preferWebsockets: true },
+				},
+			};
+			const fetch = mockOpenAiCompatibleModels("https://discovery.example.com/v1/models", [
+				"discovered",
+				"explicit-http",
+				"explicit-ws",
+			]);
+			writeRawModelsJson({ "discovery-provider": config });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+			await registry.refresh("offline");
+			await registry.refreshProvider("discovery-provider", "online");
+			const reopened = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+			for (const current of [registry, reopened]) {
+				const discovered = current.find("discovery-provider", "discovered");
+				expect(discovered).toMatchObject({ id: "discovered", api: "openai-responses" });
+				expect(discovered?.preferWebsockets).toBeUndefined();
+				expect(current.find("discovery-provider", "explicit-http")?.preferWebsockets).toBe(false);
+				expect(current.find("discovery-provider", "explicit-ws")?.preferWebsockets).toBe(true);
+			}
+		});
+
+		test("runtime models preserve explicit WebSocket preferences before and after materialization", () => {
+			for (const materialized of [false, true]) {
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				const base = registry.find("openai", "gpt-5-mini");
+				if (!base) throw new Error("Expected bundled Responses model");
+				if (materialized) registry.getAll();
+				registry.registerProvider("runtime-ws", {
+					api: "openai-responses",
+					baseUrl: "https://runtime.example.com/v1",
+					apiKey: "test-key",
+					models: [
+						{ ...base, id: "default", contextWindow: 32000, maxTokens: 1024, preferWebsockets: undefined },
+						{ ...base, id: "explicit-http", contextWindow: 32000, maxTokens: 1024, preferWebsockets: false },
+						{ ...base, id: "explicit-ws", contextWindow: 32000, maxTokens: 1024, preferWebsockets: true },
+					],
+				});
+				expect(registry.find("runtime-ws", "default")?.preferWebsockets).toBeUndefined();
+				expect(registry.find("runtime-ws", "explicit-http")?.preferWebsockets).toBe(false);
+				expect(registry.find("runtime-ws", "explicit-ws")?.preferWebsockets).toBe(true);
+				registry.unregisterProvider("runtime-ws");
+				expect(registry.find("runtime-ws", "default")).toBeUndefined();
+			}
+		});
+
+		test("models.yml preserves standard Responses WebSocket preferences and explicit HTTP overrides", async () => {
+			const modelsPath = path.join(tempDir, "models.yml");
+			await Bun.write(
+				modelsPath,
+				`providers:
+  responses-proxy:
+    api: openai-responses
+    baseUrl: https://proxy.example.com/v1
+    apiKey: test-key
+    models:
+      - id: websocket-model
+      - id: http-model
+        preferWebsockets: true
+      - id: default-model
+    modelOverrides:
+      websocket-model:
+        preferWebsockets: true
+      http-model:
+        preferWebsockets: false
+`,
+			);
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const websocketModel = registry.find("responses-proxy", "websocket-model");
+			const httpModel = registry.find("responses-proxy", "http-model");
+			const defaultModel = registry.find("responses-proxy", "default-model");
+			expect(websocketModel?.api).toBe("openai-responses");
+			expect(websocketModel?.preferWebsockets).toBe(true);
+			expect(httpModel?.preferWebsockets).toBe(false);
+			expect(defaultModel?.preferWebsockets).toBeUndefined();
+		});
+
 		test("models.yml can opt a Responses provider in while opting one model out of stored chaining", async () => {
 			const modelsPath = path.join(tempDir, "models.yml");
 			await Bun.write(
@@ -1135,6 +1222,25 @@ describe("ModelRegistry", () => {
 			expect(flash).toMatchObject({
 				api: "openai-completions",
 				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+			});
+		});
+
+		test("unscoped OpenRouter relay override keeps Decisions judges on the relay /api/alpha root", () => {
+			const relayRegistry = readonlyRegistry({
+				providers: {
+					openrouter: {
+						baseUrl: "http://127.0.0.1:7700/agents/openrouter/api/v1",
+						auth: "none",
+					},
+				},
+			});
+			expect(relayRegistry.find("openrouter", "~typesafe/jev-latest")).toMatchObject({
+				api: "openrouter-decisions",
+				baseUrl: "http://127.0.0.1:7700/agents/openrouter/api/alpha",
+			});
+			expect(relayRegistry.find("openrouter", "openai/gpt-5.5")).toMatchObject({
+				api: "openrouter",
+				baseUrl: "http://127.0.0.1:7700/agents/openrouter/api/v1",
 			});
 		});
 
@@ -1644,17 +1750,22 @@ describe("ModelRegistry", () => {
 					modelOverrides: {
 						"gpt-5.4": {
 							contextWindow: 512000,
+							preferWebsockets: true,
 						},
+						"gpt-5.5": { preferWebsockets: false },
 					},
 				},
 			});
-			const fetchMock = mockOpenAiCompatibleModels("https://my-proxy.example.com/v1/models", ["gpt-5.4"]);
+			const fetchMock = mockOpenAiCompatibleModels("https://my-proxy.example.com/v1/models", ["gpt-5.4", "gpt-5.5"]);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 			expect(registry.find("openai", "gpt-5.4")?.contextWindow).toBe(512000);
+			expect(registry.find("openai", "gpt-5.4")?.preferWebsockets).toBe(true);
 
 			await registry.refreshProvider("openai", "online");
 
 			expect(registry.find("openai", "gpt-5.4")?.contextWindow).toBe(512000);
+			expect(registry.find("openai", "gpt-5.4")?.preferWebsockets).toBe(true);
+			expect(registry.find("openai", "gpt-5.5")?.preferWebsockets).toBe(false);
 		});
 
 		test("newly discovered ids inherit provider fields, not another model's custom fields", async () => {
@@ -1775,6 +1886,7 @@ describe("ModelRegistry", () => {
 		let thinkingCustom: ModelRegistry;
 		let thinkingOverride: ModelRegistry;
 		let deepseekOverride: ModelRegistry;
+		let prefixBoundOverride: ModelRegistry;
 		beforeAll(() => {
 			thinkingCustom = readonlyRegistry({
 				providers: {
@@ -1809,6 +1921,21 @@ describe("ModelRegistry", () => {
 					},
 				},
 			});
+			prefixBoundOverride = readonlyRegistry({
+				providers: {
+					anthropic: {
+						modelOverrides: {
+							"claude-opus-5-5": {
+								thinking: {
+									mode: "anthropic-adaptive",
+									supportsDisplay: true,
+									efforts: [Effort.Low, Effort.High],
+								},
+							},
+						},
+					},
+				},
+			});
 		});
 
 		test("custom models preserve explicit thinking verbatim", () => {
@@ -1836,6 +1963,18 @@ describe("ModelRegistry", () => {
 				mode: "effort",
 				efforts: [Effort.Max, Effort.High, Effort.Low],
 				defaultLevel: Effort.High,
+			});
+		});
+
+		test("model overrides keep catalog prefix binding the override does not set", () => {
+			const model = getModelsForProvider(prefixBoundOverride, "anthropic").find(m => m.id === "claude-opus-5-5");
+			// Without prefixBinding, pruning/compaction stop preserving the bound prefix
+			// and prefix-mismatch 400s are not retried (#17276).
+			expect(model?.thinking).toEqual({
+				mode: "anthropic-adaptive",
+				supportsDisplay: true,
+				efforts: [Effort.Low, Effort.High],
+				prefixBinding: true,
 			});
 		});
 	});
@@ -2033,8 +2172,8 @@ describe("ModelRegistry", () => {
 			expect(gpt56?.cost.output).toBeGreaterThan(0);
 			expect(gpt56?.cost.longContext).toMatchObject({
 				inputThreshold: 272_000,
-				input: 10,
-				output: 45,
+				input: 8,
+				output: 30,
 			});
 		});
 
@@ -2463,7 +2602,11 @@ describe("ModelRegistry", () => {
 			await registry.refresh("online");
 
 			const disabledProbeUrls = requestedUrls.filter(
-				url => url.includes("127.0.0.1:11434") || url.includes("127.0.0.1:8080") || url.includes("127.0.0.1:1234"),
+				url =>
+					url.includes("127.0.0.1:11434") ||
+					url.includes("127.0.0.1:8080") ||
+					url.includes("127.0.0.1:9931") ||
+					url.includes("127.0.0.1:1234"),
 			);
 			expect(disabledProbeUrls).toEqual([]);
 		});
@@ -2606,6 +2749,56 @@ describe("ModelRegistry", () => {
 			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("proxy-window", "gpt-6-astra")?.contextWindow).toBe(512_000);
+		});
+
+		test("a custom maximum replacing a bundled row reports and runs the window an opt-in actually gets", async () => {
+			writeRawModelsJson({
+				openai: {
+					baseUrl: "https://example.com/v1",
+					auth: "none",
+					api: "openai-responses",
+					models: [{ id: "gpt-5.6-terra", contextWindow: 128_000, maxContextWindow: 512_000, maxTokens: 64_000 }],
+				},
+			});
+			const testSettings = Settings.isolated({ extendedContext: false });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			// The overlay's own pair, not the bundled 272K/1.05M tiers it replaced.
+			expect(registry.contextWindowTiers({ provider: "openai", id: "gpt-5.6-terra" })).toEqual({
+				standard: 128_000,
+				extended: 512_000,
+			});
+
+			cfgCompactionModelThresholds.set(testSettings, { "openai/gpt-5.6-terra": 200_000 });
+			await registry.reapplyModelPolicies();
+			const row = registry.find("openai", "gpt-5.6-terra");
+			expect(row?.contextWindow).toBe(512_000);
+			// A scope with model entries off (an overridden subagent) refits the row to the standard tier.
+			const subagentScope = Settings.isolated({
+				extendedContext: false,
+				"compaction.modelThresholdsEnabled": false,
+			});
+			if (!row) throw new Error("Expected the custom gpt-5.6-terra row");
+			expect(registry.fitContextWindow(row, subagentScope).contextWindow).toBe(128_000);
+		});
+
+		test("an overlay that authors no window keeps the bundled row's tiers", async () => {
+			writeRawModelsJson({
+				openai: {
+					baseUrl: "https://example.com/v1",
+					auth: "none",
+					api: "openai-responses",
+					models: [{ id: "gpt-5.6-terra" }],
+				},
+			});
+			const testSettings = Settings.isolated();
+			cfgCompactionModelThresholds.set(testSettings, { "openai/gpt-5.6-terra": 400_000 });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			const row = registry.find("openai", "gpt-5.6-terra");
+			if (!row) throw new Error("Expected the overlaid gpt-5.6-terra row");
+			expect(row.baseUrl).toBe("https://example.com/v1");
+			expect(row.contextWindow).toBe(1_050_000);
+			const subagentScope = Settings.isolated({ "compaction.modelThresholdsEnabled": false });
+			expect(registry.fitContextWindow(row, subagentScope).contextWindow).toBe(272_000);
 		});
 
 		test("modelOverrides supply standard and extended windows to a non-Codex provider", async () => {
@@ -2760,8 +2953,9 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai-codex", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
 			// Standard-priced 1M models (no long-context tier) keep their window.
 			expect(registry.find("anthropic", "claude-opus-4-8")?.contextWindow).toBe(1_000_000);
-			// SuperGrok carries public xAI tiers for stats estimates, not billing.
-			expect(registry.find("xai-oauth", "grok-4.20-0309-reasoning")?.contextWindow).toBe(2_000_000);
+			// SuperGrok carries public xAI tiers (200K threshold) for stats estimates,
+			// not billing, so it keeps its full 1M window.
+			expect(registry.find("xai-oauth", "grok-4.20-0309-reasoning")?.contextWindow).toBe(1_000_000);
 		});
 
 		test("reapplyModelPolicies re-clamps and restores premium windows on toggle", async () => {
@@ -2778,6 +2972,27 @@ describe("ModelRegistry", () => {
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(1_050_000);
 			expect(registry.find("openai-codex", "gpt-5.6-terra")?.contextWindow).toBe(1_000_000);
+		});
+
+		test("a compaction point past the standard window opts only that model into its extended window", async () => {
+			await Settings.init({ inMemory: true, overrides: { extendedContext: false } });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(272_000);
+			expect(registry.contextWindowTiers({ provider: "openai", id: "gpt-5.6-terra" })).toEqual({
+				standard: 272_000,
+				extended: 1_050_000,
+			});
+
+			cfgCompactionModelThresholds.set(settings, { "openai/gpt-5.6-terra": 400_000 });
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(1_050_000);
+			expect(registry.find("openai", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
+			expect(registry.find("openai-codex", "gpt-5.6-terra")?.contextWindow).toBe(272_000);
+
+			// A point inside the standard window, or a percentage, leaves the cap in place.
+			cfgCompactionModelThresholds.set(settings, { "openai/gpt-5.6-terra": "90%" });
+			await registry.reapplyModelPolicies();
+			expect(registry.find("openai", "gpt-5.6-terra")?.contextWindow).toBe(272_000);
 		});
 	});
 	describe("bundled Anthropic catalog availability", () => {
@@ -3135,9 +3350,9 @@ describe("ModelRegistry", () => {
 				{ providers: {} },
 				{
 					seedCache: dbPath => {
-						for (const [providerId, dynamicModelsAuthoritative] of [
-							["zai", false],
-							["anthropic", true],
+						for (const [providerId, policy] of [
+							["zai", { additive: true }],
+							["anthropic", { authoritative: true, additive: true }],
 						] as const) {
 							const bundledModels = getBundledModels(providerId);
 							writeModelCache(
@@ -3145,7 +3360,7 @@ describe("ModelRegistry", () => {
 								Date.now(),
 								bundledModels,
 								false,
-								fingerprintStaticModels(bundledModels, dynamicModelsAuthoritative),
+								fingerprintStaticModels(bundledModels, policy),
 								dbPath,
 							);
 						}
@@ -3232,7 +3447,7 @@ describe("ModelRegistry", () => {
 								}),
 							],
 							true,
-							fingerprintStaticModels(getBundledModels("ollama-cloud")),
+							fingerprintStaticModels(getBundledModels("ollama-cloud"), { additive: true }),
 							dbPath,
 						);
 					},
@@ -3315,7 +3530,7 @@ describe("ModelRegistry", () => {
 				{
 					seedCache: dbPath =>
 						writeModelCache(
-							"cached-compact-proxy:openai-models-list-context-v3",
+							"cached-compact-proxy:openai-models-list-context-v6",
 							Date.now(),
 							[
 								buildModel({
@@ -3352,7 +3567,7 @@ describe("ModelRegistry", () => {
 				buildModel({
 					id: "minimax/minimax-m3",
 					name,
-					api: "openai-completions",
+					api: "openai-responses",
 					provider: "litellm-proxy",
 					baseUrl: "http://litellm-proxy.example:4000/v1",
 					reasoning: true,
@@ -3362,11 +3577,11 @@ describe("ModelRegistry", () => {
 					maxTokens: 16_384,
 				});
 			litellmStaleNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
-				// Rows cached before mode filtering must be orphaned instead of
-				// serving stale non-conversational entries.
+				// Rows from rich-v6 may contain only the first /v2/model/info page;
+				// decisions-mode routing was already corrected in that namespace.
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v4",
+						"litellm-proxy:litellm-rich-v6",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3 (3x usage)")],
 						true,
@@ -3377,7 +3592,7 @@ describe("ModelRegistry", () => {
 			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v5",
+						"litellm-proxy:litellm-rich-v7",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3")],
 						true,
@@ -3398,11 +3613,11 @@ describe("ModelRegistry", () => {
 					},
 				},
 				{
-					// Row under the retired pre-modality namespace; the context-v3
-					// bump must orphan it instead of serving the stale text-only row.
+					// Row under the retired pre-`top_provider` namespace; the context-v4
+					// bump must orphan it instead of serving the stale output limit.
 					seedCache: dbPath =>
 						writeModelCache(
-							"stale-openai-proxy:openai-models-list-context-v2",
+							"stale-openai-proxy:openai-models-list-context-v3",
 							Date.now(),
 							[
 								buildModel({
@@ -3415,7 +3630,7 @@ describe("ModelRegistry", () => {
 									input: ["text"],
 									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 									contextWindow: 128_000,
-									maxTokens: 16_384,
+									maxTokens: 65_536,
 								}),
 							],
 							true,
@@ -3457,20 +3672,31 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("ignores litellm discovery rows cached under the retired rich-v4 namespace", () => {
+		test("ignores litellm discovery rows cached under the retired rich-v6 namespace", () => {
 			expect(litellmStaleNamespaceCache.find("litellm-proxy", "minimax/minimax-m3")).toBeUndefined();
 			expect(getModelsForProvider(litellmStaleNamespaceCache, "litellm-proxy")).toHaveLength(0);
 		});
 
-		test("loads litellm discovery rows cached under the rich-v5 namespace", () => {
+		test("restores LiteLLM backend session policy from rich-v7 alias rows without changing their API", () => {
 			const model = litellmCurrentNamespaceCache.find("litellm-proxy", "minimax/minimax-m3");
 			expect(model?.name).toBe("MiniMax-M3");
 			expect(model?.provider).toBe("litellm-proxy");
+			if (!model) throw new Error("Missing cached LiteLLM model");
+			expect(model.api).toBe("openai-responses");
+			expect(model.providerType).toBe("litellm");
+			if (model.api !== "openai-responses") throw new Error("Expected cached Responses API");
+			expect(
+				resolveOpenAIRequestSetup(model as Model<"openai-responses">, {
+					apiKey: "test",
+					messages: [],
+					sessionId: "cached-alias-session",
+				}).requestHeaders["x-litellm-session-id"],
+			).toBe("cached-alias-session");
 		});
 
-		test("ignores openai-models-list rows cached under the retired context-v2 namespace", () => {
-			// PR #7584 added server-advertised input-modality parsing; warm v2 rows
-			// pinned vision-capable ids at text-only and must not load.
+		test("ignores openai-models-list rows cached under the retired context-v3 namespace", () => {
+			// PR #15652 reads `top_provider.max_completion_tokens`; warm v3 rows
+			// kept the bundled reference's larger output limit and must not load.
 			expect(openaiModelsListStaleNamespaceCache.find("stale-openai-proxy", "stale-vlm")).toBeUndefined();
 			expect(getModelsForProvider(openaiModelsListStaleNamespaceCache, "stale-openai-proxy")).toHaveLength(0);
 		});
@@ -3489,7 +3715,7 @@ describe("ModelRegistry", () => {
 				Date.now(),
 				[served],
 				true,
-				fingerprintStaticModels(getBundledModels("google-antigravity"), true),
+				fingerprintStaticModels(getBundledModels("google-antigravity"), { authoritative: true }),
 				path.join(tempDir, "models.db"),
 			);
 			const restarted = new ModelRegistry(authStorage, modelsJsonPath);

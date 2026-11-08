@@ -10,9 +10,15 @@
 import { Loader } from "../components/loader";
 import { Text } from "../components/text";
 import { Container, type TUI } from "../tui";
-import { getSymbolTheme, theme } from "../theme/theme";
+import { theme } from "../theme/theme";
 import type { OutputArtifactError } from "../tools/streaming-output";
-import { formatArtifactErrorNotice, formatTruncationMetaNotice, type TruncationMeta } from "../tools/output-meta";
+import {
+	formatArtifactErrorNotice,
+	formatMinimizedMeta,
+	formatTruncationMetaNotice,
+	type MinimizedMeta,
+	type TruncationMeta,
+} from "../tools/output-meta";
 import { DynamicBorder } from "../chrome/dynamic-border";
 import { Ellipsis, truncateToWidth, visibleWidth } from "../utils";
 import { interruptKey } from "../chrome/keybinding-hints";
@@ -20,6 +26,7 @@ import { DEFAULT_TERMINAL_PREVIEW_LINES, expandKeyHint } from "../render/render-
 import type { TspCardStatus, TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { card, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
+import { runBox, runFoot, runInput, runOutput, type RunState } from "../tools/native-view";
 
 /** Output rows shown while an execution is collapsed. */
 export const PREVIEW_LINES = 20;
@@ -45,14 +52,15 @@ export type ExecutionColorKey = "dim" | "bashMode" | "pythonMode";
 /**
  * Build the spacer + top border + content container + bottom border scaffold
  * that bash and eval execution components share. The caller appends the
- * header (command vs `>>>` prompt) and the returned loader to
- * `contentContainer` so per-mode order is preserved.
+ * header (command vs `>>>` prompt) to `contentContainer` and keeps the run's
+ * state in `bottomBorder` ({@link executionStatusLabel}); the returned loader
+ * animates that label rather than taking a row of its own.
  */
 export function buildExecutionFrame(
 	parent: Container,
 	ui: TUI,
 	colorKey: ExecutionColorKey,
-): { contentContainer: Container; loader: Loader } {
+): { contentContainer: Container; loader: Loader; bottomBorder: DynamicBorder } {
 	const borderColor = (str: string) => theme.fg(colorKey, str);
 
 	parent.addChild(new DynamicBorder(borderColor));
@@ -65,23 +73,35 @@ export function buildExecutionFrame(
 		spinner => theme.fg(colorKey, spinner),
 		text => theme.fg("muted", text),
 		`Running… (${interruptKey()} to cancel)`,
-		getSymbolTheme().spinnerFrames,
+		// The status spinner, as on a running tool card's header.
+		theme.spinnerFrames,
 	);
 
-	parent.addChild(new DynamicBorder(borderColor));
-	return { contentContainer, loader };
+	const bottomBorder = new DynamicBorder(borderColor);
+	bottomBorder.setLabel(() => loader.inlineText());
+	parent.addChild(bottomBorder);
+	return { contentContainer, loader, bottomBorder };
+}
+
+/** The bottom-border marker of a settled run: `exit N` for a failure, `cancelled` for a cancel. */
+export function executionStatusLabel(
+	status: Exclude<ExecutionStatus, "running">,
+	exitCode: number | undefined,
+): string | undefined {
+	if (status === "cancelled") return theme.fg("warning", "cancelled");
+	if (status === "error") return theme.fg("error", `exit ${exitCode}`);
+	return undefined;
 }
 
 /**
- * Build the post-run status block (hidden-line hint, exit/cancel marker,
- * truncation notice). Returns undefined when there is nothing to display so
- * callers can skip appending a stray Text child.
+ * Build the post-run status block (hidden-line hint, truncation notice).
+ * Returns undefined when there is nothing to display so callers can skip
+ * appending a stray Text child.
  */
 export function buildStatusFooter(opts: {
-	status: ExecutionStatus;
-	exitCode: number | undefined;
 	truncation: TruncationMeta | undefined;
 	artifactError?: OutputArtifactError;
+	minimized?: MinimizedMeta;
 	hiddenLineCount: number;
 	/** Suppress the "… N more lines" hint (used when sixel passthrough renders the full output). */
 	suppressHiddenCount?: boolean;
@@ -91,16 +111,14 @@ export function buildStatusFooter(opts: {
 	if (opts.hiddenLineCount > 0 && !opts.suppressHiddenCount) {
 		parts.push(theme.fg("dim", `… ${opts.hiddenLineCount} more lines (${expandKeyHint()} to expand)`));
 	}
-	if (opts.status === "cancelled") {
-		parts.push(theme.fg("warning", "(cancelled)"));
-	} else if (opts.status === "error") {
-		parts.push(theme.fg("error", `(exit ${opts.exitCode})`));
-	}
 	if (opts.truncation) {
 		parts.push(theme.fg("warning", formatTruncationMetaNotice(opts.truncation)));
 	}
 	if (opts.artifactError) {
 		parts.push(theme.fg("warning", formatArtifactErrorNotice(opts.artifactError)));
+	}
+	if (opts.minimized) {
+		parts.push(theme.fg("dim", `Minimized: ${formatMinimizedMeta(opts.minimized)}`));
 	}
 
 	if (parts.length === 0) return undefined;
@@ -132,6 +150,7 @@ export interface ExecutionCardInput {
 	readonly exitCode: number | undefined;
 	readonly truncation: TruncationMeta | undefined;
 	readonly artifactError?: OutputArtifactError;
+	readonly minimized?: MinimizedMeta;
 }
 
 /**
@@ -169,6 +188,7 @@ export function describeExecutionCard(input: ExecutionCardInput): NativeNode {
 	if (input.status === "cancelled") note("(cancelled)", "warning");
 	else if (input.status === "error") note(`(exit ${input.exitCode})`, "error");
 	if (input.truncation) note(formatTruncationMetaNotice(input.truncation), "warning");
+	if (input.minimized) note(`Minimized: ${formatMinimizedMeta(input.minimized)}`, "muted");
 	if (input.artifactError) note(formatArtifactErrorNotice(input.artifactError), "warning");
 	if (notes.length > 0) children.push(text(notes, { wrap: "word", key: "notes" }));
 	return card(
@@ -190,7 +210,7 @@ export interface ExecutionToolInput {
 	/** Tool name for the head icon (`bash`, `eval`). */
 	readonly name: string;
 	readonly title: string;
-	/** The command / cell source, shown once in the head. */
+	/** The command / cell source: the run box's input and the head's Copy command. */
 	readonly command: string;
 	readonly lang: string;
 	/** Excluded from context (`!!`/`$$`). */
@@ -206,41 +226,59 @@ export interface ExecutionToolInput {
 	readonly exitCode: number | undefined;
 	readonly truncation: TruncationMeta | undefined;
 	readonly artifactError?: OutputArtifactError;
+	readonly minimized?: MinimizedMeta;
 }
 
+const EXECUTION_RUN_STATE: Record<ExecutionStatus, RunState> = {
+	running: "running",
+	complete: "done",
+	cancelled: "cancelled",
+	error: "failed",
+};
+
 /**
- * A user `!`/`$` run as the agent's `tool` frame (§6.6): the command in the
- * head with a `you` badge (plus `not sent` when excluded from context), the
- * timer, exit chip and cancelled note; the body is the output as an `ansi`
- * mini terminal following its tail, then one quiet truncation line.
+ * A user `!`/`$` run as the agent's `tool` frame (§6.6): a head with a `you`
+ * badge (plus `not sent` when excluded from context) and the command for Copy
+ * command; the body is one run box — the source, the output as an `ansi` mini
+ * terminal following its tail, and the foot (state, time, truncation) — with
+ * any images below it. Timer, exit chip and cancelled note stay head data.
  */
 export function describeExecutionTool(input: ExecutionToolInput): NativeNode {
 	const running = input.status === "running";
-	const body: NativeChild[] = [];
-	if (input.output) body.push(node("ansi", { text: input.output, follow: running }, undefined, "output"));
-	if (input.images) body.push(...input.images);
-	const notes: string[] = [];
-	if (input.truncation) notes.push(formatTruncationMetaNotice(input.truncation));
-	if (input.artifactError) notes.push(formatArtifactErrorNotice(input.artifactError));
-	if (notes.length > 0) {
-		body.push({
-			...text([span(notes.join(" · "), "muted")], { wrap: "word", role: "omp.tool.notice" }),
-			key: "foot",
-		});
-	}
+	const shell = input.name === "bash";
 	const ms = Math.max(0, Math.round((input.endedAt ?? performance.now()) - input.startedAt));
+	const state = EXECUTION_RUN_STATE[input.status];
+	const box = runBox(
+		[
+			runInput(input.command, {
+				role: shell ? "omp.tool.bash.command" : "omp.tool.eval.input",
+				lang: input.lang,
+				wrap: shell,
+			}),
+			input.output.length > 0 &&
+				runOutput(input.output, {
+					role: shell ? "omp.tool.bash.output" : "omp.tool.eval.output",
+					previewLines: DEFAULT_TERMINAL_PREVIEW_LINES,
+				}),
+			runFoot({
+				state,
+				exitCode: input.exitCode,
+				elapsedMs: ms,
+				facts: input.minimized ? [`Minimized ${formatMinimizedMeta(input.minimized)}`] : undefined,
+				meta: { truncation: input.truncation, artifactError: input.artifactError },
+			}),
+		],
+		{ key: "run", tone: state === "failed" ? "error" : undefined },
+	);
 	const badges: { text: string; tone?: TspTone; title?: string }[] = [{ text: "you", tone: "user" }];
 	if (input.excluded) badges.push({ text: "not sent", title: "Not sent to the model", tone: "muted" });
-	const hasBody = body.length > 0;
 	return node(
 		"tool",
 		{
 			role: input.role,
 			name: input.name,
 			title: input.title,
-			target: input.command,
-			targetKind: "command",
-			lang: input.lang,
+			command: input.command,
 			badges,
 			status: EXECUTION_CARD_STATUS[input.status],
 			age: running ? ms : undefined,
@@ -248,11 +286,11 @@ export function describeExecutionTool(input: ExecutionToolInput): NativeNode {
 			exit: input.status === "error" ? input.exitCode : undefined,
 			note: input.status === "cancelled" ? "cancelled" : undefined,
 			frame: "card",
-			collapsible: hasBody,
-			collapsed: hasBody ? !input.expanded : undefined,
-			preview: hasBody ? { tail: DEFAULT_TERMINAL_PREVIEW_LINES } : undefined,
+			collapsible: true,
+			collapsed: !input.expanded,
+			preview: "children",
 		},
-		body,
+		[box, ...(input.images ?? [])],
 	);
 }
 

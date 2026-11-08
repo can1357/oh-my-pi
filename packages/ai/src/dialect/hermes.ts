@@ -1,7 +1,7 @@
-import { parseJsonWithRepair, parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { parseJsonWithRepair } from "@oh-my-pi/pi-utils";
 import type { Message, ToolCall } from "../types";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
-import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
+import { asRecord, mintToolCallId, parseCompleteToolName, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./hermes.md" with { type: "text" };
 import { renderChatMlTranscript, renderDelimitedThinking, renderToolResponseResults, stringifyJson } from "./rendering";
 import { TerminatorWait } from "./terminator-wait";
@@ -137,15 +137,11 @@ export class HermesInbandScanner implements InbandScanner {
 	}
 
 	#tryStart(body: string, events: InbandScanEvent[]): void {
-		try {
-			const partial = parseStreamingJson<{ name?: unknown }>(body);
-			if (typeof partial.name !== "string" || partial.name.length === 0) return;
-			this.#name = partial.name;
-			this.#started = true;
-			events.push({ type: "toolStart", id: this.#id, name: this.#name });
-		} catch {
-			// Partial JSON is allowed until the closing tag arrives.
-		}
+		const name = parseCompleteToolName(body);
+		if (!name) return;
+		this.#name = name;
+		this.#started = true;
+		events.push({ type: "toolStart", id: this.#id, name: this.#name });
 	}
 
 	#parseCall(body: string): { name: string; arguments: Record<string, unknown> } | undefined {

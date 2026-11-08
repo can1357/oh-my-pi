@@ -80,6 +80,61 @@ describe("TypeBox adapter", () => {
 		expect(valid(minWithMultiple, 0)).toBe(false);
 	});
 
+	test("exponent-form bounds validate and survive JSON Schema emission", () => {
+		const large = Type.Integer({ minimum: 1e21, exclusiveMaximum: 1e22 });
+		expect(valid(large, 1e21)).toBe(true);
+		expect(valid(large, 1e21 - 1e6)).toBe(false);
+		expect(valid(large, 1e22)).toBe(false);
+		expect(large.toJsonSchema()).toEqual({ type: "integer", minimum: 1e21, exclusiveMaximum: 1e22 });
+
+		const small = Type.Number({ exclusiveMinimum: -1e-7, maximum: 1e-7 });
+		expect(valid(small, 0)).toBe(true);
+		expect(valid(small, 0.5e-7)).toBe(true);
+		expect(valid(small, 1e-7)).toBe(true);
+		expect(valid(small, -1e-7)).toBe(false);
+		expect(valid(small, 2e-7)).toBe(false);
+		expect(Type.Object({ small }).toJsonSchema()).toEqual({
+			type: "object",
+			properties: { small: { type: "number", exclusiveMinimum: -1e-7, maximum: 1e-7 } },
+			required: ["small"],
+		});
+	});
+
+	test("mixed decimal and exponent bounds preserve multipleOf and integer constraints", () => {
+		const mixed = Type.Number({ minimum: -1e-7, maximum: 2, multipleOf: 0.5 });
+		expect(valid(mixed, 0.5)).toBe(true);
+		expect(valid(mixed, 0.25)).toBe(false);
+		expect(valid(mixed, 2)).toBe(true);
+		expect(valid(mixed, 2.5)).toBe(false);
+		expect(valid(mixed, -0.5)).toBe(false);
+		const json = { type: "number", minimum: -1e-7, maximum: 2, multipleOf: 0.5 };
+		expect(mixed.toJsonSchema()).toEqual(json);
+
+		const integer = Type.Integer({ minimum: -1e-7, maximum: 2 });
+		expect(valid(integer, 0)).toBe(true);
+		expect(valid(integer, 0.5)).toBe(false);
+		expect(valid(integer, 2)).toBe(true);
+		// `multipleOf` rides the top-level emitter override like upstream's
+		// string `pattern`/`format`; nested emission carries the IR bounds only.
+		expect(Type.Object({ mixed, integer }).toJsonSchema()).toEqual({
+			type: "object",
+			properties: {
+				mixed: { type: "number", minimum: -1e-7, maximum: 2 },
+				integer: { type: "integer", minimum: -1e-7, maximum: 2 },
+			},
+			required: ["mixed", "integer"],
+		});
+		expect(() => Type.Number({ minimum: 1e21, maximum: 1 })).toThrow();
+		expect(() => Type.Number({ minimum: 1e-7, exclusiveMaximum: 1e-7 })).toThrow();
+	});
+
+	test("exponent-form bounds keep structured union errors", () => {
+		const union = Type.Union([Type.Number({ minimum: 1e21 }), Type.String()]);
+		const failures = union(true);
+		expect(failures instanceof type.errors).toBe(true);
+		expect(`${failures}`).toContain("at least 1e+21");
+	});
+
 	test("arrays, tuples, objects, records and intersections validate", () => {
 		const array = Type.Array(Type.Number(), { minItems: 1, maxItems: 3, uniqueItems: true });
 		expect(valid(array, [1, 2])).toBe(true);

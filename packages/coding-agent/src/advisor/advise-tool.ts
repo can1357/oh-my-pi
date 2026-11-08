@@ -67,6 +67,11 @@ export function isInterruptingSeverity(severity: AdvisorSeverity | undefined): b
 	return severity === "concern" || severity === "blocker";
 }
 
+/** Whether `severity` is at least `minimum` (an omitted severity is a plain `nit`). */
+export function meetsAdvisorSeverity(severity: AdvisorSeverity | undefined, minimum: AdvisorSeverity): boolean {
+	return advisorSeverityRank(severity) >= advisorSeverityRank(minimum);
+}
+
 /** How an advisor note is routed to the primary. */
 export type AdvisorDeliveryChannel = "aside" | "steer" | "preserve";
 /** Half-open turn-count fence for the post-interrupt cooldown. */
@@ -89,16 +94,14 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  * - An interrupting `concern`/`blocker` is normally steered into the agent: into
  *   the live turn while one is streaming, or (when idle) a triggered turn so the
  *   advice is acted on immediately.
- * - If the primary tail is already a terminal text answer and there is no queued
- *   work, late non-blocker advice (a `nit` or `concern`) is preserved as a visible
- *   card instead of waking the primary to restate completion. A `blocker` is the
- *   exception: it means the agent handed off broken or unexercised work, so it
- *   still steers a triggered turn to force the primary to acknowledge and continue
- *   before the turn is considered done (#5628) — deferring it to the next user
- *   turn is the bug.
- *   `allowTerminalConcernSteering` opts out of ONLY this preservation branch
- *   (a final-review continuation policy); stop/abort suppression, `preserveOnly`,
- *   and the immune-turn cooldown below still run first and are never bypassed.
+ * - If the primary is idle on a terminal text answer with no queued work, a note
+ *   below `continueSeverity` (`advisor.continueSeverity`) is preserved as a
+ *   visible card instead of waking the primary to restate completion (#4840).
+ *   A note at or above it — any severity, a `nit` included — triggers a
+ *   continuation so the primary acknowledges it before the run is considered
+ *   done (#5628), subject to the stop/abort and cooldown gates below; a gated
+ *   note is preserved rather than parked as an aside the idle primary would
+ *   never see.
  * - After a deliberate user interrupt (`autoResumeSuppressed`) the advisor must
  *   not auto-resume the stopped run. While the agent is idle — or still tearing
  *   the interrupted turn down (`aborting`) — the note is preserved as a visible
@@ -107,36 +110,29 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  *   auto-resume anything, so it is delivered live. Parking it during an active
  *   run instead strands it (it never reaches the running agent) and the withheld
  *   notes dump as one burst at the next user prompt — the bug this guards.
- * - During the post-interrupt immune-turn window, further `concern` notes are
- *   downgraded to asides; preservation still wins. A `blocker` is exempt: it
- *   means the agent handed off broken or unexercised work, so it still steers a
- *   triggered turn even right after a prior interrupt (#5628).
+ * - During the post-interrupt immune-turn window, further non-blocker notes are
+ *   downgraded to asides (preserved when idle on a terminal answer). A `blocker`
+ *   is exempt: it means the agent handed off broken or unexercised work, so it
+ *   still steers a triggered turn even right after a prior interrupt (#5628).
  */
 export function resolveAdvisorDeliveryChannel(opts: {
 	severity: AdvisorSeverity | undefined;
+	/** Lowest severity that may wake a primary idle on a terminal answer. */
+	continueSeverity: AdvisorSeverity;
 	autoResumeSuppressed: boolean;
 	streaming: boolean;
 	aborting: boolean;
 	terminalAnswerNoQueuedWork?: boolean;
-	/** Opt out of terminal-answer preservation for a late `concern` (default
-	 *  false). Bypasses ONLY that branch — never stop/abort suppression,
-	 *  `preserveOnly`, or the immune-turn cooldown. */
-	allowTerminalConcernSteering?: boolean;
 	interruptImmuneTurnActive?: boolean;
 	preserveOnly?: boolean;
 }): AdvisorDeliveryChannel {
 	if (opts.preserveOnly && !opts.streaming) return "preserve";
-	if (
-		opts.terminalAnswerNoQueuedWork &&
-		opts.severity !== "blocker" &&
-		!opts.allowTerminalConcernSteering &&
-		!opts.streaming &&
-		!opts.aborting
-	)
-		return "preserve";
-	if (!isInterruptingSeverity(opts.severity)) return "aside";
+	const terminalIdle = opts.terminalAnswerNoQueuedWork === true && !opts.streaming && !opts.aborting;
+	if (terminalIdle) {
+		if (!meetsAdvisorSeverity(opts.severity, opts.continueSeverity)) return "preserve";
+	} else if (!isInterruptingSeverity(opts.severity)) return "aside";
 	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
-	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
+	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return terminalIdle ? "preserve" : "aside";
 	return "steer";
 }
 

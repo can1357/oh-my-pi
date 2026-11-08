@@ -5,12 +5,18 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
+import {
+	GC_AUTO_COMPRESS_INTERVAL_MS,
+	GC_AUTO_COMPRESS_LOG,
+	scheduleGcAutoCompress,
+} from "@oh-my-pi/pi-coding-agent/cli/gc-auto-compress";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
+import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileSessionStorage, sessionStagingPath } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
 	getAgentDir,
 	getBlobsDir,
@@ -774,6 +780,61 @@ describe("runGcCommand history checkpoint", () => {
 			writer.close();
 		}
 	}, 10_000);
+});
+
+describe("runGcCommand session staging sweep", () => {
+	test("removes rewrite temps abandoned by killed writers, keeping in-flight and unrelated ones", async () => {
+		const live = await writeSession(root, "project", "live", "pending");
+		const abandoned = sessionStagingPath(live);
+		const inFlight = sessionStagingPath(live);
+		// Subagent transcripts nest inside the parent's artifacts directory.
+		const nestedAbandoned = sessionStagingPath(path.join(live.slice(0, -".jsonl".length), "0-sub.jsonl"));
+		// An extensionless `--session` transcript outside the sessions tree, known only to the registry.
+		const externalDir = path.join(root, "external-sessions");
+		const externalFile = path.join(externalDir, "work");
+		await Bun.write(externalFile, "{}\n");
+		await Bun.write(path.join(getCustomSessionFilesDir(root), "session-1"), externalFile);
+		const externalAbandoned = sessionStagingPath(externalFile);
+		const unrelated = path.join(externalDir, ".notes.0123456789abcdef.tmp");
+		for (const file of [abandoned, nestedAbandoned, externalAbandoned, unrelated]) {
+			await Bun.write(file, "partial");
+			await agePath(file);
+		}
+		await Bun.write(inFlight, "partial");
+		const flags = { agentDir: root, archive: true };
+
+		const dryRun = await runGcCommand({ flags });
+		expect(dryRun.archive).toMatchObject({ wouldDeleteTemps: 3, deletedTemps: 0, tempBytes: 21 });
+		expect(await Bun.file(abandoned).exists()).toBe(true);
+
+		const applied = await runGcCommand({ flags: { ...flags, apply: true } });
+		expect(applied.archive).toMatchObject({ wouldDeleteTemps: 3, deletedTemps: 3, errors: [] });
+		for (const removed of [abandoned, nestedAbandoned, externalAbandoned]) {
+			expect(await Bun.file(removed).exists()).toBe(false);
+		}
+		for (const kept of [live, inFlight, externalFile, unrelated]) {
+			expect(await Bun.file(kept).exists()).toBe(true);
+		}
+	});
+	test("sweeps the first-save temp of a missing registered session before its stale marker is pruned", async () => {
+		const target = path.join(root, "external-sessions", "first-save");
+		const marker = path.join(getCustomSessionFilesDir(root), "first-save");
+		await Bun.write(marker, target);
+		await agePath(marker, 2);
+		const abandoned = sessionStagingPath(target);
+		await Bun.write(abandoned, "partial");
+		await agePath(abandoned);
+
+		const result = await runGcCommand({
+			flags: { agentDir: root, archive: true, stale: true, apply: true },
+		});
+
+		expect(result.archive).toMatchObject({ wouldDeleteTemps: 1, deletedTemps: 1, errors: [] });
+		expect(result.stale?.danglingMarkers).toBe(1);
+		expect(await Bun.file(marker).exists()).toBe(false);
+		expect(await Bun.file(abandoned).exists()).toBe(false);
+		expect(await Bun.file(target).exists()).toBe(false);
+	});
 });
 
 describe("runGcCommand cold-session archive", () => {
@@ -2475,5 +2536,559 @@ describe("runGcCommand stale state", () => {
 		);
 		const enabled = await runGcCommand({ flags: { agentDir: root } });
 		expect(enabled.stale?.wouldDelete).toBe(0);
+	});
+});
+
+// Test roots live under the temp dir, so its filesystem decides which backend tests run. The volume type alone
+// does not prove the tool stores files compressed (macOS 27 `ditto --hfsCompression` writes plain copies, #16244),
+// so tests that need a file to end up compressed on disk require the same probe `gc --compress --apply` runs.
+const method = await gcCompress.compressMethod(os.tmpdir());
+const supported = method !== undefined;
+const compresses = method !== undefined && (await gcCompress.compressionWorks(os.tmpdir(), method));
+const apfsCompresses = compresses && method === "apfs";
+
+/**
+ * Replace the filesystem backend so gc's selection, lease, and accounting
+ * contracts hold on every host: the volume reports `volume`, the probe
+ * passes, and each batch "compresses" every candidate it is handed.
+ * Returns the paths of every batch, in order.
+ */
+function fakeCompressionBackend(volume: gcCompress.CompressMethod = "ntfs"): string[][] {
+	const batches: string[][] = [];
+	spyOn(gcCompress, "compressMethod").mockResolvedValue(volume);
+	spyOn(gcCompress, "compressionWorks").mockResolvedValue(true);
+	spyOn(gcCompress, "compressFilesInPlace").mockImplementation(async candidates => {
+		batches.push(candidates.map(candidate => candidate.path));
+		return { compressed: candidates.length, allocatedAfter: 0, errors: [] };
+	});
+	return batches;
+}
+
+describe("runGcCommand session compression", () => {
+	const filler =
+		`${JSON.stringify({ type: "message", message: { role: "toolResult", content: "line ".repeat(40) } })}\n`.repeat(
+			400,
+		);
+
+	/** Ages `file` to a timestamp with sub-millisecond digits, which a `Date` cannot carry. */
+	async function agePathSubMs(file: string, ageDays: number): Promise<void> {
+		const seconds = Math.floor((Date.now() - ageDays * 86_400_000) / 1000) + 0.123456;
+		await fs.utimes(file, seconds, seconds);
+	}
+
+	/** An idle session with a compressible transcript and one artifact; filler precedes its final turn. */
+	async function writeIdleSession(id: string, status: "complete" | "pending" = "complete", ageDays = 30) {
+		const file = await writeSession(root, "project", id, status);
+		const lines = (await Bun.file(file).text()).split("\n");
+		lines.splice(1, 0, filler.trimEnd());
+		await Bun.write(file, lines.join("\n"));
+		const artifact = path.join(file.slice(0, -".jsonl".length), "1.bash.log");
+		await fs.mkdir(path.dirname(artifact), { recursive: true });
+		await Bun.write(artifact, filler);
+		await agePathSubMs(artifact, ageDays);
+		await agePathSubMs(file, ageDays);
+		return { file, artifact };
+	}
+
+	async function snapshot(file: string) {
+		const stat = await fs.stat(file);
+		return {
+			bytes: await Bun.file(file).text(),
+			mtimeNs: (await fs.stat(file, { bigint: true })).mtimeNs,
+			allocated: stat.blocks * 512,
+			size: stat.size,
+		};
+	}
+
+	test.skipIf(supported)("reports the phase unsupported without touching sessions", async () => {
+		const { file } = await writeIdleSession(Bun.randomUUIDv7());
+		const before = await snapshot(file);
+
+		const result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+
+		expect(result.compress).toMatchObject({ supported: false, scanned: 0, compressed: 0, errors: [] });
+		expect(await snapshot(file)).toEqual(before);
+	});
+
+	test.skipIf(!compresses)("--apply stores an idle session compressed with identical bytes and mtimes", async () => {
+		const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
+		const before = await Promise.all([snapshot(file), snapshot(artifact)]);
+
+		const result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+
+		expect(result.compress).toMatchObject({
+			supported: true,
+			method,
+			sessions: 1,
+			wouldCompress: 2,
+			compressed: 2,
+			errors: [],
+		});
+		expect(result.compress?.allocatedAfter).toBeLessThan(result.compress?.allocatedBefore ?? 0);
+		for (const [index, target] of [file, artifact].entries()) {
+			const after = await snapshot(target);
+			expect(after.bytes).toBe(before[index].bytes);
+			expect(after.mtimeNs).toBe(before[index].mtimeNs);
+			expect(after.allocated).toBeLessThan(after.size);
+		}
+		expect((await fs.readdir(path.dirname(file))).filter(name => name.startsWith(".omp-gc-compress-"))).toEqual([]);
+
+		const rerun = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+		expect(rerun.compress).toMatchObject({ wouldCompress: 0, compressed: 0 });
+	});
+
+	test("a dry run reports candidates without rewriting them", async () => {
+		const batches = fakeCompressionBackend();
+		const { file } = await writeIdleSession(Bun.randomUUIDv7());
+		const before = await snapshot(file);
+
+		const result = await runGcCommand({ flags: { agentDir: root, compress: true } });
+
+		expect(result.compress).toMatchObject({ sessions: 1, wouldCompress: 2, compressed: 0 });
+		expect(batches).toEqual([]);
+		expect(await snapshot(file)).toEqual(before);
+	});
+
+	test("a session whose artifact tree cannot be read does not stop the run", async () => {
+		fakeCompressionBackend();
+		const broken = await writeIdleSession(Bun.randomUUIDv7());
+		// A file where the artifact directory belongs makes the tree scan fail with ENOTDIR.
+		await fs.rm(path.dirname(broken.artifact), { recursive: true });
+		await Bun.write(path.dirname(broken.artifact), "not a directory");
+		await writeIdleSession(Bun.randomUUIDv7());
+
+		const result = await runGcCommand({ flags: { agentDir: root, compress: true, wal: true, apply: true } });
+
+		expect(result.compress).toMatchObject({ scanned: 2, sessions: 1, compressed: 2 });
+		expect(result.compress?.errors).toEqual([expect.stringContaining(broken.file)]);
+		expect(result.wal).toBeDefined();
+	});
+
+	test("--apply removes only the scratch dirs a killed run left behind", async () => {
+		// Only the APFS copy-and-swap uses scratch directories.
+		fakeCompressionBackend("apfs");
+		const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
+		const inSessions = path.join(path.dirname(file), ".omp-gc-compress-a1b2c3");
+		const inArchive = path.join(root, "archive", "sessions", "project", "x", ".omp-gc-compress-d4e5f6");
+		for (const dir of [inSessions, inArchive]) {
+			await fs.mkdir(dir, { recursive: true });
+			await Bun.write(path.join(dir, ".omp-gc-compress-owner"), "");
+			await Bun.write(path.join(dir, "copy.jsonl"), filler);
+		}
+		// An artifact that merely shares the name carries no owner marker.
+		const userArtifact = path.join(path.dirname(artifact), ".omp-gc-compress-notes", "keep.txt");
+		await fs.mkdir(path.dirname(userArtifact), { recursive: true });
+		await Bun.write(userArtifact, "keep");
+
+		const dryRun = await runGcCommand({ flags: { agentDir: root, compress: true } });
+		expect(dryRun.compress?.leftoverScratchDirs).toBe(2);
+		expect(await Bun.file(path.join(inSessions, "copy.jsonl")).exists()).toBe(true);
+
+		const applied = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+		expect(applied.compress).toMatchObject({ leftoverScratchDirs: 2, compressed: 2, errors: [] });
+		for (const dir of [inSessions, inArchive]) expect(await fs.exists(dir)).toBe(false);
+		expect(await Bun.file(userArtifact).text()).toBe("keep");
+	});
+
+	test.skipIf(!apfsCompresses)("a failed batch still counts its files as allocated afterwards", async () => {
+		const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
+		const artifactBefore = await snapshot(artifact);
+		// A read-only artifact dir cannot hold the scratch copy, so only the transcript compresses.
+		await fs.chmod(path.dirname(artifact), 0o555);
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+		} finally {
+			await fs.chmod(path.dirname(artifact), 0o755);
+		}
+
+		expect(result.compress).toMatchObject({ wouldCompress: 2, compressed: 1 });
+		expect(result.compress?.errors).toHaveLength(1);
+		const transcriptAfter = (await fs.stat(file)).blocks * 512;
+		expect(result.compress?.allocatedAfter).toBe(transcriptAfter + artifactBefore.allocated);
+		expect(await snapshot(artifact)).toEqual(artifactBefore);
+	});
+
+	test("leaves recent and leased sessions uncompressed", async () => {
+		const batches = fakeCompressionBackend();
+		const recent = await writeIdleSession(Bun.randomUUIDv7(), "complete", 1);
+		// Unique per run: the lease is machine-wide.
+		const heldId = Bun.randomUUIDv7();
+		const held = await writeIdleSession(heldId);
+		const release = new FileSessionStorage().claimSession(heldId, held.file);
+		if (!release) throw new Error("Expected to claim the session lease");
+		const targets = [recent.file, recent.artifact, held.file, held.artifact];
+		const before = await Promise.all(targets.map(snapshot));
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+		} finally {
+			release();
+		}
+
+		expect(result.compress).toMatchObject({ scanned: 2, skippedLive: 1, wouldCompress: 0, compressed: 0 });
+		expect(batches).toEqual([]);
+		expect(await Promise.all(targets.map(snapshot))).toEqual(before);
+	});
+
+	test("leaves a session uncompressed while a nested transcript is live", async () => {
+		const batches = fakeCompressionBackend();
+		const parent = await writeIdleSession(Bun.randomUUIDv7());
+		const nestedId = Bun.randomUUIDv7();
+		// `--session` opens any path, so the transcript is found by its header, not its name.
+		const nested = path.join(path.dirname(parent.artifact), "0-subagent.log");
+		const header = JSON.stringify({
+			type: "session",
+			version: 3,
+			id: nestedId,
+			timestamp: "2026-01-01T00:00:00.000Z",
+		});
+		// Leading JSON whitespace still parses as a header, so it must not hide the transcript.
+		await Bun.write(nested, `\n  ${header}\n${filler}`);
+		await agePathSubMs(nested, 30);
+		const release = new FileSessionStorage().claimSession(nestedId, nested);
+		if (!release) throw new Error("Expected to claim the nested session lease");
+		const targets = [parent.file, parent.artifact, nested];
+		const before = await Promise.all(targets.map(snapshot));
+		let result: GcResult;
+		try {
+			result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+		} finally {
+			release();
+		}
+
+		expect(result.compress).toMatchObject({ skippedLive: 1, wouldCompress: 0, compressed: 0 });
+		expect(batches).toEqual([]);
+		expect(await Promise.all(targets.map(snapshot))).toEqual(before);
+	});
+
+	test("compresses an idle session whose last turn was interrupted", async () => {
+		const batches = fakeCompressionBackend();
+		const interrupted = await writeIdleSession(Bun.randomUUIDv7(), "pending");
+
+		const result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+
+		expect(result.compress).toMatchObject({ skippedLive: 0, compressed: 2 });
+		expect(batches.flat().sort()).toEqual([interrupted.file, interrupted.artifact].sort());
+	});
+
+	test("compresses a session whose artifact tree holds a copy of its transcript", async () => {
+		fakeCompressionBackend();
+		const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
+		// A plain copy keeps the parent's session id; leasing that id twice must not read as live.
+		const copy = path.join(path.dirname(artifact), "backup.jsonl");
+		await fs.copyFile(file, copy);
+		await agePathSubMs(copy, 30);
+
+		const result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+
+		expect(result.compress).toMatchObject({ skippedLive: 0, compressed: 3 });
+	});
+
+	test("a dry run reads past a large JSON artifact with no session header", async () => {
+		fakeCompressionBackend();
+		const { artifact } = await writeIdleSession(Bun.randomUUIDv7());
+		// Pretty-printed JSON opens like a record but completes none within the header
+		// read cap, and the file continues well past it.
+		const output = path.join(path.dirname(artifact), "2.mcp_search.log");
+		await Bun.write(output, `{\n  "results": [\n${'    "row",\n'.repeat(160_000)}    "end"\n  ]\n}\n`);
+		await agePathSubMs(output, 30);
+
+		const result = await runGcCommand({ flags: { agentDir: root, compress: true } });
+
+		expect(result.compress).toMatchObject({ skippedLive: 0, sessions: 1, wouldCompress: 3, errors: [] });
+	});
+
+	test("--compress-after-days overrides gc.compressAfterDays", async () => {
+		fakeCompressionBackend();
+		await writeConfig(root, ["gc:", "  compressAfterDays: 60", ""].join("\n"));
+		await writeIdleSession(Bun.randomUUIDv7(), "complete", 30);
+
+		const configured = await runGcCommand({ flags: { agentDir: root, compress: true } });
+		const overridden = await runGcCommand({ flags: { agentDir: root, compress: true, compressAfterDays: 7 } });
+
+		expect(configured.compress?.wouldCompress).toBe(0);
+		expect(overridden.compress?.wouldCompress).toBe(2);
+	});
+
+	test.skipIf(!compresses)(
+		"the background run compresses idle sessions, then waits a day before running again",
+		async () => {
+			const { file, artifact } = await writeIdleSession(Bun.randomUUIDv7());
+			const logPath = path.join(root, GC_AUTO_COMPRESS_LOG);
+
+			const child = await scheduleGcAutoCompress(root);
+			expect(await child?.exited).toBe(0);
+			for (const target of [file, artifact]) {
+				const after = await snapshot(target);
+				expect(after.allocated).toBeLessThan(after.size);
+			}
+			expect(await Bun.file(logPath).text()).toContain("compress: 2/2 files in 1 sessions");
+
+			expect(await scheduleGcAutoCompress(root)).toBeUndefined();
+
+			const lastRun = (Date.now() - GC_AUTO_COMPRESS_INTERVAL_MS - 60_000) / 1000;
+			await fs.utimes(logPath, lastRun, lastRun);
+			const next = await scheduleGcAutoCompress(root);
+			expect(await next?.exited).toBe(0);
+			expect(await Bun.file(logPath).text()).toContain("compress: 0/0 files in 0 sessions");
+		},
+		60_000,
+	);
+
+	test.skipIf(!compresses)(
+		"simultaneous launches start one background run and keep its summary",
+		async () => {
+			await writeIdleSession(Bun.randomUUIDv7());
+			const logPath = path.join(root, GC_AUTO_COMPRESS_LOG);
+			const lastRun = (Date.now() - GC_AUTO_COMPRESS_INTERVAL_MS - 60_000) / 1000;
+			await Bun.write(logPath, "previous run\n");
+			await fs.utimes(logPath, lastRun, lastRun);
+
+			const launched = (await Promise.all([1, 2, 3].map(() => scheduleGcAutoCompress(root)))).filter(
+				child => child !== undefined,
+			);
+
+			expect(launched).toHaveLength(1);
+			expect(await launched[0].exited).toBe(0);
+			const log = await Bun.file(logPath).text();
+			expect(log).toContain("compress: 2/2 files in 1 sessions");
+			expect(log).not.toContain("GC already running");
+		},
+		60_000,
+	);
+
+	test("--apply on a volume whose compression shrinks nothing leaves sessions alone", async () => {
+		const batches = fakeCompressionBackend();
+		spyOn(gcCompress, "compressionWorks").mockResolvedValue(false);
+		const { file } = await writeIdleSession(Bun.randomUUIDv7());
+		const before = await snapshot(file);
+
+		const result = await runGcCommand({ flags: { agentDir: root, compress: true, apply: true } });
+
+		expect(result.compress).toMatchObject({ supported: true, scanned: 0, wouldCompress: 0, compressed: 0 });
+		expect(batches).toEqual([]);
+		expect(result.compress?.probeFailure).toContain("stored a compressible probe file uncompressed");
+		expect(await snapshot(file)).toEqual(before);
+	});
+
+	test("omp gc --compress --apply fails when the compression probe cannot run", async () => {
+		// A supported volume, but no sessions directory to hold the probe's scratch dir.
+		const volume = spyOn(gcCompress, "compressMethod").mockResolvedValue("ntfs");
+		try {
+			await runCli(["gc", "--agent-dir", root, "--compress", "--apply"]);
+		} finally {
+			volume.mockRestore();
+		}
+
+		const stderr = stderrWrites.join("");
+		expect(process.exitCode).toBe(1);
+		expect(stderr).toContain("GC completed with 1 error:");
+		expect(stderr).toContain("compress: compression probe: ENOENT");
+		expect(writes.join("")).not.toContain("compress skipped");
+	});
+
+	test("the compression probe throws when the compression tool fails instead of reporting no compression", async () => {
+		// The other platform's tool is absent here, so its batch reports a command failure.
+		const absentTool = process.platform === "win32" ? "apfs" : "ntfs";
+
+		await expect(gcCompress.compressionWorks(root, absentTool)).rejects.toThrow(
+			absentTool === "apfs" ? "ditto exited" : "compact exited",
+		);
+	});
+
+	test.skipIf(supported)("the background run never starts without filesystem compression", async () => {
+		const { file } = await writeIdleSession(Bun.randomUUIDv7());
+		const before = await snapshot(file);
+
+		expect(await scheduleGcAutoCompress(root)).toBeUndefined();
+		expect(await Bun.file(path.join(root, GC_AUTO_COMPRESS_LOG)).text()).toContain("compress skipped: unsupported");
+		expect(await snapshot(file)).toEqual(before);
+	});
+});
+
+describe("runGcCommand replay data stripping", () => {
+	const header = (id: string) =>
+		JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp" });
+	const assistant = (content: unknown[], extra: Record<string, unknown> = {}) =>
+		JSON.stringify({
+			type: "message",
+			message: {
+				role: "assistant",
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-opus-4-5",
+				stopReason: "stop",
+				content,
+				...extra,
+			},
+		});
+
+	/** Turns carrying replay data; the latest surviving turn is followed by an aborted one. */
+	function replayLines(id: string): string[] {
+		return [
+			header(id),
+			assistant(
+				[
+					{ type: "thinking", thinking: "plan", thinkingSignature: "EqQBsigned", itemId: "rs_1" },
+					{ type: "redactedThinking", data: "EmwKencrypted" },
+					{
+						type: "toolCall",
+						id: "call_1",
+						name: "read",
+						arguments: { path: "a" },
+						thoughtSignature: "c2ln",
+						partialArgs: '{"path":"a"}',
+						streamIndex: 0,
+					},
+				],
+				{
+					stopReason: "toolUse",
+					requestControls: { messageIndex: 1 },
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: "openai-codex",
+						dt: true,
+						items: [{ type: "reasoning", encrypted_content: "gAAAA" }],
+					},
+				},
+			),
+			JSON.stringify({
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: "call_1",
+					toolName: "read",
+					isError: false,
+					content: [
+						{
+							type: "image",
+							data: "aGk=",
+							mimeType: "image/png",
+							providerFile: { provider: "openai", id: "file_1" },
+						},
+					],
+				},
+			}),
+			// Replay state with no copy elsewhere: a reasoning source field, a text phase, a snapshot history.
+			assistant(
+				[
+					{ type: "thinking", thinking: "field", thinkingSignature: "reasoning_content" },
+					{ type: "text", text: "noted", textSignature: '{"v":1,"id":"msg_1","phase":"commentary"}' },
+				],
+				{ providerPayload: { type: "openaiResponsesHistory", provider: "openai-codex", items: [] } },
+			),
+			assistant([
+				{ type: "thinking", thinking: "latest", thinkingSignature: "EqQBlatest" },
+				{ type: "text", text: "answer" },
+			]),
+			assistant([{ type: "thinking", thinking: "", thinkingSignature: "EqQBcut" }], { stopReason: "aborted" }),
+		];
+	}
+
+	async function writeTranscript(file: string, lines: string[], ageDays: number): Promise<void> {
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		await Bun.write(file, `${lines.join("\n")}\n`);
+		await agePath(file, ageDays);
+	}
+
+	async function writeReplaySession(id: string, ageDays = 40): Promise<string> {
+		const file = path.join(getSessionsDir(root), "project", `${id}.jsonl`);
+		await writeTranscript(file, replayLines(id), ageDays);
+		return file;
+	}
+
+	function expectStripped(lines: string[], original: string[]): void {
+		expect(lines).toHaveLength(original.length);
+		expect(lines[0]).toBe(original[0]);
+		expect(JSON.parse(lines[1]).message).toEqual({
+			role: "assistant",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-opus-4-5",
+			stopReason: "toolUse",
+			content: [
+				{ type: "thinking", thinking: "plan" },
+				{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "a" } },
+			],
+		});
+		expect(JSON.parse(lines[2]).message.content).toEqual([{ type: "image", data: "aGk=", mimeType: "image/png" }]);
+		expect(lines[3]).toBe(original[3]);
+		// The latest surviving turn replays natively; the aborted turn after it does not count.
+		expect(lines[4]).toBe(original[4]);
+		expect(JSON.parse(lines[5]).message.content).toEqual([{ type: "thinking", thinking: "" }]);
+	}
+
+	test("--apply strips idle transcripts except their latest surviving turn, keeping mtimes", async () => {
+		const id = Bun.randomUUIDv7();
+		const file = await writeReplaySession(id);
+		const subagentId = Bun.randomUUIDv7();
+		const subagent = path.join(file.slice(0, -".jsonl".length), "0-Explore.jsonl");
+		const subagentLines = [
+			header(subagentId),
+			assistant([{ type: "thinking", thinking: "look", thinkingSignature: "EqQBsub" }], { stopReason: "toolUse" }),
+			assistant([{ type: "text", text: "found" }], { requestControls: { messageIndex: 3 } }),
+		];
+		await writeTranscript(subagent, subagentLines, 40);
+		const mtimes = await Promise.all([file, subagent].map(async target => (await fs.stat(target)).mtimeMs));
+
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ scanned: 1, skippedLive: 0, wouldStrip: 2, stripped: 2, records: 4 });
+		expect(result.strip?.errors).toEqual([]);
+		expectStripped((await Bun.file(file).text()).split("\n").slice(0, -1), replayLines(id));
+		const subagentAfter = (await Bun.file(subagent).text()).split("\n");
+		expect(JSON.parse(subagentAfter[1]).message.content).toEqual([{ type: "thinking", thinking: "look" }]);
+		expect(subagentAfter[2]).toBe(subagentLines[2]);
+		for (const [index, target] of [file, subagent].entries()) {
+			expect((await fs.stat(target)).mtimeMs).toBeCloseTo(mtimes[index], 0);
+		}
+
+		const rerun = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+		expect(rerun.strip).toMatchObject({ wouldStrip: 0, stripped: 0 });
+	});
+
+	test("a dry run rewrites nothing, and recent or leased sessions are never stripped", async () => {
+		const idle = await writeReplaySession(Bun.randomUUIDv7());
+		const recent = await writeReplaySession(Bun.randomUUIDv7(), 10);
+		// Unique per run: the lease is machine-wide.
+		const heldId = Bun.randomUUIDv7();
+		const held = await writeReplaySession(heldId);
+		const release = new FileSessionStorage().claimSession(heldId, held);
+		if (!release) throw new Error("Expected to claim the session lease");
+		const targets = [idle, recent, held];
+		const before = await Promise.all(targets.map(target => Bun.file(target).text()));
+		let dryRun: GcResult;
+		let applied: GcResult;
+		try {
+			dryRun = await runGcCommand({ flags: { agentDir: root, strip: true } });
+			expect(await Promise.all(targets.map(target => Bun.file(target).text()))).toEqual(before);
+			applied = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+		} finally {
+			release();
+		}
+
+		expect(dryRun.strip).toMatchObject({ scanned: 3, skippedLive: 1, wouldStrip: 1, stripped: 0, records: 3 });
+		expect(dryRun.strip?.bytes).toBeGreaterThan(0);
+		expect(applied.strip).toMatchObject({ skippedLive: 1, wouldStrip: 1, stripped: 1 });
+		expect(await Bun.file(recent).text()).toBe(before[1]);
+		expect(await Bun.file(held).text()).toBe(before[2]);
+	});
+
+	test("archived sessions are stripped inside their gzip archive", async () => {
+		const id = Bun.randomUUIDv7();
+		const archive = path.join(root, "archive", "sessions", "project", `${id}.jsonl.gz`);
+		await fs.mkdir(path.dirname(archive), { recursive: true });
+		await Bun.write(archive, gzipSync(`${replayLines(id).join("\n")}\n`));
+		await agePath(archive, 40);
+
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ scanned: 0, wouldStrip: 1, stripped: 1, errors: [] });
+		const lines = gunzipSync(await Bun.file(archive).bytes())
+			.toString()
+			.split("\n")
+			.slice(0, -1);
+		expectStripped(lines, replayLines(id));
 	});
 });

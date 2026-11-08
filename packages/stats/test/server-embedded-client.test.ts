@@ -10,6 +10,7 @@ const clientFiles = {
 	"index.html": '<!doctype html><html><body><script type="module" src="/index.js"></script></body></html>',
 	"index.js": 'document.documentElement.dataset.loaded = "true";',
 	"styles.css": "body { color: blue; }",
+	"favicon.ico": await Bun.file(path.resolve(import.meta.dir, "../src/client/favicon.ico")).bytes(),
 };
 
 async function startEmbeddedDashboard(): Promise<{ url: string; tmpDir: string }> {
@@ -91,6 +92,7 @@ test("embedded dashboard serves its assets and SPA routes after temporary files 
 		{ route: "/", file: "index.html", mime: "text/html" },
 		{ route: "/index.js", file: "index.js", mime: "text/javascript" },
 		{ route: "/styles.css", file: "styles.css", mime: "text/css" },
+		{ route: "/favicon.ico", file: "favicon.ico", mime: "image/x-icon" },
 		{ route: "/traces/session", file: "index.html", mime: "text/html" },
 	] as const;
 	await Promise.all(
@@ -98,7 +100,12 @@ test("embedded dashboard serves its assets and SPA routes after temporary files 
 			const response = await fetch(url + route);
 			expect(response.status).toBe(200);
 			expect(response.headers.get("content-type")).toStartWith(mime);
-			expect(await response.text()).toBe(clientFiles[file]);
+			const expected = clientFiles[file];
+			if (typeof expected === "string") {
+				expect(await response.text()).toBe(expected);
+			} else {
+				expect(new Uint8Array(await response.arrayBuffer())).toEqual(expected);
+			}
 		}),
 	);
 });

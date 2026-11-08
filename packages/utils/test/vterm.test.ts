@@ -195,6 +195,30 @@ describe("vterm xterm-compatible golden streams", () => {
 		});
 	});
 
+	test("ignores private and intermediate CSI sequences without a handler", async () => {
+		const terminal = new Terminal({ cols: 8, rows: 3 });
+		// DECSC at the origin: a mis-dispatched `CSI < u` / `CSI > 1 u` would restore it.
+		await write(terminal, "\x1b7top\r\nmid");
+		// Kitty keyboard pop/push/query, modifyOtherKeys, XTSMGRAPHICS, DECSCUSR.
+		await write(terminal, "\x1b[<u\x1b[>1u\x1b[?u\x1b[>4;1m\x1b[?2;1;0S\x1b[0 q!");
+		expect(snapshot(terminal)).toEqual({
+			lines: ["top", "mid!", ""],
+			wraps: [false, false, false],
+			length: 3,
+			baseY: 0,
+			viewportY: 0,
+			cursorX: 4,
+			cursorY: 1,
+		});
+		const cell = terminal.buffer.active.getLine(1)!.getCell(3)!;
+		expect(cell.isBold()).toBe(0);
+		expect(cell.isUnderline()).toBe(0);
+		// The unprefixed identifiers keep their meaning.
+		await write(terminal, "\x1b[u\x1b[1m*");
+		expect(terminal.buffer.active.getLine(0)!.translateToString(true)).toBe("*op");
+		expect(terminal.buffer.active.getLine(0)!.getCell(0)!.isBold()).toBe(1);
+	});
+
 	test("keeps ASCII bases joined to combining marks and keycap sequences", async () => {
 		const terminal = new Terminal({ cols: 8, rows: 2 });
 		await write(terminal, "xa\u0301y1\uFE0F\u20E3z");

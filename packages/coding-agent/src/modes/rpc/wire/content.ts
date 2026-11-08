@@ -23,6 +23,10 @@ export const messageDefs = {
 		thinking: "string",
 		"thinkingSignature?": "string",
 		"itemId?": "string",
+		"narration?": doc(
+			"boolean",
+			"Prose the model addressed to the user, returned by the provider as thinking; present it as answer text.",
+		),
 	},
 	RedactedThinkingContent: { type: "'redactedThinking'", data: "string" },
 	ImageContent: doc(
@@ -80,9 +84,14 @@ export const messageDefs = {
 		cost: "UsageCost",
 	},
 
+	ParentIrc: doc(
+		{ from: doc("string", "Sending parent agent id."), body: doc("string", "Message body as the parent wrote it.") },
+		"Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope.",
+	),
 	UserMessage: {
 		role: "'user'",
 		content: "MessageContent",
+		"parentIrc?": "ParentIrc",
 		"synthetic?": "boolean",
 		"steering?": "boolean",
 		"liveSteered?": "boolean",

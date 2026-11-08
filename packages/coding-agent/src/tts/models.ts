@@ -114,3 +114,35 @@ export function resolveTtsVoice(modelKey: string | undefined, voice: string | un
 	const match = spec.voices.find(v => v.id === voice);
 	return match ? match.id : fallback;
 }
+
+/** Kokoro's native speaking rate; also the value used when no speed is configured. */
+export const DEFAULT_TTS_SPEED = 1;
+
+/**
+ * Accepted speaking-rate band. Kokoro takes any positive float, but intelligibility
+ * collapses well outside this range.
+ */
+export const TTS_SPEED_MIN = 0.5;
+export const TTS_SPEED_MAX = 2.5;
+
+/** Speed presets for the `tts.localSpeed` / `speech.speed` setting pickers. */
+export const TTS_SPEED_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+	{ value: "0.5", label: "0.5×" },
+	{ value: "0.75", label: "0.75×" },
+	{ value: "1", label: "1× (normal)" },
+	{ value: "1.25", label: "1.25×" },
+	{ value: "1.5", label: "1.5×" },
+	{ value: "1.75", label: "1.75×" },
+	{ value: "2", label: "2×" },
+	{ value: "2.5", label: "2.5×" },
+];
+
+/**
+ * Resolve a requested speaking rate to one Kokoro is given: clamped into
+ * [{@link TTS_SPEED_MIN}, {@link TTS_SPEED_MAX}], or {@link DEFAULT_TTS_SPEED}
+ * when missing or not a finite number.
+ */
+export function resolveTtsSpeed(speed: number | undefined): number {
+	if (speed === undefined || !Number.isFinite(speed)) return DEFAULT_TTS_SPEED;
+	return Math.min(TTS_SPEED_MAX, Math.max(TTS_SPEED_MIN, speed));
+}

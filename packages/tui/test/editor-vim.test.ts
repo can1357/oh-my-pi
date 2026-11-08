@@ -5,6 +5,8 @@ import { defaultEditorTheme } from "./test-themes";
 const ESC = "\x1b";
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
+const LEFT = "\x1b[D";
+const BACKSPACE = "\x7f";
 
 function vimEditor(text = "", options: { cursorToStart?: boolean } = {}): Editor {
 	const editor = new Editor(defaultEditorTheme);
@@ -362,6 +364,17 @@ describe("Editor vim mode", () => {
 			expect(editor.getText()).toBe("\nthree");
 		});
 
+		it("dap takes the trailing blank line, or the leading one at the end of the buffer", () => {
+			const middle = vimEditor("one\ntwo\n\nthree");
+			for (const key of "dap") middle.handleInput(key);
+			expect(middle.getText()).toBe("three");
+
+			const end = vimEditor("one\ntwo\n\nthree");
+			end.handleInput("G");
+			for (const key of "dap") end.handleInput(key);
+			expect(end.getText()).toBe("one\ntwo");
+		});
+
 		it("viw selects the word so the next operator applies to it", () => {
 			const editor = vimEditor("alfa beta");
 			for (const key of "viw") editor.handleInput(key);
@@ -538,6 +551,20 @@ describe("Editor vim mode", () => {
 			editor.handleInput("x");
 			expect(editor.getText()).toBe("!");
 		});
+
+		it("counted r refuses to cut an atomic token", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.atomicTokenPattern = /\[Image #\d+\]/g;
+			editor.setVimMode(true);
+			editor.setText("ab[Image #1] tail");
+			editor.handleInput(ESC);
+			editor.handleInput("g");
+			editor.handleInput("g");
+			editor.handleInput("5");
+			editor.handleInput("r");
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("ab[Image #1] tail");
+		});
 	});
 
 	describe("toggling the setting", () => {
@@ -664,6 +691,673 @@ describe("Editor vim mode", () => {
 			// Not the 17 from line 0 — the end of *this* line.
 			editor.handleInput("j");
 			expect(cursor(editor)).toEqual({ line: 2, col: 17 });
+		});
+	});
+
+	describe("find and till", () => {
+		it("lands f and F on the match, and t and T on the adjacent grapheme", () => {
+			const editor = vimEditor("abcde");
+			editor.handleInput("f");
+			editor.handleInput("c");
+			expect(cursor(editor)).toEqual({ line: 0, col: 2 });
+
+			editor.handleInput("F");
+			editor.handleInput("a");
+			expect(cursor(editor)).toEqual({ line: 0, col: 0 });
+
+			editor.handleInput("t");
+			editor.handleInput("c");
+			expect(cursor(editor)).toEqual({ line: 0, col: 1 });
+
+			editor.handleInput("$");
+			editor.handleInput("T");
+			editor.handleInput("c");
+			expect(cursor(editor)).toEqual({ line: 0, col: 3 });
+		});
+
+		it("counts occurrences and does not cross lines", () => {
+			const editor = vimEditor("abaca\nzzz");
+			editor.handleInput("2");
+			editor.handleInput("f");
+			editor.handleInput("a");
+			expect(cursor(editor)).toEqual({ line: 0, col: 4 });
+
+			editor.handleInput("f");
+			editor.handleInput("z");
+			expect(cursor(editor)).toEqual({ line: 0, col: 4 });
+		});
+
+		it("includes the find target and stops short of the till target", () => {
+			const found = vimEditor("abcde");
+			found.handleInput("d");
+			found.handleInput("f");
+			found.handleInput("c");
+			expect(found.getText()).toBe("de");
+
+			const till = vimEditor("abcde");
+			till.handleInput("d");
+			till.handleInput("t");
+			till.handleInput("c");
+			expect(till.getText()).toBe("cde");
+		});
+
+		it("repeats with semicolon and reverses with comma", () => {
+			const editor = vimEditor("a-b-c");
+			editor.handleInput("f");
+			editor.handleInput("-");
+			expect(cursor(editor)).toEqual({ line: 0, col: 1 });
+			editor.handleInput(";");
+			expect(cursor(editor)).toEqual({ line: 0, col: 3 });
+			editor.handleInput(",");
+			expect(cursor(editor)).toEqual({ line: 0, col: 1 });
+		});
+
+		it("repeats a till past the target it just landed beside", () => {
+			const editor = vimEditor("a,b,c,d");
+			editor.handleInput("t");
+			editor.handleInput(",");
+			expect(cursor(editor)).toEqual({ line: 0, col: 0 });
+			editor.handleInput(";");
+			expect(cursor(editor)).toEqual({ line: 0, col: 2 });
+		});
+
+		it("cancels a half-typed find without moving, and finds a digit", () => {
+			const editor = vimEditor("a1b");
+			editor.handleInput("f");
+			expect(editor.vimConsumesEscape()).toBe(true);
+			editor.handleInput(ESC);
+			expect(cursor(editor)).toEqual({ line: 0, col: 0 });
+			expect(editor.vimConsumesEscape()).toBe(false);
+
+			editor.handleInput("f");
+			editor.handleInput("1");
+			expect(cursor(editor)).toEqual({ line: 0, col: 1 });
+		});
+
+		it("finds a multi-code-unit grapheme", () => {
+			const text = "a😀b";
+			const editor = vimEditor(text);
+			editor.handleInput("f");
+			editor.handleInput("😀");
+			expect(cursor(editor)).toEqual({ line: 0, col: text.indexOf("😀") });
+		});
+	});
+
+	describe("replace", () => {
+		it("replaces the character under the cursor and stays in normal mode", () => {
+			const editor = vimEditor("abcd");
+			editor.handleInput("l");
+			editor.handleInput("r");
+			expect(editor.vimConsumesEscape()).toBe(true);
+			editor.handleInput("X");
+			expect(editor.getText()).toBe("aXcd");
+			expect(editor.vimMode).toBe("normal");
+			expect(cursor(editor)).toEqual({ line: 0, col: 1 });
+		});
+
+		it("replaces a count and refuses to run past the line", () => {
+			const editor = vimEditor("abcd");
+			editor.handleInput("3");
+			editor.handleInput("r");
+			editor.handleInput("z");
+			expect(editor.getText()).toBe("zzzd");
+			expect(cursor(editor)).toEqual({ line: 0, col: 2 });
+
+			editor.handleInput("$");
+			editor.handleInput("2");
+			editor.handleInput("r");
+			editor.handleInput("Q");
+			expect(editor.getText()).toBe("zzzd");
+		});
+
+		it("overwrites in replace mode, restores on backspace, and steps back on Escape", () => {
+			const editor = vimEditor("abcd");
+			editor.handleInput("R");
+			expect(editor.vimMode).toBe("replace");
+			editor.handleInput("XY");
+			expect(editor.getText()).toBe("XYcd");
+			editor.handleInput("\x7f");
+			expect(editor.getText()).toBe("Xbcd");
+			editor.handleInput("Z");
+			expect(editor.getText()).toBe("XZcd");
+			editor.handleInput(ESC);
+			expect(editor.vimMode).toBe("normal");
+			expect(cursor(editor)).toEqual({ line: 0, col: 1 });
+			editor.handleInput("q");
+			expect(editor.getText()).toBe("XZcd");
+		});
+
+		it("appends once replace mode runs past the end of the line", () => {
+			const editor = vimEditor("ab");
+			editor.handleInput("$");
+			editor.handleInput("R");
+			editor.handleInput("YZ");
+			expect(editor.getText()).toBe("aYZ");
+		});
+
+		it("turns a recalled prompt into a draft once replace mode overwrites it", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			editor.addToHistory("previous");
+			editor.handleInput(UP);
+			expect(editor.getText()).toBe("previous");
+			editor.handleInput(ESC);
+			editor.handleInput("0");
+			editor.handleInput("R");
+			editor.handleInput("X");
+			editor.handleInput(ESC);
+			editor.handleInput("i");
+			editor.handleInput(DOWN);
+			expect(editor.getText()).toBe("Xrevious");
+		});
+
+		it("keeps appending after Right at the end of the line", () => {
+			const editor = vimEditor("abc");
+			editor.handleInput("R");
+			editor.handleInput("xyz");
+			editor.handleInput("\x1b[C");
+			editor.handleInput("w");
+			expect(editor.getText()).toBe("xyzw");
+		});
+
+		it("does not restore a replaced character into text set after the overwrite", () => {
+			const editor = vimEditor("abcd");
+			editor.handleInput("R");
+			editor.handleInput("xy");
+			editor.setText("hyllo");
+			for (let i = 0; i < 3; i++) editor.handleInput("\x1b[D");
+			editor.handleInput("\x7f");
+			expect(editor.getText()).toBe("hyllo");
+		});
+	});
+
+	describe("bracket match", () => {
+		it("jumps between a nested pair and back", () => {
+			const editor = vimEditor("(a(b)c)");
+			editor.handleInput("%");
+			expect(cursor(editor)).toEqual({ line: 0, col: 6 });
+			editor.handleInput("%");
+			expect(cursor(editor)).toEqual({ line: 0, col: 0 });
+			editor.handleInput("l");
+			editor.handleInput("l");
+			editor.handleInput("%");
+			expect(cursor(editor)).toEqual({ line: 0, col: 4 });
+		});
+
+		it("matches across lines and deletes through the pair", () => {
+			const editor = vimEditor("(\n)");
+			editor.handleInput("%");
+			expect(cursor(editor)).toEqual({ line: 1, col: 0 });
+			editor.handleInput("%");
+			editor.handleInput("d");
+			editor.handleInput("%");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("scans forward on the line and stays put when unmatched", () => {
+			const editor = vimEditor("ab(c");
+			editor.handleInput("%");
+			expect(cursor(editor)).toEqual({ line: 0, col: 0 });
+			expect(editor.getText()).toBe("ab(c");
+		});
+
+		it("jumps between quotes and ignores an escaped one", () => {
+			const doubled = vimEditor('say "hi"');
+			doubled.handleInput("f");
+			doubled.handleInput('"');
+			doubled.handleInput("%");
+			expect(cursor(doubled)).toEqual({ line: 0, col: 7 });
+			doubled.handleInput("%");
+			expect(cursor(doubled)).toEqual({ line: 0, col: 4 });
+
+			const single = vimEditor("say 'hi'");
+			single.handleInput("%");
+			expect(cursor(single)).toEqual({ line: 0, col: 7 });
+
+			const escaped = vimEditor('say \\"hi\\"');
+			escaped.handleInput("%");
+			expect(cursor(escaped)).toEqual({ line: 0, col: 0 });
+			expect(escaped.getText()).toBe('say \\"hi\\"');
+		});
+
+		it("goes to a percentage of the buffer when counted", () => {
+			const editor = vimEditor("(a)\nb\n  c\nd");
+			editor.handleInput("5");
+			editor.handleInput("0");
+			editor.handleInput("%");
+			expect(cursor(editor)).toEqual({ line: 1, col: 0 });
+			editor.handleInput("7");
+			editor.handleInput("5");
+			editor.handleInput("%");
+			expect(cursor(editor)).toEqual({ line: 2, col: 2 });
+		});
+	});
+
+	describe("paragraph motions", () => {
+		it("lands on blank-line boundaries and steps back", () => {
+			const editor = vimEditor("aaa\n\nbbb\n\nccc");
+			editor.handleInput("}");
+			expect(cursor(editor)).toEqual({ line: 1, col: 0 });
+			editor.handleInput("}");
+			expect(cursor(editor)).toEqual({ line: 3, col: 0 });
+			editor.handleInput("{");
+			expect(cursor(editor)).toEqual({ line: 1, col: 0 });
+		});
+
+		it("deletes the paragraph text and leaves the boundary line", () => {
+			const editor = vimEditor("aaa\n\nbbb");
+			editor.handleInput("d");
+			editor.handleInput("}");
+			expect(editor.getText()).toBe("\nbbb");
+		});
+
+		it("clears through the end of a prompt that has no blank line", () => {
+			const one = vimEditor("hello world");
+			one.handleInput("d");
+			one.handleInput("}");
+			expect(one.getText()).toBe("");
+
+			const two = vimEditor("one\ntwo");
+			two.handleInput("}");
+			expect(cursor(two)).toEqual({ line: 1, col: 2 });
+			two.handleInput("g");
+			two.handleInput("g");
+			two.handleInput("d");
+			two.handleInput("}");
+			expect(two.getText()).toBe("");
+		});
+
+		it("does not restore the sticky column after a find", () => {
+			const editor = vimEditor("abcdefghij\nab");
+			for (let i = 0; i < 8; i++) editor.handleInput("l");
+			editor.handleInput("j");
+			editor.handleInput("k");
+			editor.handleInput("F");
+			editor.handleInput("a");
+			editor.handleInput("j");
+			expect(cursor(editor)).toEqual({ line: 1, col: 0 });
+		});
+	});
+
+	describe("join", () => {
+		it("inserts one space, two after a sentence, and none before a closing paren", () => {
+			const spaced = vimEditor("foo\n  bar");
+			spaced.handleInput("J");
+			expect(spaced.getText()).toBe("foo bar");
+			expect(cursor(spaced)).toEqual({ line: 0, col: 3 });
+
+			const sentence = vimEditor("end.\nnext");
+			sentence.handleInput("J");
+			expect(sentence.getText()).toBe("end.  next");
+
+			const paren = vimEditor("call(\n  )");
+			paren.handleInput("J");
+			expect(paren.getText()).toBe("call()");
+		});
+
+		it("keeps a trailing space, joins a count, and does nothing on the last line", () => {
+			const editor = vimEditor("foo \nbar\nbaz");
+			editor.handleInput("J");
+			expect(editor.getText()).toBe("foo bar\nbaz");
+			editor.handleInput("g");
+			editor.handleInput("g");
+			editor.handleInput("3");
+			editor.handleInput("J");
+			expect(editor.getText()).toBe("foo bar baz");
+
+			const last = vimEditor("only");
+			last.handleInput("J");
+			expect(last.getText()).toBe("only");
+		});
+
+		it("adds no space when the joined line is empty or blank", () => {
+			const empty = vimEditor("foo\n\nbar");
+			empty.handleInput("J");
+			expect(empty.getText()).toBe("foo\nbar");
+
+			const blank = vimEditor("foo\n   \nbar");
+			blank.handleInput("J");
+			expect(blank.getText()).toBe("foo\nbar");
+		});
+	});
+
+	describe("indent", () => {
+		it("shifts by two spaces, honors a count, and stops at the margin", () => {
+			const editor = vimEditor("a\nb");
+			editor.handleInput(">");
+			editor.handleInput(">");
+			expect(editor.getText()).toBe("  a\nb");
+			expect(cursor(editor)).toEqual({ line: 0, col: 2 });
+			editor.handleInput("2");
+			editor.handleInput(">");
+			editor.handleInput(">");
+			expect(editor.getText()).toBe("    a\n  b");
+			editor.handleInput("g");
+			editor.handleInput("g");
+			editor.handleInput("<");
+			editor.handleInput("<");
+			expect(editor.getText()).toBe("  a\n  b");
+			editor.handleInput("<");
+			editor.handleInput("<");
+			expect(editor.getText()).toBe("a\n  b");
+			editor.handleInput("<");
+			editor.handleInput("<");
+			expect(editor.getText()).toBe("a\n  b");
+		});
+
+		it("shifts the lines a motion covers, and a visual selection", () => {
+			const moved = vimEditor("a\nb\nc");
+			moved.handleInput(">");
+			moved.handleInput("j");
+			expect(moved.getText()).toBe("  a\n  b\nc");
+
+			const visual = vimEditor("a\nb");
+			visual.handleInput("V");
+			visual.handleInput("j");
+			visual.handleInput(">");
+			expect(visual.getText()).toBe("  a\n  b");
+			expect(visual.vimMode).toBe("normal");
+		});
+
+		it("indents a text object instead of deleting it", () => {
+			const editor = vimEditor("one\ntwo\n\nthree");
+			editor.handleInput(">");
+			editor.handleInput("i");
+			editor.handleInput("p");
+			expect(editor.getText()).toBe("  one\n  two\n\nthree");
+		});
+
+		it("leaves empty lines unindented", () => {
+			const editor = vimEditor("one\n\ntwo");
+			editor.handleInput(">");
+			editor.handleInput("G");
+			expect(editor.getText()).toBe("  one\n\n  two");
+		});
+
+		it("cancels a pending r on an arrow, and treats space as a find target", () => {
+			const replaced = vimEditor("abc");
+			replaced.handleInput("r");
+			replaced.handleInput("\x1b[D");
+			expect(replaced.getText()).toBe("abc");
+			expect(replaced.vimPending).toBe("");
+
+			const found = vimEditor("a b");
+			found.handleInput("f");
+			found.handleInput(" ");
+			expect(cursor(found)).toEqual({ line: 0, col: 1 });
+		});
+
+		it("cancels a pending command when Enter submits", () => {
+			const submitted: string[] = [];
+			const editor = vimEditor("abc");
+			editor.onSubmit = text => {
+				submitted.push(text);
+			};
+			editor.handleInput("r");
+			editor.handleInput("\r");
+			expect(submitted).toEqual(["abc"]);
+			expect(editor.vimPending).toBe("");
+		});
+
+		it("overwrites the rest of a batched replace", () => {
+			const editor = vimEditor("abcd");
+			editor.handleInput("RXY");
+			expect(editor.getText()).toBe("XYcd");
+			expect(editor.vimMode).toBe("replace");
+		});
+
+		it("does not restore a replace after another edit moves the bytes", () => {
+			const editor = vimEditor("abc");
+			editor.handleInput("R");
+			editor.handleInput("X");
+			expect(editor.getText()).toBe("Xbc");
+			editor.handleInput("\x1b[H");
+			editor.handleInput("\x1b[3~");
+			editor.handleInput("\x1b[C");
+			editor.handleInput("\x7f");
+			expect(editor.getText()).toBe("bc");
+			expect(editor.vimMode).toBe("replace");
+		});
+
+		it("does not restore the sticky column after r or R", () => {
+			const replaced = vimEditor("abcdefghij\nab\nabcdefghij");
+			for (let i = 0; i < 8; i++) replaced.handleInput("l");
+			replaced.handleInput("j");
+			replaced.handleInput("r");
+			replaced.handleInput("X");
+			replaced.handleInput("j");
+			expect(cursor(replaced)).toEqual({ line: 2, col: 1 });
+
+			const mode = vimEditor("abcdefghij\nab\nabcdefghij");
+			for (let i = 0; i < 8; i++) mode.handleInput("l");
+			mode.handleInput("j");
+			mode.handleInput("R");
+			mode.handleInput("Z");
+			mode.handleInput(ESC);
+			mode.handleInput("j");
+			expect(cursor(mode)).toEqual({ line: 2, col: 1 });
+		});
+	});
+
+	describe("dot repeat", () => {
+		const press = (editor: Editor, ...keys: string[]) => {
+			for (const key of keys) editor.handleInput(key);
+		};
+
+		it("repeats an operator change and undoes it in one step", () => {
+			const editor = vimEditor("alfa beta gamma");
+			press(editor, "d", "w", ".");
+			expect(editor.getText()).toBe("gamma");
+			press(editor, "u");
+			expect(editor.getText()).toBe("beta gamma");
+		});
+
+		it("replaces the original count with the count on `.`, which later `.` keeps", () => {
+			const editor = vimEditor("a b c d e f g h i");
+			press(editor, "2", "d", "w");
+			expect(editor.getText()).toBe("c d e f g h i");
+			press(editor, "3", ".");
+			expect(editor.getText()).toBe("f g h i");
+			press(editor, ".");
+			expect(editor.getText()).toBe("i");
+		});
+
+		it("replays a change's typed text, with the live session and the repeat each one undo step", () => {
+			const editor = vimEditor("alfa beta gamma");
+			press(editor, "c", "w", "new", ESC, "w", ".");
+			expect(editor.getText()).toBe("new new gamma");
+			press(editor, "u");
+			expect(editor.getText()).toBe("new beta gamma");
+			press(editor, "u");
+			expect(editor.getText()).toBe("alfa beta gamma");
+		});
+
+		it("multiplies an insert's text by the count on `.`", () => {
+			const editor = vimEditor("x");
+			press(editor, "A", "!", ESC);
+			expect(editor.getText()).toBe("x!");
+			press(editor, "3", ".");
+			expect(editor.getText()).toBe("x!!!!");
+			press(editor, ".");
+			expect(editor.getText()).toBe("x!!!!!!!");
+		});
+
+		it("opens one line per copy when `.` repeats `o` with a count", () => {
+			const editor = vimEditor("a");
+			press(editor, "o", "b", ESC, "2", ".");
+			expect(editor.getText()).toBe("a\nb\nb\nb");
+			expect(cursor(editor)).toEqual({ line: 3, col: 0 });
+		});
+
+		it("replays Backspace past the insert point", () => {
+			const editor = vimEditor("abcd\nefgh");
+			press(editor, "A", BACKSPACE, BACKSPACE, "X", ESC);
+			expect(editor.getText()).toBe("abX\nefgh");
+			press(editor, "j", ".");
+			expect(editor.getText()).toBe("abX\nefX");
+		});
+
+		it("splits redo and undo at an arrow key inside Insert mode", () => {
+			const editor = vimEditor("one\ntwo");
+			press(editor, "I", "x", LEFT, "y", ESC);
+			expect(editor.getText()).toBe("yxone\ntwo");
+			press(editor, "j", ".");
+			expect(editor.getText()).toBe("yxone\nytwo");
+			press(editor, "u");
+			expect(editor.getText()).toBe("yxone\ntwo");
+			press(editor, "u");
+			expect(editor.getText()).toBe("xone\ntwo");
+			press(editor, "u");
+			expect(editor.getText()).toBe("one\ntwo");
+		});
+
+		it("overwrites rather than inserts when repeating Replace mode", () => {
+			const editor = vimEditor("abcd\nefgh");
+			press(editor, "R", "xy", ESC, "j", "0", ".");
+			expect(editor.getText()).toBe("xycd\nxygh");
+		});
+
+		it("repeats a Visual change over the same shape at the cursor", () => {
+			const lines = vimEditor("a\nb\nc\nd\ne");
+			press(lines, "V", "j", "d");
+			expect(lines.getText()).toBe("c\nd\ne");
+			press(lines, ".");
+			expect(lines.getText()).toBe("e");
+
+			const chars = vimEditor("abcdef");
+			press(chars, "v", "l", "d");
+			expect(chars.getText()).toBe("cdef");
+			press(chars, ".");
+			expect(chars.getText()).toBe("ef");
+		});
+
+		it("ignores yanks and undo when choosing what `.` repeats", () => {
+			const editor = vimEditor("abcdef");
+			press(editor, "x");
+			expect(editor.getText()).toBe("bcdef");
+			press(editor, "y", "w", "u");
+			expect(editor.getText()).toBe("abcdef");
+			press(editor, ".");
+			expect(editor.getText()).toBe("bcdef");
+		});
+
+		it("replays an insert that replaced one emoji with another without splitting a surrogate", () => {
+			const editor = vimEditor("😀 abc\n😇 def");
+			press(editor, "l", "i", BACKSPACE, "😇", ESC, "j", "l", ".");
+			expect(editor.getText()).toBe("😇 abc\n😇 def");
+		});
+
+		it("restores the pre-insert text in one undo after the session outgrows the undo stack", () => {
+			const editor = vimEditor("seed");
+			press(editor, "i", ..." ".repeat(130), ESC, "u");
+			expect(editor.getText()).toBe("seed");
+		});
+
+		it("splits redo and undo on native caret moves inside Insert mode", () => {
+			const editor = vimEditor("abcdef");
+			press(editor, "i", "X");
+			editor.applyHostEdit({ len: 7, from: 5, to: 5, cursor: 5, text: "" });
+			press(editor, "Y", ESC);
+			expect(editor.getText()).toBe("XabcdYef");
+			press(editor, "u");
+			expect(editor.getText()).toBe("Xabcdef");
+			press(editor, "u");
+			expect(editor.getText()).toBe("abcdef");
+			press(editor, ".");
+			expect(editor.getText()).toBe("Yabcdef");
+		});
+
+		it("treats the initial Insert session on a fresh editor as a whole-session change", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			press(editor, ..."hello world", ESC);
+			expect(editor.getText()).toBe("hello world");
+			press(editor, ".");
+			expect(editor.getText()).toBe("hello worlhello worldd");
+			press(editor, "u");
+			expect(editor.getText()).toBe("hello world");
+			press(editor, "u");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("preserves newlines in Replace mode recordings", () => {
+			const editor = vimEditor("abcd\nefgh");
+			press(editor, "R", "X", "\n", "Y", ESC);
+			expect(editor.getText()).toBe("X\nYcd\nefgh");
+			press(editor, "j", "0", ".");
+			expect(editor.getText()).toBe("X\nYcd\nX\nYgh");
+			press(editor, "u");
+			expect(editor.getText()).toBe("X\nYcd\nefgh");
+		});
+
+		it("does not replace the last change when an edit command is a no-op", () => {
+			const editor = vimEditor("alfa\nbeta");
+			press(editor, "x");
+			expect(editor.getText()).toBe("lfa\nbeta");
+			press(editor, "G", "J");
+			expect(editor.getText()).toBe("lfa\nbeta");
+			press(editor, "g", "g", ".");
+			expect(editor.getText()).toBe("fa\nbeta");
+		});
+
+		it("starts a fresh tracked Insert session after a submitted draft", () => {
+			const editor = vimEditor("");
+			press(editor, "i", ..."one");
+			editor.submit();
+			press(editor, ..."two", ESC);
+			expect(editor.getText()).toBe("two");
+			press(editor, ".");
+			expect(editor.getText()).toBe("twtwoo");
+			press(editor, "u");
+			expect(editor.getText()).toBe("two");
+			press(editor, "u");
+			expect(editor.getText()).toBe("");
+		});
+
+		it("deletes whole graphemes at a multiline Visual repeat's end", () => {
+			const editor = vimEditor("a\nb\nc\n😀x");
+			press(editor, "v", "j", "d", "j", ".");
+			expect(editor.getText()).toBe("\nx");
+		});
+
+		it("repeats a find that ended on `.` as its target", () => {
+			const editor = vimEditor("a.b.c");
+			press(editor, "d", "f", ".");
+			expect(editor.getText()).toBe("b.c");
+			press(editor, ".");
+			expect(editor.getText()).toBe("c");
+		});
+
+		it("replays a backspace masked by retyping the same grapheme", () => {
+			const editor = vimEditor("abX\ncdY");
+			press(editor, "l", "l", "i", BACKSPACE, "b", "b", ESC);
+			expect(editor.getText()).toBe("abbX\ncdY");
+			press(editor, "j", ".");
+			expect(editor.getText()).toBe("abbX\ncbbY");
+		});
+
+		it("does not coalesce the first session keystroke with pre-Vim typing", () => {
+			const editor = new Editor(defaultEditorTheme);
+			press(editor, ..."abc");
+			editor.setVimMode(true);
+			press(editor, ..."def", ESC);
+			expect(editor.getText()).toBe("abcdef");
+			press(editor, "u");
+			expect(editor.getText()).toBe("abc");
+		});
+
+		it("starts a fresh tracked Replace session after a submitted draft", () => {
+			const editor = vimEditor("");
+			press(editor, "R", ..."one");
+			editor.submit();
+			press(editor, ..."two", ESC);
+			expect(editor.getText()).toBe("two");
+			press(editor, ".");
+			expect(editor.getText()).toBe("twtwo");
+			press(editor, "u");
+			expect(editor.getText()).toBe("two");
+			press(editor, "u");
+			expect(editor.getText()).toBe("");
 		});
 	});
 });

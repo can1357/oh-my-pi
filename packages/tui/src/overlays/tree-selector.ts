@@ -10,7 +10,7 @@ import {
 	TruncatedText,
 	truncateToWidth,
 } from "../index";
-import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, oklabDistance, sanitizeText } from "@oh-my-pi/pi-utils";
 /** Available session-tree display filters. */
 export const TREE_FILTER_MODES = ["default", "no-tools", "user-only", "labeled-only", "all"] as const;
 /** Session-tree display filter. */
@@ -54,9 +54,10 @@ import { shortenPath } from "../render/render-utils";
 import { canonicalizeMessage } from "../chat/thinking-display";
 import { resolveAssistantErrorPresentation } from "../chat/transcript-render-helpers";
 import { OverlayPanel, PanelDivider } from "../chrome/overlay-box";
-import { TreeView, type TreeRow } from "../components/tree-view";
+import { TreeView, type TreeAncestor, type TreeRow } from "../components/tree-view";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
-import { boundKeys, editorKeys, interruptKey } from "../chrome/keybinding-hints";
+import { boundKeys, editorKey, editorKeys, interruptKey } from "../chrome/keybinding-hints";
+import { getKeybindings } from "../keybindings";
 import type { TspPickerItem, TspPickerProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { ThemeColor } from "../theme/schema";
 import { col, keyed, node, span, text } from "../native/describe";
@@ -93,8 +94,13 @@ interface AdvisorTreeDisplay {
  */
 function sanitizeTreeField(value: string): string {
 	return sanitizeText(value)
-		.replace(/[\n\t]/g, " ")
+		.replace(/[\r\n\t\u2028\u2029]/g, " ")
 		.trim();
+}
+
+/** Strip ANSI/control characters and fold line breaks for single-line tree rows and headers. */
+function treeRowText(value: string): string {
+	return plainText(value.replace(/[\r\n\u2028\u2029]/g, " "));
 }
 
 /**
@@ -164,10 +170,38 @@ function stripSystemWrapperTags(content: string): string {
 /** Per-message cap on text folded into the tree search index. */
 const SEARCH_TEXT_LIMIT = 200;
 
-/** One theme-colored piece of an entry's display text. */
+/** One theme-colored piece of an entry's display text; `strong` draws it bold. */
 interface EntryPart {
 	t: string;
 	s?: ThemeColor;
+	strong?: boolean;
+}
+
+/** An entry part as a native span. */
+function partSpan(part: EntryPart): TspSpan {
+	const style = part.strong ? (part.s ? `${part.s} strong` : "strong") : part.s;
+	return span(treeRowText(part.t), style);
+}
+
+/** OKLab distance under which two role colors read as the same color. */
+const SAME_COLOR_DISTANCE = 0.05;
+
+let assistantLabel: { theme: typeof theme; color: ThemeColor } | undefined;
+
+/**
+ * The `assistant:` label color: `success`, unless it looks like the `user:` label's
+ * `accent` (`dark-terminal`, `*-poimandres`); then the path color, then `muted`.
+ */
+function assistantLabelColor(): ThemeColor {
+	if (assistantLabel?.theme !== theme) {
+		const accent = theme.getColorHex("accent");
+		const color =
+			(["success", "statusLinePath"] as const).find(
+				c => oklabDistance(theme.getColorHex(c), accent) >= SAME_COLOR_DISTANCE,
+			) ?? "muted";
+		assistantLabel = { theme, color };
+	}
+	return assistantLabel.color;
 }
 
 /** A cached native tree item and the inputs it was built from. */
@@ -204,6 +238,7 @@ class TreeList implements Component {
 	#roots: TreeSelectorNode[] = [];
 	#rootIds: Set<string> = new Set();
 	#nodeById: Map<string, TreeSelectorNode> = new Map();
+	#parentById: Map<string, string | null> = new Map();
 	#filterMode: FilterMode;
 	/** The search field; its value is the fuzzy query. */
 	readonly searchInput = new Input();
@@ -232,10 +267,20 @@ class TreeList implements Component {
 		| undefined;
 	/** Bumped on every label edit: labels are item badges. */
 	#labelVersion = 0;
+	/** Theme the native item caches were built under: labels bake in the `assistant:` color. */
+	#nativeTheme = theme;
 	#pickerItems:
 		| { rows: readonly TreeRow<TreeSelectorNode, string>[]; labels: number; items: TspPickerItem[] }
 		| undefined;
 	#pickerOrder: { rows: readonly TreeRow<TreeSelectorNode, string>[]; order: string[] } | undefined;
+	/** Branch-navigation targets for one filtered rows snapshot; filtering replaces the rows array. */
+	#branchTargets:
+		| {
+				rows: readonly TreeRow<TreeSelectorNode, string>[];
+				targets: readonly TreeSelectorNode[];
+				targetIndexByRootId: ReadonlyMap<string, number>;
+		  }
+		| undefined;
 	#previewMemo: { node: TreeSelectorNode | undefined; labels: number; preview: NativeChild[] } | undefined;
 
 	constructor(
@@ -256,6 +301,7 @@ class TreeList implements Component {
 			getChildren: node => this.#orderedChildren(node),
 			getChildDepth: (_node, row, children) =>
 				children.length > 1 || (this.#multipleRoots && row.parentKey === undefined) ? row.depth + 1 : row.depth,
+			compactSameDepthAncestors: true,
 			theme,
 			filter: this.#buildFilter(),
 			maxRows: maxVisibleLines,
@@ -292,8 +338,9 @@ class TreeList implements Component {
 		this.#containsActive.clear();
 		this.#nodeById.clear();
 		this.#activePathIds.clear();
+		this.#parentById.clear();
 
-		const parentIds = new Map<string, string | null>();
+		const parentIds = this.#parentById;
 		const allNodes: TreeSelectorNode[] = [];
 		const visitStack: TreeSelectorNode[] = [...roots];
 		while (visitStack.length > 0) {
@@ -364,6 +411,100 @@ class TreeList implements Component {
 		}
 		if (!hasActive) return children;
 		return [...children].sort((a, b) => Number(this.#containsActive.get(b)) - Number(this.#containsActive.get(a)));
+	}
+
+	/** Visible branch targets in rendered order, keyed by every raw branch head. */
+	#visibleBranchProjection(rows: readonly TreeRow<TreeSelectorNode, string>[]): {
+		targets: readonly TreeSelectorNode[];
+		targetIndexByRootId: ReadonlyMap<string, number>;
+	} {
+		const visibleIndex = new Map<string, number>();
+		for (let index = 0; index < rows.length; index++) visibleIndex.set(rows[index]!.key, index);
+		const nodes: TreeSelectorNode[] = [];
+		const stack = [...this.#roots].reverse();
+		while (stack.length > 0) {
+			const node = stack.pop()!;
+			nodes.push(node);
+			const children = this.#orderedChildren(node);
+			for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]!);
+		}
+
+		// One bottom-up pass makes filtered-head promotion O(nodes), rather than
+		// rescanning a branch subtree for every fork.
+		const firstVisibleById = new Map<string, TreeSelectorNode>();
+		for (let index = nodes.length - 1; index >= 0; index--) {
+			const node = nodes[index]!;
+			let target = visibleIndex.has(node.entry.id) ? node : undefined;
+			if (!target) {
+				for (const child of this.#orderedChildren(node)) {
+					target = firstVisibleById.get(child.entry.id);
+					if (target) break;
+				}
+			}
+			if (target) firstVisibleById.set(node.entry.id, target);
+		}
+
+		const byTargetId = new Map<string, { rootIds: string[]; target: TreeSelectorNode }>();
+		const addFork = (branches: readonly TreeSelectorNode[]) => {
+			if (branches.length < 2) return;
+			for (const branch of branches) {
+				const target = firstVisibleById.get(branch.entry.id);
+				if (!target) continue;
+				const existing = byTargetId.get(target.entry.id);
+				if (existing) existing.rootIds.push(branch.entry.id);
+				else byTargetId.set(target.entry.id, { rootIds: [branch.entry.id], target });
+			}
+		};
+		addFork(this.#roots);
+		for (const node of nodes) addFork(this.#orderedChildren(node));
+
+		const ordered = [...byTargetId.values()].sort(
+			(a, b) => visibleIndex.get(a.target.entry.id)! - visibleIndex.get(b.target.entry.id)!,
+		);
+		const targetIndexByRootId = new Map<string, number>();
+		for (let index = 0; index < ordered.length; index++) {
+			for (const rootId of ordered[index]!.rootIds) targetIndexByRootId.set(rootId, index);
+		}
+		return { targets: ordered.map(entry => entry.target), targetIndexByRootId };
+	}
+
+	/** Raw branch root containing `entryId` at its nearest ancestor fork. */
+	#nearestBranchRootId(entryId: string): string | undefined {
+		let branchId = entryId;
+		let parentId = this.#parentById.get(branchId);
+		while (parentId !== undefined) {
+			const siblings = parentId === null ? this.#roots : this.#orderedChildren(this.#nodeById.get(parentId)!);
+			if (siblings.length > 1) return branchId;
+			if (parentId === null) break;
+			branchId = parentId;
+			parentId = this.#parentById.get(parentId);
+		}
+		return undefined;
+	}
+
+	/**
+	 * Move through every visible branch in rendered order, crossing nested fork
+	 * depths. Raw ancestry identifies branch membership; visibility only chooses
+	 * the first selectable descendant when a branch head is filtered.
+	 */
+	#moveBranch(direction: -1 | 1): void {
+		const selected = this.#tree.selectedItem;
+		if (!selected) return;
+		// Projection is O(nodes); reuse it across presses until filtering replaces the rows.
+		const rows = this.#tree.rows;
+		if (this.#branchTargets?.rows !== rows) this.#branchTargets = { rows, ...this.#visibleBranchProjection(rows) };
+		const { targets, targetIndexByRootId } = this.#branchTargets;
+
+		if (targets.length === 0) return;
+		const currentRootId = this.#nearestBranchRootId(selected.entry.id);
+		const currentIndex = currentRootId === undefined ? -1 : (targetIndexByRootId.get(currentRootId) ?? -1);
+		const nextIndex =
+			currentIndex < 0
+				? direction > 0
+					? 0
+					: targets.length - 1
+				: (currentIndex + direction + targets.length) % targets.length;
+		this.#tree.setSelectedKey(targets[nextIndex]!.entry.id);
 	}
 
 	#applyFilter(): void {
@@ -597,6 +738,7 @@ class TreeList implements Component {
 	 * only `order` (the visible entries) and the selection.
 	 */
 	pickerView(): TreePickerView {
+		this.#syncNativeTheme();
 		const allRows = this.#tree.allRows;
 		if (this.#pickerItems?.rows !== allRows || this.#pickerItems.labels !== this.#labelVersion) {
 			// Real branch points get a disclosure; linear chains stay flat at their head's depth.
@@ -628,9 +770,7 @@ class TreeList implements Component {
 	#pickerItem(row: TreeRow<TreeSelectorNode, string>, open: boolean): TspPickerItem {
 		const item = row.item;
 		const entry = item.entry;
-		const label = this.#entryParts(item).map(part =>
-			span(part.t.includes("\x1b") ? plainText(part.t) : part.t, part.s),
-		);
+		const label = this.#entryParts(item).map(partSpan);
 		let kind: TspPickerItem["node"] = "marker";
 		let role: string | undefined;
 		if (isUserRequestEntry(entry)) {
@@ -649,7 +789,7 @@ class TreeList implements Component {
 			node: kind,
 			...(role ? { role } : {}),
 			...(open ? { open: true } : {}),
-			...(item.label ? { badges: [{ text: plainText(item.label), tone: "warning" as const }] } : {}),
+			...(item.label ? { badges: [{ text: treeRowText(item.label), tone: "warning" as const }] } : {}),
 			...(this.#activePathIds.has(row.key) ? { dot: "accent" as const } : {}),
 		};
 	}
@@ -666,7 +806,7 @@ class TreeList implements Component {
 		if (selected) {
 			const entry = selected.entry;
 			const parts = this.#entryParts(selected)
-				.map(part => (part.t.includes("\x1b") ? plainText(part.t) : part.t))
+				.map(part => treeRowText(part.t))
 				.join("");
 			if (entry.type === "message" || entry.type === "custom_message") {
 				const target: OutlineTarget = {
@@ -678,12 +818,14 @@ class TreeList implements Component {
 					entries: [entry],
 				};
 				const copy = targetCopy(target, collectBlocks(target.entries));
-				preview.push(text(`${copy.label[0]!.toUpperCase()}${copy.label.slice(1)}`, { role: "omp.picker.title" }));
-				if (selected.label) preview.push(text([span(plainText(selected.label), "warning")]));
+				preview.push(
+					text(treeRowText(`${copy.label[0]!.toUpperCase()}${copy.label.slice(1)}`), { role: "omp.picker.title" }),
+				);
+				if (selected.label) preview.push(text([span(treeRowText(selected.label), "warning")]));
 				preview.push(turnPreview(target, copy.content || parts));
 			} else {
 				preview.push(text(parts, { role: "omp.picker.title" }));
-				if (selected.label) preview.push(text([span(plainText(selected.label), "warning")]));
+				if (selected.label) preview.push(text([span(treeRowText(selected.label), "warning")]));
 			}
 		}
 		this.#previewMemo = { node: selected, labels: this.#labelVersion, preview };
@@ -697,6 +839,7 @@ class TreeList implements Component {
 	 * instead of drawn tree connectors.
 	 */
 	describeList(): NativeNode {
+		this.#syncNativeTheme();
 		const rows = this.#tree.rows;
 		let items = this.#itemsNative;
 		if (items?.rows !== rows) {
@@ -746,6 +889,15 @@ class TreeList implements Component {
 		];
 	}
 
+	/** Drop native items built under another theme. */
+	#syncNativeTheme(): void {
+		if (this.#nativeTheme === theme) return;
+		this.#nativeTheme = theme;
+		this.#pickerItems = undefined;
+		this.#itemsNative = undefined;
+		this.#itemCache.clear();
+	}
+
 	#describeRow(row: TreeRow<TreeSelectorNode, string>): NativeNode {
 		const item = row.item;
 		const branch = row.parentKey !== undefined && row.siblingCount > 1;
@@ -753,10 +905,8 @@ class TreeList implements Component {
 		if (cached !== undefined && cached.label === item.label && cached.branch === branch) return cached.node;
 		const label: TspSpan[] = [];
 		if (this.#activePathIds.has(row.key)) label.push(span(`${theme.md.bullet} `, "accent"));
-		if (item.label) label.push(span(`[${plainText(item.label)}] `, "warning"));
-		for (const part of this.#entryParts(item)) {
-			label.push(span(part.t.includes("\x1b") ? plainText(part.t) : part.t, part.s));
-		}
+		if (item.label) label.push(span(`[${treeRowText(item.label)}] `, "warning"));
+		for (const part of this.#entryParts(item)) label.push(partSpan(part));
 		const described = node("item", { label, icon: branch ? "branch" : undefined }, undefined, row.key);
 		this.#itemCache.set(row.key, { label: item.label, branch, node: described });
 		return described;
@@ -848,7 +998,7 @@ class TreeList implements Component {
 		// Active path marker - shown right before the entry text
 		const isOnActivePath = this.#activePathIds.has(node.entry.id);
 		const pathMarker = isOnActivePath ? theme.fg("accent", `${theme.md.bullet} `) : "";
-		const label = node.label ? theme.fg("warning", `[${node.label}] `) : "";
+		const label = node.label ? theme.fg("warning", `[${treeRowText(node.label)}] `) : "";
 		return `${pathMarker}${label}${this.#getEntryDisplayText(node, selected)}`;
 	}
 
@@ -893,23 +1043,26 @@ class TreeList implements Component {
 		// Linear rows reuse their branch head's depth. Existing sibling
 		// gutters remain visible; terminal gutters remain terminated.
 
+		// Branch points that can draw a gutter, indexed by rendered level: the
+		// ancestor list is as deep as the conversation, so it is scanned once
+		// per row rather than once per prefix cell.
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
+		const gutterByLevel: (TreeAncestor<string> | undefined)[] = new Array(renderedIndent);
+		for (const ancestor of row.ancestors) {
+			if (ancestor.siblingCount <= 1) continue;
+			if (this.#multipleRoots && this.#rootIds.has(ancestor.key)) continue;
+			const level = ancestor.depth - 1 - scrollOffset;
+			if (level >= 0 && level < renderedIndent && gutterByLevel[level] === undefined) {
+				gutterByLevel[level] = ancestor;
+			}
+		}
 		// Build prefix char by char, placing gutters and connector at their positions
 		const totalChars = renderedIndent * 3;
 		const prefixChars: string[] = [];
 		for (let i = 0; i < totalChars; i++) {
 			const level = Math.floor(i / 3);
-			const originalDepth = level + scrollOffset;
 			const posInLevel = i % 3;
-
-			// An ancestor branch point draws its gutter at its own depth minus
-			// one — the level its connector occupied. Session roots never emit
-			// gutters; their connectors are suppressed.
-			const gutterAncestor = row.ancestors.find(
-				ancestor =>
-					ancestor.depth - 1 === originalDepth &&
-					ancestor.siblingCount > 1 &&
-					!(this.#multipleRoots && this.#rootIds.has(ancestor.key)),
-			);
+			const gutterAncestor = gutterByLevel[level];
 			if (gutterAncestor) {
 				// Gutters follow standard tree semantics: `│` only while more
 				// siblings continue below, space below a `└─`.
@@ -941,7 +1094,13 @@ class TreeList implements Component {
 
 	#getEntryDisplayText(node: TreeSelectorNode, isSelected: boolean): string {
 		let result = "";
-		for (const part of this.#entryParts(node)) result += part.s ? theme.fg(part.s, part.t) : part.t;
+		for (const part of this.#entryParts(node)) {
+			let value = treeRowText(part.t);
+			if (part.s) value = theme.fg(part.s, value);
+			// A selected row is bolded whole; nested bold would close it early.
+			if (part.strong && !isSelected) value = theme.bold(value);
+			result += value;
+		}
 		return isSelected ? theme.bold(result) : result;
 	}
 
@@ -957,7 +1116,10 @@ class TreeList implements Component {
 				if (role === "user") {
 					const msgWithContent = msg as { content?: unknown };
 					const content = normalize(this.#extractContent(msgWithContent.content));
-					return [{ t: "user: ", s: "accent" }, { t: content }];
+					return [
+						{ t: "user: ", s: "accent", strong: true },
+						{ t: content, s: "accent", strong: true },
+					];
 				}
 				if (role === "developer") {
 					const msgWithContent = msg as { content?: unknown };
@@ -969,15 +1131,10 @@ class TreeList implements Component {
 				}
 				if (role === "assistant") {
 					const presentation = resolveAssistantErrorPresentation(msg);
-					if (presentation.kind === "compact-recovered") {
-						return [
-							{ t: "assistant: ", s: "success" },
-							{ t: presentation.text, s: "dim" },
-						];
-					}
+					const head: EntryPart = { t: "assistant: ", s: assistantLabelColor() };
+					if (presentation.kind === "compact-recovered") return [head, { t: presentation.text, s: "dim" }];
 					const msgWithContent = msg as { content?: unknown; stopReason?: string; errorMessage?: string };
 					const textContent = normalize(this.#extractContent(msgWithContent.content));
-					const head: EntryPart = { t: "assistant: ", s: "success" };
 					if (textContent) return [head, { t: textContent }];
 					if (presentation.kind === "full") {
 						return [head, { t: normalize(presentation.text).slice(0, 80), s: "error" }];
@@ -1001,10 +1158,16 @@ class TreeList implements Component {
 				if (entry.customType === "advisor") {
 					const { qualifier, text } = advisorTreeDisplay(entry.details);
 					const label = qualifier ? `advisor (${qualifier}): ` : "advisor: ";
-					return [{ t: label, s: "customMessageLabel" }, { t: normalize(text) }];
+					return [
+						{ t: label, s: "customMessageLabel" },
+						{ t: normalize(text), s: "muted" },
+					];
 				}
 				const content = stripSystemWrapperTags(this.#joinTextContent(entry.content));
-				return [{ t: `[${entry.customType}]: `, s: "customMessageLabel" }, { t: normalize(content) }];
+				return [
+					{ t: `[${entry.customType}]: `, s: "customMessageLabel" },
+					{ t: normalize(content), s: "muted" },
+				];
 			}
 			case "compaction": {
 				const tokens = Math.round(entry.tokensBefore / 1000);
@@ -1052,12 +1215,12 @@ class TreeList implements Component {
 	}
 
 	#extractContent(content: unknown): string {
-		return this.#joinTextContent(content).slice(0, SEARCH_TEXT_LIMIT);
+		return this.#joinTextContent(content, SEARCH_TEXT_LIMIT);
 	}
 
-	/** Concatenate every text block (or return a string as-is) with no length cap. */
-	#joinTextContent(content: unknown): string {
-		if (typeof content === "string") return content;
+	/** Concatenate text blocks, stopping as soon as `limit` characters exist. */
+	#joinTextContent(content: unknown, limit = Number.POSITIVE_INFINITY): string {
+		if (typeof content === "string") return content.length > limit ? content.slice(0, limit) : content;
 		if (Array.isArray(content)) {
 			let result = "";
 			for (const c of content) {
@@ -1070,6 +1233,7 @@ class TreeList implements Component {
 					typeof c.text === "string"
 				) {
 					result += c.text;
+					if (result.length >= limit) return result.slice(0, limit);
 				}
 			}
 			return result;
@@ -1205,6 +1369,10 @@ class TreeList implements Component {
 					(node.entry.message.role === "user" || node.entry.message.role === "assistant"),
 				1,
 			);
+		} else if (getKeybindings().matches(keyData, "app.tree.previousBranch")) {
+			this.#moveBranch(-1);
+		} else if (getKeybindings().matches(keyData, "app.tree.nextBranch")) {
+			this.#moveBranch(1);
 		} else if (matchesKey(keyData, "home")) {
 			this.#tree.setSelectionIndex(0);
 		} else if (matchesKey(keyData, "end")) {
@@ -1393,6 +1561,10 @@ export class TreeSelectorComponent extends OverlayPanel {
 		this.#treeContainer.addChild(this.#treeList);
 
 		this.#labelInputContainer = new Container();
+		// Either action may be unbound; hint only the keys that still do something.
+		const branchKeys = [editorKey("app.tree.previousBranch"), editorKey("app.tree.nextBranch")]
+			.filter(Boolean)
+			.join("/");
 
 		this.addChild(new Spacer(1));
 		this.addChild(
@@ -1402,6 +1574,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 					[
 						`${formatKeyHint("enter")}: switch.`,
 						`${formatKeyHints(["alt+up", "alt+down"])}: previous/next turn.`,
+						...(branchKeys ? [`${branchKeys}: previous/next branch.`] : []),
 						`${editorKeys("tui.select.pageUp", "tui.select.pageDown")} (${formatKeyHints(["left", "right"])}): page.`,
 						`${formatKeyHints(["home", "end"])}: first/last item.`,
 						`${formatKeyHint("shift+enter")}: summarize & switch.`,
@@ -1558,6 +1731,7 @@ export class TreeSelectorComponent extends OverlayPanel {
 			hintsRow([
 				{ keys: ["enter"], label: "switch" },
 				{ keys: ["alt+up", "alt+down"], label: "previous/next turn" },
+				actionHint(["app.tree.previousBranch", "app.tree.nextBranch"], "previous/next branch"),
 				actionHint(["tui.select.pageUp", "tui.select.pageDown"], "page"),
 				{ keys: ["home", "end"], label: "first/last" },
 				{ keys: ["shift+enter"], label: "summarize & switch" },

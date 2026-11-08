@@ -14,7 +14,7 @@
 //! disabled for writes, ambient `GIT_DIR`-family vars stripped, bounded output
 //! capture, and deadline + SIGTERM→SIGKILL termination via tokio.
 
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{ffi::OsStr, path::Path, process::Stdio, time::Duration};
 
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
@@ -184,6 +184,25 @@ fn is_utf8_locale(value: &str) -> bool {
 	})
 }
 
+/// Start `cmd` in a new session with no controlling terminal, the embedded
+/// shell's policy for externals. Without it git and everything it starts (ssh,
+/// credential helpers, signers, hooks) share the host's terminal: any of them
+/// can read the user's keystrokes and the terminal's protocol replies out from
+/// under the TUI, or prompt on it. Detached, a `/dev/tty` open fails
+/// (`ENXIO`), so a prompt errors out instead.
+#[cfg(unix)]
+pub(crate) fn detach_from_terminal(cmd: &mut std::process::Command) {
+	std::os::unix::process::CommandExt::setsid(cmd, true);
+}
+
+#[cfg(not(unix))]
+#[allow(
+	clippy::needless_pass_by_ref_mut,
+	reason = "no controlling terminal to detach from off unix; the signature matches the unix \
+	          variant"
+)]
+pub(crate) const fn detach_from_terminal(_cmd: &mut std::process::Command) {}
+
 /// Run `git` asynchronously with bounded capture and a deadline.
 /// Non-zero exits are returned in [`CliOutput`], not raised.
 pub(crate) async fn run(cwd: &Path, args: &[String], options: &RunOptions) -> Result<CliOutput> {
@@ -200,6 +219,7 @@ pub(crate) async fn run(cwd: &Path, args: &[String], options: &RunOptions) -> Re
 		.stderr(Stdio::piped())
 		.kill_on_drop(true);
 	apply_env(&mut cmd);
+	detach_from_terminal(cmd.as_std_mut());
 	let mut child = cmd.spawn().map_err(|err| spawn_error(cwd, err))?;
 
 	if let Some(stdin) = &options.stdin
@@ -305,6 +325,25 @@ pub(crate) fn run_sync(cwd: &Path, args: &[String], timeout: Duration) -> Result
 	run_sync_capped(cwd, args, timeout, OUTPUT_LIMIT_BYTES)
 }
 
+/// Stdin and environment for a [`run_sync_write`] invocation.
+pub(crate) struct SyncWrite<'a> {
+	/// Bytes piped to the child's stdin, then closed.
+	pub stdin: &'a [u8],
+	/// Variables set after [`apply_env`], so they win over its contract.
+	pub env:   &'a [(&'a str, &'a OsStr)],
+}
+
+/// Synchronous runner for local write plumbing (fsmonitor/untracked-cache
+/// pinned off) that feeds `input.stdin` and sets `input.env` on the child.
+pub(crate) fn run_sync_write(
+	cwd: &Path,
+	args: &[String],
+	timeout: Duration,
+	input: &SyncWrite<'_>,
+) -> Result<CliOutput> {
+	run_sync_impl(cwd, args, timeout, OUTPUT_LIMIT_BYTES, Some(input))
+}
+
 /// [`run_sync`] with an explicit retention cap. The cap is a parameter rather
 /// than a constant read inside the reader threads so a test can exercise the
 /// truncation contract on one call without lowering the limit for every other
@@ -315,18 +354,73 @@ pub(crate) fn run_sync_capped(
 	timeout: Duration,
 	limit: usize,
 ) -> Result<CliOutput> {
-	let argv = hardened_args(args, true);
+	run_sync_impl(cwd, args, timeout, limit, None)
+}
+
+/// Shared synchronous runner: read-only when `write` is `None`.
+fn run_sync_impl(
+	cwd: &Path,
+	args: &[String],
+	timeout: Duration,
+	limit: usize,
+	write: Option<&SyncWrite<'_>>,
+) -> Result<CliOutput> {
+	let argv = hardened_args(args, write.is_none());
 	let mut cmd = std::process::Command::new("git");
 	cmd.args(&argv)
 		.current_dir(cwd)
-		.stdin(Stdio::null())
+		.stdin(if write.is_some() {
+			Stdio::piped()
+		} else {
+			Stdio::null()
+		})
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped());
 	apply_env(&mut cmd);
+	detach_from_terminal(&mut cmd);
+	if let Some(write) = write {
+		for (key, value) in write.env {
+			cmd.env(key, value);
+		}
+	}
 	let mut child = cmd.spawn().map_err(|err| spawn_error(cwd, err))?;
 	let stdout = spawn_sync_reader("git-cli-stdout", child.stdout.take(), limit);
 	let stderr = spawn_sync_reader("git-cli-stderr", child.stderr.take(), limit);
+	std::thread::scope(|scope| {
+		// The writer runs beside the deadline loop: a child that stops reading
+		// must still be killed on time, and the kill closes the pipe, which
+		// unblocks the writer before the scope joins it.
+		if let Some(write) = write
+			&& let Some(mut pipe) = child.stdin.take()
+		{
+			let writer = std::thread::Builder::new()
+				.name("git-cli-stdin".into())
+				.spawn_scoped(scope, move || {
+					use std::io::Write;
+					// A child that exits early closes the pipe; its exit status
+					// is the answer, not this write error.
+					let _ = pipe.write_all(write.stdin);
+				});
+			if let Err(err) = writer {
+				// The dropped pipe reads as an empty input; the child must not
+				// act on it.
+				let _ = child.kill();
+				let _ = child.wait();
+				return Err(Error::backend("git spawn stdin writer", err));
+			}
+		}
+		wait_sync(&argv, child, stdout, stderr, timeout)
+	})
+}
 
+/// Deadline loop and output collection for [`run_sync_impl`].
+fn wait_sync(
+	argv: &[String],
+	mut child: std::process::Child,
+	stdout: Option<std::thread::JoinHandle<String>>,
+	stderr: Option<std::thread::JoinHandle<String>>,
+	timeout: Duration,
+) -> Result<CliOutput> {
 	let deadline = std::time::Instant::now() + timeout;
 	let status = loop {
 		match child.try_wait()? {
@@ -341,8 +435,8 @@ pub(crate) fn run_sync_capped(
 	};
 	// The child has exited (or been killed), so the pipes reach EOF and the
 	// readers terminate; join can only block briefly on the final drain.
-	let stdout = stdout.map_or_else(String::new, |h| h.join().unwrap_or_default());
-	let stderr = stderr.map_or_else(String::new, |h| h.join().unwrap_or_default());
+	let stdout = stdout.map_or_default(|h| h.join().unwrap_or_default());
+	let stderr = stderr.map_or_default(|h| h.join().unwrap_or_default());
 	let Some(status) = status else {
 		return Err(Error::CliTimeout { command: format!("git {}", argv.join(" ")) });
 	};
@@ -389,7 +483,7 @@ fn read_capped_sync(mut stream: impl std::io::Read, limit: usize) -> String {
 			truncated = true;
 		}
 	}
-	let mut text = String::from_utf8_lossy(&retained).into_owned();
+	let mut text = String::from_utf8_lossy_owned(retained);
 	if truncated {
 		text.push_str(TRUNCATION_MARKER);
 	}
@@ -432,7 +526,7 @@ async fn read_capped(mut stream: impl tokio::io::AsyncRead + Unpin) -> Result<St
 			truncated = true;
 		}
 	}
-	let mut text = String::from_utf8_lossy(&retained).into_owned();
+	let mut text = String::from_utf8_lossy_owned(retained);
 	if truncated {
 		text.push_str(TRUNCATION_MARKER);
 	}
@@ -585,6 +679,28 @@ mod tests {
 	/// Asks git to report the ambient variables it was started with. A `!`-alias
 	/// is the only way to make git print its own environment.
 	const ENV_PROBE_ALIAS: &str = r#"!printf 'LC_ALL=[%s] LC_CTYPE=[%s] LC_MESSAGES=[%s] LITERAL=[%s] ICASE=[%s]' "$LC_ALL" "$LC_CTYPE" "$LC_MESSAGES" "$GIT_LITERAL_PATHSPECS" "$GIT_ICASE_PATHSPECS""#;
+
+	/// A git left in the host's process group shares its terminal and can read
+	/// the TUI's keystrokes and terminal replies (Tern TSP events leaked into
+	/// the composer with their leading bytes missing). Both runners must start
+	/// it in its own session.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn runners_start_git_outside_the_host_process_group() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let args = ["-c".to_owned(), "alias.pgid=!ps -o pgid= -p $$".to_owned(), "pgid".to_owned()];
+		// SAFETY: getpgrp has no preconditions.
+		let host = unsafe { libc::getpgrp() };
+		let sync = run_sync(dir.path(), &args, SYNC_TIMEOUT).expect("sync runner");
+		let spawned = run(dir.path(), &args, &RunOptions::default())
+			.await
+			.expect("async runner");
+		for out in [sync, spawned] {
+			assert_eq!(out.exit_code, 0, "alias failed: {out:?}");
+			let pgid: i32 = out.stdout.trim().parse().expect("pgid");
+			assert_ne!(pgid, host, "git shares the host's process group: {out:?}");
+		}
+	}
 
 	/// Two guarantees this crate builds on top of, both of which depend on what
 	/// the child process actually receives:

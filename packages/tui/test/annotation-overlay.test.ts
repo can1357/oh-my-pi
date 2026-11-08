@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, afterEach, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { getKeybindings, setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 import { AnnotationOverlay, type AnnotationOverlayCallbacks } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
@@ -10,10 +10,12 @@ import type {
 	TextReviewOverlayResult,
 	TextReviewSource,
 } from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import type { NativeUiEvent } from "../src/native/node";
 import { sliceByColumn, visibleWidth } from "../src/utils";
 
 const ENTER = "\r";
 const TAB = "\t";
+const SHIFT_TAB = "\x1b[Z";
 const DOWN = "\x1b[B";
 const CANCEL = "\x1b";
 const SHIFT_ENTER = "\x1b[13;2~";
@@ -108,6 +110,11 @@ function makeTextOverlay(
 	return overlay;
 }
 
+/** A click on the native sheet's footer button `act`. */
+function click(act: string): NativeUiEvent {
+	return { type: "action", key: `actions/${act}`, act, mods: [] };
+}
+
 function makeTui(rows = 40): TUI {
 	return {
 		terminal: { rows },
@@ -157,6 +164,59 @@ describe("AnnotationOverlay", () => {
 
 	afterEach(() => {
 		setKeybindings(previousKeybindings);
+	});
+
+	describe("native sheet", () => {
+		it("titles the sheet by the review and routes its footer buttons like the keys", () => {
+			let result: CodeReviewOverlayResult | undefined;
+			const overlay = makeDiffOverlay(oneLineFiles, { onComplete: value => (result = value) });
+			expect(overlay.nativeOverlay).toMatchObject({ role: "omp.overlay.codeReview", size: "full" });
+
+			overlay.describe();
+			// Paste needs a note first; a draft blocks both actions.
+			overlay.handleNativeEvent(click("paste"));
+			expect(result).toBeUndefined();
+			overlay.handleInput(TAB);
+			overlay.handleInput("a");
+			for (const glyph of "rename this") overlay.handleInput(glyph);
+			overlay.handleNativeEvent(click("paste"));
+			expect(result).toBeUndefined();
+			overlay.handleInput(ENTER);
+
+			overlay.handleNativeEvent(click("paste"));
+			expect(result).toEqual({
+				action: "paste",
+				annotations: [expect.objectContaining({ scope: "line", note: "rename this" })],
+			});
+		});
+
+		it("opens a line's note on double-click; closing keeps the unfinished note in the draft", () => {
+			let completed = 0;
+			const overlay = makeDiffOverlay(oneLineFiles, { onComplete: () => void completed++ });
+			overlay.describe();
+			overlay.handleNativeEvent({ type: "activate", key: "split/pane/lines", item: "l1" });
+			for (const glyph of "why") overlay.handleInput(glyph);
+			overlay.handleNativeEvent(click("close"));
+			expect(completed).toBe(1);
+			expect(overlay.getAnnotations()).toEqual([]);
+			expect(overlay.getDraft()).toMatchObject({ kind: "diff", editor: { scope: "line", text: "why" } });
+		});
+
+		it("annotates text as a full sheet with only the paste action", () => {
+			let result: TextReviewOverlayResult | undefined;
+			const overlay = makeTextOverlay({ id: "t", kind: "message", label: "Reply", text: "one\ntwo" }, value => {
+				result = value;
+			});
+			expect(overlay.nativeOverlay).toMatchObject({ role: "omp.overlay.annotateText", size: "full" });
+			overlay.describe();
+			overlay.handleNativeEvent(click("review"));
+			expect(result).toBeUndefined();
+			overlay.handleInput("A");
+			for (const glyph of "tighten") overlay.handleInput(glyph);
+			overlay.handleInput(ENTER);
+			overlay.handleNativeEvent(click("paste"));
+			expect(result).toEqual({ action: "paste", annotations: [{ scope: "text", note: "tighten" }] });
+		});
 	});
 
 	it("anchors a line note to the frozen source row and deletes it on an empty edit", () => {
@@ -317,7 +377,7 @@ describe("AnnotationOverlay", () => {
 		expect(overlay.getAnnotations()).toEqual([expect.objectContaining({ note: "first\nsecond" })]);
 	});
 
-	it("deletes an existing text note on blank submit and preserves it on Escape", () => {
+	it("deletes a note on blank submit; Escape closes keeping the edit in progress, which a restore reopens", () => {
 		const source: TextReviewSource = {
 			id: "reply",
 			kind: "message",
@@ -331,14 +391,69 @@ describe("AnnotationOverlay", () => {
 		overlay.handleInput(ENTER);
 		overlay.handleInput("e");
 		overlay.handleInput(CTRL_U);
-		overlay.handleInput("discarded");
-		overlay.handleInput(CANCEL);
-		expect(overlay.getTextAnnotations()).toEqual([{ scope: "text", note: "whole note" }]);
-
-		overlay.handleInput("e");
-		overlay.handleInput(CTRL_U);
 		overlay.handleInput(ENTER);
 		expect(overlay.getTextAnnotations()).toEqual([]);
+
+		let closed: TextReviewOverlayResult | undefined | null = null;
+		const first = makeTextOverlay(source, result => {
+			closed = result;
+		});
+		first.handleInput("A");
+		first.handleInput("whole note");
+		first.handleInput(ENTER);
+		first.handleInput("e");
+		first.handleInput(CTRL_U);
+		first.handleInput("rewritten");
+		first.handleInput(CANCEL);
+		expect(closed).toBeUndefined();
+		const draft = first.getDraft();
+		expect(draft).toMatchObject({
+			annotations: [{ annotation: { note: "whole note" } }],
+			editor: { text: "rewritten" },
+		});
+
+		const second = makeTextOverlay(source);
+		// A note anchored past the source is dropped instead of restored onto nothing.
+		const stale = { sourceIndex: 9, annotation: { scope: "line" as const, line: 10, quote: "", note: "stale" } };
+		second.restoreDraft({ ...draft, annotations: [...draft.annotations, stale] } as typeof draft);
+		expect(second.getDraft()).toEqual(draft);
+		second.handleInput(ENTER);
+		expect(second.getTextAnnotations()).toEqual([{ scope: "text", note: "rewritten" }]);
+	});
+
+	it("discards every note only on a second confirm, from the keys or the native button", () => {
+		let closed = 0;
+		const overlay = makeDiffOverlay(oneLineFiles, { onComplete: result => void (result === undefined && closed++) });
+		overlay.handleInput("A");
+		overlay.handleInput("note");
+		overlay.handleInput(ENTER);
+		overlay.handleNativeEvent(click("discard"));
+		overlay.handleNativeEvent(click("review-missing"));
+		overlay.handleNativeEvent(click("discard"));
+		expect(closed).toBe(0);
+		overlay.handleNativeEvent(click("discard"));
+		expect(closed).toBe(1);
+		expect(overlay.getDraft()).toEqual({ kind: "diff", annotations: [] });
+	});
+
+	it("starts code review on Paste, so a stray Enter never sends the LLM review", () => {
+		let result: CodeReviewOverlayResult | undefined | null = null;
+		const overlay = makeDiffOverlay(oneLineFiles, {
+			onComplete: value => {
+				result = value;
+			},
+		});
+		render(overlay);
+		overlay.handleInput(SHIFT_TAB);
+		overlay.handleInput(ENTER);
+		expect(result).toBeNull();
+		overlay.handleInput(TAB);
+		overlay.handleInput("A");
+		overlay.handleInput("note");
+		overlay.handleInput(ENTER);
+		overlay.handleInput(SHIFT_TAB);
+		overlay.handleInput(ENTER);
+		expect(result).toMatchObject({ action: "paste" });
 	});
 
 	it("commits external-editor drafts", async () => {
@@ -368,6 +483,97 @@ describe("AnnotationOverlay", () => {
 		expect(render(overlay)).toContain("external");
 		overlay.handleInput(ENTER);
 		expect(overlay.getAnnotations()).toEqual([expect.objectContaining({ note: "external\neditor" })]);
+	});
+
+	it("opens the source editor on the global external-editor key and names that key", () => {
+		const opened: string[] = [];
+		const overlay = new AnnotationOverlay(
+			makeTui(),
+			darkTheme!,
+			KeybindingsManager.inMemory({ "tui.select.cancel": "escape" }),
+			oneLineFiles,
+			"PR #1",
+			{
+				onExternalEditor: () => {
+					opened.push("source");
+				},
+				onComplete: () => {},
+			},
+		);
+		overlay.focused = true;
+		expect(render(overlay)).toContain(`${formatKeyHint("ctrl+e")} editor`);
+		overlay.handleInput(CTRL_E);
+		expect(opened).toEqual(["source"]);
+		expect(overlay.reviewFilePath()).toBe("src/value.ts");
+	});
+
+	it("keeps a note chooser from opening the source editor", () => {
+		const opened: string[] = [];
+		const overlay = new AnnotationOverlay(
+			makeTui(),
+			darkTheme!,
+			getKeybindings() as KeybindingsManager,
+			{ id: "reply", kind: "message", label: "Reply", text: "same line\nsame line" },
+			{
+				onExternalEditor: () => {
+					opened.push("source");
+				},
+				onComplete: () => {},
+			},
+		);
+		overlay.focused = true;
+		render(overlay);
+		overlay.handleInput("a");
+		overlay.handleInput("first");
+		overlay.handleInput(ENTER);
+		overlay.handleInput("A");
+		overlay.handleInput("whole");
+		overlay.handleInput(ENTER);
+		overlay.handleInput("e");
+		overlay.handleInput(CTRL_E);
+		expect(render(overlay)).toContain("choose");
+		expect(opened).toEqual([]);
+		expect(overlay.getTextAnnotations()).toHaveLength(2);
+	});
+
+	it("retargets a moved unique quote, drops a stale one, and pastes the edited text", () => {
+		const completed: Array<TextReviewOverlayResult | undefined> = [];
+		const overlay = makeTextOverlay(
+			{ id: "prompt", kind: "prompt", label: "Text prompt", text: "alpha\nbeta\nalpha" },
+			result => completed.push(result),
+		);
+		render(overlay);
+		overlay.handleInput("a");
+		overlay.handleInput("on alpha");
+		overlay.handleInput(ENTER);
+		overlay.handleInput(DOWN);
+		overlay.handleInput("a");
+		overlay.handleInput("on beta");
+		overlay.handleInput(ENTER);
+		expect(overlay.replaceTextSource("beta\nalpha\nalpha")).toBe(1);
+		overlay.handleInput(TAB);
+		overlay.handleInput(ENTER);
+		expect(completed).toEqual([
+			{
+				action: "paste",
+				annotations: [{ scope: "line", line: 1, quote: "beta", note: "on beta" }],
+				editedText: "beta\nalpha\nalpha",
+			},
+		]);
+	});
+
+	it("does not resurrect a dropped line note when undoing after the source was replaced", () => {
+		const overlay = makeTextOverlay({ id: "prompt", kind: "prompt", label: "Text prompt", text: "old" });
+		render(overlay);
+		overlay.handleInput("a");
+		overlay.handleInput("on old");
+		overlay.handleInput(ENTER);
+		overlay.handleInput("A");
+		overlay.handleInput("whole");
+		overlay.handleInput(ENTER);
+		expect(overlay.replaceTextSource("new")).toBe(1);
+		overlay.handleInput("u");
+		expect(overlay.getTextAnnotations()).toEqual([{ scope: "text", note: "whole" }]);
 	});
 
 	it("returns undefined on cancel without a review result", () => {
@@ -581,7 +787,8 @@ describe("AnnotationOverlay", () => {
 						{ kind: "added", raw: rawLine, content: rawLine.slice(1), newLine: 27, hunkHeader: ONE_LINE_HUNK },
 					]),
 				],
-				{ rows: 14 },
+				// One row per action; the paging below assumes the same body height as before the discard action.
+				{ rows: 15 },
 			);
 			render(overlay, 72);
 			overlay.handleInput(TAB);

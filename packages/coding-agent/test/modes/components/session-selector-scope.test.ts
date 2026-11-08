@@ -41,7 +41,7 @@ describe("SessionSelectorComponent scope toggle", () => {
 			{
 				loadAllSessions: async () => {
 					loads++;
-					return global;
+					return { sessions: global };
 				},
 			},
 		);
@@ -70,6 +70,34 @@ describe("SessionSelectorComponent scope toggle", () => {
 		expect(loads).toBe(1);
 	});
 
+	it("shows directories in folder scope only when the list spans worktrees, across a Tab round-trip", () => {
+		const single = new SessionSelectorComponent(
+			[createSession("a", "Alpha", "/work/repo"), createSession("b", "Beta", "/work/repo")],
+			() => {},
+			() => {},
+			() => {},
+		);
+		expect(single.render(120).join("\n")).not.toContain("/work/repo");
+
+		const folder = [createSession("main", "Main", "/work/repo"), createSession("wt", "Moved", "/work/repo-wt")];
+		const selector = new SessionSelectorComponent(
+			folder,
+			() => {},
+			() => {},
+			() => {},
+			// Preloaded, so both Tab toggles apply synchronously.
+			{ allSessions: { sessions: folder } },
+		);
+		expect(selector.render(120).join("\n")).toContain("/work/repo-wt");
+
+		selector.handleInput(TAB);
+		expect(selector.render(120).join("\n")).toContain("(all projects)");
+		selector.handleInput(TAB);
+		const rendered = selector.render(120).join("\n");
+		expect(rendered).toContain("(current folder)");
+		expect(rendered).toContain("/work/repo-wt");
+	});
+
 	it("returns the full selected session, including its cwd", async () => {
 		const folder = [createSession("local", "Local", "/work/current")];
 		const remote = createSession("remote", "Remote", "/work/other-project");
@@ -79,7 +107,7 @@ describe("SessionSelectorComponent scope toggle", () => {
 			session => selected.push(session),
 			() => {},
 			() => {},
-			{ loadAllSessions: async () => [remote] },
+			{ loadAllSessions: async () => ({ sessions: [remote] }) },
 		);
 
 		selector.handleInput(TAB);
@@ -97,7 +125,7 @@ describe("SessionSelectorComponent scope toggle", () => {
 		// the picker in all-projects scope). The fix removes the option, so force it
 		// via a cast to prove the component now ignores it and stays folder-scoped —
 		// without this, the test would pass against the buggy code too.
-		const opts = { allSessions: global, loadAllSessions: async () => global };
+		const opts = { allSessions: { sessions: global }, loadAllSessions: async () => ({ sessions: global }) };
 		(opts as { startInAllScope?: boolean }).startInAllScope = true;
 		const selector = new SessionSelectorComponent(
 			[],

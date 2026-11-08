@@ -1,5 +1,5 @@
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { formatBytes, parseImageMetadata, SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils";
+import { decodeBase64ImageData, formatBytes, parseImageMetadata, SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils";
 
 export const MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024;
 
@@ -73,6 +73,58 @@ export class InvalidImageDataError extends Error {
 const DECODE_PROBE_EDGE_PX = 1;
 
 /**
+ * Whether a JPEG stream reaches an EOI marker.
+ *
+ * `Bun.Image` renders a truncated JPEG by padding the rows its missing scan
+ * data never covered, so a successful decode cannot tell a complete file from
+ * one cut mid-scan. Strict decoders — the ones behind vision providers — reject
+ * those bytes with "unsupported image", and the provider fails the whole
+ * request. Walk the marker structure instead: segments carry their length, and
+ * entropy-coded scan data is skipped by JPEG's byte-stuffing rules, so an EOI
+ * inside an embedded thumbnail cannot be mistaken for the file's end. Metadata
+ * appended after the EOI (MPF, motion photos) still passes.
+ */
+function jpegStreamIsComplete(bytes: Uint8Array): boolean {
+	if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return false;
+	let offset = 2;
+	while (offset < bytes.length) {
+		if (bytes[offset] !== 0xff) return false;
+		let markOffset = offset + 1;
+		while (markOffset < bytes.length && bytes[markOffset] === 0xff) markOffset++;
+		if (markOffset >= bytes.length) return false;
+		const marker = bytes[markOffset];
+		if (marker === 0xd9) return true;
+		offset = markOffset + 1;
+		if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+		if (marker === 0xd8) return false;
+		if (offset + 1 >= bytes.length) return false;
+		const segmentLength = (bytes[offset] << 8) | bytes[offset + 1];
+		if (segmentLength < 2) return false;
+		offset += segmentLength;
+		if (offset > bytes.length) return false;
+		if (marker === 0xda) {
+			// Entropy-coded data: 0xFF is stuffed as FF00, restart markers are
+			// standalone, and every other following byte opens the next segment.
+			while (true) {
+				const next = bytes.indexOf(0xff, offset);
+				if (next < 0) return false;
+				let scan = next + 1;
+				while (scan < bytes.length && bytes[scan] === 0xff) scan++;
+				if (scan >= bytes.length) return false;
+				const code = bytes[scan];
+				if (code === 0x00 || (code >= 0xd0 && code <= 0xd7)) {
+					offset = scan + 1;
+					continue;
+				}
+				offset = next;
+				break;
+			}
+		}
+	}
+	return false;
+}
+
+/**
  * Why an image cannot be decoded, or `null` when it decodes.
  *
  * A full decode is the only check that matches what vision backends accept: a
@@ -83,14 +135,15 @@ const DECODE_PROBE_EDGE_PX = 1;
  * truth on both sides. Callers on hot paths must cache the verdict.
  */
 export async function imageDecodeFailureReason(image: ImageContent): Promise<string | null> {
-	if (!/^[A-Za-z0-9+/]*={0,2}$/.test(image.data)) return "invalid base64 image data";
-	const normalizedData = image.data.replace(/=+$/, "");
-	const bytes = Buffer.from(image.data, "base64");
-	if (bytes.length === 0) return "empty image data";
-	if (bytes.toString("base64").replace(/=+$/, "") !== normalizedData) return "invalid base64 image data";
+	const decoded = decodeBase64ImageData(image.data);
+	if (decoded.reason !== undefined) return decoded.reason;
+	const { bytes } = decoded;
 	const detected = parseImageMetadata(bytes);
 	if (detected && detected.mimeType !== image.mimeType.toLowerCase()) {
 		return `declared ${image.mimeType} but contains ${detected.mimeType}`;
+	}
+	if (image.mimeType.toLowerCase() === "image/jpeg" && !jpegStreamIsComplete(bytes)) {
+		return "truncated JPEG data: no EOI marker";
 	}
 	try {
 		// Decode in full (that is what catches a hole in the compressed stream),

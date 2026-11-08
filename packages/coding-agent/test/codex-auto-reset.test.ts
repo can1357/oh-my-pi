@@ -18,12 +18,13 @@
  *   consent, live credit eligibility, terminal dedupe, and account cooldown.
  */
 import { describe, expect, it } from "bun:test";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ATTEMPT_COOLDOWN_MS,
 	blockedAttemptKey,
 	type CodexResetPlanInput,
+	headlessApprovedResetActions,
 	IMMINENT_RESET_EXPIRY_MS,
 	isTerminalRedeemOutcome,
 	planCodexResetRedemptions,
@@ -520,10 +521,32 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		]);
 	});
 
+	it("never restores a sibling outside the session's account pool when the active account has no credits", () => {
+		const active = report({ credits: 0 });
+		const excluded = report({ accountId: "acct-sib", email: "sib@example.com", credits: 2 });
+		const plan = planCodexResetRedemptions(
+			input([active, excluded], { permitsCredential: credentialId => credentialId === CREDENTIAL_ID }),
+		);
+		expect(plan.actions).toEqual([]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "openai-codex|-|2",
+			rule: "blocked-account",
+			reason: "outside-account-pool",
+		});
+	});
+
 	it("prefers the active account over an otherwise better sibling", () => {
 		const active = report({ credits: 1 });
 		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", credits: 3 });
 		const plan = planCodexResetRedemptions(input([active, sibling]));
+		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_KEY, active: true });
+	});
+
+	it("does not treat a Team seat sharing the workspace account id as the active account", () => {
+		// Team seats report the workspace account id; only the email tells them apart.
+		const active = report({ creditExpiries: [5 * DAY] });
+		const teammate = report({ email: "teammate@example.com", credentialId: 2, creditExpiries: [2 * DAY] });
+		const plan = planCodexResetRedemptions(input([active, teammate]));
 		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_KEY, active: true });
 	});
 
@@ -869,6 +892,18 @@ describe("codexResets policy plumbing", () => {
 		expect(isTerminalRedeemOutcome("nothing_to_reset")).toBe(false);
 		expect(isTerminalRedeemOutcome("http_500")).toBe(false);
 		expect(isTerminalRedeemOutcome("credit_list_failed")).toBe(false);
+	});
+
+	it("approves only resets expiring within five minutes for a headless unset host, pinned to that credit", () => {
+		const target: ResetCreditTarget = { provider: "openai-codex", credentialId: CREDENTIAL_ID };
+		const actions = [
+			{ target, creditId: "dying", expiresInMs: IMMINENT_RESET_EXPIRY_MS },
+			{ target, creditId: "later", expiresInMs: IMMINENT_RESET_EXPIRY_MS + 1 },
+			{ target, expiresInMs: undefined },
+		];
+		expect(headlessApprovedResetActions(actions)).toEqual([
+			{ ...actions[0], target: { ...target, creditId: "dying" } },
+		]);
 	});
 
 	it("migrates legacy boolean autoRedeem config to the tri-state policy", () => {

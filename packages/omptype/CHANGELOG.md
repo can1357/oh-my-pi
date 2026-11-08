@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
+### Breaking Changes
+
+- `fromJsonSchema` returns an opaque whole-document validator (no `.pick()`/`.props`); `format` is annotation-only unless checked via `formats`; bad `$ref` throws `invalid $ref`/`unresolved $ref`.
+
+### Added
+
+- Added `fromJsonSchema(schema, { draft, schemas, formats })`, validating JSON Schema draft 2020-12 and draft 7, including dynamic/remote refs and unevaluated keywords.
+
+### Changed
+
+- Faster `fromJsonSchema` validation, including `$ref`-heavy schemas.
+
+### Fixed
+
+- `fromJsonSchema` falls back to interpreted validation instead of throwing `EvalError` where generated code is forbidden.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.12.0] - 2026-10-17
+
+### Fixed
+
+- Fixed TypeBox numeric bounds written in exponent notation throwing during schema construction, while preserving validation and nested JSON Schema constraints ([#15925](https://github.com/can1357/oh-my-pi/pull/15925) by [@jchanghong023](https://github.com/jchanghong023)).
+- Fixed importing local JSON Schema definition references containing URI percent encoding or JSON Pointer escapes ([#15926](https://github.com/can1357/oh-my-pi/pull/15926) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.2.1] - 2026-09-15
 
 ### Added

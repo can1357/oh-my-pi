@@ -3,6 +3,8 @@
 provider "azure" {
 	default-model "gpt-5.5"
 	env "AZURE_OPENAI_API_KEY"
+	// Replaces the provider-keyed strict Responses tool-call/result pairing.
+	strict-responses-pairing #true
 
 	class "openai" {
 		thinking-mode "effort"

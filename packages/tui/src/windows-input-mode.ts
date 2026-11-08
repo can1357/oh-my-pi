@@ -39,7 +39,11 @@ const VK_RETURN = 0x0d;
 const VK_MENU = 0x12;
 const VK_ESCAPE = 0x1b;
 const VK_SPACE = 0x20;
+const VK_J = 0x4a;
 const VK_PACKET = 0xe7;
+
+/** Keys encoded as fixed bytes that can still carry text a pending dead key composed. */
+const COMPOSABLE_FIXED_VKS = new Set([VK_BACK, VK_TAB, VK_RETURN, VK_ESCAPE, VK_SPACE]);
 
 /** Modifier and lock keys: their own presses produce no input. */
 const MODIFIER_VKS = new Set([
@@ -150,6 +154,11 @@ function encodeKey(record: KeyRecord): string | null {
 	const mod = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0);
 	const text = uc === 0 ? "" : String.fromCharCode(uc);
 
+	// A pending dead key composes onto the next key: on US-International, `'` then
+	// Space arrives as a Space record carrying `'`, and `'` then Enter as an Enter
+	// record carrying `'` followed by one carrying `\r`. The carried text is the input.
+	if (!ctrl && !alt && uc > 0x20 && uc !== 0x7f && COMPOSABLE_FIXED_VKS.has(vk)) return text;
+
 	switch (vk) {
 		case VK_RETURN:
 			return mod === 1 ? "\r" : `\x1b[13;${mod}u`;
@@ -183,8 +192,13 @@ function encodeKey(record: KeyRecord): string | null {
 
 	const base = baseCodepointForVk(vk);
 	if (ctrl) {
+		// Windows Terminal / ConPTY report Ctrl+J as VK_J with Uc=LF. Returning the
+		// raw LF would make the editor treat it as Enter, so keep the key identity.
+		// Only J is special-cased: `ctrl+j` is a default `tui.input.newLine` binding,
+		// while Ctrl+M/I (CR/Tab) already decode to the keys their C0 bytes represent.
+		const ctrlJ = !alt && vk === VK_J && uc === 0x0a;
 		// Ctrl+Shift+letter collapses onto Ctrl+letter in legacy bytes; keep it distinct.
-		if ((shift || uc === 0) && base !== 0) return `\x1b[${base};${mod}u`;
+		if ((shift || uc === 0 || ctrlJ) && base !== 0) return `\x1b[${base};${mod}u`;
 		if (uc === 0) return null;
 		return alt ? `\x1b${text}` : text;
 	}
@@ -208,6 +222,19 @@ export class Win32InputModeDecoder {
 	/** Whether relayed VT text is held waiting for the rest of its sequence. */
 	get hasPendingSequence(): boolean {
 		return this.#pendingVt.length > 0;
+	}
+
+	/**
+	 * Whether the held relayed text is an OSC/DCS/APC string still waiting for
+	 * its terminator (a TSP event, a clipboard or colour reply). Unlike a lone
+	 * ESC or a short CSI, releasing it early cannot be mistaken for a key: the
+	 * head would be handed on as a fragment and the tail typed as text. A bare
+	 * two-byte introducer is not a string yet: it may be an Alt chord (Alt+]).
+	 */
+	get hasPendingString(): boolean {
+		if (this.#pendingVt.length < 3) return false;
+		const introducer = this.#pendingVt[1];
+		return introducer === "]" || introducer === "P" || introducer === "_";
 	}
 
 	/**

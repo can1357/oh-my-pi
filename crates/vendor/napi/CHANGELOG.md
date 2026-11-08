@@ -9,7 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(napi)* lock the allocator on threaded WASI and never hang after a worker crash ([#3552](https://github.com/napi-rs/napi-rs/pull/3552))
 - Initial vendor import of napi-rs 3.13.0
+
+### Changed
+
+- Updated the vendor import to napi-rs 3.14.2
+
+### Fixed
+
+- *(napi)* create objects with napi_define_properties on every Node version ([#3560](https://github.com/napi-rs/napi-rs/pull/3560))
+- *(napi)* register the wasm cleanup through the env cleanup hook ([#3571](https://github.com/napi-rs/napi-rs/pull/3571))
+- *(napi)* own NativeBorrowScope storage via NonNull to fix aliasing violation ([#3573](https://github.com/napi-rs/napi-rs/pull/3573))
+- *(napi)* bound serde_json::Value conversion depth at 128 levels ([#3568](https://github.com/napi-rs/napi-rs/pull/3568))
+
+## [3.14.2](https://github.com/napi-rs/napi-rs/compare/napi-v3.14.1...napi-v3.14.2) - 2026-10-06
+
+### Fixed
+
+- *(napi)* register the wasm cleanup through the env cleanup hook ([#3571](https://github.com/napi-rs/napi-rs/pull/3571))
+- *(napi)* own NativeBorrowScope storage via NonNull to fix aliasing violation ([#3573](https://github.com/napi-rs/napi-rs/pull/3573))
+- *(napi)* bound serde_json::Value conversion depth at 128 levels ([#3568](https://github.com/napi-rs/napi-rs/pull/3568))
+
+## [3.14.1](https://github.com/napi-rs/napi-rs/compare/napi-v3.14.0...napi-v3.14.1) - 2026-10-05
+
+### Fixed
+
+- *(napi)* create objects with napi_define_properties on every Node version ([#3560](https://github.com/napi-rs/napi-rs/pull/3560))
+
+## [3.14.0](https://github.com/napi-rs/napi-rs/compare/napi-v3.13.0...napi-v3.14.0) - 2026-10-01
+
+### Added
+
+- *(napi)* lock the allocator on threaded WASI and never hang after a worker crash ([#3552](https://github.com/napi-rs/napi-rs/pull/3552))
 
 ## [3.13.0](https://github.com/napi-rs/napi-rs/compare/napi-v3.12.7...napi-v3.13.0) - 2026-09-22
 

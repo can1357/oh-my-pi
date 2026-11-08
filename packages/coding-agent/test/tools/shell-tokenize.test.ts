@@ -1,18 +1,43 @@
 import { describe, expect, it } from "bun:test";
-import { extractLeadingCdTarget, readShellWord } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
+import { extractLeadingCdTarget, lexShellCommand, readShellWord } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
+
+describe("lexShellCommand", () => {
+	it("splits words from separators, keeping verbatim spelling beside the quote-removed value", () => {
+		const command = `git -C "my repo" log && echo 'a b' 2>&1`;
+		const tokens = lexShellCommand(command);
+		// Rewriters reassemble commands from `raw`, so the pieces must reproduce the input exactly.
+		expect(tokens.map(token => token.raw).join("")).toBe(command);
+		expect(tokens.filter(token => token.kind === "word").map(token => token.value)).toEqual([
+			"git",
+			"-C",
+			"my repo",
+			"log",
+			"echo",
+			"a b",
+			"2>",
+			"1",
+		]);
+	});
+});
 
 describe("extractLeadingCdTarget", () => {
 	it("extracts a bare cd target and returns the remainder", () => {
 		expect(extractLeadingCdTarget("cd /some/dir && echo ok")).toEqual({
 			path: "/some/dir",
 			rest: "echo ok",
+			separator: "&&",
+		});
+		expect(extractLeadingCdTarget("cd /some/dir; echo ok")).toEqual({
+			path: "/some/dir",
+			rest: "echo ok",
+			separator: ";",
 		});
 	});
 
 	it("resolves quoted and escaped path tokens", () => {
-		expect(extractLeadingCdTarget('cd "/my dir" && ls')).toEqual({ path: "/my dir", rest: "ls" });
-		expect(extractLeadingCdTarget("cd '/a b' && ls")).toEqual({ path: "/a b", rest: "ls" });
-		expect(extractLeadingCdTarget("cd /a\\ b && ls")).toEqual({ path: "/a b", rest: "ls" });
+		expect(extractLeadingCdTarget('cd "/my dir" && ls')).toEqual({ path: "/my dir", rest: "ls", separator: "&&" });
+		expect(extractLeadingCdTarget("cd '/a b' && ls")).toEqual({ path: "/a b", rest: "ls", separator: "&&" });
+		expect(extractLeadingCdTarget("cd /a\\ b && ls")).toEqual({ path: "/a b", rest: "ls", separator: "&&" });
 	});
 
 	it("leaves escaped newlines to the shell", () => {
@@ -21,11 +46,12 @@ describe("extractLeadingCdTarget", () => {
 	});
 
 	it("preserves ~ so resolveToCwd can expand it", () => {
-		expect(extractLeadingCdTarget("cd ~/proj && make")).toEqual({ path: "~/proj", rest: "make" });
+		expect(extractLeadingCdTarget("cd ~/proj && make")).toEqual({ path: "~/proj", rest: "make", separator: "&&" });
 	});
 
-	it("accepts a && with no leading whitespace", () => {
-		expect(extractLeadingCdTarget("cd /tmp&& echo ok")).toEqual({ path: "/tmp", rest: "echo ok" });
+	it("accepts a && or ; with no leading whitespace", () => {
+		expect(extractLeadingCdTarget("cd /tmp&& echo ok")).toEqual({ path: "/tmp", rest: "echo ok", separator: "&&" });
+		expect(extractLeadingCdTarget("cd /tmp;echo ok")).toEqual({ path: "/tmp", rest: "echo ok", separator: ";" });
 	});
 
 	// Regression for #7883: a redirect between the path and `&&` must not be
@@ -46,10 +72,11 @@ describe("extractLeadingCdTarget", () => {
 		expect(extractLeadingCdTarget("cd `pwd` && ls")).toBeNull();
 	});
 
-	it("requires a top-level && separator", () => {
-		expect(extractLeadingCdTarget("cd /tmp; echo ok")).toBeNull();
+	it("requires a top-level && or ; separator", () => {
 		expect(extractLeadingCdTarget("cd /foo || echo fail")).toBeNull();
 		expect(extractLeadingCdTarget("cd /tmp &echo")).toBeNull();
+		expect(extractLeadingCdTarget("cd /tmp;; echo ok")).toBeNull();
+		expect(extractLeadingCdTarget("cd /tmp;& echo ok")).toBeNull();
 	});
 
 	it("bails when there is no cd target", () => {

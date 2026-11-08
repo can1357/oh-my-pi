@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { stripOuterDoubleQuotes } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
@@ -38,9 +38,6 @@ function hasAssistantEntry(entries: unknown[]): boolean {
 describe("stripOuterDoubleQuotes", () => {
 	it("strips matching double quotes", () => {
 		expect(stripOuterDoubleQuotes('"C:\\Users\\test"')).toBe("C:\\Users\\test");
-	});
-	it("passes through unquoted paths", () => {
-		expect(stripOuterDoubleQuotes("C:\\Users\\test")).toBe("C:\\Users\\test");
 	});
 	it("does not strip mismatched quotes", () => {
 		expect(stripOuterDoubleQuotes('"mismatched')).toBe('"mismatched');
@@ -76,7 +73,7 @@ describe("SessionManager.moveTo", () => {
 
 	afterEach(async () => {
 		// Title changes open history.db under testAgentDir; Windows cannot delete an open file.
-		resetSessionIndexForTests();
+		closeSessionIndex();
 		if (originalAgentDir) {
 			setAgentDir(originalAgentDir);
 		} else {

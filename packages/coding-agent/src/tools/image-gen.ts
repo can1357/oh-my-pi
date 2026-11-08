@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -12,7 +13,17 @@ import {
 	parseAntigravityCredentials,
 } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { isEnoent, logger, parseImageMetadata, prompt, ptree, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
+import {
+	isEnoent,
+	logger,
+	parseImageMetadata,
+	prompt,
+	ptree,
+	Snowflake,
+	truncate,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import { type RoleChainCandidate, resolveModelRoleValue, resolveRoleChain } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
@@ -20,10 +31,12 @@ import { settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { resolveConfiguredModelTarget } from "../session/role-models";
-import { resolveReadPath } from "./path-utils";
+import { resolveReadPath, specialFileKind } from "./path-utils";
 
 const IMAGE_TIMEOUT = 3 * 60 * 1000;
 const MAX_IMAGE_SIZE = 35 * 1024 * 1024;
+/** 单条失败原因的字符上限：网关 HTML 错误页等原始响应体不应整段进入模型与 TUI。 */
+const MAX_FAILURE_REASON_CHARS = 300;
 
 const aspectRatioSchema = type('"1:1" | "3:4" | "4:3" | "9:16" | "16:9" | "3:2" | "2:3"').describe("aspect ratio");
 const imageSizeSchema = type('"1024x1024" | "1536x1024" | "1024x1536"').describe("image size");
@@ -89,6 +102,10 @@ function normalizeDataUrl(data: string): { data: string; mimeType?: string } {
 async function loadImageFromPath(imagePath: string, cwd: string): Promise<{ data: string; mimeType: string }> {
 	const resolved = resolveReadPath(imagePath, cwd);
 	try {
+		const stat = await fs.stat(resolved);
+		const kind = specialFileKind(stat);
+		if (kind) throw new Error(`Cannot load '${imagePath}': it is a ${kind}, not a regular file or directory.`);
+		if (stat.size > MAX_IMAGE_SIZE) throw new Error(`Image file too large: ${imagePath}`);
 		const buffer = await Bun.file(resolved).bytes();
 		if (buffer.length > MAX_IMAGE_SIZE) throw new Error(`Image file too large: ${imagePath}`);
 		const mimeType = parseImageMetadata(buffer)?.mimeType;
@@ -144,9 +161,14 @@ function resolveHostedImageCarrier(
 ): Model | undefined {
 	if (activeModel?.provider === selectedModel.provider && activeModel.hostedImage) return activeModel;
 	let carrier: Model | undefined;
+	let carrierInput = Infinity;
 	for (const model of modelRegistry.getAvailable()) {
 		if (model.provider !== selectedModel.provider || !model.hostedImage) continue;
-		if (!carrier || model.cost.input < carrier.cost.input) carrier = model;
+		const input = getEffectiveTokenCost(model.cost).input;
+		if (!carrier || input < carrierInput) {
+			carrier = model;
+			carrierInput = input;
+		}
 	}
 	return carrier;
 }
@@ -326,10 +348,22 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 			}
 
 			const attempted = candidates.map(model => `${model.provider}/${model.id}`).join(", ");
+			// 压平空白并截断每条 provider 错误；去掉句末句号，避免与统一补的标点叠成 `..`。
+			const reasons =
+				failures.length > 0
+					? ` Failures: ${failures
+							.map(error =>
+								truncate(error.message.replace(/\s+/g, " ").trim(), MAX_FAILURE_REASON_CHARS).replace(
+									/\.$/,
+									"",
+								),
+							)
+							.join("; ")}.`
+					: "";
 			const suffix = skipped.length > 0 ? ` Skipped: ${skipped.join(", ")}.` : "";
 			throw new AggregateError(
 				failures,
-				`Image generation exhausted the resolved image chain${attempted ? `: ${attempted}` : "."}${suffix}`,
+				`Image generation exhausted the resolved image chain${attempted ? `: ${attempted}` : ""}.${reasons}${suffix}`,
 			);
 		});
 	},

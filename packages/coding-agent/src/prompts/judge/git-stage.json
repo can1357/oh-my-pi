@@ -1,0 +1,16 @@
+{
+	"belongs": {
+		"instructions": "The user is staging a git commit out of a working tree with many unrelated changes and described which changes they want. `all_changed_files` lists every changed path for contrast; the state then shows one unit of change: its `path`, its `kind` (`hunk`: the added + and removed − lines of one hunk of a modified file; `deleted file`: the head of the removed − lines of a file being deleted; `new file`: the head of an untracked file; `binary`: path only), and `change`. How much does this unit belong to what the user described?",
+		"criteria": [
+			"Unrelated: different work that happens to be in the same tree.",
+			"Tangential: same file, area, or vocabulary, but the user's words do not actually describe this particular change.",
+			"Part of it: the user's words describe this particular change (its content, its kind of edit, or this file by name)."
+		]
+	},
+	"pick": {
+		"instructions": "The user is staging a git commit and described which changes they want. `candidates` are the changed units in the tree that scored highest for that description, each with its path, kind, and changed lines. Which candidate is most clearly the change the user described — or is none of them actually it?",
+		"criteria": {
+			"none": "None of the candidates is the change the user described; they only share an area or vocabulary with it."
+		}
+	}
+}

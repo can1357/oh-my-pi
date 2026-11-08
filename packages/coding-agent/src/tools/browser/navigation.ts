@@ -1,5 +1,6 @@
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import type { Page, WaitForOptions } from "puppeteer-core";
+import { puppeteerTimeoutError } from "./launch";
 
 declare module "puppeteer-core" {
 	interface Frame {
@@ -16,13 +17,6 @@ const MAIN_FRAME_LIFECYCLE_EVENTS = { load: "load", domcontentloaded: "DOMConten
 /** How often the main-frame wait re-reads the frame's lifecycle events. */
 const MAIN_FRAME_POLL_MS = 50;
 
-/** Puppeteer-compatible timeout error; built by name so this module keeps `puppeteer-core` type-only. */
-function navigationTimeoutError(timeout: number): Error {
-	const error = new Error(`Navigation timeout of ${timeout} ms exceeded`);
-	error.name = "TimeoutError";
-	return error;
-}
-
 interface PageNavigationGlobal {
 	next?: { router?: { push?: (target: string) => unknown } };
 	history: {
@@ -35,6 +29,7 @@ interface PageNavigationGlobal {
 		readonly href: string;
 		reload(): void;
 	};
+	document: { readonly readyState: string };
 	dispatchEvent(event: unknown): boolean;
 	Event: new (type: string) => unknown;
 	PopStateEvent: new (type: string, init: { state: unknown }) => unknown;
@@ -58,6 +53,67 @@ export function reloadInPage(): void {
 /** Read `location.href` inside a browser page. */
 export function locationHrefInPage(): string {
 	return (globalThis as unknown as PageNavigationGlobal).location.href;
+}
+
+/** Read `document.readyState` inside a browser page. */
+export function readyStateInPage(): string {
+	return (globalThis as unknown as PageNavigationGlobal).document.readyState;
+}
+
+/**
+ * Whether one of our own page evaluations failed because a navigation replaced the document whose execution context
+ * it targeted: the context was destroyed while the call ran, or was already gone when it arrived (Puppeteer rewrites
+ * that into the first message; the relay passes Chrome's own on). Puppeteer's own waits retry on the same two.
+ */
+export function isNavigatedContextError(error: unknown): boolean {
+	return (
+		error instanceof Error &&
+		(error.message.includes("Execution context was destroyed") ||
+			error.message.includes("Cannot find context with specified id"))
+	);
+}
+
+/**
+ * Wait, at most `timeoutMs`, for a main-frame navigation in flight to replace the document and for the new document
+ * to finish parsing. Returns at once when `navigating()` is false, unless `contextLost` says a navigation already
+ * took the document an evaluation targeted. Returns false when the wait ran out with `navigating()` still true; a
+ * wait that runs out otherwise, or a page that stops answering (a dialog), leaves the page as it is.
+ */
+export async function waitForMainFrameDocument(
+	page: Page,
+	navigating: () => boolean,
+	timeoutMs: number,
+	signal: AbortSignal,
+	contextLost = false,
+): Promise<boolean> {
+	if (!contextLost && !navigating()) return true;
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		let remaining = deadline - Date.now();
+		if (navigating()) {
+			if (remaining <= 0) return false;
+			await untilAborted(signal, () => Bun.sleep(Math.min(MAIN_FRAME_POLL_MS, remaining)));
+			continue;
+		}
+		if (remaining <= 0) return true;
+		let state: string;
+		try {
+			state = await withTimeout(
+				page.evaluate(readyStateInPage),
+				remaining,
+				"document state probe timed out",
+				signal,
+			);
+		} catch (error) {
+			if (signal.aborted) throw error;
+			if (!isNavigatedContextError(error)) return true;
+			state = "loading";
+		}
+		remaining = deadline - Date.now();
+		if (state !== "loading" && !navigating()) return true;
+		if (remaining <= 0) return !navigating();
+		await untilAborted(signal, () => Bun.sleep(Math.min(MAIN_FRAME_POLL_MS, remaining)));
+	}
 }
 
 /** Perform Next.js or History API navigation inside a browser page. */
@@ -104,7 +160,7 @@ export async function navigateMainFrame(
 		if (frame.detached) throw new Error("Navigating frame was detached");
 		if (frame._lifecycleEvents.has(event)) return;
 		const remaining = deadline - Date.now();
-		if (remaining <= 0) throw navigationTimeoutError(timeout);
+		if (remaining <= 0) throw puppeteerTimeoutError(`Navigation timeout of ${timeout} ms exceeded`);
 		// The last read lands on the deadline, so an event that arrives after it is a timeout.
 		await untilAborted(signal, () => Bun.sleep(Math.min(MAIN_FRAME_POLL_MS, remaining)));
 	}

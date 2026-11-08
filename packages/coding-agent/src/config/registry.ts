@@ -56,8 +56,10 @@ export interface UiString extends UiBase {
 }
 
 export interface UiArray extends UiBase {
-	/** Membership choices. Without options, an array setting has no UI representation (config-file only). */
+	/** Membership choices. Without options or a JSON editor, the array stays config-file only. */
 	options?: ReadonlyArray<SubmenuOption>;
+	/** Opt in to free-form JSON editing instead of a membership picker. */
+	editor?: "json";
 	/** Selection order is meaningful; the editor renders positions and supports reordering. */
 	ordered?: boolean;
 }
@@ -449,8 +451,9 @@ export function combine<R extends Record<string, Derived<unknown>>, T>(
 }
 
 /**
- * Handle for one registered setting. Reads resolve, in precedence order: the definition's
- * environment variable, runtime override, `--config` overlay, project, global, then the default.
+ * Handle for one registered setting. Reads resolve, in precedence order: runtime override (CLI
+ * flags, session-only writes, SDK overrides), the definition's environment variable, `--config`
+ * overlay, project, global, then the default.
  */
 export class Setting<T, Id extends string = string> extends Derived<T> {
 	readonly id: Id;
@@ -522,11 +525,15 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return this.#envParsed;
 	}
 
-	/** Env value that currently takes effect in `scope`: a fallback env yields to a configured layer. */
+	/**
+	 * Env value that currently takes effect in `scope`: a runtime override (a CLI flag, a session-only
+	 * write) outranks it, and a fallback env also yields to every configured layer.
+	 */
 	#effectiveEnv(scope: ScopeLike): T | undefined {
 		const value = this.envValue();
-		if (value === undefined || !this.envFallback) return value;
+		if (value === undefined) return undefined;
 		const settings = settingsOf(scope);
+		if (!this.envFallback) return settings.hasRuntimeOverride(this) ? undefined : value;
 		if (this.envFallback === true) return settings.isConfigured(this) ? undefined : value;
 		const configured = settings.rawValue(this);
 		return configured === undefined || (typeof configured === "string" && configured.trim() === "")

@@ -35,9 +35,12 @@ export function splitSvgFences(markdown: string): FigureSegment[] {
 	let proseStart = 0;
 	let lineStart = 0;
 	while (lineStart <= markdown.length) {
-		const newline = markdown.indexOf("\n", lineStart);
-		const lineEnd = newline < 0 ? markdown.length : newline;
-		const next = newline < 0 ? markdown.length + 1 : newline + 1;
+		let lineEnd = lineStart;
+		while (lineEnd < markdown.length && markdown[lineEnd] !== "\n" && markdown[lineEnd] !== "\r") lineEnd++;
+		const next =
+			lineEnd === markdown.length
+				? markdown.length + 1
+				: lineEnd + (markdown[lineEnd] === "\r" && markdown[lineEnd + 1] === "\n" ? 2 : 1);
 		const line = markdown.slice(lineStart, lineEnd);
 		if (fence) {
 			if (closesFence(line, fence.marker)) {

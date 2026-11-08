@@ -16,6 +16,14 @@ class StubClientRequest extends http.ClientRequest {
 	}
 }
 
+/**
+ * These fixtures supply body chunks and termination manually, so the inert
+ * socket must not be treated as a backing body source.
+ */
+class ManualIncomingMessage extends http.IncomingMessage {
+	override _read(_size: number): void {}
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
@@ -23,7 +31,7 @@ afterEach(() => {
 describe("coworkFetch response cancellation", () => {
 	it("destroys a compressed response source when its web body is cancelled", async () => {
 		const socket = new net.Socket();
-		const message = new http.IncomingMessage(socket);
+		const message = new ManualIncomingMessage(socket);
 		message.statusCode = 200;
 		message.statusMessage = "OK";
 		message.headers = { "content-encoding": "gzip" };
@@ -61,7 +69,7 @@ describe("coworkFetch response cancellation", () => {
 // while a caller abort keeps its own error.
 describe("coworkFetch premature response close", () => {
 	async function streamingResponse(signal?: AbortSignal) {
-		const message = new http.IncomingMessage(new net.Socket());
+		const message = new ManualIncomingMessage(new net.Socket());
 		message.statusCode = 200;
 		message.statusMessage = "OK";
 		message.headers = { "content-type": "text/event-stream" };
@@ -77,7 +85,12 @@ describe("coworkFetch premature response close", () => {
 		});
 		if (!response.body) throw new Error("Expected a streaming response body.");
 		const reader = response.body.getReader();
-		await reader.read();
+		const first = await reader.read();
+		expect(first.done).toBe(false);
+		expect(new TextDecoder().decode(first.value)).toContain("event: ping");
+		expect(message.complete).toBe(false);
+		expect(message.readableEnded).toBe(false);
+		expect(message.destroyed).toBe(false);
 		return { message, reader };
 	}
 
@@ -111,5 +124,39 @@ describe("coworkFetch premature response close", () => {
 		);
 
 		expect((error as Error).message).toBe("aborted");
+	});
+});
+
+// Bun's node:http shim emits 'close' but not 'error' for `request.destroy(error)`.
+// A request whose upstream never sent headers stayed pending after the caller
+// aborted it, so the first-event watchdog's abort could never surface and the
+// turn hung with no socket open and no retry.
+describe("coworkFetch abort before response headers", () => {
+	it("rejects with the abort reason when the upstream never answers", async () => {
+		const request = new StubClientRequest();
+		vi.spyOn(https, "request").mockImplementation(() => request);
+		const controller = new AbortController();
+		let outcome: unknown = "pending";
+		void coworkFetch("https://api.anthropic.com/v1/messages", {
+			method: "POST",
+			headers: { accept: "text/event-stream" },
+			body: "{}",
+			signal: controller.signal,
+		}).then(
+			() => {
+				outcome = "resolved";
+			},
+			(reason: unknown) => {
+				outcome = reason;
+			},
+		);
+		const reason = new Error("Anthropic stream timed out while waiting for the first event");
+		controller.abort(reason);
+		// The abort listener runs synchronously, so a settled request is visible after
+		// a few microtask turns; a pending one never settles, so drain rather than wait.
+		for (let turn = 0; turn < 20 && outcome === "pending"; turn++) await Promise.resolve();
+
+		expect(outcome).toBe(reason);
+		expect(request.destroyed).toBe(true);
 	});
 });

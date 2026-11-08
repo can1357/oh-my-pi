@@ -1,9 +1,19 @@
+import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import type { RequestPolicy } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { readSseJson } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
-import type { AssistantMessage, Context, Message, Model, StreamOptions, Tool, ToolCall } from "../../types";
+import type {
+	AssistantMessage,
+	Context,
+	GeminiNativeContentPayload,
+	Message,
+	Model,
+	StreamOptions,
+	Tool,
+	ToolCall,
+} from "../../types";
 import { createAbortSourceTracker } from "../../utils/abort";
 import { AssistantMessageEventStream } from "../../utils/event-stream";
 import {
@@ -15,15 +25,18 @@ import { notifyProviderResponse } from "../../utils/provider-response";
 import { dereferenceJsonSchema, normalizeSchemaForFactoryDroid, toolWireSchema } from "../../utils/schema";
 import {
 	extractGoogleErrorMessage,
+	FunctionCallOrder,
+	googleStreamChunkError,
+	GoogleTextBlocks,
 	mapGoogleUsage,
 	mapStopReasonString,
 	nextToolCallId,
-	pushBlockEndEvent,
 	SKIP_THOUGHT_SIGNATURE,
-	startTextOrThinkingBlock,
 } from "../google-shared";
-import type { GenerateContentResponse, Part } from "../google-types";
-import { transformMessages } from "../transform-messages";
+import type { Content, GenerateContentResponse, Part } from "../google-types";
+import { redactSensitiveInObject, transformMessages } from "../transform-messages";
+import { toolNamesByWire } from "../../utils/tool-names";
+import { sanitizeFactoryDroidToolName } from "./tool-names";
 
 /** Factory's Gemini endpoint speaks native generateContent SSE at `/api/llm/g/v1/generate`. */
 
@@ -38,35 +51,6 @@ function geminiThinkingLevel(effort: string | undefined, supportsMedium: boolean
 		default:
 			return "HIGH";
 	}
-}
-
-/**
- * The CLI sanitizes tool names to `[a-zA-Z0-9_-]`; names longer than 64 chars
- * are truncated and suffixed with `_` + an 8-char sha256. Applied to
- * declarations and replayed functionCall/functionResponse names.
- */
-function sanitizeFactoryDroidToolName(name: string): string {
-	const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
-	if (sanitized.length <= 64) return sanitized;
-	return `${sanitized.slice(0, 64)}_${Bun.SHA256.hash(sanitized, "hex").slice(0, 8)}`;
-}
-
-/**
- * Wire name -> caller tool name for the declared tools, so returned calls
- * dispatch to the tool that was advertised. Two tools sharing one wire name
- * could not be told apart, so that request is rejected.
- */
-function factoryDroidToolNamesByWire(tools: Tool[] | undefined): Map<string, string> {
-	const names = new Map<string, string>();
-	for (const tool of tools ?? []) {
-		const wire = sanitizeFactoryDroidToolName(tool.name);
-		const existing = names.get(wire);
-		if (existing !== undefined && existing !== tool.name) {
-			throw new Error(`Factory Gemini tool names "${existing}" and "${tool.name}" both encode as "${wire}"`);
-		}
-		names.set(wire, tool.name);
-	}
-	return names;
 }
 
 /** Finish reasons the CLI reports as a content-filter block (with stopDetails). */
@@ -87,22 +71,22 @@ const FACTORY_DROID_BLOCK_REASONS: Record<string, true> = {
  * "unknown" bucket has no StopReason equivalent, so unknown terminators
  * surface as errors instead of masquerading as a clean stop.
  */
-function mapFactoryDroidFinishReason(reason: string | undefined): {
+function mapFactoryDroidFinishReason(reason: string): {
 	stopReason: "stop" | "length" | "error";
 	errorMessage?: string;
 } {
 	// mapStopReasonString already implements the CLI's outcome table
 	// (STOP→stop, MAX_TOKENS→length, everything else→error); the cast narrows
 	// its wide StopReason return to the three values it ever produces.
-	const stopReason = mapStopReasonString(reason ?? "") as "stop" | "length" | "error";
+	const stopReason = mapStopReasonString(reason) as "stop" | "length" | "error";
 	if (stopReason !== "error") return { stopReason };
-	if (reason && FACTORY_DROID_BLOCK_REASONS[reason]) {
+	if (FACTORY_DROID_BLOCK_REASONS[reason]) {
 		return { stopReason: "error", errorMessage: `Generation was blocked by content filters (${reason})` };
 	}
 	if (reason === "MALFORMED_FUNCTION_CALL") {
 		return { stopReason: "error", errorMessage: `Generation failed with finish reason: ${reason}` };
 	}
-	return { stopReason: "error", errorMessage: `Unknown finish reason: ${reason ?? "none"}` };
+	return { stopReason: "error", errorMessage: `Unknown finish reason: ${reason}` };
 }
 
 /** Transports whose outputs carry Gemini-verifiable signatures (Factory's own outputs are stamped google-generative-ai). */
@@ -112,10 +96,70 @@ const GOOGLE_APIS: Record<string, true> = {
 	"google-gemini-cli": true,
 };
 
+/** Whether Factory serves `model` on this Gemini generate wire rather than through an inner Anthropic or OpenAI model. */
+export function isFactoryDroidGeminiWire(model: Pick<Model, "id" | "requestModelId">): boolean {
+	return resolveFactoryDroidPolicy(model)?.wire === "google-generate";
+}
+
+/**
+ * Whether {@link adoptFactoryReplay} may keep `turn`'s opaque reasoning payload
+ * (thinking and call signatures): only a Google-origin turn's survive.
+ */
+export function keepsFactoryGeminiReasoning(turn: Pick<AssistantMessage, "api">): boolean {
+	return GOOGLE_APIS[turn.api] === true;
+}
+
+/**
+ * Digest of what a turn says: visible text, thinking and tool calls. A turn
+ * whose digest still matches its recorded native content was not rewritten
+ * (shaken, repaired, edited), so that content may replay in its place.
+ */
+function geminiTurnDigest(content: AssistantMessage["content"]): string {
+	const projected = content.flatMap(block => {
+		if (block.type === "text") return [["text", block.text]];
+		if (block.type === "thinking") return [["thinking", block.thinking]];
+		if (block.type === "toolCall") return [["call", block.name, block.arguments]];
+		return [];
+	});
+	return Bun.SHA256.hash(JSON.stringify(projected), "hex");
+}
+
+/**
+ * The native content recorded for this model's own turn, while the turn still
+ * says what Gemini sent, its calls line up with the native ones, and outbound
+ * credential redaction would leave it alone (native parts the rebuilt turn
+ * drops, such as unsigned thoughts, never reach `transformMessages`).
+ */
+function replayableNativeContent(
+	message: AssistantMessage,
+	model: Model<"factory-droid-agent">,
+): GeminiNativeContentPayload | undefined {
+	const payload = message.providerPayload;
+	if (payload?.type !== "geminiNativeContent") return undefined;
+	if (message.provider !== model.provider || message.model !== model.id) return undefined;
+	if (payload.digest !== geminiTurnDigest(message.content)) return undefined;
+	const nativeCalls = payload.content.parts.flatMap(part => {
+		const call = part.functionCall;
+		return call && typeof call === "object" ? ["name" in call ? call.name : undefined] : [];
+	});
+	const calls = message.content.flatMap(block =>
+		block.type === "toolCall" ? [sanitizeFactoryDroidToolName(block.name)] : [],
+	);
+	if (nativeCalls.length !== calls.length || nativeCalls.some((name, i) => name !== calls[i])) return undefined;
+	if (redactSensitiveInObject(payload.content).changed) return undefined;
+	return payload;
+}
+
 /**
  * Apply Factory's replay provenance before canonical normalization: only
  * signed, Google-origin thinking and Google-origin call signatures survive;
- * everything else is DROPPED (never demoted to visible text).
+ * everything else is DROPPED (never demoted to visible text). A text block
+ * keeps its signature only when this model signed it.
+ *
+ * Tool-call names are encoded to their wire form here, before
+ * `transformMessages` drops calls whose names no provider could declare: the
+ * proxy accepts any caller tool name once sanitized, so a declared
+ * `my.tool/name` call must survive replay.
  *
  * Only Google-origin turns are stamped as the target, so `transformMessages`
  * keeps their surviving signatures verbatim instead of demoting/stripping them
@@ -124,10 +168,22 @@ const GOOGLE_APIS: Record<string, true> = {
  * reads it (Responses `call_id|item_id` results pair only with a
  * Responses-origin call), and with its reasoning already gone there is
  * nothing left for a cross-model pass to demote.
+ *
+ * Under native replay, a turn whose recorded native content may still replay
+ * keeps that payload, re-digested over the adopted content so the converter
+ * can tell whether outbound normalization then rewrote the turn; any other
+ * turn's native payload is dropped.
  */
-function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent">): Message {
+export function adoptFactoryReplay(
+	message: Message,
+	model: Model<"factory-droid-agent">,
+	nativeReplay = false,
+): Message {
 	if (message.role !== "assistant") return message;
-	const googleOrigin = GOOGLE_APIS[message.api] === true;
+	const googleOrigin = keepsFactoryGeminiReasoning(message);
+	const sameModel = googleOrigin && message.provider === model.provider && message.model === model.id;
+	// Settled on the stored turn: adoption below rewrites names and drops blocks.
+	const native = nativeReplay ? replayableNativeContent(message, model) : undefined;
 	const content: AssistantMessage["content"] = [];
 	for (const block of message.content) {
 		if (block.type === "thinking") {
@@ -135,15 +191,23 @@ function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent"
 			if (googleOrigin && block.thinking.trim() && signature && signature !== SKIP_THOUGHT_SIGNATURE) {
 				content.push(block);
 			}
-		} else if (block.type === "toolCall" && !googleOrigin && block.thoughtSignature) {
-			content.push({ ...block, thoughtSignature: undefined });
+		} else if (block.type === "toolCall") {
+			const thoughtSignature = googleOrigin ? block.thoughtSignature : undefined;
+			content.push({ ...block, name: sanitizeFactoryDroidToolName(block.name), thoughtSignature });
+		} else if (block.type === "text" && !sameModel && block.textSignature) {
+			content.push({ ...block, textSignature: undefined });
 		} else {
 			content.push(block);
 		}
 	}
+	const providerPayload = native
+		? { ...native, digest: geminiTurnDigest(content) }
+		: message.providerPayload?.type === "geminiNativeContent"
+			? undefined
+			: message.providerPayload;
 	return googleOrigin
-		? { ...message, content, api: model.api, provider: model.provider, model: model.id }
-		: { ...message, content };
+		? { ...message, content, providerPayload, api: model.api, provider: model.provider, model: model.id }
+		: { ...message, content, providerPayload };
 }
 
 /**
@@ -153,26 +217,36 @@ function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent"
  *   redaction, malformed-call sanitation, missing/aborted tool results) after
  *   {@link adoptFactoryReplay} settled which reasoning may replay.
  * - User and developer turns become user contents; images ride as `inlineData`.
- * - Signed thinking replays as plain text parts carrying its signature.
+ * - Signed thinking replays as plain text parts carrying its signature, and
+ *   text carries the signature Gemini put on it.
  * - Tool calls replay as `functionCall` parts carrying their
  *   `thoughtSignature`; consecutive tool results group into ONE user content,
- *   because the proxy 400s when a call turn's response part count mismatches.
+ *   because the proxy 400s when a call turn's response part count mismatches,
+ *   and sort back into call order, because Gemini pairs id-less responses by
+ *   position.
  * - Tool names are sanitized to the CLI's `[a-zA-Z0-9_-]` shape on
  *   declarations and on replayed call/response names.
  * - After the latest user turn containing a non-response part, function calls
- *   missing a signature get the validator-skip sentinel.
+ *   missing a signature get the validator-skip sentinel; under native replay,
+ *   every rebuilt model turn gets it.
  * - Model turns with no valid parts are dropped.
+ * - Under native replay, this model's own unrewritten turns go back as the
+ *   native content Gemini streamed, and their tool results carry Gemini's call ids.
  */
 function toGeminiContents(
 	model: Model<"factory-droid-agent">,
 	context: Context,
+	nativeReplay: boolean,
 ): {
 	contents: Array<{ role: "user" | "model"; parts: Part[] }>;
 	systemInstruction?: { parts: Part[] };
 } {
 	const contents: Array<{ role: "user" | "model"; parts: Part[] }> = [];
+	const callOrder = new FunctionCallOrder();
+	const nativeContents = new Set<Content>();
+	const nativeCallIds = new Map<string, string>();
 	const messages = transformMessages(
-		context.messages.map(message => adoptFactoryReplay(message, model)),
+		context.messages.map(message => adoptFactoryReplay(message, model, nativeReplay)),
 		model,
 	);
 	for (const message of messages) {
@@ -191,15 +265,33 @@ function toGeminiContents(
 			continue;
 		}
 		if (message.role === "assistant") {
+			// Outbound normalization may still drop a malformed call (empty id or
+			// name, overlong name): only a turn it left alone replays natively.
+			const payload = message.providerPayload;
+			if (payload?.type === "geminiNativeContent" && payload.digest === geminiTurnDigest(message.content)) {
+				const native = structuredClone(payload.content) as Content & { parts: Part[] };
+				const nativeIds = native.parts.flatMap(part => (part.functionCall ? [part.functionCall.id] : []));
+				let callIndex = 0;
+				for (const block of message.content) {
+					if (block.type !== "toolCall") continue;
+					callOrder.call(block.id);
+					const nativeId = nativeIds[callIndex++];
+					if (nativeId) nativeCallIds.set(block.id, nativeId);
+				}
+				nativeContents.add(native);
+				contents.push(native as { role: "model"; parts: Part[] });
+				continue;
+			}
 			const parts: Part[] = [];
 			for (const block of message.content) {
 				if (block.type === "text" && block.text) {
-					parts.push({ text: block.text });
+					parts.push({ text: block.text, ...(block.textSignature && { thoughtSignature: block.textSignature }) });
 				} else if (block.type === "thinking" && block.thinkingSignature) {
 					parts.push({ text: block.thinking, thoughtSignature: block.thinkingSignature });
 				} else if (block.type === "toolCall") {
+					callOrder.call(block.id);
 					parts.push({
-						functionCall: { name: sanitizeFactoryDroidToolName(block.name), args: block.arguments },
+						functionCall: { name: block.name, args: block.arguments },
 						...(block.thoughtSignature ? { thoughtSignature: block.thoughtSignature } : {}),
 					});
 				}
@@ -214,8 +306,10 @@ function toGeminiContents(
 			else if (block.type === "image")
 				binaryParts.push({ inlineData: { mimeType: block.mimeType, data: block.data } });
 		}
+		const nativeId = nativeCallIds.get(message.toolCallId);
 		const part: Part = {
 			functionResponse: {
+				...(nativeId ? { id: nativeId } : {}),
 				name: sanitizeFactoryDroidToolName(message.toolName),
 				response: {
 					result:
@@ -228,6 +322,7 @@ function toGeminiContents(
 				...(binaryParts.length > 0 ? { parts: binaryParts } : {}),
 			},
 		};
+		callOrder.response(part, message.toolCallId);
 		const last = contents[contents.length - 1];
 		if (last && last.role === "user" && last.parts.every(p => p.functionResponse)) {
 			last.parts.push(part);
@@ -235,10 +330,12 @@ function toGeminiContents(
 			contents.push({ role: "user", parts: [part] });
 		}
 	}
+	callOrder.apply(contents);
 	// Sentinel injection: scope to model turns at/after the latest user turn
 	// with a non-response part (the validator only checks the current tail).
+	// Native replay sends recorded turns untouched and stamps every rebuilt one.
 	let lastUserText = 0;
-	for (let i = contents.length - 1; i >= 0; i--) {
+	for (let i = contents.length - 1; i >= 0 && !nativeReplay; i--) {
 		const entry = contents[i];
 		if (entry.role === "user" && entry.parts.some(part => !part.functionResponse)) {
 			lastUserText = i;
@@ -247,7 +344,7 @@ function toGeminiContents(
 	}
 	for (let i = lastUserText; i < contents.length; i++) {
 		const entry = contents[i];
-		if (entry.role !== "model") continue;
+		if (entry.role !== "model" || nativeContents.has(entry)) continue;
 		for (const part of entry.parts) {
 			if (part.functionCall && !part.thoughtSignature?.trim()) part.thoughtSignature = SKIP_THOUGHT_SIGNATURE;
 		}
@@ -260,7 +357,7 @@ function toGeminiContents(
 	};
 }
 
-function toGeminiTools(tools: Tool[] | undefined): Array<{ functionDeclarations: unknown[] }> | undefined {
+export function toGeminiTools(tools: Tool[] | undefined): Array<{ functionDeclarations: unknown[] }> | undefined {
 	if (!tools || tools.length === 0) return undefined;
 	return [
 		{
@@ -282,6 +379,8 @@ export interface FactoryDroidGeminiOptions extends StreamOptions {
 	headers: Record<string, string>;
 	/** Thinking dialect selected by the route policy. */
 	thinkingDialect?: RequestPolicy["googleThinking"];
+	/** Argon-style request policy selected by the route. */
+	requestPolicy?: Pick<RequestPolicy, "googleOmitSampling" | "googlePinMaxOutputTokens" | "googleNativeReplay">;
 }
 
 export function streamFactoryDroidGemini(
@@ -321,15 +420,22 @@ export function streamFactoryDroidGemini(
 		let firstEventTimer: NodeJS.Timeout | undefined;
 
 		try {
-			const { contents, systemInstruction } = toGeminiContents(model, context);
+			const policy = options.requestPolicy ?? {};
+			const nativeReplay = policy.googleNativeReplay === true;
+			const { contents, systemInstruction } = toGeminiContents(model, context, nativeReplay);
 			let body: Record<string, unknown> = {
 				model: model.requestModelId ?? model.id,
 				contents,
 				...(systemInstruction ? { systemInstruction } : {}),
 				generationConfig: {
-					temperature: options.temperature ?? 1,
-					topP: options.topP ?? 0.95,
-					topK: options.topK ?? 64,
+					...(policy.googleOmitSampling
+						? {}
+						: {
+								temperature: options.temperature ?? 1,
+								topP: options.topP ?? 0.95,
+								topK: options.topK ?? 64,
+							}),
+					...(policy.googlePinMaxOutputTokens ? { maxOutputTokens: model.maxTokens } : {}),
 					...(options.stopSequences !== undefined ? { stopSequences: options.stopSequences } : {}),
 					thinkingConfig:
 						options.disableReasoning === true
@@ -343,7 +449,7 @@ export function streamFactoryDroidGemini(
 								},
 				},
 			};
-			const toolNamesByWire = factoryDroidToolNamesByWire(context.tools);
+			const wireNames = toolNamesByWire(context.tools, sanitizeFactoryDroidToolName);
 			const tools = toGeminiTools(context.tools);
 			if (tools) body.tools = tools;
 			const replacement = await options.onPayload?.(body, model, options.signal);
@@ -385,18 +491,13 @@ export function streamFactoryDroidGemini(
 
 			stream.push({ type: "start", partial: output });
 
-			let activeIndex = -1;
+			// Factory replays signed thinking as plain text, so summaries stay as received.
+			const textBlocks = new GoogleTextBlocks(output, stream, "verbatim");
 			let finishReason: string | undefined;
 			let blockReason: string | undefined;
 			const toolCallIndices: number[] = [];
-			const closeBlock = () => {
-				if (activeIndex < 0) return;
-				const block = output.content[activeIndex];
-				if (block.type === "thinking" || block.type === "text") {
-					pushBlockEndEvent(block, activeIndex, output, stream);
-				}
-				activeIndex = -1;
-			};
+			// Native replay keeps every streamed part as received, one part per chunk part, in arrival order.
+			let nativeContent: GeminiNativeContentPayload["content"] | undefined;
 
 			clearTimeout(firstEventTimer);
 			const chunks = iterateWithIdleTimeout(
@@ -414,6 +515,9 @@ export function streamFactoryDroidGemini(
 				},
 			);
 			for await (const chunk of chunks) {
+				// A server-declared error keeps its status and the same classification
+				// as the Google provider; only a stream that just stops is a premature close.
+				if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
 				if (firstTokenTime === undefined && chunk.candidates?.[0]?.content?.parts?.some(part => part.text)) {
 					firstTokenTime = performance.now();
 				}
@@ -425,16 +529,23 @@ export function streamFactoryDroidGemini(
 				// intermediate reasons before the terminal one).
 				finishReason = chunk.candidates?.[0]?.finishReason ?? finishReason;
 				blockReason = chunk.promptFeedback?.blockReason ?? blockReason;
-				const parts = chunk.candidates?.[0]?.content?.parts ?? [];
+				const candidateContent = chunk.candidates?.[0]?.content;
+				if (nativeReplay && candidateContent) {
+					const { parts: chunkParts, ...fields } = structuredClone(candidateContent);
+					nativeContent ??= { role: "model", parts: [] };
+					Object.assign(nativeContent, fields);
+					nativeContent.parts.push(...((chunkParts ?? []) as unknown as Record<string, unknown>[]));
+				}
+				const parts = candidateContent?.parts ?? [];
 				for (const part of parts) {
 					if (part.functionCall) {
-						closeBlock();
+						textBlocks.close();
 						const contentIndex = output.content.length;
 						const wireName = part.functionCall.name || "";
 						const toolCall: ToolCall = {
 							type: "toolCall",
 							id: nextToolCallId(wireName || "tool"),
-							name: toolNamesByWire.get(wireName) ?? wireName,
+							name: wireNames.get(wireName) ?? wireName,
 							arguments: part.functionCall.args ?? {},
 							...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
 						};
@@ -449,41 +560,34 @@ export function streamFactoryDroidGemini(
 						});
 						continue;
 					}
-					if (typeof part.text !== "string") continue;
-					if (part.thought === true) {
-						if (activeIndex >= 0 && output.content[activeIndex].type !== "thinking") closeBlock();
-						if (activeIndex < 0) {
-							activeIndex = output.content.length;
-							startTextOrThinkingBlock(true, output, stream);
-						}
-						const block = output.content[activeIndex] as { thinking: string; thinkingSignature?: string };
-						// The CLI keeps the FIRST non-empty signature per block.
-						if (!block.thinkingSignature && part.thoughtSignature) {
-							block.thinkingSignature = part.thoughtSignature;
-						}
-						block.thinking += part.text;
-						stream.push({
-							type: "thinking_delta",
-							contentIndex: activeIndex,
-							delta: part.text,
-							partial: output,
-						});
-					} else if (part.text.length > 0) {
-						if (activeIndex >= 0 && output.content[activeIndex].type !== "text") closeBlock();
-						if (activeIndex < 0) {
-							activeIndex = output.content.length;
-							startTextOrThinkingBlock(false, output, stream);
-						}
-						const block = output.content[activeIndex] as { text: string };
-						block.text += part.text;
-						stream.push({ type: "text_delta", contentIndex: activeIndex, delta: part.text, partial: output });
-					}
+					textBlocks.push(part);
 				}
 			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;
 
-			closeBlock();
+			textBlocks.close();
+			// A stream that reaches EOF without a finishReason (and without a
+			// promptFeedback block) was truncated, even when it already carried
+			// functionCall parts; fail it as retryable instead of finishing the turn.
+			if (finishReason === undefined && !blockReason) {
+				// Worded like the other incomplete-stream errors so turn recovery
+				// continues a stream that already rendered text.
+				throw new AIError.ProviderResponseError(
+					"Factory Droid Gemini stream closed before a finish_reason was received",
+					{
+						provider: model.provider,
+						kind: "incomplete-stream",
+					},
+				);
+			}
+			if (nativeContent) {
+				output.providerPayload = {
+					type: "geminiNativeContent",
+					digest: geminiTurnDigest(output.content),
+					content: nativeContent,
+				};
+			}
 			for (const contentIndex of toolCallIndices) {
 				const toolCall = output.content[contentIndex] as ToolCall;
 				stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
@@ -499,12 +603,12 @@ export function streamFactoryDroidGemini(
 				output.errorMessage = `Generation was blocked by content filters (${blockReason})`;
 				output.stopDetails = { type: "content_filter", category: blockReason };
 				stream.push({ type: "error", reason: "error", error: output });
-			} else {
+			} else if (finishReason !== undefined) {
 				const mapped = mapFactoryDroidFinishReason(finishReason);
 				output.stopReason = mapped.stopReason;
 				if (mapped.errorMessage) {
 					output.errorMessage = mapped.errorMessage;
-					if (mapped.stopReason === "error" && finishReason && FACTORY_DROID_BLOCK_REASONS[finishReason]) {
+					if (mapped.stopReason === "error" && FACTORY_DROID_BLOCK_REASONS[finishReason]) {
 						output.stopDetails = { type: "content_filter", category: finishReason };
 					}
 				}

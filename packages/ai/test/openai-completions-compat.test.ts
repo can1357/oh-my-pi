@@ -98,6 +98,7 @@ function zaiGlm52Model(): Model<"openai-completions"> {
 
 const alibabaQwen38Flash = getBundledModel<"openai-completions">("alibaba-token-plan", "qwen3.8-flash");
 const alibabaTokenPlanApiKey = serializeAlibabaTokenPlanCredential("sk-sp-test", "session_id=test");
+const mistralSmallLatest = getBundledModel<"openai-completions">("mistral", "mistral-small-latest");
 
 function kimiZaiModel(): Model<"openai-completions"> {
 	return buildModel({
@@ -117,6 +118,8 @@ async function captureOpenAICompletionsPayload(
 		apiKey?: string;
 		reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 		temperature?: number;
+		sessionId?: string;
+		cacheRetention?: "none" | "short" | "long";
 	},
 ): Promise<unknown> {
 	const { promise, resolve } = Promise.withResolvers<unknown>();
@@ -1226,6 +1229,7 @@ describe("openai-completions compatibility", () => {
 			type: "thinking",
 			thinking: "inspect tool output",
 			thinkingSignature: "reasoning_text",
+			summary: false,
 		});
 
 		const compat = { ...model.compat, requiresReasoningContentForToolCalls: true };
@@ -2466,7 +2470,7 @@ describe("anthropic cache control for OpenAI-compatible chat completions", () =>
 		expect(textPart?.cache_control).toEqual({ type: "ephemeral" });
 	});
 
-	it("does not attach Anthropic cache_control to empty assistant tool-call content", async () => {
+	it("anchors Anthropic cache_control on the trailing tool result during a tool loop", async () => {
 		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",
@@ -2504,17 +2508,16 @@ describe("anthropic cache control for OpenAI-compatible chat completions", () =>
 			messages: [{ role: "user", content: "cache me", timestamp: 0 }, assistantMessage, toolResultMessage],
 		});
 		const messages = getPayloadMessages(payload);
-		const assistant = messages.find(message => {
-			const toolCalls = message.tool_calls;
-			return message.role === "assistant" && Array.isArray(toolCalls);
-		});
-		const firstUser = messages.find(message => message.role === "user");
-		const userContent = firstUser?.content;
-		const textPart = getLastTextPart(userContent);
+		const [user, assistant, tool] = messages;
 
+		// Empty tool-call replay content must stay a string: an empty text part
+		// with cache_control is rejected by Anthropic/OpenRouter.
 		expect(assistant?.content).toBe("");
-		expect(textPart?.text).toBe("cache me");
-		expect(textPart?.cache_control).toEqual({ type: "ephemeral" });
+		expect(getLastTextPart(user?.content)?.cache_control).toBeUndefined();
+		expect(tool?.role).toBe("tool");
+		expect(tool?.content).toEqual([
+			{ type: "text", text: "Read image file [image/webp]", cache_control: { type: "ephemeral" } },
+		]);
 	});
 
 	it("does not infer Anthropic cache_control for custom Claude ids without compat", async () => {
@@ -2821,5 +2824,40 @@ describe("grammar tool-schema normalization (issue #5914)", () => {
 		const properties = toObject(toolParameters(payload, "task").properties);
 		// Off the grammar path the open field keeps the normalized bare boolean.
 		expect(properties?.outputSchema).toBe(true);
+	});
+});
+
+describe("mistral prompt_cache_key regression (#15079)", () => {
+	it("sends the session-stable prompt_cache_key on Mistral chat-completions requests", async () => {
+		expect(mistralSmallLatest.compat.supportsPromptCacheKey).toBe(true);
+		const payload = await captureOpenAICompletionsPayload(mistralSmallLatest, undefined, {
+			sessionId: "regression-session-15079",
+		});
+		const payloadObject = toObject(payload);
+		// Catalog rule + baked row must both survive regeneration for this to hold.
+		expect(payloadObject?.prompt_cache_key).toBe("regression-session-15079");
+	});
+
+	it("omits prompt_cache_key when cache retention is disabled", async () => {
+		const payload = await captureOpenAICompletionsPayload(mistralSmallLatest, undefined, {
+			sessionId: "regression-session-15079",
+			cacheRetention: "none",
+		});
+		const payloadObject = toObject(payload);
+		expect(payloadObject === null || !("prompt_cache_key" in payloadObject)).toBe(true);
+	});
+});
+
+describe("Groq Qwen reasoning_effort on the wire", () => {
+	it("sends each Qwen only an effort value Groq accepts", async () => {
+		// Qwen 3.6 takes `default` (thinking) or `none`; Qwen 3.8 takes low/medium/high.
+		const qwen36 = getBundledModel<"openai-completions">("groq", "qwen/qwen3.6-27b");
+		const on36 = toObject(await captureOpenAICompletionsPayload(qwen36, undefined, { reasoning: "high" }));
+		expect(on36?.reasoning_effort).toBe("default");
+		expect(on36?.enable_thinking).toBeUndefined();
+
+		const qwen38 = getBundledModel<"openai-completions">("groq", "qwen/qwen3.8-27b");
+		const on38 = toObject(await captureOpenAICompletionsPayload(qwen38, undefined, { reasoning: "low" }));
+		expect(on38?.reasoning_effort).toBe("low");
 	});
 });

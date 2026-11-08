@@ -29,9 +29,11 @@
  */
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollBy } from "@oh-my-pi/pi-wire";
-import { type Component, Container, CURSOR_MARKER } from "../tui";
+import { type Component, CURSOR_MARKER, ownDescription } from "../tui";
+import { getNativeBlob } from "./blobs";
 import { normalizeIconProps } from "./icons";
 import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
+import { quietMotion } from "./quiet";
 import { isNativeSettled } from "./settle";
 
 /** The regions a frame fills. */
@@ -291,6 +293,7 @@ export class Reconciler {
 		this.#prevPortals = portals;
 		this.#regions = next;
 		for (const entry of this.#dels) this.#deleteEntry(entry);
+		this.#dels = [];
 		// Parked to survive a parent/child swap but absent from the new description.
 		for (const state of this.#parked) {
 			if (!state.parked) continue;
@@ -375,6 +378,18 @@ export class Reconciler {
 		return state ? this.#findEditor(state, 0) : null;
 	}
 
+	/**
+	 * The last description of `component` on this surface (a settled one only
+	 * while still referenced elsewhere), or undefined when it isn't mounted.
+	 */
+	described(component: Component): NativeNode | undefined {
+		const state = this.#states.get(component);
+		if (!state) return undefined;
+		const node = state.node ?? (state.weak?.deref() as NativeNode | readonly string[] | undefined);
+		// A settled `rows` fallback is held by its lines; its node is kept beside them.
+		return Array.isArray(node) ? (state.rowsNode ?? undefined) : (node as NativeNode | undefined);
+	}
+
 	/** Stop referencing ids the terminal dropped (`gone`). */
 	forget(ids: readonly string[]): void {
 		for (const id of ids) this.#gone.add(id);
@@ -403,13 +418,31 @@ export class Reconciler {
 		return this.#findEditorIn(node, state.id, "", state.owner, depth);
 	}
 
-	#findEditorIn(node: NativeNode, id: string, keypath: string, owner: Owner, depth: number): string | null {
+	/**
+	 * The first editor under `node`. An `overlay`/`picker` child outside a hoisted
+	 * sheet is hoisted into `layer` under its `^` keypath (see {@link #entries}), so
+	 * a field in a sheet a dock component describes is found under that id.
+	 */
+	#findEditorIn(
+		node: NativeNode,
+		id: string,
+		keypath: string,
+		owner: Owner,
+		depth: number,
+		hoist = true,
+	): string | null {
 		if (node.k === "editor" || node.k === "input") return id;
-		for (const entry of this.#entries(node.c, keypath, owner, true, null)) {
-			const found =
-				entry.comp === undefined
-					? this.#findEditorIn(entry.node, entry.id, entry.keypath, owner, depth)
-					: this.#findEditorOf(entry.comp, depth + 1);
+		for (const entry of this.#entries(node.c, keypath, owner, false, null)) {
+			let found: string | null;
+			if (entry.comp !== undefined) {
+				found = this.#findEditorOf(entry.comp, depth + 1);
+			} else if (hoist && (entry.node.k === "overlay" || entry.node.k === "picker")) {
+				const path = entry.keypath;
+				const portalPath = keypath === "" ? `^${path}` : `${keypath}/^${path.slice(keypath.length + 1)}`;
+				found = this.#findEditorIn(entry.node, nodeId(owner.base, portalPath), portalPath, owner, depth, false);
+			} else {
+				found = this.#findEditorIn(entry.node, entry.id, entry.keypath, owner, depth, hoist);
+			}
 			if (found !== null) return found;
 		}
 		return null;
@@ -680,24 +713,28 @@ export class Reconciler {
 			this.#ops.push(["text", id, "append", newText.slice(oldText.length)]);
 			return;
 		}
-		if ((kind === "editor" || kind === "input") && oldText.length > 0) {
+		// A streaming `md` node rewrites only its tail (the speculatively closed span it ends in), so an
+		// edit past a shared head splices too instead of resending the whole text.
+		if ((kind === "editor" || kind === "input" || kind === "md") && oldText.length > 0) {
 			const limit = Math.min(oldText.length, newText.length);
 			let prefix = 0;
 			while (prefix < limit && oldText.charCodeAt(prefix) === newText.charCodeAt(prefix)) prefix++;
-			let suffix = 0;
-			while (
-				suffix < limit - prefix &&
-				oldText.charCodeAt(oldText.length - 1 - suffix) === newText.charCodeAt(newText.length - 1 - suffix)
-			)
-				suffix++;
-			this.#ops.push([
-				"splice",
-				id,
-				prefix,
-				oldText.length - prefix - suffix,
-				newText.slice(prefix, newText.length - suffix),
-			]);
-			return;
+			if (kind !== "md" || prefix > 0) {
+				let suffix = 0;
+				while (
+					suffix < limit - prefix &&
+					oldText.charCodeAt(oldText.length - 1 - suffix) === newText.charCodeAt(newText.length - 1 - suffix)
+				)
+					suffix++;
+				this.#ops.push([
+					"splice",
+					id,
+					prefix,
+					oldText.length - prefix - suffix,
+					newText.slice(prefix, newText.length - suffix),
+				]);
+				return;
+			}
 		}
 		this.#ops.push(["text", id, "replace", newText]);
 	}
@@ -711,6 +748,8 @@ export class Reconciler {
 		owner: Owner,
 		entries: readonly Entry[],
 	): Readonly<Record<string, unknown>> | undefined {
+		// Dereferencing pins the blob through this synchronous reconcile/upload job, even after settling drops its node.
+		if (node.k === "image" && node.p?.blob) getNativeBlob(node.p.blob);
 		return normalizeIconProps(node.k, this.#resolveRefs(node, owner, entries));
 	}
 
@@ -901,15 +940,8 @@ export class Reconciler {
 	/** The component's description, or a `rows` node rendered at `cx.cols`. */
 	#resolve(state: CompState): NativeNode {
 		const comp = state.comp;
-		const describe = comp.describe;
-		// A Container subclass that paints its own rows but inherits the plain
-		// column description would lose its rendering: fall back to rows.
-		// (Read lazily: this module and tui.ts import each other.)
-		const inherited = describe === Container.prototype.describe && comp.render !== Container.prototype.render;
-		if (describe && !inherited) {
-			const node = describe.call(comp, this.#cx!);
-			if (node) return node;
-		}
+		const node = ownDescription(comp, this.#cx!);
+		if (node) return quietMotion(node);
 		this.#rows++;
 		const cols = Math.max(1, this.#cx!.cols);
 		const lines = comp.render(cols);

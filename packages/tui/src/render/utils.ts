@@ -76,7 +76,7 @@ export interface RenderCache {
 }
 
 /** Build indentation and continuing branches for ancestor levels. */
-export function buildTreePrefix(ancestors: boolean[], theme: Theme): string {
+export function buildTreePrefix(ancestors: readonly boolean[], theme: Theme): string {
 	return ancestors.map(hasNext => (hasNext ? `${theme.tree.vertical}  ` : "   ")).join("");
 }
 

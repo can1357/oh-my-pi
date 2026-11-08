@@ -20,7 +20,7 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
  *   metaharness harbor --help
  */
 import type { Server } from "bun";
-import { harborRunnerArgs, type LaunchRequest } from "./launch-args";
+import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
 
 // ────────────────────────────────────────────────────────────────────── config
 
@@ -1150,7 +1150,7 @@ export function prepareSourceDeps(cfg: Config): SourceMount {
 			fs.copyFileSync(path.join(REPO_ROOT, rel), dst);
 		}
 		// --ignore-scripts: the skeleton has manifests only, so lifecycle scripts
-		// (root `prepare` → gen:tool-views) would fail; patchedDependencies still apply.
+		// (root `prepare` → gen:export-viewer) would fail; patchedDependencies still apply.
 		const script =
 			'mkdir -p /deps/bin && cp "$(command -v bun)" /deps/bin/bun && cd /deps && bun install --production --omit=optional --ignore-scripts';
 		const image = `oven/bun:${bunVersion}`;
@@ -1621,9 +1621,7 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 		);
 	}
 
-	const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-	const modelSlug = (cfg.models[0] ?? "model").replace(/[^a-zA-Z0-9]+/g, "-");
-	const jobName = cfg.jobName ?? `${modelSlug}-${stamp}`;
+	const jobName = cfg.jobName ?? defaultJobName(cfg.models[0] ?? "model");
 	const jobDir = path.join(cfg.jobsDir, jobName);
 	const benchDir = path.join(cfg.jobsDir, "_bench", jobName);
 	fs.mkdirSync(benchDir, { recursive: true });

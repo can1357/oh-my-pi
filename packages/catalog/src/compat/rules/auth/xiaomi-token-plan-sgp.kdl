@@ -4,6 +4,6 @@ auth "xiaomi-token-plan-sgp" {
 		auth-url "https://platform.xiaomimimo.com/console/plan-manage"
 		instructions "Copy your token-plan API key for the Singapore region"
 		prompt "Paste your Xiaomi Token Plan Singapore API key (tp-...)" placeholder="tp-..."
-		validate "chat-completions" label="xiaomi" base-url="https://token-plan-sgp.xiaomimimo.com/v1" model="mimo-v2.5"
+		validate "chat-completions" label="xiaomi" base-url="https://token-plan-sgp.xiaomimimo.com/v1" model="mimo-v2.6-flash"
 	}
 }

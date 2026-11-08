@@ -209,4 +209,57 @@ button { margin: 80px; width: 180px; height: 60px; }
 			await invoke({ action: "close", name, kill: true }).catch(() => undefined);
 		}
 	}, 30_000);
+
+	// Scale 0 keeps the browser's own device scale (1 in headless Chromium).
+	test.each([1.25, 2, 0])(
+		"the screenshot note maps image coordinates to clickAt at device scale %p",
+		async scale => {
+			// Backend overrides would send this open to a relay or cmux surface instead of headless Chromium.
+			const savedEnv = { ...process.env };
+			for (const key of ["PI_BROWSER_RELAY", "PI_BROWSER_CMUX", "PI_BROWSER_TERN"]) delete process.env[key];
+			const invoke = createHost();
+			const name = `screenshot-click-factor-${crypto.randomUUID()}`;
+			const html = `<!doctype html><html><head><style>
+body { margin: 0; }
+#target { position: absolute; left: 700px; top: 500px; width: 40px; height: 40px; }
+</style></head><body>
+<button id="target" onclick="event.stopPropagation(); document.title = 'hit'">Go</button>
+<script>document.addEventListener("click", event => { document.title = "miss " + event.clientX + "," + event.clientY; });</script>
+</body></html>`;
+			try {
+				await invoke({
+					action: "open",
+					name,
+					url: `data:text/html,${encodeURIComponent(html)}`,
+					viewport: { width: 1200, height: 700, scale },
+				});
+				const shot = await invoke({ action: "call", name, chain: [{ method: "screenshot", args: [] }] });
+				const text = shot.content
+					.filter(block => block.type === "text")
+					.map(block => block.text)
+					.join("\n");
+				const factor = Number(text.match(/Multiply (?:image )?coordinates by ([\d.]+)/)?.[1]);
+				const shots =
+					shot.details && typeof shot.details === "object" && "screenshots" in shot.details
+						? (shot.details.screenshots as ScreenshotResult[])
+						: [];
+				const displayedWidth = shots[0]?.width ?? 0;
+				// Where the button's centre (720, 520 CSS px) appears in the image the model sees.
+				const imageX = (720 * displayedWidth) / 1200;
+				const imageY = (520 * displayedWidth) / 1200;
+				await invoke({
+					action: "call",
+					name,
+					chain: [{ method: "clickAt", args: [Math.round(imageX * factor), Math.round(imageY * factor)] }],
+				});
+				expect(
+					valueFrom<string>(await invoke({ action: "call", name, chain: [{ method: "title", args: [] }] })),
+				).toBe("hit");
+			} finally {
+				await invoke({ action: "close", name, kill: true }).catch(() => undefined);
+				Object.assign(process.env, savedEnv);
+			}
+		},
+		30_000,
+	);
 });

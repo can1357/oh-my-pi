@@ -1,12 +1,10 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
 import { type AuthAccountPolicies, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { removeWithRetries } from "../../utils/src/temp";
 
 const EMAIL = "dev@example.com";
 const POLICIES = [{ provider: "cursor", account: { email: EMAIL }, priority: -1 }] satisfies AuthAccountPolicies;
+const GET_ME_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetMe";
 
 function cursorAccessToken(label: string): string {
 	const claims = { sub: "github|user_1", exp: Math.floor(Date.now() / 1000) + 86_400, label };
@@ -31,7 +29,7 @@ function renewCursorSession(init: RequestInit | undefined, session: string | und
 function stubCursor(access: string, session?: string): void {
 	vi.spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL | Request, init?: RequestInit) => {
 		const url = input instanceof Request ? input.url : String(input);
-		if (url === "https://cursor.com/api/auth/me") return Response.json({ sub: "user_1", email: EMAIL });
+		if (url === GET_ME_URL) return Response.json({ authId: "github|user_1", email: EMAIL });
 		if (url.startsWith("https://api2.cursor.sh/auth/poll?")) {
 			return Response.json({ accessToken: access, refreshToken: access });
 		}
@@ -40,18 +38,13 @@ function stubCursor(access: string, session?: string): void {
 	}) as typeof fetch);
 }
 
-let dir = "";
-
-afterEach(async () => {
+afterEach(() => {
 	vi.restoreAllMocks();
-	if (dir) await removeWithRetries(dir);
-	dir = "";
 });
 
 describe("Cursor account email", () => {
 	test("a Cursor login stores the email an account policy selects", async () => {
-		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cursor-login-"));
-		const store = await SqliteAuthCredentialStore.open(path.join(dir, "agent.db"));
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const auth = new AuthStorage(store, { accountPolicies: POLICIES });
 		try {
 			vi.spyOn(Bun, "sleep").mockResolvedValue(undefined);
@@ -67,8 +60,7 @@ describe("Cursor account email", () => {
 	});
 
 	test("a Cursor login stored without an email gains it at the next token refresh", async () => {
-		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cursor-refresh-"));
-		const store = await SqliteAuthCredentialStore.open(path.join(dir, "agent.db"));
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const stale = cursorAccessToken("stale");
 		await store.upsertAuthCredential("cursor", {
 			type: "oauth",
@@ -95,8 +87,7 @@ describe("Cursor account email", () => {
 	});
 
 	test("a stalled profile lookup still keeps the tokens a refresh minted", async () => {
-		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cursor-stall-"));
-		const store = await SqliteAuthCredentialStore.open(path.join(dir, "agent.db"));
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const stale = cursorAccessToken("stale");
 		await store.upsertAuthCredential("cursor", {
 			type: "oauth",
@@ -116,7 +107,7 @@ describe("Cursor account email", () => {
 			) => {
 				const url = input instanceof Request ? input.url : String(input);
 				if (url === "https://api2.cursor.sh/oauth/token") return renewCursorSession(init, stale, fresh);
-				if (url !== "https://cursor.com/api/auth/me") throw new Error(`unexpected request: ${url}`);
+				if (url !== GET_ME_URL) throw new Error(`unexpected request: ${url}`);
 				// The profile never answers; only the lookup's own deadline ends it.
 				const { promise, reject } = Promise.withResolvers<Response>();
 				init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
@@ -147,8 +138,7 @@ describe("Cursor session refresh", () => {
 	});
 
 	async function storeExpiredSession(session: string): Promise<SqliteAuthCredentialStore> {
-		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cursor-session-"));
-		const store = await SqliteAuthCredentialStore.open(path.join(dir, "agent.db"));
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		await store.upsertAuthCredential("cursor", {
 			type: "oauth",
 			access: session,

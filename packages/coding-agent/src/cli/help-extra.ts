@@ -11,6 +11,7 @@ export function getExtraHelpText(): string {
   FOUNDRY_BASE_URL           - Anthropic Foundry base URL (e.g., https://<foundry-host>)
   ANTHROPIC_FOUNDRY_API_KEY  - Anthropic token used as Authorization: Bearer <token> in Foundry mode
   ANTHROPIC_CUSTOM_HEADERS   - Extra headers for Foundry or any custom ANTHROPIC_BASE_URL gateway (e.g., "user-id: USERNAME")
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS - Omit pre-release Anthropic fields (context_management, beta tool fields, task budgets, thinking.block_binding) for gateways that reject them
   CLAUDE_CODE_CLIENT_CERT    - Client certificate (PEM path or inline PEM) for mTLS
   CLAUDE_CODE_CLIENT_KEY     - Client private key (PEM path or inline PEM) for mTLS
   NODE_EXTRA_CA_CERTS        - CA bundle path (or inline PEM) for server certificate validation
@@ -43,6 +44,7 @@ export function getExtraHelpText(): string {
   YOLO_AUTO_API_KEY          - Yolo-Auto flat-rate Qwen models
   SINGULARITYAPI_DEV_API_KEY - SingularityAPI universal gateway (300+ models)
   SINGULARITYAPI_TECH_API_KEY - SingularityAPI reserved DeepSeek lanes
+  SCW_SECRET_KEY             - Scaleway Generative APIs models
 
   ${chalk.dim("# Cloud Providers")}
   AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)
@@ -56,6 +58,7 @@ export function getExtraHelpText(): string {
   PERPLEXITY_COOKIES         - Perplexity web search (session cookie)
   TAVILY_API_KEY             - Tavily web search
   TINYFISH_API_KEY           - TinyFish web search
+  KEENABLE_API_KEY           - Keenable web search (optional; keyless public fallback)
   FIRECRAWL_API_KEY          - Firecrawl web search + fetch reader backend
   ANTHROPIC_SEARCH_API_KEY   - Anthropic web search (override; isolates search from main ANTHROPIC_API_KEY)
   ANTHROPIC_SEARCH_BASE_URL  - Anthropic web search base URL (override; pairs with ANTHROPIC_SEARCH_API_KEY)

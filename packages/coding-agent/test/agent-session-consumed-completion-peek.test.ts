@@ -6,6 +6,8 @@ import { createMockModel, type MockHandler } from "@oh-my-pi/pi-ai/providers/moc
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
+import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -56,11 +58,11 @@ describe("AgentSession peek at consumed background completions", () => {
 		return gate;
 	}
 
-	function createSession(responses: MockHandler[]): AgentSession {
+	function createSession(responses: MockHandler[], options: { launch?: boolean } = {}): AgentSession {
 		const mock = createMockModel({ provider: "openai", id: "gpt-test", responses });
 		const wait = new WaitTool({
 			cwd: tempDir.path(),
-			settings: Settings.isolated({ "launch.enabled": false }),
+			settings: Settings.isolated({ "launch.enabled": options.launch ?? false }),
 			agentRegistry: AgentRegistry.global(),
 			asyncJobManager: manager,
 			getAgentId: () => "Main",
@@ -149,5 +151,51 @@ describe("AgentSession peek at consumed background completions", () => {
 		manager.consumeJobResults(["subagent"]);
 
 		expect(active.hasPendingAsyncWork()).toBe(false);
+	});
+
+	it("returns a job's queued completion from a wait whose service refresh the completion cut short", async () => {
+		// A broker request in flight until the wait's signal aborts, as the real
+		// client's does: the queued completion aborts it.
+		const broker = {
+			request: (_operation: unknown, signal?: AbortSignal) => {
+				const { promise, reject } = Promise.withResolvers<never>();
+				const abort = () => reject(new Error("Daemon broker request aborted"));
+				if (signal?.aborted) abort();
+				else signal?.addEventListener("abort", abort, { once: true });
+				return promise;
+			},
+			onCompletion: () => () => {},
+		} as unknown as DaemonBrokerClient;
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(broker);
+		const build = gatedJob("build", "bash");
+		const queued = Promise.withResolvers<void>();
+		const active = createSession(
+			[
+				async () => {
+					// The job finishes and its notice queues while the model streams the wait.
+					build.resolve("build output");
+					await queued.promise;
+					return { content: [{ type: "toolCall", name: "wait", arguments: {} }] };
+				},
+				{ content: ["Done"] },
+			],
+			{ launch: true },
+		);
+		observeAsyncResultQueued(active, queued);
+
+		await active.prompt("wait for the build");
+		await active.waitForIdle();
+
+		const waitResult = active.agent.state.messages.find(
+			(message): message is ToolResultMessage => message.role === "toolResult" && message.toolName === "wait",
+		);
+		expect(waitResult?.isError).toBe(false);
+		expect(JSON.stringify(waitResult?.content)).toContain("build output");
+		// The wait consumed the result, so the queued notice is dropped rather than repeated.
+		expect(
+			active.agent.state.messages.some(
+				message => message.role === "custom" && message.customType === "async-result",
+			),
+		).toBe(false);
 	});
 });

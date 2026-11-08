@@ -9,7 +9,7 @@
  * worker first, saving when it has unsaved changes.
  */
 import * as fs from "node:fs";
-import * as net from "node:net";
+import { IpcConnection, IpcServer } from "@oh-my-pi/pi-natives";
 import { acquireFileLock, logger, postmortem, setProcessName } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
@@ -21,8 +21,6 @@ import {
 	idaHostReadyBanner,
 	parseIdaHostConfig,
 	parseIdaHostRequest,
-	readSocketLines,
-	writeFrame,
 } from "./protocol";
 import { idbRef, prepareStoreDir } from "./store";
 import { IdaWorker } from "./supervisor";
@@ -36,10 +34,10 @@ class IdaHost {
 	readonly #config: IdaHostConfig;
 	readonly #startedAt = Date.now();
 	readonly #opening: Promise<IdaWorker>;
-	readonly #sockets = new Set<net.Socket>();
+	readonly #connections = new Set<IpcConnection>();
 	/** Request handlers still running; shutdown lets them answer before closing sockets. */
 	readonly #inflight = new Set<Promise<void>>();
-	#server: net.Server | undefined;
+	#server: IpcServer | undefined;
 	/** The open worker; cleared once it exits. */
 	#worker: IdaWorker | undefined;
 	#stopping: Promise<void> | undefined;
@@ -51,19 +49,9 @@ class IdaHost {
 		this.#opening.catch(() => undefined);
 	}
 
-	/** Listen on the endpoint; a leftover socket file is stale because the broker runs one host per name. */
+	/** Listen on the endpoint; rejects with code EADDRINUSE when a live host already owns it. */
 	async listen(): Promise<void> {
-		const { endpoint } = this.#config;
-		if (process.platform !== "win32") await fs.promises.rm(endpoint, { force: true });
-		const server = net.createServer(socket => this.#accept(socket));
-		this.#server = server;
-		const { promise, resolve, reject } = Promise.withResolvers<void>();
-		server.once("error", reject);
-		server.listen(endpoint, () => {
-			server.off("error", reject);
-			resolve();
-		});
-		await promise;
+		this.#server = await IpcServer.listen(this.#config.endpoint, { framing: "lines" }, conn => this.#accept(conn));
 	}
 
 	/** Wait for the database to open and later close; resolves with the host's exit code. */
@@ -81,6 +69,12 @@ class IdaHost {
 		this.#worker = undefined;
 		await this.shutdown();
 		return code === 0 ? 0 : 1;
+	}
+
+	/** Startup failed before serving: let the in-flight open settle, then close whatever it opened. */
+	async abandon(): Promise<void> {
+		await this.#opening.catch(() => undefined);
+		await this.shutdown();
 	}
 
 	/** Close the worker (saving unsaved changes), let pending requests answer, then stop listening. */
@@ -102,13 +96,8 @@ class IdaHost {
 		await Promise.all(this.#inflight);
 		const server = this.#server;
 		this.#server = undefined;
-		if (server) {
-			const { promise, resolve } = Promise.withResolvers<void>();
-			server.close(() => resolve());
-			for (const socket of this.#sockets) socket.end();
-			await promise;
-		}
-		if (process.platform !== "win32") await fs.promises.rm(this.#config.endpoint, { force: true });
+		for (const conn of this.#connections) conn.end();
+		await server?.close();
 	}
 
 	async #open(): Promise<IdaWorker> {
@@ -159,16 +148,11 @@ class IdaHost {
 		};
 	}
 
-	#accept(socket: net.Socket): void {
-		this.#sockets.add(socket);
+	#accept(conn: IpcConnection): void {
+		this.#connections.add(conn);
 		// This connection's pending `call`s, aborted by `cancel` or when the connection drops.
 		const calls = new Map<number, AbortController>();
-		socket.on("error", error => logger.debug("IDA host socket error", { error: errorMessage(error) }));
-		socket.on("close", () => {
-			this.#sockets.delete(socket);
-			for (const controller of calls.values()) controller.abort();
-		});
-		readSocketLines(socket, line => {
+		const onLine = (line: string): void => {
 			let request: IdaHostRequest;
 			try {
 				request = parseIdaHostRequest(line);
@@ -181,11 +165,20 @@ class IdaHost {
 				return;
 			}
 			const handled = this.#handle(request, calls).then(
-				result => writeFrame(socket, { id: request.id, ok: true, result }),
-				error => writeFrame(socket, { id: request.id, ok: false, error: errorMessage(error) }),
+				result => {
+					conn.send(JSON.stringify({ id: request.id, ok: true, result }));
+				},
+				error => {
+					conn.send(JSON.stringify({ id: request.id, ok: false, error: errorMessage(error) }));
+				},
 			);
 			this.#inflight.add(handled);
 			void handled.finally(() => this.#inflight.delete(handled));
+		};
+		conn.start(onLine, reason => {
+			if (reason) logger.debug("IDA host connection closed", { reason });
+			this.#connections.delete(conn);
+			for (const controller of calls.values()) controller.abort();
 		});
 	}
 
@@ -247,7 +240,14 @@ export async function startIdaHostFromEnvironment(): Promise<void> {
 	const cancelCleanup = postmortem.register("ida-host", () => host.shutdown());
 	let code: number;
 	try {
-		await host.listen();
+		try {
+			await host.listen();
+		} catch (error) {
+			// EADDRINUSE: a live host already serves this database; ours must not touch its endpoint.
+			process.stderr.write(`IDA host listen failed: ${errorMessage(error)}\n`);
+			await host.abandon();
+			process.exit(1);
+		}
 		process.stdout.write(`${idaHostReadyBanner(config.endpoint)}\n`);
 		code = await host.run();
 	} finally {

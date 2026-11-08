@@ -3,14 +3,7 @@ import type { CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction";
 import { effectiveReserveTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Tool as AiTool, Model } from "@oh-my-pi/pi-ai";
 import { renderToolExamples } from "@oh-my-pi/pi-ai/dialect";
-import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { formatNumber } from "@oh-my-pi/pi-utils";
-import type { Theme, ThemeColor } from "../theme";
-import { Container } from "../tui";
-import { Text } from "../components/text";
-import type { TspSpan, TspText } from "@oh-my-pi/pi-wire";
-import type { DescribeContext, NativeNode } from "../native/node";
-import { col, node, row, span, text } from "../native/describe";
+import { stripSchemaDescriptions, toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 
 interface ContextSkill {
 	readonly name: string;
@@ -70,24 +63,12 @@ export interface ContextUsageOptions {
 	snapcompact?: ContextSavingsEstimate;
 }
 
-const GRID_COLS = 20;
-const GRID_ROWS = 10;
-const GRID_CELLS = GRID_COLS * GRID_ROWS;
-const GRID_GUTTER = "   ";
-
-const CELL_FILLED = "⛁";
-const CELL_FILLED_MESSAGES = "⛃";
-const CELL_FREE = "⛶";
-const CELL_BUFFER = "⛝";
-
 type CategoryId = "systemPrompt" | "systemContext" | "systemTools" | "skills" | "messages";
 
 interface CategoryInfo {
 	id: CategoryId;
 	label: string;
 	tokens: number;
-	color: "accent" | "warning" | "success" | "userMessageText" | "customMessageLabel";
-	glyph: string;
 }
 
 export interface ContextBreakdown {
@@ -141,11 +122,17 @@ export function computeCompactionBoundaries(
 
 /** Stable inputs used to cache non-message token estimates. */
 export interface NonMessageTokenSource {
+	readonly model?: Model;
 	readonly systemPrompt?: readonly string[];
 	readonly agent?: {
 		readonly state?: {
 			readonly tools?: readonly ContextTool[];
 		};
+		/**
+		 * Whether requests to `model` ship description-stripped tool specs because
+		 * the catalog rides in the system prompt (`Agent.prunesToolDescriptions`).
+		 */
+		prunesToolDescriptions?(model: Model | undefined): boolean;
 	};
 	readonly skills?: readonly ContextSkill[];
 	/** Provider-facing, session-frozen descriptions when available. */
@@ -184,7 +171,10 @@ type ToolSchemaSource = readonly ContextTool[];
 
 interface ToolSchemaTokenCache {
 	revision: number;
-	byTokenizer: WeakMap<Tokenizer, { revision: number; sourceRevision: number; tokens: number }>;
+	byTokenizer: WeakMap<
+		Tokenizer,
+		{ revision: number; sourceRevision: number; pruneDescriptions: boolean; tokens: number }
+	>;
 }
 
 /**
@@ -224,50 +214,116 @@ export function invalidateToolSchemaMetadata(tools: ToolSchemaSource): void {
 	toolSchemaTokenCache(tools).revision++;
 }
 
+/** Provider-visible text of one tool definition, in wire order. */
+export interface ToolSchemaFragments {
+	/** Name, description, wire schema JSON, then rendered examples; fields that cannot be serialized are omitted. */
+	readonly fragments: string[];
+	/** `fragments` with the schema JSON indented for reading; present only when a display indent was requested. */
+	readonly display?: string[];
+	/** Why serialization stopped; the schema or examples after that point are missing from `fragments`. */
+	readonly schemaError?: string;
+}
+
+/** How {@link toolSchemaFragments} renders one tool definition. */
+export interface ToolSchemaFragmentOptions {
+	/** Also return `display`: the same fragments with the schema JSON indented by this many spaces. */
+	displayIndent?: number;
+	/**
+	 * Mirror `normalizeTools({ pruneDescriptions: true })`: the wire spec is the
+	 * name plus the description-stripped schema, with no description or examples.
+	 */
+	pruneDescriptions?: boolean;
+}
+
+/**
+ * Provider-visible text of one tool definition. `displayIndent` additionally
+ * returns `display`, the same fragments with the schema JSON indented, from
+ * the same schema conversion.
+ */
+export function toolSchemaFragments(tool: ContextTool, options: ToolSchemaFragmentOptions = {}): ToolSchemaFragments {
+	const { displayIndent, pruneDescriptions = false } = options;
+	// Extension-supplied tools may carry a non-string name/description or a
+	// parameters value whose wire schema stringifies to `undefined` (e.g. a
+	// callable schema that escaped normalization). A non-string fragment is
+	// fatal inside the native tokenizer, so only real strings are kept.
+	const { name, description, parameters } = tool;
+	const fragments: string[] = [];
+	const display: string[] | undefined = displayIndent === undefined ? undefined : [];
+	const push = (wire: string, shown: string = wire): void => {
+		fragments.push(wire);
+		display?.push(shown);
+	};
+	if (typeof name === "string") push(name);
+	if (!pruneDescriptions && typeof description === "string") push(description);
+	try {
+		const wireTool: AiTool = {
+			name,
+			description,
+			parameters: parameters as AiTool["parameters"],
+			examples: tool.examples,
+		};
+		const fullSchema = toolWireSchema(wireTool) ?? {};
+		const wireSchema = pruneDescriptions ? stripSchemaDescriptions(fullSchema) : fullSchema;
+		const wireJson = JSON.stringify(wireSchema);
+		if (typeof wireJson === "string")
+			push(wireJson, display ? JSON.stringify(wireSchema, null, displayIndent) : wireJson);
+		// The agent loop appends rendered examples to the wire description,
+		// which pruning empties.
+		const examplesBlock = pruneDescriptions ? undefined : renderToolExamples(wireTool);
+		if (examplesBlock) push(examplesBlock);
+	} catch (error) {
+		// Schema may contain functions or cycles.
+		return { fragments, display, schemaError: error instanceof Error ? error.message : String(error) };
+	}
+	return { fragments, display };
+}
+
+/** Inputs that select which tool-schema estimate applies, beyond the roster and tokenizer. */
+export interface ToolSchemaEstimateOptions {
+	/** Caller settings/source revision; a change invalidates the cached estimate. */
+	sourceRevision?: number;
+	/** Count the description-stripped specs sent when the catalog rides in the system prompt. */
+	pruneDescriptions?: boolean;
+}
+
 /**
  * Estimate provider-visible tool-schema tokens.
  *
  * Results are cached by roster-array identity, tokenizer identity, the
- * caller-supplied settings/source revision, and the roster's explicit dynamic
- * metadata revision. Callers whose descriptions or schemas are live getters
- * must either advance `sourceRevision` or call
+ * caller-supplied settings/source revision, the prune mode, and the roster's
+ * explicit dynamic metadata revision. Callers whose descriptions or schemas are
+ * live getters must either advance `sourceRevision` or call
  * {@link invalidateToolSchemaMetadata} when those inputs change.
  */
-export function estimateToolSchemaTokens(tools: ToolSchemaSource, tokenizer: Tokenizer, sourceRevision = 0): number {
+export function estimateToolSchemaTokens(
+	tools: ToolSchemaSource,
+	tokenizer: Tokenizer,
+	options: ToolSchemaEstimateOptions = {},
+): number {
+	const { sourceRevision = 0, pruneDescriptions = false } = options;
 	const cache = toolSchemaTokenCache(tools);
 	const cached = cache.byTokenizer.get(tokenizer);
-	if (cached?.revision === cache.revision && cached.sourceRevision === sourceRevision) return cached.tokens;
+	if (
+		cached?.revision === cache.revision &&
+		cached.sourceRevision === sourceRevision &&
+		cached.pruneDescriptions === pruneDescriptions
+	)
+		return cached.tokens;
 
-	const fragments: string[] = [];
-	for (const tool of tools) {
-		// Extension-supplied tools may carry a non-string name/description or a
-		// parameters value whose wire schema stringifies to `undefined` (e.g. a
-		// callable schema that escaped normalization). A non-string fragment is
-		// fatal inside the native tokenizer, so only real strings are counted.
-		const name = tool.name;
-		const description = tool.description;
-		const parameters = tool.parameters;
-		if (typeof name === "string") fragments.push(name);
-		if (typeof description === "string") fragments.push(description);
-		try {
-			const wireTool: AiTool = {
-				name,
-				description,
-				parameters: parameters as AiTool["parameters"],
-				examples: tool.examples,
-			};
-			const wireJson = JSON.stringify(toolWireSchema(wireTool) ?? {});
-			if (typeof wireJson === "string") fragments.push(wireJson);
-			// The agent loop appends rendered examples to the wire description.
-			const examplesBlock = renderToolExamples(wireTool);
-			if (examplesBlock) fragments.push(examplesBlock);
-		} catch {
-			// Schema may contain functions or cycles; ignore.
-		}
-	}
+	const fragments = tools.flatMap(tool => toolSchemaFragments(tool, { pruneDescriptions }).fragments);
 	const tokens = tokenizer.countTokens(fragments);
-	cache.byTokenizer.set(tokenizer, { revision: cache.revision, sourceRevision, tokens });
+	cache.byTokenizer.set(tokenizer, { revision: cache.revision, sourceRevision, pruneDescriptions, tokens });
 	return tokens;
+}
+
+/** Count schemas carried on every request, excluding server-side deferred catalogs. */
+export function estimateContextToolSchemaTokens(
+	tools: ToolSchemaSource,
+	tokenizer: Tokenizer,
+	model: Model | undefined,
+	options: ToolSchemaEstimateOptions = {},
+): number {
+	return model?.toolSchemasInContext === false ? 0 : estimateToolSchemaTokens(tools, tokenizer, options);
 }
 
 /**
@@ -276,24 +332,18 @@ export function estimateToolSchemaTokens(tools: ToolSchemaSource, tokenizer: Tok
  * (the rest of the system-prompt array) + tools + skills.
  *
  * Exposed so callers like `StatusLineComponent` can cache the non-message
- * total separately from the message total. Non-message inputs (skills,
- * tools, system prompt) change rarely; the message list grows on every
- * streaming turn. Splitting the two lets the caller refresh each on its own
- * cadence — non-message recomputed only when the inputs identity changes,
- * messages walked incrementally as new entries append.
+ * total separately from the growing message total. A model switch can change
+ * which tool schemas occupy context without changing the roster; a prune-mode
+ * change (`Agent.prunesToolDescriptions`) changes how much of each spec ships.
  */
-// Non-message inputs (system prompt, tools, skills) change rarely — at most
-// once per turn via setSystemPrompt/setTools — but the per-turn compaction and
-// threshold paths call these helpers several times: getContextBreakdown calls
-// both, and #estimateStoredContextTokens adds a third. Memoize on the identity
-// of the three input arrays so the expensive parts (system-prompt tokenization
-// and the per-tool JSON.stringify(toolWireSchema) inside estimateToolSchemaTokens)
-// run at most once per input change rather than per call. The identity keys are
-// the same stable references the StatusLineComponent cache already trusts
-// (setSystemPrompt/setTools replace the array reference rather than mutating it).
+// The per-turn threshold and compaction paths call these helpers repeatedly.
+// Cache by prompt, roster, skills, tokenizer, revision, model schema policy, and
+// prune mode; setSystemPrompt/setTools replace their arrays rather than mutating them.
 interface NonMessageTokenCache {
 	systemPromptRef: readonly string[];
 	toolsRef: ToolSchemaSource;
+	toolSchemasInContext: boolean;
+	pruneToolDescriptions: boolean;
 	toolsRevision: number;
 	sourceRevision: number;
 	skillful: boolean;
@@ -326,6 +376,8 @@ function nonMessageTokenCacheEntry(
 	const cachedSession: CachedNonMessageTokenSource = session;
 	const systemPromptRef = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const toolsRef = session.agent?.state?.tools ?? EMPTY_TOOLS;
+	const toolSchemasInContext = session.model?.toolSchemasInContext !== false;
+	const pruneToolDescriptions = session.agent?.prunesToolDescriptions?.(session.model) === true;
 	const toolsRevision = getToolSchemaMetadataRevision(toolsRef);
 	const skillsRef = session.renderedSkills ?? session.skills ?? EMPTY_SKILLS;
 	let entry = cachedSession[NON_MESSAGE_TOKEN_CACHE];
@@ -333,6 +385,8 @@ function nonMessageTokenCacheEntry(
 		entry &&
 		entry.systemPromptRef === systemPromptRef &&
 		entry.toolsRef === toolsRef &&
+		entry.toolSchemasInContext === toolSchemasInContext &&
+		entry.pruneToolDescriptions === pruneToolDescriptions &&
 		entry.toolsRevision === toolsRevision &&
 		entry.sourceRevision === sourceRevision &&
 		entry.skillsRef === skillsRef &&
@@ -343,6 +397,8 @@ function nonMessageTokenCacheEntry(
 	entry = {
 		systemPromptRef,
 		toolsRef,
+		toolSchemasInContext,
+		pruneToolDescriptions,
 		toolsRevision,
 		sourceRevision,
 		skillful: true,
@@ -366,7 +422,10 @@ export function computeNonMessageTokens(
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
 	const tokens =
 		tokenizer.countTokens(Array.from(systemPromptParts, part => part ?? "")) +
-		estimateToolSchemaTokens(tools, tokenizer, sourceRevision);
+		estimateContextToolSchemaTokens(tools, tokenizer, session.model, {
+			sourceRevision,
+			pruneDescriptions: entry.pruneToolDescriptions,
+		});
 	entry.tokens = tokens;
 	return tokens;
 }
@@ -398,7 +457,10 @@ export function computeNonMessageBreakdown(
 					renderedSkills(session.renderedSkills ?? session.skills ?? EMPTY_SKILLS, tools),
 					tokenizer,
 				);
-	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer, sourceRevision);
+	const toolsTokens = estimateContextToolSchemaTokens(tools, tokenizer, session.model, {
+		sourceRevision,
+		pruneDescriptions: entry.pruneToolDescriptions,
+	});
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));
 	const systemPromptTokens = Math.max(0, tokenizer.countTokens(systemPromptParts[0] ?? "") - skillsTokens);
@@ -446,23 +508,11 @@ export function computeContextBreakdown(session: ContextUsageSession, options: C
 	}
 
 	const categories: CategoryInfo[] = [
-		{ id: "systemPrompt", label: "System prompt", tokens: systemPromptTokens, color: "accent", glyph: CELL_FILLED },
-		{ id: "systemTools", label: "System tools", tokens: toolsTokens, color: "warning", glyph: CELL_FILLED },
-		{
-			id: "systemContext",
-			label: "System context",
-			tokens: systemContextTokens,
-			color: "customMessageLabel",
-			glyph: CELL_FILLED,
-		},
-		{ id: "skills", label: "Skills", tokens: skillsTokens, color: "success", glyph: CELL_FILLED },
-		{
-			id: "messages",
-			label: "Messages",
-			tokens: messagesTokens,
-			color: "userMessageText",
-			glyph: CELL_FILLED_MESSAGES,
-		},
+		{ id: "systemPrompt", label: "System prompt", tokens: systemPromptTokens },
+		{ id: "systemTools", label: "System tools", tokens: toolsTokens },
+		{ id: "systemContext", label: "System context", tokens: systemContextTokens },
+		{ id: "skills", label: "Skills", tokens: skillsTokens },
+		{ id: "messages", label: "Messages", tokens: messagesTokens },
 	];
 
 	let autoCompactBufferTokens = 0;
@@ -495,424 +545,4 @@ export function computeContextBreakdown(session: ContextUsageSession, options: C
 		thresholdTokens,
 		snapcompact: options.snapcompact,
 	};
-}
-
-interface CellSpec {
-	glyph: string;
-	color: "accent" | "warning" | "success" | "userMessageText" | "customMessageLabel" | "muted" | "dim";
-}
-
-function planCells(breakdown: ContextBreakdown): CellSpec[] {
-	const cells: CellSpec[] = [];
-	const window = breakdown.contextWindow;
-
-	if (window <= 0) {
-		for (let i = 0; i < GRID_CELLS; i++) {
-			cells.push({ glyph: CELL_FREE, color: "dim" });
-		}
-		return cells;
-	}
-
-	const tokensPerCell = window / GRID_CELLS;
-
-	const ratioCells = (tokens: number): number => {
-		if (tokens <= 0) return 0;
-		return Math.max(1, Math.round(tokens / tokensPerCell));
-	};
-
-	const categoryCounts = breakdown.categories.map(category => ({
-		category,
-		count: ratioCells(category.tokens),
-	}));
-
-	let bufferCount = ratioCells(breakdown.autoCompactBufferTokens);
-
-	let usedCount = categoryCounts.reduce((sum, c) => sum + c.count, 0);
-
-	// Prevent the visualization from over-running the grid.
-	const maxUsable = GRID_CELLS - bufferCount;
-	if (usedCount > maxUsable) {
-		// Scale categories proportionally down to fit.
-		let overflow = usedCount - maxUsable;
-		// Trim from the largest categories first to preserve visibility for small ones.
-		const order = [...categoryCounts].sort((a, b) => b.count - a.count);
-		for (const entry of order) {
-			while (overflow > 0 && entry.count > 1) {
-				entry.count -= 1;
-				overflow -= 1;
-			}
-		}
-		usedCount = categoryCounts.reduce((sum, c) => sum + c.count, 0);
-		if (usedCount + bufferCount > GRID_CELLS) {
-			bufferCount = Math.max(0, GRID_CELLS - usedCount);
-		}
-	}
-
-	for (const { category, count } of categoryCounts) {
-		for (let i = 0; i < count; i++) {
-			cells.push({ glyph: category.glyph, color: category.color });
-		}
-	}
-
-	const freeCount = Math.max(0, GRID_CELLS - cells.length - bufferCount);
-	for (let i = 0; i < freeCount; i++) {
-		cells.push({ glyph: CELL_FREE, color: "dim" });
-	}
-	for (let i = 0; i < bufferCount; i++) {
-		cells.push({ glyph: CELL_BUFFER, color: "warning" });
-	}
-
-	// Pad to exactly GRID_CELLS in case rounding undershot.
-	while (cells.length < GRID_CELLS) {
-		cells.push({ glyph: CELL_FREE, color: "dim" });
-	}
-	return cells.slice(0, GRID_CELLS);
-}
-
-function percentString(part: number, whole: number, fractionDigits = 1): string {
-	if (whole <= 0) return "0%";
-	const pct = (part / whole) * 100;
-	if (pct > 0 && pct < 0.05) return "<0.1%";
-	return `${pct.toFixed(fractionDigits)}%`;
-}
-
-/** One styled run of a legend line: bold (`strong`), a theme color, or plain. */
-interface LegendPart {
-	t: string;
-	s?: ThemeColor | "strong";
-}
-
-/** Legend lines as styled runs, shared by the ANSI panel and the native description. */
-function buildLegendParts(breakdown: ContextBreakdown): LegendPart[][] {
-	const lines: LegendPart[][] = [];
-	const { model, contextWindow, categories, usedTokens, autoCompactBufferTokens, freeTokens } = breakdown;
-
-	const modelName = model?.name ?? model?.id ?? "no model";
-	const modelId = model?.id ?? "unknown";
-	const windowLabel = formatNumber(contextWindow).toLowerCase();
-
-	lines.push([
-		{ t: `${modelName}`, s: "strong" },
-		{ t: ` (${windowLabel} context)`, s: "dim" },
-	]);
-	lines.push([{ t: `${modelId}[${windowLabel}]`, s: "muted" }]);
-	lines.push([
-		{ t: formatNumber(usedTokens), s: "strong" },
-		{ t: `/${windowLabel} tokens`, s: "dim" },
-		{ t: ` (${percentString(usedTokens, contextWindow)})`, s: "muted" },
-	]);
-	lines.push([]);
-	lines.push([{ t: "Estimated usage by category", s: "muted" }]);
-
-	for (const category of categories) {
-		const pct = percentString(category.tokens, contextWindow);
-		lines.push([
-			{ t: category.glyph, s: category.color },
-			{ t: ` ${category.label}: ` },
-			{ t: formatNumber(category.tokens), s: "strong" },
-			{ t: " " },
-			{ t: `tokens (${pct})`, s: "dim" },
-		]);
-	}
-
-	lines.push([
-		{ t: CELL_FREE, s: "dim" },
-		{ t: " Free space: " },
-		{ t: formatNumber(freeTokens), s: "strong" },
-		{ t: " " },
-		{ t: `(${percentString(freeTokens, contextWindow)})`, s: "dim" },
-	]);
-
-	if (autoCompactBufferTokens > 0) {
-		lines.push([
-			{ t: CELL_BUFFER, s: "warning" },
-			{ t: " Autocompact buffer: " },
-			{ t: formatNumber(autoCompactBufferTokens), s: "strong" },
-			{ t: " " },
-			{ t: `tokens (${percentString(autoCompactBufferTokens, contextWindow)})`, s: "dim" },
-		]);
-	}
-
-	const snap = buildSnapcompactParts(breakdown);
-	if (snap.length > 0) lines.push([], ...snap);
-	return lines;
-}
-
-/** Snapcompact savings lines of the legend; empty when no snapcompact setting is on. */
-function buildSnapcompactParts(breakdown: ContextBreakdown): LegendPart[][] {
-	const lines: LegendPart[][] = [];
-	const { usedTokens } = breakdown;
-	const snap = breakdown.snapcompact;
-	if (snap) {
-		if (!snap.visionCapable) {
-			lines.push([{ t: "Snapcompact: inactive (model has no image input)", s: "muted" }]);
-		} else {
-			lines.push([{ t: "Snapcompact (estimated wire savings)", s: "muted" }]);
-			if (snap.systemPrompt) {
-				const sp = snap.systemPrompt;
-				const scope = sp.scope === "agents-md" ? "AGENTS.md" : "all";
-				if (sp.applied) {
-					lines.push([
-						{ t: `  System prompt (${scope}): saves ` },
-						{ t: `~${formatNumber(sp.savedTokens)}`, s: "strong" },
-						{ t: " " },
-						{
-							t: `(${formatNumber(sp.textTokens)} text → ${sp.frames} frame${sp.frames === 1 ? "" : "s"} ≈ ${formatNumber(sp.imageTokens)})`,
-							s: "dim",
-						},
-					]);
-				} else {
-					const reason =
-						sp.reason === "budget"
-							? "image budget exhausted"
-							: sp.reason === "empty"
-								? "nothing to image"
-								: "frames would not save tokens";
-					lines.push([{ t: `  System prompt (${scope}): ` }, { t: `stays text (${reason})`, s: "dim" }]);
-				}
-			}
-			if (snap.toolResults) {
-				const tr = snap.toolResults;
-				if (tr.swapped > 0) {
-					lines.push([
-						{ t: "  Tool results: saves " },
-						{ t: `~${formatNumber(tr.savedTokens)}`, s: "strong" },
-						{ t: " " },
-						{
-							t: `(${tr.swapped}/${tr.total} imaged, ${formatNumber(tr.textTokens)} text → ${tr.frames} frames ≈ ${formatNumber(tr.imageTokens)})`,
-							s: "dim",
-						},
-					]);
-				} else {
-					lines.push([{ t: "  Tool results: " }, { t: `none imaged (${tr.total} in history)`, s: "dim" }]);
-				}
-			}
-			if (snap.savedTokens > 0) {
-				lines.push([
-					{ t: "  Next request: " },
-					{ t: `~${formatNumber(Math.max(0, usedTokens - snap.savedTokens))}`, s: "strong" },
-					{ t: " " },
-					{ t: "tokens on the wire", s: "dim" },
-				]);
-			}
-		}
-	}
-
-	return lines;
-}
-
-function buildLegendLines(breakdown: ContextBreakdown, theme: Theme): string[] {
-	return buildLegendParts(breakdown).map(line => {
-		let out = "";
-		for (const part of line) {
-			out += part.s === "strong" ? theme.bold(part.t) : part.s ? theme.fg(part.s, part.t) : part.t;
-		}
-		return out;
-	});
-}
-
-/** Stacked meter parts in grid order: the categories, free space as the empty track, then the hatched buffer. */
-function contextMeterParts(
-	breakdown: ContextBreakdown,
-): { value: number; token?: string; label?: string; hatch?: boolean }[] {
-	const window = breakdown.contextWindow;
-	const parts: { value: number; token?: string; label?: string; hatch?: boolean }[] = breakdown.categories
-		.filter(category => category.tokens > 0)
-		.map(category => ({
-			value: category.tokens / window,
-			token: category.color,
-			label: `${category.label} · ${formatNumber(category.tokens)} tokens (${percentString(category.tokens, window)})`,
-		}));
-	parts.push({
-		value: breakdown.freeTokens / window,
-		token: "track",
-		label: `Free space · ${formatNumber(breakdown.freeTokens)} tokens (${percentString(breakdown.freeTokens, window)})`,
-	});
-	if (breakdown.autoCompactBufferTokens > 0) {
-		parts.push({
-			value: breakdown.autoCompactBufferTokens / window,
-			token: "warning",
-			hatch: true,
-			label: `Autocompact buffer · ${formatNumber(breakdown.autoCompactBufferTokens)} tokens (${percentString(breakdown.autoCompactBufferTokens, window)})`,
-		});
-	}
-	return parts;
-}
-
-/**
- * The `/context` body for terminals that draw `meter`: a blocks meter
- * beside a legend `kv` (swatch · label → tokens · %), then a full-width bar
- * of the same parts marked where auto-compaction fires, then the snapcompact
- * estimate when one is on. {@link contextUsageHead} names the model and window.
- */
-function describeContextFrame(breakdown: ContextBreakdown): NativeNode {
-	const { contextWindow: window, usedTokens, freeTokens, autoCompactBufferTokens, thresholdTokens } = breakdown;
-	const parts = contextMeterParts(breakdown);
-	const used = Math.min(1, usedTokens / window);
-	const swatch = (token: string, glyph = "■"): TspSpan => span(glyph, token);
-	const figure = (tokens: number): TspText => [
-		span(formatNumber(tokens)),
-		span(`  ${percentString(tokens, window)}`, "dim"),
-	];
-	const items: { k: TspText; v: TspText }[] = [
-		{
-			k: [span("Used", "strong")],
-			v: [
-				span(`${formatNumber(usedTokens)} / ${formatNumber(window).toLowerCase()}`),
-				span(`  ${percentString(usedTokens, window)}`, "dim"),
-			],
-		},
-	];
-	for (const category of breakdown.categories) {
-		items.push({ k: [swatch(category.color), span(` ${category.label}`)], v: figure(category.tokens) });
-	}
-	items.push({ k: [swatch("dim", "□"), span(" Free space")], v: figure(freeTokens) });
-	if (autoCompactBufferTokens > 0) {
-		items.push({ k: [swatch("warning", "▨"), span(" Autocompact buffer")], v: figure(autoCompactBufferTokens) });
-	}
-	const marks =
-		thresholdTokens !== undefined
-			? [
-					{
-						at: thresholdTokens / window,
-						tone: "warning" as const,
-						title: `Auto-compaction at ${percentString(thresholdTokens, window, 0)} (${formatNumber(thresholdTokens)} tokens)`,
-					},
-				]
-			: undefined;
-	const children = [
-		node(
-			"row",
-			{ role: "omp.context.body" },
-			[
-				node("meter", { value: used, style: "blocks", size: "lg", parts, aria: "Context usage by category" }),
-				node("kv", { items, layout: "grid", role: "omp.context.legend" }),
-			],
-			"body",
-		),
-		node(
-			"meter",
-			{ value: used, style: "bar", size: "lg", parts, ...(marks ? { marks } : {}), grow: 1 },
-			undefined,
-			"bar",
-		),
-	];
-	const snap = buildSnapcompactParts(breakdown);
-	if (snap.length > 0) {
-		children.push(
-			node(
-				"section",
-				{},
-				snap.map((line, index) => node("text", { spans: line, wrap: "word" }, undefined, `snap-${index}`)),
-				"snapcompact",
-			),
-		);
-	}
-	return col(children, { gap: "md", role: "omp.context" });
-}
-
-/** The `/context` title: the model and its window once a model is selected. */
-export function contextUsageHead(breakdown: ContextBreakdown): TspText {
-	if (breakdown.contextWindow <= 0) return [span("Context usage", "strong")];
-	const modelName = breakdown.model?.name ?? breakdown.model?.id ?? "no model";
-	return [
-		span("Context", "strong"),
-		span(` · ${modelName}`, "muted"),
-		span(` · ${formatNumber(breakdown.contextWindow).toLowerCase()}`, "dim"),
-	];
-}
-
-/**
- * Native context-usage panel for terminals without `meter`: the cell grid as
- * unwrapped styled rows beside the legend. The terminal places the legend
- * beside the grid, or below it when narrow.
- */
-export function describeContextUsage(breakdown: ContextBreakdown): NativeNode {
-	if (breakdown.contextWindow <= 0) {
-		return text([{ t: "Context usage is unavailable: no model is selected for this session.", s: "muted" }]);
-	}
-	const cells = planCells(breakdown);
-	const grid: NativeNode[] = [];
-	for (let gridRow = 0; gridRow < GRID_ROWS; gridRow++) {
-		const spans: TspSpan[] = [];
-		for (let gridCol = 0; gridCol < GRID_COLS; gridCol++) {
-			const cell = cells[gridRow * GRID_COLS + gridCol]!;
-			spans.push({ t: gridCol === 0 ? cell.glyph : ` ${cell.glyph}`, s: cell.color });
-		}
-		grid.push(node("text", { spans, wrap: "none" }, undefined, `row-${gridRow}`));
-	}
-	const legend = buildLegendParts(breakdown).map((line, index) =>
-		node("text", { spans: line.length > 0 ? line : [{ t: " " }] }, undefined, `legend-${index}`),
-	);
-	return row([col(grid), col(legend)], {
-		gap: "lg",
-		wrap: true,
-		role: "omp.context.usage",
-	});
-}
-
-/**
- * The `/context` report body, without a frame or title of its own (the panel
- * showing it is titled {@link contextUsageHead}): ANSI renders the cell grid
- * beside the legend; natively it is drawn with `meter`s where the terminal has
- * them and as the glyph grid otherwise.
- */
-export class ContextUsageView extends Container {
-	readonly #breakdown: ContextBreakdown;
-	#native: { meter: boolean; node: NativeNode } | undefined;
-
-	constructor(breakdown: ContextBreakdown, theme: Theme) {
-		super();
-		this.#breakdown = breakdown;
-		this.addChild(new Text(renderContextUsage(breakdown, theme), 0, 0));
-	}
-
-	override describe(cx: DescribeContext): NativeNode {
-		const meter = cx.supports("meter");
-		if (this.#native?.meter === meter) return this.#native.node;
-		const breakdown = this.#breakdown;
-		const described =
-			meter && breakdown.contextWindow > 0 ? describeContextFrame(breakdown) : describeContextUsage(breakdown);
-		this.#native = { meter, node: described };
-		return described;
-	}
-}
-
-/**
- * Render a colorful context-usage panel as ANSI text. Output is a series of
- * lines pairing the grid (left) with the legend (right).
- */
-export function renderContextUsage(breakdown: ContextBreakdown, theme: Theme): string {
-	if (breakdown.contextWindow <= 0) {
-		return theme.fg("muted", "Context usage is unavailable: no model is selected for this session.");
-	}
-
-	const cells = planCells(breakdown);
-	const legend = buildLegendLines(breakdown, theme);
-
-	const totalLines = Math.max(GRID_ROWS, legend.length);
-	const lines: string[] = [];
-
-	for (let row = 0; row < totalLines; row++) {
-		let gridSegment = "";
-		if (row < GRID_ROWS) {
-			const rowCells: string[] = [];
-			for (let col = 0; col < GRID_COLS; col++) {
-				const cell = cells[row * GRID_COLS + col];
-				rowCells.push(theme.fg(cell.color, cell.glyph));
-			}
-			gridSegment = rowCells.join(" ");
-		} else {
-			// Pad with blanks the same visible width as a grid row so legend lines
-			// past the grid stay aligned with their column.
-			const blank = " ".repeat(GRID_COLS * 2 - 1);
-			gridSegment = blank;
-		}
-
-		const legendSegment = legend[row] ?? "";
-		const line = legendSegment.length > 0 ? `${gridSegment}${GRID_GUTTER}${legendSegment}` : gridSegment;
-		lines.push(line);
-	}
-
-	return lines.join("\n");
 }

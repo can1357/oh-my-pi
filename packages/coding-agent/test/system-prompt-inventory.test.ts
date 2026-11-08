@@ -132,7 +132,7 @@ describe("system prompt tool inventory", () => {
 		const inventoryStart =
 			["# Tool Inventory", "# Inventory"].map(header => text.indexOf(header)).find(index => index >= 0) ?? -1;
 		expect(inventoryStart).toBeGreaterThan(-1);
-		const sectionEnds = ["\nENV\n", "\nTOOL POLICY", "\n§ ", "\n# "]
+		const sectionEnds = ["\nENV\n", "\nTOOL POLICY", "\n§ ", "\n⁂ ", "\n# "]
 			.map(marker => text.indexOf(marker, inventoryStart + 1))
 			.filter(index => index > inventoryStart);
 		const inventoryEnd = sectionEnds.length > 0 ? Math.min(...sectionEnds) : text.length;
@@ -612,8 +612,7 @@ describe("system prompt tool inventory", () => {
 			contextFiles: [],
 			skills: [],
 			rules: [],
-			toolNames: ["eval", "read"],
-			directToolNames: ["eval"],
+			toolNames: ["eval"],
 			tools,
 			evalPreludes: [{ name: "computer", guidance: "COMPUTER-GUIDANCE" }],
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
@@ -621,9 +620,8 @@ describe("system prompt tool inventory", () => {
 			inlineToolDescriptors: true,
 		});
 		const text = systemPrompt.join("\n\n");
-		// Only the direct keep-set renders as provider-callable functions.
-		expect(text).toContain("Runs code cells.");
-		expect(text).not.toContain("Reads files from disk.");
+		expect(text).toContain("type eval = (");
+		expect(text).not.toContain("type computer = (");
 		// Guidance still ships for enabled Eval preludes.
 		expect(text).toContain("COMPUTER-GUIDANCE");
 	});

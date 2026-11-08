@@ -8,6 +8,7 @@ import {
 	postMultipart,
 	resolveOpenAIImageSize,
 	toDataUrl,
+	validateImageInput,
 } from "./shared";
 import type { ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
@@ -25,21 +26,24 @@ export async function generateOpenAIImage(
 	const fetchImpl = options.fetch ?? fetch;
 	const size = resolveOpenAIImageSize(request.aspectRatio, request.imageSize);
 	const count = request.count ?? 1;
+	const wireModelId = model.requestModelId ?? model.id;
+	// Hand-built image models (SDK callers, tests) may skip `buildModel` and carry no identity.
+	const isGptImage = model.identity?.family === "gpt-image";
 	const isXAI = model.provider === "xai" || model.provider === "xai-oauth";
 	const generationBody = isXAI
 		? {
-				model: model.requestModelId ?? model.id,
+				model: wireModelId,
 				prompt: request.prompt,
 				aspect_ratio: request.aspectRatio ?? "1:1",
 				resolution: resolveXAIResolution(request.imageSize),
 				n: count,
-				response_format: "b64_json",
+				...(isGptImage ? {} : { response_format: "b64_json" }),
 			}
 		: {
-				model: model.requestModelId ?? model.id,
+				model: wireModelId,
 				prompt: request.prompt,
 				n: count,
-				response_format: "b64_json",
+				...(isGptImage ? {} : { response_format: "b64_json" }),
 				...(size ? { size } : {}),
 			};
 	const inputImages = request.inputImages ?? [];
@@ -79,13 +83,20 @@ export async function generateOpenAIImage(
 		try {
 			if (model.provider === "openai") {
 				const form = new FormData();
-				form.set("model", model.requestModelId ?? model.id);
+				form.set("model", wireModelId);
 				form.set("prompt", request.prompt);
 				form.set("n", String(count));
-				form.set("response_format", "b64_json");
+				if (!isGptImage) form.set("response_format", "b64_json");
 				if (size) form.set("size", size);
+				// 重复的标量 `image` 字段会被判为 `duplicate_parameter`；多图须使用官方 SDK
+				// 同款的 `image[]` 数组语法。单图保留标量字段，兼容只接受 `image` 的端点。
+				const imageField = inputImages.length === 1 ? "image" : "image[]";
 				for (const image of inputImages) {
-					form.append("image", new File([Buffer.from(image.data, "base64")], "image", { type: image.mimeType }));
+					validateImageInput(image);
+					form.append(
+						imageField,
+						new File([Buffer.from(image.data, "base64")], "image", { type: image.mimeType }),
+					);
 				}
 				response = await postMultipart({
 					model,

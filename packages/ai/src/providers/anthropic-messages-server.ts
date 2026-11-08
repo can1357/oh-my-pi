@@ -538,9 +538,53 @@ function mapStopReasonOut(reason: StopReason, hasToolUse: boolean): "end_turn" |
 	}
 }
 
+/**
+ * Collapse a server-side-fallback turn for a bridge client that never opted
+ * into the beta: drop the `fallback` markers and keep reasoning from one
+ * model only. The downstream client never accepted a `fallbacks` request
+ * param and the bridge does not forward one, so the marker cannot go on the
+ * wire; without it, two models' signed reasoning replayed back-to-back reads
+ * as one modified chain and is the shape Anthropic rejects.
+ *
+ * The segment kept is the first that has any reasoning, not the last. The
+ * streaming encoder has already sent the first segment's blocks when the
+ * boundary arrives and cannot retract them, so first-segment is the only
+ * rule it can decide online; this path uses the same rule so streamed and
+ * non-streamed turns present the same reasoning. The offline converter
+ * (`collapseFallbackSegments` in `anthropic.ts`) can see the whole turn and
+ * keeps the last segment instead — both guarantee a single chain survives.
+ */
+function collapseFallbackSegmentsKeepFirst(content: AssistantMessage["content"]): AssistantMessage["content"] {
+	let firstReasoningSegment = -1;
+	let segment = 0;
+	for (const block of content) {
+		if (block.type === "fallback") segment++;
+		else if (block.type === "thinking" || block.type === "redactedThinking") {
+			firstReasoningSegment = segment;
+			break;
+		}
+	}
+	if (firstReasoningSegment === -1) {
+		return content.filter(block => block.type !== "fallback");
+	}
+	const collapsed: AssistantMessage["content"] = [];
+	segment = 0;
+	for (const block of content) {
+		if (block.type === "fallback") {
+			segment++;
+			continue;
+		}
+		if ((block.type === "thinking" || block.type === "redactedThinking") && segment !== firstReasoningSegment) {
+			continue;
+		}
+		collapsed.push(block);
+	}
+	return collapsed;
+}
+
 function encodeContentBlocks(message: AssistantMessage): Record<string, unknown>[] {
 	const blocks: Record<string, unknown>[] = [];
-	for (const c of message.content) {
+	for (const c of collapseFallbackSegmentsKeepFirst(message.content)) {
 		switch (c.type) {
 			case "text":
 				blocks.push({ type: "text", text: c.text });
@@ -668,6 +712,20 @@ export function encodeStream(
 			// preceding text/thinking block before it opens, so no block that is
 			// still open is ever renumbered.
 			const suppressed = new Set<number>();
+			// A persisted `fallback` marker occupies a content index but is
+			// never emitted — the bridge client never opted into the beta, so
+			// the marker cannot go on the wire. The walk below records each
+			// marker (and every other block this encoder cannot emit) in
+			// `suppressed` so `wireIndex` stays dense. Once a boundary has been
+			// passed with reasoning already sent, every later segment's
+			// reasoning is a second signed chain the client must not receive;
+			// the first chain is already on the wire and cannot be retracted,
+			// so it is the one that survives (see
+			// `collapseFallbackSegmentsKeepFirst`). `reasoningSeen` tracks what
+			// the client actually received, which is why redacted reasoning —
+			// which this encoder has no event for — does not set it.
+			let reasoningSeen = false;
+			let suppressLaterReasoning = false;
 			const wireIndex = (contentIndex: number): number => {
 				let shift = 0;
 				for (const index of suppressed) {
@@ -707,6 +765,20 @@ export function encodeStream(
 				while (nextContentIndexToInspect < limit) {
 					const contentIndex = nextContentIndexToInspect++;
 					const content = message.content[contentIndex];
+					if (content?.type === "fallback") {
+						// Never on the wire, so keep the numbering dense. Latch the
+						// collapse only when the client already has this turn's first
+						// chain: what follows would be a second one.
+						suppressed.add(contentIndex);
+						if (reasoningSeen) suppressLaterReasoning = true;
+						continue;
+					}
+					if (content?.type === "redactedThinking") {
+						// Redacted reasoning has no stream event, so it never reaches
+						// the client; account for its index like any other hole.
+						suppressed.add(contentIndex);
+						continue;
+					}
 					if (content?.type !== "anthropicServerTool") continue;
 					ensureStart(message);
 					const index = wireIndex(contentIndex);
@@ -781,6 +853,15 @@ export function encodeStream(
 						case "thinking_start": {
 							emitServerToolBlocksBefore(ev.partial, ev.contentIndex);
 							ensureStart(ev.partial);
+							if (suppressLaterReasoning) {
+								// A later segment's reasoning is a second signed
+								// chain; drop the whole block — start, deltas,
+								// signature and stop — and account for its index
+								// so later blocks stay densely numbered.
+								suppressed.add(ev.contentIndex);
+								break;
+							}
+							reasoningSeen = true;
 							const index = wireIndex(ev.contentIndex);
 							open.set(ev.contentIndex, { index, kind: "thinking" });
 							controller.enqueue(
@@ -793,6 +874,7 @@ export function encodeStream(
 							break;
 						}
 						case "thinking_delta":
+							if (suppressed.has(ev.contentIndex)) break;
 							controller.enqueue(
 								sseFrame("content_block_delta", {
 									type: "content_block_delta",
@@ -802,6 +884,7 @@ export function encodeStream(
 							);
 							break;
 						case "thinking_end": {
+							if (suppressed.has(ev.contentIndex)) break;
 							const c = ev.partial.content[ev.contentIndex];
 							if (c?.type === "thinking" && c.thinkingSignature) {
 								controller.enqueue(

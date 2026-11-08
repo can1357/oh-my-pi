@@ -2,6 +2,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
+import { getSegmenter } from "@oh-my-pi/pi-tui";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue, resolveRoleSelection } from "../config/model-resolver";
@@ -13,7 +14,7 @@ import { customMessageContentText } from "../session/checkpoint-entries";
 import { appendSharpshooterDelta } from "./queue";
 import type { SharpshooterDelta, SharpshooterDeltaKind, SharpshooterDeltaSource, SharpshooterFriction } from "./types";
 
-import { cfgSharpshooterModel } from "./settings";
+import { cfgSharpshooterMinPromptLength, cfgSharpshooterModel } from "./settings";
 
 const SHARPSHOOTER_DELTA_KINDS = {
 	architecture_decision: true,
@@ -50,6 +51,10 @@ const recordDeltasTool = {
 
 const kExtractionInFlight = Symbol("sharpshooter.extractionInFlight");
 
+// Empty prompts never reach the length gate, so a floor of 1 filters nothing;
+// 2 is the smallest floor that still drops one-character acks ("好", "y").
+const MIN_PROMPT_LENGTH_FLOOR = 2;
+
 interface ExtractionHost extends AgentSession {
 	[kExtractionInFlight]?: Promise<void>;
 }
@@ -62,7 +67,14 @@ interface ExtractionHost extends AgentSession {
 export async function flushSharpshooterExtraction(session: AgentSession, timeoutMs = 5_000): Promise<void> {
 	const pending = (session as ExtractionHost)[kExtractionInFlight];
 	if (!pending) return;
-	await Promise.race([pending, Bun.sleep(Math.max(0, timeoutMs))]);
+	// A settled extraction must not leave the bound's timer holding the event loop open.
+	const bound = Promise.withResolvers<void>();
+	const timer = setTimeout(bound.resolve, Math.max(0, timeoutMs));
+	try {
+		await Promise.race([pending, bound.promise]);
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 export interface SharpshooterEnvelope {
@@ -185,11 +197,21 @@ export function maybeStartSharpshooterExtraction(options: {
 		const envelope = buildSharpshooterEnvelope(session.messages, options.message);
 		if (!envelope) return;
 		const trimmedPrompt = envelope.prompt.trim();
-		if (trimmedPrompt.startsWith("/") || trimmedPrompt.length < 16) return;
+		if (trimmedPrompt.startsWith("/")) return;
+		// Count user-perceived characters, not UTF-16 units: `.length` reports 2 for "👍".
+		const minLength = Math.max(MIN_PROMPT_LENGTH_FLOOR, cfgSharpshooterMinPromptLength.get(options.settings));
+		let characters = 0;
+		for (const _grapheme of getSegmenter().segment(trimmedPrompt)) {
+			if (++characters >= minLength) break;
+		}
+		if (characters < minLength) return;
 
 		const run = runSharpshooterExtraction(options, envelope)
 			.catch(error => {
-				logger.debug("Sharpshooter extraction failed", { error: String(error), sessionId: session.sessionId });
+				logger.debug("Sharpshooter extraction failed", {
+					error: String(error),
+					providerSessionId: session.sessionId,
+				});
 			})
 			.finally(() => {
 				(session as ExtractionHost)[kExtractionInFlight] = undefined;

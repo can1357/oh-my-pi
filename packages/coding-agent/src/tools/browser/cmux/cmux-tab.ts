@@ -49,6 +49,7 @@ import type {
 } from "../network";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
 import { assertTabPressArgs } from "../tab-arguments";
+import { readFilePayloads } from "../upload-files";
 import type { VitalsOptions, VitalsResult } from "../react/vitals";
 import type { RecordingOptions, RecordingStartResult, RecordingStatus, RecordingStopResult } from "../recording";
 import type {
@@ -140,12 +141,6 @@ interface BoundingBox {
 	y: number;
 	width: number;
 	height: number;
-}
-
-interface FilePayload {
-	name: string;
-	type: string;
-	data: string;
 }
 
 type CmuxCaptureEntry = BrowserConsoleEntry | BrowserErrorEntry;
@@ -870,7 +865,9 @@ export class CmuxTab implements InProcessRunTab {
 		return new CmuxElementHandle(this, selector);
 	}
 
-	async click(selector: string): Promise<void> {
+	async click(selector: string, options?: { button?: string; count?: number }): Promise<void> {
+		const quoted = JSON.stringify(selector);
+		refuseUnpressableClick(`tab.click(${quoted}, `, `tab.dblclick(${quoted})`, options);
 		await this.#selectorAction(selector, "click");
 	}
 
@@ -1089,6 +1086,17 @@ export class CmuxTab implements InProcessRunTab {
 		if (opts.fullPage) {
 			captureNotes.push("fullPage is unavailable on this surface — the image is the viewport only");
 		}
+		// The daemon does not report its capture scale: measure the image against the CSS viewport width.
+		let cssWidth: number | undefined;
+		if (!opts.silent) {
+			const answer = (await this.#request("browser.eval", { script: "window.innerWidth" }, context.timeoutMs).catch(
+				error => {
+					if (context.signal.aborted) throw error;
+					return undefined;
+				},
+			)) as CmuxEvalResult | undefined;
+			cssWidth = typeof answer?.value === "number" && answer.value > 0 ? answer.value : undefined;
+		}
 		const result = await this.#captureScreenshotPng(context.timeoutMs);
 		const buffer = Buffer.from(result.png_base64, "base64");
 		const captureMime = "image/png";
@@ -1129,6 +1137,7 @@ export class CmuxTab implements InProcessRunTab {
 				savedByteLength: savedBuffer.length,
 				dest,
 				resized,
+				capture: { area: "viewport", scale: cssWidth && resized.originalWidth / cssWidth },
 			});
 			if (captureNotes.length > 0) {
 				lines.push(`[cmux surface: ${captureNotes.join("; ")}]`);
@@ -1446,14 +1455,16 @@ export class CmuxTab implements InProcessRunTab {
 		throw new ToolError("tab.recording() is not supported on the cmux backend");
 	}
 
-	async text(selector: string): Promise<string | null> {
+	/** Without a selector, reads the page `<body>`. */
+	async text(selector = "body"): Promise<string | null> {
 		return await this.queryElement<string>(
 			selector,
-			`element => (element.innerText || element.textContent || "").trim()`,
+			`element => (typeof element.innerText === "string" ? element.innerText : element.textContent || "").trim()`,
 		);
 	}
 
-	async html(selector: string): Promise<string | null> {
+	/** Without a selector, reads the page `<body>`. */
+	async html(selector = "body"): Promise<string | null> {
 		return await this.queryElement<string>(selector, "element => element.innerHTML");
 	}
 
@@ -1600,13 +1611,8 @@ export class CmuxTab implements InProcessRunTab {
 
 	async uploadFile(selector: string, ...filePaths: string[]): Promise<void> {
 		if (!filePaths.length) throw new ToolError("tab.uploadFile() requires at least one file path");
-		const files: FilePayload[] = [];
-		for (const filePath of filePaths) {
-			const absolute = resolveToCwd(filePath, this.#requireRunContext("tab.uploadFile()").session.cwd);
-			const file = Bun.file(absolute);
-			const data = Buffer.from(await file.arrayBuffer()).toString("base64");
-			files.push({ name: path.basename(absolute), type: file.type || "application/octet-stream", data });
-		}
+		const cwd = this.#requireRunContext("tab.uploadFile()").session.cwd;
+		const files = await readFilePayloads(filePaths.map(filePath => resolveToCwd(filePath, cwd)));
 		await this.#selectorAction(selector, "uploadFile", { files });
 	}
 
@@ -2201,6 +2207,28 @@ class CmuxResponse {
 	}
 }
 
+/**
+ * Every cmux element-click path presses the left button once; refuse another button or count rather than
+ * mis-deliver it. `call` is the call as written up to its options (`tab.click("#x", `), `dblclick` the call
+ * that double-clicks the same target.
+ */
+function refuseUnpressableClick(
+	call: string,
+	dblclick: string,
+	options: { button?: string; count?: number } | undefined,
+): void {
+	if (options?.button !== undefined && options.button !== "left") {
+		throw new ToolError(
+			`${call}{ button: ${JSON.stringify(options.button)} }) is not supported in a cmux browser, which only left-clicks elements`,
+		);
+	}
+	if (options?.count !== undefined && options.count !== 1) {
+		throw new ToolError(
+			`${call}{ count: ${options.count} }) is not supported in a cmux browser; use ${dblclick} for a double click`,
+		);
+	}
+}
+
 class CmuxElementHandle {
 	readonly #tab: CmuxTab;
 	readonly #selector: string;
@@ -2211,17 +2239,7 @@ class CmuxElementHandle {
 	}
 
 	async click(options?: { button?: string; count?: number }): Promise<void> {
-		// Every cmux element-click path presses the left button once; refuse rather than mis-deliver.
-		if (options?.button !== undefined && options.button !== "left") {
-			throw new ToolError(
-				`handle.click({ button: ${JSON.stringify(options.button)} }) is not supported in a cmux browser, which only left-clicks elements`,
-			);
-		}
-		if (options?.count !== undefined && options.count !== 1) {
-			throw new ToolError(
-				`handle.click({ count: ${options.count} }) is not supported in a cmux browser; use handle.dblclick() for a double click`,
-			);
-		}
+		refuseUnpressableClick("handle.click(", "handle.dblclick()", options);
 		await this.#tab.click(this.#selector);
 	}
 

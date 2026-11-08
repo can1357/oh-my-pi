@@ -40,6 +40,48 @@ describe("validateProviderConfiguration (models-config auth)", () => {
 	});
 });
 
+describe("ModelsConfigSchema Bedrock compat overrides", () => {
+	test("rejects a non-boolean supportsThinkingBindingControls override instead of passing the typo through", () => {
+		// A truthy string would keep the binding controls on for a gateway the user meant to opt out.
+		const checked = ModelsConfigSchema({
+			providers: {
+				"amazon-bedrock": {
+					models: [
+						{
+							id: "us.anthropic.claude-fable-5-1",
+							api: "bedrock-converse-stream",
+							compat: { supportsThinkingBindingControls: "false" },
+						},
+					],
+				},
+			},
+		});
+		if (!(checked instanceof OmpErrors)) throw new Error("expected the schema to reject a string value");
+		expect(checked.map(error => `${error.path.join(".")}: ${error.problem}`)).toEqual([
+			expect.stringMatching(
+				/^providers\.amazon-bedrock\.models\.0\.compat\.supportsThinkingBindingControls: must be boolean/,
+			),
+		]);
+	});
+});
+
+describe("ModelsConfigSchema tokenizer", () => {
+	test("accepts the cl100k tokenizer and rejects an unknown one", () => {
+		const config = (tokenizer: string) => ({
+			providers: {
+				p: {
+					baseUrl,
+					apiKey: "K",
+					models: [{ id: "legacy-gpt-4", api: "openai-completions" as const, tokenizer }],
+				},
+			},
+		});
+		expect(ModelsConfigSchema(config("cl100k"))).not.toBeInstanceOf(OmpErrors);
+		expect(getModelsConfigSchema()(config("cl100k"))).not.toBeInstanceOf(OmpErrors);
+		expect(ModelsConfigSchema(config("cl200k"))).toBeInstanceOf(OmpErrors);
+	});
+});
+
 describe("ModelsConfigSchema Responses compat overrides", () => {
 	/** A custom Responses-compatible proxy serving gpt-6-astra, as a user writes it in models.yml. */
 	function astraProxyConfig(compat: Record<string, unknown>): unknown {

@@ -1,3 +1,4 @@
+import { formatLocalRefPointer, parseLocalRefPointer } from "@oh-my-pi/omptype";
 import { areJsonValuesEqual } from "./equality";
 import { epochNext, once } from "./stamps";
 import { isJsonObject, type JsonObject } from "./types";
@@ -34,9 +35,16 @@ const NON_SCHEMA_VALUE_KEYS: Record<string, true> = {
 	type: true,
 };
 
-/** Rewrite draft-07's `#/definitions/Foo` ref form to draft 2020-12's `#/$defs/Foo`. External refs (`http://…`) pass through. */
+/**
+ * Rewrite draft-07's `#/definitions/Foo` ref form to draft 2020-12's
+ * `#/$defs/Foo`, decoding URI-fragment spellings such as
+ * `#%2Fdefinitions%2Ffoo` with the shared pointer parser first. External
+ * refs (`http://…`) pass through.
+ */
 function convertRef(value: string): string {
-	return value.startsWith("#/definitions/") ? `#/$defs/${value.slice("#/definitions/".length)}` : value;
+	const pointer = parseLocalRefPointer(value);
+	if (pointer === undefined || pointer[0] !== "definitions") return value;
+	return formatLocalRefPointer(["$defs", ...pointer.slice(1)]);
 }
 
 /** Get-or-create a child object map on `target[key]`. Used to lazily build up `$defs`/`dependentRequired`/`dependentSchemas` during conversion. */

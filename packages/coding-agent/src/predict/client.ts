@@ -4,20 +4,18 @@
  * The composer's word-completion provider (`@oh-my-pi/pi-tui/prompt/word-completion`)
  * reaches the daemon through {@link textPredictionBackend}. The first request
  * starts the daemon under the `text-predict` global broker when nothing is
- * listening; one socket per process then carries every request. Failures never
+ * listening; one connection per process then carries every request. Failures never
  * surface to the editor: a query that cannot be answered shows no ghost text.
  */
 import * as fs from "node:fs/promises";
-import type * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { PredictedWord } from "@oh-my-pi/pi-natives";
+import { IpcConnection, ipcEndpoint, type PredictedWord } from "@oh-my-pi/pi-natives";
 import type { WordCompletionEngine, WordPredictionBackend } from "@oh-my-pi/pi-tui/prompt/word-completion";
-import { getAgentDir, logger, ptree, VERSION } from "@oh-my-pi/pi-utils";
+import { compareVersions, getAgentDir, logger, ptree, VERSION } from "@oh-my-pi/pi-utils";
 import { daemonClientForGlobal } from "../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../launch/ensure";
 import { resolveWorkerSpawnCmd, SMOKE_TEST_TIMEOUT_MS, workerEnvFromParent } from "../subprocess/worker-client";
-import { connectJsonlSocket, LineParser, writeJsonLine } from "../tiny/jsonl-socket";
 import { prefetchSmolLmWeights } from "./smollm-weights";
 import {
 	TEXT_PREDICT_AGENT_DIR_ENV,
@@ -66,39 +64,37 @@ interface PendingRequest {
 
 /** One JSONL connection to the daemon with id-matched responses. */
 class DaemonConnection {
-	#socket: net.Socket;
+	#connection: IpcConnection;
 	#pending = new Map<number, PendingRequest>();
 	#nextId = 1;
 	closed = false;
 
-	constructor(socket: net.Socket) {
-		this.#socket = socket;
-		const parser = new LineParser(line => {
-			let response: TextPredictResponse;
-			try {
-				response = JSON.parse(line);
-			} catch (error) {
-				logger.warn("text-predict: malformed response line", { error: String(error) });
-				return;
-			}
-			const pending = this.#pending.get(response.id);
-			if (!pending) return;
-			this.#pending.delete(response.id);
-			clearTimeout(pending.timer);
-			pending.resolve(response);
-		});
-		socket.on("data", (chunk: string) => parser.push(chunk));
-		socket.on("error", () => {
-			// "close" always follows.
-		});
-		socket.once("close", () => {
-			this.closed = true;
-			for (const pending of this.#pending.values()) {
+	constructor(connection: IpcConnection) {
+		this.#connection = connection;
+		connection.start(
+			line => {
+				let response: TextPredictResponse;
+				try {
+					response = JSON.parse(line);
+				} catch (error) {
+					logger.warn("text-predict: malformed response line", { error: String(error) });
+					return;
+				}
+				const pending = this.#pending.get(response.id);
+				if (!pending) return;
+				this.#pending.delete(response.id);
 				clearTimeout(pending.timer);
-				pending.reject(new Error("text-predict daemon connection closed"));
-			}
-			this.#pending.clear();
-		});
+				pending.resolve(response);
+			},
+			() => {
+				this.closed = true;
+				for (const pending of this.#pending.values()) {
+					clearTimeout(pending.timer);
+					pending.reject(new Error("text-predict daemon connection closed"));
+				}
+				this.#pending.clear();
+			},
+		);
 	}
 
 	request(build: (id: number) => TextPredictRequest, timeoutMs: number): Promise<TextPredictResponse> {
@@ -110,28 +106,35 @@ class DaemonConnection {
 			reject(new Error(`text-predict ${request.op} timed out`));
 		}, timeoutMs);
 		this.#pending.set(request.id, { resolve, reject, timer });
-		writeJsonLine(this.#socket, request);
+		this.#connection.send(JSON.stringify(request));
 		return promise;
 	}
 
 	close(): void {
-		this.#socket.destroy();
+		this.#connection.destroy();
 	}
 }
 
-/** Connect and confirm the daemon speaks this omp version; `undefined` when nothing usable listens. */
+/**
+ * Connect and confirm the daemon speaks this omp version or a newer one;
+ * `undefined` when nothing usable listens.
+ */
 async function connectDaemon(endpoint: string): Promise<DaemonConnection | undefined> {
-	let socket: net.Socket;
+	let ipc: IpcConnection;
 	try {
-		socket = await connectJsonlSocket(endpoint, CONNECT_TIMEOUT_MS);
+		ipc = await IpcConnection.connect(endpoint, { framing: "lines", timeoutMs: CONNECT_TIMEOUT_MS });
 	} catch {
 		return undefined;
 	}
-	const connection = new DaemonConnection(socket);
+	const connection = new DaemonConnection(ipc);
 	try {
 		const pong = await connection.request(id => ({ id, op: "ping" }), REQUEST_TIMEOUT_MS);
-		if (pong.ok && pong.op === "ping" && pong.version === VERSION) return connection;
-		// A daemon from another omp version: retire it so this version's starts.
+		if (pong.ok && pong.op === "ping" && (pong.version === VERSION || compareVersions(pong.version, VERSION) > 0)) {
+			return connection;
+		}
+		// A daemon from an older omp version: retire it so this version's starts. A newer
+		// one keeps serving: after an in-place upgrade this process would start that same
+		// newer build again, and retiring it cuts off every process already on it.
 		await connection.request(id => ({ id, op: "shutdown" }), REQUEST_TIMEOUT_MS).catch(() => undefined);
 	} catch (error) {
 		logger.debug("text-predict: daemon ping failed", { endpoint, error: String(error) });
@@ -325,10 +328,7 @@ export function syncTextPrediction(): void {
  */
 export async function smokeTestTextPredictDaemon(): Promise<void> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-text-predict-smoke-"));
-	const endpoint =
-		process.platform === "win32"
-			? `\\\\.\\pipe\\omp-text-predict-smoke-${process.pid.toString(36)}`
-			: path.join(root, "text-predict.sock");
+	const endpoint = ipcEndpoint(root, "text-predict");
 	const spawn = resolveWorkerSpawnCmd(TEXT_PREDICT_WORKER_ARG);
 	const proc = ptree.spawn(spawn.cmd, {
 		cwd: spawn.cwd,
