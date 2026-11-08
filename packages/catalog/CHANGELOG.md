@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added Keln as a built-in provider with API-key login and live discovery of chat models, prices, limits, and effort levels (default `zai-org/glm-5.3`)
+- Added Keln as a built-in provider with API-key login and live discovery of chat models, prices, limits, and effort levels (default `zai-org/glm-5.3`) ([#18550](https://github.com/can1357/oh-my-pi/pull/18550) by [@kris-holy](https://github.com/kris-holy))
 
 ### Changed
 
