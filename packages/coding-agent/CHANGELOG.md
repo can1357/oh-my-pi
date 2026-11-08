@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Quarantined Hindsight memories are now deleted once their 30-day review period ends even when no new memory is quarantined ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes

@@ -252,15 +252,98 @@ describe("Hindsight retain outbox", () => {
 
 	it("deletes quarantined events once their 30-day review period ends", async () => {
 		status = 400;
-		const { tool, state } = fixture();
-		await tool.execute("first-refused", { items: [{ content: "first refused" }] });
-		await state.flushRetainQueue();
-		const [expired] = await fs.readdir(quarantineDir());
-		await age(path.join(quarantineDir(), expired), 31 * DAY_MS);
-		await tool.execute("second-refused", { items: [{ content: "second refused" }] });
-		const [second] = await events();
-		await state.flushRetainQueue();
-		expect(await fs.readdir(quarantineDir())).toEqual([`${second.id}.json`]);
+		const first = fixture();
+		const second = fixture({}, "session-b");
+		await first.tool.execute("refused", {
+			items: [{ content: "expired refused" }, { content: "recent refused" }],
+		});
+		const pending = await events();
+		const expired = pending.find(event => event.content === "expired refused")!;
+		const recent = pending.find(event => event.content === "recent refused")!;
+		await first.state.flushRetainQueue();
+		const expiredFile = path.join(quarantineDir(), `${expired.id}.json`);
+		await age(expiredFile, 31 * DAY_MS);
+		await age(path.join(quarantineDir(), `${recent.id}.json`), 29 * DAY_MS);
+		first.notices.length = 0;
+		requests = [];
+		status = 202;
+
+		let inFlightFs = 0;
+		let fsIdle = Promise.withResolvers<void>();
+		const trackFs = async <T>(op: () => Promise<T>): Promise<T> => {
+			inFlightFs++;
+			try {
+				return await op();
+			} finally {
+				if (--inFlightFs === 0) {
+					fsIdle.resolve();
+					fsIdle = Promise.withResolvers<void>();
+				}
+			}
+		};
+		const waitForIdleFs = async () => {
+			for (let tick = 0; tick < 5; tick++) {
+				while (inFlightFs > 0) await fsIdle.promise;
+				await Promise.resolve();
+			}
+		};
+
+		const realReaddir = fs.readdir;
+		const realStat = fs.stat;
+		const realRm = fs.rm;
+		const realUtimes = fs.utimes;
+		const expiredRemoved = Promise.withResolvers<void>();
+		let expiredStats = 0;
+		let concurrentDrain: Promise<void> | undefined;
+
+		vi.spyOn(fs, "readdir").mockImplementation(((dirPath: string, options?: unknown) =>
+			trackFs(() => realReaddir(dirPath as never, options as never))) as typeof fs.readdir);
+		vi.spyOn(fs, "stat").mockImplementation((async (filePath: string, options?: unknown) => {
+			if (String(filePath) === expiredFile && ++expiredStats > 1) {
+				await expiredRemoved.promise;
+			}
+			return trackFs(() => realStat(filePath as never, options as never));
+		}) as typeof fs.stat);
+		vi.spyOn(fs, "rm").mockImplementation(async (filePath, options) => {
+			if (String(filePath) === expiredFile) {
+				await waitForIdleFs();
+				try {
+					return await trackFs(() => realRm(filePath, options));
+				} finally {
+					expiredRemoved.resolve();
+				}
+			}
+			return trackFs(() => realRm(filePath, options));
+		});
+		vi.spyOn(fs, "utimes").mockImplementation(async (filePath, atime, mtime) => {
+			if (String(filePath).startsWith(quarantineDir()) && !concurrentDrain) {
+				concurrentDrain = second.state.flushRetainQueue();
+				await waitForIdleFs();
+			}
+			return realUtimes(filePath, atime, mtime);
+		});
+
+		await Promise.all([first.state.flushRetainQueue(), second.state.flushRetainQueue()]);
+		expect(await fs.readdir(quarantineDir())).toEqual([`${recent.id}.json`]);
+		expect(requests).toHaveLength(0);
+		expect([...first.notices, ...second.notices]).toEqual([]);
+
+		await first.tool.execute("stale-undelivered", { items: [{ content: "stale undelivered" }] });
+		const [stale] = await events();
+		const [staleFile] = await eventFiles();
+		await age(staleFile, 31 * DAY_MS);
+		first.notices.length = 0;
+		second.notices.length = 0;
+
+		await first.state.flushRetainQueue();
+		await concurrentDrain;
+		expect((await fs.readdir(quarantineDir())).toSorted()).toEqual(
+			[`${recent.id}.json`, `${stale.id}.json`].toSorted(),
+		);
+		expect(requests).toHaveLength(0);
+		expect(first.notices).toHaveLength(1);
+		expect(first.notices[0]).toContain("1 Hindsight memory moved to");
+		expect(second.notices).toEqual([]);
 	});
 
 	it("retries a transient failure on its own backoff timer", async () => {
