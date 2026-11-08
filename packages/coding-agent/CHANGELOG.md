@@ -266,6 +266,9 @@
 ### Fixed
 
 - A marketplace with `metadata.pluginRoot` installs `./` sources from the marketplace root and resolves bare-name sources under `pluginRoot`, as in Claude Code; a `./` source missing from the root is still tried under `pluginRoot` ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+### Fixed
+
+- A `mnemopi.dbPath` that starts with `~` now resolves under the home directory instead of creating a literal `~` directory in the working directory ([#17986](https://github.com/can1357/oh-my-pi/pull/17986) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
 
