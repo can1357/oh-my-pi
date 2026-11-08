@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/fork pane` and `ctx.ui.openTerminal` work in the Herdr app (herdr-core): the new terminal opens as a pane in the same app tab ([#18271](https://github.com/can1357/oh-my-pi/pull/18271) by [@matteoantoci](https://github.com/matteoantoci))
+
 ### Changed
 
 - Models without a delegation rule (Claude, Gemini, …) no longer get pushed to delegate: the "map unknown code via task" rule and the "Task + scout" nudges in search tool descriptions are replaced by a light suggestion to explore unfamiliar subsystems with a scout
