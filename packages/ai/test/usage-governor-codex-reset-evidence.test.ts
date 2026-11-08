@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -211,6 +211,7 @@ class World {
 
 let activeWorld: World | undefined;
 afterEach(async () => {
+	setSystemTime();
 	await activeWorld?.close();
 	activeWorld = undefined;
 });
@@ -336,5 +337,42 @@ describe("OpenAI Codex reset credits governor evidence (slice D)", () => {
 		expect(activeWorld.fetchLog.some(req => req.url.includes("consume"))).toBe(false);
 		expect(activeWorld.fetchLog.some(req => req.method === "POST")).toBe(false);
 		expect(activeWorld.blockRowCount()).toBe(0);
+	});
+
+	test("header ingestion after >15min renders allowance unknown until fresh full payload arrives", async () => {
+		const baseNow = Date.parse("2026-11-08T12:00:00.000Z");
+		setSystemTime(new Date(baseNow));
+
+		activeWorld = await World.open({ availableCount: 2 });
+		const evaluationInitial = await activeWorld.evaluate(CHAT_MODEL);
+		expect(evaluationInitial.accounts[0]!.allowance).toBe("included");
+
+		// Advance time by 16 minutes (> GOVERNOR_STALE_MS = 15min)
+		const laterTime = baseNow + 16 * 60_000;
+		setSystemTime(new Date(laterTime));
+
+		// Ingest fresh rate limit headers. Ingestion refreshes fetchedAt and limit.observedAt to laterTime,
+		// but preserves prior metadata (governorNoPaidOverageObservedAt stays at baseNow).
+		const headers = {
+			"x-codex-primary-used-percent": "25",
+			"x-codex-primary-window-minutes": "300",
+			"x-codex-primary-reset-at": String(Math.floor((laterTime + 14400_000) / 1000)),
+			"x-codex-secondary-used-percent": "35",
+			"x-codex-secondary-window-minutes": "10080",
+			"x-codex-secondary-reset-at": String(Math.floor((laterTime + 500000_000) / 1000)),
+		};
+		const credentialId = activeWorld.store.listAuthCredentials("openai-codex")[0]?.id;
+		const ingested = activeWorld.auth.usage.ingestHeaders("openai-codex", headers, { credentialId });
+		expect(ingested).toBe(true);
+
+		// Now evaluate routes: governorAllowance detects governorNoPaidOverageObservedAt is > 15min old,
+		// returning undefined (unknown allowance) despite fresh header limits.
+		const evaluationStaleHeaders = await activeWorld.evaluate(CHAT_MODEL);
+		expect(evaluationStaleHeaders.accounts[0]!.allowance).toBe("unknown");
+
+		// Fresh full payload arrives at laterTime
+		await activeWorld.auth.usage.reports({ provider: "openai-codex" });
+		const evaluationFreshFull = await activeWorld.evaluate(CHAT_MODEL);
+		expect(evaluationFreshFull.accounts[0]!.allowance).toBe("included");
 	});
 });

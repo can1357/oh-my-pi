@@ -606,7 +606,7 @@ describe("openai-codex usage parser", () => {
 		expect(report?.resetCredits?.credits).toBeUndefined();
 	});
 
-	it("does not normalize credits with missing or non-available status as usable or eligible", async () => {
+	it("distinguishes absent status from pending status for display list and eligibility", async () => {
 		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 2 } };
 		const creditsPayload = {
 			available_count: 2,
@@ -643,18 +643,51 @@ describe("openai-codex usage parser", () => {
 		);
 		expect(report?.resetCredits?.availableCount).toBe(2);
 		expect(report?.resetCredits?.eligible).toBeUndefined();
-		// Preserves report display: non-redeemed credits surface with expiry and status, but not usable
-		expect(report?.resetCredits?.credits).toHaveLength(2);
+		// Legacy display list semantics: absent status is included for display (without usable/clears),
+		// while pending status is filtered out.
+		expect(report?.resetCredits?.credits).toHaveLength(1);
 		expect(report?.resetCredits?.credits?.[0]).toEqual({
 			grantedAt: "2025-01-15T00:00:00Z",
 			expiresAt: "2025-02-14T00:00:00Z",
 			status: undefined,
 		});
-		expect(report?.resetCredits?.credits?.[1]).toEqual({
-			grantedAt: "2025-01-20T00:00:00Z",
-			expiresAt: "2025-02-19T00:00:00Z",
-			status: "pending",
-		});
+	});
+
+	it("preserves display credits when detail availableCount is 0 but leaves eligible absent", async () => {
+		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 1 } };
+		const creditsPayload = {
+			available_count: 0,
+			credits: [
+				{
+					id: "RateLimitResetCredit_1",
+					reset_type: "codex_rate_limits",
+					status: "available",
+					granted_at: "2025-01-15T00:00:00Z",
+					expires_at: "2025-02-14T00:00:00Z",
+				},
+			],
+		};
+		const fetchImpl: FetchImpl = (async (url: string | URL | Request) => {
+			const path = typeof url === "string" ? url : url.toString();
+			const body = path.includes("rate-limit-reset-credits") ? creditsPayload : usagePayload;
+			return new Response(JSON.stringify(body), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as FetchImpl;
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fetchImpl },
+		);
+		expect(report?.resetCredits?.availableCount).toBe(0);
+		// Preserves display list for classifyResetExpiry and soonestAvailableCredit even on zero count
+		expect(report?.resetCredits?.credits).toHaveLength(1);
+		expect(report?.resetCredits?.credits?.[0]?.expiresAt).toBe("2025-02-14T00:00:00Z");
+		// But governor tie-break requires valid availableCount > 0, so eligible stays absent
+		expect(report?.resetCredits?.eligible).toBeUndefined();
 	});
 
 	it("does not normalize credits with missing or non-chat reset_type as usable or eligible", async () => {

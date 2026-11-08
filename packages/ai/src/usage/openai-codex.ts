@@ -3,6 +3,7 @@ import { planRequirementFor, quotaTierFor } from "@oh-my-pi/pi-catalog/compat/be
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { slugify, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { ProviderHttpError } from "../error";
+import { GOVERNOR_STALE_MS } from "../usage-governor/policy";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -618,6 +619,10 @@ export const openaiCodexUsageProvider: UsageProvider = {
 	id: "openai-codex",
 	// v1: credit-billed seats gained the spend-cap limit; retire their limitless reports.
 	governorAllowance(_params, report, context) {
+		const observedAt = report.metadata?.governorNoPaidOverageObservedAt;
+		if (typeof observedAt !== "number" || !Number.isFinite(observedAt)) return undefined;
+		const now = Date.now();
+		if (observedAt > now || now - observedAt > GOVERNOR_STALE_MS) return undefined;
 		// An absent credits block is not evidence that paid overage is disabled.
 		if (report.metadata?.governorNoPaidOverage !== true || context.modelId === undefined) return undefined;
 		const limits = scopeCodexLimitsForRequest(report, isCodexSparkRequest(context));
@@ -777,15 +782,15 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					resetCredits.availableCount = list.availableCount;
 				}
 				if (list?.credits.length) {
-					const displayCredits = list.credits.filter(c => c.status !== "redeemed");
+					const displayCredits = list.credits.filter(c => (c.status ?? "available") === "available");
 					if (displayCredits.length > 0) {
-						let hasEligibleCredit = false;
+						let hasUsableChatCredit = false;
 						resetCredits.credits = displayCredits.map(c => {
-							const isAvailable = c.status === "available";
+							const isExplicitAvailable = c.status === "available";
 							const isChatCoverage = c.resetType === CODEX_CHAT_RESET_TYPE;
-							const isUsableChatCredit = isAvailable && isChatCoverage;
+							const isUsableChatCredit = isExplicitAvailable && isChatCoverage;
 							if (isUsableChatCredit) {
-								hasEligibleCredit = true;
+								hasUsableChatCredit = true;
 							}
 							return {
 								grantedAt: c.grantedAt,
@@ -800,7 +805,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 									: {}),
 							};
 						});
-						if (hasEligibleCredit && list.availableCount > 0) {
+						if (hasUsableChatCredit && list.availableCount > 0) {
 							resetCredits.eligible = true;
 						}
 					}
@@ -821,6 +826,12 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					isRecord(payload.credits) &&
 					payload.credits.has_credits === false &&
 					payload.credits.unlimited === false,
+				...(isRecord(payload) &&
+				isRecord(payload.credits) &&
+				payload.credits.has_credits === false &&
+				payload.credits.unlimited === false
+					? { governorNoPaidOverageObservedAt: nowMs }
+					: {}),
 				planType,
 				...buildPlanMeterState(parsed?.allowed, parsed?.limitReached, creditOverage),
 				email,
