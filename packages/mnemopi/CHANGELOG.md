@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Prevent recall from returning episodic summaries of invalidated working memories ([#18437](https://github.com/can1357/oh-my-pi/pull/18437) by [@jasonharrison](https://github.com/jasonharrison)).
+- Fixed recall returning episodic summaries for working memories that had been invalidated.
 
 ## [18.18.1] - 2026-11-08
 

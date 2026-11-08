@@ -4,17 +4,13 @@
 
 ### Added
 
-- Added `canReplayRemoteCompactionFrom()` to check whether a model can replay the provider-native compaction another model would write ([#17747](https://github.com/can1357/oh-my-pi/pull/17747) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Changed
-
-- The tokenizer takes its Responses replay decision from the shared `getReplayableNativeResponsesHistoryItems` + `replaysNativeResponsesTurn` helpers, the same decision `/shake` uses, so a turn's local token count and its thinking blocks can no longer disagree about whether the request replays it natively
+- Added `canReplayRemoteCompactionFrom()` to determine whether a model can replay provider-native compaction produced by another model.
 
 ### Fixed
 
-- Fixed GenAI message-content capture set in omp's own `.env` files so it still applies now that those values stay out of the process environment ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
-- Compaction preparation re-expands a trailing OpenAI remote compaction the active model cannot replay instead of reporting nothing to compact ([#17747](https://github.com/can1357/oh-my-pi/pull/17747) by [@will-bogusz](https://github.com/will-bogusz))
-- Generic remote compaction to `/chat/completions` now sends per-request model headers, so gateway sessions retain their attribution ([#18032](https://github.com/can1357/oh-my-pi/issues/18032)).
+- Fixed GenAI message-content capture configured in omp's own `.env` files so it continues to apply when those values are no longer exposed through the process environment.
+- Fixed compaction preparation for remote OpenAI compaction that the active model cannot replay, ensuring the content is expanded and remains available for compaction.
+- Fixed generic remote compaction requests to `/chat/completions` so gateway sessions retain the correct per-request model attribution.
 
 ## [18.17.0] - 2026-11-06
 

@@ -4,26 +4,25 @@
 
 ### Added
 
-- `ModelHubCallbacks.onCatalogRefreshed(providerId?)` is called after the model hub re-fetches a catalog; the `--models` scope it returns replaces the hub's ([#17981](https://github.com/can1357/oh-my-pi/pull/17981) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-- `AskDialogPromptDraft`: an ask host's `onPrompt`/`onImagePrompt` may resolve `{ draft }` on cancel, and the dialog offers it again when the custom answer reopens; `HookEditorComponent`'s `onCancel` receives the editor's text and images ([#18211](https://github.com/can1357/oh-my-pi/issues/18211))
+- Added a model catalog refresh callback that lets applications update the active model scope after catalogs are re-fetched.
+- Preserved unfinished answers in ask dialogs and custom editors, allowing users to resume drafts when reopening them.
 
 ### Changed
 
-- Bash previews under the Nerd Font symbol preset show a single icon for `>/dev/null`, `2>/dev/null` and `&>/dev/null` instead of the `🔇 out`/`🔇 err`/`🔇 silent` labels
+- Simplified Bash previews for redirection to /dev/null by showing a single icon in the Nerd Font symbol preset.
 
 ### Fixed
 
-- Terminals without synchronized output (macOS Terminal.app) no longer flash duplicated rows while streaming text scrolls, or blank the screen and status line when finished rows move into scrollback
-- A streaming list item no longer flickers to raw `**bold**` markup while a nested `-` bullet is being typed, and headings inside list items keep their formatting
-- Long embedded arguments in bash previews (e.g. a `grep -E` regex) wrap under their command's indent instead of leaving a blank row and losing the gutter
-- A prompt and its Enter that were typed or written while omp was still starting now submit instead of leaving the text in the composer with the Enter turned into a newline ([#17820](https://github.com/can1357/oh-my-pi/issues/17820))
-- Rebuilt and persisted transcripts render aliased tool calls through the canonical renderer instead of a generic fallback card, matching the live path ([#17995](https://github.com/can1357/oh-my-pi/pull/17995) by [@ReKon64](https://github.com/ReKon64))
-- Debugger tool cards sanitize tabs and control characters in call arguments so rendered rows keep their measured width ([#17995](https://github.com/can1357/oh-my-pi/pull/17995) by [@ReKon64](https://github.com/ReKon64))
-- Leaving the ask dialog's Other editor without submitting keeps what you typed: reopening Other prefills that draft instead of an empty editor ([#18211](https://github.com/can1357/oh-my-pi/issues/18211))
-- Fixed LaTeX styles being lost inside nested wrappers: `\textnormal` resets bold and italic, radical indexes such as `\sqrt[n]{…}` keep the caller's style and color, optional arguments like `\xrightarrow[n]{…}` keep the active color, and `\color` no longer leaks past `\end{…}`; sized headings no longer show the ANSI codes of inline math ([#18275](https://github.com/can1357/oh-my-pi/pull/18275) by [@aleister1102](https://github.com/aleister1102))
-- Setup wizard scenes stop repainting while waiting for input in ANSI terminals ([#18328](https://github.com/can1357/oh-my-pi/issues/18328))
-- On Windows, Tern events relayed through ConPTY no longer leak into the composer as fragments like `":"ack","sf":"s:1"` when their tail arrives late ([#18465](https://github.com/can1357/oh-my-pi/pull/18465) by [@NetVar1337](https://github.com/NetVar1337)).
-- Rex terminals render OSC 8 hyperlinks: omp detected Rex for Kitty graphics but kept its hyperlink capability off, so transcript URLs and file paths stayed plain text instead of command-clickable links ([#18467](https://github.com/can1357/oh-my-pi/pull/18467) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
+- Fixed streaming and scrolling display issues in terminals without synchronized output, including duplicated rows and blank screens or status lines.
+- Fixed Markdown rendering while streaming list items, preserving bold text and heading formatting.
+- Fixed wrapping of long embedded Bash arguments so indentation and the gutter remain aligned.
+- Fixed prompts and Enter presses entered while the application was starting so they submit normally instead of leaving Enter as a newline.
+- Fixed restored transcripts so aliased tool calls use the same rendering as live tool calls.
+- Fixed debugger tool cards with tabs and control characters in arguments so their displayed width remains accurate.
+- Fixed LaTeX styling in nested content, including bold and italic resets, radical and optional-argument styling, color scoping, and inline math in headings.
+- Fixed unnecessary repainting in the setup wizard while waiting for input in ANSI terminals.
+- Fixed Windows ConPTY event handling so delayed terminal event data no longer appears in the composer.
+- Fixed OSC 8 hyperlink support in Rex terminals so transcript URLs and file paths are command-clickable.
 
 ## [18.18.1] - 2026-11-08
 

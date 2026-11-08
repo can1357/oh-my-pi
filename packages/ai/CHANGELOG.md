@@ -4,18 +4,18 @@
 
 ### Added
 
-- Added `CursorExecFrameContext`: `CursorExecHandlers.read` and `write` receive `{ editMaterialization: true }` for the frames that materialize a native StrReplace or Write, and `CursorExecHandlers.editSettled` ends the live card of an edit the server completed without writing ([#18435](https://github.com/can1357/oh-my-pi/pull/18435) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
-- Exported the Responses replay decision (`replaysNativeResponsesHistory`, `getReplayableNativeResponsesHistoryItems`, `replaysNativeResponsesTurn`), so callers that estimate or trim context can tell which turns a request sends as native payload items instead of rebuilding them from message content
+- Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
+- Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
 
 ### Fixed
 
-- Fixed a rotated credential pool reporting a stale sibling key's `401 Authentication Failed` instead of the exhausted key's usage-limit error and reset time ([#17689](https://github.com/can1357/oh-my-pi/issues/17689))
-- Fixed OpenAI image edits with two or more input images failing with `400 Duplicate parameter: 'image'` ([#17701](https://github.com/can1357/oh-my-pi/issues/17701), [#17703](https://github.com/can1357/oh-my-pi/pull/17703) by [@Lynricsy](https://github.com/Lynricsy))
-- Fixed Cursor-provider reads of `xd://` devices failing with "No such tool" because the bridge appended `:raw` to the device URL ([#17743](https://github.com/can1357/oh-my-pi/pull/17743) by [@wisehead](https://github.com/wisehead))
-- Fixed an Anthropic session staying stuck on "`thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified" when a steer, reminder or new prompt followed the refused turn: the one-time retry that drops that turn's reasoning now runs there too ([#17791](https://github.com/can1357/oh-my-pi/pull/17791) by [@aramalipoor](https://github.com/aramalipoor))
-- Fixed the auth gateway silently dropping the tool namespace and developer `additional_tools` items from Codex Responses requests, so Codex turns replayed tools without them ([#17863](https://github.com/can1357/oh-my-pi/pull/17863) by [@codyw912](https://github.com/codyw912))
-- Fixed Gemini `MALFORMED_RESPONSE` finishes failing with "Unhandled stop reason" and losing the turn's token usage; they now count as transient errors on every Gemini transport ([#17976](https://github.com/can1357/oh-my-pi/pull/17976) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-- Fixed Cursor turns failing behind TLS-intercepting proxies that block HTTP/2; later turns start on HTTP/1 ([#17985](https://github.com/can1357/oh-my-pi/pull/17985) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Fixed rotated credential pools reporting a stale sibling credential's authentication error instead of the exhausted credential's usage-limit status and reset time.
+- Fixed OpenAI image edits with multiple input images failing because image parameters were duplicated.
+- Fixed Cursor-provider reads of xd:// devices failing due to incorrect device URL handling.
+- Fixed Anthropic sessions getting stuck after refused turns containing thinking or redacted-thinking blocks when followed by a steer, reminder, or new prompt.
+- Fixed Codex Responses requests losing tool namespaces and developer-provided additional tools when replayed through the authentication gateway.
+- Fixed Gemini malformed responses being treated as unhandled stop reasons and losing token usage; they are now handled as transient transport errors.
+- Improved Cursor compatibility with TLS-intercepting proxies that block HTTP/2 by falling back to HTTP/1 for subsequent turns.
 
 ## [18.18.1] - 2026-11-08
 

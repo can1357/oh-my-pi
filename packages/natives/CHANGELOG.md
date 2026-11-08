@@ -4,14 +4,14 @@
 
 ### Added
 
-- Added Zig syntax highlighting, so fenced Zig code in markdown renders with colors ([#14964](https://github.com/can1357/oh-my-pi/issues/14964), [#18319](https://github.com/can1357/oh-my-pi/pull/18319) by [@hellopoisonx](https://github.com/hellopoisonx))
+- Added Zig syntax highlighting for fenced Zig code in Markdown.
 
 ### Fixed
 
-- Aborted or timed-out built-in `jq` filters stop running even when they have not produced an output ([#17943](https://github.com/can1357/oh-my-pi/issues/17943)).
-- Fixed `cd` and `pwd` in native Windows shell sessions corrupting drive and UNC roots during logical directory changes ([#18042](https://github.com/can1357/oh-my-pi/pull/18042) by [@jchanghong023](https://github.com/jchanghong023))
-- Fixed external commands getting the null device on Unix for a descriptor the script closed (`cmd 2>&-`, `cmd 5>&-`): the descriptor is now closed in the command, as in Bash, so its writes there fail instead of vanishing; on Windows, which has no closed standard handle, a closed standard stream gets the null device ([#18089](https://github.com/can1357/oh-my-pi/pull/18089) by [@sjawhar](https://github.com/sjawhar))
-- Fixed `setValue()` on Linux reporting success in Firefox and Thunderbird when the field kept its old text, password fields included; it now reads the text back and fails naming what the field holds, or naming no text in a password field ([#18220](https://github.com/can1357/oh-my-pi/pull/18220) by [@will-bogusz](https://github.com/will-bogusz))
+- Built-in jq filters now stop reliably when aborted or timed out, even before producing output.
+- Fixed logical directory changes with cd and pwd in native Windows shell sessions, including drive and UNC paths.
+- Fixed closed file descriptors passed to external commands on Unix so writes fail as expected; closed standard streams on Windows now use the null device.
+- Fixed setValue() on Linux reporting success when Firefox or Thunderbird fields, including password fields, were not actually updated; failures now identify the affected field appropriately.
 
 ## [18.18.1] - 2026-11-08
 
@@ -24,15 +24,11 @@
 - macOS `ax()` lines show 200 characters of a long label or value instead of 80, keep newlines as `\n`, and end a cut value with the call that reads it whole ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
 - macOS `ax()` dates read in local time with their offset, the form `setValue` takes back, and `axPerform` runs a listed action in any case, with or without its `AX` prefix ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
 - macOS background left drags across the text of one native text view, such as a TextEdit document, now select that text through accessibility, and `drag` resolves to `{ selection, focusReturn }`; drags on web page text and links still throw `BackgroundUnavailable` ([#16223](https://github.com/can1357/oh-my-pi/pull/16223) by [@will-bogusz](https://github.com/will-bogusz))
-### Changed
-
-- Source builds now use Rust nightly 2026-11-08 (1.102.0-nightly), with matching Cargo and Bazel toolchains.
 
 ### Fixed
 
 - macOS `ax()` no longer marks every cell of a focused table or sidebar `(focused)`; only the element holding the app's keyboard focus is ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
 - macOS `axPerform` reports a followed Preview PDF link or an opened Finder item as unconfirmed instead of failed ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
-- Native cross-builds no longer emit warnings about SDK discovery, missing library paths and CRT debug symbols, static Windows imports, deprecated timestamp types, or unsupported linker options.
 - The embedded shell's `comm` merges in the same locale order as its `sort`, so `comm` on `sort` output under a UTF-8 locale no longer reports unsorted input and drops common lines
 - An edit whose path is missing on disk no longer stalls the embedded shell and other native calls while it searches for the file, and a cancelled edit stops that search at once ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
 - macOS spellchecking (typo underlines, autocorrect, `apple` word completion) no longer leaks native memory for the life of the process ([#18285](https://github.com/can1357/oh-my-pi/pull/18285) by [@aleister1102](https://github.com/aleister1102))
