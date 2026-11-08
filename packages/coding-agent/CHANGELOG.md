@@ -8,7 +8,7 @@
 
 ### Added
 
-- In Tern, right-clicking an `ask` answer offers Note, which annotates that answer without picking it
+- In Tern, right-clicking an `ask` answer offers Note, which annotates that answer without picking it ([#18551](https://github.com/can1357/oh-my-pi/pull/18551))
 
 ### Fixed
 

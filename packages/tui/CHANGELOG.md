@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added a Note entry to the right-click menu of each ask dialog answer row in Tern, annotating that answer without picking it
+- Added a Note entry to the right-click menu of each ask dialog answer row in Tern, annotating that answer without picking it ([#18551](https://github.com/can1357/oh-my-pi/pull/18551))
 
 ### Fixed
 
