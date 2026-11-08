@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- SIGHUP now prints the `[Stopped by SIGHUP]` recovery hints, so a terminal runtime that stops omp with a hangup keeps the `--resume` command on screen ([#18429](https://github.com/can1357/oh-my-pi/issues/18429))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
