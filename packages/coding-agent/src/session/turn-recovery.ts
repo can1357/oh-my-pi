@@ -2820,6 +2820,7 @@ export class TurnRecovery {
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
 				if (!modelsAreEqual(this.#host.model(), sourceModel)) return false;
+				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
 				if (options?.refusalWalk && this.#refusalWalkTried.has(formatRetryFallbackBaseSelector(selector))) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);

@@ -1037,4 +1037,85 @@ describe("discriminating failure and race behavior", () => {
 			x.routing.dispose();
 		}
 	});
+
+	for (const governorEnabled of [false, true]) {
+		const label = governorEnabled ? "governor ON" : "governor OFF";
+		test(`${label}: cooled/suppressed fallback candidate is skipped in fallback walk preventing oscillation`, async () => {
+			const x = await setupCompatHarness({ governorEnabled, allowFallbackAllowance: false });
+			try {
+				let active = x.source;
+				let setModelCount = 0;
+
+				// Suppress the fallback selector (simulate cooldown)
+				x.registry.isSelectorSuppressed = selector => selector === `${CODEX}/fallback`;
+
+				const host = {
+					settings: x.settings,
+					usesRegistryAuth: () => true,
+					modelRegistry: x.registry,
+					usageRouting: x.routing,
+					agent: { state: { messages: [], systemPrompt: [], tools: [] } },
+					model: () => active,
+					sessionId: () => "s",
+					routingRole: () => "task",
+					thinkingLevel: () => undefined,
+					configuredThinkingLevel: () => undefined,
+					thinkingLevelCeiling: () => undefined,
+					contextFitsModel: () => true,
+					resolveActiveEditMode: () => "hashline",
+					setModelWithProviderSessionReset: async (model: typeof active) => {
+						setModelCount++;
+						active = model;
+					},
+					sessionManager: { appendModelChange: () => {}, getSessionId: () => "s" },
+					setThinkingLevel: () => {},
+					syncAfterModelChange: async () => {},
+					emitSessionEvent: async () => {},
+					configWarnings: [],
+					abortInProgress: () => false,
+					isDisposed: () => false,
+					streamingEditAbortTriggered: () => false,
+					promptGeneration: () => 0,
+					promptSequence: () => 0,
+					textOutputCommitted: () => false,
+					persistedAssistantEntryId: () => undefined,
+					sessionMessageAlreadyPersisted: () => true,
+					waitForSessionMessagePersistence: async () => {},
+					appendSessionMessage: () => {},
+					scheduleAgentContinue: () => {},
+				} as unknown as TurnRecoveryHost;
+
+				const recovery = new TurnRecovery(host, { deferFallbackChainValidation: true });
+				const errorMessage = {
+					role: "assistant",
+					content: [],
+					api: "openai-completions",
+					provider: PROVIDER,
+					model: "primary",
+					stopReason: "error",
+					timestamp: Date.now(),
+					errorMessage:
+						"Codex error event: This content was flagged for possible cybersecurity risk. (code=cyber_policy)",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				} as AssistantMessage;
+
+				const retried = await recovery.handleRetryableError(errorMessage);
+				expect(retried).toBe(false);
+				expect(active).toBe(x.source);
+				expect(setModelCount).toBe(0);
+
+				expectNoStrayFetch(x.h);
+				expect(x.h.redemptionPosts()).toHaveLength(0);
+			} finally {
+				x.routing.dispose();
+			}
+		});
+	}
 });
