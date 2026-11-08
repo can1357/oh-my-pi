@@ -423,7 +423,7 @@ async function runProbedChild(options: {
 	}
 }
 
-function builtinCall(name: (typeof RESERVED_NAMES)[number]) {
+function builtinCall(name: (typeof RESERVED_NAMES)[number]): MockResponse {
 	return name === "yield"
 		? { content: [{ type: "toolCall", name, arguments: { type: "result", data: "done" } }] }
 		: { content: [{ type: "toolCall", name, arguments: { report: "done" } }] };
