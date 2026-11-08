@@ -5,6 +5,8 @@
 ### Added
 
 - `credentialRejectionVerdict` reads whether a failed request's provider refused the *credential* it carried, from the provider's own structured error class (`error.type`/`error.code` on a 401) first and its documented wording only as a fallback ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
+- Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
 
 ### Fixed
 
@@ -15,8 +17,6 @@
 - An error envelope a provider embeds in its own message text no longer outranks the class the transport rendered, in either direction, and the rendered class is read from the transport's own `(type=… code=…)` group rather than from any `type=` in the prose ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - Credential-refusal classification recognizes an explicit credential-expiry 403 without classifying a permission-only 403 as a refused credential ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - Cancelling a request waiting for a prepared command header's replacement returns promptly without cancelling the shared credential mint other requests need ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
-- Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
-- Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
 
 ### Fixed
 

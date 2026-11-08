@@ -34,8 +34,8 @@ import { extractHttpStatusFromError, isRecord } from "@oh-my-pi/pi-utils";
  *
  * - `structured` — a 401 whose class names a credential refusal, or a 403
  *   with an explicit credential-expiry class. The primary signal.
- * - `text` — a 401 with no readable error class whose message is one of the
- *   documented credential refusals. Fallback only.
+ * - `text` — a 401 with no readable error class whose message matches
+ *   recognized credential-refusal prose. Fallback only.
  * - `status` — a 401 with nothing else to read. HTTP's own meaning, and what
  *   omp acted on before the structured signal existed.
  * - `not-credential` — a 401 whose own error class says it is *not* an
@@ -91,18 +91,15 @@ const AUTH_ERROR_CODES: Record<string, true> = {
 const BARE_STATUS_CODES: Record<string, true> = { "401": true };
 
 /**
- * Documented credential refusals, used only when a 401 carries no error class.
- * Each is a measured or provider-documented wording, never a guess — and the
- * length of this list is itself why the structured class above is the primary
- * signal: one gateway has four spellings for one condition.
+ * Credential-refusal prose, used only when a 401 carries no readable error class.
+ * Structured classes take precedence over these wording-specific fallbacks.
  */
 const CREDENTIAL_REFUSAL_TEXT: readonly RegExp[] = [
-	// Theorem's model gateway, identity-token hook (agent-infra
-	// `model-gateway/vm/ossv_box_auth.py`): "This identity token is signed by no
-	// key Google publishes." (measured) and "This identity token is not one this
-	// gateway accepts" (its owner's wording for one past its `exp`).
+	// Recognize "This identity token ..." in classless 401 responses. The text
+	// verdict allows static credentials to retry even though their generation
+	// cannot advance; a status-only verdict would suppress that retry.
 	/\bthis identity token\b/i,
-	// PyJWT's own expiry message, which that hook passes through.
+	// PyJWT's expiry message.
 	/\bsignature has expired\b/i,
 	// LiteLLM's two generic refusals: no usable key reached the proxy at all,
 	// and a bearer that is not one it recognises.
