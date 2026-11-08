@@ -60,13 +60,7 @@ pub const HISTORY_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const HISTORY_BYTES: usize = 8 * 1024 * 1024;
 
 fn bounded(bytes: &[u8]) -> BString {
-	let mut end = bytes.len().min(super::ARG_BYTES);
-	if let Ok(text) = std::str::from_utf8(bytes) {
-		while !text.is_char_boundary(end) {
-			end -= 1;
-		}
-	}
-	bytes[..end].into()
+	text::cut(bytes, super::ARG_BYTES).into()
 }
 /// Maximum coalesced output entry, limiting a single replay step.
 const OUTPUT_CHUNK: usize = 16 * 1024;
