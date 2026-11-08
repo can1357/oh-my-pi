@@ -876,13 +876,23 @@ impl Shell {
 			// matches the plain run. Every other source (externals,
 			// callouts, tasks, fs, host files) was dropped or replaced by
 			// the restore: an `at` the count never holds retries it once.
+			let slot_mem = |fd: i32| vp.fds.get(fd).is_some_and(|h| h.with_mem(|_| ()).is_some());
+			// A queued write waits on the object it is pinned to, not on
+			// whatever the slot it names holds now: a diagnostic bound to a
+			// host file the restore lost must be retried and fail, even
+			// where the slot has since become an in-memory descriptor.
+			let write_dest_mem = |fd: i32| match vp.out.iter().find(|w| w.fd == fd) {
+				Some(w) => match &w.pin {
+					Some(h) => h.with_mem(|_| ()).is_some(),
+					None => slot_mem(fd),
+				},
+				None => slot_mem(fd),
+			};
 			let blocked = p.blocked.map(|(key, at)| {
 				let exact = match &key {
 					WaitKey::Proc(_) | WaitKey::Job(_) => true,
-					WaitKey::Read { fd } | WaitKey::Write { fd } => vp
-						.fds
-						.get(*fd)
-						.is_some_and(|h| h.with_mem(|_| ()).is_some()),
+					WaitKey::Read { fd } => slot_mem(*fd),
+					WaitKey::Write { fd } => write_dest_mem(*fd),
 					_ => false,
 				};
 				super::proc::Blocked { key, at: if exact { at } else { u64::MAX } }
