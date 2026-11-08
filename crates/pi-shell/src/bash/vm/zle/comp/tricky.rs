@@ -89,7 +89,7 @@ pub const IN_ENV: i32 = 4;
 /// zsh `IN_PAR`: in the name of an assignment.
 pub const IN_PAR: i32 = 5;
 
-/// zle_tricky.c's globals (plus lex.c's `wb`, `we`, `addedx`, `inwhat`,
+/// `zle_tricky.c`'s globals (plus lex.c's `wb`, `we`, `addedx`, `inwhat`,
 /// which only completion reads, and utils.c's `,` special flag).
 #[derive(Clone, Debug, Default)]
 pub struct State {
@@ -211,7 +211,7 @@ pub fn quote_opts(zw: &mut Zw<'_, '_>) -> QuoteOpts {
 	}
 }
 
-/// zle_tricky.c's `quotename(s)`: `quotestring(s, instring == QT_NONE ?
+/// `zle_tricky.c`'s `quotename(s)`: `quotestring(s, instring == QT_NONE ?
 /// QT_BACKSLASH : instring)` (with `,` special under
 /// `makecommaspecial(1)`).
 pub fn quotename(t: &State, s: &[u8], o: QuoteOpts) -> Vec<u8> {
@@ -286,7 +286,7 @@ pub fn get_comp_string(zw: &mut Zw<'_, '_>) -> Option<Vec<u8>> {
 
 /// zsh `pfxlen`: the length of the common prefix of the metafied `s` and
 /// `t`, whole (UTF-8) characters only.
-pub fn pfxlen(s: &[u8], t: &[u8]) -> usize {
+pub const fn pfxlen(s: &[u8], t: &[u8]) -> usize {
 	let (mut i, mut lasti, mut pending) = (0usize, 0usize, 0u8);
 	while i < s.len() {
 		let inc = if s[i] == crate::bash::syntax::zsh::tok::META {
@@ -328,10 +328,11 @@ pub fn cmphaswilds(s: &[u8], extendedglob: bool, ignorebraces: bool) -> bool {
 	if s.len() == 1 && (s[0] == INBRACK || s[0] == OUTBRACK) {
 		return false;
 	}
-	let mut i = 0;
-	if at(s, 0) == b'%' && at(s, 1) == QUEST {
-		i = 2;
-	}
+	let mut i = if at(s, 0) == b'%' && at(s, 1) == QUEST {
+		2
+	} else {
+		0
+	};
 	if at(s, i) == TILDE
 		&& at(s, i + 1) == INBRACK
 		&& let Some(p) = s
@@ -1062,7 +1063,7 @@ fn decide(zw: &mut Zw<'_, '_>, mut s: Vec<u8>, mut lst: i32, olst: i32, k: K<i32
 	}
 	let lincmd = t.lincmd;
 	if lst == COMP_SPELL {
-		let mut w = t.origword.clone().map(Vec::from).unwrap_or_default();
+		let mut w = t.origword.clone().map_or_default(Vec::from);
 		for b in &mut w {
 			if is_null(*b) {
 				*b = crate::bash::syntax::zsh::tok::NULARG;
@@ -1095,7 +1096,7 @@ fn decide(zw: &mut Zw<'_, '_>, mut s: Vec<u8>, mut lst: i32, olst: i32, k: K<i32
 		let c = &mut *zw.zle.comp;
 		let ol = c.line.bytes().to_vec();
 		let ocs = c.line.cs;
-		let origword = c.tricky.origword.clone().map(Vec::from).unwrap_or_default();
+		let origword = c.tricky.origword.clone().map_or_default(Vec::from);
 		return doexpansion(
 			zw,
 			origword,

@@ -46,6 +46,12 @@ pub struct Vproc {
 	pub stopped:       bool,
 	/// Exit once its frames are done (subshell vprocs).
 	pub transient:     bool,
+	/// Set when this vproc's EXIT trap has been started. A root vproc keeps
+	/// the same flag per run ([`Run::exit_trap_started`]); a forked subshell
+	/// has no `Run`, and its `own_traps`, `trap_frames` and the frame scans
+	/// all go back to their pre-trap values once the trap's frame is popped,
+	/// so without this the trap could start a second time.
+	pub exit_trap_run: bool,
 	/// Background jobs not yet waited for or reported, current/previous
 	/// job and the `SIGCHLD` trap runs owed.
 	pub jobs:          JobTable,
@@ -1146,7 +1152,7 @@ pub enum Atom {
 	/// next pass puts `old` back first while `name` still holds `new`, then
 	/// assigns again as it replays, so it sees the first pass's state at
 	/// every point.
-	Wrote { name: BString, old: Box<Atom>, new: Option<BString> },
+	Wrote { name: BString, old: Box<Self>, new: Option<BString> },
 }
 
 /// Per-op scratch: expansion replay logs, staged progress and transient

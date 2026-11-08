@@ -1,3 +1,4 @@
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { logger } from "@oh-my-pi/pi-utils";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import type { BlockStoreHealth } from "./blocks";
@@ -661,6 +662,16 @@ export class CredentialPool implements CredentialsApi {
 	 */
 	hasOAuth(provider: string): boolean {
 		return this.credentials(provider).some(credential => credential.type === "oauth");
+	}
+
+	/** OAuth and provider-opted-in login API keys use subscription billing. */
+	hasSubscription(provider: string): boolean {
+		const credentials = this.credentials(provider);
+		if (credentials.some(credential => credential.type === "oauth")) return true;
+		return (
+			authPolicyFor(provider)?.loginSubscription === true &&
+			credentials.some(credential => credential.type === "api_key" && credential.source === "login")
+		);
 	}
 
 	/**

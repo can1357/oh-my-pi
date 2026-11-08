@@ -7,11 +7,16 @@ crates/pi-natives/src/applefm/bridge.swift for arm64-apple-macos against
 @macos_sdk: swift-driver, swift-frontend, the clang it links through and the
 host Swift runtime and compiler libraries those load (~900 MiB of ~4 GiB).
 
-    darwin/clang   resource dir for darwin targets (-resource-dir darwin):
-                   only the clang builtin headers. The default resource dir
-                   (usr/lib/swift) also holds the Linux corelibs module maps
-                   (CoreFoundation, dispatch, os, Block), which shadow the
-                   SDK's frameworks once on the clang search path.
+    clang/   clang builtin headers for darwin targets
+    macosx/  the macOS SDK's actual Swift runtime stubs and interfaces
+
+A separate, tiny @swift_darwin_resources repository exposes this target resource
+directory. It excludes the Linux corelibs module maps (CoreFoundation, dispatch,
+os, Block) in the default usr/lib/swift, which otherwise shadow the SDK's
+frameworks. Swift's driver also adds <resource-dir>/macosx to the linker search
+path; that points to the real SDK runtime, not an absent or empty directory.
+The overlay is not repo-content-cached because it links to other repositories;
+the large Swift download remains independently reproducible and cached.
 
 The open-source compiler builds the SDK's .swiftinterface files as long as its
 version matches the one that generated them (Swift 6.4 for the macOS 27 SDK),
@@ -25,6 +30,8 @@ libuuid1, zlib1g (present on the Ubuntu runner images).
 The ~1.1 GiB archive is sha256-pinned (repository cache) and the prune is
 deterministic, so the repo opts into the repo contents cache.
 """
+
+load("//bazel/toolchains/darwin:sdk.bzl", "MACOS_SDK_DIR")
 
 _VERSION = "6.4.0"
 
@@ -69,7 +76,7 @@ exports_files(["usr/bin/swiftc"])
 
 filegroup(
     name = "all",
-    srcs = glob(["darwin/**", "usr/**"], exclude_directories = 1),
+    srcs = glob(["usr/**"], exclude_directories = 1),
 )
 """
 
@@ -114,16 +121,38 @@ def _swift_linux_impl(rctx):
         if entry.basename not in ("bin", "lib"):
             rctx.delete(entry)
 
-    # usr/lib/swift/clang -> ../clang/<major>: the builtin headers alone.
-    # Relative, so the link survives the repo contents cache relocating the
-    # repo (rctx.symlink writes absolute targets).
-    result = rctx.execute(["/bin/sh", "-c", "mkdir darwin && ln -s ../usr/lib/swift/clang darwin/clang"])
-    if result.return_code != 0:
-        fail("bazel/toolchains/swift: creating the darwin resource dir failed: " + result.stderr)
     rctx.file("BUILD.bazel", _BUILD.format(version = _VERSION), executable = False)
     return rctx.repo_metadata(reproducible = True)
 
 swift_linux_repository = repository_rule(
     implementation = _swift_linux_impl,
     doc = "Pruned swift.org Linux toolchain for cross-compiling the Apple Foundation Models bridge.",
+)
+
+def _swift_darwin_resources_impl(rctx):
+    # Absolute cross-repo symlinks belong in this cheap, uncached overlay,
+    # never in the reproducible Swift download's repo contents cache.
+    clang = rctx.path(rctx.attr._swiftc).dirname.dirname.get_child("lib/swift/clang")
+    sdk_swift = rctx.path(rctx.attr._sdk_settings).dirname.get_child("usr/lib/swift")
+    if not clang.get_child("include/stddef.h").exists:
+        fail("bazel/toolchains/swift: the Swift compiler has no Clang builtin headers: " + str(clang))
+    if not sdk_swift.get_child("libswiftCore.tbd").exists:
+        fail("bazel/toolchains/swift: the macOS SDK has no Swift runtime stubs: " + str(sdk_swift))
+    rctx.symlink(clang, "clang")
+    rctx.symlink(sdk_swift, "macosx")
+    rctx.file("BUILD.bazel", """\
+package(default_visibility = ["//visibility:public"])
+filegroup(
+    name = "all",
+    srcs = glob(["clang/**", "macosx/**"], exclude_directories = 1),
+)
+""", executable = False)
+
+swift_darwin_resources_repository = repository_rule(
+    implementation = _swift_darwin_resources_impl,
+    attrs = {
+        "_sdk_settings": attr.label(default = Label("@macos_sdk//:" + MACOS_SDK_DIR + "/SDKSettings.json")),
+        "_swiftc": attr.label(default = Label("@swift_linux//:usr/bin/swiftc")),
+    },
+    doc = "Small uncached Darwin Swift resource overlay over the cached compiler and macOS SDK.",
 )

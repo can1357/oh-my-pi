@@ -6,12 +6,10 @@ use alloc::vec::Vec;
 use super::{
 	PResult, Parser,
 	lex::{LexState, T, unmatched_error},
-	word::merge_lits,
 };
 use crate::bash::syntax::{
-	ast::{ArrayElem, List, Word},
 	features::Features,
-	span::{NodeId, Span},
+	tree::{Id, List, Run, shape},
 	util::{ansi_decode, sh_single_quote},
 };
 
@@ -73,7 +71,7 @@ impl Parser<'_> {
 		line: u32,
 	) -> PResult<()> {
 		self.raw_depth += 1;
-		let res = self.raw_scan(out, qc, open, close, flags, line);
+		let res = self.nested(|p| p.raw_scan(out, qc, open, close, flags, line));
 		self.raw_depth -= 1;
 		res
 	}
@@ -343,8 +341,13 @@ impl Parser<'_> {
 
 	/// A command substitution body after `$(`, `${ `, `${|`, `<(` or `>(`
 	/// (bash `parse_comsub`): the commands and the text bash stores between
-	/// the delimiters.
-	pub(super) fn comsub(&mut self, close: u8, value: bool) -> PResult<(List, Vec<u8>)> {
+	/// the delimiters. A substitution nests a word and a list, so it counts
+	/// as a nesting level besides its list's.
+	pub(super) fn comsub(&mut self, close: u8, value: bool) -> PResult<(Id<shape::List>, Vec<u8>)> {
+		self.nested(|p| p.comsub_body(close, value))
+	}
+
+	fn comsub_body(&mut self, close: u8, value: bool) -> PResult<(Id<shape::List>, Vec<u8>)> {
 		debug_assert!(self.la.is_none(), "a command substitution starts inside a word");
 		let mut lx = LexState::new();
 		lx.extglob = self.feat.contains(Features::EXTGLOB);
@@ -358,13 +361,14 @@ impl Parser<'_> {
 		let saved_lx = core::mem::replace(&mut self.lx, lx);
 		let saved_compound = core::mem::take(&mut self.compound);
 		let saved_pending = core::mem::take(&mut self.pending);
+		let docs_from = self.doc_nodes.len();
 		let saved_expand = self.expand_aliases;
 		self.expand_aliases = saved_expand && self.feat.contains(Features::POSIX);
 		let close_tok = if close == b'}' { T::RBrace } else { T::RParen };
 
 		self.skip_newlines()?;
-		let mut list = if self.peek_kind()? == close_tok {
-			List::default()
+		let list = if self.peek_kind()? == close_tok {
+			self.t.list(&[])
 		} else {
 			self.compound_list()?
 		};
@@ -377,14 +381,14 @@ impl Parser<'_> {
 		if !self.pending.is_empty() {
 			self.gather_ahead();
 		}
-		super::finish::fill_docs(&mut list, &self.docs);
+		self.fill_docs(docs_from);
 
 		self.lx = saved_lx;
 		self.compound = saved_compound;
 		self.pending = saved_pending;
 		self.expand_aliases = saved_expand;
 
-		let tcmd = crate::bash::syntax::print::comsub_text(&list);
+		let tcmd = crate::bash::syntax::print::comsub_text(List::of(&self.t, list));
 		let mut text = Vec::with_capacity(tcmd.len() + 4);
 		if close == b')' {
 			if tcmd.first() == Some(&b'(') {
@@ -410,9 +414,9 @@ impl Parser<'_> {
 		Ok((list, text))
 	}
 
-	/// `name=(` seen: the elements up to the closing `)` (bash
+	/// `name=(` seen: the element nodes up to the closing `)` (bash
 	/// `parse_compound_assignment`).
-	pub(super) fn compound_assignment(&mut self) -> PResult<Vec<ArrayElem>> {
+	pub(super) fn compound_assignment(&mut self) -> PResult<Run<shape::Elem>> {
 		let line = self.bash_line();
 		let mut lx = self.lx.clone();
 		lx.compassign = true;
@@ -427,15 +431,16 @@ impl Parser<'_> {
 		lx.expect_in_cmd = None;
 		let saved = core::mem::replace(&mut self.lx, lx);
 		let saved_la = self.la.take();
-		let mut elems = Vec::new();
+		let mark = self.t.open();
 		loop {
 			let t = self.read_token()?;
 			match t.kind {
 				T::Newline => {},
 				T::RParen => break,
 				T::Word | T::Assign => {
-					let w = t.word.expect("word tokens carry a word");
-					elems.push(into_elem(w));
+					let w = self.take_word(t);
+					let e = self.elem_node(w);
+					self.t.kid(mark, e);
 				},
 				T::Eof => return Err(unmatched_error(self.eof_span(), line, ")")),
 				_ => {
@@ -447,27 +452,11 @@ impl Parser<'_> {
 				},
 			}
 		}
+		let elems = self.t.close_run(mark);
 		let assignok = saved.assignok;
 		self.lx = saved;
 		self.lx.assignok = assignok;
 		self.la = saved_la;
 		Ok(elems)
 	}
-}
-
-/// One compound-assignment word as an element.
-fn into_elem(w: super::word::WordTok) -> ArrayElem {
-	let keyed = w.asg.as_ref().is_some_and(|a| a.index.is_some());
-	if !keyed {
-		return ArrayElem { key: None, append: false, value: w.into_word() };
-	}
-	let hi = w.hi;
-	let a = w.asg.expect("checked");
-	let mut parts = w.parts;
-	let value_parts = parts.split_off(a.value_at);
-	let (s, e, span) = a.index.expect("checked");
-	let key = Word { id: NodeId(0), span, parts: merge_lits(parts.drain(s..e).collect()) };
-	let value =
-		Word { id: NodeId(0), span: Span::new(a.value_lo, hi), parts: merge_lits(value_parts) };
-	ArrayElem { key: Some(key), append: a.append, value }
 }

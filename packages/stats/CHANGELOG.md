@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- Fixed the trace dashboard returning HTTP 431 for sessions with many subagents.
+
+## [18.17.0] - 2026-11-06
+
+### Fixed
+
 - Frustration no longer counts agent-attributed messages as user messages; history is corrected on next sync ([#18183](https://github.com/can1357/oh-my-pi/issues/18183)).
 - Sessions sync promptly while an `omp stats` dashboard page is open, without repeated page refreshes during full sync.
 

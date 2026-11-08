@@ -116,7 +116,7 @@ The separate `AgentSession.branch(entryId)` API, used by extension/hook command 
 `buildSessionContext()` (in `session-context.ts`, exposed via `SessionManager.buildSessionContext()`) resolves the active root→leaf path and builds effective LLM context state:
 
 - Tracks latest configured/effective thinking, role-model, per-family service-tier, mode/data, and injected-TTSR state on the path.
-- Handles latest compaction on the path:
+- Handles the latest compaction on the path that the reading model (`options.model`) can replay:
    - emits compaction summary first
    - replays kept messages from `firstKeptEntryId` to compaction point
    - then replays post-compaction messages

@@ -4,6 +4,18 @@
 
 ### Added
 
+- Added `canReplayRemoteCompactionFrom()` to determine whether a model can replay provider-native compaction produced by another model.
+
+### Fixed
+
+- Fixed GenAI message-content capture configured in omp's own `.env` files so it continues to apply when those values are no longer exposed through the process environment.
+- Fixed compaction preparation for remote OpenAI compaction that the active model cannot replay, ensuring the content is expanded and remains available for compaction.
+- Fixed generic remote compaction requests to `/chat/completions` so gateway sessions retain the correct per-request model attribution.
+
+## [18.17.0] - 2026-11-06
+
+### Added
+
 - Added `Agent.queuedMessageGate` to filter queued messages before delivery and observe claimed messages returned undelivered.
 - Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
 
