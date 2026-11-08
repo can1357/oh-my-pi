@@ -7,6 +7,7 @@
 - Updated system prompts to use the ⁂ section marker
 - Agents finish tasks in fewer steps: the system prompt now asks for proportional verification (a failing test or user report counts as the reproduction), whole reads of small files without re-reading, batched independent calls, and stopping once the change is verified
 ### Fixed
+- Parent-to-subagent messages now appear as IRC cards in live and Agent Hub transcripts instead of user cards exposing the model-facing envelope ([#18073](https://github.com/can1357/oh-my-pi/issues/18073))
 
 - JavaScript eval keeps its variables when an unawaited promise, such as a tool call, rejects after its cell ends, and reports late errors in the next cell's output instead of restarting the kernel ([#18223](https://github.com/can1357/oh-my-pi/pull/18223) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed

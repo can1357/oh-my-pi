@@ -225,6 +225,19 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 	);
 }
 
+/** Present a consumed parent steer as an IRC card without interpreting its model-facing envelope. */
+export function buildParentIrcMessageCard(
+	parentIrc: { from: string; body: string },
+	timestamp: number,
+	getExpanded: () => boolean,
+): Component {
+	return createIrcMessageCard(
+		{ kind: "incoming", from: parentIrc.from, body: parentIrc.body, timestamp },
+		getExpanded,
+		theme,
+	);
+}
+
 /**
  * Render a `fileMention` message's files as a transcript block of "Read <path>"
  * rows. `indent` sets the left pad: the live chat renders within an outer gutter
