@@ -6386,10 +6386,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const turn: SessionTransitionTurn = { parent, nested: new Set(), childTail: Promise.resolve(), released: false };
 		const turns = new Map(outerTurns);
 		turns.set(this, turn);
+		const disposedWhenRequested = this.#isDisposed;
 		const run = (async () => {
 			try {
 				await previous;
-				if (this.#isDisposed) throw new Error("The session was disposed before this session transition could run.");
+				if (this.#isDisposed && !disposedWhenRequested) {
+					throw new Error("The session was disposed before this session transition could run.");
+				}
 				return await sessionTransitionTurnScope.run({ turns, body: { session: this, entered: false } }, rerun);
 			} finally {
 				void this.#releaseSessionTransitionTurn(turn, done, fromOutside);
