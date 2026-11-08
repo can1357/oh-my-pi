@@ -18,6 +18,7 @@ function sessionFor(cwd: string): ToolSession {
 		hasUI: false,
 		skills: [],
 		getSessionFile: () => null,
+		getSessionSpawns: () => null,
 		settings: Settings.isolated({
 			"async.enabled": false,
 			"bash.autoBackground.enabled": false,
@@ -25,7 +26,7 @@ function sessionFor(cwd: string): ToolSession {
 			"bashInterceptor.enabled": false,
 		}),
 		getClientBridge: () => undefined,
-	} as unknown as ToolSession;
+	};
 }
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
