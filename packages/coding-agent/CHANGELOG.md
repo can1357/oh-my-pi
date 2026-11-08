@@ -36,6 +36,7 @@
 ### Fixed
 
 - Starting isolated subagents on Windows no longer spawns `ps` once per subagent to record its owner (about 0.2 s each under load, and the `ps` found there knows other pids); Windows owners are checked by pid, as documented ([#18457](https://github.com/can1357/oh-my-pi/pull/18457) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- `/shake thinking` no longer claims freed context tokens for reasoning that OpenAI Responses still replays from native history, and leaves those thinking blocks in place instead: the command reports how many it kept, so the status line never claims a reduction that did not happen ([#18476](https://github.com/can1357/oh-my-pi/issues/18476)).
 
 ## [18.18.1] - 2026-11-08
 

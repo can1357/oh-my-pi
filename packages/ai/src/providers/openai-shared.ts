@@ -2179,6 +2179,73 @@ export function isColdReplayableResponsesTurn(items: ResponseInput): boolean {
 	return hasReasoning;
 }
 
+/**
+ * The native Responses history items a request for `model` would replay from
+ * this assistant turn, or `undefined` when the turn was produced by another
+ * api, model or provider and its payload cannot go back on the wire at all.
+ */
+export function getNativeResponsesHistoryItems(
+	message: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | null | undefined,
+): Array<Record<string, unknown>> | undefined {
+	if (!model || message.api !== model.api || message.model !== model.id) return undefined;
+	return getOpenAIResponsesHistoryItems(message.providerPayload, model.provider, message.provider);
+}
+
+/**
+ * The history items a request for `model` puts back on the wire for this turn,
+ * after the payload sanitizer keeps the replayable output in them, or
+ * `undefined` when the turn is rebuilt from `content` instead: another api,
+ * model or provider, no payload at all, or a payload the sanitizer empties.
+ *
+ * This is the request builder's own input to the replay decision. It asks only
+ * that replayable assistant output survives ({@link
+ * sanitizeOpenAIResponsesAssistantHistoryItemsForReplay} returns `undefined`
+ * for a hidden-empty turn), never for the reasoning the tokenizer prices: an
+ * answer-only payload replays natively with no reasoning item in it.
+ */
+export function getReplayableNativeResponsesHistoryItems(
+	message: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | null | undefined,
+): ResponseInput | undefined {
+	const items = getNativeResponsesHistoryItems(message, model);
+	if (!items) return undefined;
+	return sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(items);
+}
+
+/**
+ * Whether a request puts those items on the wire: a warm provider session
+ * always does, a cold one (`nativeHistoryReplay` false) only when nothing in
+ * them is bound to one connection ({@link isColdReplayableResponsesTurn}).
+ */
+export function replaysNativeResponsesTurn(replay: ResponseInput, nativeHistoryReplay: boolean): boolean {
+	return nativeHistoryReplay || isColdReplayableResponsesTurn(replay);
+}
+
+/**
+ * Whether a request for `model` replays this assistant turn's native Responses
+ * history, so the turn reaches the wire as `providerPayload` items and its
+ * `content` blocks are not sent at all. The one replay decision shared by
+ * request accounting (the tokenizer's local count) and context maintenance
+ * (`/shake`), mirroring `buildResponsesInput`'s assistant branch.
+ *
+ * How many tokens that replay costs is a separate question the tokenizer
+ * answers from the same items: a payload without a reasoning item replays
+ * without any reasoning to price.
+ *
+ * `buildResponsesInput` decides this inline; it can adopt these helpers once
+ * its extra concerns (rebuilding calls cut by the output limit, hidden-empty
+ * suppression) move with them.
+ */
+export function replaysNativeResponsesHistory(
+	message: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | null | undefined,
+	options: { nativeHistoryReplay?: boolean } = {},
+): boolean {
+	const replay = getReplayableNativeResponsesHistoryItems(message, model);
+	return replay !== undefined && replaysNativeResponsesTurn(replay, options.nativeHistoryReplay ?? true);
+}
+
 export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInputOptions<TApi>): ResponseInput {
 	const messages: ResponseInput = [];
 	const systemPrompts = options.systemRole ? normalizeSystemPrompts(options.context.systemPrompt) : [];

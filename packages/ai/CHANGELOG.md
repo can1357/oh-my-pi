@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported the Responses replay decision (`replaysNativeResponsesHistory`, `getReplayableNativeResponsesHistoryItems`, `replaysNativeResponsesTurn`), so callers that estimate or trim context can tell which turns a request sends as native payload items instead of rebuilding them from message content
+
 ## [18.18.1] - 2026-11-08
 
 ### Fixed

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The tokenizer takes its Responses replay decision from the shared `getReplayableNativeResponsesHistoryItems` + `replaysNativeResponsesTurn` helpers, the same decision `/shake` uses, so a turn's local token count and its thinking blocks can no longer disagree about whether the request replays it natively
+
 ## [18.17.0] - 2026-11-06
 
 ### Added
