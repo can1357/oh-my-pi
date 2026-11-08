@@ -964,15 +964,16 @@ fn secret_name(name: &str) -> bool {
 }
 
 /// Whether an `sd` command line rewrites files in place: it names files after
-/// FIND and REPLACE_WITH and does not ask for `-p`/`--preview`. `words` is the
-/// argv after `sd`, `None` where a word expands at run time; such a word counts
-/// as an operand, so a dynamic file list still reads as a write.
+/// `FIND` and `REPLACE_WITH` and does not ask for `-p`/`--preview`. `words` is
+/// the argv after `sd`, `None` where a word expands at run time; such a word
+/// counts as an operand, so a dynamic file list still reads as a write.
 fn sd_edits_files(words: impl IntoIterator<Item = Option<String>>) -> bool {
 	let mut words = words.into_iter();
 	let mut operands = 0;
 	let mut options = true;
 	while let Some(word) = words.next() {
-		let Some(word) = word.filter(|word| options && word.len() > 1 && word.starts_with('-')) else {
+		let Some(word) = word.filter(|word| options && word.len() > 1 && word.starts_with('-'))
+		else {
 			operands += 1;
 			continue;
 		};
