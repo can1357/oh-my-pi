@@ -82,7 +82,7 @@ const settled = await runStructuredSubagent({
 	},
 });
 assert.equal(settled.result.exitCode, 0, settled.result.stderr);
-assert(!settled.result.error, settled.result.error);
+assert(!settled.result.error, String(settled.result.error));
 assert(settled.result.patchPath, "isolated run did not return a patch");
 const patch = await Bun.file(settled.result.patchPath).text();
 assert(patch.includes("+recovered unique work"), patch);

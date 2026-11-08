@@ -6,7 +6,7 @@
 
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
 - A `bash.patterns` `deny` rule now blocks a command anywhere in a `;`, `|`, `||` or `&&` line even when an earlier `prompt` rule matches another part of it, and project settings can no longer override the operator's `deny` or `prompt` patterns with `allow` ([#18349](https://github.com/can1357/oh-my-pi/pull/18349) by [@asuffield](https://github.com/asuffield))
-- Subagent and vibe temporary artifacts directories under the system temp dir no longer pile up there for good: one kept for an `agent://<id>` handle is removed when the session ends or is terminated, and an eval `agent()` or `workpool()` worker's is removed with the job row that advertised it
+- Disposable subagent and vibe directories under the system temp dir are removed at process exit. Evicting an eval `agent()` or `workpool()` job requests cleanup, but retained output and transcripts remain available while any agent using the directory is registered. Unapplied isolation patches and salvaged recovery artifacts are preserved after exit.
 
 ## [18.18.0] - 2026-11-07
 

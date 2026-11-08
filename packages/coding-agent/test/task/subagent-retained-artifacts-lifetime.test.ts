@@ -25,7 +25,7 @@ async function exists(target: string): Promise<boolean> {
  * `end` decides how the process dies: by returning from main, or by the signal
  * the caller sends once the directory is known.
  */
-async function runHost(mode: "exit" | "sigterm"): Promise<{ artifactsDir: string }> {
+async function runHost(mode: "exit" | "sigterm" | "no-retain" | "throw" | "abort"): Promise<{ artifactsDir: string }> {
 	const tmpdir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-retained-artifacts-test-"));
 	tmpRoots.push(tmpdir);
 	const child = Bun.spawn([process.execPath, HOST_PATH, mode], {
@@ -88,4 +88,16 @@ describe("retained subagent artifacts outlive the run, never the process", () =>
 		},
 		HOST_TIMEOUT_MS,
 	);
+
+	for (const mode of ["no-retain", "throw", "abort"] as const) {
+		it(
+			`removes a ${mode} lease before the run returns`,
+			async () => {
+				// The host asserts the before-exit column; this process checks after exit.
+				const { artifactsDir } = await runHost(mode);
+				expect(await exists(artifactsDir)).toBe(false);
+			},
+			HOST_TIMEOUT_MS,
+		);
+	}
 });

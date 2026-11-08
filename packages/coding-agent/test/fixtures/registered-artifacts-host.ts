@@ -23,16 +23,15 @@ await fs.promises.mkdir(cwd, { recursive: true });
 const authStorage = await AuthStorage.create(":memory:");
 authStorage.keys.setRuntime("mock", "test-key");
 registerMockApi("registered-artifacts-host");
+const mode = process.argv[2];
 const model = createMockModel({
 	id: "registered-artifacts-host",
-	handler: context => ({
+	handler: () => ({
 		content: [
 			{
 				type: "toolCall",
 				name: "yield",
-				arguments: context.tools?.find(tool => tool.name === "yield")?.parameters?.properties?.key
-					? { key: 1, data: { answer: "done" } }
-					: { data: { answer: "done" } },
+				arguments: mode === "pool" ? { key: 1, data: { answer: "done" } } : { data: { answer: "done" } },
 			},
 		],
 	}),
@@ -77,7 +76,6 @@ const session = {
 	enableLsp: false,
 	enableIrc: false,
 } as unknown as ToolSession;
-const mode = process.argv[2];
 let jobId: string;
 if (mode === "agent") {
 	jobId = (await runEvalAgent({ prompt: "answer", agent: agent.name, label: "ReviveMe" }, { session })).id;
