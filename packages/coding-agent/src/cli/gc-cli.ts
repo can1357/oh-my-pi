@@ -24,6 +24,7 @@ import {
 	readLines,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
+import { GC_BLOBS_WARNING } from "./gc-settings";
 import { Settings } from "../config/settings";
 import type { Setting } from "../config/registry";
 
@@ -194,6 +195,12 @@ export interface GcResult {
 	compress?: CompressGcResult;
 	wal?: WalGcResult;
 	lockPath: string;
+	/**
+	 * Carried on the result, not only rendered, because `--json` never
+	 * reaches the text renderer and the automated caller is the one who
+	 * most needs to be told what this run can destroy.
+	 */
+	warnings?: string[];
 }
 
 interface BlobCandidate {
@@ -2320,7 +2327,57 @@ function renderText(result: GcResult): string {
 		const state = result.wal.checkpointed ? "checkpointed" : "checkpoint dry-run";
 		lines.push(`wal: ${state}, ${formatBytes(result.wal.walBytes)} across ${result.wal.databases.length} dbs`);
 	}
+	// From the result, so text and JSON say the same thing from one source.
+	for (const warning of result.warnings ?? []) lines.push(`warning: ${warning}`);
 	return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Put `text` on `stream` and wait until the kernel has it.
+ *
+ * `write` returns false when the pipe is full and keeps the bytes in a
+ * userspace buffer, so a caller that carries straight on has made a claim
+ * about the order of two statements rather than about what a reader saw.
+ * The reclamation warning needs the stronger thing: it must be *delivered*
+ * before the first unlink, measured at one unlinked blob and zero warning
+ * bytes when it was merely queued.
+ *
+ * One caller, deliberately. An earlier revision also used this for a summary
+ * printed when a later phase threw, and that is withdrawn: writing on the
+ * failure path made `omp gc` the first writer to stdout while it was already
+ * failing, and stdout's lifetime there belongs to `postmortem.ts`, which
+ * reads a broken pipe as `| head` and exits 0. Six review rounds produced
+ * five defects in that one behaviour and in the fixes for its fixes. It
+ * belongs in `postmortem.ts`, not here.
+ *
+ * A write that fails is the same answer as a write that cannot finish:
+ * nothing is deleted. `/dev/full` and a broken pipe end the run before the
+ * blob phase, and that is the behaviour being kept. Not a closed descriptor
+ * 2, though: Bun replaces an inherited closed stderr with `/dev/null` before
+ * any of this runs, so the write succeeds and the run carries on — an
+ * operator who sends the warning to `/dev/null` is suppressing a diagnostic
+ * on purpose, and this does not try to outvote them.
+ */
+async function writeDrained(stream: NodeJS.WriteStream, text: string): Promise<void> {
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	// `true` means the stream handed the bytes straight to the kernel:
+	// nothing is queued, so there is nothing to wait for. `false` means they
+	// are sitting in a userspace buffer, which is the case this exists for —
+	// wait for the write callback, or for the drain that says the buffer has
+	// emptied, whichever the host delivers.
+	const accepted = stream.write(text, error => (error ? reject(error) : resolve()));
+	if (accepted) return;
+	const onDrain = (): void => resolve();
+	const onError = (error: Error): void => reject(error);
+	stream.once("drain", onDrain);
+	stream.once("error", onError);
+	try {
+		await promise;
+	} finally {
+		// A settled promise does not remove the listener that did not fire.
+		stream.off("drain", onDrain);
+		stream.off("error", onError);
+	}
 }
 
 export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
@@ -2334,7 +2391,18 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 			: [];
 		// Pruned collab replicas release their blobs to this run's sweep.
 		if (options.runStale) next.stale = await runStaleGc(options);
-		if (options.runBlobs) next.blobs = await runBlobGc(options, archiveRoot);
+		if (options.runBlobs) {
+			// On the result, so the JSON route carries it too: the renderer
+			// held the only copy and `--json` bypasses it.
+			next.warnings = [...(next.warnings ?? []), `blobs: ${GC_BLOBS_WARNING}`];
+			// And delivered *before* anything is deleted, which means waiting
+			// for the write to drain rather than queueing it: `write` returns
+			// false when the pipe is full, and the bytes then sit in a buffer
+			// the process can be killed with — one blob unlinked, zero warning
+			// bytes delivered.
+			if (options.apply) await writeDrained(process.stderr, `warning: blobs: ${GC_BLOBS_WARNING}\n`);
+			next.blobs = await runBlobGc(options, archiveRoot);
+		}
 		if (options.runArchive) next.archive = await runArchiveGc(options, archiveRoot, registeredSessionPaths);
 		if (options.runCompress) next.compress = await runCompressGc(options, archiveRoot);
 		if (options.runWal) next.wal = await runWalGc(options);

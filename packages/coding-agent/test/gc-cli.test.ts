@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/cli/gc-auto-compress";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
+import { GC_BLOBS_WARNING } from "@oh-my-pi/pi-coding-agent/cli/gc-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
@@ -2905,4 +2907,142 @@ describe("runGcCommand session compression", () => {
 		expect(await Bun.file(path.join(root, GC_AUTO_COMPRESS_LOG)).text()).toContain("compress skipped: unsupported");
 		expect(await snapshot(file)).toEqual(before);
 	});
+});
+
+describe("runGcCommand blob reclamation is opt-in and announced", () => {
+	test("an unqualified apply does not reclaim", async () => {
+		const referencedHash = hashFor("default-referenced");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		const orphan = await writeBlob(root, hashFor("default-orphan"), "orphan");
+		await agePath(referenced);
+		await agePath(orphan);
+
+		// No phase flag, so the run takes its phases from settings — where
+		// blob reclamation is now off, because deciding that a blob is
+		// unreferenced cannot be made sound while sessions are being
+		// written. The unqualified maintenance command can no longer delete
+		// a session's data.
+		const result = await runGcCommand({ flags: { agentDir: root, apply: true } });
+
+		expect(result.blobs).toBeUndefined();
+		expect(result.warnings).toBeUndefined();
+		expect(await Bun.file(orphan).exists()).toBe(true);
+		expect(await Bun.file(referenced).exists()).toBe(true);
+	});
+
+	for (const [route, flags] of [
+		["the flag", { blobs: true }],
+		["a configured sweep", {}],
+	] as const) {
+		test(`warns that reclamation needs a quiescent machine (${route})`, async () => {
+			await writeBlob(root, hashFor(`warn-${route.length}`), "orphan");
+			if (route === "a configured sweep") {
+				await Bun.write(path.join(root, "settings.json"), JSON.stringify({ gc: { blobs: true } }));
+			}
+
+			const written: string[] = [];
+			const stdout = spyOn(process.stdout, "write").mockImplementation(chunk => {
+				written.push(String(chunk));
+				return true;
+			});
+			let result: GcResult;
+			try {
+				result = await runGcCommand({ flags: { agentDir: root, ...flags, apply: true } });
+			} finally {
+				stdout.mockRestore();
+			}
+			const text = written.join("");
+
+			// A configured sweep is the one nobody typed, and a JSON caller is
+			// the one who automated it, so both routes carry the same string
+			// from the same place.
+			expect(result.blobs).toBeDefined();
+			expect(result.warnings?.join("\n")).toContain(GC_BLOBS_WARNING);
+			expect(text).toContain("Quiescent machines only");
+			expect(text).toContain("Stop every session writer first");
+			expect(text).toContain("omp gc --wal --apply");
+		});
+	}
+
+	// POSIX only, and only where a FIFO can actually be made: the contract under
+	// test is kernel backpressure on stderr, which has no Windows equivalent, and
+	// a host without `mkfifo` would otherwise fail here rather than skip.
+	const fifoAvailable =
+		process.platform !== "win32" &&
+		Bun.spawnSync(["mkfifo", "--version"], { stdout: "ignore", stderr: "ignore" }).success;
+	test.if(fifoAvailable)(
+		"does not delete while the warning is still queued",
+		async () => {
+			const orphan = await writeBlob(root, hashFor("backpressure-orphan"), "orphan");
+			await agePath(orphan);
+			const referencedHash = hashFor("backpressure-referenced");
+			const referenced = await writeBlob(root, referencedHash, "referenced");
+			await agePath(referenced);
+			await writeSession(root, "project", "live", "complete", { blobRef: `blob:sha256:${referencedHash}` });
+
+			// A real pipe, really full. Mocking the write cannot show this: the
+			// defect is that the bytes sit in a userspace buffer while the run
+			// goes on to delete, so the test has to make the kernel refuse them.
+			const fifo = path.join(root, "stderr.fifo");
+			expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
+			const reader = await fs.open(fifo, fsSync.constants.O_RDONLY | fsSync.constants.O_NONBLOCK);
+			const writer = await fs.open(fifo, fsSync.constants.O_WRONLY | fsSync.constants.O_NONBLOCK);
+			const block = Buffer.alloc(4096, 0x50);
+			let prefilled = 0;
+			for (;;) {
+				try {
+					prefilled += (await writer.write(block)).bytesWritten;
+				} catch {
+					break;
+				}
+			}
+			expect(prefilled).toBeGreaterThan(0);
+
+			const child = Bun.spawn(
+				[process.execPath, path.join(import.meta.dir, "..", "src", "cli.ts"), "gc", "--blobs", "--apply"],
+				{
+					env: { ...process.env, PI_CODING_AGENT_DIR: root, NO_COLOR: "1" },
+					stdout: "pipe",
+					stderr: writer.fd,
+				},
+			);
+			try {
+				// While the warning cannot be delivered, nothing may go.
+				await Bun.sleep(3_000);
+				expect(await Bun.file(orphan).exists()).toBe(true);
+
+				// Drained: the warning arrives, and only then the deletion.
+				const drained: Buffer[] = [];
+				const sink = Buffer.alloc(65_536);
+				for (;;) {
+					try {
+						const read = await reader.read(sink, 0, sink.length);
+						if (read.bytesRead === 0) break;
+						drained.push(Buffer.from(sink.subarray(0, read.bytesRead)));
+					} catch {
+						break;
+					}
+				}
+				expect(await child.exited).toBe(0);
+				for (;;) {
+					try {
+						const read = await reader.read(sink, 0, sink.length);
+						if (read.bytesRead === 0) break;
+						drained.push(Buffer.from(sink.subarray(0, read.bytesRead)));
+					} catch {
+						break;
+					}
+				}
+				expect(Buffer.concat(drained).toString().slice(prefilled)).toContain("Quiescent machines only");
+				expect(await Bun.file(orphan).exists()).toBe(false);
+				expect(await Bun.file(referenced).exists()).toBe(true);
+			} finally {
+				child.kill();
+				await child.exited;
+				await writer.close();
+				await reader.close();
+			}
+		},
+		60_000,
+	);
 });
