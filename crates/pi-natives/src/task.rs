@@ -562,6 +562,43 @@ where
 	}
 }
 
+/// Run `work`, and everything it spawns, on [`FS_RUNTIME`] rather than on the
+/// runtime that polls the caller.
+///
+/// For a filesystem walk that is not a `#[napi]` promise of its own, and so
+/// carries no [`CancelToken`]: today the edit tool's missing-path recovery,
+/// bounded by its own deadline and stopped by its caller dropping the future
+/// this returns. A walk that does own a promise goes through
+/// [`run_filesystem_future`] instead.
+///
+/// `None` when the work panicked or was aborted; a panic is logged, since
+/// there is no promise here to reject with it.
+pub(crate) async fn on_filesystem_runtime<T, Fut>(tag: &'static str, work: Fut) -> Option<T>
+where
+	Fut: Future<Output = T> + Send + 'static,
+	T: Send + 'static,
+{
+	let spawned = FS_RUNTIME.spawn(async move {
+		let _guard = profile_region(tag);
+		let _work = native_work();
+		let mut work = pin!(work);
+		let scoped = future::poll_fn(|cx| {
+			crate::crash_handler::blocking_task_panic_scope(|| work.as_mut().poll(cx))
+		});
+		AssertUnwindSafe(scoped).catch_unwind().await
+	});
+	// A bare `JoinHandle` detaches on drop, which would leave the walk running
+	// after its caller (a closed preview pump, a dropped apply) is gone.
+	match AbortOnDropHandle::new(spawned).await {
+		Ok(Ok(value)) => Some(value),
+		Ok(Err(payload)) => {
+			log::error!("{}", panic_error(tag, payload).reason);
+			None
+		},
+		Err(_) => None,
+	}
+}
+
 /// Stop waiting for a queued or running worker when its caller cancels.
 async fn run_filesystem_worker<T, F>(
 	tag: &'static str,
@@ -785,6 +822,56 @@ mod tests {
 			assert!(
 				!ran_on.load(Ordering::SeqCst),
 				"the walk ran on after its caller was dropped, so a torn-down host leaves filesystem \
+				 work running"
+			);
+		});
+	}
+
+	/// Dropping the caller stops work placed on the filesystem runtime. A bare
+	/// `JoinHandle` detaches on drop, so without the abort guard a recovery
+	/// walk would run on after the session that asked for it closed.
+	///
+	/// The start is a handshake rather than a sleep, so a slow scheduler
+	/// cannot fail it; only the span between the drop and the work's own
+	/// completion is a wait, and it is generous.
+	#[test]
+	fn dropping_the_caller_stops_work_on_the_filesystem_runtime() {
+		use std::{
+			sync::{
+				Arc,
+				atomic::{AtomicBool, Ordering},
+			},
+			time::Duration,
+		};
+
+		let host = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.unwrap();
+		let (started_tx, started_rx) = flume::bounded::<()>(1);
+		let ran_on = Arc::new(AtomicBool::new(false));
+		let ran_on_probe = Arc::clone(&ran_on);
+
+		host.block_on(async move {
+			let work = Box::pin(on_filesystem_runtime("dropped", async move {
+				let _ = started_tx.send(());
+				// The yield point a walker has between directories.
+				tokio::time::sleep(Duration::from_secs(2)).await;
+				ran_on_probe.store(true, Ordering::SeqCst);
+			}));
+			let mut work = Some(work);
+			// Let go the moment the work is in flight.
+			tokio::select! {
+				_ = work.as_mut().unwrap() => panic!("the work finished before it was dropped"),
+				started = started_rx.recv_async() => started.expect("the work never started"),
+			}
+			drop(work.take());
+
+			tokio::time::sleep(Duration::from_secs(3)).await;
+			assert!(
+				!ran_on.load(Ordering::SeqCst),
+				"the work ran on after its caller was dropped, so a closed session leaves filesystem \
 				 work running"
 			);
 		});

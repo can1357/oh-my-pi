@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [18.18.1] - 2026-11-08
+
+### Fixed
+
+- Cursor exec frames keep tool-batch order: a file mutation (native StrReplace and Write, `write`, `delete`, `pi_edit`, `pi_write`) waits for the calls issued before it, and the calls issued after it wait until it lands, so a Shell sent in the same batch as a StrReplace no longer runs before the edit's write ([#18434](https://github.com/can1357/oh-my-pi/pull/18434) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
+- ChatGPT Pro Max (`promax`) counts as Pro for Codex account routing, so a blocked Pro account no longer wins over an open or pinned Pro Max account ([#18399](https://github.com/can1357/oh-my-pi/pull/18399) by [@serverinspector](https://github.com/serverinspector))
+- Cursor Shell results no longer end with `Timeout clamped to 3600s (requested 86400s; …)`: Cursor's 24 h `hard_timeout` is capped at the bash tool's 3600 s ceiling before it reaches the tool ([#18433](https://github.com/can1357/oh-my-pi/pull/18433) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
+- A 429 or 402 worded like a context overflow (Bedrock's "429 Too many tokens, please wait…") is treated as a rate limit, so it retries and walks the fallback chain instead of compacting ([#18345](https://github.com/can1357/oh-my-pi/pull/18345) by [@nick-maderight](https://github.com/nick-maderight))
+- `auth-gateway stdio` and `serve` no longer reject credentialless Apple on-device models ([#18370](https://github.com/can1357/oh-my-pi/issues/18370))
+
 ## [18.17.0] - 2026-11-06
 
 ### Added

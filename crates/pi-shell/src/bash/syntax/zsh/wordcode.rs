@@ -608,8 +608,15 @@ impl<'c, 's> Wc<'c, 's> {
 		}
 	}
 
-	/// zsh `par_list`.
+	/// zsh `par_list`, one nesting level deeper ([`Ctx::enter`]).
 	fn par_list(&mut self, cmplx: &mut bool) {
+		if self.cx.enter() {
+			self.par_list_items(cmplx);
+			self.cx.leave();
+		}
+	}
+
+	fn par_list_items(&mut self, cmplx: &mut bool) {
 		let mut lp: Option<usize> = None;
 		loop {
 			self.skip_seps();
@@ -1946,7 +1953,10 @@ impl<'c, 's> Wc<'c, 's> {
 			self.lex();
 			self.skip_cond_seps();
 			self.ecispace(p, 1);
-			self.par_cond();
+			if self.cx.enter() {
+				self.par_cond();
+				self.cx.leave();
+			}
 			let skip = (self.ec.len() - 1 - p) as u32;
 			self.set(p, wcb_cond(COND_OR, skip));
 			return true;
@@ -1963,7 +1973,10 @@ impl<'c, 's> Wc<'c, 's> {
 			self.lex();
 			self.skip_cond_seps();
 			self.ecispace(p, 1);
-			self.par_cond_1();
+			if self.cx.enter() {
+				self.par_cond_1();
+				self.cx.leave();
+			}
 			let skip = (self.ec.len() - 1 - p) as u32;
 			self.set(p, wcb_cond(COND_AND, skip));
 			return true;
@@ -1977,12 +1990,21 @@ impl<'c, 's> Wc<'c, 's> {
 		if self.cx.lx.tok == T::Bang {
 			self.lex();
 			self.ecadd(wcb_cond(COND_NOT, 0));
-			return self.par_cond_2();
+			if !self.cx.enter() {
+				return false;
+			}
+			let r = self.par_cond_2();
+			self.cx.leave();
+			return r;
 		}
 		if self.cx.lx.tok == T::Inpar {
 			self.lex();
 			self.skip_cond_seps();
-			let r = self.par_cond();
+			let r = self.cx.enter() && {
+				let r = self.par_cond();
+				self.cx.leave();
+				r
+			};
 			self.skip_cond_seps();
 			if self.cx.lx.tok != T::Outpar {
 				let n = self.ec.len();

@@ -30,7 +30,7 @@ use std::{
 };
 
 pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery, OpenedApplication};
-use ax::{AxRegistry, register_node};
+use ax::{AppFocus, AxRegistry, register_node};
 use backend::{
 	Backend, ClickOptions, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput,
 	KeyboardFocus, MouseButton, PointerEvent, is_raise_action,
@@ -1439,6 +1439,14 @@ impl Worker {
 				};
 				let mode = options.mode();
 				let backend = self.backend()?;
+				// The selection comes first: it reads the front app before any
+				// probe of the target, so a target the user brings forward while
+				// the menu preflight's probes block is not taken as their front
+				// app. A press on text opens no menu; any other drag still meets
+				// the preflight before it is posted.
+				if let Some(selection) = backend.drag_selection(target, &event, mode, token)? {
+					return Ok(Response::TextSelection(selection));
+				}
 				refuse_menu_press(backend.as_mut(), options.refuse_menu, mode, target, &event)?;
 				backend.pointer(target, event, &frame, mode, token)?;
 				Ok(Response::Input(control::take_focus_return()))
@@ -1504,7 +1512,7 @@ impl Worker {
 							.map_err(|error| error.clone())?
 							.ax()
 							.ok_or_else(DesktopError::ax_unsupported)?;
-						Some(register_node(ax, registry, "desktop", h)?)
+						Some(register_node(ax, registry, "desktop", h, &mut AppFocus::default())?)
 					},
 					None => None,
 				};
@@ -1512,7 +1520,7 @@ impl Worker {
 			},
 			Request::AxNode { reference, .. } => {
 				let h = self.registry.resolve(reference)?;
-				let props = self.ax()?.props(&h)?;
+				let props = ax::node_props(self.ax()?, &h, &mut AppFocus::default())?;
 				Ok(Response::Node(Some(ax::node_to_napi(reference.clone(), props))))
 			},
 			Request::AxAttributes { reference, .. } => {
@@ -1534,6 +1542,7 @@ impl Worker {
 				let target = self.registry.target(reference)?;
 				let handles = self.ax()?.children(&h)?;
 				let mut nodes = Vec::with_capacity(handles.len());
+				let mut focus = AppFocus::default();
 				for h in handles {
 					let (backend, registry) = (&mut self.backend, &mut self.registry);
 					let ax = backend
@@ -1541,7 +1550,7 @@ impl Worker {
 						.map_err(|error| error.clone())?
 						.ax()
 						.ok_or_else(DesktopError::ax_unsupported)?;
-					nodes.push(register_node(ax, registry, &target, h)?);
+					nodes.push(register_node(ax, registry, &target, h, &mut focus)?);
 				}
 				Ok(Response::Nodes(nodes))
 			},
@@ -1557,7 +1566,7 @@ impl Worker {
 							.map_err(|error| error.clone())?
 							.ax()
 							.ok_or_else(DesktopError::ax_unsupported)?;
-						Some(register_node(ax, registry, &target, h)?)
+						Some(register_node(ax, registry, &target, h, &mut AppFocus::default())?)
 					},
 					None => None,
 				};
@@ -1565,12 +1574,17 @@ impl Worker {
 			},
 			Request::AxPerform { reference, action, menu, .. } => {
 				let h = self.registry.resolve(reference)?;
-				match menu {
-					Some(path) => self.ax()?.perform_menu(&h, action, path)?,
-					None if action.eq_ignore_ascii_case("press") => ax::ax_press(self.ax()?, &h)?,
-					None => self.ax()?.perform(&h, action)?,
+				let performed = match menu {
+					Some(path) => self.ax()?.perform_menu(&h, action, path),
+					None if action.eq_ignore_ascii_case("press") => ax::ax_press(self.ax()?, &h),
+					None => self.ax()?.perform(&h, action),
+				};
+				match performed {
+					Err(error) if error.code == ErrorCode::AxUnconfirmed => {
+						Err(self.name_unconfirmed_target(reference, &h, error))
+					},
+					performed => performed.map(|()| Response::Unit),
 				}
-				Ok(Response::Unit)
 			},
 			Request::AxSetValue { reference, value, .. } => {
 				let h = self.registry.resolve(reference)?;
@@ -1619,6 +1633,38 @@ impl Worker {
 }
 
 impl Worker {
+	/// `error`, an action on `reference` whose outcome is unconfirmed, naming
+	/// the window and app the element is in now, so the caller knows which one
+	/// to inspect. Only reads: nothing is sent again.
+	fn name_unconfirmed_target(
+		&mut self,
+		reference: &str,
+		handle: &ax::AxHandle,
+		error: DesktopError,
+	) -> DesktopError {
+		let windows = self
+			.backend()
+			.and_then(|backend| backend.windows())
+			.unwrap_or_default();
+		let window = self
+			.ax()
+			.and_then(|ax| ax.window_id(handle, &windows))
+			.ok()
+			.and_then(|id| windows.into_iter().find(|window| window.id == id));
+		let target = match window {
+			Some(window) => {
+				let mut target = format!("{reference} is in window {} of ", window.id);
+				ax::push_quoted_label(&mut target, &window.app);
+				target.push_str(" (");
+				ax::push_quoted_label(&mut target, &window.title);
+				target.push(')');
+				target
+			},
+			None => format!("{reference}'s window could not be identified"),
+		};
+		DesktopError::new(error.code, format!("{} ({target})", error.message))
+	}
+
 	/// The error for keys addressed to `reference` that were never sent
 	/// because the element did not take keyboard focus: where focus is now,
 	/// with the focused element's `ax()` line and a ref for it.
@@ -2264,13 +2310,17 @@ impl DesktopSession {
 		}))
 	}
 
+	/// Drags along `path`. A macOS background left drag across the text of one
+	/// native text element is made as that element's selection through
+	/// accessibility, with no mouse event, and resolves to the selection read
+	/// back; a drag posted as input resolves to where a takeover left focus.
 	#[napi]
 	pub fn drag(
 		&self,
 		target: String,
 		path: Vec<DesktopPoint>,
 		opts: Option<PointerOptions>,
-	) -> Result<task::Promise<Option<DesktopFocusReturn>>> {
+	) -> Result<task::Promise<DesktopDragResult>> {
 		let o = ParsedPointerOptions::parse(opts).map_err(napi::Error::from)?;
 		if o.menu.is_some() {
 			return Err(
@@ -2281,11 +2331,20 @@ impl DesktopSession {
 			);
 		}
 		let path = path.into_iter().map(|p| (p.x, p.y)).collect();
-		Ok(self.input("desktop.drag", move |reply| Request::Drag {
-			target: Target::parse(&target),
-			path,
-			options: o,
-			reply,
+		let target = Target::parse(&target);
+		let c = Arc::clone(&self.core);
+		let token = c.cancellation.token();
+		Ok(task::blocking("desktop.drag", (), move |_| {
+			match c.call(token, |reply| Request::Drag { target, path, options: o, reply })? {
+				Response::TextSelection(v) => {
+					Ok(DesktopDragResult { selection: Some(v), focus_return: None })
+				},
+				Response::Input(report) => {
+					Ok(DesktopDragResult { selection: None, focus_return: report })
+				},
+				_ => Err(DesktopError::internal("unexpected desktop worker response")),
+			}
+			.map_err(Into::into)
 		}))
 	}
 
@@ -2679,6 +2738,8 @@ mod capture_tests {
 		reads:             u32,
 		/// Runs as each press is delivered and as each probe asks.
 		on_call:           Option<Box<dyn Fn(Call) + Send>>,
+		/// A press is delivered and the app answers with an unrelated error.
+		unconfirmed:       bool,
 	}
 
 	#[derive(Clone, Copy, PartialEq, Eq)]
@@ -2748,6 +2809,8 @@ mod capture_tests {
 		input_lookups:          Arc<Mutex<u32>>,
 		/// Every click lands on a control whose menu would take the keyboard.
 		menu_control:           bool,
+		/// What a drag is made as instead of input; `None` posts it.
+		drag_selection:         Option<AxTextSelection>,
 	}
 
 	impl FakeWaylandBackend {
@@ -2805,6 +2868,7 @@ mod capture_tests {
 				name_lookups: Arc::new(Mutex::new(0)),
 				#[cfg(target_os = "macos")]
 				input_lookups: Arc::new(Mutex::new(0)),
+				drag_selection: None,
 			}
 		}
 	}
@@ -2861,6 +2925,8 @@ mod capture_tests {
 				}),
 				actions: Vec::new(),
 				child_count: 0,
+				selected: false,
+				role_name: None,
 			})
 		}
 
@@ -2899,6 +2965,13 @@ mod capture_tests {
 			tree.pressed.push(id);
 			if tree.stale_presses {
 				return Err(DesktopError::stale_ref("the element no longer exists"));
+			}
+			if tree.unconfirmed {
+				return Err(DesktopError::new(
+					ErrorCode::AxUnconfirmed,
+					"AX action 'AXPress' was requested, but its outcome could not be confirmed. It may \
+					 already have taken effect: observe the window before retrying",
+				));
 			}
 			let Some(copy) = tree.press_rebuilds_as else {
 				return Ok(());
@@ -3100,6 +3173,16 @@ mod capture_tests {
 			Ok(())
 		}
 
+		fn drag_selection(
+			&mut self,
+			_: &Target,
+			_: &PointerEvent,
+			_: DeliveryMode,
+			_: &OperationToken,
+		) -> CoreResult<Option<AxTextSelection>> {
+			Ok(self.drag_selection.clone())
+		}
+
 		fn pointer_menu(
 			&mut self,
 			target: &Target,
@@ -3289,7 +3372,8 @@ mod capture_tests {
 			.map_err(|error| error.clone())?
 			.ax()
 			.ok_or_else(DesktopError::ax_unsupported)?;
-		let reference = register_node(ax, registry, origin, AxHandle::Test(1))?.ref_;
+		let reference =
+			register_node(ax, registry, origin, AxHandle::Test(1), &mut AppFocus::default())?.ref_;
 		let (reply, _rx) = flume::bounded(1);
 		worker.process(
 			&Request::AxClick { reference, options: ParsedPointerOptions::parse(None)?, reply },
@@ -3847,6 +3931,46 @@ mod capture_tests {
 	}
 
 	#[test]
+	fn an_unconfirmed_action_names_the_window_and_app_to_inspect_and_is_sent_once() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		tree.lock().unconfirmed = true;
+		let error = press(&mut worker, "e2").unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert!(error.message.contains("before retrying"), "{}", error.message);
+		assert!(
+			error
+				.message
+				.contains(&format!("e2 is in window {WAYLAND_ID} of \"obsidian\" (\"Obsidian\")")),
+			"{}",
+			error.message
+		);
+		assert_eq!(tree.lock().pressed, [2]);
+	}
+
+	#[test]
+	fn unconfirmed_action_metadata_is_escaped_and_bounded() {
+		let mut backend = FakeWaylandBackend::new();
+		let prefix = "A\t\n\r\u{1b}\"\\🦀";
+		backend.window.app = format!("{prefix}{}APP_END", "é".repeat(400));
+		backend.window.title = format!("{prefix}{}TITLE_END", "界".repeat(400));
+		let mut worker = worker_with(backend);
+		let error = worker.name_unconfirmed_target(
+			"e2",
+			&ax::AxHandle::Test(1),
+			DesktopError::new(ErrorCode::AxUnconfirmed, "inspect before retrying"),
+		);
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		let escaped = "A\\t\\n\\r\\u001b\\\"\\\\🦀";
+		assert!(error.message.contains(&format!("of \"{escaped}")), "{}", error.message);
+		assert!(error.message.contains(&format!("(\"{escaped}")), "{}", error.message);
+		assert!(!error.message.chars().any(char::is_control), "{}", error.message);
+		assert!(!error.message.contains("APP_END"), "{}", error.message);
+		assert!(!error.message.contains("TITLE_END"), "{}", error.message);
+		assert_eq!(error.message.matches("\"…").count(), 2, "{}", error.message);
+		assert!(error.message.chars().count() < 550, "{}", error.message);
+	}
+
+	#[test]
 	fn every_call_on_a_rebuilt_element_names_its_copy() {
 		fn e2() -> String {
 			"e2".to_string()
@@ -4057,9 +4181,10 @@ mod capture_tests {
 				.ok()
 				.and_then(|backend| backend.ax())
 				.unwrap();
-			let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
-				.unwrap()
-				.ref_;
+			let reference =
+				register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1), &mut AppFocus::default())
+					.unwrap()
+					.ref_;
 			let (reply, _rx) = flume::bounded(1);
 			let request = make(reference, reply);
 			let before = *queries.lock();
@@ -4080,9 +4205,10 @@ mod capture_tests {
 			.ok()
 			.and_then(|backend| backend.ax())
 			.unwrap();
-		let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
-			.unwrap()
-			.ref_;
+		let reference =
+			register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1), &mut AppFocus::default())
+				.unwrap()
+				.ref_;
 		let (reply, _rx) = flume::bounded(1);
 		let request = Request::AxClick {
 			reference: reference.clone(),
@@ -4109,9 +4235,10 @@ mod capture_tests {
 				.ok()
 				.and_then(|backend| backend.ax())
 				.unwrap();
-			let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
-				.unwrap()
-				.ref_;
+			let reference =
+				register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1), &mut AppFocus::default())
+					.unwrap()
+					.ref_;
 			let (reply, _rx) = flume::bounded(1);
 			let request = Request::AxInput {
 				reference: reference.clone(),
@@ -4619,6 +4746,81 @@ mod capture_tests {
 	}
 
 	#[test]
+	fn a_drag_made_as_a_text_selection_posts_no_pointer_input() {
+		let drag = |worker: &mut TestWorker| {
+			let token = CancellationSource::default().token();
+			let target = Target::Window(WAYLAND_ID.to_string());
+			worker
+				.process(&capture_request(target.clone()), &token)
+				.unwrap();
+			let (reply, _rx) = flume::bounded(1);
+			let request = Request::Drag {
+				target,
+				path: vec![(4.0, 10.0), (30.0, 10.0)],
+				options: ParsedPointerOptions::parse(None).unwrap(),
+				reply,
+			};
+			worker.process(&request, &token).unwrap()
+		};
+		let mut backend = FakeWaylandBackend::new();
+		backend.drag_selection = Some(AxTextSelection {
+			start:   4,
+			length:  5,
+			text:    "quick".to_string(),
+			focused: false,
+		});
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let Response::TextSelection(selection) = drag(&mut worker) else {
+			panic!("expected the selection the drag was made as")
+		};
+		assert_eq!((selection.start, selection.length, selection.text.as_str()), (4, 5, "quick"));
+		assert!(clicks.lock().is_empty(), "no pointer input was posted");
+		// Any other drag is posted.
+		drop(worker);
+		let backend = FakeWaylandBackend::new();
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		assert!(matches!(drag(&mut worker), Response::Input(None)));
+		assert_eq!(*clicks.lock(), [WAYLAND_ID]);
+	}
+
+	#[test]
+	fn a_drag_selection_reads_the_target_before_the_menu_preflight_probes_it() {
+		// The menu preflight probes the target, which can block; the selection
+		// reads the front app before any probe, so it runs first. A press on
+		// text opens no menu, so the refusing preflight never sees this drag.
+		let mut backend = FakeWaylandBackend::new();
+		backend.menu_control = true;
+		backend.drag_selection = Some(AxTextSelection {
+			start:   4,
+			length:  5,
+			text:    "quick".to_string(),
+			focused: false,
+		});
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		let target = Target::Window(WAYLAND_ID.to_string());
+		worker
+			.process(&capture_request(target.clone()), &token)
+			.unwrap();
+		let (reply, _rx) = flume::bounded(1);
+		let request = Request::Drag {
+			target,
+			path: vec![(4.0, 10.0), (30.0, 10.0)],
+			options: ParsedPointerOptions::parse(Some(PointerOptions {
+				refuse_menu: Some(true),
+				..PointerOptions::default()
+			}))
+			.unwrap(),
+			reply,
+		};
+		assert!(matches!(worker.process(&request, &token).unwrap(), Response::TextSelection(_)));
+		assert!(clicks.lock().is_empty(), "no pointer input was posted");
+	}
+
+	#[test]
 	fn cancelled_full_capture_restores_previously_delivered_coordinates() {
 		let backend = FakeWaylandBackend::new();
 		let cancel_on_capabilities = Arc::clone(&backend.cancel_on_capabilities);
@@ -4924,7 +5126,7 @@ mod capture_tests {
 				reply,
 			}
 		};
-		for action in ["press", "AXPress", "axraise"] {
+		for action in ["press", "AXPress"] {
 			let source = CancellationSource::default();
 			let result = call(&mut worker, perform(action), &source);
 			assert!(
@@ -4939,7 +5141,8 @@ mod capture_tests {
 			assert!(token.check().is_ok(), "the user's Escape leaves {action} running");
 		}
 		assert_eq!(tree.lock().pressed, [2], "the fake tree runs only `press`");
-		for action in ["raise", " Raise ", "AXRaise"] {
+		// macOS runs any spelling of AXRaise, `axraise` included.
+		for action in ["raise", " Raise ", "AXRaise", "axraise", "AxRaise"] {
 			let source = CancellationSource::default();
 			let error = call(&mut worker, perform(action), &source)
 				.err()

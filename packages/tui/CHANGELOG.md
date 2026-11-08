@@ -4,8 +4,27 @@
 
 ### Added
 
-- Grep headers syntax-highlight regex patterns, including incomplete patterns while a call streams, in terminal and native views ([#18392](https://github.com/can1357/oh-my-pi/pull/18392) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 - `SettingsRuntimeContext.runtimeOptions` supplies runtime submenu choices for settings without built-in ones; those rows show the chosen option's label ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
+
+## [18.18.1] - 2026-11-08
+
+### Added
+
+- Grep headers syntax-highlight regex patterns, including incomplete patterns while a call streams, in terminal and native views ([#18392](https://github.com/can1357/oh-my-pi/pull/18392) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
+
+### Changed
+
+- Grep results for a single searched file no longer repeat `1 file` after the match count; the header already names the file ([#18422](https://github.com/can1357/oh-my-pi/pull/18422) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
+
+### Fixed
+
+- Pinned sessions color their pin icon with the theme accent in the status line instead of the session title's color, matching the resume picker ([#18401](https://github.com/can1357/oh-my-pi/pull/18401) by [@SuperUserA](https://github.com/SuperUserA))
+- A saved bash trace the shell visualization can no longer restore (e.g. a `tool_result` hook rewrote its `script`) renders as plain command and output instead of crashing the TUI and every `omp --resume` of that session ([#18338](https://github.com/can1357/oh-my-pi/issues/18338))
+- Tables with near-equal large numeric columns no longer crash transcript rendering during chart analysis ([#18343](https://github.com/can1357/oh-my-pi/issues/18343))
+- A JPEG truncated before its end-of-image marker is rejected when read and omitted from the request, instead of failing the whole provider request with "unsupported image" ([#18385](https://github.com/can1357/oh-my-pi/pull/18385) by [@iwangjie](https://github.com/iwangjie))
+- Desktop notifications use unique OSC 99 ids per omp process to avoid interfering with other omp processes ([#18413](https://github.com/can1357/oh-my-pi/pull/18413) by [@farnoy](https://github.com/farnoy))
+- `updateNotesToolRenderer` now renders `update_notes` calls that omit `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
+- The copy overlay now offers fenced code blocks indented under list items, and splits code and quote blocks the same way the message renderer draws them ([#18410](https://github.com/can1357/oh-my-pi/pull/18410) by [@farnoy](https://github.com/farnoy))
 
 ## [18.18.0] - 2026-11-07
 

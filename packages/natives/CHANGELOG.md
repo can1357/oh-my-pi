@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [18.18.1] - 2026-11-08
+
+### Added
+
+- macOS `ax()` lines show what an element can do: `(selected)`, `(settable)` on dates `setValue` can write, `(readonly)` on web text fields the page locks, `actions=` beyond its press, and names for unlabeled window buttons ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- macOS `ax()` lines show 200 characters of a long label or value instead of 80, keep newlines as `\n`, and end a cut value with the call that reads it whole ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS `ax()` dates read in local time with their offset, the form `setValue` takes back, and `axPerform` runs a listed action in any case, with or without its `AX` prefix ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS background left drags across the text of one native text view, such as a TextEdit document, now select that text through accessibility, and `drag` resolves to `{ selection, focusReturn }`; drags on web page text and links still throw `BackgroundUnavailable` ([#16223](https://github.com/can1357/oh-my-pi/pull/16223) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- macOS `ax()` no longer marks every cell of a focused table or sidebar `(focused)`; only the element holding the app's keyboard focus is ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS `axPerform` reports a followed Preview PDF link or an opened Finder item as unconfirmed instead of failed ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- The embedded shell's `comm` merges in the same locale order as its `sort`, so `comm` on `sort` output under a UTF-8 locale no longer reports unsorted input and drops common lines
+- An edit whose path is missing on disk no longer stalls the embedded shell and other native calls while it searches for the file, and a cancelled edit stops that search at once ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
+- macOS spellchecking (typo underlines, autocorrect, `apple` word completion) no longer leaks native memory for the life of the process ([#18285](https://github.com/can1357/oh-my-pi/pull/18285) by [@aleister1102](https://github.com/aleister1102))
+- Fixed large brace expansions running as literal text or silently dropping words: expansions support up to 4,194,304 words and report an error above that limit ([#18092](https://github.com/can1357/oh-my-pi/pull/18092) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed

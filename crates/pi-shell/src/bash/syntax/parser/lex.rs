@@ -7,7 +7,7 @@ use alloc::{boxed::Box, vec::Vec};
 use super::{
 	PResult, ParseError, ParseErrorKind, Parser, PendingDoc,
 	cursor::{self, Frame},
-	word::WordTok,
+	word::{Plain, WordTok},
 };
 use crate::bash::syntax::{
 	ast::{AliasUse, ParseWarning},
@@ -196,24 +196,24 @@ const fn reserved(text: &[u8]) -> Option<T> {
 	})
 }
 
-/// One token with its value.
+/// One token: a small `Copy` handle that the lookahead slot, `take` and
+/// the grammar pass around by value. A word or arithmetic token's payload
+/// stays in the parser's per-command arena ([`TokArena`]); `val` indexes it.
+#[derive(Clone, Copy)]
 pub(super) struct Tok {
-	pub kind:  T,
+	pub kind: T,
 	/// Source span.
-	pub lo:    u32,
-	pub hi:    u32,
+	pub lo:   u32,
+	pub hi:   u32,
 	/// 1-based line of the first byte.
-	pub line:  u32,
-	/// Word value of `Word`, `Assign` and `RedirWord` (the name, as a plain
-	/// word).
-	pub word:  Option<WordTok>,
-	/// `Number` value.
-	pub num:   u32,
-	/// Value of `ArithCmd` / `ArithFor`, absent from ordinary tokens.
-	pub arith: Option<Box<ArithTok>>,
+	pub line: u32,
+	/// `Word`, `Assign`, `RedirWord`: index of the word in
+	/// [`TokArena::words`]; `ArithCmd`, `ArithFor`: index in
+	/// [`TokArena::ariths`]; `Number`: the value.
+	pub val:  u32,
 }
 
-/// The uncommon arithmetic token payload, kept out of every word token.
+/// The uncommon arithmetic token payload.
 pub(super) struct ArithTok {
 	pub text:  Vec<u8>,
 	pub semis: Vec<usize>,
@@ -221,13 +221,85 @@ pub(super) struct ArithTok {
 	pub hi:    u32,
 }
 
+/// Payloads of the tokens of one top-level command, cleared (not freed)
+/// when the next one starts. A payload stays here until the grammar takes
+/// it into a node, however far the lexer has read ahead meanwhile.
+#[derive(Default)]
+pub(super) struct TokArena<'s> {
+	words:  Vec<Option<WordTok<'s>>>,
+	ariths: Vec<Option<ArithTok>>,
+}
+
+impl TokArena<'_> {
+	pub(super) fn clear(&mut self) {
+		self.words.clear();
+		self.ariths.clear();
+	}
+
+	/// Room for the word tokens of about `len` bytes of source.
+	pub(super) fn reserve_for(&mut self, len: usize) {
+		self.words.reserve(len / 8);
+	}
+}
+
 impl Tok {
 	pub(super) const fn new(kind: T, lo: u32, hi: u32, line: u32) -> Self {
-		Self { kind, lo, hi, line, word: None, num: 0, arith: None }
+		Self { kind, lo, hi, line, val: 0 }
 	}
 
 	pub(super) const fn span(&self) -> Span {
 		Span::new(self.lo, self.hi)
+	}
+
+	/// The kinds that carry a word payload.
+	pub(super) const fn has_word(&self) -> bool {
+		matches!(self.kind, T::Word | T::Assign | T::RedirWord)
+	}
+}
+
+impl<'s> Parser<'s> {
+	/// Token `kind` carrying word `w`.
+	pub(super) fn word_tok(&mut self, kind: T, lo: u32, hi: u32, line: u32, w: WordTok<'s>) -> Tok {
+		let val = self.toks.words.len() as u32;
+		self.toks.words.push(Some(w));
+		Tok { kind, lo, hi, line, val }
+	}
+
+	/// Token `kind` carrying arithmetic text `a`.
+	fn arith_tok(&mut self, kind: T, lo: u32, hi: u32, line: u32, a: ArithTok) -> Tok {
+		let val = self.toks.ariths.len() as u32;
+		self.toks.ariths.push(Some(a));
+		Tok { kind, lo, hi, line, val }
+	}
+
+	/// The word of a word token, not yet taken.
+	pub(super) fn word(&self, t: &Tok) -> &WordTok<'s> {
+		debug_assert!(t.has_word());
+		self.toks.words[t.val as usize]
+			.as_ref()
+			.expect("word token already taken")
+	}
+
+	/// Move the word out of a word token (once, into a node).
+	pub(super) fn take_word(&mut self, t: Tok) -> WordTok<'s> {
+		debug_assert!(t.has_word());
+		self.toks.words[t.val as usize]
+			.take()
+			.expect("word token already taken")
+	}
+
+	/// The text of an arithmetic token.
+	pub(super) fn arith(&self, t: &Tok) -> &ArithTok {
+		self.toks.ariths[t.val as usize]
+			.as_ref()
+			.expect("arithmetic token already taken")
+	}
+
+	/// Move the text out of an arithmetic token.
+	pub(super) fn take_arith(&mut self, t: Tok) -> ArithTok {
+		self.toks.ariths[t.val as usize]
+			.take()
+			.expect("arithmetic token already taken")
 	}
 }
 
@@ -347,6 +419,7 @@ impl<'s> Parser<'s> {
 		self.lx = LexState::new();
 		self.lx.extglob = self.feat.contains(Features::EXTGLOB);
 		self.la = None;
+		self.toks.clear();
 	}
 
 	/// `yylex`: shift the token history and read a token.
@@ -695,9 +768,12 @@ impl<'s> Parser<'s> {
 				return Err(self.near_error());
 			}
 			self.bump();
-			let mut t = Tok::new(T::ArithFor, lo, self.off(), line);
-			t.arith = Some(Box::new(ArithTok { text, semis, lo: alo, hi: ahi }));
-			return Ok(Some(t));
+			return Ok(Some(self.arith_tok(T::ArithFor, lo, self.off(), line, ArithTok {
+				text,
+				semis,
+				lo: alo,
+				hi: ahi,
+			})));
 		}
 		if self.reserved_word_acceptable(self.lx.last) {
 			let m = self.mark();
@@ -708,9 +784,8 @@ impl<'s> Parser<'s> {
 			let ahi = self.off().saturating_sub(1);
 			if self.peek() == Some(b')') {
 				self.bump();
-				let mut t = Tok::new(T::ArithCmd, lo, self.off(), line);
-				t.arith = Some(Box::new(ArithTok { text, semis: Vec::new(), lo: alo, hi: ahi }));
-				return Ok(Some(t));
+				let a = ArithTok { text, semis: Vec::new(), lo: alo, hi: ahi };
+				return Ok(Some(self.arith_tok(T::ArithCmd, lo, self.off(), line, a)));
 			}
 			// Not `(( … ))`: a subshell inside a subshell. Re-read from the
 			// second parenthesis.
@@ -746,7 +821,7 @@ impl<'s> Parser<'s> {
 			&& let Some(n) = parse_int(text)
 		{
 			let mut t = Tok::new(T::Number, lo, hi, line);
-			t.num = n;
+			t.val = n;
 			return Ok(Some(t));
 		}
 		if let Some(text) = plain
@@ -781,15 +856,16 @@ impl<'s> Parser<'s> {
 		{
 			return Ok(Some(Tok::new(k, lo, hi, line)));
 		}
-		let w = w.unwrap_or_else(|| WordTok {
-			lo,
-			hi,
-			parts: vec![crate::bash::syntax::WordPart::Lit(
-				keyword.expect("borrowed keyword").to_vec(),
-			)],
-			quoted: false,
-			asg: None,
-		});
+		let w = if let Some(w) = w {
+			w
+		} else {
+			let text = keyword.expect("borrowed keyword");
+			let part = self
+				.t
+				.text_part(crate::bash::syntax::tree::TextPk::Lit, text);
+			let parts = self.t.run(&[part]);
+			WordTok { lo, hi, parts, quoted: false, asg: None, plain: Plain::Input(text) }
+		};
 		let last = self.lx.last;
 		if self.command_token_position(last) || self.lx.cmdbltin {
 			match w.plain() {
@@ -808,9 +884,7 @@ impl<'s> Parser<'s> {
 			&& text[text.len() - 1] == b'}'
 			&& valid_redir_var(&text[1..text.len() - 1])
 		{
-			let mut t = Tok::new(T::RedirWord, lo, hi, line);
-			t.word = Some(w);
-			return Ok(Some(t));
+			return Ok(Some(self.word_tok(T::RedirWord, lo, hi, line, w)));
 		}
 		let kind = if w.is_assign() && (self.assignment_acceptable() || self.lx.compassign) {
 			T::Assign
@@ -826,9 +900,7 @@ impl<'s> Parser<'s> {
 			T::Select => self.lx.expect_in += 1,
 			_ => {},
 		}
-		let mut t = Tok::new(kind, lo, hi, line);
-		t.word = Some(w);
-		Ok(Some(t))
+		Ok(Some(self.word_tok(kind, lo, hi, line, w)))
 	}
 
 	/// A contiguous, unquoted keyword entirely in the original source.
@@ -1217,29 +1289,26 @@ impl<'s> Parser<'s> {
 	}
 
 	/// Text of a token for error messages (bash `error_token_from_token`).
-	pub(super) fn token_text(t: &Tok) -> Vec<u8> {
+	pub(super) fn token_text(&self, t: &Tok) -> Vec<u8> {
+		let mut out = Vec::new();
+		self.token_text_into(t, &mut out);
+		out
+	}
+
+	/// [`Parser::token_text`] appended to `out`.
+	pub(super) fn token_text_into(&self, t: &Tok, out: &mut Vec<u8>) {
 		match t.kind {
-			T::Word | T::Assign => {
-				let mut out = Vec::new();
-				if let Some(w) = &t.word {
-					w.render(&mut out);
+			T::Word | T::Assign | T::RedirWord => {
+				if let Some(w) = &self.toks.words[t.val as usize] {
+					match w.plain() {
+						Some(s) => out.extend_from_slice(s),
+						None => w.render(&self.t, out),
+					}
 				}
-				out
 			},
-			T::Number => {
-				let mut out = Vec::new();
-				push_u32(&mut out, t.num);
-				out
-			},
-			T::ArithCmd | T::ArithFor => t.arith.as_ref().expect("arithmetic token").text.clone(),
-			T::RedirWord => {
-				let mut out = Vec::new();
-				if let Some(w) = &t.word {
-					w.render(&mut out);
-				}
-				out
-			},
-			k => k.text().to_vec(),
+			T::Number => push_u32(out, t.val),
+			T::ArithCmd | T::ArithFor => out.extend_from_slice(&self.arith(t).text),
+			k => out.extend_from_slice(k.text()),
 		}
 	}
 
@@ -1248,7 +1317,7 @@ impl<'s> Parser<'s> {
 		if t.kind == T::Eof {
 			return self.eof_error();
 		}
-		let mut text = Self::token_text(t);
+		let mut text = self.token_text(t);
 		if should_ansi_quote(&text) {
 			let mut q = Vec::new();
 			ansi_quote(&mut q, &text);
