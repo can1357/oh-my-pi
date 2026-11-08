@@ -263,6 +263,9 @@
 ### Fixed
 
 - Fixed Anthropic requests writing the whole cached conversation again on every turn after the date or working directory changed, in a session where an extension `context` handler adds its own message to each request (such as a status block at the end): the new date/cwd reminder moved with that message to the end of every request and took the prompt-cache breakpoint from the history; it now stays after the conversation's last turn ([#17991](https://github.com/can1357/oh-my-pi/pull/17991) by [@sjawhar](https://github.com/sjawhar))
+### Fixed
+
+- A marketplace with `metadata.pluginRoot` installs `./` sources from the marketplace root and resolves bare-name sources under `pluginRoot`, as in Claude Code; a `./` source missing from the root is still tried under `pluginRoot` ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
 
