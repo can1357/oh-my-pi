@@ -18,6 +18,9 @@
 ### Fixed
 
 - The `tui.mouse` setting now says mouse capture stops wheel scrolling instead of promising that wheel scroll becomes Shift+wheel ([#18458](https://github.com/can1357/oh-my-pi/issues/18458))
+### Fixed
+
+- `read` on a URL that answers with a bot challenge (Reddit posts, Cloudflare, DataDome, PerimeterX) tries the next user agent before falling back to readers, and no longer returns the site's block page, or a reader's copy of it, as the page: an unrecovered read ends `blocked` or `failed` and names the protection ([#17904](https://github.com/can1357/oh-my-pi/pull/17904) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.1] - 2026-11-08
 
