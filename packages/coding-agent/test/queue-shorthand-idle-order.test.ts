@@ -6,13 +6,14 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { submitInteractiveInput } from "@oh-my-pi/pi-coding-agent/main";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
@@ -37,11 +38,14 @@ function requestedPrompts(mock: MockModel): string[] {
 
 describe("queue shorthand on an idle session with a transcript (#10802)", () => {
 	let session: AgentSession | undefined;
+	let authStorage: AuthStorage | undefined;
 	const cleanupDirs: string[] = [];
 
 	afterEach(async () => {
 		await session?.dispose();
 		session = undefined;
+		authStorage?.close();
+		authStorage = undefined;
 		await Promise.all(cleanupDirs.splice(0).map(dir => removeWithRetries(dir)));
 		vi.restoreAllMocks();
 	});
@@ -55,13 +59,15 @@ describe("queue shorthand on an idle session with a transcript (#10802)", () => 
 			streamFn: mock.stream,
 			convertToLlm,
 		});
-		let apiKey: string | undefined = "test-key";
-		const modelRegistry: Pick<ModelRegistry, "getApiKey"> = { getApiKey: async () => apiKey };
+		authStorage = await AuthStorage.create(":memory:");
+		const modelRegistry = new ModelRegistry(authStorage);
+		let apiKey = async (): Promise<string | undefined> => "test-key";
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(() => apiKey());
 		const live = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
-			modelRegistry: modelRegistry as never,
+			modelRegistry,
 		});
 		session = live;
 		live.setFollowUpMode("one-at-a-time", false);
@@ -114,6 +120,7 @@ describe("queue shorthand on an idle session with a transcript (#10802)", () => 
 		};
 		let pending: SubmittedUserInput | undefined;
 		const ctx = {
+			locallySubmittedUserSignatures: new Set<string>(),
 			editor,
 			session: live,
 			sessionManager: live.sessionManager,
@@ -136,21 +143,31 @@ describe("queue shorthand on an idle session with a transcript (#10802)", () => 
 			},
 		} as unknown as InteractiveModeContext;
 		const controller = new InputController(ctx);
-		const submitList = async (list = QUEUE_LIST, options?: { duringDispatch?: () => Promise<void> }) => {
+		const submitList = async (
+			list = QUEUE_LIST,
+			options?: {
+				beforeDispatch?: () => Promise<void>;
+				duringDispatch?: () => Promise<void>;
+				afterDispatch?: () => void;
+			},
+		) => {
 			editor.setText(list);
 			const body = parseQueueShorthand(list);
 			if (body === undefined) throw new Error("Expected queue shorthand");
 			await controller.handleQueueCommand(body);
 			if (!pending) throw new Error("Expected the first item to be handed to the run loop");
+			await options?.beforeDispatch?.();
 			const dispatched = submitInteractiveInput(mode, live, pending);
 			await options?.duringDispatch?.();
 			await dispatched;
+			options?.afterDispatch?.();
 			await live.waitForIdle();
 		};
-		const removeApiKey = () => {
-			apiKey = undefined;
+		/** Answer the first item's API-key lookup with `key()`; the seed turn already ran. */
+		const setApiKey = (key: () => Promise<string | undefined>) => {
+			apiKey = key;
 		};
-		return { session: live, mock, editor, showError, submitList, removeApiKey };
+		return { session: live, mock, editor, showError, submitList, setApiKey, controller };
 	}
 
 	async function writeSkill(name: string): Promise<Skill> {
@@ -182,8 +199,8 @@ describe("queue shorthand on an idle session with a transcript (#10802)", () => 
 	});
 
 	it("returns the whole list to the editor when the first item fails before reaching the agent", async () => {
-		const { session, mock, editor, showError, submitList, removeApiKey } = await setup();
-		removeApiKey();
+		const { session, mock, editor, showError, submitList, setApiKey } = await setup();
+		setApiKey(async () => undefined);
 
 		await submitList();
 
@@ -230,5 +247,54 @@ describe("queue shorthand on an idle session with a transcript (#10802)", () => 
 		expect(session.getQueuedMessages().followUp).toEqual([]);
 		expect(editor.getText()).toBe(QUEUE_LIST);
 		expect(editor.pendingImages).toEqual([IMAGE]);
+	});
+
+	it("returns the whole list as one queue list when Esc lands after the rest is queued, before the first goes live", async () => {
+		const { session, mock, editor, submitList, setApiKey, controller } = await setup();
+		const keyRequested = Promise.withResolvers<void>();
+		const releaseKey = Promise.withResolvers<void>();
+		setApiKey(async () => {
+			keyRequested.resolve();
+			await releaseKey.promise;
+			return "test-key";
+		});
+
+		await submitList(QUEUE_LIST, {
+			duringDispatch: async () => {
+				await keyRequested.promise;
+				expect(session.getQueuedMessages().followUp).toEqual(["ITEM TWO", "ITEM THREE"]);
+				controller.restoreQueuedMessagesToEditor({ abort: true });
+				releaseKey.resolve();
+			},
+		});
+
+		expect(requestedPrompts(mock)).toEqual([]);
+		expect(session.getQueuedMessages().followUp).toEqual([]);
+		expect(editor.getText()).toBe(QUEUE_LIST);
+	});
+
+	it("returns the whole list when Esc lands while a busy session holds the first item in its queue", async () => {
+		const { session, mock, editor, submitList, controller } = await setup();
+		const backgroundStarted = Promise.withResolvers<void>();
+		mock.push(async (_context, options) => {
+			backgroundStarted.resolve();
+			const aborted = Promise.withResolvers<void>();
+			options?.signal?.addEventListener("abort", () => aborted.resolve());
+			await aborted.promise;
+			return { content: ["background"] };
+		});
+
+		await submitList(QUEUE_LIST, {
+			// Another turn starts between the hand-off and dispatch, so the first item is queued behind it.
+			beforeDispatch: async () => {
+				void session.prompt("BACKGROUND");
+				await backgroundStarted.promise;
+			},
+			afterDispatch: () => controller.restoreQueuedMessagesToEditor({ abort: true }),
+		});
+
+		expect(requestedPrompts(mock)).toEqual(["BACKGROUND"]);
+		expect(session.getQueuedMessages().followUp).toEqual([]);
+		expect(editor.getText()).toBe(QUEUE_LIST);
 	});
 });

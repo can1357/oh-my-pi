@@ -334,6 +334,8 @@ export class InputController {
 	#submissionHookOrder: Promise<void> = Promise.resolve();
 	/** Submissions (Enter or the follow-up key) the session has not admitted yet and that still dispatch locally. */
 	readonly #submissionDispatches = new Set<Promise<void>>();
+	/** Takes the in-flight idle `=>` batch's queued messages back so it can return them as one list. */
+	#reclaimQueuedBatch: (() => void) | undefined;
 
 	/** Return the last full editor snapshot delivered by its change contract. */
 	getDraftText(): string {
@@ -2122,13 +2124,43 @@ export class InputController {
 			return;
 		}
 
+		/** What the first message pushed onto the follow-up queue when a busy session queued it. */
+		let firstQueued: readonly AgentMessage[] = [];
 		/** What each `rest` message pushed onto the follow-up queue, by index; unset while unqueued. */
 		const queued: (readonly AgentMessage[])[] = [];
+		/** Queued `rest` messages this batch took back: they are its to return. */
+		const takenBack = new Set<AgentMessage>();
 		/** Index from which `rest` failed to queue and already went back to the editor. */
 		let returnedFrom = rest.length;
-		let handledBySession = false;
+		let admitted = false;
+		let settled = false;
+		let queueing = false;
+		let reclaimed = false;
+		let firstTakenBack = false;
+		let returned = false;
+		const takeBackQueued = () => {
+			for (const message of this.ctx.session.dropQueuedMessages(queued.flat())) takenBack.add(message);
+		};
+		/** Put what was never sent back in the editor, once, as one list. */
+		const returnBatch = (withFirst: boolean) => {
+			if (returned) return;
+			returned = true;
+			const unsent = rest.filter(
+				(_, index) =>
+					index < returnedFrom &&
+					(queued[index] === undefined || queued[index].some(message => takenBack.has(message))),
+			);
+			if (!withFirst) {
+				if (unsent.length > 0) restore(unsent, false);
+			} else if (unsent.length > 0) {
+				restore([first, ...unsent], true);
+			} else {
+				restoreDetachedDraft(this.ctx.editor, first, images, imageLinks);
+			}
+		};
 		const queueRest = async () => {
-			for (let index = 0; index < rest.length; index++) {
+			queueing = true;
+			for (let index = 0; index < rest.length && !reclaimed; index++) {
 				const message = rest[index];
 				try {
 					await this.ctx.withLocalSubmission(message, () =>
@@ -2139,33 +2171,44 @@ export class InputController {
 						}),
 					);
 				} catch (error) {
+					queueing = false;
 					returnedFrom = index;
 					restore(rest.slice(index), false);
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 					return;
 				}
 			}
+			queueing = false;
+			if (reclaimed) {
+				takeBackQueued();
+				if (firstTakenBack || settled) returnBatch(firstTakenBack);
+				return;
+			}
 			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.showStatus(`Sent first message; queued ${rest.length} for later yields`);
 			this.ctx.ui.requestRender();
 		};
-		const promptHooks: Pick<PromptOptions, "onPromptAdmitted" | "onPromptDropped"> = {
+		// Esc restores queued input as separate paragraphs, which resubmit as one prompt. The batch
+		// takes its own unsent messages back first and returns them as one list.
+		this.#reclaimQueuedBatch = () => {
+			reclaimed = true;
+			if (this.ctx.session.dropQueuedMessages(firstQueued).length > 0) firstTakenBack = true;
+			takeBackQueued();
+			if (!queueing && (firstTakenBack || settled)) returnBatch(firstTakenBack);
+		};
+		const promptHooks: Pick<PromptOptions, "onPromptAdmitted" | "onPromptDropped" | "onPromptQueued"> = {
+			// Called just before admission when a busy session queues the first message.
+			onPromptQueued: group => {
+				firstQueued = group;
+			},
 			onPromptAdmitted: () => {
-				handledBySession = true;
+				admitted = true;
 				return queueRest();
 			},
 			onPromptDropped: () => {
-				handledBySession = true;
-				// Take back what is still queued. Anything queued that is gone was returned by Esc.
-				const removed = new Set(this.ctx.session.dropQueuedMessages(queued.flat()));
-				const unsent = rest.filter(
-					(_, index) =>
-						index < returnedFrom &&
-						(queued[index] === undefined || queued[index].some(message => removed.has(message))),
-				);
-				// Restored before the session hands the first message back alone, which it does only into an empty editor.
-				if (unsent.length > 0) restore([first, ...unsent], true);
-				else restoreDetachedDraft(this.ctx.editor, first, images, imageLinks);
+				takeBackQueued();
+				// Returned before the session hands the first message back alone, which it does only into an empty editor.
+				returnBatch(true);
 			},
 		};
 		// An extension command is admitted before its handler runs, without a turn of its own: the
@@ -2174,12 +2217,20 @@ export class InputController {
 		const hooks =
 			this.#isLocalExtensionCommand(first) && !isKnownSkillCommand(this.ctx, first) ? undefined : promptHooks;
 		const settle = async (consumedLocally: boolean) => {
-			if (handledBySession) return;
+			settled = true;
+			if (returned) return;
+			// Unless it was admitted or ran locally, the first message was never sent.
+			const firstUnsent = firstTakenBack || (!admitted && !consumedLocally);
+			if (reclaimed) {
+				if (!queueing) returnBatch(firstUnsent);
+				return;
+			}
+			if (admitted) return;
 			if (consumedLocally) {
 				await queueRest();
 				return;
 			}
-			restore(messages, true);
+			returnBatch(true);
 		};
 
 		if (this.ctx.onInputCallback) {
@@ -2384,6 +2435,7 @@ export class InputController {
 
 	restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
 		this.ctx.locallySubmittedUserSignatures.clear();
+		this.#reclaimQueuedBatch?.();
 		// On Esc (abort) the abort below records queued extension/agent messages in the
 		// transcript without a turn, so the post-abort drain can't auto-resume on them;
 		// plain Alt+Up dequeue leaves them queued for the continuing stream.

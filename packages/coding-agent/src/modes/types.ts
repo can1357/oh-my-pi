@@ -103,7 +103,7 @@ export type SubmittedUserInput = {
 	dispatched?: boolean;
 	/** Editor text handed back when the submission is cancelled before it starts; defaults to `text`. */
 	draftText?: string;
-	promptHooks?: Pick<PromptOptions, "onPromptAdmitted" | "onPromptDropped">;
+	promptHooks?: Pick<PromptOptions, "onPromptAdmitted" | "onPromptDropped" | "onPromptQueued">;
 	/** After dispatch, except when cancelled before starting; `consumedLocally` means an extension command ran. */
 	onDispatchSettled?: (consumedLocally: boolean) => void;
 	cancelled: boolean;

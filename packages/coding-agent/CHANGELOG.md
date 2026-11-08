@@ -30,7 +30,7 @@
 
 ### Fixed
 
-- Fixed a `->` / `=>` list sent to an idle session running its second item before its first; if the first item can't start, the whole list goes back to the editor ([#10802](https://github.com/can1357/oh-my-pi/issues/10802))
+- Fixed a `->` / `=>` list sent to an idle session running its second item before its first; if the first item can't start, the whole list goes back to the editor ([#10802](https://github.com/can1357/oh-my-pi/issues/10802), [#18507](https://github.com/can1357/oh-my-pi/pull/18507) by [@a-glapinski](https://github.com/a-glapinski))
 - Fixed `omp --resume` showing `(no messages)` for sessions whose first prompt follows a large memory recall, image-only message, or `/skill:` reply ([#16495](https://github.com/can1357/oh-my-pi/issues/16495))
 - Reading Reddit URLs now works when Reddit blocks its API: posts, comment threads, subreddits, and user pages fall back to a Redlib mirror and then the Arctic Shift archive, and render full nested comment trees.
 - Limited xAI `web_search` to two hosted-search turns per request to help prevent unexpected X search costs.
