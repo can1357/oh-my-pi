@@ -280,6 +280,8 @@
 ### Fixed
 
 - The scoped model list (`--models` or `enabledModels`; the scoped `/models` picker and Ctrl+P) is re-resolved after `/logout`, after a model hub catalog refresh, and after an RPC `login` or `logout`, so it drops the models of a provider you signed out of and picks up models a sign-in or refresh made available ([#17981](https://github.com/can1357/oh-my-pi/pull/17981) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- A user-attributed custom message that starts a turn while idle (`sendCustomMessage` / `pi.sendMessage` with `triggerTurn`) now runs `before_agent_start` like a prompt, so its system prompt applies to that turn ([#17969](https://github.com/can1357/oh-my-pi/pull/17969) by [@Delije4](https://github.com/Delije4))
+- Fixed Windows bash output on non-UTF-8 code pages (Korean, Chinese, Japanese, …) turning into mojibake for the rest of a command after a builtin wrote one invalid byte (`printf '\xeb'`, `cut -c` through a CJK character); the stray byte now becomes `�` on its own line, and native programs' ANSI output still decodes, including through `| head` or from `cat` of a legacy file ([#17947](https://github.com/can1357/oh-my-pi/pull/17947) by [@H4vC](https://github.com/H4vC))
 
 ## [18.16.0] - 2026-11-02
 
