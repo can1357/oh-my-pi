@@ -41,8 +41,6 @@ function serveOutgoing(
 			if (state.dead) return Promise.reject(new Error("owner exited"));
 			return registry.register(request, threadId);
 		},
-		// Hold the caller's signal until the wait settles. Releasing it early drops
-		// the export, so a later abort never reaches main and the waiter dangles.
 		wait: (registry, messageId, signal) => {
 			const linked = new AbortController();
 			const follow = (source: AbortSignal): (() => void) => {
@@ -57,13 +55,13 @@ function serveOutgoing(
 				return () => source.removeEventListener("abort", onAbort);
 			};
 			const stopExit = follow(exited);
+			// Retain the caller's signal until the wait settles. `stopCaller` closes
+			// over it; releasing the signal early drops the export, so a later abort
+			// never reaches main and the waiter dangles.
 			const stopCaller = signal ? follow(signal) : undefined;
-			// `held` keeps the mirrored signal (and its export) alive until settlement.
-			const held = signal;
 			return registry.wait(messageId, linked.signal).finally(() => {
 				stopExit();
 				stopCaller?.();
-				void held;
 			});
 		},
 		resolve: (registry, messageId, from, text) => registry.resolve(messageId, from, text),

@@ -1680,9 +1680,10 @@ describe("outgoing request registry", () => {
 		await expect(registry.register(outgoingRequest())).rejects.toThrow("already registered");
 
 		expect(await registry.resolve("m1", "peer-a", "fast reply")).toBe(true);
-		expect(registry.hasOwner("owner-a")).toBe(false);
+		expect(registry.hasOwner("owner-a")).toBe(true);
 		expect(await registry.resolve("m1", "peer-a", "second")).toBe(false);
 		expect(await registry.wait("m1")).toBe("fast reply");
+		expect(registry.hasOwner("owner-a")).toBe(false);
 		await expect(registry.wait("m1")).rejects.toThrow("unknown outgoing request");
 	});
 
@@ -1797,19 +1798,32 @@ describe("outgoing request registry", () => {
 		expect(cancelFirst.registry.hasOwner("owner-a")).toBe(false);
 	});
 
-	it("rejects a registration whose worker home has already exited", async () => {
+	it("rejects a registration already queued when its worker home exits, then forgets that home", async () => {
 		const registry = new OutgoingRequests();
 		await registry.register(outgoingRequest(), "w-dead");
 		const waiting = registry.wait("m1");
 		await Promise.resolve();
 		expect(registry.hasWaiter("m1")).toBe(true);
+
+		const queued = registry.register(
+			outgoingRequest({ messageId: "inflight", ownerId: "inflight-owner", jobId: "inflight-job" }),
+			"w-dead",
+		);
 		registry.dropHome("w-dead");
 		await expect(waiting).rejects.toThrow("owner exited");
+		await expect(queued).rejects.toThrow("owner exited");
 		expect(registry.hasOwner("owner-a")).toBe(false);
+		expect(registry.hasOwner("inflight-owner")).toBe(false);
 		expect(registry.hasWaiter("m1")).toBe(false);
 		expect(await registry.resolve("m1", "peer-a", "gone")).toBe(false);
-		await expect(registry.register(outgoingRequest(), "w-dead")).rejects.toThrow("owner exited");
-		expect(registry.hasOwner("owner-a")).toBe(false);
+
+		// The dead-home mark only blocks registers already queued at exit.
+		await registry.register(
+			outgoingRequest({ messageId: "after", ownerId: "after-owner", jobId: "after-job" }),
+			"w-dead",
+		);
+		expect(registry.hasOwner("after-owner")).toBe(true);
+		await registry.cancel("after");
 
 		await registry.register(
 			outgoingRequest({ messageId: "live", ownerId: "live-owner", jobId: "live-job" }),
@@ -1818,5 +1832,89 @@ describe("outgoing request registry", () => {
 		registry.dropHome("w-dead");
 		expect(registry.hasOwner("live-owner")).toBe(true);
 		await registry.cancel("live");
+	});
+
+	it("drops the entry when a reply follows an aborted wait, and cancel with no waiter leaves nothing", async () => {
+		const registry = new OutgoingRequests();
+		await registry.register(outgoingRequest());
+		const controller = new AbortController();
+		const aborted = registry.wait("m1", controller.signal);
+		await Promise.resolve();
+		expect(registry.hasWaiter("m1")).toBe(true);
+
+		controller.abort();
+		await expect(aborted).rejects.toThrow();
+		expect(registry.hasWaiter("m1")).toBe(false);
+		expect(registry.hasOwner("owner-a")).toBe(true);
+
+		expect(await registry.resolve("m1", "peer-a", "after abort")).toBe(true);
+		expect(registry.hasOwner("owner-a")).toBe(false);
+		expect(await registry.cancel("m1")).toBe(false);
+		await expect(registry.wait("m1")).rejects.toThrow("unknown outgoing request");
+
+		await registry.register(outgoingRequest({ messageId: "bare", ownerId: "owner-bare", jobId: "job-bare" }));
+		expect(await registry.cancel("bare")).toBe(true);
+		expect(registry.hasOwner("owner-bare")).toBe(false);
+		await expect(registry.wait("bare")).rejects.toThrow("unknown outgoing request");
+		expect(await registry.cancel("bare")).toBe(false);
+	});
+
+	it("discards a kept result on cancel without treating the request as still open", async () => {
+		const registry = new OutgoingRequests();
+		await registry.register(outgoingRequest());
+		expect(await registry.resolve("m1", "peer-a", "kept")).toBe(true);
+		expect(registry.hasOwner("owner-a")).toBe(true);
+		expect(await registry.cancel("m1")).toBe(false);
+		expect(registry.hasOwner("owner-a")).toBe(false);
+		await expect(registry.wait("m1")).rejects.toThrow("unknown outgoing request");
+	});
+
+	it("counts a kept unread reply as owned until a waiter takes it", async () => {
+		const registry = new OutgoingRequests();
+		await registry.register(outgoingRequest());
+		expect(await registry.resolve("m1", "peer-a", "early")).toBe(true);
+		expect(registry.hasOwner("owner-a")).toBe(true);
+		expect(await registry.wait("m1")).toBe("early");
+		expect(registry.hasOwner("owner-a")).toBe(false);
+	});
+
+	it("re-arms a deadline above the setTimeout ceiling instead of firing early", async () => {
+		vi.useFakeTimers();
+		const ceiling = 2 ** 31 - 1;
+		const extra = 1_000;
+		const registry = new OutgoingRequests();
+		const deadline = Date.now() + ceiling * 2 + extra;
+		await registry.register(
+			outgoingRequest({ messageId: "long", ownerId: "owner-long", jobId: "job-long", deadline }),
+		);
+		const waiting = registry.wait("long");
+		const flush = async (): Promise<void> => {
+			await Promise.resolve();
+			await Promise.resolve();
+		};
+
+		vi.advanceTimersByTime(ceiling);
+		await flush();
+		expect(registry.hasOwner("owner-long")).toBe(true);
+
+		vi.advanceTimersByTime(ceiling);
+		await flush();
+		expect(registry.hasOwner("owner-long")).toBe(true);
+
+		vi.advanceTimersByTime(extra);
+		await expect(waiting).rejects.toThrow("reply timeout");
+		expect(registry.hasOwner("owner-long")).toBe(false);
+	});
+
+	it("lets the first of two gated resolves win and delivers its text", async () => {
+		const { registry, entered, release } = gateRegistry();
+		await registry.register(outgoingRequest());
+		const waiting = registry.wait("m1");
+		const first = registry.resolve("m1", "peer-a", "first text");
+		await entered;
+		const second = registry.resolve("m1", "peer-a", "second text");
+		release();
+		expect(await Promise.all([first, second])).toEqual([true, false]);
+		expect(await waiting).toBe("first text");
 	});
 });

@@ -120,7 +120,7 @@ describe("outgoing A2A registry across workers", () => {
 		expect(registry.hasOwner("live-owner")).toBe(false);
 	});
 
-	it("detaches a cancelled remote wait so a later wait still observes the reply", async () => {
+	it("detaches a cancelled remote wait and drops the entry when the reply arrives", async () => {
 		const { probe } = await startWorker();
 		const outgoing = request({ messageId: "abort-me", ownerId: "abort-owner" });
 		await probe.register(outgoing);
@@ -134,7 +134,19 @@ describe("outgoing A2A registry across workers", () => {
 
 		expect(await mainRegistry().resolve(outgoing.messageId, outgoing.peer, "after abort")).toBe(true);
 		expect(mainRegistry().hasWaiter(outgoing.messageId)).toBe(false);
-		expect(await probe.wait(outgoing.messageId)).toBe("after abort");
 		expect(mainRegistry().hasOwner("abort-owner")).toBe(false);
+		// An unref'd worker does not deliver a nested reply to an idle loop; poll, as waitFor does.
+		const pending = probe.wait(outgoing.messageId);
+		let settled = false;
+		pending.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		await waitFor(() => settled);
+		await expect(pending).rejects.toThrow("unknown outgoing request");
 	});
 });

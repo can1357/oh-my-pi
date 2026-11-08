@@ -5,8 +5,10 @@
  * the `a2a-outgoing` thread service; they do not keep a registry of their own.
  * Settlement is serialized so a reply, a deadline, and a cancel cannot each
  * succeed. A result that arrives before `wait` is held until that one waiter
- * observes it, then dropped. `hasOwner` is synchronous so a lifecycle check
- * can call it without a turn.
+ * observes it, then dropped. Cancel removes the entry in every state and
+ * reports success only while it was still open. A waiter detached by abort
+ * marks the entry so a later result is not retained. `hasOwner` is synchronous
+ * and counts a kept unread result, so a lifecycle check can call it without a turn.
  */
 export const A2A_REPLY_TIMEOUT_REASON = "reply timeout";
 
@@ -21,7 +23,7 @@ export interface OutgoingRequest {
 
 /**
  * Main-owned outgoing registry. `wait`'s optional signal aborts only that
- * parked waiter; it does not settle the request.
+ * parked waiter; it does not settle the request, but a later result is not retained.
  */
 export interface OutgoingRequestsApi {
 	register(request: OutgoingRequest): Promise<void>;
@@ -44,6 +46,8 @@ export interface OutgoingRequestsOptions {
 
 const CANCELLED_REASON = "cancelled";
 const OWNER_EXITED_REASON = "owner exited";
+/** `setTimeout` stores the delay as a signed 32-bit int; a larger value fires in about 1ms. */
+const MAX_TIMEOUT_DELAY_MS = 2 ** 31 - 1;
 
 interface Waiter {
 	settled: boolean;
@@ -60,6 +64,8 @@ interface Entry {
 	clearTimer?: () => void;
 	outcome?: Outcome;
 	waiter?: Waiter;
+	/** Set when a parked waiter aborts, so a later result is not retained. */
+	waiterDetached?: boolean;
 }
 
 function abortError(reason: unknown): Error {
@@ -102,7 +108,7 @@ export class OutgoingRequests implements OutgoingRequestsApi {
 	readonly #beforeCommit: (() => Promise<void>) | undefined;
 	readonly #entries = new Map<string, Entry>();
 	readonly #homes = new Map<string, Set<string>>();
-	/** Workers whose link has closed; a queued register must not recreate their entries. */
+	/** Homes whose link just closed. Cleared once registers already queued have seen it. */
 	readonly #deadHomes = new Set<string>();
 	#tail: Promise<void> = Promise.resolve();
 
@@ -142,13 +148,13 @@ export class OutgoingRequests implements OutgoingRequestsApi {
 	}
 
 	cancel(messageId: string): Promise<boolean> {
-		return this.#enqueue(() => this.#fail(messageId, CANCELLED_REASON));
+		return this.#enqueue(() => this.#cancel(messageId));
 	}
 
-	/** True while an open (not yet settled) request is owned by `ownerId`. */
+	/** True while `ownerId` has an open request or a result no waiter has read. */
 	hasOwner(ownerId: string): boolean {
 		for (const entry of this.#entries.values()) {
-			if (entry.request.ownerId === ownerId && !entry.outcome) return true;
+			if (entry.request.ownerId === ownerId) return true;
 		}
 		return false;
 	}
@@ -162,21 +168,24 @@ export class OutgoingRequests implements OutgoingRequestsApi {
 	/**
 	 * Drop every request registered by `home` and reject a parked waiter.
 	 * A register already queued for this home fails instead of recreating the entry.
+	 * The dead-home mark is cleared once that queued register has observed it.
 	 */
 	dropHome(home: string): void {
 		this.#deadHomes.add(home);
 		const ids = this.#homes.get(home);
 		this.#homes.delete(home);
-		if (!ids) return;
-		for (const id of ids) {
-			const entry = this.#entries.get(id);
-			if (!entry || entry.home !== home) continue;
-			this.#entries.delete(id);
-			this.#clearTimer(entry);
-			const waiter = entry.waiter;
-			entry.waiter = undefined;
-			if (waiter) settleWaiter(waiter, { ok: false, error: new Error(OWNER_EXITED_REASON) });
+		if (ids) {
+			for (const id of ids) {
+				const entry = this.#entries.get(id);
+				if (!entry || entry.home !== home) continue;
+				this.#entries.delete(id);
+				this.#clearTimer(entry);
+				const waiter = entry.waiter;
+				entry.waiter = undefined;
+				if (waiter) settleWaiter(waiter, { ok: false, error: new Error(OWNER_EXITED_REASON) });
+			}
 		}
+		void this.#enqueue(() => this.#deadHomes.delete(home));
 	}
 
 	/**
@@ -212,10 +221,20 @@ export class OutgoingRequests implements OutgoingRequestsApi {
 	#arm(entry: Entry): void {
 		const deadline = entry.request.deadline;
 		if (deadline === null) return;
-		const delay = Math.max(0, deadline - Date.now());
+		this.#scheduleDeadline(entry, deadline);
+	}
+
+	/** Re-arm in chunks of at most {@link MAX_TIMEOUT_DELAY_MS} until `deadline`. */
+	#scheduleDeadline(entry: Entry, deadline: number): void {
+		this.#clearTimer(entry);
+		const delay = Math.min(MAX_TIMEOUT_DELAY_MS, Math.max(0, deadline - Date.now()));
 		const timer = setTimeout(() => {
 			void this.#enqueue(() => {
 				if (this.#entries.get(entry.request.messageId) !== entry || entry.outcome) return false;
+				if (Date.now() < deadline) {
+					this.#scheduleDeadline(entry, deadline);
+					return false;
+				}
 				return this.#commit(entry, { ok: false, error: new Error(A2A_REPLY_TIMEOUT_REASON) });
 			});
 		}, delay);
@@ -259,6 +278,7 @@ export class OutgoingRequests implements OutgoingRequestsApi {
 				void this.#enqueue(() => {
 					if (waiter.settled || entry.waiter !== waiter) return;
 					entry.waiter = undefined;
+					entry.waiterDetached = true;
 					settleWaiter(waiter, { ok: false, error: abortError(signal.reason) });
 				}).catch(() => {});
 			};
@@ -280,6 +300,18 @@ export class OutgoingRequests implements OutgoingRequestsApi {
 		return this.#commit(entry, { ok: false, error: new Error(reason) });
 	}
 
+	async #cancel(messageId: string): Promise<boolean> {
+		const entry = this.#entries.get(messageId);
+		if (!entry) return false;
+		if (entry.outcome) {
+			this.#remove(entry);
+			return false;
+		}
+		const open = await this.#commit(entry, { ok: false, error: new Error(CANCELLED_REASON) });
+		if (this.#entries.get(messageId) === entry) this.#remove(entry);
+		return open;
+	}
+
 	async #commit(entry: Entry, outcome: Outcome): Promise<boolean> {
 		if (this.#entries.get(entry.request.messageId) !== entry || entry.outcome) return false;
 		if (this.#beforeCommit) await this.#beforeCommit();
@@ -293,7 +325,11 @@ export class OutgoingRequests implements OutgoingRequestsApi {
 		entry.outcome = outcome;
 		this.#clearTimer(entry);
 		const waiter = entry.waiter;
-		if (!waiter) return;
+		if (!waiter) {
+			// Nobody is parked. Keep the result unless the waiter already left via abort.
+			if (entry.waiterDetached) this.#remove(entry);
+			return;
+		}
 		entry.waiter = undefined;
 		this.#remove(entry);
 		settleWaiter(waiter, outcome);
