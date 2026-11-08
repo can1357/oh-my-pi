@@ -6724,13 +6724,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#maintenance.cancelSpeculation();
 		this.setHindsightSessionState(undefined);
 		hindsightState?.dispose();
-		this.#disconnectFromAgent();
-		// beginDispose() drained the rest; this catches registrations made during teardown.
-		for (const dispose of this.#disposers.splice(0)) dispose();
-		this.#eventListeners = [];
-		this.#runStateListeners.clear();
-		this.#ircWakeHoldListeners.clear();
-		this.#sessionChangeCallbacks.clear();
 
 		// A dispose triggered mid-turn (Ctrl-C / timeout / hard-killed subagent)
 		// only *signals* the agent loop via the earlier abort(); the loop and the
@@ -6757,6 +6750,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} catch (error) {
 			logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
 		}
+
+		// Event forwarding stays connected THROUGH the drain above: a tool that
+		// settles inside it (a read whose client bridge completes after the
+		// abort) still has its terminal `tool_execution_end` delivered to session
+		// subscribers — and therefore to print mode's JSON stream — instead of
+		// vanishing during unwind (issue #18450). Disconnecting here would also
+		// drop the settled tool's result from the transcript. A tool that is
+		// still unsettled at the deadline forwards nothing more either way.
+		this.#disconnectFromAgent();
+		// beginDispose() drained the rest; this catches registrations made during teardown.
+		for (const dispose of this.#disposers.splice(0)) dispose();
+		this.#eventListeners = [];
+		this.#runStateListeners.clear();
+		this.#ircWakeHoldListeners.clear();
+		this.#sessionChangeCallbacks.clear();
 
 		// Event handlers can reopen the append writer while they persist their
 		// terminal message; that pipeline has drained (or hit the deadline).

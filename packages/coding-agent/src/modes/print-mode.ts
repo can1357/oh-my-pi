@@ -127,48 +127,98 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// through postmortem (130/143/129). Record the reason so the aborted-response
 	// branch below never races that with its own ordinary failure status.
 	let signalReason: postmortem.Reason | undefined;
+	// The serializer is owned here rather than inside `runPrintModeCore` because
+	// postmortem exits the process the moment this cleanup callback settles: a
+	// record already queued on stdout would be truncated mid-line unless the
+	// signal path joins the same tail the ordinary path awaits (issue #18450).
+	const stdout = createPrintModeStdout();
 	const cancelSignalTeardown = postmortem.register("print-mode-session", reason => {
 		signalReason = reason;
-		return session.dispose({ reason, mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+		return joinStdoutAfterDispose(
+			session.dispose({ reason, mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS }),
+			stdout,
+		);
 	});
 	try {
-		return await runPrintModeCore(session, options, () => signalReason !== undefined);
+		return await runPrintModeCore(session, options, () => signalReason !== undefined, stdout);
 	} finally {
 		cancelSignalTeardown();
 	}
+}
+
+/**
+ * Serialized print-mode stdout writes.
+ *
+ * `process.stdout.write` is fire-and-forget: a large final record (e.g. a
+ * multi-MB agent_end) can be dropped when the process exits before the pipe
+ * drains, truncating it mid-line while the process still exits 0. Serializing
+ * every write on the previous write's completion callback keeps records ordered
+ * and honors backpressure; `flushed()` is the tail every shutdown path joins
+ * before dispose/exit. Same truncation class as issue #5309 (issue #7635).
+ */
+interface PrintModeStdout {
+	write(text: string): void;
+	/** Resolves once every write queued so far has reached the pipe. */
+	flushed(): Promise<void>;
+}
+
+function createPrintModeStdout(): PrintModeStdout {
+	let tail: Promise<void> = Promise.resolve();
+	return {
+		write(text: string): void {
+			tail = tail.then(() => {
+				const { promise, resolve, reject } = Promise.withResolvers<void>();
+				process.stdout.write(text, err => {
+					if (err) reject(err);
+					else resolve();
+				});
+				return promise;
+			});
+		},
+		flushed: () => tail,
+	};
+}
+
+/**
+ * Awaits the stdout tail after disposal settles, whichever way it settles.
+ *
+ * The tail is read *after* disposal, never before it: `dispose()` forwards the
+ * events its own drain produces (that drain is what keeps a settling tool's
+ * `tool_execution_end` in the stream — see `AgentSession.dispose`), so each of
+ * those events queues a write on a tail NEWER than any promise captured up
+ * front. `flushed()` resolves the tail it is handed, so a pre-dispose snapshot
+ * leaves the record disposal produced unawaited and postmortem exits
+ * mid-line. Reading it afterwards covers exactly those writes, because
+ * disposal tears event forwarding down before it resolves — nothing can be
+ * queued past this call.
+ *
+ * The drain is bounded by the enclosing postmortem cleanup pass (the default
+ * 10 s deadline; this registration adds no `deadlineMs`), so a reader that
+ * never consumes the pipe delays the exit only until the pass budget expires —
+ * shutdown is not made unbounded. A disposal failure stays the error the pass
+ * sees; a failed stdout write is already unrecoverable at exit, and postmortem
+ * classifies the disconnect itself.
+ */
+async function joinStdoutAfterDispose(disposal: Promise<void>, stdout: PrintModeStdout): Promise<void> {
+	const [disposed] = await Promise.allSettled([disposal]);
+	await Promise.allSettled([stdout.flushed()]);
+	if (disposed.status === "rejected") throw disposed.reason;
 }
 
 async function runPrintModeCore(
 	session: AgentSession,
 	options: PrintModeOptions,
 	signalTeardownActive: () => boolean,
+	stdout: PrintModeStdout,
 ): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
 	session.disableStopTimeTodoReminders();
-
-	// process.stdout.write is fire-and-forget: a large final record (e.g. a
-	// multi-MB agent_end) can be dropped when the process exits before the pipe
-	// drains, truncating the record mid-line while the process still exits 0.
-	// Serialize every stdout write on the previous write's completion callback so
-	// records stay ordered and honor backpressure, then block shutdown on the
-	// tail before dispose/exit. Same truncation class as issue #5309 (issue #7635).
-	let stdoutTail: Promise<void> = Promise.resolve();
-	const writeStdoutLine = (text: string): void => {
-		stdoutTail = stdoutTail.then(() => {
-			const { promise, resolve, reject } = Promise.withResolvers<void>();
-			process.stdout.write(text, err => {
-				if (err) reject(err);
-				else resolve();
-			});
-			return promise;
-		});
-	};
 
 	// Emit session header for JSON mode
 	if (mode === "json") {
 		const header = session.sessionManager.getHeader();
 		if (header) {
-			writeStdoutLine(`${JSON.stringify(header)}\n`);
+			stdout.write(`${JSON.stringify(header)}\n`);
 		}
 	}
 	// Set up extensions for print mode (no UI, no command context)
@@ -359,7 +409,7 @@ async function runPrintModeCore(
 	session.subscribe(event => {
 		// In JSON mode, output all events
 		if (mode === "json") {
-			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
+			stdout.write(`${JSON.stringify(printableEvent(event))}\n`);
 		} else if (
 			event.type === "notice" &&
 			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE ||
@@ -583,9 +633,9 @@ async function runPrintModeCore(
 			// Output text content; narration the provider returned as thinking is part of the reply.
 			for (const content of presentNarrationAsAnswer(assistantMsg).content) {
 				if (content.type === "text") {
-					writeStdoutLine(`${sanitizeText(content.text)}\n`);
+					stdout.write(`${sanitizeText(content.text)}\n`);
 				} else if (printThoughts && content.type === "thinking" && content.thinking.trim().length > 0) {
-					writeStdoutLine(`${sanitizeText(content.thinking)}\n`);
+					stdout.write(`${sanitizeText(content.thinking)}\n`);
 				}
 			}
 		}
@@ -611,7 +661,7 @@ async function runPrintModeCore(
 	// Block shutdown until every serialized stdout write (including the final
 	// agent_end and late JSON advisor events) has drained; process.exit would
 	// otherwise discard the buffered tail and truncate the last record.
-	await stdoutTail;
+	await stdout.flushed();
 	// Dispose before returning the status instead of hard-exiting ahead of it:
 	// the awaited `dispose()` runs the browser reaper (releaseTabsForOwner), so
 	// an OMP-owned Chromium cannot survive the exit (issue #5643).
@@ -628,6 +678,13 @@ async function runPrintModeCore(
 		// transcript stops being retryable and becomes lost.
 		writeStderrLine(formatPersistenceDurabilityFailure(persistenceFailure.message));
 		await stderrTail;
+	} finally {
+		// The flush above ran before dispose, but dispose forwards the terminal
+		// events of a tool that settles inside its own drain, so it can queue
+		// JSON records on a newer tail after that snapshot. Join the tail again
+		// on every exit from the disposal, including its failure path: the
+		// caller terminates the process as soon as this returns (issue #18450).
+		await stdout.flushed();
 	}
 
 	// Text mode reports the terminal failure on stderr exactly as before: same

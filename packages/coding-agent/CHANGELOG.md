@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `omp --mode json` no longer drops a tool's terminal `tool_execution_end` event, or truncates the final JSON record while it drains, when a run is cancelled with `SIGTERM` ([#18450](https://github.com/can1357/oh-my-pi/issues/18450), [#18464](https://github.com/can1357/oh-my-pi/pull/18464) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes
