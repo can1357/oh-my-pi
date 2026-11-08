@@ -132,7 +132,7 @@ describe("InteractiveMode HUD pills", () => {
 		spyOn(session, "getRunningJobWidgets").mockImplementation(() => entries);
 
 		const segment = jobsSegment()!;
-		expect(prop(segment, "title")).toContain("bg_1  verb-bench · decode — decode 186 tok/s ▲ 15%");
+		expect(prop(segment, "title")).toContain("bg_1  loadtest · decode — decode 186 tok/s ▲ 15%");
 
 		entries = [{ id: "bg_1", type: "bash", view: { ...decode, headline: { text: "171 tok/s" } } }];
 
@@ -140,7 +140,7 @@ describe("InteractiveMode HUD pills", () => {
 		expect(next).not.toBe(segment);
 		const glance = nodes(next).find(node => prop(node, "role") === "omp.hud.glance");
 		expect(prop(glance, "spans")).toEqual([{ t: "171 tok/s", s: "num strong" }]);
-		expect(prop(next, "title")).toBe("1 job running  /jobs\nbg_1  verb-bench · decode — 171 tok/s");
+		expect(prop(next, "title")).toBe("1 job running  /jobs\nbg_1  loadtest · decode — 171 tok/s");
 	});
 
 	it("keeps the bare count segment while no running job draws a widget", () => {
