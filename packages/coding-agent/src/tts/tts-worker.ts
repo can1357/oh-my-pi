@@ -1,4 +1,6 @@
 import { createRequire } from "node:module";
+import * as os from "node:os";
+import * as path from "node:path";
 import { ensureRuntimeInstalled, getTinyModelsCacheDir, resolveRuntimeModule } from "@oh-my-pi/pi-utils";
 import type { ProgressInfo, RawAudio } from "../subprocess/transformers-types";
 import {
@@ -13,12 +15,16 @@ import {
 } from "../subprocess/worker-runtime";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "../tiny/device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
+import { ensureSherpaModelFiles, sherpaModelDir } from "../speech/sherpa-model-files";
+import { loadSherpaRuntime, SHERPA_PACKAGE, SHERPA_VERSION, type SherpaOfflineTts } from "../stt/sherpa-runtime";
 import {
 	getTtsLocalModelSpec,
+	resolveTtsSpeakerId,
 	resolveTtsSpeed,
 	resolveTtsVoice,
+	type KokoroJsTtsLocalModelSpec,
+	type SherpaTtsLocalModelSpec,
 	type TtsLocalModelKey,
-	type TtsLocalModelSpec,
 } from "./models";
 import {
 	getTtsRuntimeDir,
@@ -61,6 +67,8 @@ interface KokoroRuntime {
 	};
 }
 
+type LoadedTts = { engine: "kokoro-js"; model: KokoroTtsInstance } | { engine: "sherpa"; model: SherpaOfflineTts };
+
 /**
  * The `@huggingface/transformers` instance `kokoro-js` runs on. We only touch its
  * `env` (cache dir + log level) and `LogLevel`; inference goes through Kokoro.
@@ -81,7 +89,7 @@ interface TransformersEnv {
 	};
 }
 
-const models = new Map<TtsLocalModelKey, Promise<KokoroTtsInstance>>();
+const models = new Map<TtsLocalModelKey, Promise<LoadedTts>>();
 let synthesizeQueue = Promise.resolve();
 const kokoroRuntime = new MemoizedRuntime<KokoroRuntime>();
 
@@ -167,7 +175,7 @@ function loadKokoroRuntime(
 
 async function loadModelOnDevice(
 	runtime: KokoroRuntime,
-	spec: TtsLocalModelSpec,
+	spec: KokoroJsTtsLocalModelSpec,
 	modelKey: TtsLocalModelKey,
 	transport: TtsTransport,
 	requestId: string,
@@ -182,7 +190,7 @@ async function loadModelOnDevice(
 
 async function loadModelWithDeviceFallback(
 	runtime: KokoroRuntime,
-	spec: TtsLocalModelSpec,
+	spec: KokoroJsTtsLocalModelSpec,
 	modelKey: TtsLocalModelKey,
 	transport: TtsTransport,
 	requestId: string,
@@ -220,20 +228,79 @@ async function loadModelWithDeviceFallback(
 	throw new Error("No TTS devices configured");
 }
 
-async function loadModel(
+async function loadSherpaTtsModel(
+	spec: SherpaTtsLocalModelSpec,
 	modelKey: TtsLocalModelKey,
 	transport: TtsTransport,
 	requestId: string,
-): Promise<KokoroTtsInstance> {
+): Promise<LoadedTts> {
+	const runtime = await loadSherpaRuntime(phase =>
+		transport.send({
+			type: "progress",
+			id: requestId,
+			event: { modelKey, status: phase, name: `${SHERPA_PACKAGE}@${SHERPA_VERSION}` },
+		}),
+	);
+	const startedAt = performance.now();
+	const files = await ensureSherpaModelFiles({
+		repo: spec.repo,
+		files: spec.files,
+		directories: spec.directories,
+		archive: spec.archive,
+		onProgress: progress =>
+			transport.send({
+				type: "progress",
+				id: requestId,
+				event: {
+					modelKey,
+					status: progress.status,
+					name: `${spec.repo}/${progress.file ?? ""}`,
+					file: progress.file,
+					loaded: progress.loaded,
+					total: progress.total,
+				},
+			}),
+	});
+	const numThreads = Math.max(1, Math.min(4, os.availableParallelism()));
+	const model = await runtime.OfflineTts.createAsync({
+		model: {
+			kokoro: {
+				model: files.model!,
+				voices: files.voices!,
+				tokens: files.tokens!,
+				dataDir: path.join(sherpaModelDir(spec.repo), "espeak-ng-data"),
+				lexicon: `${files.usLexicon},${files.zhLexicon}`,
+			},
+			numThreads,
+			provider: "cpu",
+			debug: false,
+		},
+		maxNumSentences: 1,
+	});
+	sendLog(transport, "debug", "tts: sherpa model loaded", {
+		modelKey,
+		repo: spec.repo,
+		speakers: model.numSpeakers,
+		sampleRate: model.sampleRate,
+		numThreads,
+		elapsedMs: Math.round(performance.now() - startedAt),
+	});
+	return { engine: "sherpa", model };
+}
+
+async function loadModel(modelKey: TtsLocalModelKey, transport: TtsTransport, requestId: string): Promise<LoadedTts> {
 	const spec = getTtsLocalModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown local TTS model: ${modelKey}`);
 	const cached = replayCachedReady(models, modelKey, transport, requestId, TTS_TASK, spec.repo);
 	if (cached) return cached;
 
-	const runtime = await loadKokoroRuntime(transport, requestId, modelKey);
-	const startedAt = performance.now();
-	const loaded = loadModelWithDeviceFallback(runtime, spec, modelKey, transport, requestId).then(
-		({ model, device }) => {
+	let loading: Promise<LoadedTts>;
+	if (spec.engine === "sherpa") {
+		loading = loadSherpaTtsModel(spec, modelKey, transport, requestId);
+	} else {
+		const runtime = await loadKokoroRuntime(transport, requestId, modelKey);
+		const startedAt = performance.now();
+		loading = loadModelWithDeviceFallback(runtime, spec, modelKey, transport, requestId).then(({ model, device }) => {
 			sendLog(transport, "debug", "tts: local model loaded", {
 				modelKey,
 				repo: spec.repo,
@@ -242,6 +309,11 @@ async function loadModel(
 				dtype: ttsDtypeOverride ?? spec.dtype,
 				elapsedMs: Math.round(performance.now() - startedAt),
 			});
+			return { engine: "kokoro-js" as const, model };
+		});
+	}
+	const loaded = loading.then(
+		model => {
 			transport.send({
 				type: "progress",
 				id: requestId,
@@ -258,6 +330,35 @@ async function loadModel(
 	return loaded;
 }
 
+async function synthesizeSegment(
+	loaded: LoadedTts,
+	modelKey: TtsLocalModelKey,
+	text: string,
+	voice: string | undefined,
+	speed: number | undefined,
+): Promise<{ pcm: Float32Array; sampleRate: number }> {
+	const spec = getTtsLocalModelSpec(modelKey);
+	if (loaded.engine === "sherpa") {
+		const audio = loaded.model.generate({
+			text,
+			generationConfig: {
+				sid: resolveTtsSpeakerId(modelKey, voice),
+				speed: resolveTtsSpeed(speed),
+				silenceScale: 0.2,
+			},
+		});
+		if (audio.samples.length === 0) throw new Error("sherpa TTS returned no audio samples");
+		return { pcm: audio.samples, sampleRate: audio.sampleRate };
+	}
+	const output = await loaded.model.generate(text, {
+		voice: resolveTtsVoice(modelKey, voice),
+		speed: resolveTtsSpeed(speed),
+	});
+	const audio = Array.isArray(output.audio) ? output.audio[0] : output.audio;
+	if (!audio) throw new Error("Kokoro synthesis returned no audio samples");
+	return { pcm: audio, sampleRate: output.sampling_rate || spec?.sampleRate || 24_000 };
+}
+
 async function synthesize(
 	transport: TtsTransport,
 	requestId: string,
@@ -267,14 +368,7 @@ async function synthesize(
 	speed: number | undefined,
 ): Promise<{ pcm: Float32Array; sampleRate: number }> {
 	const synthesizer = await loadModel(modelKey, transport, requestId);
-	const output = await synthesizer.generate(text, {
-		voice: resolveTtsVoice(modelKey, voice),
-		speed: resolveTtsSpeed(speed),
-	});
-	const spec = getTtsLocalModelSpec(modelKey);
-	const audio = Array.isArray(output.audio) ? output.audio[0] : output.audio;
-	if (!audio) throw new Error("Kokoro synthesis returned no audio samples");
-	return { pcm: audio, sampleRate: output.sampling_rate || spec?.sampleRate || 24_000 };
+	return synthesizeSegment(synthesizer, modelKey, text, voice, speed);
 }
 
 function enqueueRequest(
@@ -328,7 +422,6 @@ async function runStreamSession(transport: TtsTransport, id: string, session: St
 		if (session.cancelled) return;
 		const synthesizer = await loadModel(session.modelKey, transport, id);
 		if (session.cancelled) return;
-		const spec = getTtsLocalModelSpec(session.modelKey);
 		const voice = resolveTtsVoice(session.modelKey, session.voice);
 		const speed = resolveTtsSpeed(session.speed);
 		let index = 0;
@@ -346,10 +439,8 @@ async function runStreamSession(transport: TtsTransport, id: string, session: St
 				await promise;
 				continue;
 			}
-			const output = await synthesizer.generate(segment, { voice, speed });
+			const output = await synthesizeSegment(synthesizer, session.modelKey, segment, voice, speed);
 			if (session.cancelled) break;
-			const audio = Array.isArray(output.audio) ? output.audio[0] : output.audio;
-			if (!audio) continue;
 			// Drain the IPC write before the next segment's inference: ONNX
 			// blocks this event loop for seconds at a time, so a fire-and-forget
 			// send would sit in the pipe queue until the session ends and every
@@ -360,8 +451,8 @@ async function runStreamSession(transport: TtsTransport, id: string, session: St
 				id,
 				index: index++,
 				text: segment,
-				pcm: audio,
-				sampleRate: output.sampling_rate || spec?.sampleRate || 24_000,
+				pcm: output.pcm,
+				sampleRate: output.sampleRate,
 			});
 		}
 		if (!session.cancelled) transport.send({ type: "stream-done", id });

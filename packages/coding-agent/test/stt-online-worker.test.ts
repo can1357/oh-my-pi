@@ -85,6 +85,11 @@ const offlineRecognizer = {
 const nativeRuntime: runtime.SherpaRuntime = {
 	OnlineRecognizer,
 	OfflineRecognizer: { createAsync: async () => offlineRecognizer },
+	OfflineTts: {
+		createAsync: async () => {
+			throw new Error("TTS is not used by this test");
+		},
+	},
 };
 const onlineSpec = registry.getSttModelSpec("nemotron-streaming-en-0.6b")!;
 const offlineSpec = registry.getSttModelSpec("parakeet-tdt-0.6b-v3")!;

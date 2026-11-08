@@ -20,7 +20,7 @@ export const cfgTtsLocalVoice = register({
 		tab: "providers",
 		group: "Services",
 		label: "Local TTS Voice",
-		description: "Kokoro voice used by the local TTS backend (American/British, female/male)",
+		description: "Voice used by the local TTS backend (English and Chinese Kokoro voices)",
 		options: TTS_LOCAL_VOICE_OPTIONS,
 	},
 });
@@ -91,7 +91,7 @@ export const cfgSpeechVoice = register({
 		tab: "providers",
 		group: "Services",
 		label: "Speech Vocalization Voice",
-		description: "Kokoro voice used when speaking the assistant's output aloud",
+		description: "Voice used when speaking the assistant's output aloud (English and Chinese Kokoro voices)",
 		options: TTS_LOCAL_VOICE_OPTIONS,
 	},
 });

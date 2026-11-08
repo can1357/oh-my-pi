@@ -1374,8 +1374,8 @@ describe("ACP agent", () => {
 		const result = (await harness.agent.extMethod("speech.models.list", {})) as Record<string, unknown> & {
 			speechToText: { models: Array<{ value: string }> };
 			textToSpeech: {
-				models: Array<{ value: string; voices: unknown[] }>;
-				voices: unknown[];
+				models: Array<{ value: string; voices: Array<{ value: string }> }>;
+				voices: Array<{ value: string }>;
 				speeds: Array<{ value: unknown }>;
 			};
 		};
@@ -1414,8 +1414,11 @@ describe("ACP agent", () => {
 		expect(result.speechToText.models).toContainEqual(
 			expect.objectContaining({ value: "local/nemotron-streaming-en-0.6b" }),
 		);
-		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
-		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);
+		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro", "local/kokoro-zh"]);
+		const voiceValues = new Set(result.textToSpeech.voices.map(voice => voice.value));
+		for (const model of result.textToSpeech.models) {
+			for (const voice of model.voices) expect(voiceValues.has(voice.value)).toBe(true);
+		}
 		// Speed presets are numbers so clients can write them straight into the numeric settings.
 		expect(result.textToSpeech.speeds.map(speed => speed.value)).toEqual([0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5]);
 

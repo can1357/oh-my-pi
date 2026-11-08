@@ -53,12 +53,41 @@ export interface SherpaOnlineRecognizer {
 	reset(stream: SherpaOnlineStream): void;
 }
 
-/** The native sherpa-onnx module surface used by the STT worker. */
+/** A sherpa-onnx `OfflineTts` instance used by the TTS worker. */
+export interface SherpaOfflineTts {
+	numSpeakers: number;
+	sampleRate: number;
+	generate(request: { text: string; generationConfig: { sid: number; speed: number; silenceScale: number } }): {
+		samples: Float32Array;
+		sampleRate: number;
+	};
+}
+
+export interface SherpaOfflineTtsConfig {
+	model: {
+		kokoro: {
+			model: string;
+			voices: string;
+			tokens: string;
+			dataDir: string;
+			lexicon: string;
+		};
+		numThreads: number;
+		provider: string;
+		debug: boolean;
+	};
+	maxNumSentences: number;
+}
+
+/** The native sherpa-onnx module surface used by the speech workers. */
 export interface SherpaRuntime {
 	OfflineRecognizer: {
 		createAsync(config: SherpaOfflineConfig): Promise<SherpaOfflineRecognizer>;
 	};
 	OnlineRecognizer: new (config: SherpaOfflineConfig & { enableEndpoint: boolean }) => SherpaOnlineRecognizer;
+	OfflineTts: {
+		createAsync(config: SherpaOfflineTtsConfig): Promise<SherpaOfflineTts>;
+	};
 }
 
 /**

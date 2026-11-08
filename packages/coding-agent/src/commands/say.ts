@@ -16,7 +16,7 @@ import { sayHelp as commandHelp } from "../cli/command-help";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage } from "../sdk";
-import { TTS_LOCAL_VOICE_VALUES } from "../tts/models";
+import { resolveTtsVoice, TTS_LOCAL_VOICE_VALUES } from "../tts/models";
 import { SpeakableStream } from "../tts/speakable";
 import { StreamingAudioPlayer } from "../tts/streaming-player";
 import { shutdownTtsClient, ttsClient } from "../tts/tts-client";
@@ -54,7 +54,7 @@ export default class Say extends Command {
 
 		const settings = await Settings.init({ cwd: getProjectDir() });
 		const model = flags.model ?? (await this.#resolveDefaultModel(settings));
-		const voice = flags.voice ?? cfgTtsLocalVoice.get(settings);
+		const voice = resolveTtsVoice(model, flags.voice ?? cfgTtsLocalVoice.get(settings));
 		const speed = flags.speed === undefined ? cfgTtsLocalSpeed.get(settings) : Number(flags.speed);
 		if (!Number.isFinite(speed) || speed <= 0) {
 			process.stderr.write(chalk.red(`error: invalid --speed: ${flags.speed}\n`));

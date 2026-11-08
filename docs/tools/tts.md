@@ -47,7 +47,7 @@ The SDK registers this write-approved custom tool when `speechgen.enabled=true` 
 
 ## Modes / Variants
 
-- Local: Kokoro-82M on-device inference; always WAV/PCM16. Model weights may need downloading before local inference can run.
+- Local: Kokoro-82M on-device inference; always WAV/PCM16. `local/kokoro` uses kokoro-js for English; `local/kokoro-zh` uses sherpa-onnx for Chinese/English. Model weights may need downloading before local inference can run.
 - xAI: Grok Voice cloud synthesis; MP3 or WAV.
 - OpenAI-compatible speech: selected cloud model and endpoint; MP3 or WAV.
 - Legacy `providers.tts` values (`local`, `xai`, `deepinfra`) migrate to speech-role selectors on settings load. `providers.tts` and `tts.localModel` are removed; local model selection now comes from the speech role.
@@ -65,8 +65,8 @@ The SDK registers this write-approved custom tool when `speechgen.enabled=true` 
 - Text limit: `1..15_000` JavaScript string characters for every backend.
 - xAI defaults: voice `eve`, sample rate `24000`, MP3 bit rate `128000`.
 - Built-in xAI voices: `ara`, `eve`, `leo`, `rex`, `sal`; custom voice ids are accepted.
-- Default local model: `local/kokoro` (`onnx-community/Kokoro-82M-v1.0-ONNX`, q8).
-- Default local voice: `af_heart`; the settings catalog also includes `af_bella`, `af_nicole`, `af_aoede`, `af_kore`, `af_sarah`, `am_michael`, `am_fenrir`, `am_puck`, `bf_emma`, `bm_george`, and `bm_fable`.
+- Default local model: `local/kokoro` (`onnx-community/Kokoro-82M-v1.0-ONNX`, q8). Select `local/kokoro-zh` through the `speech` role for Chinese/English (sherpa-onnx Kokoro-82M v1.1-zh).
+- Default local voice: `af_heart`; the settings catalog also includes `af_bella`, `af_nicole`, `af_aoede`, `af_kore`, `af_sarah`, `am_michael`, `am_fenrir`, `am_puck`, `bf_emma`, `bm_george`, and `bm_fable`. Chinese voices are `zf_001`–`zf_005`, `zf_017`, and `zm_010`–`zm_015`; `local/kokoro-zh` uses `zf_001` when an English voice id is selected.
 
 ## Errors
 

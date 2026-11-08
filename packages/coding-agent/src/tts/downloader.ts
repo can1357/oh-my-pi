@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
+import { isSherpaModelCached } from "../speech/sherpa-model-files";
 import { getTtsLocalModelSpec } from "./models";
 import { isTtsRuntimeCached } from "./runtime";
 import { ttsClient } from "./tts-client";
@@ -12,15 +13,17 @@ export interface TtsDownloadProgress {
 }
 
 /**
- * Whether the selected local TTS model and the side Kokoro runtime are already
- * present. transformers.js stores `main`-revision files at
- * `<cacheDir>/<repo>/...`, so any `.onnx` weight under the repo dir means the
- * model weights can load without a network fetch; the Kokoro package runtime is
- * version-keyed separately and must also exist before setup can report ready.
+ * Whether the selected local TTS model is already present. Kokoro-js stores
+ * transformers.js files under `<cacheDir>/<repo>/...` and needs its version-keyed
+ * side runtime; sherpa models validate their extracted file/directory set in
+ * the shared tiny-model cache.
  */
 export async function isTtsModelCached(modelKey: string): Promise<boolean> {
 	const spec = getTtsLocalModelSpec(modelKey);
 	if (!spec) return false;
+	if (spec.engine === "sherpa") {
+		return isSherpaModelCached({ repo: spec.repo, files: spec.files, directories: spec.directories });
+	}
 	const repoDir = path.join(getTinyModelsCacheDir(), ...spec.repo.split("/"));
 	try {
 		const entries = await fs.readdir(repoDir, { recursive: true });

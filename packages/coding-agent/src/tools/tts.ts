@@ -14,7 +14,7 @@ import { roleCandidatePool } from "../config/model-roles";
 import { settings, type Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import ttsDescription from "../prompts/tools/tts.md" with { type: "text" };
-import { DEFAULT_TTS_VOICE, KOKORO_VOICES } from "../tts/models";
+import { DEFAULT_TTS_VOICE, KOKORO_VOICES, resolveTtsVoice } from "../tts/models";
 import { ttsClient } from "../tts/tts-client";
 import { encodeWav } from "../tts/wav";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
@@ -85,12 +85,12 @@ export function resolveLocalWavPath(outputPath: string): { wavPath: string; subs
 	return { wavPath: `${base}.wav`, substituted: true };
 }
 
-function readLocalVoice(settingsInstance: Settings): string {
+function readLocalVoice(settingsInstance: Settings, modelId: string): string {
 	try {
 		const value = cfgTtsLocalVoice.get(settingsInstance);
-		return typeof value === "string" && value ? value : DEFAULT_TTS_VOICE;
+		return resolveTtsVoice(modelId, typeof value === "string" && value ? value : DEFAULT_TTS_VOICE);
 	} catch {
-		return DEFAULT_TTS_VOICE;
+		return resolveTtsVoice(modelId, DEFAULT_TTS_VOICE);
 	}
 }
 
@@ -144,7 +144,7 @@ async function synthesizeLocal(
 	outputPath: string,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
-	const voice = readLocalVoice(settingsInstance);
+	const voice = readLocalVoice(settingsInstance, model.id);
 	const speed = cfgTtsLocalSpeed.get(settingsInstance);
 	const audio = await ttsClient.synthesize(model.id, params.text, { voice, speed, signal });
 	if (!audio) {
