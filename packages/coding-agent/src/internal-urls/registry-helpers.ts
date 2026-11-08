@@ -12,11 +12,12 @@ import { AgentRegistry } from "../registry/agent-registry";
 const extraArtifactsDirs = new Set<string>();
 /**
  * Transcript/output leases created by this process under the OS temp dir.
- * Each lease tracks the agents with pending or unapplied recovery inside it,
+ * Each lease tracks independent pending or unapplied recovery captures,
  * including descendants whose session-backed directories share that lease.
  */
 const temporaryArtifactsDirs = new Map<string, Set<string>>();
 const pendingArtifactsCleanups = new Map<string, () => void>();
+const activeArtifactsCleanups = new Map<string, Promise<void>>();
 let exitSweepArmed = false;
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
 const MAX_SCAN_DEPTH = 8;
@@ -50,13 +51,13 @@ export function registerTemporaryArtifactsDir(dir: string): () => void {
 	};
 }
 
-/** Protect every containing lease until this agent's recovery has been applied. */
-export function setTemporaryArtifactsRecovery(dir: string, agentId: string, required: boolean): void {
-	const owner = path.resolve(dir, `${agentId}.jsonl`);
+/** Protect every containing lease for this capture, independently of its agent's other captures. */
+export function setTemporaryArtifactsRecovery(dir: string, captureId: string, required: boolean): void {
+	const captureDir = path.resolve(dir);
 	for (const [lease, recovery] of temporaryArtifactsDirs) {
-		if (!isWithinArtifactsDir(lease, owner)) continue;
-		if (required) recovery.add(owner);
-		else recovery.delete(owner);
+		if (!isWithinArtifactsDir(lease, captureDir)) continue;
+		if (required) recovery.add(captureId);
+		else recovery.delete(captureId);
 		if (!required && recovery.size === 0 && pendingArtifactsCleanups.has(lease)) {
 			void cleanupTemporaryArtifactsDir(lease).catch(err => {
 				logger.warn("Temporary artifacts directory could not be removed after recovery application", {
@@ -79,7 +80,16 @@ function isWithinArtifactsDir(dir: string, file: string): boolean {
 
 /** Request disposal; a registered agent still owns its transcript and output. */
 export async function cleanupTemporaryArtifactsDir(dir: string): Promise<void> {
+	const active = activeArtifactsCleanups.get(dir);
+	if (active) return active;
 	if (!temporaryArtifactsDirs.has(dir)) return;
+	for (const [otherDir, cleanup] of activeArtifactsCleanups) {
+		if (isWithinArtifactsDir(otherDir, dir) || isWithinArtifactsDir(dir, otherDir)) {
+			// Recursive removals of ancestors and descendants must not race.
+			await cleanup;
+			return cleanupTemporaryArtifactsDir(dir);
+		}
+	}
 	const registry = AgentRegistry.global();
 	const registered = registry.list().some(ref => ref.sessionFile && isWithinArtifactsDir(dir, ref.sessionFile));
 	if (registered || hasTemporaryArtifactsRecovery(dir)) {
@@ -95,9 +105,17 @@ export async function cleanupTemporaryArtifactsDir(dir: string): Promise<void> {
 		return;
 	}
 	releasePendingArtifactsCleanup(dir);
-	await fs.promises.rm(dir, { recursive: true, force: true });
-	temporaryArtifactsDirs.delete(dir);
-	extraArtifactsDirs.delete(dir);
+	const cleanup = fs.promises
+		.rm(dir, { recursive: true, force: true })
+		.then(() => {
+			temporaryArtifactsDirs.delete(dir);
+			extraArtifactsDirs.delete(dir);
+		})
+		.finally(() => {
+			activeArtifactsCleanups.delete(dir);
+		});
+	activeArtifactsCleanups.set(dir, cleanup);
+	await cleanup;
 }
 
 function releasePendingArtifactsCleanup(dir: string): void {
@@ -136,6 +154,7 @@ export function resetRegisteredArtifactDirsForTests(): void {
 	for (const dir of pendingArtifactsCleanups.keys()) releasePendingArtifactsCleanup(dir);
 	extraArtifactsDirs.clear();
 	temporaryArtifactsDirs.clear();
+	activeArtifactsCleanups.clear();
 }
 
 /**

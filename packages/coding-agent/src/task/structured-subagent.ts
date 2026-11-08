@@ -945,7 +945,10 @@ async function resolveNestedPatchPaths(
 ): Promise<{ paths: string[]; failure?: string }> {
 	if (result.nestedPatchPaths) return { paths: result.nestedPatchPaths };
 	try {
-		return { paths: await persistNestedPatches(artifactsDir, result.id, result.nestedPatches ?? []) };
+		const nestedPatches = result.nestedPatches ?? [];
+		if (nestedPatches.length === 0) return { paths: [] };
+		result.recoveryCaptureId ??= crypto.randomUUID();
+		return { paths: await persistNestedPatches(artifactsDir, result.id, nestedPatches, result.recoveryCaptureId) };
 	} catch (error) {
 		return { paths: [], failure: error instanceof Error ? error.message : String(error) };
 	}
@@ -1185,9 +1188,14 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			(policy.isIsolated &&
 				hasCapturedWork &&
 				(!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
-		// A session-backed child can share a temporary ancestor. Settle only
-		// this agent's claim; another child's unapplied recovery still owns it.
-		if (settled) setTemporaryArtifactsRecovery(lease.artifactsDir, settled.id, preserveRecoveryArtifacts);
+		// Settle this exact capture, not the agent: release may already have
+		// persisted a newer capture while the original merge was awaiting I/O.
+		if (settled) {
+			if (preserveRecoveryArtifacts) settled.recoveryCaptureId ??= crypto.randomUUID();
+			if (settled.recoveryCaptureId) {
+				setTemporaryArtifactsRecovery(lease.artifactsDir, settled.recoveryCaptureId, preserveRecoveryArtifacts);
+			}
+		}
 		const shouldRetainArtifacts =
 			request.detached === true ||
 			preserveRecoveryArtifacts ||

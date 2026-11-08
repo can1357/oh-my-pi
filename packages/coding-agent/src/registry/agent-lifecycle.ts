@@ -672,6 +672,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				}
 			}
 			try {
+				// Capture owned recovery before unregistering: removal can trigger artifact-lease cleanup.
 				await onRelease?.();
 			} catch (error) {
 				logger.warn("AgentLifecycleManager.release: owned resource cleanup failed", {

@@ -151,8 +151,8 @@ export interface AsyncJob {
 	 * that `runStructuredSubagent()` retained past completion (so a
 	 * delayed `agent://<id>` handle in an `async-result` delivery still
 	 * resolves). The manager invokes and clears this exactly once — on
-	 * eviction or manager disposal — so the retained directory does not
-	 * outlive the job row it was kept alive for.
+	 * eviction or manager disposal. The closure requests cleanup; registered
+	 * agents and unapplied recovery can keep the containing lease alive.
 	 */
 	retainedArtifactsCleanup?: () => Promise<void>;
 }

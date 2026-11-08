@@ -38,27 +38,62 @@ const model = createMockModel({
 	handler: () => {
 		const turn = response++;
 		if (turn === 0) {
-			return { content: [{ type: "toolCall", name: "write", arguments: { path: "file.txt", content: "applied original work\n" } }] };
+			return {
+				content: [
+					{ type: "toolCall", name: "write", arguments: { path: "file.txt", content: "applied original work\n" } },
+				],
+			};
 		}
 		if (turn === 2 && changed) {
-			return { content: [{ type: "toolCall", name: "write", arguments: {
-				path: nested ? "vendor/nested.txt" : "file.txt",
-				content: nested ? "late unique nested recovery\n" : "applied original work\nlate unique recovery\n",
-			} }] };
+			return {
+				content: [
+					{
+						type: "toolCall",
+						name: "write",
+						arguments: {
+							path: nested ? "vendor/nested.txt" : "file.txt",
+							content: nested
+								? "late unique nested recovery\n"
+								: "applied original work\nlate unique recovery\n",
+						},
+					},
+				],
+			};
 		}
 		return { content: ["done"] };
 	},
 });
 const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
 const find = modelRegistry.find.bind(modelRegistry);
-modelRegistry.find = (provider, id) => provider === "mock" && id === model.id ? model : find(provider, id);
+modelRegistry.find = (provider, id) => (provider === "mock" && id === model.id ? model : find(provider, id));
 modelRegistry.getAvailable = () => [model];
-const agent: AgentDefinition = { name: "late", description: "Write work", systemPrompt: "Write file.", source: "bundled", tools: ["write"], model: [`mock/${model.id}`] };
+const agent: AgentDefinition = {
+	name: "late",
+	description: "Write work",
+	systemPrompt: "Write file.",
+	source: "bundled",
+	tools: ["write"],
+	model: [`mock/${model.id}`],
+};
 const session = {
-	cwd, hasUI: false,
-	settings: Settings.isolated({ "task.isolation.enabled": true, "isolation.backend": "rcopy", "task.agentIdleTtlMs": 0, "launch.enabled": false }),
-	getSessionFile: () => null, getSessionSpawns: () => "*", getSessionAgents: () => [agent], getPlanModeState: () => undefined,
-	authStorage, modelRegistry, restrictToolNames: true, enableMCP: false, enableLsp: false, enableIrc: false,
+	cwd,
+	hasUI: false,
+	settings: Settings.isolated({
+		"task.isolation.enabled": true,
+		"isolation.backend": "rcopy",
+		"task.agentIdleTtlMs": 0,
+		"launch.enabled": false,
+	}),
+	getSessionFile: () => null,
+	getSessionSpawns: () => "*",
+	getSessionAgents: () => [agent],
+	getPlanModeState: () => undefined,
+	authStorage,
+	modelRegistry,
+	restrictToolNames: true,
+	enableMCP: false,
+	enableLsp: false,
+	enableIrc: false,
 } as unknown as ToolSession;
 let patchPath: string | undefined;
 let patch: string | undefined;
@@ -70,7 +105,14 @@ async function release(): Promise<void> {
 	assert.notEqual(workdir, cwd);
 	if (changed) await ref.session.prompt("Write the follow-up recovery work now.");
 	assert(await AgentLifecycleManager.global().release("Late"));
-	assert.equal(await fs.stat(workdir).then(() => true, () => false), false, "release must remove the isolated tree");
+	assert.equal(
+		await fs.stat(workdir).then(
+			() => true,
+			() => false,
+		),
+		false,
+		"release must remove the isolated tree",
+	);
 	if (nested) {
 		const name = (await fs.readdir(path.dirname(patchPath!))).find(entry => entry.startsWith("Late.nested-"));
 		assert(name, "release must persist the nested capture");
@@ -83,29 +125,39 @@ const originalFile = Bun.file.bind(Bun);
 let intercepted = false;
 // Hold only completion of the real patch read: capture, apply and release stay real.
 Bun.file = ((input, ...options) => {
-	const file = originalFile(input, ...options);
+	const file = Reflect.apply(originalFile, Bun, [input, ...options]) as Bun.BunFile;
 	if (typeof input !== "string" || !input.endsWith("/Late.patch")) return file;
 	return new Proxy(file, {
 		get(target, key) {
-			if (key === "text") return async () => {
-				const text = await target.text();
-				if (!intercepted) {
-					intercepted = true;
-					patchPath = input;
-					assert.equal(await originalFile(path.join(cwd, "file.txt")).text(), "original\n");
-					if (before) await release();
-				}
-				return text;
-			};
+			if (key === "text")
+				return async () => {
+					const text = await target.text();
+					if (!intercepted) {
+						intercepted = true;
+						patchPath = input;
+						assert.equal(await originalFile(path.join(cwd, "file.txt")).text(), "original\n");
+						if (before) await release();
+					}
+					return text;
+				};
 			const value = Reflect.get(target, key, target);
 			return typeof value === "function" ? value.bind(target) : value;
 		},
 	});
 }) as typeof Bun.file;
 const settled = await runStructuredSubagent({
-	session, invocationKind: "eval", assignment: "write initial work", agent: agent.name, structured: false,
-	identity: { id: "Late" }, keepAlive: true, retainArtifacts: true,
-	isolation: { requested: true, apply: true, merge: "patch" }, onArtifactsRetained: owner => { cleanup = owner; },
+	session,
+	invocationKind: "eval",
+	assignment: "write initial work",
+	agent: agent.name,
+	structured: false,
+	identity: { id: "Late" },
+	keepAlive: true,
+	retainArtifacts: true,
+	isolation: { requested: true, apply: true, merge: "patch" },
+	onArtifactsRetained: owner => {
+		cleanup = owner;
+	},
 });
 Bun.file = originalFile;
 assert(intercepted, "probe must intercept the actual merge read");

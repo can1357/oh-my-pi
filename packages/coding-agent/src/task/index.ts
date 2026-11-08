@@ -1671,10 +1671,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					signal: runSignal,
 					onUpdate: forwardSyncProgress,
 					onArtifactsRetained: cleanup => {
-						// Tie the retained temp directory's lifetime to this job
-						// row: the manager runs `cleanup` exactly once, on
-						// eviction or manager disposal, instead of it leaking
-						// for the process lifetime. Look up by the resolved
+						// The job row requests cleanup on eviction or manager disposal;
+						// registered agents and unapplied recovery can keep the lease
+						// alive. Look up by the resolved
 						// `jobId`, not the requested `agentId` — `register()`
 						// suffixes `jobId` on collision, and looking up the
 						// requested id would hit an unrelated pre-existing row.

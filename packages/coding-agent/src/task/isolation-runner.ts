@@ -224,10 +224,11 @@ export async function persistNestedPatches(
 	artifactsDir: string,
 	agentId: string,
 	nestedPatches: readonly NestedRepoPatch[],
+	captureId: string,
 ): Promise<string[]> {
-	// Protect in-flight recovery before the first byte, until the merge outcome
-	// releases this agent's claim. Other agents in the lease remain independent.
-	if (nestedPatches.length > 0) setTemporaryArtifactsRecovery(artifactsDir, agentId, true);
+	// Protect before the first byte, using the same identity as the root patch
+	// and returned result when they belong to one capture.
+	if (nestedPatches.length > 0) setTemporaryArtifactsRecovery(artifactsDir, captureId, true);
 	const saved: string[] = [];
 	try {
 		for (const [index, nestedPatch] of nestedPatches.entries()) {
@@ -253,6 +254,7 @@ interface IsolationPatchArtifacts {
 	hasRootChanges: boolean;
 	nestedPatches: NestedRepoPatch[];
 	nestedPatchPaths: string[];
+	recoveryCaptureId?: string;
 }
 
 interface IsolationPatchCapture {
@@ -271,18 +273,21 @@ async function persistIsolationPatch(
 	artifactsDir: string,
 	agentId: string,
 ): Promise<IsolationPatchCapture> {
-	if (delta.rootPatch.trim().length > 0 || delta.nestedPatches.length > 0) {
-		setTemporaryArtifactsRecovery(artifactsDir, agentId, true);
-	}
+	const hasChanges = delta.rootPatch.trim().length > 0 || delta.nestedPatches.length > 0;
+	const recoveryCaptureId = hasChanges ? crypto.randomUUID() : undefined;
+	if (recoveryCaptureId) setTemporaryArtifactsRecovery(artifactsDir, recoveryCaptureId, true);
 	const patchPath = path.join(artifactsDir, `${agentId}.patch`);
 	await Bun.write(patchPath, delta.rootPatch);
-	const nestedPatchPaths = await persistNestedPatches(artifactsDir, agentId, delta.nestedPatches);
+	const nestedPatchPaths = recoveryCaptureId
+		? await persistNestedPatches(artifactsDir, agentId, delta.nestedPatches, recoveryCaptureId)
+		: [];
 	return {
 		artifacts: {
 			patchPath,
 			hasRootChanges: delta.rootPatch.trim().length > 0,
 			nestedPatches: delta.nestedPatches,
 			nestedPatchPaths,
+			recoveryCaptureId,
 		},
 		fingerprint: deltaFingerprint(delta.rootPatch, delta.nestedPatches),
 	};
@@ -579,18 +584,23 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			handedOff = deltaFingerprint(commitResult?.rootPatch ?? "", commitResult?.nestedPatches ?? []);
 			// The branch holds the root-repo work, but nested-repo patches exist
 			// only in memory until written; the workspace goes away in `finally`.
+			const recoveryCaptureId = commitResult?.nestedPatches.length ? crypto.randomUUID() : undefined;
 			try {
-				const nestedPatchPaths = await persistNestedPatches(
-					opts.artifactsDir,
-					opts.agentId,
-					commitResult?.nestedPatches ?? [],
-				);
+				const nestedPatchPaths = recoveryCaptureId
+					? await persistNestedPatches(
+							opts.artifactsDir,
+							opts.agentId,
+							commitResult!.nestedPatches,
+							recoveryCaptureId,
+						)
+					: [];
 				return rememberAgentArtifacts({
 					...result,
 					branchName: commitResult?.branchName,
 					branchBaseSha: commitResult?.baseSha,
 					nestedPatches: commitResult?.nestedPatches,
 					nestedPatchPaths,
+					recoveryCaptureId,
 				});
 			} catch (persistErr) {
 				retainWorkspace = true;
@@ -600,6 +610,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					branchName: commitResult?.branchName,
 					branchBaseSha: commitResult?.baseSha,
 					nestedPatches: commitResult?.nestedPatches,
+					recoveryCaptureId,
 					error: renderIsolationError({
 						kind: "nested-capture-failed",
 						message: persistErr instanceof Error ? persistErr.message : String(persistErr),

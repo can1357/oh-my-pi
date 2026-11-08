@@ -2533,6 +2533,8 @@ export interface SingleResult {
 	isolated?: boolean;
 	/** Patch path for isolated worktree output */
 	patchPath?: string;
+	/** Process-local identity of the recovery capture; settlement must not release another capture by this agent. */
+	recoveryCaptureId?: string;
 	/**
 	 * Whether `patchPath` holds a non-empty root-repo diff. `false` when the
 	 * agent's changes all live in nested repos (see `nestedPatchPaths`), so

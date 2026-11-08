@@ -195,7 +195,12 @@ describe("hasResolvableTranscript", () => {
 			const dir = path.join(root, "lease");
 			registerTemporaryArtifactsDir(dir);
 			const patch = "diff --git a/file.txt b/file.txt\n+unique nested work\n";
-			const [saved] = await persistNestedPatches(dir, "Worker", [{ relativePath: "nested/pkg", patch }]);
+			const [saved] = await persistNestedPatches(
+				dir,
+				"Worker",
+				[{ relativePath: "nested/pkg", patch }],
+				crypto.randomUUID(),
+			);
 			// Exercise the exit handler at the producer boundary, before the
 			// structured runner has returned and can classify the result.
 			sweepTemporaryArtifactsDirs();
