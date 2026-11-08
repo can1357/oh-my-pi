@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.2] - 2026-11-08
+
 ### Breaking Changes
 
 - `logoutCredential()` now accepts an `AgentSession` instead of a model registry and session ID. Hosts must install a scoped-model refresher with `AgentSession.setScopedModelsRefresher()`; `InteractiveMode` and `InteractiveModeContext` no longer accept `refreshScopedModelsAfterLogin`.
