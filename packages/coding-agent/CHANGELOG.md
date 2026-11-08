@@ -24,6 +24,9 @@
 ### Fixed
 
 - `/shake thinking` no longer claims freed context tokens for reasoning that OpenAI Responses still replays from native history ([#18476](https://github.com/can1357/oh-my-pi/issues/18476)).
+### Fixed
+
+- Browser `role/` selectors now find named sections and other implicit landmark and structural roles in Chrome and Tern, so scoped snapshots and observations can target them; a `role/` selector with anything after its name filter, such as a chained `>> role/combobox`, is refused instead of matching the outer role ([#17895](https://github.com/can1357/oh-my-pi/pull/17895) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.1] - 2026-11-08
 
