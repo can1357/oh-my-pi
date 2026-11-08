@@ -848,7 +848,10 @@ export class InputController {
 	 * and HUD rows focus that agent in one action, and pointer motion lights up
 	 * the hover band on the target under the cursor. Every SGR report is consumed
 	 * while inline tracking owns the terminal so button/wheel bytes never reach
-	 * the editor as typed input; clicks on chrome simply swallow.
+	 * the editor as typed input; clicks on chrome simply swallow. Wheel ticks are
+	 * consumed the same way but cannot scroll: the terminal already chose to
+	 * report instead of scrolling, and no escape sequence moves its scrollback
+	 * viewport (#18458).
 	 */
 	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!data.startsWith("\x1b[<")) return undefined;

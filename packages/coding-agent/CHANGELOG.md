@@ -15,6 +15,9 @@
 ### Fixed
 
 - A bare argument typed after an MCP prompt command (`/server:prompt value`) now fills the prompt's first free declared argument instead of being dropped, and a name already given as `key=value` is skipped rather than swallowing a positional ([#18473](https://github.com/can1357/oh-my-pi/pull/18473) by [@tatus9](https://github.com/tatus9))
+### Fixed
+
+- The `tui.mouse` setting now says mouse capture stops wheel scrolling instead of promising that wheel scroll becomes Shift+wheel ([#18458](https://github.com/can1357/oh-my-pi/issues/18458))
 
 ## [18.18.1] - 2026-11-08
 
