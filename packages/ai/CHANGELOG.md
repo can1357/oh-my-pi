@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added mid-conversation tool additions for the Responses and Codex providers: a tool that becomes active later goes out as an `additional_tools` input item at that point instead of re-declaring every tool, so the cached prompt prefix survives ([#18520](https://github.com/can1357/oh-my-pi/pull/18520) by [@Delije4](https://github.com/Delije4))
 - Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
 - Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
 
