@@ -1,6 +1,6 @@
 # Usage governor
 
-The usage governor paces eligible paid quota across the agent processes on one machine. It is off by default. When `usageGovernor.enabled` is `true`, eligible requests using a stored credential of this agent directory are checked against cached usage windows. If sending now would take the account past its allowance line, the request waits until the line catches up. Waits end when the request is aborted.
+The usage governor paces eligible paid quota across the agent processes on one machine. It is off by default. When `usageGovernor.enabled` is `true`, eligible requests using a stored credential of this agent directory are checked against cached usage windows. If sending now would take the account past its allowance line, the request waits until the line catches up, the observation becomes stale, or the governor is disabled. Waits can also be aborted.
 
 The governor is a forecast built from cached data. It does not guarantee that a request succeeds, that a provider limit is never reached, or that a wait ends before a reset.
 
@@ -27,7 +27,7 @@ For each applicable window of the account a request would use:
 - Only windows with a finite, current reset time are paced. Windowless limits such as credits or extra usage, and rolling windows, are not paced.
 - The reserve `r` is the account's reset target as a fraction. With `interactiveReserve: spend` and a request a person is waiting on, `r` is 0.
 - The allowance line `A` is `(1 - r) * (lead + (1 - lead) * x)`, where `x` is the elapsed share of the window. It starts at `lead` and reaches `1 - r` at reset. When the window length is unknown, `A` is `1 - r`.
-- The need is `u + (p + 1) * c`. `u` is the used fraction in the cached snapshot. `p` counts reservations created after that snapshot was fetched, across every process on this machine. `c` is the calibrated cost per request, `0` until calibrated.
+- The need is `u + (p + 1) * c`. `u` is the used fraction in the cached snapshot. `p` counts reservations not yet reflected in that snapshot, including live in-flight requests, across processes on this machine. `c` is the calibrated cost per request, `0` until calibrated.
 - If the snapshot is exhausted or the need is above `1 - r`, the window is `closed` until its reset.
 - If the need is at or below `A`, the window is `open`.
 - Otherwise the window is `paced` until the line reaches the need, and the request waits.
@@ -40,9 +40,9 @@ The governor never generates work to consume quota. A request is never sent earl
 
 ## Account routing
 
-The governor evaluates eligible accounts and configured fallback targets using cached evidence. Open included allowances are preferred; paced accounts can be compared by their admissible time. With `roleProtection: prefer-alternatives`, it can favor an independent open allowance for a flexible role when another role depends on the shared allowance. Set it to `off` to disable that preference. Protection is a preference, not a reservation or a guarantee.
+The governor evaluates eligible accounts and configured fallback targets using cached evidence. It prefers verified open included allowances; it does not compare paced accounts by their admissible time. With `roleProtection: prefer-alternatives`, it can favor an independent open allowance for a flexible role when another role depends on the shared allowance. Set it to `off` to disable that preference. Protection is a preference, not a reservation or a guarantee.
 
-When enabled, governed fallback can select a model and account within the requesting role's authorized configured chain, subject to the enabled-model and disabled-provider settings. It does not widen that chain. Explicit model requests remain bounded by their own authorized targets. Unknown routes do not attract proactive switching. With the governor off, the existing `retry.usageAwareFallback` behavior applies.
+When enabled, governed fallback can select a model and account within the requesting role's authorized configured chain, subject to the enabled-model and disabled-provider settings. It does not widen that chain. Explicit model requests remain bounded by their own authorized targets. Unknown routes do not attract proactive switching. Existing `retry.usageAwareFallback` settings continue to apply independently of the governor.
 
 ## Interactive reserve: hold or spend
 
@@ -75,7 +75,7 @@ A governor wait is not a provider block. It writes no `auth_credential_blocks` r
 ## Unknown, stale and degraded states
 
 - `unknown`: required identity, provider eligibility, model or cached usage evidence is missing or cannot be verified. An explicit request is not held on that basis, but an unknown route is not a proactive switching target.
-- `stale`: the cached snapshot is older than 15 minutes. It never holds a request either. Its last values are shown with their age.
+- `stale`: the cached snapshot is older than 15 minutes. It does not hold an explicit request. A bound route requiring verified allowance is rejected unsent when its evidence expires. The governor does not refresh usage itself: an external refresh can extend a wait, but a headless session without refreshed observations eventually releases an unbound wait.
 - Degraded ledger: the shared ledger is busy past its timeout or hits an error. Admission is skipped for that request, so it is sent ungoverned. The status shows `degraded` with the reason, and the next admission retries after 30 seconds. The governor fails open. It never blocks a request because its own storage is unhealthy.
 
 ## Banked resets
@@ -87,7 +87,7 @@ The governor never counts a banked reset as allowance, never redeems one, and ne
 ## Limits
 
 - The coverage is cooperative. Only processes on this machine, with this agent directory and the governor enabled, see each other's reservations. Other profiles, machines and applications appear only through the usage snapshots they produce.
-- Built-in governed allowance adapters are currently limited to OpenAI Codex and Z.AI. Codex requires OAuth and cached evidence that paid overage is disabled; Z.AI requires its coding-plan endpoint and applicable cached limits. Other providers, unsupported endpoints, and reports that cannot establish eligibility remain unknown.
+- The built-in governed allowance adapter covers OpenAI Codex OAuth only, and requires cached evidence that paid overage is disabled. Z.AI and other providers can have matching stored credentials paced against fresh applicable windows, but their allowance is unknown for proactive routing and role protection unless an adapter verifies it.
 - Routing uses cached reports, not a fresh network probe. It requires a matching stored credential and identity, an applicable model and endpoint, and all required limit observations to be current and no older than 15 minutes. Broker mode without local cache entries cannot establish those facts.
 - The governor paces against the cached snapshot. The provider's own state can be ahead of or behind that snapshot, and a snapshot is trusted for up to 15 minutes.
 - The governor reads cached snapshots only. It never fetches usage, refreshes a token, reloads the credential pool, or contacts the provider to decide a wait.
