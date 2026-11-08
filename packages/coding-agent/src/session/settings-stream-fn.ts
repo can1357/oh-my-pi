@@ -29,6 +29,7 @@ import {
 	cfgProvidersMuseCodeStoreResponses,
 	cfgProvidersOpenaiCodexDaybreak,
 	cfgProvidersOpenaiLiveSteering,
+	cfgProvidersOpenaiResponsesWebsockets,
 	cfgProvidersOpenaiWebsockets,
 	cfgProvidersOpenrouterVariant,
 	cfgProvidersStreamFirstEventTimeoutSeconds,
@@ -38,10 +39,22 @@ import {
 	validateProviderMaxInFlightRequests,
 } from "./settings";
 
-/** Map `providers.openaiWebsockets` to the provider `preferWebsockets` hint (`auto` → model default). */
-export function resolveOpenAIWebsocketPreference(settings: Settings): boolean | undefined {
+/** Apply each API's setting once; standard Responses preferences can only narrow it. */
+export function resolveWebsocketPreference(
+	settings: Settings,
+	model: Model | undefined,
+	requestPreference?: boolean,
+): boolean | undefined {
+	if (model?.api === "openai-responses") {
+		return (
+			cfgProvidersOpenaiResponsesWebsockets.get(settings) &&
+			model.preferWebsockets !== false &&
+			requestPreference !== false
+		);
+	}
+	if (model?.api !== "openai-codex-responses") return requestPreference;
 	const setting = cfgProvidersOpenaiWebsockets.get(settings);
-	return setting === "on" ? true : setting === "off" ? false : undefined;
+	return requestPreference ?? (setting === "on" ? true : setting === "off" ? false : undefined);
 }
 
 function timeoutSecondsToMs(value: number): number | undefined {
@@ -68,9 +81,9 @@ export interface SettingsStreamSlowModeContext {
  * Build a {@link StreamFn} that reads provider routing/guard settings from
  * `settings` per call and forwards to `base` (defaults to `streamSimple`).
  *
- * Caller-supplied `streamOptions` always win — the helper only fills holes.
- * The one exception is the output cap, which is lowered when prompt plus cap
- * would exceed the model's context window (see
+ * Caller-supplied `streamOptions` normally win. Standard Responses WS requires
+ * its opt-in setting and honors either explicit false; the output cap is lowered
+ * when prompt plus cap would exceed the model's context window (see
  * {@link fitOutputTokensToContextWindow}); every request this session drives,
  * including side turns like `/btw`, goes through here.
  */
@@ -89,13 +102,9 @@ export function createSettingsAwareStreamFn(
 			openrouterRoutingPreset && openrouterRoutingPreset !== "default" ? openrouterRoutingPreset : undefined;
 		const antigravityEndpointMode = cfgProvidersAntigravityEndpoint.get(settings);
 		const textVerbosity =
-			model.api === "openai-codex-responses"
-				? cfgTextVerbosity.isConfigured(settings)
-					? cfgTextVerbosity.get(settings)
-					: undefined
-				: model.api === "openai-responses"
-					? cfgTextVerbosity.get(settings)
-					: undefined;
+			model.api === "openai-codex-responses" || model.api === "openai-responses"
+				? cfgTextVerbosity.get(settings)
+				: undefined;
 		// "auto" leaves the option unset so provider defaults and the
 		// PI_CACHE_RETENTION env override keep working; anything else is an
 		// explicit per-request retention (long restores 1h Anthropic TTLs and
@@ -161,6 +170,7 @@ export function createSettingsAwareStreamFn(
 		const merged: SimpleStreamOptions = {
 			...streamOptions,
 			maxTokens,
+			preferWebsockets: resolveWebsocketPreference(settings, model, streamOptions?.preferWebsockets),
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
 			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
 			textVerbosity: streamOptions?.textVerbosity ?? textVerbosity,

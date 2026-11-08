@@ -336,7 +336,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	]),
 	...fields("label", ["title", "previousTitle", "label", "injectedRules", "intent", "emoji", "nf"]),
 	...fields("error", ["errorMessage", "explanation", "errorClassificationMessage", "upstreamError"]),
-	...fields("tool", ["toolName", "tools", "declared", "deferred", "active"]),
+	...fields("tool", ["toolName", "tools", "mountedTools", "declared", "deferred", "active"]),
 	name: "name",
 	customType: "customType",
 	inputTransformations: "transforms",
@@ -346,6 +346,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	content: "content",
 	...fields("struct", [
 		"message",
+		"parentIrc",
 		"usage",
 		"cost",
 		"cttl",

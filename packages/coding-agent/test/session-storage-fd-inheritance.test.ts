@@ -2,7 +2,7 @@
  * Descriptors omp holds for its own lifetime — session/advisor transcripts and
  * the rotating log — must not reach the commands the bash tool runs.
  *
- * The bash tool executes through the natives brush shell, which `fork`/`exec`s
+ * The bash tool executes through the natives embedded shell, which spawns
  * external commands and therefore hands every inheritable descriptor to them
  * (the same property pinned by `config-value-fd-inheritance.test.ts`). Bun's
  * `fs.open*` omitted `O_CLOEXEC` where libuv adds it until Bun 1.4.3, so before

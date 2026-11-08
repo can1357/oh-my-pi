@@ -4,11 +4,11 @@ import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { splitPathAndSel, isReadableUrlPath } from "@oh-my-pi/pi-tui/tools/read";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
 import {
+	expandTilde,
 	hasFsCode,
 	isEnoent,
 	isEnotdir,
@@ -104,17 +104,7 @@ function stripFileUrl(filePath: string): string {
 	}
 }
 
-export function expandTilde(filePath: string, home?: string): string {
-	const h = home ?? os.homedir();
-	if (filePath === "~") return h;
-	if (filePath.startsWith("~/") || filePath.startsWith("~\\")) {
-		return h + filePath.slice(1);
-	}
-	if (filePath.startsWith("~")) {
-		return path.join(h, filePath.slice(1));
-	}
-	return filePath;
-}
+export { expandTilde };
 
 export function expandPath(filePath: string): string {
 	// Some models intermittently prefix an otherwise-valid path with a stray
@@ -327,19 +317,28 @@ function isInternalUrlPath(filePath: string): boolean {
  *
  * A bare root slash is treated as a workspace-root alias for tool inputs. Users
  * often pass `/` to mean “search from here”, and letting tools escape to the
- * filesystem root is almost never what they intended.
+ * filesystem root is almost never what they intended. A shell `cd` target is
+ * not a tool input: use {@link resolveShellDirectory}.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
+	return resolveDirectory(filePath, cwd, true);
+}
+
+/**
+ * Resolve a directory a shell command named (`cd <path>`), relative to `cwd`.
+ *
+ * Same expansion as {@link resolveToCwd}, except a bare root (`/`, `//`, `///`)
+ * is the filesystem root. Explicit tool path inputs keep the workspace alias.
+ */
+export function resolveShellDirectory(filePath: string, cwd: string): string {
+	return resolveDirectory(filePath, cwd, false);
+}
+
+function resolveDirectory(filePath: string, cwd: string, aliasWorkspaceRoot: boolean): string {
 	const expanded = normalizeWindowsDriveAliasPath(expandPath(filePath));
-
 	assertNotInternalUrl(expanded, filePath);
-
-	if (/^\/+$/.test(expanded)) {
-		return cwd;
-	}
-	if (path.isAbsolute(expanded)) {
-		return expanded;
-	}
+	if (aliasWorkspaceRoot && /^\/+$/.test(expanded)) return cwd;
+	if (path.isAbsolute(expanded)) return expanded;
 	return path.resolve(cwd, expanded);
 }
 

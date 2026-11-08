@@ -14,6 +14,21 @@ function at(value: unknown, ...path: Array<string | number>): unknown {
 }
 
 describe("SessionAnonymizer", () => {
+	test("redacts parent IRC provenance without losing the transcript card's sender and body fields", () => {
+		const output = new SessionAnonymizer().entry({
+			type: "message",
+			message: {
+				role: "user",
+				content: "model-facing envelope with launch codes",
+				parentIrc: { from: "Main", body: "secret launch codes" },
+				timestamp: 1,
+			},
+		});
+		expect(at(output, "message", "parentIrc", "from")).toBeDefined();
+		expect(at(output, "message", "parentIrc", "body")).toMatch(/^\[redacted #\d+:/);
+		expect(JSON.stringify(output)).not.toContain("launch codes");
+	});
+
 	test("redacts turn content, keeps metadata, and maps tool args consistently across copies", () => {
 		const usage = { input: 120, output: 30, cacheRead: 0, cacheWrite: 0, totalTokens: 150, cost: { total: 0.01 } };
 		const records = [
@@ -190,6 +205,22 @@ describe("SessionAnonymizer", () => {
 			type: "session_init",
 			perCallModel: false,
 		});
+	});
+
+	test("keeps a session_init's mounted-device list beside its tool list", () => {
+		const anonymizer = new SessionAnonymizer();
+		const result = anonymizer.entry({
+			type: "session_init",
+			tools: ["read", "ast_grep", "mcp__acme__search"],
+			mountedTools: ["ast_grep", "mcp__acme__search"],
+		});
+		const tools = at(result, "tools") as string[];
+		const mounted = at(result, "mountedTools") as string[];
+
+		expect(tools.slice(0, 2)).toEqual(["read", "ast_grep"]);
+		expect(mounted).toHaveLength(2);
+		expect(mounted[0]).toBe("ast_grep");
+		expect(mounted[1]).toBe(tools[2]);
 	});
 
 	test("rewrites shell commands keeping programs, flags, and operators", () => {

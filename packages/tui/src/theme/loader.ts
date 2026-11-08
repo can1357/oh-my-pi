@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { adjustHsv } from "@oh-my-pi/pi-utils/color";
 import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
-import { detectColorMode, resolveThemeColors } from "./color";
+import { detectColorMode, resolveThemeColors, resolveVarRefs } from "./color";
 import darkThemeJson from "./dark.json" with { type: "json" };
 import defaultThemes from "./defaults.json" with { type: "json" };
 import lightThemeJson from "./light.json" with { type: "json" };
@@ -179,7 +179,8 @@ export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = 
 	const symbolPreset: SymbolPreset = symbolPresetOverride ?? themeJson.symbols?.preset ?? "unicode";
 	const symbolOverrides = themeJson.symbols?.overrides ?? {};
 	const spinnerFramesOverrides = normalizeSpinnerFramesOverride(themeJson.symbols?.spinnerFrames);
-	return new Theme(fgColors, bgColors, colorMode, symbolPreset, symbolOverrides, spinnerFramesOverrides);
+	const ansiPalette = themeJson.terminal?.ansi?.map(color => resolveVarRefs(color, themeJson.vars ?? {}));
+	return new Theme(fgColors, bgColors, colorMode, symbolPreset, symbolOverrides, spinnerFramesOverrides, ansiPalette);
 }
 
 export async function loadTheme(name: string, options: CreateThemeOptions = {}): Promise<Theme> {

@@ -109,6 +109,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		"preserved",
 		"interleaved",
 	]),
+	"completions-allow-missing-thinking": wire("completionsAllowMissingThinking", ["request"]),
 	"anthropic-thinking": wire("anthropicThinking", ["request"], "scalar", [
 		"adaptive",
 		"adaptive-summarized",
@@ -119,12 +120,15 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"openai-platform-header": wire("openaiPlatformHeader", ["request"]),
 	"responses-cache-retention": wire("responsesCacheRetention", ["request"]),
 	"responses-verbosity": wire("responsesVerbosity", ["request"], "scalar", ["low"]),
-	"responses-service-tier": wire("responsesServiceTier", ["request"], "scalar", ["priority"]),
+	"responses-service-tier": wire("responsesServiceTier", ["request"], "scalar", ["priority", "ultrafast"]),
 	"responses-parallel-tool-calls": wire("responsesParallelToolCalls", ["request"]),
 	"responses-safety-identifier": wire("responsesSafetyIdentifier", ["request"]),
 	"responses-tool-choice-auto": wire("responsesToolChoiceAuto", ["request"]),
 	"routing-session-lock": wire("routingSessionLock", ["request"]),
 	"google-thinking": wire("googleThinking", ["request"], "scalar", ["level", "level-medium"]),
+	"google-omit-sampling": wire("googleOmitSampling", ["request"]),
+	"google-pin-max-output-tokens": wire("googlePinMaxOutputTokens", ["request"]),
+	"google-native-replay": wire("googleNativeReplay", ["request"]),
 	// ── wire: OpenAI-compatible surfaces (chat completions + Responses) ──
 	"allows-synthetic-reasoning-content-for-tool-calls": wire("allowsSyntheticReasoningContentForToolCalls", OAI),
 	"always-send-max-tokens": wire("alwaysSendMaxTokens", OAI),
@@ -206,6 +210,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-reasoning-params": wire("supportsReasoningParams", OAI),
 	"supports-reasoning-summary": wire("supportsReasoningSummary", ["openai-responses"]),
 	"store-responses": wire("storeResponses", ["openai-responses"]),
+	"tool-name-prefix": wire("toolNamePrefix", ["openai-responses"], "scalar", ["_"]),
 	"supports-store": wire("supportsStore", ["openai"]),
 	"supports-strict-mode": wire("supportsStrictMode", OAI),
 	"supports-tool-choice": wire("supportsToolChoice", OAI),
@@ -270,6 +275,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-mid-conversation-tool-changes": wire("supportsMidConversationToolChanges", ["anthropic"]),
 	"supports-per-message-effort": wire("supportsPerMessageEffort", ["anthropic"]),
 	"supports-server-compaction": wire("supportsServerCompaction", ["anthropic", "bedrock"]),
+	"supports-message-threads": wire("supportsMessageThreads", ["anthropic"]),
 	"supports-between-tools-thinking": wire("supportsBetweenToolsThinking", ["anthropic"]),
 	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic", "bedrock"]),
 	"supports-turn-scoped-system": wire("supportsTurnScopedSystem", ["anthropic"]),
@@ -338,6 +344,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"thinking-unverified": { key: "unverified", set: "thinking", shape: "scalar" },
 
 	// ── catalog metadata ──
+	"supports-websockets": { key: "supportsWebsockets", set: "catalog", shape: "scalar", values: [true, false] },
 	"apply-patch-tool-type": {
 		key: "applyPatchToolType",
 		set: "catalog",
@@ -672,7 +679,9 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"region-limits-eu": { key: "regionLimitsEu", set: "catalog", shape: "object" },
 	/**
 	 * Subscription credit rates: `input` is the per-token credit weight shown
-	 * as the model's multiplier; `output` and `cache-read` multiply it.
+	 * as the model's multiplier; `output` and `cache-read` multiply it. An
+	 * `effective-rates` block of dated cards overwrites them from each card's
+	 * `effective-from`, as on `cost-patch`.
 	 */
 	"credit-rates": { key: "creditRates", set: "catalog", shape: "object" },
 	/**

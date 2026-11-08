@@ -1,0 +1,45 @@
+ll=ls -lll xf () 
+{ 
+    ls -l x
+}e=echo e e ef () 
+{ 
+    echo echo echo
+}e=echo |a=b e a xf () 
+{ 
+    echo b x
+}q=echo 'Err:q bar'f () 
+{ 
+    echo 'Err: bar'
+}m=a=1 b=2m cf () 
+{ 
+    a=1 b=2 c
+}p=printf '%s\n' |w=worldp wf () 
+{ 
+    printf '%s\n' world
+}l=ls|g=grepl | g xf () 
+{ 
+    ls | grep x
+}r=echo a; echo br cf () 
+{ 
+    echo a;
+    echo b c
+}i=if true; then echoi x; fif () 
+{ 
+    if true; then
+        echo x;
+    fi
+}x=xtraecho xf () 
+{ 
+    echo x
+}echo=echo aecho bf () 
+{ 
+    echo a b
+}hd=cat <<EOFhd
+body
+EOFf () 
+{ 
+    cat <<EOF
+body
+EOF
+
+}

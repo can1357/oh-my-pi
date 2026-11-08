@@ -71,6 +71,18 @@ export type WorkerOutbound =
 	| { type: "shadow-run"; id: string; eligible: boolean; reason?: string }
 	| { type: "closed" };
 
+/**
+ * First raw message a Bun Worker host posts to its worker (worker-thread mode only): the port the
+ * worker sends every {@link WorkerOutbound} on instead of `parentPort`. A terminated Bun Worker drops
+ * its undelivered `parentPort` messages, but what sits on this port stays readable, so the host
+ * still hands a killed cell's last output to its run. Consumed by `worker-entry.ts`; never reaches
+ * `WorkerCore`.
+ */
+export interface WorkerOutboxMessage {
+	type: "outbox";
+	port: MessagePort;
+}
+
 export interface Transport {
 	send(msg: WorkerOutbound): void;
 	onMessage(handler: (msg: WorkerInbound) => void): () => void;

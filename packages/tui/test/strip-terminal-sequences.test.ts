@@ -21,6 +21,7 @@ describe("stripTerminalSequences", () => {
 		expect(stripTerminalSequences("plain text 123")).toBe("plain text 123");
 	});
 
+
 	it("strips CSI styling sequences", () => {
 		expect(stripTerminalSequences(`${ESC}[31mred${ESC}[0m`)).toBe("red");
 	});

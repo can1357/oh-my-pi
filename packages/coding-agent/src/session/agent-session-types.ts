@@ -21,9 +21,10 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
-import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
+import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager, AsyncJobManagerApi } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { AgentDefinition } from "../task/types";
+import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { SessionAccountPoolScope } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
@@ -47,8 +48,8 @@ import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
-import type { SettingsGatedToolDelta } from "./session-tools";
-import type { CostGate } from "./cost-gate";
+import type { SettingsGatedToolDelta, SystemPromptRebuilder } from "./session-tools";
+import type { CostGateApi } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
@@ -67,7 +68,9 @@ export interface AgentSessionDisposeOptions {
 	 * Postmortem reason that triggered this dispose (signal/fatal teardown
 	 * paths). When set, the persisted `session_exit` diagnostic records it
 	 * instead of the generic `"dispose"` used for normal programmatic disposal
-	 * (`/quit`, test teardown, subagent completion).
+	 * (`/quit`, test teardown, subagent completion). `EXIT` (also a subagent cut
+	 * off by its owner's shutdown) additionally records a turn still in flight as
+	 * interrupted, so `omp --restore` goes on with it.
 	 */
 	reason?: postmortem.Reason;
 }
@@ -197,7 +200,7 @@ export interface AgentSessionConfig {
 	/** Mirror of `disableExtensionDiscovery`; used when no inherited root provider exists. */
 	disableExtensionDiscovery?: boolean;
 	/** Cost gate of the session tree; refuses this session's model requests at `session.maxCost`. */
-	costGate?: CostGate;
+	costGate?: CostGateApi;
 	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
 	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
@@ -346,10 +349,7 @@ export interface AgentSessionConfig {
 	/** Current session message-to-LLM conversion pipeline. */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. */
-	rebuildSystemPrompt?: (
-		toolNames: string[],
-		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	rebuildSystemPrompt?: SystemPromptRebuilder;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */
@@ -369,11 +369,13 @@ export interface AgentSessionConfig {
 	/** Async job manager owned and disposed by this session. */
 	ownedAsyncJobManager?: AsyncJobManager;
 	/** Async job manager visible to this session. */
-	asyncJobManager?: AsyncJobManager;
+	asyncJobManager?: AsyncJobManagerApi;
 	/** Registry identity used for IRC routing. */
 	agentId?: string;
 	/** Whether this is a top-level or subagent session. */
 	agentKind?: "main" | "sub";
+	/** Registry whose awaits table records this agent blocked on the user while a dialog waits for their answer. */
+	agentRegistry?: AgentRegistryApi;
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
 	/** OAuth account pools enforced on the session's key lookups; the session lifts them on dispose. */

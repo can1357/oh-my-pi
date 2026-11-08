@@ -3,23 +3,19 @@ use std::{
 	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use core_graphics::{
-	display::CGDisplay,
-	event::{
-		CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
-		ScrollEventUnit,
-	},
-	event_source::{CGEventSource, CGEventSourceStateID},
-	geometry::CGPoint,
-	sys::{CGEventRef, CGEventSourceRef},
-};
-use foreign_types::ForeignType;
 use objc2_app_kit::{NSPasteboard, NSPasteboardNameDrag};
 use objc2_application_services::AXUIElement;
+use objc2_core_foundation::{CFRetained, CGPoint};
+use objc2_core_graphics::{
+	CGAssociateMouseAndMouseCursorPosition, CGError, CGEvent, CGEventField, CGEventFlags,
+	CGEventSource, CGEventSourceStateID, CGEventTapLocation, CGEventType, CGMouseButton,
+	CGScrollEventUnit, CGWarpMouseCursorPosition,
+};
 use xutf::graphemes_str;
 
 use super::{
 	super::{
+		ax::require_phone_screen as require_mirror_screen,
 		backend::{
 			DeliveryMode, ElementDelivery, ElementInput, KeyboardFocus, Modifiers, MouseButton,
 			PointerEvent,
@@ -27,18 +23,18 @@ use super::{
 		control,
 		error::{CoreResult, DesktopError, ErrorCode},
 		keys::KeyName,
-		types::{DesktopWindow, Target},
+		types::{AxTextSelection, DesktopWindow, Target},
 	},
 	ax,
 	capture::{self, MacCapture},
 	keymap::{Keymap, Keystroke},
 	process::{self, RemoteScreen},
-	release::Route,
+	release::{self, Route},
 	release_guard, route, skylight,
 };
 
 pub(super) struct MacInput {
-	source: CGEventSource,
+	source: CFRetained<CGEventSource>,
 }
 #[allow(
 	clippy::non_send_fields_in_send_ty,
@@ -85,6 +81,7 @@ impl MacInput {
 			Target::Window(id) => {
 				let window = capture.window(id)?;
 				let (pid, wid) = window_identity(&window)?;
+				require_phone_screen(&window, process::remote_screen(pid))?;
 				match mode {
 					DeliveryMode::Background => {
 						let (window, wid) = attached_window(capture, window, pid, wid, &event)?;
@@ -239,6 +236,7 @@ impl MacInput {
 	) -> CoreResult<ElementDelivery> {
 		let (pid, wid) = window_identity(window)?;
 		let remote = process::remote_screen(pid);
+		require_phone_screen(window, remote)?;
 		// A takeover write goes to the window brought to the front for it.
 		let behind_user = || match mode {
 			DeliveryMode::Background => entry_front.require_behind(skylight::front_pid(), pid, wid),
@@ -327,6 +325,7 @@ impl MacInput {
 	) -> CoreResult<ElementDelivery> {
 		let (pid, wid) = window_identity(window)?;
 		let remote = process::remote_screen(pid);
+		require_phone_screen(window, remote)?;
 		let gap = key_gap(remote);
 		let chord = chord_keys(window, keys, remote, layout_strokes)?;
 		match mode {
@@ -405,6 +404,7 @@ impl MacInput {
 				// Read before anything about the target ([`EntryFront::before`]).
 				let entry_front = EntryFront::now();
 				let remote = process::remote_screen(pid);
+				require_phone_screen(&window, remote)?;
 				let gap = key_gap(remote);
 				let held = chord_keys(&window, keys, remote, layout_strokes)?;
 				match mode {
@@ -466,6 +466,13 @@ impl MacInput {
 	}
 }
 
+fn require_phone_screen(window: &DesktopWindow, remote: Option<RemoteScreen>) -> CoreResult<()> {
+	if remote == Some(RemoteScreen::HidReports) {
+		require_mirror_screen(&mut ax::MacAx::new(), window)?;
+	}
+	Ok(())
+}
+
 /// The current keyboard layout's lookup from character to key; `None` when
 /// the layout has no Unicode key layout data to look keys up in.
 fn layout_strokes() -> CoreResult<Option<impl Fn(char) -> Option<Keystroke>>> {
@@ -488,6 +495,107 @@ const fn returns_focus(mode: DeliveryMode) -> bool {
 	matches!(mode, DeliveryMode::ForegroundReturnFocus)
 }
 
+/// A background left drag with no keys held, from the first point of its path
+/// to the last, made as a text selection when both points lie on the text of
+/// one native text element of the target window ([`ax::select_dragged`]); a
+/// drag across text needs no mouse event, so it cannot begin a drag-and-drop
+/// session that the user's real pointer would carry. `None` for any other
+/// gesture, which is then posted as input.
+pub(super) fn drag_selection(
+	target: &Target,
+	event: &PointerEvent,
+	mode: DeliveryMode,
+	capture: &MacCapture,
+) -> CoreResult<Option<AxTextSelection>> {
+	let Some((id, (start, end))) = selecting_drag(target, event, mode) else {
+		return Ok(None);
+	};
+	// Read before anything about the target ([`EntryFront::before`]): the
+	// window, sheet and text probes below can block while the user picks it.
+	let entry_front = EntryFront::now();
+	let window = capture.window(id)?;
+	let (pid, wid) = window_identity(&window)?;
+	let (text_wid, remote) = text_window(
+		window,
+		wid,
+		|window, wid| attached_window(capture, window, pid, wid, event),
+		|window| ax::window_content(pid, window),
+		control::intervention::input_goes_to,
+	)?;
+	selection_behind(entry_front, skylight::front_pid, pid, wid, |started_in_background| {
+		ax::select_dragged(pid, text_wid, remote, started_in_background, start, end)
+	})
+}
+
+/// The selection `select` makes in an app of `pid`, told whether `pid` was
+/// behind a known front app as the drag began (`entry_front`), so a target
+/// the user brings forward while the probes block is left to them. With no
+/// selection made the drag is posted as input next, whose own front check
+/// begins after these probes; so a target that came forward meanwhile
+/// (`front`, read once `select` is done) refuses here instead.
+fn selection_behind<T>(
+	entry_front: EntryFront,
+	front: impl FnOnce() -> Option<libc::pid_t>,
+	pid: libc::pid_t,
+	wid: u32,
+	select: impl FnOnce(bool) -> CoreResult<Option<T>>,
+) -> CoreResult<Option<T>> {
+	let selection = select(entry_front.known_behind(pid))?;
+	if selection.is_none() {
+		entry_front.require_behind(front(), pid, wid)?;
+	}
+	Ok(selection)
+}
+
+/// The window id the text elements under a drag on window `wid` map to, and
+/// whether another process draws them. The press may land in a sheet or
+/// popover attached to `wid` (`attached`, as pointer input resolves it),
+/// whose fields map to that window; and `_AXUIElementGetWindow` maps the
+/// elements of a remote view, such as a system Open or Save panel, to the
+/// drawing process's own window (`content`, as [`input_owner`] routes their
+/// input). The user's clicks and keys in such a view reach the drawing
+/// process, which is passed to `route` so they count as input into the app,
+/// as for pointer input, and the selection's press checks see them.
+fn text_window<W>(
+	window: W,
+	wid: u32,
+	attached: impl FnOnce(W, u32) -> CoreResult<(W, u32)>,
+	content: impl FnOnce(&W) -> ax::WindowContent,
+	route: impl FnOnce(libc::pid_t),
+) -> CoreResult<(u32, bool)> {
+	let (window, wid) = attached(window, wid)?;
+	Ok(match content(&window) {
+		ax::WindowContent::Own => (wid, false),
+		ax::WindowContent::Remote { pid, window } => {
+			route(pid);
+			(window, true)
+		},
+	})
+}
+
+/// The global points a drag presses at and releases at.
+type DragEnds = ((f64, f64), (f64, f64));
+
+/// The window and end points of `event` when it is a drag that may be a text
+/// selection: delivered to a window in the background, with the left button,
+/// no modifier or held key, and at least two points. A takeover drag stays
+/// input, so `takeover:true` still drags what a press there picks up.
+fn selecting_drag<'a>(
+	target: &'a Target,
+	event: &PointerEvent,
+	mode: DeliveryMode,
+) -> Option<(&'a str, DragEnds)> {
+	let (Target::Window(id), DeliveryMode::Background) = (target, mode) else {
+		return None;
+	};
+	let PointerEvent::Drag { path, button: MouseButton::Left, modifiers, keys } = event else {
+		return None;
+	};
+	if path.len() < 2 || *modifiers != Modifiers::default() || !keys.is_empty() {
+		return None;
+	}
+	Some((id, (*path.first()?, *path.last()?)))
+}
 fn window_identity(window: &DesktopWindow) -> CoreResult<(libc::pid_t, u32)> {
 	let pid = window.pid.ok_or_else(|| {
 		DesktopError::input_failed(format!("window {} has no owning process id", window.id))
@@ -515,17 +623,17 @@ fn keyboard_modifiers_refusal(window: &DesktopWindow, action: &str) -> DesktopEr
 /// The physical keyboard's modifier flags, Caps Lock included.
 fn physical_flags() -> u64 {
 	// SAFETY: A read-only query of the HID system state (CGEventSource.h).
-	unsafe { source_flags_state(CGEventSourceStateID::HIDSystemState as i32) }
+	unsafe { source_flags_state(CGEventSourceStateID::HIDSystemState.0) }
 }
 
 /// Whether keyboard `flags` hold Shift, Control, Option or Command down or
 /// Caps Lock on; Screen Sharing gives each key it forwards these.
 const fn holds_modifier(flags: u64) -> bool {
-	let mask = CGEventFlags::CGEventFlagAlphaShift.bits()
-		| CGEventFlags::CGEventFlagShift.bits()
-		| CGEventFlags::CGEventFlagControl.bits()
-		| CGEventFlags::CGEventFlagAlternate.bits()
-		| CGEventFlags::CGEventFlagCommand.bits();
+	let mask = CGEventFlags::MaskAlphaShift.bits()
+		| CGEventFlags::MaskShift.bits()
+		| CGEventFlags::MaskControl.bits()
+		| CGEventFlags::MaskAlternate.bits()
+		| CGEventFlags::MaskCommand.bits();
 	flags & mask != 0
 }
 
@@ -856,17 +964,18 @@ fn post_guarded(
 /// Whether `event` presses a key: a key-down, or a modifier change that sets
 /// the flag of the modifier key it names.
 fn is_key_press(event: &CGEvent) -> bool {
-	match event.get_type() {
+	match CGEvent::r#type(Some(event)) {
 		CGEventType::KeyDown => true,
 		CGEventType::FlagsChanged => {
-			let flag = match event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) {
-				56 | 60 => CGEventFlags::CGEventFlagShift,
-				58 | 61 => CGEventFlags::CGEventFlagAlternate,
-				59 | 62 => CGEventFlags::CGEventFlagControl,
-				54 | 55 => CGEventFlags::CGEventFlagCommand,
-				_ => return false,
-			};
-			event.get_flags().contains(flag)
+			let flag =
+				match CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode) {
+					56 | 60 => CGEventFlags::MaskShift,
+					58 | 61 => CGEventFlags::MaskAlternate,
+					59 | 62 => CGEventFlags::MaskControl,
+					54 | 55 => CGEventFlags::MaskCommand,
+					_ => return false,
+				};
+			CGEvent::flags(Some(event)).contains(flag)
 		},
 		_ => false,
 	}
@@ -1294,7 +1403,8 @@ const FIELD_WINDOW_UNDER_POINTER: u32 = 91;
 const FIELD_WINDOW_UNDER_POINTER_THAT_CAN_HANDLE: u32 = 92;
 /// `NSEventSubtypeTouch`.
 const SUBTYPE_TOUCH: i64 = 3;
-/// `NSEventTypeAppKitDefined`, which the `CGEventType` enum cannot express.
+/// `NSEventTypeAppKitDefined`, an `AppKit` event type without a named Quartz
+/// constant.
 const APPKIT_DEFINED_EVENT: u32 = 13;
 /// `NSEventSubtypeApplicationActivated`.
 const APPLICATION_ACTIVATED: i64 = 1;
@@ -1379,6 +1489,13 @@ impl EntryFront {
 	/// Whether `pid` was behind another application as the input began.
 	pub(super) fn behind(self, pid: libc::pid_t) -> bool {
 		self.0 != Some(pid)
+	}
+
+	/// Whether `pid` was behind a known front process as the input began:
+	/// an unknown front app counts as the target's, as for the focus an AX
+	/// write may borrow.
+	pub(super) fn known_behind(self, pid: libc::pid_t) -> bool {
+		self.0.is_some_and(|front| front != pid)
 	}
 
 	/// Reads the front process with `front`, then runs `probe`, the target's
@@ -1559,12 +1676,10 @@ fn activate_in_background(
 	context: i64,
 ) -> CoreResult<()> {
 	let activate = || -> CoreResult<()> {
-		let activated = CGEvent::new(source.clone())
-			.map_err(|()| DesktopError::input_failed("failed to create a Quartz activation event"))?;
-		// SAFETY: `activated` is a live CGEvent and the type is a valid
-		// CGEventType value the core-graphics enum lacks.
-		unsafe { set_event_type(activated.as_ptr(), APPKIT_DEFINED_EVENT) };
-		activated.set_flags(CGEventFlags::from_bits_retain(ACTIVATION_FLAGS));
+		let activated = CGEvent::new(Some(source))
+			.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz activation event"))?;
+		CGEvent::set_type(Some(&activated), CGEventType(APPKIT_DEFINED_EVENT));
+		CGEvent::set_flags(Some(&activated), CGEventFlags::from_bits_retain(ACTIVATION_FLAGS));
 		skylight::set_fields(&activated, &[
 			(FIELD_WINDOW_NUMBER, i64::from(wid)),
 			(FIELD_WINDOW_CONTEXT, context),
@@ -1708,59 +1823,62 @@ const PRIMER_SETTLE: Duration = Duration::from_millis(50);
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
 	#[link_name = "CGEventSourceSetLocalEventsSuppressionInterval"]
-	fn set_local_events_suppression_interval(source: CGEventSourceRef, seconds: f64);
+	fn set_local_events_suppression_interval(source: *mut CGEventSource, seconds: f64);
 	#[link_name = "CGEventSourceSetLocalEventsFilterDuringSuppressionState"]
 	fn set_local_events_filter_during_suppression_state(
-		source: CGEventSourceRef,
+		source: *mut CGEventSource,
 		filter: u32,
 		state: u32,
 	);
 	#[link_name = "CGEventCreateKeyboardEvent"]
-	fn create_keyboard_event(source: CGEventSourceRef, keycode: u16, down: bool) -> CGEventRef;
+	fn create_keyboard_event(source: *mut CGEventSource, keycode: u16, down: bool) -> *mut CGEvent;
 	#[link_name = "CGEventSetTimestamp"]
-	fn set_event_timestamp(event: CGEventRef, timestamp: u64);
+	fn set_event_timestamp(event: *mut CGEvent, timestamp: u64);
 	#[link_name = "CGEventSourceFlagsState"]
 	fn source_flags_state(state: i32) -> u64;
-	#[link_name = "CGEventSetType"]
-	fn set_event_type(event: CGEventRef, event_type: u32);
 	#[cfg(test)]
 	#[link_name = "CGEventSourceGetLocalEventsSuppressionInterval"]
-	fn get_local_events_suppression_interval(source: CGEventSourceRef) -> f64;
+	fn get_local_events_suppression_interval(source: *mut CGEventSource) -> f64;
 	#[cfg(test)]
 	#[link_name = "CGEventSourceGetLocalEventsFilterDuringSuppressionState"]
-	fn get_local_events_filter_during_suppression_state(source: CGEventSourceRef, state: u32)
-	-> u32;
+	fn get_local_events_filter_during_suppression_state(
+		source: *mut CGEventSource,
+		state: u32,
+	) -> u32;
 	#[cfg(test)]
 	#[link_name = "CGEventKeyboardGetUnicodeString"]
 	fn keyboard_get_unicode_string(
-		event: CGEventRef,
+		event: *mut CGEvent,
 		capacity: usize,
 		length: *mut usize,
 		units: *mut u16,
 	);
 	#[cfg(test)]
 	#[link_name = "CGEventGetTimestamp"]
-	fn get_event_timestamp(event: CGEventRef) -> u64;
+	fn get_event_timestamp(event: *mut CGEvent) -> u64;
 }
 
-pub(super) fn source() -> CoreResult<CGEventSource> {
+pub(super) fn source() -> CoreResult<CFRetained<CGEventSource>> {
 	event_source(CGEventSourceStateID::HIDSystemState)
 }
 
-fn event_source(state: CGEventSourceStateID) -> CoreResult<CGEventSource> {
+fn event_source(state: CGEventSourceStateID) -> CoreResult<CFRetained<CGEventSource>> {
 	let source = CGEventSource::new(state)
-		.map_err(|()| DesktopError::input_failed("failed to create a Quartz input event source"))?;
+		.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz input event source"))?;
 	// SAFETY: `source` is a live CGEventSource and both setters accept these
 	// documented masks/states.
 	unsafe {
-		set_local_events_suppression_interval(source.as_ptr(), 0.0);
+		set_local_events_suppression_interval(
+			std::ptr::from_ref::<CGEventSource>(&source).cast_mut(),
+			0.0,
+		);
 		set_local_events_filter_during_suppression_state(
-			source.as_ptr(),
+			std::ptr::from_ref::<CGEventSource>(&source).cast_mut(),
 			LOCAL_EVENT_FILTER,
 			SUPPRESSION_INTERVAL,
 		);
 		set_local_events_filter_during_suppression_state(
-			source.as_ptr(),
+			std::ptr::from_ref::<CGEventSource>(&source).cast_mut(),
 			LOCAL_EVENT_FILTER,
 			REMOTE_MOUSE_DRAG,
 		);
@@ -1769,18 +1887,18 @@ fn event_source(state: CGEventSourceStateID) -> CoreResult<CGEventSource> {
 }
 
 fn modifier_flags(modifiers: Modifiers) -> CGEventFlags {
-	let mut flags = CGEventFlags::CGEventFlagNull;
+	let mut flags = CGEventFlags::empty();
 	if modifiers.ctrl {
-		flags |= CGEventFlags::CGEventFlagControl;
+		flags |= CGEventFlags::MaskControl;
 	}
 	if modifiers.alt {
-		flags |= CGEventFlags::CGEventFlagAlternate;
+		flags |= CGEventFlags::MaskAlternate;
 	}
 	if modifiers.shift {
-		flags |= CGEventFlags::CGEventFlagShift;
+		flags |= CGEventFlags::MaskShift;
 	}
 	if modifiers.meta {
-		flags |= CGEventFlags::CGEventFlagCommand;
+		flags |= CGEventFlags::MaskCommand;
 	}
 	flags
 }
@@ -1948,7 +2066,8 @@ const DRAG_TRACKING_ROLES: [&str; 5] =
 /// user's moving pointer into their own Finder window and onto the Desktop,
 /// and going back to the start once the session began did not keep it out
 /// (1 in 2 on an 11-point path). Which elements begin such a session is up to
-/// each application, so only the known trackers are let through.
+/// each application, so only the known trackers are let through; a drag across
+/// native text has already been made as a selection ([`drag_selection`]).
 fn refuse_drag_source(
 	window: &DesktopWindow,
 	event: &PointerEvent,
@@ -1978,7 +2097,8 @@ fn refuse_drag_source(
 		"the {} on window {} ({}) starts on {element}, where a press can pick up an item for drag \
 		 and drop, which macOS completes from the user's real pointer and could drop into the \
 		 user's own window; background drags and holds run only on sliders, scroll bars, splitters \
-		 and steppers; nothing was sent",
+		 and steppers, and a drag across the text of one native text view selects it; nothing was \
+		 sent",
 		pointer_kind(event),
 		window.id,
 		window.app,
@@ -2336,11 +2456,8 @@ fn pointer_owner(
 	prepare: impl FnOnce() -> CoreResult<bool>,
 	owner: impl FnOnce() -> CoreResult<(libc::pid_t, u32)>,
 ) -> CoreResult<(bool, (libc::pid_t, u32))> {
-	let prepared = if matches!(event, PointerEvent::Click { button: MouseButton::Left, .. }) {
-		prepare()?
-	} else {
-		false
-	};
+	let prepared =
+		matches!(event, PointerEvent::Click { button: MouseButton::Left, .. }) && prepare()?;
 	Ok((prepared, owner()?))
 }
 
@@ -2362,7 +2479,7 @@ fn may_open_context_menu(event: &PointerEvent) -> bool {
 pub(super) fn post_escape(pid: libc::pid_t) -> CoreResult<()> {
 	let source = source()?;
 	let mut post = |event: &CGEvent| skylight::post_keyboard(pid, event);
-	let flags = CGEventFlags::CGEventFlagNull;
+	let flags = CGEventFlags::empty();
 	post_key(&source, KeyName::Escape, true, flags, &mut post)?;
 	post_key(&source, KeyName::Escape, false, flags, &mut post)
 }
@@ -2524,7 +2641,7 @@ fn background_drag(
 		|| {
 			let start = path[0];
 			pointer(
-				&mouse_event(source, CGEventType::MouseMoved, start, CGMouseButton::Left)?,
+				&*mouse_event(source, CGEventType::MouseMoved, start, CGMouseButton::Left)?,
 				start,
 				0,
 				0,
@@ -2540,7 +2657,7 @@ fn background_drag(
 						Stroke::Up => up,
 					};
 					let event = mouse_event(source, event_type, at, cg_button)?;
-					event.set_flags(flags);
+					CGEvent::set_flags(Some(&event), flags);
 					pointer(&event, at, 1, number)
 				},
 			)
@@ -2655,11 +2772,11 @@ fn background_hold(
 		KEY_GAP,
 		|event| post(Posted::Key, pid, event),
 		|| {
-			pointer(&mouse_event(source, CGEventType::MouseMoved, at, CGMouseButton::Left)?, 0, 0)?;
+			pointer(&*mouse_event(source, CGEventType::MouseMoved, at, CGMouseButton::Left)?, 0, 0)?;
 			control::wait(Duration::from_millis(12))?;
 			control::bounded_hold(duration, |pressed| {
 				let event = mouse_event(source, if pressed { down } else { up }, at, cg_button)?;
-				event.set_flags(flags);
+				CGEvent::set_flags(Some(&event), flags);
 				pointer(&event, 1, number)
 			})
 		},
@@ -2697,7 +2814,7 @@ fn background_left_click(
 	            flags: CGEventFlags|
 	 -> CoreResult<()> {
 		let event = mouse_event(source, event_type, location, CGMouseButton::Left)?;
-		event.set_flags(flags);
+		CGEvent::set_flags(Some(&event), flags);
 		skylight::set_fields(&event, &[
 			(FIELD_MOUSE_EVENT_NUMBER, phase),
 			(FIELD_CLICK_STATE, click_state),
@@ -2712,7 +2829,7 @@ fn background_left_click(
 		skylight::set_window_location(&event, window_location)?;
 		post_event(pid, &event)
 	};
-	let unmodified = CGEventFlags::CGEventFlagNull;
+	let unmodified = CGEventFlags::empty();
 	post(CGEventType::MouseMoved, target, local, 2, 0, flags)?;
 	control::wait(Duration::from_millis(15))?;
 	before_press()?;
@@ -2758,7 +2875,7 @@ fn background_button_click(
 	button_presses(count, before_press, |pressed, click_state| {
 		let event =
 			mouse_event(source, if pressed { down } else { up }, CGPoint::new(x, y), cg_button)?;
-		event.set_flags(flags);
+		CGEvent::set_flags(Some(&event), flags);
 		post_window_pointer(pid, wid, window, &event, x, y, click_state, number, group)
 	})
 }
@@ -2855,7 +2972,9 @@ fn route_window_pointer(
 fn stamp_now(event: &CGEvent) {
 	// SAFETY: `event` is a live CGEvent. Quartz event timestamps count
 	// nanoseconds of system uptime.
-	unsafe { set_event_timestamp(event.as_ptr(), control::uptime_ns()) };
+	unsafe {
+		set_event_timestamp(std::ptr::from_ref::<CGEvent>(event).cast_mut(), control::uptime_ns());
+	}
 }
 
 fn background_scroll(
@@ -2874,11 +2993,17 @@ fn background_scroll(
 	// the event reaches the process.
 	post_hover(source, pid, wid, window, x, y, click_group_id())?;
 	control::wait(Duration::from_millis(12))?;
-	let event =
-		CGEvent::new_scroll_event(source.clone(), ScrollEventUnit::PIXEL, 2, wheel_y, wheel_x, 0)
-			.map_err(|()| DesktopError::input_failed("failed to create a Quartz scroll event"))?;
-	event.set_flags(CGEventFlags::CGEventFlagNull);
-	event.set_location(CGPoint::new(x, y));
+	let event = CGEvent::new_scroll_wheel_event2(
+		Some(source),
+		CGScrollEventUnit::Pixel,
+		2,
+		wheel_y,
+		wheel_x,
+		0,
+	)
+	.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz scroll event"))?;
+	CGEvent::set_flags(Some(&event), CGEventFlags::empty());
+	CGEvent::set_location(Some(&event), CGPoint::new(x, y));
 	skylight::set_fields(&event, &[
 		(FIELD_TARGET_PID, i64::from(pid)),
 		(FIELD_WINDOW_NUMBER, i64::from(wid)),
@@ -2997,10 +3122,10 @@ fn mouse_event(
 	event_type: CGEventType,
 	location: CGPoint,
 	button: CGMouseButton,
-) -> CoreResult<CGEvent> {
-	let event = CGEvent::new_mouse_event(source.clone(), event_type, location, button)
-		.map_err(|()| DesktopError::input_failed("failed to create a Quartz pointer event"))?;
-	event.set_flags(CGEventFlags::CGEventFlagNull);
+) -> CoreResult<CFRetained<CGEvent>> {
+	let event = CGEvent::new_mouse_event(Some(source), event_type, location, button)
+		.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz pointer event"))?;
+	CGEvent::set_flags(Some(&event), CGEventFlags::empty());
 	Ok(event)
 }
 
@@ -3190,13 +3315,18 @@ fn type_keys(
 			for character in text.chars() {
 				length += character.encode_utf16(&mut units[length..]).len();
 			}
-			let press = CGEvent::new_keyboard_event(source.clone(), code, true)
-				.map_err(|()| DesktopError::input_failed("failed to create a Quartz keyboard event"))?;
-			let release = CGEvent::new_keyboard_event(source.clone(), code, false)
-				.map_err(|()| DesktopError::input_failed("failed to create a Quartz keyboard event"))?;
+			let press = CGEvent::new_keyboard_event(Some(source), code, true).ok_or_else(|| {
+				DesktopError::input_failed("failed to create a Quartz keyboard event")
+			})?;
+			let release = CGEvent::new_keyboard_event(Some(source), code, false).ok_or_else(|| {
+				DesktopError::input_failed("failed to create a Quartz keyboard event")
+			})?;
 			for event in [&press, &release] {
-				event.set_string_from_utf16_unchecked(&units[..length]);
-				event.set_flags(modifier_flags(held));
+				// SAFETY: `units` contains `length` initialized UTF-16 code units.
+				unsafe {
+					CGEvent::keyboard_set_unicode_string(Some(event), length as u64, units.as_ptr());
+				}
+				CGEvent::set_flags(Some(event), modifier_flags(held));
 			}
 			guard()?;
 			// Once the last key is pressed the text is out: a cancel then must
@@ -3275,14 +3405,20 @@ fn post_bare_keys(
 	gap: Duration,
 	guard: impl FnMut() -> CoreResult<()>,
 ) -> CoreResult<()> {
-	post_transitions(transitions, gap, guard, post_bare)
+	let mut held = BareModifiers::default();
+	post_transitions(transitions, gap, guard, |code, down| post_bare(code, down, &mut held))
 }
 
-/// Posts one bare key transition at the HID tap: a null source and no flag
-/// or Unicode overrides, so `CoreGraphics` derives modifier state from the
-/// transitions exactly as for a hardware keyboard. Only a press can be
-/// cancelled; a release always goes out.
-fn post_bare(code: u16, down: bool) -> CoreResult<()> {
+/// Posts one bare key transition at the HID tap: a null source and no
+/// Unicode override, so the target reads the key as a hardware keyboard's.
+/// Only a press can be cancelled; a release always goes out.
+///
+/// `CoreGraphics` gives a null-source event the HID system state's flags
+/// plus the key's own marks (Fn, Help, keypad), and posting it at the HID
+/// tap makes its flags the state, so one Delete, arrow or function key left
+/// Fn held for every later key. Each event therefore carries only the
+/// modifier keys its own run holds ([`BareModifiers`]).
+fn post_bare(code: u16, down: bool, held: &mut BareModifiers) -> CoreResult<()> {
 	if down {
 		control::check()?;
 	}
@@ -3293,8 +3429,52 @@ fn post_bare(code: u16, down: bool) -> CoreResult<()> {
 	}
 	// SAFETY: `raw` is a non-null create-rule event whose ownership moves
 	// here.
-	let event = unsafe { CGEvent::from_ptr(raw) };
+	let event =
+		unsafe { CFRetained::from_raw(std::ptr::NonNull::new(raw).expect("non-null event")) };
+	let flags = held.flags(code, down, CGEvent::flags(Some(&event)).bits());
+	CGEvent::set_flags(Some(&event), CGEventFlags::from_bits_retain(flags));
 	post_global(&event)
+}
+
+/// The modifier keys a run of bare transitions holds, as the device bits a
+/// hardware keyboard reports for each (left and right apart).
+#[derive(Clone, Copy, Debug, Default)]
+struct BareModifiers(u64);
+
+impl BareModifiers {
+	/// Modifier state bits a posted event's flags carry: Shift, Control,
+	/// Option, Command, the Fn, Help and keypad marks, and the per-side
+	/// device bits. Caps Lock and the rest of `derived` pass through.
+	const STATE: u64 = CGEventFlags::MaskShift.bits()
+		| CGEventFlags::MaskControl.bits()
+		| CGEventFlags::MaskAlternate.bits()
+		| CGEventFlags::MaskCommand.bits()
+		| CGEventFlags::MaskSecondaryFn.bits()
+		| CGEventFlags::MaskHelp.bits()
+		| CGEventFlags::MaskNumericPad.bits()
+		| release::DEVICE_FLAGS;
+
+	/// Flags for transition `(code, down)`, whose event `CoreGraphics`
+	/// created with `derived`: its modifier bits replaced by those of the
+	/// keys held once the transition is posted.
+	fn flags(&mut self, code: u16, down: bool, derived: u64) -> u64 {
+		let side = release::MODIFIERS
+			.iter()
+			.flat_map(|(_, sides)| sides)
+			.find(|&&(side, _)| side == code);
+		if let Some(&(_, device)) = side {
+			if down {
+				self.0 |= device;
+			} else {
+				self.0 &= !device;
+			}
+		}
+		let held = release::MODIFIERS
+			.iter()
+			.filter(|(_, sides)| sides.iter().any(|&(_, device)| self.0 & device != 0))
+			.fold(self.0, |held, (flag, _)| held | flag);
+		(derived & !Self::STATE) | held
+	}
 }
 
 /// Presses the chord `keys` as bare transitions ([`post_bare`]), running
@@ -3307,7 +3487,8 @@ fn press_bare_chord(
 	if keys.is_empty() {
 		return Err(empty_chord());
 	}
-	hold_transitions(keys, gap, guard, || Ok(()), post_bare)
+	let mut held = BareModifiers::default();
+	hold_transitions(keys, gap, guard, || Ok(()), |code, down| post_bare(code, down, &mut held))
 }
 
 /// Holds `keys` as bare transitions ([`post_bare`]) while `body` runs,
@@ -3318,7 +3499,8 @@ fn hold_bare_keys(
 	guard: impl FnMut() -> CoreResult<()>,
 	body: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<()> {
-	hold_transitions(keys, gap, guard, body, post_bare)
+	let mut held = BareModifiers::default();
+	hold_transitions(keys, gap, guard, body, |code, down| post_bare(code, down, &mut held))
 }
 
 /// Presses `keys` in order through `post`, each once `guard` passes, runs
@@ -3584,9 +3766,9 @@ fn post_code(
 	flags: CGEventFlags,
 	post: &mut impl FnMut(&CGEvent) -> CoreResult<()>,
 ) -> CoreResult<()> {
-	let event = CGEvent::new_keyboard_event(source.clone(), code, down)
-		.map_err(|()| DesktopError::input_failed("failed to create a Quartz keyboard event"))?;
-	event.set_flags(flags);
+	let event = CGEvent::new_keyboard_event(Some(source), code, down)
+		.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz keyboard event"))?;
+	CGEvent::set_flags(Some(&event), flags);
 	post(&event)
 }
 
@@ -3899,17 +4081,24 @@ fn preserving_cursor(
 	source: &CGEventSource,
 	action: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<()> {
-	let prior = CGEvent::new(source.clone())
-		.map_err(|()| DesktopError::input_failed("failed to read the Quartz cursor location"))?
-		.location();
+	let prior =
+		CGEvent::location(Some(&*CGEvent::new(Some(source)).ok_or_else(|| {
+			DesktopError::input_failed("failed to read the Quartz cursor location")
+		})?));
 	let result = action();
 	// Attempt both operations even if one fails, and distinguish restoration
 	// failure from non-delivery so callers do not blindly repeat the action.
-	let warp = CGDisplay::warp_mouse_cursor_position(prior);
-	let associate = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
-	let cleanup = warp.and(associate).map_err(|error| {
-		DesktopError::input_failed(format!("restoring the user's cursor failed ({error:?})"))
-	});
+	let warp = CGWarpMouseCursorPosition(prior);
+	let associate = CGAssociateMouseAndMouseCursorPosition(true);
+	let cleanup = [warp, associate]
+		.into_iter()
+		.find(|error| *error != CGError::Success)
+		.map_or(Ok(()), |error| {
+			Err(DesktopError::input_failed(format!(
+				"restoring the user's cursor failed ({:?})",
+				error.0,
+			)))
+		});
 	skylight::after_cleanup(result, cleanup)
 }
 
@@ -3918,10 +4107,10 @@ fn preserving_cursor(
 /// rather than the event location.
 fn warp_pointer(point: CGPoint) -> CoreResult<()> {
 	control::check()?;
-	let _ = CGDisplay::warp_mouse_cursor_position(point);
+	let _ = CGWarpMouseCursorPosition(point);
 	// Re-couples the mouse-delta stream so the next event hit-tests at the
 	// warped point instead of freezing local input.
-	let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
+	let _ = CGAssociateMouseAndMouseCursorPosition(true);
 	control::wait(POINTER_SETTLE)
 }
 
@@ -3981,7 +4170,7 @@ fn global_pointer(source: &CGEventSource, event: PointerEvent) -> CoreResult<()>
 			let (cg_button, down, up, _, number) = button_types(button);
 			warp_pointer(point)?;
 			let result = with_global_modifiers(source, modifiers, |flags| {
-				if flags != CGEventFlags::CGEventFlagNull {
+				if flags != CGEventFlags::empty() {
 					// Primes cursor tracking with the modifiers down so a modified
 					// press extends the existing selection.
 					post_global_mouse(
@@ -4034,7 +4223,7 @@ fn global_pointer(source: &CGEventSource, event: PointerEvent) -> CoreResult<()>
 			point(x, y)?,
 			0,
 			0,
-			CGEventFlags::CGEventFlagNull,
+			CGEventFlags::empty(),
 		),
 		PointerEvent::Drag { path, button, modifiers, mut keys } => {
 			control::add_modifiers(&mut keys, modifiers);
@@ -4099,10 +4288,16 @@ fn global_scroll(
 			control::wait(WHEEL_STEP_GAP)?;
 		}
 		before_wheel()?;
-		let event =
-			CGEvent::new_scroll_event(source.clone(), ScrollEventUnit::PIXEL, 2, wheel_y, wheel_x, 0)
-				.map_err(|()| DesktopError::input_failed("failed to create a Quartz scroll event"))?;
-		event.set_location(point);
+		let event = CGEvent::new_scroll_wheel_event2(
+			Some(source),
+			CGScrollEventUnit::Pixel,
+			2,
+			wheel_y,
+			wheel_x,
+			0,
+		)
+		.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz scroll event"))?;
+		CGEvent::set_location(Some(&event), point);
 		post_global(&event)?;
 	}
 	Ok(())
@@ -4127,7 +4322,7 @@ fn prime_pointer(source: &CGEventSource, point: CGPoint, side: f64) -> CoreResul
 			CGPoint::new(side.mul_add(offset, point.x), point.y),
 			0,
 			0,
-			CGEventFlags::CGEventFlagNull,
+			CGEventFlags::empty(),
 		)?;
 	}
 	control::wait(PRIMER_SETTLE)?;
@@ -4188,14 +4383,26 @@ fn global_drag(
 	            pressed: bool,
 	            flags: CGEventFlags|
 	 -> CoreResult<()> {
-		let event = CGEvent::new_mouse_event(source.clone(), event_type, location, cg_button)
-			.map_err(|()| DesktopError::input_failed("failed to create a Quartz pointer event"))?;
-		event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, i64::from(pressed));
-		event.set_double_value_field(EventField::MOUSE_EVENT_PRESSURE, f64::from(u8::from(pressed)));
+		let event = CGEvent::new_mouse_event(Some(&source), event_type, location, cg_button)
+			.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz pointer event"))?;
+		CGEvent::set_integer_value_field(
+			Some(&event),
+			CGEventField::MouseEventClickState,
+			i64::from(pressed),
+		);
+		CGEvent::set_double_value_field(
+			Some(&event),
+			CGEventField::MouseEventPressure,
+			f64::from(u8::from(pressed)),
+		);
 		if number != 0 {
-			event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, number);
+			CGEvent::set_integer_value_field(
+				Some(&event),
+				CGEventField::MouseEventButtonNumber,
+				number,
+			);
 		}
-		event.set_flags(flags);
+		CGEvent::set_flags(Some(&event), flags);
 		post_global(&event)
 	};
 	for &key in keys {
@@ -4234,20 +4441,24 @@ fn post_global_mouse(
 	button_number: i64,
 	flags: CGEventFlags,
 ) -> CoreResult<()> {
-	let event = CGEvent::new_mouse_event(source.clone(), event_type, location, button)
-		.map_err(|()| DesktopError::input_failed("failed to create a Quartz pointer event"))?;
-	event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, click_state);
+	let event = CGEvent::new_mouse_event(Some(source), event_type, location, button)
+		.ok_or_else(|| DesktopError::input_failed("failed to create a Quartz pointer event"))?;
+	CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventClickState, click_state);
 	if button_number != 0 {
-		event.set_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER, button_number);
+		CGEvent::set_integer_value_field(
+			Some(&event),
+			CGEventField::MouseEventButtonNumber,
+			button_number,
+		);
 	}
-	event.set_flags(flags);
+	CGEvent::set_flags(Some(&event), flags);
 	post_global(&event)
 }
 
 fn post_global(event: &CGEvent) -> CoreResult<()> {
 	post_hid(event, |event| {
-		skylight::note_hid_post(event.get_type());
-		event.post(CGEventTapLocation::HID);
+		skylight::note_hid_post(CGEvent::r#type(Some(event)));
+		CGEvent::post(CGEventTapLocation::HIDEventTap, Some(event));
 	})
 }
 
@@ -4257,10 +4468,14 @@ fn post_global(event: &CGEvent) -> CoreResult<()> {
 /// always go out.
 fn post_hid(event: &CGEvent, post: impl FnOnce(&CGEvent)) -> CoreResult<()> {
 	control::check()?;
-	if is_key_press(event) || control::is_pointer_press(event.get_type() as u32) {
+	if is_key_press(event) || control::is_pointer_press(CGEvent::r#type(Some(event)).0) {
 		control::intervention::check_press()?;
 	}
-	event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, control::SYNTHETIC_EVENT_TAG);
+	CGEvent::set_integer_value_field(
+		Some(event),
+		CGEventField::EventSourceUserData,
+		control::SYNTHETIC_EVENT_TAG,
+	);
 	release_guard::post(Route::Hid, event, || {
 		post(event);
 		Ok(())
@@ -4290,17 +4505,17 @@ mod tests {
 
 	fn shift_transition(event: &CGEvent) -> (i64, u32, bool) {
 		(
-			event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
-			event.get_type() as u32,
-			event.get_flags().contains(CGEventFlags::CGEventFlagShift),
+			CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode),
+			CGEvent::r#type(Some(event)).0,
+			CGEvent::flags(Some(event)).contains(CGEventFlags::MaskShift),
 		)
 	}
 
 	const SHIFT_SPACE_TRANSITIONS: [(i64, u32, bool); 4] = [
-		(56, CGEventType::FlagsChanged as u32, true),
-		(49, CGEventType::KeyDown as u32, true),
-		(49, CGEventType::KeyUp as u32, true),
-		(56, CGEventType::FlagsChanged as u32, false),
+		(56, CGEventType::FlagsChanged.0, true),
+		(49, CGEventType::KeyDown.0, true),
+		(49, CGEventType::KeyUp.0, true),
+		(56, CGEventType::FlagsChanged.0, false),
 	];
 
 	#[test]
@@ -4338,9 +4553,10 @@ mod tests {
 			&[KeyName::Shift, KeyName::Space],
 			KEY_GAP,
 			|event| {
-				let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+				let code =
+					CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
 				events.push(shift_transition(event));
-				if code == 49 && matches!(event.get_type(), CGEventType::KeyDown) {
+				if code == 49 && matches!(CGEvent::r#type(Some(event)), CGEventType::KeyDown) {
 					Err(DesktopError::input_failed("delivery may be partial"))
 				} else {
 					Ok(())
@@ -4366,8 +4582,8 @@ mod tests {
 				KEY_GAP,
 				|| Ok(()),
 				|event| {
-					events.push(event.get_type());
-					if matches!(event.get_type(), CGEventType::KeyDown) {
+					events.push(CGEvent::r#type(Some(event)));
+					if matches!(CGEvent::r#type(Some(event)), CGEventType::KeyDown) {
 						cancellation.cancel();
 					}
 					Ok(())
@@ -4414,18 +4630,18 @@ mod tests {
 		// SAFETY: `event` is live and `units` holds the capacity passed.
 		unsafe {
 			keyboard_get_unicode_string(
-				event.as_ptr(),
+				std::ptr::from_ref::<CGEvent>(event).cast_mut(),
 				units.len(),
 				&raw mut length,
 				units.as_mut_ptr(),
 			);
 		}
-		let flags = event.get_flags();
+		let flags = CGEvent::flags(Some(event));
 		(
-			event.get_type() as u32,
-			event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
-			flags.contains(CGEventFlags::CGEventFlagShift),
-			flags.contains(CGEventFlags::CGEventFlagAlternate),
+			CGEvent::r#type(Some(event)).0,
+			CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode),
+			flags.contains(CGEventFlags::MaskShift),
+			flags.contains(CGEventFlags::MaskAlternate),
 			String::from_utf16_lossy(&units[..length]),
 		)
 	}
@@ -4447,7 +4663,7 @@ mod tests {
 		)
 		.unwrap();
 		let (down, up, flags) =
-			(CGEventType::KeyDown as u32, CGEventType::KeyUp as u32, CGEventType::FlagsChanged as u32);
+			(CGEventType::KeyDown.0, CGEventType::KeyUp.0, CGEventType::FlagsChanged.0);
 		let key = |kind, code, shift, text: &str| (kind, code, shift, false, text.to_string());
 		assert_eq!(events, [
 			key(down, 0, false, "a"),
@@ -4479,7 +4695,7 @@ mod tests {
 			|| Ok(()),
 			|event| {
 				let typed = typed_event(event);
-				let failed = typed.0 == CGEventType::KeyDown as u32 && typed.1 == 11;
+				let failed = typed.0 == CGEventType::KeyDown.0 && typed.1 == 11;
 				events.push(typed);
 				if failed {
 					Err(DesktopError::input_failed("focus changed"))
@@ -4494,10 +4710,10 @@ mod tests {
 			.map(|event| (event.0, event.1, event.2))
 			.collect();
 		assert_eq!(kinds, [
-			(CGEventType::FlagsChanged as u32, 56, true),
-			(CGEventType::KeyDown as u32, 11, true),
-			(CGEventType::KeyUp as u32, 11, true),
-			(CGEventType::FlagsChanged as u32, 56, false),
+			(CGEventType::FlagsChanged.0, 56, true),
+			(CGEventType::KeyDown.0, 11, true),
+			(CGEventType::KeyUp.0, 11, true),
+			(CGEventType::FlagsChanged.0, 56, false),
 		]);
 	}
 
@@ -4514,7 +4730,7 @@ mod tests {
 			|| Ok(()),
 			|event| {
 				let typed = typed_event(event);
-				let shift_up = typed.0 == CGEventType::FlagsChanged as u32 && typed.1 == 56 && !typed.2;
+				let shift_up = typed.0 == CGEventType::FlagsChanged.0 && typed.1 == 56 && !typed.2;
 				events.push((typed.0, typed.1, typed.2));
 				if shift_up {
 					releases += 1;
@@ -4528,11 +4744,11 @@ mod tests {
 		assert!(result.is_err());
 		// The failed Shift release is attempted again, and a is never pressed.
 		assert_eq!(events, [
-			(CGEventType::FlagsChanged as u32, 56, true),
-			(CGEventType::KeyDown as u32, 11, true),
-			(CGEventType::KeyUp as u32, 11, true),
-			(CGEventType::FlagsChanged as u32, 56, false),
-			(CGEventType::FlagsChanged as u32, 56, false),
+			(CGEventType::FlagsChanged.0, 56, true),
+			(CGEventType::KeyDown.0, 11, true),
+			(CGEventType::KeyUp.0, 11, true),
+			(CGEventType::FlagsChanged.0, 56, false),
+			(CGEventType::FlagsChanged.0, 56, false),
 		]);
 	}
 
@@ -4559,7 +4775,7 @@ mod tests {
 			},
 			|event| {
 				let typed = typed_event(event);
-				lost.update(|v| v || (typed.0, typed.1) == (lose_after.0 as u32, lose_after.1));
+				lost.update(|v| v || (typed.0, typed.1) == (lose_after.0.0, lose_after.1));
 				posted.push((typed.0, typed.1, typed.2));
 				Ok(())
 			},
@@ -4570,7 +4786,7 @@ mod tests {
 	#[test]
 	fn takeover_typing_checks_focus_before_pressing_a_modifier() {
 		let (down, up, flags) =
-			(CGEventType::KeyDown as u32, CGEventType::KeyUp as u32, CGEventType::FlagsChanged as u32);
+			(CGEventType::KeyDown.0, CGEventType::KeyUp.0, CGEventType::FlagsChanged.0);
 		// Focus moves after a: neither Shift nor B is pressed.
 		let (result, posted) = takeover_typing("aB", (CGEventType::KeyUp, 0));
 		assert!(result.is_err());
@@ -4589,8 +4805,7 @@ mod tests {
 		let keys = us_keys("ab").unwrap();
 		// Caps Lock on: every letter would arrive capitalised, so nothing is
 		// pressed.
-		let mut check =
-			physical_modifier_check(&window, || CGEventFlags::CGEventFlagAlphaShift.bits());
+		let mut check = physical_modifier_check(&window, || CGEventFlags::MaskAlphaShift.bits());
 		let mut posted = 0;
 		let error = type_keys(&source, &keys, Duration::ZERO, &mut check, |_| {
 			posted += 1;
@@ -4608,8 +4823,8 @@ mod tests {
 		let mut typed = Vec::new();
 		let error = type_keys(&source, &keys, Duration::ZERO, &mut check, |event| {
 			let event = typed_event(event);
-			if event.0 == CGEventType::KeyUp as u32 {
-				flags.set(CGEventFlags::CGEventFlagCommand.bits());
+			if event.0 == CGEventType::KeyUp.0 {
+				flags.set(CGEventFlags::MaskCommand.bits());
 			}
 			typed.push((event.0, event.1));
 			Ok(())
@@ -4623,10 +4838,9 @@ mod tests {
 			"{}",
 			error.message
 		);
-		assert_eq!(typed, [(CGEventType::KeyDown as u32, 0), (CGEventType::KeyUp as u32, 0)]);
+		assert_eq!(typed, [(CGEventType::KeyDown.0, 0), (CGEventType::KeyUp.0, 0)]);
 		// Flags that change no key, such as the keypad's, do not stop it.
-		let mut check =
-			physical_modifier_check(&window, || CGEventFlags::CGEventFlagNumericPad.bits());
+		let mut check = physical_modifier_check(&window, || CGEventFlags::MaskNumericPad.bits());
 		type_keys(&source, &keys, Duration::ZERO, &mut check, |_| Ok(())).unwrap();
 	}
 
@@ -4692,7 +4906,7 @@ mod tests {
 	#[test]
 	fn a_click_whose_last_press_is_out_is_not_reported_cancelled() {
 		use crate::desktop::error::ErrorCode;
-		let (down, up) = (CGEventType::LeftMouseDown as u32, CGEventType::LeftMouseUp as u32);
+		let (down, up) = (CGEventType::LeftMouseDown.0, CGEventType::LeftMouseUp.0);
 		// A double tap cancelled as its `cancel_at`th press goes out.
 		let run = |cancel_at: i64| {
 			let source = control::CancellationSource::default();
@@ -4703,8 +4917,8 @@ mod tests {
 					2,
 					|| Ok(()),
 					|event, click_state| {
-						posted.borrow_mut().push((event as u32, click_state));
-						if event as u32 == down && click_state == cancel_at {
+						posted.borrow_mut().push((event.0, click_state));
+						if event.0 == down && click_state == cancel_at {
 							source.cancel();
 						}
 						Ok(())
@@ -4728,7 +4942,7 @@ mod tests {
 			let token = cancellation.token();
 			control::with_token_for_test(&token, || post(&cancellation))
 		};
-		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+		let (down, up) = (CGEventType::KeyDown.0, CGEventType::KeyUp.0);
 		// Typed text: the user cancels as the last key goes down.
 		let mut typed = Vec::new();
 		cancelled(&mut |cancellation| {
@@ -4883,6 +5097,71 @@ mod tests {
 		]);
 	}
 
+	#[test]
+	fn bare_keys_carry_only_the_modifiers_they_hold() {
+		const FN: u64 = CGEventFlags::MaskSecondaryFn.bits();
+		const HELP: u64 = CGEventFlags::MaskHelp.bits();
+		const SHIFT: u64 = CGEventFlags::MaskShift.bits() | 0x2;
+		const CAPS: u64 = CGEventFlags::MaskAlphaShift.bits();
+		// An unlisted bit `CoreGraphics` sets on posted events passes through.
+		const MARK: u64 = 0x2000_0000;
+		// As `CoreGraphics` does at the HID tap: a null-source event gets the
+		// HID state's flags, updated by a Shift transition, plus Fn for Delete
+		// and Fn and Help for Insert; posting it makes its flags the state.
+		let state = std::cell::Cell::new(0);
+		let posted = std::cell::RefCell::new(Vec::new());
+		let post = |held: &mut BareModifiers, code: u16, down: bool| {
+			let derived = match (code, down) {
+				(56, true) => state.get() | SHIFT,
+				(56, false) => state.get() & !SHIFT,
+				(117, _) => state.get() | FN,
+				(114, _) => state.get() | FN | HELP,
+				_ => state.get(),
+			};
+			state.set(held.flags(code, down, derived | MARK));
+			posted.borrow_mut().push((code, down, state.get()));
+			Ok(())
+		};
+		// A takeover Delete, then Insert, then "Ba", each its own call.
+		for (name, code) in [(KeyName::Delete, 117), (KeyName::Insert, 114)] {
+			let mut held = BareModifiers::default();
+			let chord = [KeyPress { name, code }];
+			let post = |code, down| post(&mut held, code, down);
+			hold_transitions(&chord, Duration::ZERO, || Ok(()), || Ok(()), post).unwrap();
+		}
+		let mut held = BareModifiers::default();
+		let transitions = bare_transitions(&us_keys("Ba").unwrap());
+		let post_typed = |code, down| {
+			// Other input posted after Shift replaced the HID state.
+			if (code, down) == (11, true) {
+				state.set(0);
+			}
+			post(&mut held, code, down)
+		};
+		post_transitions(&transitions, Duration::ZERO, || Ok(()), post_typed).unwrap();
+		assert_eq!(posted.into_inner(), [
+			(117, true, MARK),
+			(117, false, MARK),
+			(114, true, MARK),
+			(114, false, MARK),
+			(56, true, MARK | SHIFT),
+			(11, true, MARK | SHIFT),
+			(11, false, MARK | SHIFT),
+			(56, false, MARK),
+			(0, true, MARK),
+			(0, false, MARK),
+		]);
+		assert_eq!(state.get(), MARK);
+		// Right-side keys keep their own device bit, releasing one side leaves
+		// the other's modifier held, and Caps Lock passes through.
+		let mut held = BareModifiers::default();
+		held.flags(56, true, 0);
+		let shift = CGEventFlags::MaskShift.bits();
+		assert_eq!(held.flags(60, true, 0), shift | 0x6);
+		assert_eq!(held.flags(56, false, 0), shift | 0x4);
+		assert_eq!(held.flags(60, false, CAPS | shift | 0x4), CAPS);
+	}
+
 	/// What a test's keyboard-layout read returns.
 	type LayoutRead = CoreResult<Option<fn(char) -> Option<Keystroke>>>;
 
@@ -4900,14 +5179,14 @@ mod tests {
 			|| Ok(()),
 			|event| {
 				let typed = typed_event(event);
-				events.push((typed.0, typed.1, event.get_flags(), typed.4));
+				events.push((typed.0, typed.1, CGEvent::flags(Some(event)), typed.4));
 				Ok(())
 			},
 		)
 		.unwrap();
 		// No Shift for B, and a newline is text rather than a Return press.
-		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
-		let key = |kind, text: &str| (kind, 0, CGEventFlags::CGEventFlagNull, text.to_string());
+		let (down, up) = (CGEventType::KeyDown.0, CGEventType::KeyUp.0);
+		let key = |kind, text: &str| (kind, 0, CGEventFlags::empty(), text.to_string());
 		assert_eq!(events, [
 			key(down, "a"),
 			key(up, "a"),
@@ -5033,7 +5312,7 @@ mod tests {
 			},
 		)
 		.unwrap();
-		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+		let (down, up) = (CGEventType::KeyDown.0, CGEventType::KeyUp.0);
 		let mut typed = String::new();
 		for pair in events.chunks(2) {
 			let [(press_kind, 0, false, false, press), (release_kind, 0, false, false, release)] =
@@ -5144,8 +5423,8 @@ mod tests {
 		let result = control::with_token_for_test(&token, || {
 			key_chord(&source, &[KeyName::Ctrl, KeyName::Char('a')], KEY_GAP, |event| {
 				events.push((
-					event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
-					event.get_flags().contains(CGEventFlags::CGEventFlagControl),
+					CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode),
+					CGEvent::flags(Some(event)).contains(CGEventFlags::MaskControl),
 				));
 				if events.len() == 1 {
 					cancellation.cancel();
@@ -5174,7 +5453,7 @@ mod tests {
 		let result = type_keys(&source, &unicode_keys("ab"), Duration::ZERO, guard, |event| {
 			let typed = typed_event(event);
 			// The user picks a sibling window right after a is typed.
-			if typed.0 == CGEventType::KeyUp as u32 {
+			if typed.0 == CGEventType::KeyUp.0 {
 				focused.set(window(9));
 			}
 			posted.push((typed.0, typed.4));
@@ -5184,8 +5463,8 @@ mod tests {
 		assert_eq!(error.code, ErrorCode::InputFailed);
 		assert!(error.message.contains("may already have landed"), "{}", error.message);
 		assert_eq!(posted, [
-			(CGEventType::KeyDown as u32, "a".to_string()),
-			(CGEventType::KeyUp as u32, "a".to_string()),
+			(CGEventType::KeyDown.0, "a".to_string()),
+			(CGEventType::KeyUp.0, "a".to_string()),
 		]);
 		// Space is never pressed once a sibling is key; the releases still go
 		// out, so nothing stays held.
@@ -5229,8 +5508,8 @@ mod tests {
 					// The user types in TextEdit right after Ctrl goes down.
 					listener.record_for_test(7, Instant::now());
 					events.push((
-						event.get_type() as u32,
-						event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+						CGEvent::r#type(Some(event)).0,
+						CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode),
 					));
 					Ok(())
 				})
@@ -5242,9 +5521,9 @@ mod tests {
 		assert!(error.message.contains("nothing more was sent"), "{}", error.message);
 		// Enter is never pressed; its release and Ctrl's still go out.
 		assert_eq!(events, [
-			(CGEventType::FlagsChanged as u32, 59),
-			(CGEventType::KeyUp as u32, 36),
-			(CGEventType::FlagsChanged as u32, 59),
+			(CGEventType::FlagsChanged.0, 59),
+			(CGEventType::KeyUp.0, 36),
+			(CGEventType::FlagsChanged.0, 59),
 		]);
 	}
 
@@ -5266,7 +5545,7 @@ mod tests {
 			type_keys(&source, &unicode_keys("abc"), Duration::ZERO, &guard, |event| {
 				// The user types in TextEdit right after the first key goes out.
 				listener.record_for_test(7, Instant::now());
-				events.push(event.get_type() as u32);
+				events.push(CGEvent::r#type(Some(event)).0);
 				Ok(())
 			})
 		};
@@ -5274,8 +5553,8 @@ mod tests {
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert!(error.message.contains("in TextEdit during this input"), "{}", error.message);
 		// Only a is typed; b and c are never pressed.
-		assert_eq!(&events[..2], [CGEventType::KeyDown as u32, CGEventType::KeyUp as u32]);
-		assert!(!events[2..].contains(&(CGEventType::KeyDown as u32)), "{events:?}");
+		assert_eq!(&events[..2], [CGEventType::KeyDown.0, CGEventType::KeyUp.0]);
+		assert!(!events[2..].contains(&(CGEventType::KeyDown.0)), "{events:?}");
 	}
 
 	#[test]
@@ -5450,11 +5729,12 @@ mod tests {
 			.admit(7, &token)
 			.expect("the user has not used TextEdit");
 		let event = |kind| {
-			CGEvent::new_mouse_event(source.clone(), kind, CGPoint::new(1.0, 1.0), CGMouseButton::Left)
+			CGEvent::new_mouse_event(Some(&source), kind, CGPoint::new(1.0, 1.0), CGMouseButton::Left)
 				.expect("mouse event")
 		};
 		let mut posted = Vec::new();
-		let mut post = |kind| post_hid(&event(kind), |event| posted.push(event.get_type() as u32));
+		let mut post =
+			|kind| post_hid(&event(kind), |event| posted.push(CGEvent::r#type(Some(event)).0));
 		// The user clicks in TextEdit while takeover brings the target forward.
 		listener.record_for_test(7, Instant::now());
 		let press = post(CGEventType::LeftMouseDown);
@@ -5462,7 +5742,7 @@ mod tests {
 		// Moves and releases still go out.
 		post(CGEventType::MouseMoved).unwrap();
 		post(CGEventType::LeftMouseUp).unwrap();
-		assert_eq!(posted, [CGEventType::MouseMoved as u32, CGEventType::LeftMouseUp as u32]);
+		assert_eq!(posted, [CGEventType::MouseMoved.0, CGEventType::LeftMouseUp.0]);
 	}
 
 	#[test]
@@ -5481,14 +5761,14 @@ mod tests {
 		let mut typed = Vec::new();
 		let keys = unicode_keys("ab");
 		let result = type_keys(&source, &keys, Duration::ZERO, guard, |event| {
-			if matches!(event.get_type(), CGEventType::KeyUp) {
+			if matches!(CGEvent::r#type(Some(event)), CGEventType::KeyUp) {
 				focused.set(focus_in(id(7), Some(7)));
 			}
-			typed.push(event.get_type() as u32);
+			typed.push(CGEvent::r#type(Some(event)).0);
 			Ok(())
 		});
 		assert_eq!(result.unwrap_err().code, ErrorCode::InputFailed);
-		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+		let (down, up) = (CGEventType::KeyDown.0, CGEventType::KeyUp.0);
 		assert_eq!(typed, [down, up]);
 		// The rename ending with no focused window reported stops it too.
 		let ended = focus_in(unreported, None);
@@ -5515,14 +5795,14 @@ mod tests {
 		let mut typed = Vec::new();
 		let keys = unicode_keys("ab");
 		let result = type_keys(&source, &keys, Duration::ZERO, guard, |event| {
-			if matches!(event.get_type(), CGEventType::KeyUp) {
+			if matches!(CGEvent::r#type(Some(event)), CGEventType::KeyUp) {
 				front.set(Some(7));
 			}
-			typed.push(event.get_type() as u32);
+			typed.push(CGEvent::r#type(Some(event)).0);
 			Ok(())
 		});
 		assert_eq!(result.unwrap_err().code, ErrorCode::UserIntervened);
-		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+		let (down, up) = (CGEventType::KeyDown.0, CGEventType::KeyUp.0);
 		assert_eq!(typed, [down, up]);
 		// Input into the app the user already had in front is not stopped.
 		assert!(recheck_background(false, 7, 41, || Some(7), || false, || Ok(())).is_ok());
@@ -5603,8 +5883,8 @@ mod tests {
 		let post = |_: Posted, pid, event: &CGEvent| {
 			posted.borrow_mut().push((
 				pid,
-				event.get_integer_value_field(FIELD_TARGET_PID),
-				event.get_integer_value_field(FIELD_WINDOW_NUMBER),
+				CGEvent::integer_value_field(Some(event), CGEventField(FIELD_TARGET_PID)),
+				CGEvent::integer_value_field(Some(event), CGEventField(FIELD_WINDOW_NUMBER)),
 			));
 			Ok(())
 		};
@@ -5665,11 +5945,11 @@ mod tests {
 		let before_press =
 			|| recheck_background(true, 7581, 554, || front.get(), || false, || Ok(()));
 		let post = |_, event: &CGEvent| {
-			let kind = event.get_type();
+			let kind = CGEvent::r#type(Some(event));
 			if matches!(kind, CGEventType::LeftMouseUp) {
 				front.set(Some(7581));
 			}
-			posted.borrow_mut().push(kind as u32);
+			posted.borrow_mut().push(kind.0);
 			Ok(())
 		};
 		let result = background_left_click(
@@ -5678,18 +5958,15 @@ mod tests {
 			556,
 			&window,
 			(300.0, 200.0, 1),
-			CGEventFlags::CGEventFlagNull,
+			CGEventFlags::empty(),
 			before_press,
 			post,
 		);
 		assert_eq!(result.unwrap_err().code, ErrorCode::UserIntervened);
 		// The hover and the off-screen press and release went out; the real
 		// press did not.
-		let (moved, down, up) = (
-			CGEventType::MouseMoved as u32,
-			CGEventType::LeftMouseDown as u32,
-			CGEventType::LeftMouseUp as u32,
-		);
+		let (moved, down, up) =
+			(CGEventType::MouseMoved.0, CGEventType::LeftMouseDown.0, CGEventType::LeftMouseUp.0);
 		assert_eq!(*posted.borrow(), [moved, down, up]);
 	}
 
@@ -5855,7 +6132,8 @@ mod tests {
 					Duration::ZERO,
 					|| Ok(()),
 					|event| {
-						pressed += usize::from(matches!(event.get_type(), CGEventType::KeyDown));
+						pressed +=
+							usize::from(matches!(CGEvent::r#type(Some(event)), CGEventType::KeyDown));
 						Ok(())
 					},
 				)
@@ -5891,7 +6169,7 @@ mod tests {
 					Duration::ZERO,
 					|| Ok(()),
 					|event| {
-						match event.get_type() {
+						match CGEvent::r#type(Some(event)) {
 							CGEventType::KeyDown => boxes.push(focused_box.get()),
 							// Each box hands focus to the next once its digit lands.
 							CGEventType::KeyUp => focused_box.update(|v| v + 1),
@@ -6039,13 +6317,24 @@ mod tests {
 		let source = source().expect("Quartz event source");
 		// SAFETY: `source` remains live for both CoreGraphics getter calls.
 		unsafe {
-			assert_eq!(get_local_events_suppression_interval(source.as_ptr()), 0.0);
 			assert_eq!(
-				get_local_events_filter_during_suppression_state(source.as_ptr(), SUPPRESSION_INTERVAL,),
+				get_local_events_suppression_interval(
+					std::ptr::from_ref::<CGEventSource>(&source).cast_mut()
+				),
+				0.0
+			);
+			assert_eq!(
+				get_local_events_filter_during_suppression_state(
+					std::ptr::from_ref::<CGEventSource>(&source).cast_mut(),
+					SUPPRESSION_INTERVAL,
+				),
 				LOCAL_EVENT_FILTER,
 			);
 			assert_eq!(
-				get_local_events_filter_during_suppression_state(source.as_ptr(), REMOTE_MOUSE_DRAG,),
+				get_local_events_filter_during_suppression_state(
+					std::ptr::from_ref::<CGEventSource>(&source).cast_mut(),
+					REMOTE_MOUSE_DRAG,
+				),
 				LOCAL_EVENT_FILTER,
 			);
 		}
@@ -6272,14 +6561,14 @@ mod tests {
 		let mut typed = Vec::new();
 		let keys = unicode_keys("ab");
 		let result = type_keys(&source, &keys, Duration::ZERO, guard, |event| {
-			if matches!(event.get_type(), CGEventType::KeyUp) {
+			if matches!(CGEvent::r#type(Some(event)), CGEventType::KeyUp) {
 				focused.set(Some(570));
 			}
-			typed.push(event.get_type() as u32);
+			typed.push(CGEvent::r#type(Some(event)).0);
 			Ok(())
 		});
 		assert_eq!(result.unwrap_err().code, ErrorCode::InputFailed);
-		let (down, up) = (CGEventType::KeyDown as u32, CGEventType::KeyUp as u32);
+		let (down, up) = (CGEventType::KeyDown.0, CGEventType::KeyUp.0);
 		assert_eq!(typed, [down, up]);
 		// Keys the window's own process takes need no such check.
 		let unasked = |_| -> Option<u32> { panic!("no other process is involved") };
@@ -6333,12 +6622,12 @@ mod tests {
 		let source = source().expect("Quartz event source");
 		let mut events = Vec::new();
 		let result = key_chord(&source, &[KeyName::Ctrl, KeyName::Enter], KEY_GAP, |event| {
-			let kind = event.get_type();
-			let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+			let kind = CGEvent::r#type(Some(event));
+			let code = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
 			events.push((
-				kind as u32,
+				kind.0,
 				code,
-				event.get_flags().contains(CGEventFlags::CGEventFlagControl),
+				CGEvent::flags(Some(event)).contains(CGEventFlags::MaskControl),
 			));
 			if matches!(kind, CGEventType::KeyDown) && code == 36 {
 				Err(DesktopError::input_failed("focus changed"))
@@ -6350,10 +6639,10 @@ mod tests {
 		// Quartz expresses modifier transitions as FlagsChanged; the final
 		// cleared flag proves Ctrl is released even when Enter's press fails.
 		assert_eq!(events, vec![
-			(CGEventType::FlagsChanged as u32, 59, true),
-			(CGEventType::KeyDown as u32, 36, true),
-			(CGEventType::KeyUp as u32, 36, true),
-			(CGEventType::FlagsChanged as u32, 59, false),
+			(CGEventType::FlagsChanged.0, 59, true),
+			(CGEventType::KeyDown.0, 36, true),
+			(CGEventType::KeyUp.0, 36, true),
+			(CGEventType::FlagsChanged.0, 59, false),
 		]);
 	}
 
@@ -6388,16 +6677,12 @@ mod tests {
 		let mut events = Vec::new();
 		let result =
 			key_chord(&source, &[KeyName::Ctrl, KeyName::Shift, KeyName::Enter], KEY_GAP, |event| {
-				let kind = event.get_type();
-				let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
-				let flags = event.get_flags();
-				let shift = flags.contains(CGEventFlags::CGEventFlagShift);
-				events.push((
-					kind as u32,
-					code,
-					flags.contains(CGEventFlags::CGEventFlagControl),
-					shift,
-				));
+				let kind = CGEvent::r#type(Some(event));
+				let code =
+					CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
+				let flags = CGEvent::flags(Some(event));
+				let shift = flags.contains(CGEventFlags::MaskShift);
+				events.push((kind.0, code, flags.contains(CGEventFlags::MaskControl), shift));
 				if code == 56 && shift {
 					Err(DesktopError::input_failed("focus changed"))
 				} else {
@@ -6408,10 +6693,10 @@ mod tests {
 		// Shift's failed press is released first, so no later release still
 		// carries its flag.
 		assert_eq!(events, vec![
-			(CGEventType::FlagsChanged as u32, 59, true, false),
-			(CGEventType::FlagsChanged as u32, 56, true, true),
-			(CGEventType::FlagsChanged as u32, 56, true, false),
-			(CGEventType::FlagsChanged as u32, 59, false, false),
+			(CGEventType::FlagsChanged.0, 59, true, false),
+			(CGEventType::FlagsChanged.0, 56, true, true),
+			(CGEventType::FlagsChanged.0, 56, true, false),
+			(CGEventType::FlagsChanged.0, 59, false, false),
 		]);
 	}
 
@@ -6683,7 +6968,8 @@ mod tests {
 		let before = control::uptime_ns();
 		route_window_pointer(7, 42, &window, &event, 10.0, 10.0, 1, 0, 1).expect("route");
 		// SAFETY: `event` is a live CGEvent.
-		let stamped = unsafe { get_event_timestamp(event.as_ptr()) };
+		let stamped =
+			unsafe { get_event_timestamp(std::ptr::from_ref::<CGEvent>(&event).cast_mut()) };
 		let after = control::uptime_ns();
 		assert!((before..=after).contains(&stamped), "{before} <= {stamped} <= {after}");
 	}
@@ -6945,7 +7231,7 @@ mod tests {
 		let source = source().expect("event source");
 		let downs = std::cell::Cell::new(0);
 		let post = |_: Posted, _, event: &CGEvent| {
-			if event.get_type() as u32 == CGEventType::KeyDown as u32 {
+			if CGEvent::r#type(Some(event)).0 == CGEventType::KeyDown.0 {
 				downs.update(|v| v + 1);
 			}
 			Ok(())
@@ -6985,7 +7271,7 @@ mod tests {
 		let post = |posted_as: Posted, _, event: &CGEvent| {
 			posted
 				.borrow_mut()
-				.push((posted_as, event.get_type() as u32));
+				.push((posted_as, CGEvent::r#type(Some(event)).0));
 			Ok(())
 		};
 		// The user moved focus to a sheet after the gesture was readied.
@@ -7009,7 +7295,7 @@ mod tests {
 			posted
 				.borrow()
 				.iter()
-				.all(|&(as_, kind)| as_ == Posted::Key && kind != CGEventType::KeyDown as u32),
+				.all(|&(as_, kind)| as_ == Posted::Key && kind != CGEventType::KeyDown.0),
 			"{:?}",
 			posted.borrow()
 		);
@@ -7117,6 +7403,71 @@ mod tests {
 			modifiers: Modifiers::default(),
 		};
 		refuse_drag_source(&window, &click, unread).expect("click");
+	}
+
+	#[test]
+	fn a_drag_selection_looks_for_text_in_the_attached_sheet_and_its_drawing_window() {
+		let own = |_: &u32| ax::WindowContent::Own;
+		let none = |window, wid| Ok((window, wid));
+		let unrouted = |pid| panic!("the window's own input goes nowhere else, not to {pid}");
+		assert_eq!(text_window(554, 554, none, own, unrouted).unwrap(), (554, false));
+		// TextEdit's Save sheet 1362, attached to its document window 554,
+		// takes the press; its fields map to the sheet.
+		let sheet = |_, _| Ok((1362, 1362));
+		assert_eq!(text_window(554, 554, sheet, own, unrouted).unwrap(), (1362, false));
+		// openAndSavePanelService (pid 16472) draws that sheet in its window
+		// 1363, the window its text fields map to, and takes the user's input
+		// there.
+		let drawn = |window: &u32| {
+			assert_eq!(*window, 1362, "the content of the attached sheet");
+			ax::WindowContent::Remote { pid: 16472, window: 1363 }
+		};
+		let routed = std::cell::Cell::new(None);
+		let route = |pid| routed.set(Some(pid));
+		assert_eq!(text_window(554, 554, sheet, drawn, route).unwrap(), (1363, true));
+		assert_eq!(routed.get(), Some(16472));
+	}
+
+	#[test]
+	fn only_a_plain_background_left_drag_on_a_window_may_be_made_as_a_text_selection() {
+		let window = Target::Window("41".to_string());
+		let drag = |path: Vec<(f64, f64)>, button, modifiers, keys| PointerEvent::Drag {
+			path,
+			button,
+			modifiers,
+			keys,
+		};
+		let plain = drag(
+			vec![(3.0, 4.0), (9.0, 4.0), (90.0, 40.0)],
+			MouseButton::Left,
+			Modifiers::default(),
+			Vec::new(),
+		);
+		// The selection runs from the press to the release; points between
+		// only steer the stroke.
+		assert_eq!(
+			selecting_drag(&window, &plain, DeliveryMode::Background),
+			Some(("41", ((3.0, 4.0), (90.0, 40.0))))
+		);
+		// Takeover posts the drag, so it can still pick up what is pressed.
+		assert_eq!(selecting_drag(&window, &plain, DeliveryMode::Foreground), None);
+		assert_eq!(selecting_drag(&Target::Desktop, &plain, DeliveryMode::Background), None);
+		let shift = Modifiers { shift: true, ..Modifiers::default() };
+		for other in [
+			drag(
+				vec![(3.0, 4.0), (90.0, 40.0)],
+				MouseButton::Middle,
+				Modifiers::default(),
+				Vec::new(),
+			),
+			drag(vec![(3.0, 4.0), (90.0, 40.0)], MouseButton::Left, shift, Vec::new()),
+			drag(vec![(3.0, 4.0), (90.0, 40.0)], MouseButton::Left, Modifiers::default(), vec![
+				KeyName::Alt,
+			]),
+			drag(vec![(3.0, 4.0)], MouseButton::Left, Modifiers::default(), Vec::new()),
+		] {
+			assert_eq!(selecting_drag(&window, &other, DeliveryMode::Background), None, "{other:?}");
+		}
 	}
 
 	#[test]
@@ -7259,6 +7610,37 @@ mod tests {
 	}
 
 	#[test]
+	fn a_drag_target_picked_while_its_selection_probes_block_is_left_to_the_user() {
+		use crate::desktop::error::ErrorCode;
+		// The drag began with the user's app (9) in front, and they bring the
+		// target (7) forward while its window and text probes block.
+		let user = EntryFront(Some(9));
+		let picked = || Some(7);
+		// The selection hears the target was behind, so its write refuses.
+		let mut told = None;
+		let selection = selection_behind(user, picked, 7, 42, |behind| {
+			told = Some(behind);
+			Ok(Some("quick"))
+		});
+		assert_eq!(told, Some(true));
+		assert_eq!(selection.unwrap(), Some("quick"));
+		// With no selection, the drag is not handed on to be posted there.
+		let error = selection_behind(user, picked, 7, 42, |_| Ok(None::<&str>)).unwrap_err();
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		// Still behind, or in front from the start: it is posted as input.
+		assert_eq!(selection_behind(user, || Some(9), 7, 42, |_| Ok(None::<&str>)).unwrap(), None);
+		let front = EntryFront(Some(7));
+		let mut told = None;
+		let posted = selection_behind(front, picked, 7, 42, |behind| {
+			told = Some(behind);
+			Ok(None::<&str>)
+		});
+		assert_eq!((told, posted.unwrap()), (Some(false), None));
+		// An unknown front app counts as the target's, as for `select`.
+		assert!(!EntryFront(None).known_behind(7));
+	}
+
+	#[test]
 	fn a_pointer_event_that_never_made_its_window_key_refuses_once_the_user_came_to_it() {
 		use crate::desktop::error::ErrorCode;
 		let user = EntryFront(Some(9));
@@ -7303,7 +7685,7 @@ mod tests {
 	#[test]
 	fn iphone_mirroring_taps_and_scrolls_stop_as_user_intervened_once_brought_forward() {
 		use crate::desktop::error::ErrorCode;
-		let (down, up) = (CGEventType::LeftMouseDown as u32, CGEventType::LeftMouseUp as u32);
+		let (down, up) = (CGEventType::LeftMouseDown.0, CGEventType::LeftMouseUp.0);
 		// The user (9) brings iPhone Mirroring (7) forward after the first tap
 		// of a double tap: the second press would land in the window they took.
 		// The user stepped into the target, so the stop is `UserIntervened`,
@@ -7320,8 +7702,8 @@ mod tests {
 		};
 		let posted = std::cell::RefCell::new(Vec::new());
 		let error = report_taps(2, before_post, |event_type, click_state| {
-			posted.borrow_mut().push((event_type as u32, click_state));
-			if event_type as u32 == up {
+			posted.borrow_mut().push((event_type.0, click_state));
+			if event_type.0 == up {
 				front.set(7);
 			}
 			Ok(())

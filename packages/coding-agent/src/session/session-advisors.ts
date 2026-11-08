@@ -486,8 +486,8 @@ export interface SessionAdvisorsHost {
 	yieldQueue: YieldQueue;
 	obfuscator(): SecretObfuscator | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
-	/** Live `providers.openaiWebsockets` hint for provider calls. */
-	preferWebsockets(): boolean | undefined;
+	/** Per-model WebSocket preference from the live transport settings (Codex and standard Responses). */
+	preferWebsockets(model: Model): boolean | undefined;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
@@ -576,7 +576,7 @@ export class SessionAdvisors {
 	#advisorProviderSessionIds = new Map<string, string>();
 	#advisorCosts = new Map<string, number>();
 	/**
-	 * Slugs whose recorded spend ran on an OAuth/subscription model. Kept in
+	 * Slugs whose recorded spend ran on a subscription model. Kept in
 	 * lockstep with {@link #advisorCosts} so {@link isUsingSubscription} can
 	 * attribute historical advisor spend without rescanning the model catalog
 	 * once the advisor runtime is gone (#10131).
@@ -840,8 +840,8 @@ export class SessionAdvisors {
 	}
 
 	/**
-	 * Slugs whose restored spend ran on a provider that currently authenticates
-	 * via OAuth — the persisted-spend equivalent of the live {@link isUsingSubscription}
+	 * Slugs whose restored spend ran on a provider currently using subscription
+	 * credentials — the persisted-spend equivalent of the live {@link isUsingSubscription}
 	 * check, so resumed sessions attribute subscription usage without a catalog scan.
 	 */
 	#deriveSubscriptionSlugs(
@@ -854,7 +854,7 @@ export class SessionAdvisors {
 		for (const [slug, providers] of providersBySlug) {
 			if ((costs.get(slug) ?? 0) <= 0) continue;
 			for (const provider of providers) {
-				if (auth.credentials.hasOAuth(provider)) {
+				if (auth.credentials.hasSubscription(provider)) {
 					slugs.add(slug);
 					break;
 				}
@@ -1435,10 +1435,10 @@ export class SessionAdvisors {
 			});
 			const baseAdvisorStreamFn = this.#advisorStreamFn ?? streamSimple;
 			const advisorStreamFn: StreamFn = (requestModel, context, streamOptions) => {
-				// Read per request so a mid-session `providers.openaiWebsockets` change reaches advisors.
+				// Read per request so transport setting changes reach existing advisors.
 				const options = {
 					...streamOptions,
-					preferWebsockets: streamOptions?.preferWebsockets ?? this.#host.preferWebsockets(),
+					preferWebsockets: streamOptions?.preferWebsockets ?? this.#host.preferWebsockets(requestModel),
 				};
 				if (requestModel.api === "openai-codex-responses") {
 					return baseAdvisorStreamFn(requestModel, context, {
@@ -1944,9 +1944,9 @@ export class SessionAdvisors {
 	#recordAdvisorCost(advisor: ActiveAdvisor, message: AssistantMessage): void {
 		const cost = message.usage.cost.total;
 		this.#advisorCosts.set(advisor.slug, (this.#advisorCosts.get(advisor.slug) ?? 0) + cost);
-		// Cheap in-memory OAuth-credential check; captured now so subscription
-		// attribution survives the advisor runtime being torn down (#10131).
-		if (cost > 0 && Number.isFinite(cost) && this.#host.modelRegistry.isUsingOAuth(advisor.model)) {
+		// Capture credential attribution now so subscription spend survives
+		// the advisor runtime being torn down (#10131).
+		if (cost > 0 && Number.isFinite(cost) && this.#host.modelRegistry.isUsingSubscription(advisor.model)) {
 			this.#advisorSubscriptionSlugs.add(advisor.slug);
 		}
 	}
@@ -2599,7 +2599,7 @@ export class SessionAdvisors {
 						promptCacheKey: advisorProviderSessionId,
 						metadata: advisorMetadata,
 						providerSessionState: this.#host.providerSessionState,
-						preferWebsockets: this.#host.preferWebsockets(),
+						preferWebsockets: this.#host.preferWebsockets(candidate),
 						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 						codexCompaction,
 					},
@@ -2937,14 +2937,14 @@ export class SessionAdvisors {
 		return cost;
 	}
 	/**
-	 * Whether advisor spend should be attributed to an OAuth/subscription plan.
+	 * Whether advisor spend should be attributed to a subscription plan.
 	 * With live advisors it reflects their current models; once the runtime is
 	 * gone it consults the attribution recorded as spend accrued, so the status
 	 * line never rescans the model catalog per render (#10131).
 	 */
 	isUsingSubscription(): boolean {
 		if (this.#advisors.length > 0) {
-			return this.#advisors.some(a => this.#host.modelRegistry.isUsingOAuth(a.model));
+			return this.#advisors.some(a => this.#host.modelRegistry.isUsingSubscription(a.model));
 		}
 		return this.#advisorSubscriptionSlugs.size > 0;
 	}

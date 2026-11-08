@@ -5,6 +5,7 @@ import { getProjectDir, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import {
+	abortReasonError,
 	buildManagedKernelEnv,
 	buildManagedKernelEnvPatch,
 	createCancelledKernelResult,
@@ -253,11 +254,6 @@ const formatTimeoutAnnotation = formatSessionTimeoutAnnotation;
 
 const formatKernelTimeoutAnnotation = formatSessionKernelTimeoutAnnotation;
 
-function createCancelledPythonResult(timedOut: boolean, timeoutMs?: number): PythonResult {
-	const output = timedOut ? (formatTimeoutAnnotation(timeoutMs) ?? "Command timed out") : "";
-	return createCancelledKernelResult(output);
-}
-
 // ---------------------------------------------------------------------------
 // Kernel start helpers
 // ---------------------------------------------------------------------------
@@ -484,10 +480,18 @@ interface PythonToolRequestOutcome {
 	envelope: unknown;
 }
 
-function pythonToolError(execution: KernelExecuteResult): string {
-	const error = execution.error;
-	if (!error) return "Python tool request failed";
-	return error.value || error.name || "Python tool request failed";
+/** Why a tool request produced no usable reply, or `undefined` when it completed. */
+function pythonToolFailure(execution: KernelExecuteResult, signal: AbortSignal | undefined): string | undefined {
+	if (execution.status === "error") {
+		const error = execution.error;
+		return error?.value || error?.name || "Python tool request failed";
+	}
+	// The caller's abort settles the request without waiting for the runner's reply.
+	if (execution.cancelled) {
+		if (execution.timedOut) return "Python tool request timed out";
+		return abortReasonError(signal?.reason, "Python tool request was cancelled").message;
+	}
+	return undefined;
 }
 
 async function invokePythonToolRequest(
@@ -533,7 +537,8 @@ export async function describePythonTools(
 	options: PythonToolInvokeOptions,
 ): Promise<{ tools: EvalToolDescriptor[]; missing: string[] }> {
 	const { execution, envelope } = await invokePythonToolRequest({ op: "describe", names }, options);
-	if (execution.status === "error") throw new Error(pythonToolError(execution));
+	const failure = pythonToolFailure(execution, options.signal);
+	if (failure) throw new Error(failure);
 	if (!isRecord(envelope) || envelope.ok !== true) {
 		throw new Error("Python tool describe request returned an invalid response");
 	}
@@ -559,7 +564,8 @@ export async function callPythonTool(
 	options: PythonToolInvokeOptions,
 ): Promise<EvalToolInvokeResult> {
 	const { execution, envelope } = await invokePythonToolRequest({ op: "call", name, args }, options);
-	if (execution.status === "error") return { ok: false, error: pythonToolError(execution) };
+	const failure = pythonToolFailure(execution, options.signal);
+	if (failure) return { ok: false, error: failure };
 	if (!isRecord(envelope) || envelope.ok !== true || !("value" in envelope)) {
 		return { ok: false, error: "Python tool call returned an invalid response" };
 	}
@@ -644,10 +650,12 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		}
 		return await sessionRegistry.executeOnSession(code, cwd, executionOptions);
 	} catch (err) {
-		if (isCancellationError(err, PythonExecutionCancelledError) || executionOptions.signal?.aborted) {
-			return createCancelledPythonResult(
-				isTimedOutCancellation(err, PythonExecutionCancelledError, executionOptions.signal),
-			);
+		// Only a cancellation someone asked for is reported as one; any other
+		// failure, whatever its name, reaches the caller with its text.
+		const request = { signal: executionOptions.signal, deadlineMs };
+		if (isCancellationError(err, PythonExecutionCancelledError, request)) {
+			const timedOut = isTimedOutCancellation(err, PythonExecutionCancelledError, request.signal, deadlineMs);
+			return createCancelledKernelResult(timedOut ? formatTimeoutAnnotation(executionOptions.timeoutMs) : "");
 		}
 		throw err;
 	}

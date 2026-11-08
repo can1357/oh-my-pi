@@ -329,7 +329,8 @@ pub mod matchers {
 		#[derive(Debug)]
 		pub struct WalkEntry {
 			/// Filesystem that owns `path`; every probe of this entry goes through it.
-			fs:      pi_vfs::Fs,
+			/// Shared by the entries of a walk.
+			fs:      std::sync::Arc<pi_vfs::Fs>,
 			/// Filesystem path for this entry.
 			path:    PathBuf,
 			/// Depth below the traversal root.
@@ -352,7 +353,12 @@ pub mod matchers {
 
 		impl WalkEntry {
 			/// Create a new WalkEntry for a specific file of `fs`.
-			pub fn new(fs: pi_vfs::Fs, path: impl Into<PathBuf>, depth: usize, follow: Follow) -> Self {
+			pub fn new(
+				fs: std::sync::Arc<pi_vfs::Fs>,
+				path: impl Into<PathBuf>,
+				depth: usize,
+				follow: Follow,
+			) -> Self {
 				let path = path.into();
 				let display = forward_slash_display(&path);
 				Self { fs, path, depth, follow, meta: OnceCell::new(), known_type: None, display }
@@ -407,11 +413,47 @@ pub mod matchers {
 				self.display = Some(forward_slash_display(&display).unwrap_or(display));
 			}
 
+			/// [`Self::set_display_root`] for an entry a walk of `resolved_root`
+			/// listed at the walk-relative `rel` (`/`-separated): when the path
+			/// spells `resolved_root` then `rel`, the display path is built from
+			/// `rel` without taking the path apart.
+			pub fn set_display_rel(&mut self, operand: &Path, resolved_root: &Path, rel: &[u8]) {
+				#[cfg(unix)]
+				{
+					use std::os::unix::ffi::OsStrExt;
+					let (path, root) = (self.path.as_os_str().as_bytes(), resolved_root.as_os_str().as_bytes());
+					if let Some(rest) = path.strip_prefix(root)
+						&& !pi_vfs::is_virtual_path(&self.path)
+						&& !rel.is_empty()
+						&& ((root.ends_with(b"/") && rest == rel)
+							|| (rest.first() == Some(&b'/') && &rest[1..] == rel))
+					{
+						self.display = Some(pi_vfs::join_path(operand, Path::new(OsStr::from_bytes(rel))));
+						return;
+					}
+				}
+				let _ = rel;
+				self.set_display_root(operand, resolved_root);
+			}
+
 			/// Get the name of this entry.
 			pub fn file_name(&self) -> Cow<'_, OsStr> {
 				// A URL root such as `scheme://` names itself, like `/`; URL names decode once.
 				if pi_vfs::is_virtual_path(&self.path) {
 					return pi_vfs::file_name(&self.path).unwrap_or(Cow::Borrowed(self.path.as_os_str()));
+				}
+				// The name after the last `/`, unless that is empty, `.` or `..`,
+				// which the components below resolve.
+				#[cfg(unix)]
+				{
+					use std::os::unix::ffi::OsStrExt;
+					let bytes = self.path.as_os_str().as_bytes();
+					if let Some(slash) = memchr::memrchr(b'/', bytes) {
+						let name = &bytes[slash + 1..];
+						if !matches!(name, b"" | b"." | b"..") {
+							return Cow::Borrowed(OsStr::from_bytes(name));
+						}
+					}
 				}
 				// Path::file_name() only works if the last component is normal.
 				Cow::Borrowed(
@@ -1029,6 +1071,37 @@ pub mod matchers {
 		/// An fnmatch()-style glob matcher.
 		pub struct Pattern {
 			regex: Option<Regex>,
+			/// For a case-sensitive glob of only literal characters and `*`:
+			/// its `*`-separated pieces, matched without the regex.
+			pieces: Option<Vec<String>>,
+		}
+
+		/// Whether `string` is the `*`-separated `pieces` joined with any
+		/// text in place of each `*`.
+		fn matches_pieces(pieces: &[String], string: &str) -> bool {
+			let (first, rest) = pieces.split_first().expect("a split yields a piece");
+			let string = string.as_bytes();
+			if string.len() < first.len() || !same_bytes(&string[..first.len()], first.as_bytes()) {
+				return false;
+			}
+			let mut tail = &string[first.len()..];
+			let Some((last, middle)) = rest.split_last() else {
+				return tail.is_empty();
+			};
+			for piece in middle {
+				match memchr::memmem::find(tail, piece.as_bytes()) {
+					Some(at) => tail = &tail[at + piece.len()..],
+					None => return false,
+				}
+			}
+			tail.len() >= last.len() && same_bytes(&tail[tail.len() - last.len()..], last.as_bytes())
+		}
+
+		/// `a == b` for equally long short slices, compared inline: names and
+		/// glob pieces are a few bytes, where a `memcmp` call costs more than
+		/// the comparison.
+		fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+			a.iter().zip(b).all(|(x, y)| x == y)
 		}
 
 		impl Pattern {
@@ -1042,12 +1115,41 @@ pub mod matchers {
 
 				// As long as glob_to_regex() is correct, this should never fail
 				let regex = glob_to_regex(pattern).map(|r| parse_bre(&r, options).unwrap());
-				Self { regex }
+				let pieces = (!caseless && !pattern.contains(['?', '[', '\\']))
+					.then(|| pattern.split('*').map(str::to_owned).collect());
+				Self { regex, pieces }
 			}
 
 			/// Test if this pattern matches a string.
 			pub fn matches(&self, string: &str) -> bool {
+				// The regex's `.` stops at a newline, so such names take the regex.
+				if let Some(pieces) = &self.pieces
+					&& !string.contains('\n')
+				{
+					return matches_pieces(pieces, string);
+				}
 				self.regex.as_ref().is_some_and(|r| r.is_match(string))
+			}
+		}
+
+		#[cfg(test)]
+		mod tests {
+			use super::Pattern;
+
+			/// Literal-and-`*` globs match exactly as their regex does.
+			#[test]
+			fn piece_matching_agrees_with_the_regex() {
+				let globs = ["*.txt", "a*", "*", "**", "a*b*c", "*ab*ab", "x.y", "", "*.", "a+(b)|{c}$^"];
+				let names =
+					["a.txt", ".txt", "txt", "a.txt.bak", "abc", "aXbYc", "acb", "abab", "ab", "x.y", "xzy", "", "a+(b)|{c}$^", "a\nb.txt"];
+				for glob in globs {
+					let pattern = Pattern::new(glob, false);
+					assert!(pattern.pieces.is_some(), "{glob:?} takes the piece path");
+					let regex = pattern.regex.as_ref().unwrap();
+					for name in names {
+						assert_eq!(pattern.matches(name), regex.is_match(name), "{glob:?} vs {name:?}");
+					}
+				}
 			}
 		}
 	}
@@ -1835,7 +1937,8 @@ pub mod matchers {
 		impl NameMatcher {
 			fn check(&self, file_info: &WalkEntry) -> bool {
 				let file_name = file_info.file_name();
-				let name = file_name.to_string_lossy();
+				let name =
+					file_name.to_str().map_or_else(|| file_name.to_string_lossy(), std::borrow::Cow::Borrowed);
 
 				#[cfg(unix)]
 				if name.len() > 1 && name.chars().all(|x| x == '/') {
@@ -2067,7 +2170,16 @@ pub mod matchers {
 			}
 
 			async fn print(&self, file_info: &WalkEntry, matcher_io: &mut MatcherIO<'_>) {
-				let text = format!("{}{}", file_info.display_path().display(), self.delimiter);
+				let path = file_info.display_path();
+				let text = match path.to_str() {
+					Some(path) => {
+						let mut text = String::with_capacity(path.len() + 1);
+						text.push_str(path);
+						let _ = std::fmt::Write::write_fmt(&mut text, format_args!("{}", self.delimiter));
+						text
+					},
+					None => format!("{}{}", path.display(), self.delimiter),
+				};
 				match write_output(matcher_io.deps, self.output_file.as_ref(), text.as_bytes(), false).await
 				{
 					Ok(()) => {},
@@ -4844,10 +4956,9 @@ use std::{
 	time::SystemTime,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::OsStringValueParser};
 
-use crate::host::{AsyncUtility, Host, async_util, matches_parser};
+use crate::host::{AsyncUtility, Host, matches_parser};
 use matchers::{Follow, WalkEntry};
 
 pub struct Config {
@@ -4999,8 +5110,10 @@ async fn parse_args(args: &[&str], host: &mut Host) -> Result<ParsedInfo, Box<dy
 	Ok(ParsedInfo { matcher, paths, config })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_find_entry(
 	mut entry: WalkEntry,
+	rel: &[u8],
 	operand: &Path,
 	resolved_root: &Path,
 	deps: &dyn Dependencies,
@@ -5009,12 +5122,13 @@ async fn apply_find_entry(
 	current_dir: &mut Option<PathBuf>,
 	ret: &mut i32,
 ) -> (bool, bool) {
-	entry.set_display_root(operand, resolved_root);
+	entry.set_display_rel(operand, resolved_root, rel);
 	let mut matcher_io = matchers::MatcherIO::new(deps, host);
 
-	// Allocated only when the directory changes, not for every entry.
+	// Allocated only when the directory changes, not for every entry. Every
+	// path comes from one walk, so the same directory is spelled the same.
 	let new_dir = pi_vfs::parent_path(entry.path());
-	if new_dir != current_dir.as_deref() {
+	if new_dir.map(Path::as_os_str) != current_dir.as_deref().map(Path::as_os_str) {
 		if let Some(dir) = current_dir.take() {
 			matcher.finished_dir(dir.as_path(), &mut matcher_io).await;
 		}
@@ -5079,7 +5193,7 @@ async fn process_dir_walk_request(
 	resolved_root: &Path,
 	operand: &Path,
 ) -> i32 {
-	let fs = host.vfs();
+	let fs = Arc::new(host.vfs());
 	let layer = pi_walker::Fs::new(&fs, resolved_root);
 	let mut current_dir = None;
 	let mut ret = 0;
@@ -5090,14 +5204,16 @@ async fn process_dir_walk_request(
 			let _ = writeln!(host.stderr, "Error: {}: {error}", path.display());
 		},
 		Ok(mut tree) => {
+			let mut pace = host.output_pace();
 			while let Some(event) = tree.next().await {
 				match event {
 					pi_walker::walk::Event::Entry(entry) => {
 						let walk_entry =
-							WalkEntry::new(fs.clone(), entry.abs.to_path_buf(), entry.depth, config.follow)
+							WalkEntry::new(Arc::clone(&fs), entry.abs.to_path_buf(), entry.depth, config.follow)
 								.with_listed_type(entry.file_type);
 						let (should_quit, should_skip_current_dir) = apply_find_entry(
 							walk_entry,
+							entry.path,
 							operand,
 							resolved_root,
 							deps,
@@ -5107,7 +5223,13 @@ async fn process_dir_walk_request(
 							&mut ret,
 						)
 						.await;
-						let _ = host.flush_output().await;
+						// A provider tree's next listing may wait, so its
+						// output is delivered per entry.
+						let _ = if layer.is_native() {
+							host.pace_output(&mut pace).await
+						} else {
+							host.flush_output().await
+						};
 						if host.sigpipe_hit() {
 							break;
 						}
@@ -5362,11 +5484,6 @@ impl AsyncUtility for Find {
 	}
 }
 
-/// Creates the `find` builtin registration.
-pub(crate) fn find_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	async_util::<Find, SE>()
-}
-
 #[cfg(test)]
 mod tests {
 	use std::{fs, path::PathBuf};
@@ -5499,7 +5616,8 @@ mod tests {
 	async fn exec_uses_shell_cwd_and_captures_child_stdout() {
 		let (_dir, root) = fixture();
 		let (code, out, err) =
-			crate::host::run_script("find . -maxdepth 0 -exec /bin/pwd ';'", "", &root).await;
+			crate::host::run_extra(&["find", ".", "-maxdepth", "0", "-exec", "/bin/pwd", ";"], "", &root, &[])
+				.await;
 		assert_eq!(code, 0, "stderr: {err}");
 		assert_eq!(err, "");
 		assert_eq!(out, format!("{}\n", root.display()));
@@ -5513,14 +5631,15 @@ mod tests {
 		let (_dir, root) = fixture();
 		fs::create_dir(root.join("sub")).unwrap();
 		fs::write(root.join("sub/d.txt"), b"x").unwrap();
-		let (code, out, err) = crate::host::run_script(
-			"find . -name d.txt -execdir pwd ';' && find sub -name d.txt -exec wc -c {} +",
-			"",
-			&root,
-		)
-		.await;
+		let (code, out, err) =
+			crate::host::run_extra(&["find", ".", "-name", "d.txt", "-execdir", "pwd", ";"], "", &root, &[]).await;
 		assert_eq!(code, 0, "stderr: {err}");
-		assert_eq!(out, format!("{}\n1 sub/d.txt\n", root.join("sub").display()));
+		assert_eq!(out, format!("{}\n", root.join("sub").display()));
+		let (code, out, err) =
+			crate::host::run_extra(&["find", "sub", "-name", "d.txt", "-exec", "wc", "-c", "{}", "+"], "", &root, &[])
+				.await;
+		assert_eq!(code, 0, "stderr: {err}");
+		assert_eq!(out, "1 sub/d.txt\n");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -5777,7 +5896,7 @@ mod tests {
 		use super::matchers::{Follow, WalkEntry};
 
 		let file = Path::new(OsStr::from_bytes(b"/r/bad\xffname"));
-		let mut entry = WalkEntry::new(pi_vfs::Fs::native(), file, 1, Follow::Never);
+		let mut entry = WalkEntry::new(std::sync::Arc::new(pi_vfs::Fs::native()), file, 1, Follow::Never);
 		entry.set_display_root(Path::new("."), Path::new("/r"));
 		assert_eq!(entry.display_path().as_os_str().as_bytes(), b"./bad\xffname");
 	}
@@ -5802,7 +5921,7 @@ mod tests {
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn printf_into_closed_pipe_stops_without_panicking() {
-		use brush_core::openfiles::OpenFile;
+		use crate::openfile::OpenFile;
 
 		let (_dir, root) = fixture();
 		let (mut host, capture) = crate::host::Host::for_test("find", "", &root);
@@ -5822,7 +5941,7 @@ mod tests {
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn diagnostic_into_closed_pipe_does_not_panic() {
-		use brush_core::openfiles::OpenFile;
+		use crate::openfile::OpenFile;
 
 		use crate::host::StreamWriter;
 
