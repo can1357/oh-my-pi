@@ -199,6 +199,14 @@ export function createAbortError(name: "AbortError" | "TimeoutError", message: s
 	return err;
 }
 
+/** How much of a runner's stderr a kernel keeps, to say why it stopped. */
+const STDERR_TAIL_CHARS = 2_000;
+/**
+ * How long a stopped kernel's failure waits for what explains the stop: the process exit it is
+ * named for, and the last bytes of stderr.
+ */
+const STOP_DESCRIPTION_WAIT_MS = 200;
+
 export function throwIfAborted(signal: AbortSignal | undefined, fallbackReason: string): void {
 	if (!signal?.aborted) return;
 	const reason = signal.reason;
@@ -233,6 +241,13 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	#shutdownConfirmed = false;
 	#shutdownInFlight: Promise<KernelShutdownResult> | null = null;
 	#exitedPromise: Promise<number> | null = null;
+	/** Why the process stopped, once it has: the exit code. */
+	#exitReason: string | undefined;
+	/** The last {@link STDERR_TAIL_CHARS} characters the runner wrote to stderr, to say why it stopped. */
+	#stderrTail = "";
+	#stderrDrained: Promise<void> = Promise.resolve();
+	/** Settles once {@link #exitReason} is set, so a stop description can wait for the exit itself. */
+	#exitObserved: Promise<void> = Promise.resolve();
 	#pending = new Map<string, PendingExecution>();
 	#pendingControls = new Map<string, PromiseWithResolvers<Frame>>();
 	readonly #options: BaseKernelOptions<TExecuteOptions>;
@@ -246,12 +261,15 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		this.#proc = proc;
 		this.#stdin = proc.stdin;
 		this.#exitedPromise = proc.exited;
-		void this.#exitedPromise.then(code => {
-			this.#markDead();
-			this.#abortPendingExecutions(`${this.#options.languageName} kernel exited with code ${code}`, {
-				kernelKilled: true,
-			});
-		});
+		this.#exitObserved = this.#exitedPromise
+			.then(code => {
+				this.#markDead();
+				this.#exitReason = `${this.#options.languageName} kernel exited with code ${code}`;
+				this.#abortPendingExecutions(this.#exitReason, {
+					kernelKilled: true,
+				});
+			})
+			.catch(() => {});
 
 		this.#startReader(proc.stdout as ReadableStream<Uint8Array>);
 		this.#startStderrDrain(proc.stderr as ReadableStream<Uint8Array>);
@@ -618,9 +636,10 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				while (true) {
 					const { done, value } = await reader.read();
 					if (done) break;
-					const text = decoder.decode(value);
+					const text = decoder.decode(value, { stream: true });
 					if (text.trim()) {
 						logger.warn(`${this.#options.languageName} runner stderr`, { text });
+						this.#stderrTail = (this.#stderrTail + text).slice(-STDERR_TAIL_CHARS);
 					}
 				}
 			} catch {
@@ -633,7 +652,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				}
 			}
 		};
-		void loop();
+		this.#stderrDrained = loop();
 	}
 
 	async #handleFrame(frame: Frame): Promise<void> {
@@ -756,7 +775,11 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 				storeHistory: false,
 			} as TExecuteOptions);
 			if (result.cancelled) {
-				throw createAbortError(result.timedOut ? "TimeoutError" : "AbortError", `${label} cancelled`);
+				// Asked for: the caller's signal or this step's own budget. Its reason says which.
+				throwIfAborted(controller.signal, label);
+				// Nobody asked: the kernel stopped answering, typically because its
+				// process exited. That is a failure, and its cause is the message.
+				throw new Error(`${label} failed: ${await this.#describeStop()}`);
 			}
 			if (result.status === "error") {
 				const reason = result.error?.value ?? `${this.#options.languageName} kernel init failed`;
@@ -765,6 +788,17 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		} finally {
 			for (const cleanup of cleanups) cleanup();
 		}
+	}
+
+	/** Why the kernel stopped answering: its exit, and the end of what it wrote to stderr. */
+	async #describeStop(): Promise<string> {
+		// Neither the exit nor the last stderr bytes are necessarily observed yet: a runner that dies
+		// at once can stop answering before either arrives, and the exit code is the whole reason.
+		// Wait for both, bounded, so a prompt death is still described by what killed it.
+		await Promise.race([Promise.all([this.#stderrDrained, this.#exitObserved]), Bun.sleep(STOP_DESCRIPTION_WAIT_MS)]);
+		const reason = this.#exitReason ?? `${this.#options.languageName} kernel stopped responding`;
+		const tail = this.#stderrTail.trim();
+		return tail ? `${reason}; its last stderr output: ${tail}` : reason;
 	}
 
 	#waitForExitWithTimeout(timeoutMs: number): Promise<number | null> {

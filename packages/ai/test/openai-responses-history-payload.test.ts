@@ -852,6 +852,7 @@ describe("OpenAI responses history payload", () => {
 		for (const model of [
 			getOpenAIReasoningModel("github-copilot", "gpt-5.4"),
 			getOpenAIReasoningModel("xai-oauth", "grok-4.7"),
+			getOpenAIReasoningModel("openrouter", "z-ai/glm-5.3-flash"),
 		]) {
 			const context = resumedEncryptedReasoningContext(model);
 			const providerSessionState = new Map<string, ProviderSessionState>();
@@ -879,6 +880,7 @@ describe("OpenAI responses history payload", () => {
 			"github-copilot first request",
 			"github-copilot closed",
 			"xai-oauth closed",
+			"openrouter closed",
 		]);
 	});
 

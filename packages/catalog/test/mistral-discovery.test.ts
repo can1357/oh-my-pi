@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { mistralModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 function capabilities(overrides: Record<string, boolean>) {
 	return {
@@ -23,6 +25,26 @@ async function discoverMistralModels(payload: unknown) {
 	const models = await options.fetchDynamicModels?.();
 	if (!models) throw new Error("mistral discovery failed");
 	return models;
+}
+
+type ContractFields = Pick<
+	ModelSpec,
+	"id" | "reasoning" | "input" | "contextWindow" | "maxTokens" | "cost" | "thinking"
+>;
+
+/** The metadata an alias row should inherit from the bundled model it aliases. */
+function contract(id: string, models: readonly ContractFields[]) {
+	const model = models.find(candidate => candidate.id === id);
+	return (
+		model && {
+			reasoning: model.reasoning,
+			input: model.input,
+			contextWindow: model.contextWindow,
+			maxTokens: model.maxTokens,
+			cost: model.cost,
+			efforts: model.thinking?.efforts,
+		}
+	);
 }
 
 describe("mistral discovery", () => {
@@ -76,5 +98,55 @@ describe("mistral discovery", () => {
 		const models = await discoverMistralModels({ data: [{ id: "gateway-model" }] });
 
 		expect(models.map(model => model.id)).toEqual(["gateway-model"]);
+	});
+
+	it("maps an alias id to the bundled row of the model it aliases and keeps its own id", async () => {
+		const chat = capabilities({ completion_chat: true, function_calling: true, reasoning: true, vision: true });
+		const models = await discoverMistralModels({
+			data: [
+				{
+					id: "mistral-vibe-cli-latest",
+					name: "mistral-medium-latest",
+					aliases: ["mistral-medium-latest", "mistral-medium-2604", "mistral-vibe-cli-with-tools"],
+					max_context_length: 262144,
+					capabilities: chat,
+				},
+				{
+					id: "mistral-vibe-cli-fast",
+					name: "mistral-small-2603",
+					aliases: ["mistral-small-2603", "mistral-small-latest"],
+					max_context_length: 262144,
+					capabilities: chat,
+				},
+			],
+		});
+		const bundled = getBundledModels("mistral");
+
+		expect(models.map(model => model.id).sort()).toEqual(["mistral-vibe-cli-fast", "mistral-vibe-cli-latest"]);
+		expect(contract("mistral-vibe-cli-latest", models)).toEqual(contract("mistral-medium-latest", bundled));
+		expect(contract("mistral-vibe-cli-fast", models)).toEqual(contract("mistral-small-2603", bundled));
+		expect(contract("mistral-vibe-cli-latest", models)?.cost.input).toBeGreaterThan(0);
+	});
+
+	it("keeps discovery defaults when no alias has a bundled row", async () => {
+		const models = await discoverMistralModels({
+			data: [
+				{
+					id: "acme-chat-1",
+					name: "acme-chat-latest",
+					aliases: ["acme-chat-latest"],
+					capabilities: capabilities({ completion_chat: true }),
+				},
+			],
+		});
+
+		expect(contract("acme-chat-1", models)).toEqual({
+			reasoning: false,
+			input: ["text"],
+			contextWindow: null,
+			maxTokens: null,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			efforts: undefined,
+		});
 	});
 });

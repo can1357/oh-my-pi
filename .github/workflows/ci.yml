@@ -176,7 +176,7 @@ jobs:
                 *) echo "::error::unsupported arch $(uname -m)"; exit 1 ;;
               esac
               name="cargo-deny-$ver-$arch-unknown-linux-musl"
-              curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" "https://github.com/EmbarkStudios/cargo-deny/releases/download/$ver/$name.tar.gz"
+              curl -fsSL --retry 8 --retry-max-time 240 -o "$RUNNER_TEMP/$name.tar.gz" "https://github.com/EmbarkStudios/cargo-deny/releases/download/$ver/$name.tar.gz"
               echo "$sha  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
               tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
               mkdir -p "$HOME/.cargo/bin"

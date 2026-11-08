@@ -177,6 +177,13 @@ describe("latexToBlock (2-D layout)", () => {
 		expect(latexToBlock("\\sqrt{x}").map(line => line.trimEnd())).toEqual([" ┌──", "╲│ x"]);
 	});
 
+	it("keeps a display radical degree inside its enclosing style wrapper", () => {
+		const lines = latexToBlock(String.raw`\textsl{\sqrt[n]{x}}`);
+
+		expect(lines.map(stripVTControlCharacters).map(line => line.trimEnd())).toEqual(["ⁿ ┌──", " ╲│ x"]);
+		expect(lines[0]).toContain("\x1b[3mⁿ\x1b[23m");
+	});
+
 	it("stacks \\binom inside stretched parentheses", () => {
 		expect(latexToBlock("\\binom{n}{k}")).toEqual(["⎛ n ⎞", "⎜   ⎟", "⎝ k ⎠"]);
 	});

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as nativePath from "@oh-my-pi/pi-natives/path";
 import {
 	__resetProjectDirCacheForTests,
+	directoryExists,
 	directoryIsMissing,
 	getLogPath,
 	getProjectDir,
@@ -51,12 +52,16 @@ describe("project directory state", () => {
 		},
 	);
 
-	it("treats denied stat as probeable rather than missing", async () => {
+	it("keeps forgiving probe defaults and propagates denied stat in strict mode", async () => {
 		const stat = spyOn(fs.promises, "stat").mockRejectedValue(
 			Object.assign(new Error("operation not permitted"), { code: "EACCES" }),
 		);
 		try {
-			expect(await directoryIsMissing(path.join(os.tmpdir(), "blocked"))).toBe(false);
+			const blocked = path.join(os.tmpdir(), "blocked");
+			for (const probe of [directoryExists, directoryIsMissing]) {
+				expect(await probe(blocked)).toBe(false);
+				await expect(probe(blocked, { strict: true })).rejects.toMatchObject({ code: "EACCES" });
+			}
 		} finally {
 			stat.mockRestore();
 		}

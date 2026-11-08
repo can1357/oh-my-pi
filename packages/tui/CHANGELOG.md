@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a model catalog refresh callback that lets applications update the active model scope after catalogs are re-fetched.
+- Preserved unfinished answers in ask dialogs and custom editors, allowing users to resume drafts when reopening them.
+
+### Changed
+
+- Simplified Bash previews for redirection to /dev/null by showing a single icon in the Nerd Font symbol preset.
+
+### Fixed
+
+- Fixed streaming and scrolling display issues in terminals without synchronized output, including duplicated rows and blank screens or status lines.
+- Fixed Markdown rendering while streaming list items, preserving bold text and heading formatting.
+- Fixed wrapping of long embedded Bash arguments so indentation and the gutter remain aligned.
+- Fixed prompts and Enter presses entered while the application was starting so they submit normally instead of leaving Enter as a newline.
+- Fixed restored transcripts so aliased tool calls use the same rendering as live tool calls.
+- Fixed debugger tool cards with tabs and control characters in arguments so their displayed width remains accurate.
+- Fixed LaTeX styling in nested content, including bold and italic resets, radical and optional-argument styling, color scoping, and inline math in headings.
+- Fixed unnecessary repainting in the setup wizard while waiting for input in ANSI terminals.
+- Fixed Windows ConPTY event handling so delayed terminal event data no longer appears in the composer.
+- Fixed OSC 8 hyperlink support in Rex terminals so transcript URLs and file paths are command-clickable.
+
+## [18.18.1] - 2026-11-08
+
+### Added
+
+- Grep headers syntax-highlight regex patterns, including incomplete patterns while a call streams, in terminal and native views ([#18392](https://github.com/can1357/oh-my-pi/pull/18392) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
+
+### Changed
+
+- Grep results for a single searched file no longer repeat `1 file` after the match count; the header already names the file ([#18422](https://github.com/can1357/oh-my-pi/pull/18422) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
+
+### Fixed
+
+- Pinned sessions color their pin icon with the theme accent in the status line instead of the session title's color, matching the resume picker ([#18401](https://github.com/can1357/oh-my-pi/pull/18401) by [@SuperUserA](https://github.com/SuperUserA))
+- A saved bash trace the shell visualization can no longer restore (e.g. a `tool_result` hook rewrote its `script`) renders as plain command and output instead of crashing the TUI and every `omp --resume` of that session ([#18338](https://github.com/can1357/oh-my-pi/issues/18338))
+- Tables with near-equal large numeric columns no longer crash transcript rendering during chart analysis ([#18343](https://github.com/can1357/oh-my-pi/issues/18343))
+- A JPEG truncated before its end-of-image marker is rejected when read and omitted from the request, instead of failing the whole provider request with "unsupported image" ([#18385](https://github.com/can1357/oh-my-pi/pull/18385) by [@iwangjie](https://github.com/iwangjie))
+- Desktop notifications use unique OSC 99 ids per omp process to avoid interfering with other omp processes ([#18413](https://github.com/can1357/oh-my-pi/pull/18413) by [@farnoy](https://github.com/farnoy))
+- `updateNotesToolRenderer` now renders `update_notes` calls that omit `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
+- The copy overlay now offers fenced code blocks indented under list items, and splits code and quote blocks the same way the message renderer draws them ([#18410](https://github.com/can1357/oh-my-pi/pull/18410) by [@farnoy](https://github.com/farnoy))
+
+## [18.18.0] - 2026-11-07
+
 ### Fixed
 
 - Ctrl+J from a win32-input-mode record with `VK_J` and `Uc=LF` now decodes as `ctrl+j`, so Windows Terminal / mini-term insert a newline instead of submitting ([#18253](https://github.com/can1357/oh-my-pi/pull/18253) by [@Clannad47](https://github.com/Clannad47))
