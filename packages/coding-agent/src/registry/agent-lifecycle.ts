@@ -106,6 +106,15 @@ function dropReviver(adopted: AdoptedAgent | undefined): void {
 	}
 }
 
+/** Run an adoption's `onRelease`, logging instead of throwing: the lifecycle has already ended. */
+async function runReleaseHook(id: string, onRelease: (() => Promise<void>) | undefined): Promise<void> {
+	try {
+		await onRelease?.();
+	} catch (error) {
+		logger.warn("AgentLifecycleManager: owned resource cleanup failed", { id, error: String(error) });
+	}
+}
+
 interface ParkInFlight {
 	/** The exact ref this park was started for. */
 	ref: AgentRef;
@@ -288,7 +297,9 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	 * died with the agent's session. The adoption itself stays, so its
 	 * `onRelease` (e.g. a retained isolation workspace) still runs at final
 	 * release, and the next {@link ensureLive} cold-revives through the persisted
-	 * reviver factory. Main-thread bridging only. Returns true when dropped.
+	 * reviver factory. When that factory refuses the agent too, nothing can
+	 * bring it back and its resources are released now. Main-thread bridging
+	 * only. Returns true when dropped.
 	 */
 	forgetReviver(id: string, revive: AgentReviver): boolean {
 		const adopted = this.#adopted.get(id);
@@ -297,7 +308,44 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		adopted.timer = undefined;
 		adopted.revive = undefined;
 		dropReviver(adopted);
+		void this.#releaseIfUnrevivable(id, adopted);
 		return true;
+	}
+
+	/**
+	 * Release a parked adoption no {@link ensureLive} can revive: it holds no
+	 * warm reviver and the persisted factory refuses it (an isolated run, or no
+	 * transcript at all). Without this its `onRelease` resources (an isolated
+	 * worktree) stay held until omp exits. Revivable agents are left alone.
+	 */
+	async #releaseIfUnrevivable(id: string, adopted: AdoptedAgent): Promise<void> {
+		const ref = adopted.ref;
+		const unrevivable = (): boolean =>
+			!this.#disposed &&
+			this.#adopted.get(id) === adopted &&
+			this.#registry.get(id) === ref &&
+			!adopted.revive &&
+			ref.status === "parked" &&
+			!ref.session &&
+			!this.#parks.has(id) &&
+			!this.#revivals.has(id);
+		if (!adopted.onRelease || !unrevivable()) return;
+		if (ref.sessionFile) {
+			// A factory installed later could still revive it.
+			const factory = this.#persistedReviverFactory;
+			if (!factory) return;
+			try {
+				if (await factory(ref)) return;
+			} catch (error) {
+				logger.warn("AgentLifecycleManager: persisted reviver probe failed", { id, error: String(error) });
+				return;
+			}
+			// The probe awaited I/O; another lifecycle operation may own the agent now.
+			if (!unrevivable()) return;
+		}
+		clearTimeout(adopted.timer);
+		this.#adopted.delete(id);
+		await runReleaseHook(id, adopted.onRelease);
 	}
 
 	/** True if the id is adopted (parked or live) — and, when `expected` is given, still bound to that ref. */
@@ -406,6 +454,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			detached: false,
 		};
 
+		let afterPark: AdoptedAgent | undefined;
 		park.promise = (async () => {
 			try {
 				// Yield so a same-tick ensureLive/hub-send can cancel before we
@@ -442,11 +491,15 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				} catch (error) {
 					logger.warn("AgentLifecycleManager.park: session dispose failed", { id, error: String(error) });
 				}
+				const parked = this.#adopted.get(id);
+				if (parked?.ref === ref) afterPark = parked;
 			} finally {
 				// Only clear if we are still the in-flight entry (a later park would
 				// have replaced us only after we resolved).
 				if (this.#parks.get(id) === park) this.#parks.delete(id);
 			}
+			// Outside the park entry, so the release check does not see this park in flight.
+			if (afterPark) await this.#releaseIfUnrevivable(id, afterPark);
 		})();
 
 		this.#parks.set(id, park);
@@ -680,14 +733,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 					logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
 				}
 			}
-			try {
-				await onRelease?.();
-			} catch (error) {
-				logger.warn("AgentLifecycleManager.release: owned resource cleanup failed", {
-					id,
-					error: String(error),
-				});
-			}
+			await runReleaseHook(id, onRelease);
 		}
 		if (!options?.tombstone) this.#registry.unregister(id, ref);
 		return true;
@@ -793,9 +839,14 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			clearTimeout(adopted.timer);
 			this.#adopted.delete(event.ref.id);
 			dropReviver(adopted);
+			// Unregistered outside `release` (its session disposed directly): the
+			// lifecycle still ended, so its owned resources must go with it.
+			void runReleaseHook(event.ref.id, adopted.onRelease);
 			return;
 		}
 		if (event.type !== "status_changed") return;
+		// Parked without `park()` (its worker thread died): a reviver-less agent may now be unrevivable.
+		if (event.ref.status === "parked") void this.#releaseIfUnrevivable(event.ref.id, adopted);
 		if (event.ref.status === "running") {
 			if (adopted.timer) {
 				clearTimeout(adopted.timer);

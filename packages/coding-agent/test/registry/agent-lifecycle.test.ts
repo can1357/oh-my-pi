@@ -459,6 +459,64 @@ describe("AgentLifecycleManager", () => {
 		expect(releaseResource).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps a parked agent's resources while its warm reviver can bring it back", async () => {
+		vi.useFakeTimers();
+		const releaseWorkspace = vi.fn(async () => {});
+		const revived = makeSessionStub();
+		registerIdleSub("Warm-Park-Sub", makeSessionStub().session);
+		lifecycle.adopt("Warm-Park-Sub", {
+			idleTtlMs: TTL,
+			revive: async () => revived.session,
+			onRelease: releaseWorkspace,
+		});
+
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+
+		expect(registry.get("Warm-Park-Sub")?.status).toBe("parked");
+		expect(releaseWorkspace).not.toHaveBeenCalled();
+		expect(await lifecycle.ensureLive("Warm-Park-Sub")).toBe(revived.session);
+	});
+
+	it("releases resources once a dead thread's agent is refused by the persisted reviver", async () => {
+		const manager = new AgentLifecycleManager(registry);
+		const warm = makeSessionStub();
+		const releaseWorkspace = vi.fn(async () => {});
+		const warmReviver = async () => warm.session;
+		manager.setPersistedSubagentReviverFactory(
+			async () => undefined,
+			() => 0,
+		);
+		const ref = registerIdleSub("Iso-Dead-Sub", warm.session);
+		manager.adopt("Iso-Dead-Sub", { idleTtlMs: 0, revive: warmReviver, onRelease: releaseWorkspace }, ref);
+		// Worker exit order: forget the reviver while the ref is still idle, then park the ref.
+		expect(manager.forgetReviver("Iso-Dead-Sub", warmReviver)).toBe(true);
+		await flushAsync();
+		expect(releaseWorkspace).not.toHaveBeenCalled();
+		registry.detachSession("Iso-Dead-Sub", ref);
+		registry.setStatus("Iso-Dead-Sub", "parked", ref);
+		await flushAsync();
+
+		expect(releaseWorkspace).toHaveBeenCalledTimes(1);
+		expect(manager.has("Iso-Dead-Sub")).toBe(false);
+		expect(registry.get("Iso-Dead-Sub")?.status).toBe("parked");
+		await expect(manager.ensureLive("Iso-Dead-Sub")).rejects.toThrow("cannot be revived");
+		await manager.release("Iso-Dead-Sub");
+		expect(releaseWorkspace).toHaveBeenCalledTimes(1);
+	});
+
+	it("releases owned resources when an adopted agent is unregistered outside release", async () => {
+		const releaseResource = vi.fn(async () => {});
+		const ref = registerIdleSub("Dropped-Sub", makeSessionStub().session);
+		lifecycle.adopt("Dropped-Sub", { idleTtlMs: 0, onRelease: releaseResource });
+
+		registry.unregister("Dropped-Sub", ref);
+		await flushAsync();
+
+		expect(lifecycle.has("Dropped-Sub")).toBe(false);
+		expect(releaseResource).toHaveBeenCalledTimes(1);
+	});
+
 	it("keeps the release hook when a dead thread's warm reviver is dropped, through cold revival", async () => {
 		const manager = new AgentLifecycleManager(registry);
 		const warm = makeSessionStub();
