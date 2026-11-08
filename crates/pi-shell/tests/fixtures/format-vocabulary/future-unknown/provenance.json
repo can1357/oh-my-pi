@@ -1,0 +1,50 @@
+{
+  "writer": "f4472073a8aa8a82d5603fb4cc9605418e11edf6",
+  "crate_version": "18.18.0",
+  "build_id": "0d9a43b5054d8b5c18972d8b9aa487286c95ade5e4fe5588bc6d79ada090befe",
+  "source": "../unknown_record_producer.rs",
+  "transformation": "Retarget Misc 74 to 127 and Misc 75 to 126. Preserve original frame bytes and record payloads. Original input files remain unchanged.",
+  "reason": "Misc slots 74, 75 and 76 are now known as BgPids, BangSeen and JobFrames; unknown-record tests must use still-unknown keys.",
+  "files": {
+    "unknown-root-kept.image": {
+      "input": "../18.18/unknown-root-kept.image",
+      "input_sha256": "d32f98793e3b7a70795d91b81195cde9f609f78aae11e70c6a3400d3cc34adad",
+      "frames_version": 29,
+      "sha256": "8b51f9d4242fa497acfe046effd5077653a5cb661acadb2bb5972d9ff4592c7c",
+      "size": 2242
+    },
+    "unknown-root-kept.record": {
+      "input": "../18.18/unknown-root-kept.record",
+      "input_sha256": "44ea53e9f759e4df68cb3cd0f31e7aea731f2bcf3274e42acba30dfed6c8765b",
+      "sha256": "1043d7bb075e61dbf52364096931eb5463efc5db1d2a668add540ab039c08e94",
+      "size": 7
+    },
+    "unknown-subshell-kept.image": {
+      "input": "../18.18/unknown-subshell-kept.image",
+      "input_sha256": "0d3e9cb7d76c81aa3552cdcfb057c39192cc344e642aec8e6909d9e72541495d",
+      "frames_version": 29,
+      "sha256": "327a9e3d7f93d96704a99cf2cd4c33ea3ade4f5e2a62cd8141f9686704bfaffe",
+      "size": 2481
+    },
+    "unknown-subshell-kept.record": {
+      "input": "../18.18/unknown-subshell-kept.record",
+      "input_sha256": "44ea53e9f759e4df68cb3cd0f31e7aea731f2bcf3274e42acba30dfed6c8765b",
+      "sha256": "1043d7bb075e61dbf52364096931eb5463efc5db1d2a668add540ab039c08e94",
+      "size": 7
+    },
+    "frameless-unknown-root.image": {
+      "input": "../frameless-bg-pids.image",
+      "input_sha256": "6528c50a5aa8a130b90cc92c26a0264bc8a9dea611bdb1b9ebc9af6d4a358af8",
+      "frames_version": null,
+      "sha256": "7419c70c03e00290907e38d811a7f35ced100ec5764014d1dc2abde327ab1d48",
+      "size": 1001
+    },
+    "frameless-two-unknown-roots.image": {
+      "input": "../frameless-root-marks.image",
+      "input_sha256": "695d87421a6e388c9b75f6ea91737e1b45ca67ff281d97d24fe91b82d2e9285a",
+      "frames_version": null,
+      "sha256": "fcff56ac838f5b0b4dade54e15a9905a00ae6f2bf307041461af7004067ec7aa",
+      "size": 1021
+    }
+  }
+}

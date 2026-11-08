@@ -1,6 +1,7 @@
-//! Cross-build images are written by independent libraries, never rewritten by
-//! these tests. The provenance manifests beside the legacy and 18.18 images
-//! identify each upstream-based writer.
+//! Independent libraries write these cross-build images. Unknown-record cases
+//! use separately generated copies with still-unknown Misc ordinals; their
+//! original frame bytes and record payloads are unchanged. Provenance is beside
+//! each group of fixtures.
 
 use bstr::BStr;
 use pi_shell::{
@@ -15,13 +16,14 @@ use pi_shell::{
 use serde::{Deserialize, Serialize};
 
 const BASE: &[u8] = include_bytes!("fixtures/format-vocabulary/18.18/base-parent-wait.image");
-const UNKNOWN: &[u8] = include_bytes!("fixtures/format-vocabulary/18.18/unknown-root-kept.image");
+const UNKNOWN: &[u8] =
+	include_bytes!("fixtures/format-vocabulary/future-unknown/unknown-root-kept.image");
 const UNKNOWN_RECORD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18/unknown-root-kept.record");
+	include_bytes!("fixtures/format-vocabulary/future-unknown/unknown-root-kept.record");
 const UNKNOWN_CHILD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18/unknown-subshell-kept.image");
+	include_bytes!("fixtures/format-vocabulary/future-unknown/unknown-subshell-kept.image");
 const UNKNOWN_CHILD_RECORD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18/unknown-subshell-kept.record");
+	include_bytes!("fixtures/format-vocabulary/future-unknown/unknown-subshell-kept.record");
 const NEWER: &[u8] = include_bytes!("fixtures/format-vocabulary/newer-parent-wait.image");
 const FOREIGN: &[u8] = include_bytes!("fixtures/format-vocabulary/foreign-parent-wait.image");
 

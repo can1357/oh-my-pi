@@ -17,9 +17,10 @@ const OPTIONAL: &[u8] =
 	include_bytes!("fixtures/format-vocabulary/18.18/owned-optional-vocabulary.image");
 const RESERVED: &[u8] =
 	include_bytes!("fixtures/format-vocabulary/18.18/owned-reserved-required.image");
-const FRAMELESS: &[u8] = include_bytes!("fixtures/format-vocabulary/frameless-bg-pids.image");
+const FRAMELESS: &[u8] =
+	include_bytes!("fixtures/format-vocabulary/future-unknown/frameless-unknown-root.image");
 const FRAMELESS_MARKS: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/frameless-root-marks.image");
+	include_bytes!("fixtures/format-vocabulary/future-unknown/frameless-two-unknown-roots.image");
 const READABLE: &[u8] = include_bytes!("fixtures/format-vocabulary/18.18/base-parent-wait.image");
 const FOREIGN: &[u8] = include_bytes!("fixtures/format-vocabulary/foreign-parent-wait.image");
 
@@ -201,8 +202,8 @@ fn unknown_optional_per_vproc_state_survives_two_snapshots_and_execution_continu
 }
 
 #[test]
-fn frameless_legacy_root_state_is_preserved_and_its_loss_is_reported() {
-	for (image, ids) in [(FRAMELESS, &[74][..]), (FRAMELESS_MARKS, &[74, 75][..])] {
+fn frameless_unknown_root_state_is_preserved_and_its_loss_is_reported() {
+	for (image, ids) in [(FRAMELESS, &[127][..]), (FRAMELESS_MARKS, &[127, 126][..])] {
 		let engine = Engine::new(EngineConfig::default());
 		let mut host = FakeHost::new();
 		let mut store = MemStore::from_bytes(image).unwrap();
@@ -215,7 +216,7 @@ fn frameless_legacy_root_state_is_preserved_and_its_loss_is_reported() {
 					store
 						.record(Key::UnknownMisc(id))
 						.cloned()
-						.expect("the library must really emit the legacy root record"),
+						.expect("the independent fixture must really contain the unknown root record"),
 				)
 			})
 			.collect();

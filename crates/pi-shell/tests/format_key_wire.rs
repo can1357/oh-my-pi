@@ -12,8 +12,8 @@ fn named_misc_json_still_decodes_to_the_original_binary_key() {
 
 #[test]
 fn an_unknown_numeric_misc_key_preserves_its_binary_and_human_readable_identity() {
-	let key: KeyBuf = postcard::from_bytes(&[9, 76]).unwrap();
-	assert_eq!(key, KeyBuf::UnknownMisc(76));
-	assert_eq!(serde_json::to_string(&key).unwrap(), r#"{"Misc":76}"#);
-	assert_eq!(postcard::to_stdvec(&key).unwrap(), vec![9, 76]);
+	let key: KeyBuf = postcard::from_bytes(&[9, 127]).unwrap();
+	assert_eq!(key, KeyBuf::UnknownMisc(127));
+	assert_eq!(serde_json::to_string(&key).unwrap(), r#"{"Misc":127}"#);
+	assert_eq!(postcard::to_stdvec(&key).unwrap(), vec![9, 127]);
 }
