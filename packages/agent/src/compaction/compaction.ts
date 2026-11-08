@@ -1289,11 +1289,9 @@ async function generateShortSummary(
 					maxTokens,
 					signal,
 					apiKey,
-					// Display-only summary with a 512-token cap: a thinking model spends the whole
-					// cap on reasoning and returns nothing (118 of 128 calls on a Qwen engine,
-					// 2026-11-08), so this oneshot runs without reasoning. The full summary keeps
-					// the session's effort (resolveCompactionEffort).
-					reasoning: undefined,
+					// Display-only summary under a 512-token cap: reasoning would consume the
+					// whole budget. The full summary keeps the session's effort.
+					disableReasoning: true,
 					initiatorOverride: options?.initiatorOverride,
 					metadata: options?.metadata,
 					fetch: options?.fetch,
