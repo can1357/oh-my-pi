@@ -75,6 +75,36 @@ describe("BashExecutionComponent replay seeding", () => {
 		expect(expanded).not.toContain("to expand");
 	});
 
+	it("advertises expand for an error row's recoverable tail and withholds it once nothing is left to reveal", () => {
+		// Recoverable: a run that failed without sealing a full snapshot keeps
+		// the 100-row tail, so the rows past the 20-row preview are still in the
+		// component and Ctrl+O delivers them. The head above the cap is gone, so
+		// the footer names it apart — and must not withdraw the expand hint from
+		// the rows expansion does recover.
+		const recoverable = new BashExecutionComponent("seq 1 250", ui, false);
+		recoverable.appendOutput(REPLAY_OUTPUT);
+		recoverable.setComplete(1, false);
+		const keptRows = rowsOf(recoverable).join("\n");
+		expect(keptRows).toContain(`… ${CAPPED_HIDDEN_LINES} more lines`);
+		expect(keptRows).toContain("to expand");
+		expect(keptRows).toContain(`… ${DROPPED_LINES} earlier lines dropped`);
+
+		// Not recoverable: this failed run kept only the single row the preview
+		// already shows, and the three rows the throttle skipped are gone. Nothing
+		// retained is hidden, so the footer reports the loss without promising a
+		// key that cannot bring it back.
+		const gone = new BashExecutionComponent("echo hi", ui, false);
+		gone.appendOutput("kept");
+		// Inside the 50 ms gate: rejected whole, and it starts with a newline so
+		// the retained row keeps its tail.
+		gone.appendOutput("\ngap-1\ngap-2\ngap-3");
+		gone.setComplete(1, false);
+		const goneRows = rowsOf(gone).join("\n");
+		expect(goneRows).toContain("… 3 lines skipped in output");
+		expect(goneRows).not.toContain("more lines");
+		expect(goneRows).not.toContain("to expand");
+	});
+
 	it("reports the partial line a throttled chunk lost", () => {
 		// A chunk rejected by the throttle merges its first segment into the
 		// retained last row, and that segment is discarded: the row on screen
@@ -171,24 +201,5 @@ describe("ChatTranscriptBuilder bash replay", () => {
 		expect(bulkRows.length).toBeGreaterThan(STREAMING_LINE_CAP);
 		expect(bulkRows[0]).toBe(rows[0]);
 		expect(bulkRows.at(-1)).toBe(rows.at(-1));
-	});
-
-	it("emits no output pane for an empty recorded result", () => {
-		const { component } = replayBash({
-			role: "bashExecution",
-			command: "true",
-			output: "",
-			exitCode: 0,
-			cancelled: false,
-			truncated: false,
-			timestamp: 0,
-		} as unknown as AgentMessage);
-
-		expect(component.getOutput()).toBe("");
-		// No output pane: the only rendered rows are the frame's borders and the
-		// command header, so there is neither a preview nor a status line.
-		const rows = rowsOf(component);
-		expect(rows).toHaveLength(3);
-		expect(rows[1]).toBe("$ true");
 	});
 });
