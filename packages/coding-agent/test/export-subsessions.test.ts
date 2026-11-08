@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { APP_NAME, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { exportFromFile, exportSessionToHtml, type SessionData } from "../src/export/html";
 import type { SessionHeader } from "../src/session/session-entries";
@@ -249,25 +249,6 @@ describe("collectSubSessions", () => {
 		});
 	}
 
-	test.skipIf(process.platform !== "win32")(
-		"exports to the current directory on Windows without mkdir '.' failing",
-		async () => {
-			const probe = path.join(import.meta.dir, "fixtures", "html-export-path-probe.ts");
-			const result = await $`${process.execPath} ${probe} ${mainFile}`
-				.cwd(root)
-				.env({ ...process.env, PI_BUNDLED: "1" })
-				.quiet()
-				.nothrow();
-			expect(result.exitCode, result.stderr.toString()).toBe(0);
-			const outputPath = path.resolve(root, result.text().trim());
-			expect(path.dirname(outputPath)).toBe(root);
-			const data = await readExportData(outputPath);
-			expect(data.header?.id).toBe("main");
-			expect(data.entries.map(entry => entry.id)).toEqual(["m1"]);
-			expect(data.leafId).toBe("m1");
-		},
-	);
-
 	test("rejects a missing input without creating session or export files", async () => {
 		const missingInput = path.join(root, "missing.jsonl");
 		const outputPath = path.join(root, "export.html");
@@ -359,5 +340,42 @@ describe("collectSubSessions", () => {
 	test("returns empty record when no subagent dir exists", async () => {
 		expect(await collectSubSessions(mainFile)).toEqual({});
 		expect(await collectSubSessions(path.join(root, "not-a-session"))).toEqual({});
+	});
+});
+
+describe("HTML export output paths", () => {
+	let root: string;
+	let mainFile: string;
+
+	beforeEach(async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-export-paths-"));
+		mainFile = path.join(root, "main.jsonl");
+		await Bun.write(mainFile, sessionJsonl("main", ["m1"]));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(root);
+	});
+
+	test.each([
+		["the default filename in cwd", undefined],
+		["a relative parent that normalizes to cwd", "sub/../export.html"],
+		["a relative path with missing parent directories", "exports/nested/export.html"],
+	])("exports to %s", async (_description, outputPath) => {
+		const probe = path.join(import.meta.dir, "fixtures", "html-export-path-probe.ts");
+		const args = outputPath ? [outputPath] : [];
+		const result = await $`${process.execPath} ${probe} ${mainFile} ${args}`
+			.cwd(root)
+			// Skip the development viewer asset; this test exercises output paths, not viewer packaging.
+			.env({ ...process.env, PI_BUNDLED: "1" })
+			.quiet()
+			.nothrow();
+		expect(result.exitCode, result.stderr.toString()).toBe(0);
+		const returnedPath = result.text().trim();
+		expect(returnedPath).toBe(outputPath ?? `${APP_NAME}-session-main.html`);
+		const data = await readExportData(path.resolve(root, returnedPath));
+		expect(data.header?.id).toBe("main");
+		expect(data.entries.map(entry => entry.id)).toEqual(["m1"]);
+		expect(data.leafId).toBe("m1");
 	});
 });

@@ -30,7 +30,7 @@
 
 ### Fixed
 
-- Fixed `/export` failing with `EEXIST` when saving in the current directory on Windows ([#18369](https://github.com/can1357/oh-my-pi/issues/18369)).
+- Fixed `/export` failing on Windows when saving in the current directory, including relative paths such as `sub/../session.html` ([#18369](https://github.com/can1357/oh-my-pi/issues/18369), [#18525](https://github.com/can1357/oh-my-pi/pull/18525) by [@minhngoc25a](https://github.com/minhngoc25a)).
 - Fixed `omp --resume` showing `(no messages)` for sessions whose first prompt follows a large memory recall, image-only message, or `/skill:` reply ([#16495](https://github.com/can1357/oh-my-pi/issues/16495))
 - Reading Reddit URLs now works when Reddit blocks its API: posts, comment threads, subreddits, and user pages fall back to a Redlib mirror and then the Arctic Shift archive, and render full nested comment trees.
 - Limited xAI `web_search` to two hosted-search turns per request to help prevent unexpected X search costs.
