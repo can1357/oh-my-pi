@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Agent `bash` commands on macOS no longer get `LANG`/`LC_ALL=C.UTF-8`, a locale macOS does not ship, which made `initdb` refuse to start and `perl` warn on every run; they get `C` with a UTF-8 `LC_CTYPE` instead ([#18540](https://github.com/can1357/oh-my-pi/issues/18540))
+
 ## [18.18.2] - 2026-11-08
 
 ### Breaking Changes
