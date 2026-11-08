@@ -1677,6 +1677,13 @@ async function openCodexWebSocketTransport(
 }> {
 	let canAppendBeforeRequest = websocketState.canAppend === true;
 	let chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
+	// Snapshot the pre-connect chain: `getOrCreate` resets the append baseline on
+	// reconnect, but `previous_response_id` is server-side and may still be valid
+	// on the new socket. Keep it for one optimistic attempt (issue #18475).
+	const preConnectChainedBody = chainedBody;
+	const hadPreConnectChain =
+		typeof preConnectChainedBody.previous_response_id === "string" &&
+		preConnectChainedBody.previous_response_id.length > 0;
 	const websocketHeaders = createCodexHeaders(
 		requestContext.requestHeaders,
 		requestContext.accountId,
@@ -1714,8 +1721,15 @@ async function openCodexWebSocketTransport(
 	let releaseReservation = websocketConnection.reserveForRequest();
 	try {
 		// Reconnecting (closed socket, idle eviction, token refresh, or routing-hint
-		// change) resets `canAppend`; discard any delta built against the old socket.
-		if (!websocketState.canAppend) {
+		// change) resets `canAppend`. The chain anchor is server-side: retry the
+		// pre-connect delta first — if the backend still holds `previous_response_id`
+		// this preserves the hot prompt cache (issue #18475). A stale anchor fails
+		// with `previous_response_not_found` and falls into
+		// `#tryRecoverPreviousResponseNotFound`, which replays full context.
+		if (!websocketState.canAppend && hadPreConnectChain) {
+			canAppendBeforeRequest = false;
+			chainedBody = preConnectChainedBody;
+		} else if (!websocketState.canAppend) {
 			canAppendBeforeRequest = false;
 			chainedBody = requestContext.transformedBody;
 		}

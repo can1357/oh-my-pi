@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex WebSocket turns retry the pre-connect `previous_response_id` chain on a fresh socket before falling back to a full-transcript replay, so a reconnect no longer drops the hot prompt cache when the backend still holds the anchor ([#18475](https://github.com/can1357/oh-my-pi/issues/18475))
+
 ## [18.18.1] - 2026-11-08
 
 ### Fixed

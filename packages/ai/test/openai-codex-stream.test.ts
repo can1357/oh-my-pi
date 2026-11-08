@@ -7772,7 +7772,7 @@ describe("openai-codex streaming", () => {
 	});
 
 	it.each(["closed", "idle", "token-refresh"] as const)(
-		"replays the full transcript instead of a delta when the websocket reconnects (%s)",
+		"retries the pre-connect chain after a websocket reconnect, replaying full context only when the anchor is stale (%s)",
 		async mode => {
 			const tempDir = TempDir.createSync("@pi-codex-stream-");
 			setAgentDir(tempDir.path());
@@ -7833,15 +7833,18 @@ describe("openai-codex streaming", () => {
 				}).result();
 				expect(second.stopReason).toBe("stop");
 				expect(sockets).toHaveLength(2);
-				expect(observedPayloads[0]?.previous_response_id).toBeUndefined();
-				expect(sentRequests[1]?.previous_response_id).toBeUndefined();
-				const replayedInput = JSON.stringify(sentRequests[1]?.input);
-				expect(replayedInput).toContain("Remember the original question");
-				expect(replayedInput).toContain("Continue");
+				// Optimistic chain retry (issue #18475): the pre-connect delta goes out
+				// on the fresh socket first; the mock backend still holds resp_1, so no
+				// full replay happens.
+				expect(observedPayloads[0]?.previous_response_id).toBe("resp_1");
+				expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
+				const deltaInput = JSON.stringify(sentRequests[1]?.input);
+				expect(deltaInput).toContain("Continue");
+				expect(deltaInput).not.toContain("Remember the original question");
 
 				const statsAfterReconnect = getOpenAICodexWebSocketDebugStats(model, options);
-				expect(statsAfterReconnect?.fullContextRequests).toBe(2);
-				expect(statsAfterReconnect?.deltaRequests).toBe(0);
+				expect(statsAfterReconnect?.fullContextRequests).toBe(1);
+				expect(statsAfterReconnect?.deltaRequests).toBe(1);
 				expect(statsAfterReconnect?.lastTurn?.request.canAppendBeforeRequest).toBe(false);
 
 				context.messages.push(second, { role: "user", content: "Follow up", timestamp: Date.now() + 2 });
@@ -7849,14 +7852,96 @@ describe("openai-codex streaming", () => {
 				expect(third.stopReason).toBe("stop");
 				expect(sockets).toHaveLength(2);
 				expect(sentRequests[2]?.previous_response_id).toBe("resp_2");
-				const deltaInput = JSON.stringify(sentRequests[2]?.input);
-				expect(deltaInput).toContain("Follow up");
-				expect(deltaInput).not.toContain("Remember the original question");
+				const thirdDeltaInput = JSON.stringify(sentRequests[2]?.input);
+				expect(thirdDeltaInput).toContain("Follow up");
+				expect(thirdDeltaInput).not.toContain("Remember the original question");
 			} finally {
 				for (const state of providerSessionState.values()) state.close();
 			}
 		},
 	);
+	it("replays full context when the pre-connect chain anchor is stale after reconnect", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const sockets: MockWebSocket[] = [];
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async () => {
+			throw new Error("SSE fallback should not be called");
+		});
+		class StaleAnchorWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				sockets.push(this);
+				this.scheduleOpen();
+			}
+
+			override send(data: string): void {
+				sentRequests.push(JSON.parse(data) as Record<string, unknown>);
+				const index = sentRequests.length;
+				if (index === 1) {
+					this.emitCodexResponse({
+						messageId: "msg_1",
+						responseId: "resp_1",
+						text: "Answer 1",
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+					return;
+				}
+				if (index === 2) {
+					// Optimistic retry carries the old chain; the backend no longer
+					// holds it, so it rejects with the stale-anchor code.
+					expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
+					this.sendJson({
+						type: "error",
+						code: "previous_response_not_found",
+						message: "Previous response with id 'resp_1' not found.",
+					});
+					return;
+				}
+				if (index === 3) {
+					// Recovery replays the full transcript without the chain.
+					expect(sentRequests[2]?.previous_response_id).toBeUndefined();
+					const replayedInput = JSON.stringify(sentRequests[2]?.input);
+					expect(replayedInput).toContain("Remember the original question");
+					expect(replayedInput).toContain("Continue");
+					this.emitCodexResponse({
+						messageId: "msg_3",
+						responseId: "resp_3",
+						text: "Answer 3",
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+					return;
+				}
+				throw new Error(`Unexpected websocket request index: ${index}`);
+			}
+		}
+		global.WebSocket = StaleAnchorWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const options = {
+			fetch: fetchMock as FetchImpl,
+			apiKey: createCodexTestToken(),
+			sessionId: "ws-reconnect-stale-anchor",
+			providerSessionState,
+		};
+		const context: Context = {
+			messages: [{ role: "user", content: "Remember the original question", timestamp: Date.now() }],
+		};
+		try {
+			const first = await streamOpenAICodexResponses(model, context, options).result();
+			expect(first.stopReason).toBe("stop");
+			context.messages.push(first, { role: "user", content: "Continue", timestamp: Date.now() + 1 });
+			sockets[0]!.close();
+			const second = await streamOpenAICodexResponses(model, context, options).result();
+			expect(second.stopReason).toBe("stop");
+			expect(sockets).toHaveLength(2);
+			expect(sentRequests).toHaveLength(3);
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+		}
+	});
 
 	it.each(["unchanged", "rewritten"] as const)(
 		"replays full input when onPayload deletes previous_response_id on a chained websocket turn (%s delta)",
