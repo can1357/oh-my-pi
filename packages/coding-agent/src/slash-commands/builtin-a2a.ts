@@ -16,7 +16,7 @@ import type { SlashCommandSpec } from "./types";
 const USAGE = [
 	"Usage:",
 	"  /a2a add <url> [--token <token>]  register the skills of a remote agent card",
-	"  /a2a auto [--token <token>]      register every live local bridge (a2a-bridges.json)",
+	"  /a2a auto [--token <token>]      register every live local bridge (a2a-bridges/<pid>.json)",
 	"  /a2a list                        show the registered remote agents",
 	"  /a2a remove <name>               forget one (`a2a:<skill>` or `<skill>`)",
 ].join("\n");

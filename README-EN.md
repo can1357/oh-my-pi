@@ -1,10 +1,10 @@
-# omp-fork — English
+# omp-fork — feature reference
 
-**A fork of [oh-my-pi](https://github.com/can1357/oh-my-pi): cross-terminal agent networking (A2A), chrome-mcp as the base browser, a deterministic workflow orchestrator, agent-storm guards.**
+**A fork of [oh-my-pi](https://github.com/can1357/oh-my-pi): cross-terminal agent networking (A2A), in-session agent teams, chrome-mcp as the base browser, a deterministic workflow orchestrator, agent-storm guards.**
 
 - Repository: [spgsroot/oh-my-pi-team-agents](https://github.com/spgsroot/oh-my-pi-team-agents), branch `main` = upstream mirror + features
 - Upstream base: 18.16+ (main `96e4d8eb`)
-- [Русская версия](./README-RU.md) · [Full settings guide (RU)](./FORK-RU.md)
+- Overview, media and live results: [README.md](./README.md) · [Русская версия](./README-RU.md) · [Full settings guide (RU)](./FORK-RU.md)
 
 ## What was built
 
@@ -27,8 +27,10 @@ command also remains; disable with `--no-a2a-auto-register`). Spawn and talk:
 - JSON-RPC 2.0: `SendMessage`, `SendStreamingMessage` (SSE with final frames), `GetTask`, `ListTasks`, `CancelTask`; `TASK_STATE_*` statuses;
 - SendMessage addresses the terminal's own agent by default (`metadata.to`); spawning a new agent is opt-in (`metadata.spawn: true` / `a2aSpawn` in the task tool);
 - rejection taxonomy: `AGENT_REJECTED` (−32010); registration timeout → `SUBMITTED`+pending with a 30s grace;
-- bridge registry `~/.omp/agent/a2a-bridges.json` (pid+port; dead entries pruned on read);
-- same-name skill collisions resolve with suffixes (`a2a:Main-2/-3`); re-adding the same URL refreshes in place.
+- bridge registry: one `~/.omp/agent/a2a-bridges/<pid>.json` file per process (pid + port + name; dead entries pruned on read);
+- same-name skill collisions resolve with suffixes (`a2a:Main-2/-3`); re-adding the same URL refreshes in place;
+- a peer's request reaches the receiving model as a **user** turn (never a developer message), so a never-prompted terminal acts on it and the peer gets no developer authority;
+- replies are correlated by `metadata.inReplyTo`; when the receiving main agent answers in plain text instead of spawning `a2a:<sender>`, its last text of the turn is relayed to the sender once (`a2a/reply-relay.ts`). An answer to this terminal's own request asks for no reply.
 
 ### 2. chrome-mcp as the base browser
 
@@ -74,7 +76,10 @@ With a workspace, start creates `TASKS.md` if absent without overwriting it;
 `/team status` and `/team stop` manage the team; stop releases only recorded
 member refs. Gated by `team.enabled`, capped by `team.maxTeammates`. No
 file-backed mailbox, split-pane, idle notification, shutdown approve flow or
-cross-terminal team membership.
+cross-terminal team membership. A member's own definition prompt outranks the
+team context: the bundled read-only `scout` and the structured-output
+`reviewer` ignore the team protocol in live runs; use definitions that may
+write and message peers (e.g. `task`).
 See [docs/agent-teams.md](./docs/agent-teams.md).
 
 ## Settings summary
@@ -91,27 +96,17 @@ See [docs/agent-teams.md](./docs/agent-teams.md).
 | `team.enabled` / `team.maxTeammates` | off / 4 | declarative agent teams (`.omp/teams/*.md`, `/team start`) |
 | `task.tokenBudget` | 0 (off) | subagent token budget |
 
-## Install on this machine
+## Build and install
 
-The `omp` command points to the fork binary (`~/.local/lib/omp-fork/omp`, 233 MB Bun compile). Profile is the stock `~/.omp`.
+Build from source, isolated profile and upstream sync: [README-fork.md](./README-fork.md).
 
-```bash
-# roll back to the original omp:
-ln -sf ../install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js ~/.bun/bin/omp
-# refresh the fork binary after edits:
-cd <path-to-clone> && bun run build && rsync -a packages/coding-agent/dist/omp ~/.local/lib/omp-fork/omp
-```
+## Verification
 
-## Quality
-
-- SDD execution: 13 tasks; per-task security/concurrency reviews (4 tasks); the final whole-branch review was closed by one fix wave (`all_addressed`);
-- full suite: 38443 pass; our failures = 0 against the upstream baseline;
-- zero corporate context in the diff (clean public fork);
-- live runs: A2A spawn through the bridge, the subagent chain (A2A → main → subagent → answer), workflow journal-resume after SIGKILL, 81 chrome tools on both MCP revisions.
+Live scenarios (two real terminals, a team run, workflow resume after kill, refuse policy, token budget, handback, `pi.spawnSubagent`, chrome-mcp) with their observed results: [README.md → Verified live](./README.md#verified-live).
 
 ## Origins of the mechanics
 
-The agent-interaction mechanics follow established industry patterns for multi-agent coordination (addressed delivery with a reply channel, report anti-injection, journal-resume, capability tokens).
+The agent-interaction mechanics follow established multi-agent coordination patterns (addressed delivery with a reply channel, report anti-injection, journal-resume, capability tokens). The comparison with Claude Code's Agent Teams internals is in [README.md](./README.md#what-this-fork-studies), based on the article [Inside Claude Code: how agents talk and how Agent Teams work](https://llmcrew.org/wiki/claude-code-agent-teams-internals) (RU).
 
 ### Details
 
