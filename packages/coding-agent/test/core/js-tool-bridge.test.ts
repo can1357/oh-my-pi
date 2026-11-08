@@ -7,6 +7,8 @@ import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { getLatestTodoPhasesFromEntries, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 function createTool(name: string, execute: AgentTool["execute"]): AgentTool {
@@ -701,6 +703,70 @@ describe("callSessionTool", () => {
 		expect(phases).toEqual([
 			{ name: "Recovered", tasks: [{ content: "From malformed JSON", status: "in_progress" }] },
 		]);
+	});
+
+	it("restores bridged empty-phase initialization and continues updating it", async () => {
+		const entries: SessionEntry[] = [];
+		function makeTodoSession(initial: TodoPhase[]): { session: ToolSession; current: () => TodoPhase[] } {
+			let phases = initial;
+			const session: ToolSession = {
+				...createSession([]),
+				getTodoPhases: () => phases,
+				setTodoPhases: next => {
+					phases = next;
+				},
+				commitTodoPhases: next => {
+					entries.push({
+						type: "custom",
+						customType: USER_TODO_EDIT_CUSTOM_TYPE,
+						data: { phases: next },
+					} as SessionEntry);
+				},
+				getToolByName: name => (name === "todo" ? (todo as unknown as AgentTool) : undefined),
+			};
+			const todo = new TodoTool(session);
+			return { session, current: () => phases };
+		}
+		const first = makeTodoSession([]);
+		await callSessionTool("todo", { op: "init", phase: "", items: ["First"] }, { session: first.session });
+		await callSessionTool("todo", { op: "append", phase: "Tasks", items: ["Second"] }, { session: first.session });
+		const restored = getLatestTodoPhasesFromEntries(entries);
+		expect(restored).toEqual(first.current());
+		const second = makeTodoSession(restored);
+		await callSessionTool("todo", { op: "append", phase: "Tasks", items: ["Third"] }, { session: second.session });
+		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([
+			{
+				name: "Tasks",
+				tasks: [
+					{ content: "First", status: "in_progress" },
+					{ content: "Second", status: "pending" },
+					{ content: "Third", status: "pending" },
+				],
+			},
+		]);
+		const previous = structuredClone(second.current());
+		const count = entries.length;
+		const rejected = await callSessionTool(
+			"todo",
+			{
+				op: "init",
+				list: [
+					{ phase: "", items: ["A"] },
+					{ phase: "Tasks", items: ["B"] },
+				],
+			},
+			{ session: second.session },
+		);
+		expect(rejected).toEqual(expect.objectContaining({ hasError: true }));
+		expect(second.current()).toEqual(previous);
+		expect(entries).toHaveLength(count);
+		expect(getLatestTodoPhasesFromEntries(entries)).toEqual(previous);
+	});
+
+	it("restores old snapshots with empty phase names without renaming them", () => {
+		const phases: TodoPhase[] = [{ name: "", tasks: [{ content: "Old", status: "in_progress" }] }];
+		const entries = [{ type: "custom", customType: USER_TODO_EDIT_CUSTOM_TYPE, data: { phases } }] as SessionEntry[];
+		expect(getLatestTodoPhasesFromEntries(entries)).toEqual(phases);
 	});
 
 	it("persists bridged todo mutations to the branch, which a direct toolResult would carry", async () => {

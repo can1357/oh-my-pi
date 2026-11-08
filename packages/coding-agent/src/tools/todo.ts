@@ -303,7 +303,7 @@ function getTaskTargets(phases: TodoPhase[], entry: TodoOpEntryValue, errors: st
 	return phases.flatMap(phase => phase.tasks);
 }
 
-/** Phase name for `init` given a flat `items` list with no explicit `phase`. */
+/** Phase name for `init` with an absent or empty phase name. */
 const DEFAULT_INIT_PHASE = "Tasks";
 
 function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
@@ -314,9 +314,10 @@ function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 	// params with `[]`, so an empty `list` must not shadow non-empty `items`.
 	const flat =
 		entry.items && entry.items.length > 0
-			? [{ phase: entry.phase ?? DEFAULT_INIT_PHASE, items: entry.items }]
+			? [{ phase: entry.phase || DEFAULT_INIT_PHASE, items: entry.items }]
 			: undefined;
-	const list = entry.list?.length ? entry.list : (flat ?? entry.list);
+	const selected = entry.list?.length ? entry.list : (flat ?? entry.list);
+	const list = selected?.map(listEntry => ({ ...listEntry, phase: listEntry.phase || DEFAULT_INIT_PHASE }));
 	if (!list) {
 		errors.push("Missing list for init operation");
 		return [];
