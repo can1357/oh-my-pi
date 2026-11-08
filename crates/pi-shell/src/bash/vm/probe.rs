@@ -290,6 +290,12 @@ pub fn perform(
 		Probe::Input { fd, delim, lines, nchars, timeout_ns, .. } => {
 			let handle = vp.fds.handle(*fd);
 			let seekable = handle.kind() == Some(FileKind::Regular);
+			// A Windows console in line mode ends a line with `\r\n`; a Unix
+			// terminal maps the `\r` to `\n` itself (ICRNL). Pipes and files
+			// keep their `\r`, as zsh does.
+			let console_lines = delim == &Some(b'\n')
+				&& handle.kind() == Some(FileKind::Tty)
+				&& k.engine.config().platform == Platform::Windows;
 			// The bytes so far, beside `sc.live` (the timer).
 			let input = &mut sc.io.get_or_insert_with(Box::default).input;
 			let lines = (*lines).max(1) as usize;
@@ -301,7 +307,7 @@ pub fn perform(
 				let done_delim = delim.is_some() && seen >= lines;
 				if done_len || done_delim {
 					break ProbeResult::Input {
-						data:      BString::from(std::mem::take(input)),
+						data:      line_input(std::mem::take(input), console_lines),
 						eof:       false,
 						timed_out: false,
 					};
@@ -326,7 +332,7 @@ pub fn perform(
 				match polled {
 					Poll::Ready(Ok(0) | Err(_)) => {
 						break ProbeResult::Input {
-							data:      BString::from(std::mem::take(input)),
+							data:      line_input(std::mem::take(input), console_lines),
 							eof:       true,
 							timed_out: false,
 						};
@@ -373,6 +379,23 @@ pub fn perform(
 		},
 	};
 	Ok(finish(sc, res))
+}
+
+/// Input read, with each `\r\n` turned into `\n` for a `console`'s lines.
+fn line_input(mut data: Vec<u8>, console: bool) -> BString {
+	if !console {
+		return data.into();
+	}
+	let mut w = 0;
+	for r in 0..data.len() {
+		if data[r] == b'\r' && data.get(r + 1) == Some(&b'\n') {
+			continue;
+		}
+		data[w] = data[r];
+		w += 1;
+	}
+	data.truncate(w);
+	BString::from(data)
 }
 
 /// [`perform`] for a builtin's probe ([`Need::Probe`](super::builtins::Need)):
@@ -584,7 +607,7 @@ pub fn absolute_on(cwd: &[u8], name: &[u8], platform: Platform) -> BString {
 }
 
 /// A Windows drive (`C:\x`, `C:/x`) or UNC (`\\srv\share`) path.
-const fn is_windows_absolute(name: &[u8]) -> bool {
+pub const fn is_windows_absolute(name: &[u8]) -> bool {
 	matches!(name, [b'\\' | b'/', b'\\' | b'/', ..])
 		|| matches!(name, [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic())
 }
@@ -756,6 +779,16 @@ mod tests {
 		assert_eq!(absolute(b"virtual://d", b"a.txt"), "virtual://d/a.txt");
 		assert_eq!(absolute(b"virtual://", b"a"), "virtual://a");
 		assert_eq!(absolute(b"virtual://d", b"/etc"), "/etc");
+	}
+
+	/// A cooked Windows console ends a typed line with `\r\n`; kept, the
+	/// `\r` ended up in the command name (`ls^M: command not found`). A lone
+	/// `\r` is the user's own byte and stays.
+	#[test]
+	fn console_line_ends_drop_the_cr_of_crlf_only() {
+		assert_eq!(line_input(b"ls\r\n".to_vec(), true), "ls\n");
+		assert_eq!(line_input(b"a\rb\r\n\r\n".to_vec(), true), "a\rb\n\n");
+		assert_eq!(line_input(b"partial\r".to_vec(), true), "partial\r");
 	}
 
 	#[test]

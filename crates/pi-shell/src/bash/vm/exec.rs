@@ -2440,7 +2440,10 @@ pub fn start_zsh_procsub(
 	let mut fds = vp.fds.clone();
 	fds.set(their_fd, Some(theirs));
 	let line = line_of(vp, 0);
-	let child = vp.child_text(k, cx.store, text, line, fds);
+	let mut child = vp.child_text(k, cx.store, text, line, fds);
+	if !job_control(k, cx, vp) {
+		ignore_async_signals(k, cx, &mut child);
+	}
 	let vpid = child.vpid;
 	// Not a job: its externals stay in the shell's group, without the
 	// terminal (zsh `ESUB_ASYNC`).
@@ -3985,6 +3988,9 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					fds.set(0, Some(null.clone()));
 				}
 				let mut child = vp.child(k, cx.store, Arc::clone(unit), info.stages[0].entry, fds);
+				if info.kind == SpawnKind::Background && !control {
+					ignore_async_signals(k, cx, &mut child);
+				}
 				if info.kind == SpawnKind::Background {
 					let level = stage_level(unit, info.stages[0].entry, true);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
@@ -4170,6 +4176,48 @@ pub fn job_control(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	!vp.jobs.subshell && state::option(&mut k.root, cx.store, vp, OptId::Monitor).unwrap_or(false)
 }
 
+/// An asynchronous command without job control ignores `SIGINT` (and in
+/// zsh `SIGQUIT`), so a keyboard interrupt leaves it running (zsh
+/// `entersubsh` with `ESUB_ASYNC`, bash `setup_async_signals`): ignored
+/// traps it lists (`trap -- '' INT`) and may replace, and its programs
+/// start with them ignored
+/// ([`SpawnSpec::sigmask_ign`](crate::bash::SpawnSpec)). bash's ignored
+/// `SIGQUIT`, which it does not list, is not modelled. A bash subshell cannot
+/// trap the ignore away (it was ignored on entry, [`MiscKey::HardIgnored`]);
+/// zsh's can.
+fn ignore_async_signals(k: &mut Kernel, cx: &mut Cx<'_>, child: &mut Vproc) {
+	use crate::bash::Signal;
+	let sigs: &[Signal] = if child.mode.dialect() == Dialect::Zsh {
+		&[Signal::Int, Signal::Quit]
+	} else {
+		&[Signal::Int]
+	};
+	for &sig in sigs {
+		let key = TrapKey::Signal(sig);
+		child.own_traps = child.own_traps.with(key);
+		let record = Record::Trap { mode: child.mode, action: BString::default() };
+		state::store_record(&mut k.root, cx.store, child, KeyBuf::Trap(key), Some(record));
+	}
+	if child.mode.dialect() != Dialect::Zsh {
+		let mut names = match state::record(cx.store, child, Key::Misc(MiscKey::HardIgnored)) {
+			Ok(Some(Record::Words(names))) => names.clone(),
+			_ => Vec::new(),
+		};
+		let int = BString::from(Signal::Int.to_string());
+		if !names.contains(&int) {
+			names.push(int);
+		}
+		let record = Record::Words(names);
+		state::store_record(
+			&mut k.root,
+			cx.store,
+			child,
+			KeyBuf::Misc(MiscKey::HardIgnored),
+			Some(record),
+		);
+	}
+}
+
 /// The job table a child that lists its parent's jobs starts with (a
 /// command substitution, a `jobs` pipeline stage): copies of them, which
 /// are not its children; `subshell` turns job control off.
@@ -4227,7 +4275,10 @@ fn start_coproc(
 	let mut fds = vp.fds.clone();
 	fds.set(0, Some(FdRef::mem(in_r)));
 	fds.set(1, Some(FdRef::mem(out_w)));
-	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	let mut child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	if !job_control(k, cx, vp) {
+		ignore_async_signals(k, cx, &mut child);
+	}
 	// A job of its own under job control (never in the foreground).
 	super::jobctl::own_job(k, child.vpid);
 	let vpid = child.vpid;

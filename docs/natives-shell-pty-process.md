@@ -84,13 +84,19 @@ Three search-related builtins are worth calling out:
 - `fd` is backed by `pi-walker`'s ordered `walk::tree` traversal, `globset`, and `regex`.
 - `ast-grep` (also `sg`) runs ast-grep 0.50's `run` command (`-p`/`-r`/`-U`, `--json`, context, `--heading`, `--files-with-matches`, `--stdin`) on the `pi-ast` search engine with ast-grep's piped (uncolored) output; `scan`, `test`, `new`, `lsp`, `outline`, `--config`, `--interactive`, `--kind`, `--debug-query`, and `--inspect` exit 2 as unsupported.
 
-Each builtin runs inside the shell process (no `fork`/`exec`) against the `pi-builtins` `Host` view of the shell (`src/host.rs`): stdio routes through the command's (possibly piped/redirected) file descriptors, path operands resolve against the shell working directory, the shell's exported environment is visible, and abort/timeout cancellation is honored. Because these builtins shadow system binaries, registration is gated in `crates/pi-shell/src/shell.rs`:
+Each builtin runs inside the shell process (no `fork`/`exec`) against the `pi-builtins` `Host` view of the shell (`src/host.rs`): stdio routes through the command's (possibly piped/redirected) file descriptors, path operands resolve against the shell working directory, the shell's exported environment is visible, and abort/timeout cancellation is honored. Because these builtins shadow system binaries, registration is gated (`ExtrasGate` in `crates/pi-shell/src/extras.rs`, built in `crates/pi-shell/src/tools/mod.rs`):
 
 - `PI_DISABLE_UUTILS_BUILTINS` disables the whole utility set (bare names resolve to system binaries again),
 - `PI_DISABLE_UUTILS_DESTRUCTIVE` disables the destructive shadows (`rm`, `mv`, `cp`, which overwrites existing files, and `ln`, which can clobber via `-f`) together,
 - `PI_DISABLE_RM_BUILTIN` / `PI_DISABLE_MV_BUILTIN` disable `rm`/`mv` individually.
 
 Builtin switches are read from `sessionEnv` first, then the process environment, during session creation. Values are truthy when present and not empty, `"0"`, or case-insensitive `"false"`; command-scoped `env` does not change registration.
+
+`omp zsh` (the process shell, `crates/pi-shell/src/process`) offers the same utilities the other way round: only as a fallback when `PATH` has no program of that name (`Host::fallback`), so a system's own `ls` or `grep` keeps running and Windows, which has none, still gets them. The same switches apply. `type`/`whence` still answer from `PATH`, and `exec` of a missing name stays not found.
+
+On Windows, `omp zsh` takes zsh's function library (`fpath`, for `compinit`) from an MSYS2, Cygwin or Git for Windows zsh: the root of a `…\usr\bin` (or Cygwin `…\bin`) on `PATH`, then `C:\msys64`, `C:\cygwin64` and `C:\cygwin`. A console `read` that Ctrl-C ends is not end of input: when the shell traps or ignores `INT`, the read resumes after the trap, as a Unix read interrupted by `SIGINT` does. `read -k`/`-q` read the terminal in cbreak mode on every platform.
+
+Windows has no process groups or terminal foreground, so the spawner maps them onto console process groups. A foreground program stays in the shell's console group, so the keyboard's Ctrl-C reaches it as `SIGINT` reaches a Unix foreground group. A program whose `INT` is ignored (a background job without job control) or a job-control job gets a group of its own, so the keyboard's Ctrl-C passes it by. `fg` makes the shell forward the next Ctrl-C to that job's group as `CTRL_BREAK_EVENT`, and the shell itself is not interrupted, which emulates `tcsetpgrp`. `jobs`/`fg`/`bg` work. Ctrl-Z stays with the program, because Windows programs read the console themselves. A `<(…)`/`>(…)` passed to a Windows program becomes a named pipe `\\.\pipe\obash-pump-…` in place of `/dev/fd/N`. Programs often open a path once just to inspect it (`cmd`'s `type`, the MSYS runtime's `stat`), so the pipe keeps instances listening until the connection that moves data is known. Builtins and functions keep reading `/dev/fd/N` in-process.
 
 ### Runtime lifecycle and state transitions
 

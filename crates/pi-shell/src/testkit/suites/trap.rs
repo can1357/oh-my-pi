@@ -33,6 +33,21 @@ fn ignore_reset_and_print() {
 	assert_eq!(out.status, 0);
 }
 
+/// Without job control an asynchronous command ignores `SIGINT` (bash
+/// `setup_async_signals`): its subshell lists the ignore and, the signal
+/// being ignored on entry, cannot trap it away; the shell's own traps
+/// stay as they were.
+#[test]
+fn async_commands_ignore_interrupts() {
+	let out = run_script(
+		FakeHost::new(),
+		b"( trap; trap 'echo own' INT; trap -p INT ) & wait; trap -p INT; echo done",
+		&[],
+		Fault::None,
+	);
+	assert_eq!(out.stdout, b"trap -- '' SIGINT\ntrap -- '' SIGINT\ndone\n");
+}
+
 #[test]
 fn exit_handler_sees_and_preserves_status() {
 	let out = run_script(FakeHost::new(), b"trap 'echo exit=$?' EXIT; false", &[], Fault::None);

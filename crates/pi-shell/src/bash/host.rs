@@ -60,6 +60,13 @@ pub trait Host {
 	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx) -> Resolved;
 	/// Start a native command (Rust callout or device) as a [`Task`].
 	fn start(&mut self, cmd: &NativeRef, inv: Invocation<'_>) -> io::Result<Box<dyn Task>>;
+	/// A command `PATH` search did not find, run natively instead
+	/// ([`Host::start`]): a host's own stand-ins for tools the system lacks.
+	/// Asked after the search, so a program on `PATH` always wins. `None` (the
+	/// default): the command is not found.
+	fn fallback(&mut self, _name: &BStr) -> Option<NativeRef> {
+		None
+	}
 	/// Resume a task from the bytes its [`Task::checkpoint`] produced before a
 	/// snapshot. An error makes the task [`Lost`](crate::bash::Lost) (status
 	/// 137).

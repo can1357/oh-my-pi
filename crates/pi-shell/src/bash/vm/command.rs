@@ -2073,7 +2073,17 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 			},
 			Some(Search::NotFound) => {
 				sc.io().search = None;
-				sc.exec.as_mut().expect("exec").target = Some(Target::NotFound);
+				// The host's stand-in for a missing tool; `exec` keeps its
+				// not-found handling (a process image cannot be a native).
+				let exec = sc.exec.as_ref().expect("exec");
+				let target = if exec.exec_as.is_none()
+					&& let Some(native) = cx.host.fallback(BStr::new(&name))
+				{
+					Target::Native(native)
+				} else {
+					Target::NotFound
+				};
+				sc.exec.as_mut().expect("exec").target = Some(target);
 				None
 			},
 			Some(Search::Pending(key)) => Some(Flow::Block(key)),
@@ -2817,7 +2827,7 @@ fn autoload(
 	let fpath = state::lookup(&k.root, cx.store, vp, b"FPATH")
 		.ok()
 		.flatten();
-	let fpath = fpath_dirs(fpath.as_ref().and_then(|v| v.as_scalar()));
+	let fpath = fpath_dirs(fpath.as_ref().and_then(|v| v.as_scalar()), k.engine.config().platform);
 	let cwd = vp.cwd.clone();
 	let found = {
 		let mut ask = |p: Probe| command_probe(k, cx, vp, &p);
@@ -3017,12 +3027,14 @@ fn parse_autoload(
 	Ok(first)
 }
 
-/// The directories of `$fpath` (its `FPATH` text): none when empty; an
-/// empty element is the working directory.
-pub fn fpath_dirs(fpath: Option<&[u8]>) -> Vec<BString> {
+/// The directories of `$fpath` (its `FPATH` text, joined with `platform`'s
+/// separator, as the tie keeps it): none when empty; an empty element is
+/// the working directory.
+pub fn fpath_dirs(fpath: Option<&[u8]>, platform: crate::bash::ids::Platform) -> Vec<BString> {
+	let sep = probe::path_separator(platform);
 	match fpath {
 		None | Some([]) => Vec::new(),
-		Some(f) => f.split(|&c| c == b':').map(BString::from).collect(),
+		Some(f) => f.split(|&c| c == sep).map(BString::from).collect(),
 	}
 }
 
@@ -5128,7 +5140,17 @@ fn build_env(k: &Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Result<EnvView, StoreEr
 
 #[cfg(test)]
 mod tests {
-	use super::looks_binary;
+	use super::{fpath_dirs, looks_binary};
+	use crate::bash::ids::Platform;
+
+	/// `$fpath` joins Windows directories with `;`; the autoload search
+	/// split `FPATH` on `:` and looked in `C` and `/fn`, never finding the
+	/// function.
+	#[test]
+	fn fpath_dirs_split_on_the_platform_separator() {
+		assert_eq!(fpath_dirs(Some(b"C:/a/fn;D:/b"), Platform::Windows), ["C:/a/fn", "D:/b"]);
+		assert_eq!(fpath_dirs(Some(b"/a:/b"), Platform::Linux), ["/a", "/b"]);
+	}
 
 	// bash `check_binary_file`: only a NUL on the first line (within 80
 	// bytes) makes a file binary.

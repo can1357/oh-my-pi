@@ -37,6 +37,14 @@ pub fn pipe(child_reads: bool) -> io::Result<(OsPipe, fs::File)> {
 	imp::pipe(child_reads)
 }
 
+/// A named pipe the child opens by path (a process substitution's
+/// `/dev/fd/N` on Windows, where no fd is inherited): our server end, which
+/// waits for the child's open ([`imp::Bridge`]), and the path.
+#[cfg(windows)]
+pub fn named_pipe(child_reads: bool) -> io::Result<(OsPipe, String)> {
+	imp::named_pipe(child_reads)
+}
+
 impl OsPipe {
 	/// Read into `buf`; `Ok(0)` at end of file (every writer closed).
 	pub fn poll_read(&mut self, cx: &Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
@@ -67,6 +75,20 @@ impl OsPipe {
 	)]
 	pub fn available(&mut self) -> io::Result<usize> {
 		self.0.available()
+	}
+
+	/// Our end of a [`named_pipe`] the child has not opened yet: no I/O
+	/// happened on it (a child that never opens it gives no end of file).
+	#[cfg_attr(unix, allow(clippy::unused_self, reason = "Unix pipes are connected"))]
+	pub const fn listening(&self) -> bool {
+		#[cfg(windows)]
+		{
+			self.0.listening()
+		}
+		#[cfg(unix)]
+		{
+			false
+		}
 	}
 }
 
@@ -385,8 +407,9 @@ mod imp {
 		System::{
 			IO::{CancelIoEx, OVERLAPPED},
 			Pipes::{
-				ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-				PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe,
+				ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+				PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+				PeekNamedPipe,
 			},
 			Threading::{
 				CancelThreadpoolIo, CloseThreadpoolIo, CloseThreadpoolTimer, CreateThreadpoolIo,
@@ -399,8 +422,9 @@ mod imp {
 	/// Pipe buffer size, and the size of one read or write in flight.
 	const BUF: usize = 64 << 10;
 
-	/// Our overlapped end of a pump pipe.
-	pub struct OsPipe(pub(super) WinEnd);
+	/// Our overlapped end of a pump pipe (or the instances of a
+	/// [`named_pipe`] still choosing it).
+	pub struct OsPipe(pub(super) WinPipe);
 
 	/// A one-shot timer.
 	pub struct Timer(pub(super) TimerImp);
@@ -426,33 +450,50 @@ mod imp {
 		is_os(e, ERROR_BROKEN_PIPE) || is_os(e, ERROR_PIPE_NOT_CONNECTED)
 	}
 
-	pub fn pipe(child_reads: bool) -> io::Result<(OsPipe, fs::File)> {
+	/// A fresh pipe name `\\.\pipe\obash-pump-<pid>-<n>` (NUL-terminated
+	/// UTF-16 beside it).
+	fn pipe_name() -> (String, Vec<u16>) {
 		static SEQ: AtomicU32 = AtomicU32::new(0);
 		let name = format!(
 			r"\\.\pipe\obash-pump-{}-{}",
 			std::process::id(),
 			SEQ.fetch_add(1, Ordering::Relaxed)
 		);
-		let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+		let wide = name.encode_utf16().chain([0]).collect();
+		(name, wide)
+	}
+
+	/// An overlapped server instance of pipe `wide` (the first creates it),
+	/// of at most `max` instances; ours, not inheritable.
+	fn instance(wide: &[u16], child_reads: bool, first: bool, max: u32) -> io::Result<OwnedHandle> {
 		let access = if child_reads {
 			PIPE_ACCESS_OUTBOUND
 		} else {
 			PIPE_ACCESS_INBOUND
 		};
-		// SAFETY: `wide` is NUL-terminated; null security attributes (not
-		// inheritable: the server end stays ours).
-		let server = owned(unsafe {
+		let first = if first {
+			FILE_FLAG_FIRST_PIPE_INSTANCE
+		} else {
+			0
+		};
+		// SAFETY: `wide` is NUL-terminated; null security attributes.
+		owned(unsafe {
 			CreateNamedPipeW(
 				wide.as_ptr(),
-				access | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+				access | first | FILE_FLAG_OVERLAPPED,
 				PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-				1,
+				max,
 				BUF as u32,
 				BUF as u32,
 				0,
 				ptr::null(),
 			)
-		})?;
+		})
+	}
+
+	pub fn pipe(child_reads: bool) -> io::Result<(OsPipe, fs::File)> {
+		let (_, wide) = pipe_name();
+		let server = instance(&wide, child_reads, true, 1)?;
 		// The access `CreatePipe` gives its ends: the child can query and set
 		// the pipe state of its own end.
 		let desired = if child_reads {
@@ -460,12 +501,216 @@ mod imp {
 		} else {
 			GENERIC_WRITE | FILE_READ_ATTRIBUTES
 		};
-		// SAFETY: as above; opens the client end of the instance just created,
+		// SAFETY: opens the client end of the instance just created,
 		// synchronous (no FILE_FLAG_OVERLAPPED), as children expect.
 		let client = owned(unsafe {
 			CreateFileW(wide.as_ptr(), desired, 0, ptr::null(), OPEN_EXISTING, 0, ptr::null_mut())
 		})?;
-		Ok((OsPipe(WinEnd::new(server)?), fs::File::from(client)))
+		Ok((OsPipe(WinPipe::End(WinEnd::new(server)?)), fs::File::from(client)))
+	}
+
+	pub fn named_pipe(child_reads: bool) -> io::Result<(OsPipe, String)> {
+		let (name, wide) = pipe_name();
+		let first = WinEnd::new(instance(&wide, child_reads, true, PIPE_UNLIMITED_INSTANCES)?)?;
+		let bridge = Bridge {
+			wide,
+			child_reads,
+			listeners: vec![Listener { end: first, since: None }],
+			chosen: None,
+			timer: None,
+		};
+		Ok((OsPipe(WinPipe::Bridge(Box::new(bridge))), name))
+	}
+
+	/// Our side of a pump pipe: one end, or a [`Bridge`] still choosing it.
+	pub enum WinPipe {
+		End(WinEnd),
+		Bridge(Box<Bridge>),
+	}
+
+	impl WinPipe {
+		pub fn poll_read(&mut self, cx: &Context<'_>, out: &mut [u8]) -> Poll<io::Result<usize>> {
+			match self {
+				Self::End(e) => e.poll_read(cx, out),
+				Self::Bridge(b) => b.poll_read(cx, out),
+			}
+		}
+
+		pub fn poll_write(&mut self, cx: &Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+			match self {
+				Self::End(e) => e.poll_write(cx, data),
+				Self::Bridge(b) => b.poll_write(cx, data),
+			}
+		}
+
+		pub fn poll_flush(&mut self, cx: &Context<'_>) -> Poll<io::Result<()>> {
+			match self {
+				Self::End(e) => e.poll_flush(cx),
+				Self::Bridge(b) => b
+					.chosen
+					.as_mut()
+					.map_or(Poll::Ready(Ok(())), |e| e.poll_flush(cx)),
+			}
+		}
+
+		pub fn available(&mut self) -> io::Result<usize> {
+			match self {
+				Self::End(e) => e.available(),
+				Self::Bridge(b) => b.chosen.as_mut().map_or(Ok(0), WinEnd::available),
+			}
+		}
+
+		pub const fn listening(&self) -> bool {
+			matches!(self, Self::Bridge(b) if b.chosen.is_none())
+		}
+
+		fn close(self) -> Vec<u8> {
+			match self {
+				Self::End(e) => e.close(),
+				Self::Bridge(b) => b.chosen.map_or_else(Vec::new, WinEnd::close),
+			}
+		}
+	}
+
+	/// How long a connection must last before the child's reading takes it
+	/// for its real open: programs open a path once just to look at it
+	/// (`cmd`'s `type`, the MSYS runtime's `stat`) and close it at once.
+	const SETTLE: std::time::Duration = std::time::Duration::from_millis(30);
+
+	/// Server instances kept listening while a [`Bridge`] chooses.
+	const SPARE: usize = 2;
+
+	/// At most this many instances (connections) while choosing.
+	const MAX_INSTANCES: usize = 16;
+
+	/// A named pipe a child opens by path ([`named_pipe`]). A probing open
+	/// would take a single instance for good (the real open then finds every
+	/// instance busy), so instances keep listening until the connection the
+	/// child uses is known: for its reading, the newest still open once it
+	/// settled ([`SETTLE`]); for its writing, the first that delivers bytes.
+	/// The others close.
+	pub struct Bridge {
+		wide:        Vec<u16>,
+		child_reads: bool,
+		listeners:   Vec<Listener>,
+		chosen:      Option<WinEnd>,
+		timer:       Option<TimerImp>,
+	}
+
+	struct Listener {
+		end:   WinEnd,
+		/// When its client connected; `None` while listening.
+		since: Option<Instant>,
+	}
+
+	impl Bridge {
+		/// Drive the instances' connects, keeping [`SPARE`] listening.
+		fn poll_listen(&mut self, cx: &Context<'_>) -> io::Result<()> {
+			loop {
+				let mut i = 0;
+				while i < self.listeners.len() {
+					let l = &mut self.listeners[i];
+					if l.since.is_none() {
+						match l.end.poll_connect(cx) {
+							Poll::Ready(Ok(())) => l.since = Some(Instant::now()),
+							Poll::Ready(Err(e)) => {
+								if self.listeners.len() == 1 {
+									return Err(e);
+								}
+								self.listeners.swap_remove(i);
+								continue;
+							},
+							Poll::Pending => {},
+						}
+					}
+					i += 1;
+				}
+				let waiting = self.listeners.iter().filter(|l| l.since.is_none()).count();
+				if waiting >= SPARE || self.listeners.len() >= MAX_INSTANCES {
+					return Ok(());
+				}
+				let end = WinEnd::new(instance(
+					&self.wide,
+					self.child_reads,
+					false,
+					PIPE_UNLIMITED_INSTANCES,
+				)?)?;
+				self.listeners.push(Listener { end, since: None });
+			}
+		}
+
+		/// The child reads: the newest connection still open once settled.
+		fn poll_write(&mut self, cx: &Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
+			loop {
+				if let Some(end) = &mut self.chosen {
+					return end.poll_write(cx, data);
+				}
+				if let Err(e) = self.poll_listen(cx) {
+					return Poll::Ready(Err(e));
+				}
+				let newest = self
+					.listeners
+					.iter()
+					.enumerate()
+					.filter_map(|(i, l)| l.since.map(|t| (i, t)))
+					.max_by_key(|&(_, t)| t);
+				let Some((i, since)) = newest else {
+					return Poll::Pending;
+				};
+				let settled = since + SETTLE;
+				if Instant::now() < settled {
+					let timer = self.timer.get_or_insert_with(|| TimerImp::new(settled));
+					if timer.poll(cx).is_pending() {
+						return Poll::Pending;
+					}
+					self.timer = None;
+					continue;
+				}
+				if std::task::ready!(self.listeners[i].end.poll_alive(cx)) {
+					self.chosen = Some(self.listeners.swap_remove(i).end);
+					self.listeners.clear();
+				} else {
+					let l = &mut self.listeners[i];
+					l.end.relisten();
+					l.since = None;
+				}
+			}
+		}
+
+		/// The child writes: the first connection that delivers bytes.
+		fn poll_read(&mut self, cx: &Context<'_>, out: &mut [u8]) -> Poll<io::Result<usize>> {
+			if let Some(end) = &mut self.chosen {
+				return end.poll_read(cx, out);
+			}
+			if out.is_empty() {
+				return Poll::Ready(Ok(0));
+			}
+			if let Err(e) = self.poll_listen(cx) {
+				return Poll::Ready(Err(e));
+			}
+			for i in 0..self.listeners.len() {
+				if self.listeners[i].since.is_none() {
+					continue;
+				}
+				match self.listeners[i].end.poll_read(cx, out) {
+					Poll::Ready(Ok(n)) if n > 0 => {
+						self.chosen = Some(self.listeners.swap_remove(i).end);
+						self.listeners.clear();
+						return Poll::Ready(Ok(n));
+					},
+					// A client gone without writing (a probe, or a child that
+					// wrote nothing): listen again.
+					Poll::Ready(_) => {
+						let l = &mut self.listeners[i];
+						l.end.relisten();
+						l.since = None;
+						cx.waker().wake_by_ref();
+					},
+					Poll::Pending => {},
+				}
+			}
+			Poll::Pending
+		}
 	}
 
 	/// What a feed's pipe still holds, read through the child's end `read`
@@ -485,13 +730,16 @@ mod imp {
 		/// Our overlapped server end of a named pipe (a process
 		/// substitution's), not connected yet.
 		pub fn server(handle: OwnedHandle) -> io::Result<Self> {
-			WinEnd::new(handle).map(Self)
+			WinEnd::new(handle).map(|e| Self(WinPipe::End(e)))
 		}
 
 		/// Ready once a client connected (also when it already left: the I/O
 		/// then reports end of file or a broken pipe).
 		pub fn poll_connect(&mut self, cx: &Context<'_>) -> Poll<io::Result<()>> {
-			self.0.poll_connect(cx)
+			match &mut self.0 {
+				WinPipe::End(e) => e.poll_connect(cx),
+				WinPipe::Bridge(_) => Poll::Ready(Ok(())),
+			}
 		}
 	}
 
@@ -724,6 +972,27 @@ mod imp {
 				Err(e) if is_os(&e, ERROR_PIPE_CONNECTED) || is_os(&e, ERROR_NO_DATA) => Ok(()),
 				r => r,
 			})
+		}
+
+		/// After its client left (a [`Bridge`] instance a probing open took):
+		/// disconnect and listen again, the next [`Self::poll_connect`]
+		/// waiting for a new client. Only with no operation in flight.
+		fn relisten(&mut self) {
+			// SAFETY: our own server handle; nothing is in flight on it.
+			unsafe { DisconnectNamedPipe(self.raw()) };
+			self.inflight = Inflight::Idle;
+			self.start = 0;
+			self.end = 0;
+			self.eof = false;
+		}
+
+		/// Whether the connected client still holds its end: a zero-byte
+		/// write succeeds then, and fails once it closed (`ERROR_NO_DATA`).
+		fn poll_alive(&mut self, cx: &Context<'_>) -> Poll<bool> {
+			if self.inflight == Inflight::Idle && self.start(Kind::Write(0)).is_err() {
+				return Poll::Ready(false);
+			}
+			Poll::Ready(std::task::ready!(self.poll_op(cx)).is_ok())
 		}
 
 		pub fn poll_read(&mut self, cx: &Context<'_>, out: &mut [u8]) -> Poll<io::Result<usize>> {
