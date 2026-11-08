@@ -23,7 +23,6 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import {
 	cursorRawReadPath,
-	isXdDevicePath,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,
@@ -569,11 +568,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		if (composed === null) {
 			return createToolResultMessage(toolCallId, "read", { content: [{ type: "text", text: "" }] }, false);
 		}
-		// xd:// cannot embed ranges in the path; keep kwargs for in-memory paging.
-		const readArgs = isXdDevicePath(args.path)
-			? omitUndefinedArgs({ path: composed, offset: args.offset, limit: args.limit })
-			: { path: composed };
-		return await executeTool(this.options, "read", toolCallId, readArgs);
+		return await executeTool(this.options, "read", toolCallId, { path: composed });
 	}
 
 	async ls(args: Parameters<NonNullable<ICursorExecHandlers["ls"]>>[0]) {
@@ -778,11 +773,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		if (composed === null) {
 			return createToolResultMessage(call.toolCallId, "read", { content: [{ type: "text", text: "" }] }, false);
 		}
-		const path = cursorRawReadPath(composed);
-		const readArgs = isXdDevicePath(readPath)
-			? omitUndefinedArgs({ path, offset, limit })
-			: { path };
-		return await executeTool(this.options, "read", call.toolCallId, readArgs);
+		return await executeTool(this.options, "read", call.toolCallId, { path: cursorRawReadPath(composed) });
 	}
 
 	async piBash(call: Parameters<NonNullable<ICursorExecHandlers["piBash"]>>[0]) {

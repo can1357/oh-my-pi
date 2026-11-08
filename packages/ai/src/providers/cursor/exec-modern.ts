@@ -76,7 +76,6 @@ import type { ToolResultMessage } from "../../types";
 export {
 	cursorExecReadPath,
 	cursorRawReadPath,
-	isXdDevicePath,
 	omitUndefinedArgs,
 	piEscapeRegexLiteral,
 	piGrepSkip,

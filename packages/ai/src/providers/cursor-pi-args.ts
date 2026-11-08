@@ -43,8 +43,8 @@ export function isXdDevicePath(readPath: string): boolean {
  * numbers the returned text itself, so it cannot use read's hashline gutter.
  * Use [`cursorExecReadPath`] for a range-free read, which also needs `:raw`.
  *
- * Device URLs cannot take path selectors: a ranged `xd://` read keeps the bare
- * path so the caller can retain `offset`/`limit` kwargs for in-memory paging.
+ * Device URLs cannot take path selectors, so a ranged `xd://` read keeps the
+ * bare path and reads the whole device doc.
  */
 export function piReadPath(readPath: string, offset?: number, limit?: number): string | null {
 	if (limit !== undefined && Math.floor(limit) <= 0) return null;
@@ -119,8 +119,7 @@ export function cursorRawReadPath(readPath: string): string {
  *
  * Compose a requested window before forcing `:raw` on whole-file reads. The
  * caller drops `offset`/`limit` after composing so the handler cannot append
- * another selector — except for `xd://` paths, which stay bare so callers must
- * keep the kwargs for in-memory pagination.
+ * another selector.
  */
 export function cursorExecReadPath(readPath: string, offset?: number, limit?: number): string | null {
 	const ranged = piReadPath(readPath, offset, limit);
