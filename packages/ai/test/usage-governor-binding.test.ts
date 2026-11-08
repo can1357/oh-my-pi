@@ -3,10 +3,19 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import type {
+	CredentialRankingStrategy,
+	UsageCredential,
+	UsageLimit,
+	UsageProvider,
+	UsageReport,
+} from "@oh-my-pi/pi-ai/usage";
 import type { UsageAdmissionRequest, UsageRouteBinding } from "@oh-my-pi/pi-ai/usage-governor/types";
 import { fingerprintBearer } from "../src/auth/bearer-fingerprint";
-import { CredentialGovernor } from "../src/auth/governor";
+import { BlockStoreHealth } from "../src/auth/blocks";
+import { CredentialGovernor, type CredentialGovernorSource } from "../src/auth/governor";
+import { AccountPolicies } from "../src/auth/policy";
+import { CredentialPool } from "../src/auth/pool";
 import { fakeStrategy, installFetchTripwire } from "./fixtures/usage-governor/harness";
 
 installFetchTripwire();
@@ -33,7 +42,7 @@ class World {
 	exhausted = false;
 	fetches = 0;
 	strategy: CredentialRankingStrategy = fakeStrategy;
-	customLimits?: (now: number, credential: any) => any[];
+	customLimits?: (now: number, credential: UsageCredential) => UsageLimit[];
 	customAllowance?: () => string[] | undefined;
 	adapter: UsageProvider = {
 		id: PROVIDER,
@@ -402,18 +411,23 @@ describe("request-local route binding", () => {
 	test("missing affinity fails closed with positive control", async () => {
 		const w = await setup();
 		const { a, binding, request } = await w.bind();
-		const createGov = (affinity: any) =>
+		const policies = new AccountPolicies([], 10);
+		const pool = new CredentialPool(w.store, {
+			policies,
+			blockHealth: new BlockStoreHealth(undefined),
+			onReset: () => {},
+		});
+		await pool.reload();
+		pool.noteBearer(PROVIDER, "token-a", a.credentialId);
+
+		const createGov = (affinity: CredentialGovernorSource["affinity"]) =>
 			new CredentialGovernor({
 				dbPath: path.join(w.dir, "affinity-test.db"),
 				config: { enabled: true, lead: 0.25, interactiveReserve: "hold" },
-				source: () => ({
-					pool: {
-						entries: () => [{ id: a.credentialId, credential: oauth("a") }],
-						isCurrentBearerFingerprint: () => true,
-						providers: () => [PROVIDER],
-					} as any,
+				source: (): CredentialGovernorSource => ({
+					pool,
 					usage: w.auth.usage,
-					policies: { forCredential: () => undefined, defaultReservePct: 0.1 } as any,
+					policies,
 					blocks: { isBlockedSnapshot: () => false },
 					affinity,
 					strategies: () => fakeStrategy,
@@ -432,6 +446,7 @@ describe("request-local route binding", () => {
 		govWithAffinity.setRoutingScope({ id: "scope", revision: 1, roles: [{ role: "task", targets: [TARGET] }] });
 		expect(govWithAffinity.validateRoute(binding, request)).toBe(true);
 		govWithAffinity.close();
+		pool.close();
 	});
 	test("rolling window past reset is rejected while non-rolling past reset validates", async () => {
 		const w = await setup();
@@ -486,8 +501,8 @@ describe("request-local route binding", () => {
 		const w = await setup();
 		w.strategy = {
 			...fakeStrategy,
-			scopeLimitsForReserve(report) {
-				return report.limits.filter(l => l.id === "primary");
+			scopeLimitsForReserve(report: UsageReport) {
+				return report.limits.filter((l: UsageLimit) => l.id === "primary");
 			},
 		};
 		const { binding, request } = await w.bind();
@@ -528,8 +543,8 @@ describe("request-local route binding", () => {
 		w.strategy = {
 			findWindowLimits(report: UsageReport) {
 				return {
-					primary: report.limits.find(l => l.id === "primary"),
-					secondary: report.limits.find(l => l.id === "secondary"),
+					primary: report.limits.find((l: UsageLimit) => l.id === "primary"),
+					secondary: report.limits.find((l: UsageLimit) => l.id === "secondary"),
 				};
 			},
 			windowDefaults: { primaryMs: 60_000, secondaryMs: 604_800_000 },
