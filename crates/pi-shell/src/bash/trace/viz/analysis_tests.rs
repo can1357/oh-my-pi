@@ -477,6 +477,31 @@ fn effects_cover_writes_destruction_privilege_background_and_packages() {
 }
 
 #[test]
+fn sd_is_a_write_only_when_it_edits_files_in_place() {
+	for (script, writes) in [
+		("sd foo bar file\n", true),
+		// A file operand that expands at run time still names a file.
+		("sd -f i foo bar \"$file\"\n", true),
+		// After `--`, `-p` is FIND, not the preview flag.
+		("sd -- -p bar file\n", true),
+		("sd foo bar\n", false),
+		// `-n` and `--flags` consume their values, leaving no file operand.
+		("sd -n 1 foo bar\n", false),
+		("sd --flags i foo bar\n", false),
+		("sd -pF foo bar file\n", false),
+		("sd foo bar file --preview\n", false),
+	] {
+		let analysis = analyzed(script);
+		let wrote = analysis
+			.effects
+			.values()
+			.flatten()
+			.any(|effect| effect.kind == EffectKind::Write);
+		assert_eq!(wrote, writes, "{script:?}");
+	}
+}
+
+#[test]
 #[expect(
 	clippy::literal_string_with_formatting_args,
 	reason = "Bash parameter expansion is intentional fixture syntax, not Rust formatting."
