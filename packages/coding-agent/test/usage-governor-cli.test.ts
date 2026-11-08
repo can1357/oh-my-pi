@@ -58,7 +58,7 @@ function allowedAt(resetsAtMs: number, atMs: number): number {
 }
 
 /** A send that left the wire with its window above the line at the moment it was sent. */
-function overLine(record: FakeRecord): boolean {
+function overLine(record: Pick<FakeRecord, "usedFraction" | "resetsAt" | "atMs">): boolean {
 	if (record.usedFraction === undefined || record.resetsAt === undefined) return false;
 	return record.usedFraction > allowedAt(record.resetsAt, record.atMs) + LINE_TOLERANCE;
 }
@@ -628,15 +628,26 @@ describe("usage governor CLI proof: scenarios", () => {
 	}, 90_000);
 
 	test("role restriction: default-role sends wait and never reach govplan-g; subagent sends are reserved as subagent", async () => {
-		// Both govplan accounts sit at 50 % with the line already crossed. Both govplan-g accounts are fresh.
+		// Both govplan accounts sit at 60 % with the line already crossed. Both govplan-g accounts are fresh.
 		const specs = [
-			account("govplan", "a", { usedFraction: 0.5, resetInMs: 40_000 }),
-			account("govplan", "b", { usedFraction: 0.5, resetInMs: 40_000 }),
+			account("govplan", "a", { usedFraction: 0.6, resetInMs: 55_000 }),
+			account("govplan", "b", { usedFraction: 0.6, resetInMs: 55_000 }),
 			account("govplan-g", "a", { usedFraction: 0, resetInMs: 55_000 }),
 			account("govplan-g", "b", { usedFraction: 0, resetInMs: 55_000 }),
 		];
 		const proof = await GovernorProof.create(specs, { enabled: true });
 		try {
+			proof.fake.syncAllWindows();
+			for (const spec of specs.filter(s => s.provider === "govplan")) {
+				const state = proof.fake.account(spec.bearer);
+				const preAdmissible =
+					state.resetsAt - WINDOW_MS + ((spec.usedFraction / (1 - RESERVE) - LEAD) / (1 - LEAD)) * WINDOW_MS;
+				const headroomMs = preAdmissible - Date.now();
+				expect(headroomMs).toBeGreaterThanOrEqual(15_000);
+				expect(overLine({ usedFraction: spec.usedFraction, resetsAt: state.resetsAt, atMs: Date.now() })).toBe(
+					true,
+				);
+			}
 			const result = await proof.runOmp(["-p", "DELEGATE role restriction"], 90_000);
 			expect(result.exitCode).toBe(0);
 			expect(result.stdout.trim()).toBe("done");
@@ -649,10 +660,18 @@ describe("usage governor CLI proof: scenarios", () => {
 			expect(mainSends.length).toBeGreaterThan(0);
 
 			// Default-role requests were held on the paced govplan accounts before they were sent.
-			expect(
-				ledger.waits.filter(wait => wait.provider === "govplan" && wait.source === "turn").length,
-			).toBeGreaterThan(0);
-
+			const turnWaits = ledger.waits.filter(wait => wait.provider === "govplan" && wait.source === "turn");
+			if (turnWaits.length === 0) {
+				const diagnostics = {
+					records: proof.fake.records,
+					ledger,
+					exitCode: result.exitCode,
+					stderr: result.stderr,
+					stdout: result.stdout,
+				};
+				throw new Error(`expected at least 1 turn wait on govplan: ${JSON.stringify(diagnostics)}`);
+			}
+			expect(turnWaits.length).toBeGreaterThan(0);
 			// Each subagent send on govplan-g has a prior reservation carrying source "subagent". A send
 			// reserves one row per applicable window, so the count is per grant, not per row.
 			const subagentGrants = new Set(
@@ -972,7 +991,7 @@ describe("usage governor CLI proof: stored API key", () => {
 			const spec = account("govplan", "key", {
 				authType: "api_key",
 				usedFraction: 0.6,
-				resetInMs: 35_000,
+				resetInMs: 55_000,
 				perRequest: 0,
 			});
 			const proof = await GovernorProof.create([spec], { enabled, fallbackChains: { default: [] } });
@@ -989,6 +1008,17 @@ describe("usage governor CLI proof: stored API key", () => {
 					db.close();
 				}
 				expect(row?.credential_type).toBe("api_key");
+
+				proof.fake.syncWindow(spec.label, spec.resetInMs);
+				const stateBefore = proof.fake.account(spec.label);
+				const preAdmissible =
+					stateBefore.resetsAt - WINDOW_MS + ((spec.usedFraction / (1 - RESERVE) - LEAD) / (1 - LEAD)) * WINDOW_MS;
+				const headroomMs = preAdmissible - Date.now();
+				expect(headroomMs).toBeGreaterThanOrEqual(15_000);
+				expect(
+					overLine({ usedFraction: spec.usedFraction, resetsAt: stateBefore.resetsAt, atMs: Date.now() }),
+				).toBe(true);
+
 				const result = await proof.runOmp(["-p", "WARM_API_KEY key pacing"], 40_000);
 				expect(result.exitCode).toBe(0);
 				const chats = proof.chats();
@@ -1000,6 +1030,22 @@ describe("usage governor CLI proof: stored API key", () => {
 					usage!.resetsAt! - WINDOW_MS + ((spec.usedFraction / (1 - RESERVE) - LEAD) / (1 - LEAD)) * WINDOW_MS;
 				if (enabled) {
 					const waits = proof.readLedger().waits;
+					if (waits.length !== 1) {
+						const diagnostic = {
+							headroomMs,
+							preAdmissible,
+							admissible,
+							usage,
+							chats,
+							waits,
+							records: proof.fake.records,
+							ledger: proof.readLedger(),
+							exitCode: result.exitCode,
+							stderr: result.stderr,
+							stdout: result.stdout,
+						};
+						throw new Error(`expected 1 wait row but received ${waits.length}: ${JSON.stringify(diagnostic)}`);
+					}
 					expect(waits).toHaveLength(1);
 					expect(waits[0].credentialId).toBe(row!.id);
 					expect(waits[0].provider).toBe("govplan");
@@ -1010,8 +1056,26 @@ describe("usage governor CLI proof: stored API key", () => {
 					expect(chats[0].atMs).toBeGreaterThanOrEqual(admissible - ADMISSION_SLACK_MS);
 					expect(waits[0].endedAtMs! - waits[0].startedAtMs).toBeGreaterThan(1_000);
 				} else {
-					expect(chats[0].atMs).toBeLessThan(admissible);
+					// With the governor disabled, the request is not held: it leaves immediately while over the line.
 					expect(proof.ledgerExists()).toBe(false);
+					expect(governorOf(await proof.usageJson())).toBeNull();
+					if (!overLine(chats[0]) || chats[0].atMs >= admissible) {
+						const diagnostic = {
+							headroomMs,
+							preAdmissible,
+							admissible,
+							chatAtMs: chats[0].atMs,
+							usage,
+							records: proof.fake.records,
+							exitCode: result.exitCode,
+							stderr: result.stderr,
+						};
+						throw new Error(
+							`control send at ${chats[0].atMs} was not immediate over-line send before admissible ${admissible}: ${JSON.stringify(diagnostic)}`,
+						);
+					}
+					expect(overLine(chats[0])).toBe(true);
+					expect(chats[0].atMs).toBeLessThan(admissible);
 				}
 				expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
 				assertConfined(proof);
@@ -1068,7 +1132,7 @@ describe("usage governor CLI proof: stored API key", () => {
 			const primary = account("govplan", "key", {
 				authType: "api_key",
 				usedFraction: 0.6,
-				resetInMs: 35_000,
+				resetInMs: 55_000,
 				perRequest: 0,
 			});
 			const paid = account("govplan-g", allowance, {
@@ -1083,15 +1147,38 @@ describe("usage governor CLI proof: stored API key", () => {
 				fallbackChains: { default: ["govplan-g/m"], task: [] },
 			});
 			try {
+				proof.fake.syncWindow(primary.label, primary.resetInMs);
+				const stateBefore = proof.fake.account(primary.label);
+				const preAdmissible =
+					stateBefore.resetsAt -
+					WINDOW_MS +
+					((primary.usedFraction / (1 - RESERVE) - LEAD) / (1 - LEAD)) * WINDOW_MS;
+				const headroomMs = preAdmissible - Date.now();
+				expect(headroomMs).toBeGreaterThanOrEqual(15_000);
+				expect(
+					overLine({ usedFraction: primary.usedFraction, resetsAt: stateBefore.resetsAt, atMs: Date.now() }),
+				).toBe(true);
+
 				const result = await proof.runOmp(["-p", "WARM_API_KEY WARM_FALLBACK fallback safety"], 40_000);
 				expect(result.exitCode).toBe(0);
 				expect(proof.fake.records.some(record => record.kind === "usage" && record.bearer === paid.bearer)).toBe(
 					true,
 				);
 				expect(proof.chats().map(record => record.bearer)).toEqual([primary.bearer]);
-				expect(
-					proof.readLedger().waits.some(wait => wait.provider === "govplan" && wait.outcome === "admitted"),
-				).toBe(true);
+				const waits = proof.readLedger().waits;
+				if (!waits.some(wait => wait.provider === "govplan" && wait.outcome === "admitted")) {
+					const diagnostic = {
+						headroomMs,
+						preAdmissible,
+						records: proof.fake.records,
+						ledger: proof.readLedger(),
+						exitCode: result.exitCode,
+						stderr: result.stderr,
+						stdout: result.stdout,
+					};
+					throw new Error(`expected admitted wait for govplan: ${JSON.stringify(diagnostic)}`);
+				}
+				expect(waits.some(wait => wait.provider === "govplan" && wait.outcome === "admitted")).toBe(true);
 				expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
 				assertConfined(proof);
 			} finally {

@@ -96,6 +96,10 @@ export interface FakeProvider {
 		label: string,
 		change: Partial<Pick<FakeAccountSpec, "failUsage" | "usedFraction" | "failChat" | "failChatStatus">>,
 	): void;
+	/** Re-anchor an account's window reset against now, eliminating setup drift before a scenario phase. */
+	syncWindow(label: string, resetInMs?: number): void;
+	/** Re-anchor all accounts' window resets against now. */
+	syncAllWindows(): void;
 	/** Chat records only, in arrival order. */
 	chats(): FakeRecord[];
 	close(): void;
@@ -288,6 +292,7 @@ export function startFakeProvider(specs: readonly FakeAccountSpec[], now: () => 
 		};
 		accounts.set(spec.bearer, state);
 		byLabel.set(spec.label, state);
+		byLabel.set(spec.bearer, state);
 	}
 
 	const server = Bun.serve({
@@ -383,6 +388,20 @@ export function startFakeProvider(specs: readonly FakeAccountSpec[], now: () => 
 			if (change.usedFraction !== undefined) state.usedFraction = change.usedFraction;
 			if (change.failChat !== undefined) state.failChat = change.failChat;
 			if (change.failChatStatus !== undefined) state.failChatStatus = change.failChatStatus;
+		},
+		syncWindow(label, resetInMs) {
+			const state = byLabel.get(label);
+			if (!state) throw new Error(`unknown fake account ${label}`);
+			if (resetInMs !== undefined) state.resetInMs = resetInMs;
+			state.resetsAt = now() + state.resetInMs;
+			state.weekResetsAt = now() + WEEK_MS;
+		},
+		syncAllWindows() {
+			const current = now();
+			for (const state of accounts.values()) {
+				state.resetsAt = current + state.resetInMs;
+				state.weekResetsAt = current + WEEK_MS;
+			}
 		},
 		chats() {
 			return records.filter(record => record.kind === "chat");
