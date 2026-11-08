@@ -1474,7 +1474,8 @@ mod tests {
 			let (client, server) = tokio::net::UnixStream::pair().unwrap();
 			let root = Node {
 				state:    vec![0, 0],
-				// Chromium frames report children that are all the AT-SPI null object.
+				// Chromium frames report children that are all the AT-SPI null
+				// object.
 				children: vec![
 					(PEER.to_owned(), path("/org/a11y/atspi/null")),
 					(PEER.to_owned(), path("/focus")),
