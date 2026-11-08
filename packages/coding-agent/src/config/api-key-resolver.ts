@@ -14,6 +14,11 @@ import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
 export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id">;
 
+/** Header-command provenance stays local to the registry rendering those headers. */
+export interface RegistryApiKeyOptions extends AuthApiKeyOptions {
+	rejectedHeaderGenerations?: Record<string, number>;
+}
+
 export interface ApiKeyResolverOptions {
 	/** Session id for credential stickiness; read at resolve time by the caller. */
 	sessionId?: string;
@@ -34,7 +39,7 @@ export interface ApiKeyResolverRegistry {
 	getApiKeyWithCredentialForProvider(
 		provider: string,
 		sessionId?: string,
-		options?: AuthApiKeyOptions,
+		options?: RegistryApiKeyOptions,
 	): Promise<ApiKeyResolution>;
 	authStorage: Pick<AuthStorage, "limits">;
 	/**
@@ -68,8 +73,12 @@ export function createApiKeyResolver(
 	const resolveKey = async (
 		forceRefresh: boolean | undefined,
 		recovery?: Pick<
-			AuthApiKeyOptions,
-			"signal" | "refreshReason" | "rejectedAccessToken" | "rejectedCredentialGeneration"
+			RegistryApiKeyOptions,
+			| "signal"
+			| "refreshReason"
+			| "rejectedAccessToken"
+			| "rejectedCredentialGeneration"
+			| "rejectedHeaderGenerations"
 		>,
 	): Promise<ApiKeyResolution> => {
 		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
@@ -81,7 +90,7 @@ export function createApiKeyResolver(
 		provenance.record(resolved);
 		return resolved;
 	};
-	return async ({ lastChance, error, signal, previousKey, previousGeneration }) => {
+	return async ({ lastChance, error, signal, previousKey, previousGeneration, previousHeaderGenerations }) => {
 		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
 			return resolveKey(undefined);
@@ -107,12 +116,11 @@ export function createApiKeyResolver(
 				// auth decline can instead mean a peer refreshed the bearer.
 				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 			}
-			// This operation has already spent its re-mint, so the refusal that
-			// sent it here would otherwise go unrecorded — and the generation it
-			// refused would stay eligible for a peer's retry. Name it; this
-			// resolve does not force a refresh, so nothing is minted.
+			// Record the exhausted attempt without spending a mint it cannot use.
 			const resolved = await resolveKey(undefined, {
 				rejectedCredentialGeneration: refusedGeneration(error, previousGeneration),
+				rejectedHeaderGenerations:
+					AIError.credentialRejectionVerdict(error) === "not-credential" ? undefined : previousHeaderGenerations,
 			});
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
@@ -129,7 +137,8 @@ export function createApiKeyResolver(
 			// The generation of the credential this request sent. A `!command`
 			// credential's re-mint reads it to tell a refusal of the mint it has
 			// cached from a refusal of an older one, which that mint answers.
-			rejectedCredentialGeneration: previousGeneration,
+			rejectedCredentialGeneration: verdict === "not-credential" ? undefined : previousGeneration,
+			rejectedHeaderGenerations: verdict === "not-credential" ? undefined : previousHeaderGenerations,
 		});
 		// A credential was actually minted for this refusal — the slot's
 		// generation advanced past the one the request sent. The retry is worth
@@ -138,8 +147,12 @@ export function createApiKeyResolver(
 		// do not say whether the issuer renewed it. Without a generation to
 		// compare, the provider's own wording decides, as it did before.
 		const minted =
-			previousGeneration !== undefined &&
-			(resolvedCredentialGeneration(resolved) ?? previousGeneration) > previousGeneration;
+			(previousGeneration !== undefined &&
+				(resolvedCredentialGeneration(resolved) ?? previousGeneration) > previousGeneration) ||
+			(typeof resolved === "object" &&
+				Object.entries(previousHeaderGenerations ?? {}).some(
+					([config, generation]) => (resolved?.headerGenerations?.[config] ?? generation) > generation,
+				));
 		return minted || verdict === "structured" || verdict === "text" ? markAfterRemint(resolved) : resolved;
 	};
 }

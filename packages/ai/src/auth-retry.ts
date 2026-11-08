@@ -37,6 +37,8 @@ export interface ApiKeyResolveContext {
 	 * which mint the provider refused, which the bytes cannot say.
 	 */
 	previousGeneration?: number;
+	/** Command-header generations materialized for the failed request. */
+	previousHeaderGenerations?: Record<string, number>;
 	/** Caller cancel signal, threaded into any credential refresh / rotation work. */
 	signal?: AbortSignal;
 }
@@ -80,6 +82,8 @@ export interface ResolvedApiKey {
 	 * {@link ApiKeyResolveContext.previousGeneration}.
 	 */
 	credentialGeneration?: number;
+	/** Command-header provenance; kept with this request, not with a shared resolver. */
+	headerGenerations?: Record<string, number>;
 	/** Non-secret request scope belonging to this bearer, replaced on account rotation. */
 	oauthIdentity?: OAuthRequestIdentity;
 }
@@ -240,10 +244,18 @@ export async function resolveRetryKey(
 	previousKey?: string,
 	onResolved?: (resolved: ApiKeyResolution) => void,
 	previousGeneration?: number,
+	previousHeaderGenerations?: Record<string, number>,
 ): Promise<string | undefined> {
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
-		const resolved = await resolver({ lastChance: rotateSibling, error, signal, previousKey, previousGeneration });
+		const resolved = await resolver({
+			lastChance: rotateSibling,
+			error,
+			signal,
+			previousKey,
+			previousGeneration,
+			previousHeaderGenerations,
+		});
 		onResolved?.(resolved);
 		return resolvedApiKeyBearer(resolved);
 	} catch {
@@ -262,6 +274,7 @@ export interface AuthRetryKeyState {
 	 * this request sent from the one that replaced it.
 	 */
 	lastGeneration?: number;
+	lastHeaderGenerations?: Record<string, number>;
 	/** Whether the current credential already consumed its 401 refresh-same retry. */
 	refreshedCurrent: boolean;
 	/** Whether this operation already replayed once after an explicit token-refresh request. */
@@ -270,11 +283,16 @@ export interface AuthRetryKeyState {
 	attempts: number;
 }
 
-export function createAuthRetryKeyState(initialKey: string, initialGeneration?: number): AuthRetryKeyState {
+export function createAuthRetryKeyState(
+	initialKey: string,
+	initialGeneration?: number,
+	initialHeaderGenerations?: Record<string, number>,
+): AuthRetryKeyState {
 	return {
 		attemptedKeys: new Set([initialKey]),
 		lastKey: initialKey,
 		lastGeneration: initialGeneration,
+		lastHeaderGenerations: initialHeaderGenerations,
 		refreshedCurrent: false,
 		tokenRefreshReplayUsed: false,
 		attempts: 1,
@@ -299,6 +317,7 @@ function acceptRetryKey(
 	refreshedCurrent: boolean,
 	resendAllowed = false,
 	generation?: number,
+	headerGenerations?: Record<string, number>,
 ): string | undefined {
 	if ((!resendAllowed && state.attemptedKeys.has(key)) || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) {
 		return undefined;
@@ -307,6 +326,7 @@ function acceptRetryKey(
 	state.attempts += 1;
 	state.lastKey = key;
 	state.lastGeneration = generation;
+	state.lastHeaderGenerations = headerGenerations;
 	state.refreshedCurrent = refreshedCurrent;
 	return key;
 }
@@ -324,6 +344,7 @@ export async function resolveNextAuthRetryKey(
 		if (state.tokenRefreshReplayUsed) return undefined;
 		state.tokenRefreshReplayUsed = true;
 		let generation: number | undefined;
+		let headerGenerations: Record<string, number> | undefined;
 		const refreshed = await resolveRetryKey(
 			resolver,
 			false,
@@ -332,19 +353,22 @@ export async function resolveNextAuthRetryKey(
 			state.lastKey,
 			resolved => {
 				generation = resolvedCredentialGeneration(resolved);
+				headerGenerations = typeof resolved === "object" ? resolved?.headerGenerations : undefined;
 				onResolved?.(resolved);
 			},
 			state.lastGeneration,
+			state.lastHeaderGenerations,
 		);
 		state.refreshedCurrent = true;
 		if (signal?.aborted || refreshed === undefined) return undefined;
-		return acceptRetryKey(state, refreshed, true, false, generation);
+		return acceptRetryKey(state, refreshed, true, false, generation, headerGenerations);
 	}
 	const directRotation = isDirectCredentialRotationError(error);
 	if (!directRotation) {
 		if (!state.refreshedCurrent) {
 			let afterRemint = false;
 			let generation: number | undefined;
+			let headerGenerations: Record<string, number> | undefined;
 			const refreshed = await resolveRetryKey(
 				resolver,
 				false,
@@ -354,14 +378,16 @@ export async function resolveNextAuthRetryKey(
 				resolved => {
 					afterRemint = typeof resolved === "object" && resolved?.afterRemint === true;
 					generation = resolvedCredentialGeneration(resolved);
+					headerGenerations = typeof resolved === "object" ? resolved?.headerGenerations : undefined;
 					onResolved?.(resolved);
 				},
 				state.lastGeneration,
+				state.lastHeaderGenerations,
 			);
 			state.refreshedCurrent = true;
 			if (signal?.aborted) return undefined;
 			if (refreshed !== undefined) {
-				const accepted = acceptRetryKey(state, refreshed, true, afterRemint, generation);
+				const accepted = acceptRetryKey(state, refreshed, true, afterRemint, generation, headerGenerations);
 				if (accepted !== undefined) return accepted;
 			}
 		}
@@ -370,6 +396,7 @@ export async function resolveNextAuthRetryKey(
 	if (signal?.aborted) return undefined;
 	let afterSiblingWait = false;
 	let rotatedGeneration: number | undefined;
+	let rotatedHeaderGenerations: Record<string, number> | undefined;
 	const rotated = await resolveRetryKey(
 		resolver,
 		true,
@@ -379,12 +406,21 @@ export async function resolveNextAuthRetryKey(
 		resolved => {
 			afterSiblingWait = typeof resolved === "object" && resolved.afterSiblingWait === true;
 			rotatedGeneration = resolvedCredentialGeneration(resolved);
+			rotatedHeaderGenerations = typeof resolved === "object" ? resolved?.headerGenerations : undefined;
 			onResolved?.(resolved);
 		},
 		state.lastGeneration,
+		state.lastHeaderGenerations,
 	);
 	if (signal?.aborted || rotated === undefined) return undefined;
-	return acceptRetryKey(state, rotated, !directRotation, afterSiblingWait, rotatedGeneration);
+	return acceptRetryKey(
+		state,
+		rotated,
+		!directRotation,
+		afterSiblingWait,
+		rotatedGeneration,
+		rotatedHeaderGenerations,
+	);
 }
 
 function oauthCredentialIdentity(access: OAuthAccess): string {
@@ -441,9 +477,11 @@ export async function withAuth<T>(
 	const signal = opts?.signal;
 	let initialKey: string | undefined;
 	let initialGeneration: number | undefined;
+	let initialHeaderGenerations: Record<string, number> | undefined;
 	try {
 		initialKey = await resolveApiKeyOnce(resolver, signal, resolved => {
 			initialGeneration = resolvedCredentialGeneration(resolved);
+			initialHeaderGenerations = typeof resolved === "object" ? resolved?.headerGenerations : undefined;
 		});
 	} catch (error) {
 		// A resolver that deliberately reports a missing key keeps that type.
@@ -457,7 +495,7 @@ export async function withAuth<T>(
 	}
 	if (initialKey === undefined) throw missingKey();
 
-	const state = createAuthRetryKeyState(initialKey, initialGeneration);
+	const state = createAuthRetryKeyState(initialKey, initialGeneration, initialHeaderGenerations);
 	let lastError: unknown;
 	try {
 		return await attempt(initialKey);

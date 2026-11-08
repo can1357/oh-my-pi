@@ -287,17 +287,21 @@ describe("a `!command` credential the provider refuses", () => {
 		gates[0].resolve();
 		let refused = 0;
 		let recovered = 0;
-		const rig = buildRig("literal-placeholder", counterFile, bearer => {
-			if (bearer !== "renewed-token") return false;
-			// Release the next refusal only after the preceding retry used its mint.
-			gates[++recovered]?.resolve();
-			return true;
-		}, {
-			...(scope === "provider" ? { headers } : { models: [{ id: "gw-model", name: "GW Model", headers }] }),
-		}, async () => {
-			await gates[refused++].promise;
-			return gatewayRefusal();
-		});
+		const rig = buildRig(
+			"literal-placeholder",
+			counterFile,
+			bearer => {
+				if (bearer !== "renewed-token") return false;
+				// Release the next refusal only after the preceding retry used its mint.
+				gates[++recovered]?.resolve();
+				return true;
+			},
+			scope === "provider" ? { headers } : { models: [{ id: "gw-model", name: "GW Model", headers }] },
+			async () => {
+				await gates[refused++].promise;
+				return gatewayRefusal();
+			},
+		);
 		await rig.model.resolveHeaders?.();
 		const before = rig.mints();
 		const sends = await Promise.all(Array.from({ length: 10 }, () => rig.prepare()));
@@ -307,6 +311,8 @@ describe("a `!command` credential the provider refuses", () => {
 
 		expect(results.every(result => result.stopReason !== "error")).toBe(true);
 		expect(rig.seen.length).toBe(20);
+		expect(refused).toBe(10);
+		expect(recovered).toBe(10);
 		expect(rig.mints() - before).toBe(1);
 	});
 
@@ -327,6 +333,25 @@ describe("a `!command` credential the provider refuses", () => {
 		// B obtains generation 3 before its first request, not after another 401.
 		expect(rig.seen.length - beforeRequests).toBe(1);
 		expect(rig.mints()).toBe(3);
+	});
+
+	test("a header mint earns its same-byte retry on a bare 401", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "unchanging-token");
+		let requests = 0;
+		const rig = buildRig(
+			"literal-placeholder",
+			counterFile,
+			() => requests++ > 0,
+			{ headers: { Authorization: mintFromFile(counterFile, tokenFile) } },
+			() => new Response(null, { status: 401 }),
+		);
+
+		expect((await rig.turn()).stopReason).not.toBe("error");
+		expect(rig.seen.length).toBe(2);
+		expect(rig.mints()).toBe(2);
 	});
 
 	test("gives every waiter a decisive answer when the shared re-mint fails", async () => {
@@ -757,6 +782,61 @@ describe("a `!command` credential the provider refuses", () => {
 			// well — the route before the owner served this request — costs a
 			// second call to the issuer for one refusal.
 			expect(fs.readFileSync(counterFile, "utf8").length - mintsBefore).toBe(1);
+		} finally {
+			await worker.stop();
+			server.stop(true);
+		}
+	});
+	test("shares one header re-mint across ten worker-mirror refusals", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "expired-token");
+		const wave = Promise.withResolvers<void>();
+		let requests = 0;
+		let refusals = 0;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				requests++;
+				if (request.headers.get("authorization") !== "expired-token") return okStream();
+				if (++refusals === 10) {
+					fs.writeFileSync(tokenFile, "renewed-token");
+					wave.resolve();
+				}
+				await wave.promise;
+				return gatewayRefusal();
+			},
+		});
+		const modelsPath = path.join(tempDir, "models.json");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"probe-gw": {
+						baseUrl: `http://127.0.0.1:${server.port}/v1`,
+						api: "openai-completions",
+						apiKey: "test",
+						headers: { Authorization: mintFromFile(counterFile, tokenFile) },
+						models: [{ id: "gw-model", name: "GW Model", compat: { supportsStore: false } }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath, { cacheDbPath: path.join(tempDir, "models.db") });
+		const worker = await startServiceWorker<RemintProbe>(
+			new URL("./fixtures/credential-remint-worker.ts", import.meta.url),
+			[authService],
+		);
+		try {
+			const results = await Promise.all(
+				Array.from({ length: 10 }, () => worker.probe.turn(registry, "probe-gw", "gw-model")),
+			);
+			expect(results.every(result => result.ok)).toBe(true);
+			expect(requests).toBe(20);
+			// One cold initial execution plus one shared recovery execution.
+			expect(fs.readFileSync(counterFile, "utf8").length).toBe(2);
 		} finally {
 			await worker.stop();
 			server.stop(true);

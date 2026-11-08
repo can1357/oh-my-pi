@@ -44,6 +44,30 @@ export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<stri
 /** One raw header layer or previously composed request-time resolver. */
 export type ConfigHeaderSource = Record<string, string> | ConfigHeaderResolver | undefined;
 
+/** Effective raw header values retained through composed resolvers. */
+const headerConfigs = new WeakMap<ConfigHeaderResolver, Record<string, string>>();
+
+/** Snapshot only the command slots this header chain actually materializes. */
+export function configHeaderGenerations(
+	resolver: ConfigHeaderResolver | undefined,
+): Record<string, number> | undefined {
+	const configs = resolver && headerConfigs.get(resolver);
+	if (!configs) return undefined;
+	let generations: Record<string, number> | undefined;
+	for (const config of Object.values(configs)) {
+		const command = commandConfigKey(config);
+		if (command === undefined) continue;
+		const cached = commandResultCache.get(command);
+		if (cached) (generations ??= {})[`!${command}`] = cached.generation;
+	}
+	return generations;
+}
+
+/** Whether a non-minting recovery can still serve this command's cached slot. */
+export function hasUnrefusedCommandCredential(valueConfig: string | undefined): boolean {
+	return !isCommandConfigValue(valueConfig) || settledMintFor(commandKey(valueConfig)) !== undefined;
+}
+
 /** Optional bearer-header derivation applied after explicitly configured header layers. */
 export interface ConfigHeaderResolutionOptions {
 	authHeader?: boolean;
@@ -191,7 +215,7 @@ async function executeCommand(valueConfig: string): Promise<CommandCredential | 
 	const command = commandKey(valueConfig);
 
 	const cached = commandResultCache.get(command);
-	if (cached !== undefined) return cached;
+	if (cached !== undefined && cached.generation > (commandRefusedGeneration.get(command) ?? 0)) return cached;
 	const retryAt = commandFailureRetryAt.get(command);
 	if (retryAt !== undefined && Date.now() < retryAt) return undefined;
 
@@ -336,7 +360,12 @@ export function createConfigHeaderResolver(
 ): ConfigHeaderResolver | undefined {
 	const active = sources.filter((source): source is Exclude<ConfigHeaderSource, undefined> => source !== undefined);
 	if (active.length === 0 && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
-	return async signal => {
+	const configs: Record<string, string> = {};
+	for (const source of active) {
+		Object.assign(configs, typeof source === "function" ? headerConfigs.get(source) : source);
+	}
+	if (options?.authHeader && options.apiKeyConfig) configs.Authorization = options.apiKeyConfig;
+	const resolver: ConfigHeaderResolver = async signal => {
 		signal?.throwIfAborted();
 		const resolved: Record<string, string> = {};
 		let hasResolved = false;
@@ -362,6 +391,8 @@ export function createConfigHeaderResolver(
 		}
 		return hasResolved ? resolved : undefined;
 	};
+	headerConfigs.set(resolver, configs);
+	return resolver;
 }
 
 /** Clear all command state, generation counters included. Exported for focused resolver tests. */

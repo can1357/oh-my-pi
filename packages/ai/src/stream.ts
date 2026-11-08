@@ -1314,12 +1314,14 @@ function streamSimpleRequest<TApi extends Api>(
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
 			let credentialGeneration: number | undefined;
+			let headerGenerations: Record<string, number> | undefined;
 			try {
 				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 				credentialGeneration = resolvedCredentialGeneration(resolved);
+				headerGenerations = typeof resolved === "object" ? resolved?.headerGenerations : undefined;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1340,7 +1342,7 @@ function streamSimpleRequest<TApi extends Api>(
 				outer.fail(new AIError.MissingApiKeyError(model.provider));
 				return;
 			}
-			const retryState = createAuthRetryKeyState(lastKey, credentialGeneration);
+			const retryState = createAuthRetryKeyState(lastKey, credentialGeneration, headerGenerations);
 			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			while (true) {
