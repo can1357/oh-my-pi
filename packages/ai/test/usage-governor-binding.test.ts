@@ -663,6 +663,88 @@ describe("request-local route binding", () => {
 		await w.refresh();
 		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
 	});
+	test("evaluateRoutes rejects duplicate window ids [A, A] when missing B", async () => {
+		const w = await setup();
+		w.strategy = {
+			findWindowLimits(report: UsageReport) {
+				return {
+					primary: report.limits.find((l: UsageLimit) => l.id === "primary"),
+					secondary: report.limits.find((l: UsageLimit) => l.id === "secondary"),
+				};
+			},
+			windowDefaults: { primaryMs: 60_000, secondaryMs: 604_800_000 },
+		};
+		const { a } = await w.bind();
+
+		w.customAllowance = () => ["primary", "secondary"];
+
+		// Positive control: distinct matched limits [primary, secondary] evaluate eligible
+		w.customLimits = (now, cred) => [
+			{
+				id: "primary",
+				label: "Primary",
+				scope: { provider: PROVIDER, accountId: cred.accountId },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now + 30_000 },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now,
+			},
+			{
+				id: "secondary",
+				label: "Secondary",
+				scope: { provider: PROVIDER, accountId: cred.accountId },
+				window: { id: "7d", label: "7 Day", durationMs: 604_800_000, resetsAt: now + 300_000 },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now,
+			},
+		];
+		await w.refresh();
+		const controlEval = await w.auth.governor.evaluateRoutes({
+			scopeId: "scope",
+			revision: 1,
+			role: "task",
+			sessionId: SESSION,
+			targets: [TARGET],
+		});
+		expect(controlEval.accounts.find(row => row.credentialId === a.credentialId)?.eligibility).toBe("eligible");
+
+		// Negative: [primary, primary] with fresh secondary nonfinite reset: windows has length 2 ([A, A]), ids has length 2 ([A, B]).
+		// Only the duplicate guard distinguishes [A, A] from [A, B] under evaluateRoutes.
+		w.customLimits = (now, cred) => [
+			{
+				id: "primary",
+				label: "Primary 1",
+				scope: { provider: PROVIDER, accountId: cred.accountId },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now + 30_000 },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now,
+			},
+			{
+				id: "primary",
+				label: "Primary 2 (duplicate)",
+				scope: { provider: PROVIDER, accountId: cred.accountId },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now + 30_000 },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now,
+			},
+			{
+				id: "secondary",
+				label: "Secondary (non-applicable)",
+				scope: { provider: PROVIDER, accountId: cred.accountId },
+				window: { id: "7d", label: "7 Day", durationMs: 604_800_000, resetsAt: Number.NaN },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now,
+			},
+		];
+		await w.refresh();
+		const dupEval = await w.auth.governor.evaluateRoutes({
+			scopeId: "scope",
+			revision: 1,
+			role: "task",
+			sessionId: SESSION,
+			targets: [TARGET],
+		});
+		expect(dupEval.accounts.find(row => row.credentialId === a.credentialId)?.eligibility).toBe("unknown");
+	});
 	test("discriminatory rejection of wrong scope, revision, target and credentials", async () => {
 		const w = await setup();
 		const { binding, request } = await w.bind();
