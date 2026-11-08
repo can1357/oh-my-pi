@@ -62,6 +62,7 @@ import time
 import traceback
 import tokenize
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Callable
 
 # ---------------------------------------------------------------------------
@@ -103,11 +104,42 @@ except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
     _CONTROL_IN = sys.__stdin__
 
 
-def _json_default(o: Any) -> Any:
+def _interrupting(exc: BaseException) -> bool:
+    """Whether ``exc`` may be the host's interrupt rather than a value's own.
+
+    The host interrupts a cell with SIGINT, whose handler raises
+    ``KeyboardInterrupt`` on the main thread only; the cell's ``except
+    KeyboardInterrupt`` then reports the cell cancelled. A ``KeyboardInterrupt``
+    on any other thread was raised by a value's own code.
+    """
+    return isinstance(exc, KeyboardInterrupt) and threading.current_thread() is threading.main_thread()
+
+
+def _user_text(value: Any, convert: Callable[[Any], str], placeholder: str) -> str:
+    """``convert(value)``, or ``<placeholder TypeName>`` when the value's own code raises.
+
+    The kernel converts values user code made for its own frames, views and
+    tool replies. A value's ``__str__`` or ``__repr__`` may raise anything,
+    ``SystemExit`` and ``GeneratorExit`` included; such a value gets the
+    placeholder. Only a possible interrupt (``_interrupting``) propagates, so a
+    real interrupt still stops the cell.
+    """
     try:
-        return repr(o)
-    except Exception:
-        return f"<unrepr {type(o).__name__}>"
+        return convert(value)
+    except BaseException as exc:  # noqa: BLE001 - see the docstring
+        if _interrupting(exc):
+            raise
+    try:
+        name = type(value).__name__
+    except BaseException as exc:  # noqa: BLE001 - a metaclass can make the name raise
+        if _interrupting(exc):
+            raise
+        name = None
+    return f"<{placeholder} {name}>" if type(name) is str else f"<{placeholder} object>"
+
+
+def _json_default(o: Any) -> Any:
+    return _user_text(o, repr, "unrepr")
 
 
 def _emit(frame: dict) -> None:
@@ -1989,14 +2021,11 @@ def _json_safe(value: Any, active: set[int] | None = None) -> Any:
         active.add(marker)
         try:
             if isinstance(value, dict):
-                return {str(key): _json_safe(item, active) for key, item in value.items()}
+                return {_user_text(key, str, "unprintable"): _json_safe(item, active) for key, item in value.items()}
             return [_json_safe(item, active) for item in value]
         finally:
             active.discard(marker)
-    try:
-        return str(value)
-    except Exception:
-        return f"<unprintable {type(value).__name__}>"
+    return _user_text(value, str, "unprintable")
 
 
 def _json_view(value: Any, text: str) -> dict | None:
@@ -2285,10 +2314,17 @@ def _data_view(value: Any, text: str) -> dict | None:
 
 
 def _guarded(fn: Callable[..., Any], *args: Any) -> Any:
-    """Classification never breaks a print: a failing probe means "not rich"."""
+    """Classification never breaks a print: a failing probe means "not rich".
+
+    A probe runs the value's own code, which may raise anything, ``SystemExit``
+    and ``GeneratorExit`` included. Only a possible interrupt
+    (``_interrupting``) propagates, so a real interrupt still stops the cell.
+    """
     try:
         return fn(*args)
-    except Exception:
+    except BaseException as exc:  # noqa: BLE001 - see the docstring
+        if _interrupting(exc):
+            raise
         return None
 
 
@@ -2300,7 +2336,7 @@ def _rich_value(value: Any, to_text: Callable[[Any], str]) -> tuple[str, list[tu
         return text, [] if view is None else [("view", view)]
     if type(value) in _PLAIN_TEXT_TYPES:
         return to_text(value), []
-    image = _omp_image(value)
+    image = _guarded(_omp_image, value)
     if image is not None:
         return f"<image {image['mimeType']}>", [("image", image)]
     if not isinstance(value, type):
@@ -2366,12 +2402,20 @@ def _echo_value(value: Any) -> None:
 
 
 def _flush_matplotlib_figures() -> None:
+    """Emit each figure the cell left open, then close it.
+
+    It runs in the request's cleanup, after the cell's code. Rendering runs the
+    figure's own code (artists, formatters), which may raise anything,
+    ``KeyboardInterrupt`` and ``SystemExit`` included; a raise here would end
+    the request without its ``done`` frame, or end the event loop and with it
+    the kernel, so a figure that fails is skipped.
+    """
     plt = sys.modules.get("matplotlib.pyplot")
     if plt is None:
         return
     try:
         fignums = list(plt.get_fignums())
-    except Exception:
+    except BaseException:  # noqa: BLE001 - see the docstring
         return
     for num in fignums:
         try:
@@ -2383,7 +2427,7 @@ def _flush_matplotlib_figures() -> None:
                 _png_payload(lambda buf: fig.savefig(buf, format="png", bbox_inches="tight"))
             )
             plt.close(fig)
-        except Exception:
+        except BaseException:  # noqa: BLE001 - see the docstring
             continue
 
 
@@ -2839,10 +2883,10 @@ def _jsonable(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
+        return {_user_text(key, str, "unprintable"): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [_jsonable(item) for item in value]
-    return repr(value)
+    return _user_text(value, repr, "unrepr")
 
 
 def _handle_tool_request(req: dict) -> None:
@@ -2991,10 +3035,7 @@ async def _handle_request_async(req: dict) -> None:
                     while uncancel():
                         pass
             _end_exec_sigint()
-            try:
-                _flush_matplotlib_figures()
-            except Exception:
-                pass
+            _flush_matplotlib_figures()
 
         _flush_stream_proxies(rid)
         _emit(
@@ -3019,34 +3060,431 @@ async def _handle_request_async(req: dict) -> None:
 
 
 def _emit_error(rid: str, exc: BaseException, source_filename: str = "<cell>") -> None:
-    if isinstance(exc, SyntaxError) and exc.filename in ("<cell>", source_filename):
-        # Syntax error in the executed source itself: every stack frame is
-        # runner machinery, so emit only the caret display, like a REPL.
-        tb_lines = traceback.format_exception_only(type(exc), exc)
-    else:
-        # Magics execute between the cell and loaded script. Omit runner
-        # frames throughout that chain, not just before the first user frame.
-        # Internal-only failures retain their full traceback for diagnosis.
-        formatted = traceback.TracebackException.from_exception(exc)
-        user_frames = [frame for frame in formatted.stack if frame.filename != __file__]
-        if user_frames:
-            formatted.stack = traceback.StackSummary.from_list(user_frames)
-        tb_lines = list(formatted.format())
-    if isinstance(exc, ModuleNotFoundError) and exc.name:
-        tb_lines.append(
-            f"Install the distribution that provides module {exc.name!r} with "
+    """Send ``exc`` as the request's ``error`` frame, described once (``_describe_exception``)."""
+    ename, evalue, lines = _describe_exception(exc, source_filename)
+    _emit({"type": "error", "id": rid, "ename": ename, "evalue": evalue, "traceback": lines})
+
+
+# ---------------------------------------------------------------------------
+# Describing exceptions
+# ---------------------------------------------------------------------------
+#
+# Describing an exception runs its own code: ``__str__``, its class's name, its
+# ``__notes__``, ``__cause__`` and ``__context__``, a SyntaxError's fields, the
+# ``dir()`` of an AttributeError's object. That code may raise anything,
+# ``KeyboardInterrupt``, ``SystemExit`` and ``GeneratorExit`` included; a raise
+# here would leave the request without its ``done`` frame, or end the event loop
+# and with it the kernel. It may also answer differently on a second read, or
+# hand back a sequence that never ends: ``__notes__`` that yield forever, a
+# ``__cause__`` that is a new exception on every read.
+#
+# ``_describe_exception`` is the one place that happens. It reads each of those
+# once, through ``_snapshot``, inside a ``try`` that falls back to fixed text,
+# takes at most a bounded count from any sequence and keeps at most a bounded
+# length of any text. The traceback module then formats stand-in exceptions
+# that hold only what was read, so none of its own reads reaches the original
+# exception. Nothing propagates, not even a ``KeyboardInterrupt``: the code that
+# failed has already ended, a real interrupt that lands here only stops the
+# exception's own code, and the host marked the request cancelled when it sent
+# the interrupt. What no bound can stop is code that never returns, such as a
+# ``__str__`` that loops: only the cell's timeout interrupts that.
+
+# Characters kept of an exception's text, of one note, and of a whole traceback.
+_DESCRIBE_TEXT_LIMIT = 64 * 1024
+# Notes kept per exception.
+_DESCRIBE_NOTES_LIMIT = 64
+# Exceptions described in one traceback: its chain of causes and contexts and
+# every member of its groups together.
+_DESCRIBE_EXCEPTIONS_LIMIT = 64
+# Members shown per group, and nested groups expanded: the traceback module's own defaults.
+_DESCRIBE_GROUP_WIDTH = 15
+_DESCRIBE_GROUP_DEPTH = 10
+# Names a "Did you mean" suggestion is chosen from; the traceback module offers none past this many.
+_DESCRIBE_DIR_LIMIT = 750
+
+_BASE_EXCEPTION_GROUP: Any = getattr(builtins, "BaseExceptionGroup", None)
+
+
+def _describe_exception(exc: BaseException, source_filename: str = "<cell>") -> tuple[str, str, list[str]]:
+    """``(ename, evalue, traceback lines)`` for ``exc``, without runner frames
+    and with an install hint for a missing module. Never raises; see above."""
+    cls = type(exc)
+    ename = _type_text(cls, "__name__") or "<unnamed exception>"
+    snapshot = _Snapshot()
+    try:
+        top = _snapshot(exc, snapshot, set(), 0)
+    except BaseException:  # noqa: BLE001 - see "Describing exceptions"; every read inside is guarded already
+        return ename, snapshot.text, []
+    lines = _traceback_lines(top, snapshot.cell_syntax_error(source_filename), ename, snapshot.text)
+    if snapshot.missing_module is not None:
+        lines.append(
+            f"Install the distribution that provides module {snapshot.missing_module!r} with "
             "`%pip install <distribution-name>` in eval. "
             "Distribution names can differ from import names."
         )
-    _emit(
-        {
-            "type": "error",
-            "id": rid,
-            "ename": type(exc).__name__,
-            "evalue": str(exc),
-            "traceback": [line.rstrip("\n") for line in tb_lines],
+    return ename, snapshot.text, lines
+
+
+class _Snapshot:
+    """What describing the top exception read, besides its stand-in."""
+
+    __slots__ = ("budget", "text", "syntax_filename", "missing_module", "class_names")
+
+    def __init__(self) -> None:
+        self.budget = _DESCRIBE_EXCEPTIONS_LIMIT
+        self.text = "<exception str() failed>"
+        self.syntax_filename: str | None = None
+        self.missing_module: str | None = None
+        # Each class's ``__qualname__`` and ``__module__``, read once however many of its instances the traceback shows.
+        self.class_names: dict[int, tuple[type, str, str]] = {}
+
+    def cell_syntax_error(self, source_filename: str) -> bool:
+        """Whether the top exception is a SyntaxError in the executed source itself."""
+        return self.syntax_filename is not None and self.syntax_filename in ("<cell>", source_filename)
+
+    def names(self, cls: type) -> tuple[str, str]:
+        """``cls``'s qualified name and module, each read once per description; a metaclass can make either raise."""
+        known = self.class_names.get(id(cls))
+        if known is None:
+            qualname = _type_text(cls, "__qualname__") or "<unnamed exception>"
+            module = _type_text(cls, "__module__") or "<unknown>"
+            known = self.class_names[id(cls)] = (cls, qualname, module)
+        return known[1], known[2]
+
+
+class _Names:
+    """Stands in for an AttributeError's object: ``dir()`` gives the names read from it, at most ``_DESCRIBE_DIR_LIMIT``."""
+
+    __slots__ = ("names",)
+
+    def __init__(self, names: list[str]) -> None:
+        self.names = names
+
+    def __dir__(self) -> list[str]:
+        return self.names
+
+
+def _bounded_text(text: str, limit: int = _DESCRIBE_TEXT_LIMIT) -> str:
+    """``text``, or its start and end around a note of how much was left out."""
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]}… [{len(text) - 2 * half} characters omitted] …{text[-half:]}"
+
+
+def _read(value: Any, name: str) -> Any:
+    """``getattr(value, name, None)``, read once; ``None`` when reading raises."""
+    try:
+        return getattr(value, name, None)
+    except BaseException:  # noqa: BLE001 - see "Describing exceptions"
+        return None
+
+
+def _as_text(value: Any) -> str | None:
+    """``value`` as a plain, bounded ``str`` when it is one, else ``None``. Runs no code of the value's."""
+    if not issubclass(type(value), str):
+        return None
+    return _bounded_text(str.__str__(value))
+
+
+def _converted(value: Any, convert: Callable[[Any], Any], placeholder: str) -> str:
+    """``convert(value)`` as plain, bounded text; ``placeholder`` when it raises."""
+    try:
+        text = _as_text(convert(value))
+    except BaseException:  # noqa: BLE001 - see "Describing exceptions"
+        text = None
+    return placeholder if text is None else text
+
+
+def _type_text(cls: type, name: str) -> str | None:
+    """A class's ``__name__``, ``__qualname__`` or ``__module__``, read once; a metaclass can make it raise."""
+    return _as_text(_read(cls, name))
+
+
+def _subclass(cls: type, base: Any) -> bool:
+    """``issubclass(cls, base)`` for a built-in ``base``, which asks nothing of ``cls``'s code; ``False`` for no base."""
+    if base is None:
+        return False
+    try:
+        return issubclass(cls, base)
+    except BaseException:  # noqa: BLE001 - see "Describing exceptions"
+        return False
+
+
+def _exception(value: Any) -> BaseException | None:
+    """``value`` when it is an exception, by its real type, never its ``__class__``."""
+    return value if _subclass(type(value), BaseException) else None
+
+
+def _bounded_items(value: Any, limit: int) -> tuple[list[Any], bool]:
+    """At most ``limit`` items of a list or a tuple, and whether it held more. Anything else holds none."""
+    if not _subclass(type(value), (list, tuple)):
+        return [], False
+    items: list[Any] = []
+    try:
+        for item in itertools.islice(iter(value), limit + 1):
+            items.append(item)
+    except BaseException:  # noqa: BLE001 - see "Describing exceptions"
+        pass
+    return items[:limit], len(items) > limit
+
+
+def _notes(exc: BaseException) -> list[str] | None:
+    """The exception's ``__notes__``, read once: at most ``_DESCRIBE_NOTES_LIMIT``
+    of them, each bounded. Notes that are not a list or a tuple show as their
+    ``repr``, as the traceback module shows anything that is not a sequence."""
+    notes = _read(exc, "__notes__")
+    if notes is None:
+        return None
+    if not _subclass(type(notes), (list, tuple)):
+        return [_converted(notes, repr, "<__notes__ repr() failed>")]
+    items, more = _bounded_items(notes, _DESCRIBE_NOTES_LIMIT)
+    kept = [_converted(note, str, "<note str() failed>") for note in items]
+    if more:
+        kept.append(f"[further notes not shown: only the first {_DESCRIBE_NOTES_LIMIT} are]")
+    return kept
+
+
+def _dir_names(obj: Any) -> list[str]:
+    """The names ``dir(obj)`` lists, read once, or none when it lists more than ``_DESCRIBE_DIR_LIMIT``."""
+    try:
+        names = list(itertools.islice(iter(type(obj).__dir__(obj)), _DESCRIBE_DIR_LIMIT + 1))
+    except BaseException:  # noqa: BLE001 - see "Describing exceptions"
+        return []
+    if len(names) > _DESCRIBE_DIR_LIMIT:
+        return []
+    return [name for name in names if type(name) is str]
+
+
+def _optional_int(value: Any) -> int | None:
+    return value if type(value) is int else None
+
+
+def _stand_in_class(names: tuple[str, str], base: type, text: str) -> type:
+    """A class that formats like the one ``names`` (qualified name, module) came
+    from, with ``text`` as its ``str()`` and ``base`` for how the traceback module treats it."""
+    qualname, module = names
+    namespace = {"__module__": module, "__qualname__": qualname, "__str__": lambda self: text}
+    return type(qualname.replace("\0", ""), (base,), namespace)
+
+
+def _snapshot(exc: BaseException, snapshot: _Snapshot, seen: set[int], group_depth: int) -> BaseException:
+    """A stand-in for ``exc`` holding only what was read from it, once each.
+    Its cause, context and group members are stand-ins too, while the budget lasts."""
+    snapshot.budget -= 1
+    seen.add(id(exc))
+    top = len(seen) == 1
+    cls = type(exc)
+    text = _converted(exc, str, "<exception str() failed>")
+    if top:
+        snapshot.text = text
+
+    base: type = BaseException
+    members: list[BaseException] = []
+    members_note: str | None = None
+    if _subclass(cls, _BASE_EXCEPTION_GROUP):
+        raw = _read(exc, "exceptions")
+        items, more = _bounded_items(raw, _DESCRIBE_GROUP_WIDTH)
+        if group_depth < _DESCRIBE_GROUP_DEPTH:
+            for item in items:
+                member = _exception(item)
+                if member is None or id(member) in seen or snapshot.budget <= 0:
+                    continue
+                members.append(_snapshot(member, snapshot, seen, group_depth + 1))
+        if more:
+            members_note = "[further exceptions in this group not shown]"
+        if members:
+            base = _BASE_EXCEPTION_GROUP
+    elif _subclass(cls, SyntaxError):
+        base = SyntaxError
+    elif _subclass(cls, AttributeError):
+        base = AttributeError
+    elif _subclass(cls, NameError):
+        base = NameError
+
+    stand_in_cls = _stand_in_class(snapshot.names(cls), base, text)
+    stand_in: BaseException = stand_in_cls(text, members) if members else stand_in_cls()
+
+    if base is SyntaxError:
+        filename = _as_text(_read(exc, "filename"))
+        if top:
+            snapshot.syntax_filename = filename
+        source = _as_text(_read(exc, "text"))
+        # Clamped to the text, or the caret line under it could be as long as the offset says.
+        span = len(source) + 1 if source is not None else 1
+        fields = {
+            "msg": _as_text(_read(exc, "msg")),
+            "filename": filename,
+            "lineno": _optional_int(_read(exc, "lineno")),
+            "end_lineno": _optional_int(_read(exc, "end_lineno")),
+            "text": source,
+            "offset": _optional_int(_read(exc, "offset")),
+            "end_offset": _optional_int(_read(exc, "end_offset")),
         }
-    )
+        for key in ("offset", "end_offset"):
+            if fields[key] is not None:
+                fields[key] = max(-1, min(fields[key], span))
+        for key, value in fields.items():
+            try:
+                setattr(stand_in, key, value)
+            except BaseException:  # noqa: BLE001 - an older Python lacks the end_* fields
+                pass
+    elif base is AttributeError or base is NameError:
+        name = _as_text(_read(exc, "name"))
+        try:
+            stand_in.name = name  # type: ignore[attr-defined]
+            if base is AttributeError:
+                stand_in.obj = _Names(_dir_names(_read(exc, "obj")) if name is not None else [])  # type: ignore[attr-defined]
+        except BaseException:  # noqa: BLE001 - an older Python lacks these fields and makes no suggestion
+            pass
+    elif top and _subclass(cls, ModuleNotFoundError):
+        snapshot.missing_module = _as_text(_read(exc, "name")) or None
+
+    notes = _notes(exc)
+    if members_note is not None:
+        notes = [*(notes or []), members_note]
+    if notes is not None:
+        stand_in.__notes__ = notes  # type: ignore[attr-defined]
+
+    tb = _read(exc, "__traceback__")
+    if type(tb) is TracebackType:
+        stand_in.__traceback__ = tb
+    cause = _exception(_read(exc, "__cause__"))
+    context = _exception(_read(exc, "__context__"))
+    suppress = _read(exc, "__suppress_context__") is True
+    if cause is not None and (id(cause) in seen or snapshot.budget <= 0):
+        cause = None
+    # The traceback module shows a context only when there is no cause and it is not suppressed.
+    if context is not None and (cause is not None or suppress or id(context) in seen or snapshot.budget <= 0):
+        context = None
+    if cause is not None:
+        stand_in.__cause__ = _snapshot(cause, snapshot, seen, group_depth)
+    elif context is not None:
+        stand_in.__context__ = _snapshot(context, snapshot, seen, group_depth)
+    stand_in.__suppress_context__ = suppress
+    return stand_in
+
+
+def _drop_runner_frames(formatted: traceback.TracebackException) -> None:
+    """Omit runner frames from each exception's stack: magics execute between the
+    cell and a loaded script. A stack of runner frames alone is kept whole, for diagnosis."""
+    pending = [formatted]
+    visited: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if node is None or id(node) in visited:
+            continue
+        visited.add(id(node))
+        user_frames = [frame for frame in node.stack if frame.filename != __file__]
+        if user_frames:
+            node.stack = traceback.StackSummary.from_list(user_frames)
+        pending.extend((getattr(node, "__cause__", None), getattr(node, "__context__", None)))
+        pending.extend(getattr(node, "exceptions", None) or ())
+
+
+def _traceback_lines(stand_in: BaseException, cell_syntax_error: bool, ename: str, evalue: str) -> list[str]:
+    """The formatted traceback of ``stand_in``, at most ``_DESCRIBE_TEXT_LIMIT``
+    characters, then the exception's own line when the limit cut it off.
+    A syntax error in the executed source shows only its caret display, like a
+    REPL: every frame is runner machinery. ``[]`` if formatting fails; the host
+    then shows the name and text alone.
+
+    A NameError's "Did you mean" suggestion still runs code of the user's: it
+    asks ``hasattr(self, name)`` of the ``self`` in the failing frame, which can
+    raise. Formatting then fails, and is tried once more without suggestions."""
+    for attempt in range(2):
+        try:
+            return _formatted_lines(stand_in, cell_syntax_error, ename, evalue)
+        except BaseException:  # noqa: BLE001 - see "Describing exceptions"
+            if attempt == 0:
+                _drop_suggestions(stand_in)
+    return []
+
+
+def _formatted_lines(stand_in: BaseException, cell_syntax_error: bool, ename: str, evalue: str) -> list[str]:
+    formatted = traceback.TracebackException.from_exception(stand_in)
+    if cell_syntax_error:
+        chunks = formatted.format_exception_only()
+    else:
+        _drop_runner_frames(formatted)
+        chunks = formatted.format()
+    lines: list[str] = []
+    remaining = _DESCRIBE_TEXT_LIMIT
+    for chunk in chunks:
+        if len(chunk) > remaining:
+            lines.append(f"[traceback cut at {_DESCRIBE_TEXT_LIMIT} characters]")
+            lines.append(f"{ename}: {evalue}")
+            break
+        remaining -= len(chunk)
+        lines.append(chunk.rstrip("\n"))
+    return lines
+
+
+def _drop_suggestions(stand_in: BaseException) -> None:
+    """Clear the ``name`` of every NameError and AttributeError stand-in, so no suggestion is computed."""
+    pending: list[Any] = [stand_in]
+    visited: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if node is None or id(node) in visited:
+            continue
+        visited.add(id(node))
+        if isinstance(node, (NameError, AttributeError)):
+            try:
+                node.name = None
+            except BaseException:  # noqa: BLE001 - an older Python lacks the field and makes no suggestion
+                pass
+        pending.extend((node.__cause__, node.__context__))
+        if _BASE_EXCEPTION_GROUP is not None and isinstance(node, _BASE_EXCEPTION_GROUP):
+            pending.extend(node.exceptions)
+
+
+def _report_unowned_failure(heading: str, exc: Any) -> None:
+    """Report a failure that no request is waiting for, described once
+    (``_describe_exception``) instead of by the traceback module, which reads
+    the exception without bounds. The text goes to the stderr of the request
+    that is running when Python reports the failure. Otherwise it goes to the
+    kernel's own stderr, which the host writes to its log: a task keeps the
+    context of the cell that started it, and that cell's stream is gone once
+    the cell has finished. Never raises."""
+    try:
+        failure = _exception(exc)
+        body = ""
+        if failure is not None:
+            ename, evalue, lines = _describe_exception(failure)
+            body = "\n".join(lines) if lines else f"{ename}: {evalue}"
+        text = f"{heading}\n{body}\n" if body else f"{heading}\n"
+        rid = _CURRENT_RID.get()
+        if rid is not None and rid == _STATE.capture_rid:
+            sys.stderr.write(text)
+        else:
+            _RAW_STDERR.write(text)
+            _RAW_STDERR.flush()
+    except BaseException:  # noqa: BLE001 - see "Describing exceptions"
+        pass
+
+
+def _loop_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    """The kernel loop's handler for a failure nothing awaited, such as the
+    exception of a background task a cell started that no one retrieved."""
+    message = _as_text(context.get("message")) or "Unhandled exception in event loop"
+    _report_unowned_failure(message, context.get("exception"))
+
+
+def _thread_excepthook(args: Any) -> None:
+    """``threading.excepthook``: an exception that ended a thread a cell started."""
+    if _subclass(args.exc_type, SystemExit):
+        return
+    name = _as_text(_read(args.thread, "name")) if args.thread is not None else None
+    _report_unowned_failure(f"Exception in thread {name or threading.get_ident()}:", args.exc_value)
+
+
+def _unraisable_hook(unraisable: Any) -> None:
+    """``sys.unraisablehook``: an exception Python had to drop, such as one raised by a ``__del__``."""
+    message = _as_text(unraisable.err_msg) or "Exception ignored in"
+    target = unraisable.object
+    heading = message if target is None else f"{message}: {_converted(target, repr, '<object repr() failed>')}"
+    _report_unowned_failure(heading, unraisable.exc_value)
 
 
 def _admit_shadow_run(req: dict) -> bool:
@@ -3252,6 +3690,12 @@ async def _main_async() -> None:
 
     loop = asyncio.get_running_loop()
     _STATE.loop = loop
+    # Failures no request awaits are reported by these hooks, which describe the
+    # exception within bounds; Python's defaults format it with the traceback
+    # module, which can read a cell's exception forever.
+    loop.set_exception_handler(_loop_exception_handler)
+    threading.excepthook = _thread_excepthook
+    sys.unraisablehook = _unraisable_hook
 
     if os.name == "nt":
         await _serve_windows(loop, stdin)

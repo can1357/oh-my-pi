@@ -29,7 +29,7 @@ import {
 import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
-import { isThenable } from "../../utils/ipc";
+import { catchRejection } from "../../utils/ipc";
 
 /** Subprocess argv and platform-derived spawn flags for an MCP stdio server. */
 export interface StdioSpawnCommand {
@@ -408,10 +408,8 @@ interface FrameSink {
  */
 export function writeFrame(stdin: FrameSink, frame: string): boolean {
 	try {
-		const wrote = stdin.write(frame);
-		if (isThenable(wrote)) wrote.then(undefined, () => {});
-		const flushed = stdin.flush();
-		if (isThenable(flushed)) flushed.then(undefined, () => {});
+		catchRejection(stdin.write(frame), () => {});
+		catchRejection(stdin.flush(), () => {});
 		return true;
 	} catch {
 		return false;
@@ -902,9 +900,8 @@ export class StdioTransport implements MCPTransport {
 			// from the response, timer, abort signal, or read-loop transport-close.
 			const wrote = stdin.write(message);
 			sent = true;
-			if (isThenable(wrote)) wrote.then(undefined, failFromSend);
-			const flushed = stdin.flush();
-			if (isThenable(flushed)) flushed.then(undefined, failFromSend);
+			catchRejection(wrote, failFromSend);
+			catchRejection(stdin.flush(), failFromSend);
 		} catch (error) {
 			failFromSend(error);
 		}

@@ -1,12 +1,15 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { type DescribedError, describeError } from "@oh-my-pi/pi-utils/thrown";
 import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
-import type {
-	RunErrorPayload,
-	SessionSnapshot,
-	ToolReply,
-	Transport,
-	WorkerInbound,
-	WorkerOutbound,
+import {
+	describedRunError,
+	type RunErrorPayload,
+	runErrorPayload,
+	type SessionSnapshot,
+	type ToolReply,
+	type Transport,
+	type WorkerInbound,
+	type WorkerOutbound,
 } from "./worker-protocol";
 
 interface PendingTool {
@@ -17,8 +20,8 @@ interface PendingTool {
 interface ActiveRun {
 	runId: string;
 	filename: string;
-	/** Rejections floated by this run's cell code, captured before its result was sent. */
-	floatingRejections: unknown[];
+	/** Rejections floated by this run's cell code, described as they surfaced, before its result was sent. */
+	floatingRejections: RunErrorPayload[];
 }
 
 interface KernelToolSpec {
@@ -41,7 +44,8 @@ function isKernelToolSpec(value: unknown): value is KernelToolSpec {
 
 type RunResult = Extract<WorkerOutbound, { type: "result" }>;
 
-export type RejectionInterceptor = (handler: (reason: unknown) => boolean) => () => void;
+/** Registers a handler for unhandled rejections, given each reason already described once; returns its removal. */
+export type RejectionInterceptor = (handler: (reason: unknown, described: DescribedError) => boolean) => () => void;
 
 export type WorkerCoreOptions =
 	| {
@@ -65,19 +69,6 @@ export type WorkerCoreOptions =
 /** Finished-cell filenames retained for attributing rejections that surface after the run settled. */
 const RECENT_CELL_FILES_MAX = 256;
 
-function errorPayload(error: unknown): RunErrorPayload {
-	if (error instanceof Error) {
-		return {
-			name: error.name,
-			message: error.message,
-			stack: error.stack,
-			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
-			isToolError: error.name === "ToolError" || error instanceof ToolError,
-		};
-	}
-	return { message: String(error) };
-}
-
 function errorFromPayload(payload: RunErrorPayload): Error {
 	const ctor = payload.isToolError ? ToolError : Error;
 	const error = new ctor(payload.message);
@@ -98,13 +89,12 @@ function foldFloatingRejections(active: ActiveRun, result: RunResult, hooks: Run
 	let folded = result;
 	let reported = rejections;
 	if (result.ok) {
-		const error = errorPayload(rejections[0]);
-		error.message = `Unhandled rejection (missing await?): ${error.message}`;
+		const first = rejections[0]!;
+		const error = { ...first, message: `Unhandled rejection (missing await?): ${first.message}` };
 		folded = { type: "result", runId: active.runId, ok: false, error };
 		reported = rejections.slice(1);
 	}
-	for (const reason of reported) {
-		const payload = errorPayload(reason);
+	for (const payload of reported) {
 		hooks.onText(`[unhandled rejection] ${payload.name ?? "Error"}: ${payload.message}\n`);
 	}
 	return folded;
@@ -132,22 +122,16 @@ export class WorkerCore {
 	 * calls) so they fail the owning run instead of tearing down the worker or —
 	 * via the global postmortem handler — the whole session. On the main thread
 	 * (same-realm unit harness) only cell-attributable rejections are consumed;
-	 * in the dedicated worker realm a rejection during a live run is cell activity even
-	 * without a usable stack, while anything else keeps its default fatality.
+	 * in the dedicated worker realm every rejection is cell activity, whether a
+	 * run is live or not, so none of them ends the worker.
 	 */
 	#installRejectionGuard(): () => void {
 		if (this.#options.interceptUnhandledRejections) {
-			return this.#options.interceptUnhandledRejections(reason => this.#consumeRejection(reason));
+			return this.#options.interceptUnhandledRejections((_reason, described) => this.#consumeRejection(described));
 		}
+		// Only the dedicated worker realm installs this listener, and there every rejection is consumed.
 		const onRejection = (reason: unknown): void => {
-			if (this.#consumeRejection(reason)) return;
-			// Not cell-attributable: restore default fatality. Rethrowing from a
-			// timer surfaces it as an uncaught exception, which reaches the host
-			// as a worker `error` event exactly like an unhandled rejection did
-			// before this listener existed.
-			setTimeout(() => {
-				throw reason;
-			}, 0);
+			this.#consumeRejection(describeError(reason));
 		};
 		process.on("unhandledRejection", onRejection);
 		return () => {
@@ -156,13 +140,17 @@ export class WorkerCore {
 	}
 
 	/**
-	 * Attribute an unhandled rejection to eval-cell code. Live runs are stashed
-	 * on the run (folded into its result after the settle drain); finished cells
-	 * downgrade to a host-side warn log. Returns false when the rejection is not
-	 * cell activity and must keep the default fatal path.
+	 * Attribute an unhandled rejection, described once by the caller, to
+	 * eval-cell code. Live runs keep it on the run (folded into its result after
+	 * the settle drain). One that arrives for a finished cell, or with no run
+	 * live at all, is reported as a warning on the host's log (`omp.log`), never
+	 * to a later cell: the worker and its variables carry on. Returns false only
+	 * in the same-realm harness, for a rejection that is not cell activity and
+	 * must keep the default fatal path.
 	 */
-	#consumeRejection(reason: unknown): boolean {
-		const stack = reason instanceof Error && typeof reason.stack === "string" ? reason.stack : undefined;
+	#consumeRejection(described: DescribedError): boolean {
+		const payload = describedRunError(described);
+		const stack = described.stack;
 		if (stack) {
 			// The stack can name several cells (helper defined by an earlier cell,
 			// called from the live one); the outermost matching frame is the caller
@@ -177,7 +165,7 @@ export class WorkerCore {
 				}
 			}
 			if (owner) {
-				owner.floatingRejections.push(reason);
+				owner.floatingRejections.push(payload);
 				return true;
 			}
 			let recent: string | undefined;
@@ -194,29 +182,30 @@ export class WorkerCore {
 					type: "log",
 					level: "warn",
 					msg: "Unhandled rejection from a finished eval cell (missing await?)",
-					meta: { filename: recent, error: errorPayload(reason) },
+					meta: { filename: recent, error: payload },
 				});
 				return true;
 			}
 		}
-		if (this.#options.mode === "isolated" && this.#runs.size > 0) {
-			// Dedicated eval worker: during a live run, a rejection without a cell
-			// frame (e.g. `Promise.reject("msg")` or a library-created reason) is
-			// still cell activity — nothing else runs user code in this realm.
-			if (this.#runs.size === 1) {
-				const only = this.#runs.values().next().value;
-				only?.floatingRejections.push(reason);
-				return true;
-			}
-			this.#transport.send({
-				type: "log",
-				level: "warn",
-				msg: "Unhandled rejection during concurrent eval runs; cannot attribute to a cell",
-				meta: { error: errorPayload(reason) },
-			});
+		if (this.#options.mode !== "isolated") return false;
+		// Dedicated eval worker: a rejection without a cell frame (e.g.
+		// `Promise.reject("msg")` or a library-created reason) is still cell
+		// activity — nothing else runs user code in this realm.
+		if (this.#runs.size === 1) {
+			const only = this.#runs.values().next().value;
+			only?.floatingRejections.push(payload);
 			return true;
 		}
-		return false;
+		this.#transport.send({
+			type: "log",
+			level: "warn",
+			msg:
+				this.#runs.size === 0
+					? "Unhandled rejection after every eval cell finished (missing await?)"
+					: "Unhandled rejection during concurrent eval runs; cannot attribute to a cell",
+			meta: { error: payload },
+		});
+		return true;
 	}
 
 	#handle(msg: WorkerInbound): void {
@@ -229,7 +218,7 @@ export class WorkerCore {
 					// Same-realm harnesses deliver messages on a microtask. A sync throw
 					// from ensureRuntime/setCwd would otherwise become a process-fatal
 					// unhandledRejection on the main thread.
-					this.#transport.send({ type: "init-failed", error: errorPayload(error) });
+					this.#transport.send({ type: "init-failed", error: runErrorPayload(error) });
 				}
 				return;
 			case "run":
@@ -261,7 +250,7 @@ export class WorkerCore {
 						type: "shadow-snapshot",
 						id: msg.id,
 						eligible: false,
-						reason: error instanceof Error ? error.message : String(error),
+						reason: describeError(error).message,
 					});
 				}
 				return;
@@ -285,7 +274,7 @@ export class WorkerCore {
 						type: "shadow-run",
 						id: msg.id,
 						eligible: false,
-						reason: error instanceof Error ? error.message : String(error),
+						reason: describeError(error).message,
 					});
 				}
 				return;
@@ -346,7 +335,7 @@ export class WorkerCore {
 				type: "log",
 				level: "warn",
 				msg: "JS eval subprocess could not enter the session cwd",
-				meta: { cwd, error: errorPayload(error) },
+				meta: { cwd, error: runErrorPayload(error) },
 			});
 		}
 	}
@@ -372,7 +361,7 @@ export class WorkerCore {
 			runtime.echo(value, hooks);
 			result = { type: "result", runId, ok: true };
 		} catch (error) {
-			result = { type: "result", runId, ok: false, error: errorPayload(error) };
+			result = { type: "result", runId, ok: false, error: runErrorPayload(error) };
 		}
 		try {
 			// One event-loop turn so rejections the cell already floated surface
@@ -436,7 +425,7 @@ export class WorkerCore {
 			}
 			this.#transport.send({ type: "result", runId: msg.runId, ok: true, value: envelope });
 		} catch (error) {
-			this.#transport.send({ type: "result", runId: msg.runId, ok: false, error: errorPayload(error) });
+			this.#transport.send({ type: "result", runId: msg.runId, ok: false, error: runErrorPayload(error) });
 		} finally {
 			this.#runs.delete(msg.runId);
 			this.#rememberCellFile(active.filename);
