@@ -514,6 +514,8 @@ describe("cursor native editToolCall (StrReplace)", () => {
 			toolResults.push(result);
 			return result;
 		});
+		const settled: ToolResultMessage[] = [];
+		state.onEditSettled = result => settled.push(result);
 		startEdit(output, stream, state);
 		expect(toolResults).toHaveLength(0);
 
@@ -523,6 +525,8 @@ describe("cursor native editToolCall (StrReplace)", () => {
 		expect(toolResults[0]?.toolCallId).toBe(EDIT_ID);
 		expect(toolResults[0]?.toolName).toBe("edit");
 		expect(toolResults[0]?.isError).toBe(true);
+		// The materializing read surfaced no call, so the flush must end the live card itself.
+		expect(settled).toEqual(toolResults);
 	});
 
 	it("treats a completion with no EditResult as a failed edit", () => {

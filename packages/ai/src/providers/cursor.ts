@@ -4983,6 +4983,15 @@ function stringToolArg(args: Record<string, unknown> | undefined, key: string): 
 	return typeof value === "string" ? value : undefined;
 }
 
+/** End the live card of an edit no materializing write settled; a host failure must not break the stream. */
+function settleEdit(state: BlockState, result: ToolResultMessage): void {
+	try {
+		state.onEditSettled?.(result);
+	} catch (error) {
+		log("error", "onEditSettled", { error: error instanceof Error ? error.message : String(error) });
+	}
+}
+
 function markEditToolCallPaired(state: BlockState, toolCallId: string): void {
 	if (!state.pairedEditToolCallIds) state.pairedEditToolCallIds = new Set();
 	state.pairedEditToolCallIds.add(toolCallId);
@@ -5169,14 +5178,17 @@ export function flushOpenToolCalls(
 		const kind = block[kStreamingBlockKind];
 		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit" || kind === "web-fetch") {
 			if (!(kind === "cursor-edit" && state.pairedEditToolCallIds?.has(block.id))) {
-				state.onToolResult?.({
+				const result: ToolResultMessage = {
 					role: "toolResult",
 					toolCallId: block.id,
 					toolName: block.name,
 					content: [{ type: "text", text: "The connection to Cursor closed before this call completed." }],
 					isError: true,
 					timestamp: Date.now(),
-				});
+				};
+				state.onToolResult?.(result);
+				// The edit's materializing read surfaced no call, so nothing else ends its live card.
+				if (kind === "cursor-edit") settleEdit(state, result);
 			}
 		}
 		stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: output });
@@ -6096,11 +6108,7 @@ export function processInteractionUpdate(
 						timestamp: Date.now(),
 					};
 					state.onToolResult?.(result);
-					try {
-						state.onEditSettled?.(result);
-					} catch (error) {
-						log("error", "onEditSettled", { error: error instanceof Error ? error.message : String(error) });
-					}
+					settleEdit(state, result);
 				}
 			}
 			const idx = streamedBlockIndex(output, settled);
