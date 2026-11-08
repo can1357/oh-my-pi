@@ -600,6 +600,80 @@ fn delimiter_oracle_rejects_a_contained_but_wrong_delimiter() {
 }
 
 #[test]
+fn delimiter_oracle_rejects_a_continuation_before_the_delimiter() {
+	// An offset at the preceding backslash is contained and reaches the
+	// same token end, but it is not the delimiter's first byte.
+	for (src, key, recorded, wrong) in [
+		(b"( : \\\n)".as_slice(), "Rparen", 6, 4),
+		(b"[[ a \\\n]]".as_slice(), "Right", 7, 5),
+	] {
+		let program = parse_all(src, Features::NONE).unwrap();
+		let cmd = &program.commands[0].list.items[0].and_or.first.stages[0].cmd;
+		assert_eq!(cmd.close, Some(recorded));
+		for offsets in [Offsets::Bytes, Offsets::Utf16] {
+			let mut document: serde_json::Value =
+				serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, offsets)).unwrap();
+			let mut bad = Vec::new();
+			delimiter_faults(&document, src, offsets, None, "", &mut bad);
+			assert!(bad.is_empty(), "unmodified {key}: {bad:?}");
+			document["Stmts"][0]["Cmd"][key]["Offset"] = wrong.into();
+			let mut ranges = Vec::new();
+			range_faults(&document, None, "", &mut ranges);
+			assert!(ranges.is_empty(), "mutation stays contained: {ranges:?}");
+			delimiter_faults(&document, src, offsets, None, "", &mut bad);
+			assert_eq!(bad.len(), 1, "{key} {offsets:?}: {bad:?}");
+			assert!(bad[0].contains(&format!("Cmd.{key}:")), "{bad:?}");
+			eprintln!("continued-delimiter mutation {key} {offsets:?}: {}", bad[0]);
+		}
+	}
+}
+
+#[test]
+fn delimiter_oracle_rejects_both_wrong_try_closers() {
+	// The first closer must not select a nested block's identical `}`;
+	// the second must not point inside the always body.
+	for (src, key, recorded, wrong) in [
+		(b"{ { : } } always { : }".as_slice(), "Rbrace", 8, 6),
+		(b"{ : } always { { : } }".as_slice(), "AlwaysEnd", 21, 18),
+		(b"{ : } always { { : } }".as_slice(), "AlwaysEnd", 21, 19),
+	] {
+		let program = parse_all(src, zsh_features()).unwrap();
+		let cmd = &program.commands[0].list.items[0].and_or.first.stages[0].cmd;
+		let CommandKind::Try(clause) = &cmd.kind else {
+			panic!("a try clause");
+		};
+		let position = if key == "Rbrace" { Some(clause.rbrace) } else { cmd.close };
+		assert_eq!(position, Some(recorded));
+		for offsets in [Offsets::Bytes, Offsets::Utf16] {
+			let mut document: serde_json::Value =
+				serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, offsets)).unwrap();
+			let mut bad = Vec::new();
+			delimiter_faults(&document, src, offsets, None, "", &mut bad);
+			assert!(bad.is_empty(), "unmodified {key}: {bad:?}");
+			document["Stmts"][0]["Cmd"][key]["Offset"] = wrong.into();
+			let mut ranges = Vec::new();
+			range_faults(&document, None, "", &mut ranges);
+			assert!(ranges.is_empty(), "mutation stays contained: {ranges:?}");
+			delimiter_faults(&document, src, offsets, None, "", &mut bad);
+			assert_eq!(bad.len(), 1, "{key} {offsets:?}: {bad:?}");
+			assert!(bad[0].contains(&format!("Cmd.{key}:")), "{bad:?}");
+			eprintln!("try-closer mutation {key} {offsets:?}: {}", bad[0]);
+		}
+	}
+}
+
+#[test]
+fn delimiter_oracle_accepts_continuations_between_delimiter_bytes() {
+	let src = b"[[ a ]\\\n]";
+	let program = parse_all(src, Features::NONE).unwrap();
+	let document = serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, Offsets::Bytes))
+		.unwrap();
+	let mut bad = Vec::new();
+	delimiter_faults(&document, src, Offsets::Bytes, None, "", &mut bad);
+	assert!(bad.is_empty(), "{bad:?}");
+}
+
+#[test]
 fn arithmetic_delimiters_keep_consumed_source_and_alias_positions() {
 	let mut bad = Vec::new();
 	for (name, source, text, close, utf16_close) in [
