@@ -1292,8 +1292,7 @@ fn break_long_word(
 			if let Some(seq_width) = osc66_visible_width_u16(seq, tab_width) {
 				if current_width > 0 && current_width.saturating_add(seq_width) > width {
 					write_line_end_reset(state, &mut current_line);
-					lines.push(current_line);
-					current_line = Vec::new();
+					lines.push(std::mem::take(&mut current_line));
 					write_active_codes(state, &mut current_line);
 					current_width = 0;
 				}
@@ -1333,8 +1332,7 @@ fn break_long_word(
 				// A glyph wider than the row starts it, never after an empty row.
 				if current_width > 0 && current_width + gw > width {
 					write_line_end_reset(state, &mut current_line);
-					lines.push(current_line);
-					current_line = Vec::new();
+					lines.push(std::mem::take(&mut current_line));
 					write_active_codes(state, &mut current_line);
 					current_width = 0;
 				}
@@ -1388,8 +1386,7 @@ fn wrap_single_line(line: &[u16], width: usize, tab_width: usize) -> SmallVec<[V
 		if token_width > width && !is_whitespace {
 			if !current_line.is_empty() {
 				write_line_end_reset(&state, &mut current_line);
-				wrapped.push(current_line);
-				current_line = Vec::new();
+				wrapped.push(std::mem::take(&mut current_line));
 				current_width = 0;
 			}
 
@@ -1404,12 +1401,10 @@ fn wrap_single_line(line: &[u16], width: usize, tab_width: usize) -> SmallVec<[V
 
 		let total_needed = current_width + token_width;
 		if total_needed > width && current_width > 0 {
-			let mut line_to_wrap = current_line;
+			let mut line_to_wrap = std::mem::take(&mut current_line);
 			trim_end_spaces_in_place(&mut line_to_wrap);
 			write_line_end_reset(&state, &mut line_to_wrap);
 			wrapped.push(line_to_wrap);
-
-			current_line = Vec::new();
 			write_active_codes(&state, &mut current_line);
 			if is_whitespace {
 				current_width = 0;

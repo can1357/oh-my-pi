@@ -306,6 +306,18 @@ describe("analyzeTable", () => {
 		expect(shares.measures.map(column => column.header)).toEqual(["Tokens", "Share"]);
 	});
 
+	it("ignores cyclic near-equal sums without losing ordinary compositions", () => {
+		const ambiguous = analyze(
+			"| snake_id | label | metric_a | metric_b |\n|---|---|---|---|\n| 0 | none | - | - |\n| 3 | alpha | 85,000,000,000 | 85,000,000,000 |\n| 4 | beta | 86,000,000,000 | 86,000,000,000 |\n| 5 | gamma | 87,000,000,000 | 87,000,000,000 |",
+		);
+		expect(ambiguous.composition).toBeUndefined();
+
+		const exact = analyze(
+			"| label | first | second | total |\n|---|---:|---:|---:|\n| alpha | 2 | 7 | 9 |\n| beta | 4 | 9 | 13 |\n| gamma | 6 | 11 | 17 |",
+		);
+		expect(exact.composition).toEqual({ whole: 3, parts: [1, 2], exact: true });
+	});
+
 	it("drops measure columns that echo one setting", () => {
 		const analysis = analyze(
 			"| Run | threshold | score |\n|---|---|---|\n| a | 50 | 61 |\n| b | 50 | 63 |\n| c | 50 | 58 |",

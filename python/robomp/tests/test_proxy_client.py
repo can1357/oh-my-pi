@@ -713,6 +713,30 @@ def test_proxy_git_transport_push_head_drift(proxy_settings: Settings, upstream_
     assert not _bare_has_branch(upstream_repo, branch)
 
 
+def test_proxy_git_transport_fetch_pr_head_body() -> None:
+    captured: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/gh/v1/git/fetch_pr_head"
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"pool_dir": "/unused"})
+
+    transport = ProxyGitTransport(
+        base_url="http://proxy.test",
+        hmac_key=_HMAC,
+        transport=httpx.MockTransport(handler),
+    )
+    transport.fetch_pr_head(
+        repo="octo/widget", pool_dir=Path("/unused"), pr_number=7,
+        head_ref="feature/x", head_sha="abc123", same_repo=True,
+    )
+    transport.fetch_pr_head(repo="octo/widget", pool_dir=Path("/unused"), pr_number=7)
+    assert captured == [
+        {"repo": "octo/widget", "pr_number": 7, "head_ref": "feature/x", "head_sha": "abc123", "same_repo": True},
+        {"repo": "octo/widget", "pr_number": 7, "head_ref": None, "head_sha": None, "same_repo": False},
+    ]
+
+
 def test_proxy_git_transport_push_slot_uid_body() -> None:
     captured: list[dict[str, object]] = []
 

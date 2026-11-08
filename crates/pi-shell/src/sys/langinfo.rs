@@ -144,7 +144,12 @@ mod native {
 			// object.
 			let loc =
 				unsafe { libc::newlocale(libc::LC_COLLATE_MASK, c.as_ptr(), core::ptr::null_mut()) };
-			(!loc.is_null()).then_some(Self(Loc(loc)))
+			// Never wrap a null pointer: `Loc` frees it on drop.
+			if loc.is_null() {
+				None
+			} else {
+				Some(Self(Loc(loc)))
+			}
 		}
 
 		pub fn key(&self, s: &[u8]) -> Vec<u8> {
@@ -183,7 +188,8 @@ mod native {
 				// SAFETY: as above, with a literal C string.
 				loc = unsafe { libc::newlocale(mask, c"C".as_ptr(), core::ptr::null_mut()) };
 			}
-			(!loc.is_null()).then_some(Self(loc))
+			// Never wrap a null pointer: `Loc` frees it on drop.
+			if loc.is_null() { None } else { Some(Self(loc)) }
 		}
 	}
 
@@ -372,19 +378,23 @@ mod native {
 			None
 		}
 
+		#[expect(clippy::unused_self, reason = "same shape as the locale-backed `Coll::key`")]
 		pub fn key(&self, s: &[u8]) -> Vec<u8> {
 			s.to_vec()
 		}
 	}
 
+	#[expect(clippy::missing_const_for_fn, reason = "same shape as the libc-backed `langinfo`")]
 	pub fn langinfo(_locale: &[u8], _cat: Category, _item: &str) -> Option<Vec<u8>> {
 		None
 	}
 
+	#[expect(clippy::missing_const_for_fn, reason = "same shape as the libc-backed `strftime`")]
 	pub fn strftime(_locale: &[u8], _fmt: &[u8], _tm: &Tm) -> Option<Vec<u8>> {
 		None
 	}
 
+	#[expect(clippy::missing_const_for_fn, reason = "same shape as the libc-backed `strptime`")]
 	pub fn strptime(_locale: &[u8], _fmt: &[u8], _input: &[u8]) -> Option<super::Parse> {
 		None
 	}

@@ -133,6 +133,10 @@ struct Lim {
 }
 
 /// An engine limit (`None`: unlimited) as `rlim_t`.
+#[allow(
+	clippy::unnecessary_min_or_max,
+	reason = "INF is u64::MAX on Linux but i64::MAX on macOS, where the clamp matters"
+)]
 fn raw(v: Option<u64>) -> u64 {
 	v.map_or(INF, |v| v.min(INF))
 }

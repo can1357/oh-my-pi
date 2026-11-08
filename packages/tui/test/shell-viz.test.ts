@@ -81,13 +81,14 @@ describe("native shell presentation boundary", () => {
 		const live = snapshot(trace);
 		attachShellTrace(live, trace);
 		const preferences = defaultShellVizPreferences();
-		expect(readShellPresentation(shellVisualization(live), preferences, live, "sink notice").output).toBe(
-			"sink notice",
-		);
+		const attached = shellVisualization(live);
+		if (!attached) throw new Error("Expected the attached live trace");
+		expect(readShellPresentation(attached, preferences, live, "sink notice").output).toBe("sink notice");
 		const replay = { ...preferences, cursor: live.history?.length ?? 0 };
 		expect(readShellPresentation(trace, replay, live, "sink notice").output).toBe("native-boundary\n");
 		const stored = snapshot(trace);
 		const restored = shellVisualization(stored);
+		if (!restored) throw new Error("Expected the stored trace to restore");
 		expect(readShellPresentation(restored, replay, stored).output).toBe("native-boundary\n");
 	});
 });

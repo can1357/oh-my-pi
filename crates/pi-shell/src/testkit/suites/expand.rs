@@ -284,6 +284,27 @@ fn here_documents_get_no_brace_expansion() {
 	);
 }
 
+// Golden: bash 5.2.21. A function defined in a substitution in a
+// here-document body crashed the compiler.
+#[test]
+fn here_documents_define_functions_inside_substitutions() {
+	assert_eq!(
+		out(
+			"read -r a <<E\n$(f() { echo \"in doc $1\"; }; f x)\nE\necho \"[$a]\"\ndeclare -F f || \
+			 echo outside"
+		),
+		"[in doc x]\noutside\n"
+	);
+}
+
+#[test]
+fn here_documents_of_commands_in_one_backquote_keep_their_own_bodies() {
+	assert_eq!(
+		out("x=`read -r a <<E\nfirst\nE\nread -r b <<E\nsecond\nE\necho $a $b`; echo \"$x\""),
+		"first second\n"
+	);
+}
+
 #[test]
 fn substring_arithmetic_errors_name_the_parameter() {
 	let (out, err) = run("x=abc; echo ${x:%}\necho ${unset_v:1:%}.");

@@ -723,6 +723,8 @@ pub(super) struct Ctx<'s> {
 	pub(super) lexstop:    bool,
 	/// `lex_add_raw` nesting.
 	lex_add_raw:           u32,
+	/// Nesting of the constructs being parsed ([`Ctx::enter`]).
+	depth:                 u32,
 	/// `tokstr_raw`: raw text of the command substitution being skipped.
 	raw:                   Vec<u8>,
 	/// Length of `raw` before the command substitution started.
@@ -743,6 +745,12 @@ pub(super) struct Ctx<'s> {
 	pub(super) inpartime:  bool,
 	/// Here-document bodies by sequence number.
 	pub(super) docs:       Vec<Vec<u8>>,
+	/// The syntax of the event being parsed.
+	pub(super) t:          crate::bash::syntax::tree::Tree,
+	/// Here-document text nodes waiting for their bodies, and the
+	/// sequence numbers of the bodies.
+	pub(super) doc_nodes:
+		Vec<(crate::bash::syntax::tree::Id<crate::bash::syntax::tree::shape::Text>, u32)>,
 	/// Alias substitutions of the current top-level command.
 	pub(super) alias_uses: Vec<AliasUse>,
 	/// Line of the first token of the event being parsed.
@@ -958,11 +966,14 @@ impl<'s> Ctx<'s> {
 			lx: LexState { tokfd: -1, ..LexState::default() },
 			ps: ParseFlags { incmdpos: true, ..ParseFlags::default() },
 			errflag: false,
+			depth: 0,
 			msgs: Vec::new(),
 			noaliases: false,
 			inalmore: false,
 			inpartime: false,
 			docs: Vec::new(),
+			t: crate::bash::syntax::tree::Tree::default(),
+			doc_nodes: Vec::new(),
 			alias_uses: Vec::new(),
 			ev_line: line,
 			err_tok: T::Endinput,
@@ -1327,6 +1338,24 @@ impl<'s> Ctx<'s> {
 		if !self.errflag {
 			self.msgs.push((self.line, msg));
 		}
+	}
+
+	/// Enter one more nesting level (a list, a substitution body, a `[[ … ]]`
+	/// operand); past [`MAX_NESTING`](crate::bash::syntax::parser::MAX_NESTING)
+	/// a parse error and `false`, so a deep command fails instead of
+	/// overflowing the stack. [`Ctx::leave`] after each `true`.
+	pub(super) fn enter(&mut self) -> bool {
+		if self.depth >= crate::bash::syntax::parser::MAX_NESTING {
+			self.zerr(b"parse error: maximum nesting level exceeded".to_vec());
+			return false;
+		}
+		self.depth += 1;
+		true
+	}
+
+	/// Leave the level [`Ctx::enter`] entered.
+	pub(super) const fn leave(&mut self) {
+		self.depth -= 1;
 	}
 
 	/// zsh `yyerror`: ``parse error near `X'`` for the last token text.
