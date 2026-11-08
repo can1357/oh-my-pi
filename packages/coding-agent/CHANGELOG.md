@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `lsp.formatOnWrite` no longer re-indents 2/4-space files at 1 space per level when they contain JSDoc/block comments or one-off odd indents, and no longer converts tab-indented files that open with a JSDoc block to spaces ([#18544](https://github.com/can1357/oh-my-pi/issues/18544))
+
 ## [18.18.2] - 2026-11-08
 
 ### Breaking Changes
