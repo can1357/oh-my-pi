@@ -10,6 +10,7 @@ import {
 	clearConfigValueCache,
 	createConfigHeaderResolver,
 	invalidateCommandConfig,
+	refuseCommandGeneration,
 	remintCommandConfig,
 	resolveConfigValue,
 } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
@@ -22,9 +23,8 @@ import { startServiceWorker } from "./helpers/service-worker";
 /**
  * A `!command` credential the provider refuses.
  *
- * The body is Theorem's model gateway's own, measured 2026-11-08 with a junk
- * identity token: a LiteLLM proxy answers every route with
- * `{"error":{"message":…,"type":"auth_error","param":"Authorization","code":"401"}}`.
+ * The fixture uses LiteLLM's `auth_error` / `401` envelope. Classification
+ * provenance is documented in `credential-rejection.ts`.
  *
  * What these tests hold, each with the mutation that reds it:
  * - the refusal re-mints the credential and the request is retried once
@@ -333,6 +333,97 @@ describe("a `!command` credential the provider refuses", () => {
 		expect(rig.seen.slice(beforeRequests).map(value => Number(value.slice(5)))).toEqual([3]);
 		expect(rig.mints() - beforeMints).toBe(1);
 	});
+
+	test.each(["initial", "retry"] as const)(
+		"cancelling the %s prepared-header wait leaves the shared mint available to another operation",
+		async phase => {
+			const counterFile = path.join(tempDir, "mints");
+			const tokenFile = path.join(tempDir, "token");
+			const gateFile = path.join(tempDir, "mint-gate");
+			fs.writeFileSync(counterFile, "");
+			fs.writeFileSync(tokenFile, "prepared-junk");
+			const command = `!printf 1 >> ${shellQuote(counterFile)}; while [ -f ${shellQuote(gateFile)} ]; do sleep 0.01; done; IFS= read -r value < ${shellQuote(tokenFile)}; printf %s "$value"`;
+			const rig = buildRig("literal-placeholder", counterFile, () => false, {
+				headers: { Authorization: command },
+			});
+			const resolver = rig.registry.resolver(rig.model);
+			let prepared: ApiKeyResolution;
+			await resolveApiKeyOnce(resolver, undefined, resolved => {
+				prepared = resolved;
+			});
+			if (typeof prepared !== "object" || !prepared?.readHeaders) throw new Error("prepared headers missing");
+			const readHeaders = prepared.readHeaders;
+			const bothReading = Promise.withResolvers<void>();
+			let reads = 0;
+			const seed = {
+				...prepared,
+				readHeaders: () => {
+					if (++reads === 2) bothReading.resolve();
+					return readHeaders();
+				},
+			};
+			for (const [config, generation] of Object.entries(prepared.headerGenerations ?? {})) {
+				refuseCommandGeneration(config, generation);
+			}
+			invalidateCommandConfig(command);
+			fs.writeFileSync(tokenFile, "replacement-junk");
+			fs.writeFileSync(gateFile, "");
+			const before = rig.mints();
+			const started = Promise.withResolvers<void>();
+			const watcher = fs.watch(counterFile, () => {
+				if (rig.mints() > before) started.resolve();
+			});
+			let requests = 0;
+			const fetchImpl: FetchImpl = async (_url, init) => {
+				requests++;
+				return new Headers(init?.headers).get("Authorization") === "replacement-junk"
+					? okStream()
+					: gatewayRefusal();
+			};
+			const send = async (signal?: AbortSignal): Promise<boolean> => {
+				const handle = streamSimple({ ...rig.model, resolveHeaders: undefined }, CONTEXT, {
+					apiKey:
+						phase === "initial"
+							? seedApiKeyResolver(seed, resolver)
+							: ({ error }) => (error === undefined ? "initial-junk" : seed),
+					fetch: fetchImpl,
+					signal,
+					maxTokens: 16,
+				});
+				try {
+					for await (const _event of handle) {
+						// drain
+					}
+					return (await handle.result()).stopReason !== "error";
+				} catch {
+					return false;
+				}
+			};
+			const abort = new AbortController();
+			const cancelled = send(abort.signal);
+			let survivor: Promise<boolean> | undefined;
+			try {
+				await started.promise;
+				survivor = send();
+				await bothReading.promise;
+				abort.abort();
+				// This bounds real subprocess cancellation latency; fake timers cannot drive the shell issuer.
+				const prompt = await Promise.race([cancelled.then(() => true), Bun.sleep(250).then(() => false)]);
+				// The issuer remains blocked until after the cancellation observation.
+				expect(prompt).toBe(true);
+				expect(rig.mints() - before).toBe(1);
+				fs.unlinkSync(gateFile);
+				expect(await cancelled).toBe(false);
+				expect(await survivor).toBe(true);
+				expect(rig.mints() - before).toBe(1);
+				expect(requests).toBe(phase === "initial" ? 1 : 3);
+			} finally {
+				watcher.close();
+				fs.rmSync(gateFile, { force: true });
+				await Promise.all([cancelled, survivor]);
+			}
+		},
+	);
 
 	test("a prepared header obtains a new mint when a refused generation has no replacement", async () => {
 		const counterFile = path.join(tempDir, "mints");

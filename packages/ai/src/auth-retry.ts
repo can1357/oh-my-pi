@@ -1,4 +1,4 @@
-import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
+import { extractHttpStatusFromError, untilAborted } from "@oh-my-pi/pi-utils";
 import type { LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
@@ -106,10 +106,10 @@ export function resolvedCredentialGeneration(resolved: ApiKeyResolution): number
 	return typeof resolved === "string" ? undefined : resolved?.credentialGeneration;
 }
 
-/** Read owner-held refusal state, resolving only headers already condemned by it. */
-export async function readApiKeyHeaders(resolved: ApiKeyResolution): Promise<ApiKeyResolution> {
+/** Read refused headers; abort only this caller's wait, not the shared recovery mint. */
+export async function readApiKeyHeaders(resolved: ApiKeyResolution, signal?: AbortSignal): Promise<ApiKeyResolution> {
 	if (typeof resolved !== "object" || !resolved?.readHeaders) return resolved;
-	const headers = await resolved.readHeaders();
+	const headers = await untilAborted(signal, resolved.readHeaders());
 	return headers.resolvedHeaders === resolved.resolvedHeaders ? resolved : { ...resolved, ...headers };
 }
 
@@ -268,6 +268,7 @@ export async function resolveRetryKey(
 				previousGeneration,
 				previousHeaderGenerations,
 			}),
+			signal,
 		);
 		onResolved?.(resolved);
 		return resolvedApiKeyBearer(resolved);

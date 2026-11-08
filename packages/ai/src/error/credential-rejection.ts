@@ -11,23 +11,8 @@
  * an error, not the mere absence of a cached replacement. No clock or JWT claim
  * predicts any of this: a command credential has no trusted client-side expiry.
  *
- * **The signal is the provider's own structured error class, not its prose.**
- * An error body's `type`/`code` is a contract; its `message` is wording that
- * changes. Measured 2026-11-08 against Theorem's model gateway (a LiteLLM
- * proxy) with a locally minted junk token, on `/v1/models`, `/v1/messages`,
- * `/v1/chat/completions` and `/v1/responses` alike:
- *
- * ```json
- * {"error":{"message":"…","type":"auth_error","param":"Authorization","code":"401"}}
- * ```
- *
- * Every refusal carried `type=auth_error` and `code=401`; the `message`
- * differed per sub-reason ("This identity token is signed by no key Google
- * publishes." for a bad signature, "This identity token is not one this
- * gateway accepts" for one past its `exp`, "Authentication Error, No api key
- * passed in." with no bearer at all). A non-auth failure on the same host (404
- * on an unknown route) carried no `error.type` at all, so the match stays
- * narrow.
+ * The primary signal is the provider's structured error class (`type`/`code`),
+ * not its message wording. The supported classes and their sources are below.
  *
  * By the time a failure reaches the auth-retry driver the body has been
  * flattened into a message string, in one of two renderings this module reads:

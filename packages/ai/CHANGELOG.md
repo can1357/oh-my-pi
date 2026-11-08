@@ -13,6 +13,7 @@
 - A bare HTTP status in `error.code` no longer overrules an explicit policy-denial class; LiteLLM's `token_not_found_in_db` and `expired_key` classes correctly identify rejected credentials ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - An error envelope a provider embeds in its own message text no longer outranks the class the transport rendered, in either direction, and the rendered class is read from the transport's own `(type=… code=…)` group rather than from any `type=` in the prose ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - Credential-refusal classification recognizes an explicit credential-expiry 403 without classifying a permission-only 403 as a refused credential ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- Cancelling a request waiting for a prepared command header's replacement returns promptly without cancelling the shared credential mint other requests need ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.18.1] - 2026-11-08
 

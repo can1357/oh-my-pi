@@ -1325,6 +1325,7 @@ function streamSimpleRequest<TApi extends Api>(
 			try {
 				const resolved = await readApiKeyHeaders(
 					await apiKeyResolver({ lastChance: false, error: undefined, signal }),
+					signal,
 				);
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;

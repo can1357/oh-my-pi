@@ -7,17 +7,7 @@ import {
 } from "@oh-my-pi/pi-ai/error";
 import { finalizeErrorMessage } from "@oh-my-pi/pi-ai/utils/http-inspector";
 
-/**
- * Refusals measured 2026-11-08 against Theorem's model gateway (a LiteLLM
- * proxy) at `https://model-gateway.tail12ec1c.ts.net`, with a junk identity
- * token minted locally — never a live credential. Captured on `/v1/models`,
- * `/v1/messages`, `/v1/chat/completions` and `/v1/responses`; every route
- * answered with the same body shape.
- *
- * These are the fixtures the retry path's match is for. If the gateway changes
- * BOTH its structured error class and its wording, the "a real refusal still
- * matches" test below reds rather than the retry silently ceasing to fire.
- */
+/** Credential-refusal fixtures for raw envelopes, rendered classes, and the text fallback. */
 const GATEWAY_REFUSALS: Record<string, { message: string; type: string; param?: string; code: string }> = {
 	"no Authorization header": {
 		message: "Authentication Error, No api key passed in.",
@@ -35,8 +25,7 @@ const GATEWAY_REFUSALS: Record<string, { message: string; type: string; param?: 
 		param: "Authorization",
 		code: "401",
 	},
-	// The gateway owner's wording for a token past its `exp`: the condition
-	// this whole path exists for.
+	// Compatibility wording for an identity-token refusal, not a live expired-token measurement.
 	"an identity token past its exp": {
 		message: "This identity token is not one this gateway accepts.",
 		type: "auth_error",
