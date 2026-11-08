@@ -46,6 +46,7 @@
 ### Changed
 
 - Simplified Bash previews for redirection to /dev/null by showing a single icon in the Nerd Font symbol preset.
+- The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#17093](https://github.com/can1357/oh-my-pi/pull/17093) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
@@ -313,9 +314,6 @@
 
 - Fixed the ask dialog's Note (button or `n`) right after a pick moved to the next question annotating that question's highlighted row instead of the answer just picked ([#17126](https://github.com/can1357/oh-my-pi/pull/17126) by [@H4vC](https://github.com/H4vC))
 - Fixed the ask dialog's Next button reopening the custom-answer editor after Other was cancelled instead of moving on to the next question or Review tab
-### Changed
-
-- The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#17093](https://github.com/can1357/oh-my-pi/pull/17093) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.13.0] - 2026-10-26
 
@@ -350,6 +348,7 @@
 - Fixed the newest inline charts and images at the bottom of the screen showing as text placeholders while older ones stayed rendered once a session (or a resumed one) holds more than `tui.maxInlineImages` images ([#16660](https://github.com/can1357/oh-my-pi/issues/16660))
 - Fixed Markdown tables in the terminal ignoring their column alignment, so right-aligned and centered columns rendered flush left ([#16658](https://github.com/can1357/oh-my-pi/pull/16658) by [@adi-IL](https://github.com/adi-IL))
 - Grep, Glob, Find, and AST Grep result headers wrap a long pattern instead of cutting it off, so the match/file counts and `truncated` warning stay visible ([#16635](https://github.com/can1357/oh-my-pi/issues/16635))
+
 ## [18.12.6] - 2026-10-21
 
 ### Changed
