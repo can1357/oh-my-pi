@@ -224,6 +224,9 @@ export async function persistNestedPatches(
 	agentId: string,
 	nestedPatches: readonly NestedRepoPatch[],
 ): Promise<string[]> {
+	// A signal can terminate the host before the structured runner returns.
+	// Transfer ownership before writing the first recovery byte.
+	if (nestedPatches.length > 0) preserveTemporaryArtifactsDir(artifactsDir);
 	const saved: string[] = [];
 	try {
 		for (const [index, nestedPatch] of nestedPatches.entries()) {
@@ -269,6 +272,9 @@ async function writeIsolationPatch(
 	agentId: string,
 ): Promise<IsolationPatchCapture> {
 	const delta = await captureDeltaPatch(isolationDir, baseline);
+	if (delta.rootPatch.trim().length > 0 || delta.nestedPatches.length > 0) {
+		preserveTemporaryArtifactsDir(artifactsDir);
+	}
 	const patchPath = path.join(artifactsDir, `${agentId}.patch`);
 	await Bun.write(patchPath, delta.rootPatch);
 	const nestedPatchPaths = await persistNestedPatches(artifactsDir, agentId, delta.nestedPatches);
@@ -471,9 +477,6 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				// Nothing changed since the run-end capture the caller already
 				// merged or applied: a branch now would only duplicate that work.
 				if (capture.fingerprint === handedOff) return;
-				// A late release captured new, unapplied work. Its patch is a
-				// recovery artifact even if the original turn was applied.
-				preserveTemporaryArtifactsDir(opts.artifactsDir);
 				const commitResult = await commitToBranch(
 					workspace.dir,
 					taskBaseline,

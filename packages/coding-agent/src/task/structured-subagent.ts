@@ -1185,7 +1185,12 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			((request.retainArtifacts || policy.preparedSession !== undefined) &&
 				(completedSuccessfully || hasValidStructuredOutput));
 		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
-		const cleanupArtifacts = () => cleanupTemporaryArtifactsDir(lease.artifactsDir);
+		// No retention was promised on this path; an aborted status tombstone
+		// does not turn a one-shot run into a retained artifacts handle.
+		const cleanupArtifacts = async (): Promise<void> => {
+			await fs.rm(lease.artifactsDir, { recursive: true, force: true });
+			lease.unregister?.();
+		};
 		if (shouldCleanup) {
 			if (deferredCleanup) {
 				trackLateCleanup(deferredCleanup.then(cleanupArtifacts), {
@@ -1196,10 +1201,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				await cleanupArtifacts();
 			}
 		} else if (lease.temporary && request.onArtifactsRetained) {
-			// Retained rather than cleaned up now: the caller (e.g. an async
-			// job body) owns disposing it once the retained handle is no
-			// longer needed, instead of it leaking for the process lifetime.
-			request.onArtifactsRetained(cleanupArtifacts);
+			// Row eviction requests disposal, but registered agents still own
+			// their retained output and transcripts until they are released.
+			request.onArtifactsRetained(() => cleanupTemporaryArtifactsDir(lease.artifactsDir));
 		}
 	}
 }
