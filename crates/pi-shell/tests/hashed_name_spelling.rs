@@ -1,7 +1,7 @@
 //! Recorded against Bash 5.2.21 and 5.3.0, which agree on every row here.
-//! Hash lookups (`-t`, including `-lt`) show the executable-relative spelling;
-//! table listings (`-l` without `-t`, plain `hash`, `BASH_CMDS`) keep stored
-//! bytes.
+//! Hash lookups show executable-relative spelling; table listings keep stored
+//! bytes. Fresh descriptive `command -V` results are absolute, unlike ordinary
+//! `type` and terse filename queries.
 
 #![cfg(unix)]
 
@@ -143,6 +143,105 @@ fn rows() -> Vec<Row> {
 			record_only: id == "declare-known-difference",
 		});
 	}
+	rows.extend(fresh_filename_rows());
+	rows
+}
+
+/// Fresh descriptive `command -V` results are absolute; ordinary `type` and
+/// terse filename queries retain the joined spelling. Slashed operands and
+/// cached results must not acquire that fresh-result conversion.
+fn fresh_filename_rows() -> Vec<Row> {
+	let mut rows = Vec::new();
+	for (id, path, joined, descriptive) in [
+		("relative", "bin", "bin/x", "{D}/bin/x"),
+		("dot", "./bin", "./bin/x", "{D}/bin/x"),
+		("parent", "bin/../bin", "bin/../bin/x", "{D}/bin/../bin/x"),
+		("symlink", "link", "link/x", "{D}/link/x"),
+		("absolute", "{D}/bin", "{D}/bin/x", "{D}/bin/x"),
+		("empty", "", "./x", "{D}/x"),
+		("cwd-dot", ".", "./x", "{D}/x"),
+		("double-dot", "././bin", "././bin/x", "{D}/./bin/x"),
+		("repeated-slash", "bin//", "bin//x", "{D}/bin//x"),
+		("absolute-dot", "{D}/./bin", "{D}/./bin/x", "{D}/./bin/x"),
+	] {
+		for (format, stdout) in [
+			("type", format!("x is {joined}\n")),
+			("type -a", format!("x is {joined}\n")),
+			("type -f", format!("x is {joined}\n")),
+			("type -p", format!("{joined}\n")),
+			("type -P", format!("{joined}\n")),
+			("type -ap", format!("{joined}\n")),
+			("type -aP", format!("{joined}\n")),
+			("type -t", "file\n".into()),
+			("command -v", format!("{joined}\n")),
+			("command -V", format!("x is {descriptive}\n")),
+			("command -vV", format!("x is {descriptive}\n")),
+		] {
+			rows.push(Row {
+				id:          format!("fresh-{id}-{format}"),
+				setup:       format!("{SETUP}; cp bin/x x; ln -s bin link"),
+				script:      format!("PATH={path}:/bin; {format} x; hash"),
+				stdout:      format!("{stdout}hash: hash table empty\n"),
+				stderr:      "",
+				status:      0,
+				record_only: false,
+			});
+		}
+	}
+	for word in ["bin/x", "./bin/x", "././bin/x", "bin/../bin/x", "link/x", "{D}/./bin/x"] {
+		for (format, stdout) in [
+			("type", format!("{word} is {word}\n")),
+			("type -p", format!("{word}\n")),
+			("command -v", format!("{word}\n")),
+			("command -V", format!("{word} is {word}\n")),
+		] {
+			rows.push(Row {
+				id: format!("slash-{word}-{format}"),
+				setup: format!("{SETUP}; ln -s bin link"),
+				script: format!("{format} {word}"),
+				stdout,
+				stderr: "",
+				status: 0,
+				record_only: false,
+			});
+		}
+	}
+	for (id, extra, stored, shown) in [
+		("dot", "", "./bin/x", "./bin/x"),
+		("parent", "", "bin/../bin/x", "./bin/../bin/x"),
+		("symlink", "; ln -s bin link", "link/x", "./link/x"),
+		("absolute-dot", "", "{D}/./bin/x", "{D}/./bin/x"),
+		("nonexec", "; chmod 644 bin/x", "bin/x", "bin/x"),
+		("missing", "", "bin/missing", "bin/missing"),
+	] {
+		for (format, stdout) in [
+			("type", format!("q is hashed ({shown})\n")),
+			("type -p", format!("{shown}\n")),
+			("type -P", format!("{shown}\n")),
+			("command -v", format!("{shown}\n")),
+			("command -V", format!("q is hashed ({shown})\n")),
+		] {
+			rows.push(Row {
+				id: format!("cached-{id}-{format}"),
+				setup: format!("{SETUP}{extra}"),
+				script: format!("hash -p {stored} q; {format} q"),
+				stdout,
+				stderr: "",
+				status: 0,
+				record_only: false,
+			});
+		}
+	}
+	rows.push(Row {
+		id:          "fresh-multi-V".into(),
+		setup:       format!("{SETUP}; cp bin/x bin/y"),
+		script:      "PATH=bin:/bin; command -V x y x; hash".into(),
+		stdout:      "x is {D}/bin/x\ny is {D}/bin/y\nx is {D}/bin/x\nhash: hash table empty\n"
+			.into(),
+		stderr:      "",
+		status:      0,
+		record_only: false,
+	});
 	rows
 }
 
