@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+pub const FRAMES_VERSION: u32 = 30;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -71,29 +71,33 @@ struct Header {
 
 #[derive(Serialize, Deserialize)]
 struct Image {
-	seq:       u64,
-	next_run:  u64,
-	next_call: u64,
-	next_cmd:  u64,
-	paused:    bool,
-	mask:      u64,
-	rr:        u32,
+	seq:          u64,
+	next_run:     u64,
+	next_call:    u64,
+	next_cmd:     u64,
+	paused:       bool,
+	mask:         u64,
+	rr:           u32,
 	/// The scheduler's unfinished slice (vproc, ops left).
-	slice:     Option<(Vpid, u32)>,
+	slice:        Option<(Vpid, u32)>,
 	/// The control's wake count (the `at` marks of blocked vprocs refer
 	/// to it).
-	wakes:     u64,
-	done:      Vec<(RunId, i32)>,
-	results:   Vec<(CallId, CallOutcome)>,
-	procs:     Vec<ProcImage>,
+	wakes:        u64,
+	done:         Vec<(RunId, i32)>,
+	results:      Vec<(CallId, CallOutcome)>,
+	procs:        Vec<ProcImage>,
 	/// Fd objects, referred to by index.
-	fd_objs:   Vec<FdObjImage>,
+	fd_objs:      Vec<FdObjImage>,
 	/// Engine memory objects, referred to by index.
-	mems:      Vec<MemImage>,
+	mems:         Vec<MemImage>,
 	/// Background jobs still deciding on their pid ([`Kernel::bangs`]).
-	bangs:     Vec<super::proc::Bang>,
+	bangs:        Vec<super::proc::Bang>,
 	/// Their commands' redirections still deciding ([`Kernel::deferrals`]).
-	deferrals: Vec<super::proc::Deferral>,
+	deferrals:    Vec<super::proc::Deferral>,
+	/// Statuses a terminating signal decided while an EXIT trap still runs
+	/// ([`Kernel::signal_exits`]); without them a restore mid-trap would
+	/// let the trap's own `exit` become the job's status.
+	signal_exits: Vec<(Vpid, i32)>,
 }
 
 /// One fd object.
@@ -644,6 +648,7 @@ impl Shell {
 			mems: fds.mems,
 			bangs: k.bangs.clone(),
 			deferrals: k.deferrals.clone(),
+			signal_exits: k.signal_exits.clone(),
 		};
 		let mut bytes = postcard::to_stdvec(&header).map_err(ExtError::Encode)?;
 		bytes.extend_from_slice(&postcard::to_stdvec(&image).map_err(ExtError::Encode)?);
@@ -783,6 +788,11 @@ impl Shell {
 			.deferrals
 			.into_iter()
 			.filter(|d| img.procs.iter().any(|p| p.vpid == d.vproc))
+			.collect();
+		k.signal_exits = img
+			.signal_exits
+			.into_iter()
+			.filter(|&(vpid, _)| img.procs.iter().any(|p| p.vpid == vpid))
 			.collect();
 		let built = (0..img.fd_objs.len()).map(|_| None).collect();
 		let mut objs = FdRebuild {

@@ -443,6 +443,12 @@ pub struct Kernel {
 	/// slice: that kept ~600 bytes per idle vproc; the target is ≤ 2 KiB).
 	#[expect(clippy::vec_box, reason = "slack capacity of 8-byte slots, not of whole vprocs")]
 	pub spawned:            Vec<Box<Vproc>>,
+	/// Vprocs a terminating signal has already decided the exit status of,
+	/// while their own EXIT trap still runs: bash dies of the signal after
+	/// the trap, so the trap's own `exit` does not change it. Kept here
+	/// rather than on [`Vproc`], which has an 8-byte-scale size budget, and
+	/// empty but for the moment between a signal and the trap's end.
+	pub signal_exits:       Vec<(Vpid, i32)>,
 	/// `$RANDOM` generator state (written through as `MiscKey::Random` by
 	/// [`Kernel::next_random`] and [`Kernel::seed_random`]).
 	pub rand:               state::Random,
@@ -557,6 +563,7 @@ impl Kernel {
 			shell_pid,
 			dropped_fs: 0,
 			spawned: Vec::new(),
+			signal_exits: Vec::new(),
 			rand: state::Random::new(1),
 			start_ns: 0,
 			startup: Vec::new(),
@@ -1881,7 +1888,12 @@ impl Shell {
 			let p = &self.procs[i];
 			// A subshell vproc exits once its frames and diagnostics are done.
 			if p.transient && !p.has_work() && p.out.is_empty() {
-				let p = self.procs.remove(i);
+				let mut p = self.procs.remove(i);
+				// bash dies of the terminating signal after running its EXIT
+				// trap: the status is the signal's, not the trap's own `exit`.
+				if let Some(at) = self.k.signal_exits.iter().position(|&(v, _)| v == p.vpid) {
+					p.status = self.k.signal_exits.swap_remove(at).1;
+				}
 				self.k.trace_sources.remove(&p.vpid);
 				self.k.trace_unit_origins.remove(&p.vpid);
 				jobctl::forget_vproc(&mut self.k, p.vpid);
@@ -2175,6 +2187,7 @@ impl Shell {
 		}
 		if self.procs[i].transient {
 			let p = self.procs.remove(i);
+			self.k.signal_exits.retain(|&(v, _)| v != p.vpid);
 			self.k.trace_sources.remove(&p.vpid);
 			self.k.trace_unit_origins.remove(&p.vpid);
 			self.k.settle_bang(p.vpid, None);
@@ -2263,6 +2276,23 @@ impl Shell {
 			})
 			.collect();
 		self.callout_trees(&mut hits);
+		// A job that is only `( … )` is that subshell's process in bash
+		// (`( list ) &` forks once): a signal to it reaches the subshell,
+		// which may trap it or run its EXIT trap, and the job ends with it.
+		let mut forwarded: Vec<usize> = Vec::new();
+		if let SigTarget::Vpid(_) = target {
+			for &i in &hits.clone() {
+				for child in lone_subshell(&self.procs[i]) {
+					if let Some(c) = self.procs.iter().position(|p| p.vpid == child)
+						&& !hits.contains(&c)
+					{
+						hits.push(c);
+						forwarded.push(i);
+					}
+				}
+			}
+			hits.sort_unstable();
+		}
 		// Vprocs this signal stopped or continued (job states follow).
 		let mut changed: Vec<(Vpid, Option<Signal>)> = Vec::new();
 		for &i in hits.iter().rev() {
@@ -2302,7 +2332,7 @@ impl Shell {
 			// it, and the vproc ends with the program's real status, once it
 			// has exited (`wait` returns then, not before).
 			if terminating && target != SigTarget::Vpid(root.0) {
-				let reaches_children = !matches!(target, SigTarget::Vpid(_));
+				let reaches_children = !matches!(target, SigTarget::Vpid(_)) || forwarded.contains(&i);
 				if let Some(lone) = transparent(&self.procs[i], reaches_children) {
 					let p = &mut self.procs[i];
 					let stopped = p.stopped;
@@ -2351,6 +2381,42 @@ impl Shell {
 				continue;
 			}
 			match sig.default_action() {
+				DefaultAction::Terminate
+					if runs_exit_trap_on(sig) && subshell_exit_trap(&self.procs[i]) =>
+				{
+					// bash's subshell catches the signals of its
+					// `terminating_signals` list, runs its EXIT trap, then dies
+					// of the signal (status 128 + n).
+					let p = &mut self.procs[i];
+					for f in &mut p.frames {
+						if let Some(sc) = f.scratch.as_mut() {
+							match &mut sc.live {
+								Live::Task(t) => t.signal(sig),
+								Live::Ext(e) => {
+									let _ = e.signal(sig);
+									let _ = e.cont();
+								},
+								_ => {},
+							}
+						}
+					}
+					p.blocked = None;
+					if p.stopped {
+						set_stopped(p, false);
+						changed.push((p.vpid, None));
+					}
+					// bash's handler does not set `$?` before the trap: the trap
+					// sees the last completed command's status, and the signal's
+					// status is pinned for after it.
+					let keep = self.procs[i].status;
+					let vpid = self.procs[i].vpid;
+					let status = sig.exit_status(platform);
+					match self.k.signal_exits.iter_mut().find(|(v, _)| *v == vpid) {
+						Some(entry) => entry.1 = status,
+						None => self.k.signal_exits.push((vpid, status)),
+					}
+					exec::exit_shell(&mut self.k, &mut self.procs[i], cx, keep);
+				},
 				DefaultAction::Terminate => self.kill(cx, i, sig, sig.exit_status(platform)),
 				DefaultAction::Stop | DefaultAction::Continue => {
 					let stop = sig.default_action() == DefaultAction::Stop;
@@ -2632,6 +2698,32 @@ fn transparent(p: &Vproc, children: bool) -> Option<bool> {
 	}
 }
 
+/// The vprocs of the `( … )` that is all `p` runs before it exits (the job
+/// vproc of `( list ) &`), else none.
+fn lone_subshell(p: &Vproc) -> Vec<Vpid> {
+	let lone = || -> Option<Vec<Vpid>> {
+		if !p.transient || p.own_traps.has(crate::bash::store::TrapKey::Exit) {
+			return None;
+		}
+		let [frame] = p.frames.as_slice() else {
+			return None;
+		};
+		let unit = frame.unit.as_ref()?;
+		let sc = frame.scratch.as_ref()?;
+		let op = unit.ops.get(frame.pc as usize)?;
+		if op.code != ir::Opcode::Spawn {
+			return None;
+		}
+		let spawn = unit.spawns.get(op.a as usize)?;
+		let code_at = |pc: u32| unit.ops.get(pc as usize).map(|op| op.code);
+		let whole = spawn.kind == ir::SpawnKind::Subshell
+			&& code_at(spawn.end) == Some(ir::Opcode::Leave)
+			&& code_at(spawn.end + 1) == Some(ir::Opcode::SubExit);
+		whole.then(|| sc.children.iter().map(|&(vpid, _)| vpid).collect())
+	};
+	lone().unwrap_or_default()
+}
+
 fn set_stopped(p: &mut Vproc, on: bool) {
 	p.stopped = on;
 	pause_handles(p, on);
@@ -2863,4 +2955,44 @@ pub const fn assign_scope(vp: &Vproc) -> AssignScope {
 	} else {
 		AssignScope::Global
 	}
+}
+
+/// Whether bash's handler for `sig` runs the EXIT trap before the shell
+/// dies of it (bash's `terminating_signals`; not `SIGQUIT`, `SIGPROF` and
+/// the others it leaves at their default).
+const fn runs_exit_trap_on(sig: Signal) -> bool {
+	matches!(
+		sig,
+		Signal::Hup
+			| Signal::Int
+			| Signal::Ill
+			| Signal::Trap
+			| Signal::Abrt
+			| Signal::Emt
+			| Signal::Fpe
+			| Signal::Bus
+			| Signal::Segv
+			| Signal::Sys
+			| Signal::Pipe
+			| Signal::Alrm
+			| Signal::Term
+			| Signal::Xcpu
+			| Signal::Xfsz
+			| Signal::Vtalrm
+			| Signal::Usr1
+			| Signal::Usr2
+	)
+}
+
+/// Whether `p` is a subshell with an EXIT trap of its own that is not
+/// running already.
+fn subshell_exit_trap(p: &Vproc) -> bool {
+	p.parent.is_some()
+		&& p.own_traps.has(crate::bash::store::TrapKey::Exit)
+		&& !p.frames.iter().any(|f| {
+			matches!(f.kind, proc::FrameKind::Script {
+				what: proc::ScriptKind::Trap { key: crate::bash::store::TrapKey::Exit, .. },
+				..
+			})
+		})
 }

@@ -37,7 +37,7 @@ use std::{
 	fs, io,
 	io::Read as _,
 	os::{
-		fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
+		fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
 		unix::{ffi::OsStrExt, fs::OpenOptionsExt as _, process::CommandExt},
 	},
 	path::Path,
@@ -340,72 +340,194 @@ fn invalid(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error 
 	io::Error::new(io::ErrorKind::InvalidInput, e)
 }
 
-/// One of the child's fds until the spawn: a descriptor the spawner owns
-/// (closed after the spawn, so pumps see the child's end of file) or the
-/// engine's own handle of an inherited stream, installed as it is (the
-/// engine keeps it open for the spawn call; a copy cost a `dup` and a
-/// `close` per stream and spawn).
+/// Where one source of the child's fds came from, so that every fd naming
+/// it reads the one descriptor this process holds for it.
 enum Source {
-	Owned(OwnedFd),
-	Host(RawFd),
+	/// A descriptor the engine holds (`Inherit`, or a host file's own).
+	Raw,
+	/// An engine object pumped through a pipe or socket, in one direction.
+	Object(crate::bash::FdRef, Dir),
+	/// `/dev/null`.
+	Null,
 }
 
-impl AsFd for Source {
-	fn as_fd(&self) -> BorrowedFd<'_> {
-		match self {
-			Self::Owned(fd) => fd.as_fd(),
-			// SAFETY: the engine keeps the fd object that owns this
-			// descriptor alive for the whole spawn call.
-			Self::Host(fd) => unsafe { BorrowedFd::borrow_raw(*fd) },
+/// The descriptors a child is given: each distinct source once, and the
+/// `dup2`s that put them at their numbers. bash forks, then makes each
+/// redirection in the child; here the host itself holds what the child is
+/// given, so a source named by many fds (`3>&1 4>&1 …`) or the engine's own
+/// descriptor must not be copied per fd, or a command bash runs reaches the
+/// open-file limit.
+#[derive(Default)]
+struct ChildFds {
+	/// The child's ends this process made, and moved copies.
+	held:    Vec<OwnedFd>,
+	/// Host files whose descriptors are borrowed until the spawn is done.
+	kept:    Vec<Box<dyn crate::bash::File>>,
+	sources: Vec<(Source, RawFd)>,
+	/// `(target, source)`, in the order [`ChildFds::plan`] makes them.
+	map:     Vec<(i32, RawFd)>,
+}
+
+impl ChildFds {
+	/// Gives the child `spec` at `target`.
+	fn add(
+		&mut self,
+		shared: &Shared,
+		target: i32,
+		spec: crate::bash::StdioSpec,
+		dir: Dir,
+		pumps: &mut Vec<Pump>,
+		feeds: &mut Vec<Arc<Feed>>,
+	) -> io::Result<()> {
+		use crate::bash::StdioSpec;
+		let raw = |h: OsHandle| {
+			RawFd::try_from(h.0).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+		};
+		let source = match spec {
+			// The engine keeps the object owning the descriptor alive for the
+			// whole spawn call, the child's `dup2` included.
+			StdioSpec::Inherit(h) => raw(h)?,
+			StdioSpec::File(f) => match f.os_handle() {
+				Some(h) => {
+					let fd = raw(h)?;
+					self.kept.push(f);
+					fd
+				},
+				// No identity to share: its own pipe, as for one fd.
+				None => self.own(child_end(shared, StdioSpec::File(f), dir, pumps, feeds)?),
+			},
+			StdioSpec::Null => {
+				if let Some(fd) = self.find(|s| matches!(s, Source::Null)) {
+					fd
+				} else {
+					let null = fs::File::options()
+						.read(true)
+						.write(true)
+						.open("/dev/null")?;
+					let fd = self.own(Some(null));
+					self.sources.push((Source::Null, fd));
+					fd
+				}
+			},
+			StdioSpec::Pipe(obj) => {
+				if let Some(fd) =
+					self.find(|s| matches!(s, Source::Object(o, d) if o.same(&obj) && *d == dir))
+				{
+					fd
+				} else {
+					let end = child_end(shared, StdioSpec::Pipe(obj.clone()), dir, pumps, feeds)?;
+					let fd = self.own(end);
+					self.sources.push((Source::Object(obj, dir), fd));
+					fd
+				}
+			},
+		};
+		if self.sources.iter().all(|(_, fd)| *fd != source) {
+			self.sources.push((Source::Raw, source));
 		}
+		self.map.push((target, source));
+		Ok(())
 	}
-}
 
-impl AsRawFd for Source {
-	fn as_raw_fd(&self) -> RawFd {
-		self.as_fd().as_raw_fd()
+	fn find(&self, matches: impl Fn(&Source) -> bool) -> Option<RawFd> {
+		self
+			.sources
+			.iter()
+			.find(|(s, _)| matches(s))
+			.map(|(_, fd)| *fd)
 	}
-}
 
-/// The child's fd for one stream (`/dev/null` for `Null`).
-fn child_fd(
-	shared: &Shared,
-	spec: crate::bash::StdioSpec,
-	dir: Dir,
-	pumps: &mut Vec<Pump>,
-	held: &mut Vec<Arc<Feed>>,
-) -> io::Result<Source> {
-	if let crate::bash::StdioSpec::Inherit(h) = spec {
-		return RawFd::try_from(h.0).map(Source::Host).map_err(invalid);
+	fn own(&mut self, end: Option<fs::File>) -> RawFd {
+		let fd = OwnedFd::from(end.expect("an end for a stream that is not /dev/null"));
+		let raw = fd.as_raw_fd();
+		self.held.push(fd);
+		raw
 	}
-	match child_end(shared, spec, dir, pumps, held)? {
-		Some(f) => Ok(Source::Owned(f.into())),
-		None => Ok(Source::Owned(
-			fs::File::options()
-				.read(true)
-				.write(true)
-				.open("/dev/null")?
-				.into(),
-		)),
-	}
-}
 
-/// Move every source fd above every target fd, so installing one target
-/// (`dup2`) can never clobber a source still to be installed.
-fn lift(fds: &mut [(i32, Source)]) -> io::Result<()> {
-	let floor = fds.iter().map(|(t, _)| *t).max().unwrap_or(2).max(2) + 1;
-	for (_, fd) in fds.iter_mut() {
-		if fd.as_raw_fd() < floor {
-			// SAFETY: fcntl on an fd we hold; returns a new descriptor.
-			let lifted = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, floor) };
-			if lifted < 0 {
-				return Err(io::Error::last_os_error());
+	/// Orders the `dup2`s so that none replaces a source still to be read:
+	/// one is made once no other still to be made reads its target. A
+	/// source already at its own target costs nothing: no other fd can
+	/// target that number, so it is made first, and the child has only to
+	/// clear its close-on-exec flag — which `dup2` to the same number does
+	/// (POSIX's `posix_spawn_file_actions_adddup2` with equal descriptors),
+	/// and which [`fork_exec`]'s hook does itself. Only where every pair
+	/// left reads another's target is one source moved to a number no fd is
+	/// given at; that copy is the only descriptor this adds, one per ring.
+	fn plan(&mut self) -> io::Result<()> {
+		let mut targets: Vec<i32> = self.map.iter().map(|(t, _)| *t).collect();
+		targets.sort_unstable();
+		let mut pending = std::mem::take(&mut self.map);
+		let mut readers: std::collections::HashMap<RawFd, usize> = std::collections::HashMap::new();
+		for &(_, src) in &pending {
+			*readers.entry(src).or_default() += 1;
+		}
+		let mut done = vec![false; pending.len()];
+		let mut ordered = Vec::with_capacity(pending.len());
+		// A source at its own target needs neither a descriptor nor an order.
+		// Regression: each was moved aside instead, so a command given 90 fds
+		// that already sat at their numbers needed 90 more descriptors before
+		// any `dup2` ran and died with `Too many open files`.
+		for (i, &(target, src)) in pending.iter().enumerate() {
+			if target == src {
+				done[i] = true;
+				ordered.push((target, src));
+				*readers.get_mut(&src).expect("counted") -= 1;
 			}
-			// SAFETY: a successful F_DUPFD_CLOEXEC returned a descriptor we own.
-			*fd = Source::Owned(unsafe { OwnedFd::from_raw_fd(lifted) });
+		}
+		while ordered.len() < pending.len() {
+			let mut progressed = false;
+			for (i, &(target, src)) in pending.iter().enumerate() {
+				if !done[i] && readers.get(&target).copied().unwrap_or(0) == 0 {
+					done[i] = true;
+					ordered.push((target, src));
+					*readers.get_mut(&src).expect("counted") -= 1;
+					progressed = true;
+				}
+			}
+			if progressed {
+				continue;
+			}
+			let at = done.iter().position(|d| !d).expect("one left");
+			let from = pending[at].1;
+			let moved = off_targets(from, &targets)?;
+			let to = moved.as_raw_fd();
+			self.held.push(moved);
+			let mut count = 0;
+			for (i, m) in pending.iter_mut().enumerate() {
+				if !done[i] && m.1 == from {
+					m.1 = to;
+					count += 1;
+				}
+			}
+			readers.remove(&from);
+			readers.insert(to, count);
+		}
+		self.map = ordered;
+		Ok(())
+	}
+}
+
+/// A close-on-exec copy of `fd` at the lowest number no fd is given at.
+fn off_targets(fd: RawFd, targets: &[i32]) -> io::Result<OwnedFd> {
+	let mut from = 3;
+	loop {
+		// SAFETY: fcntl on a descriptor this process holds; returns a new one.
+		let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, from) };
+		if copy < 0 {
+			return Err(io::Error::last_os_error());
+		}
+		// SAFETY: a successful F_DUPFD_CLOEXEC returned a descriptor we own.
+		let copy = unsafe { OwnedFd::from_raw_fd(copy) };
+		let n = copy.as_raw_fd();
+		if targets.binary_search(&n).is_err() {
+			return Ok(copy);
+		}
+		drop(copy);
+		from = n + 1;
+		while targets.binary_search(&from).is_ok() {
+			from += 1;
 		}
 	}
-	Ok(())
 }
 
 /// Where the child goes.
@@ -618,26 +740,26 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	let tty = job_terminal(place, pgroup)?;
 	let mut pumps = Vec::new();
 	let mut feeds = Vec::new();
-	let mut fds = Vec::with_capacity(3 + extra_fds.len());
+	let mut fds = ChildFds::default();
 	let [stdin, stdout, stderr] = stdio;
-	fds.push((0, child_fd(shared, stdin, Dir::In, &mut pumps, &mut feeds)?));
-	fds.push((1, child_fd(shared, stdout, Dir::Out, &mut pumps, &mut feeds)?));
-	fds.push((2, child_fd(shared, stderr, Dir::Out, &mut pumps, &mut feeds)?));
+	fds.add(shared, 0, stdin, Dir::In, &mut pumps, &mut feeds)?;
+	fds.add(shared, 1, stdout, Dir::Out, &mut pumps, &mut feeds)?;
+	fds.add(shared, 2, stderr, Dir::Out, &mut pumps, &mut feeds)?;
 	for (fd, s) in extra_fds {
 		if fd < 3 {
 			return Err(invalid(format!("extra fd {fd} overlaps stdio")));
 		}
-		fds.push((fd, child_fd(shared, s, Dir::Probe, &mut pumps, &mut feeds)?));
+		fds.add(shared, fd, s, Dir::Probe, &mut pumps, &mut feeds)?;
 	}
-	lift(&mut fds)?;
+	fds.plan()?;
 	let tracker = Tracker::new(pumps.iter().map(Pump::outputs).sum());
 	// Polled by the `ExtProc`; dropped (stopping every pump) on any failure
 	// below.
 	let pumps = Pumps::new(pumps, feeds, &tracker);
 	let program = Program { path, argv, env, cwd, umask, ign: sigmask_ign, rlimits, tty };
 	let launched = match &redirs {
-		Some(redirs) => fork_redirs(&program, &fds, place, redirs),
-		None => launch(&shared.state, &program, &fds, place),
+		Some(redirs) => fork_redirs(&program, &fds.map, place, redirs),
+		None => launch(&shared.state, &program, &fds.map, place),
 	};
 	// Our copies of the child's ends: pumps see end of file when the child
 	// (and what it forks) closes its own.
@@ -701,7 +823,7 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 fn launch(
 	state: &State,
 	prog: &Program<'_>,
-	fds: &[(i32, Source)],
+	fds: &[(i32, RawFd)],
 	place: Place,
 ) -> io::Result<(i32, Place)> {
 	// `posix_spawn` cannot set resource limits either, nor hand a terminal
@@ -841,25 +963,16 @@ impl Exec {
 /// itself. std would `execvp`, whose libc retries a file without `#!` as a
 /// `/bin/sh` script; the engine must see `ENOEXEC` instead and run such a
 /// script in-engine, like bash.
-fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Result<(i32, Place)> {
+fn fork_exec(prog: &Program<'_>, fds: &[(i32, RawFd)], place: Place) -> io::Result<(i32, Place)> {
 	let exec = Exec::new(prog)?;
 	let mut cmd = Command::new(OsStr::from_bytes(prog.path));
 	cmd.current_dir(OsStr::from_bytes(prog.cwd));
-	let stdio = |target: i32| -> io::Result<Stdio> {
-		let (_, fd) = fds
-			.iter()
-			.find(|(t, _)| *t == target)
-			.ok_or_else(|| invalid("missing stdio"))?;
-		Ok(Stdio::from(fd.as_fd().try_clone_to_owned()?))
-	};
-	cmd.stdin(stdio(0)?);
-	cmd.stdout(stdio(1)?);
-	cmd.stderr(stdio(2)?);
-	let extra: Vec<(i32, RawFd)> = fds
-		.iter()
-		.filter(|(t, _)| *t > 2)
-		.map(|(t, fd)| (*t, fd.as_raw_fd()))
-		.collect();
+	// The hook puts every fd, the standard ones too, in the order planned:
+	// std would put 0, 1 and 2 first, over a source another fd still reads.
+	cmd.stdin(Stdio::inherit());
+	cmd.stdout(Stdio::inherit());
+	cmd.stderr(Stdio::inherit());
+	let extra = fds.to_vec();
 	let ignore = ignored(prog.ign);
 	let mask = prog.umask as libc::mode_t;
 	let limits = limits(prog);
@@ -884,7 +997,14 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Res
 			}
 			libc::umask(mask);
 			for &(target, src) in &extra {
-				if libc::dup2(src, target) < 0 {
+				if src == target {
+					// `dup2` to the same number is a no-op that leaves the
+					// descriptor close-on-exec, and the child needs only the
+					// flag cleared; it owns this descriptor table.
+					if libc::fcntl(target, libc::F_SETFD, 0) < 0 {
+						return Err(io::Error::last_os_error());
+					}
+				} else if libc::dup2(src, target) < 0 {
 					return Err(io::Error::last_os_error());
 				}
 			}
@@ -1014,7 +1134,7 @@ fn errno() -> i32 {
 /// and its exit status (1 for a redirection, 127 or 126 for the exec).
 fn fork_redirs(
 	prog: &Program<'_>,
-	fds: &[(i32, Source)],
+	fds: &[(i32, RawFd)],
 	place: Place,
 	redirs: &ChildRedirs,
 ) -> io::Result<(i32, Place)> {
@@ -1029,7 +1149,7 @@ fn fork_redirs(
 	let ignore = ignored(prog.ign);
 	let mask = prog.umask as libc::mode_t;
 	let limits = limits(prog);
-	let raw: Vec<(i32, RawFd)> = fds.iter().map(|(t, fd)| (*t, fd.as_raw_fd())).collect();
+	let raw = fds.to_vec();
 	// Every signal stays blocked across the fork: the child runs with the
 	// host's handlers until it resets them, and a signal delivered then (a
 	// `kill $!` right after the spawn) would run host code and be lost
@@ -1076,7 +1196,14 @@ fn fork_redirs(
 				child_fail(&exec_diag, errno(), 126, texts);
 			}
 			for &(target, src) in &raw {
-				if libc::dup2(src, target) < 0 {
+				if src == target {
+					// As in `fork_exec`: `dup2` to the same number is a no-op
+					// that leaves the descriptor close-on-exec, so the child
+					// clears the flag on its own copy instead.
+					if libc::fcntl(target, libc::F_SETFD, 0) < 0 {
+						child_fail(&exec_diag, errno(), 126, texts);
+					}
+				} else if libc::dup2(src, target) < 0 {
 					child_fail(&exec_diag, errno(), 126, texts);
 				}
 			}
@@ -1151,7 +1278,7 @@ fn fork_redirs(
 
 #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 mod posix {
-	use std::{cell::RefCell, io, mem::MaybeUninit, os::fd::AsRawFd};
+	use std::{cell::RefCell, io, mem::MaybeUninit, os::fd::RawFd};
 
 	thread_local! {
 		/// Reusable actions for this thread's last descriptor map and cwd.
@@ -1170,40 +1297,25 @@ mod posix {
 	}
 
 	impl Actions {
-		fn matches(&self, exec: &Exec, fds: &[(i32, Source)]) -> bool {
-			self.cwd == exec.buf[exec.cwd..]
-				&& self.fds.len() == fds.len()
-				&& self
-					.fds
-					.iter()
-					.zip(fds)
-					.all(|(&(target, source), (want, fd))| target == *want && source == fd.as_raw_fd())
+		fn matches(&self, exec: &Exec, fds: &[(i32, RawFd)]) -> bool {
+			self.cwd == exec.buf[exec.cwd..] && self.fds == fds
 		}
 
-		fn new(exec: &Exec, fds: &[(i32, Source)], add_chdir: AddChdir) -> io::Result<Self> {
+		fn new(exec: &Exec, fds: &[(i32, RawFd)], add_chdir: AddChdir) -> io::Result<Self> {
 			let mut raw = FileActions::new()?;
-			for (target, fd) in fds {
+			for &(target, fd) in fds {
 				// SAFETY: initialized actions; descriptors are plain integers.
-				check(unsafe {
-					libc::posix_spawn_file_actions_adddup2(raw.ptr(), fd.as_raw_fd(), *target)
-				})?;
+				check(unsafe { libc::posix_spawn_file_actions_adddup2(raw.ptr(), fd, target) })?;
 			}
 			// SAFETY: initialized actions; libc copies the NUL-terminated cwd.
 			check(unsafe { add_chdir(raw.ptr(), exec.cwd()) })?;
-			Ok(Self {
-				raw,
-				fds: fds
-					.iter()
-					.map(|(target, fd)| (*target, fd.as_raw_fd()))
-					.collect(),
-				cwd: exec.buf[exec.cwd..].to_vec(),
-			})
+			Ok(Self { raw, fds: fds.to_vec(), cwd: exec.buf[exec.cwd..].to_vec() })
 		}
 	}
 
 	use std::sync::atomic::Ordering;
 
-	use super::{DISPOSITIONS, Exec, Place, Source, host_ignored, ignored};
+	use super::{DISPOSITIONS, Exec, Place, host_ignored, ignored};
 	use crate::bash::SigSet;
 
 	pub(super) type AddChdir = unsafe extern "C" fn(
@@ -1258,7 +1370,7 @@ mod posix {
 	/// `sigaction` on each signal of the set).
 	pub fn spawn(
 		exec: &Exec,
-		fds: &[(i32, Source)],
+		fds: &[(i32, RawFd)],
 		place: Place,
 		ign: SigSet,
 		add_chdir: AddChdir,

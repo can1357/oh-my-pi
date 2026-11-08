@@ -624,7 +624,7 @@ fn errexit_on(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 /// a subshell runs its EXIT trap here, the root at the run boundary. An
 /// `exit` inside a function runs the root's trap first, above the
 /// function's frames: bash's trap sees its `FUNCNAME` and locals.
-fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
+pub fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 	// zsh `zexit` while its hooks run: the hook calls end, the status is the
 	// new one.
 	if vp.zsh.is_some()
