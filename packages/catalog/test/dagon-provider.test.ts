@@ -56,6 +56,29 @@ describe("Dagon Inference model discovery", () => {
 		expect(model.cost.cacheWrite).toBe(0);
 	});
 
+	test("keeps a live zero price instead of reverting to the bundled seed rate", async () => {
+		const options = dagonModelManagerOptions({
+			fetch: async () =>
+				Response.json({
+					object: "list",
+					data: [
+						{
+							// Bundled with a nonzero seed price.
+							id: "deepseek-v4.1-flash-abliterated",
+							name: "DeepSeek V4.1 Flash Abliterated",
+							context_length: 1_048_576,
+							max_output_tokens: 65_536,
+							input_modalities: ["text"],
+							pricing_per_mtok_micros: { inputPerMtok: 0, cachedInputPerMtok: 0, outputPerMtok: 0 },
+						},
+					],
+				}),
+		});
+		const models = await options.fetchDynamicModels?.();
+		expect(models?.map(model => model.id)).toEqual(["deepseek-v4.1-flash-abliterated"]);
+		expect(models![0].cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	});
+
 	test("bundles the default model", () => {
 		const ids = getBundledModels("dagon").map(model => model.id);
 		expect(ids).toContain("deepseek-v4.1-flash-abliterated");

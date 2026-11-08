@@ -4876,10 +4876,13 @@ export function inceptionModelManagerOptions(config?: ModelManagerConfig): Model
 // Dagon Inference
 // ---------------------------------------------------------------------------
 
-/** Dagon prices are integer micro-USD per 1M tokens; omp costs are USD per 1M. */
+/**
+ * Dagon prices are integer micro-USD per 1M tokens; omp costs are USD per 1M.
+ * A live `0` is a real free rate, not a missing one.
+ */
 function dagonRate(value: unknown, fallback: number): number {
-	const micros = toPositiveNumber(value, null);
-	return micros === null ? fallback : micros / 1_000_000;
+	const parsed = toNumber(value);
+	return parsed !== undefined && parsed >= 0 ? parsed / 1_000_000 : fallback;
 }
 
 /**
