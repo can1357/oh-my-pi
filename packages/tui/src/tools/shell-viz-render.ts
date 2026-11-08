@@ -9,6 +9,16 @@ export function shellVizText(text: string): string {
 	return replaceTabs(sanitizeText(text)).replace(/[\r\n]/g, " ");
 }
 
+/**
+ * Nerd Font glyphs that replace the whole `🔇 out|err|silent` /dev/null badge;
+ * keyed by the native `badge-discard-*` style token.
+ */
+const DISCARD_ICONS: Record<string, string> = {
+	"badge-discard-out": "\u{f164d}", // nf-md-message_off
+	"badge-discard-err": "\u{f14bc}", // nf-md-alert_remove
+	"badge-discard-all": "\u{f0581}", // nf-md-volume_off
+};
+
 function color(style: string | undefined): ThemeColor {
 	const tokens = style?.split(" ") ?? [];
 	if (tokens.includes("comment")) return "syntaxComment";
@@ -28,10 +38,12 @@ function segmentText(
 	presentation: ShellVizPresentation,
 	theme: Theme,
 ): string {
-	const text = shellVizText(segment.text);
+	const tokens = segment.style?.split(" ") ?? [];
+	const discard =
+		theme.getSymbolPreset() === "nerd" ? tokens.find(token => Object.hasOwn(DISCARD_ICONS, token)) : undefined;
+	const text = discard ? ` ${DISCARD_ICONS[discard]}` : shellVizText(segment.text);
 	const inactive =
 		(presentation.running && !(segment.active ?? row.active)) || (segment.state ?? row.state) === "skipped";
-	const tokens = segment.style?.split(" ") ?? [];
 	const semantic = tokens.some(token => ["chip", "badge", "secret"].includes(token));
 	const styled = presentation.preferences.layers.color || semantic ? theme.fg(color(segment.style), text) : text;
 	const emphasized = inactive

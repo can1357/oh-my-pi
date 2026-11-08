@@ -1462,6 +1462,11 @@ impl<S: VizSource> Printer<'_, S> {
 		let name = s.and_then(command_name).unwrap_or_default();
 		for redir in cmd.redirs() {
 			let (op, fd) = (redir.op(), redir.fd());
+			let mut style = if self.options.layers.idioms {
+				"redir badge"
+			} else {
+				"redir"
+			};
 			let text = match redir.target() {
 				RedirTarget::HereDoc(doc) => {
 					if self.options.layers.unwrap {
@@ -1485,16 +1490,17 @@ impl<S: VizSource> Printer<'_, S> {
 				RedirTarget::Word(w) => {
 					let raw_target = literal(w);
 					if self.options.layers.idioms && raw_target.as_deref() == Some("/dev/null") {
-						format!(
-							" 🔇 {}",
-							if matches!(op, RedirOp::OutErr | RedirOp::AppendErr) {
-								"silent"
-							} else if matches!(fd, Some(RedirFd::Num(2))) {
-								"err"
-							} else {
-								"out"
-							}
-						)
+						// `badge-discard-*` names the discarded stream so renderers
+						// with an icon font can replace the whole label.
+						let (label, discard) = if matches!(op, RedirOp::OutErr | RedirOp::AppendErr) {
+							("silent", "redir badge badge-discard-all")
+						} else if matches!(fd, Some(RedirFd::Num(2))) {
+							("err", "redir badge badge-discard-err")
+						} else {
+							("out", "redir badge badge-discard-out")
+						};
+						style = discard;
+						format!(" 🔇 {label}")
 					} else if self.options.layers.idioms
 						&& matches!(fd, Some(RedirFd::Num(2)))
 						&& op == RedirOp::DupOut
@@ -1515,18 +1521,7 @@ impl<S: VizSource> Printer<'_, S> {
 					}
 				},
 			};
-			out.push(self.segment(
-				c,
-				cmd.id(),
-				redir.span(),
-				text,
-				if self.options.layers.idioms {
-					"redir badge"
-				} else {
-					"redir"
-				},
-				true,
-			));
+			out.push(self.segment(c, cmd.id(), redir.span(), text, style, true));
 		}
 		out
 	}
