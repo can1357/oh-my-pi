@@ -37,6 +37,12 @@ provider "mistral" {
 	// (https://docs.mistral.ai/studio/conversations/reasoning) for every
 	// reasoning model the host serves, including GLM and DeepSeek (#17375).
 	mistral-reasoning-content-parts #true
+
+	// Mistral Large 4 reasoning efforts: only "low", "medium", "high" are accepted by the Mistral API.
+	models "mistral-large-4" "mistral-large-4-0" "*mistral-large-4*" {
+		thinking-efforts "low" "medium" "high"
+	}
+
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}

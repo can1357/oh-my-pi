@@ -3062,6 +3062,7 @@ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | str
 			return { stopReason: "stop" };
 		case "length":
 		case "max_tokens":
+		case "model_length":
 			return { stopReason: "length" };
 		case "function_call":
 		case "tool_calls":
