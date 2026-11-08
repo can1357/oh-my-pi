@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { Markdown, renderInlineMarkdown } from "../src/components/markdown";
-import { defaultMarkdownTheme } from "./test-themes.js";
 import { setTerminalTextSizing, TERMINAL } from "../src/terminal-capabilities";
+import { defaultMarkdownTheme } from "./test-themes.js";
 
 const originalTrueColor = TERMINAL.trueColor;
 const originalTextSizing = TERMINAL.textSizing;
