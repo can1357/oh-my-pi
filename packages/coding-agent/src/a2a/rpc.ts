@@ -407,7 +407,19 @@ export interface A2aDispatchDeps {
 	/** Client contextId persisted per spawned task, for ListTasks filtering. */
 	contextIds?: Map<string, string>;
 	/** Notified when a peer request with a reply identity is delivered here. */
-	noteIncomingRequest?: (from: string, messageId: string) => void;
+	noteIncomingRequest?: (request: A2aIncomingRequest) => void;
+}
+
+/** A delivered peer request that expects an answer (A2). */
+export interface A2aIncomingRequest {
+	/** Sender's public A2A identity: its `a2a:<from>` agent carries the reply. */
+	from: string;
+	/** The request's A2A `messageId`, echoed back as `inReplyTo`. */
+	messageId: string;
+	/** Local agent id the request was delivered to. */
+	to: string;
+	/** When delivery started (ms since epoch): output after it may answer the request. */
+	at: number;
 }
 
 export const A2A_SENDER_ID = "a2a";
@@ -496,20 +508,27 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 			// answer; this terminal's task tool attaches metadata.inReplyTo to that
 			// spawn automatically, so the model only has to send the answer.
 			sections.push(
-				`[A2A task from peer terminal ${request.from}. This message was delivered into your conversation. When you have the answer, send it back by spawning the agent a2a:${request.from} with the task tool - that delivers your reply to the sender's terminal and is correlated to this request automatically. Do not answer in plain text: the sender only sees replies through the a2a agent.]`,
+				`[A2A task from peer terminal ${request.from}. This message was delivered into your conversation. When you have the answer, send it back by spawning the agent a2a:${request.from} with the task tool - that delivers your reply to the sender's terminal and is correlated to this request automatically. The sender only sees what reaches it through the a2a agent.]`,
 			);
 		}
 		if (contextBlock !== undefined) sections.push(contextBlock);
 		sections.push(request.text);
 		const body = sections.join("\n\n");
+		const deliveredAt = Date.now();
 		const receipt = await deps.send({
 			from: deps.senderId ?? A2A_SENDER_ID,
 			to: target.id,
 			body,
 			external: true,
+			...(request.inReplyTo !== undefined ? { a2aInReplyTo: request.inReplyTo } : {}),
 		});
 		if (receipt.outcome !== "failed" && request.from !== undefined && request.inReplyTo === undefined) {
-			deps.noteIncomingRequest?.(request.from, request.messageId);
+			deps.noteIncomingRequest?.({
+				from: request.from,
+				messageId: request.messageId,
+				to: target.id,
+				at: deliveredAt,
+			});
 		}
 		const current = deps.registry.get(target.id) ?? target;
 		return persistTask(taskFor(current, deps, { delivery: receipt, requestedTo: request.to }), request, deps, false);

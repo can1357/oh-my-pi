@@ -38,7 +38,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/a2a/server";
 import { type AgentCard, buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
-import { TASK_STATE } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
+import { type A2aIncomingRequest, TASK_STATE } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SpawnSubagentOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
@@ -780,11 +780,22 @@ describe("A2aAgentBridge cross-terminal name collisions", () => {
 describe("A2A reply correlation", () => {
 	it("correlates successive replies to separate unanswered requests from one peer", () => {
 		const bridge = new A2aAgentBridge();
-		bridge.noteIncomingRequest("peer", "first");
-		bridge.noteIncomingRequest("peer", "second");
+		bridge.noteIncomingRequest({ from: "peer", messageId: "first", to: "Main", at: 1 });
+		bridge.noteIncomingRequest({ from: "peer", messageId: "second", to: "Main", at: 2 });
 		expect(bridge.consumeOutstandingRequest("peer")).toBe("first");
 		expect(bridge.consumeOutstandingRequest("peer")).toBe("second");
 		expect(bridge.consumeOutstandingRequest("peer")).toBeUndefined();
+	});
+
+	it("consumes one named request without disturbing the order of the rest", () => {
+		const bridge = new A2aAgentBridge();
+		for (const messageId of ["first", "second", "third"]) {
+			bridge.noteIncomingRequest({ from: "peer", messageId, to: "Main", at: 1 });
+		}
+		expect(bridge.consumeOutstandingRequest("peer", "second")).toBe("second");
+		expect(bridge.consumeOutstandingRequest("peer", "second")).toBeUndefined();
+		expect(bridge.outstandingRequests().map(request => request.messageId)).toEqual(["first", "third"]);
+		expect(bridge.consumeOutstandingRequest("peer")).toBe("first");
 	});
 });
 
@@ -1084,7 +1095,7 @@ describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
 		/** Distinct cwd basenames give in-process terminals distinct auto names. */
 		cwd?: string;
 		inbox: Array<{ to: string; body: string; external?: boolean }>;
-		onIncomingRequest?: (from: string, messageId: string) => void;
+		onIncomingRequest?: (request: A2aIncomingRequest) => void;
 	}): Promise<A2aServerHandle> {
 		const settings = await Settings.loadIsolated({ inMemory: true, agentDir: options.agentDir });
 		return startA2aServer({
@@ -1161,21 +1172,21 @@ describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
 		await fs.mkdir(builderCwd, { recursive: true });
 		const senderInbox: Array<{ to: string; body: string; external?: boolean }> = [];
 		const remoteInbox: Array<{ to: string; body: string; external?: boolean }> = [];
-		const senderIncoming: Array<[string, string]> = [];
+		const senderIncoming: A2aIncomingRequest[] = [];
 		const builderReplyBridge = new A2aAgentBridge();
 		const sender = await startTerminal({
 			agentDir: dir.path(),
 			cwd: alphaCwd,
 			inbox: senderInbox,
-			onIncomingRequest: (from, messageId) => {
-				senderIncoming.push([from, messageId]);
+			onIncomingRequest: request => {
+				senderIncoming.push(request);
 			},
 		});
 		const remote = await startTerminal({
 			agentDir: dir.path(),
 			cwd: builderCwd,
 			inbox: remoteInbox,
-			onIncomingRequest: (from, messageId) => builderReplyBridge.noteIncomingRequest(from, messageId),
+			onIncomingRequest: request => builderReplyBridge.noteIncomingRequest(request),
 		});
 		try {
 			const alphaName = (await fetchAgentCard({ url: sender.url })).card.name;

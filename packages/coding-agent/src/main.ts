@@ -200,6 +200,7 @@ import {
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import {
 	cfgA2aAutoRegister,
+	cfgA2aClientTimeoutMs,
 	cfgA2aEnabled,
 	cfgA2aMaxPeerSkills,
 	cfgA2aName,
@@ -2717,9 +2718,16 @@ export async function runRootCommand(
 			const a2aPort = parsedArgs.a2aPort;
 			if (a2aPort !== undefined || cfgA2aEnabled.get(settingsInstance)) {
 				try {
-					const [{ startA2aServer, defaultA2aDeps }, { spawnSubagentForSession }] = await Promise.all([
+					const [
+						{ startA2aServer, defaultA2aDeps, readOwnA2aIdentity },
+						{ spawnSubagentForSession },
+						{ installA2aReplyRelay },
+						{ rescanLocalBridges },
+					] = await Promise.all([
 						import("./a2a/server"),
 						import("./task/spawn-subagent"),
+						import("./a2a/reply-relay"),
+						import("./a2a/agent-bridge"),
 					]);
 					const a2a = await startA2aServer({
 						settings: settingsInstance,
@@ -2732,10 +2740,32 @@ export async function runRootCommand(
 						port: a2aPort ?? cfgA2aPort.get(settingsInstance),
 						...defaultA2aDeps(),
 						spawn: options => spawnSubagentForSession(session, options),
-						onIncomingRequest: (from, messageId) => session.a2aBridge.noteIncomingRequest(from, messageId),
+						onIncomingRequest: request => session.a2aBridge.noteIncomingRequest(request),
 						version: VERSION,
 					});
-					postmortem.register("a2a-server", () => a2a.stop(), { exitOnly: true });
+					// A request answered in plain text still reaches its sender (A2).
+					const stopReplyRelay = installA2aReplyRelay({
+						bridge: session.a2aBridge,
+						subscribe: listener => session.subscribe(listener),
+						identity: () => readOwnA2aIdentity(settingsInstance.getAgentDir()),
+						rescan: async () => {
+							await rescanLocalBridges({
+								bridge: session.a2aBridge,
+								agentDir: settingsInstance.getAgentDir(),
+								settings: settingsInstance,
+								maxPeerSkills: cfgA2aMaxPeerSkills.get(settingsInstance),
+							});
+						},
+						timeoutMs: cfgA2aClientTimeoutMs.get(settingsInstance),
+					});
+					postmortem.register(
+						"a2a-server",
+						() => {
+							stopReplyRelay();
+							a2a.stop();
+						},
+						{ exitOnly: true },
+					);
 					notifs.push({ kind: "info", message: `A2A bridge listening on ${a2a.url}` });
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);

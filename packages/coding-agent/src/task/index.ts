@@ -2148,14 +2148,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	async #ownA2aIdentity(): Promise<{ name?: string; url?: string }> {
 		try {
 			// Lazy, as in `agent-bridge.ts`: a static import of the server closes an import cycle.
-			const { readLocalBridgeEntry } = await import("../a2a/server");
-			const entry = await readLocalBridgeEntry(this.session.settings.getAgentDir(), process.pid);
-			return entry !== undefined
-				? {
-						...(entry.name !== undefined ? { name: entry.name } : {}),
-						url: `http://127.0.0.1:${entry.port}/`,
-					}
-				: {};
+			const { readOwnA2aIdentity } = await import("../a2a/server");
+			return await readOwnA2aIdentity(this.session.settings.getAgentDir());
 		} catch {
 			return {};
 		}

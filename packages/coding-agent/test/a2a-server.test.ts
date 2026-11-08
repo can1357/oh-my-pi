@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
 import { A2aAgentBridge } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
 import {
+	type A2aIncomingRequest,
 	type A2aTask,
 	RPC_ERRORS,
 	TASK_STATE,
@@ -171,7 +172,7 @@ function startServer(options: {
 	registry?: FakeRegistry;
 	bus?: FakeBus;
 	streamPollMs?: number;
-	onIncomingRequest?: (from: string, messageId: string) => void;
+	onIncomingRequest?: (request: A2aIncomingRequest) => void;
 }): { handle: A2aServerHandle; registry: FakeRegistry; bus: FakeBus } {
 	const registry = options.registry ?? new FakeRegistry(options.refs ?? []);
 	const bus = options.bus ?? new FakeBus();
@@ -703,7 +704,7 @@ describe("A2A delivery ingress", () => {
 		const { handle } = startServer({
 			refs: [makeRef({ id: "Main", kind: "main", status: "running" })],
 			bus,
-			onIncomingRequest: (from, id) => incoming.push(`${from}:${id}`),
+			onIncomingRequest: request => incoming.push(`${request.from}:${request.messageId}->${request.to}`),
 		});
 		const send = (id: string) =>
 			rpc(handle, {
@@ -717,7 +718,7 @@ describe("A2A delivery ingress", () => {
 		expect(incoming).toEqual([]);
 		bus.outcome = "woken";
 		await send("delivered");
-		expect(incoming).toEqual(["peer:delivered"]);
+		expect(incoming).toEqual(["peer:delivered->Main"]);
 	});
 
 	it("marks bridge deliveries external: a repeated or bursty request is not agent-guarded", async () => {
@@ -1503,12 +1504,13 @@ describe("A2A reply envelope", () => {
 
 	it("labels metadata.inReplyTo as a reply without a new envelope or outstanding request", async () => {
 		const bodies: string[] = [];
-		const incoming: Array<[string, string]> = [];
+		const answers: Array<string | undefined> = [];
+		const incoming: A2aIncomingRequest[] = [];
 		const handle = createA2aServer({
 			token: "reply-token-3",
 			port: 0,
-			onIncomingRequest: (from, messageId) => {
-				incoming.push([from, messageId]);
+			onIncomingRequest: request => {
+				incoming.push(request);
 			},
 			registry: {
 				list: () => [],
@@ -1517,8 +1519,9 @@ describe("A2A reply envelope", () => {
 				setStatus: () => false,
 			},
 			bus: {
-				send: async (message: { to: string; body: string }) => {
+				send: async (message: { to: string; body: string; a2aInReplyTo?: string }) => {
 					bodies.push(message.body);
+					answers.push(message.a2aInReplyTo);
 					return { to: message.to, outcome: "injected" as const };
 				},
 			} as never,
@@ -1546,6 +1549,8 @@ describe("A2A reply envelope", () => {
 		expect(bodies[0]).not.toContain("[A2A task from peer terminal");
 		expect(bodies[0]).not.toContain("spawning the agent");
 		expect(incoming).toEqual([]);
+		// The recipient's footer reads this mark: an answer owes no reply.
+		expect(answers).toEqual(["request-17"]);
 	});
 });
 

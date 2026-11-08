@@ -3,7 +3,7 @@ import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
-import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 
 function makeBridge() {
 	const woken: AgentMessage[][] = [];
@@ -46,6 +46,81 @@ describe("IrcBridge wake-relay marking", () => {
 		const record = woken[0][0] as CustomMessage;
 		expect(record.details).not.toHaveProperty("wakeRelay");
 		expect(record.content).toContain("is delivered to");
+	});
+
+	it("routes a bridge request's reply through an a2a: spawn, not the pseudo-sender", async () => {
+		const { bridge, woken } = makeBridge();
+		// An A2A request arrives from the bridge's `a2a` pseudo-sender, which no
+		// agent:// write reaches; its body names the a2a: agent that carries the answer.
+		await bridge.deliver({
+			id: "irc-3",
+			from: "a2a",
+			to: "Main",
+			body: "[A2A task from peer terminal builder. ...]\n\nreview src/",
+			ts: Date.now(),
+			external: true,
+		});
+
+		const record = woken[0][0] as CustomMessage;
+		expect(record.content).toContain("A2A task from peer terminal builder");
+		expect(record.content).not.toContain("agent://a2a");
+		expect(record.content).not.toContain("No one replies on your behalf");
+		expect(record.content).toContain("with the `task` tool to the `a2a:` agent");
+		// The main agent's plain-text answer is relayed by `a2a/reply-relay.ts`.
+		expect(record.content).toContain("sent to the sender automatically");
+	});
+
+	it("tells a subagent that a plain-text answer to a bridge request is not relayed", async () => {
+		const { bridge, woken } = makeBridge();
+		await bridge.deliver({
+			id: "irc-4",
+			from: "a2a",
+			to: "Scout",
+			body: "[A2A task from peer terminal builder. ...]\n\nreview src/",
+			ts: Date.now(),
+			external: true,
+		});
+
+		const record = woken[0][0] as CustomMessage;
+		expect(record.content).toContain("never reaches the sender");
+		expect(record.content).not.toContain("sent to the sender automatically");
+	});
+
+	it("owes nothing back on an answer to this terminal's own A2A request", async () => {
+		const { bridge, woken } = makeBridge();
+		await bridge.deliver({
+			id: "irc-5",
+			from: "a2a",
+			to: "Main",
+			body: "[A2A reply to your request req-1 from peer terminal reviewer. ...]\n\ntotal() skips line 1",
+			ts: Date.now(),
+			external: true,
+			a2aInReplyTo: "req-1",
+		});
+
+		const record = woken[0][0] as CustomMessage;
+		expect(record.content).toContain("total() skips line 1");
+		expect(record.content).not.toContain("If response expected");
+		expect(record.content).not.toContain("sent to the sender automatically");
+	});
+
+	it("gives another terminal's request a user turn, never developer authority", async () => {
+		const { bridge, woken } = makeBridge();
+		await bridge.deliver({
+			id: "irc-6",
+			from: "a2a",
+			to: "Main",
+			body: "Review src/invoice.ts",
+			ts: Date.now(),
+			external: true,
+		});
+		await bridge.deliver({ id: "irc-7", from: "B", to: "A", body: "in-process note", ts: Date.now() });
+
+		const [peer] = convertToLlm(woken[0]);
+		expect(peer?.role).toBe("user");
+		expect(JSON.stringify(peer?.content)).toContain("Review src/invoice.ts");
+		// In-process IRC between agents of one session keeps its existing role.
+		expect(convertToLlm(woken[1])[0]?.role).toBe("developer");
 	});
 });
 

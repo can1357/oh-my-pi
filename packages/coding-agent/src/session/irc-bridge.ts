@@ -306,6 +306,13 @@ export class IrcBridge {
 				progress: msg.progress === true,
 				interrupting: streaming && !quiet,
 				relayOnStop,
+				// A bridge delivery comes from the `a2a` pseudo-sender, which no
+				// agent:// write reaches: the answer goes back through an a2a: spawn.
+				external: msg.external === true,
+				// The main agent's plain-text answer to a request is relayed by
+				// `a2a/reply-relay.ts`; an answer to our own request owes nothing back.
+				a2aAnswer: msg.a2aInReplyTo !== undefined,
+				a2aRelayOnStop: msg.external === true && msg.a2aInReplyTo === undefined && msg.to === MAIN_AGENT_ID,
 			}),
 			display: true,
 			details: {
@@ -318,6 +325,9 @@ export class IrcBridge {
 				...(msg.progress ? { progress: true } : {}),
 				...(msg.hops?.length ? { hops: msg.hops } : {}),
 				...(fromParent ? { fromParent: true } : {}),
+				// Read by the LLM converter: a peer terminal's text speaks as a user,
+				// never with developer authority.
+				...(msg.external ? { external: true } : {}),
 			},
 			attribution: "agent",
 			timestamp: msg.ts,

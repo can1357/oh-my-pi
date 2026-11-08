@@ -42,6 +42,11 @@ export interface IrcMessage {
 	 */
 	external?: boolean;
 	/**
+	 * On an `external` delivery that answers an A2A request this terminal sent:
+	 * that request's `messageId`. An answer owes no reply. Set by `a2a/rpc.ts`.
+	 */
+	a2aInReplyTo?: string;
+	/**
 	 * Senders this message passed through, oldest first, ending with the agent
 	 * that sent it: the bus appends the sender's own id on every send, and an
 	 * automatic wake relay hands the received chain on (a manual reply starts a

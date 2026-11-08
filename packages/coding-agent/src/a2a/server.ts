@@ -30,6 +30,7 @@ import type { AgentDefinition } from "../task/types";
 import { buildAgentCard, type AgentCard } from "./card";
 import {
 	A2A_SENDER_ID,
+	type A2aIncomingRequest,
 	type A2aTask,
 	type JsonRpcFailure,
 	type JsonRpcId,
@@ -66,7 +67,7 @@ export interface A2aServerOptions {
 	/** Public A2A identity: renames the main skill and resolves `to` by name. */
 	name?: string;
 	/** Notified when a peer request with a reply identity is delivered here (A2). */
-	onIncomingRequest?: (from: string, messageId: string) => void;
+	onIncomingRequest?: (request: A2aIncomingRequest) => void;
 	registry: Pick<AgentRegistryApi, "get" | "list" | "onChange" | "setStatus">;
 	bus: A2aBus;
 	spawn?: (options: SpawnSubagentOptions) => Promise<AgentRef>;
@@ -649,6 +650,16 @@ export async function readLocalBridgeEntry(agentDir: string, pid: number): Promi
 	} catch {
 		return undefined;
 	}
+}
+
+/** This terminal's public A2A identity for reply envelopes (A1/A3); empty when no bridge is registered. */
+export async function readOwnA2aIdentity(agentDir: string): Promise<{ name?: string; url?: string }> {
+	const entry = await readLocalBridgeEntry(agentDir, process.pid);
+	if (entry === undefined) return {};
+	return {
+		...(entry.name !== undefined ? { name: entry.name } : {}),
+		url: `http://${A2A_HOST}:${entry.port}/`,
+	};
 }
 
 /**

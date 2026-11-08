@@ -1035,6 +1035,11 @@ function customMessageContentToLlmContent(content: CustomMessage["content"]): (T
 	return typeof content === "string" ? [{ type: "text", text: content }] : content;
 }
 
+/** An `irc:incoming` delivery from the A2A bridge (another terminal), see `session/irc-bridge.ts`. */
+function isExternalPeerDelivery(message: CustomMessage): boolean {
+	return message.customType === "irc:incoming" && isRecord(message.details) && message.details.external === true;
+}
+
 function convertImageBearingCustomMessage(message: CustomMessage | HookMessage): Message[] | undefined {
 	if (!isCustomMessageContent(message.content)) return undefined;
 	if (typeof message.content === "string") return undefined;
@@ -1194,6 +1199,18 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 						role: "user",
 						content: customMessageContentToLlmContent(m.content),
 						attribution: "user",
+						timestamp: m.timestamp,
+					},
+				];
+			}
+			if (isExternalPeerDelivery(m)) {
+				// Another terminal's A2A text: a user turn, so a never-prompted
+				// terminal sees a request to act on, and the peer gets no developer authority.
+				return [
+					{
+						role: "user",
+						content: customMessageContentToLlmContent(m.content),
+						attribution: "agent",
 						timestamp: m.timestamp,
 					},
 				];
