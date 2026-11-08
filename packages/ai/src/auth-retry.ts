@@ -86,6 +86,8 @@ export interface ResolvedApiKey {
 	headerGenerations?: Record<string, number>;
 	/** Header values resolved together with their command generations. */
 	resolvedHeaders?: Record<string, string>;
+	/** Read prepared headers against known refusals; never re-resolves a still-usable snapshot. */
+	readHeaders?: () => Promise<Pick<ResolvedApiKey, "resolvedHeaders" | "headerGenerations">>;
 	/** Non-secret request scope belonging to this bearer, replaced on account rotation. */
 	oauthIdentity?: OAuthRequestIdentity;
 }
@@ -102,6 +104,13 @@ export function resolvedApiKeyBearer(resolved: ApiKeyResolution): string | undef
 /** The credential generation behind a resolution, when its source reported one. */
 export function resolvedCredentialGeneration(resolved: ApiKeyResolution): number | undefined {
 	return typeof resolved === "string" ? undefined : resolved?.credentialGeneration;
+}
+
+/** Read owner-held refusal state without resolving credentials a second time. */
+export async function readApiKeyHeaders(resolved: ApiKeyResolution): Promise<ApiKeyResolution> {
+	if (typeof resolved !== "object" || !resolved?.readHeaders) return resolved;
+	const headers = await resolved.readHeaders();
+	return headers.resolvedHeaders === resolved.resolvedHeaders ? resolved : { ...resolved, ...headers };
 }
 
 /**
@@ -250,14 +259,16 @@ export async function resolveRetryKey(
 ): Promise<string | undefined> {
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
-		const resolved = await resolver({
-			lastChance: rotateSibling,
-			error,
-			signal,
-			previousKey,
-			previousGeneration,
-			previousHeaderGenerations,
-		});
+		const resolved = await readApiKeyHeaders(
+			await resolver({
+				lastChance: rotateSibling,
+				error,
+				signal,
+				previousKey,
+				previousGeneration,
+				previousHeaderGenerations,
+			}),
+		);
 		onResolved?.(resolved);
 		return resolvedApiKeyBearer(resolved);
 	} catch {

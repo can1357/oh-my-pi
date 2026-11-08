@@ -455,30 +455,34 @@ describe("a `!command` credential the provider refuses", () => {
 			const rig = buildRig(
 				source === "apiKey" ? command : "literal-placeholder",
 				counterFile,
-				() => (schedule === "serialized" ? ++requests % 2 === 0 : ++requests > 10),
+				() => ++requests > 10,
 				source === "header" ? { headers: { Authorization: command } } : {},
 				async () => {
 					const index = refusals++;
-					if (schedule === "boundary") {
-						if (refusals === 10) allRefused.resolve();
-						await gates[index].promise;
-					}
+					if (refusals === 10) allRefused.resolve();
+					await gates[index].promise;
 					return gatewayRefusal();
 				},
 			);
 			const sends = await Promise.all(Array.from({ length: 10 }, () => rig.prepare()));
 			const before = rig.mints();
-			const results: AssistantMessage[] = [];
+			// All first attempts must be on the wire before any refusal lands.
+			// Serializing sends instead would refuse each replacement generation.
+			const pending = sends.map(send => send());
+			const unsettled = new Set(pending);
+			for (const operation of pending) void operation.then(() => unsettled.delete(operation));
+			await allRefused.promise;
 			if (schedule === "serialized") {
-				for (const send of sends) results.push(await send());
+				for (const gate of gates) {
+					gate.resolve();
+					await Promise.race(unsettled);
+				}
 			} else {
-				const pending = sends.map(send => send());
-				await allRefused.promise;
 				gates[0].resolve();
 				await Promise.race(pending);
 				for (const gate of gates.slice(1)) gate.resolve();
-				results.push(...(await Promise.all(pending)));
 			}
+			const results = await Promise.all(pending);
 			expect(refusals).toBe(10);
 			expect(results.filter(result => result.stopReason !== "error").length).toBe(10);
 			expect(rig.mints() - before).toBe(1);
@@ -512,7 +516,8 @@ describe("a `!command` credential the provider refuses", () => {
 				if (!advanced) {
 					advanced = true;
 					fs.writeFileSync(tokenFile, "replacement-junk");
-					await remintCommandConfig(command, 1);
+					invalidateCommandConfig(command);
+					await resolveConfigValue(command);
 				}
 				return { "x-probe": "present" };
 			},

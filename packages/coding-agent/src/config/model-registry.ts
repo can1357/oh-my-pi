@@ -77,6 +77,7 @@ import {
 	hasUnrefusedCommandCredential,
 	invalidateCommandConfig,
 	isCommandConfigValue,
+	readUnrefusedConfigHeaders,
 	refuseCommandGeneration,
 	remintCommandConfig,
 	resolveConfigCredential,
@@ -3853,13 +3854,25 @@ export class ModelRegistry {
 					signal: options?.signal,
 				});
 		if (!resolved || !headerResolver) return resolved;
-		// The attempt sends this snapshot, not a second resolution of the live
-		// cache paired with provenance from the earlier credential resolution.
+		// Values and provenance stay paired. The send-time read only replaces
+		// generations already condemned by the refusal watermark, without resolving.
 		const headers = await headerResolver(options?.signal);
 		const headerGenerations = configHeaderGenerations(headers);
-		return headers && headerGenerations
-			? { ...resolved, headerGenerations: Object.freeze(headerGenerations), resolvedHeaders: Object.freeze(headers) }
-			: resolved;
+		if (!headers || !headerGenerations) return resolved;
+		const snapshot = {
+			resolvedHeaders: Object.freeze(headers),
+			headerGenerations: Object.freeze(headerGenerations),
+		};
+		return {
+			...resolved,
+			...snapshot,
+			readHeaders: async () => {
+				const current = await readUnrefusedConfigHeaders(headers);
+				return current === headers
+					? snapshot
+					: { resolvedHeaders: Object.freeze(current), headerGenerations: configHeaderGenerations(current) };
+			},
+		};
 	}
 
 	/**

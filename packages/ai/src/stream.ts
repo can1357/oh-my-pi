@@ -18,6 +18,7 @@ import { getCustomApi } from "./api-registry";
 import {
 	createAuthRetryKeyState,
 	isApiKeyResolver,
+	readApiKeyHeaders,
 	resolvedApiKeyBearer,
 	resolvedCredentialGeneration,
 	resolveNextAuthRetryKey,
@@ -1322,7 +1323,9 @@ function streamSimpleRequest<TApi extends Api>(
 			let headerGenerations: Record<string, number> | undefined;
 			let resolvedHeaders: Record<string, string> | undefined;
 			try {
-				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
+				const resolved = await readApiKeyHeaders(
+					await apiKeyResolver({ lastChance: false, error: undefined, signal }),
+				);
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
