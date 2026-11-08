@@ -255,6 +255,10 @@
 - Claude no longer receives the reasoning kept in a snapcompact archive whose summary an extension wrote without the reasoning legend, with or without image input, and reads that summary's own words instead of a generic one ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `~/.omp/agent/agent.db` getting corrupted (wiping stored logins) on Linux when grep, `read`, the bash tool, extensions or eval read it while omp has it open; `write` and `tts` now refuse to overwrite a database omp holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 
+### Fixed
+
+- Fixed `generate_image` hiding each provider's error when every model in the image chain fails; the error now lists why each one failed ([#17701](https://github.com/can1357/oh-my-pi/issues/17701), [#17703](https://github.com/can1357/oh-my-pi/pull/17703) by [@Lynricsy](https://github.com/Lynricsy))
+
 ## [18.15.0] - 2026-11-01
 
 ### Added
