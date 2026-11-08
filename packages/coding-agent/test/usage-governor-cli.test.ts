@@ -279,8 +279,9 @@ describe("usage governor CLI proof: scenarios", () => {
 		const proof = await GovernorProof.create(specs, { enabled: true });
 		try {
 			proof.fake.syncAllWindows();
-			for (let index = 0; index < 5; index += 1) {
+			for (let index = 0; index < 12; index += 1) {
 				expect((await proof.runOmp(["-p", `route ${index}`])).exitCode).toBe(0);
+				if (proof.chats().some(record => record.label === "b")) break;
 			}
 			const chats = proof.chats();
 			const order = chats.map(record => record.label);
@@ -300,14 +301,18 @@ describe("usage governor CLI proof: scenarios", () => {
 			expect(lastA).toBeDefined();
 			expect(overLine(lastA!)).toBe(false);
 
-			// At the moment of switch, the next request on A exceeds A's allowance line, forcing the move to B.
+			// Compare at the last usage observation before the switch, not the later dispatch.
 			const firstBChat = chats[firstB];
 			expect(firstBChat).toBeDefined();
+			const switchObservation = proof.fake.records.findLast(
+				record => record.kind === "usage" && record.label === "a" && record.atMs <= firstBChat.atMs,
+			);
+			expect(switchObservation).toBeDefined();
 			expect(
 				overLine({
 					usedFraction: (lastA?.usedFraction ?? 0) + specs[0].perRequest,
 					resetsAt: lastA!.resetsAt!,
-					atMs: firstBChat.atMs,
+					atMs: switchObservation!.atMs,
 				}),
 			).toBe(true);
 
