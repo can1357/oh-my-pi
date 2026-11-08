@@ -118,6 +118,9 @@
 - Prewalk no longer hands a subagent to its cheap model when the subagent messages its parent or another agent (`write agent://…`) before its first file edit ([#18322](https://github.com/can1357/oh-my-pi/pull/18322) by [@1vivy](https://github.com/1vivy))
 - Edit auto-repair checks the session cost cap before each retry and counts a failed retry's cost, so a cap reached while waiting stops the next request ([#18459](https://github.com/can1357/oh-my-pi/pull/18459) by [@eggpeat](https://github.com/eggpeat))
 - `lsp reload` stops the old language server when a config change supersedes one shared through the LSP mux, instead of leaving it running for 5 minutes while reporting it stopped ([#17660](https://github.com/can1357/oh-my-pi/issues/17660)) ([#18254](https://github.com/can1357/oh-my-pi/pull/18254) by [@Alex-Wengg](https://github.com/Alex-Wengg))
+### Fixed
+
+- Starting omp with a prompt (`omp "…"` or `--goal`) reports `working` from the first frame instead of `idle`, so OSC 7501 supervisors such as `hc wait` no longer treat the session as finished before the prompt runs ([#18270](https://github.com/can1357/oh-my-pi/pull/18270) by [@matteoantoci](https://github.com/matteoantoci))
 
 ## [18.17.0] - 2026-11-06
 
