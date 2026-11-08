@@ -41,7 +41,6 @@
 - When extensions register one shortcut in different spellings (`alt+ctrl+x` and `ctrl+alt+x`, or `?` and `shift+?`), only the last one loaded is bound, as with identical spellings, instead of the first silently winning
 - Building from source works again instead of stopping at the dependency install ([#18074](https://github.com/can1357/oh-my-pi/pull/18074) by [@Maziar123](https://github.com/Maziar123))
 - Validated security findings now show their validation status, timestamp, and summary on `security://` finding pages, with status in findings lists ([#18084](https://github.com/can1357/oh-my-pi/issues/18084))
-
 - `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
 - Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
 - The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm
