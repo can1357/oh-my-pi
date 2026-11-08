@@ -387,6 +387,55 @@ export function parseListTasksParams(params: unknown): ParsedListTasks {
 		offset,
 	};
 }
+/** One bridge-created spawn whose registration has not been discarded. */
+export interface PendingSpawnRecord {
+	/** Stable SUBMITTED view captured when the spawn was reserved. */
+	task: A2aTask;
+	registration: Promise<AgentRef>;
+	/** Creation time in epoch ms, so ListTasks can order this row with registry refs. */
+	createdAt: number;
+	outcome: "pending" | "resolved" | "rejected";
+	/** The registration promise's exact ref, once it resolves. */
+	ref?: AgentRef;
+	reason?: string;
+	/** Terminal view captured once, so a rejection does not mint a new timestamp per read. */
+	failedTask?: A2aTask;
+	cancelRequested: boolean;
+}
+
+/** Bridge-owned pending spawns shared by SendMessage, GetTask, ListTasks, and SSE. */
+export class PendingSpawnLedger {
+	readonly #records = new Map<string, PendingSpawnRecord>();
+	readonly #listeners = new Set<(id: string) => void>();
+
+	get(id: string): PendingSpawnRecord | undefined {
+		return this.#records.get(id);
+	}
+
+	records(): PendingSpawnRecord[] {
+		return [...this.#records.values()];
+	}
+
+	track(record: PendingSpawnRecord): void {
+		this.#records.set(record.task.id, record);
+	}
+
+	subscribe(listener: (id: string) => void): () => void {
+		this.#listeners.add(listener);
+		return () => {
+			this.#listeners.delete(listener);
+		};
+	}
+
+	notify(id: string): void {
+		for (const listener of this.#listeners) listener(id);
+	}
+
+	/** Drop every stream subscription. Called when the server closes. */
+	release(): void {
+		this.#listeners.clear();
+	}
+}
 
 export interface A2aDispatchDeps {
 	registry: Pick<AgentRegistryApi, "get" | "list" | "setStatus">;
@@ -408,6 +457,11 @@ export interface A2aDispatchDeps {
 	contextIds?: Map<string, string>;
 	/** Notified when a peer request with a reply identity is delivered here. */
 	noteIncomingRequest?: (request: A2aIncomingRequest) => void;
+	/**
+	 * Pending spawns created by this bridge. Absent only for callers that never
+	 * spawn; the live server always installs one ledger for every view.
+	 */
+	pendingSpawns?: PendingSpawnLedger;
 }
 
 /** A delivered peer request that expects an answer (A2). */
@@ -481,6 +535,148 @@ function persistTask(
 	return created && request.contextId !== undefined ? { ...task, contextId: request.contextId } : task;
 }
 
+function registrationFailureReason(reason: unknown): string {
+	return reason instanceof Error ? reason.message : String(reason);
+}
+
+function failPendingRecord(record: PendingSpawnRecord, reason: string): void {
+	const at = new Date().toISOString();
+	record.outcome = "rejected";
+	record.reason = reason;
+	record.failedTask = {
+		...record.task,
+		status: {
+			state: TASK_STATE.FAILED,
+			timestamp: at,
+			message: {
+				messageId: `${record.task.id}:registration-failed:${at}`,
+				role: "ROLE_AGENT",
+				parts: [{ text: reason }],
+			},
+		},
+	};
+}
+
+/** Own the registration's exact ref, or drop the id when a replacement already holds it. */
+function claimResolvedRef(deps: A2aDispatchDeps, ref: AgentRef): void {
+	const current = deps.registry.get(ref.id);
+	if ((current !== undefined && current !== ref) || (deps.createdTaskRefs?.get(ref.id) ?? ref) !== ref) {
+		deps.createdTaskRefs?.delete(ref.id);
+		deps.createdTaskIds?.delete(ref.id);
+		deps.contextIds?.delete(ref.id);
+		return;
+	}
+	deps.createdTaskRefs?.set(ref.id, ref);
+}
+
+/**
+ * Abort one owned generation. A different ref now stored under the same id is a
+ * replacement: its session is never aborted and its status is never stamped.
+ */
+async function abortOwnedRef(deps: A2aDispatchDeps, ref: AgentRef): Promise<void> {
+	const current = deps.registry.get(ref.id);
+	if (current !== undefined && current !== ref) {
+		if (!TERMINAL_TASK_STATES.has(mapAgentStatus(ref))) {
+			await ref.session?.abort({ reason: "a2a CancelTask" });
+		}
+		return;
+	}
+	if (TERMINAL_TASK_STATES.has(mapAgentStatus(ref))) return;
+	await ref.session?.abort({ reason: "a2a CancelTask" });
+	const after = deps.registry.get(ref.id);
+	if (after === ref && !TERMINAL_TASK_STATES.has(mapAgentStatus(after))) {
+		deps.registry.setStatus(ref.id, "aborted", ref);
+	}
+}
+
+async function onRegistrationResolved(deps: A2aDispatchDeps, record: PendingSpawnRecord, ref: AgentRef): Promise<void> {
+	record.outcome = "resolved";
+	record.ref = ref;
+	claimResolvedRef(deps, ref);
+	if (record.cancelRequested) await abortOwnedRef(deps, ref);
+	deps.pendingSpawns?.notify(record.task.id);
+}
+
+function onRegistrationRejected(deps: A2aDispatchDeps, record: PendingSpawnRecord, reason: unknown): void {
+	failPendingRecord(record, registrationFailureReason(reason));
+	deps.pendingSpawns?.notify(record.task.id);
+}
+
+/** Remember a reserved spawn and settle it from its registration promise, not from registry absence. */
+function trackPendingSpawn(
+	deps: A2aDispatchDeps,
+	task: A2aTask,
+	registration: Promise<AgentRef>,
+	createdAt: number,
+): void {
+	const ledger = deps.pendingSpawns;
+	if (!ledger) return;
+	const record: PendingSpawnRecord = {
+		task,
+		registration,
+		createdAt,
+		outcome: "pending",
+		cancelRequested: false,
+	};
+	ledger.track(record);
+	void registration
+		.then(
+			ref => onRegistrationResolved(deps, record, ref),
+			reason => {
+				onRegistrationRejected(deps, record, reason);
+			},
+		)
+		.catch(() => {
+			ledger.notify(record.task.id);
+		});
+}
+
+/**
+ * The task every view serves for `id`: a live registry ref, the stable pending
+ * row, the registration's resolved ref, or the registration failure. Undefined
+ * when nothing owns the id (advisors included).
+ */
+export function snapshotA2aTask(deps: A2aDispatchDeps, id: string): A2aTask | undefined {
+	const record = deps.pendingSpawns?.get(id);
+	const addressed = resolveAddressedRef(deps.registry, id, deps.identityName);
+	if (record?.outcome === "rejected") {
+		if (addressed && addressed !== record.ref) return taskFor(addressed, deps);
+		return record.failedTask;
+	}
+	if (record?.outcome === "resolved" && record.ref) {
+		const current = deps.registry.get(record.ref.id);
+		if (current) return taskFor(current, deps);
+		return taskFor(record.ref, deps);
+	}
+	if (record?.outcome === "pending") {
+		if (addressed) return taskFor(addressed, deps);
+		return record.task;
+	}
+	if (!addressed) return undefined;
+	return taskFor(addressed, deps);
+}
+
+/** Registry refs plus ledger rows that are not already represented, in stable creation order. */
+function listA2aTaskRows(deps: A2aDispatchDeps): Array<{ createdAt: number; task: A2aTask }> {
+	const rows: Array<{ createdAt: number; id: string; task: A2aTask }> = [];
+	const seen = new Set<string>();
+	for (const ref of deps.registry.list()) {
+		if (ref.kind === "advisor") continue;
+		const task = snapshotA2aTask(deps, ref.id);
+		if (!task) continue;
+		rows.push({ createdAt: ref.createdAt, id: ref.id, task });
+		seen.add(ref.id);
+	}
+	for (const record of deps.pendingSpawns?.records() ?? []) {
+		if (seen.has(record.task.id)) continue;
+		const task = snapshotA2aTask(deps, record.task.id);
+		if (!task) continue;
+		rows.push({ createdAt: record.createdAt, id: task.id, task });
+	}
+	rows.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+	return rows;
+}
+
 /**
  * Deliver one SendMessage: to an addressed agent through the bus (a receipt is
  * returned in the task metadata), or as a full spawn when no recipient is named.
@@ -544,20 +740,26 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 			...(request.context !== undefined ? { context: request.context } : {}),
 		});
 	} catch (error) {
-		// The run was reserved and is still starting: report the id as SUBMITTED
-		// rather than a failure, so a client does not retry into a duplicate agent.
+		// The run was reserved and is still starting. Keep its registration
+		// promise: absence from the registry is not a failure, and a second
+		// SendMessage for the same id must not reset the stable timestamp.
 		if (error instanceof SpawnPendingError) {
-			return persistTask(
+			const existing = deps.pendingSpawns?.get(error.agentId);
+			if (existing?.outcome === "pending") return existing.task;
+			const createdAt = Date.now();
+			const task = persistTask(
 				{
 					id: error.agentId,
 					contextId: MAIN_AGENT_ID,
-					status: { state: TASK_STATE.SUBMITTED, timestamp: new Date().toISOString() },
+					status: { state: TASK_STATE.SUBMITTED, timestamp: new Date(createdAt).toISOString() },
 					metadata: { agentId: error.agentId, spawned: true, pending: true },
 				},
 				request,
 				deps,
 				true,
 			);
+			trackPendingSpawn(deps, task, error.registration, createdAt);
+			return task;
 		}
 		if (isSpawnRejection(error)) {
 			throw new RpcError(RPC_ERRORS.AGENT_REJECTED, error.message, {
@@ -621,20 +823,14 @@ export async function dispatchA2aMethod(method: string, params: unknown, deps: A
 		}
 		case "GetTask": {
 			const id = parseTaskIdParams(params);
-			const ref = resolveAddressedRef(deps.registry, id, deps.identityName);
-			if (!ref) throw new RpcError(RPC_ERRORS.TASK_NOT_FOUND, `Task not found: ${id}`, { httpStatus: 404 });
-			return attachOutputArtifact(taskFor(ref, deps), deps.readOutput);
+			const task = snapshotA2aTask(deps, id);
+			if (!task) throw new RpcError(RPC_ERRORS.TASK_NOT_FOUND, `Task not found: ${id}`, { httpStatus: 404 });
+			return attachOutputArtifact(task, deps.readOutput);
 		}
 		case "ListTasks": {
 			const request = parseListTasksParams(params);
-			const refs = deps.registry
-				.list()
-				.filter(ref => ref.kind !== "advisor")
-				// Stable creation order, not lastActivity: activity churn must not
-				// reorder pages between two ListTasks calls (A9).
-				.sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
-			const tasks = refs
-				.map(ref => taskFor(ref, deps))
+			const tasks = listA2aTaskRows(deps)
+				.map(row => row.task)
 				.filter(
 					task =>
 						(request.contextId === undefined || task.contextId === request.contextId) &&
@@ -652,8 +848,27 @@ export async function dispatchA2aMethod(method: string, params: unknown, deps: A
 		}
 		case "CancelTask": {
 			const id = parseTaskIdParams(params);
+			const pending = deps.pendingSpawns?.get(id);
+			// Registration is still open: record intent and apply it to that exact
+			// ref when the promise settles. Do not abort whatever currently occupies the id.
+			if (pending?.outcome === "pending") {
+				if (!deps.createdTaskIds?.has(id)) {
+					throw new RpcError(RPC_ERRORS.TASK_NOT_CANCELABLE, `Task is not cancelable through A2A: ${id}`, {
+						httpStatus: 400,
+					});
+				}
+				pending.cancelRequested = true;
+				return pending.task;
+			}
 			const ref = resolveAddressedRef(deps.registry, id, deps.identityName);
-			if (!ref) throw new RpcError(RPC_ERRORS.TASK_NOT_FOUND, `Task not found: ${id}`, { httpStatus: 404 });
+			if (!ref) {
+				if (pending?.outcome === "rejected") {
+					throw new RpcError(RPC_ERRORS.TASK_NOT_CANCELABLE, `Task is already terminal: ${id}`, {
+						httpStatus: 400,
+					});
+				}
+				throw new RpcError(RPC_ERRORS.TASK_NOT_FOUND, `Task not found: ${id}`, { httpStatus: 404 });
+			}
 			// Only tasks created through this bridge may be canceled. Main and local
 			// subagents belong to the local session, not to a remote caller (A8).
 			if (
@@ -670,13 +885,7 @@ export async function dispatchA2aMethod(method: string, params: unknown, deps: A
 					httpStatus: 400,
 				});
 			}
-			await ref.session?.abort({ reason: "a2a CancelTask" });
-			// Re-check terminality and generation after abort: a completion or a
-			// newer ref for this id must not be stamped `aborted` (A8).
-			const current = deps.registry.get(ref.id);
-			if (current === ref && !TERMINAL_TASK_STATES.has(mapAgentStatus(current))) {
-				deps.registry.setStatus(ref.id, "aborted", ref);
-			}
+			await abortOwnedRef(deps, ref);
 			return taskFor(ref, deps);
 		}
 		default:

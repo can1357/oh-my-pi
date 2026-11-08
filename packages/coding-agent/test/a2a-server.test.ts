@@ -8,7 +8,7 @@
  * `send` on the bus, so a fake pins exactly the surface the bridge relies on.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -128,6 +128,11 @@ class FakeRegistry {
 		this.#refs.set(ref.id, ref);
 		this.#emit({ type: "registered", ref });
 		return ref;
+	}
+	/** Insert an exact ref so a test can pin generation identity. */
+	insert(ref: AgentRef, notify = true): void {
+		this.#refs.set(ref.id, ref);
+		if (notify) this.#emit({ type: "registered", ref });
 	}
 
 	emit(event: RegistryEvent): void {
@@ -822,8 +827,15 @@ describe("A2A opt-in", () => {
 	});
 });
 
+interface SseReader {
+	until(predicate: (text: string) => boolean): Promise<void>;
+	toEnd(): Promise<void>;
+	readonly text: string;
+	cancel(): void;
+}
+
 /** One reader over an SSE response: `until` waits for a frame, `toEnd` for the close. */
-function openSse(response: Response) {
+function openSse(response: Response): SseReader {
 	const reader = response.body!.getReader();
 	const decoder = new TextDecoder();
 	let text = "";
@@ -1160,6 +1172,391 @@ describe("A2A streaming a pending spawn", () => {
 		} finally {
 			sse.cancel();
 		}
+	});
+});
+
+/** RPC result that is the task itself (`GetTask`, `CancelTask`). */
+function rpcTask(json: unknown): A2aTask {
+	const body = asObject(json, "response");
+	expect(body.error, JSON.stringify(body.error)).toBeUndefined();
+	return body.result as A2aTask;
+}
+
+function listResult(json: unknown): { tasks: A2aTask[]; nextPageToken: string; totalSize: number } {
+	const result = asObject(asObject(json, "response").result, "result");
+	return {
+		tasks: result.tasks as A2aTask[],
+		nextPageToken: String(result.nextPageToken),
+		totalSize: result.totalSize as number,
+	};
+}
+
+function sseData(text: string): unknown[] {
+	const frames: unknown[] = [];
+	for (const block of text.split("\n\n")) {
+		const line = block.split("\n").find(row => row.startsWith("data:"));
+		if (!line) continue;
+		frames.push(JSON.parse(line.slice("data:".length).trim()));
+	}
+	return frames;
+}
+
+interface SseStatusUpdate {
+	state?: string;
+	final?: boolean;
+	reason?: string;
+}
+
+function optionalRecord(value: unknown): JsonObject | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	// Guarded JSON object; callers read fields they then narrow.
+	const record: JsonObject = value as JsonObject;
+	return record;
+}
+
+function sseStatusUpdates(text: string): SseStatusUpdate[] {
+	const updates: SseStatusUpdate[] = [];
+	for (const frame of sseData(text)) {
+		const result = optionalRecord(optionalRecord(frame)?.result);
+		const update = optionalRecord(result?.statusUpdate);
+		if (!update) continue;
+		const status = optionalRecord(update.status);
+		const message = optionalRecord(status?.message);
+		const parts = message?.parts;
+		const part = Array.isArray(parts) ? optionalRecord(parts[0]) : undefined;
+		const reason = typeof part?.text === "string" ? part.text : undefined;
+		updates.push({
+			state: typeof status?.state === "string" ? status.state : undefined,
+			final: update.final === true,
+			...(reason !== undefined ? { reason } : {}),
+		});
+	}
+	return updates;
+}
+
+function initialSseTask(text: string): A2aTask {
+	for (const frame of sseData(text)) {
+		const task = optionalRecord(optionalRecord(frame)?.result)?.task;
+		if (task !== undefined) return task as A2aTask;
+	}
+	throw new Error(`SSE stream has no initial task: ${text}`);
+}
+
+async function openSpawnStream(
+	handle: A2aServerHandle,
+	messageId: string,
+	contextId?: string,
+): Promise<{ response: Response; sse: SseReader }> {
+	const response = await fetch(handle.url, {
+		method: "POST",
+		headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+		body: JSON.stringify({
+			jsonrpc: "2.0",
+			id: 40,
+			method: "SendStreamingMessage",
+			params: {
+				message: {
+					messageId,
+					role: "ROLE_USER",
+					parts: [{ text: "start late" }],
+					...(contextId !== undefined ? { contextId } : {}),
+				},
+			},
+		}),
+	});
+	expect(response.status).toBe(200);
+	expect(response.headers.get("content-type")).toContain("text/event-stream");
+	return { response, sse: openSse(response) };
+}
+
+const sendPending = (messageId: string, contextId?: string) => ({
+	jsonrpc: "2.0",
+	id: 41,
+	method: "SendMessage",
+	params: {
+		message: {
+			messageId,
+			role: "ROLE_USER",
+			parts: [{ text: "start late" }],
+			...(contextId !== undefined ? { contextId } : {}),
+		},
+	},
+});
+
+describe("A2A pending spawn lifecycle", () => {
+	function pendingServer(id: string, refs: AgentRef[] = []) {
+		const registration = Promise.withResolvers<AgentRef>();
+		const registry = new FakeRegistry(refs);
+		const events: RegistryEvent[] = [];
+		registry.onChange(event => events.push(event));
+		const started = startServer({
+			registry,
+			spawn: async () => {
+				throw new SpawnPendingError(id, registration.promise);
+			},
+		});
+		return { registration, events, ...started, registry };
+	}
+
+	it("keeps an unresolved registration SUBMITTED in every view past 30 seconds", async () => {
+		const started = Date.now();
+		const id = "Spawn-late";
+		const { handle } = pendingServer(id, [
+			makeRef({ id: "alpha", createdAt: started - 1_000, status: "running" }),
+			makeRef({ id: "gamma", createdAt: started + 1_000, status: "idle" }),
+		]);
+		setSystemTime(started);
+		let sse: SseReader | undefined;
+		try {
+			const sent = await rpc(handle, sendPending("m-pending", "ctx-pending"));
+			const submitted = taskResult(sent.json);
+			expect(submitted.id).toBe(id);
+			expect(submitted.status.state).toBe(TASK_STATE.SUBMITTED);
+			expect(submitted.contextId).toBe("ctx-pending");
+			const submittedAt = submitted.status.timestamp;
+			expect(submittedAt).toBe(new Date(started).toISOString());
+
+			setSystemTime(started + 31_000);
+			const got = rpcTask((await rpc(handle, { jsonrpc: "2.0", id: 2, method: "GetTask", params: { id } })).json);
+			expect(got).toMatchObject({
+				id,
+				contextId: "ctx-pending",
+				status: { state: TASK_STATE.SUBMITTED, timestamp: submittedAt },
+			});
+
+			const filtered = listResult(
+				(
+					await rpc(handle, {
+						jsonrpc: "2.0",
+						id: 3,
+						method: "ListTasks",
+						params: { contextId: "ctx-pending", status: TASK_STATE.SUBMITTED },
+					})
+				).json,
+			);
+			expect(filtered.tasks.map(task => task.id)).toEqual([id]);
+			expect(filtered.tasks[0]?.status).toMatchObject({ state: TASK_STATE.SUBMITTED, timestamp: submittedAt });
+
+			const otherContext = listResult(
+				(
+					await rpc(handle, {
+						jsonrpc: "2.0",
+						id: 4,
+						method: "ListTasks",
+						params: { contextId: "ctx-other" },
+					})
+				).json,
+			);
+			expect(otherContext.tasks).toEqual([]);
+
+			const page = listResult(
+				(await rpc(handle, { jsonrpc: "2.0", id: 5, method: "ListTasks", params: { pageSize: 2 } })).json,
+			);
+			expect(page.tasks.map(task => task.id)).toEqual(["alpha", id]);
+			expect(page.nextPageToken).toBe("2");
+			expect(page.totalSize).toBe(3);
+			const rest = listResult(
+				(
+					await rpc(handle, {
+						jsonrpc: "2.0",
+						id: 6,
+						method: "ListTasks",
+						params: { pageSize: 2, pageToken: page.nextPageToken },
+					})
+				).json,
+			);
+			expect(rest.tasks.map(task => task.id)).toEqual(["gamma"]);
+
+			sse = (await openSpawnStream(handle, "m-stream", "ctx-stream")).sse;
+			await sse.until(text => text.includes('"result":{"task"'));
+			const streamed = initialSseTask(sse.text);
+			expect(streamed.status.state).toBe(TASK_STATE.SUBMITTED);
+			const streamedGot = rpcTask(
+				(await rpc(handle, { jsonrpc: "2.0", id: 7, method: "GetTask", params: { id: streamed.id } })).json,
+			);
+			expect(streamedGot.status.state).toBe(TASK_STATE.SUBMITTED);
+			expect(streamedGot.status.timestamp).toBe(streamed.status.timestamp);
+
+			setSystemTime(started + 62_000);
+			// Bun.serve already armed the SSE poll on the real clock. Fake timers
+			// would freeze that interval and the open fetch, so this waits out a few
+			// 20ms polls after the clock jump instead of advancing a fake clock.
+			const grace = Promise.withResolvers<boolean>();
+			const graceTimer = setTimeout(() => grace.resolve(false), 80);
+			const ended = await Promise.race([
+				sse.toEnd().then(
+					() => true,
+					() => true,
+				),
+				grace.promise,
+			]);
+			clearTimeout(graceTimer);
+			expect(ended).toBe(false);
+			expect(sse.text).not.toContain("TASK_STATE_FAILED");
+			const still = rpcTask((await rpc(handle, { jsonrpc: "2.0", id: 8, method: "GetTask", params: { id } })).json);
+			expect(still.status).toMatchObject({ state: TASK_STATE.SUBMITTED, timestamp: submittedAt });
+		} finally {
+			sse?.cancel();
+			setSystemTime();
+		}
+	});
+
+	it("publishes the registered ref in every view once, without a duplicate row", async () => {
+		const id = "Spawn-late";
+		const { handle, registration, registry } = pendingServer(id, [
+			makeRef({ id: "alpha", createdAt: 1_000, status: "running" }),
+		]);
+		const sse = (await openSpawnStream(handle, "m-resolve", "ctx-pending")).sse;
+		try {
+			await sse.until(text => text.includes("TASK_STATE_SUBMITTED"));
+			const sent = await rpc(handle, sendPending("m-send", "ctx-pending"));
+			expect(taskResult(sent.json).status.state).toBe(TASK_STATE.SUBMITTED);
+
+			const ref = makeRef({ id, status: "running", createdAt: 1_500, activity: "booting" });
+			registration.resolve(ref);
+			await registration.promise;
+
+			const got = rpcTask((await rpc(handle, { jsonrpc: "2.0", id: 2, method: "GetTask", params: { id } })).json);
+			expect(got.status.state).toBe(TASK_STATE.WORKING);
+			expect(got.contextId).toBe("ctx-pending");
+			await sse.until(text => text.includes("TASK_STATE_WORKING"));
+
+			registry.insert(ref);
+			const listed = listResult(
+				(await rpc(handle, { jsonrpc: "2.0", id: 3, method: "ListTasks", params: {} })).json,
+			);
+			expect(listed.tasks.filter(task => task.id === id)).toHaveLength(1);
+			expect(listed.tasks.find(task => task.id === id)?.status.state).toBe(TASK_STATE.WORKING);
+			expect(listed.tasks.map(task => task.id)).toEqual(["alpha", id]);
+		} finally {
+			sse.cancel();
+		}
+	});
+
+	it("fails every view with the registration error and one final SSE update, without a registry event", async () => {
+		const id = "Spawn-late";
+		const { handle, registration, events } = pendingServer(id);
+		const sse = (await openSpawnStream(handle, "m-fail", "ctx-pending")).sse;
+		try {
+			await sse.until(text => text.includes("TASK_STATE_SUBMITTED"));
+			registration.reject(new Error("registration failed"));
+			await expect(registration.promise).rejects.toThrow("registration failed");
+
+			const got = rpcTask((await rpc(handle, { jsonrpc: "2.0", id: 2, method: "GetTask", params: { id } })).json);
+			expect(got.contextId).toBe("ctx-pending");
+			expect(got.status.state).toBe(TASK_STATE.FAILED);
+			expect(got.status.message?.parts[0]?.text).toBe("registration failed");
+			await sse.toEnd();
+			const failedUpdates = sseStatusUpdates(sse.text).filter(update => update.state === TASK_STATE.FAILED);
+			expect(failedUpdates).toEqual([{ state: TASK_STATE.FAILED, final: true, reason: "registration failed" }]);
+			expect(events).toEqual([]);
+			const listed = listResult(
+				(
+					await rpc(handle, {
+						jsonrpc: "2.0",
+						id: 3,
+						method: "ListTasks",
+						params: { contextId: "ctx-pending", status: TASK_STATE.FAILED },
+					})
+				).json,
+			);
+			expect(listed.tasks.map(task => task.status.message?.parts[0]?.text)).toEqual(["registration failed"]);
+		} finally {
+			sse.cancel();
+		}
+	});
+
+	it("records a pending cancel and aborts only that generation after registration", async () => {
+		const id = "Spawn-late";
+		let aborts = 0;
+		const owned = makeRef({
+			id,
+			status: "running",
+			createdAt: 1_500,
+			session: { abort: async () => void (aborts += 1) } as never,
+		});
+		const { handle, registration, registry } = pendingServer(id, [
+			makeRef({ id: "Main", kind: "main", status: "running" }),
+		]);
+		const sse = (await openSpawnStream(handle, "m-cancel", "ctx-pending")).sse;
+		try {
+			await sse.until(text => text.includes("TASK_STATE_SUBMITTED"));
+			const refused = await rpc(handle, { jsonrpc: "2.0", id: 9, method: "CancelTask", params: { id: "Main" } });
+			expect(errorResult(refused.json).code).toBe(RPC_ERRORS.TASK_NOT_CANCELABLE);
+
+			const canceled = rpcTask(
+				(await rpc(handle, { jsonrpc: "2.0", id: 2, method: "CancelTask", params: { id } })).json,
+			);
+			expect(canceled.status.state).toBe(TASK_STATE.SUBMITTED);
+			expect(aborts).toBe(0);
+			expect(sse.text).not.toContain('"final":true');
+
+			registry.insert(owned);
+			registration.resolve(owned);
+			await registration.promise;
+			await sse.until(text => text.includes("TASK_STATE_CANCELED"));
+			expect(aborts).toBe(1);
+			await sse.toEnd();
+			const updates = sseStatusUpdates(sse.text);
+			expect(updates.filter(update => update.state === TASK_STATE.CANCELED && update.final)).toHaveLength(1);
+
+			const got = rpcTask((await rpc(handle, { jsonrpc: "2.0", id: 3, method: "GetTask", params: { id } })).json);
+			expect(got.status.state).toBe(TASK_STATE.CANCELED);
+			const listed = listResult(
+				(await rpc(handle, { jsonrpc: "2.0", id: 4, method: "ListTasks", params: { contextId: "ctx-pending" } }))
+					.json,
+			);
+			expect(listed.tasks.map(task => task.status.state)).toEqual([TASK_STATE.CANCELED]);
+		} finally {
+			sse.cancel();
+		}
+	});
+
+	it("fails a pending cancel when registration rejects and never aborts a same-id replacement", async () => {
+		const id = "Spawn-late";
+		let ownedAborts = 0;
+		let replacementAborts = 0;
+		const owned = makeRef({
+			id,
+			status: "running",
+			session: { abort: async () => void (ownedAborts += 1) } as never,
+		});
+		const replacement = makeRef({
+			id,
+			status: "running",
+			session: { abort: async () => void (replacementAborts += 1) } as never,
+		});
+		const rejected = pendingServer(id);
+		await rpc(rejected.handle, sendPending("m-reject", "ctx-pending"));
+		const canceled = rpcTask(
+			(await rpc(rejected.handle, { jsonrpc: "2.0", id: 1, method: "CancelTask", params: { id } })).json,
+		);
+		expect(canceled.status.state).toBe(TASK_STATE.SUBMITTED);
+		rejected.registration.reject(new Error("registration failed"));
+		await expect(rejected.registration.promise).rejects.toThrow("registration failed");
+		const failed = rpcTask(
+			(await rpc(rejected.handle, { jsonrpc: "2.0", id: 2, method: "GetTask", params: { id } })).json,
+		);
+		expect(failed.status.state).toBe(TASK_STATE.FAILED);
+		expect(failed.status.message?.parts[0]?.text).toBe("registration failed");
+		expect(ownedAborts).toBe(0);
+
+		const replaced = pendingServer(id);
+		await rpc(replaced.handle, sendPending("m-replace", "ctx-pending"));
+		const pendingCancel = rpcTask(
+			(await rpc(replaced.handle, { jsonrpc: "2.0", id: 3, method: "CancelTask", params: { id } })).json,
+		);
+		expect(pendingCancel.status.state).toBe(TASK_STATE.SUBMITTED);
+		replaced.registry.insert(replacement);
+		replaced.registration.resolve(owned);
+		await replaced.registration.promise;
+		expect(replacementAborts).toBe(0);
+		expect(ownedAborts).toBe(1);
+		expect(replaced.registry.get(id)?.status).toBe("running");
+		const live = rpcTask(
+			(await rpc(replaced.handle, { jsonrpc: "2.0", id: 4, method: "GetTask", params: { id } })).json,
+		);
+		expect(live.status.state).toBe(TASK_STATE.WORKING);
 	});
 });
 

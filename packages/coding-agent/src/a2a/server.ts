@@ -30,12 +30,14 @@ import type { AgentDefinition } from "../task/types";
 import { buildAgentCard, type AgentCard } from "./card";
 import {
 	A2A_SENDER_ID,
+	type A2aDispatchDeps,
 	type A2aIncomingRequest,
 	type A2aTask,
 	type JsonRpcFailure,
 	type JsonRpcId,
 	type JsonRpcSuccess,
 	type TaskStatusUpdateEvent,
+	PendingSpawnLedger,
 	RPC_ERRORS,
 	RpcError,
 	TASK_STATE,
@@ -43,7 +45,7 @@ import {
 	dispatchA2aMethod,
 	failedDeliveryTask,
 	sendA2aMessage,
-	taskFromAgentRef,
+	snapshotA2aTask,
 } from "./rpc";
 
 /** The bridge never binds anything else: an A2A endpoint on a LAN is an open door. */
@@ -51,8 +53,9 @@ export const A2A_HOST = "127.0.0.1";
 export const DEFAULT_A2A_PORT = 7391;
 export const AGENT_CARD_PATH = "/.well-known/agent-card.json";
 export const A2A_TOKEN_FILENAME = "a2a.token";
-/** How long a stream waits on a SUBMITTED (reserved, not yet registered) spawn. */
-const PENDING_SPAWN_GRACE_MS = 30_000;
+function taskSignature(task: A2aTask): string {
+	return `${task.status.state}|${task.status.timestamp ?? ""}|${task.status.message?.parts[0]?.text ?? ""}`;
+}
 const RPC_PATHS: ReadonlySet<string> = new Set(["/", "/rpc"]);
 
 /** The bus surface the bridge uses: one fire-and-forget delivery. */
@@ -143,12 +146,14 @@ function streamTaskResponse(
 	id: JsonRpcId,
 	task: A2aTask,
 	options: Pick<A2aServerOptions, "registry" | "streamPollMs">,
+	deps: A2aDispatchDeps,
 	activeStreams: Set<() => void>,
 ): Response {
 	const encoder = new TextEncoder();
 	let closed = false;
 	let timer: ReturnType<typeof setInterval> | undefined;
-	let unsubscribe: (() => void) | undefined;
+	let unsubscribeRegistry: (() => void) | undefined;
+	let unsubscribeLedger: (() => void) | undefined;
 	let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
 
 	const frame = (result: unknown): void => {
@@ -159,7 +164,8 @@ function streamTaskResponse(
 		if (closed) return;
 		closed = true;
 		clearInterval(timer);
-		unsubscribe?.();
+		unsubscribeRegistry?.();
+		unsubscribeLedger?.();
 		activeStreams.delete(stop);
 		if (close) {
 			try {
@@ -171,15 +177,14 @@ function streamTaskResponse(
 	};
 	const stop = (): void => settle(true);
 	activeStreams.add(stop);
-	let lastSignature = `${task.status.state}|${task.status.timestamp ?? ""}`;
-	// A SUBMITTED task is a reserved spawn whose run is still starting: its id
-	// is not in the registry yet, and that must not read as a terminal failure.
-	let pendingUntil = task.metadata?.pending === true ? Date.now() + PENDING_SPAWN_GRACE_MS : 0;
+	let lastSignature = taskSignature(task);
 	const emit = (): void => {
 		if (closed) return;
-		const ref = options.registry.get(task.id);
-		if (!ref) {
-			if (pendingUntil > 0 && Date.now() < pendingUntil) return;
+		const snapshot = snapshotA2aTask(deps, task.id);
+		// A non-pending ref that disappeared is still a terminal failure. A
+		// pending registration stays SUBMITTED until its promise settles, so
+		// snapshot is defined and this branch does not run.
+		if (!snapshot) {
 			const update: TaskStatusUpdateEvent = {
 				taskId: task.id,
 				contextId: task.contextId ?? "",
@@ -190,9 +195,7 @@ function streamTaskResponse(
 			stop();
 			return;
 		}
-		pendingUntil = 0;
-		const snapshot = taskFromAgentRef(ref);
-		const signature = `${snapshot.status.state}|${snapshot.status.timestamp ?? ""}|${ref.activity ?? ""}`;
+		const signature = taskSignature(snapshot);
 		if (signature === lastSignature) return;
 		lastSignature = signature;
 		const final = TERMINAL_TASK_STATES.has(snapshot.status.state);
@@ -224,9 +227,14 @@ function streamTaskResponse(
 				stop();
 				return;
 			}
-			unsubscribe = options.registry.onChange(event => {
+			unsubscribeRegistry = options.registry.onChange(event => {
 				if (event.ref.id === task.id) emit();
 			});
+			unsubscribeLedger = deps.pendingSpawns?.subscribe(changedId => {
+				if (changedId === task.id) emit();
+			});
+			// Catch a settlement that landed between SendMessage and subscribe.
+			emit();
 			const interval = setInterval(emit, options.streamPollMs ?? 250);
 			timer = interval;
 			// An SSE stream must not pin the event loop: `server.unref()` alone
@@ -258,7 +266,8 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 	if (options.token.length === 0) throw new Error("A2A server requires a non-empty bearer token");
 	/** Every open stream's stop closure: `stop()` closes them, `server.stop` alone does not. */
 	const activeStreams = new Set<() => void>();
-	const dispatchDeps = {
+	const pendingSpawns = new PendingSpawnLedger();
+	const dispatchDeps: A2aDispatchDeps = {
 		registry: options.registry,
 		...(options.name !== undefined ? { identityName: options.name } : {}),
 		send: (message: Omit<IrcMessage, "id" | "ts">) => options.bus.send(message),
@@ -268,17 +277,21 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 		createdTaskIds: new Set<string>(),
 		createdTaskRefs: new Map<string, AgentRef | undefined>(),
 		contextIds: new Map<string, string>(),
+		pendingSpawns,
 		...(options.onIncomingRequest !== undefined ? { noteIncomingRequest: options.onIncomingRequest } : {}),
 	};
 	const unsubscribe = options.registry.onChange(event => {
-		if (event.type !== "registered" || !dispatchDeps.createdTaskRefs.has(event.ref.id)) return;
+		if (event.type !== "registered" || !dispatchDeps.createdTaskRefs?.has(event.ref.id)) return;
+		// A pending registration owns an exact future ref. The first registered
+		// event for that id may be a replacement and must not be claimed.
+		if (pendingSpawns.get(event.ref.id)?.outcome === "pending") return;
 		const owned = dispatchDeps.createdTaskRefs.get(event.ref.id);
 		if (owned === undefined) {
 			dispatchDeps.createdTaskRefs.set(event.ref.id, event.ref);
 		} else if (owned !== event.ref) {
 			dispatchDeps.createdTaskRefs.delete(event.ref.id);
-			dispatchDeps.createdTaskIds.delete(event.ref.id);
-			dispatchDeps.contextIds.delete(event.ref.id);
+			dispatchDeps.createdTaskIds?.delete(event.ref.id);
+			dispatchDeps.contextIds?.delete(event.ref.id);
 		}
 	});
 
@@ -330,7 +343,13 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 					// A refused delivery is terminal: frame the initial task and a
 					// final TASK_STATE_FAILED, then close. The task's own registry
 					// state may never change, so waiting on it would hang the stream.
-					return streamTaskResponse(rpc.id, failedDeliveryTask(task) ?? task, options, activeStreams);
+					return streamTaskResponse(
+						rpc.id,
+						failedDeliveryTask(task) ?? task,
+						options,
+						dispatchDeps,
+						activeStreams,
+					);
 				} catch (error) {
 					if (error instanceof RpcError) {
 						return jsonResponse(rpcFailure(rpc.id, error.code, error.message, error.data), error.httpStatus);
@@ -397,6 +416,7 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 			unsubscribe();
 			for (const stopStream of activeStreams) stopStream();
 			activeStreams.clear();
+			pendingSpawns.release();
 			server.stop(true);
 		},
 	};
