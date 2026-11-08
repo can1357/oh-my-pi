@@ -274,6 +274,7 @@
 
 ### Fixed
 - Remote MCP HTTP and SSE servers now trust `NODE_EXTRA_CA_CERTS` from the agent `.env`, including certificates loaded after startup.
+- Closing `/btw` history during a tool approval now returns keyboard focus to the approval prompt, so the call can still be approved or denied ([#17844](https://github.com/can1357/oh-my-pi/issues/17844)).
 
 - Browser: `browser.close({ all: true })` from a subagent no longer closes its parent's tabs; it releases only the calling agent's tabs. Tabs now belong to the agent that opened them rather than its conversation id, so after `/new`, `/resume`, fork, or branch they are still frozen, idle-closed, released by close-all, and closed when the session ends instead of leaking ([#15975](https://github.com/can1357/oh-my-pi/issues/15975), [#16133](https://github.com/can1357/oh-my-pi/pull/16133) by [@harshaygadekar](https://github.com/harshaygadekar))
 - `lsp request` now sends `payload: "null"` as JSON null instead of substituting auto-built document params ([#17715](https://github.com/can1357/oh-my-pi/issues/17715)).
