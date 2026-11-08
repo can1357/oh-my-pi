@@ -13,7 +13,7 @@
 - Long embedded arguments in bash previews (e.g. a `grep -E` regex) wrap under their command's indent instead of leaving a blank row and losing the gutter
 ### Fixed
 
-- On Windows, a Tern Surface Protocol event relayed through ConPTY (`ESC ] 877 ; tsp ; … BEL`) is no longer released as a fragment after the 75 ms Escape wait when its tail is still in flight; the tail was typed into the composer as text such as `":"ack","sf":"s:1"`. A relayed OSC/DCS/APC string now waits up to 5 s for its terminator
+- On Windows, Tern events relayed through ConPTY no longer leak into the composer as fragments like `":"ack","sf":"s:1"` when their tail arrives late ([#18465](https://github.com/can1357/oh-my-pi/pull/18465) by [@NetVar1337](https://github.com/NetVar1337)).
 
 ## [18.18.1] - 2026-11-08
 
