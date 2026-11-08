@@ -1,3 +1,4 @@
+import type { SherpaArchiveSpec } from "../speech/sherpa-model-files";
 import type { TinyModelDtype } from "../tiny/dtype";
 
 /**
@@ -21,7 +22,7 @@ interface SttModelBase {
 	/** Canonical catalog model id sent over the worker protocol. */
 	key: string;
 	engine: SttEngine;
-	/** Hugging Face repo id (transformers.js ONNX repo, or sherpa-onnx model repo). */
+	/** Hugging Face repo id, or a cache key for archive-distributed sherpa models. */
 	repo: string;
 	/** English-only checkpoint: rejects a configured source `language`. */
 	englishOnly: boolean;
@@ -47,6 +48,10 @@ export interface SherpaSttModelSpec extends SttModelBase {
 	modelType: string;
 	/** Model files (relative to the repo root) fetched into the local cache. */
 	files: { encoder: string; decoder: string; joiner: string; tokens: string };
+	/** Optional release archive; the files above are validated after extraction. */
+	archive?: SherpaArchiveSpec;
+	/** Silence appended before the final decode; streaming transducers need more than batch models. */
+	tailPaddingSeconds?: number;
 }
 
 export type SttModelSpec = TransformersSttModelSpec | SherpaSttModelSpec;
@@ -123,6 +128,28 @@ export const STT_MODELS = [
 			"NVIDIA Nemotron Speech 0.6B, English only. Native streaming recognition with live words while you speak; 160 ms audio chunks.",
 		sizeHint: "~630 MB",
 	},
+	{
+		key: "x-asr-960ms-zh-en",
+		engine: "sherpa",
+		mode: "online",
+		repo: "x-asr-960ms-streaming-zh-en-int8",
+		archive: {
+			url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-x-asr-960ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05.tar.bz2",
+		},
+		modelType: "zipformer2",
+		files: {
+			encoder: "encoder.int8.onnx",
+			decoder: "decoder.onnx",
+			joiner: "joiner.int8.onnx",
+			tokens: "tokens.txt",
+		},
+		tailPaddingSeconds: 1.5,
+		englishOnly: false,
+		label: "X-ASR 960ms streaming (Chinese/English)",
+		description:
+			"X-ASR streaming Zipformer2 transducer, Chinese/English with punctuation. 960 ms chunks, int8 encoder/joiner, live partial results.",
+		sizeHint: "~128 MB",
+	},
 ] as const satisfies readonly SttModelSpec[];
 
 /**
@@ -142,6 +169,7 @@ export const STT_MODEL_VALUES = [
 	"whisper-large-v3-turbo",
 	"parakeet-tdt-0.6b-v3",
 	"nemotron-streaming-en-0.6b",
+	"x-asr-960ms-zh-en",
 ] as const satisfies readonly SttModelKey[];
 
 type MissingSttModelValue = Exclude<SttModelKey, (typeof STT_MODEL_VALUES)[number]>;

@@ -1414,6 +1414,7 @@ describe("ACP agent", () => {
 		expect(result.speechToText.models).toContainEqual(
 			expect.objectContaining({ value: "local/nemotron-streaming-en-0.6b" }),
 		);
+		expect(result.speechToText.models).toContainEqual(expect.objectContaining({ value: "local/x-asr-960ms-zh-en" }));
 		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
 		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);
 		// Speed presets are numbers so clients can write them straight into the numeric settings.
