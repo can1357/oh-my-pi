@@ -111,6 +111,7 @@ rust_library(
         "//crates/pi-walker",
         "//crates/pi-iso",
         "//crates/pi-vfs",
+        "//crates/vendor/jaq-core",
         "//crates/vendor/grep-searcher",
     ],
 )

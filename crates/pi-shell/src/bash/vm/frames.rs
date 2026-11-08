@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 30;
+pub const FRAMES_VERSION: u32 = 31;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -250,6 +250,9 @@ struct ProcImage {
 	pending_traps: SigSet,
 	stopped:       bool,
 	transient:     bool,
+	/// This vproc's EXIT trap has already been started (a forked subshell
+	/// has no `Run` to keep the flag on).
+	exit_trap_run: bool,
 	procsubs:      Vec<(u32, i32)>,
 	coprocs:       Vec<super::proc::Coproc>,
 	restore_opts:  Vec<BString>,
@@ -516,7 +519,7 @@ impl Shell {
 			{
 				let bytes = postcard::to_stdvec(&*unit).map_err(ExtError::Encode)?;
 				cx.store.put_blob(BlobSlot::Unit(id), &bytes)?;
-				self.k.written.insert(id);
+				self.k.note_written(id);
 				report.units_written += 1;
 			}
 		}
@@ -527,7 +530,7 @@ impl Shell {
 			let mut frames = Vec::with_capacity(p.frames.len());
 			for f in &mut p.frames {
 				if let Some(unit) = &f.unit
-					&& self.k.written.insert(unit.id)
+					&& self.k.note_written(unit.id)
 				{
 					let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
 					cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
@@ -582,7 +585,7 @@ impl Shell {
 			runs.extend(p.runs.iter().map(|r| r.id));
 			let command = match &p.command {
 				Some((unit, node)) => {
-					if self.k.written.insert(unit.id) {
+					if self.k.note_written(unit.id) {
 						let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
 						cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
 						report.units_written += 1;
@@ -618,6 +621,7 @@ impl Shell {
 				pending_traps: p.pending_traps,
 				stopped: p.stopped,
 				transient: p.transient,
+				exit_trap_run: p.exit_trap_run,
 				procsubs: p.procsubs.clone(),
 				coprocs: p.coprocs.clone(),
 				restore_opts: p.restore_opts.clone(),
@@ -851,6 +855,7 @@ impl Shell {
 			}
 			vp.pending_traps = p.pending_traps;
 			vp.stopped = p.stopped;
+			vp.exit_trap_run = p.exit_trap_run;
 			vp.procsubs = p.procsubs;
 			vp.coprocs = p.coprocs;
 			vp.restore_opts = p.restore_opts;
@@ -868,7 +873,7 @@ impl Shell {
 					id,
 					k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
 				)?;
-				k.written.insert(unit.id);
+				k.note_written(unit.id);
 				vp.command = Some((unit, node));
 			}
 			// Waits on engine objects whose wake-ups were restored (child
@@ -925,7 +930,7 @@ impl Shell {
 							id,
 							k.mask.contains(crate::bash::event::EventKind::UnitCompiled),
 						)?;
-						k.written.insert(unit.id);
+						k.note_written(unit.id);
 						let in_range = |pc: u32| (pc as usize) < unit.ops.len();
 						if !in_range(f.pc)
 							|| !f.loops.iter().all(|l| in_range(l.exit) && in_range(l.cont))

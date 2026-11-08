@@ -158,6 +158,19 @@ describe("browser selector guard", () => {
 		expect(normalizeSelector("p-text/Continue")).toBe("text/Continue");
 	});
 
+	it("refuses a role/ selector with text it would otherwise ignore, before any op waits on it", () => {
+		expect(() =>
+			normalizeSelector('role/region[name="billing-worker" exact] >> role/combobox[name="REGION" exact]'),
+		).toThrow(/role\/ selectors do not chain/);
+		expect(() => normalizeSelector("role/button[pressed=true]")).toThrow(/role\/ selectors do not chain/);
+		expect(() => normalizeSelector("role/region>>role/combobox")).toThrow(/role\/ selectors do not chain/);
+		expect(() => normalizeSelector("role/button.foo")).toThrow(/role\/ selectors do not chain/);
+		expect(normalizeSelector('role/region[name="billing-worker" exact]')).toBe(
+			'role/region[name="billing-worker" exact]',
+		);
+		expect(normalizeSelector("role/button")).toBe("role/button");
+	});
+
 	it("rejects non-string selectors (handle/number) instead of crashing on .startsWith", () => {
 		// Regression: passing the ElementHandle from tab.id()/tab.ref() reached
 		// `selector.startsWith(...)` and threw the opaque `A.trim is not a function`.

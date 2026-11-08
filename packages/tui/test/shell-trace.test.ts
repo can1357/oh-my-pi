@@ -152,7 +152,8 @@ describe("shell semantic ANSI views", () => {
 		const source = `printf '${"0123456789".repeat(18)}END-OF-COMMAND'`;
 		presentation.rows = [row("0:0:1", source)];
 		const lines = renderShellVisualization(presentation, theme, 30);
-		const plain = lines.map(line => Bun.stripANSI(line)).join("");
+		// Continuations hang under the row's gutter; the source itself is uninterrupted.
+		const plain = lines.map(line => Bun.stripANSI(line).trim()).join("");
 		expect(plain).toContain("0123456789".repeat(18));
 		expect(plain).toContain("END-OF-COMMAND'");
 		expect(lines.every(line => visibleWidth(line) <= 30)).toBe(true);

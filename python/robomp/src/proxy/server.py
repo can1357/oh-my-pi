@@ -30,6 +30,7 @@ from robomp.config import Settings
 from robomp.git_ops import (
     GitCommandError,
     HeadDriftError,
+    validate_fetch_ref,
 )
 from robomp.git_ops import (
     clone as git_clone,
@@ -116,9 +117,6 @@ def _require_int(value: Any, field: str) -> int:
     return value
 
 
-_SAFE_REF_BODY_RE = re.compile(r"[A-Za-z0-9._/-]+")
-
-
 def _require_fetch_ref(value: Any) -> str:
     """Validate the base-branch ref for `/gh/v1/git/fetch_ref`.
 
@@ -132,18 +130,10 @@ def _require_fetch_ref(value: Any) -> str:
     forms. Normal slashy branch names still pass.
     """
     ref = _require_str(value, "ref")
-    body = ref.removeprefix("refs/heads/")
-    if (
-        not body
-        or ref.startswith("-")
-        or body.startswith("/")
-        or body.endswith(("/", ".", ".lock"))
-        or "//" in body
-        or ".." in body
-        or not _SAFE_REF_BODY_RE.fullmatch(body)
-    ):
-        raise HTTPException(400, "invalid ref")
-    return ref
+    try:
+        return validate_fetch_ref(ref)
+    except ValueError as exc:
+        raise HTTPException(400, "invalid ref") from exc
 
 
 def _require_branch(value: Any) -> str:
@@ -888,6 +878,15 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         data = await _json_body(request)
         repo = _require_str(data.get("repo"), "repo")
         pr_number = _require_int(data.get("pr_number"), "pr_number")
+        if pr_number <= 0:
+            raise HTTPException(400, "invalid 'pr_number'")
+        # head_ref is only validated by the same-repo branch fallback:
+        # the primary refs/pull/<n>/head fetch does not consume it.
+        head_ref = _require_str(data["head_ref"], "head_ref") if data.get("head_ref") is not None else None
+        head_sha = _require_str(data["head_sha"], "head_sha") if data.get("head_sha") is not None else None
+        same_repo = data.get("same_repo", False)
+        if not isinstance(same_repo, bool):
+            raise HTTPException(400, "invalid 'same_repo'")
         target = _pool_dir(settings, repo)
         remote = await asyncio.to_thread(_origin_remote_auth, target, repo, _resolve_token(settings))
         try:
@@ -895,12 +894,18 @@ def create_proxy_app(settings: Settings) -> FastAPI:
                 git_fetch_pr_head,
                 target,
                 pr_number,
+                head_ref=head_ref,
+                head_sha=head_sha,
+                same_repo=same_repo,
                 token=remote.token,
                 remote_url=remote.url,
                 auth_url=remote.auth_url,
             )
         except GitCommandError as exc:
             return _git_error_response(exc)
+        except ValueError as exc:
+            # Deferred ref validation in the fallback path.
+            raise HTTPException(400, "invalid ref") from exc
         return JSONResponse({"pool_dir": str(target)})
 
     @app.post("/gh/v1/git/push")

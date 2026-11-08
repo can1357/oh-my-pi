@@ -17,6 +17,47 @@ fn rig() -> Rig {
 }
 
 #[test]
+fn restore_rejects_the_upstream_version_30_frame_layout() {
+	// A fresh shell's complete frames blob, externalized by upstream
+	// 0edd6aab170606b90af348379386c4de10157b30 before this layout changed.
+	const UPSTREAM_FRAMES_30: &[u8] = &[
+		79, 66, 70, 49, 17, 30, 227, 114, 110, 55, 159, 22, 47, 12, 8, 97, 238, 223, 248, 150, 20,
+		133, 174, 55, 174, 212, 240, 112, 117, 1, 191, 245, 130, 43, 177, 109, 14, 237, 0, 0, 1, 1,
+		1, 0, 135, 255, 255, 255, 255, 255, 255, 255, 255, 1, 0, 0, 0, 0, 0, 1, 128, 128, 128, 128,
+		4, 0, 0, 0, 3, 1, 0, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		3, 0, 0, 0, 1, 0, 2, 0, 0, 0,
+	];
+	let mut r = rig();
+	let (_, host, store) = r.parts();
+	store
+		.put_blob(BlobSlot::Frames, UPSTREAM_FRAMES_30)
+		.expect("frames");
+	let engine = Engine::new(EngineConfig::default());
+	let err = Shell::restore(&engine, &mut Cx { host, store }, RestoreOpts::default())
+		.err()
+		.expect("the upstream layout must be rejected");
+	assert!(
+		matches!(err, RestoreError::Incompatible { why: Incompatibility::Build, .. }),
+		"{err:?}"
+	);
+}
+
+#[test]
+fn a_current_frame_snapshot_resumes_the_pending_run() {
+	let mut r = rig();
+	let id = r
+		.shell()
+		.submit(Script::command(&b"echo before; echo after"[..]));
+	let small = Budget { max_ops: 1, max_ns: u64::MAX };
+	let (shell, host, store) = r.parts();
+	assert_eq!(advance(shell, host, store, id, small), Stop::Yield);
+	r.snapshot();
+	let (shell, host, store) = r.parts();
+	assert_eq!(advance(shell, host, store, id, Budget::default()), Stop::Done(0));
+	assert_eq!(host.stdout.bytes(), b"before\nafter\n");
+}
+
+#[test]
 fn cancel_kill_ends_every_run_and_the_shell_stays_usable() {
 	let mut r = rig();
 	let busy = r

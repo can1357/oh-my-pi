@@ -9,6 +9,10 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { CustomToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/wrapper";
 import { DeferredMCPTool } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { dispatchXdevTool, type XdevDispatch, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -991,6 +995,60 @@ describe("AgentSession prewalk", () => {
 			expect(created.session.model?.id).toBe(created.target.id);
 		},
 	);
+
+	it("does not switch when a subagent messages its parent through write agent://", async () => {
+		// A delegate that tells its parent which files it owns has not started
+		// implementing yet: the real write tool's peer message must keep the plan on
+		// the primary, and the real file write that follows is what hands off.
+		AgentRegistry.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
+		const agents = AgentRegistry.global();
+		const parent = createLifecycleSession([{ content: ["noted"] }], { armed: false });
+		agents.register({ id: "Main", displayName: "Main", kind: "main", session: parent.session });
+		const workerTools: ToolSession = {
+			cwd: tempDir.path(),
+			hasUI: false,
+			settings: Settings.isolated(),
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getAgentId: () => "Worker",
+			agentRegistry: agents,
+		};
+		const write = new WriteTool(workerTools);
+		const writeCall = (id: string, args: { path: string; content: string }): MockResponse => ({
+			content: [{ type: "toolCall", id, name: "write", arguments: args }],
+			stopReason: "toolUse",
+		});
+		const worker = createLifecycleSession(
+			[
+				toolCall("todo", "todo"),
+				writeCall("message", { path: "agent://Main", content: "I own impl.txt." }),
+				writeCall("implementation", { path: "impl.txt", content: "implemented\n" }),
+				{ content: ["done"] },
+			],
+			{
+				tools: [todoTool, write as AgentTool],
+				registry: new Map<string, AgentTool>([
+					[todoTool.name, todoTool],
+					[write.name, write as AgentTool],
+				]),
+			},
+		);
+		try {
+			await worker.session.prompt("coordinate with the parent, then implement");
+			await parent.session.waitForIdle();
+			const parentTranscript = JSON.stringify(parent.session.messages);
+			expect(parentTranscript).toContain("I own impl.txt.");
+		} finally {
+			await parent.session.dispose();
+			IrcBus.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+		}
+		expect(await Bun.file(path.join(tempDir.path(), "impl.txt")).text()).toBe("implemented\n");
+		const primaryId = worker.primary.id;
+		expect(worker.requested).toEqual([primaryId, primaryId, primaryId, worker.target.id]);
+		expect(worker.session.model?.id).toBe(worker.target.id);
+	});
 
 	it("switches on a write-tier xd:// device dispatched through write (issue #7312)", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
