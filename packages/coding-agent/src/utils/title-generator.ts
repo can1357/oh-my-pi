@@ -26,6 +26,7 @@ import { roleCandidatePool } from "../config/model-roles";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 import type { Settings } from "../config/settings";
+import type { ModelUsageEntry } from "../session/session-entries";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
@@ -34,6 +35,10 @@ import { tinyTitleClient } from "../tiny/title-client";
 
 import { cfgRetryModelFallback } from "../session/settings";
 import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "@oh-my-pi/pi-tui/spinner-clock";
+
+export type TitleUsageCallback = (
+	usage: Pick<ModelUsageEntry, "purpose" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage">,
+) => void;
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
@@ -205,6 +210,7 @@ export async function generateSessionTitle(
 	customSystemPrompt?: string,
 	signal?: AbortSignal,
 	credentialSourceSessionId?: string,
+	onUsage?: TitleUsageCallback,
 ): Promise<string | null> {
 	// Defer titling for greetings / acknowledgements / empty input. The default
 	// tiny title model can't reliably decline trivial input, so this happens
@@ -233,6 +239,7 @@ export async function generateSessionTitle(
 			signal,
 			titleSystemPrompt,
 			credentialSourceSessionId,
+			onUsage,
 		);
 	}
 
@@ -283,6 +290,7 @@ export async function generateTitleOnline(
 	signal?: AbortSignal,
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
+	onUsage?: TitleUsageCallback,
 ): Promise<string | null> {
 	const models = getTitleModels(registry, settings, currentModel);
 	if (models.length === 0) {
@@ -298,6 +306,7 @@ export async function generateTitleOnline(
 		signal,
 		customSystemPrompt,
 		credentialSourceSessionId,
+		onUsage,
 	);
 }
 
@@ -310,6 +319,7 @@ async function generateTitleOnlineWithModels(
 	signal?: AbortSignal,
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
+	onUsage?: TitleUsageCallback,
 ): Promise<string | null> {
 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
 	// The model is always asked to wrap the title in `<title>...</title>` and
@@ -396,6 +406,18 @@ async function generateTitleOnlineWithModels(
 					),
 				{ signal, provider: model.provider },
 			);
+
+			if (response.usage) {
+				onUsage?.({
+					purpose: "title",
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: response.usage,
+					stopReason: response.stopReason,
+					...(response.errorMessage ? { errorMessage: response.errorMessage } : {}),
+				});
+			}
 
 			if (response.stopReason === "aborted" || signal?.aborted) {
 				logger.debug("title-generator: aborted", {

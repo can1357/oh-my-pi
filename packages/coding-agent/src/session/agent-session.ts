@@ -11478,6 +11478,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			: this.#titleGenerationAbortController.signal;
 		// A capped session sends no further model requests, titles included.
 		if (titleSignal.aborted || this.#costGate.check()) return null;
+		const usageOwner = {
+			sessionId: parentSessionId,
+			parentId: this.sessionManager.getLeafId(),
+		};
 		// The title request carries user text, so it follows this session's own credential
 		// redaction policy like its conversation requests (see `settingsAwareStreamFn`).
 		const title = await withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>
@@ -11491,6 +11495,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				customSystemPrompt ?? this.#titleSystemPrompt,
 				titleSignal,
 				parentSessionId,
+				usage => {
+					try {
+						const entryId = this.sessionManager.appendModelUsage(usage, usageOwner);
+						if (entryId) usageOwner.parentId = entryId;
+						if (usage.usage?.cost?.total) {
+							this.#costGate.record(usage.usage.cost.total);
+						}
+					} catch (error) {
+						logger.debug("title-generator: failed to append model usage", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				},
 			),
 		);
 		if (await this.#sessionGenerationChanged(sessionGeneration)) return null;
