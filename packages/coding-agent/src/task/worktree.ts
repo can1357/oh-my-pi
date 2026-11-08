@@ -483,41 +483,44 @@ export async function applyNestedPatches(
 		} catch {
 			continue;
 		}
-		const repository = vcs.requireGit(nestedDir);
-
 		const combinedDiff = repoPatches.map(p => p.patch).join("\n");
 		const touchedFiles = [...new Set(repoPatches.flatMap(p => patchTouchedFiles(p.patch)))];
 
-		// Preserve any pre-existing dirty state (tracked + untracked) so we
-		// commit only the agent delta, not the user's in-flight work.
-		const stashed = (await repository.isDirty())
-			? await repository.stashPush(`omp-isolation-${Snowflake.next()}`)
-			: false;
-		try {
-			for (const { patch } of repoPatches) {
-				await repository.applyPatch(patch, {});
-			}
-			if (await repository.isDirty()) {
-				if (touchedFiles.length === 0) {
-					throw new Error(`Nested repo patch for ${relativePath} did not include stageable file paths.`);
+		// Concurrent merge-backs would interleave stash/apply/commit on the
+		// same nested repo and drop each other's edits; serialize per repo.
+		await withRepoLock(nestedDir, async () => {
+			const repository = vcs.requireGit(nestedDir);
+			// Preserve any pre-existing dirty state (tracked + untracked) so we
+			// commit only the agent delta, not the user's in-flight work.
+			const stashed = (await repository.isDirty())
+				? await repository.stashPush(`omp-isolation-${Snowflake.next()}`)
+				: false;
+			try {
+				for (const { patch } of repoPatches) {
+					await repository.applyPatch(patch, {});
 				}
-				const msg = (await commitMessage?.(combinedDiff)) ?? "changes from isolated task(s)";
-				await repository.stageFiles(touchedFiles);
-				await repository.commitCreate(msg, {});
-			}
-		} finally {
-			if (stashed) {
-				const restored = await repository.stashTryPop(true).catch(() => false);
-				if (!restored) {
-					logger.warn("Pre-existing nested-repo dirty state could not be auto-restored", {
-						nestedDir,
-					});
-					warnings.push(
-						`Pre-existing dirty state in nested repo \`${relativePath}\` could not be auto-restored after the agent commit; stash entry preserved.`,
-					);
+				if (await repository.isDirty()) {
+					if (touchedFiles.length === 0) {
+						throw new Error(`Nested repo patch for ${relativePath} did not include stageable file paths.`);
+					}
+					const msg = (await commitMessage?.(combinedDiff)) ?? "changes from isolated task(s)";
+					await repository.stageFiles(touchedFiles);
+					await repository.commitCreate(msg, {});
+				}
+			} finally {
+				if (stashed) {
+					const restored = await repository.stashTryPop(true).catch(() => false);
+					if (!restored) {
+						logger.warn("Pre-existing nested-repo dirty state could not be auto-restored", {
+							nestedDir,
+						});
+						warnings.push(
+							`Pre-existing dirty state in nested repo \`${relativePath}\` could not be auto-restored after the agent commit; stash entry preserved.`,
+						);
+					}
 				}
 			}
-		}
+		});
 	}
 	return warnings;
 }

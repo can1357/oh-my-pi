@@ -7,6 +7,10 @@
 - Updated system prompts to use the ⁂ section marker
 - Agents finish tasks in fewer steps: the system prompt now asks for proportional verification (a failing test or user report counts as the reproduction), whole reads of small files without re-reading, batched independent calls, and stopping once the change is verified
 
+### Fixed
+
+- Parallel isolated tasks merging back in patch mode no longer lose each other's edits to the same file while reporting `Applied patches: yes` ([#18483](https://github.com/can1357/oh-my-pi/issues/18483))
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes
