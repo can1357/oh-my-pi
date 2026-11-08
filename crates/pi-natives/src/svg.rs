@@ -205,12 +205,14 @@ mod tests {
 	#[test]
 	fn text_survives_a_generic_family_naming_a_missing_font() {
 		let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"><text y="15">label</text></svg>"#;
+		// A text node can survive parsing and still paint nothing; the
+		// consumer sees the rendered PNG, so count the pixels it inks.
 		let draws_text = |database: Database| {
 			let options = usvg::Options { fontdb: Arc::new(database), ..usvg::Options::default() };
-			usvg::Tree::from_data(svg, &options)
-				.expect("SVG should parse")
-				.root()
-				.has_children()
+			let tree = usvg::Tree::from_data(svg, &options).expect("SVG should parse");
+			let mut pixmap = tiny_skia::Pixmap::new(80, 20).expect("pixmap should allocate");
+			resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+			pixmap.pixels().iter().any(|pixel| pixel.alpha() > 0)
 		};
 		let mut database = Database::new();
 		database.load_font_data(include_bytes!("fonts/Silver.ttf").to_vec());
