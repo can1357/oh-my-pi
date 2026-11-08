@@ -343,7 +343,7 @@ Runtime output schema precedence is:
 
 The task item's optional `schemaMode` overrides the parent session mode; the default is `permissive`.
 
-These schemas apply to structured runs. `task.structured` defaults to on, so task spawns get an output schema and the `yield` tool and return results through `yield` or `handback`. Set `task.structured` to `false` to opt out: those spawns then get no output schema and no `yield` tool and return their final assistant message, except for agents whose definition sets `structured: true`; those still resolve the agent `output`, then the parent session schema, because the task item's `outputSchema` is not exposed. Eval `agent()` and workpool spawns are always structured.
+These schemas apply to structured runs. `task.structured` defaults to on, so task spawns resolve an output schema by the precedence above when one exists, get the `yield` tool, and return results through `yield` or `handback`. Set `task.structured` to `false` to opt out: those spawns then get no output schema and no `yield` tool and return their final assistant message, except for agents whose definition sets `structured: true`; those still resolve the agent `output`, then the parent session schema, because the task item's `outputSchema` is not exposed. Eval `agent()` and workpool spawns are always structured.
 
 Explicit caller schemas are validated during preflight in both modes. Agent/session schemas are preflight-validated when the effective mode is `strict`. Invalid schemas fail before child execution.
 
