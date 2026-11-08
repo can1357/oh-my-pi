@@ -99,6 +99,9 @@ function createCloneStub(overrides?: {
 	};
 }
 
+/** Harness directories outlive `createContext`, so the `afterEach` below removes them. */
+const harnessTempDirs: TempDir[] = [];
+
 function createContext(overrides?: {
 	isStreaming?: boolean;
 	model?: Model;
@@ -112,6 +115,7 @@ function createContext(overrides?: {
 	extensionPaths?: unknown;
 }) {
 	const tempDir = TempDir.createSync("@omp-tan-controller-");
+	harnessTempDirs.push(tempDir);
 	const parentFile = path.join(tempDir.path(), "parent.jsonl");
 	// The clone nests inside the parent's artifact directory, like a subagent.
 	const cloneFile = path.join(parentFile.slice(0, -6), "clone.jsonl");
@@ -192,11 +196,12 @@ function createContext(overrides?: {
 	};
 }
 
-describe("TanCommandController", () => {
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
+afterEach(() => {
+	vi.restoreAllMocks();
+	for (const dir of harnessTempDirs.splice(0)) dir[Symbol.dispose]();
+});
 
+describe("TanCommandController", () => {
 	it("rejects empty work before forking", async () => {
 		const harness = createContext();
 		const forkSpy = vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);

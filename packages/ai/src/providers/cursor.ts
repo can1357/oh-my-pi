@@ -189,6 +189,7 @@ import type {
 	Api,
 	AssistantMessage,
 	Context,
+	CursorExecFrameContext,
 	CursorExecHandlerResult,
 	CursorExecHandlers,
 	CursorExecPairing,
@@ -449,7 +450,7 @@ export interface CursorOptions extends StreamOptions {
 	externalToolExecutor?: boolean;
 	/** Wire model id selected after thinking-effort routing (`resolveWireModelId`). */
 	wireModelId?: string;
-	/** Run transport. `auto` starts with HTTP/2 and falls back on failed ALPN negotiation. */
+	/** Run transport. `auto` starts with HTTP/2 and falls back on failed ALPN negotiation or a TLS reset. */
 	transport?: "auto" | "http2" | "http1";
 }
 
@@ -463,8 +464,9 @@ interface CursorRetryContext {
 	checkpointHash?: string;
 	noProgressResumes: number;
 	output: AssistantMessage;
-	blockState: BlockState;
-	usageState: UsageState;
+	/** Unset when the earlier attempt failed before its run started. */
+	blockState?: BlockState;
+	usageState?: UsageState;
 	baseConversationId: string;
 	conversationId: string;
 	blobStore: Map<string, Uint8Array>;
@@ -1017,14 +1019,32 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	};
 }
 
-function isHttp2Unavailable(error: unknown): boolean {
-	const code = (error as { code?: unknown } | null)?.code;
+function isHttp2AlpnRejected(error: unknown): boolean {
+	const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
 	const message = error instanceof Error ? error.message : String(error);
 	return (
 		(code === "ERR_HTTP2_ERROR" && /h2 is not supported/i.test(message)) ||
 		/Cursor run transport could not negotiate HTTP\/2/i.test(message)
 	);
 }
+
+function isCursorTlsReset(error: unknown): boolean {
+	const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+	const message = error instanceof Error ? error.message : String(error);
+	return code === "ECONNRESET" && /disconnected before secure TLS connection was established/i.test(message);
+}
+
+function isHttp2Unavailable(error: unknown): boolean {
+	return isHttp2AlpnRejected(error) || isCursorTlsReset(error);
+}
+
+const CURSOR_HTTP2_UNAVAILABLE_CACHE_MAX = 32;
+const CURSOR_HTTP2_UNAVAILABLE_TTL_MS = 10 * 60_000;
+
+const http2Unavailable = new LRUCache<string, true>({
+	max: CURSOR_HTTP2_UNAVAILABLE_CACHE_MAX,
+	ttl: CURSOR_HTTP2_UNAVAILABLE_TTL_MS,
+});
 
 /**
  * Maps an opaque HTTP/2 negotiation failure into an actionable error.
@@ -1190,7 +1210,12 @@ function streamCursorWithWireMode(
 
 	(async () => {
 		const retryContext = timing?.retry;
-		const transportMode = timing?.transport ?? (options?.transport === "http1" ? "http1" : "http2");
+		const transportMode =
+			timing?.transport ??
+			(options?.transport === "http1" ||
+			(options?.transport !== "http2" && http2Unavailable.get(model.baseUrl || CURSOR_API_URL))
+				? "http1"
+				: "http2");
 		let startTime = timing?.startTime ?? performance.now();
 		let firstTokenTime = retryContext?.firstTokenTime;
 
@@ -1483,6 +1508,8 @@ function streamCursorWithWireMode(
 					})
 				: undefined;
 
+			// Before connecting: the RunSSE fallback for a failed connect does not push its own start.
+			if (!retryContext) stream.push({ type: "start", partial: output });
 			if (transportMode === "http2") {
 				const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
 				let client: http2.ClientHttp2Session;
@@ -1508,8 +1535,6 @@ function streamCursorWithWireMode(
 					signal: options?.signal,
 				});
 			}
-
-			if (!retryContext) stream.push({ type: "start", partial: output });
 
 			const frameDecoder = new ConnectFrameDecoder();
 			const previousState = retryContext?.blockState;
@@ -1550,6 +1575,7 @@ function streamCursorWithWireMode(
 					if (!firstTokenTime) firstTokenTime = performance.now();
 				},
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
+				onEditSettled: options?.execHandlers?.editSettled?.bind(options.execHandlers),
 				onToolResult,
 				execOrder: new CursorExecOrder(),
 				holdExternalCall: relay
@@ -1991,13 +2017,12 @@ function streamCursorWithWireMode(
 			if (relay) clearTimeout(relay.quietTimer);
 			let error = caughtError;
 			const h2Unavailable = transportMode === "http2" && isHttp2Unavailable(error);
+			if (h2Unavailable && isHttp2AlpnRejected(error)) http2Unavailable.set(model.baseUrl || CURSOR_API_URL, true);
 			if (
 				h2Unavailable &&
 				options?.transport !== "http2" &&
 				!sawProgressOrSideEffect &&
 				!options?.signal?.aborted &&
-				openBlockState !== undefined &&
-				usageState !== undefined &&
 				baseConversationId !== undefined &&
 				conversationId !== undefined &&
 				activeBlobStore !== undefined &&
@@ -2021,8 +2046,8 @@ function streamCursorWithWireMode(
 						checkpointHash: retryContext?.checkpointHash,
 						noProgressResumes: retryContext?.noProgressResumes ?? 0,
 						output,
-						blockState: openBlockState,
-						usageState,
+						blockState: openBlockState ?? retryContext?.blockState,
+						usageState: usageState ?? retryContext?.usageState,
 						baseConversationId,
 						conversationId,
 						blobStore: activeBlobStore,
@@ -2034,6 +2059,7 @@ function streamCursorWithWireMode(
 				try {
 					for await (const event of http1Stream) {
 						if (event.type === "start") continue;
+						if (event.type === "done") http2Unavailable.set(model.baseUrl || CURSOR_API_URL, true);
 						stream.push(event);
 					}
 					const http1Result = await http1Stream.result();
@@ -2392,6 +2418,8 @@ export interface BlockState {
 	pairedEditToolCallIds?: Set<string>;
 	/** Orders this run's exec frames like a local tool batch. Optional so existing test harnesses stay valid. */
 	execOrder?: CursorExecOrder;
+	/** Ends the live card of an edit the server completed without a materializing write. */
+	onEditSettled?: (result: ToolResultMessage) => void;
 	firstTokenTime: number | undefined;
 	setTextBlock: (b: (TextContent & { [kStreamingBlockIndex]: number }) | null) => void;
 	setThinkingBlock: (b: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null) => void;
@@ -2878,6 +2906,8 @@ function execFrameCallId(execMsg: ExecServerMessage): string {
 	return typeof toolCallId === "string" && toolCallId.length > 0 ? toolCallId : `exec:${execMsg.id}:${execMsg.execId}`;
 }
 
+const EDIT_MATERIALIZATION: CursorExecFrameContext = { editMaterialization: true };
+
 /**
  * Runs one exec frame in its place in the tool batch ({@link CursorExecOrder}).
  * Must be entered synchronously as frames arrive: the order is arrival order.
@@ -3007,9 +3037,10 @@ async function runExecServerMessage(
 						: { path: piReadDisplayPath(args.path, args.offset, args.limit) },
 				);
 			}
+			const read = execHandlers?.read?.bind(execHandlers);
 			const { execResult: readResult, toolResult } = await resolveExecHandler(
 				handlerArgs,
-				execHandlers?.read?.bind(execHandlers),
+				read && editOwned ? (readArgs: typeof handlerArgs) => read(readArgs, EDIT_MATERIALIZATION) : read,
 				editOwned ? undefined : onToolResult,
 				result =>
 					buildReadResultFromToolResult(
@@ -3137,8 +3168,8 @@ async function runExecServerMessage(
 			const write = execHandlers?.write?.bind(execHandlers);
 			const writeHandler = write
 				? async (writeArgs: typeof args) => {
-						const result = await write(writeArgs);
-						return editOwned ? remapExecHandlerToolName(result, "edit") : result;
+						if (!editOwned) return await write(writeArgs);
+						return remapExecHandlerToolName(await write(writeArgs, EDIT_MATERIALIZATION), "edit");
 					}
 				: undefined;
 			const { execResult } = await resolveExecHandler(
@@ -4976,6 +5007,15 @@ function stringToolArg(args: Record<string, unknown> | undefined, key: string): 
 	return typeof value === "string" ? value : undefined;
 }
 
+/** End the live card of an edit no materializing write settled; a host failure must not break the stream. */
+function settleEdit(state: BlockState, result: ToolResultMessage): void {
+	try {
+		state.onEditSettled?.(result);
+	} catch (error) {
+		log("error", "onEditSettled", { error: error instanceof Error ? error.message : String(error) });
+	}
+}
+
 function markEditToolCallPaired(state: BlockState, toolCallId: string): void {
 	if (!state.pairedEditToolCallIds) state.pairedEditToolCallIds = new Set();
 	state.pairedEditToolCallIds.add(toolCallId);
@@ -5162,14 +5202,17 @@ export function flushOpenToolCalls(
 		const kind = block[kStreamingBlockKind];
 		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit" || kind === "web-fetch") {
 			if (!(kind === "cursor-edit" && state.pairedEditToolCallIds?.has(block.id))) {
-				state.onToolResult?.({
+				const result: ToolResultMessage = {
 					role: "toolResult",
 					toolCallId: block.id,
 					toolName: block.name,
 					content: [{ type: "text", text: "The connection to Cursor closed before this call completed." }],
 					isError: true,
 					timestamp: Date.now(),
-				});
+				};
+				state.onToolResult?.(result);
+				// The edit's materializing read surfaced no call, so nothing else ends its live card.
+				if (kind === "cursor-edit") settleEdit(state, result);
 			}
 		}
 		stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: output });
@@ -6080,14 +6123,16 @@ export function processInteractionUpdate(
 				state.execOrder?.leave(settled.id);
 				if (!state.pairedEditToolCallIds?.has(settled.id)) {
 					const { text, isError } = describeEditResult(toolCall);
-					state.onToolResult?.({
+					const result: ToolResultMessage = {
 						role: "toolResult",
 						toolCallId: settled.id,
 						toolName: "edit",
 						content: [{ type: "text", text }],
 						isError,
 						timestamp: Date.now(),
-					});
+					};
+					state.onToolResult?.(result);
+					settleEdit(state, result);
 				}
 			}
 			const idx = streamedBlockIndex(output, settled);

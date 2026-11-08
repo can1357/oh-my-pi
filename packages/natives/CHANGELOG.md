@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Zig syntax highlighting for fenced Zig code in Markdown.
+
+### Fixed
+
+- Built-in jq filters now stop reliably when aborted or timed out, even before producing output.
+- Fixed logical directory changes with cd and pwd in native Windows shell sessions, including drive and UNC paths.
+- Fixed closed file descriptors passed to external commands on Unix so writes fail as expected; closed standard streams on Windows now use the null device.
+- Fixed setValue() on Linux reporting success when Firefox or Thunderbird fields, including password fields, were not actually updated; failures now identify the affected field appropriately.
+
 ## [18.18.1] - 2026-11-08
 
 ### Added

@@ -18,6 +18,7 @@ import { getCustomApi } from "./api-registry";
 import {
 	createAuthRetryKeyState,
 	isApiKeyResolver,
+	preferAuthRetryError,
 	readApiKeyHeaders,
 	resolvedApiKeyBearer,
 	resolvedCredentialGeneration,
@@ -1356,6 +1357,7 @@ function streamSimpleRequest<TApi extends Api>(
 			const retryState = createAuthRetryKeyState(lastKey, credentialGeneration, headerGenerations);
 			let failure = await runAttempt(lastKey, credentialId, oauthIdentity, resolvedHeaders);
 			if (!failure) return;
+			let reportedFailure = failure;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
@@ -1377,9 +1379,13 @@ function streamSimpleRequest<TApi extends Api>(
 				if (nextKey === undefined) break;
 				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, nextHeaders);
 				if (!next) return;
+				reportedFailure =
+					preferAuthRetryError(reportedFailure.error, next.error) === reportedFailure.error
+						? reportedFailure
+						: next;
 				failure = next;
 			}
-			emitFailure(failure);
+			emitFailure(reportedFailure);
 		})();
 		return outer;
 	}

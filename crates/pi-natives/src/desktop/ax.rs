@@ -1163,6 +1163,60 @@ pub fn ax_press(backend: &mut dyn AxBackend, handle: &AxHandle) -> CoreResult<()
 	backend.perform(handle, "press")
 }
 
+/// Exact equality is the verdict: a field that shows a rewritten value has
+/// not been shown to hold what was sent (Contacts regroups a phone number in
+/// the field and stores none of it). The error names what the field reads so
+/// the next step needs no extra read, except in a secure field, whose text
+/// never enters an error.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+pub(crate) fn text_readback(
+	sent: &str,
+	expected: &str,
+	actual: Option<&str>,
+	secure: bool,
+) -> CoreResult<()> {
+	const SHOWN: usize = 200;
+	if actual == Some(expected) {
+		return Ok(());
+	}
+	if secure {
+		return Err(DesktopError::ax_failed(
+			"the secure text field's value could not be confirmed after the write; inspect the \
+			 target before writing again",
+		));
+	}
+	let quote = |text: &str| format!("{:?}", truncate_chars(text.to_owned(), SHOWN));
+	let Some(actual) = actual else {
+		return Err(DesktopError::ax_failed(format!(
+			"wrote {}, but the field's value could not be read back; inspect the target before \
+			 writing again",
+			quote(sent),
+		)));
+	};
+	let whole = if sent == expected {
+		String::new()
+	} else {
+		format!(" instead of {}", quote(expected))
+	};
+	Err(DesktopError::ax_failed(format!(
+		"wrote {}; the field now reads {}{whole}. The app may have reformatted it or not taken it: \
+		 inspect the target before writing again",
+		quote(sent),
+		quote(actual),
+	)))
+}
+
+/// `value` cut to `max` characters, the last one an ellipsis when cut.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+pub(crate) fn truncate_chars(value: String, max: usize) -> String {
+	if value.chars().count() <= max {
+		return value;
+	}
+	let mut result: String = value.chars().take(max.saturating_sub(1)).collect();
+	result.push('…');
+	result
+}
+
 /// Maps a raw `AX*` macOS accessibility role onto the cross-platform role
 /// vocabulary. Compiled only where it has a caller (macOS backend + tests).
 #[cfg(any(target_os = "macos", test))]
@@ -2662,5 +2716,46 @@ mod tests {
 		] {
 			assert_eq!(normalize_role_atspi(native, multiline), role);
 		}
+	}
+
+	#[test]
+	fn rewritten_readback_fails_and_names_what_the_field_reads() {
+		let error =
+			text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123"), false).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		assert!(error.message.contains(r#""555-789-0123""#), "{}", error.message);
+		assert!(error.message.contains(r#""(555) 789-0123""#), "{}", error.message);
+		assert!(text_readback("555-789-0123", "555-789-0123", Some("555-789-0123"), false).is_ok());
+	}
+
+	#[test]
+	fn inserted_readback_names_the_whole_value_it_expected() {
+		let error = text_readback("b", "abc", Some("ac"), false).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxFailed);
+		for quoted in [r#""b""#, r#""ac""#, r#""abc""#] {
+			assert!(error.message.contains(quoted), "{quoted}: {}", error.message);
+		}
+		let unread = text_readback("b", "abc", None, false).unwrap_err();
+		assert_eq!(unread.code, ErrorCode::AxFailed);
+		assert!(unread.message.contains(r#""b""#), "{}", unread.message);
+	}
+
+	#[test]
+	fn long_readbacks_are_cut() {
+		let long = "x".repeat(500);
+		let error = text_readback("y", "y", Some(&long), false).unwrap_err();
+		assert!(error.message.len() < 400, "{}", error.message.len());
+		assert!(error.message.contains('…'), "{}", error.message);
+	}
+
+	#[test]
+	fn secure_readbacks_never_quote_the_text() {
+		for actual in [None, Some("••••"), Some("")] {
+			let error = text_readback("hunter2", "sk-hunter2", actual, true).unwrap_err();
+			assert_eq!(error.code, ErrorCode::AxFailed);
+			assert!(!error.message.contains("hunter2"), "{}", error.message);
+			assert!(error.message.contains("secure"), "{}", error.message);
+		}
+		assert!(text_readback("hunter2", "hunter2", Some("hunter2"), true).is_ok());
 	}
 }

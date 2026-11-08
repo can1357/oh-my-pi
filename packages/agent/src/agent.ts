@@ -423,6 +423,7 @@ export class Agent {
 	#tokenizer = new Tokenizer(this.#state.model);
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#queueListeners = new Set<() => void>();
+	#pauseListeners = new Set<(paused: boolean) => void>();
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -1014,6 +1015,12 @@ export class Agent {
 		return () => this.#queueListeners.delete(listener);
 	}
 
+	/** Notify a session when this agent parks or resumes at a safe process-pause boundary. */
+	onPauseChange(listener: (paused: boolean) => void): () => void {
+		this.#pauseListeners.add(listener);
+		return () => this.#pauseListeners.delete(listener);
+	}
+
 	/** Register an independently removable hook that runs before queued messages are consumed. */
 	addBeforeQueuedMessageDequeueHook(hook: (signal?: AbortSignal) => Promise<void> | void): () => void {
 		const registration = (signal?: AbortSignal) => hook(signal);
@@ -1372,6 +1379,19 @@ export class Agent {
 				listener();
 			} catch (err) {
 				logger.warn("Agent queue listener threw", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+	}
+
+	/** Report a safe-boundary park/resume transition; a throwing observer never disrupts the loop. */
+	#emitPauseChanged(paused: boolean): void {
+		for (const listener of this.#pauseListeners) {
+			try {
+				listener(paused);
+			} catch (err) {
+				logger.warn("Agent pause listener threw", {
 					error: err instanceof Error ? err.message : String(err),
 				});
 			}
@@ -2078,7 +2098,9 @@ export class Agent {
 			onHarmonyLeak: this.#onHarmonyLeak,
 			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
 			onPauseChange: paused => {
+				if (this.#isPaused === paused) return;
 				this.#isPaused = paused;
+				this.#emitPauseChanged(paused);
 			},
 			getToolChoice,
 			softToolRequirementState: this.#softToolRequirementState,

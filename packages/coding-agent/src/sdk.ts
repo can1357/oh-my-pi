@@ -163,6 +163,7 @@ import {
 	shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
 import { parseMCPToolName } from "@oh-my-pi/pi-tui/tools/mcp";
+import { mapPromptArguments } from "./mcp/prompt-args";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
@@ -236,7 +237,7 @@ import {
 	resolveRetryFallbackChainKey,
 } from "./session/retry-fallback-chains";
 import { describeUsageFallback } from "./session/retry-fallback-reason";
-import { getRestorableSessionModels } from "./session/session-context";
+import { getReadableCompactionEntry, getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { SHAPE_RULE } from "./spotlight/shape";
 import { buildCallContext } from "./spotlight/context";
@@ -246,6 +247,7 @@ import {
 	collectMountedMCPToolRoutes,
 	projectMountedMCPXdevGuidance,
 	type SettingsGatedToolDelta,
+	type SystemPromptRebuilder,
 } from "./session/session-tools";
 import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-mode";
 import { CacheWarmer } from "./session/cache-warmer";
@@ -1670,13 +1672,7 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 					name: commandName,
 					description: prompt.description ?? `MCP prompt from ${serverName}`,
 					async execute(args: string[]) {
-						const promptArgs: Record<string, string> = {};
-						for (const arg of args) {
-							const eqIdx = arg.indexOf("=");
-							if (eqIdx > 0) {
-								promptArgs[arg.slice(0, eqIdx)] = arg.slice(eqIdx + 1);
-							}
-						}
+						const promptArgs = mapPromptArguments(prompt.arguments, args);
 						const result = await manager.executePrompt(serverName, prompt.name, promptArgs);
 						if (!result) return "";
 						const parts: string[] = [];
@@ -2628,7 +2624,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get skills() {
 				return session?.skills ?? skills;
 			},
-			refreshSkills: () => session.refreshSkills(),
+			refreshSkills: () => session.reloadSkills(),
 			skillRediscoveryHost: () => session.skillRediscoveryHost(),
 			rules: allRules,
 			activeRules: [...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()],
@@ -4220,9 +4216,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!own || own.size === 0) return hosted;
 			return new Map([...own, ...hosted].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)));
 		};
-		const rebuildSystemPrompt = async (
-			toolNames: string[],
-			tools: Map<string, AgentTool>,
+		const rebuildSystemPrompt: SystemPromptRebuilder = async (
+			toolNames,
+			tools,
+			xdev,
 		): Promise<BuildSystemPromptResult> => {
 			const promptCwd = sessionManager.getCwd();
 			let activeRepoContext = initialActiveRepoContext;
@@ -4327,16 +4324,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// List each mounted MCP tool once. A routed tool that the xd:// catalog
 			// would list carries its catalog summary on the route line and gets no
 			// catalog line; a tool the route bound omits keeps its catalog line.
-			const xdevPromptDocs = toolSession.xdev
-				? planXdevPromptDocs(
-						toolSession.xdev,
-						cfgToolsXdevDocs.get(settings),
-						cfgToolsXdevInlineDevices.get(settings),
-					)
+			const xdevPromptDocs = xdev
+				? planXdevPromptDocs(xdev, cfgToolsXdevDocs.get(settings), cfgToolsXdevInlineDevices.get(settings))
 				: undefined;
-			const projection = projectMountedMCPXdevGuidance(
-				collectMountedMCPToolRoutes(toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
-			);
+			const projection = projectMountedMCPXdevGuidance(collectMountedMCPToolRoutes(xdev ? listXdevTools(xdev) : []));
 			const routedCatalogNames = new Set(
 				projection.mappings
 					.filter(mapping => xdevPromptDocs?.catalog.has(mapping.name))
@@ -4387,7 +4378,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Mounted xd:// readers stay out of the direct inventory, but their skill
 			// capability still drives catalog/URI guidance: project them into the
 			// compact metadata map (inventory rendering stays driven by `toolNames`).
-			const mountedPromptToolNames = toolSession.xdev ? xdevEntries(toolSession.xdev).map(entry => entry.name) : [];
+			const mountedPromptToolNames = xdev ? xdevEntries(xdev).map(entry => entry.name) : [];
 			const promptTools = projectSystemPromptToolMetadata(
 				tools,
 				nativeTools && !inlineToolDescriptors
@@ -4399,11 +4390,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				noContextFiles: options.noContextFiles,
 				excludeAgentsMd,
-				xdevTools: toolSession.xdev ? xdevEntries(toolSession.xdev) : [],
+				xdevTools: xdev ? xdevEntries(xdev) : [],
 				xdevDocs: xdevPromptDocs ? renderXdevPromptDocs(xdevPromptDocs, routedCatalogNames) : "",
 				resolvedCustomPrompt: options.customSystemPrompt,
 				systemPromptTemplate: options.systemPromptTemplate,
-				skills: cfgSkillful.get(settings) ? (session?.skills ?? skills) : [],
+				skills: cfgSkillful.get(settings) ? (session?.promptSkills ?? skills) : [],
 				skillDescriptions,
 				contextFiles,
 				tools: promptTools,
@@ -4610,6 +4601,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			rebuildSystemPrompt,
 			initialToolNames,
 			toolRegistry,
+			toolSession.xdev,
 		);
 
 		const promptTemplates = await promptTemplatesPromise;
@@ -4968,14 +4960,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Restore messages if session has existing data
 		if (hasExistingSession) {
-			// The restore above built its context at the default frame payload budget, before the session
-			// model was known; rebuild only when that model's budget differs.
+			// The restore above built its context before the session model was known: at the default frame
+			// payload budget, standing on the newest compaction. Rebuild only when that model sizes the archive
+			// differently or cannot replay that compaction.
 			const frameBudget = frameDataBytesBudget(model);
+			const branch = sessionManager.getBranch();
 			const restored =
-				frameBudget === DEFAULT_FRAME_DATA_BYTES_BUDGET
+				frameBudget === DEFAULT_FRAME_DATA_BYTES_BUDGET &&
+				getReadableCompactionEntry(branch, model) === getReadableCompactionEntry(branch, undefined)
 					? existingSession
 					: deobfuscateSessionContext(
-							sessionManager.buildSessionContext({ maxFrameDataBytes: frameBudget }),
+							sessionManager.buildSessionContext({ maxFrameDataBytes: frameBudget, model }),
 							obfuscator,
 						);
 			agent.replaceMessages(restored.messages);
@@ -5727,27 +5722,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const captureModel = captureOptions.initialState?.model;
 				const captureSessionId = captureOptions.sessionId;
 				if (!captureModel || !captureSessionId) throw new Error("Auto-learn capture identity is incomplete");
-				const captureDateCwdReminder = new DateCwdReminderInjector();
 				return new Agent({
 					...captureOptions,
 					cwd: sessionManager.getCwd(),
 					cwdResolver: () => sessionManager.getCwd(),
 					convertToLlm: convertToLlmFinal,
 					transformContext: async messages => wrapSteeringForModel(messages),
-					transformProviderContext: async (context, transformModel) => {
-						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
-						transformed = capArchiveFrameBytes(transformed, transformModel);
-						transformed = clampProviderContextImages(transformed, transformModel);
-						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
-						transformed = await dropUnreadableContextImages(transformed, transformModel);
-						transformed = await blobBroker.decorateContext(transformed, transformModel);
-						transformed = clampProviderContextImageBytes(transformed, transformModel);
-						return captureDateCwdReminder.transform(
-							transformed,
-							formatLocalCalendarDate(),
-							normalizePromptPath(sessionManager.getCwd()),
-						);
-					},
+					// The primary's chain and reminder placements, so the capture matches its cached prompt.
+					transformProviderContext: createTransformProviderContext({
+						...createSessionDateCwdReminderJournal(sessionManager),
+						record: () => {},
+					}),
 					temperature: agent.temperature,
 					topP: agent.topP,
 					topK: agent.topK,

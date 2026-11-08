@@ -246,6 +246,15 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 	return isUsageLimitOutcome(status, message);
 }
 
+/** Keep a quota reset actionable when a rotated sibling fails authentication. */
+export function preferAuthRetryError(reported: unknown, next: unknown): unknown {
+	const message = reported instanceof Error ? reported.message : typeof reported === "string" ? reported : undefined;
+	return (isUsageLimit(reported) || isUsageLimitOutcome(AIError.status(reported), message)) &&
+		AIError.status(next) === 401
+		? reported
+		: next;
+}
+
 /** Resolve a single retry step, swallowing resolver failures into `undefined`. */
 export async function resolveRetryKey(
 	resolver: ApiKeyResolver,
@@ -511,11 +520,13 @@ export async function withAuth<T>(
 
 	const state = createAuthRetryKeyState(initialKey, initialGeneration, initialHeaderGenerations);
 	let lastError: unknown;
+	let reportedError: unknown;
 	try {
 		return await attempt(initialKey);
 	} catch (error) {
 		if (!isAuthError(error)) throw error;
 		lastError = error;
+		reportedError = error;
 	}
 
 	while (true) {
@@ -526,10 +537,11 @@ export async function withAuth<T>(
 		} catch (error) {
 			if (!isAuthError(error)) throw error;
 			lastError = error;
+			reportedError = preferAuthRetryError(reportedError, error);
 		}
 	}
 
-	throw lastError;
+	throw reportedError;
 }
 
 /**
@@ -604,6 +616,7 @@ export async function withOAuthAccess<T>(
 	if (attemptResult.ok) return attemptResult.result;
 
 	let lastError = attemptResult.error;
+	let reportedError: unknown = lastError;
 	while (true) {
 		let next: OAuthAccess | undefined;
 		if (signal?.aborted || attemptCount >= AUTH_RETRY_MAX_ATTEMPTS) break;
@@ -631,6 +644,7 @@ export async function withOAuthAccess<T>(
 			attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 			if (attemptResult.ok) return attemptResult.result;
 			lastError = attemptResult.error;
+			reportedError = preferAuthRetryError(reportedError, attemptResult.error);
 			continue;
 		}
 
@@ -659,6 +673,7 @@ export async function withOAuthAccess<T>(
 						attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 						if (attemptResult.ok) return attemptResult.result;
 						lastError = attemptResult.error;
+						reportedError = preferAuthRetryError(reportedError, attemptResult.error);
 						continue;
 					}
 				}
@@ -697,7 +712,8 @@ export async function withOAuthAccess<T>(
 		attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 		if (attemptResult.ok) return attemptResult.result;
 		lastError = attemptResult.error;
+		reportedError = preferAuthRetryError(reportedError, attemptResult.error);
 	}
 
-	throw lastError;
+	throw reportedError;
 }

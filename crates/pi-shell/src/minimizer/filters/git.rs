@@ -1076,7 +1076,8 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 					}
 					continue;
 				},
-				// Context; an empty line is context whose leading space was stripped.
+				// Context; an empty line is context whose leading space was
+				// stripped.
 				Some(b' ') | None => {
 					hunk_old = hunk_old.saturating_sub(1);
 					hunk_new = hunk_new.saturating_sub(1);
