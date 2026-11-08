@@ -8,9 +8,7 @@ import type { Api, AssistantMessage, Context, FetchImpl, Model } from "@oh-my-pi
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import {
 	clearConfigValueCache,
-	createConfigHeaderResolver,
 	invalidateCommandConfig,
-	refuseCommandGeneration,
 	remintCommandConfig,
 	resolveConfigValue,
 } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
@@ -198,31 +196,29 @@ describe("a `!command` credential the provider refuses", () => {
 		};
 	}
 
-	for (const resolverScope of ["provider", "missing-model", "empty-snapshot"] as const) {
-		test(`a ${resolverScope} resolver keeps caller headers beside command-backed provider headers`, async () => {
+	for (const resolverScope of ["provider", "missing-model"] as const) {
+		test(`a ${resolverScope} resolver preserves model-over-provider header precedence`, async () => {
 			const counterFile = path.join(tempDir, "mints");
 			const tokenFile = path.join(tempDir, "token");
 			fs.writeFileSync(counterFile, "");
-			fs.writeFileSync(tokenFile, "provider-value");
-			const { registry, model } = buildRig("literal-key", counterFile, () => true, {
-				headers: { "X-Provider": mintFromFile(counterFile, tokenFile) },
-				models: [{ id: "gw-model", name: "GW Model", headers: { "X-Model": "model-value" } }],
+			fs.writeFileSync(tokenFile, "provider-test-value");
+			const { registry, model } = buildRig("literal-test-key", counterFile, () => true, {
+				headers: { "X-Provider": mintFromFile(counterFile, tokenFile), "X-Route": "provider-test-route" },
+				models: [
+					{
+						id: "gw-model",
+						name: "GW Model",
+						headers: { "X-Model": "model-test-value", "X-Route": "model-test-route" },
+					},
+				],
 			});
-			const callerModel = {
-				...model,
-				id: resolverScope === "missing-model" ? "missing-model" : model.id,
-				headers: { "X-Caller": "caller-value" },
-			};
-			const resolver = registry.resolver("probe-gw", {
-				sessionId: "s",
-				modelId: resolverScope === "provider" ? undefined : callerModel.id,
-			});
+			const callerModel = { ...model, id: resolverScope === "missing-model" ? "missing-model" : model.id };
 			const sent: Headers[] = [];
 			const handle = streamSimple(callerModel, CONTEXT, {
-				apiKey:
-					resolverScope === "empty-snapshot"
-						? () => ({ apiKey: "not-a-secret-test-key", resolvedHeaders: {} })
-						: resolver,
+				apiKey: registry.resolver("probe-gw", {
+					sessionId: "s",
+					modelId: resolverScope === "provider" ? undefined : callerModel.id,
+				}),
 				fetch: async (_url, init) => {
 					sent.push(new Headers(init?.headers));
 					return okStream();
@@ -234,11 +230,63 @@ describe("a `!command` credential the provider refuses", () => {
 			}
 			expect((await handle.result()).stopReason).not.toBe("error");
 			expect(sent).toHaveLength(1);
-			expect(sent[0].get("X-Provider")).toBe("provider-value");
-			expect(sent[0].get("X-Model")).toBe("model-value");
-			expect(sent[0].get("X-Caller")).toBe("caller-value");
+			expect(sent[0].get("X-Provider")).toBe("provider-test-value");
+			expect(sent[0].get("X-Model")).toBe("model-test-value");
+			expect(sent[0].get("X-Route")).toBe("model-test-route");
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
 		});
 	}
+
+	test("a lazy header resolver replaces superseded static headers", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "provider-test-value");
+		const { registry, model } = buildRig("literal-test-key", counterFile, () => true, {
+			headers: { "X-Provider": mintFromFile(counterFile, tokenFile) },
+		});
+		const callerModel = {
+			...model,
+			headers: { "X-Old-Auth": "removed-test-value" },
+			resolveHeaders: async () => ({ "X-Keep": "current-test-value" }),
+		};
+		const sent: Headers[] = [];
+		const handle = streamSimple(callerModel, CONTEXT, {
+			apiKey: registry.resolver("probe-gw"),
+			fetch: async (_url, init) => {
+				sent.push(new Headers(init?.headers));
+				return okStream();
+			},
+			maxTokens: 16,
+		});
+		for await (const _event of handle) {
+			// drain
+		}
+		expect((await handle.result()).stopReason).not.toBe("error");
+		expect(sent).toHaveLength(1);
+		expect(sent[0].has("X-Old-Auth")).toBe(false);
+		expect(sent[0].get("X-Keep")).toBe("current-test-value");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("");
+	});
+
+	test.each(["provider", "model"] as const)("a refused %s header command is not re-minted", async scope => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "expired-test-header");
+		const headers = { Authorization: mintFromFile(counterFile, tokenFile) };
+		const rig = buildRig(
+			"literal-test-key",
+			counterFile,
+			bearer => bearer === "renewed-test-header",
+			scope === "provider" ? { headers } : { models: [{ id: "gw-model", name: "GW Model", headers }] },
+		);
+		await rig.model.resolveHeaders?.();
+		fs.writeFileSync(tokenFile, "renewed-test-header");
+		expect((await rig.turn()).errorStatus).toBe(401);
+		expect(rig.seen).toEqual(["expired-test-header", "expired-test-header"]);
+		expect(rig.mints()).toBe(1);
+	});
 
 	test("availability checks do not execute provider or model header commands", async () => {
 		const counterFile = path.join(tempDir, "mints");
@@ -257,7 +305,12 @@ describe("a `!command` credential the provider refuses", () => {
 		const requestAuth = await registry.getApiKeyWithCredentialForProvider("probe-gw", "s", {
 			modelId: "gw-model",
 		});
-		expect(requestAuth?.resolvedHeaders).toEqual({ "X-Provider": "header-value", "X-Model": "header-value" });
+		expect(requestAuth?.apiKey).toBe("literal-key");
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("");
+		expect(await registry.find("probe-gw", "gw-model")?.resolveHeaders?.()).toEqual({
+			"X-Provider": "header-value",
+			"X-Model": "header-value",
+		});
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
 	});
 
@@ -287,58 +340,29 @@ describe("a `!command` credential the provider refuses", () => {
 		}
 	});
 
-	test("a permission-only 403 does not prevent a valid prepared header request from sending", async () => {
+	test("a permission-only 403 leaves the apiKey refusal watermark unmoved", async () => {
 		const counterFile = path.join(tempDir, "mints");
 		const tokenFile = path.join(tempDir, "token");
 		fs.writeFileSync(counterFile, "");
 		fs.writeFileSync(tokenFile, "valid-junk");
-		let permitted = false;
+		const command = mintFromFile(counterFile, tokenFile);
 		const rig = buildRig(
-			"literal-placeholder",
+			command,
 			counterFile,
-			() => permitted,
-			{ headers: { Authorization: mintFromFile(counterFile, tokenFile) } },
+			() => false,
+			{},
 			() =>
-				new Response(
-					JSON.stringify({ error: { message: "This model is not permitted.", type: "auth_error", code: "403" } }),
-					{ status: 403, headers: { "Content-Type": "application/json" } },
-				),
+				new Response(JSON.stringify({ error: { message: "Forbidden.", type: "auth_error", code: "403" } }), {
+					status: 403,
+					headers: { "Content-Type": "application/json" },
+				}),
 		);
-		const send = await rig.prepare();
 		expect((await rig.turn()).errorStatus).toBe(403);
-		permitted = true;
-		const beforeRequests = rig.seen.length;
-		expect((await send()).stopReason).not.toBe("error");
-		expect(rig.seen.length - beforeRequests).toBe(1);
-		expect(rig.mints()).toBe(1);
+		const before = rig.mints();
+		// An unchanged watermark leaves the accepted credential available without another mint.
+		expect(await resolveConfigValue(command)).toBe("valid-junk");
+		expect(rig.mints() - before).toBe(0);
 	});
-
-	test.each(["apiKey", "header"] as const)(
-		"a permission-only 403 leaves the %s refusal watermark unmoved",
-		async source => {
-			const counterFile = path.join(tempDir, "mints");
-			const tokenFile = path.join(tempDir, "token");
-			fs.writeFileSync(counterFile, "");
-			fs.writeFileSync(tokenFile, "valid-junk");
-			const command = mintFromFile(counterFile, tokenFile);
-			const rig = buildRig(
-				source === "apiKey" ? command : "literal-placeholder",
-				counterFile,
-				() => false,
-				source === "header" ? { headers: { Authorization: command } } : {},
-				() =>
-					new Response(JSON.stringify({ error: { message: "Forbidden.", type: "auth_error", code: "403" } }), {
-						status: 403,
-						headers: { "Content-Type": "application/json" },
-					}),
-			);
-			expect((await rig.turn()).errorStatus).toBe(403);
-			const before = rig.mints();
-			// An unchanged watermark leaves the accepted credential available without another mint.
-			expect(await resolveConfigValue(command)).toBe("valid-junk");
-			expect(rig.mints() - before).toBe(0);
-		},
-	);
 
 	test("a token_not_found_in_db 401 shares a replacement and both prepared operations recover", async () => {
 		const counterFile = path.join(tempDir, "mints");
@@ -399,140 +423,6 @@ describe("a `!command` credential the provider refuses", () => {
 		expect((await send()).stopReason).not.toBe("error");
 		expect(rig.mints() - before).toBe(1);
 		expect(rig.seen.map(value => Number(value.slice(5)))).toEqual([1, 2, 2, 1, 3]);
-	});
-
-	test("a refused prepared header obtains a missing replacement without dispatching the dead generation", async () => {
-		const counterFile = path.join(tempDir, "mints");
-		const tokenFile = path.join(tempDir, "token");
-		fs.writeFileSync(counterFile, "");
-		fs.writeFileSync(tokenFile, "junk-1");
-		const command = mintFromFile(counterFile, tokenFile);
-		const rig = buildRig("literal-placeholder", counterFile, bearer => bearer !== "junk-1", {
-			headers: { Authorization: command },
-		});
-		const send = await rig.prepare();
-		fs.writeFileSync(tokenFile, "junk-2");
-		expect((await rig.turn()).stopReason).not.toBe("error");
-		invalidateCommandConfig(command);
-		fs.writeFileSync(tokenFile, "junk-3");
-		const beforeRequests = rig.seen.length;
-		const beforeMints = rig.mints();
-		expect((await send()).stopReason).not.toBe("error");
-		expect(rig.seen.length - beforeRequests).toBe(1);
-		expect(rig.seen.slice(beforeRequests).map(value => Number(value.slice(5)))).toEqual([3]);
-		expect(rig.mints() - beforeMints).toBe(1);
-	});
-
-	test.each(["initial", "retry"] as const)(
-		"cancelling the %s prepared-header wait leaves the shared mint available to another operation",
-		async phase => {
-			const counterFile = path.join(tempDir, "mints");
-			const tokenFile = path.join(tempDir, "token");
-			const gateFile = path.join(tempDir, "mint-gate");
-			fs.writeFileSync(counterFile, "");
-			fs.writeFileSync(tokenFile, "prepared-junk");
-			const command = `!printf 1 >> ${shellQuote(counterFile)}; while [ -f ${shellQuote(gateFile)} ]; do sleep 0.01; done; IFS= read -r value < ${shellQuote(tokenFile)}; printf %s "$value"`;
-			const rig = buildRig("literal-placeholder", counterFile, () => false, {
-				headers: { Authorization: command },
-			});
-			const resolver = rig.registry.resolver(rig.model);
-			let prepared: ApiKeyResolution;
-			await resolveApiKeyOnce(resolver, undefined, resolved => {
-				prepared = resolved;
-			});
-			if (typeof prepared !== "object" || !prepared?.readHeaders) throw new Error("prepared headers missing");
-			const readHeaders = prepared.readHeaders;
-			const bothReading = Promise.withResolvers<void>();
-			let reads = 0;
-			const seed = {
-				...prepared,
-				readHeaders: () => {
-					if (++reads === 2) bothReading.resolve();
-					return readHeaders();
-				},
-			};
-			for (const [config, generation] of Object.entries(prepared.headerGenerations ?? {})) {
-				refuseCommandGeneration(config, generation);
-			}
-			invalidateCommandConfig(command);
-			fs.writeFileSync(tokenFile, "replacement-junk");
-			fs.writeFileSync(gateFile, "");
-			const before = rig.mints();
-			const started = Promise.withResolvers<void>();
-			const watcher = fs.watch(counterFile, () => {
-				if (rig.mints() > before) started.resolve();
-			});
-			let requests = 0;
-			const fetchImpl: FetchImpl = async (_url, init) => {
-				requests++;
-				return new Headers(init?.headers).get("Authorization") === "replacement-junk"
-					? okStream()
-					: gatewayRefusal();
-			};
-			const send = async (signal?: AbortSignal): Promise<boolean> => {
-				const handle = streamSimple({ ...rig.model, resolveHeaders: undefined }, CONTEXT, {
-					apiKey:
-						phase === "initial"
-							? seedApiKeyResolver(seed, resolver)
-							: ({ error }) => (error === undefined ? "initial-junk" : seed),
-					fetch: fetchImpl,
-					signal,
-					maxTokens: 16,
-				});
-				try {
-					for await (const _event of handle) {
-						// drain
-					}
-					return (await handle.result()).stopReason !== "error";
-				} catch {
-					return false;
-				}
-			};
-			const abort = new AbortController();
-			const cancelled = send(abort.signal);
-			let survivor: Promise<boolean> | undefined;
-			try {
-				await started.promise;
-				survivor = send();
-				await bothReading.promise;
-				abort.abort();
-				// This bounds real subprocess cancellation latency; fake timers cannot drive the shell issuer.
-				const prompt = await Promise.race([cancelled.then(() => true), Bun.sleep(250).then(() => false)]);
-				// The issuer remains blocked until after the cancellation observation.
-				expect(prompt).toBe(true);
-				expect(rig.mints() - before).toBe(1);
-				fs.unlinkSync(gateFile);
-				expect(await cancelled).toBe(false);
-				expect(await survivor).toBe(true);
-				expect(rig.mints() - before).toBe(1);
-				expect(requests).toBe(phase === "initial" ? 1 : 3);
-			} finally {
-				watcher.close();
-				fs.rmSync(gateFile, { force: true });
-				await Promise.all([cancelled, survivor]);
-			}
-		},
-	);
-
-	test("a prepared header obtains a new mint when a refused generation has no replacement", async () => {
-		const counterFile = path.join(tempDir, "mints");
-		const tokenFile = path.join(tempDir, "token");
-		fs.writeFileSync(counterFile, "");
-		fs.writeFileSync(tokenFile, "prepared-junk");
-		const command = mintFromFile(counterFile, tokenFile);
-		let permitted = false;
-		const rig = buildRig("literal-placeholder", counterFile, () => permitted, {
-			headers: { Authorization: command },
-		});
-		const send = await rig.prepare();
-		expect((await rig.turn()).errorStatus).toBe(401);
-		invalidateCommandConfig(command);
-		permitted = true;
-		const beforeRequests = rig.seen.length;
-		const beforeMints = rig.mints();
-		expect((await send()).stopReason).not.toBe("error");
-		expect(rig.seen.length - beforeRequests).toBe(1);
-		expect(rig.mints() - beforeMints).toBe(1);
 	});
 
 	test("is re-minted and the request retried once", async () => {
@@ -616,116 +506,13 @@ describe("a `!command` credential the provider refuses", () => {
 		expect(rig.mints() - mintsBefore).toBe(1);
 	});
 
-	test.each(["provider", "model"])("shares one header mint per refusal wave (%s headers)", async scope => {
-		const counterFile = path.join(tempDir, "mints");
-		const tokenFile = path.join(tempDir, "token");
-		fs.writeFileSync(counterFile, "");
-		fs.writeFileSync(tokenFile, "expired-token");
-		const headers = { Authorization: mintFromFile(counterFile, tokenFile) };
-		const gates = Array.from({ length: 10 }, () => Promise.withResolvers<void>());
-		gates[0].resolve();
-		let refused = 0;
-		let recovered = 0;
-		const rig = buildRig(
-			"literal-placeholder",
-			counterFile,
-			bearer => {
-				if (bearer !== "renewed-token") return false;
-				// Release the next refusal only after the preceding retry used its mint.
-				gates[++recovered]?.resolve();
-				return true;
-			},
-			scope === "provider" ? { headers } : { models: [{ id: "gw-model", name: "GW Model", headers }] },
-			async () => {
-				await gates[refused++].promise;
-				return gatewayRefusal();
-			},
-		);
-		await rig.model.resolveHeaders?.();
-		const before = rig.mints();
-		const sends = await Promise.all(Array.from({ length: 10 }, () => rig.prepare()));
-		fs.writeFileSync(tokenFile, "renewed-token");
-
-		const results = await Promise.all(sends.map(send => send()));
-
-		expect(results.every(result => result.stopReason !== "error")).toBe(true);
-		expect(rig.seen.length).toBe(20);
-		expect(refused).toBe(10);
-		expect(recovered).toBe(10);
-		expect(rig.mints() - before).toBe(1);
-	});
-
-	async function staleHeaderWave(count: number): Promise<{ refusedResends: number; recovered: number }> {
-		const counterFile = path.join(tempDir, "mints");
-		const tokenFile = path.join(tempDir, "token");
-		fs.writeFileSync(counterFile, "");
-		fs.writeFileSync(tokenFile, "prepared-junk");
-		const command = mintFromFile(counterFile, tokenFile);
-		const rig = buildRig("literal-placeholder", counterFile, bearer => bearer !== "refused-junk", {
-			headers: { Authorization: command },
-		});
-		const sends = await Promise.all(Array.from({ length: count }, () => rig.prepare()));
-		// Another provider using this command advances its slot after these
-		// operations prepared their auth. The live header resolver now reads 2,
-		// but their seeded metadata still names 1. The gateway refuses 2.
-		fs.writeFileSync(tokenFile, "refused-junk");
-		await remintCommandConfig(command, 1);
-		fs.writeFileSync(tokenFile, "replacement-junk");
-		const results = await Promise.all(sends.map(send => send()));
-		return {
-			refusedResends: results.reduce((sum, _result, index) => {
-				const attempts = rig.seen.slice(index * 2, index * 2 + 2);
-				return sum + Number(attempts.length === 2 && attempts.every(value => value === "refused-junk"));
-			}, 0),
-			recovered: results.filter(result => result.stopReason !== "error").length,
-		};
-	}
-
-	test("a header retry never resends the generation its request just had refused", async () => {
-		expect((await staleHeaderWave(1)).refusedResends).toBe(0);
-	});
-
-	test("every prepared header operation recovers after a shared command advances", async () => {
-		expect((await staleHeaderWave(10)).recovered).toBe(10);
-	});
-
-	test.each([1, 2])("a prepared header skips known-refused generations after %s recoveries", async advances => {
-		const counterFile = path.join(tempDir, "mints");
-		const tokenFile = path.join(tempDir, "token");
-		fs.writeFileSync(counterFile, "");
-		fs.writeFileSync(tokenFile, "generation-1-junk");
-		let accepted = "generation-1-junk";
-		const rig = buildRig("literal-placeholder", counterFile, bearer => bearer === accepted, {
-			headers: { Authorization: mintFromFile(counterFile, tokenFile) },
-		});
-		const send = await rig.prepare();
-		for (let generation = 2; generation <= advances + 1; generation++) {
-			accepted = `generation-${generation}-junk`;
-			fs.writeFileSync(tokenFile, accepted);
-			expect((await rig.turn()).stopReason).not.toBe("error");
-		}
-		const requestsBefore = rig.seen.length;
-		const mintsBefore = rig.mints();
-		const result = await send();
-		const sent = rig.seen.slice(requestsBefore);
-		expect(sent.filter(value => value !== accepted).length).toBe(0);
-		expect(result.stopReason).not.toBe("error");
-		expect(sent.length).toBe(1);
-		expect(rig.mints() - mintsBefore).toBe(0);
-	});
-
-	test.each(["apiKey", "header"])("a %s snapshot outliving two ordinary mints still recovers", async source => {
+	test("an apiKey snapshot outliving two ordinary mints still recovers", async () => {
 		const counterFile = path.join(tempDir, "mints");
 		const tokenFile = path.join(tempDir, "token");
 		fs.writeFileSync(counterFile, "");
 		fs.writeFileSync(tokenFile, "generation-1-junk");
 		const command = mintFromFile(counterFile, tokenFile);
-		const rig = buildRig(
-			source === "apiKey" ? command : "literal-placeholder",
-			counterFile,
-			bearer => bearer === "generation-3-junk",
-			source === "header" ? { headers: { Authorization: command } } : {},
-		);
+		const rig = buildRig(command, counterFile, bearer => bearer === "generation-3-junk");
 		const send = await rig.prepare();
 		for (const generation of [2, 3]) {
 			fs.writeFileSync(tokenFile, `generation-${generation}-junk`);
@@ -738,48 +525,40 @@ describe("a `!command` credential the provider refuses", () => {
 		expect(rig.mints() - before).toBe(0);
 	});
 
-	test.each(["apiKey", "header"])(
-		"a prepared %s snapshot recovers every refusal with one helper execution",
-		async source => {
-			const counterFile = path.join(tempDir, "mints");
-			const tokenFile = path.join(tempDir, "token");
-			fs.writeFileSync(counterFile, "");
-			fs.writeFileSync(tokenFile, "prepared-junk");
-			const command = mintFromFile(counterFile, tokenFile);
-			const gate = Promise.withResolvers<void>();
-			let refusals = 0;
-			const rig = buildRig(
-				source === "apiKey" ? command : "literal-placeholder",
-				counterFile,
-				bearer => bearer === "replacement-junk",
-				source === "header" ? { headers: { Authorization: command } } : {},
-				async () => {
-					if (++refusals === 10) gate.resolve();
-					await gate.promise;
-					return gatewayRefusal();
-				},
-			);
-			const sends = await Promise.all(Array.from({ length: 10 }, () => rig.prepare()));
-			const before = rig.mints();
-			fs.writeFileSync(tokenFile, "replacement-junk");
-			// The gateway genuinely refuses the prepared credential, whatever the
-			// snapshot timing. Only the next generation can recover these turns.
-			const results = await Promise.all(sends.map(send => send()));
-			expect(refusals).toBe(10);
-			expect(results.filter(result => result.stopReason !== "error").length).toBe(10);
-			expect(rig.mints() - before).toBe(1);
-			expect(rig.seen.length).toBe(20);
-		},
-	);
+	test("a prepared apiKey snapshot recovers every refusal with one helper execution", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "prepared-junk");
+		const command = mintFromFile(counterFile, tokenFile);
+		const gate = Promise.withResolvers<void>();
+		let refusals = 0;
+		const rig = buildRig(
+			command,
+			counterFile,
+			bearer => bearer === "replacement-junk",
+			{},
+			async () => {
+				if (++refusals === 10) gate.resolve();
+				await gate.promise;
+				return gatewayRefusal();
+			},
+		);
+		const sends = await Promise.all(Array.from({ length: 10 }, () => rig.prepare()));
+		const before = rig.mints();
+		fs.writeFileSync(tokenFile, "replacement-junk");
+		// The gateway genuinely refuses the prepared credential, whatever the
+		// snapshot timing. Only the next generation can recover these turns.
+		const results = await Promise.all(sends.map(send => send()));
+		expect(refusals).toBe(10);
+		expect(results.filter(result => result.stopReason !== "error").length).toBe(10);
+		expect(rig.mints() - before).toBe(1);
+		expect(rig.seen.length).toBe(20);
+	});
 
-	test.each([
-		["apiKey", "boundary"],
-		["apiKey", "serialized"],
-		["header", "boundary"],
-		["header", "serialized"],
-	] as const)(
-		"a same-byte %s refusal wave recovers across %s settlement with one helper execution",
-		async (source, schedule) => {
+	test.each(["boundary", "serialized"] as const)(
+		"a same-byte apiKey refusal wave recovers across %s settlement with one helper execution",
+		async schedule => {
 			const counterFile = path.join(tempDir, "mints");
 			const tokenFile = path.join(tempDir, "token");
 			fs.writeFileSync(counterFile, "");
@@ -790,10 +569,10 @@ describe("a `!command` credential the provider refuses", () => {
 			let requests = 0;
 			let refusals = 0;
 			const rig = buildRig(
-				source === "apiKey" ? command : "literal-placeholder",
+				command,
 				counterFile,
 				() => ++requests > 10,
-				source === "header" ? { headers: { Authorization: command } } : {},
+				{},
 				async () => {
 					const index = refusals++;
 					if (refusals === 10) allRefused.resolve();
@@ -826,48 +605,6 @@ describe("a `!command` credential the provider refuses", () => {
 			expect(rig.seen.length).toBe(20);
 		},
 	);
-
-	test("a header snapshot keeps the generation that produced its values during composition", async () => {
-		const counterFile = path.join(tempDir, "mints");
-		const tokenFile = path.join(tempDir, "token");
-		fs.writeFileSync(counterFile, "");
-		fs.writeFileSync(tokenFile, "prepared-junk");
-		const command = mintFromFile(counterFile, tokenFile);
-		let refusals = 0;
-		const rig = buildRig(
-			"literal-placeholder",
-			counterFile,
-			bearer => bearer === "replacement-junk",
-			{
-				headers: { Authorization: command },
-			},
-			() => {
-				refusals++;
-				return gatewayRefusal();
-			},
-		);
-		let advanced = false;
-		rig.model.resolveHeaders = createConfigHeaderResolver([
-			rig.model.resolveHeaders,
-			async () => {
-				if (!advanced) {
-					advanced = true;
-					fs.writeFileSync(tokenFile, "replacement-junk");
-					invalidateCommandConfig(command);
-					await resolveConfigValue(command);
-				}
-				return { "x-probe": "present" };
-			},
-		]);
-		const send = await rig.prepare();
-		const before = rig.mints();
-		expect((await send()).stopReason).not.toBe("error");
-		// The snapshot sent generation 1, even though the cache changed while
-		// composing its next layer. Its refusal can reuse the already-minted 2.
-		expect(refusals).toBe(1);
-		expect(rig.seen.length).toBe(2);
-		expect(rig.mints() - before).toBe(0);
-	});
 
 	test("a refused snapshot joins an ordinary replacement already being minted", async () => {
 		const counterFile = path.join(tempDir, "mints");
@@ -917,25 +654,6 @@ describe("a `!command` credential the provider refuses", () => {
 		// B obtains generation 3 before its first request, not after another 401.
 		expect(rig.seen.length - beforeRequests).toBe(1);
 		expect(rig.mints()).toBe(3);
-	});
-
-	test("a header mint earns its same-byte retry on a bare 401", async () => {
-		const counterFile = path.join(tempDir, "mints");
-		const tokenFile = path.join(tempDir, "token");
-		fs.writeFileSync(counterFile, "");
-		fs.writeFileSync(tokenFile, "unchanging-token");
-		let requests = 0;
-		const rig = buildRig(
-			"literal-placeholder",
-			counterFile,
-			() => requests++ > 0,
-			{ headers: { Authorization: mintFromFile(counterFile, tokenFile) } },
-			() => new Response(null, { status: 401 }),
-		);
-
-		expect((await rig.turn()).stopReason).not.toBe("error");
-		expect(rig.seen.length).toBe(2);
-		expect(rig.mints()).toBe(2);
 	});
 
 	test("gives every waiter a decisive answer when the shared re-mint fails", async () => {
@@ -1366,61 +1084,6 @@ describe("a `!command` credential the provider refuses", () => {
 			// well — the route before the owner served this request — costs a
 			// second call to the issuer for one refusal.
 			expect(fs.readFileSync(counterFile, "utf8").length - mintsBefore).toBe(1);
-		} finally {
-			await worker.stop();
-			server.stop(true);
-		}
-	});
-	test("shares one header re-mint across ten worker-mirror refusals", async () => {
-		const counterFile = path.join(tempDir, "mints");
-		const tokenFile = path.join(tempDir, "token");
-		fs.writeFileSync(counterFile, "");
-		fs.writeFileSync(tokenFile, "expired-token");
-		const wave = Promise.withResolvers<void>();
-		let requests = 0;
-		let refusals = 0;
-		const server = Bun.serve({
-			hostname: "127.0.0.1",
-			port: 0,
-			fetch: async request => {
-				requests++;
-				if (request.headers.get("authorization") !== "expired-token") return okStream();
-				if (++refusals === 10) {
-					fs.writeFileSync(tokenFile, "renewed-token");
-					wave.resolve();
-				}
-				await wave.promise;
-				return gatewayRefusal();
-			},
-		});
-		const modelsPath = path.join(tempDir, "models.json");
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"probe-gw": {
-						baseUrl: `http://127.0.0.1:${server.port}/v1`,
-						api: "openai-completions",
-						apiKey: "test",
-						headers: { Authorization: mintFromFile(counterFile, tokenFile) },
-						models: [{ id: "gw-model", name: "GW Model", compat: { supportsStore: false } }],
-					},
-				},
-			}),
-		);
-		const registry = new ModelRegistry(authStorage, modelsPath, { cacheDbPath: path.join(tempDir, "models.db") });
-		const worker = await startServiceWorker<RemintProbe>(
-			new URL("./fixtures/credential-remint-worker.ts", import.meta.url),
-			[authService],
-		);
-		try {
-			const results = await Promise.all(
-				Array.from({ length: 10 }, () => worker.probe.turn(registry, "probe-gw", "gw-model")),
-			);
-			expect(results.every(result => result.ok)).toBe(true);
-			expect(requests).toBe(20);
-			// One cold initial execution plus one shared recovery execution.
-			expect(fs.readFileSync(counterFile, "utf8").length).toBe(2);
 		} finally {
 			await worker.stop();
 			server.stop(true);

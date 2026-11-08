@@ -16,11 +16,9 @@ import {
 import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import {
-	type ApiKeyResolver,
 	createAuthRetryKeyState,
 	isApiKeyResolver,
 	preferAuthRetryError,
-	readApiKeyHeaders,
 	resolvedApiKeyBearer,
 	resolvedCredentialGeneration,
 	resolveNextAuthRetryKey,
@@ -1227,36 +1225,7 @@ function streamSimpleRequest<TApi extends Api>(
 		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
 	);
 
-	const requestApiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
-	const apiKeyResolver: ApiKeyResolver | undefined = requestApiKeyResolver
-		? async ctx => {
-				const resolved = await requestApiKeyResolver(ctx);
-				const resolveHeaders = model.resolveHeaders;
-				if (
-					typeof resolved !== "object" ||
-					!resolved?.resolvedHeaders ||
-					resolved.resolvedHeaderModelId === model.id ||
-					!resolveHeaders
-				)
-					return resolved;
-				// Provider-only snapshots supplement the caller's model. Resolve its
-				// missing source before rechecking the snapshot's refusal watermark.
-				const callerHeaders = await untilAborted(ctx.signal, () => resolveHeaders(ctx.signal));
-				const merge = (headers: Record<string, string> | undefined): Record<string, string> => ({
-					...model.headers,
-					...callerHeaders,
-					...headers,
-				});
-				return {
-					...resolved,
-					resolvedHeaders: merge(resolved.resolvedHeaders),
-					readHeaders: async () => {
-						const current = resolved.readHeaders ? await resolved.readHeaders() : resolved;
-						return { ...current, resolvedHeaders: merge(current.resolvedHeaders) };
-					},
-				};
-			}
-		: undefined;
+	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
 		const signal = requestOptions?.signal;
@@ -1267,7 +1236,6 @@ function streamSimpleRequest<TApi extends Api>(
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
-			resolvedHeaders?: Record<string, string>,
 		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
@@ -1278,11 +1246,7 @@ function streamSimpleRequest<TApi extends Api>(
 
 			try {
 				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
-				const attemptModel =
-					resolvedHeaders === undefined
-						? model
-						: { ...model, resolveHeaders: undefined, headers: { ...model.headers, ...resolvedHeaders } };
-				const inner = streamSimpleRequest(attemptModel, context, attemptOptions);
+				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
 						if ("partial" in event) event.partial.credentialId = credentialId;
@@ -1351,19 +1315,12 @@ function streamSimpleRequest<TApi extends Api>(
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
 			let credentialGeneration: number | undefined;
-			let headerGenerations: Record<string, number> | undefined;
-			let resolvedHeaders: Record<string, string> | undefined;
 			try {
-				const resolved = await readApiKeyHeaders(
-					await apiKeyResolver({ lastChance: false, error: undefined, signal }),
-					signal,
-				);
+				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 				credentialGeneration = resolvedCredentialGeneration(resolved);
-				headerGenerations = typeof resolved === "object" ? resolved?.headerGenerations : undefined;
-				resolvedHeaders = typeof resolved === "object" ? resolved?.resolvedHeaders : undefined;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1384,8 +1341,8 @@ function streamSimpleRequest<TApi extends Api>(
 				outer.fail(new AIError.MissingApiKeyError(model.provider));
 				return;
 			}
-			const retryState = createAuthRetryKeyState(lastKey, credentialGeneration, headerGenerations);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity, resolvedHeaders);
+			const retryState = createAuthRetryKeyState(lastKey, credentialGeneration);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			let reportedFailure = failure;
 			while (true) {
@@ -1394,7 +1351,6 @@ function streamSimpleRequest<TApi extends Api>(
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
 				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
-				let nextHeaders: Record<string, string> | undefined;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
@@ -1403,11 +1359,10 @@ function streamSimpleRequest<TApi extends Api>(
 					resolved => {
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
-						nextHeaders = typeof resolved === "object" ? resolved?.resolvedHeaders : undefined;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, nextHeaders);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				reportedFailure =
 					preferAuthRetryError(reportedFailure.error, next.error) === reportedFailure.error

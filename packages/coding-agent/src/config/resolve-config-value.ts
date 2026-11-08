@@ -44,82 +44,6 @@ export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<stri
 /** One raw header layer or previously composed request-time resolver. */
 export type ConfigHeaderSource = Record<string, string> | ConfigHeaderResolver | undefined;
 
-/** Effective raw header values retained through composed resolvers. */
-const headerConfigs = new WeakMap<ConfigHeaderResolver, Record<string, string>>();
-
-interface HeaderCredential {
-	config: string;
-	generation: number;
-	prefix?: string;
-}
-
-/** Provenance belongs to the materialized record, never to a resolver or the live cache. */
-const resolvedHeaderCredentials = new WeakMap<Record<string, string>, Record<string, HeaderCredential>>();
-
-export function configHeaderCommands(resolver: ConfigHeaderResolver | undefined): string[] {
-	const configs = resolver && headerConfigs.get(resolver);
-	return [
-		...new Set(
-			Object.values(configs ?? {}).flatMap(config => {
-				const command = commandConfigKey(config);
-				return command === undefined ? [] : [`!${command}`];
-			}),
-		),
-	];
-}
-
-/** Read the generations that produced these exact header values. */
-export function configHeaderGenerations(
-	headers: Record<string, string> | undefined,
-): Record<string, number> | undefined {
-	const credentials = headers && resolvedHeaderCredentials.get(headers);
-	if (!credentials || Object.keys(credentials).length === 0) return undefined;
-	const generations: Record<string, number> = {};
-	for (const { config, generation } of Object.values(credentials)) {
-		generations[config] = Math.max(generations[config] ?? 0, generation);
-	}
-	return generations;
-}
-
-/**
- * Send prepared generations above the refusal watermark unchanged. For a
- * condemned generation, use a cached replacement, join a mint, or obtain one.
- * Absence of a replacement is not failure; an issuer unable to provide one is.
- * Never dispatch a generation the watermark has condemned.
- */
-export async function readUnrefusedConfigHeaders(headers: Record<string, string>): Promise<Record<string, string>> {
-	const credentials = resolvedHeaderCredentials.get(headers);
-	if (!credentials) return headers;
-	let current = headers;
-	let currentCredentials = credentials;
-	for (;;) {
-		let replaced = false;
-		for (const key in currentCredentials) {
-			const credential = currentCredentials[key];
-			const command = commandKey(credential.config);
-			if (credential.generation > (commandRefusedGeneration.get(command) ?? 0)) continue;
-			// executeCommand shares both ordinary and recovery mints, and ignores
-			// cached generations at or below the watermark. Missing cache entries
-			// therefore obtain a replacement instead of sending known-dead bytes.
-			const replacement = await executeCommand(credential.config);
-			if (!replacement) throw new Error("Unable to obtain an unrefused command credential");
-			if (current === headers) {
-				current = { ...headers };
-				currentCredentials = { ...credentials };
-			}
-			current[key] = `${credential.prefix ?? ""}${replacement.value}`;
-			currentCredentials[key] = { ...credential, generation: replacement.generation };
-			replaced = true;
-			// A later header's mint can suspend while a peer refuses an earlier
-			// header. Recheck all generations after every await, not just this one.
-			break;
-		}
-		if (!replaced) break;
-	}
-	if (current !== headers) resolvedHeaderCredentials.set(current, currentCredentials);
-	return current;
-}
-
 /** Whether a non-minting recovery can still serve this command's cached slot. */
 export function hasUnrefusedCommandCredential(valueConfig: string | undefined): boolean {
 	return !isCommandConfigValue(valueConfig) || settledMintFor(commandKey(valueConfig)) !== undefined;
@@ -138,16 +62,6 @@ export function isCommandConfigValue(valueConfig: string | undefined): valueConf
 
 function commandKey(valueConfig: string): string {
 	return valueConfig.slice(1).trim();
-}
-
-/**
- * The key a command-backed value shares its cached result, its in-flight run
- * and its re-mint under. `!helper` and `! helper` are one command, so callers
- * that compare two configured values — "is this the credential I am already
- * re-minting?" — must compare this and not the raw configuration text.
- */
-export function commandConfigKey(valueConfig: string | undefined): string | undefined {
-	return isCommandConfigValue(valueConfig) ? commandKey(valueConfig) : undefined;
 }
 
 /** Invalidate one command-backed value, including its failure backoff and pending cache epoch. */
@@ -401,19 +315,13 @@ export async function resolveConfigHeaders(
 	signal?.throwIfAborted();
 	if (!headers) return undefined;
 	const resolved: Record<string, string> = {};
-	const credentials: Record<string, HeaderCredential> = {};
 	let hasResolved = false;
 	for (const key in headers) {
-		const credential = await untilAborted(signal, () => resolveConfigCredential(headers[key]));
-		const next = typeof credential === "string" ? credential : credential?.value;
+		const next = await untilAborted(signal, () => resolveConfigValue(headers[key]));
 		if (!next) continue;
 		resolved[key] = next;
-		if (typeof credential === "object" && credential.generation !== undefined) {
-			credentials[key] = { config: `!${commandKey(headers[key])}`, generation: credential.generation };
-		}
 		hasResolved = true;
 	}
-	resolvedHeaderCredentials.set(resolved, credentials);
 	return hasResolved ? resolved : undefined;
 }
 
@@ -428,15 +336,9 @@ export function createConfigHeaderResolver(
 ): ConfigHeaderResolver | undefined {
 	const active = sources.filter((source): source is Exclude<ConfigHeaderSource, undefined> => source !== undefined);
 	if (active.length === 0 && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
-	const configs: Record<string, string> = {};
-	for (const source of active) {
-		Object.assign(configs, typeof source === "function" ? headerConfigs.get(source) : source);
-	}
-	if (options?.authHeader && options.apiKeyConfig) configs.Authorization = options.apiKeyConfig;
-	const resolver: ConfigHeaderResolver = async signal => {
+	return async signal => {
 		signal?.throwIfAborted();
 		const resolved: Record<string, string> = {};
-		const credentials: Record<string, HeaderCredential> = {};
 		let hasResolved = false;
 		for (const source of active) {
 			const next =
@@ -447,33 +349,19 @@ export function createConfigHeaderResolver(
 			if (!next) continue;
 			for (const key in next) {
 				resolved[key] = next[key];
-				const credential = resolvedHeaderCredentials.get(next)?.[key];
-				if (credential) credentials[key] = credential;
-				else delete credentials[key];
 				hasResolved = true;
 			}
 		}
 		if (options?.authHeader && options.apiKeyConfig) {
 			const keyConfig = options.apiKeyConfig;
-			const credential = await untilAborted(signal, () => resolveConfigCredential(keyConfig));
-			const apiKey = typeof credential === "string" ? credential : credential?.value;
+			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig));
 			if (apiKey) {
 				resolved.Authorization = `Bearer ${apiKey}`;
-				if (typeof credential === "object" && credential.generation !== undefined) {
-					credentials.Authorization = {
-						config: `!${commandKey(keyConfig)}`,
-						generation: credential.generation,
-						prefix: "Bearer ",
-					};
-				} else delete credentials.Authorization;
 				hasResolved = true;
 			}
 		}
-		resolvedHeaderCredentials.set(resolved, credentials);
 		return hasResolved ? resolved : undefined;
 	};
-	headerConfigs.set(resolver, configs);
-	return resolver;
 }
 
 /** Clear all command state, generation counters included. Exported for focused resolver tests. */

@@ -14,11 +14,6 @@ import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
 export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id">;
 
-/** Header-command provenance stays local to the registry rendering those headers. */
-export interface RegistryApiKeyOptions extends AuthApiKeyOptions {
-	rejectedHeaderGenerations?: Record<string, number>;
-}
-
 export interface ApiKeyResolverOptions {
 	/** Session id for credential stickiness; read at resolve time by the caller. */
 	sessionId?: string;
@@ -39,7 +34,7 @@ export interface ApiKeyResolverRegistry {
 	getApiKeyWithCredentialForProvider(
 		provider: string,
 		sessionId?: string,
-		options?: RegistryApiKeyOptions,
+		options?: AuthApiKeyOptions,
 	): Promise<ApiKeyResolution>;
 	authStorage: Pick<AuthStorage, "limits">;
 	/**
@@ -73,12 +68,8 @@ export function createApiKeyResolver(
 	const resolveKey = async (
 		forceRefresh: boolean | undefined,
 		recovery?: Pick<
-			RegistryApiKeyOptions,
-			| "signal"
-			| "refreshReason"
-			| "rejectedAccessToken"
-			| "rejectedCredentialGeneration"
-			| "rejectedHeaderGenerations"
+			AuthApiKeyOptions,
+			"signal" | "refreshReason" | "rejectedAccessToken" | "rejectedCredentialGeneration"
 		>,
 	): Promise<ApiKeyResolution> => {
 		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
@@ -90,7 +81,7 @@ export function createApiKeyResolver(
 		provenance.record(resolved);
 		return resolved;
 	};
-	return async ({ lastChance, error, signal, previousKey, previousGeneration, previousHeaderGenerations }) => {
+	return async ({ lastChance, error, signal, previousKey, previousGeneration }) => {
 		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
 			return resolveKey(undefined);
@@ -121,7 +112,6 @@ export function createApiKeyResolver(
 			// Record the exhausted attempt without spending a mint it cannot use.
 			const resolved = await resolveKey(undefined, {
 				rejectedCredentialGeneration: credentialRefused ? previousGeneration : undefined,
-				rejectedHeaderGenerations: credentialRefused ? previousHeaderGenerations : undefined,
 			});
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
@@ -138,7 +128,6 @@ export function createApiKeyResolver(
 			// credential's re-mint reads it to tell a refusal of the mint it has
 			// cached from a refusal of an older one, which that mint answers.
 			rejectedCredentialGeneration: credentialRefused ? previousGeneration : undefined,
-			rejectedHeaderGenerations: credentialRefused ? previousHeaderGenerations : undefined,
 		});
 		// A credential was actually minted for this refusal — the slot's
 		// generation advanced past the one the request sent. The retry is worth
@@ -147,12 +136,8 @@ export function createApiKeyResolver(
 		// do not say whether the issuer renewed it. Without a generation to
 		// compare, the provider's own wording decides, as it did before.
 		const minted =
-			(previousGeneration !== undefined &&
-				(resolvedCredentialGeneration(resolved) ?? previousGeneration) > previousGeneration) ||
-			(typeof resolved === "object" &&
-				Object.entries(previousHeaderGenerations ?? {}).some(
-					([config, generation]) => (resolved?.headerGenerations?.[config] ?? generation) > generation,
-				));
+			previousGeneration !== undefined &&
+			(resolvedCredentialGeneration(resolved) ?? previousGeneration) > previousGeneration;
 		return minted || verdict === "structured" || verdict === "text" ? markAfterRemint(resolved) : resolved;
 	};
 }

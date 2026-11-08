@@ -53,12 +53,7 @@ import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
 import type { AuthStorage } from "../session/auth-storage";
-import {
-	type ApiKeyResolverModel,
-	type ApiKeyResolverOptions,
-	createApiKeyResolver,
-	type RegistryApiKeyOptions,
-} from "./api-key-resolver";
+import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
 import type { ConfigError, ConfigFile } from "./config-file";
 import {
 	buildCustomModelOverlay,
@@ -70,14 +65,11 @@ import {
 	resolveModelOverrideWithAliases,
 } from "./custom-models";
 import {
-	configHeaderCommands,
-	configHeaderGenerations,
 	createConfigHeaderResolver,
 	invalidateAllCommandConfigs,
 	hasUnrefusedCommandCredential,
 	invalidateCommandConfig,
 	isCommandConfigValue,
-	readUnrefusedConfigHeaders,
 	refuseCommandGeneration,
 	remintCommandConfig,
 	resolveConfigCredential,
@@ -503,7 +495,7 @@ export class ModelRegistry {
 	/**
 	 * Accumulate every command-backed (`!cmd`) config value from an apiKey and a
 	 * header record into `target`. Used at load time to record which commands a
-	 * provider depends on so the 401 refresh path can invalidate all of them.
+	 * provider depends on so an explicit configuration refresh can invalidate them.
 	 */
 	#collectCommandConfigValues(
 		target: Set<string>,
@@ -521,9 +513,7 @@ export class ModelRegistry {
 	/**
 	 * Drop the process-cached results of every command-backed config value a
 	 * provider carries (apiKey plus provider/model-override header commands) so
-	 * the next resolve re-runs them. Invoked on the 401 force-refresh path: the
-	 * apiKey alone was refreshed before, leaving command-backed header
-	 * credentials pinned to their stale value across the retry (#9760).
+	 * the next resolve re-runs them after an explicit configuration refresh.
 	 */
 	#invalidateProviderCommandConfigs(provider: string): void {
 		this.#owner?.invalidateCommandConfigs(provider);
@@ -531,11 +521,7 @@ export class ModelRegistry {
 		this.#recordMirrorChange({ kind: "invalidateCommands", provider });
 	}
 
-	/** Re-mint the selected API-key command on its authoritative owner. Header
-	 * commands are recovered by the registry that materializes those headers,
-	 * using the failed request's own per-command generations. Unsent models'
-	 * commands are neither invalidated nor executed by another model's refusal.
-	 */
+	/** Re-mint only the selected API-key command on its authoritative owner. */
 	async #remintProviderCommandConfigs(provider: string, rejectedGeneration?: number): Promise<void> {
 		const owner = this.#owner;
 		if (owner) {
@@ -543,7 +529,6 @@ export class ModelRegistry {
 			return;
 		}
 		const apiKey = this.#selectedProviderApiKeyCommand(provider);
-		// Header recovery is request-scoped; do not invalidate its shared flights.
 		await remintCommandConfig(apiKey, rejectedGeneration);
 	}
 
@@ -3793,7 +3778,7 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<string | undefined> {
 		try {
-			return (await this.#getApiKeyWithCredentialForProvider(provider, sessionId, options, false))?.apiKey;
+			return (await this.getApiKeyWithCredentialForProvider(provider, sessionId, options))?.apiKey;
 		} catch (error) {
 			if (error instanceof OAuthRefreshUnavailableError) return undefined;
 			throw error;
@@ -3810,16 +3795,7 @@ export class ModelRegistry {
 	async getApiKeyWithCredentialForProvider(
 		provider: string,
 		sessionId?: string,
-		options?: RegistryApiKeyOptions,
-	): Promise<ResolvedApiKey | undefined> {
-		return this.#getApiKeyWithCredentialForProvider(provider, sessionId, options, true);
-	}
-
-	async #getApiKeyWithCredentialForProvider(
-		provider: string,
-		sessionId: string | undefined,
-		options: RegistryApiKeyOptions | undefined,
-		includeHeaders: boolean,
+		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		const rejectedGeneration = options?.rejectedCredentialGeneration;
@@ -3829,35 +3805,13 @@ export class ModelRegistry {
 			await this.#refuseProviderCommandGeneration(provider, rejectedGeneration);
 		}
 		const model = options?.modelId ? this.find(provider, options.modelId) : undefined;
-		const headerResolver =
-			model?.resolveHeaders ??
-			createConfigHeaderResolver([
-				this.#providerOverrides.get(provider)?.headers,
-				this.#runtimeProviderOverrides.get(provider)?.headers,
-			]);
-		const rejectedHeaders = options?.rejectedHeaderGenerations;
-		let refusedHeader = false;
-		if (rejectedHeaders) {
-			// Only recover currently configured, previously materialized commands.
-			// Never execute a command supplied merely as retry metadata.
-			for (const config of configHeaderCommands(headerResolver)) {
-				const generation = rejectedHeaders[config];
-				if (generation === undefined) continue;
-				if (options.forceRefresh) await remintCommandConfig(config, generation);
-				else {
-					refuseCommandGeneration(config, generation);
-					if (!hasUnrefusedCommandCredential(config)) refusedHeader = true;
-				}
-			}
-		}
 		if (
-			refusedHeader ||
-			(!options?.forceRefresh &&
-				rejectedGeneration !== undefined &&
-				!(await this.hasUnrefusedCommandCredential(provider)))
+			!options?.forceRefresh &&
+			rejectedGeneration !== undefined &&
+			!(await this.hasUnrefusedCommandCredential(provider))
 		)
 			return undefined;
-		const resolved = this.#isKeylessProvider(provider)
+		return this.#isKeylessProvider(provider)
 			? { apiKey: kNoAuth }
 			: await this.authStorage.keys.getWithCredential(provider, sessionId, {
 					baseUrl: options?.baseUrl,
@@ -3868,27 +3822,6 @@ export class ModelRegistry {
 					rejectedAccessToken: options?.rejectedAccessToken,
 					signal: options?.signal,
 				});
-		if (!includeHeaders || !resolved || !headerResolver) return resolved;
-		// Values and provenance stay paired. Only a condemned prepared generation
-		// needs replacement resolution; valid snapshots never cause a new mint.
-		const headers = await headerResolver(options?.signal);
-		const headerGenerations = configHeaderGenerations(headers);
-		if (!headers || !headerGenerations) return resolved;
-		const snapshot = {
-			resolvedHeaders: Object.freeze(headers),
-			resolvedHeaderModelId: model?.resolveHeaders ? model.id : undefined,
-			headerGenerations: Object.freeze(headerGenerations),
-		};
-		return {
-			...resolved,
-			...snapshot,
-			readHeaders: async () => {
-				const current = await readUnrefusedConfigHeaders(headers);
-				return current === headers
-					? snapshot
-					: { resolvedHeaders: Object.freeze(current), headerGenerations: configHeaderGenerations(current) };
-			},
-		};
 	}
 
 	/**
@@ -4227,7 +4160,7 @@ export class ModelRegistry {
 						fetcher(resolvedKey),
 					);
 					// Dynamic rows can carry `!command` headers that are not on the
-					// registerProvider() config; track them so F5 / 401 can evict the cache.
+					// registerProvider() config; track them so F5 can evict the cache.
 					this.#recordRuntimeModelHeaderCommands(providerName, modelDefs);
 					const results: Model<Api>[] = [];
 					for (const modelDef of modelDefs) {
