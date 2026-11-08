@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed sourced-file prefixes in noninteractive shell diagnostics, preserved non-UTF-8 names and glob patterns, and corrected binary script detection using each reader's byte sample and file kinds ([#18246](https://github.com/can1357/oh-my-pi/pull/18246) by [@sjawhar](https://github.com/sjawhar))
 - Built-in jq filters now stop reliably when aborted or timed out, even before producing output.
 - Fixed logical directory changes with cd and pwd in native Windows shell sessions, including drive and UNC paths.
 - Fixed closed file descriptors passed to external commands on Unix so writes fail as expected; closed standard streams on Windows now use the null device.

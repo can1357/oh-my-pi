@@ -11,6 +11,7 @@ pub(crate) mod arith;
 mod builtins;
 mod callstack;
 mod command;
+pub(crate) use command::{BinaryCheck, looks_binary};
 mod control;
 mod exec;
 mod expand;
@@ -953,16 +954,30 @@ impl Kernel {
 			.and_then(|r| r.chain.links.first())
 			.map_or(&COMMAND, |l| &l.origin);
 		let utf8 = locale::is_utf8(self, cx.store, vp);
-		// An in-engine nested shell names itself (its `$0`).
-		let shell_name = match vp
+		// A noninteractive shell names the active source file, including a
+		// function's definition file. Interactive shells keep the existing
+		// shell prefix and diagnostic format. An in-engine nested shell uses
+		// its own `$0` when no source prefix applies.
+		let nested = vp
 			.overlay
 			.as_ref()
-			.and_then(|o| o.records.get(&KeyBuf::Misc(MiscKey::Argv0)))
-		{
-			Some(Some(Record::Misc(name))) => name.as_slice(),
-			_ => self.argv0.as_slice(),
+			.and_then(|o| o.records.get(&KeyBuf::Misc(MiscKey::Argv0)));
+		let interactive = matches!(
+			state::record(cx.store, vp, crate::bash::store::Key::Misc(MiscKey::Interactive)),
+			Ok(Some(Record::Misc(value))) if value.as_slice() == b"1"
+		);
+		let sourced = if interactive {
+			None
+		} else {
+			callstack::innermost_file(vp)
 		};
-		render(diag, DiagSite { shell_name, origin, line, utf8 })
+		let shell_name = match (sourced, nested) {
+			(Some(file), _) => file.as_slice(),
+			(None, Some(Some(Record::Misc(name)))) => name.as_slice(),
+			(None, _) => self.argv0.as_slice(),
+		};
+		let site = DiagSite { shell_name, origin, line, utf8, sourced: sourced.is_some() };
+		render(diag, site)
 	}
 
 	/// The `Diag` event of a diagnostic `vp` prints.
