@@ -50,6 +50,7 @@
 - `omp gc` now shows a progress bar for each slow step (listing and scanning sessions, scanning transcripts for blob refs, archiving) on interactive terminals.
 - `omp gc --strip` and `--compress` start work immediately instead of first reading every session's metadata, and `--strip` processes several sessions at once with a running tally of transcripts stripped.
 - `omp gc` without `--apply` now says up front that it is a dry run.
+- Ctrl+Enter approves a pending tool call and sends a typed composer note with it ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 
 ### Fixed
 
@@ -197,8 +198,6 @@
 ### Changed
 
 - ovnfs turns on by itself when its binary is found (`ovnfs.path`, else `ovnfs` on PATH): agents get the separate-checkout guidance, and isolated subagents use ovnfs checkouts when `isolation.backend` is `auto`
-- Ctrl+Enter approves a pending tool call and sends a typed composer note with it ([#8765](https://github.com/can1357/oh-my-pi/issues/8765))
-- Ctrl+Enter approves a pending tool call and sends a typed composer note with it ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 - Text Verbosity now defaults to low and applies to Codex too, matching the official Codex client: shorter answers that finish sooner; set `textVerbosity` to `medium` for the old length
 - A cost cap set on the main thread now applies to running subagents immediately
 - RPC wire protocol and task streaming have lower serialization overhead

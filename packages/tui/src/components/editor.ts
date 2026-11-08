@@ -1,5 +1,3 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import {
@@ -752,21 +750,6 @@ export interface PasteOptions {
 	submitAfterPaste?: boolean;
 }
 
-/** Extra behavior for a submit beyond the normal commit path. */
-export interface SubmitOptions {
-	/**
-	 * Set by the approve-and-steer chord. A non-command note runs the input hooks, then
-	 * `steer` queues the hook-rewritten text and images; failures propagate to the submit
-	 * path, which restores the draft and reports the error. A command dispatches as usual.
-	 * `onSkillQueued` records messages pushed by an approved `/skill:` dispatch so the
-	 * approval deny-watch treats them as part of the approval, not as a denying steer.
-	 */
-	approveSteer?: {
-		steer: (text: string, images?: ImageContent[]) => Promise<void>;
-		onSkillQueued?: (queued: readonly AgentMessage[]) => void;
-	};
-}
-
 export class Editor implements Component, Focusable {
 	#state: EditorState = {
 		lines: [""],
@@ -949,11 +932,7 @@ export class Editor implements Component, Focusable {
 	 */
 	#pinnedUndo: UndoMark | null = null;
 
-	/**
-	 * Returns true when the submission was consumed locally, by a dispatched command, an input
-	 * handler, or a queued message. The approve-and-steer chord passes {@link SubmitOptions.approveSteer}.
-	 */
-	onSubmit?: (text: string, options?: SubmitOptions) => void | Promise<void | boolean>;
+	onSubmit?: (text: string) => void | Promise<void>;
 	onAltEnter?: (text: string) => void;
 	onChange?: (text: string) => void;
 	#textRevision = 0;

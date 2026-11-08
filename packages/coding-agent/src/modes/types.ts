@@ -161,6 +161,15 @@ export interface AgentHubOpenOptions {
 	initialSection?: "agents" | "activity";
 }
 
+/** Outcome of submitting text through the approval entry point. */
+export type ApprovalSubmitOutcome = "steered" | "dispatched" | "kept";
+
+/** Approval chord submission callbacks supplied by the approval dialog. */
+export interface ApprovalSubmit {
+	steer(text: string, images?: ImageContent[]): Promise<void>;
+	onSkillQueued?: (queued: readonly AgentMessage[]) => void;
+}
+
 export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
@@ -209,6 +218,8 @@ export interface InteractiveModeContext {
 	readonly focusedAgentId: string | undefined;
 	/** Set while a tool-approval dialog owns the composer: its drafts steer the main session awaiting that approval, even from a focused agent's view. */
 	approvalOwnsComposer?: boolean;
+	/** Submit an approval-note chord through InputController and report whether the approval should settle. */
+	submitApprovalNote(text: string, approval: ApprovalSubmit): Promise<ApprovalSubmitOutcome>;
 	/** Focus the main view on an agent's live session (delegates to SessionFocusController.focusAgent). */
 	focusAgentSession(id: string): Promise<void>;
 	/** Focus the focused agent's parent session, falling back to main (delegates to focusParent). */

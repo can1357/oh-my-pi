@@ -8,6 +8,7 @@
 
 - Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
 - Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
+- User messages can carry an `approvalLine` prefix so a steer sent while approving a tool call tells the model what it approved ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 
 ### Fixed
 
@@ -34,7 +35,6 @@
 ### Added
 
 - Added opt-in standard Responses WebSockets for catalog-supported models, with incremental turns and automatic HTTP/SSE fallback; enable through OMP settings ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
-- User messages can carry an `approvalLine` prefix so a steer sent while approving a tool call tells the model what it approved ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 - `AuthStorage` can now be constructed over an `AuthStorageBackend` instead of a credential store, so another thread's instance can serve every call
 - Anthropic official-API sessions use message threads, sending only new messages per turn for faster first tokens; toggle with `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0`/`1`
 - Added `devin-cli` (Devin CLI seat key) and `devin-windsurf` (Windsurf Enterprise sign-in) logins, both stored as a `devin` API key ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov), [#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))

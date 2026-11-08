@@ -15,7 +15,6 @@ import {
 	parseSgrMouse,
 	type PasteOptions,
 	type SlashCommand,
-	type SubmitOptions,
 } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -47,7 +46,12 @@ import { createModelBrowserSource } from "../model-browser-source";
 import { parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
 import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensibility/slash-commands";
-import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
+import type {
+	ApprovalSubmit,
+	ApprovalSubmitOutcome,
+	InteractiveModeContext,
+	SubmittedUserInput,
+} from "../../modes/types";
 import { openLocalFileInEditor } from "../local-file-editor";
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
@@ -1091,446 +1095,375 @@ export class InputController {
 	}
 
 	setupEditorSubmitHandler(): void {
-		const submit = async (text: string, options?: SubmitOptions) => {
-			const submittedText = text;
-			// The Editor resets before calling onSubmit, so this is normally empty;
-			// different editor text after an await below is a newer draft.
-			const draftText = this.ctx.editor.getText();
-			const armed = this.#armedBareCommand;
-			this.#armedBareCommand = undefined;
-			const armedBareCommand =
-				armed && armed.sessionId === this.ctx.sessionManager.getSessionId() ? armed.text : undefined;
-			text = this.#compactDraftImages(text.trim());
-			const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
-			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
+		// A queued `/compact` waits for Enter input taken before it to reach the session (skill
+		// expansion, `/queue`, mode commands), the same as for the follow-up key.
+		this.ctx.editor.onSubmit = text => this.#trackSubmission(() => this.#submitText(text)).then(() => {});
+	}
 
-			// Focused subagent session: the editor is a plain chat box for it.
-			// Everything below (slash/bash/python, loop,
-			// compaction queueing) is main-session-only. A tool-approval dialog
-			// owning the composer is the main session's, so its draft steers main.
-			if (this.ctx.focusedAgentId && !this.ctx.approvalOwnsComposer) {
-				await this.#submitToFocusedSession(text, "steer");
-				return;
+	async submitApprovalNote(text: string, approval: ApprovalSubmit): Promise<ApprovalSubmitOutcome> {
+		return this.#trackSubmission(() => this.#submitText(text, approval));
+	}
+
+	async #submitText(text: string, approval?: ApprovalSubmit): Promise<ApprovalSubmitOutcome> {
+		const submittedText = text;
+		// The Editor resets before calling onSubmit, so this is normally empty;
+		// different editor text after an await below is a newer draft.
+		const draftText = this.ctx.editor.getText();
+		const armed = this.#armedBareCommand;
+		this.#armedBareCommand = undefined;
+		const armedBareCommand =
+			armed && armed.sessionId === this.ctx.sessionManager.getSessionId() ? armed.text : undefined;
+		text = this.#compactDraftImages(text.trim());
+		const hasPendingImages = this.ctx.editor.pendingImages.length > 0;
+		if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
+
+		// Focused subagent session: the editor is a plain chat box for it.
+		// Everything below (slash/bash/python, loop,
+		// compaction queueing) is main-session-only. A tool-approval dialog
+		// owning the composer is the main session's, so its draft steers main.
+		if (this.ctx.focusedAgentId && !this.ctx.approvalOwnsComposer) {
+			await this.#submitToFocusedSession(text, "steer");
+			return "dispatched";
+		}
+
+		// Empty submit while streaming with queued (or live-steered) messages:
+		// abort the active turn and let the post-unwind drain deliver the
+		// agent-core queue.
+		if (!text && !hasPendingImages && this.ctx.session.isStreaming) {
+			if (this.ctx.session.hasInterruptibleInput) {
+				const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+				await aborting;
+				this.ctx.updatePendingMessagesDisplay();
+				this.ctx.ui.requestRender();
 			}
+			return "kept";
+		}
 
-			// Empty submit while streaming with queued (or live-steered) messages:
-			// abort the active turn and let the post-unwind drain deliver the
-			// agent-core queue.
-			if (!text && !hasPendingImages && this.ctx.session.isStreaming) {
-				if (this.ctx.session.hasInterruptibleInput) {
-					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
-					await aborting;
-					this.ctx.updatePendingMessagesDisplay();
-					this.ctx.ui.requestRender();
-				}
-				return;
-			}
+		if (!text && !hasPendingImages) return "kept";
 
-			if (!text && !hasPendingImages) return;
-
-			// Continue shortcuts: "." or "c" resume the agent without a visible user
-			// message, interrupting a running turn (see AgentSession.resume). During a
-			// /guided-goal interview "c" is a plausible answer (e.g. option C), so it is
-			// sent as a normal reply there.
-			// An approve-and-steer note is a message, not a continue.
-			if (!options?.approveSteer && (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive()))) {
-				if (this.ctx.onInputCallback) {
-					this.ctx.editor.clearDraft();
-					this.ctx.onInputCallback({ text, cancelled: false, started: true, resume: true });
-				} else if (this.ctx.session.isStreaming) {
-					// The input loop is parked on the running turn's prompt; resume here.
-					this.ctx.editor.clearDraft();
-					try {
-						await this.ctx.session.resume();
-					} catch (error) {
-						this.ctx.showError(error instanceof Error ? error.message : String(error));
-					}
-				}
-				return;
-			}
-
-			const runner = this.ctx.session.extensionRunner;
-			let inputImages = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
-			let inputImageLinks =
-				this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
-			let hasInputImages = (inputImages?.length ?? 0) > 0;
-			const submittedImages = inputImages;
-
-			// Input hooks pass in submission order with the follow-up key's (see
-			// `#submissionHookOrder`). `/queue` placement behind a queued `/compact`
-			// must follow the order the user sent them.
-			const earlier = this.#submissionHookOrder;
-			const hooksDone = Promise.withResolvers<void>();
-			this.#submissionHookOrder = hooksDone.promise;
-			try {
-				await earlier;
-				// A startup-deferred extension's input hook must see the first submission.
-				if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
-				if (runner?.hasHandlers("input")) {
-					const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
-					if (!input) {
-						// The handler consumed the submission. The editor text was reset
-						// before this callback ran. Anything in it now is a newer draft.
-						// Only the submitted attachments are dropped, and only while they
-						// are still the live prefix.
-						this.#dropSubmittedPending(inputImages);
-						return true;
-					}
-					({ text, images: inputImages, imageLinks: inputImageLinks } = input);
-					hasInputImages = (inputImages?.length ?? 0) > 0;
-				}
-			} finally {
-				hooksDone.resolve();
-			}
-			const submittedMode = parseSlashCommand(text)?.name;
-			const draftDetached = submittedMode !== undefined && DETACHED_DRAFT_COMMANDS.has(submittedMode);
-			if (draftDetached) this.#dropSubmittedPending(submittedImages);
-
-			if (!text && !hasInputImages) return;
-
-			const queueBody = parseQueueShorthand(text);
-			if (queueBody !== undefined) {
-				await this.#queueForYield(queueBody, {
-					historyText: text,
-					images: inputImages,
-					imageLinks: inputImageLinks,
-				});
-				return true;
-			}
-
-			const bareSlashCommand = this.#resolveBareSlashCommand(text, submittedText, hasInputImages, armedBareCommand);
-			if (bareSlashCommand?.confirm) {
-				this.#armedBareCommand = { text, sessionId: this.ctx.sessionManager.getSessionId() };
-				this.ctx.editor.setText(text);
-				this.ctx.showStatus(
-					`Press Enter again to run ${bareSlashCommand.command}; add a leading space to send "${text}" as a message`,
-				);
-				return true;
-			}
-			if (bareSlashCommand) text = bareSlashCommand.command;
-
-			// Handle built-in slash commands
-			if (text) {
-				this.#recordSlashCommandUsage(text);
-				const input =
-					(inputImages?.length ?? 0) > 0 || (inputImageLinks?.length ?? 0) > 0
-						? { images: inputImages, imageLinks: inputImageLinks }
-						: undefined;
-				let slashResult: string | boolean;
+		// Continue shortcuts: "." or "c" resume the agent without a visible user
+		// message, interrupting a running turn (see AgentSession.resume). During a
+		// /guided-goal interview "c" is a plausible answer (e.g. option C), so it is
+		// sent as a normal reply there.
+		// An approve-and-steer note is a message, not a continue.
+		if (!approval && (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive()))) {
+			if (this.ctx.onInputCallback) {
+				this.ctx.editor.clearDraft();
+				this.ctx.onInputCallback({ text, cancelled: false, started: true, resume: true });
+			} else if (this.ctx.session.isStreaming) {
+				// The input loop is parked on the running turn's prompt; resume here.
+				this.ctx.editor.clearDraft();
 				try {
-					slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
+					await this.ctx.session.resume();
 				} catch (error) {
-					// Detached mode commands (plan/vibe/goal/guided-goal) and the approve chord
-					// own their detached submission: restore it here instead of letting the throw
-					// answer the approval. Ordinary Enter rethrows for the caller to handle.
-					if (!draftDetached && !options?.approveSteer) throw error;
-					if (draftDetached) {
-						restoreDetachedDraft(this.ctx.editor, text, inputImages, inputImageLinks);
-					} else if (!this.ctx.editor.getText()) {
-						if (inputImages?.length && this.ctx.editor.pendingImages.length === 0) {
-							this.ctx.editor.pendingImages = [...inputImages];
-							this.ctx.editor.pendingImageLinks = inputImageLinks
-								? [...inputImageLinks]
-								: inputImages.map(() => undefined);
-							this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
-						}
-						this.ctx.editor.setCollapsedText(submittedText);
-					}
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
-					return true;
-				}
-				if (slashResult === true) {
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
-					return true;
-				}
-				if (typeof slashResult === "string") {
-					// Command handled but returned remaining text to use as prompt.
-					// Record the original slash command text so Up Arrow recalls
-					// "/loop 10 fix bug" rather than just "fix bug".
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
-					text = slashResult;
 				}
 			}
+			return "dispatched";
+		}
 
-			// Collab guest: prompts execute on the host; local slash/skill/bash/
-			// python execution is host-only (builtins are gated inside
-			// executeBuiltinSlashCommand, which already consumed allowed ones).
-			if (this.ctx.collabGuest) {
-				if (text.startsWith("/")) {
-					this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
-					this.ctx.editor.setText("");
-					return true;
+		const runner = this.ctx.session.extensionRunner;
+		let inputImages = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
+		let inputImageLinks =
+			this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
+		let hasInputImages = (inputImages?.length ?? 0) > 0;
+		const submittedImages = inputImages;
+
+		// Input hooks pass in submission order with the follow-up key's (see
+		// `#submissionHookOrder`). `/queue` placement behind a queued `/compact`
+		// must follow the order the user sent them.
+		const earlier = this.#submissionHookOrder;
+		const hooksDone = Promise.withResolvers<void>();
+		this.#submissionHookOrder = hooksDone.promise;
+		try {
+			await earlier;
+			// A startup-deferred extension's input hook must see the first submission.
+			if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
+			if (runner?.hasHandlers("input")) {
+				const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
+				if (!input) {
+					// The handler consumed the submission. The editor text was reset
+					// before this callback ran. Anything in it now is a newer draft.
+					// Only the submitted attachments are dropped, and only while they
+					// are still the live prefix.
+					this.#dropSubmittedPending(inputImages);
+					return "dispatched";
 				}
-				if (text.startsWith("!") || parsePythonCommandInput(text)) {
-					this.ctx.showStatus("Local execution is host-only during a collab session");
-					this.ctx.editor.setText("");
-					return true;
-				}
-				if (this.ctx.collabGuest.readOnly) {
-					// Keep the typed text: the prompt was not consumed.
-					this.ctx.showStatus("This collab link is read-only — prompting is disabled");
-					return true;
-				}
-				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.editor.clearDraft(text);
-				// No local render: the prompt comes back from the host as a
-				// collab-prompt event/entry and renders with the author badge.
-				this.ctx.collabGuest.sendPrompt(text, images);
-				return true;
+				({ text, images: inputImages, imageLinks: inputImageLinks } = input);
+				hasInputImages = (inputImages?.length ?? 0) > 0;
 			}
+		} finally {
+			hooksDone.resolve();
+		}
+		const submittedMode = parseSlashCommand(text)?.name;
+		const draftDetached = submittedMode !== undefined && DETACHED_DRAFT_COMMANDS.has(submittedMode);
+		if (draftDetached) this.#dropSubmittedPending(submittedImages);
 
-			// `side: true` file commands answer as a /btw side question: off the
-			// transcript and runnable mid-turn, so they never steer the running work.
-			// The side question carries text only, so the submitted attachments drop.
-			if (
-				await this.#runSideFileCommand(text, {
-					detach: () => this.#detachSideSubmission(draftText, submittedImages),
-					restore: () => this.#restoreResetSubmission(submittedText),
-				})
-			) {
-				return true;
-			}
+		if (!text && !hasInputImages) return "kept";
 
-			// Handle skill commands (/skill:name [args]). Enter ⇒ steer (matches the
-			// free-text Enter semantics below); Ctrl+Enter routes through `handleFollowUp`.
-			// During compaction, queue immediately so bash/python/loop-mode branches do
-			// not consume the skill before the compaction-resume path re-parses it.
-			if (text && isKnownSkillCommand(this.ctx, text)) {
-				// Capture here too: this branch's own early returns below would
-				// otherwise skip the non-skill capture further down.
-				if (this.ctx.loopModeEnabled) {
-					this.ctx.setLoopPrompt(text);
-				}
-				if (this.ctx.session.isCompacting) {
-					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-					this.ctx.queueCompactionMessage(text, "steer", images);
-					return true;
-				}
-				// Record messages pushed by an approved skill dispatch before the queue
-				// listeners fire, so the approval deny-watch ignores them instead of
-				// treating the dispatched skill as a denying steer.
-				const outcome = await this.#invokeSkillCommand(
-					text,
-					"steer",
-					inputImages,
-					inputImageLinks,
-					false,
-					options?.approveSteer?.onSkillQueued,
-				);
-				if (outcome === "dispatched") {
-					// The dispatch above ran the turn inline without resolving the input
-					// callback, so nothing re-enters `getUserInput` to arm the next
-					// iteration. Arm it here, now that the turn has settled.
-					if (this.ctx.loopModeEnabled) {
-						this.ctx.armLoopAutoSubmit();
-					}
-					// The approve chord settles its approval; ordinary submits consume the draft.
-					return options?.approveSteer ? false : true;
-				}
-				// A throw stops every submit path. A decline keeps the chord pending, and
-				// ordinary submits send the restored text as a message.
-				if (outcome === "failed") return true;
-				if (outcome === "not-dispatched" && options?.approveSteer) return true;
-			}
+		const queueBody = parseQueueShorthand(text);
+		if (queueBody !== undefined) {
+			await this.#queueForYield(queueBody, {
+				historyText: text,
+				images: inputImages,
+				imageLinks: inputImageLinks,
+			});
+			return "dispatched";
+		}
 
-			// Handle bash command (! for normal, !! for excluded from context)
-			if (text.startsWith("!")) {
-				const isExcluded = text.startsWith("!!");
-				const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
-				if (command) {
-					if (this.ctx.session.isBashRunning) {
-						this.ctx.showWarning(
-							`A bash command is already running. Press ${appKey(this.ctx.keybindings, "app.interrupt")} to cancel it first.`,
-						);
-						this.ctx.editor.setText(text);
-						return true;
-					}
-					this.ctx.editor.addToHistory(text);
-					await this.ctx.handleBashCommand(command, isExcluded);
-					this.ctx.isBashMode = false;
-					this.ctx.updateEditorBorderColor();
-					return true;
-				}
-			}
+		const bareSlashCommand = this.#resolveBareSlashCommand(text, submittedText, hasInputImages, armedBareCommand);
+		if (bareSlashCommand?.confirm) {
+			this.#armedBareCommand = { text, sessionId: this.ctx.sessionManager.getSessionId() };
+			this.ctx.editor.setText(text);
+			this.ctx.showStatus(
+				`Press Enter again to run ${bareSlashCommand.command}; add a leading space to send "${text}" as a message`,
+			);
+			return "kept";
+		}
+		if (bareSlashCommand) text = bareSlashCommand.command;
 
-			// Handle python command (`$ <code>` for normal, `$$ <code>` for excluded from context).
-			// Shell-style variables such as `$HOME` are normal prose unless a space follows the sigil.
-			const pythonCommand = parsePythonCommandInput(text);
-			if (pythonCommand) {
-				const { code, isExcluded } = pythonCommand;
-				if (code) {
-					if (this.ctx.session.isEvalRunning) {
-						this.ctx.showWarning(
-							`A Python execution is already running. Press ${appKey(this.ctx.keybindings, "app.interrupt")} to cancel it first.`,
-						);
-						this.ctx.editor.setText(text);
-						return true;
-					}
-					this.ctx.editor.addToHistory(text);
-					await this.ctx.handlePythonCommand(code, isExcluded);
-					this.ctx.isPythonMode = false;
-					this.ctx.updateEditorBorderColor();
-					return true;
-				}
-			}
-
-			// Queue input during compaction
-			if (this.ctx.session.isCompacting) {
-				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.queueCompactionMessage(text, "steer", images);
-				// An inline `/loop` body queued here arms the loop only when it is
-				// an actual model prompt. Skill/bash/python bodies never reach this
-				// branch, but an extension-command body would otherwise be retained
-				// as loopPrompt while the drain executes it locally — and idle
-				// submissions never arm commands.
-				if (submittedMode === "loop" && !this.#isLocalExtensionCommand(text)) this.ctx.setLoopPrompt(text);
-				return true;
-			}
-
-			// Extension commands are local actions. Execute them before the normal
-			// submission path creates an optimistic user message; otherwise a
-			// consumed command remains rendered like a prompt sent to the model.
-			if (this.#isLocalExtensionCommand(text)) {
-				this.ctx.editor.clearDraft(text);
-				try {
-					await this.ctx.session.prompt(text, { images: inputImages });
-				} catch (error) {
-					// Restore the snapshot only when nothing newer was attached
-					// while the command ran; otherwise the newer draft wins.
-					if (inputImages && inputImages.length > 0 && this.ctx.editor.pendingImages.length === 0) {
+		// Handle built-in slash commands
+		if (text) {
+			this.#recordSlashCommandUsage(text);
+			const input =
+				(inputImages?.length ?? 0) > 0 || (inputImageLinks?.length ?? 0) > 0
+					? { images: inputImages, imageLinks: inputImageLinks }
+					: undefined;
+			let slashResult: string | boolean;
+			try {
+				slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
+			} catch (error) {
+				// Detached mode commands (plan/vibe/goal/guided-goal) and the approve chord
+				// own their detached submission: restore it here instead of letting the throw
+				// answer the approval. Ordinary Enter rethrows for the caller to handle.
+				if (!draftDetached && !approval) throw error;
+				if (draftDetached) {
+					restoreDetachedDraft(this.ctx.editor, text, inputImages, inputImageLinks);
+				} else if (!this.ctx.editor.getText()) {
+					if (inputImages?.length && this.ctx.editor.pendingImages.length === 0) {
 						this.ctx.editor.pendingImages = [...inputImages];
 						this.ctx.editor.pendingImageLinks = inputImageLinks
 							? [...inputImageLinks]
 							: inputImages.map(() => undefined);
 						this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 					}
-					this.ctx.editor.setCollapsedText(text);
-					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					this.ctx.editor.setCollapsedText(submittedText);
 				}
-				return true;
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+				return "kept";
 			}
+			if (slashResult === true) {
+				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+				return "dispatched";
+			}
+			if (typeof slashResult === "string") {
+				// Command handled but returned remaining text to use as prompt.
+				// Record the original slash command text so Up Arrow recalls
+				// "/loop 10 fix bug" rather than just "fix bug".
+				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+				text = slashResult;
+			}
+		}
 
-			// If streaming, use prompt() with steer behavior. The approve chord shares
-			// the same bookkeeping but queues through the approval callback instead of a
-			// model prompt; a failed chord restores the draft and returns the pending
-			// marker so the approval dialog stays open.
-			if (this.ctx.session.isStreaming || options?.approveSteer) {
-				this.ctx.editor.addToHistory(text);
-				// Enter already cleared the editor synchronously. A later clear here
-				// can erase the tail of an unbracketed paste arriving after Enter.
-				this.ctx.editor.imageLinks = undefined;
-				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.editor.pendingImages = [];
-				this.ctx.editor.pendingImageLinks = [];
-				// Record the signature so the queued message's eventual delivery
-				// (a user-role `message_start` event) leaves any draft the user has
-				// typed since queuing intact. Same protection as #783, applied to
-				// the streaming/queue path.
-				let forwarded = false;
-				try {
-					forwarded = await this.ctx.withLocalSubmission(
-						text,
-						async () => {
-							if (options?.approveSteer) {
-								await options.approveSteer.steer(text, images);
-								return true;
-							}
-							return this.ctx.session.prompt(text, { streamingBehavior: "steer", images });
-						},
-						{ imageCount: images?.length ?? 0 },
-					);
-					// An inline `/loop` body arms the loop only after dispatch
-					// confirms it was forwarded: arming before the await would
-					// retain a body whose dispatch rejects, resubmitting a failed
-					// prompt after every yield. A rejection leaves prior loop
-					// state untouched, so the previous body (if any) survives.
-					if (submittedMode === "loop" && forwarded && !options?.approveSteer) this.ctx.setLoopPrompt(text);
-				} catch (error) {
-					// Don't lose the queued steer draft: restore images then the collapsed
-					// text so chip tokens (and band cards) survive the retry. A newer draft
-					// typed while dispatch awaited owns the composer, so restore nothing.
-					if (!this.ctx.editor.getText()) {
-						if (images && images.length > 0 && this.ctx.editor.pendingImages.length === 0) {
-							this.ctx.editor.pendingImages = [...images];
-							this.ctx.editor.pendingImageLinks = inputImageLinks
-								? [...inputImageLinks]
-								: images.map(() => undefined);
-							this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
-						}
-						this.ctx.editor.setCollapsedText(text);
-					}
-					this.ctx.showError(error instanceof Error ? error.message : String(error));
-				}
-				this.ctx.updatePendingMessagesDisplay();
-				this.ctx.ui.requestRender();
-				if (options?.approveSteer) return !forwarded;
-				return;
+		// Collab guest: prompts execute on the host; local slash/skill/bash/
+		// python execution is host-only (builtins are gated inside
+		// executeBuiltinSlashCommand, which already consumed allowed ones).
+		if (this.ctx.collabGuest) {
+			if (text.startsWith("/")) {
+				this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
+				this.ctx.editor.setText("");
+				return "kept";
 			}
-			// Normal message submission
-			// While loop mode is on, an idle user-typed prompt becomes the new loop
-			// prompt that auto-resubmits after each yield. This arms synchronously,
-			// before any await: arming after a turn-length dispatch would race the
-			// reschedule timer and strand the waiter. Non-forward outcomes (local
-			// consume, rejection) park the loop at their own dispatch sites, so a
-			// failed body degrades to idle instead of looping errors.
+			if (text.startsWith("!") || parsePythonCommandInput(text)) {
+				this.ctx.showStatus("Local execution is host-only during a collab session");
+				this.ctx.editor.setText("");
+				return "kept";
+			}
+			if (this.ctx.collabGuest.readOnly) {
+				// Keep the typed text: the prompt was not consumed.
+				this.ctx.showStatus("This collab link is read-only — prompting is disabled");
+				return "kept";
+			}
+			const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
+			this.ctx.editor.clearDraft(text);
+			// No local render: the prompt comes back from the host as a
+			// collab-prompt event/entry and renders with the author badge.
+			this.ctx.collabGuest.sendPrompt(text, images);
+			return "dispatched";
+		}
+
+		// `side: true` file commands answer as a /btw side question: off the
+		// transcript and runnable mid-turn, so they never steer the running work.
+		// The side question carries text only, so the submitted attachments drop.
+		if (
+			await this.#runSideFileCommand(text, {
+				detach: () => this.#detachSideSubmission(draftText, submittedImages),
+				restore: () => this.#restoreResetSubmission(submittedText),
+			})
+		) {
+			return "dispatched";
+		}
+
+		// Handle skill commands (/skill:name [args]). Enter ⇒ steer (matches the
+		// free-text Enter semantics below); Ctrl+Enter routes through `handleFollowUp`.
+		// During compaction, queue immediately so bash/python/loop-mode branches do
+		// not consume the skill before the compaction-resume path re-parses it.
+		if (text && isKnownSkillCommand(this.ctx, text)) {
+			// Capture here too: this branch's own early returns below would
+			// otherwise skip the non-skill capture further down.
 			if (this.ctx.loopModeEnabled) {
 				this.ctx.setLoopPrompt(text);
 			}
-			// First, move any pending bash components to chat
-			this.ctx.flushPendingBashComponents();
-
-			if (this.ctx.onInputCallback) {
-				// Include any pending images from clipboard paste
-				this.ctx.editor.imageLinks = undefined;
+			if (this.ctx.session.isCompacting) {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.editor.pendingImages = [];
-				this.ctx.editor.pendingImageLinks = [];
+				this.ctx.queueCompactionMessage(text, "steer", images);
+				return "dispatched";
+			}
+			// Record messages pushed by an approved skill dispatch before the queue
+			// listeners fire, so the approval deny-watch ignores them instead of
+			// treating the dispatched skill as a denying steer.
+			const outcome = await this.#invokeSkillCommand(
+				text,
+				"steer",
+				inputImages,
+				inputImageLinks,
+				false,
+				approval?.onSkillQueued,
+			);
+			if (outcome === "dispatched") {
+				// The dispatch above ran the turn inline without resolving the input
+				// callback, so nothing re-enters `getUserInput` to arm the next
+				// iteration. Arm it here, now that the turn has settled.
+				if (this.ctx.loopModeEnabled) {
+					this.ctx.armLoopAutoSubmit();
+				}
+				// The approve chord settles its approval; ordinary submits consume the draft.
+				return approval ? "steered" : "dispatched";
+			}
+			// A throw stops every submit path. A decline keeps the chord pending, and
+			// ordinary submits send the restored text as a message.
+			if (outcome === "failed") return "kept";
+			if (outcome === "not-dispatched" && approval) return "kept";
+		}
 
-				// Render user message immediately, then let session events catch up.
-				// Tag the submission as "steer": this is a normal Enter the controller
-				// believed was idle, but a background turn can start in the gap before
-				// `submitInteractiveInput` dispatches it. Steering matches the
-				// streaming-branch Enter (above) and keeps the message from throwing
-				// AgentBusyError on that race.
-				const submission = this.ctx.startPendingSubmission(
-					{
-						text,
-						images,
-						imageLinks: inputImageLinks,
-						streamingBehavior: "steer",
-					},
-					{ clearEditor: false },
-				);
-				this.ctx.onInputCallback(submission);
-			} else {
-				// No input waiter: the main loop is between turns (post-turn
-				// epilogue, retry backoff, or a scheduled continue) with the agent
-				// momentarily idle. The editor already cleared itself on Enter, so
-				// falling through here would silently swallow the message. Submit a
-				// real prompt directly; if a background turn starts in the gap,
-				// `streamingBehavior: "steer"` preserves the typed-message queueing
-				// semantics instead of throwing AgentBusyError.
-				this.ctx.editor.imageLinks = undefined;
-				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.editor.pendingImages = [];
-				this.ctx.editor.pendingImageLinks = [];
-				try {
-					const forwarded = await this.ctx.withLocalSubmission(
-						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
-						{
-							imageCount: images?.length ?? 0,
-						},
+		// Handle bash command (! for normal, !! for excluded from context)
+		if (text.startsWith("!")) {
+			const isExcluded = text.startsWith("!!");
+			const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
+			if (command) {
+				if (this.ctx.session.isBashRunning) {
+					this.ctx.showWarning(
+						`A bash command is already running. Press ${appKey(this.ctx.keybindings, "app.interrupt")} to cancel it first.`,
 					);
-					// The idle block above already armed this body synchronously.
-					// A locally-consumed dispatch starts no turn: park the armed
-					// loop instead of resubmitting a local action on next idle.
-					if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
-				} catch (error) {
-					// Don't lose the message: hand images then collapsed text back to the
-					// editor so the user can retry (e.g. prompt dispatch rejecting an
-					// extension command).
-					if (images && images.length > 0) {
+					this.ctx.editor.setText(text);
+					return "kept";
+				}
+				this.ctx.editor.addToHistory(text);
+				await this.ctx.handleBashCommand(command, isExcluded);
+				this.ctx.isBashMode = false;
+				this.ctx.updateEditorBorderColor();
+				return "dispatched";
+			}
+		}
+
+		// Handle python command (`$ <code>` for normal, `$$ <code>` for excluded from context).
+		// Shell-style variables such as `$HOME` are normal prose unless a space follows the sigil.
+		const pythonCommand = parsePythonCommandInput(text);
+		if (pythonCommand) {
+			const { code, isExcluded } = pythonCommand;
+			if (code) {
+				if (this.ctx.session.isEvalRunning) {
+					this.ctx.showWarning(
+						`A Python execution is already running. Press ${appKey(this.ctx.keybindings, "app.interrupt")} to cancel it first.`,
+					);
+					this.ctx.editor.setText(text);
+					return "kept";
+				}
+				this.ctx.editor.addToHistory(text);
+				await this.ctx.handlePythonCommand(code, isExcluded);
+				this.ctx.isPythonMode = false;
+				this.ctx.updateEditorBorderColor();
+				return "dispatched";
+			}
+		}
+
+		// Queue input during compaction
+		if (this.ctx.session.isCompacting) {
+			const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
+			this.ctx.queueCompactionMessage(text, "steer", images);
+			// An inline `/loop` body queued here arms the loop only when it is
+			// an actual model prompt. Skill/bash/python bodies never reach this
+			// branch, but an extension-command body would otherwise be retained
+			// as loopPrompt while the drain executes it locally — and idle
+			// submissions never arm commands.
+			if (submittedMode === "loop" && !this.#isLocalExtensionCommand(text)) this.ctx.setLoopPrompt(text);
+			return "dispatched";
+		}
+
+		// Extension commands are local actions. Execute them before the normal
+		// submission path creates an optimistic user message; otherwise a
+		// consumed command remains rendered like a prompt sent to the model.
+		if (this.#isLocalExtensionCommand(text)) {
+			this.ctx.editor.clearDraft(text);
+			try {
+				await this.ctx.session.prompt(text, { images: inputImages });
+			} catch (error) {
+				// Restore the snapshot only when nothing newer was attached
+				// while the command ran; otherwise the newer draft wins.
+				if (inputImages && inputImages.length > 0 && this.ctx.editor.pendingImages.length === 0) {
+					this.ctx.editor.pendingImages = [...inputImages];
+					this.ctx.editor.pendingImageLinks = inputImageLinks
+						? [...inputImageLinks]
+						: inputImages.map(() => undefined);
+					this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+				}
+				this.ctx.editor.setCollapsedText(text);
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+			}
+			return "dispatched";
+		}
+
+		// If streaming, use prompt() with steer behavior. The approve chord shares
+		// the same bookkeeping but queues through the approval callback instead of a
+		// model prompt; a failed chord restores the draft and returns kept so the
+		// approval dialog stays open.
+		if (this.ctx.session.isStreaming || approval) {
+			this.ctx.editor.addToHistory(text);
+			// Enter already cleared the editor synchronously. A later clear here
+			// can erase the tail of an unbracketed paste arriving after Enter.
+			this.ctx.editor.imageLinks = undefined;
+			const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
+			this.ctx.editor.pendingImages = [];
+			this.ctx.editor.pendingImageLinks = [];
+			// Record the signature so the queued message's eventual delivery
+			// (a user-role `message_start` event) leaves any draft the user has
+			// typed since queuing intact. Same protection as #783, applied to
+			// the streaming/queue path.
+			let forwarded = false;
+			try {
+				forwarded = await this.ctx.withLocalSubmission(
+					text,
+					async () => {
+						if (approval) {
+							await approval.steer(text, images);
+							return true;
+						}
+						return this.ctx.session.prompt(text, { streamingBehavior: "steer", images });
+					},
+					{ imageCount: images?.length ?? 0 },
+				);
+				// An inline `/loop` body arms the loop only after dispatch
+				// confirms it was forwarded: arming before the await would
+				// retain a body whose dispatch rejects, resubmitting a failed
+				// prompt after every yield. A rejection leaves prior loop
+				// state untouched, so the previous body (if any) survives.
+				if (submittedMode === "loop" && forwarded && !approval) this.ctx.setLoopPrompt(text);
+			} catch (error) {
+				// Don't lose the queued steer draft: restore images then the collapsed
+				// text so chip tokens (and band cards) survive the retry. A newer draft
+				// typed while dispatch awaited owns the composer, so restore nothing.
+				if (!this.ctx.editor.getText()) {
+					if (images && images.length > 0 && this.ctx.editor.pendingImages.length === 0) {
 						this.ctx.editor.pendingImages = [...images];
 						this.ctx.editor.pendingImageLinks = inputImageLinks
 							? [...inputImageLinks]
@@ -1538,19 +1471,97 @@ export class InputController {
 						this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
 					}
 					this.ctx.editor.setCollapsedText(text);
-					this.ctx.showError(error instanceof Error ? error.message : String(error));
-					// Dispatch rejected after the body was armed: park it so the
-					// failed prompt is not resubmitted on next idle.
-					if (this.ctx.loopPrompt === text) this.ctx.pauseLoop();
 				}
-				this.ctx.updatePendingMessagesDisplay();
-				this.ctx.ui.requestRender();
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
 			}
-			this.ctx.editor.addToHistory(text);
-		};
-		// A queued `/compact` waits for Enter input taken before it to reach the session (skill
-		// expansion, `/queue`, mode commands), the same as for the follow-up key.
-		this.ctx.editor.onSubmit = (text, options) => this.#trackSubmission(() => submit(text, options));
+			this.ctx.updatePendingMessagesDisplay();
+			this.ctx.ui.requestRender();
+			if (approval) {
+				if (forwarded) return "steered";
+				return "kept";
+			}
+			return forwarded ? "dispatched" : "kept";
+		}
+		// Normal message submission
+		// While loop mode is on, an idle user-typed prompt becomes the new loop
+		// prompt that auto-resubmits after each yield. This arms synchronously,
+		// before any await: arming after a turn-length dispatch would race the
+		// reschedule timer and strand the waiter. Non-forward outcomes (local
+		// consume, rejection) park the loop at their own dispatch sites, so a
+		// failed body degrades to idle instead of looping errors.
+		if (this.ctx.loopModeEnabled) {
+			this.ctx.setLoopPrompt(text);
+		}
+		// First, move any pending bash components to chat
+		this.ctx.flushPendingBashComponents();
+
+		if (this.ctx.onInputCallback) {
+			// Include any pending images from clipboard paste
+			this.ctx.editor.imageLinks = undefined;
+			const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
+			this.ctx.editor.pendingImages = [];
+			this.ctx.editor.pendingImageLinks = [];
+
+			// Render user message immediately, then let session events catch up.
+			// Tag the submission as "steer": this is a normal Enter the controller
+			// believed was idle, but a background turn can start in the gap before
+			// `submitInteractiveInput` dispatches it. Steering matches the
+			// streaming-branch Enter (above) and keeps the message from throwing
+			// AgentBusyError on that race.
+			const submission = this.ctx.startPendingSubmission(
+				{
+					text,
+					images,
+					imageLinks: inputImageLinks,
+					streamingBehavior: "steer",
+				},
+				{ clearEditor: false },
+			);
+			this.ctx.onInputCallback(submission);
+		} else {
+			// No input waiter: the main loop is between turns (post-turn
+			// epilogue, retry backoff, or a scheduled continue) with the agent
+			// momentarily idle. The editor already cleared itself on Enter, so
+			// falling through here would silently swallow the message. Submit a
+			// real prompt directly; if a background turn starts in the gap,
+			// `streamingBehavior: "steer"` preserves the typed-message queueing
+			// semantics instead of throwing AgentBusyError.
+			this.ctx.editor.imageLinks = undefined;
+			const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
+			this.ctx.editor.pendingImages = [];
+			this.ctx.editor.pendingImageLinks = [];
+			try {
+				const forwarded = await this.ctx.withLocalSubmission(
+					text,
+					() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
+					{
+						imageCount: images?.length ?? 0,
+					},
+				);
+				// The idle block above already armed this body synchronously.
+				// A locally-consumed dispatch starts no turn: park the armed
+				// loop instead of resubmitting a local action on next idle.
+				if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
+			} catch (error) {
+				// Don't lose the message: hand images then collapsed text back to the
+				// editor so the user can retry (e.g. prompt dispatch rejecting an
+				// extension command).
+				if (images && images.length > 0) {
+					this.ctx.editor.pendingImages = [...images];
+					this.ctx.editor.pendingImageLinks = inputImageLinks ? [...inputImageLinks] : images.map(() => undefined);
+					this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+				}
+				this.ctx.editor.setCollapsedText(text);
+				this.ctx.showError(error instanceof Error ? error.message : String(error));
+				// Dispatch rejected after the body was armed: park it so the
+				// failed prompt is not resubmitted on next idle.
+				if (this.ctx.loopPrompt === text) this.ctx.pauseLoop();
+			}
+			this.ctx.updatePendingMessagesDisplay();
+			this.ctx.ui.requestRender();
+		}
+		this.ctx.editor.addToHistory(text);
+		return "dispatched";
 	}
 
 	/**
@@ -2392,8 +2403,8 @@ export class InputController {
 		while (this.#submissionDispatches.size > 0) await Promise.all(this.#submissionDispatches);
 	}
 
-	/** Track an Enter submission from the moment it is taken until its dispatch ends. */
-	async #trackSubmission(dispatch: () => Promise<void | boolean>): Promise<void | boolean> {
+	/** Track an Enter or approval-note submission from the moment it is taken until its dispatch ends. */
+	async #trackSubmission<T>(dispatch: () => Promise<T>): Promise<T> {
 		const done = Promise.withResolvers<void>();
 		this.#submissionDispatches.add(done.promise);
 		try {

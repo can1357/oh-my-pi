@@ -12,6 +12,7 @@
 
 - Added a model catalog refresh callback that lets applications update the active model scope after catalogs are re-fetched.
 - Preserved unfinished answers in ask dialogs and custom editors, allowing users to resume drafts when reopening them.
+- Added `Editor.cancelAutocomplete()` to close an open autocomplete menu from a submit path that bypasses `submit()` ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 
 ### Changed
 
@@ -91,7 +92,6 @@
 
 ### Changed
 
-- Approval prompts approve with a composer note on Ctrl+Enter; `Editor.onSubmit` accepts submit options and `Editor.cancelAutocomplete` dismisses the menu for chord submissions ([#18466](https://github.com/can1357/oh-my-pi/pull/18466) by [@heitor-lassarote](https://github.com/heitor-lassarote))
 - Ask cards drop per-question section headers; each question shows its id and flags inline (`(db · 3 options)`) ([#18104](https://github.com/can1357/oh-my-pi/pull/18104) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Tab in the `/usage` Details view switches back to Overview ([#17962](https://github.com/can1357/oh-my-pi/pull/17962) by [@SuperUserA](https://github.com/SuperUserA))
 - LSP results use one header with request and counts, preview each reference's source line, and syntax-highlight previews and definition snippets ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))

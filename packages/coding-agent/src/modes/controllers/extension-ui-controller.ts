@@ -772,8 +772,8 @@ export class ExtensionUiController {
 							// Consume the text before dispatch; attachments stay until the submit path
 							// queues them, and a failed dispatch restores the collapsed draft.
 							editor.setText("");
-							const approveSteer = {
-								steer: async (text: string, images: ImageContent[] | undefined) => {
+							const approval = {
+								steer: async (text: string, images?: ImageContent[]) => {
 									if (settled) {
 										// The answer already landed while the hook was waiting. Queue the
 										// note without an approval line so the model gets the denial it
@@ -787,9 +787,8 @@ export class ExtensionUiController {
 									if (!settled) this.#markApprovedApprovalMessages(queued);
 								},
 							};
-							// False means the chord sent a steer or dispatched a skill; true means
-							// the submit path kept the draft or opened a modal.
-							return (await editor.onSubmit?.(note, { approveSteer })) === true;
+							const outcome = await this.ctx.submitApprovalNote(note, approval);
+							return outcome !== "steered";
 						}
 						return false;
 					};

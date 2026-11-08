@@ -13,7 +13,7 @@ import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
-import type { InteractiveModeContext } from "../../../src/modes/types";
+import type { ApprovalSubmit, InteractiveModeContext } from "../../../src/modes/types";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -105,6 +105,9 @@ function makeHarness() {
 		rebuildTranscriptScrollback: vi.fn(),
 	} as unknown as InteractiveModeContext;
 
+	const defaultInput = new InputController(ctx, { readImage: async () => null, readText: async () => "" });
+	defaultInput.setupEditorSubmitHandler();
+	ctx.submitApprovalNote = (text: string, approval: ApprovalSubmit) => defaultInput.submitApprovalNote(text, approval);
 	const controller = new ExtensionUiController(ctx);
 
 	return {
@@ -117,8 +120,12 @@ function makeHarness() {
 		showOverlay,
 		fakeHandle,
 		controller,
-		inputController: (readText: () => Promise<string>) =>
-			new InputController(ctx, { readImage: async () => null, readText }),
+		inputController: (readText: () => Promise<string>) => {
+			const input = new InputController(ctx, { readImage: async () => null, readText });
+			input.setupEditorSubmitHandler();
+			ctx.submitApprovalNote = (text: string, approval: ApprovalSubmit) => input.submitApprovalNote(text, approval);
+			return input;
+		},
 		agent,
 		/** Queue a user steer the way the session does: the agent queue grows and notifies. */
 		queueSteer(text: string): void {
@@ -691,8 +698,6 @@ describe("ExtensionUiController tool approval", () => {
 
 	it("lets the user approve and steer in one chord: the queued steer does not deny the call", async () => {
 		const harness = makeHarness();
-		harness.editor.onSubmit = (text, options) =>
-			options?.approveSteer ? options.approveSteer.steer(text) : harness.queueSteer(text);
 		// Advance past the arm window.
 		const nowSpy = vi.spyOn(performance, "now").mockReturnValue(Number.POSITIVE_INFINITY);
 		const pending = harness.controller.showCollabAwareApproval(prompt);
@@ -716,7 +721,6 @@ describe("ExtensionUiController tool approval", () => {
 
 	it("approve chord does not deny the other approvals queued in the same batch", async () => {
 		const harness = makeHarness();
-		harness.editor.onSubmit = (text, options) => options?.approveSteer?.steer(text);
 		// Advance past the arm window.
 		const nowSpy = vi.spyOn(performance, "now").mockReturnValue(Number.POSITIVE_INFINITY);
 		const first = harness.controller.showCollabAwareApproval(prompt);
@@ -734,7 +738,7 @@ describe("ExtensionUiController tool approval", () => {
 	it("leaves the approval pending when the note is a dispatched command, instead of approving behind the modal", async () => {
 		const harness = makeHarness();
 		// A registered command dispatches and opens an overlay.
-		harness.editor.onSubmit = () => Promise.resolve(true);
+		harness.ctx.submitApprovalNote = async () => "dispatched";
 		// Advance past the arm window.
 		const nowSpy = vi.spyOn(performance, "now").mockReturnValue(Number.POSITIVE_INFINITY);
 		const pending = harness.controller.showCollabAwareApproval(prompt);
@@ -773,8 +777,6 @@ describe("ExtensionUiController tool approval", () => {
 
 	it("dismisses the autocomplete menu when approving and steering", async () => {
 		const harness = makeHarness();
-		harness.editor.onSubmit = (text, options) =>
-			options?.approveSteer ? options.approveSteer.steer(text) : harness.queueSteer(text);
 		const cancel = vi.spyOn(harness.editor, "cancelAutocomplete");
 		const nowSpy = vi.spyOn(performance, "now").mockReturnValue(Number.POSITIVE_INFINITY);
 		const pending = harness.controller.showCollabAwareApproval(prompt);
@@ -790,20 +792,6 @@ describe("ExtensionUiController tool approval", () => {
 
 	it("keeps the approval pending when the steer fails", async () => {
 		const harness = makeHarness();
-		harness.editor.onSubmit = async (text, options) => {
-			if (!options?.approveSteer) {
-				harness.queueSteer(text);
-				return;
-			}
-			try {
-				await options.approveSteer.steer(text);
-				return false;
-			} catch (error) {
-				harness.showError(error instanceof Error ? error.message : String(error));
-				harness.editor.setCollapsedText(text);
-				return true;
-			}
-		};
 		const nowSpy = vi.spyOn(performance, "now").mockReturnValue(Number.POSITIVE_INFINITY);
 		harness.steer.mockRejectedValueOnce(new Error("reject"));
 		const pending = harness.controller.showCollabAwareApproval(prompt);
@@ -822,9 +810,9 @@ describe("ExtensionUiController tool approval", () => {
 	it("keeps the approval pending when the submit restores the note", async () => {
 		const harness = makeHarness();
 		// A submit path that puts the text back owns nothing, e.g. a bare slash awaiting a second Enter.
-		harness.editor.onSubmit = async text => {
+		harness.ctx.submitApprovalNote = async (text: string) => {
 			harness.editor.setText(text);
-			return true;
+			return "kept";
 		};
 		const nowSpy = vi.spyOn(performance, "now").mockReturnValue(Number.POSITIVE_INFINITY);
 		const pending = harness.controller.showCollabAwareApproval(prompt);
@@ -1061,17 +1049,6 @@ describe("ExtensionUiController tool approval", () => {
 	it("settles once for an image-only Ctrl+Enter steer and clears the attachment", async () => {
 		const harness = makeHarness();
 		const image: ImageContent = { type: "image", data: "abc123", mimeType: "image/png" };
-		harness.editor.onSubmit = async (
-			text: string,
-			options?: { approveSteer?: { steer: (t: string, i?: ImageContent[]) => Promise<void> } },
-		) => {
-			if (!options?.approveSteer) return false;
-			await options.approveSteer.steer(text, [image]);
-			harness.editor.pendingImages = [];
-			harness.editor.pendingImageLinks = [];
-			harness.editor.imageLinks = undefined;
-			return false;
-		};
 		harness.editor.setDraft("[Image #1]", [image]);
 		// Advance past the arm window.
 		const nowSpy = vi.spyOn(performance, "now").mockReturnValue(Number.POSITIVE_INFINITY);
