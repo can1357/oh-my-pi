@@ -1206,6 +1206,30 @@ more text`,
 			expect(plainLines.some(line => line.includes("```mermaid"))).toBeFalsy();
 		});
 
+		it("holds a still-streaming diagram to one row and draws it once the fence closes", () => {
+			// A diagram laid out again with every line has no rows that could
+			// retire while it streams; one row cannot outgrow the screen.
+			const tall = Array.from({ length: 40 }, (_, i) => `row ${i}`).join("\n");
+			const markdown = new Markdown("Intro.\n\n```mermaid\nflowchart TD\n  A-->B\n", 0, 0, {
+				...defaultMarkdownTheme,
+				resolveMermaidAscii: () => tall,
+			});
+			markdown.transientRenderCache = true;
+			const open = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+			expect(open).toEqual(["Intro.", "", "```mermaid · drawing diagram…"]);
+
+			markdown.setText("Intro.\n\n```mermaid\nflowchart TD\n  A-->B\n```\n\nAfter.");
+			const closed = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+			expect(closed.filter(line => line.startsWith("row "))).toHaveLength(40);
+			expect(closed.at(-1)).toBe("After.");
+
+			// A quoted fence without a closer ended with its quote: it is drawn.
+			markdown.setText("> ```mermaid\n> flowchart TD\n> A-->B\n\nOutside.\n\nMore");
+			const quoted = markdown.render(80).map(line => stripVTControlCharacters(line).trimEnd());
+			expect(quoted.some(line => line.includes("row 39"))).toBe(true);
+			expect(quoted.some(line => line.includes("drawing diagram"))).toBe(false);
+		});
+
 		it("keeps resolved Mermaid art inside the coding-agent margin", () => {
 			const markdown = new Markdown(
 				"```mermaid\nflowchart TD\n```",

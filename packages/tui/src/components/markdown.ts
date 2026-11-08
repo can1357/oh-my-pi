@@ -2448,6 +2448,8 @@ export class Markdown implements Component {
 	// fences when the theme lacks one) so completed rows are styled immediately;
 	// only the trailing partial line stays unhighlighted.
 	#renderingStablePrefix = false;
+	/** The top-level token being rendered while it is the volatile last token of a streaming render. */
+	#streamingTailToken?: Token;
 	#streamingHighlightCache?: StreamingHighlightCache;
 	#activeRenderSignature?: RenderSignature;
 	#fastTail?: FastTailRecipe; // undefined = disarmed
@@ -3539,7 +3541,10 @@ export class Markdown implements Component {
 			// identical links on neighbouring rows draw distinct markers that every render repeats.
 			this.#extensionLinkBlock = i;
 			this.#extensionLinkOrdinal = 0;
+			this.#streamingTailToken =
+				this.transientRenderCache && !this.#renderingStablePrefix && i === tokens.length - 1 ? token : undefined;
 			const renderedTokenLines = this.#renderToken(token, contentWidth, nextToken?.type);
+			this.#streamingTailToken = undefined;
 			for (const renderedRow of renderedTokenLines) {
 				// Lists wrap while their structural prefixes are still available, so
 				// continuation rows retain the correct hanging indent. Re-wrapping the
@@ -4046,6 +4051,15 @@ export class Markdown implements Component {
 				// canvas. truncateToWidth is ANSI- and wide-char-aware, and the
 				// resolver picks the shortest orientation that fits this width.
 				if (token.lang === "mermaid" && this.#theme.resolveMermaidAscii) {
+					// A fence still streaming would be laid out again with every line,
+					// so none of its rows could retire while it outgrows the screen:
+					// hold it to one row until it closes, as a tool card's figure does.
+					// Only the document's last top-level token can still be streaming;
+					// a nested fence without a closer ended with its container.
+					if (token === this.#streamingTailToken && !this.#codeTokenHasClosingFence(token)) {
+						lines.push(renderedLine(this.#theme.codeBlockBorder("```mermaid · drawing diagram…")));
+						break;
+					}
 					const ascii = this.#theme.resolveMermaidAscii(token.text, width);
 					if (ascii) {
 						for (const asciiLine of ascii.split("\n")) {

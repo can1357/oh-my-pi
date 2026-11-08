@@ -6,6 +6,10 @@
 
 - Grep headers syntax-highlight regex patterns, including incomplete patterns while a call streams, in terminal and native views ([#18392](https://github.com/can1357/oh-my-pi/pull/18392) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 
+### Changed
+
+- A mermaid diagram in a streaming answer shows one `drawing diagram…` row until its fence closes, then draws in full, so a diagram taller than the screen no longer loses its top rows while it streams ([#18529](https://github.com/can1357/oh-my-pi/pull/18529) by [@farnoy](https://github.com/farnoy))
+
 ### Fixed
 
 - Rows of a streaming answer that scroll above the screen go to scrollback as they leave it, including the prose after a table chart or a mermaid diagram and tables taller than the space they scroll through; they no longer vanish until the answer finishes ([#18529](https://github.com/can1357/oh-my-pi/pull/18529) by [@farnoy](https://github.com/farnoy))
