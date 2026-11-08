@@ -30,7 +30,7 @@ describe("edit auto-repair cost cap", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("does not send another repair request when the cap is reached during retry backoff", async () => {
+	it("does not send another repair request when the cap is reached before the retry", async () => {
 		using tempDir = TempDir.createSync("@omp-edit-repair-cost-");
 		const filePath = path.join(tempDir.path(), "sample.ts");
 		const broken = PREV.replace("const doubled = b * 2;", "const doubled = (b * 2;");
@@ -62,64 +62,29 @@ describe("edit auto-repair cost cap", () => {
 			getSessionId: () => "sess",
 		} as unknown as ToolSession;
 
-		// The retry helper waits on setTimeout between provider attempts. Hold that
-		// wait so a sibling can spend the rest of the budget before the next attempt.
-		let releaseBackoff: (() => void) | undefined;
-		const backoffStarted = Promise.withResolvers<void>();
-		const realSetTimeout = globalThis.setTimeout;
-		const realClearTimeout = globalThis.clearTimeout;
-		const heldTimer = 2_147_483_646 as unknown as Timer;
+		// The first attempt is billed $0.40 and fails transiently, so the repair
+		// retries. A sibling request spends $0.70 while that attempt is in flight.
+		// Only a repair that records the failed attempt's cost before deciding to
+		// retry sees $1.10 against the $1 cap and refuses the second request.
 		let providerCalls = 0;
 		vi.spyOn(ai, "completeSimple").mockImplementation(() => {
 			providerCalls += 1;
+			if (providerCalls === 1) costGate.record(0.7);
 			return Promise.resolve(billedOverload(0.4));
 		});
-		vi.spyOn(globalThis, "setTimeout").mockImplementation(((
-			fn: (...args: unknown[]) => void,
-			ms?: number,
-			...args: unknown[]
-		) => {
-			if (providerCalls > 0 && typeof fn === "function" && typeof ms === "number" && ms > 0 && ms < 20_000) {
-				const run = () => fn(...args);
-				if (releaseBackoff === undefined) {
-					releaseBackoff = run;
-					backoffStarted.resolve();
-				} else {
-					queueMicrotask(run);
-				}
-				return heldTimer;
-			}
-			return realSetTimeout(fn, ms, ...args);
-		}) as typeof setTimeout);
-		vi.spyOn(globalThis, "clearTimeout").mockImplementation(id => {
-			if (id === heldTimer) return;
-			realClearTimeout(id as Timer);
-		});
 
-		const pending = attemptEditAutoRepair({
-			session,
-			snapshot: { path: filePath, prev: PREV, next: broken },
-			writethrough: () => {
-				throw new Error("repair wrote the file after the cap was reached");
-			},
-		});
-		const backoffTimeout = Promise.withResolvers<undefined>();
-		realSetTimeout(() => backoffTimeout.resolve(undefined), 2_000);
-		const fireBackoff = await Promise.race([
-			backoffStarted.promise.then(() => releaseBackoff),
-			backoffTimeout.promise,
-		]);
-		if (!fireBackoff) throw new Error("repair retry did not wait between provider attempts");
+		const error = await rejectionOf(
+			attemptEditAutoRepair({
+				session,
+				snapshot: { path: filePath, prev: PREV, next: broken },
+				writethrough: () => {
+					throw new Error("repair wrote the file after the cap was reached");
+				},
+			}),
+		);
 
-		// The failed attempt is already billed. A sibling request spends the rest
-		// while this repair is waiting, which is what the next attempt must see.
-		expect(costGate.spent).toBeCloseTo(0.4, 10);
-		costGate.record(0.7);
-		fireBackoff();
-
-		const error = await rejectionOf(pending);
 		expect(providerCalls).toBe(1);
 		expect(error).toBeInstanceOf(CostCapError);
 		expect(costGate.spent).toBeCloseTo(1.1, 10);
-	});
+	}, 20_000);
 });
