@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import {
+	buildTransformedCodexRequestBody,
+	convertCodexResponsesMessages,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
 import {
@@ -11,6 +16,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { createCodexModel } from "./helpers";
 
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -244,6 +250,33 @@ function markResponsesProviderSessionStateWarmed(providerSessionState: Map<strin
 	state.nativeHistoryReplayWarmed = true;
 }
 
+function asConnectionBound(model: Model<"openai-responses">): Model<"openai-responses"> {
+	return { ...model, compat: { ...model.compat, connectionBoundNativeHistory: true } };
+}
+
+function resumedEncryptedReasoningContext(model: Model<"openai-responses">): Context {
+	return {
+		messages: [
+			{ role: "user", content: "first question", timestamp: Date.now() },
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "generic assistant that should be rebuilt" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: issue5002ZeroUsage,
+				stopReason: "stop",
+				providerPayload: createOpenAIResponsesHistoryPayload(model.provider, [
+					{ type: "reasoning", id: "rs_1", summary: [], encrypted_content: "enc_turn_1" },
+					...snapshotHistoryItems.slice(1),
+				]),
+				timestamp: Date.now(),
+			},
+			{ role: "user", content: "follow-up user", timestamp: Date.now() },
+		],
+	};
+}
+
 function captureResponsesPayload(
 	model: Model<"openai-responses">,
 	context: Context,
@@ -405,6 +438,86 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 }
 
 describe("OpenAI responses history payload", () => {
+	it("replays frozen native computer calls without writing to stored history", async () => {
+		const model = { ...createCodexModel("gpt-5.5"), supportsComputerUse: true };
+		const computer = Object.freeze({
+			type: "computer_call",
+			id: "cu_stored",
+			call_id: "call_stored",
+			action: { type: "screenshot" },
+			pending_safety_checks: [],
+		});
+		const context: Context = {
+			messages: [
+				makeAssistantMessage(
+					[
+						computer,
+						{
+							type: "computer_call_output",
+							call_id: "call_stored",
+							output: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+						},
+					],
+					true,
+					"openai-codex",
+				),
+				{ role: "user", content: "Continue", timestamp: Date.now() },
+			],
+		};
+		const payload = await buildTransformedCodexRequestBody(model, context, undefined);
+		expect(findResponsesInputItem(payload.input, "computer_call")).toMatchObject({
+			id: "cu_stored",
+			call_id: "call_stored",
+		});
+		expect(computer.call_id).toBe("call_stored");
+	});
+
+	it.each([
+		{ provider: "openai", snapshot: false },
+		{ provider: "openai", snapshot: true },
+		{ provider: "openai-codex", snapshot: false },
+		{ provider: "openai-codex", snapshot: true },
+	] as const)(
+		"strips internal response metadata from $provider replay (snapshot=$snapshot) without changing stored history",
+		async ({ provider, snapshot }) => {
+			const message = Object.freeze({
+				type: "message",
+				role: "assistant",
+				phase: "commentary",
+				content: [{ type: "output_text", text: "Previous answer", annotations: [] }],
+				metadata: { turn_id: "turn_1" },
+				internal_chat_message_metadata_passthrough: {
+					content_token_count: 52,
+					create_time: 1793472704,
+					turn_id: "turn_1",
+				},
+			});
+			const context: Context = {
+				messages: [
+					snapshot
+						? {
+								role: "user",
+								content: "Compacted history",
+								providerPayload: createOpenAIResponsesHistoryPayload(provider, [message], false),
+								timestamp: Date.now(),
+							}
+						: makeAssistantMessage([message], true, provider),
+					{ role: "user", content: "Continue", timestamp: Date.now() },
+				],
+			};
+			const payload =
+				provider === "openai-codex"
+					? await buildTransformedCodexRequestBody(createCodexModel("gpt-5.5"), context, undefined)
+					: ((await captureResponsesPayload(getOpenAIReasoningModel("openai", "gpt-5-mini"), context)) as {
+							input?: unknown[];
+						});
+			const replayed = findResponsesInputItem(payload.input, "message");
+			const { internal_chat_message_metadata_passthrough: _internal, ...expected } = message;
+			expect(replayed).toEqual(expected);
+			expect(message.internal_chat_message_metadata_passthrough.content_token_count).toBe(52);
+		},
+	);
+
 	it("clamps stored original image hints when replay support is unknown", () => {
 		const items = [
 			{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" },
@@ -639,8 +752,8 @@ describe("OpenAI responses history payload", () => {
 		expect(payload.input).toEqual(preservedHistoryItems);
 	});
 
-	it("falls back to rebuilt history on resumed same-provider sessions with fresh session state", async () => {
-		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+	it("falls back to rebuilt history on resumed connection-bound sessions with fresh session state", async () => {
+		const model = asConnectionBound(getOpenAIReasoningModel("openai", "gpt-5-mini"));
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const payload = (await captureResponsesPayload(model, resumedSameProviderContext, providerSessionState)) as {
 			input?: unknown[];
@@ -652,7 +765,7 @@ describe("OpenAI responses history payload", () => {
 	});
 
 	it("does not replay stale thinking signatures when native replay is cold", async () => {
-		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const model = asConnectionBound(getOpenAIReasoningModel("openai", "gpt-5-mini"));
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const payload = (await captureResponsesPayload(
 			model,
@@ -668,7 +781,7 @@ describe("OpenAI responses history payload", () => {
 	});
 
 	it("preserves remote replacement history on cold openai session state", async () => {
-		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const model = asConnectionBound(getOpenAIReasoningModel("openai", "gpt-5-mini"));
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const payload = (await captureResponsesPayload(
 			model,
@@ -690,8 +803,8 @@ describe("OpenAI responses history payload", () => {
 		]);
 	});
 
-	it("replays native history after the same-provider session state is warmed", async () => {
-		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+	it("replays native history after a connection-bound session state is warmed", async () => {
+		const model = asConnectionBound(getOpenAIReasoningModel("openai", "gpt-5-mini"));
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		await captureResponsesPayload(model, resumedSameProviderContext, providerSessionState);
 		markResponsesProviderSessionStateWarmed(providerSessionState);
@@ -703,6 +816,112 @@ describe("OpenAI responses history payload", () => {
 			...snapshotHistoryItems,
 			{ role: "user", content: [{ type: "input_text", text: "follow-up user" }] },
 		]);
+	});
+
+	it("replays encrypted reasoning on the first resumed request unless the host binds items to a connection", async () => {
+		const replayed: Record<string, boolean> = {};
+		for (const model of [
+			getOpenAIReasoningModel("xai-oauth", "grok-4.7"),
+			getOpenAIReasoningModel("openai", "gpt-5-mini"),
+			getOpenAIReasoningModel("github-copilot", "gpt-5.4"),
+		]) {
+			const payload = (await captureResponsesPayload(model, resumedEncryptedReasoningContext(model), new Map())) as {
+				input?: unknown[];
+			};
+			replayed[model.provider] = containsEncryptedReasoning(payload.input);
+		}
+
+		expect(replayed).toEqual({ "xai-oauth": true, openai: true, "github-copilot": false });
+	});
+
+	it("rebuilds history after the provider session state closes on a host without connection binding", async () => {
+		const model = getOpenAIReasoningModel("xai-oauth", "grok-4.7");
+		const context = resumedEncryptedReasoningContext(model);
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const warm = (await captureResponsesPayload(model, context, providerSessionState)) as { input?: unknown[] };
+		for (const state of providerSessionState.values()) state.close();
+		const closed = (await captureResponsesPayload(model, context, providerSessionState)) as { input?: unknown[] };
+
+		expect(containsEncryptedReasoning(warm.input)).toBe(true);
+		expect(containsEncryptedReasoning(closed.input)).toBe(false);
+		expect(containsAssistantOutputText(closed.input, "generic assistant that should be rebuilt")).toBe(true);
+	});
+
+	it("reports the replay decision each request makes through openAIResponsesReplaysNativeHistory", async () => {
+		const observed: Array<{ step: string; reported: boolean; replayed: boolean }> = [];
+		for (const model of [
+			getOpenAIReasoningModel("github-copilot", "gpt-5.4"),
+			getOpenAIReasoningModel("xai-oauth", "grok-4.7"),
+			getOpenAIReasoningModel("openrouter", "z-ai/glm-5.3-flash"),
+		]) {
+			const context = resumedEncryptedReasoningContext(model);
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const observe = async (step: string, state: Map<string, ProviderSessionState> | undefined) => {
+				const reported = openAIResponsesReplaysNativeHistory(model, state);
+				const payload = (await captureResponsesPayload(model, context, state)) as { input?: unknown[] };
+				observed.push({
+					step: `${model.provider} ${step}`,
+					reported,
+					replayed: containsEncryptedReasoning(payload.input),
+				});
+			};
+			await observe("without session state", undefined);
+			await observe("first request", providerSessionState);
+			markResponsesProviderSessionStateWarmed(providerSessionState);
+			await observe("warmed", providerSessionState);
+			for (const state of providerSessionState.values()) state.close();
+			await observe("closed", providerSessionState);
+		}
+
+		for (const { step, reported, replayed } of observed)
+			expect({ step, reported }).toEqual({ step, reported: replayed });
+		// Only the connection-bound host starts cold; every host is cold after a close.
+		expect(observed.filter(o => !o.replayed).map(o => o.step)).toEqual([
+			"github-copilot first request",
+			"github-copilot closed",
+			"xai-oauth closed",
+			"openrouter closed",
+		]);
+	});
+
+	it("keeps a closed provider session state cold when a request started before the close succeeds", async () => {
+		const model = getOpenAIReasoningModel("xai-oauth", "grok-4.7");
+		const context = resumedEncryptedReasoningContext(model);
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const requested = Promise.withResolvers<void>();
+		const released = Promise.withResolvers<void>();
+		const completed = [
+			{ type: "response.created", response: { id: "resp_side" } },
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "message",
+					id: "msg_side",
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text: "side answer" }],
+				},
+			},
+			{ type: "response.completed", response: { id: "resp_side", status: "completed" } },
+		];
+		const inFlight = streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			providerSessionState,
+			fetch: async () => {
+				requested.resolve();
+				await released.promise;
+				return new Response(`${completed.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+					headers: { "content-type": "text/event-stream" },
+				});
+			},
+		}).result();
+		await requested.promise;
+		for (const state of providerSessionState.values()) state.close();
+		released.resolve();
+		expect((await inFlight).stopReason).toBe("stop");
+
+		const retry = (await captureResponsesPayload(model, context, providerSessionState)) as { input?: unknown[] };
+		expect(containsEncryptedReasoning(retry.input)).toBe(false);
 	});
 
 	it("does not warm GitHub Copilot replay when only OpenAI replay state is warmed", async () => {
@@ -778,7 +997,7 @@ describe("OpenAI responses history payload", () => {
 			],
 		};
 
-		const cold = (await captureResponsesPayload(plaintextReasoningModel, context, new Map())) as {
+		const cold = (await captureResponsesPayload(asConnectionBound(plaintextReasoningModel), context, new Map())) as {
 			input?: unknown[];
 		};
 		const warm = (await captureResponsesPayload(plaintextReasoningModel, context)) as { input?: unknown[] };
@@ -875,7 +1094,11 @@ describe("OpenAI responses history payload", () => {
 			],
 		};
 
-		const payload = (await captureResponsesPayload(plaintextReasoningModel, context, new Map())) as {
+		const payload = (await captureResponsesPayload(
+			asConnectionBound(plaintextReasoningModel),
+			context,
+			new Map(),
+		)) as {
 			input?: unknown[];
 		};
 		const input = payload.input ?? [];
@@ -968,7 +1191,9 @@ describe("OpenAI responses history payload", () => {
 			const model = getOpenAIReasoningModel("commandcode", "deepseek/deepseek-v4.1-flash");
 			const context = summaryOnlyReasoningContext(model);
 			const options = { reasoning: Effort.Medium };
-			const cold = (await captureResponsesPayload(model, context, new Map(), options)) as { input?: unknown[] };
+			const cold = (await captureResponsesPayload(asConnectionBound(model), context, new Map(), options)) as {
+				input?: unknown[];
+			};
 			const warm = (await captureResponsesPayload(model, context, undefined, options)) as { input?: unknown[] };
 
 			expect(replayedReasoningTexts(cold.input)).toEqual(["Open a.txt.", "It says A."]);
@@ -1755,6 +1980,198 @@ describe("OpenAI responses history payload", () => {
 		expect(containsAssistantOutputText(payload.input, "Running the script.")).toBe(true);
 	});
 
+	describe("length-cut native tool calls (#17847)", () => {
+		function cutContext(provider: "openai" | "openai-codex", modelId: string): Context {
+			const assistant = {
+				...makeAssistantMessage(
+					[
+						{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Writing files" }] },
+						{ type: "function_call", call_id: "call_A", id: "fc_A", name: "write", arguments: '{"path":"a"}' },
+					],
+					true,
+					provider,
+					modelId,
+				),
+				content: [
+					{ type: "text" as const, text: "Writing files" },
+					{ type: "toolCall" as const, id: "call_A|fc_A", name: "write", arguments: { path: "a" } },
+					{ type: "toolCall" as const, id: "call_B|fc_B", name: "write", arguments: { path: "b" } },
+				],
+				stopReason: "length" as const,
+			};
+			return {
+				messages: [
+					{ role: "user", content: "Write two files", timestamp: 1 },
+					assistant,
+					{
+						role: "toolResult",
+						toolCallId: "call_A|fc_A",
+						toolName: "write",
+						content: [{ type: "text", text: "Stopped at output limit" }],
+						isError: true,
+						timestamp: 2,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_B|fc_B",
+						toolName: "write",
+						content: [{ type: "text", text: "Stopped at output limit" }],
+						isError: true,
+						timestamp: 3,
+					},
+				],
+			};
+		}
+
+		const pairedCalls: Array<[unknown, unknown, unknown]> = [
+			["function_call", "call_A", "write"],
+			["function_call", "call_B", "write"],
+			["function_call_output", "call_A", undefined],
+			["function_call_output", "call_B", undefined],
+		];
+
+		it("pairs both synthetic results on Responses replay instead of ending on an assistant prefill", () => {
+			const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			const input = buildResponsesInput({
+				model,
+				context: cutContext("openai", model.id),
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+				nativeHistory: { replay: true, filterReasoning: false },
+				repairOrphanOutputs: true,
+			});
+			expect(listResponsesToolItems(input)).toEqual(pairedCalls);
+			expect(input.at(-1)?.type).toBe("function_call_output");
+		});
+
+		it("pairs both synthetic results on Codex native replay", () => {
+			const model = createCodexModel("gpt-5.1-codex");
+			const input = convertCodexResponsesMessages(model, cutContext("openai-codex", model.id));
+			expect(listResponsesToolItems(input)).toEqual(pairedCalls);
+			expect(input.at(-1)?.type).toBe("function_call_output");
+		});
+
+		it("rebuilds a cut call whose id an earlier snapshot round already used", () => {
+			const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			const context = cutContext("openai", model.id);
+			const assistant = context.messages[1];
+			if (assistant?.role !== "assistant") throw new Error("expected assistant turn");
+			assistant.providerPayload = createOpenAIResponsesHistoryPayload(
+				"openai",
+				[
+					{ type: "message", role: "user", content: [{ type: "input_text", text: "Earlier round" }] },
+					{ type: "function_call", call_id: "call_B", name: "write", arguments: '{"path":"old"}' },
+					{ type: "function_call_output", call_id: "call_B", output: "old result" },
+					{ type: "message", role: "user", content: [{ type: "input_text", text: "Write two files" }] },
+					{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Writing files" }] },
+					{ type: "function_call", call_id: "call_A", name: "write", arguments: '{"path":"a"}' },
+				],
+				false,
+			);
+			const input = buildResponsesInput({
+				model,
+				context,
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+				nativeHistory: { replay: true, filterReasoning: false },
+				repairOrphanOutputs: true,
+			});
+			expect(listResponsesToolItems(input)).toEqual([
+				["function_call", "call_B", "write"],
+				["function_call_output", "call_B", undefined],
+				...pairedCalls,
+			]);
+			expect(input.at(-1)?.type).toBe("function_call_output");
+		});
+
+		// Failure mode: a model that requires reasoning before tool calls receives the cut call's turn
+		// without it and rejects the continuation.
+		it("replays the required reasoning item ahead of a turn whose only call was cut", () => {
+			const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			const context: Context = {
+				messages: [
+					{ role: "user", content: "Write a file", timestamp: 1 },
+					{
+						...makeAssistantMessage(
+							[
+								{
+									type: "message",
+									role: "assistant",
+									content: [{ type: "output_text", text: "Writing the file" }],
+								},
+							],
+							true,
+							"openai",
+							model.id,
+						),
+						content: [
+							{ type: "text" as const, text: "Writing the file" },
+							{ type: "toolCall" as const, id: "call_B|fc_B", name: "write", arguments: { path: "b" } },
+						],
+						stopReason: "length" as const,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_B|fc_B",
+						toolName: "write",
+						content: [{ type: "text", text: "Stopped at output limit" }],
+						isError: true,
+						timestamp: 2,
+					},
+				],
+			};
+			const input = buildResponsesInput({
+				model,
+				context,
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+				nativeHistory: { replay: true, filterReasoning: false },
+				repairOrphanOutputs: true,
+				requiresReasoningReplayForToolCalls: true,
+			});
+			expect(input.map(item => (isIssue5002Record(item) ? (item.type ?? item.role) : item))).toEqual([
+				"user",
+				"reasoning",
+				"message",
+				"function_call",
+				"function_call_output",
+			]);
+		});
+
+		// Failure mode: on a host that prefixes tool names (Muse Code), the rebuilt call goes out under the
+		// bare name the request never declares, next to the native call under the prefixed one.
+		it("rebuilds a cut call under the host's prefixed tool name", () => {
+			const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+			const context = cutContext("openai", model.id);
+			const assistant = context.messages[1];
+			if (assistant?.role !== "assistant") throw new Error("expected assistant turn");
+			// The host answered under the prefixed names the request declared.
+			assistant.providerPayload = createOpenAIResponsesHistoryPayload(
+				"openai",
+				[
+					{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Writing files" }] },
+					{ type: "function_call", call_id: "call_A", id: "fc_A", name: "_write", arguments: '{"path":"a"}' },
+				],
+				true,
+			);
+			const input = buildResponsesInput({
+				model,
+				context,
+				strictResponsesPairing: true,
+				supportsImageDetailOriginal: true,
+				nativeHistory: { replay: true, filterReasoning: false },
+				repairOrphanOutputs: true,
+				toolNaming: { prefix: "_", maxLength: undefined },
+			});
+			expect(listResponsesToolItems(input)).toEqual([
+				["function_call", "call_A", "_write"],
+				["function_call", "call_B", "_write"],
+				["function_call_output", "call_A", undefined],
+				["function_call_output", "call_B", undefined],
+			]);
+		});
+	});
+
 	it("drops malformed tool names from same-model native history replay", async () => {
 		const malformedName = 'bash\0arg_key="command"\0arg_value="ls -la"';
 		const assistantMessage = {
@@ -1945,7 +2362,10 @@ describe("OpenAI responses history payload", () => {
 					stopReason: "toolUse",
 					providerPayload: createOpenAIResponsesHistoryPayload(
 						"openai",
-						[{ type: "message", role: "assistant", content: [{ type: "output_text", text: "snapshot" }] }],
+						[
+							{ type: "message", role: "assistant", content: [{ type: "output_text", text: "snapshot" }] },
+							{ type: "function_call", call_id: orphanCallId, name: "bad invocation text", arguments: "{}" },
+						],
 						false,
 					),
 					timestamp: Date.now(),

@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import "./setup";
 import { configureRecallFeatures } from "@oh-my-pi/pi-mnemopi/config";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
 import type { EpisodicGraph, RelatedMemory } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
+import { transaction } from "../src/db";
 
 const previousProactive = process.env.MNEMOPI_PROACTIVE_LINKING;
 
@@ -440,6 +442,91 @@ describe("proactive memory linking", () => {
 					.get(second, first) as { count: number }
 			).count;
 			expect(after).toBe(before);
+		} finally {
+			beam.close();
+		}
+	});
+
+	// #14998: linking a retain against a large on-disk bank autocommitted every
+	// edge, so the synchronous remember paid one WAL commit (fsync) per linked
+	// memory and froze the TUI for seconds. Each commit appends at least one WAL
+	// frame, so the frame count separates one commit from one-per-edge.
+	it("links a new memory against an on-disk bank in a single commit", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+		const dir = TempDir.createSync("@mnemopi-proactive-commit-");
+		const beam = new BeamMemory({ sessionId: "proactive-commit", dbPath: dir.join("bank.db") });
+		try {
+			const seeded = 60;
+			const insert = beam.db.prepare(
+				"INSERT INTO episodic_memory (id, content, source, timestamp, session_id, importance) VALUES (?, ?, 'seed', ?, 'seed', 0.5)",
+			);
+			for (let i = 0; i < seeded; i++) {
+				insert.run(`seed-${i}`, `Deployment pipeline database indexing review ${i}`, new Date().toISOString());
+			}
+			insert.finalize();
+			beam.db.exec("PRAGMA wal_autocheckpoint=0");
+			beam.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+
+			const id = beam.remember("Deployment pipeline database indexing review notes", { importance: 0.8 });
+
+			const linked = beam.db
+				.query("SELECT COUNT(*) AS count FROM graph_edges WHERE source = ? AND edge_type = 'related_to'")
+				.get(id) as { count: number };
+			expect(linked.count).toBe(seeded);
+			const wal = beam.db.query("PRAGMA wal_checkpoint(PASSIVE)").get() as { log: number };
+			expect(wal.log).toBeLessThan(seeded);
+		} finally {
+			beam.close();
+			dir.removeSync();
+		}
+	});
+
+	it("preserves proactive links in a caller transaction and later write rollback", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+		const beam = new BeamMemory({ sessionId: "proactive-caller-tx", dbPath: ":memory:" });
+		try {
+			const first = beam.remember("Alice set up the deployment pipeline");
+			const second = beam.db.transaction(() => beam.remember("Alice set up the deployment pipeline for testing"))();
+
+			const links = beam.db
+				.query<{ count: number }, [string, string]>(
+					"SELECT COUNT(*) AS count FROM graph_edges WHERE source = ? AND target = ?",
+				)
+				.get(second, first);
+			expect(links?.count).toBeGreaterThan(0);
+
+			expect(() =>
+				transaction(beam.db, () => {
+					beam.db.run("INSERT INTO gists (id, text) VALUES ('rolled-back', 'temporary')");
+					throw new Error("rollback");
+				}),
+			).toThrow("rollback");
+			expect(beam.db.query("SELECT id FROM gists WHERE id = 'rolled-back'").get()).toBeNull();
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("leaves graph writes inside a manually begun transaction for the caller to roll back", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+		const beam = new BeamMemory({ sessionId: "proactive-manual-tx", dbPath: ":memory:" });
+		try {
+			const first = beam.remember("Alice set up the deployment pipeline");
+			beam.db.exec("BEGIN IMMEDIATE");
+			let second: string;
+			try {
+				second = beam.remember("Alice set up the deployment pipeline for testing");
+				const linked = beam.db
+					.query<{ count: number }, [string, string]>(
+						"SELECT COUNT(*) AS count FROM graph_edges WHERE source = ? AND target = ?",
+					)
+					.get(second, first);
+				expect(linked?.count).toBeGreaterThan(0);
+			} finally {
+				beam.db.exec("ROLLBACK");
+			}
+			expect(beam.db.query("SELECT id FROM working_memory WHERE id = ?").get(second)).toBeNull();
+			expect(beam.db.query("SELECT source FROM graph_edges WHERE source = ?").get(second)).toBeNull();
 		} finally {
 			beam.close();
 		}

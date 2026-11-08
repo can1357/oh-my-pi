@@ -182,6 +182,11 @@ function createSettingsTextField(
 	});
 }
 
+/** An enum setting's values as choices, each labelled by its value. */
+function enumOptions(def: SettingDef & { type: "enum" }): SelectItem[] {
+	return def.values.map(value => ({ value, label: value }));
+}
+
 /**
  * Single-choice setting field backed by the shared select form field.
  * Preserves the current selection, live async previews, footer previews,
@@ -925,7 +930,7 @@ export class SettingsSelectorComponent implements Component {
 			case "boolean":
 				return { k: "switch", on: value === true };
 			case "enum":
-				return { k: "choice", value: shown, options: def.values.map(v => ({ value: v, label: v })) };
+				return { k: "choice", value: shown, options: enumOptions(def) };
 			case "submenu": {
 				const labels = numberSteps(def);
 				if (labels) {
@@ -1071,7 +1076,10 @@ export class SettingsSelectorComponent implements Component {
 				if (typeof value === "boolean") list.applyValue(id, String(value));
 				return;
 			case "enum":
-				if (typeof value === "string") list.applyValue(id, value);
+				if (typeof value !== "string") return;
+				// A pick from the row's open menu closes it.
+				if (list.openSubmenu?.id === id) list.handleInput(ESCAPE);
+				list.applyValue(id, value);
 				return;
 			case "submenu": {
 				const choice =
@@ -1101,6 +1109,9 @@ export class SettingsSelectorComponent implements Component {
 				const open = list.openSubmenu;
 				if (open?.id === id && open.component instanceof MultiSelectSubmenu) {
 					open.component.setValues(value);
+					// The native page applies a chip toggle without closing its
+					// editor, so the row and its tab badge only update here.
+					this.#refreshItems();
 					return;
 				}
 				const next = [...value];
@@ -1484,7 +1495,13 @@ export class SettingsSelectorComponent implements Component {
 				return { ...item, currentValue: currentValue ? "true" : "false", values: ["true", "false"] };
 
 			case "enum":
-				return { ...item, currentValue: String(currentValue ?? ""), values: [...def.values] };
+				return {
+					...item,
+					currentValue: String(currentValue ?? ""),
+					values: [...def.values],
+					menu: (cv, done) =>
+						createSettingsSelectField(def.label, def.description, enumOptions(def), cv, done, () => done()),
+				};
 
 			case "submenu":
 				return {
@@ -1663,7 +1680,7 @@ export class SettingsSelectorComponent implements Component {
 	}
 
 	/**
-	 * Create a text input submenu for a plain string setting.
+	 * Create a text input submenu for a string or structured setting.
 	 */
 	#createTextInput(
 		def: SettingDef & { type: "text" },
@@ -1766,6 +1783,15 @@ export class SettingsSelectorComponent implements Component {
 			this.#context.settings.set(path, -1);
 		} else if (path === "compaction.thresholdTokens" && value === "default") {
 			this.#context.settings.set(path, -1);
+		} else if (schemaType === "array") {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(value);
+			} catch {
+				throw new Error(`Invalid array JSON for ${path}`);
+			}
+			if (!Array.isArray(parsed)) throw new Error(`Invalid array JSON for ${path}`);
+			this.#context.settings.set(path, parsed);
 		} else if (schemaType === "record") {
 			let parsed: unknown;
 			try {

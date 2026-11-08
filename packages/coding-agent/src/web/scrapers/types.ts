@@ -3,11 +3,13 @@
  */
 import { scheduler } from "node:timers/promises";
 import { ptree } from "@oh-my-pi/pi-utils";
+import { decodeEntities } from "@oh-my-pi/pi-utils/dom/parser";
 import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 
 import type { ModelRegistry } from "../../config/model-registry";
-import type { AgentStorage } from "../../session/agent-storage";
+import type { AgentStorageApi } from "../../session/agent-storage";
 import { ToolAbortError } from "../../tools/tool-errors";
+import { decodeBody, readBodyCapped } from "../response-body";
 
 export { formatNumber } from "@oh-my-pi/pi-utils";
 
@@ -18,6 +20,7 @@ export interface RenderResult {
 	method: string;
 	content: string;
 	fetchedAt: string;
+	/** True when the response body was cut mid-stream at {@link MAX_BYTES}. */
 	truncated: boolean;
 	notes: string[];
 }
@@ -30,11 +33,11 @@ export type SpecialHandler = (
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
-	storage?: AgentStorage | null,
+	storage?: AgentStorageApi | null,
 	modelRegistry?: ModelRegistry,
 ) => Promise<RenderResult | null>;
 
-export const MAX_OUTPUT_CHARS = 500_000;
+/** Network read bound for a fetched body; the only size limit on rendered URL content. */
 export const MAX_BYTES = 50 * 1024 * 1024;
 
 const USER_AGENTS = [
@@ -43,31 +46,64 @@ const USER_AGENTS = [
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 ];
 
-function isBotBlocked(status: number, content: string): boolean {
-	if (status === 403 || status === 503) {
-		const lower = content.toLowerCase();
-		return (
-			lower.includes("cloudflare") ||
-			lower.includes("captcha") ||
-			lower.includes("challenge") ||
-			lower.includes("blocked") ||
-			lower.includes("access denied") ||
-			lower.includes("bot detection")
-		);
-	}
-	return false;
+/**
+ * Statuses sites answer a user agent they refuse with (999 is LinkedIn's), whatever the body
+ * says: a bare nginx "403 Forbidden" page, SEC's "Undeclared Automated Tool" page or a 429
+ * keyed on the agent all serve the page to the next user agent.
+ */
+const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
+
+/** A challenge interstitial carries no content (Reddit's is about 8 KB); a larger page is no wall. */
+const CHALLENGE_PAGE_MAX_CHARS = 64 * 1024;
+
+/**
+ * True when a page small enough to be an interstitial holds an `<input name="js_challenge">` field
+ * outside `<template>`. Bun's HTMLRewriter tokenizes the page as a browser does, so a form quoted in
+ * a comment, script, raw-text element or attribute is no field. A field gets an attribute named with
+ * a fresh nonce, which the page cannot already carry; a tag cut off by the end of the page is
+ * written back as text, so its mark never reaches the output.
+ */
+function hasChallengeForm(html: string): boolean {
+	if (html.length > CHALLENGE_PAGE_MAX_CHARS) return false;
+	const mark = `data-omp-challenge-${crypto.randomUUID()}`;
+	const output = new HTMLRewriter()
+		.on("input[name]", {
+			element(input) {
+				if (decodeEntities(input.getAttribute("name") ?? "") === "js_challenge") input.setAttribute(mark, "");
+			},
+		})
+		.on("template input[name]", {
+			element(input) {
+				input.removeAttribute(mark);
+			},
+		})
+		.transform(html);
+	return output.includes(mark);
 }
 
 /**
- * Truncate and cleanup output
+ * Name the bot protection whose challenge or block page an HTML response is. A 2xx page counts
+ * only from Cloudflare's header or a live challenge form, since an article can quote any marker
+ * as text; vendor markers in the body count on an error status.
  */
-export function finalizeOutput(content: string): { content: string; truncated: boolean } {
-	const cleaned = content.replace(/\n{3,}/g, "\n\n").trim();
-	const truncated = cleaned.length > MAX_OUTPUT_CHARS;
-	return {
-		content: cleaned.slice(0, MAX_OUTPUT_CHARS),
-		truncated,
-	};
+function botWallOf(response: Response, contentType: string, content: string): string | undefined {
+	if (!contentType.includes("html")) return undefined;
+	if (response.headers.get("cf-mitigated") === "challenge") return "Cloudflare";
+	if (hasChallengeForm(content)) return "JavaScript challenge";
+	if (response.ok) return undefined;
+	if (content.includes("_cf_chl_opt")) return "Cloudflare";
+	if (content.includes("captcha-delivery.com")) return "DataDome";
+	if (content.includes("px-captcha")) return "PerimeterX";
+	if (content.includes("blocked by network security")) return "network security block";
+	return undefined;
+}
+
+/**
+ * Collapse blank-line runs and trim. Never shortens content: URL reads page the preview
+ * themselves, and selectors, artifacts, and URL search must see the whole body.
+ */
+export function finalizeOutput(content: string): string {
+	return content.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export interface LoadPageOptions {
@@ -97,6 +133,11 @@ export interface LoadPageResult {
 	error?: string;
 	/** True when the body read was skipped via skipBodyForContentType. */
 	bodySkipped?: boolean;
+	/**
+	 * Bot protection that answered with its challenge or block page instead of the page. Such a
+	 * response is never `ok`, whatever its status, so a caller checking `ok` does not take it as content.
+	 */
+	blockedBy?: string;
 }
 
 const RETRY_AFTER_MAX_MS = 10_000;
@@ -111,33 +152,6 @@ function parseRetryAfterMs(value: string | null): number {
 	return 1_000;
 }
 
-function charsetFromContentType(header: string): string | undefined {
-	return /charset\s*=\s*"?([\w-]+)"?/i.exec(header)?.[1];
-}
-
-/**
- * Decode a response body honoring the declared charset (Content-Type header,
- * then a cheap <meta charset> sniff), falling back to UTF-8.
- */
-function decodeBody(bytes: Buffer, contentTypeHeader: string): string {
-	let label = charsetFromContentType(contentTypeHeader);
-	if (!label) {
-		// All charsets we can decode are ASCII-compatible in the prefix, so a
-		// latin1 view of the first 2KB is enough to find a <meta charset>.
-		label = /<meta[^>]+charset\s*=\s*["']?([\w-]+)/i.exec(bytes.subarray(0, 2048).toString("latin1"))?.[1];
-	}
-	if (label && !/^utf-?8$/i.test(label)) {
-		try {
-			// Bun.Encoding's union is narrower than the runtime, which accepts
-			// WHATWG labels (shift_jis, euc-kr, gbk, big5, …); unknowns throw here.
-			return new TextDecoder(label as Bun.Encoding).decode(bytes);
-		} catch {
-			// Unknown/unsupported label — fall back to UTF-8.
-		}
-	}
-	return bytes.toString("utf-8");
-}
-
 /**
  * Fetch a page with timeout and size limit
  */
@@ -145,7 +159,13 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 	const { timeout = 20, headers = {}, maxBytes = MAX_BYTES, signal, method = "GET", body } = options;
 
 	let lastError: string | undefined;
+	let lastBlockedResponse: LoadPageResult | undefined;
 	let retried429 = false;
+	// Header names are case-insensitive, so a caller's header replaces ours whatever its spelling.
+	const callerHeaders = new Headers(headers);
+	// A caller's own User-Agent replaces every rotated one, so a refusal of it is final; a
+	// transport error still retries.
+	const rotates = !callerHeaders.has("user-agent");
 	for (let attempt = 0; attempt < USER_AGENTS.length; attempt++) {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
@@ -155,16 +175,17 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 		const requestSignal = ptree.combineSignals(signal, timeout * 1000);
 
 		try {
+			const requestHeaders = new Headers({
+				"User-Agent": userAgent,
+				Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+				"Accept-Language": "en-US,en;q=0.5",
+				"Accept-Encoding": "identity", // Cloudflare Markdown-for-Agents returns corrupted bytes when compression is negotiated
+			});
+			for (const [name, value] of callerHeaders) requestHeaders.set(name, value);
 			const requestInit: RequestInit = {
 				signal: requestSignal,
 				method,
-				headers: {
-					"User-Agent": userAgent,
-					Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-					"Accept-Language": "en-US,en;q=0.5",
-					"Accept-Encoding": "identity", // Cloudflare Markdown-for-Agents returns corrupted bytes when compression is negotiated
-					...headers,
-				},
+				headers: requestHeaders,
 				redirect: "follow",
 			};
 
@@ -178,9 +199,28 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 			const contentType = rawContentType.split(";")[0]?.trim().toLowerCase() ?? "";
 			const finalUrl = response.url;
 
+			const lastAgent = !rotates || attempt === USER_AGENTS.length - 1;
+			if (!lastAgent && BLOCKED_STATUSES.has(response.status)) {
+				void response.body?.cancel().catch(() => {});
+				// A refusal whose header names its wall is kept in case later agents fare no better; its
+				// body is not read, so rotation costs what it did. A 2xx challenge kept later wins.
+				const headerWall = lastBlockedResponse ? undefined : botWallOf(response, contentType, "");
+				if (headerWall) {
+					lastBlockedResponse = {
+						content: "",
+						contentType,
+						finalUrl,
+						ok: false,
+						status: response.status,
+						blockedBy: headerWall,
+					};
+				}
+				continue;
+			}
+
 			if (response.status === 429 && !retried429) {
-				// Rate limited: retry once, honoring a bounded Retry-After. The
-				// wait observes the caller's signal so an Esc during the backoff
+				// Rate limited under the last user agent: retry it once, honoring a bounded
+				// Retry-After. The wait observes the caller's signal so an Esc during the backoff
 				// does not stall for up to the full delay.
 				retried429 = true;
 				const delayMs = parseRetryAfterMs(response.headers.get("retry-after"));
@@ -199,51 +239,49 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 				return { content: "", contentType, finalUrl, ok: true, status: response.status, bodySkipped: true };
 			}
 
-			const reader = response.body?.getReader();
-			if (!reader) {
-				return { content: "", contentType, finalUrl, ok: false, status: response.status };
-			}
-
-			const chunks: Uint8Array[] = [];
-			let totalSize = 0;
-			let truncated = false;
-
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-
-				chunks.push(value);
-				totalSize += value.length;
-
-				if (totalSize > maxBytes) {
-					truncated = true;
-					void reader.cancel().catch(() => {});
-					break;
+			const responseBody = await readBodyCapped(response, maxBytes);
+			if (!responseBody) {
+				// Once a wall is known, an error under another agent only means trying the next one.
+				if (!response.ok && lastBlockedResponse) {
+					if (!lastAgent) continue;
+					return lastBlockedResponse;
 				}
+				// A successful response can still be bodyless (HTTP 204, or a null
+				// body stream): keep the transport's own success verdict instead of
+				// rewriting it, so the caller's status handling (a 204 is a valid
+				// empty read, not a failed fetch) runs on the real outcome.
+				return { content: "", contentType, finalUrl, ok: response.ok, status: response.status };
 			}
 
-			// A single chunk is decoded in place; only multi-chunk bodies need a concat copy.
-			const bytes =
-				chunks.length === 1
-					? Buffer.from(chunks[0].buffer, chunks[0].byteOffset, chunks[0].byteLength)
-					: Buffer.concat(chunks, totalSize);
-			const content = decodeBody(bytes, rawContentType);
-			if (isBotBlocked(response.status, content) && attempt < USER_AGENTS.length - 1) {
+			const content = decodeBody(responseBody.bytes, rawContentType);
+			const blockedBy = botWallOf(response, contentType, content);
+			const result: LoadPageResult = {
+				content,
+				contentType,
+				finalUrl,
+				ok: response.ok && !blockedBy,
+				status: response.status,
+				truncated: responseBody.truncated,
+				blockedBy,
+			};
+			if (blockedBy && !lastAgent) {
+				// A 2xx challenge outranks a refusal's wall: remote readers can still get past it.
+				if (!lastBlockedResponse || response.ok) lastBlockedResponse = result;
 				continue;
 			}
-
-			if (!response.ok) {
-				return { content, contentType, finalUrl, ok: false, status: response.status, truncated };
+			// The last agent's error yields to a saved wall, unless both are walls and the saved one is a refusal.
+			if (!response.ok && lastBlockedResponse && (!blockedBy || (lastBlockedResponse.status ?? 0) < 300)) {
+				if (!lastAgent) continue;
+				return lastBlockedResponse;
 			}
-
-			return { content, contentType, finalUrl, ok: true, status: response.status, truncated };
+			return result;
 		} catch (error) {
 			if (signal?.aborted) {
 				throw new ToolAbortError();
 			}
 			lastError = error instanceof Error ? error.message : String(error);
 			if (attempt === USER_AGENTS.length - 1) {
-				return { content: "", contentType: "", finalUrl: url, ok: false, error: lastError };
+				return lastBlockedResponse ?? { content: "", contentType: "", finalUrl: url, ok: false, error: lastError };
 			}
 		}
 	}
@@ -280,17 +318,25 @@ export async function htmlToBasicMarkdown(html: string): Promise<string> {
  */
 export function buildResult(
 	md: string,
-	opts: { url: string; finalUrl?: string; method: string; fetchedAt: string; notes?: string[]; contentType?: string },
+	opts: {
+		url: string;
+		finalUrl?: string;
+		method: string;
+		fetchedAt: string;
+		notes?: string[];
+		contentType?: string;
+		/** Pass the source `LoadPageResult.truncated` when `md` embeds a fetched body verbatim. */
+		truncated?: boolean;
+	},
 ): RenderResult {
-	const output = finalizeOutput(md);
 	return {
 		url: opts.url,
 		finalUrl: opts.finalUrl ?? opts.url,
 		contentType: opts.contentType ?? "text/markdown",
 		method: opts.method,
-		content: output.content,
+		content: finalizeOutput(md),
 		fetchedAt: opts.fetchedAt,
-		truncated: output.truncated,
+		truncated: opts.truncated ?? false,
 		notes: opts.notes ?? [],
 	};
 }

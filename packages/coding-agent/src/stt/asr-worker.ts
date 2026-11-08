@@ -1,28 +1,21 @@
 import * as fs from "node:fs/promises";
-import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
 import type {
 	AutomaticSpeechRecognitionOutput,
 	AutomaticSpeechRecognitionPipeline,
 	ProgressInfo,
-} from "@huggingface/transformers";
-import {
-	ensureRuntimeInstalled,
-	getTinyModelsCacheDir,
-	isCompiledBinary,
-	resolveRuntimeModule,
-} from "@oh-my-pi/pi-utils";
-import packageJson from "../../package.json" with { type: "json" };
+} from "../subprocess/transformers-types";
 import {
 	errorMessage,
 	errorText,
-	getTransformersVersionSpec,
 	loadTransformersRuntime,
 	MemoizedRuntime,
 	replayCachedReady,
 	sendLog,
 	sendProgress,
+	TRANSFORMERS_VERSION,
 } from "../subprocess/worker-runtime";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "../tiny/device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
@@ -35,10 +28,17 @@ import {
 	type SttModelKey,
 	type TransformersSttModelSpec,
 } from "./models";
-import { loadSourceSherpaRuntime, type SherpaOfflineRecognizer, type SherpaRuntime } from "./sherpa-runtime";
+import {
+	loadSherpaRuntime,
+	SHERPA_PACKAGE,
+	SHERPA_VERSION,
+	type SherpaOfflineRecognizer,
+	type SherpaOnlineRecognizer,
+	type SherpaOnlineStream,
+	type SherpaRuntime,
+} from "./sherpa-runtime";
 
 const ASR_TASK = "automatic-speech-recognition";
-const SHERPA_PACKAGE = "sherpa-onnx-node";
 // Whisper long-form decoding: split into 30s windows with 5s overlap so audio of
 // any length transcribes without exceeding the 30s receptive field.
 const CHUNK_LENGTH_S = 30;
@@ -46,6 +46,7 @@ const STRIDE_LENGTH_S = 5;
 // The client always resamples to 16 kHz mono float32 before sending; sherpa-onnx
 // is told the true input rate (it resamples internally to its feature config).
 const ASR_SAMPLE_RATE = 16_000;
+const ONLINE_TERMINAL_PADDING = new Float32Array(ASR_SAMPLE_RATE * 0.6);
 // Hub origin for raw sherpa-onnx model files (encoder/decoder/joiner/tokens).
 const HF_RESOLVE_BASE = "https://huggingface.co";
 // Coalesce download progress so streaming a multi-hundred-MB model file doesn't
@@ -93,7 +94,8 @@ interface TransformersRuntime {
 /** A warm model plus the engine that loaded it; cached per tier key. */
 type LoadedModel =
 	| { engine: "transformers"; pipeline: AutomaticSpeechRecognitionPipeline }
-	| { engine: "sherpa"; recognizer: SherpaOfflineRecognizer };
+	| { engine: "sherpa"; mode: "offline"; recognizer: SherpaOfflineRecognizer }
+	| { engine: "sherpa"; mode: "online"; recognizer: SherpaOnlineRecognizer };
 
 const models = new Map<SttModelKey, Promise<LoadedModel>>();
 // Serialize all model inference on a single chain: the recognizers are not
@@ -111,59 +113,9 @@ function runOnModel<T>(work: () => Promise<T>): Promise<T> {
 const transformersRuntime = new MemoizedRuntime<TransformersRuntime>();
 const sherpaRuntime = new MemoizedRuntime<SherpaRuntime>();
 
-let cachedSherpaVersionSpec: string | undefined;
-function resolveSherpaVersionSpec(): string {
-	const manifest = packageJson as {
-		optionalDependencies?: Record<string, string>;
-		dependencies?: Record<string, string>;
-	};
-	const versionSpec = manifest.optionalDependencies?.[SHERPA_PACKAGE] ?? manifest.dependencies?.[SHERPA_PACKAGE];
-	if (!versionSpec) throw new Error(`${SHERPA_PACKAGE} is missing from package.json optionalDependencies`);
-	return versionSpec;
-}
-
-function getSherpaVersionSpec(): string {
-	cachedSherpaVersionSpec ??= resolveSherpaVersionSpec();
-	return cachedSherpaVersionSpec;
-}
-
 function getSttRuntimeDir(): string {
-	const key = getTransformersVersionSpec().replace(/[^A-Za-z0-9._-]/g, "_");
+	const key = TRANSFORMERS_VERSION.replace(/[^A-Za-z0-9._-]/g, "_");
 	return path.join(path.dirname(getTinyModelsCacheDir()), "stt-runtime", `transformers-${key}`);
-}
-
-function getSherpaRuntimeDir(): string {
-	const key = getSherpaVersionSpec().replace(/[^A-Za-z0-9._-]/g, "_");
-	return path.join(path.dirname(getTinyModelsCacheDir()), "stt-runtime", `sherpa-${key}`);
-}
-
-/**
- * Resolve the native `sherpa-onnx-node` module. In a compiled binary the addon
- * (plus its per-platform prebuilt `sherpa-onnx.node` + bundled onnxruntime
- * dylibs) is installed into a side runtime dir; the addon resolves its native
- * library relative to its own location, so a plain `createRequire` of the entry
- * is enough — no module-resolver patch or bare-require stubbing is needed.
- * Memoized so the runtime loads once per process.
- */
-function loadSherpaRuntime(transport: SttTransport, requestId: string, modelKey: SttModelKey): Promise<SherpaRuntime> {
-	return sherpaRuntime.load(async () => {
-		if (!isCompiledBinary()) return loadSourceSherpaRuntime(import.meta.url);
-		const runtimeDir = await ensureRuntimeInstalled({
-			runtimeDir: getSherpaRuntimeDir(),
-			install: { dependencies: { [SHERPA_PACKAGE]: getSherpaVersionSpec() } },
-			probePackage: SHERPA_PACKAGE,
-			onPhase: phase =>
-				transport.send({
-					type: "progress",
-					id: requestId,
-					event: { modelKey, status: phase, name: `${SHERPA_PACKAGE}@${getSherpaVersionSpec()}` },
-				}),
-		});
-		const nodeModules = path.join(runtimeDir, "node_modules");
-		const entry = resolveRuntimeModule(nodeModules, SHERPA_PACKAGE);
-		if (!entry) throw new Error(`Unable to resolve ${SHERPA_PACKAGE} in compiled runtime at ${nodeModules}`);
-		return createRequire(entry)(entry) as SherpaRuntime;
-	});
 }
 
 async function loadPipelineOnDevice(
@@ -343,11 +295,19 @@ async function loadSherpaModel(
 	transport: SttTransport,
 	requestId: string,
 ): Promise<LoadedModel> {
-	const runtime = await loadSherpaRuntime(transport, requestId, modelKey);
+	const runtime = await sherpaRuntime.load(() =>
+		loadSherpaRuntime(phase =>
+			transport.send({
+				type: "progress",
+				id: requestId,
+				event: { modelKey, status: phase, name: `${SHERPA_PACKAGE}@${SHERPA_VERSION}` },
+			}),
+		),
+	);
 	const files = await ensureSherpaModelFiles(spec, modelKey, transport, requestId);
 	const startedAt = performance.now();
 	const numThreads = Math.max(1, Math.min(4, os.availableParallelism()));
-	const recognizer = await runtime.OfflineRecognizer.createAsync({
+	const config = {
 		modelConfig: {
 			transducer: { encoder: files.encoder, decoder: files.decoder, joiner: files.joiner },
 			tokens: files.tokens,
@@ -357,7 +317,15 @@ async function loadSherpaModel(
 			debug: 0,
 		},
 		decodingMethod: "greedy_search",
-	});
+	};
+	const model: LoadedModel =
+		spec.mode === "online"
+			? {
+					engine: "sherpa",
+					mode: "online",
+					recognizer: new runtime.OnlineRecognizer({ ...config, enableEndpoint: true }),
+				}
+			: { engine: "sherpa", mode: "offline", recognizer: await runtime.OfflineRecognizer.createAsync(config) };
 	sendLog(transport, "debug", "stt: local model loaded", {
 		modelKey,
 		repo: spec.repo,
@@ -366,7 +334,7 @@ async function loadSherpaModel(
 		numThreads,
 		elapsedMs: Math.round(performance.now() - startedAt),
 	});
-	return { engine: "sherpa", recognizer };
+	return model;
 }
 
 async function loadModel(modelKey: SttModelKey, transport: SttTransport, requestId: string): Promise<LoadedModel> {
@@ -404,6 +372,14 @@ async function decodeSegment(
 	language: string | undefined,
 ): Promise<string> {
 	if (model.engine === "sherpa") {
+		if (model.mode === "online") {
+			const stream = model.recognizer.createStream();
+			stream.acceptWaveform({ samples: audio, sampleRate: ASR_SAMPLE_RATE });
+			stream.acceptWaveform({ samples: ONLINE_TERMINAL_PADDING, sampleRate: ASR_SAMPLE_RATE });
+			stream.inputFinished();
+			while (model.recognizer.isReady(stream)) model.recognizer.decode(stream);
+			return model.recognizer.getResult(stream).text.trim();
+		}
 		const stream = model.recognizer.createStream();
 		stream.acceptWaveform({ samples: audio, sampleRate: ASR_SAMPLE_RATE });
 		const result = await model.recognizer.decodeAsync(stream);
@@ -456,13 +432,17 @@ async function handleBatchRequest(
 
 // ── Live streaming sessions ─────────────────────────────────────────
 
-/** State for one in-flight {@link StreamEndpointer}-driven streaming session. */
+/** State for one in-flight native-online or endpointer-driven streaming session. */
 interface StreamingSession {
 	id: string;
 	spec: SttModel;
 	language: string | undefined;
 	model: Promise<LoadedModel>;
 	endpointer: StreamEndpointer;
+	/** Online models consume each incoming chunk once, retaining one native stream. */
+	audioQueue: Float32Array[];
+	onlineStream?: SherpaOnlineStream;
+	lastPartial: string;
 	/** Finalized segments awaiting decode, in order. */
 	segmentQueue: Float32Array[];
 	/** Latest in-progress segment audio awaiting a volatile partial decode (coalesced). */
@@ -486,12 +466,26 @@ function startStreamingSession(
 		transport.send({ type: "error", id: request.id, error: `Unknown stt model: ${request.modelKey}` });
 		return;
 	}
-	sessions.set(request.id, {
+	const session: StreamingSession = {
 		id: request.id,
 		spec,
 		language: request.language,
-		model: loadModel(request.modelKey, transport, request.id),
+		// Defer loading until the session is registered; filter download callbacks too.
+		model: Promise.resolve().then(() =>
+			loadModel(
+				request.modelKey,
+				{
+					...transport,
+					send: message => {
+						if (!session.cancelled) transport.send(message);
+					},
+				},
+				request.id,
+			),
+		),
 		endpointer: new StreamEndpointer(),
+		audioQueue: [],
+		lastPartial: "",
 		segmentQueue: [],
 		pendingPartial: null,
 		committed: [],
@@ -499,7 +493,10 @@ function startStreamingSession(
 		pumping: false,
 		cancelled: false,
 		ended: false,
-	});
+	};
+	sessions.set(request.id, session);
+	// Observe load failures even if no audio arrives (or startup is cancelled).
+	void pumpSession(session, transport);
 }
 
 function ingestStreamEvents(session: StreamingSession, events: EndpointerEvent[]): void {
@@ -507,6 +504,58 @@ function ingestStreamEvents(session: StreamingSession, events: EndpointerEvent[]
 		if (event.kind === "segment") session.segmentQueue.push(event.audio);
 		else session.pendingPartial = event.audio;
 	}
+}
+
+function commitOnlineSegment(session: StreamingSession, transport: SttTransport, text: string): void {
+	if (text.length > 0) {
+		session.committed.push(text);
+		transport.send({ type: "segment", id: session.id, index: session.segmentIndex++, text });
+	}
+	session.lastPartial = "";
+}
+
+function decodeOnlineStream(
+	session: StreamingSession,
+	transport: SttTransport,
+	recognizer: SherpaOnlineRecognizer,
+	stream: SherpaOnlineStream,
+	final: boolean,
+): void {
+	while (recognizer.isReady(stream)) {
+		recognizer.decode(stream);
+		const text = recognizer.getResult(stream).text.trim();
+		if (!final && text !== session.lastPartial) {
+			session.lastPartial = text;
+			transport.send({ type: "partial", id: session.id, text });
+		}
+		if (!final && recognizer.isEndpoint(stream)) {
+			commitOnlineSegment(session, transport, text);
+			recognizer.reset(stream);
+		}
+	}
+}
+
+async function pumpOnlineSession(
+	session: StreamingSession,
+	transport: SttTransport,
+	recognizer: SherpaOnlineRecognizer,
+): Promise<void> {
+	await runOnModel(async () => {
+		if (session.cancelled) return;
+		const stream = (session.onlineStream ??= recognizer.createStream());
+		for (const audio of session.audioQueue) {
+			stream.acceptWaveform({ samples: audio, sampleRate: ASR_SAMPLE_RATE });
+			decodeOnlineStream(session, transport, recognizer, stream, false);
+		}
+		session.audioQueue.length = 0;
+		if (!session.ended) return;
+		stream.acceptWaveform({ samples: ONLINE_TERMINAL_PADDING, sampleRate: ASR_SAMPLE_RATE });
+		stream.inputFinished();
+		decodeOnlineStream(session, transport, recognizer, stream, true);
+		commitOnlineSegment(session, transport, recognizer.getResult(stream).text.trim());
+		transport.send({ type: "stream_done", id: session.id, text: session.committed.join(" ") });
+		sessions.delete(session.id);
+	});
 }
 
 /**
@@ -519,6 +568,15 @@ async function pumpSession(session: StreamingSession, transport: SttTransport): 
 	session.pumping = true;
 	try {
 		const model = await session.model;
+		if (model.engine === "sherpa" && model.mode === "online") {
+			// Audio or Stop can arrive while awaiting the model lock; drain again
+			// until neither queued audio nor an unfinished Stop remains.
+			while (!session.cancelled && sessions.get(session.id) === session) {
+				await pumpOnlineSession(session, transport, model.recognizer);
+				if (session.audioQueue.length === 0 && !session.ended) break;
+			}
+			return;
+		}
 		while (!session.cancelled) {
 			if (session.segmentQueue.length > 0) {
 				const audio = session.segmentQueue.shift()!;
@@ -535,8 +593,11 @@ async function pumpSession(session: StreamingSession, transport: SttTransport): 
 			if (session.pendingPartial) {
 				const audio = session.pendingPartial;
 				session.pendingPartial = null;
+				const startedAt = performance.now();
 				const text = await runOnModel(() => decodeSegment(model, session.spec, audio, session.language));
 				if (session.cancelled) return;
+				session.endpointer.notePartialDecode(performance.now() - startedAt);
+				if (!session.endpointer.partialsEnabled) session.pendingPartial = null;
 				// Skip a now-stale preview if a segment finalized mid-decode.
 				if (text.length > 0 && session.segmentQueue.length === 0) {
 					transport.send({ type: "partial", id: session.id, text });
@@ -569,17 +630,28 @@ function handleStreamMessage(
 	if (!session || session.cancelled) return;
 	switch (message.type) {
 		case "stream_audio":
-			ingestStreamEvents(session, session.endpointer.push(message.audio));
+			if (session.ended) return;
+			if (session.spec.engine === "sherpa" && session.spec.mode === "online") {
+				session.audioQueue.push(message.audio);
+			} else {
+				ingestStreamEvents(session, session.endpointer.push(message.audio));
+			}
 			void pumpSession(session, transport);
 			return;
 		case "stream_stop":
+			if (session.ended) return;
 			session.ended = true;
 			session.pendingPartial = null;
-			ingestStreamEvents(session, session.endpointer.flush());
+			if (!(session.spec.engine === "sherpa" && session.spec.mode === "online")) {
+				ingestStreamEvents(session, session.endpointer.flush());
+			}
 			void pumpSession(session, transport);
 			return;
 		case "stream_cancel":
 			session.cancelled = true;
+			session.audioQueue.length = 0;
+			session.segmentQueue.length = 0;
+			session.pendingPartial = null;
 			sessions.delete(message.id);
 			return;
 	}

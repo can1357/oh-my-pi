@@ -1,7 +1,10 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import type { PipeStreams } from "@oh-my-pi/pi-natives";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { IrcBus } from "../irc/bus";
+import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
@@ -49,6 +52,8 @@ export type AsyncJobType = "bash" | "task" | "eval";
 export interface AsyncJobRunResult {
 	text: string;
 	structured?: StructuredSubagentOutput;
+	/** See {@link AsyncJob.agentOutputPublished}. */
+	agentOutputPublished?: boolean;
 }
 
 /**
@@ -62,6 +67,7 @@ export class AsyncJobError extends Error {
 		readonly structured?: StructuredSubagentOutput,
 	) {
 		super(message);
+		this.name = "AsyncJobError";
 	}
 }
 
@@ -73,6 +79,27 @@ export interface AsyncJobDetails extends Record<string, unknown> {
 	meta?: OutputMeta;
 }
 
+/**
+ * Progress record of one task job's agent. A batch `task` call shares one
+ * `progress` array across its jobs, so the entry whose `id` is `agentId` wins;
+ * a job reporting only its own spawn falls back to the first entry. Used by job
+ * snapshots and eval `wait()` progress rows.
+ */
+export function agentProgress(
+	details: AsyncJobDetails | undefined,
+	agentId: string,
+): Record<string, unknown> | undefined {
+	const progress = details?.progress;
+	if (!Array.isArray(progress)) return undefined;
+	let first: Record<string, unknown> | undefined;
+	for (const record of progress) {
+		if (!isRecord(record)) continue;
+		if (record.id === agentId) return record;
+		first ??= record;
+	}
+	return first;
+}
+
 export interface AsyncJob {
 	id: string;
 	type: AsyncJobType;
@@ -81,6 +108,12 @@ export interface AsyncJob {
 	/** When the job's run settled; `endTime - startTime` is its frozen run duration. */
 	endTime?: number;
 	label: string;
+	/**
+	 * What the job is for, in the model's words: the `i` intent on the call
+	 * that started it, as one line of plain text. Job views lead with it over
+	 * the `label`. Only tools whose call starts a single job set it.
+	 */
+	intent?: string;
 	abortController: AbortController;
 	promise: Promise<void>;
 	resultText?: string;
@@ -109,8 +142,18 @@ export interface AsyncJob {
 	 * id differs from the agent id (vibe turn jobs, tan clones).
 	 */
 	agentId?: string;
+	/**
+	 * Whether this job's turn published the agent's `<agentId>.md` output. A
+	 * follow-up turn that neither yielded nor produced a message result writes
+	 * none, so `agent://<agentId>` still holds an earlier turn's output; job
+	 * bodies that know this report it so deliveries advertise only the handles
+	 * that answer for this turn. Undefined where the body does not report it.
+	 */
+	agentOutputPublished?: boolean;
 	/** The process the job runs, when it spawns one. */
 	process?: AsyncJobProcess;
+	/** What the job's live widget reads; set by bash and task jobs. */
+	widgetInputs?: JobWidgetInputs;
 	/**
 	 * Job is registered but parked behind a caller-managed gate (e.g. a task
 	 * batch semaphore). Queued jobs do not count toward the running-job limit
@@ -146,6 +189,8 @@ export interface AsyncJobProcess {
 	readonly cwd: string;
 	/** Live pids the command spawned, in spawn order; empty before it starts and after it ends. */
 	pids(): readonly number[];
+	/** Copies of the bytes crossing the command's pipes, kept with the job row (`proc://<id>/streams`). */
+	readonly streams?: PipeStreams;
 }
 
 /** Delivery callback for a settled job's result text. */
@@ -206,7 +251,16 @@ interface AsyncJobDelivery {
 	 */
 	jobSnapshot?: Pick<
 		AsyncJob,
-		"type" | "status" | "startTime" | "endTime" | "label" | "structured" | "agentId" | "latestDetails"
+		| "type"
+		| "status"
+		| "startTime"
+		| "endTime"
+		| "label"
+		| "intent"
+		| "structured"
+		| "agentId"
+		| "agentOutputPublished"
+		| "latestDetails"
 	>;
 }
 
@@ -236,6 +290,10 @@ export interface AsyncJobRegisterOptions {
 	foreground?: boolean;
 	/** The process the job runs; see {@link AsyncJob.process}. */
 	process?: AsyncJobProcess;
+	/** See {@link AsyncJob.intent}. */
+	intent?: string;
+	/** See {@link AsyncJob.widgetInputs}. */
+	widgetInputs?: JobWidgetInputs;
 }
 
 /**
@@ -248,10 +306,82 @@ export interface AsyncJobFilter {
 	ownerId: string | undefined;
 }
 
-export class AsyncJobManager {
+/** What a job body receives from {@link AsyncJobManagerApi.register}. */
+export interface AsyncJobRunContext {
+	jobId: string;
+	signal: AbortSignal;
+	reportProgress: (text: string, details?: AsyncJobDetails) => Promise<void>;
+	/** Clear the queued flag once the job actually starts executing. */
+	markRunning: () => void;
+}
+
+/** A job body: the work {@link AsyncJobManagerApi.register} runs and tracks. */
+export type AsyncJobRun = (ctx: AsyncJobRunContext) => Promise<string | AsyncJobRunResult>;
+
+/**
+ * The job surface sessions, tools and subagents use on their root's manager.
+ * {@link AsyncJobManager} implements it on the root's thread; a subagent worker
+ * holds a remote implementation (`thread/services/async-jobs-remote.ts`) whose
+ * job ids, rows and deliveries stay on the root's manager.
+ */
+export interface AsyncJobManagerApi {
+	/** Live widgets of this root's jobs, when the root session provides them. */
+	readonly widgets: JobWidgetRegistry | undefined;
+	/** True when the running-job count has reached the configured cap. */
+	readonly atCapacity: boolean;
+	/** Calls `listener` whenever a job settles; returns the unsubscribe. */
+	onJobSettled(listener: () => void): () => void;
+	/** Start tracking `run` as a job; returns its id. */
+	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string;
+	/** Deliver an already-completed result without consuming a running-job slot. */
+	publishCompleted(
+		type: AsyncJobType,
+		label: string,
+		result: AsyncJobRunResult,
+		options: { id?: string; ownerId?: string; agentId?: string },
+	): string;
+	/** Cancel one running job; a filter whose owner does not match reads as not-found. */
+	cancel(id: string, filter?: AsyncJobFilter): boolean;
+	getJob(id: string): AsyncJob | undefined;
+	/** Running background jobs; foreground-backed jobs stay hidden until promoted. */
+	getRunningJobs(filter?: AsyncJobFilter): AsyncJob[];
+	/** Settled background jobs, newest first. */
+	getRecentJobs(limit?: number, filter?: AsyncJobFilter): AsyncJob[];
+	/** Every background job row. */
+	getAllJobs(filter?: AsyncJobFilter): AsyncJob[];
+	/** Promote a foreground-backed job to a background job; false for unknown ids. */
+	backgroundJob(jobId: string): boolean;
+	/** Drop a foreground-backed job whose result the foreground call already returned. */
+	releaseForegroundJob(jobId: string): void;
+	getDeliveryState(filter?: AsyncJobFilter): AsyncJobDeliveryState;
+	hasPendingDeliveries(filter?: AsyncJobFilter): boolean;
+	watchJobs(jobIds: string[]): number;
+	/** Stop watching jobs, re-enqueueing skipped deliveries. */
+	unwatchJobs(jobIds: string[]): number;
+	acknowledgeDeliveries(jobIds: string[]): number;
+	/** Mark settled job results as recovered by a foreground snapshot. */
+	consumeJobResults(jobIds: string[]): number;
+	/** True once a result was auto-delivered or recovered by a foreground snapshot. */
+	isJobResultConsumed(jobId: string): boolean;
+	/** Cancel running jobs (scoped by `filter`), aborting each with `reason`. */
+	cancelAll(filter?: AsyncJobFilter, reason?: unknown): void;
+	/** Evict settled jobs matching the filter now; returns how many. */
+	evictCompletedJobs(filter?: AsyncJobFilter): number;
+	waitForAll(): Promise<void>;
+	/** Route completions of jobs owned by `ownerId` to `sink`; returns the unregister. */
+	registerDeliverySink(ownerId: string, sink: AsyncJobDeliverySink): () => void;
+	/** Wait until every job owned by `ownerId` settled; false when `timeoutMs` elapses first. */
+	waitForOwnerJobs(ownerId: string, options?: { timeoutMs?: number; excludeSuppressed?: boolean }): Promise<boolean>;
+	/** Cancel every job owned by `ownerId`, then wait until `deadlineAt`. */
+	cancelAndReapOwnerJobs(ownerId: string, deadlineAt: number): Promise<AsyncJobReapResult>;
+	drainDeliveries(options?: { timeoutMs?: number; filter?: AsyncJobFilter }): Promise<boolean>;
+	isDeliverySuppressed(jobId: string): boolean;
+}
+
+export class AsyncJobManager implements AsyncJobManagerApi {
 	static #instance: AsyncJobManager | undefined;
 
-	/** Process-global instance shared by internal URL protocol handlers and tools. */
+	/** Legacy pointer to the first live root; child routing uses the parent's scoped manager instead. */
 	static instance(): AsyncJobManager | undefined {
 		return AsyncJobManager.#instance;
 	}
@@ -285,6 +415,21 @@ export class AsyncJobManager {
 	#deliveryLoop: Promise<void> | undefined;
 	#deliveryQueueChanged = Promise.withResolvers<void>();
 	#disposed = false;
+	/** Live widgets of this root's jobs; set by the root session when widgets are available. */
+	widgets: JobWidgetRegistry | undefined;
+	readonly #settleListeners = new Set<() => void>();
+
+	/**
+	 * Calls `listener` whenever a job settles (completed, failed or cancelled), so
+	 * views counting running jobs repaint even when no result delivery follows.
+	 * Returns the unsubscribe.
+	 */
+	onJobSettled(listener: () => void): () => void {
+		this.#settleListeners.add(listener);
+		return () => {
+			this.#settleListeners.delete(listener);
+		};
+	}
 
 	#filterJobs(jobs: Iterable<AsyncJob>, filter?: AsyncJobFilter): AsyncJob[] {
 		if (!filter) return Array.from(jobs);
@@ -335,18 +480,7 @@ export class AsyncJobManager {
 		return activeCount >= this.#maxRunningJobs;
 	}
 
-	register(
-		type: AsyncJobType,
-		label: string,
-		run: (ctx: {
-			jobId: string;
-			signal: AbortSignal;
-			reportProgress: (text: string, details?: AsyncJobDetails) => Promise<void>;
-			/** Clear the queued flag once the job actually starts executing. */
-			markRunning: () => void;
-		}) => Promise<string | AsyncJobRunResult>,
-		options?: AsyncJobRegisterOptions,
-	): string {
+	register(type: AsyncJobType, label: string, run: AsyncJobRun, options?: AsyncJobRegisterOptions): string {
 		if (this.#disposed) {
 			throw new Error("Async job manager is disposed");
 		}
@@ -363,10 +497,7 @@ export class AsyncJobManager {
 			);
 		}
 
-		const id = this.#resolveJobId(options?.id);
-		this.#suppressedDeliveries.delete(id);
-		this.#consumedJobResults.delete(id);
-		this.#releasedForegroundJobs.delete(id);
+		const id = this.#claimJobId(options?.id);
 		if (options?.foreground) this.#suppressedDeliveries.add(id);
 		const abortController = new AbortController();
 		const startTime = Date.now();
@@ -377,11 +508,13 @@ export class AsyncJobManager {
 			status: "running",
 			startTime,
 			label,
+			...(options?.intent ? { intent: options.intent } : {}),
 			abortController,
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
 			agentId: options?.agentId,
 			process: options?.process,
+			widgetInputs: options?.widgetInputs,
 			queued: options?.queued === true,
 			...(options?.foreground ? { foreground: true } : {}),
 		};
@@ -413,11 +546,15 @@ export class AsyncJobManager {
 				const text = typeof outcome === "string" ? outcome : outcome.text;
 				const structured = typeof outcome === "string" ? undefined : outcome.structured;
 				if (structured) job.structured = structured;
+				if (typeof outcome !== "string" && outcome.agentOutputPublished !== undefined) {
+					job.agentOutputPublished = outcome.agentOutputPublished;
+				}
 				if (job.status === "cancelled") {
 					job.resultText = text;
 				} else {
 					job.status = "completed";
 					job.resultText = text;
+					this.#recordAgentReply(job);
 					this.#enqueueDelivery(id, text);
 				}
 			} catch (error) {
@@ -427,15 +564,70 @@ export class AsyncJobManager {
 				job.errorText = errorText;
 				if (job.status !== "cancelled") {
 					job.status = "failed";
+					this.#recordAgentReply(job);
 					this.#enqueueDelivery(id, errorText);
 				}
 			}
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
 			else this.#scheduleEviction(id);
+			for (const listener of this.#settleListeners) {
+				try {
+					listener();
+				} catch (error) {
+					logger.warn("Async job settle listener failed", {
+						jobId: id,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
 		})();
 
 		this.#jobs.set(id, job);
 		return id;
+	}
+
+	/**
+	 * Deliver an already-completed result through the normal owner-scoped job
+	 * queue without consuming a running-job slot.
+	 */
+	publishCompleted(
+		type: AsyncJobType,
+		label: string,
+		result: AsyncJobRunResult,
+		options: { id?: string; ownerId?: string; agentId?: string },
+	): string {
+		if (this.#disposed) throw new Error("Async job manager is disposed");
+		const id = this.#claimJobId(options.id);
+		const now = Date.now();
+		const job: AsyncJob = {
+			id,
+			type,
+			status: "completed",
+			startTime: now,
+			endTime: now,
+			label,
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			ownerId: options.ownerId,
+			agentId: options.agentId,
+			resultText: result.text,
+			structured: result.structured,
+			agentOutputPublished: result.agentOutputPublished,
+		};
+		this.#jobs.set(id, job);
+		this.#recordAgentReply(job);
+		this.#enqueueDelivery(id, result.text);
+		this.#scheduleEviction(id);
+		return id;
+	}
+
+	/**
+	 * A settled job that runs a subagent carries that agent's outcome to the
+	 * job's owner, which answers whatever the owner asked the agent before now:
+	 * a reply `wait` must not keep reporting as owed.
+	 */
+	#recordAgentReply(job: AsyncJob): void {
+		if (job.agentId !== undefined && job.ownerId !== undefined) IrcBus.recordReply(job.agentId, job.ownerId);
 	}
 
 	/**
@@ -799,6 +991,8 @@ export class AsyncJobManager {
 		this.#consumedJobResults.clear();
 		this.#releasedForegroundJobs.clear();
 		this.#deliverySinks.clear();
+		this.widgets?.dispose();
+		this.widgets = undefined;
 		return jobsSettled && drained;
 	}
 
@@ -816,8 +1010,9 @@ export class AsyncJobManager {
 		// #suppressedDeliveries; evicting now would clear that marker (#evictJob)
 		// before the queue's isStale check drains it, letting the already-consumed
 		// result inject a duplicate async-result follow-up. A parked entry keeps
-		// the full retention window instead. Clamping inside #scheduleEviction
-		// keeps a shorter configured retention the effective cap.
+		// the row until its delivery settles (see #scheduleEviction), which then
+		// arms the consumed grace. Clamping inside #scheduleEviction keeps a
+		// shorter configured retention the effective cap.
 		const deliveryPending =
 			this.#deliveries.some(delivery => delivery.jobId === jobId) ||
 			this.#inFlightDeliveries.some(delivery => delivery.jobId === jobId);
@@ -836,6 +1031,14 @@ export class AsyncJobManager {
 		this.#releasedForegroundJobs.delete(jobId);
 		this.#evictJob(jobId);
 		if (jobId === `bg_${this.#nextAutoId - 1}`) this.#nextAutoId -= 1;
+	}
+
+	#claimJobId(preferredId?: string): string {
+		const id = this.#resolveJobId(preferredId);
+		this.#suppressedDeliveries.delete(id);
+		this.#consumedJobResults.delete(id);
+		this.#releasedForegroundJobs.delete(id);
+		return id;
 	}
 
 	#resolveJobId(preferredId?: string): string {
@@ -963,6 +1166,7 @@ export class AsyncJobManager {
 		this.#consumedJobResults.delete(jobId);
 		const job = this.#jobs.get(jobId);
 		if (job) this.#runRetainedArtifactsCleanup(job);
+		this.widgets?.forget(jobId);
 		return this.#jobs.delete(jobId);
 	}
 
@@ -971,6 +1175,13 @@ export class AsyncJobManager {
 	 * retention window; a consumed result passes the shorter
 	 * {@link #consumedResultEvictionMs}. The delay is clamped to the configured
 	 * retention so an explicit short retention always stays the effective cap.
+	 * A timer that fires while a suppressed job's delivery is in flight (its
+	 * async-result entry parked on a busy owner's yield queue) evicts only once
+	 * that attempt settles: the parked entry's isStale check resolves through
+	 * the suppression marker #evictJob clears, so evicting mid-park would
+	 * re-inject a result a foreground snapshot already consumed. Unsuppressed
+	 * in-flight deliveries keep the bounded lifecycle, so a receipt that never
+	 * settles cannot pin the row and its retained artifacts.
 	 */
 	#scheduleEviction(jobId: string, delayMs: number = this.#retentionMs): void {
 		if (this.#disposed) return;
@@ -981,7 +1192,16 @@ export class AsyncJobManager {
 		const delay = Math.max(0, Math.min(this.#retentionMs, delayMs));
 		clearTimeout(this.#evictionTimers.get(jobId));
 		const timer = setTimeout(() => {
-			this.#evictJob(jobId);
+			const inFlight = this.#inFlightDeliveries.find(delivery => delivery.jobId === jobId)?.promise;
+			if (!inFlight || !this.isDeliverySuppressed(jobId)) {
+				this.#evictJob(jobId);
+				return;
+			}
+			// The settled attempt may re-arm this job's timer (consumed grace);
+			// only evict when nothing replaced this one in the meantime.
+			void inFlight.then(() => {
+				if (this.#evictionTimers.get(jobId) === timer) this.#evictJob(jobId);
+			});
 		}, delay);
 		timer.unref();
 		this.#evictionTimers.set(jobId, timer);
@@ -1063,8 +1283,10 @@ export class AsyncJobManager {
 						startTime: job.startTime,
 						endTime: job.endTime,
 						label: job.label,
+						intent: job.intent,
 						structured: job.structured,
 						agentId: job.agentId,
+						agentOutputPublished: job.agentOutputPublished,
 						latestDetails: job.latestDetails,
 					}
 				: undefined,
@@ -1203,11 +1425,13 @@ export class AsyncJobManager {
 			startTime: snapshot.startTime,
 			endTime: snapshot.endTime,
 			label: snapshot.label,
+			intent: snapshot.intent,
 			abortController: new AbortController(),
 			promise: Promise.resolve(),
 			resultText: delivery.text,
 			structured: snapshot.structured,
 			agentId: snapshot.agentId,
+			agentOutputPublished: snapshot.agentOutputPublished,
 			latestDetails: snapshot.latestDetails,
 		};
 	}

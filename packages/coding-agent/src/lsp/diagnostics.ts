@@ -1,10 +1,17 @@
 import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import * as fs from "node:fs";
 import path from "node:path";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, untilAborted, toError } from "@oh-my-pi/pi-utils";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { throwIfAborted } from "../tools/tool-errors";
-import { getOrCreateClient, sendRequest, supportsDocumentDiagnostics, waitForProjectLoaded } from "./client";
+import {
+	getOrCreateClient,
+	LspRequestTimeoutError,
+	LspResponseError,
+	sendRequest,
+	supportsDocumentDiagnostics,
+	waitForProjectLoaded,
+} from "./client";
 import { getLinterClient } from "./clients";
 import { hasRootMarkerAncestor } from "./config";
 import { applyTextEditsToString } from "./edits";
@@ -25,6 +32,7 @@ import {
 	formatDiagnostic,
 	formatDiagnosticsSummary,
 	formatLocation,
+	mergeDiagnosticLists,
 	readLocationContext,
 	sortDiagnostics,
 	uriToFile,
@@ -32,16 +40,10 @@ import {
 
 const DIAGNOSTIC_MESSAGE_LIMIT = 50;
 export const SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS = 3000;
-/**
- * Single-file diagnostics wait budget for project-aware servers (Roslyn, tsserver, …).
- * Their first pull-diagnostic response computes analysis on demand and routinely
- * takes several seconds, overrunning {@link SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS};
- * an explicit `lsp diagnostics` request can afford to wait, so give it more room
- * (still capped by the tool-level timeout).
- */
-export const PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS = 10_000;
 export const BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS = 400;
 const DIAGNOSTICS_POLL_MS = 100;
+/** Build-status notifications for a document that did not change arrive ~10–90 ms apart. */
+const BUILD_STATUS_POLL_MS = 20;
 const DIAGNOSTICS_SETTLE_MS = 250;
 /**
  * How long the edit/write writethrough blocks inline waiting for fresh
@@ -70,8 +72,28 @@ export const DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS = 12_000;
  * and the edit returns.
  */
 export const DIAGNOSTICS_PIPELINE_GRACE_MS = 10_000;
+
+/**
+ * Per-server wait budget (ms) for late post-edit diagnostics: at least
+ * {@link DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS}, raised to `lsp.requestTimeout`
+ * so a server still loading its project on a cold start delivers late instead of
+ * being dropped.
+ */
+export function deferredDiagnosticsWaitMs(requestTimeoutSec: number | undefined): number {
+	return Math.max(DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS, (requestTimeoutSec ?? 0) * 1000);
+}
 export const MAX_GLOB_DIAGNOSTIC_TARGETS = 20;
 export const WORKSPACE_SYMBOL_LIMIT = 200;
+
+/**
+ * Summary for a file some servers sent no fresh report on, appended to the summary of
+ * the reports that did arrive, so the file never reads as clean.
+ */
+export function unreportedSummary(servers: readonly string[], reported?: string): string {
+	const unverified = `no diagnostics report yet from ${servers.join(", ")}`;
+	return reported ? `${reported}; ${unverified}` : unverified;
+}
+
 export const PROJECT_INDEXED_ACTIONS: ReadonlySet<string> = new Set([
 	"definition",
 	"type_definition",
@@ -203,6 +225,13 @@ interface WaitForDiagnosticsOptions {
 	 * publish be superseded by the fresh one.
 	 */
 	settleMs?: number;
+	/**
+	 * Hold the wait while the server loads its project, once it supports pulls: a pull
+	 * during load answers from a half-loaded project (rust-analyzer: an empty report).
+	 * The budget restarts when the load settles, as if the caller had waited first.
+	 * Push-only servers are never held.
+	 */
+	afterProjectLoad?: boolean;
 }
 
 /**
@@ -211,11 +240,13 @@ interface WaitForDiagnosticsOptions {
  * Distinguishes a usable report from a failed request so a timeout or RPC error
  * is never mistaken for a clean file. `diagnostics` holds the report's items (an
  * empty array means the server reported the file clean); `failed` carries the
- * error when the pull could not complete.
+ * error when the pull could not complete; `declined` marks an answer that carries
+ * no report at all.
  */
 interface PullDiagnosticsOutcome {
 	diagnostics?: Diagnostic[];
 	failed?: unknown;
+	declined?: boolean;
 }
 
 function requestDocumentDiagnostics(
@@ -226,7 +257,10 @@ function requestDocumentDiagnostics(
 ): Promise<PullDiagnosticsOutcome> {
 	return sendRequest(client, "textDocument/diagnostic", { textDocument: { uri } }, signal, timeoutMs)
 		.then(report => {
-			if (!report || typeof report !== "object" || !("kind" in report) || report.kind !== "full") {
+			// LSP requires a report, but ruby-lsp answers `null` for a document it does not
+			// diagnose (ERB, or outside its workspace) and when its own diagnostics fail.
+			if (report === null || report === undefined) return { declined: true };
+			if (typeof report !== "object" || !("kind" in report) || report.kind !== "full") {
 				return {};
 			}
 			if (!("items" in report) || !Array.isArray(report.items)) return {};
@@ -240,29 +274,77 @@ function requestDocumentDiagnostics(
 		});
 }
 
+/** JSON-RPC `ContentModified`: the document changed while the server computed its answer. */
+const LSP_CONTENT_MODIFIED = -32801;
+/** JSON-RPC `ServerCancelled`; on a diagnostic pull, `data.retriggerRequest` says whether to ask again. */
+const LSP_SERVER_CANCELLED = -32802;
+
+/**
+ * Whether a failed pull asks to be retried rather than reporting a failure. rust-analyzer,
+ * for one, cancels pulls with `retriggerRequest: true` while it primes caches after start.
+ */
+function shouldRetriggerPull(failure: unknown): boolean {
+	if (!(failure instanceof LspResponseError)) return false;
+	if (failure.code === LSP_CONTENT_MODIFIED) return true;
+	if (failure.code !== LSP_SERVER_CANCELLED) return false;
+	return !(isRecord(failure.data) && failure.data.retriggerRequest === false);
+}
+
+/**
+ * Whether a failed pull means the server failed, not that its report is still missing:
+ * a pull the server asks to have retried, or one it was still computing when the wait's
+ * budget ran out, leaves the file unverified.
+ */
+function isPullFailure(failure: unknown): boolean {
+	return !(failure instanceof LspRequestTimeoutError) && !shouldRetriggerPull(failure);
+}
+
 function isProvisionalColdPublish(
 	client: LspClient,
+	uri: string,
 	published: PublishedDiagnostics,
 	expectedDocumentVersion: number | undefined,
 	now: number,
 ): boolean {
+	if (expectedDocumentVersion === undefined) return false;
+	// A document OMP closed and reopened can still receive publishes from before the
+	// close: the empty one that cleared it, or one versioned for its earlier life.
+	const reopenedAt = client.openFiles.get(uri)?.reopenedAt;
+	if (reopenedAt !== undefined && now - reopenedAt < DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS) {
+		if (published.diagnostics.length === 0) return true;
+		if (published.version !== null && published.version < expectedDocumentVersion) return true;
+	}
+	if (published.diagnostics.length > 0) return false;
 	return (
-		expectedDocumentVersion !== undefined &&
 		published.version === null &&
-		published.diagnostics.length === 0 &&
 		client.startedAt !== undefined &&
 		now - client.startedAt < DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS
 	);
 }
 
+/**
+ * Wait for a fresh diagnostics report for `uri`: a pull answer, or a publish that
+ * passes the freshness checks. Resolves `undefined` when none arrives within the
+ * budget, or within one settle window of the server answering the pull without a
+ * report, which callers MUST NOT read as a clean file; `[]` is a clean report.
+ */
 export async function waitForDiagnostics(
 	client: LspClient,
 	uri: string,
 	options: WaitForDiagnosticsOptions = {},
-): Promise<Diagnostic[]> {
-	const { timeoutMs = 3000, signal, minVersion, expectedDocumentVersion, settleMs = DIAGNOSTICS_SETTLE_MS } = options;
-	const deadline = Date.now() + timeoutMs;
-	let pullAttempted = false;
+): Promise<Diagnostic[] | undefined> {
+	const {
+		timeoutMs = 3000,
+		signal,
+		minVersion,
+		expectedDocumentVersion,
+		settleMs = DIAGNOSTICS_SETTLE_MS,
+		afterProjectLoad = false,
+	} = options;
+	let deadline = Date.now() + timeoutMs;
+	let awaitingProjectLoad = afterProjectLoad;
+	// When to send the next pull; `undefined` once one is in flight or answered.
+	let nextPullAt: number | undefined = 0;
 	let pullResultPromise: Promise<PullDiagnosticsOutcome> | undefined;
 	let pulled: Diagnostic[] | undefined;
 	let pullFailure: unknown;
@@ -270,28 +352,37 @@ export async function waitForDiagnostics(
 	let settledAt = 0;
 	while (Date.now() < deadline) {
 		throwIfAborted(signal);
-		if (!pullAttempted && supportsDocumentDiagnostics(client)) {
-			pullAttempted = true;
+		// Decided per turn: a server can register pulls after the wait began (Roslyn).
+		if (awaitingProjectLoad && supportsDocumentDiagnostics(client)) {
+			awaitingProjectLoad = false;
+			// Also waits out rust-analyzer's workspace load, which outlasts its `$/progress`.
+			await waitForProjectLoaded(client, signal);
+			throwIfAborted(signal);
+			deadline = Math.max(deadline, Date.now() + timeoutMs);
+		}
+		if (nextPullAt !== undefined && Date.now() >= nextPullAt && supportsDocumentDiagnostics(client)) {
+			nextPullAt = undefined;
 			pullResultPromise = requestDocumentDiagnostics(client, uri, signal, Math.max(1, deadline - Date.now()));
 		}
 
 		const versionOk = minVersion === undefined || client.diagnosticsVersion > minVersion;
 		const published = client.diagnostics.get(uri);
-		if (published && versionOk) {
+		if (published && versionOk && !supportsDocumentDiagnostics(client)) {
 			// Server honored our exact document version → authoritative, accept now.
 			if (expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
 				return published.diagnostics;
 			}
 			// An empty unversioned publish from a newly started server is often its
-			// pre-analysis placeholder. Keep waiting so the writethrough crosses its
-			// inline deadline and preserves this fetch for deferred delivery.
+			// pre-analysis placeholder, and a publish for a reopened document may
+			// predate its close. Keep waiting so the writethrough
+			// crosses its inline deadline and preserves this fetch for deferred delivery.
 			const now = Date.now();
 			if (published !== settledRef) {
 				settledRef = published;
 				settledAt = now;
 			} else if (
 				now - settledAt >= settleMs &&
-				!isProvisionalColdPublish(client, published, expectedDocumentVersion, now)
+				!isProvisionalColdPublish(client, uri, published, expectedDocumentVersion, now)
 			) {
 				return published.diagnostics;
 			}
@@ -309,17 +400,27 @@ export async function waitForDiagnostics(
 				pulled = pullResult.diagnostics;
 				break;
 			}
+			if (pullResult.declined) {
+				// A pull answered without a report is the server's answer for this document, not a
+				// failed attempt: give a publish already on its way one settle window, not the budget.
+				deadline = Math.min(deadline, Date.now() + settleMs);
+			}
 			if (pullResult.failed !== undefined) {
-				// A pull failure leaves the report unknown, but a dual-mode server
-				// may still publish fresh diagnostics within the remaining budget.
-				pullFailure = pullResult.failed;
+				if (shouldRetriggerPull(pullResult.failed)) {
+					// The server asked to be asked again.
+					nextPullAt = Date.now() + DIAGNOSTICS_POLL_MS;
+				} else if (isPullFailure(pullResult.failed)) {
+					// A pull failure leaves the report unknown, but a dual-mode server
+					// may still publish fresh diagnostics within the remaining budget.
+					pullFailure = pullResult.failed;
+				}
 			}
 		}
 	}
 
 	const versionOk = minVersion === undefined || client.diagnosticsVersion > minVersion;
 	const published = client.diagnostics.get(uri);
-	if (published && versionOk) {
+	if (published && versionOk && !supportsDocumentDiagnostics(client)) {
 		if (expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
 			return published.diagnostics;
 		}
@@ -327,7 +428,7 @@ export async function waitForDiagnostics(
 		if (
 			published === settledRef &&
 			now - settledAt >= settleMs &&
-			!isProvisionalColdPublish(client, published, expectedDocumentVersion, now)
+			!isProvisionalColdPublish(client, uri, published, expectedDocumentVersion, now)
 		) {
 			return published.diagnostics;
 		}
@@ -335,23 +436,111 @@ export async function waitForDiagnostics(
 	if (pullResultPromise) {
 		const outcome = await pullResultPromise;
 		if (outcome.diagnostics !== undefined) pulled = outcome.diagnostics;
-		else if (outcome.failed !== undefined) pullFailure = outcome.failed;
+		else if (outcome.failed !== undefined && isPullFailure(outcome.failed)) pullFailure = outcome.failed;
 	}
 	throwIfAborted(signal);
 	if (pulled === undefined) {
-		// A failed pull (timeout/RPC error) leaves the file's state unknown; never
-		// let it collapse into a clean empty result the caller renders as "OK".
-		if (pullFailure !== undefined) {
-			throw pullFailure instanceof Error ? pullFailure : new Error(String(pullFailure));
+		// The push fallback stands in for the pull only when a publish arrived after the
+		// caller's `minVersion`; an older push never vouches for the current document.
+		if (versionOk && supportsDocumentDiagnostics(client)) {
+			const publishedRecord = client.publishedDiagnostics.get(uri);
+			if (publishedRecord !== undefined) {
+				const now = Date.now();
+				const docVersion = client.openFiles.get(uri)?.version;
+				const isFresh =
+					publishedRecord.version === null
+						? !isProvisionalColdPublish(client, uri, publishedRecord, expectedDocumentVersion, now)
+						: docVersion === undefined || publishedRecord.version >= docVersion;
+				if (isFresh) {
+					const pulledRecord = client.pulledDiagnostics.get(uri);
+					const merged = pulledRecord
+						? mergeDiagnosticLists(pulledRecord.diagnostics, publishedRecord.diagnostics)
+						: publishedRecord.diagnostics;
+					client.diagnostics.set(uri, {
+						diagnostics: merged,
+						version: expectedDocumentVersion ?? docVersion ?? null,
+					});
+					client.diagnosticsVersion += 1;
+					return merged;
+				}
+			}
 		}
-		return [];
+		// A pull the server failed leaves the file's state unknown; never let it
+		// collapse into a clean empty result the caller renders as "OK".
+		if (pullFailure !== undefined) {
+			throw toError(pullFailure);
+		}
+		return undefined;
 	}
-	client.diagnostics.set(uri, {
+	client.pulledDiagnostics.set(uri, {
 		diagnostics: pulled,
 		version: expectedDocumentVersion ?? client.openFiles.get(uri)?.version ?? null,
 	});
+	const publishedRecord = client.publishedDiagnostics.get(uri);
+	const docVersion = client.openFiles.get(uri)?.version;
+	// Skip pushed records whose numeric version is older than the open document's version;
+	// unversioned flycheck publishes (version === null) still merge. Stale rustc warnings
+	// survive edits until the next flycheck publish (bounded by didSave), possibly with shifted ranges.
+	const canMergePush =
+		publishedRecord !== undefined &&
+		(publishedRecord.version === null || docVersion === undefined || publishedRecord.version >= docVersion);
+	const combined = canMergePush ? mergeDiagnosticLists(pulled, publishedRecord.diagnostics) : pulled;
+	client.diagnostics.set(uri, {
+		diagnostics: combined,
+		version: expectedDocumentVersion ?? client.openFiles.get(uri)?.version ?? null,
+	});
 	client.diagnosticsVersion += 1;
-	return pulled;
+	return combined;
+}
+
+interface WaitForRebuiltDiagnosticsOptions {
+	/** Document version `rebuildFile` left the server on. */
+	version: number;
+	/** `client.buildStatusSeq` read before the rebuild was sent. */
+	sinceSeq: number;
+	timeoutMs: number;
+	signal?: AbortSignal;
+}
+
+/**
+ * Wait for clangd's report on a document `rebuildFile` rebuilt. clangd can publish the
+ * rebuilt version twice: first against its cached headers, then again once it has rebuilt a
+ * header that changed on disk, so the first matching publish is not final. The report is
+ * final once the document's build status went busy and back to idle after the rebuild, and
+ * a request queued behind that build has answered. Resolves `undefined` when that does not
+ * happen within the budget, which callers MUST NOT read as a clean file.
+ */
+export async function waitForRebuiltDiagnostics(
+	client: LspClient,
+	uri: string,
+	options: WaitForRebuiltDiagnosticsOptions,
+): Promise<Diagnostic[] | undefined> {
+	const { version, sinceSeq, timeoutMs, signal } = options;
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		throwIfAborted(signal);
+		const status = client.buildStatus?.get(uri);
+		if (status && status.busySeq > sinceSeq && status.idleSeq > status.busySeq) break;
+		const left = deadline - Date.now();
+		if (left <= 0) return undefined;
+		await Bun.sleep(Math.min(BUILD_STATUS_POLL_MS, left));
+	}
+	// clangd turns idle once its header check ends, which can precede the publish of the AST
+	// built against rebuilt headers; a document request queues behind that build.
+	try {
+		await sendRequest(
+			client,
+			"textDocument/documentSymbol",
+			{ textDocument: { uri } },
+			signal,
+			Math.max(1, deadline - Date.now()),
+		);
+	} catch {
+		throwIfAborted(signal);
+		return undefined;
+	}
+	const published = client.diagnostics.get(uri);
+	return published?.version === version ? published.diagnostics : undefined;
 }
 
 export type ServerVersionMap = Map<string, number>;
@@ -462,10 +651,6 @@ export async function getDiagnosticsForFile(
 				// Default: use LSP
 				const client = await getOrCreateClient(serverConfig, cwd, undefined, boundSignal);
 				throwIfAborted(boundSignal);
-				if (isProjectAwareLspServer(serverConfig)) {
-					await waitForProjectLoaded(client, boundSignal);
-					throwIfAborted(boundSignal);
-				}
 				// Content already synced + didSave sent, wait for fresh diagnostics
 				const minVersion = minVersions?.get(serverName);
 				const expectedDocumentVersion = expectedDocumentVersions?.get(serverName);
@@ -474,36 +659,46 @@ export async function getDiagnosticsForFile(
 					signal: boundSignal,
 					minVersion,
 					expectedDocumentVersion,
+					afterProjectLoad: isProjectAwareLspServer(serverConfig),
 				});
 				return { serverName, serverConfig, diagnostics };
 			});
 		}),
 	);
 
+	const unreported: string[] = [];
 	for (const result of results) {
-		if (result.status === "fulfilled") {
-			serverNames.push(result.value.serverName);
-			allDiagnostics.push(
-				...filterOrphanProjectDiagnostics(
-					absolutePath,
-					result.value.serverName,
-					result.value.serverConfig,
-					result.value.diagnostics,
-				),
-			);
+		if (result.status !== "fulfilled") continue;
+		// A server that sent no fresh report leaves the file unverified: counting it
+		// as a server that answered would report the file as clean.
+		if (result.value.diagnostics === undefined) {
+			unreported.push(result.value.serverName);
+			continue;
 		}
+		serverNames.push(result.value.serverName);
+		allDiagnostics.push(
+			...filterOrphanProjectDiagnostics(
+				absolutePath,
+				result.value.serverName,
+				result.value.serverConfig,
+				result.value.diagnostics,
+			),
+		);
 	}
 
-	if (serverNames.length === 0) {
+	if (serverNames.length === 0 && unreported.length === 0) {
 		return undefined;
 	}
+	const server = [...serverNames, ...unreported].join(", ");
+	const unreportedField = unreported.length > 0 ? unreported : undefined;
 
 	if (allDiagnostics.length === 0) {
 		return {
-			server: serverNames.join(", "),
+			server,
 			messages: [],
-			summary: "OK",
+			summary: unreportedField ? unreportedSummary(unreportedField) : "OK",
 			errored: false,
+			unreported: unreportedField,
 		};
 	}
 
@@ -525,10 +720,11 @@ export async function getDiagnosticsForFile(
 	const hasErrors = uniqueDiagnostics.some(d => d.severity === 1);
 
 	return {
-		server: serverNames.join(", "),
+		server,
 		messages: limited,
-		summary,
+		summary: unreportedField ? unreportedSummary(unreportedField, summary) : summary,
 		errored: hasErrors,
+		unreported: unreportedField,
 	};
 }
 

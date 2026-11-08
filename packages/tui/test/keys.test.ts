@@ -7,6 +7,7 @@ import {
 	parseKey,
 	setKittyProtocolActive,
 } from "@oh-my-pi/pi-tui/keys";
+import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 
 describe("matchesKey", () => {
 	it("matches ctrl+letter sequences", () => {
@@ -202,27 +203,15 @@ describe("Raw 0x08 backspace disambiguation", () => {
 		"SSH_CLIENT",
 		"SSH_TTY",
 		"PI_TUI_RAW_BACKSPACE_IS_CTRL",
-		"TMUX",
-		"STY",
-		"ZELLIJ",
-		"HERDR_ENV",
-		"HERDR_PANE_ID",
-		"HERDR_TAB_ID",
-		"HERDR_WORKSPACE_ID",
-		"TERM",
-		"CMUX_WORKSPACE_ID",
-		"CMUX_SURFACE_ID",
-		"CMUX_REMOTE_TRANSPORT",
-		"WMUX",
-		"WMUX_SURFACE_ID",
-	] as const;
-	function withEnv(overrides: Partial<Record<(typeof envKeys)[number], string>>, run: () => void): void {
+		...TERMINAL_MULTIPLEXER_ENV_KEYS,
+	];
+	function withEnv(overrides: Record<string, string>, run: () => void): void {
 		const saved: Record<string, string | undefined> = {};
 		for (const key of envKeys) {
 			saved[key] = process.env[key];
 			delete process.env[key];
 		}
-		for (const key in overrides) process.env[key] = overrides[key as (typeof envKeys)[number]];
+		Object.assign(process.env, overrides);
 		try {
 			run();
 		} finally {
@@ -267,7 +256,7 @@ describe("Raw 0x08 backspace disambiguation", () => {
 		// tmux/screen/Zellij inherit WT_SESSION from the launching shell but emit
 		// raw 0x08 for plain Backspace themselves, so the automatic heuristic
 		// must stay off there (#6784 review).
-		const multiplexers: Array<Partial<Record<(typeof envKeys)[number], string>>> = [
+		const multiplexers: Array<Record<string, string>> = [
 			{ WT_SESSION: "1", TMUX: "/tmp/tmux-1000/default,1,0" },
 			{ WT_SESSION: "1", STY: "1234.pts-0" },
 			{ WT_SESSION: "1", ZELLIJ: "0" },

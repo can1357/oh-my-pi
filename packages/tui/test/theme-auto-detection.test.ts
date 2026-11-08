@@ -3,6 +3,7 @@ import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import * as nativesModule from "@oh-my-pi/pi-natives";
 import { type MacAppearanceObserver, MacOSAppearance } from "@oh-my-pi/pi-natives";
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui";
+import { getTerminalBackgroundColor, setTerminalBackgroundColor } from "@oh-my-pi/pi-tui/terminal-capabilities";
 
 const originalPlatform = process.platform;
 const originalColorfgbg = Bun.env.COLORFGBG;
@@ -125,6 +126,7 @@ async function flushThemeLoad(): Promise<void> {
 describe("theme auto-detection", () => {
 	beforeEach(async () => {
 		themeModule.stopThemeWatcher();
+		setTerminalBackgroundColor(undefined);
 		const darkTheme = await themeModule.getThemeByName("dark");
 		if (!darkTheme) {
 			throw new Error("Failed to load dark theme for tests");
@@ -135,7 +137,41 @@ describe("theme auto-detection", () => {
 
 	afterEach(() => {
 		themeModule.stopThemeWatcher();
+		setTerminalBackgroundColor(undefined);
 		vi.restoreAllMocks();
+	});
+
+	it("uses detected black or white only when OSC 11 has not reported actual RGB", () => {
+		using _globals = withThemeTestGlobals({ platform: "linux", colorfgbg: "0;15" });
+		expect(getTerminalBackgroundColor()).toBe(0xffffff);
+		setTerminalBackgroundColor(0x102030);
+		expect(getTerminalBackgroundColor()).toBe(0x102030);
+		Bun.env.COLORFGBG = "15;0";
+		expect(getTerminalBackgroundColor()).toBe(0x102030);
+		setTerminalBackgroundColor(undefined);
+		expect(getTerminalBackgroundColor()).toBe(0x000000);
+	});
+
+	it("shares terminal-reported appearance fallback rather than the active theme palette", () => {
+		using _globals = withThemeTestGlobals({ platform: "linux", colorfgbg: "15;0" });
+		themeModule.onTerminalAppearanceChange("light");
+		expect(getTerminalBackgroundColor()).toBe(0xffffff);
+	});
+
+	it("ignores cached OSC 11 RGB in favor of COLORFGBG on Darwin inside Zellij", () => {
+		using _globals = withThemeTestGlobals({ zellij: "1", colorfgbg: "15;0" });
+		const detectSpy = vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);
+		setTerminalBackgroundColor(0x102030);
+		themeModule.onTerminalAppearanceChange("light");
+
+		expect(themeModule.detectTerminalBackground()).toBe("dark");
+		expect(getTerminalBackgroundColor()).toBe(0x000000);
+
+		Bun.env.COLORFGBG = "0;15";
+		themeModule.onTerminalAppearanceChange("dark");
+		expect(themeModule.detectTerminalBackground()).toBe("light");
+		expect(getTerminalBackgroundColor()).toBe(0xffffff);
+		expect(detectSpy).not.toHaveBeenCalled();
 	});
 
 	it("prefers COLORFGBG before macOS fallback inside Zellij", async () => {
@@ -148,44 +184,101 @@ describe("theme auto-detection", () => {
 		expect(detectSpy).not.toHaveBeenCalled();
 	});
 
-	it("keeps honoring terminal-reported appearance outside fallback mode", async () => {
-		using _globals = withThemeTestGlobals();
+	it("keeps honoring terminal-reported appearance and RGB on direct Darwin", async () => {
+		using _globals = withThemeTestGlobals({ colorfgbg: "0;15" });
 		const detectSpy = vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);
 		const observerSpy = vi.spyOn(nativesModule.MacAppearanceObserver, "start");
 
+		setTerminalBackgroundColor(0x102030);
 		themeModule.onTerminalAppearanceChange("dark");
 		await themeModule.initTheme(true, undefined, undefined, "dark", "light");
 
 		expect(themeModule.getCurrentThemeName()).toBe("dark");
+		expect(getTerminalBackgroundColor()).toBe(0x102030);
 		expect(detectSpy).not.toHaveBeenCalled();
 		expect(observerSpy).not.toHaveBeenCalled();
 	});
 
-	it("updates auto theme from the native fallback observer in Zellij", async () => {
+	it("updates auto theme and fallback compositing RGB from the native observer despite cached RGB in Zellij", async () => {
 		using _globals = withThemeTestGlobals({ zellij: "1" });
 		const observer = mockMacAppearanceObserver();
 		vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);
+		setTerminalBackgroundColor(0x102030);
+		themeModule.onTerminalAppearanceChange("dark");
 
 		await themeModule.initTheme(true, undefined, undefined, "dark", "light");
 
 		expect(observer.start).toHaveBeenCalledTimes(1);
 		expect(themeModule.getCurrentThemeName()).toBe("light");
+		expect(getTerminalBackgroundColor()).toBe(0xffffff);
 
 		observer.emit(MacOSAppearance.Dark);
+		expect(getTerminalBackgroundColor()).toBe(0x000000);
 		await Bun.sleep(0);
 
 		expect(themeModule.getCurrentThemeName()).toBe("dark");
 		themeModule.stopThemeWatcher();
 		expect(observer.stop).toHaveBeenCalledTimes(1);
 	});
-	it("Zellij fallback stays macOS-only (Linux + Zellij = honor terminal)", async () => {
-		using _globals = withThemeTestGlobals({ platform: "linux", zellij: "1" });
+
+	it("publishes fallback RGB changes after a missing startup theme falls back to dark", async () => {
+		using _globals = withThemeTestGlobals({ zellij: "1" });
+		const observer = mockMacAppearanceObserver();
+		vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Dark);
+		const missingTheme = `missing-background-${crypto.randomUUID()}`;
+		await themeModule.initTheme(true, undefined, undefined, missingTheme, missingTheme);
+
+		const backgrounds: number[] = [];
+		const unsubscribe = themeModule.onTerminalBackgroundFallbackChange(() =>
+			backgrounds.push(getTerminalBackgroundColor()),
+		);
+		try {
+			expect(getTerminalBackgroundColor()).toBe(0x000000);
+			observer.emit(MacOSAppearance.Light);
+			expect(backgrounds).toEqual([0xffffff]);
+			expect(getTerminalBackgroundColor()).toBe(0xffffff);
+		} finally {
+			unsubscribe();
+		}
+	});
+
+	it("re-arms the macOS fallback observer after a runtime theme change", async () => {
+		using _globals = withThemeTestGlobals({ zellij: "1" });
+		const observer = mockMacAppearanceObserver();
+		vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);
+
+		await themeModule.initTheme(true, undefined, undefined, "dark", "light");
+		expect(observer.start).toHaveBeenCalledTimes(1);
+
+		const changes: string[] = [];
+		const unsubscribe = themeModule.onTerminalBackgroundFallbackChange(() => changes.push("changed"));
+		try {
+			// ExtensionUIContext.setTheme drives setTheme(name, true); its watcher
+			// restart calls stopThemeWatcher(), which tears down the SIGWINCH handler
+			// and the macOS appearance observer that feeds the SIXEL background
+			// fallback. It must restart that pair, or later host appearance changes
+			// never reach the fallback repaint subscription.
+			const result = await themeModule.setTheme("dark", true);
+			expect(result.success).toBe(true);
+			expect(observer.start).toHaveBeenCalledTimes(2);
+
+			observer.emit(MacOSAppearance.Dark);
+			expect(changes).toEqual(["changed"]);
+		} finally {
+			unsubscribe();
+		}
+	});
+
+	it("keeps trusting terminal-reported appearance and RGB on Linux inside Zellij", async () => {
+		using _globals = withThemeTestGlobals({ platform: "linux", zellij: "1", colorfgbg: "0;15" });
 		const detectSpy = vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);
+		setTerminalBackgroundColor(0x102030);
 
 		themeModule.onTerminalAppearanceChange("dark");
 		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
 
 		expect(themeModule.getCurrentThemeName()).toBe("dark");
+		expect(getTerminalBackgroundColor()).toBe(0x102030);
 		expect(detectSpy).not.toHaveBeenCalled();
 	});
 

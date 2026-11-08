@@ -213,7 +213,7 @@ async function expectNoActiveCheckpointError(session: AgentSession): Promise<voi
 }
 
 describe("AgentSession checkpoint rewind branch context", () => {
-	it("rebuilds active history through branch_summary before the post-rewind assistant turn", async () => {
+	it("rebuilds active history at the checkpoint before the post-rewind assistant turn", async () => {
 		const report = "findings: kept checkpoint; risks: stale signed thinking";
 		const { session, mock } = await createHarness([
 			{
@@ -241,22 +241,10 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(mock.calls.length).toBe(3);
 		const finalCall = mock.calls[2];
 		if (!finalCall) throw new Error("Expected final post-rewind provider call");
-		const summaryIndex = finalCall.context.messages.findIndex(message => {
-			if (message.role !== "user") return false;
-			const text = messageText(message);
-			const openIndex = text.indexOf("<summary>");
-			const closeIndex = text.indexOf("</summary>", openIndex + "<summary>".length);
-			return (
-				openIndex >= 0 &&
-				closeIndex > openIndex + "<summary>".length &&
-				text.slice(openIndex + "<summary>".length, closeIndex).trim().length > 0
-			);
-		});
 		const reportIndex = finalCall.context.messages.findIndex(
 			message => message.role === "developer" && messageText(message).includes(report),
 		);
-		expect(summaryIndex).toBeGreaterThan(-1);
-		expect(reportIndex).toBeGreaterThan(summaryIndex);
+		expect(reportIndex).toBeGreaterThan(-1);
 		const reportMessage = finalCall.context.messages[reportIndex];
 		if (!reportMessage) throw new Error("Expected rewind report context");
 		const reportText = messageText(reportMessage);
@@ -270,7 +258,7 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		).toBe(false);
 
 		const activeRoles = session.messages.map(message => message.role);
-		expect(activeRoles).toEqual(["user", "assistant", "toolResult", "branchSummary", "custom", "assistant"]);
+		expect(activeRoles).toEqual(["user", "assistant", "toolResult", "custom", "assistant"]);
 		expect(activeRoles).toEqual(session.sessionManager.buildSessionContext().messages.map(message => message.role));
 
 		const finalAssistant = expectLastAssistant(session.messages);
@@ -477,6 +465,53 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(reportMessages).toHaveLength(1);
 		expect(messageText(reportMessages[0]!)).toContain("Need explore again → new `checkpoint`.");
 		expect(messageText(reportMessages[0]!)).toContain(report);
+	});
+
+	it("carries each rewind report into model context exactly once across checkpoint cycles", async () => {
+		const reportA = "findings from checkpoint cycle A";
+		const reportB = "findings from checkpoint cycle B";
+		const { session, mock } = await createHarness([
+			{
+				content: [
+					{ type: "toolCall", id: "call_checkpoint_a", name: "checkpoint", arguments: { goal: "inspect A" } },
+				],
+				stopReason: "toolUse",
+			},
+			{
+				content: [{ type: "toolCall", id: "call_rewind_a", name: "rewind", arguments: { report: reportA } }],
+				stopReason: "toolUse",
+			},
+			{
+				content: [
+					{ type: "toolCall", id: "call_checkpoint_b", name: "checkpoint", arguments: { goal: "inspect B" } },
+				],
+				stopReason: "toolUse",
+			},
+			{
+				content: [{ type: "toolCall", id: "call_rewind_b", name: "rewind", arguments: { report: reportB } }],
+				stopReason: "toolUse",
+			},
+			{ content: ["DONE"], stopReason: "stop" },
+		]);
+
+		await session.prompt("investigate with two checkpoints");
+
+		const finalCall = mock.calls.at(-1);
+		if (!finalCall) throw new Error("Expected final post-rewind provider call");
+		const contextText = finalCall.context.messages.map(messageText).join("\n");
+		expect(contextText.split(reportA)).toHaveLength(2);
+		expect(contextText.split(reportB)).toHaveLength(2);
+		// Resume rebuilds the same context from the persisted session.
+		const resumedText = convertToLlm(session.sessionManager.buildSessionContext().messages)
+			.map(messageText)
+			.join("\n");
+		expect(resumedText.split(reportA)).toHaveLength(2);
+		expect(resumedText.split(reportB)).toHaveLength(2);
+		// The transcript still shows each rewind as a branch summary.
+		const transcriptSummaries = session.sessionManager
+			.buildSessionContext({ transcript: true })
+			.messages.flatMap(message => (message.role === "branchSummary" ? [message.summary] : []));
+		expect(transcriptSummaries).toEqual([reportA, reportB]);
 	});
 
 	it("ignores a completed cycle's rewind result after rebuilding context", async () => {

@@ -1,10 +1,12 @@
 import type { Database } from "bun:sqlite";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { type Env, polyphonicRecallEnabled } from "../config";
 import { closeQuietly, type DatabasePath, openDatabase } from "../db";
 import { backfillConsolidatedFacts, ensureVeracityConsolidator } from "./beam/consolidate";
 import type { BeamMemoryState, JsonValue, Metadata, RecallResult, RecallTierLabel } from "./beam/types";
-import { EpisodicGraph } from "./episodic-graph";
+import { EpisodicGraph, extractProperNouns } from "./episodic-graph";
+import { currentEmbeddingModel } from "./embeddings";
+import { STOP_WORDS } from "./synonyms";
 import { VeracityConsolidator } from "./veracity-consolidation";
 
 export type PolyphonicVoice = "hybrid" | "vector" | "graph" | "fact" | "temporal";
@@ -213,31 +215,26 @@ function cosineAgainstUnit(unit: Float32Array, raw: unknown): number | null {
 	return dot / Math.sqrt(normSq);
 }
 
-function extractEntities(text: string): string[] {
-	const seen = new Set<string>();
-	const matches = text.matchAll(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b/g);
-	for (const match of matches) {
-		const entity = match[0];
-		if (entity.length > 0) seen.add(entity);
-	}
-	return [...seen];
-}
-
 function queryTokens(query: string): string[] {
 	const tokens: string[] = [];
 	for (const match of query.toLowerCase().matchAll(/[\p{L}\p{N}_-]+/gu)) tokens.push(match[0]);
 	return tokens;
 }
 
-/** Subject candidates for the fact voice: every 3+ char query word plus adjacent word pairs. */
+/**
+ * Subject candidates for the fact voice: every 3+ char query word plus adjacent word pairs.
+ * Stopwords never anchor a subject on their own — the regex extractor stores sentence-initial
+ * words like `That` as subjects, so a bare `that` in the query would pull in unrelated memories.
+ */
 function factSubjectCandidates(query: string): string[] {
 	const tokens = queryTokens(query);
 	const seen = new Set<string>();
 	for (let i = 0; i < tokens.length; i++) {
 		const word = tokens[i] as string;
-		if (word.length >= 3) seen.add(word);
+		const isContent = !STOP_WORDS.has(word);
+		if (isContent && word.length >= 3) seen.add(word);
 		const next = tokens[i + 1];
-		if (next !== undefined) seen.add(`${word} ${next}`);
+		if (next !== undefined && (isContent || !STOP_WORDS.has(next))) seen.add(`${word} ${next}`);
 	}
 	return [...seen];
 }
@@ -346,6 +343,7 @@ export class PolyphonicRecallEngine {
 		const queryUnit = normalizeVector(queryEmbedding);
 		if (queryUnit === null) return [];
 		const now = new Date().toISOString();
+		const model = currentEmbeddingModel();
 		const working = this.#visibility("wm", options.channelId);
 		const episodic = this.#visibility("em", options.channelId);
 		let rows: EmbeddingRow[] = [];
@@ -355,19 +353,21 @@ export class PolyphonicRecallEngine {
 					SELECT me.memory_id, me.embedding_json, 'working' AS embedding_tier
 					FROM memory_embeddings me
 					JOIN working_memory wm ON wm.id = me.memory_id
-					WHERE wm.superseded_by IS NULL
+					WHERE me.model IS ?
+						AND wm.superseded_by IS NULL
 						AND (wm.valid_until IS NULL OR wm.valid_until > ?)
 						AND ${working.clause}
 					UNION ALL
 					SELECT me.memory_id, me.embedding_json, 'episodic' AS embedding_tier
 					FROM memory_embeddings me
 					JOIN episodic_memory em ON em.id = me.memory_id
-					WHERE em.superseded_by IS NULL
+					WHERE me.model IS ?
+						AND em.superseded_by IS NULL
 						AND (em.valid_until IS NULL OR em.valid_until > ?)
 						AND ${episodic.clause}
 					LIMIT 50000
 				`)
-				.all(now, ...working.params, now, ...episodic.params) as EmbeddingRow[];
+				.all(model, now, ...working.params, model, now, ...episodic.params) as EmbeddingRow[];
 		} catch {
 			return [];
 		}
@@ -414,7 +414,7 @@ export class PolyphonicRecallEngine {
 			const existing = seeds.get(hit.memoryId);
 			if (existing === undefined || hit.score > existing.score) seeds.set(hit.memoryId, hit);
 		};
-		for (const entity of extractEntities(query)) {
+		for (const entity of extractProperNouns(query)) {
 			for (const gist of this.graph.findGistsByParticipant(entity)) {
 				const memoryId = gist.id.startsWith("gist_") ? gist.id.slice(5) : gist.id;
 				addSeed({ memoryId, score: 0.6, voice: "graph", metadata: { entity, gist: gist.text } });
@@ -759,11 +759,15 @@ export function polyphonicRecall(
 	topK = 10,
 	options: PolyphonicRecallOptions = {},
 ): PolyphonicMemoryResult[] {
-	return getPolyphonicEngine(beam).recall(
-		query,
-		options.queryEmbedding ?? null,
-		topK,
-		options.contextBudget ?? 4000,
-		options,
-	);
+	// Voice fan-out, graph walk and fusion run synchronously on the caller's event loop;
+	// label them so a stall is attributable.
+	return withLoopPhase("mnemopi.recall", () => {
+		return getPolyphonicEngine(beam).recall(
+			query,
+			options.queryEmbedding ?? null,
+			topK,
+			options.contextBudget ?? 4000,
+			options,
+		);
+	});
 }

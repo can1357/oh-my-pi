@@ -347,6 +347,7 @@ interface PendingCollabUiRequest {
 	responsePending?: boolean;
 	/** Peers that were handed this dialog and can still answer it. */
 	recipients: Set<number>;
+	retainOnReconnect?: boolean;
 }
 
 /**
@@ -450,6 +451,8 @@ export class CollabHost {
 	/** The in-flight or finished `stop()`; concurrent callers share it. */
 	#stopDone: Promise<void> | undefined;
 	#stopped = false;
+	/** Bumped on every `message_start`; keys a streaming message's superseding updates. */
+	#messageSeq = 0;
 
 	constructor(ctx: InteractiveModeContext, options: CollabHostOptions = {}) {
 		this.#ctx = ctx;
@@ -540,13 +543,23 @@ export class CollabHost {
 	 * construction until teardown — including while the relay connection is
 	 * still being established — so a dialog raised by an extension's
 	 * `session_start` hook is retained for the first writer that joins.
+	 * Set `retainOnReconnect` only for a request backed by a local dialog whose
+	 * lifetime still owns the signal: authenticated writers can then resume it
+	 * after a transport reconnect. Stop and session replacement always discard it.
+	 * All current production callers opt in. The false default is a safeguard for
+	 * future guest-only callers without a local dialog to own cancellation: their
+	 * waits settle as unavailable when the relay recreates the room.
 	 *
 	 * Refused, and the room ended, once the active session is no longer the
 	 * one this room mirrors: `/resume` runs the new session's `session_switch`
 	 * hooks before the session-change callbacks fire, so a dialog raised there
 	 * must stay local rather than reach the previous session's guests.
 	 */
-	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
+	requestGuestUi(
+		request: CollabUiRequestDraft,
+		signal?: AbortSignal,
+		options?: { retainOnReconnect?: boolean },
+	): Promise<CollabGuestUiResult> | null {
 		if (!this.#guestTrafficAllowed() || signal?.aborted || this.#pendingUi.size >= MAX_PENDING_UI_REQUESTS)
 			return null;
 		const reqId = ++this.#uiReqSeq;
@@ -564,7 +577,13 @@ export class CollabHost {
 		const onAbort = (): void => settle({ kind: "unavailable" });
 		signal?.addEventListener("abort", onAbort, { once: true });
 		const recipients = new Set<number>();
-		this.#pendingUi.set(reqId, { request: fullRequest, promise, recipients, settle });
+		this.#pendingUi.set(reqId, {
+			request: fullRequest,
+			promise,
+			recipients,
+			settle,
+			retainOnReconnect: options?.retainOnReconnect,
+		});
 		// A registration only means something if somebody was asked, and it stops
 		// meaning anything once nobody who was asked can answer. The queue can
 		// refuse a targeted frame under pressure, and the caller awaits this with no
@@ -960,10 +979,16 @@ export class CollabHost {
 
 	/** Broadcast one session event, bounded and serialized exactly once. */
 	#broadcastEvent(event: AgentSessionEvent): void {
+		if (event.type === "message_start") this.#messageSeq++;
 		if (!this.#broadcastAllowed()) return;
 		const frame = encodeEventFrame(serializeReplicatedEvent(event).json);
-		if (event.type === "notice") this.#socket?.broadcastAdvisory(frame);
-		else this.#socket?.send(frame);
+		const socket = this.#socket;
+		if (event.type === "notice") socket?.broadcastAdvisory(frame);
+		// Each update carries the whole message so far, so a newer one supersedes
+		// any still queued for the same message (#16956). Keyed per message so the
+		// last update of one message is never superseded by the next one's.
+		else if (event.type === "message_update") socket?.sendLatest(`message_update:${this.#messageSeq}`, frame);
+		else socket?.send(frame);
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
@@ -1164,7 +1189,7 @@ export class CollabHost {
 		// Retained asks ride in the welcome batch rather than as one queue entry
 		// each: up to MAX_PENDING_UI_REQUESTS of them are replayed to a joining
 		// writer, which is past the per-peer share on its own.
-		const replayed = canWrite ? [...this.#pendingUi.values()] : [];
+		const replayed = canWrite ? [...this.#pendingUi.values()].filter(pending => !pending.responsePending) : [];
 		let replayBytes = 0;
 		for (const pending of replayed) {
 			replayBytes += Buffer.byteLength(JSON.stringify({ t: "ui-request", request: pending.request }));
@@ -1355,6 +1380,7 @@ export class CollabHost {
 		// the wait even if a session hook never finishes.
 		pending.responsePending = true;
 		const { reqId } = pending.request;
+		const peer = this.#peers.get(fromPeer);
 		try {
 			do {
 				await Promise.race([this.#ctx.session.waitForSessionTransition(), pending.promise]);
@@ -1365,7 +1391,7 @@ export class CollabHost {
 				this.#ctx.session.isSessionTransitioning
 			);
 			if (this.#pendingUi.get(reqId) !== pending || !this.#guestTrafficAllowed()) return;
-			if (this.#peers.get(fromPeer)?.canWrite) pending.settle({ kind: "answered", value });
+			if (peer?.canWrite && this.#peers.get(fromPeer) === peer) pending.settle({ kind: "answered", value });
 			else this.#sendWritablePeers({ t: "ui-request", request: pending.request });
 		} catch (error) {
 			logger.warn("Collab UI response could not await session transition", { error: String(error) });
@@ -1505,14 +1531,13 @@ export class CollabHost {
 		// Identities first: settle() fans `ui-request-end` out over #peers, and those
 		// ids belong to the room that just went away.
 		this.#peers.clear();
-		// The relay closed everyone who could answer, so an outstanding ask has no
-		// recipient. Leaving it pending hangs callers that await it without racing a
-		// local dialog, and #handleHello re-poses every pending request to the next
-		// writable guest — a different occupant of a different room. Matches the
-		// teardown path; settle() is guarded against a second resolve, so a teardown
-		// after this is a no-op.
-		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
-		this.#pendingUi.clear();
+		// A mirrored local dialog remains open through a transport reconnect. Keep
+		// its request for replay after a new hello verifies the writer again. Bare
+		// guest-only callers still settle rather than wait without a recipient.
+		// Explicit stop and session replacement continue to settle every request.
+		for (const pending of this.#pendingUi.values()) {
+			if (!pending.retainOnReconnect) pending.settle({ kind: "unavailable" });
+		}
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
 	}

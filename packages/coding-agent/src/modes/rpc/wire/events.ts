@@ -15,7 +15,13 @@ export const eventDefs = {
 	CacheWarmingOutcome: "'hit' | 'miss' | 'error' | 'aborted'",
 	NotifyType: "'info' | 'warning' | 'error'",
 
-	AgentStartEvent: { type: "'agent_start'" },
+	AgentStartEvent: {
+		type: "'agent_start'",
+		"resumedToolCallIds?": doc(
+			"string[]",
+			"Calls of an unpaired assistant tail a continued run executes before its first model request.",
+		),
+	},
 	AgentEndEvent: {
 		type: "'agent_end'",
 		messages: doc(
@@ -83,6 +89,23 @@ export const eventDefs = {
 		"errorMessage?": "string",
 		"skipped?": doc("boolean", "Compaction was skipped for a benign reason."),
 	},
+	ManualCompactionStartEvent: doc(
+		{
+			type: "'manual_compaction_start'",
+			"mode?": doc("string", "The `/compact <mode>` subcommand, when one was given."),
+		},
+		"A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted.",
+	),
+	ManualCompactionEndEvent: doc(
+		{
+			type: "'manual_compaction_end'",
+			"result?": doc("CompactionResult", "Present when the compaction committed."),
+			aborted: doc("boolean", "The compaction was cancelled (abort, or a `session_before_compact` hook)."),
+			"skipped?": doc("boolean", "There was nothing to compact; `errorMessage` says why."),
+			"errorMessage?": "string",
+		},
+		"Outcome of the compaction announced by the matching `manual_compaction_start`.",
+	),
 	AutoRetryStartEvent: {
 		type: "'auto_retry_start'",
 		attempt: "number.integer",
@@ -129,7 +152,10 @@ export const eventDefs = {
 	ConfigWarningsChangedEvent: { type: "'config_warnings_changed'" },
 	AdvisorCostChangedEvent: { type: "'advisor_cost_changed'" },
 	AdvisorYieldedEvent: { type: "'advisor_yielded'" },
-	TtsrTriggeredEvent: { type: "'ttsr_triggered'", rules: `${JSON_OBJECT}[]` },
+	TtsrTriggeredEvent: doc(
+		{ type: "'ttsr_triggered'", rules: `${JSON_OBJECT}[]` },
+		"Rule injection: a TTSR rule matched the stream and its text was injected. Each rule carries at least `name`, `path`, and `content`.",
+	),
 	TodoReminderEvent: {
 		type: "'todo_reminder'",
 		todos: "TodoItem[]",
@@ -153,7 +179,18 @@ export const eventDefs = {
 		"Goal mode changed, by a host `goal` command or the agent's `goal` tool.",
 	),
 	QueueUpdateEvent: doc(
-		{ type: "'queue_update'", steering: "string[]", followUp: "string[]" },
+		{
+			type: "'queue_update'",
+			steering: "string[]",
+			followUp: "string[]",
+			liveSteered: absentAs(
+				doc(
+					"number.integer",
+					"Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.",
+				),
+				0,
+			),
+		},
 		"Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.",
 	),
 
@@ -172,6 +209,8 @@ export const eventDefs = {
 			"ToolExecutionEndEvent",
 			"AutoCompactionStartEvent",
 			"AutoCompactionEndEvent",
+			"ManualCompactionStartEvent",
+			"ManualCompactionEndEvent",
 			"AutoRetryStartEvent",
 			"AutoRetryEndEvent",
 			"CacheWarmingStartEvent",

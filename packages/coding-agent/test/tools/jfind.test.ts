@@ -1,14 +1,21 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Judge, JudgmentRequest, JudgmentResult, NoulAnswer, Questions } from "@oh-my-pi/pi-ai";
 import { tokenUsage } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
-import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
-import { runCascade } from "@oh-my-pi/pi-coding-agent/tools/jfind/cascade";
+import { ChainJudge } from "@oh-my-pi/pi-coding-agent/judgment";
+import { FIND_TIMEOUT_MS, FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
+import {
+	type SpotlightClient,
+	SpotlightError,
+	type SpotlightRequest,
+} from "@oh-my-pi/pi-coding-agent/spotlight/client";
+import { type CascadeSpotlight, runCascade } from "@oh-my-pi/pi-coding-agent/tools/jfind/cascade";
 import { keywordsFromQuery } from "@oh-my-pi/pi-coding-agent/tools/jfind/keywords";
 import { grepIndex } from "@oh-my-pi/pi-coding-agent/tools/jfind/lexical";
 import {
@@ -20,8 +27,12 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/jfind/passages";
 import { readText, ReadTextError } from "@oh-my-pi/pi-coding-agent/tools/jfind/text";
 import { eligibleFile, renderTree, resolveSearchRoot } from "@oh-my-pi/pi-coding-agent/tools/jfind/tree";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { resolveSearchResultPath } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { rejectionOf } from "../helpers/rejection";
 
 /** Read-tier URL filesystem rooted at `cwd`, as the `find` tool builds one per call. */
 function urlFs(cwd: string): InternalUrlFilesystem {
@@ -215,10 +226,14 @@ function stateOf(request: JudgmentRequest): Record<string, unknown> {
 }
 
 describe("jfind cascade", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("verifies only sketched passages, reports merged ranges, and runs waves in parallel", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-"));
 		try {
-			// Enough files to need three filename batches (> 128 would be truncated).
+			// 72 files, so two 64-question filename batches (> 128 would be truncated).
 			for (let i = 0; i < 70; i++) {
 				await Bun.write(path.join(dir, "pkg", `filler${i}.ts`), `export const filler${i} = ${i};\n`);
 			}
@@ -264,7 +279,8 @@ describe("jfind cascade", () => {
 			expect(verifyRequests).toHaveLength(1);
 			expect(Object.keys(verifyRequests[0]!.questions)).toEqual(["p00"]);
 			expect(result.stats.judged).toBe(72);
-			expect(result.stats.errors).toBe(0);
+			expect(result.stats.failed).toBe(0);
+			expect(result.coverage).toBe("complete");
 			expect(result.stats.failures).toEqual([]);
 			expect(judge.peak).toBeGreaterThan(1);
 		} finally {
@@ -290,12 +306,85 @@ describe("jfind cascade", () => {
 				includeHidden: false,
 			});
 			expect(result.hits.map(hit => hit.rel)).toEqual(["a.ts"]);
-			expect(result.stats.errors).toBe(1);
+			expect(result.stats.failed).toBe(1);
+			expect(result.coverage).toBe("partial");
 			expect(result.stats.failures).toEqual(["sketches: sketch backend down"]);
 		} finally {
 			await removeWithRetries(dir);
 		}
 	});
+
+	it("reports unavailable, not an empty result, when every judge request fails", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-down-"));
+		try {
+			await Bun.write(path.join(dir, "auth.ts"), "export function refreshToken() { return 1; }\n");
+			vi.spyOn(ChainJudge.prototype, "judge").mockRejectedValue(new Error("402 billing account rejected"));
+			const tool = new FindTool({
+				cwd: dir,
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				settings: Settings.isolated({ "find.enabled": "on" }),
+				modelRegistry: {} as never,
+			});
+			const result = await tool.execute("x", { query: "token refresh", grep_keywords: ["refreshToken"] });
+			expect(result.isError).toBe(true);
+			expect(result.details?.coverage).toBe("unavailable");
+			expect(result.details?.stats.failed).toBe(result.details?.stats.requests);
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toStartWith('find unavailable for "token refresh"');
+			expect(text).not.toContain("no hits");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("keeps an empty result complete when the judge answered and nothing matched", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-empty-"));
+		try {
+			await Bun.write(path.join(dir, "a.ts"), "export const unrelated = 1;\n");
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query: "token parsing",
+				extraKeywords: [],
+				judge: new FakeJudge(() => 0.05),
+				includeHidden: false,
+			});
+			expect(result.hits).toEqual([]);
+			expect(result.coverage).toBe("complete");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("counts unusable answers apart from failed requests", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-garbled-"));
+		try {
+			await Bun.write(path.join(dir, "a.ts"), "export function parseToken() { return 1; }\n");
+			const judge = new FakeJudge(request => {
+				const state = stateOf(request);
+				if ("tree" in state) return Number.NaN;
+				if ("files" in state) return new Error("sketch backend down");
+				return 0.7;
+			});
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query: "token parsing",
+				extraKeywords: [],
+				judge,
+				includeHidden: false,
+			});
+			// One filename request answered with garbage, one sketch request threw, one verification succeeded.
+			expect(result.stats).toMatchObject({ requests: 3, failed: 1, unanswered: 1 });
+			expect(result.coverage).toBe("partial");
+			expect(result.hits.map(hit => hit.rel)).toEqual(["a.ts"]);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("resolves URL scopes in place and rejects unknown docs and range selectors before judging", async () => {
 		const filesystem = urlFs(process.cwd());
 		expect(await resolveSearchRoot(filesystem, "omp://", process.cwd())).toEqual({
@@ -397,6 +486,219 @@ describe("jfind cascade", () => {
 					signal: controller.signal,
 				}),
 			).rejects.toThrow("Operation aborted");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	/** `find`'s 20 s budget as a controller the test fires. */
+	function stubDeadline(): AbortController {
+		const deadline = new AbortController();
+		const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+		vi.spyOn(AbortSignal, "timeout").mockImplementation(ms =>
+			ms === FIND_TIMEOUT_MS ? deadline.signal : realTimeout(ms),
+		);
+		return deadline;
+	}
+
+	function findTool(cwd: string): FindTool {
+		return new FindTool({
+			cwd,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated({ "find.enabled": "on" }),
+			modelRegistry: new ModelRegistry(createInMemoryAuthStorage()),
+		});
+	}
+
+	it("returns the hits verified before find's deadline, marked partial", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-deadline-"));
+		try {
+			await Bun.write(path.join(dir, "a.ts"), "export function refreshToken() { return 1; }\n");
+			await Bun.write(path.join(dir, "b.ts"), "export function renewToken() { return 2; }\n");
+			await Bun.write(path.join(dir, "c.ts"), "export function rotateToken() { return 3; }\n");
+			const deadline = stubDeadline();
+			const answers = new FakeJudge(() => 0.9);
+			const aVerified = Promise.withResolvers<void>();
+			const late = Promise.withResolvers<void>();
+			const macrotask = () => {
+				const tick = Promise.withResolvers<void>();
+				setImmediate(tick.resolve);
+				return tick.promise;
+			};
+			vi.spyOn(ChainJudge.prototype, "judge").mockImplementation(async request => {
+				const file = stateOf(request).file;
+				if (file === "b.ts") {
+					// The deadline fires once a.ts's verification has settled, while b.ts's is in flight.
+					await aVerified.promise;
+					await macrotask();
+					deadline.abort();
+					throw new Error("request aborted");
+				}
+				// c.ts's judge ignores the abort and answers only after the call returned.
+				if (file === "c.ts") await late.promise;
+				const result = await answers.judge(request);
+				if (file === "a.ts") aVerified.resolve();
+				return result;
+			});
+			const result = await findTool(dir).execute("x", { query: "token refresh", grep_keywords: [] });
+			expect(result.details?.hits.map(hit => hit.rel)).toEqual(["a.ts"]);
+			expect(result.details?.coverage).toBe("partial");
+			expect(result.details?.timeout).toEqual({ verified: 1, passages: 3 });
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("1 of 3 passages verified");
+			expect(text).toContain("Narrow `path`");
+			const stats = structuredClone(result.details?.stats);
+			late.resolve();
+			await macrotask();
+			expect(result.details?.stats).toEqual(stats);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("names the interrupted phase when find's deadline fires before anything is verified", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-deadline-early-"));
+		try {
+			await Bun.write(path.join(dir, "a.ts"), "export function refreshToken() { return 1; }\n");
+			const deadline = stubDeadline();
+			vi.spyOn(ChainJudge.prototype, "judge").mockImplementation(async () => {
+				deadline.abort();
+				throw new Error("request aborted");
+			});
+			const error = await rejectionOf(findTool(dir).execute("x", { query: "token refresh", grep_keywords: [] }));
+			if (!(error instanceof ToolError)) throw error;
+			expect(error.message).toContain('at "filename ranking 0/1"');
+			expect(error.message).toContain("Narrow `path`");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("rejects a caller abort during verification even when the deadline fired too", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-deadline-caller-"));
+		try {
+			await Bun.write(path.join(dir, "a.ts"), "export function refreshToken() { return 1; }\n");
+			const caller = new AbortController();
+			const deadline = new AbortController();
+			const judge = new FakeJudge(request => {
+				if (!("file" in stateOf(request))) return 0.9;
+				caller.abort();
+				deadline.abort();
+				return new Error("request aborted");
+			});
+			const error = await rejectionOf(
+				runCascade({
+					root: { path: dir, type: "directory" },
+					filesystem: urlFs(dir),
+					query: "token refresh",
+					extraKeywords: [],
+					judge,
+					includeHidden: false,
+					signal: caller.signal,
+					deadline: deadline.signal,
+				}),
+			);
+			expect(error).toBeInstanceOf(ToolAbortError);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	/** 30 lexically identical files, so the two lexical picks are `filler0.ts` and `filler1.ts` (path order). */
+	async function fillerTree(prefix: string): Promise<string> {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+		for (let i = 0; i < 30; i++) {
+			await Bun.write(path.join(dir, `filler${i}.ts`), `export const filler${i} = ${i};\n`);
+		}
+		return dir;
+	}
+
+	/** Spotlight stand-in answering from `answer`, recording its requests. */
+	function fakeSpotlight(answer: (request: SpotlightRequest) => number[] | Error): {
+		spotlight: CascadeSpotlight;
+		requests: SpotlightRequest[];
+	} {
+		const requests: SpotlightRequest[] = [];
+		const client: Pick<SpotlightClient, "rank"> = {
+			async rank(request) {
+				requests.push(request);
+				const scores = answer(request);
+				if (scores instanceof Error) throw scores;
+				return { scores: { files: scores }, inputTokens: 900, costUsd: 0.000027, ms: 300, requestId: null };
+			},
+		};
+		return { spotlight: { client, thinking: "low" }, requests };
+	}
+
+	const fillerNumber = (rel: string) => Number(/filler(\d+)\.ts/.exec(rel)![1]);
+
+	it("reads the files Spotlight scores highest after the two lexical picks, without judge name batches", async () => {
+		const dir = await fillerTree("jfind-spotlight-");
+		try {
+			const { spotlight, requests } = fakeSpotlight(request => request.items.map(rel => fillerNumber(rel) / 100));
+			const judge = new FakeJudge(() => 0.1);
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query: "token parsing",
+				extraKeywords: [],
+				judge,
+				spotlight,
+				includeHidden: false,
+			});
+
+			expect(requests).toHaveLength(1);
+			expect(judge.requests.filter(request => "tree" in stateOf(request))).toHaveLength(0);
+			const expected = ["filler0.ts", "filler1.ts"];
+			for (let i = 29; expected.length < 20; i--) expected.push(`filler${i}.ts`);
+			expect(result.ranking.read).toEqual(expected);
+			expect(result.ranking).toMatchObject({
+				ranker: "spotlight",
+				candidates: 30,
+				judgeRequestsSaved: 1,
+				spotlight: { ms: 300, inputTokens: 900, costUsd: 0.000027 },
+			});
+			expect(result.ranking.spotlight?.error).toBeUndefined();
+			expect(result.stats.judged).toBe(30);
+			expect(result.stats.failures).toEqual([]);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("falls back to the judge's filename ranking when Spotlight fails, and reports the failure", async () => {
+		const dir = await fillerTree("jfind-spotlight-down-");
+		try {
+			const { spotlight } = fakeSpotlight(
+				() => new SpotlightError("spotlight HTTP 503: unavailable", 503, "unavailable"),
+			);
+			// The judge favors low-numbered files, the opposite of the Spotlight test above.
+			const judge = new FakeJudge((request, key) => {
+				const state = stateOf(request);
+				if (!("tree" in state)) return 0.1;
+				const name = new RegExp(`${key} (filler\\d+\\.ts)`).exec(String(state.tree))![1]!;
+				return 1 - fillerNumber(name) / 100;
+			});
+			const result = await runCascade({
+				root: { path: dir, type: "directory" },
+				filesystem: urlFs(dir),
+				query: "token parsing",
+				extraKeywords: [],
+				judge,
+				spotlight,
+				includeHidden: false,
+			});
+
+			expect(judge.requests.filter(request => "tree" in stateOf(request))).toHaveLength(1);
+			expect(result.ranking.read).toEqual(Array.from({ length: 20 }, (_, i) => `filler${i}.ts`));
+			expect(result.ranking.ranker).toBe("judge");
+			expect(result.ranking.judgeRequestsSaved).toBe(0);
+			expect(result.ranking.spotlight?.error).toBe("spotlight HTTP 503: unavailable");
+			expect(result.stats.failures).toEqual(["filenames: spotlight HTTP 503: unavailable"]);
+			// The judge took over, so the search itself is complete.
+			expect(result.coverage).toBe("complete");
 		} finally {
 			await removeWithRetries(dir);
 		}

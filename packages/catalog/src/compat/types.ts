@@ -351,7 +351,11 @@ export interface CompiledBehavior {
 	pricingPeers: CompiledPricingPeer[];
 	retryResetTimezones: CompiledRetryResetTimezone[];
 	retiredProviders: string[];
+	/** Hosts whose prefix caches benefit from a stable append-only conversation. */
+	appendOnlyContextProviders: string[];
 	referenceIsolatedProviders: string[];
+	/** Built-in model selector chains per agent role, keyed by role in declaration order. */
+	roleDefaults: Record<string, string[]>;
 }
 
 /**
@@ -394,8 +398,10 @@ export type CompiledAuthValidation =
 			kind: "models-endpoint";
 			label?: string;
 			url: string;
-			/** Env var holding an alternate base URL; `/models` is appended to it. */
+			/** Env var holding an alternate base URL; `baseUrlPath` is appended to it. */
 			baseUrlEnv?: string;
+			/** Path appended to the `baseUrlEnv` value (default `/models`), for bases that exclude the API version. */
+			baseUrlPath?: string;
 			/** Hook returning extra request headers (may throw a configuration error). */
 			headersHook?: string;
 			optional?: boolean;
@@ -566,6 +572,8 @@ export interface CompiledAuthProvider {
 	name: string;
 	env?: { vars: string[] } | { hook: string };
 	allowsMissingApiKey?: boolean;
+	/** Login-sourced API keys use the provider's subscription quota rather than metered billing. */
+	loginSubscription?: boolean;
 	/** Qualify credential and usage-report identity by org when an email may have multiple subscriptions. */
 	orgScopedIdentity?: boolean;
 	/** Environment variables carrying this provider's own OAuth bearer, excluding borrowed API-key aliases. */
@@ -625,6 +633,8 @@ export interface CompiledSeedModel {
 	baseUrl: string;
 	reasoning: boolean;
 	input: ("text" | "image")[];
+	/** Wire model id sent upstream when it differs from the row id (`request-model-id`). */
+	requestModelId?: string;
 	supportsTools?: boolean;
 	cost: TokenCost;
 	contextWindow: number | null;
@@ -666,6 +676,8 @@ export interface CompiledProvider {
 	dynamicModelsAuthoritative?: boolean;
 	/** Generator backfills never copy reasoning/input/limits from same-id rows on other hosts. */
 	skipCrossProviderReferenceFills?: boolean;
+	/** Runtime discovery keeps a bundled row's display name instead of the live one. */
+	keepBundledNames?: boolean;
 	/** Present only for providers enrolled in `generate-models.ts` discovery. */
 	discovery?: CompiledProviderDiscovery;
 	/** Non-chat model kinds mapped to their runtime transport APIs. */
@@ -743,6 +755,8 @@ export interface ResolvedAxes {
 export interface RequestPolicy {
 	completionsReasoningMode?: "none" | "effort" | "opt-in" | "forced-on";
 	completionsReasoningHistory?: "omit" | "preserved" | "interleaved";
+	/** Send `allow_missing_thinking` with the effort so tool-call turns may arrive without reasoning. */
+	completionsAllowMissingThinking?: boolean;
 	anthropicThinking?: "adaptive" | "adaptive-summarized" | "budget-interleaved" | "budget-effort";
 	/** Advertise `fine-grained-tool-streaming-2025-05-14` on requests that carry tools. */
 	anthropicToolStreamingBeta?: boolean;
@@ -750,12 +764,18 @@ export interface RequestPolicy {
 	openaiPlatformHeader?: string;
 	responsesCacheRetention?: boolean;
 	responsesVerbosity?: "low";
-	responsesServiceTier?: "priority";
+	responsesServiceTier?: "priority" | "ultrafast";
 	responsesParallelToolCalls?: boolean;
 	responsesSafetyIdentifier?: boolean;
 	/** Default `tool_choice` to `auto` when the request carries tools and the caller picks none. */
 	responsesToolChoiceAuto?: boolean;
 	googleThinking?: "level" | "level-medium";
+	/** Send no `temperature`, `topP` or `topK` in `generationConfig`. */
+	googleOmitSampling?: boolean;
+	/** Send `generationConfig.maxOutputTokens` as the model's output maximum. */
+	googlePinMaxOutputTokens?: boolean;
+	/** Replay the model's own turns as the native Gemini content it streamed. */
+	googleNativeReplay?: boolean;
 	/** The route locks its upstream for the session (`x-provider-routing-source: session_lock`). */
 	routingSessionLock?: boolean;
 }

@@ -93,6 +93,152 @@ function installFatalCapture(): {
 }
 
 describe("WorkerCore", () => {
+	it("keeps state and reports a late bridge rejection once without killing the worker", async () => {
+		const workerUrl = pathToFileURL(path.resolve(import.meta.dir, "../../src/eval/js/worker-core.ts")).href;
+		const browserPrelude = await Bun.file(path.resolve(import.meta.dir, "../../src/tools/browser/prelude.js")).text();
+		const probe = `
+import { WorkerCore } from ${JSON.stringify(workerUrl)};
+process.once("uncaughtException", () => process.exit(17));
+const messages = [];
+const listeners = new Set();
+const waiters = [];
+const transport = {
+	send(message) {
+		messages.push(message);
+		for (const waiter of [...waiters]) {
+			if (waiter.predicate(message)) {
+				waiters.splice(waiters.indexOf(waiter), 1);
+				waiter.resolve(message);
+			}
+		}
+	},
+	onMessage(handler) { listeners.add(handler); return () => listeners.delete(handler); },
+	close() {},
+};
+const send = message => { for (const listener of listeners) listener(message); };
+const waitFor = predicate => {
+	const { promise, resolve } = Promise.withResolvers();
+	waiters.push({ predicate, resolve });
+	return promise;
+};
+const snapshot = { cwd: process.cwd(), sessionId: "late-bridge",
+	preludes: [{ name: "browser", exports: ["browser"], source: ${JSON.stringify(browserPrelude)} }] };
+const core = new WorkerCore(transport, { mode: "isolated" });
+send({ type: "init", snapshot });
+const first = waitFor(message => message.type === "result" && message.runId === "first");
+send({ type: "run", runId: "first", filename: "[first].js", snapshot,
+	code: 'var kept = 42; var floating = Array.from({length: 13}, () => browser.tab("main").waitForDownload()); throw new Error("Tab is busy");' });
+await first;
+for (let index = 0; index < 257; index++) {
+	const runId = "evict-" + index;
+	const result = waitFor(message => message.type === "result" && message.runId === runId);
+	send({ type: "run", runId, filename: "[" + runId + "].js", snapshot, code: "" });
+	await result;
+}
+const calls = messages.filter(message => message.type === "tool-call");
+if (calls.length !== 13) throw new Error("expected thirteen pending browser calls");
+const rejectCall = async pending => {
+	const warning = waitFor(message => message.type === "log" && message.msg.includes("finished eval cell"));
+	send({ type: "tool-reply", id: pending.id, reply: { ok: false,
+		error: { name: "ToolError", message: "timed out" } } });
+	await warning;
+};
+for (const pending of calls.slice(0, 12)) await rejectCall(pending);
+const gateCall = waitFor(message => message.type === "tool-call" && message.runId === "second");
+const second = waitFor(message => message.type === "result" && message.runId === "second");
+send({ type: "run", runId: "second", filename: "[second].js", snapshot,
+	code: 'await __omp_call_tool__("read", {}); print(kept);' });
+const gate = await gateCall;
+await rejectCall(calls[12]);
+send({ type: "tool-reply", id: gate.id, reply: { ok: true, value: null } });
+await second;
+for (const runId of ["third", "fourth"]) {
+	const result = waitFor(message => message.type === "result" && message.runId === runId);
+	send({ type: "run", runId, filename: "[" + runId + "].js", snapshot, code: "print(kept);" });
+	await result;
+}
+core.dispose();
+console.log(JSON.stringify(messages));
+`;
+		await using dir = await fs.mkdtempDisposable(path.join(os.tmpdir(), "omp-late-rejection-"));
+		const probePath = path.join(dir.path, "probe.ts");
+		await Bun.write(probePath, probe);
+		const proc = Bun.spawn([process.execPath, probePath], {
+			cwd: process.cwd(),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		const messages: WorkerOutbound[] = JSON.parse(stdout);
+		expect(
+			messages.filter(message => message.type === "result" && !message.runId.startsWith("evict-")),
+		).toMatchObject([
+			{ runId: "first", ok: false },
+			{ runId: "second", ok: true },
+			{ runId: "third", ok: true },
+			{ runId: "fourth", ok: true },
+		]);
+		const text = messages.filter(message => message.type === "text");
+		const notices = text.filter(message => message.chunk.includes("at browser.call"));
+		expect(notices).toHaveLength(11);
+		expect(notices.filter(message => message.runId === "second")).toHaveLength(10);
+		expect(notices.filter(message => message.runId === "third")).toHaveLength(1);
+		expect(notices.every(message => message.chunk.includes("[first].js"))).toBe(true);
+		expect(text.filter(message => message.chunk.includes("more late rejections"))).toMatchObject([
+			{ runId: "second", chunk: expect.stringContaining("2 more late rejections") },
+		]);
+		expect(text.filter(message => message.chunk === "42\n")).toHaveLength(3);
+	});
+
+	it("delivers a completion handle id after its creating cell finishes", async () => {
+		const harness = createWorkerHarness();
+		const snapshot = { cwd: process.cwd(), sessionId: `late-handle-${crypto.randomUUID()}`, localRoots: {} };
+		await initializeWorker(harness, snapshot);
+		const toolCall = waitForMessage(
+			harness,
+			message => message.type === "tool-call" && message.name === "__completion__",
+		);
+		const firstResult = waitForMessage(
+			harness,
+			message => message.type === "result" && message.runId === "create-handle",
+		);
+		try {
+			harness.send({
+				type: "run",
+				runId: "create-handle",
+				code: 'var lateHandle = completion("hi"); print("started");',
+				filename: "[create-handle].js",
+				snapshot,
+			});
+			const call = await toolCall;
+			expect(await firstResult).toMatchObject({ type: "result", ok: true });
+			if (call.type !== "tool-call") throw new Error("expected completion bridge call");
+			harness.send({ type: "tool-reply", id: call.id, reply: { ok: true, value: { id: "late-1" } } });
+
+			const text = waitForMessage(harness, message => message.type === "text" && message.runId === "read-handle");
+			const result = waitForMessage(
+				harness,
+				message => message.type === "result" && message.runId === "read-handle",
+			);
+			harness.send({
+				type: "run",
+				runId: "read-handle",
+				code: "print((await globalThis.lateHandle).id);",
+				filename: "[read-handle].js",
+				snapshot,
+			});
+			expect(await text).toMatchObject({ chunk: "late-1\n" });
+			expect(await result).toMatchObject({ ok: true });
+		} finally {
+			harness.send({ type: "close" });
+		}
+	});
+
 	it("re-init while a same-realm run is live does not crash the process", async () => {
 		const first = createWorkerHarness();
 		const second = createWorkerHarness();
@@ -409,6 +555,98 @@ describe("WorkerCore", () => {
 			gate.resolve();
 			delete (globalThis as { __omp_worker_cwd_gate?: { entered(): void; wait: Promise<void> } })
 				.__omp_worker_cwd_gate;
+			harness.send({ type: "close" });
+			await fs.rm(dirA, { recursive: true, force: true });
+			await fs.rm(dirB, { recursive: true, force: true });
+		}
+	});
+
+	it("reads artifact:// from the artifacts dir of the run's snapshot, not the first one", async () => {
+		const dirA = await fs.mkdtemp(path.join(os.tmpdir(), "omp-artifacts-a-"));
+		const dirB = await fs.mkdtemp(path.join(os.tmpdir(), "omp-artifacts-b-"));
+		await Bun.write(path.join(dirA, "5.eval.log"), "from A");
+		await Bun.write(path.join(dirB, "5.eval.log"), "from B");
+		const harness = createWorkerHarness();
+		const probe = globalThis as { __omp_artifact_probe?: unknown };
+		const run = async (runId: string, artifacts: string) => {
+			const result = waitForMessage(harness, message => message.type === "result" && message.runId === runId);
+			harness.send({
+				type: "run",
+				runId,
+				code: `globalThis.__omp_artifact_probe = await read("artifact://5");`,
+				filename: `[${runId}].js`,
+				snapshot: { cwd: process.cwd(), sessionId: "artifact-roots", localRoots: { artifact: artifacts } },
+			});
+			expect(await result).toMatchObject({ type: "result", runId, ok: true });
+			return probe.__omp_artifact_probe;
+		};
+		try {
+			await initializeWorker(harness, {
+				cwd: process.cwd(),
+				sessionId: "artifact-roots",
+				localRoots: { artifact: dirA },
+			});
+			expect(await run("artifact-a", dirA)).toBe("from A");
+			expect(await run("artifact-b", dirB)).toBe("from B");
+		} finally {
+			delete probe.__omp_artifact_probe;
+			harness.send({ type: "close" });
+			await fs.rm(dirA, { recursive: true, force: true });
+			await fs.rm(dirB, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps a suspended run on its own artifact root while an overlapping run uses another", async () => {
+		const dirA = await fs.mkdtemp(path.join(os.tmpdir(), "omp-artifacts-a-"));
+		const dirB = await fs.mkdtemp(path.join(os.tmpdir(), "omp-artifacts-b-"));
+		await Bun.write(path.join(dirA, "5.eval.log"), "from A");
+		await Bun.write(path.join(dirB, "5.eval.log"), "from B");
+		const harness = createWorkerHarness();
+		const gate = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		const probe = globalThis as {
+			__omp_roots_gate?: { entered(): void; wait: Promise<void> };
+			__omp_roots_probe?: Record<string, unknown>;
+		};
+		probe.__omp_roots_gate = { entered: () => entered.resolve(), wait: gate.promise };
+		probe.__omp_roots_probe = {};
+		const snapshot = (artifacts: string): SessionSnapshot => ({
+			cwd: process.cwd(),
+			sessionId: "artifact-roots-overlap",
+			localRoots: { artifact: artifacts },
+		});
+		try {
+			await initializeWorker(harness, snapshot(dirA));
+			const holdResult = waitForMessage(harness, message => message.type === "result" && message.runId === "hold");
+			harness.send({
+				type: "run",
+				runId: "hold",
+				code: `globalThis.__omp_roots_gate.entered(); await globalThis.__omp_roots_gate.wait; globalThis.__omp_roots_probe.hold = await read("artifact://5");`,
+				filename: "[roots-hold].js",
+				snapshot: snapshot(dirA),
+			});
+			await entered.promise;
+
+			const overlapResult = waitForMessage(
+				harness,
+				message => message.type === "result" && message.runId === "overlap",
+			);
+			harness.send({
+				type: "run",
+				runId: "overlap",
+				code: `globalThis.__omp_roots_probe.overlap = await read("artifact://5");`,
+				filename: "[roots-overlap].js",
+				snapshot: snapshot(dirB),
+			});
+			expect(await overlapResult).toMatchObject({ type: "result", runId: "overlap", ok: true });
+
+			gate.resolve();
+			expect(await holdResult).toMatchObject({ type: "result", runId: "hold", ok: true });
+			expect(probe.__omp_roots_probe).toEqual({ overlap: "from B", hold: "from A" });
+		} finally {
+			gate.resolve();
+			delete probe.__omp_roots_gate;
+			delete probe.__omp_roots_probe;
 			harness.send({ type: "close" });
 			await fs.rm(dirA, { recursive: true, force: true });
 			await fs.rm(dirB, { recursive: true, force: true });

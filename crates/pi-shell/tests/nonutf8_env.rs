@@ -85,10 +85,9 @@ async fn session_start_skips_non_utf8_value_and_preserves_env() {
 	assert_eq!(output.trim_end(), path, "PATH must survive the corrupt-env copy");
 }
 
-/// The process builtins (`sleep`, `timeout`, `pgrep`, …) each build a plain
-/// brush shell that inherits the host environment via brush-core's
-/// `get_host_env_vars`, the second `std::env::vars()` sink. Must not panic
-/// either.
+/// The process builtins (`sleep`, `timeout`, `pgrep`, …) run as commands of
+/// the session, which was built from the host environment. Guards that one of
+/// them, `sleep`, still runs while a corrupt env var is present.
 #[tokio::test(flavor = "multi_thread")]
 async fn process_builtin_shell_build_survives_non_utf8_env() {
 	let _corrupt = ScopedEnvVar::set_corrupt("OMP_TEST_CORRUPT_8925", GHOSTTY_BIN_DIR_BYTES);

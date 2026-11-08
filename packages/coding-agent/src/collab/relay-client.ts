@@ -48,6 +48,15 @@ export const HOST_RECLAIM_BACKOFF_MAX_MS = 5_000;
  * a doomed socket.
  */
 export const HOST_RECLAIM_CONFIRM_MS = 1_000;
+/**
+ * How often an open relay socket is pinged. A network that drops without a
+ * reset (Wi-Fi lost, a laptop sleeping) leaves the socket reading as open, and
+ * nothing reveals the loss until the next write: an idle host would stay
+ * unreachable, its room long since retired by the relay, until someone typed.
+ */
+export const RELAY_PING_INTERVAL_MS = 15_000;
+/** A socket that has heard nothing, not even a pong, for this long is dropped and retried. */
+export const RELAY_SILENCE_LIMIT_MS = 40_000;
 const MAX_PENDING_SENDS = 256;
 /**
  * Ceiling on the charge the queue is carrying, levied once per entry when it is
@@ -138,6 +147,8 @@ interface PendingSend {
 	preparedEnvelope?: Uint8Array;
 	/** Next batch frame, pulled right after a write so an exhausted batch leaves the head at once. */
 	head?: CollabFrame | string;
+	/** Supersession key from {@link CollabSocket.sendLatest}; a newer send under it cancels this one while queued. */
+	key?: string;
 }
 
 export interface CollabSocketOptions {
@@ -191,6 +202,9 @@ export class CollabSocket {
 	/** A reclaim-time open not yet confirmed by the relay: not writable, not reported open. */
 	#provisional: WebSocket | undefined;
 	#confirmTimer: NodeJS.Timeout | undefined;
+	#heartbeatTimer: NodeJS.Timeout | undefined;
+	/** When the current socket last received anything, pongs included. */
+	#lastHeard = 0;
 	#sending = false;
 	#sendGeneration = 0;
 	#wakeSender: (() => void) | undefined;
@@ -331,6 +345,34 @@ export class CollabSocket {
 	/** @returns whether the frame was admitted to the queue; a caller awaiting a reply to it has to settle when it was not. */
 	send(frame: CollabFrame | EncodedFrame, targetPeer = 0): boolean {
 		if (this.#closed) return false;
+		return this.#sendOne(frame, targetPeer);
+	}
+
+	/**
+	 * Queue a broadcast frame that supersedes every frame still waiting under the
+	 * same `key`, for cumulative snapshots where only the newest matters — the
+	 * host's streaming `message_update` carries the whole message so far. Bounds
+	 * the queue by live keys instead of by emitted frames, so a stream that
+	 * outpaces the uplink does not hit the admission cap and end the room (#16956).
+	 *
+	 * The queue head is never superseded: it may already be sealing or waiting on
+	 * backpressure, and cancelling it on every newer frame would starve the guest
+	 * of updates for as long as the stream outpaces the drain. Survivors keep
+	 * emission order: the newest frame is appended, never moved ahead of frames
+	 * queued before it.
+	 *
+	 * @returns whether the newest frame was admitted. A superseded frame that was
+	 * not admitted leaves the previously queued one in place, so the guest still
+	 * receives an update either way.
+	 */
+	sendLatest(key: string, frame: CollabFrame | EncodedFrame): boolean {
+		const head = this.#pendingSends[0];
+		this.#discardWhere(pending => pending !== head && pending.key === key);
+		return this.#sendOne(frame, 0, key);
+	}
+
+	#sendOne(frame: CollabFrame | EncodedFrame, targetPeer: number, key?: string): boolean {
+		if (this.#closed) return false;
 		try {
 			const serialized = typeof frame === "string" ? frame : JSON.stringify(frame);
 			const prepared = Promise.withResolvers<void>();
@@ -343,6 +385,7 @@ export class CollabSocket {
 				false,
 				prepared.resolve,
 				true,
+				key,
 			);
 			if (!admitted) prepared.resolve();
 			return admitted;
@@ -480,6 +523,7 @@ export class CollabSocket {
 		advisory: boolean,
 		onPrepared?: () => void,
 		eager = false,
+		key?: string,
 	): boolean {
 		const refuse = (): false => {
 			onPrepared?.();
@@ -537,6 +581,7 @@ export class CollabSocket {
 			cancelled: false,
 			eager,
 			onPrepared,
+			key,
 		});
 		this.#pumpSends();
 		return true;
@@ -870,6 +915,7 @@ export class CollabSocket {
 		const hadActivity = this.#ws !== null || this.#retryTimer !== undefined;
 		this.#clearRetry();
 		this.#clearProvisional();
+		this.#stopHeartbeat();
 		const wasClosed = this.#closed;
 		this.#closed = true;
 		this.#retryMissingRoom = false;
@@ -906,6 +952,7 @@ export class CollabSocket {
 		this.#ws = ws;
 		ws.onopen = () => {
 			if (this.#ws !== ws) return;
+			this.#startHeartbeat(ws);
 			if (this.#rejoining && this.#hostReclaimUntil !== undefined && Date.now() < this.#hostReclaimUntil) {
 				// The relay may still refuse this socket as a duplicate host; commit only
 				// once it has had the chance to.
@@ -917,11 +964,15 @@ export class CollabSocket {
 		};
 		ws.onmessage = (event: MessageEvent) => {
 			if (this.#ws !== ws) return;
+			this.#lastHeard = Date.now();
 			// The relay only talks to a host it accepted; commit before dispatching so
 			// the room reset still precedes every frame.
 			if (this.#provisional === ws) this.#commitOpen(ws);
 			this.#handleMessage(ws, event.data);
 		};
+		ws.addEventListener("pong", () => {
+			if (this.#ws === ws) this.#lastHeard = Date.now();
+		});
 		ws.onerror = () => {
 			// The paired close event carries the actionable state; nothing to do here.
 		};
@@ -929,9 +980,53 @@ export class CollabSocket {
 			if (this.#ws !== ws) return;
 			this.#clearBackpressureDrain();
 			this.#clearProvisional();
+			this.#stopHeartbeat();
 			this.#ws = null;
 			this.#handleClose(event.code, event.reason);
 		};
+	}
+
+	/**
+	 * Pings `ws` every {@link RELAY_PING_INTERVAL_MS} and treats it as a transient
+	 * drop once it has heard nothing for {@link RELAY_SILENCE_LIMIT_MS}. No close
+	 * handshake can finish over a dead network, so the socket is terminated and the
+	 * drop handled here rather than waiting for a close event that may never come.
+	 */
+	#startHeartbeat(ws: WebSocket): void {
+		this.#stopHeartbeat();
+		this.#lastHeard = Date.now();
+		this.#heartbeatTimer = setInterval(() => {
+			if (this.#ws !== ws) {
+				this.#stopHeartbeat();
+				return;
+			}
+			if (Date.now() - this.#lastHeard <= RELAY_SILENCE_LIMIT_MS) {
+				try {
+					ws.ping();
+				} catch {
+					// A failed write surfaces as the socket's own close event.
+				}
+				return;
+			}
+			logger.debug("collab: relay connection went silent; reconnecting", { role: this.#opts.role });
+			this.#clearBackpressureDrain();
+			this.#clearProvisional();
+			this.#stopHeartbeat();
+			this.#ws = null;
+			try {
+				ws.terminate();
+			} catch {
+				// already gone
+			}
+			this.#handleClose(1006, "relay stopped responding");
+		}, RELAY_PING_INTERVAL_MS);
+	}
+
+	#stopHeartbeat(): void {
+		if (this.#heartbeatTimer !== undefined) {
+			clearInterval(this.#heartbeatTimer);
+			this.#heartbeatTimer = undefined;
+		}
 	}
 
 	#commitOpen(ws: WebSocket): void {
@@ -1100,6 +1195,7 @@ export class CollabSocket {
 		this.#closed = true;
 		this.#clearRetry();
 		this.#clearProvisional();
+		this.#stopHeartbeat();
 		this.#discardPendingSends();
 		const ws = this.#ws;
 		this.#ws = null;

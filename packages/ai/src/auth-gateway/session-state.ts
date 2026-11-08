@@ -86,6 +86,12 @@ export interface AuthGatewaySessionStateRequest {
 	 * resolves a sibling credential.
 	 */
 	account: string;
+	/**
+	 * Name of the scoped gateway client that sent the request, if any. A
+	 * client's conversations never share retained state with another client's,
+	 * or with unscoped traffic, even when their keys or histories match.
+	 */
+	client?: string;
 }
 
 interface RetainedSession {
@@ -161,6 +167,14 @@ function closeSessionState(
  * `sessionId` today.
  */
 function sessionKeys(request: AuthGatewaySessionStateRequest): string[] {
+	const keys = conversationKeys(request);
+	const { client } = request;
+	// Scoped keys get their own leading tag, so none can equal an unscoped one.
+	return client === undefined ? keys : keys.map(key => `s\u0000${client}\u0000${key}`);
+}
+
+/** {@link sessionKeys} of one conversation, before any client scope. */
+function conversationKeys(request: AuthGatewaySessionStateRequest): string[] {
 	const { model } = request;
 	const scope = `${model.provider}\u0000${model.id}`;
 	if (request.clientKey !== undefined) return [`c\u0000${scope}\u0000${request.clientKey}`];

@@ -1,8 +1,10 @@
 /**
- * Custom tool loader - loads TypeScript tool modules using native Bun import.
+ * Custom tool loader - loads TypeScript tool modules through the same loader
+ * as extensions, so `@oh-my-pi/*` imports resolve to the host's bundled copy
+ * (in the compiled binary there is no other copy to resolve).
  *
- * Dependencies are injected through CustomToolAPI so tools loaded from user
- * directories do not depend on workspace module resolution.
+ * Dependencies are also injected through CustomToolAPI so tools loaded from
+ * user directories need no workspace module resolution.
  */
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -15,8 +17,8 @@ import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
 import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
-// Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
-import * as PiCodingAgent from "../../index";
+import { loadLegacyPiModule } from "../plugins/legacy-pi-compat";
+import { getCodingAgentApi } from "../host-api";
 import * as typebox from "../legacy-typebox";
 import { createNoOpUIContext, resolvePath, withHostGuard } from "../utils";
 import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
@@ -50,7 +52,22 @@ function invalidToolError(path: string, index: number, source: ToolLoadError["so
 }
 
 /**
- * Load a single tool module using native Bun import.
+ * The factory a tool module exports. A CommonJS module's namespace `default` is
+ * its whole `module.exports`, so transpiled output (`exports.default = factory`
+ * with `__esModule`) carries the factory one level down.
+ */
+function customToolFactoryOf(module: { default?: unknown }): CustomToolFactory | undefined {
+	const candidate = module.default ?? module;
+	if (typeof candidate === "function") return candidate as CustomToolFactory;
+	if (typeof candidate === "object" && candidate !== null && "default" in candidate) {
+		const nested = candidate.default;
+		if (typeof nested === "function") return nested as CustomToolFactory;
+	}
+	return undefined;
+}
+
+/**
+ * Load a single tool module through the host-package loader.
  */
 async function loadTool(
 	toolPath: string,
@@ -75,8 +92,13 @@ async function loadTool(
 	}
 
 	try {
-		const module = await withHostGuard(() => import(resolvedPath));
-		const factory = (module.default ?? module) as CustomToolFactory;
+		// `reload: false`: a tool module and its helpers are evaluated once per
+		// process and shared, as with a native import; each session still calls
+		// the factory with its own API.
+		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath, { reload: false }))) as {
+			default?: unknown;
+		};
+		const factory = customToolFactoryOf(module);
 
 		if (typeof factory !== "function") {
 			return { tools: [], errors: [{ path: toolPath, error: "Tool must export a default function", source }] };
@@ -130,7 +152,6 @@ export class CustomToolLoader {
 	#seenNames: Set<string>;
 
 	constructor(
-		pi: typeof PiCodingAgent,
 		cwd: string,
 		builtInToolNames: string[],
 		pushPendingAction?: (action: {
@@ -150,7 +171,9 @@ export class CustomToolLoader {
 			typebox,
 			arktype: type,
 			zod,
-			pi,
+			get pi() {
+				return getCodingAgentApi();
+			},
 			pushPendingAction: action => {
 				if (!pushPendingAction) {
 					throw new Error("Pending action store unavailable for custom tools in this runtime.");
@@ -211,7 +234,7 @@ export async function loadCustomTools(
 		reject?(reason: string): Promise<AgentToolResult<unknown> | undefined>;
 	}) => void,
 ) {
-	const loader = new CustomToolLoader(PiCodingAgent, cwd, builtInToolNames, pushPendingAction);
+	const loader = new CustomToolLoader(cwd, builtInToolNames, pushPendingAction);
 	await loader.load(pathsWithSources);
 	return {
 		tools: loader.tools,

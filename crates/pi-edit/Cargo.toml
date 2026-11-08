@@ -17,7 +17,6 @@ pi-ast.workspace = true
 pi-diff.workspace = true
 pi-walker.workspace = true
 regex.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 xutf.workspace = true
@@ -26,3 +25,5 @@ xxhash-rust.workspace = true
 [dev-dependencies]
 tempfile = "3"
 tokio.workspace = true
+# Stands in for the on-demand Lua wasm grammar in the hashline parity fixtures.
+tree-sitter-lua.workspace = true

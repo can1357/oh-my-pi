@@ -1,24 +1,36 @@
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import { replaceTabs } from "../utils";
 import type { Theme } from "../theme/theme";
-import { Ellipsis, fileHyperlink, renderStatusLine, truncateToWidth } from "../render";
+import { Ellipsis, renderStatusLine, truncateToWidth } from "../render";
 import { framedToolCard } from "../render/tool-card";
 import {
 	appendParseErrorsBulletList,
 	formatCount,
 	formatErrorDetail,
-	formatMoreItems,
 	formatParseErrorsCountLabel,
 	PREVIEW_LIMITS,
 } from "../render/render-utils";
-import { classifyGroupedLines, groupLineIndicesByBlank } from "./grouped-file-output";
+import {
+	classifyGroupedLines,
+	createGroupedRowStyler,
+	fitGroupsToBudget,
+	formatScopedSubject,
+	groupedLinkTargets,
+	groupLineIndicesByBlank,
+	groupsByFile,
+	walkGroupedOutput,
+} from "./grouped-file-output";
 import type { OutputMeta } from "./output-meta";
-import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
+import type {
+	NativeToolHead,
+	NativeToolView,
+	RenderResultContextOptions,
+	RenderResultOptions,
+	ToolRenderer,
+} from "./renderer";
 import { code, compact, diff, node, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
 import { diffStatsMeta, displayPath, errorText, fileDiffSection, noteText, resultText, statsText } from "./native-view";
-import { getLanguageFromPath } from "../lang-from-path";
 
 /** Display metadata returned by ast-edit. */
 export interface AstEditToolDetails {
@@ -53,34 +65,24 @@ interface AstEditRenderArgs {
 const COLLAPSED_CHANGE_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
 
 /**
- * Flatten change groups (line indices, styled on demand) into frame body
- * lines. Groups are separated by a blank line and carry no tree guides — the
- * frame border is the container, so nested `├─ │` gutters would just be
- * noise. Collapsed mode always shows at least the first group, then fills up
- * to `budget` lines before summarizing the rest as `… N more changes`.
+ * Frame body lines for per-file change groups, styled on demand: files apart by
+ * a blank line and without tree guides (the frame border is the container), fit
+ * to `budget` with the rest summarized as `… N more files`.
  */
 function buildChangeBody(
 	groups: readonly (readonly number[])[],
 	styleLine: (index: number) => string,
-	expanded: boolean,
+	isFileRow: (index: number) => boolean,
 	budget: number,
 	theme: Theme,
 ): string[] {
+	const { shown, summary } = fitGroupsToBudget(groups, budget, { isUnit: isFileRow, unit: "file", gap: 1 });
 	const lines: string[] = [];
-	let shown = 0;
-	for (let i = 0; i < groups.length; i++) {
-		const group = groups[i]!;
-		const separator = shown > 0 ? 1 : 0;
-		const remainingAfter = groups.length - (i + 1);
-		const reserved = !expanded && remainingAfter > 0 ? 1 : 0;
-		// Always emit the first group; budget only gates subsequent ones.
-		if (!expanded && shown > 0 && lines.length + separator + group.length + reserved > budget) break;
-		if (separator) lines.push("");
+	for (const group of shown) {
+		if (lines.length > 0) lines.push("");
 		for (const index of group) lines.push(styleLine(index));
-		shown++;
 	}
-	const remaining = groups.length - shown;
-	if (!expanded && remaining > 0) lines.push(theme.fg("muted", formatMoreItems(remaining, "change")));
+	if (summary) lines.push(theme.fg("muted", summary));
 	return lines;
 }
 
@@ -92,9 +94,28 @@ function patternPreview(pat: string | undefined): string | undefined {
 	return collapsed || undefined;
 }
 
-const AST_EDIT_HEADER_RE = /^(#+)\s+(.*)$/;
+/** The single rewrite's pattern preview, or `N rewrites` for several. */
+function rewriteLabel(args: AstEditRenderArgs | undefined): string | undefined {
+	const rewriteCount = args?.ops?.length ?? 0;
+	if (rewriteCount === 1) return patternPreview(args?.ops?.[0]?.pat);
+	return rewriteCount > 1 ? `${rewriteCount} rewrites` : undefined;
+}
+
+/**
+ * Header subject: `pattern in scope` (or `N rewrites in scope`). The scope is the
+ * result's display scope, else the call's requested paths, as in Grep and AST Grep.
+ */
+function astEditSubject(
+	label: string | undefined,
+	args: AstEditRenderArgs | undefined,
+	theme: Theme,
+	scopePath?: string,
+): string | undefined {
+	const scope = scopePath || args?.paths?.join(", ") || undefined;
+	return formatScopedSubject(label, scope, theme);
+}
+
 const AST_EDIT_CHANGE_LINE_RE = /^([+\- ])\s*(\d+)(?:│|[:|])(.*)$/;
-const AST_EDIT_HEADER_SUFFIX_RE = /\s+\([^)]*\)\s*$/;
 
 /** One file's proposed rewrite: its unified diff text and change counts. */
 interface AstEditFileDiff {
@@ -111,29 +132,15 @@ interface AstEditFileDiff {
  */
 function parseAstEditChanges(lines: readonly string[]): AstEditFileDiff[] {
 	const files: AstEditFileDiff[] = [];
-	const dirs: string[] = [];
 	let file: AstEditFileDiff | undefined;
-	const flush = () => {
-		if (file && file.lines.length > 0) files.push(file);
-		file = undefined;
-	};
-	for (const line of lines) {
-		const header = AST_EDIT_HEADER_RE.exec(line);
-		if (header) {
-			flush();
-			const depth = header[1]!.length;
-			const rest = header[2]!.trimEnd().replace(AST_EDIT_HEADER_SUFFIX_RE, "");
-			dirs.length = depth - 1;
-			if (rest.endsWith("/")) {
-				dirs[depth - 1] = rest.slice(0, -1);
-				continue;
-			}
-			const prefix = dirs.filter(Boolean).join("/");
-			file = { path: prefix ? `${prefix}/${rest}` : rest, lines: [], added: 0, removed: 0 };
+	for (const event of walkGroupedOutput(lines)) {
+		if (event.kind !== "line") {
+			if (file && file.lines.length > 0) files.push(file);
+			file = event.kind === "file" ? { path: event.path, lines: [], added: 0, removed: 0 } : undefined;
 			continue;
 		}
-		if (!file || line.trim().length === 0) continue;
-		const change = AST_EDIT_CHANGE_LINE_RE.exec(line);
+		if (!file) continue;
+		const change = AST_EDIT_CHANGE_LINE_RE.exec(event.text);
 		if (!change) continue;
 		const lineNumber = Number.parseInt(change[2]!, 10);
 		if (file.lastOld === undefined || lineNumber > file.lastOld + 1 || lineNumber < file.lastOld) {
@@ -144,23 +151,20 @@ function parseAstEditChanges(lines: readonly string[]): AstEditFileDiff[] {
 		else if (change[1] === "-") file.removed++;
 		file.lines.push(`${change[1]}${change[3]}`);
 	}
-	flush();
+	if (file && file.lines.length > 0) files.push(file);
 	return files;
 }
 
-/** A file's proposed rewrite as a `diff`: highlighted by the path's language, no path header. */
+/** A file's proposed rewrite as a `diff`: Tern highlights it by the file's grammar and draws no path header. */
 function astEditDiff(file: AstEditFileDiff): NativeNode {
-	return diff(file.lines.join("\n"), { lang: getLanguageFromPath(file.path) });
+	return diff(file.lines.join("\n"), { path: file.path });
 }
 
 /** The single rewrite pattern (`target:"pattern"`), or the rewrite count, for the head. */
 function astEditPatternHead(args: AstEditRenderArgs | undefined): Pick<NativeToolHead, "target" | "targetKind"> {
-	const rewriteCount = args?.ops?.length ?? 0;
-	if (rewriteCount === 1) {
-		const pattern = patternPreview(args?.ops?.[0]?.pat);
-		return pattern ? { target: pattern, targetKind: "pattern" } : {};
-	}
-	return rewriteCount > 1 ? { target: `${rewriteCount} rewrites`, targetKind: "text" } : {};
+	const label = rewriteLabel(args);
+	if (!label) return {};
+	return { target: label, targetKind: args?.ops?.length === 1 ? "pattern" : "text" };
 }
 
 /** Scope facts for the final quiet line: `in src · searched 12 files · limit reached; narrow path`. */
@@ -176,29 +180,24 @@ function astEditScopeStats(details: AstEditToolDetails | undefined): NativeNode 
 export const astEditToolRenderer = {
 	inline: true,
 	renderCall(args: AstEditRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
-		const meta: string[] = [];
-		if (args.paths?.length) meta.push(`in ${args.paths.join(", ")}`);
-		const rewriteCount = args.ops?.length ?? 0;
-		if (rewriteCount > 1) meta.push(`${rewriteCount} rewrites`);
-
-		const description =
-			rewriteCount === 1 ? patternPreview(args.ops?.[0]?.pat) : rewriteCount ? `${rewriteCount} rewrites` : "?";
-		const header = renderStatusLine({ icon: "pending", title: "AST Edit", description, meta }, uiTheme);
+		const description = astEditSubject(rewriteLabel(args) ?? "?", args, uiTheme);
+		const header = renderStatusLine({ icon: "pending", title: "AST Edit", description }, uiTheme);
 		// Pending call has no body yet — a lone status line is sleeker than an empty frame.
 		return new Text(header, 0, 0);
 	},
 
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: AstEditToolDetails; isError?: boolean },
-		options: RenderResultOptions,
+		options: RenderResultContextOptions,
 		uiTheme: Theme,
 		args?: AstEditRenderArgs,
 	): Component {
 		const details = result.details;
+		const description = astEditSubject(rewriteLabel(args), args, uiTheme, details?.scopePath);
 
 		if (result.isError) {
 			const errorText = result.content?.find(c => c.type === "text")?.text || "Unknown error";
-			const header = renderStatusLine({ icon: "error", title: "AST Edit" }, uiTheme);
+			const header = renderStatusLine({ icon: "error", title: "AST Edit", description }, uiTheme);
 			return framedToolCard(uiTheme, () => ({
 				header,
 				sections: [{ content: formatErrorDetail(errorText, uiTheme).split("\n") }],
@@ -213,74 +212,63 @@ export const astEditToolRenderer = {
 		const limitReached = details?.limitReached ?? false;
 
 		if (totalReplacements === 0) {
-			const rewriteCount = args?.ops?.length ?? 0;
-			const description = rewriteCount === 1 ? patternPreview(args?.ops?.[0]?.pat) : undefined;
 			const meta = ["0 replacements"];
-			if (details?.scopePath) meta.push(`in ${details.scopePath}`);
 			if (filesSearched > 0) meta.push(`searched ${filesSearched}`);
-			const header = renderStatusLine({ icon: "warning", title: "AST Edit", description, meta }, uiTheme);
-			// The "0 replacements" count already rides on the status line; only parse
-			// errors are worth a body, so frame solely when there are some.
+			// Only parse errors are worth a body, so frame solely when there are some; a
+			// framed card carries the counts in its bottom border, as a successful one does.
 			const bodyLines: string[] = [];
 			appendParseErrorsBulletList(bodyLines, details?.parseErrors, uiTheme, details?.parseErrorsTotal);
-			if (bodyLines.length === 0) return new Text(header, 0, 0);
+			if (bodyLines.length === 0) {
+				return new Text(renderStatusLine({ icon: "warning", title: "AST Edit", description, meta }, uiTheme), 0, 0);
+			}
+			const header = renderStatusLine({ icon: "warning", title: "AST Edit", description }, uiTheme);
+			const footerMeta = uiTheme.fg("dim", meta.join(uiTheme.sep.dot));
 			return framedToolCard(uiTheme, () => ({
 				header,
+				footerMeta,
 				sections: [{ content: bodyLines }],
 				phase: "warning",
 				borderColor: "borderMuted",
 			}));
 		}
 
-		const summaryParts = [formatCount("replacement", totalReplacements), formatCount("file", filesTouched)];
-		const meta = [...summaryParts];
-		if (details?.scopePath) meta.push(`in ${details.scopePath}`);
-		meta.push(`searched ${filesSearched}`);
-		if (limitReached) meta.push(uiTheme.fg("warning", "limit reached"));
-		const rewriteCount = args?.ops?.length ?? 0;
-		const description = rewriteCount === 1 ? patternPreview(args?.ops?.[0]?.pat) : undefined;
+		const summaryParts = [
+			formatCount("replacement", totalReplacements),
+			formatCount("file", filesTouched),
+			`searched ${filesSearched}`,
+		];
 
 		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";
 		const allLines = textContent.split("\n");
-		// Resolve hyperlinks over the whole output so nested directory headers
-		// reconstruct across the blank-line groups the tree list collapses by.
+		// Classify the whole output so nested directory headers resolve across blank-line groups.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
-		// Style lazily: collapsed bodies show only the first groups.
-		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
-		const styleLine = (index: number): string => {
-			const cached = styledLines[index];
-			if (cached !== undefined) return cached;
-			const ctx = contexts[index]!;
-			// Swap the inner code-frame gutter `│` for a space so it does not nest a
-			// second vertical bar inside the frame border.
-			const display = replaceTabs(allLines[index]!.replace("│", " "));
-			let styled: string;
-			if (ctx.kind === "dir") {
-				const accent = uiTheme.fg("accent", display);
-				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, accent) : accent;
-			} else if (ctx.kind === "file") {
-				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", display);
-				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, tinted) : tinted;
-			} else if (display.startsWith("+")) {
-				styled = uiTheme.fg("toolDiffAdded", display);
-			} else if (display.startsWith("-")) {
-				styled = uiTheme.fg("toolDiffRemoved", display);
-			} else {
-				styled = uiTheme.fg("toolOutput", display);
-			}
-			styledLines[index] = styled;
-			return styled;
-		};
-		const changeGroups = groupLineIndicesByBlank(allLines).filter(indices => {
+		const styleLine = createGroupedRowStyler(allLines, contexts, uiTheme, {
+			linkTarget: groupedLinkTargets(contexts, textContent, details, options.renderContext?.rawDetails),
+			styleBody: index => {
+				// Swap the code-frame gutter `│` for a space so it does not nest a
+				// second vertical bar inside the frame border.
+				const line = allLines[index]!.replace("│", " ");
+				const color = line.startsWith("+")
+					? "toolDiffAdded"
+					: line.startsWith("-")
+						? "toolDiffRemoved"
+						: "toolOutput";
+				return uiTheme.fg(color, line);
+			},
+		});
+		const changeGroups = groupsByFile(groupLineIndicesByBlank(allLines), contexts).filter(indices => {
 			const first = allLines[indices[0]!]!;
 			return !first.startsWith("Safety cap reached") && !first.startsWith("Parse issues:");
 		});
 
-		const badge = { label: "proposed", color: "warning" as const };
 		const header = renderStatusLine(
-			{ icon: limitReached ? "warning" : "success", title: "AST Edit", description, badge, meta },
+			{ icon: limitReached ? "warning" : "success", title: "AST Edit", description },
 			uiTheme,
 		);
+		// An unapplied result is a staged proposal; the bottom rail leads with that state.
+		const footerParts = summaryParts.map(part => uiTheme.fg("dim", part));
+		if (!details?.applied) footerParts.unshift(uiTheme.fg("warning", "proposed"));
+		const footerMeta = footerParts.join(uiTheme.fg("dim", uiTheme.sep.dot));
 
 		const extraLines: string[] = [];
 		if (limitReached) {
@@ -298,7 +286,13 @@ export const astEditToolRenderer = {
 			({ contentWidth }) => {
 				const expanded = Boolean(options.expanded);
 				if (bodyMemo === undefined || bodyMemo.expanded !== expanded || bodyMemo.width !== contentWidth) {
-					const changeLines = buildChangeBody(changeGroups, styleLine, expanded, COLLAPSED_CHANGE_LIMIT, uiTheme);
+					const changeLines = buildChangeBody(
+						changeGroups,
+						styleLine,
+						index => contexts[index]!.kind === "file",
+						expanded ? Number.POSITIVE_INFINITY : COLLAPSED_CHANGE_LIMIT,
+						uiTheme,
+					);
 					const lines = [...changeLines, ...extraLines].map(l => truncateToWidth(l, contentWidth, Ellipsis.Omit));
 					while (lines.length > 0 && lines[0].trim() === "") lines.shift();
 					bodyMemo = { expanded, width: contentWidth, lines };
@@ -306,6 +300,7 @@ export const astEditToolRenderer = {
 				const bodyLines = bodyMemo.lines;
 				return {
 					header,
+					footerMeta,
 					sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
 					phase: options.isPartial ? "partial" : "success",
 					borderColor: "borderMuted",
@@ -332,8 +327,10 @@ export const astEditToolRenderer = {
 		const details = result.details;
 		const patternHead = astEditPatternHead(args);
 		if (result.isError) {
+			// A failed edit keeps the scope it ran in, as the terminal card does.
+			const scope = details?.scopePath || args?.paths?.map(displayPath).join(", ");
 			return {
-				tool: { title: "AST Edit", ...patternHead },
+				tool: { title: "AST Edit", ...patternHead, meta: scope ? [`in ${scope}`] : undefined },
 				tone: "error",
 				body: [errorText(resultText(result) || "Unknown error")],
 			};

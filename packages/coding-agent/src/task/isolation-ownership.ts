@@ -35,10 +35,11 @@ export interface IsolationOwner {
  * validate so an exact string compare rejects a recycled pid.
  *
  * Linux reads `/proc/<pid>/stat` field 22 (start time in clock ticks since
- * boot); other Unixes shell out to `ps -o lstart`. Platforms that report
- * neither (e.g. Windows) yield `null`, degrading to a pid-only liveness check.
+ * boot); other Unixes shell out to `ps -o lstart`. Windows reports neither (a
+ * `ps` found there knows other pids), yielding `null`: a pid-only liveness check.
  */
 async function processStartToken(pid: number): Promise<string | null> {
+	if (process.platform === "win32") return null;
 	if (process.platform === "linux") {
 		let stat: string;
 		try {
@@ -60,6 +61,9 @@ async function processStartToken(pid: number): Promise<string | null> {
 	return started.length > 0 ? started : null;
 }
 
+/** This process's start token, read once: every isolated run it starts records the same one. */
+let ownStartToken: Promise<string | null> | undefined;
+
 /**
  * Record the current process as owner of the sandbox rooted at `baseDir`.
  *
@@ -67,7 +71,8 @@ async function processStartToken(pid: number): Promise<string | null> {
  * `omp worktree clear` never sees an owner-less sandbox mid-creation.
  */
 export async function writeIsolationOwner(baseDir: string, id: string): Promise<void> {
-	const startToken = await processStartToken(process.pid);
+	ownStartToken ??= processStartToken(process.pid);
+	const startToken = await ownStartToken;
 	const owner: IsolationOwner = { pid: process.pid, id, ...(startToken ? { startToken } : {}) };
 	await Bun.write(path.join(baseDir, ISOLATION_OWNER_FILE), JSON.stringify(owner));
 }

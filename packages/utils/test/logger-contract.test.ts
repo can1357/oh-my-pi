@@ -27,7 +27,7 @@ afterEach(async () => {
 
 async function runScenario(
 	scenario: string,
-	options: { logLevel?: string; probe?: string; exitCode?: number } = {},
+	options: { logLevel?: string; probe?: string; exitCode?: number; testRuntime?: boolean } = {},
 ): Promise<ScenarioResult> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-logger-contract-"));
 	roots.push(root);
@@ -35,7 +35,8 @@ async function runScenario(
 	const secondaryDir = path.join(root, "secondary");
 	const resultPath = path.join(root, "result.json");
 	const stdoutPath = path.join(root, "stdout.log");
-	await Promise.all([fs.mkdir(primaryDir), fs.mkdir(secondaryDir)]);
+	const tmpDir = path.join(root, "tmp");
+	await Promise.all([fs.mkdir(primaryDir), fs.mkdir(secondaryDir), fs.mkdir(tmpDir)]);
 	const proc = Bun.spawn(
 		[
 			process.execPath,
@@ -64,6 +65,11 @@ async function runScenario(
 				// Empty XDG_CACHE_HOME makes Bun's transpiler cache path relative,
 				// spewing bun/@t@/*.pile into the repo root (the child's cwd) — disable it.
 				BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+				// os.tmpdir() reads TMPDIR on POSIX and TMP/TEMP on Windows.
+				TMPDIR: tmpDir,
+				TMP: tmpDir,
+				TEMP: tmpDir,
+				PI_TEST_RUNTIME: options.testRuntime ? "1" : "",
 				OMP_LOGGER_TEST_NOW: fixedNow,
 				OMP_LOG_LEVEL: options.logLevel ?? "",
 				TZ: "Etc/GMT+5",
@@ -181,6 +187,26 @@ describe("central logger byte contract", () => {
 		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
 	});
 
+	test("stamps each record with its own async context, read live, which call fields override", async () => {
+		const result = await runScenario("context");
+		expect(result.stderr).toBe("");
+		const expected = [
+			expectedLine(result.pid, "info", "parent-start", { sessionId: "parent" }),
+			expectedLine(result.pid, "info", "outside"),
+			expectedLine(result.pid, "info", "parent-after-timer", { sessionId: "parent-rekeyed" }),
+			expectedLine(result.pid, "info", "explicit-wins", { sessionId: "explicit" }),
+			expectedLine(result.pid, "info", "shared-service"),
+			expectedLine(result.pid, "info", "child-nested", { sessionId: "grandchild", ordinal: 1 }),
+			expectedLine(result.pid, "info", "reserved-kept", { sessionId: "reserved" }),
+			expectedLine(result.pid, "info", "to-sink", { sessionId: "sink", turn: 2 }),
+			expectedLine(result.pid, "info", "to-sink-outside"),
+		].join("");
+		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
+		const payload = JSON.parse(await fs.readFile(result.resultPath, "utf8")) as { sinkContexts: unknown[] };
+		// The throwing getter drops that record from the file; its sink still gets the call's own fields.
+		expect(payload.sinkContexts).toEqual([{ sessionId: "sink", turn: 2 }, null, { kept: true }]);
+	});
+
 	test("drops native JSON failures locally but sends original contexts to sinks", async () => {
 		const result = await runScenario("serialization-failures");
 		expect(result.stdout).toBe("");
@@ -245,6 +271,21 @@ describe("central logger transport lifecycle", () => {
 		const defaultLogsDir = path.join(result.primaryDir, ".omp", "logs");
 		const log = await readSingleLog(defaultLogsDir);
 		expect(log.text).toBe(expectedLine(result.pid, "info", "mode-default", { mode: "default" }));
+	});
+
+	test("a test process writes its default-file records under the temp dir, never the real logs dir", async () => {
+		const result = await runScenario("default-file", { testRuntime: true });
+		expect(result.stderr).toBe("");
+		// The child's HOME stays empty: no ~/.omp/logs was created.
+		expect(await fs.readdir(result.primaryDir)).toEqual([]);
+		// Named per user, so users of a shared /tmp never share it.
+		const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().username;
+		const testLogsDir = path.join(result.root, "tmp", `omp-test-logs-${uid}`);
+		const log = await readSingleLog(testLogsDir);
+		expect(log.text).toBe(expectedLine(result.pid, "info", "mode-default", { mode: "default" }));
+		// Log readers (report bundles, the stderr guard) resolve the same file.
+		const { logPath } = JSON.parse(await fs.readFile(result.resultPath, "utf8"));
+		expect(logPath).toBe(path.join(testLogsDir, log.name));
 	});
 
 	test("emits file-only, console-only, and dual modes exactly once", async () => {

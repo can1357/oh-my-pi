@@ -12,6 +12,7 @@ import {
 import eagerTasksTemplate from "./fixtures/system-prompt-template/eager-tasks.md" with { type: "text" };
 import literalDataTemplate from "./fixtures/system-prompt-template/literal-data.md" with { type: "text" };
 import liveDataTemplate from "./fixtures/system-prompt-template/live-data.md" with { type: "text" };
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 const EMPTY_TREE = {
 	rootPath: "",
@@ -33,8 +34,10 @@ async function withDiscoveryHome<T>(fn: (paths: DiscoveryPaths) => Promise<T>): 
 	const homedirSpy = spyOn(os, "homedir").mockReturnValue(home);
 	const previousHome = process.env.HOME;
 	const previousUserProfile = process.env.USERPROFILE;
+	const previousAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 	process.env.HOME = home;
 	process.env.USERPROFILE = home;
+	restoreEnvValue("PI_CODING_AGENT_DIR", undefined);
 	__resetDirsFromEnvForTests();
 	try {
 		return await fn({
@@ -48,6 +51,7 @@ async function withDiscoveryHome<T>(fn: (paths: DiscoveryPaths) => Promise<T>): 
 		else process.env.HOME = previousHome;
 		if (previousUserProfile === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = previousUserProfile;
+		restoreEnvValue("PI_CODING_AGENT_DIR", previousAgentDirEnv);
 		__resetDirsFromEnvForTests();
 	}
 }
@@ -196,7 +200,7 @@ describe("system prompt Handlebars templates", () => {
 			const result = await buildSystemPrompt(options(cwd));
 			const text = result.systemPrompt.join("\n\n");
 			expect(text).toContain("fallback literal prompt");
-			expect(text).not.toContain("§ Tool Policy");
+			expect(text).not.toContain("⁂ Tool Policy");
 		});
 	});
 
@@ -207,7 +211,7 @@ describe("system prompt Handlebars templates", () => {
 			const result = await buildSystemPrompt(options(cwd));
 			const text = result.systemPrompt.join("\n\n");
 			expect(text).not.toContain("TASK_BRANCH=");
-			expect(text).toContain("§ Tool Policy");
+			expect(text).toContain("⁂ Tool Policy");
 		});
 	});
 
@@ -219,7 +223,7 @@ describe("system prompt Handlebars templates", () => {
 			const result = await buildSystemPrompt(options(cwd));
 			const text = result.systemPrompt.join("\n\n");
 			expect(text).toContain("fallback literal prompt");
-			expect(text).not.toContain("§ Tool Policy");
+			expect(text).not.toContain("⁂ Tool Policy");
 		});
 	});
 

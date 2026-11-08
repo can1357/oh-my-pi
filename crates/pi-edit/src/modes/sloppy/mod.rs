@@ -9,8 +9,9 @@ pub mod types;
 pub use types::{InlineSloppyRegion, SloppySection};
 
 use self::{
-	apply::{ApplyContext, apply_sloppy},
+	apply::{Applied, ApplyContext, apply_sloppy, join_failures, remessage},
 	parse::split_sloppy_sections,
+	types::PARTIAL_NOTICE,
 };
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
@@ -31,9 +32,9 @@ pub struct SloppyEngine {
 }
 
 impl SloppyEngine {
-	fn sections(args: &ArgSnapshot, streaming: bool) -> Vec<SloppySection> {
+	fn sections(args: &ArgSnapshot, streaming: bool) -> Result<Vec<SloppySection>, EditError> {
 		let Some(input) = args.input.as_deref() else {
-			return Vec::new();
+			return Ok(Vec::new());
 		};
 		let input = if streaming {
 			input.rfind('\n').map_or("", |end| &input[..=end])
@@ -44,10 +45,10 @@ impl SloppyEngine {
 	}
 
 	fn missing_target(args: &ArgSnapshot) -> bool {
-		args
-			.input
-			.as_deref()
-			.is_some_and(|input| !input.trim().is_empty() && split_sloppy_sections(input).is_empty())
+		args.input.as_deref().is_some_and(|input| {
+			!input.trim().is_empty()
+				&& split_sloppy_sections(input).is_ok_and(|sections| sections.is_empty())
+		})
 	}
 }
 
@@ -64,7 +65,12 @@ impl ModeEngine for SloppyEngine {
 		store: &EditStore,
 	) -> Vec<PreviewFile> {
 		let _ = (self.allow_fuzzy, self.fuzzy_threshold);
-		let sections = Self::sections(args, streaming);
+		let sections = match Self::sections(args, streaming) {
+			Ok(sections) => sections,
+			Err(error) => {
+				return vec![PreviewFile { error: Some(error.to_string()), ..PreviewFile::default() }];
+			},
+		};
 		if sections.is_empty() {
 			if !streaming && Self::missing_target(args) {
 				return vec![PreviewFile {
@@ -104,7 +110,7 @@ impl ModeEngine for SloppyEngine {
 					canonical: &read.canonical,
 					streaming,
 				}) {
-					Ok(after) => {
+					Ok(Applied::Changed { text: after, .. }) => {
 						let output =
 							generate_diff_string(&read.text, &after, None, &BlockContextSource {
 								path: Some(&read.resolved.display),
@@ -119,8 +125,8 @@ impl ModeEngine for SloppyEngine {
 							..PreviewFile::default()
 						})
 					},
-					Err(_) if streaming => None,
-					Err(error) => Some(PreviewFile {
+					Ok(Applied::Unchanged(_)) | Err(_) if streaming => None,
+					Ok(Applied::Unchanged(error)) | Err(error) => Some(PreviewFile {
 						display: read.resolved.display.clone(),
 						error: Some(error.to_string()),
 						op: Some(FileOp::Update),
@@ -139,7 +145,7 @@ impl ModeEngine for SloppyEngine {
 	) -> Result<Vec<StagedFile>, EditError> {
 		let _ = (self.allow_fuzzy, self.fuzzy_threshold);
 		let input = args.input.as_deref().unwrap_or_default();
-		let sections = split_sloppy_sections(input);
+		let sections = split_sloppy_sections(input)?;
 		if sections.is_empty() {
 			return Err(EditError::parse(
 				"Missing file target: start the payload with *** Edit File: relative/path.ts.",
@@ -147,21 +153,20 @@ impl ModeEngine for SloppyEngine {
 		}
 		let multi_file = sections.len() > 1;
 		let mut staged = Vec::with_capacity(sections.len());
+		let mut unchanged = Vec::new();
 		for section in sections {
 			let read = files.read(&section.path).map_err(|error| {
 				// An unresolved internal URL stays typed so the host can
 				// resolve it and retry.
 				if multi_file && !matches!(error, EditError::UnresolvedUrl(_)) {
-					EditError::matched(format!(
-						"[{}]: {error}\nNo files were modified — sections apply atomically.",
-						section.path
-					))
+					EditError::InFile { path: section.path.clone(), source: Box::new(error) }
 				} else {
 					error
 				}
 			})?;
 			let mut notes = Vec::new();
-			let after = apply_sloppy(&read.text, &section.body, ApplyContext {
+			// A section that does not parse fails the whole payload.
+			let applied = apply_sloppy(&read.text, &section.body, ApplyContext {
 				path: &read.resolved.display,
 				notes: &mut notes,
 				store,
@@ -170,20 +175,11 @@ impl ModeEngine for SloppyEngine {
 			})
 			.map_err(|error| {
 				if multi_file {
-					EditError::matched(format!(
-						"[{}]: {error}\nNo files were modified — sections apply atomically.",
-						read.resolved.display
-					))
+					EditError::InFile { path: read.resolved.display.clone(), source: Box::new(error) }
 				} else {
 					error
 				}
 			})?;
-			let persisted = read.persist(&after)?;
-			let output = generate_diff_string(&read.text, &after, None, &BlockContextSource {
-				path:      Some(&read.resolved.display),
-				lang:      None,
-				streaming: false,
-			});
 			let mut file = StagedFile::new(
 				read.resolved.display.clone(),
 				read.resolved.absolute.clone(),
@@ -191,18 +187,50 @@ impl ModeEngine for SloppyEngine {
 			);
 			file.before_raw = Some(read.raw.clone());
 			file.before.clone_from(&read.text);
-			file.after = after;
-			file.persisted = Some(persisted);
-			file.diff = output.diff;
-			file.first_changed_line = output.first_changed_line;
-			file.after_preview = notes;
+			match applied {
+				Applied::Changed { text, rejected } => {
+					let output = generate_diff_string(&read.text, &text, None, &BlockContextSource {
+						path:      Some(&read.resolved.display),
+						lang:      None,
+						streaming: false,
+					});
+					file.persisted = Some(read.persist(&text)?);
+					file.after = text;
+					file.diff = output.diff;
+					file.first_changed_line = output.first_changed_line;
+					file.after_preview = notes;
+					file
+						.after_preview
+						.extend(rejected.map(|error| format!("{PARTIAL_NOTICE}\n{error}")));
+				},
+				Applied::Unchanged(error) => {
+					file.op = FileOp::Noop;
+					file.after.clone_from(&read.text);
+					file
+						.after_preview
+						.push(format!("{PARTIAL_NOTICE}\n{error}"));
+					unchanged.push(if multi_file {
+						remessage(error, |message| format!("[{}]: {message}", read.resolved.display))
+					} else {
+						error
+					});
+				},
+			}
 			staged.push(file);
 		}
-		Ok(staged)
+		let changed = staged.iter().any(|file| file.op != FileOp::Noop);
+		match join_failures(unchanged) {
+			// No file changed: the call fails with every file's rejections.
+			Some(error) if !changed => Err(error),
+			_ => Ok(staged),
+		}
 	}
 
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {
-		let sections = split_sloppy_sections(args.input.as_deref().unwrap_or_default());
+		// An unparseable payload targets nothing; `preview` and `stage` surface
+		// the error.
+		let sections =
+			split_sloppy_sections(args.input.as_deref().unwrap_or_default()).unwrap_or_default();
 		Inspection {
 			paths:    sections
 				.iter()

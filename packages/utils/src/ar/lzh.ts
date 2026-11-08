@@ -1,3 +1,4 @@
+import { readUInt16LE, readUInt32LE } from "./bytes";
 import { crc16Arc } from "./checksums";
 import { ArchiveError } from "./error";
 import { assertArchiveMemberSize, assertEntryCount, assertIndexSize, assertInMemorySize } from "./limits";
@@ -279,16 +280,8 @@ function crc16WithZeroRange(bytes: Uint8Array, zeroStart: number, zeroEnd: numbe
 	return crc16Arc(bytes.subarray(zeroEnd), value);
 }
 
-function u16(bytes: Uint8Array, offset: number): number {
-	return bytes[offset]! | (bytes[offset + 1]! << 8);
-}
-
-function u32(bytes: Uint8Array, offset: number): number {
-	return (bytes[offset]! | (bytes[offset + 1]! << 8) | (bytes[offset + 2]! << 16) | (bytes[offset + 3]! << 24)) >>> 0;
-}
-
 function u64(bytes: Uint8Array, offset: number): number {
-	const value = u32(bytes, offset) + u32(bytes, offset + 4) * 0x100000000;
+	const value = readUInt32LE(bytes, offset) + readUInt32LE(bytes, offset + 4) * 0x100000000;
 	if (!Number.isSafeInteger(value)) throw new ArchiveError("LZH uses sizes too large to read safely");
 	return value;
 }
@@ -318,7 +311,8 @@ function decodeUtf16(bytes: Uint8Array): string {
 	return UTF16LE_DECODER.decode(bytes.subarray(0, end));
 }
 
-function dosTimeToMs(value: number): number | undefined {
+/** MS-DOS packed date/time as UTC milliseconds; `undefined` for 0 or an out-of-range field. */
+export function dosTimeToMs(value: number): number | undefined {
 	if (value === 0) return undefined;
 	const year = 1980 + ((value >>> 25) & 0x7f);
 	const month = (value >>> 21) & 0x0f;
@@ -352,7 +346,7 @@ function processExtendedHeader(
 	switch (type) {
 		case 0x00:
 			if (data.byteLength < 2) throw new ArchiveError("Invalid LZH common extended header");
-			fields.commonCrc = u16(data, 0);
+			fields.commonCrc = readUInt16LE(data, 0);
 			fields.commonCrcOffset = absoluteDataOffset;
 			break;
 		case 0x01:
@@ -365,8 +359,8 @@ function processExtendedHeader(
 			throw new ArchiveError("Multi-volume LZH archives are unsupported");
 		case 0x41:
 			if (data.byteLength >= 16) {
-				const low = u32(data, 8);
-				const high = u32(data, 12);
+				const low = readUInt32LE(data, 8);
+				const high = readUInt32LE(data, 12);
 				const filetime = low + high * 0x100000000;
 				if (Number.isSafeInteger(filetime)) fields.mtimeMs = filetime / 10_000 - 11_644_473_600_000;
 			}
@@ -384,11 +378,11 @@ function processExtendedHeader(
 			break;
 		case 0x50:
 			if (data.byteLength < 2) throw new ArchiveError("Invalid LZH Unix permissions extended header");
-			fields.mode = u16(data, 0);
+			fields.mode = readUInt16LE(data, 0);
 			break;
 		case 0x54:
 			if (data.byteLength < 4) throw new ArchiveError("Invalid LZH Unix timestamp extended header");
-			fields.mtimeMs = u32(data, 0) * 1000;
+			fields.mtimeMs = readUInt32LE(data, 0) * 1000;
 			break;
 	}
 }
@@ -464,8 +458,8 @@ function parseLzhHeader(bytes: Uint8Array, offset: number, options: FormatReadOp
 	if (level > 2) throw new ArchiveError(`Unsupported LZH header level ${level}`);
 	const method = String.fromCharCode(...bytes.subarray(offset + 2, offset + 7));
 	if (!LHA_METHOD_PATTERN.test(method)) throw new ArchiveError(`Invalid LZH compression method '${method}'`);
-	let packedSize = u32(bytes, offset + 7);
-	let size = u32(bytes, offset + 11);
+	let packedSize = readUInt32LE(bytes, offset + 7);
+	let size = readUInt32LE(bytes, offset + 11);
 	let crc = 0;
 	let legacyFilename: string | undefined;
 	let mtimeMs: number | undefined;
@@ -486,22 +480,22 @@ function parseLzhHeader(bytes: Uint8Array, offset: number, options: FormatReadOp
 		if (22 + nameLength + 2 > headerLength + 2) throw new ArchiveError("Invalid LZH filename length");
 		assertArchivePathBytes(nameLength, "member path", options.limits.maxPathBytes);
 		legacyFilename = decodeLegacy(bytes.subarray(offset + 22, offset + 22 + nameLength));
-		crc = u16(bytes, offset + 22 + nameLength);
-		mtimeMs = dosTimeToMs(u32(bytes, offset + 15));
+		crc = readUInt16LE(bytes, offset + 22 + nameLength);
+		mtimeMs = dosTimeToMs(readUInt32LE(bytes, offset + 15));
 		if (level === 0) {
 			const extendedStart = offset + 24 + nameLength;
 			if (baseEnd - extendedStart >= 12) {
 				const extended = bytes.subarray(extendedStart, baseEnd);
 				if ((extended[0] === 0x55 || extended[0] === 0x4b) && extended[1] === 0) {
 					osId = extended[0]!;
-					fields.mtimeMs = u32(extended, 2) * 1000;
-					fields.mode = u16(extended, extended.byteLength - 6);
+					fields.mtimeMs = readUInt32LE(extended, 2) * 1000;
+					fields.mode = readUInt16LE(extended, extended.byteLength - 6);
 				}
 			}
 			dataStart = baseEnd;
 		} else {
 			osId = bytes[offset + 24 + nameLength]!;
-			let extensionSize = u16(bytes, baseEnd - 2);
+			let extensionSize = readUInt16LE(bytes, baseEnd - 2);
 			let cursor = baseEnd;
 			let totalExtensionSize = 0;
 			let extensionCount = 0;
@@ -519,7 +513,7 @@ function parseLzhHeader(bytes: Uint8Array, offset: number, options: FormatReadOp
 				}
 				processExtendedHeader(type, data, cursor + 1, fields);
 				const currentSize = extensionSize;
-				extensionSize = u16(bytes, dataEnd);
+				extensionSize = readUInt16LE(bytes, dataEnd);
 				cursor += currentSize;
 			}
 			dataStart = baseEnd + totalExtensionSize;
@@ -527,17 +521,17 @@ function parseLzhHeader(bytes: Uint8Array, offset: number, options: FormatReadOp
 			if (packedSize < 0) throw new ArchiveError("Invalid LZH level-1 packed size");
 		}
 	} else {
-		const headerLength = u16(bytes, offset);
+		const headerLength = readUInt16LE(bytes, offset);
 		if (headerLength < 26) throw new ArchiveError("Invalid LZH level-2 header size");
 		const headerEnd = offset + headerLength;
 		assertRange(bytes, offset, headerEnd, "header");
-		crc = u16(bytes, offset + 21);
+		crc = readUInt16LE(bytes, offset + 21);
 		osId = bytes[offset + 23]!;
-		mtimeMs = u32(bytes, offset + 15) * 1000;
+		mtimeMs = readUInt32LE(bytes, offset + 15) * 1000;
 		let cursor = offset + 24;
 		let extensionCount = 0;
 		while (cursor + 2 <= headerEnd) {
-			const extensionSize = u16(bytes, cursor);
+			const extensionSize = readUInt16LE(bytes, cursor);
 			if (extensionSize === 0) {
 				cursor += 2;
 				break;

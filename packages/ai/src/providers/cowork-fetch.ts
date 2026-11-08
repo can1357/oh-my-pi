@@ -198,7 +198,8 @@ async function sendCoworkRequest(
 	};
 	const abort = (): void => {
 		const reason = signal?.reason;
-		request?.destroy(reason instanceof Error ? reason : new DOMException("The operation was aborted.", "AbortError"));
+		const error = reason instanceof Error ? reason : new DOMException("The operation was aborted.", "AbortError");
+		request?.destroy(error);
 	};
 	if (signal?.aborted) {
 		release();

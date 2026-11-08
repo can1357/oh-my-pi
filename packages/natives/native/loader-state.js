@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as zlib from "node:zlib";
 import packageJson from "../package.json" with { type: "json" };
 import { embeddedAddon } from "./embedded-addon.js";
 import { bindingsHaveReleaseIdentity, bindingsReleaseVersion, containsVersionStamp } from "./version-sentinel.js";
@@ -450,36 +449,6 @@ function selectEmbeddedAddonFile(selectedVariant) {
 	return embeddedAddon.files.find(file => file.variant === "baseline") || null;
 }
 
-function readTarString(buffer, offset, length) {
-	const end = Math.min(offset + length, buffer.length);
-	let stringEnd = offset;
-	while (stringEnd < end && buffer[stringEnd] !== 0) stringEnd++;
-	return buffer.toString("utf8", offset, stringEnd);
-}
-
-function readTarOctal(buffer, offset, length) {
-	const value = readTarString(buffer, offset, length).trim();
-	if (!value) return 0;
-	const parsed = Number.parseInt(value, 8);
-	if (!Number.isFinite(parsed)) {
-		throw new Error(`Invalid tar octal value: ${value}`);
-	}
-	return parsed;
-}
-
-function isZeroTarBlock(buffer, offset) {
-	for (let index = 0; index < 512; index++) {
-		if (buffer[offset + index] !== 0) return false;
-	}
-	return true;
-}
-
-function getTarEntryName(header) {
-	const name = readTarString(header, 0, 100);
-	const prefix = readTarString(header, 345, 155);
-	return prefix ? `${prefix}/${name}` : name;
-}
-
 function isSafeEmbeddedAddonFilename(filename) {
 	return filename.length > 0 && path.basename(filename) === filename && !filename.includes("/") && !filename.includes("\\");
 }
@@ -488,7 +457,7 @@ function isEmbeddedAddonFileCurrent(targetPath, file) {
 	try {
 		const stat = fs.statSync(targetPath);
 		if (!stat.isFile()) return false;
-		return typeof file.size !== "number" || stat.size === file.size;
+		return stat.size === file.size;
 	} catch (err) {
 		if (err && err.code === "ENOENT") return false;
 		throw err;
@@ -510,70 +479,31 @@ function writeEmbeddedAddonFile(targetPath, content) {
 	}
 }
 
-export function extractEmbeddedAddonArchive({ archivePath, files, targetDir }) {
-	const pending = new Map();
+export function extractEmbeddedAddons({ files, targetDir }) {
 	for (const file of files) {
 		if (!isSafeEmbeddedAddonFilename(file.filename)) {
 			throw new Error(`Unsafe embedded addon filename: ${file.filename}`);
 		}
-		const targetPath = path.join(targetDir, file.filename);
-		if (!isEmbeddedAddonFileCurrent(targetPath, file)) {
-			pending.set(file.filename, file);
-		}
 	}
-	if (pending.size === 0) return [];
-
-	const archive = zlib.gunzipSync(fs.readFileSync(archivePath));
 	const writtenPaths = [];
-	let offset = 0;
-
-	while (offset + 512 <= archive.length) {
-		if (isZeroTarBlock(archive, offset)) break;
-		const header = archive.subarray(offset, offset + 512);
-		const filename = getTarEntryName(header);
-		const size = readTarOctal(header, 124, 12);
-		const typeflag = header[156] === 0 ? "0" : String.fromCharCode(header[156]);
-		offset += 512;
-
-		if (offset + size > archive.length) {
-			throw new Error(`Truncated embedded addon archive entry: ${filename}`);
+	for (const file of files) {
+		const targetPath = path.join(targetDir, file.filename);
+		if (isEmbeddedAddonFileCurrent(targetPath, file)) continue;
+		const content = Bun.zstdDecompressSync(fs.readFileSync(file.zstdPath));
+		if (content.length !== file.size) {
+			throw new Error(`Embedded addon size mismatch for ${file.filename}: expected ${file.size}, got ${content.length}`);
 		}
-
-		if (!isSafeEmbeddedAddonFilename(filename)) {
-			throw new Error(`Unsafe embedded addon archive entry: ${filename}`);
-		}
-		if (typeflag !== "0") {
-			throw new Error(`Unsupported embedded addon archive entry type ${typeflag}: ${filename}`);
-		}
-
-		const file = pending.get(filename);
-		if (file) {
-			if (typeof file.size === "number" && file.size !== size) {
-				throw new Error(`Embedded addon size mismatch for ${filename}: expected ${file.size}, got ${size}`);
-			}
-			const targetPath = path.join(targetDir, filename);
-			writeEmbeddedAddonFile(targetPath, archive.subarray(offset, offset + size));
-			pending.delete(filename);
-			writtenPaths.push(targetPath);
-		}
-
-		offset += Math.ceil(size / 512) * 512;
+		writeEmbeddedAddonFile(targetPath, content);
+		writtenPaths.push(targetPath);
 	}
-
-	if (pending.size > 0) {
-		throw new Error(`Embedded addon archive missing: ${[...pending.keys()].join(", ")}`);
-	}
-
 	return writtenPaths;
 }
 
-function maybeExtractEmbeddedAddon(ctx, errors) {
+function maybeExtractEmbeddedAddon(ctx, errors, file = selectEmbeddedAddonFile(ctx.selectedVariant)) {
 	if (!ctx.isCompiledBinary || !embeddedAddon) return null;
 	if (embeddedAddon.platformTag !== ctx.platformTag || embeddedAddon.version !== ctx.packageVersion) return null;
-
-	const selectedEmbeddedFile = selectEmbeddedAddonFile(ctx.selectedVariant);
-	if (!selectedEmbeddedFile) return null;
-	const targetPath = path.join(ctx.versionedDir, selectedEmbeddedFile.filename);
+	if (!file) return null;
+	const targetPath = path.join(ctx.versionedDir, file.filename);
 
 	startupMarker("native:extractEmbeddedAddon:start");
 	try {
@@ -584,40 +514,12 @@ function maybeExtractEmbeddedAddon(ctx, errors) {
 		return null;
 	}
 
-	if (embeddedAddon.archive) {
-		try {
-			extractEmbeddedAddonArchive({
-				archivePath: embeddedAddon.archive.filePath,
-				files: embeddedAddon.files,
-				targetDir: ctx.versionedDir,
-			});
-			if (isEmbeddedAddonFileCurrent(targetPath, selectedEmbeddedFile)) {
-				return targetPath;
-			}
-			errors.push(`embedded addon archive (${embeddedAddon.archive.filename}): missing ${selectedEmbeddedFile.filename}`);
-			return null;
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			errors.push(`embedded addon archive (${embeddedAddon.archive.filename}): ${message}`);
-			return null;
-		}
-	}
-
-	if (isEmbeddedAddonFileCurrent(targetPath, selectedEmbeddedFile)) {
-		return targetPath;
-	}
-	if (!selectedEmbeddedFile.filePath) {
-		errors.push(`embedded addon metadata missing file path for ${selectedEmbeddedFile.filename}`);
-		return null;
-	}
-
 	try {
-		const buffer = fs.readFileSync(selectedEmbeddedFile.filePath);
-		fs.writeFileSync(targetPath, buffer);
+		extractEmbeddedAddons({ files: [file], targetDir: ctx.versionedDir });
 		return targetPath;
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		errors.push(`embedded addon write (${selectedEmbeddedFile.filename}): ${message}`);
+		errors.push(`embedded addon extraction (${file.filename}): ${message}`);
 		return null;
 	}
 }
@@ -792,6 +694,48 @@ export function missingNativeExport(symbolName, addon = loadedAddon) {
 }
 
 /**
+ * Static reads a {@link missingNativeClass} stand-in answers normally rather
+ * than throwing: the function-object intrinsics every caller and inspector
+ * touches, and `then`, so an accidental `await` on the export resolves to the
+ * class instead of exploding somewhere unrelated.
+ */
+const CLASS_STUB_PLAIN_STATICS = new Set(["prototype", "name", "length", "constructor", "then"]);
+
+/**
+ * Class counterpart of {@link missingNativeExport}: a stand-in that fails with
+ * the addon's identity attached instead of as a bare `undefined` export, which
+ * surfaces as `undefined is not a constructor` at the callsite and names
+ * nothing.
+ *
+ * Same staleness rule as the function stub: only a stale addon gets a
+ * stand-in, so `typeof native.Thing === "function"` capability probes against
+ * a current addon keep their meaning.
+ *
+ * Several of these classes are entered through a static rather than a
+ * constructor — `FileLock.tryAcquire`, `IpcServer.listen`, `Process.fromPid`,
+ * `PowerAssertion.start` — so the stand-in answers any other static read with
+ * the same diagnostic. Only a stale addon reaches it, and only for a class
+ * that addon does not carry, so nothing on a healthy tree meets a proxy.
+ * @param {string} symbolName
+ * @param {ReturnType<typeof nativeAddonStatus>} [addon]
+ * @returns {(new (...args: unknown[]) => never) | undefined}
+ */
+export function missingNativeClass(symbolName, addon = loadedAddon) {
+	if (!addon?.stale) return undefined;
+	const stub = class MissingNativeClass {
+		constructor() {
+			throw new Error(missingNativeExportMessage(symbolName, addon));
+		}
+	};
+	return new Proxy(stub, {
+		get(target, key, receiver) {
+			if (typeof key === "symbol" || CLASS_STUB_PLAIN_STATICS.has(key)) return Reflect.get(target, key, receiver);
+			throw new Error(missingNativeExportMessage(`${symbolName}.${key}`, addon));
+		},
+	});
+}
+
+/**
  * Actionable text for {@link missingNativeExport}. `addon` is injectable so the
  * wording can be pinned without a stale `.node` on disk.
  * @param {string} symbolName
@@ -814,6 +758,106 @@ export function missingNativeExportMessage(symbolName, addon = loadedAddon) {
 }
 
 /**
+ * One-line notice for a workspace tree running an addon from another release.
+ *
+ * The missing-symbol stubs only speak when a caller touches a symbol the addon
+ * does not carry. A symbol it does carry runs that release's behaviour — an
+ * older shell, an older grep — with no marker at all, so this notice is the
+ * only provenance those failures get.
+ *
+ * `stale` is any release difference, so the wording must not assume the addon
+ * is the older side.
+ * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
+ * @returns {string}
+ */
+export function staleWorkspaceAddonNotice(addon) {
+	const loaded = addon.version ? `@oh-my-pi/pi-natives@${addon.version}` : "an addon without a release stamp";
+	return (
+		`[pi-natives] ${addon.path} is ${loaded}, but this checkout is @${addon.packageVersion}. ` +
+		"Symbols this checkout expects may be missing and shared ones may behave differently; " +
+		"run `bun run build:native` before trusting results from this tree.\n"
+	);
+}
+
+/**
+ * Whether the copy of this module running on the current thread has already
+ * written the mismatched-addon notice. One per loaded copy, which is one per
+ * main thread in every shape this package ships; the write itself is confined
+ * to the main thread by {@link onMainThread}.
+ */
+const staleNoticeState = { reported: false };
+
+/** Memoized answer from {@link onMainThread}; `undefined` until first asked. */
+let mainThreadAnswer;
+
+/**
+ * True on a process's main thread, false inside a worker thread.
+ *
+ * Resolved through `createRequire` on first use rather than imported at module
+ * scope: `packages/coding-agent/src/cli.ts` keeps `node:worker_threads` out of
+ * ordinary startup on purpose, and this module is reached statically from
+ * `sqlite-locks` on launches that never load an addon. Asking only when a
+ * mismatch has already been found keeps that boundary. A runtime without the
+ * builtin answers "main thread", which is the safe side: the notice prints.
+ * @returns {boolean}
+ */
+function onMainThread() {
+	if (mainThreadAnswer === undefined) {
+		try {
+			mainThreadAnswer = createRequire(import.meta.url)("node:worker_threads").isMainThread !== false;
+		} catch {
+			mainThreadAnswer = true;
+		}
+	}
+	return mainThreadAnswer;
+}
+
+/**
+ * Write {@link staleWorkspaceAddonNotice} once, from the main thread, when a
+ * workspace tree loads an addon of another release.
+ *
+ * Three guards, each load-bearing.
+ *
+ * Main thread only, because fd 2 is shared and a worker reaches `loadNative()`
+ * long after interactive mode owns the terminal — the subagent, JS-eval and
+ * tab workers all start then, so a per-worker write paints into a rendered
+ * frame. The main thread has already said it at startup; a worker repeating it
+ * adds nothing and costs the display. A worker *process* keeps the notice: it
+ * has its own main thread, and `subprocess/worker-client.ts` captures its
+ * stderr to a file rather than the terminal.
+ *
+ * Latched, because `loadNative()` is not a startup-only call: the lazy
+ * entrypoints in `clipboard.js` and friends call it on every invocation.
+ *
+ * Workspace loads only, because {@link validateLoadedBindings} has a second
+ * success path — it accepts a pre-sentinel addon on an installed load
+ * (`isCompatiblePreSentinelNativeAddon`), which reports no release and so
+ * counts as `stale`. That user has no repository to build.
+ *
+ * The write is a synchronous `fs.writeSync` to fd 2 for the same reason as
+ * {@link startupMarker}: it must survive a crash that follows it. `write` and
+ * `state` are injectable so a test can exercise the guards without consuming
+ * this copy's latch.
+ * @param {{ isWorkspaceLoad: boolean }} ctx
+ * @param {NonNullable<ReturnType<typeof nativeAddonStatus>>} addon
+ * @param {{ write?: (text: string) => void; state?: { reported: boolean } }} [deps]
+ * @returns {boolean} whether this call wrote the notice
+ */
+export function reportStaleWorkspaceAddon(ctx, addon, deps = {}) {
+	const state = deps.state ?? staleNoticeState;
+	// Thread identity last: the three cheap gates reject every ordinary launch
+	// before `node:worker_threads` is resolved at all.
+	if (!ctx.isWorkspaceLoad || !addon.stale || state.reported || !onMainThread()) return false;
+	state.reported = true;
+	try {
+		(deps.write ?? (text => fs.writeSync(2, text)))(staleWorkspaceAddonNotice(addon));
+	} catch {
+		// stderr unavailable; the notice is best-effort, the stubs still speak
+	}
+	return true;
+}
+
+/**
  * Install the addon's bounded Tokio runtime now that `dlopen` has returned and
  * the dynamic-loader lock is released. The Rust `#[module_init]` deliberately
  * does NOT build the runtime — spawning worker threads under the loader lock
@@ -830,6 +874,18 @@ function installNativeTokioRuntime(bindings) {
 	} catch (err) {
 		startupMarker(`native:tokioRuntime:failed:${err instanceof Error ? err.message : String(err)}`);
 	}
+}
+
+/**
+ * Point the addon at `<nativesDir>/grammars`, where the agent downloads the
+ * tree-sitter grammars that load as WebAssembly on demand (pi-utils
+ * `getNativeGrammarsDir()` resolves the same path). Version cleanup never
+ * touches it: only release-version directories are removed. Older addons
+ * predating the export link every grammar and need no directory.
+ */
+function configureGrammarDir(bindings, nativesDir) {
+	const setGrammarDir = bindings.__ompSetGrammarDir;
+	if (typeof setGrammarDir === "function") setGrammarDir(path.join(nativesDir, "grammars"));
 }
 
 
@@ -950,14 +1006,24 @@ export function loadNative() {
 	const stagedCandidate = embeddedCandidate ? null : maybeStageNodeModulesAddon(ctx, errors);
 	const prepended = [embeddedCandidate, stagedCandidate].filter(c => typeof c === "string");
 	const runtimeCandidates = prepended.length > 0 ? [...prepended, ...ctx.candidates] : ctx.candidates;
+	const fallbackEmbeddedFile =
+		ctx.selectedVariant === "modern" && embeddedAddon
+			? embeddedAddon.files.find(file => file.variant === "baseline")
+			: null;
+	const fallbackEmbeddedPath = fallbackEmbeddedFile && path.join(ctx.versionedDir, fallbackEmbeddedFile.filename);
 
 	for (const candidate of runtimeCandidates) {
+		if (fallbackEmbeddedFile && candidate === fallbackEmbeddedPath) {
+			maybeExtractEmbeddedAddon(ctx, errors, fallbackEmbeddedFile);
+		}
 		try {
 			startupMarker(`native:require:${path.basename(candidate)}`);
 			const bindings = require_(candidate);
 			validateLoadedBindings(ctx, bindings, candidate);
 			installNativeTokioRuntime(bindings);
+			configureGrammarDir(bindings, ctx.nativesDir);
 			loadedAddon = describeLoadedAddon(bindings, candidate, ctx);
+			reportStaleWorkspaceAddon(ctx, loadedAddon);
 	        cleanupStaleNativeVersions({ nativesDir: ctx.nativesDir, currentVersion: ctx.packageVersion });
 			startupMarker("native:loadNative:done");
 			return bindings;

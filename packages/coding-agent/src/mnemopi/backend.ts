@@ -2,11 +2,12 @@ import { rm } from "node:fs/promises";
 import * as path from "node:path";
 import { type ApiKeyResolver, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { Mnemopi } from "@oh-my-pi/pi-mnemopi";
 import type { MnemopiLlmCompleteOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import type * as MnemopiDiagnoseNs from "@oh-my-pi/pi-mnemopi/diagnose";
 import type { DiagnosticSummary } from "@oh-my-pi/pi-mnemopi/diagnose";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt, withLoopPhase } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { roleCandidatePool } from "../config/model-roles";
 import { resolveRoleChain } from "../config/model-resolver";
@@ -26,6 +27,7 @@ import mnemopiInstructions from "../prompts/system/mnemopi-instructions.md" with
 import type { AgentSession } from "../session/agent-session";
 import { tinyModelClient } from "../tiny/title-client";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { concreteThinkingLevel, shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import {
 	loadMnemopiConfig,
 	type MnemopiBackendConfig,
@@ -38,7 +40,9 @@ import {
 	getMnemopiSessionState,
 	loadMnemopi,
 	loadMnemopiCore,
+	type MnemopiBankStats,
 	MnemopiSessionState,
+	type MnemopiSessionStateApi,
 	requireMnemopi,
 	requireMnemopiCore,
 	setMnemopiSessionState,
@@ -79,8 +83,24 @@ export function resolveMemoryCompletionInput(
 	return { prompt };
 }
 
-async function installMnemopiState(session: AgentSession, config: MnemopiBackendConfig): Promise<MnemopiSessionState> {
-	const state = new MnemopiSessionState({ sessionId: session.sessionId, config, session });
+/**
+ * Installs a session-owned Mnemopi state. `inherited` is the state of a session this
+ * one was forked from with its system prompt copied (`/tan`): that prompt already
+ * carries the parent's recall, so the fork starts with it delivered instead of
+ * recalling again and appending a duplicate block that breaks the shared cache prefix.
+ */
+async function installMnemopiState(
+	session: AgentSession,
+	config: MnemopiBackendConfig,
+	inherited?: MnemopiSessionStateApi,
+): Promise<MnemopiSessionState> {
+	const state = new MnemopiSessionState({
+		sessionId: session.sessionId,
+		config,
+		session,
+		hasRecalledForFirstTurn: inherited?.hasRecalledForFirstTurn,
+	});
+	state.lastRecallSnippet = inherited?.lastRecallSnippet;
 	const previous = setMnemopiSessionState(session, state);
 	await previous?.dispose();
 	try {
@@ -130,40 +150,33 @@ export const mnemopiBackend: MemoryBackend = {
 				session.sessionManager,
 			);
 			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
-			await installMnemopiState(session, config);
+			await installMnemopiState(session, config, getMnemopiSessionStateFromParent(options));
 		} catch (error) {
 			logger.warn("Mnemopi: backend startup failed; memory backend inert.", { error: String(error) });
 		}
 	},
 
-	async buildDeveloperInstructions(_agentDir, settings, session): Promise<string | undefined> {
-		const state = getMnemopiSessionState(session);
-		const primary = state?.aliasOf ?? state;
-		const parts = [prompt.render(mnemopiInstructions, { toolRefs: memoryToolRefs(session?.getXdevToolEntries()) })];
-		if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
-		const rendered = parts.join("\n\n").trim();
-		if (!rendered) return undefined;
-		return truncateApproxTokens(rendered, cfgMnemopiInjectionTokenLimit.get(settings));
+	async buildDeveloperInstructions(_agentDir, _cwd, settings, session): Promise<string | undefined> {
+		return withLoopPhase("mnemopi.recall", () => {
+			const state = getMnemopiSessionState(session);
+			const primary = state?.aliasOf ?? state;
+			const parts = [
+				prompt.render(mnemopiInstructions, { toolRefs: memoryToolRefs(session?.getXdevToolEntries()) }),
+			];
+			if (primary?.lastRecallSnippet) parts.push(primary.lastRecallSnippet);
+			const rendered = parts.join("\n\n").trim();
+			if (!rendered) return undefined;
+			return truncateApproxTokens(rendered, cfgMnemopiInjectionTokenLimit.get(settings));
+		});
 	},
 
 	async beforeAgentStartPrompt(session, promptText, signal): Promise<MemoryPromptPreparation | undefined> {
 		const state = getMnemopiSessionState(session);
 		const preparation = await state?.beforeAgentStartPrompt(promptText, signal);
-		if (!preparation) return undefined;
-		if (preparation.context) {
-			// Match the canonical memory block's budget while the recall is staged
-			// separately from its static instructions. Commit still caches the full snippet.
-			const instructions = prompt.render(mnemopiInstructions, {
-				toolRefs: memoryToolRefs(session.getXdevToolEntries()),
-			});
-			const rendered = [instructions, preparation.context].join("\n\n").trim();
-			preparation.context =
-				truncateApproxTokens(rendered, cfgMnemopiInjectionTokenLimit.get(session.settings))
-					.slice(instructions.length)
-					.trim() || undefined;
-		}
+		if (!state || !preparation) return undefined;
 		return {
 			context: preparation.context,
+			notice: preparation.notice,
 			commit: () => getMnemopiSessionState(session) === state && preparation.commit(),
 		};
 	},
@@ -214,13 +227,9 @@ export const mnemopiBackend: MemoryBackend = {
 
 	async stats(agentDir, _cwd, session): Promise<string | undefined> {
 		await Promise.all([loadMnemopi(), loadMnemopiCore()]);
-		const { targets, owned } = createStatsTargets(agentDir, session);
-		try {
-			if (targets.length === 0) return undefined;
-			return renderMnemopiStats(targets);
-		} finally {
-			for (const memory of owned) memory.close();
-		}
+		const banks = collectBankStats(agentDir, session);
+		if (banks.length === 0) return undefined;
+		return renderMnemopiStats(banks);
 	},
 
 	async diagnose(agentDir, _cwd, session): Promise<string | undefined> {
@@ -230,10 +239,12 @@ export const mnemopiBackend: MemoryBackend = {
 		const [{ inspectDatabase }] = await Promise.all([loadMnemopiDiagnose(), loadMnemopiCore()]);
 		const banks = getMnemopiScopedBanks(config);
 		const dbPaths = getMnemopiScopedDbPaths(config);
-		const summaries = dbPaths.map((dbPath, index) => ({
-			bank: banks[index] ?? "unknown",
-			summary: inspectDatabase({ dbPath, initialize: false }),
-		}));
+		const summaries = withLoopPhase("mnemopi.stats", () =>
+			dbPaths.map((dbPath, index) => ({
+				bank: banks[index] ?? "unknown",
+				summary: inspectDatabase({ dbPath, initialize: false }),
+			})),
+		);
 		return renderMnemopiDiagnostics(summaries);
 	},
 
@@ -250,21 +261,17 @@ export const mnemopiBackend: MemoryBackend = {
 			};
 		}
 
-		const { targets, owned } = createStatsTargets(agentDir, session);
-		try {
-			if (targets.length === 0) {
-				return {
-					backend: "mnemopi",
-					active: false,
-					writable: false,
-					searchable: false,
-					message: "Mnemopi backend is configured but not initialised for this session.",
-				};
-			}
-			return summarizeMnemopiStatus(targets, session);
-		} finally {
-			for (const memory of owned) memory.close();
+		const banks = collectBankStats(agentDir, session);
+		if (banks.length === 0) {
+			return {
+				backend: "mnemopi",
+				active: false,
+				writable: false,
+				searchable: false,
+				message: "Mnemopi backend is configured but not initialised for this session.",
+			};
 		}
+		return summarizeMnemopiStatus(banks, session);
 	},
 
 	async search({ session }, query, options) {
@@ -323,7 +330,7 @@ export const mnemopiBackend: MemoryBackend = {
 				scope: "bank",
 				extract: true,
 				extractEntities: true,
-				veracity: "user",
+				veracity: "stated",
 				memoryType: "fact",
 			});
 		} catch (error) {
@@ -333,35 +340,29 @@ export const mnemopiBackend: MemoryBackend = {
 		return { backend: "mnemopi", stored: 1, ids: [id] };
 	},
 
-	async preCompactionContext(messages, _settings, session): Promise<string | undefined> {
+	async preCompactionContext(messages, _settings, session, signal): Promise<string | undefined> {
 		const state = getMnemopiSessionState(session);
-		return await state?.recallForCompaction(messages);
+		return await state?.recallForCompaction(messages, signal);
 	},
 };
 
-interface MnemopiStatsTarget {
-	bank: string;
-	memory: Mnemopi;
-}
-
-function createStatsTargets(
-	agentDir: string,
-	session: AgentSession | undefined,
-): { targets: MnemopiStatsTarget[]; owned: Mnemopi[] } {
+/**
+ * Stats of the session's scoped banks: through its live state (an alias's come from the
+ * parent's banks), else from stores opened for this read and closed again.
+ */
+function collectBankStats(agentDir: string, session: AgentSession | undefined): MnemopiBankStats[] {
 	const state = getMnemopiSessionState(session);
-	if (state) {
-		return {
-			targets: dedupeStatsTargets([state.getScopedRetainTarget(), ...state.getScopedRecallTargets()]),
-			owned: [],
-		};
-	}
-	if (!session) return { targets: [], owned: [] };
+	if (state) return withLoopPhase("mnemopi.open", () => state.getScopedStats());
+	if (!session) return [];
 	const config = loadMnemopiConfig(session.settings, agentDir);
-	const targets = getMnemopiScopedBanks(config).map(bank => ({
-		bank,
-		memory: createStatsMemory(config, bank),
-	}));
-	return { targets, owned: targets.map(target => target.memory) };
+	const owned = withLoopPhase("mnemopi.open", () =>
+		getMnemopiScopedBanks(config).map(bank => ({ bank, memory: createStatsMemory(config, bank) })),
+	);
+	try {
+		return owned.map(({ bank, memory }) => ({ bank, stats: memory.getStats() }));
+	} finally {
+		for (const { memory } of owned) memory.close();
+	}
 }
 
 function createStatsMemory(config: MnemopiBackendConfig, bank: string): Mnemopi {
@@ -386,28 +387,16 @@ function resolveBankDbPath(config: MnemopiBackendConfig, bank: string): string {
 	return new BankManager(path.dirname(config.dbPath)).getBankDbPath(bank);
 }
 
-function dedupeStatsTargets(targets: readonly MnemopiStatsTarget[]): MnemopiStatsTarget[] {
-	const seen = new Set<string>();
-	const unique: MnemopiStatsTarget[] = [];
-	for (const target of targets) {
-		if (seen.has(target.bank)) continue;
-		seen.add(target.bank);
-		unique.push(target);
-	}
-	return unique;
-}
-
-function renderMnemopiStats(targets: readonly MnemopiStatsTarget[]): string {
+function renderMnemopiStats(banks: readonly MnemopiBankStats[]): string {
 	const lines = [
 		"# Mnemopi Memory Stats",
 		"",
 		"| Bank | Working | Episodic | Triples | Last memory | Database |",
 		"|---|---:|---:|---:|---|---|",
 	];
-	for (const target of targets) {
-		const stats = target.memory.getStats();
+	for (const { bank, stats } of banks) {
 		lines.push(
-			`| ${escapeMarkdownTableCell(target.bank)} | ${statCount(stats.beam.working_memory)} | ${statCount(
+			`| ${escapeMarkdownTableCell(bank)} | ${statCount(stats.beam.working_memory)} | ${statCount(
 				stats.beam.episodic_memory,
 			)} | ${stats.beam.triples.total} | ${escapeMarkdownTableCell(stats.last_memory ?? "never")} | ${escapeMarkdownTableCell(shortenPath(stats.database))} |`,
 		);
@@ -416,7 +405,7 @@ function renderMnemopiStats(targets: readonly MnemopiStatsTarget[]): string {
 }
 
 function summarizeMnemopiStatus(
-	targets: readonly MnemopiStatsTarget[],
+	banks: readonly MnemopiBankStats[],
 	session: AgentSession | undefined,
 ): MemoryBackendStatus {
 	let workingCount = 0;
@@ -424,8 +413,7 @@ function summarizeMnemopiStatus(
 	let tripleCount = 0;
 	let lastMemory: string | undefined;
 	let database: string | undefined;
-	for (const target of targets) {
-		const stats = target.memory.getStats();
+	for (const { stats } of banks) {
 		workingCount += statCount(stats.beam.working_memory);
 		episodicCount += statCount(stats.beam.episodic_memory);
 		tripleCount += stats.beam.triples.total;
@@ -440,8 +428,8 @@ function summarizeMnemopiStatus(
 		writable: true,
 		searchable: true,
 		scope: primary?.config.scoping,
-		retainBank: primary?.getScopedRetainTarget().bank ?? targets[0]?.bank,
-		recallBanks: primary?.getScopedRecallTargets().map(target => target.bank) ?? targets.map(target => target.bank),
+		retainBank: primary?.getScopedRetainTarget().bank ?? banks[0]?.bank,
+		recallBanks: primary?.getScopedRecallTargets().map(target => target.bank) ?? banks.map(({ bank }) => bank),
 		workingCount,
 		episodicCount,
 		tripleCount,
@@ -579,14 +567,16 @@ async function resolveMnemopiProviderOptions(
 			// journalJudgmentUsage snapshots the session id. /new, fork, and session
 			// switch keep this function, so bind inside each call. An in-flight call
 			// keeps the callback it already created and still journals to its start.
-			const onUsage = journalJudgmentUsage(usageLedger);
-			const request = resolveMemoryCompletionInput(prompt, opts);
-			const signal =
-				typeof opts?.timeout === "number" && Number.isFinite(opts.timeout) && opts.timeout > 0
-					? AbortSignal.timeout(opts.timeout)
-					: undefined;
+			const { onUsage, request, signal } = {
+				onUsage: journalJudgmentUsage(usageLedger),
+				request: resolveMemoryCompletionInput(prompt, opts),
+				signal:
+					typeof opts?.timeout === "number" && Number.isFinite(opts.timeout) && opts.timeout > 0
+						? AbortSignal.timeout(opts.timeout)
+						: undefined,
+			};
 
-			for (const { model } of candidates) {
+			for (const { model, thinkingLevel } of candidates) {
 				if (signal?.aborted) return null;
 				try {
 					if (model.api === "local-inference") {
@@ -612,32 +602,38 @@ async function resolveMnemopiProviderOptions(
 						});
 						continue;
 					}
+					// `auto` has no per-request classifier here, so it sends no effort, like an omitted suffix.
+					const level = concreteThinkingLevel(thinkingLevel);
 					const message = await retryTransientCompletion(
 						() =>
-							completeSimple(
-								model,
-								{
-									...(request.systemPrompt ? { systemPrompt: [request.systemPrompt] } : {}),
-									messages: [{ role: "user", content: request.prompt, timestamp: Date.now() }],
-								},
-								{
-									apiKey: modelRegistry.resolver(model, sessionId),
-									sessionId,
-									maxTokens: opts?.maxTokens,
-									temperature: opts?.temperature,
-									signal,
-									onAttempt: message =>
-										onUsage?.({
-											purpose: "memory",
-											role: "memory",
-											api: model.api,
-											provider: model.provider,
-											model: model.id,
-											usage: message.usage,
-											stopReason: message.stopReason,
-											errorMessage: message.errorMessage,
-										}),
-								},
+							withLoopPhase("mnemopi.extract", () =>
+								completeSimple(
+									model,
+									{
+										...(request.systemPrompt ? { systemPrompt: [request.systemPrompt] } : {}),
+										messages: [{ role: "user", content: request.prompt, timestamp: Date.now() }],
+									},
+									{
+										apiKey: modelRegistry.resolver(model, sessionId),
+										sessionId,
+										maxTokens: opts?.maxTokens,
+										temperature: opts?.temperature,
+										reasoning: clampThinkingLevelForModel(model, toReasoningEffort(level)),
+										disableReasoning: shouldDisableReasoning(level) ? true : undefined,
+										signal,
+										onAttempt: message =>
+											onUsage?.({
+												purpose: "memory",
+												role: "memory",
+												api: model.api,
+												provider: model.provider,
+												model: model.id,
+												usage: message.usage,
+												stopReason: message.stopReason,
+												errorMessage: message.errorMessage,
+											}),
+									},
+								),
 							),
 						{ provider: model.provider, signal },
 					);
@@ -689,7 +685,7 @@ async function resolveMnemopiProviderOptions(
 	}
 }
 
-function getMnemopiSessionStateFromParent(options: MemoryBackendStartOptions): MnemopiSessionState | undefined {
+function getMnemopiSessionStateFromParent(options: MemoryBackendStartOptions): MnemopiSessionStateApi | undefined {
 	const parent = options.parentMnemopiSessionState;
 	return parent?.aliasOf ?? parent;
 }

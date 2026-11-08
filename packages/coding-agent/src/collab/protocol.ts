@@ -38,7 +38,13 @@ export type {
 	RelayControlToGuest,
 	RelayControlToHost,
 } from "@oh-my-pi/pi-wire";
-export { COLLAB_PROMPT_MESSAGE_TYPE, COLLAB_PROTO } from "@oh-my-pi/pi-wire";
+export {
+	COLLAB_PROMPT_MESSAGE_TYPE,
+	COLLAB_PROTO,
+	packEnvelope,
+	rewriteEnvelopePeer,
+	unpackEnvelope,
+} from "@oh-my-pi/pi-wire";
 export { DEFAULT_RELAY_URL, ENVELOPE_HEADER_LENGTH, ROOM_ID_BYTES };
 
 export type CollabParticipant = Participant;
@@ -153,9 +159,7 @@ export function encodeSnapshotChunk(entryJsons: readonly string[], final: boolea
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Wire envelope: [4B uint32 BE peerId][sealed payload]
-// Host→relay: peerId 0 broadcasts to all guests; peerId N targets guest N.
-// Guest→relay: always 0; the relay rewrites it to the sender's id.
+// Thrown values: total conversion, bounded output
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
@@ -193,24 +197,6 @@ export function describeThrown(value: unknown, maxUnits: number): string {
 	}
 	if (typeof text !== "string" || text.length === 0) return "(unprintable error)";
 	return text.length <= maxUnits ? text : `${text.slice(0, maxUnits)}…`;
-}
-
-export function packEnvelope(peerId: number, sealed: Uint8Array): Uint8Array {
-	const out = new Uint8Array(ENVELOPE_HEADER_LENGTH + sealed.byteLength);
-	new DataView(out.buffer).setUint32(0, peerId, false);
-	out.set(sealed, ENVELOPE_HEADER_LENGTH);
-	return out;
-}
-
-export function unpackEnvelope(data: Uint8Array): { peerId: number; payload: Uint8Array } | null {
-	if (data.byteLength < ENVELOPE_HEADER_LENGTH) return null;
-	const peerId = new DataView(data.buffer, data.byteOffset, ENVELOPE_HEADER_LENGTH).getUint32(0, false);
-	return { peerId, payload: data.subarray(ENVELOPE_HEADER_LENGTH) };
-}
-
-/** Rewrite the peerId in place without copying the payload. */
-export function rewriteEnvelopePeer(data: Uint8Array, peerId: number): void {
-	new DataView(data.buffer, data.byteOffset, ENVELOPE_HEADER_LENGTH).setUint32(0, peerId, false);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

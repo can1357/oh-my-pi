@@ -75,4 +75,30 @@ export type TextReviewAnnotation =
 export interface TextReviewOverlayResult {
 	action: "paste";
 	annotations: TextReviewAnnotation[];
+	/** Source text after an external-editor edit; absent when the source was not edited. */
+	editedText?: string;
 }
+
+export type AnnotationOverlayDraft =
+	| {
+			kind: "diff";
+			annotations: { fileIndex: number; sourceIndex: number; annotation: CodeReviewAnnotation }[];
+			editor?: {
+				fileIndex: number;
+				sourceIndex: number;
+				scope: "file" | "line";
+				editingAnnotationIndex?: number;
+				text: string;
+			};
+	  }
+	| {
+			kind: "text";
+			annotations: { sourceIndex: number; annotation: TextReviewAnnotation }[];
+			editedText?: string;
+			editor?: {
+				sourceIndex: number;
+				scope: "text" | "line";
+				editingAnnotationIndex?: number;
+				text: string;
+			};
+	  };

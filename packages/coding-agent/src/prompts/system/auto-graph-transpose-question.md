@@ -1,1 +1,0 @@
-The state is a Markdown table from a coding assistant's answer, with each column's inferred type. Is each row a different metric (its own unit or meaning, like "latency", "cost", "success rate") while the columns are the things being compared? No when each row is one item measured by the same columns.

@@ -6,6 +6,7 @@ import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-tui/overlays/ask-d
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
+import type { DescribeContext, NativeUiEvent } from "../src/native/node";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -542,6 +543,109 @@ describe("AskDialogComponent", () => {
 			note: "Updated [Image #1]",
 			noteImages: [image],
 		});
+	});
+
+	describe("Note right after a pick that moved to the next question", () => {
+		const twoQuestions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Q1?", options: [{ label: "Alpha" }, { label: "Beta" }] },
+			{ id: "q2", question: "Q2?", options: [{ label: "Gamma" }, { label: "Delta" }] },
+		];
+		const cx: DescribeContext = {
+			cols: 100,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		const action = (act: string): NativeUiEvent => ({ type: "action", key: `actions/${act}`, act, mods: [] });
+		const flush = async (): Promise<void> => {
+			for (let i = 0; i < 4; i++) await Promise.resolve();
+		};
+		const surfaces = {
+			// Tern: a click commits a single-choice row, then the Note button.
+			tern: async (component: AskDialogComponent) => {
+				component.describe(cx);
+				component.handleNativeEvent({ type: "activate", key: "q0", item: "option:1" });
+				component.handleNativeEvent(action("note"));
+				await flush();
+				component.handleNativeEvent({ type: "activate", key: "q1", item: "option:0" });
+				component.handleNativeEvent(action("submit"));
+			},
+			tui: async (component: AskDialogComponent) => {
+				component.handleInput(DOWN);
+				component.handleInput(ENTER);
+				component.handleInput("n");
+				await flush();
+				component.handleInput(ENTER);
+				component.handleInput(ENTER);
+			},
+		};
+
+		for (const [surface, run] of Object.entries(surfaces)) {
+			it(`annotates that pick, not the next question's row (${surface})`, async () => {
+				const onPrompt = vi.fn().mockResolvedValue("why Beta");
+				const onSubmit = vi.fn();
+				const component = new AskDialogComponent(twoQuestions, { onSubmit, onCancel: vi.fn(), onPrompt });
+
+				await run(component);
+
+				expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Beta", question: "Q1?" });
+				const [first, second] = onSubmit.mock.calls[0][0].results;
+				expect(first).toMatchObject({ selectedOptions: ["Beta"], note: "why Beta", noteOption: "Beta" });
+				expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: undefined, noteOption: undefined });
+			});
+		}
+
+		it("goes back to the highlighted row once the next question gets other input", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("why Delta");
+			const onSubmit = vi.fn();
+			const component = new AskDialogComponent(twoQuestions, { onSubmit, onCancel: vi.fn(), onPrompt });
+
+			component.handleInput(ENTER); // Alpha, on to Q2
+			component.handleInput(DOWN); // Delta highlighted
+			component.handleInput("n");
+			await flush();
+			component.handleInput(ENTER);
+			component.handleInput(ENTER);
+
+			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Delta", question: "Q2?" });
+			const [first, second] = onSubmit.mock.calls[0][0].results;
+			expect(first.note).toBeUndefined();
+			expect(second).toMatchObject({ selectedOptions: ["Delta"], note: "why Delta", noteOption: "Delta" });
+		});
+		for (const surface of ["tern", "tui"] as const) {
+			it(`starts a new note on the next question after annotating the previous answer (${surface})`, async () => {
+				const onPrompt = vi.fn().mockResolvedValueOnce("why Beta").mockResolvedValueOnce("why Gamma");
+				const onSubmit = vi.fn();
+				const component = new AskDialogComponent(twoQuestions, { onSubmit, onCancel: vi.fn(), onPrompt });
+
+				if (surface === "tern") {
+					component.describe(cx);
+					component.handleNativeEvent({ type: "activate", key: "q0", item: "option:1" });
+					component.handleNativeEvent(action("note"));
+				} else {
+					component.handleInput(DOWN);
+					component.handleInput(ENTER);
+					component.handleInput("n");
+				}
+				await flush();
+				if (surface === "tern") component.handleNativeEvent(action("note"));
+				else component.handleInput("n");
+				await flush();
+
+				expect(onPrompt.mock.calls[1]).toEqual([{ title: "Note for Gamma", question: "Q2?" }, undefined]);
+				if (surface === "tern") {
+					component.handleNativeEvent({ type: "activate", key: "q1", item: "option:0" });
+					component.handleNativeEvent(action("submit"));
+				} else {
+					component.handleInput(ENTER);
+					component.handleInput(ENTER);
+				}
+				const [first, second] = onSubmit.mock.calls[0][0].results;
+				expect(first).toMatchObject({ selectedOptions: ["Beta"], note: "why Beta", noteOption: "Beta" });
+				expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: "why Gamma", noteOption: "Gamma" });
+			});
+		}
 	});
 
 	it("note prefill is empty when editing a different row after noting another option", async () => {
@@ -1659,6 +1763,37 @@ describe("AskDialogComponent", () => {
 			customInput: "see [Image #1] again",
 			customInputImages: [image],
 		});
+	});
+
+	it("reopens a cancelled Other prompt with its draft, leaving the submitted answer unchanged (#18211)", async () => {
+		const onPrompt = vi
+			.fn()
+			.mockResolvedValueOnce("first")
+			.mockResolvedValueOnce({ draft: { text: "first, then more" } })
+			.mockResolvedValueOnce({ draft: { text: "  " } })
+			.mockResolvedValueOnce(undefined);
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Choose multiple?", options: [{ label: "Option A" }], multi: true }],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
+		const openOther = async () => {
+			component.handleInput(ENTER);
+			await Promise.resolve();
+			await Promise.resolve();
+		};
+
+		component.handleInput(DOWN); // Other
+		await openOther();
+		component.handleInput(SHIFT_TAB);
+		await openOther(); // cancelled with a draft
+		await openOther(); // cancelled after blanking it
+		await openOther();
+
+		expect(onPrompt.mock.calls.map(call => call[1])).toEqual([undefined, "first", "first, then more", "first"]);
+		component.handleInput(TAB);
+		component.handleInput(ENTER);
+		expect(onSubmit.mock.calls[0][0].results[0].customInput).toBe("first");
 	});
 
 	it("drops custom-answer images when the custom answer is cleared", async () => {

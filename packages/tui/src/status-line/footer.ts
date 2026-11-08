@@ -176,22 +176,11 @@ export class FooterComponent implements Component {
 	 */
 	describe(): NativeNode {
 		const state = this.session.state;
-		let input = 0;
-		let output = 0;
-		let cacheRead = 0;
-		let cacheWrite = 0;
-		let cost = 0;
-		let premiumRequests = 0;
-		for (const entry of this.session.sessionManager.getEntries()) {
-			if (entry.type === "message" && entry.message?.role === "assistant") {
-				input += entry.message.usage.input;
-				output += entry.message.usage.output;
-				cacheRead += entry.message.usage.cacheRead;
-				cacheWrite += entry.message.usage.cacheWrite;
-				cost += entry.message.usage.cost.total;
-				premiumRequests += entry.message.usage.premiumRequests ?? 0;
-			}
-		}
+		// Cumulative usage: the session manager's running rollup spans every entry
+		// in the session (so it survives compaction) and already folds in the usage
+		// completed `task` tool results carry, which is where subagent spend lands.
+		const { input, output, cacheRead, cacheWrite, cost, premiumRequests } =
+			this.session.sessionManager.getUsageStatistics();
 		const segs: NativeNode[] = [];
 		const seg = (key: string, props: TspProps<"seg">): void => {
 			segs.push(node("seg", { role: `omp.footer.${key}`, ...props }, undefined, key));
@@ -209,7 +198,7 @@ export class FooterComponent implements Component {
 		for (const [key, glyph, amount] of counters) {
 			if (amount) seg(key, { side: "left", priority: 1, spans: [span(`${glyph}${formatNumber(amount)}`, "dim")] });
 		}
-		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const usingSubscription = state.model ? this.session.modelRegistry.isUsingSubscription(state.model) : false;
 		const billing = formatBillingSummary({ cost, usingSubscription, premiumRequests, fractionDigits: 3 }, theme);
 		if (billing) seg("cost", { side: "left", priority: 3, spans: [span(billing, "dim")] });
 		const contextUsage = this.session.getContextUsage();
@@ -255,25 +244,19 @@ export class FooterComponent implements Component {
 	render(width: number): readonly string[] {
 		const state = this.session.state;
 
-		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
-		let totalPremiumRequests = 0;
-
-		for (const entry of this.session.sessionManager.getEntries()) {
-			if (entry.type === "message" && entry.message?.role === "assistant") {
-				totalInput += entry.message.usage.input;
-				totalOutput += entry.message.usage.output;
-				totalCacheRead += entry.message.usage.cacheRead;
-				totalCacheWrite += entry.message.usage.cacheWrite;
-				totalCost += entry.message.usage.cost.total;
-				totalPremiumRequests += entry.message.usage.premiumRequests ?? 0;
-			}
-		}
-
+		// Cumulative usage comes from the session manager's running rollup, which
+		// spans every entry in the session and folds in the usage completed `task`
+		// tool results carry (subagent spend). Context usage below is a separate
+		// question and stays window-scoped on purpose. Destructured straight off the
+		// rollup: a repaint must not allocate a second copy of these six fields.
+		const {
+			input: totalInput,
+			output: totalOutput,
+			cacheRead: totalCacheRead,
+			cacheWrite: totalCacheWrite,
+			cost: totalCost,
+			premiumRequests: totalPremiumRequests,
+		} = this.session.sessionManager.getUsageStatistics();
 		// Calculate context usage from session (handles compaction correctly).
 		// After compaction, tokens are unknown until the next LLM response.
 		const contextUsage = this.session.getContextUsage();
@@ -319,7 +302,7 @@ export class FooterComponent implements Component {
 		}
 
 		// Show billing summary with subscription and premium-request indicators
-		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
+		const usingSubscription = state.model ? this.session.modelRegistry.isUsingSubscription(state.model) : false;
 		const { auto: autoIcon } = theme.icon;
 		const billing = formatBillingSummary(
 			{ cost: totalCost, usingSubscription, premiumRequests: totalPremiumRequests, fractionDigits: 3 },

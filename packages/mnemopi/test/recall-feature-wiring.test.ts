@@ -15,7 +15,7 @@ import {
 	type VoiceRecallResult,
 } from "@oh-my-pi/pi-mnemopi/core/polyphonic-recall";
 import { VeracityConsolidator } from "@oh-my-pi/pi-mnemopi/core/veracity-consolidation";
-import { logger } from "@oh-my-pi/pi-utils";
+import { currentLoopPhase, logger } from "@oh-my-pi/pi-utils";
 
 const roots: string[] = [];
 const open: Mnemopi[] = [];
@@ -236,6 +236,18 @@ describe("polyphonic graph voice bounds", () => {
 			engine.close();
 		}
 	});
+
+	it("seeds from gists whose participants the query names, in any script and past two words (issue #16723)", () => {
+		const engine = new PolyphonicRecallEngine();
+		try {
+			engine.graph.storeGist(engine.graph.extractGist("Chúng tôi gặp nhau ở Hà Nội.", "hn"), "hn");
+			engine.graph.storeGist(engine.graph.extractGist("We wired Grafana Loki Tempo into the stack.", "gl"), "gl");
+			expect(engine.graphVoice("Hà Nội").map(result => result.memoryId)).toEqual(["hn"]);
+			expect(engine.graphVoice("Grafana Loki Tempo").map(result => result.memoryId)).toEqual(["gl"]);
+		} finally {
+			engine.close();
+		}
+	});
 });
 
 describe("enhanced recall cache wiring", () => {
@@ -253,6 +265,31 @@ describe("enhanced recall cache wiring", () => {
 		const afterWrite = await mem.recallEnhanced("deploy runbook", 5, { includeFacts: true, channelId: "bank-a" });
 		expect(contents(afterWrite)).toContain("The deploy runbook now also covers rollbacks");
 		expect(mem.beam.caches.queryCache?.stats()).toMatchObject({ hits: 1, misses: 2 });
+	});
+
+	it("reports the cache-hit and cache-miss recall-count updates to the loop watchdog", async () => {
+		const dbPath = tempDbPath();
+		const mem = memory(dbPath, { enhancedRecall: true });
+		mem.remember("The deploy runbook lives in the ops wiki");
+
+		// The recall-count UPDATE is synchronous and can wait out SQLite's busy timeout
+		// behind another writer; without a label that stall is logged as "unknown".
+		const run = mem.beam.db.run.bind(mem.beam.db);
+		const phases: (string | undefined)[] = [];
+		const spy = spyOn(mem.beam.db, "run").mockImplementation(((sql: string, ...params: unknown[]) => {
+			phases.push(currentLoopPhase());
+			return run(sql, ...(params as []));
+		}) as typeof mem.beam.db.run);
+		try {
+			await mem.recallEnhanced("deploy runbook", 5); // miss
+			await mem.recallEnhanced("deploy runbook", 5); // hit
+		} finally {
+			spy.mockRestore();
+		}
+
+		expect(mem.beam.caches.queryCache?.stats()).toMatchObject({ hits: 1, misses: 1 });
+		expect(phases.length).toBeGreaterThan(0);
+		expect(phases.every(phase => phase === "mnemopi.recall")).toBe(true);
 	});
 
 	it("drops cached results when another connection writes to the same bank", async () => {

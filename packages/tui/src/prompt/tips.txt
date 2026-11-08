@@ -12,6 +12,7 @@ Need a cheap nested model call? Use `completion(x...)`. Have a big batch of task
 Spaghetti code? Try complaining with /omfg
 Did you know? Each kitty/tmux/cmux/zellij/wezterm split keeps its own session — `omp -c` resumes the right one
 Drop the word `ultrathink` in your message for harder multi-step reasoning — watch it glow rainbow as you type
+Agent overthinking? Say `chillax` — on models with per-message effort, thinking drops to the lowest level, even mid-turn — watch it glow as you type
 Say `orchestrate` in your message to drive a multi-phase task with parallel subagents — watch it glow as you type
 Say `workflowz` in your message to drive the task with parallel subagents in eval — watch it glow as you type
 Bulk data to classify or triage? Say `jevify` in your message — the eval kernel's `judge()` processes the batch and you read only what it flags — watch it glow as you type

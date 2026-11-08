@@ -9,6 +9,7 @@ import {
 	calculateUncachedInputCost,
 	calculateUsageCost,
 	getBundledModel,
+	getEffectiveTokenCost,
 	getBundledModels,
 	getNextTimeBasedPricingTransition,
 	getTimeBasedPricingPeriod,
@@ -96,18 +97,19 @@ describe("time-based token pricing", () => {
 		expect(first.cost.total + second.cost.total).toBeCloseTo(2.259, 12);
 	});
 
-	it("switches Pro to Flash prices exactly at the dated cutoff, then resumes Flash peak rates", () => {
-		const model = buildModel(spec("deepseek-v4-pro"));
+	it("keeps Pro billing distinct from Flash after the canceled September transition", () => {
 		const cutoff = Date.parse("2026-09-14T04:00:00Z");
-		const before = calculateCost(model, usage(), cutoff - 1);
-		const after = calculateCost(model, usage(), cutoff);
-		const nextPeak = calculateCost(model, usage(), Date.parse("2026-09-14T06:00:00Z"));
-		expect(before.input).toBeCloseTo(1.32, 12);
-		expect(before.output).toBeCloseTo(3.96, 12);
-		expect(before.cacheRead).toBeCloseTo(0.044, 12);
-		expect(before.total).toBeCloseTo(5.324, 12);
-		expect(after.total).toBeCloseTo(0.753, 12);
-		expect(nextPeak.total).toBeCloseTo(1.506, 12);
+		const nextPeak = Date.parse("2026-09-14T06:00:00Z");
+		const proCard = { input: 1.32, output: 3.96, cacheRead: 0.044, cacheWrite: 0 };
+		const flashCard = { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 };
+		for (const pro of [buildModel(spec("deepseek-v4-pro")), getBundledModel("deepseek", "deepseek-v4-pro")]) {
+			expect(getEffectiveTokenCost(pro.cost, cutoff)).toMatchObject(proCard);
+			expect(getEffectiveTokenCost(pro.cost, nextPeak)).toMatchObject(proCard);
+			expect(calculateCost(pro, usage(), cutoff - 1).total).toBeCloseTo(5.324, 12);
+			expect(calculateCost(pro, usage(), cutoff).total).toBeCloseTo(2.662, 12);
+			expect(calculateCost(pro, usage(), nextPeak).total).toBeCloseTo(5.324, 12);
+		}
+		expect(getEffectiveTokenCost(buildModel(spec("deepseek-flash")).cost, nextPeak)).toMatchObject(flashCard);
 	});
 
 	it("applies first-party policies to documented aliases but not reseller or expiring products", () => {
@@ -349,6 +351,25 @@ describe("financial schedule validation", () => {
 				effectiveRates: [{ ...serialized.effectiveRates?.[0], effectiveFrom: Infinity }],
 			}),
 		).toBe(false);
+	});
+
+	it("rejects malformed cost-patch and cost-fallback dated cards instead of keeping the old price", () => {
+		const card = { effectiveFrom: "2026-12-01T08:00:00Z", input: 4, output: 20 };
+		const invalid = [
+			{ ...card, effectiveFrom: "2026-12-01" },
+			{ ...card, effectiveFrom: "2026-02-30T08:00:00Z" },
+			{ ...card, input: -1 },
+			{ ...card, cache_read: 0.2 },
+		];
+		for (const axis of ["costPatch", "costFallback"] as const) {
+			const name = axis === "costPatch" ? "cost-patch" : "cost-fallback";
+			for (const effectiveRate of invalid) {
+				const catalog = { [axis]: { input: 2, output: 10, effectiveRates: { listPrice: effectiveRate } } };
+				expect(() => applyCatalogCorrections(spec("custom-model", "custom"), catalog)).toThrow(`Invalid ${name}`);
+			}
+			const duplicate = { [axis]: { input: 2, output: 10, effectiveRates: { first: card, second: card } } };
+			expect(() => applyCatalogCorrections(spec("custom-model", "custom"), duplicate)).toThrow(`Invalid ${name}`);
+		}
 	});
 });
 

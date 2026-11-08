@@ -817,6 +817,44 @@ fn apply_patches_to_map(
 				message: format!("mode does not match for {}", source_path.unwrap_or_default()),
 			});
 		}
+		if source
+			.as_ref()
+			.is_some_and(|entry| entry.mode == Mode::COMMIT)
+			|| target_mode == Some(Mode::COMMIT)
+		{
+			let (preimage, postimage) = if options.reverse {
+				(b'+', b'-')
+			} else {
+				(b'-', b'+')
+			};
+			// `git apply` reads a gitlink preimage only from the index; worktree
+			// application drops gitlink hunks, so any directory stands for the old
+			// commit. A pure rename has no hunk and keeps the source commit.
+			let changed = !patch.hunks.is_empty();
+			if options.cached
+				&& changed
+				&& let Some(entry) = &source
+				&& entry.id != gitlink_id(patch, preimage)?
+			{
+				return Err(Error::PatchFailed {
+					message: format!("gitlink does not match for {}", source_path.unwrap_or_default()),
+				});
+			}
+			if let Some(path) = source_path
+				&& target_path != Some(path)
+			{
+				state.remove(path);
+			}
+			if let Some(path) = target_path {
+				validate_repo_path(path).map_err(ApplyFailure::into_error)?;
+				let id = match &source {
+					Some(entry) if !changed => entry.id,
+					_ => gitlink_id(patch, postimage)?,
+				};
+				state.insert(path.to_owned(), FileEntry::new(id, Mode::COMMIT));
+			}
+			continue;
+		}
 		let source_bytes = match source.as_ref() {
 			Some(entry) => blob_bytes(repo, entry.id)?,
 			None => Vec::new(),
@@ -848,6 +886,18 @@ fn apply_patches_to_map(
 		}
 	}
 	Ok(())
+}
+
+fn gitlink_id(patch: &FilePatch, kind: u8) -> Result<gix::ObjectId> {
+	let id = patch
+		.hunks
+		.iter()
+		.flat_map(|hunk| &hunk.lines)
+		.find(|line| line.kind == kind)
+		.and_then(|line| line.data.strip_prefix(b"Subproject commit "))
+		.ok_or_else(|| Error::PatchFailed { message: "gitlink patch lacks a commit id".into() })?;
+	gix::ObjectId::from_hex(id)
+		.map_err(|_| Error::PatchFailed { message: "gitlink patch has an invalid commit id".into() })
 }
 
 fn patch_sides(
@@ -1354,7 +1404,8 @@ fn tree_map(repo: &gix::Repository, tree: gix::ObjectId) -> Result<BTreeMap<Stri
 /// patch's source, or its target when it creates one. Applying needs nothing
 /// else, so the rest of the worktree is never read or hashed. Tracked paths
 /// take their index mode (there is no executable bit on Windows), others the
-/// mode the patch records.
+/// mode the patch records. A directory at a source path is a gitlink, as git
+/// reads it, whether or not the submodule is initialized.
 fn patch_worktree_map(
 	repo: &GitRepo,
 	gix_repo: &gix::Repository,
@@ -1370,6 +1421,15 @@ fn patch_worktree_map(
 			continue;
 		};
 		if state.contains_key(path) {
+			continue;
+		}
+		if source == Some(path)
+			&& fs::symlink_metadata(repo.root().join(path)).is_ok_and(|metadata| metadata.is_dir())
+		{
+			// Worktree application never reads the commit (see
+			// `apply_patches_to_map`).
+			let id = gix::ObjectId::null(gix_repo.object_hash());
+			state.insert(path.to_owned(), FileEntry::new(id, Mode::COMMIT));
 			continue;
 		}
 		let mode = index
@@ -1637,7 +1697,15 @@ fn write_patch_worktree(
 			let entry = state.get(target).ok_or_else(|| Error::PatchFailed {
 				message: format!("missing applied path {target}"),
 			})?;
-			write_worktree_entry(repo, gix_repo, filter, target, entry)?;
+			if entry.mode == Mode::COMMIT {
+				// Like `git apply`, a gitlink only ensures its directory: an added
+				// one is created empty, a checked-out submodule is left
+				// untouched.
+				validate_repo_path(target).map_err(ApplyFailure::into_error)?;
+				fs::create_dir_all(repo.root().join(target))?;
+			} else {
+				write_worktree_entry(repo, gix_repo, filter, target, entry)?;
+			}
 		}
 	}
 	Ok(())
@@ -1769,7 +1837,9 @@ fn checkout_changed_paths(
 	unstaged: &BTreeSet<String>,
 ) -> Result<()> {
 	for path in changed {
+		// A gitlink changes the index, not the initialized submodule directory.
 		match worktree.get(path) {
+			Some(entry) if entry.mode == Mode::COMMIT => {},
 			Some(entry) => write_worktree_entry(repo, gix_repo, filter, path, entry)?,
 			None => remove_worktree_path(repo, path)?,
 		}
@@ -1780,7 +1850,7 @@ fn checkout_changed_paths(
 		let Some(entry) = merged.get(path) else {
 			continue;
 		};
-		let stat = if unstaged.contains(path) {
+		let stat = if entry.mode == Mode::COMMIT || unstaged.contains(path) {
 			Stat::default()
 		} else {
 			let metadata = gix::index::fs::Metadata::from_path_no_follow(&repo.root().join(path))?;
@@ -1841,13 +1911,22 @@ fn write_worktree_entry(
 	Ok(())
 }
 
+/// Remove `path` and the parent directories it leaves empty. A directory at
+/// `path` is a gitlink: like git, only an empty (uninitialized) one is
+/// removed, a checked-out submodule stays.
 fn remove_worktree_path(repo: &GitRepo, path: &str) -> Result<()> {
 	validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 	let absolute = repo.root().join(path);
-	match fs::remove_file(&absolute) {
-		Ok(()) => {},
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-		Err(err) => return Err(err.into()),
+	if fs::symlink_metadata(&absolute).is_ok_and(|metadata| metadata.is_dir()) {
+		if fs::remove_dir(&absolute).is_err() {
+			return Ok(());
+		}
+	} else {
+		match fs::remove_file(&absolute) {
+			Ok(()) => {},
+			Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+			Err(err) => return Err(err.into()),
+		}
 	}
 	let mut directory = absolute.parent();
 	while let Some(current) = directory {
@@ -2609,5 +2688,178 @@ mod tests {
 		assert!(repository.stash_try_pop(false).expect("pop second"));
 		assert_eq!(git(temp.path(), &["rev-parse", "refs/stash"]), first);
 		assert_eq!(fs::read(temp.path().join("file.txt")).expect("second restored"), b"second\n");
+	}
+
+	/// Superproject tracking gitlink `module` at the first of two module
+	/// commits: checked out there when `initialized`, an empty directory
+	/// otherwise. Module commits carry fixed dates and no signature (a user's
+	/// `commit.gpgsign` stamps the signing time into the id), so every fixture
+	/// shares the same `(old, new)` commit ids.
+	fn gitlink_fixture(initialized: bool) -> (TempDir, String, String) {
+		let temp = init(&[("file.txt", b"base\n")]);
+		let module = temp.path().join("module");
+		fs::create_dir(&module).expect("create module");
+		git(&module, &["init", "-q"]);
+		let commit = |content: &[u8]| {
+			fs::write(module.join("f.txt"), content).expect("write module file");
+			git(&module, &["add", "f.txt"]);
+			let status = Command::new("git")
+				.current_dir(&module)
+				.env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+				.env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+				.args([
+					"-c",
+					"user.name=Patch Test",
+					"-c",
+					"user.email=patch@example.com",
+					"-c",
+					"commit.gpgsign=false",
+					"commit",
+					"-qm",
+					"module",
+				])
+				.status()
+				.expect("run git commit");
+			assert!(status.success(), "module commit failed");
+			git(&module, &["rev-parse", "HEAD"]).trim().to_owned()
+		};
+		let old = commit(b"one\n");
+		let new = commit(b"two\n");
+		git(&module, &["checkout", "-q", &old]);
+		git(temp.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{old},module")]);
+		git(temp.path(), &["commit", "-qm", "add gitlink"]);
+		if !initialized {
+			fs::remove_dir_all(&module).expect("remove module checkout");
+			fs::create_dir(&module).expect("create empty module");
+		}
+		(temp, old, new)
+	}
+
+	/// Index, status, and the `module` and `moved` directory listings (`None`
+	/// when absent).
+	fn gitlink_snapshot(path: &Path) -> (String, String, Vec<Option<Vec<String>>>) {
+		let listings = ["module", "moved"]
+			.iter()
+			.map(|dir| {
+				fs::read_dir(path.join(dir)).ok().map(|entries| {
+					let mut names: Vec<String> = entries
+						.map(|entry| {
+							entry
+								.expect("gitlink dir entry")
+								.file_name()
+								.to_string_lossy()
+								.into_owned()
+						})
+						.collect();
+					names.sort();
+					names
+				})
+			})
+			.collect();
+		(git(path, &["ls-files", "--stage"]), git(path, &["status", "--porcelain"]), listings)
+	}
+
+	/// Apply `patch` to `ours` and `git apply` it to `oracle`, then assert both
+	/// agree on success, `can_apply_patch`, and the resulting gitlink state.
+	fn assert_gitlink_apply_matches_git(
+		ours: &Path,
+		oracle: &Path,
+		patch: &str,
+		options: &ApplyOptions,
+		case: &str,
+	) {
+		let repository = repo(ours);
+		let checked = repository
+			.can_apply_patch(patch, options)
+			.expect("check patch");
+		let applied = repository.apply_patch(patch, options);
+		fs::write(oracle.join(".git/change.patch"), patch).expect("write patch");
+		let mut args = vec!["apply"];
+		if options.cached {
+			args.push("--cached");
+		}
+		if options.reverse {
+			args.push("--reverse");
+		}
+		args.push(".git/change.patch");
+		let expected = Command::new("git")
+			.current_dir(oracle)
+			.args(args)
+			.output()
+			.expect("run git apply");
+		assert_eq!(
+			applied.is_ok(),
+			expected.status.success(),
+			"{case}: ours {applied:?}, git {}",
+			String::from_utf8_lossy(&expected.stderr)
+		);
+		assert_eq!(checked, expected.status.success(), "{case}");
+		assert_eq!(gitlink_snapshot(ours), gitlink_snapshot(oracle), "{case}");
+	}
+
+	#[test]
+	fn worktree_apply_of_gitlink_patches_matches_git() {
+		// Regression: worktree application found no source for a submodule
+		// directory ("does not exist") and materialized added gitlinks as blobs.
+		for initialized in [true, false] {
+			for (kind, reverse) in [("update", false), ("delete", false), ("delete", true)] {
+				let (ours, old, new) = gitlink_fixture(initialized);
+				let (oracle, ..) = gitlink_fixture(initialized);
+				if kind == "update" {
+					git(ours.path(), &["update-index", "--cacheinfo", &format!("160000,{new},module")]);
+				} else {
+					git(ours.path(), &["update-index", "--force-remove", "module"]);
+				}
+				let patch = repo(ours.path())
+					.diff_text(&DiffOptions { cached: true, ..DiffOptions::default() })
+					.expect("gitlink patch");
+				git(ours.path(), &[
+					"update-index",
+					"--add",
+					"--cacheinfo",
+					&format!("160000,{old},module"),
+				]);
+				assert_gitlink_apply_matches_git(
+					ours.path(),
+					oracle.path(),
+					&patch,
+					&ApplyOptions { reverse, ..ApplyOptions::default() },
+					&format!("{kind} reverse={reverse} initialized={initialized}"),
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn gitlink_pure_rename_applies_like_git() {
+		// Regression: a header-only gitlink rename has no `Subproject commit`
+		// line, so apply failed instead of keeping the source commit.
+		for initialized in [true, false] {
+			for cached in [true, false] {
+				let (ours, old, _) = gitlink_fixture(initialized);
+				let (oracle, ..) = gitlink_fixture(initialized);
+				git(ours.path(), &["update-index", "--force-remove", "module"]);
+				git(ours.path(), &[
+					"update-index",
+					"--add",
+					"--cacheinfo",
+					&format!("160000,{old},moved"),
+				]);
+				let patch = repo(ours.path())
+					.diff_text(&DiffOptions { cached: true, ..DiffOptions::default() })
+					.expect("gitlink rename patch");
+				assert!(patch.contains("rename to moved") && !patch.contains("@@"), "{patch}");
+				git(ours.path(), &["reset", "-q"]);
+				for reverse in [false, true] {
+					assert_gitlink_apply_matches_git(
+						ours.path(),
+						oracle.path(),
+						&patch,
+						&ApplyOptions { cached, reverse, ..ApplyOptions::default() },
+						&format!("cached={cached} reverse={reverse} initialized={initialized}"),
+					);
+				}
+			}
+		}
 	}
 }

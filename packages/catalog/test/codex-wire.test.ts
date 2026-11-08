@@ -41,6 +41,17 @@ describe("getCodexResidency", () => {
 		expect(getCodexResidency(codexToken({ chatgpt_account_id: "acct-1" }))).toBeUndefined();
 	});
 
+	it("sends no residency header for an unconstrained account (#16493)", () => {
+		// Personal Plus tokens carry `no_constraint`; declaring it makes every request 404.
+		const headers = new Headers();
+		applyCodexResidencyHeader(headers, codexToken({ chatgpt_data_residency: "no_constraint" }));
+		expect(headers.has(OPENAI_HEADERS.RESIDENCY)).toBe(false);
+		// The authoritative data claim is not overridden by a compute residency.
+		expect(
+			getCodexResidency(codexToken({ chatgpt_data_residency: "no_constraint", chatgpt_compute_residency: "us" })),
+		).toBeUndefined();
+	});
+
 	it("ignores blank and non-string claims instead of sending an empty header", () => {
 		expect(getCodexResidency(codexToken({ chatgpt_data_residency: "   " }))).toBeUndefined();
 		expect(getCodexResidency(codexToken({ chatgpt_data_residency: 42 }))).toBeUndefined();

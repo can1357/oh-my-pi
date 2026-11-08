@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { type BeamMemoryState, initBeam } from "@oh-my-pi/pi-mnemopi/core/beam";
+import { currentEmbeddingModel } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { PolyphonicRecallEngine, polyphonicRecall } from "@oh-my-pi/pi-mnemopi/core/polyphonic-recall";
 import { closeQuietly, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
+import { currentLoopPhase } from "@oh-my-pi/pi-utils";
 
 function makeBeam(): BeamMemoryState {
 	const db = openDatabase(":memory:", { create: true, readwrite: true });
@@ -54,13 +56,15 @@ function seedPolyphonicFixture(beam: BeamMemoryState): PolyphonicRecallEngine {
 	insertWorking(beam, "m1", "Alice owns the durable launch checklist", 0.8, old);
 	insertWorking(beam, "m2", "Alice linked the graph traversal plan", 0.7, old);
 	insertWorking(beam, "m3", "Recent operational note for this week", 0.6);
-	beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+	beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)", [
 		"m1",
 		JSON.stringify([0.8, 0.2]),
+		currentEmbeddingModel(),
 	]);
-	beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+	beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)", [
 		"m2",
 		JSON.stringify([1, 0]),
+		currentEmbeddingModel(),
 	]);
 	beam.db.run(
 		`INSERT INTO gists (id, text, timestamp, participants_json, memory_id)
@@ -100,6 +104,33 @@ describe("PolyphonicRecallEngine", () => {
 		}
 	});
 
+	it("reports its synchronous fan-out and fusion to the loop watchdog as mnemopi.recall", () => {
+		const beam = makeBeam();
+		try {
+			seedPolyphonicFixture(beam);
+			const recall = PolyphonicRecallEngine.prototype.recall;
+			const phases: (string | undefined)[] = [];
+			const spy = spyOn(PolyphonicRecallEngine.prototype, "recall").mockImplementation(function (
+				this: PolyphonicRecallEngine,
+				...args
+			) {
+				phases.push(currentLoopPhase());
+				return recall.apply(this, args);
+			});
+			try {
+				polyphonicRecall(beam, "Alice recent", 10, { queryEmbedding: [1, 0] });
+
+				expect(phases.length).toBeGreaterThan(0);
+				expect(phases.every(phase => phase === "mnemopi.recall")).toBe(true);
+				expect(currentLoopPhase()).toBeUndefined();
+			} finally {
+				spy.mockRestore();
+			}
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
 	it("honors per-voice gates without producing fake-success results", () => {
 		const beam = makeBeam();
 		try {
@@ -110,6 +141,26 @@ describe("PolyphonicRecallEngine", () => {
 			const results = engine.recall("Alice recent", [1, 0], 10);
 			expect(results.map(result => result.id)).toEqual(["m1"]);
 			expect(results[0]?.voice_scores).toEqual({ fact: 1 / 61 });
+		} finally {
+			closeQuietly(beam.db);
+		}
+	});
+
+	it("does not let a query stopword match a stopword fact subject", () => {
+		const beam = makeBeam();
+		try {
+			const engine = seedPolyphonicFixture(beam);
+			insertWorking(beam, "m-junk", "That is approximately one CSS pixel at the default zoom level");
+			const timestamp = new Date().toISOString();
+			// Shape the regex extractor stores for "That is ..." sentences.
+			beam.db.run(
+				`INSERT INTO consolidated_facts
+					(id, subject, predicate, object, confidence, mention_count, first_seen, last_seen, sources_json, veracity)
+					VALUES ('cf_that', 'That', 'related_to', 'approximately one CSS pixel', 0.9, 2, ?, ?, ?, 'likely_true')`,
+				[timestamp, timestamp, JSON.stringify(["m-junk"])],
+			);
+
+			expect(engine.factVoice("the checklist that Alice owns").map(result => result.memoryId)).toEqual(["m1"]);
 		} finally {
 			closeQuietly(beam.db);
 		}
@@ -137,13 +188,15 @@ describe("PolyphonicRecallEngine", () => {
 				"session-b",
 				"global",
 			);
-			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)", [
 				"wm-private-b",
 				JSON.stringify([1, 0]),
+				currentEmbeddingModel(),
 			]);
-			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+			beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)", [
 				"wm-global-b",
 				JSON.stringify([1, 0]),
+				currentEmbeddingModel(),
 			]);
 			process.env.MNEMOPI_VOICE_GRAPH = "0";
 			process.env.MNEMOPI_VOICE_FACT = "0";

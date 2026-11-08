@@ -8,17 +8,17 @@ The classic format examples below come from the NousResearch `Hermes-Function-Ca
 
 Only the ChatML markers are control tokens; the tool and reasoning markers are text-level strings inside the turn body. Token **IDs are model-specific** (each Hermes release has its own tokenizer), so they are deliberately not listed here.
 
-| Marker (verbatim) | Kind | Purpose |
-|---|---|---|
-| `<\|im_start\|>` | ChatML control token | Start of a turn; followed immediately by the role name + `\n` |
-| `<\|im_end\|>` | ChatML control token | End of a turn |
-| `<tool_call>` | Text-level marker | Opens one tool call |
-| `</tool_call>` | Text-level marker | Closes one tool call |
-| `<tool_response>` | Text-level marker | Opens one tool result |
-| `</tool_response>` | Text-level marker | Closes one tool result |
-| `<tools>` … `</tools>` | Plain text | Wrapper around the tool list in the system turn |
-| `<scratch_pad>` … `</scratch_pad>` | Text-level marker (Hermes 3) | GOAP reasoning sections before calls |
-| `<think>` … `</think>` | Not in the Hermes 2 Pro spec | Thinking markers recognized by the omp scanner (R1-style fine-tunes) |
+| Marker (verbatim)                  | Kind                         | Purpose                                                              |
+| ---------------------------------- | ---------------------------- | -------------------------------------------------------------------- |
+| `<\|im_start\|>`                   | ChatML control token         | Start of a turn; followed immediately by the role name + `\n`        |
+| `<\|im_end\|>`                     | ChatML control token         | End of a turn                                                        |
+| `<tool_call>`                      | Text-level marker            | Opens one tool call                                                  |
+| `</tool_call>`                     | Text-level marker            | Closes one tool call                                                 |
+| `<tool_response>`                  | Text-level marker            | Opens one tool result                                                |
+| `</tool_response>`                 | Text-level marker            | Closes one tool result                                               |
+| `<tools>` … `</tools>`             | Plain text                   | Wrapper around the tool list in the system turn                      |
+| `<scratch_pad>` … `</scratch_pad>` | Text-level marker (Hermes 3) | GOAP reasoning sections before calls                                 |
+| `<think>` … `</think>`             | Not in the Hermes 2 Pro spec | Thinking markers recognized by the omp scanner (R1-style fine-tunes) |
 
 Notes on exactness:
 

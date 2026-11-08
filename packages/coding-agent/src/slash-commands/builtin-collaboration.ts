@@ -232,18 +232,25 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		icon: "clipboard",
 		description: "Copy session transcript to clipboard (and write LLM request JSON to tmp)",
 		acpDescription: "Return full transcript as plain text, with LLM request JSON path",
-		acpInputHint: "[all]",
+		acpInputHint: "[all|anon]",
 		subcommands: [
 			{
 				name: "all",
 				description: "Write a zip with the main transcript, LLM request JSON, and one file per subagent",
 			},
+			{
+				name: "anon",
+				description: "Write a zip of anonymized session JSONL (contents redacted, metadata kept) plus subagents",
+			},
 		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const { verb } = parseSubcommand(command.args);
-			if (verb === "all") {
-				const archive = await runtime.session.dumpSessionArchiveToTmpDir();
+			if (verb === "all" || verb === "anon") {
+				const archive =
+					verb === "all"
+						? await runtime.session.dumpSessionArchiveToTmpDir()
+						: await runtime.session.dumpAnonymizedArchiveToTmpDir();
 				if (!archive) {
 					await runtime.output("No messages to dump yet.");
 					return commandConsumed();
@@ -251,7 +258,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				await runtime.output(formatDumpArchiveReport(archive).join("\n"));
 				return commandConsumed();
 			}
-			if (verb) return usage("Usage: /dump [all]", runtime);
+			if (verb) return usage("Usage: /dump [all|anon]", runtime);
 			const text = runtime.session.formatSessionAsText();
 			if (!text) {
 				await runtime.output("No messages to dump yet.");
@@ -276,7 +283,8 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		handleTui: async (command, runtime) => {
 			const { verb } = parseSubcommand(command.args);
 			if (verb === "all") await runtime.ctx.handleDumpAllCommand();
-			else if (verb) runtime.ctx.showStatus("Usage: /dump [all]");
+			else if (verb === "anon") await runtime.ctx.handleDumpAnonCommand();
+			else if (verb) runtime.ctx.showStatus("Usage: /dump [all|anon]");
 			else await runtime.ctx.handleDumpCommand();
 			clearSubmittedText(runtime);
 		},

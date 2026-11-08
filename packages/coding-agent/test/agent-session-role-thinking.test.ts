@@ -781,8 +781,8 @@ describe("AgentSession role model thinking behavior", () => {
 
 	it("applies matching role thinking to temporary model picks", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
-		const temporaryModel = getBundledModel("google-antigravity", "gemini-3.5-flash");
-		if (!temporaryModel) throw new Error("Expected google-antigravity model gemini-3.5-flash to exist");
+		const temporaryModel = getBundledModel("google-antigravity", "gemini-3.8-flash");
+		if (!temporaryModel) throw new Error("Expected google-antigravity model gemini-3.8-flash to exist");
 
 		await createSession({
 			initialModelId: defaultModel.id,

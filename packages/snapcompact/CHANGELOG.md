@@ -2,6 +2,65 @@
 
 ## [Unreleased]
 
+## [18.17.0] - 2026-11-06
+
+### Fixed
+
+- `compact()` now keeps image content from pre-16.1.0 archived histories in the dropped-history summary.
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added `archiveIncludesThinking()`, whether a compaction may replay reasoning from its summary's legend or its archive's text, and `viewSummary()`, which keeps a summary the template did not write in its own words, followed by the template's guide to the view's text ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed `viewWithoutFrames` and `viewWithoutThinking` keeping an archive's reasoning for a reader without it when the summary (say, one an extension wrote) declares no `¶think:` scope, and replacing such a summary with the template's ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.15.0] - 2026-11-01
+
+### Added
+
+- Added `viewWithoutFrames`: what a reader without image input reads for an archive, its kept text in place of its frames ([#17510](https://github.com/can1357/oh-my-pi/pull/17510) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.12.4] - 2026-10-20
+
+### Fixed
+
+- Fixed snapcompact archive frames for Factory Droid models ignoring Factory's inline-image budget: they are now sized to half of it, like other budgeted hosts ([#16288](https://github.com/can1357/oh-my-pi/pull/16288) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.10.4] - 2026-10-13
+
+### Added
+
+- Added `viewWithoutThinking()`, `textWithoutThinking()`, `readerIncludesThinking()` and an optional `Archive.withoutThinking` variant, so an archive rendered with reasoning can be read by a model that must not see it; without a stored variant the view keeps only reasoning-free text and no frames ([#15436](https://github.com/can1357/oh-my-pi/pull/15436) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed re-rendering an archive without reasoning keeping every paragraph after the first of a multi-paragraph `¶think:` section ([#15436](https://github.com/can1357/oh-my-pi/pull/15436) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.10.3] - 2026-10-12
+
+### Breaking Changes
+
+- `providerImageBudget(provider)` and `providerFrameBudget(provider)` became `providerImageBudget(model)` and `providerFrameBudget(model)`, and `maxFramesForDataBudget(shape)` became `maxFramesForDataBudget(shape, budget)` with a required byte budget ([#15434](https://github.com/can1357/oh-my-pi/pull/15434) by [@will-bogusz](https://github.com/will-bogusz))
+- Removed `PROVIDER_IMAGE_BUDGETS` and `FRAME_DATA_BYTES_BUDGET`: image counts come from the catalog's `image-count-budget` rules, and frame byte budgets from `frameDataBytesBudget(model)` (`DEFAULT_FRAME_DATA_BYTES_BUDGET` where the host has none) ([#15434](https://github.com/can1357/oh-my-pi/pull/15434) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Added
+
+- Added `plannedFrameTokens` and `Shape.frameTokensVerified`: archive sizing charges a frame its own price when the reader's `image-tokenization` rule is `verified`, and at least `FRAME_TOKEN_ESTIMATE` otherwise ([#15442](https://github.com/can1357/oh-my-pi/pull/15442) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed snapcompact frames for Claude and GPT on Cursor, including its `default` (Auto) route, being drawn at 1568–1932px, which Cursor shrank to 1024px before the model read them; frames now render at the host's catalog `image-max-edge` ([#15448](https://github.com/can1357/oh-my-pi/pull/15448) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.6.3] - 2026-10-06
 
 ### Breaking Changes

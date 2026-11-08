@@ -6,11 +6,47 @@ import type { SpinnerFramesOverride } from "./symbols";
 
 export type ColorValue = string | number;
 
+/**
+ * Index of each slot in a theme's 16-color `terminal.ansi` palette (0–7
+ * normal, 8–15 bright). `Theme.ansiFg()` paints by slot name.
+ */
+export const ANSI_COLOR_INDEX = {
+	black: 0,
+	red: 1,
+	green: 2,
+	yellow: 3,
+	blue: 4,
+	magenta: 5,
+	cyan: 6,
+	white: 7,
+	brightBlack: 8,
+	brightRed: 9,
+	brightGreen: 10,
+	brightYellow: 11,
+	brightBlue: 12,
+	brightMagenta: 13,
+	brightCyan: 14,
+	brightWhite: 15,
+} as const;
+
+export type AnsiColor = keyof typeof ANSI_COLOR_INDEX;
+
+/**
+ * Tokens a theme is allowed to omit. They resolve to the terminal default
+ * foreground, so `Theme.fg()` stays total for callers that paint a token a theme
+ * never declared (e.g. a `modelTags.<role>.color` reference) while
+ * `Theme.hasColor()` still reports them as unset.
+ */
+export const OPTIONAL_THEME_COLOR_RECORD = {
+	assistantMessageText: true,
+} satisfies Partial<Record<ThemeColor, true>>;
+
 export interface ThemeJson {
 	$schema?: string;
 	name: string;
 	vars?: Record<string, ColorValue>;
-	colors: Omit<Record<ThemeColor | ThemeBg, ColorValue>, "thinkingMax"> & { thinkingMax?: ColorValue };
+	colors: Omit<Record<ThemeColor | ThemeBg, ColorValue>, "thinkingMax" | keyof typeof OPTIONAL_THEME_COLOR_RECORD> &
+		Partial<Record<keyof typeof OPTIONAL_THEME_COLOR_RECORD, ColorValue>> & { thinkingMax?: ColorValue };
 	export?: {
 		pageBg?: ColorValue;
 		cardBg?: ColorValue;
@@ -31,7 +67,11 @@ export interface ThemeJson {
 		chrome?: ColorValue;
 		/** Lifted surfaces: popovers, menus, buttons. */
 		widget?: ColorValue;
-		/** ANSI colors 0–15: exactly 16. */
+		/**
+		 * ANSI colors 0–15: exactly 16. omp also paints colorful Markdown
+		 * (headings, emphasis, table headers) from this palette; slots it
+		 * omits fall back to the terminal's own palette.
+		 */
 		ansi?: ColorValue[];
 	};
 	symbols?: {
@@ -52,6 +92,7 @@ export type ThemeColor =
 	| "muted"
 	| "dim"
 	| "text"
+	| "assistantMessageText"
 	| "thinkingText"
 	| "userMessageText"
 	| "customMessageText"
@@ -115,6 +156,7 @@ const THEME_COLOR_RECORD = {
 	muted: true,
 	dim: true,
 	text: true,
+	assistantMessageText: true,
 	thinkingText: true,
 	userMessageText: true,
 	customMessageText: true,

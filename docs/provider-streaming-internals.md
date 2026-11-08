@@ -19,13 +19,13 @@ All providers emit the same shape (`AssistantMessageEvent` in `packages/ai/src/t
 
 - `start`
 - content block lifecycle triplets:
-  - text: `text_start` → `text_delta`\* → `text_end`
-  - thinking: `thinking_start` → `thinking_delta`\* → `thinking_end`
-  - tool call: `toolcall_start` → `toolcall_delta`\* → `toolcall_end`
+   - text: `text_start` → `text_delta`\* → `text_end`
+   - thinking: `thinking_start` → `thinking_delta`\* → `thinking_end`
+   - tool call: `toolcall_start` → `toolcall_delta`\* → `toolcall_end`
 - complete image blocks: `image_end`
 - terminal event:
-  - `done` with `reason: "stop" | "length" | "toolUse"`
-  - or `error` with `reason: "aborted" | "error"`
+   - `done` with `reason: "stop" | "length" | "toolUse"`
+   - or `error` with `reason: "aborted" | "error"`
 
 `AssistantMessageEventStream` guarantees:
 
@@ -51,10 +51,10 @@ Normalization points:
 - `message_start` initializes usage (input/output/cache tokens)
 - `content_block_start` maps to text/thinking/toolcall starts
 - `content_block_delta` maps:
-  - `text_delta` → `text_delta`
-  - `thinking_delta` → `thinking_delta`
-  - `input_json_delta` → `toolcall_delta`
-  - `signature_delta` updates `thinkingSignature` only (no event)
+   - `text_delta` → `text_delta`
+   - `thinking_delta` → `thinking_delta`
+   - `input_json_delta` → `toolcall_delta`
+   - `signature_delta` updates `thinkingSignature` only (no event)
 - `content_block_stop` emits corresponding `*_end`
 - `message_delta.stop_reason` maps via `mapStopReason()`
 - signed `compaction` blocks are retained in `providerPayload` only when the terminal stop reason confirms compaction; no ordinary text/thinking delta is synthesized for them
@@ -102,6 +102,81 @@ Tool-call argument streaming:
 - custom tools stream raw string input and expose final arguments as `{ input: <raw> }`
 - providers that send only `response.function_call_arguments.done` still populate final args
 - tool call IDs are normalized as `"<call_id>|<item_id>"`
+
+### Standard Responses transport ownership
+
+The user-facing contract lives in [Standard Responses WebSockets](./models.md#standard-responses-websockets).
+`settings-stream-fn.ts` adapts the independent API settings at the application
+boundary; `resolveResponsesWebSocketPreference` applies final catalog capability
+and model/request vetoes in the standard provider, without a Settings dependency.
+
+`providers/responses-websocket-connection.ts` contains the single physical channel
+implementation, extracted from Codex. `ResponsesWebSocketConnection` owns connect
+settlement, socket health, the bounded queue, one reader, frame/sequence guards,
+optional heartbeats, cancellation and typed transport errors.
+`utils/websocket.ts` continues to own shared URL/header utilities.
+`providers/openai-responses-session.ts` owns standard `response.create` exchanges,
+socket-local baselines, leases and logical transport state.
+`openai-codex-responses.ts` composes the same channel while retaining Codex's
+steering/control frames, successor receive/attach, Lite shaping, legacy error
+translation and recovery. Sharing the channel does not apply standard fallback
+policy to Codex or change its timers/environment controls.
+
+Each standard lease admits one active exchange. A concurrent request for the same
+scope receives an independent temporary socket, not a busy connection's reader or
+baseline. Reuse requires an open channel with recent inbound activity, within the
+30-second idle reuse limit. Standard channels use a queue capacity of 4096 and no
+heartbeat. A normally closed or health-retired socket after successful completion
+is replaced by a new WS connection with full input and no previous socket's anchor;
+that replacement is not an SSE downgrade.
+
+#### Request preparation and lifetime
+
+`prepareRequest` builds and hooks each candidate before the socket connects.
+A pre-send HTTP fallback rebuilds through the same preparation path; strict-tool
+corrections reuse it too. The physical handshake callback runs only for a newly
+connected channel, not for each exchange on a retained socket.
+
+`timeResponsesStream` owns standard stream deadlines. HTTP keeps its headers
+watchdog and existing first-event semantics; WS preserves one first-event budget
+across bounded parameter corrections. Priming exposes a definite first-frame
+rejection to those corrections; it is not a second timeout owner. Connect retains
+its separate bounded deadline, while Codex keeps its own channel deadlines.
+
+Logical entries count active leases independently of the retained connection.
+Idle retirement or release removes an entry only when it has no connection, no
+active lease, no sticky downgrade and no pending failure counts (pre-send connect
+failures, stale-anchor rejections, or disabled continuation). Such entries remain
+until their existing session/provider owner releases them, so a temporary sibling
+cannot erase a later network downgrade or change the identity of an outstanding lease.
+
+### OpenRouter native finish reasons
+
+Chat Completions and Responses treat explicit `native_finish_reason` values
+`MALFORMED_RESPONSE`, `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL`, and
+`network_error` as provider errors, regardless of a normalized successful finish.
+Usage and response IDs survive, and earlier tool-call fragments cannot promote
+the failed turn to `toolUse`. Unknown native reasons remain forward-compatible.
+
+OpenRouter defaults to Responses, whose translation can omit the native reason.
+For a terminal `stop` with no content blocks, native output items, or progress
+marker, the Responses adapter performs one best-effort `GET /generation?id=...`
+against the configured base URL per attempt. It reuses request authentication,
+the custom fetch implementation, and cancellation, with a two-second deadline.
+Matching generation metadata with a recognized failure changes the result. A
+metadata `404` on a zero-item turn with non-reasoning output usage triggers an
+explicitly **inferred** `MALFORMED_RESPONSE` recovery, not a confirmed native
+reason. Other HTTP failures, transport/JSON errors, reasoning-only usage, and
+unknown or mismatched metadata preserve existing empty-stop recovery.
+Visible output, signed reasoning, and provider-hosted tool progress do not incur
+this lookup. Terminal malformed Responses bypass adapter-level replay so the
+agent can add its corrective reminder before retrying. Transient network errors
+retain adapter-level retries; existing agent retry budgets still apply, and
+retries can issue fresh billable generations.
+
+Provider-reported output counts can include reasoning and failed structured
+generation. Without an explicit failure reason, usage alone establishes neither
+content filtering nor that deliverable output was generated and dropped.
 
 ## Google Generative AI (`google-generative-ai`)
 

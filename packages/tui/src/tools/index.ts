@@ -27,6 +27,7 @@ import { todoToolRenderer } from "./todo";
 import { createVibeToolRenderer } from "./vibe";
 import { webSearchToolRenderer } from "./web-search";
 import { writeToolRenderer } from "./write";
+import { yieldToolRenderer } from "./yield";
 import { setXdevRendererLookup } from "./xdev";
 
 export * from "./renderer";
@@ -67,6 +68,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	vibe_kill: createVibeToolRenderer("kill"),
 	vibe_list: createVibeToolRenderer("list"),
 	write: writeToolRenderer,
+	yield: yieldToolRenderer,
 };
 
 // Wire the xd:// render delegation without the xdev module importing this registry.

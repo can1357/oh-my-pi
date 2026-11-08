@@ -4,6 +4,8 @@ import { rangeMeta, TIME_RANGES } from "../data/range";
 import { useLiveStatus } from "../data/live";
 import type { TimeRange } from "../types";
 import { Segmented } from "../ui";
+import { CloseButton } from "./CloseButton";
+import { isDialogOpen, isTypingTarget } from "./keys";
 import { LiveChip } from "./LiveChip";
 import { type DashboardSection, NAV } from "./nav";
 import { ThemeToggle } from "./ThemeToggle";
@@ -77,6 +79,7 @@ export function Shell({ section, onSectionChange, range, onRangeChange, children
 					</span>
 					<Segmented options={RANGE_OPTIONS} value={range} onChange={onRangeChange} aria-label="Time range" />
 					<ThemeToggle />
+					<CloseButton />
 				</div>
 				{progress !== undefined && (
 					<div className="topbar-progress">
@@ -143,17 +146,7 @@ function useShortcuts(onSection: (section: DashboardSection) => void, onRange: (
 		let pendingG = 0;
 		const onKey = (e: KeyboardEvent) => {
 			if (e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
-			const target = e.target;
-			if (
-				target instanceof HTMLElement &&
-				(target.isContentEditable ||
-					target.tagName === "INPUT" ||
-					target.tagName === "TEXTAREA" ||
-					target.tagName === "SELECT")
-			) {
-				return;
-			}
-			if (document.querySelector('[aria-modal="true"]')) return;
+			if (isTypingTarget(e.target) || isDialogOpen()) return;
 			const key = e.key.toLowerCase();
 			if (pendingG && Date.now() - pendingG < 1200) {
 				pendingG = 0;

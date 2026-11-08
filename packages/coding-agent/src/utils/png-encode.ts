@@ -1,9 +1,18 @@
-import { deflateSync } from "node:zlib";
+import { deflateSync, constants as zlibConstants } from "node:zlib";
 
 export const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
 
-/** Encode 8-bit RGB (3 channels) or RGBA (4 channels) pixels as a non-interlaced PNG. */
-export function encodeRawPng(pixels: Uint8Array, width: number, height: number, channels: 3 | 4): Buffer {
+/**
+ * Encode 8-bit RGB (3 channels) or RGBA (4 channels) pixels as a non-interlaced PNG,
+ * deflated at zlib `level` (0 stores, for an intermediate decoded right away).
+ */
+export function encodeRawPng(
+	pixels: Uint8Array,
+	width: number,
+	height: number,
+	channels: 3 | 4,
+	level = zlibConstants.Z_DEFAULT_COMPRESSION,
+): Buffer {
 	const stride = width * channels;
 	const scanlines = Buffer.allocUnsafe((stride + 1) * height);
 	for (let row = 0; row < height; row++) {
@@ -19,7 +28,7 @@ export function encodeRawPng(pixels: Uint8Array, width: number, height: number, 
 	return Buffer.concat([
 		PNG_SIGNATURE,
 		pngChunk("IHDR", header),
-		pngChunk("IDAT", deflateSync(scanlines)),
+		pngChunk("IDAT", deflateSync(scanlines, { level })),
 		pngChunk("IEND", new Uint8Array()),
 	]);
 }

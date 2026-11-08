@@ -145,6 +145,138 @@ describe("Muse Code subscription usage", () => {
 		}
 	});
 
+	test("keeps quota current while Meta omits usage for an idle window", async () => {
+		const startedAt = 1_800_000_000_000;
+		const weeklyResetsAt = startedAt + 2 * 86_400_000;
+		let now = startedAt;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		let requests = 0;
+		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageFetch: Object.assign(
+				(input: string | URL | Request) => {
+					const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+					if (!url.includes("/muse-code/key")) return Promise.resolve(new Response(null, { status: 503 }));
+					requests += 1;
+					return Promise.resolve(
+						Response.json(
+							requests === 1
+								? {
+										is_subs_active: true,
+										subs_usage: {
+											window: {
+												used_percent: 7,
+												resets_at: startedAt + 3_600_000,
+												window_duration_mins: 300,
+											},
+											weekly: { used_percent: 2, resets_at: weeklyResetsAt },
+										},
+									}
+								: { is_subs_active: true },
+						),
+					);
+				},
+				{ preconnect: fetch.preconnect },
+			),
+		});
+		try {
+			await storage.credentials.reload();
+			await storage.credentials.set("muse-code", {
+				type: "oauth",
+				access: credential.accessToken,
+				refresh: "meta-refresh",
+				expires: startedAt + 86_400_000,
+			});
+
+			await storage.usage.reports();
+			now += 6 * 3_600_000;
+			const report = (await storage.usage.reports())?.find(entry => entry.provider === "muse-code");
+
+			expect(requests).toBe(2);
+			expect(report?.fetchedAt).toBe(now);
+			expect(report?.limits).toMatchObject([
+				{ id: "300m", amount: { usedFraction: 0 }, window: { durationMs: 18_000_000 } },
+				{ id: "1w", amount: { usedFraction: 0.02 }, window: { resetsAt: weeklyResetsAt } },
+			]);
+			expect(report?.limits[0]?.window?.resetsAt).toBeUndefined();
+		} finally {
+			storage.close();
+		}
+	});
+
+	test("zeroes carried weekly usage once its reset passes and carries none it cannot bound", async () => {
+		const now = 1_800_000_000_000;
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		const idleKey: FetchImpl = () => Promise.resolve(Response.json({ is_subs_active: true }));
+		const passedReset = now - 3_600_000;
+		const previousReport = {
+			provider: "muse-code",
+			fetchedAt: now - 3 * 86_400_000,
+			limits: [
+				{
+					id: "1w",
+					label: "Weekly",
+					scope: { provider: "muse-code" },
+					window: { id: "1w", label: "Weekly", durationMs: 604_800_000, resetsAt: passedReset },
+					amount: { usedFraction: 0.4, unit: "percent" as const },
+				},
+			],
+		};
+
+		const rolled = await museCodeUsageProvider.fetchUsage(
+			{ provider: "muse-code", credential },
+			{ fetch: idleKey, previousReport },
+		);
+		const firstSeen = await museCodeUsageProvider.fetchUsage(
+			{ provider: "muse-code", credential },
+			{ fetch: idleKey },
+		);
+		const { resetsAt: _dropped, ...unbounded } = previousReport.limits[0].window;
+		const resetUnknown = await museCodeUsageProvider.fetchUsage(
+			{ provider: "muse-code", credential },
+			{
+				fetch: idleKey,
+				previousReport: { ...previousReport, limits: [{ ...previousReport.limits[0], window: unbounded }] },
+			},
+		);
+
+		expect(rolled?.limits.find(limit => limit.id === "1w")).toMatchObject({
+			amount: { usedFraction: 0 },
+			window: { resetsAt: passedReset + 604_800_000 },
+		});
+		expect(firstSeen?.limits.map(limit => limit.id)).toEqual(["300m"]);
+		expect(resetUnknown?.limits.map(limit => limit.id)).toEqual(["300m"]);
+	});
+
+	test("reports no quota when a response without usage is not an active paid subscription", async () => {
+		const previousReport = {
+			provider: "muse-code",
+			fetchedAt: Date.now() - 3_600_000,
+			limits: [
+				{
+					id: "1w",
+					label: "Weekly",
+					scope: { provider: "muse-code" },
+					window: { id: "1w", label: "Weekly", durationMs: 604_800_000, resetsAt: Date.now() + 86_400_000 },
+					amount: { usedFraction: 0.4, unit: "percent" as const },
+				},
+			],
+		};
+		const responses = [
+			{ require_payment: true, require_payment_action_url: "https://dev.meta.ai/subscribe" },
+			{ is_subs_active: true, require_payment: true },
+			{ is_subs_active: true, action_url: "https://dev.meta.ai/subscribe" },
+		];
+
+		for (const body of responses) {
+			const report = await museCodeUsageProvider.fetchUsage(
+				{ provider: "muse-code", credential },
+				{ fetch: () => Promise.resolve(Response.json(body)), previousReport },
+			);
+			expect(report).toBeNull();
+		}
+	});
+
 	test("reports inactive subscriptions through credential validation", async () => {
 		const storage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
 			usageFetch: Object.assign(() => Promise.resolve(Response.json({ is_subs_active: false }, { status: 200 })), {

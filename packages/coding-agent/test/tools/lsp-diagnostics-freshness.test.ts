@@ -51,6 +51,8 @@ function createClient(cwd: string, config: ServerConfig): LspClient {
 		proc: {} as ptree.ChildProcess<"pipe">,
 		requestId: 0,
 		diagnostics: new EquivalentUriMap(),
+		publishedDiagnostics: new Map(),
+		pulledDiagnostics: new Map(),
 		diagnosticsVersion: 0,
 		openFiles: new Map(),
 		pendingRequests: new Map(),
@@ -375,7 +377,7 @@ describe("LSP diagnostics freshness", () => {
 			return init.promise;
 		});
 		vi.spyOn(lspClient, "syncContent").mockImplementation(async mockClient => {
-			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript" });
+			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 			publishDiagnostics(mockClient, uri, [], 1);
@@ -391,6 +393,38 @@ describe("LSP diagnostics freshness", () => {
 		expect(result?.diagnostics?.formatter).toBe(FileFormatResult.FORMATTED);
 		expect(result?.diagnostics?.messages).toEqual([]);
 		expect(await Bun.file(filePath).text()).toBe("export const value = 1;\n");
+	});
+
+	it("does not report a formatted write as clean when its diagnostics server never answered", async () => {
+		const filePath = path.join(tempDir.path(), "formatted.ts");
+		const uri = fileToUri(filePath);
+		const client = createClient(tempDir.path(), TEST_SERVER);
+		client.serverCapabilities = { documentFormattingProvider: true };
+		installVirtualTime(new VirtualClock(Date.now()));
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
+		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+		vi.spyOn(lspClient, "sendRequest").mockResolvedValue([
+			{
+				range: { start: { line: 0, character: 0 }, end: { line: 1, character: 0 } },
+				newText: "export const value = 1;\n",
+			},
+		]);
+		vi.spyOn(lspClient, "syncContent").mockImplementation(async mockClient => {
+			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
+		});
+		// The server formats the file but never publishes diagnostics for it.
+		vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: true,
+		});
+		const result = await writethrough(filePath, "export const value=1\n");
+
+		expect(result?.diagnostics?.formatter).toBe(FileFormatResult.FORMATTED);
+		expect(result?.diagnostics?.summary).not.toBe("OK");
 	});
 
 	it("announces batched sibling writes before syncing the diagnostic target", async () => {
@@ -415,7 +449,7 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
 			events.push(`sync:${path.basename(syncedFilePath)}`);
 			const syncedUri = fileToUri(syncedFilePath);
-			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 			publishDiagnostics(mockClient, tsUri, [], mockClient.openFiles.get(tsUri)?.version ?? null);
@@ -441,7 +475,7 @@ describe("LSP diagnostics freshness", () => {
 		const filePath = path.join(tempDir.path(), "example.ts");
 		const uri = fileToUri(filePath);
 		const client = createClient(tempDir.path(), TEST_SERVER);
-		client.openFiles.set(uri, { version: 1, languageId: "typescript" });
+		client.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		const clock = new VirtualClock(Date.now());
 		installVirtualTime(clock);
 
@@ -455,7 +489,7 @@ describe("LSP diagnostics freshness", () => {
 			if (openFile) {
 				openFile.version += 1;
 			} else {
-				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 			}
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async (mockClient, savedFilePath) => {
@@ -485,7 +519,7 @@ describe("LSP diagnostics freshness", () => {
 		const filePath = path.join(tempDir.path(), "example.ts");
 		const uri = fileToUri(filePath);
 		const client = createClient(tempDir.path(), TEST_SERVER);
-		client.openFiles.set(uri, { version: 1, languageId: "typescript" });
+		client.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		const clock = new VirtualClock(Date.now());
 		installVirtualTime(clock);
 
@@ -499,7 +533,7 @@ describe("LSP diagnostics freshness", () => {
 			if (openFile) {
 				openFile.version += 1;
 			} else {
-				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 			}
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async (mockClient, savedFilePath) => {
@@ -546,7 +580,7 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
 		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 		vi.spyOn(lspClient, "syncContent").mockImplementation(async mockClient => {
-			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript" });
+			mockClient.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 			clock.in(10, () => {
@@ -592,7 +626,7 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 		vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
 			const syncedUri = fileToUri(syncedFilePath);
-			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 			clock.in(10, () => {
@@ -628,7 +662,7 @@ describe("LSP diagnostics freshness", () => {
 		const filePath = path.join(tempDir.path(), "pull-only.ts");
 		const uri = fileToUri(filePath);
 		const client = createClient(tempDir.path(), TEST_SERVER);
-		client.openFiles.set(uri, { version: 1, languageId: "typescript" });
+		client.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		client.serverCapabilities = { diagnosticProvider: true };
 
 		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
@@ -641,7 +675,7 @@ describe("LSP diagnostics freshness", () => {
 			if (openFile) {
 				openFile.version += 1;
 			} else {
-				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 			}
 		});
 		vi.spyOn(lspClient, "notifySaved").mockResolvedValue();
@@ -677,7 +711,7 @@ describe("LSP diagnostics freshness", () => {
 		const filePath = path.join(tempDir.path(), "example.ts");
 		const uri = fileToUri(filePath);
 		const client = createClient(tempDir.path(), TEST_SERVER);
-		client.openFiles.set(uri, { version: 1, languageId: "typescript" });
+		client.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		const clock = new VirtualClock(Date.now());
 		installVirtualTime(clock);
 
@@ -691,7 +725,7 @@ describe("LSP diagnostics freshness", () => {
 			if (openFile) {
 				openFile.version += 1;
 			} else {
-				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 			}
 		});
 		// Publish far past the 500ms inline budget (INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS)
@@ -744,7 +778,7 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 		vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
 			const syncedUri = fileToUri(syncedFilePath);
-			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 			clock.in(2000, () => {
@@ -799,7 +833,11 @@ describe("LSP diagnostics freshness", () => {
 		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
 		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 		vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
-			mockClient.openFiles.set(fileToUri(syncedFilePath), { version: 1, languageId: "typescript" });
+			mockClient.openFiles.set(fileToUri(syncedFilePath), {
+				version: 1,
+				languageId: "typescript",
+				lastUsedAt: Date.now(),
+			});
 		});
 		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 			clock.in(2000, () => {
@@ -854,7 +892,7 @@ describe("LSP diagnostics freshness", () => {
 			const filePath = path.join(orphanDir.path(), "scratch.ts");
 			const uri = fileToUri(filePath);
 			const client = createClient(tempDir.path(), server);
-			client.openFiles.set(uri, { version: 1, languageId: "typescript" });
+			client.openFiles.set(uri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
 				servers: { "typescript-language-server": server },
@@ -864,7 +902,7 @@ describe("LSP diagnostics freshness", () => {
 			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 			vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
 				const syncedUri = fileToUri(syncedFilePath);
-				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() });
 			});
 			vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
 				const moduleDiagnostic = createDiagnostic(

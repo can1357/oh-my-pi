@@ -23,7 +23,7 @@ describe("buildMemoryToolDeveloperInstructions", () => {
 			await fs.mkdir(memoryRoot, { recursive: true });
 			await Bun.write(path.join(memoryRoot, "memory_summary.md"), "Use structured retries for flaky network calls.");
 
-			const instructions = await buildMemoryToolDeveloperInstructions(agentDir, settings);
+			const instructions = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings);
 			expect(instructions).toBeDefined();
 			expect(instructions).toContain("memory://root/memory_summary.md");
 			expect(instructions).toContain("memory://root/skills/<name>/SKILL.md");

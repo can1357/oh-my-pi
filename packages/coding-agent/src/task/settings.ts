@@ -8,15 +8,17 @@ import {
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { effect, register } from "../config/registry";
+import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
 const EMPTY_AGENT_ACCOUNT_POOLS: Record<string, OAuthAccountPools> = {};
+const EMPTY_AGENT_SOFT_REQUEST_BUDGET: Record<string, number | null> = {};
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
 
@@ -30,8 +32,8 @@ export const cfgTaskIsolationEnabled = register({
 	ui: {
 		tab: "tasks",
 		group: "Isolation",
-		label: "Isolate Subagents",
-		description: "Run subagents in an isolated copy of the checkout and integrate their changes afterwards",
+		label: "Allow Isolated Subagents",
+		description: "Allow per-task isolation with `isolated: true`; tasks without it run in the shared checkout",
 	},
 });
 
@@ -47,7 +49,12 @@ export const cfgIsolationBackend = register({
 		label: "Isolation Backend",
 		description: "Backend used for subagent isolation and worktree cloning",
 		options: [
-			{ value: "auto", label: "Auto", description: "Let the PAL pick the best available backend" },
+			{
+				value: "auto",
+				label: "Auto",
+				description:
+					"Isolated subagents use ovnfs checkouts when ovnfs is found; otherwise (and for worktrees) the PAL picks the best available backend",
+			},
 			{ value: "apfs", label: "APFS", description: "macOS clonefile reflink (APFS)" },
 			{ value: "btrfs", label: "btrfs", description: "btrfs subvolume snapshot" },
 			{ value: "zfs", label: "ZFS", description: "ZFS snapshot + clone" },
@@ -157,6 +164,30 @@ export const cfgTaskIsolationApply = register({
 	},
 });
 
+export const cfgOvnfsPath = register({
+	id: "ovnfs.path",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "tasks",
+		group: "Isolation",
+		label: "ovnfs Binary",
+		description:
+			"ovnfs executable; unset looks for `ovnfs` on PATH. When it is found, ovnfs checkouts (copy-on-write views of a folder, ready in about a second at any size) serve every separate copy: the system prompt tells agents to open checkouts instead of git worktrees or copies, and isolated subagents (when allowed, with `isolation.backend` on auto) run in checkouts instead of native clones",
+	},
+});
+
+/**
+ * The ovnfs command agents and isolated subagents use (`ovnfs.path`, else `ovnfs`),
+ * or `undefined` when that binary is not found. Read by the system prompt (checkout
+ * guidance), the bash git guard, `grep`/`glob` (searches through the daemon), and the
+ * task runner (ovnfs-backed isolation when `isolation.backend` is auto).
+ */
+export function ovnfsCommand(settings: Settings): string | undefined {
+	const command = cfgOvnfsPath.get(settings)?.trim() || "ovnfs";
+	return $which(command) ? command : undefined;
+}
+
 export const cfgTaskIsolationMerge = register({
 	id: "task.isolation.merge",
 	protocolDefault: ["rpc", "acp"],
@@ -251,6 +282,32 @@ export const cfgTaskBatch = register({
 	},
 });
 
+export const cfgTaskFile = register({
+	id: "task.file",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Task Instructions from Files",
+		description:
+			"Let the task tool read subagent instructions from a file (taskFile), recording its path and SHA-256.",
+	},
+});
+
+export const cfgTaskStructured = register({
+	id: "task.structured",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Structured Task Results",
+		description:
+			"Expose outputSchema/schemaMode on the task tool and return subagent results through the yield tool, validated against caller or agent output schemas. Off: task subagents have no yield tool and return their final message as plain text, except agents whose definition sets structured: true. Eval agent()/workpool spawns always keep structured results.",
+	},
+});
+
 export const cfgTaskSpeculativeLaunch = register({
 	id: "task.speculativeLaunch",
 	type: "boolean",
@@ -277,6 +334,73 @@ export const cfgTaskEnableEffort = register({
 	},
 });
 
+export const cfgTaskPerCallModel = register({
+	id: "task.perCallModel",
+	type: "enum",
+	values: ["off", "eval", "on"] as const,
+	default: "off",
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model",
+		description:
+			"Whether a subagent call may pick its model with one exact provider/model-id[@upstream][:level] selector. An @upstream pin is part of the model identity and is supported only by aggregators. Only models the configuration already routes to are accepted. Project settings can turn it off but not on, and never approve a model.",
+		options: [
+			{ value: "off", label: "Off", description: "Reject `model` on task items and eval agent()/workpool()" },
+			{ value: "eval", label: "Eval only", description: "Accept `model` in eval agent() and workpool() only" },
+			{ value: "on", label: "On", description: "Accept `model` on task items and in eval agent()/workpool()" },
+		],
+	},
+});
+
+/**
+ * Whether `task.perCallModel` accepts a per-call `model` for this invocation kind. The operator's
+ * layers ({@link Settings.grantAuthority}) must enable it; project and subagent-injected settings,
+ * which the live merged value includes, can only turn it off.
+ */
+export function perCallModelEnabled(settings: Settings, invocationKind: "task" | "eval"): boolean {
+	return [settings.grantAuthority(), settings].every(layers => {
+		const mode = cfgTaskPerCallModel.get(layers);
+		return mode === "on" || (mode === "eval" && invocationKind === "eval");
+	});
+}
+
+/**
+ * Validates `task.perCallModelAllow`: a list of exact `provider/model-id` strings. A non-string
+ * entry fails load and writes instead of reaching approval as an entry that matches nothing.
+ */
+function validatePerCallModelAllow(value: unknown): void {
+	if (value === undefined || value === null) return;
+	if (!Array.isArray(value)) {
+		throw new Error(
+			`Invalid task.perCallModelAllow: expected a list of provider/model-id strings, got ${Bun.inspect(value)}.`,
+		);
+	}
+	for (const [index, entry] of value.entries()) {
+		if (typeof entry === "string") continue;
+		throw new Error(
+			`Invalid task.perCallModelAllow[${index}]: expected a provider/model-id string, got ${Bun.inspect(entry)}.`,
+		);
+	}
+}
+
+export const cfgTaskPerCallModelAllow = register({
+	id: "task.perCallModelAllow",
+	type: "array",
+	default: [] as string[],
+	validate: validatePerCallModelAllow,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Per-Call Model Allowlist",
+		editor: "json",
+		// The editor writes the global layer; hide a project-supplied list so the repository cannot promote it.
+		condition: "perCallModelAllowNotProject",
+		description:
+			"Exact selectors: `provider/model-id`, including `@upstream` only for a pinned OpenRouter/Vercel route (e.g. `openrouter/x@y`). When set, a per-call model must also be listed here. Empty: every model the configuration grants. A project list can only narrow this one.",
+	},
+});
+
 export const cfgTaskMaxConcurrency = register({
 	id: "task.maxConcurrency",
 	protocolDefault: ["rpc", "acp"],
@@ -296,6 +420,39 @@ export const cfgTaskMaxConcurrency = register({
 			{ value: "16", label: "16 tasks" },
 			{ value: "32", label: "32 tasks" },
 			{ value: "64", label: "64 tasks" },
+		],
+	},
+});
+
+function validateWorkerThreads(value: unknown): void {
+	if (value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)) return;
+	throw new Error(
+		`Invalid task.workerThreads: expected a non-negative integer (0 runs subagents on the main thread), got ${Bun.inspect(value)}.`,
+	);
+}
+
+/**
+ * Upper bound on worker threads hosting subagents; how many are used follows the number of
+ * concurrent subagents (`allowedSubagentWorkers`). 0 keeps every subagent on the main thread.
+ */
+export const cfgTaskWorkerThreads = register({
+	id: "task.workerThreads",
+	protocolDefault: ["rpc", "acp"],
+	type: "number",
+	default: 4,
+	validate: validateWorkerThreads,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Subagent Worker Threads",
+		description:
+			"Maximum worker threads for subagents. Up to 8 concurrent subagents run on the main thread; at 9 one worker joins, and one more each time the count doubles (18, 36, 72). Workers stop a minute after no subagent is live in them; 0 keeps every subagent on the main thread",
+		options: [
+			{ value: "0", label: "Main thread only" },
+			{ value: "1", label: "Up to 1 worker" },
+			{ value: "2", label: "Up to 2 workers" },
+			{ value: "4", label: "Up to 4 workers", description: "Default" },
+			{ value: "8", label: "Up to 8 workers" },
 		],
 	},
 });
@@ -388,7 +545,7 @@ export const cfgTaskSoftRequestBudget = register({
 		group: "Subagents",
 		label: "Soft Subagent Request Budget",
 		description:
-			"Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is force-stopped and the agent must yield its partial findings. 0 disables the guard. Bundled scout/sonic agents cap out at a lower built-in budget, so a value below that cap still applies to them.",
+			"Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is force-stopped and the agent must hand back its partial findings. 0 disables the guard. Bundled scout/sonic agents cap out at a lower built-in budget, so a value below that cap still applies to them. A task.agentSoftRequestBudget entry replaces this budget for the agent it names.",
 		options: [
 			{ value: "0", label: "Disabled" },
 			{ value: "90", label: "90 requests" },
@@ -396,6 +553,34 @@ export const cfgTaskSoftRequestBudget = register({
 			{ value: "200", label: "200 requests", description: "Default" },
 		],
 	},
+});
+
+/**
+ * Validates `task.agentSoftRequestBudget`: exact agent name → request budget,
+ * a non-negative integer (0 disables that agent's guard). A `null` entry clears
+ * one inherited from a lower-priority settings layer.
+ */
+function validateAgentSoftRequestBudget(value: unknown): void {
+	if (value === undefined || value === null) return;
+	if (!isRecord(value)) {
+		const received = Array.isArray(value) ? "an array" : `a ${typeof value}`;
+		throw new Error(
+			`Invalid task.agentSoftRequestBudget: expected a map of agent name to request budget, got ${received}.`,
+		);
+	}
+	for (const [agentName, budget] of Object.entries(value)) {
+		if (budget === null || (typeof budget === "number" && Number.isSafeInteger(budget) && budget >= 0)) continue;
+		throw new Error(
+			`Invalid task.agentSoftRequestBudget.${agentName}: expected a non-negative integer request count (0 disables the guard), got ${Bun.inspect(budget)}.`,
+		);
+	}
+}
+
+export const cfgTaskAgentSoftRequestBudget = register({
+	id: "task.agentSoftRequestBudget",
+	type: "record",
+	default: EMPTY_AGENT_SOFT_REQUEST_BUDGET,
+	validate: validateAgentSoftRequestBudget,
 });
 
 export const cfgTaskSoftRequestBudgetNotice = register({
@@ -421,7 +606,7 @@ export const cfgTaskMaxEffort = register({
 		group: "Subagents",
 		label: "Maximum Per-Spawn Effort",
 		description:
-			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint. Lower values prevent callers from escalating subagents above this ceiling; the default preserves the model's full range.",
+			"Maximum reasoning effort allowed for the task tool's per-spawn effort hint or a per-call model. An explicit `:level` is clamped to the highest supported effort at or below this ceiling, and an omitted `:level` inherits the agent's thinking level capped at this value; cold revival re-applies the cap. Unset, `:inherit` and `:off` keep their existing meaning. A per-call model must support an effort at or below this ceiling; the default preserves the model's full range.",
 		options: THINKING_EFFORTS.map(getThinkingLevelMetadata),
 	},
 });

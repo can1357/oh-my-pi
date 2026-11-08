@@ -173,7 +173,7 @@ describe("estimate cache invalidation seams", () => {
 			fenceMinTokens: 0,
 		});
 		expect(regions.length).toBeGreaterThan(0);
-		applyShakeRegion(regions[0], "[shaken]");
+		applyShakeRegion(regions[0], "[shaken]", tokenizer.countTokens("[shaken]"));
 
 		const after = tokenizer.countMessage(big as AgentMessage);
 		expect(after).toBeLessThan(before);

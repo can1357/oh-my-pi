@@ -18,8 +18,8 @@ import {
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
-import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
-import { getAntigravityUserAgent, getGeminiCliHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
+import { getAntigravityHeaders, getGeminiCliHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { type ConfiguredThinkingLevel, concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { fetchWithRetry, USER_AGENT } from "@oh-my-pi/pi-utils";
 
@@ -390,11 +390,12 @@ async function callGeminiSearch(
 	timeoutMs: number | undefined,
 ): Promise<GeminiSearchResult> {
 	const endpoint = baseUrl.replace(/\/+$/, "");
-	const headers = auth.isAntigravity ? { "User-Agent": getAntigravityUserAgent() } : getGeminiCliHeaders();
+	const headers = auth.isAntigravity
+		? getAntigravityHeaders()
+		: { Accept: "text/event-stream", ...getGeminiCliHeaders() };
 
 	const requestMetadata = auth.isAntigravity
 		? {
-				requestType: "agent",
 				userAgent: "antigravity",
 				requestId: `agent-${crypto.randomUUID()}`,
 			}
@@ -445,7 +446,6 @@ async function callGeminiSearch(
 			...configuredHeaders,
 			Authorization: `Bearer ${auth.accessToken}`,
 			"Content-Type": "application/json",
-			Accept: "text/event-stream",
 			...headers,
 		},
 		body: JSON.stringify(requestBody),
@@ -614,9 +614,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 			keyOrResolver,
 			async storedApiKey => {
 				const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
-				const apiKey = endpoint.isCloudflareGateway
-					? parseCloudflareAiGatewayCredential(storedApiKey)?.token
-					: storedApiKey;
+				const apiKey = endpoint.isCloudflareGateway ? parseCloudflareCredential(storedApiKey)?.token : storedApiKey;
 				if (!apiKey) {
 					throw new SearchProviderError("gemini", "Selected Gemini credential is empty", 401);
 				}

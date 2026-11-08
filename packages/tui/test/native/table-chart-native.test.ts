@@ -3,7 +3,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { setTableCharts } from "@oh-my-pi/pi-tui/chat/table-chart";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
-import { initTheme, setTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme, setTheme } from "@oh-my-pi/pi-tui/theme";
 import { TspHarness } from "./tsp-harness";
 
 const ANSWER = `Where the time goes:
@@ -52,7 +52,7 @@ describe("table charts on a TSP terminal", () => {
 		await setTheme("dark");
 	});
 
-	it("sends the chart as an SVG image between the prose runs, recolored when the theme changes", async () => {
+	it("sends the chart between the prose runs as an svg fence the terminal colors, whatever omp's theme", async () => {
 		setTableCharts("always");
 		const component = new AssistantMessageComponent(answer(ANSWER));
 		harness = await TspHarness.start();
@@ -60,26 +60,22 @@ describe("table charts on a TSP terminal", () => {
 		await harness.render();
 
 		const h = harness;
-		expect(h.findAll(node => node.k === "md" || node.k === "image").map(node => node.k)).toEqual([
-			"md",
-			"image",
-			"md",
-		]);
-		const blob = () => {
-			const props = h.find(node => node.k === "image")?.p;
-			const id = props && "blob" in props ? String(props.blob) : "";
-			return new TextDecoder().decode(h.terminal.blobs.get(id));
-		};
-		const dark = blob();
-		expect(dark).toStartWith("<svg");
-		expect(dark).not.toContain("var(--");
-		expect(dark).toContain(theme.getColorHex("accent"));
+		const texts = () =>
+			h
+				.findAll(node => node.k === "md" || node.k === "image")
+				.map(node => (node.k === "md" && node.p && "text" in node.p ? String(node.p.text) : node.k));
+		const [before, chart, after] = texts();
+		expect(texts()).toHaveLength(3);
+		expect(before).toEndWith("| everything else | 9 ms |");
+		expect(after).toBe("The API call dominates.");
+		// Tern resolves the figure tokens in the palette it shows, so omp's theme must not leak into the fence.
+		expect(chart).toMatch(/^```svg\n<svg [^>]*aria-label="[^"]*bar chart of[^"]*"[^]*<\/svg>\n```$/);
+		expect(chart).toContain('fill="var(--c1)"');
+		expect(chart).not.toMatch(/(?:fill|stroke|stop-color)="#/);
 
 		await setTheme("light");
 		await h.render();
-		const light = blob();
-		expect(light).toContain(theme.getColorHex("accent"));
-		expect(light).not.toBe(dark);
+		expect(texts()[1]).toBe(chart);
 		expect(h.errors).toEqual([]);
 	});
 

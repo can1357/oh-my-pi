@@ -13,6 +13,8 @@ import {
 	type AuthStorage,
 	type DisabledCredentialSummary,
 	type OAuthAccountIdentity,
+	type OAuthAccountSummary,
+	type ResetCreditRedeemOutcome,
 	isWithinUsageReserve,
 	resolveCredentialIdentityKey,
 	resolveUsedFraction,
@@ -24,14 +26,35 @@ import {
 import { AuthBrokerClient, AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
+import { peakBuckets, renderSparkline } from "@oh-my-pi/pi-tui/components/sparkline";
 import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+import { resetAccountLockKey } from "../session/codex-auto-reset";
+import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
-import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
+import { reportMatchesStatus } from "../session/claude-auto-reset";
+import {
+	classifyResetExpiry,
+	type ResetExpiryWarning,
+	type ResetSpendVerdict,
+	resetSpendVerdict,
+} from "../session/reset-expiry";
+import { formatCodexUsageReportLabel, usageReportIdentity } from "../slash-commands/helpers/active-oauth-account";
+import { errorMessage } from "../slash-commands/helpers/parse";
+import {
+	describeRedeemOutcome,
+	formatResetProviderName,
+	formatResetUsageAccountLine,
+	normalizeResetProvider,
+	oneLine,
+	parseResetUsageTarget,
+	resolveResetUsageTarget,
+	toResetUsageAccount,
+} from "../slash-commands/helpers/reset-usage";
 import {
 	accountIdentityLabel,
 	collectStoredAccounts,
@@ -48,6 +71,8 @@ export interface UsageCommandArgs {
 	action?: string;
 	json?: boolean;
 	provider?: string;
+	/** `<provider>/<credential id>` saved reset to spend (with the `reset` action). */
+	target?: string;
 	redact?: boolean;
 	/** Show recorded usage-limit history instead of a live snapshot. */
 	history?: boolean;
@@ -64,6 +89,13 @@ export interface UsagePolicyDiagnosticsOptions {
 	globalReservePct: number;
 	/** Delegates selector matching to AuthStorage's authoritative policy matcher. */
 	getAccountPolicy: (provider: string, identity: OAuthAccountIdentity) => AuthAccountPolicy | undefined;
+}
+
+export interface UsageResetExpiryOptions {
+	/** Settings that decide whether an expiring saved reset is spent automatically. */
+	settings: Settings;
+	/** Stored OAuth accounts, as `/usage reset <provider>/<credential id>` addresses them. */
+	accounts: (provider: string) => readonly OAuthAccountSummary[];
 }
 
 /**
@@ -214,7 +246,8 @@ function aggregateStatus(limits: UsageLimit[]): LimitStatus {
 
 function formatUnitValue(value: number, unit: UsageUnit): string {
 	if (unit === "usd") return `$${value.toFixed(2)}`;
-	return formatNumber(value);
+	// Metered balances (e.g. Codex spend-cap credits) arrive as fractional floats.
+	return formatNumber(value, 2);
 }
 
 const UNIT_SUFFIX: Record<UsageUnit, string> = {
@@ -304,6 +337,25 @@ function formatQualifiedIdentity(
 	return `${chalk.bold(identity)}${chalk.dim(rendered.slice(identity.length))}`;
 }
 
+/** Account identity as the breakdown shows it: bold label, then the dim organization and plan. */
+function formatReportIdentity(
+	report: UsageReport,
+	peers: readonly UsageReport[],
+	index: number,
+	redaction?: Map<string, string>,
+): string {
+	const label = reportAccountLabel(report, index);
+	if (report.provider === "openai-codex") return formatQualifiedIdentity(report, peers, label, redaction);
+	let identity = chalk.bold(redaction?.get(label) ?? label);
+	const metaOrgName = report.metadata?.orgName;
+	const metaOrgId = report.metadata?.orgId;
+	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
+	if (typeof org === "string" && org && org !== label) identity += chalk.dim(` · ${redaction?.get(org) ?? org}`);
+	const plan = report.metadata?.planType;
+	if (typeof plan === "string" && plan.trim()) identity += chalk.dim(` · plan: ${plan.trim()}`);
+	return identity;
+}
+
 function formatAccountHeader(
 	report: UsageReport,
 	peers: readonly UsageReport[],
@@ -312,19 +364,7 @@ function formatAccountHeader(
 	redaction?: Map<string, string>,
 ): string {
 	const status = aggregateStatus(report.limits);
-	const icon = STATUS_COLOR[status]("●");
-	const label = reportAccountLabel(report, index);
-	let header = `${icon} ${chalk.bold(redaction?.get(label) ?? label)}`;
-	if (report.provider === "openai-codex") {
-		header = `${icon} ${formatQualifiedIdentity(report, peers, label, redaction)}`;
-	} else {
-		const metaOrgName = report.metadata?.orgName;
-		const metaOrgId = report.metadata?.orgId;
-		const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
-		if (typeof org === "string" && org && org !== label) header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
-		const plan = report.metadata?.planType;
-		if (typeof plan === "string" && plan.trim()) header += chalk.dim(` · plan: ${plan.trim()}`);
-	}
+	let header = `${STATUS_COLOR[status]("●")} ${formatReportIdentity(report, peers, index, redaction)}`;
 	if (report.metadata?.daybreak === true) header += chalk.cyan(" · daybreak");
 	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 	if (resets && resets.bankedCount > 0) {
@@ -332,7 +372,14 @@ function formatAccountHeader(
 		if (resets.redeemableCount !== resets.bankedCount) {
 			header += chalk.dim(` · ${resets.redeemableCount} usable now`);
 		}
-		if (resets.soonestExpiry) {
+		const expiring = classifyResetExpiry(report, nowMs);
+		if (expiring) {
+			const text = ` · ▲ ${formatExpiringResets(expiring, nowMs)}`;
+			header +=
+				expiring.tier === "imminent"
+					? chalk.red(text)
+					: chalk.yellow(`${text} (${new Date(expiring.expiresAtMs).toISOString().slice(0, 10)})`);
+		} else if (resets.soonestExpiry) {
 			const expiryMs = Date.parse(resets.soonestExpiry);
 			if (expiryMs > nowMs) {
 				header += chalk.dim(
@@ -590,28 +637,6 @@ function disabledIdentityLabel(summary: DisabledCredentialSummary, redaction?: M
 	return `${masked} · ${redaction?.get(org) ?? org}`;
 }
 
-function metadataIdentity(report: UsageReport): OAuthAccountIdentity {
-	const metadata = report.metadata ?? {};
-	const read = (key: keyof OAuthAccountIdentity): string | undefined => {
-		const value = metadata[key];
-		return typeof value === "string" && value.length > 0 ? value : undefined;
-	};
-	const firstScoped = (key: "accountId" | "projectId" | "orgId"): string | undefined => {
-		for (const limit of report.limits) {
-			const value = limit.scope[key];
-			if (value) return value;
-		}
-		return undefined;
-	};
-	return {
-		email: read("email"),
-		accountId: read("accountId") ?? firstScoped("accountId"),
-		projectId: read("projectId") ?? firstScoped("projectId"),
-		orgId: read("orgId") ?? firstScoped("orgId"),
-		orgName: read("orgName"),
-	};
-}
-
 function accountOAuthIdentity(account: UsageAccountIdentity): OAuthAccountIdentity {
 	return {
 		email: account.email,
@@ -635,23 +660,32 @@ function policyEnabledProviders(
 		}
 	}
 	for (const report of reports) {
-		if (options.getAccountPolicy(report.provider, metadataIdentity(report))) providers.add(report.provider);
+		if (options.getAccountPolicy(report.provider, usageReportIdentity(report))) providers.add(report.provider);
 	}
 	return providers;
 }
 
-function formatPolicyLine(
+/** Optional per-account JSON field on reports and accountsWithoutUsage; the text view's policy line renders it. */
+export type UsagePolicyDiagnostics = {
+	priority: number;
+	reservePct: number;
+	reserveSource: "global" | "override";
+	reclaimAbovePct?: number;
+} & (
+	| { state: "unknown"; remainingPct?: never }
+	| { state: "exhausted"; remainingPct?: number }
+	| { state: "eligible" | "inside-reserve"; remainingPct: number }
+);
+
+function computePolicyDiagnostics(
 	provider: string,
 	identity: OAuthAccountIdentity,
 	limits: UsageLimit[] | undefined,
 	options: UsagePolicyDiagnosticsOptions,
-): string {
+): UsagePolicyDiagnostics {
 	const policy = options.getAccountPolicy(provider, identity);
-	const priority = policy?.priority ?? 0;
 	const configuredReservePct = policy?.reservePct;
-	const inherited = configuredReservePct === undefined;
 	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
-	const reserveLabel = `${reservePct}% ${inherited ? "(global)" : "(override)"}`;
 	// `omp usage` has no model/session context, so report the conservative
 	// account-wide state from the most-consumed visible window. Actual routing
 	// still scopes limits and selection in AuthStorage.
@@ -661,15 +695,128 @@ function formatPolicyLine(
 	const usedFractions = (limits ?? [])
 		.map(resolveUsedFraction)
 		.filter((fraction): fraction is number => fraction !== undefined && Number.isFinite(fraction));
-	if (usedFractions.length === 0) {
-		const unmeasured = exhausted ? "exhausted" : "reserve unknown";
-		return `policy: priority ${priority} · reserve ${reserveLabel} · ${unmeasured}`;
-	}
+	const base = {
+		priority: policy?.priority ?? 0,
+		reservePct,
+		reserveSource: configuredReservePct === undefined ? "global" : "override",
+		...(policy?.reclaimAbovePct === undefined ? {} : { reclaimAbovePct: policy.reclaimAbovePct }),
+	} as const;
+	if (usedFractions.length === 0) return { ...base, state: exhausted ? "exhausted" : "unknown" };
 	const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
-	let state = "eligible";
-	if (exhausted || remainingFraction <= 0) state = "exhausted";
-	else if (isWithinUsageReserve(remainingFraction, reservePct / 100)) state = "inside reserve";
-	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${(remainingFraction * 100).toFixed(1)}% left`;
+	const state =
+		exhausted || remainingFraction <= 0
+			? "exhausted"
+			: isWithinUsageReserve(remainingFraction, reservePct / 100)
+				? "inside-reserve"
+				: "eligible";
+	// Rounded exactly as the text view prints it (`toFixed(1)`), so JSON carries 9 rather than 8.999999999999996.
+	return { ...base, state, remainingPct: Number((remainingFraction * 100).toFixed(1)) };
+}
+
+function formatPolicyLine(policy: UsagePolicyDiagnostics): string {
+	const reclaimLabel = policy.reclaimAbovePct === undefined ? "" : ` · reclaim above ${policy.reclaimAbovePct}%`;
+	const prefix = `policy: priority ${policy.priority} · reserve ${policy.reservePct}% (${policy.reserveSource})${reclaimLabel}`;
+	if (policy.remainingPct === undefined) {
+		return `${prefix} · ${policy.state === "exhausted" ? "exhausted" : "reserve unknown"}`;
+	}
+	const state = policy.state === "inside-reserve" ? "inside reserve" : policy.state;
+	return `${prefix} · ${state} · ${policy.remainingPct.toFixed(1)}% left`;
+}
+
+/** Add policy only where the text view displays it (providers with a configured account policy). */
+export function annotateUsagePolicy(
+	reports: UsageReport[],
+	unreported: UsageAccountIdentity[],
+	accounts: UsageAccountIdentity[],
+	options: UsagePolicyDiagnosticsOptions,
+): {
+	reports: (UsageReport & { policy?: UsagePolicyDiagnostics })[];
+	accountsWithoutUsage: (UsageAccountIdentity & { policy?: UsagePolicyDiagnostics })[];
+} {
+	const enabled = policyEnabledProviders(reports, accounts, options);
+	return {
+		reports: reports.map(report =>
+			enabled.has(report.provider)
+				? {
+						...report,
+						policy: computePolicyDiagnostics(
+							report.provider,
+							usageReportIdentity(report),
+							report.limits,
+							options,
+						),
+					}
+				: report,
+		),
+		accountsWithoutUsage: unreported.map(account =>
+			enabled.has(account.provider) && account.type === "oauth"
+				? {
+						...account,
+						policy: computePolicyDiagnostics(account.provider, accountOAuthIdentity(account), undefined, options),
+					}
+				: account,
+		),
+	};
+}
+
+/** `1 expires in 6h`, or `2 expire, soonest in 6h`. */
+function formatExpiringResets(warning: ResetExpiryWarning, nowMs: number): string {
+	const due = formatDuration(warning.expiresAtMs - nowMs);
+	return warning.count === 1 ? `1 expires in ${due}` : `${warning.count} expire, soonest in ${due}`;
+}
+
+function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
+	const outcome =
+		verdict.kind === "auto"
+			? "an open interactive omp session spends it by its last 5 min if eligible then"
+			: verdict.kind === "ask"
+				? "an open interactive omp session asks before spending it"
+				: "not spent automatically";
+	return `→ ${outcome}  (${verdict.setting}: ${verdict.mode})${verdict.eligibleNow ? "" : " · not eligible now"}`;
+}
+
+/**
+ * Saved resets expiring within 24 hours on accounts worth restoring: what the
+ * provider's `autoRedeem` setting does with each one, whether it is eligible
+ * now, and the `/usage reset` target that spends it now when the provider allows.
+ */
+function formatResetExpiryBanner(
+	expiring: readonly { report: UsageReport; warning: ResetExpiryWarning }[],
+	reportsByProvider: ReadonlyMap<string, UsageReport[]>,
+	nowMs: number,
+	redaction: Map<string, string> | undefined,
+	options: UsageResetExpiryOptions,
+): string[] {
+	const verdicts = expiring.map(({ report, warning }) => resetSpendVerdict(report, warning, options.settings, nowMs));
+	const count = expiring.reduce((sum, { warning }) => sum + warning.count, 0);
+	const lost = verdicts.every(verdict => verdict.kind === "off");
+	const lines = [
+		chalk.red.bold(
+			`▲ ${count} saved reset${count === 1 ? " expires" : "s expire"} within 24h${lost ? " and will be lost" : ""}`,
+		),
+	];
+	expiring.forEach(({ report, warning }, index) => {
+		const peers = reportsByProvider.get(report.provider) ?? [report];
+		const identity = formatReportIdentity(report, peers, peers.indexOf(report), redaction);
+		const expiry = new Date(warning.expiresAtMs);
+		const expiresAt = `${expiry.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${expiry.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}`;
+		const used = `${limitTitle(warning.limit)} ${Math.round(warning.usedFraction * 100)}% used`;
+		lines.push(
+			`  ${formatResetProviderName(warning.provider)} · ${identity} · ${formatExpiringResets(warning, nowMs)} (${expiresAt}) · ${used}`,
+		);
+		lines.push(`    ${chalk.dim(formatResetSpendVerdict(verdicts[index]!))}`);
+		if (!warning.usableNow) return;
+		// Codex usage reports carry no credential id; the stored account with the same identity has it.
+		const stored = options
+			.accounts(warning.provider)
+			.filter(account => reportMatchesStatus(report, { ...account, provider: warning.provider }));
+		const command =
+			stored.length === 1 ? `/usage reset ${warning.provider}/${stored[0]!.credentialId}` : "/usage reset";
+		lines.push(
+			`    ${verdicts[index]!.kind === "off" ? "spend it" : "or now"}:  ${chalk.cyan(command)} ${chalk.dim("in omp")}`,
+		);
+	});
+	return lines;
 }
 
 /**
@@ -684,6 +831,7 @@ export function formatUsageBreakdown(
 	redaction?: Map<string, string>,
 	disabled: DisabledCredentialSummary[] = [],
 	policyOptions?: UsagePolicyDiagnosticsOptions,
+	resetOptions?: UsageResetExpiryOptions,
 ): string {
 	const displayReports = collapseSharedUsageReports(reports);
 	const reportsByProvider = new Map<string, UsageReport[]>();
@@ -716,6 +864,13 @@ export function formatUsageBreakdown(
 	const latestFetchedAt = Math.max(0, ...displayReports.map(report => report.fetchedAt ?? 0));
 	const headerSuffix = latestFetchedAt ? chalk.dim(` · fetched ${formatDuration(nowMs - latestFetchedAt)} ago`) : "";
 	lines.push(`${chalk.bold("Usage")}${headerSuffix}`);
+	const expiring = displayReports.flatMap(report => {
+		const warning = classifyResetExpiry(report, nowMs);
+		return warning?.tier === "imminent" ? [{ report, warning }] : [];
+	});
+	if (resetOptions && expiring.length > 0) {
+		lines.push("", ...formatResetExpiryBanner(expiring, reportsByProvider, nowMs, redaction, resetOptions));
+	}
 
 	for (const provider of providers) {
 		const providerReports = reportsByProvider.get(provider) ?? [];
@@ -743,7 +898,7 @@ export function formatUsageBreakdown(
 			lines.push(`  ${formatAccountHeader(report, providerReports, index, nowMs, redaction)}`);
 			if (policyOptions && policyProviders.has(provider)) {
 				lines.push(
-					`      ${chalk.dim(formatPolicyLine(provider, metadataIdentity(report), report.limits, policyOptions))}`,
+					`      ${chalk.dim(formatPolicyLine(computePolicyDiagnostics(provider, usageReportIdentity(report), report.limits, policyOptions)))}`,
 				);
 			}
 			if (report.limits.length === 0) {
@@ -766,7 +921,7 @@ export function formatUsageBreakdown(
 			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${label} — no usage data`)}`);
 			if (policyOptions && account.type === "oauth" && policyProviders.has(provider)) {
 				lines.push(
-					`      ${chalk.dim(formatPolicyLine(provider, accountOAuthIdentity(account), undefined, policyOptions))}`,
+					`      ${chalk.dim(formatPolicyLine(computePolicyDiagnostics(provider, accountOAuthIdentity(account), undefined, policyOptions)))}`,
 				);
 			}
 		}
@@ -799,7 +954,6 @@ export function formatUsageBreakdown(
 }
 
 const HISTORY_SPARK_WIDTH = 48;
-const SPARK_LEVELS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"] as const;
 
 interface HistorySeries {
 	title: string;
@@ -857,24 +1011,15 @@ function historyStatus(fraction: number | undefined, status: UsageHistoryEntry["
 
 /** Peak-per-bucket sparkline over [sinceMs, nowMs]; empty buckets render dim dots. */
 function renderHistorySparkline(entries: UsageHistoryEntry[], sinceMs: number, nowMs: number): string {
-	const span = Math.max(1, nowMs - sinceMs);
-	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
-	const buckets: Array<number | undefined> = new Array(HISTORY_SPARK_WIDTH).fill(undefined);
-	for (const entry of entries) {
-		if (entry.usedFraction === undefined) continue;
-		const offset = Math.floor(((entry.recordedAt - sinceMs) / span) * HISTORY_SPARK_WIDTH);
-		const index = Math.min(HISTORY_SPARK_WIDTH - 1, Math.max(0, offset));
-		const prev = buckets[index];
-		buckets[index] = prev === undefined ? entry.usedFraction : Math.max(prev, entry.usedFraction);
-	}
-	return buckets
-		.map(fraction => {
-			if (fraction === undefined) return chalk.dim("·");
-			const clamped = Math.min(Math.max(fraction, 0), 1);
-			const level = SPARK_LEVELS[Math.min(SPARK_LEVELS.length - 1, Math.floor(clamped * SPARK_LEVELS.length))];
-			return STATUS_COLOR[historyStatus(clamped, undefined)](level);
-		})
-		.join("");
+	const points = entries.flatMap(entry =>
+		entry.usedFraction === undefined ? [] : [{ at: entry.recordedAt, value: entry.usedFraction }],
+	);
+	return renderSparkline(peakBuckets(points, sinceMs, nowMs, HISTORY_SPARK_WIDTH), {
+		min: 0,
+		max: 1,
+		gap: chalk.dim("·"),
+		style: (glyph, _value, fraction) => STATUS_COLOR[historyStatus(fraction, undefined)](glyph),
+	});
 }
 
 /** Identity strings a history rendering could surface — input for {@link buildRedactionMap}. */
@@ -1159,6 +1304,211 @@ function formatOAuthIdentityKeys(rows: readonly OAuthIdentityKeyRow[]): string {
 	return lines.join("\n");
 }
 
+const RESET_COMMAND = "omp usage reset";
+
+function failUsageReset(message: string): void {
+	process.stderr.write(chalk.red(`${message}\n`));
+	process.exitCode = 1;
+}
+
+/**
+ * Mask each identity wherever it appears inside free text (`--redact`):
+ * its stored spelling or its lowercase form, case-insensitively, in one pass so
+ * a mask is never matched again; the longest identity wins an overlap.
+ */
+function identityTextMasker(redaction: Map<string, string>): (text: string) => string {
+	if (redaction.size === 0) return text => text;
+	const byLowerCase = new Map([...redaction].map(([value, mask]) => [value.toLowerCase(), mask]));
+	const pattern = new RegExp(
+		[...new Set([...redaction.keys(), ...byLowerCase.keys()])]
+			.sort((a, b) => b.length - a.length)
+			.map(value => RegExp.escape(value))
+			.join("|"),
+		"gi",
+	);
+	return text => text.replace(pattern, value => redaction.get(value) ?? byLowerCase.get(value.toLowerCase()) ?? value);
+}
+
+/**
+ * `omp usage reset [<provider>/<credential id>]`: list every stored Codex and
+ * Claude account's saved resets, or spend one on the named account. Both run in
+ * this process with the store's tokens, so a broker client works like the host.
+ */
+async function runUsageResetCommand(
+	cmd: UsageCommandArgs,
+	settings: Settings,
+	authStorage: AuthStorage,
+): Promise<void> {
+	let providers = ["openai-codex", "anthropic"];
+	if (cmd.target) {
+		const target = parseResetUsageTarget(cmd.target, RESET_COMMAND);
+		if ("error" in target) {
+			failUsageReset(target.error);
+			return;
+		}
+		if (target.account === "active") {
+			failUsageReset(
+				`\`${RESET_COMMAND}\` runs outside a session, so no account is active. Name one by the credential id \`${RESET_COMMAND}\` lists.`,
+			);
+			return;
+		}
+		providers = [target.provider];
+	} else if (cmd.provider) {
+		const provider = normalizeResetProvider(cmd.provider);
+		if (!provider) {
+			failUsageReset(
+				"Saved resets exist only for Codex and Claude accounts. Use --provider openai-codex or anthropic.",
+			);
+			return;
+		}
+		providers = [provider];
+	}
+	const modelRegistry = await loadUsageSources(cmd, settings, authStorage);
+	const baseUrlResolver = (provider: string) => modelRegistry.getProviderBaseUrl(provider);
+	// Codex's listing requests carry no timeout of their own (Claude's discovery
+	// bounds each request), so a stalled endpoint cannot hang a script.
+	const statuses = (
+		await Promise.all(
+			providers.map(provider =>
+				authStorage.resets.list({
+					provider,
+					baseUrlResolver,
+					signal: provider === "openai-codex" ? AbortSignal.timeout(10_000) : undefined,
+				}),
+			),
+		)
+	).flat();
+	const redaction = cmd.redact
+		? buildRedactionMap(
+				statuses.flatMap(status =>
+					[status.email, status.accountId, status.orgId, status.orgName].filter(
+						(value): value is string => !!value,
+					),
+				),
+			)
+		: new Map<string, string>();
+	const maskText = identityTextMasker(redaction);
+	const maskOptionalText = (text: string | undefined) => (text === undefined ? undefined : maskText(text));
+	// Rows are built and judged from the stored statuses; `--redact` then masks only
+	// what is printed (identities and provider free text such as credit titles,
+	// reasons and errors), so provider, credential and credit ids stay canonical.
+	const accounts = statuses.map(status => {
+		const account = toResetUsageAccount(status);
+		return {
+			...account,
+			label: maskText(account.label),
+			error: maskOptionalText(account.error),
+			unavailableReason: maskOptionalText(account.unavailableReason),
+		};
+	});
+
+	if (!cmd.target) {
+		if (cmd.json) {
+			const rows = statuses.map((status, index) => {
+				const account = accounts[index];
+				return {
+					provider: status.provider,
+					credentialId: status.credentialId,
+					email: maskIdentity(redaction, status.email),
+					accountId: maskIdentity(redaction, status.accountId),
+					orgId: maskIdentity(redaction, status.orgId),
+					orgName: maskIdentity(redaction, status.orgName),
+					availableCount: account.availableCount,
+					redeemableCount: account.redeemableCount,
+					nextCreditId: status.nextCreditId,
+					soonestExpiry: account.expiresAt,
+					unavailableReason: account.unavailableReason,
+					error: account.error,
+					// Typed credit fields only, so untyped provider text never reaches the output.
+					credits: status.credits.map(credit => ({
+						id: credit.id,
+						title: maskOptionalText(credit.title),
+						program: credit.program,
+						status: credit.status,
+						remainingCount: credit.remainingCount,
+						usable: credit.usable,
+						requiresLimit: credit.requiresLimit,
+						clears: credit.clears,
+						blocking: credit.blocking,
+						usedFractions: credit.usedFractions,
+						grantedAt: credit.grantedAt,
+						expiresAt: credit.expiresAt,
+					})),
+				};
+			});
+			process.stdout.write(`${JSON.stringify({ generatedAt: Date.now(), accounts: rows }, null, 2)}\n`);
+			return;
+		}
+		if (accounts.length === 0) {
+			const names = providers.map(formatResetProviderName).join(" or ");
+			process.stderr.write(chalk.yellow(`No ${names} accounts found. Run \`omp\` and use /login to add one.\n`));
+			process.exitCode = 1;
+			return;
+		}
+		const lines = ["Saved rate-limit resets:", ...accounts.map(formatResetUsageAccountLine)];
+		lines.push("", `Spend one with \`${RESET_COMMAND} <provider>/<credential id>\`.`);
+		process.stdout.write(`${lines.join("\n")}\n`);
+		return;
+	}
+
+	const resolved = resolveResetUsageTarget(accounts, cmd.target, RESET_COMMAND);
+	if ("error" in resolved) {
+		failUsageReset(resolved.error);
+		return;
+	}
+	const { label, provider, availableCount, target } = resolved.account;
+	const who = `${oneLine(label)} (${formatResetProviderName(provider)})`;
+	const lockKey = resetAccountLockKey(target);
+	if (!lockKey) {
+		failUsageReset(
+			`${who}: this login stores no account id or email to fence the spend against other omp processes, so nothing was spent. Run \`omp\` and use /login to sign in to it again.`,
+		);
+		return;
+	}
+	// The fence a session's automatic spend takes: neither spends while the
+	// other's attempt is in flight or within a minute of it.
+	const result = await withResetFence<ResetCreditRedeemOutcome | ResetMarker>(
+		resetLockPath(lockKey),
+		async marker => marker,
+		async markedRedeem => {
+			if (provider === "openai-codex") {
+				const live = await authStorage.resets.list({
+					provider,
+					baseUrlResolver,
+					signal: AbortSignal.timeout(10_000),
+				});
+				const balance = checkCodexBalance(live, target.credentialId, availableCount);
+				if (balance) return { ok: false, code: balance === "spent" ? "offer_changed" : balance, provider };
+			}
+			const { outcome } = await markedRedeem(async () => {
+				try {
+					// Bounded like the session executor's redeem: the fence is held until it settles.
+					return await authStorage.resets.redeem({ target, baseUrlResolver, signal: AbortSignal.timeout(15_000) });
+				} catch (error) {
+					// A transport failure can land after the provider applied the reset.
+					return { ok: false, code: "network_error", provider, reason: errorMessage(error) };
+				}
+			});
+			return outcome;
+		},
+	);
+	if ("state" in result) {
+		const ago = formatDuration(Date.now() - result.atMs);
+		failUsageReset(
+			result.state === "reset"
+				? `${who}: another omp process spent a saved reset on this account ${ago} ago, so this one was not spent. Check \`omp usage\` before spending another.`
+				: `${who}: another omp process started spending a saved reset on this account ${ago} ago, so nothing was spent. Try again in a minute.`,
+		);
+		return;
+	}
+	const message = oneLine(describeRedeemOutcome({ ...result, reason: maskOptionalText(result.reason) }, label));
+	if (result.ok) {
+		process.stdout.write(`${message}\n`);
+	} else {
+		failUsageReset(message);
+	}
+}
+
 export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 	const settings = await Settings.loadReadOnly();
 	const authStorage = await discoverAuthStorage(undefined, { settings });
@@ -1219,6 +1569,10 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				return;
 			}
 			process.stdout.write(`${formatOAuthIdentityKeys(rows)}\n`);
+			return;
+		}
+		if (cmd.action === "reset") {
+			await runUsageResetCommand(cmd, settings, authStorage);
 			return;
 		}
 		if (cmd.action === "clients") {
@@ -1320,10 +1674,16 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			: undefined;
 
 		if (cmd.json) {
-			// Drop the heavy provider-specific `raw` payload — same shape as the
-			// broker/gateway `/v1/usage` endpoints.
-			let trimmed = filteredReports.map(({ raw: _raw, ...rest }) => rest);
-			let unreportedAccounts = collectUnreportedAccounts(filteredReports, accounts);
+			// Compute policy against original identities before masking, then drop
+			// the heavy provider-specific `raw` payload.
+			const annotated = annotateUsagePolicy(
+				filteredReports,
+				collectUnreportedAccounts(filteredReports, accounts),
+				accounts,
+				policyOptions,
+			);
+			let trimmed = annotated.reports.map(({ raw: _raw, ...rest }) => rest);
+			let unreportedAccounts = annotated.accountsWithoutUsage;
 			if (redaction) {
 				trimmed = trimmed.map(report => redactReportForJson(report, redaction));
 				unreportedAccounts = unreportedAccounts.map(account => ({
@@ -1380,8 +1740,12 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 
+		const resetOptions: UsageResetExpiryOptions = {
+			settings,
+			accounts: provider => authStorage.oauth.accounts(provider),
+		};
 		process.stdout.write(
-			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions)}\n`,
+			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions)}\n`,
 		);
 	} catch (error) {
 		// Broker-backed reads (`clients`, `--history`) fail on an unreachable or

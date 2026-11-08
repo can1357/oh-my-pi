@@ -259,6 +259,36 @@ async function collectEvents(stream: AssistantMessageEventStream): Promise<Assis
 }
 
 describe("OpenAI Responses transient stream retry", () => {
+	it("recovers from an HTTP-200 gateway WebSocket error before output", async () => {
+		let attempts = 0;
+		const fetchMock = vi.fn(async () => {
+			attempts++;
+			return attempts === 1
+				? createSseResponse([
+						{ type: "response.created", response: { id: "resp_gateway", status: "in_progress" } },
+						{
+							type: "error",
+							error: {
+								code: "stream_incomplete",
+								message:
+									"Upstream websocket closed before response.completed: Upstream websocket receive failed",
+							},
+						},
+					])
+				: createCompletedTextResponse("Recovered", "resp_recovered");
+		}) as FetchImpl;
+
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerRetryWait: async () => {},
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(result.content).toMatchObject([{ type: "text", text: "Recovered" }]);
+		expect(result.stopReason).toBe("stop");
+	});
+
 	it("retries a truncated pending tool call with a fresh request and clean state", async () => {
 		const sentRequests: Array<Record<string, unknown>> = [];
 		let attempt = 0;

@@ -1,5 +1,6 @@
 //! Session-level contracts: streamed previews converge on the applied diff,
-//! multi-file payloads stage atomically, and apply never trusts preview reads.
+//! sloppy multi-file payloads fail only when no file changes, and apply never
+//! trusts preview reads.
 
 mod common;
 
@@ -55,24 +56,60 @@ async fn streamed_sloppy_previews_grow_and_match_apply() {
 }
 
 #[tokio::test]
-async fn multi_file_failure_stages_nothing() {
+async fn multi_file_failure_names_every_file_when_none_changes() {
 	let ws = Workspace::new(EditMode::Sloppy);
 	ws.write("a.rs", SOURCE);
 	ws.write("b.rs", "fn other() {}\n");
-	let input = format!(
-		"{}*** Edit File: b.rs\n*** Find\nfn missing() {{}}\n*** Replace\nfn present() {{}}\n",
-		sloppy_payload("a.rs")
-	);
+	let miss = |path: &str| {
+		format!(
+			"*** Edit File: {path}\n*** Find\nfn missing() {{}}\n*** Replace\nfn present() {{}}\n"
+		)
+	};
 	let writer = DiskWriter::default();
 	let err = ws
-		.apply_json(&serde_json::json!({ "input": input }), &writer)
+		.apply_raw(&format!("{}{}", miss("a.rs"), miss("b.rs")), &writer)
 		.await
-		.expect_err("second section fails");
+		.expect_err("no section changes anything");
 	let message = err.to_string();
-	assert!(message.starts_with("[b.rs]: "), "{message}");
-	assert!(message.ends_with("No files were modified — sections apply atomically."), "{message}");
-	assert_eq!(writer.requests.lock().len(), 0);
+	assert_eq!(err.kind(), "no_match", "{message}");
+	assert!(message.starts_with("[a.rs]: "), "{message}");
+	assert!(message.contains("\n\n[b.rs]: "), "{message}");
+	assert!(writer.requests.lock().is_empty());
 	assert_eq!(ws.read("a.rs").unwrap(), SOURCE);
+}
+
+#[tokio::test]
+async fn a_file_failure_keeps_its_kind_beside_another_file() {
+	for mode in [EditMode::ApplyPatch, EditMode::Sloppy] {
+		let ws = Workspace::new(mode);
+		ws.write("a.rs", SOURCE);
+		std::fs::write(ws.cwd().join("bad.rs"), b"fn caf\xe9() {}\n").unwrap();
+		let section = |path: &str| match mode {
+			EditMode::ApplyPatch => {
+				format!("*** Update File: {path}\n@@\n-    let x = 1;\n+    let x = 2;\n")
+			},
+			_ => sloppy_payload(path),
+		};
+		let payload = |body: String| match mode {
+			EditMode::ApplyPatch => format!("*** Begin Patch\n{body}*** End Patch"),
+			_ => body,
+		};
+		for (target, kind) in [("missing.rs", "file_not_found"), ("bad.rs", "invalid_utf8")] {
+			let alone = ws
+				.apply_raw(&payload(section(target)), &DiskWriter::default())
+				.await
+				.expect_err(target);
+			let writer = DiskWriter::default();
+			let beside = ws
+				.apply_raw(&payload(format!("{}{}", section("a.rs"), section(target))), &writer)
+				.await
+				.expect_err(target);
+			assert_eq!(alone.kind(), kind, "{mode:?}: {alone}");
+			assert_eq!(beside.kind(), kind, "{mode:?}: {beside}");
+			assert!(beside.to_string().starts_with(&format!("[{target}]: ")), "{beside}");
+			assert!(writer.requests.lock().is_empty());
+		}
+	}
 }
 
 #[tokio::test]
@@ -428,6 +465,7 @@ async fn hashline_rem_streaming_preview_does_not_error_on_invalid_utf8() {
 		allow_fuzzy:        true,
 		fuzzy_threshold:    0.95,
 		enforce_seen_lines: false,
+		max_columns:        512,
 		raw_input:          false,
 	};
 	let mut session = Session::new(config, EditStore::new());

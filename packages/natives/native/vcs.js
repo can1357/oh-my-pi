@@ -1,5 +1,6 @@
 import { $ } from "bun";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { loadNative } from "./loader-state.js";
 
 let native;
@@ -94,6 +95,58 @@ export function clone(url, target, options = {}, signal) {
 /** Sever a copied working tree from shared git metadata. */
 export function detachGitDir(worktreeRoot, sourceCommonDir, signal) {
 	return api().vcsDetachGitDir(worktreeRoot, sourceCommonDir, signal);
+}
+
+/**
+ * Publish `from` at `to` only once fully written: copy to a sibling temp name,
+ * then hard-link it into place (Git's own `finalize_object_file` strategy) so
+ * readers never see a partial file and an interrupted copy leaves only a
+ * `tmp_` file that `git gc` prunes. An existing `to` was itself published
+ * whole and holds the same content-addressed bytes, so it is kept.
+ */
+async function publishGitObjectFile(from, to) {
+	const tmp = path.join(path.dirname(to), `tmp_obj_omp_${crypto.randomUUID()}`);
+	try {
+		await fs.promises.copyFile(from, tmp, fs.constants.COPYFILE_EXCL);
+		try {
+			await fs.promises.link(tmp, to);
+		} catch (error) {
+			if (error?.code === "EEXIST") return;
+			// Filesystems without hard links: rename is still atomic, and any
+			// file it replaces holds identical content-addressed bytes.
+			if (error?.code !== "EPERM" && error?.code !== "ENOTSUP" && error?.code !== "EXDEV") throw error;
+			await fs.promises.rename(tmp, to);
+		}
+	} finally {
+		await fs.promises.rm(tmp, { force: true });
+	}
+}
+
+/**
+ * Keep objects created in an isolated Git repository reachable after its
+ * worktree is removed, without changing the destination's refs or index.
+ * Every file is published atomically; a pack is published before its index.
+ */
+export async function copyGitObjects(isolationRoot, sourceRoot) {
+	const from = path.join(requireGit(isolationRoot).info().commonDir, "objects");
+	const to = path.join(requireGit(sourceRoot).info().commonDir, "objects");
+	for (const entry of await fs.promises.readdir(from, { withFileTypes: true })) {
+		if (!entry.isDirectory() || !/^[0-9a-f]{2}$/.test(entry.name)) continue;
+		await fs.promises.mkdir(path.join(to, entry.name), { recursive: true });
+		for (const name of await fs.promises.readdir(path.join(from, entry.name))) {
+			if (!/^[0-9a-f]{38,62}$/.test(name)) continue;
+			await publishGitObjectFile(path.join(from, entry.name, name), path.join(to, entry.name, name));
+		}
+	}
+	const packs = (await fs.promises.readdir(path.join(from, "pack"))).filter(name => name.startsWith("pack-"));
+	await fs.promises.mkdir(path.join(to, "pack"), { recursive: true });
+	// The index must only become visible after the pack it describes.
+	for (const name of packs.filter(name => name.endsWith(".pack"))) {
+		await publishGitObjectFile(path.join(from, "pack", name), path.join(to, "pack", name));
+	}
+	for (const name of packs.filter(name => /\.(?:idx|rev|keep|promisor|mtimes)$/.test(name))) {
+		await publishGitObjectFile(path.join(from, "pack", name), path.join(to, "pack", name));
+	}
 }
 
 /**

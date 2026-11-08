@@ -99,8 +99,8 @@ pub struct BlockParseOptions {
 /// [`enclosing_block_boundaries`], [`block_range_at`] and [`node_chain_at`]
 /// are synchronous and parse on the JS thread when their source is not
 /// cached; awaiting this first makes that parse a cache hit. Resolves without
-/// parsing when the language is unrecognized or the source is too large for
-/// the cache to keep.
+/// parsing when the language is unrecognized or the source is over 2 MiB,
+/// where a typical tree would not fit the cache's memory budget.
 #[napi]
 pub fn warm_block_parse(options: BlockParseOptions) -> task::Promise<()> {
 	task::blocking("block.warm_parse", (), move |_| {

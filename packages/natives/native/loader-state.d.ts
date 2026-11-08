@@ -1,21 +1,17 @@
 export interface EmbeddedAddonFile {
 	variant: "modern" | "baseline" | "default";
+	/** Basename of the extracted `.node` file. */
 	filename: string;
-	size?: number;
-	filePath?: string;
-}
-
-export interface EmbeddedAddonArchive {
-	format: "tar.gz";
-	filename: string;
-	filePath: string;
+	/** Decompressed addon size in bytes. */
+	size: number;
+	/** Embedded zstd frame holding the addon bytes. */
+	zstdPath: string;
 }
 
 export interface EmbeddedAddon {
 	platformTag: string;
 	version: string;
 	files: EmbeddedAddonFile[];
-	archive?: EmbeddedAddonArchive;
 }
 
 export interface DetectCompiledBinaryInput {
@@ -90,13 +86,13 @@ export function cleanupStaleNativeVersions(input: CleanupStaleNativeVersionsInpu
 
 export function prepareNativeVersionDir(versionedDir: string): void;
 
-export interface ExtractEmbeddedAddonArchiveInput {
-	archivePath: string;
+export interface ExtractEmbeddedAddonsInput {
 	files: EmbeddedAddonFile[];
 	targetDir: string;
 }
 
-export function extractEmbeddedAddonArchive(input: ExtractEmbeddedAddonArchiveInput): string[];
+/** Decompress every manifest addon missing or wrong-sized in `targetDir`; returns the paths written. */
+export function extractEmbeddedAddons(input: ExtractEmbeddedAddonsInput): string[];
 
 export interface SelectCpuVariantInput {
 	arch: string;
@@ -148,6 +144,29 @@ export function missingNativeExport(
 	symbolName: string,
 	addon?: NativeAddonStatus | null,
 ): (() => never) | undefined;
+
+/**
+ * Stub for a class the addon does not provide: `undefined` on a current addon,
+ * a class whose constructor throws on a stale one.
+ */
+export function missingNativeClass(
+	symbolName: string,
+	addon?: NativeAddonStatus | null,
+): (new (...args: unknown[]) => never) | undefined;
+
+/** Notice a workspace tree prints when its addon is from another release. */
+export function staleWorkspaceAddonNotice(addon: NativeAddonStatus): string;
+
+/**
+ * Write {@link staleWorkspaceAddonNotice} once, from the main thread, and only
+ * on a workspace load. The latch is per loaded copy of this module. Returns
+ * whether this call wrote it.
+ */
+export function reportStaleWorkspaceAddon(
+	ctx: { isWorkspaceLoad: boolean },
+	addon: NativeAddonStatus,
+	deps?: { write?: (text: string) => void; state?: { reported: boolean } },
+): boolean;
 
 /** Actionable text for {@link missingNativeExport}. */
 export function missingNativeExportMessage(symbolName: string, addon?: NativeAddonStatus | null): string;

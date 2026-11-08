@@ -47,6 +47,18 @@ describe("remember(extract) wires the LLM fact extractor", () => {
 		expect(memory.beam.factRecall("dark roast", 5).some(fact => fact.content.includes("dark roast"))).toBe(true);
 	});
 
+	it("stores every plain-line fact past the fifth", async () => {
+		const lines = Array.from({ length: 8 }, (_, index) => `Runbook step ${index + 1} restarts the gateway`);
+		const memory = makeMemory({ complete: () => lines.join("\n") });
+
+		const id = memory.remember("A long runbook memory with eight steps.", { source: "test", extract: true });
+		await memory.flushExtractions();
+
+		expect(memory.conn.query("SELECT object FROM facts WHERE source_msg_id = ? ORDER BY rowid").all(id)).toEqual(
+			lines.map(object => ({ object })),
+		);
+	});
+
 	it("routes structured LLM categories into MEMORIA and KG tables", async () => {
 		let calls = 0;
 		const memory = makeMemory({

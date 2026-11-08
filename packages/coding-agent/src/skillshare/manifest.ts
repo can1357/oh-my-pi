@@ -70,12 +70,12 @@ export function getGlobalSkillsInstallPaths(): SkillsInstallPaths {
 /**
  * Manifest + lock paths for a project: the nearest `.omp/` walking up from
  * `cwd`, else the git root's `.omp/`, else `<cwd>/.omp/`. Throws when `cwd` is
- * the home directory, whose `.omp/` is the user config root, not a project.
+ * a discovery ceiling or a user config root rather than a project root.
  */
 export async function getProjectSkillsInstallPaths(cwd: string): Promise<SkillsInstallPaths> {
 	const registryPath = await resolveOrDefaultProjectRegistryPath(cwd);
 	if (!registryPath) {
-		throw new Error("The home directory is not a project; pass --global to install for your user.");
+		throw new Error("This directory is not a project root; pass --global to install for your user.");
 	}
 	// `<root>/.omp/plugins/installed_plugins.json` → `<root>/.omp`
 	return installPathsIn(path.dirname(path.dirname(registryPath)));

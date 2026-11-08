@@ -1,11 +1,20 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { TspDocument } from "@oh-my-pi/pi-tui/native/apply";
+import { Reconciler } from "@oh-my-pi/pi-tui/native/reconcile";
+import type { TspNode } from "@oh-my-pi/pi-wire";
+import { getProjectAgentDir, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgDevAutoqa } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgContextFilesExtra } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 beforeAll(async () => {
 	await initTheme();
@@ -87,5 +96,82 @@ describe("settings section sidebar", () => {
 
 		clickOption(comp, "Developer");
 		expect(cfgDevAutoqa.get(settings)).toBe(true);
+	});
+});
+
+function openExtraContextFiles(): SettingsSelectorComponent {
+	const component = createSelector();
+	component.handleNativeEvent({ type: "action", key: "", act: "page", value: "context", mods: [] });
+	component.handleNativeEvent({ type: "activate", key: "", item: "contextFiles.extra" });
+	return component;
+}
+
+async function submitText(component: SettingsSelectorComponent, value: string): Promise<void> {
+	component.handleInput("\x01");
+	component.handleInput("\x0b");
+	for (const character of value) component.handleInput(character);
+	component.handleInput("\r");
+	await Promise.resolve();
+}
+
+function nativeErrorText(node: TspNode): string {
+	const text = node.k === "text" ? (node.p?.spans ?? []).filter(span => span.s === "error").map(span => span.t) : [];
+	for (const child of node.c ?? []) text.push(nativeErrorText(child));
+	return text.join("\n");
+}
+
+describe("extra context filenames editor", () => {
+	it("saves multiple filenames as an array and lets users disable extras", async () => {
+		const component = openExtraContextFiles();
+		await submitText(component, '["AGENTS.local.md","TEAM.md"]');
+		expect(cfgContextFilesExtra.get(settings)).toEqual(["AGENTS.local.md", "TEAM.md"]);
+
+		component.handleInput("\r");
+		await submitText(component, "[]");
+		expect(cfgContextFilesExtra.get(settings)).toEqual([]);
+	});
+
+	it.each([
+		["[", /Invalid array JSON/],
+		['{"file":"TEAM.md"}', /Invalid array JSON/],
+		['["../TEAM.md"]', /file names, not paths/],
+	])("keeps the saved filenames when input %s is rejected", async (input, error) => {
+		cfgContextFilesExtra.set(settings, ["TEAM.md"]);
+		const component = openExtraContextFiles();
+		await submitText(component, input);
+		expect(cfgContextFilesExtra.get(settings)).toEqual(["TEAM.md"]);
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toMatch(error);
+		const document = new TspDocument("settings");
+		const reconciler = new Reconciler("settings");
+		const ops = reconciler.reconcile(
+			{ main: [], dock: [], layer: [component] },
+			{ cols: 120, reduceMotion: false, dark: true, supports: () => true, feature: () => true },
+		);
+		expect(document.applyFrame({ sf: "settings", s: 1, ops })).toEqual([]);
+		expect(nativeErrorText(document.snapshot())).toMatch(error);
+	});
+
+	it("is not offered when the project config sets the list, so it cannot be copied to global", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extra-ctx-"));
+		try {
+			const cwd = path.join(root, "repo");
+			const agentDir = path.join(root, "agent");
+			await fs.mkdir(agentDir, { recursive: true });
+			await Bun.write(path.join(getProjectAgentDir(cwd), "config.yml"), "contextFiles:\n  extra:\n    - TEAM.md\n");
+			resetSettingsForTest();
+			await Settings.init({ cwd, agentDir });
+
+			const component = openExtraContextFiles();
+			component.handleInput("\r");
+			await settings.flush();
+
+			expect(Bun.stripANSI(component.render(120).join("\n"))).not.toContain("Extra Context Files");
+			const globalConfig = Bun.file(path.join(agentDir, "config.yml"));
+			expect((await globalConfig.exists()) ? await globalConfig.text() : "").not.toContain("TEAM.md");
+		} finally {
+			resetSettingsForTest();
+			AgentStorage.close();
+			await removeWithRetries(root);
+		}
 	});
 });

@@ -1,6 +1,9 @@
 //! Conservative text filters for system-style commands.
 
-use std::{collections::HashMap, fmt::Write as _};
+use std::{
+	collections::HashMap,
+	fmt::{NumBuffer, Write as _},
+};
 
 use super::git;
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, primitives};
@@ -46,6 +49,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 		"summary" => compact_summary_output(&cleaned, exit_code),
 		"err" => compact_err_output(&cleaned),
 		"test" => compact_test_output(&cleaned),
+		"diff" if git::keeps_patch_whole(ctx, ctx.program, input, &cleaned, exit_code) => cleaned,
 		"diff" => git::compact_diff_output(&cleaned),
 		"format" => compact_format_output(&cleaned),
 		"pipe" => compact_pipe_like_output(&cleaned, exit_code),
@@ -371,7 +375,7 @@ fn push_counted_line(out: &mut String, line: &str, count: usize) {
 	out.push_str(line);
 	if count > 1 {
 		out.push_str(" (×");
-		out.push_str(&count.to_string());
+		out.push_str(count.format_into(&mut NumBuffer::new()));
 		out.push(')');
 	}
 	out.push('\n');
@@ -889,12 +893,12 @@ fn compact_ssh_output(input: &str) -> String {
 		if is_ssh_noise(line) {
 			continue;
 		}
-		out.push_str(&primitives::truncate_line(line, 120));
+		out.push_str(line);
 		out.push('\n');
 	}
-	if out.lines().count() > 200 {
+	if input.len() > primitives::WHOLE_OUTPUT_BYTES && out.lines().count() > 200 {
 		primitives::head_tail_lines(&out, 100, 80)
-	} else if out.is_empty() {
+	} else if out.trim().is_empty() {
 		input.to_string()
 	} else {
 		out
@@ -903,8 +907,7 @@ fn compact_ssh_output(input: &str) -> String {
 
 fn is_ssh_noise(line: &str) -> bool {
 	let trimmed = line.trim();
-	trimmed.is_empty()
-		|| trimmed.starts_with("Warning: Permanently added")
+	trimmed.starts_with("Warning: Permanently added")
 		|| trimmed.starts_with("Connection to ") && trimmed.ends_with(" closed.")
 		|| trimmed.starts_with("Authenticated to ")
 		|| trimmed.starts_with("debug1:")
@@ -1005,7 +1008,12 @@ warning: unused import: `baz`
 	fn diff_output_reuses_unified_diff_compaction() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = ctx("diff", &cfg);
-		let mut input = String::from("--- a/a.rs\n+++ b/a.rs\n@@ -1,140 +1,140 @@\n");
+		// `diff -r` prints a binary file's line alone, with no header before it,
+		// and names that hold ` and ` themselves.
+		let mut input = String::from(
+			"Binary files x/salt and pepper.bin and y/salt and pepper.bin differ\n--- a/a.rs\n+++ \
+			 b/a.rs\n@@ -1,140 +1,140 @@\n",
+		);
 		for idx in 0..140 {
 			input.push_str("-old ");
 			input.push_str(&idx.to_string());
@@ -1013,12 +1021,15 @@ warning: unused import: `baz`
 			input.push_str(&idx.to_string());
 			input.push('\n');
 		}
+		// Blank lines take the patch past the size it is returned whole at.
+		input.push_str(&"\n".repeat(primitives::WHOLE_OUTPUT_BYTES));
 		let out = filter(&ctx, &input, 0);
 		assert!(out.changed);
+		assert!(out.text.starts_with("y/salt and pepper.bin | Bin\n"), "{}", out.text);
 		assert!(out.text.contains("a.rs | 280"));
 		assert!(
 			out.text
-				.contains("1 file changed, 140 insertions(+), 140 deletions(-)")
+				.contains("2 files changed, 140 insertions(+), 140 deletions(-)")
 		);
 		assert!(out.text.contains("--- Changes ---"));
 		assert!(out.text.contains("-old 0"));

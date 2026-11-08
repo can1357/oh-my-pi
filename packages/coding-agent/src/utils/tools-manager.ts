@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, getToolsDir, logger, ptree, TempDir, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { $env, $which, fetchWithRetry, getToolsDir, logger, ptree, TempDir, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { extractArchive } from "@oh-my-pi/pi-utils/ar";
 import { type DownloadTracker, trackDownload, withDownload } from "../downloads/activity";
 
@@ -173,11 +173,17 @@ export function getToolPath(tool: ToolName): string | null {
 }
 
 // Fetch latest release version from GitHub
-async function getLatestVersion(repo: string, signal?: AbortSignal): Promise<string> {
+export async function getLatestVersion(repo: string, signal?: AbortSignal): Promise<string> {
+	// Use GITHUB_TOKEN if available
+	const token = $env.GITHUB_TOKEN || $env.GH_TOKEN;
+	const headers: Record<string, string> = { "User-Agent": USER_AGENT };
+	if (token) {
+		headers.Authorization = `Bearer ${token}`;
+	}
 	let response: Response;
 	try {
 		response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
-			headers: { "User-Agent": USER_AGENT },
+			headers,
 			signal: ptree.combineSignals(signal, TOOL_METADATA_TIMEOUT_MS),
 		});
 	} catch (err) {
@@ -204,15 +210,16 @@ export interface DownloadFileOptions {
 	onProgress?: (loaded: number, total: number | undefined) => void;
 }
 
-/** Download a tool asset without handing the streaming Response to Bun.write. */
+/**
+ * Download a tool asset without handing the streaming Response to Bun.write.
+ * Transient failures (5xx, 408, 429, network errors) are retried within `timeoutMs`.
+ */
 export async function downloadFile(url: string, dest: string, options: DownloadFileOptions = {}): Promise<void> {
 	const { signal, timeoutMs = TOOL_DOWNLOAD_TIMEOUT_MS, onProgress } = options;
 	const downloadSignal = ptree.combineSignals(signal, timeoutMs);
 	let response: Response;
 	try {
-		response = await fetch(url, {
-			signal: downloadSignal,
-		});
+		response = await fetchWithRetry(url, { signal: downloadSignal, maxAttempts: 4, maxDelayMs: 8_000 });
 		if (!response.ok) {
 			throw new Error(`Failed to download: ${response.status}`);
 		} else if (!response.body) {
@@ -232,7 +239,7 @@ export async function downloadFile(url: string, dest: string, options: DownloadF
 				}),
 		);
 	} catch (err) {
-		if (isAbortLikeError(err)) {
+		if (isAbortLikeError(err) || downloadSignal?.aborted) {
 			throw new Error(`Download timed out: ${url}`);
 		}
 		throw err;
@@ -327,6 +334,7 @@ async function downloadTool(
 
 // Install a Python package via uv (preferred) or pip
 async function installPythonPackage(pkg: string, signal?: AbortSignal): Promise<boolean> {
+	if (signal?.aborted) return false;
 	try {
 		// Try uv first (faster, better isolation)
 		const uv = $which("uv");
@@ -338,6 +346,7 @@ async function installPythonPackage(pkg: string, signal?: AbortSignal): Promise<
 				stderr: "full",
 			});
 			if (result.exitCode === 0) return true;
+			if (signal?.aborted) return false;
 		}
 
 		// Fall back to pip
@@ -381,6 +390,7 @@ export async function ensureTool(tool: ToolName, silentOrOptions?: EnsureToolOpt
 	if (existingPath) {
 		return existingPath;
 	}
+	if (signal?.aborted) return undefined;
 
 	// On Android/Termux, Linux binaries don't work due to Bionic libc incompatibility.
 	// Users must install via pkg.
@@ -401,6 +411,10 @@ export async function ensureTool(tool: ToolName, silentOrOptions?: EnsureToolOpt
 		notify?.(`Installing ${pythonConfig.name}…`);
 		const tracker = trackDownload(pythonConfig.name, { detail: "installing" });
 		const success = await installPythonPackage(pythonConfig.package, signal);
+		if (signal?.aborted) {
+			tracker.done();
+			return undefined;
+		}
 		if (success) {
 			// Re-check for the command after installation
 			const path = $which(pythonConfig.binaryName);

@@ -22,7 +22,12 @@ import {
 	truncateMiddle,
 	truncateTail,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { formatOutputNotice, type OutputMeta, type TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import {
+	formatOutputNotice,
+	type MinimizedMeta,
+	type OutputMeta,
+	type TruncationMeta,
+} from "@oh-my-pi/pi-tui/tools/output-meta";
 import { renderError } from "./tool-errors";
 import {
 	cfgToolsArtifactHeadBytes,
@@ -33,6 +38,9 @@ import {
 	cfgToolsOutputMaxColumns,
 } from "./settings";
 
+/** The sink's middle-elision marker line (`formatMiddleElisionMarker`): head lines above it, tail lines below. */
+const MIDDLE_ELISION_MARKER = /^\[…\d+(?:ln|B) elided…\]$/;
+
 /** Input for {@link OutputMetaBuilder.limits}. `columnUnit` defaults to `chars`. */
 export interface LimitsInput {
 	matchLimit?: number;
@@ -41,6 +49,12 @@ export interface LimitsInput {
 	headLimit?: number;
 	columnMax?: number;
 	columnUnit?: "bytes" | "chars";
+	/** First and last lines the column cap cut, for the `:raw` recovery selector. */
+	columnLines?: { first: number; last: number };
+	/** Target the `:raw:<first>-<last>` recovery selector is appended to. */
+	columnSelectorBase?: string;
+	/** Bytes a `:raw` read of the first cut line returns when that line is larger, so the hint names the cap. */
+	columnRawByteCap?: number;
 }
 
 // =============================================================================
@@ -194,7 +208,9 @@ export class OutputMetaBuilder {
 		// when the output is otherwise complete (`truncated === false`). The sink
 		// enforces the cap in UTF-8 bytes, so the notice must say "bytes".
 		if (summary.columnMax != null && summary.columnMax > 0 && (summary.columnTruncatedLines ?? 0) > 0) {
-			this.columnTruncated(summary.columnMax, "bytes", summary.artifactId, summary.artifactElidedBytes);
+			this.columnTruncated(summary.columnMax, "bytes", summary.artifactId, summary.artifactElidedBytes, {
+				lines: summary.columnTruncatedRange,
+			});
 		}
 		if (!summary.truncated) return this;
 
@@ -204,21 +220,30 @@ export class OutputMetaBuilder {
 		// A capped artifact holds only a head/tail sample; the notice must say so.
 		const artifactElidedBytes = artifactId ? summary.artifactElidedBytes : undefined;
 
-		// Middle elision: the sink retained head + tail with an elision marker.
+		// Middle elision: the sink retained head + tail with an elision marker; the marker's line splits them.
 		if (summary.elidedBytes != null && summary.elidedBytes > 0) {
 			const elidedLines = summary.elidedLines ?? Math.max(0, totalLines - summary.outputLines);
+			const shown = summary.output.split("\n");
+			const markerAt = shown.findIndex(line => MIDDLE_ELISION_MARKER.test(line));
+			// Output ending in a newline has no line after it, though the counts carry an empty one.
+			const trailing = markerAt >= 0 && shown.length > markerAt + 1 && shown.at(-1) === "" ? 1 : 0;
+			const lastLine = totalLines - trailing;
 			const keptLines = Math.max(0, summary.outputLines - 1); // -1 for marker line
-			const headLines = Math.ceil(keptLines / 2);
-			const tailLines = keptLines - headLines;
+			// Lines from the marker on are the marker and the tail; the rest of `outputLines` is the head. A notice
+			// `dump(notice)` put above the head is not in `outputLines`, so it never counts as a head line.
+			const tailLines =
+				markerAt >= 0 ? shown.length - markerAt - 1 - trailing : keptLines - Math.ceil(keptLines / 2);
+			const headLines =
+				markerAt >= 0 ? Math.max(0, summary.outputLines - (shown.length - markerAt)) : Math.ceil(keptLines / 2);
 			this.#meta.truncation = {
 				direction: "middle",
 				truncatedBy: "middle",
-				totalLines,
+				totalLines: lastLine,
 				totalBytes: summary.totalBytes,
 				outputLines: summary.outputLines,
 				outputBytes: summary.outputBytes,
 				headRange: headLines > 0 ? { start: 1, end: headLines } : undefined,
-				tailRange: tailLines > 0 ? { start: totalLines - tailLines + 1, end: totalLines } : undefined,
+				tailRange: tailLines > 0 ? { start: lastLine - tailLines + 1, end: lastLine } : undefined,
 				elidedBytes: summary.elidedBytes,
 				elidedLines,
 				artifactId,
@@ -329,7 +354,11 @@ export class OutputMetaBuilder {
 			this.headLimit(limits.headLimit);
 		}
 		if (limits.columnMax !== undefined) {
-			this.columnTruncated(limits.columnMax, limits.columnUnit);
+			this.columnTruncated(limits.columnMax, limits.columnUnit, undefined, undefined, {
+				lines: limits.columnLines,
+				selectorBase: limits.columnSelectorBase,
+				rawByteCap: limits.columnRawByteCap,
+			});
 		}
 		return this;
 	}
@@ -361,14 +390,20 @@ export class OutputMetaBuilder {
 	 * into that artifact; the rendered notice then advertises it as a recovery
 	 * pointer (see {@link formatOutputNotice}), matching the tail-truncation notice.
 	 * `artifactElidedBytes` marks an artifact the size cap cut to a head/tail sample.
+	 * `recovery.lines` (first to last cut line) lets the notice name the
+	 * `<selectorBase>:raw:<first>-<last>` read that returns those lines whole;
+	 * the base defaults to `artifact://<artifactId>`.
 	 */
 	columnTruncated(
 		maxColumn: number,
 		unit: "bytes" | "chars" = "chars",
 		artifactId?: string,
 		artifactElidedBytes?: number,
+		recovery?: { lines?: { first: number; last: number }; selectorBase?: string; rawByteCap?: number },
 	): this {
 		if (maxColumn <= 0) return this;
+		// Lines matter only with a target the recovery selector can read them from.
+		const lines = artifactId || recovery?.selectorBase !== undefined ? recovery?.lines : undefined;
 		this.#meta.limits = {
 			...this.#meta.limits,
 			columnTruncated: {
@@ -376,6 +411,9 @@ export class OutputMetaBuilder {
 				unit,
 				artifactId,
 				...(artifactId && artifactElidedBytes ? { artifactElidedBytes } : {}),
+				...(lines ? { lines } : {}),
+				...(lines && recovery?.selectorBase !== undefined ? { selectorBase: recovery.selectorBase } : {}),
+				...(lines && recovery?.rawByteCap !== undefined ? { rawByteCap: recovery.rawByteCap } : {}),
 			},
 		};
 		return this;
@@ -399,7 +437,7 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Mark the output as a bounded page of session artifact storage its source re-reads with line selectors ({@link OutputMeta.pagedSource}). */
+	/** Mark the output as a bounded page of a file or artifact its source re-reads with line selectors ({@link OutputMeta.pagedSource}). */
 	pagedSource(): this {
 		this.#meta.pagedSource = true;
 		return this;
@@ -409,6 +447,12 @@ export class OutputMetaBuilder {
 	diagnostics(summary: string, messages: string[]): this {
 		if (messages.length === 0) return this;
 		this.#meta.diagnostics = { summary, messages };
+		return this;
+	}
+
+	/** Record the bash minimizer's rewrite. No-op when the output was not minimized. */
+	minimized(value: MinimizedMeta | undefined): this {
+		if (value) this.#meta.minimized = value;
 		return this;
 	}
 
@@ -493,11 +537,20 @@ export function resolveOutputSinkHeadBytes(s: Settings | undefined): number {
 const INLINE_CAP_SLACK_BYTES = 2 * 1024;
 
 /**
+ * Resolve the spill threshold (bytes) from session settings. Results above it
+ * spill to an artifact; `read` caps its line pages at it so a file read pages
+ * at a line boundary instead of being middle-elided.
+ */
+export function resolveArtifactSpillThreshold(s: Settings | undefined): number {
+	return getSpillConfig(s).threshold;
+}
+
+/**
  * Resolve the `enforceInlineByteCap` budget for streaming tools (bash/ssh)
  * from session settings: the user's spill threshold plus notice slack.
  */
 export function resolveInlineByteCapBudget(s: Settings | undefined): number {
-	return getSpillConfig(s).threshold + INLINE_CAP_SLACK_BYTES;
+	return resolveArtifactSpillThreshold(s) + INLINE_CAP_SLACK_BYTES;
 }
 
 /**
@@ -538,9 +591,9 @@ async function spillLargeResultToArtifact(
 	const existingMeta: OutputMeta | undefined = result.details?.meta;
 	if (existingMeta?.truncation?.artifactId) return result;
 
-	// A bounded page of artifact storage its source URL re-reads with `:N-M` is already
-	// recoverable. Spilling it would only create a redundant artifact holding another
-	// artifact's page (and can repeat indefinitely on subsequent artifact reads).
+	// A bounded page its source re-reads with `:N-M` is already recoverable. Spilling it
+	// would middle-elide a page that already names its exact continuation, or duplicate
+	// an artifact's page into another artifact (repeatedly, on subsequent artifact reads).
 	if (existingMeta?.pagedSource) return result;
 
 	// Measure total text content. `totalLength` is the UTF-16 length of the "\n"-joined text.
@@ -725,25 +778,53 @@ async function wrappedExecute(
 ): Promise<AgentToolResult> {
 	const originalExecute = this[kUnwrappedExecute];
 
+	let own: AgentToolResult;
+	let result: AgentToolResult;
 	try {
-		let result = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
+		own = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
 
 		// Spill large results to artifact, truncate to tail
-		result = await spillLargeResultToArtifact(result, this.name, context);
+		result = await spillLargeResultToArtifact(own, this.name, context);
 
 		// Append notices from meta
 		const meta: OutputMeta | undefined = result.details?.meta;
 		if (meta) {
-			return {
+			result = {
 				...result,
 				content: appendOutputNotice(result.content, meta),
 			};
 		}
-		return result;
 	} catch (e) {
 		// Re-throw with formatted message so agent-loop sets isError flag
 		throw new Error(renderError(e));
 	}
+	// The Spotlight experiment shapes what the agent's own calls return; calls a tool or script makes stay whole.
+	const shape = context?.spotlightShape;
+	if (shape && isAgentCall(this, toolCallId, context)) {
+		result = await shape({
+			tool: this.name,
+			toolCallId,
+			args: params,
+			own,
+			result,
+			signal,
+		});
+	}
+	return result;
+}
+
+/**
+ * Whether call `toolCallId` of `tool` is one the agent made: the loop's batch lists it under this tool's name. Calls
+ * dispatched under another tool's call (an `xd://` device behind `write`) or outside the loop (eval's tool bridge, an
+ * advisor) are not.
+ */
+function isAgentCall(tool: AgentTool, toolCallId: string, context: AgentToolContext): boolean {
+	const calls = context.toolCall?.toolCalls;
+	if (!calls) return false;
+	for (const call of calls) {
+		if (call.id === toolCallId) return call.name === tool.name || call.name === tool.customWireName;
+	}
+	return false;
 }
 
 /**
