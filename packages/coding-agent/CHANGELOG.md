@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Agents finish tasks in fewer steps: the system prompt now asks for proportional verification (a failing test or user report counts as the reproduction), whole reads of small files without re-reading, batched independent calls, and stopping once the change is verified
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes
