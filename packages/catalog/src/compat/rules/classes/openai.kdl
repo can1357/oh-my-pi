@@ -70,7 +70,7 @@ class "openai" {
 	// tool-search guide). Verified on the Codex backend for the GPT-6 family;
 	// proxies stay off until checked.
 	on "openai" "openai-codex" {
-		revision ">=6" {
+		revision ">=6 <7" {
 			supports-mid-conversation-tool-changes #true
 		}
 	}

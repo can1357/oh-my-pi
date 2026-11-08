@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { buildTransformedCodexRequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import type { RequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
+import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { planStableOpenAITools, resolveOpenAIToolControlState } from "@oh-my-pi/pi-ai/providers/openai-tool-additions";
-import type { Context, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
+import type { Context, FetchImpl, Model, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { createCodexModel } from "./helpers";
 
@@ -82,6 +85,23 @@ describe("planStableOpenAITools", () => {
 		expect(rewritten.some(item => item.type === "additional_tools")).toBe(false);
 	});
 
+	it("re-declares when an earlier part of the history changed, even before an unchanged item", () => {
+		const assistant = (text: string): TestItem => ({
+			type: "message",
+			role: "assistant",
+			content: [{ type: "output_text", text }],
+		});
+		const state = fresh();
+		planStableOpenAITools(state, [user("old")], [fn("read")]);
+		planStableOpenAITools(state, [user("old"), assistant("same"), user("next")], [fn("read"), fn("search")]);
+		const branched = [user("different"), assistant("same"), user("next")];
+		expect(planStableOpenAITools(state, branched, [fn("read"), fn("search")]).map(tool => tool.name)).toEqual([
+			"read",
+			"search",
+		]);
+		expect(branched.some(item => item.type === "additional_tools")).toBe(false);
+	});
+
 	it("sends current definitions, and a side request never changes its parent's state", () => {
 		const states = new Map();
 		const parent = resolveOpenAIToolControlState(states, id => id, "parent", undefined);
@@ -137,7 +157,7 @@ describe("openai-codex mid-conversation tools", () => {
 		tools,
 	});
 	/** Declared tool names (the leading Responses Lite item or top-level `tools`) and the mid-conversation additions. */
-	const tools = (body: Awaited<ReturnType<typeof buildTransformedCodexRequestBody>>) => {
+	const tools = (body: RequestBody) => {
 		const input = (body.input ?? []) as TestItem[];
 		const lead = input[0]?.type === "additional_tools" ? input[0] : undefined;
 		const named = (list: unknown) => (list as { name?: string }[]).map(item => item.name);
@@ -184,5 +204,101 @@ describe("openai-codex mid-conversation tools", () => {
 			options,
 		);
 		expect(tools(second)).toEqual({ declared: ["read", "search"], added: [] });
+	});
+});
+
+describe("openai-responses mid-conversation tools", () => {
+	const model: Model<"openai-responses"> = buildModel({
+		id: "gpt-6-astra",
+		name: "GPT-6 Astra",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl: "https://api.openai.com/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 272_000,
+		maxTokens: 128_000,
+	});
+
+	function sse(id: string): Response {
+		const events = [
+			{ type: "response.created", response: { id, status: "in_progress" } },
+			{
+				type: "response.output_item.done",
+				item: {
+					type: "message",
+					id: `msg_${id}`,
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text: "Hello" }],
+				},
+			},
+			{
+				type: "response.completed",
+				response: {
+					id,
+					status: "completed",
+					usage: {
+						input_tokens: 5,
+						output_tokens: 3,
+						total_tokens: 8,
+						input_tokens_details: { cached_tokens: 0 },
+					},
+				},
+			},
+		];
+		return new Response(`${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+	}
+
+	const tool = (name: string): Tool => ({
+		name,
+		description: name,
+		parameters: { type: "object", properties: {} } as Tool["parameters"],
+	});
+
+	it("keeps the declared tools and sends the added tool once in the response chain", async () => {
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const bodies: Array<Record<string, unknown>> = [];
+		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			bodies.push(typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {});
+			return sse(`resp_${bodies.length}`);
+		});
+		const run = (messages: Context["messages"], tools: Tool[]) =>
+			streamOpenAIResponses(
+				model,
+				{ systemPrompt: ["stable system"], messages, tools },
+				{ apiKey: "test-key", fetch: fetchMock, providerSessionState, sessionId: "astra-tools-session" },
+			).result();
+		const names = (list: unknown) => (list as { name?: string }[]).map(item => item.name);
+		const shape = (input: unknown) =>
+			(input as TestItem[]).flatMap(item =>
+				item.type === "additional_tools"
+					? [`+${names(item.tools).join(",")}`]
+					: item.role === "user"
+						? ["user"]
+						: [],
+			);
+
+		const first = { role: "user" as const, content: "first", timestamp: 1 };
+		const firstResponse = await run([first], [tool("read")]);
+		const second = { role: "user" as const, content: "second", timestamp: 2 };
+		const secondResponse = await run([first, firstResponse, second], [tool("read"), tool("search")]);
+		await run(
+			[first, firstResponse, second, secondResponse, { role: "user", content: "third", timestamp: 3 }],
+			[tool("read"), tool("search")],
+		);
+
+		// The platform endpoint chains requests: each sends only what follows the previous response, so the
+		// added tool goes out once, in the request that adds it, and stays part of the chain after that.
+		expect(bodies.map(body => names(body.tools))).toEqual([["read"], ["read"], ["read"]]);
+		expect(bodies.map(body => [body.previous_response_id ?? null, shape(body.input)])).toEqual([
+			[null, ["user"]],
+			["resp_1", ["+search", "user"]],
+			["resp_2", ["user"]],
+		]);
 	});
 });

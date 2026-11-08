@@ -20,7 +20,13 @@
  * State lives in each provider's session state, keyed per conversation, like
  * the effort controls; a side request plans against a copy of its parent's.
  */
-import { type AnchorableItem, responsesInputAnchor } from "./openai-configuration-update";
+/** The fields of an input item the planner reads; any other field only enters the history fingerprint. */
+interface PlannedItem {
+	type?: string | null;
+	role?: string;
+	id?: string | null;
+	status?: string | null;
+}
 
 /** A Responses tool declaration as sent on the wire; function and custom tools carry `name`, hosted tools only `type`. */
 export interface ResponsesWireTool {
@@ -38,7 +44,7 @@ export interface AdditionalToolsItem<TTool extends ResponsesWireTool = Responses
 interface ToolAddition {
 	/** Input-array position the item is spliced into (before `input[index]`). */
 	index: number;
-	/** Fingerprint of `input[index - 1]` at record time; a mismatch means the history was rewritten. */
+	/** Fingerprint of `input[0..index)` at record time; a mismatch means the history was rewritten. */
 	anchor: string;
 	/** Keys of the tools added there, in request order. */
 	keys: string[];
@@ -56,6 +62,27 @@ const MAX_TOOL_CONTROL_STATES = 16;
 
 function toolKey(tool: ResponsesWireTool): string {
 	return tool.name ?? `type:${tool.type}`;
+}
+
+/**
+ * Fingerprints of the history before each position in `indices`, from one pass
+ * over `input`. Output-only lifecycle fields are left out (a live response
+ * item carries `id`/`status` that its sanitized replay drops), and so are
+ * `additional_tools` items: the leading Responses Lite declaration follows the
+ * current tools, and mid-conversation items are spliced in after planning.
+ */
+function historyAnchors(input: readonly PlannedItem[], indices: readonly number[]): Map<number, string> {
+	const anchors = new Map<number, string>();
+	const wanted = new Set(indices);
+	let hash: bigint | number = 0;
+	for (let index = 0; index <= input.length; index++) {
+		if (wanted.has(index)) anchors.set(index, String(hash));
+		const item = input[index];
+		if (!item || item.type === "additional_tools") continue;
+		const { id: _id, status: _status, ...stable } = item;
+		hash = Bun.hash(JSON.stringify(stable), hash);
+	}
+	return anchors;
 }
 
 /**
@@ -109,7 +136,7 @@ export function releaseOpenAIToolControlSession(states: Map<string, OpenAIToolCo
  */
 export function planStableOpenAITools<TTool extends ResponsesWireTool>(
 	state: OpenAIToolControlState,
-	input: AnchorableItem[],
+	input: PlannedItem[],
 	tools: readonly TTool[],
 ): TTool[] {
 	const byKey = new Map(tools.map(tool => [toolKey(tool), tool]));
@@ -119,20 +146,17 @@ export function planStableOpenAITools<TTool extends ResponsesWireTool>(
 		return [...tools];
 	};
 	if (!state.declared) return rebaseline();
+	const last = input[input.length - 1];
+	const index = last?.role === "user" ? input.length - 1 : input.length;
+	const anchors = historyAnchors(input, [...state.additions.map(addition => addition.index), index]);
 	for (const addition of state.additions) {
-		if (addition.index > input.length || addition.anchor !== responsesInputAnchor(input, addition.index)) {
-			return rebaseline();
-		}
+		if (addition.index > input.length || addition.anchor !== anchors.get(addition.index)) return rebaseline();
 	}
 	const known = [...state.declared, ...state.additions.flatMap(addition => addition.keys)];
 	if (known.some(key => !byKey.has(key))) return rebaseline();
 	const knownSet = new Set(known);
 	const added = [...byKey.keys()].filter(key => !knownSet.has(key));
-	if (added.length > 0) {
-		const last = input[input.length - 1];
-		const index = last && "role" in last && last.role === "user" ? input.length - 1 : input.length;
-		state.additions.push({ index, anchor: responsesInputAnchor(input, index), keys: added });
-	}
+	if (added.length > 0) state.additions.push({ index, anchor: anchors.get(index)!, keys: added });
 	let offset = 0;
 	for (const addition of state.additions) {
 		const item: AdditionalToolsItem<TTool> = {
