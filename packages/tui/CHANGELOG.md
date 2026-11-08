@@ -23,6 +23,7 @@
 - Fixed unnecessary repainting in the setup wizard while waiting for input in ANSI terminals.
 - Fixed Windows ConPTY event handling so delayed terminal event data no longer appears in the composer.
 - Fixed OSC 8 hyperlink support in Rex terminals so transcript URLs and file paths are command-clickable.
+- Added `CustomEditor.onEscapeCancel`: it is called for a raw Escape that no configured action claims, so a host can keep Escape as a cancel key when `app.interrupt` is bound elsewhere ([#16464](https://github.com/can1357/oh-my-pi/pull/16464) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
@@ -43,7 +44,6 @@
 - Desktop notifications use unique OSC 99 ids per omp process to avoid interfering with other omp processes ([#18413](https://github.com/can1357/oh-my-pi/pull/18413) by [@farnoy](https://github.com/farnoy))
 - `updateNotesToolRenderer` now renders `update_notes` calls that omit `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
 - The copy overlay now offers fenced code blocks indented under list items, and splits code and quote blocks the same way the message renderer draws them ([#18410](https://github.com/can1357/oh-my-pi/pull/18410) by [@farnoy](https://github.com/farnoy))
-- Added `CustomEditor.onEscapeCancel`: it is called for a raw Escape that no configured action claims, so a host can keep Escape as a cancel key when `app.interrupt` is bound elsewhere ([#16464](https://github.com/can1357/oh-my-pi/pull/16464) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.0] - 2026-11-07
 
