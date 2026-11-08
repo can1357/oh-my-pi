@@ -68,6 +68,10 @@ export async function cleanupTemporaryArtifactsDir(dir: string): Promise<void> {
 				});
 			});
 			pendingArtifactsCleanups.set(dir, unsubscribe);
+			// A remote owner can disappear between the snapshot and subscription.
+			if (!registry.list().some(ref => ref.sessionFile && isWithinArtifactsDir(dir, ref.sessionFile))) {
+				return cleanupTemporaryArtifactsDir(dir);
+			}
 		}
 		return;
 	}

@@ -15,6 +15,9 @@ import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SubagentWorker } from "@oh-my-pi/pi-coding-agent/thread/subagent-worker";
+import { agentsThreadService } from "@oh-my-pi/pi-coding-agent/thread/services/agents";
+import { identityThreadService } from "@oh-my-pi/pi-coding-agent/thread/services/identity";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -26,6 +29,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { localSession } from "../helpers/local-session";
+import type { RetainedArtifactsProbe } from "../fixtures/retained-artifacts-worker";
 
 const MOCK_API_SOURCE = "seance-artifact-lifecycle-test";
 const AGENT_ID = "SeanceArtifactLifecycle";
@@ -108,6 +112,72 @@ afterEach(() => {
 });
 
 describe("seance artifact lifecycle", () => {
+	it("reclaims worker artifacts when release falls between the registry snapshot and subscription", async () => {
+		using tempDir = TempDir.createSync("@omp-worker-artifacts-gap-");
+		// Install the process-lifetime observer before counting this run's subscriptions.
+		const lifecycle = AgentLifecycleManager.global();
+		const registry = AgentRegistry.global();
+		const ready = Promise.withResolvers<RetainedArtifactsProbe>();
+		const worker = new SubagentWorker({
+			entry: new URL("../fixtures/retained-artifacts-worker.ts", import.meta.url),
+			services: [
+				identityThreadService,
+				agentsThreadService,
+				{ name: "retainedArtifacts", globals: () => ({ ready: ready.resolve }) },
+			],
+		});
+		try {
+			await worker.ready;
+			const probe = await ready.promise;
+			const subscribe = registry.onChange.bind(registry);
+			const subscriptions = new Set<symbol>();
+			vi.spyOn(registry, "onChange").mockImplementation(listener => {
+				const key = Symbol();
+				subscriptions.add(key);
+				const unsubscribe = subscribe(listener);
+				return () => {
+					subscriptions.delete(key);
+					unsubscribe();
+				};
+			});
+			const run = await probe.run(tempDir.path());
+			expect(run.exitCode).toBe(0);
+			expect(run.hasCleanup).toBe(true);
+			expect(await Bun.file(path.join(run.dir, "WorkerArtifactsOwner.md")).exists()).toBe(true);
+			await lifecycle.park("WorkerArtifactsOwner");
+			expect(registry.get("WorkerArtifactsOwner")?.status).toBe("parked");
+			const counts = [subscriptions.size];
+			const list = registry.list.bind(registry);
+			let release: Promise<boolean> | undefined;
+			vi.spyOn(registry, "list").mockImplementation(() => {
+				const snapshot = list();
+				if (!release && snapshot.some(ref => ref.id === "WorkerArtifactsOwner")) {
+					// The worker receives this real snapshot after main removes the parked owner.
+					release = lifecycle.release("WorkerArtifactsOwner");
+				}
+				return snapshot;
+			});
+			await probe.cleanup();
+			expect(release).toBeDefined();
+			await release;
+			await probe.barrier();
+			counts.push(subscriptions.size);
+			expect(registry.get("WorkerArtifactsOwner")).toBeUndefined();
+			expect({
+				subscriptions: counts,
+				directoryExists: await fs.stat(run.dir).then(
+					() => true,
+					() => false,
+				),
+			}).toEqual({
+				subscriptions: [0, 0],
+				directoryExists: false,
+			});
+		} finally {
+			await worker.terminate("test done");
+		}
+	}, 20_000);
+
 	it("aborting one-shot seances retires cleanup subscriptions with their temporary directories", async () => {
 		using tempDir = TempDir.createSync("@omp-seance-abort-subscriptions-");
 		const cwd = path.join(tempDir.path(), "project");
