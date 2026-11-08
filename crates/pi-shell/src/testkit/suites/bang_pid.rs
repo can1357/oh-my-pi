@@ -197,18 +197,37 @@ fn compound_and_builtin_jobs_keep_virtual_pids() {
 
 // Failure mode: a background pipeline's `$!` is the shell's virtual pid,
 // which `kill` cannot reach as a program, instead of its last program's
-// (bash: `kill $!` signals that program, `wait $!` gets its status).
+// (bash: `kill $!` signals that program), also under `!` and `time`.
 #[test]
 fn a_background_pipeline_is_known_by_its_last_program() {
+	for prefix in ["", "! ", "time "] {
+		let world = World::new();
+		let (out, _) =
+			run(world.host(), &format!("{prefix}/x/true | /x/trap42 & p=$!; kill $p; wait; echo $p"));
+		let last = world
+			.redirs
+			.lock()
+			.iter()
+			.position(|(argv0, _)| argv0.as_slice() == b"/x/trap42")
+			.expect("the last stage ran");
+		let pid = FIRST + last as u32;
+		assert_eq!(out, format!("{pid}\n"), "{prefix:?}");
+		assert_eq!(world.got(pid), [Signal::Term], "{prefix:?}");
+	}
+}
+
+// Failure mode: once a pipeline's last program ended, `kill` of its pid
+// (`$!`) still reaches the job its other stages keep running (bash: no
+// such process, status 1).
+#[test]
+fn an_ended_last_stage_is_no_longer_signalled() {
 	let world = World::new();
-	let (out, _) = run(world.host(), "/x/true | /x/trap42 & p=$!; kill $p; wait $p; echo $?");
-	assert_eq!(out, "42\n");
-	let spawned = world.redirs.lock();
-	let last = spawned
-		.iter()
-		.position(|(argv0, _)| argv0.as_slice() == b"/x/trap42")
-		.expect("the last stage ran");
-	assert_eq!(world.got(FIRST + last as u32), [Signal::Term]);
+	let (out, _) = run(
+		world.host(),
+		&format!("/x/sleeper | /x/true & p=$!; {BUSY}; kill -0 $p; echo $?; kill %1; wait"),
+	);
+	assert_eq!(out, "1\n");
+	assert_eq!(world.got(FIRST), [Signal::Term], "only `kill %1` reached the first stage");
 }
 
 // Failure mode: `wait -n -p` names the virtual pid while `$!` showed the OS

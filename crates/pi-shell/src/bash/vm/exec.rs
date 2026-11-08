@@ -3923,13 +3923,27 @@ fn bang_stage(unit: &Unit, entry: u32) -> Option<BangStage> {
 	if code(entry) == Some(Opcode::Exec) && code(entry + 1) == Some(Opcode::SubExit) {
 		return Some(BangStage::Lone);
 	}
-	if let Some(op) = unit.ops.get(entry as usize)
+	// `time` and `!` wrap the pipeline's spawn: `[TimeStart] Spawn …
+	// [Not] [TimeEnd]`, then the job's `SubExit`.
+	let at = if code(entry) == Some(Opcode::TimeStart) {
+		entry + 1
+	} else {
+		entry
+	};
+	if let Some(op) = unit.ops.get(at as usize)
 		&& op.code == Opcode::Spawn
 		&& let Some(spawn) = unit.spawns.get(op.a as usize)
 		&& spawn.kind == SpawnKind::Pipeline
-		&& code(spawn.end) == Some(Opcode::SubExit)
 	{
-		return Some(BangStage::Pipeline);
+		let mut end = spawn.end;
+		for wrap in [Opcode::Not, Opcode::TimeEnd] {
+			if code(end) == Some(wrap) {
+				end += 1;
+			}
+		}
+		if code(end) == Some(Opcode::SubExit) {
+			return Some(BangStage::Pipeline);
+		}
 	}
 	let group = [Opcode::Enter, Opcode::Exec, Opcode::Leave, Opcode::SubExit]
 		.iter()
