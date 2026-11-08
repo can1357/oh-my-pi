@@ -196,12 +196,12 @@ function createContext(overrides?: {
 	};
 }
 
-describe("TanCommandController", () => {
-	afterEach(() => {
-		vi.restoreAllMocks();
-		for (const dir of harnessTempDirs.splice(0)) dir.removeSync();
-	});
+afterEach(() => {
+	vi.restoreAllMocks();
+	for (const dir of harnessTempDirs.splice(0)) dir[Symbol.dispose]();
+});
 
+describe("TanCommandController", () => {
 	it("rejects empty work before forking", async () => {
 		const harness = createContext();
 		const forkSpy = vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
