@@ -1,0 +1,65 @@
+// Catalog entry for "dagon": Dagon Inference (https://inference.dagon.so), an
+// OpenAI- and Anthropic-compatible gateway. `GET /v1/models` is public and is
+// the authoritative roster; prices float with the cheapest upstream route.
+
+provider "dagon" {
+	// Cheapest removed-refusal model with a 1M window (live catalog, 2026-11).
+	default-model "deepseek-v4.1-flash-abliterated"
+	env "DAGON_API_KEY"
+	allow-unauthenticated #true
+	dynamic-models-authoritative #true
+	skip-cross-provider-reference-fills #true
+	discovery label="Dagon Inference" allow-unauthenticated=#true
+
+	// Live `/v1/models` snapshot (2026-11-08), bundled for first boot.
+	seed api="openai-completions" base-url="https://inference.dagon.so/v1" bundle="fallback" {
+		model "abliterated-model" name="Abliterated Model" {
+			reasoning #false
+			input "text" "image"
+			cost input=1.1 output=3.3 cache-read=0.11 cache-write=0
+			limits context=262144 max-tokens=65536
+		}
+		model "abliterated-model-large-flash" name="Abliterated Large Flash" {
+			reasoning #false
+			input "text" "image"
+			cost input=1.1 output=2.2 cache-read=0.11 cache-write=0
+			limits context=1048576 max-tokens=65536
+		}
+		model "abliterated-model-large-v2" name="Abliterated Large v2" {
+			reasoning #false
+			input "text"
+			cost input=3.3 output=5.5 cache-read=0.33 cache-write=0
+			limits context=1000000 max-tokens=65536
+		}
+		model "glm-5.3-abliterated" name="GLM-5.3 Abliterated" {
+			reasoning #false
+			input "text"
+			cost input=1.1 output=2.2 cache-read=0.165 cache-write=0
+			limits context=1048576 max-tokens=65536
+		}
+		model "glm-5.3-flash-abliterated" name="GLM-5.3 Flash Abliterated" {
+			reasoning #false
+			input "text"
+			cost input=0.132 output=0.55 cache-read=0.044 cache-write=0
+			limits context=1048576 max-tokens=65536
+		}
+		model "deepseek-v4.1-flash-abliterated" name="DeepSeek V4.1 Flash Abliterated" {
+			reasoning #false
+			input "text"
+			cost input=0.088 output=0.352 cache-read=0.0176 cache-write=0
+			limits context=1048576 max-tokens=65536
+		}
+		model "kimi-k3.1-pro-abliterated" name="Kimi K3.1 Pro Abliterated" {
+			reasoning #false
+			input "text" "image"
+			cost input=5.5 output=16.5 cache-read=0.55 cache-write=0
+			limits context=1048576 max-tokens=65536
+		}
+		model "hy4" name="Hy4" {
+			reasoning #false
+			input "text" "image"
+			cost input=1.76 output=3.52 cache-read=0.33 cache-write=0
+			limits context=1048576 max-tokens=65536
+		}
+	}
+}
