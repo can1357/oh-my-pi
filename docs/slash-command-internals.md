@@ -531,7 +531,7 @@ Navigation uses the `tui.select.*` bindings: up/down select and scroll, confirm 
 | `confidence` | number, 0.0 to 1.0 | Confidence in the verdict |
 | `findings` (optional) | list | One entry per issue: `title`, `body`, `priority` (0 blocks release to 3 nice to have), `confidence`, `file_path`, `line_start`, `line_end` |
 
-The schema applies only to structured runs: `task.structured` on, or `structured: true` in the agent definition. The bundled `reviewer` does not set `structured`, so with the default `task.structured: false` the task result is the reviewer's final message as text. The `/review` request also asks reviewers to report through incremental `yield` sections, and the `yield` tool exists only on structured runs. See [model and structured-output precedence](./task-agent-discovery.md#model-and-structured-output-precedence).
+The schema applies to structured runs. `task.structured` defaults to on, so the bundled `reviewer` — which does not set `structured` — still gets `yield` and this schema, and the `/review` task result is the accepted report rather than the reviewer's final message as text. Set `task.structured` to `false` to opt out: the result is then that final message, unless the agent definition sets `structured: true`. The `/review` request asks reviewers to report through incremental `yield` sections; that tool exists only on structured runs. See [model and structured-output precedence](./task-agent-discovery.md#model-and-structured-output-precedence).
 
 **Replacing the reviewer.** `/review` looks the agent up by name, so any task agent whose frontmatter has `name: reviewer` replaces the bundled one. The first match wins in this order:
 
