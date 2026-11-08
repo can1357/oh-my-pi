@@ -368,6 +368,7 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"rm",
 		"rmdir",
 		"rsync",
+		"sd",
 		"sed",
 		"seq",
 		"sg",
