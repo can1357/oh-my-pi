@@ -5048,7 +5048,7 @@ fn spawn_error(name: BString, err: std::io::Error) -> (Diag, i32) {
 
 fn stdio_spec(h: &FdRef) -> StdioSpec {
 	if !h.is_open() {
-		StdioSpec::Null
+		StdioSpec::Closed
 	} else if let Some(os) = h.os_handle() {
 		StdioSpec::Inherit(os)
 	} else {

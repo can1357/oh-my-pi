@@ -55,7 +55,7 @@ use bstr::BString;
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use pi_builtins::read_process_umask as process_umask;
 
-use super::{Dir, Leftover, Sessions, Shared, child_end};
+use super::{ChildEnd, Dir, Leftover, Sessions, Shared, child_end};
 use crate::{
 	bash::{
 		ChildRedir, ChildRedirs, EnvView, ExitStatus, ExtProc, OpenFlags, OsHandle, PgroupSpec,
@@ -344,30 +344,30 @@ fn invalid(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error 
 /// (closed after the spawn, so pumps see the child's end of file) or the
 /// engine's own handle of an inherited stream, installed as it is (the
 /// engine keeps it open for the spawn call; a copy cost a `dup` and a
-/// `close` per stream and spawn).
+/// `close` per stream and spawn), or a descriptor left closed by the script.
 enum Source {
+	Closed,
 	Owned(OwnedFd),
 	Host(RawFd),
 }
 
-impl AsFd for Source {
-	fn as_fd(&self) -> BorrowedFd<'_> {
+impl Source {
+	fn open_fd(&self) -> Option<BorrowedFd<'_>> {
 		match self {
-			Self::Owned(fd) => fd.as_fd(),
+			Self::Closed => None,
+			Self::Owned(fd) => Some(fd.as_fd()),
 			// SAFETY: the engine keeps the fd object that owns this
 			// descriptor alive for the whole spawn call.
-			Self::Host(fd) => unsafe { BorrowedFd::borrow_raw(*fd) },
+			Self::Host(fd) => Some(unsafe { BorrowedFd::borrow_raw(*fd) }),
 		}
 	}
-}
 
-impl AsRawFd for Source {
-	fn as_raw_fd(&self) -> RawFd {
-		self.as_fd().as_raw_fd()
+	fn raw_fd(&self) -> Option<RawFd> {
+		self.open_fd().map(|fd| fd.as_raw_fd())
 	}
 }
 
-/// The child's fd for one stream (`/dev/null` for `Null`).
+/// The child's fd for one stream (`/dev/null` for `Null`, absent for `Closed`).
 fn child_fd(
 	shared: &Shared,
 	spec: crate::bash::StdioSpec,
@@ -379,8 +379,9 @@ fn child_fd(
 		return RawFd::try_from(h.0).map(Source::Host).map_err(invalid);
 	}
 	match child_end(shared, spec, dir, pumps, held)? {
-		Some(f) => Ok(Source::Owned(f.into())),
-		None => Ok(Source::Owned(
+		ChildEnd::Closed => Ok(Source::Closed),
+		ChildEnd::File(f) => Ok(Source::Owned(f.into())),
+		ChildEnd::Null => Ok(Source::Owned(
 			fs::File::options()
 				.read(true)
 				.write(true)
@@ -402,9 +403,11 @@ fn lift(fds: &mut [(i32, Source)]) -> io::Result<()> {
 		// Descriptors handed out meanwhile that are targets themselves; they
 		// close when this loop step ends.
 		let mut skipped = Vec::new();
-		while targets.contains(&fd.as_raw_fd()) {
+		while let Some(source) = fd.raw_fd()
+			&& targets.contains(&source)
+		{
 			// SAFETY: fcntl on an fd we hold; returns a new descriptor.
-			let lifted = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+			let lifted = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 3) };
 			if lifted < 0 {
 				return Err(io::Error::last_os_error());
 			}
@@ -862,15 +865,18 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Res
 			.iter()
 			.find(|(t, _)| *t == target)
 			.ok_or_else(|| invalid("missing stdio"))?;
-		Ok(Stdio::from(fd.as_fd().try_clone_to_owned()?))
+		match fd.open_fd() {
+			Some(fd) => Ok(Stdio::from(fd.try_clone_to_owned()?)),
+			None => Ok(Stdio::inherit()),
+		}
 	};
 	cmd.stdin(stdio(0)?);
 	cmd.stdout(stdio(1)?);
 	cmd.stderr(stdio(2)?);
-	let extra: Vec<(i32, RawFd)> = fds
+	let extra: Vec<(i32, Option<RawFd>)> = fds
 		.iter()
-		.filter(|(t, _)| *t > 2)
-		.map(|(t, fd)| (*t, fd.as_raw_fd()))
+		.filter(|(t, fd)| *t > 2 || matches!(fd, Source::Closed))
+		.map(|(t, fd)| (*t, fd.raw_fd()))
 		.collect();
 	let ignore = ignored(prog.ign);
 	let mask = prog.umask as libc::mode_t;
@@ -896,8 +902,14 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Res
 			}
 			libc::umask(mask);
 			for &(target, src) in &extra {
-				if libc::dup2(src, target) < 0 {
-					return Err(io::Error::last_os_error());
+				match src {
+					Some(src) if libc::dup2(src, target) < 0 => {
+						return Err(io::Error::last_os_error());
+					},
+					None => {
+						libc::close(target);
+					},
+					_ => {},
 				}
 			}
 			for (n, &ign) in ignore.iter().enumerate().skip(1) {
@@ -1390,7 +1402,7 @@ fn fork_redirs(
 	let ignore = ignored(prog.ign);
 	let mask = prog.umask as libc::mode_t;
 	let limits = limits(prog);
-	let raw: Vec<(i32, RawFd)> = fds.iter().map(|(t, fd)| (*t, fd.as_raw_fd())).collect();
+	let raw: Vec<(i32, Option<RawFd>)> = fds.iter().map(|(t, fd)| (*t, fd.raw_fd())).collect();
 	// The kernel's numbers and the room the child needs, read here: the
 	// forked child may neither allocate nor read a file.
 	let mut plan = ClosePlan::new();
@@ -1448,8 +1460,14 @@ fn fork_redirs(
 				child_fail(&exec_diag, errno(), 126, texts);
 			}
 			for &(target, src) in &raw {
-				if libc::dup2(src, target) < 0 {
-					child_fail(&exec_diag, errno(), 126, texts);
+				match src {
+					Some(src) if libc::dup2(src, target) < 0 => {
+						child_fail(&exec_diag, errno(), 126, texts);
+					},
+					None => {
+						libc::close(target);
+					},
+					_ => {},
 				}
 			}
 			// The redirections below run with only the command's own
@@ -1528,7 +1546,7 @@ fn fork_redirs(
 
 #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 mod posix {
-	use std::{cell::RefCell, io, mem::MaybeUninit, os::fd::AsRawFd};
+	use std::{cell::RefCell, io, mem::MaybeUninit};
 
 	thread_local! {
 		/// Reusable actions for this thread's last descriptor map and cwd.
@@ -1542,7 +1560,7 @@ mod posix {
 	/// The cached action list and the inputs that completely describe it.
 	struct Actions {
 		raw: FileActions,
-		fds: Vec<(i32, i32)>,
+		fds: Vec<(i32, Option<i32>)>,
 		cwd: Vec<u8>,
 	}
 
@@ -1554,7 +1572,7 @@ mod posix {
 					.fds
 					.iter()
 					.zip(fds)
-					.all(|(&(target, source), (want, fd))| target == *want && source == fd.as_raw_fd())
+					.all(|(&(target, source), (want, fd))| target == *want && source == fd.raw_fd())
 		}
 
 		fn new(exec: &Exec, fds: &[(i32, Source)], add_chdir: AddChdir) -> io::Result<Self> {
@@ -1562,7 +1580,12 @@ mod posix {
 			for (target, fd) in fds {
 				// SAFETY: initialized actions; descriptors are plain integers.
 				check(unsafe {
-					libc::posix_spawn_file_actions_adddup2(raw.ptr(), fd.as_raw_fd(), *target)
+					match fd.raw_fd() {
+						Some(source) => {
+							libc::posix_spawn_file_actions_adddup2(raw.ptr(), source, *target)
+						},
+						None => libc::posix_spawn_file_actions_addclose(raw.ptr(), *target),
+					}
 				})?;
 			}
 			// SAFETY: initialized actions; libc copies the NUL-terminated cwd.
@@ -1571,7 +1594,7 @@ mod posix {
 				raw,
 				fds: fds
 					.iter()
-					.map(|(target, fd)| (*target, fd.as_raw_fd()))
+					.map(|(target, fd)| (*target, fd.raw_fd()))
 					.collect(),
 				cwd: exec.buf[exec.cwd..].to_vec(),
 			})

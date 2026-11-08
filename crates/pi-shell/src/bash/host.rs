@@ -567,6 +567,8 @@ crate::bash::packed_names::packed_names!(Rlimit);
 pub enum StdioSpec {
 	/// Pass this OS handle through.
 	Inherit(OsHandle),
+	/// Leave the descriptor closed, including before child-side redirections.
+	Closed,
 	/// `/dev/null`.
 	Null,
 	/// Engine fd object without an OS handle (in-memory pipe, VFS file): the

@@ -349,28 +349,34 @@ enum Dir {
 	Probe,
 }
 
+enum ChildEnd {
+	Closed,
+	Null,
+	File(fs::File),
+}
+
 /// The child's side of one stream; pumps for engine objects go to `pumps`,
-/// shared input feeds the `ExtProc` must keep go to `held`. `None` for
-/// [`StdioSpec::Null`].
+/// shared input feeds the `ExtProc` must keep go to `held`.
 fn child_end(
 	shared: &Shared,
 	spec: StdioSpec,
 	dir: Dir,
 	pumps: &mut Vec<Pump>,
 	held: &mut Vec<Arc<Feed>>,
-) -> io::Result<Option<fs::File>> {
+) -> io::Result<ChildEnd> {
 	let end = match spec {
-		StdioSpec::Inherit(h) => return imp::dup(h).map(Some),
-		StdioSpec::Null => return Ok(None),
+		StdioSpec::Inherit(h) => return imp::dup(h).map(ChildEnd::File),
+		StdioSpec::Closed => return Ok(ChildEnd::Closed),
+		StdioSpec::Null => return Ok(ChildEnd::Null),
 		StdioSpec::Pipe(fd) => End::Fd(fd),
 		StdioSpec::File(f) => match f.os_handle() {
-			Some(h) => return imp::dup(h).map(Some),
+			Some(h) => return imp::dup(h).map(ChildEnd::File),
 			None => End::File(f),
 		},
 	};
 	match dir {
-		Dir::In => shared.input(end, pumps, held).map(Some),
-		Dir::Out => pipe_end(end, false, pumps).map(Some),
+		Dir::In => shared.input(end, pumps, held).map(ChildEnd::File),
+		Dir::Out => pipe_end(end, false, pumps).map(ChildEnd::File),
 		#[cfg(unix)]
 		Dir::Probe => {
 			let mut end = end;
@@ -378,21 +384,21 @@ fn child_end(
 			if let End::Fd(fd) = &end
 				&& shared.feed_of(fd).is_some()
 			{
-				return shared.input(end, pumps, held).map(Some);
+				return shared.input(end, pumps, held).map(ChildEnd::File);
 			}
 			match end.direction() {
-				(true, false) => shared.input(end, pumps, held).map(Some),
+				(true, false) => shared.input(end, pumps, held).map(ChildEnd::File),
 				(true, true) => {
 					// Read-write (`n<>`): one socket pumped both ways. Linux
 					// cannot reopen a socket through `/dev/fd/N` (ENXIO), but
 					// `n<>` is used through the fd number, not by path.
 					let (ours, theirs) = os::socket_pair()?;
 					pumps.push(Pump::Duplex(end, ours));
-					Ok(Some(theirs))
+					Ok(ChildEnd::File(theirs))
 				},
 				// Writable only, or neither (a pipe whose reader is gone: the
 				// child writes and gets EPIPE as it would).
-				(false, _) => pipe_end(end, false, pumps).map(Some),
+				(false, _) => pipe_end(end, false, pumps).map(ChildEnd::File),
 			}
 		},
 	}

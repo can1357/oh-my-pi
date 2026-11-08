@@ -59,7 +59,7 @@ use windows_sys::Win32::{
 	},
 };
 
-use super::{Dir, Leftover, Shared, UnsupportedFd, child_end};
+use super::{ChildEnd, Dir, Leftover, Shared, UnsupportedFd, child_end};
 use crate::{
 	bash::{EnvView, ExitStatus, ExtProc, OsHandle, PgroupSpec, Signal, SpawnSpec, StdioSpec},
 	sys::{
@@ -405,22 +405,23 @@ fn env_block(env: &EnvView) -> io::Result<Vec<u16>> {
 	Ok(block)
 }
 
-/// The child's handle for one stream (`NUL` for `Null`), inheritable.
+/// The child's inheritable handle (`NUL` for `Null`, absent for `Closed`).
 fn child_handle(
 	shared: &Shared,
 	spec: StdioSpec,
 	dir: Dir,
 	pumps: &mut Vec<Pump>,
 	held: &mut Vec<Arc<Feed>>,
-) -> io::Result<OwnedHandle> {
+) -> io::Result<Option<OwnedHandle>> {
 	let file = match child_end(shared, spec, dir, pumps, held)? {
-		Some(f) => f,
-		None => fs::File::options().read(true).write(true).open("NUL")?,
+		ChildEnd::Closed => return Ok(None),
+		ChildEnd::File(f) => f,
+		ChildEnd::Null => fs::File::options().read(true).write(true).open("NUL")?,
 	};
 	let h = OwnedHandle::from(file);
 	// SAFETY: our own private duplicate; it is closed right after the spawn.
 	check(unsafe { SetHandleInformation(raw(&h), HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) })?;
-	Ok(h)
+	Ok(Some(h))
 }
 
 /// A process attribute list holding the handle list to inherit.
@@ -430,6 +431,9 @@ struct Attributes {
 
 impl Attributes {
 	fn with_handles(handles: &[HANDLE]) -> io::Result<Self> {
+		if handles.is_empty() {
+			return Ok(Self { buf: Vec::new() });
+		}
 		let mut size = 0usize;
 		// SAFETY: a null list with a size pointer is the documented size query
 		// (it "fails" with ERROR_INSUFFICIENT_BUFFER).
@@ -465,7 +469,11 @@ impl Attributes {
 	}
 
 	const fn list(&mut self) -> *mut c_void {
-		self.buf.as_mut_ptr().cast()
+		if self.buf.is_empty() {
+			ptr::null_mut()
+		} else {
+			self.buf.as_mut_ptr().cast()
+		}
 	}
 }
 
@@ -577,11 +585,11 @@ fn create(
 	line: &mut [u16],
 	env: &[u16],
 	cwd: &[u16],
-	handles: &[OwnedHandle; 3],
+	handles: &[Option<OwnedHandle>; 3],
 	job: &Job,
 ) -> io::Result<(OwnedHandle, u32)> {
 	let mut list: Vec<HANDLE> = Vec::with_capacity(3);
-	for h in handles {
+	for h in handles.iter().flatten() {
 		if !list.contains(&raw(h)) {
 			list.push(raw(h));
 		}
@@ -590,9 +598,9 @@ fn create(
 	let mut si = STARTUPINFOEXW::default();
 	si.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
 	si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-	si.StartupInfo.hStdInput = raw(&handles[0]);
-	si.StartupInfo.hStdOutput = raw(&handles[1]);
-	si.StartupInfo.hStdError = raw(&handles[2]);
+	si.StartupInfo.hStdInput = handles[0].as_ref().map_or(ptr::null_mut(), raw);
+	si.StartupInfo.hStdOutput = handles[1].as_ref().map_or(ptr::null_mut(), raw);
+	si.StartupInfo.hStdError = handles[2].as_ref().map_or(ptr::null_mut(), raw);
 	si.lpAttributeList = attrs.list();
 	let mut pi = PROCESS_INFORMATION::default();
 	let flags = CREATE_SUSPENDED
@@ -608,7 +616,7 @@ fn create(
 			line.as_mut_ptr(),
 			ptr::null(),
 			ptr::null(),
-			1,
+			i32::from(!list.is_empty()),
 			flags,
 			env.as_ptr().cast(),
 			cwd.as_ptr(),
