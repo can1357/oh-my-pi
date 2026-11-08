@@ -6,7 +6,8 @@
 
 - Fixed the bash tool's job control after a background job ends to match Bash 5.3: `wait PID` reports a finished job's status again, `wait %N` and `%%` still find a job `wait` reported until the shell next forks or runs `jobs`, `wait` without operands forgets kept statuses, `disown` keeps Bash's statuses, `$!` is the same inside `$( )`, and a background function that traps `TERM` runs its trap and ends with its own status ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
 - Fixed restoring upstream shell snapshots with an active background child, with or without a pending parent `wait` ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
-- Fixed a failed shell restore consuming its snapshot; refused cleanup writes are retried without aborting the restored shell ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
+- Fixed refused execution-image cleanup silently losing retained job results on a second shell restore ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes
