@@ -27,6 +27,8 @@ rust_library(
     compile_data = glob([
         "src/minimizer/filters/fixtures/**",
         "src/process/*.txt",
+        # The Windows console's terminfo entry (`terminfo_db.rs` `include_bytes!`).
+        "src/bash/vm/zsh/terminfo/*",
     ]),
     crate_name = "pi_shell",
     edition = "2024",
