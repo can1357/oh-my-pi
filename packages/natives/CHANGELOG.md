@@ -4,7 +4,7 @@
 
 ### Breaking Changes
 
-- Custom Rust shell stores must implement atomic `StateStore::commit_restore`; stores that cannot commit a complete restore must refuse it without changing state.
+- Custom Rust shell stores must implement atomic `StateStore::commit_restore`; stores that cannot commit a complete restore must refuse it without changing state ([#18470](https://github.com/can1357/oh-my-pi/pull/18470) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Fixed
 
@@ -13,7 +13,7 @@
 - Fixed refused execution-image cleanup silently losing a suspended root command, child or retained job result on a second restore; refused frame and job-record deletion both leave the complete image available for retry ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
 - Fixed foreground waits and restored subshells hanging when the embedded shell starts at virtual process ID zero; disowned children no longer share an ownership marker with that root's children ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
 - Shell snapshots now name incompatible execution formats before reading state, preserve unknown optional state while reporting its loss, and explain explicit frame abandonment without resuming discarded execution ([#18299](https://github.com/can1357/oh-my-pi/pull/18299) by [@sjawhar](https://github.com/sjawhar)).
-- Failed shell restores leave the saved execution image and all stored state unchanged, including when cleanup or signal setup is refused.
+- Failed shell restores leave the saved execution image and all stored state unchanged, including when cleanup or signal setup is refused ([#18470](https://github.com/can1357/oh-my-pi/pull/18470) by [@sjawhar](https://github.com/sjawhar)).
 ## [18.18.2] - 2026-11-08
 
 ### Added
