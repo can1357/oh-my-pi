@@ -13,6 +13,10 @@ rust_library(
     crate_features = ["std"],
     crate_name = "jaq_core",
     edition = "2021",
+    tags = [
+        "noclippy",
+        "norustfmt",
+    ],
     version = "3.1.1",
     deps = all_crate_deps(normal = True),
 )
