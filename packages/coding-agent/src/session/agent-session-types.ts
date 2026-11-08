@@ -473,7 +473,7 @@ export interface PromptOptions {
 	/** Delegator's open-endedness description (task tool `solutionSpace`); replaces the prompt as `auto` thinking classification input. */
 	solutionSpace?: string;
 	/**
-	 * Called synchronously once this prompt is admitted: idle, at the start of
+	 * Called once this prompt is admitted: idle, at the start of
 	 * #promptWithMessage's own turn setup (before preflight, image
 	 * normalization, or provider dispatch); while streaming, once the message
 	 * is pushed onto its steer/follow-up/aside queue (after image
@@ -481,8 +481,17 @@ export interface PromptOptions {
 	 * is routed to an extension command, before its handler runs. Admission is
 	 * not proof that a model call will occur. A prompt dropped, cancelled, or
 	 * failed before admission still only settles through the returned promise.
+	 * A returned promise is awaited before own-turn setup continues; other paths
+	 * call synchronously without awaiting.
 	 */
-	onPromptAdmitted?: () => void;
+	onPromptAdmitted?: () => unknown;
+	/**
+	 * Called synchronously on a pre-live abort, or an own-turn setup error or refusal.
+	 * Runs before `setPromptDropped` and before the session goes idle, so callers
+	 * can reclaim queued work before it drains. Never called after the turn goes live.
+	 * Errors thrown before admission settle only through the returned promise.
+	 */
+	onPromptDropped?: () => void;
 	/**
 	 * Called synchronously when this prompt is pushed onto the steer or
 	 * follow-up queue, just before {@link onPromptAdmitted}, with the messages it

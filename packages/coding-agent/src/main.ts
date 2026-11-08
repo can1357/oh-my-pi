@@ -442,6 +442,7 @@ export async function submitInteractiveInput(
 	if (input.cancelled) {
 		return;
 	}
+	let consumedLocally = false;
 
 	try {
 		// Honor the submission's queue intent, defaulting to followUp. Reading
@@ -491,11 +492,17 @@ export async function submitInteractiveInput(
 				imageLinks: input.imageLinks,
 				optimistic: true,
 				propagateErrors: true,
+				promptHooks: input.promptHooks,
 			});
 		} else {
 			let forwarded = false;
 			try {
-				forwarded = await session.prompt(input.text, { images: input.images, streamingBehavior });
+				forwarded = await session.prompt(input.text, {
+					images: input.images,
+					streamingBehavior,
+					...input.promptHooks,
+				});
+				consumedLocally = !forwarded;
 			} catch (error: unknown) {
 				mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
 			}
@@ -511,6 +518,7 @@ export async function submitInteractiveInput(
 		mode.showError(errorMessage);
 	} finally {
 		mode.finishPendingSubmission(input);
+		input.onDispatchSettled?.(consumedLocally);
 		await mode.checkShutdownRequested();
 	}
 }

@@ -32,6 +32,7 @@ import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
+import type { PromptOptions } from "../session/agent-session-types";
 import type { AgentViewSession } from "../session/agent-session-handle";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
@@ -100,6 +101,11 @@ export type SubmittedUserInput = {
 	streamingBehavior?: "steer" | "followUp";
 	/** Set by `submitInteractiveInput` for a custom-message submission: the session took it (started a turn or queued it into one). */
 	dispatched?: boolean;
+	/** Editor text handed back when the submission is cancelled before it starts; defaults to `text`. */
+	draftText?: string;
+	promptHooks?: Pick<PromptOptions, "onPromptAdmitted" | "onPromptDropped">;
+	/** After dispatch, except when cancelled before starting; `consumedLocally` means an extension command ran. */
+	onDispatchSettled?: (consumedLocally: boolean) => void;
 	cancelled: boolean;
 	started: boolean;
 };

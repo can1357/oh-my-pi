@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
+import type { PromptOptions } from "../session/agent-session-types";
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../session/messages";
 import type { InteractiveModeContext } from "./types";
 
@@ -44,6 +45,8 @@ interface InvokeSkillCommandOptions {
 	optimistic?: boolean;
 	/** With `queueOnly`: called with the messages the skill prompt pushed onto a queue (see `PromptOptions.onPromptQueued`). */
 	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
+	/** Without `queueOnly`: forwarded to the session prompt (see `PromptOptions`). */
+	promptHooks?: Pick<PromptOptions, "onPromptAdmitted" | "onPromptDropped">;
 }
 
 /** Built custom-message payload and delivery options for a `/skill:` command. */
@@ -100,7 +103,7 @@ export async function invokeSkillCommandFromText(
 		if (!built) return false;
 		const promptOptions = options?.queueOnly
 			? { ...built.options, queueOnly: true, onPromptQueued: options.onPromptQueued }
-			: built.options;
+			: { ...built.options, ...options?.promptHooks };
 		optimistic = options?.optimistic === true && !options?.queueOnly && !ctx.session.isStreaming;
 		if (optimistic) {
 			ctx.renderOptimisticSkillMessage(

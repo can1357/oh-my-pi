@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type AutocompleteProvider,
@@ -48,7 +48,7 @@ import { parseFileSlashInvocation, renderFileSlashCommand } from "../../extensib
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import { openLocalFileInEditor } from "../local-file-editor";
 import { AgentRegistry } from "../../registry/agent-registry";
-import type { RestoredQueuedMessage } from "../../session/agent-session-types";
+import type { PromptOptions, RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { PINNED_HUD_TOGGLE_ID } from "../../task/output-manager";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
@@ -250,6 +250,12 @@ function parsePythonCommandInput(text: string): { code: string; isExcluded: bool
 /** Wrap pasted text in `<attachment>` tags so the model treats it as one quoted block. */
 function wrapPasteInAttachmentBlock(content: string): string {
 	return `<attachment>\n${content}\n</attachment>`;
+}
+
+function formatQueueShorthand(messages: readonly string[]): string {
+	return messages.length === 1
+		? `=> ${messages[0]}`
+		: `=>\n${messages.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`).join("\n")}`;
 }
 
 /** Run a teardown abort that must never throw (Esc / Ctrl+C path). A thrown
@@ -2018,6 +2024,10 @@ export class InputController {
 		}
 
 		const startImmediately = !this.ctx.session.isStreaming && this.ctx.session.queuedMessageCount === 0;
+		if (startImmediately && messages.length > 1) {
+			await this.#startQueuedBatch(messages, images, imageLinks);
+			return;
+		}
 		let queuedCount = 0;
 		try {
 			if (startImmediately && this.ctx.onInputCallback) {
@@ -2063,13 +2073,7 @@ export class InputController {
 					}
 				}
 			} else {
-				const remaining = messages.slice(queuedCount);
-				const restored =
-					remaining.length === 1
-						? `=> ${remaining[0]}`
-						: `=>\n${remaining
-								.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`)
-								.join("\n")}`;
+				const restored = formatQueueShorthand(messages.slice(queuedCount));
 				if (options.detachedText !== undefined) restoreDetachedDraft(this.ctx.editor, restored);
 				else this.ctx.editor.setText(restored);
 			}
@@ -2089,6 +2093,122 @@ export class InputController {
 			);
 		}
 		this.ctx.ui.requestRender();
+	}
+
+	/** Queue only after admission; otherwise the idle drain can run the rest before the first item (#10802). */
+	async #startQueuedBatch(
+		messages: string[],
+		images: ImageContent[] | undefined,
+		imageLinks: (string | undefined)[] | undefined,
+	): Promise<void> {
+		const [first = "", ...rest] = messages;
+		const restore = (unsent: readonly string[], withImages: boolean) => {
+			restoreDetachedDraft(
+				this.ctx.editor,
+				formatQueueShorthand(unsent),
+				withImages ? images : undefined,
+				withImages ? imageLinks : undefined,
+			);
+			this.ctx.updatePendingMessagesDisplay();
+			this.ctx.ui.requestRender();
+		};
+		// The follow-up queue refuses extension commands; refuse the batch before any of it is sent.
+		const command = rest.find(message => this.#isLocalExtensionCommand(message));
+		if (command !== undefined) {
+			restore(messages, true);
+			this.ctx.showError(
+				`Extension command "${command.split(" ", 1)[0]}" can't wait in the queue; send it on its own`,
+			);
+			return;
+		}
+
+		/** What each `rest` message pushed onto the follow-up queue, by index; unset while unqueued. */
+		const queued: (readonly AgentMessage[])[] = [];
+		/** Index from which `rest` failed to queue and already went back to the editor. */
+		let returnedFrom = rest.length;
+		let handledBySession = false;
+		const queueRest = async () => {
+			for (let index = 0; index < rest.length; index++) {
+				const message = rest[index];
+				try {
+					await this.ctx.withLocalSubmission(message, () =>
+						this.ctx.session.followUp(message, undefined, {
+							onPromptQueued: group => {
+								queued[index] = group;
+							},
+						}),
+					);
+				} catch (error) {
+					returnedFrom = index;
+					restore(rest.slice(index), false);
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					return;
+				}
+			}
+			this.ctx.updatePendingMessagesDisplay();
+			this.ctx.showStatus(`Sent first message; queued ${rest.length} for later yields`);
+			this.ctx.ui.requestRender();
+		};
+		const promptHooks: Pick<PromptOptions, "onPromptAdmitted" | "onPromptDropped"> = {
+			onPromptAdmitted: () => {
+				handledBySession = true;
+				return queueRest();
+			},
+			onPromptDropped: () => {
+				handledBySession = true;
+				// Take back what is still queued. Anything queued that is gone was returned by Esc.
+				const removed = new Set(this.ctx.session.dropQueuedMessages(queued.flat()));
+				const unsent = rest.filter(
+					(_, index) =>
+						index < returnedFrom &&
+						(queued[index] === undefined || queued[index].some(message => removed.has(message))),
+				);
+				// Restored before the session hands the first message back alone, which it does only into an empty editor.
+				if (unsent.length > 0) restore([first, ...unsent], true);
+				else restoreDetachedDraft(this.ctx.editor, first, images, imageLinks);
+			},
+		};
+		// An extension command is admitted before its handler runs, without a turn of its own: the
+		// rest waits until the command finished, so whatever the command sends goes first. A skill of
+		// the same name wins, as in submitInteractiveInput.
+		const hooks =
+			this.#isLocalExtensionCommand(first) && !isKnownSkillCommand(this.ctx, first) ? undefined : promptHooks;
+		const settle = async (consumedLocally: boolean) => {
+			if (handledBySession) return;
+			if (consumedLocally) {
+				await queueRest();
+				return;
+			}
+			restore(messages, true);
+		};
+
+		if (this.ctx.onInputCallback) {
+			const submission = this.ctx.startPendingSubmission({
+				text: first,
+				images,
+				imageLinks,
+				streamingBehavior: "followUp",
+			});
+			submission.draftText = formatQueueShorthand(messages);
+			submission.promptHooks = hooks;
+			submission.onDispatchSettled = consumedLocally => void settle(consumedLocally);
+			this.ctx.onInputCallback(submission);
+			return;
+		}
+
+		let forwarded: boolean;
+		try {
+			forwarded = await this.ctx.withLocalSubmission(
+				first,
+				() => this.ctx.session.prompt(first, { images, streamingBehavior: "followUp", ...hooks }),
+				{ imageCount: images?.length ?? 0 },
+			);
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			await settle(false);
+			return;
+		}
+		await settle(!forwarded);
 	}
 
 	/** Send editor text as a follow-up message (queued behind current stream). */

@@ -8797,6 +8797,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				promptGeneration: queueGeneration,
 			});
 			outcome.sessionClaimed = queued;
+			if (!queued) this.#notifyPromptDropped(options);
 			if (!queued && this.#promptGeneration !== queueGeneration && !options?.synthetic) {
 				this.#promptDropped?.({ text: typedText, images: options?.images });
 			}
@@ -8844,6 +8845,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// generation-race checks further down.
 		if (this.#promptGeneration !== preflightGeneration) {
 			outcome.sessionClaimed = false;
+			this.#notifyPromptDropped(options);
 			if (!options?.synthetic) {
 				this.#promptDropped?.({ text: typedText, images: options?.images });
 			}
@@ -8878,6 +8880,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				onPromptQueued: options?.onPromptQueued,
 			});
 			outcome.sessionClaimed = queued;
+			if (!queued) this.#notifyPromptDropped(options);
 			if (!queued && options?.throwOnDrop) throw new PromptDroppedError();
 			return true;
 		}
@@ -8980,7 +8983,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
+		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "onPromptDropped"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 			onPromptQueued?: PromptOptions["onPromptQueued"];
@@ -8991,7 +8994,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	async #promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
+		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "onPromptDropped"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 			onPromptQueued?: PromptOptions["onPromptQueued"];
@@ -9013,7 +9016,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #dispatchCustomPrompt<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		options:
-			| (Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
+			| (Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "onPromptDropped"> & {
 					queueChipText?: string;
 					queueOnly?: boolean;
 					onPromptQueued?: PromptOptions["onPromptQueued"];
@@ -9087,6 +9090,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// description must not publish the skill or start a turn afterwards.
 		if (hasSkillImages && (this.#promptGeneration !== preparationGeneration || this.#isDisposed)) {
 			outcome.sessionClaimed = false;
+			this.#notifyPromptDropped(options);
 			return true;
 		}
 
@@ -9331,7 +9335,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		expandedText: string,
 		options?: Pick<
 			PromptOptions,
-			"toolChoice" | "images" | "skipCompactionCheck" | "solutionSpace" | "onPromptAdmitted"
+			"toolChoice" | "images" | "skipCompactionCheck" | "solutionSpace" | "onPromptAdmitted" | "onPromptDropped"
 		> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
@@ -9351,8 +9355,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
+		let wentLive = false;
 		try {
-			options?.onPromptAdmitted?.();
+			await options?.onPromptAdmitted?.();
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			// Auto-prewalk: return from the previous task's handoff before the usage preflight checks the model,
 			// then judge this task alongside the rest of setup; the decision is applied right before dispatch.
@@ -9592,6 +9597,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			try {
 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
+					wentLive = true;
 					// `agent.prompt` claims streaming synchronously before its
 					// first await: this callback fires exactly when THIS
 					// client-owned run goes live (never on a busy-retry that
@@ -9608,6 +9614,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			return true;
 		} finally {
+			// Before the in-flight bracket closes: once idle, the session may drain what the
+			// caller queued behind this prompt as an autonomous turn.
+			if (!wentLive) this.#notifyPromptDropped(options);
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -9616,6 +9625,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// against zero.
 			this.#endInFlight(inFlightEpoch);
 			if (this.#promptSetupAbortController === setupAbort) this.#promptSetupAbortController = undefined;
+		}
+	}
+
+	#notifyPromptDropped(options: Pick<PromptOptions, "onPromptDropped"> | undefined): void {
+		// A throwing caller must not mask the drop or skip the cleanup that follows it.
+		try {
+			options?.onPromptDropped?.();
+		} catch (error) {
+			logger.error("onPromptDropped callback failed", { error: String(error) });
 		}
 	}
 
@@ -11096,14 +11114,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Remove exactly `messages` from the steering and follow-up queues; everything else queued
 	 * stays. A caller takes back what it queued (the groups reported by `onPromptQueued`) without
 	 * touching what other sources queued meanwhile. A message no longer queued (already delivered,
-	 * or removed before) is skipped.
+	 * or removed before) is skipped. Returns the messages it removed.
 	 */
-	dropQueuedMessages(messages: Iterable<AgentMessage>): void {
+	dropQueuedMessages(messages: Iterable<AgentMessage>): AgentMessage[] {
 		const dropped = new Set(messages);
-		if (dropped.size === 0) return;
+		if (dropped.size === 0) return [];
+		const steering = this.agent.peekSteeringQueue();
+		const followUp = this.agent.peekFollowUpQueue();
+		const removed = [...steering, ...followUp].filter(message => dropped.has(message));
 		const kept = (queue: readonly AgentMessage[]): AgentMessage[] => queue.filter(message => !dropped.has(message));
-		this.agent.replaceQueues(kept(this.agent.peekSteeringQueue()), kept(this.agent.peekFollowUpQueue()));
+		this.agent.replaceQueues(kept(steering), kept(followUp));
 		this.#reconcileQueuedMessageDrain();
+		return removed;
 	}
 
 	/**
