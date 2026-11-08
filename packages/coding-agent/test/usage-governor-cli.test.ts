@@ -166,16 +166,28 @@ describe("usage governor CLI proof: confinement", () => {
 
 describe("usage governor CLI proof: scenarios", () => {
 	test("calibration and coordination: concurrent processes are serialised to the line; the control sends over it", async () => {
-		// One account, 30 % used, reset 40 s away, 10 points per send. Phase one sends three requests and
+		// One account, 30 % used, reset 58 s away, 10 points per send. Phase one sends three requests and
 		// invalidates; phase two runs two processes at once against the same ledger.
-		const specs = [account("govplan", "a", { usedFraction: 0.3, resetInMs: 40_000, perRequest: 0.1 })];
+		const specs = [account("govplan", "a", { usedFraction: 0.3, resetInMs: 58_000, perRequest: 0.1 })];
 		const proof = await GovernorProof.create(specs, { enabled: true });
 		try {
+			proof.fake.syncAllWindows();
 			for (let index = 0; index < 3; index += 1) {
 				expect((await proof.runOmp(["-p", `phase one ${index}`])).exitCode).toBe(0);
 			}
 			expect((await proof.invalidateUsage()).exitCode).toBe(0);
 			const phaseTwoMs = Date.now();
+			const acctBefore = proof.fake.account("a");
+			const preAdmissible =
+				acctBefore.resetsAt -
+				WINDOW_MS +
+				(((acctBefore.usedFraction + 0.1) / (1 - RESERVE) - LEAD) / (1 - LEAD)) * WINDOW_MS;
+			const headroomMs = preAdmissible - phaseTwoMs;
+			expect(headroomMs).toBeGreaterThanOrEqual(10_000);
+			expect(
+				overLine({ usedFraction: acctBefore.usedFraction + 0.1, resetsAt: acctBefore.resetsAt, atMs: phaseTwoMs }),
+			).toBe(true);
+
 			const phaseTwoStart = proof.chats().length;
 			const [first, second] = await Promise.all([
 				proof.runOmp(["-p", "phase two first"], 90_000),
@@ -193,6 +205,17 @@ describe("usage governor CLI proof: scenarios", () => {
 
 			// Both processes waited on the line, and each was admitted no earlier than its admissible time.
 			const waits = proof.readLedger().waits.filter(wait => wait.startedAtMs >= phaseTwoMs);
+			if (waits.length !== 2) {
+				const diagnostics = {
+					headroomMs,
+					preAdmissible,
+					phaseTwoMs,
+					acctBefore,
+					waits: proof.readLedger().waits,
+					records: proof.fake.records,
+				};
+				throw new Error(`expected 2 phase-two waits but received ${waits.length}: ${JSON.stringify(diagnostics)}`);
+			}
 			expect(waits.length).toBe(2);
 			for (const wait of waits) {
 				expect(wait.outcome).toBe("admitted");
@@ -208,13 +231,26 @@ describe("usage governor CLI proof: scenarios", () => {
 	}, 150_000);
 
 	test("calibration control: with usageGovernor disabled the same run sends over the line and writes no ledger", async () => {
-		const specs = [account("govplan", "a", { usedFraction: 0.3, resetInMs: 40_000, perRequest: 0.1 })];
+		const specs = [account("govplan", "a", { usedFraction: 0.3, resetInMs: 58_000, perRequest: 0.1 })];
 		const proof = await GovernorProof.create(specs, { enabled: false });
 		try {
+			proof.fake.syncAllWindows();
 			for (let index = 0; index < 3; index += 1) {
 				expect((await proof.runOmp(["-p", `phase one ${index}`])).exitCode).toBe(0);
 			}
 			expect((await proof.invalidateUsage()).exitCode).toBe(0);
+			const phaseTwoMs = Date.now();
+			const acctBefore = proof.fake.account("a");
+			const preAdmissible =
+				acctBefore.resetsAt -
+				WINDOW_MS +
+				(((acctBefore.usedFraction + 0.1) / (1 - RESERVE) - LEAD) / (1 - LEAD)) * WINDOW_MS;
+			const headroomMs = preAdmissible - phaseTwoMs;
+			expect(headroomMs).toBeGreaterThanOrEqual(10_000);
+			expect(
+				overLine({ usedFraction: acctBefore.usedFraction + 0.1, resetsAt: acctBefore.resetsAt, atMs: phaseTwoMs }),
+			).toBe(true);
+
 			const phaseTwoStart = proof.chats().length;
 			const [first, second] = await Promise.all([
 				proof.runOmp(["-p", "phase two first"]),
@@ -235,27 +271,59 @@ describe("usage governor CLI proof: scenarios", () => {
 	}, 120_000);
 
 	test("routing: sends go to the account with headroom until it crosses its line, then to the fresh account", async () => {
-		// A resets in 25 s with headroom; B is fresh with a full window ahead. Each send adds 0.2.
+		// A resets in 55 s with headroom; B is fresh with a full window ahead. A serves until crossing its line.
 		const specs = [
-			account("govplan", "a", { usedFraction: 0, resetInMs: 25_000, perRequest: 0.2 }),
-			account("govplan", "b", { usedFraction: 0, resetInMs: 60_000, perRequest: 0.2 }),
+			account("govplan", "a", { usedFraction: 0, resetInMs: 55_000, perRequest: 0.08 }),
+			account("govplan", "b", { usedFraction: 0, resetInMs: 60_000, perRequest: 0.05 }),
 		];
 		const proof = await GovernorProof.create(specs, { enabled: true });
 		try {
+			proof.fake.syncAllWindows();
 			for (let index = 0; index < 5; index += 1) {
 				expect((await proof.runOmp(["-p", `route ${index}`])).exitCode).toBe(0);
 			}
 			const chats = proof.chats();
 			const order = chats.map(record => record.label);
 			const firstB = order.indexOf("b");
-			expect(firstB).toBeGreaterThan(0);
+			if (firstB <= 0) {
+				const diagnostic = { order, chats, records: proof.fake.records, ledger: proof.readLedger() };
+				throw new Error(`expected route to switch to fresh account b: ${JSON.stringify(diagnostic)}`);
+			}
+			expect(firstB).toBeGreaterThanOrEqual(2);
 			expect(order.slice(0, firstB).every(label => label === "a")).toBe(true);
 			expect(order.slice(firstB).every(label => label === "b")).toBe(true);
+
 			// Every send to A was on or under A's line at the moment it was sent.
-			expect(chats.filter(record => record.label === "a").filter(overLine)).toEqual([]);
-			// The move was forced by the line: A had already used more than half of its window.
-			const lastA = chats.filter(record => record.label === "a").at(-1);
-			expect(lastA?.usedFraction ?? 0).toBeGreaterThan(0.5);
+			const aChats = chats.filter(record => record.label === "a");
+			expect(aChats.filter(overLine)).toEqual([]);
+			const lastA = aChats.at(-1);
+			expect(lastA).toBeDefined();
+			expect(overLine(lastA!)).toBe(false);
+
+			// At the moment of switch, the next request on A exceeds A's allowance line, forcing the move to B.
+			const firstBChat = chats[firstB];
+			expect(firstBChat).toBeDefined();
+			expect(
+				overLine({
+					usedFraction: (lastA?.usedFraction ?? 0) + specs[0].perRequest,
+					resetsAt: lastA!.resetsAt!,
+					atMs: firstBChat.atMs,
+				}),
+			).toBe(true);
+
+			// B was fresh when selected: its first send carried only its own perRequest usage.
+			expect(firstBChat.usedFraction).toBe(specs[1].perRequest);
+
+			// All sends to each account retain the exact same resetsAt: no synthetic window rollover occurred.
+			const aResets = new Set(aChats.map(c => c.resetsAt));
+			expect(aResets.size).toBe(1);
+			expect(aChats[0].resetsAt).toBe(proof.fake.account("a").resetsAt);
+
+			const bChats = chats.filter(record => record.label === "b");
+			const bResets = new Set(bChats.map(c => c.resetsAt));
+			expect(bResets.size).toBe(1);
+			expect(bChats[0].resetsAt).toBe(proof.fake.account("b").resetsAt);
+
 			assertConfined(proof);
 		} finally {
 			proof.close();
@@ -544,6 +612,7 @@ describe("usage governor CLI proof: scenarios", () => {
 		try {
 			const status = governorOf(await proof.usageJson());
 			expect(windowsFor(status, "govplan-g-b@example.invalid").some(window => window.state === "open")).toBe(true);
+			proof.fake.syncAllWindows();
 			child = proof.spawnOmp(["-p", "WARM_FALLBACK ROUTE_PIN"]);
 			if (!(await awaitCondition(() => proof.chats().length >= 2, 20_000))) {
 				child.kill("SIGINT");
@@ -552,12 +621,12 @@ describe("usage governor CLI proof: scenarios", () => {
 					`missing second chat: ${JSON.stringify({ records: proof.fake.records, ledger: proof.readLedger(), stderr: await new Response(child.stderr).text() })}`,
 				);
 			}
-			expect(
-				proof
-					.chats()
-					.slice(0, 2)
-					.map(record => record.provider),
-			).toEqual(["govplan", "govplan-g"]);
+			const chats = proof.chats();
+			if (chats.length < 2 || chats[0].provider !== "govplan" || chats[1].provider !== "govplan-g") {
+				const diagnostic = { chats, records: proof.fake.records, ledger: proof.readLedger() };
+				throw new Error(`expected fallback from govplan to govplan-g: ${JSON.stringify(diagnostic)}`);
+			}
+			expect(chats.slice(0, 2).map(record => record.provider)).toEqual(["govplan", "govplan-g"]);
 			expect(proof.fake.records.filter(record => record.kind === "unexpected")).toEqual([]);
 			assertConfined(proof);
 		} finally {
