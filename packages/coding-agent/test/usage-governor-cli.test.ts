@@ -810,6 +810,148 @@ describe("usage governor CLI proof: scenarios", () => {
 			proof.close();
 		}
 	}, 120_000);
+
+	for (const enabled of [false, true]) {
+		test(`provider error falls back to role-chain target with unknown allowance when governor is ${enabled ? "enabled" : "disabled"}`, async () => {
+			const primary = account("govplan", "primary", {
+				usedFraction: 0,
+				resetInMs: 60_000,
+				perRequest: 0.1,
+				failChat: true,
+			});
+			const fallback = account("govplan-h", "fallback", {
+				bearer: "tok-govplan-h-unknown",
+				usedFraction: 0,
+				resetInMs: 60_000,
+				perRequest: 0.1,
+			});
+			const proof = await GovernorProof.create([primary, fallback], {
+				enabled,
+				roleProtection: "off",
+				modelRoles: { default: "govplan/m", task: "govplan/m" },
+				fallbackChains: { default: ["govplan-h/m2"], task: [] },
+			});
+			try {
+				const result = await proof.runOmp(["-p", `error fallback ${enabled ? "governed" : "control"}`], 60_000);
+				expect(result.exitCode).toBe(0);
+				expect(result.stdout.trim()).toBe("ok");
+
+				const chats = proof.chats();
+				expect(chats).toHaveLength(2);
+				expect(chats[0]).toMatchObject({
+					provider: "govplan",
+					model: "m",
+					bearer: primary.bearer,
+					status: 500,
+				});
+				expect(chats[1]).toMatchObject({
+					provider: "govplan-h",
+					model: "m2",
+					bearer: fallback.bearer,
+					status: 200,
+				});
+			} finally {
+				proof.close();
+			}
+		}, 90_000);
+	}
+
+	test("difference between proactive unknown route (forbidden) and ordinary configured error fallback (preserved)", async () => {
+		const fallbackUnknown = account("govplan-h", "fallback-unknown", {
+			bearer: "tok-govplan-h-unknown",
+			usedFraction: 0,
+			resetInMs: 60_000,
+		});
+
+		// 1. Proactive unknown route is forbidden: when primary is above its pacing line,
+		// the governor holds/waits on primary rather than escaping to the unknown fallback.
+		const primaryPaced = account("govplan", "primary-paced", {
+			usedFraction: 0.85,
+			resetInMs: 58_000,
+		});
+		const proactiveProof = await GovernorProof.create([primaryPaced, fallbackUnknown], {
+			enabled: true,
+			roleProtection: "off",
+			modelRoles: { default: "govplan/m", task: "govplan/m" },
+			fallbackChains: { default: ["govplan-h/m2"], task: [] },
+		});
+		const proactiveChild = proactiveProof.spawnOmp(["-p", "proactive unknown forbidden"]);
+		try {
+			expect(await awaitCondition(() => proactiveProof.readLedger().waits.length > 0, 20_000)).toBe(true);
+			// Proactively, zero chat requests were sent to the unknown fallback route.
+			expect(proactiveProof.chats()).toEqual([]);
+		} finally {
+			proactiveChild.kill("SIGINT");
+			await proactiveChild.exited;
+			proactiveProof.close();
+		}
+
+		// 2. Ordinary configured error fallback is preserved: when primary encounters a provider
+		// error, ordinary error fallback recovers onto the configured role-chain target.
+		const primaryFailing = account("govplan", "primary-failing", {
+			usedFraction: 0,
+			resetInMs: 60_000,
+			perRequest: 0.1,
+			failChat: true,
+		});
+		const errorProof = await GovernorProof.create([primaryFailing, fallbackUnknown], {
+			enabled: true,
+			roleProtection: "off",
+			modelRoles: { default: "govplan/m", task: "govplan/m" },
+			fallbackChains: { default: ["govplan-h/m2"], task: [] },
+		});
+		try {
+			const result = await errorProof.runOmp(["-p", "error fallback preserved"], 60_000);
+			expect(result.exitCode).toBe(0);
+			expect(result.stdout.trim()).toBe("ok");
+
+			const chats = errorProof.chats();
+			expect(chats).toHaveLength(2);
+			expect(chats[0]).toMatchObject({
+				provider: "govplan",
+				model: "m",
+				bearer: primaryFailing.bearer,
+				status: 500,
+			});
+			expect(chats[1]).toMatchObject({
+				provider: "govplan-h",
+				model: "m2",
+				bearer: fallbackUnknown.bearer,
+				status: 200,
+			});
+		} finally {
+			errorProof.close();
+		}
+	}, 120_000);
+
+	for (const enabled of [false, true]) {
+		test(`retry.usageAwareFallback fail-closed blocks model turn with governor ${enabled ? "enabled" : "disabled"}`, async () => {
+			const spec = account("govplan", "a", {
+				usedFraction: 0.95,
+				resetInMs: 60_000,
+			});
+			const proof = await GovernorProof.create([spec], {
+				enabled,
+				usageAwareFallback: true,
+				usageReservePolicy: "fail-closed",
+				usageReservePct: 10,
+				modelRoles: { default: "govplan/m", task: "govplan/m" },
+			});
+			try {
+				const result = await proof.runOmp(["-p", `fail-closed ${enabled ? "governed" : "control"}`], 60_000);
+				expect(result.exitCode).not.toBe(0);
+				expect(result.stderr).toMatch(/fail-closed/i);
+
+				// Fake wire outcomes: usage preflight was fetched, but zero chat completions were sent.
+				expect(proof.chats()).toEqual([]);
+				const usageRecords = proof.fake.records.filter(record => record.kind === "usage");
+				expect(usageRecords.length).toBeGreaterThan(0);
+				expect(usageRecords.every(record => record.provider === "govplan")).toBe(true);
+			} finally {
+				proof.close();
+			}
+		}, 90_000);
+	}
 });
 
 describe("usage governor CLI proof: stored API key", () => {

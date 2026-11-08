@@ -48,6 +48,10 @@ export interface ScenarioSettings {
 	roleProtection?: "off" | "prefer-alternatives";
 	fallbackChains?: Record<string, string[]>;
 	modelRoles?: Record<string, string>;
+	usageAwareFallback?: boolean;
+	usageReservePolicy?: "confirm" | "auto" | "fail-closed";
+	usageReservePct?: number;
+	modelFallback?: boolean;
 }
 
 /** Writes the scenario config: `usageGovernor.leadPct` is left unset so the default applies. */
@@ -73,8 +77,11 @@ export function writeScenarioConfig(agentDir: string, settings: ScenarioSettings
 		].filter(provider => provider !== "govplan" && provider !== "govplan-g" && provider !== "govplan-h"),
 		modelRoles: settings.modelRoles ?? { default: "govplan/m", task: "govplan-g/m" },
 		retry: {
-			usageReservePct: 10,
+			usageReservePct: settings.usageReservePct ?? 10,
 			fallbackChains: settings.fallbackChains ?? { default: ["govplan/m2"] },
+			...(settings.usageAwareFallback !== undefined ? { usageAwareFallback: settings.usageAwareFallback } : {}),
+			...(settings.usageReservePolicy !== undefined ? { usageReservePolicy: settings.usageReservePolicy } : {}),
+			...(settings.modelFallback !== undefined ? { modelFallback: settings.modelFallback } : {}),
 		},
 		compaction: { enabled: false },
 	};

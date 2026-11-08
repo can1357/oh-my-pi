@@ -50,6 +50,10 @@ export interface FakeAccountSpec {
 	creditBalance?: number;
 	/** Usage endpoint answers 500 while true. */
 	failUsage?: boolean;
+	/** Chat completions answers error while true (or remaining count > 0). */
+	failChat?: boolean | number;
+	/** Status code for chat failures (default 500). */
+	failChatStatus?: number;
 }
 
 interface AccountState extends FakeAccountSpec {
@@ -75,6 +79,8 @@ export interface FakeRecord {
 	usedFraction?: number;
 	/** 60 s window reset served with the request. */
 	resetsAt?: number;
+	/** HTTP status code served for this request. */
+	status?: number;
 	/** Epoch ms when the fake saw the request. */
 	atMs: number;
 }
@@ -86,7 +92,10 @@ export interface FakeProvider {
 	/** Live account state, read by scenarios between phases. */
 	account(label: string): Readonly<AccountState>;
 	/** Mutate an account's served state between phases (for example to make usage fail). */
-	patch(label: string, change: Partial<Pick<FakeAccountSpec, "failUsage" | "usedFraction">>): void;
+	patch(
+		label: string,
+		change: Partial<Pick<FakeAccountSpec, "failUsage" | "usedFraction" | "failChat" | "failChatStatus">>,
+	): void;
 	/** Chat records only, in arrival order. */
 	chats(): FakeRecord[];
 	close(): void;
@@ -304,6 +313,9 @@ export function startFakeProvider(specs: readonly FakeAccountSpec[], now: () => 
 					.map(message => messageText(message).slice(0, RESULT_PREVIEW_CHARS));
 				roll(account, atMs);
 				account.usedFraction += account.perRequest;
+				const shouldFailChat =
+					account.failChat === true || (typeof account.failChat === "number" && account.failChat > 0);
+				const status = shouldFailChat ? (account.failChatStatus ?? 500) : 200;
 				records.push({
 					kind: "chat",
 					path: url.pathname,
@@ -315,14 +327,25 @@ export function startFakeProvider(specs: readonly FakeAccountSpec[], now: () => 
 					toolResults,
 					usedFraction: account.usedFraction,
 					resetsAt: account.resetsAt,
+					status,
 					atMs,
 				});
+				if (shouldFailChat) {
+					if (typeof account.failChat === "number") {
+						account.failChat -= 1;
+					}
+					return Response.json(
+						{ error: { message: "upstream chat failure", type: "server_error", code: "server_error" } },
+						{ status },
+					);
+				}
 				const reply = replyFor(account.provider, messages, toolResults.length);
 				return new Response(sse(model, reply), { headers: { "content-type": "text/event-stream" } });
 			}
 
 			if (request.method === "GET" && url.pathname.endsWith("/usage") && account) {
 				const report = usageReport(account, atMs);
+				const status = account.failUsage ? 500 : 200;
 				records.push({
 					kind: "usage",
 					path: url.pathname,
@@ -331,6 +354,7 @@ export function startFakeProvider(specs: readonly FakeAccountSpec[], now: () => 
 					bearer,
 					usedFraction: account.usedFraction,
 					resetsAt: account.resetsAt,
+					status,
 					atMs,
 				});
 				if (account.failUsage) return Response.json({ error: "upstream usage failure" }, { status: 500 });
@@ -357,6 +381,8 @@ export function startFakeProvider(specs: readonly FakeAccountSpec[], now: () => 
 			if (!state) throw new Error(`unknown fake account ${label}`);
 			if (change.failUsage !== undefined) state.failUsage = change.failUsage;
 			if (change.usedFraction !== undefined) state.usedFraction = change.usedFraction;
+			if (change.failChat !== undefined) state.failChat = change.failChat;
+			if (change.failChatStatus !== undefined) state.failChatStatus = change.failChatStatus;
 		},
 		chats() {
 			return records.filter(record => record.kind === "chat");

@@ -62,7 +62,7 @@ export default function govplanExtension(pi: ExtensionAPI): void {
 		const usage: UsageProvider = {
 			id: provider,
 			governorAllowance: params => {
-				const key = params.credential.apiKey;
+				const key = params.credential.apiKey ?? params.credential.accessToken;
 				if (key?.endsWith("-unknown")) return undefined;
 				if (key?.endsWith("-metered")) return ["paid-credits"];
 				return ["requests-60s", "requests-7d"];
