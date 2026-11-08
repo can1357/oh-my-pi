@@ -2,9 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a Note entry to the right-click menu of each ask dialog answer row in Tern, annotating that answer without picking it
+
 ### Fixed
 
-- Fixed the ask dialog's `n` right after a keyboard pick annotating the previous question's answer instead of the highlighted row shown; only a pointer click still redirects Note to the answer just picked, and the Note button then names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
+- Fixed the ask dialog's Note (button or `n`) right after a pick moved on annotating the previous question's answer; it now always annotates the highlighted answer of the question shown ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
 
 ## [18.18.2] - 2026-11-08
 

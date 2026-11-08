@@ -6,9 +6,13 @@
 
 - Models without a delegation rule (Claude, Gemini, …) no longer get pushed to delegate: the "map unknown code via task" rule and the "Task + scout" nudges in search tool descriptions are replaced by a light suggestion to explore unfamiliar subsystems with a scout
 
+### Added
+
+- In Tern, right-clicking an `ask` answer offers Note, which annotates that answer without picking it
+
 ### Fixed
 
-- Fixed `ask` notes added with `n` right after picking an answer landing on the previous question instead of the one shown; a Tern click then Note still notes the answer just clicked, and the Note button names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
+- Fixed `ask` notes added right after picking an answer landing on the previous question instead of the one shown ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
 
 ## [18.18.2] - 2026-11-08
 
