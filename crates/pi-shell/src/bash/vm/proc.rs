@@ -1371,14 +1371,16 @@ pub struct RedirProgress {
 pub enum Probe {
 	/// `stat(path)` (`follow` = not `lstat`).
 	Stat { path: BString, follow: bool },
-	/// `stat` of each path, following links (zsh's `$fpath` search):
-	/// [`ProbeResult::Stats`]. One probe for a search that would otherwise
-	/// ask (and restart its builtin) once per path.
+	/// `stat` of each path in turn, following links, up to the first that
+	/// names a file (zsh's `$fpath` search): [`ProbeResult::Stats`], as
+	/// many as were asked. One probe for a stretch of the search that would
+	/// otherwise ask (and restart its builtin) once per path; a hit never
+	/// waits on the directories after it.
 	StatAll { paths: Vec<BString> },
 	/// Whether a zsh word code digest holds a loadable function
 	/// ([`DumpQuery`]): [`ProbeResult::Ok`]. Read once per digest and
-	/// remembered ([`crate::bash::Engine`]): an `$fpath` search asks of
-	/// the same digests for every function.
+	/// remembered by the shell ([`super::Kernel::dump_funcs`]): an `$fpath`
+	/// search asks of the same digests for every function.
 	DumpHas(Box<DumpQuery>),
 	/// `access(path, mode bits)`.
 	Access { path: BString, mode: u8 },

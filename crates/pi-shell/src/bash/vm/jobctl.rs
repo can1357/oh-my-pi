@@ -104,6 +104,9 @@ pub struct JobCtl {
 	texts:       Vec<(Vpid, BString)>,
 	/// zsh `stopmsg`: `exit` warned about jobs; counts down per command.
 	stopmsg:     u8,
+	/// The terminal `read -k`/`-q` put in cbreak mode, with the modes it
+	/// had ([`set_cbreak`]).
+	cbreak:      Option<(FdRef, Termios)>,
 }
 
 impl JobCtl {
@@ -431,6 +434,7 @@ pub fn untrapped(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, sig: Signal) -
 /// Abandon the command line the root is running: frames above the run's
 /// script go, the script reads its next command.
 fn interrupt(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
+	end_cbreak(k, cx);
 	if vp.frames.is_empty() {
 		return;
 	}
@@ -1293,8 +1297,8 @@ fn session_terminal(vp: &Vproc) -> Option<FdRef> {
 }
 
 /// zsh `setcbreak` on `tty` for `read -k`/`-q`: no line editing, a read
-/// returns each key (echo stays). A non-interactive shell first takes
-/// the modes it puts back (`gettyinfo(&shttyinfo)`).
+/// returns each key (echo stays). The terminal's modes before it are kept
+/// for [`end_cbreak`].
 pub fn set_cbreak(k: &mut Kernel, cx: &mut Cx<'_>, tty: &FdRef) {
 	let (Some(h), Some(term)) = (tty.os_handle(), cx.host.terminal()) else {
 		return;
@@ -1302,23 +1306,23 @@ pub fn set_cbreak(k: &mut Kernel, cx: &mut Cx<'_>, tty: &FdRef) {
 	let Ok(cur) = term.attrs(h) else {
 		return;
 	};
-	if !k.jobctl.interactive || k.jobctl.modes.is_none() {
-		k.jobctl.modes = Some(cur.clone());
-	}
-	let mut ti = cur;
+	let mut ti = cur.clone();
 	ti.set(TermFlag::Icanon, false);
 	ti.min = 1;
 	ti.time = 0;
+	k.jobctl.cbreak = Some((tty.clone(), cur));
 	let _ = term.set_attrs(h, &ti, SetWhen::Drain);
 }
 
-/// After [`set_cbreak`]: back to the shell's modes (zsh
-/// `settyinfo(&shttyinfo)`).
-pub fn end_cbreak(k: &Kernel, cx: &mut Cx<'_>, tty: &FdRef) {
-	if let (Some(h), Some(term), Some(modes)) =
-		(tty.os_handle(), cx.host.terminal(), &k.jobctl.modes)
+/// After [`set_cbreak`]: its terminal back to the modes it had (zsh
+/// `settyinfo`), the shell's own or a `zpty` command's. Also when the
+/// read is abandoned ([`interrupt`]): the terminal does not stay in
+/// cbreak mode.
+pub fn end_cbreak(k: &mut Kernel, cx: &mut Cx<'_>) {
+	if let Some((tty, modes)) = k.jobctl.cbreak.take()
+		&& let (Some(h), Some(term)) = (tty.os_handle(), cx.host.terminal())
 	{
-		let _ = term.set_attrs(h, modes, SetWhen::Drain);
+		let _ = term.set_attrs(h, &modes, SetWhen::Drain);
 	}
 }
 

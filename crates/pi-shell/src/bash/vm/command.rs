@@ -3057,9 +3057,9 @@ pub enum FpFound {
 }
 
 /// zsh `getfpfunc`: the first regular file `name` in `dirs` (relative to
-/// `cwd`), answered through `ask`. Every `stat` of the search is asked at
-/// once ([`Probe::StatAll`]): one probe, not one per directory, each of
-/// which would restart the asking builtin.
+/// `cwd`), answered through `ask`. The search's `stat`s are asked in
+/// stretches ([`Probe::StatAll`], each up to the first file it finds), not
+/// one probe per path, each of which would restart the asking builtin.
 ///
 /// # Errors
 /// What `ask` fails with (a probe in flight).
@@ -3074,18 +3074,29 @@ pub fn getfpfunc<E>(
 		.iter()
 		.flat_map(|d| fpath_stat_paths(cwd, d, name))
 		.collect();
-	let stats = match ask(Probe::StatAll { paths: paths.clone() })? {
-		ProbeResult::Stats(stats) => stats,
-		_ => Vec::new(),
-	};
-	let known: std::collections::HashMap<&[u8], Option<crate::bash::fs::Stat>> =
-		paths.iter().map(|p| p.as_slice()).zip(stats).collect();
-	// The `stat`s of the batch are answered from it; reads go to `ask`.
-	let mut ask = |p: Probe| match &p {
-		Probe::Stat { path, follow: true } if known.contains_key(path.as_slice()) => {
-			Ok(ProbeResult::Stat(known[path.as_slice()]))
-		},
-		_ => ask(p),
+	let mut known: std::collections::HashMap<BString, Option<crate::bash::fs::Stat>> =
+		std::collections::HashMap::new();
+	// `paths[..asked]` are in `known`.
+	let mut asked = 0;
+	// A `stat` of the search is answered from the stretches; one past them
+	// asks for the next stretch. Reads go to `ask`.
+	let mut ask = |p: Probe| {
+		let Probe::Stat { path, follow: true } = &p else {
+			return ask(p);
+		};
+		if !known.contains_key(path)
+			&& paths[asked..].contains(path)
+			&& let ProbeResult::Stats(stats) = ask(Probe::StatAll { paths: paths[asked..].to_vec() })?
+		{
+			for (q, st) in paths[asked..].iter().zip(&stats) {
+				known.insert(q.clone(), *st);
+			}
+			asked += stats.len().max(1);
+		}
+		match known.get(path) {
+			Some(st) => Ok(ProbeResult::Stat(*st)),
+			None => ask(p),
+		}
 	};
 	for dir in dirs {
 		let mut rel = BString::from(dir.as_slice());

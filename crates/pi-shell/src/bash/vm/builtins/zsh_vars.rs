@@ -947,7 +947,7 @@ pub fn read(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 				timeout_ns,
 				prompt.as_deref(),
 			)?;
-			jobctl::end_cbreak(ctx.k, ctx.cx, &tty);
+			jobctl::end_cbreak(ctx.k, ctx.cx);
 			r
 		} else {
 			read_input(ctx, fd, None, Some(nchars), cs.utf8, true, timeout_ns, prompt.as_deref())?

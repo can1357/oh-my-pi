@@ -127,7 +127,14 @@ pub fn perform(
 				break ProbeResult::Stats(std::mem::take(&mut sc.io().zsh().stats));
 			};
 			match poll_stat(cx, vp, sc, &mut tcx, path, true) {
-				Poll::Ready(st) => sc.io().zsh().stats.push(st),
+				Poll::Ready(st) => {
+					let file = st.as_ref().is_some_and(|s| s.kind != StatKind::Dir);
+					sc.io().zsh().stats.push(st);
+					// Later paths are asked only if the search goes on.
+					if file {
+						break ProbeResult::Stats(std::mem::take(&mut sc.io().zsh().stats));
+					}
+				},
 				Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Stat, path: path.clone() }),
 			}
 		},
@@ -251,7 +258,7 @@ pub fn perform(
 		Probe::DumpHas(q) => {
 			let (path, name) = (&q.path, &q.name);
 			let stamp = (q.mtime_ns, q.size);
-			let funcs = match k.engine.dump_funcs(path, stamp) {
+			let funcs = match k.dump_funcs(path, stamp) {
 				Some(funcs) => funcs,
 				None => match read_file(&mut tcx, cx, sc, path) {
 					Poll::Ready(Ok(data)) => {
@@ -260,8 +267,7 @@ pub fn perform(
 							|head| head.loadable(&data),
 						);
 						let funcs = std::sync::Arc::new(funcs);
-						k.engine
-							.cache_dump_funcs(path, stamp, std::sync::Arc::clone(&funcs));
+						k.cache_dump_funcs(path, stamp, std::sync::Arc::clone(&funcs));
 						funcs
 					},
 					Poll::Ready(Err(_)) => std::sync::Arc::default(),
