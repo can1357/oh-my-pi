@@ -2087,10 +2087,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							// `handback` delegates to `yield`: record its terminal payload
 							// as the run's yield item so acceptance and finalization take
 							// the same path as a real `yield` call.
-							recordExtractedToolData(
-								event.toolName === HANDBACK_TOOL_NAME ? "yield" : event.toolName,
-								data,
-							);
+							recordExtractedToolData(event.toolName === HANDBACK_TOOL_NAME ? "yield" : event.toolName, data);
 						}
 					}
 
@@ -2543,13 +2540,21 @@ interface DriveOutcome {
 }
 
 /**
- * Whether a settled drive handed over its final result — an accepted `yield`,
- * or for a message-result run a clean finish on a non-empty report turn — so
- * the caller can mark the registry ref accepted.
+ * Whether a settled drive handed over its final result — an accepted `yield`
+ * or `handback`, or a clean finish on a non-empty report turn for a
+ * message-result run or a schema-less structured run — so the caller can mark
+ * the registry ref accepted. A schema-bearing run still counts only an
+ * accepted yield: fallback prose is a missing yield, not a delivery.
  */
-function resultDelivered(outcome: DriveOutcome, monitor: SubagentRunMonitor, structured: boolean): boolean {
-	if (structured) return monitor.yieldCalled();
-	return outcome.exitCode === 0 && !outcome.aborted && monitor.lastReportTurnText() !== undefined;
+function resultDelivered(
+	outcome: DriveOutcome,
+	monitor: SubagentRunMonitor,
+	structured: boolean,
+	schemaLess: boolean,
+): boolean {
+	const cleanReport = outcome.exitCode === 0 && !outcome.aborted && monitor.lastReportTurnText() !== undefined;
+	if (structured) return monitor.yieldCalled() || (schemaLess && cleanReport);
+	return cleanReport;
 }
 
 const MAX_YIELD_RETRIES = 3;
@@ -2977,8 +2982,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		!signal?.aborted &&
 		args.outputSchema === undefined &&
 		!hasAcceptedYield;
-	let rawOutput =
-		!structured || cleanSchemaLessFallback ? (monitor.lastReportTurnText() ?? "") : monitor.rawOutput();
+	let rawOutput = !structured || cleanSchemaLessFallback ? (monitor.lastReportTurnText() ?? "") : monitor.rawOutput();
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
 	// here is attributed to this subagent rather than logged as "unknown".
 	pushLoopPhase(`subagent:${id}`);
@@ -4075,7 +4079,7 @@ async function driveFollowUpTurn(
 					attemptUnsubscribe = monitor.attach(session);
 				},
 			});
-			if (resultDelivered(outcome, monitor, structured)) {
+			if (resultDelivered(outcome, monitor, structured, options.outputSchema === undefined)) {
 				// A follow-up turn's accepted result is the run's final result too:
 				// terminalize the ref here, not just on the initial run (#11079).
 				AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt());
@@ -5361,7 +5365,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left
 			// `running` before the (possibly slow) cleanup below.
-			if (resultDelivered(outcome, monitor, structured)) {
+			if (resultDelivered(outcome, monitor, structured, outputSchema === undefined)) {
 				AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt());
 			}
 			exitCode = outcome.exitCode;

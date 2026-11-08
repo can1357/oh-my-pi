@@ -26,6 +26,7 @@ import {
 	attachIrcWakeTurnMonitor,
 	runSubagentFollowUpTurn,
 	runSubprocess,
+	SUBAGENT_WARNING_MISSING_YIELD,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -89,13 +90,21 @@ interface SessionHarness {
  * `subscribeRunState` never fires — the run-state mirror omits `idle`, which is
  * exactly the leak the acceptance boundary must cover.
  */
-function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: AsyncJobManager }): SessionHarness {
+function createHarness(options?: {
+	hangPrompt?: boolean;
+	asyncJobManager?: AsyncJobManager;
+	/** End each prompt with assistant text and no `yield` or `handback`. */
+	textOnly?: boolean;
+	/** Runs after each text-only assistant message, before the prompt resolves. */
+	onTextOnlyTurn?: () => void;
+}): SessionHarness {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const messages: AssistantMessage[] = [];
 	const promptEntered = Promise.withResolvers<void>();
 	const hangingPrompt = Promise.withResolvers<void>();
 	let yieldSeq = 0;
 	let toolSeq = 0;
+	let textOnlyTurns = 0;
 	let wakeObserver: ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined;
 	const emit = (event: AgentSessionEvent) => {
 		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
@@ -152,6 +161,12 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 			promptEntered.resolve();
 			if (options?.hangPrompt) {
 				await hangingPrompt.promise;
+				return true;
+			}
+			if (options?.textOnly) {
+				textOnlyTurns += 1;
+				emitAssistantText(`FALLBACK_TURN_${textOnlyTurns}`);
+				options.onTextOnlyTurn?.();
 				return true;
 			}
 			emitAssistantText("submitting");
@@ -247,6 +262,123 @@ describe("runSubprocess result acceptance", () => {
 		expect(AgentRegistry.global().staleAcceptedRuns()).toEqual([]);
 		// Launch milestone is the registration timestamp the acceptance must not move.
 		expect(settled?.createdAt).toBe(ref.createdAt);
+	});
+
+	function mockCreatedSession(harness: SessionHarness): void {
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: harness.session,
+			extensionsResult: {} as unknown as LoadExtensionsResult,
+			setToolUIContext: () => {},
+			eventBus: new EventBus(),
+		} as CreateAgentSessionResult);
+	}
+
+	function expectUnstamped(): void {
+		const settled = AgentRegistry.global().get(AGENT_ID);
+		expect(settled, "the ref must still exist so a missing stamp is observable").toBeDefined();
+		expect(settled?.lifecycle?.responseAt).toBeUndefined();
+		expect(settled?.lifecycle?.acceptedAt).toBeUndefined();
+	}
+
+	it("stamps a schema-less structured run that ends on fallback text without a handback", async () => {
+		const harness = createHarness({ textOnly: true });
+		registerRunning(harness.session);
+		mockCreatedSession(harness);
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "do the work",
+			index: 0,
+			id: AGENT_ID,
+			structured: true,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe("FALLBACK_TURN_4");
+		expect(result.output).not.toContain("FALLBACK_TURN_1");
+		const settled = AgentRegistry.global().get(AGENT_ID);
+		expect(settled?.lifecycle?.responseAt).toBeNumber();
+		expect(settled?.lifecycle?.acceptedAt).toBeNumber();
+	});
+
+	it("stamps a schema-less follow-up that ends on fallback text without a handback", async () => {
+		const harness = createHarness({ textOnly: true });
+		registerRunning(harness.session);
+
+		const result = await runSubagentFollowUpTurn({
+			id: AGENT_ID,
+			agent: baseAgent,
+			message: "continue",
+			structured: true,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe("FALLBACK_TURN_4");
+		const settled = AgentRegistry.global().get(AGENT_ID);
+		expect(settled?.lifecycle?.responseAt).toBeNumber();
+		expect(settled?.lifecycle?.acceptedAt).toBeNumber();
+	});
+
+	it("leaves a schema-bearing missing-yield run unstamped", async () => {
+		const harness = createHarness({ textOnly: true });
+		registerRunning(harness.session);
+		mockCreatedSession(harness);
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "do the work",
+			index: 0,
+			id: AGENT_ID,
+			structured: true,
+			outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toBe(SUBAGENT_WARNING_MISSING_YIELD);
+		expectUnstamped();
+	});
+
+	it("leaves a schema-bearing follow-up that never yields unstamped", async () => {
+		const harness = createHarness({ textOnly: true });
+		registerRunning(harness.session);
+
+		const result = await runSubagentFollowUpTurn({
+			id: AGENT_ID,
+			agent: baseAgent,
+			message: "continue",
+			structured: true,
+			outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toBe(SUBAGENT_WARNING_MISSING_YIELD);
+		expectUnstamped();
+	});
+
+	it("leaves an aborted schema-less run unstamped even after fallback text", async () => {
+		const controller = new AbortController();
+		const harness = createHarness({
+			textOnly: true,
+			onTextOnlyTurn: () => controller.abort("cancelled"),
+		});
+		registerRunning(harness.session);
+		mockCreatedSession(harness);
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "do the work",
+			index: 0,
+			id: AGENT_ID,
+			structured: true,
+			signal: controller.signal,
+		});
+
+		expect(result.aborted).toBe(true);
+		expect(result.exitCode).toBe(1);
+		expectUnstamped();
 	});
 
 	it("settles the owning task job when Agent Hub tombstones a running subagent", async () => {
