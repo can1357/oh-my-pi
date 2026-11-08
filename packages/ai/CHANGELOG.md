@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported `replaysNativeResponsesHistory` and `getNativeResponsesHistoryItems` from `providers/openai-shared`, the one decision for whether a turn's reasoning reaches a Responses request from its native payload, now used by the tokenizer and by `/shake`
+
 ## [18.18.1] - 2026-11-08
 
 ### Fixed

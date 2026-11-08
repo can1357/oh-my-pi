@@ -134,7 +134,12 @@ import {
 	resolveOpenCodeGoCacheAffinity,
 	setHeaderIfAbsent,
 } from "./inference-headers";
-import { isMalformedToolCallName, isValidToolCallId, transformMessages } from "./transform-messages";
+import {
+	isMalformedToolCallName,
+	isValidToolCallId,
+	shouldDropTruncatedThinkingOnlyAssistant,
+	transformMessages,
+} from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
 export interface OpenAIModelIdentity {
@@ -2177,6 +2182,49 @@ export function isColdReplayableResponsesTurn(items: ResponseInput): boolean {
 		hasReasoning = true;
 	}
 	return hasReasoning;
+}
+
+/**
+ * The native Responses history items a request for `model` would replay from
+ * this assistant turn, or `undefined` when the turn was produced by another
+ * api, model or provider and its payload cannot go back on the wire at all.
+ */
+export function getNativeResponsesHistoryItems(
+	message: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | null | undefined,
+): Array<Record<string, unknown>> | undefined {
+	if (!model || message.api !== model.api || message.model !== model.id) return undefined;
+	return getOpenAIResponsesHistoryItems(message.providerPayload, model.provider, message.provider);
+}
+
+/**
+ * Whether a request for `model` replays this assistant turn's native Responses
+ * history, so its reasoning reaches the wire from `providerPayload` and not
+ * from `content`. The one replay decision shared by request accounting (the
+ * tokenizer's local count) and context maintenance (`/shake`): the payload must
+ * belong to the model ({@link getNativeResponsesHistoryItems}), the sanitizer
+ * must keep a reasoning item in it, and a truncated turn whose blocks are all
+ * reasoning never replays. A cold provider session (`nativeHistoryReplay`
+ * false) replays only a turn whose items carry no state bound to one
+ * connection ({@link isColdReplayableResponsesTurn}).
+ *
+ * `buildResponsesInput`'s assistant branch decides the same thing inline; it
+ * can adopt this helper once its two extra concerns (rebuilding calls cut by
+ * the output limit, hidden-empty suppression) move with it.
+ */
+export function replaysNativeResponsesHistory(
+	message: AssistantMessage,
+	model: Pick<Model, "api" | "provider" | "id"> | null | undefined,
+	options: { nativeHistoryReplay?: boolean } = {},
+): boolean {
+	const items = getNativeResponsesHistoryItems(message, model);
+	if (!items) return false;
+	if (!items.some(item => item.type === "reasoning") || shouldDropTruncatedThinkingOnlyAssistant(message)) {
+		return false;
+	}
+	const replay = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(items);
+	if (!replay?.some(item => item.type === "reasoning")) return false;
+	return (options.nativeHistoryReplay ?? true) || isColdReplayableResponsesTurn(replay);
 }
 
 export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInputOptions<TApi>): ResponseInput {

@@ -2214,7 +2214,8 @@ export class CommandController {
 			(result.imagesDropped ?? 0) +
 			(result.thinkingBlocksDropped ?? 0);
 		if (dropped === 0) {
-			this.ctx.showStatus("Nothing to shake.");
+			// Replayed thinking was left in place: nothing to rebuild, but say so.
+			this.ctx.showStatus((result.thinkingBlocksKept ?? 0) > 0 ? formatShakeSummary(result) : "Nothing to shake.");
 			return;
 		}
 		this.ctx.rebuildChatFromMessages();
