@@ -1,0 +1,1 @@
+Returned early so you can read an incoming message. The question stays open for the user; their answer arrives on its own as the result of background job `{{jobId}}`; NEVER poll.{{#if waitTool}} Call `wait` to block on it once the message is handled.{{/if}}

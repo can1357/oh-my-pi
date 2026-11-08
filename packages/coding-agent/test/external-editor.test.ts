@@ -135,4 +135,42 @@ describe("openInEditor", () => {
 			await tempDir.remove();
 		}
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"returns the caller's own bytes when the editor saves them unchanged",
+		async () => {
+			// An ask answer reaches the model byte for byte: an editor that writes the file back
+			// unchanged must not cost the person the newline their text ended with.
+			const tempDir = TempDir.createSync("@external-editor-");
+			try {
+				const editorPath = path.join(tempDir.path(), "noop");
+				await Bun.write(editorPath, "#!/bin/sh\nexit 0\n");
+				fs.chmodSync(editorPath, 0o755);
+
+				expect(await openInEditor(editorPath, "tail\n")).toBe("tail\n");
+				expect(await openInEditor(editorPath, "tail\n\n")).toBe("tail\n\n");
+				expect(await openInEditor(editorPath, "tail")).toBe("tail");
+			} finally {
+				await tempDir.remove();
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"drops the final newline an editor adds to newline-free content",
+		async () => {
+			// vi and friends terminate the last line on save; a one-line answer must stay one line.
+			const tempDir = TempDir.createSync("@external-editor-");
+			try {
+				const editorPath = path.join(tempDir.path(), "terminate");
+				await Bun.write(editorPath, '#!/bin/sh\nprintf "answer\\n" > "$1"\n');
+				fs.chmodSync(editorPath, 0o755);
+
+				expect(await openInEditor(editorPath, "answer")).toBe("answer");
+				expect(await openInEditor(editorPath, "answer", { trimTrailingNewline: false })).toBe("answer\n");
+			} finally {
+				await tempDir.remove();
+			}
+		},
+	);
 });

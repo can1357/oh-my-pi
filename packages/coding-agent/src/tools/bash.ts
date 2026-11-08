@@ -19,7 +19,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { PipeStreams } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
-import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import { foregroundMessageSignal, raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { InternalUrlRouter } from "../internal-urls";
@@ -1375,7 +1375,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					env: sessionEnv,
 				},
 				signal,
-				ready === undefined ? undefined : ctx?.toolCall?.steeringSignal,
+				ready === undefined ? undefined : foregroundMessageSignal(ctx?.toolCall),
 			);
 			const daemon = service.daemon;
 			if (service.readyInterrupted) {
@@ -1506,7 +1506,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				job.completion,
 				autoBackgroundWaitMs,
 				signal,
-				ctx?.toolCall?.steeringSignal,
+				foregroundMessageSignal(ctx?.toolCall),
 			);
 			if (waitResult.kind === "completed") {
 				autoBgManager.releaseForegroundJob(job.jobId);
@@ -1523,7 +1523,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			}
 			job.background();
 			autoBgManager.backgroundJob(job.jobId);
-			// "steer": a queued user/peer message arrived mid-wait — background
+			// "steer": a queued user/peer message or aside arrived mid-wait — background
 			// the command (it keeps running) so the message injects promptly.
 			// `job.notices` also carries the temporary-shell notice once the run started.
 			const notices =

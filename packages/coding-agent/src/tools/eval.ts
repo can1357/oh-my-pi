@@ -16,7 +16,7 @@ import {
 } from "@oh-my-pi/pi-tui/render/render-utils";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
-import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import { foregroundMessageSignal, raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
@@ -741,7 +741,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			completion.promise,
 			autoBackgroundWaitMs,
 			signal,
-			ctx?.toolCall?.steeringSignal,
+			foregroundMessageSignal(ctx?.toolCall),
 		);
 		if (waitResult.kind === "completed") {
 			autoBgManager.releaseForegroundJob(jobId);
@@ -758,7 +758,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		}
 		backgrounded = true;
 		autoBgManager.backgroundJob(jobId);
-		// "steer": a queued user/peer message arrived mid-wait — background the
+		// "steer": a queued user/peer message or aside arrived mid-wait — background the
 		// cell (it keeps running) so the message injects promptly.
 		const steerNotice =
 			waitResult.kind === "steer"

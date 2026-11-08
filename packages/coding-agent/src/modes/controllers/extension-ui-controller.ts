@@ -883,7 +883,7 @@ export class ExtensionUiController {
 					this.ctx.ui,
 					prompt.title,
 					prefill,
-					(text, images) => finishPrompt({ text, images }),
+					(text, images, parts) => finishPrompt({ text, images, parts }),
 					() => finishPrompt(undefined),
 					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
 				);
@@ -911,7 +911,9 @@ export class ExtensionUiController {
 				promptResolve = resolve;
 				openPrompt(prompt, prefill?.text, {
 					acceptImages: true,
-					images: prefill?.images,
+					// Attachments and the runs that name them travel together; a prefill with one
+					// and not the other has no provenance, and the prompt refuses it.
+					...(prefill?.parts?.length ? { images: prefill.images, parts: prefill.parts } : {}),
 					onPasteImage: () => this.ctx.handleImagePaste(),
 					onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
 				});

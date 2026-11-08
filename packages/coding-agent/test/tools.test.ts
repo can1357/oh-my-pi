@@ -2768,6 +2768,61 @@ function b() {
 			await asyncJobManager.dispose();
 		});
 
+		it("backgrounds on a queued aside but finishes inline when only a background completion is queued", async () => {
+			// An aside (how peer messages such as envoy's arrive) is a message for
+			// the model: the command must step aside for it, as it does for a
+			// steer. A finished background job's notice is not: detaching for it
+			// chains millisecond commands into separate deliveries (#12869).
+			const asyncJobManager = new AsyncJobManager({});
+			const tool = wrapToolWithMetaNotice(
+				new BashTool(
+					createTestToolSession(
+						testDir,
+						Settings.isolated({
+							"bash.autoBackground.enabled": true,
+							"bash.autoBackground.thresholdMs": 60_000,
+						}),
+						{ getSessionId: () => "test-session", asyncJobManager },
+					),
+				),
+			);
+			const run = (id: string, signals: { messageSignal?: AbortSignal; wakeSignal?: AbortSignal }) =>
+				tool.execute(
+					"test-call-" + id,
+					{ command: "printf 'start\\n'; sleep 0.05; printf 'done\\n'" },
+					undefined,
+					undefined,
+					{
+						...createTestToolContext([]),
+						toolCall: {
+							batchId: "batch-1",
+							index: 0,
+							total: 1,
+							toolCalls: [{ id: "test-call-" + id, name: "bash" }],
+							steeringSignal: new AbortController().signal,
+							...signals,
+						},
+					},
+				);
+
+			const aside = new AbortController();
+			aside.abort("aside");
+			const asideResult = await run("aside", { messageSignal: aside.signal, wakeSignal: aside.signal });
+			expect(asideResult.details?.async?.state).toBe("running");
+			expect(getTextOutput(asideResult)).toContain("Backgrounded early to handle an incoming message");
+			await asyncJobManager.getJob(asideResult.details?.async?.jobId ?? "")?.promise;
+
+			const completion = new AbortController();
+			completion.abort("background");
+			const completionResult = await run("completion", {
+				messageSignal: new AbortController().signal,
+				wakeSignal: completion.signal,
+			});
+			expect(completionResult.details?.async).toBeUndefined();
+			expect(getTextOutput(completionResult)).toContain("done");
+			await asyncJobManager.dispose();
+		});
+
 		it("should background instead of timing out when auto-background wait exceeds the effective timeout", async () => {
 			const deliveries: Array<{ jobId: string; text: string }> = [];
 			const asyncJobManager = new AsyncJobManager({

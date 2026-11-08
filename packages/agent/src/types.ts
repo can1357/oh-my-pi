@@ -340,7 +340,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * Uses the same delivery rules as steering: the poll is non-consuming, only
 	 * runs for interruptible tools, and cuts them short even when interruptMode
-	 * is "wait".
+	 * is "wait". Unless interruptMode is "wait", a detected IRC also raises
+	 * {@link ToolCallContext.steeringSignal}, {@link ToolCallContext.messageSignal}
+	 * and {@link ToolCallContext.wakeSignal}.
 	 * The host owns message injection at the next boundary.
 	 */
 	hasIrcInterrupts?: () => boolean | Promise<boolean>;
@@ -352,9 +354,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * *interruptible* waits short, in either interruptMode. Without
 	 * it a completion notice sits behind an hour-long `wait` that the agent
 	 * would have abandoned had it seen the notice. Unlike a peer IRC it never
-	 * raises {@link ToolCallContext.steeringSignal}: a queued completion must
-	 * not push ordinary foreground work (auto-background bash/eval) into the
-	 * background.
+	 * raises {@link ToolCallContext.steeringSignal} or
+	 * {@link ToolCallContext.messageSignal}: a queued completion must not push
+	 * ordinary foreground work (auto-background bash/eval) into the background.
+	 * Unless interruptMode is "wait" it raises {@link ToolCallContext.wakeSignal},
+	 * which only tools whose pending work can continue without the call follow.
 	 */
 	hasBackgroundCompletions?: () => boolean | Promise<boolean>;
 	/**
@@ -363,8 +367,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * Same rules as {@link hasBackgroundCompletions}: non-consuming, ends only
 	 * *interruptible* waits, never raises {@link ToolCallContext.steeringSignal}.
-	 * The host still injects the aside once at the boundary; ordinary running
-	 * tools finish first.
+	 * Unless interruptMode is "wait" it raises {@link ToolCallContext.messageSignal}
+	 * and {@link ToolCallContext.wakeSignal}, so cooperative tools can step
+	 * aside; the host still injects the aside once at the boundary.
 	 */
 	hasQueuedAsides?: () => boolean | Promise<boolean>;
 	/**
@@ -701,6 +706,32 @@ export interface ToolCallContext {
 	 * always safe (the message injects at the next batch boundary).
 	 */
 	steeringSignal?: AbortSignal;
+	/**
+	 * Cooperative message signal: aborted the first time this batch's interrupt
+	 * watch detects a message for the model: queued steering of any source, a
+	 * peer IRC, or a queued aside. Never for a background completion (a
+	 * finished job's notice must not detach ordinary foreground work, #12869).
+	 * Its `reason` names the first source (a {@link SteeringInterruptSource},
+	 * `"irc"` or `"aside"`). Raised only when interruptMode is not "wait".
+	 * Like {@link steeringSignal} it never kills the tool; foreground work that
+	 * can move to the background (auto-background bash/eval) observes it so the
+	 * message injects promptly.
+	 */
+	messageSignal?: AbortSignal;
+	/**
+	 * Cooperative wake signal: aborted the first time this batch's interrupt
+	 * watch detects anything that would end an interruptible `wait`: queued
+	 * steering of any source, a peer IRC, a queued aside, or a background
+	 * completion. Its `reason` names the first source (a
+	 * {@link SteeringInterruptSource}, `"irc"`, `"aside"` or `"background"`).
+	 * Absent when interruptMode is "wait" (no wake can end the call there, so a
+	 * tool must keep blocking and report itself non-interruptible). It never kills the tool and
+	 * ignoring it is safe. It is for tools whose pending work can continue
+	 * without the call (a blocking task's children, an open question): they
+	 * hand that work off and return, so the message injects at the batch
+	 * boundary right away.
+	 */
+	wakeSignal?: AbortSignal;
 	/**
 	 * Loop-owned sink for passive context reported while this call executes.
 	 * Values join the call's context at the batch boundary and are injected

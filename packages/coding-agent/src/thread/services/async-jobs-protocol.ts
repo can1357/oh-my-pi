@@ -132,7 +132,7 @@ export type AsyncJobManagerProtocol = {
 		],
 		string
 	>;
-	cancel: RpcMethod<[id: string, filter: AsyncJobFilter | undefined], boolean>;
+	cancel: RpcMethod<[id: string, filter: AsyncJobFilter | undefined, reason: unknown], boolean>;
 	getJob: RpcMethod<[id: string], AsyncJobWire | undefined>;
 	getRunningJobs: RpcMethod<[filter: AsyncJobFilter | undefined], AsyncJobWire[]>;
 	getRecentJobs: RpcMethod<[limit: number | undefined, filter: AsyncJobFilter | undefined], AsyncJobWire[]>;

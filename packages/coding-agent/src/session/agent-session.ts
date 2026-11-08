@@ -336,6 +336,7 @@ import type {
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
+import { writeFileAtomicallySync } from "../utils/atomic-file";
 import { startPowerAssertion } from "./power-assertion-backend";
 import { renderAttachmentSourceNotice } from "./attachment-source-notice";
 import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -346,6 +347,7 @@ import {
 	ASYNC_PREVIEW_TAIL_CHARS,
 	ASYNC_RESULT_MESSAGE_TYPE,
 	type AsyncResultEntry,
+	asyncResultPreview,
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
 import { type BashExecuteOptions, BashRunner, type BashRunnerHost } from "./bash-runner";
@@ -3718,7 +3720,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// must not enqueue — the suppression marker alone is unreliable because
 		// job-id reuse clears it.
 		const epoch = this.#asyncDeliveryEpoch;
-		const formatted = await this.#formatAsyncResultForFollowUp(text, job?.latestDetails?.meta);
+		// A backgrounded `ask` answer is numbered against the other answers it is delivered
+		// with, which is known only when the delivery is built: an answer too long to deliver
+		// whole gets its saved file there, holding the renumbered text.
+		const marked = job?.type === "ask" ? job.latestDetails?.imageMarkedText : undefined;
+		const formatted = marked ? text : await this.#formatAsyncResultForFollowUp(text, job?.latestDetails?.meta);
+		const spill = marked && text.length > ASYNC_INLINE_RESULT_MAX_CHARS ? await this.#asyncResultSpill() : undefined;
 		if (this.#isDisposed) return;
 		if (epoch !== this.#asyncDeliveryEpoch) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
@@ -3729,6 +3736,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			job,
 			durationMs,
 			epoch,
+			...(spill ? { spill } : {}),
 		});
 	}
 
@@ -3793,7 +3801,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Strip the already-rendered source notice before taking the smaller preview,
 		// then retain its capture warning once even when the original footer is elided.
 		const body = meta?.artifactError ? stripOutputNotice(result, meta).trimEnd() : result;
-		const preview = `${body.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
+		const preview = asyncResultPreview(body);
 		if (meta?.artifactError) return `${preview}\n[${formatArtifactErrorNotice(meta.artifactError)}]`;
 		// The producing tool's output sink already mirrored the raw stream to an
 		// artifact; `result` is its elided inline body, so link the raw capture.
@@ -3807,18 +3815,52 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}).content;
 			return `${headTail}\nFull output: artifact://${rawArtifactId}`;
 		}
-		try {
-			const { path: artifactPath, id: artifactId } = await this.sessionManager.allocateArtifactPath("async");
-			if (artifactPath && artifactId) {
-				await writeArtifact(artifactPath, result);
-				return `${preview}\nFull output: artifact://${artifactId}`;
+		const slot = await this.#reserveAsyncResultArtifact();
+		if (slot) {
+			try {
+				await writeArtifact(slot.path, result);
+				return `${preview}\nFull output: artifact://${slot.id}`;
+			} catch (error) {
+				logger.warn("Failed to persist async follow-up artifact", {
+					error: error instanceof Error ? error.message : String(error),
+				});
 			}
+		}
+		return preview;
+	}
+
+	/** Reserve the saved file an oversized async result spills to, before its text is known. */
+	async #reserveAsyncResultArtifact(): Promise<{ id: string; path: string } | undefined> {
+		try {
+			const { path, id } = await this.sessionManager.allocateArtifactPath("async");
+			if (path && id) return { id, path };
 		} catch (error) {
-			logger.warn("Failed to persist async follow-up artifact", {
+			logger.warn("Failed to allocate async follow-up artifact", {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
-		return preview;
+		return undefined;
+	}
+
+	/**
+	 * Reserve the saved file for a result the delivery build will cut to a preview, and return
+	 * the build's synchronous writer: it saves the full text and returns the artifact id, or
+	 * undefined when no file could be saved (the preview then goes out without a link).
+	 */
+	async #asyncResultSpill(): Promise<(fullText: string) => string | undefined> {
+		const slot = await this.#reserveAsyncResultArtifact();
+		if (!slot) return () => undefined;
+		return fullText => {
+			try {
+				writeFileAtomicallySync(slot.path, fullText, 0o644);
+				return slot.id;
+			} catch (error) {
+				logger.warn("Failed to persist async follow-up artifact", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return undefined;
+			}
+		};
 	}
 
 	// =========================================================================

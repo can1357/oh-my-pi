@@ -496,6 +496,28 @@ describe("AsyncJobManager", () => {
 		manager.cancel(firstJobId);
 	});
 
+	test("allows a foreground job when background work already fills the cap", async () => {
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		const release = Promise.withResolvers<void>();
+		const backgroundId = manager.register("bash", "background", async () => {
+			await release.promise;
+			return "background complete";
+		});
+		const foregroundId = manager.register("task", "foreground", async () => "foreground complete", {
+			foreground: true,
+		});
+
+		// The foreground call must run this work either way; it stays hidden
+		// until the caller promotes it or releases its inline result.
+		expect(manager.getJob(foregroundId)?.foreground).toBe(true);
+		await manager.getJob(foregroundId)?.promise;
+		manager.releaseForegroundJob(foregroundId);
+		expect(manager.getJob(foregroundId)).toBeUndefined();
+		release.resolve();
+		await manager.getJob(backgroundId)?.promise;
+		await manager.dispose();
+	});
+
 	test("queued jobs do not count toward the cap until markRunning", async () => {
 		const manager = new AsyncJobManager({
 			maxRunningJobs: 1,

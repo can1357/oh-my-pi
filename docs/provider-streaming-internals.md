@@ -257,7 +257,8 @@ Cancellation is layered:
 Tool execution cancellation is separate from model stream cancellation:
 
 - interruptible wait-like tools observe a combined external/steering/IRC abort signal
-- side-effecting foreground tools observe only the external abort signal; steering and IRC reach them through a cooperative `steeringSignal`, not a hard kill
+- side-effecting foreground tools observe only the external abort signal. They receive cooperative `steeringSignal` for steering/IRC and `messageSignal` for steering, IRC, or queued asides; neither is a hard kill. A background completion intentionally does not raise `messageSignal`, so it cannot cascade ordinary foreground tools into background jobs.
+- Tools whose pending work can continue as a job (a blocking `task` child, an open `ask` question) receive `wakeSignal`, which also includes a queued background completion. They may return while their job continues, so the message injects at that boundary.
 - queued interruptions are injected at execution boundaries while completed tool results are preserved
 
 ## Watchdog configuration

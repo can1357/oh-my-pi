@@ -1738,10 +1738,11 @@ describe("AskDialogComponent", () => {
 
 	it("returns images pasted into the custom answer and supplies them again when it is edited", async () => {
 		const image: ImageContent = { type: "image", data: "image-data", mimeType: "image/png" };
+		const parts = ["see ", { kind: "image", n: 1, tail: "" }];
 		const onImagePrompt = vi
 			.fn()
-			.mockResolvedValueOnce({ text: "see [Image #1]", images: [image] })
-			.mockResolvedValueOnce({ text: "see [Image #1] again", images: [image] });
+			.mockResolvedValueOnce({ text: "see [Image #1]", images: [image], parts })
+			.mockResolvedValueOnce({ text: "see [Image #1] again", images: [image], parts: [...parts, " again"] });
 		const onSubmit = vi.fn();
 		const component = new AskDialogComponent(
 			[{ id: "q1", question: "Choose multiple?", options: [{ label: "Option A" }], multi: true }],
@@ -1758,10 +1759,13 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 		component.handleInput(ENTER);
 
-		expect(onImagePrompt.mock.calls[1][1]).toEqual({ text: "see [Image #1]", images: [image] });
+		expect(onImagePrompt.mock.calls[1][1]).toEqual({ text: "see [Image #1]", images: [image], parts });
 		expect(onSubmit.mock.calls[0][0].results[0]).toMatchObject({
 			customInput: "see [Image #1] again",
 			customInputImages: [image],
+			// The runs travel with the answer, so a consumer renumbering markers across answers
+			// moves the marker and leaves typed text alone.
+			customInputParts: [...parts, " again"],
 		});
 	});
 

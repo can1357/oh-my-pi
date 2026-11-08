@@ -12,6 +12,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { getThemeByName, initTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { AskTool } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { askToolRenderer } from "@oh-my-pi/pi-tui/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
@@ -68,6 +69,8 @@ function createContext(args: {
 	abort?: () => void;
 	/** The loop's cooperative steering signal for this call (`ctx.toolCall.steeringSignal`). */
 	steeringSignal?: AbortSignal;
+	/** The loop's broader wake signal for this call (`ctx.toolCall.wakeSignal`). */
+	wakeSignal?: AbortSignal;
 }): AgentToolContext {
 	// AgentToolContext includes many runtime fields; tests only need UI + abort behavior.
 	return {
@@ -83,7 +86,14 @@ function createContext(args: {
 			) => args.editor?.(title, prefill, dialogOptions, editorOptions) ?? Promise.resolve(undefined),
 		},
 		abort: args.abort ?? (() => {}),
-		...(args.steeringSignal ? { toolCall: { steeringSignal: args.steeringSignal } } : {}),
+		...(args.steeringSignal || args.wakeSignal
+			? {
+					toolCall: {
+						...(args.steeringSignal ? { steeringSignal: args.steeringSignal } : {}),
+						...(args.wakeSignal ? { wakeSignal: args.wakeSignal } : {}),
+					},
+				}
+			: {}),
 	} as unknown as AgentToolContext;
 }
 
@@ -161,6 +171,178 @@ describe("AskTool cancellation", () => {
 
 		const irc = ask("irc");
 		expect((await irc.outcome).details).toMatchObject({ selectedOptions: ["SQLite"] });
+	});
+
+	it("backgrounds an open question on a non-user wake and delivers the answer", async () => {
+		const answer = Promise.withResolvers<ExtensionAskDialogResult>();
+		const deliveries: Array<{ jobId: string; text: string }> = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: (jobId, text) => {
+				deliveries.push({ jobId, text });
+			},
+		});
+		const wake = new AbortController();
+		const context = createContext({
+			wakeSignal: wake.signal,
+			askDialog: async () => await answer.promise,
+		});
+		const tool = new AskTool(createSession({ asyncJobManager: manager }));
+		const pending = tool.execute(
+			"ask-wake",
+			{ questions: [{ id: "choice", question: "Which database?", options: [{ label: "SQLite" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+		wake.abort("aside");
+		const result = await pending;
+
+		// An aside yields the call but does not dismiss the user-visible form.
+		expect(result.content[0]?.type === "text" && result.content[0].text).toContain("question stays open");
+		const job = manager.getRunningJobs()[0];
+		expect(job?.type).toBe("ask");
+
+		answer.resolve({
+			kind: "submit",
+			results: [
+				{
+					id: "choice",
+					question: "Which database?",
+					options: ["SQLite"],
+					multi: false,
+					selectedOptions: ["SQLite"],
+				},
+			],
+		});
+		await job?.promise;
+		await manager.drainDeliveries({ timeoutMs: 100 });
+		expect(deliveries).toHaveLength(1);
+		expect(deliveries[0]?.text).toContain("User selected: SQLite");
+		await manager.dispose();
+	});
+
+	it("names the background job by the first question on one line, while the dialog shows it whole", async () => {
+		const question = "Which\tdatabase?\nPick one\x1b[31m now\x1b[0m";
+		const shown = Promise.withResolvers<string>();
+		const manager = new AsyncJobManager({});
+		const wake = new AbortController();
+		const tool = new AskTool(createSession({ asyncJobManager: manager }));
+		const pending = tool.execute(
+			"ask-label",
+			{ questions: [{ id: "choice", question, options: [{ label: "SQLite" }] }] },
+			undefined,
+			undefined,
+			createContext({
+				wakeSignal: wake.signal,
+				askDialog: async questions => {
+					shown.resolve(questions[0]!.question);
+					return await Promise.withResolvers<ExtensionAskDialogResult>().promise;
+				},
+			}),
+		);
+		expect(await shown.promise).toBe(question);
+		wake.abort("aside");
+		await pending;
+
+		expect(manager.getRunningJobs().map(job => job.label)).toEqual(["Which database? Pick one now"]);
+		await manager.dispose();
+	});
+
+	it("ends only the backgrounded question when the user dismisses it later", async () => {
+		// The turn that asked is over by then: aborting the context would cancel
+		// whatever turn runs now.
+		const dismiss = Promise.withResolvers<ExtensionAskDialogResult | undefined>();
+		const deliveries: string[] = [];
+		const manager = new AsyncJobManager({ onJobComplete: (_jobId, text) => void deliveries.push(text) });
+		const abort = vi.fn();
+		const wake = new AbortController();
+		const tool = new AskTool(createSession({ asyncJobManager: manager }));
+		const pending = tool.execute(
+			"ask-dismiss",
+			{ questions: [{ id: "choice", question: "Which database?", options: [{ label: "SQLite" }] }] },
+			undefined,
+			undefined,
+			createContext({ abort, wakeSignal: wake.signal, askDialog: async () => await dismiss.promise }),
+		);
+		wake.abort("irc");
+		await pending;
+		const job = manager.getRunningJobs()[0];
+		dismiss.resolve(undefined);
+		await job?.promise;
+		await manager.drainDeliveries({ timeoutMs: 100 });
+
+		expect(abort).not.toHaveBeenCalled();
+		expect(deliveries).toHaveLength(1);
+		expect(deliveries[0]).toContain("dismissed the question");
+		await manager.dispose();
+	});
+
+	it("stays cancelled when the call is cancelled right after a wake", async () => {
+		// The dialog is already closing: the call must report the cancellation,
+		// not claim the question stays open and deliver the cancel later.
+		const deliveries: string[] = [];
+		const manager = new AsyncJobManager({ onJobComplete: (_jobId, text) => void deliveries.push(text) });
+		const opened = Promise.withResolvers<void>();
+		const wake = new AbortController();
+		const cancel = new AbortController();
+		const tool = new AskTool(createSession({ asyncJobManager: manager }));
+		const pending = tool.execute(
+			"ask-wake-cancel",
+			{ questions: [{ id: "choice", question: "Which database?", options: [{ label: "SQLite" }] }] },
+			cancel.signal,
+			undefined,
+			createContext({
+				wakeSignal: wake.signal,
+				askDialog: async (_questions, options) => {
+					opened.resolve();
+					const { promise, resolve } = Promise.withResolvers<undefined>();
+					options?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+					return promise;
+				},
+			}),
+		);
+		await opened.promise;
+		wake.abort("aside");
+		cancel.abort();
+
+		await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
+		await manager.drainDeliveries({ timeoutMs: 100 });
+		expect(manager.getAllJobs()).toHaveLength(0);
+		expect(deliveries).toHaveLength(0);
+		await manager.dispose();
+	});
+
+	it("returns the answer inline and delivers nothing extra when no message arrives", async () => {
+		const deliveries: string[] = [];
+		const manager = new AsyncJobManager({ onJobComplete: (_jobId, text) => void deliveries.push(text) });
+		const tool = new AskTool(createSession({ asyncJobManager: manager }));
+		const result = await tool.execute(
+			"ask-inline",
+			{ questions: [{ id: "choice", question: "Which database?", options: [{ label: "SQLite" }] }] },
+			undefined,
+			undefined,
+			createContext({
+				wakeSignal: new AbortController().signal,
+				askDialog: async () => ({
+					kind: "submit",
+					results: [
+						{
+							id: "choice",
+							question: "Which database?",
+							options: ["SQLite"],
+							multi: false,
+							selectedOptions: ["SQLite"],
+						},
+					],
+				}),
+			}),
+		);
+
+		expect(result.details).toMatchObject({ selectedOptions: ["SQLite"] });
+		await manager.drainDeliveries({ timeoutMs: 100 });
+		expect(deliveries).toHaveLength(0);
+		expect(manager.getAllJobs()).toHaveLength(0);
+		await manager.dispose();
 	});
 
 	it("delivers queued steering while ask is open without cancelling the turn", async () => {
@@ -1818,14 +2000,17 @@ describe("AskTool rich ask dialog", () => {
 					selectedOptions: [],
 					customInput: "Like [Image #1]",
 					customInputImages: [customImage],
+					customInputParts: ["Like ", { kind: "image", n: 1, tail: "" }],
 					note: "Evidence [Image #1]",
 					noteImages: [firstImage],
+					noteParts: ["Evidence ", { kind: "image", n: 1, tail: "" }],
 				},
 				{
 					id: "q2",
 					selectedOptions: ["B"],
 					note: "Evidence [Image #1]",
 					noteImages: [secondImage],
+					noteParts: ["Evidence ", { kind: "image", n: 1, tail: "" }],
 				},
 			],
 		});
@@ -1862,18 +2047,34 @@ describe("AskTool rich ask dialog", () => {
 		}
 	});
 
-	it("renumbers only markers that refer to the answer's own images", async () => {
+	it("renumbers the markers the prompt inserted and leaves every typed character alone", async () => {
+		// One answer field owns one real image and also contains text that reads like a marker:
+		// a file name, a quotation, a fenced block and a code span. Only the run the prompt
+		// inserted is a marker, so only it moves; the rest is delivered byte for byte and the
+		// path the person named still resolves.
 		const image = { type: "image" as const, data: "image", mimeType: "image/png" };
+		const typed = [
+			' of user-[Image #1].png, which they called "[Image #1]"\n',
+			"~~~\n[Image #1]\n~~~\n",
+			"and `[Image #1]` inline",
+		].join("");
 		const askDialog = vi.fn().mockResolvedValue({
 			kind: "submit",
 			results: [
-				{ id: "q1", selectedOptions: [], customInput: "Like [Image #1]", customInputImages: [image] },
+				{
+					id: "q1",
+					selectedOptions: [],
+					customInput: "Like [Image #1]",
+					customInputImages: [image],
+					customInputParts: ["Like ", { kind: "image", n: 1, tail: "" }],
+				},
 				{
 					id: "q2",
 					selectedOptions: [],
 					customInput: "Match the mock in [Image #1]",
-					note: "[Image #1] beside [Image #5]",
+					note: `shot [Image #1, 8x4]${typed}`,
 					noteImages: [image],
+					noteParts: ["shot ", { kind: "image", n: 1, tail: ", 8x4" }, typed],
 				},
 			],
 		});
@@ -1893,8 +2094,39 @@ describe("AskTool rich ask dialog", () => {
 		expect(result.details).toMatchObject({
 			results: [
 				{ customInput: "Like [Image #1]" },
-				{ customInput: "Match the mock in [Image #1]", note: "[Image #2] beside [Image #5]" },
+				// The field with no images of its own keeps its text untouched too.
+				{ customInput: "Match the mock in [Image #1]", note: `shot [Image #2, 8x4]${typed}` },
 			],
+		});
+	});
+
+	it("leaves an answer's own numbering alone when its host attached images but reported no runs", async () => {
+		// No host in this repo does, but an extension or SDK UI may: with nothing saying which
+		// characters the prompt wrote, the text reaches the model as the host sent it rather
+		// than having markers guessed out of the person's words.
+		const image = { type: "image" as const, data: "image", mimeType: "image/png" };
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{ id: "q1", selectedOptions: [], customInput: "first [Image #1]", customInputImages: [image] },
+				{ id: "q2", selectedOptions: [], customInput: "second [Image #1]", customInputImages: [image] },
+			],
+		});
+		const result = await new AskTool(createSession()).execute(
+			"call-no-parts",
+			{
+				questions: [
+					{ id: "q1", question: "Q1?", options: [{ label: "A" }] },
+					{ id: "q2", question: "Q2?", options: [{ label: "B" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.details).toMatchObject({
+			results: [{ customInput: "first [Image #1]" }, { customInput: "second [Image #1]" }],
 		});
 	});
 
