@@ -153,6 +153,8 @@ def _require_branch(value: Any) -> str:
 
 _RELEASE_TAG_RE = re.compile(r"v[0-9][A-Za-z0-9._-]*")
 
+_POSTABLE_STATUS_STATES = frozenset({"pending", "success", "failure", "error"})
+
 
 def _require_release_tag(value: Any) -> str:
     tag = _require_str(value, "tag")
@@ -798,6 +800,28 @@ def create_proxy_app(settings: Settings) -> FastAPI:
         github: GitHubClient = request.app.state.github
         try:
             await github.close_issue(repo, number, reason=reason)
+        except GitHubError as exc:
+            return _gh_error_response(exc)
+        return JSONResponse({"ok": True})
+
+    @app.post("/gh/v1/commit_status")
+    async def commit_status(request: Request) -> JSONResponse:
+        data = await _json_body(request)
+        repo = _require_str(data.get("repo"), "repo")
+        sha = _require_str(data.get("sha"), "sha")
+        state = _require_str(data.get("state"), "state")
+        if state not in _POSTABLE_STATUS_STATES:
+            raise HTTPException(400, "invalid 'state'")
+        context = _require_str(data.get("context"), "context")
+        description_raw = data.get("description")
+        description = description_raw if isinstance(description_raw, str) else ""
+        target_url_raw = data.get("target_url")
+        target_url = target_url_raw if isinstance(target_url_raw, str) and target_url_raw else None
+        github: GitHubClient = request.app.state.github
+        try:
+            await github.create_commit_status(
+                repo, sha, state=state, context=context, description=description, target_url=target_url
+            )
         except GitHubError as exc:
             return _gh_error_response(exc)
         return JSONResponse({"ok": True})
