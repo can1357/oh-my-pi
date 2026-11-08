@@ -59,4 +59,46 @@ describe("Gateway placeholder in chat-completions reasoning", () => {
 		const thinking = result.content.find(block => block.type === "thinking");
 		expect(thinking?.type === "thinking" ? thinking.thinking : "").toBe("");
 	});
+
+	it("keeps a placeholder-sized fragment inside real reasoning", async () => {
+		// A provider may chunk reasoning so that one delta happens to spell the
+		// placeholder. Inside a block that already carries text those bytes are
+		// part of the trace, not the whole fabricated answer.
+		const result = await streamOpenAICompletions(
+			model,
+			{ messages: [{ role: "user", content: "go", timestamp: 0 }] },
+			{
+				apiKey: "k",
+				fetch: reasoningStream(["Checking the ", PLACEHOLDER, " catalog first."]),
+			},
+		).result();
+		const thinking = result.content.find(block => block.type === "thinking");
+		expect(thinking?.type === "thinking" ? thinking.thinking : "").toBe(`Checking the ${PLACEHOLDER} catalog first.`);
+	});
+
+	it("does not record the placeholder for an endpoint without the translation flag", async () => {
+		// The decoder strip is not gated: a model that echoes a placeholder back
+		// (including omp's own synthetic replay text) must not pin the session to
+		// it. A plain chat-completions provider is pinned here so the choice is
+		// explicit.
+		const plainModel = buildModel({
+			id: "deepseek-chat",
+			name: "DeepSeek Chat",
+			api: "openai-completions",
+			provider: "deepseek",
+			baseUrl: "https://api.deepseek.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 65536,
+			maxTokens: 8192,
+		}) as Model<"openai-completions">;
+		const result = await streamOpenAICompletions(
+			plainModel,
+			{ messages: [{ role: "user", content: "go", timestamp: 0 }] },
+			{ apiKey: "k", fetch: reasoningStream([PLACEHOLDER]) },
+		).result();
+		const thinking = result.content.find(block => block.type === "thinking");
+		expect(thinking?.type === "thinking" ? thinking.thinking : "").not.toContain(PLACEHOLDER);
+	});
 });

@@ -13,6 +13,7 @@
 
 - Added the `translates-responses-to-chat-completions` compat axis (`translatesResponsesToChatCompletions`) for endpoints that accept Responses requests but serve them by translating them into chat completions; set it per model in `models.yml`. ([#18531](https://github.com/can1357/oh-my-pi/pull/18531) by [@SakurakaiCat](https://github.com/SakurakaiCat))
 
+## [18.18.2] - 2026-11-08
 ### Fixed
 
 - Fixed model catalog pricing and output-limit metadata for Mistral alias IDs, including the Mistral Vibe CLI default model, by applying the metadata of their aliased models.

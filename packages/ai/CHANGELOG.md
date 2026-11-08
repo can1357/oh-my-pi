@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `compat.translatesResponsesToChatCompletions` setting for endpoints that accept Responses requests but serve them by translating them into chat completions; set it per model under `providers.<id>.compat` in `models.yml`. ([#18531](https://github.com/can1357/oh-my-pi/pull/18531) by [@SakurakaiCat](https://github.com/SakurakaiCat))
+
+### Fixed
+
+- Fixed mid-session model switches making a proxy-backed reasoning model answer with `[reasoning unavailable]`: the replayed tool-call turn now carries a reasoning item whose summary the proxy can forward, and a recorded placeholder item is replaced instead of replayed, so the placeholder never reaches the wire. ([#18531](https://github.com/can1357/oh-my-pi/pull/18531) by [@SakurakaiCat](https://github.com/SakurakaiCat))
+- Fixed `[reasoning unavailable]` being stored as a model's thinking: placeholder-only reasoning is dropped by the Responses, Codex, and chat-completions decoders, and is no longer demoted to prose when a turn is replayed across models, so the text can no longer be shown or fed back to the model. The decoder-side strip is not gated on the translation flag, because no provider returns the placeholder as real reasoning. ([#18531](https://github.com/can1357/oh-my-pi/pull/18531) by [@SakurakaiCat](https://github.com/SakurakaiCat))
+
 ## [18.18.2] - 2026-11-08
 
 ### Added
@@ -18,7 +27,6 @@
 - Fixed Codex Responses requests losing tool namespaces and developer-provided additional tools when replayed through the authentication gateway.
 - Fixed Gemini malformed responses being treated as unhandled stop reasons and losing token usage; they are now handled as transient transport errors.
 - Improved Cursor compatibility with TLS-intercepting proxies that block HTTP/2 by falling back to HTTP/1 for subsequent turns.
-- Fixed mid-session model switches making a proxy-backed reasoning model answer with `[reasoning unavailable]`: the replayed tool-call turn now carries a reasoning item whose summary the proxy can forward, a recorded placeholder item is replaced instead of replayed, and a placeholder the proxy did send is no longer stored as the turn's thinking. Set `compat.translatesResponsesToChatCompletions: true` in `models.yml` for proxies that serve Responses requests by translating them into chat completions. ([#18531](https://github.com/can1357/oh-my-pi/pull/18531) by [@SakurakaiCat](https://github.com/SakurakaiCat))
 
 ## [18.18.1] - 2026-11-08
 

@@ -1216,7 +1216,15 @@ const streamOpenAICompletionsOnce = (
 				// the proxy had nothing real to send and the model echoed it back.
 				// Recording it would show the text as the model's thinking and pin
 				// every later turn to it.
-				if (isSyntheticReasoningPlaceholder(thinking)) return;
+				//
+				// Only the delta that would open the block — or find it empty — can be
+				// the whole placeholder. Inside an open block that already carries
+				// text, the same bytes are a fragment of real reasoning (a provider may
+				// emit large chunks, and the cumulative path emits suffix diffs), so
+				// they stay; `finishCurrentBlock` still drops a block that turned out
+				// to be nothing but the placeholder.
+				const midTrace = currentBlock?.type === "thinking" && currentBlock.thinking.length > 0;
+				if (!midTrace && isSyntheticReasoningPlaceholder(thinking)) return;
 				const block =
 					currentBlock?.type === "thinking" &&
 					(signature === undefined || currentBlock.thinkingSignature === signature)

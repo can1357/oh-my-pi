@@ -148,6 +148,46 @@ function switchedContext(): Context {
 	};
 }
 
+/** A streamed answer whose only reasoning is the gateway's placeholder. */
+function placeholderAnswerSse(): string {
+	const events = [
+		{
+			type: "response.output_item.added",
+			output_index: 0,
+			item: { id: "rs_1", type: "reasoning", summary: [] },
+		},
+		{
+			type: "response.output_item.done",
+			output_index: 0,
+			item: {
+				id: "rs_1",
+				type: "reasoning",
+				summary: [{ type: "summary_text", text: PLACEHOLDER }],
+				content: [{ type: "reasoning_text", text: PLACEHOLDER }],
+			},
+		},
+		{
+			type: "response.completed",
+			response: {
+				status: "completed",
+				usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+			},
+		},
+	];
+	return `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`;
+}
+
+function placeholderAnswerFetch() {
+	const sse = placeholderAnswerSse();
+	return vi.fn(
+		async () =>
+			new Response(new TextEncoder().encode(sse), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+	);
+}
+
 describe("Responses replay behind a chat-completions proxy", () => {
 	it("gives a tool-call turn a reasoning item with a summary after a model switch", async () => {
 		const payload = await capture(switchedContext());
@@ -274,46 +314,13 @@ describe("Responses replay behind a chat-completions proxy", () => {
 	it("does not keep a gateway placeholder as the turn's thinking", async () => {
 		// The proxy answered with its own placeholder. Storing it would show the
 		// text as the model's thinking and pin the next turn to it.
-		const events = [
-			{
-				type: "response.output_item.added",
-				output_index: 0,
-				item: { id: "rs_1", type: "reasoning", summary: [] },
-			},
-			{
-				type: "response.output_item.done",
-				output_index: 0,
-				item: {
-					id: "rs_1",
-					type: "reasoning",
-					summary: [{ type: "summary_text", text: PLACEHOLDER }],
-					content: [{ type: "reasoning_text", text: PLACEHOLDER }],
-				},
-			},
-			{
-				type: "response.completed",
-				response: {
-					status: "completed",
-					usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-				},
-			},
-		];
-		const sse = `${events.map(event => `data: ${JSON.stringify(event)}`).join("\n\n")}\n\n`;
-		const fetchMock = vi.fn(
-			async () =>
-				new Response(new TextEncoder().encode(sse), {
-					status: 200,
-					headers: { "content-type": "text/event-stream" },
-				}),
-		);
-
 		const result = await streamOpenAIResponses(
 			gatewayModel,
 			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
 			{
 				apiKey: "sk-test",
 				reasoning: "high",
-				fetch: fetchMock as unknown as typeof fetch,
+				fetch: placeholderAnswerFetch() as unknown as typeof fetch,
 			},
 		).result();
 
@@ -324,6 +331,26 @@ describe("Responses replay behind a chat-completions proxy", () => {
 });
 
 describe("Gateway placeholder handling off the wire", () => {
+	it("never stores placeholder-only thinking, even without the translation flag", async () => {
+		// The strip is deliberately not gated on `translatesResponsesToChatCompletions`:
+		// no provider returns the placeholder as real reasoning, and a model that
+		// echoes one (omp's own synthetic replay text included) must not pin the
+		// session to it. An ordinary Responses endpoint is pinned here so the
+		// choice is explicit.
+		const result = await streamOpenAIResponses(
+			officialModel,
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			{
+				apiKey: "sk-test",
+				reasoning: "high",
+				fetch: placeholderAnswerFetch() as unknown as typeof fetch,
+			},
+		).result();
+
+		const thinking = result.content.find(block => block.type === "thinking");
+		expect(thinking?.type === "thinking" ? thinking.thinking : "").not.toContain(PLACEHOLDER);
+	});
+
 	it("drops a placeholder thinking block instead of demoting it to prose", () => {
 		// A turn from another model normally demotes its unsigned thinking block
 		// to prose. A gateway placeholder must never reach the wire that way: the

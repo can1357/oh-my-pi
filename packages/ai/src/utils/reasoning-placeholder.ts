@@ -129,5 +129,5 @@ export function reasoningSignatureCarriesEncryptedReasoning(signature: string | 
 	}
 	if (!parsed || typeof parsed !== "object") return false;
 	if (!("encrypted_content" in parsed)) return false;
-	return hasEncryptedReasoningBlob(parsed as { encrypted_content?: unknown });
+	return hasEncryptedReasoningBlob(parsed);
 }
