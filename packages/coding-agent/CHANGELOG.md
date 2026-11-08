@@ -58,6 +58,7 @@
 - Edit auto-repair now accounts for retry costs and stops before exceeding the session cost cap.
 - MCP prompt commands now correctly assign positional arguments that follow `key=value` arguments.
 - `/shake thinking` now reports and preserves reasoning blocks that the provider continues to replay, avoiding inaccurate context-reduction claims.
+- MCP tool results no longer drop embedded binary resources: a supported image now reaches the model as an image block, and any other payload is saved under `local://` with its MIME type and size instead of only `[Resource: <uri>]` ([#14598](https://github.com/can1357/oh-my-pi/issues/14598), [#16451](https://github.com/can1357/oh-my-pi/pull/16451) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
@@ -97,7 +98,6 @@
 - Eval `wait()` progress rows for agents spawned by one `task` call show each agent's own tool count, context, cost and activity instead of the first agent's ([#18393](https://github.com/can1357/oh-my-pi/issues/18393))
 - In the Pseudo shell visualization, an `&&` chain keeps its `and` rows while it runs and after it finishes, instead of switching to literal ` && ` rows and a raw-bash tail when the output minimizer runs it one command at a time ([#18408](https://github.com/can1357/oh-my-pi/issues/18408))
 - Autoresearch `update_notes` calls can now append an idea with only `append_idea`, without passing a replacement `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
-- MCP tool results no longer drop embedded binary resources: a supported image now reaches the model as an image block, and any other payload is saved under `local://` with its MIME type and size instead of only `[Resource: <uri>]` ([#14598](https://github.com/can1357/oh-my-pi/issues/14598), [#16451](https://github.com/can1357/oh-my-pi/pull/16451) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.0] - 2026-11-07
 
