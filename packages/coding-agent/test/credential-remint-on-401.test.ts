@@ -137,7 +137,7 @@ describe("a `!command` credential the provider refuses", () => {
 		counterFile: string,
 		accept: (bearer: string | undefined) => boolean,
 		extraProviderConfig: Record<string, unknown> = {},
-		refuse: () => Response | Promise<Response> = gatewayRefusal,
+		refuse: (bearer?: string) => Response | Promise<Response> = gatewayRefusal,
 	): Rig {
 		const modelsPath = path.join(tempDir, "models.json");
 		fs.writeFileSync(
@@ -164,7 +164,7 @@ describe("a `!command` credential the provider refuses", () => {
 			const auth = headers.Authorization;
 			const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : auth;
 			seen.push(bearer ?? "<none>");
-			return accept(bearer) ? okStream() : refuse();
+			return accept(bearer) ? okStream() : refuse(bearer);
 		};
 
 		/** Resolve and seed a turn now; the returned function sends it. */
@@ -251,7 +251,90 @@ describe("a `!command` credential the provider refuses", () => {
 		},
 	);
 
-	test("a prepared header still sends when a refused generation has no replacement", async () => {
+	test("a token_not_found_in_db 401 shares a replacement and both prepared operations recover", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "junk-1");
+		const rig = buildRig(
+			mintFromFile(counterFile, tokenFile),
+			counterFile,
+			bearer => bearer === "junk-2",
+			{},
+			() =>
+				new Response(
+					JSON.stringify({
+						error: { message: "Virtual key expected.", type: "token_not_found_in_db", code: "401" },
+					}),
+					{ status: 401, headers: { "Content-Type": "application/json" } },
+				),
+		);
+		const sends = await Promise.all([rig.prepare(), rig.prepare()]);
+		fs.writeFileSync(tokenFile, "junk-2");
+		const before = rig.mints();
+		const results = [];
+		for (const send of sends) results.push(await send());
+		expect(results.filter(result => result.stopReason !== "error").length).toBe(2);
+		expect(rig.mints() - before).toBe(1);
+		expect(rig.seen.map(value => Number(value.slice(5)))).toEqual([1, 2, 1, 2]);
+	});
+
+	test("an expired_token 403 condemns generation 2 before a straggler's genuine 401", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "junk-1");
+		let expiry = false;
+		const rig = buildRig(
+			mintFromFile(counterFile, tokenFile),
+			counterFile,
+			bearer => bearer === "junk-3" || (bearer === "junk-2" && !expiry),
+			{},
+			bearer =>
+				bearer === "junk-2"
+					? new Response(
+							JSON.stringify({
+								error: { message: "Signature has expired", type: "auth_error", code: "expired_token" },
+							}),
+							{ status: 403, headers: { "Content-Type": "application/json" } },
+						)
+					: gatewayRefusal(),
+		);
+		const send = await rig.prepare();
+		fs.writeFileSync(tokenFile, "junk-2");
+		expect((await rig.turn()).stopReason).not.toBe("error");
+		expiry = true;
+		expect((await rig.turn()).errorStatus).toBe(403);
+		fs.writeFileSync(tokenFile, "junk-3");
+		const before = rig.mints();
+		expect((await send()).stopReason).not.toBe("error");
+		expect(rig.mints() - before).toBe(1);
+		expect(rig.seen.map(value => Number(value.slice(5)))).toEqual([1, 2, 2, 1, 3]);
+	});
+
+	test("a refused prepared header obtains a missing replacement without dispatching the dead generation", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "junk-1");
+		const command = mintFromFile(counterFile, tokenFile);
+		const rig = buildRig("literal-placeholder", counterFile, bearer => bearer !== "junk-1", {
+			headers: { Authorization: command },
+		});
+		const send = await rig.prepare();
+		fs.writeFileSync(tokenFile, "junk-2");
+		expect((await rig.turn()).stopReason).not.toBe("error");
+		invalidateCommandConfig(command);
+		fs.writeFileSync(tokenFile, "junk-3");
+		const beforeRequests = rig.seen.length;
+		const beforeMints = rig.mints();
+		expect((await send()).stopReason).not.toBe("error");
+		expect(rig.seen.length - beforeRequests).toBe(1);
+		expect(rig.seen.slice(beforeRequests).map(value => Number(value.slice(5)))).toEqual([3]);
+		expect(rig.mints() - beforeMints).toBe(1);
+	});
+
+	test("a prepared header obtains a new mint when a refused generation has no replacement", async () => {
 		const counterFile = path.join(tempDir, "mints");
 		const tokenFile = path.join(tempDir, "token");
 		fs.writeFileSync(counterFile, "");
@@ -269,7 +352,7 @@ describe("a `!command` credential the provider refuses", () => {
 		const beforeMints = rig.mints();
 		expect((await send()).stopReason).not.toBe("error");
 		expect(rig.seen.length - beforeRequests).toBe(1);
-		expect(rig.mints() - beforeMints).toBe(0);
+		expect(rig.mints() - beforeMints).toBe(1);
 	});
 
 	test("is re-minted and the request retried once", async () => {

@@ -3854,8 +3854,8 @@ export class ModelRegistry {
 					signal: options?.signal,
 				});
 		if (!resolved || !headerResolver) return resolved;
-		// Values and provenance stay paired. The send-time read only replaces
-		// generations already condemned by the refusal watermark, without resolving.
+		// Values and provenance stay paired. Only a condemned prepared generation
+		// needs replacement resolution; valid snapshots never cause a new mint.
 		const headers = await headerResolver(options?.signal);
 		const headerGenerations = configHeaderGenerations(headers);
 		if (!headers || !headerGenerations) return resolved;

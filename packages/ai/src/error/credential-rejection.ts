@@ -1,13 +1,15 @@
 /**
  * Did the provider refuse the *credential* a request carried?
  *
- * This is a **refreshable-failure** signal, not expiry detection. It never
- * predicts that a credential has gone stale and never withholds a request: a
- * credential is sent until the provider refuses it, and only then does this
- * module read what the refusal says. A credential minted by a `!command` has
- * no trustworthy expiry a client can read — a JWT's `exp` is a wall-clock
- * instant, and a process has no trusted wall clock — whereas the provider
- * answers the question exactly, with a 401.
+ * This is a **refreshable-failure** signal, not expiry prediction. A qualifying
+ * 401 (structured class, existing prose fallback, or bare status) establishes
+ * that the credential was refused. A 403 does so only with an explicit expiry
+ * signal; permission-only 403s never condemn a credential. The caller records
+ * the refused generation as a watermark: never send it or an older generation
+ * again. Send a prepared generation above the watermark; otherwise use or join
+ * a newer mint, or obtain one. Only failure to obtain usable authentication is
+ * an error, not the mere absence of a cached replacement. No clock or JWT claim
+ * predicts any of this: a command credential has no trusted client-side expiry.
  *
  * **The signal is the provider's own structured error class, not its prose.**
  * An error body's `type`/`code` is a contract; its `message` is wording that
@@ -45,8 +47,8 @@ import { extractHttpStatusFromError, isRecord } from "@oh-my-pi/pi-utils";
 /**
  * What a failed request says about the credential it carried.
  *
- * - `structured` — a 401 whose own error class names an authentication
- *   failure. The primary signal.
+ * - `structured` — a 401 whose class names a credential refusal, or a 403
+ *   with an explicit credential-expiry class. The primary signal.
  * - `text` — a 401 with no readable error class whose message is one of the
  *   documented credential refusals. Fallback only.
  * - `status` — a 401 with nothing else to read. HTTP's own meaning, and what
@@ -55,18 +57,23 @@ import { extractHttpStatusFromError, isRecord } from "@oh-my-pi/pi-utils";
  *   authentication failure. The only verdict that withholds a re-mint, since
  *   re-minting cannot help and a `!command` credential's re-mint is a call to
  *   its issuer.
- * - `unclassified` — not a 401 at all. This module has nothing to say about
- *   the credential, and a caller keeps whatever policy it had.
+ * - `unclassified` — neither a qualifying 401 nor an explicit-expiry 403.
+ *   This module has nothing to say about the credential.
  */
 export type CredentialVerdict = "structured" | "text" | "status" | "not-credential" | "unclassified";
 
 /**
- * `type` values that name an authentication failure. `auth_error` is LiteLLM's
- * (and therefore Theorem's model gateway's); the rest are the spellings the
- * other wires omp speaks use.
+ * Credential-refusal types. LiteLLM emits `auth_error`, `token_not_found_in_db`
+ * and `expired_key`: see `proxy/auth/auth_exception_handler.py`,
+ * `proxy/auth/resolvers/exceptions.py` and `proxy/auth/user_api_key_auth.py` at
+ * BerriAI/litellm 43112547fb9c0a8d482f4fe031e09a6c2cc234e1. Anthropic documents
+ * `authentication_error` at https://platform.claude.com/docs/en/api/errors.
+ * The remaining compatibility spellings predate this classification update.
  */
 const AUTH_ERROR_TYPES: Record<string, true> = {
 	auth_error: true,
+	token_not_found_in_db: true,
+	expired_key: true,
 	authentication_error: true,
 	invalid_authentication: true,
 	invalid_api_key: true,
@@ -92,13 +99,9 @@ const AUTH_ERROR_CODES: Record<string, true> = {
 };
 
 /**
- * `code` values that only restate the HTTP status. LiteLLM sends the bare
- * status as the code, so `code=401` adds nothing the 401 did not already say.
- * Measured 2026-11-08 against Theorem's model gateway: an unknown virtual key
- * answers `type=token_not_found_in_db code=401`, and reading that code as an
- * authentication class made the body's own, differing `type` irrelevant —
- * every 401 the gateway renders qualified, and each cost an issuer call a
- * fresh credential could not have fixed.
+ * Codes that only restate the HTTP status. LiteLLM's `code=401` adds nothing
+ * to the status: it must not override an explicit policy failure. Its actual
+ * credential-refusal types (`token_not_found_in_db` included) qualify above.
  */
 const BARE_STATUS_CODES: Record<string, true> = { "401": true };
 
@@ -125,6 +128,20 @@ const CREDENTIAL_REFUSAL_TEXT: readonly RegExp[] = [
 	/\b(?:token|credential|session)\b[^.\n]{0,40}\bexpired\b/i,
 	/\bexpired\b[^.\n]{0,40}\b(?:token|credential|session)\b/i,
 ];
+
+/** Explicit expiry classes, unlike the permission-only `auth_error` 403. */
+const CREDENTIAL_EXPIRY_CLASSES: Record<string, true> = {
+	expired_token: true,
+	token_expired: true,
+	expired_key: true,
+};
+
+function namesCredentialExpiry({ type, code }: ErrorClass): boolean {
+	return (
+		(type !== undefined && CREDENTIAL_EXPIRY_CLASSES[type.toLowerCase()] === true) ||
+		(code !== undefined && CREDENTIAL_EXPIRY_CLASSES[code.toLowerCase()] === true)
+	);
+}
 
 /** The structured error class a provider reported, as far as it is readable. */
 interface ErrorClass {
@@ -305,8 +322,17 @@ function errorStatus(error: unknown): number | undefined {
  * {@link CredentialVerdict}; the module doc has the measurements behind it.
  */
 export function credentialRejectionVerdict(error: unknown): CredentialVerdict {
-	if (errorStatus(error) !== 401) return "unclassified";
+	const status = errorStatus(error);
+	if (status !== 401 && status !== 403) return "unclassified";
 	const onObject = readErrorClassFromObject(error);
+	if (status === 403) {
+		const message = errorText(error);
+		const errorClass =
+			message === undefined ? undefined : (readErrorClassFromRendering(message) ?? readErrorClassFromJson(message));
+		return (onObject && namesCredentialExpiry(onObject)) || (errorClass && namesCredentialExpiry(errorClass))
+			? "structured"
+			: "unclassified";
+	}
 	if (onObject && namesAuthFailure(onObject)) return "structured";
 	const message = errorText(error);
 	if (message === undefined) return "status";
@@ -317,8 +343,8 @@ export function credentialRejectionVerdict(error: unknown): CredentialVerdict {
 
 /**
  * Whether the provider refused the credential the request carried. False for
- * a failure that is not a 401, and for a 401 whose own error class says it is
- * not an authentication failure.
+ * a failure other than a qualifying 401 or explicit-expiry 403, and for a 401
+ * whose own error class says it is not an authentication failure.
  */
 export function isCredentialRejection(error: unknown): boolean {
 	const verdict = credentialRejectionVerdict(error);

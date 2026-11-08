@@ -12,7 +12,8 @@
 - A provider 401 no longer runs a configured `!command` credential the auth cascade did not select: with a runtime `--api-key` override in force, the recovery re-mints the source that served the request rather than the configured one, and no longer waits out that command's timeout ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - Command-backed provider and model headers now share the same one-execution-per-refusal-wave bound as command-backed API keys, including staggered refusals after the mint settles ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - New operations resolve a replacement before sending a command credential whose generation the provider already refused; permission-only 403 responses do not disqualify that credential ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
-- Prepared requests keep command-backed headers with their credential generations, use an available replacement for a refused credential, and still send when no replacement exists ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- Prepared requests keep command-backed headers with their credential generations and obtain a replacement before sending a refused credential, including after cache invalidation ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- Explicit credential-expiry 403 responses disqualify the expired command credential without treating permission-only 403 responses as credential refusals ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.18.1] - 2026-11-08
 

@@ -81,29 +81,40 @@ export function configHeaderGenerations(
 	return generations;
 }
 
-/** Prefer an available replacement for a known-refused header; otherwise send the prepared value. Never mint here. */
+/**
+ * Send prepared generations above the refusal watermark unchanged. For a
+ * condemned generation, use a cached replacement, join a mint, or obtain one.
+ * Absence of a replacement is not failure; an issuer unable to provide one is.
+ * Never dispatch a generation the watermark has condemned.
+ */
 export async function readUnrefusedConfigHeaders(headers: Record<string, string>): Promise<Record<string, string>> {
 	const credentials = resolvedHeaderCredentials.get(headers);
 	if (!credentials) return headers;
 	let current = headers;
 	let currentCredentials = credentials;
-	for (const key in credentials) {
-		const credential = credentials[key];
-		const command = commandKey(credential.config);
-		let refused = commandRefusedGeneration.get(command) ?? 0;
-		if (credential.generation > refused) continue;
-		// Join only a replacement already being minted, never a new resolution.
-		const pending = commandInFlight.get(command);
-		if (pending) await pending;
-		refused = commandRefusedGeneration.get(command) ?? 0;
-		const replacement = commandResultCache.get(command);
-		if (!replacement || replacement.generation <= refused) continue;
-		if (current === headers) {
-			current = { ...headers };
-			currentCredentials = { ...credentials };
+	for (;;) {
+		let replaced = false;
+		for (const key in currentCredentials) {
+			const credential = currentCredentials[key];
+			const command = commandKey(credential.config);
+			if (credential.generation > (commandRefusedGeneration.get(command) ?? 0)) continue;
+			// executeCommand shares both ordinary and recovery mints, and ignores
+			// cached generations at or below the watermark. Missing cache entries
+			// therefore obtain a replacement instead of sending known-dead bytes.
+			const replacement = await executeCommand(credential.config);
+			if (!replacement) throw new Error("Unable to obtain an unrefused command credential");
+			if (current === headers) {
+				current = { ...headers };
+				currentCredentials = { ...credentials };
+			}
+			current[key] = `${credential.prefix ?? ""}${replacement.value}`;
+			currentCredentials[key] = { ...credential, generation: replacement.generation };
+			replaced = true;
+			// A later header's mint can suspend while a peer refuses an earlier
+			// header. Recheck all generations after every await, not just this one.
+			break;
 		}
-		current[key] = `${credential.prefix ?? ""}${replacement.value}`;
-		currentCredentials[key] = { ...credential, generation: replacement.generation };
+		if (!replaced) break;
 	}
 	if (current !== headers) resolvedHeaderCredentials.set(current, currentCredentials);
 	return current;

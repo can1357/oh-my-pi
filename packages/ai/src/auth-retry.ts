@@ -106,7 +106,7 @@ export function resolvedCredentialGeneration(resolved: ApiKeyResolution): number
 	return typeof resolved === "string" ? undefined : resolved?.credentialGeneration;
 }
 
-/** Read owner-held refusal state without resolving credentials a second time. */
+/** Read owner-held refusal state, resolving only headers already condemned by it. */
 export async function readApiKeyHeaders(resolved: ApiKeyResolution): Promise<ApiKeyResolution> {
 	if (typeof resolved !== "object" || !resolved?.readHeaders) return resolved;
 	const headers = await resolved.readHeaders();

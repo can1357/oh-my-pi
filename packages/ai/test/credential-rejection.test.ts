@@ -124,7 +124,29 @@ describe("credentialRejectionVerdict", () => {
 		expect(isCredentialRejection(error)).toBe(false);
 	});
 
-	it("says nothing about failures that are not 401s", () => {
+	it.each(["token_not_found_in_db", "expired_key"])("recognizes LiteLLM's %s on both renderings", type => {
+		const refusal = { message: "Credential rejected.", type, code: "401" };
+		for (const message of [rawBodyMessage(refusal), renderedMessage(refusal)]) {
+			expect(credentialRejectionVerdict(new ProviderHttpError(message, 401))).toBe("structured");
+		}
+	});
+
+	it.each(["expired_token", "token_expired", "expired_key"])(
+		"records explicit 403 expiry %s, not generic auth errors",
+		expiry => {
+			for (const field of ["type", "code"]) {
+				const body = JSON.stringify({
+					error: { type: "auth_error", [field]: expiry, message: "Credential rejected." },
+				});
+				expect(isCredentialRejection(new ProviderHttpError(`403 ${body}`, 403))).toBe(true);
+			}
+			expect(isCredentialRejection(new ProviderHttpError("403 Forbidden (type=auth_error code=403)", 403))).toBe(
+				false,
+			);
+		},
+	);
+
+	it("leaves other statuses and permission-only 403s unclassified", () => {
 		expect(credentialRejectionVerdict(new ProviderHttpError("403 forbidden", 403))).toBe("unclassified");
 		expect(credentialRejectionVerdict(new ProviderHttpError("429 slow down", 429))).toBe("unclassified");
 		expect(credentialRejectionVerdict(new ProviderHttpError("500 server error", 500))).toBe("unclassified");
@@ -187,14 +209,12 @@ describe("credentialRejectionVerdict", () => {
 	});
 
 	it("does not let a code that restates the status override a differing type", () => {
-		// Measured 2026-11-08 against Theorem's model gateway: an unknown
-		// virtual key. LiteLLM restates the status as the code, so reading the
-		// code as a class made the body's own `type` irrelevant and every 401
-		// the gateway renders qualified.
+		// A bare status must not override a policy denial, even when the message
+		// mentions authentication. Virtual-key rejection is tested above.
 		const body = JSON.stringify({
 			error: {
 				message: "Authentication Error, Invalid proxy server token passed.",
-				type: "token_not_found_in_db",
+				type: "policy_blocked",
 				code: "401",
 			},
 		});

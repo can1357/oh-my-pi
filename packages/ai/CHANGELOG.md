@@ -10,8 +10,9 @@
 
 - A credential re-minted because the provider said it refused the one a request sent is now tried, even when the mint hands back the same bytes; a request still gets exactly one such retry ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - A provider error's `type`, `param` and `code` keep their own labels in the error message: an absent field used to rename the ones after it, so an OpenAI rejected key (`type=invalid_request_error`, no `param`, `code=invalid_api_key`) reached every reader as `param=invalid_api_key` ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
-- A 401 whose body names an error `type` of its own is read by that name: LiteLLM restates the HTTP status as `error.code`, so `code=401` no longer overrules a differing `type` and refusals like `token_not_found_in_db` stop counting as authentication failures ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- A bare HTTP status in `error.code` no longer overrules an explicit policy-denial class; LiteLLM's `token_not_found_in_db` and `expired_key` classes correctly identify rejected credentials ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - An error envelope a provider embeds in its own message text no longer outranks the class the transport rendered, in either direction, and the rendered class is read from the transport's own `(type=… code=…)` group rather than from any `type=` in the prose ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- Credential-refusal classification recognizes an explicit credential-expiry 403 without classifying a permission-only 403 as a refused credential ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.18.1] - 2026-11-08
 
