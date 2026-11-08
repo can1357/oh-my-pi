@@ -20,6 +20,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionStatsTracker } from "@oh-my-pi/pi-coding-agent/session/session-stats";
 import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -724,7 +725,12 @@ describe("AgentSession shake", () => {
 				api: model.api,
 				provider: model.provider,
 				model: options.modelId ?? model.id,
-				providerPayload: { type: "openaiResponsesHistory", provider: model.provider, dt: true, items: options.items },
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					provider: model.provider,
+					dt: true,
+					items: options.items,
+				},
 				stopReason: "stop",
 				usage,
 				timestamp: options.timestamp ?? Date.now(),
@@ -775,21 +781,24 @@ describe("AgentSession shake", () => {
 			});
 			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
 			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			const contentBefore = structuredClone(replayed.content);
 			const rewriteEntries = vi.spyOn(sessionManager, "rewriteEntries");
 			const replaceMessages = vi.spyOn(session.agent, "replaceMessages");
+			const anchoredRewrite = vi.spyOn(SessionStatsTracker.prototype, "recordAnchoredHistoryRewrite");
 
 			const result = await session.shake("thinking");
 
 			expect(result.thinkingBlocksDropped).toBe(0);
 			expect(result.thinkingBlocksKept).toBe(1);
 			expect(result.tokensFreed).toBe(0);
-			expect(replayed.content.map(block => block.type)).toEqual(["thinking", "text"]);
+			expect(replayed.content).toEqual(contentBefore);
 			expect(session.getContextUsage()?.tokens).toBe(20_000);
 			// No rewrite at all: the transcript is what the wire already sends.
 			expect(rewriteEntries).not.toHaveBeenCalled();
 			expect(replaceMessages).not.toHaveBeenCalled();
+			expect(anchoredRewrite).not.toHaveBeenCalled();
 			expect(formatShakeSummary(result)).toBe(
-				"1 thinking block is replayed from the provider payload and left in place.",
+				"1 thinking block was kept because removing it would not change what the model receives.",
 			);
 		});
 
@@ -891,7 +900,9 @@ describe("AgentSession shake", () => {
 			expect(rebuilt.content).toEqual([{ type: "text", text: "second answer" }]);
 			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true }));
 			expect(rewriteEntries).toHaveBeenCalledTimes(1);
-			expect(formatShakeSummary(result)).toContain("replayed from the provider payload and left in place");
+			expect(formatShakeSummary(result)).toContain(
+				"1 thinking block was kept because removing it would not change what the model receives",
+			);
 
 			const sessionFile = sessionManager.getSessionFile();
 			if (!sessionFile) throw new Error("Expected persisted shake session");
@@ -902,8 +913,16 @@ describe("AgentSession shake", () => {
 					.flatMap(entry =>
 						entry.type === "message" && entry.message.role === "assistant" ? [entry.message] : [],
 					);
-				const keptTurn = assistants.find(message => message.providerPayload?.type === "openaiResponsesHistory");
-				expect(keptTurn?.content.map(block => block.type)).toEqual(["thinking", "text"]);
+				const keptTurn = assistants.find(message => message.content.some(block => block.type === "thinking"));
+				if (!keptTurn) throw new Error("Expected the kept thinking turn to persist");
+				expect(keptTurn.model).toBe(model.id);
+				const payload = keptTurn.providerPayload;
+				if (payload?.type !== "openaiResponsesHistory") throw new Error("Expected the native payload to persist");
+				// The reasoning item and its answer item are still exactly what the
+				// request replays, so the kept turn stays a complete native turn.
+				expect(payload.items).toEqual(items);
+				const droppedTurn = assistants.find(message => message.model === "z-ai/glm-4.6");
+				expect(droppedTurn?.content.map(block => block.type)).toEqual(["text"]);
 			} finally {
 				await persisted.close();
 			}

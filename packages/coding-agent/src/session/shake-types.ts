@@ -39,9 +39,9 @@ export function formatShakeSummary(result: ShakeResult): string {
 		const dropped = result.thinkingBlocksDropped ?? 0;
 		const kept = result.thinkingBlocksKept ?? 0;
 		if (dropped === 0 && kept === 0) return "No thinking blocks found in this session.";
-		const keptText = `${kept} thinking block${kept === 1 ? "" : "s"} ${
-			kept === 1 ? "is" : "are"
-		} replayed from the provider payload and left in place`;
+		const keptText = `${kept} thinking block${kept === 1 ? "" : "s"} ${kept === 1 ? "was" : "were"} kept because removing ${
+			kept === 1 ? "it" : "them"
+		} would not change what the model receives`;
 		if (dropped === 0) return `${keptText}.`;
 		const droppedText = `Dropped ${dropped} thinking block${dropped === 1 ? "" : "s"} from this session${result.tokensFreed > 0 ? ` (~${result.tokensFreed} tokens freed)` : ""}`;
 		return kept === 0 ? `${droppedText}.` : `${droppedText}; ${keptText}.`;

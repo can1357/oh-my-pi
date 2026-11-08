@@ -2196,8 +2196,10 @@ export class CommandController {
 
 	/**
 	 * TUI handler for `/shake`. `elide` drops heavy structural content,
-	 * `images` strips image blocks, and `thinking` drops all thinking blocks.
-	 * Rebuilds the chat and reports counts.
+	 * `images` strips image blocks, and `thinking` drops the thinking blocks the
+	 * request rebuilds from them, keeping the turns it replays natively (they
+	 * are reported as kept and the transcript is left alone). Rebuilds the chat
+	 * and reports counts.
 	 */
 	async handleShakeCommand(mode: ShakeMode): Promise<void> {
 		let result: ShakeResult;

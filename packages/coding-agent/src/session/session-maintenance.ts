@@ -934,7 +934,12 @@ export class SessionMaintenance {
 	 * Surgically reduce context by dropping heavy content ("shake").
 	 *
 	 * - `images` delegates to {@link dropImages}.
-	 * - `thinking` removes assistant reasoning blocks without replacement text.
+	 * - `thinking` removes assistant reasoning blocks without replacement text
+	 *   and credits their tokens. A turn whose native payload the request
+	 *   replays is left untouched instead: those blocks are not on the wire, so
+	 *   removing them would change nothing the model receives and would credit
+	 *   tokens that stay billed. Kept blocks are reported through
+	 *   {@link ShakeResult.thinkingBlocksKept}.
 	 * - `elide` replaces whole tool-call results and large fenced/XML blocks
 	 *   with short placeholders that embed an `artifact://` recovery link.
 	 *
@@ -942,7 +947,8 @@ export class SessionMaintenance {
 	 * rebuilt context through the agent, and tears down provider sessions that
 	 * cache message identity — same rewrite contract as {@link dropImages}.
 	 *
-	 * No-op (zero counts) when nothing is eligible.
+	 * No-op (zero counts) when nothing is eligible, and a `thinking` run whose
+	 * every turn is replayed returns without rewriting anything at all.
 	 */
 	async shake(
 		mode: ShakeMode,
