@@ -2100,10 +2100,13 @@ export class ProcessTerminal implements Terminal {
 			this.#safeWrite("\x1b[?9001h");
 			this.#win32InputDecoder = new Win32InputModeDecoder();
 			// The normalizer's expiry already spent the ESC wait; release the decoder's hold
-			// at once instead of starting a second window.
+			// at once instead of starting a second window. A held string keeps its own
+			// longer timer: releasing it here would type the rest of it as text.
 			this.#win32PasteNormalizer = new Win32PasteMarkerNormalizer(
 				data => this.#stdinBuffer?.process(data),
-				() => this.#releaseWin32PendingSequence(),
+				() => {
+					if (!this.#win32InputDecoder?.hasPendingString) this.#releaseWin32PendingSequence();
+				},
 			);
 			// A WSL pty is not always relayed by a console host (tmux, VS Code
 			// Remote-WSL, WSLg terminals). Those ignore 9001 and keep sending plain

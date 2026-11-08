@@ -156,6 +156,12 @@ describe("Win32InputModeDecoder", () => {
 		expect(relay('{"a":1}\x07').flatMap(record => decoder.decode(record)!)).toEqual(['\x1b]877;tsp;e;{"a":1}\x07']);
 		expect(decoder.hasPendingString).toBe(false);
 
+		// A bare introducer may still be an Alt chord (Alt+], Alt+P, Alt+_).
+		for (const record of relay("\x1b]")) decoder.decode(record);
+		expect(decoder.hasPendingSequence).toBe(true);
+		expect(decoder.hasPendingString).toBe(false);
+		decoder.flushPendingSequence();
+
 		// A lone ESC or a CSI prefix is not a string: it keeps the short Escape timeout.
 		decoder.decode(relay("\x1b")[0]!);
 		expect(decoder.hasPendingString).toBe(false);
@@ -288,6 +294,43 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		await harness.feed("\x1b[65;30;97;1;0;1_");
 
 		expect(recorder.received).toEqual(["a"]);
+	});
+
+	it("keeps a relayed TSP event out of the composer when a stdin read splits one of its records", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		// The paste-marker normalizer holds the torn record for its own 75 ms window, then
+		// hands it to StdinBuffer; its expiry must not release the held string head.
+		// `feed` itself elapses 67 ms, so the extra 20 ms lands between the two expiries.
+		const relay = (text: string) => [...text].map(char => `\x1b[0;0;${char.charCodeAt(0)};1;0;1_`);
+		const event = relay('\x1b]877;tsp;ack;{"sf":"s:1","s":12}\x07');
+		const torn = event[20]!;
+		await harness.feed(...event.slice(0, 20), torn.slice(0, 6));
+		vi.advanceTimersByTime(20);
+		await harness.feed(torn.slice(6), ...event.slice(21));
+		await harness.feed("\x1b[65;30;97;1;0;1_");
+
+		expect(recorder.received).toEqual(["a"]);
+	});
+
+	it("keeps the short Escape wait for a relayed two-byte Alt chord head", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		// `ESC ]` alone is also Alt+]; it must not wait the multi-second string timeout.
+		await harness.feed("\x1b[0;0;27;1;0;1_", "\x1b[0;0;93;1;0;1_");
+		expect(recorder.received).toEqual([]);
+		vi.advanceTimersByTime(100);
+		expect(recorder.received).toEqual(["\x1b]"]);
 	});
 
 	it("prefers a late kitty reply and turns win32-input-mode back off", async () => {
