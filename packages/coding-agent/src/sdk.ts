@@ -163,6 +163,7 @@ import {
 	shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
 import { parseMCPToolName } from "@oh-my-pi/pi-tui/tools/mcp";
+import { mapPromptArguments } from "./mcp/prompt-args";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
@@ -1670,13 +1671,7 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 					name: commandName,
 					description: prompt.description ?? `MCP prompt from ${serverName}`,
 					async execute(args: string[]) {
-						const promptArgs: Record<string, string> = {};
-						for (const arg of args) {
-							const eqIdx = arg.indexOf("=");
-							if (eqIdx > 0) {
-								promptArgs[arg.slice(0, eqIdx)] = arg.slice(eqIdx + 1);
-							}
-						}
+						const promptArgs = mapPromptArguments(prompt.arguments, args);
 						const result = await manager.executePrompt(serverName, prompt.name, promptArgs);
 						if (!result) return "";
 						const parts: string[] = [];
