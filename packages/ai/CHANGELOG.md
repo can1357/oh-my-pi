@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.2] - 2026-11-08
+
 ### Added
 
 - Exposed Codex subscription-account usage-credit balances as exact decimal strings in normalized usage reports, broker/gateway `/v1/usage`, and `omp usage --json` ([#14795](https://github.com/can1357/oh-my-pi/pull/14795) by [@schickling-assistant](https://github.com/schickling-assistant))

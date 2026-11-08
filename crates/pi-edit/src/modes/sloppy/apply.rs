@@ -1,11 +1,12 @@
 //! Sloppy matching and application: pattern parsing, candidate location,
 //! rewrite planning, overlap reconciliation and sequencing, echo recovery, and
-//! the atomic apply.
+//! the per-operation apply.
 //!
 //! Port of `packages/coding-agent/src/edit/sloppy.ts` lines 1651–4258.
 
 use std::{
 	borrow::Cow,
+	cell::OnceCell,
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
 	iter,
 	path::Path,
@@ -17,8 +18,8 @@ use super::{
 		operation_payload, parse_section,
 	},
 	types::{
-		ATOMICITY_NOTICE, Candidate, CandidateResult, EdgeGaps, LiteralFallback, MAX_CANDIDATES,
-		MAX_COMBINATIONS, NormalizedText, Occurrence, Operation, OperationRewrite, ParsedPattern,
+		Candidate, CandidateResult, EdgeGaps, LiteralFallback, MAX_CANDIDATES, MAX_COMBINATIONS,
+		NormalizedText, Occurrence, Operation, OperationRewrite, PARSE_FAILURE_NOTICE, ParsedPattern,
 		PatternToken, Placement, PlannedEdit, SelectionPair,
 		markers::{GAP, SELECT_CLOSE, SELECT_DIVIDER, SELECT_OPEN},
 	},
@@ -919,7 +920,6 @@ fn no_match_error(
 	operation: &Operation,
 	operation_number: usize,
 	path: &str,
-	standalone: bool,
 ) -> EditError {
 	let normalized = normalize_text(content);
 	let (literal, needle) =
@@ -960,22 +960,17 @@ fn no_match_error(
 	} else {
 		String::new()
 	};
-	let correction =
-		if occurrences.is_empty() && closest.2 < 0.35 && !closest.0.is_empty() && standalone {
-			let corrected = operation.pattern_text.replacen(literal, &closest.0, 1);
-			format!(
-				"Copy-ready corrected operation:\n{}",
-				operation_payload(operation, path, operation.all, Some(&corrected))
-			)
-		} else if standalone {
-			"No copy-ready correction — the closest current text is only a fuzzy match. Re-read the \
-			 region above and rebuild *** Find from the exact current text."
-				.to_owned()
-		} else {
-			"No copy-ready correction — retrying this operation alone would drop sibling operations. \
-			 Rebuild it inside the full payload."
-				.to_owned()
-		};
+	let correction = if occurrences.is_empty() && closest.2 < 0.35 && !closest.0.is_empty() {
+		let corrected = operation.pattern_text.replacen(literal, &closest.0, 1);
+		format!(
+			"Copy-ready corrected operation:\n{}",
+			operation_payload(operation, path, operation.all, Some(&corrected))
+		)
+	} else {
+		"No copy-ready correction — the closest current text is only a fuzzy match. Re-read the \
+		 region above and rebuild *** Find from the exact current text."
+			.to_owned()
+	};
 	EditError::matched(format!(
 		"{first}{missing}\nCurrent file content near the closest match (no re-read \
 		 needed):\n{}\n{correction}",
@@ -1092,7 +1087,6 @@ pub(crate) fn locate(
 	operation_number: usize,
 	path: &str,
 	exclusions: &[(usize, usize)],
-	standalone_operation: bool,
 ) -> Result<Vec<Candidate>, EditError> {
 	let normalized = normalize_text(content);
 	let raw = collect_candidates(content, &normalized, pattern, MatchMode::Raw, false);
@@ -1191,14 +1185,7 @@ pub(crate) fn locate(
 		return Ok(candidates);
 	}
 	if candidates.is_empty() {
-		return Err(no_match_error(
-			content,
-			pattern,
-			operation,
-			operation_number,
-			path,
-			standalone_operation,
-		));
+		return Err(no_match_error(content, pattern, operation, operation_number, path));
 	}
 	if candidates.len() <= 4
 		&& !operation.desired_state
@@ -2060,10 +2047,9 @@ fn locate_with_recovery(
 	number: usize,
 	path: &str,
 	exclusions: &[(usize, usize)],
-	standalone: bool,
 ) -> Result<(Operation, ParsedPattern, Vec<Candidate>), EditError> {
 	let pattern = parse_pattern(&operation.pattern_text, number)?;
-	match locate(content, &pattern, operation, number, path, exclusions, standalone) {
+	match locate(content, &pattern, operation, number, path, exclusions) {
 		Ok(candidates) => {
 			let mut resolved = operation.clone();
 			if has_marker_lines(&operation.source_pattern_text) {
@@ -2087,8 +2073,7 @@ fn locate_with_recovery(
 				};
 				let mut recovered = operation.clone();
 				recovered.pattern_text = candidate;
-				if let Ok(candidates) =
-					locate(content, &pattern, &recovered, number, path, exclusions, standalone)
+				if let Ok(candidates) = locate(content, &pattern, &recovered, number, path, exclusions)
 				{
 					return Ok((recovered, pattern, candidates));
 				}
@@ -2097,9 +2082,7 @@ fn locate_with_recovery(
 				let Ok(pattern) = parse_pattern(&variant.pattern_text, number) else {
 					continue;
 				};
-				if let Ok(candidates) =
-					locate(content, &pattern, &variant, number, path, exclusions, standalone)
-				{
+				if let Ok(candidates) = locate(content, &pattern, &variant, number, path, exclusions) {
 					let partial_run = candidates.iter().any(|candidate| {
 						candidate.selection_spans.iter().any(|(start, end)| {
 							if start >= end {
@@ -2223,33 +2206,55 @@ fn resolve_references(rewrite: &str, removed: &[Option<String>]) -> Result<Strin
 	Ok(lines.join("\n"))
 }
 
+/// Records one apply's no-op in the store at most once, however many of its
+/// operations are rejected as no-ops, so a payload never counts as a repeat
+/// of itself.
+struct NoopTally<'a> {
+	store:     &'a EditStore,
+	canonical: &'a Path,
+	payload:   u64,
+	recorded:  OnceCell<(u32, bool)>,
+}
+
+impl<'a> NoopTally<'a> {
+	const fn new(store: &'a EditStore, canonical: &'a Path, payload: u64) -> Self {
+		Self { store, canonical, payload, recorded: OnceCell::new() }
+	}
+
+	/// How often this payload has been a no-op in a row, and whether that
+	/// reached the escalation limit.
+	fn record(&self) -> (u32, bool) {
+		*self
+			.recorded
+			.get_or_init(|| self.store.record_noop(self.canonical, self.payload))
+	}
+}
+
 fn no_op_error(
-	context: &ApplyContext<'_>,
-	payload: u64,
+	path: &str,
+	noop: &NoopTally<'_>,
 	operation: Option<usize>,
 	preview: Option<(&str, usize)>,
 	match_count: Option<usize>,
 	hint: Option<&str>,
 ) -> EditError {
-	let (count, escalated) = context.store.record_noop(context.canonical, payload);
+	let (count, escalated) = noop.record();
 	let base = if escalated {
 		format!(
-			"STOP: identical no-op repeated {count} times for {}. Re-read current code and send a \
-			 changed payload, or move on.",
-			context.path
+			"STOP: identical no-op repeated {count} times for {path}. Re-read current code and send \
+			 a changed payload, or move on."
 		)
 	} else if let Some(operation) = operation {
 		if let Some(matches) = match_count {
 			format!(
 				"Operation {operation} (all) matched {matches} occurrences but all make no change to \
-				 {}.",
-				context.path
+				 {path}."
 			)
 		} else {
-			format!("Operation {operation} makes no change to {}.", context.path)
+			format!("Operation {operation} makes no change to {path}.")
 		}
 	} else {
-		format!("Edits to {} made no change.", context.path)
+		format!("Edits to {path} made no change.")
 	};
 	let grounding = preview.map_or_default(|(content, offset)| {
 		format!(
@@ -2312,27 +2317,24 @@ struct Plan {
 	deletions:  BTreeMap<usize, String>,
 	/// Match start of the last located candidate, for no-op previews.
 	last_match: usize,
+	/// Failures of the operations that did not plan, by operation number.
+	rejected:   Vec<(usize, EditError)>,
 }
 
 /// Locate the operations at `indices` against `content` and plan their edits.
 ///
 /// An ambiguous operation is retried once after the others, excluding the
-/// spans they already claimed.
-///
-/// # Errors
-/// The first operation that fails to locate, render, or change `content`.
-#[allow(
-	clippy::suspicious_operation_groupings,
-	reason = "operation and pattern flags are distinct conditions"
-)]
+/// spans they already claimed. An operation that fails to locate, render, or
+/// change `content` is rejected alone: its edits and advisories are dropped
+/// and planning continues with the next.
 fn plan_operations(
 	content: &str,
 	operations: &[Operation],
 	indices: &[usize],
 	removed: &mut [Option<String>],
-	context: &ApplyContext<'_>,
-	payload: u64,
-) -> Result<Plan, EditError> {
+	path: &str,
+	noop: &NoopTally<'_>,
+) -> Plan {
 	let mut plan = Plan::default();
 	let mut queue = indices.to_vec();
 	let mut retried = HashSet::new();
@@ -2341,9 +2343,6 @@ fn plan_operations(
 		let index = queue[cursor];
 		cursor += 1;
 		let number = index + 1;
-		if let Some(note) = &operations[index].recovery_note {
-			plan.notes.push((number, note.clone()));
-		}
 		let exclusions = if retried.contains(&index) {
 			plan
 				.edits
@@ -2353,117 +2352,209 @@ fn plan_operations(
 		} else {
 			Vec::new()
 		};
-		let located = locate_with_recovery(
-			content,
-			&operations[index],
-			number,
-			context.path,
-			&exclusions,
-			operations.len() == 1,
+		let (operation, pattern, candidates) =
+			match locate_with_recovery(content, &operations[index], number, path, &exclusions) {
+				Ok(value) => value,
+				Err(error)
+					if !retried.contains(&index) && error.to_string().contains(" is ambiguous: ") =>
+				{
+					retried.insert(index);
+					queue.push(index);
+					continue;
+				},
+				Err(error) => {
+					plan.rejected.push((number, error));
+					continue;
+				},
+			};
+		let (edits, notes, last_match) = (plan.edits.len(), plan.notes.len(), plan.last_match);
+		if let Some(note) = &operations[index].recovery_note {
+			plan.notes.push((number, note.clone()));
+		}
+		let planned = plan_operation(
+			content, index, &operation, &pattern, candidates, removed, path, noop, &mut plan,
 		);
-		let (operation, pattern, mut candidates) = match located {
-			Ok(value) => value,
-			Err(error)
-				if !retried.contains(&index) && error.to_string().contains(" is ambiguous: ") =>
-			{
-				retried.insert(index);
-				queue.push(index);
-				continue;
-			},
-			Err(error) => return Err(error),
-		};
-		if operation.whitespace_matched {
-			plan.notes.push((
-				number,
-				format!(
-					"Note: operation {number}'s *** Find differed from the file in whitespace only and \
-					 was matched leniently. Inserted lines are written exactly as authored — verify \
-					 their indentation."
-				),
-			));
+		if let Err(error) = planned {
+			plan.edits.truncate(edits);
+			plan.notes.truncate(notes);
+			plan.last_match = last_match;
+			plan.deletions.remove(&number);
+			removed[index] = None;
+			plan.rejected.push((number, error));
 		}
-		if operation.all {
-			candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.start));
-		}
-		match &operation.rewrite {
-			OperationRewrite::Insert { text, at } => {
-				let body = text.strip_suffix('\n').unwrap_or(text);
-				for candidate in &candidates {
-					let (offset, replacement) = match at {
-						// Insert at the first anchor line's start, ahead of its
-						// indentation.
-						Placement::Before => {
-							let start = candidate.match_start;
-							let offset = content[..start].rfind('\n').map_or(0, |at| at + 1);
-							(offset, format!("{body}\n"))
-						},
-						// Insert before the final anchor line's newline, retaining
-						// its EOF convention.
-						Placement::After => {
-							let end = candidate.match_end;
-							let offset = if end > 0 && content.as_bytes()[end - 1] == b'\n' {
-								end - 1
-							} else {
-								content[end..]
-									.find('\n')
-									.map_or(content.len(), |at| end + at)
-							};
-							(offset, format!("\n{body}"))
-						},
-					};
+	}
+	plan
+}
+
+/// Plan the edits of the located operation at `index` into `plan`.
+///
+/// # Errors
+/// The operation fails to render or leaves `content` unchanged; `plan` may
+/// then hold part of its edits, which the caller drops.
+#[allow(
+	clippy::suspicious_operation_groupings,
+	reason = "operation and pattern flags are distinct conditions"
+)]
+fn plan_operation(
+	content: &str,
+	index: usize,
+	operation: &Operation,
+	pattern: &ParsedPattern,
+	mut candidates: Vec<Candidate>,
+	removed: &mut [Option<String>],
+	path: &str,
+	noop: &NoopTally<'_>,
+	plan: &mut Plan,
+) -> Result<(), EditError> {
+	let number = index + 1;
+	if operation.whitespace_matched {
+		plan.notes.push((
+			number,
+			format!(
+				"Note: operation {number}'s *** Find differed from the file in whitespace only and \
+				 was matched leniently. Inserted lines are written exactly as authored — verify their \
+				 indentation."
+			),
+		));
+	}
+	if operation.all {
+		candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.start));
+	}
+	match &operation.rewrite {
+		OperationRewrite::Insert { text, at } => {
+			let body = text.strip_suffix('\n').unwrap_or(text);
+			for candidate in &candidates {
+				let (offset, replacement) = match at {
+					// Insert at the first anchor line's start, ahead of its
+					// indentation.
+					Placement::Before => {
+						let start = candidate.match_start;
+						let offset = content[..start].rfind('\n').map_or(0, |at| at + 1);
+						(offset, format!("{body}\n"))
+					},
+					// Insert before the final anchor line's newline, retaining
+					// its EOF convention.
+					Placement::After => {
+						let end = candidate.match_end;
+						let offset = if end > 0 && content.as_bytes()[end - 1] == b'\n' {
+							end - 1
+						} else {
+							content[end..]
+								.find('\n')
+								.map_or(content.len(), |at| end + at)
+						};
+						(offset, format!("\n{body}"))
+					},
+				};
+				plan.edits.push(PlannedEdit {
+					start: offset,
+					end: offset,
+					replacement,
+					operation_number: number,
+				});
+				plan.last_match = candidate.match_start;
+			}
+		},
+		OperationRewrite::Inline { replacements } => {
+			let replacements = replacements
+				.iter()
+				.map(|rewrite| resolve_references(rewrite, removed))
+				.collect::<Result<Vec<_>, _>>()?;
+			if pattern.selection_pairs.len() != replacements.len() {
+				return Err(EditError::matched(format!(
+					"Operation {number} inline replacements do not align with its selections."
+				)));
+			}
+			let mut changes = 0;
+			for candidate in &candidates {
+				let mut selections = candidate
+					.selection_spans
+					.iter()
+					.copied()
+					.enumerate()
+					.collect::<Vec<_>>();
+				selections.sort_by_key(|(_, (start, _))| std::cmp::Reverse(*start));
+				for (selection_index, span) in selections {
+					let pair = &pattern.selection_pairs[selection_index];
+					let (prepared, replacement, deleted) = prepare_inline(
+						content,
+						candidate,
+						span,
+						pair,
+						&replacements[selection_index],
+						selection_edges(pattern, candidate, pair),
+						number,
+						operation.whitespace_matched,
+					)?;
+					if content[prepared.start..prepared.end] == replacement {
+						continue;
+					}
+					if candidates.len() == 1
+						&& pattern.selection_pairs.len() == 1
+						&& let Some(deleted) = deleted
+					{
+						removed[index] = Some(deleted);
+					}
 					plan.edits.push(PlannedEdit {
-						start: offset,
-						end: offset,
+						start: prepared.start,
+						end: prepared.end,
 						replacement,
 						operation_number: number,
 					});
-					plan.last_match = candidate.match_start;
+					changes += 1;
 				}
-			},
-			OperationRewrite::Inline { replacements } => {
-				let replacements = replacements
-					.iter()
-					.map(|rewrite| resolve_references(rewrite, removed))
-					.collect::<Result<Vec<_>, _>>()?;
-				if pattern.selection_pairs.len() != replacements.len() {
-					return Err(EditError::matched(format!(
-						"Operation {number} inline replacements do not align with its selections."
-					)));
+				plan.last_match = candidate.match_start;
+			}
+			if changes == 0 {
+				return Err(no_op_error(
+					path,
+					noop,
+					Some(number),
+					Some((content, candidates[0].match_start)),
+					operation.all.then_some(candidates.len()),
+					Some(
+						"The stated text equals the current text and never changes the file. Restate \
+						 the edit with the actual change; do not drop the operation.",
+					),
+				));
+			}
+		},
+		OperationRewrite::Explicit { text } => {
+			let resolved = resolve_references(text, removed)?;
+			let base = if resolved.trim().is_empty() {
+				if pattern.insertion {
+					"\n".to_owned()
+				} else {
+					String::new()
 				}
+			} else {
+				resolved
+			};
+			if pattern.selection_ranges.len() > 1
+				&& let Some(segments) = positional_rewrite_segments(
+					&base,
+					pattern.selection_ranges.len(),
+					pattern
+						.tokens
+						.iter()
+						.any(|token| matches!(token, PatternToken::Gap { .. })),
+				) {
 				let mut changes = 0;
 				for candidate in &candidates {
-					let mut selections = candidate
+					for ((start, end), replacement) in candidate
 						.selection_spans
 						.iter()
 						.copied()
-						.enumerate()
-						.collect::<Vec<_>>();
-					selections.sort_by_key(|(_, (start, _))| std::cmp::Reverse(*start));
-					for (selection_index, span) in selections {
-						let pair = &pattern.selection_pairs[selection_index];
-						let (prepared, replacement, deleted) = prepare_inline(
-							content,
-							candidate,
-							span,
-							pair,
-							&replacements[selection_index],
-							selection_edges(&pattern, candidate, pair),
-							number,
-							operation.whitespace_matched,
-						)?;
-						if content[prepared.start..prepared.end] == replacement {
+						.zip(&segments)
+						.rev()
+					{
+						if content[start..end] == *replacement {
 							continue;
 						}
-						if candidates.len() == 1
-							&& pattern.selection_pairs.len() == 1
-							&& let Some(deleted) = deleted
-						{
-							removed[index] = Some(deleted);
-						}
 						plan.edits.push(PlannedEdit {
-							start: prepared.start,
-							end: prepared.end,
-							replacement,
+							start,
+							end,
+							replacement: replacement.clone(),
 							operation_number: number,
 						});
 						changes += 1;
@@ -2472,232 +2563,174 @@ fn plan_operations(
 				}
 				if changes == 0 {
 					return Err(no_op_error(
-						context,
-						payload,
+						path,
+						noop,
 						Some(number),
 						Some((content, candidates[0].match_start)),
 						operation.all.then_some(candidates.len()),
-						Some(
-							"The stated text equals the current text and never changes the file. Restate \
-							 the edit with the actual change; do not drop the operation.",
-						),
-					));
-				}
-			},
-			OperationRewrite::Explicit { text } => {
-				let resolved = resolve_references(text, removed)?;
-				let base = if resolved.trim().is_empty() {
-					if pattern.insertion {
-						"\n".to_owned()
-					} else {
-						String::new()
-					}
-				} else {
-					resolved
-				};
-				if pattern.selection_ranges.len() > 1
-					&& let Some(segments) = positional_rewrite_segments(
-						&base,
-						pattern.selection_ranges.len(),
-						pattern
-							.tokens
-							.iter()
-							.any(|token| matches!(token, PatternToken::Gap { .. })),
-					) {
-					let mut changes = 0;
-					for candidate in &candidates {
-						for ((start, end), replacement) in candidate
-							.selection_spans
-							.iter()
-							.copied()
-							.zip(&segments)
-							.rev()
-						{
-							if content[start..end] == *replacement {
-								continue;
-							}
-							plan.edits.push(PlannedEdit {
-								start,
-								end,
-								replacement: replacement.clone(),
-								operation_number: number,
-							});
-							changes += 1;
-						}
-						plan.last_match = candidate.match_start;
-					}
-					if changes == 0 {
-						return Err(no_op_error(
-							context,
-							payload,
-							Some(number),
-							Some((content, candidates[0].match_start)),
-							operation.all.then_some(candidates.len()),
-							None,
-						));
-					}
-					continue;
-				}
-				if pattern.selection_ranges.len() > 1
-					&& !candidates
-						.iter()
-						.all(|candidate| rewrite_proves_whole_span(content, candidate, &base))
-				{
-					let one_line = base.split_whitespace().collect::<Vec<_>>().join(" ");
-					let repeated = vec![one_line; pattern.selection_ranges.len()];
-					let header = edit_header(context.path, operation.all);
-					let candidate = &candidates[0];
-					return Err(EditError::matched(
-						[
-							format!(
-								"Operation {number} has {} selections, but *** Replace proves neither \
-								 positional substitution nor whole-span replacement.",
-								pattern.selection_ranges.len()
-							),
-							"Copy-ready per-selection interpretation:".to_owned(),
-							format!(
-								"{header}\n*** Find\n{}\n*** Replace\n{}",
-								operation.pattern_text,
-								repeated.join("\n")
-							),
-							"Copy-ready whole-span interpretation:".to_owned(),
-							format!(
-								"{header}\n*** Find\n{}\n*** Replace\n{}",
-								operation.pattern_text,
-								rewrite_selection_spans(content, candidate, &repeated)
-							),
-						]
-						.join("\n"),
-					));
-				}
-				let mut changes = 0;
-				for located in &candidates {
-					let mut candidate = located.clone();
-					if operation.whitespace_matched
-						&& pattern.line_insertion
-						&& candidate.start == candidate.end
-					{
-						let snapped =
-							snap_line_insertion_offset(content, candidate.start, !base.starts_with('\n'));
-						candidate.start = snapped;
-						candidate.end = snapped;
-					}
-					let rewrite = if pattern.line_insertion {
-						frame_line_insertion(content, candidate.start, &base, false)
-					} else {
-						base.clone()
-					};
-					let rendered = render_rewrite(
-						&rewrite,
-						if candidate.captures.is_empty() {
-							&[]
-						} else {
-							&pattern.selected_capture_indices
-						},
-						&candidate.captures,
-						if candidate.literal_gaps {
-							EdgeGaps::default()
-						} else {
-							pattern.edge_gaps
-						},
-						number,
-					)?;
-					let replacement = align_boundary_echoes(content, &candidate, &rendered);
-					let deleted = replacement
-						.is_empty()
-						.then(|| content[candidate.start..candidate.end].to_owned());
-					if deleted.is_some() {
-						candidate = expand_full_line_deletion(content, &candidate);
-					}
-					if candidates.len() == 1
-						&& let Some(deleted) = &deleted
-					{
-						removed[index] = Some(deleted.clone());
-					}
-					if let Some(deleted) = deleted {
-						let lines = deleted
-							.lines()
-							.filter(|line| !line.trim().is_empty())
-							.count();
-						plan.deletions.insert(
-							number,
-							if operation.assumed_deletion {
-								format!(
-									"Note: operation {number} had no *** Replace and was applied as a move \
-									 deletion (a later operation re-emits its block)."
-								)
-							} else {
-								format!(
-									"Note: operation {number} deleted {lines} line(s); an empty *** \
-									 Replace means deletion — resend with the final text if you meant to \
-									 replace."
-								)
-							},
-						);
-					}
-					plan.last_match = candidate.match_start;
-					let same = content[candidate.start..candidate.end] == replacement
-						|| operation.desired_state
-							&& normalize_text(&replacement).text
-								== normalize_text(&content[candidate.start..candidate.end]).text;
-					if same {
-						if operation.all {
-							continue;
-						}
-						if let Some((start, end)) =
-							duplicate_collapse_span(content, &candidate, &replacement)
-						{
-							plan.edits.push(PlannedEdit {
-								start,
-								end,
-								replacement,
-								operation_number: number,
-							});
-							changes += 1;
-							continue;
-						}
-						if operation.desired_state {
-							plan.notes.push((
-								number,
-								format!(
-									"Note: operation {number} already matches the file; no change was \
-									 needed there."
-								),
-							));
-							changes += 1;
-							continue;
-						}
-						return Err(no_op_error(
-							context,
-							payload,
-							Some(number),
-							Some((content, candidate.match_start)),
-							None,
-							None,
-						));
-					}
-					plan.edits.push(PlannedEdit {
-						start: candidate.start,
-						end: candidate.end,
-						replacement,
-						operation_number: number,
-					});
-					changes += 1;
-				}
-				if operation.all && changes == 0 {
-					return Err(no_op_error(
-						context,
-						payload,
-						Some(number),
-						Some((content, candidates[0].match_start)),
-						Some(candidates.len()),
 						None,
 					));
 				}
-			},
-		}
+				return Ok(());
+			}
+			if pattern.selection_ranges.len() > 1
+				&& !candidates
+					.iter()
+					.all(|candidate| rewrite_proves_whole_span(content, candidate, &base))
+			{
+				let one_line = base.split_whitespace().collect::<Vec<_>>().join(" ");
+				let repeated = vec![one_line; pattern.selection_ranges.len()];
+				let header = edit_header(path, operation.all);
+				let candidate = &candidates[0];
+				return Err(EditError::matched(
+					[
+						format!(
+							"Operation {number} has {} selections, but *** Replace proves neither \
+							 positional substitution nor whole-span replacement.",
+							pattern.selection_ranges.len()
+						),
+						"Copy-ready per-selection interpretation:".to_owned(),
+						format!(
+							"{header}\n*** Find\n{}\n*** Replace\n{}",
+							operation.pattern_text,
+							repeated.join("\n")
+						),
+						"Copy-ready whole-span interpretation:".to_owned(),
+						format!(
+							"{header}\n*** Find\n{}\n*** Replace\n{}",
+							operation.pattern_text,
+							rewrite_selection_spans(content, candidate, &repeated)
+						),
+					]
+					.join("\n"),
+				));
+			}
+			let mut changes = 0;
+			for located in &candidates {
+				let mut candidate = located.clone();
+				if operation.whitespace_matched
+					&& pattern.line_insertion
+					&& candidate.start == candidate.end
+				{
+					let snapped =
+						snap_line_insertion_offset(content, candidate.start, !base.starts_with('\n'));
+					candidate.start = snapped;
+					candidate.end = snapped;
+				}
+				let rewrite = if pattern.line_insertion {
+					frame_line_insertion(content, candidate.start, &base, false)
+				} else {
+					base.clone()
+				};
+				let rendered = render_rewrite(
+					&rewrite,
+					if candidate.captures.is_empty() {
+						&[]
+					} else {
+						&pattern.selected_capture_indices
+					},
+					&candidate.captures,
+					if candidate.literal_gaps {
+						EdgeGaps::default()
+					} else {
+						pattern.edge_gaps
+					},
+					number,
+				)?;
+				let replacement = align_boundary_echoes(content, &candidate, &rendered);
+				let deleted = replacement
+					.is_empty()
+					.then(|| content[candidate.start..candidate.end].to_owned());
+				if deleted.is_some() {
+					candidate = expand_full_line_deletion(content, &candidate);
+				}
+				if candidates.len() == 1
+					&& let Some(deleted) = &deleted
+				{
+					removed[index] = Some(deleted.clone());
+				}
+				if let Some(deleted) = deleted {
+					let lines = deleted
+						.lines()
+						.filter(|line| !line.trim().is_empty())
+						.count();
+					plan.deletions.insert(
+						number,
+						if operation.assumed_deletion {
+							format!(
+								"Note: operation {number} had no *** Replace and was applied as a move \
+								 deletion (a later operation re-emits its block)."
+							)
+						} else {
+							format!(
+								"Note: operation {number} deleted {lines} line(s); an empty *** Replace \
+								 means deletion — resend with the final text if you meant to replace."
+							)
+						},
+					);
+				}
+				plan.last_match = candidate.match_start;
+				let same = content[candidate.start..candidate.end] == replacement
+					|| operation.desired_state
+						&& normalize_text(&replacement).text
+							== normalize_text(&content[candidate.start..candidate.end]).text;
+				if same {
+					if operation.all {
+						continue;
+					}
+					if let Some((start, end)) =
+						duplicate_collapse_span(content, &candidate, &replacement)
+					{
+						plan.edits.push(PlannedEdit {
+							start,
+							end,
+							replacement,
+							operation_number: number,
+						});
+						changes += 1;
+						continue;
+					}
+					if operation.desired_state {
+						plan.notes.push((
+							number,
+							format!(
+								"Note: operation {number} already matches the file; no change was needed \
+								 there."
+							),
+						));
+						changes += 1;
+						continue;
+					}
+					return Err(no_op_error(
+						path,
+						noop,
+						Some(number),
+						Some((content, candidate.match_start)),
+						None,
+						None,
+					));
+				}
+				plan.edits.push(PlannedEdit {
+					start: candidate.start,
+					end: candidate.end,
+					replacement,
+					operation_number: number,
+				});
+				changes += 1;
+			}
+			if operation.all && changes == 0 {
+				return Err(no_op_error(
+					path,
+					noop,
+					Some(number),
+					Some((content, candidates[0].match_start)),
+					Some(candidates.len()),
+					None,
+				));
+			}
+		},
 	}
-	Ok(plan)
+	Ok(())
 }
 
 /// Merge position-sorted `edits` into disjoint splices, skipping operations
@@ -2743,7 +2776,7 @@ fn merge_edits<'a>(
 
 /// Rewrite `error`'s message, keeping its rejection reason; every other
 /// variant becomes a match failure.
-fn remessage(error: EditError, rewrite: impl FnOnce(String) -> String) -> EditError {
+pub(super) fn remessage(error: EditError, rewrite: impl FnOnce(String) -> String) -> EditError {
 	let reason = match &error {
 		EditError::Rejected { reason, .. } => Some(*reason),
 		_ => None,
@@ -2755,18 +2788,49 @@ fn remessage(error: EditError, rewrite: impl FnOnce(String) -> String) -> EditEr
 	}
 }
 
-/// Locate every operation against `content` and splice the edits in one pass.
+/// Join `failures` with blank lines, dropping repeats and keeping the first's
+/// class; `None` when there are none.
+pub(super) fn join_failures(failures: impl IntoIterator<Item = EditError>) -> Option<EditError> {
+	let mut failures = failures.into_iter();
+	let first = failures.next()?;
+	let mut messages = vec![first.to_string()];
+	for failure in failures {
+		let message = failure.to_string();
+		if !messages.contains(&message) {
+			messages.push(message);
+		}
+	}
+	Some(remessage(first, |_| messages.join("\n\n")))
+}
+
+/// One section's outcome once every operation that locates has applied.
+#[derive(Debug)]
+pub enum Applied {
+	/// The text changed; `rejected` reports the operations that did not apply.
+	Changed { text: String, rejected: Option<EditError> },
+	/// Nothing changed: every operation was rejected, or the applied ones left
+	/// the text as it was.
+	Unchanged(EditError),
+}
+
+/// Locate every operation against `content` and splice the edits of those
+/// that apply.
 ///
 /// An operation whose edits overlap an earlier operation's without
 /// reconciling is withheld and located again in that pass's result, so
-/// overlapping operations apply consecutively in operation order.
+/// overlapping operations apply consecutively in operation order. A failing
+/// operation is rejected alone; once others changed the text, it is located
+/// again in the final text so its failure quotes the file as written.
+///
+/// # Errors
+/// The section does not parse.
 fn apply_operations(
 	content: &str,
 	input: &str,
 	context: &mut ApplyContext<'_>,
-) -> Result<String, EditError> {
-	let payload = payload_hash(input);
+) -> Result<Applied, EditError> {
 	let operations = parse_section(input, content, context.path, context.streaming)?;
+	let noop = NoopTally::new(context.store, context.canonical, payload_hash(input));
 	let overlap_note = |later: usize, earlier: usize| {
 		format!(
 			"Note: operation {later} overlaps operation {earlier}, so it was located in the file as \
@@ -2777,26 +2841,24 @@ fn apply_operations(
 	let mut text = content.to_owned();
 	let mut notes = Vec::new();
 	let mut deletions = BTreeMap::new();
+	let mut rejected = BTreeMap::new();
 	let mut last_match = None;
 	let mut pending = (0..operations.len()).collect::<Vec<_>>();
 	// Operation number withheld from the previous pass → the earlier
 	// operation it overlapped.
 	let mut overlapped = BTreeMap::<usize, usize>::new();
 	while !pending.is_empty() {
-		let mut plan = plan_operations(&text, &operations, &pending, &mut removed, context, payload)
-			.map_err(|error| {
-				if overlapped.is_empty() {
-					return error;
-				}
-				remessage(error, |message| {
-					let mut preamble = overlapped
-						.iter()
-						.map(|(&later, &earlier)| overlap_note(later, earlier))
-						.collect::<Vec<_>>();
-					preamble.push(message);
-					preamble.join("\n")
-				})
-			})?;
+		let mut plan =
+			plan_operations(&text, &operations, &pending, &mut removed, context.path, &noop);
+		for (number, error) in plan.rejected.drain(..) {
+			let error = match overlapped.get(&number) {
+				Some(&earlier) => {
+					remessage(error, |message| format!("{}\n{message}", overlap_note(number, earlier)))
+				},
+				None => error,
+			};
+			rejected.insert(number, error);
+		}
 		last_match.get_or_insert(plan.last_match);
 		plan.edits.sort_by_key(|edit| (edit.start, edit.end));
 		let mut deferred = BTreeMap::new();
@@ -2829,36 +2891,43 @@ fn apply_operations(
 		overlapped = deferred;
 	}
 	if text == content {
-		return Err(no_op_error(
-			context,
-			payload,
-			None,
-			Some((content, last_match.unwrap_or_default())),
-			None,
-			None,
-		));
+		let error = join_failures(rejected.into_values()).unwrap_or_else(|| {
+			no_op_error(
+				context.path,
+				&noop,
+				None,
+				Some((content, last_match.unwrap_or_default())),
+				None,
+				None,
+			)
+		});
+		return Ok(Applied::Unchanged(error));
 	}
+	// A rejected operation that would now apply keeps the failure it hit.
+	let rejected = join_failures(rejected.into_iter().map(|(number, error)| {
+		plan_operations(&text, &operations, &[number - 1], &mut removed.clone(), context.path, &noop)
+			.rejected
+			.pop()
+			.map_or(error, |(_, error)| error)
+	}));
 	context.store.reset_noop(context.canonical);
 	context
 		.notes
 		.extend(notes.into_iter().map(|(_, note)| note));
 	context.notes.extend(deletions.into_values());
-	Ok(text)
+	Ok(Applied::Changed { text, rejected })
 }
 
-/// Parse, locate, and atomically apply one sloppy section.
+/// Parse one sloppy section and apply every operation that locates; a
+/// failing operation is rejected alone.
+///
+/// # Errors
+/// The section does not parse, so none of its operations may apply.
 pub fn apply_sloppy(
 	content: &str,
 	input: &str,
 	mut context: ApplyContext<'_>,
-) -> Result<String, EditError> {
-	apply_operations(content, input, &mut context).map_err(|error| {
-		remessage(error, |message| {
-			if message.contains(ATOMICITY_NOTICE) {
-				message
-			} else {
-				format!("{ATOMICITY_NOTICE}\n{message}")
-			}
-		})
-	})
+) -> Result<Applied, EditError> {
+	apply_operations(content, input, &mut context)
+		.map_err(|error| remessage(error, |message| format!("{PARSE_FAILURE_NOTICE}\n{message}")))
 }
