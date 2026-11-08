@@ -6,6 +6,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-sto
 import type { UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import type { UsageAdmissionRequest, UsageRouteBinding } from "@oh-my-pi/pi-ai/usage-governor/types";
 import { fingerprintBearer } from "../src/auth/bearer-fingerprint";
+import { CredentialGovernor } from "../src/auth/governor";
 import { fakeStrategy, installFetchTripwire } from "./fixtures/usage-governor/harness";
 
 installFetchTripwire();
@@ -359,14 +360,83 @@ describe("request-local route binding", () => {
 		expect(w.auth.governor.validateRoute!(binding, { ...request, modelId: "different-model" })).toBe(false);
 		// Switching baseUrl
 		expect(w.auth.governor.validateRoute!(binding, { ...request, baseUrl: "https://other.example.com" })).toBe(false);
-		// Missing or different sessionId
+		// Missing or empty sessionId
 		expect(w.auth.governor.validateRoute!(binding, { ...request, context: undefined })).toBe(false);
+		expect(
+			w.auth.governor.validateRoute!(binding, {
+				...request,
+				context: { source: "subagent", sessionId: "" },
+			}),
+		).toBe(false);
+
+		// Reject when other-session has custom session boundaries (restricted or pinned)
+		const lease = w.auth.sessions.restrict(PROVIDER, "other-session", ["account:b"]);
 		expect(
 			w.auth.governor.validateRoute!(binding, {
 				...request,
 				context: { source: "subagent", sessionId: "other-session" },
 			}),
 		).toBe(false);
+		w.auth.sessions.unrestrict(PROVIDER, "other-session", lease);
+
+		expect(w.auth.sessions.pin(PROVIDER, "other-session", b.credentialId)).toBe(true);
+		expect(
+			w.auth.governor.validateRoute!(binding, {
+				...request,
+				context: { source: "subagent", sessionId: "other-session" },
+			}),
+		).toBe(false);
+	});
+	test("missing affinity fails closed and rejects route validation", async () => {
+		const w = await setup();
+		const { a, binding, request } = await w.bind();
+		const gov = new CredentialGovernor({
+			dbPath: path.join(w.dir, "no-affinity.db"),
+			config: { enabled: true, lead: 0.25, interactiveReserve: "hold" },
+			source: () => ({
+				pool: {
+					entries: () => [{ id: a.credentialId, credential: oauth("a") }],
+					isCurrentBearerFingerprint: () => true,
+					providers: () => [PROVIDER],
+				} as any,
+				usage: w.auth.usage,
+				policies: { forCredential: () => undefined, defaultReservePct: 0.1 } as any,
+				affinity: undefined,
+				strategies: () => fakeStrategy,
+				permitsRoute: () => true,
+			}),
+		});
+		gov.setRoutingScope({ id: "scope", revision: 1, roles: [{ role: "task", targets: [TARGET] }] });
+		expect(gov.validateRoute(binding, request)).toBe(false);
+		gov.close();
+	});
+	test("discriminatory rejection of wrong scope, revision, target and credentials", async () => {
+		const w = await setup();
+		const { binding, request } = await w.bind();
+
+		// Wrong scopeId
+		expect(w.auth.governor.validateRoute!({ ...binding, scopeId: "wrong-scope" }, request)).toBe(false);
+
+		// Wrong scope revision
+		expect(w.auth.governor.validateRoute!({ ...binding, revision: 999 }, request)).toBe(false);
+
+		// Target not belonging to role in scope
+		const unlistedTarget = { selector: `${PROVIDER}/unregistered`, provider: PROVIDER, modelId: "unregistered" };
+		expect(
+			w.auth.governor.validateRoute!(
+				{ ...binding, target: unlistedTarget },
+				{ ...request, modelId: "unregistered" },
+			),
+		).toBe(false);
+
+		// CredentialId not in pool
+		expect(
+			w.auth.governor.validateRoute!({ ...binding, credentialId: 99999 }, { ...request, credentialId: 99999 }),
+		).toBe(false);
+
+		// Governor allowance ID not in report limits
+		w.adapter.governorAllowance = () => ["non-existent-limit"];
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
 	});
 	test("a constrained resolution neither overrides an explicit pin nor records a new affinity", async () => {
 		const w = await setup();

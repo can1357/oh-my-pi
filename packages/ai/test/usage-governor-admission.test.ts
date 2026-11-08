@@ -234,7 +234,12 @@ describe("governed dispatch", () => {
 			const resetsAt = await pacedPair(h);
 			configureUsageAdmission(h.storage.governor);
 
-			const target = { selector: `${PROVIDER}/mock-model`, provider: PROVIDER, modelId: "mock-model" };
+			const target = {
+				selector: `${PROVIDER}/mock-model`,
+				provider: PROVIDER,
+				modelId: "mock-model",
+				baseUrl: "mock://",
+			};
 			h.storage.governor.setRoutingScope({
 				id: "scope-paced-binding",
 				revision: 1,
@@ -312,13 +317,18 @@ describe("governed dispatch", () => {
 				{
 					accountId: "acc-closed",
 					email: "closed@example.com",
-					window: { used: 1.0, resetsAt, durationMs: 2_000 },
+					window: { used: 0.1, resetsAt, durationMs: 2_000 },
 				},
 			]);
 			await seedReports(h, PROVIDER);
 			configureUsageAdmission(h.storage.governor);
 
-			const target = { selector: `${PROVIDER}/mock-model`, provider: PROVIDER, modelId: "mock-model" };
+			const target = {
+				selector: `${PROVIDER}/mock-model`,
+				provider: PROVIDER,
+				modelId: "mock-model",
+				baseUrl: "mock://",
+			};
 			h.storage.governor.setRoutingScope({
 				id: "scope-closed-binding",
 				revision: 1,
@@ -343,6 +353,11 @@ describe("governed dispatch", () => {
 				bearerFingerprint: fingerprintBearer(selected.apiKey),
 			};
 
+			// Route is bound; account usage becomes exhausted / spent
+			h.usage.setWindow("acc-closed", { used: 1.0 });
+			await h.storage.usage.invalidate(PROVIDER);
+			await seedReports(h, PROVIDER);
+
 			const sentAt: number[] = [];
 			const model = createMockModel({
 				provider: PROVIDER,
@@ -363,7 +378,7 @@ describe("governed dispatch", () => {
 
 			expect(sentAt).toHaveLength(1);
 			expect(sentAt[0] ?? 0).toBeGreaterThanOrEqual(resetsAt);
-			expect(h.reservations()).toHaveLength(1);
+			expect(h.reservations()).toHaveLength(0);
 			const wait = h.storage.governor.status().waits.find(record => record.credentialId === account.credentialId);
 			expect(wait?.untilMs).toBeCloseTo(resetsAt, -1);
 			expect(wait?.reason).toBe("exhausted");
@@ -396,7 +411,12 @@ describe("governed dispatch", () => {
 			await pacedPair(h);
 			configureUsageAdmission(h.storage.governor);
 
-			const target = { selector: `${PROVIDER}/mock-model`, provider: PROVIDER, modelId: "mock-model" };
+			const target = {
+				selector: `${PROVIDER}/mock-model`,
+				provider: PROVIDER,
+				modelId: "mock-model",
+				baseUrl: "mock://",
+			};
 			h.storage.governor.setRoutingScope({
 				id: "scope-stale-binding",
 				revision: 1,
@@ -469,7 +489,12 @@ describe("governed dispatch", () => {
 			await pacedPair(h);
 			configureUsageAdmission(h.storage.governor);
 
-			const target = { selector: `${PROVIDER}/mock-model`, provider: PROVIDER, modelId: "mock-model" };
+			const target = {
+				selector: `${PROVIDER}/mock-model`,
+				provider: PROVIDER,
+				modelId: "mock-model",
+				baseUrl: "mock://",
+			};
 			h.storage.governor.setRoutingScope({
 				id: "scope-switch-binding",
 				revision: 1,
@@ -550,7 +575,12 @@ describe("governed dispatch", () => {
 			await pacedPair(h);
 			configureUsageAdmission(h.storage.governor);
 
-			const target = { selector: `${PROVIDER}/mock-model`, provider: PROVIDER, modelId: "mock-model" };
+			const target = {
+				selector: `${PROVIDER}/mock-model`,
+				provider: PROVIDER,
+				modelId: "mock-model",
+				baseUrl: "mock://",
+			};
 			h.storage.governor.setRoutingScope({
 				id: "scope-paid-binding",
 				revision: 1,

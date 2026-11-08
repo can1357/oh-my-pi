@@ -151,6 +151,134 @@ export class CredentialGovernor implements GovernorApi {
 		return this.#evaluateRoutes(request);
 	}
 
+	#evaluateAccount(
+		target: UsageRouteTarget,
+		row: StoredCredential,
+		sessionId: string,
+		now: number,
+		cachedOnly: boolean,
+		tolerateExpiredWindows = false,
+	): UsageRouteAccountEvaluation {
+		const unknown: UsageRouteAccountEvaluation = {
+			selector: target.selector,
+			credentialId: row.id,
+			eligibility: "unknown",
+			allowance: "unknown",
+			quotaKeys: [],
+			state: "unknown",
+			protectedFor: [],
+		};
+		const source = this.#source();
+		if (!this.active || !source.affinity) return unknown;
+		if (!source.affinity.permits(target.provider, sessionId, row.id)) {
+			return { ...unknown, eligibility: "ineligible" };
+		}
+		const blocked = source.blocks?.isBlockedSnapshot(target.provider, row.credential.type, row.id, target.modelId);
+		if (blocked === undefined) return unknown;
+		if (blocked) return { ...unknown, eligibility: "ineligible" };
+		if (target.accountIds !== undefined && row.credential.type === "oauth") {
+			const account = oauthAccountKey(row.credential);
+			if (account === undefined || !target.accountIds.includes(account)) {
+				return { ...unknown, eligibility: "ineligible" };
+			}
+		}
+		const credential =
+			source.usage.resolvedUsageCredential?.(target.provider, row.credential) ??
+			(row.credential.type === "oauth" ? buildUsageCredential(row.credential) : undefined);
+		const report = source.usage.cachedReport(target.provider, row.credential, { baseUrl: target.baseUrl });
+		const provider = source.usage.providerFor(target.provider);
+		if (!credential || !report || !provider?.governorAllowance) return unknown;
+		const context = { modelId: target.modelId };
+		const params = { provider: target.provider, credential, baseUrl: target.baseUrl };
+		if (provider.supports && !provider.supports(params)) return { ...unknown, eligibility: "ineligible" };
+		const gate = source.strategies(target.provider)?.planGate?.(context)?.(report);
+		if (gate === false) return { ...unknown, eligibility: "ineligible" };
+		if (source.strategies(target.provider)?.planGate?.(context) && gate !== true) return unknown;
+		const ids = provider.governorAllowance(params, report, context);
+		if (!ids || ids.length === 0 || new Set(ids).size !== ids.length) return unknown;
+		const limits = ids.map(id => report.limits.find(limit => limit.id === id));
+		if (
+			limits.some(
+				limit =>
+					!limit || !limit.observedAt || limit.observedAt > now || now - limit.observedAt > GOVERNOR_STALE_MS,
+			)
+		)
+			return unknown;
+		const windows = this.#applicable(target.provider, row.credential, report, context, now, credential);
+		if (windows.some(window => !window.limitId || !ids.includes(window.limitId))) return unknown;
+		if (!tolerateExpiredWindows) {
+			if (windows.length !== ids.length) return unknown;
+		} else {
+			const windowLimitIds = new Set(windows.map(w => w.limitId));
+			for (const id of ids) {
+				if (!windowLimitIds.has(id)) {
+					const limit = limits.find(l => l?.id === id);
+					const window = limit?.window;
+					if (
+						!window ||
+						typeof window.resetsAt !== "number" ||
+						!Number.isFinite(window.resetsAt) ||
+						window.resetsAt > now ||
+						report.fetchedAt >= window.resetsAt
+					) {
+						return unknown;
+					}
+				}
+			}
+		}
+		let state: UsageWindowState = "open";
+		let admissibleAtMs: number | undefined;
+		if (windows.length > 0) {
+			const evaluated = (cachedOnly ? this.#inspectCached.bind(this) : this.#inspect.bind(this))(
+				windows.map(window => ({
+					...window,
+					reserve: this.#reserveFor(source, target.provider, row.credential, false),
+				})),
+				now,
+			);
+			if (evaluated.some(window => window.decision.state === "unknown" || window.decision.state === "stale"))
+				return unknown;
+			const verdict = admissionVerdict(
+				evaluated.map(window => window.decision),
+				now,
+			);
+			admissibleAtMs = verdict.admissibleAtMs;
+			state = evaluated.some(window => window.decision.state === "closed")
+				? "closed"
+				: evaluated.some(window => window.decision.state === "paced")
+					? "paced"
+					: "open";
+		}
+		const resets = report.resetCredits;
+		const expiry =
+			resets?.eligible === true &&
+			resets.observedAt !== undefined &&
+			resets.observedAt <= now &&
+			now - resets.observedAt <= GOVERNOR_STALE_MS
+				? resets.credits
+						?.filter(
+							credit =>
+								credit.usable === true &&
+								(credit.remainingCount ?? 0) > 0 &&
+								ids.every(id => credit.clears?.includes(id)) &&
+								credit.expiresAt !== undefined &&
+								Number.isFinite(Date.parse(credit.expiresAt)) &&
+								Date.parse(credit.expiresAt) > now,
+						)
+						.map(credit => Date.parse(credit.expiresAt!))
+						.sort((a, b) => a - b)[0]
+				: undefined;
+		return {
+			...unknown,
+			eligibility: "eligible",
+			allowance: windows.some(window => window.exhausted || (window.usedFraction ?? 0) >= 1) ? "spent" : "included",
+			state,
+			quotaKeys: windows.map(window => createHash("sha256").update(window.quotaKey).digest("base64url")),
+			admissibleAtMs,
+			resetTieBreakExpiresAtMs: expiry,
+		};
+	}
+
 	#evaluateRoutes(request: UsageRouteEvaluationRequest, cachedOnly = false): UsageRouteEvaluation {
 		const scope = this.#scopes.get(request.scopeId);
 		if (!scope || scope.revision !== request.revision) throw new Error("Usage routing scope revision mismatch");
@@ -165,114 +293,9 @@ export class CredentialGovernor implements GovernorApi {
 		const source = this.#source();
 		const now = this.#now();
 		const evaluate = (target: UsageRouteTarget): UsageRouteAccountEvaluation[] =>
-			source.pool.entries(target.provider).map(row => {
-				const unknown: UsageRouteAccountEvaluation = {
-					selector: target.selector,
-					credentialId: row.id,
-					eligibility: "unknown",
-					allowance: "unknown",
-					quotaKeys: [],
-					state: "unknown",
-					protectedFor: [],
-				};
-				if (!this.active || !source.affinity) return unknown;
-				if (!source.affinity.permits(target.provider, request.sessionId, row.id)) {
-					return { ...unknown, eligibility: "ineligible" };
-				}
-				const blocked = source.blocks?.isBlockedSnapshot(
-					target.provider,
-					row.credential.type,
-					row.id,
-					target.modelId,
-				);
-				if (blocked === undefined) return unknown;
-				if (blocked) return { ...unknown, eligibility: "ineligible" };
-				if (target.accountIds !== undefined && row.credential.type === "oauth") {
-					const account = oauthAccountKey(row.credential);
-					if (account === undefined || !target.accountIds.includes(account)) {
-						return { ...unknown, eligibility: "ineligible" };
-					}
-				}
-				const credential =
-					source.usage.resolvedUsageCredential?.(target.provider, row.credential) ??
-					(row.credential.type === "oauth" ? buildUsageCredential(row.credential) : undefined);
-				const report = source.usage.cachedReport(target.provider, row.credential, { baseUrl: target.baseUrl });
-				const provider = source.usage.providerFor(target.provider);
-				if (!credential || !report || !provider?.governorAllowance) return unknown;
-				const context = { modelId: target.modelId };
-				const params = { provider: target.provider, credential, baseUrl: target.baseUrl };
-				if (provider.supports && !provider.supports(params)) return { ...unknown, eligibility: "ineligible" };
-				const gate = source.strategies(target.provider)?.planGate?.(context)?.(report);
-				if (gate === false) return { ...unknown, eligibility: "ineligible" };
-				if (source.strategies(target.provider)?.planGate?.(context) && gate !== true) return unknown;
-				const ids = provider.governorAllowance(params, report, context);
-				if (!ids || ids.length === 0 || new Set(ids).size !== ids.length) return unknown;
-				const limits = ids.map(id => report.limits.find(limit => limit.id === id));
-				if (
-					limits.some(
-						limit =>
-							!limit ||
-							!limit.observedAt ||
-							limit.observedAt > now ||
-							now - limit.observedAt > GOVERNOR_STALE_MS,
-					)
-				)
-					return unknown;
-				const windows = this.#applicable(target.provider, row.credential, report, context, now, credential);
-				if (
-					windows.length !== ids.length ||
-					windows.some(window => !window.limitId || !ids.includes(window.limitId))
-				)
-					return unknown;
-				const evaluated = (cachedOnly ? this.#inspectCached.bind(this) : this.#inspect.bind(this))(
-					windows.map(window => ({
-						...window,
-						reserve: this.#reserveFor(source, target.provider, row.credential, false),
-					})),
-					now,
-				);
-				if (evaluated.some(window => window.decision.state === "unknown" || window.decision.state === "stale"))
-					return unknown;
-				const verdict = admissionVerdict(
-					evaluated.map(window => window.decision),
-					now,
-				);
-				const state = evaluated.some(window => window.decision.state === "closed")
-					? "closed"
-					: evaluated.some(window => window.decision.state === "paced")
-						? "paced"
-						: "open";
-				const resets = report.resetCredits;
-				const expiry =
-					resets?.eligible === true &&
-					resets.observedAt !== undefined &&
-					resets.observedAt <= now &&
-					now - resets.observedAt <= GOVERNOR_STALE_MS
-						? resets.credits
-								?.filter(
-									credit =>
-										credit.usable === true &&
-										(credit.remainingCount ?? 0) > 0 &&
-										ids.every(id => credit.clears?.includes(id)) &&
-										credit.expiresAt !== undefined &&
-										Number.isFinite(Date.parse(credit.expiresAt)) &&
-										Date.parse(credit.expiresAt) > now,
-								)
-								.map(credit => Date.parse(credit.expiresAt!))
-								.sort((a, b) => a - b)[0]
-						: undefined;
-				return {
-					...unknown,
-					eligibility: "eligible",
-					allowance: windows.some(window => window.exhausted || (window.usedFraction ?? 0) >= 1)
-						? "spent"
-						: "included",
-					state,
-					quotaKeys: windows.map(window => createHash("sha256").update(window.quotaKey).digest("base64url")),
-					admissibleAtMs: verdict.admissibleAtMs,
-					resetTieBreakExpiresAtMs: expiry,
-				};
-			});
+			source.pool
+				.entries(target.provider)
+				.map(row => this.#evaluateAccount(target, row, request.sessionId, now, cachedOnly, false));
 		const byRole = new Map(scope.roles.map(plan => [plan.role, plan.targets.flatMap(evaluate)]));
 		const accounts = request.targets.flatMap(evaluate);
 		const currentOpportunities = owner.kind === "role" ? (byRole.get(owner.role) ?? []) : targets.flatMap(evaluate);
@@ -329,23 +352,22 @@ export class CredentialGovernor implements GovernorApi {
 			if (!credential?.apiKey || fingerprintBearer(credential.apiKey) !== binding.bearerFingerprint) return false;
 		}
 		try {
-			const evaluation = this.#evaluateRoutes(
-				{
-					scopeId: binding.scopeId,
-					revision: binding.revision,
-					owner: binding.owner,
-					role: binding.owner.kind === "role" ? binding.owner.role : "",
-					sessionId: request.context.sessionId,
-					targets: [binding.target],
-				},
-				true,
-			);
-			return evaluation.accounts.some(
-				account =>
-					account.selector === binding.target.selector &&
-					account.credentialId === binding.credentialId &&
-					account.eligibility === "eligible" &&
-					(account.allowance === "included" || account.allowance === "spent"),
+			const scope = this.#scopes.get(binding.scopeId);
+			if (!scope || scope.revision !== binding.revision) return false;
+			const owner = binding.owner;
+			const targets =
+				owner.kind === "role"
+					? scope.roles.find(item => item.role === owner.role)?.targets
+					: scope.models?.find(item => item.selector === owner.selector)?.targets;
+			if (!targets || !targets.some(allowed => sameTarget(binding.target, allowed))) {
+				return false;
+			}
+			const account = this.#evaluateAccount(binding.target, row, request.context.sessionId, this.#now(), true, true);
+			return (
+				account.selector === binding.target.selector &&
+				account.credentialId === binding.credentialId &&
+				account.eligibility === "eligible" &&
+				(account.allowance === "included" || account.allowance === "spent")
 			);
 		} catch {
 			return false;
