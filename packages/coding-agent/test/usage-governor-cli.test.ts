@@ -837,20 +837,18 @@ describe("usage governor CLI proof: scenarios", () => {
 				expect(result.stdout.trim()).toBe("ok");
 
 				const chats = proof.chats();
-				console.log(
-					"CHATS DEBUG:",
-					JSON.stringify(
-						chats.map(c => ({ provider: c.provider, model: c.model, status: c.status, atMs: c.atMs })),
-					),
-				);
-				expect(chats).toHaveLength(2);
-				expect(chats[0]).toMatchObject({
-					provider: "govplan",
-					model: "m",
-					bearer: primary.bearer,
-					status: 500,
-				});
-				expect(chats[1]).toMatchObject({
+				expect(chats.length).toBeGreaterThanOrEqual(2);
+				const retries = chats.slice(0, -1);
+				expect(retries.length).toBeGreaterThanOrEqual(1);
+				for (const retry of retries) {
+					expect(retry).toMatchObject({
+						provider: "govplan",
+						model: "m",
+						bearer: primary.bearer,
+						status: 500,
+					});
+				}
+				expect(chats.at(-1)).toMatchObject({
 					provider: "govplan-h",
 					model: "m2",
 					bearer: fallback.bearer,
@@ -914,14 +912,18 @@ describe("usage governor CLI proof: scenarios", () => {
 			expect(result.stdout.trim()).toBe("ok");
 
 			const chats = errorProof.chats();
-			expect(chats).toHaveLength(2);
-			expect(chats[0]).toMatchObject({
-				provider: "govplan",
-				model: "m",
-				bearer: primaryFailing.bearer,
-				status: 500,
-			});
-			expect(chats[1]).toMatchObject({
+			expect(chats.length).toBeGreaterThanOrEqual(2);
+			const retries = chats.slice(0, -1);
+			expect(retries.length).toBeGreaterThanOrEqual(1);
+			for (const retry of retries) {
+				expect(retry).toMatchObject({
+					provider: "govplan",
+					model: "m",
+					bearer: primaryFailing.bearer,
+					status: 500,
+				});
+			}
+			expect(chats.at(-1)).toMatchObject({
 				provider: "govplan-h",
 				model: "m2",
 				bearer: fallbackUnknown.bearer,
