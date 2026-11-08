@@ -1,5 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { combine, effect, register, type SettingValueOf } from "../config/registry";
+import { combine, effect, register, type ScopeLike, type SettingValueOf } from "../config/registry";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -22,6 +22,7 @@ import {
 } from "../tiny/dtype";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
+import type { UsageGovernorConfig } from "@oh-my-pi/pi-ai/usage-governor/types";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
@@ -842,8 +843,8 @@ export const cfgRetryUsageReservePct = register({
 		group: "Retry & Fallback",
 		label: "Reserve Margin",
 		description:
-			"Treat a coding-plan model as near its limit below this remaining percentage. Unknown or unmapped usage keeps the primary model.",
-		condition: "usageAwareFallbackEnabled",
+			"Treat a coding-plan model as near its limit below this remaining percentage, and the target the usage governor paces each account back to at its reset. Unknown or unmapped usage keeps the primary model.",
+		condition: "usageReserveVisible",
 		options: [
 			{ value: "5", label: "5%", description: "Act only when nearly exhausted" },
 			{ value: "10", label: "10%", description: "Balanced safety margin" },
@@ -936,6 +937,107 @@ export const cfgRetry = combine({
 
 /** Retry/backoff policy ({@link cfgRetry}). */
 export type RetrySettings = SettingValueOf<typeof cfgRetry>;
+
+export const cfgUsageGovernorEnabled = register({
+	id: "usageGovernor.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Usage Governor",
+		label: "Usage Governor",
+		description:
+			"Pace requests to each account's usage allowance: an account ahead of its line waits, abortably, until the line catches up before its reset. Accounts without fresh usage data are never paced. Waits are forecasts, not guarantees.",
+	},
+});
+
+function validateUsageGovernorLeadPct(raw: unknown): void {
+	if (raw === undefined || raw === null) return;
+	if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0 || raw > 100) {
+		throw new Error(`usageGovernor.leadPct must be a number from 0 to 100, got ${JSON.stringify(raw)}`);
+	}
+}
+
+export const cfgUsageGovernorLeadPct = register({
+	id: "usageGovernor.leadPct",
+	type: "number",
+	default: 25,
+	validate: validateUsageGovernorLeadPct,
+	ui: {
+		tab: "model",
+		group: "Usage Governor",
+		label: "Window Lead",
+		description:
+			"Share of a window's allowance usable ahead of linear pacing at the window start, decaying to zero at reset. 0 paces strictly linearly.",
+		condition: "usageGovernorEnabled",
+		options: [
+			{ value: "0", label: "0%", description: "Strictly linear pacing" },
+			{ value: "10", label: "10%", description: "Light front-loading" },
+			{ value: "25", label: "25%", description: "Balanced" },
+			{ value: "50", label: "50%", description: "Front-loaded" },
+		],
+	},
+});
+
+export const cfgUsageGovernorInteractiveReserve = register({
+	id: "usageGovernor.interactiveReserve",
+	type: "enum",
+	values: ["hold", "spend"] as const,
+	default: "hold",
+	ui: {
+		tab: "model",
+		group: "Usage Governor",
+		label: "Interactive Reserve",
+		description:
+			"Whether foreground requests (your turns, /btw and IRC side turns) may use the account reserve. Hold keeps the reserve for every request, so foreground work waits or falls back.",
+		condition: "usageGovernorEnabled",
+		options: [
+			{ value: "hold", label: "Hold reserve", description: "Foreground requests keep the reserve too" },
+			{
+				value: "spend",
+				label: "Spend reserve",
+				description: "Foreground requests may use the reserve, still paced",
+			},
+		],
+	},
+});
+
+export const cfgUsageGovernorRoleProtection = register({
+	id: "usageGovernor.roleProtection",
+	type: "enum",
+	values: ["off", "prefer-alternatives"] as const,
+	default: "prefer-alternatives",
+	ui: {
+		tab: "model",
+		group: "Usage Governor",
+		label: "Role Protection",
+		description: "Prefer independent included allowances for roles with more alternatives.",
+		condition: "usageGovernorEnabled",
+		options: [
+			{ value: "off", label: "Off", description: "Do not prefer routes by role" },
+			{ value: "prefer-alternatives", label: "Prefer alternatives", description: "Protect less flexible roles" },
+		],
+	},
+});
+
+/** Usage governor policy (`usageGovernor.*`). */
+export const cfgUsageGovernor = combine({
+	enabled: cfgUsageGovernorEnabled,
+	leadPct: cfgUsageGovernorLeadPct,
+	interactiveReserve: cfgUsageGovernorInteractiveReserve,
+	roleProtection: cfgUsageGovernorRoleProtection,
+});
+
+/** Usage governor policy (`usageGovernor.*`) in the shape the pi-ai admission seam reads. */
+export function usageGovernorConfig(settings: ScopeLike): UsageGovernorConfig {
+	const policy = cfgUsageGovernor.get(settings);
+	return {
+		enabled: policy.enabled,
+		lead: policy.leadPct / 100,
+		interactiveReserve: policy.interactiveReserve,
+		roleProtection: policy.roleProtection,
+	};
+}
 
 export const cfgProvidersAnthropicServerSideFallback = register({
 	id: "providers.anthropic.serverSideFallback",

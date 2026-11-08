@@ -18,6 +18,7 @@ import {
 	isWithinUsageReserve,
 	resolveCredentialIdentityKey,
 	resolveUsedFraction,
+	type UsageGovernorStatus,
 	type UsageHistoryEntry,
 	type UsageLimit,
 	type UsageReport,
@@ -62,6 +63,13 @@ import {
 	selectReportableAccounts,
 	type UsageAccountIdentity,
 } from "../slash-commands/helpers/usage-accounts";
+import {
+	formatUsageGovernorLines,
+	readUsageGovernorStatus,
+	type UsageGovernorAccountLabeler,
+	usageGovernorAccountIdentities,
+	usageGovernorAccountLabeler,
+} from "../slash-commands/helpers/usage-report";
 
 import { cfgRetryUsageReservePct } from "../session/settings";
 
@@ -1509,6 +1517,42 @@ async function runUsageResetCommand(
 	}
 }
 
+/**
+ * Governor status for `--json`: each row gains its resolved account label, and free text is
+ * masked under `--redact`. Banked resets carry `countedAs`, waits carry `durationMs`, and the
+ * payload's `governor` key is `null` while the governor is off.
+ */
+function governorForJson(
+	status: UsageGovernorStatus,
+	nowMs: number,
+	accountLabel: UsageGovernorAccountLabeler,
+	mask: ((text: string) => string) | undefined,
+) {
+	const maskText = mask ?? (text => text);
+	const maskOptional = (value: string | undefined): string | undefined =>
+		value === undefined ? undefined : maskText(value);
+	return {
+		...status,
+		degradedReason: maskOptional(status.degradedReason),
+		windows: status.windows.map(window => ({
+			...window,
+			quotaKey: maskText(window.quotaKey),
+			accountLabel: accountLabel(window.provider, window.credentialId),
+			bankedResets: window.bankedResets && {
+				...window.bankedResets,
+				reason: maskOptional(window.bankedResets.reason),
+				countedAs: "not counted",
+			},
+		})),
+		waits: status.waits.map(wait => ({
+			...wait,
+			bindingLabel: maskOptional(wait.bindingLabel),
+			accountLabel: accountLabel(wait.provider, wait.credentialId),
+			durationMs: Math.max(0, (wait.endedAtMs ?? nowMs) - wait.startedAtMs),
+		})),
+	};
+}
+
 export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 	const settings = await Settings.loadReadOnly();
 	const authStorage = await discoverAuthStorage(undefined, { settings });
@@ -1669,9 +1713,21 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			disabled = disabled.filter(summary => summary.provider.toLowerCase() === wanted);
 		}
 
+		// Governor status is cached state only: no reports are fetched and no resets are touched.
+		const governorAccounts = (provider: string) => authStorage.oauth.accounts(provider);
+		const governorStatus = readUsageGovernorStatus(authStorage.governor, cmd.provider?.toLowerCase());
+		const governorIdentities = governorStatus ? usageGovernorAccountIdentities(governorStatus, governorAccounts) : [];
 		const redaction = cmd.redact
-			? buildRedactionMap(collectIdentityStrings(filteredReports, accounts, disabled))
+			? buildRedactionMap([
+					...collectIdentityStrings(filteredReports, accounts, disabled),
+					...collectIdentityStrings([], governorIdentities),
+				])
 			: undefined;
+		const governorLabel = usageGovernorAccountLabeler(governorAccounts, redaction);
+		const governorMask = redaction ? identityTextMasker(redaction) : undefined;
+		const governorJson = governorStatus
+			? governorForJson(governorStatus, Date.now(), governorLabel, governorMask)
+			: null;
 
 		if (cmd.json) {
 			// Compute policy against original identities before masking, then drop
@@ -1718,6 +1774,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				accountsWithoutUsage: unreportedAccounts,
 				disabledCredentials: disabledForJson,
 				capacity,
+				governor: governorJson,
 			};
 			process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 			return;
@@ -1744,9 +1801,24 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			settings,
 			accounts: provider => authStorage.oauth.accounts(provider),
 		};
-		process.stdout.write(
-			`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled, policyOptions, resetOptions)}\n`,
+		const breakdown = formatUsageBreakdown(
+			filteredReports,
+			accounts,
+			Date.now(),
+			redaction,
+			disabled,
+			policyOptions,
+			resetOptions,
 		);
+		const governorLines = governorStatus
+			? formatUsageGovernorLines(governorStatus, {
+					nowMs: Date.now(),
+					accountLabel: governorLabel,
+					maskText: governorMask,
+				})
+			: [];
+		const sections = governorLines.length > 0 ? [breakdown, governorLines.join("\n")] : [breakdown];
+		process.stdout.write(`${sections.join("\n\n")}\n`);
 	} catch (error) {
 		// Broker-backed reads (`clients`, `--history`) fail on an unreachable or
 		// pre-endpoint broker; report one line instead of a stack dump.

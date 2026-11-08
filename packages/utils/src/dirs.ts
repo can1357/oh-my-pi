@@ -966,6 +966,11 @@ export function getAgentDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "agent.db", "data");
 }
 
+/** Get the path to usage-governor.db (disposable SQLite ledger of governed request pacing). */
+export function getUsageGovernorDbPath(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "usage-governor.db", "data");
+}
+
 /** Get the last-seen-changelog-version marker file (~/.omp/agent/last-changelog-version). */
 export function getLastChangelogVersionPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "last-changelog-version", "state");

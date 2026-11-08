@@ -38,7 +38,7 @@ import { mergeRefreshedOrganizationScope, OAUTH_REFRESH_SKEW_MS } from "./refres
 import type { OAuthRefresher } from "./refresh";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
-import type { AuthCredential, OAuthCredential, ObservedUsageInput, UsageApi } from "./types";
+import type { AuthCredential, OAuthCredential, ObservedUsageInput, UsageApi, UsageHeaderIngestOptions } from "./types";
 import {
 	dedupeUsageReports,
 	isUsageLimitExhausted,
@@ -120,6 +120,8 @@ export class UsageService implements UsageApi {
 	#usageRequestInFlight: Map<string, { refreshEpoch: number; promise: Promise<UsageReport | null> }> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
+	/** Only secrets resolved on the ordinary selection or usage path may identify API-key cache entries. */
+	#resolvedApiKeys = new Map<string, string>();
 	readonly fetch: typeof fetch;
 	readonly logger: UsageLogger;
 	readonly requestTimeoutMs: number;
@@ -145,6 +147,19 @@ export class UsageService implements UsageApi {
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined {
 		return this.#runtimeUsageProviderOverrides.get(provider)?.provider ?? this.#deps.usageProviders(provider);
+	}
+
+	noteResolvedApiKey(provider: Provider, credential: AuthCredential, value: string | undefined): void {
+		if (credential.type !== "api_key") return;
+		const key = `${provider}\0${credential.key}`;
+		if (value) this.#resolvedApiKeys.set(key, value);
+		else this.#resolvedApiKeys.delete(key);
+	}
+
+	resolvedUsageCredential(provider: Provider, credential: AuthCredential): UsageCredential | undefined {
+		if (credential.type !== "api_key") return buildUsageCredential(credential);
+		const apiKey = this.#resolvedApiKeys.get(`${provider}\0${credential.key}`);
+		return apiKey ? { type: "api_key", apiKey } : undefined;
 	}
 
 	/**
@@ -281,6 +296,17 @@ export class UsageService implements UsageApi {
 				logger: this.logger,
 				...(previousReport ? { previousReport } : {}),
 			});
+			if (report) {
+				// A successful provider read observes its returned limits. Adapters that
+				// retain an older limit must preserve its observedAt rather than refreshing it.
+				const observedAt = Date.now();
+				for (const limit of report.limits) limit.observedAt ??= observedAt;
+				// Some adapters retain the previous reset inventory when its independent
+				// probe fails. That retained object is not a fresh observation.
+				if (report.resetCredits && report.resetCredits !== previousReport?.resetCredits) {
+					report.resetCredits.observedAt ??= observedAt;
+				}
+			}
 			// Attribute the report to the credential's organization. The orgId and
 			// orgName fallbacks apply independently: Claude's usage endpoint stamps
 			// orgId from the `anthropic-organization-id` response header but never
@@ -496,22 +522,45 @@ export class UsageService implements UsageApi {
 		return this.#deps.store.getClientUsageSummary?.(sinceMs) ?? { clients: [] };
 	}
 
-	/** Merge rate-limit headers into the latest account report. */
-	ingestHeaders(
-		provider: Provider,
-		headers: Record<string, string>,
-		options?: { sessionId?: string; baseUrl?: string; responseStatus?: number },
-	): boolean {
-		const parseHeaders = this.providerFor(provider)?.parseRateLimitHeaders;
-		if (!parseHeaders) return false;
+	/** Last good report for the exact resolved credential; never resolve references here. */
+	cachedReport(provider: Provider, credential: AuthCredential, options?: { baseUrl?: string }): UsageReport | null {
+		const resolved = this.resolvedUsageCredential(provider, credential);
+		if (!resolved) return null;
+		const request = usageRequest(provider, resolved, options?.baseUrl);
+		const exact = this.#deps.cache.lastGood(this.#deps.cache.reportKey(request));
+		return exact ?? (credential.type === "oauth" ? this.#deps.cache.lastGoodForAccount(provider, resolved) : null);
+	}
 
-		const credential = this.#deps.affinity.activeOAuth(provider, options?.sessionId);
+	/** Merge rate-limit headers into the latest account report. */
+	ingestHeaders(provider: Provider, headers: Record<string, string>, options?: UsageHeaderIngestOptions): boolean {
+		const providerImpl = this.providerFor(provider);
+		const parseHeaders = providerImpl?.parseRateLimitHeaders;
+		if (!parseHeaders || options?.credentialId === null) return false;
+
+		const row =
+			options?.credentialId === undefined
+				? undefined
+				: this.#deps.pool.entries(provider).find(entry => entry.id === options.credentialId);
+		const credential =
+			options?.credentialId === undefined
+				? this.#deps.affinity.activeOAuth(provider, options?.sessionId)
+				: row?.credential.type === "oauth"
+					? row.credential
+					: undefined;
 		if (!credential) return false;
+		if (
+			options?.credentialId !== undefined &&
+			providerImpl?.supports &&
+			!providerImpl.supports(oauthUsageRequest(provider, credential, options?.baseUrl))
+		) {
+			return false;
+		}
 
 		const cacheKey = this.#deps.cache.reportKey(oauthUsageRequest(provider, credential, options?.baseUrl));
 		const now = Date.now();
 		const parsedReport = parseHeaders(headers, now, { responseStatus: options?.responseStatus });
 		if (!parsedReport) return false;
+		for (const limit of parsedReport.limits) limit.observedAt = now;
 		// Throttled to one ingest per interval — except when a window reads
 		// exhausted: persist that snapshot immediately. A full-backed cache can
 		// then block the next getApiKey; a cold header-only snapshot first probes
@@ -651,6 +700,7 @@ export class UsageService implements UsageApi {
 					// skipped: probing with the literal reference string would
 					// 401 and flag a working credential as bad.
 					const apiKey = await this.#deps.overrides.resolve(credential.key);
+					this.noteResolvedApiKey(provider, credential, apiKey);
 					if (!apiKey) continue;
 					request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
 				} else {
@@ -689,6 +739,7 @@ export class UsageService implements UsageApi {
 		const usageCredential = buildUsageCredential(credential);
 		if (credential.type === "api_key") {
 			const resolvedApiKey = await this.#deps.overrides.resolve(credential.key);
+			this.noteResolvedApiKey(provider, credential, resolvedApiKey);
 			if (!resolvedApiKey) return null;
 			usageCredential.apiKey = resolvedApiKey;
 		}

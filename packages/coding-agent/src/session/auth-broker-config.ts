@@ -41,7 +41,7 @@ import { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
 
 import { cfgAuthAccountPolicies, cfgAuthBrokerToken, cfgAuthBrokerUrl } from "../config/model-settings";
-import { cfgRetryUsageReservePct } from "./settings";
+import { cfgRetryUsageReservePct, cfgUsageGovernor, usageGovernorConfig } from "./settings";
 
 export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
 
@@ -130,6 +130,7 @@ const cfgAuthStorageSettings = combine({
 	brokerToken: cfgAuthBrokerToken,
 	accountPolicies: cfgAuthAccountPolicies,
 	usageReservePct: cfgRetryUsageReservePct,
+	usageGovernor: cfgUsageGovernor,
 });
 
 /** Live link between settings and a long-lived `AuthStorage`; see {@link createAuthStorageSettingsSync}. */
@@ -143,6 +144,7 @@ export interface AuthStorageSettingsSync {
 /**
  * Keeps a long-lived `authStorage` in step with the auth settings of `scope`:
  * - `auth.accountPolicies` / `retry.usageReservePct` re-apply account routing policy.
+ * - `usageGovernor.*` reconfigures the usage governor, so toggling it takes effect in this thread and in its workers without a restart.
  * - `auth.broker.url` / `auth.broker.token` flush pending writes, re-resolve the
  *   broker with startup precedence (env → config.yml → token file; project layers
  *   never redirect credentials), and swap the credential store in place when the
@@ -166,6 +168,16 @@ export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: Aut
 			authStorage.setAccountPolicies(await loadEffectiveAuthAccountPolicyConfig({ settings }));
 		} catch (error) {
 			logger.warn("Account policy change not applied; keeping the previous policy", { error: String(error) });
+		}
+	};
+
+	const applyGovernor = () => {
+		try {
+			authStorage.governor.configure(usageGovernorConfig(settings));
+		} catch (error) {
+			logger.warn("Usage governor change not applied; keeping the previous configuration", {
+				error: String(error),
+			});
 		}
 	};
 
@@ -195,9 +207,11 @@ export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: Aut
 		const policiesChanged =
 			next.usageReservePct !== previous.usageReservePct ||
 			!Bun.deepEquals(next.accountPolicies, previous.accountPolicies);
+		const governorChanged = !Bun.deepEquals(next.usageGovernor, previous.usageGovernor);
 		pending = pending.then(async () => {
 			if (brokerChanged) await applyBroker();
 			if (policiesChanged) await applyPolicies();
+			if (governorChanged) applyGovernor();
 		});
 		return pending;
 	});

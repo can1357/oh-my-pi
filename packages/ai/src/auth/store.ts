@@ -104,6 +104,8 @@ export interface CredentialBlockStore {
 	 * {@link CredentialBlockStore.getCredentialBlock} per scope when absent.
 	 */
 	getCredentialBlockScopes?(credentialId: number, providerKey: string): ReadonlyMap<string, number>;
+	/** Nonmutating snapshot of live persisted scopes; absent means the store cannot safely provide one. */
+	getCredentialBlockScopesSnapshot?(credentialId: number, providerKey: string): ReadonlyMap<string, number>;
 	/** Earliest time a shared-store block should be eligible for live-usage reconciliation. */
 	getCredentialBlockReconcileAfter(credentialId: number, providerKey: string, blockScope: string): number | undefined;
 	/** Upsert with MAX semantics: keep the later blockedUntilMs on conflict. */

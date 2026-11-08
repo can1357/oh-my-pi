@@ -3,6 +3,7 @@ import { planRequirementFor, quotaTierFor } from "@oh-my-pi/pi-catalog/compat/be
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { slugify, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { ProviderHttpError } from "../error";
+import { GOVERNOR_STALE_MS } from "../usage-governor/policy";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -522,6 +523,8 @@ function buildAdditionalUsageLimit(args: {
 }
 
 const CODEX_SPEND_CAP_LIMIT_ID = "openai-codex:spend-cap";
+export const CODEX_RESET_CLEARABLE_LIMIT_IDS = ["openai-codex:primary", "openai-codex:secondary"] as const;
+const CODEX_CHAT_RESET_TYPE = "codex_rate_limits";
 
 function buildSpendCapLimit(cap: ParsedSpendCap, accountId: string | undefined, nowMs: number): UsageLimit {
 	const resetsAt = resolveResetTime({ resetAt: cap.resetAt, resetAfterSeconds: cap.resetAfterSeconds }, nowMs);
@@ -588,6 +591,7 @@ export function parseCodexRateLimitHeaders(
 	const verdict = requestSucceeded ? { allowed: true, limitReached: false } : {};
 	if (primary) limits.push(buildUsageLimit({ key: "primary", window: primary, ...verdict, nowMs: now }));
 	if (secondary) limits.push(buildUsageLimit({ key: "secondary", window: secondary, ...verdict, nowMs: now }));
+	for (const limit of limits) limit.observedAt = now;
 	return {
 		provider: "openai-codex",
 		fetchedAt: now,
@@ -614,6 +618,17 @@ function buildPlanMeterState(
 export const openaiCodexUsageProvider: UsageProvider = {
 	id: "openai-codex",
 	// v1: credit-billed seats gained the spend-cap limit; retire their limitless reports.
+	governorAllowance(_params, report, context) {
+		const observedAt = report.metadata?.governorNoPaidOverageObservedAt;
+		if (typeof observedAt !== "number" || !Number.isFinite(observedAt)) return undefined;
+		const now = Date.now();
+		if (observedAt > now || now - observedAt > GOVERNOR_STALE_MS) return undefined;
+		// An absent credits block is not evidence that paid overage is disabled.
+		if (report.metadata?.governorNoPaidOverage !== true || context.modelId === undefined) return undefined;
+		const limits = scopeCodexLimitsForRequest(report, isCodexSparkRequest(context));
+		if (limits.length === 0 || limits.some(limit => limit.id === CODEX_SPEND_CAP_LIMIT_ID)) return undefined;
+		return limits.map(limit => limit.id);
+	},
 	cacheVersion: 1,
 	supports(params: UsageFetchParams): boolean {
 		return params.provider === "openai-codex" && params.credential.type === "oauth";
@@ -751,7 +766,9 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			limits.push(buildSpendCapLimit(parsed.spendCap, accountId, nowMs));
 		}
 
+		for (const limit of limits) limit.observedAt = nowMs;
 		const resetCredits = parseResetCredits(payload);
+		if (resetCredits) resetCredits.observedAt = nowMs;
 		if (resetCredits && resetCredits.availableCount > 0) {
 			try {
 				const list = await listCodexResetCredits({
@@ -761,20 +778,35 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					fetch: ctx.fetch,
 					signal: params.signal,
 				});
+				if (list) {
+					resetCredits.availableCount = list.availableCount;
+				}
 				if (list?.credits.length) {
-					resetCredits.credits = list.credits
-						.filter(c => (c.status ?? "available") === "available")
-						.map(c => ({
+					const displayCredits = list.credits.filter(c => (c.status ?? "available") === "available");
+					let hasUsableChatCredit = false;
+					resetCredits.credits = displayCredits.map(c => {
+						const isExplicitAvailable = c.status === "available";
+						const isChatCoverage = c.resetType === CODEX_CHAT_RESET_TYPE;
+						const isUsableChatCredit = isExplicitAvailable && isChatCoverage;
+						if (isUsableChatCredit) {
+							hasUsableChatCredit = true;
+						}
+						return {
 							grantedAt: c.grantedAt,
 							expiresAt: c.expiresAt,
 							status: c.status,
-						}));
-				}
-				// Always sync the live count from the detail endpoint — it may report
-				// fewer or zero available credits after expiry/redeem, even when the
-				// /wham/usage payload still has a stale count.
-				if (list) {
-					resetCredits.availableCount = list.availableCount;
+							...(isUsableChatCredit
+								? {
+										usable: true,
+										remainingCount: 1,
+										clears: [...CODEX_RESET_CLEARABLE_LIMIT_IDS],
+									}
+								: {}),
+						};
+					});
+					if (hasUsableChatCredit && list.availableCount > 0) {
+						resetCredits.eligible = true;
+					}
 				}
 			} catch (error) {
 				ctx.logger?.warn("Codex reset credits detail fetch failed", { error: String(error) });
@@ -787,6 +819,17 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			limits,
 			...(resetCredits ? { resetCredits } : {}),
 			metadata: {
+				governorNoPaidOverage:
+					isRecord(payload) &&
+					isRecord(payload.credits) &&
+					payload.credits.has_credits === false &&
+					payload.credits.unlimited === false,
+				...(isRecord(payload) &&
+				isRecord(payload.credits) &&
+				payload.credits.has_credits === false &&
+				payload.credits.unlimited === false
+					? { governorNoPaidOverageObservedAt: nowMs }
+					: {}),
 				planType,
 				...buildPlanMeterState(parsed?.allowed, parsed?.limitReached, creditOverage),
 				email,

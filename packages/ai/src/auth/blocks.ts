@@ -142,6 +142,41 @@ export class CredentialBlocks implements BlocksApi {
 		}
 	}
 
+	/** Read current blocks without reconciling, pruning, or changing store health. */
+	isBlockedSnapshot(
+		provider: string,
+		type: AuthCredential["type"],
+		credentialId: number,
+		modelId?: string,
+	): boolean | undefined {
+		if (this.#deps.health.damaged) return undefined;
+		const store = this.#deps.store;
+		if (!store.getCredentialBlockScopesSnapshot) return undefined;
+		const providerKey = providerTypeKey(provider, type);
+		const strategy = this.#deps.strategies(provider);
+		const context = { modelId };
+		const scopes = [
+			"",
+			...PROTECTED_BLOCK_SCOPES,
+			...credentialBlockScopesForRequest(provider, strategy, context, strategy?.blockScope?.(context)),
+		];
+		const now = Date.now();
+		try {
+			const persisted = store.getCredentialBlockScopesSnapshot(credentialId, providerKey);
+			for (const scope of scopes) {
+				if (
+					(this.#credentialBackoff.get(scopedBackoffKey(providerKey, scope))?.get(credentialId)?.until ?? 0) > now
+				)
+					return true;
+				const expiry = persisted.get(scope);
+				if (expiry !== undefined && expiry > now) return true;
+			}
+			return false;
+		} catch {
+			return undefined;
+		}
+	}
+
 	/**
 	 * Returns in-memory block expiry timestamp for a credential/key pair, cleaning up expired entries.
 	 * `persistedScopes` is a bulk read for the key's providerKey; omitted, the store is point-read.

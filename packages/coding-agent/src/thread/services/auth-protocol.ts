@@ -63,11 +63,22 @@ import type {
 	RotateCredentialOptions,
 	StoredAuthCredential,
 	StoredCredentialBlock,
+	UsageHeaderIngestOptions,
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 	UsageLimitMarkResult,
 	UsageProvider,
 	UsageReport,
+	UsageAdmissionGrant,
+	UsageAdmissionOutcome,
+	UsageAdmissionRequest,
+	UsageGovernorConfig,
+	UsageGovernorEvent,
+	UsageGovernorStatus,
+	UsageRouteEvaluation,
+	UsageRouteEvaluationRequest,
+	UsageRouteBinding,
+	UsageRoutingScope,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import type { ModelRefreshStrategy } from "@oh-my-pi/pi-catalog/model-manager";
@@ -212,6 +223,10 @@ export type AuthStorageProtocol = {
 		AuthCredentialSnapshotEntry
 	>;
 
+	"sessions.selected": RpcMethod<
+		[provider: string, sessionId: string],
+		{ credentialId: number; explicit: boolean } | undefined
+	>;
 	"sessions.pin": RpcMethod<
 		[provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }],
 		boolean
@@ -227,12 +242,13 @@ export type AuthStorageProtocol = {
 	"sessions.release": RpcMethod<[provider: string, sessionId: string], boolean>;
 
 	"usage.reports": RpcMethod<[options?: WireUsageReportsOptions], UsageReport[] | null>;
+	/** Cache-only read of a credential's last good usage report; never fetches. */
+	"usage.cachedReport": RpcMethod<
+		[provider: Provider, credential: AuthCredential, options?: { baseUrl?: string }],
+		UsageReport | null
+	>;
 	"usage.ingestHeaders": RpcMethod<
-		[
-			provider: Provider,
-			headers: Record<string, string>,
-			options?: { sessionId?: string; baseUrl?: string; responseStatus?: number },
-		],
+		[provider: Provider, headers: Record<string, string>, options?: UsageHeaderIngestOptions],
 		boolean
 	>;
 	"usage.invalidate": RpcMethod<[provider?: string, signal?: AbortSignal], void>;
@@ -272,6 +288,20 @@ export type AuthStorageProtocol = {
 	"blocks.upsert": RpcMethod<[block: StoredCredentialBlock], void>;
 	"blocks.delete": RpcMethod<[credentialId: number, providerKey: string, blockScope: string], void>;
 	"blocks.deleteAll": RpcMethod<[credentialId: number], void>;
+
+	/** Sync read of the live config; the listener receives the config and wait events that follow it. */
+	"governor.config": RpcMethod<[listener?: (event: UsageGovernorEvent) => void], UsageGovernorConfig>;
+	"governor.configure": RpcMethod<[config: UsageGovernorConfig], void>;
+	"governor.setRoutingScope": RpcMethod<[scope: UsageRoutingScope], void>;
+	"governor.removeRoutingScope": RpcMethod<[scopeId: string], void>;
+	"governor.evaluateRoutes": RpcMethod<
+		[request: UsageRouteEvaluationRequest, signal?: AbortSignal],
+		UsageRouteEvaluation
+	>;
+	"governor.validateRoute": RpcMethod<[binding: UsageRouteBinding, request: UsageAdmissionRequest], boolean>;
+	"governor.admit": RpcMethod<[request: UsageAdmissionRequest, signal?: AbortSignal], UsageAdmissionGrant | undefined>;
+	"governor.settle": RpcMethod<[grantId: string, outcome: UsageAdmissionOutcome], void>;
+	"governor.status": RpcMethod<[options?: { provider?: string; waitLimit?: number }], UsageGovernorStatus>;
 
 	setAccountPolicies: RpcMethod<[config: AuthAccountPolicyConfig], void>;
 };

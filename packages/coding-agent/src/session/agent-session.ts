@@ -82,7 +82,14 @@ import type {
 	UsageReport,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
+import {
+	type Effort,
+	serviceTierFamily,
+	streamSimple,
+	type UsageGovernorEvent,
+	type UsageGovernorWaitReason,
+} from "@oh-my-pi/pi-ai";
+import { withUsageAdmission } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
@@ -454,7 +461,7 @@ import {
 	toRestoredQueuedMessage,
 } from "./queued-messages";
 import { checkCodexBalance, readResetMarker, resetLockPath, withResetFence } from "./reset-fence";
-import type { ServingModel } from "./retry-fallback-chains";
+import { formatRetryFallbackSelector, type ServingModel } from "./retry-fallback-chains";
 import {
 	type AdvisorCatchupOptions,
 	type AdvisorStats,
@@ -512,6 +519,7 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { SessionUsageRouting } from "./usage-routing";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -549,6 +557,7 @@ import {
 	cfgProvidersAntigravityEndpoint,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
+	cfgUsageGovernorEnabled,
 	cfgSampling,
 	cfgSkillful,
 	cfgTierAdvisor,
@@ -1013,6 +1022,15 @@ function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string,
 	return true;
 }
 
+/** Shortest governor wait a session announces, in milliseconds. */
+const USAGE_GOVERNOR_NOTICE_MIN_WAIT_MS = 5_000;
+/** Why a governed request waits, worded for the session notice. */
+const USAGE_GOVERNOR_REASON_TEXT: Record<UsageGovernorWaitReason, string> = {
+	"over-allowance": "over its usage allowance",
+	"reserve-held": "holding its reserve",
+	exhausted: "exhausted until its reset",
+};
+
 export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * Cross-thread identity token (`${homeThreadId}:${snowflake}`), unique per
@@ -1289,6 +1307,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
+	#registryAuthResolver?: Agent["getApiKey"];
+	#usageRouting?: SessionUsageRouting;
+	#usageRoutingRole?: string;
 	/** Main thread only: spots streaming spawning tool calls so a subagent worker boots ahead of dispatch. */
 	readonly #spawnSignal = isMainThread() ? new SubagentSpawnSignal() : undefined;
 	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
@@ -2168,6 +2189,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.#registryAuthResolver = config.registryAuthResolver;
 		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
 		this.#reseedTokenRate();
 		this.agent.setQueuedMessageGrouping(
@@ -2181,8 +2203,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
+		this.agent.usageAdmission = this.#modelRegistry.authStorage.governor;
 		this.#allowSessionModelFallback = config.allowSessionModelFallback === true;
 		this.#disableModelFallback = config.disableModelFallback === true;
+		const usageRouting = new SessionUsageRouting(this.settings, this.#modelRegistry);
+		this.#usageRouting = usageRouting;
+		this.#usageRoutingRole = config.routingRole;
+		this.addDisposer(() => usageRouting.dispose());
 		this.#interactivePrompts = config.interactivePrompts !== false;
 		this.#extensionRoots =
 			config.extensionRoots ??
@@ -2321,7 +2348,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
 				await this.#setModelWithProviderSessionReset(model);
 				// Only a completed explicit selection, including same-model reselection, takes ownership.
-				if (selection === "explicit") this.#prewalk.releaseHandoff();
+				if (selection === "explicit") {
+					this.#usageRoutingRole = undefined;
+					this.#prewalk.releaseHandoff();
+				}
+			},
+			setRoutingRole: role => {
+				this.#usageRoutingRole = role;
 			},
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
@@ -2361,6 +2394,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			usageRouting,
+			routingRole: () => this.#usageRoutingRole,
+			usesRegistryAuth: () =>
+				this.#registryAuthResolver !== undefined && this.agent.getApiKey === this.#registryAuthResolver,
 			configWarnings: this.configWarnings,
 			model: () => this.model,
 			contextFitsModel: (model, excludedMessage) => this.#maintenance.contextFitsModel(model, excludedMessage),
@@ -2402,6 +2439,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			deferFallbackChainValidation: this.#fallbackChainValidationDeferred,
 			unexpectedStopJudgeTimeoutMs: config.unexpectedStopJudgeTimeoutMs,
 		});
+		const configureGovernedPreparation = () => {
+			this.agent.prepareModelCallAuth = cfgUsageGovernorEnabled.get(this.settings)
+				? async (model, resolveCurrent, signal) => {
+						const usageSessionId = this.sessionId;
+						const prepared = await this.#recovery.prepareGovernedModelCall(
+							model,
+							resolveCurrent,
+							this.#usageRoutingRole
+								? { kind: "role", role: this.#usageRoutingRole }
+								: { kind: "model", selector: formatRetryFallbackSelector(model, this.thinkingLevel) },
+							signal,
+						);
+						return prepared ? { ...prepared, usageSessionId } : undefined;
+					}
+				: undefined;
+		};
+		configureGovernedPreparation();
+		this.addDisposer(this.settings.onLayersChange(configureGovernedPreparation));
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
 			if (
 				!cfgRetryUsageAwareFallback.get(this.settings) ||
@@ -2470,7 +2525,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
-		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
+		const sideStream = config.sideStreamFn ?? streamSimple;
+		this.#sideStreamFn = (model, context, options) =>
+			withUsageAdmission(this.#modelRegistry.authStorage.governor, () => sideStream(model, context, options));
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
@@ -3087,6 +3144,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		cfgProviderAppendOnlyContext.listen(this, () => this.#syncAppendOnlyContext(this.model));
 		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
+		// Governor waits this session's own requests start are announced here; in a worker the
+		// subscription is the local fan-out of the one the worker made with the main thread.
+		const unsubscribeGovernor = this.#modelRegistry.authStorage.governor?.onEvent(event =>
+			this.#handleGovernorEvent(event),
+		);
+		if (unsubscribeGovernor) this.addDisposer(unsubscribeGovernor);
 		// Re-derive the active model's effective context window when the
 		// extended-context setting flips at runtime, or a per-model compaction
 		// point moves past (or back inside) a standard window or is switched on/off: the registry
@@ -6548,6 +6611,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
+	/** Announce a governor wait this session's own request started, when it lasts at least the notice minimum. */
+	#handleGovernorEvent(event: UsageGovernorEvent): void {
+		if (event.kind !== "wait-start" || event.wait.sessionId !== this.sessionId) return;
+		const { wait } = event;
+		if (wait.untilMs === undefined) return;
+		const waitMs = wait.untilMs - wait.startedAtMs;
+		if (waitMs < USAGE_GOVERNOR_NOTICE_MIN_WAIT_MS) return;
+		const window = wait.bindingLabel ? ` ${wait.bindingLabel}` : "";
+		const usage =
+			wait.usedFraction === undefined
+				? ""
+				: ` (${Math.round(wait.usedFraction * 100)}% used${
+						wait.allowedFraction === undefined ? "" : `, ${Math.round(wait.allowedFraction * 100)}% allowed`
+					})`;
+		this.emitNotice(
+			"info",
+			`Paced ${Math.ceil(waitMs / 1000)}s on ${wait.provider}${window}: ${USAGE_GOVERNOR_REASON_TEXT[wait.reason]}${usage}.`,
+			"usage-governor",
+		);
+	}
+
 	/** Run one abortable auto-learn capture outside the primary agent loop. */
 	async runAutolearnCapture(capture: (signal: AbortSignal) => Promise<void>): Promise<void> {
 		if (this.#autolearnCaptureTask || this.#isDisposed) return;
@@ -6590,6 +6674,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  MCP discovery task in sdk.ts) must not touch the session past this point. */
 	get isDisposed(): boolean {
 		return this.#isDisposed;
+	}
+	get usageRoutingContext(): { routingScopeId: string; routingRevision: number; routingRole?: string } | undefined {
+		const scope = this.#usageRouting?.refresh();
+		if (!scope) return undefined;
+		return {
+			routingScopeId: scope.id,
+			routingRevision: scope.revision,
+			routingRole: this.#usageRoutingRole,
+		};
 	}
 
 	markMovedFromEmptySessionFile(sessionFile: string): void {
@@ -9384,14 +9477,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 			}
 
-			// Validate API key; a provider without one walks the retry fallback chain first.
-			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
-			if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
-				if (setupAbort.signal.aborted) return false;
-				throw new PromptPreflightError(
-					`No API key found for ${model.provider}.\n\n` +
-						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
+			// A custom resolver owns its own credentials and must not trigger registry resolution.
+			if (
+				!cfgUsageGovernorEnabled.get(this.settings) ||
+				(this.#registryAuthResolver !== undefined && this.agent.getApiKey === this.#registryAuthResolver)
+			) {
+				const apiKey = await logger.time("prompt:apiKey", () =>
+					this.#modelRegistry.getApiKey(model, this.sessionId),
 				);
+				if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
+					if (setupAbort.signal.aborted) return false;
+					throw new PromptPreflightError(
+						`No API key found for ${model.provider}.\n\n` +
+							`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
+					);
+				}
 			}
 
 			// Recover a previously failed/incomplete assistant turn before sending.
@@ -9768,7 +9868,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const args = parseCommandArgs(argsString);
 			// Commands that consult findScopedSettings, including /review, must see this
 			// session's cache kill switch instead of the default enabled cache.
-			const result = await withActiveSettings(this.settings, () => loaded.command.execute(args, ctx, argsString));
+			const result = await withUsageAdmission(this.#modelRegistry.authStorage.governor, () =>
+				withActiveSettings(this.settings, () => loaded.command.execute(args, ctx, argsString)),
+			);
 			// If result is a string, it's a prompt to send to LLM
 			// If void/undefined, command handled everything
 			return result ?? "";
@@ -11752,17 +11854,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (titleSignal.aborted || this.#costGate.check()) return null;
 		// The title request carries user text, so it follows this session's own credential
 		// redaction policy like its conversation requests (see `settingsAwareStreamFn`).
-		const title = await withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>
-			generateSessionTitle(
-				firstMessage,
-				this.#modelRegistry,
-				this.settings,
-				sessionId,
-				this.model,
-				provider => buildSessionMetadata(sessionId, provider, this.#modelRegistry.authStorage),
-				customSystemPrompt ?? this.#titleSystemPrompt,
-				titleSignal,
-				parentSessionId,
+		const title = await withUsageAdmission(this.#modelRegistry.authStorage.governor, () =>
+			withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>
+				generateSessionTitle(
+					firstMessage,
+					this.#modelRegistry,
+					this.settings,
+					sessionId,
+					this.model,
+					provider => buildSessionMetadata(sessionId, provider, this.#modelRegistry.authStorage),
+					customSystemPrompt ?? this.#titleSystemPrompt,
+					titleSignal,
+					parentSessionId,
+				),
 			),
 		);
 		if (await this.#sessionGenerationChanged(sessionGeneration)) return null;
@@ -13840,6 +13944,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const previousUsagePreflightReadyForNextModelCall = this.#usagePreflightReadyForNextModelCall;
 		const previousUsagePreflightReadyModel = this.#usagePreflightReadyModel;
 		const previousModel = this.model;
+		const previousUsageRoutingRole = this.#usageRoutingRole;
 		const previousThinkingLevel = this.thinkingLevel;
 		const previousAutoThinking = this.isAutoThinking;
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
@@ -13945,6 +14050,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						: `Could not restore model ${targetModelStrings[0]}`;
 				}
 			}
+			const restoredUsageRole = this.sessionManager.getLastModelChangeRole({ skipEphemeral: true });
+			this.#usageRoutingRole = explicitModel
+				? undefined
+				: options?.keepModel
+					? previousUsageRoutingRole
+					: restoredUsageRole === "temporary"
+						? undefined
+						: restoredUsageRole;
 			// The first build was read by the departing model; rebuild it for the
 			// model this session is about to adopt when that one sizes the archive
 			// differently or stands on another compaction boundary.
@@ -14107,9 +14220,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			this.#recovery.clearActiveRetryFallback();
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
+			this.#usageRoutingRole = previousUsageRoutingRole;
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();

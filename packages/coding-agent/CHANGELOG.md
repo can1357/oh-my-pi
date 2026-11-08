@@ -6,6 +6,10 @@
 
 - `logoutCredential()` now accepts an `AgentSession` instead of a model registry and session ID. Hosts must install a scoped-model refresher with `AgentSession.setScopedModelsRefresher()`; `InteractiveMode` and `InteractiveModeContext` no longer accept `refreshScopedModelsAfterLogin`.
 
+### Added
+
+- Added opt-in usage pacing, role-aware fallback and shared-quota protection, with governor status in `/usage` and `omp usage` ([#18240](https://github.com/can1357/oh-my-pi/pull/18240) by [@jwaldrip](https://github.com/jwaldrip))
+
 ### Changed
 
 - Updated system prompts with the ⁂ section marker and improved task completion guidance, including proportional verification, efficient file reading, batching independent operations, and stopping after changes are verified.

@@ -8,6 +8,7 @@ import { type AnySetting, lookup } from "./registry";
 import { cfgPlanAutosave, cfgPlanEnabled } from "../plan-mode/settings";
 import {
 	cfgRetryUsageAwareFallback,
+	cfgUsageGovernorEnabled,
 	cfgDefaultThinkingLevel,
 	normalizeProviderMaxInFlightRequests,
 	validateProviderMaxInFlightRequests,
@@ -37,6 +38,10 @@ const CONDITIONS: Record<string, () => boolean> = {
 	autolearnActive: whenSettings(s => cfgAutolearnEnabled.get(s) === true),
 	autoThinkingActive: whenSettings(s => cfgDefaultThinkingLevel.get(s) === "auto"),
 	usageAwareFallbackEnabled: whenSettings(s => cfgRetryUsageAwareFallback.get(s) === true),
+	usageReserveVisible: whenSettings(
+		s => cfgRetryUsageAwareFallback.get(s) === true || cfgUsageGovernorEnabled.get(s) === true,
+	),
+	usageGovernorEnabled: whenSettings(s => cfgUsageGovernorEnabled.get(s) === true),
 	planModeEnabled: whenSettings(s => cfgPlanEnabled.get(s)),
 	planAutosaveEnabled: whenSettings(s => cfgPlanEnabled.get(s) && cfgPlanAutosave.get(s)),
 	// These editors write the global layer; hide them so a project-supplied list is never promoted to global.

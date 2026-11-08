@@ -4,11 +4,13 @@
 
 ### Added
 
+- Added an opt-in usage governor for eligible stored accounts, with cached quota pacing and request-bound route validation ([#18240](https://github.com/can1357/oh-my-pi/pull/18240) by [@jwaldrip](https://github.com/jwaldrip))
 - Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
 - Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
 
 ### Fixed
 
+- Codex usage reports identify eligible saved chat resets and their covered limits ([#18240](https://github.com/can1357/oh-my-pi/pull/18240) by [@jwaldrip](https://github.com/jwaldrip))
 - Fixed rotated credential pools reporting a stale sibling credential's authentication error instead of the exhausted credential's usage-limit status and reset time.
 - Fixed OpenAI image edits with multiple input images failing because image parameters were duplicated.
 - Fixed Cursor-provider reads of xd:// devices failing due to incorrect device URL handling.

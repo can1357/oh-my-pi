@@ -1291,24 +1291,52 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("enforces fail-closed reserve policy without requiring a fallback candidate", async () => {
+	test.each([false, true])(
+		"enforces fail-closed reserve policy without requiring a fallback candidate (usageGovernor.enabled = %s)",
+		async governorEnabled => {
+			const settings = Settings.isolated({
+				"retry.usageAwareFallback": true,
+				"retry.usageReservePolicy": "fail-closed",
+				"usageGovernor.enabled": governorEnabled,
+			});
+			const options = buildSessionOptions("runtime-provider/runtime-model");
+			const healthSpy = vi.spyOn(options.authStorage.health, "model").mockResolvedValue({
+				state: "reserve",
+				accounts: [{ credentialId: 1, credentialType: "oauth", state: "reserve", remainingFraction: 0.05 }],
+			});
+
+			await expect(
+				createAgentSession({
+					...options,
+					settings,
+					hasUI: false,
+				}),
+			).rejects.toThrow("reserve policy is fail-closed");
+			expect(healthSpy).toHaveBeenCalledTimes(1);
+		},
+	);
+
+	test("skips health.model checks on startup when retry.usageAwareFallback is disabled with governor on", async () => {
 		const settings = Settings.isolated({
-			"retry.usageAwareFallback": true,
+			"retry.usageAwareFallback": false,
 			"retry.usageReservePolicy": "fail-closed",
+			"usageGovernor.enabled": true,
 		});
 		const options = buildSessionOptions("runtime-provider/runtime-model");
-		vi.spyOn(options.authStorage.health, "model").mockResolvedValue({
-			state: "reserve",
-			accounts: [{ credentialId: 1, credentialType: "oauth", state: "reserve", remainingFraction: 0.05 }],
-		});
+		const healthSpy = vi.spyOn(options.authStorage.health, "model");
 
-		await expect(
-			createAgentSession({
-				...options,
-				settings,
-				hasUI: false,
-			}),
-		).rejects.toThrow("reserve policy is fail-closed");
+		const { session } = await createAgentSession({
+			...options,
+			settings,
+			hasUI: false,
+		});
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-model");
+			expect(healthSpy).not.toHaveBeenCalled();
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	test("installs fallback chain for remaining deferred subagent modelPattern candidates", async () => {

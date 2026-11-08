@@ -74,6 +74,15 @@ import type {
 	ThinkingBudgets,
 	ToolChoice,
 } from "./types";
+import {
+	admitSend,
+	type AdmittedSend,
+	currentUsageAdmission,
+	type UsageAdmissionCall,
+	UsageRouteInvalidatedError,
+	validateSendRoute,
+} from "./usage-governor/admission";
+import type { UsageAdmissionOutcome, UsageRouteBinding } from "./usage-governor/types";
 import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
@@ -636,19 +645,33 @@ export const __providerInFlightForTesting = {
 	},
 };
 
-function withProviderInFlightLimit<
-	TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests" | "beforeDispatch">,
->(
+/**
+ * Dispatch fields that usage admission and the provider slot read. `apiKey` is loose because simple
+ * options carry an ApiKey resolver; only a static string is ever fingerprinted.
+ */
+type DispatchOptions = Pick<
+	StreamOptions,
+	"signal" | "maxInFlightRequests" | "beforeDispatch" | "credentialId" | "usageContext" | "usageRouteBinding"
+> & { apiKey?: unknown };
+
+/**
+ * The one chokepoint every chat send passes through: usage admission, then the provider slot when
+ * `limit` is set, then `beforeDispatch`, then `dispatch`. Admission runs before the slot so a pacing
+ * wait never holds a concurrency permit. With no active admission and no limit, the no-limit path
+ * below stays synchronous.
+ */
+function withAdmittedDispatch<TOptions extends DispatchOptions>(
 	model: Model<Api>,
 	options: TOptions | undefined,
+	limit: number | undefined,
 	dispatch: (limited: boolean) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
 	// Leaked-thinking healing folds in here — the one shared provider-dispatch
 	// chokepoint — so the loop guard (which wraps this) sees healed events and all
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
-	const limit = resolveProviderInFlightLimit(model.provider, options);
-	if (limit === undefined) {
+	const admission = currentUsageAdmission();
+	if (limit === undefined && admission?.active !== true && !options?.usageRouteBinding) {
 		options?.beforeDispatch?.();
 		return healLeakedThinking(model, dispatch(false));
 	}
@@ -677,17 +700,33 @@ function withProviderInFlightLimit<
 				});
 			}
 		};
+		let send: AdmittedSend | undefined;
+		// Nothing reaches the wire before `dispatch` returns; a failure after that may already have sent.
+		let outcome: UsageAdmissionOutcome = "not-sent";
 		try {
+			const call: UsageAdmissionCall = {
+				admission: admission ?? null,
+				credentialId: options?.credentialId,
+				bearer: typeof options?.apiKey === "string" ? options.apiKey : undefined,
+				provider: model.provider,
+				modelId: model.id,
+				baseUrl: model.baseUrl,
+				context: options?.usageContext,
+				usageRouteBinding: options?.usageRouteBinding,
+			};
+			send = await admitSend(call, options?.signal);
 			const startedWaitingAt = Date.now();
 			release = await acquireProviderInFlightSlot(model.provider, limit, options?.signal);
-			if (Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
+			if (limit !== undefined && Date.now() - startedWaitingAt >= PROVIDER_INFLIGHT_SIGNAL_FALLBACK_MS) {
 				logger.debug("Provider in-flight limit wait completed", { provider: model.provider, limit });
 			}
 			if (options?.signal?.aborted) {
 				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 			}
+			validateSendRoute(call);
 			options?.beforeDispatch?.();
-			const inner = healLeakedThinking(model, dispatch(true));
+			const inner = healLeakedThinking(model, dispatch(limit !== undefined));
+			outcome = "sent";
 			let terminalEvent: AssistantMessageEvent | undefined;
 			for await (const event of inner) {
 				if (event.type === "done" || event.type === "error") {
@@ -697,6 +736,7 @@ function withProviderInFlightLimit<
 				outer.push(event);
 				if (outer.done) {
 					await releaseBestEffort();
+					send?.settle("sent");
 					return;
 				}
 			}
@@ -705,16 +745,26 @@ function withProviderInFlightLimit<
 			// result first lets an immediate follow-up turn contend with its own
 			// still-live lease, which is particularly costly on Windows.
 			await releaseBestEffort();
+			send?.settle("sent");
 			if (!outer.done) {
 				if (terminalEvent) outer.push(terminalEvent);
 				else outer.end(result);
 			}
 		} catch (error) {
 			await releaseBestEffort();
+			send?.settle(outcome);
 			if (!outer.done) outer.fail(error);
 		}
 	})();
 	return outer;
+}
+
+function withProviderInFlightLimit<TOptions extends DispatchOptions>(
+	model: Model<Api>,
+	options: TOptions | undefined,
+	dispatch: (limited: boolean) => AssistantMessageEventStream,
+): AssistantMessageEventStream {
+	return withAdmittedDispatch(model, options, resolveProviderInFlightLimit(model.provider, options), dispatch);
 }
 
 function createVertexAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
@@ -825,6 +875,19 @@ function withResolvedModelHeaders<TApi extends Api>(
 	return outer;
 }
 
+/** Bind response observations to the credential used by this physical attempt. */
+function withResponseCredential<T extends { credentialId?: number; onResponse?: StreamOptions["onResponse"] }>(
+	options: T,
+): T {
+	const onResponse = options.onResponse;
+	if (!onResponse) return options;
+	const credentialId = options.credentialId ?? null;
+	return {
+		...options,
+		onResponse: (response, model, signal) => onResponse({ ...response, credentialId }, model, signal),
+	};
+}
+
 export function stream<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -855,9 +918,8 @@ function streamDispatch<TApi extends Api>(
 	options: OptionsForApi<TApi> | undefined,
 	limited: boolean,
 ): AssistantMessageEventStream {
-	const requestOptions = withSupportedSamplingParams(
-		model,
-		withTransportFetch(model, (options || {}) as StreamOptions),
+	const requestOptions = withResponseCredential(
+		withSupportedSamplingParams(model, withTransportFetch(model, (options || {}) as StreamOptions)),
 	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
@@ -1219,7 +1281,7 @@ function streamSimpleRequest<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const requestOptions = withSupportedSamplingParams(
+	let requestOptions = withSupportedSamplingParams(
 		model,
 		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
 	);
@@ -1235,6 +1297,7 @@ function streamSimpleRequest<TApi extends Api>(
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
+			usageRouteBinding?: UsageRouteBinding,
 		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
@@ -1244,7 +1307,7 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
+				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity, usageRouteBinding };
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
@@ -1284,6 +1347,10 @@ function streamSimpleRequest<TApi extends Api>(
 					outer.end(result);
 				}
 			} catch (error) {
+				if (error instanceof UsageRouteInvalidatedError) {
+					outer.fail(error);
+					return undefined;
+				}
 				if (
 					!emittedReplayUnsafeEvent &&
 					isRetryableUpstreamError(
@@ -1313,11 +1380,13 @@ function streamSimpleRequest<TApi extends Api>(
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
 			let oauthIdentity: OAuthRequestIdentity | undefined;
+			let usageRouteBinding: UsageRouteBinding | undefined;
 			try {
 				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+				usageRouteBinding = typeof resolved === "string" ? undefined : resolved?.usageRouteBinding;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1339,8 +1408,14 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity, usageRouteBinding);
 			if (!failure) return;
+			// An automatic route authorizes this attempt only. Recovery must prepare
+			// a fresh binding rather than letting the generic resolver rotate it.
+			if (usageRouteBinding) {
+				emitFailure(failure);
+				return;
+			}
 			let reportedFailure = failure;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
@@ -1348,6 +1423,7 @@ function streamSimpleRequest<TApi extends Api>(
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
 				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
+				let nextBinding: UsageRouteBinding | undefined;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
@@ -1356,16 +1432,20 @@ function streamSimpleRequest<TApi extends Api>(
 					resolved => {
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+						nextBinding = typeof resolved === "string" ? undefined : resolved?.usageRouteBinding;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, nextBinding);
 				if (!next) return;
 				reportedFailure =
 					preferAuthRetryError(reportedFailure.error, next.error) === reportedFailure.error
 						? reportedFailure
 						: next;
 				failure = next;
+				// A binding authorizes only the attempt that carried it, including
+				// when it was obtained during retry rather than initial resolution.
+				if (nextBinding) break;
 			}
 			emitFailure(reportedFailure);
 		})();
@@ -1377,6 +1457,7 @@ function streamSimpleRequest<TApi extends Api>(
 			streamSimpleRequest(resolvedModel, context, requestOptions),
 		);
 	}
+	requestOptions = withResponseCredential(requestOptions);
 
 	// Pi-native transport short-circuits the per-provider dispatch entirely:
 	// the gateway resolves provider + credential server-side, so we don't
@@ -1461,17 +1542,15 @@ function streamSimpleRequest<TApi extends Api>(
 
 	// GitLab Duo Workflow - IDE workflow protocol + WebSocket action bridge
 	if (model.api === "gitlab-duo-agent") {
-		// Does not route through withProviderInFlightLimit, so heal explicitly.
-		return withThinkingLoopGuard(model, requestOptions, opts => {
-			opts?.beforeDispatch?.();
-			return healLeakedThinking(
-				model,
+		// No provider slot applies to this transport, but the send still goes through the shared admission path.
+		return withThinkingLoopGuard(model, requestOptions, opts =>
+			withAdmittedDispatch(model, { ...opts, apiKey }, undefined, () =>
 				streamGitLabDuoWorkflow(model as Model<"gitlab-duo-agent">, context, {
 					...opts,
 					apiKey,
 				}),
-			);
-		});
+			),
+		);
 	}
 
 	// Kimi Code - route to dedicated handler that wraps OpenAI or Anthropic API
@@ -1805,6 +1884,8 @@ function mapOptionsForApi<TApi extends Api>(
 		apiKey: apiKey ?? (typeof options?.apiKey === "string" ? options.apiKey : undefined),
 		credentialId: options?.credentialId,
 		oauthIdentity: options?.oauthIdentity,
+		usageRouteBinding: options?.usageRouteBinding,
+		usageContext: options?.usageContext,
 		cacheRetention: options?.cacheRetention,
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,
