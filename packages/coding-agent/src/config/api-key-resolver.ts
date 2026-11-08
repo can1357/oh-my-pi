@@ -66,17 +66,13 @@ export function createApiKeyResolver(
 	const provenance = createOAuthProvenance();
 	const resolveKey = async (
 		forceRefresh: boolean | undefined,
-		signal?: AbortSignal,
-		refreshReason?: AuthApiKeyOptions["refreshReason"],
-		rejectedAccessToken?: string,
+		recovery?: Pick<AuthApiKeyOptions, "signal" | "refreshReason" | "rejectedAccessToken" | "rejectedApiKey">,
 	): Promise<ApiKeyResolution> => {
 		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
 			modelId,
 			forceRefresh,
-			signal,
-			refreshReason,
-			rejectedAccessToken,
+			...recovery,
 		});
 		provenance.record(resolved);
 		return resolved;
@@ -116,12 +112,15 @@ export function createApiKeyResolver(
 		// the re-mint: refreshing cannot help, and a `!command` credential's
 		// re-mint is a call to its issuer.
 		const verdict = AIError.credentialRejectionVerdict(error);
-		const resolved = await resolveKey(
-			verdict !== "not-credential",
+		const resolved = await resolveKey(verdict !== "not-credential", {
 			signal,
-			AIError.status(error) === 401 ? "auth-recovery" : undefined,
+			refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
 			rejectedAccessToken,
-		);
+			// The bearer this request sent. A `!command` credential's re-mint
+			// reads it to tell a refusal of the credential it has cached from a
+			// refusal of an older copy, which a mint it already made answers.
+			rejectedApiKey: previousKey,
+		});
 		// The provider said the credential was refused — structurally, or in one
 		// of its documented wordings. The retry is then worth making even when
 		// the mint handed back the same bytes: what the request has not yet

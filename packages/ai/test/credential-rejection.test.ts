@@ -185,4 +185,69 @@ describe("credentialRejectionVerdict", () => {
 		const error = new ProviderHttpError(`${rawBodyMessage(refusal)}\nrequest-id: abc123`, 401);
 		expect(credentialRejectionVerdict(error)).toBe("structured");
 	});
+
+	it("does not let a code that restates the status override a differing type", () => {
+		// Measured 2026-11-08 against Theorem's model gateway: an unknown
+		// virtual key. LiteLLM restates the status as the code, so reading the
+		// code as a class made the body's own `type` irrelevant and every 401
+		// the gateway renders qualified.
+		const body = JSON.stringify({
+			error: {
+				message: "Authentication Error, Invalid proxy server token passed.",
+				type: "token_not_found_in_db",
+				code: "401",
+			},
+		});
+		const error = new ProviderHttpError(`401 ${body}`, 401);
+		expect(credentialRejectionVerdict(error)).toBe("not-credential");
+		expect(isCredentialRejection(error)).toBe(false);
+	});
+
+	it("does not read a request-shape 401 as a credential refusal on its status code", () => {
+		const body = JSON.stringify({
+			error: { message: "request blocked", type: "invalid_request_error", code: "401" },
+		});
+		expect(credentialRejectionVerdict(new ProviderHttpError(`401 ${body}`, 401))).toBe("not-credential");
+	});
+
+	it("still reads the status restated as a code when the body names no type", () => {
+		const body = JSON.stringify({ error: { message: "Authentication Error.", code: "401" } });
+		expect(credentialRejectionVerdict(new ProviderHttpError(`401 ${body}`, 401))).toBe("structured");
+	});
+
+	it("qualifies a signature failure whose token is nowhere near its exp", () => {
+		// A locally signed junk JWT with `exp` an hour out, replayed from the
+		// gateway's own answer to it. The signal is that a refreshable
+		// credential was refused, not that one expired — nothing here reads a
+		// token's `exp`, and nothing withholds a request on one.
+		const body = JSON.stringify({
+			error: {
+				message: "This identity token is signed by no key Google publishes.",
+				type: "auth_error",
+				param: "Authorization",
+				code: "401",
+			},
+		});
+		expect(credentialRejectionVerdict(new ProviderHttpError(`401 ${body}`, 401))).toBe("structured");
+	});
+
+	it("prefers the transport's class over an error envelope inside the prose", () => {
+		// The prose object carries an `error` member, so it reads as an
+		// envelope. The transport's suffix is still the body's real class.
+		const message =
+			'401 Credential validation failed for claims {"error":{"type":"id_token"}} (type=auth_error param=Authorization code=401)';
+		expect(credentialRejectionVerdict(new ProviderHttpError(message, 401))).toBe("structured");
+	});
+
+	it("does not let an auth envelope in the prose qualify a refusal that is not one", () => {
+		const message =
+			'401 Request denied; prior check {"error":{"type":"auth_error"}} (type=invalid_request_error param=Authorization code=policy_blocked)';
+		expect(credentialRejectionVerdict(new ProviderHttpError(message, 401))).toBe("not-credential");
+	});
+
+	it("does not mistake prose that merely contains type= for the transport's class", () => {
+		const refusal = GATEWAY_REFUSALS["an identity token past its exp"]!;
+		const message = `401 upstream said type=id_token for ${JSON.stringify({ error: refusal })}`;
+		expect(credentialRejectionVerdict(new ProviderHttpError(message, 401))).toBe("structured");
+	});
 });

@@ -13,6 +13,7 @@ import type {
 import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import type { FetchImpl } from "../../types";
+import { decodeJwtPayload, jwtExpiryMs } from "../../utils/jwt";
 import { HOOKS } from "../hooks";
 import type {
 	AfterExchangeHook,
@@ -87,23 +88,7 @@ export function jsonPath(body: unknown, path: string): unknown {
 	return current;
 }
 
-/** Decodes a JWT payload without verification; `null` for malformed tokens. */
-export function decodeJwtPayload(token: string): Record<string, unknown> | null {
-	const parts = token.split(".");
-	if (parts.length !== 3 || !parts[1]) return null;
-	try {
-		const decoded = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as unknown;
-		return decoded !== null && typeof decoded === "object" ? (decoded as Record<string, unknown>) : null;
-	} catch {
-		return null;
-	}
-}
-
-/** Epoch ms of a JWT `exp` claim minus `skewMs`, or undefined when absent. */
-export function jwtExpiryMs(token: string, skewMs: number): number | undefined {
-	const exp = decodeJwtPayload(token)?.exp;
-	return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 - skewMs : undefined;
-}
+export { decodeJwtPayload, jwtExpiryMs };
 
 function scalarString(value: unknown): string | undefined {
 	if (typeof value === "string") return value.length > 0 ? value : undefined;

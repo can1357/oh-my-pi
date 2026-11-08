@@ -1,10 +1,13 @@
 /**
  * Did the provider refuse the *credential* a request carried?
  *
- * A credential minted by a `!command` has no trustworthy expiry a client can
- * read: a JWT's `exp` is a wall-clock instant, and a process has no trusted
- * wall clock. The provider, on the other hand, answers the question exactly —
- * with a 401. This module reads that answer.
+ * This is a **refreshable-failure** signal, not expiry detection. It never
+ * predicts that a credential has gone stale and never withholds a request: a
+ * credential is sent until the provider refuses it, and only then does this
+ * module read what the refusal says. A credential minted by a `!command` has
+ * no trustworthy expiry a client can read — a JWT's `exp` is a wall-clock
+ * instant, and a process has no trusted wall clock — whereas the provider
+ * answers the question exactly, with a 401.
  *
  * **The signal is the provider's own structured error class, not its prose.**
  * An error body's `type`/`code` is a contract; its `message` is wording that
@@ -32,7 +35,10 @@
  * - `401 … (type=auth_error param=Authorization code=401)` — the fields
  *   re-rendered by `formatCapturedHttpErrorParts` for the OpenAI wires.
  *
- * Prose is consulted only when neither rendering yields a class.
+ * Prose is consulted only when neither rendering yields a class, and the
+ * transport's own rendering outranks any JSON embedded in the provider's
+ * prose: a provider puts an object inside its message text, and that object
+ * is not the envelope the transport rendered.
  */
 import { extractHttpStatusFromError, isRecord } from "@oh-my-pi/pi-utils";
 
@@ -71,10 +77,9 @@ const AUTH_ERROR_TYPES: Record<string, true> = {
 /**
  * `code` values that name an authentication failure. OpenAI reports a rejected
  * key as `type=invalid_request_error` with `code=invalid_api_key`, so the code
- * has to qualify a body on its own; LiteLLM sends the bare status as the code.
+ * has to qualify a body on its own.
  */
 const AUTH_ERROR_CODES: Record<string, true> = {
-	"401": true,
 	authentication_error: true,
 	auth_error: true,
 	invalid_api_key: true,
@@ -85,6 +90,17 @@ const AUTH_ERROR_CODES: Record<string, true> = {
 	unauthenticated: true,
 	unauthorized: true,
 };
+
+/**
+ * `code` values that only restate the HTTP status. LiteLLM sends the bare
+ * status as the code, so `code=401` adds nothing the 401 did not already say.
+ * Measured 2026-11-08 against Theorem's model gateway: an unknown virtual key
+ * answers `type=token_not_found_in_db code=401`, and reading that code as an
+ * authentication class made the body's own, differing `type` irrelevant —
+ * every 401 the gateway renders qualified, and each cost an issuer call a
+ * fresh credential could not have fixed.
+ */
+const BARE_STATUS_CODES: Record<string, true> = { "401": true };
 
 /**
  * Documented credential refusals, used only when a 401 carries no error class.
@@ -187,8 +203,11 @@ function readErrorClassFromJson(message: string): ErrorClass | undefined {
 
 /**
  * `(type=… param=… code=…)`, the form `formatCapturedHttpErrorParts` renders
- * for the OpenAI wires. The last occurrence wins: a provider's own message can
- * carry an earlier one, and the transport appends its own at the end.
+ * for the OpenAI wires and `withSuffix` appends at the end of the message.
+ * The last such group wins: a provider's own message can carry an earlier one,
+ * and the transport appends its own after it. Only a parenthesised group
+ * counts, so prose that merely contains `type=` is not mistaken for the
+ * transport's class.
  *
  * `param` is read as a candidate code only when no `code` is present. Before
  * this module existed that renderer labelled fields by position after dropping
@@ -197,6 +216,7 @@ function readErrorClassFromJson(message: string): ErrorClass | undefined {
  * and a message rendered by an older build still classifies. Only a value in
  * the auth table qualifies, so an ordinary `param=Authorization` says nothing.
  */
+const RENDERED_GROUP = /\(([^()]*)\)/g;
 const RENDERED_TYPE = /\btype=([^\s)]+)/g;
 const RENDERED_PARAM = /\bparam=([^\s)]+)/g;
 const RENDERED_CODE = /\bcode=([^\s)]+)/g;
@@ -208,19 +228,41 @@ function lastMatch(pattern: RegExp, message: string): string | undefined {
 	return found;
 }
 
+/** The content of the last parenthesised group that carries a rendered field. */
+function lastRenderedGroup(message: string): string | undefined {
+	RENDERED_GROUP.lastIndex = 0;
+	let found: string | undefined;
+	for (let match = RENDERED_GROUP.exec(message); match !== null; match = RENDERED_GROUP.exec(message)) {
+		const group = match[1];
+		if (group !== undefined && /\b(?:type|param|code)=/.test(group)) found = group;
+	}
+	return found;
+}
+
 /** Read the error class out of the re-rendered `(type=… code=…)` suffix. */
 function readErrorClassFromRendering(message: string): ErrorClass | undefined {
-	const type = lastMatch(RENDERED_TYPE, message);
-	const code = lastMatch(RENDERED_CODE, message) ?? lastMatch(RENDERED_PARAM, message);
+	const group = lastRenderedGroup(message);
+	if (group === undefined) return undefined;
+	const type = lastMatch(RENDERED_TYPE, group);
+	const code = lastMatch(RENDERED_CODE, group) ?? lastMatch(RENDERED_PARAM, group);
 	if (type === undefined && code === undefined) return undefined;
 	return { type, code };
 }
 
+/**
+ * Whether an error class names an authentication failure.
+ *
+ * A `code` qualifies a body on its own only when it names a class of its own.
+ * A code that merely restates the status does not override a `type` the body
+ * did state: the provider named the failure, and a differing name is its
+ * answer, not noise to be talked over.
+ */
 function namesAuthFailure({ type, code }: ErrorClass): boolean {
-	return (
-		(type !== undefined && AUTH_ERROR_TYPES[type.toLowerCase()] === true) ||
-		(code !== undefined && AUTH_ERROR_CODES[code.toLowerCase()] === true)
-	);
+	if (type !== undefined && AUTH_ERROR_TYPES[type.toLowerCase()] === true) return true;
+	if (code === undefined) return false;
+	const normalized = code.toLowerCase();
+	if (AUTH_ERROR_CODES[normalized] === true) return true;
+	return type === undefined && BARE_STATUS_CODES[normalized] === true;
 }
 
 /**
@@ -268,7 +310,7 @@ export function credentialRejectionVerdict(error: unknown): CredentialVerdict {
 	if (onObject && namesAuthFailure(onObject)) return "structured";
 	const message = errorText(error);
 	if (message === undefined) return "status";
-	const errorClass = readErrorClassFromJson(message) ?? readErrorClassFromRendering(message);
+	const errorClass = readErrorClassFromRendering(message) ?? readErrorClassFromJson(message);
 	if (errorClass) return namesAuthFailure(errorClass) ? "structured" : "not-credential";
 	return CREDENTIAL_REFUSAL_TEXT.some(pattern => pattern.test(message)) ? "text" : "status";
 }

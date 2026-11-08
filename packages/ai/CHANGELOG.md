@@ -10,6 +10,8 @@
 
 - A credential re-minted because the provider said it refused the one a request sent is now tried, even when the mint hands back the same bytes; a request still gets exactly one such retry
 - A provider error's `type`, `param` and `code` keep their own labels in the error message: an absent field used to rename the ones after it, so an OpenAI rejected key (`type=invalid_request_error`, no `param`, `code=invalid_api_key`) reached every reader as `param=invalid_api_key`
+- A 401 whose body names an error `type` of its own is read by that name: LiteLLM restates the HTTP status as `error.code`, so `code=401` no longer overrules a differing `type` and refusals like `token_not_found_in_db` stop counting as authentication failures
+- An error envelope a provider embeds in its own message text no longer outranks the class the transport rendered, in either direction, and the rendered class is read from the transport's own `(type=… code=…)` group rather than from any `type=` in the prose
 
 ## [18.18.1] - 2026-11-08
 

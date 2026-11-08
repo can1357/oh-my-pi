@@ -512,6 +512,13 @@ export type AuthApiKeyOptions = {
 	 * tokens every needless exchange revokes the token its peers are using.
 	 */
 	rejectedAccessToken?: string;
+	/**
+	 * The bearer the provider rejected with a 401, when this resolve is that
+	 * 401's recovery. The OAuth cascade ignores it; the coding-agent registry
+	 * reads it so a `!command` credential minted after the refusal was issued
+	 * answers that refusal instead of costing a second call to the issuer.
+	 */
+	rejectedApiKey?: string;
 	/** When false, select as `sessionId` would without recording the choice as that session's sticky credential. */
 	recordAffinity?: boolean;
 };

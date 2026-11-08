@@ -1,3 +1,4 @@
+import { jwtExpiryMs } from "@oh-my-pi/pi-ai/utils/jwt";
 import { executeShell } from "@oh-my-pi/pi-natives";
 import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 
@@ -35,6 +36,16 @@ function commandKey(valueConfig: string): string {
 	return valueConfig.slice(1).trim();
 }
 
+/**
+ * The key a command-backed value shares its cached result, its in-flight run
+ * and its re-mint under. `!helper` and `! helper` are one command, so callers
+ * that compare two configured values — "is this the credential I am already
+ * re-minting?" — must compare this and not the raw configuration text.
+ */
+export function commandConfigKey(valueConfig: string | undefined): string | undefined {
+	return isCommandConfigValue(valueConfig) ? commandKey(valueConfig) : undefined;
+}
+
 /** Invalidate one command-backed value, including its failure backoff and pending cache generation. */
 export function invalidateCommandConfig(valueConfig: string | undefined): void {
 	if (!isCommandConfigValue(valueConfig)) return;
@@ -69,6 +80,26 @@ export function invalidateAllCommandConfigs(): void {
  * ten retries — a mint can be an IAM `generateIdToken` call, and a burst of
  * those per session across a fleet is what this bounds.
  *
+ * `rejected` is the credential the refused request actually sent, and it
+ * extends that bound past the moment the shared run settles. Refusals of one
+ * credential arrive staggered, not only together: a request already on the
+ * wire when the mint lands is refused after it, and re-minting again for that
+ * refusal costs an issuer call for a credential the caller has in hand. When
+ * the cached value is *not* the one the refusal names, the refused request
+ * never sent it, so it is returned as-is and nothing is minted.
+ *
+ * Value identity, not recency, is what makes that safe. "Minted within the
+ * last second" would also match a mint that raced the refusal — one issued
+ * against the very bytes now cached — and the retry it allowed would be
+ * refused again for certain. A cached value that differs from the refused one
+ * cannot be the one that refusal names.
+ *
+ * The reuse is bounded by the cached token's own `exp`, when it states one:
+ * past it, the issuer is asked again rather than handing back a credential
+ * whose own claim says it is finished. That read decides whether to *mint*,
+ * never whether to *send* — a credential is sent until the provider refuses
+ * it, which is the signal this whole path is built on.
+ *
  * The shared run is decisive for every waiter: a mint that fails resolves them
  * all to `undefined` rather than leaving them waiting, and the entry is
  * dropped as soon as the run settles, so the next refusal starts a fresh
@@ -80,11 +111,13 @@ export function invalidateAllCommandConfigs(): void {
  * {@link invalidateCommandConfig}; this one is for the moment a provider has
  * refused the credential and the fresh value is needed now.
  */
-export function remintCommandConfig(valueConfig: string | undefined): Promise<string | undefined> {
+export function remintCommandConfig(valueConfig: string | undefined, rejected?: string): Promise<string | undefined> {
 	if (!isCommandConfigValue(valueConfig)) return Promise.resolve(undefined);
 	const command = commandKey(valueConfig);
 	const joined = commandRemintInFlight.get(command);
 	if (joined) return joined;
+	const settled = settledMintFor(command, rejected);
+	if (settled !== undefined) return Promise.resolve(settled);
 	invalidateCommandConfig(valueConfig);
 	// `executeCommand` registers its run in `commandInFlight` before its first
 	// await, so every later resolve of this command joins it too.
@@ -94,6 +127,20 @@ export function remintCommandConfig(valueConfig: string | undefined): Promise<st
 	});
 	commandRemintInFlight.set(command, tracked);
 	return tracked;
+}
+
+/**
+ * The already-minted credential that answers this refusal, or undefined when
+ * the issuer has to be asked. See {@link remintCommandConfig}.
+ */
+function settledMintFor(command: string, rejected: string | undefined): string | undefined {
+	if (rejected === undefined) return undefined;
+	const cached = commandResultCache.get(command);
+	// The refusal names the cached value: this is the mint the provider has
+	// already answered, so reusing it would spend the retry on a certainty.
+	if (cached === undefined || cached === rejected) return undefined;
+	const expiry = jwtExpiryMs(cached);
+	return expiry !== undefined && expiry <= Date.now() ? undefined : cached;
 }
 
 async function executeCommand(valueConfig: string): Promise<string | undefined> {

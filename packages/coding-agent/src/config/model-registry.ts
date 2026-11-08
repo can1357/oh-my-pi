@@ -65,6 +65,7 @@ import {
 	resolveModelOverrideWithAliases,
 } from "./custom-models";
 import {
+	commandConfigKey,
 	createConfigHeaderResolver,
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
@@ -522,9 +523,13 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * The provider refused the credential, so re-mint it.
+	 * The provider refused the credential, so re-mint it. `rejected` is the
+	 * bearer the refused request sent; it lets the mint tell a refusal issued
+	 * against the cached credential from one issued against an older copy.
 	 *
-	 * Only the provider's `apiKey` command is run here, and only through
+	 * Only the provider's `apiKey` command is run here, and only when the auth
+	 * cascade actually selects it (see
+	 * {@link ModelRegistry.#selectedProviderApiKeyCommand}), and only through
 	 * `remintCommandConfig`, which is single-flight per command: a session's
 	 * in-flight requests share one credential, so a provider that starts
 	 * refusing it refuses them together, and invalidate-then-resolve ran the
@@ -533,40 +538,66 @@ export class ModelRegistry {
 	 * again only where a request materializes them, so refreshing one model's
 	 * credential never calls another model's issuer.
 	 *
-	 * On a mirror the owner's cache is the one the retry reads, so the owner
-	 * does the re-mint and this awaits it; the mirror still drops its own
-	 * copies, which feed the headers it renders locally.
+	 * On a mirror the owner's cache is the one the retry reads and the owner
+	 * holds the authoritative cascade, so the owner decides and does the
+	 * re-mint and this awaits it; the mirror still drops its own copies, which
+	 * feed the headers it renders locally.
 	 */
-	async #remintProviderCommandConfigs(provider: string): Promise<void> {
-		const apiKey = this.#customProviderApiKeys.get(provider);
-		const remote = this.#owner?.remintCommandConfigs(provider);
+	async #remintProviderCommandConfigs(provider: string, rejected?: string): Promise<void> {
+		const owner = this.#owner;
+		if (owner) {
+			const remote = owner.remintCommandConfigs(provider, rejected);
+			this.#invalidateLocalProviderCommandConfigs(provider);
+			this.#recordMirrorChange({ kind: "invalidateCommands", provider });
+			await remote;
+			return;
+		}
+		const apiKey = this.#selectedProviderApiKeyCommand(provider);
 		// Everything but the credential being re-minted: invalidating that one
 		// would drop the shared run the concurrent refusals are meant to join.
 		this.#invalidateLocalProviderCommandConfigs(provider, apiKey);
 		this.#recordMirrorChange({ kind: "invalidateCommands", provider });
-		if (remote) {
-			invalidateCommandConfig(apiKey);
-			await remote;
-			return;
-		}
-		await remintCommandConfig(apiKey);
+		await remintCommandConfig(apiKey, rejected);
+	}
+
+	/**
+	 * The provider's command-backed `apiKey`, but only when the auth cascade
+	 * would serve the request from it.
+	 *
+	 * A `!command` apiKey is one tier of the cascade (runtime `--api-key` →
+	 * config → OAuth → login key → env → stored key). When a higher tier owns
+	 * the provider, the configured command never produced the credential the
+	 * 401 refused, so running it calls an issuer for nothing and makes the
+	 * caller wait out the command's timeout — up to ten seconds — before its
+	 * own error surfaces. Recovery re-mints the source that was selected.
+	 */
+	#selectedProviderApiKeyCommand(provider: string): string | undefined {
+		const apiKey = this.#customProviderApiKeys.get(provider);
+		if (!isCommandConfigValue(apiKey)) return undefined;
+		return this.authStorage.keys.source(provider)?.kind === "config" ? apiKey : undefined;
 	}
 
 	/**
 	 * Owner side of {@link ModelRegistryOwner.remintCommandConfigs}: a mirror's
 	 * request that this registry re-mint `provider`'s refused credential.
 	 */
-	remintCommandConfigs(provider: string): Promise<void> {
-		return this.#remintProviderCommandConfigs(provider);
+	remintCommandConfigs(provider: string, rejected?: string): Promise<void> {
+		return this.#remintProviderCommandConfigs(provider, rejected);
 	}
 
 	/**
 	 * Drop only this process's cached results for `provider`'s command-backed
 	 * values, leaving `keep` — the credential a caller is re-minting — alone.
+	 *
+	 * Commands are compared canonically. `!helper` as the apiKey and
+	 * `! helper` as a header are one command with one cached result and one
+	 * shared re-mint, and comparing the raw configuration text made each
+	 * refusal drop the run every other refusal was waiting to join.
 	 */
 	#invalidateLocalProviderCommandConfigs(provider: string, keep?: string): void {
+		const keepKey = commandConfigKey(keep);
 		const drop = (config: string | undefined): void => {
-			if (config !== keep) invalidateCommandConfig(config);
+			if (keepKey === undefined || commandConfigKey(config) !== keepKey) invalidateCommandConfig(config);
 		};
 		drop(this.#customProviderApiKeys.get(provider));
 		const configs = this.#commandConfigsByProvider.get(provider);
@@ -3779,7 +3810,7 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		if (options?.forceRefresh) await this.#remintProviderCommandConfigs(provider);
+		if (options?.forceRefresh) await this.#remintProviderCommandConfigs(provider, options.rejectedApiKey);
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
@@ -4264,9 +4295,11 @@ export interface ModelRegistryOwner {
 	 * Re-mint the owner's command-backed credential for `provider` after it was
 	 * refused, and resolve once the fresh value is cached. A request, not a
 	 * notification: the owner holds the resolver that serves the retry, so the
-	 * retry must not race ahead of the value it asked for.
+	 * retry must not race ahead of the value it asked for. `rejected` is the
+	 * bearer the refused request sent, so a mint the owner already settled can
+	 * answer a refusal that cannot have carried it.
 	 */
-	remintCommandConfigs(provider: string): Promise<void>;
+	remintCommandConfigs(provider: string, rejected?: string): Promise<void>;
 	/** {@link ModelRegistry.refresh} on the owner. */
 	refresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): Promise<void>;
 	/** {@link ModelRegistry.refreshProvider} on the owner. */
