@@ -135,6 +135,7 @@ describe("a `!command` credential the provider refuses", () => {
 		counterFile: string,
 		accept: (bearer: string | undefined) => boolean,
 		extraProviderConfig: Record<string, unknown> = {},
+		refuse: () => Response = gatewayRefusal,
 	): Rig {
 		const modelsPath = path.join(tempDir, "models.json");
 		fs.writeFileSync(
@@ -161,7 +162,7 @@ describe("a `!command` credential the provider refuses", () => {
 			const auth = headers.Authorization;
 			const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : auth;
 			seen.push(bearer ?? "<none>");
-			return accept(bearer) ? okStream() : gatewayRefusal();
+			return accept(bearer) ? okStream() : refuse();
 		};
 
 		/** Resolve and seed a turn now; the returned function sends it. */
@@ -491,20 +492,114 @@ describe("a `!command` credential the provider refuses", () => {
 		expect(rig.mints() - mintsBefore).toBe(1);
 	});
 
-	test("re-mints rather than reuse a cached credential past its own exp", async () => {
+	test("reuses a replacement the provider has not refused, whatever the client clock says of it", async () => {
 		const counterFile = path.join(tempDir, "mints");
 		const tokenFile = path.join(tempDir, "token");
 		fs.writeFileSync(counterFile, "");
-		// A JWT whose `exp` is in the past, with a junk signature: only the
-		// claim is read, and only to decide whether to mint again.
+		// A JWT whose `exp` passed a minute ago, with a junk signature. Every
+		// mint prints this same one, so the replacement is byte-identical to
+		// the credential it replaces and equally "expired" by the local clock.
 		fs.writeFileSync(tokenFile, junkJwt(Math.floor(Date.now() / 1000) - 60));
-		const rig = buildRig(mintFromFile(counterFile, tokenFile), counterFile, () => false);
+		const config = mintFromFile(counterFile, tokenFile);
+		const rig = buildRig(config, counterFile, () => false);
 
-		const cached = await rig.registry.getApiKey(rig.model);
+		await rig.registry.getApiKey(rig.model);
 		const mintsBefore = rig.mints();
-		// A refusal of some other bearer: the cached credential is not the one
-		// it names, so only its own `exp` stands between it and reuse.
-		expect(await remintCommandConfig(mintFromFile(counterFile, tokenFile), "a-bearer-nobody-cached")).toBe(cached);
+		// Generation 1 is refused: the issuer is asked, and answers with the
+		// same bytes as generation 2.
+		const replacement = await remintCommandConfig(config, 1);
+		expect(rig.mints() - mintsBefore).toBe(1);
+
+		// A second request that also sent generation 1. Generation 2 is past
+		// the `exp` it states and the clock agrees — and a clock running fast
+		// would say so of a credential the provider is accepting. Only a
+		// refusal of generation 2 may disqualify it, and none has arrived.
+		expect(await remintCommandConfig(config, 1)).toBe(replacement);
+		expect(rig.mints() - mintsBefore).toBe(1);
+	});
+
+	test("does not retry a replacement the provider already refused", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "first-token");
+		const rig = buildRig(mintFromFile(counterFile, tokenFile), counterFile, bearer => bearer === "third-token");
+
+		await rig.registry.getApiKey(rig.model);
+		const mintsBefore = rig.mints();
+		// Two operations resolved before any refusal, so both carry the first
+		// credential.
+		const first = await rig.prepare();
+		const late = await rig.prepare();
+
+		fs.writeFileSync(tokenFile, "second-token");
+		// The first one's re-mint produces the second credential, and the
+		// provider refuses that too; this operation has no retry left.
+		expect((await first()).errorStatus).toBe(401);
+
+		fs.writeFileSync(tokenFile, "third-token");
+		// The late refusal still names the first credential. The second is
+		// newer, but the provider has answered it, so handing it over would
+		// spend this operation's one retry on a certainty.
+		expect((await late()).stopReason).not.toBe("error");
+		expect(rig.seen).toEqual(["first-token", "second-token", "first-token", "third-token"]);
+		expect(rig.mints() - mintsBefore).toBe(2);
+	});
+
+	test("re-mints once across settlement when the issuer renews to the same bytes", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "unchanging-token");
+		// Every mint prints the same bytes, so nothing about the credential
+		// itself says which mint produced it. The provider refuses each turn's
+		// first request and accepts its retry.
+		let seenRequests = 0;
+		const rig = buildRig(mintFromFile(counterFile, tokenFile), counterFile, () => seenRequests++ % 2 === 1);
+
+		await rig.registry.getApiKey(rig.model);
+		const mintsBefore = rig.mints();
+
+		// All five resolve before any refusal, so all five carry the first
+		// credential; they are then sent one at a time, so every refusal after
+		// the first lands once the previous turn's re-mint has settled and
+		// there is no in-flight run left to join.
+		const sends = await Promise.all(Array.from({ length: 5 }, () => rig.prepare()));
+		for (const send of sends) {
+			expect((await send()).stopReason).not.toBe("error");
+		}
+
+		expect(rig.seen.length).toBe(10);
+		// One mint for the wave. The four later refusals name a generation
+		// older than the one cached, which the identical bytes cannot show.
+		expect(rig.mints() - mintsBefore).toBe(1);
+	});
+
+	test("sends the retry its mint earned when the 401 carries no error class", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "unchanging-token");
+		// A 401 with no body at all: nothing states the credential was
+		// refused, so the recovery mints on the bare status alone.
+		let seenRequests = 0;
+		const rig = buildRig(
+			mintFromFile(counterFile, tokenFile),
+			counterFile,
+			() => seenRequests++ >= 1,
+			{},
+			() => new Response(null, { status: 401 }),
+		);
+
+		await rig.registry.getApiKey(rig.model);
+		const mintsBefore = rig.mints();
+		const result = await rig.turn();
+
+		expect(result.stopReason).not.toBe("error");
+		// The mint ran, so the credential's generation advanced and the retry
+		// is worth sending — even though the issuer handed back the same bytes
+		// and nothing in the refusal said the credential was the problem.
+		expect(rig.seen).toEqual(["unchanging-token", "unchanging-token"]);
 		expect(rig.mints() - mintsBefore).toBe(1);
 	});
 

@@ -4,6 +4,7 @@ import {
 	createOAuthProvenance,
 	markAfterRemint,
 	markAfterSiblingWait,
+	resolvedCredentialGeneration,
 } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
@@ -66,7 +67,10 @@ export function createApiKeyResolver(
 	const provenance = createOAuthProvenance();
 	const resolveKey = async (
 		forceRefresh: boolean | undefined,
-		recovery?: Pick<AuthApiKeyOptions, "signal" | "refreshReason" | "rejectedAccessToken" | "rejectedApiKey">,
+		recovery?: Pick<
+			AuthApiKeyOptions,
+			"signal" | "refreshReason" | "rejectedAccessToken" | "rejectedCredentialGeneration"
+		>,
 	): Promise<ApiKeyResolution> => {
 		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
@@ -77,7 +81,7 @@ export function createApiKeyResolver(
 		provenance.record(resolved);
 		return resolved;
 	};
-	return async ({ lastChance, error, signal, previousKey }) => {
+	return async ({ lastChance, error, signal, previousKey, previousGeneration }) => {
 		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
 			return resolveKey(undefined);
@@ -103,7 +107,13 @@ export function createApiKeyResolver(
 				// auth decline can instead mean a peer refreshed the bearer.
 				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 			}
-			const resolved = await resolveKey(undefined);
+			// This operation has already spent its re-mint, so the refusal that
+			// sent it here would otherwise go unrecorded — and the generation it
+			// refused would stay eligible for a peer's retry. Name it; this
+			// resolve does not force a refresh, so nothing is minted.
+			const resolved = await resolveKey(undefined, {
+				rejectedCredentialGeneration: refusedGeneration(error, previousGeneration),
+			});
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
 		// Step (b): the credential itself may be the problem, so re-mint it and
@@ -116,16 +126,29 @@ export function createApiKeyResolver(
 			signal,
 			refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
 			rejectedAccessToken,
-			// The bearer this request sent. A `!command` credential's re-mint
-			// reads it to tell a refusal of the credential it has cached from a
-			// refusal of an older copy, which a mint it already made answers.
-			rejectedApiKey: previousKey,
+			// The generation of the credential this request sent. A `!command`
+			// credential's re-mint reads it to tell a refusal of the mint it has
+			// cached from a refusal of an older one, which that mint answers.
+			rejectedCredentialGeneration: previousGeneration,
 		});
-		// The provider said the credential was refused — structurally, or in one
-		// of its documented wordings. The retry is then worth making even when
-		// the mint handed back the same bytes: what the request has not yet
-		// tried is a credential minted after that refusal, and the bytes do not
-		// say whether the issuer renewed it.
-		return verdict === "structured" || verdict === "text" ? markAfterRemint(resolved) : resolved;
+		// A credential was actually minted for this refusal — the slot's
+		// generation advanced past the one the request sent. The retry is worth
+		// making even when the mint handed back the same bytes: what the request
+		// has not tried is a credential minted after that refusal, and the bytes
+		// do not say whether the issuer renewed it. Without a generation to
+		// compare, the provider's own wording decides, as it did before.
+		const minted =
+			previousGeneration !== undefined &&
+			(resolvedCredentialGeneration(resolved) ?? previousGeneration) > previousGeneration;
+		return minted || verdict === "structured" || verdict === "text" ? markAfterRemint(resolved) : resolved;
 	};
+}
+
+/**
+ * The generation a rotation step should record as refused: only when the error
+ * says the credential itself was refused, matching the gate that mints one.
+ */
+function refusedGeneration(error: unknown, previousGeneration: number | undefined): number | undefined {
+	if (previousGeneration === undefined) return undefined;
+	return AIError.credentialRejectionVerdict(error) === "not-credential" ? undefined : previousGeneration;
 }

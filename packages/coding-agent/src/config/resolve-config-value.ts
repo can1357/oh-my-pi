@@ -1,12 +1,35 @@
-import { jwtExpiryMs } from "@oh-my-pi/pi-ai/utils/jwt";
 import { executeShell } from "@oh-my-pi/pi-natives";
 import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 
 const COMMAND_FAILURE_RETRY_MS = 30_000;
-const commandResultCache = new Map<string, string>();
+
+/**
+ * One command's cached stdout and the generation of the mint that produced it.
+ *
+ * Two runs of an issuer can hand back byte-identical credentials, so the bytes
+ * cannot say which run produced the copy a request sent. The generation can:
+ * it counts this command's mints, monotonically, and never repeats.
+ */
+interface CommandCredential {
+	value: string;
+	generation: number;
+}
+
+const commandResultCache = new Map<string, CommandCredential>();
 const commandFailureRetryAt = new Map<string, number>();
-const commandInFlight = new Map<string, Promise<string | undefined>>();
-const commandGeneration = new Map<string, number>();
+const commandInFlight = new Map<string, Promise<CommandCredential | undefined>>();
+/** Bumped by every invalidation, so a run that started before one cannot cache its result. */
+const commandInvalidationEpoch = new Map<string, number>();
+/** The last generation handed out per command; monotonic, and never reset by invalidation. */
+const commandMintedGeneration = new Map<string, number>();
+/**
+ * The highest generation of a command's credential a provider has refused.
+ *
+ * A refusal names the generation whose bytes its request sent, so this is the
+ * watermark below which no cached credential may answer a later refusal: the
+ * generation the provider has already answered, and every older copy.
+ */
+const commandRefusedGeneration = new Map<string, number>();
 
 /**
  * The one re-mint in flight per command. A credential is shared by every
@@ -46,7 +69,7 @@ export function commandConfigKey(valueConfig: string | undefined): string | unde
 	return isCommandConfigValue(valueConfig) ? commandKey(valueConfig) : undefined;
 }
 
-/** Invalidate one command-backed value, including its failure backoff and pending cache generation. */
+/** Invalidate one command-backed value, including its failure backoff and pending cache epoch. */
 export function invalidateCommandConfig(valueConfig: string | undefined): void {
 	if (!isCommandConfigValue(valueConfig)) return;
 	const command = commandKey(valueConfig);
@@ -54,7 +77,7 @@ export function invalidateCommandConfig(valueConfig: string | undefined): void {
 	commandFailureRetryAt.delete(command);
 	commandInFlight.delete(command);
 	commandRemintInFlight.delete(command);
-	commandGeneration.set(command, (commandGeneration.get(command) ?? 0) + 1);
+	commandInvalidationEpoch.set(command, (commandInvalidationEpoch.get(command) ?? 0) + 1);
 }
 
 /** Invalidate every command-backed value without cancelling shared in-flight processes. */
@@ -64,12 +87,28 @@ export function invalidateAllCommandConfigs(): void {
 		...commandFailureRetryAt.keys(),
 		...commandInFlight.keys(),
 	])) {
-		commandGeneration.set(command, (commandGeneration.get(command) ?? 0) + 1);
+		commandInvalidationEpoch.set(command, (commandInvalidationEpoch.get(command) ?? 0) + 1);
 	}
 	commandResultCache.clear();
 	commandFailureRetryAt.clear();
 	commandInFlight.clear();
 	commandRemintInFlight.clear();
+}
+
+/**
+ * Record that the provider refused the credential of `generation`.
+ *
+ * This is the only fact that disqualifies a minted credential. A provider
+ * refusing a generation is the whole of it: no clock is consulted, and no
+ * claim the credential makes about its own lifetime is read. A client has no
+ * trusted clock, and one running fast turned a wave of refusals into one mint
+ * per refusal and threw away replacements the provider was accepting.
+ */
+export function refuseCommandGeneration(valueConfig: string | undefined, generation: number | undefined): void {
+	if (generation === undefined || !isCommandConfigValue(valueConfig)) return;
+	const command = commandKey(valueConfig);
+	const refused = commandRefusedGeneration.get(command);
+	if (refused === undefined || generation > refused) commandRefusedGeneration.set(command, generation);
 }
 
 /**
@@ -80,25 +119,24 @@ export function invalidateAllCommandConfigs(): void {
  * ten retries — a mint can be an IAM `generateIdToken` call, and a burst of
  * those per session across a fleet is what this bounds.
  *
- * `rejected` is the credential the refused request actually sent, and it
- * extends that bound past the moment the shared run settles. Refusals of one
- * credential arrive staggered, not only together: a request already on the
- * wire when the mint lands is refused after it, and re-minting again for that
- * refusal costs an issuer call for a credential the caller has in hand. When
- * the cached value is *not* the one the refusal names, the refused request
- * never sent it, so it is returned as-is and nothing is minted.
+ * `rejectedGeneration` is the generation of the credential the refused request
+ * sent, and it extends that bound past the moment the shared run settles.
+ * Refusals of one credential arrive staggered, not only together: a request
+ * already on the wire when the mint lands is refused after it, and minting
+ * again for that refusal costs an issuer call for a credential the caller has
+ * in hand. A mint that came *after* the generation a refusal names, and that
+ * no provider has refused in its turn, answers it; nothing is minted.
  *
- * Value identity, not recency, is what makes that safe. "Minted within the
- * last second" would also match a mint that raced the refusal — one issued
- * against the very bytes now cached — and the retry it allowed would be
- * refused again for certain. A cached value that differs from the refused one
- * cannot be the one that refusal names.
+ * Ordering, not bytes, is what makes that safe. An issuer may hand back the
+ * same bytes twice, so "the cached value differs from the refused one" cannot
+ * tell a request's own credential from its replacement, and a wave of
+ * refusals that straddled a settlement cost one mint each. Generations are
+ * monotonic per command, so `cached > refused` is exactly "minted after the
+ * refusal that is asking, and not itself refused since".
  *
- * The reuse is bounded by the cached token's own `exp`, when it states one:
- * past it, the issuer is asked again rather than handing back a credential
- * whose own claim says it is finished. That read decides whether to *mint*,
- * never whether to *send* — a credential is sent until the provider refuses
- * it, which is the signal this whole path is built on.
+ * A refusal that cannot name its generation — a caller outside the resolve
+ * path, or a bearer the command never produced — proves nothing about what
+ * the cache holds, so it mints.
  *
  * The shared run is decisive for every waiter: a mint that fails resolves them
  * all to `undefined` rather than leaving them waiting, and the entry is
@@ -111,17 +149,23 @@ export function invalidateAllCommandConfigs(): void {
  * {@link invalidateCommandConfig}; this one is for the moment a provider has
  * refused the credential and the fresh value is needed now.
  */
-export function remintCommandConfig(valueConfig: string | undefined, rejected?: string): Promise<string | undefined> {
+export function remintCommandConfig(
+	valueConfig: string | undefined,
+	rejectedGeneration?: number,
+): Promise<string | undefined> {
 	if (!isCommandConfigValue(valueConfig)) return Promise.resolve(undefined);
 	const command = commandKey(valueConfig);
+	refuseCommandGeneration(valueConfig, rejectedGeneration);
 	const joined = commandRemintInFlight.get(command);
 	if (joined) return joined;
-	const settled = settledMintFor(command, rejected);
-	if (settled !== undefined) return Promise.resolve(settled);
+	if (rejectedGeneration !== undefined) {
+		const settled = settledMintFor(command);
+		if (settled !== undefined) return Promise.resolve(settled);
+	}
 	invalidateCommandConfig(valueConfig);
 	// `executeCommand` registers its run in `commandInFlight` before its first
 	// await, so every later resolve of this command joins it too.
-	const started = executeCommand(valueConfig);
+	const started = executeCommand(valueConfig).then(credential => credential?.value);
 	const tracked = started.finally(() => {
 		if (commandRemintInFlight.get(command) === tracked) commandRemintInFlight.delete(command);
 	});
@@ -133,17 +177,17 @@ export function remintCommandConfig(valueConfig: string | undefined, rejected?: 
  * The already-minted credential that answers this refusal, or undefined when
  * the issuer has to be asked. See {@link remintCommandConfig}.
  */
-function settledMintFor(command: string, rejected: string | undefined): string | undefined {
-	if (rejected === undefined) return undefined;
+function settledMintFor(command: string): string | undefined {
 	const cached = commandResultCache.get(command);
-	// The refusal names the cached value: this is the mint the provider has
-	// already answered, so reusing it would spend the retry on a certainty.
-	if (cached === undefined || cached === rejected) return undefined;
-	const expiry = jwtExpiryMs(cached);
-	return expiry !== undefined && expiry <= Date.now() ? undefined : cached;
+	if (cached === undefined) return undefined;
+	// Every generation up to the watermark has been refused — including the one
+	// this refusal names, recorded a moment ago. Handing one of them back would
+	// spend the retry on a certainty.
+	const refused = commandRefusedGeneration.get(command) ?? 0;
+	return cached.generation > refused ? cached.value : undefined;
 }
 
-async function executeCommand(valueConfig: string): Promise<string | undefined> {
+async function executeCommand(valueConfig: string): Promise<CommandCredential | undefined> {
 	const command = commandKey(valueConfig);
 
 	const cached = commandResultCache.get(command);
@@ -154,21 +198,30 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 	const existing = commandInFlight.get(command);
 	if (existing) return await existing;
 
-	const generation = commandGeneration.get(command) ?? 0;
-	const promise: Promise<string | undefined> = (async () => {
+	const epoch = commandInvalidationEpoch.get(command) ?? 0;
+	const promise: Promise<CommandCredential | undefined> = (async () => {
 		const cwd = getProjectDir();
 		if (!(await directoryIsEnterable(cwd))) return undefined;
 		return await runShellCommand(command, 10_000, cwd);
 	})()
 		.then(result => {
-			if ((commandGeneration.get(command) ?? 0) !== generation) return result;
 			if (result === undefined) {
-				commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
-			} else {
-				commandFailureRetryAt.delete(command);
-				commandResultCache.set(command, result);
+				if ((commandInvalidationEpoch.get(command) ?? 0) === epoch) {
+					commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
+				}
+				return undefined;
 			}
-			return result;
+			// A run the cache no longer owns still produced a credential its
+			// caller will send, so it gets a generation of its own; what it must
+			// not do is overwrite the entry the invalidation made room for.
+			const generation = (commandMintedGeneration.get(command) ?? 0) + 1;
+			commandMintedGeneration.set(command, generation);
+			const credential: CommandCredential = { value: result, generation };
+			if ((commandInvalidationEpoch.get(command) ?? 0) === epoch) {
+				commandFailureRetryAt.delete(command);
+				commandResultCache.set(command, credential);
+			}
+			return credential;
 		})
 		.catch(error => {
 			const code =
@@ -176,7 +229,7 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
 					? (error as NodeJS.ErrnoException).code
 					: "unknown";
 			logger.warn("config: !command value resolution failed", { code });
-			if ((commandGeneration.get(command) ?? 0) === generation) {
+			if ((commandInvalidationEpoch.get(command) ?? 0) === epoch) {
 				commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
 			}
 			return undefined;
@@ -194,9 +247,26 @@ async function executeCommand(valueConfig: string): Promise<string | undefined> 
  * successful stdout is cached; environment-backed and literal values stay live.
  */
 export async function resolveConfigValue(valueConfig: string): Promise<string | undefined> {
-	if (isCommandConfigValue(valueConfig)) return await executeCommand(valueConfig);
+	if (isCommandConfigValue(valueConfig)) return (await executeCommand(valueConfig))?.value;
 	const envValue = $envExact(valueConfig);
 	return envValue || valueConfig;
+}
+
+/**
+ * {@link resolveConfigValue}, plus the generation of the credential slot that
+ * produced a `!command` value.
+ *
+ * The auth cascade resolves a provider's configured key through this, so the
+ * generation travels with the bearer a request sends — including to a worker,
+ * whose credential its owner mints — and a 401 can name the generation it was
+ * refused rather than bytes two mints may share.
+ */
+export async function resolveConfigCredential(
+	valueConfig: string,
+): Promise<{ value: string; generation?: number } | string | undefined> {
+	if (!isCommandConfigValue(valueConfig)) return await resolveConfigValue(valueConfig);
+	const credential = await executeCommand(valueConfig);
+	return credential && { value: credential.value, generation: credential.generation };
 }
 
 /**
@@ -294,8 +364,11 @@ export function createConfigHeaderResolver(
 	};
 }
 
-/** Clear all command state. Exported for focused resolver tests. */
+/** Clear all command state, generation counters included. Exported for focused resolver tests. */
 export function clearConfigValueCache(): void {
 	invalidateAllCommandConfigs();
 	commandInFlight.clear();
+	commandInvalidationEpoch.clear();
+	commandMintedGeneration.clear();
+	commandRefusedGeneration.clear();
 }

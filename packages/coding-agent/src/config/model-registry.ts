@@ -70,7 +70,9 @@ import {
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
 	isCommandConfigValue,
+	refuseCommandGeneration,
 	remintCommandConfig,
+	resolveConfigCredential,
 	resolveConfigHeaders,
 	resolveConfigValue,
 } from "./resolve-config-value";
@@ -523,9 +525,11 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * The provider refused the credential, so re-mint it. `rejected` is the
-	 * bearer the refused request sent; it lets the mint tell a refusal issued
-	 * against the cached credential from one issued against an older copy.
+	 * The provider refused the credential, so re-mint it. `rejectedGeneration`
+	 * is the generation of the credential the refused request sent; it lets the
+	 * mint tell a refusal issued against the cached credential from one issued
+	 * against an older copy, which the bytes cannot do when an issuer renews to
+	 * the same bytes.
 	 *
 	 * Only the provider's `apiKey` command is run here, and only when the auth
 	 * cascade actually selects it (see
@@ -543,10 +547,10 @@ export class ModelRegistry {
 	 * re-mint and this awaits it; the mirror still drops its own copies, which
 	 * feed the headers it renders locally.
 	 */
-	async #remintProviderCommandConfigs(provider: string, rejected?: string): Promise<void> {
+	async #remintProviderCommandConfigs(provider: string, rejectedGeneration?: number): Promise<void> {
 		const owner = this.#owner;
 		if (owner) {
-			const remote = owner.remintCommandConfigs(provider, rejected);
+			const remote = owner.remintCommandConfigs(provider, rejectedGeneration);
 			this.#invalidateLocalProviderCommandConfigs(provider);
 			this.#recordMirrorChange({ kind: "invalidateCommands", provider });
 			await remote;
@@ -557,7 +561,21 @@ export class ModelRegistry {
 		// would drop the shared run the concurrent refusals are meant to join.
 		this.#invalidateLocalProviderCommandConfigs(provider, apiKey);
 		this.#recordMirrorChange({ kind: "invalidateCommands", provider });
-		await remintCommandConfig(apiKey, rejected);
+		await remintCommandConfig(apiKey, rejectedGeneration);
+	}
+
+	/**
+	 * The provider refused the credential of `generation` and this caller is
+	 * not minting a replacement. Recording it keeps a generation the provider
+	 * has answered from being handed to a peer's retry as though it were fresh.
+	 */
+	async #refuseProviderCommandGeneration(provider: string, generation: number): Promise<void> {
+		const owner = this.#owner;
+		if (owner) {
+			await owner.refuseCommandGeneration(provider, generation);
+			return;
+		}
+		refuseCommandGeneration(this.#selectedProviderApiKeyCommand(provider), generation);
 	}
 
 	/**
@@ -581,8 +599,16 @@ export class ModelRegistry {
 	 * Owner side of {@link ModelRegistryOwner.remintCommandConfigs}: a mirror's
 	 * request that this registry re-mint `provider`'s refused credential.
 	 */
-	remintCommandConfigs(provider: string, rejected?: string): Promise<void> {
-		return this.#remintProviderCommandConfigs(provider, rejected);
+	remintCommandConfigs(provider: string, rejectedGeneration?: number): Promise<void> {
+		return this.#remintProviderCommandConfigs(provider, rejectedGeneration);
+	}
+
+	/**
+	 * Owner side of {@link ModelRegistryOwner.refuseCommandGeneration}: a
+	 * mirror reporting a refusal it is not minting a replacement for.
+	 */
+	refuseCommandGeneration(provider: string, generation: number): void {
+		refuseCommandGeneration(this.#selectedProviderApiKeyCommand(provider), generation);
 	}
 
 	/**
@@ -718,7 +744,7 @@ export class ModelRegistry {
 		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath ?? path.join(getAgentDir(), "models.yml"));
 		this.#cacheDbPath =
 			options?.cacheDbPath ?? (modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined);
-		if (!this.#owner) this.authStorage.keys.setResolver(resolveConfigValue);
+		if (!this.#owner) this.authStorage.keys.setResolver(resolveConfigCredential);
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
 	}
@@ -3810,7 +3836,12 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		if (options?.forceRefresh) await this.#remintProviderCommandConfigs(provider, options.rejectedApiKey);
+		const rejectedGeneration = options?.rejectedCredentialGeneration;
+		if (options?.forceRefresh) {
+			await this.#remintProviderCommandConfigs(provider, rejectedGeneration);
+		} else if (rejectedGeneration !== undefined) {
+			await this.#refuseProviderCommandGeneration(provider, rejectedGeneration);
+		}
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
@@ -4295,11 +4326,15 @@ export interface ModelRegistryOwner {
 	 * Re-mint the owner's command-backed credential for `provider` after it was
 	 * refused, and resolve once the fresh value is cached. A request, not a
 	 * notification: the owner holds the resolver that serves the retry, so the
-	 * retry must not race ahead of the value it asked for. `rejected` is the
-	 * bearer the refused request sent, so a mint the owner already settled can
-	 * answer a refusal that cannot have carried it.
+	 * retry must not race ahead of the value it asked for.
+	 * `rejectedGeneration` is the generation of the credential the refused
+	 * request sent, so a mint the owner already settled can answer a refusal
+	 * that cannot have carried it. A number, not the bearer: credential
+	 * material does not need to cross the thread boundary for this.
 	 */
-	remintCommandConfigs(provider: string, rejected?: string): Promise<void>;
+	remintCommandConfigs(provider: string, rejectedGeneration?: number): Promise<void>;
+	/** {@link ModelRegistry.refuseCommandGeneration} on the owner. */
+	refuseCommandGeneration(provider: string, generation: number): Promise<void>;
 	/** {@link ModelRegistry.refresh} on the owner. */
 	refresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): Promise<void>;
 	/** {@link ModelRegistry.refreshProvider} on the owner. */

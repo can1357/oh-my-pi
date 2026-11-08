@@ -32,6 +32,7 @@ import type {
 	AuthStorage,
 	AuthStorageData,
 	CheckCredentialsOptions,
+	ConfigValueResolver,
 	Context,
 	ClientUsageReport,
 	ClientUsageSummary,
@@ -188,7 +189,7 @@ export type AuthStorageProtocol = {
 	"keys.setConfig": RpcMethod<[provider: string, apiKeyConfig: string, options?: { fallback?: boolean }], void>;
 	"keys.removeConfig": RpcMethod<[provider: string], void>;
 	"keys.clearConfig": RpcMethod<[], void>;
-	"keys.setResolver": RpcMethod<[resolver: (config: string) => Promise<string | undefined>], void>;
+	"keys.setResolver": RpcMethod<[resolver: ConfigValueResolver], void>;
 	"keys.resolver": RpcMethod<
 		[provider: string, options?: { sessionId?: string; baseUrl?: string; modelId?: string }],
 		ApiKeyResolver
@@ -363,9 +364,12 @@ export type ModelRegistryProtocol = {
 	invalidateCommandConfigs: RpcMethod<[provider?: string], void>;
 	/**
 	 * Re-mint `provider`'s refused command-backed credential here, and resolve
-	 * once it is cached. `rejected` is the bearer the refused request sent.
+	 * once it is cached. `rejectedGeneration` is the generation of the
+	 * credential the refused request sent — a counter, not the bearer.
 	 */
-	remintCommandConfigs: RpcMethod<[provider: string, rejected?: string], void>;
+	remintCommandConfigs: RpcMethod<[provider: string, rejectedGeneration?: number], void>;
+	/** Record that the provider refused `provider`'s credential of `generation`, without minting. */
+	refuseCommandGeneration: RpcMethod<[provider: string, generation: number], void>;
 	refresh: RpcMethod<[strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions], void>;
 	refreshProvider: RpcMethod<
 		[providerId: string, strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions],

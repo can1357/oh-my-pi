@@ -337,6 +337,23 @@ export interface CredentialDisabledEvent {
  */
 export type OAuthRefreshReason = "auth-recovery" | "usage-probe";
 
+/**
+ * A resolved config value, with the generation of the credential slot that
+ * produced it when the host can say.
+ *
+ * A `!command` credential is re-minted when a provider refuses it, and two
+ * mints can hand back byte-identical credentials, so the bytes cannot say
+ * which mint a request sent. The generation can: it counts that command's
+ * mints, monotonically. See {@link AuthApiKeyOptions.rejectedCredentialGeneration}.
+ */
+export interface ConfigValueResolution {
+	value: string;
+	generation?: number;
+}
+
+/** Resolve a config value (env var name, `!command`, literal) to the secret it names. */
+export type ConfigValueResolver = (config: string) => Promise<string | ConfigValueResolution | undefined>;
+
 /** Configuration supplied when constructing credential storage. */
 export type AuthStorageOptions = {
 	usageProviderResolver?: (provider: Provider) => UsageProvider | undefined;
@@ -513,12 +530,17 @@ export type AuthApiKeyOptions = {
 	 */
 	rejectedAccessToken?: string;
 	/**
-	 * The bearer the provider rejected with a 401, when this resolve is that
-	 * 401's recovery. The OAuth cascade ignores it; the coding-agent registry
-	 * reads it so a `!command` credential minted after the refusal was issued
-	 * answers that refusal instead of costing a second call to the issuer.
+	 * The {@link ConfigValueResolution.generation} of the credential the
+	 * provider rejected with a 401, when this resolve is that 401's recovery.
+	 *
+	 * The OAuth cascade ignores it; the coding-agent registry reads it so a
+	 * `!command` credential minted after the refused one answers that refusal
+	 * instead of costing a second call to the issuer, and so the generation
+	 * the provider has now refused is never handed to a later waiter. It is a
+	 * counter, not credential material, so it crosses a worker boundary where
+	 * the bearer itself should not.
 	 */
-	rejectedApiKey?: string;
+	rejectedCredentialGeneration?: number;
 	/** When false, select as `sessionId` would without recording the choice as that session's sticky credential. */
 	recordAffinity?: boolean;
 };
@@ -1057,7 +1079,7 @@ export interface KeysApi {
 	 * failure backoff, and process hardening even when AuthStorage was created
 	 * independently and later attached to a registry.
 	 */
-	setResolver(resolver: (config: string) => Promise<string | undefined>): void;
+	setResolver(resolver: ConfigValueResolver): void;
 	/**
 	 * Build an {@link ApiKeyResolver} backed by this storage, implementing the
 	 * central a/b/c auth-retry policy:

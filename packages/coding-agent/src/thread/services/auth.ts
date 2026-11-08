@@ -363,7 +363,10 @@ function serveModelRegistry(state: PeerAuthState): RpcServe<ModelRegistry, Model
 			};
 		},
 		invalidateCommandConfigs: (registry, provider) => registry.invalidateCommandConfigs(provider),
-		remintCommandConfigs: (registry, provider, rejected) => registry.remintCommandConfigs(provider, rejected),
+		remintCommandConfigs: (registry, provider, rejectedGeneration) =>
+			registry.remintCommandConfigs(provider, rejectedGeneration),
+		refuseCommandGeneration: (registry, provider, generation) =>
+			registry.refuseCommandGeneration(provider, generation),
 		refresh: (registry, strategy, options) => registry.refresh(strategy, options),
 		refreshProvider: (registry, providerId, strategy, options) =>
 			registry.refreshProvider(providerId, strategy, options),
