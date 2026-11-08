@@ -396,40 +396,112 @@ fn byte_offset(src: &[u8], off: u64, offsets: Offsets) -> Option<usize> {
 	(units == off).then_some(src.len())
 }
 
-/// The closing token a node kind ends with, and whether the node's own `End`
-/// is just after it. A closer that does not end its node (a C-style loop's
-/// header `))`, which the loop's body follows) is anchored differently.
-fn closing_delimiter(v: &serde_json::Value) -> Option<(&'static str, &'static [u8], bool)> {
-	Some(match v.get("Type")?.as_str()? {
-		"DblQuoted" => ("Right", b"\"".as_slice(), true),
-		"SglQuoted" => ("Right", b"'", true),
-		"CmdSubst" if v["Backquotes"] == true => ("Right", b"`", true),
-		"CmdSubst" if v["TempFile"] == true || v["ReplyVar"] == true => ("Right", b"}", true),
-		"CmdSubst" => ("Right", b")", true),
-		"ArithmExp" if v["Bracket"] == true => ("Right", b"]", true),
-		"ArithmExp" | "ArithmCmd" => ("Right", b"))", true),
-		"TestClause" => ("Right", b"]]", true),
-		"CStyleLoop" => ("Rparen", b"))", false),
-		"Subshell" | "ParenTest" | "ProcSubst" | "ArrayExpr" => ("Rparen", b")", true),
-		"Block" => ("Rbrace", b"}", true),
-		"ParamExp" if v.get("Rbrace").is_some() => ("Rbrace", b"}", true),
+type RecordedTryClosers = (Span, [Option<u32>; 2]);
+
+/// Keep the parser's positions, not another source scan or an export-derived
+/// estimate. zsh word expansions are opaque, so their interiors hold no AST
+/// commands to visit here.
+fn recorded_try_closers(program: &Program) -> Vec<RecordedTryClosers> {
+	fn list(l: &List, out: &mut Vec<RecordedTryClosers>) {
+		for item in &l.items {
+			for pipeline in core::iter::once(&item.and_or.first)
+				.chain(item.and_or.rest.iter().map(|(_, pipeline)| pipeline))
+			{
+				for stage in &pipeline.stages {
+					command(&stage.cmd, out);
+				}
+			}
+		}
+	}
+	fn command(cmd: &Command, out: &mut Vec<RecordedTryClosers>) {
+		match &cmd.kind {
+			CommandKind::Brace(body) | CommandKind::Subshell(body) => list(body, out),
+			CommandKind::If(clause) => {
+				for arm in &clause.arms {
+					list(&arm.cond, out);
+					list(&arm.body, out);
+				}
+				if let Some(body) = &clause.else_body {
+					list(body, out);
+				}
+			},
+			CommandKind::While(clause) => {
+				list(&clause.cond, out);
+				list(&clause.body, out);
+			},
+			CommandKind::For(clause) | CommandKind::Select(clause) => list(&clause.body, out),
+			CommandKind::ArithFor(clause) => list(&clause.body, out),
+			CommandKind::Case(clause) => {
+				for arm in &clause.arms {
+					list(&arm.body, out);
+				}
+			},
+			CommandKind::FuncDef(function) => command(&function.body, out),
+			CommandKind::Coproc(coproc) => command(&coproc.body, out),
+			CommandKind::Repeat(clause) => list(&clause.body, out),
+			CommandKind::Try(clause) => {
+				out.push((cmd.extent.unwrap_or(cmd.span), [Some(clause.rbrace), cmd.close]));
+				list(&clause.body, out);
+				list(&clause.always, out);
+			},
+			CommandKind::AnonFunc(function) => command(&function.body, out),
+			CommandKind::Simple(_) | CommandKind::Arith(_) | CommandKind::Cond(_) => {},
+		}
+	}
+	let mut out = Vec::new();
+	for unit in &program.commands {
+		list(&unit.list, &mut out);
+	}
+	out
+}
+
+#[derive(Clone, Copy)]
+enum CloserAnchor {
+	NodeEnd,
+	Header,
+	Try(usize),
+}
+
+/// Every literal closer owned by this node, with its independent anchor.
+/// A try clause owns both its body's `}` and its always body's `}`.
+fn closing_delimiters(
+	v: &serde_json::Value,
+) -> &'static [(&'static str, &'static [u8], CloserAnchor)] {
+	use CloserAnchor::{Header, NodeEnd, Try};
+	match v.get("Type").and_then(serde_json::Value::as_str) {
+		Some("DblQuoted") => &[("Right", b"\"", NodeEnd)],
+		Some("SglQuoted") => &[("Right", b"'", NodeEnd)],
+		Some("CmdSubst") if v["Backquotes"] == true => &[("Right", b"`", NodeEnd)],
+		Some("CmdSubst") if v["TempFile"] == true || v["ReplyVar"] == true => {
+			&[("Right", b"}", NodeEnd)]
+		},
+		Some("CmdSubst") => &[("Right", b")", NodeEnd)],
+		Some("ArithmExp") if v["Bracket"] == true => &[("Right", b"]", NodeEnd)],
+		Some("ArithmExp" | "ArithmCmd") => &[("Right", b"))", NodeEnd)],
+		Some("TestClause") => &[("Right", b"]]", NodeEnd)],
+		Some("CStyleLoop") => &[("Rparen", b"))", Header)],
+		Some("Subshell" | "ParenTest" | "ProcSubst" | "ArrayExpr") => &[("Rparen", b")", NodeEnd)],
+		Some("Block") => &[("Rbrace", b"}", NodeEnd)],
+		Some("TryClause") => &[("Rbrace", b"}", Try(0)), ("AlwaysEnd", b"}", Try(1))],
+		Some("ParamExp") if v.get("Rbrace").is_some() => &[("Rbrace", b"}", NodeEnd)],
 		// Keyword closers (`DonePos`, `FiPos`, `Esac`) are deliberately out:
 		// the same node closes with `done`, with `}` for a brace body, and
 		// with `end` in zsh's short forms, so a byte check on them asserts
 		// the dialect's spelling rather than the position. They are covered
 		// by containment and by the fixtures compared with real shfmt.
-		_ => return None,
-	})
+		_ => &[],
+	}
 }
 
-/// Read `token` at `at`, allowing the line continuations bash removes, and
-/// report the offset just after its last byte. `None` when the buffer does
-/// not hold that token there.
+/// Read a token whose first byte is exactly at `at`. Line continuations
+/// are allowed only between its bytes, never before that first byte.
 fn token_end(src: &[u8], at: usize, token: &[u8]) -> Option<usize> {
 	let mut i = at;
-	for &want in token {
-		while src.get(i) == Some(&b'\\') && src.get(i + 1) == Some(&b'\n') {
-			i += 2;
+	for (n, &want) in token.iter().enumerate() {
+		if n != 0 {
+			while src.get(i) == Some(&b'\\') && src.get(i + 1) == Some(&b'\n') {
+				i += 2;
+			}
 		}
 		if src.get(i) != Some(&want) {
 			return None;
@@ -454,12 +526,14 @@ fn delimiter_faults(
 	src: &[u8],
 	offsets: Offsets,
 	alias: Option<(&serde_json::Value, &[u8], usize, usize)>,
+	recorded: &[RecordedTryClosers],
 	path: &str,
 	bad: &mut Vec<String>,
 ) {
-	if let Some((key, delimiter, ends_node)) = closing_delimiter(v)
-		&& !v[key].is_null()
-	{
+	for &(key, delimiter, anchor) in closing_delimiters(v) {
+		if v[key].is_null() {
+			continue;
+		}
 		let at = v[key]["Offset"]
 			.as_u64()
 			.and_then(|o| byte_offset(src, o, offsets));
@@ -481,16 +555,31 @@ fn delimiter_faults(
 			else {
 				return false;
 			};
-			if ends_node {
-				return end == Some(after);
+			match anchor {
+				CloserAnchor::NodeEnd => end == Some(after),
+				CloserAnchor::Header => {
+					let last = ["Post", "Cond", "Init"].iter().find_map(|k| {
+						v[k]["End"]["Offset"]
+							.as_u64()
+							.and_then(|o| byte_offset(buffer, o, offsets))
+					});
+					last.is_none_or(|e| i >= e)
+				},
+				CloserAnchor::Try(index) => {
+					let reference = alias.map_or(v, |(r, ..)| r);
+					let at = |key: &str| {
+						reference[key]["Offset"]
+							.as_u64()
+							.and_then(|o| byte_offset(buffer, o, offsets))
+					};
+					let extent = at("Pos").zip(at("End"));
+					recorded
+						.iter()
+						.find(|(span, _)| extent == Some((span.lo as usize, span.hi as usize)))
+						.and_then(|(_, positions)| positions[index])
+						.is_some_and(|position| i == position as usize)
+				},
 			}
-			// A header closer: it must follow the last header expression.
-			let last = ["Post", "Cond", "Init"].iter().find_map(|k| {
-				v[k]["End"]["Offset"]
-					.as_u64()
-					.and_then(|o| byte_offset(buffer, o, offsets))
-			});
-			last.is_none_or(|e| i >= e)
 		};
 		let valid = if let Some((reference, expanded, start, len)) = alias {
 			let expected = reference[key]["Offset"]
@@ -569,13 +658,13 @@ fn delimiter_faults(
 		serde_json::Value::Object(map) => {
 			for (k, child) in map {
 				let next = alias.map(|(r, s, start, len)| (&r[k], s, start, len));
-				delimiter_faults(child, src, offsets, next, &format!("{path}.{k}"), bad);
+				delimiter_faults(child, src, offsets, next, recorded, &format!("{path}.{k}"), bad);
 			}
 		},
 		serde_json::Value::Array(items) => {
 			for (i, child) in items.iter().enumerate() {
 				let next = alias.map(|(r, s, start, len)| (&r[i], s, start, len));
-				delimiter_faults(child, src, offsets, next, &format!("{path}[{i}]"), bad);
+				delimiter_faults(child, src, offsets, next, recorded, &format!("{path}[{i}]"), bad);
 			}
 		},
 		_ => {},
@@ -593,7 +682,7 @@ fn delimiter_oracle_rejects_a_contained_but_wrong_delimiter() {
 	range_faults(&document, None, "", &mut ranges);
 	assert!(ranges.is_empty(), "mutation stays contained: {ranges:?}");
 	let mut bad = Vec::new();
-	delimiter_faults(&document, src, Offsets::Bytes, None, "", &mut bad);
+	delimiter_faults(&document, src, Offsets::Bytes, None, &[], "", &mut bad);
 	assert_eq!(bad.len(), 1, "{bad:?}");
 	assert!(bad[0].contains("Loop.Rparen"), "{bad:?}");
 	eprintln!("contained delimiter mutation: {}", bad[0]);
@@ -603,10 +692,9 @@ fn delimiter_oracle_rejects_a_contained_but_wrong_delimiter() {
 fn delimiter_oracle_rejects_a_continuation_before_the_delimiter() {
 	// An offset at the preceding backslash is contained and reaches the
 	// same token end, but it is not the delimiter's first byte.
-	for (src, key, recorded, wrong) in [
-		(b"( : \\\n)".as_slice(), "Rparen", 6, 4),
-		(b"[[ a \\\n]]".as_slice(), "Right", 7, 5),
-	] {
+	for (src, key, recorded, wrong) in
+		[(b"( : \\\n)".as_slice(), "Rparen", 6, 4), (b"[[ a \\\n]]".as_slice(), "Right", 7, 5)]
+	{
 		let program = parse_all(src, Features::NONE).unwrap();
 		let cmd = &program.commands[0].list.items[0].and_or.first.stages[0].cmd;
 		assert_eq!(cmd.close, Some(recorded));
@@ -614,13 +702,13 @@ fn delimiter_oracle_rejects_a_continuation_before_the_delimiter() {
 			let mut document: serde_json::Value =
 				serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, offsets)).unwrap();
 			let mut bad = Vec::new();
-			delimiter_faults(&document, src, offsets, None, "", &mut bad);
+			delimiter_faults(&document, src, offsets, None, &[], "", &mut bad);
 			assert!(bad.is_empty(), "unmodified {key}: {bad:?}");
 			document["Stmts"][0]["Cmd"][key]["Offset"] = wrong.into();
 			let mut ranges = Vec::new();
 			range_faults(&document, None, "", &mut ranges);
 			assert!(ranges.is_empty(), "mutation stays contained: {ranges:?}");
-			delimiter_faults(&document, src, offsets, None, "", &mut bad);
+			delimiter_faults(&document, src, offsets, None, &[], "", &mut bad);
 			assert_eq!(bad.len(), 1, "{key} {offsets:?}: {bad:?}");
 			assert!(bad[0].contains(&format!("Cmd.{key}:")), "{bad:?}");
 			eprintln!("continued-delimiter mutation {key} {offsets:?}: {}", bad[0]);
@@ -638,23 +726,28 @@ fn delimiter_oracle_rejects_both_wrong_try_closers() {
 		(b"{ : } always { { : } }".as_slice(), "AlwaysEnd", 21, 19),
 	] {
 		let program = parse_all(src, zsh_features()).unwrap();
+		let closers = recorded_try_closers(&program);
 		let cmd = &program.commands[0].list.items[0].and_or.first.stages[0].cmd;
 		let CommandKind::Try(clause) = &cmd.kind else {
 			panic!("a try clause");
 		};
-		let position = if key == "Rbrace" { Some(clause.rbrace) } else { cmd.close };
+		let position = if key == "Rbrace" {
+			Some(clause.rbrace)
+		} else {
+			cmd.close
+		};
 		assert_eq!(position, Some(recorded));
 		for offsets in [Offsets::Bytes, Offsets::Utf16] {
 			let mut document: serde_json::Value =
 				serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, offsets)).unwrap();
 			let mut bad = Vec::new();
-			delimiter_faults(&document, src, offsets, None, "", &mut bad);
+			delimiter_faults(&document, src, offsets, None, &closers, "", &mut bad);
 			assert!(bad.is_empty(), "unmodified {key}: {bad:?}");
 			document["Stmts"][0]["Cmd"][key]["Offset"] = wrong.into();
 			let mut ranges = Vec::new();
 			range_faults(&document, None, "", &mut ranges);
 			assert!(ranges.is_empty(), "mutation stays contained: {ranges:?}");
-			delimiter_faults(&document, src, offsets, None, "", &mut bad);
+			delimiter_faults(&document, src, offsets, None, &closers, "", &mut bad);
 			assert_eq!(bad.len(), 1, "{key} {offsets:?}: {bad:?}");
 			assert!(bad[0].contains(&format!("Cmd.{key}:")), "{bad:?}");
 			eprintln!("try-closer mutation {key} {offsets:?}: {}", bad[0]);
@@ -666,10 +759,10 @@ fn delimiter_oracle_rejects_both_wrong_try_closers() {
 fn delimiter_oracle_accepts_continuations_between_delimiter_bytes() {
 	let src = b"[[ a ]\\\n]";
 	let program = parse_all(src, Features::NONE).unwrap();
-	let document = serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, Offsets::Bytes))
-		.unwrap();
+	let document =
+		serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, Offsets::Bytes)).unwrap();
 	let mut bad = Vec::new();
-	delimiter_faults(&document, src, Offsets::Bytes, None, "", &mut bad);
+	delimiter_faults(&document, src, Offsets::Bytes, None, &[], "", &mut bad);
 	assert!(bad.is_empty(), "{bad:?}");
 }
 
@@ -733,10 +826,10 @@ fn heredoc_delimiter_oracle_checks_the_source_terminator() {
 			let mut document: serde_json::Value =
 				serde_json::from_str(&to_json(src, &program, JsonDialect::Shfmt, offsets)).unwrap();
 			let mut bad = Vec::new();
-			delimiter_faults(&document, src, offsets, None, "", &mut bad);
+			delimiter_faults(&document, src, offsets, None, &[], "", &mut bad);
 			assert!(bad.is_empty(), "{features:?} {offsets:?}: {bad:?}");
 			document["Stmts"][0]["Redirs"][0]["Hdoc"]["End"]["Offset"] = wrong.into();
-			delimiter_faults(&document, src, offsets, None, "", &mut bad);
+			delimiter_faults(&document, src, offsets, None, &[], "", &mut bad);
 			assert_eq!(bad.len(), 1, "{features:?} {offsets:?}: {bad:?}");
 			assert!(bad[0].contains("Hdoc.End"), "{bad:?}");
 		}
@@ -1261,6 +1354,7 @@ fn exported_nodes_contain_their_children_in_source_and_alias_text() {
 		let reference = parse_all(&expanded, features).expect("expanded sample parses");
 		for aliased in [false, true] {
 			let program = parse_sample(sample, aliased);
+			let recorded = recorded_try_closers(if aliased { &reference } else { &program });
 			let src = if aliased { sample.src } else { sample.text };
 			let mut here = Vec::new();
 			for offsets in [Offsets::Bytes, Offsets::Utf16] {
@@ -1275,7 +1369,7 @@ fn exported_nodes_contain_their_children_in_source_and_alias_text() {
 								.unwrap();
 						let alias =
 							aliased.then_some((&reference, expanded.as_slice(), start, sample.text.len()));
-						delimiter_faults(&document, src, offsets, alias, "", &mut bad);
+						delimiter_faults(&document, src, offsets, alias, &recorded, "", &mut bad);
 					}
 					for fault in bad {
 						here.push(format!(
