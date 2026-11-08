@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed transcript paragraphs a few turns above the composer going missing — from the screen and from scrollback, at a place that moved with every resize — while a todo list or subagent panel stayed up after a turn; a HUD that outlives the idle settle window now retires the rows it displaces ([#XXXXX](https://github.com/can1357/oh-my-pi/pull/XXXXX) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
