@@ -17,7 +17,7 @@ import { WorkPoolRegistry } from "@oh-my-pi/pi-coding-agent/task/workpool";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
-const RESERVED = ["yield", "handback"] as const;
+const RESERVED: Array<"yield" | "handback"> = ["yield", "handback"];
 
 const taskAgent: AgentDefinition = {
 	name: "task",

@@ -11,6 +11,7 @@ import { type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as loggerModule from "@oh-my-pi/pi-utils/logger";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import type { MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -325,7 +326,7 @@ it("cold-revives with the tools and devices it was parked with", async () => {
 	}
 }, 30_000);
 
-const RESERVED_NAMES = ["yield", "handback"] as const;
+const RESERVED_NAMES: Array<"yield" | "handback"> = ["yield", "handback"];
 const RESERVED_MARKER = "CUSTOM_RESERVED_TOOL";
 
 function reservedMessage(name: string): string {
@@ -368,9 +369,7 @@ async function runProbedChild(options: {
 	id: string;
 	factory?: ExtensionFactory;
 	customTools?: CustomTool[];
-	onRequest: (tools: ReadonlyArray<{ name: string; description?: string }>, index: number) => {
-		content: unknown;
-	};
+	onRequest: (tools: ReadonlyArray<{ name: string; description?: string }>, index: number) => MockResponse;
 }): Promise<{ exitCode: number; error?: string; stderr: string; requests: number }> {
 	const cwd = path.join(root, "home", options.id);
 	const artifactsDir = path.join(root, "reserved-artifacts", options.id);
