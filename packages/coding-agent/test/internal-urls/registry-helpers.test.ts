@@ -11,12 +11,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	cleanupTemporaryArtifactsDir,
 	hasResolvableTranscript,
 	registerArtifactsDir,
+	registerTemporaryArtifactsDir,
 	resetRegisteredArtifactDirsForTests,
+	sweepTemporaryArtifactsDirs,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { persistNestedPatches } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 function fakeLiveSession(): AgentSession {
@@ -129,5 +133,75 @@ describe("hasResolvableTranscript", () => {
 			status: "running",
 		});
 		expect(await hasResolvableTranscript("__advisor1")).toBe(false);
+	});
+
+	it("sweeps only disposable leases, not caller-named directories or temp siblings", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "registry-sweep-"));
+		try {
+			const userDir = path.join(root, "caller-named");
+			const leaseDir = path.join(root, "lease");
+			const sibling = path.join(root, "not-ours.txt");
+			await Bun.write(path.join(userDir, "Session.jsonl"), "user data\n");
+			await Bun.write(path.join(leaseDir, "Worker.md"), "output\n");
+			await Bun.write(sibling, "keep me\n");
+			registerArtifactsDir(userDir);
+			registerTemporaryArtifactsDir(leaseDir);
+			sweepTemporaryArtifactsDirs();
+			expect(await Bun.file(path.join(userDir, "Session.jsonl")).text()).toBe("user data\n");
+			expect(await Bun.file(sibling).text()).toBe("keep me\n");
+			expect(await Bun.file(path.join(leaseDir, "Worker.md")).exists()).toBe(false);
+		} finally {
+			await removeWithRetries(root);
+		}
+	});
+
+	it("keeps every registered descendant, without confusing a sibling path for an owner", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "registry-shared-lease-"));
+		try {
+			const dir = path.join(root, "lease");
+			const registry = AgentRegistry.global();
+			for (const [id, file] of [
+				["Parent", path.join(dir, "Parent.jsonl")],
+				["Child", path.join(dir, "Parent/Child.jsonl")],
+				["Sibling", path.join(root, "lease-other/Sibling.jsonl")],
+			]) {
+				await Bun.write(file!, `${id}\n`);
+				registry.register({
+					id: id!,
+					displayName: id!,
+					kind: "sub",
+					session: null,
+					sessionFile: file,
+					status: "parked",
+				});
+			}
+			registerTemporaryArtifactsDir(dir);
+			await cleanupTemporaryArtifactsDir(dir);
+			registry.unregister("Parent");
+			await cleanupTemporaryArtifactsDir(dir);
+			expect(await Bun.file(path.join(dir, "Parent/Child.jsonl")).text()).toBe("Child\n");
+			registry.unregister("Child");
+			await cleanupTemporaryArtifactsDir(dir);
+			expect(await Bun.file(path.join(dir, "Parent/Child.jsonl")).exists()).toBe(false);
+			expect(await Bun.file(path.join(root, "lease-other/Sibling.jsonl")).text()).toBe("Sibling\n");
+		} finally {
+			await removeWithRetries(root);
+		}
+	});
+
+	it("keeps nested recovery work if the host exits before the run hands it back", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "registry-recovery-"));
+		try {
+			const dir = path.join(root, "lease");
+			registerTemporaryArtifactsDir(dir);
+			const patch = "diff --git a/file.txt b/file.txt\n+unique nested work\n";
+			const [saved] = await persistNestedPatches(dir, "Worker", [{ relativePath: "nested/pkg", patch }]);
+			// Exercise the exit handler at the producer boundary, before the
+			// structured runner has returned and can classify the result.
+			sweepTemporaryArtifactsDirs();
+			expect(await Bun.file(saved!).text()).toBe(patch);
+		} finally {
+			await removeWithRetries(root);
+		}
 	});
 });
