@@ -1,1 +1,1 @@
-`history://<id>`: read-only transcript; bare lists registered agents, not persisted unregistered top-level sessions.
+`history://<id>`: read-only concise transcript (tool calls/results summarized; `:raw` strips `read` formatting, not summary truncation). `history://current/full`: caller's live branch with full retained text/tool outputs (requires `compaction.experimentalContextManagement` and a bound live branch). Bare `history://` lists registered agents and retained on-disk agent transcripts, not persisted unregistered top-level sessions.
