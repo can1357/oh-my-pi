@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Mistral alias ids such as `mistral-vibe-cli-latest`, the Mistral Vibe CLI's default model, being listed with zero cost and unknown output limits; an id with no bundled row now reuses the bundled row of the model it aliases ([#18010](https://github.com/can1357/oh-my-pi/pull/18010) by [@revofusion](https://github.com/revofusion))
+
 ## [18.18.1] - 2026-11-08
 
 ### Fixed
@@ -35,10 +39,6 @@
 
 - Fixed newly published Azure models missing after catalog refresh ([#18173](https://github.com/can1357/oh-my-pi/issues/18173), [#18174](https://github.com/can1357/oh-my-pi/pull/18174) by [@dunkpi](https://github.com/dunkpi))
 - Fixed Factory Droid hiding models when the live-routing family default yields no usable upstream; explicit empty per-model routes still hide them ([#17862](https://github.com/can1357/oh-my-pi/pull/17862) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Fixed Mistral alias ids such as `mistral-vibe-cli-latest`, the Mistral Vibe CLI's default model, being listed as text-only, non-reasoning models with unknown limits and zero cost; an id with no bundled row now reuses the bundled row of the model it aliases ([#18010](https://github.com/can1357/oh-my-pi/pull/18010) by [@revofusion](https://github.com/revofusion))
 
 ## [18.16.0] - 2026-11-02
 
