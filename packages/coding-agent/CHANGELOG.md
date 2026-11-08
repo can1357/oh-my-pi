@@ -148,6 +148,7 @@
 
 - Starting omp with a prompt (`omp "…"` or `--goal`) reports `working` from the first frame instead of `idle`, so OSC 7501 supervisors such as `hc wait` no longer treat the session as finished before the prompt runs ([#18270](https://github.com/can1357/oh-my-pi/pull/18270) by [@matteoantoci](https://github.com/matteoantoci))
 - `grep` and `glob` no longer wait past their timeout or cancellation when `ovnfs --json status` or the ovnfs daemon handshake stalls ([#18448](https://github.com/can1357/oh-my-pi/pull/18448) by [@eggpeat](https://github.com/eggpeat))
+- Fixed `eval` cells that spawn or wait on subagents bloating the session with multi-megabyte tool results ([#18281](https://github.com/can1357/oh-my-pi/pull/18281) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.17.0] - 2026-11-06
 

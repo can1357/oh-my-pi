@@ -112,11 +112,17 @@ const MAX_LIVE_IRC_CARDS = 4;
 
 const RAW_PARTIAL_JSON_RENDERERS: Record<string, true> = { bash: true, edit: true, apply_patch: true };
 
-function hasNestedTodo(details: unknown): boolean {
+function hasCommittedTodo(events: unknown): boolean {
 	return (
-		isRecord(details) &&
-		Array.isArray(details.statusEvents) &&
-		details.statusEvents.some(event => isRecord(event) && event.op === "todo" && event.committed === true)
+		Array.isArray(events) && events.some(event => isRecord(event) && event.op === "todo" && event.committed === true)
+	);
+}
+
+/** Eval status events live on each cell. */
+function hasNestedTodo(details: unknown): boolean {
+	if (!isRecord(details)) return false;
+	return (
+		Array.isArray(details.cells) && details.cells.some(cell => isRecord(cell) && hasCommittedTodo(cell.statusEvents))
 	);
 }
 
