@@ -198,6 +198,80 @@ describe("a `!command` credential the provider refuses", () => {
 		};
 	}
 
+	test("a permission-only 403 does not prevent a valid prepared header request from sending", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "valid-junk");
+		let permitted = false;
+		const rig = buildRig(
+			"literal-placeholder",
+			counterFile,
+			() => permitted,
+			{ headers: { Authorization: mintFromFile(counterFile, tokenFile) } },
+			() =>
+				new Response(
+					JSON.stringify({ error: { message: "This model is not permitted.", type: "auth_error", code: "403" } }),
+					{ status: 403, headers: { "Content-Type": "application/json" } },
+				),
+		);
+		const send = await rig.prepare();
+		expect((await rig.turn()).errorStatus).toBe(403);
+		permitted = true;
+		const beforeRequests = rig.seen.length;
+		expect((await send()).stopReason).not.toBe("error");
+		expect(rig.seen.length - beforeRequests).toBe(1);
+		expect(rig.mints()).toBe(1);
+	});
+
+	test.each(["apiKey", "header"] as const)(
+		"a permission-only 403 leaves the %s refusal watermark unmoved",
+		async source => {
+			const counterFile = path.join(tempDir, "mints");
+			const tokenFile = path.join(tempDir, "token");
+			fs.writeFileSync(counterFile, "");
+			fs.writeFileSync(tokenFile, "valid-junk");
+			const command = mintFromFile(counterFile, tokenFile);
+			const rig = buildRig(
+				source === "apiKey" ? command : "literal-placeholder",
+				counterFile,
+				() => false,
+				source === "header" ? { headers: { Authorization: command } } : {},
+				() =>
+					new Response(JSON.stringify({ error: { message: "Forbidden.", type: "auth_error", code: "403" } }), {
+						status: 403,
+						headers: { "Content-Type": "application/json" },
+					}),
+			);
+			expect((await rig.turn()).errorStatus).toBe(403);
+			const before = rig.mints();
+			// An unchanged watermark leaves the accepted credential available without another mint.
+			expect(await resolveConfigValue(command)).toBe("valid-junk");
+			expect(rig.mints() - before).toBe(0);
+		},
+	);
+
+	test("a prepared header still sends when a refused generation has no replacement", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "prepared-junk");
+		const command = mintFromFile(counterFile, tokenFile);
+		let permitted = false;
+		const rig = buildRig("literal-placeholder", counterFile, () => permitted, {
+			headers: { Authorization: command },
+		});
+		const send = await rig.prepare();
+		expect((await rig.turn()).errorStatus).toBe(401);
+		invalidateCommandConfig(command);
+		permitted = true;
+		const beforeRequests = rig.seen.length;
+		const beforeMints = rig.mints();
+		expect((await send()).stopReason).not.toBe("error");
+		expect(rig.seen.length - beforeRequests).toBe(1);
+		expect(rig.mints() - beforeMints).toBe(0);
+	});
+
 	test("is re-minted and the request retried once", async () => {
 		const counterFile = path.join(tempDir, "mints");
 		const tokenFile = path.join(tempDir, "token");

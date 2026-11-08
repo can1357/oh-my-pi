@@ -81,7 +81,7 @@ export function configHeaderGenerations(
 	return generations;
 }
 
-/** Keep a prepared header unless its own generation is already known refused. Never resolve or mint here. */
+/** Prefer an available replacement for a known-refused header; otherwise send the prepared value. Never mint here. */
 export async function readUnrefusedConfigHeaders(headers: Record<string, string>): Promise<Record<string, string>> {
 	const credentials = resolvedHeaderCredentials.get(headers);
 	if (!credentials) return headers;
@@ -97,9 +97,7 @@ export async function readUnrefusedConfigHeaders(headers: Record<string, string>
 		if (pending) await pending;
 		refused = commandRefusedGeneration.get(command) ?? 0;
 		const replacement = commandResultCache.get(command);
-		if (!replacement || replacement.generation <= refused) {
-			throw new Error("Prepared command header was refused and has no cached replacement");
-		}
+		if (!replacement || replacement.generation <= refused) continue;
 		if (current === headers) {
 			current = { ...headers };
 			currentCredentials = { ...credentials };

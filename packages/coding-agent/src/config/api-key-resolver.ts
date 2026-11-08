@@ -95,6 +95,8 @@ export function createApiKeyResolver(
 		if (error === undefined) {
 			return resolveKey(undefined);
 		}
+		const verdict = AIError.credentialRejectionVerdict(error);
+		const credentialRefused = verdict === "structured" || verdict === "text" || verdict === "status";
 		if (lastChance) {
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
 			// sibling credential. We do NOT honor the failed account's retry-after
@@ -118,9 +120,8 @@ export function createApiKeyResolver(
 			}
 			// Record the exhausted attempt without spending a mint it cannot use.
 			const resolved = await resolveKey(undefined, {
-				rejectedCredentialGeneration: refusedGeneration(error, previousGeneration),
-				rejectedHeaderGenerations:
-					AIError.credentialRejectionVerdict(error) === "not-credential" ? undefined : previousHeaderGenerations,
+				rejectedCredentialGeneration: credentialRefused ? previousGeneration : undefined,
+				rejectedHeaderGenerations: credentialRefused ? previousHeaderGenerations : undefined,
 			});
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
@@ -129,7 +130,6 @@ export function createApiKeyResolver(
 		// says it is NOT an authentication failure is the one case that skips
 		// the re-mint: refreshing cannot help, and a `!command` credential's
 		// re-mint is a call to its issuer.
-		const verdict = AIError.credentialRejectionVerdict(error);
 		const resolved = await resolveKey(verdict !== "not-credential", {
 			signal,
 			refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
@@ -137,8 +137,8 @@ export function createApiKeyResolver(
 			// The generation of the credential this request sent. A `!command`
 			// credential's re-mint reads it to tell a refusal of the mint it has
 			// cached from a refusal of an older one, which that mint answers.
-			rejectedCredentialGeneration: verdict === "not-credential" ? undefined : previousGeneration,
-			rejectedHeaderGenerations: verdict === "not-credential" ? undefined : previousHeaderGenerations,
+			rejectedCredentialGeneration: credentialRefused ? previousGeneration : undefined,
+			rejectedHeaderGenerations: credentialRefused ? previousHeaderGenerations : undefined,
 		});
 		// A credential was actually minted for this refusal — the slot's
 		// generation advanced past the one the request sent. The retry is worth
@@ -155,13 +155,4 @@ export function createApiKeyResolver(
 				));
 		return minted || verdict === "structured" || verdict === "text" ? markAfterRemint(resolved) : resolved;
 	};
-}
-
-/**
- * The generation a rotation step should record as refused: only when the error
- * says the credential itself was refused, matching the gate that mints one.
- */
-function refusedGeneration(error: unknown, previousGeneration: number | undefined): number | undefined {
-	if (previousGeneration === undefined) return undefined;
-	return AIError.credentialRejectionVerdict(error) === "not-credential" ? undefined : previousGeneration;
 }

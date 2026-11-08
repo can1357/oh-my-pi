@@ -4,15 +4,15 @@
 
 ### Fixed
 
-- Requests that share a `!command` credential and are refused together now cost one run of the command, not one per request: the re-mint a 401 asks for is single-flight per command, so ten rejected requests make one call to the credential's issuer and ten retries. A re-mint that fails answers every waiter instead of leaving them waiting, and the next rejection starts a fresh attempt rather than joining the failed one.
-- A 401 whose own error class says it is not an authentication failure no longer re-runs a provider's `!command` credentials
-- A refusal that arrives after a shared `!command` re-mint has already settled now reuses that mint and retries, instead of calling the issuer again.
-- A `!command` credential re-minted for a 401 that carried no readable error class is now sent: the mint ran, so the credential's generation advanced, and the retry it earned is no longer dropped because the issuer handed back the same bytes
-- Two spellings of one `!command` — `!helper` as the `apiKey` and `! helper` as a header — are recognised as the same command, so invalidating one no longer drops the shared re-mint the other's refusals are waiting to join
-- A provider 401 no longer runs a configured `!command` credential the auth cascade did not select: with a runtime `--api-key` override in force, the recovery re-mints the source that served the request rather than the configured one, and no longer waits out that command's timeout
-- Command-backed provider and model headers now share the same one-execution-per-refusal-wave bound as command-backed API keys, including staggered refusals after the mint settles.
-- New operations resolve a replacement before sending a command credential whose generation the provider already refused.
-- Prepared requests keep command-backed header values with their credential generations and skip credentials another request has already proved invalid.
+- Requests that share a `!command` credential and are refused together now cost one run of the command, not one per request ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- A 401 whose own error class says it is not an authentication failure no longer re-runs a provider's `!command` credentials ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- A refusal that arrives after a shared `!command` re-mint has already settled now reuses that mint and retries, instead of calling the issuer again ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- A `!command` credential re-minted for a 401 that carried no readable error class is now sent: the mint ran, so the credential's generation advanced, and the retry it earned is no longer dropped because the issuer handed back the same bytes ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- Two spellings of one `!command` — `!helper` as the `apiKey` and `! helper` as a header — are recognised as the same command, so invalidating one no longer drops the shared re-mint the other's refusals are waiting to join ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- A provider 401 no longer runs a configured `!command` credential the auth cascade did not select: with a runtime `--api-key` override in force, the recovery re-mints the source that served the request rather than the configured one, and no longer waits out that command's timeout ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- Command-backed provider and model headers now share the same one-execution-per-refusal-wave bound as command-backed API keys, including staggered refusals after the mint settles ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- New operations resolve a replacement before sending a command credential whose generation the provider already refused; permission-only 403 responses do not disqualify that credential ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- Prepared requests keep command-backed headers with their credential generations, use an available replacement for a refused credential, and still send when no replacement exists ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.18.1] - 2026-11-08
 
