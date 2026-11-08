@@ -383,6 +383,11 @@ pub struct Shell {
 	orphans: Vec<Vpid>,
 }
 
+/// A small announced set must not repeatedly scan a large function table.
+/// At 1,000 loaded functions this floor keeps the scan below roughly two
+/// function-record visits per fresh announcement.
+const SWEEP_FLOOR: usize = 512;
+
 /// Shell-wide state shared by all vprocs (kept apart from `procs` so ops can
 /// borrow a vproc and the kernel at once).
 pub struct Kernel {
@@ -410,12 +415,15 @@ pub struct Kernel {
 	/// Mappings adopted at restore remain retireable even when the caller
 	/// resets the event mask to request fresh compilation announcements.
 	pub restored_claims:    HashMap<Vpid, HashSet<UnitId>>,
-	/// Gone vprocs whose announcements another live vproc still reaches.
-	/// Bookkeeping only: later sweeps use the same unit roots to retire them.
-	pub retiring_vpids:     HashMap<Vpid, ModeId>,
-	/// Callable function units, cached at `Root::func_epoch`.
-	pub func_units:         HashSet<UnitId>,
-	pub func_units_epoch:   Option<u64>,
+	/// Announced-set size of each vproc right after its last sweep. The next
+	/// in-run sweep is due when the set has doubled past it. Amortized: a sweep
+	/// costs O(functions + announced) and buys at least as many new
+	/// announcements, so total sweep work over a run is O(announcements).
+	pub sweep_mark:         HashMap<Vpid, usize>,
+	/// Vprocs whose announced set has passed their mark. Checked by emptiness
+	/// at the top of a command, so a run that announces nothing new pays one
+	/// `is_empty`.
+	pub sweep_due:          HashSet<Vpid>,
 	/// Observed script origins by actual activation depth. Empty without
 	/// tracing.
 	pub trace_sources:      HashMap<Vpid, HashMap<usize, crate::bash::event::SourceOrigin>>,
@@ -543,9 +551,8 @@ impl Kernel {
 			results: HashMap::new(),
 			announced: HashMap::new(),
 			restored_claims: HashMap::new(),
-			retiring_vpids: HashMap::new(),
-			func_units: HashSet::new(),
-			func_units_epoch: None,
+			sweep_mark: HashMap::new(),
+			sweep_due: HashSet::new(),
 			trace_sources: HashMap::new(),
 			trace_unit_origins: HashMap::new(),
 			written: HashSet::new(),
@@ -1823,9 +1830,7 @@ impl Shell {
 			}
 			let slice = left.min(budget.max_ops - ops).max(1);
 			let before = ops;
-			let (before_procs, current_and_after) = self.procs.split_at_mut(i);
-			let (current, after_procs) = current_and_after.split_first_mut().expect("selected vproc");
-			exec::run_slice(&mut self.k, current, (before_procs, after_procs), cx, slice, &mut ops);
+			exec::run_slice(&mut self.k, &mut self.procs[i], cx, slice, &mut ops);
 			let used = ops - before;
 			let p = &self.procs[i];
 			let ran = p.vpid;
@@ -1855,11 +1860,9 @@ impl Shell {
 			// A subshell vproc exits once its frames and diagnostics are done.
 			if p.transient && !p.has_work() && p.out.is_empty() {
 				let p = self.procs.remove(i);
-				exec::retire_vproc_sources(&mut self.k, cx, &self.procs, p.vpid, p.mode);
+				exec::retire_vproc_sources(&mut self.k, cx, p.vpid, p.mode);
 				self.k.trace_sources.remove(&p.vpid);
-				if !self.k.retiring_vpids.contains_key(&p.vpid) {
-					self.k.trace_unit_origins.remove(&p.vpid);
-				}
+				self.k.trace_unit_origins.remove(&p.vpid);
 				jobctl::forget_vproc(&mut self.k, p.vpid);
 				// A job that ended undecided keeps its virtual pid.
 				self.k.settle_bang(p.vpid, None);
@@ -2151,11 +2154,9 @@ impl Shell {
 		}
 		if self.procs[i].transient {
 			let p = self.procs.remove(i);
-			exec::retire_vproc_sources(&mut self.k, cx, &self.procs, p.vpid, p.mode);
+			exec::retire_vproc_sources(&mut self.k, cx, p.vpid, p.mode);
 			self.k.trace_sources.remove(&p.vpid);
-			if !self.k.retiring_vpids.contains_key(&p.vpid) {
-				self.k.trace_unit_origins.remove(&p.vpid);
-			}
+			self.k.trace_unit_origins.remove(&p.vpid);
 			self.k.settle_bang(p.vpid, None);
 			self.k.forget_deferral(p.vpid);
 			self.k.proc_exited(cx.store, p.vpid, p.parent, status);
@@ -2471,10 +2472,6 @@ impl Shell {
 	pub fn set_event_mask(&mut self, mask: EventMask) {
 		self.k.mask = mask;
 		self.k.announced.clear();
-		self
-			.k
-			.retiring_vpids
-			.retain(|vpid, _| self.k.restored_claims.contains_key(vpid));
 	}
 
 	/// The current event mask.

@@ -21,7 +21,10 @@
 //! and a pipe counts exactly the ends restored fds hold. Only host files
 //! (and what externals held) are lost.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+	collections::{HashMap, HashSet},
+	sync::Arc,
+};
 
 use bstr::{BStr, BString};
 use serde::{Deserialize, Serialize};
@@ -98,11 +101,11 @@ struct Image {
 
 type OriginImage = (Vpid, u32, SpanOwned);
 
-fn origin_image(origin: SourceOrigin) -> OriginImage {
+const fn origin_image(origin: SourceOrigin) -> OriginImage {
 	(origin.vpid, origin.node, origin.span)
 }
 
-fn restore_origin((vpid, node, span): OriginImage) -> SourceOrigin {
+const fn restore_origin((vpid, node, span): OriginImage) -> SourceOrigin {
 	SourceOrigin { vpid, node, span }
 }
 
@@ -511,7 +514,7 @@ impl Shell {
 			..ExternalizeReport::default()
 		};
 		let live = exec::live_units(
-			&mut self.k,
+			&self.k,
 			cx.store,
 			self.procs.iter().map(Box::as_ref),
 			exec::UnitScope::All,
@@ -583,10 +586,20 @@ impl Shell {
 			runs.extend(p.runs.iter().map(|r| r.id));
 			let command = match &p.command {
 				Some((unit, node)) => {
-					if !self.k.written.contains(&unit.id) {
-						let bytes = postcard::to_stdvec(&**unit).map_err(ExtError::Encode)?;
-						cx.store.put_blob(BlobSlot::Unit(unit.id), &bytes)?;
-						self.k.written.insert(unit.id);
+					if self.k.written.insert(unit.id) {
+						let write = postcard::to_stdvec(&**unit)
+							.map_err(ExtError::Encode)
+							.and_then(|bytes| {
+								cx.store
+									.put_blob(BlobSlot::Unit(unit.id), &bytes)
+									.map_err(ExtError::from)
+							});
+						if let Err(error) = write {
+							// A failed write must remain retryable; the set only
+							// records units whose blobs reached the store.
+							self.k.written.remove(&unit.id);
+							return Err(error);
+						}
 						report.units_written += 1;
 					}
 					Some((unit.id, *node))
@@ -687,6 +700,26 @@ impl Shell {
 		for unit in stale {
 			cx.store.del_blob(BlobSlot::Unit(unit))?;
 			self.k.written.remove(&unit);
+		}
+		// Only a durable checkpoint whose stale blobs were deleted may tell
+		// the observer to retire mappings. Compute every live set first so a
+		// failed store scan cannot leave a partially retired observer.
+		let mut retirements = Vec::with_capacity(self.procs.len());
+		for vp in &self.procs {
+			let live = exec::live_units(
+				&self.k,
+				cx.store,
+				self.procs.iter().map(Box::as_ref),
+				exec::UnitScope::One(vp.vpid),
+			)?;
+			retirements.push((vp.vpid, vp.mode, live));
+		}
+		for ((vpid, mode, live), vp) in retirements.into_iter().zip(&self.procs) {
+			exec::retire_announced(&mut self.k, cx, vpid, mode, vp.runs.front(), &live);
+			self
+				.k
+				.sweep_mark
+				.insert(vpid, self.k.announced.get(&vpid).map_or(0, HashSet::len));
 		}
 		report.bytes = bytes.len();
 		Ok(report)
@@ -809,7 +842,7 @@ impl Shell {
 		let mut live = HashMap::new();
 		for vp in &shell.procs {
 			let units = exec::live_units(
-				&mut shell.k,
+				&shell.k,
 				cx.store,
 				shell.procs.iter().map(Box::as_ref),
 				exec::UnitScope::One(vp.vpid),

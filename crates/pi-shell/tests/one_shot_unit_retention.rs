@@ -10,16 +10,27 @@
 //! retained history entry still has to render.
 #![cfg(unix)]
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+	collections::{HashMap, HashSet},
+	sync::{
+		Arc, Mutex,
+		atomic::{AtomicBool, AtomicUsize, Ordering},
+	},
+};
 
 use pi_shell::{
 	Shell, ShellOptions, ShellRunOptions,
-	bash::trace::{
-		RunTrace,
-		history::{HISTORY_BYTES, HISTORY_EVENTS, HistoryData},
-		viz::{Options as VizOptions, StoredVisualization},
+	bash::{
+		Budget, Cx, Engine, EngineConfig, Event, EventData, EventMask, EventSink, MemStore, Script,
+		Shell as VmShell, Step, UnitId,
+		trace::{
+			RunTrace,
+			history::{HISTORY_BYTES, HISTORY_EVENTS, HistoryData},
+			viz::{Options as VizOptions, StoredVisualization},
+		},
 	},
 	cancel::CancelToken,
+	testkit::{FakeHost, fault::skeleton_init},
 };
 
 async fn trace(script: &str, files: &[(&str, &str)], expected: &str) -> Arc<RunTrace> {
@@ -55,36 +66,35 @@ async fn trace(script: &str, files: &[(&str, &str)], expected: &str) -> Arc<RunT
 	trace
 }
 
-/// Run the same program at two iteration counts, both past the history cap,
-/// and require what the trace keeps to be a property of the program rather
-/// than of the count.
-async fn assert_growth_bounded(command: impl Fn(usize) -> String) {
-	let small_count = HISTORY_EVENTS / 4;
-	let large_count = HISTORY_EVENTS / 2;
-	let small = trace(&command(small_count), &[], &small_count.to_string()).await;
-	let large = trace(&command(large_count), &[], &large_count.to_string()).await;
-	let small_snapshot = small.snapshot();
-	let large_snapshot = large.snapshot();
-	assert!(small_snapshot.history_truncated && large_snapshot.history_truncated);
-	let small_json = small.snapshot_json();
-	let large_json = large.snapshot_json();
-	// Pollers must not copy ever-growing source tables for work whose
-	// executions have already fallen out of their bounded replay window.
-	assert!(
-		large_snapshot.units.len() <= small_snapshot.units.len() + HISTORY_EVENTS / 64
-			&& large_json.len() <= small_json.len() + HISTORY_BYTES,
-		"retained trace grew with the iteration count: units {} -> {}, snapshot {} -> {} bytes",
-		small_snapshot.units.len(),
-		large_snapshot.units.len(),
-		small_json.len(),
-		large_json.len(),
-	);
-	StoredVisualization::from_snapshot_json(&large_json).expect("persisted trace remains readable");
+/// Run the same program past the history cap at three iteration counts.
+/// Collection is amortized, so the residual may vary by one 512-unit floor
+/// between samples; it must not grow with the number of distinct texts.
+async fn assert_growth_bounded(kind: &str, unit_slack: usize, command: impl Fn(usize) -> String) {
+	let mut baseline = None;
+	for count in [2_500, 5_000, 10_000] {
+		let trace = trace(&command(count), &[], &count.to_string()).await;
+		let snapshot = trace.snapshot();
+		let json = trace.snapshot_json();
+		assert!(snapshot.history_truncated);
+		let units = snapshot.units.len();
+		let bytes = json.len();
+		println!("RETENTION kind={kind} n={count} units={units} bytes={bytes}");
+		let (first_units, first_bytes) = *baseline.get_or_insert((units, bytes));
+		// In-run collection permits one sweep floor of unswept sources.
+		// Exit-collected and reused sources keep their original allowance;
+		// neither case may add a source for every iteration.
+		assert!(
+			units <= first_units + unit_slack && bytes <= first_bytes + HISTORY_BYTES,
+			"retained trace grew with the iteration count: units {first_units} -> {units}, snapshot \
+			 {first_bytes} -> {bytes} bytes",
+		);
+		StoredVisualization::from_snapshot_json(&json).expect("persisted trace remains readable");
+	}
 }
 
 #[tokio::test]
 async fn distinct_eval_sources_stop_growing_the_trace_after_history_truncation() {
-	assert_growth_bounded(|count| {
+	assert_growth_bounded("eval", 512, |count| {
 		format!(
 			"for ((i=0;i<{count};i++)); do eval \"printf '%0512d' $i\" >/dev/null; done; echo {count}"
 		)
@@ -94,7 +104,7 @@ async fn distinct_eval_sources_stop_growing_the_trace_after_history_truncation()
 
 #[tokio::test]
 async fn distinct_command_substitution_texts_stop_growing_the_trace() {
-	assert_growth_bounded(|count| {
+	assert_growth_bounded("command_substitution", HISTORY_EVENTS / 64, |count| {
 		format!("for ((i=0;i<{count};i++)); do x=$(eval \"printf '%0512d' $i\"); done; echo {count}")
 	})
 	.await;
@@ -102,7 +112,7 @@ async fn distinct_command_substitution_texts_stop_growing_the_trace() {
 
 #[tokio::test]
 async fn distinct_sourced_file_texts_stop_growing_the_trace() {
-	assert_growth_bounded(|count| {
+	assert_growth_bounded("source", 512, |count| {
 		format!(
 			"for ((i=0;i<{count};i++)); do printf \"printf '%%0512d' %d\\n\" \"$i\" > f.sh; . ./f.sh \
 			 >/dev/null; done; echo {count}"
@@ -113,7 +123,7 @@ async fn distinct_sourced_file_texts_stop_growing_the_trace() {
 
 #[tokio::test]
 async fn distinct_trap_action_texts_stop_growing_the_trace() {
-	assert_growth_bounded(|count| {
+	assert_growth_bounded("trap", 512, |count| {
 		format!(
 			"for ((i=0;i<{count};i++)); do trap \"printf '%0512d' $i >/dev/null\" DEBUG; :; done; \
 			 trap - DEBUG; echo {count}"
@@ -124,7 +134,7 @@ async fn distinct_trap_action_texts_stop_growing_the_trace() {
 
 #[tokio::test]
 async fn distinct_env_prefix_values_stop_growing_the_trace() {
-	assert_growth_bounded(|count| {
+	assert_growth_bounded("env", HISTORY_EVENTS / 64, |count| {
 		format!(
 			"for ((i=0;i<{count};i++)); do printf -v w '%0512d' \"$i\"; env \"V=$w\" printf '%s' '' \
 			 >/dev/null; done; echo {count}"
@@ -334,5 +344,110 @@ async fn dead_nested_definitions_do_not_grow_the_trace() {
 		println!("DEAD_DEFINITION n={count} units={} bytes={}", snapshot.units.len(), json.len());
 		counts.push(snapshot.units.len());
 	}
-	assert_eq!(counts, vec![counts[0]; 3], "dead-definition retention must be flat: {counts:?}");
+	// The fixed live set is below the floor, so samples may differ by
+	// 512 unswept announcements, but never by the iteration count.
+	assert!(
+		counts.iter().all(|&count| count <= counts[0] + 512),
+		"dead-definition retention must stay within one sweep floor: {counts:?}"
+	);
+}
+
+/// Consecutive retirement events are one sweep, not one visit per unit.
+/// Other events separate sweeps because the fixture executes between them.
+#[derive(Default)]
+struct RetirementBatches {
+	/// The preceding event was a retirement, so its batch is already counted.
+	in_batch: AtomicBool,
+	/// Count batches rather than units to expose a per-command collector.
+	batches:  AtomicUsize,
+	/// Current announcement owners expose a disabled collector without history
+	/// noise.
+	live:     Mutex<HashSet<UnitId>>,
+}
+
+impl EventSink for RetirementBatches {
+	fn mask(&self) -> EventMask {
+		EventMask::ALL
+	}
+
+	fn event(&self, event: &Event<'_>) {
+		match &event.data {
+			EventData::UnitCompiled(compiled) => {
+				self
+					.live
+					.lock()
+					.expect("announcement set")
+					.insert(compiled.unit.id);
+			},
+			EventData::UnitRetired { unit } => {
+				self.live.lock().expect("announcement set").remove(unit);
+			},
+			_ => {},
+		}
+		let retired = matches!(event.data, EventData::UnitRetired { .. });
+		if retired && !self.in_batch.swap(true, Ordering::SeqCst) {
+			self.batches.fetch_add(1, Ordering::SeqCst);
+		} else if !retired {
+			self.in_batch.store(false, Ordering::SeqCst);
+		}
+	}
+}
+
+fn fixed_live_set_sweeps(rounds: usize) -> (usize, usize) {
+	let source = format!(
+		"for ((i=0;i<1000;i++)); do eval \"keeper$i() {{ :; }}\"; done; for ((i=0;i<{rounds};i++)); \
+		 do eval \": $i\"; done"
+	);
+	let batches = Arc::new(RetirementBatches::default());
+	let mut host = FakeHost::new().with_event_sink(batches.clone());
+	let mut store = MemStore::new();
+	let engine = Engine::new(EngineConfig::default());
+	let mut shell =
+		VmShell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, skeleton_init(&[]))
+			.expect("shell");
+	shell.set_event_mask(EventMask::ALL);
+	let run = shell.submit(Script::command(source.into_bytes()));
+	for _ in 0..1_000_000 {
+		let step = shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default());
+		host.events.clear();
+		match step {
+			Step::Done { run: id, status } if id == run => {
+				assert_eq!(status, 0);
+				return (
+					batches.batches.load(Ordering::SeqCst),
+					batches.live.lock().expect("announcement set").len(),
+				);
+			},
+			Step::Idle => panic!("idle before the root finished"),
+			_ => {},
+		}
+	}
+	panic!("the sweep fixture did not finish");
+}
+
+/// A per-command collector repeatedly scans the same 1,000 live functions;
+/// a disabled collector instead retains every disposable one-shot source.
+/// Pin both failures: at most `N / 512 + 3` sweeps at each sampled N, and
+/// at most 512 unswept sources plus two loop commands retained, even after
+/// four times as many distinct evals. The sweep allowance includes the
+/// initial definitions and the few announcements retained at each sweep.
+/// Callable bodies stay live but are never run or announced in this fixture.
+#[test]
+fn fixed_live_churn_amortizes_sweeps_without_unbounded_retention() {
+	let small = fixed_live_set_sweeps(10_000);
+	let large = fixed_live_set_sweeps(40_000);
+	println!(
+		"SWEEP_BATCHES n=10000 sweeps={} units={}; n=40000 sweeps={} units={}",
+		small.0, small.1, large.0, large.1
+	);
+	for (rounds, (sweeps, units)) in [(10_000, small), (40_000, large)] {
+		assert!(
+			sweeps <= rounds / 512 + 3,
+			"the collector swept per command: n={rounds} sweeps={sweeps}"
+		);
+		assert!(
+			units <= 512 + 2,
+			"retention must stay within the fixed live-set bound: n={rounds} units={units}"
+		);
+	}
 }
