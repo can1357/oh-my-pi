@@ -52,6 +52,7 @@ class Connection {
 	readonly #ready = Promise.withResolvers<this>();
 	readonly #pending = new Map<number, Pending>();
 	#ops: ReadonlySet<string> | undefined;
+	#features: ReadonlySet<string> = new Set();
 	#next = 1;
 	#chunks: Buffer[] = [];
 	#buffered = 0;
@@ -73,6 +74,11 @@ class Connection {
 	/** Resolves once the daemon has welcomed this client on {@link PROTOCOL_VERSION}. */
 	get ready(): Promise<this> {
 		return this.#ready.promise;
+	}
+
+	/** Optional request fields the daemon said it honors (`api.Features`), e.g. `diff.binary`. */
+	get features(): ReadonlySet<string> {
+		return this.#features;
 	}
 
 	/**
@@ -162,6 +168,8 @@ class Connection {
 				return;
 			}
 			this.#ops = new Set(welcome.ops.filter(op => typeof op === "string"));
+			if (Array.isArray(welcome.features))
+				this.#features = new Set(welcome.features.filter(feature => typeof feature === "string"));
 			this.#conn.unref();
 			this.#ready.resolve(this);
 			return;
@@ -205,4 +213,9 @@ export async function callSocket<T>(socket: string, op: string, args: object, si
 	const conn = await connection(socket);
 	// Replies are the daemon's api shapes; callers name the one their op returns.
 	return conn.call(op, args, signal) as Promise<T>;
+}
+
+/** The optional request fields the daemon at `socket` honors; empty for one that names none. */
+export async function socketFeatures(socket: string): Promise<ReadonlySet<string>> {
+	return (await connection(socket)).features;
 }

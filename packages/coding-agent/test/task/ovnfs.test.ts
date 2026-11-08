@@ -21,12 +21,14 @@ const STALE = "omp-authrefactor-stale1";
 interface CheckoutRecord {
 	command: string;
 	checkout: string;
+	start?: string;
 }
 
 interface DaemonOp {
 	op: string;
 	checkout?: string;
 	name?: string;
+	base?: string;
 }
 
 describe("ovnfs checkout recovery", () => {
@@ -52,11 +54,12 @@ describe("ovnfs checkout recovery", () => {
 		vi.spyOn(daemon, "startDaemon").mockResolvedValue({ socket: "/tmp/ovnfs-test.sock", mount: "/mnt/ovnfs" });
 		vi.spyOn(client, "callSocket").mockImplementation(
 			async <T>(_socket: string, op: string, args: object): Promise<T> => {
-				const record = args as { checkout?: unknown; name?: unknown };
+				const record = args as { checkout?: unknown; name?: unknown; base?: unknown };
 				return handle({
 					op,
 					checkout: typeof record.checkout === "string" ? record.checkout : undefined,
 					name: typeof record.name === "string" ? record.name : undefined,
+					base: typeof record.base === "string" ? record.base : undefined,
 				}) as T;
 			},
 		);
@@ -290,5 +293,73 @@ describe("ovnfs checkout recovery", () => {
 		failRemoval = false;
 		await workspace.cleanup();
 		await expect(fs.stat(baseDir)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	/** A daemon that captured `repo` as one repository on capture `b_1`, serving `features`. */
+	function captureDaemon(repo: string, features: string[], handle: (op: DaemonOp) => unknown): void {
+		vi.spyOn(client, "socketFeatures").mockResolvedValue(new Set(features));
+		mockDaemon(op => {
+			if (op.op === "new" && op.name && !op.base) {
+				return {
+					checkout: { name: op.name, path: `/mnt/ovnfs/${op.name}`, base: "b_1" },
+					capture: { root: repo, repos: [""] },
+				};
+			}
+			return handle(op);
+		});
+	}
+
+	it("starts from the checkout's capture only when the daemon can diff and reopen it", async () => {
+		const repo = path.join(root, "features");
+		await fs.mkdir(repo);
+		captureDaemon(repo, ["diff.binary"], () => ({}));
+		expect((await ovnfsWorkspace(COMMAND)(repo, "Old")).start).toBeUndefined();
+
+		vi.restoreAllMocks();
+		captureDaemon(repo, ["new.base", "diff.binary"], op => {
+			if (op.op === "diff") throw new client.OvnfsError("unsupported", "a.big goes through a filter");
+			return {};
+		});
+		const workspace = await ovnfsWorkspace(COMMAND)(repo, "New");
+		expect(workspace.start).toBeDefined();
+		// ovnfs leaves a filtered path to git: the runner then diffs against the baseline.
+		expect(await workspace.start?.rootPatch()).toBeUndefined();
+	});
+
+	it("records the start checkout a branch baseline opens until it is removed", async () => {
+		const repo = path.join(root, "start");
+		await fs.mkdir(repo);
+		const removed: string[] = [];
+		const opened: DaemonOp[] = [];
+		let failRemoval = false;
+		captureDaemon(repo, ["new.base", "diff.binary"], op => {
+			if (op.op === "new") {
+				opened.push(op);
+				return { checkout: { name: op.name, path: path.join(root, "missing", op.name ?? ""), base: op.base } };
+			}
+			if (op.op === "rm") {
+				removed.push(op.checkout ?? "");
+				// Only the removal after the baseline read fails; clearing a leftover first succeeds.
+				if (failRemoval && opened.length > 0) throw new client.OvnfsError("busy", "checkout is busy");
+				return {};
+			}
+			throw new Error(op.op);
+		});
+		const agentId = "Branch";
+		const workspace = await ovnfsWorkspace(COMMAND)(repo, agentId);
+		const baseDir = taskIsolationBaseDir(repo, agentId);
+		const { checkout } = await readRecord(baseDir);
+		const start = `${checkout}-start`;
+
+		failRemoval = true;
+		// The start checkout's path is no repository, so the baseline read fails.
+		await expect(workspace.start?.baseline()).rejects.toThrow();
+		expect(opened).toEqual([{ op: "new", base: "b_1", name: start, checkout: undefined }]);
+		expect(await readRecord(baseDir)).toEqual({ command: COMMAND, checkout, start });
+
+		failRemoval = false;
+		removed.length = 0;
+		expect(await releaseOvnfsCheckout(baseDir)).toBe(true);
+		expect(removed).toEqual([start, checkout]);
 	});
 });
