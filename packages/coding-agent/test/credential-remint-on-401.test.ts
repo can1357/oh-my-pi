@@ -352,6 +352,55 @@ describe("a `!command` credential the provider refuses", () => {
 		expect((await staleHeaderWave(10)).recovered).toBe(10);
 	});
 
+	test.each([1, 2])("a prepared header skips known-refused generations after %s recoveries", async advances => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "generation-1-junk");
+		let accepted = "generation-1-junk";
+		const rig = buildRig("literal-placeholder", counterFile, bearer => bearer === accepted, {
+			headers: { Authorization: mintFromFile(counterFile, tokenFile) },
+		});
+		const send = await rig.prepare();
+		for (let generation = 2; generation <= advances + 1; generation++) {
+			accepted = `generation-${generation}-junk`;
+			fs.writeFileSync(tokenFile, accepted);
+			expect((await rig.turn()).stopReason).not.toBe("error");
+		}
+		const requestsBefore = rig.seen.length;
+		const mintsBefore = rig.mints();
+		const result = await send();
+		const sent = rig.seen.slice(requestsBefore);
+		expect(sent.filter(value => value !== accepted).length).toBe(0);
+		expect(result.stopReason).not.toBe("error");
+		expect(sent.length).toBe(1);
+		expect(rig.mints() - mintsBefore).toBe(0);
+	});
+
+	test.each(["apiKey", "header"])("a %s snapshot outliving two ordinary mints still recovers", async source => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "generation-1-junk");
+		const command = mintFromFile(counterFile, tokenFile);
+		const rig = buildRig(
+			source === "apiKey" ? command : "literal-placeholder",
+			counterFile,
+			bearer => bearer === "generation-3-junk",
+			source === "header" ? { headers: { Authorization: command } } : {},
+		);
+		const send = await rig.prepare();
+		for (const generation of [2, 3]) {
+			fs.writeFileSync(tokenFile, `generation-${generation}-junk`);
+			invalidateCommandConfig(command);
+			await resolveConfigValue(command);
+		}
+		const before = rig.mints();
+		expect((await send()).stopReason).not.toBe("error");
+		expect(rig.seen).toEqual(["generation-1-junk", "generation-3-junk"]);
+		expect(rig.mints() - before).toBe(0);
+	});
+
 	test.each(["apiKey", "header"])(
 		"a prepared %s snapshot recovers every refusal with one helper execution",
 		async source => {
