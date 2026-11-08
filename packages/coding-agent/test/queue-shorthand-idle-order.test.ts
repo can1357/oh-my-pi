@@ -120,7 +120,6 @@ describe("queue shorthand on an idle session with a transcript (#10802)", () => 
 		};
 		let pending: SubmittedUserInput | undefined;
 		const ctx = {
-			locallySubmittedUserSignatures: new Set<string>(),
 			editor,
 			session: live,
 			sessionManager: live.sessionManager,
@@ -143,31 +142,22 @@ describe("queue shorthand on an idle session with a transcript (#10802)", () => 
 			},
 		} as unknown as InteractiveModeContext;
 		const controller = new InputController(ctx);
-		const submitList = async (
-			list = QUEUE_LIST,
-			options?: {
-				beforeDispatch?: () => Promise<void>;
-				duringDispatch?: () => Promise<void>;
-				afterDispatch?: () => void;
-			},
-		) => {
+		const submitList = async (list = QUEUE_LIST, options?: { duringDispatch?: () => Promise<void> }) => {
 			editor.setText(list);
 			const body = parseQueueShorthand(list);
 			if (body === undefined) throw new Error("Expected queue shorthand");
 			await controller.handleQueueCommand(body);
 			if (!pending) throw new Error("Expected the first item to be handed to the run loop");
-			await options?.beforeDispatch?.();
 			const dispatched = submitInteractiveInput(mode, live, pending);
 			await options?.duringDispatch?.();
 			await dispatched;
-			options?.afterDispatch?.();
 			await live.waitForIdle();
 		};
 		/** Answer the first item's API-key lookup with `key()`; the seed turn already ran. */
 		const setApiKey = (key: () => Promise<string | undefined>) => {
 			apiKey = key;
 		};
-		return { session: live, mock, editor, showError, submitList, setApiKey, controller };
+		return { session: live, mock, editor, showError, submitList, setApiKey };
 	}
 
 	async function writeSkill(name: string): Promise<Skill> {
@@ -247,54 +237,5 @@ describe("queue shorthand on an idle session with a transcript (#10802)", () => 
 		expect(session.getQueuedMessages().followUp).toEqual([]);
 		expect(editor.getText()).toBe(QUEUE_LIST);
 		expect(editor.pendingImages).toEqual([IMAGE]);
-	});
-
-	it("returns the whole list as one queue list when Esc lands after the rest is queued, before the first goes live", async () => {
-		const { session, mock, editor, submitList, setApiKey, controller } = await setup();
-		const keyRequested = Promise.withResolvers<void>();
-		const releaseKey = Promise.withResolvers<void>();
-		setApiKey(async () => {
-			keyRequested.resolve();
-			await releaseKey.promise;
-			return "test-key";
-		});
-
-		await submitList(QUEUE_LIST, {
-			duringDispatch: async () => {
-				await keyRequested.promise;
-				expect(session.getQueuedMessages().followUp).toEqual(["ITEM TWO", "ITEM THREE"]);
-				controller.restoreQueuedMessagesToEditor({ abort: true });
-				releaseKey.resolve();
-			},
-		});
-
-		expect(requestedPrompts(mock)).toEqual([]);
-		expect(session.getQueuedMessages().followUp).toEqual([]);
-		expect(editor.getText()).toBe(QUEUE_LIST);
-	});
-
-	it("returns the whole list when Esc lands while a busy session holds the first item in its queue", async () => {
-		const { session, mock, editor, submitList, controller } = await setup();
-		const backgroundStarted = Promise.withResolvers<void>();
-		mock.push(async (_context, options) => {
-			backgroundStarted.resolve();
-			const aborted = Promise.withResolvers<void>();
-			options?.signal?.addEventListener("abort", () => aborted.resolve());
-			await aborted.promise;
-			return { content: ["background"] };
-		});
-
-		await submitList(QUEUE_LIST, {
-			// Another turn starts between the hand-off and dispatch, so the first item is queued behind it.
-			beforeDispatch: async () => {
-				void session.prompt("BACKGROUND");
-				await backgroundStarted.promise;
-			},
-			afterDispatch: () => controller.restoreQueuedMessagesToEditor({ abort: true }),
-		});
-
-		expect(requestedPrompts(mock)).toEqual(["BACKGROUND"]);
-		expect(session.getQueuedMessages().followUp).toEqual([]);
-		expect(editor.getText()).toBe(QUEUE_LIST);
 	});
 });

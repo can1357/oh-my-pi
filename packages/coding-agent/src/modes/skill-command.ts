@@ -46,7 +46,7 @@ interface InvokeSkillCommandOptions {
 	/** With `queueOnly`: called with the messages the skill prompt pushed onto a queue (see `PromptOptions.onPromptQueued`). */
 	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 	/** Without `queueOnly`: forwarded to the session prompt (see `PromptOptions`). */
-	promptHooks?: Pick<PromptOptions, "onPromptAdmitted" | "onPromptDropped" | "onPromptQueued">;
+	promptHooks?: Pick<PromptOptions, "onPromptAdmitted" | "onPromptDropped">;
 }
 
 /** Built custom-message payload and delivery options for a `/skill:` command. */
