@@ -7,8 +7,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import { configureUsageAdmission } from "@oh-my-pi/pi-ai/usage-governor/admission";
+import { configureUsageAdmission, UsageRouteInvalidatedError } from "@oh-my-pi/pi-ai/usage-governor/admission";
+import type { UsageRouteBinding } from "@oh-my-pi/pi-ai/usage-governor/types";
 import type { Context } from "@oh-my-pi/pi-ai/types";
+import { fingerprintBearer } from "../src/auth/bearer-fingerprint";
 import {
 	createHarness,
 	disposeHarness,
@@ -206,6 +208,395 @@ describe("governed dispatch", () => {
 			expect((sent[0] ?? Number.POSITIVE_INFINITY) - start).toBeLessThan(500);
 			expect(h.ledgerExists()).toBe(false);
 			expect(h.storage.governor.status().waits).toHaveLength(0);
+			expectNoStrayFetch(h);
+		} finally {
+			await disposeHarness();
+		}
+	}, 15_000);
+
+	test("a bound route that is paced stays valid, waits for admission, and dispatches successfully", async () => {
+		const h = await createHarness(ENABLED);
+		try {
+			const original = h.usage.provider.bind(h.usage);
+			h.usage.provider = id => {
+				const provider = original(id);
+				return {
+					...provider,
+					governorAllowance: () => ["primary"],
+					fetchUsage: async (params, ctx) => {
+						const report = await provider.fetchUsage(params, ctx);
+						if (report) for (const limit of report.limits) limit.observedAt = Date.now();
+						return report;
+					},
+				};
+			};
+
+			const resetsAt = await pacedPair(h);
+			configureUsageAdmission(h.storage.governor);
+
+			const target = { selector: `${PROVIDER}/mock-model`, provider: PROVIDER, modelId: "mock-model" };
+			h.storage.governor.setRoutingScope({
+				id: "scope-paced-binding",
+				revision: 1,
+				roles: [{ role: "task", targets: [target] }],
+			});
+
+			const account = h.storage.oauth.accounts(PROVIDER).find(a => a.accountId === "acc-a")!;
+			const sessionId = "session-paced-binding";
+			const selected = await h.storage.keys.getWithCredential(PROVIDER, sessionId, {
+				requestCredential: { credentialId: account.credentialId },
+				recordAffinity: false,
+			});
+			if (!selected?.apiKey) throw new Error("missing key for acc-a");
+
+			const binding: UsageRouteBinding = {
+				scopeId: "scope-paced-binding",
+				revision: 1,
+				owner: { kind: "role", role: "task" },
+				target,
+				credentialId: account.credentialId,
+				intent: "proactive",
+				bearerFingerprint: fingerprintBearer(selected.apiKey),
+			};
+
+			const sentAt: number[] = [];
+			const model = createMockModel({
+				provider: PROVIDER,
+				handler: () => {
+					sentAt.push(Date.now());
+					return { content: ["ok"] };
+				},
+			});
+
+			const expected = admissibleFromWindow(resetsAt, USED["acc-a"]);
+			await streamSimple(model, context(), {
+				apiKey: () => ({
+					apiKey: selected.apiKey,
+					credentialId: account.credentialId,
+					usageRouteBinding: binding,
+				}),
+				usageContext: { role: "task", source: "turn", interactive: true, sessionId },
+			}).result();
+
+			expect(sentAt).toHaveLength(1);
+			expect(sentAt[0] ?? 0).toBeGreaterThanOrEqual(expected);
+			expect(h.reservations()).toHaveLength(1);
+			const wait = h.storage.governor.status().waits.find(record => record.credentialId === account.credentialId);
+			expect(wait?.untilMs).toBeDefined();
+			expect(wait?.outcome).toBe("admitted");
+			expectNoStrayFetch(h);
+		} finally {
+			await disposeHarness();
+		}
+	}, 15_000);
+
+	test("a bound route that is closed stays valid and waits until reset before sending", async () => {
+		const h = await createHarness(ENABLED);
+		try {
+			const original = h.usage.provider.bind(h.usage);
+			h.usage.provider = id => {
+				const provider = original(id);
+				return {
+					...provider,
+					governorAllowance: () => ["primary"],
+					fetchUsage: async (params, ctx) => {
+						const report = await provider.fetchUsage(params, ctx);
+						if (report) for (const limit of report.limits) limit.observedAt = Date.now();
+						return report;
+					},
+				};
+			};
+
+			const resetsAt = Date.now() + 600;
+			await seedAccounts(h, PROVIDER, [
+				{
+					accountId: "acc-closed",
+					email: "closed@example.com",
+					window: { used: 1.0, resetsAt, durationMs: 2_000 },
+				},
+			]);
+			await seedReports(h, PROVIDER);
+			configureUsageAdmission(h.storage.governor);
+
+			const target = { selector: `${PROVIDER}/mock-model`, provider: PROVIDER, modelId: "mock-model" };
+			h.storage.governor.setRoutingScope({
+				id: "scope-closed-binding",
+				revision: 1,
+				roles: [{ role: "task", targets: [target] }],
+			});
+
+			const account = h.storage.oauth.accounts(PROVIDER).find(a => a.accountId === "acc-closed")!;
+			const sessionId = "session-closed-binding";
+			const selected = await h.storage.keys.getWithCredential(PROVIDER, sessionId, {
+				requestCredential: { credentialId: account.credentialId },
+				recordAffinity: false,
+			});
+			if (!selected?.apiKey) throw new Error("missing key for acc-closed");
+
+			const binding: UsageRouteBinding = {
+				scopeId: "scope-closed-binding",
+				revision: 1,
+				owner: { kind: "role", role: "task" },
+				target,
+				credentialId: account.credentialId,
+				intent: "proactive",
+				bearerFingerprint: fingerprintBearer(selected.apiKey),
+			};
+
+			const sentAt: number[] = [];
+			const model = createMockModel({
+				provider: PROVIDER,
+				handler: () => {
+					sentAt.push(Date.now());
+					return { content: ["ok"] };
+				},
+			});
+
+			await streamSimple(model, context(), {
+				apiKey: () => ({
+					apiKey: selected.apiKey,
+					credentialId: account.credentialId,
+					usageRouteBinding: binding,
+				}),
+				usageContext: { role: "task", source: "turn", interactive: true, sessionId },
+			}).result();
+
+			expect(sentAt).toHaveLength(1);
+			expect(sentAt[0] ?? 0).toBeGreaterThanOrEqual(resetsAt);
+			expect(h.reservations()).toHaveLength(1);
+			const wait = h.storage.governor.status().waits.find(record => record.credentialId === account.credentialId);
+			expect(wait?.untilMs).toBeCloseTo(resetsAt, -1);
+			expect(wait?.reason).toBe("exhausted");
+			expect(wait?.outcome).toBe("admitted");
+			expectNoStrayFetch(h);
+		} finally {
+			await disposeHarness();
+		}
+	}, 15_000);
+
+	test("a bound route with stale evidence rejects admission and sends nothing", async () => {
+		const h = await createHarness(ENABLED);
+		try {
+			const original = h.usage.provider.bind(h.usage);
+			h.usage.provider = id => {
+				const provider = original(id);
+				return {
+					...provider,
+					governorAllowance: () => ["primary"],
+					fetchUsage: async (params, ctx) => {
+						const report = await provider.fetchUsage(params, ctx);
+						if (report) {
+							for (const limit of report.limits) limit.observedAt = Date.now() - 24 * 60 * 60_000;
+						}
+						return report;
+					},
+				};
+			};
+
+			await pacedPair(h);
+			configureUsageAdmission(h.storage.governor);
+
+			const target = { selector: `${PROVIDER}/mock-model`, provider: PROVIDER, modelId: "mock-model" };
+			h.storage.governor.setRoutingScope({
+				id: "scope-stale-binding",
+				revision: 1,
+				roles: [{ role: "task", targets: [target] }],
+			});
+
+			const account = h.storage.oauth.accounts(PROVIDER).find(a => a.accountId === "acc-a")!;
+			const sessionId = "session-stale-binding";
+			const selected = await h.storage.keys.getWithCredential(PROVIDER, sessionId, {
+				requestCredential: { credentialId: account.credentialId },
+				recordAffinity: false,
+			});
+			if (!selected?.apiKey) throw new Error("missing key for acc-a");
+
+			const binding: UsageRouteBinding = {
+				scopeId: "scope-stale-binding",
+				revision: 1,
+				owner: { kind: "role", role: "task" },
+				target,
+				credentialId: account.credentialId,
+				intent: "proactive",
+				bearerFingerprint: fingerprintBearer(selected.apiKey),
+			};
+
+			const sentAt: number[] = [];
+			const model = createMockModel({
+				provider: PROVIDER,
+				handler: () => {
+					sentAt.push(Date.now());
+					return { content: ["ok"] };
+				},
+			});
+
+			await expect(
+				streamSimple(model, context(), {
+					apiKey: () => ({
+						apiKey: selected.apiKey,
+						credentialId: account.credentialId,
+						usageRouteBinding: binding,
+					}),
+					usageContext: { role: "task", source: "turn", interactive: true, sessionId },
+				}).result(),
+			).rejects.toBeInstanceOf(UsageRouteInvalidatedError);
+
+			expect(sentAt).toHaveLength(0);
+			expect(h.reservations()).toHaveLength(0);
+			expectNoStrayFetch(h);
+		} finally {
+			await disposeHarness();
+		}
+	}, 15_000);
+
+	test("a bound route with unauthorized credential switch rejects admission and sends nothing", async () => {
+		const h = await createHarness(ENABLED);
+		try {
+			const original = h.usage.provider.bind(h.usage);
+			h.usage.provider = id => {
+				const provider = original(id);
+				return {
+					...provider,
+					governorAllowance: () => ["primary"],
+					fetchUsage: async (params, ctx) => {
+						const report = await provider.fetchUsage(params, ctx);
+						if (report) for (const limit of report.limits) limit.observedAt = Date.now();
+						return report;
+					},
+				};
+			};
+
+			await pacedPair(h);
+			configureUsageAdmission(h.storage.governor);
+
+			const target = { selector: `${PROVIDER}/mock-model`, provider: PROVIDER, modelId: "mock-model" };
+			h.storage.governor.setRoutingScope({
+				id: "scope-switch-binding",
+				revision: 1,
+				roles: [{ role: "task", targets: [target] }],
+			});
+
+			const accountA = h.storage.oauth.accounts(PROVIDER).find(a => a.accountId === "acc-a")!;
+			const accountB = h.storage.oauth.accounts(PROVIDER).find(a => a.accountId === "acc-b")!;
+			const sessionId = "session-switch-binding";
+			const selectedA = await h.storage.keys.getWithCredential(PROVIDER, sessionId, {
+				requestCredential: { credentialId: accountA.credentialId },
+				recordAffinity: false,
+			});
+			const selectedB = await h.storage.keys.getWithCredential(PROVIDER, sessionId, {
+				requestCredential: { credentialId: accountB.credentialId },
+				recordAffinity: false,
+			});
+			if (!selectedA?.apiKey || !selectedB?.apiKey) throw new Error("missing keys");
+
+			// Binding is for accountA
+			const binding: UsageRouteBinding = {
+				scopeId: "scope-switch-binding",
+				revision: 1,
+				owner: { kind: "role", role: "task" },
+				target,
+				credentialId: accountA.credentialId,
+				intent: "proactive",
+				bearerFingerprint: fingerprintBearer(selectedA.apiKey),
+			};
+
+			const sentAt: number[] = [];
+			const model = createMockModel({
+				provider: PROVIDER,
+				handler: () => {
+					sentAt.push(Date.now());
+					return { content: ["ok"] };
+				},
+			});
+
+			// Attempt to dispatch using accountB's credential under accountA's binding
+			await expect(
+				streamSimple(model, context(), {
+					apiKey: () => ({
+						apiKey: selectedB.apiKey,
+						credentialId: accountB.credentialId,
+						usageRouteBinding: binding,
+					}),
+					usageContext: { role: "task", source: "turn", interactive: true, sessionId },
+				}).result(),
+			).rejects.toBeInstanceOf(UsageRouteInvalidatedError);
+
+			expect(sentAt).toHaveLength(0);
+			expect(h.reservations()).toHaveLength(0);
+			expectNoStrayFetch(h);
+		} finally {
+			await disposeHarness();
+		}
+	}, 15_000);
+
+	test("a bound route with paid or unknown allowance rejects admission and sends nothing", async () => {
+		const h = await createHarness(ENABLED);
+		try {
+			const original = h.usage.provider.bind(h.usage);
+			h.usage.provider = id => {
+				const provider = original(id);
+				return {
+					...provider,
+					// Empty allowance array -> treated as paid / no included allowance
+					governorAllowance: () => [],
+					fetchUsage: async (params, ctx) => {
+						const report = await provider.fetchUsage(params, ctx);
+						if (report) for (const limit of report.limits) limit.observedAt = Date.now();
+						return report;
+					},
+				};
+			};
+
+			await pacedPair(h);
+			configureUsageAdmission(h.storage.governor);
+
+			const target = { selector: `${PROVIDER}/mock-model`, provider: PROVIDER, modelId: "mock-model" };
+			h.storage.governor.setRoutingScope({
+				id: "scope-paid-binding",
+				revision: 1,
+				roles: [{ role: "task", targets: [target] }],
+			});
+
+			const account = h.storage.oauth.accounts(PROVIDER).find(a => a.accountId === "acc-a")!;
+			const sessionId = "session-paid-binding";
+			const selected = await h.storage.keys.getWithCredential(PROVIDER, sessionId, {
+				requestCredential: { credentialId: account.credentialId },
+				recordAffinity: false,
+			});
+			if (!selected?.apiKey) throw new Error("missing key for acc-a");
+
+			const binding: UsageRouteBinding = {
+				scopeId: "scope-paid-binding",
+				revision: 1,
+				owner: { kind: "role", role: "task" },
+				target,
+				credentialId: account.credentialId,
+				intent: "proactive",
+				bearerFingerprint: fingerprintBearer(selected.apiKey),
+			};
+
+			const sentAt: number[] = [];
+			const model = createMockModel({
+				provider: PROVIDER,
+				handler: () => {
+					sentAt.push(Date.now());
+					return { content: ["ok"] };
+				},
+			});
+
+			await expect(
+				streamSimple(model, context(), {
+					apiKey: () => ({
+						apiKey: selected.apiKey,
+						credentialId: account.credentialId,
+						usageRouteBinding: binding,
+					}),
+					usageContext: { role: "task", source: "turn", interactive: true, sessionId },
+				}).result(),
+			).rejects.toBeInstanceOf(UsageRouteInvalidatedError);
+
+			expect(sentAt).toHaveLength(0);
+			expect(h.reservations()).toHaveLength(0);
 			expectNoStrayFetch(h);
 		} finally {
 			await disposeHarness();

@@ -27,6 +27,8 @@ class World {
 	auth!: AuthStorage;
 	allowance: "included" | "unknown" | "paid" = "included";
 	observedAt = Date.now();
+	usedFraction = 0.1;
+	exhausted = false;
 	fetches = 0;
 	adapter: UsageProvider = {
 		id: PROVIDER,
@@ -42,7 +44,8 @@ class World {
 						label: "Included",
 						scope: { provider, accountId: credential.accountId },
 						window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now + 30_000 },
-						amount: { unit: "percent", usedFraction: 0.1 },
+						amount: { unit: "percent", usedFraction: this.usedFraction },
+						status: this.exhausted ? "exhausted" : undefined,
 						observedAt: this.observedAt,
 					},
 				],
@@ -237,6 +240,133 @@ describe("request-local route binding", () => {
 		w.observedAt = Date.now() - 24 * 60 * 60_000;
 		await w.refresh();
 		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
+	});
+	test("a bound route that becomes paced or closed with fresh evidence stays valid", async () => {
+		const w = await setup();
+		const { a, binding, request } = await w.bind();
+
+		// Initially open:
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(true);
+
+		// Paced (usedFraction past the line):
+		w.usedFraction = 0.8;
+		await w.refresh();
+		const pacedEval = await w.auth.governor.evaluateRoutes({
+			scopeId: "scope",
+			revision: 1,
+			role: "task",
+			sessionId: SESSION,
+			targets: [TARGET],
+		});
+		expect(pacedEval.accounts.find(row => row.credentialId === a.credentialId)).toMatchObject({
+			eligibility: "eligible",
+			allowance: "included",
+			state: "paced",
+		});
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(true);
+
+		// Closed (reserve-held):
+		w.usedFraction = 0.95;
+		await w.refresh();
+		const reserveHeldEval = await w.auth.governor.evaluateRoutes({
+			scopeId: "scope",
+			revision: 1,
+			role: "task",
+			sessionId: SESSION,
+			targets: [TARGET],
+		});
+		expect(reserveHeldEval.accounts.find(row => row.credentialId === a.credentialId)).toMatchObject({
+			eligibility: "eligible",
+			allowance: "included",
+			state: "closed",
+		});
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(true);
+
+		// Closed (exhausted / allowance spent):
+		w.usedFraction = 1.0;
+		w.exhausted = true;
+		await w.refresh();
+		const spentEval = await w.auth.governor.evaluateRoutes({
+			scopeId: "scope",
+			revision: 1,
+			role: "task",
+			sessionId: SESSION,
+			targets: [TARGET],
+		});
+		expect(spentEval.accounts.find(row => row.credentialId === a.credentialId)).toMatchObject({
+			eligibility: "eligible",
+			allowance: "spent",
+			state: "closed",
+		});
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(true);
+	});
+	test("a paced or closed bound route becomes invalid if evidence goes stale or unknown", async () => {
+		const w = await setup();
+		const { binding, request } = await w.bind();
+
+		// Set to paced
+		w.usedFraction = 0.8;
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(true);
+
+		// Stale evidence
+		w.observedAt = Date.now() - 24 * 60 * 60_000;
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
+
+		// Reset observedAt, set to spent/closed
+		w.observedAt = Date.now();
+		w.usedFraction = 1.0;
+		w.exhausted = true;
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(true);
+
+		// Stale evidence when spent
+		w.observedAt = Date.now() - 24 * 60 * 60_000;
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
+
+		// Unknown allowance when paced
+		w.observedAt = Date.now();
+		w.usedFraction = 0.8;
+		w.exhausted = false;
+		w.allowance = "unknown";
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
+
+		// Paid allowance when paced
+		w.allowance = "paid";
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
+	});
+	test("a paced or closed bound route rejects unauthorized switches", async () => {
+		const w = await setup();
+		const { b, binding, request } = await w.bind();
+
+		w.usedFraction = 0.8;
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(true);
+
+		// Switching credentialId
+		expect(w.auth.governor.validateRoute!(binding, { ...request, credentialId: b.credentialId })).toBe(false);
+		// Switching bearerFingerprint
+		expect(
+			w.auth.governor.validateRoute!(binding, { ...request, bearerFingerprint: fingerprintBearer("different") }),
+		).toBe(false);
+		// Switching provider
+		expect(w.auth.governor.validateRoute!(binding, { ...request, provider: "openai" })).toBe(false);
+		// Switching modelId
+		expect(w.auth.governor.validateRoute!(binding, { ...request, modelId: "different-model" })).toBe(false);
+		// Switching baseUrl
+		expect(w.auth.governor.validateRoute!(binding, { ...request, baseUrl: "https://other.example.com" })).toBe(false);
+		// Missing or different sessionId
+		expect(w.auth.governor.validateRoute!(binding, { ...request, context: undefined })).toBe(false);
+		expect(
+			w.auth.governor.validateRoute!(binding, {
+				...request,
+				context: { source: "subagent", sessionId: "other-session" },
+			}),
+		).toBe(false);
 	});
 	test("a constrained resolution neither overrides an explicit pin nor records a new affinity", async () => {
 		const w = await setup();

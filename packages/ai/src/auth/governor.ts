@@ -345,8 +345,7 @@ export class CredentialGovernor implements GovernorApi {
 					account.selector === binding.target.selector &&
 					account.credentialId === binding.credentialId &&
 					account.eligibility === "eligible" &&
-					account.allowance === "included" &&
-					account.state === "open",
+					(account.allowance === "included" || account.allowance === "spent"),
 			);
 		} catch {
 			return false;
