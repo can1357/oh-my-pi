@@ -48,6 +48,9 @@
 - Reranking requests now send configured model headers, including custom `Authorization`
 - Provider retries no longer retry responses explicitly marked non-retryable
 - Fixed Gemini `MALFORMED_RESPONSE` finishes failing with "Unhandled stop reason" and losing the turn's token usage; they now count as transient errors on every Gemini transport ([#17976](https://github.com/can1357/oh-my-pi/pull/17976) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+### Fixed
+
+- Fixed the auth gateway silently dropping the tool namespace and developer `additional_tools` items from Codex Responses requests, so Codex turns replayed tools without them ([#17863](https://github.com/can1357/oh-my-pi/pull/17863) by [@codyw912](https://github.com/codyw912))
 
 ## [18.16.0] - 2026-11-02
 
