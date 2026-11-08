@@ -316,6 +316,40 @@ describe("a `!command` credential the provider refuses", () => {
 		expect(rig.mints() - before).toBe(1);
 	});
 
+	async function staleHeaderWave(count: number): Promise<{ refusedResends: number; recovered: number }> {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "prepared-junk");
+		const command = mintFromFile(counterFile, tokenFile);
+		const rig = buildRig("literal-placeholder", counterFile, bearer => bearer !== "refused-junk", {
+			headers: { Authorization: command },
+		});
+		const sends = await Promise.all(Array.from({ length: count }, () => rig.prepare()));
+		// Another provider using this command advances its slot after these
+		// operations prepared their auth. The live header resolver now reads 2,
+		// but their seeded metadata still names 1. The gateway refuses 2.
+		fs.writeFileSync(tokenFile, "refused-junk");
+		await remintCommandConfig(command, 1);
+		fs.writeFileSync(tokenFile, "replacement-junk");
+		const results = await Promise.all(sends.map(send => send()));
+		return {
+			refusedResends: results.reduce((sum, _result, index) => {
+				const attempts = rig.seen.slice(index * 2, index * 2 + 2);
+				return sum + Number(attempts.length === 2 && attempts.every(value => value === "refused-junk"));
+			}, 0),
+			recovered: results.filter(result => result.stopReason !== "error").length,
+		};
+	}
+
+	test("a header retry never resends the generation its request just had refused", async () => {
+		expect((await staleHeaderWave(1)).refusedResends).toBe(0);
+	});
+
+	test("every prepared header operation recovers after a shared command advances", async () => {
+		expect((await staleHeaderWave(10)).recovered).toBe(10);
+	});
+
 	test("a new operation never sends a generation already recorded as refused", async () => {
 		const counterFile = path.join(tempDir, "mints");
 		const tokenFile = path.join(tempDir, "token");
