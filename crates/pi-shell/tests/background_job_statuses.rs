@@ -200,6 +200,25 @@ async fn waits_and_forks_clean_up_as_bash_does() {
 	.await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn waiting_a_previous_job_cleans_up_before_waiting_the_current_job() {
+	assert_bash_outputs(&[
+		(
+			r"f(){ return 3; }; g(){ /bin/sleep .3; return 7; }; f & a=$!; g & b=$!; wait $a; wait %%; echo c=$?; wait %- 2>/dev/null; echo p=$?",
+			"c=7\np=127\n",
+		),
+		(
+			r#"f(){ return 3; }; g(){ /bin/sleep .03; return 7; }; f & a=$!; g & b=$!; wait "$a"; wait %%; echo c=$?; wait %- 2>/dev/null; echo p=$?; wait "$a"; echo numeric=$?; wait %% 2>/dev/null; echo current2=$?"#,
+			"c=7\np=127\nnumeric=3\ncurrent2=127\n",
+		),
+		(
+			r#"f(){ return 7; }; g(){ /bin/sleep .01; return 7; }; f & p=$!; wait "$p"; g & /bin/sleep .03; wait %%; echo c=$?; wait %- 2>/dev/null; echo p=$?; wait "$p"; echo numeric=$?"#,
+			"c=7\np=7\nnumeric=7\n",
+		),
+	])
+	.await;
+}
+
 /// A process substitution stays waitable after `$!` names a later job; a
 /// command substitution lists the running jobs and `$!`'s only; a job
 /// disowned before `$!` was read still gets its program's OS pid.

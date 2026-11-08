@@ -8,15 +8,16 @@ use pi_shell::{
 	bash::{
 		Budget, CallOutcome, Cx, Engine, EngineConfig, MemStore, RestoreOpts, Script, Shell,
 		ShellApi, StateStore, Step,
-		store::{BlobSlot, Change, Key, Record, StoreError, Table},
+		store::{BlobSlot, Change, Key, MiscKey, Record, StoreError, Table},
 	},
 	testkit::{FakeHost, fault::skeleton_init},
 };
 
 struct RefuseFrames {
-	inner:    MemStore,
-	refuse:   bool,
-	refusals: usize,
+	inner:       MemStore,
+	refuse:      bool,
+	refuse_jobs: bool,
+	refusals:    usize,
 }
 
 impl StateStore for RefuseFrames {
@@ -29,6 +30,13 @@ impl StateStore for RefuseFrames {
 	}
 
 	fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
+		if self.refuse
+			&& self.refuse_jobs
+			&& matches!(&change, Change::Del(Key::Misc(MiscKey::JobFrames)))
+		{
+			self.refusals += 1;
+			return Err(StoreError::Backend("refused JobFrames deletion".into()));
+		}
 		self.inner.apply(change)
 	}
 
@@ -41,7 +49,7 @@ impl StateStore for RefuseFrames {
 	}
 
 	fn del_blob(&mut self, slot: BlobSlot) -> Result<(), StoreError> {
-		if self.refuse && slot == BlobSlot::Frames {
+		if self.refuse && !self.refuse_jobs && slot == BlobSlot::Frames {
 			self.refusals += 1;
 			return Err(StoreError::Backend("refused Frames deletion".into()));
 		}
@@ -55,16 +63,40 @@ impl StateStore for RefuseFrames {
 
 #[test]
 fn refused_frames_deletion_cannot_silently_lose_kept_status_on_second_restore() {
+	refused_deletion_preserves_execution(
+		br#"f(){ g(){ return 7; }; g & q=$!; wait "$q"; jobs; hold; wait "$q"; echo kept=$?; }; f & wait"#,
+		b"kept=7\n",
+		false,
+	);
+}
+
+#[test]
+fn refused_jobframes_deletion_preserves_the_suspended_root_command() {
+	refused_deletion_preserves_execution(
+		br#"g(){ return 7; }; g & q=$!; wait "$q"; jobs; hold; wait "$q"; echo kept=$?; echo USER_WORK_RESUMED"#,
+		b"kept=7\nUSER_WORK_RESUMED\n",
+		true,
+	);
+}
+
+#[test]
+fn refused_jobframes_deletion_preserves_the_child_and_parent_wait() {
+	refused_deletion_preserves_execution(
+		br#"f(){ g(){ return 7; }; g & q=$!; wait "$q"; jobs; hold; wait "$q"; echo kept=$?; }; f & wait"#,
+		b"kept=7\n",
+		true,
+	);
+}
+
+fn refused_deletion_preserves_execution(script: &[u8], expected: &[u8], refuse_jobs: bool) {
 	let engine = Engine::new(EngineConfig::default());
 	let mut host = FakeHost::new();
 	host.tool("hold", Arc::new(|_: &mut ShellApi<'_, '_>, _: &[BString]| CallOutcome::Exit(0)));
-	let mut store = RefuseFrames { inner: MemStore::new(), refuse: false, refusals: 0 };
+	let mut store = RefuseFrames { inner: MemStore::new(), refuse: false, refuse_jobs, refusals: 0 };
 	let mut shell =
 		Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, skeleton_init(&[]))
 			.unwrap();
-	let run = shell.submit(Script::command(
-		br#"f(){ g(){ return 7; }; g & q=$!; wait "$q"; jobs; hold; wait "$q"; echo kept=$?; }; f & wait"#.as_slice(),
-	));
+	let run = shell.submit(Script::command(script));
 	let mut call = None;
 	for _ in 0..10_000 {
 		match shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()) {
@@ -97,6 +129,12 @@ fn refused_frames_deletion_cannot_silently_lose_kept_status_on_second_restore() 
 		first.as_ref().map(|(_, report)| report),
 		store.inner.to_bytes() == before
 	);
+	assert!(first.is_err(), "a refused cleanup must not return a restored shell");
+	assert_eq!(
+		store.inner.to_bytes(),
+		before,
+		"a failed restore must leave the full image retryable"
+	);
 	drop(first);
 	store.refuse = false;
 	let (mut shell, report) = Shell::restore(
@@ -121,5 +159,5 @@ fn refused_frames_deletion_cannot_silently_lose_kept_status_on_second_restore() 
 	}
 	assert!(done);
 	println!("consumer={}", String::from_utf8_lossy(&host.stdout.bytes()));
-	assert_eq!(host.stdout.bytes(), b"kept=7\n");
+	assert_eq!(host.stdout.bytes(), expected);
 }
