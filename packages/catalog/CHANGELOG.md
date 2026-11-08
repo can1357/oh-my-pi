@@ -6,6 +6,10 @@
 
 - Added Otari gateway provider: `/login otari` with `OTARI_API_KEY`, models discovered live per workspace ([#17841](https://github.com/can1357/oh-my-pi/pull/17841) by [@tbille](https://github.com/tbille))
 
+### Fixed
+
+- Restricted Mistral Large 4 reasoning efforts to low, medium, and high so invalid effort tiers are rejected before calling the API ([#18486](https://github.com/can1357/oh-my-pi/pull/18486) by [@its-benjamin](https://github.com/its-benjamin))
+
 ## [18.18.3] - 2026-11-09
 
 ### Changed
