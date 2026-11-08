@@ -115,6 +115,7 @@
 - Autoresearch `update_notes` calls can now append an idea with only `append_idea`, without passing a replacement `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
 - A session resumed after an idle shake, prune, image drop, rewind, branch switch or tree navigation now sends the same history the previous process sent, so the provider prompt cache keeps hitting instead of missing from the eval-state snapshot that rewrite added ([#18414](https://github.com/can1357/oh-my-pi/pull/18414) by [@materemias](https://github.com/materemias))
 - On models that bind thinking to the prompt prefix (e.g. Claude Opus 5.5), MCP tools a session loads mid-session no longer enter the eval description and system prompt at the next unrelated prompt rebuild (a body-only `manage_skill update`, an unchanged memory or settings refresh), which read zero cached tokens and dropped all earlier thinking; they keep arriving through the hidden notice ([#18396](https://github.com/can1357/oh-my-pi/issues/18396))
+- In the bash tool's shell, a fatal expansion error (`${x?}`, `set -u`) raised while an EXIT trap is running no longer replaces the status the shell was exiting with, so `( trap ': ${nope?boom}' EXIT; exit 4 ); echo $?` prints 4 as it does in Bash 5.2 and 5.3, instead of 1 (127 at the top level) ([#18383](https://github.com/can1357/oh-my-pi/pull/18383) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.18.0] - 2026-11-07
 

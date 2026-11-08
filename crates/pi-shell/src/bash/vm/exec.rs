@@ -2096,6 +2096,27 @@ fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 		)
 }
 
+/// The status a fatal expansion error leaves when the EXIT trap is the
+/// innermost trap action running: bash's EXIT trap keeps the status the
+/// shell was exiting with (`last_command_exit_value` is saved across the
+/// trap), so the shell leaves with that status and not with the constant
+/// below. Only the EXIT trap does this, so a nested trap action of any
+/// other kind answers `None` and keeps the constant.
+///
+/// The saved status is carried as the `i32` the frame holds, exactly as
+/// every other reader of it does (`return` with no argument inside a
+/// trap, the frame-pop restore); it is already a wait status in `0..=255`
+/// on every path that arms a trap, and narrowing it here would be a
+/// silent second opinion about a value this function does not own.
+fn exit_trap_status(vp: &Vproc) -> Option<i32> {
+	vp.frames.iter().rev().find_map(|frame| match frame.kind {
+		FrameKind::Script { what: ScriptKind::Trap { key, status, .. }, .. } => {
+			Some((key == TrapKey::Exit).then_some(status))
+		},
+		_ => None,
+	})?
+}
+
 /// The flow for an expansion error (the diagnostic is printed).
 pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, stop: Stop) -> Flow {
 	match stop {
@@ -2123,6 +2144,16 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		},
 		Stop::Fail(d) | Stop::Fatal(d) => {
 			k.diag(cx, vp, line, d);
+			// The EXIT trap keeps the status the shell was exiting with.
+			// Under `set -e` bash reaches the same rows through its own
+			// errexit jump, which this change does not model, so the
+			// upstream constant stays whenever errexit is on.
+			if vp.mode.dialect() != Dialect::Zsh
+				&& let Some(status) = exit_trap_status(vp)
+				&& !errexit_on(k, cx, vp)
+			{
+				return Flow::Exit(status);
+			}
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
 			// failure status); a nested shell (depth 0) is its own `-c` shell.
