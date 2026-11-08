@@ -872,11 +872,13 @@ impl GitRepo {
 
 		// gix overwrites an existing file in place, which a read-only copy
 		// refuses; unlinked, it is created fresh as in any other checkout.
+		// Behind a symlinked parent the file may lie outside the clone, so it
+		// is left for gix, which replaces that parent with a directory.
 		for relative in &write {
 			let full = path.join(relative.to_path_lossy());
-			unlock_clone_path(path, &full)?;
-			if fs::symlink_metadata(&full)
-				.is_ok_and(|meta| meta.is_file() && meta.permissions().readonly())
+			if unlock_clone_path(path, &full)?
+				&& fs::symlink_metadata(&full)
+					.is_ok_and(|meta| meta.is_file() && !owner_can_write(&meta))
 			{
 				fs::remove_file(&full)?;
 			}
@@ -943,7 +945,9 @@ impl GitRepo {
 		// versa. Only now are the target's ignore files and index in place.
 		// Clean this fresh clone through the existing repository-safe walk;
 		// keep target-ignored caches and never enter nested repositories.
-		linked.clean_with(&CleanOptions::default(), |full| unlock_clone_path(linked.root(), full))
+		linked.clean_with(&CleanOptions::default(), |full| {
+			unlock_clone_path(linked.root(), full).map(drop)
+		})
 	}
 
 	/// Resolve the executable hook `name` as git's `find_hook` does: under
@@ -1965,8 +1969,9 @@ fn register_worktree(path: &Path, common: &Path, head: &str) -> Result<PathBuf> 
 /// Give the owner access to the directories leading to `path` below `root`
 /// and, when `path` is a directory, to those inside it. A clone copies the
 /// source's permission bits, so read-only directories would otherwise refuse
-/// the entries being replaced or removed.
-fn unlock_clone_path(root: &Path, path: &Path) -> Result<()> {
+/// the entries being replaced or removed. Returns whether every directory
+/// leading to `path` is a real directory rather than a symlink.
+fn unlock_clone_path(root: &Path, path: &Path) -> Result<bool> {
 	let parents: Vec<_> = path
 		.ancestors()
 		.skip(1)
@@ -1974,10 +1979,11 @@ fn unlock_clone_path(root: &Path, path: &Path) -> Result<()> {
 		.collect();
 	for dir in parents.into_iter().rev() {
 		if !unlock_dir(dir)? {
-			return Ok(());
+			return Ok(false);
 		}
 	}
-	unlock_tree(path)
+	unlock_tree(path)?;
+	Ok(true)
 }
 
 fn unlock_tree(dir: &Path) -> Result<()> {
@@ -2010,10 +2016,24 @@ fn unlock_dir(path: &Path) -> Result<bool> {
 	Ok(true)
 }
 
-/// Directory permission bits do not restrict removal off Unix.
+/// Directory permission bits do not restrict removal off Unix; only report
+/// whether `path` is a directory, without following symlinks.
 #[cfg(not(unix))]
-fn unlock_dir(_path: &Path) -> Result<bool> {
-	Ok(false)
+fn unlock_dir(path: &Path) -> Result<bool> {
+	Ok(fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()))
+}
+
+/// Whether the owner may write the file: group or other write bits do not
+/// let the owner open it for writing.
+#[cfg(unix)]
+fn owner_can_write(meta: &fs::Metadata) -> bool {
+	use std::os::unix::fs::PermissionsExt;
+	meta.permissions().mode() & 0o200 != 0
+}
+
+#[cfg(not(unix))]
+fn owner_can_write(meta: &fs::Metadata) -> bool {
+	!meta.permissions().readonly()
 }
 
 fn cleanup_worktree_add(path: &Path, common: &Path) {
@@ -3110,8 +3130,11 @@ mod tests {
 		git(temp.path(), &["commit", "-qm", "ignore kept"]);
 		git(temp.path(), &["branch", "target"]);
 		fs::write(temp.path().join("a"), "newer\n").unwrap();
-		git(temp.path(), &["commit", "-qam", "newer a"]);
+		fs::write(temp.path().join("b"), "newer\n").unwrap();
+		git(temp.path(), &["commit", "-qam", "newer a and b"]);
 		chmod(&temp.path().join("a"), 0o444);
+		// Group and other may write, the owner may not.
+		chmod(&temp.path().join("b"), 0o464);
 		for name in ["cache", "kept"] {
 			let dir = temp.path().join(name);
 			fs::create_dir(&dir).unwrap();
@@ -3134,17 +3157,59 @@ mod tests {
 		assert!(result.cloned_with.is_some());
 		assert_eq!(fs::read_to_string(linked.join("a")).unwrap(), "one\n");
 		assert_ne!(fs::metadata(linked.join("a")).unwrap().permissions().mode() & 0o200, 0);
+		assert_eq!(fs::read_to_string(linked.join("b")).unwrap(), "two\n");
 		assert!(!linked.join("cache").exists());
 		assert_eq!(fs::read_to_string(linked.join("kept/data")).unwrap(), "generated\n");
 		let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
 		assert_eq!(mode(&linked.join("kept")), 0o555);
 		// Only the clone is unlocked; the source keeps its permissions.
 		assert_eq!(mode(&temp.path().join("a")), 0o444);
+		assert_eq!(mode(&temp.path().join("b")), 0o464);
 		assert_eq!(mode(&temp.path().join("cache")), 0o555);
 
 		chmod(&temp.path().join("cache"), 0o755);
 		chmod(&temp.path().join("kept"), 0o755);
 		chmod(&linked.join("kept"), 0o755);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn clone_first_worktree_leaves_read_only_files_behind_a_symlinked_parent() {
+		use std::os::unix::fs::PermissionsExt;
+		let (temp, repo) = fixture();
+		if !clone_works_on(temp.path()) {
+			return;
+		}
+		fs::create_dir(temp.path().join("dir")).unwrap();
+		fs::write(temp.path().join("dir/file"), "tracked\n").unwrap();
+		git(temp.path(), &["add", "dir"]);
+		git(temp.path(), &["commit", "-qm", "add dir"]);
+		git(temp.path(), &["branch", "target"]);
+		git(temp.path(), &["rm", "-rq", "dir"]);
+		git(temp.path(), &["commit", "-qm", "drop dir"]);
+		// An untracked symlink where the target tracks a directory; the clone
+		// copies it, so `dir/file` resolves outside the clone.
+		let outside = tempfile::tempdir().unwrap();
+		let outside_file = outside.path().join("file");
+		fs::write(&outside_file, "outside\n").unwrap();
+		fs::set_permissions(&outside_file, fs::Permissions::from_mode(0o444)).unwrap();
+		std::os::unix::fs::symlink(outside.path(), temp.path().join("dir")).unwrap();
+
+		let destination = tempfile::tempdir().unwrap();
+		let linked = destination.path().join("linked");
+		let result = repo
+			.worktree_add(&linked, "target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+
+		assert_eq!(result.clone_error, None);
+		assert!(result.cloned_with.is_some());
+		assert_eq!(fs::read_to_string(&outside_file).unwrap(), "outside\n");
+		assert!(fs::symlink_metadata(linked.join("dir")).unwrap().is_dir());
+		assert_eq!(fs::read_to_string(linked.join("dir/file")).unwrap(), "tracked\n");
 	}
 
 	#[cfg(unix)]
