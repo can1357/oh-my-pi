@@ -2372,10 +2372,11 @@ async fn pipe_tap_forwards_every_byte_and_counts_them() {
 
 /// Windows `/dev/null` is the null device: a stdout redirect discards `x`,
 /// and a stderr redirect discards `y` written to fd 2. `test -e` sees the
-/// device (open, stat, existence). A regression leaves `x` or `y` on a
-/// captured stream, or a non-zero status when the redirect or the existence
-/// check fails. `printf y` alone writes stdout, so the stderr case is
-/// `{ printf y >&2; } 2>/dev/null`.
+/// device, and `test -r` / `test -w` succeed even when `GetFileAttributes`
+/// cannot stat `NUL`. A regression leaves `x` or `y` on a captured stream,
+/// or a non-zero status when the redirect, the existence check, or the
+/// read/write check fails. `printf y` alone writes stdout, so the stderr
+/// case is `{ printf y >&2; } 2>/dev/null`.
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread")]
 async fn dev_null_redirects_discard_both_streams_and_exists() {
@@ -2384,7 +2385,7 @@ async fn dev_null_redirects_discard_both_streams_and_exists() {
 	let stderr = tempfile::tempfile().expect("stderr capture");
 	let result = session
 		.run_test(
-			"printf x >/dev/null; { printf y >&2; } 2>/dev/null; test -e /dev/null",
+			"printf x >/dev/null; { printf y >&2; } 2>/dev/null; test -e /dev/null && test -r /dev/null && test -w /dev/null",
 			&TestStdio::null().stdout(&stdout).stderr(&stderr),
 		)
 		.await

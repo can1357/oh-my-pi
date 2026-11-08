@@ -854,7 +854,17 @@ fn access(path: &BStr, mode: Access) -> io::Result<()> {
 	#[cfg(windows)]
 	{
 		let p = host_path(path)?;
-		let meta = fs::metadata(p)?;
+		let meta = fs::metadata(p);
+		// `GetFileAttributes` does not see the null device. A failed lookup of
+		// `NUL` is still readable and writable (`test -r`/`test -w`/`test -e`);
+		// it is not executable.
+		if meta.is_err() && p == Path::new("NUL") {
+			if mode.contains(Access::EXEC) {
+				return Err(io::ErrorKind::PermissionDenied.into());
+			}
+			return Ok(());
+		}
+		let meta = meta?;
 		if mode.contains(Access::WRITE) && meta.permissions().readonly() {
 			return Err(io::ErrorKind::PermissionDenied.into());
 		}
