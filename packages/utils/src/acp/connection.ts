@@ -65,7 +65,15 @@ export interface Client {
 	waitForTerminalExit?(params: { sessionId: string; terminalId: string }): MaybePromise<WaitForTerminalExitResponse>;
 	killTerminal?(params: { sessionId: string; terminalId: string }): MaybePromise<TerminalActionResponse | void>;
 	releaseTerminal?(params: { sessionId: string; terminalId: string }): MaybePromise<TerminalActionResponse | void>;
-	unstable_createElicitation?(params: CreateElicitationRequest): MaybePromise<CreateElicitationResponse>;
+	/**
+	 * Serve a form elicitation. `options.signal` aborts when the agent cancels the request
+	 * (`$/cancel_request`) because it no longer waits for the answer, so the client can close
+	 * the form instead of leaving a person to fill in one whose answer is not used.
+	 */
+	unstable_createElicitation?(
+		params: CreateElicitationRequest,
+		options?: { signal?: AbortSignal },
+	): MaybePromise<CreateElicitationResponse>;
 	unstable_completeElicitation?(params: CompleteElicitationNotification): MaybePromise<void>;
 	extMethod?(method: string, params: Record<string, unknown>): MaybePromise<Record<string, unknown>>;
 	extNotification?(method: string, params: Record<string, unknown>): MaybePromise<void>;
@@ -126,6 +134,20 @@ export class AgentSideConnection {
 	/** Creates an interactive elicitation on the client. */
 	unstable_createElicitation(params: CreateElicitationRequest): Promise<CreateElicitationResponse> {
 		return this.#connection.request("elicitation/create", params);
+	}
+	/**
+	 * Creates an elicitation on the client, returning a handle for the pending wire request.
+	 * `cancel()` sends `$/cancel_request` and stops waiting, so the client closes a form whose
+	 * answer is no longer used. `withdraw()` sends it and keeps waiting: the client's response
+	 * still arrives, an answer the person submitted before the cancellation reached the client,
+	 * or `-32800`.
+	 */
+	unstable_createElicitationWithCancel(params: CreateElicitationRequest): {
+		promise: Promise<CreateElicitationResponse>;
+		cancel(): void;
+		withdraw(): void;
+	} {
+		return this.#connection.requestCancellable<CreateElicitationResponse>("elicitation/create", params);
 	}
 	/** Notifies a client that URL elicitation completed. */
 	unstable_completeElicitation(params: CompleteElicitationNotification): Promise<void> {
@@ -342,7 +364,8 @@ async function dispatchClient(
 				params as { sessionId: string; terminalId: string },
 			);
 		case "elicitation/create":
-			return invokeRequired(client, client.unstable_createElicitation, method, params as CreateElicitationRequest);
+			if (!client.unstable_createElicitation) throw RequestError.methodNotFound(method);
+			return client.unstable_createElicitation(params as CreateElicitationRequest, { signal });
 		case "elicitation/complete":
 			return invokeRequired(
 				client,

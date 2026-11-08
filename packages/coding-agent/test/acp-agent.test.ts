@@ -590,8 +590,8 @@ async function createHarness(
 			options.permissionHandler?.(request);
 			return { promise: Promise.resolve({ outcome: { outcome: "cancelled" } }), cancel: () => {} };
 		},
-		unstable_createElicitation: options.elicitationHandler
-			? async (req: CreateElicitationRequest) => options.elicitationHandler!(req)
+		unstable_createElicitationWithCancel: options.elicitationHandler
+			? (req: CreateElicitationRequest) => ({ promise: options.elicitationHandler!(req), cancel: () => {} })
 			: undefined,
 		signal: abortController.signal,
 		closed: Promise.withResolvers<void>().promise,
@@ -3611,15 +3611,18 @@ describe("ACP agent", () => {
 		function createElicitConnection(handler: (req: CreateElicitationRequest) => Promise<CreateElicitationResponse>): {
 			connection: AgentSideConnection;
 			calls: CreateElicitationRequest[];
+			/** Requests the bridge cancelled on the wire (`$/cancel_request`), closing the client's form. */
+			cancelled: CreateElicitationRequest[];
 		} {
 			const calls: CreateElicitationRequest[] = [];
+			const cancelled: CreateElicitationRequest[] = [];
 			const connection = {
-				unstable_createElicitation: async (req: CreateElicitationRequest) => {
+				unstable_createElicitationWithCancel: (req: CreateElicitationRequest) => {
 					calls.push(req);
-					return handler(req);
+					return { promise: Promise.try(() => handler(req)), cancel: () => cancelled.push(req) };
 				},
 			} as unknown as AgentSideConnection;
-			return { connection, calls };
+			return { connection, calls, cancelled };
 		}
 
 		/** Narrows `CreateElicitationRequest` to the `mode: "form"` branch; the SDK's `mode: string` catch-all arm otherwise defeats literal narrowing on `mode !== "form"`. */
@@ -4068,9 +4071,9 @@ describe("ACP agent", () => {
 			expect(calls).toHaveLength(0);
 		});
 
-		it("resolves to the stub fallback when dialogOptions.signal aborts mid-flight", async () => {
+		it("resolves to the stub fallback and closes the client's form when dialogOptions.signal aborts mid-flight", async () => {
 			const { resolve, promise: never } = Promise.withResolvers<CreateElicitationResponse>();
-			const { connection, calls } = createElicitConnection(() => never);
+			const { connection, calls, cancelled } = createElicitConnection(() => never);
 			const ctx = createAcpExtensionUiContext(connection, () => "session-midabort", FORM_CAPABILITIES);
 			const controller = new AbortController();
 
@@ -4078,6 +4081,7 @@ describe("ACP agent", () => {
 			controller.abort();
 			expect(await pending).toBeUndefined();
 			expect(calls).toHaveLength(1);
+			expect(cancelled).toEqual(calls);
 			// Resolve the never-promise so the bridge's `.then(finish)` chain settles
 			// and Bun's promise tracker doesn't flag a leaked pending promise.
 			resolve({ action: "decline" });
@@ -4132,15 +4136,16 @@ describe("ACP agent", () => {
 			expect(await ctx.input("Name?")).toBeUndefined();
 		});
 
-		it("fires onTimeout and resolves to the stub fallback when dialogOptions.timeout expires", async () => {
+		it("fires onTimeout, resolves to the stub fallback and closes the client's form when dialogOptions.timeout expires", async () => {
 			const { promise: never } = Promise.withResolvers<CreateElicitationResponse>();
-			const { connection, calls } = createElicitConnection(() => never);
+			const { connection, calls, cancelled } = createElicitConnection(() => never);
 			const ctx = createAcpExtensionUiContext(connection, () => "session-timeout", FORM_CAPABILITIES);
 			let timeoutFired = 0;
 			const result = await ctx.select("Pick", ["a"], { timeout: 1, onTimeout: () => timeoutFired++ });
 			expect(result).toBeUndefined();
 			expect(timeoutFired).toBe(1);
 			expect(calls).toHaveLength(1);
+			expect(cancelled).toEqual(calls);
 		});
 
 		it("treats whitespace-only placeholder as absent on `input`", async () => {

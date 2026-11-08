@@ -31,6 +31,11 @@ export type CollabSessionState = SessionState & {
 export interface CollabStatus {
 	role: "host" | "guest";
 	participantCount: number;
+	/**
+	 * Host only: guests, by name, that a question closed by a message from the host's person still waits on (an
+	 * answer each sent before the question closed, or its reply that it has none). The host's turn waits with it.
+	 */
+	waitingOn?: readonly string[];
 	/** Guest only: host footer snapshot that overrides locally computed values. */
 	stateOverride?: CollabSessionState | null;
 }

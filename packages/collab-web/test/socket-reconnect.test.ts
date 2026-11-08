@@ -25,7 +25,12 @@ class ScriptedWebSocket {
 		ScriptedWebSocket.instances.push(this);
 	}
 
-	send(_data: unknown): void {}
+	/** What the guest did to this connection, in order: each frame written, then the close. */
+	events: ("send" | "close")[] = [];
+
+	send(_data: unknown): void {
+		this.events.push("send");
+	}
 
 	open(): void {
 		this.readyState = ScriptedWebSocket.OPEN;
@@ -43,6 +48,7 @@ class ScriptedWebSocket {
 
 	close(code = 1000, reason = "closed"): void {
 		if (this.readyState === ScriptedWebSocket.CLOSED) return;
+		this.events.push("close");
 		this.relayClose(code, reason);
 	}
 }
@@ -112,5 +118,20 @@ describe("browser guest room recovery", () => {
 		expect(client.getSnapshot()).toMatchObject({ phase: "ended", endedReason: "no such room" });
 		vi.advanceTimersByTime(30_000);
 		expect(ScriptedWebSocket.instances).toHaveLength(1);
+	});
+
+	it("delivers an answer still being sealed when the guest leaves", async () => {
+		installScriptedWebSocket();
+		const client = new GuestClient(LINK, "tester");
+		client.connect();
+		const ws = instance(0);
+		ws.open();
+		// Submit and leave in one step: the hello and the answer are both still being sealed.
+		client.sendUiResponse(3, "Yes");
+		client.close();
+		// Sealing is real WebCrypto work, so wait on the connection's close rather than a clock.
+		const deadline = Date.now() + 3_000;
+		while (ws.readyState !== ScriptedWebSocket.CLOSED && Date.now() < deadline) await Bun.sleep(1);
+		expect(ws.events).toEqual(["send", "send", "close"]);
 	});
 });

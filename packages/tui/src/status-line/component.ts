@@ -1248,7 +1248,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			!this.#collabStatus?.stateOverride &&
 			!status?.stateOverride &&
 			this.#collabStatus?.role === status?.role &&
-			this.#collabStatus?.participantCount === status?.participantCount
+			this.#collabStatus?.participantCount === status?.participantCount &&
+			(this.#collabStatus?.waitingOn ?? []).join("\n") === (status?.waitingOn ?? []).join("\n")
 		) {
 			return;
 		}

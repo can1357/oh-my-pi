@@ -21,6 +21,7 @@ import type {
 	AgentEvent as WireAgentEvent,
 	SessionEntry as WireSessionEntry,
 } from "@oh-my-pi/pi-wire";
+import { DialogSupersededError, WITHDRAWN_DIALOG_REPLY_MS } from "../extensibility/extensions/types";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
@@ -134,6 +135,16 @@ const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fe
 const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
 const MAX_PENDING_UI_REQUESTS = 64;
 /**
+ * How long the host waits, once a message from its person withdraws a guest's question, for a writer that said
+ * `hello.cancelReplies`. Such a guest replies as soon as it reads the withdrawal, one relay round trip after the
+ * host sent it, behind any answer it had already sent. One that has not replied by then is not reading (a paused
+ * or frozen browser tab, a hung client): the host stops waiting for it, as it stops waiting for a guest that
+ * predates `cancelReplies` after {@link WITHDRAWN_DIALOG_REPLY_MS}, and the person's message goes on to the agent.
+ * An answer that arrives later is ignored. It is many relay round trips long, and short enough that a stalled
+ * guest holds the host's turn only briefly; the collab status names the guests waited on meanwhile.
+ */
+export const WITHDRAWN_GUEST_REPLY_LIMIT_MS = 10_000;
+/**
  * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
  * response (an `undefined` value is a genuine guest cancel); `unavailable`
  * means the collab channel went away (teardown, relay drop) or the request was
@@ -141,12 +152,44 @@ const MAX_PENDING_UI_REQUESTS = 64;
  */
 export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
 
+/** A guest that said `hello`. */
+interface CollabPeer {
+	name: string;
+	canWrite: boolean;
+	/** The guest replies to every withdrawn request it was shown (`hello.cancelReplies`). */
+	cancelReplies: boolean;
+}
+
+/**
+ * A request a person's message withdrew while it was open. It settles on the first answer from a writer it still
+ * waits for, or `unavailable` once it waits for none.
+ */
+interface CollabUiWithdrawal {
+	/**
+	 * Writers shown the request that may still answer it, by peer id. A writer leaves the set with its reply, when it
+	 * leaves the room (once the frames it sent before leaving have been dispatched), or when its time runs out:
+	 * {@link WITHDRAWN_DIALOG_REPLY_MS} for one that predates `cancelReplies`, {@link WITHDRAWN_GUEST_REPLY_LIMIT_MS}
+	 * for any. Only a writer still in the set may answer: not one that replied, not one that joined later.
+	 */
+	replies: Map<number, CollabPeer>;
+	timers: Timer[];
+	/** Stops listening for the caller's {@link DialogSupersededError.abandon}. */
+	release(): void;
+}
+
 interface PendingCollabUiRequest {
 	request: CollabUiRequest;
 	promise: Promise<CollabGuestUiResult>;
 	settle(result: CollabGuestUiResult): void;
 	responsePending?: boolean;
 	retainOnReconnect?: boolean;
+	/**
+	 * The writer records the request was sent to. A withdrawal waits only on these: a writer never shown the request
+	 * (one that left before it was asked, or joined while it was not offered) has nothing to reply to. Records, not
+	 * ids, so an id the relay reissues after a room recreation never matches.
+	 */
+	shown: Set<CollabPeer>;
+	withdrawal?: CollabUiWithdrawal;
 }
 
 /**
@@ -231,7 +274,15 @@ export class CollabHost {
 	 * yet, and after a shed, when the peer leaves the participant list but is
 	 * still owed a resync error.
 	 */
-	#peers = new Map<number, { name: string; canWrite: boolean }>();
+	#peers = new Map<number, CollabPeer>();
+	/**
+	 * Writers that left while frames they sent before leaving may still be decrypting, until the socket has
+	 * dispatched those frames ({@link #handlePeerLeft}). An answer among those frames still counts for its
+	 * request, and a request a person's message withdraws meanwhile still waits for them if they were shown it.
+	 * Other frames from them are dropped, as from any peer that left. Cleared with {@link #peers} when the relay
+	 * recreates the room, since ids are then reissued.
+	 */
+	#departing = new Map<number, CollabPeer>();
 	/**
 	 * Never reset, including across a room recreation: ids must not be reissued, or
 	 * a late `ui-response` carrying an old id would settle an unrelated new request.
@@ -301,9 +352,26 @@ export class CollabHost {
 		return this.#stopping || this.#stopped;
 	}
 
-	/** True while a host-side question is retained for (or shown to) a writable guest. */
+	/**
+	 * True while a host-side question is retained for (or shown to) a writable guest. A withdrawn one only
+	 * waits for guests' replies to the withdrawal, so it needs no input; {@link awaitingGuests} names them.
+	 */
 	get inputRequired(): boolean {
-		return this.#pendingUi.size > 0;
+		for (const pending of this.#pendingUi.values()) if (!pending.withdrawal) return true;
+		return false;
+	}
+
+	/**
+	 * Writable guests, by name, that a question closed by a message from the host's person still waits on: each
+	 * one's answer sent before it read the closing, or its reply that it has none. The host's turn waits with it,
+	 * though no input is required; the wait ends within {@link WITHDRAWN_GUEST_REPLY_LIMIT_MS}.
+	 */
+	get awaitingGuests(): string[] {
+		const awaited = new Map<number, string>();
+		for (const pending of this.#pendingUi.values()) {
+			for (const [peerId, peer] of pending.withdrawal?.replies ?? []) awaited.set(peerId, peer.name);
+		}
+		return [...awaited.values()];
 	}
 
 	get relayConnected(): boolean {
@@ -349,6 +417,16 @@ export class CollabHost {
 	 * future guest-only callers without a local dialog to own cancellation: their
 	 * waits settle as unavailable when the relay recreates the room.
 	 *
+	 * A `signal` aborted with a `DialogSupersededError` (a message from the
+	 * host's person) withdraws the request instead of settling it: guests are
+	 * told with `ui-request-end { withdrawn: true }`, and an answer a guest sent
+	 * before it read that still settles the request, however late the relay
+	 * delivers it. A guest that said `hello.cancelReplies` replies to the
+	 * withdrawal, so the host waits for that reply, up to
+	 * {@link WITHDRAWN_GUEST_REPLY_LIMIT_MS}; one that did not is read for
+	 * {@link WITHDRAWN_DIALOG_REPLY_MS}. The error's `abandon` signal ends the
+	 * wait at once. Any other abort settles `unavailable` at once.
+	 *
 	 * Refused, and the room ended, once the active session is no longer the
 	 * one this room mirrors: `/resume` runs the new session's `session_switch`
 	 * hooks before the session-change callbacks fire, so a dialog raised there
@@ -371,18 +449,88 @@ export class CollabHost {
 			signal?.removeEventListener("abort", onAbort);
 			this.#pendingUi.delete(reqId);
 			this.#sendWritablePeers({ t: "ui-request-end", reqId });
+			if (pending.withdrawal) {
+				for (const timer of pending.withdrawal.timers) clearTimeout(timer);
+				pending.withdrawal.release();
+				this.#showAwaitedGuests();
+			}
 			resolve(result);
 		};
-		const onAbort = (): void => settle({ kind: "unavailable" });
-		signal?.addEventListener("abort", onAbort, { once: true });
-		this.#pendingUi.set(reqId, {
+		const onAbort = (): void => {
+			const reason: unknown = signal?.reason;
+			if (reason instanceof DialogSupersededError) this.#withdrawUi(pending, reason.abandon);
+			else settle({ kind: "unavailable" });
+		};
+		const pending: PendingCollabUiRequest = {
 			request: fullRequest,
 			promise,
 			settle,
 			retainOnReconnect: options?.retainOnReconnect,
-		});
-		this.#sendWritablePeers({ t: "ui-request", request: fullRequest });
+			shown: new Set(),
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+		this.#pendingUi.set(reqId, pending);
+		this.#showUi(pending);
 		return promise;
+	}
+
+	/** Withdraws an open request; see {@link requestGuestUi}. */
+	#withdrawUi(pending: PendingCollabUiRequest, abandon: AbortSignal | undefined): void {
+		if (abandon?.aborted) {
+			pending.settle({ kind: "unavailable" });
+			return;
+		}
+		// Only writers shown the request owe a reply: present ones, and departed ones whose earlier frames are still
+		// being dispatched (an answer among them still counts).
+		const replies = new Map<number, CollabPeer>();
+		for (const peers of [this.#peers, this.#departing]) {
+			for (const [peerId, peer] of peers) if (pending.shown.has(peer)) replies.set(peerId, peer);
+		}
+		const stopWaiting = (expired: (peer: CollabPeer) => boolean): void => {
+			for (const [peerId, peer] of replies) if (expired(peer)) replies.delete(peerId);
+			this.#settleWithdrawnIfDone(pending);
+			this.#showAwaitedGuests();
+		};
+		const timers = [setTimeout(() => stopWaiting(() => true), WITHDRAWN_GUEST_REPLY_LIMIT_MS)];
+		// A writer that predates `cancelReplies` sends no reply: read it for the window, then stop.
+		if ([...replies.values()].some(peer => !peer.cancelReplies)) {
+			timers.push(setTimeout(() => stopWaiting(peer => !peer.cancelReplies), WITHDRAWN_DIALOG_REPLY_MS));
+		}
+		const onAbandon = (): void => pending.settle({ kind: "unavailable" });
+		abandon?.addEventListener("abort", onAbandon, { once: true });
+		pending.withdrawal = { replies, timers, release: () => abandon?.removeEventListener("abort", onAbandon) };
+		this.#sendWritablePeers({ t: "ui-request-end", reqId: pending.request.reqId, withdrawn: true });
+		this.#settleWithdrawnIfDone(pending);
+		this.#showAwaitedGuests();
+	}
+
+	/** A writer that was shown a withdrawn request will send nothing more for it. */
+	#withdrawnReplyGone(pending: PendingCollabUiRequest, peerId: number): void {
+		if (!pending.withdrawal?.replies.delete(peerId)) return;
+		this.#settleWithdrawnIfDone(pending);
+		this.#showAwaitedGuests();
+	}
+
+	/** Sends `pending`'s request to `toPeer`, or to every writer present, and records who was shown it. */
+	#showUi(pending: PendingCollabUiRequest, toPeer?: number): void {
+		for (const [peerId, peer] of this.#peers) {
+			if (!peer.canWrite || (toPeer !== undefined && peerId !== toPeer)) continue;
+			pending.shown.add(peer);
+			this.#send({ t: "ui-request", request: pending.request }, peerId);
+		}
+	}
+
+	/** The status segment names the guests a withdrawn request waits on ({@link awaitingGuests}). */
+	#showAwaitedGuests(): void {
+		if (!this.ending) this.#updateStatusSegment();
+	}
+
+	/**
+	 * Settles a withdrawn request once no writer shown it can still reply. An answer held for a session
+	 * transition may still settle it, so that wait re-checks when it ends ({@link #settleUiAfterTransition}).
+	 */
+	#settleWithdrawnIfDone(pending: PendingCollabUiRequest): void {
+		if (pending.withdrawal?.replies.size === 0 && !pending.responsePending) pending.settle({ kind: "unavailable" });
 	}
 
 	#sendWritablePeers(frame: CollabFrame): void {
@@ -456,7 +604,8 @@ export class CollabHost {
 			await firstOpen.promise;
 		} catch (err) {
 			this.#stopped = true;
-			socket.close();
+			// Nothing was sent on a connection that never opened: nothing to wait for.
+			void socket.close();
 			this.#socket = null;
 			// A question retained while connecting has no room to reach anymore.
 			for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
@@ -611,7 +760,9 @@ export class CollabHost {
 		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
 		this.#pendingUi.clear();
 		this.#peers.clear();
-		this.#socket?.close();
+		// The goodbye is in the socket's buffer; stop() resolves only once it has left the process, so an exit
+		// right after it still tells guests the room ended (bounded by `CLOSE_DELIVERY_LIMIT_MS`).
+		const closed = this.#socket?.close();
 		this.#socket = null;
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#ctx.ui.requestRender();
@@ -624,6 +775,7 @@ export class CollabHost {
 		if (late) {
 			await late.close().catch(err => logger.warn("Collab host registry withdrawal failed", { error: String(err) }));
 		}
+		await closed;
 	}
 
 	/**
@@ -673,6 +825,7 @@ export class CollabHost {
 			participants: this.participants.length,
 			relayConnected: this.#relayConnected,
 			inputRequired: this.inputRequired,
+			awaitingGuests: this.awaitingGuests.length,
 			// Same source as the guest footer's `isStreaming`, read at query time:
 			// true for the whole turn, including tool execution, and false once
 			// the agent ends — so a poller sees the session stop while the room
@@ -729,6 +882,11 @@ export class CollabHost {
 		// peer's lifetime at reception; re-read it here rather than acting on a
 		// sender that is already gone and registering a ghost participant.
 		if (!this.#socket?.isServing(fromPeer)) {
+			// A writer that left may still be owed an answer it sent before leaving (`#departing`).
+			if (frame.t === "ui-response" && this.#departing.has(fromPeer)) {
+				this.#handleUiResponse(frame.reqId, frame.value, fromPeer);
+				return;
+			}
 			logger.debug("collab host ignoring frame from a peer it no longer serves", { type: frame.t, fromPeer });
 			return;
 		}
@@ -744,7 +902,7 @@ export class CollabHost {
 		if (!this.#guestTrafficAllowed()) return;
 		switch (frame.t) {
 			case "hello":
-				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
+				this.#handleHello(frame.name, frame.proto, frame.writeToken, frame.cancelReplies === true, fromPeer);
 				break;
 			case "prompt":
 				if (this.#rejectWhileStarting("prompting", fromPeer)) break;
@@ -793,7 +951,13 @@ export class CollabHost {
 		return true;
 	}
 
-	#handleHello(name: string, proto: number, writeToken: string | undefined, fromPeer: number): void {
+	#handleHello(
+		name: string,
+		proto: number,
+		writeToken: string | undefined,
+		cancelReplies: boolean,
+		fromPeer: number,
+	): void {
 		if (this.#ctx.session.isSessionTransitioning) {
 			this.#send({ t: "error", message: "Session transition in progress; join again when it completes" }, fromPeer);
 			return;
@@ -808,7 +972,7 @@ export class CollabHost {
 		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
 		const firstPeer = this.#peers.size === 0;
-		this.#peers.set(fromPeer, { name: cleanName, canWrite });
+		this.#peers.set(fromPeer, { name: cleanName, canWrite, cancelReplies });
 
 		const socket = this.#socket;
 		if (!socket) return;
@@ -839,8 +1003,9 @@ export class CollabHost {
 		socket.sendBatch(this.#snapshotChunks(snapshotEntries.json, snapshotEntries.bytes), fromPeer);
 		if (canWrite) {
 			for (const pending of this.#pendingUi.values()) {
-				if (pending.responsePending) continue;
-				this.#send({ t: "ui-request", request: pending.request }, fromPeer);
+				// A withdrawn request is not offered again: the writers it waits for were shown it before.
+				if (pending.responsePending || pending.withdrawal) continue;
+				this.#showUi(pending, fromPeer);
 			}
 		}
 		this.#ctx.session.emitNotice(
@@ -950,12 +1115,28 @@ export class CollabHost {
 	#handleUiResponse(reqId: number, value: CollabUiResponseValue, fromPeer: number): void {
 		const suspended = !this.#guestTrafficAllowed();
 		if (suspended && (this.ending || !this.#ctx.session.isSessionTransitioning)) return;
-		const peer = this.#peers.get(fromPeer);
-		if (!peer?.canWrite) {
+		// A writer that left is still heard for the answers it sent before leaving (`#departing`): the relay
+		// forwarded them while it was present, and only their decryption finished after its departure.
+		const departed = !this.#peers.has(fromPeer) && this.#departing.has(fromPeer);
+		if (!departed && !this.#peers.get(fromPeer)?.canWrite) {
 			this.#rejectReadOnly("responding to ask", fromPeer);
 			return;
 		}
 		const pending = this.#pendingUi.get(reqId);
+		if (pending?.withdrawal) {
+			// A withdrawn request hears only the writers it still waits for: not one that replied or ran out of
+			// time, not one that joined after the withdrawal. Acknowledged like a settled request.
+			if (!pending.withdrawal.replies.has(fromPeer)) {
+				this.#send({ t: "ui-request-end", reqId }, fromPeer);
+				return;
+			}
+			// No value: this writer has no answer for it. Counted even while an answer waits for a session
+			// transition, which may yet fail to apply.
+			if (value === undefined) {
+				this.#withdrawnReplyGone(pending, fromPeer);
+				return;
+			}
+		}
 		if (pending) {
 			if (pending.responsePending) return;
 			if (suspended) {
@@ -967,8 +1148,8 @@ export class CollabHost {
 		}
 		// The request already settled (or never existed for this peer). A writer that
 		// reconnected after the broadcast `ui-request-end` resends its answer and would
-		// otherwise wait forever, so acknowledge it directly.
-		this.#send({ t: "ui-request-end", reqId }, fromPeer);
+		// otherwise wait forever, so acknowledge it directly; one that left needs nothing.
+		if (!departed) this.#send({ t: "ui-request-end", reqId }, fromPeer);
 	}
 
 	async #settleUiAfterTransition(
@@ -991,13 +1172,20 @@ export class CollabHost {
 				this.#ctx.session.isSessionTransitioning
 			);
 			if (this.#pendingUi.get(reqId) !== pending || !this.#guestTrafficAllowed()) return;
-			if (peer?.canWrite && this.#peers.get(fromPeer) === peer) pending.settle({ kind: "answered", value });
-			else this.#sendWritablePeers({ t: "ui-request", request: pending.request });
+			// A withdrawn request keeps an answer it received from a writer it waited for, even one that has left
+			// since: nothing else will answer it. Any other request takes it only from a writer still present.
+			if (pending.withdrawal || (peer?.canWrite && this.#peers.get(fromPeer) === peer)) {
+				pending.settle({ kind: "answered", value });
+			} else {
+				this.#showUi(pending);
+			}
 		} catch (error) {
 			logger.warn("Collab UI response could not await session transition", { error: String(error) });
 			pending.settle({ kind: "unavailable" });
 		} finally {
 			pending.responsePending = false;
+			// Replies to the withdrawal that arrived while this answer waited may leave nothing to wait for.
+			if (this.#pendingUi.get(reqId) === pending) this.#settleWithdrawnIfDone(pending);
 		}
 	}
 
@@ -1081,28 +1269,53 @@ export class CollabHost {
 	 */
 	#handleRoomRecreated(): void {
 		if (this.#stopped) return;
+		this.#departing.clear();
 		if (this.#peers.size === 0 && this.#pendingUi.size === 0) return;
 		// Identities first: settle() fans `ui-request-end` out over #peers, and those
 		// ids belong to the room that just went away.
 		this.#peers.clear();
 		// A mirrored local dialog remains open through a transport reconnect. Keep
 		// its request for replay after a new hello verifies the writer again. Bare
-		// guest-only callers still settle rather than wait without a recipient.
+		// guest-only callers still settle rather than wait without a recipient, and
+		// so does a withdrawn request, since the writers it waited for were in the old
+		// room, unless it holds an answer for a session transition: it settles with
+		// that answer when the transition ends.
 		// Explicit stop and session replacement continue to settle every request.
 		for (const pending of this.#pendingUi.values()) {
-			if (!pending.retainOnReconnect) pending.settle({ kind: "unavailable" });
+			if (pending.withdrawal) {
+				pending.withdrawal.replies.clear();
+				this.#settleWithdrawnIfDone(pending);
+			} else if (!pending.retainOnReconnect) {
+				pending.settle({ kind: "unavailable" });
+			}
 		}
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
 	}
 
-	/** Identity and UI only: the socket already retired the peer and dropped its backlog. */
+	/**
+	 * Identity and UI: the socket already retired the peer and dropped its backlog. Frames a writer sent before it
+	 * left may still be decrypting, and an answer among them still counts: withdrawn requests stop waiting for
+	 * the writer, and its answers stop counting, once the socket has dispatched those frames ({@link #departing}).
+	 */
 	#handlePeerLeft(peer: number): void {
-		const name = this.#peers.get(peer)?.name;
+		const record = this.#peers.get(peer);
 		this.#peers.delete(peer);
+		if (record?.canWrite) {
+			this.#departing.set(peer, record);
+			const retire = (): void => {
+				// A room recreation since then cleared the record, and the id may name someone else now.
+				if (this.#departing.get(peer) !== record) return;
+				this.#departing.delete(peer);
+				for (const pending of this.#pendingUi.values()) this.#withdrawnReplyGone(pending, peer);
+			};
+			const socket = this.#socket;
+			if (socket) void socket.dispatched().then(retire);
+			else retire();
+		}
 		// Relay controls arrive outside the normal frame handler.
 		if (!this.#guestTrafficAllowed()) return;
-		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
+		if (record) this.#ctx.session.emitNotice("info", `${record.name} left the collab session`, "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
 	}
@@ -1280,7 +1493,11 @@ export class CollabHost {
 	}
 
 	#updateStatusSegment(): void {
-		this.#ctx.statusLine.setCollabStatus({ role: "host", participantCount: this.#peers.size + 1 });
+		this.#ctx.statusLine.setCollabStatus({
+			role: "host",
+			participantCount: this.#peers.size + 1,
+			waitingOn: this.awaitingGuests,
+		});
 		this.#ctx.statusLine.invalidate();
 		this.#ctx.ui.requestRender();
 	}

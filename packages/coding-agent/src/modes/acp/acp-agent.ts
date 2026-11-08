@@ -51,7 +51,9 @@ import {
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	getExtensionUISelectOptionLabel,
+	isDialogSuperseded,
 	timedOutAskDialogResult,
+	WITHDRAWN_DIALOG_REPLY_MS,
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
@@ -515,21 +517,22 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
  * Bridge an ExtensionUIContext form to ACP `unstable_createElicitation`.
  *
  * `dialogOptions.signal` short-circuits the elicitation if it is already
- * aborted and races the in-flight request against the abort event. The SDK
- * exposes no `cancel_elicitation` surface for form-mode elicitations
- * (`unstable_completeElicitation` is URL-mode only), so the ACP request itself
- * keeps running on the client side until the user dismisses it — but
- * resolving the local promise unblocks the caller (matches the RPC mode
- * pattern in `requestRpcEditor`). The abort listener is removed once the
- * elicitation settles so that callers which reuse the same signal across many
- * elicitations don't accumulate listeners and trip Node's `MaxListeners`
- * warning.
+ * aborted. When the agent stops waiting (abort or timeout) the wire request is
+ * cancelled (`$/cancel_request`), so the client closes the form instead of
+ * leaving the person filling in one whose answer is no longer used. When a
+ * message from the person superseded the form (`DialogSupersededError`), the
+ * request is cancelled the same way but the agent keeps reading the client's
+ * response for `WITHDRAWN_DIALOG_REPLY_MS`: an answer received in that window is
+ * used, and a client that honors `$/cancel_request` answers `-32800` at once.
+ * ACP does not carry when an answer was submitted, so an answer received after
+ * the window is dropped, even one submitted before the cancellation. The
+ * abort listener is removed once the elicitation settles so that callers which
+ * reuse the same signal across many elicitations don't accumulate listeners and
+ * trip Node's `MaxListeners` warning.
  *
  * `dialogOptions.timeout` mirrors `RpcExtensionUIContext.#createDialogPromise`:
  * when the timer fires before the client responds, `onTimeout` is invoked and
- * the caller's promise resolves to the stub fallback. Late SDK responses that
- * arrive after abort/timeout — both rejections and successful `accept`s —
- * are dropped silently (no `logger.warn`) to keep operator logs clean.
+ * the caller's promise resolves to the stub fallback.
  */
 async function elicitFormFromAcpClient(
 	connection: AgentSideConnection,
@@ -546,6 +549,7 @@ async function elicitFormFromAcpClient(
 	}
 	const { promise, resolve } = Promise.withResolvers<CreateElicitationResponse | undefined>();
 	let settled = false;
+	let withdrawn = false;
 	let timeoutId: NodeJS.Timeout | undefined;
 	const finish = (value: CreateElicitationResponse | undefined) => {
 		if (settled) return;
@@ -554,7 +558,36 @@ async function elicitFormFromAcpClient(
 		signal?.removeEventListener("abort", onAbort);
 		resolve(value);
 	};
-	const onAbort = () => finish(undefined);
+	const request = connection.unstable_createElicitationWithCancel({
+		mode: "form",
+		sessionId,
+		message,
+		requestedSchema: {
+			type: "object",
+			properties,
+			required,
+		},
+	});
+	// The agent no longer waits for this answer: close the client's form.
+	const abandon = () => {
+		if (settled) return;
+		finish(undefined);
+		request.cancel();
+	};
+	const onAbort = () => {
+		if (!isDialogSuperseded(signal)) {
+			abandon();
+			return;
+		}
+		// The person moved on: close the client's form, and read its response for
+		// WITHDRAWN_DIALOG_REPLY_MS, an answer or its `-32800`. An answer received later is
+		// dropped; the dialog's own timeout no longer applies.
+		withdrawn = true;
+		request.withdraw();
+		clearTimeout(timeoutId);
+		timeoutId = setTimeout(abandon, WITHDRAWN_DIALOG_REPLY_MS);
+		timeoutId.unref();
+	};
 	signal?.addEventListener("abort", onAbort, { once: true });
 	if (dialogOptions?.timeout !== undefined) {
 		timeoutId = setTimeout(() => {
@@ -563,10 +596,10 @@ async function elicitFormFromAcpClient(
 				dialogOptions.onTimeout?.();
 			} catch (error) {
 				// A throwing `onTimeout` must not leave the elicitation promise
-				// pending — settle it via `finish` below regardless.
+				// pending — settle it via `abandon` below regardless.
 				logger.warn("ACP elicitation onTimeout threw", { acpSessionId: sessionId, method, error });
 			}
-			finish(undefined);
+			abandon();
 		}, dialogOptions.timeout);
 		// A long pending timeout alone shouldn't keep the event loop alive when
 		// the rest of the agent has shut down — matches `job-manager.ts` /
@@ -574,23 +607,14 @@ async function elicitFormFromAcpClient(
 		// loop alive on the happy path.
 		timeoutId.unref();
 	}
-	connection
-		.unstable_createElicitation({
-			mode: "form",
-			sessionId,
-			message,
-			requestedSchema: {
-				type: "object",
-				properties,
-				required,
-			},
-		})
-		.then(finish, error => {
-			// Caller may already have moved on via abort/timeout; suppress noise.
-			if (settled) return;
-			logger.warn("ACP elicitation failed", { acpSessionId: sessionId, method, error });
-			finish(undefined);
-		});
+	request.promise.then(finish, error => {
+		// Caller may already have moved on via abort/timeout (that cancellation
+		// rejects the request), and a withdrawn form ends in the client's
+		// `-32800`; suppress noise.
+		if (settled) return;
+		if (!withdrawn) logger.warn("ACP elicitation failed", { acpSessionId: sessionId, method, error });
+		finish(undefined);
+	});
 	const response = await promise;
 	if (!isAcceptedElicitation(response) || !response.content) {
 		return undefined;

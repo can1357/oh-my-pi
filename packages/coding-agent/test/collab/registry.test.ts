@@ -67,6 +67,7 @@ function makeFixture(over: Partial<CollabHostSnapshot> = {}): Fixture {
 			participants: 3,
 			relayConnected: true,
 			inputRequired: false,
+			awaitingGuests: 0,
 			busy: false,
 			access: "control",
 			...over,
@@ -384,11 +385,11 @@ describe("collab registry", () => {
 		expect(JSON.parse(unknownOp)).toEqual({ ok: false, v: COLLAB_REGISTRY_VERSION, error: "invalid_operation" });
 	});
 
-	it("lists a host that omits busy as unknown and drops one that reports garbage", async () => {
+	it("lists a host that omits busy or awaitingGuests as unknown or not waiting, and drops one that reports garbage", async () => {
 		const dir = await tempDir();
-		// An omp older than the `busy` field: same protocol version, one key short.
+		// An omp older than the `busy` and `awaitingGuests` fields: same protocol version, keys short.
 		const older = makeFixture({ sessionId: "older-host" });
-		const { busy: _busy, ...withoutBusy } = older.snapshot;
+		const { busy: _busy, awaitingGuests: _awaitingGuests, ...withoutBusy } = older.snapshot;
 		openPublications.push(
 			await publishCollabHost(
 				{ snapshot: () => withoutBusy as CollabHostSnapshot, link: () => null },
@@ -397,11 +398,14 @@ describe("collab registry", () => {
 		);
 		const broken = makeFixture({ sessionId: "broken-host", busy: "yes" as unknown as boolean });
 		await publish(dir, broken);
+		const negative = makeFixture({ sessionId: "negative-host", awaitingGuests: -1 });
+		await publish(dir, negative);
 
 		const hosts = await listCollabHosts({ dir });
-		// Unknown, never idle: the older host stays listed with a null flag, and a
-		// snapshot that answers with a non-boolean is malformed, not busy.
-		expect(hosts.map(host => [host.sessionId, host.busy])).toEqual([["older-host", null]]);
+		// Unknown, never idle: the older host stays listed with a null flag. A host that predates
+		// `awaitingGuests` never waits on guests. A snapshot that answers with a non-boolean busy or a
+		// negative count is malformed.
+		expect(hosts.map(host => [host.sessionId, host.busy, host.awaitingGuests])).toEqual([["older-host", null, 0]]);
 	});
 
 	it("keeps both URLs and room secrets off disk even after resolving links", async () => {

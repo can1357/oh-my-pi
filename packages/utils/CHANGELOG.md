@@ -22,6 +22,9 @@
 - `ptree` commands with `subreaper: true` now reliably terminate all descendants on graceful shutdown.
 - `fatal()` in a worker thread now reaches the parent's `error` listeners instead of only exiting with code 1.
 - Fixed the terminal stderr guard leaking a copy of the terminal into processes spawned from native code.
+- Added `logger.setLogForwarder(forwarder)` (`LogForwarder { emit, flush }`), which routes a thread's records — `withContext` fields merged, context reduced to clone-safe JSON — to another thread instead of its own file and sinks, and `logger.emitForeign(event)`, which writes such a record with its original timestamp and runs the sinks without the caller's `withContext` fields
+- Added `expandTilde(path, home?)` (`@oh-my-pi/pi-utils/path`), which expands a leading `~` to the home directory; `@oh-my-pi/pi-coding-agent/tools/path-utils` re-exports it ([#17931](https://github.com/can1357/oh-my-pi/pull/17931) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `AgentSideConnection.unstable_createElicitationWithCancel()`, which cancels a pending form elicitation with `$/cancel_request` (`cancel()` stops waiting; `withdraw()` keeps reading the client's response), and an abort signal for a client's `unstable_createElicitation` handler that fires when the agent cancels it ([#17585](https://github.com/can1357/oh-my-pi/pull/17585) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

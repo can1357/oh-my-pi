@@ -16,10 +16,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
-import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
+import { importRoomKey, open } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { CollabHost, CollabHostStoppedError } from "@oh-my-pi/pi-coding-agent/collab/host";
-import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import {
+	COLLAB_PROTO,
+	type CollabFrame,
+	parseCollabLink,
+	unpackEnvelope,
+} from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
@@ -38,11 +43,12 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, postmortem, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 import { createTestSession, type TestSessionContext } from "../utilities";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+import { waitFor } from "./helpers/throttled-host";
 
 import { cfgCollabAutoStart } from "@oh-my-pi/pi-coding-agent/collab/settings";
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
@@ -568,6 +574,69 @@ describe("interactive collaboration startup", () => {
 		expect(local.collabGuest).toBeUndefined();
 		expect(local.collabHost?.sessionId).toBe(local.sessionManager.getSessionId());
 		expect(cfgCollabAutoStart.get(local.settings)).toBe("view");
+	});
+
+	it.each(["exits", "leaves and then exits"] as const)("delivers what a guest already sent when it %s", async path => {
+		const { local, remote } = await prepareGuestMode();
+		await executeBuiltinSlashCommand(`/join ${remote.link}`, { ctx: local });
+		await local.collabController.idle();
+		const guest = local.collabGuest;
+		if (!guest) throw new Error("join did not install the guest");
+		const wire = capturedSockets.filter(ws => ws.role === "guest").at(-1);
+		if (!wire) throw new Error("guest transport missing");
+		const parsed = parseCollabLink(remote.link);
+		if ("error" in parsed) throw new Error(parsed.error);
+		const key = await importRoomKey(parsed.key);
+		const written: Uint8Array[] = [];
+		const write = wire.send.bind(wire);
+		wire.send = data => {
+			written.push(new Uint8Array(data));
+			write(data);
+		};
+		const sealing = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const realEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
+		spyOn(crypto.subtle, "encrypt").mockImplementationOnce(
+			async (...args: Parameters<typeof crypto.subtle.encrypt>) => {
+				sealing.resolve();
+				await release.promise;
+				return realEncrypt(...args);
+			},
+		);
+		// What the relay had received from the guest, and whether the connection had closed, when the process quits.
+		let atQuit: { closed: boolean; frames: CollabFrame[] } | undefined;
+		spyOn(postmortem, "quit").mockImplementation(async () => {
+			const frames: CollabFrame[] = [];
+			for (const bytes of written) {
+				const envelope = unpackEnvelope(bytes);
+				if (envelope) frames.push(await open(key, envelope.payload));
+			}
+			atQuit = { closed: wire.readyState === FakeWebSocket.CLOSED, frames };
+		});
+
+		guest.sendPrompt("sent before exiting");
+		// Still being sealed when the person exits.
+		await sealing.promise;
+		if (path === "leaves and then exits") {
+			// The relay is slow to finish the close handshake: the connection closes only once teardown has
+			// asked to wait for the guest connections still closing. A teardown that does not wait quits first.
+			const closeRequested = Promise.withResolvers<void>();
+			const finishWireClose = wire.close.bind(wire);
+			wire.close = () => closeRequested.resolve();
+			const waitForGuests = local.collabController.guestConnectionsClosed.bind(local.collabController);
+			spyOn(local.collabController, "guestConnectionsClosed").mockImplementation(() => {
+				void closeRequested.promise.then(() => finishWireClose());
+				return waitForGuests();
+			});
+			// `/leave` hands the local session back at once while the connection is still delivering.
+			void executeBuiltinSlashCommand("/leave", { ctx: local });
+			await waitFor(() => local.collabGuest === undefined, "leave never restored the local session");
+		}
+		const exiting = local.shutdown();
+		release.resolve();
+		await exiting;
+
+		expect(atQuit).toEqual({ closed: true, frames: [{ t: "prompt", text: "sent before exiting" }] });
 	});
 
 	it.each(["stop", "shutdown"] as const)(

@@ -207,9 +207,57 @@ export function timedOutAskDialogResult(questions: ExtensionAskDialogQuestion[])
 }
 
 /**
+ * `signal.reason` when a message from the person superseded a dialog: they moved on without
+ * answering it. See {@link ExtensionUIDialogOptions.signal}.
+ */
+export class DialogSupersededError extends Error {
+	/**
+	 * Aborts once the caller stops waiting for the dialog altogether; `ask` passes its run's signal, which
+	 * aborts on Esc. A host still waiting for a remote reply to the withdrawn dialog stops waiting then: the
+	 * collab host ends the guests' withdrawn request at once.
+	 */
+	readonly abandon: AbortSignal | undefined;
+
+	constructor(abandon?: AbortSignal) {
+		super("A message from the person superseded the dialog");
+		this.name = "DialogSupersededError";
+		this.abandon = abandon;
+	}
+}
+
+/** True when `signal` closed a dialog because a message from the person superseded it. */
+export function isDialogSuperseded(signal: AbortSignal | undefined): boolean {
+	return signal?.aborted === true && signal.reason instanceof DialogSupersededError;
+}
+
+/**
+ * After a person's message withdraws a dialog a remote client shows (an RPC host, an ACP client, a collab guest),
+ * how long omp keeps reading the reply of a client that has not promised one: an answer, or an acknowledgement
+ * (RPC `cancelled: true`, ACP `-32800`, a collab `ui-response` with no value). Either ends the wait at once. An answer
+ * received within this window is used. Such a client does not say when an answer was submitted, so an answer
+ * received later cannot be told apart from none: the dialog is reported unanswered when the window ends, and a later
+ * answer is ignored, even one submitted before the withdrawal. Waiting longer would hold back the person's message
+ * that long on every client that sends no reply. A collab guest that said `hello.cancelReplies` acknowledges every
+ * withdrawal as soon as it reads it, behind any answer it already sent, so omp waits for that acknowledgement
+ * instead of this window, up to the collab host's `WITHDRAWN_GUEST_REPLY_LIMIT_MS`.
+ */
+export const WITHDRAWN_DIALOG_REPLY_MS = 2_000;
+
+/**
  * UI dialog options for extensions.
  */
 export interface ExtensionUIDialogOptions {
+	/**
+	 * Closes the dialog. A {@link DialogSupersededError} reason means a message from the person
+	 * superseded it, and the host hands back what the person had submitted, never text they had
+	 * not submitted: the interactive TUI's `askDialog` resolves a submit result with
+	 * `interrupted: true`, and a remote host (RPC, ACP) withdraws the dialog and resolves with an
+	 * answer its client sends within {@link WITHDRAWN_DIALOG_REPLY_MS}, else unanswered. In a collab
+	 * session the guests' request is withdrawn too: it ends with the first guest answer that reaches the
+	 * host, or once each writable guest has replied that it has none, left, or run out of time, or when
+	 * the error's `abandon` signal aborts.
+	 * Any other reason: the answer no longer matters, and the dialog resolves its cancelled value.
+	 */
 	signal?: AbortSignal;
 	timeout?: number;
 	/** Invoked when the UI times out while waiting for a selection/input */

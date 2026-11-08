@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed an answer you submitted just before leaving a collab session being lost; leaving now delivers it first ([#17761](https://github.com/can1357/oh-my-pi/pull/17761) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Changed
