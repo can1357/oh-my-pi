@@ -648,11 +648,13 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 			.frames
 			.iter()
 			.any(|f| matches!(f.kind, FrameKind::Function { .. }))
-		&& vp
-			.runs
-			.front()
-			.is_some_and(|r| r.started && !r.exit_trap_started)
-		&& start_trap(k, vp, cx, TrapKey::Exit)
+		&& match vp.runs.front() {
+			Some(r) => r.started && !r.exit_trap_started,
+			// A forked subshell has no run: it is its own exit, and its
+			// own flag is what keeps the trap from starting twice.
+			None => vp.transient && !vp.exit_trap_run,
+		}
+		&& start_exit_trap_once(k, vp, cx)
 	{
 		if let Some(run) = vp.runs.front_mut() {
 			run.exit_trap_started = true;
@@ -674,8 +676,23 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		super::zsh::zexit::start(k, cx, vp);
 	}
 	if !in_exit_trap && vp.transient && vp.runs.is_empty() {
-		start_trap(k, vp, cx, TrapKey::Exit);
+		start_exit_trap_once(k, vp, cx);
 	}
+}
+
+/// Start this vproc's EXIT trap, at most once for a forked subshell: it has
+/// no [`Run`](super::proc::Run) to keep `exit_trap_started` on, and
+/// `own_traps`, `trap_frames` and the frame scans all return to their
+/// pre-trap values when the trap's frame is popped. A root vproc is
+/// unaffected: its guard is its run's own flag, one per shell invocation.
+fn start_exit_trap_once(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
+	if vp.transient {
+		if vp.exit_trap_run {
+			return false;
+		}
+		vp.exit_trap_run = true;
+	}
+	start_trap(k, vp, cx, TrapKey::Exit)
 }
 
 fn top_frame(vp: &mut Vproc) -> &mut Frame {
@@ -1105,7 +1122,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			vp.status = 0;
 		}
 		if sub_end {
-			start_trap(k, vp, cx, TrapKey::Exit);
+			start_exit_trap_once(k, vp, cx);
 			return None;
 		}
 		if let Some(cancel) = cancel {
@@ -1611,7 +1628,7 @@ fn end_unit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
 		FrameKind::NoFork | FrameKind::Stage => pop_frame(&mut k.root, cx.store, vp),
 		FrameKind::Subshell | FrameKind::Job { .. } => {
 			unwind(&mut k.root, cx.store, vp, 0);
-			start_trap(k, vp, cx, TrapKey::Exit);
+			start_exit_trap_once(k, vp, cx);
 		},
 	}
 }
@@ -2096,6 +2113,27 @@ fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 		)
 }
 
+/// The status a fatal expansion error leaves when the EXIT trap is the
+/// innermost trap action running: bash's EXIT trap keeps the status the
+/// shell was exiting with (`last_command_exit_value` is saved across the
+/// trap), so the shell leaves with that status and not with the constant
+/// below. Only the EXIT trap does this, so a nested trap action of any
+/// other kind answers `None` and keeps the constant.
+///
+/// The saved status is carried as the `i32` the frame holds, exactly as
+/// every other reader of it does (`return` with no argument inside a
+/// trap, the frame-pop restore); it is already a wait status in `0..=255`
+/// on every path that arms a trap, and narrowing it here would be a
+/// silent second opinion about a value this function does not own.
+fn exit_trap_status(vp: &Vproc) -> Option<i32> {
+	vp.frames.iter().rev().find_map(|frame| match frame.kind {
+		FrameKind::Script { what: ScriptKind::Trap { key, status, .. }, .. } => {
+			Some((key == TrapKey::Exit).then_some(status))
+		},
+		_ => None,
+	})?
+}
+
 /// The flow for an expansion error (the diagnostic is printed).
 pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, stop: Stop) -> Flow {
 	match stop {
@@ -2123,6 +2161,16 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		},
 		Stop::Fail(d) | Stop::Fatal(d) => {
 			k.diag(cx, vp, line, d);
+			// The EXIT trap keeps the status the shell was exiting with.
+			// Under `set -e` bash reaches the same rows through its own
+			// errexit jump, which this change does not model, so the
+			// upstream constant stays whenever errexit is on.
+			if vp.mode.dialect() != Dialect::Zsh
+				&& let Some(status) = exit_trap_status(vp)
+				&& !errexit_on(k, cx, vp)
+			{
+				return Flow::Exit(status);
+			}
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
 			// failure status); a nested shell (depth 0) is its own `-c` shell.
@@ -2965,7 +3013,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			} else {
 				// A subshell, pipeline stage or job ends: its EXIT trap runs.
 				unwind(&mut k.root, cx.store, vp, 0);
-				start_trap(k, vp, cx, TrapKey::Exit);
+				start_exit_trap_once(k, vp, cx);
 			}
 			Flow::Call
 		},

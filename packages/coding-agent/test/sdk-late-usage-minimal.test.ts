@@ -89,4 +89,92 @@ describe("SDK delayed quota error after a provider switch", () => {
 			expect(mark).not.toHaveBeenCalled();
 		});
 	}
+
+	it("tries the selected provider after the old request exhausts its retry budget", async () => {
+		registerMockApi(SOURCE);
+		const root = TempDir.createSync("@pi-sdk-late-budget-");
+		cleanups.push(() => root.removeSync());
+		const auth = createInMemoryAuthStorage();
+		cleanups.push(() => auth.close());
+		auth.keys.setRuntime("openai-codex", "test-key");
+		auth.keys.setRuntime("anthropic", "test-key");
+		const settings = Settings.isolated({
+			"retry.enabled": true,
+			"retry.maxRetries": 1,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 6,
+			"retry.modelFallback": false,
+			"compaction.enabled": false,
+			"todo.enabled": false,
+		});
+		const registry = new ModelRegistry(auth, root.join("models.yml"), { settings });
+		const secondStarted = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const calls: string[] = [];
+		const retryEvents: string[] = [];
+		const retryDelays: number[] = [];
+		const oldModel = createMockModel({
+			provider: "openai-codex",
+			id: "gpt-6.1-sol-sdk-late-budget",
+			handler: async () => {
+				calls.push("old");
+				if (calls.length === 1) return { stopReason: "error", errorMessage: "500 Internal Server Error" };
+				secondStarted.resolve();
+				await release.promise;
+				return {
+					stopReason: "error",
+					errorMessage: "429 usage_limit_reached: You've reached your ChatGPT plan limit. Try again in ~9701 min.",
+				};
+			},
+		});
+		const selectedModel = createMockModel({
+			provider: "anthropic",
+			id: "claude-sdk-late-budget",
+			handler: () => {
+				calls.push("selected");
+				return { content: ["recovered"], stopReason: "stop" };
+			},
+		});
+		const { session } = await createAgentSession({
+			cwd: root.path(),
+			agentDir: root.path(),
+			modelRegistry: registry,
+			model: oldModel,
+			getApiKey: () => "test-key",
+			sessionManager: SessionManager.inMemory(root.path()),
+			settings,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			cacheWarming: false,
+		});
+		cleanups.push(() => session.dispose());
+		const mark = vi.spyOn(auth.limits, "markReached").mockResolvedValue({ switched: false });
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryDelays.push(event.delayMs);
+			if (event.type === "auto_retry_start" || event.type === "auto_retry_end") retryEvents.push(event.type);
+		});
+		const prompting = session.prompt("hello");
+		try {
+			await secondStarted.promise;
+			session.agent.setModel(selectedModel);
+		} finally {
+			release.resolve();
+		}
+		await prompting;
+		await session.waitForIdle();
+		expect(calls).toEqual(["old", "old", "selected"]);
+		expect(retryEvents).toEqual(["auto_retry_start", "auto_retry_start", "auto_retry_end"]);
+		expect(retryDelays[0]).toBeGreaterThan(0);
+		expect(retryDelays[1]).toBe(0);
+		expect(mark).not.toHaveBeenCalled();
+		const last = session.agent.state.messages.at(-1);
+		expect(last?.role).toBe("assistant");
+		if (last?.role === "assistant") expect(last.stopReason).toBe("stop");
+	});
 });

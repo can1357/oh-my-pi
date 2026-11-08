@@ -666,6 +666,27 @@ def fetch_ref(
     )
 
 
+_UNSAFE_REF_BODY_RE = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
+
+
+def validate_fetch_ref(ref: str) -> str:
+    """Accept Git-valid branch names minus refspec/option-injectable characters."""
+    body = ref.removeprefix("refs/heads/")
+    if (
+        not body
+        or body.startswith(("-", "/"))
+        or body.endswith(("/", ".", ".lock"))
+        or "//" in body
+        or ".." in body
+        or "@{" in body
+        or body == "@"
+        or any(part.startswith(".") or part.endswith(".lock") for part in body.split("/"))
+        or _UNSAFE_REF_BODY_RE.search(body)
+    ):
+        raise ValueError("invalid ref")
+    return ref
+
+
 def fetch_pr_head(
     repo_dir: Path,
     pr_number: int,
@@ -674,33 +695,88 @@ def fetch_pr_head(
     remote_url: str | None = None,
     auth_url: str | None = None,
     safe_directory: Path | None = None,
+    head_ref: str | None = None,
+    head_sha: str | None = None,
+    same_repo: bool = False,
 ) -> None:
-    """Fetch ``refs/pull/<n>/head`` into FETCH_HEAD with all reachable blobs.
+    """Fetch the PR head, falling back to a verified same-repo branch.
 
     Immediately followed by ``git worktree add --detach FETCH_HEAD`` for PR
     review checkouts, so the head's tree blobs are backfilled the same way as
     :func:`fetch_ref`; without them the worktree-add triggers a promisor lazy
     fetch that fails under proxy-transport deployments (oh-my-pi#1818).
 
-    Raises ``GitCommandError`` when the fetch or the backfill fails.
+    Raises ``GitCommandError`` when fetching, SHA verification, or backfill fails.
     """
     if pr_number <= 0:
-        raise ValueError(f"invalid PR number: {pr_number!r}")
+        raise ValueError(f"invalid pr_number={pr_number!r}")
     remote = remote_url or "origin"
     extra_env = _explicit_remote_env(remote_url, cwd=repo_dir)
     ref = f"refs/pull/{pr_number}/head" if remote_url else f"pull/{pr_number}/head"
     args = ["fetch", "--no-tags", remote, ref]
-    _check(
-        _run_git(
-            args,
+    try:
+        _check(
+            _run_git(
+                args,
+                cwd=repo_dir,
+                token=token,
+                auth_url=auth_url,
+                extra_env=extra_env,
+                safe_directory=safe_directory,
+            ),
+            ["git", *args],
+        )
+    except GitCommandError as exc:
+        # The fallback fetches a branch named by the (webhook-supplied) PR
+        # payload, so it is only eligible when we can verify the result:
+        # same-repo PR, present head ref, present head SHA. Anything else
+        # keeps the original failure.
+        if (
+            "couldn't find remote ref" not in exc.stderr
+            or not same_repo
+            or not head_ref
+            or not head_sha
+        ):
+            raise
+        validate_fetch_ref(head_ref)
+        log.warning("PR head ref unavailable; fetching same-repo branch", extra={"pr": pr_number, "head_ref": head_ref})
+        args = ["fetch", "--no-tags", remote, "--", f"refs/heads/{head_ref}"]
+        try:
+            _check(
+                _run_git(
+                    args,
+                    cwd=repo_dir,
+                    token=token,
+                    auth_url=auth_url,
+                    extra_env=extra_env,
+                    safe_directory=safe_directory,
+                ),
+                ["git", *args],
+            )
+        except GitCommandError as fallback_exc:
+            raise GitCommandError(
+                fallback_exc.cmd,
+                fallback_exc.returncode,
+                fallback_exc.stdout,
+                f"{exc.stderr}\nBranch fallback failed: {fallback_exc.stderr}",
+            ) from fallback_exc
+        probe_args = ["rev-parse", "FETCH_HEAD"]
+        probe = _run_git(
+            probe_args,
             cwd=repo_dir,
             token=token,
             auth_url=auth_url,
             extra_env=extra_env,
             safe_directory=safe_directory,
-        ),
-        ["git", *args],
-    )
+        )
+        _check(probe, ["git", *probe_args])
+        if probe.stdout.strip() != head_sha:
+            raise GitCommandError(
+                ["git", *probe_args],
+                1,
+                probe.stdout,
+                f"PR head SHA mismatch: expected {head_sha}, fetched {probe.stdout.strip()}",
+            )
     backfill = _backfill_tip_blobs(
         repo_dir,
         "FETCH_HEAD",

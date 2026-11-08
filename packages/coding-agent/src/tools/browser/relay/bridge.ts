@@ -26,6 +26,7 @@ import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { BROWSER_PROTOCOL_TIMEOUT_MS } from "../launch";
 import {
 	DISCARDED_TABS_PROTOCOL_VERSION,
+	DOWNLOADS_PROTOCOL_VERSION,
 	EXTENSION_RELOAD_PROTOCOL_VERSION,
 	FOREIGN_FRAME_REFUSAL,
 	isOlderOmpVersion,
@@ -137,6 +138,7 @@ interface ExtInstance {
 		discardedTabsProtocol?: number;
 		ompVersion?: string;
 		reloadProtocol?: number;
+		downloadsProtocol?: number;
 	} | null;
 	/** Chrome extension id from the socket's `Origin`; null when the upgrade carried none. */
 	extensionId: string | null;
@@ -685,6 +687,7 @@ export class RelayBridge {
 			discardedTabsProtocol: msg.discardedTabsProtocol,
 			ompVersion: typeof msg.ompVersion === "string" ? msg.ompVersion : undefined,
 			reloadProtocol: msg.reloadProtocol,
+			downloadsProtocol: msg.downloadsProtocol,
 		};
 		this.#lastHelloInstance = instanceId;
 		this.#extensionSeen = true;
@@ -1143,6 +1146,9 @@ export class RelayBridge {
 			this.#replyError(conn, msg, "relay extension is not connected");
 			return false;
 		}
+		// Relay-private: where Chrome saved a download the page reported. A page session's download events carry no
+		// path, and Chrome refuses an extension's `setDownloadBehavior`, so the extension looks the file up.
+		if (msg.method === "OMP.downloadPath") return await this.#replyDownloadPath(conn, msg, inst);
 		// Sent raw, createTarget honors `newWindow` and answers with Chrome's id, which no relay command
 		// resolves; close and activate are refused ("Not allowed"). Run them in this tab's browser, where a
 		// new tab lands like every relay-created tab: in that browser's current window.
@@ -2092,6 +2098,44 @@ export class RelayBridge {
 		const inst = this.#instances.get(tab.instanceId);
 		if (!inst) throw new Error("relay extension is not connected");
 		return inst;
+	}
+
+	/** Answer `OMP.downloadPath` with the file Chrome saved for the completed download the page reported as `params.guid`. */
+	async #replyDownloadPath(conn: CdpConnection, msg: CdpCommand, inst: ExtInstance): Promise<boolean> {
+		const guid = msg.params?.guid;
+		if (typeof guid !== "string") {
+			this.#replyError(conn, msg, "OMP.downloadPath requires the download's guid");
+			return false;
+		}
+		if (inst.info?.downloadsProtocol !== DOWNLOADS_PROTOCOL_VERSION) {
+			this.#replyError(
+				conn,
+				msg,
+				"the omp relay extension in this browser predates download tracking; run `omp browser-relay install` and reload the extension in chrome://extensions",
+			);
+			return false;
+		}
+		let found: unknown;
+		try {
+			found = await this.#rpc({ op: "findDownload", guid }, inst);
+		} catch (err) {
+			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
+			return false;
+		}
+		if (
+			!found ||
+			typeof found !== "object" ||
+			!("filename" in found) ||
+			typeof found.filename !== "string" ||
+			!found.filename ||
+			!("state" in found) ||
+			found.state !== "complete"
+		) {
+			this.#replyError(conn, msg, "Chrome has no completed download for this report");
+			return false;
+		}
+		this.#reply(conn, msg, { filePath: found.filename });
+		return true;
 	}
 
 	#rpc(

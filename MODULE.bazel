@@ -244,6 +244,15 @@ crate.annotation(
     crate = "grep-printer",
     deps = ["@@//crates/vendor/grep-searcher:grep-searcher"],
 )
+# Restore registry crates' edges to the patched workspace-local jaq-core.
+crate.annotation(
+    crate = "jaq-json",
+    deps = ["@@//crates/vendor/jaq-core:jaq-core"],
+)
+crate.annotation(
+    crate = "jaq-std",
+    deps = ["@@//crates/vendor/jaq-core:jaq-core"],
+)
 
 # Release addons must never pick up a host libpcre2 (Homebrew paths leaked into
 # shipped dylibs before); always build the vendored static copy.

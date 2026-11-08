@@ -188,6 +188,11 @@ interface OpenMenu {
 	mount?: () => OverlayHandle;
 }
 
+/** Return input to the current editor-slot owner after a fullscreen overlay closes. */
+export function focusActiveEditorArea(ctx: InteractiveModeContext): void {
+	ctx.ui.setFocus(ctx.editorContainer.children[0] ?? ctx.editor);
+}
+
 export class SelectorController {
 	/**
 	 * Each single-instance menu from the moment it is requested until it closes,
@@ -289,8 +294,7 @@ export class SelectorController {
 	 * overlay hides to re-target focus at the visible slot owner.
 	 */
 	focusActiveEditorArea(): void {
-		const visible = this.ctx.editorContainer.children[0] ?? this.ctx.editor;
-		this.ctx.ui.setFocus(visible);
+		focusActiveEditorArea(this.ctx);
 	}
 
 	/**
@@ -608,6 +612,7 @@ export class SelectorController {
 			runtime: createExtensionDashboardRuntime({
 				cwd: getProjectDir(),
 				settings: this.ctx.settings,
+				extensionRoots: () => this.ctx.session.effectiveExtensionRoots,
 				mcpManager: this.ctx.mcpManager,
 				eventBus: this.ctx.eventBus,
 				onMcpToolsChanged: tools => this.ctx.session.refreshMCPTools(tools),
@@ -788,7 +793,10 @@ export class SelectorController {
 			switched = true;
 			await apply();
 		};
-		const outcome = await this.ctx.handleCompactCommand(undefined, undefined, switchAfterCompaction);
+		// The target reads what this pass writes: no provider-native method it cannot replay.
+		const outcome = await this.ctx.handleCompactCommand(undefined, undefined, switchAfterCompaction, {
+			readerModel: model,
+		});
 		await switchAfterCompaction(outcome);
 	}
 
@@ -1128,6 +1136,10 @@ export class SelectorController {
 				onLoginRequest: providerId => {
 					done();
 					void this.#loginThenReopenModelHub(providerId);
+				},
+				onCatalogRefreshed: async () => {
+					await this.ctx.session.refreshScopedModels();
+					return this.ctx.session.scopedModels;
 				},
 				onCycleOrderChange: order => {
 					try {
@@ -2191,11 +2203,7 @@ export class SelectorController {
 			// are left untouched. `refreshProvider` swallows discovery failures, so
 			// awaiting cannot reject the login.
 			await this.ctx.session.modelRegistry.refreshProvider(getOAuthCredentialProvider(providerId), "online");
-			try {
-				await this.ctx.refreshScopedModelsAfterLogin?.();
-			} catch (error) {
-				logger.warn("Scoped model refresh after login failed", { error: String(error) });
-			}
+			await this.ctx.session.refreshScopedModels();
 			const block = new TranscriptBlock();
 			// Name the account (and Anthropic organization) that was stored so a
 			// login that lands on an unintended account/subscription is visible
@@ -2230,10 +2238,9 @@ export class SelectorController {
 	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
 		try {
 			const { removed, remainingSource } = await logoutCredential(
-				this.ctx.session.modelRegistry,
+				this.ctx.session,
 				providerId,
 				account.credentialId,
-				this.ctx.session.sessionId,
 			);
 			if (!removed) {
 				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerId}.`);

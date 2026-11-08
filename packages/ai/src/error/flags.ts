@@ -234,6 +234,9 @@ const MALFORMED_FUNCTION_CALL_PATTERN =
 	/\b(?:malformed[_. ]?(?:function[_. ]?call|response)|unexpected[_. ]?tool[_. ]?call)\b/i;
 const PROVIDER_FINISH_ERROR_PATTERN = /\bProvider (?:returned error finish_reason|finish_reason:\s*error)\b/i;
 const EMPTY_RESPONSE_PATTERN = /\bthought-only response without final output\b/i;
+/** Gemini's MALFORMED_RESPONSE finish is a backend fault: the same request can succeed. Kept narrow so
+ *  other "malformed response" errors (e.g. an image API's) stay terminal. */
+const MALFORMED_RESPONSE_FINISH_PATTERN = /\bfinish reason:\s*MALFORMED_RESPONSE\b/i;
 const CONTENT_FILTER_PATTERN = /\b(?:incomplete:\s*)?content_filter\b/i;
 const ACCOUNT_POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
 export const ANTHROPIC_ACCOUNT_POLICY_PATTERN =
@@ -655,6 +658,7 @@ function classifyText(
 		if (isMalformedFunctionCallText(errorMessage)) kinds |= Flag.MalformedFunctionCall;
 		if (isProviderFinishErrorText(errorMessage)) kinds |= Flag.ProviderFinishError;
 		if (EMPTY_RESPONSE_PATTERN.test(errorMessage)) kinds |= Flag.EmptyResponse | Flag.Transient;
+		if (MALFORMED_RESPONSE_FINISH_PATTERN.test(errorMessage)) kinds |= Flag.Transient;
 		if (isContentBlockedText(errorMessage)) kinds |= Flag.ContentBlocked;
 
 		if (

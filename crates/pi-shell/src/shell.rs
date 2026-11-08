@@ -1871,7 +1871,8 @@ async fn read_output_buffered(
 		// large output.
 		if !exceeded && captured_bytes.saturating_add(n) > max_capture_bytes {
 			exceeded = true;
-			captured = String::new();
+			captured.clear();
+			captured.shrink_to_fit();
 		}
 		captured_bytes = captured_bytes.saturating_add(n);
 

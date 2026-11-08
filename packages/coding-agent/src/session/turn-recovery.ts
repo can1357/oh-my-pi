@@ -3073,7 +3073,13 @@ export class TurnRecovery {
 			}
 		}
 
-		if (retryBudgetExhausted) {
+		if (retryBudgetExhausted && staleUsageLimit) {
+			// The spent attempts and their backoff belong to the replaced provider.
+			// Give the selected model its first request without inheriting the old
+			// provider's fail-fast cap or reset window.
+			this.#retryAttempt = 1;
+			delayMs = 0;
+		} else if (retryBudgetExhausted) {
 			if (!switchedModel && !switchedCredential) {
 				const attempt = this.#retryAttempt - 1;
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;

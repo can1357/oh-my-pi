@@ -10,12 +10,15 @@
  * and re-dials after Chrome reaps it while disconnected.
  */
 import {
+	DOWNLOADS_PROTOCOL_VERSION,
 	EXTENSION_RELOAD_PROTOCOL_VERSION,
 	type ExtToRelayMessage,
+	type FoundDownload,
 	type RelayToExtMessage,
 	type TabSnapshot,
 } from "../../coding-agent/src/tools/browser/relay/protocol";
 import { ownedDebuggerTabs } from "./debugger-ownership";
+import { DownloadPairing } from "./download-pairing";
 import { pastForeignFrames } from "./foreign-frames";
 
 const DEFAULT_PORT = 9224;
@@ -222,6 +225,7 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
 		ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
 		reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
+		downloadsProtocol: DOWNLOADS_PROTOCOL_VERSION,
 		tabs: snapshots,
 		attachedTabIds,
 	};
@@ -275,6 +279,13 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: Web
 		case "ungroup":
 			await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
 			return {};
+		case "findDownload": {
+			const id = downloads.idFor(msg.guid);
+			const [item] = id === undefined ? [] : await chrome.downloads.search({ id });
+			if (item && item.state !== "in_progress") downloads.forget(msg.guid);
+			const found: FoundDownload = item ? { filename: item.filename, state: item.state } : null;
+			return found;
+		}
 	}
 }
 
@@ -341,10 +352,24 @@ async function connect(): Promise<void> {
 	};
 }
 
+// ---- downloads ----------------------------------------------------------------
+
+/** Pairs the downloads driven tabs' pages report with Chrome's download items. */
+const downloads = new DownloadPairing();
+
+chrome.downloads.onCreated.addListener(item => downloads.created(item.id, item.finalUrl));
+chrome.downloads.onChanged.addListener(delta => {
+	const state = delta.state?.current;
+	if (state === "complete" || state === "interrupted") downloads.finished(delta.id, state);
+});
+
 // ---- event streaming ---------------------------------------------------------
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
 	if (source.tabId === undefined) return;
+	if (method === "Page.downloadWillBegin" && typeof params?.guid === "string" && typeof params.url === "string") {
+		downloads.report(params.guid, params.url);
+	}
 	post({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
 });
 
