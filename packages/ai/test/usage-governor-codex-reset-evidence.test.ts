@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import { installFetchTripwire } from "./fixtures/usage-governor/harness";
+import { buildUsageCredential, usageCacheIdentity } from "../src/auth/usage-cache";
 
 installFetchTripwire();
 
@@ -403,15 +404,19 @@ describe("OpenAI Codex reset credits governor evidence (slice D)", () => {
 		).toEqual(["openai-codex:primary", "openai-codex:secondary"]);
 
 		// Also update the persisted SQLite cache row to prove evaluateRoutes reflects it end-to-end
+		const identity = usageCacheIdentity(buildUsageCredential(credentialRow!.credential));
+		const exactCacheKey = `usage_cache:report:${openaiCodexUsageProvider.cacheVersion ?? 0}:openai-codex:default:${identity}`;
 		const db = new Database(activeWorld.authDbPath);
-		const cacheRow = db.prepare("SELECT key, value FROM cache WHERE key LIKE '%openai-codex%'").get() as {
+		const matchingRows = db.prepare("SELECT key, value FROM cache WHERE key = ?").all(exactCacheKey) as {
 			key: string;
 			value: string;
-		} | null;
-		expect(cacheRow).not.toBeNull();
-		const parsedCache = JSON.parse(cacheRow!.value);
+		}[];
+		expect(matchingRows).toHaveLength(1);
+		const cacheRow = matchingRows[0]!;
+		expect(cacheRow.key).toBe(exactCacheKey);
+		const parsedCache = JSON.parse(cacheRow.value);
 		parsedCache.value.metadata.governorNoPaidOverageObservedAt = laterTime;
-		db.prepare("UPDATE cache SET value = ? WHERE key = ?").run(JSON.stringify(parsedCache), cacheRow!.key);
+		db.prepare("UPDATE cache SET value = ? WHERE key = ?").run(JSON.stringify(parsedCache), exactCacheKey);
 		db.close();
 
 		const evaluationRefreshedStamp = await activeWorld.evaluate(CHAT_MODEL);
@@ -421,7 +426,7 @@ describe("OpenAI Codex reset credits governor evidence (slice D)", () => {
 		// Restore stale stamp in SQLite to re-verify evaluateRoutes switches back to unknown
 		const dbRestore = new Database(activeWorld.authDbPath);
 		parsedCache.value.metadata.governorNoPaidOverageObservedAt = baseNow;
-		dbRestore.prepare("UPDATE cache SET value = ? WHERE key = ?").run(JSON.stringify(parsedCache), cacheRow!.key);
+		dbRestore.prepare("UPDATE cache SET value = ? WHERE key = ?").run(JSON.stringify(parsedCache), exactCacheKey);
 		dbRestore.close();
 		const evaluationRecheckedStale = await activeWorld.evaluate(CHAT_MODEL);
 		expect(evaluationRecheckedStale.accounts[0]!.allowance).toBe("unknown");
