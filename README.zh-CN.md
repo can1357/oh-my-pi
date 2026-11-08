@@ -191,7 +191,7 @@ _[观看录屏 ↗](https://omp.sh/clips/collab.mp4)_
 
 ### 08 · 读一篇 arXiv 上的 PDF？有何不可。
 
-web_search 串联了二十三个按优先级排列的搜索提供商，并把找到的 URL 直接交给 read。arXiv PDF、GitHub 页面、Stack Overflow 帖子都会以结构化 Markdown 返回，锚点完整保留——与处理本地文件使用同一套工具。引用、跟进、摘录，永远不会丢失出处。
+web_search 串联了二十四个按优先级排列的搜索提供商，并把找到的 URL 直接交给 read。arXiv PDF、GitHub 页面、Stack Overflow 帖子都会以结构化 Markdown 返回，锚点完整保留——与处理本地文件使用同一套工具。引用、跟进、摘录，永远不会丢失出处。
 
 ![omp TUI：web_search 针对推理时计算扩展返回 10 个按排名排列的 Perplexity 来源，智能体挑选了一篇 arXiv 论文，调用 read https://arxiv.org/pdf/2604.10739v1，并用真实数据总结论文的核心结论。](https://omp.sh/clips/web-poster.webp)
 
@@ -203,7 +203,7 @@ _[观看录屏 ↗](https://omp.sh/clips/web.mp4)_
 
 ### 10 · 带优先级和结论的代码评审
 
-明确告诉你这次改动能否发布，每个问题按 P0 到 P3 排序并给出置信度评分。/review 会派生专门的评审子智能体，并行审查分支、单个提交或未提交的修改。你先处理阻碍发布的问题；重要内容不会淹没在大段文字里。
+明确告诉你这次改动能否发布，每个问题按 P0 到 P3 排序并给出置信度评分。[/review](docs/slash-command-internals.md#15-bundled-command-note-review) 会派生专门的评审子智能体，并行审查分支、单个提交或未提交的修改。你先处理阻碍发布的问题；重要内容不会淹没在大段文字里。
 
 想自己主导评审？`/annotate code-review` 会打开 diff，让你在评审者运行前把批注钉在具体行上。`/annotate` 还可以针对最新回复、某条会话消息、某个文件或引用文本，把你的批注粘贴进提示词。参见 [`/annotate`](docs/slash-command-internals.md#12-bundled-command-note-annotate)。
 
@@ -343,7 +343,7 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 直连 API 和网关。可按角色混用不同提供商。
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway
 
 ### 编程套餐
 
@@ -392,13 +392,13 @@ modelRoles:
 
 完整的提供商与路由参考见 [omp.sh/docs/providers](https://omp.sh/docs/providers)。
 
-## 二十三个后端。_智能体早已用惯的一个工具_。
+## 二十四个后端。_智能体早已用惯的一个工具_。
 
-`web_search` 是内置的，而不是外挂的。`auto` 会依次尝试二十三个提供商；如果你已经付费订阅了某一个，也可以按名称固定使用。每个搜索结果背后，站点感知的提取器会把 GitHub、包注册表、arXiv、Stack Overflow 和文档站点转换为结构化 Markdown——锚点和链接目标都会保留。
+`web_search` 是内置的，而不是外挂的。`auto` 会依次尝试二十四个提供商；如果你已经付费订阅了某一个，也可以按名称固定使用。每个搜索结果背后，站点感知的提取器会把 GitHub、包注册表、arXiv、Stack Overflow 和文档站点转换为结构化 Markdown——锚点和链接目标都会保留。
 
 ### 搜索提供商
 
-二十三个后端。固定使用其中之一，或让 `auto` 按顺序依次尝试。
+二十四个后端。固定使用其中之一，或让 `auto` 按顺序依次尝试。
 
 | 提供商       | 认证方式                                  |
 | ------------ | ----------------------------------------- |
@@ -411,6 +411,7 @@ modelRoles:
 | `zai`        | `ZAI_API_KEY`                             |
 | `exa`        | `EXA_API_KEY`（或 mcp）                   |
 | `tinyfish`   | `TINYFISH_API_KEY`                        |
+| `keenable`   | `KEENABLE_API_KEY`（可无密钥回退）        |
 | `jina`       | `JINA_API_KEY`                            |
 | `kagi`       | `KAGI_API_KEY`                            |
 | `tavily`     | `TAVILY_API_KEY`                          |

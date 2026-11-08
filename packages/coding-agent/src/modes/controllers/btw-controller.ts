@@ -15,6 +15,7 @@ import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
+import { focusActiveEditorArea } from "./selector-controller";
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import type { BtwInjectState } from "@oh-my-pi/pi-tui/overlays/btw-inject";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
@@ -765,6 +766,7 @@ export class BtwController {
 		this.#historyPanel = undefined;
 		if (!overlay) return;
 		overlay.hide();
+		focusActiveEditorArea(this.ctx);
 		// Closing while a BTW still answers keeps it running: text mode returns
 		// to its inline panel; Tern has none, so it says how to get back.
 		const request = this.#activeRequest;

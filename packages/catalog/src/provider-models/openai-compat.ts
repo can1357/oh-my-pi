@@ -813,6 +813,7 @@ type OpenAICompatibleModelManagerBuilderOptions<TApi extends Api> = {
 		entry: OpenAICompatibleModelRecord,
 		defaults: ModelSpec<TApi>,
 		reference: ModelSpec<TApi> | undefined,
+		references: Map<string, ModelSpec<TApi>>,
 	) => ModelSpec<TApi> | null;
 };
 
@@ -842,7 +843,8 @@ function createOpenAICompatibleModelManagerOptions<TApi extends Api>(
 						...(filterModel && {
 							filterModel: (entry, model) => filterModel(entry, model, references),
 						}),
-						mapModel: (entry, defaults) => options.mapModel(entry, defaults, references.get(defaults.id)),
+						mapModel: (entry, defaults) =>
+							options.mapModel(entry, defaults, references.get(defaults.id), references),
 						fetch: options.config?.fetch,
 					}),
 					options.providerId,
@@ -3222,10 +3224,69 @@ export interface MistralModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+/**
+ * Mistral's `/v1/models` lists each alias as its own row, with the canonical
+ * id in `name` and the other ids in `aliases`; `mistral-vibe-cli-latest`, the
+ * Vibe CLI's default, is a row named `mistral-medium-latest`. An id with no
+ * bundled row of its own reuses the bundled row of the model it aliases, so it
+ * keeps that model's reasoning, image input, limits, and prices. Such an id is
+ * listed only for keys whose `/v1/models` returns it.
+ */
+function mistralAliasReference(
+	entry: OpenAICompatibleModelRecord,
+	references: Map<string, ModelSpec<"openai-completions">>,
+): ModelSpec<"openai-completions"> | undefined {
+	const aliases = Array.isArray(entry.aliases) ? entry.aliases : [];
+	for (const candidate of [entry.name, ...aliases]) {
+		if (typeof candidate !== "string") continue;
+		const reference = references.get(candidate);
+		if (reference) return reference;
+	}
+	return undefined;
+}
+
+/**
+ * Mistral's `/v1/models` lists every SKU the key can call, including
+ * embedding, OCR, moderation, transcription, and speech models, and flags chat
+ * support per row in `capabilities.completion_chat`. Rows without it reject
+ * `/chat/completions` with `invalid_model`, so they stay out of the chat
+ * roster. A row with no `capabilities` object (a compatible gateway on a
+ * custom `baseUrl`) is kept.
+ *
+ * The context window comes from `max_context_length`. `capabilities.vision`
+ * and `capabilities.reasoning` can add image input or reasoning to a bundled
+ * reference, never remove them.
+ */
+function mapMistralModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+	references: Map<string, ModelSpec<"openai-completions">>,
+): ModelSpec<"openai-completions"> | null {
+	const capabilities = isRecord(entry.capabilities) ? entry.capabilities : undefined;
+	if (capabilities && capabilities.completion_chat !== true) return null;
+	const model = mapWithBundledReference(entry, defaults, reference ?? mistralAliasReference(entry, references));
+	const input: ModelSpec<"openai-completions">["input"] =
+		capabilities?.vision === true && !model.input.includes("image") ? [...model.input, "image"] : model.input;
+	return {
+		...model,
+		reasoning: model.reasoning || capabilities?.reasoning === true,
+		input,
+		contextWindow: toPositiveNumber(entry.max_context_length, model.contextWindow),
+	};
+}
+
 export function mistralModelManagerOptions(
 	config?: MistralModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	return createSimpleOpenAICompletionsOptions("mistral", "https://api.mistral.ai/v1", config);
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "mistral",
+		defaultBaseUrl: "https://api.mistral.ai/v1",
+		config,
+		requireApiKey: true,
+		mapModel: mapMistralModel,
+	});
 }
 
 // ---------------------------------------------------------------------------

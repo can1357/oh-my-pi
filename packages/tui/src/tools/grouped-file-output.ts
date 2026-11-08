@@ -168,6 +168,11 @@ export function isMatchRow(line: string): boolean {
 	return GROUPED_MATCH_ROW_RE.test(line);
 }
 
+/** Whether a row of grouped output is a `#` directory or file header; single-file scopes print none. */
+export function isGroupedHeader(line: string): boolean {
+	return GROUPED_HEADER_RE.test(line);
+}
+
 /** Per-line classification of grouped output, used by renderers for file rows and hyperlinks. */
 export interface GroupedLineContext {
 	/** Directory header, file header, or any non-header body/content line. */

@@ -535,9 +535,43 @@ func (v Usage) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), "", v.Extra)
 }
 
+// Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope.
+type ParentIrc struct {
+	// Sending parent agent id.
+	From string `json:"from"`
+	// Message body as the parent wrote it.
+	Body string `json:"body"`
+	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
+	// Encoding writes them back, over a declared field with the same key.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+func (v *ParentIrc) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ParentIrc", v.decodeFrom)
+}
+
+func (v *ParentIrc) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ParentIrc
+	d := fieldDecoder{raw: raw, owner: "ParentIrc", open: true}
+	d.required("from", &out.From)
+	d.required("body", &out.Body)
+	out.Extra = d.rest()
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v ParentIrc) MarshalJSON() ([]byte, error) {
+	type plain ParentIrc
+	return encodeObject(plain(v), "", v.Extra)
+}
+
 type UserMessage struct {
 	Content          MessageContent             `json:"content"`
 	Timestamp        float64                    `json:"timestamp"`
+	ParentIrc        *ParentIrc                 `json:"parentIrc,omitempty"`
 	Synthetic        *bool                      `json:"synthetic,omitempty"`
 	Steering         *bool                      `json:"steering,omitempty"`
 	LiveSteered      *bool                      `json:"liveSteered,omitempty"`
@@ -559,6 +593,7 @@ func (v *UserMessage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("role", "user")
 	d.required("content", &out.Content)
 	d.required("timestamp", &out.Timestamp)
+	d.optional("parentIrc", &out.ParentIrc)
 	d.optional("synthetic", &out.Synthetic)
 	d.optional("steering", &out.Steering)
 	d.optional("liveSteered", &out.LiveSteered)
@@ -4698,6 +4733,8 @@ type ReadyEvent struct {
 	SupportedProtocolVersions []int64 `json:"supportedProtocolVersions,omitempty"`
 	MaxFrameBytes             *int64  `json:"maxFrameBytes,omitempty"`
 	MaxReassembledFrameBytes  *int64  `json:"maxReassembledFrameBytes,omitempty"`
+	// `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands.
+	SupportsBashExcludeFromContext *bool `json:"supportsBashExcludeFromContext,omitempty"`
 }
 
 func (v *ReadyEvent) UnmarshalJSON(data []byte) error {
@@ -4712,6 +4749,7 @@ func (v *ReadyEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("supportedProtocolVersions", &out.SupportedProtocolVersions)
 	d.optional("maxFrameBytes", &out.MaxFrameBytes)
 	d.optional("maxReassembledFrameBytes", &out.MaxReassembledFrameBytes)
+	d.optional("supportsBashExcludeFromContext", &out.SupportsBashExcludeFromContext)
 	if d.err != nil {
 		return d.err
 	}
@@ -8223,10 +8261,11 @@ func (c Commands) AbortRetry(ctx context.Context) error {
 
 // BashCommand holds the parameters of "bash".
 type BashCommand struct {
-	Command string `json:"command"`
+	Command            string `json:"command"`
+	ExcludeFromContext *bool  `json:"excludeFromContext,omitempty"`
 }
 
-// Bash sends "bash": Run a shell command.
+// Bash sends "bash": Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true.
 func (c Commands) Bash(ctx context.Context, p BashCommand) (BashResult, error) {
 	var out BashResult
 	err := c.call(ctx, "bash", p, 0, &out)

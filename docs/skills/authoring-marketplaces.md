@@ -56,7 +56,7 @@ The catalog file lives at either `.omp-plugin/marketplace.json` or `.claude-plug
 | `plugins`              | yes      | Array of plugin entries (see below)                                                                                                                        |
 | `metadata.description` | no       | Short description of the marketplace                                                                                                                       |
 | `metadata.version`     | no       | Catalog metadata version string                                                                                                                            |
-| `metadata.pluginRoot`  | no       | String prepended to all relative plugin source paths                                                                                                       |
+| `metadata.pluginRoot`  | no       | Directory for bare-name sources and the legacy fallback for `./` sources missing from the marketplace root |
 | extra top-level fields | no       | Preserved by the parser but not used by marketplace install/runtime logic                                                                                  |
 
 ### Plugin entry fields
@@ -117,7 +117,7 @@ The catalog file lives at either `.omp-plugin/marketplace.json` or `.claude-plug
 
 ### 1. Relative path string
 
-Points to a subdirectory inside the marketplace repository itself. Must start with `./`.
+Points to a subdirectory inside the marketplace repository itself. Must start with `./`, unless it is a bare name under `metadata.pluginRoot`.
 
 ```json
 "source": "./plugins/my-plugin"
@@ -125,17 +125,19 @@ Points to a subdirectory inside the marketplace repository itself. Must start wi
 
 The path is resolved relative to the marketplace repository root. Path traversal outside the repo root is rejected.
 
-Use `metadata.pluginRoot` to avoid repeating a common prefix:
+Use `metadata.pluginRoot` to avoid repeating a common prefix. Bare names (a single directory name, no `/`) resolve under it; a source that starts with `./` still resolves from the repository root, and a nested name such as `team-a/plugin-c` still needs the `./` prefix:
 
 ```json
 {
 	"metadata": { "pluginRoot": "./plugins" },
 	"plugins": [
-		{ "name": "plugin-a", "source": "./plugin-a" },
-		{ "name": "plugin-b", "source": "./plugin-b" }
+		{ "name": "plugin-a", "source": "plugin-a" },
+		{ "name": "plugin-b", "source": "./plugins/plugin-b" }
 	]
 }
 ```
+
+Both entries resolve to `./plugins/<name>`. This matches Claude Code.
 
 ### 2. Git URL
 

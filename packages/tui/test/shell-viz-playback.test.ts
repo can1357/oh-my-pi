@@ -128,6 +128,16 @@ describe("bash visualization playback", () => {
 		}
 	});
 
+	it("renders a saved trace the engine cannot restore as plain command and output", () => {
+		// A tool_result hook rewrote `script`; unit byte offsets now point past its end.
+		const trace = { ...completedTrace(), script: nativeTrace.script.slice(0, -4) };
+		const component = tool(trace);
+		expect(findPresentation(component.describe(context))).toBeUndefined();
+		const rendered = Bun.stripANSI(component.render(100).join("\n"));
+		expect(rendered).toContain("printf");
+		expect(rendered).toContain("final output");
+	});
+
 	it("resumes the remaining part of a paused event gap instead of restarting it", () => {
 		const advance = fakeClock();
 		const component = tool(completedTrace());
