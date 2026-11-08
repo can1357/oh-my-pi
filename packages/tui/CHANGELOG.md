@@ -69,6 +69,7 @@
 ### Changed
 
 - Simplified Bash previews for redirection to /dev/null by showing a single icon in the Nerd Font symbol preset.
+- The terminal stays responsive through long tool output: the TUI does less work per render while edit previews stream and streamed assistant tables grow ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
@@ -102,9 +103,6 @@
 - Desktop notifications use unique OSC 99 ids per omp process to avoid interfering with other omp processes ([#18413](https://github.com/can1357/oh-my-pi/pull/18413) by [@farnoy](https://github.com/farnoy))
 - `updateNotesToolRenderer` now renders `update_notes` calls that omit `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
 - The copy overlay now offers fenced code blocks indented under list items, and splits code and quote blocks the same way the message renderer draws them ([#18410](https://github.com/can1357/oh-my-pi/pull/18410) by [@farnoy](https://github.com/farnoy))
-### Changed
-
-- The terminal stays responsive through long tool output: the TUI does less work per render while edit previews stream and streamed assistant tables grow ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.0] - 2026-11-07
 
