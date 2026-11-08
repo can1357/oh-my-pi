@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A bare argument typed after an MCP prompt command (`/server:prompt value`) now fills the prompt's first free declared argument instead of being dropped, and a name already given as `key=value` is skipped rather than swallowing a positional ([#18473](https://github.com/can1357/oh-my-pi/pull/18473) by [@tatus9](https://github.com/tatus9))
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes
