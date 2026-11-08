@@ -21,6 +21,10 @@
 - Fixed steering and follow-up queue notifications observing a batch before its preparation claim was installed and missing the transition to delivery, leaving pending-message snapshots stale after asynchronous preparation.
 - Compaction preparation re-expands a trailing OpenAI remote compaction the active model cannot replay instead of reporting nothing to compact ([#17747](https://github.com/can1357/oh-my-pi/pull/17747) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Fixed GenAI message-content capture set in omp's own `.env` files so it still applies now that those values stay out of the process environment ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
+
 ## [18.16.0] - 2026-11-02
 
 ### Changed

@@ -293,6 +293,10 @@
 - A user-attributed custom message that starts a turn while idle (`sendCustomMessage` / `pi.sendMessage` with `triggerTurn`) now runs `before_agent_start` like a prompt, so its system prompt applies to that turn ([#17969](https://github.com/can1357/oh-my-pi/pull/17969) by [@Delije4](https://github.com/Delije4))
 - Fixed Windows bash output on non-UTF-8 code pages (Korean, Chinese, Japanese, …) turning into mojibake for the rest of a command after a builtin wrote one invalid byte (`printf '\xeb'`, `cut -c` through a CJK character); the stray byte now becomes `�` on its own line, and native programs' ANSI output still decodes, including through `| head` or from `cat` of a legacy file ([#17947](https://github.com/can1357/oh-my-pi/pull/17947) by [@H4vC](https://github.com/H4vC))
 
+### Fixed
+
+- Fixed `OTEL_*` values from omp's own `.env` files (agent dir, config root, home) being inherited by bash, PTY, eval, subagent, MCP and LSP children and visible to in-process extensions; shell-exported and project `.env` values are unchanged, and extensions that need their own OpenTelemetry settings should read them from the shell ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

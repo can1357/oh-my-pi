@@ -31,6 +31,10 @@
 - `pathIsWithin()` takes `EquivalentPathOptions` for the candidate, so `{ throughMissing: true }` checks a path that does not exist yet against a symlinked root ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 - `directoryExists()` and `directoryIsMissing()` accept `{ strict: true }` to propagate filesystem errors other than absent or non-directory paths ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
+### Added
+
+- Added `$otelEnv` and `withOmpOtelEnv` for reading `OTEL_*` values from omp's own `.env` files, which no longer enter `Bun.env` ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
