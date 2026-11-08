@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Consecutive identical generic aborts now exhaust after three model attempts instead of the full configured retry budget, while preserving the watchdog and first two retries
+
 ## [18.18.2] - 2026-11-08
 
 ### Breaking Changes
