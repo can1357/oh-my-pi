@@ -282,12 +282,27 @@ describe("recovery differential tests (governor ON vs OFF)", () => {
 				const x = await setupCompatHarness({ governorEnabled, allowFallbackAllowance: true });
 				try {
 					const owner = { kind: "role", role: "task" } as const;
-					let active = x.fallback;
+					let active = x.source;
 					let retryScheduled = false;
 
 					const routing = {
 						refresh: x.routing.refresh.bind(x.routing),
-						candidates: x.routing.candidates.bind(x.routing),
+						candidates: (
+							requestedOwner: typeof owner,
+							sessionId: string,
+							model: typeof active,
+							credentialId: number | undefined,
+							intent: "error" | "proactive",
+							signal?: AbortSignal,
+						) =>
+							x.routing.candidates(
+								requestedOwner,
+								sessionId,
+								model,
+								credentialId,
+								intent === "proactive" ? "error" : intent,
+								signal,
+							),
 						evaluate: async (requestedOwner: typeof owner, sessionId: string, signal?: AbortSignal) => {
 							const result = await x.routing.evaluate(requestedOwner, sessionId, signal);
 							if (!result) return result;
@@ -351,14 +366,26 @@ describe("recovery differential tests (governor ON vs OFF)", () => {
 
 					const recovery = new TurnRecovery(host, { deferFallbackChainValidation: true });
 
-					// Prepare initial call to establish bound route when governor is ON
+					// Prepare initial call: when governor is ON, genuinely binds CODEX/fallback with failedId
 					const current = async () => ({
-						model: x.fallback,
+						model: x.source,
 						apiKey: () => undefined,
-						resolved: { apiKey: "fallback-key", credentialId: x.failedId },
+						resolved: { apiKey: "source", credentialId: x.sourceId },
 					});
-					await recovery.prepareGovernedModelCall(x.fallback, current, owner);
-
+					const initial = await recovery.prepareGovernedModelCall(x.source, current, owner);
+					if (governorEnabled) {
+						expect(initial).toBeDefined();
+						expect(initial?.model.id).toBe("fallback");
+						expect(
+							typeof initial?.resolved === "object"
+								? initial.resolved?.usageRouteBinding?.credentialId
+								: undefined,
+						).toBe(x.failedId);
+						expect(active.id).toBe("fallback");
+					} else {
+						expect(initial).toBeUndefined();
+						active = x.fallback;
+					}
 					const message = {
 						role: "assistant",
 						content: [],
@@ -387,7 +414,12 @@ describe("recovery differential tests (governor ON vs OFF)", () => {
 					expect(retryScheduled).toBe(true);
 
 					// Next preparation call falls through without throwing and shows no binding
-					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
+					const fallbackCurrent = async () => ({
+						model: active,
+						apiKey: () => undefined,
+						resolved: { apiKey: "fallback-key", credentialId: x.pinnedId },
+					});
+					const prepared = await recovery.prepareGovernedModelCall(active, fallbackCurrent, owner);
 					if (governorEnabled) {
 						expect(prepared).toBeDefined();
 						const binding =
@@ -407,12 +439,27 @@ describe("recovery differential tests (governor ON vs OFF)", () => {
 				const x = await setupCompatHarness({ governorEnabled, allowFallbackAllowance: true });
 				try {
 					const owner = { kind: "role", role: "task" } as const;
-					let active = x.fallback;
+					let active = x.source;
 					let retryScheduled = false;
 
 					const routing = {
 						refresh: x.routing.refresh.bind(x.routing),
-						candidates: x.routing.candidates.bind(x.routing),
+						candidates: (
+							requestedOwner: typeof owner,
+							sessionId: string,
+							model: typeof active,
+							credentialId: number | undefined,
+							intent: "error" | "proactive",
+							signal?: AbortSignal,
+						) =>
+							x.routing.candidates(
+								requestedOwner,
+								sessionId,
+								model,
+								credentialId,
+								intent === "proactive" ? "error" : intent,
+								signal,
+							),
 						evaluate: async (requestedOwner: typeof owner, sessionId: string, signal?: AbortSignal) => {
 							const result = await x.routing.evaluate(requestedOwner, sessionId, signal);
 							if (!result) return result;
@@ -476,13 +523,26 @@ describe("recovery differential tests (governor ON vs OFF)", () => {
 
 					const recovery = new TurnRecovery(host, { deferFallbackChainValidation: true });
 
+					// Prepare initial call: when governor is ON, genuinely binds CODEX/fallback with failedId
 					const current = async () => ({
-						model: x.fallback,
+						model: x.source,
 						apiKey: () => undefined,
-						resolved: { apiKey: "fallback-key", credentialId: x.failedId },
+						resolved: { apiKey: "source", credentialId: x.sourceId },
 					});
-					await recovery.prepareGovernedModelCall(x.fallback, current, owner);
-
+					const initial = await recovery.prepareGovernedModelCall(x.source, current, owner);
+					if (governorEnabled) {
+						expect(initial).toBeDefined();
+						expect(initial?.model.id).toBe("fallback");
+						expect(
+							typeof initial?.resolved === "object"
+								? initial.resolved?.usageRouteBinding?.credentialId
+								: undefined,
+						).toBe(x.failedId);
+						expect(active.id).toBe("fallback");
+					} else {
+						expect(initial).toBeUndefined();
+						active = x.fallback;
+					}
 					const message = {
 						role: "assistant",
 						content: [],
@@ -508,7 +568,12 @@ describe("recovery differential tests (governor ON vs OFF)", () => {
 					expect(retried).toBe(true);
 					expect(retryScheduled).toBe(true);
 
-					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
+					const fallbackCurrent = async () => ({
+						model: active,
+						apiKey: () => undefined,
+						resolved: { apiKey: "fallback-key", credentialId: x.pinnedId },
+					});
+					const prepared = await recovery.prepareGovernedModelCall(active, fallbackCurrent, owner);
 					if (governorEnabled) {
 						expect(prepared).toBeDefined();
 						const binding =
@@ -612,6 +677,7 @@ describe("custom-auth sessions contract (CR3d zero-call spies)", () => {
 				api: "openai-completions",
 				provider: PROVIDER,
 				model: "primary",
+				credentialId: x.sourceId,
 				stopReason: "error",
 				timestamp: Date.now(),
 				errorMessage: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
@@ -1026,10 +1092,22 @@ describe("discriminating failure and race behavior", () => {
 			expect(first?.model.id).toBe("fallback");
 
 			const controller = new AbortController();
+
+			let resolverCalled = false;
+			const origGetApiKey = x.registry.getApiKeyWithCredentialForProvider.bind(x.registry);
+			x.registry.getApiKeyWithCredentialForProvider = async (provider, sessionId, options) => {
+				if (options?.signal?.aborted) {
+					resolverCalled = true;
+					throw new DOMException("The operation was aborted", "AbortError");
+				}
+				return origGetApiKey(provider, sessionId, options);
+			};
+
 			controller.abort();
 
-			// Aborted signal must be honored by throwing
+			// Aborted signal must be caught in pending branch and propagated by throwing
 			await expect(recovery.prepareGovernedModelCall(active, current, owner, controller.signal)).rejects.toThrow();
+			expect(resolverCalled).toBe(true);
 
 			expectNoStrayFetch(x.h);
 			expect(x.h.redemptionPosts()).toHaveLength(0);
