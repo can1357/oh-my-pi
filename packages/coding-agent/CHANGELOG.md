@@ -100,6 +100,7 @@
 - In the Pseudo shell visualization, an `&&` chain keeps its `and` rows while it runs and after it finishes, instead of switching to literal ` && ` rows and a raw-bash tail when the output minimizer runs it one command at a time ([#18408](https://github.com/can1357/oh-my-pi/issues/18408))
 - Autoresearch `update_notes` calls can now append an idea with only `append_idea`, without passing a replacement `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
 - A session resumed after an idle shake, prune, image drop, rewind, branch switch or tree navigation now sends the same history the previous process sent, so the provider prompt cache keeps hitting instead of missing from the eval-state snapshot that rewrite added ([#18414](https://github.com/can1357/oh-my-pi/pull/18414) by [@materemias](https://github.com/materemias))
+- On models that bind thinking to the prompt prefix (e.g. Claude Opus 5.5), MCP tools a session loads mid-session no longer enter the eval description and system prompt at the next unrelated prompt rebuild (a body-only `manage_skill update`, an unchanged memory or settings refresh), which read zero cached tokens and dropped all earlier thinking; they keep arriving through the hidden notice ([#18396](https://github.com/can1357/oh-my-pi/issues/18396))
 
 ## [18.18.0] - 2026-11-07
 

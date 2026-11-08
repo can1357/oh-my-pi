@@ -247,6 +247,7 @@ import {
 	collectMountedMCPToolRoutes,
 	projectMountedMCPXdevGuidance,
 	type SettingsGatedToolDelta,
+	type SystemPromptRebuilder,
 } from "./session/session-tools";
 import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-mode";
 import { CacheWarmer } from "./session/cache-warmer";
@@ -4215,9 +4216,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!own || own.size === 0) return hosted;
 			return new Map([...own, ...hosted].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)));
 		};
-		const rebuildSystemPrompt = async (
-			toolNames: string[],
-			tools: Map<string, AgentTool>,
+		const rebuildSystemPrompt: SystemPromptRebuilder = async (
+			toolNames,
+			tools,
+			xdev,
 		): Promise<BuildSystemPromptResult> => {
 			const promptCwd = sessionManager.getCwd();
 			let activeRepoContext = initialActiveRepoContext;
@@ -4322,16 +4324,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// List each mounted MCP tool once. A routed tool that the xd:// catalog
 			// would list carries its catalog summary on the route line and gets no
 			// catalog line; a tool the route bound omits keeps its catalog line.
-			const xdevPromptDocs = toolSession.xdev
-				? planXdevPromptDocs(
-						toolSession.xdev,
-						cfgToolsXdevDocs.get(settings),
-						cfgToolsXdevInlineDevices.get(settings),
-					)
+			const xdevPromptDocs = xdev
+				? planXdevPromptDocs(xdev, cfgToolsXdevDocs.get(settings), cfgToolsXdevInlineDevices.get(settings))
 				: undefined;
-			const projection = projectMountedMCPXdevGuidance(
-				collectMountedMCPToolRoutes(toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
-			);
+			const projection = projectMountedMCPXdevGuidance(collectMountedMCPToolRoutes(xdev ? listXdevTools(xdev) : []));
 			const routedCatalogNames = new Set(
 				projection.mappings
 					.filter(mapping => xdevPromptDocs?.catalog.has(mapping.name))
@@ -4382,7 +4378,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Mounted xd:// readers stay out of the direct inventory, but their skill
 			// capability still drives catalog/URI guidance: project them into the
 			// compact metadata map (inventory rendering stays driven by `toolNames`).
-			const mountedPromptToolNames = toolSession.xdev ? xdevEntries(toolSession.xdev).map(entry => entry.name) : [];
+			const mountedPromptToolNames = xdev ? xdevEntries(xdev).map(entry => entry.name) : [];
 			const promptTools = projectSystemPromptToolMetadata(
 				tools,
 				nativeTools && !inlineToolDescriptors
@@ -4394,7 +4390,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				noContextFiles: options.noContextFiles,
 				excludeAgentsMd,
-				xdevTools: toolSession.xdev ? xdevEntries(toolSession.xdev) : [],
+				xdevTools: xdev ? xdevEntries(xdev) : [],
 				xdevDocs: xdevPromptDocs ? renderXdevPromptDocs(xdevPromptDocs, routedCatalogNames) : "",
 				resolvedCustomPrompt: options.customSystemPrompt,
 				systemPromptTemplate: options.systemPromptTemplate,
@@ -4605,6 +4601,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			rebuildSystemPrompt,
 			initialToolNames,
 			toolRegistry,
+			toolSession.xdev,
 		);
 
 		const promptTemplates = await promptTemplatesPromise;
