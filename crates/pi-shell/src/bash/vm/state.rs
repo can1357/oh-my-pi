@@ -1274,6 +1274,17 @@ pub enum VarEdit<'e> {
 	/// Append unkeyed elements after the highest index of an indexed array
 	/// (`a+=(x y)`); clears [`Attrs::INVISIBLE`].
 	Push(Vec<BString>),
+	/// Insert `key` into an associative array at position `at` of its
+	/// entries ([`AssocArray::insert_at`]: zsh's hash order); clears
+	/// [`Attrs::INVISIBLE`].
+	Insert {
+		/// The key (absent; a present one takes the value in place).
+		key:   &'e [u8],
+		/// Its value.
+		value: &'e [u8],
+		/// Its position.
+		at:    usize,
+	},
 }
 
 impl VarEdit<'_> {
@@ -1312,6 +1323,12 @@ impl VarEdit<'_> {
 					let first = items.last().map_or(0, |(i, _)| i + 1);
 					items.reserve(elems.len());
 					items.extend((first..).zip(elems));
+				}
+			},
+			Self::Insert { key, value, at } => {
+				var.attrs = var.attrs.without(Attrs::INVISIBLE);
+				if let VarValue::Assoc(items) = &mut var.value {
+					items.insert_at(at, BString::from(key), BString::from(value));
 				}
 			},
 		}
@@ -1367,6 +1384,8 @@ enum Fast<'e> {
 	Elem(Elem<'e>, &'e [u8], bool),
 	/// [`Change::SetElem`] of each pushed element from this index.
 	Push(i64),
+	/// [`Change::InsertElem`].
+	Insert(&'e [u8], &'e [u8], usize),
 	/// [`Change::DelElem`].
 	Remove(Elem<'e>),
 	/// The change leaves the variable as it is.
@@ -1397,6 +1416,12 @@ fn fast_edit<'e>(edit: &VarEdit<'e>, cur: &Var) -> Option<Fast<'e>> {
 			};
 		},
 		VarEdit::Replace(_) | VarEdit::AddAttrs(_) => return None,
+		VarEdit::Insert { key, value, at } => {
+			return match &cur.value {
+				VarValue::Assoc(_) => Some(Fast::Insert(key, value, at)),
+				_ => Some(Fast::Nothing),
+			};
+		},
 	};
 	Some(match (&cur.value, elem) {
 		(VarValue::Str(_), None) => Fast::Scalar(value, append),
@@ -1467,6 +1492,12 @@ const fn seen_edit<'e>(edit: &VarEdit<'e>, seen: Seen) -> Option<Fast<'e>> {
 			};
 		},
 		VarEdit::Replace(_) | VarEdit::AddAttrs(_) => return None,
+		VarEdit::Insert { key, value, at } => {
+			return match seen {
+				Seen::Assoc => Some(Fast::Insert(key, value, at)),
+				Seen::Scalar | Seen::Indexed { .. } => None,
+			};
+		},
 	};
 	match (seen, elem) {
 		(Seen::Scalar, None) => Some(Fast::Scalar(value, append)),
@@ -1516,6 +1547,9 @@ fn store_edit(
 			}
 		},
 		Ok(Fast::Remove(elem)) => root.write(store, Change::DelElem(key, elem)),
+		Ok(Fast::Insert(k, v, at)) => {
+			root.write(store, Change::InsertElem(key, at, BStr::new(k), BStr::new(v)));
+		},
 		Ok(Fast::Nothing) => {},
 		Err(mut var) => {
 			edit.apply(&mut var);
@@ -2237,13 +2271,16 @@ pub fn exported(
 
 /// Push `name` with `var`'s value when it is an exported, set scalar
 /// (an exported array keeps the attribute but stays out of the
-/// environment, in bash and zsh alike).
+/// environment, in bash and zsh alike). A zsh float goes out as zsh shows
+/// it, not as stored.
 fn push_exported(out: &mut Vec<(BString, BString)>, name: &[u8], var: &Var) {
 	if var.attrs.contains(Attrs::EXPORT)
 		&& !var.attrs.contains(Attrs::INVISIBLE)
 		&& let VarValue::Str(s) = &var.value
 	{
-		out.push((BString::from(name), s.clone()));
+		let value =
+			super::zsh::params::stored_float_display(var.attrs, s).unwrap_or_else(|| s.clone());
+		out.push((BString::from(name), value));
 	}
 }
 

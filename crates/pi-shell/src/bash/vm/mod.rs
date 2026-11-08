@@ -463,6 +463,12 @@ pub struct Kernel {
 	pub pseudo_traps:       exec::PseudoTraps,
 	/// Re-parsed `${ ;}` bodies ([`exec::NoforkUnits`]); not imaged.
 	pub nofork_units:       exec::NoforkUnits,
+	/// The functions each zsh word code digest (`.zwc`) holds, by path,
+	/// with the modification time and size they were read at
+	/// ([`Kernel::dump_funcs`]): an `$fpath` search asks of the same digests
+	/// for every function it resolves. Per shell, as its host's files are
+	/// (shells sharing an engine may see other files at a path); not imaged.
+	zsh_dumps:              parking_lot::Mutex<HashMap<BString, DumpFuncs>>,
 	/// Syntax-tree buffers of the last command run, lent to the next parse
 	/// ([`Parser::recycle`](crate::bash::syntax::Parser::recycle); at most
 	/// [`SPARE_BUFFER_BYTES`], see [`Kernel::keep_spare_tree`]); not imaged.
@@ -507,6 +513,12 @@ pub struct Kernel {
 	/// scheduler after it (`Shell::adopt`); empty between turns, not
 	/// imaged.
 	pub settled:            Vec<(Vpid, u32)>,
+	/// `(OS pid, vproc, job)`: a job's `$!` names a program a vproc other
+	/// than the job's own runs (a background pipeline's last stage), so
+	/// `kill` of that pid signals that vproc, and finds no process once it
+	/// ended though the job runs on. Dropped when the job ends; not imaged
+	/// (a restored shell signals the job's vproc).
+	pub pid_owners:         Vec<(u32, Vpid, Vpid)>,
 	/// Background jobs' lone commands whose redirections wait for their name
 	/// to resolve ([`proc::Deferral`]): imaged (a restored command goes on).
 	pub deferrals:          Vec<proc::Deferral>,
@@ -534,7 +546,39 @@ impl ProcState {
 	}
 }
 
+/// A digest's function names, with the modification time (ns) and size
+/// of the file they were read from.
+type DumpFuncs = ((i64, u64), Arc<std::collections::HashSet<BString>>);
+
 impl Kernel {
+	/// The functions (metafied names) of the digest `path` as this shell
+	/// last read it, while its modification time and size are `stamp`.
+	pub(crate) fn dump_funcs(
+		&self,
+		path: &[u8],
+		stamp: (i64, u64),
+	) -> Option<Arc<std::collections::HashSet<BString>>> {
+		self
+			.zsh_dumps
+			.lock()
+			.get(path)
+			.filter(|(s, _)| *s == stamp)
+			.map(|(_, f)| Arc::clone(f))
+	}
+
+	/// Remember the functions `funcs` of the digest `path` at `stamp`.
+	pub(crate) fn cache_dump_funcs(
+		&self,
+		path: &[u8],
+		stamp: (i64, u64),
+		funcs: Arc<std::collections::HashSet<BString>>,
+	) {
+		self
+			.zsh_dumps
+			.lock()
+			.insert(BString::from(path), (stamp, funcs));
+	}
+
 	fn new(engine: &Arc<Engine>, root: Root, argv0: BString, shell_pid: u32) -> Self {
 		let ctl = Ctl::new();
 		Self {
@@ -568,6 +612,7 @@ impl Kernel {
 			startup: Vec::new(),
 			pseudo_traps: exec::PseudoTraps::default(),
 			nofork_units: HashMap::new(),
+			zsh_dumps: parking_lot::Mutex::new(HashMap::new()),
 			spare_tree: crate::bash::syntax::Tree::default(),
 			arith_recent: arith::Recent::default(),
 			clock: None,
@@ -578,6 +623,7 @@ impl Kernel {
 			reported_signal: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),
+			pid_owners: Vec::new(),
 			deferrals: Vec::new(),
 			jobctl: jobctl::JobCtl::default(),
 		}
@@ -611,8 +657,11 @@ impl Kernel {
 		let bang = self.bangs.swap_remove(i);
 		if let Some(pid) = os {
 			self.settled.push((bang.job, pid));
+			if bang.vproc != bang.job {
+				self.pid_owners.push((pid, bang.vproc, bang.job));
+			}
 		}
-		jobctl::bang_settled(self, bang.job, os);
+		jobctl::bang_settled(self, bang.vproc, os);
 		self.ctl.notify();
 	}
 
@@ -712,6 +761,16 @@ impl Kernel {
 		id
 	}
 
+	/// The vproc that runs (or ran) the program OS pid `pid` names when
+	/// that is not its job's own vproc ([`Self::pid_owners`]).
+	pub fn pid_owner(&self, pid: u32) -> Option<Vpid> {
+		self
+			.pid_owners
+			.iter()
+			.find(|&&(p, ..)| p == pid)
+			.map(|&(_, owner, _)| owner)
+	}
+
 	/// Child vproc `vpid` of `parent` ended with `status`; the record stays
 	/// until the status is collected ([`Self::proc_collect`]).
 	pub fn proc_exited(
@@ -721,6 +780,7 @@ impl Kernel {
 		parent: Option<Vpid>,
 		status: i32,
 	) {
+		self.pid_owners.retain(|&(.., job)| job != vpid);
 		let rec = Record::Proc { parent, status: Some(status) };
 		self.root.write(store, Change::Put(Key::Proc(vpid), rec));
 	}
