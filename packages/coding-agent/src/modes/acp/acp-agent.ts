@@ -3074,7 +3074,9 @@ export class AcpAgent implements Agent {
 					});
 				},
 				sendUserMessage: (content, options) => {
-					this.#trackExtensionUserMessage(record, record.session.sendUserMessage(content, options));
+					const task = record.session.sendUserMessage(content, options);
+					this.#trackExtensionUserMessage(record, task);
+					return task;
 				},
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);
