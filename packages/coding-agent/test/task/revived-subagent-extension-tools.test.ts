@@ -8,12 +8,17 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { logger } from "@oh-my-pi/pi-utils";
+import * as loggerModule from "@oh-my-pi/pi-utils/logger";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -317,5 +322,224 @@ it("cold-revives with the tools and devices it was parked with", async () => {
 	} finally {
 		await revived?.dispose();
 		run.close();
+	}
+}, 30_000);
+
+const RESERVED_NAMES = ["yield", "handback"] as const;
+const RESERVED_MARKER = "CUSTOM_RESERVED_TOOL";
+
+function reservedMessage(name: string): string {
+	return `tool name "${name}" is reserved`;
+}
+
+function reservedDefinition(name: string, hit?: { called: boolean }) {
+	return {
+		name,
+		label: name,
+		description: `${RESERVED_MARKER}:${name}`,
+		parameters: type({}),
+		async execute() {
+			if (hit) hit.called = true;
+			return { content: [{ type: "text" as const, text: `${RESERVED_MARKER}:${name}` }] };
+		},
+	};
+}
+
+function registersReservedAtFactory(name: string): ExtensionFactory {
+	return pi => {
+		pi.registerTool(reservedDefinition(name));
+	};
+}
+
+function registersReservedAtSessionStart(name: string, hit: { called: boolean }): ExtensionFactory {
+	return pi => {
+		pi.on("session_start", () => {
+			pi.registerTool(reservedDefinition(name, hit));
+		});
+	};
+}
+
+function preparedExtension(factory: ExtensionFactory) {
+	return [{ path: "<inline-reserved>", resolvedPath: "<inline-reserved>", factory, error: null }];
+}
+
+/** Schema-less structured child: both built-ins are present, and the mock records the first request. */
+async function runProbedChild(options: {
+	id: string;
+	factory?: ExtensionFactory;
+	customTools?: CustomTool[];
+	onRequest: (tools: ReadonlyArray<{ name: string; description?: string }>, index: number) => {
+		content: unknown;
+	};
+}): Promise<{ exitCode: number; error?: string; stderr: string; requests: number }> {
+	const cwd = path.join(root, "home", options.id);
+	const artifactsDir = path.join(root, "reserved-artifacts", options.id);
+	await fs.mkdir(cwd, { recursive: true });
+	await fs.mkdir(artifactsDir, { recursive: true });
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("mock", "test-key");
+	const modelRegistry = new ModelRegistry(authStorage);
+	let requests = 0;
+	const mock = createMockModel({
+		handler: context => {
+			const index = requests;
+			requests += 1;
+			const tools = (context.tools ?? []).map(tool => ({ name: tool.name, description: tool.description }));
+			return options.onRequest(tools, index);
+		},
+	});
+	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [mock, ...catalogAvailable(kind)]);
+	const settings = Settings.isolated({
+		"task.agentIdleTtlMs": 0,
+		"async.enabled": false,
+		"compaction.enabled": false,
+		"retry.enabled": false,
+		"todo.enabled": false,
+		"todo.reminders": false,
+		"advisor.enabled": false,
+		modelRoles: { default: "mock/mock-model" },
+	});
+	try {
+		const result = await runSubprocess({
+			cwd,
+			artifactsDir,
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "report done",
+			index: 0,
+			id: options.id,
+			modelOverride: "mock/mock-model",
+			authStorage,
+			modelRegistry,
+			settings,
+			enableLsp: false,
+			enableMCP: false,
+			enableIrc: false,
+			...(options.factory ? { preloadedPreparedExtensions: preparedExtension(options.factory) } : {}),
+			...(options.customTools ? { customTools: options.customTools } : {}),
+		});
+		return { exitCode: result.exitCode, error: result.error, stderr: result.stderr, requests };
+	} finally {
+		authStorage.close();
+	}
+}
+
+function builtinCall(name: (typeof RESERVED_NAMES)[number]) {
+	return name === "yield"
+		? { content: [{ type: "toolCall", name, arguments: { type: "result", data: "done" } }] }
+		: { content: [{ type: "toolCall", name, arguments: { report: "done" } }] };
+}
+
+it.each(RESERVED_NAMES)(
+	"fails the task before model execution when an explicit child custom tool is named %s",
+	async name => {
+		const seen = await runProbedChild({
+			id: `Explicit${name}`,
+			customTools: [reservedDefinition(name) as CustomTool],
+			onRequest: () => builtinCall("yield"),
+		});
+		expect(seen.requests).toBe(0);
+		expect(seen.exitCode).not.toBe(0);
+		expect(`${seen.error ?? ""}\n${seen.stderr}`).toContain(reservedMessage(name));
+		expect(`${seen.error ?? ""}\n${seen.stderr}`).not.toContain("Failed to load extension");
+	},
+	30_000,
+);
+
+it.each(RESERVED_NAMES)(
+	"fails the task before model execution when a prepared extension registers %s at child startup",
+	async name => {
+		const seen = await runProbedChild({
+			id: `Startup${name}`,
+			factory: registersReservedAtFactory(name),
+			onRequest: () => builtinCall("yield"),
+		});
+		expect(seen.requests).toBe(0);
+		expect(seen.exitCode).not.toBe(0);
+		expect(`${seen.error ?? ""}\n${seen.stderr}`).toContain(reservedMessage(name));
+		expect(`${seen.error ?? ""}\n${seen.stderr}`).not.toContain("Failed to bind extension");
+	},
+	30_000,
+);
+
+it.each(RESERVED_NAMES)(
+	"does not let a session_start registration replace built-in %s",
+	async name => {
+		const hit = { called: false };
+		let description = "";
+		const errorSpy = vi.spyOn(logger, "error");
+		const moduleErrorSpy = vi.spyOn(loggerModule, "error");
+		const seen = await runProbedChild({
+			id: `Late${name}`,
+			factory: registersReservedAtSessionStart(name, hit),
+			onRequest: (tools, index) => {
+				if (index === 0) description = tools.find(tool => tool.name === name)?.description ?? "";
+				return index === 0 ? builtinCall(name) : { content: ["ack"] };
+			},
+		});
+		const diagnostic = [...errorSpy.mock.calls, ...moduleErrorSpy.mock.calls]
+			.map(call => call.map(part => (typeof part === "string" ? part : JSON.stringify(part))).join(" "))
+			.join("\n");
+		expect(hit.called).toBe(false);
+		expect(description).not.toContain(RESERVED_MARKER);
+		expect(description.length).toBeGreaterThan(0);
+		expect(seen.exitCode).toBe(0);
+		expect(diagnostic).toContain(reservedMessage(name));
+	},
+	30_000,
+);
+
+it("still exposes a nonreserved explicit child custom tool", async () => {
+	const hit = { called: false };
+	const seen = await runProbedChild({
+		id: "PlainCustom",
+		customTools: [reservedDefinition("word_count", hit) as CustomTool],
+		onRequest: (_tools, index) =>
+			index === 0
+				? { content: [{ type: "toolCall", name: "word_count", arguments: {} }] }
+				: builtinCall("yield"),
+	});
+	expect(hit.called).toBe(true);
+	expect(seen.exitCode).toBe(0);
+}, 30_000);
+
+it("still lets a main-session extension register yield and handback", async () => {
+	const cwd = path.join(root, "home", "main-reserved");
+	await fs.mkdir(cwd, { recursive: true });
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("mock", "test-key");
+	const modelRegistry = new ModelRegistry(authStorage);
+	const mock = createMockModel();
+	const catalogAvailable = modelRegistry.getAvailable.bind(modelRegistry);
+	vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [mock, ...catalogAvailable(kind)]);
+	const { session } = await createAgentSession({
+		cwd,
+		agentDir: path.join(root, "home", ".omp", "agent"),
+		authStorage,
+		modelRegistry,
+		settings: Settings.isolated({
+			"async.enabled": false,
+			"compaction.enabled": false,
+			"advisor.enabled": false,
+			modelRoles: { default: "mock/mock-model" },
+		}),
+		sessionManager: SessionManager.inMemory(cwd),
+		disableExtensionDiscovery: true,
+		enableMCP: false,
+		enableLsp: false,
+		skipPythonPreflight: true,
+		extensions: [
+			pi => {
+				for (const name of RESERVED_NAMES) pi.registerTool(reservedDefinition(name));
+			},
+		],
+	});
+	try {
+		for (const name of RESERVED_NAMES) {
+			expect(session.getToolByName(name)?.description).toContain(`${RESERVED_MARKER}:${name}`);
+		}
+	} finally {
+		await session.dispose();
+		authStorage.close();
 	}
 }, 30_000);

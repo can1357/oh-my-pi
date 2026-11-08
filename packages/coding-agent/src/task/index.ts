@@ -1087,7 +1087,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (spawn.tools?.length && this.session.getPlanModeState?.()?.enabled === true) return undefined;
 		let blocking: boolean;
 		try {
-			blocking = (await this.#resolveSpawnPreflight(spawn)).effectiveAgent.blocking === true;
+			blocking = (await this.#resolveSpawnPreflight(spawn, signal)).effectiveAgent.blocking === true;
 		} catch {
 			return undefined;
 		}
@@ -1134,7 +1134,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * normalized task params rather than smuggling internal policy over the
 	 * task wire contract.
 	 */
-	#resolveSpawnPreflight(params: TaskParams) {
+	async #resolveSpawnPreflight(params: TaskParams, signal?: AbortSignal) {
+		const customTools = params.tools?.length
+			? createEvalCustomTools(this.session, await describeEvalTools(this.session, params.tools, signal))
+			: undefined;
 		return resolveEffectiveSubagentPolicy({
 			session: this.session,
 			invocationKind: "task",
@@ -1150,6 +1153,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
+			...(customTools ? { customTools } : {}),
 		});
 	}
 
@@ -1237,7 +1241,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const preflights = await Promise.all(
 			normalizedSpawnParams.map(async spawn => {
 				try {
-					return { policy: await this.#resolveSpawnPreflight(spawn) };
+					return { policy: await this.#resolveSpawnPreflight(spawn, signal) };
 				} catch (error) {
 					return { error: error instanceof StructuredSubagentError ? error.message : String(error) };
 				}
