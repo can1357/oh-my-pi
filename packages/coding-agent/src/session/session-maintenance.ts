@@ -3741,6 +3741,10 @@ export class SessionMaintenance {
 						buildProviderContext: (summarized, retained, signal, model) =>
 							this.#host.buildLiveProviderContext(summarized, retained, signal, model),
 						isUserAuthored: isUserAuthoredMessage,
+						onPayload: this.#host.extensionRunner?.hasHandlers("before_provider_request")
+							? (payload, model, signal) =>
+									this.#host.extensionRunner?.emitBeforeProviderRequest(payload, model, signal)
+							: undefined,
 						telemetry,
 						// Honor the user's /model thinking selection (incl. `off`) on
 						// the manual `/compact` path. Clamped per-model inside compact()
