@@ -83,12 +83,14 @@ function startRunSseServer(options: { runSseStatus?: number } = {}) {
 	};
 }
 
-// HTTP/2 sessions are pointed at a server that resets the TLS handshake; RunSSE still reaches the model.
+// HTTP/2 sessions are pointed at a server that drops the ClientHello; RunSSE still reaches the model.
 async function interceptHttp2() {
 	let connections = 0;
 	const dropper = net.createServer(socket => {
 		connections++;
-		socket.destroy();
+		// Close only once the ClientHello arrives: closing on accept can reset the
+		// socket before the client writes, which surfaces as a bare `read ECONNRESET`.
+		socket.once("data", () => socket.destroy());
 	});
 	const listening = Promise.withResolvers<void>();
 	dropper.listen(0, "127.0.0.1", () => listening.resolve());
