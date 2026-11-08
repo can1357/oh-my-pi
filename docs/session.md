@@ -586,7 +586,7 @@ These projections leave the live entries unchanged. On load, ordinary persisted 
 
 ## Storage Abstractions
 
-`SessionStorage` owns filesystem-like operations used by `SessionManager`: synchronous directory/existence/write/stat/list operations; async read, sliced read, write, guarded atomic write, rename, unlink, artifact-aware deletion, title update, writer creation, and backend drain. Optional capabilities include synchronous reads, confirmed remote writes, assistant-turn scans, file locking, session ownership claims, and conditional artifact-aware deletion.
+`SessionStorage` owns filesystem-like operations used by `SessionManager`: synchronous directory/existence/write/stat/list operations; async read, sliced read, write, guarded atomic write, rename, unlink, artifact-aware deletion, title update, writer creation, and backend drain. Optional capabilities include synchronous reads, confirmed remote writes, line scans (`scanLines`), file locking, session ownership claims, and conditional artifact-aware deletion.
 
 Implementations and adapters:
 
@@ -630,7 +630,7 @@ Discovery helpers live in `session-listing.ts`; `SessionManager` exposes project
 - `SessionManager.listForPicker(...)` / `listAllForPicker()` -> pinned-first lists with untitled, prompt-less zero-turn stubs removed; pinned stubs remain selectable
 - `resolveResumableSession(...)` -> local lookup then optional global fallback
 
-`getRecentSessions()` sorts file stats and first looks up titles in `history.db`'s `session_titles` index; unindexed files fall back to content scanning and backfill their title. `findMostRecentSession()` reads a 4 KiB prefix. Status-enabled full/non-empty scans read that prefix plus a bounded 32 KiB tail. Scans are stat-keyed and cached; large full lists use bounded parallel workers. Normal per-directory scans also recover the newest orphaned EPERM backup when its primary JSONL is missing.
+`getRecentSessions()` sorts file stats and first looks up titles in `history.db`'s `session_titles` index; unindexed files fall back to content scanning and backfill their title. `findMostRecentSession()` reads a 4 KiB prefix. Status-enabled full/non-empty scans read that prefix plus a bounded 32 KiB tail. When those windows hold no text prompt or no assistant record, one `scanLines` pass over the file recovers them, so a prompt behind a large memory recall or attachment still previews (capped at 4 KiB of text); backends without `scanLines` keep the window evidence. Scans are stat-keyed and cached; large full lists use bounded parallel workers. Normal per-directory scans also recover the newest orphaned EPERM backup when its primary JSONL is missing.
 
 `SessionManager.list()`/`listAll()` sort pinned sessions first; raw listing helpers sort newest first. Empty filtering is picker/continue-specific, not applied to id lookup or maintenance. Resume matching is case-insensitive and accepts session id prefixes, full filename prefixes, or the id suffix after the timestamp. Explicit `sessionDir` disables global fallback unless `allowGlobalFallback: true` is requested.
 
