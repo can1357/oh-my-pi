@@ -57,6 +57,7 @@ import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
+import { completedToolCallIds, latestUserTurnIndex, shrinkToolHistoryMessage } from "./tool-history-shrink";
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 export {
@@ -1099,6 +1100,10 @@ interface ConvertArrayMemo {
 	output: Message[];
 	tail: AgentMessage | undefined;
 	prefixOutputLen: number;
+	/** Latest real user turn start (-1: none); history before it is send-shrunk. */
+	turnStart: number;
+	/** Output length contributed by messages[0 .. turnStart). */
+	turnOutputLen: number;
 }
 
 let convertGeneration = 0;
@@ -1313,6 +1318,21 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
 }
 
 /**
+ * True when a tool result in the appended suffix (from `from`) answers a call of
+ * an assistant before `from - 1`. The boundary reconvert cannot reach that
+ * message, so the caller must rebuild the output.
+ */
+function appendedResultReachesOlderCall(messages: readonly AgentMessage[], from: number): boolean {
+	if (messages[from - 1]?.role === "assistant") return false;
+	for (let i = from; i < messages.length; i++) {
+		const role = messages[i]!.role;
+		if (role === "assistant") return false;
+		if (role === "toolResult") return true;
+	}
+	return false;
+}
+
+/**
  * Transform AgentMessages (including custom types) to LLM-compatible Messages.
  *
  * This is used by:
@@ -1329,6 +1349,14 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  * {@link convertMessagesForContextView} mirrors this loop through
  * {@link convertMessageAt}; it stays separate so the index mapping `/context`
  * needs adds no cost here.
+ *
+ * Completed tool calls are sent through {@link shrinkToolHistoryMessage}: oversized
+ * arguments are replaced by markers in a provider-only copy, in every turn, since
+ * the result already exists. Tool results are shrunk only before the latest real
+ * user turn; the current turn's results and the session file keep full values.
+ * When a new user turn arrives on the same growing array, only the previously
+ * protected turn is reconverted. A pending call that gets its result on the same
+ * array is reconverted at the boundary, so it shrinks on the next send.
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	const len = messages.length;
@@ -1351,17 +1379,32 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	// plus the appended suffix. The boundary-identity check (old tail still sits
 	// at its old index) rejects an in-place interior splice-replace that grew the
 	// array while swapping earlier identities, forcing a full rebuild.
-	let out: Message[];
-	let start: number;
-	if (
+	// A new real user turn in the appended suffix makes the previously protected
+	// turn's results eligible for shrinking; the scan stops at the old length. A result that
+	// completes a call of an older assistant (parallel or async batch) forces a
+	// rebuild; per-message conversion stays cached.
+	const grew =
 		sameGeneration &&
 		len > memo.length &&
 		memo.length > 0 &&
 		messages[memo.length - 1] === memo.tail &&
-		memo.prefixOutputLen <= memo.output.length
-	) {
+		memo.prefixOutputLen <= memo.output.length &&
+		!appendedResultReachesOlderCall(messages, memo.length);
+	const appendedTurn = grew ? latestUserTurnIndex(messages, memo.length) : -1;
+	const turnStart = !grew ? latestUserTurnIndex(messages) : appendedTurn >= 0 ? appendedTurn : memo.turnStart;
+
+	let out: Message[];
+	let start: number;
+	let turnOutputLen = 0;
+	if (grew && turnStart === memo.turnStart) {
 		out = memo.output.slice(0, memo.prefixOutputLen);
 		start = memo.length - 1;
+		turnOutputLen = memo.turnOutputLen;
+	} else if (grew && memo.turnStart >= 0 && memo.turnOutputLen <= memo.prefixOutputLen) {
+		// Reconvert from the old turn start: its results are now eligible history.
+		out = memo.output.slice(0, memo.turnOutputLen);
+		start = memo.turnStart;
+		turnOutputLen = memo.turnOutputLen;
 	} else {
 		out = [];
 		start = 0;
@@ -1372,7 +1415,11 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	let prefixOutputLen = 0;
 	for (let i = start; i < len; i++) {
 		if (i === len - 1) prefixOutputLen = out.length;
-		const fragment = convertMessageAt(messages, i, convertOneCached);
+		if (i === turnStart) turnOutputLen = out.length;
+		const source = shrinkToolHistoryMessage(messages[i], completedToolCallIds(messages, i), i < turnStart);
+		const fragment = convertMessageAt(messages, i, (_m, interruptedNext) =>
+			convertOneCached(source, interruptedNext),
+		);
 		for (const msg of fragment) out.push(msg);
 	}
 	if (len === 0) prefixOutputLen = 0;
@@ -1385,6 +1432,8 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 		output: out,
 		tail,
 		prefixOutputLen,
+		turnStart,
+		turnOutputLen,
 	});
 	return out;
 }
