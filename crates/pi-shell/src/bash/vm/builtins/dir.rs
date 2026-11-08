@@ -117,7 +117,8 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let relative =
 		!target.starts_with(b"/") && !target.starts_with(b".") && url_root_len(&target).is_none();
 	if relative && let Some(cdpath) = ctx.scalar(b"CDPATH")? {
-		for dir in cdpath.split(|&c| c == b':') {
+		let sep = crate::bash::vm::probe::path_separator(ctx.k.engine.config().platform);
+		for dir in cdpath.split(|&c| c == sep) {
 			if dir.is_empty() {
 				continue;
 			}
