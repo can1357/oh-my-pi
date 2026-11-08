@@ -8221,6 +8221,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// InteractiveMode instance (e.g. test harnesses, headless re-init).
 		setAutoQaConsentHandler(null, null);
 		setCfgApprovalHost(null);
+		setWordPredictionHost(undefined);
 		this.#disposeImageBlobWriter?.();
 		this.#disposeImageBlobWriter = undefined;
 		this.#hideSessionInfo();
