@@ -397,8 +397,6 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						// build status settles.
 						let rebuildStatusSeq: number | undefined;
 						if (supportsDocumentDiagnostics(client)) {
-							// The wait pulls a fresh report; drop the cached one so it cannot answer first.
-							client.diagnostics.delete(uri);
 							await reconcileFileFromDisk(client, resolved, signal);
 						} else if (client.buildStatus) {
 							// clangd with build status: rebuild the main file in place, keeping the
