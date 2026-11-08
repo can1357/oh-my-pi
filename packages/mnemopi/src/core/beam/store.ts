@@ -725,7 +725,9 @@ export function invalidate(beam: BeamMemoryState, memoryId: string, replacementI
 			[now, replacementId, memoryId, beam.sessionId],
 		);
 		if (working.changes > 0) {
-			// Retire summaries too so consolidation cannot resurrect the source.
+			// Retire episodic summaries built from this source: they still carry its text. Siblings
+			// covered by the same summary stay recallable via their (consolidated, never TTL-trimmed)
+			// working rows.
 			beam.db.run(
 				`UPDATE episodic_memory SET valid_until = ?, superseded_by = ?
 				 WHERE (session_id = ? OR scope = 'global')
