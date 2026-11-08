@@ -9,6 +9,9 @@
 ### Fixed
 
 - JavaScript eval keeps its variables when an unawaited promise, such as a tool call, rejects after its cell ends, and reports late errors in the next cell's output instead of restarting the kernel ([#18223](https://github.com/can1357/oh-my-pi/pull/18223) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- On Linux under X11, the browser guide now tells agents to use the keyboard instead of clicking in the Chrome tab you can see when you need to keep your app in front, since a click raises Chrome and sends your typing into the page ([#17940](https://github.com/can1357/oh-my-pi/pull/17940) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.1] - 2026-11-08
 
