@@ -118,12 +118,25 @@ describe("executePython reports a failure nobody cancelled as a failure", () => 
 		using tempDir = TempDir.createSync("@python-kernel-dies-at-start-");
 		// A real kernel process, on an interpreter that fails the way a broken
 		// version-manager shim does: a message on stderr, then a non-zero exit.
+		// It exits at once: the diagnosis must come from observing the exit, not
+		// from a sleep long enough to make the observation likely.
 		const interpreter = path.join(tempDir.path(), "python");
-		await Bun.write(interpreter, "#!/bin/sh\necho 'shim: python 3.12.4 is not installed' >&2\nsleep 0.3\nexit 3\n");
+		await Bun.write(interpreter, "#!/bin/sh\necho 'shim: python 3.12.4 is not installed' >&2\nexit 3\n");
 		await fs.chmod(interpreter, 0o755);
 		const run = executePython("1 + 1", { kernelMode: "per-call", interpreter, cwd: tempDir.path() });
 		await expect(run).rejects.toThrow("Python kernel exited with code 3");
 		await expect(run).rejects.toThrow("shim: python 3.12.4 is not installed");
+	});
+
+	it("a kernel whose process exits during startup saying nothing still reports its exit code", async () => {
+		using tempDir = TempDir.createSync("@python-kernel-dies-silently-at-start-");
+		// Nothing on stderr, so the exit code is the only thing that explains the
+		// failure: a diagnosis built from the stderr drain alone has no reason at all.
+		const interpreter = path.join(tempDir.path(), "python");
+		await Bun.write(interpreter, "#!/bin/sh\nexit 23\n");
+		await fs.chmod(interpreter, 0o755);
+		const run = executePython("1 + 1", { kernelMode: "per-call", interpreter, cwd: tempDir.path() });
+		await expect(run).rejects.toThrow("Python kernel exited with code 23");
 	});
 
 	for (const name of ["AbortError", "TimeoutError"] as const) {

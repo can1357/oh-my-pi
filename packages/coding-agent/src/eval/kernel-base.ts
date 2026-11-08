@@ -201,8 +201,11 @@ export function createAbortError(name: "AbortError" | "TimeoutError", message: s
 
 /** How much of a runner's stderr a kernel keeps, to say why it stopped. */
 const STDERR_TAIL_CHARS = 2_000;
-/** How long a stopped kernel's failure waits for the stderr drain to read the last bytes. */
-const STDERR_SETTLE_MS = 200;
+/**
+ * How long a stopped kernel's failure waits for what explains the stop: the process exit it is
+ * named for, and the last bytes of stderr.
+ */
+const STOP_DESCRIPTION_WAIT_MS = 200;
 
 export function throwIfAborted(signal: AbortSignal | undefined, fallbackReason: string): void {
 	if (!signal?.aborted) return;
@@ -243,6 +246,8 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	/** The last {@link STDERR_TAIL_CHARS} characters the runner wrote to stderr, to say why it stopped. */
 	#stderrTail = "";
 	#stderrDrained: Promise<void> = Promise.resolve();
+	/** Settles once {@link #exitReason} is set, so a stop description can wait for the exit itself. */
+	#exitObserved: Promise<void> = Promise.resolve();
 	#pending = new Map<string, PendingExecution>();
 	#pendingControls = new Map<string, PromiseWithResolvers<Frame>>();
 	readonly #options: BaseKernelOptions<TExecuteOptions>;
@@ -256,13 +261,15 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		this.#proc = proc;
 		this.#stdin = proc.stdin;
 		this.#exitedPromise = proc.exited;
-		void this.#exitedPromise.then(code => {
-			this.#markDead();
-			this.#exitReason = `${this.#options.languageName} kernel exited with code ${code}`;
-			this.#abortPendingExecutions(this.#exitReason, {
-				kernelKilled: true,
-			});
-		});
+		this.#exitObserved = this.#exitedPromise
+			.then(code => {
+				this.#markDead();
+				this.#exitReason = `${this.#options.languageName} kernel exited with code ${code}`;
+				this.#abortPendingExecutions(this.#exitReason, {
+					kernelKilled: true,
+				});
+			})
+			.catch(() => {});
 
 		this.#startReader(proc.stdout as ReadableStream<Uint8Array>);
 		this.#startStderrDrain(proc.stderr as ReadableStream<Uint8Array>);
@@ -785,8 +792,10 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 
 	/** Why the kernel stopped answering: its exit, and the end of what it wrote to stderr. */
 	async #describeStop(): Promise<string> {
-		// The exit can arrive before the last stderr bytes are read; give the drain a moment.
-		await Promise.race([this.#stderrDrained, Bun.sleep(STDERR_SETTLE_MS)]);
+		// Neither the exit nor the last stderr bytes are necessarily observed yet: a runner that dies
+		// at once can stop answering before either arrives, and the exit code is the whole reason.
+		// Wait for both, bounded, so a prompt death is still described by what killed it.
+		await Promise.race([Promise.all([this.#stderrDrained, this.#exitObserved]), Bun.sleep(STOP_DESCRIPTION_WAIT_MS)]);
 		const reason = this.#exitReason ?? `${this.#options.languageName} kernel stopped responding`;
 		const tail = this.#stderrTail.trim();
 		return tail ? `${reason}; its last stderr output: ${tail}` : reason;

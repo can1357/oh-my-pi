@@ -901,6 +901,13 @@ async function killSession(session: JsSession, error: Error, options: { force: b
 	for (const toolSession of session.stateSessions) {
 		updateEvalState(toolSession, { language: "js", kernelId: session.kernelId, alive: false });
 	}
+	// This kill is the sole settler of every run from here on. Mark them all before a single tool
+	// controller is aborted: an aborted bridge call's `finally` runs during the drain below, and an
+	// unmarked run would let it release a worker success the runtime never got to stand behind —
+	// reporting a cell whose host work was cut short as having completed. `aborted` also keeps a
+	// late `result` frame out of `settlePending`. Neither blocks text or display frames, so the
+	// output the runtime sent before it stopped still reaches the run.
+	for (const pending of session.pending.values()) pending.aborted = true;
 	// Stop delegated host work at once; the runtime itself goes next.
 	for (const pending of session.pending.values()) {
 		for (const ctrl of pending.toolCalls.values()) ctrl.abort(error);

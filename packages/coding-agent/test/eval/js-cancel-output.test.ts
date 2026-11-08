@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import {
@@ -8,6 +9,7 @@ import {
 	executeInVmContext,
 	setJsEvalWorkerFactoriesForTests,
 } from "../../src/eval/js/context-manager";
+import { executeJs, type JsResult } from "../../src/eval/js/executor";
 import type { ToolSession } from "../../src/tools";
 
 const cleanups: Array<() => void> = [];
@@ -17,13 +19,14 @@ afterEach(async () => {
 	await disposeAllVmContexts();
 });
 
-function toolSession(cwd: string): ToolSession {
+function toolSession(cwd: string, tool?: AgentTool): ToolSession {
 	return {
 		cwd,
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,
 		settings: Settings.isolated(),
+		getToolByName: (name: string) => (tool?.name === name ? tool : undefined),
 	};
 }
 
@@ -102,6 +105,90 @@ describe("a JavaScript cell aborted while its output is still queued", () => {
 			}),
 		);
 		expect(await abortAfterUnhandledPrint()).toEqual(expected);
+		expect(processSpawns).toBe(1);
+	});
+});
+
+interface StoppedRun {
+	/** Whether the host operation saw its cancellation. */
+	aborted: boolean;
+	/** What the caller was told. */
+	result: JsResult;
+}
+
+/**
+ * Run a cell that leaves a bridge call in flight and then kills its own runtime.
+ *
+ * The worker reports the cell finished while that call is still running, so the context manager
+ * withholds the result until the call drains — a cell owns every bridge call it starts. The
+ * runtime then dies. Stopping the session aborts the call, and the abort unwinds through the same
+ * drain the stop is waiting on.
+ */
+async function runtimeDiesWithBridgeCallOutstanding(): Promise<StoppedRun> {
+	using dir = TempDir.createSync("@omp-js-stop-held-result-");
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let aborted = false;
+	const slow: AgentTool = {
+		name: "slow",
+		label: "Slow",
+		description: "A host operation that runs until it is cancelled",
+		parameters: { type: "object", properties: {}, additionalProperties: false },
+		execute: async (_id, _args, signal) => {
+			entered.resolve();
+			signal?.addEventListener("abort", () => {
+				aborted = true;
+				release.reject(signal.reason);
+			});
+			await release.promise;
+			return { content: [{ type: "text", text: "the host operation finished" }], details: {} };
+		},
+	};
+	const code = [
+		// The cell's own module loader: this exit happens in the runtime, not in the test process.
+		'const runtime = await import("node:process");',
+		// Floated, so the worker finishes the cell while the call is still running.
+		"void tool.slow({}).catch(() => {});",
+		'console.log("printed before the runtime stops");',
+		// A real timer inside the runtime: the result has to reach the host and be withheld before
+		// the runtime dies, and host fake time cannot advance a separate process or thread.
+		"setTimeout(() => runtime.exit(17), 200);",
+	].join("\n");
+	const run = executeJs(code, {
+		session: toolSession(dir.path(), slow),
+		sessionId: `js-stop-held-result:${crypto.randomUUID()}`,
+	});
+	await entered.promise;
+	const result = await run;
+	return { aborted, result };
+}
+
+describe("a JavaScript cell whose runtime dies with a bridge call still running", () => {
+	const expectStopReported = ({ aborted, result }: StoppedRun): void => {
+		expect(aborted).toBe(true);
+		// The output the runtime sent before it died is still the cell's output.
+		expect(result.output).toContain("printed before the runtime stops");
+		// Nobody cancelled this cell, and its host work never finished: a failure, with the reason.
+		expect(result.cancelled).toBe(false);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("worker exited");
+	};
+
+	it("reports the death rather than the withheld success, in subprocess mode", async () => {
+		expectStopReported(await runtimeDiesWithBridgeCallOutstanding());
+	});
+
+	it("reports the death rather than the withheld success, in worker-thread mode", async () => {
+		let processSpawns = 0;
+		cleanups.push(
+			setJsEvalWorkerFactoriesForTests({
+				spawnProcess: () => {
+					processSpawns++;
+					throw new Error("test: use the Bun Worker fallback");
+				},
+			}),
+		);
+		expectStopReported(await runtimeDiesWithBridgeCallOutstanding());
 		expect(processSpawns).toBe(1);
 	});
 });
