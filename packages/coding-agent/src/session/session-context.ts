@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
 import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { getAnthropicCompactionPayload, isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import {
@@ -235,6 +235,35 @@ export type TranscriptEntry = SessionMessageEntry | CustomMessageEntry;
 
 export function isTranscriptEntry(entry: SessionEntry): entry is TranscriptEntry {
 	return entry.type === "message" || entry.type === "custom_message";
+}
+
+/**
+ * True when `message` is a not-executed synthetic tool result that `branch`
+ * cannot pair: no assistant turn there emitted its tool call.
+ *
+ * This is the shape that got every later turn of a session refused
+ * (INFRA-1191). A refused turn is not stored, but the placeholder results its
+ * started calls produced were, so the stored result had no `tool_use` to pair
+ * with and each later request replayed it as a bare user message.
+ *
+ * A result is appended directly after the assistant turn that called it, so
+ * only the newest assistant turn on the branch can own this call — an older
+ * one would mean the result arrived out of its turn, which is itself an
+ * orphan. An empty branch has nothing to pair with either.
+ *
+ * `branch` is a thunk, not an array: only a synthetic result can be orphaned,
+ * and every other message on the persistence path (every user turn, above all)
+ * must not pay a branch lookup to be told so.
+ */
+export function isOrphanedSyntheticResult(branch: () => readonly SessionEntry[], message: AgentMessage): boolean {
+	if (!isSyntheticToolResultMessage(message)) return false;
+	const entries = branch();
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		return !entry.message.content.some(block => block.type === "toolCall" && block.id === message.toolCallId);
+	}
+	return true;
 }
 
 export function buildSessionContext(
@@ -782,6 +811,35 @@ export function buildSessionContext(
 					}
 				}
 			}
+		}
+	}
+
+	// Heal a session whose history already carries an orphaned synthetic result:
+	// a not-executed placeholder whose `tool_use` is in no assistant turn on this
+	// path. A refused turn was dropped at persist time while the placeholders its
+	// calls produced were stored, so every later request replayed them as bare
+	// user messages — and the provider's refusal text used to be quoted inside
+	// them, which made the classifier refuse the next turn too, forever
+	// (INFRA-1191). Nothing below re-pairs such a result: the dangling-call pass
+	// above strips unanswered calls, never unanchored results.
+	//
+	// The predicate is the pairing itself, so it cannot miss a case or invent
+	// one: keep every result whose call is present, drop only a synthetic
+	// not-executed result whose call is absent. A real tool result is never
+	// synthetic, so it is never a candidate however its turn was stored.
+	if (!options?.transcript) {
+		const emittedToolCallIds = new Set<string>();
+		for (const message of messages) {
+			if (message.role !== "assistant") continue;
+			for (const block of message.content) {
+				if (block.type === "toolCall") emittedToolCallIds.add(block.id);
+			}
+		}
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (!isSyntheticToolResultMessage(message)) continue;
+			if (emittedToolCallIds.has(message.toolCallId)) continue;
+			messages.splice(i, 1);
 		}
 	}
 
