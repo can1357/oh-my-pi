@@ -1051,9 +1051,10 @@ describe("discriminating failure and race behavior", () => {
 		try {
 			const owner = { kind: "role", role: "task" } as const;
 			let active = x.source;
+			let allowCandidates = true;
 
 			const routing = {
-				candidates: () => x.routing.candidates(owner, "s", x.source, x.sourceId, "error"),
+				candidates: () => (allowCandidates ? x.routing.candidates(owner, "s", x.source, x.sourceId, "error") : []),
 				refresh: x.routing.refresh.bind(x.routing),
 				evaluate: x.routing.evaluate.bind(x.routing),
 			};
@@ -1103,11 +1104,33 @@ describe("discriminating failure and race behavior", () => {
 				return origGetApiKey(provider, sessionId, options);
 			};
 
+			// Make post-fallthrough candidates return [] so a later loop check cannot mask the catch
+			allowCandidates = false;
+
+			let currentCalled = false;
+			const fallbackCurrent = async () => {
+				currentCalled = true;
+				return {
+					model: active,
+					apiKey: () => undefined,
+					resolved: { apiKey: "fallback-key", credentialId: x.pinnedId },
+				};
+			};
+
 			controller.abort();
 
-			// Aborted signal must be caught in pending branch and propagated by throwing
-			await expect(recovery.prepareGovernedModelCall(active, current, owner, controller.signal)).rejects.toThrow();
+			// Aborted signal must be caught in pending branch and propagated by throwing AbortError
+			let caughtError: unknown;
+			try {
+				await recovery.prepareGovernedModelCall(active, fallbackCurrent, owner, controller.signal);
+			} catch (err) {
+				caughtError = err;
+			}
+			expect(caughtError).toBeInstanceOf(DOMException);
+			expect((caughtError as DOMException).name).toBe("AbortError");
 			expect(resolverCalled).toBe(true);
+			// current must never be called when abort propagates from the pending branch
+			expect(currentCalled).toBe(false);
 
 			expectNoStrayFetch(x.h);
 			expect(x.h.redemptionPosts()).toHaveLength(0);
