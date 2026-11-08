@@ -10,6 +10,7 @@
 
 - Terminals without synchronized output (macOS Terminal.app) no longer flash duplicated rows while streaming text scrolls, or blank the screen and status line when finished rows move into scrollback
 - A streaming list item no longer flickers to raw `**bold**` markup while a nested `-` bullet is being typed, and headings inside list items keep their formatting
+- Long embedded arguments in bash previews (e.g. a `grep -E` regex) wrap under their command's indent instead of leaving a blank row and losing the gutter
 
 ## [18.18.1] - 2026-11-08
 

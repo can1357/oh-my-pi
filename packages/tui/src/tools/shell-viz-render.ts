@@ -54,7 +54,13 @@ function segmentText(
 	return emphasized;
 }
 
-function rowText(row: ShellVizRow, presentation: ShellVizPresentation, theme: Theme, width: number): string {
+/** A row split into its gutter/indent/effects lead and the wrappable source text after it. */
+function rowParts(
+	row: ShellVizRow,
+	presentation: ShellVizPresentation,
+	theme: Theme,
+	width: number,
+): { lead: string; body: string } {
 	const selected =
 		presentation.preferences.selectedNode !== undefined &&
 		(row.node === presentation.preferences.selectedNode ||
@@ -96,11 +102,24 @@ function rowText(row: ShellVizRow, presentation: ShellVizPresentation, theme: Th
 			return muted ? theme.faint(annotation) : annotation;
 		})
 		.join(theme.fg("muted", " · "));
-	return `${gutter} ${indent}${effect ? `${effect} ` : ""}${body}${meta}${annotations ? `  ${theme.fg("muted", "‹")} ${annotations} ${theme.fg("muted", "›")}` : ""}`;
+	return {
+		lead: `${gutter} ${indent}${effect ? `${effect} ` : ""}`,
+		body: `${body}${meta}${annotations ? `  ${theme.fg("muted", "‹")} ${annotations} ${theme.fg("muted", "›")}` : ""}`,
+	};
 }
 
+/**
+ * Wrap the row's text under its lead with a hanging indent. Wrapping the lead
+ * together with the text would let a long unbreakable token (an embedded regex
+ * or URL) drop to its own line: the whitespace-only lead becomes a blank row
+ * and the continuation loses the gutter and nesting indent.
+ */
 function rowLines(row: ShellVizRow, presentation: ShellVizPresentation, theme: Theme, width: number): string[] {
-	return wrapTextWithAnsi(rowText(row, presentation, theme, width), Math.max(1, width));
+	const { lead, body } = rowParts(row, presentation, theme, width);
+	const leadWidth = visibleWidth(lead);
+	if (leadWidth >= width) return wrapTextWithAnsi(`${lead}${body}`, Math.max(1, width));
+	const hanging = " ".repeat(leadWidth);
+	return wrapTextWithAnsi(body, width - leadWidth).map((line, index) => `${index === 0 ? lead : hanging}${line}`);
 }
 
 function joinPanes(left: string[], right: string[], width: number, separator: string): string[] {
