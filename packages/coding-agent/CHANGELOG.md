@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/shake thinking` no longer claims freed context tokens for reasoning that OpenAI Responses still replays from native history ([#18476](https://github.com/can1357/oh-my-pi/issues/18476)).
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes
