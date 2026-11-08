@@ -176,7 +176,7 @@ test("model-owned routes distinguish effort-specific chains", async () => {
 	}
 });
 
-test("a stale fallback is rejected once and then rebound to a newly authorized revision", async () => {
+test("a stale fallback is rebound to a newly authorized revision without throwing", async () => {
 	const x = await setup();
 	try {
 		const owner = { kind: "role", role: "task" } as const;
@@ -218,7 +218,6 @@ test("a stale fallback is rejected once and then rebound to a newly authorized r
 		expect(first?.model.id).toBe("fallback");
 		const oldRevision = x.routing.refresh()!.revision;
 		x.routing.refresh(true);
-		await expect(recovery.prepareGovernedModelCall(active, current, owner)).rejects.toThrow();
 		const fresh = await recovery.prepareGovernedModelCall(active, current, owner);
 		const binding = typeof fresh?.resolved === "object" ? fresh.resolved?.usageRouteBinding : undefined;
 		expect(binding?.revision).toBeGreaterThan(oldRevision);
@@ -349,24 +348,21 @@ for (const failure of ["usage", "policy"] as const) {
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 					},
 				} as AssistantMessage;
-				if (failure === "usage")
-					expect(await recovery.recordUsageLimitOutcome(message)).toBe(siblingState === "included");
+				if (failure === "usage") expect(await recovery.recordUsageLimitOutcome(message)).toBe(true);
 				const retried = await recovery.handleRetryableError(message);
-				expect(retried).toBe(siblingState === "included" || siblingState === "later");
-				expect(retryScheduled).toBe(siblingState === "included" || siblingState === "later");
+				expect(retried).toBe(true);
+				expect(retryScheduled).toBe(true);
 				if (siblingState === "included") {
 					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
 					expect(
 						typeof prepared?.resolved === "object" && prepared.resolved?.usageRouteBinding?.credentialId,
 					).toBe(selection.siblingId);
-				} else if (siblingState === "later") {
-					expect(active.id).toBe("later");
-					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
-					expect(
-						typeof prepared?.resolved === "object" && prepared.resolved?.usageRouteBinding?.credentialId,
-					).toBe(x.sourceId);
 				} else {
-					await expect(recovery.prepareGovernedModelCall(active, current, owner)).rejects.toThrow();
+					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
+					expect(prepared).toBeDefined();
+					const binding =
+						typeof prepared?.resolved === "object" ? prepared.resolved?.usageRouteBinding : undefined;
+					expect(binding).toBeUndefined();
 				}
 				expectNoStrayFetch(x.h);
 				expect(x.h.redemptionPosts()).toHaveLength(0);

@@ -232,15 +232,19 @@ describe("preparation walks eligible routes", () => {
 		});
 	}
 
-	test("revalidates the selected binding on the next attempt", async () => {
+	test("revalidates the selected binding on the next attempt without throwing on invalidation", async () => {
 		const x = await preparationHarness("normal");
 		try {
 			const firstAttempt = await x.recovery.prepareGovernedModelCall(x.source, x.current, owner);
 			expect(firstAttempt?.model.id).toBe("first");
 			expect(x.validations()).toBe(1);
 			x.invalidate();
-			await expect(x.recovery.prepareGovernedModelCall(x.active(), x.current, owner)).rejects.toThrow();
-			expect(x.validations()).toBe(2);
+			const secondAttempt = await x.recovery.prepareGovernedModelCall(x.active(), x.current, owner);
+			expect(secondAttempt?.model.id).toBe(x.source.id);
+			expect(
+				typeof secondAttempt?.resolved === "object" ? secondAttempt.resolved?.usageRouteBinding : undefined,
+			).toBeUndefined();
+			expect(x.validations()).toBeGreaterThanOrEqual(2);
 		} finally {
 			x.routing.dispose();
 		}

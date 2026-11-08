@@ -21,12 +21,7 @@ import type {
 	UsageRoutingOwner,
 	AnthropicFallbackCreditHandle,
 } from "@oh-my-pi/pi-ai";
-import {
-	calculateRateLimitBackoffMs,
-	isBillingCapUsageLimit,
-	parseRateLimitReason,
-	UsageRouteInvalidatedError,
-} from "@oh-my-pi/pi-ai";
+import { calculateRateLimitBackoffMs, isBillingCapUsageLimit, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
@@ -408,7 +403,6 @@ type UsageLimitOutcome = {
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
 export class TurnRecovery {
 	#governedRoute?: UsageRouteCandidate;
-	#governedRouteStale = false;
 
 	async #resolveGovernedRoute(
 		candidate: UsageRouteCandidate,
@@ -458,7 +452,6 @@ export class TurnRecovery {
 	): Promise<boolean> {
 		if (this.#host.usesRegistryAuth?.() !== true) {
 			this.#governedRoute = undefined;
-			this.#governedRouteStale = false;
 			return false;
 		}
 		const pending = this.#governedRoute;
@@ -521,7 +514,6 @@ export class TurnRecovery {
 			}
 			if (!prepared || this.#governedRoute !== pending || !modelsAreEqual(this.#host.model(), model)) continue;
 			this.#governedRoute = candidate;
-			this.#governedRouteStale = false;
 			return true;
 		}
 		return false;
@@ -535,7 +527,6 @@ export class TurnRecovery {
 	): Promise<PreparedModelAuth | undefined> {
 		if (this.#host.usesRegistryAuth?.() !== true) {
 			this.#governedRoute = undefined;
-			this.#governedRouteStale = false;
 			return undefined;
 		}
 		if (!cfgUsageGovernorEnabled.get(this.#host.settings)) return undefined;
@@ -547,16 +538,15 @@ export class TurnRecovery {
 			pending.target.baseUrl === model.baseUrl
 		) {
 			const currentScope = this.#host.usageRouting?.refresh?.();
-			if (
-				!this.#governedRouteStale &&
-				currentScope &&
-				(currentScope.id !== pending.scopeId || currentScope.revision !== pending.revision)
-			) {
-				this.#governedRouteStale = true;
-				throw new UsageRouteInvalidatedError();
-			}
+			const revisionChanged = Boolean(
+				currentScope && (currentScope.id !== pending.scopeId || currentScope.revision !== pending.revision),
+			);
 			let candidate = pending;
-			if (this.#governedRouteStale) {
+			let bound: PreparedModelAuth | undefined;
+			if (!revisionChanged) {
+				bound = await this.#resolveGovernedRoute(candidate, model, signal);
+			}
+			if (revisionChanged || !bound) {
 				const owner = pending.owner;
 				const evaluation = await this.#host.usageRouting?.evaluate(owner, this.#host.sessionId(), signal);
 				const plan =
@@ -575,29 +565,30 @@ export class TurnRecovery {
 						item.selector === target?.selector &&
 						item.credentialId === pending.credentialId &&
 						item.eligibility === "eligible" &&
-						item.allowance === "included" &&
-						item.state === "open" &&
+						(item.allowance === "included" || item.allowance === "spent") &&
 						item.quotaKeys.length > 0,
 				);
-				if (!evaluation || !target || !account) throw new UsageRouteInvalidatedError();
-				candidate = { ...pending, revision: evaluation.scope.revision, target };
+				if (evaluation && target && account) {
+					candidate = {
+						...pending,
+						scopeId: evaluation.scope.id,
+						revision: evaluation.scope.revision,
+						target,
+					};
+					bound = await this.#resolveGovernedRoute(candidate, model, signal);
+				}
 			}
-			const bound = await this.#resolveGovernedRoute(candidate, model, signal);
 			if (this.#host.usesRegistryAuth?.() !== true) {
 				this.#governedRoute = undefined;
-				this.#governedRouteStale = false;
 				return undefined;
 			}
-			if (!bound) {
-				this.#governedRouteStale = true;
-				throw new UsageRouteInvalidatedError();
+			if (bound) {
+				this.#governedRoute = candidate;
+				return bound;
 			}
-			this.#governedRoute = candidate;
-			this.#governedRouteStale = false;
-			return bound;
+			this.#governedRoute = undefined;
 		}
 		this.#governedRoute = undefined;
-		this.#governedRouteStale = false;
 		const current = await resolveCurrent();
 		if (this.#host.usesRegistryAuth?.() !== true) return undefined;
 		if (!cfgRetryModelFallback.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return current;
@@ -665,7 +656,6 @@ export class TurnRecovery {
 			);
 			if (!applied) continue;
 			this.#governedRoute = route;
-			this.#governedRouteStale = false;
 			return prepared;
 		}
 		return current;
@@ -1114,7 +1104,6 @@ export class TurnRecovery {
 		if (!activeModel || !AIError.is(id, AIError.Flag.UsageLimit)) return false;
 		if (cfgUsageGovernorEnabled.get(this.#host.settings) && this.#host.usesRegistryAuth?.() !== true) {
 			this.#governedRoute = undefined;
-			this.#governedRouteStale = false;
 			return false;
 		}
 		if (cfgUsageGovernorEnabled.get(this.#host.settings) && message.credentialId === undefined) return false;
@@ -1138,11 +1127,20 @@ export class TurnRecovery {
 						modelId: activeModel.id,
 					},
 				);
+				let switchedCredential = outcome.switched;
+				if (this.#governedRoute) {
+					const switched = outcome.switched
+						? await this.#switchGovernedSibling(activeModel, message.credentialId)
+						: false;
+					if (switched) {
+						switchedCredential = true;
+					} else {
+						this.#governedRoute = undefined;
+						switchedCredential = outcome.switched;
+					}
+				}
 				return {
-					switchedCredential:
-						outcome.switched && this.#governedRoute
-							? await this.#switchGovernedSibling(activeModel, message.credentialId)
-							: outcome.switched,
+					switchedCredential,
 					retryAfterMs,
 					retryAtMs: outcome.retryAtMs,
 					blockedUntilMs: outcome.blockedUntilMs,
@@ -2175,7 +2173,6 @@ export class TurnRecovery {
 	/** Clears fallback ownership after an explicit model change or a restore. */
 	clearActiveRetryFallback(): void {
 		this.#governedRoute = undefined;
-		this.#governedRouteStale = false;
 		this.#activeRetryFallback = undefined;
 		this.#fallbackRoutedFor = undefined;
 	}
@@ -2305,9 +2302,7 @@ export class TurnRecovery {
 	}
 
 	async #maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
-		if (!cfgRetryUsageAwareFallback.get(this.#host.settings) && !cfgUsageGovernorEnabled.get(this.#host.settings))
-			return false;
-		if (cfgUsageGovernorEnabled.get(this.#host.settings)) return false;
+		if (!cfgRetryUsageAwareFallback.get(this.#host.settings)) return false;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
 		const sessionId = this.#host.sessionManager.getSessionId();
@@ -2431,7 +2426,6 @@ export class TurnRecovery {
 		currentModel: Model,
 		signal: AbortSignal,
 	): Promise<{ role: string; selector: RetryFallbackSelector; apiKey: string } | undefined> {
-		if (cfgUsageGovernorEnabled.get(this.#host.settings)) return undefined;
 		const stale = () => signal.aborted || !modelsAreEqual(this.#host.model(), currentModel);
 		const ceiling = this.#host.thinkingLevelCeiling();
 		for (const role of this.retryFallbackChainKeys(currentSelector, currentModel)) {
@@ -2618,6 +2612,55 @@ export class TurnRecovery {
 		return true;
 	}
 
+	#isEligibleRetryFallbackCandidate(
+		candidate: Model,
+		selector: RetryFallbackSelector,
+		context: {
+			options?: {
+				excludeProvider?: string;
+				preserveFailedTurn?: boolean;
+				refusalWalk?: boolean;
+				sameModelRetryAvailable?: boolean;
+			};
+			failedMessage: AssistantMessage;
+			latestAssistant?: AssistantMessage;
+			canRedeemFallbackCredit: boolean;
+			creditLive: boolean;
+			signerRetryRemains: boolean;
+			ceiling?: Effort;
+		},
+	): boolean {
+		if (!this.#isGovernorFallbackAllowed(candidate)) return false;
+		if (this.#isNoOpRetryFallback(candidate, selector)) return false;
+		if (context.options?.excludeProvider === candidate.provider) return false;
+		const refusalKeepsCredit = context.options?.refusalWalk === true && context.creditLive;
+		if (
+			(context.signerRetryRemains || refusalKeepsCredit) &&
+			!context.canRedeemFallbackCredit &&
+			candidate.api === "anthropic-messages" &&
+			context.latestAssistant?.api === "anthropic-messages" &&
+			context.latestAssistant.provider === candidate.provider &&
+			context.latestAssistant.model !== candidate.id &&
+			context.latestAssistant.content.some(
+				block =>
+					(block.type === "thinking" && Boolean(block.thinkingSignature?.trim())) ||
+					block.type === "redactedThinking",
+			)
+		) {
+			return false;
+		}
+		if (context.ceiling !== undefined && !modelSupportsEffortCeiling(candidate, context.ceiling)) return false;
+		if (
+			!this.#host.contextFitsModel(
+				candidate,
+				context.options?.preserveFailedTurn ? undefined : context.failedMessage,
+			)
+		) {
+			return false;
+		}
+		return true;
+	}
+
 	async #tryRetryModelFallback(
 		currentSelector: string,
 		failedMessage: AssistantMessage,
@@ -2644,6 +2687,7 @@ export class TurnRecovery {
 			? this.#host.modelRegistry.find(failedMessage.provider, failedMessage.model)
 			: undefined;
 		const creditTargets = failedModel ? fallbackCreditTargets(failedModel) : [];
+		const creditLive = creditHandle !== undefined && creditTargets.length > 0 && Date.now() < creditHandle.expiresAt;
 		// Deferring a sibling Anthropic candidate below is only worth it while
 		// another attempt on the model that signed the replayed thinking follows:
 		// the active model is that model, and the retry policy will retry it. Any
@@ -2656,21 +2700,30 @@ export class TurnRecovery {
 		// under a different one.
 		const sourceModel = this.#host.model();
 		const governorEnabled = cfgUsageGovernorEnabled.get(this.#host.settings);
-		if (governorEnabled && this.#host.usesRegistryAuth?.() !== true) {
-			this.#governedRoute = undefined;
-			this.#governedRouteStale = false;
-			return false;
-		}
-		let governorCandidates: UsageRouteCandidate[] = [];
-		if (governorEnabled) {
-			if (!sourceModel || !this.#host.usageRouting) return false;
+		const signerRetryRemains =
+			options?.sameModelRetryAvailable === true &&
+			latestAssistant !== undefined &&
+			!!sourceModel &&
+			sourceModel.provider === latestAssistant.provider &&
+			sourceModel.id === latestAssistant.model;
+
+		const candidateFilterContext = {
+			options,
+			failedMessage,
+			latestAssistant,
+			creditLive,
+			signerRetryRemains,
+			ceiling,
+		};
+
+		if (governorEnabled && this.#host.usesRegistryAuth?.() === true && this.#host.usageRouting && sourceModel) {
 			const routingRole = this.#host.routingRole?.();
 			const owner: UsageRoutingOwner =
 				this.#governedRoute?.owner ??
 				(routingRole
 					? { kind: "role", role: routingRole }
 					: { kind: "model", selector: formatRetryFallbackSelector(sourceModel, this.#host.thinkingLevel()) });
-			governorCandidates = await this.#host.usageRouting.candidates(
+			const governorCandidates = await this.#host.usageRouting.candidates(
 				owner,
 				this.#host.sessionId(),
 				sourceModel,
@@ -2678,150 +2731,111 @@ export class TurnRecovery {
 				"error",
 				this.#retryAbortController?.signal,
 			);
-			if (!governorCandidates.length || !modelsAreEqual(this.#host.model(), sourceModel)) return false;
-		}
-		const signerRetryRemains =
-			options?.sameModelRetryAvailable === true &&
-			latestAssistant !== undefined &&
-			!!sourceModel &&
-			sourceModel.provider === latestAssistant.provider &&
-			sourceModel.id === latestAssistant.model;
-		const governorRole = governorCandidates[0]?.owner;
-		const roles =
-			governorEnabled && governorRole
-				? [governorRole.kind === "role" ? governorRole.role : governorRole.selector]
-				: this.retryFallbackChainKeys(currentSelector);
-		for (const role of roles) {
-			const selectors = governorEnabled
-				? [...new Set(governorCandidates.map(item => item.target.selector))].flatMap(raw => {
+			if (modelsAreEqual(this.#host.model(), sourceModel) && governorCandidates.length > 0) {
+				const governorRole = governorCandidates[0]?.owner;
+				const roles = governorRole
+					? [governorRole.kind === "role" ? governorRole.role : governorRole.selector]
+					: this.retryFallbackChainKeys(currentSelector);
+				for (const role of roles) {
+					const selectors = [...new Set(governorCandidates.map(item => item.target.selector))].flatMap(raw => {
 						const parsed = parseRetryFallbackSelector(raw, this.#host.modelRegistry);
 						return parsed ? [parsed] : [];
-					})
-				: this.findRetryFallbackCandidates(role, currentSelector, undefined, options);
-			for (const selector of selectors) {
+					});
+					for (const selector of selectors) {
+						if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
+						if (options?.refusalWalk && this.#refusalWalkTried.has(formatRetryFallbackBaseSelector(selector)))
+							continue;
+						const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
+						const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
+						if (!candidate) continue;
+						const canRedeemFallbackCredit =
+							creditHandle !== undefined &&
+							candidate.api === "anthropic-messages" &&
+							candidate.provider === failedMessage.provider &&
+							creditTargets.includes(candidate.id) &&
+							Date.now() < creditHandle.expiresAt;
+						if (
+							!this.#isEligibleRetryFallbackCandidate(candidate, selector, {
+								...candidateFilterContext,
+								canRedeemFallbackCredit,
+							})
+						)
+							continue;
+
+						let governedCandidate: UsageRouteCandidate | undefined;
+						let governedAuth: PreparedModelAuth | undefined;
+						for (const route of governorCandidates.filter(item => item.target.selector === selector.raw)) {
+							try {
+								governedAuth = await this.#resolveGovernedRoute(
+									route,
+									candidate,
+									this.#retryAbortController?.signal,
+								);
+							} catch {
+								this.#retryAbortController?.signal?.throwIfAborted();
+								continue;
+							}
+							if (governedAuth) {
+								governedCandidate = route;
+								break;
+							}
+						}
+						if (!governedCandidate || !governedAuth) continue;
+
+						const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
+							...options,
+							pinFallback: false,
+							apiKey: typeof governedAuth?.resolved === "object" ? governedAuth.resolved.apiKey : undefined,
+							reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
+						});
+						if (applied) {
+							this.#governedRoute = governedCandidate;
+							return true;
+						}
+					}
+				}
+			}
+		}
+
+		this.#governedRoute = undefined;
+
+		for (const role of this.retryFallbackChainKeys(currentSelector)) {
+			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
 				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
-				// A refusal walk visits any one model at most once per turn. Without this a
-				// pair of chains naming each other alternates: each hop is a model the walk
-				// has already been refused on, and the budget no longer stops it.
 				if (options?.refusalWalk && this.#refusalWalkTried.has(formatRetryFallbackBaseSelector(selector))) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
-				if (!this.#isGovernorFallbackAllowed(candidate)) continue;
-				// A candidate that would leave the request exactly as it is — same
-				// routed model, same effective thinking level — is not a switch, and
-				// must never be applied: `findRetryFallbackCandidates` excludes the
-				// current model by selector STRING, while what gets applied is what
-				// `resolveModelOverride` resolves that string to, clamped. When those
-				// disagree, the swap "succeeds" onto the failing request, the caller
-				// sets `switchedModel`, and the retry budget is reset to 1 on every
-				// failure — an unbounded retry loop against a model that cannot work.
-				if (this.#isNoOpRetryFallback(candidate, selector)) continue;
-				if (options?.excludeProvider === candidate.provider) continue;
-				// Redeeming Anthropic fallback credit replays the refused request's frozen
-				// body; the server validates thinking blocks across the boundary itself
-				// using the credit token.
 				const canRedeemFallbackCredit =
 					creditHandle !== undefined &&
 					candidate.api === "anthropic-messages" &&
 					candidate.provider === failedMessage.provider &&
 					creditTargets.includes(candidate.id) &&
 					Date.now() < creditHandle.expiresAt;
-				// Anthropic signatures and redacted blocks are model-bound, while the
-				// latest assistant response must remain byte-identical. While another
-				// attempt on the model that signed them is still allowed, prefer it to a
-				// same-provider model switch, which satisfies neither constraint; a later
-				// cross-provider candidate's message transform can demote the foreign
-				// thinking safely. A refusal, an account-policy denial, a non-retryable
-				// error, a wait past `retry.maxDelayMs` or a spent budget makes no such
-				// attempt, and, when `retry.rateLimitWalksChain` is on, a rate limit on
-				// the signer makes only a futile one, so the chain moves to the
-				// candidate.
-				// A classifier refusal is one of those: the source model declines the same
-				// request again, and Anthropic's documented retry for a refusal resends
-				// the history unchanged on another Claude model, which drops the thinking
-				// blocks it cannot read (preserved thinking, "Switching models
-				// mid-conversation").
-				// While the refusal's fallback credit can still be redeemed, only its
-				// targets pass, so an earlier non-target entry cannot forfeit the credit.
-				// An Anthropic-compatible proxy that will not verify a sibling model's
-				// signature is covered by the transport, not by skipping the hop: the
-				// `Invalid signature in thinking block` 400 escalates to a retry that
-				// replays no thinking and succeeds, and the session stops replaying it
-				// afterwards.
-				const creditLive =
-					creditHandle !== undefined && creditTargets.length > 0 && Date.now() < creditHandle.expiresAt;
-				const refusalKeepsCredit = options?.refusalWalk === true && creditLive;
 				if (
-					(signerRetryRemains || refusalKeepsCredit) &&
-					!canRedeemFallbackCredit &&
-					candidate.api === "anthropic-messages" &&
-					latestAssistant?.api === "anthropic-messages" &&
-					latestAssistant.provider === candidate.provider &&
-					latestAssistant.model !== candidate.id &&
-					latestAssistant.content.some(
-						block =>
-							(block.type === "thinking" && Boolean(block.thinkingSignature?.trim())) ||
-							block.type === "redactedThinking",
-					)
-				) {
+					!this.#isEligibleRetryFallbackCandidate(candidate, selector, {
+						...candidateFilterContext,
+						canRedeemFallbackCredit,
+					})
+				)
 					continue;
+
+				let apiKey: string | undefined;
+				try {
+					apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+				} catch (error) {
+					if (!(error instanceof AIError.MissingApiKeyError)) throw error;
 				}
-				// A candidate whose effort floor exceeds the per-spawn ceiling would be
-				// clamped UP past the cap by its model floor — skip it entirely.
-				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidate, ceiling)) continue;
-				// Skip a candidate whose window cannot hold the retry context. The
-				// failed assistant is excluded only when retry removes it; preserved
-				// unexecuted-tool turns remain part of the request (issue #8065).
-				if (!this.#host.contextFitsModel(candidate, options?.preserveFailedTurn ? undefined : failedMessage)) {
-					continue;
-				}
-				// A session restricted to an OAuth account pool throws for a provider
-				// none of its pooled accounts can serve; that candidate is unavailable,
-				// exactly like one without a credential.
-				if (!governorEnabled) {
-					let apiKey: string | undefined;
-					try {
-						apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
-					} catch (error) {
-						if (!(error instanceof AIError.MissingApiKeyError)) throw error;
-					}
-					if (!apiKey) continue;
-				}
-				let governedCandidate: UsageRouteCandidate | undefined;
-				let governedAuth: PreparedModelAuth | undefined;
-				if (governorEnabled) {
-					for (const route of governorCandidates.filter(item => item.target.selector === selector.raw)) {
-						try {
-							governedAuth = await this.#resolveGovernedRoute(
-								route,
-								candidate,
-								this.#retryAbortController?.signal,
-							);
-						} catch {
-							this.#retryAbortController?.signal.throwIfAborted();
-							continue;
-						}
-						if (governedAuth) {
-							governedCandidate = route;
-							break;
-						}
-					}
-					if (!governedCandidate || !governedAuth) continue;
-				}
+				if (!apiKey) continue;
+
 				const previousEditMode = this.#host.resolveActiveEditMode();
 				const previousSystemPrompt = [...this.#host.agent.state.systemPrompt];
 				const previousTools = [...this.#host.agent.state.tools];
 				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
-					pinFallback: governorEnabled ? false : options?.pinFallback,
-					apiKey: typeof governedAuth?.resolved === "object" ? governedAuth.resolved.apiKey : undefined,
+					pinFallback: options?.pinFallback,
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
 				});
-				if (applied && governedCandidate) this.#governedRoute = governedCandidate;
-				// Redemption replays the refused request's frozen `system` and `tools`. If the
-				// swap rebuilt either, the fallback model would be prompted with, and call tools
-				// through, a surface the agent no longer runs: send a fresh request instead.
 				const { systemPrompt, tools } = this.#host.agent.state;
 				const requestSurfaceUnchanged =
 					this.#host.resolveActiveEditMode() === previousEditMode &&
@@ -2829,7 +2843,6 @@ export class TurnRecovery {
 					tools.length === previousTools.length &&
 					tools.every((tool, index) => tool === previousTools[index]);
 				if (
-					!governorEnabled &&
 					applied &&
 					options?.pinFallback === true &&
 					creditHandle !== undefined &&
@@ -2841,7 +2854,7 @@ export class TurnRecovery {
 						handle: creditHandle,
 					};
 				}
-				return applied;
+				if (applied) return true;
 			}
 		}
 
@@ -3284,18 +3297,19 @@ export class TurnRecovery {
 						credentialId: message.credentialId,
 						modelId: currentModel.id,
 						signal: rotateAbortController.signal,
-						waitForSibling: rotationsRemaining > 0 && !this.#governedRoute,
+						waitForSibling: rotationsRemaining > 0,
 					})
 				).switched;
 				// Rotation is advisory: expired blocks or a repeatedly offered sibling
 				// must not retry beyond one pool traversal in this saga.
 				switchedCredential &&= rotationsRemaining > 0;
-				if (switchedCredential && this.#governedRoute) {
-					switchedCredential = await this.#switchGovernedSibling(
-						currentModel,
-						message.credentialId,
-						rotateAbortController.signal,
-					);
+				if (this.#governedRoute) {
+					const switched = switchedCredential
+						? await this.#switchGovernedSibling(currentModel, message.credentialId, rotateAbortController.signal)
+						: false;
+					if (!switched) {
+						this.#governedRoute = undefined;
+					}
 				}
 			} catch (error) {
 				if (!rotateAbortController.signal.aborted) throw error;
@@ -3329,7 +3343,6 @@ export class TurnRecovery {
 						siblingAvailabilityWaitMs,
 					));
 		const waitForSiblingCredential =
-			!this.#governedRoute &&
 			siblingAvailabilityWaitMs !== undefined &&
 			effectiveUsageLimitWaitMs !== undefined &&
 			effectiveUsageLimitWaitMs <= retrySettings.maxDelayMs;
@@ -3473,11 +3486,7 @@ export class TurnRecovery {
 			// same-route budget: every distinct account must be tried first.
 			if (switchedModel) this.#retryAttempt = 1;
 		}
-		if (
-			(classifierRefusal || accountPolicyDenial || (recordedUsageLimitOutcome && this.#governedRoute)) &&
-			!switchedCredential &&
-			!switchedModel
-		) {
+		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
 			// A prior attempt in this saga already announced `auto_retry_start`
 			// (retryAttempt was incremented for each call to this method, so > 1
 			// means at least one earlier attempt started the loop) but this
