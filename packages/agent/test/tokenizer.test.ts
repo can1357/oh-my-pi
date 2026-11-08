@@ -5,7 +5,7 @@ import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect/demotion";
 import { adoptFactoryReplay } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { convertMessages } from "@oh-my-pi/pi-ai/providers/openai-completions";
-import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -815,6 +815,47 @@ describe("replayed Responses reasoning", () => {
 		);
 	});
 
+	test("prices the thinking a filtered route rebuilds into a synthetic item for a tool-call turn", async () => {
+		// 42 OpenRouter Anthropic routes filter reasoning history out of the
+		// request, and all of them require reasoning content on tool calls while
+		// accepting a synthetic item. Their encoder therefore rebuilds the dropped
+		// reasoning item out of the turn's own thinking text.
+		const openRouter = bundledModel("openrouter", "anthropic/claude-sonnet-4.5");
+		const thinkingText = "Read the guard, patch the branch, then rerun the suite. ".repeat(40).trim();
+		const toolTurn = responsesTurn(
+			openRouter,
+			undefined,
+			[{ type: "thinking", thinking: thinkingText }, toolCall],
+			"toolUse",
+		);
+
+		const tokenizer = new Tokenizer(openRouter);
+		const sent = assistantWireText(await responsesWireInput(openRouter, toolTurn, undefined, { reasoning: "high" }));
+		// The request carries the whole thinking text as the rebuilt item's
+		// `reasoning_text`, never a placeholder, so the meter must charge it.
+		expect(sent).toEqual([thinkingText, "read", '{"path":"a.ts"}']);
+		expect(tokenizer.countMessage(toolTurn)).toBe(tokenizer.countTokens(sent));
+		expect(tokenizer.countMessage(toolTurn, floored)).toBe(tokenizer.countTokens(sent));
+
+		// Without a tool call the same route rebuilds nothing and drops the
+		// thinking text, so the meter charges only the visible block.
+		const answerTurn = responsesTurn(
+			openRouter,
+			undefined,
+			[
+				{ type: "thinking", thinking: thinkingText },
+				{ type: "text", text: "answer" },
+			],
+			"stop",
+		);
+		const answerSent = assistantWireText(
+			await responsesWireInput(openRouter, answerTurn, undefined, { reasoning: "high" }),
+		);
+		expect(answerSent).toEqual(["answer"]);
+		expect(tokenizer.countMessage(answerTurn)).toBe(tokenizer.countTokens(answerSent));
+		expect(tokenizer.countMessage(answerTurn, floored)).toBe(tokenizer.countTokens(answerSent));
+	});
+
 	test("charges nothing, signature included, for a turn whose replay sends no reasoning", () => {
 		const tokenizer = new Tokenizer(sol);
 		const dropped: Array<[string, AssistantMessage]> = [
@@ -915,7 +956,10 @@ describe("replayed Responses reasoning", () => {
 	});
 });
 
-function bundledModel<TApi extends Api = Api>(provider: "openai" | "openai-codex", id: string): Model<TApi> {
+function bundledModel<TApi extends Api = Api>(
+	provider: "openai" | "openai-codex" | "openrouter",
+	id: string,
+): Model<TApi> {
 	const model = getBundledModel<TApi>(provider, id);
 	if (!model) throw new Error(`Expected bundled ${provider}/${id}`);
 	return model;
@@ -923,9 +967,10 @@ function bundledModel<TApi extends Api = Api>(provider: "openai" | "openai-codex
 
 /** The input items the real Responses request carries for `turn` under the session's replay state. */
 async function responsesWireInput(
-	model: Model<"openai-responses">,
+	model: Model<Api>,
 	turn: AssistantMessage,
 	providerSessionState?: Map<string, ProviderSessionState>,
+	options?: { reasoning?: OpenAIResponsesOptions["reasoning"] },
 ): Promise<unknown[]> {
 	const { promise, resolve } = Promise.withResolvers<unknown>();
 	const controller = new AbortController();
@@ -936,9 +981,15 @@ async function responsesWireInput(
 		{ role: "user" as const, content: "Next.", timestamp: 0 },
 	];
 	streamOpenAIResponses(
-		model,
+		model as Model<"openai-responses">,
 		{ messages },
-		{ apiKey: "test-key", signal: controller.signal, providerSessionState, onPayload: resolve },
+		{
+			apiKey: "test-key",
+			signal: controller.signal,
+			providerSessionState,
+			onPayload: resolve,
+			reasoning: options?.reasoning,
+		},
 	);
 	const payload = await promise;
 	if (!isRecord(payload) || !Array.isArray(payload.input)) throw new Error("expected a Responses payload");
@@ -955,11 +1006,35 @@ async function responsesWireReasoning(
 	return input.filter(item => isRecord(item) && item.type === "reasoning").length;
 }
 
-/** The assistant text the request carries for a turn, in the tokenizer's pricing order. */
+/**
+ * The assistant-side text the request carries for a turn — rebuilt reasoning
+ * text, visible text, and tool-call names and arguments — in the tokenizer's
+ * pricing order.
+ */
 function assistantWireText(input: readonly unknown[]): string[] {
 	const fragments: string[] = [];
 	for (const item of input) {
-		if (!isRecord(item) || item.type !== "message" || item.role !== "assistant" || !Array.isArray(item.content)) {
+		if (!isRecord(item)) continue;
+		// A reasoning item's plaintext `reasoning_text` is assistant-side input: the
+		// encoder rebuilds a filtered turn's dropped item from its thinking text.
+		if (item.type === "reasoning" && Array.isArray(item.content)) {
+			for (const part of item.content) {
+				if (
+					isRecord(part) &&
+					part.type === "reasoning_text" &&
+					typeof part.text === "string" &&
+					part.text.length > 0
+				) {
+					fragments.push(part.text);
+				}
+			}
+			continue;
+		}
+		if (item.type === "function_call" && typeof item.name === "string" && typeof item.arguments === "string") {
+			fragments.push(item.name, item.arguments);
+			continue;
+		}
+		if (item.type !== "message" || item.role !== "assistant" || !Array.isArray(item.content)) {
 			continue;
 		}
 		for (const part of item.content) {

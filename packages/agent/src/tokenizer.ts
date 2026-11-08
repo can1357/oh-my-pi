@@ -73,6 +73,43 @@ function filtersReasoningHistory(model: TokenizerModel | null | undefined): bool
 	return compat !== undefined && "filterReasoningHistory" in compat && compat.filterReasoningHistory === true;
 }
 
+/** Which of a filtered reader's turns its encoder rebuilds thinking items for; `null` for none. */
+type RebuiltThinkingTurns = "all-turns" | "tool-calls";
+
+/**
+ * Whether the reader's Responses encoder rebuilds a filtered turn's own thinking
+ * into a synthetic reasoning item. `filterReasoningHistory` drops the native
+ * item, but the `requiresReasoningContent*` safety net puts the turn's thinking
+ * text back on the wire as the rebuilt item's `reasoning_text` — unless the
+ * target rejects synthetic items (`allowsSyntheticReasoningContentForToolCalls`),
+ * in which case reconstruction is off and the text is dropped with the item.
+ * Mirrors `buildParams`' `canReconstructReasoningReplay` and
+ * `convertResponsesAssistantMessage`' `carriedReasoningTexts`.
+ */
+function rebuiltThinkingTurns(model: TokenizerModel | null | undefined): RebuiltThinkingTurns | null {
+	const compat = model?.compat;
+	// `buildParams` gates both reconstructions on a requested reasoning effort,
+	// which a per-message count cannot see; a model that cannot reason never
+	// reconstructs, and one that can counts the text it may send.
+	if (model?.reasoning !== true || !filtersReasoningHistory(model) || compat === undefined) return null;
+	if (
+		!("allowsSyntheticReasoningContentForToolCalls" in compat) ||
+		compat.allowsSyntheticReasoningContentForToolCalls !== true
+	) {
+		return null;
+	}
+	if (
+		"requiresReasoningContentForAllAssistantTurns" in compat &&
+		compat.requiresReasoningContentForAllAssistantTurns === true
+	) {
+		return "all-turns";
+	}
+	if ("requiresReasoningContentForToolCalls" in compat && compat.requiresReasoningContentForToolCalls === true) {
+		return "tool-calls";
+	}
+	return null;
+}
+
 /** The model an assistant turn's native reasoning (signed thinking, Responses history) is replayed to. */
 function reasoningReplayReader(model: TokenizerModel | null | undefined): ModelIdentity | undefined {
 	// Filtering targets strip native reasoning items before the request is encoded.
@@ -236,6 +273,8 @@ export class Tokenizer {
 	readonly #model: ModelIdentity | undefined;
 	/** Whether the reader strips native reasoning items out of its Responses requests. */
 	readonly #filtersReasoningHistory: boolean;
+	/** Which turns the reader's encoder rebuilds a stripped reasoning item for, carrying the thinking text. */
+	readonly #rebuiltThinkingTurns: RebuiltThinkingTurns | null;
 	readonly #dropsOllamaThinking: boolean;
 	readonly #dropsCompletionsThinking: boolean;
 	/** Claude's own API and prefix-bound hosts keep another model's signature from their deployment. */
@@ -279,6 +318,7 @@ export class Tokenizer {
 		this.#reasoningReader = reasoningReplayReader(model);
 		this.#model = modelIdentity(model);
 		this.#filtersReasoningHistory = filtersReasoningHistory(model);
+		this.#rebuiltThinkingTurns = rebuiltThinkingTurns(model);
 		this.#dropsOllamaThinking = ollamaChatDropsOwnThinking(model);
 		this.#dropsCompletionsThinking = completionsDropsOwnThinking(model);
 		const compat = model?.compat;
@@ -494,18 +534,34 @@ export class Tokenizer {
 					content.some(block => block.type === "toolCall");
 				const untrustedIndex = invalidStop ? content.length - 1 : -1;
 				// A filtering Responses reader replays no reasoning item and its encoder
-				// drops the turn's own thinking blocks, so neither their text nor their
-				// signature reaches the wire. Another model's thinking has no native slot
-				// there either; the transform demotes it to visible text, which is sent.
+				// drops the turn's own thinking blocks, so usually neither their text nor
+				// their signature reaches the wire (the reconstruction below is the one
+				// exception). Another model's thinking has no native slot there either;
+				// the transform demotes it to visible text, which is sent.
 				const ownThinkingFiltered =
 					this.#filtersReasoningHistory && this.#model !== undefined && isSameModelTurn(message, this.#model);
+				// A filtering reader drops the turn's own reasoning item, but its
+				// encoder rebuilds one — carrying this turn's thinking text — for
+				// targets that require reasoning content and accept a synthetic item.
+				// The item is only attached to a turn that emits another item.
+				const ownThinkingRebuilt =
+					ownThinkingFiltered &&
+					this.#rebuiltThinkingTurns !== null &&
+					message.stopReason !== "error" &&
+					(this.#rebuiltThinkingTurns === "all-turns" || content.some(block => block.type === "toolCall")) &&
+					content.some(block => block.type === "text" || block.type === "toolCall");
 				let signedReasoning = false;
 				for (let index = 0; index < content.length; index++) {
 					const block = content[index];
 					if (block.type === "text") {
 						fragments.push(block.text);
 					} else if (block.type === "thinking") {
-						if (ownThinkingFiltered) continue;
+						if (ownThinkingFiltered) {
+							// The rebuilt item carries the thinking text verbatim; the
+							// signature stays off the wire either way.
+							if (ownThinkingRebuilt) fragments.push(block.thinking);
+							continue;
+						}
 						// `transformMessages` drops another model's empty thinking and demotes the
 						// rest to visible text; only the reader's own thinking stays native.
 						if (ollamaReader && !ownOllamaTurn) {
@@ -649,6 +705,7 @@ export class Tokenizer {
 			snapcompact.frameBillingKey(snapcompact.frameBilling(model ?? undefined)) === this.frameBillingKey &&
 			reasoningReplayKey(model) === this.reasoningReplayKey &&
 			filtersReasoningHistory(model) === this.#filtersReasoningHistory &&
+			rebuiltThinkingTurns(model) === this.#rebuiltThinkingTurns &&
 			resolveThinkingReplayTokens(model ?? {}) === this.thinkingReplayTokens &&
 			ollamaChatDropsOwnThinking(model) === this.#dropsOllamaThinking &&
 			completionsDropsOwnThinking(model) === this.#dropsCompletionsThinking &&
