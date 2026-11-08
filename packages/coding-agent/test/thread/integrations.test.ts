@@ -52,22 +52,56 @@ async function untilLogged(logPath: string, frame: string, timeoutMs = 5_000): P
 	}
 }
 
+/** Run every cleanup step. A failure in one must not skip the rest; the first error is rethrown. */
+async function finishSteps(steps: Array<() => Promise<void> | void>): Promise<void> {
+	const errors: unknown[] = [];
+	for (const step of steps) {
+		try {
+			await step();
+		} catch (error) {
+			errors.push(error);
+		}
+	}
+	if (errors.length > 0) throw errors[0];
+}
+
+interface IntegrationHandles {
+	dir?: string;
+	authStorage?: AuthStorage;
+	manager?: MCPManager;
+	fixture?: ServiceWorker<IntegrationsProbe>;
+}
+
 describe("integrations thread service", () => {
-	let dir: string;
-	let authStorage: AuthStorage;
-	let registry: ModelRegistry;
-	let manager: MCPManager;
-	let frameLog: string;
+	let dir: string | undefined;
+	let authStorage: AuthStorage | undefined;
+	let registry: ModelRegistry | undefined;
+	let manager: MCPManager | undefined;
+	let frameLog: string | undefined;
 	let fixture: ServiceWorker<IntegrationsProbe> | undefined;
-	let probe: IntegrationsProbe;
+	let probe: IntegrationsProbe | undefined;
+	// Cleared before each setup. afterEach cleans only what this attempt recorded,
+	// so a throw cannot re-stop the previous test's fixture or skip the new resources.
+	let handles: IntegrationHandles = {};
 
 	beforeEach(async () => {
+		handles = {};
+		fixture = undefined;
+		probe = undefined;
+		manager = undefined;
+		authStorage = undefined;
+		dir = undefined;
+		frameLog = undefined;
+		registry = undefined;
 		dir = path.join(os.tmpdir(), `omp-integrations-thread-${Snowflake.next()}`);
+		handles.dir = dir;
 		fs.mkdirSync(dir, { recursive: true });
 		frameLog = path.join(dir, "frames.log");
 		authStorage = createInMemoryAuthStorage();
+		handles.authStorage = authStorage;
 		registry = new ModelRegistry(authStorage, path.join(dir, "models.yml"));
 		manager = new MCPManager(dir, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+		handles.manager = manager;
 		const configs: Record<string, MCPStdioServerConfig> = {
 			progress: { type: "stdio", command: process.execPath, args: [path.join(FIXTURES, "progress-mcp.ts")] },
 			cancel: {
@@ -83,26 +117,55 @@ describe("integrations thread service", () => {
 			new URL("../fixtures/integrations-worker.ts", import.meta.url),
 			[settingsThreadService, authService, integrationsThreadService, runtimeThreadService],
 		);
+		handles.fixture = fixture;
 		probe = fixture.probe;
 	});
 
 	afterEach(async () => {
-		// A failed boot leaves fixture unset. Still disconnect what was started
-		// and close auth storage so a partial setup does not leak into the next test.
-		if (fixture) await fixture.stop();
-		MCPManager.resetForTests();
-		if (manager) await manager.disconnectAll();
-		authStorage?.close();
-		if (dir) removeSyncWithRetries(dir);
+		const current = handles;
+		handles = {};
+		fixture = undefined;
+		await finishSteps([
+			async () => {
+				if (current.fixture) await current.fixture.stop();
+			},
+			() => {
+				MCPManager.resetForTests();
+			},
+			async () => {
+				if (current.manager) await current.manager.disconnectAll();
+			},
+			() => {
+				current.authStorage?.close();
+			},
+			() => {
+				if (current.dir) removeSyncWithRetries(current.dir);
+			},
+		]);
 	});
 
+	function requireLive(): {
+		dir: string;
+		registry: ModelRegistry;
+		manager: MCPManager;
+		frameLog: string;
+		probe: IntegrationsProbe;
+	} {
+		if (!dir || !registry || !manager || !frameLog || !probe) {
+			throw new Error("integrations fixture was not started");
+		}
+		return { dir, registry, manager, frameLog, probe };
+	}
+
 	function toolNamed(suffix: string): string {
+		if (!manager) throw new Error("integrations fixture was not started");
 		const name = manager.getTools().find(tool => tool.name.endsWith(suffix))?.name;
 		if (!name) throw new Error(`no MCP tool ending in ${suffix}`);
 		return name;
 	}
 
 	it("routes the worker's MCPManager globals and tool calls to main's manager", async () => {
+		const { probe, manager, registry } = requireLive();
 		const global = await probe.mcpGlobal();
 		expect(global.available).toBe(true);
 		expect(global.remote).toBe(true);
@@ -125,6 +188,7 @@ describe("integrations thread service", () => {
 	}, 20_000);
 
 	it("aborts a worker's MCP call on main's connection", async () => {
+		const { probe, registry, frameLog } = requireLive();
 		const controller = new AbortController();
 		const call = probe.mcpCall(registry, toolNamed("hang"), { text: "x" }, controller.signal);
 		await untilLogged(frameLog, '"tools/call"');
@@ -135,12 +199,14 @@ describe("integrations thread service", () => {
 	}, 20_000);
 
 	it("delivers main's tool-change notifications to worker subscribers", async () => {
+		const { probe, manager } = requireLive();
 		const { changed } = await probe.watchTools();
 		await manager.disconnectServer("cancel");
 		await changed;
 	}, 20_000);
 
 	it("runs a main-defined custom tool with a worker context, streaming updates and abort", async () => {
+		const { probe, registry } = requireLive();
 		const seen: SeenContext[] = [];
 		const tool: CustomTool = {
 			name: "kernel_tool",
@@ -193,6 +259,7 @@ describe("integrations thread service", () => {
 	}, 20_000);
 
 	it("makes bridged executor options and local-protocol getters synchronous in the worker", async () => {
+		const { dir, probe } = requireLive();
 		let artifacts = path.join(dir, "artifacts-a");
 		const local: LocalProtocolOptions = { getArtifactsDir: () => artifacts, getSessionId: () => "parent" };
 		const roots = { explicit: ["/ext"], mode: "merge" as const, configured: [], configuredLevel: "user" as const };
@@ -230,6 +297,7 @@ describe("integrations thread service", () => {
 	}, 20_000);
 
 	it("re-binds a parent-prepared extension against the worker's own ExtensionAPI", async () => {
+		const { dir, probe } = requireLive();
 		const prepared = await importExtensionModule(path.join(FIXTURES, "integrations-extension.ts"), dir);
 		expect(prepared.error).toBeNull();
 		const local = await bindPreparedExtensions([prepared], dir);
@@ -280,16 +348,42 @@ async function expectPersistentSettingsEcho(
 		const echoed = await fixture.probe.mcpCall(registry, toolName, { text: "from worker" });
 		expect(echoed.text).toBe("from worker");
 	} finally {
-		releaseSettings?.();
-		if (fixture) await fixture.stop();
-		MCPManager.resetForTests();
-		await manager.disconnectAll();
-		authStorage.close();
-		resetCapabilityForTests();
-		resetSettingsForTest();
-		AgentStorage.close();
-		restoreEnvValue("PI_CONFIG_FILES", originalPiConfigFiles);
-		removeSyncWithRetries(dir);
+		const currentFixture = fixture;
+		const currentManager = manager;
+		const currentAuth = authStorage;
+		fixture = undefined;
+		await finishSteps([
+			() => {
+				releaseSettings?.();
+			},
+			async () => {
+				if (currentFixture) await currentFixture.stop();
+			},
+			() => {
+				MCPManager.resetForTests();
+			},
+			async () => {
+				await currentManager.disconnectAll();
+			},
+			() => {
+				currentAuth.close();
+			},
+			() => {
+				resetCapabilityForTests();
+			},
+			() => {
+				resetSettingsForTest();
+			},
+			() => {
+				AgentStorage.close();
+			},
+			() => {
+				restoreEnvValue("PI_CONFIG_FILES", originalPiConfigFiles);
+			},
+			() => {
+				removeSyncWithRetries(dir);
+			},
+		]);
 	}
 }
 

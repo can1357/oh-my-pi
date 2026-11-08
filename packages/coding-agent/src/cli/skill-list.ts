@@ -36,30 +36,11 @@ export async function runSkillsCommand(
 	} = {},
 ): Promise<SkillsCommandResult> {
 	const cwd = options.cwd ?? process.cwd();
-	let skillsSettings: Partial<SkillsSettings>;
-	let disabledExtensions: string[];
-	let extensionRoots: EffectiveExtensionRoots;
-	// Only the no-override path binds capability settings. Release exactly that
-	// hold, including when discovery throws, so an enclosing scope stays bound.
-	let release: (() => void) | undefined;
-	if (options.skillsSettings) {
-		// Test seam: fully isolated from ambient configuration.
-		skillsSettings = options.skillsSettings;
-		disabledExtensions = [];
-		extensionRoots = { explicit: [], mode: "merge", configured: [], configuredLevel: "user" };
-	} else {
-		const settings = await Settings.init({ cwd });
-		release = initializeWithSettings(settings);
-		skillsSettings = cfgSkills.get(settings);
-		disabledExtensions = [...cfgDisabledExtensions.get(settings)];
-		extensionRoots = {
-			explicit: [],
-			mode: "merge",
-			configured: cfgExtensions.get(settings),
-			configuredLevel: settings.extensionsSourceLevel(),
-		};
-	}
-	try {
+	const list = async (
+		skillsSettings: Partial<SkillsSettings>,
+		disabledExtensions: string[],
+		extensionRoots: EffectiveExtensionRoots,
+	): Promise<SkillsCommandResult> => {
 		if (skillsSettings.customDirectories?.length) {
 			// Relative entries are config-relative to the inspected directory, not
 			// to wherever the command happens to run. A `~` entry names the home
@@ -91,8 +72,27 @@ export async function runSkillsCommand(
 			})),
 			warnings,
 		};
+	};
+	if (options.skillsSettings) {
+		// Test seam: fully isolated from ambient configuration. No capability hold.
+		return list(options.skillsSettings, [], {
+			explicit: [],
+			mode: "merge",
+			configured: [],
+			configuredLevel: "user",
+		});
+	}
+	const settings = await Settings.init({ cwd });
+	const release = initializeWithSettings(settings);
+	try {
+		return await list(cfgSkills.get(settings), [...cfgDisabledExtensions.get(settings)], {
+			explicit: [],
+			mode: "merge",
+			configured: cfgExtensions.get(settings),
+			configuredLevel: settings.extensionsSourceLevel(),
+		});
 	} finally {
-		release?.();
+		release();
 	}
 }
 
