@@ -7,6 +7,7 @@ import { FileLock, IpcConnection, IpcServer, Process, type PtyRunResult, PtySess
 import { isEnoent, isRecord, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
+import { replaceFileWithRetry } from "../utils/atomic-file";
 import {
 	truncateHead,
 	truncateHeadBytes,
@@ -190,11 +191,11 @@ function syncReadyPending(record: ManagedDaemon): void {
 	record.snapshot.readyPending = pending.length > 0 ? pending : undefined;
 }
 
-/** Replace `filePath` via a pid-scoped temp file so readers never see a partial write. */
+/** Replace via a pid-scoped temp file; Windows may briefly deny replacement while a reader holds the target. */
 async function writeFileAtomic(filePath: string, content: string): Promise<void> {
 	const tempPath = `${filePath}.${process.pid}.tmp`;
 	await Bun.write(tempPath, content);
-	await fs.rename(tempPath, filePath);
+	await replaceFileWithRetry(tempPath, filePath);
 }
 
 async function fileTextSlice(filePath: string, head: boolean): Promise<string> {
