@@ -29,6 +29,7 @@
 
 ### Fixed
 
+- Reading Reddit URLs now works when Reddit blocks its API: posts, comment threads, subreddits, and user pages fall back to a Redlib mirror and then the Arctic Shift archive, and render full nested comment trees.
 - Limited xAI `web_search` to two hosted-search turns per request to help prevent unexpected X search costs.
 - Fixed extension event delivery so each extension receives events in emission order, even when another extension is slow to process an earlier event.
 - `pi.sendUserMessage()` now rejects when a message is dropped before a turn begins, including the cost-cap reason when available.
