@@ -547,7 +547,7 @@ export class TurnRecovery {
 				if (!revisionChanged) {
 					try {
 						bound = await this.#resolveGovernedRoute(candidate, model, signal);
-					} catch (error) {
+					} catch {
 						signal?.throwIfAborted();
 						bound = undefined;
 					}
@@ -583,13 +583,13 @@ export class TurnRecovery {
 						};
 						try {
 							bound = await this.#resolveGovernedRoute(candidate, model, signal);
-						} catch (error) {
+						} catch {
 							signal?.throwIfAborted();
 							bound = undefined;
 						}
 					}
 				}
-			} catch (error) {
+			} catch {
 				signal?.throwIfAborted();
 				this.#governedRoute = undefined;
 				bound = undefined;

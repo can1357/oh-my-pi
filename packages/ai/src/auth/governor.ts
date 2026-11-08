@@ -45,6 +45,7 @@ import {
 	type UsageRouteBinding,
 	type UsageRouteTarget,
 	type UsageRoutingScope,
+	type UsageWindowState,
 } from "../usage-governor/types";
 import { fingerprintBearer } from "./bearer-fingerprint";
 import type { CredentialBlocks } from "./blocks";
