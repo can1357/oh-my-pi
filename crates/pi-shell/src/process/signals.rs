@@ -333,7 +333,7 @@ mod windows {
 	use windows_sys::{
 		Win32::System::Console::{
 			CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
-			GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
+			SetConsoleCtrlHandler,
 		},
 		core::BOOL,
 	};
@@ -363,22 +363,22 @@ mod windows {
 		}
 	}
 
-	/// The console control handler (it runs on a thread of its own): no
-	/// allocation, no locks, no shell calls.
+	/// The console control handler. Windows runs it on a thread of its own,
+	/// not interrupting the shell's (no async-signal constraints): no shell
+	/// calls; the one lock it takes is the spawner's short group registry.
 	pub(super) unsafe extern "system" fn on_event(event: u32) -> BOOL {
 		let Some(sig) = signal_of(event) else {
 			return 0;
 		};
 		let b = bit(sig);
 		if event == CTRL_C_EVENT {
-			// The job `fg` brought to the foreground leads a console group
-			// of its own, out of the console's Ctrl-C: it gets it as
-			// `CTRL_BREAK`, as a Unix terminal sends `SIGINT` to its
-			// foreground group, and the shell, not in that group, does not.
+			// The job `fg` brought to the foreground leads console groups of
+			// its own (one per stage), out of the console's Ctrl-C: they get
+			// it as `CTRL_BREAK`, as a Unix terminal sends `SIGINT` to its
+			// foreground group, and the shell, not in them, does not. A job
+			// whose stages all ended leaves the event to the shell.
 			let fg = crate::sys::console::ctrl_c_forward();
-			if fg != 0 {
-				// SAFETY: plain call with scalar arguments.
-				unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, fg) };
+			if fg != 0 && crate::sys::break_console_groups(fg) {
 				return 1;
 			}
 		}

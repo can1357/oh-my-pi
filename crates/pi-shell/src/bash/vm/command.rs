@@ -2073,10 +2073,12 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 			},
 			Some(Search::NotFound) => {
 				sc.io().search = None;
-				// The host's stand-in for a missing tool; `exec` keeps its
-				// not-found handling (a process image cannot be a native).
+				// The host's stand-in for a missing tool, unless a not-found
+				// hook handles it; `exec` keeps its not-found handling (a
+				// process image cannot be a native).
 				let exec = sc.exec.as_ref().expect("exec");
 				let target = if exec.exec_as.is_none()
+					&& !has_not_found_hook(cx, vp)
 					&& let Some(native) = cx.host.fallback(BStr::new(&name))
 				{
 					Target::Native(native)
@@ -2417,13 +2419,13 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				env: &env,
 				cwd: BStr::new(&vp.cwd),
 				stdio: [
-					stdio_spec(&vp.fds.handle(0)),
-					stdio_spec(&vp.fds.handle(1)),
-					stdio_spec(&vp.fds.handle(2)),
+					stdio_spec(&vp.fds.handle(0), false),
+					stdio_spec(&vp.fds.handle(1), true),
+					stdio_spec(&vp.fds.handle(2), true),
 				],
 				extra_fds: extra_fds(vp)
 					.iter()
-					.map(|(fd, h)| (*fd, stdio_spec(h)))
+					.map(|(fd, h)| (*fd, stdio_spec(h, false)))
 					.collect(),
 				pgroup,
 				tag,
@@ -4817,22 +4819,43 @@ fn exec_failed(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 	}
 }
 
+/// The not-found hook function of `vp`'s dialect: bash's
+/// `command_not_found_handle`, zsh's `command_not_found_handler`.
+fn not_found_hook_name(vp: &Vproc) -> &'static [u8] {
+	if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		b"command_not_found_handler"
+	} else {
+		b"command_not_found_handle"
+	}
+}
+
+/// Whether `hook` is the function running (it does not handle itself).
+fn in_not_found_hook(vp: &Vproc, hook: &[u8]) -> bool {
+	vp.frames
+		.iter()
+		.any(|f| matches!(&f.kind, FrameKind::Function { name, .. } if name.as_slice() == hook))
+}
+
+/// Whether a not-found hook would handle a missing command (it is defined
+/// and not the one running): it wins over [`crate::bash::Host::fallback`],
+/// as on a system whose tools are missing.
+fn has_not_found_hook(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+	let hook = not_found_hook_name(vp);
+	!in_not_found_hook(vp, hook)
+		&& matches!(
+			state::record(cx.store, vp, Key::Func(BStr::new(hook))),
+			Ok(Some(Record::Func { .. }))
+		)
+}
+
 /// bash's `command_not_found_handle` (zsh's `command_not_found_handler`,
 /// zsh `commandnotfound` in the forked child): when that function exists
 /// (and is not the one running), it runs in a subshell with the command's
 /// words as its arguments, and its status is the command's. `None`: no
 /// handler, else the flow that waits for it.
 fn not_found_hook(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<Flow> {
-	let hook: &[u8] = if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
-		b"command_not_found_handler"
-	} else {
-		b"command_not_found_handle"
-	};
-	if vp
-		.frames
-		.iter()
-		.any(|f| matches!(&f.kind, FrameKind::Function { name, .. } if name.as_slice() == hook))
-	{
+	let hook = not_found_hook_name(vp);
+	if in_not_found_hook(vp, hook) {
 		return None;
 	}
 	match state::record(cx.store, vp, Key::Func(BStr::new(hook))) {
@@ -5058,15 +5081,20 @@ fn spawn_error(name: BString, err: std::io::Error) -> (Diag, i32) {
 	}
 }
 
-/// How an external gets fd object `h`: a slot the script closed stays
-/// closed (bash's child inherits it so); an object a restore lost reads as
-/// the null device.
-fn stdio_spec(h: &FdRef) -> StdioSpec {
+/// How an external gets fd object `h`, as its input or its `output`: a
+/// slot the script closed stays closed (bash's child inherits it so); an
+/// object a restore lost reads as the null device.
+fn stdio_spec(h: &FdRef, output: bool) -> StdioSpec {
+	let os = if output {
+		h.os_output_handle()
+	} else {
+		h.os_handle()
+	};
 	if h.origin() == FdOrigin::Closed {
 		StdioSpec::Closed
 	} else if !h.is_open() {
 		StdioSpec::Null
-	} else if let Some(os) = h.os_handle() {
+	} else if let Some(os) = os {
 		StdioSpec::Inherit(os)
 	} else {
 		StdioSpec::Pipe(h.clone())

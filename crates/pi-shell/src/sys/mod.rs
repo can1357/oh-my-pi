@@ -53,6 +53,8 @@ pub mod uname;
 pub mod user;
 pub mod utmp;
 
+#[cfg(windows)]
+pub(crate) use crate::sys::spawn::break_console_groups;
 pub use crate::sys::{
 	fs::{StdFile, StdFs, std_stream},
 	park::Parker,

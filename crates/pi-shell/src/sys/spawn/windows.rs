@@ -906,7 +906,7 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	match job.con {
 		JobConsole::Shared if own_group => {
 			job.roots.lock().push(pid);
-			GROUP_LEADERS.lock().push(pid);
+			GROUP_LEADERS.lock().push((job.leader(), pid));
 		},
 		JobConsole::Shared => job.shared_group.store(true, Ordering::Release),
 		_ => job.roots.lock().push(pid),
@@ -1024,16 +1024,29 @@ fn create(
 	Ok((process, pi.dwProcessId))
 }
 
-/// Pids of the shared-console stages that lead a console process group of
-/// their own, while their `ExtProc` lives (so a pid here is never reused).
-static GROUP_LEADERS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// The shared-console stages that lead a console process group of their
+/// own, as (job leader, stage pid), while their `ExtProc` lives (so a pid
+/// here is never reused).
+static GROUP_LEADERS: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
 
-/// Whether `pid` is a shared-console stage leading a console process group
-/// of its own: a `CTRL_BREAK_EVENT` to it reaches its group and nothing
-/// else (a job `fg` brought to the foreground, which the keyboard's Ctrl-C
-/// does not reach).
-pub(crate) fn leads_console_group(pid: u32) -> bool {
-	GROUP_LEADERS.lock().contains(&pid)
+/// Whether the job led by `pgid` has stages leading console process groups
+/// of their own: a job `fg` brought to the foreground, which the keyboard's
+/// Ctrl-C does not reach ([`break_console_groups`] forwards it).
+pub(crate) fn has_console_groups(pgid: u32) -> bool {
+	GROUP_LEADERS.lock().iter().any(|&(job, _)| job == pgid)
+}
+
+/// Send `CTRL_BREAK_EVENT` to every console group the stages of the job
+/// led by `pgid` lead (each pipeline stage leads its own); false when none
+/// is left. An event to a group reaches it and nothing else.
+pub(crate) fn break_console_groups(pgid: u32) -> bool {
+	let leaders = GROUP_LEADERS.lock();
+	let mut sent = false;
+	for &(_, pid) in leaders.iter().filter(|&&(job, _)| job == pgid) {
+		// SAFETY: plain call with scalar arguments.
+		sent |= unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } != 0;
+	}
+	sent
 }
 
 /// Wait for the exit; meanwhile fire a due KILL. After the exit, a pending
@@ -1127,8 +1140,8 @@ impl ExtProc for WinProc {
 
 	/// The job's first process: what later stages join
 	/// ([`PgroupSpec::Join`], [`PgroupSpec::Job`]) and what job control
-	/// hands the terminal to ([`leads_console_group`] when the job leads a
-	/// console group of its own).
+	/// hands the terminal to ([`has_console_groups`] when its stages lead
+	/// console groups of their own).
 	fn pgid(&self) -> Option<u32> {
 		Some(self.inner.job.leader())
 	}
@@ -1165,7 +1178,7 @@ impl ExtProc for WinProc {
 
 impl Drop for WinProc {
 	fn drop(&mut self) {
-		GROUP_LEADERS.lock().retain(|&p| p != self.pid);
+		GROUP_LEADERS.lock().retain(|&(_, p)| p != self.pid);
 		// The pumps (and the feeds) stop when the fields drop, after this.
 		let mut life = self.tracker.lock();
 		if self.detached {

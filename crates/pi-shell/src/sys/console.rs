@@ -367,6 +367,10 @@ impl File for ConsoleFile {
 		Some(OsHandle(self.console.conin.0 as u64))
 	}
 
+	fn os_output_handle(&self) -> Option<OsHandle> {
+		Some(OsHandle(self.console.conout.0 as u64))
+	}
+
 	fn dup(&self) -> io::Result<Box<dyn File>> {
 		Ok(Box::new(Self { console: Arc::clone(&self.console), pending: Vec::new(), high: None }))
 	}
@@ -400,13 +404,14 @@ impl WindowsConsole {
 	}
 }
 
-/// Where the keyboard's Ctrl-C is forwarded as `CTRL_BREAK_EVENT` (0:
-/// nowhere): a job `fg` brought to the foreground that leads a console
-/// process group of its own, which the console's own Ctrl-C does not reach
-/// (the console has no `tcsetpgrp`).
+/// The job the keyboard's Ctrl-C is forwarded to as `CTRL_BREAK_EVENT`, by
+/// its leader's pid (0: nowhere): a job `fg` brought to the foreground
+/// whose stages lead console process groups of their own, which the
+/// console's own Ctrl-C does not reach (the console has no `tcsetpgrp`).
 static FORWARD_CTRL_C: AtomicU32 = AtomicU32::new(0);
 
-/// The group a Ctrl-C the shell's handler sees goes on to (0: none).
+/// The job a Ctrl-C the shell's handler sees goes on to (0: none), for
+/// [`crate::sys::spawn::break_console_groups`].
 pub fn ctrl_c_forward() -> u32 {
 	FORWARD_CTRL_C.load(Ordering::Acquire)
 }
@@ -621,7 +626,7 @@ impl Terminal for WindowsConsole {
 		self.foreground = Some(pgid);
 		let forward = u32::try_from(pgid)
 			.ok()
-			.filter(|&p| p != std::process::id() && crate::sys::spawn::leads_console_group(p))
+			.filter(|&p| p != std::process::id() && crate::sys::spawn::has_console_groups(p))
 			.unwrap_or(0);
 		FORWARD_CTRL_C.store(forward, Ordering::Release);
 		Ok(())

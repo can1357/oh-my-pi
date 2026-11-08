@@ -259,6 +259,10 @@ impl File for StreamFile {
 		self.with(None, |f| f.os_handle())
 	}
 
+	fn os_output_handle(&self) -> Option<OsHandle> {
+		self.with(None, |f| f.os_output_handle())
+	}
+
 	fn dup(&self) -> io::Result<Box<dyn File>> {
 		// Share the generation, not a duplicate OS handle: clear closes the
 		// run's pipe even while a background job retains this file.

@@ -440,8 +440,10 @@ fn fd_paths_are_matched_whole() {
 
 /// A process substitution's pipe, opened by path, survives the probing
 /// open many programs make first (`cmd`'s `type` and redirections open
-/// the path once to look at it): the data reaches the real open, which a
-/// single-instance pipe would refuse (`All pipe instances are busy`).
+/// the path once to look at it), which a single-instance pipe answered
+/// with `All pipe instances are busy`. Its reader finds the pipe open and
+/// gets the data after a slow producer, and a writer that exits before the
+/// pump looks again loses nothing.
 #[test]
 fn a_path_opened_pipe_survives_a_probing_open() {
 	use crate::sys::pump::os::named_pipe;
@@ -455,9 +457,15 @@ fn a_path_opened_pipe_survives_a_probing_open() {
 			.spawn()
 			.unwrap()
 	};
-	// The child reads.
+	// The child reads; the producer has nothing for 300 ms, while the pump
+	// keeps the pipe listening.
 	let (mut ours, name) = named_pipe(true).unwrap();
 	let child = run(format!("type {name}"));
+	let slow = Instant::now() + Duration::from_millis(300);
+	while Instant::now() < slow {
+		ours.poll_listening(&cx);
+		thread::sleep(Duration::from_millis(10));
+	}
 	let mut sent = false;
 	while !sent {
 		assert!(Instant::now() < deadline, "no reader took the pipe");
@@ -477,13 +485,18 @@ fn a_path_opened_pipe_survives_a_probing_open() {
 		"{}",
 		String::from_utf8_lossy(&out.stderr)
 	);
-	// The child writes.
+	// The child writes and exits between two polls of the pump (which polls
+	// from the spawn on): its bytes are read, not taken for a pipe nobody
+	// opened.
 	let (mut ours, name) = named_pipe(false).unwrap();
-	let child = run(format!("echo hi>{name}"));
 	let mut got = Vec::new();
 	let mut buf = [0u8; 64];
+	assert!(ours.poll_read(&cx, &mut buf).is_pending());
+	let out = run(format!("echo hi>{name}")).wait_with_output().unwrap();
+	assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+	assert!(!ours.poll_unopened(&cx), "a client wrote: the pipe was opened");
 	loop {
-		assert!(Instant::now() < deadline, "no writer reached the pipe");
+		assert!(Instant::now() < deadline, "the writer's bytes never came");
 		match ours.poll_read(&cx, &mut buf) {
 			Poll::Ready(Ok(0)) => break,
 			Poll::Ready(Ok(n)) => got.extend_from_slice(&buf[..n]),
@@ -491,7 +504,6 @@ fn a_path_opened_pipe_survives_a_probing_open() {
 			Poll::Pending => thread::sleep(Duration::from_millis(10)),
 		}
 	}
-	child.wait_with_output().unwrap();
 	assert_eq!(String::from_utf8_lossy(&got), "hi\r\n");
 }
 

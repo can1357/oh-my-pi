@@ -24,7 +24,7 @@ use super::{
 	zsh_typeset::PM_EXPORTED,
 };
 use crate::bash::{
-	fs::{Stat, StatKind},
+	fs::{Stat, StatKind, plain_windows_path},
 	ids::Platform,
 	store::{Key, MiscKey, Record},
 	syntax::zsh::tok::{head, tail},
@@ -102,13 +102,14 @@ fn on_windows(ctx: &Ctx<'_, '_>) -> bool {
 /// `path` as zsh keeps directories on Windows (`$PWD`, `$HOME`, the
 /// directory stack): `/` separators (zsh's path code, `:h`/`:t` and `%~`
 /// split on `/`, and Windows takes either), the `\\?\` prefix of a
-/// resolved path dropped, and a root-relative `/x` on the drive of `cwd`.
+/// resolved path dropped ([`plain_windows_path`]; a path that keeps it is
+/// left as is, `\` being its only separator), and a root-relative `/x` on
+/// the drive of `cwd`.
 pub(crate) fn windows_spelling(path: &[u8], cwd: &[u8]) -> BString {
-	let path = path
-		.strip_prefix(br"\\?\UNC\")
-		.map(|unc| [&b"//"[..], unc].concat())
-		.or_else(|| path.strip_prefix(br"\\?\").map(<[u8]>::to_vec))
-		.unwrap_or_else(|| path.to_vec());
+	let path = plain_windows_path(path);
+	if path.starts_with(br"\\?\") {
+		return BString::from(path.into_owned());
+	}
 	let mut out: Vec<u8> = path
 		.iter()
 		.map(|&c| if c == b'\\' { b'/' } else { c })

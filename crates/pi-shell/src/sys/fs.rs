@@ -515,33 +515,6 @@ pub fn host_path(p: &[u8]) -> io::Result<&Path> {
 		.map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }
 
-/// A resolved path without the `\\?\` (`\\?\UNC\`) prefix Windows'
-/// `canonicalize` adds to a plain drive (share) path: `C:\x`, as a user
-/// and `$PWD` spell it. Other verbatim paths keep it.
-fn without_verbatim_prefix(p: std::path::PathBuf) -> std::path::PathBuf {
-	#[cfg(windows)]
-	{
-		use std::path::{Component, Prefix};
-		let mut parts = p.components();
-		let plain = match parts.next() {
-			Some(Component::Prefix(prefix)) => match prefix.kind() {
-				Prefix::VerbatimDisk(drive) => format!("{}:", char::from(drive)),
-				Prefix::VerbatimUNC(server, share) => {
-					format!(r"\\{}\{}", server.to_string_lossy(), share.to_string_lossy())
-				},
-				_ => return p,
-			},
-			_ => return p,
-		};
-		let mut out = std::path::PathBuf::from(plain);
-		out.push(std::path::MAIN_SEPARATOR_STR);
-		out.extend(parts.filter(|c| !matches!(c, Component::RootDir)));
-		out
-	}
-	#[cfg(not(windows))]
-	p
-}
-
 /// Host path → engine bytes.
 fn engine_path(p: &Path) -> BString {
 	BString::from(p.as_os_str().as_encoded_bytes())
@@ -1226,11 +1199,15 @@ impl Fs for StdFs {
 	}
 
 	fn realpath(&mut self, path: &BStr) -> FsPoll<BString> {
-		FsPoll::Ready(
-			host_path(path)
-				.and_then(fs::canonicalize)
-				.map(|p| engine_path(&without_verbatim_prefix(p))),
-		)
+		FsPoll::Ready(host_path(path).and_then(fs::canonicalize).map(|p| {
+			// `C:\x`, not `\\?\C:\x`, where both name the file.
+			let p = engine_path(&p);
+			if cfg!(windows) {
+				BString::from(crate::bash::fs::plain_windows_path(&p).into_owned())
+			} else {
+				p
+			}
+		}))
 	}
 
 	fn mkfifo_or_temp(&mut self, purpose: TempPurpose) -> FsPoll<TempNode> {

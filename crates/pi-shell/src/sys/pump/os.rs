@@ -77,16 +77,28 @@ impl OsPipe {
 		self.0.available()
 	}
 
-	/// Our end of a [`named_pipe`] the child has not opened yet: no I/O
-	/// happened on it (a child that never opens it gives no end of file).
+	/// Our end of a [`named_pipe`] the child reads, before there is data
+	/// for it: keep it listening (spares, and instances whose client left),
+	/// so the child's opens find an instance however slow the producer is.
 	#[cfg_attr(unix, allow(clippy::unused_self, reason = "Unix pipes are connected"))]
-	pub const fn listening(&self) -> bool {
+	pub fn poll_listening(&mut self, cx: &Context<'_>) {
+		#[cfg(windows)]
+		self.0.poll_listening(cx);
+		#[cfg(unix)]
+		let _ = cx;
+	}
+
+	/// Our end of a [`named_pipe`] no client holds: the child never opened
+	/// it, or left without writing (no end of file comes from it).
+	#[cfg_attr(unix, allow(clippy::unused_self, reason = "Unix pipes are connected"))]
+	pub fn poll_unopened(&mut self, cx: &Context<'_>) -> bool {
 		#[cfg(windows)]
 		{
-			self.0.listening()
+			self.0.poll_unopened(cx)
 		}
 		#[cfg(unix)]
 		{
+			let _ = cx;
 			false
 		}
 	}
@@ -560,8 +572,33 @@ mod imp {
 			}
 		}
 
-		pub const fn listening(&self) -> bool {
-			matches!(self, Self::Bridge(b) if b.chosen.is_none())
+		/// [`OsPipe::poll_listening`].
+		pub fn poll_listening(&mut self, cx: &Context<'_>) {
+			if let Self::Bridge(b) = self
+				&& b.child_reads
+				&& b.chosen.is_none()
+				&& b.poll_listen(cx).is_ok()
+			{
+				for l in &mut b.listeners {
+					if l.since.is_some() && l.end.inflight == Inflight::Idle && !l.end.client_open() {
+						if l.end.inflight == Inflight::Idle {
+							l.end.relisten();
+						}
+						l.since = None;
+					}
+				}
+				let _ = b.poll_listen(cx);
+			}
+		}
+
+		/// [`OsPipe::poll_unopened`]: the connects that completed taken first.
+		pub fn poll_unopened(&mut self, cx: &Context<'_>) -> bool {
+			match self {
+				Self::Bridge(b) if b.chosen.is_none() => {
+					b.poll_listen(cx).is_err() || b.listeners.iter().all(|l| l.since.is_none())
+				},
+				_ => false,
+			}
 		}
 
 		fn close(self) -> Vec<u8> {
@@ -666,12 +703,14 @@ mod imp {
 					self.timer = None;
 					continue;
 				}
-				if std::task::ready!(self.listeners[i].end.poll_alive(cx)) {
+				if self.listeners[i].end.client_open() {
 					self.chosen = Some(self.listeners.swap_remove(i).end);
 					self.listeners.clear();
 				} else {
 					let l = &mut self.listeners[i];
-					l.end.relisten();
+					if l.end.inflight == Inflight::Idle {
+						l.end.relisten();
+					}
 					l.since = None;
 				}
 			}
@@ -986,13 +1025,18 @@ mod imp {
 			self.eof = false;
 		}
 
-		/// Whether the connected client still holds its end: a zero-byte
-		/// write succeeds then, and fails once it closed (`ERROR_NO_DATA`).
-		fn poll_alive(&mut self, cx: &Context<'_>) -> Poll<bool> {
-			if self.inflight == Inflight::Idle && self.start(Kind::Write(0)).is_err() {
-				return Poll::Ready(false);
+		/// Whether the connected client still holds its end: asking to
+		/// connect again fails with `ERROR_PIPE_CONNECTED` then, and with
+		/// `ERROR_NO_DATA` once it closed. Nothing reaches the client (a
+		/// write, even of zero bytes, could end its pending read with
+		/// nothing, which it takes for end of file). Only with no operation
+		/// in flight; a connect that waits (the instance listens again)
+		/// stays in flight, and the client counts as gone.
+		fn client_open(&mut self) -> bool {
+			match self.start(Kind::Connect) {
+				Err(e) => is_os(&e, ERROR_PIPE_CONNECTED),
+				Ok(()) => false,
 			}
-			Poll::Ready(std::task::ready!(self.poll_op(cx)).is_ok())
 		}
 
 		pub fn poll_read(&mut self, cx: &Context<'_>, out: &mut [u8]) -> Poll<io::Result<usize>> {

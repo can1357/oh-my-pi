@@ -48,7 +48,7 @@ use std::{
 use bstr::BString;
 use parking_lot::Mutex;
 #[cfg(windows)]
-pub(crate) use windows::leads_console_group;
+pub(crate) use windows::{break_console_groups, has_console_groups};
 
 #[cfg(unix)]
 use self::unix as imp;

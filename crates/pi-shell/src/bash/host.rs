@@ -354,7 +354,9 @@ pub struct SpawnSpec<'a> {
 	pub cwd:         &'a BStr,
 	/// fds 0, 1, 2.
 	pub stdio:       [StdioSpec; 3],
-	/// Further fds; Unix only (Windows hosts fail with `Unsupported`).
+	/// Further fds. Windows inherits none: one a `/dev/fd/N` argument names
+	/// (a process substitution's) reaches the child as a named pipe, others
+	/// stay with the shell.
 	pub extra_fds:   Vec<(i32, StdioSpec)>,
 	/// Process group placement.
 	pub pgroup:      PgroupSpec,

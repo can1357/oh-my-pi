@@ -92,7 +92,7 @@ Each builtin runs inside the shell process (no `fork`/`exec`) against the `pi-bu
 
 Builtin switches are read from `sessionEnv` first, then the process environment, during session creation. Values are truthy when present and not empty, `"0"`, or case-insensitive `"false"`; command-scoped `env` does not change registration.
 
-`omp zsh` (the process shell, `crates/pi-shell/src/process`) offers the same utilities the other way round: only as a fallback when `PATH` has no program of that name (`Host::fallback`), so a system's own `ls` or `grep` keeps running and Windows, which has none, still gets them. The same switches apply. `type`/`whence` still answer from `PATH`, and `exec` of a missing name stays not found.
+`omp zsh` (the process shell, `crates/pi-shell/src/process`) offers the same utilities the other way round: only as a fallback when `PATH` has no program of that name (`Host::fallback`), so a system's own `ls` or `grep` keeps running and Windows, which has none, still gets them. A defined `command_not_found_handler` (Ubuntu's `command-not-found`, Arch's `pkgfile`) wins over the fallback. The same switches apply. `type`/`whence` still answer from `PATH`, and `exec` of a missing name stays not found.
 
 On Windows, `omp zsh` takes zsh's function library (`fpath`, for `compinit`) from an MSYS2, Cygwin or Git for Windows zsh: the root of a `…\usr\bin` (or Cygwin `…\bin`) on `PATH`, then `C:\msys64`, `C:\cygwin64` and `C:\cygwin`. A console `read` that Ctrl-C ends is not end of input: when the shell traps or ignores `INT`, the read resumes after the trap, as a Unix read interrupted by `SIGINT` does. `read -k`/`-q` read the terminal in cbreak mode on every platform.
 

@@ -150,8 +150,9 @@ fn command_v_succeeds_when_any_name_is_found() {
 
 /// A command `PATH` lacks runs the host's stand-in (`Host::fallback`, as
 /// `omp zsh` offers pi's utilities where Windows has no `ls`); `exec` of
-/// it is still not found (a process image cannot be a native), and `type`
-/// still answers from `PATH`.
+/// it is still not found (a process image cannot be a native), `type`
+/// still answers from `PATH`, and a defined not-found handler (Ubuntu's
+/// `command-not-found`) handles the name instead.
 #[test]
 fn path_misses_run_the_hosts_fallback() {
 	let mut host = FakeHost::new().natives_as_fallback();
@@ -164,4 +165,13 @@ fn path_misses_run_the_hosts_fallback() {
 	);
 	assert_eq!(String::from_utf8_lossy(&out.stdout), "7\nuntyped\n");
 	assert_eq!(out.status, 127);
+	let mut host = FakeHost::new().natives_as_fallback();
+	host.countdown("mytool", 1, 7);
+	let out = run_script(
+		host,
+		b"command_not_found_handle() { echo \"install $1\"; return 3; }; mytool; echo $?",
+		&[],
+		Fault::None,
+	);
+	assert_eq!(String::from_utf8_lossy(&out.stdout), "install mytool\n3\n");
 }
