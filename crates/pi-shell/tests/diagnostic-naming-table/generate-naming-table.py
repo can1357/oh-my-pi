@@ -128,6 +128,46 @@ def make_probe(path, kind):
     return {"command": command, "files": files, "note": note}
 
 
+def activation_probes(body):
+    """Bash frame/input transitions that can surround either new segment.
+
+    Source depth is crossed separately: entering a source from a substitution
+    is not the same activation order as a substitution in an active source.
+    """
+    yield "top", body, {}
+    yield "function", "f() {\n" + body + "\n}; f", {}
+    yield "function-after-source", ". ./defs; f", {"defs": "f() {\n" + body + "\n}\n"}
+    yield "eval", "eval " + shlex.quote(body), {}
+    yield "subshell", "(\n" + body + "\n)", {}
+    yield "pipeline-left", "{\n" + body + "\n} | cat", {}
+    yield "pipeline-right", "printf '' | {\n" + body + "\n}", {}
+    yield "lastpipe", "set +m; shopt -s lastpipe; printf '' | {\n" + body + "\n}", {}
+    yield "command-substitution", "x=$(\n" + body + "\n)", {}
+    yield "backquote", "x=`\n" + body.replace("`", "\\`") + "\n`", {}
+    yield "process-input", "cat <(\n" + body + "\n)", {}
+    # Completion is a fixture file, not wait's treatment of process-substitution
+    # pids. Both shells execute this trap after the diagnostic, including on a
+    # fatal source parse error; the parent observes that execution exactly once.
+    completed = "trap ': > .process-done' EXIT;\n" + body
+    join = "while [ ! -e .process-done ]; do sleep 0.01; done"
+    yield "process-output", "printf '' > >(\n" + completed + "\n); " + join, {}
+    # Only the launching shell's job notices are redirected; the child restores
+    # stderr from fd 3 before the diagnostic. No recorded bytes are normalized.
+    yield "background", "{ {\n" + body + "\n} 2>&3 & wait; } 3>&2 2>/dev/null", {}
+    yield "coprocess", "{ coproc {\n" + body + "\n} 2>&3; wait; } 3>&2 2>/dev/null", {}
+    yield "nofork", "x=${\n" + body + "\n}", {}
+    yield "value-substitution", "x=${|\n" + body + "\n}", {}
+    for trap, enable, trigger, files in (
+        ("EXIT", "", "exit", {}),
+        ("ERR", "set -E; ", "false", {}),
+        ("RETURN", "set -T; ", ". ./returned", {"returned": ":\n"}),
+        ("DEBUG", "set -T; ", ":", {}),
+        ("USR1", "", "kill -USR1 $$", {}),
+    ):
+        action = "trap - " + trap + ";\n" + body
+        yield "trap-" + trap.lower(), enable + "trap " + shlex.quote(action) + " " + trap + "; " + trigger, files
+
+
 def probes():
     rows = {}
     for path in PATHS:
@@ -203,6 +243,98 @@ def probes():
             rows[rid] = dict(id=rid, path=path, kind=kind, mode=mode, command=command, files=files,
                              note="Exact boundary/alternative parser-input probe; see command and files.",
                              regressions=[regression] if regression else [])
+    # Closed frame/input alternatives at both gates. The source-depth cross
+    # distinguishes inherited source state from a source entered in the child.
+    for segment, body in (("heredoc", "cat <<EOF\n$(if)\nEOF"), ("source-entered", ". ./src")):
+        for activation, command, fixtures in activation_probes(body):
+            for depth in (0, 1, 3):
+                # These exact top-level paths were recorded before the renderer.
+                if activation == "top":
+                    continue
+                files = dict(fixtures)
+                if segment == "source-entered":
+                    files["src"] = ":\n)\n"
+                if depth:
+                    files["f3"] = ":\n" + command + "\n"
+                    if depth == 3:
+                        files.update({"f1": ":\n. ./f2\n", "f2": ":\n. ./f3\n"})
+                    command_at_depth = ":\n. ./" + ("f1" if depth == 3 else "f3")
+                else:
+                    command_at_depth = command
+                for mode in MODES:
+                    rid = f"{segment}-activation-{activation}-sources-{depth}.{mode}"
+                    rows[rid] = dict(id=rid, path="heredoc-substitution" if segment == "heredoc" else "source",
+                                     kind="parser", mode=mode, command=command_at_depth, files=files,
+                                     note=f"{segment} reached from {activation}, with {depth} enclosing sources. "
+                                          "The innermost source is entered after the activation for source-entered rows.",
+                                     regressions=["round1-activation-coverage"])
+    # Parser-input edges, not just VM execution frames. Separate parser inputs
+    # (backquotes and nested documents) occur in both nesting directions.
+    for name, text in (
+        ("process-input", "$(cat <(if))"),
+        ("process-output", "$(cat >(if))"),
+        ("dollar-in-process-input", "$(cat <(echo $(if)))"),
+        ("dollar-in-process-output", "$(cat >(echo $(if)))"),
+        ("nofork", "$(echo ${ if; })"),
+        ("value-substitution", "$(echo ${| if; })"),
+        ("dollar-in-nofork", "$(echo ${ echo $(if); })"),
+        ("dollar-in-value-substitution", "$(echo ${| echo $(if); })"),
+        ("backquote-in-dollar", "$(echo `if)`)"),
+        ("dollar-in-backquote", "`echo $(if)`"),
+        ("parameter-word", "${x:-$(if)}"),
+        ("parameter-in-dollar", "$(echo ${x:-$(if)})"),
+        ("arithmetic", "$((1+$(if)))"),
+        ("arithmetic-in-dollar", "$(echo $((1+$(if))))"),
+        ("arithmetic-bracket", "$[1+$(if)]"),
+        ("arithmetic-bracket-in-dollar", "$(echo $[1+$(if)])"),
+        ("double-quoted-word", '$(echo "$(if)")'),
+        ("nested-document", "$(cat <<IN\n$(if)\nIN\n)"),
+        ("second-substitution", "$(printf ok) $(if)"),
+        ("continued-line", "prefix \\\n$(if)"),
+    ):
+        for mode in MODES:
+            rid = f"heredoc-parser-{name}.{mode}"
+            rows[rid] = dict(id=rid, path="heredoc-substitution", kind="parser", mode=mode,
+                             command="cat <<EOF\n" + text + "\nEOF", files={},
+                             note=("Control: reaches neither new-segment gate. Backquote parsing suppresses its existing error, "
+                                   "or raw arithmetic does not set comsub_start; both producer classes are outside this renderer change."
+                                   if name in ("backquote-in-dollar", "dollar-in-backquote", "arithmetic", "arithmetic-bracket")
+                                   else "Parser-input nesting edge inside the unquoted document; separate from active VM frames."),
+                             regressions=["round1-parser-input-coverage"])
+    # The first token's end line is Bash's simplecmd_lineno. Distinguish a
+    # multiline substitution in that token from one in a later argument, and
+    # distinguish its parser input from its position in the enclosing input.
+    body = "cat <<EOF\n$(if)\nEOF"
+    readers = ("command-substitution", "backquote", "process-input", "process-output", "nofork", "value-substitution")
+    for activation, command, files in activation_probes(":\n" + body):
+        if activation not in readers:
+            continue
+        for mode in MODES:
+            rid = f"heredoc-reader-{activation}-shifted.{mode}"
+            rows[rid] = dict(id=rid, path="heredoc-substitution", kind="parser", mode=mode,
+                             command=":\n:\n" + command, files=files,
+                             note="Shifted enclosing input and an additional line inside the substitution; protects parser-coordinate rebasing.",
+                             regressions=["round1-reader-coordinates"])
+    for activation, opener, closer in (
+        ("command-substitution", "$(", ")"), ("backquote", "`", "`"),
+        ("nofork", "${", "}"), ("value-substitution", "${|", "}"),
+    ):
+        for mode in MODES:
+            rid = f"heredoc-reader-{activation}-argument.{mode}"
+            rows[rid] = dict(id=rid, path="heredoc-substitution", kind="parser", mode=mode,
+                             command=": \"" + opener + "\n" + body + "\n" + closer + "\"", files={},
+                             note="Substitution in a later argument, rather than in the first simple-command token.",
+                             regressions=["round1-reader-coordinates"])
+    for activation, sigil in (("process-input", "<"), ("process-output", ">")):
+        for form, command in (
+            ("continued", "printf '' \\\n" + ("< " if sigil == "<" else "> ") + sigil + "(\ntrap ': > .process-done' EXIT;\n" + body + "\n); while [ ! -e .process-done ]; do sleep 0.01; done"),
+            ("assignment", "x=" + sigil + "(\ntrap ': > .process-done' EXIT;\n" + body + "\n); while [ ! -e .process-done ]; do sleep 0.01; done"),
+        ):
+            for mode in MODES:
+                rid = f"heredoc-reader-{activation}-{form}.{mode}"
+                rows[rid] = dict(id=rid, path="heredoc-substitution", kind="parser", mode=mode,
+                                 command=command, files={}, note="Process input position versus first-token reader line.",
+                                 regressions=["round1-reader-coordinates"])
     return rows
 
 
@@ -506,6 +638,8 @@ def markdown(table):
         "The four kind names identify producer probes, not four disjoint Bash call graphs: get_name_for_error also supplies error_prolog and builtin_error_prolog. Runtime lookup and general redirection errors both use internal_error/error_prolog; they remain separate semantic rows because a renderer must not invent a builtin-name segment on redirection errors. Syntax in a running function, subshell, or pipeline is triggered by eval; malformed declarations are separate rows because the outer parser rejects them before the activation exists. Command-substitution syntax has both direct-parser and eval-parser rows.", "",
         "A literal here-document body does not execute commands or shell grammar. Its four quoted-body cells, and three unquoted literal controls, explicitly record no diagnostic. An unquoted expansion error and a missing-delimiter warning are additional general-prolog rows. Silence means the supplied probe did not emit a diagnostic; it does not prove no other probe could do so. Top-level RETURN without a function/source return is likewise a measured no-fire control. DEBUG syntax can fire more than once because its invalid body cannot execute a trap-disable command; every emission is retained.", "",
         "Trap rows distinguish top level, a function, a sourced file, three nested sources, and a source that already returned. In nested RETURN rows the same installed trap can run once per returning source; do not flatten those diagnostics to one prefix. EXIT rows include exit from inside a function/source and nested-source unwinding. Function-after-source rows separately measure a live function whose definition source is no longer active. Additional compositions run a function, eval, substitution, subshell, or either pipeline element while one or three source activations remain live.", "",
+        "The activation rows cross both the malformed here-document and entering a malformed source with zero, one and three enclosing sources. They cover function/returned-definition, eval, subshell, both pipeline elements, lastpipe, dollar/backquote substitutions, input/output process substitutions, asynchronous jobs, coprocesses, both no-fork substitutions, and EXIT/ERR/RETURN/DEBUG/signal traps. Source-entered rows deliberately reverse the activation order of source-command-substitution rows. Asynchronous launchers redirect only their own job notices to /dev/null; their children restore diagnostic stderr from fd 3, so no PID or output bytes are rewritten after capture.", "",
+        "Parser-input rows separately cover process input/output, dollar nesting, both no-fork forms, backquote/dollar nesting in both directions, parameter words, parenthesized/bracket arithmetic, quoted words, nested documents, successive substitutions and continued lines. Some are controls that take a different parser-error producer rather than the repeated context path. These probe classes follow the renderer gates and parser transitions, not an assertion that every composition matches Bash.", "",
         "A future renderer change needs a measured row for each new emitted segment and each relevant reachable activation/parser path. This finite table covers the listed paths and probes; it is not an exhaustive inventory of all Bash diagnostic messages or all possible products of nested shell constructs. Bash 5.3.0 is the target for every listed version difference.", "",
         "Bash versions:", "",
     ]
