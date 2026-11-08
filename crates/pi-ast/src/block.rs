@@ -176,7 +176,8 @@ fn brace_block_span(code: &str, line: u32) -> Option<BlockRange> {
 				regex = true;
 				i += 1;
 			},
-			// Backtick template literals are strings too, so a `}` inside one never closes a group.
+			// Backtick template literals are strings too, so a `}` inside one
+			// never closes a group.
 			b'"' | b'\'' | b'`' => {
 				string_delim = byte;
 				prev = byte;
