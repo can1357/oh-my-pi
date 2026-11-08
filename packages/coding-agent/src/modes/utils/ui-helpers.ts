@@ -812,8 +812,12 @@ export class UiHelpers {
 			} else if (message.role === "toolResult") {
 				if (options.preservedLiveToolCallIds?.has(message.toolCallId)) continue;
 				const pendingReadComponent = this.ctx.pendingTools.get(message.toolCallId);
+				// Mirror the call side: resolve the wire toolName through the registry
+				// so aliased results route under the canonical name their call used.
+				const tool = this.ctx.viewSession.getToolByName(message.toolName);
+				const renderToolName = toolRenderName(message.toolName, tool);
 				const isReadGroupResult =
-					message.toolName === "read" &&
+					renderToolName === "read" &&
 					(!pendingReadComponent || pendingReadComponent instanceof ReadToolGroupComponent);
 				if (isReadGroupResult) {
 					const assistantComponent = readToolCallAssistantComponents.get(message.toolCallId);
@@ -891,13 +895,13 @@ export class UiHelpers {
 					} else {
 						this.ctx.pendingTools.delete(message.toolCallId);
 						if (
-							message.toolName === "wait" &&
+							renderToolName === "wait" &&
 							component instanceof ToolExecutionComponent &&
 							component.isDisplaceableBlock()
 						) {
 							waitingPoll = component;
 						} else if (
-							message.toolName === "todo" &&
+							renderToolName === "todo" &&
 							component instanceof ToolExecutionComponent &&
 							component.canBeDisplacedBy("todo")
 						) {
