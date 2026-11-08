@@ -82,6 +82,19 @@ export const cfgSpeechEnhanced = register({
 	},
 });
 
+export const cfgSpeechPromptAppendFile = register({
+	id: "speech.promptAppendFile",
+	type: "string",
+	default: "",
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Speech Prompt Append File",
+		description:
+			"Markdown file appended to the enhanced-speech rewrite prompt, for example to keep spoken replies to one to three sentences",
+	},
+});
+
 export const cfgSpeechVoice = register({
 	id: "speech.voice",
 	type: "enum",

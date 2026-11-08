@@ -15,15 +15,20 @@
  *   mechanical {@link SpeakableStream} cleanup — speech never blocks on the
  *   model.
  */
+import * as path from "node:path";
 import { type AssistantMessage, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { expandTilde, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { roleCandidatePool } from "../config/model-roles";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import speechRewriteAppendTemplate from "../prompts/system/speech-rewrite-append.md" with { type: "text" };
 import speechRewritePrompt from "../prompts/system/speech-rewrite.md" with { type: "text" };
+import { cfgSpeechPromptAppendFile } from "./settings";
 
 const SYSTEM_PROMPT = prompt.render(speechRewritePrompt);
+/** Static wrapper so user-authored Markdown passes through byte-for-byte. */
+const renderSpeechRewriteAppend = prompt.compile(speechRewriteAppendTemplate.trimEnd());
 // Rewrite budget: a paragraph in, a spoken paragraph (usually shorter) out.
 // Always reserve enough room to survive backends that ignore `disableReasoning`
 // (e.g. Qwen3 via llama.cpp catalogued `reasoning: false` but still emitting
@@ -32,6 +37,11 @@ const SYSTEM_PROMPT = prompt.render(speechRewritePrompt);
 const ANSWER_MAX_TOKENS = 1536;
 /** Per-block completion deadline before falling back to mechanical cleanup. */
 const REWRITE_TIMEOUT_MS = 6000;
+/**
+ * Cap the optional append-file read. A FIFO or stalled network mount must not
+ * hold a rewrite slot past the deadline; 1s is ample for a prompt file.
+ */
+const APPEND_FILE_TIMEOUT_MS = 1000;
 /** Bound block characters sent to the model (huge diffs/code dumps get elided). */
 const MAX_BLOCK_CHARS = 4000;
 
@@ -49,6 +59,47 @@ function extractText(content: AssistantMessage["content"]): string {
 		.map(block => block.text)
 		.join(" ")
 		.trim();
+}
+
+/**
+ * Read the optional append file under a hard deadline. `Bun.file().text()` has
+ * no abort signal, so race it instead of awaiting it directly.
+ */
+async function readAppendFile(filePath: string, signal?: AbortSignal): Promise<string> {
+	const { promise: stopped, reject } = Promise.withResolvers<never>();
+	const timer = setTimeout(() => reject(new Error("timed out")), APPEND_FILE_TIMEOUT_MS);
+	const onAbort = () => reject(signal?.reason);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await Promise.race([Bun.file(filePath).text(), stopped]);
+	} finally {
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+	}
+}
+
+/**
+ * Compose the rewrite system prompt from the bundled prompt plus the optional
+ * `speech.promptAppendFile` Markdown. The file is read per rewrite so edits
+ * apply without a restart; an absent, empty, or unreadable file leaves the
+ * bundled prompt unchanged.
+ */
+async function composeSystemPrompt(settings: Settings, signal?: AbortSignal): Promise<string> {
+	const configured = cfgSpeechPromptAppendFile.get(settings).trim();
+	if (!configured) return SYSTEM_PROMPT;
+	const filePath = path.resolve(expandTilde(configured));
+	try {
+		const append = (await readAppendFile(filePath, signal)).trim();
+		return append ? renderSpeechRewriteAppend({ basePrompt: SYSTEM_PROMPT, append }) : SYSTEM_PROMPT;
+	} catch (error) {
+		if (!signal?.aborted && !isEnoent(error)) {
+			logger.warn("speech-enhancer: failed to read speech.promptAppendFile", {
+				path: filePath,
+				error: String(error),
+			});
+		}
+		return SYSTEM_PROMPT;
+	}
 }
 
 /**
@@ -83,13 +134,14 @@ export class SpeechEnhancer {
 			if (!apiKey) return null;
 			// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 			const metadata = this.#deps.metadataResolver?.(model.provider);
+			const systemPrompt = await composeSystemPrompt(settings, signal);
 			const response = await retryTransientCompletion(
 				() => {
 					const timeout = AbortSignal.timeout(REWRITE_TIMEOUT_MS);
 					return completeSimple(
 						model,
 						{
-							systemPrompt: [SYSTEM_PROMPT],
+							systemPrompt: [systemPrompt],
 							messages: [{ role: "user", content: boundBlock(block), timestamp: Date.now() }],
 						},
 						{

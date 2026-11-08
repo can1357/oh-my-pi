@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `speech.promptAppendFile`, a Markdown file appended to the enhanced-speech rewrite prompt, so read-aloud instructions such as "one to three sentences" customize vocalization without replacing the bundled prompt ([#18545](https://github.com/can1357/oh-my-pi/pull/18545) by [@steimerbyte](https://github.com/steimerbyte)).
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
