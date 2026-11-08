@@ -44,6 +44,7 @@ export interface SubagentEventPayload {
 
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
+const taskModelInputSchema = type("string").or("string[] <= 0");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
 
@@ -80,7 +81,7 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
+	"model?": taskModelInputSchema,
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -91,7 +92,7 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
+	"model?": taskModelInputSchema,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -104,7 +105,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
+	"model?": taskModelInputSchema,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -116,7 +117,7 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
-	"model?": "string",
+	"model?": taskModelInputSchema,
 	"+": "delete",
 });
 function guardBatchAgent(schema: BaseType): BaseType {
@@ -192,7 +193,7 @@ function createTaskSchema(options: {
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
 	// `model` is always declared, and preflight decides whether a per-call model
 	// is allowed; seance widens it to a list.
-	const seanceFields = { "model?": "string", ...options.seanceFields };
+	const seanceFields = { "model?": taskModelInputSchema, ...options.seanceFields };
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({

@@ -509,6 +509,35 @@ interface SpawnPlan {
 	spawns: TaskParams[];
 }
 
+function normalizeTaskModelPlaceholders(params: TaskParams): TaskParams {
+	if (!isRecord(params)) return params;
+	const prototype = Object.getPrototypeOf(params);
+	if (prototype !== Object.prototype && prototype !== null) return params;
+	const originalTasks = params.tasks;
+	let normalizedTasks: TaskItem[] | undefined;
+	if (Array.isArray(originalTasks)) {
+		for (let i = 0; i < originalTasks.length; i++) {
+			const item = originalTasks[i];
+			if (!isRecord(item)) continue;
+			const model = item.model;
+			if (model !== "" && !(Array.isArray(model) && model.length === 0)) continue;
+			const itemPrototype = Object.getPrototypeOf(item);
+			if (itemPrototype !== Object.prototype && itemPrototype !== null) continue;
+			normalizedTasks ??= originalTasks.slice();
+			const copy = { ...item };
+			delete copy.model;
+			normalizedTasks[i] = copy;
+		}
+	}
+	const model = params.model;
+	const emptyRootModel = model === "" || (Array.isArray(model) && model.length === 0);
+	if (!emptyRootModel && !normalizedTasks) return params;
+	const copy = { ...params };
+	if (emptyRootModel) delete copy.model;
+	if (normalizedTasks) copy.tasks = normalizedTasks;
+	return copy;
+}
+
 /**
  * Repair, validate, and normalize a call into its spawns. Returns the
  * validation error the call reports instead when the shape is rejected. Shared
@@ -522,7 +551,7 @@ function planSpawns(
 	seanceAdvertised: boolean,
 	settings: Settings,
 ): SpawnPlan | string {
-	const params = repairTaskParams(rawParams as TaskParams);
+	const params = normalizeTaskModelPlaceholders(repairTaskParams(rawParams as TaskParams));
 	const error =
 		validateShapeParams(batchEnabled, params) ??
 		validateSpawnParams(params, batchEnabled, fileEnabled, defaultAgent, settings) ??

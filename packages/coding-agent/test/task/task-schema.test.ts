@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { isJsonSchemaValueValid, tryEnforceStrictSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
@@ -175,8 +176,17 @@ describe("task schema seance fields", () => {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
 				expect(wireSchema).not.toContain('"sourceSession"');
-				// Only the per-call `model` remains: one string, never the seance selector list.
-				expect(wireSchema).toContain('"model":{"type":"string"}');
+				const item = { task: "work", solutionSpace: "bounded", model: [] };
+				expect(schema(batchEnabled ? { context: "shared", tasks: [item] } : item) instanceof type.errors).toBe(
+					false,
+				);
+				expect(
+					schema(
+						batchEnabled
+							? { context: "shared", tasks: [{ ...item, model: ["p/m"] }] }
+							: { ...item, model: ["p/m"] },
+					) instanceof type.errors,
+				).toBe(true);
 			}
 		}
 	});
@@ -225,7 +235,7 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		expect(planSchema).toContain('"model":{"type":"string"}');
+		expect(planSchema).toContain('"model"');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 
@@ -237,6 +247,41 @@ Custom prompt.`,
 		expect(ordinary.description).toContain("Historical consults");
 	});
 	afterEach(() => vi.restoreAllMocks());
+});
+
+describe("ordinary model wire schema", () => {
+	it("accepts only strings or empty arrays in static and dynamic provider schemas", () => {
+		for (const batchEnabled of [false, true]) {
+			for (const isolationEnabled of [false, true]) {
+				for (const structured of [false, true]) {
+					const schema = getTaskSchema({ batchEnabled, isolationEnabled, structured });
+					const wire = schema.toJsonSchema();
+					const properties = wire.properties;
+					if (!isRecord(properties)) throw new Error("missing schema properties");
+					let itemProperties = properties;
+					if (batchEnabled) {
+						const tasks = properties.tasks;
+						if (!isRecord(tasks) || !isRecord(tasks.items) || !isRecord(tasks.items.properties)) {
+							throw new Error("missing batch item properties");
+						}
+						itemProperties = tasks.items.properties;
+					}
+					const model = itemProperties.model;
+					expect(isJsonSchemaValueValid(model, "p/m")).toBe(true);
+					expect(isJsonSchemaValueValid(model, [])).toBe(true);
+					expect(isJsonSchemaValueValid(model, ["p/m"])).toBe(false);
+					expect(
+						tryEnforceStrictSchema({
+							type: "object",
+							properties: { model },
+							required: ["model"],
+							additionalProperties: false,
+						}).strict,
+					).toBe(true);
+				}
+			}
+		}
+	});
 });
 
 describe("task spawn validation", () => {
@@ -278,6 +323,22 @@ describe("task spawn validation", () => {
 		const scout = loadBundledAgents().find(agent => agent.name === "scout");
 		if (!scout) throw new Error("Expected the bundled scout agent");
 		expect(await executeText(params, [bundledSeance, scout])).toContain("task.perCallModel: off");
+	});
+
+	it("still requires a source for bundled seance with an empty model placeholder", async () => {
+		const text = await executeText({ agent: "seance", task: "Consult history", model: [] }, [bundledSeance]);
+		expect(text).toContain("requires a non-empty `sourceSession`");
+	});
+
+	it("does not exempt a project agent shadowing seance from model policy", async () => {
+		const shadow: AgentDefinition = {
+			name: "seance",
+			description: "ordinary",
+			systemPrompt: "ordinary",
+			source: "project",
+		};
+		const text = await executeText({ agent: "seance", task: "work", model: "p/requested" }, [shadow]);
+		expect(text).toContain("task.perCallModel: off");
 	});
 
 	it("advertises approved selectors only while task.perCallModel is on", async () => {
