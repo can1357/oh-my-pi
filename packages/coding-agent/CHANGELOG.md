@@ -36,6 +36,8 @@
 
 ### Fixed
 
+- A `yield` or `handback` result ends the child only when that same result was accepted. A same-named custom tool replacing the built-in, or a result with missing details or an unknown status, no longer aborts the run without a report; a later valid terminal report is still accepted, and an earlier incremental section cannot authorize a later rejected result. `yield` and `handback` are reserved in child sessions so a custom tool cannot replace those built-ins
+- A clean schema-less structured child that never submits an accepted yield returns only its last assistant turn with exit 0, instead of concatenating earlier turns and reminder replies
 - `omp skill list` releases the capability settings hold it takes, so a caller's provider scope stays in effect after the command, including when discovery throws. Skill-list tests isolate Claude config, home, profile, and agent-dir environment, and the integrations worker fixture registers the runtime storage codec and cleans up a failed boot.
 - A2A terminals without `a2a.name` get a unique `<cwd>-<pid>` name, so a peer's reply address resolves to a registered `a2a:` agent instead of an unaddressable URL; a reply is correlated to the request it answers (`metadata.inReplyTo`) and carries no reply-back instruction, so two terminals no longer ping-pong indefinitely
 - A2A discovery is symmetric and race-free: each bridge writes its own registry file under `<agent dir>/a2a-bridges/` with an `instanceId` verified against its card, unknown `a2a:` names and `agent://` listings rescan live bridges, stale peers are dropped, and re-registering an endpoint replaces its agents instead of adding `Main-N` duplicates
@@ -91,6 +93,7 @@
 
 ### Changed
 
+- `task.structured` now defaults to on: the task tool advertises `outputSchema`/`schemaMode`, and task children return results through `yield` or `handback`. Set `task.structured` to `false` to opt out (schema-less, yield-less children that return their final message). Workflow spawns that pass `structured: false`, and agents that set `structured: true` while the setting is off, are unchanged
 - Local Whisper speech-to-text and the local tiny model install their Transformers.js runtime on first use instead of with omp, so installs are smaller; first use needs network access
 - Local Parakeet and Nemotron speech runtimes now install on first use in source and npm installs too, reducing initial install size; first use needs network access
 - `wait` with nothing new now returns after 5s instead of blocking up to 30 minutes, the window growing 5s → 10s → 30s → 1m → 5m across back-to-back waits (5s again after news or a minute away); from the second idle wait on it tells the agent to get on with work that does not need the result instead of waiting

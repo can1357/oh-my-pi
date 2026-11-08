@@ -115,7 +115,7 @@ Run on 2026-11-08: Windows 11, binary built from `main`, model `openai-codex/gpt
 | Workflow resume | Two-phase script killed mid-run, resumed with `resumeFrom` | Completed calls replayed from the journal, only the unfinished call ran |
 | Refuse policy | `maxConcurrency: 1`, three parallel scouts | One ran, two refused with "Do not retry" |
 | Token budget | 30 000-token budget, subagent reads every file | `<total_tokens>13896 tokens left of 30000</total_tokens>` injected |
-| `handback` | Subagent ends with a 3-line report | Report delivered in the framed envelope. One earlier run with `task.structured: true` was marked `failed (exit 1)` after a successful `handback`; not investigated |
+| `handback` | Subagent ends with a 3-line report | Report delivered in the framed envelope. An earlier run marked `failed (exit 1)` was caused by a same-named custom tool replacing the built-in, not by a successful handback; reserved names and accepted-result-only termination prevent that mismatch |
 | `pi.spawnSubagent` | Project extension tool spawns a scout | Scout result returned to the calling session |
 | chrome-mcp | List windows and tabs | Real Chrome windows listed |
 | Capability token on kill | `proc://<agent>/kill` | Not triggered live (the agent's transcript was already on disk, so no unsaved work); covered by `test/capability-token.test.ts` |
