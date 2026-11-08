@@ -24,17 +24,26 @@ const authStorage = await AuthStorage.create(":memory:");
 authStorage.keys.setRuntime("mock", "test-key");
 registerMockApi("registered-artifacts-host");
 const mode = process.argv[2];
+const firstWorkerEntered = Promise.withResolvers<void>();
+const releaseFirstWorker = Promise.withResolvers<void>();
+let workersEntered = 0;
 const model = createMockModel({
 	id: "registered-artifacts-host",
-	handler: () => ({
-		content: [
-			{
-				type: "toolCall",
-				name: "yield",
-				arguments: mode === "pool" ? { key: 1, data: { answer: "done" } } : { data: { answer: "done" } },
-			},
-		],
-	}),
+	handler: async () => {
+		if (mode === "pool" && workersEntered++ === 0) {
+			firstWorkerEntered.resolve();
+			await releaseFirstWorker.promise;
+		}
+		return {
+			content: [
+				{
+					type: "toolCall",
+					name: "yield",
+					arguments: mode === "pool" ? { key: 1, data: { answer: "done" } } : { data: { answer: "done" } },
+				},
+			],
+		};
+	},
 });
 const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
 const find = modelRegistry.find.bind(modelRegistry);
@@ -87,7 +96,16 @@ if (mode === "agent") {
 		agent: agent.name,
 	});
 	const pool = new WorkPool(session, { name: "registeredPool", policy });
-	pool.push(["first", "second"]);
+	pool.push(["first"]);
+	await firstWorkerEntered.promise;
+	assert.equal(
+		AgentRegistry.global()
+			.list()
+			.filter(ref => ref.kind === "sub").length,
+		1,
+	);
+	pool.push(["second"]);
+	releaseFirstWorker.resolve();
 	jobId = pool.name;
 }
 const job = manager.getJob(jobId)!;

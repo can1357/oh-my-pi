@@ -30,8 +30,9 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import {
 	cleanupTemporaryArtifactsDir,
-	preserveTemporaryArtifactsDir,
+	hasTemporaryArtifactsRecovery,
 	registerTemporaryArtifactsDir,
+	setTemporaryArtifactsRecovery,
 } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
@@ -738,8 +739,8 @@ async function leaseArtifacts(
 		return { sessionFile, artifactsDir, temporary: false, unregister: undefined };
 	}
 	// No session file: the run gets its own directory under the OS temp dir.
-	// Disposable output is bounded by the process. Recovery artifacts are
-	// explicitly promoted out of the lease before returning their paths.
+	// Disposable output is bounded by the process. Each recovery producer
+	// protects the containing lease until its merge outcome is known.
 	const artifactsDir = path.join(
 		os.tmpdir(),
 		`${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${Snowflake.next()}`,
@@ -1175,16 +1176,25 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			{ cause: error, result: settled },
 		);
 	} finally {
+		const hasCapturedWork =
+			(settled?.patchPath !== undefined && settled.hasRootChanges !== false) ||
+			settled?.branchName !== undefined ||
+			(settled?.nestedPatches?.length ?? 0) > 0;
 		const preserveRecoveryArtifacts =
 			retainSalvagedArtifact ||
-			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
-		if (lease.temporary && preserveRecoveryArtifacts) preserveTemporaryArtifactsDir(lease.artifactsDir);
+			(policy.isIsolated &&
+				hasCapturedWork &&
+				(!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
+		// A session-backed child can share a temporary ancestor. Settle only
+		// this agent's claim; another child's unapplied recovery still owns it.
+		if (settled) setTemporaryArtifactsRecovery(lease.artifactsDir, settled.id, preserveRecoveryArtifacts);
 		const shouldRetainArtifacts =
 			request.detached === true ||
 			preserveRecoveryArtifacts ||
 			((request.retainArtifacts || policy.preparedSession !== undefined) &&
 				(completedSuccessfully || hasValidStructuredOutput));
-		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
+		const shouldCleanup =
+			lease.temporary && !shouldRetainArtifacts && !hasTemporaryArtifactsRecovery(lease.artifactsDir);
 		// No retention was promised on this path; an aborted status tombstone
 		// does not turn a one-shot run into a retained artifacts handle.
 		const cleanupArtifacts = async (): Promise<void> => {

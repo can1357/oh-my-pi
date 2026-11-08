@@ -233,10 +233,8 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						...(isolation ? { isolation } : {}),
 						...(customTools ? { customTools } : {}),
 						retainArtifacts: true,
-						// The handle outlives the run so a delayed `agent://<id>`
-						// in the delivery still resolves; the job row owns the
-						// directory from here and removes it once the result has
-						// been delivered and the row is evicted.
+						// Row eviction requests cleanup; registered agents and
+						// unapplied recovery can keep the containing lease alive.
 						onArtifactsRetained: cleanup => {
 							const job = manager.getJob(jobId);
 							if (job) job.retainedArtifactsCleanup = cleanup;

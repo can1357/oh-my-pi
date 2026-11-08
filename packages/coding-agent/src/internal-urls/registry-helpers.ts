@@ -11,11 +11,11 @@ import { AgentRegistry } from "../registry/agent-registry";
 
 const extraArtifactsDirs = new Set<string>();
 /**
- * Disposable transcript/output leases created by this process under the OS
- * temp dir. Recovery artifacts are promoted out of this set: their returned
- * filesystem paths remain useful after the creating process exits.
+ * Transcript/output leases created by this process under the OS temp dir.
+ * Each lease tracks the agents with pending or unapplied recovery inside it,
+ * including descendants whose session-backed directories share that lease.
  */
-const temporaryArtifactsDirs = new Set<string>();
+const temporaryArtifactsDirs = new Map<string, Set<string>>();
 const pendingArtifactsCleanups = new Map<string, () => void>();
 let exitSweepArmed = false;
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
@@ -33,17 +33,16 @@ export function registerArtifactsDir(dir: string): () => void {
  * `agent://`/`history://`, and take responsibility for deleting it.
  *
  * Same resolution behaviour as {@link registerArtifactsDir}, plus a bound on
- * the directory's life: whatever still holds a lease when the process exits is
- * removed then. Without it a lease held past its run — a retained subagent
- * handle, a vibe worker, a run killed by a signal mid-flight — stays on disk
- * forever, long after the only process that could resolve it has gone.
+ * the directory's life: leases without pending or unapplied recovery are
+ * removed when the process exits. Retained handles remain useful until their
+ * last registered agent is released or the process exits.
  *
  * The returned callback drops the lease; an owner that removes the directory
  * earlier (an async job row disposing its retained artifacts) calls it then.
  */
 export function registerTemporaryArtifactsDir(dir: string): () => void {
 	const unregister = registerArtifactsDir(dir);
-	temporaryArtifactsDirs.add(dir);
+	temporaryArtifactsDirs.set(dir, new Set());
 	armExitSweep();
 	return () => {
 		temporaryArtifactsDirs.delete(dir);
@@ -51,22 +50,39 @@ export function registerTemporaryArtifactsDir(dir: string): () => void {
 	};
 }
 
-/** Transfer a lease to the user: recovery data is not disposable output. */
-export function preserveTemporaryArtifactsDir(dir: string): void {
-	temporaryArtifactsDirs.delete(dir);
-	releasePendingArtifactsCleanup(dir);
+/** Protect every containing lease until this agent's recovery has been applied. */
+export function setTemporaryArtifactsRecovery(dir: string, agentId: string, required: boolean): void {
+	const owner = path.resolve(dir, `${agentId}.jsonl`);
+	for (const [lease, recovery] of temporaryArtifactsDirs) {
+		if (!isWithinArtifactsDir(lease, owner)) continue;
+		if (required) recovery.add(owner);
+		else recovery.delete(owner);
+		if (!required && recovery.size === 0 && pendingArtifactsCleanups.has(lease)) {
+			void cleanupTemporaryArtifactsDir(lease).catch(err => {
+				logger.warn("Temporary artifacts directory could not be removed after recovery application", {
+					dir: lease,
+					err,
+				});
+			});
+		}
+	}
+}
+
+export function hasTemporaryArtifactsRecovery(dir: string): boolean {
+	return (temporaryArtifactsDirs.get(dir)?.size ?? 0) > 0;
+}
+
+function isWithinArtifactsDir(dir: string, file: string): boolean {
+	const relative = path.relative(dir, file);
+	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 /** Request disposal; a registered agent still owns its transcript and output. */
 export async function cleanupTemporaryArtifactsDir(dir: string): Promise<void> {
 	if (!temporaryArtifactsDirs.has(dir)) return;
 	const registry = AgentRegistry.global();
-	const registered = registry.list().some(ref => {
-		if (!ref.sessionFile) return false;
-		const relative = path.relative(dir, ref.sessionFile);
-		return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-	});
-	if (registered) {
+	const registered = registry.list().some(ref => ref.sessionFile && isWithinArtifactsDir(dir, ref.sessionFile));
+	if (registered || hasTemporaryArtifactsRecovery(dir)) {
 		if (!pendingArtifactsCleanups.has(dir)) {
 			const unsubscribe = registry.onChange(event => {
 				if (event.type !== "removed" && event.type !== "registered") return;
@@ -98,12 +114,13 @@ function armExitSweep(): void {
 }
 
 /**
- * Delete every temporary artifacts directory this process still holds, and
- * drop its registration. Runs at process exit; synchronous because the `exit`
- * event runs no asynchronous work.
+ * Delete temporary artifacts leases with no pending or unapplied recovery.
+ * Runs at process exit; synchronous because the `exit` event runs no
+ * asynchronous work.
  */
 export function sweepTemporaryArtifactsDirs(): void {
-	for (const dir of temporaryArtifactsDirs) {
+	for (const [dir, recovery] of temporaryArtifactsDirs) {
+		if (recovery.size > 0) continue;
 		releasePendingArtifactsCleanup(dir);
 		temporaryArtifactsDirs.delete(dir);
 		extraArtifactsDirs.delete(dir);
