@@ -1540,6 +1540,7 @@ export async function buildSessionOptions(
 		if (matchedAfterMissingRolePattern) {
 			// Extensions may register an earlier configured role candidate.
 			options.modelPattern = parsed.model;
+			if (resolved.configuredRole) options.modelPatternFallbackRole = resolved.configuredRole;
 		} else if (resolved.error) {
 			if (
 				parsed.provider &&
@@ -1552,6 +1553,7 @@ export async function buildSessionOptions(
 				options.modelPattern = parsed.model.toLowerCase().startsWith(`${parsed.provider.toLowerCase()}/`)
 					? parsed.model
 					: `${parsed.provider}/${parsed.model}`;
+				if (resolved.configuredRole) options.modelPatternFallbackRole = resolved.configuredRole;
 			} else if (
 				!parsed.provider &&
 				((resolved.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))
@@ -1559,12 +1561,14 @@ export async function buildSessionOptions(
 				// Model not found in built-in registry — defer resolution to after extensions load
 				// (extensions may register additional providers/models via registerProvider)
 				options.modelPattern = parsed.model;
+				if (resolved.configuredRole) options.modelPatternFallbackRole = resolved.configuredRole;
 			} else {
 				process.stderr.write(`${chalk.red(resolved.error)}\n`);
 				process.exit(1);
 			}
 		} else if (resolved.model) {
 			options.model = resolved.model;
+			if (resolved.configuredRole) options.modelRole = resolved.configuredRole;
 			options.rebindModelAfterDiscovery = true;
 			// The recorded role must carry the effort the session actually starts
 			// at, or the first cycle back into `default` overrides it.

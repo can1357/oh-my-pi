@@ -621,6 +621,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
+	/** Role name when the session model was selected via an explicit role alias (e.g. CLI `--model pi/<role>`). */
+	modelRole?: string;
 	/**
 	 * Allow an explicit {@link model} to be rebound to its same-selector registry
 	 * entry after initial background discovery. The CLI enables this for models
@@ -4984,11 +4986,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (model) {
 				const initialModel = `${model.provider}/${model.id}`;
 				sessionManager.appendModelChange(initialModel);
-				// A deferred pattern's own retry role follows the explicit default entry, as
-				// the task executor records it, so chain lookup prefers the pattern's chain
+				// An explicit role's or deferred pattern's own retry role follows the explicit default
+				// entry, as the task executor records it, so chain lookup prefers the role's chain
 				// while resume still restores this model as the default.
-				if (modelPatternRetryFallbackRole) {
-					sessionManager.appendModelChange(initialModel, modelPatternRetryFallbackRole);
+				const retryRole = options.modelRole ?? modelPatternRetryFallbackRole;
+				if (retryRole && retryRole !== "default") {
+					sessionManager.appendModelChange(initialModel, retryRole);
 				}
 			}
 			if (!autoThinking) {
