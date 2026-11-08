@@ -723,6 +723,7 @@ export interface EmbedItem {
 	readonly content: string;
 }
 
+/** One derived vector waiting to be written, keyed to the memory and the exact text embedded. */
 export interface StagedEmbedding extends EmbedItem {
 	readonly json: string;
 }
@@ -739,6 +740,19 @@ const INSERT_LIVE_EMBEDDING_SQL = `
 	)
 `;
 
+/**
+ * Upsert each staged vector only if its memory is still live (not superseded) and its
+ * effective embedding text -- `COALESCE(embed_text, content)` for working memories,
+ * `content` for episodic ones -- still equals the text that was embedded. Returns the
+ * number of rows actually written, which is what gates callers' cache invalidation.
+ * `memory_embeddings` rows are only ever written here, so this is the one place that
+ * rejects the two stale writes of a slow `embed()` call: a late vector for a memory
+ * whose text changed after an update, and a late vector for a deleted memory.
+ *
+ * Relies on every `scheduleEmbedding` caller passing exactly the stored effective text
+ * (`remember`, `rememberBatch`, `updateWorking` -- which nulls `embed_text` -- and
+ * `consolidateToEpisodic`); a mismatched text is silently dropped, not re-embedded.
+ */
 export function insertLiveEmbeddings(db: Database, rows: readonly StagedEmbedding[], model: string): number {
 	using insertEmbedding = db.prepare(INSERT_LIVE_EMBEDDING_SQL);
 	let committed = 0;
@@ -780,12 +794,14 @@ async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]):
 				insertLiveEmbeddings(beam.db, rows, model),
 			);
 			const committed = insertMany(staged);
+			// A recall taken while these vectors were still generating cached an FTS-only ranking, and
 			// committing vectors changes what recall returns -- so that cache must be dropped, or the
 			// pre-embedding order keeps being served for the whole cache TTL. Gated on `committed`: a
-			// batch whose provider returned a short or empty matrix inserts nothing, changes no ranking,
-			// and invalidating there would only discard a still-valid cache. Only the query cache is
-			// affected; the polyphonic subject dictionary is built from facts/gists, which an embedding
-			// batch never touches.
+			// batch whose provider returned a short or empty matrix inserts nothing, and a row whose
+			// memory was updated or deleted while its vector was in flight is discarded instead of
+			// written; neither changes a ranking, and invalidating there would only discard a
+			// still-valid cache. Only the query cache is affected; the polyphonic subject dictionary
+			// is built from facts/gists, which an embedding batch never touches.
 			if (committed > 0) beam.caches.queryCache?.invalidate();
 		});
 	} catch (error) {
