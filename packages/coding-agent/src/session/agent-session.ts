@@ -7440,6 +7440,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.refreshSkills();
 	}
 
+	/** Rediscovers skills without rebuilding the system prompt's skill list. */
+	reloadSkills(): Promise<void> {
+		return this.#tools.reloadSkills();
+	}
+
 	/**
 	 * This session as the holder `skill://`, `/skill:` and autoload rediscover through when a skill
 	 * goes stale: a reloadable session refreshes its skills (also when the plugin registries replaced
@@ -9429,7 +9434,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				: undefined;
 			const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
 			const sessionAgentNotice = isUserQueuedMessage(message) ? this.#tools.takeSessionAgentNotice() : undefined;
-			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice) {
+			const skillNotice = isUserQueuedMessage(message) ? this.#tools.takeSkillNotice() : undefined;
+			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice || skillNotice) {
 				messages.splice(
 					xdevMountNoticeIndex,
 					0,
@@ -9437,6 +9443,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					...(toolRosterNotice ? [toolRosterNotice] : []),
 					...(evalPreludeNotice ? [evalPreludeNotice] : []),
 					...(sessionAgentNotice ? [sessionAgentNotice] : []),
+					...(skillNotice ? [skillNotice] : []),
 				);
 			}
 
@@ -11083,6 +11090,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Skills loaded by SDK (empty if --no-skills or skills: [] was passed) */
 	get skills(): readonly Skill[] {
 		return this.#tools.skills;
+	}
+
+	/** Skills the system prompt lists; behind {@link skills} after {@link reloadSkills}. */
+	get promptSkills(): readonly Skill[] {
+		return this.#tools.promptSkills;
 	}
 
 	/**
