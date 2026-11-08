@@ -6,6 +6,10 @@
 
 - Bash previews under the Nerd Font symbol preset show a single icon for `>/dev/null`, `2>/dev/null` and `&>/dev/null` instead of the `🔇 out`/`🔇 err`/`🔇 silent` labels
 
+### Fixed
+
+- Terminals without synchronized output (macOS Terminal.app) no longer flash duplicated rows while streaming text scrolls, or blank the screen and status line when finished rows move into scrollback
+
 ## [18.18.1] - 2026-11-08
 
 ### Added
