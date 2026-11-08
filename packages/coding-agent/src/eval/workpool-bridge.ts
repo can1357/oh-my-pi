@@ -79,16 +79,17 @@ export async function runEvalWorkpool(args: unknown, options: EvalWorkpoolBridge
 		if (tools?.length && options.session.getPlanModeState?.()?.enabled === true) {
 			throw new ToolError("Eval-defined tools are unavailable in plan mode.");
 		}
+		const customTools = tools?.length
+			? createEvalCustomTools(options.session, await describeEvalTools(options.session, tools, options.signal))
+			: [];
 		const policy = await resolveEffectiveSubagentPolicy({
 			session: options.session,
 			invocationKind: "eval",
 			assignment: `Create workpool ${requestedName ?? agent ?? "worker"}`,
 			...(agent ? { agent } : {}),
 			...(model !== undefined ? { perCallModel: model } : {}),
+			...(customTools.length > 0 ? { customTools } : {}),
 		});
-		const customTools = tools?.length
-			? createEvalCustomTools(options.session, await describeEvalTools(options.session, tools, options.signal))
-			: [];
 		const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
 		const registry = WorkPoolRegistry.global();
 		let name = requestedName ?? `${policy.agentName}-pool`;

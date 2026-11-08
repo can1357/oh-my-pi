@@ -42,6 +42,7 @@ import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
+import { isReservedChildToolName, reservedChildToolMessage } from "./reserved-tools";
 import { type ExecutorOptions, runSubprocess, type SubagentToolResult } from "./executor";
 import {
 	applyEligibleNestedPatches,
@@ -504,6 +505,13 @@ export function withTeamIrcTools(agent: AgentDefinition, teamIrc: boolean, planM
 export async function resolveEffectiveSubagentPolicy(
 	request: StructuredSubagentRequest,
 ): Promise<EffectiveSubagentPolicy> {
+	// Reserved completion tools are a name error, independent of agent validity.
+	// Fail before discovery or settings reload so no child work is allocated.
+	for (const tool of request.customTools ?? []) {
+		if (isReservedChildToolName(tool.name)) {
+			throw new StructuredSubagentError("preflight", reservedChildToolMessage(tool.name));
+		}
+	}
 	// A per-call model is approved against the operator settings behind any overlay, so reload those too.
 	await request.session.settings.reloadFromDisk({
 		includeParents: request.perCallModel !== undefined || request.seanceModel !== undefined,

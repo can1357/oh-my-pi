@@ -266,6 +266,7 @@ import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
+import { isReservedChildToolName, reservedChildToolMessage } from "./task/reserved-tools";
 import { isMainThread } from "./thread/identity";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import {
@@ -3859,6 +3860,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 		for (const tool of wrappedExtensionTools) {
+			// Startup-known collisions are task validation failures. Extension binding
+			// has already succeeded, so this must throw here rather than be logged as
+			// a factory or load diagnostic. Main sessions keep last-wins registration.
+			if (isSubagentSession && isReservedChildToolName(tool.name)) {
+				throw new Error(reservedChildToolMessage(tool.name));
+			}
 			toolRegistry.set(tool.name, tool);
 			builtInRegistryToolNames.delete(tool.name);
 		}
@@ -5311,6 +5318,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// registry and serialize activation so no update can overwrite a sibling.
 		const scheduledToolRegistrations = new WeakMap<RegisteredTool, Promise<void>>();
 		const scheduleToolRegistration = (registered: RegisteredTool, signal?: AbortSignal): Promise<void> => {
+			// A session_start registration cannot replace a child built-in. Refusing
+			// the overwrite leaves the built-in callable; it is not a task failure.
+			if (isSubagentSession && isReservedChildToolName(registered.definition.name)) return Promise.resolve();
 			const scheduled = scheduledToolRegistrations.get(registered);
 			if (scheduled) return scheduled;
 			const activationSignal = signal ?? AbortSignal.timeout(EXTENSION_HANDLER_TIMEOUT_MS);

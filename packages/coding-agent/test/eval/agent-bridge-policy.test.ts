@@ -17,6 +17,7 @@ import type { PlanModeState } from "../../src/plan-mode/state";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import type { AgentSession } from "../../src/session/agent-session";
 import * as taskDiscovery from "../../src/task/discovery";
+import * as evalTools from "../../src/task/eval-tools";
 import type { ExecutorOptions } from "../../src/task/executor";
 import * as taskExecutor from "../../src/task/executor";
 import * as isolationRunner from "../../src/task/isolation-runner";
@@ -578,6 +579,48 @@ describe("runEvalAgent", () => {
 		await expect(runEvalAgentAndWait({ prompt: "blank" }, { session: makeSession() })).rejects.toThrow(
 			"agent() subagent 'task' failed.",
 		);
+	});
+	it.each(["yield", "handback"] as const)(
+		"rejects agent() tools that resolve to reserved %s before spawn",
+		async name => {
+			mockAgents();
+			const runSpy = vi
+				.spyOn(taskExecutor, "runSubprocess")
+				.mockImplementation(async options => singleResult(options));
+			vi.spyOn(evalTools, "describeEvalTools").mockResolvedValue([
+				{
+					name,
+					description: `custom ${name}`,
+					parameters: { type: "object", properties: {} },
+					language: "python",
+				},
+			]);
+
+			await expect(runEvalAgent({ prompt: "hello", tools: [name] }, { session: makeSession() })).rejects.toThrow(
+				`tool name "${name}" is reserved`,
+			);
+			expect(runSpy).not.toHaveBeenCalled();
+		},
+	);
+
+	it("still spawns agent() when the resolved custom tool is not reserved", async () => {
+		mockAgents();
+		const runSpy = vi
+			.spyOn(taskExecutor, "runSubprocess")
+			.mockImplementation(async options => singleResult(options, { output: "plain" }));
+		vi.spyOn(evalTools, "describeEvalTools").mockResolvedValue([
+			{
+				name: "word_count",
+				description: "Count words",
+				parameters: { type: "object", properties: {} },
+				language: "js",
+			},
+		]);
+
+		const result = await runEvalAgentAndWait({ prompt: "hello", tools: ["word_count"] }, { session: makeSession() });
+
+		expect(result.text).toBe("plain");
+		expect(runSpy).toHaveBeenCalledTimes(1);
 	});
 });
 

@@ -1789,3 +1789,42 @@ describe("per-call model preflight", () => {
 		});
 	});
 });
+
+describe("reserved child tool names", () => {
+	function resolvedCustomTool(name: string) {
+		return createEvalCustomTools(session(), [
+			{
+				name,
+				description: `custom ${name}`,
+				parameters: { type: "object", properties: {} },
+				language: "python",
+			},
+		]);
+	}
+
+	it.each(["yield", "handback"] as const)(
+		"rejects a resolved %s custom tool for task and eval before any child executor runs",
+		async name => {
+			mockDiscovery();
+			const run = vi.spyOn(executorModule, "runSubprocess");
+			const customTools = resolvedCustomTool(name);
+			const message = `tool name "${name}" is reserved`;
+
+			for (const invocationKind of ["task", "eval"] as const) {
+				await expect(
+					resolveEffectiveSubagentPolicy(request({ customTools, invocationKind })),
+				).rejects.toMatchObject({ name: "StructuredSubagentError", message });
+			}
+			await expect(runStructuredSubagent(request({ customTools }))).rejects.toThrow(message);
+			expect(run).not.toHaveBeenCalled();
+		},
+	);
+
+	it("admits a nonreserved custom tool", async () => {
+		mockDiscovery();
+		const customTools = resolvedCustomTool("word_count");
+		const policy = await resolveEffectiveSubagentPolicy(request({ customTools }));
+		expect(policy.agent.name).toBe("worker");
+		expect(customTools.map(tool => tool.name)).toEqual(["word_count"]);
+	});
+});
