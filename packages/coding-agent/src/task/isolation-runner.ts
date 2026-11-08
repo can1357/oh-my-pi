@@ -23,6 +23,7 @@ import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { prompt } from "@oh-my-pi/pi-utils";
+import { preserveTemporaryArtifactsDir } from "../internal-urls/registry-helpers";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -470,6 +471,9 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				// Nothing changed since the run-end capture the caller already
 				// merged or applied: a branch now would only duplicate that work.
 				if (capture.fingerprint === handedOff) return;
+				// A late release captured new, unapplied work. Its patch is a
+				// recovery artifact even if the original turn was applied.
+				preserveTemporaryArtifactsDir(opts.artifactsDir);
 				const commitResult = await commitToBranch(
 					workspace.dir,
 					taskBaseline,

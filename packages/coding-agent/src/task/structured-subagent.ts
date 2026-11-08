@@ -28,7 +28,11 @@ import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
-import { registerTemporaryArtifactsDir } from "../internal-urls/registry-helpers";
+import {
+	cleanupTemporaryArtifactsDir,
+	preserveTemporaryArtifactsDir,
+	registerTemporaryArtifactsDir,
+} from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
@@ -734,10 +738,8 @@ async function leaseArtifacts(
 		return { sessionFile, artifactsDir, temporary: false, unregister: undefined };
 	}
 	// No session file: the run gets its own directory under the OS temp dir.
-	// `registerTemporaryArtifactsDir` bounds its life by the process, so a
-	// lease deliberately retained past the run (`retainArtifacts`, an isolated
-	// failure's recovery artifacts) still goes away with the process that is
-	// the only thing able to resolve it.
+	// Disposable output is bounded by the process. Recovery artifacts are
+	// explicitly promoted out of the lease before returning their paths.
 	const artifactsDir = path.join(
 		os.tmpdir(),
 		`${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${Snowflake.next()}`,
@@ -873,10 +875,7 @@ function buildExecutorOptions(
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		onRelease:
 			preparedSession !== undefined && lease.temporary
-				? async () => {
-						await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-						lease.unregister?.();
-					}
+				? () => cleanupTemporaryArtifactsDir(lease.artifactsDir)
 				: undefined,
 		parentTelemetry: session.getTelemetry?.(),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
@@ -1176,17 +1175,17 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			{ cause: error, result: settled },
 		);
 	} finally {
+		const preserveRecoveryArtifacts =
+			retainSalvagedArtifact ||
+			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
+		if (lease.temporary && preserveRecoveryArtifacts) preserveTemporaryArtifactsDir(lease.artifactsDir);
 		const shouldRetainArtifacts =
 			request.detached === true ||
-			retainSalvagedArtifact ||
+			preserveRecoveryArtifacts ||
 			((request.retainArtifacts || policy.preparedSession !== undefined) &&
-				(completedSuccessfully || hasValidStructuredOutput)) ||
-			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
+				(completedSuccessfully || hasValidStructuredOutput));
 		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
-		const cleanupArtifacts = async (): Promise<void> => {
-			await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-			lease.unregister?.();
-		};
+		const cleanupArtifacts = () => cleanupTemporaryArtifactsDir(lease.artifactsDir);
 		if (shouldCleanup) {
 			if (deferredCleanup) {
 				trackLateCleanup(deferredCleanup.then(cleanupArtifacts), {

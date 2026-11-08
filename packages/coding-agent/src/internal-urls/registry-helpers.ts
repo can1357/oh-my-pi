@@ -11,10 +11,9 @@ import { AgentRegistry } from "../registry/agent-registry";
 
 const extraArtifactsDirs = new Set<string>();
 /**
- * Registered dirs this process created under the OS temp dir and must delete
- * again. A retained lease deliberately outlives its run so `agent://<id>`
- * keeps resolving, but nothing resolves it once the process is gone, so the
- * process is its hard upper bound.
+ * Disposable transcript/output leases created by this process under the OS
+ * temp dir. Recovery artifacts are promoted out of this set: their returned
+ * filesystem paths remain useful after the creating process exits.
  */
 const temporaryArtifactsDirs = new Set<string>();
 let exitSweepArmed = false;
@@ -49,6 +48,19 @@ export function registerTemporaryArtifactsDir(dir: string): () => void {
 		temporaryArtifactsDirs.delete(dir);
 		unregister();
 	};
+}
+
+/** Transfer a lease to the user: recovery data is not disposable output. */
+export function preserveTemporaryArtifactsDir(dir: string): void {
+	temporaryArtifactsDirs.delete(dir);
+}
+
+/** Dispose only a lease, never a directory promoted to recovery storage. */
+export async function cleanupTemporaryArtifactsDir(dir: string): Promise<void> {
+	if (!temporaryArtifactsDirs.has(dir)) return;
+	await fs.promises.rm(dir, { recursive: true, force: true });
+	temporaryArtifactsDirs.delete(dir);
+	extraArtifactsDirs.delete(dir);
 }
 
 function armExitSweep(): void {
