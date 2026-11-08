@@ -438,6 +438,12 @@ fn kinds(
 
 /// `type [-afptP] name …`.
 pub fn type_(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
+	type_impl(ctx, args, false)
+}
+
+/// Descriptive `command -V` makes fresh PATH results absolute; ordinary
+/// `type`, cached results and operands containing a slash keep their spelling.
+fn type_impl(ctx: &mut Ctx<'_, '_>, args: &[BString], command_verbose: bool) -> R {
 	let o = match opts(ctx, args, b"afptP", b"", false) {
 		Ok(o) => o,
 		Err(st) => return done(st),
@@ -499,7 +505,15 @@ pub fn type_(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				Kind::Special => out.extend_from_slice(b" is a special shell builtin\n"),
 				Kind::File(p) => {
 					out.extend_from_slice(b" is ");
-					out.extend_from_slice(p);
+					if command_verbose && !name.contains(&b'/') && !p.starts_with(b"/") {
+						out.extend_from_slice(&probe::make_absolute(
+							&ctx.vp.cwd,
+							p,
+							ctx.k.engine.config().platform,
+						));
+					} else {
+						out.extend_from_slice(p);
+					}
 					out.push(b'\n');
 				},
 				Kind::Hashed(p) => {
@@ -531,7 +545,7 @@ pub fn command_v(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	if o.has(b'V') {
 		let mut status = i32::from(!o.rest.is_empty());
 		for name in o.rest {
-			if type_(ctx, &[BString::from("--"), name.clone()])?.status == 0 {
+			if type_impl(ctx, &[BString::from("--"), name.clone()], true)?.status == 0 {
 				status = 0;
 			}
 		}
