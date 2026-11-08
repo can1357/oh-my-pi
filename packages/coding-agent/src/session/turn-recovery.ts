@@ -543,40 +543,56 @@ export class TurnRecovery {
 			);
 			let candidate = pending;
 			let bound: PreparedModelAuth | undefined;
-			if (!revisionChanged) {
-				bound = await this.#resolveGovernedRoute(candidate, model, signal);
-			}
-			if (revisionChanged || !bound) {
-				const owner = pending.owner;
-				const evaluation = await this.#host.usageRouting?.evaluate(owner, this.#host.sessionId(), signal);
-				const plan =
-					owner.kind === "role"
-						? evaluation?.scope.roles.find(item => item.role === owner.role)
-						: evaluation?.scope.models?.find(item => item.selector === owner.selector);
-				const target = plan?.targets.find(
-					item =>
-						item.selector === pending.target.selector &&
-						item.provider === model.provider &&
-						item.modelId === model.id &&
-						item.baseUrl === model.baseUrl,
-				);
-				const account = evaluation?.accounts.find(
-					item =>
-						item.selector === target?.selector &&
-						item.credentialId === pending.credentialId &&
-						item.eligibility === "eligible" &&
-						(item.allowance === "included" || item.allowance === "spent") &&
-						item.quotaKeys.length > 0,
-				);
-				if (evaluation && target && account) {
-					candidate = {
-						...pending,
-						scopeId: evaluation.scope.id,
-						revision: evaluation.scope.revision,
-						target,
-					};
-					bound = await this.#resolveGovernedRoute(candidate, model, signal);
+			try {
+				if (!revisionChanged) {
+					try {
+						bound = await this.#resolveGovernedRoute(candidate, model, signal);
+					} catch (error) {
+						signal?.throwIfAborted();
+						bound = undefined;
+					}
 				}
+				if (revisionChanged || !bound) {
+					const owner = pending.owner;
+					const evaluation = await this.#host.usageRouting?.evaluate(owner, this.#host.sessionId(), signal);
+					const plan =
+						owner.kind === "role"
+							? evaluation?.scope.roles.find(item => item.role === owner.role)
+							: evaluation?.scope.models?.find(item => item.selector === owner.selector);
+					const target = plan?.targets.find(
+						item =>
+							item.selector === pending.target.selector &&
+							item.provider === model.provider &&
+							item.modelId === model.id &&
+							item.baseUrl === model.baseUrl,
+					);
+					const account = evaluation?.accounts.find(
+						item =>
+							item.selector === target?.selector &&
+							item.credentialId === pending.credentialId &&
+							item.eligibility === "eligible" &&
+							(item.allowance === "included" || item.allowance === "spent") &&
+							item.quotaKeys.length > 0,
+					);
+					if (evaluation && target && account) {
+						candidate = {
+							...pending,
+							scopeId: evaluation.scope.id,
+							revision: evaluation.scope.revision,
+							target,
+						};
+						try {
+							bound = await this.#resolveGovernedRoute(candidate, model, signal);
+						} catch (error) {
+							signal?.throwIfAborted();
+							bound = undefined;
+						}
+					}
+				}
+			} catch (error) {
+				signal?.throwIfAborted();
+				this.#governedRoute = undefined;
+				bound = undefined;
 			}
 			if (this.#host.usesRegistryAuth?.() !== true) {
 				this.#governedRoute = undefined;
@@ -1128,10 +1144,8 @@ export class TurnRecovery {
 					},
 				);
 				let switchedCredential = outcome.switched;
-				if (this.#governedRoute) {
-					const switched = outcome.switched
-						? await this.#switchGovernedSibling(activeModel, message.credentialId)
-						: false;
+				if (outcome.switched && this.#governedRoute) {
+					const switched = await this.#switchGovernedSibling(activeModel, message.credentialId);
 					if (switched) {
 						switchedCredential = true;
 					} else {
@@ -2731,7 +2745,8 @@ export class TurnRecovery {
 				"error",
 				this.#retryAbortController?.signal,
 			);
-			if (modelsAreEqual(this.#host.model(), sourceModel) && governorCandidates.length > 0) {
+			if (!modelsAreEqual(this.#host.model(), sourceModel)) return false;
+			if (governorCandidates.length > 0) {
 				const governorRole = governorCandidates[0]?.owner;
 				const roles = governorRole
 					? [governorRole.kind === "role" ? governorRole.role : governorRole.selector]
@@ -2742,6 +2757,7 @@ export class TurnRecovery {
 						return parsed ? [parsed] : [];
 					});
 					for (const selector of selectors) {
+						if (!modelsAreEqual(this.#host.model(), sourceModel)) return false;
 						if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
 						if (options?.refusalWalk && this.#refusalWalkTried.has(formatRetryFallbackBaseSelector(selector)))
 							continue;
@@ -2775,6 +2791,7 @@ export class TurnRecovery {
 								this.#retryAbortController?.signal?.throwIfAborted();
 								continue;
 							}
+							if (!modelsAreEqual(this.#host.model(), sourceModel)) return false;
 							if (governedAuth) {
 								governedCandidate = route;
 								break;
@@ -2792,6 +2809,7 @@ export class TurnRecovery {
 							this.#governedRoute = governedCandidate;
 							return true;
 						}
+						return false;
 					}
 				}
 			}
@@ -2801,7 +2819,7 @@ export class TurnRecovery {
 
 		for (const role of this.retryFallbackChainKeys(currentSelector)) {
 			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
-				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
+				if (!modelsAreEqual(this.#host.model(), sourceModel)) return false;
 				if (options?.refusalWalk && this.#refusalWalkTried.has(formatRetryFallbackBaseSelector(selector))) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -2826,6 +2844,7 @@ export class TurnRecovery {
 				} catch (error) {
 					if (!(error instanceof AIError.MissingApiKeyError)) throw error;
 				}
+				if (!modelsAreEqual(this.#host.model(), sourceModel)) return false;
 				if (!apiKey) continue;
 
 				const previousEditMode = this.#host.resolveActiveEditMode();
@@ -2854,7 +2873,7 @@ export class TurnRecovery {
 						handle: creditHandle,
 					};
 				}
-				if (applied) return true;
+				return applied;
 			}
 		}
 
@@ -3303,11 +3322,15 @@ export class TurnRecovery {
 				// Rotation is advisory: expired blocks or a repeatedly offered sibling
 				// must not retry beyond one pool traversal in this saga.
 				switchedCredential &&= rotationsRemaining > 0;
-				if (this.#governedRoute) {
-					const switched = switchedCredential
-						? await this.#switchGovernedSibling(currentModel, message.credentialId, rotateAbortController.signal)
-						: false;
-					if (!switched) {
+				if (switchedCredential && this.#governedRoute) {
+					const switched = await this.#switchGovernedSibling(
+						currentModel,
+						message.credentialId,
+						rotateAbortController.signal,
+					);
+					if (switched) {
+						switchedCredential = true;
+					} else {
 						this.#governedRoute = undefined;
 					}
 				}

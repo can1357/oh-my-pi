@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { Effort, type AssistantMessage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
@@ -33,7 +34,7 @@ async function setupCompatHarness(options: {
 		const provider = original(id);
 		return {
 			...provider,
-			governorAllowance: () => (id === PROVIDER ? ["primary"] : options.allowFallbackAllowance ? ["fallback"] : []),
+			governorAllowance: () => (id === PROVIDER ? ["primary"] : options.allowFallbackAllowance ? ["primary"] : []),
 			fetchUsage: async (params, ctx) => {
 				const report = await provider.fetchUsage(params, ctx);
 				if (report) for (const limit of report.limits) limit.observedAt = Date.now();
@@ -207,11 +208,15 @@ describe("recovery differential tests (governor ON vs OFF)", () => {
 					resolved: { apiKey: "ordinary-fallback-key", credentialId: x.pinnedId },
 				});
 				const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
-				expect(prepared).toBeDefined();
-				expect(prepared?.model.id).toBe("fallback");
-				// The unverified route has NO binding
-				const binding = typeof prepared?.resolved === "object" ? prepared.resolved?.usageRouteBinding : undefined;
-				expect(binding).toBeUndefined();
+				if (governorEnabled) {
+					expect(prepared).toBeDefined();
+					expect(prepared?.model.id).toBe("fallback");
+					const binding =
+						typeof prepared?.resolved === "object" ? prepared.resolved?.usageRouteBinding : undefined;
+					expect(binding).toBeUndefined();
+				} else {
+					expect(prepared).toBeUndefined();
+				}
 
 				expectNoStrayFetch(x.h);
 				expect(x.h.redemptionPosts()).toHaveLength(0);
@@ -383,11 +388,14 @@ describe("recovery differential tests (governor ON vs OFF)", () => {
 
 					// Next preparation call falls through without throwing and shows no binding
 					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
-					expect(prepared).toBeDefined();
-					const binding =
-						typeof prepared?.resolved === "object" ? prepared.resolved?.usageRouteBinding : undefined;
-					expect(binding).toBeUndefined();
-
+					if (governorEnabled) {
+						expect(prepared).toBeDefined();
+						const binding =
+							typeof prepared?.resolved === "object" ? prepared.resolved?.usageRouteBinding : undefined;
+						expect(binding).toBeUndefined();
+					} else {
+						expect(prepared).toBeUndefined();
+					}
 					expectNoStrayFetch(x.h);
 					expect(x.h.redemptionPosts()).toHaveLength(0);
 				} finally {
@@ -501,11 +509,14 @@ describe("recovery differential tests (governor ON vs OFF)", () => {
 					expect(retryScheduled).toBe(true);
 
 					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
-					expect(prepared).toBeDefined();
-					const binding =
-						typeof prepared?.resolved === "object" ? prepared.resolved?.usageRouteBinding : undefined;
-					expect(binding).toBeUndefined();
-
+					if (governorEnabled) {
+						expect(prepared).toBeDefined();
+						const binding =
+							typeof prepared?.resolved === "object" ? prepared.resolved?.usageRouteBinding : undefined;
+						expect(binding).toBeUndefined();
+					} else {
+						expect(prepared).toBeUndefined();
+					}
 					expectNoStrayFetch(x.h);
 					expect(x.h.redemptionPosts()).toHaveLength(0);
 				} finally {
@@ -603,7 +614,7 @@ describe("custom-auth sessions contract (CR3d zero-call spies)", () => {
 				model: "primary",
 				stopReason: "error",
 				timestamp: Date.now(),
-				errorMessage: "429 Rate limit reached",
+				errorMessage: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
 				usage: {
 					input: 0,
 					output: 0,
@@ -731,11 +742,17 @@ describe("pending route recovery without throwing (CR5 & A8)", () => {
 				return origValidate ? origValidate(binding, ctx) : true;
 			};
 
+			const routing = {
+				candidates: () => x.routing.candidates(owner, "s", x.source, x.sourceId, "error"),
+				refresh: x.routing.refresh.bind(x.routing),
+				evaluate: x.routing.evaluate.bind(x.routing),
+			};
+
 			const host = {
 				settings: x.settings,
 				usesRegistryAuth: () => true,
 				modelRegistry: x.registry,
-				usageRouting: x.routing,
+				usageRouting: routing,
 				agent: { state: { messages: [] } },
 				model: () => active,
 				sessionId: () => "s",
@@ -778,6 +795,241 @@ describe("pending route recovery without throwing (CR5 & A8)", () => {
 			expect(second?.model.id).toBe("fallback");
 			const binding = typeof second?.resolved === "object" ? second.resolved?.usageRouteBinding : undefined;
 			expect(binding).toBeUndefined();
+
+			expectNoStrayFetch(x.h);
+			expect(x.h.redemptionPosts()).toHaveLength(0);
+		} finally {
+			x.routing.dispose();
+		}
+	});
+});
+
+describe("discriminating failure and race behavior", () => {
+	test("model change during candidates await stops retry and does not overwrite selection", async () => {
+		const x = await setupCompatHarness({ governorEnabled: true, allowFallbackAllowance: true });
+		try {
+			let active = x.source;
+			let setModelCount = 0;
+
+			const alternate = {
+				provider: PROVIDER,
+				id: "user-selected-model",
+				api: "openai-completions",
+				baseUrl: "https://source.example.test",
+			} as unknown as typeof x.source;
+
+			const routing = {
+				candidates: async () => {
+					// Simulate concurrent user action while candidates is resolving
+					active = alternate;
+					return x.routing.candidates({ kind: "role", role: "task" }, "s", x.source, undefined, "error");
+				},
+				refresh: x.routing.refresh.bind(x.routing),
+				evaluate: x.routing.evaluate.bind(x.routing),
+			};
+
+			const host = {
+				settings: x.settings,
+				usesRegistryAuth: () => true,
+				modelRegistry: x.registry,
+				usageRouting: routing,
+				agent: { state: { messages: [] } },
+				model: () => active,
+				sessionId: () => "s",
+				thinkingLevel: () => undefined,
+				configuredThinkingLevel: () => undefined,
+				thinkingLevelCeiling: () => undefined,
+				contextFitsModel: () => true,
+				resolveActiveEditMode: () => "hashline",
+				setModelWithProviderSessionReset: async (model: typeof active) => {
+					setModelCount++;
+					active = model;
+				},
+				sessionManager: {
+					appendModelChange: () => {},
+					getSessionId: () => "s",
+					getBranchView: () => [],
+					getBranch: () => [],
+				},
+				setThinkingLevel: () => {},
+				syncAfterModelChange: async () => {},
+				emitSessionEvent: async () => {},
+				maybeAutoRedeemReset: async () => ({ restored: false }),
+				configWarnings: [],
+				abortInProgress: () => false,
+				isDisposed: () => false,
+				streamingEditAbortTriggered: () => false,
+				promptGeneration: () => 0,
+				promptSequence: () => 0,
+				textOutputCommitted: () => false,
+				persistedAssistantEntryId: () => undefined,
+				sessionMessageAlreadyPersisted: () => true,
+				waitForSessionMessagePersistence: async () => {},
+				appendSessionMessage: () => {},
+				scheduleAgentContinue: () => {},
+			} as unknown as TurnRecoveryHost;
+
+			const recovery = new TurnRecovery(host, { deferFallbackChainValidation: true });
+			const errorMessage = {
+				role: "assistant",
+				content: [],
+				api: "openai-completions",
+				provider: PROVIDER,
+				model: "primary",
+				stopReason: "error",
+				timestamp: Date.now(),
+				errorMessage:
+					"Codex error event: This content was flagged for possible cybersecurity risk. (code=cyber_policy)",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			} as AssistantMessage;
+
+			const retried = await recovery.handleRetryableError(errorMessage);
+			expect(retried).toBe(false);
+			// The user's selection was preserved and not overwritten
+			expect(active).toBe(alternate);
+			expect(setModelCount).toBe(0);
+
+			expectNoStrayFetch(x.h);
+			expect(x.h.redemptionPosts()).toHaveLength(0);
+		} finally {
+			x.routing.dispose();
+		}
+	});
+
+	test("pending route resolveGovernedRoute throwing MissingApiKeyError clears route without throwing", async () => {
+		const x = await setupCompatHarness({ governorEnabled: true, allowFallbackAllowance: true });
+		try {
+			const owner = { kind: "role", role: "task" } as const;
+			let active = x.source;
+			let throwResolutionError = false;
+
+			const origGetApiKey = x.registry.getApiKeyWithCredentialForProvider.bind(x.registry);
+			x.registry.getApiKeyWithCredentialForProvider = async (provider, sessionId, options) => {
+				if (throwResolutionError) {
+					throw new AIError.MissingApiKeyError("synthetic missing key");
+				}
+				return origGetApiKey(provider, sessionId, options);
+			};
+
+			const routing = {
+				candidates: () => x.routing.candidates(owner, "s", x.source, x.sourceId, "error"),
+				refresh: x.routing.refresh.bind(x.routing),
+				evaluate: x.routing.evaluate.bind(x.routing),
+			};
+
+			const host = {
+				settings: x.settings,
+				usesRegistryAuth: () => true,
+				modelRegistry: x.registry,
+				usageRouting: routing,
+				agent: { state: { messages: [] } },
+				model: () => active,
+				sessionId: () => "s",
+				thinkingLevel: () => undefined,
+				configuredThinkingLevel: () => undefined,
+				thinkingLevelCeiling: () => undefined,
+				contextFitsModel: () => true,
+				resolveActiveEditMode: () => "hashline",
+				setModelWithProviderSessionReset: async (model: typeof active) => {
+					active = model;
+				},
+				sessionManager: { appendModelChange: () => {}, getSessionId: () => "s" },
+				setThinkingLevel: () => {},
+				syncAfterModelChange: async () => {},
+				emitSessionEvent: async () => {},
+				configWarnings: [],
+			} as unknown as TurnRecoveryHost;
+
+			const recovery = new TurnRecovery(host, { deferFallbackChainValidation: true });
+			const current = async () => ({
+				model: x.source,
+				apiKey: () => undefined,
+				resolved: { apiKey: "source", credentialId: x.sourceId },
+			});
+
+			const first = await recovery.prepareGovernedModelCall(x.source, current, owner);
+			expect(first?.model.id).toBe("fallback");
+
+			// Cause resolution on pending route to throw MissingApiKeyError
+			throwResolutionError = true;
+
+			const fallbackCurrent = async () => ({
+				model: active,
+				apiKey: () => undefined,
+				resolved: { apiKey: "fallback-key", credentialId: x.pinnedId },
+			});
+
+			// Must not throw, must clear zombie route, and fall through
+			const second = await recovery.prepareGovernedModelCall(active, fallbackCurrent, owner);
+			expect(second).toBeDefined();
+			expect(second?.model.id).toBe("fallback");
+			const binding = typeof second?.resolved === "object" ? second.resolved?.usageRouteBinding : undefined;
+			expect(binding).toBeUndefined();
+
+			expectNoStrayFetch(x.h);
+			expect(x.h.redemptionPosts()).toHaveLength(0);
+		} finally {
+			x.routing.dispose();
+		}
+	});
+
+	test("pending route resolveGovernedRoute with aborted signal propagates abort", async () => {
+		const x = await setupCompatHarness({ governorEnabled: true, allowFallbackAllowance: true });
+		try {
+			const owner = { kind: "role", role: "task" } as const;
+			let active = x.source;
+
+			const routing = {
+				candidates: () => x.routing.candidates(owner, "s", x.source, x.sourceId, "error"),
+				refresh: x.routing.refresh.bind(x.routing),
+				evaluate: x.routing.evaluate.bind(x.routing),
+			};
+
+			const host = {
+				settings: x.settings,
+				usesRegistryAuth: () => true,
+				modelRegistry: x.registry,
+				usageRouting: routing,
+				agent: { state: { messages: [] } },
+				model: () => active,
+				sessionId: () => "s",
+				thinkingLevel: () => undefined,
+				configuredThinkingLevel: () => undefined,
+				thinkingLevelCeiling: () => undefined,
+				contextFitsModel: () => true,
+				resolveActiveEditMode: () => "hashline",
+				setModelWithProviderSessionReset: async (model: typeof active) => {
+					active = model;
+				},
+				sessionManager: { appendModelChange: () => {}, getSessionId: () => "s" },
+				setThinkingLevel: () => {},
+				syncAfterModelChange: async () => {},
+				emitSessionEvent: async () => {},
+				configWarnings: [],
+			} as unknown as TurnRecoveryHost;
+
+			const recovery = new TurnRecovery(host, { deferFallbackChainValidation: true });
+			const current = async () => ({
+				model: x.source,
+				apiKey: () => undefined,
+				resolved: { apiKey: "source", credentialId: x.sourceId },
+			});
+
+			const first = await recovery.prepareGovernedModelCall(x.source, current, owner);
+			expect(first?.model.id).toBe("fallback");
+
+			const controller = new AbortController();
+			controller.abort();
+
+			// Aborted signal must be honored by throwing
+			await expect(recovery.prepareGovernedModelCall(active, current, owner, controller.signal)).rejects.toThrow();
 
 			expectNoStrayFetch(x.h);
 			expect(x.h.redemptionPosts()).toHaveLength(0);

@@ -180,7 +180,11 @@ async function preparationHarness(kind: "unavailable" | "context" | "effort" | "
 		settings: x.settings,
 		usesRegistryAuth: () => true,
 		modelRegistry: x.registry,
-		usageRouting: { candidates: async () => routes },
+		usageRouting: {
+			candidates: async () => routes,
+			refresh: x.routing.refresh.bind(x.routing),
+			evaluate: x.routing.evaluate.bind(x.routing),
+		},
 		model: () => active,
 		sessionId: () => "s",
 		thinkingLevel: () => undefined,

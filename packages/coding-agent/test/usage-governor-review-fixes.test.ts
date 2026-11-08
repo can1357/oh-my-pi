@@ -357,6 +357,11 @@ for (const failure of ["usage", "policy"] as const) {
 					expect(
 						typeof prepared?.resolved === "object" && prepared.resolved?.usageRouteBinding?.credentialId,
 					).toBe(selection.siblingId);
+				} else if (siblingState === "later") {
+					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
+					expect(
+						typeof prepared?.resolved === "object" && prepared.resolved?.usageRouteBinding?.credentialId,
+					).toBe(x.sourceId);
 				} else {
 					const prepared = await recovery.prepareGovernedModelCall(active, current, owner);
 					expect(prepared).toBeDefined();
