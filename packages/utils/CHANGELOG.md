@@ -39,6 +39,10 @@
 
 - `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
 
+### Fixed
+
+- Relaxed JSON parsing now keeps `__proto__` keys as own properties instead of letting them replace the result object's prototype ([#17829](https://github.com/can1357/oh-my-pi/pull/17829) by [@xiong-wei1](https://github.com/xiong-wei1))
+
 ## [18.15.0] - 2026-11-01
 
 ### Added
