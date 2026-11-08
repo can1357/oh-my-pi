@@ -344,7 +344,6 @@ describe("Composer prepaint", () => {
 				undefined,
 				undefined,
 				undefined,
-				undefined,
 				composer,
 			);
 			vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
@@ -420,7 +419,6 @@ describe("Composer prepaint", () => {
 				undefined,
 				undefined,
 				undefined,
-				undefined,
 				adoptedComposer,
 			);
 			lease.adopt();
@@ -470,7 +468,6 @@ describe("Composer prepaint", () => {
 		const mode = new InteractiveMode(
 			testSession.session,
 			"test",
-			undefined,
 			undefined,
 			undefined,
 			undefined,
@@ -531,7 +528,6 @@ describe("Composer prepaint", () => {
 			undefined,
 			undefined,
 			undefined,
-			undefined,
 			lease.composer,
 		);
 		lease.adopt();
@@ -559,7 +555,6 @@ describe("Composer prepaint", () => {
 		const mode = new InteractiveMode(
 			testSession.session,
 			"test",
-			undefined,
 			undefined,
 			undefined,
 			undefined,
@@ -640,7 +635,6 @@ describe("Composer prepaint", () => {
 		const mode = new InteractiveMode(
 			testSession.session,
 			"test",
-			undefined,
 			undefined,
 			undefined,
 			undefined,
@@ -774,7 +768,6 @@ describe("Composer prepaint", () => {
 			mode = new InteractiveMode(
 				testSession.session,
 				"9.9.9",
-				undefined,
 				undefined,
 				undefined,
 				undefined,

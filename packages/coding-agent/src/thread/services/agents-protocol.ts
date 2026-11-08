@@ -3,7 +3,8 @@
  * worker's proxies to the main thread's instances (see `./agents`).
  */
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import type { AdoptOptions } from "../../registry/agent-lifecycle";
+import type { IrcWaitFilter } from "../../irc/bus";
+import type { AdoptOptions, AgentReleaseOptions } from "../../registry/agent-lifecycle";
 import type {
 	AgentHistorySummary,
 	AgentRef,
@@ -64,7 +65,7 @@ export type AgentLifecycleProtocol = {
 	isParking: RpcMethod<[id: string, expected?: AgentRefExpectation], boolean>;
 	park: RpcMethod<[id: string], void>;
 	ensureLive: RpcMethod<[id: string], AgentSessionHandle>;
-	release: RpcMethod<[id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }], boolean>;
+	release: RpcMethod<[id: string, expected?: AgentRefExpectation, options?: AgentReleaseOptions], boolean>;
 };
 
 /** Result row of `IrcBusApi.unansweredSends`. */
@@ -76,13 +77,13 @@ export interface UnansweredSend {
 
 /** `IrcBusApi` over the link. */
 export type IrcBusProtocol = {
-	send: RpcMethod<[msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean }], IrcDeliveryReceipt>;
+	send: RpcMethod<[msg: Omit<IrcMessage, "id" | "ts">], IrcDeliveryReceipt>;
 	sentSince: RpcMethod<[from: string, to: string, sinceTs: number], boolean>;
 	unansweredSends: RpcMethod<[from: string, sinceTs: number], UnansweredSend[]>;
 	wait: RpcMethod<
 		[
 			agentId: string,
-			filter: { from?: string },
+			filter: IrcWaitFilter,
 			timeoutMs: number,
 			signal?: AbortSignal,
 			options?: { drainPending?: boolean },

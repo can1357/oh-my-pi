@@ -161,6 +161,52 @@ describe("ModelRegistry", () => {
 		expect(recovered.stderr).toBe("");
 	});
 
+	test("keeps an authHeader extension provider's cached catalog when a forced refresh fails (#18227)", async () => {
+		const modelsPath = path.join(tmpDir, "models.yaml");
+		let fail = false;
+		const register = (target: ModelRegistry) =>
+			target.registerProvider(
+				"auth-ext",
+				{
+					baseUrl: "https://auth-ext.example.test/v1",
+					apiKey: "literal-test-key",
+					authHeader: true,
+					api: "openai-completions",
+					fetchDynamicModels: async () => {
+						if (fail) throw new Error("HTTP 503");
+						return [
+							{
+								id: "auth-model",
+								name: "Auth Model",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 128000,
+								maxTokens: 4096,
+							},
+						];
+					},
+				},
+				"ext://auth-ext",
+			);
+		register(registry);
+		await registry.refreshProvider("auth-ext", "online");
+		expect(registry.find("auth-ext", "auth-model")).toBeDefined();
+
+		// Each step runs in a fresh registry, as separate `omp` invocations do.
+		fail = true;
+		const failedRefresh = new ModelRegistry(authStorage, modelsPath);
+		register(failedRefresh);
+		await failedRefresh.refreshProvider("auth-ext", "online");
+		const kept = failedRefresh.find("auth-ext", "auth-model");
+		expect(await kept?.resolveHeaders?.()).toEqual({ Authorization: "Bearer literal-test-key" });
+
+		const nextLaunch = new ModelRegistry(authStorage, modelsPath);
+		register(nextLaunch);
+		await nextLaunch.refreshRuntimeProviders();
+		expect(nextLaunch.find("auth-ext", "auth-model")).toBeDefined();
+	});
+
 	test("warns for nested fixed-field compat keys but accepts open extraBody payloads", async () => {
 		await Bun.write(
 			path.join(tmpDir, "models.yaml"),

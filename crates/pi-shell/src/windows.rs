@@ -14,7 +14,7 @@ use winreg::{RegKey, enums::HKEY_LOCAL_MACHINE};
 
 /// Add Git for Windows' tool directories to the shell's starting `PATH` in
 /// `vars`, translating MSYS2-style entries to Windows paths.
-pub fn configure_windows_path(vars: &mut HashMap<String, String>) {
+pub fn configure_windows_path<S: std::hash::BuildHasher>(vars: &mut HashMap<String, String, S>) {
 	let GitDiscovery { install_roots, paths: git_paths } = discover_git();
 	if install_roots.is_empty() && git_paths.is_empty() {
 		return;

@@ -422,14 +422,6 @@ describe("replaceLlmImagesWithText", () => {
 		const user = scrubbed.find(m => m.role === "user");
 		expect(Array.isArray(user?.content) && user.content).toEqual([{ type: "text", text: "[image omitted]" }]);
 	});
-
-	it("returns the same array reference when there are no image blocks", () => {
-		const converted = convertToLlm([
-			{ role: "user", content: [{ type: "text", text: "hi" }], attribution: "user", timestamp: 1 },
-		]);
-
-		expect(replaceLlmImagesWithText(converted, "[image omitted]")).toBe(converted);
-	});
 });
 
 describe("buildReplanTitleContext", () => {

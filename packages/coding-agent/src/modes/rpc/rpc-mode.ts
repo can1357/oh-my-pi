@@ -1422,6 +1422,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			supportedProtocolVersions: [1, 2],
 			maxFrameBytes: MAX_RPC_FRAME_BYTES,
 			maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
+			supportsBashExcludeFromContext: true,
 		}),
 	);
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
@@ -1569,6 +1570,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		}
 
 		rerenderMessage(): void {
+			// No transcript is drawn in RPC mode
+		}
+
+		refreshTranscript(): void {
 			// No transcript is drawn in RPC mode
 		}
 
@@ -2629,7 +2634,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// =================================================================
 
 			case "bash": {
-				const result = await session.executeBash(command.command);
+				// Reject rather than coerce: a falsy non-boolean such as `null` would silently share the output.
+				if (command.excludeFromContext !== undefined && typeof command.excludeFromContext !== "boolean") {
+					return error(id, "bash", "excludeFromContext must be a boolean");
+				}
+				const result = await session.executeBash(command.command, undefined, {
+					excludeFromContext: command.excludeFromContext,
+				});
 				return success(id, "bash", result);
 			}
 

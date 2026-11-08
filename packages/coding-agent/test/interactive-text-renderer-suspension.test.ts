@@ -45,7 +45,7 @@ describe("assistant text renderers of a suspended extension", () => {
 		});
 		term = new VirtualTerminal(120, 32);
 		const composer = new Composer({ terminal: term });
-		mode = new InteractiveMode(session, "test", undefined, () => {}, undefined, undefined, new EventBus(), composer);
+		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, new EventBus(), composer);
 	});
 
 	afterEach(async () => {
@@ -66,6 +66,7 @@ describe("assistant text renderers of a suspended extension", () => {
 			tools: new Map(),
 			assistantThinkingRenderers: [],
 			assistantTextRenderers: [({ text }) => text.replace("now", "NOW")],
+			transcriptPresenters: [],
 			linkSchemes: [],
 			fileWriteFallbackHandlers: [],
 			fileDeleteFallbackHandlers: [],

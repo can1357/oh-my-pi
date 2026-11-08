@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type AuthStorage, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { type AuthStorage, type Context, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { ModelRegistry, type ProviderConfigInput } from "../../src/config/model-registry";
@@ -35,6 +35,8 @@ function modelDefinition(id: string): ModelDefinition {
 interface StreamCalls {
 	apiKeys: (string | undefined)[];
 	aborted: boolean;
+	/** `context.tools` of each request, when recorded. */
+	tools?: Context["tools"][];
 }
 
 /** `fetch-*` models request this host's `/ok`, `/hold` or `/fail` through the stream's `fetch` option. */
@@ -47,9 +49,10 @@ const FETCH_PATHS: Record<string, string> = { "fetch-model": "/ok", "fetch-hold"
  * (status line, then each body chunk), reporting a failure as `<error name>: <message>`.
  */
 function mainOnlyStream(calls: StreamCalls): NonNullable<ProviderConfigInput["streamSimple"]> {
-	return (model, _context, options?: SimpleStreamOptions) => {
+	return (model, context, options?: SimpleStreamOptions) => {
 		if (model.id === "throw-model") throw new Error("scripted main-thread failure");
 		calls.apiKeys.push(typeof options?.apiKey === "string" ? options.apiKey : undefined);
+		calls.tools?.push(context.tools);
 		const stream = new AssistantMessageEventStream();
 		const message = (text: string, stopReason: "stop" | "aborted" | "error", errorMessage?: string) => ({
 			role: "assistant" as const,
@@ -297,6 +300,28 @@ describe("worker model registry mirror", () => {
 			.stream(registry, PROVIDER, "throw-model")
 			.then(() => "resolved", failureMessage);
 		expect(workerFailure).toBe(failure);
+	});
+
+	it("streams a worker request whose tools carry class instances, handing main only their tool definitions", async () => {
+		expect(await probe.providerModels(registry, PROVIDER)).toBe("[]");
+		const calls: StreamCalls = { apiKeys: [], aborted: false, tools: [] };
+		registry.registerProvider(PROVIDER, runtimeConfig(calls), SOURCE);
+		await flushToMirrors();
+
+		expect(await probe.streamWithTools(registry, PROVIDER, "runtime-model")).toMatchObject({
+			stopReason: "stop",
+			text: "hello",
+		});
+		// Main receives declaration fields only: no `session`, `label` or other live tool state.
+		const sentKeys = calls.tools?.map(tools =>
+			tools?.map(tool =>
+				Object.entries(tool)
+					.filter(([, value]) => value !== undefined)
+					.map(([key]) => key)
+					.sort(),
+			),
+		);
+		expect(sentKeys).toEqual([[["description", "name", "parameters"]]]);
 	});
 
 	it("runs the worker's fetch override for a main-side custom API, streaming the response body back", async () => {

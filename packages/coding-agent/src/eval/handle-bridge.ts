@@ -1,5 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { AsyncJob, AsyncJobManagerApi } from "../async";
+import { type AsyncJob, type AsyncJobManagerApi, agentProgress } from "../async";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -140,18 +140,18 @@ function emitProgress(
 	previousProgress: unknown,
 ): unknown {
 	if (!emitStatus || !("job" in resolved)) return previousProgress;
-	const progress = resolved.job.latestDetails?.progress;
-	const first = Array.isArray(progress) ? progress[0] : undefined;
-	if (!isRecord(first) || first === previousProgress) return previousProgress;
-	const task = typeof first.assignment === "string" ? first.assignment : first.task;
+	const id = resolved.job.agentId ?? resolved.job.id;
+	const progress = agentProgress(resolved.job.latestDetails, id);
+	if (!progress || progress === previousProgress) return previousProgress;
+	const task = typeof progress.assignment === "string" ? progress.assignment : progress.task;
 	const taskPreview = typeof task === "string" ? task.split("\n")[0]?.slice(0, 120) : undefined;
 	emitStatus({
-		...first,
+		...progress,
 		op: "agent",
-		id: resolved.job.agentId ?? resolved.job.id,
+		id,
 		taskPreview: taskPreview || undefined,
 	});
-	return first;
+	return progress;
 }
 
 /** Largest setTimeout delay before 32-bit overflow (Node/Bun warn and fire in ~1ms past this). */
@@ -209,9 +209,18 @@ export async function runEvalWait(
 ): Promise<{ items: EvalHandleSnapshot[] }> {
 	const { items, timeoutMs } = parseRefs(args);
 	const resolved = items.map(item => resolveHandle(item, options));
+	// Worker job rows are snapshots: re-read each row when it settles, before
+	// another handle can hold this wait open past the row's retention.
+	const refresh = (handle: ResolvedHandle): void => {
+		if ("job" in handle) handle.job = handle.manager.getJob(handle.ref.id) ?? handle.job;
+	};
+	for (const handle of resolved) {
+		if ("job" in handle) void handle.job.promise.then(() => refresh(handle));
+	}
 	const emittedProgress = new Map<string, unknown>();
 	const emitLatestProgress = (handle: ResolvedHandle): void => {
-		if (!("job" in handle)) return;
+		if (!options.emitStatus || !("job" in handle)) return;
+		refresh(handle);
 		const progress = emitProgress(handle, options.emitStatus, emittedProgress.get(handle.ref.id));
 		if (progress) emittedProgress.set(handle.ref.id, progress);
 	};
@@ -242,7 +251,10 @@ export async function runEvalWait(
 				clearInterval(interval);
 				for (const release of releaseHolds) release();
 			}
-			for (const handle of resolved) emitLatestProgress(handle);
+			for (const handle of resolved) {
+				refresh(handle);
+				emitLatestProgress(handle);
+			}
 			if (outcome === "aborted") {
 				for (const handle of resolved) cancelResolved(handle, options.signal?.reason);
 				await Promise.allSettled(

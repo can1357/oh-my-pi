@@ -1047,6 +1047,38 @@ describe("Streamed Markdown equals a one-shot render across the frozen prefix", 
 		const after = frameWork(`${doc}$$ E = mc^2 $$ holds.`);
 		expect(after.lexed).toBeLessThan(closing.lexed / 4);
 	});
+
+	it("a list item keeps its formatted rows while a nested bullet's `-` is typed under it", () => {
+		const item =
+			'3. **Platform choice**: the requirement is "preferably an Android camera app" for the final wearable, ' +
+			"but the fastest practical working prototype on this Mac (darwin arm64) would be... Options:\n";
+		const full =
+			"Key engineering decisions:\n" +
+			"1. **Model selection**: lightweight, on-device detection. Options:\n" +
+			"   - YOLOv8n / YOLO11n (Ultralytics) — fast on CPU/GPU\n" +
+			"   - MediaPipe\n" +
+			"2. **Latency budget**: capture → detect → decide → speak.\n" +
+			item +
+			"   - Python desktop prototype using macOS camera (AVFoundation via av/cv2/AVFoundation)\n";
+		const itemEnd = full.indexOf(item) + item.length - 1;
+		const streaming = new Markdown("", 0, 0, THEME);
+		streaming.transientRenderCache = true;
+		let itemRows: string[] | undefined;
+		for (let len = full.indexOf(item) + "3. **Platform choice**: the requirement".length; len <= full.length; len++) {
+			clearRenderCache();
+			streaming.setText(full.slice(0, len));
+			const rows = streaming.render(77);
+			const text = rows.map(row => Bun.stripANSI(row)).join("\n");
+			expect(text).toContain("3. Platform choice: the requirement");
+			expect(text).not.toContain("**");
+			if (len === itemEnd) itemRows = rows.slice();
+			// Until the bullet's text arrives, the item renders exactly as it did before its `-` line began.
+			if (len > itemEnd && full.slice(itemEnd, len).trim() === "-") expect(rows).toEqual(itemRows!);
+		}
+		streaming.transientRenderCache = false;
+		clearRenderCache();
+		expect(streaming.render(77)).toEqual(renderCold(full, 77));
+	});
 });
 
 describe("Markdown OSC 8 tail normalization across streaming appends", () => {

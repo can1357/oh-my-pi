@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [18.18.1] - 2026-11-08
+
+### Changed
+
+- The extension now requests `scripting` and access to all sites (Chrome lists "Read and change all your data on all websites"); it uses them only to empty another extension's frames in a tab omp is driving, when Chrome refuses it the debugger there ([#16908](https://github.com/can1357/oh-my-pi/pull/16908) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed a password manager's inline autofill menu locking omp out of a tab it drives: the extension empties and hides such frames in that tab and retries the attach or command Chrome refused ([#16908](https://github.com/can1357/oh-my-pi/pull/16908) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

@@ -14,10 +14,11 @@ use alloc::vec::Vec;
 
 use super::lex::{Ctx, T};
 use crate::bash::syntax::{
-	ast::{CompleteCommand, List, ParseWarning},
+	ast::{CompleteCommand, ParseWarning},
 	features::{AliasLookup, Features},
-	parser::{ParseError, ParseErrorKind, Resume, finish},
+	parser::{ParseError, ParseErrorKind, Resume},
 	span::{Pos, Span},
+	tree::{List, Tree},
 };
 
 /// Incremental zsh parser over one source: what [`crate::bash::syntax::Parser`]
@@ -42,6 +43,17 @@ impl<'s> ZshParser<'s> {
 	/// [`Features::ZSH`].
 	pub fn new(src: &'s [u8], feat: Features, aliases: &'s dyn AliasLookup) -> Self {
 		Self { cx: Ctx::new(src, 0, 1, feat, aliases), failed: false }
+	}
+
+	/// See [`crate::bash::syntax::Parser::recycle`].
+	pub fn recycle(&mut self, mut tree: Tree) {
+		tree.clear();
+		self.cx.t = tree;
+	}
+
+	/// See [`crate::bash::syntax::Parser::take_tree`].
+	pub fn take_tree(&mut self) -> Tree {
+		core::mem::take(&mut self.cx.t)
 	}
 
 	/// Resume at `pos` (from an earlier [`ZshParser::pos`] over the same
@@ -94,21 +106,27 @@ impl<'s> ZshParser<'s> {
 		loop {
 			let cx = &mut self.cx;
 			cx.docs.clear();
+			cx.doc_nodes.clear();
+			cx.t.clear();
 			cx.alias_uses.clear();
 			cx.msgs.clear();
 			cx.errflag = false;
 			cx.lexstop = false;
-			let (ok, items) = cx.parse_event_top();
+			cx.cmdstack.clear();
+			cx.eof_stack = None;
+			let (ok, list) = cx.parse_event_top();
 			if ok && !cx.errflag {
-				let lo = items.first().map_or(0, |i| i.and_or.span.lo);
-				let hi = items.last().map_or(lo, |i| i.and_or.span.hi);
-				let mut list = List { items };
-				finish::fill_docs(&mut list, &cx.docs);
-				let node_count = finish::assign_ids(&mut list);
+				let items = List::of(&cx.t, list).items();
+				let lo = items.first().map_or(0, |i| i.and_or().span().lo);
+				let hi = items.last().map_or(lo, |i| i.and_or().span().hi);
+				debug_assert_eq!(cx.t.scratch_len(), 0, "a builder left children on the scratch stack");
+				cx.fill_docs();
+				let node_count = cx.t.assign_ids(list.index());
 				return Some(Ok(CompleteCommand {
 					span: Span::new(lo, hi),
 					line: cx.ev_line,
-					list,
+					tree: core::mem::take(&mut cx.t),
+					root: list,
 					node_count,
 					source_replay: false,
 					aliases: core::mem::take(&mut cx.alias_uses),
@@ -123,6 +141,26 @@ impl<'s> ZshParser<'s> {
 				return None;
 			}
 		}
+	}
+
+	/// zsh's `cmdstack` (`CS_*` codes, outermost first; name them with
+	/// [`super::cmdname`]) when the input ran out in the last event parsed:
+	/// the constructs `PS2`'s `%_` shows when interactive zsh asks for
+	/// another line (`if then`, `for dquote cmdsubst`, `cmdand`,
+	/// `heredoc`).
+	///
+	/// Describes the event the last [`ZshParser::next_command`] call parsed,
+	/// until the next call; empty when the input never ran out in that
+	/// event or ran out with nothing open. Non-empty means interactive zsh
+	/// would have asked for another line, whatever the call returned: `None`,
+	/// an error at the end of the input, or a command whose here-document
+	/// the end of input cut short (`cat <<E` → `heredoc`). As
+	/// for zsh, the source should end with the newline of the last line
+	/// read: without it, end of input can be met (and recorded) while a
+	/// token is still being read, before the construct it ends is open
+	/// (`a |`).
+	pub fn cmdstack(&self) -> &[u8] {
+		self.cx.eof_stack.as_deref().unwrap_or_default()
 	}
 
 	/// The error for the messages zsh printed.

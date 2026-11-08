@@ -6,10 +6,11 @@
 //! `getstat`), of the test-mode half of `parse.c`'s condition parser
 //! (`par_cond`, `par_cond_1`, `par_cond_2`, `par_cond_double`,
 //! `par_cond_triple`, `par_cond_multi`, `get_cond_num`), of `builtin.c`
-//! `bin_test`/`testlex`, and of `Modules/regex.c` `zcond_regex_match` for
-//! `=~` (POSIX ERE through the engine's ERE). Statuses are zsh's: 0 true,
-//! 1 false, 2 error, 3 "no such option" from `-o`. No condition module
-//! exists, so every other `-name` condition is `unknown condition`.
+//! `bin_test`/`testlex`. Statuses are zsh's: 0 true, 1 false, 2 error, 3
+//! "no such option" from `-o`. Every other `-name` condition, and `=~`
+//! (zsh/regex's `-regex-match`, zsh/pcre's `-pcre-match` under
+//! `REMATCH_PCRE`), is a module condition: [`zsh_module::cond_module`]
+//! finds (and autoloads) its module, `run_module_cond` runs it.
 //!
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
@@ -21,22 +22,23 @@ use bstr::{BString, ByteSlice};
 use crate::bash::{
 	diag::Diag,
 	fs::{FileKind, Stat, StatKind},
-	ir::{CondIr, Op as IrOp, Part, Unit},
-	pattern::{
-		Regex,
-		zsh::{Captures, PatFlags},
-	},
+	ir::{CondIr, Op as IrOp, Opcode, Part, Unit, Word},
+	pattern::zsh::{Captures, PatFlags},
 	syntax::zsh::{
 		tok,
-		tok::{head, span, tail},
+		tok::{span, tail},
 	},
 	vm::{
 		Cx, Kernel,
-		builtins::{Chunk, Ctx, Need, Outcome, R, done, zsh_args::zx as with_ex},
-		exec::{Flow, expanding},
+		builtins::{
+			Chunk, Ctx, Need, Outcome, R, done, zsh_args::zx as with_ex, zsh_mod_example,
+			zsh_mod_pcre, zsh_mod_regex, zsh_module,
+		},
+		exec::{self, Flow, expanding},
 		probe::{self, absolute},
 		proc::{PendingWrite, Probe, ProbeResult, Slot, Vproc},
-		zsh::{arith, math::Number, params, subscript, zglob, zpattern},
+		xtrace,
+		zsh::{arith, math::Number, subscript, zglob, zpattern},
 	},
 	zshopt::ZshOpt,
 };
@@ -210,75 +212,144 @@ fn test_int(s: &[u8]) -> Option<i64> {
 	Some(if neg { v.wrapping_neg() } else { v })
 }
 
-/// The number of characters of `s[..n]` (bytes outside UTF-8).
-fn chars_before(s: &[u8], n: usize, utf8: bool) -> i64 {
-	let k = if utf8 { head(s, n).chars().count() } else { n };
-	i64::try_from(k).unwrap_or(i64::MAX)
+/// A condition a module provides (zsh's `COND_REGEX`, `COND_MODI`,
+/// `COND_MOD`), by the name written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModCond<'a> {
+	/// `l =~ r`: zsh/regex's `-regex-match`, or zsh/pcre's `-pcre-match`
+	/// under `REMATCH_PCRE`.
+	Regex,
+	/// `l -name r` (`-name` with its dash).
+	Infix(&'a [u8]),
+	/// `-name arg…` (`-name` with its dash).
+	Prefix(&'a [u8]),
 }
 
-/// zsh/regex `zcond_regex_match`: an ERE match of `l` against `r` (case
-/// ignored without `CASE_MATCH`) that sets `MATCH MBEGIN MEND match
-/// mbegin mend`, or `BASH_REMATCH` under `BASH_REMATCH`, on success.
-#[allow(clippy::many_single_char_names, reason = "a direct port of zsh's regex_match")]
-fn regex_match(ctx: &mut Ctx<'_, '_>, l: &[u8], r: &[u8]) -> Result<Res, Need> {
-	if ctx.zsh_option(ZshOpt::Rematchpcre)? {
-		ctx.diag(Diag::ModuleUnavailable { name: "zsh/pcre".into() });
-		ctx.diag(Diag::Usage { msg: "-pcre-match not available for regex".into() });
-		return Ok(Res::St(2));
+/// The operand counts (`conddef`'s `min`, `max`) of the prefix conditions
+/// zsh's modules define.
+const fn prefix_arity(name: &[u8]) -> (usize, Option<usize>) {
+	match name {
+		b"len" | b"prefix" | b"suffix" => (1, Some(2)),
+		b"after" => (1, Some(1)),
+		b"between" => (2, Some(2)),
+		_ => (0, None),
 	}
-	let icase = !ctx.zsh_option(ZshOpt::Casematch)?;
-	let re = match Regex::new(r, icase) {
-		Ok(re) => re,
-		Err(err) => {
-			ctx.diag(Diag::Usage { msg: format!("failed to compile regex: {err}").into() });
-			return Ok(Res::St(1));
+}
+
+/// `unknown condition: NAME`.
+fn unknown(name: &[u8]) -> Diag {
+	Diag::Usage { msg: format!("unknown condition: {}", name.as_bstr()).into() }
+}
+
+/// zsh `getconddef(infix, name, 1)`: the module providing condition
+/// `-name`, autoloaded if need be.
+fn conddef(
+	ctx: &mut Ctx<'_, '_>,
+	name: &[u8],
+	infix: bool,
+) -> Result<Result<Option<&'static str>, Diag>, Need> {
+	with_ex(ctx, |ex| zsh_module::cond_module(ex, name, infix))
+}
+
+/// zsh `evalcond`'s `COND_REGEX`/`COND_MOD`/`COND_MODI` cases: find the
+/// module condition `which` names (`args` its operands) and run it; when
+/// no module provides it, retry with the first operand as a prefix
+/// condition's name (`[[ -name -cond x ]]`) before `unknown condition`.
+fn module_cond(
+	ctx: &mut Ctx<'_, '_>,
+	fromtest: bool,
+	which: ModCond<'_>,
+	args: &[BString],
+) -> Result<Res, Need> {
+	let (name, infix, regex): (Vec<u8>, bool, bool) = match which {
+		ModCond::Regex => {
+			let (module, feature): (&[u8], &[u8]) = if ctx.zsh_option(ZshOpt::Rematchpcre)? {
+				(b"zsh/pcre", b"pcre-match")
+			} else {
+				(b"zsh/regex", b"regex-match")
+			};
+			// zsh ignores what `ensurefeature` returns; a failed load has
+			// said why.
+			if let Err(d) =
+				with_ex(ctx, |ex| zsh_module::ensure_feature_ex(ex, module, b'C', feature))?
+			{
+				ctx.diag(d);
+			}
+			let mut name = b"-".to_vec();
+			name.extend_from_slice(feature);
+			(name, true, true)
+		},
+		ModCond::Infix(n) => (n.to_vec(), true, false),
+		ModCond::Prefix(n) => (n.to_vec(), false, false),
+	};
+	let n = args.len();
+	let fits = |cond: &[u8]| {
+		let (min, max) = prefix_arity(cond);
+		n >= min && max.is_none_or(|max| n <= max)
+	};
+	let bare = name.get(1..).unwrap_or_default();
+	match conddef(ctx, bare, infix)? {
+		Err(d) => return Ok(Res::Zerr(d)),
+		Ok(Some(module)) => {
+			if !infix && !fits(bare) {
+				warn(ctx, fromtest, unknown(&name));
+				return Ok(Res::St(2));
+			}
+			return run_module_cond(ctx, fromtest, module, bare, args);
+		},
+		Ok(None) => {},
+	}
+	if regex {
+		// The standard regex condition is missing: a hard error.
+		let d = Diag::Usage { msg: format!("{} not available for regex", name.as_bstr()).into() };
+		return Ok(Res::Zerr(if fromtest { d.by(ctx.name) } else { d }));
+	}
+	if let Some(first) = args.first()
+		&& let Some(cond) = first.strip_prefix(b"-")
+	{
+		match conddef(ctx, cond, false)? {
+			Err(d) => return Ok(Res::Zerr(d)),
+			Ok(Some(module)) => {
+				if !fits(cond) {
+					warn(ctx, fromtest, unknown(&name));
+					return Ok(Res::St(2));
+				}
+				let mut strs = args.to_vec();
+				strs[0] = BString::from(name);
+				return run_module_cond(ctx, fromtest, module, cond, &strs);
+			},
+			Ok(None) => {},
+		}
+	}
+	warn(ctx, fromtest, unknown(&name));
+	Ok(Res::St(2))
+}
+
+/// Run condition `-name` of `module` (the conddef handlers) on `args`.
+fn run_module_cond(
+	ctx: &mut Ctx<'_, '_>,
+	fromtest: bool,
+	module: &str,
+	name: &[u8],
+	args: &[BString],
+) -> Result<Res, Need> {
+	let arg = |i: usize| args.get(i).map_or(&b""[..], |a| a.as_slice());
+	let r = match (module, name) {
+		("zsh/regex", b"regex-match") => zsh_mod_regex::cond_regex_match(ctx, arg(0), arg(1))?,
+		("zsh/pcre", b"pcre-match") => zsh_mod_pcre::cond_pcre_match(ctx, arg(0), arg(1))?,
+		("zsh/example", _) => with_ex(ctx, |ex| zsh_mod_example::cond(ex, name, args))?,
+		("zsh/complete", _) => {
+			with_ex(ctx, |ex| crate::bash::vm::zle::comp::complete::cond(ex, name, args))?
+		},
+		_ => {
+			warn(ctx, fromtest, Diag::Unsupported {
+				what: format!("condition `-{}' of module {module}", name.as_bstr()).into(),
+			});
+			return Ok(Res::St(2));
 		},
 	};
-	let Some(caps) = re.captures(l) else {
-		return Ok(Res::St(1));
-	};
-	let bash = ctx.zsh_option(ZshOpt::Bashrematch)?;
-	let ksh = i64::from(!ctx.zsh_option(ZshOpt::Ksharrays)?);
-	let utf8 = crate::bash::vm::builtins::zsh_print::charset(ctx)?.utf8;
-	let text = |g: &Option<std::ops::Range<usize>>| {
-		BString::from(g.clone().map_or_default(|g| span(l, g.start, g.end)))
-	};
-	let r = with_ex(ctx, |ex| {
-		if bash {
-			let arr: Vec<BString> = caps.iter().map(text).collect();
-			return params::assignaparam(ex, b"BASH_REMATCH", arr, 0);
-		}
-		let whole = caps.first().cloned().flatten().unwrap_or(0..0);
-		params::assignsparam(ex, b"MATCH", span(l, whole.start, whole.end), 0)?;
-		let begin = chars_before(l, whole.start, utf8);
-		let end = chars_before(l, whole.end, utf8);
-		for (name, n) in [(&b"MBEGIN"[..], begin + ksh), (&b"MEND"[..], end + ksh - 1)] {
-			params::setnparam(ex, name, Number::Int(n), n.to_string().as_bytes(), 10)?;
-		}
-		if caps.len() > 1 {
-			let mut arr = Vec::with_capacity(caps.len() - 1);
-			let mut mbegin = Vec::with_capacity(caps.len() - 1);
-			let mut mend = Vec::with_capacity(caps.len() - 1);
-			for g in tail(&caps, 1) {
-				arr.push(text(g));
-				if let Some(g) = g {
-					let b = chars_before(l, g.start, utf8) + ksh;
-					let e = chars_before(l, g.end, utf8) + ksh - 1;
-					mbegin.push(BString::from(b.to_string()));
-					mend.push(BString::from(e.to_string()));
-				} else {
-					mbegin.push(BString::from("-1"));
-					mend.push(BString::from("-1"));
-				}
-			}
-			params::assignaparam(ex, b"match", arr, 0)?;
-			params::assignaparam(ex, b"mbegin", mbegin, 0)?;
-			params::assignaparam(ex, b"mend", mend, 0)?;
-		}
-		Ok(())
-	})?;
 	Ok(match r {
-		Ok(()) => Res::St(0),
+		Ok(b) => Res::St(i32::from(!b)),
 		Err(d) => Res::Zerr(d),
 	})
 }
@@ -380,7 +451,7 @@ fn primary(
 		},
 		C::StrLt => st(l < r),
 		C::StrGt => st(l > r),
-		C::Regex => regex_match(ctx, l, r),
+		C::Regex => module_cond(ctx, fromtest, ModCond::Regex, &[BString::from(l), BString::from(r)]),
 		C::Nt | C::Ot => {
 			let Some(a) = getstat(ctx, l, true)? else {
 				return Ok(Res::St(1));
@@ -488,28 +559,93 @@ pub fn cond_test(
 		return Flow::Discard(2);
 	};
 	let pair: [u32; 2];
-	let (name, cop, words): (&[u8], Option<CondOp>, &[u32]) = match c {
-		CondIr::Unary { op, arg } => (op.as_slice(), unary_op(op), std::slice::from_ref(arg)),
+	let (prim, words): (Result<CondOp, ModCond<'_>>, &[u32]) = match c {
+		CondIr::Unary { op, arg } => {
+			// A word of other than one part is `par_cond_multi`'s operand
+			// list: a module condition even when named like `-f`.
+			let single = unit
+				.words
+				.get(*arg as usize)
+				.is_some_and(|w| w.parts.len() == 1);
+			let prim = match unary_op(op) {
+				Some(cop) if single => Ok(cop),
+				_ => Err(ModCond::Prefix(op.as_slice())),
+			};
+			(prim, std::slice::from_ref(arg))
+		},
 		CondIr::Binary { op, lhs, rhs } => {
 			pair = [*lhs, *rhs];
-			(op.as_slice(), binary_op(op), &pair)
+			(binary_op(op).ok_or(ModCond::Infix(op.as_slice())), &pair)
 		},
-		CondIr::Word(w) => (b"-n", Some(CondOp::Unary(b'n')), std::slice::from_ref(w)),
-	};
-	let Some(cop) = cop else {
-		// No condition module provides it: zsh abandons the command line
-		// (`[[ -fail x ]]; echo $?` prints nothing more), status 2.
-		k.diag(cx, vp, line, Diag::Usage {
-			msg: format!("unknown condition: {}", name.as_bstr()).into(),
-		});
-		return Flow::Discard(2);
+		CondIr::Word(w) => (Ok(CondOp::Unary(b'n')), std::slice::from_ref(w)),
 	};
 	let record = words
 		.iter()
 		.any(|&w| unit.words.get(w as usize).is_some_and(|w| w.parks));
+	let cop = match prim {
+		Ok(cop) => cop,
+		Err(m) => {
+			// zsh `cond_str`: each operand is substituted, no more.
+			let vals = match expanding(k, vp, cx, Slot::Words, record, line, |ex| {
+				let mut vals = Vec::new();
+				for &w in words {
+					let Some(word) = unit.words.get(w as usize) else {
+						continue;
+					};
+					if let ModCond::Prefix(n) = &m {
+						// zsh/complete's conditions take their operands
+						// with `cond_str(…, raw)`: patterns keep their tokens.
+						let raw = matches!(*n, b"-prefix" | b"-suffix" | b"-after" | b"-between");
+						for p in &word.parts {
+							let one = Word { parts: vec![p.clone()], kind: word.kind, ..Word::default() };
+							vals.push(if raw {
+								ex.pattern(unit, &one)?
+							} else {
+								ex.scalar(unit, &one)?
+							});
+						}
+					} else {
+						vals.push(ex.scalar(unit, word)?);
+					}
+				}
+				Ok(vals)
+			}) {
+				Ok(v) => v,
+				Err(flow) => return flow,
+			};
+			// zsh `tracemodcond`: the operands as written.
+			let regex_name = regex_cond_name(k, vp, cx);
+			trace(k, vp, cx, unit, op, |_, out| match &m {
+				ModCond::Regex => {
+					out.push(b' ');
+					out.extend_from_slice(exec::word_source(unit, words[0]));
+					out.extend_from_slice(regex_name);
+					out.extend_from_slice(exec::word_source(unit, words[1]));
+				},
+				ModCond::Prefix(name) => {
+					out.push(b' ');
+					out.extend_from_slice(name);
+					for &w in words {
+						out.push(b' ');
+						out.extend_from_slice(exec::word_source(unit, w));
+					}
+				},
+				ModCond::Infix(name) => {
+					out.push(b' ');
+					out.extend_from_slice(exec::word_source(unit, words[0]));
+					out.push(b' ');
+					out.extend_from_slice(name);
+					out.push(b' ');
+					out.extend_from_slice(exec::word_source(unit, words[1]));
+				},
+			});
+			return eval_primary(k, vp, cx, line, |ctx| module_cond(ctx, false, m, &vals));
+		},
+	};
 	let pattern = matches!(cop, CondOp::StrEq | CondOp::StrDeq | CondOp::StrNeq);
 	// zsh `cond_subst`: an operand ending in `(#q…)` (the left one, the
-	// right one of a non-pattern, non-regex binary) is filename-generated.
+	// right one of a non-pattern binary) is filename-generated; `=~` is a
+	// module condition, whose operands are only substituted.
 	let (mut vals, globbed) = match expanding(k, vp, cx, Slot::Words, record, line, |ex| {
 		let mut vals = Vec::with_capacity(2);
 		let mut globbed = Vec::new();
@@ -518,7 +654,8 @@ pub fn cond_test(
 				vals.push(BString::default());
 				continue;
 			};
-			if (i == 0 || (!pattern && cop != CondOp::Regex))
+			if cop != CondOp::Regex
+				&& (i == 0 || !pattern)
 				&& let [Part::Zsh(t)] = word.parts.as_slice()
 				&& zglob::cond_globqual(ex, t)?
 			{
@@ -531,8 +668,6 @@ pub fn cond_test(
 			}
 			vals.push(if i == 1 && pattern {
 				ex.pattern(unit, word)?
-			} else if i == 1 && cop == CondOp::Regex {
-				ex.regex(unit, word)?
 			} else {
 				ex.scalar(unit, word)?
 			});
@@ -552,19 +687,131 @@ pub fn cond_test(
 			*v = bstr::join(" ", fields).into();
 		}
 	}
+	let lhs: &[u8] = vals.first().map_or(b"", |v| v.as_slice());
 	let rhs: &[u8] = vals.get(1).map_or(b"", |v| v.as_slice());
+	let regex_name = if cop == CondOp::Regex {
+		regex_cond_name(k, vp, cx)
+	} else {
+		b""
+	};
+	trace(k, vp, cx, unit, op, |q, out| match (cop, c) {
+		// `=~` is zsh/regex's (zsh/pcre's) module condition: traced as
+		// one (`tracemodcond`), the operands as written.
+		(CondOp::Regex, _) => {
+			out.push(b' ');
+			out.extend_from_slice(exec::word_source(unit, words[0]));
+			out.extend_from_slice(regex_name);
+			out.extend_from_slice(exec::word_source(unit, words[1]));
+		},
+		(CondOp::Unary(ch), _) => {
+			out.extend_from_slice(&[b' ', b'-', ch, b' ']);
+			q.push(out, lhs);
+		},
+		(_, CondIr::Binary { op: name, .. }) => {
+			out.push(b' ');
+			q.push(out, lhs);
+			out.push(b' ');
+			out.extend_from_slice(name);
+			out.push(b' ');
+			if pattern {
+				out.extend_from_slice(&xtrace::quote_tokenized(rhs));
+			} else {
+				q.push(out, rhs);
+			}
+		},
+		_ => {},
+	});
+	eval_primary(k, vp, cx, line, |ctx| primary(ctx, false, cop, lhs, rhs))
+}
+
+/// The module condition `=~` is traced as (zsh `evalcond`'s
+/// `overridename`), with the blanks around it.
+fn regex_cond_name(k: &mut Kernel, vp: &Vproc, cx: &mut Cx<'_>) -> &'static [u8] {
+	let pcre = crate::bash::vm::state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Rematchpcre)
+		.unwrap_or(false);
+	if pcre {
+		b" -pcre-match "
+	} else {
+		b" -regex-match "
+	}
+}
+
+/// zsh `evalcond`'s trace of a primary of a traced `[[ ]]`
+/// (`tracingcond`, the line `execcond` began with `[[`): ` &&`/` ||` when
+/// the primary starts the right operand of one (being evaluated), ` !` on a
+/// negated primary, then what `body` writes. Once per primary (not again
+/// when it runs again after a probe).
+fn trace(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	unit: &Unit,
+	op: IrOp,
+	body: impl FnOnce(xtrace::ZshQuote, &mut Vec<u8>),
+) {
+	if !xtrace::on(k, cx, vp) {
+		return;
+	}
+	let Some(top) = vp.frames.last() else {
+		return;
+	};
+	if top
+		.scratch
+		.as_ref()
+		.is_some_and(|sc| !sc.probes().is_empty() || sc.probing().is_some())
+	{
+		return;
+	}
+	let mut out = Vec::new();
+	let prev = (top.pc as usize)
+		.checked_sub(1)
+		.and_then(|p| unit.ops.get(p));
+	if let Some(prev) = prev.filter(|p| p.node == op.node) {
+		match prev.code {
+			Opcode::BrOk => out.extend_from_slice(b" ||"),
+			Opcode::BrFail => out.extend_from_slice(b" &&"),
+			_ => {},
+		}
+	}
+	if op.flags & IrOp::NEGATED != 0 {
+		out.extend_from_slice(b" !");
+	}
+	let q = xtrace::ZshQuote::of(k, cx, vp);
+	body(q, &mut out);
+	xtrace::write(k, cx, vp, out);
+}
+
+/// Evaluate one `[[ ]]` primary with `eval` (re-run after each probe it
+/// needs) and settle its status.
+fn eval_primary(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	line: u32,
+	mut eval: impl FnMut(&mut Ctx<'_, '_>) -> Result<Res, Need>,
+) -> Flow {
 	loop {
 		let mut sc = vp
 			.frames
 			.last_mut()
 			.and_then(|f| f.scratch.take())
 			.unwrap_or_default();
-		let (res, chunks) = {
+		// A math function an operand called has returned: its value joins
+		// the replay log.
+		if let Some(flow) = exec::settle_sub(k, vp, cx, &mut sc, Slot::Builtin) {
+			if let Some(f) = vp.frames.last_mut() {
+				f.scratch = Some(sc);
+			}
+			return flow;
+		}
+		let log = std::mem::take(&mut sc.logs[Slot::Builtin as usize]);
+		let (res, chunks, log) = {
 			let mut ctx = Ctx::new(k, cx, vp, sc.probes(), line, "[[");
-			let lhs: &[u8] = vals.first().map_or(b"", |v| v.as_slice());
-			let res = primary(&mut ctx, false, cop, lhs, rhs);
-			(res, std::mem::take(&mut ctx.chunks))
+			ctx.log = log;
+			let res = eval(&mut ctx);
+			(res, std::mem::take(&mut ctx.chunks), std::mem::take(&mut ctx.log))
 		};
+		sc.logs[Slot::Builtin as usize] = log;
 		let park = |vp: &mut Vproc, sc| {
 			if let Some(f) = vp.frames.last_mut() {
 				f.scratch = Some(sc);
@@ -594,6 +841,26 @@ pub fn cond_test(
 			Err(Need::Store(e)) => {
 				k.fail(e);
 				return Flow::Discard(1);
+			},
+			Err(Need::Park(key)) => {
+				park(vp, sc);
+				return Flow::Block(key);
+			},
+			// An arithmetic operand's math function: its call runs above,
+			// then the primary replays.
+			Err(Need::Sub(crate::bash::vm::expand::Stop::MathCall(call))) => {
+				let fi = vp.frames.len() - 1;
+				let flow = crate::bash::vm::command::start_math_call(
+					k,
+					vp,
+					cx,
+					&mut sc,
+					Slot::Builtin,
+					&call,
+					line,
+				);
+				vp.frames[fi].scratch = Some(sc);
+				return flow;
 			},
 			// The operands are expanded: nothing left to substitute.
 			Err(Need::Sub(_)) => {
@@ -628,9 +895,13 @@ enum Node {
 		l:  BString,
 		r:  BString,
 	},
-	/// A `-name` condition no module provides (`COND_MOD`/`COND_MODI`):
-	/// `unknown condition: NAME`.
-	Unknown(BString),
+	/// A module condition: `l -name r` (`COND_MODI`, `infix`) or `-name
+	/// args…` (`COND_MOD`).
+	Mod {
+		name:  BString,
+		infix: bool,
+		args:  Vec<BString>,
+	},
 }
 
 /// Tokens of `testlex`.
@@ -800,10 +1071,12 @@ impl TestParser<'_> {
 			let s3 = self.s();
 			self.lex();
 			if self.tok == Tok::Str {
+				let mut l = vec![s2, s3];
 				while self.tok == Tok::Str {
+					l.push(self.s());
 					self.lex();
 				}
-				return multi(s1);
+				return multi(s1, l);
 			}
 			return triple(s1, &s2, &s3);
 		}
@@ -819,7 +1092,7 @@ fn double(a: &[u8], b: &[u8]) -> Result<Node, Perr> {
 	if a.len() == 2 && UNARY.contains(&a[1]) {
 		return Ok(Node::Prim { op: CondOp::Unary(a[1]), l: b.into(), r: BString::default() });
 	}
-	Ok(Node::Unknown(a.into()))
+	Ok(Node::Mod { name: a.into(), infix: false, args: vec![b.into()] })
 }
 
 /// `par_cond_triple`: `a b c`.
@@ -828,20 +1101,20 @@ fn triple(a: &[u8], b: &[u8], c: &[u8]) -> Result<Node, Perr> {
 		return Ok(Node::Prim { op, l: a.into(), r: c.into() });
 	}
 	if b.first() == Some(&b'-') {
-		return Ok(Node::Unknown(b.into()));
+		return Ok(Node::Mod { name: b.into(), infix: true, args: vec![a.into(), c.into()] });
 	}
 	if a.first() == Some(&b'-') && a.len() > 1 {
-		return Ok(Node::Unknown(a.into()));
+		return Ok(Node::Mod { name: a.into(), infix: false, args: vec![b.into(), c.into()] });
 	}
 	Err(Perr::Cond(format!("condition expected: {}", b.as_bstr())))
 }
 
 /// `par_cond_multi`: `-name args…`.
-fn multi(a: &[u8]) -> Result<Node, Perr> {
+fn multi(a: &[u8], args: Vec<BString>) -> Result<Node, Perr> {
 	if a.first() != Some(&b'-') || a.len() < 2 {
 		return Err(Perr::Cond(format!("condition expected: {}", a.as_bstr())));
 	}
-	Ok(Node::Unknown(a.into()))
+	Ok(Node::Mod { name: a.into(), infix: false, args })
 }
 
 /// zsh `evalcond` over a parsed `test` expression.
@@ -860,11 +1133,13 @@ fn evalcond(ctx: &mut Ctx<'_, '_>, n: &Node) -> Result<Res, Need> {
 			r => r,
 		},
 		Node::Prim { op, l, r } => primary(ctx, true, *op, l, r)?,
-		Node::Unknown(name) => {
-			warn(ctx, true, Diag::Usage {
-				msg: format!("unknown condition: {}", name.as_bstr()).into(),
-			});
-			Res::St(2)
+		Node::Mod { name, infix, args } => {
+			let which = if *infix {
+				ModCond::Infix(name.as_slice())
+			} else {
+				ModCond::Prefix(name.as_slice())
+			};
+			module_cond(ctx, true, which, args)?
 		},
 	})
 }
@@ -989,7 +1264,11 @@ mod tests {
 				.1
 		);
 		assert_eq!(parse(&["a", "b"]).unwrap_err(), "parse error: condition expected: a");
-		assert_eq!(parse(&["x", "-q", "y"]).unwrap().0, Node::Unknown("-q".into()));
+		assert_eq!(parse(&["x", "-q", "y"]).unwrap().0, Node::Mod {
+			name:  "-q".into(),
+			infix: true,
+			args:  vec!["x".into(), "y".into()],
+		});
 		assert_eq!(parse(&["(", "a"]).unwrap_err(), "argument expected");
 	}
 

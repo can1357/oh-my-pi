@@ -3159,6 +3159,9 @@ pub struct BashResult {
 	pub working_dir: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub images: Option<Vec<ImageContent>>,
+	/// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub trace: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4085,6 +4088,9 @@ pub struct ReadyEvent {
 	pub max_frame_bytes: Option<i64>,
 	#[serde(rename = "maxReassembledFrameBytes", default, skip_serializing_if = "Option::is_none")]
 	pub max_reassembled_frame_bytes: Option<i64>,
+	/// `bash` accepts `excludeFromContext`; require exactly true before sending excluded commands.
+	#[serde(rename = "supportsBashExcludeFromContext", default, skip_serializing_if = "Option::is_none")]
+	pub supports_bash_exclude_from_context: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -5483,6 +5489,8 @@ pub struct SetAutoRetryParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BashParams {
 	pub command: String,
+	#[serde(rename = "excludeFromContext", default, skip_serializing_if = "Option::is_none")]
+	pub exclude_from_context: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6919,10 +6927,12 @@ impl Command for AbortRetryCommand {
 	}
 }
 
-/// Run a shell command.
+/// Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BashCommand {
 	pub command: String,
+	#[serde(rename = "excludeFromContext", default, skip_serializing_if = "Option::is_none")]
+	pub exclude_from_context: Option<bool>,
 }
 
 impl Command for BashCommand {

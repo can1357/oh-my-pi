@@ -1,5 +1,6 @@
 // ../coding-agent/src/tools/browser/relay/protocol.ts
 var EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
+var FOREIGN_FRAME_REFUSAL = /chrome-extension:\/\/ URL of different extension/i;
 
 // extension/debugger-ownership.ts
 async function ownedDebuggerTabs(targets, probe) {
@@ -14,6 +15,68 @@ async function ownedDebuggerTabs(targets, probe) {
     }
   }));
   return owned.filter((tabId) => tabId !== undefined);
+}
+
+// extension/foreign-frames.ts
+var RETRY_DELAYS_MS = [50, 100, 200, 400];
+var sweeps = new Map;
+async function pastForeignFrames(tabId, request) {
+  for (let attempt = 0;; attempt++) {
+    try {
+      return await request();
+    } catch (error) {
+      if (attempt === RETRY_DELAYS_MS.length || !FOREIGN_FRAME_REFUSAL.test(String(error)) || await sweep(tabId) === 0)
+        throw error;
+    }
+    const { promise, resolve } = Promise.withResolvers();
+    setTimeout(resolve, RETRY_DELAYS_MS[attempt]);
+    await promise;
+  }
+}
+function sweep(tabId) {
+  let pending = sweeps.get(tabId);
+  if (!pending) {
+    pending = neutralizeForeignFrames(tabId).finally(() => sweeps.delete(tabId));
+    sweeps.set(tabId, pending);
+  }
+  return pending;
+}
+async function neutralizeForeignFrames(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      injectImmediately: true,
+      args: [chrome.runtime.id],
+      func: (self) => {
+        let found = 0;
+        const visit = (root) => {
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+          for (let element = walker.nextNode();element; element = walker.nextNode()) {
+            const tag = element.tagName.toUpperCase();
+            if (tag === "IFRAME" || tag === "FRAME") {
+              const src = element.getAttribute("src") ?? "";
+              if (src.startsWith("chrome-extension://") && !src.startsWith(`chrome-extension://${self}/`)) {
+                if (tag === "FRAME")
+                  element.setAttribute("src", "about:blank");
+                else if (element.getAttribute("srcdoc") === null)
+                  element.setAttribute("srcdoc", "");
+                element.style.setProperty("display", "none", "important");
+                found++;
+              }
+            }
+            const shadow = chrome.dom.openOrClosedShadowRoot(element);
+            if (shadow)
+              visit(shadow);
+          }
+        };
+        visit(document);
+        return found;
+      }
+    });
+    return results.reduce((total, frame) => total + (frame.result ?? 0), 0);
+  } catch {
+    return 0;
+  }
 }
 
 // extension/background.ts
@@ -183,9 +246,11 @@ async function buildHello() {
 }
 async function runRpc(msg, origin) {
   switch (msg.op) {
-    case "attach":
-      await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+    case "attach": {
+      const attach = () => chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+      await (msg.clearForeignFrames ? pastForeignFrames(msg.tabId, attach) : attach());
       return {};
+    }
     case "detach":
       relayInitiatedDetachTabs.add(msg.tabId);
       try {
@@ -195,8 +260,10 @@ async function runRpc(msg, origin) {
         relayInitiatedDetachTabs.delete(msg.tabId);
         throw error;
       }
-    case "send":
-      return await chrome.debugger.sendCommand(msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId }, msg.method, msg.params);
+    case "send": {
+      const send = () => chrome.debugger.sendCommand(msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId }, msg.method, msg.params);
+      return await (msg.clearForeignFrames ? pastForeignFrames(msg.tabId, send) : send());
+    }
     case "createTab": {
       const tab = await chrome.tabs.create({ url: msg.url, active: msg.active ?? true });
       const snap = snapshot(tab);

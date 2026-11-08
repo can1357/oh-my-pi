@@ -109,7 +109,7 @@ export function lexShellCommand(command: string): ShellToken[] {
 }
 
 /** A command in a conservative, flat `&&` chain. */
-interface LiteralShellCommandSegment {
+export interface LiteralShellCommandSegment {
 	/** Original segment text with quoting and escaping preserved. */
 	text: string;
 	/** Literal argv after shell quote removal. */
@@ -513,18 +513,20 @@ const CD_TARGET_TERMINATORS: Record<string, true> = {
 };
 
 /**
- * Parses a leading `cd <path> && ...` prefix so the bash tool can route the
- * target through its structured `cwd` parameter when the model omits it.
+ * Parses a leading `cd <path> && ...` or `cd <path>; ...` prefix so the bash
+ * tool can route the target through its structured `cwd` parameter when the
+ * model omits it.
  *
  * Returns the single path token (quotes and backslash escapes resolved to their
- * literal value) and the command remainder after the top-level `&&`, or `null`
- * when the command does not begin with exactly `cd`, one path token, and a
- * top-level `&&`. The scanner deliberately bails on anything else in the prefix
- * — redirects (`cd /tmp 2>/dev/null && ...`), extra arguments, or paths needing
- * shell expansion (`$`, backticks, `(`) — leaving the whole command for the
- * shell instead of absorbing shell syntax into `cwd`.
+ * literal value), the command remainder after the separator, and which
+ * separator it was, or `null` when the command does not begin with exactly
+ * `cd`, one path token, and a top-level `&&` or `;`. The scanner deliberately
+ * bails on anything else in the prefix — redirects (`cd /tmp 2>/dev/null && ...`),
+ * extra arguments, or paths needing shell expansion (`$`, backticks, `(`) —
+ * leaving the whole command for the shell instead of absorbing shell syntax
+ * into `cwd`.
  */
-export function extractLeadingCdTarget(command: string): { path: string; rest: string } | null {
+export function extractLeadingCdTarget(command: string): { path: string; rest: string; separator: "&&" | ";" } | null {
 	const prefix = /^cd[ \t]+/.exec(command);
 	if (!prefix) return null;
 	let i = prefix[0].length;
@@ -582,13 +584,21 @@ export function extractLeadingCdTarget(command: string): { path: string; rest: s
 	if (inSingle || inDouble || path.length === 0) return null;
 	// A path needing shell expansion can't be resolved literally through cwd.
 	if (/[$`(]/.test(path)) return null;
-	// Skip inter-token whitespace, then require a top-level `&&` (a single `&`,
-	// `||`, `;`, `|`, or a redirect all mean this is not a bare `cd <path>`).
+	// Skip inter-token whitespace, then require a top-level `&&` or `;` (a single
+	// `&`, `||`, `|`, a `case` terminator `;;`/`;&`, or a redirect all mean this
+	// is not a bare `cd <path>`).
 	while (command[i] === " " || command[i] === "\t") i++;
-	if (command[i] !== "&" || command[i + 1] !== "&") return null;
-	i += 2;
+	let separator: "&&" | ";";
+	if (command[i] === "&" && command[i + 1] === "&") {
+		separator = "&&";
+	} else if (command[i] === ";" && command[i + 1] !== ";" && command[i + 1] !== "&") {
+		separator = ";";
+	} else {
+		return null;
+	}
+	i += separator.length;
 	while (command[i] === " " || command[i] === "\t") i++;
-	return { path, rest: command.slice(i) };
+	return { path, rest: command.slice(i), separator };
 }
 
 /**

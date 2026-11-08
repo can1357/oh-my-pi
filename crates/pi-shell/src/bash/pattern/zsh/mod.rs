@@ -70,6 +70,12 @@ mod tests;
 
 use core::{fmt, ops};
 
+/// For the completion matchers (`compmatch.c`'s `mb_patmatchrange` on
+/// `parse_class` strings).
+pub(crate) use self::{
+	class::{mb_class, pp_name, range_type},
+	mbchar::metacharinc,
+};
 pub use self::{
 	compile::{FileGlobState, Pattern},
 	exec::{Approx, Captures, Groups, Span},
