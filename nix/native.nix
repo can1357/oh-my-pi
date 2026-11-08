@@ -15,7 +15,8 @@
 let
   rootCargoToml = builtins.readFile (source + "/Cargo.toml");
   lockText = builtins.readFile (source + "/Cargo.lock");
-  workspaceVersion = (builtins.fromTOML rootCargoToml).workspace.package.version;
+  rootManifest = builtins.fromTOML rootCargoToml;
+  workspaceVersion = rootManifest.workspace.package.version;
   platform =
     {
       aarch64-darwin = {
@@ -168,7 +169,7 @@ let
     lib.recursiveUpdate (craneLib.cleanCargoToml { cargoTomlContents = rootCargoToml; }) {
       workspace = {
         package.version = placeholderVersion;
-        inherit ((builtins.fromTOML rootCargoToml).workspace) lints;
+        inherit (rootManifest.workspace) lints;
       };
     }
   );
