@@ -9,10 +9,13 @@ import * as path from "node:path";
 import { clearWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 import * as client from "../../src/ovnfs/client";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import * as daemon from "../../src/ovnfs/daemon";
 import { ISOLATION_OWNER_FILE } from "../../src/task/isolation-ownership";
 import * as isolationRunner from "../../src/task/isolation-runner";
 import { OVNFS_CHECKOUT_FILE, ovnfsWorkspace, releaseOvnfsCheckout } from "../../src/task/ovnfs";
+import * as executorModule from "../../src/task/executor";
+import * as worktreeModule from "../../src/task/worktree";
 import { taskIsolationBaseDir } from "../../src/task/worktree";
 
 const COMMAND = "/opt/ovnfs/ovnfs";
@@ -357,9 +360,109 @@ describe("ovnfs checkout recovery", () => {
 		expect(opened).toEqual([{ op: "new", base: "b_1", name: start, checkout: undefined }]);
 		expect(await readRecord(baseDir)).toEqual({ command: COMMAND, checkout, start });
 
+		// Closing the workspace removes the start checkout too, and keeps the record while it cannot.
+		removed.length = 0;
+		await workspace.cleanup();
+		expect(removed).toEqual([start]);
+		expect(await readRecord(baseDir)).toEqual({ command: COMMAND, checkout, start });
+
 		failRemoval = false;
 		removed.length = 0;
-		expect(await releaseOvnfsCheckout(baseDir)).toBe(true);
+		await workspace.cleanup();
 		expect(removed).toEqual([start, checkout]);
+		await expect(fs.stat(baseDir)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
+	/**
+	 * Runs agent `agentId` to success on a checkout of `repo` whose daemon diffs
+	 * it as `patch`, with the branch commit stubbed to report `patch`.
+	 */
+	async function runOnCheckout(repo: string, agentId: string, mergeMode: "patch" | "branch", patch: string) {
+		const artifactsDir = path.join(root, "artifacts", agentId);
+		await fs.mkdir(artifactsDir, { recursive: true });
+		const opened: DaemonOp[] = [];
+		captureDaemon(repo, ["new.base", "diff.binary"], op => {
+			if (op.op === "diff") return { patch, binary: true };
+			if (op.op === "new") {
+				opened.push(op);
+				return { checkout: { name: op.name, path: `/mnt/ovnfs/${op.name}`, base: op.base } };
+			}
+			return {};
+		});
+		const baseline = {
+			root: { repoRoot: repo, headCommit: "base", staged: "", unstaged: "", untracked: [], untrackedPatch: "" },
+			nested: [],
+		};
+		const captured = vi.spyOn(worktreeModule, "captureIsolationBaseline").mockResolvedValue(baseline);
+		const committed = vi.spyOn(worktreeModule, "commitToBranch").mockResolvedValue({
+			branchName: `omp/task/${agentId}`,
+			baseSha: "base",
+			rootPatch: patch,
+			nestedPatches: [],
+		});
+		const succeeded: SingleResult = {
+			index: 0,
+			id: agentId,
+			agent: "task",
+			agentSource: "bundled",
+			task: "Do work",
+			assignment: "Do work",
+			exitCode: 0,
+			output: "done",
+			stderr: "",
+			truncated: false,
+			durationMs: 1,
+			tokens: 0,
+			requests: 0,
+		};
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(succeeded);
+		const result = await isolationRunner.runIsolatedSubprocess({
+			baseOptions: {
+				cwd: repo,
+				agent: { name: "task", description: "Task agent", systemPrompt: "test", source: "bundled" },
+				task: "Do work",
+				index: 0,
+				id: agentId,
+				keepAlive: false,
+			},
+			context: { repoRoot: repo },
+			openWorkspace: ovnfsWorkspace(COMMAND),
+			agentId,
+			mergeMode,
+			artifactsDir,
+			buildFailureResult: error => ({ ...succeeded, exitCode: 1, error: String(error) }),
+		});
+		return { result, opened, captured, committed, baseline };
+	}
+
+	const binaryPatch =
+		"diff --git a/logo.bin b/logo.bin\nnew file mode 100644\nindex 0000000..1b2c3d4\nGIT binary patch\nliteral 3\nKcmZQzWMT#Y01f~L\n\nliteral 0\nHcmV?d00001\n\n";
+
+	it("hands the daemon's binary patch to a patch-mode run without taking a baseline", async () => {
+		const repo = path.join(root, "patch-run");
+		await fs.mkdir(repo);
+		const { result, captured, committed } = await runOnCheckout(repo, "PatchRun", "patch", binaryPatch);
+		expect(result.error).toBeUndefined();
+		expect(await Bun.file(result.patchPath ?? "").text()).toBe(binaryPatch);
+		expect(captured).not.toHaveBeenCalled();
+		expect(committed).not.toHaveBeenCalled();
+	});
+
+	it("commits the daemon's patch on the baseline of a checkout reopened on the same capture", async () => {
+		const repo = path.join(root, "branch-run");
+		await fs.mkdir(repo);
+		const { result, opened, captured, committed, baseline } = await runOnCheckout(
+			repo,
+			"BranchRun",
+			"branch",
+			binaryPatch,
+		);
+		expect(result.branchName).toBe("omp/task/BranchRun");
+		const start = opened.find(op => op.base);
+		expect(start?.base).toBe("b_1");
+		expect(captured.mock.calls).toEqual([[`/mnt/ovnfs/${start?.name}`, repo]]);
+		expect(committed).toHaveBeenCalledTimes(1);
+		expect(committed.mock.calls[0]?.[1]).toBe(baseline);
+		expect(committed.mock.calls[0]?.[5]).toEqual({ rootPatch: binaryPatch, nestedPatches: [] });
 	});
 });

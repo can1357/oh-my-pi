@@ -103,12 +103,13 @@ async function removeCheckout(command: string, checkout: string): Promise<void> 
 }
 
 /**
- * Remove `checkout`, then delete `dir`. A removal that cannot be confirmed
- * keeps `dir` and the checkout record in it, so `omp worktree clear` can retry.
+ * Remove every checkout `dir` records (`checkout` when it records none), then
+ * delete `dir`. A removal that cannot be confirmed keeps `dir` and the checkout
+ * record in it, so `omp worktree clear` can retry.
  */
 async function releaseCheckoutRecord(dir: string, command: string, checkout: string): Promise<void> {
 	try {
-		await removeCheckout(command, checkout);
+		if (!(await releaseOvnfsCheckout(dir))) await removeCheckout(command, checkout);
 	} catch (err) {
 		logger.warn("ovnfs checkout removal failed; `omp worktree clear` retries it", {
 			dir,
@@ -212,7 +213,7 @@ class OvnfsWorkspace implements IsolationWorkspace {
 		return { dir: this.dir, sidecarOk: true };
 	}
 
-	/** Remove the checkout, then its record; a checkout that cannot be removed keeps its record for `omp worktree clear`. */
+	/** Remove the checkouts, then their record; a checkout that cannot be removed keeps the record for `omp worktree clear`. */
 	async cleanup(): Promise<void> {
 		await releaseCheckoutRecord(this.baseDir, this.command, this.checkout);
 	}
