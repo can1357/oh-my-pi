@@ -7,6 +7,22 @@
 - Fixed the bash tool's job control after a background job ends to match Bash 5.3: `wait PID` reports a finished job's status again, `wait %N` and `%%` still find a job `wait` reported until the shell next forks or runs `jobs`, `wait` without operands forgets kept statuses, `disown` keeps Bash's statuses, `$!` is the same inside `$( )`, and a background function that traps `TERM` runs its trap and ends with its own status ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
 - Fixed restoring upstream shell snapshots with an active background child, with or without a pending parent `wait` ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
 - Fixed refused execution-image cleanup silently losing retained job results on a second shell restore ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
+### Breaking Changes
+
+- Custom Rust shell stores must implement atomic `StateStore::commit_restore`; stores that cannot commit a complete restore must refuse it without changing state.
+
+### Fixed
+
+- Shell snapshots now name incompatible execution formats before reading state, preserve unknown optional state while reporting its loss, and explain explicit frame abandonment without resuming discarded execution ([#18299](https://github.com/can1357/oh-my-pi/pull/18299) by [@sjawhar](https://github.com/sjawhar)).
+- Failed shell restores leave the saved execution image and all stored state unchanged, including when cleanup or signal setup is refused.
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Fixed `find()` missing elements more than 24 levels down, such as VS Code's editor; it now searches 64 levels deep ([#18221](https://github.com/can1357/oh-my-pi/pull/18221) by [@will-bogusz](https://github.com/will-bogusz))
+- `glob`, `grep`, `fuzzyFind`, `ast_grep` and `ast_edit` now run their directory traversal on a filesystem runtime of their own, so a search over a large or cold tree can no longer take the worker threads that the embedded shell and every other native call are scheduled on. Those threads are named `pi-fs-worker`, so a stall in a search is tellable apart from a stall elsewhere.
+- Fixed a workspace tree whose native addon does not match its checkout failing with `undefined is not a constructor` at the callsite: a class the addon lacks now throws a message naming the addon file, both releases and `bun run build:native` — from its constructor and from any static entrypoint — and the loader reports that mismatch once as it loads ([#18230](https://github.com/can1357/oh-my-pi/pull/18230) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.17.0] - 2026-11-06
 

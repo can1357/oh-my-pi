@@ -409,7 +409,7 @@ fn refused_disown_markers_do_not_leak_proc_records_through_restore() {
 		bash::{
 			Budget, Cx, Engine, EngineConfig, MemStore, RestoreOpts, Script, StateStore, Step,
 			StoreError, Vpid,
-			store::{BlobSlot, Change, Key, Record, Table},
+			store::{BlobSlot, Change, Key, Record, RestoreWrite, Table},
 		},
 		testkit::{FakeHost, fault::skeleton_init},
 	};
@@ -444,6 +444,10 @@ fn refused_disown_markers_do_not_leak_proc_records_through_restore() {
 				return Err(StoreError::Backend("disown marker refused".into()));
 			}
 			self.inner.apply(change)
+		}
+
+		fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+			self.inner.commit_restore(writes)
 		}
 
 		fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
@@ -547,7 +551,7 @@ fn proc_retry_fault_reproduction_stays_deleted_after_each_restore() {
 		bash::{
 			Budget, Cx, Engine, EngineConfig, ExtError, MemStore, RestoreOpts, Script, StateStore,
 			Step, StoreError, Vpid,
-			store::{BlobSlot, Change, Key, KeyBuf, Record, Table},
+			store::{BlobSlot, Change, Key, KeyBuf, Record, RestoreWrite, Table},
 		},
 		testkit::{FakeHost, fault::skeleton_init},
 	};
@@ -594,6 +598,10 @@ fn proc_retry_fault_reproduction_stays_deleted_after_each_restore() {
 				}
 			}
 			self.inner.apply(change)
+		}
+
+		fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+			self.inner.commit_restore(writes)
 		}
 
 		fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {

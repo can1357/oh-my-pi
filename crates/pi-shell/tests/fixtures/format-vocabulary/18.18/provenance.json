@@ -1,0 +1,90 @@
+{
+  "base-parent-wait.image": {
+    "writer": "f2b795ba747b23d42052184d822b41e3d01357cc",
+    "producer": "base",
+    "crate_version": "18.18.0",
+    "build_id": "0d9a43b5054d8b5c18972d8b9aa487286c95ade5e4fe5588bc6d79ada090befe",
+    "frames_version": 29,
+    "sha256": "2c49c3a6583d10ac33bbe08f6c935d7ffdb42976aa4d831af57353c3a2431441",
+    "size": 2655,
+    "source": "refresh-base-producer.rs",
+    "product_patch": "refresh-base-product.patch"
+  },
+  "owned-required-vocabulary.image": {
+    "writer": "f2b795ba747b23d42052184d822b41e3d01357cc",
+    "producer": "base",
+    "crate_version": "18.18.0",
+    "build_id": "0d9a43b5054d8b5c18972d8b9aa487286c95ade5e4fe5588bc6d79ada090befe",
+    "frames_version": 29,
+    "sha256": "a8ce61334e7c1605461e0ec1627e669b747e36c5a6406c945cfab1e89407420a",
+    "size": 2593,
+    "source": "refresh-base-producer.rs",
+    "product_patch": "refresh-base-product.patch"
+  },
+  "owned-optional-vocabulary.image": {
+    "writer": "f2b795ba747b23d42052184d822b41e3d01357cc",
+    "producer": "base",
+    "crate_version": "18.18.0",
+    "build_id": "0d9a43b5054d8b5c18972d8b9aa487286c95ade5e4fe5588bc6d79ada090befe",
+    "frames_version": 29,
+    "sha256": "75cb051af295abbd4de90048c573dc292778c4fadb5903d4c5f9366050b48273",
+    "size": 2593,
+    "source": "refresh-base-producer.rs",
+    "product_patch": "refresh-base-product.patch"
+  },
+  "owned-reserved-required.image": {
+    "writer": "f2b795ba747b23d42052184d822b41e3d01357cc",
+    "producer": "base",
+    "crate_version": "18.18.0",
+    "build_id": "0d9a43b5054d8b5c18972d8b9aa487286c95ade5e4fe5588bc6d79ada090befe",
+    "frames_version": 29,
+    "sha256": "64adbcbb6969d4dad5808c6e3625a5775c449ff64f71d2bdd6fcb2f0e85bdf09",
+    "size": 2591,
+    "source": "refresh-base-producer.rs",
+    "product_patch": "refresh-base-product.patch"
+  },
+  "unknown-root-kept.image": {
+    "writer": "f2b795ba747b23d42052184d822b41e3d01357cc",
+    "producer": "records",
+    "crate_version": "18.18.0",
+    "build_id": "0d9a43b5054d8b5c18972d8b9aa487286c95ade5e4fe5588bc6d79ada090befe",
+    "frames_version": 29,
+    "sha256": "d32f98793e3b7a70795d91b81195cde9f609f78aae11e70c6a3400d3cc34adad",
+    "size": 2242,
+    "source": "refresh-records-producer.rs",
+    "product_patch": "refresh-records-product.patch"
+  },
+  "unknown-root-kept.record": {
+    "writer": "f2b795ba747b23d42052184d822b41e3d01357cc",
+    "producer": "records",
+    "crate_version": "18.18.0",
+    "build_id": "0d9a43b5054d8b5c18972d8b9aa487286c95ade5e4fe5588bc6d79ada090befe",
+    "frames_version": 29,
+    "sha256": "44ea53e9f759e4df68cb3cd0f31e7aea731f2bcf3274e42acba30dfed6c8765b",
+    "size": 7,
+    "source": "refresh-records-producer.rs",
+    "product_patch": "refresh-records-product.patch"
+  },
+  "unknown-subshell-kept.image": {
+    "writer": "f2b795ba747b23d42052184d822b41e3d01357cc",
+    "producer": "records",
+    "crate_version": "18.18.0",
+    "build_id": "0d9a43b5054d8b5c18972d8b9aa487286c95ade5e4fe5588bc6d79ada090befe",
+    "frames_version": 29,
+    "sha256": "0d3e9cb7d76c81aa3552cdcfb057c39192cc344e642aec8e6909d9e72541495d",
+    "size": 2481,
+    "source": "refresh-records-producer.rs",
+    "product_patch": "refresh-records-product.patch"
+  },
+  "unknown-subshell-kept.record": {
+    "writer": "f2b795ba747b23d42052184d822b41e3d01357cc",
+    "producer": "records",
+    "crate_version": "18.18.0",
+    "build_id": "0d9a43b5054d8b5c18972d8b9aa487286c95ade5e4fe5588bc6d79ada090befe",
+    "frames_version": 29,
+    "sha256": "44ea53e9f759e4df68cb3cd0f31e7aea731f2bcf3274e42acba30dfed6c8765b",
+    "size": 7,
+    "source": "refresh-records-producer.rs",
+    "product_patch": "refresh-records-product.patch"
+  }
+}

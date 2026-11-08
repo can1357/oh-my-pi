@@ -1,5 +1,4 @@
-//! Restore refusals during the read-only prefix leave the saved image
-//! retryable.
+//! A refused restore must not consume the only resumable image.
 #![cfg(unix)]
 
 use std::sync::Arc;
@@ -9,7 +8,7 @@ use pi_shell::{
 	bash::{
 		Budget, CallId, CallOutcome, Cx, Engine, EngineConfig, MemStore, RestoreOpts, RestoreReport,
 		RunId, Script, Shell, ShellApi, StateStore, Step,
-		store::{BlobSlot, Change, Key, Record, StoreError, Table},
+		store::{BlobSlot, Change, Key, Record, RestoreWrite, StoreError, Table},
 	},
 	testkit::{FakeHost, fault::skeleton_init},
 };
@@ -63,6 +62,21 @@ impl StateStore for RefusingStore {
 		};
 		self.operation(operation, true)?;
 		self.inner.apply(change)
+	}
+
+	fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+		// Exercise every backend write's admission without publishing any of
+		// them.
+		for write in &writes {
+			let operation = match write {
+				RestoreWrite::Put(key, _) => format!("put {:?}", key.as_key()),
+				RestoreWrite::Delete(key) => format!("del {:?}", key.as_key()),
+				RestoreWrite::DeleteBlob(slot) => format!("del_blob {slot:?}"),
+			};
+			self.operation(operation, true)?;
+		}
+		self.operation("commit restore".into(), true)?;
+		self.inner.commit_restore(writes)
 	}
 
 	fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
@@ -128,6 +142,19 @@ fn snapshot() -> Snapshot {
 	shell
 		.externalize(&mut Cx { host: &mut host, store: &mut store })
 		.unwrap();
+	// A record without a surviving parent must be removed only at commit.
+	store
+		.apply(Change::Put(Key::Proc(pi_shell::bash::Vpid(9)), Record::Proc {
+			parent: None,
+			status: Some(5),
+		}))
+		.unwrap();
+	store
+		.apply(Change::Put(
+			Key::UnknownMisc(200),
+			Record::Misc(BString::from(b"opaque\0\xffexecution state".as_slice())),
+		))
+		.unwrap();
 	Snapshot { bytes: store.to_bytes(), run, call: call.unwrap() }
 }
 
@@ -162,16 +189,24 @@ fn image_for(frameless: bool) -> Snapshot {
 fn expected_report(image: &Snapshot, drop_frames: bool, frameless: bool) -> RestoreReport {
 	if drop_frames || frameless {
 		RestoreReport {
-			lost: vec![pi_shell::bash::Lost::Vproc { vpid: pi_shell::bash::Vpid(1_073_741_825) }],
+			lost: vec![pi_shell::bash::Lost::Record { id: 200 }, pi_shell::bash::Lost::Vproc {
+				vpid: pi_shell::bash::Vpid(1_073_741_825),
+			}],
 			abandoned: if drop_frames {
 				vec![image.run]
 			} else {
 				Vec::new()
 			},
+			frames_abandoned: drop_frames.then_some(pi_shell::bash::FrameAbandonment::Requested),
 			..RestoreReport::default()
 		}
 	} else {
-		RestoreReport { vprocs: 2, runs: 1, ..RestoreReport::default() }
+		RestoreReport {
+			vprocs: 2,
+			runs: 1,
+			lost: vec![pi_shell::bash::Lost::Record { id: 200 }],
+			..RestoreReport::default()
+		}
 	}
 }
 
@@ -254,14 +289,8 @@ fn finish(
 	}
 	assert!(
 		store.inner.get_blob(BlobSlot::Frames).unwrap().is_none(),
-		"successful restore must consume the frame image"
+		"successful atomic commit must consume the frame image"
 	);
-	let mut sidecar = false;
-	store
-		.inner
-		.scan(Table::Misc, &mut |key, _| sidecar |= format!("{key:?}") == "Misc(JobFrames)")
-		.unwrap();
-	assert!(!sidecar, "successful restore must consume the saved job state");
 }
 
 fn sweep(drop_frames: bool, frameless: bool, permanent: bool) {
@@ -278,21 +307,10 @@ fn sweep(drop_frames: bool, frameless: bool, permanent: bool) {
 		opts,
 	)
 	.unwrap();
-	assert_eq!(report, expected, "unfaulted restore must satisfy the independent contract");
+	assert_eq!(report, expected);
 	let operations = baseline.operations;
-	assert!(!operations.is_empty(), "the real restore must reach the store");
 	let mut failures = Vec::new();
-	// Keep the read-only-prefix rows; transactional cleanup is a separate
-	// contract.
-	let reads = operations
-		.iter()
-		.take_while(|operation| {
-			!operation.starts_with("put ")
-				&& !operation.starts_with("del ")
-				&& !operation.starts_with("del_blob ")
-		})
-		.count();
-	for (index, operation) in operations.iter().take(reads).enumerate() {
+	for (index, operation) in operations.iter().enumerate() {
 		let mut store = RefusingStore {
 			inner: MemStore::from_bytes(&image.bytes).unwrap(),
 			refuse_at: (!permanent).then_some(index + 1),
@@ -303,93 +321,95 @@ fn sweep(drop_frames: bool, frameless: bool, permanent: bool) {
 		let before = store.inner.to_bytes();
 		let mut host = FakeHost::new();
 		let engine = Engine::new(EngineConfig::default());
-		let mut restored = None;
 		for attempt in 1..=if permanent { 3 } else { 1 } {
 			let result = Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, opts);
 			assert!(!store.refused.is_empty(), "injection {index}: {operation} was reached");
-			assert!(
-				store.refused.iter().all(|actual| actual == operation),
-				"injection must refuse the selected operation, not a different ordinal: {:?}",
-				store.refused
+			let unchanged = store.inner.to_bytes() == before;
+			let reported = matches!(result, Err(pi_shell::bash::RestoreError::Store(_)));
+			println!(
+				"point={} {operation}: attempt={attempt} reported={reported} unchanged={unchanged}",
+				index + 1
 			);
-			match result {
-				Ok(value) => {
-					println!("point={} {operation}: attempt={attempt} success {:?}", index + 1, value.1);
-					restored = Some(value);
-					break;
-				},
-				Err(error) => {
-					let after = store.inner.to_bytes();
-					let unchanged = after == before;
-					println!(
-						"point={} {operation}: attempt={attempt} error={error:?}; \
-						 unchanged={unchanged}; before_bytes={}; after_bytes={}",
-						index + 1,
-						before.len(),
-						after.len()
-					);
-					if !unchanged {
-						failures.push(format!(
-							"point={} {operation}: failed restore changed store bytes ({} -> {})",
-							index + 1,
-							before.len(),
-							after.len()
-						));
-						break;
-					}
-				},
-			}
-		}
-		store.refuse_at = None;
-		store.refuse_forever = None;
-		if restored.is_none() && store.inner.to_bytes() == before {
-			restored = Some(
-				Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, opts)
-					.expect("a refused unchanged restore must be retryable"),
-			);
-		}
-		if let Some((mut shell, report)) = restored {
-			if report != expected {
+			if !unchanged || !reported {
 				failures.push(format!(
-					"{operation}: retry lost execution: {report:?}, expected {expected:?}"
+					"point={} {operation}: reported={reported} unchanged={unchanged}",
+					index + 1
 				));
-			} else {
-				finish(&mut shell, &mut host, &mut store, &image, drop_frames || frameless);
+				break;
 			}
+		}
+		if store.inner.to_bytes() == before {
+			store.refuse_at = None;
+			store.refuse_forever = None;
+			let (mut shell, report) =
+				Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, opts).unwrap();
+			assert_eq!(report, expected);
+			finish(&mut shell, &mut host, &mut store, &image, drop_frames || frameless);
 		}
 	}
-	println!("exercised {reads} read-only-prefix operations");
+	println!("exercised {} observed fallible operations", operations.len());
 	assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
-fn normal_restore_read_prefix_refusals_preserve_execution_and_store_bytes() {
+fn every_normal_restore_refusal_preserves_execution_or_all_store_bytes() {
 	sweep(false, false, false);
 }
 
 #[test]
-fn drop_frames_read_prefix_refusals_preserve_execution_and_store_bytes() {
+fn every_drop_frames_refusal_preserves_cleanup_or_all_store_bytes() {
 	sweep(true, false, false);
 }
 
 #[test]
-fn frameless_restore_read_prefix_refusals_preserve_execution_and_store_bytes() {
+fn every_frameless_restore_refusal_preserves_cleanup_or_all_store_bytes() {
 	sweep(false, true, false);
 }
 
 #[test]
-fn permanently_refused_normal_read_prefix_preserves_execution_and_store_bytes() {
+fn permanently_refused_normal_restore_step_preserves_execution_or_all_store_bytes() {
 	sweep(false, false, true);
 }
 
 #[test]
-fn permanently_refused_drop_frames_read_prefix_preserves_execution_and_store_bytes() {
+fn permanently_refused_drop_frames_step_preserves_cleanup_or_all_store_bytes() {
 	sweep(true, false, true);
 }
 
 #[test]
-fn permanently_refused_frameless_read_prefix_preserves_execution_and_store_bytes() {
+fn permanently_refused_frameless_step_preserves_cleanup_or_all_store_bytes() {
 	sweep(false, true, true);
+}
+
+#[test]
+fn permanently_refused_writes_leave_the_image_retryable() {
+	let image = snapshot();
+	let mut store = RefusingStore {
+		inner: MemStore::from_bytes(&image.bytes).unwrap(),
+		refuse_writes: true,
+		..RefusingStore::default()
+	};
+	let before = store.inner.to_bytes();
+	let mut host = FakeHost::new();
+	let engine = Engine::new(EngineConfig::default());
+	for _ in 0..3 {
+		let result = Shell::restore(
+			&engine,
+			&mut Cx { host: &mut host, store: &mut store },
+			RestoreOpts::default(),
+		);
+		assert!(matches!(result, Err(pi_shell::bash::RestoreError::Store(_))));
+		assert_eq!(store.inner.to_bytes(), before);
+	}
+	assert!(store.refusals >= 3);
+	store.refuse_writes = false;
+	let (mut shell, _) = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	)
+	.unwrap();
+	resume(&mut shell, &mut host, &mut store, &image);
 }
 
 #[test]
@@ -413,4 +433,232 @@ fn permanently_unreadable_store_keeps_every_retry_byte_identical() {
 		assert_eq!(store.inner.to_bytes(), before, "permanent refusal consumed state");
 	}
 	assert_eq!(store.refusals, 3);
+}
+
+struct SignalHost {
+	inner:    FakeHost,
+	refuse:   bool,
+	refusals: usize,
+}
+
+// Refuse only the real host boundary; all execution and store behavior stays
+// the same as FakeHost, including output, callouts, and virtual processes.
+impl pi_shell::bash::Host for SignalHost {
+	fn resolve(
+		&mut self,
+		name: &bstr::BStr,
+		mode: pi_shell::bash::ModeId,
+		why: pi_shell::bash::ResolveCtx,
+	) -> pi_shell::bash::Resolved {
+		self.inner.resolve(name, mode, why)
+	}
+
+	fn start(
+		&mut self,
+		cmd: &pi_shell::bash::NativeRef,
+		inv: pi_shell::bash::Invocation<'_>,
+	) -> std::io::Result<Box<dyn pi_shell::bash::Task>> {
+		self.inner.start(cmd, inv)
+	}
+
+	fn restore_task(
+		&mut self,
+		cmd: &pi_shell::bash::NativeRef,
+		state: &[u8],
+	) -> std::io::Result<Box<dyn pi_shell::bash::Task>> {
+		self.inner.restore_task(cmd, state)
+	}
+
+	fn spawn(&mut self, spec: pi_shell::bash::SpawnSpec<'_>) -> pi_shell::bash::SpawnFuture {
+		self.inner.spawn(spec)
+	}
+
+	fn set_signal_trap(
+		&mut self,
+		_: pi_shell::bash::Signal,
+		_: Option<&bstr::BStr>,
+	) -> std::io::Result<bool> {
+		if self.refuse {
+			self.refusals += 1;
+			Err(std::io::Error::other("injected signal setup refusal"))
+		} else {
+			Ok(true)
+		}
+	}
+
+	fn fs(&mut self) -> &mut dyn pi_shell::bash::Fs {
+		self.inner.fs()
+	}
+
+	fn stdio(&mut self, fd: pi_shell::bash::StdFd) -> Option<Box<dyn pi_shell::bash::fs::File>> {
+		self.inner.stdio(fd)
+	}
+
+	fn now_ns(&self) -> u64 {
+		self.inner.now_ns()
+	}
+
+	fn timer(&mut self, at: pi_shell::bash::Deadline) -> Box<dyn pi_shell::bash::Timer> {
+		self.inner.timer(at)
+	}
+
+	fn wall(&self) -> pi_shell::bash::SystemTimeLike {
+		self.inner.wall()
+	}
+
+	fn random(&mut self) -> u64 {
+		self.inner.random()
+	}
+
+	fn shell_pid(&self) -> u32 {
+		self.inner.shell_pid()
+	}
+
+	fn ppid(&self) -> u32 {
+		self.inner.ppid()
+	}
+
+	fn user(&self) -> pi_shell::bash::UserInfo {
+		self.inner.user()
+	}
+
+	fn hostname(&self) -> BString {
+		self.inner.hostname()
+	}
+
+	fn tty(&mut self, fd: i32) -> Option<pi_shell::bash::TtyInfo> {
+		self.inner.tty(fd)
+	}
+
+	fn tz_offset(&self, tz: Option<&bstr::BStr>, unix_s: i64) -> (i32, BString) {
+		self.inner.tz_offset(tz, unix_s)
+	}
+
+	fn event(&mut self, ev: &pi_shell::bash::Event<'_>) -> pi_shell::bash::Verdict {
+		self.inner.event(ev)
+	}
+}
+
+fn signal_refusal(drop_frames: bool, frameless: bool) {
+	let image = image_for(frameless);
+	let opts = RestoreOpts { drop_frames };
+	let mut store = RefusingStore {
+		inner: MemStore::from_bytes(&image.bytes).unwrap(),
+		..RefusingStore::default()
+	};
+	let mut host = SignalHost { inner: FakeHost::new(), refuse: true, refusals: 0 };
+	let engine = Engine::new(EngineConfig::default());
+	let before = store.inner.to_bytes();
+	let error = Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, opts)
+		.err()
+		.expect("host signal setup must be fallible");
+	assert!(matches!(error, pi_shell::bash::RestoreError::SignalSetup { .. }));
+	assert_eq!(host.refusals, 1);
+	assert!(
+		store.inner.to_bytes() == before,
+		"signal refusal consumed the resumable image: {error:?}; before_bytes={}; after_bytes={}",
+		before.len(),
+		store.inner.to_bytes().len()
+	);
+	host.refuse = false;
+	let (mut shell, report) =
+		Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, opts).unwrap();
+	assert_eq!(report, expected_report(&image, drop_frames, frameless));
+	finish(&mut shell, &mut host.inner, &mut store, &image, drop_frames || frameless);
+}
+
+#[test]
+fn refused_signal_setup_preserves_resumable_image() {
+	signal_refusal(false, false);
+}
+
+#[test]
+fn drop_frames_refused_signal_setup_preserves_store() {
+	signal_refusal(true, false);
+}
+
+#[test]
+fn frameless_refused_signal_setup_preserves_store() {
+	signal_refusal(false, true);
+}
+
+#[test]
+fn frameless_refused_scope_cleanup_cannot_leak_locals_into_the_next_function() {
+	let image = image_for(true);
+	let mut store = RefusingStore {
+		inner: MemStore::from_bytes(&image.bytes).unwrap(),
+		refuse_forever: Some("del Scope(0)".into()),
+		..RefusingStore::default()
+	};
+	let engine = Engine::new(EngineConfig::default());
+	let mut host = FakeHost::new();
+	let before = store.inner.to_bytes();
+	let result = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	);
+	assert!(matches!(result, Err(pi_shell::bash::RestoreError::Store(_))));
+	assert_eq!(store.inner.to_bytes(), before);
+	assert!(store.refusals > 0);
+	store.refuse_forever = None;
+	let (mut shell, report) = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	)
+	.unwrap();
+	assert_eq!(report, expected_report(&image, false, true));
+	// No suspension or intervening step: the first command reuses the
+	// abandoned function's depth and materializes another local there.
+	let run = shell.submit(Script::command(
+		br#"fresh_scope(){ local fresh=1; echo local=${KEEP-unset}; }; fresh_scope"#.as_slice(),
+	));
+	let mut done = false;
+	for _ in 0..10_000 {
+		match shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()) {
+			Step::Done { run: id, status } if id == run => {
+				assert_eq!(status, 0);
+				done = true;
+				break;
+			},
+			Step::Yield => {},
+			other => panic!("the new function must complete: {other:?}"),
+		}
+	}
+	assert!(done);
+	assert_eq!(host.stdout.bytes(), b"local=unset\n");
+}
+
+#[test]
+fn refused_frames_commit_preserves_opaque_records_and_reports_the_second_restore_loss() {
+	let image = snapshot();
+	let mut store = RefusingStore {
+		inner: MemStore::from_bytes(&image.bytes).unwrap(),
+		refuse_forever: Some("del_blob Frames".into()),
+		..RefusingStore::default()
+	};
+	let key = Key::UnknownMisc(200);
+	let record = Record::Misc(b"opaque retained execution state".as_slice().into());
+	store.inner.apply(Change::Put(key, record.clone())).unwrap();
+	let before = store.inner.to_bytes();
+	let engine = Engine::new(EngineConfig::default());
+	let mut host = FakeHost::new();
+	let result = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	);
+	assert!(matches!(result, Err(pi_shell::bash::RestoreError::Store(_))));
+	assert_eq!(store.inner.to_bytes(), before);
+	store.refuse_forever = None;
+	let (mut shell, report) = Shell::restore(
+		&engine,
+		&mut Cx { host: &mut host, store: &mut store },
+		RestoreOpts::default(),
+	)
+	.unwrap();
+	assert_eq!(report.lost, [pi_shell::bash::Lost::Record { id: 200 }]);
+	assert_eq!(store.inner.get(key).unwrap(), Some(&record));
+	resume(&mut shell, &mut host, &mut store, &image);
 }

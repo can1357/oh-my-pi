@@ -8,11 +8,12 @@
 //! blob. A subshell vproc's scopes, overlay and fields are execution
 //! position and are in the blob.
 //!
-//! Layout: a postcard [`Header`] (magic `OBF1`, IR version, frames version,
-//! engine build id, ids of the scripts in flight) followed by a postcard
-//! [`Image`] of every vproc, script, frame and staged op. The header decodes
-//! on its own, so an incompatible blob can still be abandoned with
-//! `RestoreOpts { drop_frames: true }`.
+//! Layout: a postcard [`Header`] (IR/core versions, engine build id and
+//! in-flight script ids), followed by the core [`Image`] for `OBF1`, or one
+//! `OBF2` envelope containing a delimited core and vocabulary entries. Ordinary
+//! incompatibility refusal leaves persisted bytes unchanged. Explicit
+//! `RestoreOpts { drop_frames: true }` instead consumes the blob, abandons all
+//! execution and reports why. Its header must still decode on its own.
 //!
 //! Fds: the image numbers every distinct fd object once ([`FdObjImage`];
 //! slots, saved fds and substitutions refer to it by index), and every
@@ -55,16 +56,21 @@ use crate::bash::{
 	},
 	mem::{Capture, MemEnd, MemImage, MemObj},
 	signal::{SigSet, Signal},
-	snapshot::{ExternalizeReport, Lost, RestoreOpts, RestoreReport},
+	snapshot::{ExternalizeReport, FrameAbandonment, Lost, RestoreOpts, RestoreReport},
 	store::{BlobSlot, Change, Key, MiscKey, Record, StateStore, StoreError, Table, TrapKey},
 };
 
-/// Version of the [`Image`] layout; part of the header and the build id.
-/// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
-/// variant: an exec target holds it by index.
+/// Version of the frozen execution core; part of the header and build id.
+/// New state and variants belong in snapshot vocabulary entries, outside this
+/// core. A core change needs an explicit migration/rejection policy: bumping
+/// this version also changes every engine identity and invalidates old images.
 pub const FRAMES_VERSION: u32 = 29;
 
 const MAGIC: [u8; 4] = *b"OBF1";
+const VOCABULARY_MAGIC: [u8; 4] = *b"OBF2";
+
+#[cfg(all(test, debug_assertions))]
+pub(super) mod vocabulary_tests;
 
 #[derive(Serialize, Deserialize)]
 struct Header {
@@ -145,6 +151,60 @@ impl SavedWait {
 			},
 			_ => {},
 		}
+	}
+}
+
+struct Prepared {
+	header:           Header,
+	image:            Option<Image>,
+	entries:          Vec<crate::bash::snapshot::vocabulary::Entry>,
+	frames_abandoned: Option<FrameAbandonment>,
+}
+
+fn prepare(bytes: &[u8], drop_frames: bool) -> Result<Prepared, RestoreError> {
+	let (header, body) =
+		postcard::take_from_bytes::<Header>(bytes).map_err(RestoreError::Corrupt)?;
+	let preflight = preflight(&header, body);
+	if drop_frames {
+		let reason = match preflight {
+			Ok(_) => FrameAbandonment::Requested,
+			Err(RestoreError::Incompatible { why }) => FrameAbandonment::Incompatible { why },
+			Err(RestoreError::Corrupt(_)) => FrameAbandonment::Unreadable,
+			Err(error) => return Err(error),
+		};
+		return Ok(Prepared {
+			header,
+			image: None,
+			entries: Vec::new(),
+			frames_abandoned: Some(reason),
+		});
+	}
+	let (core, entries) = preflight?;
+	let (image, rest) = postcard::take_from_bytes::<Image>(core).map_err(RestoreError::Corrupt)?;
+	if !rest.is_empty() {
+		return Err(RestoreError::Corrupt(postcard::Error::DeserializeBadEncoding));
+	}
+	Ok(Prepared { header, image: Some(image), entries, frames_abandoned: None })
+}
+
+fn preflight<'a>(
+	header: &Header,
+	body: &'a [u8],
+) -> Result<(&'a [u8], Vec<crate::bash::snapshot::vocabulary::Entry>), RestoreError> {
+	check(header).map_err(|why| RestoreError::Incompatible { why })?;
+	if header.magic == VOCABULARY_MAGIC {
+		let (envelope, rest) =
+			postcard::take_from_bytes::<crate::bash::snapshot::vocabulary::Envelope<'_>>(body)
+				.map_err(RestoreError::Corrupt)?;
+		if !rest.is_empty() {
+			return Err(RestoreError::Corrupt(postcard::Error::DeserializeBadEncoding));
+		}
+		for entry in envelope.entries.iter() {
+			entry.preflight()?;
+		}
+		Ok((envelope.core, envelope.entries.into_owned()))
+	} else {
+		Ok((body, Vec::new()))
 	}
 }
 
@@ -689,9 +749,15 @@ impl Shell {
 				blocked: p.blocked.as_ref().map(|b| (b.key.clone(), b.at)),
 			});
 		}
+		let mut captured = Vec::new();
+		crate::bash::snapshot::vocabulary::capture(self, &mut captured).map_err(ExtError::Encode)?;
 		let k = &self.k;
 		let header = Header {
-			magic: MAGIC,
+			magic: if self.entries.is_empty() && captured.is_empty() {
+				MAGIC
+			} else {
+				VOCABULARY_MAGIC
+			},
 			ir: IR_VERSION,
 			frames: FRAMES_VERSION,
 			build: Engine::build_id(),
@@ -715,8 +781,28 @@ impl Shell {
 			bangs: k.bangs.clone(),
 			deferrals: k.deferrals.clone(),
 		};
-		let mut bytes = postcard::to_stdvec(&header).map_err(ExtError::Encode)?;
-		bytes.extend_from_slice(&postcard::to_stdvec(&image).map_err(ExtError::Encode)?);
+		// Move opaque bytes, rather than cloning them, and put retained records
+		// back even when serialization fails. Newly captured state is rebuilt
+		// from its owning consumer on every snapshot.
+		let mut entries = std::mem::take(&mut self.entries);
+		let retained = entries.len();
+		entries.append(&mut captured);
+		let encoded = (|| {
+			let bytes = postcard::to_stdvec(&header)?;
+			if entries.is_empty() {
+				postcard::to_extend(&image, bytes)
+			} else {
+				let core = postcard::to_stdvec(&image)?;
+				let envelope = crate::bash::snapshot::vocabulary::Envelope {
+					core:    &core,
+					entries: std::borrow::Cow::Borrowed(&entries),
+				};
+				postcard::to_extend(&envelope, bytes)
+			}
+		})();
+		entries.truncate(retained);
+		self.entries = entries;
+		let bytes = encoded.map_err(ExtError::Encode)?;
 		let key = Key::Misc(MiscKey::JobFrames);
 		if job_frames.is_empty() {
 			cx.store.apply(Change::Del(key))?;
@@ -731,9 +817,9 @@ impl Shell {
 	}
 
 	/// Re-attach to a store that holds root state (and possibly a `Frames`
-	/// blob) — after a heap restore, in any process. With no blob (or with
-	/// `drop_frames`), starts idle; running procs/jobs in the store become
-	/// lost (137), their empty scopes are dropped.
+	/// blob) — after a heap restore, in any process. Every store mutation is
+	/// committed atomically after preparation succeeds. Any refusal leaves the
+	/// image and store unchanged; success consumes the frames blob.
 	///
 	/// Externals in flight are lost (their waiters see 137 and a `Lost`
 	/// event); tasks resume through
@@ -743,16 +829,25 @@ impl Shell {
 	///
 	/// # Errors
 	///
-	/// [`RestoreError::Incompatible`] for frames of another IR version or
-	/// engine build (retry with `drop_frames`), [`RestoreError::Corrupt`] /
-	/// [`RestoreError::InvalidUnit`] for undecodable or inconsistent blobs,
-	/// [`RestoreError::MissingUnit`], [`RestoreError::Store`].
+	/// [`RestoreError::Incompatible`] for unsupported encoding, core/IR version,
+	/// engine build or required vocabulary (retry with `drop_frames`),
+	/// [`RestoreError::Corrupt`] / [`RestoreError::InvalidUnit`] for
+	/// undecodable or inconsistent blobs, [`RestoreError::MissingUnit`],
+	/// [`RestoreError::Store`].
 	pub fn restore(
 		engine: &Arc<Engine>,
 		cx: &mut Cx<'_>,
 		opts: RestoreOpts,
 	) -> Result<(Self, RestoreReport), RestoreError> {
-		let root = Root::load(cx.store)?;
+		// Compatibility preflight is read-only. The atomic commit below owns
+		// every store mutation, including consuming the execution image.
+		let prepared = cx
+			.store
+			.get_blob(BlobSlot::Frames)?
+			.map(|bytes| prepare(&bytes, opts.drop_frames))
+			.transpose()?;
+		let mut root = Root::load(cx.store)?;
+		root.stage_restore();
 		let argv0 = state::root_misc(cx.store, MiscKey::Argv0)?
 			.map_or_else(|| BString::from("bash"), BString::from);
 		let shell_pid = parse_misc(cx.store, MiscKey::ShellPid)?.unwrap_or(0);
@@ -791,21 +886,17 @@ impl Shell {
 			slice: None,
 			gone: Vec::new(),
 			orphans: Vec::new(),
+			entries: Vec::new(),
 		};
 		let mut report = RestoreReport::default();
+		cx.store.scan(Table::Misc, &mut |key, _| {
+			if let Key::UnknownMisc(id) = key {
+				report.lost.push(Lost::Record { id });
+			}
+		})?;
 		let mut restored = false;
-		if let Some(bytes) = cx.store.get_blob(BlobSlot::Frames)? {
-			let (header, body) =
-				postcard::take_from_bytes::<Header>(&bytes).map_err(RestoreError::Corrupt)?;
-			if opts.drop_frames {
-				for &run in &header.runs {
-					shell.k.done.push_back((run, 255));
-					shell.k.next_run = shell.k.next_run.max(run.0 + 1);
-				}
-				report.abandoned = header.runs;
-			} else {
-				check(&header).map_err(|why| RestoreError::Incompatible { why })?;
-				let image: Image = postcard::from_bytes(body).map_err(RestoreError::Corrupt)?;
+		if let Some(prepared) = prepared {
+			if let Some(image) = prepared.image {
 				let jobs = match cx.store.get(Key::Misc(MiscKey::JobFrames))? {
 					Some(Record::Misc(bytes)) => {
 						postcard::from_bytes(bytes).map_err(RestoreError::Corrupt)?
@@ -814,12 +905,47 @@ impl Shell {
 					Some(_) => return Err(StoreError::Shape { table: Table::Misc }.into()),
 				};
 				shell.apply(engine, cx, image, jobs, &mut stdio, &mut report)?;
+				let mut entries = prepared.entries;
+				let mut failed = None;
+				entries.retain_mut(|entry| {
+					if failed.is_some() {
+						return true;
+					}
+					if let Some(codec) = crate::bash::snapshot::vocabulary::find(entry) {
+						let owned = crate::bash::snapshot::vocabulary::Entry {
+							id:       entry.id,
+							revision: entry.revision,
+							required: entry.required,
+							vpid:     entry.vpid,
+							payload:  std::mem::take(&mut entry.payload),
+						};
+						failed = codec.restore(&mut shell, owned).err();
+						false
+					} else {
+						report.lost.push(entry.loss());
+						true
+					}
+				});
+				if let Some(error) = failed {
+					return Err(error);
+				}
+				shell.entries = entries;
 				shell.seed_orphans();
 				restored = true;
+			} else {
+				for &run in &prepared.header.runs {
+					shell.k.done.push_back((run, 255));
+					shell.k.next_run = shell.k.next_run.max(run.0 + 1);
+				}
+				report.abandoned = prepared.header.runs;
+				report.frames_abandoned = prepared.frames_abandoned;
 			}
-			cx.store.del_blob(BlobSlot::Frames)?;
+			shell.k.root.delete_restore_blob(BlobSlot::Frames);
 		}
-		cx.store.apply(Change::Del(Key::Misc(MiscKey::JobFrames)))?;
+		shell
+			.k
+			.root
+			.write(cx.store, Change::Del(Key::Misc(MiscKey::JobFrames)));
 		if !restored {
 			shell.lose_running(cx, &mut report)?;
 		}
@@ -828,6 +954,7 @@ impl Shell {
 			return Err(RestoreError::Store(err));
 		}
 		reinstall_signal_traps(cx)?;
+		shell.k.root.commit_restore(cx.store)?;
 		let root = (shell.procs[0].vpid, shell.procs[0].mode);
 		shell
 			.k
@@ -1223,13 +1350,16 @@ fn run_image(r: &Run) -> RunImage {
 }
 
 fn check(h: &Header) -> Result<(), Incompatibility> {
-	if h.magic != MAGIC {
+	if h.magic != MAGIC && h.magic != VOCABULARY_MAGIC {
 		return Err(Incompatibility::Magic);
 	}
 	if h.ir != IR_VERSION {
 		return Err(Incompatibility::IrVersion { found: h.ir, expected: IR_VERSION });
 	}
-	if h.frames != FRAMES_VERSION || h.build != Engine::build_id() {
+	if h.frames != FRAMES_VERSION {
+		return Err(Incompatibility::FramesVersion { found: h.frames, expected: FRAMES_VERSION });
+	}
+	if h.build != Engine::build_id() {
 		return Err(Incompatibility::Build);
 	}
 	Ok(())

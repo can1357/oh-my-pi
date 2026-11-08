@@ -24,7 +24,7 @@ use crate::{
 		Vpid,
 		store::{
 			BlobSlot, Change, Elem, Job, JobState, Key, KeyBuf, LossyKind, MiscKey, OptId, Record,
-			Sticky, Table, TrapKey, Var, ZshScope,
+			RestoreWrite, Sticky, Table, TrapKey, Var, ZshScope,
 		},
 		zshopt::{ZshOpt, ZshOpts},
 	},
@@ -65,6 +65,7 @@ pub fn store_conformance<S: StateStore>(
 	zsh_options_and_aliases_put_scan_del_and_follow_the_epoch(&mut make(), &mut bump_epoch);
 	blobs_are_independent(&mut make());
 	apply_never_moves_the_epoch(&mut make(), &mut bump_epoch);
+	atomic_restore_validates_the_entire_batch_before_publishing(&mut make());
 	copies_hold_the_same_records(&mut make(), &mut copy);
 	shell_sees_out_of_band_writes_after_an_epoch_bump(&mut make(), &mut bump_epoch);
 	frames_resume_from_the_store(&mut make());
@@ -113,6 +114,58 @@ const fn var_rec(attrs: Attrs, value: VarValue) -> Record {
 /// A scope record.
 fn scope_rec(func: Option<&str>) -> Record {
 	Record::Scope { func: func.map(BString::from), positional: None, zsh: None }
+}
+
+fn atomic_restore_validates_the_entire_batch_before_publishing(store: &mut dyn StateStore) {
+	let status = Key::Misc(MiscKey::Status);
+	let opaque = Key::UnknownMisc(200);
+	let value = Record::Misc(BString::from("preserved"));
+	let local_value = str_var(b"outer", Attrs::default());
+	store.apply(Change::Put(status, value.clone())).unwrap();
+	store.apply(Change::Put(opaque, value.clone())).unwrap();
+	store
+		.apply(Change::Put(Key::Scope(0), scope_rec(Some("outer"))))
+		.unwrap();
+	store
+		.apply(Change::Put(local(0, b"KEEP"), local_value.clone()))
+		.unwrap();
+	store.put_blob(BlobSlot::Frames, b"saved image").unwrap();
+	let epoch = store.epoch();
+	for invalid in [
+		RestoreWrite::Put(Key::Scope(2).to_buf(), scope_rec(None)),
+		RestoreWrite::Put(local(0, b"KEEP").to_buf(), local_value.clone()),
+		RestoreWrite::Put(var(b"bad").to_buf(), Record::Words(Vec::new())),
+	] {
+		let result = store.commit_restore(vec![
+			RestoreWrite::DeleteBlob(BlobSlot::Frames),
+			RestoreWrite::Delete(Key::Scope(0).to_buf()),
+			RestoreWrite::Put(status.to_buf(), Record::Misc(BString::from("changed"))),
+			invalid,
+		]);
+		assert!(
+			matches!(result, Err(StoreError::Shape { .. })),
+			"invalid last write must refuse the whole batch"
+		);
+		assert_eq!(store.get(status).unwrap(), Some(&value));
+		assert_eq!(store.get(opaque).unwrap(), Some(&value));
+		assert_eq!(store.get(Key::Scope(0)).unwrap(), Some(&scope_rec(Some("outer"))));
+		assert_eq!(store.get(local(0, b"KEEP")).unwrap(), Some(&local_value));
+		assert_eq!(store.get_blob(BlobSlot::Frames).unwrap(), Some(b"saved image".to_vec()));
+		assert_eq!(store.epoch(), epoch);
+	}
+	store
+		.commit_restore(vec![
+			RestoreWrite::Delete(Key::Scope(0).to_buf()),
+			RestoreWrite::Put(Key::Scope(0).to_buf(), scope_rec(Some("replacement"))),
+			RestoreWrite::Put(local(0, b"NEW").to_buf(), str_var(b"inner", Attrs::default())),
+			RestoreWrite::DeleteBlob(BlobSlot::Frames),
+		])
+		.unwrap();
+	assert_eq!(store.get(local(0, b"KEEP")).unwrap(), None);
+	assert_eq!(store.get(local(0, b"NEW")).unwrap(), Some(&str_var(b"inner", Attrs::default())));
+	assert_eq!(store.get(opaque).unwrap(), Some(&value));
+	assert_eq!(store.get_blob(BlobSlot::Frames).unwrap(), None);
+	assert_eq!(store.epoch(), epoch);
 }
 
 /// A sticky emulation naming options on and off.

@@ -8,7 +8,7 @@ use pi_shell::{
 	bash::{
 		Budget, CallOutcome, Cx, Engine, EngineConfig, MemStore, RestoreOpts, Script, Shell,
 		ShellApi, StateStore, Step,
-		store::{BlobSlot, Change, Key, MiscKey, Record, StoreError, Table},
+		store::{BlobSlot, Change, Key, MiscKey, Record, RestoreWrite, StoreError, Table},
 	},
 	testkit::{FakeHost, fault::skeleton_init},
 };
@@ -38,6 +38,24 @@ impl StateStore for RefuseFrames {
 			return Err(StoreError::Backend("refused JobFrames deletion".into()));
 		}
 		self.inner.apply(change)
+	}
+
+	fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+		for write in &writes {
+			let refused = self.refuse
+				&& match write {
+					RestoreWrite::Delete(key) => {
+						self.refuse_jobs && matches!(key.as_key(), Key::Misc(MiscKey::JobFrames))
+					},
+					RestoreWrite::DeleteBlob(BlobSlot::Frames) => !self.refuse_jobs,
+					_ => false,
+				};
+			if refused {
+				self.refusals += 1;
+				return Err(StoreError::Backend("refused execution image deletion".into()));
+			}
+		}
+		self.inner.commit_restore(writes)
 	}
 
 	fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
