@@ -152,7 +152,7 @@ export interface AsyncJob {
 	 * delayed `agent://<id>` handle in an `async-result` delivery still
 	 * resolves). The manager invokes and clears this exactly once — on
 	 * eviction or manager disposal. The closure requests cleanup; registered
-	 * agents and unapplied recovery can keep the containing lease alive.
+	 * agents can keep the containing lease alive until their release.
 	 */
 	retainedArtifactsCleanup?: () => Promise<void>;
 }

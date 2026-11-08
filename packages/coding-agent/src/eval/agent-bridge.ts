@@ -233,8 +233,8 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						...(isolation ? { isolation } : {}),
 						...(customTools ? { customTools } : {}),
 						retainArtifacts: true,
-						// Row eviction requests cleanup; registered agents and
-						// unapplied recovery can keep the containing lease alive.
+						// Row eviction requests cleanup; registered agents keep their
+						// containing lease alive until release.
 						onArtifactsRetained: cleanup => {
 							const job = manager.getJob(jobId);
 							if (job) job.retainedArtifactsCleanup = cleanup;

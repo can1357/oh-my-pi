@@ -67,24 +67,24 @@ afterEach(async () => {
 	for (const root of tmpRoots.splice(0)) await fs.rm(root, { recursive: true, force: true });
 });
 
-describe("retained subagent artifacts outlive the run, never the process", () => {
+describe("subagent artifacts after the run returns", () => {
 	it(
-		"removes a retained temporary artifacts directory when its host exits normally",
+		"leaves a retained temporary artifacts directory behind when its host exits normally",
 		async () => {
 			const { artifactsDir } = await runHost("exit");
 
 			expect(path.basename(artifactsDir)).toStartWith("omp-eval-agent-");
-			expect(await exists(artifactsDir)).toBe(false);
+			expect(await exists(artifactsDir)).toBe(true);
 		},
 		HOST_TIMEOUT_MS,
 	);
 
 	it(
-		"removes a retained temporary artifacts directory when its host is terminated",
+		"leaves a retained temporary artifacts directory behind when its host is terminated",
 		async () => {
 			const { artifactsDir } = await runHost("sigterm");
 
-			expect(await exists(artifactsDir)).toBe(false);
+			expect(await exists(artifactsDir)).toBe(true);
 		},
 		HOST_TIMEOUT_MS,
 	);

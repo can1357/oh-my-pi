@@ -14,9 +14,7 @@ import { $ } from "bun";
 
 const root = process.env.PROBE_ROOT!;
 const mode = process.argv[2];
-const nested = mode.startsWith("nested");
 const applied = mode.startsWith("applied");
-let creatingParent = nested;
 let response = 0;
 const cwd = path.join(root, "project");
 await fs.mkdir(cwd, { recursive: true });
@@ -32,7 +30,7 @@ registerMockApi("recovery-artifacts-host");
 const model = createMockModel({
 	id: "recovery-artifacts-host",
 	handler: () => {
-		if (creatingParent || mode === "empty") return { content: ["nothing to change"] };
+		if (mode === "empty") return { content: ["nothing to change"] };
 		if (response++ === 0) {
 			return {
 				content: [
@@ -77,38 +75,13 @@ const session = {
 	enableIrc: false,
 } as unknown as ToolSession;
 let cleanup: (() => Promise<void>) | undefined;
-let parentCleanup: (() => Promise<void>) | undefined;
-let parentDir: string | undefined;
-if (nested) {
-	const parent = await runStructuredSubagent({
-		session,
-		invocationKind: "eval",
-		assignment: "parent",
-		agent: agent.name,
-		structured: false,
-		identity: { id: "Parent" },
-		keepAlive: true,
-		retainArtifacts: true,
-		isolation: { requested: false },
-		onArtifactsRetained: owner => {
-			parentCleanup = owner;
-		},
-	});
-	parentDir = parent.artifactsDir;
-	const parentRef = AgentRegistry.global().get("Parent")!;
-	assert(parentRef.sessionFile, "parent did not publish a transcript");
-	session.getSessionFile = () => parentRef.sessionFile!;
-	session.getAgentId = () => "Parent";
-	session.taskDepth = 1;
-	creatingParent = false;
-}
 const settled = await runStructuredSubagent({
 	session,
 	invocationKind: "task",
 	assignment: "change file.txt",
 	agent: agent.name,
 	structured: false,
-	identity: { id: nested ? "Parent.Child" : "RecoveryWorker" },
+	identity: { id: "RecoveryWorker" },
 	keepAlive: mode === "applied-live",
 	retainArtifacts: true,
 	isolation: { requested: true, apply: applied, merge: "patch" },
@@ -124,30 +97,10 @@ if (mode === "empty") assert.equal(patch, "");
 else assert(patch.includes("+recovered unique work"), patch);
 assert.equal(await Bun.file(path.join(cwd, "file.txt")).text(), applied ? "recovered unique work\n" : "original\n");
 if (applied) assert.equal(settled.changesApplied, true, settled.mergeSummary);
-if (nested) assert(settled.result.patchPath.startsWith(`${parentDir}${path.sep}`));
-if (mode === "nested-mixed") {
-	response = 0;
-	const merged = await runStructuredSubagent({
-		session,
-		invocationKind: "task",
-		assignment: "apply another child's work",
-		agent: agent.name,
-		structured: false,
-		identity: { id: "Parent.Applied" },
-		keepAlive: false,
-		retainArtifacts: true,
-		isolation: { requested: true, apply: true, merge: "patch" },
-	});
-	assert.equal(merged.changesApplied, true, merged.mergeSummary);
-}
 await AgentLifecycleManager.global().dispose();
-const ownerDisposal = mode !== "exit" && mode !== "applied-exit" && mode !== "nested-exit";
-if (ownerDisposal) {
-	assert(cleanup || parentCleanup, "run did not hand artifacts to an owner");
-	await cleanup?.();
-	await parentCleanup?.();
-}
-const directory = parentDir ?? settled.artifactsDir;
+assert(cleanup, "run did not hand artifacts to an owner");
+await cleanup();
+const directory = settled.artifactsDir;
 const afterOwnerExists = await fs.stat(directory).then(
 	() => true,
 	() => false,

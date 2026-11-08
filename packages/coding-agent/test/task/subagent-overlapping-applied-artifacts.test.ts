@@ -3,16 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const HOST = path.resolve(import.meta.dir, "../fixtures/overlapping-recovery-host.ts");
-for (const mode of [
-	"root-before",
-	"nested-before",
-	"root-after",
-	"nested-after",
-	"unchanged-before",
-	"unchanged-after",
-]) {
-	it(`settles only the applied capture, independently of release: ${mode}`, async () => {
+const HOST = path.resolve(import.meta.dir, "../fixtures/overlapping-applied-artifacts-host.ts");
+for (const mode of ["unchanged-before", "unchanged-after"]) {
+	it(`reclaims applied artifacts after overlapping lifecycle release: ${mode}`, async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-overlapping-recovery-"));
 		const child = Bun.spawn([process.execPath, HOST, mode], {
 			cwd: path.resolve(import.meta.dir, "../../../.."),
@@ -38,26 +31,13 @@ for (const mode of [
 			expect(exitCode, stderr).toBe(0);
 			const line = stdout.split("\n").find(entry => entry.startsWith("RESULT "));
 			expect(line, stdout).toBeDefined();
-			const result = JSON.parse(line!.slice(7)) as {
-				artifactsDir: string;
-				patchPath: string;
-				patch: string;
-				changed: boolean;
-			};
-			if (result.changed) {
-				// The child and isolated tree are gone: the bytes must survive normal exit.
-				expect(await Bun.file(result.patchPath).text()).toBe(result.patch);
-				expect(result.patch).toContain(
-					mode.startsWith("nested") ? "+late unique nested recovery" : "+late unique recovery",
-				);
-			} else {
-				expect(
-					await fs.stat(result.artifactsDir).then(
-						() => true,
-						() => false,
-					),
-				).toBe(false);
-			}
+			const result = JSON.parse(line!.slice(7)) as { artifactsDir: string };
+			expect(
+				await fs.stat(result.artifactsDir).then(
+					() => true,
+					() => false,
+				),
+			).toBe(false);
 		} finally {
 			clearTimeout(deadline);
 			child.kill("SIGKILL");

@@ -29,7 +29,7 @@ import type { AsyncJob, AsyncJobManagerApi, AsyncJobRunResult } from "../async/j
 import { validateAgentAccountPools } from "../config/account-pools";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
-import { registerTemporaryArtifactsDir } from "../internal-urls/registry-helpers";
+import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import vibeTurnResultTemplate from "../prompts/tools/vibe-turn-result.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -1278,7 +1278,7 @@ export class VibeSessionRegistry {
 		const sessionArtifactsDir = sessionFile ? sessionFile.slice(0, -6) : null;
 		const artifactsDir = sessionArtifactsDir ?? path.join(os.tmpdir(), `omp-vibe-${Snowflake.next()}`);
 		await fs.mkdir(artifactsDir, { recursive: true });
-		if (!sessionArtifactsDir) registerTemporaryArtifactsDir(artifactsDir);
+		if (!sessionArtifactsDir) registerArtifactsDir(artifactsDir);
 		const localProtocolOptions = sessionLocalProtocolOptions(session);
 		// Same exact-name pool task dispatch and persisted revival apply, so a
 		// worker is restricted from its first turn, not only after a revive.

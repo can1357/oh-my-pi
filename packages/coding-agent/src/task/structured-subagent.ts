@@ -28,12 +28,7 @@ import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
-import {
-	cleanupTemporaryArtifactsDir,
-	hasTemporaryArtifactsRecovery,
-	registerTemporaryArtifactsDir,
-	setTemporaryArtifactsRecovery,
-} from "../internal-urls/registry-helpers";
+import { cleanupTemporaryArtifactsDir, registerTemporaryArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
@@ -739,8 +734,6 @@ async function leaseArtifacts(
 		return { sessionFile, artifactsDir, temporary: false, unregister: undefined };
 	}
 	// No session file: the run gets its own directory under the OS temp dir.
-	// Disposable output is bounded by the process. Each recovery producer
-	// protects the containing lease until its merge outcome is known.
 	const artifactsDir = path.join(
 		os.tmpdir(),
 		`${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${Snowflake.next()}`,
@@ -945,10 +938,7 @@ async function resolveNestedPatchPaths(
 ): Promise<{ paths: string[]; failure?: string }> {
 	if (result.nestedPatchPaths) return { paths: result.nestedPatchPaths };
 	try {
-		const nestedPatches = result.nestedPatches ?? [];
-		if (nestedPatches.length === 0) return { paths: [] };
-		result.recoveryCaptureId ??= crypto.randomUUID();
-		return { paths: await persistNestedPatches(artifactsDir, result.id, nestedPatches, result.recoveryCaptureId) };
+		return { paths: await persistNestedPatches(artifactsDir, result.id, result.nestedPatches ?? []) };
 	} catch (error) {
 		return { paths: [], failure: error instanceof Error ? error.message : String(error) };
 	}
@@ -1179,30 +1169,13 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			{ cause: error, result: settled },
 		);
 	} finally {
-		const hasCapturedWork =
-			(settled?.patchPath !== undefined && settled.hasRootChanges !== false) ||
-			settled?.branchName !== undefined ||
-			(settled?.nestedPatches?.length ?? 0) > 0;
-		const preserveRecoveryArtifacts =
-			retainSalvagedArtifact ||
-			(policy.isIsolated &&
-				hasCapturedWork &&
-				(!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
-		// Settle this exact capture, not the agent: release may already have
-		// persisted a newer capture while the original merge was awaiting I/O.
-		if (settled) {
-			if (preserveRecoveryArtifacts) settled.recoveryCaptureId ??= crypto.randomUUID();
-			if (settled.recoveryCaptureId) {
-				setTemporaryArtifactsRecovery(lease.artifactsDir, settled.recoveryCaptureId, preserveRecoveryArtifacts);
-			}
-		}
 		const shouldRetainArtifacts =
 			request.detached === true ||
-			preserveRecoveryArtifacts ||
+			retainSalvagedArtifact ||
 			((request.retainArtifacts || policy.preparedSession !== undefined) &&
-				(completedSuccessfully || hasValidStructuredOutput));
-		const shouldCleanup =
-			lease.temporary && !shouldRetainArtifacts && !hasTemporaryArtifactsRecovery(lease.artifactsDir);
+				(completedSuccessfully || hasValidStructuredOutput)) ||
+			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
+		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
 		// No retention was promised on this path; an aborted status tombstone
 		// does not turn a one-shot run into a retained artifacts handle.
 		const cleanupArtifacts = async (): Promise<void> => {

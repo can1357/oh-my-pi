@@ -1672,8 +1672,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					onUpdate: forwardSyncProgress,
 					onArtifactsRetained: cleanup => {
 						// The job row requests cleanup on eviction or manager disposal;
-						// registered agents and unapplied recovery can keep the lease
-						// alive. Look up by the resolved
+						// registered agents keep the lease alive until release. Look up
+						// by the resolved
 						// `jobId`, not the requested `agentId` — `register()`
 						// suffixes `jobId` on collision, and looking up the
 						// requested id would hit an unrelated pre-existing row.

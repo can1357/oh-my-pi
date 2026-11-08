@@ -444,8 +444,8 @@ export class WorkPool {
 	 * the only home its `agent://<id>` output has for the rest of the pool's
 	 * life, and later turns write to the session's own artifacts dir. So the
 	 * aggregate pool job owns it, not the single turn that leased it. Row
-	 * eviction requests cleanup; registered workers and unapplied recovery
-	 * can keep the containing lease alive.
+	 * eviction requests cleanup; registered workers keep the containing
+	 * lease alive until release.
 	 */
 	#ownRetainedArtifacts(cleanup: () => Promise<void>): void {
 		const job = this.session.asyncJobManager?.getJob(this.name);

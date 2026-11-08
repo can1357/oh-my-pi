@@ -3,20 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const HOST = path.resolve(import.meta.dir, "../fixtures/recovery-artifacts-host.ts");
+const HOST = path.resolve(import.meta.dir, "../fixtures/applied-artifacts-host.ts");
 
-for (const mode of [
-	"exit",
-	"owner",
-	"applied",
-	"applied-exit",
-	"applied-live",
-	"nested-exit",
-	"nested-owner",
-	"nested-mixed",
-	"empty",
-] as const) {
-	it(`releases applied or empty leases and keeps unapplied recovery: ${mode}`, async () => {
+for (const mode of ["applied", "applied-live", "empty"] as const) {
+	it(`releases applied or empty retained artifacts after owner disposal: ${mode}`, async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-recovery-lifetime-"));
 		const child = Bun.spawn([process.execPath, HOST, mode], {
 			cwd: path.resolve(import.meta.dir, "../../../.."),
@@ -44,25 +34,17 @@ for (const mode of [
 			expect(line, stdout).toBeDefined();
 			const result = JSON.parse(line!.slice(7)) as {
 				artifactsDir: string;
-				patchPath: string;
-				patch: string;
 				afterOwnerExists: boolean;
 			};
-			const disposable = mode.startsWith("applied") || mode === "empty";
-			if (disposable) {
-				if (mode !== "applied-exit") expect(result.afterOwnerExists).toBe(false);
-				expect(
-					await fs.stat(result.artifactsDir).then(
-						() => true,
-						() => false,
-					),
-				).toBe(false);
-			} else {
-				// Read from outside the exited host, after every registered owner left.
-				expect(await Bun.file(result.patchPath).text()).toBe(result.patch);
-			}
+			expect(result.afterOwnerExists).toBe(false);
+			expect(
+				await fs.stat(result.artifactsDir).then(
+					() => true,
+					() => false,
+				),
+			).toBe(false);
 			expect(await Bun.file(path.join(root, "project/file.txt")).text()).toBe(
-				mode.startsWith("applied") || mode === "nested-mixed" ? "recovered unique work\n" : "original\n",
+				mode.startsWith("applied") ? "recovered unique work\n" : "original\n",
 			);
 		} finally {
 			clearTimeout(deadline);
