@@ -1749,31 +1749,62 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([]);
 	});
 
-	it("enforces fail-closed usage health when model fallback is disabled", async () => {
+	it.each([false, true])(
+		"enforces fail-closed usage health when model fallback is disabled (usageGovernor.enabled = %s)",
+		async governorEnabled => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!primaryModel) throw new Error("Expected bundled fail-closed model");
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: createMockModel().stream,
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.modelFallback": false,
+				"retry.usageAwareFallback": true,
+				"retry.usageReservePolicy": "fail-closed",
+				"usageGovernor.enabled": governorEnabled,
+			});
+			const healthSpy = vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({
+				state: "reserve",
+				accounts: [
+					{
+						credentialId: 1,
+						credentialType: "oauth",
+						state: "reserve",
+						remainingFraction: 0.05,
+					},
+				],
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+
+			await expect(session.prompt("Do not spend reserve")).rejects.toThrow("reserve policy is fail-closed");
+			expect(healthSpy).toHaveBeenCalledTimes(1);
+		},
+	);
+
+	it("skips usage-aware preflight when retry.usageAwareFallback is disabled with governor on", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!primaryModel) throw new Error("Expected bundled fail-closed model");
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
 			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: createMockModel().stream,
+			streamFn: createMockModel({ responses: [{ content: ["ok"] }] }).stream,
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.modelFallback": false,
-			"retry.usageAwareFallback": true,
+			"retry.usageAwareFallback": false,
 			"retry.usageReservePolicy": "fail-closed",
+			"usageGovernor.enabled": true,
 		});
-		vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({
-			state: "reserve",
-			accounts: [
-				{
-					credentialId: 1,
-					credentialType: "oauth",
-					state: "reserve",
-					remainingFraction: 0.05,
-				},
-			],
-		});
+		const healthSpy = vi.spyOn(modelRegistry.authStorage.health, "model");
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -1781,7 +1812,8 @@ describe("AgentSession retry fallback", () => {
 			modelRegistry,
 		});
 
-		await expect(session.prompt("Do not spend reserve")).rejects.toThrow("reserve policy is fail-closed");
+		await session.prompt("Run with governor on and usageAwareFallback off");
+		expect(healthSpy).not.toHaveBeenCalled();
 	});
 
 	it("does not degrade Fireworks Fast or retry a chain after queued fail-closed preflight", async () => {

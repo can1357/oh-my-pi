@@ -2413,9 +2413,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		configureGovernedPreparation();
 		this.addDisposer(this.settings.onLayersChange(configureGovernedPreparation));
 		this.#detachUsageBeforeQueueDequeue = this.agent.addBeforeQueuedMessageDequeueHook(async signal => {
-			if (cfgUsageGovernorEnabled.get(this.settings)) return;
 			if (
-				(!cfgRetryUsageAwareFallback.get(this.settings) && !cfgUsageGovernorEnabled.get(this.settings)) ||
+				!cfgRetryUsageAwareFallback.get(this.settings) ||
 				(this.#usagePreflightReadyForNextModelCall && this.#usagePreflightReadyModel === this.model)
 			) {
 				return;
@@ -2427,8 +2426,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
-			if (cfgUsageGovernorEnabled.get(this.settings)) return;
-			if (!cfgRetryUsageAwareFallback.get(this.settings) && !cfgUsageGovernorEnabled.get(this.settings)) return;
+			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
 				this.#usagePreflightReadyForNextModelCall = false;
@@ -5501,7 +5499,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return { status: "skipped", reason: "post-restore-unavailable" };
 				}
 			}
-			if (cfgRetryUsageAwareFallback.get(this.settings) || cfgUsageGovernorEnabled.get(this.settings)) {
+			if (cfgRetryUsageAwareFallback.get(this.settings)) {
 				if (!(await this.#runQueuedUsageAwarePreflight(signal))) {
 					return { status: "skipped", reason: "session-unavailable" };
 				}
