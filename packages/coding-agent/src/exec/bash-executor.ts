@@ -292,6 +292,52 @@ const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
 // leaking the session key in `brokenShellSessions`/`shellSessionQuarantines`
 // (#10308). The backing timer is unref'd so it never keeps the process alive.
 const QUARANTINE_CLEANUP_TIMEOUT_MS = 30_000;
+// A run whose output a consumer did not take fails with this prefix. The
+// engine raises it without tearing its shell down: the command ran, only its
+// output was lost, so the session's variables, exports and functions are
+// intact and the next call must still see them. This is the line between "the
+// run failed" and "the session is unusable".
+const OUTPUT_DELIVERY_FAILURE = "Command output was not all delivered";
+// How long a run whose consumer has ALREADY failed may still settle before the
+// executor reports its interruption. The engine fails such a run as soon as it
+// unwinds, so this only bounds a wedged one; a run with no observed loss is
+// never waited for, because a stalled native cleanup must still return
+// promptly (#10308).
+const OUTPUT_LOSS_SETTLE_MS = 2_000;
+
+/** True for the engine's "output was lost" failure, which leaves the shell usable. */
+function isOutputDeliveryFailure(err: unknown): boolean {
+	return err instanceof Error && err.message.includes(OUTPUT_DELIVERY_FAILURE);
+}
+
+/**
+ * The engine's delivery failure for a run whose output callback has already
+ * thrown and which a cancel or a timeout then interrupted, waiting at most
+ * {@link OUTPUT_LOSS_SETTLE_MS} for the engine to raise it. One owner decides
+ * a run's outcome: output the consumer lost outranks a cancel that arrived
+ * after it. When the engine is too slow to say so, the consumer's own failure
+ * is the evidence and this reports it in the same terms. The rejection keeps a
+ * handler here; its real consumer is the quarantine record.
+ */
+async function lostOutputAfterInterrupt(runPromise: Promise<ShellRunResult>, consumerFailure: unknown): Promise<Error> {
+	const { promise: deadline, resolve } = Promise.withResolvers<void>();
+	const timer = setTimeout(resolve, OUTPUT_LOSS_SETTLE_MS);
+	timer.unref?.();
+	try {
+		const fromEngine = await Promise.race([
+			runPromise.then(
+				() => undefined,
+				(err: unknown) => (isOutputDeliveryFailure(err) ? (err as Error) : undefined),
+			),
+			deadline.then(() => undefined),
+		]);
+		if (fromEngine) return fromEngine;
+		const reason = consumerFailure instanceof Error ? consumerFailure.message : String(consumerFailure);
+		return new Error(`${OUTPUT_DELIVERY_FAILURE}: the output callback failed: ${reason}`);
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 async function retainShellWithLiveBackgroundJobs(shell: Shell): Promise<void> {
 	let live: number;
@@ -684,10 +730,19 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	let acceptingChunks = true;
 	let graphicsFinished = false;
 	let decodedImages: ImageContent[] = [];
+	// The consumer's own failure, kept because it is this side's evidence that
+	// the run's output was lost: the engine fails such a run, and an
+	// interruption that lands afterwards must not report it as a cancellation.
+	let consumerFailure: unknown;
 	const enqueueChunk = (chunk: string) => {
 		if (!acceptingChunks) return;
-		const clean = graphics.push(chunk);
-		if (clean) sink.push(clean);
+		try {
+			const clean = graphics.push(chunk);
+			if (clean) sink.push(clean);
+		} catch (err) {
+			consumerFailure ??= err;
+			throw err;
+		}
 	};
 	const dump = async (notice?: string): Promise<OutputSummary & { images?: ImageContent[] }> => {
 		if (!graphicsFinished) {
@@ -856,6 +911,14 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			} else {
 				void Promise.allSettled([runPromise, cleanupPromise]);
 			}
+			// Output this run already lost owns the outcome: reporting the
+			// interruption instead would hide it. A run with no lost output is
+			// not waited for, so a stalled native cleanup still returns at once.
+			// The shell was torn down here either way, so the session stays reset.
+			if (consumerFailure !== undefined) {
+				resetSession = true;
+				throw await lostOutputAfterInterrupt(runPromise, consumerFailure);
+			}
 			let notice = "Command cancelled";
 			if (winner.kind === "timeout" && deadlineTimeoutMs !== undefined) {
 				const seconds = Math.round(deadlineTimeoutMs / 1000);
@@ -953,7 +1016,12 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			...(await dump()),
 		};
 	} catch (err) {
-		resetSession = true;
+		// A failed run is not a broken session. The engine keeps its shell when
+		// only this run's output was lost, so the next call still sees the
+		// variables, exports and functions the user set; every other failure
+		// leaves the session unusable and tears it down. A teardown decided
+		// earlier (an interruption) stands.
+		resetSession ||= !isOutputDeliveryFailure(err);
 		throw err;
 	} finally {
 		settleTrace();

@@ -36,7 +36,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	releaseShellSessions(sessionKey);
-	removeSyncWithRetries(cwd, { recursive: true, force: true });
+	removeSyncWithRetries(cwd);
 });
 
 /** A consumer that throws on its first chunk: the native run then loses output. */
