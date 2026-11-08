@@ -17,6 +17,7 @@
 - `task.eager` (`preferred`/`always`) now shapes only the main agent's system prompt; subagents fall back to their model's own delegation policy instead of being pushed to spawn further subagents
 
 ### Fixed
+- Remote MCP HTTP and SSE connections retain system-trusted certificates when `NODE_EXTRA_CA_CERTS` is also set ([#18556](https://github.com/can1357/oh-my-pi/issues/18556)).
 
 - Fixed `ask` notes added with `n` right after picking an answer landing on the previous question instead of the one shown; a Tern click then Note still notes the answer just clicked, and the Note button names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
 ### Added

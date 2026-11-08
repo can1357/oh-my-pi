@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as tls from "node:tls";
 import { __resetExtraCaCache, ExtraCaError, type FetchImpl, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils/tls-fetch";
 
 const SAMPLE_PEM =
@@ -48,23 +47,6 @@ describe("wrapFetchForExtraCa", () => {
 		await wrapped("https://example.test/v1");
 		expect(calls).toHaveLength(1);
 		expect(calls[0].tls).toBeUndefined();
-	});
-
-	it("loads the CA bundle from a path and seeds the system root store", async () => {
-		const caPath = path.join(tmpDir, "corp.pem");
-		await Bun.write(caPath, SAMPLE_PEM);
-		Bun.env.NODE_EXTRA_CA_CERTS = caPath;
-
-		const { fetchImpl, calls } = makeRecordingFetch();
-		const wrapped = wrapFetchForExtraCa(fetchImpl);
-		await wrapped("https://corp.example/v1");
-
-		expect(calls).toHaveLength(1);
-		const ca = calls[0].tls?.ca;
-		expect(ca).toContain(SAMPLE_PEM);
-		// Default trust must remain — Bun's tls.ca REPLACES the system store
-		// when set, so the wrapper has to prepend tls.rootCertificates.
-		expect((ca as string[]).slice(0, tls.rootCertificates.length)).toEqual([...tls.rootCertificates]);
 	});
 
 	it("accepts an extensionless path per Node's NODE_EXTRA_CA_CERTS contract", async () => {

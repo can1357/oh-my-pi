@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Explicit fetch CA bundles now retain system-trusted certificates when system CA trust is enabled.
+
 ## [18.18.2] - 2026-11-08
 
 ### Added

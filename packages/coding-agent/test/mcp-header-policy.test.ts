@@ -4,6 +4,7 @@ import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as tls from "node:tls";
 
 const LOCALHOST_CERT = `-----BEGIN CERTIFICATE-----
 MIIBjjCCATSgAwIBAgIUDqCmhiK21hvtyURmE/76OrsM3uAwCgYIKoZIzj0EAwIw
@@ -107,6 +108,61 @@ describe("MCP transport header policy", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"retains system-only CAs when the MCP client also has an extra bundle",
+		async () => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-system-ca-"));
+			const systemCa = path.join(dir, "system.pem");
+			const extraCa = path.join(dir, "extra.pem");
+			const server = Bun.serve({
+				port: 0,
+				hostname: "127.0.0.1",
+				tls: { cert: LOCALHOST_CERT, key: LOCALHOST_KEY },
+				fetch: rpcResult,
+			});
+			try {
+				await Bun.write(systemCa, LOCALHOST_CERT);
+				await Bun.write(extraCa, tls.rootCertificates[0]);
+				// System trust is selected at startup, so the MCP client must run in a child process.
+				const client = Bun.spawn(
+					[
+						process.execPath,
+						"-e",
+						`import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
+					const transport = new HttpTransport({ type: "http", url: process.argv[1], timeout: 3000 });
+					await transport.connect();
+					try { console.log(JSON.stringify(await transport.request("tools/list"))); }
+					finally { await transport.close(); }`,
+						`https://127.0.0.1:${server.port}/mcp`,
+					],
+					{
+						env: {
+							...process.env,
+							NODE_USE_SYSTEM_CA: "1",
+							SSL_CERT_FILE: systemCa,
+							NODE_EXTRA_CA_CERTS: extraCa,
+						},
+						stdout: "pipe",
+						stderr: "pipe",
+					},
+				);
+				const [exitCode, output, error] = await Promise.all([
+					client.exited,
+					new Response(client.stdout).text(),
+					new Response(client.stderr).text(),
+				]);
+				expect({ exitCode, output, error: exitCode === 0 ? undefined : error }).toEqual({
+					exitCode: 0,
+					output: '{"ok":true}\n',
+					error: undefined,
+				});
+			} finally {
+				server.stop(true);
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("keeps generated protocol headers when configured headers collide by casing", async () => {
 		let received: Headers | null = null;
