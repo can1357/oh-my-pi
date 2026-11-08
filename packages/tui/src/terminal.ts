@@ -45,6 +45,13 @@ const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
 /** How long a relayed ESC record waits for the rest of its sequence before acting as Escape (matches StdinBuffer). */
 const WIN32_RELAYED_ESCAPE_TIMEOUT_MS = 75;
+/**
+ * How long a relayed OSC/DCS/APC string waits for its terminator. Far longer
+ * than a lone ESC: a TSP event split across console-host reads must not be
+ * released mid-string (its tail would be typed into the composer), and a stall
+ * of the event loop longer than 75 ms fires the timer before the queued tail is read.
+ */
+const WIN32_RELAYED_STRING_TIMEOUT_MS = 5000;
 
 /** How long a TSP hello waits for its reply inside tmux, which answers DA1 itself. */
 const TSP_TMUX_HELLO_TIMEOUT_MS = 1000;
@@ -1402,7 +1409,7 @@ export class ProcessTerminal implements Terminal {
 				if (decoder.hasPendingSequence) {
 					this.#win32PendingFlushTimer = setTimeout(
 						() => this.#releaseWin32PendingSequence(),
-						WIN32_RELAYED_ESCAPE_TIMEOUT_MS,
+						decoder.hasPendingString ? WIN32_RELAYED_STRING_TIMEOUT_MS : WIN32_RELAYED_ESCAPE_TIMEOUT_MS,
 					);
 				}
 				return;

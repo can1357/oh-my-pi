@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Editor, type Component } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { matchesAppFollowUp } from "@oh-my-pi/pi-tui/keybinding-matchers";
@@ -146,6 +146,23 @@ describe("Win32InputModeDecoder", () => {
 		expect(matchesKey(split[1]!, "alt+d")).toBe(true);
 		expect(decoder.hasPendingSequence).toBe(false);
 	});
+
+	it("reports a held OSC/DCS/APC string so the caller can wait for its terminator", () => {
+		const relay = (text: string) => [...text].map(ch => `\x1b[0;0;${ch.charCodeAt(0)};1;0;1_`);
+		const decoder = new Win32InputModeDecoder();
+		for (const record of relay("\x1b]877;tsp;e;")) expect(decoder.decode(record)).toEqual([]);
+		expect(decoder.hasPendingSequence).toBe(true);
+		expect(decoder.hasPendingString).toBe(true);
+		expect(relay('{"a":1}\x07').flatMap(record => decoder.decode(record)!)).toEqual(['\x1b]877;tsp;e;{"a":1}\x07']);
+		expect(decoder.hasPendingString).toBe(false);
+
+		// A lone ESC or a CSI prefix is not a string: it keeps the short Escape timeout.
+		decoder.decode(relay("\x1b")[0]!);
+		expect(decoder.hasPendingString).toBe(false);
+		decoder.flushPendingSequence();
+		for (const record of relay("\x1b[1;")) decoder.decode(record);
+		expect(decoder.hasPendingString).toBe(false);
+	});
 });
 
 class InputRecorder implements Component {
@@ -251,6 +268,26 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		await harness.feed("\x1b[65;30;97;1;0;1_", "\x1b[66;48;98;1;0;1_");
 
 		expect(recorder.received).toEqual(["a", "b"]);
+	});
+
+	it("keeps a relayed TSP event out of the composer when its tail arrives after the Escape timeout", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;0c");
+
+		// ConPTY relays an OSC 877 TSP event as one text record per byte. An event-loop stall
+		// longer than the 75 ms Escape wait must not release the head and then type the tail.
+		const relay = (text: string) => [...text].map(char => `\x1b[0;0;${char.charCodeAt(0)};1;0;1_`);
+		const event = relay('\x1b]877;tsp;ack;{"sf":"s:1","s":12}\x07');
+		await harness.feed(...event.slice(0, 20));
+		vi.advanceTimersByTime(150);
+		await harness.feed(...event.slice(20));
+		await harness.feed("\x1b[65;30;97;1;0;1_");
+
+		expect(recorder.received).toEqual(["a"]);
 	});
 
 	it("prefers a late kitty reply and turns win32-input-mode back off", async () => {
