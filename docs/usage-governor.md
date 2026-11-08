@@ -87,7 +87,7 @@ The governor never counts a banked reset as allowance, never redeems one, and ne
 ## Limits
 
 - The coverage is cooperative. Only processes on this machine, with this agent directory and the governor enabled, see each other's reservations. Other profiles, machines and applications appear only through the usage snapshots they produce.
-- The built-in governed allowance adapter covers OpenAI Codex OAuth only, and requires cached evidence that paid overage is disabled. Z.AI and other providers can have matching stored credentials paced against fresh applicable windows, but their allowance is unknown for proactive routing and role protection unless an adapter verifies it.
+- The built-in governed allowance adapter covers OpenAI Codex OAuth only, and requires evidence from a full usage report no more than 15 minutes old that paid overage is disabled. Rate-limit headers cannot refresh that evidence. Z.AI and other providers can have matching stored credentials paced against fresh applicable windows, but their allowance is unknown for proactive routing and role protection unless an adapter verifies it.
 - Routing uses cached reports, not a fresh network probe. It requires a matching stored credential and identity, an applicable model and endpoint, and all required limit observations to be current and no older than 15 minutes. Broker mode without local cache entries cannot establish those facts.
 - The governor paces against the cached snapshot. The provider's own state can be ahead of or behind that snapshot, and a snapshot is trusted for up to 15 minutes.
 - The governor reads cached snapshots only. It never fetches usage, refreshes a token, reloads the credential pool, or contacts the provider to decide a wait.
