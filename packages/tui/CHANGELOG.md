@@ -22,6 +22,7 @@
 - Fixed LaTeX styling in nested content, including bold and italic resets, radical and optional-argument styling, color scoping, and inline math in headings.
 - Fixed unnecessary repainting in the setup wizard while waiting for input in ANSI terminals.
 - Fixed Windows ConPTY event handling so delayed terminal event data no longer appears in the composer.
+- Fixed relayed Windows terminal events after an event-loop stall so they neither abort the running turn nor type TSP data into the composer ([#18512](https://github.com/can1357/oh-my-pi/issues/18512)).
 - Fixed OSC 8 hyperlink support in Rex terminals so transcript URLs and file paths are command-clickable.
 
 ## [18.18.1] - 2026-11-08
