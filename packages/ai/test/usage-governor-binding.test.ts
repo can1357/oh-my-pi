@@ -574,7 +574,9 @@ describe("request-local route binding", () => {
 		await w.refresh();
 		expect(w.auth.governor.validateRoute!(binding, request)).toBe(true);
 
-		// Negative: duplicate limits [primary, primary] with missing secondary is rejected
+		// Negative: duplicate limits [primary, primary] while secondary is present but non-applicable (non-finite resetsAt).
+		// Windows is [primary, primary] and ids is [primary, secondary].
+		// Both limits exist in report and are fresh, so early limit-existence checks pass and the duplicate guard rejects.
 		w.customLimits = (now, cred) => [
 			{
 				id: "primary",
@@ -591,6 +593,71 @@ describe("request-local route binding", () => {
 				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now + 30_000 },
 				amount: { unit: "percent", usedFraction: 0.1 },
 				observedAt: now,
+			},
+			{
+				id: "secondary",
+				label: "Secondary (non-applicable)",
+				scope: { provider: PROVIDER, accountId: cred.accountId },
+				window: { id: "7d", label: "7 Day", durationMs: 604_800_000, resetsAt: Number.NaN },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now,
+			},
+		];
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
+	});
+	test("expired window tolerance requires fetchedAt before reset and finite present window", async () => {
+		const w = await setup();
+		const { binding, request } = await w.bind();
+
+		// Positive control: fetchedAt is before reset deadline (which has passed) -> validates true
+		const now = Date.now();
+		w.fetchedAt = now - 10_000;
+		w.observedAt = now - 10_000;
+		w.customLimits = () => [
+			{
+				id: "primary",
+				label: "Included",
+				scope: { provider: PROVIDER, accountId: "a" },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now - 5_000 },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now - 10_000,
+			},
+		];
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(true);
+
+		// Negative control 1: fetchedAt >= resetsAt (fetched after reset) is rejected
+		w.fetchedAt = now - 2_000;
+		w.observedAt = now - 2_000;
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
+
+		// Negative control 2: non-finite resetsAt is rejected
+		w.fetchedAt = now - 10_000;
+		w.observedAt = now - 10_000;
+		w.customLimits = () => [
+			{
+				id: "primary",
+				label: "Included",
+				scope: { provider: PROVIDER, accountId: "a" },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: Number.NaN },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now - 10_000,
+			},
+		];
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
+
+		// Negative control 3: absent window is rejected
+		w.customLimits = () => [
+			{
+				id: "primary",
+				label: "Included",
+				scope: { provider: PROVIDER, accountId: "a" },
+				window: undefined,
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now - 10_000,
 			},
 		];
 		await w.refresh();
