@@ -6,6 +6,7 @@ import type { MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { sessionResolveContext } from "@oh-my-pi/pi-coding-agent/internal-urls/context";
+import { resetRegisteredArtifactDirsForTests } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -18,6 +19,7 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { PreparedSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -100,11 +102,110 @@ afterEach(() => {
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
+	resetRegisteredArtifactDirsForTests();
 	unregisterCustomApis(MOCK_API_SOURCE);
 	vi.restoreAllMocks();
 });
 
 describe("seance artifact lifecycle", () => {
+	it("aborting one-shot seances retires cleanup subscriptions with their temporary directories", async () => {
+		using tempDir = TempDir.createSync("@omp-seance-abort-subscriptions-");
+		const cwd = path.join(tempDir.path(), "project");
+		const sourceFile = path.join(tempDir.path(), "source.jsonl");
+		await fs.mkdir(cwd, { recursive: true });
+		await Bun.write(
+			sourceFile,
+			`${JSON.stringify({ type: "session", version: CURRENT_SESSION_VERSION, id: "source", timestamp: new Date().toISOString(), cwd })}\n`,
+		);
+		let entered = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			id: "seance-abort-subscriptions",
+			handler: async (_context, options) => {
+				const stopped = Promise.withResolvers<void>();
+				if (options?.signal?.aborted) stopped.resolve();
+				else options?.signal?.addEventListener("abort", () => stopped.resolve(), { once: true });
+				entered.resolve();
+				await stopped.promise;
+				return { content: ["aborted"] };
+			},
+		});
+		registerMockApi(MOCK_API_SOURCE);
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime(mock.model.provider, "test-key");
+		const modelRegistry = makeModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"), mock.model);
+		const agent = getBundledAgent("seance");
+		if (!agent) throw new Error("Expected the bundled seance agent");
+		const session: ToolSession = {
+			cwd,
+			hasUI: false,
+			settings: Settings.isolated({
+				"task.isolation.enabled": false,
+				"task.agentIdleTtlMs": 0,
+				"retry.enabled": false,
+				"launch.enabled": false,
+			}),
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			getSessionAgents: () => [agent],
+			authStorage,
+			modelRegistry,
+			restrictToolNames: true,
+			enableMCP: false,
+			enableLsp: false,
+			enableIrc: false,
+		};
+		const registry = AgentRegistry.global();
+		// The process-lifetime lifecycle subscription is not owned by a run.
+		const lifecycle = AgentLifecycleManager.global();
+		const subscribe = registry.onChange.bind(registry);
+		const subscriptions = new Set<symbol>();
+		vi.spyOn(registry, "onChange").mockImplementation(listener => {
+			const key = Symbol();
+			subscriptions.add(key);
+			const unsubscribe = subscribe(listener);
+			return () => {
+				subscriptions.delete(key);
+				unsubscribe();
+			};
+		});
+		const remaining: number[] = [];
+		try {
+			for (const id of ["AbortedSeanceOne", "AbortedSeanceTwo"]) {
+				entered = Promise.withResolvers<void>();
+				const controller = new AbortController();
+				const pending = runStructuredSubagent({
+					session,
+					invocationKind: "task",
+					assignment: "Consult the saved context.",
+					agent: "seance",
+					sourceSession: sourceFile,
+					model: `mock/${mock.model.id}`,
+					structured: false,
+					identity: { id },
+					keepAlive: false,
+					signal: controller.signal,
+				});
+				await entered.promise;
+				controller.abort();
+				const result = await pending;
+				expect(result.result.aborted).toBe(true);
+				expect(
+					await fs.stat(result.artifactsDir).then(
+						() => true,
+						() => false,
+					),
+				).toBe(false);
+				remaining.push(subscriptions.size);
+				registry.unregister(id);
+			}
+			await lifecycle.dispose();
+			expect(remaining).toEqual([0, 0]);
+			expect(subscriptions.size).toBe(0);
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	it("publishes the latest warm and cold yield beside sibling results", async () => {
 		using tempDir = TempDir.createSync("@omp-seance-artifact-lifecycle-");
 		const cwd = path.join(tempDir.path(), "project");

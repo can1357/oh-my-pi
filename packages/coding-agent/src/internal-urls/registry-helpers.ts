@@ -34,6 +34,7 @@ export function registerTemporaryArtifactsDir(dir: string): () => void {
 	const unregister = registerArtifactsDir(dir);
 	temporaryArtifactsDirs.add(dir);
 	return () => {
+		releasePendingArtifactsCleanup(dir);
 		temporaryArtifactsDirs.delete(dir);
 		unregister();
 	};
