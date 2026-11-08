@@ -166,8 +166,9 @@ impl AnsiState {
 				90..=97 => self.fg = (code - 81) as ColorVal,
 				100..=107 => self.bg = (code - 91) as ColorVal,
 
-				// Extended colors, `;` form (`38;2;r;g;b`) or `:` form (`38:2::r:g:b`, `38:5:n`).
-				// Underline color (58) is consumed so its arguments are not read as codes, not tracked.
+				// Extended colors, `;` form (`38;2;r;g;b`) or `:` form
+				// (`38:2::r:g:b`, `38:5:n`). Underline color (58) is consumed so
+				// its arguments are not read as codes, not tracked.
 				38 | 48 | 58 => {
 					let color = if param.subs().is_empty() {
 						let (mode, ni) = next_sgr_param_u16(params, i);
@@ -190,7 +191,8 @@ impl AnsiState {
 					} else {
 						match param.subs() {
 							[5, idx, ..] => 0x100 | (*idx as ColorVal & 0xff),
-							// With a color-space id (`2:cs:r:g:b`, often empty) or without one.
+							// With a color-space id (`2:cs:r:g:b`, often empty) or
+							// without one.
 							[2, _, r, g, b, ..] | [2, r, g, b] => rgb_color(*r, *g, *b),
 							_ => continue,
 						}
