@@ -31,6 +31,11 @@
 ### Fixed
 
 - Browser relay tabs report their downloads: `tab.waitForDownload()` and `tab.downloads()` return each file where Chrome saved it instead of failing with "Browser target is not found", and an open with `downloads` says the relay cannot choose Chrome's folder ([#17893](https://github.com/can1357/oh-my-pi/pull/17893) by [@will-bogusz](https://github.com/will-bogusz))
+- An isolated subagent in an ovnfs checkout starts without walking and diffing the checkout first: its patch comes from ovnfs's `diff`, and a branch commit reads its baseline from a second checkout on the same capture only when it needs one. A slot left by no earlier run is claimed with one `mkdir`. With an ovnfs daemon that serves `new.base` and `diff.binary`, 20 subagents at once get their checkouts within about 20 ms each, or 100 ms right after a file edit, instead of about 40 s; repositories with nested repos or submodules keep the previous baseline ([#18457](https://github.com/can1357/oh-my-pi/pull/18457) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+
+### Fixed
+
+- Starting isolated subagents on Windows no longer spawns `ps` once per subagent to record its owner (about 0.2 s each under load, and the `ps` found there knows other pids); Windows owners are checked by pid, as documented ([#18457](https://github.com/can1357/oh-my-pi/pull/18457) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
 
 ## [18.18.1] - 2026-11-08
 
