@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import { describe, expect, test } from "bun:test";
 import type { FakeAccountSpec } from "./fixtures/usage-governor/fake-provider";
 import { GovernorProof } from "./fixtures/usage-governor/harness";
@@ -75,7 +75,7 @@ describe("usage governor readLedger", () => {
 	test("returns empty ledger when ledger file exists but schema tables are not yet committed", async () => {
 		const proof = await GovernorProof.create([account("govplan", "a")], { enabled: true });
 		try {
-			fs.writeFileSync(proof.ledgerPath, "");
+			await Bun.write(proof.ledgerPath, "");
 			expect(proof.readLedger()).toEqual({ waits: [], reservations: [] });
 			assertConfined(proof);
 		} finally {
@@ -86,7 +86,7 @@ describe("usage governor readLedger", () => {
 	test("discriminates non-BUSY errors: does not mask SQLITE_NOTADB as empty", async () => {
 		const proof = await GovernorProof.create([account("govplan", "a")], { enabled: true });
 		try {
-			fs.writeFileSync(proof.ledgerPath, "not a valid sqlite database file header");
+			await Bun.write(proof.ledgerPath, "not a valid sqlite database file header");
 			expect(() => proof.readLedger()).toThrow(/ledger read failed/);
 			try {
 				proof.readLedger();
@@ -115,9 +115,9 @@ describe("usage governor readLedger", () => {
 			db.close();
 
 			// Corrupt the page contents
-			const buf = fs.readFileSync(proof.ledgerPath);
+			const buf = await fs.readFile(proof.ledgerPath);
 			buf.fill(0xff, 100, Math.min(500, buf.length));
-			fs.writeFileSync(proof.ledgerPath, buf);
+			await Bun.write(proof.ledgerPath, buf);
 
 			expect(() => proof.readLedger()).toThrow(/ledger read failed/);
 			try {
