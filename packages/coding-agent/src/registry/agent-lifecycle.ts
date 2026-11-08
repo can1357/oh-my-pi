@@ -78,6 +78,12 @@ export interface AdoptOptions {
 	/** Releases resources that must survive parking but end with the agent lifecycle. */
 	onRelease?: () => Promise<void>;
 	/**
+	 * Parking ends the agent: its session cannot come back once disposed (an
+	 * isolated run's worktree is torn down with it), so park releases the
+	 * adoption and runs `onRelease` instead of keeping the agent revivable.
+	 */
+	releaseOnPark?: boolean;
+	/**
 	 * Called once when this adoption stops holding `revive` — released, replaced by
 	 * a re-adopt, removed from the registry, or its reviver forgotten — so whoever
 	 * tracks the reviver can let go of it.
@@ -90,6 +96,7 @@ interface AdoptedAgent {
 	idleTtlMs: number;
 	revive?: AgentReviver;
 	onRelease?: () => Promise<void>;
+	releaseOnPark?: boolean;
 	onReviverDropped?: () => void;
 	timer?: NodeJS.Timeout;
 }
@@ -285,6 +292,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			idleTtlMs: opts.idleTtlMs,
 			revive: opts.revive,
 			onRelease: opts.onRelease,
+			releaseOnPark: opts.releaseOnPark,
 			onReviverDropped: opts.onReviverDropped,
 		};
 		dropReviver(existing);
@@ -492,7 +500,13 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 					logger.warn("AgentLifecycleManager.park: session dispose failed", { id, error: String(error) });
 				}
 				const parked = this.#adopted.get(id);
-				if (parked?.ref === ref) afterPark = parked;
+				if (parked?.ref === ref && parked.releaseOnPark) {
+					this.#adopted.delete(id);
+					dropReviver(parked);
+					await runReleaseHook(id, parked.onRelease);
+				} else if (parked?.ref === ref) {
+					afterPark = parked;
+				}
 			} finally {
 				// Only clear if we are still the in-flight entry (a later park would
 				// have replaced us only after we resolved).

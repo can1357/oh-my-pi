@@ -3773,6 +3773,10 @@ export async function finalizeSubagentLifecycle(args: {
 			idleTtlMs: args.agentIdleTtlMs,
 			revive: args.reviveSession ?? undefined,
 			onRelease: args.onRelease,
+			// An isolated session cannot be revived outside its worktree, and a
+			// worktree kept for a parked agent leaks until omp exits; parking
+			// after `task.agentIdleTtlMs` ends the run and tears the worktree down.
+			releaseOnPark: args.isolated,
 		},
 		ref,
 	);

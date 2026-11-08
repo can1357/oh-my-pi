@@ -1598,11 +1598,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// its widget has no tool tap to read.
 		let spawnRun: SpawnRun | undefined = run;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
-			// Isolated runs are parked without a reviver once the run ends
-			// (`finalizeSubagentLifecycle`), so "message it" would point the
-			// caller at a follow-up path that no longer exists. The template says
-			// nothing about the worktree itself: the runner keeps it when captured
-			// changes could not be written, and names that path in the result.
+			// Isolated runs lose their reviver and worktree when they park
+			// (`releaseOnPark` in `finalizeSubagentLifecycle`), so "message it"
+			// would point the caller at a follow-up path that soon disappears.
+			// The template says nothing about the worktree itself: the runner
+			// keeps it when captured changes could not be written, and names
+			// that path in the result.
 			const isolated = spawnParams.isolated === true;
 			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
 			return `\n\n${prompt.render(taskFollowUpTemplate, {

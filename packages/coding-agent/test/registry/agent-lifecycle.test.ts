@@ -478,6 +478,33 @@ describe("AgentLifecycleManager", () => {
 		expect(await lifecycle.ensureLive("Warm-Park-Sub")).toBe(revived.session);
 	});
 
+	it("releases an isolated agent's resources when it parks and leaves it unrevivable", async () => {
+		vi.useFakeTimers();
+		const stub = makeSessionStub();
+		const releaseWorkspace = vi.fn(async () => {});
+		const revive = vi.fn(async () => makeSessionStub().session);
+		registerIdleSub("Iso-Park-Sub", stub.session);
+		lifecycle.adopt("Iso-Park-Sub", {
+			idleTtlMs: TTL,
+			revive,
+			onRelease: releaseWorkspace,
+			releaseOnPark: true,
+		});
+
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+
+		expect(stub.disposeCalls()).toBe(1);
+		expect(releaseWorkspace).toHaveBeenCalledTimes(1);
+		expect(registry.get("Iso-Park-Sub")?.status).toBe("parked");
+		expect(lifecycle.has("Iso-Park-Sub")).toBe(false);
+		await expect(lifecycle.ensureLive("Iso-Park-Sub")).rejects.toThrow("cannot be revived");
+		expect(revive).not.toHaveBeenCalled();
+
+		await lifecycle.release("Iso-Park-Sub");
+		expect(releaseWorkspace).toHaveBeenCalledTimes(1);
+	});
+
 	it("releases resources once a dead thread's agent is refused by the persisted reviver", async () => {
 		const manager = new AgentLifecycleManager(registry);
 		const warm = makeSessionStub();
