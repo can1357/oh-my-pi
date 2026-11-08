@@ -752,16 +752,11 @@ describe("Cursor MCP exec ordering", () => {
 	 */
 	function gatingRunner(onCall: (toolName: string) => Promise<void> | void): ExtensionRunner {
 		return {
-			hasHandlers: () => true,
-			consumeToolCallEmitted: () => false,
-			runScoped<T>(fn: () => T): T {
-				return fn();
-			},
+			...passthroughRunner(),
 			emitToolCall: async (event: { toolName: string }) => {
 				await onCall(event.toolName);
 				return undefined;
 			},
-			emitToolResult: async () => undefined,
 		} as unknown as ExtensionRunner;
 	}
 

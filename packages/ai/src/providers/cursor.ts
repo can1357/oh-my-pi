@@ -2925,9 +2925,7 @@ async function handleExecServerMessage(
 	const order = state.execOrder;
 	const execCase = execMsg.message.case;
 	const gated = order !== undefined && execCase !== undefined && execCase !== "requestContextArgs";
-	const mcp: { exclusive: boolean; call?: CursorMcpCall } = gated
-		? classifyMcpExecFrame(execMsg, execHandlers)
-		: { exclusive: false };
+	const mcp = gated ? classifyMcpExecFrame(execMsg, execHandlers) : { exclusive: false };
 	const run = () =>
 		runExecServerMessage(
 			execMsg,
