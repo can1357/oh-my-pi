@@ -530,9 +530,9 @@ fn run(args: &ShellArgs, env: Vec<(BString, BString)>, input: Input, opts: Proce
 	// Before the process opens any fd of its own.
 	let inherited = inherited_fds(opts.embedded);
 	let mut host = NativeHost::new(None, false, inherited, ignored_on_entry(), 0, opts.embedded);
-	// `omp zsh`: pi's utilities stand in for tools the system lacks (most
-	// of them on Windows). obash stays the plain process shell.
-	if opts.embedded {
+	// `omp zsh` on Windows: pi's utilities stand in for the Unix tools it
+	// lacks. Elsewhere, and in obash, a missing command stays not found.
+	if opts.embedded && cfg!(windows) {
 		host.offer_extras(&env);
 	}
 	let cfg = EngineConfig::default();

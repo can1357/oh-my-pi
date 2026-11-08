@@ -4176,17 +4176,21 @@ pub fn job_control(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	!vp.jobs.subshell && state::option(&mut k.root, cx.store, vp, OptId::Monitor).unwrap_or(false)
 }
 
-/// An asynchronous command without job control ignores `SIGINT` (and in
-/// zsh `SIGQUIT`), so a keyboard interrupt leaves it running (zsh
-/// `entersubsh` with `ESUB_ASYNC`, bash `setup_async_signals`): ignored
-/// traps it lists (`trap -- '' INT`) and may replace, and its programs
-/// start with them ignored
+/// On Windows, an asynchronous command without job control ignores
+/// `SIGINT` (and in zsh `SIGQUIT`), as zsh (`entersubsh` with
+/// `ESUB_ASYNC`) and bash (`setup_async_signals`) have it: the keyboard's
+/// Ctrl-C leaves it running (its programs lead console groups of their
+/// own, out of the console's Ctrl-C). Ignored traps it lists (`trap -- ''
+/// INT`) and may replace, and its programs start with them ignored
 /// ([`SpawnSpec::sigmask_ign`](crate::bash::SpawnSpec)). bash's ignored
 /// `SIGQUIT`, which it does not list, is not modelled. A bash subshell cannot
 /// trap the ignore away (it was ignored on entry, [`MiscKey::HardIgnored`]);
-/// zsh's can.
+/// zsh's can. Elsewhere the dispositions are left as they are.
 fn ignore_async_signals(k: &mut Kernel, cx: &mut Cx<'_>, child: &mut Vproc) {
 	use crate::bash::Signal;
+	if k.engine.config().platform != crate::bash::ids::Platform::Windows {
+		return;
+	}
 	let sigs: &[Signal] = if child.mode.dialect() == Dialect::Zsh {
 		&[Signal::Int, Signal::Quit]
 	} else {

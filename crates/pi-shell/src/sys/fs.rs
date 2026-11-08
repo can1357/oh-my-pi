@@ -1131,6 +1131,11 @@ mod pipe {
 
 impl Fs for StdFs {
 	fn open(&mut self, path: &BStr, flags: OpenFlags, mode: u32) -> FsPoll<Box<dyn File>> {
+		// The console, as `/dev/tty` is the controlling terminal on Unix.
+		#[cfg(windows)]
+		if path.as_bytes() == b"/dev/tty" {
+			return FsPoll::Ready(crate::sys::console::open_tty());
+		}
 		#[cfg(unix)]
 		if flags.contains(OpenFlags::WRITE) && !flags.contains(OpenFlags::READ) {
 			match open_for_writing(path, flags, mode, self.umask) {

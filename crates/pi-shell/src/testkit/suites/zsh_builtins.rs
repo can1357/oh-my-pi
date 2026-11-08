@@ -21,22 +21,6 @@ fn zsh(src: &str) -> (String, String, i32) {
 	)
 }
 
-/// Without job control an asynchronous command (a subshell job, a process
-/// substitution) ignores `INT` and `QUIT` (zsh `entersubsh`): listed as
-/// traps, which it may replace; the shell's own stay unset.
-#[test]
-fn async_commands_ignore_interrupts() {
-	let (out, err, _) = zsh(
-		"( trap; trap 'print own' INT; trap ) & wait; print -r -- $(< <(trap)); trap; print done",
-	);
-	assert_eq!(err, "");
-	assert_eq!(
-		out,
-		"trap -- '' INT\ntrap -- '' QUIT\ntrap -- 'print own' INT\ntrap -- '' QUIT\ntrap -- '' INT \
-		 trap -- '' QUIT\ndone\n"
-	);
-}
-
 #[test]
 fn print_options_and_escapes() {
 	let (out, _, st) = zsh(r#"print -l a b; print -n x; print -r -- "a\tb"; print "a\tb""#);

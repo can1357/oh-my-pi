@@ -101,6 +101,39 @@ impl Drop for Console {
 }
 
 impl Console {
+	/// The process's console, opened afresh (`CONIN$`, `CONOUT$`); `None`
+	/// when the process has none.
+	fn open() -> io::Result<Option<Self>> {
+		let Some(conin) = open("CONIN$") else {
+			return Ok(None);
+		};
+		let Some(conout) = open("CONOUT$") else {
+			// SAFETY: closes the handle just opened.
+			unsafe { CloseHandle(conin.get()) };
+			return Ok(None);
+		};
+		// SAFETY: a manual-reset, unsignalled, unnamed event.
+		let stop = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+		if stop.is_null() {
+			let e = io::Error::last_os_error();
+			// SAFETY: closes the handles just opened.
+			unsafe {
+				CloseHandle(conin.get());
+				CloseHandle(conout.get());
+			}
+			return Err(e);
+		}
+		Ok(Some(Self {
+			conin,
+			conout,
+			icrnl: AtomicBool::new(false),
+			inlcr: AtomicBool::new(false),
+			isig: AtomicBool::new(false),
+			stop: Raw::of(stop),
+			waiter: Mutex::new((None, false)),
+		}))
+	}
+
 	/// Whether a read finds a character now. Records that carry none
 	/// (key releases, focus and mouse events) are dropped, so they neither
 	/// block a read nor keep waking the waiter.
@@ -196,6 +229,16 @@ impl Console {
 				drop,
 			);
 	}
+}
+
+/// `/dev/tty`: the process's console.
+///
+/// It reads `CONIN$` and writes `CONOUT$` (an external gets the one for its
+/// direction, [`File::os_output_handle`]). Without a console it fails as a
+/// Unix process without a controlling terminal does (`ENXIO`).
+pub fn open_tty() -> io::Result<Box<dyn File>> {
+	let console = Console::open()?.ok_or_else(|| io::Error::other("No such device or address"))?;
+	Ok(Box::new(ConsoleFile { console: Arc::new(console), pending: Vec::new(), high: None }))
 }
 
 /// Ctrl-C events the process host's console handler claimed (a trapped or
@@ -664,49 +707,25 @@ impl Terminal for WindowsConsole {
 		if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
 			return Ok(None);
 		}
-		let Some(conin) = open("CONIN$") else {
+		let Some(console) = Console::open()? else {
 			return Ok(None);
 		};
-		let Some(conout) = open("CONOUT$") else {
-			// SAFETY: closes the handle just opened.
-			unsafe { CloseHandle(conin.get()) };
-			return Ok(None);
-		};
-		// SAFETY: a manual-reset, unsignalled, unnamed event.
-		let stop = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
-		if stop.is_null() {
-			let e = io::Error::last_os_error();
-			// SAFETY: closes the handles just opened.
-			unsafe {
-				CloseHandle(conin.get());
-				CloseHandle(conout.get());
-			}
-			return Err(e);
-		}
-		self.save(conin, conout);
+		self.save(console.conin, console.conout);
 		// The shell writes UTF-8 and escape sequences (ZLE's display).
-		// SAFETY: plain calls on the handles just opened.
+		// SAFETY: plain calls on the console's handles.
 		unsafe {
 			SetConsoleOutputCP(CP_UTF8);
 			SetConsoleCP(CP_UTF8);
-			if let Some(m) = mode(conout.get()) {
+			if let Some(m) = mode(console.conout.get()) {
 				SetConsoleMode(
-					conout.get(),
+					console.conout.get(),
 					m | ENABLE_PROCESSED_OUTPUT
 						| ENABLE_WRAP_AT_EOL_OUTPUT
 						| ENABLE_VIRTUAL_TERMINAL_PROCESSING,
 				);
 			}
 		}
-		let console = Arc::new(Console {
-			conin,
-			conout,
-			icrnl: AtomicBool::new(false),
-			inlcr: AtomicBool::new(false),
-			isig: AtomicBool::new(false),
-			stop: Raw::of(stop),
-			waiter: Mutex::new((None, false)),
-		});
+		let console = Arc::new(console);
 		self.console = Some(Arc::clone(&console));
 		let file = ConsoleFile { console, pending: Vec::new(), high: None };
 		Ok(Some(Shtty { file: Box::new(file), name: BString::from("/dev/tty") }))

@@ -1,5 +1,5 @@
-//! The zsh dialect on a Windows engine (`EngineConfig::platform`), run on
-//! any host: what `omp zsh` shows a Windows user.
+//! The shell on a Windows engine (`EngineConfig::platform`), run on any
+//! host: what `omp zsh` and the bash tool show a Windows user.
 
 use bstr::BString;
 
@@ -85,4 +85,37 @@ fn an_imported_username_is_no_lossy_crossing() {
 	let (out, err) = zsh_on_windows(&[("USERNAME", "b")], "print -r -- ${+USERNAME}");
 	assert_eq!(out, "1\n");
 	assert_eq!(err, "");
+}
+
+/// Run `src` in `mode` on a `platform` engine; stdout.
+fn run_on(mode: ModeId, platform: Platform, src: &str) -> String {
+	let argv0 = if mode == ModeId::Zsh { "zsh" } else { "bash" };
+	let init = ShellInit { mode, argv0: argv0.into(), ..ShellInit::default() };
+	let cfg = EngineConfig { platform, ..EngineConfig::default() };
+	let mut rig = Rig::with_config(FakeHost::new(), init, cfg);
+	rig.run(Script::command(src.as_bytes().to_vec()), Fault::None);
+	String::from_utf8_lossy(&rig.host.stdout.bytes()).into_owned()
+}
+
+/// On Windows an asynchronous command without job control ignores `INT`
+/// (and in zsh `QUIT`), as zsh and bash have it, so the console's Ctrl-C
+/// passes it by: it lists the ignore, zsh's may trap it, bash's (ignored
+/// on entry) may not, and the shell's own traps stay unset. Elsewhere it
+/// keeps the shell's dispositions.
+#[test]
+fn async_commands_ignore_interrupts_on_windows_only() {
+	let zsh =
+		"( trap; trap 'print own' INT; trap ) & wait; print -r -- $(< <(trap)); trap; print done";
+	let bash = "( trap; trap 'echo own' INT; trap -p INT ) & wait; trap -p INT; echo done";
+	assert_eq!(
+		run_on(ModeId::Zsh, Platform::Windows, zsh),
+		"trap -- '' INT\ntrap -- '' QUIT\ntrap -- 'print own' INT\ntrap -- '' QUIT\ntrap -- '' INT \
+		 trap -- '' QUIT\ndone\n"
+	);
+	assert_eq!(
+		run_on(ModeId::Bash, Platform::Windows, bash),
+		"trap -- '' SIGINT\ntrap -- '' SIGINT\ndone\n"
+	);
+	assert_eq!(run_on(ModeId::Zsh, Platform::Linux, zsh), "trap -- 'print own' INT\n\ndone\n");
+	assert_eq!(run_on(ModeId::Bash, Platform::Linux, bash), "trap -- 'echo own' SIGINT\ndone\n");
 }

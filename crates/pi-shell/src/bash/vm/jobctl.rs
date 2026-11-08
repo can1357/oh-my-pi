@@ -571,10 +571,15 @@ pub fn spawned(k: &mut Kernel, vp: &Vproc, ext: &dyn ExtProc) {
 }
 
 /// A background job `vpid` started: an interactive shell doing job
-/// control prints `[n] pid` once its pid is settled (zsh `spawnjob`).
+/// control prints `[n] pid` with the pid `$!` gives (zsh `spawnjob`):
+/// once it is settled, at once when nothing is left to settle (a
+/// pipeline's `$!` is its own).
 pub fn started(k: &mut Kernel, cx: &mut Cx<'_>, vpid: Vpid, number: u32) {
 	if k.jobctl.interactive && jobbing(k, cx) {
 		k.jobctl.announce.push((vpid, number));
+		if !k.bang_pending(vpid) {
+			bang_settled(k, vpid, None);
+		}
 	}
 }
 
