@@ -837,6 +837,12 @@ describe("usage governor CLI proof: scenarios", () => {
 				expect(result.stdout.trim()).toBe("ok");
 
 				const chats = proof.chats();
+				console.log(
+					"CHATS DEBUG:",
+					JSON.stringify(
+						chats.map(c => ({ provider: c.provider, model: c.model, status: c.status, atMs: c.atMs })),
+					),
+				);
 				expect(chats).toHaveLength(2);
 				expect(chats[0]).toMatchObject({
 					provider: "govplan",
@@ -850,6 +856,7 @@ describe("usage governor CLI proof: scenarios", () => {
 					bearer: fallback.bearer,
 					status: 200,
 				});
+				assertConfined(proof);
 			} finally {
 				proof.close();
 			}
@@ -880,6 +887,7 @@ describe("usage governor CLI proof: scenarios", () => {
 			expect(await awaitCondition(() => proactiveProof.readLedger().waits.length > 0, 20_000)).toBe(true);
 			// Proactively, zero chat requests were sent to the unknown fallback route.
 			expect(proactiveProof.chats()).toEqual([]);
+			assertConfined(proactiveProof);
 		} finally {
 			proactiveChild.kill("SIGINT");
 			await proactiveChild.exited;
@@ -919,6 +927,7 @@ describe("usage governor CLI proof: scenarios", () => {
 				bearer: fallbackUnknown.bearer,
 				status: 200,
 			});
+			assertConfined(errorProof);
 		} finally {
 			errorProof.close();
 		}
@@ -947,6 +956,7 @@ describe("usage governor CLI proof: scenarios", () => {
 				const usageRecords = proof.fake.records.filter(record => record.kind === "usage");
 				expect(usageRecords.length).toBeGreaterThan(0);
 				expect(usageRecords.every(record => record.provider === "govplan")).toBe(true);
+				assertConfined(proof);
 			} finally {
 				proof.close();
 			}

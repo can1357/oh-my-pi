@@ -333,13 +333,26 @@ describe("a killed process keeps its reservation counted until a newer snapshot"
 describe("reservations unreflected by a snapshot", () => {
 	installFetchTripwire();
 
+	/**
+	 * Seeds the ledger so a snapshot at t3 with usedFraction 0.8 has costPerRequest = 0.1
+	 * and exactly one slot available under the 0.9 headroom (0.8 + 0.1 = 0.9).
+	 */
+	function seedHeadroomFloor(ledger: UsageLedger, t3: number): void {
+		calibrate(ledger);
+		for (let i = 0; i < 5; i++) {
+			const id = crypto.randomUUID();
+			admitAt(ledger, t2 + 10 + i, {}, id);
+			ledger.settle(id, "sent", t3 - 20);
+		}
+	}
+
 	test("a live unsettled row created before a newer snapshot changes a decision from admit to wait", () => {
 		const ledger = UsageLedger.open(ledgerPath);
 		try {
-			calibrate(ledger);
 			const t3 = t2 + 100;
-			// At t3 with usedFraction 0.8, cost 0.1, headroom 0.9, allowance is (0.9 - 0.8) / 0.1 = 1 slot.
-			// Without any unreflected reservations, an admission at t3 would succeed:
+			seedHeadroomFloor(ledger, t3);
+
+			// Control: without any live unsettled row, the single slot admits:
 			const baseline = ledger.inspect([window({ fetchedAt: t3, usedFraction: 0.8 })], t3 + 1, LEAD)[0];
 			expect(baseline?.pending).toBe(0);
 			expect(baseline?.inFlight).toBe(0);
@@ -367,10 +380,11 @@ describe("reservations unreflected by a snapshot", () => {
 	test("rows settled before the snapshot are not counted", () => {
 		const ledger = UsageLedger.open(ledgerPath);
 		try {
-			calibrate(ledger);
 			const t3 = t2 + 100;
+			seedHeadroomFloor(ledger, t3);
+
 			const grantId = crypto.randomUUID();
-			expect(admitAt(ledger, t3 - 20, { fetchedAt: t2 }, grantId).kind).toBe("admitted");
+			expect(admitAt(ledger, t3 - 10, { fetchedAt: t2 }, grantId).kind).toBe("admitted");
 			// Settled before the snapshot at t3 was observed:
 			ledger.settle(grantId, "sent", t3 - 5);
 
@@ -388,10 +402,11 @@ describe("reservations unreflected by a snapshot", () => {
 	test("rows settled after the snapshot are counted", () => {
 		const ledger = UsageLedger.open(ledgerPath);
 		try {
-			calibrate(ledger);
 			const t3 = t2 + 100;
+			seedHeadroomFloor(ledger, t3);
+
 			const grantId = crypto.randomUUID();
-			expect(admitAt(ledger, t3 - 20, { fetchedAt: t2 }, grantId).kind).toBe("admitted");
+			expect(admitAt(ledger, t3 - 10, { fetchedAt: t2 }, grantId).kind).toBe("admitted");
 			// Settled after the snapshot at t3 was observed:
 			ledger.settle(grantId, "sent", t3 + 10);
 
@@ -410,7 +425,9 @@ describe("reservations unreflected by a snapshot", () => {
 	test("a killed child process row created before the snapshot is not counted", async () => {
 		const ledger = UsageLedger.open(ledgerPath);
 		try {
-			calibrate(ledger);
+			const t3 = t2 + 100;
+			seedHeadroomFloor(ledger, t3);
+
 			// Child admits once and holds until killed:
 			const holder = Bun.spawn([process.execPath, CHILD, JSON.stringify(childConfig({ mode: "hold" }))], {
 				stdout: "pipe",
@@ -431,13 +448,17 @@ describe("reservations unreflected by a snapshot", () => {
 			reader.releaseLock();
 
 			// Snapshot observed after the child process was killed:
-			const t3 = Date.now() + 50;
-			const inspected = ledger.inspect([window({ fetchedAt: t3, usedFraction: 0.8 })], t3 + 1, LEAD)[0];
+			const snapshotAt = Date.now() + 50;
+			const inspected = ledger.inspect(
+				[window({ fetchedAt: snapshotAt, usedFraction: 0.8 })],
+				snapshotAt + 1,
+				LEAD,
+			)[0];
 			expect(inspected?.pending).toBe(0);
 			expect(inspected?.inFlight).toBe(0);
 
 			// Since the killed process's reservation is not counted, admission succeeds:
-			expect(admitAt(ledger, t3 + 1, { fetchedAt: t3, usedFraction: 0.8 }).kind).toBe("admitted");
+			expect(admitAt(ledger, snapshotAt + 1, { fetchedAt: snapshotAt, usedFraction: 0.8 }).kind).toBe("admitted");
 		} finally {
 			ledger.close();
 		}
@@ -446,8 +467,8 @@ describe("reservations unreflected by a snapshot", () => {
 	test("a row older than F - 15 min is not counted, while a row within 15 min is counted", () => {
 		const ledger = UsageLedger.open(ledgerPath);
 		try {
-			calibrate(ledger);
-			const t3 = Date.now();
+			const t3 = t2 + 100;
+			seedHeadroomFloor(ledger, t3);
 			const oldGrant = crypto.randomUUID();
 
 			// Insert a reservation created older than F - GOVERNOR_STALE_MS:
@@ -470,7 +491,7 @@ describe("reservations unreflected by a snapshot", () => {
 			const admittedOld = admitAt(ledger, t3 + 1, { fetchedAt: t3, usedFraction: 0.8 }, firstAdmit);
 			expect(admittedOld.kind).toBe("admitted");
 			// Settle this admission before the next check:
-			ledger.settle(firstAdmit, "sent", t3);
+			ledger.settle(firstAdmit, "not-sent", t3);
 
 			// Insert a reservation within F - 15 min:
 			const recentGrant = crypto.randomUUID();
