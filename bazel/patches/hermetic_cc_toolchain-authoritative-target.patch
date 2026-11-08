@@ -24,8 +24,8 @@ diff --git a/toolchain/zig-wrapper.zig b/toolchain/zig-wrapper.zig
 +        if (run_mode == RunMode.cc and mem.eql(u8, arg, "-Wl,-O1"))
 +            continue;
          // rustc adds this on aarch64 linux (rust-lang/rust#155453); zig cc
-         // rejects it as an unsupported linker arg.
-         if (run_mode == RunMode.cc and mem.eql(u8, arg, "-Wl,--fix-cortex-a53-843419"))
+         // rejects both spellings.
+         if (run_mode == RunMode.cc and (mem.eql(u8, arg, "-Wl,--fix-cortex-a53-843419") or mem.eql(u8, arg, "-mfix-cortex-a53-843419")))
              continue;
          try args.append(arena, arg);
      }
