@@ -494,6 +494,15 @@ impl GitRepo {
 
 	/// Remove untracked files and directories according to ignore mode.
 	pub fn clean(&self, options: &CleanOptions) -> Result<()> {
+		self.clean_with(options, |_| Ok(()))
+	}
+
+	/// [`Self::clean`], calling `before_remove` on each path it removes.
+	fn clean_with(
+		&self,
+		options: &CleanOptions,
+		before_remove: impl Fn(&Path) -> Result<()>,
+	) -> Result<()> {
 		// `.` (and `./`) normalize to "" and mean "everything", so they drop out
 		// of the restriction set. A literally empty string is rejected the way
 		// git rejects it instead of silently widening to the whole worktree.
@@ -560,6 +569,7 @@ impl GitRepo {
 				continue;
 			}
 			let full = self.root().join(entry.rela_path.to_str_lossy().as_ref());
+			before_remove(&full)?;
 			remove_existing(&full)?;
 			prune_empty_parents(self.root(), full.parent(), &paths)?;
 		}
@@ -852,10 +862,23 @@ impl GitRepo {
 
 		for relative in &delete {
 			let full = path.join(relative.to_path_lossy());
+			unlock_clone_path(path, &full)?;
 			match fs::remove_file(&full) {
 				Ok(()) => prune_empty_parents(path, full.parent(), &BTreeSet::new())?,
 				Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
 				Err(err) => return Err(err.into()),
+			}
+		}
+
+		// gix overwrites an existing file in place, which a read-only copy
+		// refuses; unlinked, it is created fresh as in any other checkout.
+		for relative in &write {
+			let full = path.join(relative.to_path_lossy());
+			unlock_clone_path(path, &full)?;
+			if fs::symlink_metadata(&full)
+				.is_ok_and(|meta| meta.is_file() && meta.permissions().readonly())
+			{
+				fs::remove_file(&full)?;
 			}
 		}
 
@@ -885,7 +908,7 @@ impl GitRepo {
 				&interrupt,
 				checkout_options,
 			)
-			.map_err(|err| Error::backend("git worktree add", err))?;
+			.map_err(|err| Error::backend("git worktree add", with_causes(&err)))?;
 			if !outcome.collisions.is_empty() || !outcome.errors.is_empty() {
 				return Err(Error::backend(
 					"git worktree add",
@@ -920,7 +943,7 @@ impl GitRepo {
 		// versa. Only now are the target's ignore files and index in place.
 		// Clean this fresh clone through the existing repository-safe walk;
 		// keep target-ignored caches and never enter nested repositories.
-		linked.clean(&CleanOptions::default())
+		linked.clean_with(&CleanOptions::default(), |full| unlock_clone_path(linked.root(), full))
 	}
 
 	/// Resolve the executable hook `name` as git's `find_hook` does: under
@@ -1609,7 +1632,7 @@ fn checkout_tree(
 		&interrupt,
 		opts,
 	)
-	.map_err(|e| Error::backend("git checkout", e))?;
+	.map_err(|e| Error::backend("git checkout", with_causes(&e)))?;
 	target
 		.write(INDEX_WRITE)
 		.map_err(|e| Error::backend("git checkout", e))
@@ -1845,6 +1868,7 @@ fn prune_nonrelocatable_clone_dirs(root: &Path) -> Result<BTreeSet<PathBuf>> {
 	while let Some(dir) = pending.pop() {
 		let marked = dir.join("pyvenv.cfg").is_file() || dir.join("CMakeCache.txt").is_file();
 		if marked && dir != root {
+			unlock_clone_path(root, &dir)?;
 			remove_existing(&dir)?;
 			excluded.insert(
 				dir.strip_prefix(root)
@@ -1859,6 +1883,7 @@ fn prune_nonrelocatable_clone_dirs(root: &Path) -> Result<BTreeSet<PathBuf>> {
 				continue;
 			}
 			if marked {
+				unlock_clone_path(root, &entry.path())?;
 				remove_existing(&entry.path())?;
 			} else if entry.file_type()?.is_dir() {
 				pending.push(entry.path());
@@ -1912,6 +1937,19 @@ fn git_metadata_path(path: &Path) -> Cow<'_, str> {
 	}
 }
 
+/// `err` followed by its causes: gix's checkout errors name the operation but
+/// keep the OS error in their source.
+fn with_causes(err: &dyn std::error::Error) -> String {
+	let mut message = err.to_string();
+	let mut cause = err.source();
+	while let Some(err) = cause {
+		message.push_str(": ");
+		message.push_str(&err.to_string());
+		cause = err.source();
+	}
+	message
+}
+
 fn register_worktree(path: &Path, common: &Path, head: &str) -> Result<PathBuf> {
 	fs::create_dir_all(path)?;
 	let name = worktree_admin_name(common, path);
@@ -1924,8 +1962,63 @@ fn register_worktree(path: &Path, common: &Path, head: &str) -> Result<PathBuf> 
 	Ok(admin)
 }
 
+/// Give the owner access to the directories leading to `path` below `root`
+/// and, when `path` is a directory, to those inside it. A clone copies the
+/// source's permission bits, so read-only directories would otherwise refuse
+/// the entries being replaced or removed.
+fn unlock_clone_path(root: &Path, path: &Path) -> Result<()> {
+	let parents: Vec<_> = path
+		.ancestors()
+		.skip(1)
+		.take_while(|dir| dir.starts_with(root))
+		.collect();
+	for dir in parents.into_iter().rev() {
+		if !unlock_dir(dir)? {
+			return Ok(());
+		}
+	}
+	unlock_tree(path)
+}
+
+fn unlock_tree(dir: &Path) -> Result<()> {
+	if unlock_dir(dir)? {
+		for entry in fs::read_dir(dir)? {
+			let entry = entry?;
+			if entry.file_type()?.is_dir() {
+				unlock_tree(&entry.path())?;
+			}
+		}
+	}
+	Ok(())
+}
+
+/// Add owner read, write and search permission to the directory at `path`,
+/// without following symlinks. Returns whether `path` is a directory.
+#[cfg(unix)]
+fn unlock_dir(path: &Path) -> Result<bool> {
+	use std::os::unix::fs::PermissionsExt;
+	let meta = match fs::symlink_metadata(path) {
+		Ok(meta) if meta.is_dir() => meta,
+		Ok(_) => return Ok(false),
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+		Err(err) => return Err(err.into()),
+	};
+	let mode = meta.permissions().mode();
+	if mode & 0o700 != 0o700 {
+		fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700))?;
+	}
+	Ok(true)
+}
+
+/// Directory permission bits do not restrict removal off Unix.
+#[cfg(not(unix))]
+fn unlock_dir(_path: &Path) -> Result<bool> {
+	Ok(false)
+}
+
 fn cleanup_worktree_add(path: &Path, common: &Path) {
 	let admin = registered_admin(&path.join(".git")).ok().flatten();
+	let _ = unlock_tree(path);
 	let _ = fs::remove_dir_all(path);
 	if let Some(admin) = admin.filter(|admin| admin.starts_with(common.join("worktrees"))) {
 		let _ = fs::remove_dir_all(admin);
@@ -2999,6 +3092,77 @@ mod tests {
 			);
 		}
 		let _ = repo.worktree_remove(&linked, true);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn clone_first_worktree_handles_read_only_entries_copied_from_the_source() {
+		use std::os::unix::fs::PermissionsExt;
+		let chmod = |path: &Path, mode: u32| {
+			fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+		};
+		let (temp, repo) = fixture();
+		if !clone_works_on(temp.path()) {
+			return;
+		}
+		fs::write(temp.path().join(".gitignore"), "kept/\n").unwrap();
+		git(temp.path(), &["add", ".gitignore"]);
+		git(temp.path(), &["commit", "-qm", "ignore kept"]);
+		git(temp.path(), &["branch", "target"]);
+		fs::write(temp.path().join("a"), "newer\n").unwrap();
+		git(temp.path(), &["commit", "-qam", "newer a"]);
+		chmod(&temp.path().join("a"), 0o444);
+		for name in ["cache", "kept"] {
+			let dir = temp.path().join(name);
+			fs::create_dir(&dir).unwrap();
+			fs::write(dir.join("data"), "generated\n").unwrap();
+			chmod(&dir.join("data"), 0o444);
+			chmod(&dir, 0o555);
+		}
+
+		let destination = tempfile::tempdir().unwrap();
+		let linked = destination.path().join("linked");
+		let result = repo
+			.worktree_add(&linked, "target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+
+		assert_eq!(result.clone_error, None);
+		assert!(result.cloned_with.is_some());
+		assert_eq!(fs::read_to_string(linked.join("a")).unwrap(), "one\n");
+		assert_ne!(fs::metadata(linked.join("a")).unwrap().permissions().mode() & 0o200, 0);
+		assert!(!linked.join("cache").exists());
+		assert_eq!(fs::read_to_string(linked.join("kept/data")).unwrap(), "generated\n");
+		let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+		assert_eq!(mode(&linked.join("kept")), 0o555);
+		// Only the clone is unlocked; the source keeps its permissions.
+		assert_eq!(mode(&temp.path().join("a")), 0o444);
+		assert_eq!(mode(&temp.path().join("cache")), 0o555);
+
+		chmod(&temp.path().join("cache"), 0o755);
+		chmod(&temp.path().join("kept"), 0o755);
+		chmod(&linked.join("kept"), 0o755);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn failed_clone_cleanup_leaves_no_read_only_tree_for_the_fallback() {
+		use std::os::unix::fs::PermissionsExt;
+		let temp = tempfile::tempdir().unwrap();
+		let linked = temp.path().join("linked");
+		let nested = linked.join("cache/nested");
+		fs::create_dir_all(&nested).unwrap();
+		fs::write(nested.join("data"), "generated\n").unwrap();
+		for dir in [&nested, &linked.join("cache")] {
+			fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
+		}
+
+		cleanup_worktree_add(&linked, &temp.path().join("common"));
+
+		assert!(!linked.exists());
 	}
 
 	/// Whether any host-available clone backend can actually clone a tree
