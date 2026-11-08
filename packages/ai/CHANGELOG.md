@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Codex usage reports identify eligible saved chat resets and their covered limits ([#18240](https://github.com/can1357/oh-my-pi/pull/18240) by [@jwaldrip](https://github.com/jwaldrip))
 - Fixed account switching stopping after rate-limited accounts when model discovery had not seen every stored account; other eligible accounts are now tried before blocked fallbacks
 - Fixed OpenRouter Decisions judges ignoring a model's `compat.openRouterRouting` and `compat.extraBody` (including `@provider` pins): judgment requests now carry them, so provider pins, `allow_fallbacks: false`, and `data_collection: "deny"` reach OpenRouter ([#18140](https://github.com/can1357/oh-my-pi/issues/18140))
 - OAuth broker validation now checks optional residency, inference-region, and selected-organization metadata in uploaded credentials and remote snapshots

@@ -522,6 +522,8 @@ function buildAdditionalUsageLimit(args: {
 }
 
 const CODEX_SPEND_CAP_LIMIT_ID = "openai-codex:spend-cap";
+export const CODEX_RESET_CLEARABLE_LIMIT_IDS = ["openai-codex:primary", "openai-codex:secondary"] as const;
+const CODEX_CHAT_RESET_TYPE = "codex_rate_limits";
 
 function buildSpendCapLimit(cap: ParsedSpendCap, accountId: string | undefined, nowMs: number): UsageLimit {
 	const resetsAt = resolveResetTime({ resetAt: cap.resetAt, resetAfterSeconds: cap.resetAfterSeconds }, nowMs);
@@ -771,20 +773,37 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					fetch: ctx.fetch,
 					signal: params.signal,
 				});
-				if (list?.credits.length) {
-					resetCredits.credits = list.credits
-						.filter(c => (c.status ?? "available") === "available")
-						.map(c => ({
-							grantedAt: c.grantedAt,
-							expiresAt: c.expiresAt,
-							status: c.status,
-						}));
-				}
-				// Always sync the live count from the detail endpoint — it may report
-				// fewer or zero available credits after expiry/redeem, even when the
-				// /wham/usage payload still has a stale count.
 				if (list) {
 					resetCredits.availableCount = list.availableCount;
+				}
+				if (list?.credits.length) {
+					const displayCredits = list.credits.filter(c => c.status !== "redeemed");
+					if (displayCredits.length > 0) {
+						let hasEligibleCredit = false;
+						resetCredits.credits = displayCredits.map(c => {
+							const isAvailable = c.status === "available";
+							const isChatCoverage = c.resetType === CODEX_CHAT_RESET_TYPE;
+							const isUsableChatCredit = isAvailable && isChatCoverage;
+							if (isUsableChatCredit) {
+								hasEligibleCredit = true;
+							}
+							return {
+								grantedAt: c.grantedAt,
+								expiresAt: c.expiresAt,
+								status: c.status,
+								...(isUsableChatCredit
+									? {
+											usable: true,
+											remainingCount: 1,
+											clears: [...CODEX_RESET_CLEARABLE_LIMIT_IDS],
+										}
+									: {}),
+							};
+						});
+						if (hasEligibleCredit && list.availableCount > 0) {
+							resetCredits.eligible = true;
+						}
+					}
 				}
 			} catch (error) {
 				ctx.logger?.warn("Codex reset credits detail fetch failed", { error: String(error) });
