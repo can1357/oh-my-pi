@@ -23,10 +23,12 @@ import {
 	admissionVerdict,
 	applicableWindows,
 	GOVERNOR_STALE_MS,
+	isExpiredPacingLimit,
 	type ApplicableWindow,
 	evaluateWindow,
 	reserveFraction,
 } from "../usage-governor/policy";
+import { reserveUsageLimits } from "./usage-report";
 import {
 	DISABLED_USAGE_GOVERNOR_CONFIG,
 	type GovernorApi,
@@ -205,23 +207,26 @@ export class CredentialGovernor implements GovernorApi {
 			)
 		)
 			return unknown;
+		const strategy = source.strategies(target.provider);
+		const strategyLimits = reserveUsageLimits(strategy, report, context);
+		const strategyLimitIds = new Set(strategyLimits.map(l => l.id));
+		for (const id of ids) {
+			if (!strategyLimitIds.has(id)) return unknown;
+		}
 		const windows = this.#applicable(target.provider, row.credential, report, context, now, credential);
+		const windowIds = windows.map(w => w.limitId).filter((id): id is string => typeof id === "string");
+		if (windowIds.length !== windows.length || new Set(windowIds).size !== windowIds.length) {
+			return unknown;
+		}
 		if (windows.some(window => !window.limitId || !ids.includes(window.limitId))) return unknown;
+		const windowIdSet = new Set(windowIds);
 		if (!tolerateExpiredWindows) {
-			if (windows.length !== ids.length) return unknown;
+			if (windowIds.length !== ids.length) return unknown;
 		} else {
-			const windowLimitIds = new Set(windows.map(w => w.limitId));
 			for (const id of ids) {
-				if (!windowLimitIds.has(id)) {
+				if (!windowIdSet.has(id)) {
 					const limit = limits.find(l => l?.id === id);
-					const window = limit?.window;
-					if (
-						!window ||
-						typeof window.resetsAt !== "number" ||
-						!Number.isFinite(window.resetsAt) ||
-						window.resetsAt > now ||
-						report.fetchedAt >= window.resetsAt
-					) {
+					if (!limit || !isExpiredPacingLimit(limit, report.fetchedAt, now)) {
 						return unknown;
 					}
 				}

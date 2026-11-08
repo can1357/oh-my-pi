@@ -783,31 +783,29 @@ export const openaiCodexUsageProvider: UsageProvider = {
 				}
 				if (list?.credits.length) {
 					const displayCredits = list.credits.filter(c => (c.status ?? "available") === "available");
-					if (displayCredits.length > 0) {
-						let hasUsableChatCredit = false;
-						resetCredits.credits = displayCredits.map(c => {
-							const isExplicitAvailable = c.status === "available";
-							const isChatCoverage = c.resetType === CODEX_CHAT_RESET_TYPE;
-							const isUsableChatCredit = isExplicitAvailable && isChatCoverage;
-							if (isUsableChatCredit) {
-								hasUsableChatCredit = true;
-							}
-							return {
-								grantedAt: c.grantedAt,
-								expiresAt: c.expiresAt,
-								status: c.status,
-								...(isUsableChatCredit
-									? {
-											usable: true,
-											remainingCount: 1,
-											clears: [...CODEX_RESET_CLEARABLE_LIMIT_IDS],
-										}
-									: {}),
-							};
-						});
-						if (hasUsableChatCredit && list.availableCount > 0) {
-							resetCredits.eligible = true;
+					let hasUsableChatCredit = false;
+					resetCredits.credits = displayCredits.map(c => {
+						const isExplicitAvailable = c.status === "available";
+						const isChatCoverage = c.resetType === CODEX_CHAT_RESET_TYPE;
+						const isUsableChatCredit = isExplicitAvailable && isChatCoverage;
+						if (isUsableChatCredit) {
+							hasUsableChatCredit = true;
 						}
+						return {
+							grantedAt: c.grantedAt,
+							expiresAt: c.expiresAt,
+							status: c.status,
+							...(isUsableChatCredit
+								? {
+										usable: true,
+										remainingCount: 1,
+										clears: [...CODEX_RESET_CLEARABLE_LIMIT_IDS],
+									}
+								: {}),
+						};
+					});
+					if (hasUsableChatCredit && list.availableCount > 0) {
+						resetCredits.eligible = true;
 					}
 				}
 			} catch (error) {

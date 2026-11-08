@@ -20,7 +20,21 @@ export const GOVERNOR_CALIBRATION_MIN_SAMPLES = 3;
 export const GOVERNOR_GENERATION_MS = 60_000;
 
 /** Reset labels that name a rolling regeneration rather than a full window reset. */
-const ROLLING_RESET_LABELS: Record<string, true> = { tick: true, regen: true };
+export const ROLLING_RESET_LABELS: Record<string, true> = { tick: true, regen: true };
+
+export function isRollingResetLabel(label: string | undefined): boolean {
+	return label !== undefined && ROLLING_RESET_LABELS[label] === true;
+}
+
+/** Check if a limit was dropped from applicableWindows strictly because its reset has passed. */
+export function isExpiredPacingLimit(limit: UsageLimit, reportFetchedAt: number, nowMs: number): boolean {
+	const window = limit.window;
+	if (!window) return false;
+	const resetsAt = window.resetsAt;
+	if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt)) return false;
+	if (isRollingResetLabel(window.resetLabel)) return false;
+	return resetsAt <= nowMs && reportFetchedAt < resetsAt;
+}
 
 /** One paced window of the selected account, derived from a cached usage report. */
 export interface ApplicableWindow {
@@ -98,7 +112,7 @@ export function applicableWindows(input: {
 		if (!window) continue;
 		const resetsAt = window.resetsAt;
 		if (typeof resetsAt !== "number" || !Number.isFinite(resetsAt)) continue;
-		if (window.resetLabel !== undefined && ROLLING_RESET_LABELS[window.resetLabel] === true) continue;
+		if (isRollingResetLabel(window.resetLabel)) continue;
 		// Same current-window test as the health reserve check (health.ts): a reset that has passed
 		// stays current only while the snapshot was fetched after it.
 		if (!(resetsAt > nowMs || report.fetchedAt >= resetsAt)) continue;

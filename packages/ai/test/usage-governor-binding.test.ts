@@ -28,9 +28,13 @@ class World {
 	auth!: AuthStorage;
 	allowance: "included" | "unknown" | "paid" = "included";
 	observedAt = Date.now();
+	fetchedAt?: number;
 	usedFraction = 0.1;
 	exhausted = false;
 	fetches = 0;
+	strategy: CredentialRankingStrategy = fakeStrategy;
+	customLimits?: (now: number, credential: any) => any[];
+	customAllowance?: () => string[] | undefined;
 	adapter: UsageProvider = {
 		id: PROVIDER,
 		fetchUsage: async ({ credential, provider }): Promise<UsageReport> => {
@@ -38,29 +42,37 @@ class World {
 			const now = Date.now();
 			return {
 				provider,
-				fetchedAt: now,
-				limits: [
-					{
-						id: "primary",
-						label: "Included",
-						scope: { provider, accountId: credential.accountId },
-						window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now + 30_000 },
-						amount: { unit: "percent", usedFraction: this.usedFraction },
-						status: this.exhausted ? "exhausted" : undefined,
-						observedAt: this.observedAt,
-					},
-				],
+				fetchedAt: this.fetchedAt ?? now,
+				limits: this.customLimits
+					? this.customLimits(now, credential)
+					: [
+							{
+								id: "primary",
+								label: "Included",
+								scope: { provider, accountId: credential.accountId },
+								window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now + 30_000 },
+								amount: { unit: "percent", usedFraction: this.usedFraction },
+								status: this.exhausted ? "exhausted" : undefined,
+								observedAt: this.observedAt,
+							},
+						],
 			};
 		},
 		governorAllowance: () =>
-			this.allowance === "included" ? ["primary"] : this.allowance === "paid" ? [] : undefined,
+			this.customAllowance
+				? this.customAllowance()
+				: this.allowance === "included"
+					? ["primary"]
+					: this.allowance === "paid"
+						? []
+						: undefined,
 	};
 	async open() {
 		this.dir = await fs.mkdtemp(path.join(os.tmpdir(), "governor-binding-"));
 		this.store = await SqliteAuthCredentialStore.open(path.join(this.dir, "auth.db"));
 		this.auth = new AuthStorage(this.store, {
 			usageProviderResolver: id => (id === PROVIDER || id === "openai" ? this.adapter : undefined),
-			rankingStrategyResolver: id => (id === PROVIDER || id === "openai" ? fakeStrategy : undefined),
+			rankingStrategyResolver: id => (id === PROVIDER || id === "openai" ? this.strategy : undefined),
 			governor: {
 				dbPath: path.join(this.dir, "ledger.db"),
 				config: { enabled: true, lead: 0.25, interactiveReserve: "hold" },
@@ -387,28 +399,187 @@ describe("request-local route binding", () => {
 			}),
 		).toBe(false);
 	});
-	test("missing affinity fails closed and rejects route validation", async () => {
+	test("missing affinity fails closed with positive control", async () => {
 		const w = await setup();
 		const { a, binding, request } = await w.bind();
-		const gov = new CredentialGovernor({
-			dbPath: path.join(w.dir, "no-affinity.db"),
-			config: { enabled: true, lead: 0.25, interactiveReserve: "hold" },
-			source: () => ({
-				pool: {
-					entries: () => [{ id: a.credentialId, credential: oauth("a") }],
-					isCurrentBearerFingerprint: () => true,
-					providers: () => [PROVIDER],
-				} as any,
-				usage: w.auth.usage,
-				policies: { forCredential: () => undefined, defaultReservePct: 0.1 } as any,
-				affinity: undefined,
-				strategies: () => fakeStrategy,
-				permitsRoute: () => true,
-			}),
-		});
-		gov.setRoutingScope({ id: "scope", revision: 1, roles: [{ role: "task", targets: [TARGET] }] });
-		expect(gov.validateRoute(binding, request)).toBe(false);
-		gov.close();
+		const createGov = (affinity: any) =>
+			new CredentialGovernor({
+				dbPath: path.join(w.dir, "affinity-test.db"),
+				config: { enabled: true, lead: 0.25, interactiveReserve: "hold" },
+				source: () => ({
+					pool: {
+						entries: () => [{ id: a.credentialId, credential: oauth("a") }],
+						isCurrentBearerFingerprint: () => true,
+						providers: () => [PROVIDER],
+					} as any,
+					usage: w.auth.usage,
+					policies: { forCredential: () => undefined, defaultReservePct: 0.1 } as any,
+					blocks: { isBlockedSnapshot: () => false },
+					affinity,
+					strategies: () => fakeStrategy,
+					permitsRoute: () => true,
+				}),
+			});
+
+		// Negative control: missing affinity fails closed even when blocks are unblocked
+		const govNoAffinity = createGov(undefined);
+		govNoAffinity.setRoutingScope({ id: "scope", revision: 1, roles: [{ role: "task", targets: [TARGET] }] });
+		expect(govNoAffinity.validateRoute(binding, request)).toBe(false);
+		govNoAffinity.close();
+
+		// Positive control: same governor with affinity permits route
+		const govWithAffinity = createGov({ permits: () => true });
+		govWithAffinity.setRoutingScope({ id: "scope", revision: 1, roles: [{ role: "task", targets: [TARGET] }] });
+		expect(govWithAffinity.validateRoute(binding, request)).toBe(true);
+		govWithAffinity.close();
+	});
+	test("rolling window past reset is rejected while non-rolling past reset validates", async () => {
+		const w = await setup();
+		const { binding, request } = await w.bind();
+
+		// Control: valid non-rolling window past reset validates true under expired-window exception
+		const now = Date.now();
+		w.fetchedAt = now - 10_000;
+		w.observedAt = now - 10_000;
+		w.customLimits = () => [
+			{
+				id: "primary",
+				label: "Included",
+				scope: { provider: PROVIDER, accountId: "a" },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now - 5_000 },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now - 10_000,
+			},
+		];
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(true);
+
+		// Negative: rolling tick window past reset is rejected
+		w.customLimits = () => [
+			{
+				id: "primary",
+				label: "Included",
+				scope: { provider: PROVIDER, accountId: "a" },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now - 5_000, resetLabel: "tick" },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now - 10_000,
+			},
+		];
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
+
+		// Negative: rolling regen window past reset is rejected
+		w.customLimits = () => [
+			{
+				id: "primary",
+				label: "Included",
+				scope: { provider: PROVIDER, accountId: "a" },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now - 5_000, resetLabel: "regen" },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now - 10_000,
+			},
+		];
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
+	});
+	test("strategy-excluded id past reset is rejected while strategy-selected validates", async () => {
+		const w = await setup();
+		w.strategy = {
+			...fakeStrategy,
+			scopeLimitsForReserve(report) {
+				return report.limits.filter(l => l.id === "primary");
+			},
+		};
+		const { binding, request } = await w.bind();
+
+		const now = Date.now();
+		w.fetchedAt = now - 10_000;
+		w.observedAt = now - 10_000;
+		// Control: strategy selects primary, which is past reset -> validates true
+		w.customLimits = () => [
+			{
+				id: "primary",
+				label: "Primary",
+				scope: { provider: PROVIDER, accountId: "a" },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now - 5_000 },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now - 10_000,
+			},
+			{
+				id: "excluded",
+				label: "Excluded",
+				scope: { provider: PROVIDER, accountId: "a" },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now - 5_000 },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now - 10_000,
+			},
+		];
+		w.customAllowance = () => ["primary"];
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(true);
+
+		// Negative: governorAllowance names excluded, which fakeStrategy does NOT select
+		w.customAllowance = () => ["excluded"];
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
+	});
+	test("duplicate window ids with missing id are rejected while distinct matched ids validate", async () => {
+		const w = await setup();
+		w.strategy = {
+			findWindowLimits(report: UsageReport) {
+				return {
+					primary: report.limits.find(l => l.id === "primary"),
+					secondary: report.limits.find(l => l.id === "secondary"),
+				};
+			},
+			windowDefaults: { primaryMs: 60_000, secondaryMs: 604_800_000 },
+		};
+		const { binding, request } = await w.bind();
+
+		// Control: distinct matched ids [primary, secondary] validate true
+		w.customAllowance = () => ["primary", "secondary"];
+		w.customLimits = (now, cred) => [
+			{
+				id: "primary",
+				label: "Primary",
+				scope: { provider: PROVIDER, accountId: cred.accountId },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now + 30_000 },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now,
+			},
+			{
+				id: "secondary",
+				label: "Secondary",
+				scope: { provider: PROVIDER, accountId: cred.accountId },
+				window: { id: "7d", label: "7 Day", durationMs: 604_800_000, resetsAt: now + 300_000 },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now,
+			},
+		];
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(true);
+
+		// Negative: duplicate limits [primary, primary] with missing secondary is rejected
+		w.customLimits = (now, cred) => [
+			{
+				id: "primary",
+				label: "Primary 1",
+				scope: { provider: PROVIDER, accountId: cred.accountId },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now + 30_000 },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now,
+			},
+			{
+				id: "primary",
+				label: "Primary 2 (duplicate)",
+				scope: { provider: PROVIDER, accountId: cred.accountId },
+				window: { id: "5h", label: "5 Hour", durationMs: 60_000, resetsAt: now + 30_000 },
+				amount: { unit: "percent", usedFraction: 0.1 },
+				observedAt: now,
+			},
+		];
+		await w.refresh();
+		expect(w.auth.governor.validateRoute!(binding, request)).toBe(false);
 	});
 	test("discriminatory rejection of wrong scope, revision, target and credentials", async () => {
 		const w = await setup();

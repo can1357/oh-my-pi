@@ -690,6 +690,46 @@ describe("openai-codex usage parser", () => {
 		expect(report?.resetCredits?.eligible).toBeUndefined();
 	});
 
+	it("sets resetCredits.credits to empty array when list has credits but all are pending or redeemed", async () => {
+		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 1 } };
+		const creditsPayload = {
+			available_count: 0,
+			credits: [
+				{
+					id: "RateLimitResetCredit_pending",
+					status: "pending",
+					granted_at: "2025-01-15T00:00:00Z",
+					expires_at: "2025-02-14T00:00:00Z",
+				},
+				{
+					id: "RateLimitResetCredit_redeemed",
+					status: "redeemed",
+					granted_at: "2025-01-20T00:00:00Z",
+					expires_at: "2025-02-19T00:00:00Z",
+				},
+			],
+		};
+		const fetchImpl: FetchImpl = (async (url: string | URL | Request) => {
+			const path = typeof url === "string" ? url : url.toString();
+			const body = path.includes("rate-limit-reset-credits") ? creditsPayload : usagePayload;
+			return new Response(JSON.stringify(body), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as FetchImpl;
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fetchImpl },
+		);
+		expect(report?.resetCredits?.availableCount).toBe(0);
+		// Preserves exact D2 shape: nonempty list.credits with all non-available entries yields []
+		expect(report?.resetCredits?.credits).toEqual([]);
+		expect(report?.resetCredits?.eligible).toBeUndefined();
+	});
+
 	it("does not normalize credits with missing or non-chat reset_type as usable or eligible", async () => {
 		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 2 } };
 		const creditsPayload = {

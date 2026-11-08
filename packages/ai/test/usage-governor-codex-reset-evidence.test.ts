@@ -361,18 +361,75 @@ describe("OpenAI Codex reset credits governor evidence (slice D)", () => {
 			"x-codex-secondary-window-minutes": "10080",
 			"x-codex-secondary-reset-at": String(Math.floor((laterTime + 500000_000) / 1000)),
 		};
-		const credentialId = activeWorld.store.listAuthCredentials("openai-codex")[0]?.id;
+		const credentialRow = activeWorld.store.listAuthCredentials("openai-codex")[0];
+		expect(credentialRow).toBeDefined();
+		const credentialId = credentialRow!.id;
 		const ingested = activeWorld.auth.usage.ingestHeaders("openai-codex", headers, { credentialId });
 		expect(ingested).toBe(true);
 
-		// Now evaluate routes: governorAllowance detects governorNoPaidOverageObservedAt is > 15min old,
-		// returning undefined (unknown allowance) despite fresh header limits.
+		// Explicitly prove all applicable id observations are fresh on the merged cached report
+		const cachedReport = activeWorld.auth.usage.cachedReport("openai-codex", credentialRow!.credential);
+		expect(cachedReport).not.toBeNull();
+		expect(cachedReport!.fetchedAt).toBe(laterTime);
+		for (const id of ["openai-codex:primary", "openai-codex:secondary"]) {
+			const limit = cachedReport!.limits.find(l => l.id === id);
+			expect(limit).toBeDefined();
+			expect(limit!.observedAt).toBe(laterTime);
+			expect(laterTime - limit!.observedAt!).toBeLessThanOrEqual(15 * 60_000);
+		}
+		// Prove that only governorNoPaidOverageObservedAt is stale (>15min)
+		const staleObservedAt = cachedReport!.metadata?.governorNoPaidOverageObservedAt;
+		expect(staleObservedAt).toBe(baseNow);
+		expect(laterTime - Number(staleObservedAt)).toBeGreaterThan(15 * 60_000);
+
+		// With the stale stamp, governorAllowance returns undefined, rendering allowance unknown
 		const evaluationStaleHeaders = await activeWorld.evaluate(CHAT_MODEL);
 		expect(evaluationStaleHeaders.accounts[0]!.allowance).toBe("unknown");
+		expect(evaluationStaleHeaders.accounts[0]!.eligibility).toBe("unknown");
 
-		// Fresh full payload arrives at laterTime
+		// Decisive control: using the exact same fresh headers and same report,
+		// prove that governorAllowance directly establishes included allowance when
+		// governorNoPaidOverageObservedAt is refreshed.
+		const refreshedReport = {
+			...cachedReport!,
+			metadata: { ...cachedReport!.metadata, governorNoPaidOverageObservedAt: laterTime },
+		};
+		expect(
+			openaiCodexUsageProvider.governorAllowance?.(
+				{ provider: "openai-codex", credential: credentialRow!.credential },
+				refreshedReport,
+				{ modelId: CHAT_MODEL },
+			),
+		).toEqual(["openai-codex:primary", "openai-codex:secondary"]);
+
+		// Also update the persisted SQLite cache row to prove evaluateRoutes reflects it end-to-end
+		const db = new Database(activeWorld.authDbPath);
+		const cacheRow = db.prepare("SELECT key, value FROM cache WHERE key LIKE '%openai-codex%'").get() as {
+			key: string;
+			value: string;
+		} | null;
+		expect(cacheRow).not.toBeNull();
+		const parsedCache = JSON.parse(cacheRow!.value);
+		parsedCache.value.metadata.governorNoPaidOverageObservedAt = laterTime;
+		db.prepare("UPDATE cache SET value = ? WHERE key = ?").run(JSON.stringify(parsedCache), cacheRow!.key);
+		db.close();
+
+		const evaluationRefreshedStamp = await activeWorld.evaluate(CHAT_MODEL);
+		expect(evaluationRefreshedStamp.accounts[0]!.allowance).toBe("included");
+		expect(evaluationRefreshedStamp.accounts[0]!.eligibility).toBe("eligible");
+
+		// Restore stale stamp in SQLite to re-verify evaluateRoutes switches back to unknown
+		const dbRestore = new Database(activeWorld.authDbPath);
+		parsedCache.value.metadata.governorNoPaidOverageObservedAt = baseNow;
+		dbRestore.prepare("UPDATE cache SET value = ? WHERE key = ?").run(JSON.stringify(parsedCache), cacheRow!.key);
+		dbRestore.close();
+		const evaluationRecheckedStale = await activeWorld.evaluate(CHAT_MODEL);
+		expect(evaluationRecheckedStale.accounts[0]!.allowance).toBe("unknown");
+		expect(evaluationRecheckedStale.accounts[0]!.eligibility).toBe("unknown");
+		// Fresh full payload arrives via usage.reports()
 		await activeWorld.auth.usage.reports({ provider: "openai-codex" });
 		const evaluationFreshFull = await activeWorld.evaluate(CHAT_MODEL);
 		expect(evaluationFreshFull.accounts[0]!.allowance).toBe("included");
+		expect(evaluationFreshFull.accounts[0]!.eligibility).toBe("eligible");
 	});
 });
