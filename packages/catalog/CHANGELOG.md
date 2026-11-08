@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Added a `balanced` delegation bias between `eager` and `restrained`; models without a `delegation-bias` rule now resolve to it instead of `eager`
+
+## [18.18.2] - 2026-11-08
+
+### Fixed
+
+- Fixed model catalog pricing and output-limit metadata for Mistral alias IDs, including the Mistral Vibe CLI default model, by applying the metadata of their aliased models.
+- Updated xAI Grok 4.20 beta and multi-agent aliases to use the current Grok 4.20-0309 pricing, including the higher rates for prompts exceeding 200K tokens.
+
 ## [18.18.1] - 2026-11-08
 
 ### Fixed

@@ -5,7 +5,7 @@
 	"description": "Lets the omp coding agent drive your existing tabs through a local CDP relay.",
 	"author": "Stencil Labs, Inc.",
 	"homepage_url": "https://omp.sh",
-	"permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms", "scripting"],
+	"permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms", "scripting", "downloads"],
 	"host_permissions": ["<all_urls>"],
 	"background": {
 		"service_worker": "background.js"

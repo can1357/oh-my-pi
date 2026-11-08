@@ -39,6 +39,7 @@ use super::{
 };
 use crate::bash::{
 	diag::Diag,
+	ids::Platform,
 	pattern::zsh::Pattern,
 	store::{Attrs, Key, KeyBuf, LossyKind, MiscKey, Record, Table, VarValue},
 	syntax::zsh::tok::{
@@ -284,8 +285,15 @@ impl Param {
 		}
 	}
 
-	/// The parameter a computed special shows.
-	pub fn special(name: &[u8], flags: PmFlags, value: PValue, sp: Special) -> Self {
+	/// The parameter a computed special shows, on the shell's `platform`
+	/// (a tie's separator).
+	pub fn special(
+		name: &[u8],
+		flags: PmFlags,
+		value: PValue,
+		sp: Special,
+		platform: Platform,
+	) -> Self {
 		Self {
 			name: BString::from(name),
 			flags,
@@ -294,7 +302,9 @@ impl Param {
 			value,
 			special: Some(sp),
 			scope: None,
-			tied: sp.tie_partner().map(|(p, sep)| (BString::from(p), sep)),
+			tied: sp
+				.tie_partner(platform)
+				.map(|(p, sep)| (BString::from(p), sep)),
 			lazy: false,
 			attrs: flags.to_attrs(0, 0),
 		}
@@ -302,8 +312,8 @@ impl Param {
 
 	/// A keyed special whose value is computed only when needed
 	/// ([`Param::lazy`]).
-	fn lazy_special(name: &[u8], sp: Special) -> Self {
-		let mut p = Self::special(name, sp.flags(), PValue::Hash(Vec::new()), sp);
+	fn lazy_special(name: &[u8], sp: Special, platform: Platform) -> Self {
+		let mut p = Self::special(name, sp.flags(), PValue::Hash(Vec::new()), sp, platform);
 		p.lazy = true;
 		p
 	}
@@ -738,7 +748,7 @@ fn param_of(
 /// Report that zsh code used `name`, a special that hides a set bash
 /// variable of the same name.
 fn shadowed(ex: &mut Expander<'_, '_>, name: &[u8]) {
-	let what = format!("bash variable `{}' shadowed by the zsh special", name.as_bstr());
+	let what = format!("value of bash variable `{}' (shadowed by the zsh special)", name.as_bstr());
 	mode::report_lossy(ex.k, ex.cx, ex.vp, ex.line, LossyKind::Shadowed, what);
 }
 
@@ -856,11 +866,11 @@ fn getparam_in(ex: &mut Expander<'_, '_>, name: &[u8], defer: Defer) -> X<Option
 					PmFlags::HASHED => PValue::Hash(Vec::new()),
 					_ => PValue::Scalar(BString::default()),
 				};
-				Param::special(name, flags, value, sp)
+				Param::special(name, flags, value, sp, ex.k.engine.config().platform)
 			} else if (defer == Defer::All && sp != Special::Seconds)
 				|| (defer == Defer::Keyed && sp.keyed())
 			{
-				Param::lazy_special(name, sp)
+				Param::lazy_special(name, sp, ex.k.engine.config().platform)
 			} else {
 				specials::param(ex, sp, name)?
 			};
@@ -894,7 +904,7 @@ fn getparam_in(ex: &mut Expander<'_, '_>, name: &[u8], defer: Defer) -> X<Option
 		p.tied = Some((partner, sep));
 	}
 	if let Some(sp) = sp
-		&& let Some((partner, sep)) = sp.tie_partner()
+		&& let Some((partner, sep)) = sp.tie_partner(ex.k.engine.config().platform)
 	{
 		// zsh/watch's `WATCH` is tied without `PM_TIED`.
 		p.flags = p
@@ -1653,7 +1663,10 @@ fn store_param_assignment(ex: &mut Expander<'_, '_>, pm: &Param, trace: bool) ->
 	let uniq_pm;
 	let pm = match &pm.value {
 		PValue::Scalar(s) if pm.flags.contains(PmFlags::UNIQUE.with(PmFlags::TIED)) => {
-			let tie = match pm.special.and_then(Special::tie_partner) {
+			let tie = match pm
+				.special
+				.and_then(|sp| sp.tie_partner(ex.k.engine.config().platform))
+			{
 				Some((array, sep)) => Some((pm.name.clone(), BString::from(array), sep)),
 				None => tie_of(ex, &pm.name)?,
 			};

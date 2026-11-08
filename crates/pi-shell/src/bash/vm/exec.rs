@@ -648,11 +648,13 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 			.frames
 			.iter()
 			.any(|f| matches!(f.kind, FrameKind::Function { .. }))
-		&& vp
-			.runs
-			.front()
-			.is_some_and(|r| r.started && !r.exit_trap_started)
-		&& start_trap(k, vp, cx, TrapKey::Exit)
+		&& match vp.runs.front() {
+			Some(r) => r.started && !r.exit_trap_started,
+			// A forked subshell has no run: it is its own exit, and its
+			// own flag is what keeps the trap from starting twice.
+			None => vp.transient && !vp.exit_trap_run,
+		}
+		&& start_exit_trap_once(k, vp, cx)
 	{
 		if let Some(run) = vp.runs.front_mut() {
 			run.exit_trap_started = true;
@@ -674,8 +676,23 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		super::zsh::zexit::start(k, cx, vp);
 	}
 	if !in_exit_trap && vp.transient && vp.runs.is_empty() {
-		start_trap(k, vp, cx, TrapKey::Exit);
+		start_exit_trap_once(k, vp, cx);
 	}
+}
+
+/// Start this vproc's EXIT trap, at most once for a forked subshell: it has
+/// no [`Run`](super::proc::Run) to keep `exit_trap_started` on, and
+/// `own_traps`, `trap_frames` and the frame scans all return to their
+/// pre-trap values when the trap's frame is popped. A root vproc is
+/// unaffected: its guard is its run's own flag, one per shell invocation.
+fn start_exit_trap_once(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
+	if vp.transient {
+		if vp.exit_trap_run {
+			return false;
+		}
+		vp.exit_trap_run = true;
+	}
+	start_trap(k, vp, cx, TrapKey::Exit)
 }
 
 fn top_frame(vp: &mut Vproc) -> &mut Frame {
@@ -1105,7 +1122,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			vp.status = 0;
 		}
 		if sub_end {
-			start_trap(k, vp, cx, TrapKey::Exit);
+			start_exit_trap_once(k, vp, cx);
 			return None;
 		}
 		if let Some(cancel) = cancel {
@@ -1611,7 +1628,7 @@ fn end_unit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
 		FrameKind::NoFork | FrameKind::Stage => pop_frame(&mut k.root, cx.store, vp),
 		FrameKind::Subshell | FrameKind::Job { .. } => {
 			unwind(&mut k.root, cx.store, vp, 0);
-			start_trap(k, vp, cx, TrapKey::Exit);
+			start_exit_trap_once(k, vp, cx);
 		},
 	}
 }
@@ -2096,6 +2113,27 @@ fn posix_exits(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 		)
 }
 
+/// The status a fatal expansion error leaves when the EXIT trap is the
+/// innermost trap action running: bash's EXIT trap keeps the status the
+/// shell was exiting with (`last_command_exit_value` is saved across the
+/// trap), so the shell leaves with that status and not with the constant
+/// below. Only the EXIT trap does this, so a nested trap action of any
+/// other kind answers `None` and keeps the constant.
+///
+/// The saved status is carried as the `i32` the frame holds, exactly as
+/// every other reader of it does (`return` with no argument inside a
+/// trap, the frame-pop restore); it is already a wait status in `0..=255`
+/// on every path that arms a trap, and narrowing it here would be a
+/// silent second opinion about a value this function does not own.
+fn exit_trap_status(vp: &Vproc) -> Option<i32> {
+	vp.frames.iter().rev().find_map(|frame| match frame.kind {
+		FrameKind::Script { what: ScriptKind::Trap { key, status, .. }, .. } => {
+			Some((key == TrapKey::Exit).then_some(status))
+		},
+		_ => None,
+	})?
+}
+
 /// The flow for an expansion error (the diagnostic is printed).
 pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, stop: Stop) -> Flow {
 	match stop {
@@ -2123,6 +2161,16 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 		},
 		Stop::Fail(d) | Stop::Fatal(d) => {
 			k.diag(cx, vp, line, d);
+			// The EXIT trap keeps the status the shell was exiting with.
+			// Under `set -e` bash reaches the same rows through its own
+			// errexit jump, which this change does not model, so the
+			// upstream constant stays whenever errexit is on.
+			if vp.mode.dialect() != Dialect::Zsh
+				&& let Some(status) = exit_trap_status(vp)
+				&& !errexit_on(k, cx, vp)
+			{
+				return Flow::Exit(status);
+			}
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
 			// failure status); a nested shell (depth 0) is its own `-c` shell.
@@ -2392,7 +2440,10 @@ pub fn start_zsh_procsub(
 	let mut fds = vp.fds.clone();
 	fds.set(their_fd, Some(theirs));
 	let line = line_of(vp, 0);
-	let child = vp.child_text(k, cx.store, text, line, fds);
+	let mut child = vp.child_text(k, cx.store, text, line, fds);
+	if !job_control(k, cx, vp) {
+		ignore_async_signals(k, cx, &mut child);
+	}
 	let vpid = child.vpid;
 	// Not a job: its externals stay in the shell's group, without the
 	// terminal (zsh `ESUB_ASYNC`).
@@ -2965,7 +3016,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 			} else {
 				// A subshell, pipeline stage or job ends: its EXIT trap runs.
 				unwind(&mut k.root, cx.store, vp, 0);
-				start_trap(k, vp, cx, TrapKey::Exit);
+				start_exit_trap_once(k, vp, cx);
 			}
 			Flow::Call
 		},
@@ -3937,6 +3988,9 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					fds.set(0, Some(null.clone()));
 				}
 				let mut child = vp.child(k, cx.store, Arc::clone(unit), info.stages[0].entry, fds);
+				if info.kind == SpawnKind::Background && !control {
+					ignore_async_signals(k, cx, &mut child);
+				}
 				if info.kind == SpawnKind::Background {
 					let level = stage_level(unit, info.stages[0].entry, true);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
@@ -4122,6 +4176,52 @@ pub fn job_control(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	!vp.jobs.subshell && state::option(&mut k.root, cx.store, vp, OptId::Monitor).unwrap_or(false)
 }
 
+/// On Windows, an asynchronous command without job control ignores
+/// `SIGINT` (and in zsh `SIGQUIT`), as zsh (`entersubsh` with
+/// `ESUB_ASYNC`) and bash (`setup_async_signals`) have it: the keyboard's
+/// Ctrl-C leaves it running (its programs lead console groups of their
+/// own, out of the console's Ctrl-C). Ignored traps it lists (`trap -- ''
+/// INT`) and may replace, and its programs start with them ignored
+/// ([`SpawnSpec::sigmask_ign`](crate::bash::SpawnSpec)). bash's ignored
+/// `SIGQUIT`, which it does not list, is not modelled. A bash subshell cannot
+/// trap the ignore away (it was ignored on entry, [`MiscKey::HardIgnored`]);
+/// zsh's can. Elsewhere the dispositions are left as they are.
+fn ignore_async_signals(k: &mut Kernel, cx: &mut Cx<'_>, child: &mut Vproc) {
+	use crate::bash::Signal;
+	if k.engine.config().platform != crate::bash::ids::Platform::Windows {
+		return;
+	}
+	let sigs: &[Signal] = if child.mode.dialect() == Dialect::Zsh {
+		&[Signal::Int, Signal::Quit]
+	} else {
+		&[Signal::Int]
+	};
+	for &sig in sigs {
+		let key = TrapKey::Signal(sig);
+		child.own_traps = child.own_traps.with(key);
+		let record = Record::Trap { mode: child.mode, action: BString::default() };
+		state::store_record(&mut k.root, cx.store, child, KeyBuf::Trap(key), Some(record));
+	}
+	if child.mode.dialect() != Dialect::Zsh {
+		let mut names = match state::record(cx.store, child, Key::Misc(MiscKey::HardIgnored)) {
+			Ok(Some(Record::Words(names))) => names.clone(),
+			_ => Vec::new(),
+		};
+		let int = BString::from(Signal::Int.to_string());
+		if !names.contains(&int) {
+			names.push(int);
+		}
+		let record = Record::Words(names);
+		state::store_record(
+			&mut k.root,
+			cx.store,
+			child,
+			KeyBuf::Misc(MiscKey::HardIgnored),
+			Some(record),
+		);
+	}
+}
+
 /// The job table a child that lists its parent's jobs starts with (a
 /// command substitution, a `jobs` pipeline stage): copies of them, which
 /// are not its children; `subshell` turns job control off.
@@ -4179,7 +4279,10 @@ fn start_coproc(
 	let mut fds = vp.fds.clone();
 	fds.set(0, Some(FdRef::mem(in_r)));
 	fds.set(1, Some(FdRef::mem(out_w)));
-	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	let mut child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	if !job_control(k, cx, vp) {
+		ignore_async_signals(k, cx, &mut child);
+	}
 	// A job of its own under job control (never in the foreground).
 	super::jobctl::own_job(k, child.vpid);
 	let vpid = child.vpid;

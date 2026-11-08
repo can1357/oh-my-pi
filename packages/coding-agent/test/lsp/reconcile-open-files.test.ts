@@ -32,6 +32,8 @@ function fakeClient(openFiles: Map<string, { version: number; languageId: string
 		proc: { stdin: sink },
 		openFiles: new Map(openFiles),
 		diagnostics: new Map(),
+		publishedDiagnostics: new Map(),
+		pulledDiagnostics: new Map(),
 	} as unknown as LspClient;
 	return { client, frames };
 }

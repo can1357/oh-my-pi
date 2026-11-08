@@ -42,6 +42,7 @@ import {
 	cleanupTaskBranches,
 	type CommitToBranchResult,
 	commitToBranch,
+	type DeltaPatchResult,
 	ensureIsolation,
 	getRepoRoot,
 	mergeTaskBranches,
@@ -252,6 +253,8 @@ interface IsolationPatchArtifacts {
 
 interface IsolationPatchCapture {
 	artifacts: IsolationPatchArtifacts;
+	/** The delta written. */
+	delta: DeltaPatchResult;
 	/** {@link deltaFingerprint} of the written delta. */
 	fingerprint: bigint | number;
 }
@@ -262,12 +265,11 @@ interface IsolationPatchCapture {
  * down. Throws when any write fails so nothing captured is ever the only copy.
  */
 async function writeIsolationPatch(
-	isolationDir: string,
-	baseline: WorktreeBaseline,
+	changes: RunChanges,
 	artifactsDir: string,
 	agentId: string,
 ): Promise<IsolationPatchCapture> {
-	const delta = await captureDeltaPatch(isolationDir, baseline);
+	const delta = await changes.delta();
 	const patchPath = path.join(artifactsDir, `${agentId}.patch`);
 	await Bun.write(patchPath, delta.rootPatch);
 	const nestedPatchPaths = await persistNestedPatches(artifactsDir, agentId, delta.nestedPatches);
@@ -278,7 +280,51 @@ async function writeIsolationPatch(
 			nestedPatches: delta.nestedPatches,
 			nestedPatchPaths,
 		},
+		delta,
 		fingerprint: deltaFingerprint(delta.rootPatch, delta.nestedPatches),
+	};
+}
+
+/** How an isolated run's changes are read: relative to the state its workspace opened in. */
+interface RunChanges {
+	/** Every change since the workspace opened. */
+	delta(): Promise<DeltaPatchResult>;
+	/** The baseline the workspace opened in, for branch commits. */
+	baseline(): Promise<WorktreeBaseline>;
+}
+
+/**
+ * Read `workspace`'s changes. A workspace that keeps its own starting state
+ * ({@link IsolationWorkspace.start}) needs nothing taken now; any other gets
+ * its baseline captured before the run begins.
+ */
+async function trackChanges(workspace: IsolationWorkspace, repoRoot: string): Promise<RunChanges> {
+	const start = workspace.start;
+	if (!start) {
+		const baseline = await captureIsolationBaseline(workspace.dir, repoRoot);
+		return {
+			delta: () => captureDeltaPatch(workspace.dir, baseline),
+			baseline: async () => baseline,
+		};
+	}
+	let pending: Promise<WorktreeBaseline> | undefined;
+	const baseline = (): Promise<WorktreeBaseline> => {
+		const read =
+			pending ??
+			start.baseline().catch((err: unknown) => {
+				pending = undefined;
+				throw err;
+			});
+		pending = read;
+		return read;
+	};
+	return {
+		delta: async () => {
+			const rootPatch = await start.rootPatch();
+			if (rootPatch !== undefined) return { rootPatch, nestedPatches: [] };
+			return captureDeltaPatch(workspace.dir, await baseline());
+		},
+		baseline,
 	};
 }
 
@@ -346,6 +392,21 @@ export async function vacateIsolationSlot(baseDir: string): Promise<string | und
 }
 
 /**
+ * The state a workspace opened in, kept by the workspace itself (an ovnfs
+ * checkout's capture), so the runner need not take a baseline when it opens.
+ */
+export interface WorkspaceStart {
+	/**
+	 * The root repo's changes since the workspace opened, as `git diff --binary`
+	 * writes them; `undefined` when only git can tell (they are then diffed
+	 * against {@link baseline}).
+	 */
+	rootPatch(): Promise<string | undefined>;
+	/** The baseline the workspace opened in, read from a copy of that state; for branch commits. */
+	baseline(): Promise<WorktreeBaseline>;
+}
+
+/**
  * The checkout an isolated run works in, from materialisation to teardown:
  * a native copy or mount ({@link nativeWorkspace}) or an ovnfs checkout
  * (`ovnfsWorkspace` in `./ovnfs`). Capture and merge only see {@link dir}.
@@ -353,6 +414,8 @@ export async function vacateIsolationSlot(baseDir: string): Promise<string | und
 export interface IsolationWorkspace {
 	/** The checkout the subagent runs in. */
 	readonly dir: string;
+	/** Set when the workspace keeps the state it opened in; then no baseline is taken at start. */
+	readonly start?: WorkspaceStart;
 	/** Keep the workspace past the run (its changes could not be captured) and say where it stays. */
 	retain(): Promise<RetainedWorkspace>;
 	/** Tear the workspace down. */
@@ -418,7 +481,7 @@ function renderIsolationError(context: IsolationErrorContext): string {
  * sibling and its path is named in the resulting error.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
-	let taskBaseline: WorktreeBaseline | undefined;
+	let changes: RunChanges | undefined;
 	/** Fingerprint of the delta already handed to the caller at run end; release only re-captures on change. */
 	let handedOff: bigint | number | undefined;
 	let workspace: IsolationWorkspace | undefined;
@@ -442,14 +505,14 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	};
 	const releaseIsolation = (): Promise<void> => {
 		releasePromise ??= (async () => {
-			if (!workspace || !taskBaseline || retainWorkspace) {
+			if (!workspace || !changes || retainWorkspace) {
 				await cleanupHandle();
 				return;
 			}
 			try {
 				let capture: IsolationPatchCapture;
 				try {
-					capture = await writeIsolationPatch(workspace.dir, taskBaseline, opts.artifactsDir, opts.agentId);
+					capture = await writeIsolationPatch(changes, opts.artifactsDir, opts.agentId);
 				} catch (captureErr) {
 					retainWorkspace = true;
 					const retained = await workspace.retain();
@@ -472,10 +535,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				if (capture.fingerprint === handedOff) return;
 				const commitResult = await commitToBranch(
 					workspace.dir,
-					taskBaseline,
+					await changes.baseline(),
 					opts.agentId,
 					opts.description,
 					undefined,
+					capture.delta,
 				);
 				AgentRegistry.global().setHistory(opts.agentId, {
 					patchPath: patchResult.patchPath,
@@ -491,8 +555,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	try {
 		workspace = await opts.openWorkspace(opts.context.repoRoot, opts.agentId);
 		const isolationDir = workspace.dir;
-		const baseline = await captureIsolationBaseline(isolationDir, opts.context.repoRoot);
-		taskBaseline = baseline;
+		const runChanges = await trackChanges(workspace, opts.context.repoRoot);
+		changes = runChanges;
 		const result = await runSubprocess({
 			...opts.baseOptions,
 			worktree: isolationDir,
@@ -522,13 +586,16 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		}
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			let commitResult: CommitToBranchResult | null;
+			let baseline: WorktreeBaseline | undefined;
 			try {
+				baseline = await runChanges.baseline();
 				commitResult = await commitToBranch(
 					isolationDir,
 					baseline,
 					opts.agentId,
 					opts.description,
 					opts.buildCommitMessage?.(),
+					await runChanges.delta(),
 				);
 			} catch (mergeErr) {
 				// Agent succeeded but the branch commit failed. `commitToBranch`
@@ -540,13 +607,15 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				// other copy of those objects — is destroyed by the `finally`
 				// below, so deleting the branch unconditionally turned a
 				// recoverable merge conflict into permanent loss of committed
-				// work (#8868). Delete only when nothing is at stake.
-				const baseSha = baseline.root.headCommit;
+				// work (#8868). Delete only when nothing is at stake. Without a
+				// baseline no branch was started.
 				const branchName = `omp/task/${opts.agentId}`;
-				const rescueBranch = await rescueTaskBranch(opts.context.repoRoot, branchName, baseSha);
+				const rescueBranch = baseline
+					? await rescueTaskBranch(opts.context.repoRoot, branchName, baseline.root.headCommit)
+					: undefined;
 				const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
 				try {
-					const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+					const capture = await writeIsolationPatch(runChanges, opts.artifactsDir, opts.agentId);
 					return rememberAgentArtifacts({
 						...result,
 						...capture.artifacts,
@@ -603,7 +672,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		}
 		if (result.exitCode === 0) {
 			try {
-				const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
+				const capture = await writeIsolationPatch(runChanges, opts.artifactsDir, opts.agentId);
 				handedOff = capture.fingerprint;
 				return rememberAgentArtifacts({ ...result, ...capture.artifacts });
 			} catch (patchErr) {

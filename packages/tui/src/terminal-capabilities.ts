@@ -627,8 +627,13 @@ const KNOWN_TERMINALS = Object.freeze({
 	// OSC 99, and OSC 66 text sizing are outside rio's supported set and keep
 	// the conservative defaults.
 	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, true),
-	// Rex (TERM_PROGRAM=rex / TERM=xterm-rex): only Kitty graphics is confirmed.
-	rex: new TerminalInfo("rex", ImageProtocol.Kitty, true, false),
+	// Rex (Superlogical's terminal) identifies via TERM_PROGRAM=rex, or
+	// TERM=xterm-rex over SSH. It renders Kitty graphics and OSC 8
+	// hyperlinks — a link opens on command-click, and
+	// Settings > Terminal > Links only decides whether an `ssh://`-style link
+	// that launches another app asks first — so links are on. Notifications
+	// keep the BEL default.
+	rex: new TerminalInfo("rex", ImageProtocol.Kitty, true, true),
 	// Tern (Stencil's terminal, `stencil-term`) sets TERM_PROGRAM=tern and
 	// implements Kitty graphics (Unicode placeholders included), OSC 8 and
 	// OSC 9/99 notifications. Whether omp renders natively (Tern Surface

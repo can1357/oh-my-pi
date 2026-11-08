@@ -202,11 +202,7 @@ impl<'de> Visitor<'de> for NodeSeed<'_> {
 					.ok_or_else(|| de::Error::invalid_length(i - 1, &"a stored syntax node"))?
 			}};
 			($bit:expr, $head:expr) => {
-				if $head & $bit != 0 {
-					next!()
-				} else {
-					0
-				}
+				if $head & $bit != 0 { next!() } else { 0 }
 			};
 		}
 		let head: u8 = next!();
