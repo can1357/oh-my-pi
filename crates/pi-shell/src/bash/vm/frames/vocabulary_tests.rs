@@ -50,7 +50,7 @@ impl Codec for ProbeCodec {
 #[test]
 fn a_known_required_codec_restores_and_recaptures_only_its_owning_vproc() {
 	let bytes = include_bytes!(
-		"../../../../tests/fixtures/format-vocabulary/18.18/owned-required-vocabulary.image"
+		"../../../../tests/fixtures/format-vocabulary/18.18.2-ir17/owned-required.image"
 	);
 	let engine = Engine::new(crate::bash::EngineConfig::default());
 	let mut store = crate::bash::MemStore::from_bytes(bytes).unwrap();

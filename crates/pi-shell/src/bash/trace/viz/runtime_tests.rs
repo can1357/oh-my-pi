@@ -7,8 +7,8 @@ use crate::{
 	Shell, ShellRunOptions,
 	bash::{
 		EventSink, Script,
-		syntax::CommandKind,
-		trace::{RunTrace, history::HistoryData, syntax::SyntaxTree},
+		syntax::tree::{CommandKind, List},
+		trace::{RunTrace, history::HistoryData, syntax::Root},
 	},
 	testkit::{FakeHost, Fault, Rig, fault::skeleton_init},
 };
@@ -377,35 +377,47 @@ async fn local_eval_literal_child_uses_actual_origin_and_native_node_ids() {
 		.syntax
 		.as_ref()
 		.unwrap();
-	let SyntaxTree::List(parent_list) = &parent_syntax.tree else {
+	let Root::List(parent_list) = parent_syntax.tree.view() else {
 		panic!("native parent list");
 	};
-	let CommandKind::Simple(parent_command) = &parent_list.items[0].and_or.first.stages[0].cmd.kind
-	else {
+	fn first(list: List<'_>) -> crate::bash::syntax::tree::Command<'_> {
+		list
+			.items()
+			.first()
+			.unwrap()
+			.and_or()
+			.first()
+			.stages()
+			.first()
+			.unwrap()
+	}
+	let CommandKind::Simple(parent_command) = first(parent_list).kind() else {
 		panic!("native shell invocation");
 	};
-	let word = &parent_command.words[1];
-	assert_eq!(parent.node, word.id.0);
+	let word = parent_command.words().get(1).unwrap();
+	assert_eq!(parent.node, word.id().0);
 	assert_eq!(
 		(parent.lo, parent.hi),
-		(word.span.lo - parent_syntax.offset, word.span.hi - parent_syntax.offset)
+		(word.span().lo - parent_syntax.offset, word.span().hi - parent_syntax.offset)
 	);
 	assert_eq!(
 		&script.as_bytes()[parent.lo as usize..parent.hi as usize],
 		b"'child=inside; printf \"%s\\n\" \"$child\"'"
 	);
 	let child_syntax = child.1.syntax.as_ref().unwrap();
-	let SyntaxTree::List(child_list) = &child_syntax.tree else {
+	let Root::List(child_list) = child_syntax.tree.view() else {
 		panic!("native child list");
 	};
-	let CommandKind::Simple(setter) = &child_list.items[0].and_or.first.stages[0].cmd.kind else {
+	let CommandKind::Simple(setter) = first(child_list).kind() else {
 		panic!("native child assignment");
 	};
-	let assignment = &setter.assigns[0];
-	let key = format!("{}:0:{}", child.0, assignment.id.0);
-	let owner = format!("{}:0:{}", child.0, child_list.items[0].and_or.first.stages[0].cmd.id.0);
-	let range =
-		serde_json::json!([parent.lo + 1 + assignment.span.lo, parent.lo + 1 + assignment.span.hi,]);
+	let assignment = setter.assigns().first().unwrap();
+	let key = format!("{}:0:{}", child.0, assignment.id().0);
+	let owner = format!("{}:0:{}", child.0, first(child_list).id().0);
+	let range = serde_json::json!([
+		parent.lo + 1 + assignment.span().lo,
+		parent.lo + 1 + assignment.span().hi,
+	]);
 	let model = present(&trace, &Options::default());
 	assert_eq!(model["output"], "inside\n");
 	assert!(
@@ -468,16 +480,19 @@ fn same_native_child_unit_at_two_real_origins_keeps_distinct_trace_identity() {
 		.syntax
 		.as_ref()
 		.unwrap();
-	let SyntaxTree::List(parent_list) = &parent_syntax.tree else {
+	let Root::List(parent_list) = parent_syntax.tree.view() else {
 		panic!("native parent list");
 	};
-	let mut expected = parent_list.items[..2]
+	let mut expected = parent_list
+		.items()
+		.take(2)
 		.iter()
 		.map(|item| {
-			let CommandKind::Simple(command) = &item.and_or.first.stages[0].cmd.kind else {
+			let command = item.and_or().first().stages().first().unwrap();
+			let CommandKind::Simple(command) = command.kind() else {
 				panic!("native shell invocation");
 			};
-			command.words[2].id.0
+			command.words().get(2).unwrap().id().0
 		})
 		.collect::<Vec<_>>();
 	let mut actual = children
@@ -497,11 +512,19 @@ fn same_native_child_unit_at_two_real_origins_keeps_distinct_trace_identity() {
 		assert_eq!(unit.source.as_ref().unwrap().as_slice(), b"printf same");
 		let syntax = unit.syntax.as_ref().unwrap();
 		let parent = syntax.parent.unwrap();
-		let SyntaxTree::List(list) = &syntax.tree else {
+		let Root::List(list) = syntax.tree.view() else {
 			panic!("native child list");
 		};
-		let command = &list.items[0].and_or.first.stages[0].cmd;
-		let key = format!("{index}:0:{}", command.id.0);
+		let command = list
+			.items()
+			.first()
+			.unwrap()
+			.and_or()
+			.first()
+			.stages()
+			.first()
+			.unwrap();
+		let key = format!("{index}:0:{}", command.id().0);
 		let range = serde_json::json!([parent.lo + 1, parent.hi - 1]);
 		let completion = snapshot
 			.history
@@ -635,4 +658,262 @@ async fn branch_badges_follow_real_negated_and_elif_decisions() {
 		.collect();
 	assert!(heads.iter().filter(|row| row["meta"] == "↳").count() >= 2);
 	assert!(heads.iter().any(|row| row["meta"] == "↷"));
+}
+
+#[test]
+fn a_trace_saved_by_another_build_restores_from_its_source() {
+	use base64::{Engine as _, engine::general_purpose::STANDARD};
+	let (trace, _) = run_native_shell(
+		"f() { echo \"$1\"; }\nf one\nread -r d <<E\ndoc $(echo x)\nE\necho \"$d\"\n",
+	);
+	let saved = trace.snapshot_json();
+	// Another build's archives: the same field, a version this build does
+	// not read (a session saved before an upgrade).
+	let mut other: Value = serde_json::from_str(&saved).unwrap();
+	let mut archives = 0;
+	for unit in other["units"].as_array_mut().unwrap() {
+		if let Some(text) = unit["syntax"].as_str() {
+			let mut bytes = STANDARD.decode(text).unwrap();
+			bytes[0] = bytes[0].wrapping_add(1);
+			unit["syntax"] = STANDARD.encode(bytes).into();
+			archives += 1;
+		}
+	}
+	assert!(archives > 0);
+	let present = |json: &str| {
+		StoredVisualization::from_snapshot_json(json)
+			.unwrap()
+			.presentation_json(&Options::default())
+			.unwrap()
+	};
+	assert_eq!(present(&other.to_string()), present(&saved));
+}
+
+/// A command nested past [`MAX_NESTING`](crate::bash::syntax::MAX_NESTING)
+/// is a syntax error rather than a stack overflow that takes the host
+/// process down; one at the limit is parsed, lowered, printed, exported,
+/// run and drawn within a 2 MiB stack, the default the shells run on.
+#[test]
+fn nesting_is_a_syntax_error_past_the_limit_and_fits_a_default_stack_at_it() {
+	use crate::bash::{
+		ids::ModeId,
+		ir,
+		syntax::{
+			Features, JsonDialect, MAX_NESTING, Offsets, PrintStyle, parse_all, print_list, to_json,
+		},
+	};
+	let zsh = Features::ZSH | Features::ZSH_SHORT_LOOPS | Features::ZSH_INTERACTIVE_COMMENTS;
+	// (prefix, open, inner, close, suffix, features, levels per repeat,
+	// levels of the prefix): `open`/`close` repeat once per level; a bash
+	// substitution is two; text re-parsed as a list (a backquote, a `$((`
+	// that is not arithmetic) is one more.
+	type Shape =
+		(&'static str, &'static str, &'static str, &'static str, &'static str, Features, u32, u32);
+	let shapes: [Shape; 13] = [
+		("", "( ", ":", " )", "", Features::NONE, 1, 0),
+		("", "{ ", ":", "; }", "", Features::NONE, 1, 0),
+		("", "if :; then ", ":", "; fi", "", Features::NONE, 1, 0),
+		("", "echo $(", "echo x", ")", "", Features::NONE, 2, 0),
+		("", "echo ${x:-", "y", "}", "", Features::NONE, 1, 0),
+		("[[ ", "( ", "a", " )", " ]]", Features::NONE, 1, 0),
+		("[[ ", "! ", "a", "", " ]]", Features::NONE, 1, 0),
+		("[[ ", "a || ", "a", "", " ]]", Features::NONE, 1, 0),
+		("echo `", "( ", ":", " )", "`", Features::NONE, 1, 1),
+		("echo $(", "( ", "echo x", " )", " )", Features::NONE, 1, 1),
+		("", "( ", ":", " )", "", zsh, 1, 0),
+		("", "echo $(", "echo x", ")", "", zsh, 1, 0),
+		("[[ ", "( ", "a", " )", " ]]", zsh, 1, 0),
+	];
+	let check = move || {
+		for (pre, open, inner, close, suf, feat, cost, extra) in shapes {
+			let n = ((MAX_NESTING - extra) / cost) as usize;
+			let src = |k: usize| format!("{pre}{}{inner}{}{suf}\n", open.repeat(k), close.repeat(k));
+			let at = src(n);
+			let prog = parse_all(at.as_bytes(), feat).unwrap_or_else(|e| {
+				panic!("{open:?} nested {n} deep: {}", String::from_utf8_lossy(&e.bash_msg()))
+			});
+			for dialect in [JsonDialect::Native, JsonDialect::Shfmt] {
+				to_json(at.as_bytes(), &prog, dialect, Offsets::Bytes);
+			}
+			let style = if feat.contains(Features::ZSH) {
+				PrintStyle::Zsh
+			} else {
+				PrintStyle::DeclareF
+			};
+			for cc in &prog.commands {
+				print_list(cc.list(), style);
+			}
+			let mode = if feat.contains(Features::ZSH) {
+				ModeId::Zsh
+			} else {
+				ModeId::Bash
+			};
+			ir::compile_all(at.as_bytes(), mode, feat);
+			if !feat.contains(Features::ZSH) {
+				let (trace, _) = run_native_shell(&at);
+				present(&trace, &Options::default());
+			}
+			let past = parse_all(src(n + 1).as_bytes(), feat)
+				.map(|_| ())
+				.expect_err(&format!("{pre}{open} {feat:?} nested {} deep parsed", n + 1));
+			// zsh's lexer reports a substitution it cannot parse as `parse
+			// error near …`, whatever the reason.
+			let msg = past.bash_msg();
+			assert!(
+				msg.ends_with(b"maximum nesting level exceeded")
+					|| (feat.contains(Features::ZSH) && open == "echo $("),
+				"{pre}{open:?} nested {} deep: {}",
+				n + 1,
+				String::from_utf8_lossy(&msg)
+			);
+		}
+	};
+	std::thread::Builder::new()
+		.stack_size(2 << 20)
+		.spawn(check)
+		.unwrap()
+		.join()
+		.unwrap();
+}
+
+#[cfg(unix)]
+/// Text, indentation and role of every statement or literal row: what a
+/// phase change must not move.
+fn chain_rows(p: &Value) -> Vec<(String, u64, String)> {
+	rows(p)
+		.into_iter()
+		.filter(|(_, row)| row["role"] == "stmt" || row["role"] == "raw")
+		.map(|(text, row)| {
+			(text, row["depth"].as_u64().unwrap(), row["role"].as_str().unwrap().to_owned())
+		})
+		.collect()
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_and_chain_keeps_pseudo_connectors_while_running_and_after() {
+	// Regression for #18408: the minimizer runs each `&&` operand as its own
+	// unit, and the operators between (and before) them were drawn as raw
+	// ` && ` rows instead of Pseudo `and` connectors.
+	let root = tempfile::tempdir().unwrap();
+	let gate = root.path().join("gate");
+	let wait = root.path().join("wait.sh");
+	std::fs::write(&wait, format!("while [ ! -e \"{}\" ]; do sleep 0.01; done\n", gate.display()))
+		.unwrap();
+	let command = format!("echo start && /bin/sh {} && echo middle && echo end", wait.display());
+	let pending = chain_rows(&present(&RunTrace::new(command.as_str()), &Options::default()));
+	assert_eq!(pending.len(), 4, "{pending:?}");
+	assert_eq!(pending[0], ("print(\"start\")".into(), 0, "stmt".into()));
+	assert!(
+		pending[1..]
+			.iter()
+			.all(|(text, depth, role)| text.starts_with("and ") && *depth == 1 && role == "stmt"),
+		"{pending:?}"
+	);
+
+	let trace = Arc::new(RunTrace::new(command.as_str()));
+	let shell = Shell::new(Some(crate::ShellOptions {
+		minimizer: Some(crate::minimizer::MinimizerOptions {
+			enabled: Some(true),
+			..Default::default()
+		}),
+		..Default::default()
+	}));
+	let run = shell.run(
+		ShellRunOptions {
+			command: command.clone(),
+			trace: Some(Arc::clone(&trace)),
+			..Default::default()
+		},
+		None,
+		().into(),
+	);
+	let probe = async {
+		// The gate segment is the second announced unit; the tail is unrun.
+		while trace
+			.snapshot()
+			.units
+			.iter()
+			.filter(|unit| unit.at.is_some())
+			.count()
+			< 2
+		{
+			tokio::task::yield_now().await;
+		}
+		let running = chain_rows(&present(&trace, &Options::default()));
+		std::fs::write(&gate, []).unwrap();
+		running
+	};
+	let (result, running) =
+		tokio::time::timeout(std::time::Duration::from_secs(10), async { tokio::join!(run, probe) })
+			.await
+			.unwrap();
+	assert_eq!(result.unwrap().exit_code, Some(0));
+	assert_eq!(running, pending, "running");
+	assert_eq!(chain_rows(&present(&trace, &Options::default())), pending, "finished");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn running_command_keeps_the_script_it_runs_active() {
+	// What a command runs is part of the command: while it runs, its heredoc
+	// and its untraced `sh -c` script must not dim like inactive rows.
+	let root = tempfile::tempdir().unwrap();
+	let gate = root.path().join("gate");
+	let wait = format!("while [ ! -e \"{}\" ]; do sleep 0.01; done", gate.display());
+	for command in [
+		format!("/bin/sh <<'EOF'\n{wait}\necho done\nEOF\necho after"),
+		format!("/bin/sh -c '{wait}\necho done'\necho after"),
+	] {
+		let _ = std::fs::remove_file(&gate);
+		let trace = Arc::new(RunTrace::new(command.as_str()));
+		let shell = Shell::new(None);
+		let run = shell.run(
+			ShellRunOptions {
+				command: command.clone(),
+				trace: Some(Arc::clone(&trace)),
+				..Default::default()
+			},
+			None,
+			().into(),
+		);
+		let probe = async {
+			loop {
+				let p = present(&trace, &Options::default());
+				if p["running"] == true {
+					let raw = present(&trace, &Options { view: View::Raw, ..Options::default() });
+					std::fs::write(&gate, []).unwrap();
+					return (p, raw);
+				}
+				tokio::task::yield_now().await;
+			}
+		};
+		let (result, (running, raw)) =
+			tokio::time::timeout(std::time::Duration::from_secs(10), async {
+				tokio::join!(run, probe)
+			})
+			.await
+			.unwrap();
+		assert_eq!(result.unwrap().exit_code, Some(0));
+		let shown = rows(&running);
+		let script: Vec<&(String, &Value)> = shown
+			.iter()
+			.filter(|(_, row)| row["depth"].as_u64() > Some(0))
+			.collect();
+		assert!(script.len() >= 3, "{command:?}: {running}");
+		assert!(script.iter().all(|(_, row)| row["active"] == true), "{command:?}: {running}");
+		let (_, after) = shown.last().unwrap();
+		assert_ne!(after["active"], true, "{command:?}: {running}");
+		// Raw: every source line of the command, through a heredoc's
+		// delimiter, runs; the next command does not.
+		let lines = rows(&raw);
+		let (after, command_lines) = lines.split_last().unwrap();
+		assert!(command_lines.iter().all(|(_, row)| row["active"] == true), "{command:?}: {raw}");
+		assert_ne!(after.1["active"], true, "{command:?}: {raw}");
+		let finished = present(&trace, &Options::default());
+		assert!(
+			rows(&finished).iter().all(|(_, row)| row["active"] != true),
+			"{command:?}: {finished}"
+		);
+	}
 }

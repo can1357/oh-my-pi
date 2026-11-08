@@ -27,7 +27,7 @@ export const cfgSpotlightExperimentHoldout = register({
 	id: "spotlight.experiment.holdout",
 	env: { name: "PI_SPOTLIGHT_HOLDOUT", parse: parseShare },
 	type: "number",
-	default: 0.15,
+	default: 0.05,
 	validate: raw => validateShare("spotlight.experiment.holdout", raw),
 });
 

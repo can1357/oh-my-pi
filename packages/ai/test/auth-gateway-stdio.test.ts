@@ -52,6 +52,55 @@ describe("auth-gateway stdio transport", () => {
 		}
 	});
 
+	it("serves Apple chat without a stored credential while rejecting credential-required providers", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-stdio-keyless-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const apple = createMockModel({ provider: "apple", id: "on-device" });
+		const required = createMockModel({ provider: "openrouter", id: "missing-key" });
+		const router = createAuthGatewayRouter({
+			storage,
+			resolveModel: id => (id === "apple/on-device" ? apple.model : required.model),
+		});
+		try {
+			apple.push({ content: ["ok"] });
+			const output = await serve(
+				["apple/on-device", "openrouter/missing-key"].map((model, id) =>
+					JSON.stringify({
+						id,
+						path: "/v1/chat/completions",
+						body: { model, messages: [{ role: "user", content: "Reply with ok." }] },
+					}),
+				),
+				req => router.route(req, "test"),
+			);
+			expect(output).toContainEqual(
+				expect.objectContaining({
+					id: 0,
+					status: 200,
+					body: expect.objectContaining({
+						choices: [
+							expect.objectContaining({
+								message: expect.objectContaining({ role: "assistant", content: "ok" }),
+							}),
+						],
+					}),
+				}),
+			);
+			expect(output).toContainEqual(
+				expect.objectContaining({
+					id: 1,
+					status: 401,
+					body: { error: expect.objectContaining({ type: "authentication_error" }) },
+				}),
+			);
+		} finally {
+			router.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("answers in completion order by id, rejects malformed lines and waits for requests in flight", async () => {
 		const fastAnswered = Promise.withResolvers<void>();
 		const route = async (req: Request): Promise<Response> => {

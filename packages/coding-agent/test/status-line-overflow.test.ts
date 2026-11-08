@@ -41,7 +41,7 @@ function createCtx(overrides?: {
 		session: {
 			state: {},
 			isFastModeEnabled: () => false,
-			modelRegistry: { isUsingOAuth: () => false },
+			modelRegistry: { isUsingSubscription: () => false },
 			sessionManager: hasName ? { getSessionName: () => overrides.sessionName } : undefined,
 		} as unknown as SegmentContext["session"],
 		sessionAccent: overrides?.sessionAccent,
@@ -118,7 +118,7 @@ function createStatusLineSession(sessionName: string, modelName?: string) {
 		isFastModeEnabled: () => false,
 		getContextUsage: () => ({ tokens: 0, contextWindow: 128000 }),
 		getGoalModeState: () => null,
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingSubscription: () => false },
 		sessionManager: {
 			getSessionName: () => sessionName,
 			getUsageStatistics: () => ({

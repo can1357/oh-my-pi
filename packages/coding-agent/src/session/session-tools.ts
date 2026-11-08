@@ -10,12 +10,20 @@ import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
+import { clearPluginRootsAndCaches } from "../discovery/helpers";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
-import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
+import {
+	getActiveSkills,
+	type LoadSkillsResult,
+	loadSkills,
+	type Skill,
+	type SkillWarning,
+	setActiveSkills,
+} from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
@@ -26,6 +34,7 @@ import type { MemoryBackendStartOptions, MemoryPromptPreparation } from "../memo
 import type { AgentDefinition } from "../task/types";
 import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
 import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
+import skillNoticePrompt from "../prompts/system/skill-notice.md" with { type: "text" };
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
@@ -149,6 +158,17 @@ export interface SettingsGatedToolDelta {
 	readonly xdev: XdevState | undefined;
 }
 
+/**
+ * Renders the base prompt for an active tool set. `xdev` is the `xd://` state
+ * to render: the live state, or a frozen prefix's committed roster when a
+ * rebuild re-renders it. Supplied by `sdk.ts`; called on every prompt rebuild.
+ */
+export type SystemPromptRebuilder = (
+	toolNames: string[],
+	tools: Map<string, AgentTool>,
+	xdev: XdevState | undefined,
+) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+
 interface SessionToolsOptions {
 	autoApprove?: boolean;
 	toolRegistry?: Map<string, AgentTool>;
@@ -170,10 +190,7 @@ interface SessionToolsOptions {
 	 * registry; `isBuiltIn` reports this session's built-in provenance.
 	 */
 	reconcileSettingsGatedTools?: (isBuiltIn: (name: string) => boolean) => Promise<SettingsGatedToolDelta>;
-	rebuildSystemPrompt?: (
-		toolNames: string[],
-		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	rebuildSystemPrompt?: SystemPromptRebuilder;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
 	setActiveToolNames?: (names: Iterable<string>) => void;
@@ -268,15 +285,28 @@ export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRou
 const TOOL_ROSTER_NOTICE_MESSAGE_TYPE = "tool-roster-notice";
 const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
 const EVAL_PRELUDE_NOTICE_MESSAGE_TYPE = "eval-prelude-notice";
+const SKILL_NOTICE_MESSAGE_TYPE = "skill-notice";
 
 /** Custom entry holding the digest of the base prompt the branch's primary model calls are built from. */
 const SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE = "system-prompt-digest";
+
+/**
+ * Least time between two rediscoveries started by `skill://` names no loaded skill owns, so a typo
+ * read in a loop (a shell resolving one URL per spawned command) costs one pass per interval
+ * rather than one per read, while a skill installed after a miss is found once it has passed.
+ */
+const UNKNOWN_SKILL_REDISCOVERY_INTERVAL_MS = 2_000;
 
 /** Equal digests mean equal prompt blocks. */
 function systemPromptDigest(blocks: readonly string[]): string {
 	let hash = BigInt(blocks.length);
 	for (const block of blocks) hash = Bun.hash.wyhash(block, hash);
 	return hash.toString(16);
+}
+
+/** Whether two prompts carry the same blocks in the same order. */
+function samePromptBlocks(left: readonly string[], right: readonly string[]): boolean {
+	return left.length === right.length && left.every((block, index) => block === right[index]);
 }
 
 /** The digest a branch entry records, `undefined` for a malformed record, or `null` when it is not a record. */
@@ -308,6 +338,12 @@ interface EvalPreludeNoticeDetails {
 	removed: string[];
 }
 
+/** Skills one hidden {@link SKILL_NOTICE_MESSAGE_TYPE} message announced or withdrew. */
+interface SkillNoticeDetails {
+	announced: Array<{ name: string; description: string }>;
+	removed: string[];
+}
+
 /** Agent pseudonyms added/removed by one hidden {@link SESSION_AGENT_NOTICE_TYPE} message. */
 interface SessionAgentNoticeDetails {
 	added: string[];
@@ -329,6 +365,20 @@ interface PromptSurface {
 	sessionAgents: readonly AgentDefinition[];
 	/** Tool names the eval description lists as callable from cells. */
 	evalToolNames: readonly string[];
+}
+
+/**
+ * Tool roster a committed base prompt rendered, captured for prefix-bound
+ * models. While a roster change is held out of that prompt, a forced rebuild
+ * re-renders this roster first (see `SessionTools.#prepareHeldRosterPrompt`).
+ */
+interface PromptRoster {
+	/** Active tool names the render listed. */
+	readonly toolNames: string[];
+	/** Registry entries the render could read. */
+	readonly tools: Map<string, AgentTool>;
+	/** `xd://` state over {@link tools} with the mounts the render listed. */
+	readonly xdev: XdevState | undefined;
 }
 
 interface PendingNoticePreview<T> {
@@ -414,6 +464,10 @@ export class SessionTools {
 	/** The latest per-turn override and the base its hook was given; kept after the turn ends. */
 	#lastTurnSystemPromptOverride: { prompt: string[]; base: string[] } | undefined;
 	#lastAppliedToolSignature: string | undefined;
+	/** Roster {@link #baseSystemPrompt} rendered; captured only for prefix-bound models. */
+	#basePromptRoster: PromptRoster | undefined;
+	/** A frozen roster change is held out of {@link #baseSystemPrompt}, riding notices instead. */
+	#promptRosterHeld = false;
 	/** Full enabled set, including tools demoted from the model-visible surface. */
 	#enabledToolNames = new Set<string>();
 	/**
@@ -475,11 +529,14 @@ export class SessionTools {
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
 	#reconcileSettingsGatedTools: SessionToolsOptions["reconcileSettingsGatedTools"];
 	#skills: Skill[];
+	#promptSkills: Skill[];
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
 	/** The skill rediscovery in flight, shared by concurrent misses (see {@link shareSkillRediscovery}). */
 	#skillsRediscovery: Promise<readonly Skill[]> | undefined;
+	/** Earliest time (ms since epoch) a name no loaded skill owns may start another rediscovery. */
+	#nextUnknownSkillRediscovery = 0;
 	/**
 	 * Prompt surface committed by the last system-prompt rebuild. The
 	 * provider-visible system prompt is deliberately byte-stable across
@@ -534,6 +591,7 @@ export class SessionTools {
 				? { reply: restoredReply, promptDigest: restoredPromptDigest }
 				: undefined;
 		this.#skills = options.skills ?? [];
+		this.#promptSkills = this.#skills;
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
@@ -600,9 +658,14 @@ export class SessionTools {
 		this.#turnSystemPromptOverride = undefined;
 	}
 
-	/** Skills currently rendered into the system prompt. */
+	/** The live skill registry: what `skill://` and `/skill:` resolve. */
 	get skills(): Skill[] {
 		return this.#skills;
+	}
+
+	/** Skills the system prompt renders; behind {@link skills} after {@link reloadSkills}. */
+	get promptSkills(): Skill[] {
+		return this.#promptSkills;
 	}
 
 	/** Whether {@link refreshSkills} rediscovers the list; false when it was fixed at creation (a subagent's). */
@@ -613,6 +676,7 @@ export class SessionTools {
 	/** Stores a re-pointed fixed skill list (see `rediscoverSkills`) and refreshes prompt metadata. */
 	async replaceSkills(skills: readonly Skill[]): Promise<void> {
 		this.#skills = [...skills];
+		this.#promptSkills = this.#skills;
 		if (this.#host.agentKind() === "main") {
 			setActiveSkills(this.#skills);
 		}
@@ -626,6 +690,61 @@ export class SessionTools {
 			this.#skillsRediscovery = undefined;
 		});
 		return this.#skillsRediscovery;
+	}
+
+	/**
+	 * Skills rediscovered for a `skill://` name the list lacks (one created or installed since the
+	 * list was taken, or a typo): joins a pass in flight, else starts one unless another such miss
+	 * started one within {@link UNKNOWN_SKILL_REDISCOVERY_INTERVAL_MS}. Undefined when skipped.
+	 */
+	rediscoverSkillsForUnknownName(): Promise<readonly Skill[]> | undefined {
+		if (!this.#skillsRediscovery) {
+			const now = Date.now();
+			if (now < this.#nextUnknownSkillRediscovery) return undefined;
+			this.#nextUnknownSkillRediscovery = now + UNKNOWN_SKILL_REDISCOVERY_INTERVAL_MS;
+		}
+		return this.shareSkillRediscovery(() => this.#adoptNewSkills());
+	}
+
+	/**
+	 * Discovers this session's skills again and adopts them when they differ from the list (a skill
+	 * added, or one removed, which a stale-skill miss joining this pass must see gone); otherwise the
+	 * list, the prompt and the process snapshot stay as they were. The process snapshot follows only
+	 * while it is this session's list, so another session's stays published.
+	 */
+	#adoptNewSkills(): Promise<readonly Skill[]> {
+		return this.runToolRegistryMutation(async () => {
+			clearPluginRootsAndCaches();
+			resetCapabilities();
+			const { discovered, skillsSettings } = await this.#discoverSkills();
+			const held = new Set(this.#skills.map(skill => `${skill.name}\0${skill.filePath}`));
+			if (
+				discovered.skills.length === this.#skills.length &&
+				discovered.skills.every(skill => held.has(`${skill.name}\0${skill.filePath}`))
+			) {
+				return this.#skills;
+			}
+			const published = getActiveSkills() === this.#skills;
+			this.#skills = discovered.skills;
+			this.#skillWarnings = discovered.warnings;
+			this.#skillsSettings = skillsSettings;
+			if (published) setActiveSkills(this.#skills);
+			await this.refreshBaseSystemPrompt();
+			this.#host.notifyCommandMetadataChanged();
+			return this.#skills;
+		});
+	}
+
+	/** A fresh discovery of this session's skills, with the skills settings it ran under. */
+	async #discoverSkills(): Promise<{ discovered: LoadSkillsResult; skillsSettings: SkillsSettings }> {
+		const skillsSettings = cfgSkills.get(this.#host.settings);
+		const discovered = await loadSkills({
+			...skillsSettings,
+			cwd: this.#host.sessionManager.getCwd(),
+			disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
+			extensionRoots: this.#host.effectiveExtensionRoots(),
+		});
+		return { discovered, skillsSettings };
 	}
 
 	/** Diagnostics produced while loading the current skills. */
@@ -679,7 +798,7 @@ export class SessionTools {
 	/** Derives the candidate surface from live state without publishing it. */
 	#derivePromptSurface(): PromptSurface {
 		return {
-			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && (this.#skills?.length ?? 0) > 0,
+			skillHintVisible: cfgSkillful.get(this.#host.settings) === true && this.#promptSkills.length > 0,
 			evalPreludes: this.#host.evalPreludes(),
 			sessionAgents: this.#host.sessionAgents(),
 			evalToolNames: this.getEvalBridgeToolNames(),
@@ -1451,7 +1570,7 @@ export class SessionTools {
 					const built = await untilAborted(
 						signal,
 						this.#promptSurfaceScope.run(candidate, () =>
-							rebuildSystemPrompt(validToolNames, this.#toolRegistry),
+							rebuildSystemPrompt(validToolNames, this.#toolRegistry, this.#xdev),
 						),
 					);
 					rebuiltSystemPrompt = built.systemPrompt;
@@ -1511,6 +1630,7 @@ export class SessionTools {
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
 				this.#lastAppliedToolSignature = rebuiltSignature;
+				this.#recordPromptRoster(validToolNames);
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 				this.#setBasePromptXdevNames(rebuiltXdevCatalogNames);
@@ -1525,6 +1645,7 @@ export class SessionTools {
 			} else if (frozenSignature) {
 				this.#notifyToolRosterDelta(previousActiveToolNames, validToolNames);
 				this.#lastAppliedToolSignature = frozenSignature;
+				this.#promptRosterHeld = true;
 			}
 			if (restoreDormantDeviceOnlyWrite) {
 				this.#setDeviceOnlyWrite?.(true);
@@ -1670,6 +1791,30 @@ export class SessionTools {
 		const latest = this.#latestReply();
 		if (latest === undefined) return "free";
 		return latest === this.#restoredTranscript?.reply ? this.#restoredTranscript : "frozen";
+	}
+
+	/**
+	 * Records the roster a just-committed base prompt rendered and ends any hold.
+	 * Only prefix-bound models hold roster changes, so others skip the copy.
+	 */
+	#recordPromptRoster(toolNames: readonly string[]): void {
+		this.#promptRosterHeld = false;
+		if (this.#host.model()?.thinking?.prefixBinding !== true) {
+			this.#basePromptRoster = undefined;
+			return;
+		}
+		const tools = new Map(this.#toolRegistry);
+		const xdev = this.#xdev;
+		this.#basePromptRoster = {
+			toolNames: [...toolNames],
+			tools,
+			xdev: xdev && {
+				tools,
+				mountedNames: new Set(xdev.mountedNames),
+				builtInNames: xdev.builtInNames,
+				isActive: xdev.isActive,
+			},
+		};
 	}
 
 	#notifyToolRosterDelta(previousActiveToolNames: readonly string[], appliedNames: readonly string[]): void {
@@ -1939,6 +2084,48 @@ export class SessionTools {
 		};
 	}
 
+	/**
+	 * Builds the hidden notice of skills the live registry has gained, changed or lost since the system
+	 * prompt and the notices still in context listed them. A changed description is announced again
+	 * because the model routes on it. Gated like the prompt's skill list: `skillful` on and an enabled
+	 * tool, top-level or `xd://`-mounted, that reads `skill://`.
+	 */
+	takeSkillNotice(): CustomMessage<SkillNoticeDetails> | undefined {
+		if (cfgSkillful.get(this.#host.settings) !== true) return undefined;
+		if (!this.getEnabledToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)))) return undefined;
+		const listed = (skills: readonly Skill[]) => skills.filter(skill => skill.hide !== true);
+		const known = new Map(listed(this.#promptSkills).map(skill => [skill.name, skill.description]));
+		for (const message of this.#host.agent.state.messages) {
+			if (message.role !== "custom" || message.customType !== SKILL_NOTICE_MESSAGE_TYPE) continue;
+			const details = message.details;
+			if (!isRecord(details) || !Array.isArray(details.announced) || !Array.isArray(details.removed)) continue;
+			for (const entry of details.announced) {
+				if (isRecord(entry) && typeof entry.name === "string" && typeof entry.description === "string") {
+					known.set(entry.name, entry.description);
+				}
+			}
+			for (const name of details.removed) if (typeof name === "string") known.delete(name);
+		}
+		const live = listed(this.#skills);
+		const liveNames = new Set(live.map(skill => skill.name));
+		const added = live.filter(skill => !known.has(skill.name));
+		const updated = live.filter(skill => known.has(skill.name) && known.get(skill.name) !== skill.description);
+		const removed = [...known.keys()].filter(name => !liveNames.has(name));
+		if (added.length === 0 && updated.length === 0 && removed.length === 0) return undefined;
+		return {
+			role: "custom",
+			customType: SKILL_NOTICE_MESSAGE_TYPE,
+			content: prompt.render(skillNoticePrompt, { added, updated, removed }),
+			details: {
+				announced: [...added, ...updated].map(({ name, description }) => ({ name, description })),
+				removed,
+			},
+			attribution: "agent",
+			display: false,
+			timestamp: Date.now(),
+		};
+	}
+
 	/** Previews the hidden `xd://` mount notice and its rendered-content fingerprint. */
 	peekPendingXdevMountNotice(options: {
 		baseCatalogDelivered: boolean;
@@ -2071,29 +2258,37 @@ export class SessionTools {
 		};
 	}
 
-	/** Rediscovers reloadable skills and refreshes prompt metadata. */
+	/** Rediscovers reloadable skills and rebuilds the system prompt's skill list. */
 	refreshSkills(): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
-			resetCapabilities();
-			if (this.#skillsReloadable) {
-				const skillsSettings = cfgSkills.get(this.#host.settings);
-				const discovered = await loadSkills({
-					...skillsSettings,
-					cwd: this.#host.sessionManager.getCwd(),
-					disabledExtensions: cfgDisabledExtensions.get(this.#host.settings),
-					extensionRoots: this.#host.effectiveExtensionRoots(),
-				});
-				this.#skills = discovered.skills;
-				this.#skillWarnings = discovered.warnings;
-				this.#skillsSettings = skillsSettings;
-
-				if (this.#host.agentKind() === "main") {
-					setActiveSkills(this.#skills);
-				}
-			}
+			await this.#rediscoverSkills();
+			this.#promptSkills = this.#skills;
 			await this.refreshBaseSystemPrompt();
 			this.#host.notifyCommandMetadataChanged();
 		});
+	}
+
+	/**
+	 * Rediscovers skills for the registry only, after a tool wrote or deleted one. The system prompt keeps
+	 * its list so the provider cache prefix survives; {@link takeSkillNotice} tells the model instead.
+	 */
+	reloadSkills(): Promise<void> {
+		return this.runToolRegistryMutation(async () => {
+			await this.#rediscoverSkills();
+			this.#host.notifyCommandMetadataChanged();
+		});
+	}
+
+	async #rediscoverSkills(): Promise<void> {
+		resetCapabilities();
+		if (!this.#skillsReloadable) return;
+		const { discovered, skillsSettings } = await this.#discoverSkills();
+		this.#skills = discovered.skills;
+		this.#skillWarnings = discovered.warnings;
+		this.#skillsSettings = skillsSettings;
+		if (this.#host.agentKind() === "main") {
+			setActiveSkills(this.#skills);
+		}
 	}
 
 	/** Selects enabled tools, ignoring names absent from the registry. */
@@ -2317,6 +2512,12 @@ export class SessionTools {
 		const activeToolNames = this.getActiveToolNames();
 		this.#setActiveToolNames?.(activeToolNames);
 		const previousBaseSystemPrompt = this.#baseSystemPrompt;
+		const heldRoster =
+			this.#promptRosterHeld && this.#implicitRebuildBinding() !== "free" ? this.#basePromptRoster : undefined;
+		if (heldRoster) {
+			const kept = await this.#prepareHeldRosterPrompt(heldRoster, rebuildSystemPrompt, isCurrent);
+			if (kept) return kept;
+		}
 		// Derive the candidate and run the awaited render inside its scope: the
 		// tool getters read the candidate while the prompt renders, so the built
 		// prompt and the captured signature describe the same state. Nothing is
@@ -2326,7 +2527,7 @@ export class SessionTools {
 		// winner.
 		const candidate = this.#derivePromptSurface();
 		const built = await this.#promptSurfaceScope.run(candidate, () =>
-			rebuildSystemPrompt(activeToolNames, this.#toolRegistry),
+			rebuildSystemPrompt(activeToolNames, this.#toolRegistry, this.#xdev),
 		);
 		const promptTools = activeToolNames
 			.map(name => this.#toolRegistry.get(name))
@@ -2352,10 +2553,7 @@ export class SessionTools {
 				this.#promptSurface = candidate;
 				this.#setBasePromptXdevNames(built.xdevCatalogNames);
 				this.#host.clearMemoryPromotionSnapshot();
-				if (
-					previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||
-					previousBaseSystemPrompt.some((part, index) => part !== this.#baseSystemPrompt[index])
-				) {
+				if (!samePromptBlocks(previousBaseSystemPrompt, this.#baseSystemPrompt)) {
 					this.#host.clearInheritedProviderPromptCacheKey();
 				}
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
@@ -2368,6 +2566,45 @@ export class SessionTools {
 				this.#promptModelKey = this.#currentPromptModelKey();
 				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 				this.#lastAppliedToolSignature = signature;
+				this.#recordPromptRoster(activeToolNames);
+				return true;
+			},
+		};
+	}
+
+	/**
+	 * Re-renders a frozen prefix's base prompt against the roster it was
+	 * committed with, so a forced rebuild that changes nothing else (a body-only
+	 * skill update, an unchanged memory refresh) keeps the held roster change
+	 * out of the bound prefix — eval description included — and leaves it to its
+	 * notices. Returns `undefined` when the rebuild changes the prompt anyway:
+	 * the prefix breaks regardless, so the caller absorbs the live roster.
+	 */
+	async #prepareHeldRosterPrompt(
+		roster: PromptRoster,
+		rebuildSystemPrompt: SystemPromptRebuilder,
+		isCurrent: (() => boolean) | undefined,
+	): Promise<SystemPromptPreparation | undefined> {
+		const previousBaseSystemPrompt = this.#baseSystemPrompt;
+		const candidate: PromptSurface = {
+			...this.#derivePromptSurface(),
+			evalToolNames: this.#promptSurface.evalToolNames,
+		};
+		const built = await this.#promptSurfaceScope.run(candidate, () =>
+			rebuildSystemPrompt(roster.toolNames, roster.tools, roster.xdev),
+		);
+		if (!samePromptBlocks(built.systemPrompt, previousBaseSystemPrompt)) return undefined;
+		return {
+			systemPrompt: previousBaseSystemPrompt,
+			commit: () => {
+				if (this.#host.isDisposed() || isCurrent?.() === false) return false;
+				if (this.#baseSystemPrompt !== previousBaseSystemPrompt) return true;
+				this.#promptSurface = candidate;
+				this.#host.clearMemoryPromotionSnapshot();
+				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+				invalidateToolSchemaMetadata(this.#host.agent.state.tools);
+				this.#promptModelKey = this.#currentPromptModelKey();
+				this.#promptInlineDescriptors = this.#currentInlineDescriptors();
 				return true;
 			},
 		};

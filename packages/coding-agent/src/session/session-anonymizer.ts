@@ -346,6 +346,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	content: "content",
 	...fields("struct", [
 		"message",
+		"parentIrc",
 		"usage",
 		"cost",
 		"cttl",

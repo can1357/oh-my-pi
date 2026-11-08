@@ -1,0 +1,320 @@
+{
+  "generated_at": "2026-11-08T14:37:28.168684+00:00",
+  "upstream_tree": "5e20c1cfb31e592e380f32dba13cfae44f33adb9",
+  "merge_product_tree": "77c027145a62639ac2a4fea43ee6a0223f36f445",
+  "current_core": {
+    "ir_version": 17,
+    "frames_version": 30,
+    "build_id": [
+      227,
+      114,
+      110,
+      55,
+      159,
+      22,
+      47,
+      12,
+      8,
+      97,
+      238,
+      223,
+      248,
+      150,
+      20,
+      133,
+      174,
+      55,
+      174,
+      212,
+      240,
+      112,
+      117,
+      1,
+      191,
+      245,
+      130,
+      43,
+      177,
+      109,
+      14,
+      237
+    ],
+    "size": 2577,
+    "active_runs": 1,
+    "call": 1,
+    "vpid_base": 0,
+    "source": "KEEP=preserved; f(){ hold; return 23; }; f & p=$!; wait \"$p\"; echo child=$?"
+  },
+  "foreign_core": {
+    "ir_version": 17,
+    "frames_version": 30,
+    "build_id": [
+      105,
+      149,
+      192,
+      9,
+      99,
+      143,
+      243,
+      212,
+      253,
+      96,
+      192,
+      157,
+      114,
+      232,
+      5,
+      59,
+      217,
+      160,
+      230,
+      49,
+      254,
+      27,
+      37,
+      117,
+      211,
+      117,
+      88,
+      238,
+      25,
+      121,
+      21,
+      126
+    ],
+    "size": 2577,
+    "active_runs": 1,
+    "call": 1,
+    "vpid_base": 0,
+    "source": "KEEP=preserved; f(){ hold; return 23; }; f & p=$!; wait \"$p\"; echo child=$?"
+  },
+  "future_core": {
+    "ir_version": 17,
+    "frames_version": 4294967295,
+    "build_id": [
+      80,
+      82,
+      246,
+      83,
+      40,
+      1,
+      89,
+      183,
+      33,
+      17,
+      136,
+      84,
+      192,
+      200,
+      232,
+      128,
+      0,
+      134,
+      114,
+      206,
+      205,
+      156,
+      29,
+      60,
+      178,
+      215,
+      2,
+      188,
+      56,
+      20,
+      201,
+      2
+    ],
+    "size": 2581,
+    "active_runs": 1,
+    "call": 1,
+    "vpid_base": 0,
+    "source": "KEEP=preserved; f(){ hold; return 23; }; f & p=$!; wait \"$p\"; echo child=$?"
+  },
+  "reader_policy": "Exact IR, core version and engine identity are required. OBF1 is the legacy encoding of the matching current core, not a promise to migrate older IRs.",
+  "originals": {
+    "source": "f4472073a8aa8a82d5603fb4cc9605418e11edf6",
+    "verified_unchanged_files": [
+      "crates/pi-shell/tests/fixtures/format-vocabulary/18.18/base-parent-wait.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/18.18/owned-optional-vocabulary.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/18.18/owned-required-vocabulary.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/18.18/owned-reserved-required.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/18.18/provenance.json",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/18.18/unknown-root-kept.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/18.18/unknown-root-kept.record",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/18.18/unknown-subshell-kept.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/18.18/unknown-subshell-kept.record",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/base-parent-wait.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/foreign-parent-wait.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/frameless-bg-pids.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/frameless-root-marks.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/newer-parent-wait.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/owned-optional-vocabulary.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/owned-required-vocabulary.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/owned-reserved-required.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/provenance.json",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/unknown-root-kept.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/unknown-root-kept.record",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/unknown-subshell-kept.image",
+      "crates/pi-shell/tests/fixtures/format-vocabulary/unknown-subshell-kept.record",
+      "crates/pi-shell/tests/fixtures/frames/upstream-18.18-provenance.json",
+      "crates/pi-shell/tests/fixtures/frames/upstream-v29-18.17-no-wait.image",
+      "crates/pi-shell/tests/fixtures/frames/upstream-v29-18.17-parent-wait.image",
+      "crates/pi-shell/tests/fixtures/frames/upstream-v29-18.18-no-wait.image",
+      "crates/pi-shell/tests/fixtures/frames/upstream-v29-18.18-parent-wait.image",
+      "crates/pi-shell/tests/fixtures/frames/upstream-v29-no-wait.image",
+      "crates/pi-shell/tests/fixtures/frames/upstream-v29-parent-wait.image"
+    ]
+  },
+  "writers": {
+    "current_core": {
+      "product": "5e20c1cfb31e592e380f32dba13cfae44f33adb9",
+      "product_changes": [],
+      "source": "core_fixture_writer.rs",
+      "target": "fixture_writer18470",
+      "purpose": "Fresh OBF1 cores with a real pending call, with and without a parent wait; root/subshell retained-job cases."
+    },
+    "records_and_entries": {
+      "product": "77c027145a62639ac2a4fea43ee6a0223f36f445",
+      "product_changes": [],
+      "source": "entry_fixture_writer.rs",
+      "target": "entry_writer18470",
+      "purpose": "Transport exact retained UnknownMisc(74) record bytes and exact original independent-writer vocabulary entry wire bytes around a freshly serialized current upstream core. The old core is discarded, not relabeled; the codec decoder is not called. The producer asserts byte-identical entry reserialization and exact id, revision, requiredness and owner.",
+      "codec": {
+        "id": 65537,
+        "revision": 7,
+        "required": true,
+        "vpid": 1,
+        "payload": [
+          0,
+          255,
+          128,
+          2,
+          0,
+          0,
+          9
+        ]
+      },
+      "reserved_entry": {
+        "id": 1,
+        "revision": 7,
+        "required": false,
+        "vpid": 1,
+        "payload": [
+          0,
+          255,
+          128,
+          2,
+          0,
+          0,
+          9
+        ]
+      }
+    },
+    "foreign": {
+      "product": "5e20c1cfb31e592e380f32dba13cfae44f33adb9",
+      "product_changes": [
+        "foreign-writer.patch"
+      ],
+      "source": "core_fixture_writer.rs",
+      "crate_version": "18.18.1-foreign-fixture",
+      "purpose": "A coherently serialized different engine build with the same IR17/core30, never a relabeled header."
+    },
+    "future": {
+      "product": "5e20c1cfb31e592e380f32dba13cfae44f33adb9",
+      "product_changes": [
+        "future-writer.patch"
+      ],
+      "source": "core_fixture_writer.rs",
+      "purpose": "A real writer with FRAMES_VERSION=u32::MAX and pending Call serialized as a newly appended awaited enum variant. Both the header and body come from this writer."
+    }
+  },
+  "groups": {
+    "current_upstream_cores": {
+      "merge_failures": 10,
+      "purpose": "Matching-identity legacy encoding, explicit readable abandonment, and allocated/optional envelopes built over that same core."
+    },
+    "opaque_records": {
+      "merge_failures": 2,
+      "purpose": "Unknown historical records survive root/subshell execution and write-back with their original wire bytes."
+    },
+    "codec_and_requiredness": {
+      "merge_failures": 5,
+      "purpose": "Independent known-codec ownership and recapture, requiredness, reserved allocation and optional opaque-entry retention."
+    },
+    "future_or_foreign": {
+      "merge_failures": 5,
+      "purpose": "Specific future-core or foreign-build refusal before record reads, without consuming or changing the saved store."
+    }
+  },
+  "files": {
+    "base-parent-wait.image": {
+      "sha256": "23278b0c94928d2207e4842158527b71008f4dc10cb0c5f521e306fa6dcf3580",
+      "size": 2577
+    },
+    "core_fixture_writer.rs": {
+      "sha256": "60eb5069536ee9a5dafb7ac899bdc8488f6aa5731af3f452a722d722ab3910d5",
+      "size": 2771
+    },
+    "entry_fixture_writer.rs": {
+      "sha256": "4cb8ccf486dde5e97034030d1725ab87e97368d5dab329b57a0a1da77ff585c5",
+      "size": 4162
+    },
+    "foreign-parent-wait.image": {
+      "sha256": "af44e5001cd30a62583f7e57a4107f48f63dc410e9f6da9ae1e38285960fab2f",
+      "size": 2577
+    },
+    "foreign-writer.patch": {
+      "sha256": "38da7d617074f62ad1ad411d35420319438d0317be28f640a5659a97c5dad952",
+      "size": 293
+    },
+    "future-writer.patch": {
+      "sha256": "2f361c81a275578f77e228bd23c86228717806efa5e9c188aa97c789e7004737",
+      "size": 2279
+    },
+    "newer-parent-wait.image": {
+      "sha256": "34c5219dd0db9764ddcb0f9781276dea9c63fea09282d5416e3d9d034b127e51",
+      "size": 2581
+    },
+    "owned-optional.image": {
+      "sha256": "5e1e178d391e7ba5766c0a186110d915d39ee8a9930043fb5f4adf2a5b9baa47",
+      "size": 2595
+    },
+    "owned-optional.image.entries.json": {
+      "sha256": "b630ffdae561e3077015133083914134adde9d28567d12775f414fe239f6570e",
+      "size": 174
+    },
+    "owned-required.image": {
+      "sha256": "1078d98bfb46e619c95c47a644c55d544f8e38cf43bae7f86b51126ef9132397",
+      "size": 2595
+    },
+    "owned-required.image.entries.json": {
+      "sha256": "c4339e9652cb49445cddc627b920748183c649b09063c5601badd2959f8444f5",
+      "size": 173
+    },
+    "reserved-required.image": {
+      "sha256": "347b477005151da0660c0645c27b72c236c4408ddb3d0eba7e53c9b5e5f69a73",
+      "size": 2593
+    },
+    "reserved-required.image.entries.json": {
+      "sha256": "917e6bf25e9956a2e07f79362809bfea31acdb02e327e64924766372fd0f82e9",
+      "size": 170
+    },
+    "unknown-root-kept.image": {
+      "sha256": "56bdeeb12379556edf10d0b5ec91f0f2dcdde924eef9918eb0f47e8f4b335564",
+      "size": 2208
+    },
+    "unknown-root-kept.record": {
+      "sha256": "44ea53e9f759e4df68cb3cd0f31e7aea731f2bcf3274e42acba30dfed6c8765b",
+      "size": 7
+    },
+    "unknown-subshell-kept.image": {
+      "sha256": "2b6b7abe5004c375ba3b2b6e0ec1dfce588ba49c8d9c09397288e02a866fc7b6",
+      "size": 2429
+    },
+    "unknown-subshell-kept.record": {
+      "sha256": "44ea53e9f759e4df68cb3cd0f31e7aea731f2bcf3274e42acba30dfed6c8765b",
+      "size": 7
+    }
+  }
+}

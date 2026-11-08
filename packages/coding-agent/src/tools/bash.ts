@@ -49,7 +49,7 @@ import { isFindEnabled } from "./jfind";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
-import { resolveToCwd } from "./path-utils";
+import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
 	extractLeadingCdTarget,
 	extractLiteralAndChainSegments,
@@ -531,9 +531,8 @@ interface BashProgressDetails extends BashToolDetails {
 /** Pid probe of a background job with no command in flight. */
 const NO_PIDS = (): readonly number[] => [];
 
-/** Shown when a call overlapped another one (parallel or backgrounded) and could not use the session's shell. */
-const SESSION_SHELL_BUSY_NOTICE =
-	"Ran in a temporary shell while the session shell is busy with another command: session variables and functions were unavailable, and nothing set here persists.";
+/** Shown when a call overlapped another one (parallel or backgrounded) and ran in a fork of the session's shell. */
+const SESSION_SHELL_BUSY_NOTICE = "Ran in a copy of the busy session shell; changes here won't persist.";
 
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";
@@ -583,6 +582,12 @@ function formatTimeoutClampNotice(
 		? `global tools.maxTimeout ceiling ${maxTimeout}s`
 		: `allowed range ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}s`;
 	return `Timeout clamped to ${effectiveTimeoutSec}s (requested ${requestedTimeoutSec}s; ${limit}).`;
+}
+
+/** Explicit tool `cwd` keeps the workspace-root alias; a hoisted shell `cd` does not. */
+function resolveCommandCwd(cwd: string | undefined, sessionCwd: string, hoistedShellCwd: boolean): string {
+	if (!cwd) return sessionCwd;
+	return hoistedShellCwd ? resolveShellDirectory(cwd, sessionCwd) : resolveToCwd(cwd, sessionCwd);
 }
 
 /**
@@ -1266,14 +1271,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// a missing directory fails early, as the shell would short-circuit. `;`
 		// runs the rest even when `cd` fails, so it hoists only onto an existing host
 		// directory; anything else (URL targets included) stays with the shell.
+		// The target is a shell path: `/` is the filesystem root, not the workspace
+		// alias an explicit tool `cwd` keeps.
+		let hoistedShellCwd = false;
 		if (!cwd) {
 			const cd = extractLeadingCdTarget(command);
-			const hoist =
-				cd?.separator === "&&" ||
-				(cd?.separator === ";" &&
-					!InternalUrlRouter.instance().canHandle(cd.path) &&
-					(await fs.promises.stat(resolveToCwd(cd.path, this.session.cwd)).catch(() => null))?.isDirectory());
-			if (cd && hoist) {
+			const virtualTarget = cd !== null && InternalUrlRouter.instance().canHandle(cd.path);
+			const semicolonDirectory =
+				cd?.separator === ";" &&
+				!virtualTarget &&
+				(await fs.promises.stat(resolveShellDirectory(cd.path, this.session.cwd)).catch(() => null))?.isDirectory();
+			if (cd && (cd.separator === "&&" || semicolonDirectory === true)) {
+				hoistedShellCwd = !virtualTarget;
 				cwd = cd.path;
 				command = cd.rest;
 				if (cd.separator === ";") ran.cdSeparator = ";";
@@ -1325,7 +1334,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const approvalTier = typeof approval === "string" ? approval : approval.tier;
 		const router = InternalUrlRouter.instance();
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
-		const commandCwd = virtualCwd ?? (cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd);
+		const commandCwd = virtualCwd ?? resolveCommandCwd(cwd, this.session.cwd, hoistedShellCwd);
 		if (cwd) ran.cwd = commandCwd;
 		if (virtualCwd !== undefined) {
 			if (name !== undefined || canUseInteractiveBashPty(pty === true, ctx)) {

@@ -4,9 +4,14 @@ use alloc::{string::String, vec, vec::Vec};
 
 use crate::bash::syntax::{
 	JsonDialect, Offsets,
-	ast::*,
-	parser::{TextMode, parse_text},
+	ast::{AndOrOp, CaseMode, CaseTerm, ComsubKind, Program, RedirOp, ReplaceMode, Sep, Special},
+	parser::{TextMode, parse_text_at},
 	span::Span,
+	tree::{
+		AndOr, ArithText, ArrayElem, Assign, AssignValue, Command, CommandKind, Cond, CondExpr,
+		IfArm, List, ListItem, Param, ParamName, ParamOp, Part, Pipeline, Redir, RedirFd,
+		RedirTarget, Seq, Simple, Subscript, TextPk, Tree, Word, WordPart,
+	},
 };
 
 // ---- value tree and writer
@@ -165,16 +170,128 @@ pub fn to_json(src: &[u8], program: &Program, dialect: JsonDialect, offsets: Off
 	let mut out = String::new();
 	match dialect {
 		JsonDialect::Native => {
-			let v = native::program(&map, program);
+			let mut v = native::program(&map, program);
+			clip_spans(&mut v, None, None);
 			write(&mut out, &v, false, 0);
 		},
 		JsonDialect::Shfmt => {
-			let v = shfmt::program(&map, src, program);
+			let mut v = shfmt::program(&map, src, program);
+			clip(&mut v, None, None);
 			write(&mut out, &v, true, 0);
 			out.push('\n');
 		},
 	}
 	out
+}
+
+/// A shfmt position's `(Offset, Line, Col)`.
+type At = (u64, u64, u64);
+
+/// The position object `v` is, as numbers.
+fn at(v: &V) -> Option<At> {
+	let V::Obj(f) = v else { return None };
+	match f.as_slice() {
+		[("Offset", V::Num(o)), ("Line", V::Num(l)), ("Col", V::Num(c))] => Some((*o, *l, *c)),
+		_ => None,
+	}
+}
+
+/// Overwrite position object `v` with `a`.
+fn set_at(v: &mut V, a: At) {
+	if let V::Obj(f) = v {
+		f[0].1 = V::Num(a.0);
+		f[1].1 = V::Num(a.1);
+		f[2].1 = V::Num(a.2);
+	}
+}
+
+/// Text an alias expands to has no bytes of its own: every token in it
+/// reports the place after the alias, so its nodes have empty ranges. A
+/// place the export derives by counting or scanning would land in another
+/// node there; inside an empty node every range and position is that
+/// node's place (`point`). Elsewhere only a range running backwards (an
+/// end counted back from an empty one, so its start is no better) is
+/// replaced, by an empty one inside its parent's range (`outer`).
+fn clip(v: &mut V, point: Option<At>, outer: Option<(At, At)>) {
+	match v {
+		V::Arr(items) => {
+			for x in items {
+				clip(x, point, outer);
+			}
+		},
+		V::Obj(fields) => {
+			let find = |k: &str| fields.iter().position(|(n, _)| *n == k);
+			let (mut inner, mut range) = (point, outer);
+			if let (Some(p), Some(e)) = (find("Pos"), find("End"))
+				&& let (Some(lo), Some(hi)) = (at(&fields[p].1), at(&fields[e].1))
+			{
+				let (lo, hi) = match (point, outer) {
+					(Some(pt), _) => (pt, pt),
+					(None, Some((olo, ohi))) if hi.0 < lo.0 => {
+						let at = if lo.0 < olo.0 {
+							olo
+						} else if lo.0 > ohi.0 {
+							ohi
+						} else {
+							lo
+						};
+						(at, at)
+					},
+					(None, None) if hi.0 < lo.0 => (lo, lo),
+					(None, _) => (lo, hi),
+				};
+				set_at(&mut fields[p].1, lo);
+				set_at(&mut fields[e].1, hi);
+				inner = (lo.0 == hi.0).then_some(lo);
+				range = Some((lo, hi));
+			}
+			for (k, x) in fields.iter_mut() {
+				if matches!(*k, "Pos" | "End") {
+					continue;
+				}
+				match (at(x), inner) {
+					(Some(_), Some(pt)) => set_at(x, pt),
+					(Some(_), None) => {},
+					(None, _) => clip(x, inner, range),
+				}
+			}
+		},
+		_ => {},
+	}
+}
+
+/// [`clip`] for the native schema's `span` pairs.
+fn clip_spans(v: &mut V, point: Option<u64>, outer: Option<(u64, u64)>) {
+	match v {
+		V::Arr(items) => {
+			for x in items {
+				clip_spans(x, point, outer);
+			}
+		},
+		V::Obj(fields) => {
+			let (mut inner, mut range) = (point, outer);
+			if let Some((_, V::Arr(s))) = fields.iter_mut().find(|(k, _)| *k == "span")
+				&& let [V::Num(lo), V::Num(hi)] = s.as_mut_slice()
+			{
+				match (point, outer) {
+					(Some(pt), _) => (*lo, *hi) = (pt, pt),
+					(None, Some((olo, ohi))) if *hi < *lo => {
+						*lo = (*lo).clamp(olo, ohi);
+						*hi = *lo;
+					},
+					(None, _) => *hi = (*hi).max(*lo),
+				}
+				inner = (*lo == *hi).then_some(*lo);
+				range = Some((*lo, *hi));
+			}
+			for (k, x) in fields.iter_mut() {
+				if *k != "span" {
+					clip_spans(x, inner, range);
+				}
+			}
+		},
+		_ => {},
+	}
 }
 
 /// Offset conversion and line/column lookup.
@@ -276,26 +393,26 @@ mod native {
 								.collect(),
 						),
 					),
-					("list", list(m, &cc.list)),
+					("list", list(m, cc.list())),
 				])
 			})
 			.collect();
 		V::Obj(vec![("commands", V::Arr(cmds))])
 	}
 
-	fn list(m: &OffMap, l: &List) -> V {
+	fn list(m: &OffMap, l: List<'_>) -> V {
 		V::Arr(
-			l.items
+			l.items()
 				.iter()
 				.map(|it| {
-					let sep: &[u8] = match it.sep {
+					let sep: &[u8] = match it.sep() {
 						Sep::Semi => b";",
 						Sep::Amp => b"&",
 						Sep::Disown => b"&|",
 						Sep::Newline => b"\n",
 						Sep::None => b"",
 					};
-					V::Obj(vec![("sep", s(sep)), ("and_or", and_or(m, &it.and_or))])
+					V::Obj(vec![("sep", s(sep)), ("and_or", and_or(m, it.and_or()))])
 				})
 				.collect(),
 		)
@@ -305,62 +422,55 @@ mod native {
 		V::Num(u64::from(n.0))
 	}
 
-	fn and_or(m: &OffMap, ao: &AndOr) -> V {
+	fn and_or(m: &OffMap, ao: AndOr<'_>) -> V {
 		let rest = ao
-			.rest
-			.iter()
+			.rest()
 			.map(|(op, p)| {
-				let op: &[u8] = if *op == AndOrOp::And { b"&&" } else { b"||" };
+				let op: &[u8] = if op == AndOrOp::And { b"&&" } else { b"||" };
 				V::Obj(vec![("op", s(op)), ("pipeline", pipeline(m, p))])
 			})
 			.collect();
 		V::Obj(vec![
-			("id", id(ao.id)),
-			("span", m.span(ao.span)),
-			("first", pipeline(m, &ao.first)),
+			("id", id(ao.id())),
+			("span", m.span(ao.span())),
+			("first", pipeline(m, ao.first())),
 			("rest", V::Arr(rest)),
 		])
 	}
 
-	fn pipeline(m: &OffMap, p: &Pipeline) -> V {
-		let time = match p.time {
+	fn pipeline(m: &OffMap, p: Pipeline<'_>) -> V {
+		let time = match p.time() {
 			Some(t) => V::Obj(vec![("posix", V::Bool(t.posix))]),
 			None => V::Null,
 		};
 		let stages = p
-			.stages
+			.stages()
 			.iter()
-			.map(|st| {
-				V::Obj(vec![("pipe_stderr", V::Bool(st.pipe_stderr)), ("cmd", command(m, &st.cmd))])
-			})
+			.map(|c| V::Obj(vec![("pipe_stderr", V::Bool(c.pipe_stderr())), ("cmd", command(m, c))]))
 			.collect();
 		V::Obj(vec![
-			("id", id(p.id)),
-			("span", m.span(p.span)),
-			("bang", V::Bool(p.bang)),
+			("id", id(p.id())),
+			("span", m.span(p.span())),
+			("bang", V::Bool(p.bang())),
 			("time", time),
 			("stages", V::Arr(stages)),
 		])
 	}
 
-	fn opt_list(m: &OffMap, l: Option<&List>) -> V {
-		l.map_or(V::Null, |l| list(m, l))
-	}
-
-	fn words(m: &OffMap, ws: &[Word]) -> V {
+	fn words(m: &OffMap, ws: Seq<'_, Word<'_>>) -> V {
 		V::Arr(ws.iter().map(|w| word(m, w)).collect())
 	}
 
-	fn arith(m: &OffMap, a: &ArithText) -> V {
-		V::Obj(vec![("span", m.span(a.span)), ("src", s(&a.src))])
+	fn arith(m: &OffMap, a: ArithText<'_>) -> V {
+		V::Obj(vec![("span", m.span(a.span())), ("src", s(a.src()))])
 	}
 
-	fn command(m: &OffMap, c: &Command) -> V {
-		let mut f: Vec<(&'static str, V)> = vec![("id", id(c.id)), ("span", m.span(c.span))];
-		let ty: &[u8] = match &c.kind {
+	fn command(m: &OffMap, c: Command<'_>) -> V {
+		let mut f: Vec<(&'static str, V)> = vec![("id", id(c.id())), ("span", m.span(c.span()))];
+		let ty: &[u8] = match c.kind() {
 			CommandKind::Simple(sc) => {
-				f.push(("assigns", V::Arr(sc.assigns.iter().map(|a| assign(m, a)).collect())));
-				f.push(("words", words(m, &sc.words)));
+				f.push(("assigns", V::Arr(sc.assigns().iter().map(|a| assign(m, a)).collect())));
+				f.push(("words", words(m, sc.words())));
 				b"simple"
 			},
 			CommandKind::Brace(l) => {
@@ -373,55 +483,54 @@ mod native {
 			},
 			CommandKind::If(i) => {
 				let arms = i
-					.arms
-					.iter()
-					.map(|a| V::Obj(vec![("cond", list(m, &a.cond)), ("body", list(m, &a.body))]))
+					.arms()
+					.map(|a| V::Obj(vec![("cond", list(m, a.cond)), ("body", list(m, a.body))]))
 					.collect();
 				f.push(("arms", V::Arr(arms)));
-				f.push(("else", opt_list(m, i.else_body.as_ref())));
+				f.push(("else", i.else_body().map_or(V::Null, |l| list(m, l))));
 				b"if"
 			},
 			CommandKind::While(w) => {
-				f.push(("until", V::Bool(w.until)));
-				f.push(("cond", list(m, &w.cond)));
-				f.push(("body", list(m, &w.body)));
+				f.push(("until", V::Bool(w.until())));
+				f.push(("cond", list(m, w.cond())));
+				f.push(("body", list(m, w.body())));
 				b"while"
 			},
-			CommandKind::For(fr) | CommandKind::Select(fr) => {
-				f.push(("var", s(&fr.var)));
-				if !fr.extra_vars.is_empty() {
-					f.push(("extra_vars", V::Arr(fr.extra_vars.iter().map(|v| s(v)).collect())));
+			k @ (CommandKind::For(fr) | CommandKind::Select(fr)) => {
+				f.push(("var", s(fr.var())));
+				if fr.extra_vars().len() > 0 {
+					f.push(("extra_vars", V::Arr(fr.extra_vars().map(s).collect())));
 				}
-				f.push(("var_span", m.span(fr.var_span)));
-				f.push(("words", fr.words.as_ref().map_or(V::Null, |w| words(m, w))));
-				f.push(("body", list(m, &fr.body)));
-				if matches!(c.kind, CommandKind::For(_)) {
+				f.push(("var_span", m.span(fr.var_span())));
+				f.push(("words", fr.words().map_or(V::Null, |w| words(m, w))));
+				f.push(("body", list(m, fr.body())));
+				if matches!(k, CommandKind::For(_)) {
 					b"for"
 				} else {
 					b"select"
 				}
 			},
 			CommandKind::ArithFor(a) => {
-				f.push(("init", arith(m, &a.init)));
-				f.push(("cond", arith(m, &a.cond)));
-				f.push(("step", arith(m, &a.step)));
-				f.push(("body", list(m, &a.body)));
+				f.push(("init", arith(m, a.init())));
+				f.push(("cond", arith(m, a.cond())));
+				f.push(("step", arith(m, a.step())));
+				f.push(("body", list(m, a.body())));
 				b"arith_for"
 			},
 			CommandKind::Case(cs) => {
-				f.push(("word", word(m, &cs.word)));
+				f.push(("word", word(m, cs.word())));
 				let arms = cs
-					.arms
+					.arms()
 					.iter()
 					.map(|a| {
-						let term: &[u8] = match a.term {
+						let term: &[u8] = match a.term() {
 							CaseTerm::Break => b";;",
 							CaseTerm::FallThrough => b";&",
 							CaseTerm::Continue => b";;&",
 						};
 						V::Obj(vec![
-							("patterns", words(m, &a.patterns)),
-							("body", list(m, &a.body)),
+							("patterns", words(m, a.patterns())),
+							("body", list(m, a.body())),
 							("term", s(term)),
 						])
 					})
@@ -438,44 +547,44 @@ mod native {
 				b"cond"
 			},
 			CommandKind::FuncDef(fd) => {
-				f.push(("name", s(&fd.name)));
-				if !fd.extra_names.is_empty() {
-					f.push(("extra_names", V::Arr(fd.extra_names.iter().map(|n| s(n)).collect())));
+				f.push(("name", s(fd.name())));
+				if fd.extra_names().len() > 0 {
+					f.push(("extra_names", V::Arr(fd.extra_names().map(s).collect())));
 				}
-				f.push(("keyword", V::Bool(fd.keyword)));
-				f.push(("body", command(m, &fd.body)));
+				f.push(("keyword", V::Bool(fd.keyword())));
+				f.push(("body", command(m, fd.body())));
 				b"function"
 			},
 			CommandKind::Coproc(cp) => {
-				f.push(("name", cp.name.as_ref().map_or(V::Null, |n| s(n))));
-				f.push(("body", command(m, &cp.body)));
+				f.push(("name", cp.name().map_or(V::Null, s)));
+				f.push(("body", command(m, cp.body())));
 				b"coproc"
 			},
 			CommandKind::Repeat(r) => {
-				f.push(("count", word(m, &r.count)));
-				f.push(("body", list(m, &r.body)));
+				f.push(("count", word(m, r.count())));
+				f.push(("body", list(m, r.body())));
 				b"repeat"
 			},
 			CommandKind::Try(t) => {
-				f.push(("body", list(m, &t.body)));
-				f.push(("always", list(m, &t.always)));
+				f.push(("body", list(m, t.body())));
+				f.push(("always", list(m, t.always())));
 				b"try"
 			},
 			CommandKind::AnonFunc(a) => {
-				f.push(("body", command(m, &a.body)));
-				f.push(("args", words(m, &a.args)));
+				f.push(("body", command(m, a.body())));
+				f.push(("args", words(m, a.args())));
 				b"anon_func"
 			},
 		};
 		f.insert(2, ("type", s(ty)));
-		f.push(("redirs", V::Arr(c.redirs.iter().map(|r| redir(m, r)).collect())));
+		f.push(("redirs", V::Arr(c.redirs().iter().map(|r| redir(m, r)).collect())));
 		V::Obj(f)
 	}
 
-	fn redir(m: &OffMap, r: &Redir) -> V {
-		let fd = match &r.fd {
+	fn redir(m: &OffMap, r: Redir<'_>) -> V {
+		let fd = match r.fd() {
 			None => V::Null,
-			Some(RedirFd::Num(n)) => V::Num(u64::from(*n)),
+			Some(RedirFd::Num(n)) => V::Num(u64::from(n)),
 			Some(RedirFd::Var(v)) => {
 				let mut t = b"{".to_vec();
 				t.extend_from_slice(v);
@@ -483,83 +592,83 @@ mod native {
 				V::Str(t)
 			},
 		};
-		let target = match &r.target {
+		let target = match r.target() {
 			RedirTarget::Word(w) => word(m, w),
 			RedirTarget::HereDoc(d) => V::Obj(vec![(
 				"heredoc",
 				V::Obj(vec![
-					("delim", s(&d.delim)),
-					("delim_raw", s(&d.delim_raw)),
-					("quoted", V::Bool(d.quoted)),
-					("text", s(&d.text)),
+					("delim", s(d.delim())),
+					("delim_raw", s(d.delim_raw())),
+					("quoted", V::Bool(d.quoted())),
+					("text", s(d.text())),
 				]),
 			)]),
 		};
 		V::Obj(vec![
-			("span", m.span(r.span)),
+			("span", m.span(r.span())),
 			("fd", fd),
-			("op", s(super::redir_op(r.op))),
+			("op", s(super::redir_op(r.op()))),
 			("target", target),
 		])
 	}
 
-	fn assign(m: &OffMap, a: &Assign) -> V {
-		let value = match &a.value {
+	fn assign(m: &OffMap, a: Assign<'_>) -> V {
+		let value = match a.value() {
 			AssignValue::Scalar(w) => word(m, w),
 			AssignValue::Array(e) => V::Obj(vec![("array", elems(m, e))]),
 		};
 		V::Obj(vec![
-			("id", id(a.id)),
-			("span", m.span(a.span)),
-			("name", s(&a.name)),
-			("index", a.index.as_ref().map_or(V::Null, |w| word(m, w))),
-			("append", V::Bool(a.append)),
+			("id", id(a.id())),
+			("span", m.span(a.span())),
+			("name", s(a.name())),
+			("index", a.index().map_or(V::Null, |w| word(m, w))),
+			("append", V::Bool(a.append())),
 			("value", value),
 		])
 	}
 
-	fn elems(m: &OffMap, e: &[ArrayElem]) -> V {
+	fn elems(m: &OffMap, e: Seq<'_, ArrayElem<'_>>) -> V {
 		V::Arr(
 			e.iter()
 				.map(|el| {
 					V::Obj(vec![
-						("key", el.key.as_ref().map_or(V::Null, |w| word(m, w))),
-						("append", V::Bool(el.append)),
-						("value", word(m, &el.value)),
+						("key", el.key().map_or(V::Null, |w| word(m, w))),
+						("append", V::Bool(el.append())),
+						("value", word(m, el.value())),
 					])
 				})
 				.collect(),
 		)
 	}
 
-	fn cond(m: &OffMap, e: &CondExpr) -> V {
-		match e {
-			CondExpr::Unary { op, arg } => {
+	fn cond(m: &OffMap, e: CondExpr<'_>) -> V {
+		match e.get() {
+			Cond::Unary { op, arg } => {
 				V::Obj(vec![("type", s(b"unary")), ("op", s(op)), ("arg", word(m, arg))])
 			},
-			CondExpr::Binary { op, lhs, rhs } => V::Obj(vec![
+			Cond::Binary { op, lhs, rhs } => V::Obj(vec![
 				("type", s(b"binary")),
 				("op", s(op)),
 				("lhs", word(m, lhs)),
 				("rhs", word(m, rhs)),
 			]),
-			CondExpr::Word(w) => V::Obj(vec![("type", s(b"word")), ("word", word(m, w))]),
-			CondExpr::Not(x) => V::Obj(vec![("type", s(b"not")), ("expr", cond(m, x))]),
-			CondExpr::Group(x) => V::Obj(vec![("type", s(b"group")), ("expr", cond(m, x))]),
-			CondExpr::And(a, b) => {
+			Cond::Word(w) => V::Obj(vec![("type", s(b"word")), ("word", word(m, w))]),
+			Cond::Not(x) => V::Obj(vec![("type", s(b"not")), ("expr", cond(m, x))]),
+			Cond::Group(x) => V::Obj(vec![("type", s(b"group")), ("expr", cond(m, x))]),
+			Cond::And(a, b) => {
 				V::Obj(vec![("type", s(b"and")), ("lhs", cond(m, a)), ("rhs", cond(m, b))])
 			},
-			CondExpr::Or(a, b) => {
+			Cond::Or(a, b) => {
 				V::Obj(vec![("type", s(b"or")), ("lhs", cond(m, a)), ("rhs", cond(m, b))])
 			},
 		}
 	}
 
-	pub(super) fn word(m: &OffMap, w: &Word) -> V {
-		V::Obj(vec![("id", id(w.id)), ("span", m.span(w.span)), ("parts", parts(m, &w.parts))])
+	pub(super) fn word(m: &OffMap, w: Word<'_>) -> V {
+		V::Obj(vec![("id", id(w.id())), ("span", m.span(w.span())), ("parts", parts(m, w.parts()))])
 	}
 
-	fn parts(m: &OffMap, ps: &[WordPart]) -> V {
+	fn parts(m: &OffMap, ps: Seq<'_, WordPart<'_>>) -> V {
 		V::Arr(ps.iter().map(|p| part(m, p)).collect())
 	}
 
@@ -567,24 +676,20 @@ mod native {
 		V::Obj(vec![("type", s(t)), ("value", s(v))])
 	}
 
-	fn part(m: &OffMap, p: &WordPart) -> V {
-		match p {
-			WordPart::Lit(v) => tv(b"lit", v),
-			WordPart::Escaped(v) => tv(b"escaped", v),
-			WordPart::SQuote(v) => tv(b"squote", v),
-			WordPart::AnsiC(v) => tv(b"ansic", v),
-			WordPart::BadSubst(v) => tv(b"bad_subst", v),
-			WordPart::BadComsub(b) => tv(b"bad_comsub", &b.text),
-			WordPart::DroppedQuote => tv(b"dropped_quote", b"\""),
-			WordPart::DQuote(inner) => {
-				V::Obj(vec![("type", s(b"dquote")), ("parts", parts(m, inner))])
-			},
-			WordPart::Locale(inner) => {
-				V::Obj(vec![("type", s(b"locale")), ("parts", parts(m, inner))])
-			},
-			WordPart::Param(pp) => param(m, pp),
-			WordPart::Comsub(c) => {
-				let kind: &[u8] = match c.kind {
+	fn part(m: &OffMap, p: WordPart<'_>) -> V {
+		match p.get() {
+			Part::Lit(v) => tv(b"lit", v),
+			Part::Escaped(v) => tv(b"escaped", v),
+			Part::SQuote(v) => tv(b"squote", v),
+			Part::AnsiC(v) => tv(b"ansic", v),
+			Part::BadSubst(v) => tv(b"bad_subst", v),
+			Part::BadComsub(b) => tv(b"bad_comsub", b.text()),
+			Part::DroppedQuote => tv(b"dropped_quote", b"\""),
+			Part::DQuote(inner) => V::Obj(vec![("type", s(b"dquote")), ("parts", parts(m, inner))]),
+			Part::Locale(inner) => V::Obj(vec![("type", s(b"locale")), ("parts", parts(m, inner))]),
+			Part::Param(pp) => param(m, pp),
+			Part::Comsub(c) => {
+				let kind: &[u8] = match c.kind() {
 					ComsubKind::Dollar => b"dollar",
 					ComsubKind::Backtick => b"backtick",
 					ComsubKind::NoFork => b"nofork",
@@ -593,18 +698,18 @@ mod native {
 				V::Obj(vec![
 					("type", s(b"comsub")),
 					("kind", s(kind)),
-					("text", s(&c.text)),
-					("body", list(m, &c.body)),
+					("text", s(c.text())),
+					("body", list(m, c.body())),
 				])
 			},
-			WordPart::Arith(a) => V::Obj(vec![("type", s(b"arith")), ("expr", arith(m, a))]),
-			WordPart::ProcSub(ps) => V::Obj(vec![
+			Part::Arith(a) => V::Obj(vec![("type", s(b"arith")), ("expr", arith(m, a))]),
+			Part::ProcSub(ps) => V::Obj(vec![
 				("type", s(b"procsub")),
-				("output", V::Bool(ps.output)),
-				("body", list(m, &ps.body)),
+				("output", V::Bool(ps.output())),
+				("body", list(m, ps.body())),
 			]),
-			WordPart::Compound(e) => V::Obj(vec![("type", s(b"compound")), ("elems", elems(m, e))]),
-			WordPart::Zsh(raw) => {
+			Part::Compound(e) => V::Obj(vec![("type", s(b"compound")), ("elems", elems(m, e))]),
+			Part::Zsh(raw) => {
 				let mut text = Vec::new();
 				crate::bash::syntax::print::zsh_text(raw, &mut text);
 				V::Obj(vec![("type", s(b"zsh")), ("text", V::Str(text))])
@@ -612,49 +717,49 @@ mod native {
 		}
 	}
 
-	fn param(m: &OffMap, p: &Param) -> V {
-		let (name, kind): (Vec<u8>, &[u8]) = match &p.name {
-			ParamName::Var(v) => (v.clone(), b"var"),
+	fn param(m: &OffMap, p: Param<'_>) -> V {
+		let (name, kind): (Vec<u8>, &[u8]) = match p.name() {
+			ParamName::Var(v) => (v.to_vec(), b"var"),
 			ParamName::Positional(n) => {
 				let mut t = Vec::new();
-				crate::bash::syntax::util::push_u32(&mut t, *n);
+				crate::bash::syntax::util::push_u32(&mut t, n);
 				(t, b"positional")
 			},
-			ParamName::Special(sp) => (vec![super::special_char(*sp)], b"special"),
+			ParamName::Special(sp) => (vec![super::special_char(sp)], b"special"),
 		};
-		let index = match &p.index {
+		let index = match p.index() {
 			None => V::Null,
 			Some(Subscript::At) => s(b"@"),
 			Some(Subscript::Star) => s(b"*"),
 			Some(Subscript::Expr(w)) => word(m, w),
 		};
-		let ow = |t: &[u8], colon: bool, w: Option<&Word>| {
+		let ow = |t: &[u8], colon: bool, w: Option<Word<'_>>| {
 			V::Obj(vec![
 				("type", s(t)),
 				("colon", V::Bool(colon)),
 				("word", w.map_or(V::Null, |w| word(m, w))),
 			])
 		};
-		let op = match &p.op {
+		let op = match p.op() {
 			ParamOp::None => V::Obj(vec![("type", s(b"none"))]),
 			ParamOp::Length => V::Obj(vec![("type", s(b"length"))]),
 			ParamOp::Indirect => V::Obj(vec![("type", s(b"indirect"))]),
 			ParamOp::PrefixNames { star } => {
-				V::Obj(vec![("type", s(b"prefix_names")), ("star", V::Bool(*star))])
+				V::Obj(vec![("type", s(b"prefix_names")), ("star", V::Bool(star))])
 			},
-			ParamOp::Default { colon, word } => ow(b"default", *colon, Some(word)),
-			ParamOp::Assign { colon, word } => ow(b"assign", *colon, Some(word)),
-			ParamOp::Error { colon, word } => ow(b"error", *colon, word.as_ref()),
-			ParamOp::Alt { colon, word } => ow(b"alt", *colon, Some(word)),
+			ParamOp::Default { colon, word } => ow(b"default", colon, Some(word)),
+			ParamOp::Assign { colon, word } => ow(b"assign", colon, Some(word)),
+			ParamOp::Error { colon, word } => ow(b"error", colon, word),
+			ParamOp::Alt { colon, word } => ow(b"alt", colon, Some(word)),
 			ParamOp::Substr { offset, len } => V::Obj(vec![
 				("type", s(b"substr")),
 				("offset", arith(m, offset)),
-				("len", len.as_ref().map_or(V::Null, |l| arith(m, l))),
+				("len", len.map_or(V::Null, |l| arith(m, l))),
 			]),
 			ParamOp::Trim { suffix, longest, pat } => V::Obj(vec![
 				("type", s(b"trim")),
-				("suffix", V::Bool(*suffix)),
-				("longest", V::Bool(*longest)),
+				("suffix", V::Bool(suffix)),
+				("longest", V::Bool(longest)),
 				("pat", word(m, pat)),
 			]),
 			ParamOp::Replace { mode, pat, rep } => {
@@ -668,7 +773,7 @@ mod native {
 					("type", s(b"replace")),
 					("mode", s(mode)),
 					("pat", word(m, pat)),
-					("rep", rep.as_ref().map_or(V::Null, |w| word(m, w))),
+					("rep", rep.map_or(V::Null, |w| word(m, w))),
 				])
 			},
 			ParamOp::Case { mode, all, pat } => {
@@ -680,18 +785,18 @@ mod native {
 				V::Obj(vec![
 					("type", s(b"case")),
 					("mode", s(mode)),
-					("all", V::Bool(*all)),
-					("pat", pat.as_ref().map_or(V::Null, |w| word(m, w))),
+					("all", V::Bool(all)),
+					("pat", pat.map_or(V::Null, |w| word(m, w))),
 				])
 			},
-			ParamOp::Transform(c) => V::Obj(vec![("type", s(b"transform")), ("op", s(&[*c]))]),
+			ParamOp::Transform(c) => V::Obj(vec![("type", s(b"transform")), ("op", s(&[c]))]),
 		};
 		V::Obj(vec![
 			("type", s(b"param")),
 			("name", V::Str(name)),
 			("name_kind", s(kind)),
-			("braced", V::Bool(p.braced)),
-			("indirect", V::Bool(p.indirect)),
+			("braced", V::Bool(p.braced())),
+			("indirect", V::Bool(p.indirect())),
 			("index", index),
 			("op", op),
 		])
@@ -770,23 +875,26 @@ mod shfmt {
 		let mut stmts = Vec::new();
 		let mut floor = 0;
 		for unit in &prog.commands {
-			for item in &unit.list.items {
+			for item in unit.list().items() {
 				let (v, end) = ctx.item(item, floor);
 				stmts.push(v);
 				floor = end;
 			}
 		}
-		let (pos, end) = match (prog.commands.first(), prog.commands.last()) {
-			(Some(a), Some(b)) => (a.span.lo, b.span.hi),
-			_ => (0, 0),
-		};
+		// shfmt's file ends where its last statement does.
+		let pos = prog.commands.first().map_or(0, |a| a.span.lo);
 		let mut f = vec![("Type", s(b"File"))];
 		if !stmts.is_empty() {
 			f.push(("Pos", map.pos(pos)));
-			f.push(("End", map.pos(end)));
+			f.push(("End", map.pos(floor)));
 			f.push(("Stmts", V::Arr(stmts)));
 		}
 		V::Obj(f)
+	}
+
+	/// End of the last item of `l`.
+	fn list_end(l: List<'_>) -> Option<u32> {
+		l.items().last().map(|it| it.and_or().span().hi)
 	}
 
 	impl Ctx<'_> {
@@ -830,10 +938,23 @@ mod shfmt {
 			}
 		}
 
-		/// End of the token text that ends right before `hi`, trimming blanks.
+		/// End of the token text that ends right before `hi`, trimming blanks
+		/// and line continuations.
 		fn trim_back(&self, lo: u32, mut hi: u32) -> u32 {
-			while hi > lo && matches!(self.at(hi - 1), b' ' | b'\t' | b'\n') {
-				hi -= 1;
+			while hi > lo {
+				match self.at(hi - 1) {
+					b' ' | b'\t' => hi -= 1,
+					b'\n' => {
+						hi -= 1;
+						// A newline after an odd run of backslashes ends a
+						// continuation: its backslash is not token text.
+						let run = (lo..hi).rev().take_while(|&i| self.at(i) == b'\\').count();
+						if run % 2 == 1 {
+							hi -= 1;
+						}
+					},
+					_ => break,
+				}
 			}
 			hi
 		}
@@ -886,19 +1007,21 @@ mod shfmt {
 		/// One list item as a `Stmt`, with the comments shfmt attaches to it
 		/// (comment lines since `floor`, the previous statement's end, and
 		/// a comment after it on the same line); also returns its end.
-		fn item(&self, it: &ListItem, floor: u32) -> (V, u32) {
-			let mut st = self.and_or(&it.and_or);
-			match it.sep {
+		fn item(&self, it: ListItem<'_>, floor: u32) -> (V, u32) {
+			let ao = it.and_or();
+			let sep = it.sep();
+			let mut st = self.and_or(ao);
+			match sep {
 				Sep::Semi | Sep::Amp => {
-					let ch: &[u8] = if it.sep == Sep::Semi { b";" } else { b"&" };
-					let at = self.find(it.and_or.span.hi, ch);
+					let ch: &[u8] = if sep == Sep::Semi { b";" } else { b"&" };
+					let at = self.find(ao.span().hi, ch);
 					if self.at(at) == ch[0] {
 						st.semi = Some(at);
 					}
-					st.bg = it.sep == Sep::Amp;
+					st.bg = sep == Sep::Amp;
 				},
 				Sep::Disown => {
-					let at = self.find(it.and_or.span.hi, b"&");
+					let at = self.find(ao.span().hi, b"&");
 					if self.at(at) == b'&' {
 						st.semi = Some(at);
 					}
@@ -910,7 +1033,7 @@ mod shfmt {
 			let mut comments = self.comments_before(st.pos, floor);
 			comments.extend(self.comment_after(end));
 			let mut v = self.stmt(st);
-			if it.sep == Sep::Disown
+			if sep == Sep::Disown
 				&& let V::Obj(f) = &mut v
 			{
 				let at = f
@@ -927,10 +1050,11 @@ mod shfmt {
 			(v, end)
 		}
 
-		fn list(&self, l: &List) -> V {
+		fn list(&self, l: List<'_>) -> V {
 			let mut floor = 0;
-			let mut out = Vec::with_capacity(l.items.len());
-			for it in &l.items {
+			let items = l.items();
+			let mut out = Vec::with_capacity(items.len());
+			for it in items {
 				let (v, end) = self.item(it, floor);
 				out.push(v);
 				floor = end;
@@ -1000,19 +1124,19 @@ mod shfmt {
 			(self.src.get(i) == Some(&b'#')).then(|| self.comment(i as u32))
 		}
 
-		fn and_or(&self, ao: &AndOr) -> St {
-			let mut st = self.pipeline(&ao.first);
-			for (op, p) in &ao.rest {
+		fn and_or(&self, ao: AndOr<'_>) -> St {
+			let mut st = self.pipeline(ao.first());
+			for (op, p) in ao.rest() {
 				let left_end = st.end;
 				let x = self.stmt(st);
 				let yst = self.pipeline(p);
 				let end = stmt_end(&yst);
 				let y = self.stmt(yst);
-				let opt: &[u8] = if *op == AndOrOp::And { b"&&" } else { b"||" };
+				let opt: &[u8] = if op == AndOrOp::And { b"&&" } else { b"||" };
 				let op_pos = self.find(left_end, opt);
 				let cmd = V::Obj(vec![
 					("Type", s(b"BinaryCmd")),
-					("Pos", self.m.pos(ao.span.lo)),
+					("Pos", self.m.pos(ao.span().lo)),
 					("End", self.m.pos(end)),
 					("OpPos", self.m.pos(op_pos)),
 					("Op", s(opt)),
@@ -1020,7 +1144,7 @@ mod shfmt {
 					("Y", y),
 				]);
 				st = St {
-					pos: ao.span.lo,
+					pos: ao.span().lo,
 					end,
 					cmd: Some(cmd),
 					negated: false,
@@ -1033,15 +1157,17 @@ mod shfmt {
 			st
 		}
 
-		fn pipeline(&self, p: &Pipeline) -> St {
-			let mut inner = self.stage(&p.stages[0].cmd);
-			for (i, st) in p.stages.iter().enumerate().skip(1) {
-				let prev = &p.stages[i - 1];
-				let opt: &[u8] = if prev.pipe_stderr { b"|&" } else { b"|" };
-				let op_pos = self.find(prev.cmd.span.hi, opt);
+		fn pipeline(&self, p: Pipeline<'_>) -> St {
+			let stages = p.stages();
+			let first = stages.first().expect("a pipeline has a stage");
+			let mut inner = self.stage(first);
+			let mut prev = first;
+			for st in stages.skip(1) {
+				let opt: &[u8] = if prev.pipe_stderr() { b"|&" } else { b"|" };
+				let op_pos = self.find(prev.span().hi, opt);
 				let pos = inner.pos;
 				let x = self.stmt(inner);
-				let yst = self.stage(&st.cmd);
+				let yst = self.stage(st);
 				let end = stmt_end(&yst);
 				let y = self.stmt(yst);
 				inner = St {
@@ -1062,25 +1188,27 @@ mod shfmt {
 					semi: None,
 					bg: false,
 				};
+				prev = st;
 			}
-			if let Some(t) = p.time {
-				let tpos = self.find(p.span.lo + u32::from(p.bang), b"time");
+			let span = p.span();
+			if let Some(t) = p.time() {
+				let tpos = self.find(span.lo + u32::from(p.bang()), b"time");
 				let mut f = vec![
 					("Type", s(b"TimeClause")),
 					("Pos", self.m.pos(tpos)),
-					("End", self.m.pos(p.span.hi)),
+					("End", self.m.pos(span.hi)),
 					("Time", self.m.pos(tpos)),
 				];
 				if t.posix {
 					f.push(("PosixFormat", V::Bool(true)));
 				}
-				let has_cmd = !(p.stages.len() == 1 && is_empty_simple(&p.stages[0].cmd));
+				let has_cmd = !(stages.len() == 1 && is_empty_simple(first));
 				if has_cmd {
 					f.push(("Stmt", self.stmt(inner)));
 				}
 				inner = St {
 					pos:     tpos,
-					end:     p.span.hi,
+					end:     span.hi,
 					cmd:     Some(V::Obj(f)),
 					negated: false,
 					redirs:  Vec::new(),
@@ -1089,24 +1217,24 @@ mod shfmt {
 					bg:      false,
 				};
 			}
-			inner.pos = p.span.lo;
-			inner.negated = p.bang;
+			inner.pos = span.lo;
+			inner.negated = p.bang();
 			inner
 		}
 
 		/// One pipeline stage: the command and its redirections.
-		fn stage(&self, c: &Command) -> St {
+		fn stage(&self, c: Command<'_>) -> St {
 			let (cmd, end) = self.command(c);
-			let (redirs, rend) = if let CommandKind::FuncDef(_) = c.kind {
+			let (redirs, rend) = if let CommandKind::FuncDef(_) = c.kind() {
 				(Vec::new(), 0)
 			} else {
-				self.redirs(&c.redirs)
+				self.redirs(c.redirs())
 			};
-			St { pos: c.span.lo, end, cmd, negated: false, redirs, rend, semi: None, bg: false }
+			St { pos: c.span().lo, end, cmd, negated: false, redirs, rend, semi: None, bg: false }
 		}
 
 		/// Redirections and the end of the last one.
-		fn redirs(&self, rs: &[Redir]) -> (Vec<V>, u32) {
+		fn redirs(&self, rs: Seq<'_, Redir<'_>>) -> (Vec<V>, u32) {
 			let mut next_body: Option<u32> = None;
 			let mut end = 0;
 			let v = rs
@@ -1120,51 +1248,53 @@ mod shfmt {
 			(v, end)
 		}
 
-		fn redir(&self, r: &Redir, next_body: &mut Option<u32>) -> (V, u32) {
-			let mut end = r.span.hi;
-			let op = redir_op(r.op);
-			let op_pos = match r.fd {
-				None => r.span.lo,
-				Some(_) => self.find_op(r.span.lo, op),
+		fn redir(&self, r: Redir<'_>, next_body: &mut Option<u32>) -> (V, u32) {
+			let span = r.span();
+			let mut end = span.hi;
+			let op = redir_op(r.op());
+			let op_pos = match r.fd() {
+				None => span.lo,
+				Some(_) => self.find_op(span.lo, op),
 			};
 			let mut f = vec![
-				("Pos", self.m.pos(r.span.lo)),
-				("End", self.m.pos(r.span.hi)),
+				("Pos", self.m.pos(span.lo)),
+				("End", self.m.pos(span.hi)),
 				("OpPos", self.m.pos(op_pos)),
 				("Op", s(op)),
 			];
-			if r.fd.is_some() {
-				f.push(("N", self.lit(r.span.lo, op_pos, false)));
+			if r.fd().is_some() {
+				f.push(("N", self.lit(span.lo, op_pos, false)));
 			}
-			match &r.target {
+			match r.target() {
 				RedirTarget::Word(w) => f.push(("Word", self.word(w, false))),
 				RedirTarget::HereDoc(d) => {
 					let wlo = self.skip_ws(op_pos + op.len() as u32);
-					let whi = wlo + d.delim_raw.len() as u32;
-					let delim_word = Word {
-						id:    crate::bash::syntax::span::NodeId(0),
-						span:  Span::new(wlo, whi),
-						parts: first_word_parts(&d.delim_raw),
-					};
-					f.push(("Word", self.word(&delim_word, false)));
-					let body = next_body.unwrap_or_else(|| self.line_after(r.span.hi));
-					let strip = matches!(r.op, RedirOp::HereDoc { strip_tabs: true });
-					let (text_end, delim_end) = self.doc_end(body, &d.delim, strip);
+					let whi = wlo + d.delim_raw().len() as u32;
+					let (t, w) = first_word(d.delim_raw());
+					f.push(("Word", self.word_at(wlo, whi, Word::at(&t, w).parts(), false)));
+					let body = next_body.unwrap_or_else(|| self.line_after(span.hi));
+					let strip = matches!(r.op(), RedirOp::HereDoc { strip_tabs: true });
+					let (text_end, delim_end) = self.doc_end(body, d.delim(), strip);
 					*next_body = Some(self.line_after(delim_end));
 					let parts = if text_end == body {
 						Vec::new()
-					} else if d.quoted {
+					} else if d.quoted() {
 						vec![self.lit_with(body, delim_end, &self.src[body as usize..text_end as usize])]
 					} else {
 						self.text_parts(body, text_end, delim_end)
 					};
-					let mut h = vec![("Pos", self.m.pos(body)), ("End", self.m.pos(delim_end))];
+					// shfmt has no `Hdoc` for an empty body: the redirection
+					// ends at its delimiter word.
 					if !parts.is_empty() {
-						h.push(("Parts", V::Arr(parts)));
+						let h = vec![
+							("Pos", self.m.pos(body)),
+							("End", self.m.pos(delim_end)),
+							("Parts", V::Arr(parts)),
+						];
+						f[1] = ("End", self.m.pos(delim_end));
+						end = delim_end;
+						f.push(("Hdoc", V::Obj(h)));
 					}
-					f[1] = ("End", self.m.pos(delim_end));
-					end = delim_end;
-					f.push(("Hdoc", V::Obj(h)));
 				},
 			}
 			(V::Obj(f), end)
@@ -1214,30 +1344,32 @@ mod shfmt {
 			(n, n)
 		}
 
-		/// Parts of an unquoted here-document body.
 		/// Parts of an unquoted here-document body `lo..hi`; shfmt ends a
 		/// final literal at the end of the delimiter line (`doc_end`).
 		fn text_parts(&self, lo: u32, hi: u32, doc_end: u32) -> Vec<V> {
 			let text = &self.src[lo as usize..hi as usize];
-			let Ok(w) = parse_text(text, crate::bash::syntax::Features::NONE, TextMode::HereDoc)
+			// Spans of commands substituted in the body are file offsets.
+			let Ok((tree, root)) =
+				parse_text_at(text, crate::bash::syntax::Features::NONE, TextMode::HereDoc, lo)
 			else {
 				return vec![self.lit_with(lo, doc_end, text)];
 			};
-			let spans = part_spans(self.src, lo, hi, &w.parts);
-			let mut out = self.parts(&w.parts, &spans);
-			let lit_kind = |p: &WordPart| {
+			let parts = Word::at(&tree, root).parts();
+			let spans = part_spans(self.src, lo, hi, parts);
+			let mut out = self.parts(parts, &spans);
+			let lit_kind = |p: WordPart<'_>| {
 				matches!(
-					p,
-					WordPart::Lit(_)
-						| WordPart::Escaped(_)
-						| WordPart::BadSubst(_)
-						| WordPart::BadComsub(_)
-						| WordPart::DroppedQuote
+					p.get(),
+					Part::Lit(_)
+						| Part::Escaped(_)
+						| Part::BadSubst(_)
+						| Part::BadComsub(_)
+						| Part::DroppedQuote
 				)
 			};
-			if w.parts.last().is_some_and(lit_kind) {
-				let mut k = w.parts.len() - 1;
-				while k > 0 && lit_kind(&w.parts[k - 1]) {
+			if parts.last().is_some_and(lit_kind) {
+				let mut k = parts.len() - 1;
+				while k > 0 && parts.get(k - 1).is_some_and(lit_kind) {
 					k -= 1;
 				}
 				let run_lo = spans[k].0;
@@ -1249,16 +1381,18 @@ mod shfmt {
 
 		/// The shfmt command for `c` and the end of the command proper
 		/// (without trailing redirections).
-		fn command(&self, c: &Command) -> (Option<V>, u32) {
-			let lo = c.span.lo;
-			let hi = match c.redirs.first() {
-				Some(r) if !matches!(c.kind, CommandKind::Simple(_) | CommandKind::FuncDef(_)) => {
-					self.trim_back(lo, r.span.lo)
+		fn command(&self, c: Command<'_>) -> (Option<V>, u32) {
+			let span = c.span();
+			let lo = span.lo;
+			let kind = c.kind();
+			let hi = match c.redirs().first() {
+				Some(r) if !matches!(kind, CommandKind::Simple(_) | CommandKind::FuncDef(_)) => {
+					self.trim_back(lo, r.span().lo)
 				},
-				_ => c.span.hi,
+				_ => span.hi,
 			};
 			let p = |o| self.m.pos(o);
-			let v = match &c.kind {
+			let v = match kind {
 				CommandKind::Simple(sc) => return self.simple(sc),
 				CommandKind::Brace(l) => V::Obj(vec![
 					("Type", s(b"Block")),
@@ -1276,9 +1410,12 @@ mod shfmt {
 					("Rparen", p(hi.saturating_sub(1))),
 					("Stmts", self.list(l)),
 				]),
-				CommandKind::If(i) => self.if_clause(hi, &i.arms, i.else_body.as_ref(), true, lo),
+				CommandKind::If(i) => {
+					let arms: Vec<IfArm<'_>> = i.arms().collect();
+					self.if_clause(hi, &arms, i.else_body(), true, lo)
+				},
 				CommandKind::While(w) => {
-					let cond_end = w.cond.items.last().map_or(lo, |it| it.and_or.span.hi);
+					let cond_end = list_end(w.cond()).unwrap_or(lo);
 					let do_pos = self.find(cond_end, b"do");
 					let mut f = vec![
 						("Type", s(b"WhileClause")),
@@ -1288,45 +1425,45 @@ mod shfmt {
 						("DoPos", p(do_pos)),
 						("DonePos", p(hi.saturating_sub(4))),
 					];
-					if w.until {
+					if w.until() {
 						f.push(("Until", V::Bool(true)));
 					}
-					f.push(("Cond", self.list(&w.cond)));
-					f.push(("Do", self.list(&w.body)));
+					f.push(("Cond", self.list(w.cond())));
+					f.push(("Do", self.list(w.body())));
 					V::Obj(f)
 				},
 				CommandKind::For(fr) | CommandKind::Select(fr) => {
-					let select = matches!(c.kind, CommandKind::Select(_));
+					let select = matches!(kind, CommandKind::Select(_));
+					let vs = fr.var_span();
+					let words = fr.words();
 					let mut iter = vec![
 						("Type", s(b"WordIter")),
-						("Pos", p(fr.var_span.lo)),
-						(
-							"End",
-							p(fr
-								.words
-								.as_ref()
-								.and_then(|w| w.last())
-								.map_or(fr.var_span.hi, |w| w.span.hi)),
-						),
-						("Name", self.lit_value(fr.var_span.lo, fr.var_span.hi, &fr.var)),
+						("Pos", p(vs.lo)),
+						("Name", self.lit_value(vs.lo, vs.hi, fr.var())),
 					];
-					let (extra, mut after) = self.extra_names(fr.var_span.hi, &fr.extra_vars);
+					let extra: Vec<&[u8]> = fr.extra_vars().collect();
+					let (extra, mut after) = self.extra_names(vs.hi, &extra);
 					if let Some(extra) = extra {
 						iter.push(("ExtraNames", extra));
 					}
-					if let Some(ws) = &fr.words {
+					// The iterator ends at its last word, or at `in` with no
+					// words after it.
+					let mut end = vs.hi;
+					if let Some(ws) = words {
 						let in_pos = self.find(after, b"in");
 						iter.push(("InPos", p(in_pos)));
-						after = ws.last().map_or(in_pos + 2, |w| w.span.hi);
+						after = ws.last().map_or(in_pos + 2, |w| w.span().hi);
+						end = after;
 						if !ws.is_empty() {
 							iter.push(("Items", V::Arr(ws.iter().map(|w| self.word(w, false)).collect())));
 						}
 					}
-					self.for_clause(lo, hi, select, V::Obj(iter), after, &fr.body)
+					iter.insert(2, ("End", p(end)));
+					self.for_clause(lo, hi, select, V::Obj(iter), after, fr.body())
 				},
 				CommandKind::ArithFor(a) => {
 					let lp = self.find(lo + 3, b"((");
-					let rp = self.find(a.step.span.hi, b"))");
+					let rp = self.find(a.step().span().hi, b"))");
 					let mut l = vec![
 						("Type", s(b"CStyleLoop")),
 						("Pos", p(lp)),
@@ -1334,24 +1471,33 @@ mod shfmt {
 						("Lparen", p(lp)),
 						("Rparen", p(rp)),
 					];
-					for (k, t) in [("Init", &a.init), ("Cond", &a.cond), ("Post", &a.step)] {
+					for (k, t) in [("Init", a.init()), ("Cond", a.cond()), ("Post", a.step())] {
 						if let Some(x) = self.arith(t) {
 							l.push((k, x));
 						}
 					}
-					self.for_clause(lo, hi, false, V::Obj(l), rp + 2, &a.body)
+					self.for_clause(lo, hi, false, V::Obj(l), rp + 2, a.body())
 				},
 				CommandKind::Case(cs) => {
-					let in_pos = self.find(cs.word.span.hi, b"in");
+					let in_pos = self.find(cs.word().span().hi, b"in");
 					let mut items = Vec::new();
 					let mut at = in_pos + 2;
-					for arm in &cs.arms {
-						let plo = arm.patterns.first().map_or(at, |w| w.span.lo);
-						let body_end = arm.body.items.last().map_or_else(
-							|| arm.patterns.last().map_or(plo, |w| w.span.hi + 1),
-							|it| it.and_or.span.hi,
-						);
-						let op: &[u8] = match arm.term {
+					for arm in cs.arms() {
+						let pats = arm.patterns();
+						let plo = pats.first().map_or(at, |w| w.span().lo);
+						// An empty arm's terminator follows its `)`, which may come
+						// after blanks (`x ) ;;`).
+						let body_end = list_end(arm.body()).unwrap_or_else(|| {
+							pats.last().map_or(plo, |w| {
+								let rp = self.find(w.span().hi, b")");
+								if self.at(rp) == b')' {
+									rp + 1
+								} else {
+									w.span().hi + 1
+								}
+							})
+						});
+						let op: &[u8] = match arm.term() {
 							CaseTerm::Break => b";;",
 							CaseTerm::FallThrough => b";&",
 							CaseTerm::Continue => b";;&",
@@ -1361,24 +1507,27 @@ mod shfmt {
 							.src
 							.get(op_pos as usize..)
 							.is_some_and(|r| r.starts_with(op));
+						// shfmt ends an arm at its terminator, else at its last
+						// command; an arm with neither has no end.
 						let end = if found {
-							op_pos + op.len() as u32
+							Some(op_pos + op.len() as u32)
 						} else {
-							body_end
+							list_end(arm.body())
 						};
-						let mut f = vec![("Pos", p(plo)), ("End", p(end)), ("Op", s(op))];
+						let mut f = vec![("Pos", p(plo))];
+						if let Some(end) = end {
+							f.push(("End", p(end)));
+						}
+						f.push(("Op", s(op)));
 						if found {
 							f.push(("OpPos", p(op_pos)));
 						}
-						f.push((
-							"Patterns",
-							V::Arr(arm.patterns.iter().map(|w| self.word(w, false)).collect()),
-						));
-						if !arm.body.items.is_empty() {
-							f.push(("Stmts", self.list(&arm.body)));
+						f.push(("Patterns", V::Arr(pats.iter().map(|w| self.word(w, false)).collect())));
+						if !arm.body().items().is_empty() {
+							f.push(("Stmts", self.list(arm.body())));
 						}
 						items.push(V::Obj(f));
-						at = end;
+						at = end.unwrap_or(body_end);
 					}
 					let mut f = vec![
 						("Type", s(b"CaseClause")),
@@ -1387,7 +1536,7 @@ mod shfmt {
 						("Case", p(lo)),
 						("In", p(in_pos)),
 						("Esac", p(hi.saturating_sub(4))),
-						("Word", self.word(&cs.word, false)),
+						("Word", self.word(cs.word(), false)),
 					];
 					if !items.is_empty() {
 						f.push(("Items", V::Arr(items)));
@@ -1416,49 +1565,42 @@ mod shfmt {
 					("X", self.test(e)),
 				]),
 				CommandKind::FuncDef(fd) => {
-					let name_lo = if fd.keyword { self.skip_ws(lo + 8) } else { lo };
-					let name_hi = name_lo + fd.name.len() as u32;
-					let (extra, names_hi) = self.extra_names(name_hi, &fd.extra_names);
+					let name_lo = if fd.keyword() {
+						self.skip_ws(lo + 8)
+					} else {
+						lo
+					};
+					let name_hi = name_lo + fd.name().len() as u32;
+					let extra: Vec<&[u8]> = fd.extra_names().collect();
+					let (extra, names_hi) = self.extra_names(name_hi, &extra);
 					let parens = self.at(self.skip_ws(names_hi)) == b'(';
 					let mut f = vec![
 						("Type", s(b"FuncDecl")),
 						("Pos", p(lo)),
-						("End", p(c.span.hi)),
+						("End", p(span.hi)),
 						("Position", p(lo)),
 					];
-					if fd.keyword {
+					if fd.keyword() {
 						f.push(("RsrvWord", V::Bool(true)));
 					}
 					if parens {
 						f.push(("Parens", V::Bool(true)));
 					}
-					f.push(("Name", self.lit_value(name_lo, name_hi, &fd.name)));
+					f.push(("Name", self.lit_value(name_lo, name_hi, fd.name())));
 					if let Some(extra) = extra {
 						f.push(("ExtraNames", extra));
 					}
-					let (bc, bend) = self.command(&fd.body);
-					let (redirs, rend) = self.redirs(&fd.body.redirs);
-					let body = St {
-						pos: fd.body.span.lo,
-						end: bend,
-						cmd: bc,
-						negated: false,
-						redirs,
-						rend,
-						semi: None,
-						bg: false,
-					};
-					f.push(("Body", self.stmt(body)));
-					return (Some(V::Obj(f)), c.span.hi);
+					f.push(("Body", self.body_stmt(fd.body())));
+					return (Some(V::Obj(f)), span.hi);
 				},
 				CommandKind::Coproc(cp) => {
 					let mut f = vec![
 						("Type", s(b"CoprocClause")),
 						("Pos", p(lo)),
-						("End", p(c.span.hi)),
+						("End", p(span.hi)),
 						("Coproc", p(lo)),
 					];
-					if let Some(name) = &cp.name {
+					if let Some(name) = cp.name() {
 						let nlo = self.skip_ws(lo + 6);
 						let nhi = nlo + name.len() as u32;
 						f.push((
@@ -1470,51 +1612,40 @@ mod shfmt {
 							]),
 						));
 					}
-					f.push(("Stmt", self.stmt(self.stage(&cp.body))));
-					return (Some(V::Obj(f)), c.span.hi);
+					f.push(("Stmt", self.stmt(self.stage(cp.body()))));
+					return (Some(V::Obj(f)), span.hi);
 				},
 				CommandKind::Repeat(r) => {
-					let do_pos = self.find(r.count.span.hi, b"do");
+					let do_pos = self.find(r.count().span().hi, b"do");
 					V::Obj(vec![
 						("Type", s(b"RepeatClause")),
 						("Pos", p(lo)),
 						("End", p(hi)),
 						("RepeatPos", p(lo)),
-						("Count", self.word(&r.count, true)),
+						("Count", self.word(r.count(), true)),
 						("DoPos", p(do_pos)),
-						("Do", self.list(&r.body)),
+						("Do", self.list(r.body())),
 					])
 				},
 				CommandKind::Try(t) => {
-					let body_end = t.body.items.last().map_or(lo + 1, |it| it.and_or.span.hi);
+					let body_end = list_end(t.body()).unwrap_or(lo + 1);
 					let rbrace = self.find(body_end, b"}");
 					let always = self.find(rbrace + 1, b"always");
 					V::Obj(vec![
 						("Type", s(b"TryClause")),
 						("Pos", p(lo)),
 						("End", p(hi)),
-						("Body", self.list(&t.body)),
+						("Body", self.list(t.body())),
 						("AlwaysPos", p(always)),
-						("Always", self.list(&t.always)),
+						("Always", self.list(t.always())),
 					])
 				},
 				CommandKind::AnonFunc(a) => {
 					let mut f = vec![("Type", s(b"AnonFuncDecl")), ("Pos", p(lo)), ("End", p(hi))];
-					let (bc, bend) = self.command(&a.body);
-					let (redirs, rend) = self.redirs(&a.body.redirs);
-					let body = St {
-						pos: a.body.span.lo,
-						end: bend,
-						cmd: bc,
-						negated: false,
-						redirs,
-						rend,
-						semi: None,
-						bg: false,
-					};
-					f.push(("Body", self.stmt(body)));
-					if !a.args.is_empty() {
-						f.push(("Args", V::Arr(a.args.iter().map(|w| self.word(w, false)).collect())));
+					f.push(("Body", self.body_stmt(a.body())));
+					let args = a.args();
+					if !args.is_empty() {
+						f.push(("Args", V::Arr(args.iter().map(|w| self.word(w, false)).collect())));
 					}
 					V::Obj(f)
 				},
@@ -1522,10 +1653,27 @@ mod shfmt {
 			(Some(v), hi)
 		}
 
+		/// A function body command (with its redirections) as a `Stmt`.
+		fn body_stmt(&self, b: Command<'_>) -> V {
+			let (bc, bend) = self.command(b);
+			let (redirs, rend) = self.redirs(b.redirs());
+			let body = St {
+				pos: b.span().lo,
+				end: bend,
+				cmd: bc,
+				negated: false,
+				redirs,
+				rend,
+				semi: None,
+				bg: false,
+			};
+			self.stmt(body)
+		}
+
 		/// zsh's extra loop variables or function names written after the
 		/// first one (which ends at `from`): their `Lit`s (`None` when there
 		/// are none) and the end of the last.
-		fn extra_names(&self, from: u32, names: &[Vec<u8>]) -> (Option<V>, u32) {
+		fn extra_names(&self, from: u32, names: &[&[u8]]) -> (Option<V>, u32) {
 			if names.is_empty() {
 				return (None, from);
 			}
@@ -1541,7 +1689,7 @@ mod shfmt {
 			(Some(V::Arr(lits)), at)
 		}
 
-		fn for_clause(&self, lo: u32, hi: u32, select: bool, lp: V, after: u32, body: &List) -> V {
+		fn for_clause(&self, lo: u32, hi: u32, select: bool, lp: V, after: u32, body: List<'_>) -> V {
 			let p = |o| self.m.pos(o);
 			let do_pos = self.find(after, b"do");
 			let braces = self.at(do_pos) != b'd';
@@ -1572,8 +1720,8 @@ mod shfmt {
 		fn if_clause(
 			&self,
 			hi: u32,
-			arms: &[IfArm],
-			else_body: Option<&List>,
+			arms: &[IfArm<'_>],
+			else_body: Option<List<'_>>,
 			typed: bool,
 			pos: u32,
 		) -> V {
@@ -1581,7 +1729,7 @@ mod shfmt {
 			let Some((arm, rest)) = arms.split_first() else {
 				return V::Null;
 			};
-			let cond_end = arm.cond.items.last().map_or(pos, |it| it.and_or.span.hi);
+			let cond_end = list_end(arm.cond).unwrap_or(pos);
 			let then_pos = self.find(cond_end, b"then");
 			let mut f = Vec::new();
 			if typed {
@@ -1592,13 +1740,9 @@ mod shfmt {
 			f.push(("Position", p(pos)));
 			f.push(("ThenPos", p(then_pos)));
 			f.push(("FiPos", p(hi.saturating_sub(2))));
-			f.push(("Cond", self.list(&arm.cond)));
-			f.push(("Then", self.list(&arm.body)));
-			let body_end = arm
-				.body
-				.items
-				.last()
-				.map_or(then_pos + 4, |it| it.and_or.span.hi);
+			f.push(("Cond", self.list(arm.cond)));
+			f.push(("Then", self.list(arm.body)));
+			let body_end = list_end(arm.body).unwrap_or(then_pos + 4);
 			if !rest.is_empty() {
 				let elif = self.find(body_end, b"elif");
 				f.push(("Else", self.if_clause(hi, rest, else_body, false, elif)));
@@ -1619,12 +1763,13 @@ mod shfmt {
 		}
 
 		/// An arithmetic expression as one `Word` leaf.
-		fn arith(&self, a: &ArithText) -> Option<V> {
-			let mut lo = a.span.lo;
-			while lo < a.span.hi && matches!(self.at(lo), b' ' | b'\t' | b'\n') {
+		fn arith(&self, a: ArithText<'_>) -> Option<V> {
+			let span = a.span();
+			let mut lo = span.lo;
+			while lo < span.hi && matches!(self.at(lo), b' ' | b'\t' | b'\n') {
 				lo += 1;
 			}
-			let hi = self.trim_back(lo, a.span.hi);
+			let hi = self.trim_back(lo, span.hi);
 			(hi > lo).then(|| {
 				V::Obj(vec![
 					("Type", s(b"Word")),
@@ -1635,31 +1780,31 @@ mod shfmt {
 			})
 		}
 
-		fn test(&self, e: &CondExpr) -> V {
+		fn test(&self, e: CondExpr<'_>) -> V {
 			let p = |o| self.m.pos(o);
-			match e {
-				CondExpr::Word(w) => self.word(w, true),
-				CondExpr::Unary { op, arg } => {
-					let olo = self.find_back_op(arg.span.lo, op);
+			match e.get() {
+				Cond::Word(w) => self.word(w, true),
+				Cond::Unary { op, arg } => {
+					let olo = self.find_back_op(arg.span().lo, op);
 					V::Obj(vec![
 						("Type", s(b"UnaryTest")),
 						("Pos", p(olo)),
-						("End", p(arg.span.hi)),
+						("End", p(arg.span().hi)),
 						("OpPos", p(olo)),
 						("Op", s(op)),
 						("X", self.word(arg, true)),
 					])
 				},
-				CondExpr::Binary { op, lhs, rhs } => V::Obj(vec![
+				Cond::Binary { op, lhs, rhs } => V::Obj(vec![
 					("Type", s(b"BinaryTest")),
-					("Pos", p(lhs.span.lo)),
-					("End", p(rhs.span.hi)),
-					("OpPos", p(self.find(lhs.span.hi, op))),
+					("Pos", p(lhs.span().lo)),
+					("End", p(rhs.span().hi)),
+					("OpPos", p(self.find(lhs.span().hi, op))),
 					("Op", s(op)),
 					("X", self.word(lhs, true)),
 					("Y", self.word(rhs, true)),
 				]),
-				CondExpr::Not(x) => {
+				Cond::Not(x) => {
 					let (xlo, xhi) = test_span(x);
 					let olo = self.find_back_op(xlo, b"!");
 					V::Obj(vec![
@@ -1671,7 +1816,7 @@ mod shfmt {
 						("X", self.test(x)),
 					])
 				},
-				CondExpr::Group(x) => {
+				Cond::Group(x) => {
 					let (xlo, xhi) = test_span(x);
 					let lp = self.find_back_op(xlo, b"(");
 					let rp = self.find(xhi, b")");
@@ -1684,8 +1829,8 @@ mod shfmt {
 						("X", self.test(x)),
 					])
 				},
-				CondExpr::And(a, b) | CondExpr::Or(a, b) => {
-					let op: &[u8] = if matches!(e, CondExpr::And(..)) {
+				c @ (Cond::And(a, b) | Cond::Or(a, b)) => {
+					let op: &[u8] = if matches!(c, Cond::And(..)) {
 						b"&&"
 					} else {
 						b"||"
@@ -1719,42 +1864,41 @@ mod shfmt {
 			}
 		}
 
-		fn simple(&self, sc: &Simple) -> (Option<V>, u32) {
-			let first = sc
-				.assigns
+		fn simple(&self, sc: Simple<'_>) -> (Option<V>, u32) {
+			let (assigns, words) = (sc.assigns(), sc.words());
+			let first = assigns
 				.first()
-				.map(|a| a.span.lo)
-				.or_else(|| sc.words.first().map(|w| w.span.lo));
+				.map(|a| a.span().lo)
+				.or_else(|| words.first().map(|w| w.span().lo));
 			let Some(lo) = first else { return (None, 0) };
-			let hi = sc
-				.words
+			let hi = words
 				.last()
-				.map(|w| w.span.hi)
-				.or_else(|| sc.assigns.last().map(|a| a.span.hi))
+				.map(|w| w.span().hi)
+				.or_else(|| assigns.last().map(|a| a.span().hi))
 				.unwrap_or(lo);
 			let p = |o| self.m.pos(o);
-			if sc.assigns.is_empty()
-				&& let Some(head) = sc.words.first()
-				&& let [WordPart::Lit(name)] = &head.parts[..]
+			if assigns.is_empty()
+				&& let Some(head) = words.first()
+				&& let Some(Part::Lit(name)) = head.parts().one().map(WordPart::get)
 			{
 				if matches!(
-					&name[..],
+					name,
 					b"declare" | b"local" | b"export" | b"readonly" | b"typeset" | b"nameref"
 				) {
-					let args: Vec<V> = sc.words[1..].iter().map(|w| self.decl_arg(w)).collect();
+					let args: Vec<V> = words.skip(1).iter().map(|w| self.decl_arg(w)).collect();
 					let mut f = vec![
 						("Type", s(b"DeclClause")),
 						("Pos", p(lo)),
 						("End", p(hi)),
-						("Variant", self.lit_value(head.span.lo, head.span.hi, name)),
+						("Variant", self.lit_value(head.span().lo, head.span().hi, name)),
 					];
 					if !args.is_empty() {
 						f.push(("Args", V::Arr(args)));
 					}
 					return (Some(V::Obj(f)), hi);
 				}
-				if &name[..] == b"let" && sc.words.len() > 1 {
-					let exprs = sc.words[1..].iter().map(|w| self.word(w, true)).collect();
+				if name == b"let" && words.len() > 1 {
+					let exprs = words.skip(1).iter().map(|w| self.word(w, true)).collect();
 					return (
 						Some(V::Obj(vec![
 							("Type", s(b"LetClause")),
@@ -1768,60 +1912,62 @@ mod shfmt {
 				}
 			}
 			let mut f = vec![("Type", s(b"CallExpr")), ("Pos", p(lo)), ("End", p(hi))];
-			if !sc.assigns.is_empty() {
-				f.push(("Assigns", V::Arr(sc.assigns.iter().map(|a| self.assign(a)).collect())));
+			if !assigns.is_empty() {
+				f.push(("Assigns", V::Arr(assigns.iter().map(|a| self.assign(a)).collect())));
 			}
-			if !sc.words.is_empty() {
-				f.push(("Args", V::Arr(sc.words.iter().map(|w| self.word(w, false)).collect())));
+			if !words.is_empty() {
+				f.push(("Args", V::Arr(words.iter().map(|w| self.word(w, false)).collect())));
 			}
 			(Some(V::Obj(f)), hi)
 		}
 
-		fn assign(&self, a: &Assign) -> V {
+		fn assign(&self, a: Assign<'_>) -> V {
 			let p = |o| self.m.pos(o);
-			let mut f = vec![("Pos", p(a.span.lo)), ("End", p(a.span.hi))];
-			if a.append {
+			let span = a.span();
+			let mut f = vec![("Pos", p(span.lo)), ("End", p(span.hi))];
+			if a.append() {
 				f.push(("Append", V::Bool(true)));
 			}
-			let nhi = a.span.lo + a.name.len() as u32;
-			f.push(("Name", self.lit_value(a.span.lo, nhi, &a.name)));
-			if let Some(i) = &a.index {
+			let nhi = span.lo + a.name().len() as u32;
+			f.push(("Name", self.lit_value(span.lo, nhi, a.name())));
+			if let Some(i) = a.index() {
 				f.push(("Index", self.word(i, true)));
 			}
-			match &a.value {
+			match a.value() {
 				AssignValue::Scalar(w) => {
-					if !w.parts.is_empty() {
+					if !w.parts().is_empty() {
 						f.push(("Value", self.word(w, false)));
 					}
 				},
 				AssignValue::Array(elems) => {
-					let alo = self.find(a.span.lo, b"(");
-					let alo = if self.at(alo) == b'(' {
-						alo
-					} else {
-						a.span.hi.saturating_sub(1)
-					};
-					f.push(("Array", self.array(alo, a.span.hi, elems)));
+					// `(` follows `name`, its `[index]`, and `=` or `+=`.
+					let mut alo = a.index().map_or(nhi, |i| i.span().hi + 1) + 1;
+					if a.append() {
+						alo += 1;
+					}
+					if self.at(alo) != b'(' {
+						alo = span.hi.saturating_sub(1);
+					}
+					f.push(("Array", self.array(alo, span.hi, elems)));
 				},
 			}
 			V::Obj(f)
 		}
 
-		fn array(&self, lo: u32, hi: u32, elems: &[ArrayElem]) -> V {
+		fn array(&self, lo: u32, hi: u32, elems: Seq<'_, ArrayElem<'_>>) -> V {
 			let p = |o| self.m.pos(o);
 			let es: Vec<V> = elems
 				.iter()
 				.map(|e| {
-					let elo = e
-						.key
-						.as_ref()
-						.map_or(e.value.span.lo, |k| k.span.lo.saturating_sub(1));
-					let mut f = vec![("Pos", p(elo)), ("End", p(e.value.span.hi))];
-					if let Some(k) = &e.key {
+					let value = e.value();
+					// shfmt places an indexed element at its index.
+					let elo = e.key().map_or_else(|| value.span().lo, |k| k.span().lo);
+					let mut f = vec![("Pos", p(elo)), ("End", p(value.span().hi))];
+					if let Some(k) = e.key() {
 						f.push(("Index", self.word(k, true)));
 					}
-					if !e.value.parts.is_empty() {
-						f.push(("Value", self.word(&e.value, false)));
+					if !value.parts().is_empty() {
+						f.push(("Value", self.word(value, false)));
 					}
 					V::Obj(f)
 				})
@@ -1838,12 +1984,13 @@ mod shfmt {
 			V::Obj(f)
 		}
 
-		fn decl_arg(&self, w: &Word) -> V {
+		fn decl_arg(&self, w: Word<'_>) -> V {
 			let p = |o| self.m.pos(o);
-			let lo = w.span.lo;
-			let hi = w.span.hi;
+			let span = w.span();
+			let (lo, hi) = (span.lo, span.hi);
+			let parts = w.parts();
 			// `name=(…)` and `name=value`.
-			if let Some(WordPart::Lit(first)) = w.parts.first()
+			if let Some(Part::Lit(first)) = parts.first().map(WordPart::get)
 				&& let Some(eq) = first.iter().position(|&c| c == b'=')
 				&& crate::bash::syntax::util::is_identifier(
 					first[..eq].strip_suffix(b"+").unwrap_or(&first[..eq]),
@@ -1856,24 +2003,31 @@ mod shfmt {
 				}
 				f.push(("Name", self.lit_value(lo, lo + name.len() as u32, name)));
 				let vlo = lo + eq as u32 + 1;
-				if let Some(WordPart::Compound(elems)) = w.parts.get(1) {
+				if let Some(Part::Compound(elems)) = parts.get(1).map(WordPart::get) {
 					f.push(("Array", self.array(vlo, hi, elems)));
 				} else if vlo < hi {
-					let mut rest = w.clone();
-					rest.span = Span::new(vlo, hi);
-					if let Some(WordPart::Lit(l)) = rest.parts.first_mut() {
-						l.drain(..=eq);
-						if l.is_empty() {
-							rest.parts.remove(0);
-						}
+					// The value: the word without `name=`.
+					let src = w.tree();
+					let mut t = src.sharing_text();
+					let mark = t.open();
+					let rest = &first[eq + 1..];
+					if !rest.is_empty() {
+						let l = t.text_part(TextPk::Lit, rest);
+						t.kid(mark, l);
 					}
-					f.push(("Value", self.word(&rest, false)));
+					for q in parts.skip(1) {
+						let c = t.copy(src, q.handle());
+						t.kid(mark, c);
+					}
+					let r = t.close_run(mark);
+					let value = t.word_unmerged(Span::new(vlo, hi), r);
+					f.push(("Value", self.word(Word::of(&t, value), false)));
 				}
 				return V::Obj(f);
 			}
 			let mut f = vec![("Pos", p(lo)), ("End", p(hi)), ("Naked", V::Bool(true))];
-			match &w.parts[..] {
-				[WordPart::Lit(n)] if crate::bash::syntax::util::is_identifier(n) => {
+			match parts.one().map(WordPart::get) {
+				Some(Part::Lit(n)) if crate::bash::syntax::util::is_identifier(n) => {
 					f.push(("Name", self.lit_value(lo, hi, n)));
 				},
 				_ => f.push(("Value", self.word(w, false))),
@@ -1882,15 +2036,20 @@ mod shfmt {
 		}
 
 		/// A word; `typed` adds `"Type": "Word"` (interface positions).
-		fn word(&self, w: &Word, typed: bool) -> V {
-			let spans = part_spans(self.src, w.span.lo, w.span.hi, &w.parts);
-			let parts = self.parts(&w.parts, &spans);
+		fn word(&self, w: Word<'_>, typed: bool) -> V {
+			self.word_at(w.span().lo, w.span().hi, w.parts(), typed)
+		}
+
+		/// A word of `parts` at `lo..hi`.
+		fn word_at(&self, lo: u32, hi: u32, parts: Seq<'_, WordPart<'_>>, typed: bool) -> V {
+			let spans = part_spans(self.src, lo, hi, parts);
+			let parts = self.parts(parts, &spans);
 			let mut f = Vec::new();
 			if typed {
 				f.push(("Type", s(b"Word")));
 			}
-			f.push(("Pos", self.m.pos(w.span.lo)));
-			f.push(("End", self.m.pos(w.span.hi)));
+			f.push(("Pos", self.m.pos(lo)));
+			f.push(("End", self.m.pos(hi)));
 			if !parts.is_empty() {
 				f.push(("Parts", V::Arr(parts)));
 			}
@@ -1899,11 +2058,12 @@ mod shfmt {
 
 		/// Parts with their source spans; literal and escaped runs merge into
 		/// one `Lit` holding the source text, as shfmt keeps them.
-		fn parts(&self, parts: &[WordPart], spans: &[(u32, u32)]) -> Vec<V> {
+		fn parts(&self, parts: Seq<'_, WordPart<'_>>, spans: &[(u32, u32)]) -> Vec<V> {
 			let mut out = Vec::new();
 			let mut run: Option<(u32, u32)> = None;
 			for (part, &(lo, hi)) in parts.iter().zip(spans) {
-				if matches!(part, WordPart::Lit(_)) {
+				let pv = part.get();
+				if matches!(pv, Part::Lit(_)) {
 					// shfmt makes every `$` that starts no expansion a `Lit` of
 					// its own; a literal part's `$` bytes are exactly those.
 					let mut start = lo;
@@ -1924,12 +2084,12 @@ mod shfmt {
 					continue;
 				}
 				if matches!(
-					part,
-					WordPart::Escaped(_)
-						| WordPart::BadSubst(_)
-						| WordPart::BadComsub(_)
-						| WordPart::DroppedQuote
-						| WordPart::Zsh(_)
+					pv,
+					Part::Escaped(_)
+						| Part::BadSubst(_)
+						| Part::BadComsub(_)
+						| Part::DroppedQuote
+						| Part::Zsh(_)
 				) {
 					run = Some(run.map_or((lo, hi), |(a, _)| (a, hi)));
 					continue;
@@ -1937,7 +2097,7 @@ mod shfmt {
 				if let Some((a, b)) = run.take() {
 					out.push(self.lit(a, b, true));
 				}
-				out.push(self.part(part, lo, hi));
+				out.push(self.part(pv, lo, hi));
 			}
 			if let Some((a, b)) = run {
 				out.push(self.lit(a, b, true));
@@ -1945,10 +2105,10 @@ mod shfmt {
 			out
 		}
 
-		fn part(&self, part: &WordPart, lo: u32, hi: u32) -> V {
+		fn part(&self, part: Part<'_>, lo: u32, hi: u32) -> V {
 			let p = |o| self.m.pos(o);
 			match part {
-				WordPart::SQuote(v) | WordPart::AnsiC(v) => {
+				Part::SQuote(v) | Part::AnsiC(v) => {
 					let mut f = vec![
 						("Type", s(b"SglQuoted")),
 						("Pos", p(lo)),
@@ -1956,7 +2116,7 @@ mod shfmt {
 						("Left", p(lo)),
 						("Right", p(hi.saturating_sub(1))),
 					];
-					if matches!(part, WordPart::AnsiC(_)) {
+					if matches!(part, Part::AnsiC(_)) {
 						f.push(("Dollar", V::Bool(true)));
 					}
 					// shfmt omits empty strings.
@@ -1965,8 +2125,8 @@ mod shfmt {
 					}
 					V::Obj(f)
 				},
-				WordPart::DQuote(inner) | WordPart::Locale(inner) => {
-					let dollar = matches!(part, WordPart::Locale(_));
+				Part::DQuote(inner) | Part::Locale(inner) => {
+					let dollar = matches!(part, Part::Locale(_));
 					let ilo = lo + 1 + u32::from(dollar);
 					let spans = part_spans(self.src, ilo, hi.saturating_sub(1), inner);
 					let parts = self.parts(inner, &spans);
@@ -1985,8 +2145,8 @@ mod shfmt {
 					}
 					V::Obj(f)
 				},
-				WordPart::Param(pp) => self.param(pp, lo, hi),
-				WordPart::Comsub(c) => {
+				Part::Param(pp) => self.param(pp, lo, hi),
+				Part::Comsub(c) => {
 					let mut f = vec![
 						("Type", s(b"CmdSubst")),
 						("Pos", p(lo)),
@@ -1994,10 +2154,10 @@ mod shfmt {
 						("Left", p(lo)),
 						("Right", p(hi.saturating_sub(1))),
 					];
-					if !c.body.items.is_empty() {
-						f.push(("Stmts", self.list(&c.body)));
+					if !c.body().items().is_empty() {
+						f.push(("Stmts", self.list(c.body())));
 					}
-					match c.kind {
+					match c.kind() {
 						ComsubKind::Backtick => f.push(("Backquotes", V::Bool(true))),
 						ComsubKind::NoFork => f.push(("TempFile", V::Bool(true))),
 						ComsubKind::ValueSub => f.push(("ReplyVar", V::Bool(true))),
@@ -2005,7 +2165,7 @@ mod shfmt {
 					}
 					V::Obj(f)
 				},
-				WordPart::Arith(a) => {
+				Part::Arith(a) => {
 					let bracket = self.at(lo + 1) == b'[';
 					let mut f = vec![
 						("Type", s(b"ArithmExp")),
@@ -2022,61 +2182,62 @@ mod shfmt {
 					}
 					V::Obj(f)
 				},
-				WordPart::ProcSub(ps) => {
+				Part::ProcSub(ps) => {
 					let mut f = vec![
 						("Type", s(b"ProcSubst")),
 						("Pos", p(lo)),
 						("End", p(hi)),
 						("OpPos", p(lo)),
 						("Rparen", p(hi.saturating_sub(1))),
-						("Op", s(if ps.output { b">(" } else { b"<(" })),
+						("Op", s(if ps.output() { b">(" } else { b"<(" })),
 					];
-					if !ps.body.items.is_empty() {
-						f.push(("Stmts", self.list(&ps.body)));
+					if !ps.body().items().is_empty() {
+						f.push(("Stmts", self.list(ps.body())));
 					}
 					V::Obj(f)
 				},
-				WordPart::Compound(elems) => self.array(lo, hi, elems),
-				WordPart::Lit(_)
-				| WordPart::Escaped(_)
-				| WordPart::BadSubst(_)
-				| WordPart::BadComsub(_)
-				| WordPart::DroppedQuote
-				| WordPart::Zsh(_) => self.lit(lo, hi, true),
+				Part::Compound(elems) => self.array(lo, hi, elems),
+				Part::Lit(_)
+				| Part::Escaped(_)
+				| Part::BadSubst(_)
+				| Part::BadComsub(_)
+				| Part::DroppedQuote
+				| Part::Zsh(_) => self.lit(lo, hi, true),
 			}
 		}
 
-		fn param(&self, pp: &Param, lo: u32, hi: u32) -> V {
+		fn param(&self, pp: Param<'_>, lo: u32, hi: u32) -> V {
 			let p = |o| self.m.pos(o);
 			let mut f =
 				vec![("Type", s(b"ParamExp")), ("Pos", p(lo)), ("End", p(hi)), ("Dollar", p(lo))];
 			let mut name_lo = lo + 1;
-			if pp.braced {
+			if pp.braced() {
 				f.push(("Rbrace", p(hi.saturating_sub(1))));
 				name_lo += 1;
 			} else {
 				f.push(("Short", V::Bool(true)));
 			}
-			let excl = matches!(pp.op, ParamOp::Indirect | ParamOp::PrefixNames { .. }) || pp.indirect;
+			let op = pp.op();
+			let excl = matches!(op, ParamOp::Indirect | ParamOp::PrefixNames { .. }) || pp.indirect();
 			if excl {
 				f.push(("Excl", V::Bool(true)));
 				name_lo += 1;
 			}
-			if pp.op == ParamOp::Length {
+			if matches!(op, ParamOp::Length) {
 				f.push(("Length", V::Bool(true)));
 				name_lo += 1;
 			}
 			let mut name = Vec::new();
-			match &pp.name {
+			match pp.name() {
 				ParamName::Var(v) => name.extend_from_slice(v),
-				ParamName::Positional(n) => crate::bash::syntax::util::push_u32(&mut name, *n),
-				ParamName::Special(sp) => name.push(special_char(*sp)),
+				ParamName::Positional(n) => crate::bash::syntax::util::push_u32(&mut name, n),
+				ParamName::Special(sp) => name.push(special_char(sp)),
 			}
 			let name_hi = name_lo + name.len() as u32;
 			f.push(("Param", self.lit_value(name_lo, name_hi, &name)));
-			match &pp.index {
-				Some(Subscript::At | Subscript::Star) => {
-					let at: &[u8] = if pp.index == Some(Subscript::At) {
+			match pp.index() {
+				Some(sub @ (Subscript::At | Subscript::Star)) => {
+					let at: &[u8] = if matches!(sub, Subscript::At) {
 						b"@"
 					} else {
 						b"*"
@@ -2094,29 +2255,29 @@ mod shfmt {
 				Some(Subscript::Expr(w)) => f.push(("Index", self.word(w, true))),
 				None => {},
 			}
-			let opw = |op: &[u8], w: Option<&Word>| {
+			let opw = |op: &[u8], w: Option<Word<'_>>| {
 				let mut e = vec![("Op", s(op))];
 				if let Some(w) = w
-					&& !w.parts.is_empty()
+					&& !w.parts().is_empty()
 				{
 					e.push(("Word", self.word(w, false)));
 				}
 				V::Obj(e)
 			};
-			match &pp.op {
+			match op {
 				ParamOp::None | ParamOp::Length | ParamOp::Indirect => {},
-				ParamOp::PrefixNames { star } => f.push(("Names", s(if *star { b"*" } else { b"@" }))),
+				ParamOp::PrefixNames { star } => f.push(("Names", s(if star { b"*" } else { b"@" }))),
 				ParamOp::Default { colon, word } => {
-					f.push(("Exp", opw(if *colon { b":-" } else { b"-" }, Some(word))));
+					f.push(("Exp", opw(if colon { b":-" } else { b"-" }, Some(word))));
 				},
 				ParamOp::Assign { colon, word } => {
-					f.push(("Exp", opw(if *colon { b":=" } else { b"=" }, Some(word))));
+					f.push(("Exp", opw(if colon { b":=" } else { b"=" }, Some(word))));
 				},
 				ParamOp::Error { colon, word } => {
-					f.push(("Exp", opw(if *colon { b":?" } else { b"?" }, word.as_ref())));
+					f.push(("Exp", opw(if colon { b":?" } else { b"?" }, word)));
 				},
 				ParamOp::Alt { colon, word } => {
-					f.push(("Exp", opw(if *colon { b":+" } else { b"+" }, Some(word))));
+					f.push(("Exp", opw(if colon { b":+" } else { b"+" }, Some(word))));
 				},
 				ParamOp::Substr { offset, len } => {
 					let mut sl = Vec::new();
@@ -2141,23 +2302,28 @@ mod shfmt {
 				},
 				ParamOp::Replace { mode, pat, rep } => {
 					let mut r = Vec::new();
-					if *mode == ReplaceMode::All {
+					if mode == ReplaceMode::All {
 						r.push(("All", V::Bool(true)));
 					}
-					let orig = if matches!(mode, ReplaceMode::Prefix | ReplaceMode::Suffix) {
-						// shfmt keeps the anchor in the pattern.
-						let alo = pat.span.lo.saturating_sub(1);
-						let spans = part_spans(self.src, pat.span.lo, pat.span.hi, &pat.parts);
-						let mut parts =
-							vec![self.lit(alo, spans.first().map_or(pat.span.lo, |s| s.0), true)];
-						parts.extend(self.parts(&pat.parts, &spans));
+					let ps = pat.span();
+					// shfmt keeps a `#`/`%` anchor in the pattern, and has no
+					// word for an empty one or an empty replacement.
+					if matches!(mode, ReplaceMode::Prefix | ReplaceMode::Suffix) {
+						let alo = ps.lo.saturating_sub(1);
+						let spans = part_spans(self.src, ps.lo, ps.hi, pat.parts());
+						let mut parts = vec![self.lit(alo, spans.first().map_or(ps.lo, |s| s.0), true)];
+						parts.extend(self.parts(pat.parts(), &spans));
 						let merged = merge_lit_vs(parts, self);
-						V::Obj(vec![("Pos", p(alo)), ("End", p(pat.span.hi)), ("Parts", V::Arr(merged))])
-					} else {
-						self.word(pat, false)
-					};
-					r.push(("Orig", orig));
-					if let Some(w) = rep {
+						r.push((
+							"Orig",
+							V::Obj(vec![("Pos", p(alo)), ("End", p(ps.hi)), ("Parts", V::Arr(merged))]),
+						));
+					} else if !pat.parts().is_empty() {
+						r.push(("Orig", self.word(pat, false)));
+					}
+					if let Some(w) = rep
+						&& !w.parts().is_empty()
+					{
 						r.push(("With", self.word(w, false)));
 					}
 					f.push(("Repl", V::Obj(r)));
@@ -2171,7 +2337,7 @@ mod shfmt {
 						(CaseMode::Toggle, false) => b"~",
 						(CaseMode::Toggle, true) => b"~~",
 					};
-					f.push(("Exp", opw(op, pat.as_ref())));
+					f.push(("Exp", opw(op, pat)));
 				},
 				ParamOp::Transform(c) => {
 					let at = hi.saturating_sub(2);
@@ -2184,7 +2350,7 @@ mod shfmt {
 								V::Obj(vec![
 									("Pos", p(at)),
 									("End", p(at + 1)),
-									("Parts", V::Arr(vec![self.lit_with(at, at + 1, &[*c])])),
+									("Parts", V::Arr(vec![self.lit_with(at, at + 1, &[c])])),
 								]),
 							),
 						]),
@@ -2206,28 +2372,29 @@ mod shfmt {
 		}
 	}
 
-	/// The parts of the first word of `raw` (a here-document delimiter as
-	/// written).
-	fn first_word_parts(raw: &[u8]) -> Vec<WordPart> {
+	/// The first word of `raw` (a here-document delimiter as written), or
+	/// `raw` as one literal.
+	fn first_word(raw: &[u8]) -> (Tree, u32) {
 		let parsed = crate::bash::syntax::parse_all(raw, crate::bash::syntax::Features::NONE).ok();
-		let word = parsed.as_ref().and_then(|p| {
-			let cmd = &p
-				.commands
-				.first()?
-				.list
-				.items
-				.first()?
-				.and_or
-				.first
-				.stages
-				.first()?
-				.cmd;
-			match &cmd.kind {
-				CommandKind::Simple(s) => s.words.first().cloned(),
-				_ => None,
+		if let Some(mut p) = parsed
+			&& !p.commands.is_empty()
+		{
+			let cc = p.commands.swap_remove(0);
+			let word = cc.list().items().first().and_then(|it| {
+				let cmd = it.and_or().first().stages().first()?;
+				match cmd.kind() {
+					CommandKind::Simple(s) => s.words().first().map(|w| w.node()),
+					_ => None,
+				}
+			});
+			if let Some(w) = word {
+				return (cc.tree, w);
 			}
-		});
-		word.map_or_else(|| vec![WordPart::Lit(raw.to_vec())], |w| w.parts)
+		}
+		let mut t = Tree::default();
+		let lit = t.text_part(TextPk::Lit, raw);
+		let w = t.word(Span::default(), &[lit]);
+		(t, w.index())
 	}
 
 	/// Join a leading anchor `Lit` with a following `Lit` (shfmt keeps
@@ -2269,26 +2436,26 @@ mod shfmt {
 		Some((get("ValuePos")?, get("ValueEnd")?))
 	}
 
-	const fn is_empty_simple(c: &Command) -> bool {
-		matches!(&c.kind, CommandKind::Simple(s) if s.assigns.is_empty() && s.words.is_empty())
-			&& c.redirs.is_empty()
+	fn is_empty_simple(c: Command<'_>) -> bool {
+		matches!(c.kind(), CommandKind::Simple(s) if s.assigns().is_empty() && s.words().is_empty())
+			&& c.redirs().is_empty()
 	}
 
 	/// Source extent of a `[[ ]]` expression.
-	fn test_span(e: &CondExpr) -> (u32, u32) {
-		match e {
-			CondExpr::Word(w) => (w.span.lo, w.span.hi),
-			CondExpr::Unary { arg, .. } => (arg.span.lo.saturating_sub(3), arg.span.hi),
-			CondExpr::Binary { lhs, rhs, .. } => (lhs.span.lo, rhs.span.hi),
-			CondExpr::Not(x) => {
+	fn test_span(e: CondExpr<'_>) -> (u32, u32) {
+		match e.get() {
+			Cond::Word(w) => (w.span().lo, w.span().hi),
+			Cond::Unary { arg, .. } => (arg.span().lo.saturating_sub(3), arg.span().hi),
+			Cond::Binary { lhs, rhs, .. } => (lhs.span().lo, rhs.span().hi),
+			Cond::Not(x) => {
 				let (a, b) = test_span(x);
 				(a.saturating_sub(2), b)
 			},
-			CondExpr::Group(x) => {
+			Cond::Group(x) => {
 				let (a, b) = test_span(x);
 				(a.saturating_sub(2), b + 2)
 			},
-			CondExpr::And(a, b) | CondExpr::Or(a, b) => (test_span(a).0, test_span(b).1),
+			Cond::And(a, b) | Cond::Or(a, b) => (test_span(a).0, test_span(b).1),
 		}
 	}
 }
@@ -2299,18 +2466,18 @@ mod shfmt {
 /// Source spans of `parts`, which lie in `src[lo..hi]` (re-scanning the
 /// source; transformed text such as re-printed command substitutions is
 /// located by its delimiters).
-fn part_spans(src: &[u8], lo: u32, hi: u32, parts: &[WordPart]) -> Vec<(u32, u32)> {
+fn part_spans(src: &[u8], lo: u32, hi: u32, parts: Seq<'_, WordPart<'_>>) -> Vec<(u32, u32)> {
 	let mut sc = PartScan { src, i: lo as usize, hi: hi as usize };
 	let mut out = Vec::with_capacity(parts.len());
 	for p in parts {
 		let a = sc.i;
-		sc.part(p);
+		sc.part(p.get());
 		let b = sc.i.min(sc.hi.max(a));
 		out.push((a as u32, b as u32));
 	}
 	// A zsh word ends at the word's end whatever its stored text dropped
 	// (`\newline`).
-	if let (Some(WordPart::Zsh(_)), Some(last)) = (parts.last(), out.last_mut()) {
+	if let (Some(Part::Zsh(_)), Some(last)) = (parts.last().map(WordPart::get), out.last_mut()) {
 		last.1 = last.1.max(hi);
 	}
 	out
@@ -2333,10 +2500,10 @@ impl PartScan<'_> {
 		}
 	}
 
-	fn part(&mut self, p: &WordPart) {
+	fn part(&mut self, p: Part<'_>) {
 		self.skip_cont();
 		match p {
-			WordPart::Lit(s) => {
+			Part::Lit(s) => {
 				for &b in s {
 					self.skip_cont();
 					if self.at(self.i) == b {
@@ -2346,34 +2513,30 @@ impl PartScan<'_> {
 					}
 				}
 			},
-			WordPart::Escaped(s) => self.i += 1 + s.len(),
-			WordPart::SQuote(s) => self.i += 2 + s.len(),
-			WordPart::AnsiC(s) => self.i += 3 + s.len(),
-			WordPart::DQuote(inner) | WordPart::Locale(inner) => {
-				self.i += if matches!(p, WordPart::Locale(_)) {
-					2
-				} else {
-					1
-				};
+			Part::Escaped(s) => self.i += 1 + s.len(),
+			Part::SQuote(s) => self.i += 2 + s.len(),
+			Part::AnsiC(s) => self.i += 3 + s.len(),
+			Part::DQuote(inner) | Part::Locale(inner) => {
+				self.i += if matches!(p, Part::Locale(_)) { 2 } else { 1 };
 				for q in inner {
-					self.part(q);
+					self.part(q.get());
 				}
 				self.skip_cont();
 				self.i += 1;
 			},
-			WordPart::Param(pp) => {
-				if pp.braced {
+			Part::Param(pp) => {
+				if pp.braced() {
 					let inner_end = param_inner_end(pp);
 					self.close_after(inner_end.map_or(self.i + 2, |e| e as usize), b'}');
 				} else {
 					self.i += 1;
-					match &pp.name {
+					match pp.name() {
 						ParamName::Var(v) => self.i += v.len(),
 						_ => self.i += 1,
 					}
 				}
 			},
-			WordPart::Comsub(c) => match c.kind {
+			Part::Comsub(c) => match c.kind() {
 				ComsubKind::Backtick => {
 					self.i += 1;
 					while self.i < self.src.len() && self.at(self.i) != b'`' {
@@ -2384,27 +2547,27 @@ impl PartScan<'_> {
 					}
 					self.i += 1;
 				},
-				ComsubKind::Dollar if c.body.items.is_empty() || self.at(self.i + 2) == b'(' => {
-					self.i += 2 + c.text.len() + 1;
+				ComsubKind::Dollar if c.body().items().is_empty() || self.at(self.i + 2) == b'(' => {
+					self.i += 2 + c.text().len() + 1;
 				},
-				ComsubKind::Dollar => self.after_list(&c.body, b')'),
-				ComsubKind::NoFork | ComsubKind::ValueSub => self.after_list(&c.body, b'}'),
+				ComsubKind::Dollar => self.after_list(c.body(), b')'),
+				ComsubKind::NoFork | ComsubKind::ValueSub => self.after_list(c.body(), b'}'),
 			},
-			WordPart::ProcSub(ps) => self.after_list(&ps.body, b')'),
-			WordPart::Arith(a) => {
-				let e = a.span.hi as usize;
+			Part::ProcSub(ps) => self.after_list(ps.body(), b')'),
+			Part::Arith(a) => {
+				let e = a.span().hi as usize;
 				self.i = if self.at(e) == b']' { e + 1 } else { e + 2 };
 			},
-			WordPart::Compound(elems) => {
+			Part::Compound(elems) => {
 				let e = elems
 					.last()
-					.map_or(self.i + 1, |e| e.value.span.hi as usize);
+					.map_or(self.i + 1, |e| e.value().span().hi as usize);
 				self.close_after(e, b')');
 			},
-			WordPart::BadSubst(t) => self.i += t.len(),
-			WordPart::BadComsub(b) => self.i += b.text.len(),
-			WordPart::DroppedQuote => self.i += 1,
-			WordPart::Zsh(raw) => {
+			Part::BadSubst(t) => self.i += t.len(),
+			Part::BadComsub(b) => self.i += b.text().len(),
+			Part::DroppedQuote => self.i += 1,
+			Part::Zsh(raw) => {
 				let mut text = Vec::new();
 				crate::bash::syntax::print::zsh_text(raw, &mut text);
 				for &b in &text {
@@ -2420,11 +2583,11 @@ impl PartScan<'_> {
 	}
 
 	/// After a command list: skip separators and blanks to `close`.
-	fn after_list(&mut self, l: &List, close: u8) {
+	fn after_list(&mut self, l: List<'_>, close: u8) {
 		let start = l
-			.items
+			.items()
 			.last()
-			.map_or(self.i + 2, |it| it.and_or.span.hi as usize);
+			.map_or(self.i + 2, |it| it.and_or().span().hi as usize);
 		let mut j = start.max(self.i);
 		while j < self.src.len() {
 			match self.at(j) {
@@ -2455,21 +2618,23 @@ impl PartScan<'_> {
 }
 
 /// End of the last source-located piece inside a `${…}`.
-fn param_inner_end(p: &Param) -> Option<u32> {
-	let w = |w: &Word| Some(w.span.hi);
-	let from_op = match &p.op {
+fn param_inner_end(p: Param<'_>) -> Option<u32> {
+	let w = |w: Word<'_>| Some(w.span().hi);
+	let from_op = match p.op() {
 		ParamOp::Default { word, .. } | ParamOp::Assign { word, .. } | ParamOp::Alt { word, .. } => {
 			w(word)
 		},
-		ParamOp::Error { word, .. } => word.as_ref().and_then(w),
+		ParamOp::Error { word, .. } => word.and_then(w),
 		ParamOp::Trim { pat, .. } => w(pat),
-		ParamOp::Replace { pat, rep, .. } => rep.as_ref().map_or(Some(pat.span.hi), w),
-		ParamOp::Case { pat, .. } => pat.as_ref().and_then(w),
-		ParamOp::Substr { offset, len } => Some(len.as_ref().map_or(offset.span.hi, |l| l.span.hi)),
+		ParamOp::Replace { pat, rep, .. } => rep.map_or_else(|| Some(pat.span().hi), w),
+		ParamOp::Case { pat, .. } => pat.and_then(w),
+		ParamOp::Substr { offset, len } => {
+			Some(len.map_or_else(|| offset.span().hi, |l| l.span().hi))
+		},
 		_ => None,
 	};
-	from_op.or(match &p.index {
-		Some(Subscript::Expr(x)) => Some(x.span.hi),
+	from_op.or_else(|| match p.index() {
+		Some(Subscript::Expr(x)) => Some(x.span().hi),
 		_ => None,
 	})
 }

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [18.18.2] - 2026-11-08
+
+### Added
+
+- Added utilities for reading OpenTelemetry configuration from omp-managed `.env` files, including `$otelEnv` and `withOmpOtelEnv`.
+- Added filesystem path utilities for checking paths through symlinked roots, including paths that do not yet exist, and for optionally propagating filesystem errors in directory checks.
+
+### Fixed
+
+- Fixed relaxed JSON parsing so `__proto__` is preserved as a regular own property rather than modifying the parsed object's prototype.
+- Fixed SIGHUP handling so stopped terminal sessions display recovery hints, including the `--resume` command.
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed

@@ -4,14 +4,23 @@ import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, RESCUE_SHAKE_CONFIG, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	ImageContent,
+	Model,
+	ProviderSessionState,
+	ToolResultMessage,
+	UserMessage,
+} from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionStatsTracker } from "@oh-my-pi/pi-coding-agent/session/session-stats";
 import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -634,6 +643,364 @@ describe("AgentSession shake", () => {
 
 			expect(result.tokensFreed).toBeGreaterThan(0);
 			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
+		});
+
+		it("does not credit thinking that the Responses request replays from native history", async () => {
+			const model = getBundledModel("openrouter", "z-ai/glm-5.3-flash");
+			if (!model) throw new Error("Expected bundled OpenRouter model");
+			session.agent.setModel(model);
+			const prior: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "reasoning ".repeat(1_000) },
+					{ type: "text", text: "answer" },
+				],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					provider: model.provider,
+					dt: true,
+					items: [
+						{ type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "reasoning" }] },
+						{
+							type: "message",
+							id: "msg_1",
+							role: "assistant",
+							content: [{ type: "output_text", text: "answer" }],
+						},
+					],
+				},
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now() - 1,
+			};
+			sessionManager.appendMessage(prior);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+
+			const result = await session.shake("thinking");
+
+			expect(result.tokensFreed).toBe(0);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			expect(prior.content[0]?.type).toBe("thinking");
+			const wire = buildResponsesInput({
+				model,
+				context: { messages: [prior] },
+				strictResponsesPairing: false,
+				supportsImageDetailOriginal: false,
+				nativeHistory: { replay: true, filterReasoning: false },
+			});
+			expect(wire.some(item => item.type === "reasoning" && item.summary?.[0]?.text === "reasoning")).toBe(true);
+		});
+
+		/** An assistant turn as a real Responses request stores it: reasoning items plus the answer item. */
+		function nativeTurn(
+			model: Model,
+			options: {
+				answer: string;
+				items: Array<Record<string, unknown>>;
+				modelId?: string;
+				thinking: string;
+				timestamp?: number;
+			},
+		): AssistantMessage {
+			return {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: options.thinking },
+					{ type: "text", text: options.answer },
+				],
+				api: model.api,
+				provider: model.provider,
+				model: options.modelId ?? model.id,
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					provider: model.provider,
+					dt: true,
+					items: options.items,
+				},
+				stopReason: "stop",
+				usage,
+				timestamp: options.timestamp ?? Date.now(),
+			};
+		}
+
+		/** The native output item a real turn carries ahead of its reasoning. */
+		function answerItem(text: string): Array<Record<string, unknown>> {
+			return [
+				{
+					type: "message",
+					id: "msg_answer",
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text, annotations: [] }],
+				},
+			];
+		}
+
+		function bundled(provider: string, id: string): Model {
+			const model = getBundledModel(provider, id);
+			if (!model) throw new Error(`Expected bundled ${provider} test model to exist`);
+			return model;
+		}
+
+		it("reports replayed thinking as kept and rewrites nothing", async () => {
+			const model = bundled("openrouter", "z-ai/glm-4.7");
+			session.agent.setModel(model);
+			const replayed = nativeTurn(model, {
+				thinking: "reasoning the payload replays ".repeat(1_000),
+				answer: "old answer",
+				items: [
+					{ type: "reasoning", id: "rs_replayed", summary: [], encrypted_content: "e".repeat(2_000) },
+					...answerItem("old answer"),
+				],
+				timestamp: Date.now() - 1,
+			});
+			sessionManager.appendMessage(replayed);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			const contentBefore = structuredClone(replayed.content);
+			const rewriteEntries = vi.spyOn(sessionManager, "rewriteEntries");
+			const replaceMessages = vi.spyOn(session.agent, "replaceMessages");
+			const anchoredRewrite = vi.spyOn(SessionStatsTracker.prototype, "recordAnchoredHistoryRewrite");
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(0);
+			expect(result.thinkingBlocksKept).toBe(1);
+			expect(result.tokensFreed).toBe(0);
+			expect(replayed.content).toEqual(contentBefore);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			// No rewrite at all: the transcript is what the wire already sends.
+			expect(rewriteEntries).not.toHaveBeenCalled();
+			expect(replaceMessages).not.toHaveBeenCalled();
+			expect(anchoredRewrite).not.toHaveBeenCalled();
+			// The wording is not part of this contract: it must say blocks were kept
+			// and must not claim a drop.
+			const summary = formatShakeSummary(result);
+			expect(summary).toContain("1 thinking block");
+			expect(summary).toContain("kept");
+			expect(summary).not.toContain("Dropped");
+		});
+
+		it("leaves an answer-only native turn's thinking in place", async () => {
+			// The request replays this turn from its payload, which carries the answer
+			// item and no reasoning item: the content thinking never reaches the wire.
+			const model = bundled("openrouter", "z-ai/glm-4.7");
+			session.agent.setModel(model);
+			const replayed = nativeTurn(model, {
+				thinking: "reasoning with no native item ".repeat(1_000),
+				answer: "answer",
+				items: [
+					{
+						type: "message",
+						id: "msg_x",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: "answer", annotations: [] }],
+					},
+				],
+				timestamp: Date.now() - 1,
+			});
+			sessionManager.appendMessage(replayed);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const contentBefore = structuredClone(replayed.content);
+			const rewriteEntries = vi.spyOn(sessionManager, "rewriteEntries");
+			const replaceMessages = vi.spyOn(session.agent, "replaceMessages");
+			const anchoredRewrite = vi.spyOn(SessionStatsTracker.prototype, "recordAnchoredHistoryRewrite");
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(0);
+			expect(result.thinkingBlocksKept).toBe(1);
+			expect(result.tokensFreed).toBe(0);
+			expect(replayed.content).toEqual(contentBefore);
+			expect(rewriteEntries).not.toHaveBeenCalled();
+			expect(replaceMessages).not.toHaveBeenCalled();
+			expect(anchoredRewrite).not.toHaveBeenCalled();
+		});
+
+		it("drops an answer-only turn a cold session rebuilds from content", async () => {
+			// Cold: the builder replays native items only when nothing in them is
+			// bound to one connection, and an answer item carrying an id is bound, so
+			// the turn is rebuilt from `content` and its thinking does leave the
+			// transcript's wire form.
+			const model = bundled("github-copilot", "gpt-5.4");
+			session.agent.setModel(model);
+			const rebuilt = nativeTurn(model, {
+				thinking: "reasoning rebuilt from content ".repeat(1_000),
+				answer: "answer",
+				items: [
+					{
+						type: "message",
+						id: "msg_x",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: "answer", annotations: [] }],
+					},
+				],
+			});
+			sessionManager.appendMessage(rebuilt);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const tokenizer = session.agent.tokenizer;
+			const before = tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true });
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(1);
+			expect(result.thinkingBlocksKept).toBe(0);
+			expect(rebuilt.content).toEqual([{ type: "text", text: "answer" }]);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true }));
+		});
+
+		it("still drops thinking a cold Responses session rebuilds from content", async () => {
+			// GitHub Copilot binds native items to one connection, so the session
+			// starts cold and the turn is rebuilt from `content`.
+			const model = bundled("github-copilot", "gpt-5.4");
+			session.agent.setModel(model);
+			const rebuilt = nativeTurn(model, {
+				thinking: "reasoning rebuilt from content ".repeat(1_000),
+				answer: "answer",
+				items: [
+					{ type: "reasoning", id: "rs_cold", summary: [], encrypted_content: "e".repeat(2_000) },
+					...answerItem("answer"),
+				],
+			});
+			sessionManager.appendMessage(rebuilt);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const tokenizer = session.agent.tokenizer;
+			const before = tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true });
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(1);
+			expect(result.thinkingBlocksKept).toBe(0);
+			expect(rebuilt.content).toEqual([{ type: "text", text: "answer" }]);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true }));
+		});
+
+		it("leaves plaintext reasoning a cold session replays in place", async () => {
+			const model = bundled("openai", "gpt-5");
+			// A warmed-then-closed session: cold, and nothing in the items is bound
+			// to a connection, so the plaintext reasoning still replays.
+			const cold: ProviderSessionState & { nativeHistoryReplayWarmed: boolean } = {
+				close: () => {},
+				nativeHistoryReplayWarmed: false,
+			};
+			session.agent.providerSessionState = new Map<string, ProviderSessionState>([
+				["openai-responses:openai", cold],
+			]);
+			session.agent.setModel(model);
+			const replayed = nativeTurn(model, {
+				thinking: "plaintext reasoning ".repeat(1_000),
+				answer: "answer",
+				items: [
+					{ type: "reasoning", summary: [], content: [{ type: "reasoning_text", text: "plaintext reasoning" }] },
+					{
+						type: "message",
+						role: "assistant",
+						content: [{ type: "output_text", text: "answer", annotations: [] }],
+					},
+				],
+			});
+			sessionManager.appendMessage(replayed);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(0);
+			expect(result.thinkingBlocksKept).toBe(1);
+			expect(result.tokensFreed).toBe(0);
+			expect(replayed.content.map(block => block.type)).toEqual(["thinking", "text"]);
+		});
+
+		it("keeps a replayed turn while dropping a rebuilt one, and persists the payload", async () => {
+			const model = bundled("openrouter", "z-ai/glm-4.7");
+			session.agent.setModel(model);
+			const items = [
+				{ type: "reasoning", id: "rs_turn", summary: [], encrypted_content: "e".repeat(2_000) },
+				...answerItem("first answer"),
+			];
+			const replayed = nativeTurn(model, {
+				thinking: "first reasoning ".repeat(1_000),
+				answer: "first answer",
+				items,
+				timestamp: Date.now() - 2,
+			});
+			// Same provider and payload shape, but the turn belongs to another model.
+			const rebuilt = nativeTurn(model, {
+				thinking: "second reasoning ".repeat(1_000),
+				answer: "second answer",
+				items,
+				modelId: "z-ai/glm-4.6",
+				timestamp: Date.now() - 1,
+			});
+			sessionManager.appendMessage(replayed);
+			sessionManager.appendMessage(rebuilt);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const tokenizer = session.agent.tokenizer;
+			const before = tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true });
+			const rewriteEntries = vi.spyOn(sessionManager, "rewriteEntries");
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(1);
+			expect(result.thinkingBlocksKept).toBe(1);
+			expect(replayed.content.map(block => block.type)).toEqual(["thinking", "text"]);
+			expect(rebuilt.content).toEqual([{ type: "text", text: "second answer" }]);
+			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true }));
+			expect(rewriteEntries).toHaveBeenCalledTimes(1);
+			const summary = formatShakeSummary(result);
+			expect(summary).toContain("Dropped 1 thinking block");
+			expect(summary).toContain("1 thinking block");
+			expect(summary).toContain("kept");
+
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted shake session");
+			const persisted = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				const assistants = persisted
+					.getBranch()
+					.flatMap(entry =>
+						entry.type === "message" && entry.message.role === "assistant" ? [entry.message] : [],
+					);
+				const keptTurn = assistants.find(message => message.content.some(block => block.type === "thinking"));
+				if (!keptTurn) throw new Error("Expected the kept thinking turn to persist");
+				expect(keptTurn.model).toBe(model.id);
+				const payload = keptTurn.providerPayload;
+				if (payload?.type !== "openaiResponsesHistory") throw new Error("Expected the native payload to persist");
+				// The reasoning item and its answer item are still exactly what the
+				// request replays, so the kept turn stays a complete native turn.
+				expect(payload.items).toEqual(items);
+				const droppedTurn = assistants.find(message => message.model === "z-ai/glm-4.6");
+				expect(droppedTurn?.content.map(block => block.type)).toEqual(["text"]);
+			} finally {
+				await persisted.close();
+			}
 		});
 	});
 
