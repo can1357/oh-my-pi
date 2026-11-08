@@ -30,7 +30,7 @@ use super::{
 use crate::bash::{
 	diag::Diag,
 	event::{EventData, NodeKind, RedirKind, ResolvedKind, WaitKey, assign_preview},
-	fd::FdRef,
+	fd::{FdOrigin, FdRef},
 	fs::StatKind,
 	host::{
 		ChildRedirs, EnvView, ExitStatus, Invocation, ProcEvent, ResolveCtx, Resolved, SpawnSpec,
@@ -5046,8 +5046,13 @@ fn spawn_error(name: BString, err: std::io::Error) -> (Diag, i32) {
 	}
 }
 
+/// How an external gets fd object `h`: a slot the script closed stays
+/// closed (bash's child inherits it so); an object a restore lost reads as
+/// the null device.
 fn stdio_spec(h: &FdRef) -> StdioSpec {
-	if !h.is_open() {
+	if h.origin() == FdOrigin::Closed {
+		StdioSpec::Closed
+	} else if !h.is_open() {
 		StdioSpec::Null
 	} else if let Some(os) = h.os_handle() {
 		StdioSpec::Inherit(os)
@@ -5058,10 +5063,14 @@ fn stdio_spec(h: &FdRef) -> StdioSpec {
 
 fn extra_fds(vp: &Vproc) -> Vec<(i32, FdRef)> {
 	// A close-on-exec fd (`sysopen -o cloexec`, a `zsystem flock` lock) is
-	// not inherited.
+	// not inherited, nor is one the script closed.
 	vp.fds
 		.iter()
-		.filter(|(fd, h)| *fd > 2 && !h.flags().contains(crate::bash::FdFlags::CLOEXEC))
+		.filter(|(fd, h)| {
+			*fd > 2
+				&& h.origin() != FdOrigin::Closed
+				&& !h.flags().contains(crate::bash::FdFlags::CLOEXEC)
+		})
 		.map(|(fd, h)| (fd, h.clone()))
 		.collect()
 }

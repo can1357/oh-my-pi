@@ -11,6 +11,8 @@ import { type CompactionMethod, resolveSpeculationMethod } from "@oh-my-pi/pi-co
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
+import { hindsightBackend } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
 
 import {
@@ -135,6 +137,7 @@ describe("async speculative compaction", () => {
 			reconnectToAgent: () => {},
 			drainStrandedQueuedMessages: () => {},
 			buildDisplaySessionContext: () => sessionManager.buildSessionContext(),
+			replaceMessagesFromSessionContext: (messages: AgentMessage[]) => agent.replaceMessages(messages),
 			persistEvalStateContext: () => {},
 			convertToLlmForSideRequest:
 				options.convertToLlmForSideRequest ?? ((messages: AgentMessage[]) => messages as never),
@@ -256,6 +259,28 @@ describe("async speculative compaction", () => {
 		expect(maintenance.speculationState).toBe("running");
 		await waitForState("armed");
 		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not recall unused memory while arming native Codex compaction", async () => {
+		const bundled = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!bundled) throw new Error("Expected built-in Codex model");
+		model = { ...bundled, contextWindow: CONTEXT_WINDOW };
+		authStorage.keys.setRuntime("openai-codex", "test-key");
+		maintenance = createMaintenance({ methodOrder: ["remote"] });
+		cfgMemoryBackend.override(maintenanceSettings, "hindsight");
+		const recallSpy = vi.spyOn(hindsightBackend, "preCompactionContext").mockResolvedValue("fresh memory");
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "native summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+			preserveData: { openaiRemoteCompaction: { provider: model.provider, replacementHistory: [] } },
+		}));
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+
+		expect(recallSpy).not.toHaveBeenCalled();
 	});
 
 	it("commits an armed summary at threshold without paying for another summarizer call", async () => {
@@ -1087,6 +1112,6 @@ describe("resolveSpeculationMethod", () => {
 		const settings = cfgCompaction.get(Settings.isolated({ "compaction.methodOrder": ["snapcompact", "soft"] }));
 		// Same declared input; only the second drops images on the wire.
 		expect(resolveSpeculationMethod(getBundledModel("anthropic", "claude-sonnet-4-5"), settings)).toBeUndefined();
-		expect(resolveSpeculationMethod(getBundledModel("venice", "deepseek-v4-1-flash"), settings)).toBe("soft");
+		expect(resolveSpeculationMethod(getBundledModel("deepseek", "deepseek-v4-flash"), settings)).toBe("soft");
 	});
 });

@@ -344,7 +344,7 @@ impl Launcher {
 			StdioSpec::Pipe(fd) => {
 				(fd.is_capture() || fd.observes_output()).then(|| TextSink::Capture(fd.clone()))
 			},
-			StdioSpec::Null | StdioSpec::File(_) => None,
+			StdioSpec::Null | StdioSpec::Closed | StdioSpec::File(_) => None,
 		}
 	}
 
@@ -952,6 +952,10 @@ fn read_user() -> UserInfo {
 
 /// The process's supplementary group ids (`GROUPS`); empty where the
 /// platform has none or `getgroups` fails.
+#[cfg_attr(
+	not(unix),
+	expect(clippy::missing_const_for_fn, reason = "the unix body calls getgroups")
+)]
 fn groups() -> Vec<u32> {
 	#[cfg(unix)]
 	{

@@ -266,8 +266,9 @@ pub fn perform(
 		Probe::Zftp { .. } => {
 			ProbeResult::Zftp(Box::new(super::builtins::zsh_mod_zftp::ZftpAns::Done))
 		},
-		// A program's shell has no history files ([`crate::bash::Profile::Tool`]):
-		// reads find none, writes fail; only the clock steps run.
+		// A program's shell has no history files
+		// ([`crate::bash::Profile::Tool`]): reads find none, writes fail; only
+		// the clock steps run.
 		Probe::Hist { op, .. }
 			if !matches!(**op, HistOp::Now | HistOp::Sleep { .. })
 				&& super::is_tool(cx.store, vp).unwrap_or(true) =>

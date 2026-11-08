@@ -95,8 +95,8 @@ pub const KILL_EXIT_CODE: u32 = 137;
 pub const CONTROL_C_EXIT: u32 = 0xc000_013a;
 
 /// Classify a Windows exit code: our own job kill reads as
-/// `Signaled(KILL)`, the console-control exit as the signal we mapped to
-/// `CTRL_BREAK` (`console`, else INT), anything else as a plain exit.
+/// `Signaled(KILL)`, the console-control exit as the signal we mapped to a
+/// console control event (`console`, else INT), anything else as a plain exit.
 pub fn exit_status(code: u32, killed: bool, console: Option<Signal>) -> ExitStatus {
 	match code {
 		KILL_EXIT_CODE if killed => ExitStatus::Signaled(Signal::Kill),
