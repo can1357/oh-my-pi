@@ -6,6 +6,8 @@ import { md } from "@oh-my-pi/pi-tui/native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurfaceProvider } from "@oh-my-pi/pi-tui/native/node";
 import { AskDialogComponent, type ExtensionAskDialogQuestion } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { APPROVE_ARM_MS, ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { getEditorTheme } from "@oh-my-pi/pi-tui/theme";
 import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
@@ -868,5 +870,46 @@ describe("dialogs under a native surface", () => {
 		dialog.handleNativeEvent({ type: "action", key: "x", act: "cancel", mods: [] });
 		await expect(cancelled).rejects.toThrow("Login cancelled");
 		expect(onComplete).toHaveBeenCalledWith(false, "Login cancelled");
+	});
+
+	it("approval chord is ignored while a raw paste from draft editing is landing", async () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const paste = Promise.withResolvers<void>();
+		editor.onPasteTextRaw = async () => {
+			await paste.promise;
+			editor.insertText("raw paste");
+		};
+		editor.setActionKeys("app.clipboard.pasteTextRaw", ["ctrl+v"]);
+
+		const onApprove = vi.fn();
+		const dialog = new ApprovalDialogComponent(
+			"Allow tool: bash\nCommand: ls",
+			{ onApprove, onDeny: vi.fn() },
+			{
+				draft: {
+					hasDraft: () => editor.getText().length > 0 || editor.composerChips().length > 0 || editor.pasteInFlight,
+					pasteInFlight: () => editor.pasteInFlight,
+					handleInput: key => editor.handleDraftEdit(key),
+				},
+			},
+		);
+		const now = vi.spyOn(performance, "now").mockReturnValue(Number.POSITIVE_INFINITY);
+		try {
+			dialog.handleInput("\x16");
+			expect(editor.pasteInFlight).toBe(true);
+			dialog.handleInput("\x11");
+			expect(onApprove).not.toHaveBeenCalled();
+
+			paste.resolve();
+			await paste.promise;
+			await Promise.resolve();
+
+			expect(editor.pasteInFlight).toBe(false);
+			expect(editor.getText()).toBe("raw paste");
+			dialog.handleInput("\x11");
+			expect(onApprove).toHaveBeenCalledTimes(1);
+		} finally {
+			now.mockRestore();
+		}
 	});
 });

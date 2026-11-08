@@ -624,6 +624,52 @@ describe("CustomEditor configured paste image keys", () => {
 	});
 });
 
+describe("CustomEditor configured raw paste shortcuts", () => {
+	it("keeps an async raw text paste in flight until it lands", async () => {
+		const { editor } = makeEditor();
+		const clipboard = Promise.withResolvers<void>();
+		editor.onPasteTextRaw = async () => {
+			await clipboard.promise;
+			editor.insertText("pasted raw");
+		};
+		editor.setActionKeys("app.clipboard.pasteTextRaw", ["ctrl+v"]);
+
+		editor.handleInput("\x16");
+		expect(editor.pasteInFlight).toBe(true);
+		editor.handleInput("x");
+		expect(editor.getText()).toBe("");
+
+		clipboard.resolve();
+		await clipboard.promise;
+		await Promise.resolve();
+
+		expect(editor.pasteInFlight).toBe(false);
+		expect(editor.getText()).toBe("pasted rawx");
+	});
+
+	it("keeps an async raw paste from draft editing in flight until it lands", async () => {
+		const { editor } = makeEditor();
+		const clipboard = Promise.withResolvers<void>();
+		editor.onPasteTextRaw = async () => {
+			await clipboard.promise;
+			editor.insertText("draft raw");
+		};
+		editor.setActionKeys("app.clipboard.pasteTextRaw", ["ctrl+v"]);
+
+		editor.handleDraftEdit("\x16");
+		expect(editor.pasteInFlight).toBe(true);
+		editor.handleDraftEdit("x");
+		expect(editor.getText()).toBe("");
+
+		clipboard.resolve();
+		await clipboard.promise;
+		await Promise.resolve();
+
+		expect(editor.pasteInFlight).toBe(false);
+		expect(editor.getText()).toBe("draft rawx");
+	});
+});
+
 describe("extractImagePathFromText (issue #3506)", () => {
 	it("returns the path when the text is a single image or video file path", () => {
 		expect(extractImagePathFromText("/tmp/screenshot.png")).toBe("/tmp/screenshot.png");
