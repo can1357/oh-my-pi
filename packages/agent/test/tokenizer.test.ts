@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as path from "node:path";
 import type { Api, AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect/demotion";
 import { adoptFactoryReplay } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { convertMessages } from "@oh-my-pi/pi-ai/providers/openai-completions";
@@ -10,6 +11,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { Agent } from "../src/agent";
 import type { SessionMessageEntry } from "../src/compaction/entries";
 import { applyShakeRegions, collectShakeRegions, RESCUE_SHAKE_CONFIG } from "../src/compaction/shake";
@@ -439,6 +441,8 @@ describe("countMessage replayed thinking", () => {
 	const VISIBLE = "Check the call sites first.";
 	// What the visible blocks count to in the test env (bytes/4 per fragment).
 	const VISIBLE_TOKENS = 9;
+	// The text block alone, once a filtered reader's own thinking is not sent.
+	const DONE_TOKENS = 2;
 	const OUTPUT_TOKENS = 3000;
 
 	function reader(provider: "anthropic" | "openrouter" | "amazon-bedrock" | "google", id: string): Model {
@@ -510,10 +514,17 @@ describe("countMessage replayed thinking", () => {
 			bedrockOpus,
 			reader("amazon-bedrock", "global.anthropic.claude-opus-5"),
 		],
-		// OpenRouter filters reasoning history out of the request.
-		["a reader that filters reasoning history", openRouterOpus, openRouterOpus],
 	] as const)("charges only the visible blocks for %s, never the signature", (_case, model, from) => {
 		expect(new Tokenizer(model).countMessage(signedTurn(from, VISIBLE, SIGNATURE))).toBe(VISIBLE_TOKENS);
+	});
+
+	test("charges nothing for a filtered reader's own thinking, which its request never sends", () => {
+		// OpenRouter strips the turn's reasoning items from the request and its
+		// encoder drops the same-model thinking block outright, so neither the
+		// signature nor the thinking text is part of the reading model's input.
+		expect(new Tokenizer(openRouterOpus).countMessage(signedTurn(openRouterOpus, VISIBLE, SIGNATURE))).toBe(
+			DONE_TOKENS,
+		);
 	});
 
 	test("charges only the visible thinking of an aborted turn's final, partly signed block", () => {
@@ -737,6 +748,73 @@ describe("replayed Responses reasoning", () => {
 		expect(filtering.countMessage(turn, floored)).toBe(visible(filtering));
 	});
 
+	test("never reuses a tokenizer across a filtered and a replaying route", () => {
+		const openai = bundledModel<"openai-responses">("openai", "gpt-6.1-sol");
+		const filtering = { ...openai, compat: { ...openai.compat, filterReasoningHistory: true } };
+		// Filtering changes what a turn counts to, so it is part of the reuse key
+		// even for a model that carries no identity to key reasoning replays on.
+		const filtered = new Tokenizer({ tokenizer: filtering.tokenizer, compat: filtering.compat });
+		expect(filtered.countsAlike({ tokenizer: filtering.tokenizer })).toBe(false);
+		expect(filtered.countsAlike({ tokenizer: filtering.tokenizer, compat: filtering.compat })).toBe(true);
+	});
+
+	test("prices only the bytes a filtered Responses request carries for a turn's thinking", async () => {
+		const openai = bundledModel<"openai-responses">("openai", "gpt-6.1-sol");
+		const filtering = { ...openai, compat: { ...openai.compat, filterReasoningHistory: true } };
+		const THINKING = "Read the guard, patch the branch, then rerun the suite. ".repeat(40).trim();
+		const thinking = {
+			type: "thinking",
+			thinking: THINKING,
+			thinkingSignature: JSON.stringify(reasoningItem),
+		} as const;
+		// The native payload the turn actually carries: its reasoning item plus the
+		// answer message. Filtering strips the reasoning item and nothing else.
+		const answerItem = {
+			type: "message",
+			role: "assistant",
+			content: [{ type: "output_text", text: "answer", annotations: [] }],
+		};
+		const ownTurn = responsesTurn(
+			filtering,
+			history(filtering.provider, [reasoningItem, answerItem]),
+			[thinking, { type: "text", text: "answer" }],
+			"stop",
+		);
+
+		const tokenizer = new Tokenizer(filtering);
+		const sent = assistantWireText(await responsesWireInput(filtering, ownTurn));
+		expect(sent).toEqual(["answer"]);
+		// Delta 0: no reasoning item and no demoted copy of the thinking text reach
+		// the request, so the meter charges none of it in either arm.
+		expect(tokenizer.countMessage(ownTurn)).toBe(tokenizer.countTokens(sent));
+		expect(tokenizer.countMessage(ownTurn, floored)).toBe(tokenizer.countTokens(sent));
+
+		// Another model's thinking is demoted to visible text, which the request
+		// does carry, so it stays priced — at the demoted rendering.
+		const demoted = renderDemotedThinking(filtering.id, THINKING);
+		const foreignTurn = { ...ownTurn, model: "another-model" };
+		expect(assistantWireText(await responsesWireInput(filtering, foreignTurn))).toEqual([demoted, "answer"]);
+		expect(tokenizer.countMessage(foreignTurn)).toBe(tokenizer.countTokens([demoted, "answer"]));
+
+		// Control: the replaying route still charges the turn's thinking text.
+		const replaying = new Tokenizer(openai);
+		const replayedTurn = responsesTurn(
+			openai,
+			history(openai.provider),
+			[thinking, { type: "text", text: "answer" }],
+			"stop",
+		);
+		const withoutThinking = responsesTurn(
+			openai,
+			history(openai.provider),
+			[{ type: "text", text: "answer" }],
+			"stop",
+		);
+		expect(replaying.countMessage(replayedTurn) - replaying.countMessage(withoutThinking)).toBe(
+			replaying.countTokens(THINKING),
+		);
+	});
+
 	test("charges nothing, signature included, for a turn whose replay sends no reasoning", () => {
 		const tokenizer = new Tokenizer(sol);
 		const dropped: Array<[string, AssistantMessage]> = [
@@ -843,12 +921,12 @@ function bundledModel<TApi extends Api = Api>(provider: "openai" | "openai-codex
 	return model;
 }
 
-/** Reasoning items the real Responses request carries for `turn` under the session's replay state. */
-async function responsesWireReasoning(
+/** The input items the real Responses request carries for `turn` under the session's replay state. */
+async function responsesWireInput(
 	model: Model<"openai-responses">,
 	turn: AssistantMessage,
-	providerSessionState: Map<string, ProviderSessionState>,
-): Promise<number> {
+	providerSessionState?: Map<string, ProviderSessionState>,
+): Promise<unknown[]> {
 	const { promise, resolve } = Promise.withResolvers<unknown>();
 	const controller = new AbortController();
 	controller.abort();
@@ -862,8 +940,35 @@ async function responsesWireReasoning(
 		{ messages },
 		{ apiKey: "test-key", signal: controller.signal, providerSessionState, onPayload: resolve },
 	);
-	const { input } = (await promise) as { input: Array<{ type?: string }> };
-	return input.filter(item => item.type === "reasoning").length;
+	const payload = await promise;
+	if (!isRecord(payload) || !Array.isArray(payload.input)) throw new Error("expected a Responses payload");
+	return payload.input;
+}
+
+/** Reasoning items the real Responses request carries for `turn` under the session's replay state. */
+async function responsesWireReasoning(
+	model: Model<"openai-responses">,
+	turn: AssistantMessage,
+	providerSessionState: Map<string, ProviderSessionState>,
+): Promise<number> {
+	const input = await responsesWireInput(model, turn, providerSessionState);
+	return input.filter(item => isRecord(item) && item.type === "reasoning").length;
+}
+
+/** The assistant text the request carries for a turn, in the tokenizer's pricing order. */
+function assistantWireText(input: readonly unknown[]): string[] {
+	const fragments: string[] = [];
+	for (const item of input) {
+		if (!isRecord(item) || item.type !== "message" || item.role !== "assistant" || !Array.isArray(item.content)) {
+			continue;
+		}
+		for (const part of item.content) {
+			if (isRecord(part) && part.type === "output_text" && typeof part.text === "string" && part.text.length > 0) {
+				fragments.push(part.text);
+			}
+		}
+	}
+	return fragments;
 }
 
 /** The per-image charge, read back through the arm that already applied it. */
