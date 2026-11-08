@@ -2369,3 +2369,25 @@ async fn pipe_tap_forwards_every_byte_and_counts_them() {
 	assert!(read.data.ends_with(format!("\n{LAST}\n").as_bytes()));
 	assert!(!read.open);
 }
+
+/// Windows `/dev/null` is the null device: stdout and stderr redirects discard
+/// their text, and `test -e` sees the device (open, stat, existence). A
+/// regression leaves `x` or `y` on a captured stream, or a non-zero status
+/// when the redirect or the existence check fails.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn dev_null_redirects_discard_both_streams_and_exists() {
+	let mut session = default_session().await;
+	let stdout = tempfile::tempfile().expect("stdout capture");
+	let stderr = tempfile::tempfile().expect("stderr capture");
+	let result = session
+		.run_test(
+			"printf x >/dev/null; printf y 2>/dev/null; test -e /dev/null",
+			&TestStdio::null().stdout(&stdout).stderr(&stderr),
+		)
+		.await
+		.expect("dev/null redirection");
+	assert_eq!(exit_code(&result), 0);
+	assert_eq!(read_capture(&stdout), "", "redirected stdout must not appear");
+	assert_eq!(read_capture(&stderr), "", "redirected stderr must not appear");
+}
