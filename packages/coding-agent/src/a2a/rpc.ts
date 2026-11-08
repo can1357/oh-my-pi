@@ -20,6 +20,7 @@ import { SpawnRefusedError } from "../task/spawn-run";
 import { SpawnPendingError } from "../task/spawn-subagent";
 import { StructuredSubagentError } from "../task/structured-subagent";
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import { logger } from "@oh-my-pi/pi-utils";
 
 /** A2A v1.0 task lifecycle states (proto enum names; JSON keeps them verbatim). */
 export const TASK_STATE = {
@@ -420,6 +421,11 @@ export class PendingSpawnLedger {
 		this.#records.set(record.task.id, record);
 	}
 
+	/** Drop one record. The caller notifies views that were serving it. */
+	delete(id: string): void {
+		this.#records.delete(id);
+	}
+
 	subscribe(listener: (id: string) => void): () => void {
 		this.#listeners.add(listener);
 		return () => {
@@ -528,7 +534,11 @@ function persistTask(
 ): A2aTask {
 	if (created) {
 		deps.createdTaskIds?.add(task.id);
-		deps.createdTaskRefs?.set(task.id, ref ?? deps.registry.get(task.id));
+		// Pending spawns pass no ref, so this stays undefined until
+		// claimResolvedRef. Do not capture registry.get: a reused id may still
+		// hold a stale earlier generation, and that comparison must see only
+		// the registry at resolve time.
+		deps.createdTaskRefs?.set(task.id, ref);
 		if (request.contextId !== undefined) deps.contextIds?.set(task.id, request.contextId);
 		else deps.contextIds?.delete(task.id);
 	}
@@ -626,7 +636,11 @@ function trackPendingSpawn(
 				onRegistrationRejected(deps, record, reason);
 			},
 		)
-		.catch(() => {
+		.catch((error: unknown) => {
+			logger.warn("A2A pending spawn abort failed", {
+				taskId: record.task.id,
+				error: error instanceof Error ? error.message : String(error),
+			});
 			ledger.notify(record.task.id);
 		});
 }
@@ -649,6 +663,8 @@ export function snapshotA2aTask(deps: A2aDispatchDeps, id: string): A2aTask | un
 		return taskFor(record.ref, deps);
 	}
 	if (record?.outcome === "pending") {
+		// Invariant: registration resolves to the first ref registered under this
+		// id, so a live registry ref here is that generation, not a replacement.
 		if (addressed) return taskFor(addressed, deps);
 		return record.task;
 	}

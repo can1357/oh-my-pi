@@ -281,6 +281,17 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 		...(options.onIncomingRequest !== undefined ? { noteIncomingRequest: options.onIncomingRequest } : {}),
 	};
 	const unsubscribe = options.registry.onChange(event => {
+		if (event.type === "removed") {
+			// A resolved pending spawn must not outlive the exact ref the registry
+			// dropped. Evict that record so GetTask, ListTasks, and SSE match a
+			// normal unregistration: missing, absent, and one final FAILED.
+			const record = pendingSpawns.get(event.ref.id);
+			if (record?.ref === event.ref) {
+				pendingSpawns.delete(event.ref.id);
+				pendingSpawns.notify(event.ref.id);
+			}
+			return;
+		}
 		if (event.type !== "registered" || !dispatchDeps.createdTaskRefs?.has(event.ref.id)) return;
 		// A pending registration owns an exact future ref. The first registered
 		// event for that id may be a replacement and must not be claimed.

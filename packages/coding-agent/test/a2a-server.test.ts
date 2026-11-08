@@ -135,6 +135,15 @@ class FakeRegistry {
 		if (notify) this.#emit({ type: "registered", ref });
 	}
 
+	/** Drop a ref the way AgentRegistry.unregister does, including the removed event. */
+	unregister(id: string): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref) return false;
+		this.#refs.delete(id);
+		this.#emit({ type: "removed", ref });
+		return true;
+	}
+
 	emit(event: RegistryEvent): void {
 		this.#emit(event);
 	}
@@ -1284,7 +1293,7 @@ const sendPending = (messageId: string, contextId?: string) => ({
 });
 
 describe("A2A pending spawn lifecycle", () => {
-	function pendingServer(id: string, refs: AgentRef[] = []) {
+	function pendingServer(id: string, refs: AgentRef[] = [], options?: { streamPollMs?: number }) {
 		const registration = Promise.withResolvers<AgentRef>();
 		const registry = new FakeRegistry(refs);
 		const events: RegistryEvent[] = [];
@@ -1294,6 +1303,7 @@ describe("A2A pending spawn lifecycle", () => {
 			spawn: async () => {
 				throw new SpawnPendingError(id, registration.promise);
 			},
+			...(options?.streamPollMs !== undefined ? { streamPollMs: options.streamPollMs } : {}),
 		});
 		return { registration, events, ...started, registry };
 	}
@@ -1435,7 +1445,7 @@ describe("A2A pending spawn lifecycle", () => {
 
 	it("fails every view with the registration error and one final SSE update, without a registry event", async () => {
 		const id = "Spawn-late";
-		const { handle, registration, events } = pendingServer(id);
+		const { handle, registration, events } = pendingServer(id, [], { streamPollMs: 60_000 });
 		const sse = (await openSpawnStream(handle, "m-fail", "ctx-pending")).sse;
 		try {
 			await sse.until(text => text.includes("TASK_STATE_SUBMITTED"));
@@ -1557,6 +1567,67 @@ describe("A2A pending spawn lifecycle", () => {
 			(await rpc(replaced.handle, { jsonrpc: "2.0", id: 4, method: "GetTask", params: { id } })).json,
 		);
 		expect(live.status.state).toBe(TASK_STATE.WORKING);
+	});
+
+	it("drops a resolved spawn from every view when its exact ref is unregistered", async () => {
+		const id = "Spawn-late";
+		const { handle, registration, registry } = pendingServer(id, [
+			makeRef({ id: "alpha", createdAt: 1_000, status: "running" }),
+		]);
+		const ref = makeRef({ id, status: "running", createdAt: 1_500, activity: "booting" });
+		const sse = (await openSpawnStream(handle, "m-evict", "ctx-pending")).sse;
+		try {
+			await sse.until(text => text.includes("TASK_STATE_SUBMITTED"));
+			registration.resolve(ref);
+			await registration.promise;
+			registry.insert(ref);
+			await sse.until(text => text.includes("TASK_STATE_WORKING"));
+
+			expect(registry.unregister(id)).toBe(true);
+			const missing = await rpc(handle, { jsonrpc: "2.0", id: 2, method: "GetTask", params: { id } });
+			expect(errorResult(missing.json).code).toBe(RPC_ERRORS.TASK_NOT_FOUND);
+			const listed = listResult(
+				(await rpc(handle, { jsonrpc: "2.0", id: 3, method: "ListTasks", params: {} })).json,
+			);
+			expect(listed.tasks.map(task => task.id)).toEqual(["alpha"]);
+			await sse.toEnd();
+			expect(
+				sseStatusUpdates(sse.text).filter(update => update.state === TASK_STATE.FAILED && update.final),
+			).toHaveLength(1);
+		} finally {
+			sse.cancel();
+		}
+	});
+
+	it("cancels the resolved generation when a stale ref occupied the id at SendMessage", async () => {
+		const id = "Spawn-late";
+		let staleAborts = 0;
+		let ownedAborts = 0;
+		const stale = makeRef({
+			id,
+			status: "idle",
+			createdAt: 1_000,
+			session: { abort: async () => void (staleAborts += 1) } as never,
+		});
+		const owned = makeRef({
+			id,
+			status: "running",
+			createdAt: 2_000,
+			session: { abort: async () => void (ownedAborts += 1) } as never,
+		});
+		const { handle, registration, registry } = pendingServer(id, [stale]);
+		await rpc(handle, sendPending("m-stale", "ctx-pending"));
+		registry.insert(owned);
+		registration.resolve(owned);
+		await registration.promise;
+
+		const canceled = rpcTask(
+			(await rpc(handle, { jsonrpc: "2.0", id: 2, method: "CancelTask", params: { id } })).json,
+		);
+		expect(canceled.status.state).toBe(TASK_STATE.CANCELED);
+		expect(ownedAborts).toBe(1);
+		expect(staleAborts).toBe(0);
+		expect(registry.get(id)?.status).toBe("aborted");
 	});
 });
 
