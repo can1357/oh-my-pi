@@ -16,6 +16,7 @@ const extraArtifactsDirs = new Set<string>();
  * filesystem paths remain useful after the creating process exits.
  */
 const temporaryArtifactsDirs = new Set<string>();
+const pendingArtifactsCleanups = new Map<string, () => void>();
 let exitSweepArmed = false;
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
 const MAX_SCAN_DEPTH = 8;
@@ -53,14 +54,39 @@ export function registerTemporaryArtifactsDir(dir: string): () => void {
 /** Transfer a lease to the user: recovery data is not disposable output. */
 export function preserveTemporaryArtifactsDir(dir: string): void {
 	temporaryArtifactsDirs.delete(dir);
+	releasePendingArtifactsCleanup(dir);
 }
 
-/** Dispose only a lease, never a directory promoted to recovery storage. */
+/** Request disposal; a registered agent still owns its transcript and output. */
 export async function cleanupTemporaryArtifactsDir(dir: string): Promise<void> {
 	if (!temporaryArtifactsDirs.has(dir)) return;
+	const registry = AgentRegistry.global();
+	const registered = registry.list().some(ref => {
+		if (!ref.sessionFile) return false;
+		const relative = path.relative(dir, ref.sessionFile);
+		return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+	});
+	if (registered) {
+		if (!pendingArtifactsCleanups.has(dir)) {
+			const unsubscribe = registry.onChange(event => {
+				if (event.type !== "removed" && event.type !== "registered") return;
+				void cleanupTemporaryArtifactsDir(dir).catch(err => {
+					logger.warn("Temporary artifacts directory could not be removed after agent release", { dir, err });
+				});
+			});
+			pendingArtifactsCleanups.set(dir, unsubscribe);
+		}
+		return;
+	}
+	releasePendingArtifactsCleanup(dir);
 	await fs.promises.rm(dir, { recursive: true, force: true });
 	temporaryArtifactsDirs.delete(dir);
 	extraArtifactsDirs.delete(dir);
+}
+
+function releasePendingArtifactsCleanup(dir: string): void {
+	pendingArtifactsCleanups.get(dir)?.();
+	pendingArtifactsCleanups.delete(dir);
 }
 
 function armExitSweep(): void {
@@ -78,6 +104,7 @@ function armExitSweep(): void {
  */
 export function sweepTemporaryArtifactsDirs(): void {
 	for (const dir of temporaryArtifactsDirs) {
+		releasePendingArtifactsCleanup(dir);
 		temporaryArtifactsDirs.delete(dir);
 		extraArtifactsDirs.delete(dir);
 		try {
@@ -89,6 +116,7 @@ export function sweepTemporaryArtifactsDirs(): void {
 }
 
 export function resetRegisteredArtifactDirsForTests(): void {
+	for (const dir of pendingArtifactsCleanups.keys()) releasePendingArtifactsCleanup(dir);
 	extraArtifactsDirs.clear();
 	temporaryArtifactsDirs.clear();
 }
