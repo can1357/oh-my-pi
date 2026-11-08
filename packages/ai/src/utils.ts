@@ -4,6 +4,11 @@ import { isMalformedToolCallName, redactSensitiveCredentials } from "./providers
 export { normalizeToolCallId } from "./providers/transform-messages";
 import type { CacheRetention, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
 import { invalidToolCallArguments } from "./utils/tool-call-arguments";
+import {
+	isPlaceholderOnlyReasoningItem,
+	isSyntheticReasoningPlaceholder,
+	reasoningPartText,
+} from "./utils/reasoning-placeholder";
 
 type OpenAIResponsesReplayItem = ResponseInput[number];
 const NON_WHITESPACE_RE = /\S/;
@@ -640,11 +645,28 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 function sanitizeOpenAIResponsesReasoningItemForReplay(
 	item: Record<string, unknown>,
 	preserveItemId: boolean,
-): OpenAIResponsesReplayItem {
+): OpenAIResponsesReplayItem | undefined {
+	// A gateway-synthesized placeholder (`[reasoning unavailable]`) is not
+	// reasoning: the proxy had nothing real to send, and replaying the text
+	// makes the model echo it back as its own thinking. Drop such an item
+	// outright when nothing else survives, and strip placeholder parts from an
+	// item that also carries real text.
+	if (isPlaceholderOnlyReasoningItem(item)) return undefined;
 	const sanitizedItem: Record<string, unknown> = { type: "reasoning" };
 	if (preserveItemId && typeof item.id === "string") sanitizedItem.id = item.id;
-	if (Array.isArray(item.summary)) sanitizedItem.summary = item.summary;
-	if (Array.isArray(item.content)) sanitizedItem.content = item.content;
+	if (Array.isArray(item.summary)) {
+		const summary = item.summary.filter(part => !isSyntheticReasoningPlaceholder(reasoningPartText(part)));
+		// An empty array is the provider's own shape and stays as it is; only a
+		// fully placeholder-filled array disappears.
+		if (summary.length > 0 || item.summary.length === 0) sanitizedItem.summary = summary;
+	}
+	if (Array.isArray(item.content)) {
+		const content = item.content.filter(part => {
+			if (!part || typeof part !== "object" || !("type" in part) || part.type !== "reasoning_text") return true;
+			return !isSyntheticReasoningPlaceholder(reasoningPartText(part));
+		});
+		if (content.length > 0 || item.content.length === 0) sanitizedItem.content = content;
+	}
 	if (typeof item.encrypted_content === "string" || item.encrypted_content === null) {
 		sanitizedItem.encrypted_content = item.encrypted_content;
 	}

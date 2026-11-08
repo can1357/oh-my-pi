@@ -66,6 +66,11 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { escapeHarmonyControlTokens, isHarmonyDialectModel } from "../utils/harmony-leak";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import {
+	hasEncryptedReasoningBlob,
+	isSyntheticReasoningPlaceholder,
+	stripPlaceholderReasoningParts,
+} from "../utils/reasoning-placeholder";
+import {
 	armPreResponseTimeout,
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
@@ -2471,13 +2476,25 @@ class CodexStreamProcessor {
 
 		if (item.type === "reasoning" && block?.type === "thinking") {
 			this.#flushSummaryDeltas(entry);
-			block.thinking = finalizeReasoningThinking(
+			const finalizedThinking = finalizeReasoningThinking(
 				item,
 				block.thinking,
 				this.#sequentialCutoffSummaries ? this.runtime.cutoffSummaries : undefined,
 			);
-			block.thinkingSignature = JSON.stringify(item);
-			settleReasoningSummary(item, block);
+			if (isSyntheticReasoningPlaceholder(finalizedThinking)) {
+				// A gateway placeholder (`[reasoning unavailable]`) is not reasoning:
+				// the proxy had nothing real to send and the model merely echoed it
+				// back. Leave the block empty and unreplayable, but keep the item's
+				// opaque reasoning blob — that is the server's own reasoning.
+				block.thinking = "";
+				block.summary = false;
+				const stripped = stripPlaceholderReasoningParts(item);
+				block.thinkingSignature = hasEncryptedReasoningBlob(stripped) ? JSON.stringify(stripped) : undefined;
+			} else {
+				block.thinking = finalizedThinking;
+				block.thinkingSignature = JSON.stringify(item);
+				settleReasoningSummary(item, block);
+			}
 			stream.push({
 				type: "thinking_end",
 				contentIndex,

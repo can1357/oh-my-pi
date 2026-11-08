@@ -50,6 +50,7 @@ import {
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
+import { isSyntheticReasoningPlaceholder } from "../utils/reasoning-placeholder";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
@@ -1158,6 +1159,13 @@ const streamOpenAICompletionsOnce = (
 					return;
 				}
 				if (block.type === "thinking") {
+					// The placeholder can also arrive split across deltas, in which case
+					// no single delta matches it. Drop it when the block closes so the
+					// recorded turn never carries the text.
+					if (isSyntheticReasoningPlaceholder(block.thinking)) {
+						block.thinking = "";
+						block.summary = false;
+					}
 					stream.push({ type: "thinking_end", contentIndex, content: block.thinking, partial: output });
 					return;
 				}
@@ -1204,6 +1212,11 @@ const streamOpenAICompletionsOnce = (
 				return block;
 			};
 			const appendThinking = (thinking: string, signature?: string): void => {
+				// A gateway placeholder (`[reasoning unavailable]`) is not reasoning:
+				// the proxy had nothing real to send and the model echoed it back.
+				// Recording it would show the text as the model's thinking and pin
+				// every later turn to it.
+				if (isSyntheticReasoningPlaceholder(thinking)) return;
 				const block =
 					currentBlock?.type === "thinking" &&
 					(signature === undefined || currentBlock.thinkingSignature === signature)

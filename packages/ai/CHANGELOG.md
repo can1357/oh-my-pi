@@ -18,6 +18,7 @@
 - Fixed Codex Responses requests losing tool namespaces and developer-provided additional tools when replayed through the authentication gateway.
 - Fixed Gemini malformed responses being treated as unhandled stop reasons and losing token usage; they are now handled as transient transport errors.
 - Improved Cursor compatibility with TLS-intercepting proxies that block HTTP/2 by falling back to HTTP/1 for subsequent turns.
+- Fixed mid-session model switches making a proxy-backed reasoning model answer with `[reasoning unavailable]`: the replayed tool-call turn now carries a reasoning item whose summary the proxy can forward, a recorded placeholder item is replaced instead of replayed, and a placeholder the proxy did send is no longer stored as the turn's thinking. Set `compat.translatesResponsesToChatCompletions: true` in `models.yml` for proxies that serve Responses requests by translating them into chat completions. ([#18531](https://github.com/can1357/oh-my-pi/pull/18531) by [@SakurakaiCat](https://github.com/SakurakaiCat))
 
 ## [18.18.1] - 2026-11-08
 

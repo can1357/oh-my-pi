@@ -185,6 +185,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"strict-responses-pairing": wire("strictResponsesPairing", ["openai-responses"]),
 	"connection-bound-native-history": wire("connectionBoundNativeHistory", ["openai-responses"]),
 	"stateful-responses": wire("statefulResponses", ["openai-responses"]),
+	"translates-responses-to-chat-completions": wire("translatesResponsesToChatCompletions", ["openai-responses"]),
 	"requires-reasoning-off-juice-instruction": wire("requiresReasoningOffJuiceInstruction", ["openai-responses"]),
 	"supports-all-turns-reasoning-context": wire("supportsAllTurnsReasoningContext", ["openai-responses"]),
 	"supports-configuration-update": wire("supportsConfigurationUpdate", ["openai-responses"]),
