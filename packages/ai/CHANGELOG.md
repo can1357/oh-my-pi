@@ -17,6 +17,10 @@
 - Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
 - Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
 
+### Changed
+
+- Reduced allocations when preparing transcripts with many assistant turns for providers ([#17095](https://github.com/can1357/oh-my-pi/pull/17095) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ### Fixed
 
 - Fixed rotated credential pools reporting a stale sibling credential's authentication error instead of the exhausted credential's usage-limit status and reset time.
@@ -36,9 +40,6 @@
 - Cursor Shell results no longer end with `Timeout clamped to 3600s (requested 86400s; …)`: Cursor's 24 h `hard_timeout` is capped at the bash tool's 3600 s ceiling before it reaches the tool ([#18433](https://github.com/can1357/oh-my-pi/pull/18433) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 - A 429 or 402 worded like a context overflow (Bedrock's "429 Too many tokens, please wait…") is treated as a rate limit, so it retries and walks the fallback chain instead of compacting ([#18345](https://github.com/can1357/oh-my-pi/pull/18345) by [@nick-maderight](https://github.com/nick-maderight))
 - `auth-gateway stdio` and `serve` no longer reject credentialless Apple on-device models ([#18370](https://github.com/can1357/oh-my-pi/issues/18370))
-### Changed
-
-- Reduced allocations when preparing transcripts with many assistant turns for providers ([#17095](https://github.com/can1357/oh-my-pi/pull/17095) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.17.0] - 2026-11-06
 
