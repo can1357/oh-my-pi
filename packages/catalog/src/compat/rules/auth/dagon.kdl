@@ -1,0 +1,10 @@
+auth "dagon" {
+	name "Dagon Inference"
+	login "api-key" {
+		auth-url "https://inference.dagon.so/app/"
+		instructions "Create an API key in the Dagon Inference console"
+		prompt "Paste your Dagon Inference API key" placeholder="gk_..."
+		// `/v1/models` is public; `/v1/key` requires a valid key.
+		validate "models-endpoint" label="Dagon Inference" url="https://inference.dagon.so/v1/key"
+	}
+}

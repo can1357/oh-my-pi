@@ -22,6 +22,7 @@ export type KnownProvider =
 	| "coralbricks"
 	| "coreweave"
 	| "cursor"
+	| "dagon"
 	| "deepinfra"
 	| "deepseek"
 	| "devin"

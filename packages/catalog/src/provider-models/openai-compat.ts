@@ -4873,6 +4873,62 @@ export function inceptionModelManagerOptions(config?: ModelManagerConfig): Model
 }
 
 // ---------------------------------------------------------------------------
+// Dagon Inference
+// ---------------------------------------------------------------------------
+
+/**
+ * Dagon prices are integer micro-USD per 1M tokens; omp costs are USD per 1M.
+ * A live `0` is a real free rate, not a missing one.
+ */
+function dagonRate(value: unknown, fallback: number): number {
+	const parsed = toNumber(value);
+	return parsed !== undefined && parsed >= 0 ? parsed / 1_000_000 : fallback;
+}
+
+/**
+ * Builds Dagon Inference's model-discovery manager. `/v1/models` is public, so
+ * discovery runs without a key and the live roster is authoritative. Rows carry
+ * `context_length`, `max_output_tokens`, `input_modalities`,
+ * `pricing_per_mtok_micros` (`inputPerMtok`, `cachedInputPerMtok`,
+ * `outputPerMtok`; micro-USD per 1M tokens), and optionally
+ * `supported_parameters` (a `reasoning` entry marks a reasoning model).
+ * Deprecated rows are dropped. Prices float with the cheapest upstream route,
+ * so the live card wins over the bundled seed.
+ */
+export function dagonModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	return {
+		...createOpenAICompatibleModelManagerOptions({
+			api: "openai-completions",
+			providerId: "dagon",
+			defaultBaseUrl: "https://inference.dagon.so/v1",
+			config,
+			dynamicModelsAuthoritative: true,
+			mapModel: (entry, defaults, reference) => {
+				if (entry.deprecated === true) return null;
+				const model = mapWithBundledReference(entry, defaults, reference);
+				const rates = isRecord(entry.pricing_per_mtok_micros) ? entry.pricing_per_mtok_micros : {};
+				const params = Array.isArray(entry.supported_parameters) ? entry.supported_parameters : undefined;
+				return {
+					...model,
+					...(params && { reasoning: params.includes("reasoning") }),
+					input: Array.isArray(entry.input_modalities) ? toInputCapabilities(entry.input_modalities) : model.input,
+					cost: {
+						input: dagonRate(rates.inputPerMtok, model.cost.input),
+						output: dagonRate(rates.outputPerMtok, model.cost.output),
+						cacheRead: dagonRate(rates.cachedInputPerMtok, model.cost.cacheRead),
+						cacheWrite: 0,
+					},
+					maxTokens: toPositiveNumber(entry.max_output_tokens, model.maxTokens),
+				};
+			},
+		}),
+		dynamicInputAuthoritative: true,
+		dynamicCostAuthoritative: true,
+		staticModels: seedModels<"openai-completions">("dagon"),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 15.5 CoreWeave Serverless Inference
 // ---------------------------------------------------------------------------
 
