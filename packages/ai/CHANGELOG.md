@@ -64,6 +64,11 @@
 
 - Fixed OpenAI image edits with two or more input images failing with `400 Duplicate parameter: 'image'` ([#17701](https://github.com/can1357/oh-my-pi/issues/17701), [#17703](https://github.com/can1357/oh-my-pi/pull/17703) by [@Lynricsy](https://github.com/Lynricsy))
 
+- `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
+
+### Fixed
+
+- Fixed an Anthropic session staying stuck on "`thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified" when a steer, reminder or new prompt followed the refused turn: the one-time retry that drops that turn's reasoning now runs there too ([#17791](https://github.com/can1357/oh-my-pi/pull/17791) by [@aramalipoor](https://github.com/aramalipoor))
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
