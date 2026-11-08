@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { handleSkillList, runSkillsCommand } from "../../src/cli/skill-list";
 import { boundSettings } from "../../src/capability";
+import type { Skill } from "../../src/capability/skill";
 import {
 	getEnabledProviders,
 	initializeWithSettings,
@@ -429,7 +430,7 @@ describe("runSkillsCommand settings hold", () => {
 		expect(getEnabledProviders()).not.toContain("cursor");
 		expect(isUserSourceEnabled("codex")).toBe(true);
 		expect(isUserSourceEnabled("cursor")).toBe(false);
-		const discovered = await loadCapability("skills", { cwd: directory });
+		const discovered = await loadCapability<Skill>("skills", { cwd: directory });
 		expect(discovered.items.map(item => item.name)).toContain(OUTER_CODEX);
 	}
 
@@ -478,7 +479,7 @@ describe("runSkillsCommand settings hold", () => {
 			expect(boundSettings() === undefined, "skill-list leaked the Settings.init hold").toBe(true);
 			expect(isUserSourceEnabled("codex")).toBe(false);
 			expect(getEnabledProviders()).not.toContain("codex");
-			const discovered = await loadCapability("skills", { cwd: directory });
+			const discovered = await loadCapability<Skill>("skills", { cwd: directory });
 			expect(discovered.items.map(item => item.name)).not.toContain(OUTER_CODEX);
 		} finally {
 			await removeWithRetries(directory);
