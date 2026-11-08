@@ -68,6 +68,13 @@ import {
 	resolveOpenAIEffortControlState,
 } from "./openai-configuration-update";
 import {
+	type OpenAIToolControlState,
+	planStableOpenAITools,
+	releaseOpenAIToolControlSession,
+	type ResponsesWireTool,
+	resolveOpenAIToolControlState,
+} from "./openai-tool-additions";
+import {
 	applyOpenAIReasoningEffortFallback,
 	clearOpenAIReasoningEffortFallbackState,
 	createOpenAIReasoningEffortFallbackKey,
@@ -450,6 +457,8 @@ export interface OpenAIResponsesProviderSessionState
 	/** `configuration_update` effort baselines, keyed by baseUrl/model/session. */
 	effortControls: Map<string, OpenAIEffortControlState<ResponsesStableEffort>>;
 	transports?: OpenAIResponsesTransportSessions;
+	/** Declared tools and `additional_tools` additions, keyed by baseUrl/model/session. */
+	toolControls: Map<string, OpenAIToolControlState>;
 }
 
 /** Wire efforts a `configuration_update` can carry: every real tier, never `none`/null. */
@@ -506,6 +515,7 @@ function createOpenAIResponsesProviderSessionState(
 		closeCount: 0,
 		chains: new Map(),
 		effortControls: new Map(),
+		toolControls: new Map(),
 		releaseSession: sessionId => {
 			const normalizedSessionId = normalizeOpenAIPromptCacheKey(sessionId);
 			if (!normalizedSessionId) return;
@@ -514,6 +524,7 @@ function createOpenAIResponsesProviderSessionState(
 			}
 			releaseOpenAIEffortControlSession(state.effortControls, normalizedSessionId);
 			state.transports?.releaseSession(normalizedSessionId);
+			releaseOpenAIToolControlSession(state.toolControls, normalizedSessionId);
 		},
 		close: () => {
 			state.nativeHistoryReplayWarmed = false;
@@ -522,6 +533,7 @@ function createOpenAIResponsesProviderSessionState(
 			state.effortControls.clear();
 			state.transports?.close();
 			state.transports = undefined;
+			state.toolControls.clear();
 			clearOpenAIStrictToolsState(state);
 			clearOpenAIReasoningEffortFallbackState(state);
 		},
@@ -1957,6 +1969,7 @@ export function buildParams(
 	if (model.reasoningMode && !options?.forceReasoningOff) {
 		params.reasoning = { ...params.reasoning, mode: model.reasoningMode };
 	}
+	applyResponsesStableTools(model, params, messages, options, providerSessionState);
 	applyResponsesStableEffort(model, params, messages, options, providerSessionState);
 
 	if (model.compat.isVercelGatewayHost) {
@@ -2013,6 +2026,32 @@ function applyResponsesStableEffort(
 		...reasoning,
 		effort: planStableOpenAIEffort(state, input, effort, minimizedResponsesEffort(model, options)),
 	};
+}
+
+/**
+ * Keep the declared tools byte-stable across a conversation and carry later
+ * additions as `additional_tools` items. A forced tool choice that narrows the
+ * declaration to one tool is left alone. Same session requirements as
+ * {@link applyResponsesStableEffort}.
+ */
+function applyResponsesStableTools(
+	model: Model<"openai-responses">,
+	params: OpenAIResponsesSamplingParams,
+	input: ResponseInput,
+	options: OpenAIResponsesOptions | undefined,
+	providerSessionState: OpenAIResponsesProviderSessionState | undefined,
+): void {
+	if (!model.compat.supportsMidConversationToolChanges || !providerSessionState || !params.tools?.length) return;
+	if (typeof params.tool_choice === "object" && params.tool_choice !== null) return;
+	const sessionId = getOpenAIResponsesRoutingSessionId(options);
+	if (!sessionId) return;
+	const state = resolveOpenAIToolControlState(
+		providerSessionState.toolControls,
+		id => `${model.baseUrl ?? ""}\u0000${model.id}\u0000${id}`,
+		sessionId,
+		normalizeOpenAIPromptCacheKey(options?.parentSessionId),
+	);
+	params.tools = planStableOpenAITools(state, input, params.tools as ResponsesWireTool[]) as typeof params.tools;
 }
 
 /** The model's lowest effort on the wire when the caller asked to minimize it (`minimizeEffort`). */

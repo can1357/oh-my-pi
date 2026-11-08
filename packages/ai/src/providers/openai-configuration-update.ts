@@ -105,7 +105,7 @@ export function releaseOpenAIEffortControlSession<TEffort extends string>(
 	}
 }
 
-interface AnchorableItem {
+export interface AnchorableItem {
 	type?: string | null;
 	role?: string;
 	id?: string | null;
@@ -115,9 +115,9 @@ interface AnchorableItem {
 /**
  * Fingerprint of the item a transition sits after. Output-only lifecycle
  * fields are excluded: a live response item carries `id`/`status` that the
- * sanitized replay of the same item drops.
+ * sanitized replay of the same item drops. Shared with the tool additions.
  */
-function effortControlAnchor(input: readonly AnchorableItem[], index: number): string {
+export function responsesInputAnchor(input: readonly AnchorableItem[], index: number): string {
 	if (index === 0) return "";
 	const item = input[index - 1];
 	if (!item) return "";
@@ -140,7 +140,7 @@ function resetOpenAIEffortControlState(state: OpenAIEffortControlState<string>):
  */
 function syncOpenAIEffortControlState(state: OpenAIEffortControlState<string>, input: readonly AnchorableItem[]): void {
 	for (const transition of state.transitions) {
-		if (transition.index > input.length || transition.anchor !== effortControlAnchor(input, transition.index)) {
+		if (transition.index > input.length || transition.anchor !== responsesInputAnchor(input, transition.index)) {
 			resetOpenAIEffortControlState(state);
 			return;
 		}
@@ -178,7 +178,7 @@ export function planStableOpenAIEffort<TItem extends AnchorableItem, TEffort ext
 		if (existing) {
 			existing.effort = effort;
 		} else {
-			state.transitions.push({ index, anchor: effortControlAnchor(input, index), effort });
+			state.transitions.push({ index, anchor: responsesInputAnchor(input, index), effort });
 		}
 		// A change back to the effort already in force at that position is a
 		// no-op on the wire; drop it rather than send a redundant item.
