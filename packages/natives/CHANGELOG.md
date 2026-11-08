@@ -47,6 +47,9 @@
 ### Added
 
 - Added Zig syntax highlighting, so fenced Zig code in markdown renders with colors ([#14964](https://github.com/can1357/oh-my-pi/issues/14964), [#18319](https://github.com/can1357/oh-my-pi/pull/18319) by [@hellopoisonx](https://github.com/hellopoisonx))
+### Fixed
+
+- Fixed `cd` and `pwd` in native Windows shell sessions corrupting drive and UNC roots during logical directory changes ([#18042](https://github.com/can1357/oh-my-pi/pull/18042) by [@jchanghong023](https://github.com/jchanghong023))
 
 ## [18.17.0] - 2026-11-06
 
