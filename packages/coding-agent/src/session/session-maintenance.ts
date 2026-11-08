@@ -63,7 +63,12 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { isColdReplayableResponsesTurn } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
+import {
+	getOpenAIResponsesHistoryPayload,
+	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
+} from "@oh-my-pi/pi-ai/utils";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -960,6 +965,8 @@ export class SessionMaintenance {
 			let tokensFreed = 0;
 			let anchoredTokensRemoved = 0;
 			const countOptions = { excludeEncryptedReasoning: true } as const;
+			const model = this.#host.model();
+			const nativeHistoryReplay = openAIResponsesReplaysNativeHistory(model, this.#host.providerSessionState);
 			for (const [index, entry] of branchEntries.entries()) {
 				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 				const message = entry.message;
@@ -968,6 +975,20 @@ export class SessionMaintenance {
 				);
 				const dropped = message.content.length - kept.length;
 				if (dropped === 0) continue;
+				// Native Responses replay uses the stored payload instead of content.
+				// Leave those blocks intact: stripping them cannot save wire tokens
+				// and needlessly invalidates the provider's prompt cache.
+				if (model && message.api === model.api && message.model === model.id) {
+					const payload = getOpenAIResponsesHistoryPayload(
+						message.providerPayload,
+						model.provider,
+						message.provider,
+					);
+					if (payload) {
+						const replay = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(payload.items);
+						if (replay && (nativeHistoryReplay || isColdReplayableResponsesTurn(replay))) continue;
+					}
+				}
 				// Match the stored-context floor: opaque signatures and encrypted
 				// reasoning bytes do not have a reliable provider-token equivalent.
 				const before = this.#tokenizer.countMessage(message, countOptions);

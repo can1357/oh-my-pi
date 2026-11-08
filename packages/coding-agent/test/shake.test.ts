@@ -6,6 +6,7 @@ import { Agent, type AgentMessage, RESCUE_SHAKE_CONFIG, Tokenizer } from "@oh-my
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -634,6 +635,66 @@ describe("AgentSession shake", () => {
 
 			expect(result.tokensFreed).toBeGreaterThan(0);
 			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
+		});
+
+		it("does not credit thinking that the Responses request replays from native history", async () => {
+			const model = getBundledModel("openrouter", "z-ai/glm-5.3-flash");
+			if (!model) throw new Error("Expected bundled OpenRouter model");
+			session.agent.setModel(model);
+			const prior: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "reasoning ".repeat(1_000) },
+					{ type: "text", text: "answer" },
+				],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					provider: model.provider,
+					dt: true,
+					items: [
+						{ type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "reasoning" }] },
+						{
+							type: "message",
+							id: "msg_1",
+							role: "assistant",
+							content: [{ type: "output_text", text: "answer" }],
+						},
+					],
+				},
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now() - 1,
+			};
+			sessionManager.appendMessage(prior);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+
+			const result = await session.shake("thinking");
+
+			expect(result.tokensFreed).toBe(0);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			expect(prior.content[0]?.type).toBe("thinking");
+			const wire = buildResponsesInput({
+				model,
+				context: { messages: [prior] },
+				strictResponsesPairing: false,
+				supportsImageDetailOriginal: false,
+				nativeHistory: { replay: true, filterReasoning: false },
+			});
+			expect(wire.some(item => item.type === "reasoning" && item.summary?.[0]?.text === "reasoning")).toBe(true);
 		});
 	});
 
