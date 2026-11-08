@@ -32,10 +32,14 @@ it.skipIf(process.platform === "win32")(
 		});
 		try {
 			const home = tempDir.path();
+			// Run outside any Tern pane the test runner sits in: with TERN_* set, omp opens the
+			// dashboard in that pane (replacing its block) instead of the stub opener on PATH.
+			const hostEnv: Record<string, string | undefined> = {};
+			for (const key in process.env) if (!key.startsWith("TERN_")) hostEnv[key] = process.env[key];
 			const proc = Bun.spawn([process.execPath, cliEntry, "stats", "--port", String(existing.port)], {
 				cwd: home,
 				env: {
-					...process.env,
+					...hostEnv,
 					HOME: home,
 					USERPROFILE: home,
 					PI_CODING_AGENT_DIR: tempDir.join("agent"),
