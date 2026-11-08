@@ -10,7 +10,7 @@ import * as path from "node:path";
 import { OmpErrors, type } from "@oh-my-pi/omptype";
 import { getAgentDir, hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
 import { resolveOrDefaultProjectRegistryPath } from "../discovery/helpers";
-import { replaceFileAtomically } from "../utils/atomic-file";
+import { replaceFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 
 export const SKILLS_MANIFEST_FILE = "skills.json";
 export const SKILLS_LOCK_FILE = "skills.lock.json";

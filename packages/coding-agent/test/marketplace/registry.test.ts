@@ -24,6 +24,7 @@ import {
 	writeMarketplacesRegistry,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 
 // ── ID helpers ───────────────────────────────────────────────────────
 
@@ -175,14 +176,19 @@ describe("registry file I/O", () => {
 	let tmpDir: string;
 	let marketplacesPath: string;
 	let installedPath: string;
+	let originalAgentDir: string;
 
 	beforeEach(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mkt-test-"));
 		marketplacesPath = path.join(tmpDir, "marketplaces.json");
 		installedPath = path.join(tmpDir, "installed_plugins.json");
+		// A registry write asks to follow a symlink; a temp agent dir keeps it contained.
+		originalAgentDir = getAgentDir();
+		setAgentDir(tmpDir);
 	});
 
 	afterEach(() => {
+		setAgentDir(originalAgentDir);
 		removeSyncWithRetries(tmpDir);
 	});
 
@@ -278,5 +284,27 @@ describe("registry file I/O", () => {
 		const entries = getInstalledPlugin(reg, "plug@mkt");
 		expect(entries).toBeDefined();
 		expect((entries![0] as unknown as Record<string, unknown>).someExtraField).toBe("preserved");
+	});
+
+	// A shared omp profile links the profile's registry at the default profile's copy. A write
+	// that replaced the link with a regular file silently stopped the profiles sharing state.
+	it("writes through a symlinked registry path and keeps the link", async () => {
+		const shared = path.join(tmpDir, "shared-marketplaces.json");
+		await writeMarketplacesRegistry(shared, { version: 1, marketplaces: [] });
+		fs.symlinkSync(shared, marketplacesPath);
+
+		const entry: MarketplaceRegistryEntry = {
+			name: "linked-market",
+			sourceType: "local",
+			sourceUri: "/tmp/linked",
+			catalogPath: path.join(tmpDir, "catalog.json"),
+			addedAt: "2025-01-01T00:00:00.000Z",
+			updatedAt: "2025-01-01T00:00:00.000Z",
+		};
+		await writeMarketplacesRegistry(marketplacesPath, { version: 1, marketplaces: [entry] });
+
+		expect(fs.lstatSync(marketplacesPath).isSymbolicLink()).toBe(true);
+		const viaTarget = await readMarketplacesRegistry(shared);
+		expect(viaTarget.marketplaces.map(m => m.name)).toEqual(["linked-market"]);
 	});
 });

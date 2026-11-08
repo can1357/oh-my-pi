@@ -170,6 +170,13 @@ export interface EquivalentPathOptions {
 }
 
 export function resolveEquivalentPath(inputPath: string, options?: EquivalentPathOptions): string {
+	// Deliberately upstream main's form, unchanged. Every caller of this shares
+	// it — session directory names (`getDefaultSessionDirName`), approval cache
+	// keys, project discovery, plugin-root containment, gc — and a canonicalizer
+	// that resolves differently gives those a different answer for the same path,
+	// which for a key or a directory name is a silent migration. The config write
+	// path does its own kernel-faithful resolution in `atomic-file.ts`, where it
+	// is scoped to the three writers that asked for it.
 	const resolvedPath = path.resolve(inputPath);
 	try {
 		return fs.realpathSync(resolvedPath);
@@ -207,7 +214,11 @@ export function normalizePathForComparison(inputPath: string): string {
  */
 export function relativePathWithinNormalizedRoot(normalizedRoot: string, normalizedCandidate: string): string | null {
 	const relative = path.relative(normalizedRoot, normalizedCandidate);
-	if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) return null;
+	// Only a `..` COMPONENT leaves the root. Testing the prefix alone also
+	// rejected an ordinary directory whose name merely starts with dots, such as
+	// `..config`, which is inside the root like any other name.
+	const escapes = relative === ".." || relative.startsWith(`..${path.sep}`);
+	if (relative !== "" && (escapes || path.isAbsolute(relative))) return null;
 	return relative;
 }
 
@@ -441,6 +452,22 @@ class DirResolver {
 		};
 	}
 
+	/**
+	 * The root `rootSubdir(…, "data")` builds on: `$XDG_DATA_HOME/omp` where XDG
+	 * is in use, and the config root otherwise. Exposed because the config-write
+	 * boundary has to accept it — the plugin registries resolve through it, so
+	 * without XDG it is the config root and with XDG it is the only root those
+	 * files live under.
+	 */
+	get dataRoot(): string {
+		return this.#rootDirs.data;
+	}
+
+	/** Profile-independent sibling of {@link dataRoot}, as `getBaseConfigRoot` is of `configRoot`. */
+	get baseDataRoot(): string {
+		return this.#baseRootDirs.data;
+	}
+
 	/** Profile-independent config-root subdirectory, with optional XDG override. Shared across profiles. */
 	baseRootSubdir(subdir: string, xdg?: XdgCategory): string {
 		return path.join(xdg ? this.#baseRootDirs[xdg] : getBaseConfigRoot(), subdir);
@@ -553,6 +580,22 @@ export function refreshDirsFromEnv(): void {
 /** Get the config root directory (~/.omp). */
 export function getConfigRootDir(): string {
 	return dirs.configRoot;
+}
+
+/**
+ * Get the data root (`~/.omp`; XDG default `$XDG_DATA_HOME/omp`).
+ *
+ * Without XDG this IS the config root, so a caller that accepts both accepts one
+ * directory. With XDG it is where the plugin registries live, and nothing else
+ * omp keeps points at it.
+ */
+export function getDataRootDir(): string {
+	return dirs.dataRoot;
+}
+
+/** Get the profile-independent data root, as `getBaseConfigRoot` is to `getConfigRootDir`. */
+export function getBaseDataRoot(): string {
+	return dirs.baseDataRoot;
 }
 
 /** Set the coding agent directory. Creates a fresh resolver, invalidating all cached paths. */

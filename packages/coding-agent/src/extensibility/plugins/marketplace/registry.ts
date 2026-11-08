@@ -10,14 +10,18 @@
  * Read/write functions accept explicit file paths so callers control the
  * location. Path helpers compute the default paths from the dir singleton.
  *
- * Both use atomic write (tmp + rename). On Windows, rename over existing file
- * can fail with EPERM — fallback: unlink target then rename.
+ * All three publish with `writeConfigFileAtomically`, the shared helper's one
+ * config form: a symlinked destination is resolved first, the temp file is
+ * staged beside the file the link names, and one rename inside that directory
+ * publishes it — so the link survives, the replace stays atomic, and a link onto
+ * another filesystem still publishes.
  */
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { getPluginsDir, isEnoent, logger, tryParseJson } from "@oh-my-pi/pi-utils";
+import { writeConfigFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 
 export { getMarketplacesRegistryPath } from "@oh-my-pi/pi-utils";
 
@@ -43,33 +47,20 @@ export function getPluginsCacheDir(): string {
 
 // ── Atomic write ─────────────────────────────────────────────────────
 
+/**
+ * The one opt-in to link-following in the tree. The helper resolves a symlinked
+ * destination, stages beside the file the link names, and publishes with a
+ * single rename inside that directory — so a shared profile keeps sharing, and
+ * a link onto another filesystem publishes rather than failing `EXDEV`, which is
+ * what staging beside the path as given used to do.
+ *
+ * No `mode` argument: these files keep the user's umask, which is what they had
+ * before they shared this helper and what a 0600-or-0644 argument would
+ * override.
+ */
 async function atomicWriteJson(filePath: string, data: unknown): Promise<void> {
-	const content = `${JSON.stringify(data, null, 2)}\n`;
-	const tmpPath = `${filePath}.tmp`;
-
-	await Bun.write(tmpPath, content);
-
-	try {
-		await fs.rename(tmpPath, filePath);
-	} catch (err) {
-		// Windows EPERM fallback: unlink target, then rename
-		if ((err as NodeJS.ErrnoException).code === "EPERM") {
-			try {
-				await fs.unlink(filePath);
-			} catch {
-				// Target may not exist — that's fine
-			}
-			await fs.rename(tmpPath, filePath);
-		} else {
-			// Clean up tmp on unexpected errors
-			try {
-				await fs.unlink(tmpPath);
-			} catch {
-				// Best effort
-			}
-			throw err;
-		}
-	}
+	await fs.mkdir(path.dirname(filePath), { recursive: true });
+	await writeConfigFileAtomically(filePath, `${JSON.stringify(data, null, 2)}\n`);
 }
 
 // ── Marketplaces registry ────────────────────────────────────────────

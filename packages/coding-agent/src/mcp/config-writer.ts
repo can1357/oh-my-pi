@@ -3,10 +3,10 @@
  *
  * Utilities for reading/writing .omp/mcp.json files at user or project level.
  */
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { writeFileAtomically } from "@oh-my-pi/pi-utils/atomic-file";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { invalidate as invalidateFsCache } from "../capability/fs";
 
@@ -28,10 +28,9 @@ function withSchema(config: MCPConfigFile): MCPConfigFile {
  * non-recursive `mkdir` — without this the very first write (before the config
  * file or its parent exists) would fail to acquire the lock with ENOENT.
  */
-function withConfigLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
-	return fs.promises
-		.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 })
-		.then(() => withFileLock(filePath, fn));
+async function withConfigLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+	await fs.promises.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+	return withFileLock(filePath, fn);
 }
 
 /**
@@ -61,20 +60,7 @@ export async function writeMCPConfigFile(filePath: string, config: MCPConfigFile
 	const dir = path.dirname(filePath);
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
 
-	// Write to a per-writer temp file, then atomically rename into place. The
-	// temp name is unique (pid + random) so two concurrent writers to the same
-	// config never share one `.tmp` path and rename each other's file out from
-	// under them (which surfaced as ENOENT or a clobbered final file).
-	const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-	const content = JSON.stringify(withSchema(config), null, 2);
-	try {
-		await fs.promises.writeFile(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
-		// Rename to final path (atomic on most systems)
-		await fs.promises.rename(tmpPath, filePath);
-	} catch (error) {
-		await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
-		throw error;
-	}
+	await writeFileAtomically(filePath, JSON.stringify(withSchema(config), null, 2));
 	// Invalidate the capability fs cache so subsequent reads see the new content
 	invalidateFsCache(filePath);
 }

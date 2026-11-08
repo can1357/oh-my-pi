@@ -62,14 +62,16 @@ describe("project directory state", () => {
 		}
 	});
 
-	it("normalizes each containment operand only once", () => {
+	// The config writers read this relative path to decide whether a destination
+	// sits inside a project's own config directory, so the empty and outside
+	// cases are the difference between following a symlink and refusing to.
+	it("reports containment as the path below the root, and nothing for a path outside it", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-dirs-containment-"));
-		const candidate = path.join(root, "child");
-		fs.mkdirSync(candidate);
-		const realpath = spyOn(fs, "realpathSync");
 		try {
-			expect(relativePathWithinRoot(root, candidate)).toBe("child");
-			expect(realpath).toHaveBeenCalledTimes(2);
+			fs.mkdirSync(path.join(root, "child", "leaf"), { recursive: true });
+			expect(relativePathWithinRoot(root, path.join(root, "child", "leaf"))).toBe(path.join("child", "leaf"));
+			expect(relativePathWithinRoot(root, root)).toBeNull();
+			expect(relativePathWithinRoot(root, path.dirname(root))).toBeNull();
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
