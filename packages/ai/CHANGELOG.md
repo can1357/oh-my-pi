@@ -42,6 +42,7 @@
 - Fixed reranking when Cohere-compatible responses omit the model field
 - Reranking requests now send configured model headers, including custom `Authorization`
 - Provider retries no longer retry responses explicitly marked non-retryable
+- Fixed Gemini `MALFORMED_RESPONSE` finishes failing with "Unhandled stop reason" and losing the turn's token usage; they now count as transient errors on every Gemini transport ([#17976](https://github.com/can1357/oh-my-pi/pull/17976) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
 
