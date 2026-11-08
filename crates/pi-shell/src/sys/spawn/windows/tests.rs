@@ -9,7 +9,7 @@ use std::{
 
 use bstr::{BString, ByteSlice};
 use windows_sys::Win32::{
-	Foundation::{CloseHandle, HWND, WAIT_OBJECT_0},
+	Foundation::{CloseHandle, HANDLE, HWND, WAIT_OBJECT_0},
 	System::{
 		Console::{AllocConsole, GetConsoleProcessList, GetConsoleWindow, SetConsoleCtrlHandler},
 		Threading::{
@@ -70,16 +70,19 @@ fn ping() -> Vec<BString> {
 	argv
 }
 
+const NEW: PgroupSpec = PgroupSpec::New(JobId(1));
+
 /// `argv` as a fresh job's only stage.
 fn spawn(s: &NativeSpawner, argv: &[BString], lineage: Lineage) -> Box<dyn ExtProc> {
-	spawn_with(s, argv, lineage, &[])
+	spawn_with(s, argv, lineage, NEW, &[])
 }
 
-/// [`spawn`] with variables added to its environment.
+/// [`spawn`] into `pgroup`, with variables added to its environment.
 fn spawn_with(
 	s: &NativeSpawner,
 	argv: &[BString],
 	lineage: Lineage,
+	pgroup: PgroupSpec,
 	vars: &[(&str, &str)],
 ) -> Box<dyn ExtProc> {
 	let root = system_root();
@@ -100,7 +103,7 @@ fn spawn_with(
 		cwd: system_root().as_bytes().as_bstr(),
 		stdio: [StdioSpec::Null, StdioSpec::Null, StdioSpec::Null],
 		extra_fds: Vec::new(),
-		pgroup: PgroupSpec::New(JobId(1)),
+		pgroup,
 		tag: CmdTag { run: RunId(1), vpid: Vpid(Vpid::BASE), seq: 1 },
 		vpid: Vpid(Vpid::BASE),
 		umask: 0,
@@ -149,6 +152,109 @@ fn assert_running(p: &mut Box<dyn ExtProc>) {
 #[link(name = "user32.dll", kind = "raw-dylib", modifiers = "+verbatim")]
 unsafe extern "system" {
 	fn IsWindowVisible(hwnd: HWND) -> i32;
+}
+
+/// `PROCESSENTRY32W`.
+#[repr(C)]
+struct ProcessEntry {
+	size:    u32,
+	usage:   u32,
+	pid:     u32,
+	heap:    usize,
+	module:  u32,
+	threads: u32,
+	parent:  u32,
+	base:    i32,
+	flags:   u32,
+	exe:     [u16; 260],
+}
+
+#[link(name = "kernel32.dll", kind = "raw-dylib", modifiers = "+verbatim")]
+unsafe extern "system" {
+	fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> HANDLE;
+	fn Process32FirstW(snapshot: HANDLE, entry: *mut ProcessEntry) -> i32;
+	fn Process32NextW(snapshot: HANDLE, entry: *mut ProcessEntry) -> i32;
+}
+
+/// Console hosts this process started: one per open pseudoconsole.
+fn our_console_hosts() -> usize {
+	const TH32CS_SNAPPROCESS: u32 = 2;
+	// SAFETY: a process snapshot, walked with a sized entry, closed once.
+	unsafe {
+		let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+		assert!(!snapshot.is_null() && snapshot as isize != -1, "no process snapshot");
+		let mut entry: ProcessEntry = std::mem::zeroed();
+		entry.size = std::mem::size_of::<ProcessEntry>() as u32;
+		let mut hosts = 0;
+		let mut more = Process32FirstW(snapshot, &raw mut entry) != 0;
+		while more {
+			let len = entry
+				.exe
+				.iter()
+				.position(|&c| c == 0)
+				.unwrap_or(entry.exe.len());
+			let exe = String::from_utf16_lossy(&entry.exe[..len]);
+			if entry.parent == std::process::id() && exe.eq_ignore_ascii_case("conhost.exe") {
+				hosts += 1;
+			}
+			more = Process32NextW(snapshot, &raw mut entry) != 0;
+		}
+		CloseHandle(snapshot);
+		hosts
+	}
+}
+
+/// Poll `cond` until it holds or `LONG` passes; whether it held.
+fn eventually(mut cond: impl FnMut() -> bool) -> bool {
+	let deadline = Instant::now() + LONG;
+	while !cond() {
+		if Instant::now() > deadline {
+			return false;
+		}
+		thread::sleep(Duration::from_millis(50));
+	}
+	true
+}
+
+/// A finished owned job's pseudoconsole host lingered until the spawner was
+/// dropped (up to one per job between registry sweeps): the console now
+/// closes once the job's last process exits, while the spawner lives on.
+#[test]
+fn an_owned_job_closes_its_console_when_its_last_process_exits() {
+	let s = spawner(Sessions::Detach, LONG);
+	let mut running = spawn(&s, &ping(), Lineage::default());
+	assert_running(&mut running);
+	assert_eq!(our_console_hosts(), 1, "a running owned job has one console host");
+	running.signal(Signal::Kill).unwrap();
+	wait(&mut running);
+	for _ in 0..3 {
+		let mut p = spawn(&s, &cmd("exit 0"), Lineage::default());
+		assert_eq!(wait(&mut p), ExitStatus::Exited(0));
+	}
+	assert!(
+		eventually(|| our_console_hosts() == 0),
+		"{} console hosts outlive their jobs",
+		our_console_hosts()
+	);
+	drop(s);
+}
+
+/// A pipeline stage joining a job whose earlier stages already exited (and
+/// whose console therefore closed) gets a console again instead of failing.
+#[test]
+fn a_stage_joining_an_emptied_owned_job_gets_a_console() {
+	let s = spawner(Sessions::Detach, LONG);
+	let mut first = spawn(&s, &cmd("exit 0"), Lineage::default());
+	assert_eq!(wait(&mut first), ExitStatus::Exited(0));
+	assert!(eventually(|| our_console_hosts() == 0), "the emptied job's console stays open");
+	let mut next = spawn_with(
+		&s,
+		&cmd("(echo x> CON) && exit 7"),
+		Lineage::default(),
+		PgroupSpec::Join(first.pid()),
+		&[],
+	);
+	assert_eq!(wait(&mut next), ExitStatus::Exited(7), "the joining stage has no usable console");
 }
 
 const PROBE: &str = "sys::spawn::windows::tests::console_probe";
@@ -253,7 +359,7 @@ fn detach_externals_and_their_children_share_a_usable_windowless_console() {
 	for (n, lineage) in [Lineage::default(), RELEASED].into_iter().enumerate() {
 		let out = dir.path().join(n.to_string()).to_str().unwrap().to_owned();
 		let s = spawner(Sessions::Detach, LONG);
-		let mut p = spawn_with(&s, &probe_argv(), lineage, &[(PROBE_OUT, &out)]);
+		let mut p = spawn_with(&s, &probe_argv(), lineage, NEW, &[(PROBE_OUT, &out)]);
 		assert_eq!(wait(&mut p), ExitStatus::Exited(0), "detached={}", lineage.detached);
 		let (probe, child) = (Seen::read(&out), Seen::read(&format!("{out}.child")));
 		for seen in [&probe, &child] {

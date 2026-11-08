@@ -149,9 +149,9 @@ pub enum Sessions {
 	/// the host's foreground. `PgroupSpec::Join` stages lead their own
 	/// sessions too: a process can never `setpgid`-join a leader in another
 	/// session (`EPERM`, the pi-shell lesson). On Windows no external shares
-	/// the host's console: an owned job gets a pseudoconsole the spawner holds,
-	/// a released (`nohup`) one a hidden console of its own. The default, for
-	/// agent hosts.
+	/// the host's console: an owned job gets a pseudoconsole the spawner holds
+	/// while its processes run, a released (`nohup`) one a hidden console of
+	/// its own. The default, for agent hosts.
 	#[default]
 	Detach,
 	/// Bash job-control layout: `PgroupSpec::New` leads a process group in the

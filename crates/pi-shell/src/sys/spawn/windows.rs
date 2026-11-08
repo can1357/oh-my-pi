@@ -11,10 +11,11 @@
 //!   console I/O that bypasses the redirected stdio (`CONOUT$` progress bars,
 //!   `CONIN$` prompts, console modes, the title) never reaches it. The console
 //!   follows the spawner's ownership of the external ([`JobConsole`]): an owned
-//!   one gets a pseudoconsole the spawner holds ([`Pty`]), closed with its job;
-//!   a released (`nohup`) one gets a hidden console of its own
-//!   (`CREATE_NO_WINDOW`), which lives as long as its processes. Other layouts
-//!   share the host's console in a new process group per stage.
+//!   one gets a pseudoconsole the spawner holds ([`Pty`]), open while the job's
+//!   processes run ([`Watcher`] closes it when the last exits); a released
+//!   (`nohup`) one gets a hidden console of its own (`CREATE_NO_WINDOW`), which
+//!   lives as long as its processes. Other layouts share the host's console in
+//!   a new process group per stage.
 //! - **Jobs.** `PgroupSpec::New` creates a job; `Join(pid)` adds the stage to
 //!   the job led by `pid` (and its console). Signals map to the job: KILL =
 //!   `TerminateJobObject` (members exit 137, reported as `Signaled(KILL)`). On
@@ -30,6 +31,7 @@
 //! - **Fds.** Extra fds (> 2) fail with `Unsupported` ([`UnsupportedFd`]).
 
 use std::{
+	collections::HashMap,
 	ffi::c_void,
 	fs,
 	io::{self, Write as _},
@@ -37,8 +39,8 @@ use std::{
 	os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle},
 	ptr,
 	sync::{
-		Arc,
-		atomic::{AtomicBool, AtomicU32, Ordering},
+		Arc, Weak,
+		atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll},
 	thread,
@@ -46,22 +48,24 @@ use std::{
 };
 
 use bstr::{BStr, BString, ByteSlice};
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use windows_sys::Win32::{
 	Foundation::{
-		ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, HANDLE, HANDLE_FLAG_INHERIT, NTSTATUS,
-		SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+		ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+		NTSTATUS, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 	},
 	System::{
 		Console::{
 			COORD, CTRL_BREAK_EVENT, ClosePseudoConsole, CreatePseudoConsole,
 			GenerateConsoleCtrlEvent, HPCON,
 		},
+		IO::{CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus},
 		JobObjects::{
 			AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
-			JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+			JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+			JOBOBJECT_BASIC_PROCESS_ID_LIST, JobObjectAssociateCompletionPortInformation,
 			JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
-			QueryInformationJobObject, TerminateJobObject,
+			QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 		},
 		SystemInformation::GetSystemDirectoryW,
 		Threading::{
@@ -125,7 +129,9 @@ fn raw(h: &impl AsRawHandle) -> HANDLE {
 
 /// Platform state of a spawner: the jobs it created.
 pub(super) struct State {
-	jobs: Mutex<Jobs>,
+	jobs:    Mutex<Jobs>,
+	/// Started with the first job on a pseudoconsole.
+	watcher: Mutex<Option<Arc<Watcher>>>,
 }
 
 struct Jobs {
@@ -135,7 +141,10 @@ struct Jobs {
 
 impl State {
 	pub(super) const fn new() -> Self {
-		Self { jobs: Mutex::new(Jobs { list: Vec::new(), next_sweep: SWEEP }) }
+		Self {
+			jobs:    Mutex::new(Jobs { list: Vec::new(), next_sweep: SWEEP }),
+			watcher: Mutex::new(None),
+		}
 	}
 
 	/// The job for `pgroup`: the one led by the pid to join, else a new one on
@@ -143,14 +152,28 @@ impl State {
 	fn job_for(
 		&self,
 		pgroup: PgroupSpec,
-		console: impl FnOnce() -> io::Result<JobConsole>,
+		console: impl FnOnce() -> JobConsole,
 	) -> io::Result<Arc<Job>> {
 		if let PgroupSpec::Join(leader) = pgroup
 			&& let Some(job) = self.jobs.lock().list.iter().find(|j| j.leader() == leader)
 		{
 			return Ok(Arc::clone(job));
 		}
-		Job::new(console()?)
+		let job = Job::new(console())?;
+		if matches!(job.con, JobConsole::Private(_)) {
+			self.watcher()?.watch(&job)?;
+		}
+		Ok(job)
+	}
+
+	fn watcher(&self) -> io::Result<Arc<Watcher>> {
+		let mut watcher = self.watcher.lock();
+		if let Some(w) = &*watcher {
+			return Ok(Arc::clone(w));
+		}
+		let w = Watcher::start()?;
+		*watcher = Some(Arc::clone(&w));
+		Ok(w)
 	}
 
 	fn record(&self, job: &Arc<Job>) {
@@ -169,6 +192,102 @@ impl State {
 
 	fn jobs(&self) -> Vec<Arc<Job>> {
 		self.jobs.lock().list.clone()
+	}
+}
+
+impl Drop for State {
+	fn drop(&mut self) {
+		if let Some(w) = self.watcher.get_mut() {
+			w.stop();
+		}
+	}
+}
+
+/// `JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO` (`winnt.h`): the job's last process
+/// exited.
+const JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO: u32 = 4;
+
+/// Closes a job's pseudoconsole when its last process exits, so no idle
+/// console host outlives the processes it served: the jobs report that on
+/// one completion port, read by one thread.
+struct Watcher {
+	port: OwnedHandle,
+	/// Completion keys (from 1; 0 stops the thread) to the jobs.
+	jobs: Mutex<HashMap<usize, Weak<Job>>>,
+	next: AtomicUsize,
+}
+
+impl Watcher {
+	fn start() -> io::Result<Arc<Self>> {
+		// SAFETY: a new port, associated with no file.
+		let port = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, ptr::null_mut(), 0, 1) };
+		let watcher = Arc::new(Self {
+			port: owned(port)?,
+			jobs: Mutex::new(HashMap::new()),
+			next: AtomicUsize::new(1),
+		});
+		let run = Arc::clone(&watcher);
+		thread::Builder::new()
+			.name("obash-console".into())
+			.stack_size(SMALL_STACK)
+			.spawn(move || run.run())?;
+		Ok(watcher)
+	}
+
+	/// Report `job`'s emptying to this watcher.
+	fn watch(&self, job: &Arc<Job>) -> io::Result<()> {
+		let key = self.next.fetch_add(1, Ordering::Relaxed);
+		{
+			let mut jobs = self.jobs.lock();
+			jobs.retain(|_, j| j.strong_count() > 0);
+			jobs.insert(key, Arc::downgrade(job));
+		}
+		let info = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+			CompletionKey:  ptr::without_provenance_mut(key),
+			CompletionPort: raw(&self.port),
+		};
+		// SAFETY: our job and port handles; `info` is readable for its size.
+		check(unsafe {
+			SetInformationJobObject(
+				raw(&job.handle),
+				JobObjectAssociateCompletionPortInformation,
+				(&raw const info).cast(),
+				mem::size_of_val(&info) as u32,
+			)
+		})
+	}
+
+	fn run(&self) {
+		loop {
+			let (mut msg, mut key, mut overlapped) = (0u32, 0usize, ptr::null_mut());
+			// SAFETY: our port; writable out-parameters.
+			let ok = unsafe {
+				GetQueuedCompletionStatus(
+					raw(&self.port),
+					&raw mut msg,
+					&raw mut key,
+					&raw mut overlapped,
+					INFINITE,
+				)
+			};
+			if ok == 0 || key == 0 {
+				return;
+			}
+			if msg != JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO {
+				continue;
+			}
+			let job = self.jobs.lock().get(&key).and_then(Weak::upgrade);
+			if let Some(job) = job
+				&& let JobConsole::Private(pty) = &job.con
+			{
+				pty.close_if_idle(&job);
+			}
+		}
+	}
+
+	fn stop(&self) {
+		// SAFETY: our port; key 0 with no overlapped is the stop packet.
+		unsafe { PostQueuedCompletionStatus(raw(&self.port), 0, 0, ptr::null()) };
 	}
 }
 
@@ -299,8 +418,8 @@ impl Job {
 enum JobConsole {
 	/// The host's console (`Sessions::Share`, `Sessions::Inherit`).
 	Shared,
-	/// A pseudoconsole the spawner holds: owned externals under
-	/// `Sessions::Detach`, which must not outlive the shell.
+	/// A pseudoconsole the spawner holds while the job's processes run: owned
+	/// externals under `Sessions::Detach`, which must not outlive the shell.
 	Private(Pty),
 	/// A hidden console of the job's own: released (`nohup`) externals under
 	/// `Sessions::Detach`, which outlive the shell and its host process.
@@ -308,26 +427,75 @@ enum JobConsole {
 }
 
 impl JobConsole {
-	fn new(sessions: Sessions, released: bool) -> io::Result<Self> {
-		Ok(match (sessions, released) {
-			(Sessions::Detach, false) => Self::Private(Pty::new()?),
+	const fn new(sessions: Sessions, released: bool) -> Self {
+		match (sessions, released) {
+			(Sessions::Detach, false) => Self::Private(Pty::new()),
 			(Sessions::Detach, true) => Self::Own,
 			_ => Self::Shared,
-		})
+		}
 	}
 }
 
-/// A job's private pseudoconsole. Its output goes to `NUL`, so the console
-/// host never blocks on a full pipe and no reader thread is needed.
+/// A job's private pseudoconsole, open while processes run on it: opened for
+/// the first process attached, closed when the job empties ([`Watcher`]) or
+/// on TERM/HUP; a stage attached later opens a new one.
 struct Pty {
-	/// 0 once hung up.
-	hpc:   Mutex<HPCON>,
+	open: Mutex<Option<Console>>,
+}
+
+impl Pty {
+	const fn new() -> Self {
+		Self { open: Mutex::new(None) }
+	}
+
+	/// The console, opened if closed, locked so that no hang-up or idle close
+	/// takes it while a process is being attached and assigned to the job.
+	fn attach(&self) -> io::Result<MappedMutexGuard<'_, Console>> {
+		let mut open = self.open.lock();
+		if open.is_none() {
+			*open = Some(Console::new()?);
+		}
+		Ok(MutexGuard::map(open, |c| c.as_mut().expect("opened above")))
+	}
+
+	/// `CTRL_C_EVENT` to the attached processes; ignored by those that
+	/// inherited an ignored Ctrl-C (a parent in a new process group). Fails
+	/// when the console is closed: nothing runs on it.
+	fn interrupt(&self) -> io::Result<()> {
+		match &*self.open.lock() {
+			Some(console) => (&console.input).write_all(&[0x03]),
+			None => Err(io::ErrorKind::BrokenPipe.into()),
+		}
+	}
+
+	/// Close the console: `CTRL_CLOSE_EVENT` to every attached process, which
+	/// none can ignore, and termination 5 s later by the system for those
+	/// still handling it.
+	fn hang_up(&self) {
+		self.open.lock().take();
+	}
+
+	/// Close the console if nothing runs in `job`. Under the lock: a process
+	/// being attached is assigned to the job before `attach` lets go, so it
+	/// either counts here or finds the console closed and opens a new one.
+	fn close_if_idle(&self, job: &Job) {
+		let mut open = self.open.lock();
+		if job.active().is_ok_and(|n| n == 0) {
+			open.take();
+		}
+	}
+}
+
+/// An open pseudoconsole. Its output goes to `NUL`, so the console host
+/// never blocks on a full pipe and no reader thread is needed.
+struct Console {
+	hpc:   HPCON,
 	/// The console's input: an ETX here raises `CTRL_C_EVENT` in every
 	/// attached process that does not ignore it.
 	input: io::PipeWriter,
 }
 
-impl Pty {
+impl Console {
 	/// Size reported to programs that query the console (progress bars).
 	const SIZE: COORD = COORD { X: 120, Y: 30 };
 
@@ -346,41 +514,14 @@ impl Pty {
 		if hr < 0 {
 			return Err(io::Error::from_raw_os_error(hr));
 		}
-		Ok(Self { hpc: Mutex::new(hpc), input })
-	}
-
-	/// The open console, locked so that no hang-up closes it while a process
-	/// is being attached.
-	fn lock(&self) -> io::Result<MutexGuard<'_, HPCON>> {
-		let hpc = self.hpc.lock();
-		if *hpc == 0 {
-			return Err(io::ErrorKind::BrokenPipe.into());
-		}
-		Ok(hpc)
-	}
-
-	/// `CTRL_C_EVENT` to the attached processes; ignored by those that
-	/// inherited an ignored Ctrl-C (a parent in a new process group).
-	fn interrupt(&self) -> io::Result<()> {
-		(&self.input).write_all(&[0x03])
-	}
-
-	/// Close the console: `CTRL_CLOSE_EVENT` to every attached process, which
-	/// none can ignore, and termination 5 s later by the system for those
-	/// still handling it. Later interrupts fail: the input has no reader.
-	fn hang_up(&self) {
-		let mut hpc = self.hpc.lock();
-		if *hpc != 0 {
-			// SAFETY: open (non-zero), closed once: zeroed under the lock.
-			unsafe { ClosePseudoConsole(*hpc) };
-			*hpc = 0;
-		}
+		Ok(Self { hpc, input })
 	}
 }
 
-impl Drop for Pty {
+impl Drop for Console {
 	fn drop(&mut self) {
-		self.hang_up();
+		// SAFETY: created in `new`, closed once.
+		unsafe { ClosePseudoConsole(self.hpc) };
 	}
 }
 
@@ -736,13 +877,13 @@ fn create(
 			list.push(raw(h));
 		}
 	}
-	// Held across CreateProcessW: a hang-up must not close the console under
-	// it.
-	let pty = match &job.con {
-		JobConsole::Private(pty) => Some(pty.lock()?),
+	// Held until the process is in the job: no hang-up or idle close takes
+	// the console from under it.
+	let attached = match &job.con {
+		JobConsole::Private(pty) => Some(pty.attach()?),
 		JobConsole::Shared | JobConsole::Own => None,
 	};
-	let mut attrs = Attributes::new(&list, pty.as_deref().copied())?;
+	let mut attrs = Attributes::new(&list, attached.as_ref().map(|c| c.hpc))?;
 	let mut si = STARTUPINFOEXW::default();
 	si.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
 	si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
