@@ -625,6 +625,26 @@ export const MCP_DISCOVERY_TURN_WAIT_MS = 1500;
 const IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS = 20_000;
 /** Marks work running inside the deferred extension load so it never waits on itself. */
 const deferredExtensionLoadScope = new AsyncLocalStorage<true>();
+/**
+ * One session transition in its session's tree of transitions. Transitions it starts itself queue
+ * on its `childTail`; it hands its parent's queue on once it and every one in `nested` settled.
+ */
+interface SessionTransitionTurn {
+	readonly parent: SessionTransitionTurn | undefined;
+	readonly nested: Set<Promise<unknown>>;
+	childTail: Promise<void>;
+	released: boolean;
+}
+/**
+ * Marks work running inside session transitions with the innermost transition of each session on
+ * the path (so one that goes through another session still counts as nested in its own), and the
+ * body a transition's entry point is about to run, so a transition started from inside one queues
+ * among that one's own instead of behind it.
+ */
+const sessionTransitionTurnScope = new AsyncLocalStorage<{
+	readonly turns: ReadonlyMap<object, SessionTransitionTurn>;
+	readonly body?: { readonly session: object; entered: boolean };
+}>();
 
 /** A failed preparation, not a provider failure: the ordinary input can still be restored. */
 class AgentStartPolicyChangedError extends Error {
@@ -1407,6 +1427,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#sessionTransitionSettled: Promise<void> | undefined;
 	#resolveSessionTransition: (() => void) | undefined;
 	#sessionTransitionDepth = 0;
+	/** Root of this session's transition tree: transitions requested from outside any running one queue on it. */
+	readonly #sessionTransitionRoot: SessionTransitionTurn = {
+		parent: undefined,
+		nested: new Set(),
+		childTail: Promise.resolve(),
+		released: false,
+	};
+	/** Transitions requested from outside and not yet released (queued, running, or awaiting nested ones). */
+	#queuedSessionTransitions = 0;
 	/** Each using declaration disposes one depth, so nested transitions reuse this token. */
 	readonly #sessionTransitionScope: Disposable = {
 		[Symbol.dispose]: () => {
@@ -6284,14 +6313,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	/** True while a session identity or transcript transition is still applying or rolling back. */
+	/**
+	 * True while a session identity or transcript transition is still applying or rolling back, or is
+	 * requested and waiting for an earlier one to finish.
+	 */
 	get isSessionTransitioning(): boolean {
-		return this.#sessionTransitionDepth > 0;
+		return this.#sessionTransitionDepth > 0 || this.#queuedSessionTransitions > 0;
 	}
 
-	/** Wait until all active session/transcript transitions have settled, including rollback. */
+	/**
+	 * Wait until all active and requested session/transcript transitions have settled, including
+	 * rollback and the transitions they started.
+	 */
 	async waitForSessionTransition(): Promise<void> {
-		while (this.#sessionTransitionSettled) await this.#sessionTransitionSettled;
+		while (this.#sessionTransitionSettled || this.#queuedSessionTransitions > 0) {
+			await (this.#sessionTransitionSettled ?? this.#sessionTransitionRoot.childTail);
+		}
 	}
 
 	#beginSessionTransition(): Disposable {
@@ -6304,6 +6341,79 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#resolveSessionTransition = settled.resolve;
 		}
 		return this.#sessionTransitionScope;
+	}
+
+	/**
+	 * Starts a session transition (switch, new session, fork, branch, tree navigation, context reset).
+	 * Each entry point calls this first with a call of itself, and runs its own body when this returns
+	 * `undefined`. A transition snapshots the session and restores that snapshot when it rolls back,
+	 * so one that overlapped another would either restore over the other's result or snapshot a
+	 * session the other was still changing. So transitions run one after another at every level:
+	 * one requested from outside queues behind every earlier one, and one that a running transition
+	 * starts itself (from its hooks or callbacks, through any session) queues only behind the earlier
+	 * ones that same transition started, never behind the transition itself, since that would wait for
+	 * itself. A transition hands its queue on once those nested in it have settled too, awaited or not.
+	 */
+	#enterSessionTransition<T>(rerun: () => Promise<T>): Promise<T> | undefined {
+		const store = sessionTransitionTurnScope.getStore();
+		const body = store?.body;
+		if (body && body.session === this && !body.entered) {
+			// This call is the re-entry that runs the transition's body.
+			body.entered = true;
+			return undefined;
+		}
+		// The innermost transition of this session on the caller's path, if it is still running.
+		let parent = store?.turns.get(this);
+		while (parent?.released) parent = parent.parent;
+		return this.#runSessionTransition(rerun, parent ?? this.#sessionTransitionRoot, store?.turns);
+	}
+
+	/**
+	 * Runs a session transition once every transition requested before it under the same parent has
+	 * finished, nested ones included. A transition still waiting when the session is disposed never
+	 * runs: its caller gets an error instead of a change to a session that is gone.
+	 */
+	async #runSessionTransition<T>(
+		rerun: () => Promise<T>,
+		parent: SessionTransitionTurn,
+		outerTurns: ReadonlyMap<object, SessionTransitionTurn> | undefined,
+	): Promise<T> {
+		const previous = parent.childTail;
+		const done = Promise.withResolvers<void>();
+		parent.childTail = done.promise;
+		const fromOutside = parent === this.#sessionTransitionRoot;
+		if (fromOutside) this.#queuedSessionTransitions++;
+		const turn: SessionTransitionTurn = { parent, nested: new Set(), childTail: Promise.resolve(), released: false };
+		const turns = new Map(outerTurns);
+		turns.set(this, turn);
+		const run = (async () => {
+			try {
+				await previous;
+				if (this.#isDisposed) throw new Error("The session was disposed before this session transition could run.");
+				return await sessionTransitionTurnScope.run({ turns, body: { session: this, entered: false } }, rerun);
+			} finally {
+				void this.#releaseSessionTransitionTurn(turn, done, fromOutside);
+			}
+		})();
+		if (!fromOutside) {
+			// The parent waits for this transition's whole subtree, not only its body: `done` settles
+			// once this transition and every one nested in it, at any depth, have settled.
+			parent.nested.add(done.promise);
+			void done.promise.then(() => parent.nested.delete(done.promise));
+		}
+		return run;
+	}
+
+	/** Hands a parent's queue on once a transition and every one nested in it have settled. */
+	async #releaseSessionTransitionTurn(
+		turn: SessionTransitionTurn,
+		done: PromiseWithResolvers<void>,
+		fromOutside: boolean,
+	): Promise<void> {
+		while (turn.nested.size > 0) await Promise.allSettled([...turn.nested]);
+		turn.released = true;
+		if (fromOutside) this.#queuedSessionTransitions--;
+		done.resolve();
 	}
 
 	/** Register cleanup that runs when this AgentSession adopts a different session ID. */
@@ -6899,6 +7009,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * streaming or a foreground bash/python execution is in flight.
 	 */
 	async resetSessionContext(): Promise<ResetSessionContextResult | undefined> {
+		const queued = this.#enterSessionTransition(() => this.resetSessionContext());
+		if (queued) return queued;
 		using _transition = this.#beginSessionTransition();
 		// Refuse while a response streams OR a foreground user bash/python
 		// execution is in flight: those complete via recordBashResult()/
@@ -11928,6 +12040,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @returns true if completed, false if cancelled by hook
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
+		const queued = this.#enterSessionTransition(() => this.newSession(options));
+		if (queued) return queued;
 		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
@@ -12082,6 +12196,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @returns true if completed, false if cancelled by hook or not persisting
 	 */
 	async fork(entryId?: string, options?: { requireIdle?: boolean }): Promise<boolean> {
+		const queued = this.#enterSessionTransition(() => this.fork(entryId, options));
+		if (queued) return queued;
 		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const requireIdleFor = entryId !== undefined || options?.requireIdle ? "fork the session" : undefined;
@@ -13660,6 +13776,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			onModelFallback?: (warning: string) => void;
 		},
 	): Promise<boolean> {
+		const queued = this.#enterSessionTransition(() => this.switchSession(sessionPath, options));
+		if (queued) return queued;
 		const explicitModel = options?.model;
 		if (explicitModel && !this.#modelRegistry.hasConfiguredAuth(explicitModel)) {
 			throw new Error(`No API key for ${explicitModel.provider}/${explicitModel.id}`);
@@ -14105,6 +14223,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		selectedImages: ImageContent[];
 		cancelled: boolean;
 	}> {
+		const queued = this.#enterSessionTransition(() => this.branch(entryId));
+		if (queued) return queued;
 		using _transition = this.#beginSessionTransition();
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
@@ -14243,6 +14363,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		sessionId: string,
 		images?: ImageContent[],
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
+		const queued = this.#enterSessionTransition(() =>
+			this.branchFromBtw(question, assistantMessage, leafId, sessionId, images),
+		);
+		if (queued) return queued;
 		using _transition = this.#beginSessionTransition();
 		const previousSessionFile = this.sessionFile;
 		if (!this.sessionManager.getSessionFile()) {
@@ -14405,6 +14529,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			requireIdle?: boolean;
 		} = {},
 	): Promise<NavigateTreeResult> {
+		const queued = this.#enterSessionTransition(() => this.navigateTree(targetId, options));
+		if (queued) return queued;
 		using _transition = this.#beginSessionTransition();
 		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();
