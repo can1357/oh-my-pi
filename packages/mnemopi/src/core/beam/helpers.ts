@@ -723,6 +723,40 @@ export interface EmbedItem {
 	readonly content: string;
 }
 
+export interface StagedEmbedding extends EmbedItem {
+	readonly json: string;
+}
+
+const INSERT_LIVE_EMBEDDING_SQL = `
+	INSERT OR REPLACE INTO memory_embeddings(memory_id, embedding_json, model)
+	SELECT ?, ?, ?
+	WHERE EXISTS (
+		SELECT 1 FROM working_memory
+		WHERE id = ? AND superseded_by IS NULL AND COALESCE(embed_text, content) = ?
+	) OR EXISTS (
+		SELECT 1 FROM episodic_memory
+		WHERE id = ? AND superseded_by IS NULL AND content = ?
+	)
+`;
+
+export function insertLiveEmbeddings(db: Database, rows: readonly StagedEmbedding[], model: string): number {
+	using insertEmbedding = db.prepare(INSERT_LIVE_EMBEDDING_SQL);
+	let committed = 0;
+	for (const row of rows) {
+		const result = insertEmbedding.run(
+			row.memoryId,
+			row.json,
+			model,
+			row.memoryId,
+			row.content,
+			row.memoryId,
+			row.content,
+		);
+		committed += result.changes;
+	}
+	return committed;
+}
+
 async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]): Promise<void> {
 	try {
 		const matrix = await embed(items.map(item => item.content));
@@ -731,21 +765,21 @@ async function runEmbedding(beam: BeamMemoryState, items: readonly EmbedItem[]):
 		// stall is attributable. The embedding itself is awaited above, outside the label.
 		withLoopPhase("mnemopi.embed-persist", () => {
 			const model = currentEmbeddingModel();
-			using insertEmbedding = beam.db.prepare(
-				"INSERT OR REPLACE INTO memory_embeddings(memory_id, embedding_json, model) VALUES (?, ?, ?)",
+			const staged: StagedEmbedding[] = [];
+			for (let i = 0; i < items.length; i += 1) {
+				const vector = matrix[i];
+				const item = items[i];
+				if (vector === undefined || item === undefined) continue;
+				staged.push({
+					memoryId: item.memoryId,
+					content: item.content,
+					json: JSON.stringify(Array.from(vector)),
+				});
+			}
+			const insertMany = beam.db.transaction((rows: readonly StagedEmbedding[]) =>
+				insertLiveEmbeddings(beam.db, rows, model),
 			);
-			let committed = 0;
-			const insertMany = beam.db.transaction((rows: readonly EmbedItem[]) => {
-				for (let i = 0; i < rows.length; i += 1) {
-					const vector = matrix[i];
-					const item = rows[i];
-					if (vector === undefined || item === undefined) continue;
-					insertEmbedding.run(item.memoryId, JSON.stringify(Array.from(vector)), model);
-					committed += 1;
-				}
-			});
-			insertMany(items);
-			// A recall taken while these vectors were still generating cached an FTS-only ranking, and
+			const committed = insertMany(staged);
 			// committing vectors changes what recall returns -- so that cache must be dropped, or the
 			// pre-embedding order keeps being served for the whole cache TTL. Gated on `committed`: a
 			// batch whose provider returned a short or empty matrix inserts nothing, changes no ranking,
