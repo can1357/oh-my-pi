@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `local/kokoro-zh` sherpa-onnx Kokoro-82M v1.1-zh TTS seed row.
+- Added the `local/kokoro-zh` sherpa-onnx Kokoro-82M v1.1-zh TTS seed row ([#18496](https://github.com/can1357/oh-my-pi/pull/18496) by [@YangtseSu](https://github.com/YangtseSu)).
 
 ### Fixed
 

@@ -4,11 +4,11 @@
 
 ### Added
 
-- Added `local/kokoro-zh`, a sherpa-onnx Kokoro-82M v1.1-zh local TTS model with Chinese/English voices. It downloads into the shared tiny-model cache through `omp setup speech` and works through the existing `speech` role.
+- Added `local/kokoro-zh`, a sherpa-onnx Kokoro-82M v1.1-zh local TTS model with Chinese/English voices. It downloads into the shared tiny-model cache through `omp setup speech` and works through the existing `speech` role ([#18496](https://github.com/can1357/oh-my-pi/pull/18496) by [@YangtseSu](https://github.com/YangtseSu)).
 
 ### Fixed
 
-- Speech vocalization now uses the model selected by the `speech` role instead of always loading the default English Kokoro model; the event controller wires the session settings and registry into the vocalizer.
+- Speech vocalization now uses the model selected by the `speech` role instead of always loading the default English Kokoro model; the event controller wires the session settings and registry into the vocalizer ([#18496](https://github.com/can1357/oh-my-pi/pull/18496) by [@YangtseSu](https://github.com/YangtseSu)).
 
 ### Breaking Changes
 
