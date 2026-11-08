@@ -4,6 +4,7 @@ import type { ModelRegistry } from "../../src/config/model-registry";
 import type { CustomTool, CustomToolContext } from "../../src/extensibility/custom-tools/types";
 import { bindPreparedExtensions } from "../../src/extensibility/extensions/loader";
 import type { PreparedExtension } from "../../src/extensibility/extensions/types";
+import { runtimeThreadService } from "../../src/thread/services/runtime";
 import { type LocalProtocolOptions, resolveLocalRoot } from "../../src/internal-urls/local-protocol";
 import { MCPManager } from "../../src/mcp/manager";
 import { SessionManager } from "../../src/session/session-manager";
@@ -183,7 +184,7 @@ port.once("message", (init: { sync: MessagePort; counter: SharedArrayBuffer }) =
 		},
 		{ name: "integrations-fixture", sync: { port: init.sync, counter: new Int32Array(init.counter) } },
 	);
-	const services = [settingsThreadService, authService, integrationsThreadService];
+	const services = [settingsThreadService, authService, integrationsThreadService, runtimeThreadService];
 	for (const service of services) service.installWorker?.(link);
 	link.handle("ping", nonce => nonce);
 	link.handle("boot", async globals => {

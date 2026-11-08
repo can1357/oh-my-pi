@@ -56,7 +56,30 @@ export async function startServiceWorker<Probe>(url: URL, services: ThreadServic
 	const { promise: probed, resolve: onProbe } = Promise.withResolvers<Probe>();
 	const globals: Record<string, unknown> = { test: { ready: (probe: Probe) => onProbe(probe) } };
 	for (const service of services) globals[service.name] = service.globals?.(peer);
-	await link.call("boot", globals);
+	try {
+		await link.call("boot", globals);
+	} catch (error) {
+		// A failed boot must not leave the worker or its link alive. Cleanup
+		// failures must not replace the boot error the caller is asserting.
+		try {
+			link.close("boot failed");
+		} catch {
+			// The boot error wins.
+		}
+		for (const service of services) {
+			try {
+				service.onWorkerExit?.(peer, "boot failed");
+			} catch {
+				// The boot error wins.
+			}
+		}
+		try {
+			await worker.terminate();
+		} catch {
+			// The boot error wins.
+		}
+		throw error;
+	}
 	const probe = await probed;
 	return {
 		worker,

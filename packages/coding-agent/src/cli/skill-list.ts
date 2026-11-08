@@ -39,6 +39,9 @@ export async function runSkillsCommand(
 	let skillsSettings: Partial<SkillsSettings>;
 	let disabledExtensions: string[];
 	let extensionRoots: EffectiveExtensionRoots;
+	// Only the no-override path binds capability settings. Release exactly that
+	// hold, including when discovery throws, so an enclosing scope stays bound.
+	let release: (() => void) | undefined;
 	if (options.skillsSettings) {
 		// Test seam: fully isolated from ambient configuration.
 		skillsSettings = options.skillsSettings;
@@ -46,7 +49,7 @@ export async function runSkillsCommand(
 		extensionRoots = { explicit: [], mode: "merge", configured: [], configuredLevel: "user" };
 	} else {
 		const settings = await Settings.init({ cwd });
-		initializeWithSettings(settings);
+		release = initializeWithSettings(settings);
 		skillsSettings = cfgSkills.get(settings);
 		disabledExtensions = [...cfgDisabledExtensions.get(settings)];
 		extensionRoots = {
@@ -56,37 +59,41 @@ export async function runSkillsCommand(
 			configuredLevel: settings.extensionsSourceLevel(),
 		};
 	}
-	if (skillsSettings.customDirectories?.length) {
-		// Relative entries are config-relative to the inspected directory, not
-		// to wherever the command happens to run. A `~` entry names the home
-		// directory, so it is expanded first — otherwise it would resolve to a
-		// literal `~` segment below `cwd` and the listing would disagree with
-		// the loader, which expands the tilde itself.
-		skillsSettings = {
+	try {
+		if (skillsSettings.customDirectories?.length) {
+			// Relative entries are config-relative to the inspected directory, not
+			// to wherever the command happens to run. A `~` entry names the home
+			// directory, so it is expanded first — otherwise it would resolve to a
+			// literal `~` segment below `cwd` and the listing would disagree with
+			// the loader, which expands the tilde itself.
+			skillsSettings = {
+				...skillsSettings,
+				customDirectories: skillsSettings.customDirectories.map(dir => {
+					const expanded = expandTilde(dir);
+					return path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
+				}),
+			};
+		}
+		const { skills, warnings } = await loadSkills({
 			...skillsSettings,
-			customDirectories: skillsSettings.customDirectories.map(dir => {
-				const expanded = expandTilde(dir);
-				return path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
-			}),
+			cwd,
+			disabledExtensions,
+			extensionRoots,
+		});
+		return {
+			skills: skills.map(skill => ({
+				name: skill.name,
+				description: skill.description,
+				filePath: skill.filePath,
+				baseDir: skill.baseDir,
+				source: skill.source,
+				hide: skill.hide === true,
+			})),
+			warnings,
 		};
+	} finally {
+		release?.();
 	}
-	const { skills, warnings } = await loadSkills({
-		...skillsSettings,
-		cwd,
-		disabledExtensions,
-		extensionRoots,
-	});
-	return {
-		skills: skills.map(skill => ({
-			name: skill.name,
-			description: skill.description,
-			filePath: skill.filePath,
-			baseDir: skill.baseDir,
-			source: skill.source,
-			hide: skill.hide === true,
-		})),
-		warnings,
-	};
 }
 
 /** Control characters (including newlines and tabs) are escaped so skill

@@ -5,6 +5,8 @@ import * as path from "node:path";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../src/config/model-registry";
+import { effectsSettings } from "../../src/config/registry";
+import { isSettingsInitialized, resetSettingsForTest, Settings } from "../../src/config/settings";
 import type { CustomTool } from "../../src/extensibility/custom-tools/types";
 import { bindPreparedExtensions, importExtensionModule } from "../../src/extensibility/extensions/loader";
 import { type LocalProtocolOptions, resolveLocalRoot } from "../../src/internal-urls/local-protocol";
@@ -19,8 +21,12 @@ import {
 	toWorkerCustomTool,
 } from "../../src/thread/services/integrations";
 import { settingsThreadService } from "../../src/thread/services/settings";
+import { runtimeThreadService } from "../../src/thread/services/runtime";
+import { initializeWithSettings, resetCapabilityForTests } from "../../src/discovery";
+import { AgentStorage } from "../../src/session/agent-storage";
 import type { IntegrationsProbe } from "../fixtures/integrations-worker";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { restoreEnvValue } from "../helpers/settings-test-state";
 import { type ServiceWorker, startServiceWorker } from "../helpers/service-worker";
 
 const FIXTURES = path.join(import.meta.dir, "..", "fixtures");
@@ -52,7 +58,7 @@ describe("integrations thread service", () => {
 	let registry: ModelRegistry;
 	let manager: MCPManager;
 	let frameLog: string;
-	let fixture: ServiceWorker<IntegrationsProbe>;
+	let fixture: ServiceWorker<IntegrationsProbe> | undefined;
 	let probe: IntegrationsProbe;
 
 	beforeEach(async () => {
@@ -75,17 +81,19 @@ describe("integrations thread service", () => {
 		MCPManager.setInstance(manager);
 		fixture = await startServiceWorker<IntegrationsProbe>(
 			new URL("../fixtures/integrations-worker.ts", import.meta.url),
-			[settingsThreadService, authService, integrationsThreadService],
+			[settingsThreadService, authService, integrationsThreadService, runtimeThreadService],
 		);
 		probe = fixture.probe;
 	});
 
 	afterEach(async () => {
-		await fixture.stop();
+		// A failed boot leaves fixture unset. Still disconnect what was started
+		// and close auth storage so a partial setup does not leak into the next test.
+		if (fixture) await fixture.stop();
 		MCPManager.resetForTests();
-		await manager.disconnectAll();
-		authStorage.close();
-		removeSyncWithRetries(dir);
+		if (manager) await manager.disconnectAll();
+		authStorage?.close();
+		if (dir) removeSyncWithRetries(dir);
 	});
 
 	function toolNamed(suffix: string): string {
@@ -228,5 +236,86 @@ describe("integrations thread service", () => {
 		expect(local.extensions.flatMap(extension => [...extension.commands.keys()])).toEqual(["thread-main"]);
 
 		expect(await probe.bindExtensions([prepared], dir)).toEqual({ commands: ["thread-worker"], errors: [] });
+	}, 20_000);
+});
+
+/**
+ * Boot the integrations worker after a persistent settings database is live and
+ * assert the MCP echo contract. `runtimeThreadService` is installed so `watch`
+ * can send the real AgentStorage instance across the link.
+ */
+async function expectPersistentSettingsEcho(
+	install: (dir: string) => Promise<() => void>,
+): Promise<void> {
+	const dir = path.join(os.tmpdir(), `omp-integrations-storage-${Snowflake.next()}`);
+	fs.mkdirSync(dir, { recursive: true });
+	const originalPiConfigFiles = process.env.PI_CONFIG_FILES;
+	delete process.env.PI_CONFIG_FILES;
+	delete Bun.env.PI_CONFIG_FILES;
+	resetSettingsForTest();
+	resetCapabilityForTests();
+	const authStorage = createInMemoryAuthStorage();
+	const registry = new ModelRegistry(authStorage, path.join(dir, "models.yml"));
+	const manager = new MCPManager(dir, null, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+	let fixture: ServiceWorker<IntegrationsProbe> | undefined;
+	let releaseSettings: (() => void) | undefined;
+	try {
+		const configs: Record<string, MCPStdioServerConfig> = {
+			cancel: {
+				type: "stdio",
+				command: process.execPath,
+				args: [path.join(FIXTURES, "cancellable-mcp.ts"), path.join(dir, "frames.log")],
+			},
+		};
+		await manager.connectServers(configs, {});
+		expect((await manager.waitForStartup(0)).failed).toEqual([]);
+		MCPManager.setInstance(manager);
+		releaseSettings = await install(dir);
+		fixture = await startServiceWorker<IntegrationsProbe>(
+			new URL("../fixtures/integrations-worker.ts", import.meta.url),
+			[settingsThreadService, authService, integrationsThreadService, runtimeThreadService],
+		);
+		const toolName = manager.getTools().find(tool => tool.name.endsWith("echo"))?.name;
+		if (!toolName) throw new Error("no MCP tool ending in echo");
+		const echoed = await fixture.probe.mcpCall(registry, toolName, { text: "from worker" });
+		expect(echoed.text).toBe("from worker");
+	} finally {
+		releaseSettings?.();
+		if (fixture) await fixture.stop();
+		MCPManager.resetForTests();
+		await manager.disconnectAll();
+		authStorage.close();
+		resetCapabilityForTests();
+		resetSettingsForTest();
+		AgentStorage.close();
+		restoreEnvValue("PI_CONFIG_FILES", originalPiConfigFiles);
+		removeSyncWithRetries(dir);
+	}
+}
+
+describe("integrations thread service persistent settings", () => {
+	it("echoes an MCP tool call while Settings.init holds persistent storage", async () => {
+		await expectPersistentSettingsEcho(async dir => {
+			const settings = await Settings.init({ cwd: dir, agentDir: path.join(dir, "agent") });
+			expect(settings.getStorage()).not.toBeNull();
+			return () => {
+				resetSettingsForTest();
+			};
+		});
+	}, 20_000);
+
+	it("echoes an MCP tool call while an isolated settings hold carries persistent storage", async () => {
+		await expectPersistentSettingsEcho(async dir => {
+			expect(isSettingsInitialized()).toBe(false);
+			expect(effectsSettings()).toBeUndefined();
+			const settings = await Settings.loadIsolated({ cwd: dir, agentDir: path.join(dir, "agent") });
+			const release = initializeWithSettings(settings);
+			expect(isSettingsInitialized()).toBe(false);
+			expect(effectsSettings()).toBeUndefined();
+			expect(settings.getStorage()).not.toBeNull();
+			return () => {
+				release();
+			};
+		});
 	}, 20_000);
 });
