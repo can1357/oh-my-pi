@@ -125,21 +125,26 @@ function fenceIndentValid(text: string, lineStart: number, indent: number): bool
 	return false;
 }
 
-/** Whether a code fence is still open at `end` of `text`. */
-function fenceOpenAt(text: string, end: number): boolean {
-	let open: string | undefined;
+/** The trimmed info string of the code fence still open at `end` of `text`, or undefined when none is. */
+function openFenceInfo(text: string, end: number): string | undefined {
+	let open: { marker: string; info: string } | undefined;
 	FENCE_LINE.lastIndex = 0;
 	for (let match = FENCE_LINE.exec(text); match !== null && match.index < end; match = FENCE_LINE.exec(text)) {
 		const [, indent, marker, rest] = match;
 		if (!fenceIndentValid(text, match.index, indentWidth(indent))) continue;
 		if (open === undefined) {
 			// A backtick fence's info string cannot hold a backtick (that line is inline code).
-			if (marker[0] !== "`" || !rest.includes("`")) open = marker;
-		} else if (marker[0] === open[0] && marker.length >= open.length && !rest.trim()) {
+			if (marker[0] !== "`" || !rest.includes("`")) open = { marker, info: rest.trim() };
+		} else if (marker[0] === open.marker[0] && marker.length >= open.marker.length && !rest.trim()) {
 			open = undefined;
 		}
 	}
-	return open !== undefined;
+	return open?.info;
+}
+
+/** Whether a code fence is still open at `end` of `text`. */
+function fenceOpenAt(text: string, end: number): boolean {
+	return openFenceInfo(text, end) !== undefined;
 }
 
 /**
@@ -168,12 +173,19 @@ export function endsInsideOpenFence(text: string): boolean {
  * prefix it publishes, so cutting at the final "\n" would publish nothing on
  * exactly those frames. Once the closing fence has arrived, the retained line
  * is the one in front of it.
+ *
+ * `drawsWhole` names fence languages rendered from their whole body (a mermaid
+ * diagram is laid out again with every line), whose finished lines are not
+ * settled rows: they settle nothing.
  */
-function settledFenceBodyEnd(text: string): number {
+function settledFenceBodyEnd(text: string, drawsWhole: (lang: string) => boolean): number {
 	const lastBreak = text.lastIndexOf("\n");
 	if (lastBreak <= 0) return 0;
 	const cut = text.lastIndexOf("\n", lastBreak - 1) + 1;
-	return cut > 0 && fenceOpenAt(text, cut) ? cut : 0;
+	if (cut <= 0) return 0;
+	const info = openFenceInfo(text, cut);
+	if (info === undefined) return 0;
+	return drawsWhole(info.split(/\s/, 1)[0] ?? "") ? 0 : cut;
 }
 
 /**
@@ -2603,7 +2615,10 @@ export class Markdown implements Component {
 			fence = undefined;
 			this.#streamFenceSettledText = undefined;
 		}
-		const body = settledFenceBodyEnd(source);
+		const body = settledFenceBodyEnd(
+			source,
+			lang => lang === "mermaid" && this.#theme.resolveMermaidAscii !== undefined,
+		);
 		if (body > (fence?.length ?? 0)) {
 			fence = source.slice(0, body);
 			this.#streamFenceSettledText = fence;

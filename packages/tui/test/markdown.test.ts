@@ -2352,6 +2352,25 @@ describe("Module-level LRU render cache", () => {
 		expect(markdown.getLastRenderStableText()).toBe("```sql\nSELECT 1;\nSELECT 2;\n");
 	});
 
+	it("settles nothing inside an open mermaid fence drawn as a diagram", () => {
+		// The diagram is laid out again from the whole body with every line, so
+		// its rows are not append-only: published rows would stop prefixing the
+		// block and freeze it, leaving every row above the screen unretired.
+		clearRenderCache();
+		const source = "Intro.\n\n```mermaid\nflowchart TD\n  A --> B\n  B --> C\n  C --> D";
+		const diagramTheme = { ...defaultMarkdownTheme, resolveMermaidAscii: () => "diagram" };
+		const diagram = new Markdown(source, 0, 0, diagramTheme);
+		diagram.transientRenderCache = true;
+		diagram.render(80);
+		expect(diagram.getLastRenderStableText()).toBe("Intro.\n\n");
+
+		// Without a resolver the fence renders as code, which only appends.
+		const code = new Markdown(source, 0, 0, { ...defaultMarkdownTheme, resolveMermaidAscii: undefined });
+		code.transientRenderCache = true;
+		code.render(80);
+		expect(code.getLastRenderStableText()).toBe("Intro.\n\n```mermaid\nflowchart TD\n  A --> B\n");
+	});
+
 	it("clears the settled fence text when a non-append edit rewinds it", () => {
 		// Regression: the stored prefix survived a rewind, so every later frame
 		// failed the prefix check and the block stayed unretirable for the rest
