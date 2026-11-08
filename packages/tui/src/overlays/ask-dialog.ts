@@ -616,11 +616,12 @@ export class AskDialogComponent implements Component {
 	/** Once-a-second re-describe while the native countdown ring is shown. */
 	#ringTick: NodeJS.Timeout | undefined;
 	/**
-	 * The answer whose pick just moved the dialog on to the next question. Note annotates it, not the
-	 * next question's highlighted row, until that question is answered or any other input arrives:
-	 * a Tern click commits a single-choice row, so picking then pressing Note is the mouse flow.
+	 * The answer a pointer click just picked, moving the dialog on: a Tern click commits a row
+	 * without first showing it highlighted, so Note annotates that answer (and says so on its button)
+	 * until the question it moved on to is answered or any other input arrives. Keyboard picks never
+	 * set it: there the highlighted row on screen is the target.
 	 */
-	#justAnswered: { questionIndex: number; rowKey: string } | undefined;
+	#pointerPick: { questionIndex: number; rowKey: string } | undefined;
 	readonly #panel: OverlayPanel;
 	readonly #headerRegion: PanelRows;
 	readonly #bodyRegion: PanelRows;
@@ -719,7 +720,7 @@ export class AskDialogComponent implements Component {
 		// closed/prompt guards, matching HookSelector/HookInput semantics.
 		this.#countdown?.reset();
 		this.#native = undefined;
-		if (keyData !== "n" && keyData !== "N") this.#justAnswered = undefined;
+		if (keyData !== "n" && keyData !== "N") this.#pointerPick = undefined;
 		if (matchesSelectCancel(keyData)) {
 			this.#finishCancel();
 			return;
@@ -1049,11 +1050,21 @@ export class AskDialogComponent implements Component {
 			tone: "accent",
 			title: question?.multi ? `${enterLabel}  enter · Toggle  space` : `${enterLabel}  enter`,
 		});
-		const note = actionButton("Note", "note", {
-			keys: "n",
-			title: "Add a note to the highlighted answer, or to the one just picked  n",
-		});
+		const note = this.#describeNoteButton();
 		return actionBar([...lead, null, note, skip, submit]);
+	}
+
+	/** Note, naming the answer it goes to while that is a just-clicked pick rather than the highlighted row. */
+	#describeNoteButton(): NativeNode {
+		const target = this.#noteTarget();
+		if (!target || target.questionIndex === this.#currentQuestionIndex()) {
+			return actionButton("Note", "note", { keys: "n", title: "Add a note to the highlighted answer  n" });
+		}
+		const tab = questionTabName(target.question, target.questionIndex);
+		return actionButton(`Note on ${tab}`, "note", {
+			keys: "n",
+			title: `Add a note to ${target.rowItem.label}, just picked on ${tab}  n`,
+		});
 	}
 
 	/**
@@ -1065,7 +1076,7 @@ export class AskDialogComponent implements Component {
 	 */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#closed || this.#promptActive) return;
-		if (event.type !== "action" || event.act !== "note") this.#justAnswered = undefined;
+		if (event.type !== "action" || event.act !== "note") this.#pointerPick = undefined;
 		if (event.type === "action") {
 			if (event.act === "cancel") {
 				this.#finishCancel();
@@ -1108,7 +1119,7 @@ export class AskDialogComponent implements Component {
 		state.cursorIndex = index;
 		state.manualScroll = false;
 		const toggles = event.type === "select" && question.multi === true && rowItem.kind === "option";
-		this.#commitRow(question, state, rowItem, !toggles);
+		this.#commitRow(question, state, rowItem, !toggles, true);
 		this.#requestRender();
 	}
 
@@ -1129,10 +1140,10 @@ export class AskDialogComponent implements Component {
 		const rowItem = active ? this.#questionRows(active.question)[active.state.cursorIndex] : undefined;
 		if (!active || !rowItem) return;
 		if (rowItem.kind === "other" && this.#hasSubmitTab()) {
-			this.#advanceAfterQuestion(active.state.customInput === undefined ? undefined : rowItem.key);
+			this.#advanceAfterQuestion();
 			return;
 		}
-		this.#commitRow(active.question, active.state, rowItem, true);
+		this.#commitRow(active.question, active.state, rowItem, true, false);
 		this.#requestRender();
 	}
 
@@ -1144,22 +1155,23 @@ export class AskDialogComponent implements Component {
 		if (target) void this.#promptForNote(target.question, target.state, target.rowItem);
 	}
 
-	/**
-	 * The row a note goes to: the answer just picked while the question it moved on to is still
-	 * unanswered, else the highlighted row.
-	 */
-	#noteTarget(): { question: ExtensionAskDialogQuestion; state: QuestionState; rowItem: QuestionRow } | undefined {
+	/** The row a note goes to: a {@link #pointerPick} while the question it moved on to is unanswered, else the highlighted row. */
+	#noteTarget():
+		| { question: ExtensionAskDialogQuestion; questionIndex: number; state: QuestionState; rowItem: QuestionRow }
+		| undefined {
 		const active = this.#activeQuestionState();
 		if (!active) return undefined;
-		const last = this.#justAnswered;
-		if (last && last.questionIndex !== this.#currentQuestionIndex() && !isAnswered(active.state)) {
-			const question = this.#questions[last.questionIndex];
-			const state = this.#states[last.questionIndex];
-			const rowItem = question ? this.#questionRows(question).find(row => row.key === last.rowKey) : undefined;
-			if (question && state && rowItem) return { question, state, rowItem };
+		const pick = this.#pointerPick;
+		if (pick && pick.questionIndex !== this.#currentQuestionIndex() && !isAnswered(active.state)) {
+			const question = this.#questions[pick.questionIndex];
+			const state = this.#states[pick.questionIndex];
+			const rowItem = question ? this.#questionRows(question).find(row => row.key === pick.rowKey) : undefined;
+			if (question && state && rowItem) return { question, questionIndex: pick.questionIndex, state, rowItem };
 		}
 		const rowItem = this.#questionRows(active.question)[active.state.cursorIndex];
-		return rowItem ? { question: active.question, state: active.state, rowItem } : undefined;
+		return rowItem
+			? { question: active.question, questionIndex: this.#currentQuestionIndex(), state: active.state, rowItem }
+			: undefined;
 	}
 
 	/** Re-describe once a second while a countdown ring is shown (the ring's value is data, not a terminal clock). */
@@ -1439,18 +1451,22 @@ export class AskDialogComponent implements Component {
 		const isEnter = matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n";
 		const isSpace = matchesKey(keyData, "space") || keyData === " ";
 		if (!isEnter && !(question.multi && isSpace)) return;
-		this.#commitRow(question, state, rowItem, isEnter);
+		this.#commitRow(question, state, rowItem, isEnter, false);
 	}
 
-	/** Enter (`isEnter`) or multi-select Space on a row: toggle, select, or prompt for its answer. */
+	/**
+	 * Enter (`isEnter`) or multi-select Space on a row: toggle, select, or prompt for its answer.
+	 * `byPointer`: a click did it, so a pick that moves on becomes the {@link #pointerPick}.
+	 */
 	#commitRow(
 		question: ExtensionAskDialogQuestion,
 		state: QuestionState,
 		rowItem: QuestionRow,
 		isEnter: boolean,
+		byPointer: boolean,
 	): void {
 		if (rowItem.kind === "other") {
-			void this.#promptForCustomInput(question, state, rowItem);
+			void this.#promptForCustomInput(question, state, rowItem, byPointer);
 			return;
 		}
 		const option = question.options[rowItem.optionIndex ?? -1];
@@ -1461,7 +1477,7 @@ export class AskDialogComponent implements Component {
 				// focused option; Space toggles. Advances to the next question
 				// (submitting only for a single-question dialog), matching
 				// single-select Enter (#8252).
-				this.#advanceAfterQuestion(state.selectedOptions.has(option.label) ? rowItem.key : undefined);
+				this.#advanceAfterQuestion(byPointer && state.selectedOptions.has(option.label) ? rowItem.key : undefined);
 				return;
 			}
 			if (state.selectedOptions.has(option.label)) {
@@ -1477,7 +1493,7 @@ export class AskDialogComponent implements Component {
 		state.customInput = undefined;
 		state.customInputImages = undefined;
 		clearNoteUnlessRow(state, rowItem.key);
-		this.#advanceAfterQuestion(rowItem.key);
+		this.#advanceAfterQuestion(byPointer ? rowItem.key : undefined);
 	}
 
 	#handleSubmitTabInput(keyData: string): void {
@@ -1502,12 +1518,12 @@ export class AskDialogComponent implements Component {
 		this.#submitScrollOffset = 0;
 	}
 
-	/** Move past the current question; `answeredRowKey` is the row whose pick did it, for {@link #noteTarget}. */
-	#advanceAfterQuestion(answeredRowKey?: string): void {
+	/** Move past the current question (submits a single-question dialog); `clickedRowKey` arms {@link #pointerPick}. */
+	#advanceAfterQuestion(clickedRowKey?: string): void {
 		const current = this.#currentQuestionIndex();
-		this.#justAnswered =
-			answeredRowKey !== undefined && this.#questions.length > 1
-				? { questionIndex: current, rowKey: answeredRowKey }
+		this.#pointerPick =
+			clickedRowKey !== undefined && this.#questions.length > 1
+				? { questionIndex: current, rowKey: clickedRowKey }
 				: undefined;
 		if (this.#questions.length === 1) {
 			this.#finishSubmit();
@@ -1535,6 +1551,7 @@ export class AskDialogComponent implements Component {
 		question: ExtensionAskDialogQuestion,
 		state: QuestionState,
 		rowItem: QuestionRow,
+		byPointer: boolean,
 	): Promise<void> {
 		this.#promptActive = true;
 		try {
@@ -1570,7 +1587,7 @@ export class AskDialogComponent implements Component {
 				this.#activeTabIndex = this.#submitTabIndex();
 				this.#submitScrollOffset = 0;
 			} else {
-				this.#advanceAfterQuestion(rowItem.key);
+				this.#advanceAfterQuestion(byPointer ? rowItem.key : undefined);
 			}
 		} finally {
 			this.#promptActive = false;
@@ -1599,7 +1616,7 @@ export class AskDialogComponent implements Component {
 			state.note = note.text;
 			state.noteImages = note.images;
 			state.noteRowKey = rowItem.key;
-			this.#justAnswered = undefined;
+			this.#pointerPick = undefined;
 		} finally {
 			this.#promptActive = false;
 			this.#runDeferredTimeout();
