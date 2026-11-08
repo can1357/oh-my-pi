@@ -2087,12 +2087,12 @@ export class SessionTools {
 	/**
 	 * Builds the hidden notice of skills the live registry has gained, changed or lost since the system
 	 * prompt and the notices still in context listed them. A changed description is announced again
-	 * because the model routes on it. Gated like the prompt's skill list: `skillful` on and an active
-	 * tool that reads `skill://`.
+	 * because the model routes on it. Gated like the prompt's skill list: `skillful` on and an enabled
+	 * tool, top-level or `xd://`-mounted, that reads `skill://`.
 	 */
 	takeSkillNotice(): CustomMessage<SkillNoticeDetails> | undefined {
 		if (cfgSkillful.get(this.#host.settings) !== true) return undefined;
-		if (!this.getActiveToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)))) return undefined;
+		if (!this.getEnabledToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)))) return undefined;
 		const listed = (skills: readonly Skill[]) => skills.filter(skill => skill.hide !== true);
 		const known = new Map(listed(this.#promptSkills).map(skill => [skill.name, skill.description]));
 		for (const message of this.#host.agent.state.messages) {
