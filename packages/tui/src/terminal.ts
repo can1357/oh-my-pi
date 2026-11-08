@@ -2525,6 +2525,10 @@ export class ProcessTerminal implements Terminal {
 	#markTerminalDisconnected(reason: string, err?: unknown): void {
 		if (this.#dead) return;
 		this.#dead = true;
+		// The SIGHUP raised below is this instance's own disconnect, so postmortem
+		// must not write a report to fd 2 afterwards: a stalled stdout leaves that
+		// descriptor a full, blocking pty, and the write would hang before the exit.
+		postmortem.declareTerminalDead();
 		this.#disarmStdoutStallWatchdog();
 		logger.warn("terminal disconnected; stopping interactive rendering", { reason, err });
 
