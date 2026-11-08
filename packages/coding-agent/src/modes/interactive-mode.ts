@@ -13,6 +13,7 @@ import type {
 	AutocompleteProvider,
 	Component,
 	EditorTheme,
+	HistoryFlushOptions,
 	KeyId,
 	LoaderMessageColorFn,
 	OverlayHandle,
@@ -22,6 +23,7 @@ import type {
 import {
 	Container,
 	clearRenderCache,
+	EXIT_FLUSH_MAX_ROWS,
 	getComposerStyle,
 	getPaddingX,
 	getWidthConfigEpoch,
@@ -38,6 +40,7 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
+import { writeStderrBehindTerminal } from "@oh-my-pi/pi-tui/terminal-handoff";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { col, compact, kbd, keyed, node, row, span, text } from "@oh-my-pi/pi-tui/native/describe";
 import {
@@ -2195,6 +2198,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 		);
 		this.ui.setInlineMouseTrackingProvider(() => this.#mouseCapture);
+		// Every exiting stop (quit, Ctrl+D, a postmortem restore other than a
+		// signal) flushes on this session's condition.
+		this.ui.setExitFlushProvider(() => this.#exitFlush());
 		setExtensionLinkPicking(this.#linkPickable);
 		// Tern's native view routes link clicks itself, so claimed links stop (or start) being
 		// pickable here: re-run the renderers reading `getLinkClicksAvailable()`.
@@ -6773,7 +6779,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		try {
-			this.ui.stop();
+			this.ui.stop({ resuming: true });
 			const result = await openInEditor(editorCmd, currentText, {
 				extension: path.extname(resolvedPath) || ".md",
 				trimTrailingNewline: false,
@@ -6799,7 +6805,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		try {
-			this.ui.stop();
+			this.ui.stop({ resuming: true });
 			const result = await openInEditor(editorCmd, draft, { extension: ".md" });
 			if (result !== null) {
 				commit(result);
@@ -8214,7 +8220,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#disposeImageBlobWriter = undefined;
 		this.#hideSessionInfo();
 		if (this.#ownsStartedUi) {
-			this.ui.stop();
+			// The one teardown that hands the terminal back for good, so the one
+			// stop that may be capped; #exitFlush() decides whether it is.
+			this.ui.stop({ exiting: true });
 			this.#ownsStartedUi = false;
 		}
 		// The markdown renderer's extension-link state and the transcript presenters are process-wide;
@@ -8265,7 +8273,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.#resumableSessionId();
 		if (sessionId) {
 			// Command on its own line so triple-click selects just the command (#11001).
-			process.stderr.write(`\n${chalk.dim("Resume this session with")}\n${chalk.dim(resumeCommand(sessionId))}\n`);
+			// A stalled terminal may not have read the restore yet; the hint queues behind it.
+			writeStderrBehindTerminal(
+				`\n${chalk.dim("Resume this session with")}\n${chalk.dim(resumeCommand(sessionId))}\n`,
+			);
 		}
 
 		await this.#quitHostOwned(0);
@@ -8380,6 +8391,29 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
+	 * How the transcript flushes when this session hands the terminal back at
+	 * exit: capped only when the backing store has confirmed the session file,
+	 * which keeps the messages the cap skips; otherwise native scrollback is the
+	 * transcript's only copy, so it gets the full flush. A remote store with a
+	 * write still in flight does not count, since the exit can abort that write.
+	 * A failed teardown (the escape hatch quits without writing the log) or a
+	 * latched disk failure means the file exists but lacks the newest entries,
+	 * so both flush in full. Notices (errors, warnings) are never persisted, so a
+	 * capped exit does not keep those older than the capped rows.
+	 */
+	#exitFlush(): HistoryFlushOptions {
+		if (
+			this.#teardownFailed ||
+			this.sessionManager.hasPersistenceFailure() ||
+			!this.sessionManager.getSessionId() ||
+			!this.sessionManager.isSessionConfirmedOnDisk()
+		) {
+			return {};
+		}
+		return { maxRows: EXIT_FLUSH_MAX_ROWS };
+	}
+
+	/**
 	 * Claim the one-shot `shutdown()`/`restart()` close and acknowledge it before
 	 * any await: worktree exit planning, live commands, and BTW history writes can
 	 * all stall, and the user must see a reason for the pause.
@@ -8441,15 +8475,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Close the TSP surfaces first so the drain below also swallows what the
 		// terminal still sends them (acks, events) instead of the shell.
 		this.ui.closeNative();
-		// Drain any in-flight Kitty key release events before stopping.
-		// This prevents escape sequences from leaking to the parent shell over slow SSH.
-		await this.ui.terminal.drainInput(1000);
+		// Settle queued output first so the title pop below heads the queue. Queued
+		// behind a backlog, a later settle (drainInput's, then `ui.stop()`'s) could
+		// drop it, and the parent shell would keep omp's title.
+		this.ui.terminal.settleOutput?.();
 		// Stop the run-state spinner interval BEFORE restoring the shell title, so a
 		// pending tick cannot re-emit an OSC title after `popTerminalTitle` hands the
 		// terminal back (which would leave the parent shell with a `π ⠋ …` tab).
 		disposeTerminalTitleState();
 		disposeProgramStatus();
 		popTerminalTitle();
+		// Drain any in-flight Kitty key release events before stopping.
+		// This prevents escape sequences from leaking to the parent shell over slow SSH.
+		await this.ui.terminal.drainInput(1000);
 		this.stop();
 	}
 
