@@ -11577,11 +11577,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const signal = this.#titleGenerationAbortController.signal;
 		const started = performance.now();
 		const icons = this.#cardIcons();
+		// The fork is billed to the branch it branches from, even after the main
+		// turn moves the leaf while this request streams.
+		const usageOwner = { sessionId, parentId: this.sessionManager.getLeafId() };
 		this.runEphemeralTurn({
 			promptText: prompt.render(titleForkPrompt, {
 				card: icons !== "boring",
 				nerdFonts: icons === "nf+emoji",
 			}),
+			// Journaled where the billed message exists, so a fork that ends in a
+			// provider error still records its spend before rejecting.
+			onUsage: message => this.#reportTitleUsage(usageOwner, message),
 			signal: AbortSignal.any([signal, AbortSignal.timeout(TITLE_FORK_TIMEOUT_MS)]),
 		})
 			.then(
@@ -11760,6 +11766,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const parentSessionId = this.sessionId;
 		const sessionGeneration = this.#sessionGeneration;
 		const sessionId = this.#resolveTitleProviderSessionId(parentSessionId);
+		// Journal ownership follows the session manager, not the provider-side id
+		// titles request under (`sessionId` above is an isolated side identity).
+		const usageOwner = { sessionId: this.sessionManager.getSessionId(), parentId: this.sessionManager.getLeafId() };
 		const titleSignal = signal
 			? AbortSignal.any([signal, this.#titleGenerationAbortController.signal])
 			: this.#titleGenerationAbortController.signal;
@@ -11778,10 +11787,39 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				customSystemPrompt ?? this.#titleSystemPrompt,
 				titleSignal,
 				parentSessionId,
+				message => this.#reportTitleUsage(usageOwner, message),
 			),
 		);
 		if (await this.#sessionGenerationChanged(sessionGeneration)) return null;
 		return !titleSignal.aborted && this.sessionId === parentSessionId ? title : null;
+	}
+
+	/**
+	 * Journal a title request's billed usage as a `model_usage` entry on the
+	 * branch it ran from, so `/usage`, `getUsageStatistics()`, and `omp stats`
+	 * count title spend. Titles are cosmetic: a stale session owner or a failed
+	 * journal write is logged and dropped rather than failing the title.
+	 */
+	#reportTitleUsage(owner: { sessionId: string; parentId: string | null }, message: AssistantMessage): void {
+		try {
+			this.sessionManager.appendModelUsage(
+				{
+					purpose: "title",
+					api: message.api,
+					provider: message.provider,
+					model: message.model,
+					usage: message.usage,
+					stopReason: message.stopReason,
+					errorMessage: message.errorMessage,
+				},
+				owner,
+			);
+		} catch (err) {
+			logger.debug("title-generator: usage accounting failed", {
+				sessionId: owner.sessionId,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
 	}
 
 	/** Capture before generation to detect interruption or disposal of a title request. */
@@ -13618,6 +13656,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					break;
 				}
 				if (event.type === "error") {
+					// The terminal error message still carries the tokens the provider
+					// billed, so report it before the throw discards the turn's result.
+					args.onUsage?.(event.error);
 					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
 				}
 			}
@@ -13647,6 +13688,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			...assistantMessage,
 			content: assistantMessage.content.filter(block => block.type !== "toolCall"),
 		};
+		args.onUsage?.(sanitizedMessage);
 		return {
 			replyText:
 				args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim(), args.replyMaxBytes),
