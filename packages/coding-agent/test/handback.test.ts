@@ -293,11 +293,7 @@ describe("handback through the subagent executor", () => {
 		return { result, handle };
 	}
 
-	function emitAssistant(
-		emit: (event: never) => void,
-		pushMessage: (message: unknown) => void,
-		text: string,
-	) {
+	function emitAssistant(emit: (event: never) => void, pushMessage: (message: unknown) => void, text: string) {
 		const message = {
 			role: "assistant" as const,
 			content: [{ type: "text" as const, text }],

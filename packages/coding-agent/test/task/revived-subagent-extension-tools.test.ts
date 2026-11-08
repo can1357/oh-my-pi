@@ -494,9 +494,7 @@ it("still exposes a nonreserved explicit child custom tool", async () => {
 		id: "PlainCustom",
 		customTools: [reservedDefinition("word_count", hit) as CustomTool],
 		onRequest: (_tools, index) =>
-			index === 0
-				? { content: [{ type: "toolCall", name: "word_count", arguments: {} }] }
-				: builtinCall("yield"),
+			index === 0 ? { content: [{ type: "toolCall", name: "word_count", arguments: {} }] } : builtinCall("yield"),
 	});
 	expect(hit.called).toBe(true);
 	expect(seen.exitCode).toBe(0);

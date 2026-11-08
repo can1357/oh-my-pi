@@ -138,9 +138,9 @@ describe("reserved eval workpool tools", () => {
 		const run = vi.spyOn(executorModule, "runSubprocess");
 		const session = createSession();
 
-		await expect(
-			runEvalWorkpool({ op: "create", name: `pool-${name}`, tools: [name] }, { session }),
-		).rejects.toThrow(`tool name "${name}" is reserved`);
+		await expect(runEvalWorkpool({ op: "create", name: `pool-${name}`, tools: [name] }, { session })).rejects.toThrow(
+			`tool name "${name}" is reserved`,
+		);
 		expect(run).not.toHaveBeenCalled();
 		expect(WorkPoolRegistry.global().get("Main", `pool-${name}`)).toBeUndefined();
 	});

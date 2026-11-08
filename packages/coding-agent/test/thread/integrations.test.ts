@@ -312,9 +312,7 @@ describe("integrations thread service", () => {
  * assert the MCP echo contract. `runtimeThreadService` is installed so `watch`
  * can send the real AgentStorage instance across the link.
  */
-async function expectPersistentSettingsEcho(
-	install: (dir: string) => Promise<() => void>,
-): Promise<void> {
+async function expectPersistentSettingsEcho(install: (dir: string) => Promise<() => void>): Promise<void> {
 	const dir = path.join(os.tmpdir(), `omp-integrations-storage-${Snowflake.next()}`);
 	fs.mkdirSync(dir, { recursive: true });
 	const originalPiConfigFiles = process.env.PI_CONFIG_FILES;
