@@ -126,26 +126,32 @@ function fenceIndentValid(text: string, lineStart: number, indent: number): bool
 	return false;
 }
 
+/** A code fence still open: its marker and trimmed info string. */
+interface OpenFence {
+	marker: string;
+	info: string;
+}
+
 /** Whether a code fence is still open at `end` of `text`. */
 function fenceOpenAt(text: string, end: number): boolean {
 	return scanFenceLines(text, 0, end, undefined) !== undefined;
 }
 
 /**
- * The marker of the fence left open by the fence lines of `text` that start in
+ * The fence left open by the fence lines of `text` that start in
  * `[from, end)`, given the fence `open` in front of `from`. `from` must be a
  * line start; fence lines are whole lines, so resuming there finds exactly the
  * lines a scan from the start would.
  */
-function scanFenceLines(text: string, from: number, end: number, open: string | undefined): string | undefined {
+function scanFenceLines(text: string, from: number, end: number, open: OpenFence | undefined): OpenFence | undefined {
 	FENCE_LINE.lastIndex = from;
 	for (let match = FENCE_LINE.exec(text); match !== null && match.index < end; match = FENCE_LINE.exec(text)) {
 		const [, indent, marker, rest] = match;
 		if (!fenceIndentValid(text, match.index, indentWidth(indent))) continue;
 		if (open === undefined) {
 			// A backtick fence's info string cannot hold a backtick (that line is inline code).
-			if (marker[0] !== "`" || !rest.includes("`")) open = marker;
-		} else if (marker[0] === open[0] && marker.length >= open.length && !rest.trim()) {
+			if (marker[0] !== "`" || !rest.includes("`")) open = { marker, info: rest.trim() };
+		} else if (marker[0] === open.marker[0] && marker.length >= open.marker.length && !rest.trim()) {
 			open = undefined;
 		}
 	}
@@ -196,21 +202,31 @@ export function endsInsideOpenFence(text: string): boolean {
  * `scan` is the fence state of an earlier, shorter form of `text`; it is used
  * when `text` still starts with it, so a growing stream scans only new lines.
  * Returns the cut and the scan to pass next time.
+ *
+ * `drawsWhole` names fence languages rendered from their whole body (a mermaid
+ * diagram is laid out again with every line), whose finished lines are not
+ * settled rows: they settle nothing.
  */
-function settledFenceBodyEnd(text: string, scan: FenceScan | undefined): { end: number; scan: FenceScan | undefined } {
+function settledFenceBodyEnd(
+	text: string,
+	scan: FenceScan | undefined,
+	drawsWhole: (lang: string) => boolean,
+): { end: number; scan: FenceScan | undefined } {
 	const lastBreak = text.lastIndexOf("\n");
 	if (lastBreak <= 0) return { end: 0, scan };
 	const cut = text.lastIndexOf("\n", lastBreak - 1) + 1;
 	if (cut <= 0) return { end: 0, scan };
 	const resume = scan !== undefined && scan.text.length <= cut && text.startsWith(scan.text) ? scan : undefined;
 	const open = scanFenceLines(text, resume?.text.length ?? 0, cut, resume?.open);
-	return { end: open === undefined ? 0 : cut, scan: { text: text.slice(0, cut), open } };
+	const next = { text: text.slice(0, cut), open };
+	if (open === undefined || drawsWhole(open.info.split(/\s/, 1)[0] ?? "")) return { end: 0, scan: next };
+	return { end: cut, scan: next };
 }
 
-/** Fence state at the end of `text`, which ends at a line start: the marker of the fence still open there. */
+/** Fence state at the end of `text`, which ends at a line start: the fence still open there. */
 interface FenceScan {
 	text: string;
-	open: string | undefined;
+	open: OpenFence | undefined;
 }
 
 /**
@@ -2745,7 +2761,11 @@ export class Markdown implements Component {
 			fence = undefined;
 			this.#streamFenceSettledText = undefined;
 		}
-		const settled = settledFenceBodyEnd(source, this.#fenceScan);
+		const settled = settledFenceBodyEnd(
+			source,
+			this.#fenceScan,
+			lang => lang === "mermaid" && this.#theme.resolveMermaidAscii !== undefined,
+		);
 		this.#fenceScan = settled.scan;
 		const body = settled.end;
 		if (body > (fence?.length ?? 0)) {

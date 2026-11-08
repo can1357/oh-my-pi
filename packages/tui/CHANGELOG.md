@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Rows of a streaming answer that scroll above the screen go to scrollback as they leave it, including the prose after a table chart; they no longer vanish until the answer finishes ([#18529](https://github.com/can1357/oh-my-pi/pull/18529) by [@farnoy](https://github.com/farnoy))
+- Rows of a streaming answer that scroll above the screen go to scrollback as they leave it, including the prose after a table chart or a mermaid diagram; they no longer vanish until the answer finishes ([#18529](https://github.com/can1357/oh-my-pi/pull/18529) by [@farnoy](https://github.com/farnoy))
 - Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19896](https://github.com/can1357/oh-my-pi/pull/19896) by [@Xytronix](https://github.com/Xytronix))
 
 ## [19.1.0] - 2026-11-21
