@@ -225,6 +225,17 @@ export class Win32InputModeDecoder {
 	}
 
 	/**
+	 * Whether the held relayed text is an OSC/DCS/APC string still waiting for
+	 * its terminator (a TSP event, a clipboard or colour reply). Unlike a lone
+	 * ESC or a short CSI, releasing it early cannot be mistaken for a key: the
+	 * head would be handed on as a fragment and the tail typed as text.
+	 */
+	get hasPendingString(): boolean {
+		const introducer = this.#pendingVt[1];
+		return introducer === "]" || introducer === "P" || introducer === "_";
+	}
+
+	/**
 	 * Release held VT text as-is. The caller invokes this once no further bytes
 	 * arrived in time, so a lone relayed ESC still acts as the Escape key.
 	 */
