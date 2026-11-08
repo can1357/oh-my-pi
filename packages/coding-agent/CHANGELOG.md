@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The compaction display summary no longer requests reasoning, so thinking models return a summary instead of spending the 512-token cap on reasoning and returning nothing ([#18541](https://github.com/can1357/oh-my-pi/pull/18541) by [@phillipxkang](https://github.com/phillipxkang))
+
 ## [18.18.2] - 2026-11-08
 
 ### Breaking Changes

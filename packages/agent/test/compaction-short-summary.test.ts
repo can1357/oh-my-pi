@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type CompactionPreparation, compact, DEFAULT_COMPACTION_SETTINGS } from "@oh-my-pi/pi-agent-core/compaction";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { AssistantMessage, Model, StopReason } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -69,6 +70,25 @@ describe("compaction short summary isolation", () => {
 
 		expect(result.summary.startsWith(FULL_SUMMARY)).toBe(true);
 		expect(result.shortSummary).toBe("I fixed the thing.");
+	});
+
+	test("the short summary requests no reasoning while the full summary keeps the session effort", async () => {
+		const seen: (string | undefined)[] = [];
+		const result = await compact(makePreparation(), getModel(), "key", undefined, undefined, {
+			completeImpl: async (_model, _ctx, options) => {
+				seen.push(options.reasoning);
+				return seen.length === 1
+					? reply("stop", [{ type: "text", text: FULL_SUMMARY }])
+					: reply("stop", [{ type: "text", text: "I fixed the thing." }]);
+			},
+			oneshotRetry: false,
+			thinkingLevel: ThinkingLevel.High,
+		});
+
+		expect(result.shortSummary).toBe("I fixed the thing.");
+		// full summary first (session effort), display summary second (none)
+		expect(seen[0]).toBeDefined();
+		expect(seen[1]).toBeUndefined();
 	});
 
 	test("a failed short summary keeps the full summary and omits shortSummary", async () => {
