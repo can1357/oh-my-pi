@@ -11,7 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { configureUsageAdmission } from "@oh-my-pi/pi-ai/usage-governor/admission";
 import { type LedgerAdmitResult, type LedgerWindow, UsageLedger } from "@oh-my-pi/pi-ai/usage-governor/ledger";
-import { governorGeneration } from "@oh-my-pi/pi-ai/usage-governor/policy";
+import { governorGeneration, GOVERNOR_STALE_MS } from "@oh-my-pi/pi-ai/usage-governor/policy";
 import {
 	credentialIdOf,
 	createHarness,
@@ -123,7 +123,11 @@ function admitAt(
  * and `t2`, then (by the caller) a snapshot at `t2` reading 0.3. Cost is `(0.3 - 0) / 3`.
  */
 function calibrate(ledger: UsageLedger): void {
-	for (const offset of [1, 2, 3]) admitAt(ledger, t1 + offset, { fetchedAt: t1, usedFraction: 0 });
+	for (const offset of [1, 2, 3]) {
+		const grantId = crypto.randomUUID();
+		admitAt(ledger, t1 + offset, { fetchedAt: t1, usedFraction: 0 }, grantId);
+		ledger.settle(grantId, "sent", t1 + offset);
+	}
 }
 
 /** The number of reservations that fit above a 0.3 reading at cost 0.1 under the 0.9 headroom: six. */
@@ -295,21 +299,201 @@ describe("a killed process keeps its reservation counted until a newer snapshot"
 			expect(afterKill?.inFlight).toBe(0);
 
 			// Fill the rest of the allowance. The dead reservation holds one slot, so four more fit.
-			let filled = 0;
-			while (admitAt(ledger, Date.now()).kind === "admitted") filled += 1;
-			expect(filled).toBe(allowanceFromT2() - 2);
+			const filledGrants: string[] = [];
+			while (true) {
+				const grantId = crypto.randomUUID();
+				const result = admitAt(ledger, Date.now(), {}, grantId);
+				if (result.kind !== "admitted") break;
+				filledGrants.push(grantId);
+			}
+			expect(filledGrants.length).toBe(allowanceFromT2() - 2);
 
 			// Control: against the same snapshot the ledger still refuses, so the dead reservation is counted.
 			expect(admitAt(ledger, Date.now()).kind).toBe("wait");
 
-			// A newer snapshot is later than every reservation, so none of them count any more.
+			// Against a newer snapshot, the dead holder and the settled observer no longer count,
+			// but live unsettled reservations from this process remain counted in pending and in-flight.
 			const newer = Date.now() + 500;
-			expect(ledger.inspect([window({ fetchedAt: newer })], Date.now(), LEAD)[0]?.pending).toBe(0);
+			const inspected = ledger.inspect([window({ fetchedAt: newer })], Date.now(), LEAD)[0];
+			expect(inspected?.pending).toBe(filledGrants.length);
+			expect(inspected?.inFlight).toBe(filledGrants.length);
+
+			// Settling the live reservations before the newer snapshot releases them too.
+			for (const grantId of filledGrants) ledger.settle(grantId, "sent", newer - 100);
+			const afterSettle = ledger.inspect([window({ fetchedAt: newer })], Date.now(), LEAD)[0];
+			expect(afterSettle?.pending).toBe(0);
+			expect(afterSettle?.inFlight).toBe(0);
 			expect(admitAt(ledger, Date.now(), { fetchedAt: newer }).kind).toBe("admitted");
 		} finally {
 			ledger.close();
 		}
 	}, 20_000);
+});
+
+describe("reservations unreflected by a snapshot", () => {
+	installFetchTripwire();
+
+	test("a live unsettled row created before a newer snapshot changes a decision from admit to wait", () => {
+		const ledger = UsageLedger.open(ledgerPath);
+		try {
+			calibrate(ledger);
+			const t3 = t2 + 100;
+			// At t3 with usedFraction 0.8, cost 0.1, headroom 0.9, allowance is (0.9 - 0.8) / 0.1 = 1 slot.
+			// Without any unreflected reservations, an admission at t3 would succeed:
+			const baseline = ledger.inspect([window({ fetchedAt: t3, usedFraction: 0.8 })], t3 + 1, LEAD)[0];
+			expect(baseline?.pending).toBe(0);
+			expect(baseline?.inFlight).toBe(0);
+
+			// Admit a reservation before t3 that remains unsettled with a live process:
+			const liveGrant = crypto.randomUUID();
+			expect(admitAt(ledger, t3 - 10, { fetchedAt: t2 }, liveGrant).kind).toBe("admitted");
+
+			// Against the newer snapshot at t3, the live unsettled reservation is counted in pending and in-flight:
+			const inspected = ledger.inspect([window({ fetchedAt: t3, usedFraction: 0.8 })], t3 + 1, LEAD)[0];
+			expect(inspected?.pending).toBe(1);
+			expect(inspected?.inFlight).toBe(1);
+
+			// Because the live unsettled row occupies the 1 available slot, admission changes from admit to wait:
+			const result = admitAt(ledger, t3 + 1, { fetchedAt: t3, usedFraction: 0.8 });
+			expect(result.kind).toBe("wait");
+			if (result.kind === "wait") {
+				expect(result.reason).toBe("reserve-held");
+			}
+		} finally {
+			ledger.close();
+		}
+	});
+
+	test("rows settled before the snapshot are not counted", () => {
+		const ledger = UsageLedger.open(ledgerPath);
+		try {
+			calibrate(ledger);
+			const t3 = t2 + 100;
+			const grantId = crypto.randomUUID();
+			expect(admitAt(ledger, t3 - 20, { fetchedAt: t2 }, grantId).kind).toBe("admitted");
+			// Settled before the snapshot at t3 was observed:
+			ledger.settle(grantId, "sent", t3 - 5);
+
+			const inspected = ledger.inspect([window({ fetchedAt: t3, usedFraction: 0.8 })], t3 + 1, LEAD)[0];
+			expect(inspected?.pending).toBe(0);
+			expect(inspected?.inFlight).toBe(0);
+
+			// The single slot is available because the earlier request already settled before t3:
+			expect(admitAt(ledger, t3 + 1, { fetchedAt: t3, usedFraction: 0.8 }).kind).toBe("admitted");
+		} finally {
+			ledger.close();
+		}
+	});
+
+	test("rows settled after the snapshot are counted", () => {
+		const ledger = UsageLedger.open(ledgerPath);
+		try {
+			calibrate(ledger);
+			const t3 = t2 + 100;
+			const grantId = crypto.randomUUID();
+			expect(admitAt(ledger, t3 - 20, { fetchedAt: t2 }, grantId).kind).toBe("admitted");
+			// Settled after the snapshot at t3 was observed:
+			ledger.settle(grantId, "sent", t3 + 10);
+
+			const inspected = ledger.inspect([window({ fetchedAt: t3, usedFraction: 0.8 })], t3 + 1, LEAD)[0];
+			// Settled after snapshot -> counted in pending (snapshot could not reflect it), not in flight:
+			expect(inspected?.pending).toBe(1);
+			expect(inspected?.inFlight).toBe(0);
+
+			// The single slot is occupied, so admission waits:
+			expect(admitAt(ledger, t3 + 1, { fetchedAt: t3, usedFraction: 0.8 }).kind).toBe("wait");
+		} finally {
+			ledger.close();
+		}
+	});
+
+	test("a killed child process row created before the snapshot is not counted", async () => {
+		const ledger = UsageLedger.open(ledgerPath);
+		try {
+			calibrate(ledger);
+			// Child admits once and holds until killed:
+			const holder = Bun.spawn([process.execPath, CHILD, JSON.stringify(childConfig({ mode: "hold" }))], {
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const reader = holder.stdout.getReader();
+			const decoder = new TextDecoder();
+			let buffered = "";
+			while (!buffered.includes("\n")) {
+				const chunk = await reader.read();
+				if (chunk.done) throw new Error("holder exited before admitting");
+				buffered += decoder.decode(chunk.value, { stream: true });
+			}
+			const holderEvent: ChildEvent = JSON.parse(buffered.split("\n")[0] ?? "{}");
+			expect(holderEvent.kind).toBe("admitted");
+			holder.kill("SIGKILL");
+			await holder.exited;
+			reader.releaseLock();
+
+			// Snapshot observed after the child process was killed:
+			const t3 = Date.now() + 50;
+			const inspected = ledger.inspect([window({ fetchedAt: t3, usedFraction: 0.8 })], t3 + 1, LEAD)[0];
+			expect(inspected?.pending).toBe(0);
+			expect(inspected?.inFlight).toBe(0);
+
+			// Since the killed process's reservation is not counted, admission succeeds:
+			expect(admitAt(ledger, t3 + 1, { fetchedAt: t3, usedFraction: 0.8 }).kind).toBe("admitted");
+		} finally {
+			ledger.close();
+		}
+	}, 20_000);
+
+	test("a row older than F - 15 min is not counted, while a row within 15 min is counted", () => {
+		const ledger = UsageLedger.open(ledgerPath);
+		try {
+			calibrate(ledger);
+			const t3 = Date.now();
+			const oldGrant = crypto.randomUUID();
+
+			// Insert a reservation created older than F - GOVERNOR_STALE_MS:
+			const db = new Database(ledgerPath);
+			try {
+				db.query(
+					`INSERT INTO reservations (grant_id, quota_key, generation, created_at_ms, settled_at_ms, pid, provider,
+						credential_id, model_id, role, source, session_id, interactive)
+					 VALUES (?, ?, ?, ?, NULL, ?, ?, 1, NULL, NULL, 'turn', NULL, 0)`,
+				).run(oldGrant, QUOTA, generation, t3 - GOVERNOR_STALE_MS - 100, process.pid, PROVIDER);
+			} finally {
+				db.close();
+			}
+
+			// Older than F - 15 min: bounded out, not counted:
+			const inspectedOld = ledger.inspect([window({ fetchedAt: t3, usedFraction: 0.8 })], t3 + 1, LEAD)[0];
+			expect(inspectedOld?.pending).toBe(0);
+			expect(inspectedOld?.inFlight).toBe(0);
+			const firstAdmit = crypto.randomUUID();
+			const admittedOld = admitAt(ledger, t3 + 1, { fetchedAt: t3, usedFraction: 0.8 }, firstAdmit);
+			expect(admittedOld.kind).toBe("admitted");
+			// Settle this admission before the next check:
+			ledger.settle(firstAdmit, "sent", t3);
+
+			// Insert a reservation within F - 15 min:
+			const recentGrant = crypto.randomUUID();
+			const db2 = new Database(ledgerPath);
+			try {
+				db2.query(
+					`INSERT INTO reservations (grant_id, quota_key, generation, created_at_ms, settled_at_ms, pid, provider,
+						credential_id, model_id, role, source, session_id, interactive)
+					 VALUES (?, ?, ?, ?, NULL, ?, ?, 1, NULL, NULL, 'turn', NULL, 0)`,
+				).run(recentGrant, QUOTA, generation, t3 - GOVERNOR_STALE_MS + 10_000, process.pid, PROVIDER);
+			} finally {
+				db2.close();
+			}
+
+			// Within F - 15 min and live/unsettled -> counted:
+			const inspectedRecent = ledger.inspect([window({ fetchedAt: t3, usedFraction: 0.8 })], t3 + 1, LEAD)[0];
+			expect(inspectedRecent?.pending).toBe(1);
+			expect(inspectedRecent?.inFlight).toBe(1);
+			expect(admitAt(ledger, t3 + 1, { fetchedAt: t3, usedFraction: 0.8 }).kind).toBe("wait");
+		} finally {
+			ledger.close();
+		}
+	});
 });
 
 describe("ledger failure fails open with a visible degraded state", () => {

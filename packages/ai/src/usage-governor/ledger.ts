@@ -13,6 +13,7 @@ import {
 	calibrateCostPerRequest,
 	evaluateWindow,
 	GOVERNOR_GENERATION_MS,
+	GOVERNOR_STALE_MS,
 	type WindowDecision,
 } from "./policy";
 import type {
@@ -145,7 +146,7 @@ export type LedgerAdmitResult =
 /** A window evaluated against the ledger, for admission and status alike. */
 export interface EvaluatedLedgerWindow extends LedgerWindow {
 	decision: WindowDecision;
-	/** Reservations created after the snapshot, across all processes. */
+	/** Reservations unreflected by the snapshot, across all processes. */
 	pending: number;
 	/** Pending reservations whose process is still alive and has not settled. */
 	inFlight: number;
@@ -358,7 +359,7 @@ export class UsageLedger {
 			}
 		}
 		return windows.map(window => {
-			const pending = this.#countPending(window.quotaKey, window.fetchedAt);
+			const { pending, inFlight } = this.#countReservations(window.quotaKey, window.fetchedAt);
 			const costPerRequest = this.#calibrate(window, write);
 			const decision = evaluateWindow({
 				nowMs,
@@ -376,7 +377,7 @@ export class UsageLedger {
 				...window,
 				decision,
 				pending,
-				inFlight: this.#countInFlight(window.quotaKey, window.fetchedAt),
+				inFlight,
 				costPerRequest,
 			};
 		});
@@ -460,27 +461,42 @@ export class UsageLedger {
 		return measured ?? prior?.cost_per_request;
 	}
 
-	#countPending(quotaKey: string, fetchedAt: number): number {
-		const row = this.#db
-			.query<{ n: number }, [string, number]>(
-				"SELECT COUNT(DISTINCT grant_id) AS n FROM reservations WHERE quota_key = ? AND created_at_ms >= ?",
-			)
-			.get(quotaKey, fetchedAt);
-		return row?.n ?? 0;
-	}
-
-	#countInFlight(quotaKey: string, fetchedAt: number): number {
+	#countReservations(quotaKey: string, fetchedAt: number): { pending: number; inFlight: number } {
 		const rows = this.#db
-			.query<{ pid: number; n: number }, [string, number]>(
-				`SELECT pid, COUNT(DISTINCT grant_id) AS n FROM reservations
-				 WHERE quota_key = ? AND created_at_ms >= ? AND settled_at_ms IS NULL GROUP BY pid`,
+			.query<
+				{ grant_id: string; pid: number; created_at_ms: number; settled_at_ms: number | null },
+				[string, number]
+			>(
+				`SELECT grant_id, pid, created_at_ms, settled_at_ms FROM reservations
+				 WHERE quota_key = ? AND created_at_ms >= ?`,
 			)
-			.all(quotaKey, fetchedAt);
-		let total = 0;
+			.all(quotaKey, fetchedAt - GOVERNOR_STALE_MS);
+
+		const pendingGrants = new Set<string>();
+		const inFlightGrants = new Set<string>();
+		const pidAlive = new Map<number, boolean>();
+
 		for (const row of rows) {
-			if (isPidAlive(row.pid)) total += row.n;
+			let alive = pidAlive.get(row.pid);
+			if (alive === undefined) {
+				alive = isPidAlive(row.pid);
+				pidAlive.set(row.pid, alive);
+			}
+
+			const counted =
+				row.created_at_ms >= fetchedAt || (row.settled_at_ms !== null ? row.settled_at_ms > fetchedAt : alive);
+			if (counted) {
+				pendingGrants.add(row.grant_id);
+			}
+			if (row.settled_at_ms === null && alive) {
+				inFlightGrants.add(row.grant_id);
+			}
 		}
-		return total;
+
+		return {
+			pending: pendingGrants.size,
+			inFlight: inFlightGrants.size,
+		};
 	}
 
 	#insertWait(request: LedgerAdmitRequest, binding: EvaluatedLedgerWindow, admissibleAtMs: number): number {
