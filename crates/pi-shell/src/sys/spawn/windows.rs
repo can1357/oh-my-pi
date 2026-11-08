@@ -1,30 +1,46 @@
 //! Windows spawning: `CreateProcessW` into a Job Object per job.
 //!
-//! - **Start.** The child is created suspended in a new console process group
-//!   (`CREATE_NEW_PROCESS_GROUP`), assigned to its job, then resumed, so
-//!   nothing it starts escapes the job. Only its three stdio handles are
-//!   inherited (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`), so concurrent spawns
-//!   never leak pipe ends into each other. The command line uses MSVCRT
+//! - **Start.** The child is created suspended, assigned to its job, then
+//!   resumed, so nothing it starts escapes the job. Only its three stdio
+//!   handles are inherited (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`), so concurrent
+//!   spawns never leak pipe ends into each other. The command line uses MSVCRT
 //!   quoting; `.bat`/`.cmd` run through `cmd.exe` with std's hardened batch
 //!   quoting ([`crate::sys::cmdline`]).
+//! - **Consoles.** Under [`Sessions::Detach`] no external shares the host's
+//!   console, the counterpart of a session without a controlling terminal:
+//!   console I/O that bypasses the redirected stdio (`CONOUT$` progress bars,
+//!   `CONIN$` prompts, console modes, the title) never reaches it. The console
+//!   follows the spawner's ownership of the external ([`JobConsole`]): an owned
+//!   one gets a pseudoconsole the spawner holds ([`Pty`]), open while the job's
+//!   processes run ([`Watcher`] closes it when the last exits); a released
+//!   (`nohup`) one gets a hidden console of its own (`CREATE_NO_WINDOW`), which
+//!   lives as long as its processes. Other layouts share the host's console in
+//!   a new process group per stage.
 //! - **Jobs.** `PgroupSpec::New` creates a job; `Join(pid)` adds the stage to
-//!   the job led by `pid`. Signals map to the job: KILL = `TerminateJobObject`
-//!   (members exit 137, reported as `Signaled(KILL)`); TERM, INT, HUP, QUIT =
-//!   `CTRL_BREAK_EVENT` to each stage's console group, and after TERM a KILL
-//!   once the grace expires (console programs often ignore the event); when the
-//!   event cannot be delivered (no shared console) the job is killed at once.
-//!   Pause = `NtSuspendProcess` per member, resume = `NtResumeProcess` on
-//!   exactly those ([`crate::sys::job`]).
+//!   the job led by `pid` (and its console). Signals map to the job: KILL =
+//!   `TerminateJobObject` (members exit 137, reported as `Signaled(KILL)`). On
+//!   a pseudoconsole TERM and HUP hang it up (`CTRL_CLOSE`, which no process
+//!   can ignore; the system ends holdouts after 5 s) and INT and QUIT send
+//!   `CTRL_C` (ignored by a child that inherited an ignored Ctrl-C); on the
+//!   shared console TERM, INT, HUP and QUIT send `CTRL_BREAK_EVENT` to each
+//!   stage's process group; nothing reaches a hidden console. After TERM a KILL
+//!   follows once the grace expires (console programs often ignore the event);
+//!   when the event cannot be delivered the job is killed at once. Pause =
+//!   `NtSuspendProcess` per member, resume = `NtResumeProcess` on exactly those
+//!   ([`crate::sys::job`]).
 //! - **Fds.** Extra fds (> 2) fail with `Unsupported` ([`UnsupportedFd`]).
 
 use std::{
+	collections::HashMap,
 	ffi::c_void,
-	fs, io, mem,
+	fs,
+	io::{self, Write as _},
+	mem,
 	os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle},
 	ptr,
 	sync::{
-		Arc,
-		atomic::{AtomicBool, AtomicU32, Ordering},
+		Arc, Weak,
+		atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll},
 	thread,
@@ -32,34 +48,40 @@ use std::{
 };
 
 use bstr::{BStr, BString, ByteSlice};
-use parking_lot::Mutex;
+use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use windows_sys::Win32::{
 	Foundation::{
-		ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, HANDLE, HANDLE_FLAG_INHERIT, NTSTATUS,
-		SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+		ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+		NTSTATUS, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
 	},
 	System::{
-		Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent},
+		Console::{
+			COORD, CTRL_BREAK_EVENT, ClosePseudoConsole, CreatePseudoConsole,
+			GenerateConsoleCtrlEvent, HPCON,
+		},
+		IO::{CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus},
 		JobObjects::{
 			AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
-			JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+			JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+			JOBOBJECT_BASIC_PROCESS_ID_LIST, JobObjectAssociateCompletionPortInformation,
 			JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
-			QueryInformationJobObject, TerminateJobObject,
+			QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 		},
 		SystemInformation::GetSystemDirectoryW,
 		Threading::{
-			CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateEventW,
-			CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+			CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+			CreateEventW, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
 			GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, OpenProcess,
-			PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, PROCESS_NAME_WIN32,
-			PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SUSPEND_RESUME, QueryFullProcessImageNameW,
-			ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW, SetEvent,
-			TerminateProcess, UpdateProcThreadAttribute, WaitForMultipleObjects,
+			PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+			PROCESS_INFORMATION, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+			PROCESS_SUSPEND_RESUME, QueryFullProcessImageNameW, ResumeThread, STARTF_USESTDHANDLES,
+			STARTUPINFOEXW, STARTUPINFOW, SetEvent, TerminateProcess, UpdateProcThreadAttribute,
+			WaitForMultipleObjects,
 		},
 	},
 };
 
-use super::{Dir, Leftover, Shared, UnsupportedFd, child_end};
+use super::{Dir, Leftover, Sessions, Shared, UnsupportedFd, child_end};
 use crate::{
 	bash::{EnvView, ExitStatus, ExtProc, OsHandle, PgroupSpec, Signal, SpawnSpec, StdioSpec},
 	sys::{
@@ -107,7 +129,9 @@ fn raw(h: &impl AsRawHandle) -> HANDLE {
 
 /// Platform state of a spawner: the jobs it created.
 pub(super) struct State {
-	jobs: Mutex<Jobs>,
+	jobs:    Mutex<Jobs>,
+	/// Started with the first job on a pseudoconsole.
+	watcher: Mutex<Option<Arc<Watcher>>>,
 }
 
 struct Jobs {
@@ -117,17 +141,39 @@ struct Jobs {
 
 impl State {
 	pub(super) const fn new() -> Self {
-		Self { jobs: Mutex::new(Jobs { list: Vec::new(), next_sweep: SWEEP }) }
+		Self {
+			jobs:    Mutex::new(Jobs { list: Vec::new(), next_sweep: SWEEP }),
+			watcher: Mutex::new(None),
+		}
 	}
 
-	/// The job for `pgroup`: the one led by the pid to join, else a new one.
-	fn job_for(&self, pgroup: PgroupSpec) -> io::Result<Arc<Job>> {
+	/// The job for `pgroup`: the one led by the pid to join, else a new one on
+	/// `console`.
+	fn job_for(
+		&self,
+		pgroup: PgroupSpec,
+		console: impl FnOnce() -> JobConsole,
+	) -> io::Result<Arc<Job>> {
 		if let PgroupSpec::Join(leader) = pgroup
 			&& let Some(job) = self.jobs.lock().list.iter().find(|j| j.leader() == leader)
 		{
 			return Ok(Arc::clone(job));
 		}
-		Job::new()
+		let job = Job::new(console())?;
+		if matches!(job.con, JobConsole::Private(_)) {
+			self.watcher()?.watch(&job)?;
+		}
+		Ok(job)
+	}
+
+	fn watcher(&self) -> io::Result<Arc<Watcher>> {
+		let mut watcher = self.watcher.lock();
+		if let Some(w) = &*watcher {
+			return Ok(Arc::clone(w));
+		}
+		let w = Watcher::start()?;
+		*watcher = Some(Arc::clone(&w));
+		Ok(w)
 	}
 
 	fn record(&self, job: &Arc<Job>) {
@@ -149,21 +195,121 @@ impl State {
 	}
 }
 
+impl Drop for State {
+	fn drop(&mut self) {
+		if let Some(w) = self.watcher.get_mut() {
+			w.stop();
+		}
+	}
+}
+
+/// `JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO` (`winnt.h`): the job's last process
+/// exited.
+const JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO: u32 = 4;
+
+/// Closes a job's pseudoconsole when its last process exits, so no idle
+/// console host outlives the processes it served: the jobs report that on
+/// one completion port, read by one thread.
+struct Watcher {
+	port: OwnedHandle,
+	/// Completion keys (from 1; 0 stops the thread) to the jobs.
+	jobs: Mutex<HashMap<usize, Weak<Job>>>,
+	next: AtomicUsize,
+}
+
+impl Watcher {
+	fn start() -> io::Result<Arc<Self>> {
+		// SAFETY: a new port, associated with no file.
+		let port = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, ptr::null_mut(), 0, 1) };
+		let watcher = Arc::new(Self {
+			port: owned(port)?,
+			jobs: Mutex::new(HashMap::new()),
+			next: AtomicUsize::new(1),
+		});
+		let run = Arc::clone(&watcher);
+		thread::Builder::new()
+			.name("obash-console".into())
+			.stack_size(SMALL_STACK)
+			.spawn(move || run.run())?;
+		Ok(watcher)
+	}
+
+	/// Report `job`'s emptying to this watcher.
+	fn watch(&self, job: &Arc<Job>) -> io::Result<()> {
+		let key = self.next.fetch_add(1, Ordering::Relaxed);
+		{
+			let mut jobs = self.jobs.lock();
+			jobs.retain(|_, j| j.strong_count() > 0);
+			jobs.insert(key, Arc::downgrade(job));
+		}
+		let info = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+			CompletionKey:  ptr::without_provenance_mut(key),
+			CompletionPort: raw(&self.port),
+		};
+		// SAFETY: our job and port handles; `info` is readable for its size.
+		check(unsafe {
+			SetInformationJobObject(
+				raw(&job.handle),
+				JobObjectAssociateCompletionPortInformation,
+				(&raw const info).cast(),
+				mem::size_of_val(&info) as u32,
+			)
+		})
+	}
+
+	fn run(&self) {
+		loop {
+			let (mut msg, mut key, mut overlapped) = (0u32, 0usize, ptr::null_mut());
+			// SAFETY: our port; writable out-parameters.
+			let ok = unsafe {
+				GetQueuedCompletionStatus(
+					raw(&self.port),
+					&raw mut msg,
+					&raw mut key,
+					&raw mut overlapped,
+					INFINITE,
+				)
+			};
+			if ok == 0 || key == 0 {
+				return;
+			}
+			if msg != JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO {
+				continue;
+			}
+			let job = self.jobs.lock().get(&key).and_then(Weak::upgrade);
+			if let Some(job) = job
+				&& let JobConsole::Private(pty) = &job.con
+			{
+				pty.close_if_idle(&job);
+			}
+		}
+	}
+
+	fn stop(&self) {
+		// SAFETY: our port; key 0 with no overlapped is the stop packet.
+		unsafe { PostQueuedCompletionStatus(raw(&self.port), 0, 0, ptr::null()) };
+	}
+}
+
 /// One Job Object: a pipeline or a single command.
 struct Job {
 	handle:  OwnedHandle,
 	/// Pid of the first process (the job's `pgid`).
 	leader:  AtomicU32,
-	/// Console process groups of the stages (each stage's pid).
+	/// Console process groups of the stages (each stage's pid), on the shared
+	/// console.
 	roots:   Mutex<Vec<u32>>,
 	pause:   Mutex<JobPause<OwnedHandle>>,
 	killed:  AtomicBool,
-	/// The signal last mapped to `CTRL_BREAK`, to name the exit it causes.
+	/// The signal last mapped to a console control event, to name the exit
+	/// it causes.
 	console: Mutex<Option<Signal>>,
+	/// Where the job's processes attach.
+	con:     JobConsole,
 }
 
 impl Job {
-	fn new() -> io::Result<Arc<Self>> {
+	fn new(con: JobConsole) -> io::Result<Arc<Self>> {
 		// SAFETY: null attributes and name create an anonymous job.
 		let handle = owned(unsafe { CreateJobObjectW(ptr::null(), ptr::null()) })?;
 		Ok(Arc::new(Self {
@@ -173,6 +319,7 @@ impl Job {
 			pause: Mutex::new(JobPause::default()),
 			killed: AtomicBool::new(false),
 			console: Mutex::new(None),
+			con,
 		}))
 	}
 
@@ -186,9 +333,21 @@ impl Job {
 		check(unsafe { TerminateJobObject(raw(&self.handle), job::KILL_EXIT_CODE) })
 	}
 
-	/// `CTRL_BREAK_EVENT` to every stage's console group.
-	fn ctrl_break(&self, sig: Signal) -> io::Result<()> {
+	/// A console control event to every stage. On a pseudoconsole TERM and HUP
+	/// hang it up (`CTRL_CLOSE`), INT and QUIT send `CTRL_C`; on the shared
+	/// console each stage's group gets `CTRL_BREAK_EVENT`; a hidden console is
+	/// out of reach (`Unsupported`).
+	fn interrupt(&self, sig: Signal) -> io::Result<()> {
 		*self.console.lock() = Some(sig);
+		match &self.con {
+			JobConsole::Shared => {},
+			JobConsole::Private(pty) if matches!(sig, Signal::Term | Signal::Hup) => {
+				pty.hang_up();
+				return Ok(());
+			},
+			JobConsole::Private(pty) => return pty.interrupt(),
+			JobConsole::Own => return Err(io::ErrorKind::Unsupported.into()),
+		}
 		let roots = self.roots.lock().clone();
 		let mut result = Ok(());
 		for root in roots {
@@ -252,6 +411,117 @@ impl Job {
 			};
 			return Ok(ids.iter().map(|&id| id as u32).collect());
 		}
+	}
+}
+
+/// Where a job's processes attach, by the spawner's ownership of the job.
+enum JobConsole {
+	/// The host's console (`Sessions::Share`, `Sessions::Inherit`).
+	Shared,
+	/// A pseudoconsole the spawner holds while the job's processes run: owned
+	/// externals under `Sessions::Detach`, which must not outlive the shell.
+	Private(Pty),
+	/// A hidden console of the job's own: released (`nohup`) externals under
+	/// `Sessions::Detach`, which outlive the shell and its host process.
+	Own,
+}
+
+impl JobConsole {
+	const fn new(sessions: Sessions, released: bool) -> Self {
+		match (sessions, released) {
+			(Sessions::Detach, false) => Self::Private(Pty::new()),
+			(Sessions::Detach, true) => Self::Own,
+			_ => Self::Shared,
+		}
+	}
+}
+
+/// A job's private pseudoconsole, open while processes run on it: opened for
+/// the first process attached, closed when the job empties ([`Watcher`]) or
+/// on TERM/HUP; a stage attached later opens a new one.
+struct Pty {
+	open: Mutex<Option<Console>>,
+}
+
+impl Pty {
+	const fn new() -> Self {
+		Self { open: Mutex::new(None) }
+	}
+
+	/// The console, opened if closed, locked so that no hang-up or idle close
+	/// takes it while a process is being attached and assigned to the job.
+	fn attach(&self) -> io::Result<MappedMutexGuard<'_, Console>> {
+		let mut open = self.open.lock();
+		if open.is_none() {
+			*open = Some(Console::new()?);
+		}
+		Ok(MutexGuard::map(open, |c| c.as_mut().expect("opened above")))
+	}
+
+	/// `CTRL_C_EVENT` to the attached processes; ignored by those that
+	/// inherited an ignored Ctrl-C (a parent in a new process group). Fails
+	/// when the console is closed: nothing runs on it.
+	fn interrupt(&self) -> io::Result<()> {
+		match &*self.open.lock() {
+			Some(console) => (&console.input).write_all(&[0x03]),
+			None => Err(io::ErrorKind::BrokenPipe.into()),
+		}
+	}
+
+	/// Close the console: `CTRL_CLOSE_EVENT` to every attached process, which
+	/// none can ignore, and termination 5 s later by the system for those
+	/// still handling it.
+	fn hang_up(&self) {
+		self.open.lock().take();
+	}
+
+	/// Close the console if nothing runs in `job`. Under the lock: a process
+	/// being attached is assigned to the job before `attach` lets go, so it
+	/// either counts here or finds the console closed and opens a new one.
+	fn close_if_idle(&self, job: &Job) {
+		let mut open = self.open.lock();
+		if job.active().is_ok_and(|n| n == 0) {
+			open.take();
+		}
+	}
+}
+
+/// An open pseudoconsole. Its output goes to `NUL`, so the console host
+/// never blocks on a full pipe and no reader thread is needed.
+struct Console {
+	hpc:   HPCON,
+	/// The console's input: an ETX here raises `CTRL_C_EVENT` in every
+	/// attached process that does not ignore it.
+	input: io::PipeWriter,
+}
+
+impl Console {
+	/// Size reported to programs that query the console (progress bars).
+	const SIZE: COORD = COORD { X: 120, Y: 30 };
+
+	fn new() -> io::Result<Self> {
+		let (reader, input) = io::pipe()?;
+		let sink = fs::File::options().write(true).open("NUL")?;
+		let mut hpc: HPCON = 0;
+		// No `PSEUDOCONSOLE_INHERIT_CURSOR`: only with it does the console
+		// host query the cursor (`ESC[6n`) and wait for the reply before its
+		// clients run (the hang `pi-natives`' `pty.rs` answers for
+		// portable-pty, which sets it), so the discarded output needs none.
+		// SAFETY: open handles (the console host duplicates them) and a
+		// writable `hpc`.
+		let hr =
+			unsafe { CreatePseudoConsole(Self::SIZE, raw(&reader), raw(&sink), 0, &raw mut hpc) };
+		if hr < 0 {
+			return Err(io::Error::from_raw_os_error(hr));
+		}
+		Ok(Self { hpc, input })
+	}
+}
+
+impl Drop for Console {
+	fn drop(&mut self) {
+		// SAFETY: created in `new`, closed once.
+		unsafe { ClosePseudoConsole(self.hpc) };
 	}
 }
 
@@ -423,27 +693,29 @@ fn child_handle(
 	Ok(h)
 }
 
-/// A process attribute list holding the handle list to inherit.
+/// A process attribute list: the handle list to inherit, and the
+/// pseudoconsole to attach to.
 struct Attributes {
 	buf: Vec<usize>,
 }
 
 impl Attributes {
-	fn with_handles(handles: &[HANDLE]) -> io::Result<Self> {
+	fn new(handles: &[HANDLE], pty: Option<HPCON>) -> io::Result<Self> {
+		let count = 1 + u32::from(pty.is_some());
 		let mut size = 0usize;
 		// SAFETY: a null list with a size pointer is the documented size query
 		// (it "fails" with ERROR_INSUFFICIENT_BUFFER).
-		unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), 1, 0, &raw mut size) };
+		unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), count, 0, &raw mut size) };
 		let mut buf = vec![0usize; size.div_ceil(mem::size_of::<usize>())];
 		// SAFETY: `buf` holds at least `size` bytes, aligned.
 		check(unsafe {
-			InitializeProcThreadAttributeList(buf.as_mut_ptr().cast(), 1, 0, &raw mut size)
+			InitializeProcThreadAttributeList(buf.as_mut_ptr().cast(), count, 0, &raw mut size)
 		})?;
 		// Initialized: from here on, drop deletes it.
 		let mut a = Self { buf };
 		// SAFETY: the list is initialized; `handles` outlives CreateProcessW
 		// (the caller keeps it alive across the call).
-		let ok = unsafe {
+		let mut ok = unsafe {
 			UpdateProcThreadAttribute(
 				a.list(),
 				0,
@@ -454,6 +726,23 @@ impl Attributes {
 				ptr::null(),
 			)
 		};
+		if ok != 0
+			&& let Some(hpc) = pty
+		{
+			// SAFETY: as above; the attribute's value is the `HPCON` itself, which
+			// the job keeps open past CreateProcessW.
+			ok = unsafe {
+				UpdateProcThreadAttribute(
+					a.list(),
+					0,
+					PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+					ptr::with_exposed_provenance(hpc as usize),
+					mem::size_of::<HPCON>(),
+					ptr::null_mut(),
+					ptr::null(),
+				)
+			};
+		}
 		if ok == 0 {
 			let e = last_error();
 			// SAFETY: initialized above.
@@ -514,7 +803,9 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	let (app, mut line) = command(path, argv)?;
 	let env = env_block(env)?;
 	let cwd = wide(cwd)?;
-	let job = shared.state.job_for(pgroup)?;
+	let job = shared
+		.state
+		.job_for(pgroup, || JobConsole::new(shared.config.sessions, lineage.detached))?;
 	let mut pumps = Vec::new();
 	let mut feeds = Vec::new();
 	let [stdin, stdout, stderr] = stdio;
@@ -571,7 +862,7 @@ fn undo(process: &OwnedHandle, e: io::Error) -> io::Error {
 	e
 }
 
-/// `CreateProcessW` suspended, into `job`, then resumed.
+/// `CreateProcessW` suspended, into `job` (and its console), then resumed.
 fn create(
 	app: &[u16],
 	line: &mut [u16],
@@ -586,7 +877,13 @@ fn create(
 			list.push(raw(h));
 		}
 	}
-	let mut attrs = Attributes::with_handles(&list)?;
+	// Held until the process is in the job: no hang-up or idle close takes
+	// the console from under it.
+	let attached = match &job.con {
+		JobConsole::Private(pty) => Some(pty.attach()?),
+		JobConsole::Shared | JobConsole::Own => None,
+	};
+	let mut attrs = Attributes::new(&list, attached.as_ref().map(|c| c.hpc))?;
 	let mut si = STARTUPINFOEXW::default();
 	si.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
 	si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -595,10 +892,16 @@ fn create(
 	si.StartupInfo.hStdError = raw(&handles[2]);
 	si.lpAttributeList = attrs.list();
 	let mut pi = PROCESS_INFORMATION::default();
-	let flags = CREATE_SUSPENDED
-		| CREATE_NEW_PROCESS_GROUP
-		| CREATE_UNICODE_ENVIRONMENT
-		| EXTENDED_STARTUPINFO_PRESENT;
+	let console = match job.con {
+		// A group of its own keeps the host's Ctrl-C away and CTRL_BREAK
+		// targetable.
+		JobConsole::Shared => CREATE_NEW_PROCESS_GROUP,
+		// Ctrl-C reaches every process of the pseudoconsole.
+		JobConsole::Private(_) => 0,
+		JobConsole::Own => CREATE_NO_WINDOW,
+	};
+	let flags =
+		CREATE_SUSPENDED | console | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
 	// SAFETY: every pointer is valid for the call: NUL-terminated wide
 	// strings, a writable command line, the environment block, the startup
 	// info with its attribute list and handle list kept alive until return.
@@ -701,11 +1004,12 @@ impl WinProc {
 		self.shared.config.grace
 	}
 
-	/// TERM-like signals: `CTRL_BREAK`, or KILL when it cannot be delivered.
-	fn ctrl_break(&self, sig: Signal, escalate: bool) -> io::Result<()> {
+	/// TERM-like signals: a console control event, or KILL when it cannot be
+	/// delivered.
+	fn interrupt(&self, sig: Signal, escalate: bool) -> io::Result<()> {
 		let mut life = self.tracker.lock();
 		life.signalled(sig);
-		if self.inner.job.ctrl_break(sig).is_err() {
+		if self.inner.job.interrupt(sig).is_err() {
 			life.signalled(Signal::Kill);
 			return self.inner.job.terminate();
 		}
@@ -734,8 +1038,8 @@ impl ExtProc for WinProc {
 				self.tracker.lock().signalled(Signal::Kill);
 				self.inner.job.terminate()
 			},
-			Signal::Term => self.ctrl_break(sig, true),
-			Signal::Int | Signal::Hup | Signal::Quit => self.ctrl_break(sig, false),
+			Signal::Term => self.interrupt(sig, true),
+			Signal::Int | Signal::Hup | Signal::Quit => self.interrupt(sig, false),
 			Signal::Stop | Signal::Tstp | Signal::Ttin | Signal::Ttou => self.stop(),
 			Signal::Cont => self.cont(),
 			_ => Err(io::ErrorKind::Unsupported.into()),
@@ -765,9 +1069,9 @@ impl Drop for WinProc {
 		if let Abandon::Escalate { term, .. } = life.abandon(Instant::now(), self.grace()) {
 			drop(life);
 			let job = &self.inner.job;
-			// A suspended job cannot handle CTRL_BREAK.
+			// A suspended job cannot handle a console control event.
 			let _ = job.pause.lock().resume(&Ops(job));
-			if term && job.ctrl_break(Signal::Term).is_err() {
+			if term && job.interrupt(Signal::Term).is_err() {
 				self.tracker.lock().signalled(Signal::Kill);
 				let _ = job.terminate();
 			}
@@ -828,3 +1132,6 @@ pub(super) fn kill_leftovers(shared: &Shared) -> io::Result<Vec<Leftover>> {
 	}
 	Ok(killed)
 }
+
+#[cfg(test)]
+mod tests;

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.2] - 2026-11-08
+
 ### Added
 
 - Added a model catalog refresh callback that lets applications update the active model scope after catalogs are re-fetched.
