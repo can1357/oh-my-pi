@@ -41,7 +41,15 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { $otelEnv } from "@oh-my-pi/pi-utils";
 import type * as OtelApi from "@opentelemetry/api";
-import type { Attributes, AttributeValue, Span, SpanKind, SpanStatusCode, Tracer } from "@opentelemetry/api";
+import type {
+	Attributes,
+	AttributeValue,
+	Context as OtelContext,
+	Span,
+	SpanKind,
+	SpanStatusCode,
+	Tracer,
+} from "@opentelemetry/api";
 
 // Cached lazy loader: keeps @opentelemetry/api (~190ms of CJS require chains)
 // off CLI startup until telemetry is actually enabled or a consumer touches it.
@@ -482,6 +490,22 @@ function resolveContentCapture(value: TelemetryContentCapture | undefined): Reso
 }
 
 /**
+ * Context a new span is parented to: the explicit `parent`, else the active
+ * span, else (for a root span) the W3C context in the `TRACEPARENT` env var set
+ * by a launching process that already owns a trace. A missing or invalid
+ * `TRACEPARENT` leaves the active context untouched. Parsing goes through the
+ * global propagator, which the OTLP exporter's `register()` installs.
+ */
+function resolveParentContext(parent: Span | undefined): OtelContext {
+	const { context, propagation, trace } = otelApi();
+	const active = context.active();
+	if (parent) return trace.setSpan(active, parent);
+	const traceparent = process.env.TRACEPARENT;
+	if (!traceparent || trace.getSpan(active)) return active;
+	return propagation.extract(active, { traceparent });
+}
+
+/**
  * Start a span with the standard attribute envelope (provider, operation,
  * conversation, agent identity, user-supplied extras) pre-applied. Returns
  * `undefined` when telemetry is disabled.
@@ -521,8 +545,7 @@ function startSpan(
 	if (dynamicAttributes) Object.assign(attrs, dynamicAttributes);
 	if (options.attributes) Object.assign(attrs, options.attributes);
 
-	const { context, trace } = otelApi();
-	const ctx = options.parent ? trace.setSpan(context.active(), options.parent) : context.active();
+	const ctx = resolveParentContext(options.parent);
 	const span = telemetry.tracer.startSpan(
 		name,
 		{ kind: options.spanKind, attributes: attrs, startTime: options.startTime },

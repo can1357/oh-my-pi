@@ -46,6 +46,7 @@
   "devDependencies": {
     "@oh-my-pi/omptype": "catalog:",
     "@opentelemetry/context-async-hooks": "catalog:",
+    "@opentelemetry/core": "catalog:",
     "@opentelemetry/sdk-trace-base": "catalog:",
     "@types/bun": "catalog:"
   },
