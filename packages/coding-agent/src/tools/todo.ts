@@ -312,10 +312,7 @@ function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 	// `list: [{phase, items}]`. Accept that shape by synthesizing a one-phase list
 	// so a common, recoverable mistake isn't a hard error. Models also fill unused
 	// params with `[]`, so an empty `list` must not shadow non-empty `items`.
-	const flat =
-		entry.items && entry.items.length > 0
-			? [{ phase: entry.phase || DEFAULT_INIT_PHASE, items: entry.items }]
-			: undefined;
+	const flat = entry.items && entry.items.length > 0 ? [{ phase: entry.phase, items: entry.items }] : undefined;
 	const selected = entry.list?.length ? entry.list : (flat ?? entry.list);
 	const list = selected?.map(listEntry => ({ ...listEntry, phase: listEntry.phase || DEFAULT_INIT_PHASE }));
 	if (!list) {

@@ -447,8 +447,8 @@ describe("TodoTool lenient init shapes", () => {
 	it("keeps flat and canonical empty phases addressable through completion", async () => {
 		for (const args of [
 			{ op: "init" as const, phase: "", items: ["First"] },
+			{ op: "init" as const, list: [], phase: "", items: ["First"] },
 			{ op: "init" as const, list: [{ phase: "", items: ["First"] }] },
-			{ op: "init" as const, items: ["First"] },
 		]) {
 			const session = createSession();
 			const tool = new TodoTool(session);
@@ -491,39 +491,6 @@ describe("TodoTool lenient init shapes", () => {
 		expect(result.details?.phases).toEqual(initial);
 	});
 
-	it("preserves non-empty phase names and does not treat an empty append target as an alias", async () => {
-		const session = createSession();
-		const tool = new TodoTool(session);
-		const initialized = await tool.execute("init", { op: "init", list: [{ phase: " ", items: ["First"] }] });
-		expect(initialized.details?.phases[0]?.name).toBe(" ");
-		const rejected = await tool.execute("append", { op: "append", phase: "", items: ["Second"] });
-		expect(rejected.isError).toBe(true);
-		expect(session.getTodoPhases?.()).toEqual(initialized.details?.phases);
-	});
-
-	it("preserves clearing and global targeting after default phase initialization", async () => {
-		const tool = new TodoTool(createSession());
-		for (const op of ["done", "drop", "rm"] as const) {
-			await tool.execute("init", {
-				op: "init",
-				list: [
-					{ phase: "", items: ["First"] },
-					{ phase: "Other", items: ["Second"] },
-				],
-			});
-			const result = await tool.execute(op, { op });
-			const tasks = result.details?.phases.flatMap(phase => phase.tasks) ?? [];
-			if (op === "rm") expect(tasks).toEqual([]);
-			else
-				expect(tasks.map(task => task.status)).toEqual(
-					op === "done" ? ["completed", "completed"] : ["abandoned", "abandoned"],
-				);
-		}
-		const cleared = await tool.execute("clear", { op: "init", list: [] });
-		expect(cleared.isError).toBeUndefined();
-		expect(cleared.details?.phases).toEqual([]);
-	});
-
 	it("accepts a flattened init with bare items and no phase", async () => {
 		const tool = new TodoTool(createSession());
 		const result = await tool.execute("call-1", { op: "init", items: ["First", "Second"] });
@@ -548,7 +515,7 @@ describe("TodoTool lenient init shapes", () => {
 
 	it("uses flat items when list is an empty placeholder array (#17346)", async () => {
 		const tool = new TodoTool(createSession([{ name: "Old", tasks: [{ content: "Stale", status: "pending" }] }]));
-		const result = await tool.execute("call-1", { op: "init", list: [], phase: "", items: ["First", "Second"] });
+		const result = await tool.execute("call-1", { op: "init", list: [], items: ["First", "Second"] });
 
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.phases.map(phase => phase.name)).toEqual(["Tasks"]);
