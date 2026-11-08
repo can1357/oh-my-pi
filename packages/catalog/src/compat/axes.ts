@@ -58,12 +58,13 @@ export const EFFORT_TIERS: readonly string[] = [...EFFORTS, "off"];
 
 /**
  * How hard agent prompts push subagent delegation for a model lineage
- * (`delegation-bias` axis). `eager` is the unassigned default: the prompt
- * actively pushes fan-out. `restrained` keeps fan-out for genuinely parallel
- * slices but forbids reflexive scouts and single-agent babysitting. `gated`
- * forbids subagents unless the user or a skill asks.
+ * (`delegation-bias` axis). `eager` actively pushes fan-out. `balanced`, the
+ * unassigned default, neither pushes nor restricts fan-out beyond a light
+ * nudge to explore unfamiliar code with a scout. `restrained` keeps fan-out
+ * for genuinely parallel slices but forbids reflexive scouts and single-agent
+ * babysitting. `gated` forbids subagents unless the user or a skill asks.
  */
-export const DELEGATION_BIASES = ["eager", "restrained", "gated"] as const;
+export const DELEGATION_BIASES = ["eager", "balanced", "restrained", "gated"] as const;
 const THINKING_MODES = [
 	"effort",
 	"budget",

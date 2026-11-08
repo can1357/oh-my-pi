@@ -172,10 +172,10 @@ describe("AgentSession model-change prompt refresh", () => {
 
 	function pickModelsAcrossTaskPolicies(): [Model, Model] {
 		const all = modelRegistry.getAll();
-		const eager = all.find(model => resolveDelegationBias(model) === "eager");
+		const gated = all.find(model => resolveDelegationBias(model) === "gated");
 		const restrained = all.find(model => resolveDelegationBias(model) === "restrained");
-		if (!eager || !restrained) throw new Error("Expected eager and restrained delegation models");
-		return [eager, restrained];
+		if (!gated || !restrained) throw new Error("Expected gated and restrained delegation models");
+		return [gated, restrained];
 	}
 
 	function newSession(
