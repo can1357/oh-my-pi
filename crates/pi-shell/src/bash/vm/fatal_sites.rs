@@ -165,12 +165,42 @@ fn axis_elements<'a>(fixture: &'a serde_json::Value, axis: &str) -> Vec<&'a str>
 		.collect()
 }
 
+/// The original matrix's axis elements, pinned HERE rather than read from the
+/// fixture.
+///
+/// Reading the required list out of the fixture made the requirement move with
+/// the generator: drop a context from `CONTEXTS`, regenerate, and the recorded
+/// list shrinks with the rows, so a gate that compares the two stays green over
+/// less coverage. Pinned here, removing an element is a source edit in the gate
+/// — which is the decision it should be — and the fixture must still match.
+const ORIGINAL_AXES: &[(&str, &[&str])] = &[
+	("construct", &[
+		"simple", "and", "or", "not", "pipe_head", "pipe_tail", "group", "subshell",
+		"background", "cmdsub", "if_cond", "if_body", "while_cond", "until_cond", "for_in",
+		"for_arith", "case_word", "case_arm", "function", "redirect", "time_pipeline",
+		"cond_test", "arith_command", "eval_builtin", "source_builtin", "nested_c",
+		"nested_script", "loop_continue",
+	]),
+	("context", &[
+		"top", "top_errexit", "subshell", "subshell_errexit", "cmdsub", "eval", "source",
+		"nested_script", "exit_trap", "exit_trap_errexit", "err_trap", "err_trap_from_debug",
+		"debug_trap", "return_trap", "err_trap_in_exit", "debug_trap_in_exit",
+		"return_trap_in_exit", "fork_in_exit", "top_posix", "top_posix_errexit",
+		"exit_trap_posix",
+	]),
+	("raiser", &[
+		"fatal_unset", "fatal_nounset", "discard_readonly", "assign_int", "assign_subscript",
+		"arith_word",
+	]),
+];
+
 /// Every element of every sampled axis has a measured row.
 ///
-/// Name freshness is not coverage: without this, the recorded axis lists can
-/// agree with the crate while the rows that exercise them are gone, and a new
-/// variant can be waved through by regenerating the lists alone. The original
-/// matrix's axes are checked here, the carrier matrix's below.
+/// Name freshness is not coverage. Without this, the rows that exercise an axis
+/// can be gone while the recorded names still agree with the crate, and a new
+/// variant can be waved through by regenerating the names alone. The original
+/// matrix's axes are checked here against the pinned lists above, the carrier
+/// matrix's below against its enums.
 #[test]
 fn every_sampled_axis_element_has_a_measured_row() {
 	let fixture = fixture();
@@ -181,43 +211,65 @@ fn every_sampled_axis_element_has_a_measured_row() {
 		"the declaration axis is no longer DeclareKind; {REGENERATE}"
 	);
 	let mut missing = Vec::new();
-	for axis in ["construct", "context", "raiser", "declareKind"] {
-		let elements = axis_elements(&fixture, axis);
-		assert!(!elements.is_empty(), "the {axis} axis is empty; {REGENERATE}");
-		for element in elements {
+	for (axis, pinned) in ORIGINAL_AXES.iter().copied() {
+		assert_eq!(
+			axis_elements(&fixture, axis),
+			pinned,
+			"the {axis} axis is no longer the one this gate requires; a dropped element is a \
+			 decision, so remove it from ORIGINAL_AXES beside this test as well, and say in the \
+			 pull request what stopped being covered"
+		);
+		for element in pinned {
 			if !tags.contains(format!("{axis}:{element}").as_str()) {
 				missing.push(format!("{axis}:{element}"));
 			}
 		}
 	}
+	for element in DeclareKind::VARIANTS {
+		if !tags.contains(format!("declareKind:{element}").as_str()) {
+			missing.push(format!("declareKind:{element}"));
+		}
+	}
 	assert!(missing.is_empty(), "the site matrix has no row for {missing:?}; {REGENERATE}");
 }
 
-/// Opcodes no sample of this matrix lowers to, each with why.
+/// Opcodes no sample of this matrix lowers to, each with why not.
+///
+/// Two different reasons appear here, and the distinction matters: four of
+/// these are perfectly reachable from bash and are simply not sampled by this
+/// matrix's constructs, and the rest belong to the zsh dialect, which a
+/// bash-dialect matrix cannot reach at all. An entry is a record of a sampling
+/// choice, never a claim that the engine cannot get there.
 ///
 /// This list is source, not fixture: regenerating the matrix cannot grow it,
-/// so a new `Opcode` stays failing until someone writes a sample or records
-/// here that the fatal-jump model has none. Every entry is checked against
-/// the measurement below, so an entry that becomes reachable fails too.
+/// so a new `Opcode` stays failing until someone writes a sample or records a
+/// reason here. Every entry is checked against the measurement below, so an
+/// entry a sample starts reaching fails too.
 const OPCODES_WITH_NO_SAMPLE: &[(&str, &str)] = &[
-	("Nop", "a zsh list marker (`lower::list` emits it only in the zsh dialect)"),
-	("Redir", "a COMPOUND command's redirection list; a simple command's redirections \
-	           are part of its `Exec`, and the matrix redirects a simple command"),
-	("PopRedir", "the close of the same compound redirection"),
-	("Warn", "a parse warning's diagnostic; every sample parses without one"),
-	("Abort", "a syntax error, or a construct the engine cannot run; every sample lowers"),
-	("Repeat", "zsh `repeat`: the bash grammar has no such command"),
-	("TryEnter", "zsh `always`: the bash grammar has no such block"),
-	("AlwaysEnter", "zsh `always`: the bash grammar has no such block"),
-	("AlwaysEnd", "zsh `always`: the bash grammar has no such block"),
-	("CallAnon", "zsh anonymous function: the bash grammar has no such call"),
+	// Reachable from bash; this matrix's constructs do not sample them.
+	("Redir", "a COMPOUND command's redirection list (`{ …; } > /dev/null`); a simple \
+	           command's redirections are part of its `Exec`, and every construct here \
+	           redirects a simple command"),
+	("PopRedir", "the close of that same compound redirection"),
+	("Warn", "a parse warning's diagnostic (`if ; then :; fi`); every sample parses clean"),
+	("Abort", "a syntax error or a construct the engine cannot run (an unterminated \
+	           here-document); every sample parses and lowers"),
+	// zsh-dialect only: the bash grammar has no such construct.
+	("Nop", "a zsh list marker; `lower::list` emits it only in the zsh dialect"),
+	("Repeat", "zsh `repeat`"),
+	("TryEnter", "zsh `always`"),
+	("AlwaysEnter", "zsh `always`"),
+	("AlwaysEnd", "zsh `always`"),
+	("CallAnon", "a zsh anonymous function"),
 ];
 
 /// Every `Opcode` the engine has is lowered to by a sample, or is recorded
-/// above as one this matrix cannot reach.
+/// above as one this matrix does not sample, with why not.
 ///
-/// Measured, not declared: each row's script is compiled and the opcodes of
-/// the resulting units — function bodies included — are collected.
+/// Measured, not declared, and STATIC: each row's script is compiled and the
+/// opcodes of the resulting units — function bodies included — are collected.
+/// What an `eval`'s or a sourced file's runtime text lowers to is not followed,
+/// so this is coverage of what the matrix compiles, not of every op it runs.
 #[test]
 fn every_opcode_is_reached_by_a_measured_sample() {
 	fn collect(unit: &crate::bash::ir::Unit, seen: &mut HashSet<Opcode>) {
@@ -285,7 +337,14 @@ const FRAME_SAMPLES: &[(&str, Sample)] = &[
 	("Function", Sample::Row("construct-function-fatal_unset-top-clean", "a function call")),
 	("Subshell", Sample::Row("construct-subshell-fatal_unset-top-clean", "a forked `( )`")),
 	("NoFork", Sample::Row("carrier-direct-normal-nofork-badsub", "`${ ;}` in the current shell")),
-	("Stage", Sample::Row("construct-pipe_tail-fatal_unset-top-clean", "a pipeline's last stage")),
+	(
+		"Stage",
+		Sample::None(
+			"the last stage of a pipeline run in the CURRENT shell, which happens only under \
+			 `shopt -s lastpipe`; no sample enables it, and an ordinary pipeline's last stage \
+			 is a forked `Subshell` instead",
+		),
+	),
 	("Job", Sample::None("the base frame of a suspended job; the matrix has no job control")),
 ];
 
@@ -300,6 +359,14 @@ enum Sample {
 
 /// Each variant of the two runtime axes names the row that exercises it, or
 /// records why none does, and every row it names exists.
+///
+/// What this does NOT do is observe the variant at run time: it checks the
+/// named row is in the matrix, and the claim that the row reaches the variant
+/// is carried by the note beside it. Each mapping here was confirmed by
+/// instrumenting frame construction once, by hand; a mapping that silently
+/// stops holding would need that instrumentation again, which is why the
+/// `Stage` entry records no row rather than naming a pipeline that only
+/// reaches it under `lastpipe`.
 #[test]
 fn every_runtime_axis_variant_names_its_sample() {
 	let fixture = fixture();

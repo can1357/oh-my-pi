@@ -46,6 +46,33 @@ def _strip_noise(text: str) -> str:
 	read as present, which is the safe direction for a coverage gate.
 	"""
 	out, i, n = [], 0, len(text)
+
+	def skip_string(j: int) -> int:
+		"""Index just past the literal starting at `j`, or `j` if none starts."""
+		m = re.match(r'(?:br|rb|b|r)?(#*)"', text[j : j + 16])
+		if m and "r" in m.group(0):
+			close = '"' + m.group(1)
+			end = text.find(close, j + m.end())
+			return n if end < 0 else end + len(close)
+		if m:
+			k = j + m.end()
+			while k < n and text[k] != '"':
+				k += 2 if text[k] == "\\" else 1
+			return k + 1
+		if text[j] == '"':
+			k = j + 1
+			while k < n and text[k] != '"':
+				k += 2 if text[k] == "\\" else 1
+			return k + 1
+		# `'a` is a lifetime, `'x'` and `'\n'` are character literals.
+		if text[j] == "'":
+			if text[j + 1 : j + 2] == "\\":
+				end = text.find("'", j + 2)
+				return n if end < 0 else end + 1
+			if text[j + 2 : j + 3] == "'":
+				return j + 3
+		return j
+
 	while i < n:
 		two = text[i : i + 2]
 		if two == "//":
@@ -55,7 +82,8 @@ def _strip_noise(text: str) -> str:
 			j = text.find("*/", i + 2)
 			i = n if j < 0 else j + 2
 		elif text[i] == "#" and text[i + 1 : i + 2] in ("[", "!"):
-			# Skip the whole attribute, matching its brackets.
+			# Skip the whole attribute, matching its brackets but stepping over
+			# any string literal inside, whose `]` is not a bracket.
 			j = text.find("[", i)
 			if j < 0:
 				out.append(text[i])
@@ -63,28 +91,35 @@ def _strip_noise(text: str) -> str:
 				continue
 			depth, j = 1, j + 1
 			while j < n and depth:
+				after = skip_string(j)
+				if after != j:
+					j = after
+					continue
 				if text[j] == "[":
 					depth += 1
 				elif text[j] == "]":
 					depth -= 1
 				j += 1
 			i = j
-		elif text[i] in "\"'":
-			quote, j = text[i], i + 1
-			while j < n and text[j] != quote:
-				j += 2 if text[j] == "\\" else 1
-			out.append(" ")
-			i = j + 1
 		else:
-			out.append(text[i])
-			i += 1
+			after = skip_string(i)
+			if after != i:
+				out.append(" ")
+				i = after
+			else:
+				out.append(text[i])
+				i += 1
 	return "".join(out)
 
 
 def variants(path: str, enum: str) -> list[str]:
 	"""The variant names of a Rust enum, read from its declaration."""
 	src = _strip_noise(open(path, encoding="utf-8").read())
-	m = re.search(r"\benum\s+%s\s*\{" % re.escape(enum), src)
+	# Generic parameters and a `where` clause may stand between the name and
+	# the body: `enum Test<'a, T> where T: Copy { … }`.
+	m = re.search(
+		r"\benum\s+%s\s*(?:<[^>{]*>)?\s*(?:where[^{]*)?\{" % re.escape(enum), src
+	)
 	if not m:
 		raise SystemExit(f"gen-fatal-sites: no `enum {enum}` in {path}")
 	i, depth = m.end(), 1
