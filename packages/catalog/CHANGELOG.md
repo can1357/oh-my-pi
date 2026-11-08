@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `local/x-asr-960ms-zh-en` streaming Chinese/English X-ASR seed row.
+- Added the `local/x-asr-960ms-zh-en` streaming Chinese/English X-ASR seed row ([#18495](https://github.com/can1357/oh-my-pi/pull/18495) by [@YangtseSu](https://github.com/YangtseSu)).
 
 ### Fixed
 
