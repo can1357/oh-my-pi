@@ -303,6 +303,10 @@
 
 - Fixed `OTEL_*` values from omp's own `.env` files (agent dir, config root, home) being inherited by bash, PTY, eval, subagent, MCP and LSP children and visible to in-process extensions; shell-exported and project `.env` values are unchanged, and extensions that need their own OpenTelemetry settings should read them from the shell ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
 
+### Fixed
+
+- Isolated `task` agents on the git-worktree (`rcopy`) backend no longer hang setup forever when `git worktree add` never exits or its output pipes stay open after it exits; setup now fails with an error after a deadline ([#17901](https://github.com/can1357/oh-my-pi/issues/17901))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
