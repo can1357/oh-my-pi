@@ -292,6 +292,7 @@ export async function runRpcSkillCommand(
 	prebuilt?: BuiltSkillPromptMessage,
 	onPromptAdmitted?: () => void,
 	images?: ImageContent[],
+	clientMessageId?: string,
 ): Promise<boolean> {
 	const built = prebuilt ?? (await session.buildUserSkillPrompt(invocation.skill, invocation));
 	return session.promptCustomMessage(
@@ -302,7 +303,12 @@ export async function runRpcSkillCommand(
 			details: built.details,
 			attribution: "user",
 		},
-		{ streamingBehavior, queueChipText: invocation.queueChipText, onPromptAdmitted },
+		{
+			streamingBehavior,
+			queueChipText: invocation.queueChipText,
+			onPromptAdmitted,
+			...(clientMessageId !== undefined ? { clientMessageId } : {}),
+		},
 	);
 }
 
@@ -327,6 +333,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	onError: (error: Error) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
 	images?: ImageContent[];
+	clientMessageId?: string;
 	isCurrent?: () => boolean;
 }): Promise<RpcSkillCommandResult | "cancelled" | null> {
 	const invocation = resolveRpcSkillInvocation(input.session, input.message);
@@ -350,6 +357,7 @@ export async function dispatchRpcSkillPrompt(input: {
 				built,
 				onPromptAdmitted,
 				input.images,
+				input.clientMessageId,
 			),
 		results: input.results,
 		onError: input.onError,
@@ -1901,25 +1909,30 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			const sessionId = session.sessionId;
 			const isCurrent = () =>
 				inputGate.isCurrent(command) && !shutdownState.requested && session.sessionId === sessionId;
+			const consumed = (): "local" => {
+				if (command.clientMessageId !== undefined) session.resolveClientMessages([command.clientMessageId]);
+				return "local";
+			};
 			if (!isCurrent()) return "cancelled";
+			if (command.clientMessageId !== undefined) session.assertClientMessageAvailable(command.clientMessageId);
 			let text = command.message;
 			let images = command.images;
 			const runner = session.extensionRunner;
 			if (runner?.hasHandlers("input")) {
 				const result = await runner.emitInput(text, images, "rpc");
 				if (!isCurrent()) return "cancelled";
-				if (result.handled) return "local";
+				if (result.handled) return consumed();
 				if (result.text !== undefined) text = result.text;
 				if (result.images !== undefined) images = result.images;
 			}
 			if (!isCurrent()) return "cancelled";
-			if (!text.trim() && !images?.length) return "local";
+			if (!text.trim() && !images?.length) return consumed();
 			if (command.type === "steer") {
-				await session.steer(text, images);
+				await session.steer(text, images, { clientMessageId: command.clientMessageId });
 				return "admitted";
 			}
 			if (command.type === "follow_up") {
-				await session.followUp(text, images);
+				await session.followUp(text, images, { clientMessageId: command.clientMessageId });
 				return "admitted";
 			}
 			if (command.type === "prompt") {
@@ -1929,6 +1942,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					session,
 					message: text,
 					streamingBehavior: command.streamingBehavior,
+					clientMessageId: command.clientMessageId,
 					results: promptResults,
 					onError: onPromptError(command.id, "prompt"),
 					extensionUserMessageTracker,
@@ -1978,6 +1992,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (builtinResult !== false) {
 					if (!("prompt" in builtinResult)) {
 						if (builtinResult.agentInvoked === true && ticket) {
+							if (command.clientMessageId !== undefined)
+								session.resolveClientMessages([command.clientMessageId]);
 							void session.waitForIdle().then(
 								() => promptResults.settle(ticket),
 								(idleError: unknown) =>
@@ -1988,7 +2004,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 							);
 							return "builtin-agent";
 						}
-						return "local";
+						return consumed();
 					}
 					text = builtinResult.prompt;
 				}
@@ -1999,6 +2015,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				startPrompt: onPromptAdmitted =>
 					session.prompt(text, {
 						images,
+						clientMessageId: command.clientMessageId,
 						...(command.type === "prompt" ? { streamingBehavior: command.streamingBehavior } : {}),
 						onPromptAdmitted,
 					}),
@@ -2022,6 +2039,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	// Handle a single command
 	const handleCommandImpl = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
+		if (
+			(command.type === "prompt" ||
+				command.type === "steer" ||
+				command.type === "follow_up" ||
+				command.type === "abort_and_prompt") &&
+			command.clientMessageId !== undefined
+		) {
+			session.assertClientMessageAvailable(command.clientMessageId);
+		}
 
 		switch (command.type) {
 			case "negotiate_protocol": {
@@ -2257,11 +2283,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// State
 			// =================================================================
 
+			case "get_client_message_status":
+				return success(id, command.type, await session.getClientMessageStatus(command.clientMessageIds));
+
 			case "get_state": {
 				// A goal exit triggered by the last turn restores tools asynchronously; report after it.
 				await goalController.settled();
 				const queuedMessages = session.getQueuedMessages();
 				const state: RpcSessionState = {
+					supportsClientMessageIds: true,
 					model: session.model,
 					thinkingLevel: session.thinkingLevel,
 					isStreaming: session.isStreaming,
@@ -2281,6 +2311,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 						steering: [...queuedMessages.steering],
 						followUp: [...queuedMessages.followUp],
 						liveSteered: queuedMessages.liveSteered,
+						...(queuedMessages.clientMessageIds ? { clientMessageIds: queuedMessages.clientMessageIds } : {}),
 					},
 					todoPhases: session.getTodoPhases(),
 					fastModeEnabled: session.isFastModeEnabled(),
@@ -2944,7 +2975,23 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const inputDispatcher = new RpcInputDispatcher({
 		deps: dispatchFrameDeps,
 		afterSerialCommand: () => shutdownCoordinator.checkShutdownRequested(),
-		acceptInput: command => inputGate.accept(command),
+		acceptInput: command => {
+			if (
+				(command.type === "prompt" ||
+					command.type === "steer" ||
+					command.type === "follow_up" ||
+					command.type === "abort_and_prompt") &&
+				command.clientMessageId !== undefined
+			) {
+				try {
+					session.assertClientMessageAvailable(command.clientMessageId);
+				} catch {
+					// The handler returns the correlated error; invalid input must not invalidate prior submissions.
+					return;
+				}
+			}
+			inputGate.accept(command);
+		},
 	});
 
 	// Startup is over: run the frames held back meanwhile, then every later frame, through the dispatcher.

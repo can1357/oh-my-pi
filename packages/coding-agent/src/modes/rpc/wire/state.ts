@@ -38,10 +38,20 @@ export const stateDefs = {
 	},
 	TodoPhase: { name: "string", tasks: "TodoItem[]" },
 	ContextUsage: { tokens: "number.integer", contextWindow: "number.integer", percent: "number" },
+	QueuedClientMessageIds: { steering: "(string | null)[]", followUp: "(string | null)[]" },
+	CorrelatedClientMessage: { clientMessageId: "string", message: "AgentMessage" },
+	ClientMessageStatus: {
+		messages: "CorrelatedClientMessage[]",
+		queuedMessages: "QueuedMessagesState",
+		resolvedClientMessageIds: "string[]",
+		persistedClientMessageIds: "string[]",
+		unresolvedClientMessageIds: "string[]",
+	},
 	QueuedMessagesState: doc(
 		{
 			steering: "string[]",
 			followUp: "string[]",
+			"clientMessageIds?": doc("QueuedClientMessageIds", "IDs align with chip arrays; legacy slots are null."),
 			liveSteered: absentAs(
 				doc(
 					"number.integer",
@@ -102,6 +112,7 @@ export const stateDefs = {
 		"Provider-neutral state of an account past its usage limit, discriminated by `stage`.",
 	),
 	SessionState: {
+		supportsClientMessageIds: absentAs("boolean", false),
 		"model?": "ModelInfo",
 		"thinkingLevel?": "ThinkingLevel",
 		isStreaming: absentAs("boolean", false),

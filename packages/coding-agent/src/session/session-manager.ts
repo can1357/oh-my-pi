@@ -3588,8 +3588,11 @@ export class SessionManager {
 			| BashExecutionMessage
 			| PythonExecutionMessage
 			| FileMentionMessage,
+		metadata?: { clientMessageId?: string },
 	): string {
-		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
+		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message, ...metadata };
+		// Correlated acceptance must survive reconnect even before the first assistant reply.
+		if (metadata?.clientMessageId !== undefined) this.#forceFileCreation = true;
 		this.#recordEntry(entry);
 		return entry.id;
 	}
@@ -3774,8 +3777,9 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	appendCustomEntry(customType: string, data?: unknown): string {
+	appendCustomEntry(customType: string, data?: unknown, options?: { forceFileCreation?: boolean }): string {
 		const entry: CustomEntry = { type: "custom", customType, data, ...this.#freshEntryFields() };
+		if (options?.forceFileCreation) this.#forceFileCreation = true;
 		this.#recordEntry(entry);
 		return entry.id;
 	}
@@ -3805,6 +3809,7 @@ export class SessionManager {
 		details?: T,
 		attribution: MessageAttribution | undefined = "agent",
 		timestamp?: number,
+		metadata?: { clientMessageId?: string },
 	): string {
 		const normalized = normalizeCustomMessagePayload<T>({ customType, content, display, details, attribution });
 		const fresh = this.#freshEntryFields();
@@ -3821,7 +3826,9 @@ export class SessionManager {
 			// records the emission time, which on rebuild excludes provider
 			// preparation / hook time from the prompt→yield anchor.
 			timestamp: timestamp !== undefined ? new Date(timestamp).toISOString() : fresh.timestamp,
+			...metadata,
 		};
+		if (metadata?.clientMessageId !== undefined) this.#forceFileCreation = true;
 		this.#recordEntry(entry);
 		return entry.id;
 	}

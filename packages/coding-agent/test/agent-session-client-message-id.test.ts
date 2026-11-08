@@ -1,0 +1,476 @@
+import { afterEach, describe, expect, test, vi } from "bun:test";
+import * as path from "node:path";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { dispatchRpcSkillPrompt } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import {
+	RpcExtensionUserMessageTracker,
+	RpcPromptResults,
+} from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-prompt-results";
+import {
+	AgentSession,
+	type AgentSessionConfig,
+	type AgentSessionEvent,
+	type PromptOptions,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { convertToLlm, VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+
+// The proposed SDK boundary is deliberately entry/event metadata, not AgentMessage metadata.
+interface ClientMessageStatus {
+	messages: { clientMessageId: string; message: AgentMessage }[];
+	queuedMessages: {
+		steering: readonly string[];
+		followUp: readonly string[];
+		liveSteered: number;
+		clientMessageIds?: { steering: (string | null)[]; followUp: (string | null)[] };
+	};
+	resolvedClientMessageIds: string[];
+	persistedClientMessageIds: string[];
+	unresolvedClientMessageIds: string[];
+}
+type CorrelatedSession = AgentSession & {
+	getClientMessageStatus(ids: readonly string[]): Promise<ClientMessageStatus>;
+};
+const cleanup: (() => Promise<void>)[] = [];
+afterEach(async () => {
+	vi.restoreAllMocks();
+	for (const dispose of cleanup.splice(0).reverse()) await dispose();
+});
+
+function setup(
+	options: {
+		manager?: SessionManager;
+		responses?: MockResponseSource;
+		config?: Partial<AgentSessionConfig>;
+	} = {},
+) {
+	const directory = TempDir.createSync("@client-message-id-");
+	const auth = createInMemoryAuthStorage();
+	auth.keys.setRuntime("anthropic", "test-key");
+	const manager = options.manager ?? SessionManager.inMemory(directory.path());
+	const mock = createMockModel({ responses: options.responses, handler: { content: ["done"] } });
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: {
+			model: getBundledModel("anthropic", "claude-sonnet-4-5"),
+			systemPrompt: ["Test"],
+			tools: [],
+			messages: manager.buildSessionContext().messages,
+		},
+		convertToLlm,
+		streamFn: mock.stream,
+	});
+	const session = new AgentSession({
+		agent,
+		sessionManager: manager,
+		settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+		modelRegistry: new ModelRegistry(auth, path.join(directory.path(), "models.yml")),
+		autoTitle: false,
+		...options.config,
+	}) as CorrelatedSession;
+	cleanup.push(async () => {
+		await session.dispose();
+		auth.close();
+		directory.removeSync();
+	});
+	const events: AgentSessionEvent[] = [];
+	session.subscribe(event => {
+		events.push(event);
+	});
+	return { session, manager, mock, events, directory };
+}
+
+function intent(clientMessageId: string): PromptOptions & { clientMessageId: string } {
+	return { clientMessageId };
+}
+
+async function status(session: CorrelatedSession, ids: readonly string[]) {
+	expect(typeof session.getClientMessageStatus).toBe("function");
+	return session.getClientMessageStatus(ids);
+}
+
+function expectNoProviderMetadata(mock: { calls: { context: { messages: unknown[] } }[] }, ids: string[]) {
+	for (const call of mock.calls) {
+		const payload = JSON.stringify(call.context.messages);
+		expect(payload).not.toContain("clientMessageId");
+		for (const id of ids) expect(payload).not.toContain(id);
+	}
+}
+
+describe("AgentSession client intent identity", () => {
+	test("identifies two identical idle prompts in events and persisted entries without exposing IDs to the model", async () => {
+		const { session, manager, mock, events } = setup();
+		await session.prompt("same request", intent("intent-idle-a"));
+		await session.prompt("same request", intent("intent-idle-b"));
+		await session.settleInFlightMessagePersistence();
+		const userEvents = events.filter(
+			event => (event.type === "message_start" || event.type === "message_end") && event.message.role === "user",
+		);
+		expect(userEvents).toMatchObject([
+			{ type: "message_start", clientMessageId: "intent-idle-a" },
+			{ type: "message_end", clientMessageId: "intent-idle-a" },
+			{ type: "message_start", clientMessageId: "intent-idle-b" },
+			{ type: "message_end", clientMessageId: "intent-idle-b" },
+		]);
+		const entries = manager.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user");
+		expect(entries).toMatchObject([{ clientMessageId: "intent-idle-a" }, { clientMessageId: "intent-idle-b" }]);
+		for (const message of session.messages) expect(message).not.toHaveProperty("clientMessageId");
+		const found = await status(session, ["intent-idle-b", "never-submitted"]);
+		expect(found.messages.map(item => item.clientMessageId)).toEqual(["intent-idle-b"]);
+		expect<unknown>(found.messages[0]?.message).toBe(session.messages.findLast(message => message.role === "user"));
+		expect(found.persistedClientMessageIds).toEqual(["intent-idle-b"]);
+		expect(found.resolvedClientMessageIds).toEqual([]);
+		expect(found.unresolvedClientMessageIds).toEqual(["never-submitted"]);
+		expect(mock.calls).toHaveLength(2);
+		expectNoProviderMetadata(mock, ["intent-idle-a", "intent-idle-b"]);
+	});
+
+	test("materializes a correlated first user entry before the assistant produces any output", async () => {
+		const disk = TempDir.createSync("@client-message-first-entry-");
+		cleanup.push(async () => disk.removeSync());
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const { session, manager } = setup({
+			manager: SessionManager.create(disk.path(), disk.path()),
+			responses: [
+				async () => {
+					entered.resolve();
+					await release.promise;
+					return { content: ["done"] };
+				},
+			],
+		});
+		const running = session.prompt("first input", intent("intent-before-reply"));
+		try {
+			await withTimeout(entered.promise, 5_000, "Provider did not reach the held first response");
+			const found = await status(session, ["intent-before-reply"]);
+			expect(found.persistedClientMessageIds).toEqual(["intent-before-reply"]);
+			const file = manager.getSessionFile();
+			if (!file) throw new Error("Expected a correlated first-user journal");
+			const journal = await Bun.file(file).text();
+			expect(journal).toContain('"clientMessageId":"intent-before-reply"');
+			expect(journal).not.toContain('"role":"assistant"');
+			expect(session.isStreaming).toBe(true);
+		} finally {
+			release.resolve();
+			await running;
+		}
+	});
+
+	test("keeps IDs aligned through template expansion, legacy null slots and follow-up promotion", async () => {
+		const { session, events, mock } = setup({
+			config: {
+				promptTemplates: [{ name: "review", description: "Review", content: "Review $ARGUMENTS", source: "test" }],
+			},
+		});
+		await session.followUp("legacy request");
+		await session.followUp("/review queue", undefined, intent("intent-template"));
+		expect(session.getQueuedMessages()).toMatchObject({
+			followUp: ["legacy request", "Review queue"],
+			clientMessageIds: { steering: [], followUp: [null, "intent-template"] },
+		});
+		expect(session.promoteQueuedMessage("/review queue")).toBe(true);
+		expect(session.getQueuedMessages()).toMatchObject({
+			steering: ["Review queue"],
+			followUp: ["legacy request"],
+			clientMessageIds: { steering: ["intent-template"], followUp: [null] },
+		});
+		await session.waitForIdle();
+		const found = await status(session, ["intent-template"]);
+		expect(found.messages).toMatchObject([
+			{
+				clientMessageId: "intent-template",
+				message: { role: "user", content: [{ type: "text", text: "Review queue" }] },
+			},
+		]);
+		expect(found.resolvedClientMessageIds).toEqual([]);
+		expect(events.filter(event => event.type === "message_end")).toContainEqual(
+			expect.objectContaining({ clientMessageId: "intent-template" }),
+		);
+		expectNoProviderMetadata(mock, ["intent-template"]);
+	});
+
+	test("emits a queue_update when identical chip texts exchange only their IDs", async () => {
+		const { session, events } = setup();
+		await session.followUp("duplicate", undefined, intent("intent-queue-a"));
+		await session.followUp("duplicate", undefined, intent("intent-queue-b"));
+		const before = events.filter(event => event.type === "queue_update").length;
+		const queued = session.agent.peekFollowUpQueue();
+		session.agent.replaceQueues([], [queued[1], queued[0]]);
+		expect(events.filter(event => event.type === "queue_update")).toHaveLength(before + 1);
+		expect(events.at(-1)).toMatchObject({
+			type: "queue_update",
+			followUp: ["duplicate", "duplicate"],
+			clientMessageIds: { steering: [], followUp: ["intent-queue-b", "intent-queue-a"] },
+		});
+	});
+
+	test("keeps an RPC-expanded queued skill's identity through delivery, custom persistence and reopen", async () => {
+		const disk = TempDir.createSync("@client-message-resume-");
+		cleanup.push(async () => disk.removeSync());
+		const skillPath = path.join(disk.path(), "SKILL.md");
+		await Bun.write(
+			skillPath,
+			"---\nname: reviewer\ndescription: Review code\n---\n\nReview the supplied code carefully.\n",
+		);
+		const manager = SessionManager.create(disk.path(), disk.path());
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const { session, mock } = setup({
+			manager,
+			responses: [
+				async () => {
+					entered.resolve();
+					await release.promise;
+					return { content: ["first done"] };
+				},
+			],
+			config: {
+				skills: [
+					{
+						name: "reviewer",
+						description: "Review code",
+						filePath: skillPath,
+						baseDir: disk.path(),
+						source: "project",
+					},
+				],
+				skillsSettings: { enableSkillCommands: true },
+			},
+		});
+		const running = session.prompt("before the skill", intent("intent-resume-user"));
+		const results = new RpcPromptResults(session, () => {});
+		session.subscribe(event => results.observe(event));
+		const request = {
+			ticket: results.begin("rpc-skill-request"),
+			results,
+			session,
+			message: "/skill:reviewer inspect risks",
+			streamingBehavior: "followUp" as const,
+			clientMessageId: "intent-skill",
+			onError: (error: Error) => {
+				throw error;
+			},
+			extensionUserMessageTracker: new RpcExtensionUserMessageTracker(),
+		};
+		try {
+			await withTimeout(entered.promise, 5_000, "Initial skill turn did not reach the model");
+			await dispatchRpcSkillPrompt(request);
+			expect(session.getQueuedMessages()).toMatchObject({
+				followUp: ["/skill:reviewer inspect risks"],
+				clientMessageIds: { steering: [], followUp: ["intent-skill"] },
+			});
+		} finally {
+			release.resolve();
+			await running;
+		}
+		await session.waitForIdle();
+		await session.settleInFlightMessagePersistence();
+		await manager.flush();
+		expect(
+			manager.getEntries().find(entry => entry.type === "custom_message" && entry.customType === "skill-prompt"),
+		).toMatchObject({
+			clientMessageId: "intent-skill",
+			content: expect.stringContaining("Review the supplied code carefully."),
+		});
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("Expected a persisted skill session");
+		const journal = await Bun.file(file).text();
+		expect(journal).toContain('"clientMessageId":"intent-skill"');
+		await session.dispose();
+		const resumed = setup({ manager: await SessionManager.open(file) });
+		const found = await status(resumed.session, ["intent-resume-user", "intent-skill", "unknown-after-reopen"]);
+		expect(found.persistedClientMessageIds).toEqual(["intent-resume-user", "intent-skill"]);
+		expect(found.resolvedClientMessageIds).toEqual([]);
+		expect(found.unresolvedClientMessageIds).toEqual(["unknown-after-reopen"]);
+		await expect(resumed.session.prompt("reuse persisted identity", intent("intent-resume-user"))).rejects.toThrow(
+			"already submitted",
+		);
+		await resumed.session.prompt("continue review");
+		expectNoProviderMetadata(mock, ["intent-resume-user", "intent-skill"]);
+		expectNoProviderMetadata(resumed.mock, ["intent-resume-user", "intent-skill"]);
+	});
+
+	test("records explicit withdrawals durably, never treating a missing or merely queued ID as resolved", async () => {
+		const disk = TempDir.createSync("@client-message-withdraw-");
+		cleanup.push(async () => disk.removeSync());
+		const { session, manager } = setup({ manager: SessionManager.create(disk.path(), disk.path()) });
+		await session.followUp("duplicate", undefined, intent("intent-removed"));
+		await session.followUp("duplicate", undefined, intent("intent-survivor"));
+		expect(session.removeQueuedMessage("duplicate", "followUp")).toBe(true);
+		const found = await status(session, ["intent-removed", "intent-survivor", "never-seen"]);
+		expect(found.resolvedClientMessageIds).toEqual(["intent-removed"]);
+		expect(found.persistedClientMessageIds).toEqual([]);
+		expect(found.unresolvedClientMessageIds).toEqual(["never-seen"]);
+		expect(found.queuedMessages).toMatchObject({
+			followUp: ["duplicate"],
+			clientMessageIds: { followUp: ["intent-survivor"] },
+		});
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("Expected withdrawal to create a durable session entry");
+		await manager.flush();
+		expect(await Bun.file(file).exists()).toBe(true);
+		expect(await Bun.file(file).text()).toContain('"customType":"client-message-resolution"');
+		expect(manager.buildSessionContext().messages).toEqual([]);
+		await session.dispose();
+		const resumed = setup({
+			manager: await SessionManager.open(file, undefined, undefined, { throwIfMissing: true }),
+		});
+		const after = await status(resumed.session, ["intent-removed", "intent-survivor"]);
+		expect(after.resolvedClientMessageIds).toEqual(["intent-removed"]);
+		expect(after.unresolvedClientMessageIds).toEqual(["intent-survivor"]);
+		await expect(resumed.session.followUp("reuse withdrawal", undefined, intent("intent-removed"))).rejects.toThrow(
+			"already resolved",
+		);
+	});
+
+	test("resolves identity-drop, identity-withdrawal, editor-pop and clear through their distinct removal paths", async () => {
+		const { session } = setup();
+		let dropped: readonly AgentMessage[] = [];
+		await session.followUp("drop by identity", undefined, {
+			...intent("intent-drop"),
+			onPromptQueued: messages => {
+				dropped = messages;
+			},
+		});
+		await session.followUp("pop me", undefined, intent("intent-pop"));
+		session.dropQueuedMessages(dropped);
+		let withdrawn: readonly AgentMessage[] = [];
+		await session.followUp("withdraw by identity", undefined, {
+			...intent("intent-withdraw"),
+			onPromptQueued: messages => {
+				withdrawn = messages;
+			},
+		});
+		expect(session.withdrawQueuedMessage(withdrawn[withdrawn.length - 1])).toBe(true);
+		expect(session.popLastQueuedMessage()).toMatchObject({ text: "pop me" });
+		await session.followUp("clear me", undefined, intent("intent-clear"));
+		session.clearQueue();
+		const found = await status(session, ["intent-drop", "intent-pop", "intent-withdraw", "intent-clear"]);
+		expect(found.resolvedClientMessageIds).toEqual(["intent-drop", "intent-pop", "intent-withdraw", "intent-clear"]);
+		expect(found.unresolvedClientMessageIds).toEqual([]);
+		expect(found.messages).toEqual([]);
+	});
+
+	test("queries actual state during streaming without consuming queues or starting another turn", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const { session, mock } = setup({
+			responses: [
+				async () => {
+					entered.resolve();
+					await release.promise;
+					return { content: ["done"] };
+				},
+			],
+		});
+		const running = session.prompt("long request", intent("intent-stream"));
+		try {
+			await withTimeout(entered.promise, 5_000, "Provider did not start");
+			await session.followUp("wait for turn", undefined, intent("intent-waiting"));
+			const messages = [...session.messages];
+			const queue = session.getQueuedMessages();
+			const found = await withTimeout(
+				status(session, ["intent-stream", "intent-waiting", "unknown"]),
+				1_000,
+				"Status waited for the active turn",
+			);
+			expect(found.messages).toMatchObject([{ clientMessageId: "intent-stream", message: { role: "user" } }]);
+			expect<unknown>(found.messages[0]?.message).toBe(messages.find(message => message.role === "user"));
+			expect(found.queuedMessages).toEqual(queue);
+			expect(found.unresolvedClientMessageIds).toEqual(["unknown"]);
+			expect(session.messages).toEqual(messages);
+			expect(session.getQueuedMessages()).toEqual(queue);
+			expect(session.isStreaming).toBe(true);
+			expect(mock.calls).toHaveLength(1);
+		} finally {
+			release.resolve();
+			await running;
+			await session.waitForIdle();
+		}
+	});
+
+	test("rejects reuse of queued and resolved intent IDs instead of correlating a second input", async () => {
+		const { session } = setup();
+		await session.followUp("original", undefined, intent("intent-once"));
+		await expect(session.followUp("different input", undefined, intent("intent-once"))).rejects.toThrow(
+			"already submitted",
+		);
+		expect(session.getQueuedMessages()).toMatchObject({ followUp: ["original"] });
+		expect(session.removeQueuedMessage("original", "followUp")).toBe(true);
+		await expect(session.prompt("resubmit withdrawn input", intent("intent-once"))).rejects.toThrow(
+			"already submitted",
+		);
+		const found = await status(session, ["intent-once"]);
+		expect(found.resolvedClientMessageIds).toEqual(["intent-once"]);
+		expect(found.messages).toEqual([]);
+	});
+
+	test("reserves an idle prompt's ID synchronously before asynchronous preparation", async () => {
+		const { session } = setup();
+		const first = session.prompt("first input", intent("intent-admitting"));
+		await expect(session.followUp("second input", undefined, intent("intent-admitting"))).rejects.toThrow(
+			"already submitted",
+		);
+		await first;
+		await expect(session.prompt("third input", intent("intent-admitting"))).rejects.toThrow("already submitted");
+		expect((await status(session, ["intent-admitting"])).messages).toMatchObject([
+			{
+				clientMessageId: "intent-admitting",
+				message: { role: "user", content: [{ type: "text", text: "first input" }] },
+			},
+		]);
+	});
+
+	test("bounds combined native message payloads without truncating persisted representations", async () => {
+		const { session } = setup();
+		const padding = " ".repeat(6 * 1024 * 1024);
+		await session.prompt(`${padding}first`, intent("intent-large-a"));
+		await session.prompt(`${padding}second`, intent("intent-large-b"));
+		await session.prompt(`${padding}third`, intent("intent-large-c"));
+		const found = await status(session, ["intent-large-a", "intent-large-b", "intent-large-c"]);
+		expect(found.messages.map(item => item.clientMessageId)).toEqual(["intent-large-a", "intent-large-b"]);
+		expect(Buffer.byteLength(JSON.stringify(found.messages), "utf8")).toBeLessThan(16 * 1024 * 1024);
+		expect<unknown>(found.messages[0]?.message).toBe(session.messages.find(message => message.role === "user"));
+		expect(found.persistedClientMessageIds).toEqual(["intent-large-a", "intent-large-b", "intent-large-c"]);
+		expect(found.resolvedClientMessageIds).toEqual([]);
+		expect(found.unresolvedClientMessageIds).toEqual([]);
+	});
+
+	test("leaves an oversized nonpersisted native representation unresolved rather than shrinking or resolving it", async () => {
+		const { session } = setup();
+		const options = intent("intent-large-ephemeral");
+		await session.promptCustomMessage(
+			{
+				customType: VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+				content: `${" ".repeat(16 * 1024 * 1024)}ephemeral context`,
+				display: false,
+				attribution: "user",
+			},
+			options,
+		);
+		const native = session.messages.find(
+			message => message.role === "custom" && message.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+		);
+		expect(native).toBeDefined();
+		expect(Buffer.byteLength(JSON.stringify(native), "utf8")).toBeGreaterThan(16 * 1024 * 1024);
+		const found = await status(session, ["intent-large-ephemeral"]);
+		expect(found.messages).toEqual([]);
+		expect(found.persistedClientMessageIds).toEqual([]);
+		expect(found.resolvedClientMessageIds).toEqual([]);
+		expect(found.unresolvedClientMessageIds).toEqual(["intent-large-ephemeral"]);
+	});
+
+	test("surfaces ordinary persistence failure instead of advertising an unconfirmed persisted ID", async () => {
+		const { session, manager } = setup();
+		await session.prompt("persist this", intent("intent-flush-failure"));
+		vi.spyOn(manager, "flush").mockRejectedValueOnce(new Error("disk write failed"));
+		await expect(status(session, ["intent-flush-failure"])).rejects.toThrow("disk write failed");
+	});
+});

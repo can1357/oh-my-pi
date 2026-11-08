@@ -14,6 +14,7 @@ import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { ClientMessageStatus } from "../../session/agent-session-types";
 import type { CacheWarmingMode } from "../../session/cache-warmer";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { SessionLeaseReport } from "../../session/session-storage";
@@ -737,8 +738,13 @@ export class RpcClient {
 	 * use onEvent() to receive streaming events and onPromptResult() to observe its
 	 * completion under that id.
 	 */
-	async prompt(message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp"): Promise<string> {
-		const response = await this.#send({ type: "prompt", message, images, streamingBehavior });
+	async prompt(
+		message: string,
+		images?: ImageContent[],
+		streamingBehavior?: "steer" | "followUp",
+		clientMessageId?: string,
+	): Promise<string> {
+		const response = await this.#send({ type: "prompt", message, images, streamingBehavior, clientMessageId });
 		this.#getData(response);
 		return response.id ?? "";
 	}
@@ -746,15 +752,15 @@ export class RpcClient {
 	/**
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
-	async steer(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "steer", message, images });
+	async steer(message: string, images?: ImageContent[], clientMessageId?: string): Promise<void> {
+		await this.#send({ type: "steer", message, images, clientMessageId });
 	}
 
 	/**
 	 * Queue a follow-up message to be processed after the agent finishes.
 	 */
-	async followUp(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "follow_up", message, images });
+	async followUp(message: string, images?: ImageContent[], clientMessageId?: string): Promise<void> {
+		await this.#send({ type: "follow_up", message, images, clientMessageId });
 	}
 
 	/**
@@ -785,8 +791,13 @@ export class RpcClient {
 	/**
 	 * Abort current operation and immediately start a new turn with the given message.
 	 */
-	async abortAndPrompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "abort_and_prompt", message, images });
+	async abortAndPrompt(message: string, images?: ImageContent[], clientMessageId?: string): Promise<void> {
+		await this.#send({ type: "abort_and_prompt", message, images, clientMessageId });
+	}
+
+	/** Selective read-only reconciliation, including during an active stream. */
+	async getClientMessageStatus(clientMessageIds: string[]): Promise<ClientMessageStatus> {
+		return this.#getData(await this.#send({ type: "get_client_message_status", clientMessageIds }));
 	}
 
 	/**

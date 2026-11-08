@@ -113,6 +113,8 @@ export interface SessionEntryBase {
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Local client intent metadata; never included in provider context. */
+	clientMessageId?: string;
 }
 
 /** Usage from a model call that does not belong in the conversation transcript. */
@@ -343,6 +345,8 @@ export interface ModeChangeEntry extends SessionEntryBase {
  */
 export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	type: "custom_message";
+	/** Local client intent metadata for expanded skill/custom prompts. */
+	clientMessageId?: string;
 	customType: string;
 	content: string | (TextContent | ImageContent)[];
 	details?: T;

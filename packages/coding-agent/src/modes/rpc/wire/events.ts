@@ -40,14 +40,24 @@ export const eventDefs = {
 	},
 	TurnStartEvent: { type: "'turn_start'" },
 	TurnEndEvent: { type: "'turn_end'", message: "AgentMessage", toolResults: "ToolResultMessage[]" },
-	MessageStartEvent: { type: "'message_start'", message: "AgentMessage", "messageId?": MESSAGE_ID },
+	MessageStartEvent: {
+		type: "'message_start'",
+		message: "AgentMessage",
+		"messageId?": MESSAGE_ID,
+		"clientMessageId?": "string",
+	},
 	MessageUpdateEvent: {
 		type: "'message_update'",
 		message: "AgentMessage",
 		assistantMessageEvent: "AssistantMessageEvent",
 		"messageId?": MESSAGE_ID,
 	},
-	MessageEndEvent: { type: "'message_end'", message: "AgentMessage", "messageId?": MESSAGE_ID },
+	MessageEndEvent: {
+		type: "'message_end'",
+		message: "AgentMessage",
+		"messageId?": MESSAGE_ID,
+		"clientMessageId?": "string",
+	},
 	ToolExecutionStartEvent: {
 		type: "'tool_execution_start'",
 		toolCallId: "string",
@@ -183,6 +193,7 @@ export const eventDefs = {
 			type: "'queue_update'",
 			steering: "string[]",
 			followUp: "string[]",
+			"clientMessageIds?": "QueuedClientMessageIds",
 			liveSteered: absentAs(
 				doc(
 					"number.integer",

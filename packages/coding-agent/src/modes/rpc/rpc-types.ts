@@ -20,7 +20,7 @@ import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { SessionLeaseReport } from "../../session/session-storage";
-import type { RestoredQueuedMessage } from "../../session/agent-session-types";
+import type { ClientMessageStatus, RestoredQueuedMessage } from "../../session/agent-session-types";
 import type { CacheWarmingMode } from "../../session/cache-warmer";
 import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { UsageLimitState } from "../../session/usage-limit";
@@ -50,19 +50,27 @@ export type RpcCommand =
 	| { id?: string; type: "negotiate_protocol"; protocolVersion: number }
 
 	// Prompting
-	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
-	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
-	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
+	| {
+			id?: string;
+			type: "prompt";
+			message: string;
+			images?: ImageContent[];
+			streamingBehavior?: "steer" | "followUp";
+			clientMessageId?: string;
+	  }
+	| { id?: string; type: "steer"; message: string; images?: ImageContent[]; clientMessageId?: string }
+	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[]; clientMessageId?: string }
 	| { id?: string; type: "remove_queued_message"; message: string; queue: "steering" | "followUp" }
 	| { id?: string; type: "promote_queued_message"; message: string }
 	| { id?: string; type: "abort" }
-	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
+	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[]; clientMessageId?: string }
 	| { id?: string; type: "abort_and_restore_queue" }
 	| { id?: string; type: "new_session"; parentSession?: string }
 	| { id?: string; type: "open_session"; sessionDir: string; provider?: string; modelId?: string }
 
 	// State
 	| { id?: string; type: "get_state" }
+	| { id?: string; type: "get_client_message_status"; clientMessageIds: string[] }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
 	| { id?: string; type: "set_slow_mode"; enabled: boolean }
 	| {
@@ -171,6 +179,7 @@ export type RpcCommand =
 // ============================================================================
 
 export interface RpcSessionState {
+	supportsClientMessageIds?: true;
 	model?: Model;
 	thinkingLevel: ThinkingLevel | undefined;
 	isStreaming: boolean;
@@ -207,7 +216,12 @@ export interface RpcSessionState {
 	 *  (and the `queue_update` event) instead of tracking chips independently.
 	 *  `liveSteered` counts the leading `steering` entries already sent into the
 	 *  streaming response; `remove_queued_message` cannot reach them. */
-	queuedMessages: { steering: string[]; followUp: string[]; liveSteered: number };
+	queuedMessages: {
+		steering: string[];
+		followUp: string[];
+		liveSteered: number;
+		clientMessageIds?: { steering: (string | null)[]; followUp: (string | null)[] };
+	};
 	todoPhases: TodoPhase[];
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];
@@ -463,6 +477,7 @@ export type RpcResponse =
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
+	| { id?: string; type: "response"; command: "get_client_message_status"; success: true; data: ClientMessageStatus }
 	| {
 			id?: string;
 			type: "response";

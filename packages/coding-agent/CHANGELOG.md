@@ -8,6 +8,10 @@
 - `/new` and switching sessions now start tools fresh: `conflict://` ids, already-reported diagnostics and repeat-read counts no longer carry over from the previous conversation, for the main agent and advisors alike
 - `/annotate session` now opens the same fullscreen message picker as `/copy` in classic terminals and Tern ([#19145](https://github.com/can1357/oh-my-pi/pull/19145) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 
+### Added
+
+- RPC hosts can correlate submitted intents across native messages, queues, skill expansion and session reloads with optional `clientMessageId` metadata and read-only `get_client_message_status` reconciliation, without sending client IDs to providers ([#18668](https://github.com/can1357/oh-my-pi/pull/18668) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
