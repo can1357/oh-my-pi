@@ -647,11 +647,11 @@ impl LastBg {
 /// A background job whose pid is still to be settled, kept by the kernel
 /// ([`super::Kernel::bangs`]) for the vproc that may settle it. The first
 /// command that vproc dispatches decides: the external spawned as the job's
-/// lone command (or `exec`'d) makes the job known by that program's OS pid
-/// ([`Job::os_pid`], `$!`); anything else (a builtin, a native task, a
-/// subshell or pipeline, a non-`exec` external in a compound body, the
-/// vproc's end) leaves its virtual pid. Readers of the pid (`$!`, `jobs
-/// -l`/`-p`/`-x`) wait for the decision.
+/// lone command (or `exec`'d, or a pipeline's last stage's) makes the job
+/// known by that program's OS pid ([`Job::os_pid`], `$!`); anything else
+/// (a builtin, a native task, a subshell, a non-`exec` external in a
+/// compound body, the vproc's end) leaves its virtual pid. Readers of the
+/// pid (`$!`, `jobs -l`/`-p`/`-x`) wait for the decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bang {
 	/// The vproc that decides: the job's own, or the subshell a callout of
@@ -730,6 +730,9 @@ pub enum BangStage {
 	/// `nohup`); unless it does, the alias settles virtual when the host
 	/// steps the shell again.
 	Callout,
+	/// The job's body is a pipeline: its last stage, once started, decides
+	/// as a job body of its own would (`$!` names the last process).
+	Pipeline,
 }
 
 /// A running coprocess: its vproc, the variable naming it and the shell's
