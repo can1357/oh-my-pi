@@ -1,3 +1,4 @@
+import type { SherpaArchiveSpec } from "../speech/sherpa-model-files";
 import type { TinyModelDtype } from "../tiny/dtype";
 
 /**
@@ -9,27 +10,43 @@ import type { TinyModelDtype } from "../tiny/dtype";
 export interface TtsLocalVoiceSpec {
 	id: string;
 	label: string;
+	/** sherpa-onnx speaker id; absent for the kokoro-js runtime, which takes the id directly. */
+	sid?: number;
 }
 
-/**
- * A local (on-device, ONNX) text-to-speech model the worker can load. `repo` is
- * the Hugging Face model id loaded through `kokoro-js`
- * (`KokoroTTS.from_pretrained`), which runs on the same `@huggingface/transformers`
- * + `onnxruntime` runtime as the rest of the tiny-model stack and bundles the
- * misaki/espeak phonemizer Kokoro needs. `dtype` is the default ONNX precision
- * (overridable via `providers.tinyModelDtype`/`PI_TINY_DTYPE`).
- */
-export interface TtsLocalModelSpec {
+interface TtsLocalModelBase {
 	key: string;
+	/** Hugging Face repo id or archive cache key. */
 	repo: string;
-	dtype: TinyModelDtype;
-	/** PCM sample rate the model emits; fallback only — the worker uses the value RawAudio reports. */
+	/** PCM sample rate the model emits; fallback only — the worker uses the value the runtime reports. */
 	sampleRate: number;
 	label: string;
 	description: string;
+	/** Approximate on-disk download size for the shipped weights (UI hint). */
+	sizeHint: string;
 	/** First entry is the model's default voice. */
 	voices: readonly TtsLocalVoiceSpec[];
 }
+
+/** A Kokoro-82M ONNX export loaded through `kokoro-js`. */
+export interface KokoroJsTtsLocalModelSpec extends TtsLocalModelBase {
+	engine: "kokoro-js";
+	/** Default ONNX precision (overridable via `providers.tinyModelDtype`/`PI_TINY_DTYPE`). */
+	dtype: TinyModelDtype;
+}
+
+/** A sherpa-onnx Kokoro export loaded through the native `OfflineTts` API. */
+export interface SherpaTtsLocalModelSpec extends TtsLocalModelBase {
+	engine: "sherpa";
+	/** Release archive downloaded into the shared tiny-model cache. */
+	archive: SherpaArchiveSpec;
+	/** Required files relative to the extracted model root. */
+	files: Record<string, string>;
+	/** Required directories relative to the extracted model root. */
+	directories?: readonly string[];
+}
+
+export type TtsLocalModelSpec = KokoroJsTtsLocalModelSpec | SherpaTtsLocalModelSpec;
 
 /**
  * Curated Kokoro-82M voice catalog. Kokoro ships ~28 voices; we surface the
@@ -52,39 +69,85 @@ export const KOKORO_VOICES: readonly TtsLocalVoiceSpec[] = [
 	{ id: "bm_fable", label: "Fable (British male)" },
 ] as const;
 
+/**
+ * Curated Chinese voices from Kokoro-82M v1.1-zh. The full sherpa export has 100
+ * Chinese speakers; this list covers common female and male voices while keeping
+ * the settings picker navigable. `sid` values come from the model's speaker
+ * table and are stable for the v1.1-zh export.
+ */
+export const KOKORO_ZH_VOICES: readonly TtsLocalVoiceSpec[] = [
+	{ id: "zf_001", label: "Chinese female (zf_001)", sid: 3 },
+	{ id: "zf_002", label: "Chinese female (zf_002)", sid: 4 },
+	{ id: "zf_003", label: "Chinese female (zf_003)", sid: 5 },
+	{ id: "zf_004", label: "Chinese female (zf_004)", sid: 6 },
+	{ id: "zf_005", label: "Chinese female (zf_005)", sid: 7 },
+	{ id: "zf_017", label: "Chinese female (zf_017)", sid: 11 },
+	{ id: "zm_010", label: "Chinese male (zm_010)", sid: 59 },
+	{ id: "zm_011", label: "Chinese male (zm_011)", sid: 60 },
+	{ id: "zm_012", label: "Chinese male (zm_012)", sid: 61 },
+	{ id: "zm_013", label: "Chinese male (zm_013)", sid: 62 },
+	{ id: "zm_014", label: "Chinese male (zm_014)", sid: 63 },
+	{ id: "zm_015", label: "Chinese male (zm_015)", sid: 64 },
+] as const;
+
 /** Default voice within the default model — Kokoro's flagship grade-A voice. */
 export const DEFAULT_TTS_VOICE = "af_heart";
 
 /**
- * Local TTS model registry. Kokoro-82M is the on-device SoTA tiny TTS (tops the
- * TTS Arena leaderboard); the `onnx-community` ONNX export runs through
- * `kokoro-js` on the shared transformers.js/onnxruntime worker. q8 keeps the
- * weights ~100 MB and CPU inference fast while preserving quality. One model
- * spans every voice/accent — language selection is a voice choice, not a
- * separate download.
+ * Local TTS model registry. `kokoro` is the original English-only Kokoro-82M
+ * runtime; `kokoro-zh` is the official sherpa-onnx Kokoro-82M v1.1-zh export,
+ * which handles Chinese and English inside the native sherpa runtime.
  */
 export const TTS_LOCAL_MODELS = [
 	{
 		key: "kokoro",
+		engine: "kokoro-js",
 		repo: "onnx-community/Kokoro-82M-v1.0-ONNX",
 		dtype: "q8",
 		sampleRate: 24_000,
 		label: "Kokoro-82M",
 		description: "Kokoro-82M neural TTS — SoTA on-device quality, multi-voice, fully local",
+		sizeHint: "~100 MB",
 		voices: KOKORO_VOICES,
+	},
+	{
+		key: "kokoro-zh",
+		engine: "sherpa",
+		repo: "kokoro-int8-multi-lang-v1_1",
+		archive: {
+			url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2",
+		},
+		files: {
+			model: "model.int8.onnx",
+			voices: "voices.bin",
+			tokens: "tokens.txt",
+			usLexicon: "lexicon-us-en.txt",
+			zhLexicon: "lexicon-zh.txt",
+		},
+		directories: ["espeak-ng-data"],
+		sampleRate: 24_000,
+		label: "Kokoro-82M v1.1 (Chinese/English)",
+		description:
+			"Kokoro-82M v1.1-zh, 103 voices, Chinese and English with punctuation, int8 sherpa-onnx. Fully local.",
+		sizeHint: "~200 MB",
+		voices: KOKORO_ZH_VOICES,
 	},
 ] as const satisfies readonly TtsLocalModelSpec[];
 
 export type TtsLocalModelKey = (typeof TTS_LOCAL_MODELS)[number]["key"];
 
-/** Voice options for the `tts.localVoice` setting picker (default model's catalog). */
-export const TTS_LOCAL_VOICE_OPTIONS = KOKORO_VOICES.map(voice => ({
-	value: voice.id,
-	label: voice.label,
-})) as ReadonlyArray<{ value: string; label: string }>;
+const seenVoiceIds: Record<string, true> = {};
+/** Voice options for the `tts.localVoice` picker across every local model. */
+export const TTS_LOCAL_VOICE_OPTIONS = TTS_LOCAL_MODELS.flatMap(model =>
+	model.voices.flatMap(voice => {
+		if (seenVoiceIds[voice.id]) return [];
+		seenVoiceIds[voice.id] = true;
+		return [{ value: voice.id, label: voice.label }];
+	}),
+) as ReadonlyArray<{ value: string; label: string }>;
 
-/** Accepted `tts.localVoice` values (default model's catalog) for schema validation. */
-export const TTS_LOCAL_VOICE_VALUES = KOKORO_VOICES.map(voice => voice.id) as readonly string[];
+/** Accepted `tts.localVoice` values across every local model for schema validation. */
+export const TTS_LOCAL_VOICE_VALUES = TTS_LOCAL_VOICE_OPTIONS.map(voice => voice.value) as readonly string[];
 
 export function getTtsLocalModelSpec(key: string): TtsLocalModelSpec | undefined {
 	return TTS_LOCAL_MODELS.find(model => model.key === key);
@@ -94,7 +157,7 @@ export function isTtsLocalModelKey(value: string): value is TtsLocalModelKey {
 	return getTtsLocalModelSpec(value) !== undefined;
 }
 
-/** Resolve a model key (or the default) to its Hugging Face repo id. */
+/** Resolve a model key (or the default) to its Hugging Face repo id or archive cache key. */
 export function resolveTtsRepo(modelKey: string | undefined): string {
 	const fallbackKey = TTS_LOCAL_MODELS[0].key;
 	const spec = (modelKey && getTtsLocalModelSpec(modelKey)) || getTtsLocalModelSpec(fallbackKey);
@@ -105,7 +168,7 @@ export function resolveTtsRepo(modelKey: string | undefined): string {
 /**
  * Resolve a requested voice id to a concrete voice the model supports, falling
  * back to the model's default voice (first entry) when the id is unknown or the
- * legacy `"default"` sentinel. The returned id is always a valid Kokoro voice.
+ * legacy `"default"` sentinel.
  */
 export function resolveTtsVoice(modelKey: string | undefined, voice: string | undefined): string {
 	const spec = (modelKey && getTtsLocalModelSpec(modelKey)) || getTtsLocalModelSpec(TTS_LOCAL_MODELS[0].key);
@@ -113,6 +176,17 @@ export function resolveTtsVoice(modelKey: string | undefined, voice: string | un
 	if (!spec || !voice) return fallback;
 	const match = spec.voices.find(v => v.id === voice);
 	return match ? match.id : fallback;
+}
+
+/** Resolve a sherpa voice id to its speaker id. */
+export function resolveTtsSpeakerId(modelKey: string | undefined, voice: string | undefined): number {
+	const spec = (modelKey && getTtsLocalModelSpec(modelKey)) || getTtsLocalModelSpec(TTS_LOCAL_MODELS[0].key);
+	const resolved = resolveTtsVoice(modelKey, voice);
+	const match = spec?.voices.find(v => v.id === resolved);
+	if (match?.sid === undefined) {
+		throw new Error(`Voice ${resolved} has no sherpa speaker id for model ${spec?.key ?? modelKey}`);
+	}
+	return match.sid;
 }
 
 /** Kokoro's native speaking rate; also the value used when no speed is configured. */

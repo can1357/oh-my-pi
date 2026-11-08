@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `local/kokoro-zh` sherpa-onnx Kokoro-82M v1.1-zh TTS seed row.
+
 ### Fixed
 
 - Fixed model catalog pricing and output-limit metadata for Mistral alias IDs, including the Mistral Vibe CLI default model, by applying the metadata of their aliased models.

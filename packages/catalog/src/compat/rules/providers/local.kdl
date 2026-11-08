@@ -12,6 +12,13 @@ provider "local" {
 			limits
 			supports-tools #false
 		}
+		model "kokoro-zh" name="Kokoro-82M v1.1 (Chinese/English)" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 		model "parakeet-tdt-0.6b-v3" name="Parakeet TDT 0.6B v3" {
 			reasoning #false
 			input "text"
@@ -105,7 +112,7 @@ provider "local" {
 		}
 	}
 
-	models "kokoro" {
+	models "kokoro" "kokoro-zh" {
 		kind "tts"
 	}
 	models "parakeet-tdt-0.6b-v3" "nemotron-streaming-en-0.6b" "whisper-*" {
