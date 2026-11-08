@@ -61,6 +61,7 @@
 - Eval `wait()` progress rows for agents spawned by one `task` call show each agent's own tool count, context, cost and activity instead of the first agent's ([#18393](https://github.com/can1357/oh-my-pi/issues/18393))
 - In the Pseudo shell visualization, an `&&` chain keeps its `and` rows while it runs and after it finishes, instead of switching to literal ` && ` rows and a raw-bash tail when the output minimizer runs it one command at a time ([#18408](https://github.com/can1357/oh-my-pi/issues/18408))
 - Autoresearch `update_notes` calls can now append an idea with only `append_idea`, without passing a replacement `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
+- A session resumed after an idle shake, prune, image drop, rewind, branch switch or tree navigation now sends the same history the previous process sent, so the provider prompt cache keeps hitting instead of missing from the eval-state snapshot that rewrite added ([#18414](https://github.com/can1357/oh-my-pi/pull/18414) by [@materemias](https://github.com/materemias))
 
 ## [18.18.0] - 2026-11-07
 
