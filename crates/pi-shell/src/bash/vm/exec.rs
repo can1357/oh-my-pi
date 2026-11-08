@@ -2174,7 +2174,9 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
 			// failure status); a nested shell (depth 0) is its own `-c` shell.
-			let command = super::subshell_depth(vp) == 0
+			// zsh exits 1 from any of them (`errflag` ends `loop` with 1).
+			let command = vp.mode.dialect() != Dialect::Zsh
+				&& super::subshell_depth(vp) == 0
 				&& matches!(
 					state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
 					Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"

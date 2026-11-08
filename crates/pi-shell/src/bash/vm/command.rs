@@ -3057,7 +3057,9 @@ pub enum FpFound {
 }
 
 /// zsh `getfpfunc`: the first regular file `name` in `dirs` (relative to
-/// `cwd`), answered through `ask`.
+/// `cwd`), answered through `ask`. The search's `stat`s are asked in
+/// stretches ([`Probe::StatAll`], each up to the first file it finds), not
+/// one probe per path, each of which would restart the asking builtin.
 ///
 /// # Errors
 /// What `ask` fails with (a probe in flight).
@@ -3067,6 +3069,35 @@ pub fn getfpfunc<E>(
 	name: &[u8],
 	dirs: &[BString],
 ) -> Result<FpFound, E> {
+	use super::builtins::zsh_zcompile::fpath_stat_paths;
+	let paths: Vec<BString> = dirs
+		.iter()
+		.flat_map(|d| fpath_stat_paths(cwd, d, name))
+		.collect();
+	let mut known: std::collections::HashMap<BString, Option<crate::bash::fs::Stat>> =
+		std::collections::HashMap::new();
+	// `paths[..asked]` are in `known`.
+	let mut asked = 0;
+	// A `stat` of the search is answered from the stretches; one past them
+	// asks for the next stretch. Reads go to `ask`.
+	let mut ask = |p: Probe| {
+		let Probe::Stat { path, follow: true } = &p else {
+			return ask(p);
+		};
+		if !known.contains_key(path)
+			&& paths[asked..].contains(path)
+			&& let ProbeResult::Stats(stats) = ask(Probe::StatAll { paths: paths[asked..].to_vec() })?
+		{
+			for (q, st) in paths[asked..].iter().zip(&stats) {
+				known.insert(q.clone(), *st);
+			}
+			asked += stats.len().max(1);
+		}
+		match known.get(path) {
+			Some(st) => Ok(ProbeResult::Stat(*st)),
+			None => ask(p),
+		}
+	};
 	for dir in dirs {
 		let mut rel = BString::from(dir.as_slice());
 		if !rel.is_empty() {
@@ -3081,7 +3112,9 @@ pub fn getfpfunc<E>(
 		if !regular {
 			// zsh loads a definition from word code alone (`DIR.zwc`,
 			// `DIR/NAME.zwc`, a digest in `$fpath`).
-			if let Some(dump) = super::builtins::zsh_zcompile::fpath_dump::<E>(ask, cwd, dir, name)? {
+			if let Some(dump) =
+				super::builtins::zsh_zcompile::fpath_dump::<E>(&mut ask, cwd, dir, name)?
+			{
 				return Ok(FpFound::Dump(dump));
 			}
 			continue;

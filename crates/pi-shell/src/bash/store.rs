@@ -655,6 +655,29 @@ impl AssocArray {
 		}
 	}
 
+	/// Insert `key` at position `at` of the entries (clamped to their
+	/// length), the entries after it moving down one; a key already there
+	/// takes `value` in its place instead. Costs a move of the later
+	/// entries and an update of their indices, no rehashing.
+	pub fn insert_at(&mut self, at: usize, key: BString, value: BString) {
+		if let Some(dst) = self.get_mut(&key) {
+			*dst = value;
+			return;
+		}
+		let data = &mut *self.0;
+		let at = at.min(data.entries.len());
+		for i in &mut data.index {
+			if *i >= at {
+				*i += 1;
+			}
+		}
+		let hash = data.hasher.hash_one(key.as_slice());
+		data.entries.insert(at, (key, value));
+		data
+			.index
+			.insert_unique(hash, at, |&i| data.hasher.hash_one(data.entries[i].0.as_slice()));
+	}
+
 	/// Remove one key without changing the relative order of other entries.
 	pub fn remove(&mut self, key: &[u8]) {
 		if let Some(i) = self.position(key) {
@@ -1223,6 +1246,10 @@ pub enum Change<'a> {
 	/// new element when absent. Shape, ordering and attributes follow
 	/// [`Change::SetElem`]; existing value buffers are reused.
 	AppendElem(Key<'a>, Elem<'a>, &'a BStr),
+	/// Insert a key absent from an existing associative array at position
+	/// `.1` of its entries (zsh keeps its hash table's iteration order); a
+	/// key already there takes the value in its place instead.
+	InsertElem(Key<'a>, usize, &'a BStr, &'a BStr),
 	/// Remove one element of an existing array variable (absent: no
 	/// effect); the others keep their order.
 	DelElem(Key<'a>, Elem<'a>),
