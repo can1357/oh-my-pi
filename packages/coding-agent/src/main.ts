@@ -480,8 +480,7 @@ export async function submitInteractiveInput(
 			};
 			input.dispatched = await session.promptCustomMessage(message, { streamingBehavior });
 		} else if (input.resume) {
-			// No queue intent: the streaming queue only carries user messages, so a
-			// continue shortcut while busy is rejected rather than queued as one.
+			// No queue intent: a continue shortcut interrupts a running turn instead.
 			await session.resume();
 		} else if (isKnownSkillCommand(skillHost, input.text)) {
 			// Resubmitted skill text must dispatch through the skill path, or the

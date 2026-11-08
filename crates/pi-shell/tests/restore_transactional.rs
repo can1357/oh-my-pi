@@ -295,7 +295,7 @@ fn finish(
 
 fn sweep(drop_frames: bool, frameless: bool, permanent: bool) {
 	let image = image_for(frameless);
-	let opts = RestoreOpts { drop_frames };
+	let opts = RestoreOpts { drop_frames, ..RestoreOpts::default() };
 	let expected = expected_report(&image, drop_frames, frameless);
 	let mut baseline = RefusingStore {
 		inner: MemStore::from_bytes(&image.bytes).unwrap(),
@@ -541,7 +541,7 @@ impl pi_shell::bash::Host for SignalHost {
 
 fn signal_refusal(drop_frames: bool, frameless: bool) {
 	let image = image_for(frameless);
-	let opts = RestoreOpts { drop_frames };
+	let opts = RestoreOpts { drop_frames, ..RestoreOpts::default() };
 	let mut store = RefusingStore {
 		inner: MemStore::from_bytes(&image.bytes).unwrap(),
 		..RefusingStore::default()

@@ -1391,7 +1391,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#abortInProgress = false;
 	/** Forced sends still unwinding, including while their pending agent_end is flushed. */
 	#forcedQueuedMessageDeliveryCount = 0;
-	/** In-flight {@link abort} calls; each settles after scheduling its stranded-queue drain, which {@link waitForIdle} must observe. */
+	/** In-flight {@link abort} calls (and {@link resume} interrupt handoffs); each settles after scheduling the turn that follows, which {@link waitForIdle} must observe. */
 	#abortUnwinds = new Set<Promise<void>>();
 	/** Submissions accepted by prompt()/promptCustomMessage()/sendCustomMessage() that have not
 	 *  yet dispatched a turn, queued, or bailed. Preprocessing (manual-compaction wait, slash
@@ -8621,17 +8621,45 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Resume the agent for the operator's `.`/`c` continue shortcut. A prompt the
-	 * model has not answered yet (an Esc before any output) runs again as is: a
-	 * continue directive would add nothing. Otherwise the hidden manual-continue
-	 * directive asks the model to pick its work back up. A conversation with
-	 * neither a user turn nor a compaction/branch summary of earlier ones cannot
-	 * be continued.
+	 * Resume the agent for the operator's `.`/`c` continue shortcut. A running turn
+	 * is interrupted first, as Esc would, so the continuation starts from the
+	 * current state (e.g. a model picked mid-turn); input queued behind that turn
+	 * continues the run in place of the directive. A prompt the model has not
+	 * answered yet (an interrupt before any output) runs again as is: a continue
+	 * directive would add nothing. Otherwise the hidden manual-continue directive
+	 * asks the model to pick its work back up. A conversation with neither a user
+	 * turn nor a compaction/branch summary of earlier ones cannot be continued.
 	 *
-	 * @throws {AgentBusyError} while a turn runs.
+	 * @throws {AgentBusyError} when another turn claims the session between the interrupt and the continuation.
 	 * @throws {Error} when there is no conversation to resume.
 	 */
 	async resume(): Promise<void> {
+		if (!this.isStreaming) return this.#resumeIdle();
+		// waitForIdle() reads a pending unwind as busy. Hold one from the interrupt
+		// until the continuation is live, so a host driving this session to a result
+		// (the subagent executor) never mistakes the gap for the end of the run.
+		const handoff = Promise.withResolvers<void>();
+		this.#abortUnwinds.add(handoff.promise);
+		const release = (): void => {
+			if (this.#abortUnwinds.delete(handoff.promise)) handoff.resolve();
+		};
+		try {
+			const queued = this.hasInterruptibleInput;
+			await this.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: queued });
+			// Interrupt-and-send: the abort's own drain resumes the run with the queued input.
+			if (queued) return;
+			await this.#resumeIdle(() => void this.#waitForPromptDispatchLive().then(release));
+		} finally {
+			release();
+		}
+	}
+
+	/**
+	 * {@link resume} on an idle session. `onAdmitted` fires once the directive
+	 * prompt claims the session; the bare resume schedules its continuation
+	 * before returning.
+	 */
+	async #resumeIdle(onAdmitted?: () => void): Promise<void> {
 		const prompt = this.#recovery.prepareResume();
 		if (!prompt) {
 			// A handoff or full compaction can leave only the summary: it carries the
@@ -8649,6 +8677,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				synthetic: true,
 				userInitiated: true,
 				expandPromptTemplates: false,
+				onPromptAdmitted: onAdmitted,
 			});
 			return;
 		}

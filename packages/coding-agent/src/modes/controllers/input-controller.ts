@@ -1127,12 +1127,21 @@ export class InputController {
 			if (!text && !hasPendingImages) return;
 
 			// Continue shortcuts: "." or "c" resume the agent without a visible user
-			// message (see AgentSession.resume). During a /guided-goal interview "c" is
-			// a plausible answer (e.g. option C), so it is sent as a normal reply there.
+			// message, interrupting a running turn (see AgentSession.resume). During a
+			// /guided-goal interview "c" is a plausible answer (e.g. option C), so it is
+			// sent as a normal reply there.
 			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
 				if (this.ctx.onInputCallback) {
 					this.ctx.editor.clearDraft();
 					this.ctx.onInputCallback({ text, cancelled: false, started: true, resume: true });
+				} else if (this.ctx.session.isStreaming) {
+					// The input loop is parked on the running turn's prompt; resume here.
+					this.ctx.editor.clearDraft();
+					try {
+						await this.ctx.session.resume();
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
 				}
 				return;
 			}

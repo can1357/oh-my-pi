@@ -1,6 +1,6 @@
 //! Current-identity images come from independent writers. Original generations
-//! remain unchanged as old-IR refusal controls. Each generation records its
-//! writer source and product tree in a provenance manifest.
+//! remain unchanged as old-IR and old-build refusal controls. Each generation
+//! records its writer source and product tree in a provenance manifest.
 
 use bstr::BStr;
 use pi_shell::{
@@ -15,19 +15,19 @@ use pi_shell::{
 use serde::{Deserialize, Serialize};
 
 const BASE: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/base-parent-wait.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/base-parent-wait.image");
 const UNKNOWN: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/unknown-root-kept.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/unknown-root-kept.image");
 const UNKNOWN_RECORD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/unknown-root-kept.record");
+	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/unknown-root-kept.record");
 const UNKNOWN_CHILD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/unknown-subshell-kept.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/unknown-subshell-kept.image");
 const UNKNOWN_CHILD_RECORD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/unknown-subshell-kept.record");
+	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/unknown-subshell-kept.record");
 const NEWER: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/newer-parent-wait.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/newer-parent-wait.image");
 const FOREIGN: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/foreign-parent-wait.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/foreign-parent-wait.image");
 
 fn records(store: &mut MemStore) -> Vec<Vec<u8>> {
 	let mut records = Vec::new();
@@ -115,6 +115,7 @@ fn refuse_before_records(bytes: &[u8], frames_version: bool) {
 		records_readable: false,
 	};
 	let before = store.store.to_bytes();
+	let epoch = store.epoch();
 	let result = Shell::restore(
 		&engine,
 		&mut Cx { host: &mut host, store: &mut store },
@@ -131,12 +132,14 @@ fn refuse_before_records(bytes: &[u8], frames_version: bool) {
 		before == store.store.to_bytes()
 	);
 	assert_eq!(store.store.to_bytes(), before, "refusal consumed persisted execution");
+	assert_eq!(store.epoch(), epoch, "refusal changed the store epoch");
 	assert_eq!(store.writes, 0, "refusal attempted a store write");
 	assert_eq!(store.reads, 0, "incompatibility must precede every record read: {error:?}");
 	if frames_version {
-		let named = format!("{error:?}");
 		assert!(
-			named.contains("FramesVersion") && named.contains("4294967295"),
+			matches!(error, RestoreError::Incompatible {
+				why: Incompatibility::FramesVersion { found: u32::MAX, expected: 30 },
+			}),
 			"name the unsupported frames version, not corrupt data or a different build: {error:?}"
 		);
 	} else {
@@ -171,9 +174,10 @@ fn newer_frames_refusal_identifies_the_unsupported_wire_version() {
 	let error = result.err().expect("newer frames must not return a shell");
 	println!("error={error:?}; shell_returned=false; unchanged={}", before == store.to_bytes());
 	assert_eq!(store.to_bytes(), before);
-	let named = format!("{error:?}");
 	assert!(
-		named.contains("FramesVersion") && named.contains("4294967295"),
+		matches!(error, RestoreError::Incompatible {
+			why: Incompatibility::FramesVersion { found: u32::MAX, expected: 30 },
+		}),
 		"report which frames version is newer: {error:?}"
 	);
 }
@@ -482,4 +486,29 @@ fn original_required_codec_cores_are_refused_before_records_without_changing_the
 		include_bytes!("fixtures/format-vocabulary/owned-required-vocabulary.image"),
 		include_bytes!("fixtures/format-vocabulary/18.18/owned-required-vocabulary.image"),
 	]);
+}
+
+#[test]
+fn previous_build_cores_are_refused_before_records_without_changing_the_store() {
+	for image in [
+		include_bytes!("fixtures/frames/upstream-v30-18.18.1-parent-wait.image").as_slice(),
+		include_bytes!("fixtures/frames/upstream-v30-18.18.1-no-wait.image").as_slice(),
+		include_bytes!("fixtures/frames/foreign-v30-18.18.1-parent-wait.image").as_slice(),
+		include_bytes!("fixtures/frames/foreign-v30-18.18.1-no-wait.image").as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/base-parent-wait.image").as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/foreign-parent-wait.image")
+			.as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/owned-required.image").as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/owned-optional.image").as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/reserved-required.image").as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/unknown-root-kept.image").as_slice(),
+		include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/unknown-subshell-kept.image")
+			.as_slice(),
+	] {
+		refuse_before_records(image, false);
+	}
+	refuse_before_records(
+		include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/newer-parent-wait.image"),
+		true,
+	);
 }

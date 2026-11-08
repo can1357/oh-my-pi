@@ -12,18 +12,18 @@ use pi_shell::{
 use serde::Deserialize;
 
 const REQUIRED: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/owned-required.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/owned-required.image");
 const OPTIONAL: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/owned-optional.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/owned-optional.image");
 const RESERVED: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/reserved-required.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/reserved-required.image");
 const FRAMELESS: &[u8] = include_bytes!("fixtures/format-vocabulary/frameless-bg-pids.image");
 const FRAMELESS_MARKS: &[u8] =
 	include_bytes!("fixtures/format-vocabulary/frameless-root-marks.image");
 const READABLE: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/base-parent-wait.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/base-parent-wait.image");
 const FOREIGN: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.1-ir17/foreign-parent-wait.image");
+	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/foreign-parent-wait.image");
 
 struct RecordsUnavailable {
 	store:  MemStore,
@@ -261,6 +261,7 @@ fn assert_abandoned_root_runs(image: &[u8], reason: serde_json::Value) {
 	let (mut shell, report) =
 		Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts {
 			drop_frames: true,
+			..RestoreOpts::default()
 		})
 		.unwrap();
 	println!("explicit_abandonment={report:?}");
@@ -330,6 +331,7 @@ fn explicit_abandonment_does_not_bypass_root_store_integrity() {
 	let error =
 		Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts {
 			drop_frames: true,
+			..RestoreOpts::default()
 		})
 		.err()
 		.expect("abandoning execution must not suppress a root-store failure");

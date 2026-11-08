@@ -67,7 +67,11 @@ pub struct RestoreOpts {
 	/// which leaves persisted bytes unchanged, this consumes the Frames blob.
 	/// The report distinguishes incompatibility from requested abandonment;
 	/// root-store integrity is still checked.
-	pub drop_frames: bool,
+	pub drop_frames:   bool,
+	/// Seed `$RANDOM` from the host instead of continuing the snapshot's
+	/// sequence, as bash reseeds a forked subshell: shells restored from one
+	/// image next to each other would otherwise draw the same numbers.
+	pub reseed_random: bool,
 }
 
 /// Why execution was deliberately discarded by [`RestoreOpts::drop_frames`].

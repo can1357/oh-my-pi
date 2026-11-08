@@ -10,9 +10,12 @@
 
 - Shell snapshots now name incompatible execution formats before reading state, preserve unknown optional state while reporting its loss, and explain explicit frame abandonment without resuming discarded execution ([#18299](https://github.com/can1357/oh-my-pi/pull/18299) by [@sjawhar](https://github.com/sjawhar)).
 - Failed shell restores leave the saved execution image and all stored state unchanged, including when cleanup or signal setup is refused.
+## [18.18.2] - 2026-11-08
+
 ### Added
 
 - Added Zig syntax highlighting for fenced Zig code in Markdown.
+- Added `Shell.fork()`, a new shell whose session starts from this one's variables, functions, aliases, options, and working directory as of its last command boundary, without waiting for a command in flight.
 
 ### Fixed
 
