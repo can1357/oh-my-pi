@@ -273,6 +273,10 @@ export class RemoteModelRegistryOwner implements ModelRegistryOwner {
 		this.#remote.notify("invalidateCommandConfigs", provider);
 	}
 
+	remintCommandConfigs(provider: string): Promise<void> {
+		return this.#remote.call("remintCommandConfigs", provider);
+	}
+
 	refresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): Promise<void> {
 		return this.#remote.call("refresh", strategy, options);
 	}

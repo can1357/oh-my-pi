@@ -522,45 +522,60 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Re-mint every command-backed value this provider carries, after the
-	 * provider refused the credential one of them produced.
+	 * The provider refused the credential, so re-mint it.
 	 *
-	 * The same work {@link #invalidateProviderCommandConfigs} asks for, but
-	 * single-flighted per command (see `remintCommandConfig`): a session's
+	 * Only the provider's `apiKey` command is run here, and only through
+	 * `remintCommandConfig`, which is single-flight per command: a session's
 	 * in-flight requests share one credential, so a provider that starts
 	 * refusing it refuses them together, and invalidate-then-resolve ran the
-	 * mint once per refused request. Awaited, so the credential the retry
-	 * resolves is the re-minted one rather than whatever the cache happens to
-	 * hold when the resolve lands.
+	 * mint once per refused request. The command's other values — header
+	 * credentials, including other models' — are invalidated as before and run
+	 * again only where a request materializes them, so refreshing one model's
+	 * credential never calls another model's issuer.
+	 *
+	 * On a mirror the owner's cache is the one the retry reads, so the owner
+	 * does the re-mint and this awaits it; the mirror still drops its own
+	 * copies, which feed the headers it renders locally.
 	 */
 	async #remintProviderCommandConfigs(provider: string): Promise<void> {
-		this.#owner?.invalidateCommandConfigs(provider);
-		this.#recordMirrorChange({ kind: "invalidateCommands", provider });
-		const configs = this.#providerCommandConfigs(provider);
-		if (configs.length === 0) return;
-		await Promise.all(configs.map(config => remintCommandConfig(config)));
-	}
-
-	/** Every `!command` value `provider` carries: its apiKey plus header commands. */
-	#providerCommandConfigs(provider: string): string[] {
-		const configs = new Set<string>();
 		const apiKey = this.#customProviderApiKeys.get(provider);
-		if (isCommandConfigValue(apiKey)) configs.add(apiKey);
-		for (const config of this.#commandConfigsByProvider.get(provider) ?? []) configs.add(config);
-		for (const config of this.#runtimeCommandConfigsByProvider.get(provider) ?? []) configs.add(config);
-		return [...configs];
+		const remote = this.#owner?.remintCommandConfigs(provider);
+		// Everything but the credential being re-minted: invalidating that one
+		// would drop the shared run the concurrent refusals are meant to join.
+		this.#invalidateLocalProviderCommandConfigs(provider, apiKey);
+		this.#recordMirrorChange({ kind: "invalidateCommands", provider });
+		if (remote) {
+			invalidateCommandConfig(apiKey);
+			await remote;
+			return;
+		}
+		await remintCommandConfig(apiKey);
 	}
 
-	/** Drop only this process's cached results for `provider`'s command-backed values. */
-	#invalidateLocalProviderCommandConfigs(provider: string): void {
-		invalidateCommandConfig(this.#customProviderApiKeys.get(provider));
+	/**
+	 * Owner side of {@link ModelRegistryOwner.remintCommandConfigs}: a mirror's
+	 * request that this registry re-mint `provider`'s refused credential.
+	 */
+	remintCommandConfigs(provider: string): Promise<void> {
+		return this.#remintProviderCommandConfigs(provider);
+	}
+
+	/**
+	 * Drop only this process's cached results for `provider`'s command-backed
+	 * values, leaving `keep` — the credential a caller is re-minting — alone.
+	 */
+	#invalidateLocalProviderCommandConfigs(provider: string, keep?: string): void {
+		const drop = (config: string | undefined): void => {
+			if (config !== keep) invalidateCommandConfig(config);
+		};
+		drop(this.#customProviderApiKeys.get(provider));
 		const configs = this.#commandConfigsByProvider.get(provider);
 		if (configs) {
-			for (const config of configs) invalidateCommandConfig(config);
+			for (const config of configs) drop(config);
 		}
 		const runtimeConfigs = this.#runtimeCommandConfigsByProvider.get(provider);
 		if (!runtimeConfigs) return;
-		for (const config of runtimeConfigs) invalidateCommandConfig(config);
+		for (const config of runtimeConfigs) drop(config);
 	}
 
 	#recordRuntimeCommandConfigs(providerName: string, config: ProviderConfigInput): void {
@@ -4245,6 +4260,13 @@ export class ModelRegistry {
 export interface ModelRegistryOwner {
 	/** Drop the owner's cached `!command` results for `provider` (every provider when omitted). */
 	invalidateCommandConfigs(provider?: string): void;
+	/**
+	 * Re-mint the owner's command-backed credential for `provider` after it was
+	 * refused, and resolve once the fresh value is cached. A request, not a
+	 * notification: the owner holds the resolver that serves the retry, so the
+	 * retry must not race ahead of the value it asked for.
+	 */
+	remintCommandConfigs(provider: string): Promise<void>;
 	/** {@link ModelRegistry.refresh} on the owner. */
 	refresh(strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions): Promise<void>;
 	/** {@link ModelRegistry.refreshProvider} on the owner. */

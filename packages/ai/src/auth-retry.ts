@@ -60,9 +60,10 @@ export interface ResolvedApiKey {
 	 * had refused the one the request sent. The driver accepts this bearer even
 	 * when the mint handed back the same bytes: the request has not yet been
 	 * tried with a credential minted *after* that refusal, and no client can
-	 * tell from the bytes whether the issuer renewed it. Bounded to one extra
-	 * attempt by `AuthRetryKeyState.refreshedCurrent`, which lets the
-	 * refresh-same step run once per logical operation.
+	 * tell from the bytes whether the issuer renewed it. Bounded by
+	 * `AuthRetryKeyState.refreshedCurrent`, which lets the refresh-same step run
+	 * once per credential the operation tries: a sibling rotation clears it, so
+	 * a rotated-to credential earns its own refresh, as it did before.
 	 */
 	afterRemint?: boolean;
 	/** Non-secret request scope belonging to this bearer, replaced on account rotation. */
@@ -261,7 +262,9 @@ export function createAuthRetryKeyState(initialKey: string): AuthRetryKeyState {
  * a sibling's short block ({@link ResolvedApiKey.afterSiblingWait}), and one
  * taken after the credential was re-minted because the provider said it had
  * refused it ({@link ResolvedApiKey.afterRemint}). Each is reachable once per
- * logical operation, and {@link AUTH_RETRY_MAX_ATTEMPTS} bounds the rest.
+ * credential the operation tries — a sibling rotation clears `refreshedCurrent`
+ * and the next credential earns its own — and {@link AUTH_RETRY_MAX_ATTEMPTS}
+ * bounds the rest.
  */
 function acceptRetryKey(
 	state: AuthRetryKeyState,

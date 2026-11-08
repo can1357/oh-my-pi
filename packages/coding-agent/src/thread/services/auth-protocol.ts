@@ -361,6 +361,8 @@ export type ModelRegistryProtocol = {
 	/** Sync: subscribe `listener` to main's change batches (until the worker exits) and return the mirror's inputs. */
 	mirror: RpcMethod<[listener: (batch: WireMirrorBatch) => void], ModelRegistryMirrorWire>;
 	invalidateCommandConfigs: RpcMethod<[provider?: string], void>;
+	/** Re-mint `provider`'s refused command-backed credential here, and resolve once it is cached. */
+	remintCommandConfigs: RpcMethod<[provider: string], void>;
 	refresh: RpcMethod<[strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions], void>;
 	refreshProvider: RpcMethod<
 		[providerId: string, strategy: ModelRefreshStrategy, options?: ModelRegistryRefreshOptions],

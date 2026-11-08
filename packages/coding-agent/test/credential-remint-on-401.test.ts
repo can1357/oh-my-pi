@@ -342,4 +342,72 @@ describe("a `!command` credential the provider refuses", () => {
 		expect(fs.readFileSync(counterFile, "utf8").length).toBe(1);
 		expect(seen.length).toBe(1);
 	});
+
+	test("does not run another model's credential helper", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		const otherCounter = path.join(tempDir, "other-mints");
+		const otherToken = path.join(tempDir, "other-token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "expired-token");
+		fs.writeFileSync(otherCounter, "");
+		fs.writeFileSync(otherToken, "other-header");
+		const modelsPath = path.join(tempDir, "models.json");
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"probe-gw": {
+						baseUrl: "https://gateway.invalid/v1",
+						api: "openai-completions",
+						apiKey: mintFromFile(counterFile, tokenFile),
+						models: [
+							{ id: "gw-model", name: "GW Model" },
+							// Never selected, and its header command must stay unrun:
+							// a real one is another call to another issuer, and the
+							// refused model's recovery would wait for it.
+							{
+								id: "other-model",
+								name: "Other Model",
+								headers: { "x-other": mintFromFile(otherCounter, otherToken) },
+							},
+						],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("probe-gw", "gw-model");
+		if (!model) throw new Error("probe model missing");
+
+		const seen: string[] = [];
+		const fetchImpl: FetchImpl = async (_url, init) => {
+			const headers = (init?.headers ?? {}) as Record<string, string>;
+			const auth = headers.Authorization;
+			const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : auth;
+			seen.push(bearer ?? "<none>");
+			return bearer === "expired-token" ? gatewayRefusal() : okStream();
+		};
+
+		await registry.getApiKey(model);
+		fs.writeFileSync(tokenFile, "renewed-token");
+		const resolver = registry.resolver(model);
+		let seeded: ApiKeyResolution;
+		const first = await resolveApiKeyOnce(resolver, undefined, resolved => {
+			seeded = resolved;
+		});
+		const handle = streamSimple(model, CONTEXT, {
+			apiKey: seedApiKeyResolver(seeded ?? first, resolver),
+			fetch: fetchImpl,
+			maxTokens: 16,
+		});
+		for await (const _event of handle) {
+			// drain
+		}
+		const result = await handle.result();
+
+		expect(result.stopReason).not.toBe("error");
+		expect(seen).toEqual(["expired-token", "renewed-token"]);
+		expect(fs.readFileSync(otherCounter, "utf8").length).toBe(0);
+	});
 });

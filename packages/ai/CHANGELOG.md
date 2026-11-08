@@ -9,6 +9,7 @@
 ### Fixed
 
 - A credential re-minted because the provider said it refused the one a request sent is now tried, even when the mint hands back the same bytes; a request still gets exactly one such retry
+- A provider error's `type`, `param` and `code` keep their own labels in the error message: an absent field used to rename the ones after it, so an OpenAI rejected key (`type=invalid_request_error`, no `param`, `code=invalid_api_key`) reached every reader as `param=invalid_api_key`
 
 ## [18.18.1] - 2026-11-08
 

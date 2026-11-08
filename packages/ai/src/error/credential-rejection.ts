@@ -151,34 +151,67 @@ function endOfJsonObject(text: string, start: number): number | undefined {
 	return undefined;
 }
 
-/** Read the error class out of a JSON body embedded in the message. */
+/** How many `{` positions in one message are tried as the start of an envelope. */
+const ENVELOPE_CANDIDATES = 8;
+
+/**
+ * Read the error class out of a JSON error envelope embedded in the message.
+ *
+ * Only an envelope counts: an object with an `error` member. A provider puts
+ * JSON inside its own message text (`… failed for claims {"type":"id_token"}`),
+ * and that object must never outrank the envelope the transport rendered.
+ * Candidate `{` positions are tried in turn, so prose that is not valid JSON
+ * does not hide the body behind it, and the count is capped because each
+ * candidate costs a scan of the rest of the message.
+ */
 function readErrorClassFromJson(message: string): ErrorClass | undefined {
-	const start = message.indexOf("{");
-	if (start < 0) return undefined;
-	const end = endOfJsonObject(message, start);
-	if (end === undefined) return undefined;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(message.slice(start, end));
-	} catch {
-		return undefined;
+	let start = message.indexOf("{");
+	for (let tried = 0; start >= 0 && tried < ENVELOPE_CANDIDATES; tried++, start = message.indexOf("{", start + 1)) {
+		const end = endOfJsonObject(message, start);
+		if (end === undefined) continue;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(message.slice(start, end));
+		} catch {
+			continue;
+		}
+		if (!isRecord(parsed) || !("error" in parsed)) continue;
+		const nested = isRecord(parsed.error) ? parsed.error : undefined;
+		const type = (nested && readString(nested, "type")) ?? readString(parsed, "type");
+		const code = (nested && readString(nested, "code")) ?? readString(parsed, "code");
+		if (type === undefined && code === undefined) continue;
+		return { type, code };
 	}
-	if (!isRecord(parsed)) return undefined;
-	const nested = isRecord(parsed.error) ? parsed.error : undefined;
-	const type = (nested && readString(nested, "type")) ?? readString(parsed, "type");
-	const code = (nested && readString(nested, "code")) ?? readString(parsed, "code");
-	if (type === undefined && code === undefined) return undefined;
-	return { type, code };
+	return undefined;
 }
 
-/** `(type=… param=… code=…)`, the re-rendered form the OpenAI wires carry. */
-const RENDERED_TYPE = /\btype=([^\s)]+)/;
-const RENDERED_CODE = /\bcode=([^\s)]+)/;
+/**
+ * `(type=… param=… code=…)`, the form `formatCapturedHttpErrorParts` renders
+ * for the OpenAI wires. The last occurrence wins: a provider's own message can
+ * carry an earlier one, and the transport appends its own at the end.
+ *
+ * `param` is read as a candidate code only when no `code` is present. Before
+ * this module existed that renderer labelled fields by position after dropping
+ * the absent ones, so an OpenAI rejected key arrived as
+ * `(type=invalid_request_error param=invalid_api_key)`; the renderer is fixed,
+ * and a message rendered by an older build still classifies. Only a value in
+ * the auth table qualifies, so an ordinary `param=Authorization` says nothing.
+ */
+const RENDERED_TYPE = /\btype=([^\s)]+)/g;
+const RENDERED_PARAM = /\bparam=([^\s)]+)/g;
+const RENDERED_CODE = /\bcode=([^\s)]+)/g;
+
+function lastMatch(pattern: RegExp, message: string): string | undefined {
+	pattern.lastIndex = 0;
+	let found: string | undefined;
+	for (let match = pattern.exec(message); match !== null; match = pattern.exec(message)) found = match[1];
+	return found;
+}
 
 /** Read the error class out of the re-rendered `(type=… code=…)` suffix. */
 function readErrorClassFromRendering(message: string): ErrorClass | undefined {
-	const type = RENDERED_TYPE.exec(message)?.[1];
-	const code = RENDERED_CODE.exec(message)?.[1];
+	const type = lastMatch(RENDERED_TYPE, message);
+	const code = lastMatch(RENDERED_CODE, message) ?? lastMatch(RENDERED_PARAM, message);
 	if (type === undefined && code === undefined) return undefined;
 	return { type, code };
 }
@@ -188,6 +221,24 @@ function namesAuthFailure({ type, code }: ErrorClass): boolean {
 		(type !== undefined && AUTH_ERROR_TYPES[type.toLowerCase()] === true) ||
 		(code !== undefined && AUTH_ERROR_CODES[code.toLowerCase()] === true)
 	);
+}
+
+/**
+ * The class carried on the error object itself. `ProviderHttpError` keeps the
+ * provider's machine code there, and the Codex decoder keeps it when it
+ * reduces the message to prose.
+ *
+ * Read only to *qualify* a 401, never to disqualify one: plenty of error
+ * objects carry a `code` that has nothing to do with a credential, and
+ * withholding a re-mint on one of those is the failure this signal exists to
+ * avoid.
+ */
+function readErrorClassFromObject(error: unknown): ErrorClass | undefined {
+	if (!isRecord(error)) return undefined;
+	const type = readString(error, "type");
+	const code = readString(error, "code");
+	if (type === undefined && code === undefined) return undefined;
+	return { type, code };
 }
 
 /** The message a failure carries, from an `Error`, a string, or an assistant-message shape. */
@@ -213,6 +264,8 @@ function errorStatus(error: unknown): number | undefined {
  */
 export function credentialRejectionVerdict(error: unknown): CredentialVerdict {
 	if (errorStatus(error) !== 401) return "unclassified";
+	const onObject = readErrorClassFromObject(error);
+	if (onObject && namesAuthFailure(onObject)) return "structured";
 	const message = errorText(error);
 	if (message === undefined) return "status";
 	const errorClass = readErrorClassFromJson(message) ?? readErrorClassFromRendering(message);

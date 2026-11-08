@@ -5,6 +5,7 @@ import {
 	ProviderHttpError,
 	statesCredentialRejection,
 } from "@oh-my-pi/pi-ai/error";
+import { finalizeErrorMessage } from "@oh-my-pi/pi-ai/utils/http-inspector";
 
 /**
  * Refusals measured 2026-11-08 against Theorem's model gateway (a LiteLLM
@@ -130,6 +131,53 @@ describe("credentialRejectionVerdict", () => {
 		expect(credentialRejectionVerdict(new ProviderHttpError('404 {"detail":"Not Found"}', 404))).toBe("unclassified");
 		expect(credentialRejectionVerdict(undefined)).toBe("unclassified");
 		expect(isCredentialRejection(new ProviderHttpError("500 server error", 500))).toBe(false);
+	});
+
+	it("reads an OpenAI rejected key through the real response formatter", async () => {
+		// The path that produces the message, not a hand-written copy of it:
+		// `finalizeErrorMessage` renders the captured body, and its output is
+		// what the retry driver classifies. The renderer used to label fields by
+		// position after dropping the absent ones, so this body — type present,
+		// `param` null, code present — arrived as `param=invalid_api_key` and
+		// the reader called it "not a credential failure".
+		const payload = {
+			error: {
+				message: "Incorrect API key provided: sk-***.",
+				type: "invalid_request_error",
+				param: null,
+				code: "invalid_api_key",
+			},
+		};
+		const message = await finalizeErrorMessage(new Error("401 Incorrect API key provided: sk-***."), undefined, {
+			status: 401,
+			bodyText: JSON.stringify(payload),
+			bodyJson: payload,
+		});
+		expect(message).toContain("code=invalid_api_key");
+		expect(credentialRejectionVerdict(new ProviderHttpError(message, 401))).toBe("structured");
+	});
+
+	it("still reads a rejected key a build before the renderer fix mislabelled", () => {
+		const message = "401 Incorrect API key provided: sk-***. (type=invalid_request_error param=invalid_api_key)";
+		expect(credentialRejectionVerdict(new ProviderHttpError(message, 401))).toBe("structured");
+	});
+
+	it("prefers the transport's error class over JSON inside the provider's prose", () => {
+		const message =
+			'401 Credential validation failed for claims {"type":"id_token"} (type=auth_error param=Authorization code=401)';
+		expect(credentialRejectionVerdict(new ProviderHttpError(message, 401))).toBe("structured");
+	});
+
+	it("finds the envelope behind prose that is not JSON", () => {
+		const refusal = GATEWAY_REFUSALS["an identity token past its exp"]!;
+		const message = `401 upstream {request} rejected: ${JSON.stringify({ error: refusal })}`;
+		expect(credentialRejectionVerdict(new ProviderHttpError(message, 401))).toBe("structured");
+	});
+
+	it("reads a machine code the decoder kept on the error object", () => {
+		// Codex reduces the message to prose but keeps the code on the error.
+		const error = new ProviderHttpError("401 Unauthorized", 401, { code: "invalid_api_key" });
+		expect(credentialRejectionVerdict(error)).toBe("structured");
 	});
 
 	it("survives a body with text appended after it", () => {
