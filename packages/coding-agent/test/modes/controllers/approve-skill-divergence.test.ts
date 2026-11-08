@@ -9,7 +9,7 @@ import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-t
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
 import { loadSkillPrompt, renderSkillPromptMessage } from "../../../src/extensibility/skills";
-import type { InteractiveModeContext } from "../../../src/modes/types";
+import type { ApprovalSubmit, ApprovalSubmitOutcome, InteractiveModeContext } from "../../../src/modes/types";
 import type { Skill, SkillPromptInput } from "../../../src/extensibility/skills";
 
 afterEach(() => {
@@ -39,11 +39,11 @@ function makeHarness(harnessOptions?: { inputHook?: (text: string) => string; sk
 	const sentSkillMessages: { message: unknown; options: unknown }[] = [];
 	const steerMessages: string[] = [];
 	// buildSkillPromptMessage reads skill.filePath, so the mock points at a real SKILL.md.
-	const skillDir = join(import.meta.dir, "../../fixtures/skills/valid-skill");
+	const skillDir = join(import.meta.dir, "../../../../../.omp/skills/system-prompts");
 	const skillCommands = new Map<string, Skill>();
-	skillCommands.set("skill:test-skill", {
-		name: "test-skill",
-		description: "A test skill.",
+	skillCommands.set("skill:system-prompts", {
+		name: "system-prompts",
+		description: "Write system prompts, tool docs, and agent definitions.",
 		filePath: join(skillDir, "SKILL.md"),
 		baseDir: skillDir,
 		source: "test",
@@ -124,10 +124,12 @@ function makeHarness(harnessOptions?: { inputHook?: (text: string) => string; sk
 	const controller = new ExtensionUiController(ctx);
 	const input = new InputController(ctx, { readImage: async () => null, readText: async () => "" });
 	input.setupEditorSubmitHandler();
+	ctx.submitApprovalNote = (text: string, approval: ApprovalSubmit) => input.submitApprovalNote(text, approval);
 
 	return {
 		editor,
 		editorContainer,
+		ctx,
 		focused: () => focused,
 		setFocus,
 		controller,
@@ -234,10 +236,10 @@ describe("approve vs deny /skill: steer", () => {
 	it("APPROVE keeps the approval pending when the skill dispatch throws", async () => {
 		const h = makeHarness({ skillDispatchFails: true });
 		// Await the submit promise; the dispatch reads a real SKILL.md.
-		const original = h.editor.onSubmit!;
-		let submitted: Promise<void | boolean> | undefined;
-		h.editor.onSubmit = (text, options) => {
-			submitted = Promise.resolve(original(text, options));
+		const original = h.ctx.submitApprovalNote;
+		let submitted: Promise<ApprovalSubmitOutcome> | undefined;
+		h.ctx.submitApprovalNote = (text: string, approval: ApprovalSubmit) => {
+			submitted = Promise.resolve(original(text, approval));
 			return submitted;
 		};
 		const nowSpy = vi.spyOn(performance, "now").mockReturnValue(Number.POSITIVE_INFINITY);
