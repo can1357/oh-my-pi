@@ -6,6 +6,10 @@
 
 - Models without a delegation rule (Claude, Gemini, …) no longer get pushed to delegate: the "map unknown code via task" rule and the "Task + scout" nudges in search tool descriptions are replaced by a light suggestion to explore unfamiliar subsystems with a scout
 
+### Fixed
+
+- Isolated subagents no longer leave a `__omp_worker_daemon_broker` process behind for their checkout: omp closes its connection to that broker when it tears the worktree down, so the broker exits after its idle grace instead of living (and holding ~90 MB) until omp quits
+
 ## [18.18.2] - 2026-11-08
 
 ### Breaking Changes

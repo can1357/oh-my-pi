@@ -2,7 +2,15 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { IpcConnection } from "@oh-my-pi/pi-natives";
-import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem, toError } from "@oh-my-pi/pi-utils";
+import {
+	getGlobalDaemonRuntimeDir,
+	isEexist,
+	isEnoent,
+	logger,
+	postmortem,
+	relativePathWithinNormalizedRoot,
+	toError,
+} from "@oh-my-pi/pi-utils";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
@@ -438,6 +446,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 }
 
 const sharedClients = new Map<string, Promise<DaemonBrokerClient>>();
+const PROJECT_CLIENT_KEY = "project:";
 let cancelExitCleanup: (() => void) | undefined;
 
 function sharedDaemonClient(key: string, create: () => Promise<DaemonBrokerClient>): Promise<DaemonBrokerClient> {
@@ -466,7 +475,7 @@ export async function createDaemonBrokerClient(
 /** Get the process-shared daemon broker client for one canonical project directory. */
 export async function daemonClientForProject(projectDir: string): Promise<DaemonBrokerClient> {
 	const canonical = await canonicalProjectDir(projectDir);
-	return sharedDaemonClient(`project:${canonical}`, () => createDaemonBrokerClient(canonical));
+	return sharedDaemonClient(`${PROJECT_CLIENT_KEY}${canonical}`, () => createDaemonBrokerClient(canonical));
 }
 
 /** Get the process-shared client that leases one profile-independent, machine-global daemon broker. */
@@ -490,6 +499,28 @@ export async function closeDaemonClients(): Promise<void> {
 	for (const client of await Promise.all(pending)) client.close();
 	cancelExitCleanup?.();
 	cancelExitCleanup = undefined;
+}
+
+/**
+ * Close this process's shared broker connections for every project scope at or
+ * under `rootDir`. An isolated subagent's checkout is its own broker scope, and
+ * this process's shared connection is usually that broker's only client: left
+ * open after the run, it keeps the broker and its session daemons alive until
+ * omp exits. Closed, the broker shuts down after its idle grace unless a
+ * persistent daemon still runs.
+ */
+export async function closeDaemonClientsUnder(rootDir: string): Promise<void> {
+	const root = await canonicalProjectDir(rootDir);
+	const closing: Promise<DaemonBrokerClient>[] = [];
+	for (const [key, pending] of sharedClients) {
+		if (!key.startsWith(PROJECT_CLIENT_KEY)) continue;
+		if (relativePathWithinNormalizedRoot(root, key.slice(PROJECT_CLIENT_KEY.length)) === null) continue;
+		sharedClients.delete(key);
+		closing.push(pending);
+	}
+	for (const result of await Promise.allSettled(closing)) {
+		if (result.status === "fulfilled") result.value.close();
+	}
 }
 
 /** Exercise worker-host broker startup and authenticated RPC for distribution smoke tests. */

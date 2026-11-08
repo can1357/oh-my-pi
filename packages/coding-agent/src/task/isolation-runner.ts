@@ -22,7 +22,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { closeDaemonClientsUnder } from "../launch/client";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -489,6 +490,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	let retainWorkspace = false;
 	let baseReleasePromise: Promise<void> | undefined;
 	let cleanupPromise: Promise<void> | undefined;
+	let daemonScopePromise: Promise<void> | undefined;
 	let releasePromise: Promise<void> | undefined;
 	/** The run's IRC wake hold, released only once the run-end capture is done. */
 	let releaseIrcWakes: (() => void) | undefined;
@@ -496,9 +498,23 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		baseReleasePromise ??= opts.baseOptions.onRelease?.() ?? Promise.resolve();
 		return baseReleasePromise;
 	};
+	// The subagent's session has ended; its checkout's broker must not outlive it.
+	const releaseDaemonScope = (): Promise<void> => {
+		const dir = workspace?.dir;
+		daemonScopePromise ??= dir
+			? closeDaemonClientsUnder(dir).catch(err => {
+					logger.warn("Failed to release isolated daemon broker scope", {
+						dir,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				})
+			: Promise.resolve();
+		return daemonScopePromise;
+	};
 	const cleanupHandle = (): Promise<void> => {
 		cleanupPromise ??= (async () => {
 			await releaseBase();
+			await releaseDaemonScope();
 			if (workspace && !retainWorkspace) await workspace.cleanup();
 		})();
 		return cleanupPromise;
@@ -695,11 +711,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} finally {
 		if (
 			workspace &&
-			!retainWorkspace &&
 			!releasePromise &&
 			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
 		) {
-			if (deferredCleanup) {
+			if (retainWorkspace) {
+				await releaseDaemonScope();
+			} else if (deferredCleanup) {
 				trackLateCleanup(deferredCleanup.then(cleanupHandle), {
 					agentId: opts.agentId,
 					resource: "isolation",
