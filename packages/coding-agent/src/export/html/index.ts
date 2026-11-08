@@ -221,7 +221,11 @@ async function writeExportHtml(sessionData: SessionData, outputPath: string, opt
 	const marker = page.indexOf(SESSION_DATA_MARKER);
 
 	// Unlike `Bun.write`, a `FileSink` does not create missing parent directories.
-	await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+	const outputDir = path.dirname(outputPath);
+	// Work around Bun's Windows mkdir(".") EEXIST (oven-sh/bun#45059).
+	if (process.platform !== "win32" || outputDir !== ".") {
+		await fs.promises.mkdir(outputDir, { recursive: true });
+	}
 	const writer = Bun.file(outputPath).writer();
 	try {
 		writer.write(page.slice(0, marker));

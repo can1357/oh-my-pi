@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $ } from "bun";
 import { exportFromFile, exportSessionToHtml, type SessionData } from "../src/export/html";
 import type { SessionHeader } from "../src/session/session-entries";
 import { SessionManager } from "../src/session/session-manager";
@@ -247,6 +248,25 @@ describe("collectSubSessions", () => {
 			expect(JSON.stringify(mainOnly)).not.toContain("advisor-model");
 		});
 	}
+
+	test.skipIf(process.platform !== "win32")(
+		"exports to the current directory on Windows without mkdir '.' failing",
+		async () => {
+			const probe = path.join(import.meta.dir, "fixtures", "html-export-path-probe.ts");
+			const result = await $`${process.execPath} ${probe} ${mainFile}`
+				.cwd(root)
+				.env({ ...process.env, PI_BUNDLED: "1" })
+				.quiet()
+				.nothrow();
+			expect(result.exitCode, result.stderr.toString()).toBe(0);
+			const outputPath = path.resolve(root, result.text().trim());
+			expect(path.dirname(outputPath)).toBe(root);
+			const data = await readExportData(outputPath);
+			expect(data.header?.id).toBe("main");
+			expect(data.entries.map(entry => entry.id)).toEqual(["m1"]);
+			expect(data.leafId).toBe("m1");
+		},
+	);
 
 	test("rejects a missing input without creating session or export files", async () => {
 		const missingInput = path.join(root, "missing.jsonl");
