@@ -1,8 +1,10 @@
 # Memory Guidance
 Root: memory://root
 Rules:
+{{#if memory_summary}}
 1. Read `memory://root/memory_summary.md` first.
 2. If needed, inspect `memory://root/MEMORY.md` and `memory://root/skills/<name>/SKILL.md`.
+{{/if}}
 3. Memory: heuristics/process context; current repo files, runtime output, user instruction: factual state/final decisions.
 4. Memory changes plan → cite artifact path (e.g. `memory://root/skills/<name>/SKILL.md`) and current-repo evidence.
 5. Memory disagreement with repo state/user instruction → stale; corrected behavior, then update/regenerate memory artifacts.
