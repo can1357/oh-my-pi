@@ -57,6 +57,29 @@ async function session(content: string): Promise<string> {
 	return file;
 }
 
+/** Counts bytes read through `Bun.file().bytes()` until `restore()`; `reset()` zeroes the count. */
+function observeReads(file: string): { readonly bytes: number; reset(): void; restore(): void } {
+	const prototype: Bun.BunFile = Object.getPrototypeOf(Bun.file(file));
+	const original = prototype.bytes;
+	let bytes = 0;
+	const observer = spyOn(prototype, "bytes").mockImplementation(async function (this: Bun.BunFile) {
+		const read = await original.call(this);
+		bytes += read.length;
+		return read;
+	});
+	return {
+		get bytes() {
+			return bytes;
+		},
+		reset() {
+			bytes = 0;
+		},
+		restore() {
+			observer.mockRestore();
+		},
+	};
+}
+
 describe("incremental stats ingestion", () => {
 	for (const kind of ["message", "user", "tool", "tool-entry"] as const) {
 		const title =
@@ -185,25 +208,18 @@ describe("incremental stats ingestion", () => {
 		closeDb();
 		const tail = assistant("second");
 		await fs.appendFile(file, tail);
-		const prototype: Bun.BunFile = Object.getPrototypeOf(Bun.file(file));
-		const original = prototype.bytes;
-		let readBytes = 0;
-		const observer = spyOn(prototype, "bytes").mockImplementation(async function (this: Bun.BunFile) {
-			const bytes = await original.call(this);
-			readBytes += bytes.length;
-			return bytes;
-		});
+		const reads = observeReads(file);
 		try {
 			await syncAllSessions({ workers: 1 });
-			expect(readBytes).toBeLessThan(Buffer.byteLength(tail) + 4096);
+			expect(reads.bytes).toBeLessThan(Buffer.byteLength(tail) + 4096);
 
 			await fs.copyFile(file, `${file}.replacement`);
 			await fs.rename(`${file}.replacement`, file);
-			readBytes = 0;
+			reads.reset();
 			await syncAllSessions({ workers: 1 });
-			expect(readBytes).toBeLessThan(Buffer.byteLength(content + tail) + 4096);
+			expect(reads.bytes).toBeLessThan(Buffer.byteLength(content + tail) + 4096);
 		} finally {
-			observer.mockRestore();
+			reads.restore();
 		}
 		expect(getOverallStats().totalRequests).toBe(2);
 		expect(getOverallStats().totalPremiumRequests).toBe(2);
@@ -227,26 +243,19 @@ describe("incremental stats ingestion", () => {
 		const file = await session(content);
 		await syncAllSessions({ workers: 1 });
 
-		const prototype: Bun.BunFile = Object.getPrototypeOf(Bun.file(file));
-		const original = prototype.bytes;
-		let readBytes = 0;
-		const observer = spyOn(prototype, "bytes").mockImplementation(async function (this: Bun.BunFile) {
-			const bytes = await original.call(this);
-			readBytes += bytes.length;
-			return bytes;
-		});
+		const reads = observeReads(file);
 		try {
 			await renumberDevice(file);
 			await syncAllSessions({ workers: 1 });
-			expect(readBytes).toBe(0);
+			expect(reads.bytes).toBe(0);
 
 			const tail = assistant("second");
 			await fs.appendFile(file, tail);
 			await renumberDevice(file);
 			await syncAllSessions({ workers: 1 });
-			expect(readBytes).toBeLessThan(Buffer.byteLength(tail) + 4096);
+			expect(reads.bytes).toBeLessThan(Buffer.byteLength(tail) + 4096);
 		} finally {
-			observer.mockRestore();
+			reads.restore();
 		}
 		expect(getOverallStats().totalRequests).toBe(2);
 	});

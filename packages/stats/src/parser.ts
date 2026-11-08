@@ -554,8 +554,8 @@ async function readCheckpoint(handle: fs.FileHandle, end: number): Promise<Uint8
 
 /**
  * Whether `info` is still the file a cursor was taken from. The device number is deliberately not part of
- * this: ZFS and others renumber it across mounts and reboots while the transcript stays intact, and every
- * resume still has to pass the tail checkpoint.
+ * this: ZFS and others renumber it across mounts and reboots while the transcript stays intact; `ino` +
+ * `birthtimeMs` (plus size/mtime at call sites) identify the file.
  */
 export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
 	return state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
