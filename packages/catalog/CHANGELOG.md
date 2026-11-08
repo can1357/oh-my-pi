@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- xAI's `grok-4.20-beta-latest-reasoning`, `grok-4.20-beta-latest-non-reasoning`, and `grok-4.20-multi-agent-beta-latest` aliases now carry the grok-4.20-0309 generation's rates ($1.25 input / $0.20 cached / $2.50 output per million tokens, doubled over 200K prompt tokens) instead of the retired 4.5-generation card, and SuperGrok's `grok-4.20-multi-agent-0309` peer follows them ([#18404](https://github.com/can1357/oh-my-pi/issues/18404))
 - Fixed Mistral alias ids such as `mistral-vibe-cli-latest`, the Mistral Vibe CLI's default model, being listed with zero cost and unknown output limits; an id with no bundled row now reuses the bundled row of the model it aliases ([#18010](https://github.com/can1357/oh-my-pi/pull/18010) by [@revofusion](https://github.com/revofusion))
+- xAI's `grok-4.20-beta-latest-reasoning`, `grok-4.20-beta-latest-non-reasoning`, and `grok-4.20-multi-agent-beta-latest` aliases now carry the grok-4.20-0309 generation's rates ($1.25 input / $0.20 cached / $2.50 output per million tokens, doubled over 200K prompt tokens) instead of the retired 4.5-generation card, and SuperGrok's `grok-4.20-multi-agent-0309` peer follows them ([#18404](https://github.com/can1357/oh-my-pi/issues/18404))
 
 ## [18.18.1] - 2026-11-08
 

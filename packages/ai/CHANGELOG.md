@@ -4,10 +4,20 @@
 
 ### Added
 
+- Added `CursorExecFrameContext`: `CursorExecHandlers.read` and `write` receive `{ editMaterialization: true }` for the frames that materialize a native StrReplace or Write, and `CursorExecHandlers.editSettled` ends the live card of an edit the server completed without writing ([#18435](https://github.com/can1357/oh-my-pi/pull/18435) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 - Exported the Responses replay decision (`replaysNativeResponsesHistory`, `getReplayableNativeResponsesHistoryItems`, `replaysNativeResponsesTurn`), so callers that estimate or trim context can tell which turns a request sends as native payload items instead of rebuilding them from message content
 
+### Fixed
+
+- Fixed a rotated credential pool reporting a stale sibling key's `401 Authentication Failed` instead of the exhausted key's usage-limit error and reset time ([#17689](https://github.com/can1357/oh-my-pi/issues/17689))
+- Fixed OpenAI image edits with two or more input images failing with `400 Duplicate parameter: 'image'` ([#17701](https://github.com/can1357/oh-my-pi/issues/17701), [#17703](https://github.com/can1357/oh-my-pi/pull/17703) by [@Lynricsy](https://github.com/Lynricsy))
+- Fixed Cursor-provider reads of `xd://` devices failing with "No such tool" because the bridge appended `:raw` to the device URL ([#17743](https://github.com/can1357/oh-my-pi/pull/17743) by [@wisehead](https://github.com/wisehead))
+- Fixed an Anthropic session staying stuck on "`thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified" when a steer, reminder or new prompt followed the refused turn: the one-time retry that drops that turn's reasoning now runs there too ([#17791](https://github.com/can1357/oh-my-pi/pull/17791) by [@aramalipoor](https://github.com/aramalipoor))
+- Fixed the auth gateway silently dropping the tool namespace and developer `additional_tools` items from Codex Responses requests, so Codex turns replayed tools without them ([#17863](https://github.com/can1357/oh-my-pi/pull/17863) by [@codyw912](https://github.com/codyw912))
+- Fixed Gemini `MALFORMED_RESPONSE` finishes failing with "Unhandled stop reason" and losing the turn's token usage; they now count as transient errors on every Gemini transport ([#17976](https://github.com/can1357/oh-my-pi/pull/17976) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Fixed Cursor turns failing behind TLS-intercepting proxies that block HTTP/2; later turns start on HTTP/1 ([#17985](https://github.com/can1357/oh-my-pi/pull/17985) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ## [18.18.1] - 2026-11-08
-- Added `CursorExecFrameContext`: `CursorExecHandlers.read` and `write` receive `{ editMaterialization: true }` for the frames that materialize a native StrReplace or Write, and `CursorExecHandlers.editSettled` ends the live card of an edit the server completed without writing ([#18435](https://github.com/can1357/oh-my-pi/pull/18435) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 
 ### Fixed
 
@@ -47,15 +57,6 @@
 - Fixed reranking when Cohere-compatible responses omit the model field
 - Reranking requests now send configured model headers, including custom `Authorization`
 - Provider retries no longer retry responses explicitly marked non-retryable
-- Fixed Gemini `MALFORMED_RESPONSE` finishes failing with "Unhandled stop reason" and losing the turn's token usage; they now count as transient errors on every Gemini transport ([#17976](https://github.com/can1357/oh-my-pi/pull/17976) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-### Fixed
-
-- Fixed the auth gateway silently dropping the tool namespace and developer `additional_tools` items from Codex Responses requests, so Codex turns replayed tools without them ([#17863](https://github.com/can1357/oh-my-pi/pull/17863) by [@codyw912](https://github.com/codyw912))
-- Cursor turns over HTTP/1 (RunSSE) no longer stall for minutes after Cursor asks for many history blobs; the answers go out one BidiAppend at a time, in order
-- Cursor turns over HTTP/1 (RunSSE) survive a 502, 503 or 504 on a BidiAppend: the append is resent up to twice on the open stream, after `retry-after` (at most 5 s) or a short backoff, instead of restarting or failing the turn
-- Fixed Cursor turns over HTTP/1 stalling for minutes on long conversations ([#17983](https://github.com/can1357/oh-my-pi/pull/17983) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-- Fixed one proxy gateway error ending a Cursor turn over HTTP/1 ([#17983](https://github.com/can1357/oh-my-pi/pull/17983) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-- Fixed Cursor turns failing behind TLS-intercepting proxies that block HTTP/2; later turns start on HTTP/1 ([#17985](https://github.com/can1357/oh-my-pi/pull/17985) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
 
@@ -73,15 +74,6 @@
 
 - Fixed Factory Droid Fable requests offering Opus 5 as the refusal fallback when your organization's model policy excludes Opus 5; Claude requests now offer only fallback models your account can use, and a request served by another organization's login than the one your model list came from offers none ([#17772](https://github.com/can1357/oh-my-pi/pull/17772) by [@will-bogusz](https://github.com/will-bogusz))
 
-### Fixed
-
-- Fixed OpenAI image edits with two or more input images failing with `400 Duplicate parameter: 'image'` ([#17701](https://github.com/can1357/oh-my-pi/issues/17701), [#17703](https://github.com/can1357/oh-my-pi/pull/17703) by [@Lynricsy](https://github.com/Lynricsy))
-
-- `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
-
-### Fixed
-
-- Fixed an Anthropic session staying stuck on "`thinking` or `redacted_thinking` blocks in the latest assistant message cannot be modified" when a steer, reminder or new prompt followed the refused turn: the one-time retry that drops that turn's reasoning now runs there too ([#17791](https://github.com/can1357/oh-my-pi/pull/17791) by [@aramalipoor](https://github.com/aramalipoor))
 ## [18.15.0] - 2026-11-01
 
 ### Fixed
@@ -90,8 +82,6 @@
 - Fixed `service_tier: "ultrafast"` being dropped for OpenAI-family models on custom providers even when the model's `serviceTiers` lists it ([#17577](https://github.com/can1357/oh-my-pi/pull/17577) by [@jakehemmerle](https://github.com/jakehemmerle))
 - Fixed Google Vertex requests with Workforce Identity Federation ADC failing token refresh against the wrong endpoint ([#17447](https://github.com/can1357/oh-my-pi/issues/17447)).
 - Fixed Anthropic (and other rotating-token) OAuth accounts being signed out automatically when a background usage poll's token refresh got `invalid_grant`, including refreshes a client delegates to an auth broker; usage polling no longer disables credentials, so only a real request's refresh can do that ([#17468](https://github.com/can1357/oh-my-pi/issues/17468))
-- Kept the usage-limit reset visible when rotating to a sibling credential that fails authentication.
-- Fixed Codex conversation replay failing with an unknown `internal_chat_message_metadata_passthrough.content_token_count` parameter by omitting backend-internal response metadata from replayed input ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe)).
 
 ## [18.14.2] - 2026-10-31
 

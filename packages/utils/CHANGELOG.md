@@ -2,8 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `$otelEnv` and `withOmpOtelEnv` for reading `OTEL_*` values from omp's own `.env` files, which no longer enter `Bun.env` ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
+- `pathIsWithin()` takes `EquivalentPathOptions` for the candidate, so `{ throughMissing: true }` checks a path that does not exist yet against a symlinked root ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- `directoryExists()` and `directoryIsMissing()` accept `{ strict: true }` to propagate filesystem errors other than absent or non-directory paths ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ### Fixed
 
+- Relaxed JSON parsing now keeps `__proto__` keys as own properties instead of letting them replace the result object's prototype ([#17829](https://github.com/can1357/oh-my-pi/pull/17829) by [@xiong-wei1](https://github.com/xiong-wei1))
 - SIGHUP now prints the `[Stopped by SIGHUP]` recovery hints, so a terminal runtime that stops omp with a hangup keeps the `--resume` command on screen ([#18429](https://github.com/can1357/oh-my-pi/issues/18429), [#18460](https://github.com/can1357/oh-my-pi/pull/18460) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.0] - 2026-11-07
@@ -26,14 +33,6 @@
 - `ptree` commands with `subreaper: true` now reliably terminate all descendants on graceful shutdown.
 - `fatal()` in a worker thread now reaches the parent's `error` listeners instead of only exiting with code 1.
 - Fixed the terminal stderr guard leaking a copy of the terminal into processes spawned from native code.
-### Added
-
-- `pathIsWithin()` takes `EquivalentPathOptions` for the candidate, so `{ throughMissing: true }` checks a path that does not exist yet against a symlinked root ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-- `directoryExists()` and `directoryIsMissing()` accept `{ strict: true }` to propagate filesystem errors other than absent or non-directory paths ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-
-### Added
-
-- Added `$otelEnv` and `withOmpOtelEnv` for reading `OTEL_*` values from omp's own `.env` files, which no longer enter `Bun.env` ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
 
 ## [18.16.0] - 2026-11-02
 
@@ -46,10 +45,6 @@
 ### Changed
 
 - `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
-
-### Fixed
-
-- Relaxed JSON parsing now keeps `__proto__` keys as own properties instead of letting them replace the result object's prototype ([#17829](https://github.com/can1357/oh-my-pi/pull/17829) by [@xiong-wei1](https://github.com/xiong-wei1))
 
 ## [18.15.0] - 2026-11-01
 

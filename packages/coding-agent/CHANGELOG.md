@@ -2,40 +2,74 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `logoutCredential()` takes the `AgentSession` instead of the model registry and session id, and `InteractiveMode` and `InteractiveModeContext` no longer take `refreshScopedModelsAfterLogin`; hosts install a scope refresher with `AgentSession.setScopedModelsRefresher()` ([#17981](https://github.com/can1357/oh-my-pi/pull/17981) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ### Changed
 
 - Updated system prompts to use the ⁂ section marker
 - Agents finish tasks in fewer steps: the system prompt now asks for proportional verification (a failing test or user report counts as the reproduction), whole reads of small files without re-reading, batched independent calls, and stopping once the change is verified
-### Fixed
-- Parent-to-subagent messages now appear as IRC cards in live and Agent Hub transcripts instead of user cards exposing the model-facing envelope ([#18073](https://github.com/can1357/oh-my-pi/issues/18073))
-
-- JavaScript eval keeps its variables when an unawaited promise, such as a tool call, rejects after its cell ends, and reports late errors in the next cell's output instead of restarting the kernel ([#18223](https://github.com/can1357/oh-my-pi/pull/18223) by [@will-bogusz](https://github.com/will-bogusz))
-### Fixed
-
-- On Linux under X11, the browser guide now tells agents to use the keyboard instead of clicking in the Chrome tab you can see when you need to keep your app in front, since a click raises Chrome and sends your typing into the page ([#17940](https://github.com/can1357/oh-my-pi/pull/17940) by [@will-bogusz](https://github.com/will-bogusz))
-### Fixed
-
-- A bare argument typed after an MCP prompt command (`/server:prompt value`) now fills the prompt's first free declared argument instead of being dropped, and a name already given as `key=value` is skipped rather than swallowing a positional ([#18473](https://github.com/can1357/oh-my-pi/pull/18473) by [@tatus9](https://github.com/tatus9))
-### Fixed
-
-- The `tui.mouse` setting now says mouse capture stops wheel scrolling instead of promising that wheel scroll becomes Shift+wheel ([#18458](https://github.com/can1357/oh-my-pi/issues/18458))
-### Fixed
-
-- `read` on a URL that answers with a bot challenge (Reddit posts, Cloudflare, DataDome, PerimeterX) tries the next user agent before falling back to readers, and no longer returns the site's block page, or a reader's copy of it, as the page: an unrecovered read ends `blocked` or `failed` and names the protection ([#17904](https://github.com/can1357/oh-my-pi/pull/17904) by [@will-bogusz](https://github.com/will-bogusz))
-### Fixed
-
-- `/shake thinking` no longer claims freed context tokens for reasoning that OpenAI Responses still replays from native history ([#18476](https://github.com/can1357/oh-my-pi/issues/18476)).
-### Fixed
-
-- Browser `role/` selectors now find named sections and other implicit landmark and structural roles in Chrome and Tern, so scoped snapshots and observations can target them; a `role/` selector with anything after its name filter, such as a chained `>> role/combobox`, is refused instead of matching the outer role ([#17895](https://github.com/can1357/oh-my-pi/pull/17895) by [@will-bogusz](https://github.com/will-bogusz))
-### Fixed
-
-- Browser relay tabs report their downloads: `tab.waitForDownload()` and `tab.downloads()` return each file where Chrome saved it instead of failing with "Browser target is not found", and an open with `downloads` says the relay cannot choose Chrome's folder ([#17893](https://github.com/can1357/oh-my-pi/pull/17893) by [@will-bogusz](https://github.com/will-bogusz))
 - An isolated subagent in an ovnfs checkout starts without walking and diffing the checkout first: its patch comes from ovnfs's `diff`, and a branch commit reads its baseline from a second checkout on the same capture only when it needs one. A slot left by no earlier run is claimed with one `mkdir`. With an ovnfs daemon that serves `new.base` and `diff.binary`, 20 subagents at once get their checkouts within about 20 ms each, or 100 ms right after a file edit, instead of about 40 s; repositories with nested repos or submodules keep the previous baseline ([#18457](https://github.com/can1357/oh-my-pi/pull/18457) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
 
 ### Fixed
 
+- xAI `web_search` now limits hosted search to two turns per request to reduce unexpected X search costs ([#17676](https://github.com/can1357/oh-my-pi/issues/17676)).
+- Fixed an extension receiving `tool_execution_end` before `tool_execution_start` for the same call (or any later event before an earlier one) when an extension loaded before it handles the earlier event slowly; each extension now gets events in emission order ([#17680](https://github.com/can1357/oh-my-pi/issues/17680))
+- Extensions awaiting `pi.sendUserMessage()` now get a rejection, with the cost-cap reason when available, if the message is dropped before a turn starts ([#17679](https://github.com/can1357/oh-my-pi/issues/17679)).
+- Fixed `OTEL_*` values from omp's own `.env` files (agent dir, config root, home) being inherited by bash, PTY, eval, subagent, MCP and LSP children and visible to in-process extensions; shell-exported and project `.env` values are unchanged, and extensions that need their own OpenTelemetry settings should read them from the shell ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
+- Waiting for a supervised service to exit now returns after its log, metadata, and session-owner completion are published ([#17687](https://github.com/can1357/oh-my-pi/issues/17687)).
+- Fixed Windows daemon metadata writes being lost when `omp ps` or another reader briefly holds `meta.json` open ([#17686](https://github.com/can1357/oh-my-pi/issues/17686)).
+- Fixed coding-agent tests contacting the user's text-predict daemon and leaking interactive-host state between test files.
+- Fixed `generate_image` hiding each provider's error when every model in the image chain fails; the error now lists why each one failed ([#17701](https://github.com/can1357/oh-my-pi/issues/17701), [#17703](https://github.com/can1357/oh-my-pi/pull/17703) by [@Lynricsy](https://github.com/Lynricsy))
+- `lsp` `code_actions` now lists source actions such as Organize Imports and can apply them by title or index, for servers like typescript-language-server that return them only when asked for by kind ([#17713](https://github.com/can1357/oh-my-pi/issues/17713))
+- `/extensions` now lists and toggles extension modules from packages in the `extensions:` setting and from installed plugins, under OMP Extension Packages, instead of only modules in `.omp/extensions/` ([#17736](https://github.com/can1357/oh-my-pi/issues/17736))
+- Switching away from a model whose session holds an OpenAI remote compaction (to another provider, including `openai` ↔ `openai-codex` and Codex → Grok) no longer leaves the new model with only a placeholder summary: it reads the history behind that compaction from its first request, compacting first when its window cannot hold it ([#17747](https://github.com/can1357/oh-my-pi/pull/17747) by [@will-bogusz](https://github.com/will-bogusz))
+- Remote MCP HTTP and SSE servers now trust `NODE_EXTRA_CA_CERTS` from the agent `.env`, including certificates loaded after startup.
+- Auto-learn capture turns run the main turn's provider-context transform, snapcompact included, so a capture after a snapcompacted turn reuses its prompt cache instead of re-reading the whole conversation ([#17834](https://github.com/can1357/oh-my-pi/pull/17834) by [@STRML](https://github.com/STRML))
+- A skill that `manage_skill` or `learn` writes mid-session no longer rebuilds the system prompt, so the provider prompt cache survives; the next user prompt carries a hidden notice naming it ([#17838](https://github.com/can1357/oh-my-pi/pull/17838) by [@STRML](https://github.com/STRML))
+- Closing `/btw` history during a tool approval now returns keyboard focus to the approval prompt, so the call can still be approved or denied ([#17844](https://github.com/can1357/oh-my-pi/issues/17844)).
+- Browser relay tabs report their downloads: `tab.waitForDownload()` and `tab.downloads()` return each file where Chrome saved it instead of failing with "Browser target is not found", and an open with `downloads` says the relay cannot choose Chrome's folder ([#17893](https://github.com/can1357/oh-my-pi/pull/17893) by [@will-bogusz](https://github.com/will-bogusz))
+- Browser `role/` selectors now find named sections and other implicit landmark and structural roles in Chrome and Tern, so scoped snapshots and observations can target them; a `role/` selector with anything after its name filter, such as a chained `>> role/combobox`, is refused instead of matching the outer role ([#17895](https://github.com/can1357/oh-my-pi/pull/17895) by [@will-bogusz](https://github.com/will-bogusz))
+- Isolated `task` agents on the git-worktree (`rcopy`) backend no longer hang setup forever when `git worktree add` never exits or its output pipes stay open after it exits; setup now fails with an error after a deadline ([#17901](https://github.com/can1357/oh-my-pi/issues/17901))
+- `read` on a URL that answers with a bot challenge (Reddit posts, Cloudflare, DataDome, PerimeterX) tries the next user agent before falling back to readers, and no longer returns the site's block page, or a reader's copy of it, as the page: an unrecovered read ends `blocked` or `failed` and names the protection ([#17904](https://github.com/can1357/oh-my-pi/pull/17904) by [@will-bogusz](https://github.com/will-bogusz))
+- On Linux under X11, the browser guide now tells agents to use the keyboard instead of clicking in the Chrome tab you can see when you need to keep your app in front, since a click raises Chrome and sends your typing into the page ([#17940](https://github.com/can1357/oh-my-pi/pull/17940) by [@will-bogusz](https://github.com/will-bogusz))
+- Timed-out or aborted `read` JSON queries stop evaluating `jq` filters instead of continuing to consume CPU and memory in the background ([#17943](https://github.com/can1357/oh-my-pi/issues/17943)).
+- A user-attributed custom message that starts a turn while idle (`sendCustomMessage` / `pi.sendMessage` with `triggerTurn`) now runs `before_agent_start` like a prompt, so its system prompt applies to that turn ([#17969](https://github.com/can1357/oh-my-pi/pull/17969) by [@Delije4](https://github.com/Delije4))
+- The scoped model list (`--models` or `enabledModels`; the scoped `/models` picker and Ctrl+P) is re-resolved after `/logout`, after a model hub catalog refresh, and after an RPC `login` or `logout`, so it drops the models of a provider you signed out of and picks up models a sign-in or refresh made available ([#17981](https://github.com/can1357/oh-my-pi/pull/17981) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- A marketplace with `metadata.pluginRoot` installs `./` sources from the marketplace root and resolves bare-name sources under `pluginRoot`, as in Claude Code; a `./` source missing from the root is still tried under `pluginRoot` ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- A `mnemopi.dbPath` that starts with `~` now resolves under the home directory instead of creating a literal `~` directory in the working directory ([#17986](https://github.com/can1357/oh-my-pi/pull/17986) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Fixed Anthropic requests writing the whole cached conversation again on every turn after the date or working directory changed, in a session where an extension `context` handler adds its own message to each request (such as a status block at the end): the new date/cwd reminder moved with that message to the end of every request and took the prompt-cache breakpoint from the history; it now stays after the conversation's last turn ([#17991](https://github.com/can1357/oh-my-pi/pull/17991) by [@sjawhar](https://github.com/sjawhar))
+- Fixed standalone binaries failing to load extensions that import top-level `@oh-my-pi/pi-utils` subpaths such as `marked` ([#17994](https://github.com/can1357/oh-my-pi/pull/17994) by [@gudkovWay](https://github.com/gudkovWay))
+- The HUD jobs glance and hover card now follow wall-clock-derived widget headlines (rate/decay) instead of freezing until the next data-matching output line ([#18000](https://github.com/can1357/oh-my-pi/pull/18000) by [@ReKon64](https://github.com/ReKon64))
+- Generic remote compaction now runs `before_provider_request` payload hooks, allowing extensions to inspect or transform its summary request ([#18032](https://github.com/can1357/oh-my-pi/issues/18032)).
+- Paused agent turns now let the machine sleep once their running work reaches a safe boundary; resuming restores sleep prevention before work continues ([#18044](https://github.com/can1357/oh-my-pi/issues/18044))
+- Session switches, new sessions, forks, branches, tree navigation and context resets requested while another one is still pending (for example while omp asks whether to change directory) now run one after another. Before, overlapping switches that were refused out of order could freeze omp, leave a session other than the original one live, or put a message into the wrong transcript, and a refused switch could undo a new session started after it ([#18051](https://github.com/can1357/oh-my-pi/pull/18051) by [@sjawhar](https://github.com/sjawhar))
+- Disabling `codex` stops `.codex/config.toml` from overriding omp settings; a provider can also disable itself without applying its other settings ([#18052](https://github.com/can1357/oh-my-pi/issues/18052)) ([#18054](https://github.com/can1357/oh-my-pi/pull/18054) by [@clssck](https://github.com/clssck))
+- Parent-to-subagent messages now appear as IRC cards in live and Agent Hub transcripts instead of user cards exposing the model-facing envelope ([#18073](https://github.com/can1357/oh-my-pi/issues/18073))
+- Validated security findings now show their validation status, timestamp, and summary on `security://` finding pages, with status in findings lists ([#18084](https://github.com/can1357/oh-my-pi/issues/18084))
+- Dual-mode LSP servers (such as rust-analyzer) retain pushed build diagnostics alongside pull diagnostics, preventing rustc and clippy errors from being dropped across document edits ([#17657](https://github.com/can1357/oh-my-pi/issues/17657), [#18117](https://github.com/can1357/oh-my-pi/pull/18117) by [@harshaygadekar](https://github.com/harshaygadekar))
+- A skill created or installed while omp runs is found by `skill://<name>` in `read`, bash arguments and the other tools of the main session, instead of failing as an unknown skill until restart; a missing name rescans at most once every 2 seconds ([#18167](https://github.com/can1357/oh-my-pi/pull/18167) by [@will-bogusz](https://github.com/will-bogusz))
+- JavaScript eval keeps its variables when an unawaited promise, such as a tool call, rejects after its cell ends, and reports late errors in the next cell's output instead of restarting the kernel ([#18223](https://github.com/can1357/oh-my-pi/pull/18223) by [@will-bogusz](https://github.com/will-bogusz))
+- `lsp reload` stops the old language server when a config change supersedes one shared through the LSP mux, instead of leaving it running for 5 minutes while reporting it stopped ([#17660](https://github.com/can1357/oh-my-pi/issues/17660)) ([#18254](https://github.com/can1357/oh-my-pi/pull/18254) by [@Alex-Wengg](https://github.com/Alex-Wengg))
+- Starting omp with a prompt (`omp "…"` or `--goal`) reports `working` from the first frame instead of `idle`, so OSC 7501 supervisors such as `hc wait` no longer treat the session as finished before the prompt runs ([#18270](https://github.com/can1357/oh-my-pi/pull/18270) by [@matteoantoci](https://github.com/matteoantoci))
+- Fixed `eval` cells that spawn or wait on subagents bloating the session with multi-megabyte tool results ([#18281](https://github.com/can1357/oh-my-pi/pull/18281) by [@aleister1102](https://github.com/aleister1102))
+- Background completions after an ACP prompt ends no longer start hidden turns that reject the next prompt as busy; completions received before it ends remain visible in the current prompt ([#18342](https://github.com/can1357/oh-my-pi/pull/18342) by [@mgarmash](https://github.com/mgarmash)).
+- An eval cell that fails without anyone cancelling it (a Python kernel that exits while starting, a kernel's own startup timeout, a JavaScript cell's own `TimeoutError`) now reports the failure and its reason, such as `Python kernel init failed: Python kernel exited with code 1; its last stderr output: …`, instead of an empty cancelled result ([#18373](https://github.com/can1357/oh-my-pi/pull/18373) by [@sjawhar](https://github.com/sjawhar))
+- A JavaScript `eval` cell that is cancelled or times out now keeps the output it printed just before it was stopped, instead of losing its last lines ([#18373](https://github.com/can1357/oh-my-pi/pull/18373) by [@sjawhar](https://github.com/sjawhar))
+- A JavaScript `eval` cell whose runtime dies while one of its `tool(...)` calls is still running now reports that death, instead of handing back the success the runtime reported before it died as a completed cell ([#18373](https://github.com/can1357/oh-my-pi/pull/18373) by [@sjawhar](https://github.com/sjawhar))
+- In the bash tool's shell, a fatal expansion error (`${x?}`, `set -u`) raised while an EXIT trap is running no longer replaces the status the shell was exiting with, so `( trap ': ${nope?boom}' EXIT; exit 4 ); echo $?` prints 4 as it does in Bash 5.2 and 5.3, instead of 1 (127 at the top level) ([#18383](https://github.com/can1357/oh-my-pi/pull/18383) by [@sjawhar](https://github.com/sjawhar))
+- On models that bind thinking to the prompt prefix (e.g. Claude Opus 5.5), MCP tools a session loads mid-session no longer enter the eval description and system prompt at the next unrelated prompt rebuild (a body-only `manage_skill update`, an unchanged memory or settings refresh), which read zero cached tokens and dropped all earlier thinking; they keep arriving through the hidden notice ([#18396](https://github.com/can1357/oh-my-pi/issues/18396))
+- A session resumed after an idle shake, prune, image drop, rewind, branch switch or tree navigation now sends the same history the previous process sent, so the provider prompt cache keeps hitting instead of missing from the eval-state snapshot that rewrite added ([#18414](https://github.com/can1357/oh-my-pi/pull/18414) by [@materemias](https://github.com/materemias))
+- In the bash tool's shell, a forked `( … )` subshell now runs its EXIT trap above the function frames it was inside, as Bash does, so the trap action sees the function's positional parameters and `FUNCNAME` instead of the enclosing shell's ([#18430](https://github.com/can1357/oh-my-pi/pull/18430) by [@sjawhar](https://github.com/sjawhar))
+- Cursor's native StrReplace and Write no longer show as separate Read and Write cards beside an edit card reading "No changes were made": the edit card shows the diff it made, live and after a reload, and an edit Cursor rejects closes its card as failed ([#18435](https://github.com/can1357/oh-my-pi/pull/18435) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
+- `grep` and `glob` no longer wait past their timeout or cancellation when `ovnfs --json status` or the ovnfs daemon handshake stalls ([#18448](https://github.com/can1357/oh-my-pi/pull/18448) by [@eggpeat](https://github.com/eggpeat))
+- Stopping a `--mode json` run with SIGTERM/SIGINT no longer drops the `tool_execution_end` of a tool that finishes during shutdown, and waits for buffered stdout so the last JSON record is not truncated ([#18450](https://github.com/can1357/oh-my-pi/issues/18450)).
+- A bash command that starts with `cd /` and `&&` or `;` now runs in the filesystem root instead of the workspace ([#18456](https://github.com/can1357/oh-my-pi/pull/18456) by [@eggpeat](https://github.com/eggpeat))
 - Starting isolated subagents on Windows no longer spawns `ps` once per subagent to record its owner (about 0.2 s each under load, and the `ps` found there knows other pids); Windows owners are checked by pid, as documented ([#18457](https://github.com/can1357/oh-my-pi/pull/18457) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- Edit auto-repair checks the session cost cap before each retry and counts a failed retry's cost, so a cap reached while waiting stops the next request ([#18459](https://github.com/can1357/oh-my-pi/pull/18459) by [@eggpeat](https://github.com/eggpeat))
+- The `tui.mouse` setting now says mouse capture stops wheel scrolling instead of promising that wheel scroll becomes Shift+wheel ([#18458](https://github.com/can1357/oh-my-pi/issues/18458))
+- A bare argument typed after an MCP prompt command (`/server:prompt value`) now fills the prompt's first free declared argument instead of being dropped, and a name already given as `key=value` is skipped rather than swallowing a positional ([#18473](https://github.com/can1357/oh-my-pi/pull/18473) by [@tatus9](https://github.com/tatus9))
 - `/shake thinking` no longer claims freed context tokens for reasoning that OpenAI Responses still replays from native history, and leaves those thinking blocks in place instead: the command reports how many it kept, so the status line never claims a reduction that did not happen ([#18476](https://github.com/can1357/oh-my-pi/issues/18476)).
 
 ## [18.18.1] - 2026-11-08
@@ -43,40 +77,10 @@
 ### Breaking Changes
 
 - Rust SDK: `BashCommand` and `ReadyEvent` struct literals need `exclude_from_context: None` and `supports_bash_exclude_from_context: None` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
-### Fixed
-
-- Timed-out or aborted `read` JSON queries stop evaluating `jq` filters instead of continuing to consume CPU and memory in the background ([#17943](https://github.com/can1357/oh-my-pi/issues/17943)).
 
 ### Added
 
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
-- Fixed standalone binaries failing to load extensions that import top-level `@oh-my-pi/pi-utils` subpaths such as `marked` ([#17994](https://github.com/can1357/oh-my-pi/pull/17994) by [@gudkovWay](https://github.com/gudkovWay))
-- A skill created or installed while omp runs is found by `skill://<name>` in `read`, bash arguments and the other tools of the main session, instead of failing as an unknown skill until restart; a missing name rescans at most once every 2 seconds ([#18167](https://github.com/can1357/oh-my-pi/pull/18167) by [@will-bogusz](https://github.com/will-bogusz))
-- Thin tool images are padded to the vision model's minimum height or width instead of causing a 400 on the next turn ([#18081](https://github.com/can1357/oh-my-pi/issues/18081))
-- JSON query truncation notices now report the 50KB read budget instead of the bytes shown ([#18022](https://github.com/can1357/oh-my-pi/pull/18022) by [@eggpeat](https://github.com/eggpeat))
-- Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
-- An AST Grep capture spanning several lines shows on one `meta:` row of the result card instead of one row per line, so collapsed results no longer show its later lines and a blank line inside it no longer splits the match from its file ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- Extension shortcuts on a reserved chord spelled with a different modifier order (e.g. `ctrl+shift+p`) are now ignored like the reserved spelling ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
-- When extensions register one shortcut in different spellings (`alt+ctrl+x` and `ctrl+alt+x`, or `?` and `shift+?`), only the last one loaded is bound, as with identical spellings, instead of the first silently winning
-- Building from source works again instead of stopping at the dependency install ([#18074](https://github.com/can1357/oh-my-pi/pull/18074) by [@Maziar123](https://github.com/Maziar123))
-- Validated security findings now show their validation status, timestamp, and summary on `security://` finding pages, with status in findings lists ([#18084](https://github.com/can1357/oh-my-pi/issues/18084))
-- `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
-- Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
-- The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm
-- A running session no longer falls back to a setting's default when `config.yml` gains a value its omp version doesn't know (such as an `edit.mode` a newer omp added); it keeps the value it had, so the edit doesn't change its tools and throw away every open session's prompt cache
-- Forcing a queued message with Enter now resumes the agent even when interruption races tool completion or model preparation
-- `.`/`c` continue no longer fails with "Nothing to resume" in a session started by a `/skill:` command
-- Interrupting a Python eval cell that is waiting on a top-level `await` (Esc, a timeout, or an awaited tool call) now cancels the cell and keeps the kernel and its variables ([#18115](https://github.com/can1357/oh-my-pi/pull/18115) by [@Winston-Hsiao](https://github.com/Winston-Hsiao))
-- Apostrophes in slash-command and prompt-template arguments, such as `/fix the user's login bug` or `/fix don't break it`, now reach `$ARGUMENTS` and `$1`, `$2`, … intact instead of being stripped and merging the rest of the line into one argument ([#18008](https://github.com/can1357/oh-my-pi/issues/18008))
-- Generic remote compaction now runs `before_provider_request` payload hooks, allowing extensions to inspect or transform its summary request ([#18032](https://github.com/can1357/oh-my-pi/issues/18032)).
-- Paused agent turns now let the machine sleep once their running work reaches a safe boundary; resuming restores sleep prevention before work continues ([#18044](https://github.com/can1357/oh-my-pi/issues/18044))
-- Disabling `codex` stops `.codex/config.toml` from overriding omp settings; a provider can also disable itself without applying its other settings ([#18052](https://github.com/can1357/oh-my-pi/issues/18052)) ([#18054](https://github.com/can1357/oh-my-pi/pull/18054) by [@clssck](https://github.com/clssck))
-- Long bash output cut in the middle no longer splits a line at the `[…N ln elided…]` marker, and its "Showing lines …" notice now names the lines actually shown, ending at the output's real last line ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
-- A bash command that prints nothing and succeeds now returns `(no output, exit code 0)` instead of a bare `(no output)`, so an empty diff or search no longer reads like a failed command ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
-- Added `tui.motion` (`full` / `reduced` / `none`, also `--motion` and `PI_MOTION`), one switch over spinners, the thinking pulse, shimmer and the status-line blink/fade for many-pane or reduced-motion use; a `tui.spinnerInterval` you set still wins over the preset ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
-- Added `tui.spinnerInterval` (also `--spinner-interval` and `PI_SPINNER_INTERVAL`) to slow every spinner, the terminal title included, or pin them static with `0` ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
-- Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
-- Switching away from a model whose session holds an OpenAI remote compaction (to another provider, including `openai` ↔ `openai-codex` and Codex → Grok) no longer leaves the new model with only a placeholder summary: it reads the history behind that compaction from its first request, compacting first when its window cannot hold it ([#17747](https://github.com/can1357/oh-my-pi/pull/17747) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -87,19 +91,12 @@
 
 ### Fixed
 
-- Stopping a `--mode json` run with SIGTERM/SIGINT no longer drops the `tool_execution_end` of a tool that finishes during shutdown, and waits for buffered stdout so the last JSON record is not truncated ([#18450](https://github.com/can1357/oh-my-pi/issues/18450)).
 - A browser relay tab stays usable after a password manager's inline autofill menu opens in it; the call that opened the menu still fails once (reinstall the extension with `omp browser-relay install` and reload it) ([#16908](https://github.com/can1357/oh-my-pi/pull/16908) by [@will-bogusz](https://github.com/will-bogusz))
 - A `%%bash` cell in Python eval no longer prints its exit status (a stray `0`) after the command's output; a failing cell reports `%%bash: exit status N` on stderr instead.
 - Reusing an already running `omp stats` dashboard now exits successfully without stopping the existing server ([#18443](https://github.com/can1357/oh-my-pi/issues/18443)).
 - A function defined inside a command substitution in a here-document body (`cat <<E` / `$(f() { …; }; f)` / `E`) no longer crashes the built-in shell.
 - A Cursor tool call sent in the same batch as a native StrReplace or Write no longer runs before the edit is written, so a check right after an edit sees the new file ([#18434](https://github.com/can1357/oh-my-pi/pull/18434) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 - Pinned sessions color their pin icon with the theme accent in the status line and the band composer's title instead of taking the title's color or dim style, matching the resume picker ([#18401](https://github.com/can1357/oh-my-pi/pull/18401) by [@SuperUserA](https://github.com/SuperUserA))
-- A bash command that starts with `cd /` and `&&` or `;` now runs in the filesystem root instead of the workspace ([#18456](https://github.com/can1357/oh-my-pi/pull/18456) by [@eggpeat](https://github.com/eggpeat))
-- An eval cell that fails without anyone cancelling it (a Python kernel that exits while starting, a kernel's own startup timeout, a JavaScript cell's own `TimeoutError`) now reports the failure and its reason, such as `Python kernel init failed: Python kernel exited with code 1; its last stderr output: …`, instead of an empty cancelled result ([#18373](https://github.com/can1357/oh-my-pi/pull/18373) by [@sjawhar](https://github.com/sjawhar))
-- A JavaScript `eval` cell that is cancelled or times out now keeps the output it printed just before it was stopped, instead of losing its last lines ([#18373](https://github.com/can1357/oh-my-pi/pull/18373) by [@sjawhar](https://github.com/sjawhar))
-- A JavaScript `eval` cell whose runtime dies while one of its `tool(...)` calls is still running now reports that death, instead of handing back the success the runtime reported before it died as a completed cell ([#18373](https://github.com/can1357/oh-my-pi/pull/18373) by [@sjawhar](https://github.com/sjawhar))
-- Cursor's native StrReplace and Write no longer show as separate Read and Write cards beside an edit card reading "No changes were made": the edit card shows the diff it made, live and after a reload, and an edit Cursor rejects closes its card as failed ([#18435](https://github.com/can1357/oh-my-pi/pull/18435) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
-- Dual-mode LSP servers (such as rust-analyzer) retain pushed build diagnostics alongside pull diagnostics, preventing rustc and clippy errors from being dropped across document edits ([#17657](https://github.com/can1357/oh-my-pi/issues/17657), [#18117](https://github.com/can1357/oh-my-pi/pull/18117) by [@harshaygadekar](https://github.com/harshaygadekar))
 - An ovnfs checkout stays recoverable with `omp worktree clear` when removing it fails, or when creating it fails after the daemon may already have it, instead of being forgotten ([#18337](https://github.com/can1357/oh-my-pi/pull/18337) by [@eggpeat](https://github.com/eggpeat))
 - A `retain` call that fails midway no longer delivers part of itself to the Hindsight server while telling the model nothing was queued ([#18440](https://github.com/can1357/oh-my-pi/pull/18440) by [@eggpeat](https://github.com/eggpeat))
 - A `bash.patterns` `deny` rule now blocks a command anywhere in a `;`, `|`, `||` or `&&` line even when an earlier `prompt` rule matches another part of it, and project settings can no longer override the operator's `deny` or `prompt` patterns with `allow` ([#18349](https://github.com/can1357/oh-my-pi/pull/18349) by [@asuffield](https://github.com/asuffield))
@@ -113,10 +110,6 @@
 - Eval `wait()` progress rows for agents spawned by one `task` call show each agent's own tool count, context, cost and activity instead of the first agent's ([#18393](https://github.com/can1357/oh-my-pi/issues/18393))
 - In the Pseudo shell visualization, an `&&` chain keeps its `and` rows while it runs and after it finishes, instead of switching to literal ` && ` rows and a raw-bash tail when the output minimizer runs it one command at a time ([#18408](https://github.com/can1357/oh-my-pi/issues/18408))
 - Autoresearch `update_notes` calls can now append an idea with only `append_idea`, without passing a replacement `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
-- A session resumed after an idle shake, prune, image drop, rewind, branch switch or tree navigation now sends the same history the previous process sent, so the provider prompt cache keeps hitting instead of missing from the eval-state snapshot that rewrite added ([#18414](https://github.com/can1357/oh-my-pi/pull/18414) by [@materemias](https://github.com/materemias))
-- On models that bind thinking to the prompt prefix (e.g. Claude Opus 5.5), MCP tools a session loads mid-session no longer enter the eval description and system prompt at the next unrelated prompt rebuild (a body-only `manage_skill update`, an unchanged memory or settings refresh), which read zero cached tokens and dropped all earlier thinking; they keep arriving through the hidden notice ([#18396](https://github.com/can1357/oh-my-pi/issues/18396))
-- In the bash tool's shell, a fatal expansion error (`${x?}`, `set -u`) raised while an EXIT trap is running no longer replaces the status the shell was exiting with, so `( trap ': ${nope?boom}' EXIT; exit 4 ); echo $?` prints 4 as it does in Bash 5.2 and 5.3, instead of 1 (127 at the top level) ([#18383](https://github.com/can1357/oh-my-pi/pull/18383) by [@sjawhar](https://github.com/sjawhar))
-- In the bash tool's shell, a forked `( … )` subshell now runs its EXIT trap above the function frames it was inside, as Bash does, so the trap action sees the function's positional parameters and `FUNCNAME` instead of the enclosing shell's ([#18430](https://github.com/can1357/oh-my-pi/pull/18430) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.18.0] - 2026-11-07
 
@@ -124,12 +117,10 @@
 
 - Fixed transcript output freezing after provider restarts or switching sessions mid-stream ([#18358](https://github.com/can1357/oh-my-pi/pull/18358) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Bash tool cards for a command whose leading `cd <dir> &&` / `cd <dir>;` was hoisted into the working directory show that `cd` again above the visualized command, with the separator the model wrote, instead of dropping where it ran
-- Background completions after an ACP prompt ends no longer start hidden turns that reject the next prompt as busy; completions received before it ends remain visible in the current prompt ([#18342](https://github.com/can1357/oh-my-pi/pull/18342) by [@mgarmash](https://github.com/mgarmash)).
 - Bash commands starting with `cd <dir>; ...` now run in `<dir>` as their working directory when it exists, so its direnv environment loads and the directory shows on the tool card ([#18329](https://github.com/can1357/oh-my-pi/pull/18329) by [@harshaygadekar](https://github.com/harshaygadekar))
 - Task-file approvals show and keep the checked file target through dispatch, so retargeted symlinks cannot silently substitute another assignment; replaced files require a retry ([#18314](https://github.com/can1357/oh-my-pi/pull/18314) by [@iliaal](https://github.com/iliaal)).
 - Subagents receive task instructions with their blank lines, Markdown hard breaks, and table spacing intact, whether given inline or via `taskFile`.
 - Hindsight `retain` and `learn` memories are no longer lost when delivery fails or omp exits: they are kept on disk, retried, and delivered by the next session without duplicates ([#18176](https://github.com/can1357/oh-my-pi/pull/18176) by [@alphastorm](https://github.com/alphastorm))
-- Session switches, new sessions, forks, branches, tree navigation and context resets requested while another one is still pending (for example while omp asks whether to change directory) now run one after another. Before, overlapping switches that were refused out of order could freeze omp, leave a session other than the original one live, or put a message into the wrong transcript, and a refused switch could undo a new session started after it ([#18051](https://github.com/can1357/oh-my-pi/pull/18051) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the session crashing with `Native shell returned an invalid execution trace` when a bash command assigned a long value containing multi-byte characters such as Chinese text ([#18259](https://github.com/can1357/oh-my-pi/issues/18259))
 - `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.
 - The bash execution visualization keeps updating, and saved traces still restore, after a command handles bytes that aren't valid UTF-8 (e.g. `v=$(printf '\377')`)
@@ -150,13 +141,6 @@
 - An extension provider with `authHeader: true` keeps its cached `fetchDynamicModels` catalog when `omp models refresh` fails, instead of showing 0 models until the next successful forced refresh ([#18227](https://github.com/can1357/oh-my-pi/issues/18227))
 - A session whose request carries no titleable text of its own — an attached `@brief.md`, a greeting, a bare number — is now named once from the assistant's reading of it, instead of staying untitled until the next message that happens to be titleable (which, for an agent launched from one brief and left to run, never came) ([#18238](https://github.com/can1357/oh-my-pi/pull/18238) by [@sjawhar](https://github.com/sjawhar))
 - Prewalk no longer hands a subagent to its cheap model when the subagent messages its parent or another agent (`write agent://…`) before its first file edit ([#18322](https://github.com/can1357/oh-my-pi/pull/18322) by [@1vivy](https://github.com/1vivy))
-- Edit auto-repair checks the session cost cap before each retry and counts a failed retry's cost, so a cap reached while waiting stops the next request ([#18459](https://github.com/can1357/oh-my-pi/pull/18459) by [@eggpeat](https://github.com/eggpeat))
-- `lsp reload` stops the old language server when a config change supersedes one shared through the LSP mux, instead of leaving it running for 5 minutes while reporting it stopped ([#17660](https://github.com/can1357/oh-my-pi/issues/17660)) ([#18254](https://github.com/can1357/oh-my-pi/pull/18254) by [@Alex-Wengg](https://github.com/Alex-Wengg))
-### Fixed
-
-- Starting omp with a prompt (`omp "…"` or `--goal`) reports `working` from the first frame instead of `idle`, so OSC 7501 supervisors such as `hc wait` no longer treat the session as finished before the prompt runs ([#18270](https://github.com/can1357/oh-my-pi/pull/18270) by [@matteoantoci](https://github.com/matteoantoci))
-- `grep` and `glob` no longer wait past their timeout or cancellation when `ovnfs --json status` or the ovnfs daemon handshake stalls ([#18448](https://github.com/can1357/oh-my-pi/pull/18448) by [@eggpeat](https://github.com/eggpeat))
-- Fixed `eval` cells that spawn or wait on subagents bloating the session with multi-megabyte tool results ([#18281](https://github.com/can1357/oh-my-pi/pull/18281) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.17.0] - 2026-11-06
 
@@ -280,33 +264,6 @@
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
 
-### Fixed
-
-- Fixed Anthropic requests writing the whole cached conversation again on every turn after the date or working directory changed, in a session where an extension `context` handler adds its own message to each request (such as a status block at the end): the new date/cwd reminder moved with that message to the end of every request and took the prompt-cache breakpoint from the history; it now stays after the conversation's last turn ([#17991](https://github.com/can1357/oh-my-pi/pull/17991) by [@sjawhar](https://github.com/sjawhar))
-### Fixed
-
-- A marketplace with `metadata.pluginRoot` installs `./` sources from the marketplace root and resolves bare-name sources under `pluginRoot`, as in Claude Code; a `./` source missing from the root is still tried under `pluginRoot` ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-### Fixed
-
-- A `mnemopi.dbPath` that starts with `~` now resolves under the home directory instead of creating a literal `~` directory in the working directory ([#17986](https://github.com/can1357/oh-my-pi/pull/17986) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-### Breaking Changes
-
-- `logoutCredential()` takes the `AgentSession` instead of the model registry and session id, and `InteractiveMode` and `InteractiveModeContext` no longer take `refreshScopedModelsAfterLogin`; hosts install a scope refresher with `AgentSession.setScopedModelsRefresher()` ([#17981](https://github.com/can1357/oh-my-pi/pull/17981) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-
-### Fixed
-
-- The scoped model list (`--models` or `enabledModels`; the scoped `/models` picker and Ctrl+P) is re-resolved after `/logout`, after a model hub catalog refresh, and after an RPC `login` or `logout`, so it drops the models of a provider you signed out of and picks up models a sign-in or refresh made available ([#17981](https://github.com/can1357/oh-my-pi/pull/17981) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-- A user-attributed custom message that starts a turn while idle (`sendCustomMessage` / `pi.sendMessage` with `triggerTurn`) now runs `before_agent_start` like a prompt, so its system prompt applies to that turn ([#17969](https://github.com/can1357/oh-my-pi/pull/17969) by [@Delije4](https://github.com/Delije4))
-- Fixed Windows bash output on non-UTF-8 code pages (Korean, Chinese, Japanese, …) turning into mojibake for the rest of a command after a builtin wrote one invalid byte (`printf '\xeb'`, `cut -c` through a CJK character); the stray byte now becomes `�` on its own line, and native programs' ANSI output still decodes, including through `| head` or from `cat` of a legacy file ([#17947](https://github.com/can1357/oh-my-pi/pull/17947) by [@H4vC](https://github.com/H4vC))
-
-### Fixed
-
-- Fixed `OTEL_*` values from omp's own `.env` files (agent dir, config root, home) being inherited by bash, PTY, eval, subagent, MCP and LSP children and visible to in-process extensions; shell-exported and project `.env` values are unchanged, and extensions that need their own OpenTelemetry settings should read them from the shell ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
-
-### Fixed
-
-- Isolated `task` agents on the git-worktree (`rcopy`) backend no longer hang setup forever when `git worktree add` never exits or its output pipes stay open after it exits; setup now fails with an error after a deadline ([#17901](https://github.com/can1357/oh-my-pi/issues/17901))
-
 ## [18.16.0] - 2026-11-02
 
 ### Added
@@ -326,16 +283,12 @@
 - The subagent HUD marks each running agent with the running status glyph instead of a dot ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ### Fixed
-- Remote MCP HTTP and SSE servers now trust `NODE_EXTRA_CA_CERTS` from the agent `.env`, including certificates loaded after startup.
-- Closing `/btw` history during a tool approval now returns keyboard focus to the approval prompt, so the call can still be approved or denied ([#17844](https://github.com/can1357/oh-my-pi/issues/17844)).
 
 - Browser: `browser.close({ all: true })` from a subagent no longer closes its parent's tabs; it releases only the calling agent's tabs. Tabs now belong to the agent that opened them rather than its conversation id, so after `/new`, `/resume`, fork, or branch they are still frozen, idle-closed, released by close-all, and closed when the session ends instead of leaking ([#15975](https://github.com/can1357/oh-my-pi/issues/15975), [#16133](https://github.com/can1357/oh-my-pi/pull/16133) by [@harshaygadekar](https://github.com/harshaygadekar))
 - `lsp request` now sends `payload: "null"` as JSON null instead of substituting auto-built document params ([#17715](https://github.com/can1357/oh-my-pi/issues/17715)).
 - A prompt rejected before a turn starts because its model or credential is missing returns to the editor for retry; `.`/`c` on an empty conversation reports that there is nothing to resume ([#17828](https://github.com/can1357/oh-my-pi/issues/17828)).
 - Factory Droid requests keep attached images and snapcompact system-prompt frames when tools carry large runtime state ([#17819](https://github.com/can1357/oh-my-pi/issues/17819)).
 - `pr://<n>`, `issue://<n>`, and repo-less `github` tool calls in a checkout whose `upstream` remote is not the fork parent of `origin` now resolve to `origin` instead of the upstream project; `gh repo set-default` still wins
-- Auto-learn capture turns run the main turn's provider-context transform, snapcompact included, so a capture after a snapcompacted turn reuses its prompt cache instead of re-reading the whole conversation ([#17834](https://github.com/can1357/oh-my-pi/pull/17834) by [@STRML](https://github.com/STRML))
-- A skill that `manage_skill` or `learn` writes mid-session no longer rebuilds the system prompt, so the provider prompt cache survives; the next user prompt carries a hidden notice naming it ([#17838](https://github.com/can1357/oh-my-pi/pull/17838) by [@STRML](https://github.com/STRML))
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 - `omp --export` and `/export` no longer fail with `Error: Out of memory` on large sessions with subagent transcripts, and use far less memory: the HTML is now streamed to disk instead of built as one string ([#17741](https://github.com/can1357/oh-my-pi/issues/17741))
 - A native `security_scan` with `async.enabled` on (the default) now waits for its background `security-reviewer` workers and publishes their findings, instead of ending `partial` with 0 findings and "The scan session ended without publishing a canonical result" ([#17788](https://github.com/can1357/oh-my-pi/issues/17788))
@@ -354,14 +307,6 @@
 - `models.yml` accepts `tokenizer: cl100k` on a custom model or override ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 - Claude no longer receives the reasoning kept in a snapcompact archive whose summary an extension wrote without the reasoning legend, with or without image input, and reads that summary's own words instead of a generic one ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `~/.omp/agent/agent.db` getting corrupted (wiping stored logins) on Linux when grep, `read`, the bash tool, extensions or eval read it while omp has it open; `write` and `tts` now refuse to overwrite a database omp holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
-- The HUD jobs glance and hover card now follow wall-clock-derived widget headlines (rate/decay) instead of freezing until the next data-matching output line ([#18000](https://github.com/can1357/oh-my-pi/pull/18000) by [@ReKon64](https://github.com/ReKon64))
-
-### Fixed
-
-- Fixed `generate_image` hiding each provider's error when every model in the image chain fails; the error now lists why each one failed ([#17701](https://github.com/can1357/oh-my-pi/issues/17701), [#17703](https://github.com/can1357/oh-my-pi/pull/17703) by [@Lynricsy](https://github.com/Lynricsy))
-- `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
-- `lsp` `code_actions` now lists source actions such as Organize Imports and can apply them by title or index, for servers like typescript-language-server that return them only when asked for by kind ([#17713](https://github.com/can1357/oh-my-pi/issues/17713))
-- `/extensions` now lists and toggles extension modules from packages in the `extensions:` setting and from installed plugins, under OMP Extension Packages, instead of only modules in `.omp/extensions/` ([#17736](https://github.com/can1357/oh-my-pi/issues/17736))
 
 ## [18.15.0] - 2026-11-01
 
@@ -405,24 +350,6 @@
 - Local dictation stops live previews when the speech model repeatedly cannot keep up, so final transcripts no longer wait behind repeated previews ([#17410](https://github.com/can1357/oh-my-pi/issues/17410)).
 - ACP clients now receive `_omp/compaction/start` and `_omp/compaction/end` notifications, including failures and cancellations, without requiring an active prompt. ([#16969](https://github.com/can1357/oh-my-pi/issues/16969); [#17384](https://github.com/can1357/oh-my-pi/pull/17384) by [@SAKANA-MOONLIGHT](https://github.com/SAKANA-MOONLIGHT)).
 - Fixed `cd` (and `pushd`/`popd`/`z`) failing with `command not found: __zsh_like_cd` in agent shells when `mise activate` or `zoxide init` installed wrapper functions: the shell snapshot now keeps the underscore-prefixed helper functions those wrappers call, instead of dropping every private-looking function ([#17448](https://github.com/can1357/oh-my-pi/pull/17448) by [@KamijoToma](https://github.com/KamijoToma))
-### Fixed
-
-- Fixed Windows daemon metadata writes being lost when `omp ps` or another reader briefly holds `meta.json` open ([#17686](https://github.com/can1357/oh-my-pi/issues/17686)).
-### Fixed
-
-- Fixed coding-agent tests contacting the user's text-predict daemon and leaking interactive-host state between test files.
-### Fixed
-
-- xAI `web_search` now limits hosted search to two turns per request to reduce unexpected X search costs ([#17676](https://github.com/can1357/oh-my-pi/issues/17676)).
-### Fixed
-
-- Waiting for a supervised service to exit now returns after its log, metadata, and session-owner completion are published ([#17687](https://github.com/can1357/oh-my-pi/issues/17687)).
-### Fixed
-
-- Extensions awaiting `pi.sendUserMessage()` now get a rejection, with the cost-cap reason when available, if the message is dropped before a turn starts ([#17679](https://github.com/can1357/oh-my-pi/issues/17679)).
-### Fixed
-
-- Fixed an extension receiving `tool_execution_end` before `tool_execution_start` for the same call (or any later event before an earlier one) when an extension loaded before it handles the earlier event slowly; each extension now gets events in emission order ([#17680](https://github.com/can1357/oh-my-pi/issues/17680))
 
 ## [18.14.2] - 2026-10-31
 

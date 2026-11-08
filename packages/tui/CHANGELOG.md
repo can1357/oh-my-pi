@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ModelHubCallbacks.onCatalogRefreshed(providerId?)` is called after the model hub re-fetches a catalog; the `--models` scope it returns replaces the hub's ([#17981](https://github.com/can1357/oh-my-pi/pull/17981) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- `AskDialogPromptDraft`: an ask host's `onPrompt`/`onImagePrompt` may resolve `{ draft }` on cancel, and the dialog offers it again when the custom answer reopens; `HookEditorComponent`'s `onCancel` receives the editor's text and images ([#18211](https://github.com/can1357/oh-my-pi/issues/18211))
+
 ### Changed
 
 - Bash previews under the Nerd Font symbol preset show a single icon for `>/dev/null`, `2>/dev/null` and `&>/dev/null` instead of the `🔇 out`/`🔇 err`/`🔇 silent` labels
@@ -11,11 +16,13 @@
 - Terminals without synchronized output (macOS Terminal.app) no longer flash duplicated rows while streaming text scrolls, or blank the screen and status line when finished rows move into scrollback
 - A streaming list item no longer flickers to raw `**bold**` markup while a nested `-` bullet is being typed, and headings inside list items keep their formatting
 - Long embedded arguments in bash previews (e.g. a `grep -E` regex) wrap under their command's indent instead of leaving a blank row and losing the gutter
-### Fixed
-
+- A prompt and its Enter that were typed or written while omp was still starting now submit instead of leaving the text in the composer with the Enter turned into a newline ([#17820](https://github.com/can1357/oh-my-pi/issues/17820))
+- Rebuilt and persisted transcripts render aliased tool calls through the canonical renderer instead of a generic fallback card, matching the live path ([#17995](https://github.com/can1357/oh-my-pi/pull/17995) by [@ReKon64](https://github.com/ReKon64))
+- Debugger tool cards sanitize tabs and control characters in call arguments so rendered rows keep their measured width ([#17995](https://github.com/can1357/oh-my-pi/pull/17995) by [@ReKon64](https://github.com/ReKon64))
+- Leaving the ask dialog's Other editor without submitting keeps what you typed: reopening Other prefills that draft instead of an empty editor ([#18211](https://github.com/can1357/oh-my-pi/issues/18211))
+- Fixed LaTeX styles being lost inside nested wrappers: `\textnormal` resets bold and italic, radical indexes such as `\sqrt[n]{…}` keep the caller's style and color, optional arguments like `\xrightarrow[n]{…}` keep the active color, and `\color` no longer leaks past `\end{…}`; sized headings no longer show the ANSI codes of inline math ([#18275](https://github.com/can1357/oh-my-pi/pull/18275) by [@aleister1102](https://github.com/aleister1102))
+- Setup wizard scenes stop repainting while waiting for input in ANSI terminals ([#18328](https://github.com/can1357/oh-my-pi/issues/18328))
 - On Windows, Tern events relayed through ConPTY no longer leak into the composer as fragments like `":"ack","sf":"s:1"` when their tail arrives late ([#18465](https://github.com/can1357/oh-my-pi/pull/18465) by [@NetVar1337](https://github.com/NetVar1337)).
-### Fixed
-
 - Rex terminals render OSC 8 hyperlinks: omp detected Rex for Kitty graphics but kept its hyperlink capability off, so transcript URLs and file paths stayed plain text instead of command-clickable links ([#18467](https://github.com/can1357/oh-my-pi/pull/18467) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
 
 ## [18.18.1] - 2026-11-08
@@ -23,35 +30,6 @@
 ### Added
 
 - Grep headers syntax-highlight regex patterns, including incomplete patterns while a call streams, in terminal and native views ([#18392](https://github.com/can1357/oh-my-pi/pull/18392) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
-- Bash cards now show incremental Python-like pseudocode with a Raw toggle, same-color execution dimming, failure marks and variable values beside their latest setter; the inspector adds layers, split source and timestamp-based replay. Native hosts keep the segmented run box: the `shell` node (role `omp.tool.bash.command`) is the command segment only, and the box's ordinary `omp.tool.bash.output` segment shows the output once (the replay-cursor output while one is held). Bash cards keep a neutral background in every state, and native bash views are inline (head above, the segmented run box the only frame).
-- Added `VersionUpdate`, `WelcomeComponent.setVersionUpdate()`, and `ComposerWelcomeUpdate.versionUpdate`: the welcome banner shows background self-update progress, readiness, or failure after its version label, narrowing to the percent and then dropping it on narrow terminals
-- `newSessionThinkingLevel` and `resolveConfiguredThinkingLevel` resolve the thinking level a new session starts at on a model; `ComposerCache.writeStatus` takes `{ shared: false }` to keep a project's status out of the any-project fallback
-- Added `SettingItem.menu`: a cycling row's choices as a menu, which `SettingsList.openSubmenuFor` opens (a native settings page's popup) while Enter/Space still cycle
-- `StatusLineComponent.setSessionPinned()` / `setPinnedSessionIds()` / `isSessionPinned()` track pinned sessions; `session_name` prefixes the theme's pin icon for a pinned session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
-- `chat/transcript-presentation` resolves extension transcript presenters (`setTranscriptPresenters`, `readTranscriptPresentation`, `TranscriptPresentationState`); tool cards and read entries draw full, compact or hidden from it in both `render()` and `describe()`, while `ChatTranscriptBuilder` replays draw stock cards ([#17960](https://github.com/can1357/oh-my-pi/pull/17960) by [@materemias](https://github.com/materemias))
-- `PresentedBlock` (`chat/transcript-presentation`) applies transcript presenters to advisor, skill, late-diagnostics, execution, background-job, supervised-process, TTSR and todo-reminder blocks; `TtsrNotificationComponent.rules` reads its merged rules ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
-- `LinkBrowserComponent` (`overlays/link-browser`) replays a transcript fullscreen with extension link hint tags that each link keeps while it stays in view; `LinkHints` / `viewportLinkTargets()` (`render/link-hints`) share tag assignment (preferring the letters a label starts with) and painting with `Composer`; `ChatTranscriptBuilder` accepts `textRenderers` ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
-- Added the `cache` status-line segment, `StatusLineSession.getPromptCacheStatus`, the `icon.cacheWarm` / `icon.cacheCold` symbols, the composer's `omp.composer.cache` fact and the `promptCacheBrief` / `promptCacheDetails` text helpers ([#12677](https://github.com/can1357/oh-my-pi/issues/12677)) ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
-- Added effort-level rows to `^` model mention autocomplete: after `:`, it lists the supported levels of the top three matching models below any model ids that contain the typed text, and typing `:` reopens a closed mention popup ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
-- Added optional `AutocompleteProvider.trySyncModelMentionCompletion`, which returns a `ModelMentionCompletion`; the editor uses it to refresh a shown mention popup as you type, so Tab accepts a row for the current text ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
-- Added a shared spinner clock (`spinner-clock`: `setSpinnerInterval`, `sharedSpinnerFrame`, `spinnerTickDelay`) that every spinner and the thinking pulse follow, ticking on common boundaries so N spinners cost one frame per period; `0` pins them static with no timers ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
-- Added a frame-rate ceiling (`frame-rate`: `setMaxFps`, `minFrameIntervalMs`) honoured by the render scheduler and animation timers; frames a keystroke waits on keep 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
-- Added a decorative-motion switch (`motion-effects`: `setMotionEffects`) gating the status-line blink and brand fade, the editor's magic-keyword sweep, and native `fx` spans; a static spinner clock also stills native `spinner` nodes ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
-- `CompactTranscriptBlock` (`chrome/transcript-container`): consecutive blocks whose `isTranscriptBlockCompact()` returns true draw without blank rows between them in the terminal (scrollback included) and as one gapless entry on a native (TSP) surface. Tool cards, read groups and `PresentedBlock` report it while a presenter draws them compact, and `FramedMessageComponent` forwards it from an extension renderer's component ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
-- `AskDialogPromptDraft`: an ask host's `onPrompt`/`onImagePrompt` may resolve `{ draft }` on cancel, and the dialog offers it again when the custom answer reopens; `HookEditorComponent`'s `onCancel` receives the editor's text and images ([#18211](https://github.com/can1357/oh-my-pi/issues/18211))
-
-### Fixed
-- The `find` card marks a search its 20 s budget cut short (`timed out, V/P passages verified`), so its hits are not read as a complete result ([#18161](https://github.com/can1357/oh-my-pi/pull/18161) by [@will-bogusz](https://github.com/will-bogusz))
-- Tern's classic renderer draws inline images (table charts included) as Kitty Unicode placeholders, so text that replaces an image's cells removes the image instead of leaving a stale copy over the table while an answer streams or the pane resizes
-- The native composer's first frame shows the cached thinking level on the model chip (or effort chip) instead of the plain model icon until the session attaches
-- Clicking the popup of an enum setting with many values (Edit Mode, Session Tree Filter, Advisor Sync Backlog) on a native settings page opens its menu instead of doing nothing
-- Leaving the ask dialog's Other editor without submitting keeps what you typed: reopening Other prefills that draft instead of an empty editor ([#18211](https://github.com/can1357/oh-my-pi/issues/18211))
-- Ask notes added on successive single-select questions now start with an empty editor and stay with their respective answers ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
-- LSP references render as references even when a referenced line reads like a diagnostics summary (`"1 error(s)"`) or holds a code fence, instead of turning into a diagnostics or hover card ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-- The LSP diagnostics card lists diagnostics grouped under their file, the form the tool reports, instead of only their counts; its header counts every file's diagnostics (info and hints included) instead of only the first file's, a failed language server counts as a server failure instead of `No issues`, and a partial server failure shows as a warning instead of a clean result ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-
-- Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
-- ASCII tree branches are two columns (`|-`, `'-`) like their Unicode counterparts, so rows hanging under a branch, such as a single-file Grep's code frames, line up with its text instead of sitting one column left ([#18103](https://github.com/can1357/oh-my-pi/pull/18103) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ### Changed
 
@@ -71,13 +49,9 @@
 
 ### Fixed
 
-- Setup wizard scenes stop repainting while waiting for input in ANSI terminals ([#18328](https://github.com/can1357/oh-my-pi/issues/18328))
 - Ctrl+J from a win32-input-mode record with `VK_J` and `Uc=LF` now decodes as `ctrl+j`, so Windows Terminal / mini-term insert a newline instead of submitting ([#18253](https://github.com/can1357/oh-my-pi/pull/18253) by [@Clannad47](https://github.com/Clannad47))
 - The BTW history page (`f` on a side answer) scrolls its reader and history list with the mouse wheel, matching the other scrolling sheets ([#18303](https://github.com/can1357/oh-my-pi/pull/18303) by [@ImAlexBlock](https://github.com/ImAlexBlock))
 - The BTW history list shows the date for questions asked before today (and the year for ones from an earlier year), instead of a bare time that read as today's; a follow-up asked on a later day than its topic shows its date too ([#18210](https://github.com/can1357/oh-my-pi/pull/18210) by [@a-glapinski](https://github.com/a-glapinski))
-### Fixed
-
-- Fixed LaTeX styles being lost inside nested wrappers: `\textnormal` resets bold and italic, radical indexes such as `\sqrt[n]{…}` keep the caller's style and color, optional arguments like `\xrightarrow[n]{…}` keep the active color, and `\color` no longer leaks past `\end{…}`; sized headings no longer show the ANSI codes of inline math ([#18275](https://github.com/can1357/oh-my-pi/pull/18275) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.17.0] - 2026-11-06
 
@@ -131,9 +105,6 @@
 - The LSP diagnostics card lists diagnostics per file, counts every file, and reports server failures instead of `No issues` ([#18106](https://github.com/can1357/oh-my-pi/pull/18106) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Closing an overlay that others opened over no longer makes them return focus to it ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
 - ASCII tree branches are two columns wide (`|-`, `'-`), so child rows align like Unicode trees ([#18103](https://github.com/can1357/oh-my-pi/pull/18103) by [@JustasMasiulis](https://github.com/JustasMasiulis))
-### Added
-
-- `ModelHubCallbacks.onCatalogRefreshed(providerId?)` is called after the model hub re-fetches a catalog; the `--models` scope it returns replaces the hub's ([#17981](https://github.com/can1357/oh-my-pi/pull/17981) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
 
@@ -169,12 +140,6 @@
 - With two or more `Editor.predictions`, the ghost text follows the first one the draft is a prefix of; a typed draft that equals a shorter one keeps the ghost of a longer one. Once the buffer equals one of them with no ghost (always right after Tab, Right, or the list inserts one), a dim `⇥ N more` hint appears; press Tab to list them all, then Enter, Tab or Right to swap the whole line (never submitting) or Esc to keep it ([#17796](https://github.com/can1357/oh-my-pi/pull/17796) by [@wolfiesch](https://github.com/wolfiesch))
 - F2 now opens the rename dialog in the resume picker in Ghostty, kitty and other terminals using the kitty keyboard protocol; F1 and F4 shortcuts work there too ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
 - Added `Component.nativeTrailers()`, which lets a transcript block add native blocks of its own directly after it. Trailing blocks stay visible while the block is collapsed.
-
-### Fixed
-
-- A prompt and its Enter that were typed or written while omp was still starting now submit instead of leaving the text in the composer with the Enter turned into a newline ([#17820](https://github.com/can1357/oh-my-pi/issues/17820))
-- Rebuilt and persisted transcripts render aliased tool calls through the canonical renderer instead of a generic fallback card, matching the live path ([#17995](https://github.com/can1357/oh-my-pi/pull/17995) by [@ReKon64](https://github.com/ReKon64))
-- Debugger tool cards sanitize tabs and control characters in call arguments so rendered rows keep their measured width ([#17995](https://github.com/can1357/oh-my-pi/pull/17995) by [@ReKon64](https://github.com/ReKon64))
 
 ## [18.15.0] - 2026-11-01
 
@@ -1923,7 +1888,7 @@
 
 ### Changed
 
-- Improved native scrollback history management by introducing an optional erase-and-replay mechanism to rebuild scrollback when mutated rows (such as finalized tool blocks or collapsed transcripts) diverge. This is now gated behind the `tui.scrollbackRebuild` setting and defaults to off.
+ - Improved native scrollback history management by introducing an optional erase-and-replay mechanism to rebuild scrollback when mutated rows (such as finalized tool blocks or collapsed transcripts) diverge. This is now gated behind the `tui.scrollbackRebuild` setting and defaults to off.
 
 ### Fixed
 
@@ -2272,7 +2237,7 @@
 - Added `ctrl+j` as a second default binding for the `tui.input.newLine` action alongside `shift+enter`, so terminals that cannot emit `shift+enter` still have a newline key. On terminals with Kitty-protocol / `modifyOtherKeys` disambiguation `ctrl+j` inserts a newline while `Enter` still submits; on legacy terminals where `ctrl+j` and `Enter` are both byte-identical `LF` it submits (documented limitation). User keybinding overrides still take precedence ([#2473](https://github.com/can1357/oh-my-pi/issues/2473))
 - Added an `Editor.onLargePaste(text, lineCount)` hook, fired for a "marker-sized" paste (the point where the editor would otherwise collapse it into a `[Paste #N]` token). Returning `true` lets the host intercept the paste — e.g. to offer wrap-in-code-block / wrap-in-XML / attach-as-file choices — and suppresses the default marker (no undo state is recorded). Added `Editor.insertPaste(content)` so the host can re-insert a (possibly transformed) collapsed paste marker without re-triggering the hook.
 - Added `Editor.deleteBeforeCursor(count)`, which removes up to `count` characters immediately before the cursor on the current line (capped at the cursor column, single line, records one undo state). Hosts use it to "track back" optimistically-inserted characters — e.g. the coding-agent hold-`Space` push-to-talk gesture deleting the space-bar auto-repeat burst.
-- Added an optional `getNativeScrollbackSnapshotSafeEnd()` to the `NativeScrollbackLiveRegion` contract: a _durable_ commit boundary (D ≥ the byte-stable `commitSafeEnd`) for live rows whose current snapshot is permanent content but may still drift bytes later (a streaming markdown table re-aligning its columns). The engine commits these rows when they scroll above the window — never dropping them — but **audit-exempt** (tracked via a new byte-stable `auditRows` prefix), so a later layout change of an already-committed row freezes a stale row in history (duplication never loss) instead of re-anchoring the committed-prefix audit and spraying duplicate snapshots. Components that omit it are unchanged: `durableBoundary === byteStableBoundary` and `auditRows === committedRows`, so the ledger math is byte-identical.
+- Added an optional `getNativeScrollbackSnapshotSafeEnd()` to the `NativeScrollbackLiveRegion` contract: a *durable* commit boundary (D ≥ the byte-stable `commitSafeEnd`) for live rows whose current snapshot is permanent content but may still drift bytes later (a streaming markdown table re-aligning its columns). The engine commits these rows when they scroll above the window — never dropping them — but **audit-exempt** (tracked via a new byte-stable `auditRows` prefix), so a later layout change of an already-committed row freezes a stale row in history (duplication never loss) instead of re-anchoring the committed-prefix audit and spraying duplicate snapshots. Components that omit it are unchanged: `durableBoundary === byteStableBoundary` and `auditRows === committedRows`, so the ledger math is byte-identical.
 
 ### Fixed
 
@@ -2513,7 +2478,7 @@
 
 ### Fixed
 
-- Fixed Windows ConPTY session-resume painting the transcript with the last several rows truncated below the viewport until Alt+Tab forced a host repaint. After `sessionReplace`/`historyRebuild`/`overlayRebuild` paints that scroll-push content into native scrollback, the renderer now arms a 150 ms ConPTY settle window that coalesces spinner/blink-driven `requestRender(false)` calls into a single trailing render — Windows Terminal's viewport-follow logic no longer falls further behind the cursor on every tick of the post-paint storm. The arm also reclaims any render request queued _during_ the in-flight composition (notably `ImageBudget.endPass()` calling `requestRender()` synchronously when a frame trips the live-graphics cap): without that, the queued request sat on the standard 30 Hz throttle and fired at ~33 ms — well inside the 150 ms quiet window — defeating the coalescing. Bumped the ConPTY per-`WriteFile` chunk cap from 8 KiB to 16 KiB so a multi-megabyte resume paint emits half as many writes (still well under the ~32 KiB threshold from #2034 that the original cap defends against), and made the cap measure encoded UTF-8 bytes instead of JS code units so a CJK-heavy transcript can't silently inflate a 16-KiB-of-code-units chunk into ~48 KiB of `WriteFile` traffic and reintroduce the #2034 viewport bug ([#2095](https://github.com/can1357/oh-my-pi/issues/2095)).
+- Fixed Windows ConPTY session-resume painting the transcript with the last several rows truncated below the viewport until Alt+Tab forced a host repaint. After `sessionReplace`/`historyRebuild`/`overlayRebuild` paints that scroll-push content into native scrollback, the renderer now arms a 150 ms ConPTY settle window that coalesces spinner/blink-driven `requestRender(false)` calls into a single trailing render — Windows Terminal's viewport-follow logic no longer falls further behind the cursor on every tick of the post-paint storm. The arm also reclaims any render request queued *during* the in-flight composition (notably `ImageBudget.endPass()` calling `requestRender()` synchronously when a frame trips the live-graphics cap): without that, the queued request sat on the standard 30 Hz throttle and fired at ~33 ms — well inside the 150 ms quiet window — defeating the coalescing. Bumped the ConPTY per-`WriteFile` chunk cap from 8 KiB to 16 KiB so a multi-megabyte resume paint emits half as many writes (still well under the ~32 KiB threshold from #2034 that the original cap defends against), and made the cap measure encoded UTF-8 bytes instead of JS code units so a CJK-heavy transcript can't silently inflate a 16-KiB-of-code-units chunk into ~48 KiB of `WriteFile` traffic and reintroduce the #2034 viewport bug ([#2095](https://github.com/can1357/oh-my-pi/issues/2095)).
 
 ## [15.10.3] - 2026-06-08
 

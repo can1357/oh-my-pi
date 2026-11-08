@@ -2,9 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `canReplayRemoteCompactionFrom()` to check whether a model can replay the provider-native compaction another model would write ([#17747](https://github.com/can1357/oh-my-pi/pull/17747) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Changed
 
 - The tokenizer takes its Responses replay decision from the shared `getReplayableNativeResponsesHistoryItems` + `replaysNativeResponsesTurn` helpers, the same decision `/shake` uses, so a turn's local token count and its thinking blocks can no longer disagree about whether the request replays it natively
+
+### Fixed
+
+- Fixed GenAI message-content capture set in omp's own `.env` files so it still applies now that those values stay out of the process environment ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
+- Compaction preparation re-expands a trailing OpenAI remote compaction the active model cannot replay instead of reporting nothing to compact ([#17747](https://github.com/can1357/oh-my-pi/pull/17747) by [@will-bogusz](https://github.com/will-bogusz))
+- Generic remote compaction to `/chat/completions` now sends per-request model headers, so gateway sessions retain their attribution ([#18032](https://github.com/can1357/oh-my-pi/issues/18032)).
 
 ## [18.17.0] - 2026-11-06
 
@@ -12,18 +22,6 @@
 
 - Added `Agent.queuedMessageGate` to filter queued messages before delivery and observe claimed messages returned undelivered.
 - Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
-- Added `wireToolsFingerprint()`, a hash of the tool specs a request sends ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
-- Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
-- Added `canReplayRemoteCompactionFrom()` to check whether a model can replay the provider-native compaction another model would write ([#17747](https://github.com/can1357/oh-my-pi/pull/17747) by [@will-bogusz](https://github.com/will-bogusz))
-### Fixed
-
-- Generic remote compaction to `/chat/completions` now sends per-request model headers, so gateway sessions retain their attribution ([#18032](https://github.com/can1357/oh-my-pi/issues/18032)).
-- Fixed steering and follow-up queue notifications observing a batch before its preparation claim was installed and missing the transition to delivery, leaving pending-message snapshots stale after asynchronous preparation.
-- Compaction preparation re-expands a trailing OpenAI remote compaction the active model cannot replay instead of reporting nothing to compact ([#17747](https://github.com/can1357/oh-my-pi/pull/17747) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Fixed GenAI message-content capture set in omp's own `.env` files so it still applies now that those values stay out of the process environment ([#17685](https://github.com/can1357/oh-my-pi/pull/17685) by [@Flare576](https://github.com/Flare576))
 
 ## [18.16.0] - 2026-11-02
 

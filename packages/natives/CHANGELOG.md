@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Zig syntax highlighting, so fenced Zig code in markdown renders with colors ([#14964](https://github.com/can1357/oh-my-pi/issues/14964), [#18319](https://github.com/can1357/oh-my-pi/pull/18319) by [@hellopoisonx](https://github.com/hellopoisonx))
+
+### Fixed
+
+- Aborted or timed-out built-in `jq` filters stop running even when they have not produced an output ([#17943](https://github.com/can1357/oh-my-pi/issues/17943)).
+- Fixed `cd` and `pwd` in native Windows shell sessions corrupting drive and UNC roots during logical directory changes ([#18042](https://github.com/can1357/oh-my-pi/pull/18042) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed external commands getting the null device on Unix for a descriptor the script closed (`cmd 2>&-`, `cmd 5>&-`): the descriptor is now closed in the command, as in Bash, so its writes there fail instead of vanishing; on Windows, which has no closed standard handle, a closed standard stream gets the null device ([#18089](https://github.com/can1357/oh-my-pi/pull/18089) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `setValue()` on Linux reporting success in Firefox and Thunderbird when the field kept its old text, password fields included; it now reads the text back and fails naming what the field holds, or naming no text in a password field ([#18220](https://github.com/can1357/oh-my-pi/pull/18220) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.1] - 2026-11-08
 
 ### Added
@@ -26,16 +37,6 @@
 - An edit whose path is missing on disk no longer stalls the embedded shell and other native calls while it searches for the file, and a cancelled edit stops that search at once ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
 - macOS spellchecking (typo underlines, autocorrect, `apple` word completion) no longer leaks native memory for the life of the process ([#18285](https://github.com/can1357/oh-my-pi/pull/18285) by [@aleister1102](https://github.com/aleister1102))
 - Fixed large brace expansions running as literal text or silently dropping words: expansions support up to 4,194,304 words and report an error above that limit ([#18092](https://github.com/can1357/oh-my-pi/pull/18092) by [@sjawhar](https://github.com/sjawhar))
-- Fixed `setValue()` on Linux reporting success in Firefox and Thunderbird when the field kept its old text, password fields included; it now reads the text back and fails naming what the field holds, or naming no text in a password field ([#18220](https://github.com/can1357/oh-my-pi/pull/18220) by [@will-bogusz](https://github.com/will-bogusz))
-
-## [18.18.0] - 2026-11-07
-
-### Fixed
-
-- Fixed external commands getting the null device on Unix for a descriptor the script closed (`cmd 2>&-`, `cmd 5>&-`): the descriptor is now closed in the command, as in Bash, so its writes there fail instead of vanishing; on Windows, which has no closed standard handle, a closed standard stream gets the null device ([#18089](https://github.com/can1357/oh-my-pi/pull/18089) by [@sjawhar](https://github.com/sjawhar))
-- The embedded shell's `comm` merges in the same locale order as its `sort`, so `comm` on `sort` output under a UTF-8 locale no longer reports unsorted input and drops common lines
-- An edit whose path is missing on disk no longer stalls the embedded shell and other native calls while it searches for the file, and a cancelled edit stops that search at once ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
-- macOS spellchecking (typo underlines, autocorrect, `apple` word completion) no longer leaks native memory for the life of the process ([#18285](https://github.com/can1357/oh-my-pi/pull/18285) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.18.0] - 2026-11-07
 
@@ -44,12 +45,6 @@
 - Fixed `find()` missing elements more than 24 levels down, such as VS Code's editor; it now searches 64 levels deep ([#18221](https://github.com/can1357/oh-my-pi/pull/18221) by [@will-bogusz](https://github.com/will-bogusz))
 - `glob`, `grep`, `fuzzyFind`, `ast_grep` and `ast_edit` now run their directory traversal on a filesystem runtime of their own, so a search over a large or cold tree can no longer take the worker threads that the embedded shell and every other native call are scheduled on. Those threads are named `pi-fs-worker`, so a stall in a search is tellable apart from a stall elsewhere.
 - Fixed a workspace tree whose native addon does not match its checkout failing with `undefined is not a constructor` at the callsite: a class the addon lacks now throws a message naming the addon file, both releases and `bun run build:native` — from its constructor and from any static entrypoint — and the loader reports that mismatch once as it loads ([#18230](https://github.com/can1357/oh-my-pi/pull/18230) by [@sjawhar](https://github.com/sjawhar))
-### Added
-
-- Added Zig syntax highlighting, so fenced Zig code in markdown renders with colors ([#14964](https://github.com/can1357/oh-my-pi/issues/14964), [#18319](https://github.com/can1357/oh-my-pi/pull/18319) by [@hellopoisonx](https://github.com/hellopoisonx))
-### Fixed
-
-- Fixed `cd` and `pwd` in native Windows shell sessions corrupting drive and UNC roots during logical directory changes ([#18042](https://github.com/can1357/oh-my-pi/pull/18042) by [@jchanghong023](https://github.com/jchanghong023))
 
 ## [18.17.0] - 2026-11-06
 
@@ -106,9 +101,6 @@
 - An unanswered Wayland RemoteDesktop permission dialog now fails input with `Timeout` before the run deadline, sending nothing ([#17932](https://github.com/can1357/oh-my-pi/pull/17932) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 takeover input stopping with `Cancelled` after you typed locally; Escape now stops computer use for the rest of the turn ([#17912](https://github.com/can1357/oh-my-pi/pull/17912) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 background `el.type`/`el.press` raising the window and taking your keyboard; elements without GTK 3 focus now use takeover ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
-### Fixed
-
-- Aborted or timed-out built-in `jq` filters stop running even when they have not produced an output ([#17943](https://github.com/can1357/oh-my-pi/issues/17943)).
 
 ## [18.16.0] - 2026-11-02
 
