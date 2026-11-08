@@ -6,9 +6,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { recordHandoff, resolveTelemetry, startInvokeAgentSpan } from "@oh-my-pi/pi-agent-core/telemetry";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import { context, propagation, trace } from "@opentelemetry/api";
+import { context, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
-import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
 
 const TRACE_ID = "0af7651916cd43dd8448eb211c80319c";
@@ -23,9 +22,8 @@ const model = createMockModel({ id: "mock-model", provider: "mock-provider", res
 beforeAll(() => {
 	trace.disable();
 	context.disable();
-	propagation.disable();
+	// No global propagator is registered: hosts that inject a tracer without registering one still get the parent.
 	context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
-	propagation.setGlobalPropagator(new W3CTraceContextPropagator());
 	provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
 	trace.setGlobalTracerProvider(provider);
 });
@@ -40,7 +38,6 @@ afterAll(async () => {
 	await provider.shutdown();
 	context.disable();
 	trace.disable();
-	propagation.disable();
 });
 
 function startRoot() {

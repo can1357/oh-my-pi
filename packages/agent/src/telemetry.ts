@@ -45,8 +45,10 @@ import {
 	type AttributeValue,
 	type Context as OtelContext,
 	context,
-	propagation,
+	isValidSpanId,
+	isValidTraceId,
 	type Span,
+	type SpanContext,
 	SpanKind,
 	SpanStatusCode,
 	type Tracer,
@@ -482,15 +484,25 @@ function resolveContentCapture(value: TelemetryContentCapture | undefined): Reso
  * Context a new span is parented to: the explicit `parent`, else the active
  * span, else (for a root span) the W3C context in the `TRACEPARENT` env var set
  * by a launching process that already owns a trace. A missing or invalid
- * `TRACEPARENT` leaves the active context untouched. Parsing goes through the
- * global propagator, which the OTLP exporter's `register()` installs.
+ * `TRACEPARENT` leaves the active context untouched. The header is parsed here
+ * rather than through the global propagator, so hosts that inject a tracer
+ * without registering a propagator get the same parent.
  */
 function resolveParentContext(parent: Span | undefined): OtelContext {
 	const active = context.active();
 	if (parent) return trace.setSpan(active, parent);
-	const traceparent = process.env.TRACEPARENT;
-	if (!traceparent || trace.getSpan(active)) return active;
-	return propagation.extract(active, { traceparent });
+	if (trace.getSpan(active)) return active;
+	const remote = parseTraceparent(process.env.TRACEPARENT);
+	return remote ? trace.setSpanContext(active, remote) : active;
+}
+
+const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
+
+/** W3C `traceparent` (version 00) to a remote span context; undefined when malformed. */
+function parseTraceparent(value: string | undefined): SpanContext | undefined {
+	const match = value ? TRACEPARENT_RE.exec(value.trim()) : null;
+	if (!match || !isValidTraceId(match[1]) || !isValidSpanId(match[2])) return undefined;
+	return { traceId: match[1], spanId: match[2], traceFlags: Number.parseInt(match[3], 16), isRemote: true };
 }
 
 /**
