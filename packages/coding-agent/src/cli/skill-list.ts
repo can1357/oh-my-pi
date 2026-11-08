@@ -36,57 +36,64 @@ export async function runSkillsCommand(
 	} = {},
 ): Promise<SkillsCommandResult> {
 	const cwd = options.cwd ?? process.cwd();
-	let skillsSettings: Partial<SkillsSettings>;
-	let disabledExtensions: string[];
-	let extensionRoots: EffectiveExtensionRoots;
+	const list = async (
+		skillsSettings: Partial<SkillsSettings>,
+		disabledExtensions: string[],
+		extensionRoots: EffectiveExtensionRoots,
+	): Promise<SkillsCommandResult> => {
+		if (skillsSettings.customDirectories?.length) {
+			// Relative entries are config-relative to the inspected directory, not
+			// to wherever the command happens to run. A `~` entry names the home
+			// directory, so it is expanded first — otherwise it would resolve to a
+			// literal `~` segment below `cwd` and the listing would disagree with
+			// the loader, which expands the tilde itself.
+			skillsSettings = {
+				...skillsSettings,
+				customDirectories: skillsSettings.customDirectories.map(dir => {
+					const expanded = expandTilde(dir);
+					return path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
+				}),
+			};
+		}
+		const { skills, warnings } = await loadSkills({
+			...skillsSettings,
+			cwd,
+			disabledExtensions,
+			extensionRoots,
+		});
+		return {
+			skills: skills.map(skill => ({
+				name: skill.name,
+				description: skill.description,
+				filePath: skill.filePath,
+				baseDir: skill.baseDir,
+				source: skill.source,
+				hide: skill.hide === true,
+			})),
+			warnings,
+		};
+	};
 	if (options.skillsSettings) {
-		// Test seam: fully isolated from ambient configuration.
-		skillsSettings = options.skillsSettings;
-		disabledExtensions = [];
-		extensionRoots = { explicit: [], mode: "merge", configured: [], configuredLevel: "user" };
-	} else {
-		const settings = await Settings.init({ cwd });
-		initializeWithSettings(settings);
-		skillsSettings = cfgSkills.get(settings);
-		disabledExtensions = [...cfgDisabledExtensions.get(settings)];
-		extensionRoots = {
+		// Test seam: fully isolated from ambient configuration. No capability hold.
+		return list(options.skillsSettings, [], {
+			explicit: [],
+			mode: "merge",
+			configured: [],
+			configuredLevel: "user",
+		});
+	}
+	const settings = await Settings.init({ cwd });
+	const release = initializeWithSettings(settings);
+	try {
+		return await list(cfgSkills.get(settings), [...cfgDisabledExtensions.get(settings)], {
 			explicit: [],
 			mode: "merge",
 			configured: cfgExtensions.get(settings),
 			configuredLevel: settings.extensionsSourceLevel(),
-		};
+		});
+	} finally {
+		release();
 	}
-	if (skillsSettings.customDirectories?.length) {
-		// Relative entries are config-relative to the inspected directory, not
-		// to wherever the command happens to run. A `~` entry names the home
-		// directory, so it is expanded first — otherwise it would resolve to a
-		// literal `~` segment below `cwd` and the listing would disagree with
-		// the loader, which expands the tilde itself.
-		skillsSettings = {
-			...skillsSettings,
-			customDirectories: skillsSettings.customDirectories.map(dir => {
-				const expanded = expandTilde(dir);
-				return path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded);
-			}),
-		};
-	}
-	const { skills, warnings } = await loadSkills({
-		...skillsSettings,
-		cwd,
-		disabledExtensions,
-		extensionRoots,
-	});
-	return {
-		skills: skills.map(skill => ({
-			name: skill.name,
-			description: skill.description,
-			filePath: skill.filePath,
-			baseDir: skill.baseDir,
-			source: skill.source,
-			hide: skill.hide === true,
-		})),
-		warnings,
-	};
 }
 
 /** Control characters (including newlines and tabs) are escaped so skill

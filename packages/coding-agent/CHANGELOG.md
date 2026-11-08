@@ -36,6 +36,7 @@
 
 ### Fixed
 
+- `omp skill list` releases the capability settings hold it takes, so a caller's provider scope stays in effect after the command, including when discovery throws. Skill-list tests isolate Claude config, home, profile, and agent-dir environment, and the integrations worker fixture registers the runtime storage codec and cleans up a failed boot.
 - A2A terminals without `a2a.name` get a unique `<cwd>-<pid>` name, so a peer's reply address resolves to a registered `a2a:` agent instead of an unaddressable URL; a reply is correlated to the request it answers (`metadata.inReplyTo`) and carries no reply-back instruction, so two terminals no longer ping-pong indefinitely
 - A2A discovery is symmetric and race-free: each bridge writes its own registry file under `<agent dir>/a2a-bridges/` with an `instanceId` verified against its card, unknown `a2a:` names and `agent://` listings rescan live bridges, stale peers are dropped, and re-registering an endpoint replaces its agents instead of adding `Main-N` duplicates
 - `a2a.clientTimeoutMs` bounds the whole remote run including the initial `SendMessage`; remote spawns forward batch `context` and are refused in plan mode; `CancelTask` only cancels tasks the bridge created; `ListTasks` honors `contextId` and stable pagination; JSON-RPC notifications and batches are answered per spec

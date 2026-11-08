@@ -1,38 +1,158 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { handleSkillList, runSkillsCommand } from "../../src/cli/skill-list";
-import { resetSettingsForTest } from "../../src/config/settings";
+import { boundSettings } from "../../src/capability";
+import {
+	getEnabledProviders,
+	initializeWithSettings,
+	isUserSourceEnabled,
+	loadCapability,
+	resetCapabilityForTests,
+} from "../../src/discovery";
+import { resetSettingsForTest, Settings } from "../../src/config/settings";
 import { AgentStorage } from "../../src/session/agent-storage";
-import { getAgentDir, removeWithRetries, setAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "../helpers/settings-test-state";
+import * as skillsModule from "../../src/extensibility/skills";
+import { __resetDirsFromEnvForTests, getAgentDir, removeWithRetries, setAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
 import { CliUsageError } from "@oh-my-pi/pi-utils/cli";
+
+const CLAUDE_POISON = "omp-foundation-w6-claude-poison";
+const AGENTS_POISON = "omp-foundation-w6-agents-poison";
+const OUTER_CODEX = "omp-foundation-w6-outer-codex";
+
+/** Ambient Claude config the current fixture does not clear. Owned only when the variable was absent. */
+let ambientClaudeDir = "";
+let ownedClaudeDir = false;
+let originalClaudeConfigDir: string | undefined;
+/** Real home captured before `os.homedir` is mocked; project ancestor walks can still see it. */
+let ambientHome = "";
+let agentsPoisonDir = "";
+
+function skillMarkdown(name: string, description: string): string {
+	return `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
+}
+
+async function writeSkill(directory: string, name: string, description: string): Promise<string> {
+	const skillDir = path.join(directory, name);
+	await fs.mkdir(skillDir, { recursive: true });
+	const filePath = path.join(skillDir, "SKILL.md");
+	await Bun.write(filePath, skillMarkdown(name, description));
+	return filePath;
+}
+
+function listingEvidence(skills: { name: string; source: string; filePath: string }[]): string {
+	const rows = skills.map(skill => `${skill.name}\t${skill.source}\t${skill.filePath}`);
+	return [
+		`mocked os.homedir (ctx.home seam): ${os.homedir()}`,
+		`ambient home: ${ambientHome}`,
+		`HOME=${process.env.HOME ?? "<absent>"}`,
+		`USERPROFILE=${process.env.USERPROFILE ?? "<absent>"}`,
+		`CLAUDE_CONFIG_DIR=${process.env.CLAUDE_CONFIG_DIR ?? "<absent>"}`,
+		`claude poison: ${path.join(ambientClaudeDir, "skills", CLAUDE_POISON, "SKILL.md")}`,
+		`agents poison: ${path.join(agentsPoisonDir, "SKILL.md")}`,
+		"discovered:",
+		...rows,
+	].join("\n");
+}
+
+beforeAll(async () => {
+	ambientHome = os.homedir();
+	originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+	const configured = originalClaudeConfigDir?.trim();
+	if (configured) {
+		ambientClaudeDir = path.resolve(configured);
+	} else {
+		ambientClaudeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-w6-claude-poison-"));
+		ownedClaudeDir = true;
+		process.env.CLAUDE_CONFIG_DIR = ambientClaudeDir;
+		Bun.env.CLAUDE_CONFIG_DIR = ambientClaudeDir;
+	}
+	await writeSkill(path.join(ambientClaudeDir, "skills"), CLAUDE_POISON, "Ambient Claude poison.");
+	agentsPoisonDir = path.join(ambientHome, ".agents", "skills", AGENTS_POISON);
+	await fs.mkdir(agentsPoisonDir, { recursive: true });
+	await Bun.write(path.join(agentsPoisonDir, "SKILL.md"), skillMarkdown(AGENTS_POISON, "Ambient agents poison."));
+});
+
+afterAll(async () => {
+	await removeWithRetries(path.join(ambientClaudeDir, "skills", CLAUDE_POISON));
+	if (ownedClaudeDir) await removeWithRetries(ambientClaudeDir);
+	await removeWithRetries(agentsPoisonDir);
+	restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
+});
 
 // Every test below discovers skills through the real capability loader, which
 // walks `os.homedir()` and `getAgentDir()` for user-level providers (native
 // `<agentDir>/skills`, `~/.claude/skills`, managed auto-learn skills, and
 // `Settings.init()`'s own config.yml/settings.json lookup in the
-// `handleSkillList` tests below). Without isolating both seams, the developer's
-// or CI runner's real agent config leaks into every assertion here.
+// `handleSkillList` tests below). The fixture isolates that walk: cwd lives
+// under a mocked home that is its own repo root, and Claude/profile/agent-dir
+// variables are snapshotted and restored. Poison files stay in their ambient
+// locations so a leak still fails the listing assertion.
+const ISOLATED_ENV = [
+	"CLAUDE_CONFIG_DIR",
+	"PI_CONFIG_FILES",
+	"HOME",
+	"USERPROFILE",
+	"PI_CODING_AGENT_DIR",
+	"OMP_PROFILE",
+	"PI_PROFILE",
+] as const;
 let tempHome: string;
-let originalAgentDir: string;
+let isolatedEnv: Record<(typeof ISOLATED_ENV)[number], string | undefined>;
+
+function deleteEnv(key: string): void {
+	delete process.env[key];
+	delete Bun.env[key];
+}
+
+/** Working directory inside the isolated home, so ancestor discovery stops there. */
+function isolatedDirectory(prefix: string): Promise<string> {
+	return fs.mkdtemp(path.join(tempHome, prefix));
+}
 
 beforeEach(async () => {
-	originalAgentDir = getAgentDir();
+	isolatedEnv = {
+		CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+		PI_CONFIG_FILES: process.env.PI_CONFIG_FILES,
+		HOME: process.env.HOME,
+		USERPROFILE: process.env.USERPROFILE,
+		PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+		OMP_PROFILE: process.env.OMP_PROFILE,
+		PI_PROFILE: process.env.PI_PROFILE,
+	};
 	tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-list-home-"));
+	// Nearest `.git` stops project ancestor walks before the real home.
+	await Bun.write(path.join(tempHome, ".git"), "");
+	process.env.HOME = tempHome;
+	Bun.env.HOME = tempHome;
+	process.env.USERPROFILE = tempHome;
+	Bun.env.USERPROFILE = tempHome;
+	deleteEnv("CLAUDE_CONFIG_DIR");
+	deleteEnv("PI_CONFIG_FILES");
+	deleteEnv("OMP_PROFILE");
+	deleteEnv("PI_PROFILE");
 	spyOn(os, "homedir").mockReturnValue(tempHome);
 	setAgentDir(path.join(tempHome, ".omp", "agent"));
 });
 
 afterEach(async () => {
+	// Close storage before removing the isolated home. Windows refuses to
+	// delete a directory that still has agent.db open. Do not release a
+	// capability hold here: the two-file command must still see one if
+	// `runSkillsCommand` leaks it.
+	resetSettingsForTest();
+	AgentStorage.close();
 	spyOn(os, "homedir").mockRestore();
-	setAgentDir(originalAgentDir);
+	for (const key of ISOLATED_ENV) restoreEnvValue(key, isolatedEnv[key]);
+	__resetDirsFromEnvForTests();
 	await removeWithRetries(tempHome);
 });
 
 describe("runSkillsCommand", () => {
 	test("lists skills for a directory with public metadata", async () => {
-		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skills-cmd-"));
+		const directory = await isolatedDirectory("omp-skills-cmd-");
 		const skillsRoot = path.join(directory, "skills-fixture");
 		await fs.mkdir(path.join(skillsRoot, "first", "calendar"), { recursive: true });
 		await fs.mkdir(path.join(skillsRoot, "second", "reviewer"), { recursive: true });
@@ -75,7 +195,7 @@ describe("runSkillsCommand", () => {
 	});
 
 	test("resolves relative custom directories against the requested directory", async () => {
-		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-rel-${Snowflake.next()}-`));
+		const directory = await isolatedDirectory(`omp-skills-rel-${Snowflake.next()}-`);
 		await fs.mkdir(path.join(directory, "rel-root", "calendar"), { recursive: true });
 		await Bun.write(
 			path.join(directory, "rel-root", "calendar", "SKILL.md"),
@@ -97,7 +217,7 @@ describe("runSkillsCommand", () => {
 	});
 
 	test("expands a tilde custom directory against the home directory", async () => {
-		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-tilde-${Snowflake.next()}-`));
+		const directory = await isolatedDirectory(`omp-skills-tilde-${Snowflake.next()}-`);
 		// `os.homedir()` is stubbed to `tempHome` above, so `~/example-skills`
 		// names this fixture directory.
 		const skillsRoot = path.join(tempHome, "example-skills");
@@ -138,7 +258,7 @@ describe("handleSkillList", () => {
 	});
 
 	test("keeps stdout to TSV rows and sends warnings to stderr", async () => {
-		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-list-${Snowflake.next()}-`));
+		const directory = await isolatedDirectory(`omp-skills-list-${Snowflake.next()}-`);
 		for (const root of ["first", "second"]) {
 			await fs.mkdir(path.join(directory, root, "calendar"), { recursive: true });
 			await Bun.write(
@@ -179,7 +299,7 @@ describe("handleSkillList", () => {
 	});
 
 	test("applies global manualSkills from config and lets a project list clear it", async () => {
-		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-layer-${Snowflake.next()}-`));
+		const directory = await isolatedDirectory(`omp-skills-layer-${Snowflake.next()}-`);
 		const projectDir = path.join(directory, "project");
 		const skillsRoot = path.join(directory, "skills");
 		const agentDir = getAgentDir();
@@ -237,7 +357,7 @@ describe("handleSkillList", () => {
 	});
 
 	test("rejects a target that is not a directory", async () => {
-		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-list-${Snowflake.next()}-`));
+		const directory = await isolatedDirectory(`omp-skills-list-${Snowflake.next()}-`);
 		const file = path.join(directory, "file.txt");
 		await Bun.write(file, "not a directory");
 		try {
@@ -251,6 +371,115 @@ describe("handleSkillList", () => {
 			await expect(handleSkillList(["file.txt/sub"], directory, false)).rejects.toThrow(
 				new CliUsageError(`Not a directory: ${path.join(file, "sub")}`),
 			);
+		} finally {
+			await removeWithRetries(directory);
+		}
+	});
+});
+
+describe("ambient skill isolation", () => {
+	test("lists only the requested fixture skill, not ambient Claude or .agents poison", async () => {
+		const directory = await isolatedDirectory("omp-skills-poison-");
+		const fixtureRoot = path.join(directory, "fixture-skills");
+		await writeSkill(fixtureRoot, "fixture-only", "Requested fixture skill.");
+		try {
+			// Poison files stay in the ambient Claude dir and real home. The fixture
+			// home mock must not be treated as proof that those inputs are unreachable.
+			const result = await runSkillsCommand({
+				cwd: directory,
+				skillsSettings: { customDirectories: [fixtureRoot] },
+			});
+			const evidence = listingEvidence(result.skills);
+			const poisonHits = result.skills.filter(
+				skill => skill.name === CLAUDE_POISON || skill.name === AGENTS_POISON,
+			);
+			// Claude poison is claude:user via CLAUDE_CONFIG_DIR. The .agents poison is
+			// agents:project from the real-home ancestor walk, not the mocked ctx.home.
+			expect(poisonHits.map(skill => `${skill.name}\t${skill.source}\t${skill.filePath}`), evidence).toEqual([]);
+			expect(result.skills.map(skill => skill.name), evidence).toEqual(["fixture-only"]);
+		} finally {
+			await removeWithRetries(directory);
+		}
+	});
+});
+
+describe("runSkillsCommand settings hold", () => {
+	beforeEach(() => {
+		resetSettingsForTest();
+		resetCapabilityForTests();
+	});
+
+	afterEach(() => {
+		// Release is asserted inside each test. Do not clear a leaked hold here,
+		// or the two-file integrations run would no longer see it.
+		resetSettingsForTest();
+		AgentStorage.close();
+	});
+
+	async function projectConfig(directory: string, yaml: string): Promise<void> {
+		await fs.mkdir(path.join(directory, ".omp"), { recursive: true });
+		await Bun.write(path.join(directory, ".omp", "config.yml"), yaml);
+	}
+
+	async function assertOuterCodexScope(directory: string, outer: Settings): Promise<void> {
+		expect(boundSettings() === outer, "skill-list must release its own hold and leave the outer scope bound").toBe(
+			true,
+		);
+		expect(getEnabledProviders()).toContain("codex");
+		expect(getEnabledProviders()).not.toContain("cursor");
+		expect(isUserSourceEnabled("codex")).toBe(true);
+		expect(isUserSourceEnabled("cursor")).toBe(false);
+		const discovered = await loadCapability("skills", { cwd: directory });
+		expect(discovered.items.map(item => item.name)).toContain(OUTER_CODEX);
+	}
+
+	test("keeps an outer provider scope after the normal skill-list path", async () => {
+		const directory = await isolatedDirectory("omp-skills-hold-");
+		await writeSkill(path.join(tempHome, ".codex", "skills"), OUTER_CODEX, "Outer codex skill.");
+		await projectConfig(directory, "enabledProviders:\n  - cursor\ndisabledProviders:\n  - codex\n");
+		const outer = Settings.isolated({ enabledProviders: ["codex"] });
+		const release = initializeWithSettings(outer);
+		try {
+			await runSkillsCommand({ cwd: directory });
+			await assertOuterCodexScope(directory, outer);
+		} finally {
+			release();
+			await removeWithRetries(directory);
+		}
+	});
+
+	test("keeps an outer provider scope when skill discovery throws", async () => {
+		const directory = await isolatedDirectory("omp-skills-hold-throw-");
+		await writeSkill(path.join(tempHome, ".codex", "skills"), OUTER_CODEX, "Outer codex skill.");
+		await projectConfig(directory, "enabledProviders:\n  - cursor\ndisabledProviders:\n  - codex\n");
+		const outer = Settings.isolated({ enabledProviders: ["codex"] });
+		const release = initializeWithSettings(outer);
+		const discovery = spyOn(skillsModule, "loadSkills").mockRejectedValue(
+			new Error("downstream skill discovery failed"),
+		);
+		try {
+			await expect(runSkillsCommand({ cwd: directory })).rejects.toThrow("downstream skill discovery failed");
+			discovery.mockRestore();
+			await assertOuterCodexScope(directory, outer);
+		} finally {
+			discovery.mockRestore();
+			release();
+			await removeWithRetries(directory);
+		}
+	});
+
+	test("does not leave a capability hold when skill-list had no enclosing binding", async () => {
+		const directory = await isolatedDirectory("omp-skills-hold-none-");
+		await writeSkill(path.join(tempHome, ".codex", "skills"), OUTER_CODEX, "Inner-only codex skill.");
+		await projectConfig(directory, "enabledProviders:\n  - codex\n");
+		try {
+			expect(boundSettings() === undefined, "nothing is bound before skill-list").toBe(true);
+			await runSkillsCommand({ cwd: directory });
+			expect(boundSettings() === undefined, "skill-list leaked the Settings.init hold").toBe(true);
+			expect(isUserSourceEnabled("codex")).toBe(false);
+			expect(getEnabledProviders()).not.toContain("codex");
+			const discovered = await loadCapability("skills", { cwd: directory });
+			expect(discovered.items.map(item => item.name)).not.toContain(OUTER_CODEX);
 		} finally {
 			await removeWithRetries(directory);
 		}
