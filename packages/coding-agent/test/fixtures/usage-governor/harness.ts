@@ -7,7 +7,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { ensureSqliteLockShim, getDbBusyTimeoutMs, isSqliteBusyError, TempDir } from "@oh-my-pi/pi-utils";
 import { checkConfinement, sandboxCommand } from "./confinement";
 import { type FakeAccountSpec, type FakeProvider, type FakeRecord, startFakeProvider } from "./fake-provider";
 import { type ScenarioSettings, seedAuthDb, writeScenarioConfig } from "./seed";
@@ -331,70 +331,85 @@ export class GovernorProof {
 	 */
 	readLedger(): LedgerSnapshot {
 		if (!this.ledgerExists()) return EMPTY_LEDGER;
-		let db: Database | undefined;
-		try {
-			db = new Database(this.ledgerPath, { readonly: true });
-			const tables = new Set(
-				db
-					.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'")
-					.all()
-					.map(row => row.name),
-			);
-			if (!tables.has("waits") || !tables.has("reservations")) return EMPTY_LEDGER;
-			const waits = db
-				.query<WaitRow, []>("SELECT * FROM waits ORDER BY id")
-				.all()
-				.map(row => ({
-					id: row.id,
-					startedAtMs: row.started_at_ms,
-					endedAtMs: row.ended_at_ms,
-					outcome: row.outcome,
-					provider: row.provider,
-					credentialId: row.credential_id,
-					role: row.role,
-					source: row.source,
-					pid: row.pid,
-					reason: row.reason,
-					bindingLabel: row.binding_label,
-					used: row.used,
-					allowed: row.allowed,
-					untilMs: row.until_ms,
-					resetsAtMs: row.resets_at_ms,
-				}));
-			const reservations = db
-				.query<ReservationRow, []>("SELECT * FROM reservations ORDER BY id")
-				.all()
-				.map(row => ({
-					id: row.id,
-					grantId: row.grant_id,
-					quotaKey: row.quota_key,
-					generation: row.generation,
-					createdAtMs: row.created_at_ms,
-					settledAtMs: row.settled_at_ms,
-					pid: row.pid,
-					provider: row.provider,
-					credentialId: row.credential_id,
-					role: row.role,
-					source: row.source,
-					interactive: row.interactive,
-				}));
-			return { waits, reservations };
-		} catch (error) {
-			const details =
-				error instanceof Error
-					? Object.fromEntries(
-							Object.getOwnPropertyNames(error).map(key => [
-								key,
-								(error as unknown as Record<string, unknown>)[key],
-							]),
-						)
-					: error;
-			throw new Error(`ledger read failed: ${JSON.stringify({ error: details, files: this.ledgerDiagnostics() })}`, {
-				cause: error,
-			});
-		} finally {
-			db?.close();
+		const maxAttempts = 3;
+		for (let attempt = 0; attempt < maxAttempts; attempt++) {
+			let db: Database | undefined;
+			try {
+				ensureSqliteLockShim();
+				db = new Database(this.ledgerPath, { readonly: true });
+				db.run(`PRAGMA busy_timeout = ${Math.max(getDbBusyTimeoutMs(), 5000)}`);
+				return db.transaction((): LedgerSnapshot => {
+					const tables = new Set(
+						db!
+							.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'")
+							.all()
+							.map(row => row.name),
+					);
+					if (!tables.has("waits") || !tables.has("reservations")) return EMPTY_LEDGER;
+					const waits = db!
+						.query<WaitRow, []>("SELECT * FROM waits ORDER BY id")
+						.all()
+						.map(row => ({
+							id: row.id,
+							startedAtMs: row.started_at_ms,
+							endedAtMs: row.ended_at_ms,
+							outcome: row.outcome,
+							provider: row.provider,
+							credentialId: row.credential_id,
+							role: row.role,
+							source: row.source,
+							pid: row.pid,
+							reason: row.reason,
+							bindingLabel: row.binding_label,
+							used: row.used,
+							allowed: row.allowed,
+							untilMs: row.until_ms,
+							resetsAtMs: row.resets_at_ms,
+						}));
+					const reservations = db!
+						.query<ReservationRow, []>("SELECT * FROM reservations ORDER BY id")
+						.all()
+						.map(row => ({
+							id: row.id,
+							grantId: row.grant_id,
+							quotaKey: row.quota_key,
+							generation: row.generation,
+							createdAtMs: row.created_at_ms,
+							settledAtMs: row.settled_at_ms,
+							pid: row.pid,
+							provider: row.provider,
+							credentialId: row.credential_id,
+							role: row.role,
+							source: row.source,
+							interactive: row.interactive,
+						}));
+					return { waits, reservations };
+				})();
+			} catch (error) {
+				if (isSqliteBusyError(error) && attempt + 1 < maxAttempts) {
+					Bun.sleepSync(50 * (attempt + 1));
+					continue;
+				}
+				const details =
+					error instanceof Error
+						? Object.fromEntries(
+								Object.getOwnPropertyNames(error).map(key => [
+									key,
+									(error as unknown as Record<string, unknown>)[key],
+								]),
+							)
+						: error;
+				throw new Error(
+					`ledger read failed: ${JSON.stringify({ error: details, files: this.ledgerDiagnostics() })}`,
+					{
+						cause: error,
+					},
+				);
+			} finally {
+				db?.close();
+			}
 		}
+		return EMPTY_LEDGER;
 	}
 
 	/** Stop the fake and the tripwire, and remove the temp HOME. */
