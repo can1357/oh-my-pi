@@ -36,6 +36,11 @@ import { tinyTitleClient } from "../tiny/title-client";
 import { cfgRetryModelFallback } from "../session/settings";
 import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "@oh-my-pi/pi-tui/spinner-clock";
 
+/**
+ * Receives billed model usage for each completed title request attempt (including
+ * retried or failed attempts that incurred spend). Implementations must not throw;
+ * errors will not interrupt fallback or retry handling.
+ */
 export type TitleUsageCallback = (
 	usage: Pick<ModelUsageEntry, "purpose" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage">,
 ) => void;
@@ -211,6 +216,7 @@ export async function generateSessionTitle(
 	signal?: AbortSignal,
 	credentialSourceSessionId?: string,
 	onUsage?: TitleUsageCallback,
+	isCapped?: () => boolean,
 ): Promise<string | null> {
 	// Defer titling for greetings / acknowledgements / empty input. The default
 	// tiny title model can't reliably decline trivial input, so this happens
@@ -240,6 +246,7 @@ export async function generateSessionTitle(
 			titleSystemPrompt,
 			credentialSourceSessionId,
 			onUsage,
+			isCapped,
 		);
 	}
 
@@ -291,6 +298,7 @@ export async function generateTitleOnline(
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
 	onUsage?: TitleUsageCallback,
+	isCapped?: () => boolean,
 ): Promise<string | null> {
 	const models = getTitleModels(registry, settings, currentModel);
 	if (models.length === 0) {
@@ -307,6 +315,7 @@ export async function generateTitleOnline(
 		customSystemPrompt,
 		credentialSourceSessionId,
 		onUsage,
+		isCapped,
 	);
 }
 
@@ -320,6 +329,7 @@ async function generateTitleOnlineWithModels(
 	customSystemPrompt?: string,
 	credentialSourceSessionId?: string,
 	onUsage?: TitleUsageCallback,
+	isCapped?: () => boolean,
 ): Promise<string | null> {
 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
 	// The model is always asked to wrap the title in `<title>...</title>` and
@@ -340,10 +350,10 @@ async function generateTitleOnlineWithModels(
 		};
 		logger.debug("title-generator: start", modelContext);
 
-		if (signal?.aborted) {
+		if (signal?.aborted || isCapped?.()) {
 			logger.debug("title-generator: aborted before attempt", {
 				...modelContext,
-				reason: "aborted",
+				reason: isCapped?.() ? "cost-cap" : "aborted",
 			});
 			return null;
 		}
@@ -362,10 +372,10 @@ async function generateTitleOnlineWithModels(
 				logger.warn("title-generator: no API key", { ...modelContext, reason: "missing-api-key" });
 				continue;
 			}
-			if (signal?.aborted) {
+			if (signal?.aborted || isCapped?.()) {
 				logger.debug("title-generator: aborted after credential", {
 					...modelContext,
-					reason: "aborted",
+					reason: isCapped?.() ? "cost-cap" : "aborted",
 				});
 				return null;
 			}
@@ -383,8 +393,18 @@ async function generateTitleOnlineWithModels(
 			if (model.supportsAssistantPrefill) messages.push(titlePrefill(model));
 
 			const response = await retryTransientCompletion(
-				() =>
-					completeSimple(
+				async () => {
+					if (signal?.aborted || isCapped?.()) {
+						return {
+							role: "assistant",
+							content: [],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							stopReason: "aborted",
+						};
+					}
+					const attemptResponse = await completeSimple(
 						model,
 						{
 							systemPrompt,
@@ -403,26 +423,35 @@ async function generateTitleOnlineWithModels(
 							metadata,
 							signal,
 						},
-					),
+					);
+
+					if (attemptResponse.usage) {
+						try {
+							onUsage?.({
+								purpose: "title",
+								api: model.api,
+								provider: model.provider,
+								model: model.id,
+								usage: attemptResponse.usage,
+								stopReason: attemptResponse.stopReason,
+								...(attemptResponse.errorMessage ? { errorMessage: attemptResponse.errorMessage } : {}),
+							});
+						} catch (error) {
+							logger.debug("title-generator: usage callback failed", {
+								error: error instanceof Error ? error.message : String(error),
+							});
+						}
+					}
+
+					return attemptResponse;
+				},
 				{ signal, provider: model.provider },
 			);
 
-			if (response.usage) {
-				onUsage?.({
-					purpose: "title",
-					api: model.api,
-					provider: model.provider,
-					model: model.id,
-					usage: response.usage,
-					stopReason: response.stopReason,
-					...(response.errorMessage ? { errorMessage: response.errorMessage } : {}),
-				});
-			}
-
-			if (response.stopReason === "aborted" || signal?.aborted) {
+			if (response.stopReason === "aborted" || signal?.aborted || isCapped?.()) {
 				logger.debug("title-generator: aborted", {
 					...modelContext,
-					reason: "aborted",
+					reason: isCapped?.() ? "cost-cap" : "aborted",
 					stopReason: response.stopReason,
 				});
 				return null;

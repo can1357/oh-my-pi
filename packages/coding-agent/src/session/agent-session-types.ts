@@ -654,6 +654,12 @@ export interface EphemeralTurnOptions {
 	maxContextBytes?: number;
 	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */
 	onTextDelta?: (delta: string) => void | Promise<void>;
+	/**
+	 * Receives billed model usage for every side turn that reached the provider,
+	 * including one that ends in an error event, so off-transcript callers can
+	 * journal the spend. Must not throw.
+	 */
+	onUsage?: (message: AssistantMessage) => void;
 	signal?: AbortSignal;
 	dedupeReply?: boolean;
 	/** UTF-8 byte cap of the deduped reply (default 4 KiB); `Infinity` keeps a long answer whole. */

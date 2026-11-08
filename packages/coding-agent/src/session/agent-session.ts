@@ -11288,13 +11288,44 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const { sessionId } = input;
 		this.#titleGenerationInFlightFor = sessionId;
 		const signal = this.#titleGenerationAbortController.signal;
+		const costGate = this.#costGate;
+		if (signal.aborted || costGate.check()) return;
 		const started = performance.now();
 		const icons = this.#cardIcons();
+		const usageOwner = {
+			sessionId,
+			parentId: this.sessionManager.getLeafId(),
+		};
 		this.runEphemeralTurn({
 			promptText: prompt.render(titleForkPrompt, {
 				card: icons !== "boring",
 				nerdFonts: icons === "nf+emoji",
 			}),
+			onUsage: message => {
+				try {
+					const entryId = this.sessionManager.appendModelUsage(
+						{
+							purpose: "title",
+							api: message.api,
+							provider: message.provider,
+							model: message.model,
+							usage: message.usage,
+							stopReason: message.stopReason,
+							...(message.errorMessage ? { errorMessage: message.errorMessage } : {}),
+						},
+						usageOwner,
+					);
+					if (entryId) usageOwner.parentId = entryId;
+					if (message.usage?.cost?.total) {
+						costGate.record(message.usage.cost.total);
+					}
+				} catch (error) {
+					logger.debug("title-generator: fork usage accounting failed", {
+						sessionId,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			},
 			signal: AbortSignal.any([signal, AbortSignal.timeout(TITLE_FORK_TIMEOUT_MS)]),
 		})
 			.then(
@@ -11354,7 +11385,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#fallBackFromTitleFork(input: TitleInput, signal: AbortSignal): void {
-		if (signal.aborted) {
+		if (signal.aborted || this.#costGate.check()) {
 			this.#cancelTitle(input.sessionId);
 			return;
 		}
@@ -11473,11 +11504,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const parentSessionId = this.sessionId;
 		const sessionGeneration = this.#sessionGeneration;
 		const sessionId = this.#resolveTitleProviderSessionId(parentSessionId);
+		const costGate = this.#costGate;
 		const titleSignal = signal
 			? AbortSignal.any([signal, this.#titleGenerationAbortController.signal])
 			: this.#titleGenerationAbortController.signal;
 		// A capped session sends no further model requests, titles included.
-		if (titleSignal.aborted || this.#costGate.check()) return null;
+		if (titleSignal.aborted || costGate.check()) return null;
 		const usageOwner = {
 			sessionId: parentSessionId,
 			parentId: this.sessionManager.getLeafId(),
@@ -11500,7 +11532,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						const entryId = this.sessionManager.appendModelUsage(usage, usageOwner);
 						if (entryId) usageOwner.parentId = entryId;
 						if (usage.usage?.cost?.total) {
-							this.#costGate.record(usage.usage.cost.total);
+							costGate.record(usage.usage.cost.total);
 						}
 					} catch (error) {
 						logger.debug("title-generator: failed to append model usage", {
@@ -11508,6 +11540,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						});
 					}
 				},
+				() => Boolean(costGate.check()),
 			),
 		);
 		if (await this.#sessionGenerationChanged(sessionGeneration)) return null;
@@ -13334,9 +13367,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					assistantMessage = this.#obfuscator?.hasSecrets()
 						? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
 						: { ...event.message, content: rawContent };
+					if (assistantMessage.usage) {
+						try {
+							args.onUsage?.(assistantMessage);
+						} catch (error) {
+							logger.debug("ephemeral-turn: usage callback failed", {
+								error: error instanceof Error ? error.message : String(error),
+							});
+						}
+					}
 					break;
 				}
 				if (event.type === "error") {
+					if (event.error?.usage) {
+						try {
+							args.onUsage?.(event.error);
+						} catch (error) {
+							logger.debug("ephemeral-turn: usage callback failed", {
+								error: error instanceof Error ? error.message : String(error),
+							});
+						}
+					}
 					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
 				}
 			}
