@@ -2959,7 +2959,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			disconnectFromAgent: () => this.#disconnectFromAgent(),
 			reconnectToAgent: () => this.#reconnectToAgent(),
 			drainStrandedQueuedMessages: () => this.#drainStrandedQueuedMessages(),
-			buildDisplaySessionContext: () => this.buildDisplaySessionContext(),
+			buildDisplaySessionContext: model => this.buildDisplaySessionContext(model),
 			replaceMessagesFromSessionContext: messages => this.replaceMessagesFromSessionContext(messages),
 			persistEvalStateContext: () => {
 				// The rewritten history carries no snapshot yet, so always build one.
@@ -13012,6 +13012,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#emit({ type: "model_changed" });
 		}
 
+		// A model that cannot replay the latest provider-native compaction reads
+		// the history behind it instead (see `BuildSessionContextOptions.model`):
+		// rebuild the context whenever the two models stand on different boundaries.
+		if (isChanging && this.#providerBoundary.readsOtherCompaction(currentModel, model)) {
+			this.agent.replaceMessages(this.buildDisplaySessionContext(model).messages);
+		}
+
 		await this.#reconcileModelDependentState(model);
 	}
 
@@ -13935,9 +13942,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						: `Could not restore model ${targetModelStrings[0]}`;
 				}
 			}
-			// The first build used the departing model's frame budget; size the
-			// archive for the model this session is about to adopt.
-			if (targetModel && frameDataBytesBudget(targetModel) !== frameDataBytesBudget(this.model)) {
+			// The first build was read by the departing model; rebuild it for the
+			// model this session is about to adopt when that one sizes the archive
+			// differently or stands on another compaction boundary.
+			if (
+				targetModel &&
+				(frameDataBytesBudget(targetModel) !== frameDataBytesBudget(this.model) ||
+					this.#providerBoundary.readsOtherCompaction(targetModel, this.model))
+			) {
 				sessionContext = this.buildDisplaySessionContext(targetModel);
 			}
 			const didReloadConversationChange =
@@ -14781,6 +14793,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Update agent state — build display context to populate agent messages.
 		const stateContext = this.sessionManager.buildSessionContext({
 			maxFrameDataBytes: frameDataBytesBudget(this.model),
+			model: this.model,
 		});
 		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
 		this.replaceMessagesFromSessionContext(displayContext.messages);
@@ -14813,6 +14826,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			});
 			const rawContext = this.sessionManager.buildSessionContext({
 				maxFrameDataBytes: frameDataBytesBudget(this.model),
+				model: this.model,
 			});
 			return {
 				editorText,

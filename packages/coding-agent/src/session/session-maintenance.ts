@@ -21,6 +21,7 @@ import {
 	type CompactionResult,
 	type CompactionSummaryMessage,
 	calculateContextTokens,
+	canReplayRemoteCompactionFrom,
 	collectShakeRegions,
 	COMPACTION_RECOVERY_BAND,
 	compact,
@@ -110,7 +111,12 @@ import {
 	resolveRoleModelFull,
 } from "./role-models";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
-import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
+import {
+	buildSessionContext,
+	getLatestCompactionEntry,
+	getOpenAiRemoteCompactionPayload,
+	getReadableCompactionEntry,
+} from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
@@ -457,7 +463,8 @@ export interface SessionMaintenanceHost {
 	disconnectFromAgent(): void;
 	reconnectToAgent(): void;
 	drainStrandedQueuedMessages(): void;
-	buildDisplaySessionContext(): SessionContext;
+	/** The stored context as `model` reads it (the active model when omitted). */
+	buildDisplaySessionContext(model?: Model): SessionContext;
 	/** Adopt a {@link buildDisplaySessionContext} result as the live history, persisting any snapshot it appended. */
 	replaceMessagesFromSessionContext(messages: AgentMessage[]): void;
 	/** Preserve the eval runtime snapshot at the history rewrite boundary for replay. */
@@ -634,11 +641,12 @@ export class SessionMaintenance {
 		return this.#host.agent.tokenizer;
 	}
 
-	/** Frame budget and blob resolution that rebuild a branch's context as the live session sends it. */
+	/** Frame budget, blob resolution and reading model that rebuild a branch's context as the live session sends it. */
 	get #contextBuildOptions(): BuildSessionContextOptions {
 		return {
 			maxFrameDataBytes: snapcompact.frameDataBytesBudget(this.#model),
 			resolveFrameData: data => this.#host.sessionManager.resolveFrameData(data),
+			model: this.#model,
 		};
 	}
 
@@ -1333,7 +1341,14 @@ export class SessionMaintenance {
 			}
 
 			const compactionSettings = this.#compactionSettings;
-			methods = resolveCompactionMethodOrder(compactMode?.overrides.methodOrder ?? compactionSettings.methodOrder);
+			// A reader that cannot replay the active model's native payload rules out the remote method; its
+			// native lanes run before a configured endpoint, so an endpoint does not make it portable.
+			const readerModel = options?.readerModel;
+			methods = resolveCompactionMethodOrder(
+				compactMode?.overrides.methodOrder ?? compactionSettings.methodOrder,
+			).filter(
+				method => method !== "remote" || !readerModel || canReplayRemoteCompactionFrom(activeModel, readerModel),
+			);
 			const explicitSnapcompact = compactMode?.name === "snapcompact";
 			const runsManually = (method: CompactionMethod): boolean => {
 				switch (method) {
@@ -1371,13 +1386,17 @@ export class SessionMaintenance {
 			const effectiveSettings = resolveMethodSettings(compactionSettings, selectedMethod);
 			const availableModels = this.#host.modelRegistry.getAvailable();
 			const requireProviderRemote = selectedMethod === "remote" && !effectiveSettings.remoteEndpoint;
+			const remoteReader = selectedMethod === "remote" ? options?.readerModel : undefined;
 			const compactionCandidates = this.#getCompactionModelCandidates(
 				availableModels,
-				requireProviderRemote
-					? candidate => canUseLiveProviderNativeCompaction(candidate, activeModel, effectiveSettings)
+				requireProviderRemote || remoteReader
+					? candidate =>
+							(!requireProviderRemote ||
+								canUseLiveProviderNativeCompaction(candidate, activeModel, effectiveSettings)) &&
+							(!remoteReader || canReplayRemoteCompactionFrom(candidate, remoteReader))
 					: undefined,
 			);
-			if (requireProviderRemote && compactionCandidates.length === 0) {
+			if ((requireProviderRemote || remoteReader) && compactionCandidates.length === 0) {
 				this.#host.emitNotice(
 					"warning",
 					`remote compaction is unavailable for ${activeModel.id}; trying the next preferred method`,
@@ -3678,6 +3697,16 @@ export class SessionMaintenance {
 		if (!candidate) return undefined;
 		if (modelsAreEqual(candidate, currentModel)) return undefined;
 		if (candidate.contextWindow == null || candidate.contextWindow <= contextWindow) return undefined;
+		// A larger window only helps when the target reads this same context. One
+		// that cannot replay the compaction it stands on reads the history behind
+		// it instead, so promote only when that history fits too.
+		const branch = this.#host.sessionManager.getBranch();
+		if (
+			getReadableCompactionEntry(branch, candidate) !== getReadableCompactionEntry(branch, currentModel) &&
+			!this.contextFitsModel(candidate)
+		) {
+			return undefined;
+		}
 		const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
 		if (!apiKey) return undefined;
 		return candidate;
@@ -4379,7 +4408,7 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Whether the current stored context fits `model`'s usable window
+	 * Whether the stored context, as `model` reads it, fits `model`'s usable window
 	 * (`contextWindow - reserve`), using the same reserve resolution as
 	 * compaction. This is deliberately independent of `compaction.enabled`: an
 	 * oversized request overflows the provider whether or not compaction would
@@ -4398,11 +4427,17 @@ export class SessionMaintenance {
 	 * turn that will be removed before retrying; subtracting it makes the selector
 	 * judge the request that will actually be sent. When the window is unknown we
 	 * cannot evaluate the budget, so we optimistically report a fit (preserving
-	 * prior behavior).
+	 * prior behavior). A model that stands on another compaction boundary (see
+	 * `BuildSessionContextOptions.model`) is judged on its own rebuilt context,
+	 * so a switch never lands on re-expanded history its window cannot hold.
 	 */
 	contextFitsModel(model: Model, excludedMessage?: AssistantMessage): boolean {
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return true;
+		const fitBudget = Math.max(
+			0,
+			contextWindow - resolveBudgetReserveTokens(contextWindow, this.#compactionSettings),
+		);
 		const messages = this.#host.messages();
 		const activeExcludedMessage = excludedMessage && messages.includes(excludedMessage) ? excludedMessage : undefined;
 		// Provider usage describes the active model's last request, so the failed
@@ -4420,6 +4455,35 @@ export class SessionMaintenance {
 		const storedExcludedTokens = activeExcludedMessage
 			? tokenizer.countMessage(activeExcludedMessage, { excludeEncryptedReasoning: true })
 			: 0;
+		const branch = this.#host.sessionManager.getBranch();
+		if (
+			this.#model &&
+			getReadableCompactionEntry(branch, model) !== getReadableCompactionEntry(branch, this.#model)
+		) {
+			// `model` stands on another compaction boundary than the active model
+			// (it cannot replay a provider-native compaction, or can replay one the
+			// active model cannot), so neither the provider usage nor the live
+			// messages describe what it would be sent: count its own context.
+			const readerMessages = this.#host.buildDisplaySessionContext(model).messages;
+			// The rebuild can return copies (secret deobfuscation), so the failed turn also matches by what
+			// it holds; at most one message is dropped, newest first, so an earlier reply sharing its
+			// millisecond stays counted.
+			const excludedIndex = activeExcludedMessage
+				? readerMessages.findLastIndex(
+						message =>
+							message === activeExcludedMessage ||
+							(message.role === "assistant" &&
+								message.timestamp === activeExcludedMessage.timestamp &&
+								Bun.deepEquals(message.content, activeExcludedMessage.content)),
+					)
+				: -1;
+			const sentMessages =
+				excludedIndex === -1 ? readerMessages : readerMessages.filter((_, index) => index !== excludedIndex);
+			const readerTokens =
+				computeNonMessageTokens(this.#host.nonMessageTokenSource(), tokenizer, this.#host.settings.revision) +
+				tokenizer.countMessages(sentMessages, { excludeEncryptedReasoning: true });
+			return readerTokens <= fitBudget;
+		}
 		// Provider usage carries the reasoning the active model's request replayed,
 		// so it moves into `model`'s domain by the difference in replayed
 		// reasoning. Usage leaves out the anchor turn's own output, so this may
@@ -4430,7 +4494,6 @@ export class SessionMaintenance {
 			replayedReasoningShift =
 				tokenizer.replayedReasoningTokens(retained) - this.#tokenizer.replayedReasoningTokens(retained);
 		}
-		const compactionSettings = this.#compactionSettings;
 		const residualTokens = compactionContextTokens(
 			Math.max(
 				0,
@@ -4447,7 +4510,6 @@ export class SessionMaintenance {
 				) - storedExcludedTokens,
 			),
 		);
-		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		return residualTokens <= fitBudget;
 	}
 

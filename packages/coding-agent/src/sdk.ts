@@ -237,7 +237,7 @@ import {
 	resolveRetryFallbackChainKey,
 } from "./session/retry-fallback-chains";
 import { describeUsageFallback } from "./session/retry-fallback-reason";
-import { getRestorableSessionModels } from "./session/session-context";
+import { getReadableCompactionEntry, getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { SHAPE_RULE } from "./spotlight/shape";
 import { buildCallContext } from "./spotlight/context";
@@ -4960,14 +4960,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Restore messages if session has existing data
 		if (hasExistingSession) {
-			// The restore above built its context at the default frame payload budget, before the session
-			// model was known; rebuild only when that model's budget differs.
+			// The restore above built its context before the session model was known: at the default frame
+			// payload budget, standing on the newest compaction. Rebuild only when that model sizes the archive
+			// differently or cannot replay that compaction.
 			const frameBudget = frameDataBytesBudget(model);
+			const branch = sessionManager.getBranch();
 			const restored =
-				frameBudget === DEFAULT_FRAME_DATA_BYTES_BUDGET
+				frameBudget === DEFAULT_FRAME_DATA_BYTES_BUDGET &&
+				getReadableCompactionEntry(branch, model) === getReadableCompactionEntry(branch, undefined)
 					? existingSession
 					: deobfuscateSessionContext(
-							sessionManager.buildSessionContext({ maxFrameDataBytes: frameBudget }),
+							sessionManager.buildSessionContext({ maxFrameDataBytes: frameBudget, model }),
 							obfuscator,
 						);
 			agent.replaceMessages(restored.messages);
