@@ -3485,6 +3485,19 @@ mod tests {
 				self.inner.apply(change)
 			}
 
+			fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+				// Refuse a batch containing a Job or Proc deletion, just as apply
+				// does.
+				if self.refuse > 0
+					&& writes.iter().any(|write| {
+						matches!(write, RestoreWrite::Delete(KeyBuf::Job(_) | KeyBuf::Proc(_)))
+					}) {
+					self.refuse -= 1;
+					return Err(StoreError::Backend("refused".into()));
+				}
+				self.inner.commit_restore(writes)
+			}
+
 			fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
 				self.inner.put_blob(slot, bytes)
 			}
@@ -3569,6 +3582,20 @@ mod tests {
 				self.inner.apply(change)
 			}
 
+			fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+				// Refuse the first batch writing BgPids, just as apply refuses its
+				// write.
+				if self.refuse
+					&& writes
+						.iter()
+						.any(|write| matches!(write, RestoreWrite::Put(KeyBuf::Misc(MiscKey::BgPids), _)))
+				{
+					self.refuse = false;
+					return Err(StoreError::Backend("refused once".into()));
+				}
+				self.inner.commit_restore(writes)
+			}
+
 			fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
 				self.inner.put_blob(slot, bytes)
 			}
@@ -3635,6 +3662,18 @@ mod tests {
 						return Err(StoreError::Backend("refused".into()));
 					}
 					self.0.apply(change)
+				}
+
+				fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+					// Refuse a batch containing any record deletion, just as apply
+					// does.
+					if writes
+						.iter()
+						.any(|write| matches!(write, RestoreWrite::Delete(_)))
+					{
+						return Err(StoreError::Backend("refused".into()));
+					}
+					self.0.commit_restore(writes)
 				}
 
 				fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
@@ -3706,6 +3745,21 @@ mod tests {
 					return Err(StoreError::Backend("proc change refused".into()));
 				}
 				self.inner.apply(change)
+			}
+
+			fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+				// Refuse a batch containing a Proc write or deletion while refusal
+				// is on.
+				if self.refuse
+					&& writes.iter().any(|write| {
+						matches!(
+							write,
+							RestoreWrite::Put(KeyBuf::Proc(_), _) | RestoreWrite::Delete(KeyBuf::Proc(_))
+						)
+					}) {
+					return Err(StoreError::Backend("proc change refused".into()));
+				}
+				self.inner.commit_restore(writes)
 			}
 
 			fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
@@ -3823,6 +3877,8 @@ mod tests {
 
 	/// Every length-four word over two-key writes/deletions, refusal modes,
 	/// replay and snapshot/restore must converge to the shell's desired records.
+	/// Its store double must refuse masked restore batches without changing
+	/// records or frames.
 	#[test]
 	fn proc_retry_exhaustive_two_key_sequences_preserve_owned_records() {
 		use crate::{
@@ -3862,6 +3918,23 @@ mod tests {
 				self.inner.apply(change)
 			}
 
+			fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+				// Refuse the whole batch at the first Proc mutation selected by the
+				// mask.
+				for write in &writes {
+					let bit = match write {
+						RestoreWrite::Put(KeyBuf::Proc(_), _) => 1,
+						RestoreWrite::Delete(KeyBuf::Proc(_)) => 2,
+						_ => 0,
+					};
+					if self.mask & bit != 0 {
+						self.refused += 1;
+						return Err(StoreError::Backend("proc intent refused".into()));
+					}
+				}
+				self.inner.commit_restore(writes)
+			}
+
 			fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
 				self.inner.put_blob(slot, bytes)
 			}
@@ -3878,6 +3951,51 @@ mod tests {
 				self.inner.epoch()
 			}
 		}
+		// Exercise the batch contract directly: runtime retries do not cover it.
+		for mask in [0, 1, 2] {
+			let mut store = Refusing { inner: MemStore::new(), mask, refused: 0 };
+			let vpid = Vpid(42);
+			store
+				.inner
+				.put_blob(BlobSlot::Frames, b"held frames")
+				.unwrap();
+			store
+				.inner
+				.apply(Change::Put(Key::Proc(vpid), Record::Proc {
+					parent: Some(Vpid(1)),
+					status: Some(23),
+				}))
+				.unwrap();
+			let before = store.inner.to_bytes();
+			let epoch = store.epoch();
+			let result = store.commit_restore(vec![
+				RestoreWrite::DeleteBlob(BlobSlot::Frames),
+				RestoreWrite::Put(KeyBuf::Proc(vpid), Record::Proc {
+					parent: Some(Vpid(1)),
+					status: Some(24),
+				}),
+				RestoreWrite::Delete(KeyBuf::Proc(vpid)),
+			]);
+			if mask == 0 {
+				result.unwrap();
+				assert!(store.get_blob(BlobSlot::Frames).unwrap().is_none());
+				assert!(store.get(Key::Proc(vpid)).unwrap().is_none());
+				assert_eq!(store.refused, 0);
+			} else {
+				assert!(
+					matches!(result, Err(StoreError::Backend(_))),
+					"batch must refuse masked Proc mutation {mask}"
+				);
+				assert_eq!(store.refused, 1);
+				assert_eq!(
+					store.inner.to_bytes(),
+					before,
+					"mask {mask} must preserve records and frames"
+				);
+				assert_eq!(store.epoch(), epoch, "mask {mask} must preserve the epoch");
+			}
+		}
+
 		fn records(store: &mut dyn StateStore) -> Vec<(KeyBuf, Record)> {
 			let mut got = Vec::new();
 			store
