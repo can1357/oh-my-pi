@@ -737,6 +737,16 @@ export async function refreshAgentDiscovery(cwd: string, extensionRoots?: Effect
 // Tool Class
 // ═══════════════════════════════════════════════════════════════════════════
 
+interface TaskDispatchEvidence {
+	activeLaunchSessions: Map<string, Set<TaskLaunchSession>>;
+	activeDispatches: Map<string, number>;
+	dispatchedCallIds: Set<string>;
+	saturated: boolean;
+}
+
+// Tool factories can recreate TaskTool while the same session still owns runs.
+const taskDispatchEvidence = new WeakMap<ToolSession, TaskDispatchEvidence>();
+
 /**
  * Task tool - Delegate tasks to specialized agents.
  *
@@ -860,12 +870,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	};
 	/** Streamed calls' speculative launches, keyed by tool-call id until dispatch adopts or discards them. */
 	readonly #launchSessions = new Map<string, TaskLaunchSession>();
-	readonly #activeLaunchSessions = new Map<string, Set<TaskLaunchSession>>();
-	// IDs can be reused or dispatched concurrently, including after a discarded
-	// session. Never consume this evidence. Saturate instead of evicting it:
-	// after the cap, absence of an ID is no longer proof that it never launched.
-	readonly #speculativeCallIds = new Set<string>();
-	#speculativeHistorySaturated = false;
+	readonly #dispatchEvidence: TaskDispatchEvidence;
 	readonly #launcher: TaskLauncher = {
 		spawns: args => {
 			const plan = planSpawns(
@@ -897,15 +902,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					launcher: this.#launcher,
 					onClose: () => {
 						if (this.#launchSessions.get(id) === session) this.#launchSessions.delete(id);
-						const active = this.#activeLaunchSessions.get(id);
+						const active = this.#dispatchEvidence.activeLaunchSessions.get(id);
 						active?.delete(session);
-						if (active?.size === 0) this.#activeLaunchSessions.delete(id);
+						if (active?.size === 0) this.#dispatchEvidence.activeLaunchSessions.delete(id);
 					},
 				});
 				this.#launchSessions.set(id, session);
-				const active = this.#activeLaunchSessions.get(id) ?? new Set<TaskLaunchSession>();
+				const active = this.#dispatchEvidence.activeLaunchSessions.get(id) ?? new Set<TaskLaunchSession>();
 				active.add(session);
-				this.#activeLaunchSessions.set(id, active);
+				this.#dispatchEvidence.activeLaunchSessions.set(id, active);
 				return session;
 			},
 		},
@@ -979,6 +984,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		private readonly session: ToolSession,
 		discoveredAgents: AgentDefinition[],
 	) {
+		let evidence = taskDispatchEvidence.get(session);
+		if (!evidence) {
+			evidence = {
+				activeLaunchSessions: new Map(),
+				activeDispatches: new Map(),
+				dispatchedCallIds: new Set(),
+				saturated: false,
+			};
+			taskDispatchEvidence.set(session, evidence);
+		}
+		this.#dispatchEvidence = evidence;
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
 		this.#discoveredAgents = discoveredAgents;
 	}
@@ -1104,8 +1120,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			cfgAsyncEnabled.get(this.session.settings) && this.session.asyncJobManager !== undefined && !blocking;
 		const agentId = await this.#outputManager().allocate(spawn.name?.trim() || generateTaskName());
 		if (signal.aborted) return undefined;
-		if (this.#speculativeCallIds.size < 1024) this.#speculativeCallIds.add(toolCallId);
-		else if (!this.#speculativeCallIds.has(toolCallId)) this.#speculativeHistorySaturated = true;
+		this.#recordDispatch(toolCallId);
 		return this.#launch({ toolCallId, params: spawn, index, agentId, detached });
 	}
 
@@ -1156,6 +1171,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return new TaskTool(session, agents);
 	}
 
+	#recordDispatch(toolCallId: string): void {
+		const evidence = this.#dispatchEvidence;
+		// Never evict evidence: saturation makes all subsequent outcomes unknown.
+		if (evidence.dispatchedCallIds.size < 1024) evidence.dispatchedCallIds.add(toolCallId);
+		else if (!evidence.dispatchedCallIds.has(toolCallId)) evidence.saturated = true;
+	}
+
 	async execute(
 		toolCallId: string,
 		rawParams: unknown,
@@ -1164,11 +1186,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const launchSession = this.#launchSessions.get(toolCallId);
 		this.#launchSessions.delete(toolCallId);
+		const active = this.#dispatchEvidence.activeDispatches;
+		active.set(toolCallId, (active.get(toolCallId) ?? 0) + 1);
 		try {
 			return await this.#dispatch(toolCallId, rawParams, launchSession, signal, onUpdate);
 		} finally {
 			// No-op once dispatch adopted; otherwise nothing launched early may outlive the call.
 			launchSession?.discard("task call settled without adopting speculative launches");
+			const remaining = active.get(toolCallId)! - 1;
+			if (remaining === 0) active.delete(toolCallId);
+			else active.set(toolCallId, remaining);
 		}
 	}
 
@@ -1184,9 +1211,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			// still awaiting authorization or preflight.
 			launchSession?.discard("task call rejected before dispatch");
 			const dispatchOutcome =
-				this.#speculativeHistorySaturated ||
-				this.#speculativeCallIds.has(toolCallId) ||
-				this.#activeLaunchSessions.has(toolCallId)
+				this.#dispatchEvidence.saturated ||
+				this.#dispatchEvidence.dispatchedCallIds.has(toolCallId) ||
+				this.#dispatchEvidence.activeLaunchSessions.has(toolCallId) ||
+				(this.#dispatchEvidence.activeDispatches.get(toolCallId) ?? 0) > 1
 					? undefined
 					: "rejected-before-dispatch";
 			return createTaskModeError(text, dispatchOutcome);
@@ -1254,6 +1282,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					.join("\n"),
 			);
 		}
+		// Dispatch or adoption may now begin, including for a reused call id.
+		this.#recordDispatch(toolCallId);
 		const policies = preflights.map(preflight => preflight.policy!);
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
 

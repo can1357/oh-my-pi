@@ -188,6 +188,25 @@ describe("SDK async task guidance", () => {
 		expect((result.details as TaskToolDetails).async?.state).toBe("running");
 	});
 
+	it("keeps reused non-speculative call IDs unknown after another dispatch", async () => {
+		const { session } = await harness();
+		const task = session.getToolByName("task")!;
+		await task.execute("reused", { agent: "task", name: "worker", task: "Work" });
+		const rejected = await task.execute("reused", { agent: "missing", name: "invalid", task: "Work" });
+		expect(rejected.isError).toBe(true);
+		expect((rejected.details as TaskToolDetails).dispatchOutcome).toBeUndefined();
+	});
+
+	it("keeps concurrent executions with the same call ID unknown", async () => {
+		const { session } = await harness();
+		const task = session.getToolByName("task")!;
+		const running = task.execute("concurrent", { agent: "task", name: "worker", task: "Work" });
+		const rejected = await task.execute("concurrent", { agent: "missing", name: "invalid", task: "Work" });
+		expect(rejected.isError).toBe(true);
+		expect((rejected.details as TaskToolDetails).dispatchOutcome).toBeUndefined();
+		await running;
+	});
+
 	it("does not classify a job registration failure as a pre-dispatch rejection", async () => {
 		const { session } = await harness();
 		vi.spyOn(session.asyncJobManager!, "register").mockImplementation(() => {

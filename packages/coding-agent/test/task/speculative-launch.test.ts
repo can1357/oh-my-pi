@@ -186,6 +186,46 @@ describe("task speculative launch", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
+	it("retains dispatch evidence when the task tool is recreated for the same session", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.push(manager);
+		const toolSession = createSession(manager);
+		const original = await TaskTool.create(toolSession);
+		const replacement = await TaskTool.create(toolSession);
+		const invalid = { context: "ctx", tasks: [{ name: "Missing", agent: "missing", task: "Work." }] };
+		const running = original.execute("recreated", args);
+		const concurrent = await replacement.execute("recreated", invalid);
+		expect(concurrent.isError).toBe(true);
+		expect(concurrent.details?.dispatchOutcome).toBeUndefined();
+		await running;
+		await Promise.all([spawn("Alpha").started.promise, spawn("Beta").started.promise]);
+		const afterDispatch = await replacement.execute("recreated", invalid);
+		expect(afterDispatch.isError).toBe(true);
+		expect(afterDispatch.details?.dispatchOutcome).toBeUndefined();
+		for (const events of spawns.values()) events.release.resolve();
+		await Promise.all(manager.getAllJobs().map(job => job.promise));
+		const afterCompletion = await replacement.execute("recreated", invalid);
+		expect(afterCompletion.details?.dispatchOutcome).toBeUndefined();
+		const independent = await replacement.execute("independent", invalid);
+		expect(independent.details?.dispatchOutcome).toBe("rejected-before-dispatch");
+	});
+
+	it("retains pending speculative session evidence across tool recreation", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.push(manager);
+		const toolSession = createSession(manager);
+		const original = await TaskTool.create(toolSession);
+		const session = await original.speculation.stream?.open({ coordinator: sink, parentToolCallId: toolCall.id });
+		if (!session) throw new Error("expected a task launch session");
+		const replacement = await TaskTool.create(toolSession);
+		const invalid = { context: "ctx", tasks: [{ name: "Missing", agent: "missing", task: "Work." }] };
+		const result = await replacement.execute(toolCall.id, invalid);
+		expect(result.details?.dispatchOutcome).toBeUndefined();
+		(session as TaskLaunchSession).discard("test complete");
+		const later = await replacement.execute(toolCall.id, invalid);
+		expect(later.details?.dispatchOutcome).toBe("rejected-before-dispatch");
+	});
+
 	it("starts each item as it closes and dispatch adopts the running agents", async () => {
 		const { tool, manager, session } = await openSession();
 
