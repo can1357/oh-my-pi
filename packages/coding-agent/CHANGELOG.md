@@ -6,6 +6,10 @@
 
 - Added `local/kokoro-zh`, a sherpa-onnx Kokoro-82M v1.1-zh local TTS model with Chinese/English voices. It downloads into the shared tiny-model cache through `omp setup speech` and works through the existing `speech` role.
 
+### Fixed
+
+- Speech vocalization now uses the model selected by the `speech` role instead of always loading the default English Kokoro model; the event controller wires the session settings and registry into the vocalizer.
+
 ### Breaking Changes
 
 - `logoutCredential()` now accepts an `AgentSession` instead of a model registry and session ID. Hosts must install a scoped-model refresher with `AgentSession.setScopedModelsRefresher()`; `InteractiveMode` and `InteractiveModeContext` no longer accept `refreshScopedModelsAfterLogin`.
