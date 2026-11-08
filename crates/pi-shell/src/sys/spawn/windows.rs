@@ -335,6 +335,10 @@ impl Pty {
 		let (reader, input) = io::pipe()?;
 		let sink = fs::File::options().write(true).open("NUL")?;
 		let mut hpc: HPCON = 0;
+		// No `PSEUDOCONSOLE_INHERIT_CURSOR`: only with it does the console
+		// host query the cursor (`ESC[6n`) and wait for the reply before its
+		// clients run (the hang `pi-natives`' `pty.rs` answers for
+		// portable-pty, which sets it), so the discarded output needs none.
 		// SAFETY: open handles (the console host duplicates them) and a
 		// writable `hpc`.
 		let hr =
