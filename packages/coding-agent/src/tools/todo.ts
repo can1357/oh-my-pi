@@ -655,13 +655,19 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 	const done = current.tasks.filter(task => task.status === "completed" || task.status === "abandoned").length;
 
 	const lines: string[] = [];
+	const fullList = readOnly || errors.length > 0;
 	if (errors.length > 0) lines.push(`Errors: ${errors.join("; ")}`);
 	if (remainingTasks.length === 0) {
 		lines.push("Remaining items: none.");
 	} else {
-		lines.push(`Remaining items (${remainingTasks.length}):`);
+		lines.push(
+			fullList
+				? `Remaining items (${remainingTasks.length}):`
+				: `Remaining items: ${remainingTasks.length}. First remaining item:`,
+		);
 		for (const task of remainingTasks) {
 			lines.push(`  - ${task.content} [${task.status}] (${task.phase})`);
+			if (!fullList) break;
 		}
 	}
 	// Closed = completed + abandoned, mirroring the per-phase `done` count.
@@ -686,6 +692,10 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 				: "."
 		}`,
 	);
+	if (!fullList) {
+		lines.push('Use op: "view" for the full task list.');
+		return lines.join("\n");
+	}
 	for (const phase of phases) {
 		lines.push(`  ${phase.name}:`);
 		for (const task of phase.tasks) {
