@@ -1,7 +1,7 @@
 //! The shared engine: configuration and the compiled-unit cache.
 
 use std::{
-	collections::{HashMap, VecDeque},
+	collections::{HashMap, HashSet, VecDeque},
 	sync::Arc,
 };
 
@@ -80,7 +80,15 @@ pub struct Engine {
 	/// `$functions` bodies regenerated from function sources, by source
 	/// (regenerating means a parse; plugins scan `$functions` on every key).
 	bodies:       Mutex<HashMap<BString, BString>>,
+	/// The functions each zsh word code digest (`.zwc`) holds, by path,
+	/// with the modification time and size they were read at: an `$fpath`
+	/// search asks of the same digests for every function it resolves.
+	dumps:        Mutex<HashMap<BString, DumpFuncs>>,
 }
+
+/// A digest's function names, with the modification time (ns) and size
+/// of the file they were read from.
+type DumpFuncs = ((i64, u64), Arc<HashSet<BString>>);
 
 #[derive(Default)]
 struct UnitCache {
@@ -100,7 +108,36 @@ impl Engine {
 			patterns: PatternCache::default(),
 			zsh_patterns: ZshPatternCache::default(),
 			bodies: Mutex::new(HashMap::new()),
+			dumps: Mutex::new(HashMap::new()),
 		})
+	}
+
+	/// The functions (metafied names) of the digest `path` as last read,
+	/// while its modification time and size are still `stamp`.
+	pub(crate) fn dump_funcs(
+		&self,
+		path: &[u8],
+		stamp: (i64, u64),
+	) -> Option<Arc<HashSet<BString>>> {
+		self
+			.dumps
+			.lock()
+			.get(path)
+			.filter(|(s, _)| *s == stamp)
+			.map(|(_, f)| Arc::clone(f))
+	}
+
+	/// Remember the functions `funcs` of the digest `path` at `stamp`.
+	pub(crate) fn cache_dump_funcs(
+		&self,
+		path: &[u8],
+		stamp: (i64, u64),
+		funcs: Arc<HashSet<BString>>,
+	) {
+		self
+			.dumps
+			.lock()
+			.insert(BString::from(path), (stamp, funcs));
 	}
 
 	/// The compiled-arithmetic cache.

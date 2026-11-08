@@ -1006,8 +1006,10 @@ fn typeset_single(
 				.as_ref()
 				.is_none_or(|p| !matches!(scope, Where::Scope(s) if s == p.scope))
 			{
-				let exported = cur.map_or(0, |p| p.flags.bits() & PM_EXPORTED);
-				create_in(ex, partner, PmFlags::from_bits(exported), (0, 0), scope);
+				// `local -U path`: its uniqueness lives on the scalar's record
+				// ([`params::set_flags`]), local with it.
+				let kept = cur.map_or(0, |p| p.flags.bits() & PM_EXPORTED) | (flags & PM_UNIQUE);
+				create_in(ex, partner, PmFlags::from_bits(kept), (0, 0), scope);
 			}
 		} else {
 			// zsh `createparam` without `PM_LOCAL` over a private

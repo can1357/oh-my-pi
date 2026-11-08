@@ -19,6 +19,7 @@ use super::{
 use crate::bash::{
 	diag,
 	event::WaitKey,
+	fd::FdRef,
 	fs::{Access, FileKind, FsOp, FsPoll, OpenFlags, Stat, StatKind},
 	host::Deadline,
 	ids::Platform,
@@ -73,6 +74,38 @@ pub(super) fn fd_stat(vp: &Vproc, fd: i32) -> Option<Stat> {
 	})
 }
 
+/// `stat` (`follow`: not `lstat`) of `path`, continuing the one in flight
+/// in `sc`; `None` when it fails.
+fn poll_stat(
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	sc: &mut Scratch,
+	tcx: &mut Context<'_>,
+	path: &[u8],
+	follow: bool,
+) -> Poll<Option<Stat>> {
+	if let Some(fd) = dev_fd(path) {
+		return Poll::Ready(fd_stat(vp, fd));
+	}
+	let polled = match &mut sc.live {
+		Live::Stat(fut) => fut.poll(tcx),
+		_ => match cx.host.fs().stat(BStr::new(path), follow) {
+			FsPoll::Ready(polled) => Poll::Ready(polled),
+			FsPoll::Pending(mut fut) => {
+				let polled = fut.poll(tcx);
+				if polled.is_pending() {
+					sc.live = Live::Stat(fut);
+				}
+				polled
+			},
+		},
+	};
+	polled.map(|r| {
+		sc.live = Live::None;
+		r.ok()
+	})
+}
+
 /// Perform `probe` (or continue it); `Err` is the wait key while it is pending.
 pub fn perform(
 	k: &Kernel,
@@ -84,25 +117,17 @@ pub fn perform(
 	begin(sc, probe);
 	let mut tcx = Context::from_waker(&k.waker);
 	let res = match probe {
-		Probe::Stat { path, follow } => {
-			if let Some(fd) = dev_fd(path) {
-				return Ok(finish(sc, ProbeResult::Stat(fd_stat(vp, fd))));
-			}
-			let polled = match &mut sc.live {
-				Live::Stat(fut) => fut.poll(&mut tcx),
-				_ => match cx.host.fs().stat(BStr::new(path), *follow) {
-					FsPoll::Ready(polled) => Poll::Ready(polled),
-					FsPoll::Pending(mut fut) => {
-						let polled = fut.poll(&mut tcx);
-						if polled.is_pending() {
-							sc.live = Live::Stat(fut);
-						}
-						polled
-					},
-				},
+		Probe::Stat { path, follow } => match poll_stat(cx, vp, sc, &mut tcx, path, *follow) {
+			Poll::Ready(st) => ProbeResult::Stat(st),
+			Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Stat, path: path.clone() }),
+		},
+		Probe::StatAll { paths } => loop {
+			let done = sc.io().zsh().stats.len();
+			let Some(path) = paths.get(done) else {
+				break ProbeResult::Stats(std::mem::take(&mut sc.io().zsh().stats));
 			};
-			match polled {
-				Poll::Ready(polled) => ProbeResult::Stat(polled.ok()),
+			match poll_stat(cx, vp, sc, &mut tcx, path, true) {
+				Poll::Ready(st) => sc.io().zsh().stats.push(st),
 				Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Stat, path: path.clone() }),
 			}
 		},
@@ -223,6 +248,28 @@ pub fn perform(
 				}
 			}
 		},
+		Probe::DumpHas(q) => {
+			let (path, name) = (&q.path, &q.name);
+			let stamp = (q.mtime_ns, q.size);
+			let funcs = match k.engine.dump_funcs(path, stamp) {
+				Some(funcs) => funcs,
+				None => match read_file(&mut tcx, cx, sc, path) {
+					Poll::Ready(Ok(data)) => {
+						let funcs = super::zsh::zwc::DumpHeader::parse(&data).map_or_else(
+							|_| std::collections::HashSet::new(),
+							|head| head.loadable(&data),
+						);
+						let funcs = std::sync::Arc::new(funcs);
+						k.engine
+							.cache_dump_funcs(path, stamp, std::sync::Arc::clone(&funcs));
+						funcs
+					},
+					Poll::Ready(Err(_)) => std::sync::Arc::default(),
+					Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Open, path: path.clone() }),
+				},
+			};
+			ProbeResult::Ok(funcs.contains(name.as_slice()))
+		},
 		Probe::RealPath { path } => {
 			let polled = match &mut sc.live {
 				Live::Path(fut) => fut.poll(&mut tcx),
@@ -284,11 +331,11 @@ pub fn perform(
 		},
 		Probe::Ready { fd } => {
 			// `read -t 0`: is input available, without consuming it.
-			let handle = vp.fds.handle(*fd);
+			let handle = input_handle(k, vp, *fd);
 			ProbeResult::Ok(handle.is_open() && handle.poll_read(&mut tcx, &mut []).is_ready())
 		},
 		Probe::Input { fd, delim, lines, nchars, timeout_ns, .. } => {
-			let handle = vp.fds.handle(*fd);
+			let handle = input_handle(k, vp, *fd);
 			let seekable = handle.kind() == Some(FileKind::Regular);
 			// A Windows console in line mode ends a line with `\r\n`; a Unix
 			// terminal maps the `\r` to `\n` itself (ICRNL). Pipes and files
@@ -381,6 +428,15 @@ pub fn perform(
 	Ok(finish(sc, res))
 }
 
+/// The fd an input probe reads: `fd` of the table, or the shell's
+/// terminal for [`Probe::TERMINAL_FD`] (a closed fd when there is none).
+fn input_handle(k: &Kernel, vp: &Vproc, fd: i32) -> FdRef {
+	if fd == Probe::TERMINAL_FD {
+		return super::jobctl::open_key_terminal(k, vp).unwrap_or_else(|| vp.fds.handle(fd));
+	}
+	vp.fds.handle(fd)
+}
+
 /// Input read, with each `\r\n` turned into `\n` for a `console`'s lines.
 fn line_input(mut data: Vec<u8>, console: bool) -> BString {
 	if !console {
@@ -430,6 +486,9 @@ pub(super) fn begin(sc: &mut Scratch, probe: &Probe) {
 		io.search = None;
 		io.walk = None;
 		io.input.clear();
+		if let Some(z) = io.zsh.as_mut() {
+			z.stats.clear();
+		}
 		sc.live = Live::None;
 	}
 }

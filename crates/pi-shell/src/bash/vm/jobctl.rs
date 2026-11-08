@@ -39,7 +39,7 @@ use crate::bash::{
 	ir::{Opcode, Unit},
 	signal::{SigSet, Signal},
 	store::{KeyBuf, OptId, TrapKey},
-	term::{SetWhen, Termios},
+	term::{SetWhen, TermFlag, Termios},
 	zshopt::ZshOpt,
 };
 
@@ -1268,6 +1268,58 @@ pub const fn shell_modes(k: &Kernel) -> Option<&Termios> {
 /// line editor).
 pub fn set_shell_modes(k: &mut Kernel, modes: Termios) {
 	k.jobctl.modes = Some(modes);
+}
+
+/// The terminal `read -k`/`-q` reads keys from (zsh `bin_read`): a `zpty`
+/// command's own terminal in its session, else `SHTTY`, opened now when
+/// the shell has none yet (zsh opens `/dev/tty`). `None`: no terminal.
+pub fn key_terminal(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Option<FdRef> {
+	if let Some(ctty) = session_terminal(vp) {
+		return Some(ctty);
+	}
+	open_shtty(k, cx);
+	shtty_file(k)
+}
+
+/// [`key_terminal`] when already open (what a [`super::proc::Probe::Input`]
+/// of [`super::proc::Probe::TERMINAL_FD`] reads).
+pub fn open_key_terminal(k: &Kernel, vp: &Vproc) -> Option<FdRef> {
+	session_terminal(vp).or_else(|| shtty_file(k))
+}
+
+/// A `zpty` command's terminal ([`super::proc::VprocZsh::ctty`]).
+fn session_terminal(vp: &Vproc) -> Option<FdRef> {
+	vp.zsh.as_deref().and_then(|z| z.ctty.0.clone())
+}
+
+/// zsh `setcbreak` on `tty` for `read -k`/`-q`: no line editing, a read
+/// returns each key (echo stays). A non-interactive shell first takes
+/// the modes it puts back (`gettyinfo(&shttyinfo)`).
+pub fn set_cbreak(k: &mut Kernel, cx: &mut Cx<'_>, tty: &FdRef) {
+	let (Some(h), Some(term)) = (tty.os_handle(), cx.host.terminal()) else {
+		return;
+	};
+	let Ok(cur) = term.attrs(h) else {
+		return;
+	};
+	if !k.jobctl.interactive || k.jobctl.modes.is_none() {
+		k.jobctl.modes = Some(cur.clone());
+	}
+	let mut ti = cur;
+	ti.set(TermFlag::Icanon, false);
+	ti.min = 1;
+	ti.time = 0;
+	let _ = term.set_attrs(h, &ti, SetWhen::Drain);
+}
+
+/// After [`set_cbreak`]: back to the shell's modes (zsh
+/// `settyinfo(&shttyinfo)`).
+pub fn end_cbreak(k: &Kernel, cx: &mut Cx<'_>, tty: &FdRef) {
+	if let (Some(h), Some(term), Some(modes)) =
+		(tty.os_handle(), cx.host.terminal(), &k.jobctl.modes)
+	{
+		let _ = term.set_attrs(h, modes, SetWhen::Drain);
+	}
 }
 
 impl Shell {

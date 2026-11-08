@@ -3057,7 +3057,9 @@ pub enum FpFound {
 }
 
 /// zsh `getfpfunc`: the first regular file `name` in `dirs` (relative to
-/// `cwd`), answered through `ask`.
+/// `cwd`), answered through `ask`. Every `stat` of the search is asked at
+/// once ([`Probe::StatAll`]): one probe, not one per directory, each of
+/// which would restart the asking builtin.
 ///
 /// # Errors
 /// What `ask` fails with (a probe in flight).
@@ -3067,6 +3069,24 @@ pub fn getfpfunc<E>(
 	name: &[u8],
 	dirs: &[BString],
 ) -> Result<FpFound, E> {
+	use super::builtins::zsh_zcompile::fpath_stat_paths;
+	let paths: Vec<BString> = dirs
+		.iter()
+		.flat_map(|d| fpath_stat_paths(cwd, d, name))
+		.collect();
+	let stats = match ask(Probe::StatAll { paths: paths.clone() })? {
+		ProbeResult::Stats(stats) => stats,
+		_ => Vec::new(),
+	};
+	let known: std::collections::HashMap<&[u8], Option<crate::bash::fs::Stat>> =
+		paths.iter().map(|p| p.as_slice()).zip(stats).collect();
+	// The `stat`s of the batch are answered from it; reads go to `ask`.
+	let mut ask = |p: Probe| match &p {
+		Probe::Stat { path, follow: true } if known.contains_key(path.as_slice()) => {
+			Ok(ProbeResult::Stat(known[path.as_slice()]))
+		},
+		_ => ask(p),
+	};
 	for dir in dirs {
 		let mut rel = BString::from(dir.as_slice());
 		if !rel.is_empty() {
@@ -3081,7 +3101,9 @@ pub fn getfpfunc<E>(
 		if !regular {
 			// zsh loads a definition from word code alone (`DIR.zwc`,
 			// `DIR/NAME.zwc`, a digest in `$fpath`).
-			if let Some(dump) = super::builtins::zsh_zcompile::fpath_dump::<E>(ask, cwd, dir, name)? {
+			if let Some(dump) =
+				super::builtins::zsh_zcompile::fpath_dump::<E>(&mut ask, cwd, dir, name)?
+			{
 				return Ok(FpFound::Dump(dump));
 			}
 			continue;

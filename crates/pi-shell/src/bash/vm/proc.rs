@@ -1298,16 +1298,20 @@ pub struct ScratchZsh {
 	/// The `fcntl` lock a history file operation holds (zsh `flock_fd`,
 	/// `histfcntllock`), released with the op (not imaged).
 	pub hist_lock: Option<Box<dyn crate::bash::fs::File>>,
+	/// The results so far of the `StatAll` probe in flight (zsh's `$fpath`
+	/// search).
+	pub stats:     Vec<Option<crate::bash::fs::Stat>>,
 }
 
 impl ScratchZsh {
 	/// Clear for the next op, keeping the vectors' allocations.
 	fn clear(&mut self) {
-		let Self { zglob, multio, more, hist_lock } = self;
+		let Self { zglob, multio, more, hist_lock, stats } = self;
 		*zglob = None;
 		multio.clear();
 		more.clear();
 		*hist_lock = None;
+		stats.clear();
 	}
 }
 
@@ -1367,6 +1371,15 @@ pub struct RedirProgress {
 pub enum Probe {
 	/// `stat(path)` (`follow` = not `lstat`).
 	Stat { path: BString, follow: bool },
+	/// `stat` of each path, following links (zsh's `$fpath` search):
+	/// [`ProbeResult::Stats`]. One probe for a search that would otherwise
+	/// ask (and restart its builtin) once per path.
+	StatAll { paths: Vec<BString> },
+	/// Whether a zsh word code digest holds a loadable function
+	/// ([`DumpQuery`]): [`ProbeResult::Ok`]. Read once per digest and
+	/// remembered ([`crate::bash::Engine`]): an `$fpath` search asks of
+	/// the same digests for every function.
+	DumpHas(Box<DumpQuery>),
 	/// `access(path, mode bits)`.
 	Access { path: BString, mode: u8 },
 	/// PATH search for a command name over `$PATH` = `path`.
@@ -1381,7 +1394,9 @@ pub enum Probe {
 	/// of one command (continuation lines, `select` re-prompts); `timeout_ns`
 	/// gives up after that long without complete input (`read -t`, `TMOUT`).
 	/// Nothing past the end is consumed: a regular file's read-ahead is given
-	/// back, other fds are read a byte at a time.
+	/// back, other fds are read a byte at a time. `fd`
+	/// [`Probe::TERMINAL_FD`] reads the shell's terminal
+	/// ([`super::jobctl::open_key_terminal`]).
 	Input {
 		fd:         i32,
 		delim:      Option<u8>,
@@ -1416,10 +1431,31 @@ pub enum Probe {
 	Hist { seq: u32, op: Box<super::builtins::history::io::HistOp> },
 }
 
+/// The question of a [`Probe::DumpHas`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DumpQuery {
+	/// The digest.
+	pub path:     BString,
+	/// The function (metafied).
+	pub name:     BString,
+	/// The digest's modification time, as `stat` saw it.
+	pub mtime_ns: i64,
+	/// The digest's size, as `stat` saw it.
+	pub size:     u64,
+}
+
+impl Probe {
+	/// The `fd` of a [`Probe::Input`] or [`Probe::Ready`] that reads the
+	/// shell's terminal (`read -k`), not a descriptor of the fd table.
+	pub const TERMINAL_FD: i32 = i32::MIN;
+}
+
 /// Answer of a [`Probe`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProbeResult {
 	Stat(Option<crate::bash::fs::Stat>),
+	/// The answers of a [`Probe::StatAll`], in its order.
+	Stats(Vec<Option<crate::bash::fs::Stat>>),
 	Ok(bool),
 	Path(Option<BString>),
 	/// File contents, or the `strerror` text of the failure.
