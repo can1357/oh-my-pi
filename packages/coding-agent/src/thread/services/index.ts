@@ -6,6 +6,7 @@
 import type { ThreadService } from "../services";
 import { agentsThreadService } from "./agents";
 import { asyncJobsThreadService } from "./async-jobs";
+import { a2aOutgoingThreadService } from "./a2a-outgoing";
 import { authService } from "./auth";
 import { executorThreadService } from "./executor";
 import { identityThreadService } from "./identity";
@@ -32,6 +33,8 @@ export const THREAD_SERVICES: readonly ThreadService[] = [
 	integrationsThreadService,
 	runtimeThreadService,
 	asyncJobsThreadService,
+	// Before executor: a worker task run may register an outgoing A2A wait.
+	a2aOutgoingThreadService,
 	// Last: its entry points run subagents against every service above.
 	executorThreadService,
 ];

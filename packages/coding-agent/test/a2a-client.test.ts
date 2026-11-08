@@ -39,6 +39,7 @@ import {
 import { type AgentCard, buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { type A2aIncomingRequest, TASK_STATE } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
+import { type OutgoingRequest, OutgoingRequests } from "@oh-my-pi/pi-coding-agent/a2a/outgoing-requests";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SpawnSubagentOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
@@ -1580,5 +1581,242 @@ describe("a2a.name card propagation", () => {
 		} finally {
 			handle.stop();
 		}
+	});
+});
+
+function outgoingRequest(overrides: Partial<OutgoingRequest> = {}): OutgoingRequest {
+	return {
+		messageId: "m1",
+		peer: "peer-a",
+		ownerId: "owner-a",
+		jobId: "job-a",
+		deadline: null,
+		...overrides,
+	};
+}
+
+/** A settlement hook that pauses the first claim so a second transition can queue behind it. */
+function gateRegistry(): {
+	registry: OutgoingRequests;
+	entered: Promise<void>;
+	release: () => void;
+} {
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let calls = 0;
+	const registry = new OutgoingRequests({
+		beforeCommit: async () => {
+			calls++;
+			if (calls === 1) {
+				entered.resolve();
+				await release.promise;
+			}
+		},
+	});
+	return { registry, entered: entered.promise, release: () => release.resolve() };
+}
+
+function trackSettlement(promise: Promise<string>): { settled: () => boolean; result: Promise<string> } {
+	let settled = false;
+	const result = promise.then(
+		text => {
+			settled = true;
+			return text;
+		},
+		(error: unknown) => {
+			settled = true;
+			throw error;
+		},
+	);
+	return { settled: () => settled, result };
+}
+
+describe("outgoing request registry", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+		OutgoingRequests.resetGlobalForTests();
+	});
+
+	it("installs a process-wide singleton", () => {
+		const installed = new OutgoingRequests();
+		OutgoingRequests.installGlobal(installed);
+		expect(OutgoingRequests.global()).toBe(installed);
+		OutgoingRequests.resetGlobalForTests();
+		const created = OutgoingRequests.global();
+		expect(created).not.toBe(installed);
+		expect(created).toBeInstanceOf(OutgoingRequests);
+		expect(OutgoingRequests.global()).toBe(created);
+	});
+
+	it("settles only the matching peer and id, and a second resolve loses", async () => {
+		const registry = new OutgoingRequests();
+		await registry.register(outgoingRequest());
+		await registry.register(outgoingRequest({ messageId: "m2", peer: "peer-b", ownerId: "owner-b", jobId: "job-b" }));
+		const own = trackSettlement(registry.wait("m1"));
+		const other = trackSettlement(registry.wait("m2"));
+
+		expect(await registry.resolve("m1", "peer-b", "wrong peer")).toBe(false);
+		expect(await registry.resolve("missing", "peer-a", "unknown")).toBe(false);
+		expect(own.settled()).toBe(false);
+		expect(other.settled()).toBe(false);
+		expect(registry.hasOwner("owner-a")).toBe(true);
+		expect(registry.hasOwner("owner-b")).toBe(true);
+
+		expect(await registry.resolve("m1", "peer-a", "exact-a")).toBe(true);
+		expect(await own.result).toBe("exact-a");
+		expect(other.settled()).toBe(false);
+		expect(registry.hasOwner("owner-a")).toBe(false);
+		expect(registry.hasOwner("owner-b")).toBe(true);
+		expect(await registry.resolve("m1", "peer-a", "again")).toBe(false);
+		expect(other.settled()).toBe(false);
+
+		await registry.cancel("m2");
+		await expect(other.result).rejects.toThrow("cancelled");
+	});
+
+	it("rejects duplicate registration and keeps a fast reply for a late wait", async () => {
+		const registry = new OutgoingRequests();
+		await registry.register(outgoingRequest());
+		await expect(registry.register(outgoingRequest())).rejects.toThrow("already registered");
+
+		expect(await registry.resolve("m1", "peer-a", "fast reply")).toBe(true);
+		expect(registry.hasOwner("owner-a")).toBe(false);
+		expect(await registry.resolve("m1", "peer-a", "second")).toBe(false);
+		expect(await registry.wait("m1")).toBe("fast reply");
+		await expect(registry.wait("m1")).rejects.toThrow("unknown outgoing request");
+	});
+
+	it("fails a deadline with reply timeout and leaves a null deadline open under fake time", async () => {
+		vi.useFakeTimers();
+		const registry = new OutgoingRequests();
+		const deadline = Date.now() + 5_000;
+		await registry.register(outgoingRequest({ messageId: "timed", deadline }));
+		await registry.register(outgoingRequest({ messageId: "open", ownerId: "owner-open", jobId: "job-open" }));
+		await registry.register(
+			outgoingRequest({ messageId: "past", ownerId: "owner-past", jobId: "job-past", deadline: Date.now() - 1 }),
+		);
+		const timed = registry.wait("timed");
+		const open = trackSettlement(registry.wait("open"));
+		const past = registry.wait("past");
+
+		vi.advanceTimersByTime(1);
+		await expect(past).rejects.toThrow("reply timeout");
+		expect(registry.hasOwner("owner-past")).toBe(false);
+
+		vi.advanceTimersByTime(4_998);
+		await Promise.resolve();
+		expect(registry.hasOwner("owner-a")).toBe(true);
+		vi.advanceTimersByTime(1);
+		await expect(timed).rejects.toThrow("reply timeout");
+		expect(registry.hasOwner("owner-a")).toBe(false);
+
+		vi.advanceTimersByTime(60 * 60 * 1000);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(open.settled()).toBe(false);
+		expect(registry.hasOwner("owner-open")).toBe(true);
+		expect(await registry.cancel("open")).toBe(true);
+		await expect(open.result).rejects.toThrow("cancelled");
+	});
+
+	it("fail and cancel remove ownership and reject the waiter", async () => {
+		const registry = new OutgoingRequests();
+		await registry.register(outgoingRequest());
+		await registry.register(outgoingRequest({ messageId: "m2", peer: "peer-b", ownerId: "owner-b", jobId: "job-b" }));
+		const failed = registry.wait("m1");
+		const cancelled = registry.wait("m2");
+
+		expect(await registry.fail("m1", "delivery failed")).toBe(true);
+		await expect(failed).rejects.toThrow("delivery failed");
+		expect(registry.hasOwner("owner-a")).toBe(false);
+		expect(await registry.fail("m1", "again")).toBe(false);
+
+		expect(await registry.cancel("m2")).toBe(true);
+		await expect(cancelled).rejects.toThrow("cancelled");
+		expect(registry.hasOwner("owner-b")).toBe(false);
+		expect(await registry.cancel("m2")).toBe(false);
+		expect(await registry.cancel("missing")).toBe(false);
+	});
+
+	it("lets the first gated settlement win against a timeout", async () => {
+		vi.useFakeTimers();
+		const { registry, entered, release } = gateRegistry();
+		await registry.register(outgoingRequest({ deadline: Date.now() + 1_000 }));
+		const waiting = trackSettlement(registry.wait("m1"));
+
+		const resolving = registry.resolve("m1", "peer-a", "won the race");
+		await entered;
+		vi.advanceTimersByTime(1_000);
+		release();
+
+		expect(await resolving).toBe(true);
+		expect(await waiting.result).toBe("won the race");
+		expect(waiting.settled()).toBe(true);
+		expect(registry.hasOwner("owner-a")).toBe(false);
+		expect(await registry.resolve("m1", "peer-a", "late")).toBe(false);
+	});
+
+	it("lets a gated timeout win against resolve", async () => {
+		vi.useFakeTimers();
+		const { registry, entered, release } = gateRegistry();
+		await registry.register(outgoingRequest({ deadline: Date.now() + 1_000 }));
+		const waiting = registry.wait("m1");
+
+		vi.advanceTimersByTime(1_000);
+		await entered;
+		const resolving = registry.resolve("m1", "peer-a", "too late");
+		release();
+
+		expect(await resolving).toBe(false);
+		await expect(waiting).rejects.toThrow("reply timeout");
+		expect(registry.hasOwner("owner-a")).toBe(false);
+	});
+
+	it("lets the first gated settlement win between cancel and resolve", async () => {
+		const resolveFirst = gateRegistry();
+		await resolveFirst.registry.register(outgoingRequest());
+		const resolveWait = resolveFirst.registry.wait("m1");
+		const resolving = resolveFirst.registry.resolve("m1", "peer-a", "resolved");
+		await resolveFirst.entered;
+		const cancelling = resolveFirst.registry.cancel("m1");
+		resolveFirst.release();
+		expect(await resolving).toBe(true);
+		expect(await cancelling).toBe(false);
+		expect(await resolveWait).toBe("resolved");
+
+		const cancelFirst = gateRegistry();
+		await cancelFirst.registry.register(outgoingRequest({ messageId: "m2", jobId: "job-2" }));
+		const cancelWait = cancelFirst.registry.wait("m2");
+		const cancellingFirst = cancelFirst.registry.cancel("m2");
+		await cancelFirst.entered;
+		const resolvingSecond = cancelFirst.registry.resolve("m2", "peer-a", "nope");
+		cancelFirst.release();
+		expect(await cancellingFirst).toBe(true);
+		expect(await resolvingSecond).toBe(false);
+		await expect(cancelWait).rejects.toThrow("cancelled");
+		expect(cancelFirst.registry.hasOwner("owner-a")).toBe(false);
+	});
+
+	it("rejects a registration whose worker home has already exited", async () => {
+		const registry = new OutgoingRequests();
+		await registry.register(outgoingRequest(), "w-dead");
+		const waiting = registry.wait("m1");
+		await Promise.resolve();
+		expect(registry.hasWaiter("m1")).toBe(true);
+		registry.dropHome("w-dead");
+		await expect(waiting).rejects.toThrow("owner exited");
+		expect(registry.hasOwner("owner-a")).toBe(false);
+		expect(registry.hasWaiter("m1")).toBe(false);
+		expect(await registry.resolve("m1", "peer-a", "gone")).toBe(false);
+		await expect(registry.register(outgoingRequest(), "w-dead")).rejects.toThrow("owner exited");
+		expect(registry.hasOwner("owner-a")).toBe(false);
+
+		await registry.register(
+			outgoingRequest({ messageId: "live", ownerId: "live-owner", jobId: "live-job" }),
+			"w-live",
+		);
+		registry.dropHome("w-dead");
+		expect(registry.hasOwner("live-owner")).toBe(true);
+		await registry.cancel("live");
 	});
 });
