@@ -140,6 +140,7 @@
 - Edit auto-repair now accounts for retry costs and stops before exceeding the session cost cap.
 - MCP prompt commands now correctly assign positional arguments that follow `key=value` arguments.
 - `/shake thinking` now reports and preserves reasoning blocks that the provider continues to replay, avoiding inaccurate context-reduction claims.
+- Custom command packages, custom tools, and extension manifests that are symlinked into their discovery directory are now discovered instead of being dropped silently ([#18492](https://github.com/can1357/oh-my-pi/pull/18492))
 
 ## [18.18.1] - 2026-11-08
 
