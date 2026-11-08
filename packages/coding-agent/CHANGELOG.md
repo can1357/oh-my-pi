@@ -878,6 +878,7 @@
 - Edit auto-repair now accounts for retry costs and stops before exceeding the session cost cap.
 - MCP prompt commands now correctly assign positional arguments that follow `key=value` arguments.
 - `/shake thinking` now reports and preserves reasoning blocks that the provider continues to replay, avoiding inaccurate context-reduction claims.
+- Fixed `read` inlining unbounded text for an `artifact://` recovery read: the output is now paged at a per-call byte budget across all of the call's ranges, and the notice names the range to read next ([#15062](https://github.com/can1357/oh-my-pi/issues/15062), [#15172](https://github.com/can1357/oh-my-pi/pull/15172) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
