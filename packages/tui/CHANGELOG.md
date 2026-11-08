@@ -171,6 +171,7 @@
 - Fixed unnecessary repainting in the setup wizard while waiting for input in ANSI terminals.
 - Fixed Windows ConPTY event handling so delayed terminal event data no longer appears in the composer.
 - Fixed OSC 8 hyperlink support in Rex terminals so transcript URLs and file paths are command-clickable.
+- Diagnostics cards mark a file no language server reported on as unverified instead of counting it as clean, including reports that arrive after the edit has returned ([#15408](https://github.com/can1357/oh-my-pi/issues/15408), [#16463](https://github.com/can1357/oh-my-pi/pull/16463) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
@@ -185,7 +186,6 @@
 ### Fixed
 
 - Pinned sessions color their pin icon with the theme accent in the status line instead of the session title's color, matching the resume picker ([#18401](https://github.com/can1357/oh-my-pi/pull/18401) by [@SuperUserA](https://github.com/SuperUserA))
-- Diagnostics cards mark a file no language server reported on as unverified instead of counting it as clean, including reports that arrive after the edit has returned ([#15408](https://github.com/can1357/oh-my-pi/issues/15408), [#16463](https://github.com/can1357/oh-my-pi/pull/16463) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - A saved bash trace the shell visualization can no longer restore (e.g. a `tool_result` hook rewrote its `script`) renders as plain command and output instead of crashing the TUI and every `omp --resume` of that session ([#18338](https://github.com/can1357/oh-my-pi/issues/18338))
 - Tables with near-equal large numeric columns no longer crash transcript rendering during chart analysis ([#18343](https://github.com/can1357/oh-my-pi/issues/18343))
 - A JPEG truncated before its end-of-image marker is rejected when read and omitted from the request, instead of failing the whole provider request with "unsupported image" ([#18385](https://github.com/can1357/oh-my-pi/pull/18385) by [@iwangjie](https://github.com/iwangjie))
