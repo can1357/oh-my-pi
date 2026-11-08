@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { modelApiKeyCredential } from "@oh-my-pi/pi-catalog/types";
 import {
 	createConfigHeaderResolver,
 	invalidateAllCommandConfigs,
@@ -60,6 +61,43 @@ describe("async config header materialization", () => {
 		});
 
 		expect(await resolver?.()).toEqual({ Authorization: "Bearer sekret", "X-Keep": "k" });
+	});
+
+	it("carries the derived API key and its generation through nested composition", async () => {
+		const inner = createConfigHeaderResolver([], {
+			authHeader: true,
+			apiKeyConfig: "!printf %s test-a",
+		});
+		const outer = createConfigHeaderResolver([inner, { "X-Keep": "test-value" }]);
+		const headers = await outer?.();
+		expect(headers?.Authorization).toBe("Bearer test-a");
+		expect(headers?.["X-Keep"]).toBe("test-value");
+		expect(headers?.[modelApiKeyCredential]).toEqual({ apiKey: "test-a", credentialGeneration: 1 });
+	});
+
+	it.each(["Authorization", "authorization", "AUTHORIZATION"])(
+		"drops API-key provenance when a later %s header replaces the derived key",
+		async header => {
+			const inner = createConfigHeaderResolver([], {
+				authHeader: true,
+				apiKeyConfig: "!printf %s test-b",
+			});
+			const outer = createConfigHeaderResolver([inner, { [header]: "Bearer test-c" }]);
+			const headers = await outer?.();
+			expect(headers?.[header]).toBe("Bearer test-c");
+			expect(headers?.[modelApiKeyCredential]).toBeUndefined();
+		},
+	);
+
+	it("does not claim a derived API key when Authorization has case-duplicate values", async () => {
+		const resolver = createConfigHeaderResolver([{ authorization: "Bearer test-c" }], {
+			authHeader: true,
+			apiKeyConfig: "!printf %s test-d",
+		});
+		const headers = await resolver?.();
+		expect(headers?.authorization).toBe("Bearer test-c");
+		expect(headers?.Authorization).toBe("Bearer test-d");
+		expect(headers?.[modelApiKeyCredential]).toBeUndefined();
 	});
 
 	it("reads environment-backed values for every request", async () => {

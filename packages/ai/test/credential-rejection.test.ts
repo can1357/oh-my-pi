@@ -52,7 +52,7 @@ describe("credentialRejectionVerdict", () => {
 		const refusal = GATEWAY_REFUSALS[name]!;
 		const error = new ProviderHttpError(rawBodyMessage(refusal), 401);
 		expect(credentialRejectionVerdict(error)).toBe("structured");
-		expect(statesCredentialRejection(error)).toBe(true);
+		expect(statesCredentialRejection(credentialRejectionVerdict(error))).toBe(true);
 	});
 
 	it.each(Object.keys(GATEWAY_REFUSALS))("reads the structured class out of the rendering: %s", name => {
@@ -71,7 +71,7 @@ describe("credentialRejectionVerdict", () => {
 		const textOnly = new ProviderHttpError(`401 ${refusal.message}`, 401);
 		const verdict = credentialRejectionVerdict(textOnly);
 		expect(verdict).toBe("text");
-		expect(statesCredentialRejection(textOnly)).toBe(true);
+		expect(statesCredentialRejection(verdict)).toBe(true);
 	});
 
 	it("reads the assistant-message shape the stream driver carries", () => {
@@ -99,9 +99,9 @@ describe("credentialRejectionVerdict", () => {
 		expect(credentialRejectionVerdict(error)).toBe("status");
 		// Re-minting is still worth trying — HTTP's own meaning, and what omp
 		// did before the structured signal existed …
-		expect(isCredentialRejection(error)).toBe(true);
+		expect(isCredentialRejection(credentialRejectionVerdict(error))).toBe(true);
 		// … but the provider did not say so, so no credential is resent.
-		expect(statesCredentialRejection(error)).toBe(false);
+		expect(statesCredentialRejection(credentialRejectionVerdict(error))).toBe(false);
 	});
 
 	it("does not call a 401 a credential refusal when its own class says otherwise", () => {
@@ -110,7 +110,7 @@ describe("credentialRejectionVerdict", () => {
 		});
 		const error = new ProviderHttpError(`401 ${body}`, 401);
 		expect(credentialRejectionVerdict(error)).toBe("not-credential");
-		expect(isCredentialRejection(error)).toBe(false);
+		expect(isCredentialRejection(credentialRejectionVerdict(error))).toBe(false);
 	});
 
 	it.each(["token_not_found_in_db", "expired_key"])("recognizes LiteLLM's %s on both renderings", type => {
@@ -127,11 +127,15 @@ describe("credentialRejectionVerdict", () => {
 				const body = JSON.stringify({
 					error: { type: "auth_error", [field]: expiry, message: "Credential rejected." },
 				});
-				expect(isCredentialRejection(new ProviderHttpError(`403 ${body}`, 403))).toBe(true);
+				expect(isCredentialRejection(credentialRejectionVerdict(new ProviderHttpError(`403 ${body}`, 403)))).toBe(
+					true,
+				);
 			}
-			expect(isCredentialRejection(new ProviderHttpError("403 Forbidden (type=auth_error code=403)", 403))).toBe(
-				false,
-			);
+			expect(
+				isCredentialRejection(
+					credentialRejectionVerdict(new ProviderHttpError("403 Forbidden (type=auth_error code=403)", 403)),
+				),
+			).toBe(false);
 		},
 	);
 
@@ -141,7 +145,9 @@ describe("credentialRejectionVerdict", () => {
 		expect(credentialRejectionVerdict(new ProviderHttpError("500 server error", 500))).toBe("unclassified");
 		expect(credentialRejectionVerdict(new ProviderHttpError('404 {"detail":"Not Found"}', 404))).toBe("unclassified");
 		expect(credentialRejectionVerdict(undefined)).toBe("unclassified");
-		expect(isCredentialRejection(new ProviderHttpError("500 server error", 500))).toBe(false);
+		expect(isCredentialRejection(credentialRejectionVerdict(new ProviderHttpError("500 server error", 500)))).toBe(
+			false,
+		);
 	});
 
 	it("reads an OpenAI rejected key through the real response formatter", async () => {
@@ -209,7 +215,7 @@ describe("credentialRejectionVerdict", () => {
 		});
 		const error = new ProviderHttpError(`401 ${body}`, 401);
 		expect(credentialRejectionVerdict(error)).toBe("not-credential");
-		expect(isCredentialRejection(error)).toBe(false);
+		expect(isCredentialRejection(credentialRejectionVerdict(error))).toBe(false);
 	});
 
 	it("does not read a request-shape 401 as a credential refusal on its status code", () => {

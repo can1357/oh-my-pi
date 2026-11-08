@@ -23,6 +23,11 @@ export interface ApiKeyResolverOptions {
 	modelId?: string;
 }
 
+/** Registry-only recovery state; never forwarded to the durable credential store. */
+export interface ApiKeyResolverRequestOptions extends AuthApiKeyOptions {
+	invalidateOtherCommandConfigs?: boolean;
+}
+
 /**
  * Minimal slice of `ModelRegistry` the resolver needs. Typed structurally so
  * narrower registry shells (e.g. the commit pipeline's `CommitModelRegistry`)
@@ -34,7 +39,7 @@ export interface ApiKeyResolverRegistry {
 	getApiKeyWithCredentialForProvider(
 		provider: string,
 		sessionId?: string,
-		options?: AuthApiKeyOptions,
+		options?: ApiKeyResolverRequestOptions,
 	): Promise<ApiKeyResolution>;
 	authStorage: Pick<AuthStorage, "limits">;
 	/**
@@ -68,8 +73,12 @@ export function createApiKeyResolver(
 	const resolveKey = async (
 		forceRefresh: boolean | undefined,
 		recovery?: Pick<
-			AuthApiKeyOptions,
-			"signal" | "refreshReason" | "rejectedAccessToken" | "rejectedCredentialGeneration"
+			ApiKeyResolverRequestOptions,
+			| "signal"
+			| "refreshReason"
+			| "rejectedAccessToken"
+			| "rejectedCredentialGeneration"
+			| "invalidateOtherCommandConfigs"
 		>,
 	): Promise<ApiKeyResolution> => {
 		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
@@ -87,7 +96,7 @@ export function createApiKeyResolver(
 			return resolveKey(undefined);
 		}
 		const verdict = AIError.credentialRejectionVerdict(error);
-		const credentialRefused = verdict === "structured" || verdict === "text" || verdict === "status";
+		const credentialRefused = AIError.isCredentialRejection(verdict);
 		if (lastChance) {
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
 			// sibling credential. We do NOT honor the failed account's retry-after
@@ -111,6 +120,7 @@ export function createApiKeyResolver(
 			}
 			// Record the exhausted attempt without spending a mint it cannot use.
 			const resolved = await resolveKey(undefined, {
+				invalidateOtherCommandConfigs: credentialRefused,
 				rejectedCredentialGeneration: credentialRefused ? previousGeneration : undefined,
 			});
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
@@ -133,11 +143,13 @@ export function createApiKeyResolver(
 		// generation advanced past the one the request sent. The retry is worth
 		// making even when the mint handed back the same bytes: what the request
 		// has not tried is a credential minted after that refusal, and the bytes
-		// do not say whether the issuer renewed it. Without a generation to
-		// compare, the provider's own wording decides, as it did before.
-		const minted =
-			previousGeneration !== undefined &&
-			(resolvedCredentialGeneration(resolved) ?? previousGeneration) > previousGeneration;
-		return minted || verdict === "structured" || verdict === "text" ? markAfterRemint(resolved) : resolved;
+		// do not say whether the issuer renewed it. An explicit refusal can also
+		// retry a command-backed resolution without a prior generation. Static
+		// keys get no same-byte exemption: invalidating caches did not mint them.
+		const generation = resolvedCredentialGeneration(resolved);
+		const minted = previousGeneration !== undefined && (generation ?? previousGeneration) > previousGeneration;
+		return minted || (generation !== undefined && AIError.statesCredentialRejection(verdict))
+			? markAfterRemint(resolved)
+			: resolved;
 	};
 }

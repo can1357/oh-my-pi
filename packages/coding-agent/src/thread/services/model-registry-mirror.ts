@@ -269,8 +269,8 @@ export class RemoteModelRegistryOwner implements ModelRegistryOwner {
 		this.#remote = remote;
 	}
 
-	invalidateCommandConfigs(provider?: string): void {
-		this.#remote.notify("invalidateCommandConfigs", provider);
+	invalidateCommandConfigs(provider?: string, preserveConfig?: string): void {
+		this.#remote.notify("invalidateCommandConfigs", provider, preserveConfig);
 	}
 
 	remintCommandConfigs(provider: string, rejectedGeneration?: number): Promise<void> {

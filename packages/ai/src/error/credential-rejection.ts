@@ -324,21 +324,18 @@ export function credentialRejectionVerdict(error: unknown): CredentialVerdict {
 }
 
 /**
- * Whether the provider refused the credential the request carried. False for
- * a failure other than a qualifying 401 or explicit-expiry 403, and for a 401
- * whose own error class says it is not an authentication failure.
+ * Whether a classified failure refused the credential the request carried.
+ * False for a non-qualifying status or an explicit non-authentication class.
  */
-export function isCredentialRejection(error: unknown): boolean {
-	const verdict = credentialRejectionVerdict(error);
+export function isCredentialRejection(verdict: CredentialVerdict): boolean {
 	return verdict === "structured" || verdict === "text" || verdict === "status";
 }
 
 /**
- * Whether the provider *said* the credential was refused — structurally, or in
- * one of the documented wordings. Stronger than {@link isCredentialRejection}:
- * a bare 401 with an unreadable body does not qualify.
+ * Whether the classified failure states that the credential was refused.
+ * Stronger than {@link isCredentialRejection}: a bare 401 with an unreadable
+ * body does not qualify. Accepts an existing verdict without classifying twice.
  */
-export function statesCredentialRejection(error: unknown): boolean {
-	const verdict = credentialRejectionVerdict(error);
+export function statesCredentialRejection(verdict: CredentialVerdict): boolean {
 	return verdict === "structured" || verdict === "text";
 }

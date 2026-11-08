@@ -1,3 +1,4 @@
+import { type ModelApiKeyCredential, type ModelHeaders, modelApiKeyCredential } from "@oh-my-pi/pi-catalog/types";
 import { executeShell } from "@oh-my-pi/pi-natives";
 import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 
@@ -40,7 +41,7 @@ const commandRefusedGeneration = new Map<string, number>();
 const commandRemintInFlight = new Map<string, Promise<string | undefined>>();
 
 /** Materialize request headers for models and discovery without property-access side effects. */
-export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
+export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<ModelHeaders | undefined>;
 /** One raw header layer or previously composed request-time resolver. */
 export type ConfigHeaderSource = Record<string, string> | ConfigHeaderResolver | undefined;
 
@@ -64,10 +65,11 @@ function commandKey(valueConfig: string): string {
 	return valueConfig.slice(1).trim();
 }
 
-/** Invalidate one command-backed value, including its failure backoff and pending cache epoch. */
-export function invalidateCommandConfig(valueConfig: string | undefined): void {
+/** Invalidate a command's cache unless it is the selected API-key command being re-minted. */
+export function invalidateCommandConfig(valueConfig: string | undefined, preserveConfig?: string): void {
 	if (!isCommandConfigValue(valueConfig)) return;
 	const command = commandKey(valueConfig);
+	if (isCommandConfigValue(preserveConfig) && command === commandKey(preserveConfig)) return;
 	commandResultCache.delete(command);
 	commandFailureRetryAt.delete(command);
 	commandInFlight.delete(command);
@@ -338,10 +340,11 @@ export function createConfigHeaderResolver(
 	if (active.length === 0 && (!options?.authHeader || !options.apiKeyConfig)) return undefined;
 	return async signal => {
 		signal?.throwIfAborted();
-		const resolved: Record<string, string> = {};
+		const resolved: ModelHeaders = {};
+		let apiKeyCredential: ModelApiKeyCredential | undefined;
 		let hasResolved = false;
 		for (const source of active) {
-			const next =
+			const next: ModelHeaders | undefined =
 				typeof source === "function"
 					? await untilAborted(signal, () => source(signal))
 					: await resolveConfigHeaders(source, signal);
@@ -349,15 +352,31 @@ export function createConfigHeaderResolver(
 			if (!next) continue;
 			for (const key in next) {
 				resolved[key] = next[key];
+				if (key === "Authorization") apiKeyCredential = next[modelApiKeyCredential];
 				hasResolved = true;
 			}
 		}
 		if (options?.authHeader && options.apiKeyConfig) {
 			const keyConfig = options.apiKeyConfig;
-			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig));
-			if (apiKey) {
-				resolved.Authorization = `Bearer ${apiKey}`;
+			const credential = await untilAborted(signal, () => resolveConfigCredential(keyConfig));
+			if (credential) {
+				resolved.Authorization = `Bearer ${typeof credential === "string" ? credential : credential.value}`;
+				apiKeyCredential =
+					typeof credential === "string"
+						? undefined
+						: { apiKey: credential.value, credentialGeneration: credential.generation };
 				hasResolved = true;
+			}
+		}
+		if (apiKeyCredential) {
+			// Preserve upstream's header composition. Duplicate Authorization spellings
+			// can be combined by a transport, so they do not identify one API-key mint.
+			let authorizationCount = 0;
+			for (const key in resolved) {
+				if (key.toLowerCase() === "authorization") authorizationCount += 1;
+			}
+			if (authorizationCount === 1) {
+				Object.defineProperty(resolved, modelApiKeyCredential, { value: apiKeyCredential });
 			}
 		}
 		return hasResolved ? resolved : undefined;

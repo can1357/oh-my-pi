@@ -53,7 +53,12 @@ import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
 import type { AuthStorage } from "../session/auth-storage";
-import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
+import {
+	type ApiKeyResolverModel,
+	type ApiKeyResolverOptions,
+	type ApiKeyResolverRequestOptions,
+	createApiKeyResolver,
+} from "./api-key-resolver";
 import type { ConfigError, ConfigFile } from "./config-file";
 import {
 	buildCustomModelOverlay,
@@ -494,8 +499,8 @@ export class ModelRegistry {
 
 	/**
 	 * Accumulate every command-backed (`!cmd`) config value from an apiKey and a
-	 * header record into `target`. Used at load time to record which commands a
-	 * provider depends on so an explicit configuration refresh can invalidate them.
+	 * header record into `target`. Configuration refresh and auth recovery use
+	 * this set to invalidate the provider's cached commands.
 	 */
 	#collectCommandConfigValues(
 		target: Set<string>,
@@ -512,23 +517,24 @@ export class ModelRegistry {
 
 	/**
 	 * Drop the process-cached results of every command-backed config value a
-	 * provider carries (apiKey plus provider/model-override header commands) so
-	 * the next resolve re-runs them after an explicit configuration refresh.
+	 * provider carries (apiKey plus provider/model-override header commands).
 	 */
-	#invalidateProviderCommandConfigs(provider: string): void {
-		this.#owner?.invalidateCommandConfigs(provider);
-		this.#invalidateLocalProviderCommandConfigs(provider);
-		this.#recordMirrorChange({ kind: "invalidateCommands", provider });
+	#invalidateProviderCommandConfigs(provider: string, preserveConfig?: string): void {
+		this.#owner?.invalidateCommandConfigs(provider, preserveConfig);
+		this.#invalidateLocalProviderCommandConfigs(provider, preserveConfig);
+		this.#recordMirrorChange({ kind: "invalidateCommands", provider, preserveConfig });
 	}
 
-	/** Re-mint only the selected API-key command on its authoritative owner. */
+	/** Re-mint the selected API key; invalidate all other commands as upstream does. */
 	async #remintProviderCommandConfigs(provider: string, rejectedGeneration?: number): Promise<void> {
+		const apiKey = this.#selectedProviderApiKeyCommand(provider);
+		this.#invalidateLocalProviderCommandConfigs(provider, apiKey);
 		const owner = this.#owner;
 		if (owner) {
 			await owner.remintCommandConfigs(provider, rejectedGeneration);
 			return;
 		}
-		const apiKey = this.#selectedProviderApiKeyCommand(provider);
+		this.#recordMirrorChange({ kind: "invalidateCommands", provider, preserveConfig: apiKey });
 		await remintCommandConfig(apiKey, rejectedGeneration);
 	}
 
@@ -585,16 +591,16 @@ export class ModelRegistry {
 		return hasUnrefusedCommandCredential(this.#selectedProviderApiKeyCommand(provider));
 	}
 
-	/** Drop this process's command caches for an explicit configuration refresh. */
-	#invalidateLocalProviderCommandConfigs(provider: string): void {
-		invalidateCommandConfig(this.#customProviderApiKeys.get(provider));
+	/** Invalidate provider commands, preserving only a selected API key's recovery state. */
+	#invalidateLocalProviderCommandConfigs(provider: string, preserveConfig?: string): void {
+		invalidateCommandConfig(this.#customProviderApiKeys.get(provider), preserveConfig);
 		const configs = this.#commandConfigsByProvider.get(provider);
 		if (configs) {
-			for (const config of configs) invalidateCommandConfig(config);
+			for (const config of configs) invalidateCommandConfig(config, preserveConfig);
 		}
 		const runtimeConfigs = this.#runtimeCommandConfigsByProvider.get(provider);
 		if (!runtimeConfigs) return;
-		for (const config of runtimeConfigs) invalidateCommandConfig(config);
+		for (const config of runtimeConfigs) invalidateCommandConfig(config, preserveConfig);
 	}
 
 	#recordRuntimeCommandConfigs(providerName: string, config: ProviderConfigInput): void {
@@ -646,9 +652,9 @@ export class ModelRegistry {
 	 * the next key or header resolve re-runs them. A mirror registry forwards
 	 * this to its {@link ModelRegistryOwner}, whose resolver mints the keys.
 	 */
-	invalidateCommandConfigs(provider?: string): void {
+	invalidateCommandConfigs(provider?: string, preserveConfig?: string): void {
 		if (provider === undefined) this.#invalidateAllCommandConfigs();
-		else this.#invalidateProviderCommandConfigs(provider);
+		else this.#invalidateProviderCommandConfigs(provider, preserveConfig);
 	}
 
 	/**
@@ -783,7 +789,7 @@ export class ModelRegistry {
 			case "invalidateCommands":
 				// Local caches only: forwarding to the owner would echo the invalidation back.
 				if (change.provider === undefined) invalidateAllCommandConfigs();
-				else this.#invalidateLocalProviderCommandConfigs(change.provider);
+				else this.#invalidateLocalProviderCommandConfigs(change.provider, change.preserveConfig);
 				return;
 		}
 	}
@@ -3795,14 +3801,20 @@ export class ModelRegistry {
 	async getApiKeyWithCredentialForProvider(
 		provider: string,
 		sessionId?: string,
-		options?: AuthApiKeyOptions,
+		options?: ApiKeyResolverRequestOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		const rejectedGeneration = options?.rejectedCredentialGeneration;
 		if (options?.forceRefresh) {
 			await this.#remintProviderCommandConfigs(provider, rejectedGeneration);
-		} else if (rejectedGeneration !== undefined) {
-			await this.#refuseProviderCommandGeneration(provider, rejectedGeneration);
+		} else {
+			// An exhausted refusal must not leave cached headers stuck for the next operation.
+			if (options?.invalidateOtherCommandConfigs) {
+				this.#invalidateProviderCommandConfigs(provider, this.#selectedProviderApiKeyCommand(provider));
+			}
+			if (rejectedGeneration !== undefined) {
+				await this.#refuseProviderCommandGeneration(provider, rejectedGeneration);
+			}
 		}
 		const model = options?.modelId ? this.find(provider, options.modelId) : undefined;
 		if (
@@ -4288,7 +4300,7 @@ export class ModelRegistry {
  */
 export interface ModelRegistryOwner {
 	/** Drop the owner's cached `!command` results for `provider` (every provider when omitted). */
-	invalidateCommandConfigs(provider?: string): void;
+	invalidateCommandConfigs(provider?: string, preserveConfig?: string): void;
 	/**
 	 * Re-mint the owner's command-backed credential for `provider` after it was
 	 * refused, and resolve once the fresh value is cached. A request, not a
@@ -4357,7 +4369,12 @@ type ModelRegistryMirrorChangeInput =
 	/** A static (models.yml + cache) reload outside the other changes. */
 	| { readonly kind: "reload" }
 	/** Owner dropped cached `!command` results (one provider's, or all when `provider` is undefined). */
-	| { readonly kind: "invalidateCommands"; readonly provider: string | undefined };
+	| {
+			readonly kind: "invalidateCommands";
+			readonly provider: string | undefined;
+			/** Selected API-key command whose generation-aware recovery remains authoritative. */
+			readonly preserveConfig?: string;
+	  };
 
 /** A runtime change of an owner registry, as {@link ModelRegistry.applyMirrorBatch} replays it. */
 export type ModelRegistryMirrorChange = ModelRegistryMirrorChangeInput & { readonly seq: number };

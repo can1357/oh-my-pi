@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Lazy API-key derivation carries the credential value and its mint generation together, so a refusal names the credential actually sent without replacing runtime overrides or noncommand siblings ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - An API-key credential re-minted after a provider refusal is tried even when the mint returns the same bytes. Each request gets one such retry per credential ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - A provider error's `type`, `param` and `code` keep their own labels in the error message: an absent field used to rename the ones after it, so an OpenAI rejected key (`type=invalid_request_error`, no `param`, `code=invalid_api_key`) reached every reader as `param=invalid_api_key` ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - A bare HTTP status in `error.code` no longer overrules an explicit policy-denial class; LiteLLM's `token_not_found_in_db` and `expired_key` classes correctly identify rejected credentials ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))

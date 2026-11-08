@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { streamSimple } from "@oh-my-pi/pi-ai";
+import { registerCustomApi, streamSimple, unregisterCustomApis } from "@oh-my-pi/pi-ai";
 import { type ApiKeyResolution, resolveApiKeyOnce, seedApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Api, AssistantMessage, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -120,6 +120,7 @@ describe("a `!command` credential the provider refuses", () => {
 	});
 
 	afterEach(() => {
+		unregisterCustomApis("credential-selection-test");
 		clearConfigValueCache();
 		authStorage.close();
 		if (!tempDir || !fs.existsSync(tempDir)) return;
@@ -136,6 +137,7 @@ describe("a `!command` credential the provider refuses", () => {
 		accept: (bearer: string | undefined) => boolean,
 		extraProviderConfig: Record<string, unknown> = {},
 		refuse: (bearer?: string) => Response | Promise<Response> = gatewayRefusal,
+		requestHeaders?: Record<string, string>,
 	): Rig {
 		const modelsPath = path.join(tempDir, "models.json");
 		fs.writeFileSync(
@@ -158,8 +160,7 @@ describe("a `!command` credential the provider refuses", () => {
 
 		const seen: string[] = [];
 		const fetchImpl: FetchImpl = async (_url, init) => {
-			const headers = (init?.headers ?? {}) as Record<string, string>;
-			const auth = headers.Authorization;
+			const auth = new Headers(init?.headers).get("Authorization") ?? undefined;
 			const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : auth;
 			seen.push(bearer ?? "<none>");
 			return accept(bearer) ? okStream() : refuse(bearer);
@@ -176,6 +177,7 @@ describe("a `!command` credential the provider refuses", () => {
 				const handle = streamSimple(model, CONTEXT, {
 					apiKey: seedApiKeyResolver(seeded ?? first, resolver),
 					fetch: fetchImpl,
+					headers: requestHeaders,
 					maxTokens: 16,
 				});
 				for await (const _event of handle) {
@@ -196,6 +198,151 @@ describe("a `!command` credential the provider refuses", () => {
 		};
 	}
 
+	test("a provider header command refreshes on the operation after a 401", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "expired-test-header");
+		const rig = buildRig("literal-test-key", counterFile, bearer => bearer === "renewed-test-header", {
+			headers: { Authorization: mintFromFile(counterFile, tokenFile) },
+		});
+		expect((await rig.turn()).errorStatus).toBe(401);
+		const mintsBefore = rig.mints();
+		const requestsBefore = rig.seen.length;
+		fs.writeFileSync(tokenFile, "renewed-test-header");
+		expect((await rig.turn()).stopReason).not.toBe("error");
+		expect(rig.mints() - mintsBefore).toBe(1);
+		expect(rig.seen.slice(requestsBefore)).toEqual(["renewed-test-header"]);
+	});
+
+	test.each(["same", "changed"] as const)(
+		"a pure-header %s-byte refusal retains upstream's no-retry behavior",
+		async bytes => {
+			const counterFile = path.join(tempDir, "mints");
+			const tokenFile = path.join(tempDir, "token");
+			fs.writeFileSync(counterFile, "");
+			fs.writeFileSync(tokenFile, "expired-test-header");
+			const { promise: allRefused, resolve: release } = Promise.withResolvers<void>();
+			let refusals = 0;
+			const rig = buildRig(
+				"literal-test-key",
+				counterFile,
+				bearer => bearer === "renewed-test-header",
+				{ headers: { Authorization: mintFromFile(counterFile, tokenFile) } },
+				async () => {
+					if (++refusals <= 10) {
+						if (refusals === 10) release();
+						await allRefused;
+					}
+					return gatewayRefusal();
+				},
+			);
+			const operations = await Promise.all(Array.from({ length: 10 }, () => rig.prepare()));
+			await rig.registry.getProviderHeaders("probe-gw");
+			const mintsBefore = rig.mints();
+			if (bytes === "changed") fs.writeFileSync(tokenFile, "renewed-test-header");
+			const results = await Promise.all(operations.map(operation => operation()));
+			expect(rig.mints() - mintsBefore).toBe(0);
+			expect(rig.seen).toHaveLength(10);
+			expect(results.filter(result => result.stopReason !== "error")).toHaveLength(0);
+		},
+	);
+
+	test("authHeader keeps the generation of the configured API key it sends", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "test-g1");
+		const command = mintFromFile(counterFile, tokenFile);
+		const rig = buildRig(command, counterFile, bearer => bearer === "test-g3", { authHeader: true });
+		const prepared = await rig.prepare();
+		fs.writeFileSync(tokenFile, "test-g2");
+		invalidateCommandConfig(command);
+		expect(await resolveConfigValue(command)).toBe("test-g2");
+		fs.writeFileSync(tokenFile, "test-g3");
+		const mintsBefore = rig.mints();
+		expect((await prepared()).stopReason).not.toBe("error");
+		expect(rig.mints() - mintsBefore).toBe(1);
+		expect(rig.seen).toEqual(["test-g2", "test-g3"]);
+	});
+
+	test.each([
+		["Authorization", ["test-override", "test-override"]],
+		["authorization", ["test-override, Bearer test-g1", "test-override, Bearer test-g2"]],
+		["AUTHORIZATION", ["test-override, Bearer test-g1", "test-override, Bearer test-g2"]],
+	] as const)(
+		"does not attach derived API-key provenance to a per-call %s override",
+		async (header, expectedBearers) => {
+			const counterFile = path.join(tempDir, "mints");
+			const tokenFile = path.join(tempDir, "token");
+			fs.writeFileSync(counterFile, "");
+			fs.writeFileSync(tokenFile, "test-g1");
+			const command = mintFromFile(counterFile, tokenFile);
+			const rig = buildRig(command, counterFile, () => false, { authHeader: true }, gatewayRefusal, {
+				[header]: "Bearer test-override",
+			});
+			const prepared = await rig.prepare();
+			fs.writeFileSync(tokenFile, "test-g2");
+			invalidateCommandConfig(command);
+			expect(await resolveConfigValue(command)).toBe("test-g2");
+			fs.writeFileSync(tokenFile, "test-g3");
+			const mintsBefore = rig.mints();
+			expect((await prepared()).stopReason).toBe("error");
+			expect(rig.seen).toEqual([...expectedBearers]);
+			expect(rig.mints() - mintsBefore).toBe(0);
+		},
+	);
+
+	/** A custom transport consumes options.apiKey rather than configured gateway headers. */
+	function useSelectedKeyTransport(model: Model<Api>): void {
+		registerCustomApi(
+			"key-selection-test",
+			(resolvedModel, context, options) =>
+				streamSimple({ ...resolvedModel, api: "openai-completions", headers: undefined }, context, options),
+			"credential-selection-test",
+		);
+		model.api = "key-selection-test";
+	}
+
+	test("authHeader provenance does not replace a runtime-selected API key", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "configured-test-key");
+		authStorage.keys.setRuntime("probe-gw", "runtime-test-key");
+		const rig = buildRig(mintFromFile(counterFile, tokenFile), counterFile, key => key === "runtime-test-key", {
+			authHeader: true,
+		});
+		useSelectedKeyTransport(rig.model);
+		expect((await rig.turn()).stopReason).not.toBe("error");
+		expect(rig.seen).toEqual(["runtime-test-key"]);
+		// Materializing the configured header still costs upstream's one helper.
+		expect(rig.mints()).toBe(1);
+	});
+
+	test("authHeader provenance does not replace a noncommand sibling selected for retry", async () => {
+		const counterFile = path.join(tempDir, "mints");
+		const tokenFile = path.join(tempDir, "token");
+		fs.writeFileSync(counterFile, "");
+		fs.writeFileSync(tokenFile, "configured-test-key");
+		const rig = buildRig(mintFromFile(counterFile, tokenFile), counterFile, () => false, { authHeader: true });
+		useSelectedKeyTransport(rig.model);
+		const seen: Array<string | null> = [];
+		const handle = streamSimple(rig.model, CONTEXT, {
+			apiKey: async ({ error }) => (error ? "sibling-test-key" : "initial-test-key"),
+			fetch: async (_url, init) => {
+				const key = new Headers(init?.headers).get("Authorization");
+				seen.push(key);
+				return key === "Bearer sibling-test-key" ? okStream() : gatewayRefusal();
+			},
+			maxTokens: 16,
+		});
+		for await (const event of handle) void event;
+		expect((await handle.result()).stopReason).not.toBe("error");
+		expect(seen).toEqual(["Bearer initial-test-key", "Bearer sibling-test-key"]);
+		expect(rig.mints()).toBe(1);
+	});
+
 	for (const resolverScope of ["provider", "missing-model"] as const) {
 		test(`a ${resolverScope} resolver preserves model-over-provider header precedence`, async () => {
 			const counterFile = path.join(tempDir, "mints");
@@ -212,7 +359,11 @@ describe("a `!command` credential the provider refuses", () => {
 					},
 				],
 			});
-			const callerModel = { ...model, id: resolverScope === "missing-model" ? "missing-model" : model.id };
+			const callerModel = {
+				...model,
+				id: resolverScope === "missing-model" ? "missing-model" : model.id,
+				headers: { "X-Caller": "caller-test-value" },
+			};
 			const sent: Headers[] = [];
 			const handle = streamSimple(callerModel, CONTEXT, {
 				apiKey: registry.resolver("probe-gw", {
@@ -233,6 +384,8 @@ describe("a `!command` credential the provider refuses", () => {
 			expect(sent[0].get("X-Provider")).toBe("provider-test-value");
 			expect(sent[0].get("X-Model")).toBe("model-test-value");
 			expect(sent[0].get("X-Route")).toBe("model-test-route");
+			// Upstream's complete lazy result replaces static model.headers, including X-Caller.
+			expect(sent[0].has("X-Caller")).toBe(false);
 			expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
 		});
 	}
@@ -269,7 +422,7 @@ describe("a `!command` credential the provider refuses", () => {
 		expect(fs.readFileSync(counterFile, "utf8")).toBe("");
 	});
 
-	test.each(["provider", "model"] as const)("a refused %s header command is not re-minted", async scope => {
+	test.each(["provider", "model"] as const)("a refused %s header command uses upstream invalidation", async scope => {
 		const counterFile = path.join(tempDir, "mints");
 		const tokenFile = path.join(tempDir, "token");
 		fs.writeFileSync(counterFile, "");
@@ -284,8 +437,11 @@ describe("a `!command` credential the provider refuses", () => {
 		await rig.model.resolveHeaders?.();
 		fs.writeFileSync(tokenFile, "renewed-test-header");
 		expect((await rig.turn()).errorStatus).toBe(401);
-		expect(rig.seen).toEqual(["expired-test-header", "expired-test-header"]);
+		expect(rig.seen).toEqual(["expired-test-header"]);
 		expect(rig.mints()).toBe(1);
+		expect((await rig.turn()).stopReason).not.toBe("error");
+		expect(rig.seen).toEqual(["expired-test-header", "renewed-test-header"]);
+		expect(rig.mints()).toBe(2);
 	});
 
 	test("availability checks do not execute provider or model header commands", async () => {
@@ -1024,10 +1180,9 @@ describe("a `!command` credential the provider refuses", () => {
 		const elapsedMs = performance.now() - started;
 
 		expect(result.errorStatus).toBe(401);
-		// The retry resends the key the cascade selected, which a peer may have
-		// rotated under it; what it must not do is call an issuer that owns
-		// none of these bearers.
-		expect(rig.seen).toEqual(["runtime-key", "runtime-key"]);
+		// No command credential was minted, so the unchanged literal gets no
+		// same-byte retry exemption and never calls an issuer it does not own.
+		expect(rig.seen).toEqual(["runtime-key"]);
 		// Zero executions of that command, and no wait on it either.
 		expect(rig.mints()).toBe(0);
 		expect(elapsedMs).toBeLessThan(5_000);

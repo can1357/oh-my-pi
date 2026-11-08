@@ -362,7 +362,8 @@ function serveModelRegistry(state: PeerAuthState): RpcServe<ModelRegistry, Model
 				snapshot: toWireMirrorBatch(snapshot),
 			};
 		},
-		invalidateCommandConfigs: (registry, provider) => registry.invalidateCommandConfigs(provider),
+		invalidateCommandConfigs: (registry, provider, preserveConfig) =>
+			registry.invalidateCommandConfigs(provider, preserveConfig),
 		remintCommandConfigs: (registry, provider, rejectedGeneration) =>
 			registry.remintCommandConfigs(provider, rejectedGeneration),
 		refuseCommandGeneration: (registry, provider, generation) =>

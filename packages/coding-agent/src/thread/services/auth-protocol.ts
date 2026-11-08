@@ -361,7 +361,7 @@ export interface ModelRegistryMirrorWire extends ModelRegistryMirrorInputs {
 export type ModelRegistryProtocol = {
 	/** Sync: subscribe `listener` to main's change batches (until the worker exits) and return the mirror's inputs. */
 	mirror: RpcMethod<[listener: (batch: WireMirrorBatch) => void], ModelRegistryMirrorWire>;
-	invalidateCommandConfigs: RpcMethod<[provider?: string], void>;
+	invalidateCommandConfigs: RpcMethod<[provider?: string, preserveConfig?: string], void>;
 	/**
 	 * Re-mint `provider`'s refused command-backed credential here, and resolve
 	 * once it is cached. `rejectedGeneration` is the generation of the

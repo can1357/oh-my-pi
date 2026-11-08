@@ -26,6 +26,18 @@ export type KnownApi =
 	| "apple-foundation-models";
 export type Api = KnownApi | (string & {});
 
+/** API-key value and mint provenance travel together through lazy derivation. */
+export interface ModelApiKeyCredential {
+	apiKey: string;
+	credentialGeneration?: number;
+}
+
+/** API-key-only provenance; independent header commands never create this metadata. */
+export const modelApiKeyCredential = Symbol("modelApiKeyCredential");
+export type ModelHeaders = Record<string, string> & {
+	[modelApiKeyCredential]?: ModelApiKeyCredential;
+};
+
 /** Catalog kinds used to isolate role-specific runners from session chat models. */
 export const MODEL_KINDS = [
 	"chat",
@@ -1759,8 +1771,9 @@ export interface Model<TApi extends Api = Api> {
 	 * Materialize config-backed headers immediately before a request. Catalog
 	 * inspection never invokes this hook; transports receive a cloned model
 	 * whose `headers` is a plain resolved record and whose hook is removed.
+	 * A derived API key retains its value and mint provenance in the returned result.
 	 */
-	resolveHeaders?: (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
+	resolveHeaders?: (signal?: AbortSignal) => Promise<ModelHeaders | undefined>;
 	/**
 	 * Streaming transport override. When `"pi-native"`, `streamSimple` routes
 	 * the request to the model's `baseUrl` via the auth-gateway's
