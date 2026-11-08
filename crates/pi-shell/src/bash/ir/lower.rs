@@ -443,12 +443,16 @@ impl Lower {
 		self.unit.strs.len() as u32 - 1
 	}
 
-	fn node(&mut self, id: syn::NodeId, kind: NodeKind, span: syn::Span) {
-		let span = span.rebase(self.base);
-		let line = self
+	fn source_line(&self, offset: u32) -> u32 {
+		self
 			.line_starts
-			.partition_point(|&s| s <= span.lo)
-			.saturating_sub(1);
+			.partition_point(|&s| s <= offset.saturating_sub(self.base))
+			.saturating_sub(1) as u32
+	}
+
+	fn node(&mut self, id: syn::NodeId, kind: NodeKind, span: syn::Span) {
+		let line = self.source_line(span.lo) as usize;
+		let span = span.rebase(self.base);
 		let col = span.lo - self.line_starts[line] + 1;
 		if self.unit.nodes.len() <= id.0 as usize {
 			self.unit.nodes.resize(id.0 as usize + 1, NodeInfo {
@@ -583,7 +587,16 @@ impl Lower {
 			} else {
 				Some(self.redir_list(&cmd.redirs)?)
 			};
-			let c = self.simple(s, redirs)?;
+			let first = s
+				.assigns
+				.iter()
+				.map(|a| a.span)
+				.chain(s.words.iter().map(|w| w.span))
+				.chain(cmd.redirs.iter().map(|r| r.span))
+				.min_by_key(|span| span.lo)
+				.unwrap_or(cmd.span);
+			let reader_line = self.source_line(first.hi.saturating_sub(1));
+			let c = self.simple(s, redirs, reader_line)?;
 			self.emit(Opcode::Exec, c, 0, id);
 			return Ok(());
 		}
@@ -1055,7 +1068,7 @@ impl Lower {
 		(self.unit.ariths.len() as u32 - 1, if literal { Op::LITERAL } else { 0 })
 	}
 
-	fn simple(&mut self, s: &syn::Simple, redirs: Option<u32>) -> Idx {
+	fn simple(&mut self, s: &syn::Simple, redirs: Option<u32>, reader_line: u32) -> Idx {
 		let mut assigns = Vec::with_capacity(s.assigns.len());
 		for a in &s.assigns {
 			self.node(a.id, NodeKind::Assign, a.span);
@@ -1077,7 +1090,7 @@ impl Lower {
 		self
 			.unit
 			.cmds
-			.push(Cmd { assigns, words, redirs, typeset: s.typeset });
+			.push(Cmd { assigns, words, redirs, reader_line, typeset: s.typeset });
 		Ok(idx)
 	}
 
@@ -1364,12 +1377,23 @@ impl Lower {
 				if kind == ComsubForm::Fork {
 					self.mark_cat(entry);
 				}
-				out.push(Part::Comsub { entry, kind, quoted, text });
+				out.push(Part::Comsub {
+					entry,
+					input_line: self.source_line(c.input_start),
+					kind,
+					quoted,
+					text,
+				});
 			},
 			syn::WordPart::Arith(a) => out.push(Part::Arith { text: a.src.as_slice().into(), quoted }),
 			syn::WordPart::ProcSub(p) => {
 				let entry = self.block(&p.body)?;
-				out.push(Part::ProcSub { entry, output: p.output });
+				let readers = p.reader_lines.as_ref().map(|lines| {
+					let index = self.unit.reader_lines.len() as u32;
+					self.unit.reader_lines.push(lines.clone());
+					index
+				});
+				out.push(Part::ProcSub { entry, readers, output: p.output });
 			},
 			syn::WordPart::Compound(elems) => out.push(Part::Compound(self.elems(elems)?)),
 			syn::WordPart::BadSubst(text) => out.push(Part::BadSubst(text.as_slice().into())),

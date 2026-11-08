@@ -413,6 +413,10 @@ pub struct Kernel {
 	/// Origin of each currently executing source-context unit in its actual
 	/// vproc.
 	pub trace_unit_origins: HashMap<Vpid, Arc<HashMap<UnitId, crate::bash::event::SourceOrigin>>>,
+	/// Parser-input display coordinates by (vproc, activation depth). Only
+	/// nondefault inputs are stored; ordinary frames and idle jobs pay nothing.
+	/// Saved alongside their activation in the frames image.
+	pub heredoc_inputs:     HashMap<(Vpid, usize), proc::HeredocInput>,
 	/// Unit blobs known to be in the store ([`Kernel::persist_unit`],
 	/// `externalize`).
 	pub written:            HashSet<UnitId>,
@@ -535,6 +539,7 @@ impl Kernel {
 			announced: HashSet::new(),
 			trace_sources: HashMap::new(),
 			trace_unit_origins: HashMap::new(),
+			heredoc_inputs: HashMap::new(),
 			written: HashSet::new(),
 			written_vpid: engine.config().vpid_base,
 			paused: false,
@@ -559,6 +564,42 @@ impl Kernel {
 			deferrals: Vec::new(),
 			jobctl: jobctl::JobCtl::default(),
 		}
+	}
+
+	/// The active parser input's display coordinates, not runtime LINENO.
+	pub fn heredoc_input(&self, vp: &Vproc) -> Option<proc::HeredocInput> {
+		self
+			.heredoc_inputs
+			.get(&(vp.vpid, vp.frames.len()))
+			.copied()
+	}
+
+	/// The adjustment of an input that retains compiled source coordinates.
+	pub fn heredoc_line_offset(&self, vp: &Vproc) -> i32 {
+		self.heredoc_input(vp).map_or(0, |input| input.offset)
+	}
+
+	/// Associate nondefault parser-input coordinates with their activation.
+	pub fn set_heredoc_input(
+		&mut self,
+		vpid: Vpid,
+		depth: usize,
+		input: Option<proc::HeredocInput>,
+	) {
+		if let Some(input) = input.filter(|input| input.offset != 0 || input.readers.is_some()) {
+			self.heredoc_inputs.insert((vpid, depth), input);
+		} else {
+			self.heredoc_inputs.remove(&(vpid, depth));
+		}
+	}
+
+	/// Associate an input's compiled-coordinate adjustment with its activation.
+	pub fn set_heredoc_line_offset(&mut self, vpid: Vpid, depth: usize, offset: i32) {
+		self.set_heredoc_input(
+			vpid,
+			depth,
+			Some(proc::HeredocInput { offset, ..Default::default() }),
+		);
 	}
 
 	/// The redirections `vproc`'s command leaves to the process it spawns,
@@ -918,10 +959,11 @@ impl Kernel {
 			.overlay
 			.as_ref()
 			.and_then(|o| o.records.get(&KeyBuf::Misc(MiscKey::Argv0)));
-		let interactive = matches!(
-			state::record(cx.store, vp, crate::bash::store::Key::Misc(MiscKey::Interactive)),
-			Ok(Some(Record::Misc(value))) if value.as_slice() == b"1"
-		);
+		let interactive = !vp.async_diagnostics
+			&& matches!(
+				state::record(cx.store, vp, crate::bash::store::Key::Misc(MiscKey::Interactive)),
+				Ok(Some(Record::Misc(value))) if value.as_slice() == b"1"
+			);
 		let sourced = if interactive {
 			None
 		} else {
@@ -2059,7 +2101,7 @@ impl Shell {
 					if trapped {
 						exec::mark_cancel(&mut self.procs[i], status);
 					} else {
-						exec::finish_cancel(&mut self.k.root, cx.store, &mut self.procs[i], status);
+						exec::finish_cancel(&mut self.k, cx.store, &mut self.procs[i], status);
 					}
 				} else {
 					self.kill(cx, i, sig, status);
@@ -2137,7 +2179,7 @@ impl Shell {
 				}
 			}
 		}
-		exec::unwind(&mut self.k.root, cx.store, p, 0);
+		exec::unwind(&mut self.k, cx.store, p, 0);
 		while state::drop_scope(&mut self.k.root, cx.store, p) {}
 		p.out.clear();
 		p.blocked = None;
@@ -2662,6 +2704,7 @@ impl Vproc {
 			pending_traps: crate::bash::signal::SigSet::EMPTY,
 			stopped: false,
 			transient,
+			async_diagnostics: false,
 			jobs: proc::JobTable::default(),
 			last_bg: proc::LastBg::default(),
 			getopts: proc::GetoptsState { optind: None, next: None, at: None },
@@ -2710,7 +2753,10 @@ impl Vproc {
 		// A subshell runs code of the same unit: it keeps the line numbering.
 		frame.line_shift = line_shift;
 		frame.subshell_line = subshell_line;
-		self.child_running(k, store, fds, frame)
+		let input = k.heredoc_input(self);
+		let child = self.child_running(k, store, fds, frame);
+		k.set_heredoc_input(child.vpid, child.frames.len(), input);
+		child
 	}
 
 	/// A subshell of `self` that parses and runs `src` from script line
@@ -2772,6 +2818,7 @@ impl Vproc {
 		vp.lineage = self.lineage;
 		jobctl::inherit(k, vp.vpid, self.vpid);
 		vp.mode = self.mode;
+		vp.async_diagnostics = self.async_diagnostics;
 		vp.zle.clone_from(&self.zle);
 		vp.set_sticky(self.sticky().cloned());
 		// zsh forks keep `scriptname`: diagnostics of the child name the

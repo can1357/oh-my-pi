@@ -64,13 +64,15 @@ pub enum Stop {
 	/// A command substitution must run first (the op parks, then replays).
 	Sub {
 		/// Unit holding the body.
-		unit:  Arc<Unit>,
+		unit:       Arc<Unit>,
 		/// Entry pc of the body.
-		entry: u32,
+		entry:      u32,
+		/// Unit-relative line of the parser input's opener.
+		input_line: u32,
 		/// Syntax form.
-		form:  ComsubForm,
+		form:       ComsubForm,
 		/// `strs` index of a `$( )` body's source text.
-		text:  Option<u32>,
+		text:       Option<u32>,
 	},
 	/// A zsh command substitution must run first: `text` is its body (zsh
 	/// source, parsed in the vproc's mode when it starts); the op parks,
@@ -957,8 +959,8 @@ impl<'e, 'c> Expander<'e, 'c> {
 			Part::Lit(b) => Self::lit_text(sink, b, rhs),
 			Part::Quoted(b) => sink.lit(b, true),
 			Part::Param(p) => self.param(unit, p, sink, inq || p.quoted, rhs)?,
-			Part::Comsub { entry, kind, quoted, text } => {
-				let out = self.comsub(unit, *entry, *kind, *text)?;
+			Part::Comsub { entry, input_line, kind, quoted, text } => {
+				let out = self.comsub(unit, *entry, *input_line, *kind, *text)?;
 				sink.value(&out, inq || *quoted);
 			},
 			Part::Arith { text, quoted } => {
@@ -974,13 +976,15 @@ impl<'e, 'c> Expander<'e, 'c> {
 				};
 				sink.value(v.format_into(&mut NumBuffer::new()).as_bytes(), inq || *quoted);
 			},
-			Part::ProcSub { entry, output } => {
+			Part::ProcSub { entry, readers, output } => {
 				// Logged, so a replay after a command substitution parks does
 				// not start it twice.
 				let path = if let Some(Atom::Str(Some(p))) = self.replay() {
 					p
 				} else {
-					let p = super::exec::start_procsub(self.k, self.vp, self.cx, unit, *entry, *output);
+					let p = super::exec::start_procsub(
+						self.k, self.vp, self.cx, unit, *entry, *readers, *output,
+					);
 					self.note(|| Atom::Str(Some(p.clone())));
 					p
 				};
@@ -1018,6 +1022,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 		&mut self,
 		unit: &Arc<Unit>,
 		entry: u32,
+		input_line: u32,
 		form: ComsubForm,
 		text: Option<u32>,
 	) -> X<BString> {
@@ -1039,7 +1044,7 @@ impl<'e, 'c> Expander<'e, 'c> {
 				self.vp.status = status;
 				Ok(out)
 			},
-			_ => Err(Stop::Sub { unit: Arc::clone(unit), entry, form, text }),
+			_ => Err(Stop::Sub { unit: Arc::clone(unit), entry, input_line, form, text }),
 		}
 	}
 

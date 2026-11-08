@@ -271,7 +271,7 @@ fn modules(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<WaitKey> {
 	z.step = Step::Done;
 	let (exit, depth) = (z.exit, z.depth as usize);
 	while vp.frames.len() > depth {
-		pop_frame(&mut k.root, cx.store, vp);
+		pop_frame(k, cx.store, vp);
 	}
 	vp.status = exit;
 	None

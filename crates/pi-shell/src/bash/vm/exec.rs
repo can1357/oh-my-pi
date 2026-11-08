@@ -386,11 +386,11 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				// An interactive shell's own input goes on: the command is
 				// dropped and the next one read (zsh `loop`, bash
 				// `reader_loop`).
-				unwind(&mut k.root, cx.store, vp, i + 1);
+				unwind(k, cx.store, vp, i + 1);
 				if super::zle::reader::applies(cx, vp) {
 					top_frame(vp).unit = None;
 				} else {
-					unwind(&mut k.root, cx.store, vp, i);
+					unwind(k, cx.store, vp, i);
 				}
 			},
 			Flow::Return(status) if unit.mode.dialect() == Dialect::Zsh => {
@@ -410,7 +410,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				});
 				if let Some(i) = target {
 					if vp.frames[i].kind == FrameKind::NoFork || !return_trap(k, vp, cx, i) {
-						unwind(&mut k.root, cx.store, vp, i);
+						unwind(k, cx.store, vp, i);
 					}
 				} else if vp.parent.is_some() && in_function_scope(k, cx, vp) {
 					exit_shell(k, vp, cx, status);
@@ -442,19 +442,19 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 					.iter()
 					.rposition(|f| matches!(f.kind, FrameKind::Script { .. }));
 				if let Some(i) = script {
-					unwind(&mut k.root, cx.store, vp, i + 1);
+					unwind(k, cx.store, vp, i + 1);
 					clear_scratch(&mut k.root, cx.store, vp);
 					truncate(vp, Depths::default());
 					let f = top_frame(vp);
 					f.unit = None;
 					f.loops.clear();
 				} else {
-					unwind(&mut k.root, cx.store, vp, 0);
+					unwind(k, cx.store, vp, 0);
 				}
 			},
 		}
 		if cancel_transfer {
-			finish_cancel(&mut k.root, cx.store, vp, cancellation.expect("checked"));
+			finish_cancel(k, cx.store, vp, cancellation.expect("checked"));
 			continue;
 		}
 		let errexit = errexit_failed
@@ -526,7 +526,7 @@ fn zsh_return_flow(
 		// `retflag`, which `loop` clears: the rest of the command line (and
 		// a list trap that ran it, p10k's `return 130` on ^C) is dropped and
 		// the shell reads its next one.
-		unwind(&mut k.root, cx.store, vp, i + 1);
+		unwind(k, cx.store, vp, i + 1);
 		clear_scratch(&mut k.root, cx.store, vp);
 		truncate(vp, Depths::default());
 		let f = top_frame(vp);
@@ -631,7 +631,7 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		&& let Some(keep) = super::zsh::zexit::exit_in_hooks(vp, status)
 	{
 		vp.status = status;
-		unwind(&mut k.root, cx.store, vp, keep);
+		unwind(k, cx.store, vp, keep);
 		return;
 	}
 	let in_exit_trap = vp.frames.iter().any(|f| {
@@ -667,7 +667,7 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		}
 		return;
 	}
-	unwind(&mut k.root, cx.store, vp, 0);
+	unwind(k, cx.store, vp, 0);
 	// zsh `exit` in a subshell is its `zexit`: the hooks run after its EXIT
 	// trap (pushed below them).
 	if vp.parent.is_some() && vp.runs.is_empty() && vp.mode.dialect() == Dialect::Zsh {
@@ -989,6 +989,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 	let FrameKind::Script { src, pos, aux, stdin, .. } = &mut frame.kind else {
 		// Function and subshell frames never run out of code.
 		frame.unit = None;
+		k.heredoc_inputs.remove(&(vp.vpid, vp.frames.len()));
 		vp.frames.pop();
 		return None;
 	};
@@ -1084,7 +1085,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		if source && return_trap(k, vp, cx, top) {
 			return None;
 		}
-		pop_frame(&mut k.root, cx.store, vp);
+		pop_frame(k, cx.store, vp);
 		if debug && !vp.frames.is_empty() {
 			zsh_debug_done(k, vp, cx);
 		}
@@ -1096,7 +1097,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 			return None;
 		}
 		if let Some(cancel) = cancel {
-			finish_cancel(&mut k.root, cx.store, vp, cancel);
+			finish_cancel(k, cx.store, vp, cancel);
 		} else if let Some(status) = status
 			&& exit
 		{
@@ -1108,7 +1109,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		} else if let Some(status) = status {
 			vp.status = status;
 			if let Some(target) = return_target {
-				unwind(&mut k.root, cx.store, vp, target);
+				unwind(k, cx.store, vp, target);
 			} else if debug
 				&& trap_status != 0
 				&& state::option(&mut k.root, cx.store, vp, OptId::Extdebug).unwrap_or(false)
@@ -1124,7 +1125,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 						!matches!(op.code, Opcode::ForIn | Opcode::ForNext | Opcode::CaseWord)
 					});
 				if f.debug_pc == Some(ENTRY_DEBUG) {
-					pop_frame(&mut k.root, cx.store, vp);
+					pop_frame(k, cx.store, vp);
 					vp.status = trap_status;
 				} else if f.debug_pc == Some(f.pc) && skippable {
 					f.pc += 1;
@@ -1586,23 +1587,25 @@ fn end_unit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) {
 		FrameKind::Function { .. } => {
 			let target = vp.frames.len() - 1;
 			if !return_trap(k, vp, cx, target) {
-				pop_frame(&mut k.root, cx.store, vp);
+				pop_frame(k, cx.store, vp);
 			}
 		},
-		FrameKind::NoFork | FrameKind::Stage => pop_frame(&mut k.root, cx.store, vp),
+		FrameKind::NoFork | FrameKind::Stage => pop_frame(k, cx.store, vp),
 		FrameKind::Subshell | FrameKind::Job { .. } => {
-			unwind(&mut k.root, cx.store, vp, 0);
+			unwind(k, cx.store, vp, 0);
 			start_trap(k, vp, cx, TrapKey::Exit);
 		},
 	}
 }
 
 /// Pop the top frame, restoring the fds its redirections saved and the
-/// scope of a function call or `${ ;}`. A store failure is kept on `root`.
-pub fn pop_frame(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc) {
+/// scope of a function call or `${ ;}`. A store failure is kept on `k.root`.
+pub fn pop_frame(k: &mut Kernel, store: &mut dyn StateStore, vp: &mut Vproc) {
 	let Some(mut f) = vp.frames.pop() else {
 		return;
 	};
+	k.heredoc_inputs.remove(&(vp.vpid, vp.frames.len() + 1));
+	let root = &mut k.root;
 	if matches!(f.kind, FrameKind::Script { what: ScriptKind::Trap { .. }, .. }) {
 		vp.trap_frames = vp.trap_frames.saturating_sub(1);
 	}
@@ -1799,9 +1802,9 @@ pub fn take_scratch(vp: &mut Vproc) -> Box<Scratch> {
 }
 
 /// Pop frames until `keep` remain.
-pub fn unwind(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc, keep: usize) {
+pub fn unwind(k: &mut Kernel, store: &mut dyn StateStore, vp: &mut Vproc, keep: usize) {
 	while vp.frames.len() > keep {
-		pop_frame(root, store, vp);
+		pop_frame(k, store, vp);
 	}
 }
 
@@ -1931,7 +1934,7 @@ fn break_loops(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, n: u32, cont: bo
 			FrameKind::Script { what: ScriptKind::Eval, .. } | FrameKind::NoFork | FrameKind::Stage
 		);
 		if crossable && vp.frames.len() > 1 {
-			pop_frame(&mut k.root, cx.store, vp);
+			pop_frame(k, cx.store, vp);
 			// The caller's op (`eval`) is abandoned with the loop.
 			clear_scratch(&mut k.root, cx.store, vp);
 			continue;
@@ -2012,9 +2015,10 @@ pub fn expanding<T>(
 			top_frame(vp).scratch = Some(sc);
 			Ok(v)
 		},
-		Err(Stop::Sub { unit, entry, form, text }) => {
+		Err(Stop::Sub { unit, entry, input_line, form, text }) => {
 			// A no-fork substitution pushes its frame above this op's.
-			let flow = start_sub(k, vp, cx, &mut sc, Sub { unit, entry, form, text, line });
+			let flow =
+				start_sub(k, vp, cx, &mut sc, Sub { unit, entry, input_line, form, text, line });
 			vp.frames[fi].scratch = Some(sc);
 			Err(flow)
 		},
@@ -2160,19 +2164,68 @@ pub fn probe_atom(answer: ProbeResult) -> Atom {
 	})
 }
 
+/// Bash captures simplecmd_lineno at the end of the first token, not at the
+/// end of an arbitrary substitution argument. Keep this reader coordinate
+/// separate from the runtime command line.
+pub(super) fn heredoc_reader_line(k: &Kernel, vp: &Vproc) -> Option<i64> {
+	let frame = vp.frames.last()?;
+	let unit = frame.unit.as_ref()?;
+	let op = unit.ops.get(frame.pc as usize)?;
+	if let Some(input) = k.heredoc_input(vp)
+		&& let Some(readers) = input.readers
+		&& let Some(line) = unit.reader_lines.get(readers as usize)?.line(op.node)
+	{
+		return Some(input.base.saturating_add(i64::from(line)));
+	}
+	let relative = if op.code == Opcode::Exec {
+		unit.cmds.get(op.a as usize)?.reader_line
+	} else {
+		unit.nodes.get(op.node as usize)?.line
+	};
+	Some(
+		i64::from(unit.line) + i64::from(relative) - i64::from(frame.line_shift)
+			+ i64::from(k.heredoc_line_offset(vp)),
+	)
+}
+
+/// subst.c passes RESETLINE only while executing interactive input outside
+/// source files. Forked inputs, no-fork substitutions and trap actions are
+/// noninteractive even when the session retains interactive_shell.
+fn reset_heredoc_input(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+	vp.parent.is_none()
+		&& !vp.async_diagnostics
+		&& vp.trap_frames == 0
+		&& !vp
+			.frames
+			.iter()
+			.any(|f| matches!(f.kind, FrameKind::NoFork))
+		&& !vp
+			.calls
+			.iter()
+			.any(|call| matches!(call.kind, super::callstack::CallKind::Source { .. }))
+		&& matches!(state::record(cx.store, vp, Key::Misc(MiscKey::Interactive)),
+			Ok(Some(Record::Misc(value))) if value.as_slice() == b"1")
+}
+
+fn heredoc_offset(expected: i64, actual: u32) -> i32 {
+	(expected - i64::from(actual)).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
 /// A command substitution to start: its body and the line of the command
 /// that runs it.
 pub struct Sub {
 	/// Unit holding the body.
-	pub unit:  Arc<Unit>,
+	pub unit:       Arc<Unit>,
 	/// Entry pc of the body.
-	pub entry: u32,
+	pub entry:      u32,
+	/// Unit-relative line of the parser input's opener.
+	pub input_line: u32,
 	/// Syntax form.
-	pub form:  ComsubForm,
+	pub form:       ComsubForm,
 	/// `strs` index of the body's source text.
-	pub text:  Option<u32>,
+	pub text:       Option<u32>,
 	/// Line of the command running it.
-	pub line:  u32,
+	pub line:       u32,
 }
 
 /// Start a command substitution for the op whose scratch is `sc`.
@@ -2183,7 +2236,7 @@ pub fn start_sub(
 	sc: &mut Scratch,
 	sub: Sub,
 ) -> Flow {
-	let Sub { unit, entry, form, text, line } = sub;
+	let Sub { unit, entry, input_line, form, text, line } = sub;
 	let first = unit
 		.ops
 		.get(entry as usize)
@@ -2192,6 +2245,10 @@ pub fn start_sub(
 	// `line` is already shifted by this frame, so the difference is the
 	// child's whole shift.
 	let shift = first.saturating_sub(line);
+	let bash = unit.mode.dialect() == Dialect::Bash;
+	let reset = bash && reset_heredoc_input(cx, vp);
+	let reader = heredoc_reader_line(k, vp).unwrap_or(i64::from(line));
+	let parser_base = if reset { 1 } else { reader };
 	let capture = Capture::default();
 	let out = FdRef::mem(capture.clone());
 	// A command substitution runs without `set -e` unless `inherit_errexit`
@@ -2240,6 +2297,21 @@ pub fn start_sub(
 				child.trace_base += 1;
 				child
 			};
+			if bash {
+				// Dollar inputs are reprinted; backquotes retain the leading
+				// lines between their opener and first compiled command.
+				let leading = if text.is_none() {
+					first.saturating_sub(unit.line + input_line)
+				} else {
+					0
+				};
+				let current = if reparse.is_some() { base } else { line };
+				k.set_heredoc_line_offset(
+					child.vpid,
+					child.frames.len(),
+					heredoc_offset(parser_base + i64::from(leading), current),
+				);
+			}
 			// With `-e` already off in the parent the child sees it off and
 			// `SHELLOPTS` is already right: nothing to reset.
 			if !inherit && state::option(&mut k.root, cx.store, vp, OptId::Errexit).unwrap_or(true) {
@@ -2291,6 +2363,15 @@ pub fn start_sub(
 			};
 			let mut frame = Frame::new(Some(unit), entry, FrameKind::NoFork);
 			frame.line_shift = shift;
+			if bash {
+				// The directly compiled no-fork block has no script reader's
+				// initial line increment. RESETLINE therefore starts it at 2.
+				k.set_heredoc_line_offset(
+					vp.vpid,
+					vp.frames.len() + 1,
+					heredoc_offset(if reset { 2 } else { reader }, line),
+				);
+			}
 			// It shares the shell's options, so `-e` is ignored instead.
 			frame.ignore_errexit = !inherit;
 			let prev = vp.fds.get(1).cloned();
@@ -2501,6 +2582,7 @@ pub fn start_procsub(
 	cx: &mut Cx<'_>,
 	unit: &Arc<Unit>,
 	entry: u32,
+	readers: Option<u32>,
 	output: bool,
 ) -> BString {
 	let (r, w) = mem::pipe();
@@ -2524,6 +2606,18 @@ pub fn start_procsub(
 		}
 	}
 	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	if unit.mode.dialect() == Dialect::Bash {
+		let base = heredoc_reader_line(k, vp).unwrap_or(i64::from(line_of(vp, 0))) - 1;
+		k.set_heredoc_input(
+			child.vpid,
+			child.frames.len(),
+			readers.map(|readers| super::proc::HeredocInput {
+				readers: Some(readers),
+				base,
+				offset: 0,
+			}),
+		);
+	}
 	let vpid = child.vpid;
 	// Not a job: its externals stay in the shell's group, without the
 	// terminal.
@@ -2942,10 +3036,10 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 		Opcode::Spawn => spawn(k, vp, cx, unit, op),
 		Opcode::SubExit => {
 			if matches!(top_frame(vp).kind, FrameKind::NoFork | FrameKind::Stage) {
-				pop_frame(&mut k.root, cx.store, vp);
+				pop_frame(k, cx.store, vp);
 			} else {
 				// A subshell, pipeline stage or job ends: its EXIT trap runs.
-				unwind(&mut k.root, cx.store, vp, 0);
+				unwind(k, cx.store, vp, 0);
 				start_trap(k, vp, cx, TrapKey::Exit);
 			}
 			Flow::Call
@@ -3919,6 +4013,7 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 				}
 				let mut child = vp.child(k, cx.store, Arc::clone(unit), info.stages[0].entry, fds);
 				if info.kind == SpawnKind::Background {
+					child.async_diagnostics |= unit.mode.dialect() == Dialect::Bash;
 					let level = stage_level(unit, info.stages[0].entry, true);
 					super::set_subshell_depth(&mut child, super::subshell_depth(vp) + level);
 					// A job of its own: its processes get their own group.
@@ -3979,6 +4074,8 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 						sc.inline = Some(InlineStage::Running);
 						let mut frame = Frame::new(Some(Arc::clone(unit)), stage.entry, FrameKind::Stage);
 						frame.line_shift = line_shift;
+						let input = k.heredoc_input(vp);
+						k.set_heredoc_input(vp.vpid, vp.frames.len() + 1, input);
 						let prev = vp.fds.get(0).cloned();
 						vp.fds.set(0, stdin.take());
 						frame.redirs.push(vec![Saved { fd: 0, prev }]);
@@ -4160,7 +4257,8 @@ fn start_coproc(
 	let mut fds = vp.fds.clone();
 	fds.set(0, Some(FdRef::mem(in_r)));
 	fds.set(1, Some(FdRef::mem(out_w)));
-	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	let mut child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	child.async_diagnostics |= unit.mode.dialect() == Dialect::Bash;
 	// A job of its own under job control (never in the foreground).
 	super::jobctl::own_job(k, child.vpid);
 	let vpid = child.vpid;
@@ -4696,8 +4794,8 @@ pub fn mark_cancel(vp: &mut Vproc, status: i32) {
 /// none; `Shell::apply_requests`): unwind everything with `status`. The
 /// started run still runs its EXIT trap, as bash does when a signal ends
 /// the shell; scripts queued behind it end unstarted.
-pub fn finish_cancel(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc, status: i32) {
-	unwind(root, store, vp, 0);
+pub fn finish_cancel(k: &mut Kernel, store: &mut dyn StateStore, vp: &mut Vproc, status: i32) {
+	unwind(k, store, vp, 0);
 	vp.status = status;
 	vp.blocked = None;
 	for (i, run) in vp.runs.iter_mut().enumerate() {
@@ -4915,7 +5013,7 @@ fn run_always(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, floor: usize, end
 	let Some((fi, ri)) = found else {
 		return false;
 	};
-	unwind(&mut k.root, cx.store, vp, fi + 1);
+	unwind(k, cx.store, vp, fi + 1);
 	// The op of that frame (a call, the op that ended the list) is over.
 	clear_scratch(&mut k.root, cx.store, vp);
 	let f = top_frame(vp);
@@ -4962,7 +5060,7 @@ pub fn zsh_return(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) 
 /// trap it set runs afterwards in its caller (zsh `endtrapscope`).
 #[inline(never)]
 fn zsh_leave(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) {
-	unwind(&mut k.root, cx.store, vp, target + 1);
+	unwind(k, cx.store, vp, target + 1);
 	let zsh_function = vp.trap_frames == 0
 		&& matches!(
 			vp.frames.get(target),
@@ -4985,7 +5083,7 @@ fn zsh_leave(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, target: usize) {
 	) {
 		restore_local_specials(k, vp, cx);
 	}
-	pop_frame(&mut k.root, cx.store, vp);
+	pop_frame(k, cx.store, vp);
 	match exit {
 		Some(builtins::trap::ScopeExit::Text { action, mode }) => {
 			push_trap(k, vp, cx, TrapKey::Exit, &action, mode);
@@ -5090,7 +5188,7 @@ fn zsh_break(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, n: u32, cont: bool
 		if !crossable || vp.frames.len() < 2 {
 			break;
 		}
-		pop_frame(&mut k.root, cx.store, vp);
+		pop_frame(k, cx.store, vp);
 		// zsh `doshfunc`: with `localloops` (as restored on return) the
 		// break ends with the function; the call completes.
 		if function
@@ -5192,7 +5290,7 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		// Code a builtin runs (`ScriptKind::Code`): the builtin learns of
 		// the error (zsh's `errflag` after `execode`) when it runs again.
 		let code = matches!(vp.frames[i].kind, FrameKind::Script { what: ScriptKind::Code(_), .. });
-		unwind(&mut k.root, cx.store, vp, i);
+		unwind(k, cx.store, vp, i);
 		if code {
 			state::store_record(
 				&mut k.root,
@@ -5207,7 +5305,7 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		&& (state::zsh_option(&mut k.root, cx.store, vp, ZshOpt::Continueonerror).unwrap_or(false)
 			|| super::zle::reader::input_frame(cx, vp, i))
 	{
-		unwind(&mut k.root, cx.store, vp, i + 1);
+		unwind(k, cx.store, vp, i + 1);
 		clear_scratch(&mut k.root, cx.store, vp);
 		truncate(vp, Depths::default());
 		let f = top_frame(vp);
@@ -5215,7 +5313,7 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		f.loops.clear();
 		vp.status = status;
 	} else {
-		unwind(&mut k.root, cx.store, vp, 0);
+		unwind(k, cx.store, vp, 0);
 		exit_shell(k, vp, cx, status);
 	}
 }

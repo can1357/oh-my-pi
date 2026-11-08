@@ -318,7 +318,7 @@ pub(crate) fn parse_text_with_context(
 	let mut p = Parser::new(src, feat, NO_ALIASES);
 	p.virt = 0;
 	let mut word = p.text_word(mode).map_err(|error| (error, p.comsub_start))?;
-	finish::finish_word(&mut word, &p.docs);
+	finish::finish_word(&mut word, &p.docs, !feat.contains(Features::ZSH));
 	Ok(word)
 }
 

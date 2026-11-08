@@ -433,9 +433,17 @@ impl Reader {
 				)
 				.into(),
 			),
-			Err(Stop::Sub { unit, entry, form, text }) => {
-				Err(start_sub(k, vp, cx, &mut self.sc, Sub { unit, entry, form, text, line: 0 }).into())
-			},
+			Err(Stop::Sub { unit, entry, input_line, form, text }) => Err(
+				start_sub(k, vp, cx, &mut self.sc, Sub {
+					unit,
+					entry,
+					input_line,
+					form,
+					text,
+					line: 0,
+				})
+				.into(),
+			),
 			Err(Stop::Fail(d) | Stop::Fatal(d)) => {
 				self.sc.recycle();
 				k.diag(cx, vp, 0, d);

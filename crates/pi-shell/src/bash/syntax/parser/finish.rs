@@ -6,9 +6,10 @@ use crate::bash::syntax::{ast::*, span::NodeId};
 
 /// Walks a tree in id order, filling here-document texts and/or ids.
 struct Walk<'d> {
-	next: u32,
-	ids:  bool,
-	docs: &'d [Vec<u8>],
+	next:    u32,
+	ids:     bool,
+	readers: bool,
+	docs:    &'d [Vec<u8>],
 }
 
 impl Walk<'_> {
@@ -191,7 +192,12 @@ impl Walk<'_> {
 					}
 				},
 				WordPart::Comsub(c) => self.list(&mut c.body),
-				WordPart::ProcSub(p) => self.list(&mut p.body),
+				WordPart::ProcSub(p) => {
+					self.list(&mut p.body);
+					if self.readers {
+						p.reader_lines = crate::bash::syntax::print::comsub_readers(&p.body).1;
+					}
+				},
 				WordPart::Compound(elems) => self.elems(elems),
 				WordPart::Lit(_)
 				| WordPart::Escaped(_)
@@ -220,23 +226,23 @@ pub fn fill_docs(list: &mut List, docs: &[Vec<u8>]) {
 	if docs.is_empty() {
 		return;
 	}
-	Walk { next: 0, ids: false, docs }.list(list);
+	Walk { next: 0, ids: false, readers: false, docs }.list(list);
 }
 
 /// Assign preorder ids; returns the count.
 pub fn assign_ids(list: &mut List) -> u32 {
-	assign_ids_with_docs(list, &[])
+	assign_ids_with_docs(list, &[], false)
 }
 
 /// Finalize a bash command's ids and gathered documents in one tree walk.
-pub(super) fn assign_ids_with_docs(list: &mut List, docs: &[Vec<u8>]) -> u32 {
-	let mut w = Walk { next: 0, ids: true, docs };
+pub(super) fn assign_ids_with_docs(list: &mut List, docs: &[Vec<u8>], readers: bool) -> u32 {
+	let mut w = Walk { next: 0, ids: true, readers, docs };
 	w.list(list);
 	w.next
 }
 
 /// Ids for a lone word ([`parse_text`](super::parse_text)).
-pub(super) fn finish_word(word: &mut Word, docs: &[Vec<u8>]) {
-	let mut w = Walk { next: 0, ids: true, docs };
+pub(super) fn finish_word(word: &mut Word, docs: &[Vec<u8>], readers: bool) {
+	let mut w = Walk { next: 0, ids: true, readers, docs };
 	w.word(word);
 }

@@ -132,10 +132,19 @@ pub fn command_string(list: &List) -> Vec<u8> {
 /// bash `print_comsub`: the text bash stores for a command substitution
 /// body.
 pub fn comsub_text(list: &List) -> Vec<u8> {
+	comsub_print(list, false).0
+}
+
+pub(super) fn comsub_readers(list: &List) -> (Vec<u8>, Option<ReaderLines>) {
+	comsub_print(list, true)
+}
+
+fn comsub_print(list: &List, readers: bool) -> (Vec<u8>, Option<ReaderLines>) {
 	let mut p = Bp::new(true);
+	p.track_readers = readers;
 	let node = list_node(list, true);
 	p.mcsi(node.as_ref());
-	p.out
+	(p.out, ReaderLines::new(p.reader_lines))
 }
 
 // ---- command tree ---------------------------------------------------------
@@ -287,6 +296,10 @@ struct Bp<'a> {
 	printing_connection: u32,
 	printing_comsub:     bool,
 	deferred:            Vec<&'a Redir>,
+	track_readers:       bool,
+	reader_lines:        Vec<(u32, u32)>,
+	counted_bytes:       usize,
+	counted_lines:       u32,
 }
 
 impl<'a> Bp<'a> {
@@ -300,6 +313,31 @@ impl<'a> Bp<'a> {
 			printing_connection: 0,
 			printing_comsub:     comsub,
 			deferred:            Vec::new(),
+			track_readers:       false,
+			reader_lines:        Vec::new(),
+			counted_bytes:       0,
+			counted_lines:       0,
+		}
+	}
+
+	fn record_reader(&mut self, node: u32) {
+		if !self.track_readers || self.inside_function_def != 0 {
+			return;
+		}
+		if self.counted_bytes > self.out.len() {
+			self.counted_bytes = 0;
+			self.counted_lines = 0;
+		}
+		self.counted_lines += self.out[self.counted_bytes..]
+			.iter()
+			.filter(|&&b| b == b'\n')
+			.count() as u32;
+		self.counted_bytes = self.out.len();
+		let line = self.counted_lines + 1;
+		if let Some(last) = self.reader_lines.last_mut().filter(|last| last.0 == node) {
+			last.1 = line;
+		} else {
+			self.reader_lines.push((node, line));
 		}
 	}
 
@@ -505,9 +543,10 @@ impl<'a> Bp<'a> {
 	}
 
 	fn command(&mut self, cmd: &'a Command, fl: Fl) {
+		self.record_reader(cmd.id.0);
 		match &cmd.kind {
 			CommandKind::Simple(s) => {
-				self.simple(s, &cmd.redirs, fl.stderr);
+				self.simple(cmd.id.0, s, &cmd.redirs, fl.stderr);
 				return;
 			},
 			CommandKind::For(f) => self.for_like(b"for ", f),
@@ -580,7 +619,7 @@ impl<'a> Bp<'a> {
 		}
 		if !cmd.redirs.is_empty() || fl.stderr {
 			self.put(b" ");
-			self.redirection_list(&cmd.redirs, fl.stderr);
+			self.redirection_list(&cmd.redirs, fl.stderr, None);
 		}
 	}
 
@@ -790,31 +829,37 @@ impl<'a> Bp<'a> {
 		}
 	}
 
-	fn simple(&mut self, s: &'a Simple, redirs: &'a [Redir], stderr: bool) {
+	fn simple(&mut self, node: u32, s: &'a Simple, redirs: &'a [Redir], stderr: bool) {
 		let mut any = false;
 		for a in &s.assigns {
 			if any {
 				self.put(b" ");
 			}
-			any = true;
 			assign_text(a, &mut self.out);
+			if !any {
+				self.record_reader(node);
+			}
+			any = true;
 		}
 		for w in &s.words {
 			if any {
 				self.put(b" ");
 			}
-			any = true;
 			word_text(w, &mut self.out);
+			if !any {
+				self.record_reader(node);
+			}
+			any = true;
 		}
 		if !redirs.is_empty() || stderr {
 			if any {
 				self.put(b" ");
 			}
-			self.redirection_list(redirs, stderr);
+			self.redirection_list(redirs, stderr, (!any).then_some(node));
 		}
 	}
 
-	fn redirection_list(&mut self, redirs: &'a [Redir], stderr: bool) {
+	fn redirection_list(&mut self, redirs: &'a [Redir], stderr: bool, reader: Option<u32>) {
 		let mut heredocs: Vec<&'a Redir> = Vec::new();
 		self.was_heredoc = false;
 		let mut all: Vec<R<'a>> = redirs.iter().map(R::Real).collect();
@@ -830,6 +875,11 @@ impl<'a> Bp<'a> {
 				},
 				R::Real(r) => redirection_text(r, &mut self.out),
 				R::StderrDup => self.put(b"2>&1"),
+			}
+			if i == 0
+				&& let Some(node) = reader
+			{
+				self.record_reader(node);
 			}
 			if i + 1 < n {
 				self.put(b" ");
@@ -911,7 +961,7 @@ impl<'a> Bp<'a> {
 			self.was_heredoc = false;
 		} else {
 			self.newline(b"} ");
-			self.redirection_list(redirs, false);
+			self.redirection_list(redirs, false, None);
 		}
 	}
 

@@ -643,7 +643,12 @@ impl<'s> Parser<'s> {
 			}
 		}
 		let body = super::sub_parse_list(&code, self.feat, text_lo).unwrap_or_default();
-		Ok(WordPart::Comsub(Box::new(Comsub { kind: ComsubKind::Backtick, body, text })))
+		Ok(WordPart::Comsub(Box::new(Comsub {
+			kind: ComsubKind::Backtick,
+			input_start: text_lo,
+			body,
+			text,
+		})))
 	}
 
 	/// Parts up to the terminator of `stop`.
@@ -973,35 +978,46 @@ impl<'s> Parser<'s> {
 			}));
 		}
 		let body = super::sub_parse_list(&text, self.feat, lo).unwrap_or_default();
-		Ok(WordPart::Comsub(Box::new(Comsub { kind: ComsubKind::Dollar, body, text })))
+		Ok(WordPart::Comsub(Box::new(Comsub {
+			kind: ComsubKind::Dollar,
+			input_start: lo,
+			body,
+			text,
+		})))
 	}
 
 	/// `$(` seen: parse the command substitution.
 	fn dollar_paren(&mut self) -> PResult<WordPart> {
 		let start = self.off();
 		let (body, text) = self
-			.comsub(b')', false)
+			.comsub(b')', false, true)
 			.inspect_err(|_| self.comsub_start = start)?;
-		Ok(WordPart::Comsub(Box::new(Comsub { kind: ComsubKind::Dollar, body, text })))
+		Ok(WordPart::Comsub(Box::new(Comsub {
+			kind: ComsubKind::Dollar,
+			input_start: start,
+			body,
+			text,
+		})))
 	}
 
 	/// `${ ` / `${|` seen: a nofork command substitution.
 	fn funsub(&mut self, value: bool) -> PResult<WordPart> {
-		let (body, text) = self.comsub(b'}', value)?;
+		let input_start = self.off();
+		let (body, text) = self.comsub(b'}', value, true)?;
 		let kind = if value {
 			ComsubKind::ValueSub
 		} else {
 			ComsubKind::NoFork
 		};
-		Ok(WordPart::Comsub(Box::new(Comsub { kind, body, text })))
+		Ok(WordPart::Comsub(Box::new(Comsub { kind, input_start, body, text })))
 	}
 
 	/// `<(` / `>(` at the cursor.
 	fn procsub(&mut self, output: bool) -> PResult<WordPart> {
 		self.bump();
 		self.bump();
-		let (body, _) = self.comsub(b')', false)?;
-		Ok(WordPart::ProcSub(Box::new(ProcSub { output, body })))
+		let (body, _) = self.comsub(b')', false, false)?;
+		Ok(WordPart::ProcSub(Box::new(ProcSub { output, reader_lines: None, body })))
 	}
 
 	/// `"${a+'$('\'}"`: between the literal quotes of a `${…}` word inside
@@ -1015,7 +1031,7 @@ impl<'s> Parser<'s> {
 		let len = word_end_in_quote(rest)?;
 		let text = &rest[..len];
 		let mut sub = Parser::new(&text[2..], self.feat, crate::bash::syntax::NO_ALIASES);
-		let e = sub.comsub(b')', false).err()?;
+		let e = sub.comsub(b')', false, true).err()?;
 		let part = BadComsub { text: text.to_vec(), line: e.line, msg: e.bash_msg() };
 		self.advance_lines(len);
 		Some(WordPart::BadComsub(Box::new(part)))

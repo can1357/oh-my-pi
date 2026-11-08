@@ -240,7 +240,7 @@ impl Parser<'_> {
 					self.raw_into(&mut nested, 0, b'(', b')', Flags::ARITH, line)?;
 					nested
 				} else {
-					self.comsub(b')', false)?.1
+					self.comsub(b')', false, true)?.1
 				};
 				out.extend_from_slice(&nested);
 				out.push(b')');
@@ -251,7 +251,7 @@ impl Parser<'_> {
 					if value || matches!(self.peek(), Some(b' ' | b'\t')) {
 						self.bump();
 					}
-					self.comsub(b'}', value)?.1
+					self.comsub(b'}', value, true)?.1
 				} else {
 					let mut nested = Vec::new();
 					let nflags = Flags::FIRSTCLOSE.with(Flags::DOLBRACE).with(rflags);
@@ -344,7 +344,12 @@ impl Parser<'_> {
 	/// A command substitution body after `$(`, `${ `, `${|`, `<(` or `>(`
 	/// (bash `parse_comsub`): the commands and the text bash stores between
 	/// the delimiters.
-	pub(super) fn comsub(&mut self, close: u8, value: bool) -> PResult<(List, Vec<u8>)> {
+	pub(super) fn comsub(
+		&mut self,
+		close: u8,
+		value: bool,
+		print_text: bool,
+	) -> PResult<(List, Vec<u8>)> {
 		debug_assert!(self.la.is_none(), "a command substitution starts inside a word");
 		let mut lx = LexState::new();
 		lx.extglob = self.feat.contains(Features::EXTGLOB);
@@ -384,6 +389,9 @@ impl Parser<'_> {
 		self.pending = saved_pending;
 		self.expand_aliases = saved_expand;
 
+		if !print_text {
+			return Ok((list, Vec::new()));
+		}
 		let tcmd = crate::bash::syntax::print::comsub_text(&list);
 		let mut text = Vec::with_capacity(tcmd.len() + 4);
 		if close == b')' {

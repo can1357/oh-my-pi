@@ -434,7 +434,7 @@ fn interrupt(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 	if vp.frames.is_empty() {
 		return;
 	}
-	exec::unwind(&mut k.root, cx.store, vp, 1);
+	exec::unwind(k, cx.store, vp, 1);
 	exec::clear_scratch(&mut k.root, cx.store, vp);
 	let f = &mut vp.frames[0];
 	let saves: Vec<Vec<Saved>> = std::mem::take(&mut f.redirs);
@@ -771,6 +771,8 @@ pub fn suspend(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, sig: Signal) -> 
 	let mut moved: Vec<Frame> = Vec::new();
 	while vp.frames.len() > base + 1 {
 		let top = vp.frames.len() - 1;
+		let input = k.heredoc_input(vp);
+		k.set_heredoc_input(job.vpid, top - base + 1, input);
 		let f = &mut vp.frames[top];
 		let mut stand_in = Frame::new(f.unit.clone(), f.pc, f.kind.clone());
 		stand_in.redirs = f.redirs.iter().map(|s| copy_saves(s)).collect();
@@ -780,10 +782,12 @@ pub fn suspend(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, sig: Signal) -> 
 			undo_scratch(k, cx, vp, sc);
 			live_children(sc, &mut children);
 		}
-		exec::pop_frame(&mut k.root, cx.store, vp);
+		exec::pop_frame(k, cx.store, vp);
 		moved.push(frame);
 	}
 	moved.reverse();
+	let input = k.heredoc_input(vp);
+	k.set_heredoc_input(job.vpid, 1, input);
 	// The base frame's part: the op at the pc and the open compounds.
 	let f = &mut vp.frames[base];
 	let scratch = f.scratch.take();

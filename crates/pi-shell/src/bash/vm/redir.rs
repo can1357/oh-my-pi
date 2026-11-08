@@ -253,7 +253,11 @@ fn target_text(
 						reason = "one here-document per redirection; no bytecount dependency"
 					)]
 					let at = if e.context.is_some() {
-						line + e.line
+						let reader = super::exec::heredoc_reader_line(k, vp)
+							.unwrap_or(i64::from(line) + i64::from(k.heredoc_line_offset(vp)));
+						reader
+							.saturating_add(i64::from(e.line))
+							.clamp(0, i64::from(u32::MAX)) as u32
 					} else {
 						line + text.iter().filter(|&&c| c == b'\n').count() as u32 + 1
 					};

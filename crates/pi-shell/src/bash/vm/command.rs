@@ -3847,10 +3847,10 @@ fn run_builtin(
 					return Some(flow);
 				}
 			},
-			Err(Need::Sub(Stop::Sub { unit, entry, form, text })) => {
+			Err(Need::Sub(Stop::Sub { unit, entry, input_line, form, text })) => {
 				// A no-fork substitution pushes its frame above this op's.
 				let fi = vp.frames.len() - 1;
-				let sub = exec::Sub { unit, entry, form, text, line };
+				let sub = exec::Sub { unit, entry, input_line, form, text, line };
 				let flow = exec::start_sub(k, vp, cx, &mut sc, sub);
 				vp.frames[fi].scratch = Some(sc);
 				return Some(flow);

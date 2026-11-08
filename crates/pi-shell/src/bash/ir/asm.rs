@@ -40,19 +40,20 @@ pub struct AsmError {
 /// Side tables, as one postcard image.
 #[derive(Serialize, Deserialize)]
 struct Tables {
-	aliases: Vec<(BString, BString)>,
-	nodes:   Vec<NodeInfo>,
-	words:   Vec<Word>,
-	lists:   Vec<Vec<u32>>,
-	cmds:    Vec<Cmd>,
-	names:   Vec<BString>,
-	strs:    Vec<BString>,
-	redirs:  Vec<Vec<RedirIr>>,
-	spawns:  Vec<SpawnIr>,
-	pats:    Vec<Vec<u32>>,
-	ariths:  Vec<BString>,
-	conds:   Vec<CondIr>,
-	funcs:   Vec<FuncIr>,
+	aliases:      Vec<(BString, BString)>,
+	nodes:        Vec<NodeInfo>,
+	words:        Vec<Word>,
+	lists:        Vec<Vec<u32>>,
+	cmds:         Vec<Cmd>,
+	names:        Vec<BString>,
+	strs:         Vec<BString>,
+	reader_lines: Vec<crate::bash::syntax::ReaderLines>,
+	redirs:       Vec<Vec<RedirIr>>,
+	spawns:       Vec<SpawnIr>,
+	pats:         Vec<Vec<u32>>,
+	ariths:       Vec<BString>,
+	conds:        Vec<CondIr>,
+	funcs:        Vec<FuncIr>,
 }
 
 /// Render `unit` as IR text.
@@ -69,19 +70,20 @@ pub fn disasm(unit: &Unit) -> String {
 		let _ = writeln!(out, ".root {root}");
 	}
 	let tables = Tables {
-		aliases: unit.aliases.clone(),
-		nodes:   unit.nodes.clone(),
-		words:   unit.words.clone(),
-		lists:   unit.lists.clone(),
-		cmds:    unit.cmds.clone(),
-		names:   unit.names.clone(),
-		strs:    unit.strs.clone(),
-		redirs:  unit.redirs.clone(),
-		spawns:  unit.spawns.clone(),
-		pats:    unit.pats.clone(),
-		ariths:  unit.ariths.clone(),
-		conds:   unit.conds.clone(),
-		funcs:   unit.funcs.clone(),
+		aliases:      unit.aliases.clone(),
+		nodes:        unit.nodes.clone(),
+		words:        unit.words.clone(),
+		lists:        unit.lists.clone(),
+		cmds:         unit.cmds.clone(),
+		names:        unit.names.clone(),
+		strs:         unit.strs.clone(),
+		reader_lines: unit.reader_lines.clone(),
+		redirs:       unit.redirs.clone(),
+		spawns:       unit.spawns.clone(),
+		pats:         unit.pats.clone(),
+		ariths:       unit.ariths.clone(),
+		conds:        unit.conds.clone(),
+		funcs:        unit.funcs.clone(),
 	};
 	let image = postcard::to_stdvec(&tables).expect("IR tables serialize");
 	out.push_str(".tables ");
@@ -184,6 +186,7 @@ pub fn asm(text: &str) -> Result<Unit, AsmError> {
 				unit.cmds = t.cmds;
 				unit.names = t.names;
 				unit.strs = t.strs;
+				unit.reader_lines = t.reader_lines;
 				unit.redirs = t.redirs;
 				unit.spawns = t.spawns;
 				unit.pats = t.pats;

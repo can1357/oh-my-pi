@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+pub const FRAMES_VERSION: u32 = 30;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -236,42 +236,43 @@ impl FdRebuild<'_> {
 /// (`state::sync_root`), so the root's image has none.
 #[derive(Serialize, Deserialize)]
 struct ProcImage {
-	vpid:          Vpid,
-	parent:        Option<Vpid>,
-	runs:          Vec<RunImage>,
-	frames:        Vec<FrameImage>,
+	vpid:              Vpid,
+	parent:            Option<Vpid>,
+	runs:              Vec<RunImage>,
+	frames:            Vec<FrameImage>,
 	/// Fd object index of every slot.
-	fds:           Vec<Option<u32>>,
+	fds:               Vec<Option<u32>>,
 	/// A subshell's own state (`None` for the root vproc).
-	fields:        Option<Fields>,
-	out:           Vec<PendingWrite>,
-	pending_traps: SigSet,
-	stopped:       bool,
-	transient:     bool,
-	procsubs:      Vec<(u32, i32)>,
-	coprocs:       Vec<super::proc::Coproc>,
-	restore_opts:  Vec<BString>,
-	trace_base:    u32,
+	fields:            Option<Fields>,
+	out:               Vec<PendingWrite>,
+	pending_traps:     SigSet,
+	stopped:           bool,
+	transient:         bool,
+	async_diagnostics: bool,
+	procsubs:          Vec<(u32, i32)>,
+	coprocs:           Vec<super::proc::Coproc>,
+	restore_opts:      Vec<BString>,
+	trace_base:        u32,
 	/// `$BASH_SUBSHELL`.
-	subshell:      u32,
+	subshell:          u32,
 	/// `BASH_COMMAND`: the unit (written to the store) and syntax node; a
 	/// trap action that runs after the restore still names the trapped
 	/// command.
-	command:       Option<(UnitId, u32)>,
+	command:           Option<(UnitId, u32)>,
 	/// Pushes onto bash's call-stack arrays.
-	calls:         Vec<super::callstack::Call>,
+	calls:             Vec<super::callstack::Call>,
 	/// The pseudo-signal traps the vproc set itself.
-	own_traps:     super::proc::OwnTraps,
+	own_traps:         super::proc::OwnTraps,
 	/// Current mode (the root's is also `MiscKey::Mode`).
-	mode:          ModeId,
+	mode:              ModeId,
 	/// zsh state (sticky emulation, frames' restores).
-	zsh:           Option<Box<super::proc::VprocZsh>>,
+	zsh:               Option<Box<super::proc::VprocZsh>>,
 	/// Host lineage (a detached tree stays detached after a restore).
-	lineage:       crate::bash::host::Lineage,
+	lineage:           crate::bash::host::Lineage,
 	/// What the vproc was parked on and the wake count then: a restored
 	/// shell schedules exactly as the externalized one would have (no
 	/// second `Blocked`, same interleaving).
-	blocked:       Option<(WaitKey, u64)>,
+	blocked:           Option<(WaitKey, u64)>,
 }
 
 /// A subshell vproc's state that the root vproc keeps in the store.
@@ -317,6 +318,7 @@ struct FrameImage {
 	redirs:            Vec<Vec<SavedImage>>,
 	scratch:           Option<ScratchImage>,
 	line_shift:        u32,
+	heredoc_input:     Option<super::proc::HeredocInput>,
 	debug_pc:          Option<u32>,
 	debug_trap_local:  bool,
 	err_trap_local:    bool,
@@ -523,7 +525,7 @@ impl Shell {
 		let mut fds = FdImager::default();
 		for p in &mut self.procs {
 			let mut frames = Vec::with_capacity(p.frames.len());
-			for f in &mut p.frames {
+			for (index, f) in p.frames.iter_mut().enumerate() {
 				if let Some(unit) = &f.unit
 					&& self.k.written.insert(unit.id)
 				{
@@ -546,6 +548,7 @@ impl Shell {
 					redirs: f.redirs.iter().map(|r| saved_image(r, &mut fds)).collect(),
 					scratch,
 					line_shift: f.line_shift,
+					heredoc_input: self.k.heredoc_inputs.get(&(p.vpid, index + 1)).copied(),
 					debug_pc: f.debug_pc,
 					debug_trap_local: f.debug_trap_local,
 					err_trap_local: f.err_trap_local,
@@ -605,6 +608,7 @@ impl Shell {
 				pending_traps: p.pending_traps,
 				stopped: p.stopped,
 				transient: p.transient,
+				async_diagnostics: p.async_diagnostics,
 				procsubs: p.procsubs.clone(),
 				coprocs: p.coprocs.clone(),
 				restore_opts: p.restore_opts.clone(),
@@ -830,6 +834,7 @@ impl Shell {
 			vp.out = p.out.into();
 			vp.pending_traps = p.pending_traps;
 			vp.stopped = p.stopped;
+			vp.async_diagnostics = p.async_diagnostics;
 			vp.procsubs = p.procsubs;
 			vp.coprocs = p.coprocs;
 			vp.restore_opts = p.restore_opts;
@@ -1012,6 +1017,7 @@ impl Shell {
 				frame.redirs = redirs;
 				frame.scratch = scratch;
 				frame.line_shift = f.line_shift;
+				k.set_heredoc_input(vpid, vp.frames.len() + 1, f.heredoc_input);
 				frame.debug_pc = f.debug_pc;
 				frame.debug_trap_local = f.debug_trap_local;
 				frame.err_trap_local = f.err_trap_local;
@@ -1204,7 +1210,10 @@ fn valid(u: &Unit) -> bool {
 				| Part::AnsiC(_)
 				| Part::Zsh(_)
 				| Part::ComsubSyntax { .. } => true,
-				Part::Comsub { entry, .. } | Part::ProcSub { entry, .. } => *entry < n,
+				Part::Comsub { entry, .. } => *entry < n,
+				Part::ProcSub { entry, readers, .. } => {
+					*entry < n && readers.is_none_or(|index| (index as usize) < u.reader_lines.len())
+				},
 				Part::Compound(elems) => elems
 					.iter()
 					.all(|e| e.key.is_none_or(w_ok) && w_ok(e.value)),

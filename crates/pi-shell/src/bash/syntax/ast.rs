@@ -761,12 +761,14 @@ pub enum CaseMode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comsub {
 	/// Syntax used.
-	pub kind: ComsubKind,
+	pub kind:        ComsubKind,
+	/// Source offset immediately after the opening delimiter.
+	pub input_start: u32,
 	/// Commands inside.
-	pub body: List,
+	pub body:        List,
 	/// Source text between the delimiters (backquoted text is printed
 	/// verbatim; the other forms are re-printed from `body`).
-	pub text: Vec<u8>,
+	pub text:        Vec<u8>,
 }
 
 /// The four command-substitution forms of bash 5.3.
@@ -786,7 +788,45 @@ pub enum ComsubKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcSub {
 	/// `>(…)` rather than `<(…)`.
-	pub output: bool,
+	pub output:       bool,
+	/// Reader positions in the canonical text reparsed for this input.
+	pub reader_lines: Option<ReaderLines>,
 	/// Commands inside.
-	pub body:   List,
+	pub body:         List,
+}
+
+/// Command reader lines in a canonical parser input, shared with compiled IR.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderLines(std::sync::Arc<Vec<(u32, u32)>>);
+
+impl ReaderLines {
+	pub(crate) fn new(mut lines: Vec<(u32, u32)>) -> Option<Self> {
+		if lines.is_empty() {
+			return None;
+		}
+		lines.sort_unstable_by_key(|&(node, _)| node);
+		Some(Self(std::sync::Arc::new(lines)))
+	}
+
+	pub(crate) fn line(&self, node: u32) -> Option<u32> {
+		self
+			.0
+			.binary_search_by_key(&node, |&(id, _)| id)
+			.ok()
+			.map(|i| self.0[i].1)
+	}
+}
+
+impl Serialize for ReaderLines {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		self.0.as_ref().serialize(serializer)
+	}
+}
+
+impl<'de> Deserialize<'de> for ReaderLines {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let mut lines = Vec::<(u32, u32)>::deserialize(deserializer)?;
+		lines.sort_unstable_by_key(|&(node, _)| node);
+		Ok(Self(std::sync::Arc::new(lines)))
+	}
 }

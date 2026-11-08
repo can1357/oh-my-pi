@@ -8,6 +8,7 @@ use super::{
 	word::WordTok,
 };
 use crate::bash::syntax::{
+	Features,
 	ast::*,
 	span::{NodeId, Span},
 	util::push_u32,
@@ -202,7 +203,11 @@ impl Parser<'_> {
 			hi = hi.max(self.base + end as u32);
 		}
 		let mut list = List { items };
-		let node_count = super::finish::assign_ids_with_docs(&mut list, &self.docs);
+		let node_count = super::finish::assign_ids_with_docs(
+			&mut list,
+			&self.docs,
+			!self.feat.contains(Features::ZSH),
+		);
 		Ok(Some(CompleteCommand {
 			span: Span::new(lo, hi.max(lo)),
 			line,

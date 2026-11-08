@@ -95,7 +95,7 @@ use crate::bash::{
 };
 
 /// IR version; part of the frames header.
-pub const IR_VERSION: u32 = 15;
+pub const IR_VERSION: u32 = 17;
 
 /// Opcodes.
 #[derive(
@@ -280,6 +280,8 @@ pub struct Unit {
 	pub names:               Vec<BString>,
 	/// Diagnostic texts.
 	pub strs:                Vec<BString>,
+	/// Canonical parser-input command coordinates, shared with validated syntax.
+	pub reader_lines:        Vec<crate::bash::syntax::ReaderLines>,
 	/// Redirection lists.
 	pub redirs:              Vec<Vec<RedirIr>>,
 	/// Subshells, pipelines and background jobs.
@@ -314,6 +316,7 @@ impl Unit {
 			cmds: Vec::new(),
 			names: Vec::new(),
 			strs: Vec::new(),
+			reader_lines: Vec::new(),
 			redirs: Vec::new(),
 			spawns: Vec::new(),
 			pats: Vec::new(),
@@ -390,6 +393,7 @@ impl Unit {
 			&self.cmds,
 			&self.names,
 			&self.strs,
+			&self.reader_lines,
 			&self.redirs,
 			&self.spawns,
 			&self.pats,
@@ -555,14 +559,16 @@ pub enum Part {
 	/// with `SubExit`, or `End` for nofork forms).
 	Comsub {
 		/// Entry pc of the body.
-		entry:  u32,
+		entry:      u32,
+		/// Unit-relative line of this parser input's opener.
+		input_line: u32,
 		/// Syntax form.
-		kind:   ComsubForm,
+		kind:       ComsubForm,
 		/// Inside double quotes.
-		quoted: bool,
+		quoted:     bool,
 		/// `$( )`: `strs` index of the body's source text, re-parsed with
 		/// the aliases in effect when it runs (outside posix mode).
-		text:   Option<u32>,
+		text:       Option<u32>,
 	},
 	/// `$((…))`: arithmetic text, expanded then evaluated.
 	Arith {
@@ -574,9 +580,11 @@ pub enum Part {
 	/// `<(…)` / `>(…)`.
 	ProcSub {
 		/// Entry pc of the body.
-		entry:  u32,
+		entry:   u32,
+		/// Index of the canonical input reader table.
+		readers: Option<u32>,
 		/// `>(…)`.
-		output: bool,
+		output:  bool,
 	},
 	/// `(…)` of a declaration-builtin argument (`declare -a a=(1 2)`).
 	Compound(Vec<ElemIr>),
@@ -734,15 +742,18 @@ pub enum CaseIr {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cmd {
 	/// Prefix assignments.
-	pub assigns: Vec<AssignOp>,
+	pub assigns:     Vec<AssignOp>,
 	/// Word list (`lists` index).
-	pub words:   u32,
+	pub words:       u32,
 	/// Redirections (`redirs` index).
-	pub redirs:  Option<u32>,
+	pub redirs:      Option<u32>,
+	/// Unit-relative line where the first simple-command element ends:
+	/// Bash's simplecmd_lineno, including multiline first words.
+	pub reader_line: u32,
 	/// zsh: the command word is a reserved word of the `typeset` family
 	/// ([`crate::bash::syntax::Simple::typeset`]).
 	#[serde(default)]
-	pub typeset: bool,
+	pub typeset:     bool,
 }
 
 /// One prefix assignment.
