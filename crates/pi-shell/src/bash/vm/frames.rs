@@ -501,7 +501,7 @@ impl Shell {
 		let surviving_externals: Vec<_> = self
 			.surviving_externals
 			.iter()
-			.map(|(vpid, child)| (*vpid, child.pid()))
+			.map(|r| (r.vpid, r.child.pid()))
 			.collect();
 		report.lost.extend(
 			surviving_externals

@@ -11,7 +11,7 @@
 - The embedded shell's `comm` merges in the same locale order as its `sort`, so `comm` on `sort` output under a UTF-8 locale no longer reports unsorted input and drops common lines
 - An edit whose path is missing on disk no longer stalls the embedded shell and other native calls while it searches for the file, and a cancelled edit stops that search at once ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
 - macOS spellchecking (typo underlines, autocorrect, `apple` word completion) no longer leaks native memory for the life of the process ([#18285](https://github.com/can1357/oh-my-pi/pull/18285) by [@aleister1102](https://github.com/aleister1102))
-- Shell snapshots and both restore modes report native process identifiers even after their virtual owner ends; cancelling the whole shell also ends those retained programs. ([#18212](https://github.com/can1357/oh-my-pi/pull/18212) by [@sjawhar](https://github.com/sjawhar))
+- Shell snapshots and both restore modes report native process identifiers even after their virtual owner ends; cancelling the whole shell also ends those retained programs, except the ones a detached (`nohup`) owner started, which run on as they do while their owner lives. ([#18212](https://github.com/can1357/oh-my-pi/pull/18212) by [@sjawhar](https://github.com/sjawhar))
 - Shell restore now refuses an incompatible engine image before reading state-store records; dropping frames cannot bypass a different IR record schema. ([#18212](https://github.com/can1357/oh-my-pi/pull/18212) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.18.0] - 2026-11-07

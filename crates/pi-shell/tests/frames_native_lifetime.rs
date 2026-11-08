@@ -198,6 +198,87 @@ async fn shell_term_escalates_a_retained_native_without_ending_it_on_a_vproc_sig
 	assert_eq!(live, 0);
 }
 
+/// A `nohup` program must outlive whole-shell cancellation even after the
+/// virtual process that started it has already ended. Retaining the handle
+/// past its owner must not lose the owner's detached lineage: an active
+/// detached vproc's work is already left alone by cancellation, and a
+/// retained one is the same program a moment later.
+///
+/// `nohup` is given a shell FUNCTION, so the detached owner is a subshell of
+/// its own and the native program underneath it is not the job's program.
+/// That is what makes `kill -TERM %1` end the owner while the program runs
+/// on, leaving a retained handle with no vproc and no frame behind it. Giving
+/// `nohup` the program directly instead makes the job's program the native
+/// itself, which ends it along with its owner and never reaches this path.
+///
+/// The program counts the signals it receives, so the assertion is that
+/// cancellation sent none, not merely that something survived a grace period.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_cancellation_leaves_a_retained_detached_native_running() {
+	let dir = tempfile::tempdir().unwrap();
+	let script_file = dir.path().join("native.py");
+	let pid_file = dir.path().join("pid");
+	let terms_file = dir.path().join("pid.terms");
+	std::fs::write(
+		&script_file,
+		"import os,signal,time,sys\n\
+		 seen=0\n\
+		 def term(s,f):\n\
+		 \x20global seen\n\
+		 \x20seen+=1\n\
+		 \x20open(sys.argv[1]+'.terms','w').write(str(seen))\n\
+		 signal.signal(signal.SIGTERM,term)\n\
+		 open(sys.argv[1],'w').write(str(os.getpid()))\n\
+		 time.sleep(120)\n",
+	)
+	.unwrap();
+	let mut session = Session::new(SessionConfig {
+		env:             vec![(BString::from("PATH"), BString::from("/usr/bin:/bin"))],
+		cwd:             BString::from("/"),
+		fs:              Box::new(StdFs::default()),
+		vfs:             None,
+		runtime:         tokio::runtime::Handle::current(),
+		output_decoding: None,
+	})
+	.unwrap();
+	let token = CancellationToken::new();
+	let watch = async {
+		// The owner takes its TERM and ends; the program records that one
+		// signal and runs on, so the engine keeps its handle with no vproc
+		// behind it. Only then is the shell cancelled.
+		let until = tokio::time::Instant::now() + Duration::from_secs(25);
+		while !terms_file.exists() {
+			assert!(tokio::time::Instant::now() < until, "the owner's TERM never reached it");
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		tokio::time::sleep(TERM_GRACE * 2).await;
+		let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+		let before = std::fs::read_to_string(&terms_file).unwrap();
+		assert!(alive(pid), "the program died before the shell was cancelled");
+		token.cancel();
+		(pid, before)
+	};
+	let script = format!(
+		"worker(){{ /usr/bin/python3 '{script}' '{pid}' >/dev/null 2>&1; echo UNREACHABLE; }}; \
+		 nohup worker >/dev/null 2>&1 & while [ ! -s '{pid}' ]; do sleep 0.01; done; \
+		 kill -TERM %1; wait %1; while :; do sleep 0.1; done",
+		script = script_file.display(),
+		pid = pid_file.display()
+	);
+	let (outcome, (pid, before)) =
+		tokio::join!(session.run(&script, RunStdio::default(), token.clone()), watch);
+	let _cleanup = Program { pid, owner: Vpid(0), run: RunId(0) };
+	assert!(outcome.unwrap().cancelled);
+	tokio::time::sleep(TERM_GRACE * 3).await;
+	let after = std::fs::read_to_string(&terms_file).unwrap();
+	println!(
+		"retained detached across cancel: pid={pid} before={before} after={after} alive={}",
+		alive(pid)
+	);
+	assert_eq!(after, before, "whole-shell cancellation signalled a retained detached program");
+	assert!(alive(pid), "whole-shell cancellation ended a retained detached native program");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_kill_reaches_a_retained_native_without_ending_it_on_a_vproc_signal() {
 	retained_program_is_cancelled(Signal::Kill).await;

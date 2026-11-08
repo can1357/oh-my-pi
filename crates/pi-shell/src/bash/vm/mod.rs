@@ -384,7 +384,21 @@ pub struct Shell {
 	/// External programs still running after their owner was unwound. Their
 	/// handles stay here until exit or whole-shell cancellation, without
 	/// keeping a dead vproc or frame.
-	surviving_externals: Vec<(Vpid, Box<dyn ExtProc>)>,
+	surviving_externals: Vec<Retained>,
+}
+
+/// A native program retained past the end of the virtual process that started
+/// it. It outlives its owner, so the owner's record is gone and the decisions
+/// that read the owner's lineage must be made from what is kept here.
+struct Retained {
+	/// The virtual process that started it, as the image and loss reports
+	/// name it.
+	vpid:     Vpid,
+	/// Its owner was detached, so whole-shell cancellation leaves it alone,
+	/// exactly as it leaves an active detached vproc's work alone.
+	detached: bool,
+	/// The live handle to the native process.
+	child:    Box<dyn ExtProc>,
 }
 
 /// Shell-wide state shared by all vprocs (kept apart from `procs` so ops can
@@ -2094,13 +2108,16 @@ impl Shell {
 			let mut task_cx = Context::from_waker(&self.k.waker);
 			self
 				.surviving_externals
-				.retain_mut(|(_, child)| child.poll_wait(&mut task_cx).is_pending());
+				.retain_mut(|r| r.child.poll_wait(&mut task_cx).is_pending());
 		}
 	}
 
 	/// Signal an ending vproc's work, retaining live externals. With no owner,
-	/// signal all non-detached work and release retained handles to the host's
-	/// grace/KILL escalation; frame handles are released by cancellation unwind.
+	/// signal all non-detached work and release the retained programs of
+	/// non-detached owners to the host's grace/KILL escalation; a retained
+	/// program whose owner was detached is left alone and stays retained,
+	/// exactly as an active detached vproc's work is. Frame handles are
+	/// released by cancellation unwind.
 	fn signal_work(&mut self, owner: Option<usize>, sig: Signal) {
 		let range = owner.map_or(0..self.procs.len(), |i| i..i + 1);
 		let mut task_cx = Context::from_waker(&self.k.waker);
@@ -2126,16 +2143,24 @@ impl Shell {
 						&& child.poll_wait(&mut task_cx).is_pending()
 						&& let Live::Ext(child) = std::mem::replace(&mut sc.live, Live::None)
 					{
-						self.surviving_externals.push((p.vpid, child));
+						self.surviving_externals.push(Retained {
+							vpid: p.vpid,
+							detached: p.lineage.detached,
+							child,
+						});
 					}
 				}
 			}
 		}
 		if owner.is_none() {
-			for (_, mut child) in self.surviving_externals.drain(..) {
-				let _ = child.signal(sig);
-				let _ = child.cont();
-			}
+			self.surviving_externals.retain_mut(|r| {
+				if r.detached {
+					return true;
+				}
+				let _ = r.child.signal(sig);
+				let _ = r.child.cont();
+				false
+			});
 		}
 	}
 
