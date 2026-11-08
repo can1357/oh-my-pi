@@ -440,7 +440,9 @@ export async function waitForDiagnostics(
 	}
 	throwIfAborted(signal);
 	if (pulled === undefined) {
-		if (supportsDocumentDiagnostics(client)) {
+		// The push fallback stands in for the pull only when a publish arrived after the
+		// caller's `minVersion`; an older push never vouches for the current document.
+		if (versionOk && supportsDocumentDiagnostics(client)) {
 			const publishedRecord = client.publishedDiagnostics.get(uri);
 			if (publishedRecord !== undefined) {
 				const now = Date.now();

@@ -6814,6 +6814,70 @@ describe("lsp regressions", () => {
 			}
 		}, 15_000);
 
+		it("does not let a push older than minVersion stand in for a failed dual-mode pull (#17657)", async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-dual-mode-stale-push-");
+			const sourcePath = path.join(tempDir.path(), "main.rs");
+			const sourceUri = fileToUri(sourcePath);
+			await Bun.write(sourcePath, "fn main() {}\n");
+
+			installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { diagnosticProvider: { identifier: "rust-analyzer" } } },
+					});
+				} else if (message.method === "textDocument/diagnostic") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						error: { code: -32603, message: "Internal server error" },
+					});
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+
+			const config: ServerConfig = { command: "dual-lsp", fileTypes: [".rs"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "dual-lsp": config },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["dual-lsp", config]]);
+
+			try {
+				const client = await lspClient.getOrCreateClient(config, tempDir.path());
+				await lspClient.ensureFileOpen(client, sourcePath);
+
+				// A clean flycheck publish from before the edit must not turn a failed pull into "OK".
+				client.publishedDiagnostics.set(sourceUri, { diagnostics: [], version: null });
+				client.diagnosticsVersion += 1;
+				const minVersion = client.diagnosticsVersion;
+				await expect(
+					waitForDiagnostics(client, sourceUri, { timeoutMs: 50, minVersion, settleMs: 0 }),
+				).rejects.toThrow("Internal server error");
+
+				// A publish after minVersion still serves as the fallback.
+				const rustcDiagnostic: Diagnostic = {
+					range: { start: { line: 0, character: 0 }, end: { line: 0, character: 2 } },
+					message: "unused variable: `x`",
+					severity: 2,
+					source: "rustc",
+				};
+				client.publishedDiagnostics.set(sourceUri, { diagnostics: [rustcDiagnostic], version: null });
+				client.diagnosticsVersion += 1;
+				expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 50, minVersion, settleMs: 0 })).toEqual([
+					rustcDiagnostic,
+				]);
+			} finally {
+				vi.restoreAllMocks();
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
 		it("resolves undefined on timeout for push-only servers without falling back to stale pushes (#17657)", async () => {
 			const tempDir = TempDir.createSync("@omp-lsp-push-timeout-");
 			const sourcePath = path.join(tempDir.path(), "test.ts");
