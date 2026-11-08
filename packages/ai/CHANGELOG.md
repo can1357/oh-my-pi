@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Codex streaming tests no longer leave temporary directories behind
-
 ## [18.17.0] - 2026-11-06
 
 ### Added
