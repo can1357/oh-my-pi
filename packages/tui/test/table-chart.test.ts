@@ -828,6 +828,66 @@ describe("table charts in assistant Markdown", () => {
 		}
 	});
 
+	it("keeps publishing the answer past a drawn chart, but not past a chart still being picked", async () => {
+		const protocol = TERMINAL.imageProtocol;
+		await initTheme(false);
+		setTerminalImageProtocol(ImageProtocol.Kitty);
+		const pick = Promise.withResolvers<ChartPlan | null>();
+		setTableCharts("smart", request => pick.promise.then(() => request.guess));
+		try {
+			const after = Array.from({ length: 8 }, (_, i) => `Paragraph ${i} after the chart.`).join("\n\n");
+			const text = `The numbers from the last run.\n\n${SHARES}\n\n${after}`;
+			let changed = Promise.withResolvers<void>();
+			const component = new AssistantMessageComponent(undefined, false, () => changed.resolve());
+			const stream = (end: number) => {
+				component.updateContent(
+					{
+						role: "assistant",
+						content: [{ type: "text", text: text.slice(0, end) }],
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "claude-sonnet-4-5",
+						stopReason: "stop",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						timestamp: 1,
+					},
+					{ transient: true },
+				);
+				const rows = trimBlankEdges(component.render(100));
+				const stable = component.renderTranscriptStableRows(component.getTranscriptStableRows().length, 100);
+				expect(rows.slice(0, stable.length)).toEqual([...stable]);
+				return stable;
+			};
+			const published = (stable: readonly string[], needle: string) => stable.some(row => row.includes(needle));
+
+			// Up to the middle of the prose after the table, with the pick pending.
+			const middle = text.indexOf("Paragraph 4");
+			let stable: readonly string[] = [];
+			for (let end = 1; end <= middle; end++) stable = stream(end);
+			expect(published(stable, "Tool results")).toBe(true);
+			expect(published(stable, "Paragraph 0")).toBe(false);
+
+			// The pick lands, then its raster.
+			pick.resolve(null);
+			await changed.promise;
+			changed = Promise.withResolvers<void>();
+			component.render(100);
+			await changed.promise;
+			for (let end = middle + 1; end <= text.length; end++) stable = stream(end);
+			expect(stable.some(row => TERMINAL.isImageLine(row))).toBe(true);
+			expect(published(stable, "Paragraph 6")).toBe(true);
+		} finally {
+			setTerminalImageProtocol(protocol);
+		}
+	});
+
 	it("asks the smart planner once per table the guess would chart, single series included", async () => {
 		const planner = vi.fn<TableChartPlanner>(async request =>
 			request.table.measures.length > 1 ? { ...request.guess, kind: "heatmap" } : null,

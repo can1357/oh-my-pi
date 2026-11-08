@@ -623,12 +623,14 @@ describe("TranscriptContainer", () => {
 		const block = new ReflowingAppendBlock();
 		transcript.addChild(block);
 
-		// Room 2: "efgh" is still on screen, so its stable prefix stays live —
-		// committing it would strand that row above the live tail.
-		expect(transcript.peekFinalizedBatch(4, 2)).toBeUndefined();
-		// Room 1: the whole two-row stable prefix has left the screen.
+		// Room 2: only "abcd" left the screen; "efgh" stays live under it.
+		const head = transcript.peekFinalizedBatch(4, 2)!;
+		expect(head.rows).toEqual(["abcd"]);
+		transcript.acknowledgeFinalizedBatch(head.id);
+		expect(transcript.renderViewport(4, 2, frame)).toEqual(["efgh", "partial"]);
+		// Room 1: the rest of the two-row stable prefix has left the screen.
 		const emitted = transcript.peekFinalizedBatch(4, 1)!;
-		expect(emitted.rows).toEqual(["abcd", "efgh"]);
+		expect(emitted.rows).toEqual(["efgh"]);
 		transcript.acknowledgeFinalizedBatch(emitted.id);
 		expect(transcript.renderViewport(8, 1, frame)).toEqual(["partial"]);
 
@@ -640,6 +642,45 @@ describe("TranscriptContainer", () => {
 		block.finalize();
 		const suffix = transcript.peekFinalizedBatch(8, 0)!;
 		expect(suffix.rows).toEqual(["final", ""]);
+	});
+
+	it("retires a stable prefix taller than the overflow row by row while it streams", () => {
+		// One published prefix renders as a seven-row table. Its rows retire as
+		// they leave the screen; waiting for the whole prefix to fit in the
+		// overflow would leave the rows above the viewport shown nowhere.
+		const table = ["intro", "t1", "t2", "t3", "t4", "t5", "t6"];
+		const block = new AppendBlock([...table, "streaming"], []);
+		block.publishStable([{ key: "table" }], table);
+		block.renderTranscriptStableRows = count => (count > 0 ? table : []);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(block);
+
+		const first = transcript.peekFinalizedBatch(80, 5)!;
+		expect(first.rows).toEqual(["intro", "t1", "t2"]);
+		transcript.acknowledgeFinalizedBatch(first.id);
+		expect(transcript.renderViewport(80, 5, frame)).toEqual(["t3", "t4", "t5", "t6", "streaming"]);
+		expect(transcript.peekFinalizedBatch(80, 5)).toBeUndefined();
+
+		// Two more live rows push two more table rows off the screen.
+		block.revise([...table, "streaming", "more", "rows"]);
+		const second = transcript.peekFinalizedBatch(80, 5)!;
+		expect(second.rows).toEqual(["t3", "t4"]);
+		transcript.acknowledgeFinalizedBatch(second.id);
+
+		// A replay at the same width rewrites exactly what history held.
+		transcript.beginReplay();
+		const replay = transcript.peekReplayBatch(80)!;
+		expect(replay.rows).toEqual(["intro", "t1", "t2", "t3", "t4"]);
+		transcript.acknowledgeFinalizedBatch(replay.id);
+
+		// Finalizing retires each remaining row once.
+		block.finalize([...table, "streaming", "more", "rows"]);
+		const rest: string[] = [];
+		for (let batch = transcript.peekFinalizedBatch(80, 0); batch; batch = transcript.peekFinalizedBatch(80, 0)) {
+			rest.push(...batch.rows);
+			transcript.acknowledgeFinalizedBatch(batch.id);
+		}
+		expect(rest).toEqual(["t5", "t6", "streaming", "more", "rows", ""]);
 	});
 
 	it("drops emitted stable rows on reset so a replay honors a hidden presentation (#10177)", () => {

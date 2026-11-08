@@ -2,7 +2,7 @@ import type { Tokens } from "@oh-my-pi/pi-utils/marked";
 import type { ImageBudget } from "../components/image";
 import { type Markdown, streamingMarkdownSource } from "../components/markdown";
 import { Spacer } from "../components/spacer";
-import { Container } from "../tui";
+import { type Component, Container } from "../tui";
 import { SvgFigure, svgFigureRendering } from "./svg-figure";
 import { type FigureSegment, splitSvgFences } from "./svg-source";
 import { type ChartSegment, hasChartTable, splitTableCharts, TableChartFigure } from "./table-chart";
@@ -19,6 +19,12 @@ export interface FigureMarkdownOptions {
 	/** A figure's rows changed outside a text update (raster landed, fell back to code). */
 	onChange: () => void;
 }
+
+/** One run of {@link FigureMarkdown.stablePrefix}: settled prose, the blank row between parts, or a figure whose rows are final. */
+export type FigureStablePart =
+	| { readonly kind: "markdown"; readonly text: string }
+	| { readonly kind: "spacer" }
+	| { readonly kind: "figure"; readonly figure: Component };
 
 type Part =
 	| { readonly kind: "markdown"; readonly md: Markdown; text: string }
@@ -68,20 +74,34 @@ export class FigureMarkdown extends Container {
 	}
 
 	/**
-	 * The trimmed prose ahead of the first figure, or "" when the block opens
-	 * with one. These are the only rows plain Markdown reproduces byte for
-	 * byte, so they are all a transcript may publish ahead of the figure. While
-	 * that prose is still the streaming tail (no figure follows it yet), only
-	 * its settled prefix ({@link Markdown.getLastRenderStableText}) qualifies:
-	 * the rest is still being written. Both forms are in
-	 * {@link streamingMarkdownSource} form, so the settled prefix stays a byte
-	 * prefix of the whole run once a figure splits it off.
+	 * The leading parts whose rows can no longer change, for a transcript to
+	 * publish ahead of the streaming tail: closed prose runs, the blank rows
+	 * {@link #mount} puts between parts, and figures that draw their final
+	 * source. It stops at the first figure still waiting for its source, pick
+	 * or raster. In the streaming prose run only its settled prefix
+	 * ({@link Markdown.getLastRenderStableText}) qualifies; prose is in
+	 * {@link streamingMarkdownSource} form, so that prefix stays a byte prefix
+	 * of the run once a figure splits it off. `complete` when every part
+	 * qualified in full.
 	 */
-	get leadingProse(): string {
-		const first = this.#parts[0];
-		if (first?.kind !== "markdown") return "";
-		if (this.#transient && this.#parts.length === 1) return first.md.getLastRenderStableText().trim();
-		return streamingMarkdownSource(first.text);
+	stablePrefix(): { parts: FigureStablePart[]; complete: boolean } {
+		const parts: FigureStablePart[] = [];
+		const last = this.#parts.length - 1;
+		for (const [index, part] of this.#parts.entries()) {
+			if (index > 0 && part.kind !== "chart") parts.push({ kind: "spacer" });
+			if (part.kind === "markdown") {
+				if (this.#transient && index === last) {
+					const settled = part.md.getLastRenderStableText().trim();
+					if (settled) parts.push({ kind: "markdown", text: settled });
+					return { parts, complete: false };
+				}
+				parts.push({ kind: "markdown", text: streamingMarkdownSource(part.text) });
+				continue;
+			}
+			if (!part.figure.settled) return { parts, complete: false };
+			parts.push({ kind: "figure", figure: part.figure });
+		}
+		return { parts, complete: true };
 	}
 
 	/** Whether a figure's final source still waits for its raster, or a chart for its pick or raster. */

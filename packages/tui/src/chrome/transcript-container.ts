@@ -104,6 +104,15 @@ interface TranscriptEntry {
 	stableRowCountByWidth: Map<number, Map<number, number>>;
 	emitted: number;
 	/**
+	 * Rows past the `emitted` stable prefix already in native history at
+	 * `width`: the head of later stable rows that left the screen while the
+	 * next whole prefix was still partly on it (one stable prefix can be a
+	 * table taller than the overflow). Stable rows are final bytes, so these
+	 * rows never change; at another width none count, and a replay re-emits
+	 * only whole prefixes there.
+	 */
+	partial: { readonly width: number; readonly rows: number } | undefined;
+	/**
 	 * Set when a published stable row drifted (retraction, byte change within a
 	 * width epoch, or no longer a render prefix). Rows already in native
 	 * scrollback cannot be retracted, so the entry keeps its last good stable
@@ -146,8 +155,19 @@ interface RowSplit {
 
 type RetirementPolicy = "pressure" | "flush";
 type Offered =
-	/** `lead`: the rows start with the blank history owed the head (see {@link RowsAbove}). */
-	| { batch: HistoryBatch; kind: "append"; entry: number; emittedEnd: number; lead: boolean }
+	/**
+	 * `lead`: the rows start with the blank history owed the head (see {@link RowsAbove}).
+	 * `partialRows`: rows past the `emittedEnd` prefix at `width` (see {@link TranscriptEntry.partial}).
+	 */
+	| {
+			batch: HistoryBatch;
+			kind: "append";
+			entry: number;
+			emittedEnd: number;
+			partialRows: number;
+			width: number;
+			lead: boolean;
+	  }
 	/**
 	 * Whole blocks `[frontier, end)`, then optionally the head rows of block
 	 * `end`; `historyEnd` is what history ends with once it is acknowledged.
@@ -161,10 +181,11 @@ type Offered =
  */
 type RowsAbove = boolean | undefined;
 
-/** Rows a progressive-append retirement offers, and the stable count they bring the head to. */
+/** Rows a progressive-append retirement offers, the stable count they bring the head to, and the rows past it. */
 interface AppendBatch {
 	rows: readonly string[];
 	emittedEnd: number;
+	partialRows: number;
 }
 
 const MAX_LIVE_BLOCKS = 256;
@@ -395,6 +416,7 @@ export class TranscriptContainer extends Container {
 			renderedStableByWidth: new Map(),
 			stableRowCountByWidth: new Map(),
 			emitted: 0,
+			partial: undefined,
 			stableFrozen: false,
 			split: undefined,
 		});
@@ -478,6 +500,7 @@ export class TranscriptContainer extends Container {
 		this.#historyEnd = undefined;
 		for (const entry of this.#entries) {
 			entry.emitted = 0;
+			entry.partial = undefined;
 			entry.stableRows = EMPTY_STABLE_ROWS;
 			entry.renderedStableByWidth = new Map();
 			entry.stableRowCountByWidth = new Map();
@@ -505,7 +528,7 @@ export class TranscriptContainer extends Container {
 		const index = this.#entries.findLastIndex(entry => entry.component === component);
 		if (index < 0) return -1;
 		const entry = this.#entries[index]!;
-		if (entry.state === "committed" || entry.emitted > 0 || entry.split !== undefined) return -1;
+		if (entry.state === "committed" || entry.emitted > 0 || entry.partial || entry.split !== undefined) return -1;
 		if (this.#offered?.kind === "commit" && index < this.#offered.end + (this.#offered.split ? 1 : 0)) return -1;
 		if (this.#offered?.kind === "append" && index === this.#offered.entry) return -1;
 		return index;
@@ -885,9 +908,18 @@ export class TranscriptContainer extends Container {
 		if (offered.kind === "append") {
 			const entry = this.#entries[offered.entry];
 			if (entry === undefined) return undefined;
-			const before = this.#renderStablePrefix(entry, entry.emitted, width);
-			const after = this.#renderStablePrefix(entry, offered.emittedEnd, width);
-			const added = after.slice(before.length);
+			// Rows past a whole prefix are counted at one width; at another the
+			// offer keeps only its whole prefixes.
+			if (offered.width !== width) {
+				offered.partialRows = 0;
+				offered.width = width;
+			}
+			const start = this.#emittedRowCount(entry, width);
+			const end = this.#stablePrefixRowCount(entry, offered.emittedEnd, width) + offered.partialRows;
+			const added =
+				end > start
+					? this.#renderStablePrefix(entry, entry.stableRows.length, width).slice(start, end)
+					: EMPTY_ROWS;
 			rows = offered.lead ? ["", ...added] : added;
 		} else if (offered.kind === "commit") {
 			const retirement = this.#renderRange(this.#frontier, offered.end, width, this.#historyEnd);
@@ -1007,16 +1039,24 @@ export class TranscriptContainer extends Container {
 			// A blank history owes the head goes out first, within the overflow.
 			const leadRows = lead === 0 ? 1 : 0;
 			const overflow = liveRows - room - leadRows;
-			const { rows, emittedEnd } =
+			const { rows, emittedEnd, partialRows } =
 				this.#measuredAppendBatch(appendHead, width, overflow) ??
 				this.#renderedAppendBatch(appendHead, width, overflow);
-			if (emittedEnd > appendHead.emitted) {
+			if (rows.length > 0) {
 				const batch: HistoryBatch = {
 					id: this.#nextBatchId++,
 					rows: leadRows > 0 ? ["", ...rows] : rows,
 					kind: "append",
 				};
-				this.#offered = { batch, kind: "append", entry: this.#frontier, emittedEnd, lead: leadRows > 0 };
+				this.#offered = {
+					batch,
+					kind: "append",
+					entry: this.#frontier,
+					emittedEnd,
+					partialRows,
+					width,
+					lead: leadRows > 0,
+				};
 				this.#pinnedFrontier = undefined;
 				return batch;
 			}
@@ -1125,8 +1165,13 @@ export class TranscriptContainer extends Container {
 			// The offered end must still extend this entry's emitted prefix: a
 			// stale offer (already-advanced entry) or a retraction (entry reset to
 			// zero with the offer still live) must not move it backwards.
-			if (entry === undefined || offered.entry !== this.#frontier || offered.emittedEnd <= entry.emitted) return;
+			if (entry === undefined || offered.entry !== this.#frontier) return;
+			const advances =
+				offered.emittedEnd > entry.emitted ||
+				(offered.emittedEnd === entry.emitted && offered.partialRows > this.#partialRows(entry, offered.width));
+			if (!advances) return;
 			entry.emitted = offered.emittedEnd;
+			entry.partial = offered.partialRows > 0 ? { width: offered.width, rows: offered.partialRows } : undefined;
 			this.#historyEnd = undefined;
 		} else if (offered.kind === "commit") {
 			for (let index = this.#frontier; index < offered.end; index++) {
@@ -1346,7 +1391,8 @@ export class TranscriptContainer extends Container {
 			return this.#splitRowCount(entry, offered.split, width);
 		}
 		if (offered?.kind === "append" && offered.entry === index && entry.split === undefined) {
-			return this.#stablePrefixRowCount(entry, offered.emittedEnd, width);
+			const partialRows = offered.width === width ? offered.partialRows : 0;
+			return this.#stablePrefixRowCount(entry, offered.emittedEnd, width) + partialRows;
 		}
 		return this.#emittedRowCount(entry, width);
 	}
@@ -1354,7 +1400,12 @@ export class TranscriptContainer extends Container {
 	/** Rows of `entry` at `width` already acknowledged into native history. */
 	#emittedRowCount(entry: TranscriptEntry, width: number): number {
 		if (entry.split !== undefined) return this.#splitRowCount(entry, entry.split, width);
-		return this.#stablePrefixRowCount(entry, entry.emitted, width);
+		return this.#stablePrefixRowCount(entry, entry.emitted, width) + this.#partialRows(entry, width);
+	}
+
+	/** Rows of `entry` past its emitted stable prefix already in history at `width`. */
+	#partialRows(entry: TranscriptEntry, width: number): number {
+		return entry.partial?.width === width ? entry.partial.rows : 0;
 	}
 
 	/**
@@ -1436,60 +1487,74 @@ export class TranscriptContainer extends Container {
 	 * `renderedStableByWidth` holds the newest, so each count's rows are a
 	 * prefix of it and the batch is one slice. Undefined when a count the walk
 	 * needs was never recorded here (published between renders, or before a
-	 * resize); the rendered walk then decides. Like the rendered walk, it never
-	 * passes `overflow`: a prefix reaching onto the screen waits.
+	 * resize); the rendered walk then decides.
 	 */
 	#measuredAppendBatch(entry: TranscriptEntry, width: number, overflow: number): AppendBatch | undefined {
 		const counts = entry.stableRowCountByWidth.get(width);
 		const newest = entry.renderedStableByWidth.get(width);
 		const target = entry.stableRows.length;
 		if (counts === undefined || newest === undefined || counts.get(target) !== newest.length) return undefined;
-		const start = entry.emitted === 0 ? 0 : counts.get(entry.emitted);
-		if (start === undefined) return undefined;
-		let emittedEnd = entry.emitted;
-		let end = start;
-		while (emittedEnd < target) {
-			const next = counts.get(emittedEnd + 1);
-			if (next === undefined) return undefined;
-			if (next <= start) {
-				if (emittedEnd === entry.emitted) {
-					this.#freezeStableRows(entry, EMPTY_ROWS, "semantic row render added no suffix");
-				}
-				break;
-			}
-			if (next - start > overflow) break;
-			end = next;
-			emittedEnd += 1;
-		}
-		return { rows: emittedEnd > entry.emitted ? newest.slice(start, end) : EMPTY_ROWS, emittedEnd };
+		const base = entry.emitted === 0 ? 0 : counts.get(entry.emitted);
+		if (base === undefined) return undefined;
+		return this.#sizeAppendBatch(entry, width, overflow, newest, base, count => counts.get(count));
 	}
 
 	/**
-	 * Size a progressive-append batch by rendering each further stable prefix:
-	 * extend the emitted prefix while its new rows stay within `overflow` — the
-	 * rows that left the screen — stopping at the first prefix that would reach
-	 * onto it, adds no row, or stops extending the emitted one (freezing the
-	 * block when that is the very next prefix). A prefix still partly on screen
-	 * stays live: committing it would strand those rows above the live tail,
-	 * where a later shrink of the chrome below opens a band no frame can fill.
+	 * Size a progressive-append batch by rendering each further stable prefix
+	 * (see {@link #sizeAppendBatch}); a prefix that stops extending the emitted
+	 * one counts as adding no row.
 	 */
 	#renderedAppendBatch(entry: TranscriptEntry, width: number, overflow: number): AppendBatch {
 		const before = this.#renderStablePrefix(entry, entry.emitted, width);
+		const newest = this.#renderStablePrefix(entry, entry.stableRows.length, width);
+		const batch = this.#sizeAppendBatch(entry, width, overflow, newest, before.length, count => {
+			const next = this.#renderStablePrefix(entry, count, width);
+			return isRowPrefix(before, next) && isRowPrefix(next, newest) ? next.length : 0;
+		});
+		// The rendered walk knows every count.
+		return batch ?? { rows: EMPTY_ROWS, emittedEnd: entry.emitted, partialRows: this.#partialRows(entry, width) };
+	}
+
+	/**
+	 * Commit exactly the stable rows that left the screen: `overflow` rows past
+	 * those already in history, capped by the published stable rows. Whole
+	 * prefixes inside that span advance the emitted count; the rest of the span
+	 * is the head of the next prefix, recorded as partial rows at `width`. A
+	 * prefix taller than the overflow (a table, a chart) thus retires row by row
+	 * as it scrolls instead of vanishing above the viewport until it fits whole;
+	 * rows still on screen stay live, so a later shrink of the chrome below
+	 * refills the screen from live rows. The first further prefix adding no row
+	 * past the emitted ones freezes the block. `endOf` answers a prefix's row
+	 * count, undefined when unknown.
+	 */
+	#sizeAppendBatch(
+		entry: TranscriptEntry,
+		width: number,
+		overflow: number,
+		newest: readonly string[],
+		base: number,
+		endOf: (count: number) => number | undefined,
+	): AppendBatch | undefined {
+		const partialRows = this.#partialRows(entry, width);
+		const start = base + partialRows;
+		const limit = Math.min(newest.length, start + Math.max(0, overflow));
+		const none: AppendBatch = { rows: EMPTY_ROWS, emittedEnd: entry.emitted, partialRows };
 		let emittedEnd = entry.emitted;
-		let after = before;
+		let end = base;
 		while (emittedEnd < entry.stableRows.length) {
-			const next = this.#renderStablePrefix(entry, emittedEnd + 1, width);
-			if (!isRowPrefix(before, next) || next.length === before.length) {
-				if (emittedEnd === entry.emitted) {
-					this.#freezeStableRows(entry, EMPTY_ROWS, "semantic row render added no suffix");
-				}
-				break;
+			const next = endOf(emittedEnd + 1);
+			if (next === undefined) return undefined;
+			if (next <= base) {
+				if (emittedEnd !== entry.emitted) break;
+				this.#freezeStableRows(entry, EMPTY_ROWS, "semantic row render added no suffix");
+				return none;
 			}
-			if (next.length - before.length > overflow) break;
-			after = next;
+			if (next > limit) break;
+			end = next;
 			emittedEnd += 1;
 		}
-		return { rows: emittedEnd > entry.emitted ? after.slice(before.length) : EMPTY_ROWS, emittedEnd };
+		if (limit <= start) return none;
+		return { rows: newest.slice(start, limit), emittedEnd, partialRows: limit - end };
 	}
 
 	/**
@@ -1595,10 +1660,20 @@ export class TranscriptContainer extends Container {
 			this.#setAllocation(head.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const committed = this.#splitRowCount(head, head.split, width);
 			headRows = renderForScrollback(() => this.#renderEntry(head, width)).slice(0, committed);
-		} else if (head?.mode === "appendOnly" && head.emitted > 0) {
+		} else if (head?.mode === "appendOnly" && (head.emitted > 0 || head.partial !== undefined)) {
 			this.#setAllocation(head.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			this.#renderEntry(head, width);
-			headRows = this.#renderStablePrefix(head, head.emitted, width);
+			// The replay rewrites history at this width; rows past a whole
+			// prefix counted at another go live again.
+			if (head.partial !== undefined && head.partial.width !== width) head.partial = undefined;
+			const partialRows = this.#partialRows(head, width);
+			headRows =
+				partialRows > 0
+					? this.#renderStablePrefix(head, head.stableRows.length, width).slice(
+							0,
+							this.#stablePrefixRowCount(head, head.emitted, width) + partialRows,
+						)
+					: this.#renderStablePrefix(head, head.emitted, width);
 		}
 		if (head === undefined || headRows.length === 0) {
 			return { rows: range.rows, historyEnd: this.#closeRange(range.rows, range.above, this.#frontier, width) };
@@ -1628,6 +1703,7 @@ export class TranscriptContainer extends Container {
 	#retireEntry(entry: TranscriptEntry): void {
 		entry.state = "committed";
 		entry.emitted = 0;
+		entry.partial = undefined;
 		entry.split = undefined;
 		entry.stableRows = EMPTY_STABLE_ROWS;
 		entry.renderedStableByWidth = new Map();
@@ -1660,7 +1736,9 @@ export class TranscriptContainer extends Container {
 	#startReplay(): void {
 		const head = this.#entries[this.#frontier];
 		this.#replayPending =
-			this.#frontier > 0 || head?.split !== undefined || (head?.mode === "appendOnly" && head.emitted > 0);
+			this.#frontier > 0 ||
+			head?.split !== undefined ||
+			(head?.mode === "appendOnly" && (head.emitted > 0 || head.partial !== undefined));
 		this.#replayRequested = false;
 	}
 
@@ -1830,6 +1908,7 @@ export class TranscriptContainer extends Container {
 					renderedStableByWidth: new Map(),
 					stableRowCountByWidth: new Map(),
 					emitted: 0,
+					partial: undefined,
 					stableFrozen: false,
 					split: undefined,
 				},

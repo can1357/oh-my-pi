@@ -223,6 +223,11 @@ export class SvgFigure implements Component {
 		);
 	}
 
+	/** Whether the figure draws its final source and no raster is still on its way: its rows no longer change at this width. */
+	get settled(): boolean {
+		return this.#final && !this.pending;
+	}
+
 	/** The caller's row ceiling, if any; a surface shorter than its chrome leaves none. */
 	#maxRows(): number | undefined {
 		const rows = this.#options.maxRows?.();
