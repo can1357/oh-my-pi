@@ -4886,12 +4886,55 @@ function dagonRate(value: unknown, fallback: number): number {
 }
 
 /**
+ * Tiers omp sends as `reasoning_effort`, mirroring generic `/v1/models`
+ * discovery: `none` is the wire off-switch rather than a tier, and `minimal`
+ * is dropped from advertised ladders.
+ */
+const DAGON_ADVERTISED_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
+
+/**
+ * Applies a row's advertised `reasoning` / `supported_reasoning_levels`, the
+ * fields generic openai-models-list discovery reads. A row that says neither
+ * keeps the bundled surface; `reasoning: false` clears it; a listed `none`
+ * routes thinking-off through `reasoning_effort: "none"`. The disable mode is
+ * always set from the live row so a bundled rule's off-switch cannot outlive it.
+ */
+function withDagonAdvertisedReasoning(
+	model: ModelSpec<"openai-completions">,
+	entry: OpenAICompatibleModelRecord,
+): ModelSpec<"openai-completions"> {
+	if (entry.reasoning === false) return { ...model, reasoning: false, thinking: undefined };
+	if (!Array.isArray(entry.supported_reasoning_levels)) return model;
+	const advertised = entry.supported_reasoning_levels.flatMap(level =>
+		typeof level === "string" ? [level.toLowerCase()] : [],
+	);
+	const efforts = DAGON_ADVERTISED_EFFORTS.filter(effort => advertised.includes(effort));
+	if (efforts.length === 0) return model;
+	const inheritedDefault = model.thinking?.defaultLevel;
+	return {
+		...model,
+		reasoning: true,
+		thinking: {
+			mode: "effort",
+			efforts,
+			defaultLevel:
+				inheritedDefault !== undefined && efforts.includes(inheritedDefault) ? inheritedDefault : efforts[0],
+		},
+		compat: {
+			...model.compat,
+			supportsReasoningEffort: true,
+			reasoningDisableMode: advertised.includes("none") ? "none-effort" : "lowest-effort",
+		},
+	};
+}
+
+/**
  * Builds Dagon Inference's model-discovery manager. `/v1/models` is public, so
  * discovery runs without a key and the live roster is authoritative. Rows carry
  * `context_length`, `max_output_tokens`, `input_modalities`,
  * `pricing_per_mtok_micros` (`inputPerMtok`, `cachedInputPerMtok`,
- * `outputPerMtok`; micro-USD per 1M tokens), and optionally
- * `supported_parameters` (a `reasoning` entry marks a reasoning model).
+ * `outputPerMtok`; micro-USD per 1M tokens), and `reasoning` /
+ * `supported_reasoning_levels` (see `withDagonAdvertisedReasoning`).
  * Deprecated rows are dropped. Prices float with the cheapest upstream route,
  * so the live card wins over the bundled seed.
  */
@@ -4905,12 +4948,10 @@ export function dagonModelManagerOptions(config?: ModelManagerConfig): ModelMana
 			dynamicModelsAuthoritative: true,
 			mapModel: (entry, defaults, reference) => {
 				if (entry.deprecated === true) return null;
-				const model = mapWithBundledReference(entry, defaults, reference);
+				const model = withDagonAdvertisedReasoning(mapWithBundledReference(entry, defaults, reference), entry);
 				const rates = isRecord(entry.pricing_per_mtok_micros) ? entry.pricing_per_mtok_micros : {};
-				const params = Array.isArray(entry.supported_parameters) ? entry.supported_parameters : undefined;
 				return {
 					...model,
-					...(params && { reasoning: params.includes("reasoning") }),
 					input: Array.isArray(entry.input_modalities) ? toInputCapabilities(entry.input_modalities) : model.input,
 					cost: {
 						input: dagonRate(rates.inputPerMtok, model.cost.input),

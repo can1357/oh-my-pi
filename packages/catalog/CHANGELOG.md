@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added Dagon Inference (`dagon`) as a built-in OpenAI-compatible provider (`DAGON_API_KEY`, `/login`), with keyless, authoritative model discovery from its public `/v1/models` roster, including live limits, input modalities, and floating per-model prices.
+- Added Dagon Inference (`dagon`) as a built-in OpenAI-compatible provider (`DAGON_API_KEY`, `/login`), with keyless, authoritative model discovery from its public `/v1/models` roster, including live limits, input modalities, floating per-model prices, and per-model reasoning levels (`reasoning` / `supported_reasoning_levels`, where a listed `none` is the thinking-off switch).
 
 ## [18.18.2] - 2026-11-08
 
