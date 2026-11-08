@@ -235,14 +235,17 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		expect(planSchema).toContain('"model"');
+		const baseItem = { task: "work", solutionSpace: "bounded" };
+		expect(planMode.parameters({ ...baseItem, model: [] }) instanceof type.errors).toBe(false);
+		expect(planMode.parameters({ ...baseItem, model: ["p/m"] }) instanceof type.errors).toBe(true);
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 
 		const ordinary = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
 		const ordinarySchema = JSON.stringify(ordinary.parameters.toJsonSchema());
 		expect(ordinarySchema).toContain('"sourceSession"');
-		expect(ordinarySchema).toContain('"model"');
+		expect(ordinary.parameters({ ...baseItem, model: [] }) instanceof type.errors).toBe(false);
+		expect(ordinary.parameters({ ...baseItem, model: ["p/m"] }) instanceof type.errors).toBe(false);
 		expect(ordinary.description).toContain("`seance`");
 		expect(ordinary.description).toContain("Historical consults");
 	});
