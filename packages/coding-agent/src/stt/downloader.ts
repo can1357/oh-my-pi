@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
+import { isSherpaModelCached } from "../speech/sherpa-model-files";
 import { sttClient } from "./asr-client";
 import type { SttProgressStatus } from "./asr-protocol";
 import { resolveSttModelSpec } from "./models";
@@ -49,15 +50,7 @@ export async function isSttModelCached(key: string): Promise<boolean> {
 	const spec = resolveSttModelSpec(key);
 	const repoDir = path.join(getTinyModelsCacheDir(), spec.repo);
 	if (spec.engine === "sherpa") {
-		try {
-			const root = new Set(await fs.readdir(repoDir));
-			for (const role in spec.files) {
-				if (!root.has(spec.files[role as keyof typeof spec.files])) return false;
-			}
-			return true;
-		} catch {
-			return false;
-		}
+		return isSherpaModelCached({ repo: spec.repo, files: spec.files });
 	}
 	try {
 		const root = await fs.readdir(repoDir);

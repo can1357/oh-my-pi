@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `local/x-asr-960ms-zh-en`, a streaming Chinese/English X-ASR dictation tier with native partial results. It downloads into the shared tiny-model cache through `omp setup speech` and works through the existing `dictation` role ([#18495](https://github.com/can1357/oh-my-pi/pull/18495) by [@YangtseSu](https://github.com/YangtseSu)).
+
 ### Breaking Changes
 
 - `logoutCredential()` now accepts an `AgentSession` instead of a model registry and session ID. Hosts must install a scoped-model refresher with `AgentSession.setScopedModelsRefresher()`; `InteractiveMode` and `InteractiveModeContext` no longer accept `refreshScopedModelsAfterLogin`.
