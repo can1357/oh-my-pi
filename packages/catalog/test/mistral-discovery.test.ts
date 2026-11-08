@@ -27,7 +27,10 @@ async function discoverMistralModels(payload: unknown) {
 	return models;
 }
 
-type ContractFields = Pick<ModelSpec, "id" | "reasoning" | "input" | "contextWindow" | "maxTokens" | "cost" | "thinking">;
+type ContractFields = Pick<
+	ModelSpec,
+	"id" | "reasoning" | "input" | "contextWindow" | "maxTokens" | "cost" | "thinking"
+>;
 
 /** The metadata an alias row should inherit from the bundled model it aliases. */
 function contract(id: string, models: readonly ContractFields[]) {

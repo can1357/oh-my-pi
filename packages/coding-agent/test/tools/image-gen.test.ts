@@ -239,7 +239,9 @@ describe("imageGenTool catalog routing", () => {
 			.catch((error: unknown) => error);
 		if (!(failure instanceof AggregateError)) throw new Error("Expected an exhausted image chain");
 		expect(failure.errors).toHaveLength(2);
-		expect(failure.message).toContain("deepinfra/first-image image request failed (400): Duplicate parameter: 'image'");
+		expect(failure.message).toContain(
+			"deepinfra/first-image image request failed (400): Duplicate parameter: 'image'",
+		);
 		expect(failure.message).toContain("openrouter/second-image image request failed (502)");
 		expect(failure.message).not.toContain("\n");
 		expect(failure.message.length).toBeLessThan(gatewayPage.length / 4);
