@@ -70,6 +70,7 @@ import {
 	resolveModelOverrideWithAliases,
 } from "./custom-models";
 import {
+	configHeaderCommands,
 	configHeaderGenerations,
 	createConfigHeaderResolver,
 	invalidateAllCommandConfigs,
@@ -3823,7 +3824,7 @@ export class ModelRegistry {
 		if (rejectedHeaders) {
 			// Only recover currently configured, previously materialized commands.
 			// Never execute a command supplied merely as retry metadata.
-			for (const config of Object.keys(configHeaderGenerations(headerResolver) ?? {})) {
+			for (const config of configHeaderCommands(headerResolver)) {
 				const generation = rejectedHeaders[config];
 				if (generation === undefined) continue;
 				if (options.forceRefresh) await remintCommandConfig(config, generation);
@@ -3852,11 +3853,13 @@ export class ModelRegistry {
 					signal: options?.signal,
 				});
 		if (!resolved || !headerResolver) return resolved;
-		// Resolve only this model's headers so its initial request, as well as its
-		// retry, carries the generations of the commands it actually uses.
-		await headerResolver(options?.signal);
-		const headerGenerations = configHeaderGenerations(headerResolver);
-		return headerGenerations ? { ...resolved, headerGenerations } : resolved;
+		// The attempt sends this snapshot, not a second resolution of the live
+		// cache paired with provenance from the earlier credential resolution.
+		const headers = await headerResolver(options?.signal);
+		const headerGenerations = configHeaderGenerations(headers);
+		return headers && headerGenerations
+			? { ...resolved, headerGenerations: Object.freeze(headerGenerations), resolvedHeaders: Object.freeze(headers) }
+			: resolved;
 	}
 
 	/**

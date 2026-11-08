@@ -47,18 +47,33 @@ export type ConfigHeaderSource = Record<string, string> | ConfigHeaderResolver |
 /** Effective raw header values retained through composed resolvers. */
 const headerConfigs = new WeakMap<ConfigHeaderResolver, Record<string, string>>();
 
-/** Snapshot only the command slots this header chain actually materializes. */
-export function configHeaderGenerations(
-	resolver: ConfigHeaderResolver | undefined,
-): Record<string, number> | undefined {
+/** Provenance belongs to the materialized record, never to a resolver or the live cache. */
+const resolvedHeaderCredentials = new WeakMap<
+	Record<string, string>,
+	Record<string, { config: string; generation: number }>
+>();
+
+export function configHeaderCommands(resolver: ConfigHeaderResolver | undefined): string[] {
 	const configs = resolver && headerConfigs.get(resolver);
-	if (!configs) return undefined;
-	let generations: Record<string, number> | undefined;
-	for (const config of Object.values(configs)) {
-		const command = commandConfigKey(config);
-		if (command === undefined) continue;
-		const cached = commandResultCache.get(command);
-		if (cached) (generations ??= {})[`!${command}`] = cached.generation;
+	return [
+		...new Set(
+			Object.values(configs ?? {}).flatMap(config => {
+				const command = commandConfigKey(config);
+				return command === undefined ? [] : [`!${command}`];
+			}),
+		),
+	];
+}
+
+/** Read the generations that produced these exact header values. */
+export function configHeaderGenerations(
+	headers: Record<string, string> | undefined,
+): Record<string, number> | undefined {
+	const credentials = headers && resolvedHeaderCredentials.get(headers);
+	if (!credentials || Object.keys(credentials).length === 0) return undefined;
+	const generations: Record<string, number> = {};
+	for (const { config, generation } of Object.values(credentials)) {
+		generations[config] = Math.max(generations[config] ?? 0, generation);
 	}
 	return generations;
 }
@@ -185,6 +200,11 @@ export function remintCommandConfig(
 	if (rejectedGeneration !== undefined) {
 		const settled = settledMintFor(command);
 		if (settled !== undefined) return Promise.resolve(settled);
+		// An ordinary resolution can already be minting the replacement. Its
+		// generation is assigned at completion, after every issued generation,
+		// so invalidating it would start a competing mint for the same refusal.
+		const pending = commandInFlight.get(command);
+		if (pending) return pending.then(credential => credential?.value);
 	}
 	invalidateCommandConfig(valueConfig);
 	// `executeCommand` registers its run in `commandInFlight` before its first
@@ -339,13 +359,19 @@ export async function resolveConfigHeaders(
 	signal?.throwIfAborted();
 	if (!headers) return undefined;
 	const resolved: Record<string, string> = {};
+	const credentials: Record<string, { config: string; generation: number }> = {};
 	let hasResolved = false;
 	for (const key in headers) {
-		const next = await untilAborted(signal, () => resolveConfigValue(headers[key]));
+		const credential = await untilAborted(signal, () => resolveConfigCredential(headers[key]));
+		const next = typeof credential === "string" ? credential : credential?.value;
 		if (!next) continue;
 		resolved[key] = next;
+		if (typeof credential === "object" && credential.generation !== undefined) {
+			credentials[key] = { config: `!${commandKey(headers[key])}`, generation: credential.generation };
+		}
 		hasResolved = true;
 	}
+	resolvedHeaderCredentials.set(resolved, credentials);
 	return hasResolved ? resolved : undefined;
 }
 
@@ -368,6 +394,7 @@ export function createConfigHeaderResolver(
 	const resolver: ConfigHeaderResolver = async signal => {
 		signal?.throwIfAborted();
 		const resolved: Record<string, string> = {};
+		const credentials: Record<string, { config: string; generation: number }> = {};
 		let hasResolved = false;
 		for (const source of active) {
 			const next =
@@ -378,17 +405,25 @@ export function createConfigHeaderResolver(
 			if (!next) continue;
 			for (const key in next) {
 				resolved[key] = next[key];
+				const credential = resolvedHeaderCredentials.get(next)?.[key];
+				if (credential) credentials[key] = credential;
+				else delete credentials[key];
 				hasResolved = true;
 			}
 		}
 		if (options?.authHeader && options.apiKeyConfig) {
 			const keyConfig = options.apiKeyConfig;
-			const apiKey = await untilAborted(signal, () => resolveConfigValue(keyConfig));
+			const credential = await untilAborted(signal, () => resolveConfigCredential(keyConfig));
+			const apiKey = typeof credential === "string" ? credential : credential?.value;
 			if (apiKey) {
 				resolved.Authorization = `Bearer ${apiKey}`;
+				if (typeof credential === "object" && credential.generation !== undefined) {
+					credentials.Authorization = { config: `!${commandKey(keyConfig)}`, generation: credential.generation };
+				} else delete credentials.Authorization;
 				hasResolved = true;
 			}
 		}
+		resolvedHeaderCredentials.set(resolved, credentials);
 		return hasResolved ? resolved : undefined;
 	};
 	headerConfigs.set(resolver, configs);

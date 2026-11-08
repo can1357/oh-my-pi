@@ -84,6 +84,8 @@ export interface ResolvedApiKey {
 	credentialGeneration?: number;
 	/** Command-header provenance; kept with this request, not with a shared resolver. */
 	headerGenerations?: Record<string, number>;
+	/** Header values resolved together with their command generations. */
+	resolvedHeaders?: Record<string, string>;
 	/** Non-secret request scope belonging to this bearer, replaced on account rotation. */
 	oauthIdentity?: OAuthRequestIdentity;
 }

@@ -1235,6 +1235,7 @@ function streamSimpleRequest<TApi extends Api>(
 			apiKey?: string,
 			credentialId?: number,
 			oauthIdentity?: OAuthRequestIdentity,
+			resolvedHeaders?: Record<string, string>,
 		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
@@ -1245,7 +1246,11 @@ function streamSimpleRequest<TApi extends Api>(
 
 			try {
 				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
-				const inner = streamSimpleRequest(model, context, attemptOptions);
+				const attemptModel =
+					resolvedHeaders === undefined
+						? model
+						: { ...model, resolveHeaders: undefined, headers: resolvedHeaders };
+				const inner = streamSimpleRequest(attemptModel, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
 						if ("partial" in event) event.partial.credentialId = credentialId;
@@ -1315,6 +1320,7 @@ function streamSimpleRequest<TApi extends Api>(
 			let oauthIdentity: OAuthRequestIdentity | undefined;
 			let credentialGeneration: number | undefined;
 			let headerGenerations: Record<string, number> | undefined;
+			let resolvedHeaders: Record<string, string> | undefined;
 			try {
 				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
@@ -1322,6 +1328,7 @@ function streamSimpleRequest<TApi extends Api>(
 				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 				credentialGeneration = resolvedCredentialGeneration(resolved);
 				headerGenerations = typeof resolved === "object" ? resolved?.headerGenerations : undefined;
+				resolvedHeaders = typeof resolved === "object" ? resolved?.resolvedHeaders : undefined;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1343,7 +1350,7 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey, credentialGeneration, headerGenerations);
-			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity, resolvedHeaders);
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
@@ -1351,6 +1358,7 @@ function streamSimpleRequest<TApi extends Api>(
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
 				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
+				let nextHeaders: Record<string, string> | undefined;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
@@ -1359,10 +1367,11 @@ function streamSimpleRequest<TApi extends Api>(
 					resolved => {
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
 						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
+						nextHeaders = typeof resolved === "object" ? resolved?.resolvedHeaders : undefined;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity, nextHeaders);
 				if (!next) return;
 				failure = next;
 			}

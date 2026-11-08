@@ -10,8 +10,9 @@
 - A `!command` credential re-minted for a 401 that carried no readable error class is now sent: the mint ran, so the credential's generation advanced, and the retry it earned is no longer dropped because the issuer handed back the same bytes
 - Two spellings of one `!command` — `!helper` as the `apiKey` and `! helper` as a header — are recognised as the same command, so invalidating one no longer drops the shared re-mint the other's refusals are waiting to join
 - A provider 401 no longer runs a configured `!command` credential the auth cascade did not select: with a runtime `--api-key` override in force, the recovery re-mints the source that served the request rather than the configured one, and no longer waits out that command's timeout
-- Command-backed provider and model headers now share the same one-execution-per-refusal-wave bound as command-backed API keys, including staggered refusals after the mint settles. Header recovery uses the failed request's command generations and does not invalidate another model's helpers.
-- New operations resolve a replacement before sending a command credential whose generation the provider already refused. Recording the exhausted operation's refusal does not spend an unused mint.
+- Command-backed provider and model headers now share the same one-execution-per-refusal-wave bound as command-backed API keys, including staggered refusals after the mint settles.
+- New operations resolve a replacement before sending a command credential whose generation the provider already refused.
+- Prepared requests keep command-backed header values with their credential generations, so another request's refresh cannot make a retry resend the credential just refused.
 
 ## [18.18.1] - 2026-11-08
 
